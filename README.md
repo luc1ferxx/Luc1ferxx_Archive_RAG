@@ -1,70 +1,142 @@
-# Getting Started with Create React App
+# Luc1ferxx Archive
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+Luc1ferxx Archive is a minimal multi-document RAG workspace built with React and Node.js. It lets you upload multiple PDFs, ask questions against those documents, compare the response with live web search results, and inspect cited pages in a built-in PDF preview panel.
 
-## Available Scripts
+## Features
 
-In the project directory, you can run:
+- Multi-document PDF upload
+- RAG answers generated from uploaded documents
+- MCP-powered web search answers generated from Google search results
+- Source citations with file name, page number, and excerpt
+- Inline PDF preview for cited sources
+- Lightweight Apple-inspired UI
 
-### `npm start`
+## Stack
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+- Frontend: React, Ant Design, Axios
+- Backend: Node.js, Express, Multer
+- RAG: LangChain, OpenAI embeddings, in-memory vector store
+- Web search: MCP server + SerpAPI
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Project Structure
 
-### `npm test`
+```text
+.
+|-- public/                # Static frontend assets
+|-- src/                   # React frontend
+|-- server/
+|   |-- chat.js            # RAG ingestion and retrieval
+|   |-- chat-mcp.js        # MCP client + web answer generation
+|   |-- mcp-server.js      # Local MCP server exposing search_web
+|   |-- server.js          # Express API
+|   `-- uploads/           # Runtime PDF uploads, ignored by git
+|-- package.json           # Frontend scripts
+`-- README.md
+```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Environment Variables
 
-### `npm run build`
+Create `server/.env` from `server/.env.example`.
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+```env
+OPENAI_API_KEY=your_openai_api_key
+SERPAPI_KEY=your_serpapi_key
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_CHAT_MODEL=gpt-5
+```
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+Notes:
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+- `OPENAI_API_KEY` is required for document embeddings and answer generation.
+- `SERPAPI_KEY` is required for the web-search answer path.
+- `server/.env` is ignored by git and should never be committed.
 
-### `npm run eject`
+## Installation
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+Install frontend dependencies:
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+```powershell
+cmd /c npm.cmd install
+```
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+Install backend dependencies:
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+```powershell
+cd server
+cmd /c npm.cmd install
+cd ..
+```
 
-## Learn More
+## Running the Project
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+Start frontend and backend together from the repository root:
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+```powershell
+cmd /c npm.cmd run dev
+```
 
-### Code Splitting
+Open:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+```text
+http://localhost:3000
+```
 
-### Analyzing the Bundle Size
+Default local services:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:5001`
 
-### Making a Progressive Web App
+## How It Works
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+1. Upload one or more PDFs from the frontend.
+2. The backend stores each file under `server/uploads/`.
+3. `server/chat.js` parses the PDF, splits text into chunks, creates embeddings, and stores them in an in-memory vector index.
+4. When you ask a question, the backend retrieves the most relevant chunks across the selected documents and asks GPT to generate a RAG answer.
+5. In parallel, `server/chat-mcp.js` calls the local MCP server, fetches Google search results through SerpAPI, and asks GPT to summarize a web answer.
+6. The frontend displays both answers, the cited document sources, and a preview of the selected PDF page.
 
-### Advanced Configuration
+## Current Limitations
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+- The vector store is in memory only. Restarting the backend clears uploaded document embeddings.
+- Uploaded PDFs are stored locally for development and are not persisted to cloud storage.
+- There is no user authentication yet.
 
-### Deployment
+## Validation
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+Build the frontend:
 
-### `npm run build` fails to minify
+```powershell
+cmd /c npm.cmd run build
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Start the backend directly if needed:
+
+```powershell
+cd server
+cmd /c npm.cmd start
+```
+
+## API Overview
+
+### `POST /upload`
+
+Uploads a PDF and ingests it into the RAG pipeline.
+
+### `GET /chat`
+
+Accepts:
+
+- `question`
+- `docId` or `docIds`
+
+Returns:
+
+- `ragAnswer`
+- `ragSources`
+- `mcpAnswer`
+
+## Security
+
+- Do not commit `server/.env`.
+- Do not commit real uploaded documents from `server/uploads/`.
+- Use `server/.env.example` as the public configuration template.

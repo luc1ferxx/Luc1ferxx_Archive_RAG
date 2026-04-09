@@ -12,6 +12,8 @@
 /build
 
 server/.env
+server/uploads/*
+!server/uploads/.gitkeep
 
 # misc
 .DS_Store
