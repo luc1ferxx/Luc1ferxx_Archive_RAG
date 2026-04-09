@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import { rm } from "fs/promises";
 import multer from "multer";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -66,6 +67,18 @@ const serializeError = (error, fallbackMessage) => {
   return fallbackMessage;
 };
 
+const cleanupUploadedFile = async (filePath) => {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await rm(filePath, { force: true });
+  } catch (cleanupError) {
+    console.error(`Failed to remove uploaded file at ${filePath}.`, cleanupError);
+  }
+};
+
 app.post("/upload", upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({
@@ -82,6 +95,8 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
     return res.status(201).json(document);
   } catch (error) {
+    await cleanupUploadedFile(req.file.path);
+
     return res.status(error.status ?? 500).json({
       error: serializeError(error, "Failed to ingest uploaded PDF."),
     });
