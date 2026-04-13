@@ -1,22 +1,31 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
-import { rm } from "fs/promises";
+import { mkdir, rm } from "fs/promises";
 import multer from "multer";
 import { randomUUID } from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
 import chat, { getDocument, ingestDocument } from "./chat.js";
 import chatMCP from "./chat-mcp.js";
-
-dotenv.config();
+import {
+  clearUploadSession,
+  ensureUploadStorage,
+  finalizeUploadSession,
+  getUploadSessionStatus,
+  initializeUploadSession,
+  removeMergedUpload,
+  storeUploadChunk,
+} from "./upload-session-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const uploadsDirectory = path.join(__dirname, "uploads");
+const DEFAULT_UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 app.use("/uploads", express.static(uploadsDirectory));
 
 const storage = multer.diskStorage({
@@ -32,6 +41,9 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+});
+const chunkUpload = multer({
+  storage: multer.memoryStorage(),
 });
 
 const PORT = 5001;
@@ -78,6 +90,139 @@ const cleanupUploadedFile = async (filePath) => {
     console.error(`Failed to remove uploaded file at ${filePath}.`, cleanupError);
   }
 };
+
+const createStoredFileName = (originalFileName) => {
+  const extension = path.extname(originalFileName);
+  const baseName = path.basename(originalFileName, extension);
+  return `${baseName}-${randomUUID()}${extension}`;
+};
+
+await mkdir(uploadsDirectory, { recursive: true });
+await ensureUploadStorage();
+
+app.post("/upload/init", async (req, res) => {
+  try {
+    const session = await initializeUploadSession({
+      fileId: req.body.fileId,
+      fileName: req.body.fileName,
+      fileSize: req.body.fileSize,
+      lastModified: req.body.lastModified,
+      totalChunks: req.body.totalChunks,
+      chunkSize: req.body.chunkSize ?? DEFAULT_UPLOAD_CHUNK_SIZE,
+    });
+
+    return res.status(201).json(session);
+  } catch (error) {
+    return res.status(error.status ?? 500).json({
+      error: serializeError(error, "Failed to initialize the upload session."),
+    });
+  }
+});
+
+app.get("/upload/status", async (req, res) => {
+  const fileId = req.query.fileId?.trim();
+
+  if (!fileId) {
+    return res.status(400).json({
+      error: "fileId is required.",
+    });
+  }
+
+  try {
+    const session = await getUploadSessionStatus(fileId);
+
+    if (!session) {
+      return res.status(404).json({
+        error: "Upload session not found.",
+      });
+    }
+
+    return res.json(session);
+  } catch (error) {
+    return res.status(error.status ?? 500).json({
+      error: serializeError(error, "Failed to read the upload session status."),
+    });
+  }
+});
+
+app.post("/upload/chunk", chunkUpload.single("chunk"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({
+      error: "No chunk uploaded.",
+    });
+  }
+
+  try {
+    const chunkIndex = Number.parseInt(req.body.chunkIndex, 10);
+    const totalChunks = Number.parseInt(req.body.totalChunks, 10);
+    const fileId = req.body.fileId?.trim();
+
+    if (!fileId) {
+      return res.status(400).json({
+        error: "fileId is required.",
+      });
+    }
+
+    const result = await storeUploadChunk({
+      fileId,
+      chunkIndex,
+      totalChunks,
+      chunkBuffer: req.file.buffer,
+    });
+
+    return res.status(201).json(result);
+  } catch (error) {
+    return res.status(error.status ?? 500).json({
+      error: serializeError(error, "Failed to store the uploaded chunk."),
+    });
+  }
+});
+
+app.post("/upload/complete", async (req, res) => {
+  const fileId = req.body.fileId?.trim();
+
+  if (!fileId) {
+    return res.status(400).json({
+      error: "fileId is required.",
+    });
+  }
+
+  let mergedFilePath = null;
+
+  try {
+    const session = await getUploadSessionStatus(fileId);
+
+    if (!session) {
+      return res.status(404).json({
+        error: "Upload session not found.",
+      });
+    }
+
+    const storedFileName = createStoredFileName(session.fileName);
+    mergedFilePath = path.join(uploadsDirectory, storedFileName);
+
+    await finalizeUploadSession({
+      fileId,
+      destinationPath: mergedFilePath,
+    });
+
+    const document = await ingestDocument({
+      docId: randomUUID(),
+      filePath: mergedFilePath,
+      fileName: session.fileName,
+    });
+
+    await clearUploadSession(fileId);
+
+    return res.status(201).json(document);
+  } catch (error) {
+    await removeMergedUpload(mergedFilePath);
+
+    return res.status(error.status ?? 500).json({
+      error: serializeError(error, "Failed to finalize the uploaded PDF."),
+    });
+  }
+});
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   if (!req.file) {

@@ -25,3 +25,8 @@ server/uploads/*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+*.out.log
+*.err.log
+
+server/evaluation/generated/
