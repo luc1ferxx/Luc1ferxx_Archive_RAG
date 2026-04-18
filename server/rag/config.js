@@ -32,10 +32,23 @@ const toBoolean = (rawValue, fallbackValue = false) => {
   return fallbackValue;
 };
 
+const toChoice = (rawValue, fallbackValue, allowedValues) => {
+  if (typeof rawValue !== "string") {
+    return fallbackValue;
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  return allowedValues.includes(normalizedValue) ? normalizedValue : fallbackValue;
+};
+
 export const getEmbeddingModel = () =>
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 
 export const getChatModel = () => process.env.OPENAI_CHAT_MODEL || "gpt-5";
+
+export const getPromptVersion = () =>
+  toChoice(process.env.RAG_PROMPT_VERSION, "v2", ["v1", "v2"]);
 
 export const getChunkStrategy = () =>
   (process.env.RAG_CHUNK_STRATEGY || "structured").trim().toLowerCase();

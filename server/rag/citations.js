@@ -16,7 +16,7 @@ export const buildCitation = (document, score, rank) => ({
   sectionHeading: document.metadata?.sectionHeading ?? null,
 });
 
-export const buildContextSection = (document, score, rank) =>
+export const buildContextSection = (document, _score, rank) =>
   [
     `Source ${rank}`,
     `File: ${document.metadata?.fileName ?? "Unknown document"}`,
@@ -26,7 +26,7 @@ export const buildContextSection = (document, score, rank) =>
     document.metadata?.sectionHeading
       ? `Section: ${document.metadata.sectionHeading}`
       : null,
-    `Relevance: ${Number(score.toFixed(4))}`,
+    `Evidence:`,
     document.pageContent,
   ]
     .filter(Boolean)

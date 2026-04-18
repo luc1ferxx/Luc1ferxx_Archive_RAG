@@ -1,5 +1,5 @@
-import { PromptTemplate } from "@langchain/core/prompts";
-import { getMaxComparisonSources } from "./config.js";
+import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
+import { getMaxComparisonSources, getPromptVersion } from "./config.js";
 import {
   buildCitation,
   buildContextSection,
@@ -8,7 +8,7 @@ import {
 } from "./citations.js";
 import { completeText } from "./openai.js";
 
-const qaPrompt = PromptTemplate.fromTemplate(
+const qaPromptV1 = PromptTemplate.fromTemplate(
   `You answer questions using only retrieved document evidence.
 If the evidence is insufficient, say so directly.
 Do not substitute adjacent topics for the asked topic.
@@ -23,7 +23,7 @@ Retrieved Evidence:
 Grounded Answer:`
 );
 
-const comparisonPrompt = PromptTemplate.fromTemplate(
+const comparisonPromptV1 = PromptTemplate.fromTemplate(
   `You compare uploaded documents using only the provided evidence.
 Separate agreement, difference, and uncertainty.
 If a document lacks evidence, say so explicitly.
@@ -46,10 +46,79 @@ Differences:
 Gaps or uncertainty:`
 );
 
+const qaPromptV2 = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You are a document-grounded assistant for uploaded PDFs.
+Follow these rules strictly:
+- Answer only from the provided evidence.
+- Use the same language as the user's latest question.
+- Answer the original user question, not the retrieval paraphrase.
+- Use the resolved retrieval question only to clarify references or scope.
+- Do not substitute related topics, adjacent policies, or likely assumptions for the asked topic.
+- If the evidence is insufficient, say exactly what is missing and do not guess.
+- Every evidence-based sentence must end with citations like [Source 1].
+- Do not cite a source unless it directly supports the sentence.
+- Keep the answer concise, usually within five sentences.`,
+  ],
+  [
+    "human",
+    `{questionBlock}
+
+Retrieved evidence:
+{context}
+
+Grounded Answer:`,
+  ],
+]);
+
+const comparisonPromptV2 = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You are a document-grounded comparison assistant for uploaded PDFs.
+Follow these rules strictly:
+- Compare only from the provided evidence.
+- Use the same language as the user's latest question.
+- Separate agreement, difference, and uncertainty clearly.
+- If any document lacks strong evidence, say so explicitly.
+- Do not treat a related but different policy as evidence for the asked policy.
+- Do not fill evidence gaps with assumptions.
+- Every evidence-based sentence must end with citations like [Source 1].
+- Do not cite a source unless it directly supports the sentence.
+- Keep the answer concise and structured.`,
+  ],
+  [
+    "human",
+    `{questionBlock}
+
+Comparison diagnostics:
+{diagnostics}
+
+Evidence by document:
+{context}
+
+Write the answer using these sections:
+Summary:
+Per document:
+Agreements:
+Differences:
+Gaps or uncertainty:
+
+Use short bullets inside sections when helpful.`,
+  ],
+]);
+
 const buildQuestionBlock = ({ query, resolvedQuery }) =>
   resolvedQuery && resolvedQuery !== query
-    ? `User Question:\n${query}\n\nResolved Retrieval Question:\n${resolvedQuery}`
-    : `Question:\n${query}`;
+    ? [
+        `User Question:\n${query}`,
+        `Resolved Retrieval Question:\n${resolvedQuery}`,
+        "Answer the user question. Use the resolved retrieval question only for reference disambiguation.",
+      ].join("\n\n")
+    : `User Question:\n${query}`;
+
+const formatSelectedPrompt = async ({ v1Template, v2Template, values }) =>
+  getPromptVersion() === "v1" ? v1Template.format(values) : v2Template.invoke(values);
 
 export const prepareQASourceBundle = ({ results }) => {
   const rankedResults = results.map((result, index) => ({
@@ -169,12 +238,16 @@ export const prepareComparisonSourceBundle = ({ alignment }) => {
 };
 
 export const writeQaAnswer = async ({ query, resolvedQuery, bundle }) => {
-  const prompt = await qaPrompt.format({
-    questionBlock: buildQuestionBlock({
-      query,
-      resolvedQuery,
-    }),
-    context: bundle.context,
+  const prompt = await formatSelectedPrompt({
+    v1Template: qaPromptV1,
+    v2Template: qaPromptV2,
+    values: {
+      questionBlock: buildQuestionBlock({
+        query,
+        resolvedQuery,
+      }),
+      context: bundle.context,
+    },
   });
   const text = await completeText(prompt);
 
@@ -202,15 +275,19 @@ export const writeComparisonAnswer = async ({
       : "Documents without strong evidence: none",
   ].join("\n");
 
-  const prompt = await comparisonPrompt.format({
-    questionBlock: buildQuestionBlock({
-      query,
-      resolvedQuery,
-    }),
-    diagnostics,
-    context: bundle.context,
+  const selectedPrompt = await formatSelectedPrompt({
+    v1Template: comparisonPromptV1,
+    v2Template: comparisonPromptV2,
+    values: {
+      questionBlock: buildQuestionBlock({
+        query,
+        resolvedQuery,
+      }),
+      diagnostics,
+      context: bundle.context,
+    },
   });
-  const text = await completeText(prompt);
+  const text = await completeText(selectedPrompt);
 
   return {
     text:

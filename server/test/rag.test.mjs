@@ -133,6 +133,35 @@ test("qa flow returns grounded citations", async () => {
   assert.equal(response.citations[0].pageNumber, 1);
 });
 
+test("legacy prompt version remains supported", async () => {
+  const originalPromptVersion = process.env.RAG_PROMPT_VERSION;
+  process.env.RAG_PROMPT_VERSION = "v1";
+
+  try {
+    await ingestFixture({
+      docId: "benefits-legacy",
+      fileName: "benefits-legacy.pdf",
+      pages: [
+        "Annual leave policy: employees receive 10 paid annual leave days each year.",
+      ],
+    });
+
+    const response = await chat(
+      ["benefits-legacy"],
+      "What is the annual leave policy?"
+    );
+
+    assert.match(response.text, /Grounded answer/);
+    assert.equal(response.citations.length, 1);
+  } finally {
+    if (originalPromptVersion === undefined) {
+      delete process.env.RAG_PROMPT_VERSION;
+    } else {
+      process.env.RAG_PROMPT_VERSION = originalPromptVersion;
+    }
+  }
+});
+
 test("compare flow returns multi-document evidence", async () => {
   await ingestFixture({
     docId: "benefits-2024",

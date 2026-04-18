@@ -1,5 +1,6 @@
-import { PromptTemplate } from "@langchain/core/prompts";
+import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
 import { completeText } from "./openai.js";
+import { getPromptVersion } from "./config.js";
 import { tokenize } from "./text-utils.js";
 import { getRagDataPath, readJsonFileSync, writeJsonFileSync } from "./storage.js";
 
@@ -48,7 +49,7 @@ const persistSessionMemoryStore = () => {
   );
 };
 
-const rewritePrompt = PromptTemplate.fromTemplate(
+const rewritePromptV1 = PromptTemplate.fromTemplate(
   `You rewrite follow-up questions into standalone retrieval queries for a document-grounded RAG system.
 Use the conversation only to resolve references, ellipsis, and document scope.
 Do not add facts that were not already stated by the user or assistant.
@@ -66,6 +67,37 @@ Latest user question:
 
 Standalone retrieval question:`
 );
+
+const rewritePromptV2 = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You rewrite follow-up questions into standalone retrieval queries for a document-grounded RAG system.
+Follow these rules strictly:
+- Use the conversation only to resolve references, ellipsis, and document scope.
+- Keep the rewritten question concise and in the same language as the user's latest question.
+- Preserve ambiguity if the user was ambiguous.
+- Do not add facts, constraints, dates, or policy details that were not already stated by the user or assistant.
+- Return only the rewritten question with no explanation.`,
+  ],
+  [
+    "human",
+    `Active documents:
+{documents}
+
+Recent conversation:
+{recentConversation}
+
+Latest user question:
+{question}
+
+Standalone retrieval question:`,
+  ],
+]);
+
+const formatRewritePrompt = async (values) =>
+  getPromptVersion() === "v1"
+    ? rewritePromptV1.format(values)
+    : rewritePromptV2.invoke(values);
 
 const trimMemoryText = (value = "", maxLength = MAX_MESSAGE_CHARS) => {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -182,7 +214,7 @@ export const resolveQueryWithSessionMemory = async ({
   }
 
   try {
-    const prompt = await rewritePrompt.format({
+    const prompt = await formatRewritePrompt({
       documents:
         documents.length > 0
           ? documents.map((document) => document.fileName).join(", ")

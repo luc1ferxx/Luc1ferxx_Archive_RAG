@@ -2,8 +2,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { PromptTemplate } from "@langchain/core/prompts";
+import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
 import { completeText } from "./rag/openai.js";
+import { getPromptVersion } from "./rag/config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -89,6 +90,47 @@ const withRetry = async (operation) => {
   throw lastError;
 };
 
+const webAnswerPromptV1 = PromptTemplate.fromTemplate(
+  `Use the search results to answer the user's question.
+Be concise and say when the results are insufficient.
+When possible, mention the source titles directly in the answer.
+
+Question:
+{question}
+
+Search Results:
+{searchResults}
+
+Helpful Answer:`
+);
+
+const webAnswerPromptV2 = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You answer questions using live web search snippets.
+Follow these rules strictly:
+- Use the same language as the user's question.
+- Base the answer only on the provided search results.
+- Be concise and explicit when the results are insufficient or conflicting.
+- Prefer mentioning source titles directly instead of making generic attribution claims.`,
+  ],
+  [
+    "human",
+    `Question:
+{question}
+
+Search Results:
+{searchResults}
+
+Helpful Answer:`,
+  ],
+]);
+
+const formatWebAnswerPrompt = async (values) =>
+  getPromptVersion() === "v1"
+    ? webAnswerPromptV1.format(values)
+    : webAnswerPromptV2.invoke(values);
+
 const chatMCP = async (query) => {
   getOpenAIApiKey();
 
@@ -110,20 +152,7 @@ const chatMCP = async (query) => {
         ? toolResult.content[0].text
         : "No search results available";
 
-    const answerTemplate = `Use the search results to answer the user's question.
-Be concise and say when the results are insufficient.
-When possible, mention the source titles directly in the answer.
-
-Question:
-{question}
-
-Search Results:
-{searchResults}
-
-Helpful Answer:`;
-
-    const prompt = PromptTemplate.fromTemplate(answerTemplate);
-    const formattedPrompt = await prompt.format({
+    const formattedPrompt = await formatWebAnswerPrompt({
       question: query,
       searchResults,
     });

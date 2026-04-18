@@ -127,6 +127,56 @@ const normalizeContent = (content) => {
   return "";
 };
 
+const getPromptMessageType = (message) => {
+  if (typeof message?.getType === "function") {
+    return message.getType();
+  }
+
+  if (typeof message?._getType === "function") {
+    return message._getType();
+  }
+
+  if (typeof message?.type === "string") {
+    return message.type;
+  }
+
+  if (typeof message?.role === "string") {
+    return message.role;
+  }
+
+  return "message";
+};
+
+const renderPromptMessages = (messages) =>
+  messages
+    .map((message) => {
+      const role = getPromptMessageType(message).toUpperCase();
+      const content = normalizeContent(message?.content);
+
+      return content ? `${role}:\n${content}` : role;
+    })
+    .join("\n\n");
+
+const renderPromptInput = (prompt) => {
+  if (typeof prompt === "string") {
+    return prompt;
+  }
+
+  if (Array.isArray(prompt)) {
+    return renderPromptMessages(prompt);
+  }
+
+  if (typeof prompt?.toChatMessages === "function") {
+    return renderPromptMessages(prompt.toChatMessages());
+  }
+
+  if (Array.isArray(prompt?.messages)) {
+    return renderPromptMessages(prompt.messages);
+  }
+
+  return normalizeContent(prompt?.content ?? prompt);
+};
+
 export const configureOpenAIProvider = (provider) => {
   customProvider = provider ?? null;
   embeddingsInstance = null;
@@ -161,7 +211,7 @@ export const embedQuery = async (query) => {
 
 export const completeText = async (prompt) => {
   if (customProvider?.completeText) {
-    return customProvider.completeText(prompt);
+    return customProvider.completeText(renderPromptInput(prompt));
   }
 
   const response = await withRetry(
