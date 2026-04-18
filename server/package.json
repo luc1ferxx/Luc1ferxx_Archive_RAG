@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "eval:synthetic": "node evaluation/run-synthetic-eval.mjs",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "eval:real": "node evaluation/run-real-eval.mjs",
+    "test": "node test/run.test.mjs"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +18,7 @@
     "@langchain/core": "^1.1.0",
     "@langchain/openai": "^1.1.3",
     "@modelcontextprotocol/sdk": "^1.23.0",
+    "@qdrant/js-client-rest": "^1.17.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",

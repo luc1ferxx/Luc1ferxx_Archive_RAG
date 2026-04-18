@@ -1,0 +1,219 @@
+{
+  "documents": [
+    {
+      "key": "benefits_2023",
+      "fileName": "benefits-2023.pdf",
+      "pages": [
+        "Annual Leave Policy\nEmployees receive 8 paid annual leave days per year.\nUnused leave cannot be carried over into the next year.",
+        "Remote Work Policy\nEmployees may work remotely 1 day per week with department head approval.",
+        "Expense Policy\nThe meal reimbursement limit is 45 dollars per day."
+      ]
+    },
+    {
+      "key": "benefits_2024",
+      "fileName": "benefits-2024.pdf",
+      "pages": [
+        "Annual Leave Policy\nEmployees receive 10 paid annual leave days per year.\nUnused leave cannot be carried over into the next year.",
+        "Remote Work Policy\nEmployees may work remotely 2 days per week with manager approval.",
+        "Expense Policy\nThe meal reimbursement limit is 50 dollars per day."
+      ]
+    },
+    {
+      "key": "benefits_2025",
+      "fileName": "benefits-2025.pdf",
+      "pages": [
+        "Annual Leave Policy\nEmployees receive 15 paid annual leave days per year.\nUp to 5 unused leave days may be carried over into the next year.",
+        "Remote Work Policy\nEmployees may work remotely 3 days per week with manager approval.",
+        "Expense Policy\nThe meal reimbursement limit is 60 dollars per day."
+      ]
+    },
+    {
+      "key": "benefits_2026",
+      "fileName": "benefits-2026.pdf",
+      "pages": [
+        "Annual Leave Policy\nEmployees receive 18 paid annual leave days per year.\nUp to 7 unused leave days may be carried over into the next year.",
+        "Remote Work Policy\nEmployees may work remotely 4 days per week with director approval.",
+        "Expense Policy\nThe meal reimbursement limit is 70 dollars per day."
+      ]
+    },
+    {
+      "key": "contractor_handbook",
+      "fileName": "contractor-handbook.pdf",
+      "pages": [
+        "Annual Leave Policy\nContractors receive 5 paid annual leave days per year.\nUnused leave expires at the end of the year.",
+        "Remote Work Policy\nContractors may work remotely 2 days per week with program lead approval.",
+        "Travel Expense Policy\nHotel reimbursement is capped at 160 dollars per night.\nPre-approval is required before booking."
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "qa_leave_2023",
+      "type": "qa",
+      "docKeys": ["benefits_2023"],
+      "question": "How many paid annual leave days do employees receive per year?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "benefits_2023",
+          "pages": [1]
+        }
+      ]
+    },
+    {
+      "id": "qa_remote_contractor",
+      "type": "qa",
+      "docKeys": ["contractor_handbook"],
+      "question": "How many remote work days per week are contractors allowed?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "contractor_handbook",
+          "pages": [2]
+        }
+      ]
+    },
+    {
+      "id": "compare_leave_3way",
+      "type": "compare",
+      "docKeys": ["benefits_2023", "benefits_2024", "benefits_2025"],
+      "question": "Compare the annual leave policy across these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "benefits_2023",
+          "pages": [1]
+        },
+        {
+          "docKey": "benefits_2024",
+          "pages": [1]
+        },
+        {
+          "docKey": "benefits_2025",
+          "pages": [1]
+        }
+      ]
+    },
+    {
+      "id": "compare_remote_3way",
+      "type": "compare",
+      "docKeys": ["benefits_2024", "benefits_2025", "benefits_2026"],
+      "question": "What is different about the remote work policy in these documents?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "benefits_2024",
+          "pages": [2]
+        },
+        {
+          "docKey": "benefits_2025",
+          "pages": [2]
+        },
+        {
+          "docKey": "benefits_2026",
+          "pages": [2]
+        }
+      ]
+    },
+    {
+      "id": "compare_meal_limit_3way",
+      "type": "compare",
+      "docKeys": ["benefits_2024", "benefits_2025", "benefits_2026"],
+      "question": "Compare the meal reimbursement limit in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "benefits_2024",
+          "pages": [3]
+        },
+        {
+          "docKey": "benefits_2025",
+          "pages": [3]
+        },
+        {
+          "docKey": "benefits_2026",
+          "pages": [3]
+        }
+      ]
+    },
+    {
+      "id": "compare_leave_5way",
+      "type": "compare",
+      "docKeys": ["benefits_2023", "benefits_2024", "benefits_2025", "benefits_2026", "contractor_handbook"],
+      "question": "Compare the annual leave policy across these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "benefits_2023",
+          "pages": [1]
+        },
+        {
+          "docKey": "benefits_2024",
+          "pages": [1]
+        },
+        {
+          "docKey": "benefits_2025",
+          "pages": [1]
+        },
+        {
+          "docKey": "benefits_2026",
+          "pages": [1]
+        },
+        {
+          "docKey": "contractor_handbook",
+          "pages": [1]
+        }
+      ]
+    },
+    {
+      "id": "compare_remote_5way",
+      "type": "compare",
+      "docKeys": ["benefits_2023", "benefits_2024", "benefits_2025", "benefits_2026", "contractor_handbook"],
+      "question": "What is different about the remote work policy in these documents?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "benefits_2023",
+          "pages": [2]
+        },
+        {
+          "docKey": "benefits_2024",
+          "pages": [2]
+        },
+        {
+          "docKey": "benefits_2025",
+          "pages": [2]
+        },
+        {
+          "docKey": "benefits_2026",
+          "pages": [2]
+        },
+        {
+          "docKey": "contractor_handbook",
+          "pages": [2]
+        }
+      ]
+    },
+    {
+      "id": "qa_parental_leave_abstain",
+      "type": "qa",
+      "docKeys": ["benefits_2024"],
+      "question": "What is the parental leave policy?",
+      "shouldAbstain": true,
+      "expectedEvidence": []
+    },
+    {
+      "id": "compare_hotel_policy_5way_abstain",
+      "type": "compare",
+      "docKeys": ["benefits_2023", "benefits_2024", "benefits_2025", "benefits_2026", "contractor_handbook"],
+      "question": "Compare the hotel reimbursement policy across these documents.",
+      "shouldAbstain": true,
+      "expectedEvidence": [
+        {
+          "docKey": "contractor_handbook",
+          "pages": [3]
+        }
+      ]
+    }
+  ]
+}

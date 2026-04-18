@@ -1,0 +1,35 @@
+{
+  "documents": [
+    {
+      "key": "benefits_2025",
+      "filePath": "./fixtures/benefits-2025.pdf"
+    },
+    {
+      "key": "travel_guide",
+      "filePath": "./fixtures/travel-guide.pdf"
+    }
+  ],
+  "cases": [
+    {
+      "id": "qa_remote_policy",
+      "type": "qa",
+      "docKeys": ["benefits_2025"],
+      "question": "What is the remote work policy?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "benefits_2025",
+          "pages": [2]
+        }
+      ]
+    },
+    {
+      "id": "compare_hotel_policy",
+      "type": "compare",
+      "docKeys": ["benefits_2025", "travel_guide"],
+      "question": "Compare the hotel reimbursement policy in these documents.",
+      "shouldAbstain": true,
+      "expectedEvidence": []
+    }
+  ]
+}

@@ -21,6 +21,8 @@ const STOP_WORDS = new Set([
   "the",
   "their",
   "this",
+  "these",
+  "those",
   "to",
   "was",
   "what",
@@ -61,12 +63,27 @@ const STOP_WORDS = new Set([
   "about",
   "against",
   "between",
+  "policy",
+  "policies",
+  "document",
+  "documents",
+  "file",
+  "files",
   "than",
   "then",
   "there",
   "here",
   "also",
   "just",
+  "compare",
+  "comparison",
+  "different",
+  "difference",
+  "same",
+  "similar",
+  "conflict",
+  "contrast",
+  "contradict",
   "not",
   "no",
   "yes",
@@ -116,8 +133,21 @@ export const tokenize = (value = "") =>
 const isMeaningfulToken = (token) =>
   Boolean(token) && (token.length > 1 || isCjkToken(token)) && !STOP_WORDS.has(token);
 
+export const extractMeaningfulTokens = (value = "") =>
+  tokenize(value).filter((token) => isMeaningfulToken(token));
+
 export const buildTermSet = (value = "") =>
-  new Set(tokenize(value).filter((token) => isMeaningfulToken(token)));
+  new Set(extractMeaningfulTokens(value));
+
+export const buildTermFrequencyMap = (value = "") => {
+  const frequencies = new Map();
+
+  for (const token of extractMeaningfulTokens(value)) {
+    frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
+  }
+
+  return frequencies;
+};
 
 export const extractTerms = (value = "", { limit = 10 } = {}) => {
   const frequencies = new Map();

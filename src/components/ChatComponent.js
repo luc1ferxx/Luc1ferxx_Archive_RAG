@@ -10,19 +10,25 @@ import { API_DOMAIN } from "../config";
 
 const { Search } = Input;
 
-const requestChat = async ({ docIds, question }) => {
-  const response = await axios.get(`${API_DOMAIN}/chat`, {
-    params: {
-      question,
-      docIds: docIds.join(","),
-    },
+const requestChat = async ({ docIds, question, sessionId }) => {
+  const response = await axios.post(`${API_DOMAIN}/chat`, {
+    question,
+    docIds: docIds.join(","),
+    sessionId,
   });
 
   return response.data;
 };
 
 const ChatComponent = (props) => {
-  const { docIds = [], docLabel, handleResp, isLoading, setIsLoading } = props;
+  const {
+    docIds = [],
+    docLabel,
+    sessionId,
+    handleResp,
+    isLoading,
+    setIsLoading,
+  } = props;
   const [searchValue, setSearchValue] = useState("");
   const [isChatModeOn, setIsChatModeOn] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -82,6 +88,7 @@ const ChatComponent = (props) => {
         const data = await requestChat({
           docIds,
           question: trimmedQuestion,
+          sessionId,
         });
 
         handleResp(trimmedQuestion, data);
@@ -104,7 +111,7 @@ const ChatComponent = (props) => {
         setIsLoading(false);
       }
     },
-    [docIds, handleResp, hasDocuments, isChatModeOn, setIsLoading, talk]
+    [docIds, handleResp, hasDocuments, isChatModeOn, sessionId, setIsLoading, talk]
   );
 
   useEffect(() => {

@@ -14,7 +14,9 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const uploadSessionsDirectory = path.join(__dirname, "upload-sessions");
+let uploadSessionsDirectory =
+  process.env.UPLOAD_SESSION_DIRECTORY?.trim() ||
+  path.join(__dirname, "upload-sessions");
 const chunkPrefix = "chunk-";
 
 const createUploadError = (message, status = 400) => {
@@ -132,6 +134,10 @@ const metadataMatches = (storedMetadata, nextMetadata) =>
 
 export const ensureUploadStorage = async () => {
   await mkdir(uploadSessionsDirectory, { recursive: true });
+};
+
+export const configureUploadSessionDirectory = (nextDirectory) => {
+  uploadSessionsDirectory = path.resolve(nextDirectory);
 };
 
 export const initializeUploadSession = async (rawMetadata) => {

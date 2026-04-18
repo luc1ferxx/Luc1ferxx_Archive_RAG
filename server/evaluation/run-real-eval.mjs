@@ -20,22 +20,13 @@ import { resetDocumentRegistry } from "../rag/doc-registry.js";
 import { resetSessionMemory } from "../rag/memory.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
 import { resetVectorStore } from "../rag/vector-store.js";
-import {
-  clearUploadSession,
-  configureUploadSessionDirectory,
-  finalizeUploadSession,
-  getUploadSessionStatus,
-  initializeUploadSession,
-  storeUploadChunk,
-} from "../upload-session-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const resultsDirectory = path.join(__dirname, "results");
 const generatedDirectory = path.join(__dirname, "generated");
-const defaultCorpusPath = path.join(__dirname, "synthetic-corpus.json");
-const uploadChunkSizeBytes = 180;
+const defaultCorpusPath = path.join(__dirname, "real-corpus.json");
 const abstainPatterns = [
   "couldn't find enough grounded evidence",
   "comparison would be unreliable",
@@ -44,84 +35,6 @@ const abstainPatterns = [
 ];
 
 const toRunId = () => new Date().toISOString().replace(/[:.]/g, "-");
-
-const escapePdfText = (text) =>
-  text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
-
-const buildPageStream = (pageText) => {
-  const lines = pageText
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const commands = ["BT", "/F1 12 Tf", "72 720 Td"];
-
-  lines.forEach((line, index) => {
-    if (index > 0) {
-      commands.push("0 -18 Td");
-    }
-
-    commands.push(`(${escapePdfText(line)}) Tj`);
-  });
-
-  commands.push("ET");
-
-  return commands.join("\n");
-};
-
-const buildPdfBuffer = (pages) => {
-  const pageObjectIds = pages.map((_, index) => 4 + index * 2);
-  const contentObjectIds = pages.map((_, index) => 5 + index * 2);
-  const objects = [
-    {
-      id: 1,
-      body: "<< /Type /Catalog /Pages 2 0 R >>",
-    },
-    {
-      id: 2,
-      body: `<< /Type /Pages /Kids [${pageObjectIds
-        .map((id) => `${id} 0 R`)
-        .join(" ")}] /Count ${pages.length} >>`,
-    },
-    {
-      id: 3,
-      body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    },
-  ];
-
-  pages.forEach((pageText, index) => {
-    const pageStream = buildPageStream(pageText);
-
-    objects.push({
-      id: pageObjectIds[index],
-      body: `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contentObjectIds[index]} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
-    });
-    objects.push({
-      id: contentObjectIds[index],
-      body: `<< /Length ${Buffer.byteLength(pageStream, "utf8")} >>\nstream\n${pageStream}\nendstream`,
-    });
-  });
-
-  const sortedObjects = objects.sort((left, right) => left.id - right.id);
-  let pdf = "%PDF-1.4\n";
-  const offsets = new Map();
-
-  for (const entry of sortedObjects) {
-    offsets.set(entry.id, Buffer.byteLength(pdf, "utf8"));
-    pdf += `${entry.id} 0 obj\n${entry.body}\nendobj\n`;
-  }
-
-  const xrefOffset = Buffer.byteLength(pdf, "utf8");
-  pdf += `xref\n0 ${sortedObjects.length + 1}\n`;
-  pdf += "0000000000 65535 f \n";
-
-  for (const entry of sortedObjects) {
-    pdf += `${String(offsets.get(entry.id)).padStart(10, "0")} 00000 n \n`;
-  }
-
-  pdf += `trailer\n<< /Root 1 0 R /Size ${sortedObjects.length + 1} >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
-
-  return Buffer.from(pdf, "utf8");
-};
 
 const writeJson = async (filePath, value) => {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -187,88 +100,17 @@ const evaluateExpectedCoverage = ({ citations, expectedEvidence }) => {
   };
 };
 
-const runUploadResumeFlow = async ({ buffer, fileName, runDirectory, uploadIndex }) => {
-  const fileId = `synthetic-${uploadIndex}-${randomUUID()}`;
-  const totalChunks = Math.max(1, Math.ceil(buffer.length / uploadChunkSizeBytes));
-  const initiallyUploadedChunkCount = Math.max(1, Math.floor(totalChunks / 2));
-  const mergedFilePath = path.join(runDirectory, fileName);
+const ratio = (numerator, denominator) =>
+  denominator === 0 ? null : Number((numerator / denominator).toFixed(4));
 
-  await initializeUploadSession({
-    fileId,
-    fileName,
-    fileSize: buffer.length,
-    lastModified: 0,
-    totalChunks,
-    chunkSize: uploadChunkSizeBytes,
-  });
-
-  for (let chunkIndex = 0; chunkIndex < initiallyUploadedChunkCount; chunkIndex += 1) {
-    const start = chunkIndex * uploadChunkSizeBytes;
-    const end = Math.min(start + uploadChunkSizeBytes, buffer.length);
-
-    await storeUploadChunk({
-      fileId,
-      chunkIndex,
-      totalChunks,
-      chunkBuffer: buffer.subarray(start, end),
-    });
-  }
-
-  const pausedStatus = await getUploadSessionStatus(fileId);
-  const resumedSession = await initializeUploadSession({
-    fileId,
-    fileName,
-    fileSize: buffer.length,
-    lastModified: 0,
-    totalChunks,
-    chunkSize: uploadChunkSizeBytes,
-  });
-  const alreadyUploadedChunks = new Set(resumedSession.uploadedChunks ?? []);
-  let resumedBytesUploaded = 0;
-
-  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
-    if (alreadyUploadedChunks.has(chunkIndex)) {
-      continue;
-    }
-
-    const start = chunkIndex * uploadChunkSizeBytes;
-    const end = Math.min(start + uploadChunkSizeBytes, buffer.length);
-    const chunkBuffer = buffer.subarray(start, end);
-
-    resumedBytesUploaded += chunkBuffer.length;
-    await storeUploadChunk({
-      fileId,
-      chunkIndex,
-      totalChunks,
-      chunkBuffer,
-    });
-  }
-
-  await finalizeUploadSession({
-    fileId,
-    destinationPath: mergedFilePath,
-  });
-
-  const mergedBuffer = await readFile(mergedFilePath);
-  await clearUploadSession(fileId);
-
-  const skippedChunksOnResume = resumedSession.uploadedChunks.length;
-  const skippedBytesOnResume = Math.max(0, buffer.length - resumedBytesUploaded);
-
-  return {
-    fileName,
-    fileId,
-    totalBytes: buffer.length,
-    totalChunks,
-    chunkSizeBytes: uploadChunkSizeBytes,
-    pausedUploadedChunks: pausedStatus?.uploadedChunks ?? [],
-    skippedChunksOnResume,
-    skippedBytesOnResume,
-    resumedBytesUploaded,
-    mergedMatchesOriginal: Buffer.compare(buffer, mergedBuffer) === 0,
-    mergedFilePath,
-  };
-};
+const average = (values) =>
+  values.length === 0
+    ? null
+    : Number(
+        (
+          values.reduce((sum, value) => sum + value, 0) / values.length
+        ).toFixed(2)
+      );
 
 const evaluateCase = async ({ testCase, docIdByKey, docKeyByDocId }) => {
   const startedAt = performance.now();
@@ -313,27 +155,9 @@ const evaluateCase = async ({ testCase, docIdByKey, docKeyByDocId }) => {
   };
 };
 
-const ratio = (numerator, denominator) =>
-  denominator === 0 ? null : Number((numerator / denominator).toFixed(4));
-
-const average = (values) =>
-  values.length === 0
-    ? null
-    : Number(
-        (
-          values.reduce((sum, value) => sum + value, 0) / values.length
-        ).toFixed(2)
-      );
-
-const buildMarkdownReport = ({
-  runId,
-  corpusPath,
-  summary,
-  uploadResults,
-  caseResults,
-}) => {
+const buildMarkdownReport = ({ runId, corpusPath, summary, documentRecords, caseResults }) => {
   const lines = [
-    "# Synthetic RAG Evaluation",
+    "# Real RAG Evaluation",
     "",
     `- Run ID: \`${runId}\``,
     `- Corpus file: \`${corpusPath}\``,
@@ -345,32 +169,27 @@ const buildMarkdownReport = ({
     `- Chunk size / overlap: \`${summary.config.chunkSize}/${summary.config.chunkOverlap}\``,
     `- Min relevance score: \`${summary.config.minRelevanceScore}\``,
     "",
-    "## Metrics",
+    "## Documents",
     "",
-    "| Metric | Value |",
-    "| --- | ---: |",
-    `| Overall pass rate | ${summary.metrics.overallPassRate} |`,
-    `| QA page hit rate | ${summary.metrics.qaPageHitRate} |`,
-    `| Compare doc coverage | ${summary.metrics.compareDocCoverageRate} |`,
-    `| Compare page hit rate | ${summary.metrics.comparePageHitRate} |`,
-    `| Abstain accuracy | ${summary.metrics.abstainAccuracy} |`,
-    `| Answer content hit rate | ${summary.metrics.answerContentHitRate} |`,
-    `| Upload resume success rate | ${summary.metrics.uploadResumeSuccessRate} |`,
-    `| Avg response time (ms) | ${summary.metrics.averageResponseTimeMs} |`,
-    `| Avg citation count | ${summary.metrics.averageCitationCount} |`,
-    `| Resume saved bytes | ${summary.metrics.totalSkippedBytesOnResume} |`,
-    "",
-    "## Upload Resume Checks",
-    "",
-    "| Document | Chunks | Skipped On Resume | Saved Bytes | Merge OK |",
-    "| --- | ---: | ---: | ---: | --- |",
+    "| Doc Key | File | Pages | Chunks |",
+    "| --- | --- | ---: | ---: |",
   ];
 
-  for (const uploadResult of uploadResults) {
+  for (const document of documentRecords) {
     lines.push(
-      `| ${uploadResult.fileName} | ${uploadResult.totalChunks} | ${uploadResult.skippedChunksOnResume} | ${uploadResult.skippedBytesOnResume} | ${uploadResult.mergedMatchesOriginal ? "yes" : "no"} |`
+      `| ${document.docKey} | ${document.fileName} | ${document.pageCount} | ${document.chunkCount} |`
     );
   }
+
+  lines.push("", "## Metrics", "", "| Metric | Value |", "| --- | ---: |");
+  lines.push(`| Overall pass rate | ${summary.metrics.overallPassRate} |`);
+  lines.push(`| QA page hit rate | ${summary.metrics.qaPageHitRate} |`);
+  lines.push(`| Compare doc coverage | ${summary.metrics.compareDocCoverageRate} |`);
+  lines.push(`| Compare page hit rate | ${summary.metrics.comparePageHitRate} |`);
+  lines.push(`| Abstain accuracy | ${summary.metrics.abstainAccuracy} |`);
+  lines.push(`| Answer content hit rate | ${summary.metrics.answerContentHitRate} |`);
+  lines.push(`| Avg response time (ms) | ${summary.metrics.averageResponseTimeMs} |`);
+  lines.push(`| Avg citation count | ${summary.metrics.averageCitationCount} |`);
 
   lines.push(
     "",
@@ -420,58 +239,40 @@ const main = async () => {
   try {
     await access(corpusPath);
   } catch {
-    throw new Error(`Synthetic evaluation corpus not found at ${corpusPath}.`);
+    throw new Error(
+      `Real evaluation corpus not found at ${corpusPath}. Create it from evaluation/real-corpus.example.json or pass a custom path.`
+    );
   }
 
-  const runId = toRunId();
+  const runId = `real-${toRunId()}`;
   const runDirectory = path.join(generatedDirectory, runId);
-  const mergedDirectory = path.join(runDirectory, "merged");
-  const sourceDirectory = path.join(runDirectory, "source");
+  const ragDataDirectory = path.join(runDirectory, "rag-data");
   const resultsRunJsonPath = path.join(resultsDirectory, `${runId}.json`);
   const resultsRunMarkdownPath = path.join(resultsDirectory, `${runId}.md`);
-  const latestJsonPath = path.join(resultsDirectory, "latest.json");
-  const latestMarkdownPath = path.join(resultsDirectory, "latest.md");
+  const latestJsonPath = path.join(resultsDirectory, "latest-real.json");
+  const latestMarkdownPath = path.join(resultsDirectory, "latest-real.md");
+  const corpusDirectory = path.dirname(corpusPath);
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
-  const ragDataDirectory = path.join(runDirectory, "rag-data");
-  const uploadSessionDirectory = path.join(runDirectory, "upload-sessions");
 
   await mkdir(resultsDirectory, { recursive: true });
-  await mkdir(sourceDirectory, { recursive: true });
-  await mkdir(mergedDirectory, { recursive: true });
+  await mkdir(runDirectory, { recursive: true });
 
   configureRagDataDirectory(ragDataDirectory);
   resetDocumentRegistry();
   resetVectorStore();
   resetSessionMemory();
-  configureUploadSessionDirectory(uploadSessionDirectory);
 
-  const uploadResults = [];
   const docIdByKey = new Map();
   const docKeyByDocId = new Map();
   const documentRecords = [];
 
-  for (const [index, documentSpec] of corpus.documents.entries()) {
-    const buffer = buildPdfBuffer(documentSpec.pages);
-    const sourcePath = path.join(sourceDirectory, documentSpec.fileName);
-
-    await writeFile(sourcePath, buffer);
-
-    const uploadResult = await runUploadResumeFlow({
-      buffer,
-      fileName: documentSpec.fileName,
-      runDirectory: mergedDirectory,
-      uploadIndex: index,
-    });
-    uploadResults.push({
-      ...uploadResult,
-      sourcePath,
-    });
-
+  for (const documentSpec of corpus.documents ?? []) {
     const docId = randomUUID();
+    const filePath = path.resolve(corpusDirectory, documentSpec.filePath);
     const documentRecord = await ingestDocument({
       docId,
-      filePath: uploadResult.mergedFilePath,
-      fileName: documentSpec.fileName,
+      filePath,
+      fileName: documentSpec.fileName ?? path.basename(filePath),
     });
 
     docIdByKey.set(documentSpec.key, docId);
@@ -479,9 +280,8 @@ const main = async () => {
     documentRecords.push({
       docKey: documentSpec.key,
       docId,
-      fileName: documentSpec.fileName,
-      sourcePath,
-      mergedFilePath: uploadResult.mergedFilePath,
+      fileName: documentRecord.fileName,
+      filePath,
       pageCount: documentRecord.pageCount,
       chunkCount: documentRecord.chunkCount,
     });
@@ -489,7 +289,7 @@ const main = async () => {
 
   const caseResults = [];
 
-  for (const testCase of corpus.cases) {
+  for (const testCase of corpus.cases ?? []) {
     caseResults.push(
       await evaluateCase({
         testCase,
@@ -506,18 +306,14 @@ const main = async () => {
     (caseResult) => caseResult.type === "compare" && !caseResult.shouldAbstain
   );
   const abstainCases = caseResults.filter((caseResult) => caseResult.shouldAbstain);
-  const successfulUploads = uploadResults.filter(
-    (uploadResult) =>
-      uploadResult.mergedMatchesOriginal && uploadResult.skippedChunksOnResume > 0
-  );
 
   const summary = {
     runId,
     createdAt: new Date().toISOString(),
     corpus: {
       path: corpusPath,
-      documents: corpus.documents.length,
-      cases: corpus.cases.length,
+      documents: documentRecords.length,
+      cases: caseResults.length,
       qaCases: qaCases.length,
       compareCases: compareCases.length,
       abstainCases: abstainCases.length,
@@ -534,7 +330,6 @@ const main = async () => {
       compareTopKPerDoc: getComparisonTopKPerDoc(),
       maxComparisonSources: getMaxComparisonSources(),
       minRelevanceScore: getMinRelevanceScore(),
-      uploadChunkSizeBytes,
     },
     metrics: {
       overallPassRate: ratio(
@@ -563,19 +358,11 @@ const main = async () => {
         ).length,
         caseResults.filter((caseResult) => !caseResult.shouldAbstain).length
       ),
-      uploadResumeSuccessRate: ratio(
-        successfulUploads.length,
-        uploadResults.length
-      ),
       averageResponseTimeMs: average(
         caseResults.map((caseResult) => caseResult.responseTimeMs)
       ),
       averageCitationCount: average(
         caseResults.map((caseResult) => caseResult.citationCount)
-      ),
-      totalSkippedBytesOnResume: uploadResults.reduce(
-        (sum, uploadResult) => sum + uploadResult.skippedBytesOnResume,
-        0
       ),
     },
   };
@@ -583,14 +370,13 @@ const main = async () => {
   const resultPayload = {
     summary,
     documents: documentRecords,
-    uploads: uploadResults,
     cases: caseResults,
   };
   const markdownReport = buildMarkdownReport({
     runId,
-    summary,
     corpusPath,
-    uploadResults,
+    summary,
+    documentRecords,
     caseResults,
   });
 

@@ -1,8 +1,9 @@
 {
   "summary": {
-    "runId": "2026-04-13T06-58-38-397Z",
-    "createdAt": "2026-04-13T06:59:56.099Z",
+    "runId": "2026-04-18T01-33-03-319Z",
+    "createdAt": "2026-04-18T01:34:03.867Z",
     "corpus": {
+      "path": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\synthetic-corpus-hybrid.json",
       "documents": 3,
       "cases": 8,
       "qaCases": 3,
@@ -14,6 +15,7 @@
       "chat": "gpt-5"
     },
     "config": {
+      "chunkStrategy": "structured",
       "chunkSize": 900,
       "chunkOverlap": 180,
       "retrievalTopK": 6,
@@ -28,389 +30,594 @@
       "compareDocCoverageRate": 1,
       "comparePageHitRate": 1,
       "abstainAccuracy": 0,
+      "answerContentHitRate": 1,
       "uploadResumeSuccessRate": 1,
-      "averageResponseTimeMs": 9254,
-      "averageCitationCount": 2,
-      "totalSkippedBytesOnResume": 2160
+      "averageResponseTimeMs": 7421.13,
+      "averageCitationCount": 4.63,
+      "totalSkippedBytesOnResume": 2700
     }
   },
   "documents": [
     {
-      "docKey": "benefits_2024",
-      "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-      "fileName": "benefits-2024.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\source\\benefits-2024.pdf",
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\merged\\benefits-2024.pdf",
-      "pageCount": 3,
-      "chunkCount": 3
+      "docKey": "catalog_alpha",
+      "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+      "fileName": "catalog-alpha.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-alpha.pdf",
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-alpha.pdf",
+      "pageCount": 4,
+      "chunkCount": 4
     },
     {
-      "docKey": "benefits_2025",
-      "docId": "65f2ba27-72c4-44fa-bcee-d1751d1c077b",
-      "fileName": "benefits-2025.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\source\\benefits-2025.pdf",
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\merged\\benefits-2025.pdf",
-      "pageCount": 3,
-      "chunkCount": 3
+      "docKey": "catalog_beta",
+      "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+      "fileName": "catalog-beta.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-beta.pdf",
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-beta.pdf",
+      "pageCount": 4,
+      "chunkCount": 4
     },
     {
-      "docKey": "travel_guide",
-      "docId": "27ce5e82-546d-4c76-8226-2c2db6993a94",
-      "fileName": "travel-guide.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\source\\travel-guide.pdf",
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\merged\\travel-guide.pdf",
-      "pageCount": 3,
-      "chunkCount": 3
+      "docKey": "catalog_gamma",
+      "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+      "fileName": "catalog-gamma.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-gamma.pdf",
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-gamma.pdf",
+      "pageCount": 4,
+      "chunkCount": 4
     }
   ],
   "uploads": [
     {
-      "fileName": "benefits-2024.pdf",
-      "fileId": "synthetic-0-c85f4b5a-26c4-4f3e-8421-4c67786cc4b0",
-      "totalBytes": 1423,
-      "totalChunks": 8,
+      "fileName": "catalog-alpha.pdf",
+      "fileId": "synthetic-0-0abe2684-24ce-4b2c-b295-ed8773f073ad",
+      "totalBytes": 1628,
+      "totalChunks": 10,
       "chunkSizeBytes": 180,
       "pausedUploadedChunks": [
         0,
         1,
         2,
-        3
+        3,
+        4
       ],
-      "skippedChunksOnResume": 4,
-      "skippedBytesOnResume": 720,
-      "resumedBytesUploaded": 703,
+      "skippedChunksOnResume": 5,
+      "skippedBytesOnResume": 900,
+      "resumedBytesUploaded": 728,
       "mergedMatchesOriginal": true,
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\merged\\benefits-2024.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\source\\benefits-2024.pdf"
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-alpha.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-alpha.pdf"
     },
     {
-      "fileName": "benefits-2025.pdf",
-      "fileId": "synthetic-1-c9a73c9b-3afc-476d-8936-c394c381dcb9",
-      "totalBytes": 1433,
-      "totalChunks": 8,
+      "fileName": "catalog-beta.pdf",
+      "fileId": "synthetic-1-dae9367e-23b4-4a81-91fd-6a89878d9f44",
+      "totalBytes": 1628,
+      "totalChunks": 10,
       "chunkSizeBytes": 180,
       "pausedUploadedChunks": [
         0,
         1,
         2,
-        3
+        3,
+        4
       ],
-      "skippedChunksOnResume": 4,
-      "skippedBytesOnResume": 720,
-      "resumedBytesUploaded": 713,
+      "skippedChunksOnResume": 5,
+      "skippedBytesOnResume": 900,
+      "resumedBytesUploaded": 728,
       "mergedMatchesOriginal": true,
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\merged\\benefits-2025.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\source\\benefits-2025.pdf"
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-beta.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-beta.pdf"
     },
     {
-      "fileName": "travel-guide.pdf",
-      "fileId": "synthetic-2-716075f9-0975-47c3-b1e6-c77b074b957d",
-      "totalBytes": 1388,
-      "totalChunks": 8,
+      "fileName": "catalog-gamma.pdf",
+      "fileId": "synthetic-2-aa16d178-ca6d-4685-b8e9-a64edc1a02f8",
+      "totalBytes": 1628,
+      "totalChunks": 10,
       "chunkSizeBytes": 180,
       "pausedUploadedChunks": [
         0,
         1,
         2,
-        3
+        3,
+        4
       ],
-      "skippedChunksOnResume": 4,
-      "skippedBytesOnResume": 720,
-      "resumedBytesUploaded": 668,
+      "skippedChunksOnResume": 5,
+      "skippedBytesOnResume": 900,
+      "resumedBytesUploaded": 728,
       "mergedMatchesOriginal": true,
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\merged\\travel-guide.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-13T06-58-38-397Z\\source\\travel-guide.pdf"
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-gamma.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-gamma.pdf"
     }
   ],
   "cases": [
     {
-      "id": "qa_leave_2024",
+      "id": "qa_nulpar_bq_beta",
       "type": "qa",
-      "question": "How many paid annual leave days do employees receive per year?",
+      "question": "What is the NULPAR-BQ allocation amount?",
       "docKeys": [
-        "benefits_2024"
+        "catalog_beta"
       ],
       "shouldAbstain": false,
       "abstained": false,
       "docCoverageHit": true,
       "pageCoverageHit": true,
+      "answerExpectationHit": true,
       "passed": true,
-      "responseTimeMs": 2807,
-      "citationCount": 1,
-      "answer": "Employees receive 10 paid annual leave days per year (Source 1).",
+      "responseTimeMs": 2556,
+      "citationCount": 3,
+      "answer": "270 dollars per cycle (Source 1).",
       "citations": [
         {
           "rank": 1,
-          "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-          "docKey": "benefits_2024",
-          "fileName": "benefits-2024.pdf",
-          "pageNumber": 1,
-          "score": 0.7411,
-          "sectionHeading": null
-        }
-      ]
-    },
-    {
-      "id": "qa_remote_2025",
-      "type": "qa",
-      "question": "How many remote work days per week are allowed?",
-      "docKeys": [
-        "benefits_2025"
-      ],
-      "shouldAbstain": false,
-      "abstained": false,
-      "docCoverageHit": true,
-      "pageCoverageHit": true,
-      "passed": true,
-      "responseTimeMs": 2821,
-      "citationCount": 2,
-      "answer": "Employees may work remotely up to 3 days per week, with manager approval (Source 1).",
-      "citations": [
-        {
-          "rank": 1,
-          "docId": "65f2ba27-72c4-44fa-bcee-d1751d1c077b",
-          "docKey": "benefits_2025",
-          "fileName": "benefits-2025.pdf",
-          "pageNumber": 2,
-          "score": 0.7245,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 4,
+          "score": 1,
           "sectionHeading": null
         },
         {
           "rank": 2,
-          "docId": "65f2ba27-72c4-44fa-bcee-d1751d1c077b",
-          "docKey": "benefits_2025",
-          "fileName": "benefits-2025.pdf",
-          "pageNumber": 1,
-          "score": 0.3587,
-          "sectionHeading": null
-        }
-      ]
-    },
-    {
-      "id": "qa_meal_2024",
-      "type": "qa",
-      "question": "What is the meal reimbursement limit?",
-      "docKeys": [
-        "benefits_2024"
-      ],
-      "shouldAbstain": false,
-      "abstained": false,
-      "docCoverageHit": true,
-      "pageCoverageHit": true,
-      "passed": true,
-      "responseTimeMs": 10401,
-      "citationCount": 1,
-      "answer": "The meal reimbursement limit is $50 per day (Source 1).",
-      "citations": [
-        {
-          "rank": 1,
-          "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-          "docKey": "benefits_2024",
-          "fileName": "benefits-2024.pdf",
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
           "pageNumber": 3,
-          "score": 0.7513,
-          "sectionHeading": null
-        }
-      ]
-    },
-    {
-      "id": "compare_leave",
-      "type": "compare",
-      "question": "Compare the annual leave policy in these documents.",
-      "docKeys": [
-        "benefits_2024",
-        "benefits_2025"
-      ],
-      "shouldAbstain": false,
-      "abstained": false,
-      "docCoverageHit": true,
-      "pageCoverageHit": true,
-      "passed": true,
-      "responseTimeMs": 20002,
-      "citationCount": 4,
-      "answer": "Summary:\n- 2024 policy: 10 paid annual leave days; no carryover. (Source 1)\n- 2025 policy: 15 paid annual leave days; up to 5 days may be carried over. (Source 2)\n\nPer document:\n- benefits-2024.pdf: Employees receive 10 paid annual leave days per year; unused leave cannot be carried over into the next year. (Source 1)\n- benefits-2025.pdf: Employees receive 15 paid annual leave days per year; up to 5 unused leave days may be carried over into the next year. (Source 2)\n\nAgreements:\n- Both define paid annual leave for employees and specify a number of days per year. (Sources 1, 2)\n- Both include an explicit carryover policy (whether allowed or not). (Sources 1, 2)\n\nDifferences:\n- Leave entitlement: 10 days (2024) vs 15 days (2025). (Sources 1, 2)\n- Carryover: none allowed (2024) vs up to 5 days allowed (2025). (Sources 1, 2)\n\nGaps or uncertainty:\n- No details on accrual method, eligibility differences (e.g., part-time, tenure), approval process, blackout periods, or payout on termination. (No evidence in Sources 1–2)\n- Effective dates or whether 2025 supersedes 2024 are not stated. (No evidence in Sources 1–2)\n- Both documents provide direct annual-leave evidence; none lack relevant evidence.",
-      "citations": [
-        {
-          "rank": 1,
-          "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-          "docKey": "benefits_2024",
-          "fileName": "benefits-2024.pdf",
-          "pageNumber": 1,
-          "score": 0.5693,
-          "sectionHeading": null
-        },
-        {
-          "rank": 2,
-          "docId": "65f2ba27-72c4-44fa-bcee-d1751d1c077b",
-          "docKey": "benefits_2025",
-          "fileName": "benefits-2025.pdf",
-          "pageNumber": 1,
-          "score": 0.5644,
+          "score": 0.7111,
           "sectionHeading": null
         },
         {
           "rank": 3,
-          "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-          "docKey": "benefits_2024",
-          "fileName": "benefits-2024.pdf",
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 1,
+          "score": 0.6687,
+          "sectionHeading": null
+        }
+      ]
+    },
+    {
+      "id": "qa_nulpar_cr_gamma",
+      "type": "qa",
+      "question": "What is the NULPAR-CR allocation amount?",
+      "docKeys": [
+        "catalog_gamma"
+      ],
+      "shouldAbstain": false,
+      "abstained": false,
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
+      "answerExpectationHit": true,
+      "passed": true,
+      "responseTimeMs": 2681,
+      "citationCount": 3,
+      "answer": "The NULPAR-CR allocation amount is 360 dollars per cycle (Source 1).",
+      "citations": [
+        {
+          "rank": 1,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 3,
+          "score": 1,
+          "sectionHeading": null
+        },
+        {
+          "rank": 2,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 4,
+          "score": 0.7492,
+          "sectionHeading": null
+        },
+        {
+          "rank": 3,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
           "pageNumber": 2,
-          "score": 0.3356,
+          "score": 0.7261,
+          "sectionHeading": null
+        }
+      ]
+    },
+    {
+      "id": "compare_nulpar_bq",
+      "type": "compare",
+      "question": "Compare the NULPAR-BQ allocation amount in these documents.",
+      "docKeys": [
+        "catalog_alpha",
+        "catalog_beta",
+        "catalog_gamma"
+      ],
+      "shouldAbstain": false,
+      "abstained": false,
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
+      "answerExpectationHit": true,
+      "passed": true,
+      "responseTimeMs": 11777,
+      "citationCount": 8,
+      "answer": "Summary:\nThe NULPAR-BQ allocation amount differs across documents: 260, 270, and 280 dollars per cycle.\n\nPer document:\n- catalog-alpha.pdf: 260 dollars per cycle (Source 1).\n- catalog-beta.pdf: 270 dollars per cycle (Source 2).\n- catalog-gamma.pdf: 280 dollars per cycle (Source 3).\n\nAgreements:\n- All specify NULPAR-BQ allocation in dollars per cycle (Sources 1–3).\n\nDifferences:\n- Amounts vary by document: 260 (alpha) vs 270 (beta) vs 280 (gamma) dollars per cycle (Sources 1–3).\n\nGaps or uncertainty:\n- None of the documents lack direct evidence for NULPAR-BQ. The documents do not provide context (e.g., dates/effective periods) to explain the differing amounts.",
+      "citations": [
+        {
+          "rank": 1,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 2,
+          "score": 1,
+          "sectionHeading": null
+        },
+        {
+          "rank": 2,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 4,
+          "score": 1,
+          "sectionHeading": null
+        },
+        {
+          "rank": 3,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 2,
+          "score": 1,
           "sectionHeading": null
         },
         {
           "rank": 4,
-          "docId": "65f2ba27-72c4-44fa-bcee-d1751d1c077b",
-          "docKey": "benefits_2025",
-          "fileName": "benefits-2025.pdf",
-          "pageNumber": 2,
-          "score": 0.326,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 1,
+          "score": 0.7064,
+          "sectionHeading": null
+        },
+        {
+          "rank": 5,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 3,
+          "score": 0.721,
+          "sectionHeading": null
+        },
+        {
+          "rank": 6,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 4,
+          "score": 0.707,
+          "sectionHeading": null
+        },
+        {
+          "rank": 7,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 3,
+          "score": 0.6729,
+          "sectionHeading": null
+        },
+        {
+          "rank": 8,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 1,
+          "score": 0.6602,
           "sectionHeading": null
         }
       ]
     },
     {
-      "id": "compare_remote",
+      "id": "compare_nulpar_cr",
       "type": "compare",
-      "question": "What is different about the remote work policy in these documents?",
+      "question": "Compare the NULPAR-CR allocation amount in these documents.",
       "docKeys": [
-        "benefits_2024",
-        "benefits_2025"
+        "catalog_alpha",
+        "catalog_beta",
+        "catalog_gamma"
       ],
       "shouldAbstain": false,
       "abstained": false,
       "docCoverageHit": true,
       "pageCoverageHit": true,
+      "answerExpectationHit": true,
       "passed": true,
-      "responseTimeMs": 10104,
-      "citationCount": 2,
-      "answer": "Summary:\n2025 increases the allowed remote work from 2 to 3 days per week while keeping the manager approval requirement (Source 1; Source 2).\n\nPer document:\n- benefits-2024.pdf: Employees may work remotely 2 days per week with manager approval (Source 1).\n- benefits-2025.pdf: Employees may work remotely 3 days per week with manager approval (Source 2).\n\nAgreements:\n- Remote work is permitted with manager approval (Source 1; Source 2).\n\nDifferences:\n- Number of allowed remote days per week: 2 days (2024) vs. 3 days (2025) (Source 1; Source 2).\n\nGaps or uncertainty:\n- No details provided on eligibility exceptions, scheduling rules, or fully remote options; only the number of days and approval requirement are specified in the excerpts (Source 1; Source 2).",
+      "responseTimeMs": 8955,
+      "citationCount": 8,
+      "answer": "Summary:\nEach document states a different NULPAR-CR allocation amount: 340 (catalog-alpha), 350 (catalog-beta), and 360 dollars per cycle (catalog-gamma) [Source 1; Source 2; Source 3].\n\nPer document:\n- catalog-alpha.pdf: 340 dollars per cycle (Source 1).\n- catalog-beta.pdf: 350 dollars per cycle (Source 2).\n- catalog-gamma.pdf: 360 dollars per cycle (Source 3).\n\nAgreements:\n- None. No two documents report the same amount.\n\nDifferences:\n- catalog-beta is $10 higher than catalog-alpha (350 vs 340) [Source 2 vs Source 1].\n- catalog-gamma is $10 higher than catalog-beta (360 vs 350) and $20 higher than catalog-alpha (360 vs 340) [Source 3 vs Source 2; Source 3 vs Source 1].\n\nGaps or uncertainty:\n- None. All documents provide explicit NULPAR-CR allocation amounts. Other program entries (e.g., NULPAR-AX, NULPAR-BQ) are not used as evidence for NULPAR-CR.",
       "citations": [
         {
           "rank": 1,
-          "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-          "docKey": "benefits_2024",
-          "fileName": "benefits-2024.pdf",
-          "pageNumber": 2,
-          "score": 0.5506,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 3,
+          "score": 1,
           "sectionHeading": null
         },
         {
           "rank": 2,
-          "docId": "65f2ba27-72c4-44fa-bcee-d1751d1c077b",
-          "docKey": "benefits_2025",
-          "fileName": "benefits-2025.pdf",
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 1,
+          "score": 1,
+          "sectionHeading": null
+        },
+        {
+          "rank": 3,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 3,
+          "score": 1,
+          "sectionHeading": null
+        },
+        {
+          "rank": 4,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 1,
+          "score": 0.7579,
+          "sectionHeading": null
+        },
+        {
+          "rank": 5,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 3,
+          "score": 0.7829,
+          "sectionHeading": null
+        },
+        {
+          "rank": 6,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 4,
+          "score": 0.763,
+          "sectionHeading": null
+        },
+        {
+          "rank": 7,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
           "pageNumber": 2,
-          "score": 0.5505,
+          "score": 0.7389,
+          "sectionHeading": null
+        },
+        {
+          "rank": 8,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 4,
+          "score": 0.7425,
           "sectionHeading": null
         }
       ]
     },
     {
-      "id": "compare_meal_limit",
-      "type": "compare",
-      "question": "Compare the meal reimbursement limit in these documents.",
-      "docKeys": [
-        "benefits_2024",
-        "benefits_2025"
-      ],
-      "shouldAbstain": false,
-      "abstained": false,
-      "docCoverageHit": true,
-      "pageCoverageHit": true,
-      "passed": true,
-      "responseTimeMs": 9356,
-      "citationCount": 2,
-      "answer": "Summary:\n- 2024 policy: 50 dollars per day meal reimbursement limit (Source 1).\n- 2025 policy: 60 dollars per day meal reimbursement limit (Source 2).\n- Net change: +10 dollars per day from 2024 to 2025 (Sources 1–2).\n\nPer document:\n- benefits-2024.pdf: “The meal reimbursement limit is 50 dollars per day.” (Source 1)\n- benefits-2025.pdf: “The meal reimbursement limit is 60 dollars per day.” (Source 2)\n\nAgreements:\n- Both documents set a per-day meal reimbursement limit (Sources 1–2).\n\nDifferences:\n- Amount: 50 dollars/day in 2024 vs 60 dollars/day in 2025 (Source 1 vs Source 2).\n\nGaps or uncertainty:\n- Currency is stated as “dollars” but not explicitly specified as USD (Sources 1–2).\n- No additional conditions provided (e.g., taxes/tips inclusion, location-specific rules, or eligibility details) in the cited excerpts (Sources 1–2).",
-      "citations": [
-        {
-          "rank": 1,
-          "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-          "docKey": "benefits_2024",
-          "fileName": "benefits-2024.pdf",
-          "pageNumber": 3,
-          "score": 0.6484,
-          "sectionHeading": null
-        },
-        {
-          "rank": 2,
-          "docId": "65f2ba27-72c4-44fa-bcee-d1751d1c077b",
-          "docKey": "benefits_2025",
-          "fileName": "benefits-2025.pdf",
-          "pageNumber": 3,
-          "score": 0.6418,
-          "sectionHeading": null
-        }
-      ]
-    },
-    {
-      "id": "qa_parental_leave_abstain",
+      "id": "qa_badge_window_beta",
       "type": "qa",
-      "question": "What is the parental leave policy?",
+      "question": "What is the badge renewal window?",
       "docKeys": [
-        "benefits_2024"
+        "catalog_beta"
+      ],
+      "shouldAbstain": false,
+      "abstained": false,
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
+      "answerExpectationHit": true,
+      "passed": true,
+      "responseTimeMs": 3396,
+      "citationCount": 1,
+      "answer": "Renew access badges every 14 months after the last successful audit (Source 1).",
+      "citations": [
+        {
+          "rank": 1,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 2,
+          "score": 1,
+          "sectionHeading": "Badge Renewal Window"
+        }
+      ]
+    },
+    {
+      "id": "compare_badge_window",
+      "type": "compare",
+      "question": "Compare the badge renewal window in these documents.",
+      "docKeys": [
+        "catalog_alpha",
+        "catalog_beta",
+        "catalog_gamma"
+      ],
+      "shouldAbstain": false,
+      "abstained": false,
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
+      "answerExpectationHit": true,
+      "passed": true,
+      "responseTimeMs": 11579,
+      "citationCount": 3,
+      "answer": "Summary:\nAll three documents define a badge renewal window tied to the last successful audit, but they differ in the renewal interval: 12 months (alpha), 14 months (beta), and 16 months (gamma) after the audit (Source 1; Source 2; Source 3).\n\nPer document:\n- catalog-alpha.pdf: Renew access badges every 12 months after the last successful audit (Source 1).\n- catalog-beta.pdf: Renew access badges every 14 months after the last successful audit (Source 2).\n- catalog-gamma.pdf: Renew access badges every 16 months after the last successful audit (Source 3).\n\nAgreements:\n- All require renewal “after the last successful audit” and apply to access badges (Source 1; Source 2; Source 3).\n\nDifferences:\n- Renewal interval: 12 months vs 14 months vs 16 months (Source 1; Source 2; Source 3).\n\nGaps or uncertainty:\n- None of the documents specify window boundaries (e.g., earliest/latest renewal dates), grace periods, early renewal allowances, handling of partial months, or what qualifies as a “successful audit” (Source 1; Source 2; Source 3).",
+      "citations": [
+        {
+          "rank": 1,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 4,
+          "score": 1,
+          "sectionHeading": "Badge Renewal Window"
+        },
+        {
+          "rank": 2,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 2,
+          "score": 1,
+          "sectionHeading": "Badge Renewal Window"
+        },
+        {
+          "rank": 3,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 1,
+          "score": 1,
+          "sectionHeading": "Badge Renewal Window"
+        }
+      ]
+    },
+    {
+      "id": "qa_nulpar_dz_abstain",
+      "type": "qa",
+      "question": "What is the NULPAR-DZ allocation amount?",
+      "docKeys": [
+        "catalog_alpha"
       ],
       "shouldAbstain": true,
       "abstained": false,
       "docCoverageHit": false,
       "pageCoverageHit": false,
+      "answerExpectationHit": true,
       "passed": false,
-      "responseTimeMs": 6284,
-      "citationCount": 2,
-      "answer": "The retrieved evidence does not include a parental leave policy.  \nIt only covers annual leave (10 paid days; no carryover) and remote work (2 days/week with manager approval) (Source 1; Source 2).  \nPlease provide the relevant document or location for the parental leave policy so I can confirm the details.",
+      "responseTimeMs": 5007,
+      "citationCount": 3,
+      "answer": "Insufficient evidence: the retrieved sources mention only NULPAR-AX, NULPAR-BQ, and NULPAR-CR; none include NULPAR-DZ, so I cannot determine its allocation amount.",
       "citations": [
         {
           "rank": 1,
-          "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-          "docKey": "benefits_2024",
-          "fileName": "benefits-2024.pdf",
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
           "pageNumber": 1,
-          "score": 0.5119,
+          "score": 1,
           "sectionHeading": null
         },
         {
           "rank": 2,
-          "docId": "9514a8b6-9112-44f6-b856-261ae46dba59",
-          "docKey": "benefits_2024",
-          "fileName": "benefits-2024.pdf",
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
           "pageNumber": 2,
-          "score": 0.3877,
+          "score": 0.9794,
+          "sectionHeading": null
+        },
+        {
+          "rank": 3,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 3,
+          "score": 0.9699,
           "sectionHeading": null
         }
       ]
     },
     {
-      "id": "compare_hotel_policy_abstain",
+      "id": "compare_nulpar_dz_abstain",
       "type": "compare",
-      "question": "Compare the hotel reimbursement policy in these documents.",
+      "question": "Compare the NULPAR-DZ allocation amount in these documents.",
       "docKeys": [
-        "benefits_2025",
-        "travel_guide"
+        "catalog_alpha",
+        "catalog_beta",
+        "catalog_gamma"
       ],
       "shouldAbstain": true,
       "abstained": false,
-      "docCoverageHit": true,
-      "pageCoverageHit": true,
+      "docCoverageHit": false,
+      "pageCoverageHit": false,
+      "answerExpectationHit": true,
       "passed": false,
-      "responseTimeMs": 12257,
-      "citationCount": 2,
-      "answer": "Summary:\n- Only travel-guide.pdf states a hotel reimbursement policy: capped at 180 dollars per night and requires manager approval (Source 2).\n- benefits-2025.pdf does not state any hotel reimbursement terms; it only mentions a meal limit of 60 dollars per day (Source 1).\n\nPer document:\n- benefits-2025.pdf: No hotel reimbursement policy found. Mentions meal reimbursement limit of 60 dollars per day (Source 1).\n- travel-guide.pdf: Hotel reimbursement capped at 180 dollars per night; manager approval is required (Source 2).\n\nAgreements:\n- None on hotel reimbursement. Only one document specifies hotel terms.\n\nDifferences:\n- Scope: travel-guide.pdf covers hotel reimbursement with a cap and approval requirement (Source 2); benefits-2025.pdf is silent on hotel reimbursement and instead specifies a meal limit (Source 1).\n\nGaps or uncertainty:\n- Whether benefits-2025.pdf contains any hotel policy elsewhere or intends to defer to the travel guide.\n- Whether the 180 dollars per night cap includes taxes/fees or varies by location (not specified in Source 2).\n- Whether manager approval is required for all hotel reimbursements or only in specific cases (Source 2 does not clarify).",
+      "responseTimeMs": 13418,
+      "citationCount": 8,
+      "answer": "Summary:\nNo document provides an allocation amount for NULPAR-DZ. Each document lists allocations for other NULPAR programs (AX, BQ, and/or CR), but NULPAR-DZ is not mentioned.\n\nPer document:\n- catalog-alpha.pdf: No evidence of NULPAR-DZ. Only NULPAR-AX (180 dollars), NULPAR-BQ (260 dollars), and NULPAR-CR (340 dollars) are listed (Source 1; Source 4; Source 7).\n- catalog-beta.pdf: No evidence of NULPAR-DZ. Only NULPAR-AX (190 dollars), NULPAR-BQ (270 dollars), and NULPAR-CR (350 dollars) are listed (Source 2; Source 5; Source 8).\n- catalog-gamma.pdf: No evidence of NULPAR-DZ. Only NULPAR-AX (200 dollars) and NULPAR-BQ (280 dollars) are listed (Source 3; Source 6).\n\nAgreements:\n- All documents lack any mention of NULPAR-DZ allocation amount (in the provided evidence).\n\nDifferences:\n- None related to NULPAR-DZ; differences only exist for AX/BQ/CR amounts across documents (Sources 1–8), which are not evidence for DZ.\n\nGaps or uncertainty:\n- The allocation amount for NULPAR-DZ cannot be determined from the provided evidence. If NULPAR-DZ exists, it may be documented elsewhere not included in these excerpts.",
       "citations": [
         {
           "rank": 1,
-          "docId": "65f2ba27-72c4-44fa-bcee-d1751d1c077b",
-          "docKey": "benefits_2025",
-          "fileName": "benefits-2025.pdf",
-          "pageNumber": 3,
-          "score": 0.4563,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 1,
+          "score": 1,
           "sectionHeading": null
         },
         {
           "rank": 2,
-          "docId": "27ce5e82-546d-4c76-8226-2c2db6993a94",
-          "docKey": "travel_guide",
-          "fileName": "travel-guide.pdf",
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 3,
+          "score": 1,
+          "sectionHeading": null
+        },
+        {
+          "rank": 3,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 4,
+          "score": 1,
+          "sectionHeading": null
+        },
+        {
+          "rank": 4,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 2,
+          "score": 0.9815,
+          "sectionHeading": null
+        },
+        {
+          "rank": 5,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
+          "pageNumber": 4,
+          "score": 0.9651,
+          "sectionHeading": null
+        },
+        {
+          "rank": 6,
+          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
+          "docKey": "catalog_gamma",
+          "fileName": "catalog-gamma.pdf",
+          "pageNumber": 2,
+          "score": 0.9754,
+          "sectionHeading": null
+        },
+        {
+          "rank": 7,
+          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
+          "docKey": "catalog_alpha",
+          "fileName": "catalog-alpha.pdf",
+          "pageNumber": 3,
+          "score": 0.9551,
+          "sectionHeading": null
+        },
+        {
+          "rank": 8,
+          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
+          "docKey": "catalog_beta",
+          "fileName": "catalog-beta.pdf",
           "pageNumber": 1,
-          "score": 0.5898,
+          "score": 0.9318,
           "sectionHeading": null
         }
       ]

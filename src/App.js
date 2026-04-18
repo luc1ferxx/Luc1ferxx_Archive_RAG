@@ -1,18 +1,118 @@
-import React, { useState } from "react";
-import { Button, Layout, Tag, Typography } from "antd";
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+import { Button, Layout, Tag, Typography, message } from "antd";
 import PdfUploader from "./components/PdfUploader";
 import ChatComponent from "./components/ChatComponent";
 import RenderQA from "./components/RenderQA";
 import PdfPreview from "./components/PdfPreview";
+import { API_DOMAIN } from "./config";
 import "./App.css";
+
+const SESSION_STORAGE_KEY = "archive-session-id";
+
+const createSessionId = () =>
+  (typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : null) ??
+  `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+const readStoredSessionId = () => {
+  try {
+    const storedSessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    return storedSessionId?.trim() ? storedSessionId : createSessionId();
+  } catch {
+    return createSessionId();
+  }
+};
+
+const persistSessionId = (sessionId) => {
+  try {
+    window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  } catch {
+    // Ignore localStorage failures for browsers with restricted storage access.
+  }
+};
+
+const fetchDocuments = async () => {
+  const response = await axios.get(`${API_DOMAIN}/documents`);
+  return response.data;
+};
+
+const requestDocumentDelete = async (docId) => {
+  const response = await axios.delete(`${API_DOMAIN}/documents/${docId}`);
+  return response.data;
+};
+
+const requestDocumentClear = async () => {
+  const response = await axios.post(`${API_DOMAIN}/documents/clear`);
+  return response.data;
+};
+
+const requestSessionClear = async (sessionId) => {
+  if (!sessionId) {
+    return;
+  }
+
+  await axios.delete(`${API_DOMAIN}/sessions/${sessionId}`);
+};
 
 const App = () => {
   const [conversation, setConversation] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [activeDocuments, setActiveDocuments] = useState([]);
   const [selectedSource, setSelectedSource] = useState(null);
+  const [sessionId, setSessionId] = useState(() => readStoredSessionId());
   const { Content } = Layout;
   const { Paragraph, Text, Title } = Typography;
+
+  useEffect(() => {
+    persistSessionId(sessionId);
+  }, [sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadDocuments = async () => {
+      try {
+        const documents = await fetchDocuments();
+
+        if (!cancelled) {
+          setActiveDocuments(documents);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const backendMessage =
+            error.response?.data?.error ?? "Unable to load persisted documents.";
+          message.error(backendMessage);
+        }
+      }
+    };
+
+    void loadDocuments();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const resetConversationState = () => {
+    setConversation([]);
+    setSelectedSource(null);
+  };
+
+  const rotateSession = async () => {
+    const previousSessionId = sessionId;
+    const nextSessionId = createSessionId();
+
+    try {
+      await requestSessionClear(previousSessionId);
+    } catch (error) {
+      console.error("Failed to clear persisted session memory:", error);
+    }
+
+    setSessionId(nextSessionId);
+    persistSessionId(nextSessionId);
+  };
 
   const handleResp = (question, answer) => {
     setConversation((prev) => [...prev, { question, answer }]);
@@ -30,16 +130,34 @@ const App = () => {
     setSelectedSource(null);
   };
 
-  const removeDocument = (docId) => {
-    setActiveDocuments((prev) =>
-      prev.filter((document) => document.docId !== docId)
-    );
-    setSelectedSource((prev) => (prev?.docId === docId ? null : prev));
+  const removeDocument = async (docId) => {
+    try {
+      await requestDocumentDelete(docId);
+      setActiveDocuments((prev) =>
+        prev.filter((document) => document.docId !== docId)
+      );
+      resetConversationState();
+      await rotateSession();
+      message.success("Document removed.");
+    } catch (error) {
+      const backendMessage =
+        error.response?.data?.error ?? "Unable to remove the document.";
+      message.error(backendMessage);
+    }
   };
 
-  const clearDocuments = () => {
-    setActiveDocuments([]);
-    setSelectedSource(null);
+  const clearDocuments = async () => {
+    try {
+      await requestDocumentClear();
+      setActiveDocuments([]);
+      resetConversationState();
+      await rotateSession();
+      message.success("All documents cleared.");
+    } catch (error) {
+      const backendMessage =
+        error.response?.data?.error ?? "Unable to clear documents.";
+      message.error(backendMessage);
+    }
   };
 
   const docIds = activeDocuments.map((document) => document.docId);
@@ -75,7 +193,7 @@ const App = () => {
               </Text>
               <Button
                 className="archive-secondary-button"
-                onClick={clearDocuments}
+                onClick={() => void clearDocuments()}
                 disabled={activeDocuments.length === 0}
               >
                 Clear
@@ -101,7 +219,7 @@ const App = () => {
                       className="document-pill"
                       onClose={(event) => {
                         event.preventDefault();
-                        removeDocument(document.docId);
+                        void removeDocument(document.docId);
                       }}
                     >
                       <span className="document-pill-name">{document.fileName}</span>
@@ -145,6 +263,7 @@ const App = () => {
             <ChatComponent
               docIds={docIds}
               docLabel={docLabel}
+              sessionId={sessionId}
               handleResp={handleResp}
               isLoading={isLoading}
               setIsLoading={setIsLoading}

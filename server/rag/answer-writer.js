@@ -11,11 +11,11 @@ import { completeText } from "./openai.js";
 const qaPrompt = PromptTemplate.fromTemplate(
   `You answer questions using only retrieved document evidence.
 If the evidence is insufficient, say so directly.
+Do not substitute adjacent topics for the asked topic.
 Keep the answer concise, within five sentences.
 When you rely on evidence, cite source labels such as Source 1.
 
-Question:
-{question}
+{questionBlock}
 
 Retrieved Evidence:
 {context}
@@ -27,10 +27,10 @@ const comparisonPrompt = PromptTemplate.fromTemplate(
   `You compare uploaded documents using only the provided evidence.
 Separate agreement, difference, and uncertainty.
 If a document lacks evidence, say so explicitly.
+Do not treat a related but different policy as evidence for the asked policy.
 Keep the answer concise and cite source labels such as Source 1 when making evidence-based claims.
 
-Question:
-{question}
+{questionBlock}
 
 Comparison diagnostics:
 {diagnostics}
@@ -45,6 +45,11 @@ Agreements:
 Differences:
 Gaps or uncertainty:`
 );
+
+const buildQuestionBlock = ({ query, resolvedQuery }) =>
+  resolvedQuery && resolvedQuery !== query
+    ? `User Question:\n${query}\n\nResolved Retrieval Question:\n${resolvedQuery}`
+    : `Question:\n${query}`;
 
 export const prepareQASourceBundle = ({ results }) => {
   const rankedResults = results.map((result, index) => ({
@@ -163,9 +168,12 @@ export const prepareComparisonSourceBundle = ({ alignment }) => {
   };
 };
 
-export const writeQaAnswer = async ({ query, bundle }) => {
+export const writeQaAnswer = async ({ query, resolvedQuery, bundle }) => {
   const prompt = await qaPrompt.format({
-    question: query,
+    questionBlock: buildQuestionBlock({
+      query,
+      resolvedQuery,
+    }),
     context: bundle.context,
   });
   const text = await completeText(prompt);
@@ -176,7 +184,12 @@ export const writeQaAnswer = async ({ query, bundle }) => {
   };
 };
 
-export const writeComparisonAnswer = async ({ query, bundle, analysis }) => {
+export const writeComparisonAnswer = async ({
+  query,
+  resolvedQuery,
+  bundle,
+  analysis,
+}) => {
   const diagnostics = [
     analysis.sharedTerms.length > 0
       ? `Shared focus terms: ${analysis.sharedTerms.join(", ")}`
@@ -190,7 +203,10 @@ export const writeComparisonAnswer = async ({ query, bundle, analysis }) => {
   ].join("\n");
 
   const prompt = await comparisonPrompt.format({
-    question: query,
+    questionBlock: buildQuestionBlock({
+      query,
+      resolvedQuery,
+    }),
     diagnostics,
     context: bundle.context,
   });

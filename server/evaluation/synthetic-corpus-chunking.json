@@ -1,0 +1,159 @@
+{
+  "documents": [
+    {
+      "key": "ops_alpha",
+      "fileName": "ops-manual-alpha.pdf",
+      "pages": [
+        "Administrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nLocal notes cover filing labels, queue timing, and room checks.\n\nCybersecurity Rotation Allowance Cap\nApproved reimbursement is 2400 dollars per quarter.",
+        "Administrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nLocal notes cover filing labels, queue timing, and room checks only.\n\nDeferred Mobility Housing Ceiling\nApproved lodging support is 185 dollars per night.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "ops_beta",
+      "fileName": "ops-manual-beta.pdf",
+      "pages": [
+        "Administrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nLocal notes cover filing labels, queue timing, and room checks.\n\nCybersecurity Rotation Allowance Cap\nApproved reimbursement is 3000 dollars per quarter.",
+        "Administrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nLocal notes cover filing labels, queue timing, and room checks only.\n\nDeferred Mobility Housing Ceiling\nApproved lodging support is 210 dollars per night.",
+        "Badge Renewal Window\nRenew access badges every 14 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "ops_gamma",
+      "fileName": "ops-manual-gamma.pdf",
+      "pages": [
+        "Administrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nLocal notes cover filing labels, queue timing, and room checks.\n\nCybersecurity Rotation Allowance Cap\nApproved reimbursement is 3600 dollars per quarter.",
+        "Administrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nAdministrative archive references describe onboarding batches, storage labels, hallway signage, roster formatting, and visitor badge steps without stating any stipend limits or named training programs.\n\nLocal notes cover filing labels, queue timing, and room checks only.\n\nDeferred Mobility Housing Ceiling\nApproved lodging support is 235 dollars per night.",
+        "Badge Renewal Window\nRenew access badges every 16 months after the last successful audit."
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "qa_cyber_allowance_alpha",
+      "type": "qa",
+      "docKeys": ["ops_alpha"],
+      "question": "What is the cybersecurity rotation allowance cap?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "ops_alpha",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["2400", "quarter"]
+    },
+    {
+      "id": "qa_housing_gamma",
+      "type": "qa",
+      "docKeys": ["ops_gamma"],
+      "question": "What is the deferred mobility housing ceiling?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "ops_gamma",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["235", "night"]
+    },
+    {
+      "id": "compare_cyber_allowance",
+      "type": "compare",
+      "docKeys": ["ops_alpha", "ops_beta", "ops_gamma"],
+      "question": "Compare the cybersecurity rotation allowance cap in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "ops_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "ops_beta",
+          "pages": [1]
+        },
+        {
+          "docKey": "ops_gamma",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["2400", "3000", "3600"]
+    },
+    {
+      "id": "compare_housing_ceiling",
+      "type": "compare",
+      "docKeys": ["ops_alpha", "ops_beta", "ops_gamma"],
+      "question": "Compare the deferred mobility housing ceiling in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "ops_alpha",
+          "pages": [2]
+        },
+        {
+          "docKey": "ops_beta",
+          "pages": [2]
+        },
+        {
+          "docKey": "ops_gamma",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["185", "210", "235"]
+    },
+    {
+      "id": "qa_badge_window_beta",
+      "type": "qa",
+      "docKeys": ["ops_beta"],
+      "question": "What is the badge renewal window?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "ops_beta",
+          "pages": [3]
+        }
+      ],
+      "expectedAnswerIncludes": ["14", "months"]
+    },
+    {
+      "id": "compare_badge_window",
+      "type": "compare",
+      "docKeys": ["ops_alpha", "ops_beta", "ops_gamma"],
+      "question": "Compare the badge renewal window in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "ops_alpha",
+          "pages": [3]
+        },
+        {
+          "docKey": "ops_beta",
+          "pages": [3]
+        },
+        {
+          "docKey": "ops_gamma",
+          "pages": [3]
+        }
+      ],
+      "expectedAnswerIncludes": ["12", "14", "16"]
+    },
+    {
+      "id": "qa_satellite_stipend_abstain",
+      "type": "qa",
+      "docKeys": ["ops_alpha"],
+      "question": "What is the satellite relocation stipend?",
+      "shouldAbstain": true,
+      "expectedEvidence": [],
+      "expectedAnswerIncludes": []
+    },
+    {
+      "id": "compare_lunar_premium_abstain",
+      "type": "compare",
+      "docKeys": ["ops_alpha", "ops_beta", "ops_gamma"],
+      "question": "Compare the lunar escort premium in these documents.",
+      "shouldAbstain": true,
+      "expectedEvidence": [],
+      "expectedAnswerIncludes": []
+    }
+  ]
+}

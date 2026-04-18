@@ -12,8 +12,16 @@
 /build
 
 server/.env
+/server/node_modules/
+/server/data/
+/server/upload-sessions/
+/server/evaluation/results/20*.json
+!/server/evaluation/results/latest.json
+/server/evaluation/results/20*.md
+!/server/evaluation/results/latest.md
 server/uploads/*
 !server/uploads/.gitkeep
+/.npm-cache/
 
 # misc
 .DS_Store

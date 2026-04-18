@@ -2,8 +2,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { ChatOpenAI } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
+import { completeText } from "./rag/openai.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -12,6 +12,12 @@ let client = null;
 let transport = null;
 let isConnecting = false;
 let connectionPromise = null;
+const RETRY_DELAYS_MS = [250, 750];
+
+const sleep = (durationMs) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, durationMs);
+  });
 
 const getOpenAIApiKey = () => {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -63,29 +69,46 @@ const ensureConnected = async () => {
   await connectionPromise;
 };
 
+const withRetry = async (operation) => {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+
+      if (attempt === RETRY_DELAYS_MS.length) {
+        break;
+      }
+
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+
+  throw lastError;
+};
+
 const chatMCP = async (query) => {
-  const apiKey = getOpenAIApiKey();
+  getOpenAIApiKey();
 
   try {
     await ensureConnected();
 
-    const toolResult = await client.callTool({
-      name: "search_web",
-      arguments: {
-        query,
-        num: 5,
-      },
-    });
+    const toolResult = await withRetry(() =>
+      client.callTool({
+        name: "search_web",
+        arguments: {
+          query,
+          num: 5,
+        },
+      })
+    );
 
     const searchResults =
       toolResult.content && toolResult.content.length > 0
         ? toolResult.content[0].text
         : "No search results available";
-
-    const model = new ChatOpenAI({
-      model: "gpt-5",
-      apiKey,
-    });
 
     const answerTemplate = `Use the search results to answer the user's question.
 Be concise and say when the results are insufficient.
@@ -104,10 +127,9 @@ Helpful Answer:`;
       question: query,
       searchResults,
     });
+    const text = await completeText(formattedPrompt);
 
-    const response = await model.invoke(formattedPrompt);
-
-    return { text: response.content };
+    return { text };
   } catch (error) {
     if (client) {
       try {

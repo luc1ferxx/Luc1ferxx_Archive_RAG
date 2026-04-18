@@ -1,17 +1,29 @@
-import { getMinRelevanceScore } from "./config.js";
+import { getMinQueryTermCoverage, getMinRelevanceScore } from "./config.js";
 
 const FALLBACK_THRESHOLD_RATIO = 0.8;
 
+const hasEnoughQueryCoverage = (result) => {
+  if (typeof result?.keywordScore !== "number") {
+    return true;
+  }
+
+  return result.keywordScore >= getMinQueryTermCoverage();
+};
+
 const getUsableResults = (results) => {
   const minimumScore = getMinRelevanceScore();
-  const strongResults = results.filter((result) => result.score >= minimumScore);
+  const strongResults = results.filter(
+    (result) => result.score >= minimumScore && hasEnoughQueryCoverage(result)
+  );
 
   if (strongResults.length > 0) {
     return strongResults;
   }
 
   return results.filter(
-    (result) => result.score >= minimumScore * FALLBACK_THRESHOLD_RATIO
+    (result) =>
+      result.score >= minimumScore * FALLBACK_THRESHOLD_RATIO &&
+      hasEnoughQueryCoverage(result)
   );
 };
 

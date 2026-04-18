@@ -1,4 +1,4 @@
-import { getChunkOverlap, getChunkSize } from "./config.js";
+import { getChunkOverlap, getChunkSize, getChunkStrategy } from "./config.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { normalizeWhitespace, splitParagraphs } from "./text-utils.js";
 
@@ -29,6 +29,12 @@ const isLikelyHeading = (paragraph) => {
       compactParagraph
     )
   ) {
+    return true;
+  }
+
+  const titleCaseWordCount = words.filter((word) => /^[A-Z][A-Za-z0-9/-]*$/.test(word)).length;
+
+  if (titleCaseWordCount === words.length && words.length >= 2 && words.length <= 8) {
     return true;
   }
 
@@ -120,69 +126,194 @@ const buildOverlapParagraphs = (paragraphs, overlapSize) => {
 const buildChunkText = (sectionHeading, paragraphs) =>
   sectionHeading ? [sectionHeading, ...paragraphs].join("\n\n") : paragraphs.join("\n\n");
 
+const buildChunkRecord = ({
+  docId,
+  fileName,
+  filePath,
+  publicFilePath,
+  pageNumber,
+  chunkIndex,
+  pageContent,
+  sectionHeading = null,
+}) => ({
+  id: `${docId}:${chunkIndex}`,
+  pageContent,
+  metadata: {
+    docId,
+    fileName,
+    filePath,
+    publicFilePath,
+    pageNumber,
+    chunkIndex,
+    sectionHeading,
+  },
+});
+
+const chunkPageWithFixedWindows = ({
+  docId,
+  fileName,
+  filePath,
+  publicFilePath,
+  page,
+  chunkSize,
+  chunkOverlap,
+  startingChunkIndex,
+}) => {
+  const normalizedText = normalizeWhitespace(page.text);
+
+  if (!normalizedText) {
+    return {
+      chunks: [],
+      nextChunkIndex: startingChunkIndex,
+    };
+  }
+
+  const chunks = [];
+  const safeOverlap = Math.min(chunkOverlap, Math.max(0, chunkSize - 1));
+  const step = Math.max(1, chunkSize - safeOverlap);
+  let chunkIndex = startingChunkIndex;
+
+  for (let start = 0; start < normalizedText.length; start += step) {
+    const pageContent = normalizedText.slice(start, start + chunkSize).trim();
+
+    if (!pageContent) {
+      continue;
+    }
+
+    chunks.push(
+      buildChunkRecord({
+        docId,
+        fileName,
+        filePath,
+        publicFilePath,
+        pageNumber: page.pageNumber,
+        chunkIndex,
+        pageContent,
+      })
+    );
+    chunkIndex += 1;
+
+    if (start + chunkSize >= normalizedText.length) {
+      break;
+    }
+  }
+
+  return {
+    chunks,
+    nextChunkIndex: chunkIndex,
+  };
+};
+
+const chunkPageWithStructure = ({
+  docId,
+  fileName,
+  filePath,
+  publicFilePath,
+  page,
+  chunkSize,
+  chunkOverlap,
+  startingChunkIndex,
+}) => {
+  const rawParagraphs = splitParagraphs(page.text).flatMap((paragraph) =>
+    splitOversizedParagraph(paragraph, chunkSize)
+  );
+
+  if (rawParagraphs.length === 0) {
+    return {
+      chunks: [],
+      nextChunkIndex: startingChunkIndex,
+    };
+  }
+
+  const chunks = [];
+  let currentHeading = null;
+  let buffer = [];
+  let chunkIndex = startingChunkIndex;
+
+  const flushBuffer = () => {
+    if (buffer.length === 0) {
+      return;
+    }
+
+    chunks.push(
+      buildChunkRecord({
+        docId,
+        fileName,
+        filePath,
+        publicFilePath,
+        pageNumber: page.pageNumber,
+        chunkIndex,
+        pageContent: buildChunkText(currentHeading, buffer),
+        sectionHeading: currentHeading,
+      })
+    );
+
+    chunkIndex += 1;
+  };
+
+  for (const paragraph of rawParagraphs) {
+    if (isLikelyHeading(paragraph)) {
+      flushBuffer();
+      buffer = [];
+      currentHeading = paragraph;
+      continue;
+    }
+
+    const nextLength =
+      getParagraphLength(buffer) + paragraph.length + (buffer.length > 0 ? 2 : 0);
+
+    if (buffer.length > 0 && nextLength > chunkSize) {
+      const overlap = buildOverlapParagraphs(buffer, chunkOverlap);
+      flushBuffer();
+      buffer = [...overlap, paragraph];
+      continue;
+    }
+
+    buffer.push(paragraph);
+  }
+
+  flushBuffer();
+
+  return {
+    chunks,
+    nextChunkIndex: chunkIndex,
+  };
+};
+
 export const chunkDocument = ({ docId, fileName, filePath, pages }) => {
   const publicFilePath = buildPublicFilePath(filePath);
   const chunkSize = getChunkSize();
   const chunkOverlap = getChunkOverlap();
+  const chunkStrategy = getChunkStrategy();
   const chunks = [];
   let chunkIndex = 0;
 
   for (const page of pages) {
-    const rawParagraphs = splitParagraphs(page.text).flatMap((paragraph) =>
-      splitOversizedParagraph(paragraph, chunkSize)
-    );
+    const pageChunks =
+      chunkStrategy === "simple"
+        ? chunkPageWithFixedWindows({
+            docId,
+            fileName,
+            filePath,
+            publicFilePath,
+            page,
+            chunkSize,
+            chunkOverlap,
+            startingChunkIndex: chunkIndex,
+          })
+        : chunkPageWithStructure({
+            docId,
+            fileName,
+            filePath,
+            publicFilePath,
+            page,
+            chunkSize,
+            chunkOverlap,
+            startingChunkIndex: chunkIndex,
+          });
 
-    if (rawParagraphs.length === 0) {
-      continue;
-    }
-
-    let currentHeading = null;
-    let buffer = [];
-
-    const flushBuffer = () => {
-      if (buffer.length === 0) {
-        return;
-      }
-
-      chunks.push({
-        id: `${docId}:${chunkIndex}`,
-        pageContent: buildChunkText(currentHeading, buffer),
-        metadata: {
-          docId,
-          fileName,
-          filePath,
-          publicFilePath,
-          pageNumber: page.pageNumber,
-          chunkIndex,
-          sectionHeading: currentHeading,
-        },
-      });
-
-      chunkIndex += 1;
-    };
-
-    for (const paragraph of rawParagraphs) {
-      if (isLikelyHeading(paragraph)) {
-        flushBuffer();
-        buffer = [];
-        currentHeading = paragraph;
-        continue;
-      }
-
-      const nextLength =
-        getParagraphLength(buffer) + paragraph.length + (buffer.length > 0 ? 2 : 0);
-
-      if (buffer.length > 0 && nextLength > chunkSize) {
-        const overlap = buildOverlapParagraphs(buffer, chunkOverlap);
-        flushBuffer();
-        buffer = [...overlap, paragraph];
-        continue;
-      }
-
-      buffer.push(paragraph);
-    }
-
-    flushBuffer();
+    chunks.push(...pageChunks.chunks);
+    chunkIndex = pageChunks.nextChunkIndex;
   }
 
   return chunks;

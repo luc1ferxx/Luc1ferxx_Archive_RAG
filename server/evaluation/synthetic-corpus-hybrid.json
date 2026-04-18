@@ -1,0 +1,162 @@
+{
+  "documents": [
+    {
+      "key": "catalog_alpha",
+      "fileName": "catalog-alpha.pdf",
+      "pages": [
+        "Program NULPAR-AX allocation amount is 180 dollars per cycle.",
+        "Program NULPAR-BQ allocation amount is 260 dollars per cycle.",
+        "Program NULPAR-CR allocation amount is 340 dollars per cycle.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "catalog_beta",
+      "fileName": "catalog-beta.pdf",
+      "pages": [
+        "Program NULPAR-CR allocation amount is 350 dollars per cycle.",
+        "Badge Renewal Window\nRenew access badges every 14 months after the last successful audit.",
+        "Program NULPAR-AX allocation amount is 190 dollars per cycle.",
+        "Program NULPAR-BQ allocation amount is 270 dollars per cycle."
+      ]
+    },
+    {
+      "key": "catalog_gamma",
+      "fileName": "catalog-gamma.pdf",
+      "pages": [
+        "Badge Renewal Window\nRenew access badges every 16 months after the last successful audit.",
+        "Program NULPAR-BQ allocation amount is 280 dollars per cycle.",
+        "Program NULPAR-CR allocation amount is 360 dollars per cycle.",
+        "Program NULPAR-AX allocation amount is 200 dollars per cycle."
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "qa_nulpar_bq_beta",
+      "type": "qa",
+      "docKeys": ["catalog_beta"],
+      "question": "What is the NULPAR-BQ allocation amount?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "catalog_beta",
+          "pages": [4]
+        }
+      ],
+      "expectedAnswerIncludes": ["270", "cycle"]
+    },
+    {
+      "id": "qa_nulpar_cr_gamma",
+      "type": "qa",
+      "docKeys": ["catalog_gamma"],
+      "question": "What is the NULPAR-CR allocation amount?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "catalog_gamma",
+          "pages": [3]
+        }
+      ],
+      "expectedAnswerIncludes": ["360", "cycle"]
+    },
+    {
+      "id": "compare_nulpar_bq",
+      "type": "compare",
+      "docKeys": ["catalog_alpha", "catalog_beta", "catalog_gamma"],
+      "question": "Compare the NULPAR-BQ allocation amount in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "catalog_alpha",
+          "pages": [2]
+        },
+        {
+          "docKey": "catalog_beta",
+          "pages": [4]
+        },
+        {
+          "docKey": "catalog_gamma",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["260", "270", "280"]
+    },
+    {
+      "id": "compare_nulpar_cr",
+      "type": "compare",
+      "docKeys": ["catalog_alpha", "catalog_beta", "catalog_gamma"],
+      "question": "Compare the NULPAR-CR allocation amount in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "catalog_alpha",
+          "pages": [3]
+        },
+        {
+          "docKey": "catalog_beta",
+          "pages": [1]
+        },
+        {
+          "docKey": "catalog_gamma",
+          "pages": [3]
+        }
+      ],
+      "expectedAnswerIncludes": ["340", "350", "360"]
+    },
+    {
+      "id": "qa_badge_window_beta",
+      "type": "qa",
+      "docKeys": ["catalog_beta"],
+      "question": "What is the badge renewal window?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "catalog_beta",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["14", "months"]
+    },
+    {
+      "id": "compare_badge_window",
+      "type": "compare",
+      "docKeys": ["catalog_alpha", "catalog_beta", "catalog_gamma"],
+      "question": "Compare the badge renewal window in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "catalog_alpha",
+          "pages": [4]
+        },
+        {
+          "docKey": "catalog_beta",
+          "pages": [2]
+        },
+        {
+          "docKey": "catalog_gamma",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["12", "14", "16"]
+    },
+    {
+      "id": "qa_nulpar_dz_abstain",
+      "type": "qa",
+      "docKeys": ["catalog_alpha"],
+      "question": "What is the NULPAR-DZ allocation amount?",
+      "shouldAbstain": true,
+      "expectedEvidence": [],
+      "expectedAnswerIncludes": []
+    },
+    {
+      "id": "compare_nulpar_dz_abstain",
+      "type": "compare",
+      "docKeys": ["catalog_alpha", "catalog_beta", "catalog_gamma"],
+      "question": "Compare the NULPAR-DZ allocation amount in these documents.",
+      "shouldAbstain": true,
+      "expectedEvidence": [],
+      "expectedAnswerIncludes": []
+    }
+  ]
+}

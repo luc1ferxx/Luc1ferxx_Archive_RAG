@@ -3,6 +3,58 @@ import { getChatModel, getEmbeddingModel } from "./config.js";
 
 let embeddingsInstance = null;
 let chatModelInstance = null;
+let customProvider = null;
+
+const RETRY_DELAYS_MS = [250, 750, 1500];
+
+const sleep = (durationMs) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, durationMs);
+  });
+
+const isRetriableError = (error) => {
+  const status = Number(error?.status);
+  const code = String(error?.code ?? error?.cause?.code ?? "").toUpperCase();
+
+  if ([408, 409, 429, 500, 502, 503, 504].includes(status)) {
+    return true;
+  }
+
+  return [
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ECONNABORTED",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+    "EPIPE",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+  ].includes(code);
+};
+
+const withRetry = async (operation, failureMessage) => {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+
+      if (!isRetriableError(error) || attempt === RETRY_DELAYS_MS.length) {
+        break;
+      }
+
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+
+  if (lastError instanceof Error && failureMessage) {
+    lastError.message = `${failureMessage} ${lastError.message}`.trim();
+  }
+
+  throw lastError;
+};
 
 export const getOpenAIApiKey = () => {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -17,6 +69,10 @@ export const getOpenAIApiKey = () => {
 };
 
 export const getEmbeddings = () => {
+  if (customProvider?.getEmbeddings) {
+    return customProvider.getEmbeddings();
+  }
+
   if (embeddingsInstance) {
     return embeddingsInstance;
   }
@@ -30,6 +86,10 @@ export const getEmbeddings = () => {
 };
 
 const getChatModelInstance = () => {
+  if (customProvider?.getChatModel) {
+    return customProvider.getChatModel();
+  }
+
   if (chatModelInstance) {
     return chatModelInstance;
   }
@@ -67,11 +127,46 @@ const normalizeContent = (content) => {
   return "";
 };
 
-export const embedTexts = async (texts) => getEmbeddings().embedDocuments(texts);
+export const configureOpenAIProvider = (provider) => {
+  customProvider = provider ?? null;
+  embeddingsInstance = null;
+  chatModelInstance = null;
+};
 
-export const embedQuery = async (query) => getEmbeddings().embedQuery(query);
+export const resetOpenAIProvider = () => {
+  configureOpenAIProvider(null);
+};
+
+export const embedTexts = async (texts) => {
+  if (customProvider?.embedTexts) {
+    return customProvider.embedTexts(texts);
+  }
+
+  return withRetry(
+    async () => getEmbeddings().embedDocuments(texts),
+    "Embedding request failed."
+  );
+};
+
+export const embedQuery = async (query) => {
+  if (customProvider?.embedQuery) {
+    return customProvider.embedQuery(query);
+  }
+
+  return withRetry(
+    async () => getEmbeddings().embedQuery(query),
+    "Query embedding request failed."
+  );
+};
 
 export const completeText = async (prompt) => {
-  const response = await getChatModelInstance().invoke(prompt);
+  if (customProvider?.completeText) {
+    return customProvider.completeText(prompt);
+  }
+
+  const response = await withRetry(
+    async () => getChatModelInstance().invoke(prompt),
+    "Chat completion failed."
+  );
   return normalizeContent(response.content);
 };
