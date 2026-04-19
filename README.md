@@ -96,13 +96,15 @@ RAG_HYBRID_SPARSE_WEIGHT=0.35
 RAG_SPARSE_TOP_K=8
 ```
 
-With hybrid retrieval enabled, the backend runs a dense embedding search and a BM25-style sparse search over the same chunks, then fuses the two result sets before confidence gating.
+With hybrid retrieval enabled, the backend runs a dense embedding search and a BM25-style sparse search over the same chunks, then fuses the two result sets before confidence gating. Under the local provider those indices are persisted as JSON files. Under the Qdrant provider both dense and sparse vectors are stored in the same Qdrant collection.
 
 To switch the vector store from local JSON persistence to Qdrant, start Qdrant locally and set `VECTOR_STORE_PROVIDER=qdrant`.
 
 ```powershell
 docker run -p 6333:6333 qdrant/qdrant
 ```
+
+The current Qdrant schema expects one named dense vector (`dense`) and one named sparse vector (`sparse`) per point. If you already have an older `rag_chunks` collection from a previous version of this repository, use a fresh collection name or clear that collection before re-ingesting documents.
 
 ## Running The Project
 

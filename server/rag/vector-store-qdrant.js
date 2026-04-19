@@ -1,4 +1,3 @@
-import { randomUUID } from "crypto";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import {
   getKeywordWeight,
@@ -9,14 +8,33 @@ import {
   getVectorWeight,
 } from "./config.js";
 import { embedTexts } from "./openai.js";
-import { buildTermSet } from "./text-utils.js";
+import {
+  buildTermFrequencyMap,
+  buildTermSet,
+  extractMeaningfulTokens,
+} from "./text-utils.js";
+
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
+const QDRANT_DENSE_VECTOR_NAME = "dense";
+const QDRANT_SPARSE_VECTOR_NAME = "sparse";
+const QDRANT_SCROLL_PAGE_SIZE = 256;
+const QDRANT_UPDATE_BATCH_SIZE = 128;
 
 let qdrantClient = null;
+let qdrantClientFactory = null;
 let collectionChecked = false;
 let collectionReady = false;
+let sparseStateLoaded = false;
+let sparseState = null;
 
 const getClient = () => {
   if (qdrantClient) {
+    return qdrantClient;
+  }
+
+  if (qdrantClientFactory) {
+    qdrantClient = qdrantClientFactory();
     return qdrantClient;
   }
 
@@ -32,21 +50,34 @@ const getClient = () => {
 const resetCollectionState = () => {
   collectionChecked = false;
   collectionReady = false;
+  sparseStateLoaded = false;
+  sparseState = null;
 };
+
+export const configureQdrantClientFactory = (factory) => {
+  qdrantClientFactory = typeof factory === "function" ? factory : null;
+  qdrantClient = null;
+  resetCollectionState();
+};
+
+export const resetQdrantClientFactory = () => {
+  configureQdrantClientFactory(null);
+};
+
+const buildSearchableText = ({ pageContent = "", metadata = {} } = {}) =>
+  [metadata.fileName, metadata.sectionHeading, pageContent].filter(Boolean).join("\n");
 
 const buildKeywordScore = (queryTerms, payload) => {
   if (queryTerms.size === 0) {
     return null;
   }
 
-  const searchableText = [
-    payload?.fileName,
-    payload?.sectionHeading,
-    payload?.pageContent,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  const entryTerms = buildTermSet(searchableText);
+  const entryTerms = buildTermSet(
+    buildSearchableText({
+      pageContent: payload?.pageContent ?? "",
+      metadata: payload,
+    })
+  );
 
   if (entryTerms.size === 0) {
     return 0;
@@ -73,10 +104,12 @@ const buildCombinedScore = (vectorScore, keywordScore) => {
   return Math.max(vectorScore, keywordScore, weightedScore);
 };
 
-const buildResultScore = ({ vectorScore, keywordScore, scoringMode }) =>
+const buildDenseResultScore = ({ vectorScore, keywordScore, scoringMode }) =>
   scoringMode === "dense"
     ? vectorScore
     : buildCombinedScore(vectorScore, keywordScore);
+
+const buildPointId = (document) => String(document.id);
 
 const buildPointPayload = (document) => ({
   docId: document.metadata?.docId ?? "",
@@ -99,7 +132,7 @@ const buildMetadataFromPayload = (payload = {}) => ({
   sectionHeading: payload.sectionHeading ?? null,
 });
 
-const toSearchResult = (point, keywordScore, scoringMode) => {
+const toDenseSearchResult = (point, keywordScore, scoringMode) => {
   const payload = point.payload ?? {};
   const vectorScore = Number(point.score ?? 0);
 
@@ -109,12 +142,28 @@ const toSearchResult = (point, keywordScore, scoringMode) => {
       pageContent: String(payload.pageContent ?? ""),
       metadata: buildMetadataFromPayload(payload),
     },
-    score: buildResultScore({
+    score: buildDenseResultScore({
       vectorScore,
       keywordScore,
       scoringMode,
     }),
     vectorScore,
+    keywordScore,
+  };
+};
+
+const toSparseSearchResult = (point, keywordScore) => {
+  const payload = point.payload ?? {};
+  const sparseScore = Number(point.score ?? 0);
+
+  return {
+    document: {
+      id: String(point.id),
+      pageContent: String(payload.pageContent ?? ""),
+      metadata: buildMetadataFromPayload(payload),
+    },
+    score: sparseScore,
+    sparseScore,
     keywordScore,
   };
 };
@@ -147,6 +196,43 @@ const buildDocIdFilter = (docIds) => {
   };
 };
 
+const isDenseVectorConfigCompatible = (vectorsConfig = null) => {
+  if (!vectorsConfig || Array.isArray(vectorsConfig)) {
+    return false;
+  }
+
+  if (typeof vectorsConfig.size === "number") {
+    return false;
+  }
+
+  return Boolean(vectorsConfig?.[QDRANT_DENSE_VECTOR_NAME]);
+};
+
+const isSparseVectorConfigCompatible = (sparseVectorsConfig = null) =>
+  Boolean(sparseVectorsConfig?.[QDRANT_SPARSE_VECTOR_NAME]);
+
+const ensureCompatibleCollectionSchema = async () => {
+  const collectionInfo = await getClient().getCollection(getQdrantCollection());
+  const params = collectionInfo?.config?.params ?? {};
+  const vectorsConfig = params.vectors ?? null;
+  const sparseVectorsConfig = params.sparse_vectors ?? null;
+
+  if (
+    isDenseVectorConfigCompatible(vectorsConfig) &&
+    isSparseVectorConfigCompatible(sparseVectorsConfig)
+  ) {
+    return true;
+  }
+
+  throw new Error(
+    [
+      "The configured Qdrant collection schema is incompatible with this app.",
+      `Expected a named dense vector '${QDRANT_DENSE_VECTOR_NAME}' and a named sparse vector '${QDRANT_SPARSE_VECTOR_NAME}'.`,
+      `Use a fresh collection name or clear the existing '${getQdrantCollection()}' collection before ingesting again.`,
+    ].join(" ")
+  );
+};
+
 const ensureCollection = async (vectorSize = null) => {
   if (collectionReady) {
     return true;
@@ -158,6 +244,11 @@ const ensureCollection = async (vectorSize = null) => {
     const existence = await client.collectionExists(getQdrantCollection());
     collectionChecked = true;
     collectionReady = Boolean(existence?.exists);
+
+    if (collectionReady) {
+      await ensureCompatibleCollectionSchema();
+      return true;
+    }
   }
 
   if (collectionReady) {
@@ -170,14 +261,253 @@ const ensureCollection = async (vectorSize = null) => {
 
   await client.createCollection(getQdrantCollection(), {
     vectors: {
-      size: vectorSize,
-      distance: getQdrantDistance(),
+      [QDRANT_DENSE_VECTOR_NAME]: {
+        size: vectorSize,
+        distance: getQdrantDistance(),
+      },
+    },
+    sparse_vectors: {
+      [QDRANT_SPARSE_VECTOR_NAME]: {},
     },
   });
 
   collectionReady = true;
   collectionChecked = true;
+  sparseStateLoaded = false;
   return true;
+};
+
+const chunkArray = (values, size) => {
+  const chunks = [];
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+
+  return chunks;
+};
+
+const buildSparseEntry = ({ id, payload = {} }) => {
+  const pageContent = String(payload.pageContent ?? "");
+  const metadata = buildMetadataFromPayload(payload);
+  const termFrequencies = buildTermFrequencyMap(
+    buildSearchableText({
+      pageContent,
+      metadata,
+    })
+  );
+  const terms = [...termFrequencies.keys()];
+
+  return {
+    id: String(id),
+    payload: {
+      ...metadata,
+      pageContent,
+    },
+    pageContent,
+    metadata,
+    termFrequencies,
+    termSet: new Set(terms),
+    documentLength: [...termFrequencies.values()].reduce((sum, value) => sum + value, 0),
+  };
+};
+
+const buildSparseState = (entries) => {
+  const documentFrequencyByTerm = new Map();
+  const allTerms = new Set();
+  let totalDocumentLength = 0;
+
+  for (const entry of entries) {
+    totalDocumentLength += entry.documentLength;
+
+    for (const term of entry.termSet) {
+      allTerms.add(term);
+      documentFrequencyByTerm.set(term, (documentFrequencyByTerm.get(term) ?? 0) + 1);
+    }
+  }
+
+  const sortedTerms = [...allTerms].sort((left, right) => left.localeCompare(right));
+  const termIndexByTerm = new Map(
+    sortedTerms.map((term, index) => [term, index])
+  );
+
+  return {
+    entries,
+    documentFrequencyByTerm,
+    averageDocumentLength:
+      entries.length > 0 ? totalDocumentLength / entries.length : 0,
+    termIndexByTerm,
+  };
+};
+
+const getInverseDocumentFrequency = (term, state) => {
+  const documentCount = state.entries.length;
+
+  if (documentCount === 0) {
+    return 0;
+  }
+
+  const documentFrequency = state.documentFrequencyByTerm.get(term) ?? 0;
+
+  return Math.log(1 + (documentCount - documentFrequency + 0.5) / (documentFrequency + 0.5));
+};
+
+const buildSparseVectorForEntry = (entry, state) => {
+  if (!entry || entry.documentLength === 0 || state.entries.length === 0) {
+    return null;
+  }
+
+  const averageLength = state.averageDocumentLength || 1;
+  const components = [];
+
+  for (const [term, termFrequency] of entry.termFrequencies.entries()) {
+    const index = state.termIndexByTerm.get(term);
+
+    if (index === undefined || termFrequency <= 0) {
+      continue;
+    }
+
+    const idf = getInverseDocumentFrequency(term, state);
+    const denominator =
+      termFrequency +
+      BM25_K1 * (1 - BM25_B + BM25_B * (entry.documentLength / averageLength));
+    const value = idf * ((termFrequency * (BM25_K1 + 1)) / denominator);
+
+    if (value > 0) {
+      components.push([index, value]);
+    }
+  }
+
+  if (components.length === 0) {
+    return null;
+  }
+
+  components.sort((left, right) => left[0] - right[0]);
+
+  return {
+    indices: components.map(([index]) => index),
+    values: components.map(([, value]) => value),
+  };
+};
+
+const buildSparseQuery = (queryText, state) => {
+  const queryTerms = [...new Set(extractMeaningfulTokens(queryText))];
+  const indices = [];
+  const values = [];
+
+  for (const term of queryTerms) {
+    const index = state.termIndexByTerm.get(term);
+
+    if (index === undefined) {
+      continue;
+    }
+
+    indices.push(index);
+    values.push(1);
+  }
+
+  if (indices.length === 0) {
+    return null;
+  }
+
+  return {
+    queryTerms,
+    sparseVector: {
+      indices,
+      values,
+    },
+  };
+};
+
+const scrollAllQdrantPoints = async ({ filter } = {}) => {
+  const ready = await ensureCollection();
+
+  if (!ready) {
+    return [];
+  }
+
+  const points = [];
+  let offset = undefined;
+
+  while (true) {
+    const response = await getClient().scroll(getQdrantCollection(), {
+      limit: QDRANT_SCROLL_PAGE_SIZE,
+      offset,
+      filter,
+      with_payload: true,
+      with_vector: false,
+    });
+    const batch = response?.points ?? [];
+
+    points.push(...batch);
+    offset = response?.next_page_offset;
+
+    if (!offset || batch.length === 0) {
+      break;
+    }
+  }
+
+  return points;
+};
+
+const refreshSparseStateFromQdrant = async () => {
+  const points = await scrollAllQdrantPoints();
+
+  sparseState = buildSparseState(
+    points.map((point) =>
+      buildSparseEntry({
+        id: point.id,
+        payload: point.payload ?? {},
+      })
+    )
+  );
+  sparseStateLoaded = true;
+  return sparseState;
+};
+
+const ensureSparseState = async () => {
+  if (sparseStateLoaded) {
+    return sparseState ?? buildSparseState([]);
+  }
+
+  return refreshSparseStateFromQdrant();
+};
+
+const deleteDocumentsByDocIds = async ({ docIds }) => {
+  if (!Array.isArray(docIds) || docIds.length === 0) {
+    return;
+  }
+
+  await getClient().delete(getQdrantCollection(), {
+    wait: true,
+    filter: buildDocIdFilter(docIds),
+  });
+};
+
+const updateSparseVectorsForEntries = async (entries, state) => {
+  const updates = entries
+    .map((entry) => {
+      const sparseVector = buildSparseVectorForEntry(entry, state);
+
+      if (!sparseVector) {
+        return null;
+      }
+
+      return {
+        id: entry.id,
+        vector: {
+          [QDRANT_SPARSE_VECTOR_NAME]: sparseVector,
+        },
+      };
+    })
+    .filter(Boolean);
+
+  for (const batch of chunkArray(updates, QDRANT_UPDATE_BATCH_SIZE)) {
+    await getClient().updateVectors(getQdrantCollection(), {
+      wait: true,
+      points: batch,
+    });
+  }
 };
 
 export const addDocumentsToQdrantIndex = async ({ documents }) => {
@@ -185,25 +515,49 @@ export const addDocumentsToQdrantIndex = async ({ documents }) => {
     return;
   }
 
-  const vectors = await embedTexts(documents.map((document) => document.pageContent));
+  const denseVectors = await embedTexts(documents.map((document) => document.pageContent));
 
-  if (vectors.length === 0) {
+  if (denseVectors.length === 0) {
     return;
   }
 
-  await ensureCollection(vectors[0]?.length ?? null);
-  await removeDocumentsFromQdrantIndex({
-    docIds: [...new Set(documents.map((document) => document.metadata?.docId).filter(Boolean))],
-  });
+  await ensureCollection(denseVectors[0]?.length ?? null);
+
+  const replacementDocIds = [
+    ...new Set(documents.map((document) => document.metadata?.docId).filter(Boolean)),
+  ];
+
+  if (replacementDocIds.length > 0) {
+    await deleteDocumentsByDocIds({
+      docIds: replacementDocIds,
+    });
+  }
+
+  const currentState = await refreshSparseStateFromQdrant();
+  const nextEntries = documents.map((document) =>
+    buildSparseEntry({
+      id: buildPointId(document),
+      payload: buildPointPayload(document),
+    })
+  );
+  const combinedState = buildSparseState([...currentState.entries, ...nextEntries]);
 
   await getClient().upsert(getQdrantCollection(), {
     wait: true,
     points: documents.map((document, index) => ({
-      id: randomUUID(),
-      vector: vectors[index],
+      id: buildPointId(document),
+      vector: {
+        [QDRANT_DENSE_VECTOR_NAME]: denseVectors[index],
+        [QDRANT_SPARSE_VECTOR_NAME]: buildSparseVectorForEntry(nextEntries[index], combinedState),
+      },
       payload: buildPointPayload(document),
     })),
   });
+
+  await updateSparseVectorsForEntries(currentState.entries, combinedState);
+
+  sparseState = combinedState;
+  sparseStateLoaded = true;
 };
 
 export const removeDocumentsFromQdrantIndex = async ({ docIds }) => {
@@ -217,10 +571,15 @@ export const removeDocumentsFromQdrantIndex = async ({ docIds }) => {
     return;
   }
 
-  await getClient().delete(getQdrantCollection(), {
-    wait: true,
-    filter: buildDocIdFilter(docIds),
+  await deleteDocumentsByDocIds({
+    docIds,
   });
+
+  const nextState = await refreshSparseStateFromQdrant();
+
+  if (nextState.entries.length > 0) {
+    await updateSparseVectorsForEntries(nextState.entries, nextState);
+  }
 };
 
 export const clearQdrantVectorIndex = async () => {
@@ -252,6 +611,7 @@ export const searchQdrantDocuments = async ({
 
   const response = await getClient().query(getQdrantCollection(), {
     query: queryVector,
+    using: QDRANT_DENSE_VECTOR_NAME,
     filter: buildDocIdFilter(docIds),
     limit: topK,
     with_payload: true,
@@ -260,7 +620,7 @@ export const searchQdrantDocuments = async ({
 
   return (response?.points ?? [])
     .map((point) =>
-      toSearchResult(
+      toDenseSearchResult(
         point,
         buildKeywordScore(queryTerms, point.payload ?? {}),
         scoringMode
@@ -270,6 +630,47 @@ export const searchQdrantDocuments = async ({
       (left, right) =>
         right.score - left.score ||
         right.vectorScore - left.vectorScore ||
+        (right.keywordScore ?? 0) - (left.keywordScore ?? 0)
+    );
+};
+
+export const searchQdrantSparseDocuments = async ({
+  queryText = "",
+  docIds,
+  topK,
+}) => {
+  const ready = await ensureCollection();
+
+  if (!ready) {
+    return [];
+  }
+
+  const state = await ensureSparseState();
+  const sparseQuery = buildSparseQuery(queryText, state);
+
+  if (!sparseQuery) {
+    return [];
+  }
+
+  const queryTerms = new Set(sparseQuery.queryTerms);
+  const response = await getClient().query(getQdrantCollection(), {
+    query: sparseQuery.sparseVector,
+    using: QDRANT_SPARSE_VECTOR_NAME,
+    filter: buildDocIdFilter(docIds),
+    limit: topK,
+    with_payload: true,
+  });
+
+  return (response?.points ?? [])
+    .map((point) =>
+      toSparseSearchResult(
+        point,
+        buildKeywordScore(queryTerms, point.payload ?? {})
+      )
+    )
+    .sort(
+      (left, right) =>
+        right.sparseScore - left.sparseScore ||
         (right.keywordScore ?? 0) - (left.keywordScore ?? 0)
     );
 };

@@ -20,6 +20,7 @@ import {
   removeDocumentsFromQdrantIndex,
   resetQdrantVectorStore,
   searchQdrantDocuments,
+  searchQdrantSparseDocuments,
 } from "./vector-store-qdrant.js";
 import {
   addDocumentsToSparseIndex,
@@ -50,6 +51,9 @@ const normalizeWeights = () => {
 const normalizeByMaximum = (value, maximum) =>
   maximum > 0 ? value / maximum : 0;
 
+const noop = () => {};
+const asyncNoop = async () => {};
+
 const getVectorStoreImplementation = () => {
   const provider = getVectorStoreProvider();
 
@@ -60,6 +64,11 @@ const getVectorStoreImplementation = () => {
       clearDenseIndex: clearQdrantVectorIndex,
       searchDenseDocuments: searchQdrantDocuments,
       resetDenseVectorStore: resetQdrantVectorStore,
+      addDocumentsToSparseIndex: asyncNoop,
+      removeDocumentsFromSparseIndex: asyncNoop,
+      clearSparseIndex: asyncNoop,
+      searchSparseDocuments: searchQdrantSparseDocuments,
+      resetSparseStore: noop,
     };
   }
 
@@ -69,6 +78,11 @@ const getVectorStoreImplementation = () => {
     clearDenseIndex: clearLocalVectorIndex,
     searchDenseDocuments: searchLocalDocuments,
     resetDenseVectorStore: resetLocalVectorStore,
+    addDocumentsToSparseIndex,
+    removeDocumentsFromSparseIndex,
+    clearSparseIndex,
+    searchSparseDocuments,
+    resetSparseStore,
   };
 };
 
@@ -154,7 +168,7 @@ const searchHybridDocuments = async ({
       topK: denseTopK,
       scoringMode: "dense",
     }),
-    searchSparseDocuments({
+    implementation.searchSparseDocuments({
       queryText,
       docIds,
       topK: getSparseRetrievalTopK(),
@@ -175,7 +189,7 @@ export const addDocumentsToIndex = async ({ documents }) => {
     implementation.addDocumentsToDenseIndex({
       documents,
     }),
-    addDocumentsToSparseIndex({
+    implementation.addDocumentsToSparseIndex({
       documents,
     }),
   ]);
@@ -188,7 +202,7 @@ export const removeDocumentsFromIndex = async ({ docIds }) => {
     implementation.removeDocumentsFromDenseIndex({
       docIds,
     }),
-    removeDocumentsFromSparseIndex({
+    implementation.removeDocumentsFromSparseIndex({
       docIds,
     }),
   ]);
@@ -199,7 +213,7 @@ export const clearVectorIndex = async () => {
 
   await Promise.all([
     implementation.clearDenseIndex(),
-    clearSparseIndex(),
+    implementation.clearSparseIndex(),
   ]);
 };
 
@@ -243,5 +257,5 @@ export const resetVectorStore = () => {
   const implementation = getVectorStoreImplementation();
 
   implementation.resetDenseVectorStore();
-  resetSparseStore();
+  implementation.resetSparseStore();
 };
