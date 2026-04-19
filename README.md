@@ -38,7 +38,7 @@ The custom logic in this repository is the part that makes the project distincti
 
 The frontend supports multi-document upload, persisted document reloading, document deletion and clearing, question asking, voice input, TTS playback, side-by-side document and web answers, citation display, and inline PDF preview. The backend supports resumable uploads, persisted document and session state, compare-aware document retrieval, synthetic evaluation, a real-document evaluation entry point, and a local MCP-powered search path for live web answers.
 
-The current local defaults are `text-embedding-3-small` for embeddings, `gpt-5` for answer generation, `v2` for the prompt version, `local` for the vector store provider, `structured` for the chunking strategy, `false` for hybrid retrieval, `900` for chunk size, `180` for chunk overlap, `6` for global retrieval top-k, `8` for sparse retrieval top-k, `3` for compare retrieval top-k per document, `0.32` for the minimum relevance score gate, and `0.51` for the minimum query-term coverage gate. These values can be changed through `server/.env`.
+The current local defaults are `text-embedding-3-small` for embeddings, `gpt-5` for answer generation, `v3` for the prompt version, `local` for the vector store provider, `structured` for the chunking strategy, `false` for hybrid retrieval, `900` for chunk size, `180` for chunk overlap, `6` for global retrieval top-k, `8` for sparse retrieval top-k, `3` for compare retrieval top-k per document, `0.32` for the minimum relevance score gate, and `0.51` for the minimum query-term coverage gate. These values can be changed through `server/.env`.
 
 ## Repository Structure
 
@@ -72,7 +72,7 @@ QDRANT_COLLECTION=rag_chunks
 QDRANT_DISTANCE=Cosine
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_CHAT_MODEL=gpt-5
-RAG_PROMPT_VERSION=v2
+RAG_PROMPT_VERSION=v3
 RAG_CHUNK_STRATEGY=structured
 RAG_HYBRID_ENABLED=false
 RAG_HYBRID_DENSE_WEIGHT=0.65
@@ -85,7 +85,7 @@ RAG_COMPARE_TOP_K_PER_DOC=3
 RAG_MIN_QUERY_TERM_COVERAGE=0.51
 ```
 
-`OPENAI_API_KEY` is required for embeddings and answer generation. `SERPAPI_KEY` is required for the web-search answer path. `RAG_PROMPT_VERSION` supports `v1` for the legacy flat-string prompt and `v2` for the default `system` plus `human` prompt layout. `server/.env` is ignored by git and should never be committed.
+`OPENAI_API_KEY` is required for embeddings and answer generation. `SERPAPI_KEY` is required for the web-search answer path. `RAG_PROMPT_VERSION` supports `v1` for the legacy flat-string prompt, `v2` for the `system` plus `human` prompt layout, and `v3` for the structured follow-up rewrite prompt with JSON output. `server/.env` is ignored by git and should never be committed.
 
 To enable true hybrid retrieval locally, keep the same chunking pipeline and set:
 

@@ -94,10 +94,76 @@ Standalone retrieval question:`,
   ],
 ]);
 
-const formatRewritePrompt = async (values) =>
-  getPromptVersion() === "v1"
-    ? rewritePromptV1.format(values)
-    : rewritePromptV2.invoke(values);
+const rewritePromptV3 = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You rewrite follow-up questions into standalone retrieval queries for a document-grounded RAG system.
+Follow these rules strictly:
+- Use the conversation only to resolve references, ellipsis, and document scope.
+- Keep the rewritten question concise and in the same language as the user's latest question.
+- Preserve ambiguity if the user was ambiguous.
+- Do not add facts, constraints, dates, policy details, or comparisons that were not already stated by the user or assistant.
+- Prefer concrete nouns from the recent conversation over pronouns when the referent is clear.
+- Do not answer the question. Only rewrite it for retrieval.
+- Return JSON only with this shape:
+  {{"rewritten_query":"...","preserved_ambiguity":true|false}}`,
+  ],
+  [
+    "human",
+    `Active documents:
+{documents}
+
+Recent conversation:
+{recentConversation}
+
+Latest user question:
+{question}
+
+Examples:
+1.
+Recent conversation:
+User [docs: benefits-2025.pdf]: Tell me about remote work.
+Assistant [docs: benefits-2025.pdf] [mode: qa]: Manager approval is required.
+Latest user question:
+And approval?
+JSON:
+{{"rewritten_query":"What is the remote work approval policy?","preserved_ambiguity":false}}
+
+2.
+Recent conversation:
+User [docs: plan-a.pdf, plan-b.pdf]: 对比这两份文档的远程办公政策。
+Assistant [docs: plan-a.pdf, plan-b.pdf] [mode: compare]: 两份文档都要求经理审批，但每周远程天数不同。
+Latest user question:
+那第二个呢？
+JSON:
+{{"rewritten_query":"第二份文档的远程办公政策是什么？","preserved_ambiguity":false}}
+
+3.
+Recent conversation:
+User [docs: handbook.pdf]: Tell me about reimbursement and remote work.
+Assistant [docs: handbook.pdf] [mode: qa]: The handbook covers both reimbursement and remote work.
+Latest user question:
+Which one is stricter?
+JSON:
+{{"rewritten_query":"Which one is stricter?","preserved_ambiguity":true}}
+
+Now return JSON only.`,
+  ],
+]);
+
+const formatRewritePrompt = async (values) => {
+  const promptVersion = getPromptVersion();
+
+  if (promptVersion === "v1") {
+    return rewritePromptV1.format(values);
+  }
+
+  if (promptVersion === "v3") {
+    return rewritePromptV3.invoke(values);
+  }
+
+  return rewritePromptV2.invoke(values);
+};
 
 const trimMemoryText = (value = "", maxLength = MAX_MESSAGE_CHARS) => {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -179,7 +245,7 @@ const shouldRewriteQuestion = ({ query, session }) => {
   return tokenize(query).length <= 5;
 };
 
-const sanitizeRewrittenQuery = (rewrittenQuery, fallbackQuery) => {
+const sanitizeRewriteQueryText = (rewrittenQuery, fallbackQuery) => {
   const normalized = String(rewrittenQuery ?? "")
     .trim()
     .replace(/^(```(?:text)?|```)/gi, "")
@@ -197,6 +263,50 @@ const sanitizeRewrittenQuery = (rewrittenQuery, fallbackQuery) => {
   }
 
   return finalQuery.replace(/^["'`]+|["'`]+$/g, "").trim() || fallbackQuery;
+};
+
+const parseRewriteJsonResponse = (rewrittenResponse) => {
+  const normalized = String(rewrittenResponse ?? "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  const startIndex = normalized.indexOf("{");
+  const endIndex = normalized.lastIndexOf("}");
+
+  if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(normalized.slice(startIndex, endIndex + 1));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const sanitizeRewrittenQuery = (rewrittenResponse, fallbackQuery) => {
+  const parsedResponse = parseRewriteJsonResponse(rewrittenResponse);
+
+  if (parsedResponse) {
+    if (parsedResponse.should_rewrite === false) {
+      return fallbackQuery;
+    }
+
+    const structuredQuery =
+      typeof parsedResponse.rewritten_query === "string"
+        ? parsedResponse.rewritten_query
+        : typeof parsedResponse.query === "string"
+          ? parsedResponse.query
+          : "";
+
+    if (structuredQuery) {
+      return sanitizeRewriteQueryText(structuredQuery, fallbackQuery);
+    }
+  }
+
+  return sanitizeRewriteQueryText(rewrittenResponse, fallbackQuery);
 };
 
 export const resolveQueryWithSessionMemory = async ({

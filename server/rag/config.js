@@ -48,7 +48,7 @@ export const getEmbeddingModel = () =>
 export const getChatModel = () => process.env.OPENAI_CHAT_MODEL || "gpt-5";
 
 export const getPromptVersion = () =>
-  toChoice(process.env.RAG_PROMPT_VERSION, "v2", ["v1", "v2"]);
+  toChoice(process.env.RAG_PROMPT_VERSION, "v3", ["v1", "v2", "v3"]);
 
 export const getChunkStrategy = () =>
   (process.env.RAG_CHUNK_STRATEGY || "structured").trim().toLowerCase();

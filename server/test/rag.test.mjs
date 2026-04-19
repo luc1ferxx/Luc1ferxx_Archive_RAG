@@ -47,6 +47,13 @@ const provider = {
   embedTexts: async (texts) => texts.map((text) => toEmbedding(text)),
   embedQuery: async (query) => toEmbedding(query),
   completeText: async (prompt) => {
+    if (prompt.includes("preserved_ambiguity")) {
+      return JSON.stringify({
+        rewritten_query: "What is the remote work approval policy?",
+        preserved_ambiguity: false,
+      });
+    }
+
     if (prompt.includes("Standalone retrieval question:")) {
       return "What is the remote work approval policy?";
     }
@@ -159,6 +166,64 @@ test("legacy prompt version remains supported", async () => {
     } else {
       process.env.RAG_PROMPT_VERSION = originalPromptVersion;
     }
+  }
+});
+
+test("v3 rewrite prompt accepts structured JSON output", async () => {
+  const originalPromptVersion = process.env.RAG_PROMPT_VERSION;
+
+  process.env.RAG_PROMPT_VERSION = "v3";
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      if (prompt.includes("preserved_ambiguity")) {
+        return JSON.stringify({
+          rewritten_query: "What is the remote work approval policy?",
+          preserved_ambiguity: false,
+        });
+      }
+
+      return "Grounded answer based on Source 1.";
+    },
+  });
+
+  try {
+    await ingestFixture({
+      docId: "benefits-json",
+      fileName: "benefits-json.pdf",
+      pages: [
+        "Remote work policy: employees may work remotely 3 days per week with manager approval.",
+      ],
+    });
+
+    recordSessionTurn({
+      sessionId: "session-json",
+      query: "Tell me about remote work.",
+      resolvedQuery: "Tell me about remote work.",
+      answer: "Manager approval is required.",
+      documents: [getDocument("benefits-json")],
+      routeMode: "qa",
+    });
+
+    const memoryResolution = await resolveQueryWithSessionMemory({
+      sessionId: "session-json",
+      query: "And approval?",
+      documents: [getDocument("benefits-json")],
+    });
+
+    assert.equal(memoryResolution.memoryApplied, true);
+    assert.equal(
+      memoryResolution.resolvedQuery,
+      "What is the remote work approval policy?"
+    );
+  } finally {
+    if (originalPromptVersion === undefined) {
+      delete process.env.RAG_PROMPT_VERSION;
+    } else {
+      process.env.RAG_PROMPT_VERSION = originalPromptVersion;
+    }
+
+    configureOpenAIProvider(provider);
   }
 });
 
