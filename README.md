@@ -1,4 +1,4 @@
-# Luc1ferxx Archive
+# DocCompare AI
 
 Luc1ferxx Archive is a multi-document RAG workspace built with React and Node.js. Users can upload PDFs, ask grounded questions, compare multiple documents, inspect citations in an inline PDF preview, and contrast document answers with a live web-search answer.
 
@@ -186,6 +186,38 @@ cmd /c npm.cmd run eval:real -- evaluation/real-corpus.json
 ```
 
 Saved reports are written to `server/evaluation/results/`. The tracked `latest.*` files currently come from the dedicated near-duplicate compare corpus.
+
+## Quantitative Results
+
+### Chunking Benchmark
+
+The clearest accuracy improvement in this project came from moving from simple fixed-window chunking to the current structured chunker on `evaluation/synthetic-corpus-chunking.json`.
+
+| Metric | Before: simple `900/0` | After: structured `900/180` |
+| --- | ---: | ---: |
+| Overall pass rate | 0.5 | 1 |
+| QA page hit rate | 0.3333 | 1 |
+| Compare doc coverage | 0.3333 | 1 |
+| Compare page hit rate | 0.3333 | 1 |
+| Answer content hit rate | 0.3333 | 1 |
+| Upload resume success rate | 1 | 1 |
+| Avg response time (ms) | 1310.63 | 3649.63 |
+| Avg citation count | 0.5 | 1.5 |
+
+This tradeoff is intentional: the structured chunker is slower, but it keeps better-grounded evidence in play and improves both QA and compare accuracy.
+
+### Latest Tracked Eval
+
+The current tracked `latest.*` report comes from `evaluation/synthetic-corpus-near-duplicate.json` and reports:
+
+- `overallPassRate`: `0.875`
+- `qaPageHitRate`: `1.0`
+- `compareDocCoverageRate`: `1.0`
+- `comparePageHitRate`: `1.0`
+- `abstainAccuracy`: `1.0`
+- `answerContentHitRate`: `0.8333`
+- `averageResponseTimeMs`: `11059`
+- `averageCitationCount`: `1.63`
 
 ## Current Limits
 
