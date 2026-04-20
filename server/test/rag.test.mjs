@@ -21,6 +21,8 @@ import {
   resetSessionMemory,
   resolveQueryWithSessionMemory,
 } from "../rag/memory.js";
+import { analyzeComparison } from "../rag/comparison-engine.js";
+import { alignComparisonEvidence } from "../rag/evidence-aligner.js";
 import { buildTermSet } from "../rag/text-utils.js";
 
 const originalDataDirectory = getRagDataDirectory();
@@ -258,6 +260,41 @@ const ingestFixture = async ({ docId, fileName, pages }) =>
     })),
   });
 
+const buildComparisonAnalysis = ({ query, entries }) => {
+  const documents = entries.map((entry) => ({
+    docId: entry.docId,
+    fileName: entry.fileName,
+  }));
+  const perDocumentResults = new Map(
+    entries.map((entry) => [
+      entry.docId,
+      (entry.pageContents ?? []).map((pageContent, index) => ({
+        document: {
+          id: `${entry.docId}:${index}`,
+          pageContent,
+          metadata: {
+            docId: entry.docId,
+            fileName: entry.fileName,
+            pageNumber: index + 1,
+            chunkIndex: index,
+          },
+        },
+        score: entry.scores?.[index] ?? 0.9,
+      })),
+    ])
+  );
+
+  const alignment = alignComparisonEvidence({
+    query,
+    documents,
+    perDocumentResults,
+  });
+
+  return analyzeComparison({
+    alignment,
+  });
+};
+
 beforeEach(async () => {
   tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-rag-test-"));
   configureRagDataDirectory(path.join(tempRoot, "rag-data"));
@@ -415,10 +452,282 @@ test("compare flow returns multi-document evidence", async () => {
   const citedDocIds = new Set(response.citations.map((citation) => citation.docId));
 
   assert.match(response.text, /Summary:/);
+  assert.doesNotMatch(response.text, /No evidence-backed material differences were found/i);
   assert.equal(citedDocIds.size, 2);
   assert.ok(citedDocIds.has("benefits-2024"));
   assert.ok(citedDocIds.has("benefits-2025"));
 });
+
+test("near-duplicate compare flow short-circuits to no material difference", async () => {
+  await ingestFixture({
+    docId: "handbook-alpha",
+    fileName: "handbook-alpha.pdf",
+    pages: [
+      "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+    ],
+  });
+  await ingestFixture({
+    docId: "handbook-beta",
+    fileName: "handbook-beta.pdf",
+    pages: [
+      "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+    ],
+  });
+
+  const response = await chat(
+    ["handbook-alpha", "handbook-beta"],
+    "Compare the remote work policy."
+  );
+  const citedDocIds = new Set(response.citations.map((citation) => citation.docId));
+
+  assert.match(response.text, /No evidence-backed material differences were found/i);
+  assert.doesNotMatch(response.text, /The weekly day limit differs/i);
+  assert.equal(citedDocIds.size, 2);
+  assert.ok(citedDocIds.has("handbook-alpha"));
+  assert.ok(citedDocIds.has("handbook-beta"));
+});
+
+test("near-duplicate guard can be disabled to preserve baseline compare behavior", async () => {
+  const originalNearDuplicateGuard = process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED;
+
+  process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED = "false";
+
+  try {
+    await ingestFixture({
+      docId: "handbook-alpha",
+      fileName: "handbook-alpha.pdf",
+      pages: [
+        "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+      ],
+    });
+    await ingestFixture({
+      docId: "handbook-beta",
+      fileName: "handbook-beta.pdf",
+      pages: [
+        "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+      ],
+    });
+
+    const response = await chat(
+      ["handbook-alpha", "handbook-beta"],
+      "Compare the remote work policy."
+    );
+
+    assert.doesNotMatch(
+      response.text,
+      /No evidence-backed material differences were found/i
+    );
+    assert.match(response.text, /The weekly day limit differs/i);
+  } finally {
+    if (originalNearDuplicateGuard === undefined) {
+      delete process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED;
+    } else {
+      process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED = originalNearDuplicateGuard;
+    }
+  }
+});
+
+test("comparison analysis does not short-circuit when no comparable evidence exists", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work policy.",
+    entries: [
+      {
+        docId: "handbook-alpha",
+        fileName: "handbook-alpha.pdf",
+        pageContents: [],
+      },
+      {
+        docId: "handbook-beta",
+        fileName: "handbook-beta.pdf",
+        pageContents: [],
+      },
+    ],
+  });
+
+  assert.equal(analysis.pairwiseAnalysis.length, 0);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
+  assert.equal(analysis.nearDuplicatePairs.length, 0);
+  assert.equal(analysis.explicitConflictPairs.length, 0);
+});
+
+test("comparison analysis marks identical evidence as strong near-duplicate without conflicts", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work policy.",
+    entries: [
+      {
+        docId: "handbook-alpha",
+        fileName: "handbook-alpha.pdf",
+        pageContents: [
+          "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "handbook-beta",
+        fileName: "handbook-beta.pdf",
+        pageContents: [
+          "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+    ],
+  });
+
+  assert.equal(analysis.pairwiseAnalysis.length, 1);
+  assert.equal(analysis.pairwiseAnalysis[0].strongNearDuplicate, true);
+  assert.equal(analysis.pairwiseAnalysis[0].explicitConflict, false);
+  assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 1);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, true);
+});
+
+test("comparison analysis detects explicit conflicts for near-duplicate evidence with different numbers", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work policy.",
+    entries: [
+      {
+        docId: "benefits-2024",
+        fileName: "benefits-2024.pdf",
+        pageContents: [
+          "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "benefits-2025",
+        fileName: "benefits-2025.pdf",
+        pageContents: [
+          "Remote work policy: employees may work remotely 3 days per week with manager approval.",
+        ],
+      },
+    ],
+  });
+
+  assert.equal(analysis.pairwiseAnalysis.length, 1);
+  assert.equal(analysis.pairwiseAnalysis[0].nearDuplicate, true);
+  assert.equal(analysis.pairwiseAnalysis[0].explicitConflict, true);
+  assert.equal(analysis.explicitConflictPairs.length, 1);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
+});
+
+test("comparison analysis keeps mixed duplicate and conflict evidence from short-circuiting", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work policy.",
+    entries: [
+      {
+        docId: "handbook-alpha",
+        fileName: "handbook-alpha.pdf",
+        pageContents: [
+          "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "handbook-beta",
+        fileName: "handbook-beta.pdf",
+        pageContents: [
+          "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "handbook-gamma",
+        fileName: "handbook-gamma.pdf",
+        pageContents: [
+          "Remote work policy: employees may work remotely 3 days per week with manager approval.",
+        ],
+      },
+    ],
+  });
+
+  assert.equal(analysis.pairwiseAnalysis.length, 3);
+  assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 1);
+  assert.equal(analysis.explicitConflictPairs.length, 2);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
+});
+
+test("comparison analysis does not mark unrelated evidence as near-duplicate", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work policy.",
+    entries: [
+      {
+        docId: "remote-policy",
+        fileName: "remote-policy.pdf",
+        pageContents: [
+          "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "badge-manual",
+        fileName: "badge-manual.pdf",
+        pageContents: [
+          "Badge renewal window: renew access badges every 14 months after the last audit.",
+        ],
+      },
+    ],
+  });
+
+  assert.equal(analysis.pairwiseAnalysis.length, 1);
+  assert.equal(analysis.pairwiseAnalysis[0].nearDuplicate, false);
+  assert.equal(analysis.nearDuplicatePairs.length, 0);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
+});
+
+test("compare flow abstains when only one selected document has strong evidence", async () => {
+  await ingestFixture({
+    docId: "benefits-2024",
+    fileName: "benefits-2024.pdf",
+    pages: [
+      "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+    ],
+  });
+  await ingestFixture({
+    docId: "travel-guide",
+    fileName: "travel-guide.pdf",
+    pages: [
+      "Travel reimbursement policy: meals are capped at 40 dollars per day.",
+    ],
+  });
+
+  const response = await chat(
+    ["benefits-2024", "travel-guide"],
+    "Compare the remote work policy."
+  );
+
+  assert.equal(response.abstained, true);
+  assert.match(response.abstainReason, /comparison would be unreliable|selected documents to compare/i);
+});
+
+test("near-duplicate compare flow short-circuits across three highly similar documents", async () => {
+  await ingestFixture({
+    docId: "manual-alpha",
+    fileName: "manual-alpha.pdf",
+    pages: [
+      "Badge renewal window: renew access badges every 12 months after the last successful audit.",
+    ],
+  });
+  await ingestFixture({
+    docId: "manual-beta",
+    fileName: "manual-beta.pdf",
+    pages: [
+      "Badge renewal window: renew access badges every 12 months after the last successful audit.",
+    ],
+  });
+  await ingestFixture({
+    docId: "manual-gamma",
+    fileName: "manual-gamma.pdf",
+    pages: [
+      "Badge renewal window: renew access badges every 12 months after the last successful audit.",
+    ],
+  });
+
+  const response = await chat(
+    ["manual-alpha", "manual-beta", "manual-gamma"],
+    "Compare the badge renewal window."
+  );
+  const citedDocIds = new Set(response.citations.map((citation) => citation.docId));
+
+  assert.match(response.text, /No evidence-backed material differences were found/i);
+  assert.equal(citedDocIds.size, 3);
+  assert.ok(citedDocIds.has("manual-alpha"));
+  assert.ok(citedDocIds.has("manual-beta"));
+  assert.ok(citedDocIds.has("manual-gamma"));
+});
+
 
 test("hybrid retrieval fuses sparse evidence when dense scores are flat", async () => {
   const originalHybridEnabled = process.env.RAG_HYBRID_ENABLED;
@@ -593,7 +902,30 @@ test("unsupported questions abstain instead of using adjacent policies", async (
 
   const response = await chat(["benefits-2024"], "What is the parental leave policy?");
 
+  assert.equal(response.abstained, true);
+  assert.match(response.abstainReason, /grounded evidence/i);
   assert.match(response.text, /couldn't find enough grounded evidence/i);
+  assert.equal(response.citations.length, 0);
+});
+
+test("code-like anchors must appear in evidence before qa answers proceed", async () => {
+  await ingestFixture({
+    docId: "catalog-alpha",
+    fileName: "catalog-alpha.pdf",
+    pages: [
+      "NULPAR-AX allocation amount is 180 dollars per cycle.",
+      "NULPAR-BQ allocation amount is 260 dollars per cycle.",
+      "NULPAR-CR allocation amount is 340 dollars per cycle.",
+    ],
+  });
+
+  const response = await chat(
+    ["catalog-alpha"],
+    "What is the NULPAR-DZ allocation amount?"
+  );
+
+  assert.equal(response.abstained, true);
+  assert.match(response.abstainReason, /NULPAR-DZ/i);
   assert.equal(response.citations.length, 0);
 });
 

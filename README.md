@@ -20,7 +20,7 @@ When the user asks a question, the backend first normalizes the selected `docIds
 
 In the normal QA path, the system embeds the query, retrieves the top document chunks across the selected PDFs, runs a confidence gate, and, if enough grounded evidence exists, builds a prompt and asks GPT-5 to generate a concise grounded answer with citations.
 
-In the compare path, the system does not simply retrieve a global top-k across all documents. Instead, it retrieves evidence per document, checks confidence across the selected documents, aligns evidence across documents, analyzes the comparison structure, and only then asks GPT-5 to write a structured comparison. The final answer is organized into sections such as summary, per-document findings, agreements, differences, and uncertainty.
+In the compare path, the system does not simply retrieve a global top-k across all documents. Instead, it retrieves evidence per document, checks confidence across the selected documents, aligns evidence across documents, analyzes the comparison structure, and only then decides whether to short-circuit a "no evidence-backed material difference" response or ask GPT-5 to write a structured comparison. The final answer is organized into sections such as summary, per-document findings, agreements, differences, and uncertainty.
 
 ## Why This Project Is Interesting
 
@@ -32,13 +32,13 @@ This project addresses that problem by routing comparison questions into a dedic
 
 LangChain is used here as the infrastructure layer. `PDFLoader` handles PDF parsing, `Document` objects provide a normalized document abstraction, `OpenAIEmbeddings` handles embedding requests, `ChatOpenAI` handles the final generation call, and `PromptTemplate` plus `ChatPromptTemplate` organize prompts.
 
-The custom logic in this repository is the part that makes the project distinctive. The custom chunker uses page, heading, paragraph, and sentence structure to produce more stable retrieval units. The query router recognizes comparison-style questions and switches retrieval mode. The compare retriever preserves fairness across documents by retrieving per document instead of performing only a global ranking. The evidence aligner organizes retrieved evidence into a document-aware comparison bundle. The confidence layer decides whether the evidence is strong enough to answer or compare reliably. The upload subsystem adds chunked upload and resumable upload behavior that is independent of LangChain.
+The custom logic in this repository is the part that makes the project distinctive. The custom chunker uses page, heading, paragraph, and sentence structure to produce more stable retrieval units. The query router recognizes comparison-style questions and switches retrieval mode. The compare retriever preserves fairness across documents by retrieving per document instead of performing only a global ranking, and the per-document retrieval step now runs in parallel to reduce compare latency. The evidence aligner organizes retrieved evidence into a document-aware comparison bundle, and the comparison analyzer can short-circuit highly similar, conflict-free compare cases before the system falls back to GPT-5. The confidence layer decides whether the evidence is strong enough to answer or compare reliably. The upload subsystem adds chunked upload and resumable upload behavior that is independent of LangChain.
 
 ## Current Feature Set
 
-The frontend supports multi-document upload, persisted document reloading, document deletion and clearing, question asking, voice input, TTS playback, side-by-side document and web answers, citation display, and inline PDF preview. The backend supports resumable uploads, persisted document and session state, compare-aware document retrieval, synthetic evaluation, a real-document evaluation entry point, and a local MCP-powered search path for live web answers.
+The frontend supports multi-document upload, persisted document reloading, document deletion and clearing, question asking, voice input, TTS playback, side-by-side document and web answers, citation display, and inline PDF preview. The backend supports resumable uploads, persisted document and session state, compare-aware document retrieval, a near-duplicate no-difference guard for highly similar compare evidence, synthetic evaluation, a real-document evaluation entry point, and a local MCP-powered search path for live web answers.
 
-The current local defaults are `text-embedding-3-small` for embeddings, `gpt-5` for answer generation, `v3` for the prompt version, `local` for the vector store provider, `structured` for the chunking strategy, `false` for hybrid retrieval, `900` for chunk size, `180` for chunk overlap, `6` for global retrieval top-k, `8` for sparse retrieval top-k, `3` for compare retrieval top-k per document, `0.32` for the minimum relevance score gate, and `0.51` for the minimum query-term coverage gate. These values can be changed through `server/.env`.
+The current local defaults are `text-embedding-3-small` for embeddings, `gpt-5` for answer generation, `v3` for the prompt version, `local` for the vector store provider, `structured` for the chunking strategy, `false` for hybrid retrieval, `900` for chunk size, `180` for chunk overlap, `6` for global retrieval top-k, `8` for sparse retrieval top-k, `3` for compare retrieval top-k per document, `0.32` for the minimum relevance score gate, `0.51` for the minimum query-term coverage gate, and `true` for the near-duplicate compare guard. These values can be changed through `server/.env`.
 
 ## Repository Structure
 
@@ -83,9 +83,10 @@ RAG_RETRIEVAL_TOP_K=6
 RAG_SPARSE_TOP_K=8
 RAG_COMPARE_TOP_K_PER_DOC=3
 RAG_MIN_QUERY_TERM_COVERAGE=0.51
+RAG_NEAR_DUPLICATE_GUARD_ENABLED=true
 ```
 
-`OPENAI_API_KEY` is required for embeddings and answer generation. `SERPAPI_KEY` is required for the web-search answer path. `RAG_PROMPT_VERSION` supports `v1` for the legacy flat-string prompt, `v2` for the `system` plus `human` prompt layout, and `v3` for the structured follow-up rewrite prompt with JSON output. `server/.env` is ignored by git and should never be committed.
+`OPENAI_API_KEY` is required for embeddings and answer generation. `SERPAPI_KEY` is required for the web-search answer path. `RAG_PROMPT_VERSION` supports `v1` for the legacy flat-string prompt, `v2` for the `system` plus `human` prompt layout, and `v3` for the structured follow-up rewrite prompt with JSON output. `RAG_NEAR_DUPLICATE_GUARD_ENABLED` controls whether compare answers may short-circuit to a deterministic "no evidence-backed material difference" response when all retrieved evidence is highly similar and conflict-free. `server/.env` is ignored by git and should never be committed.
 
 To enable true hybrid retrieval locally, keep the same chunking pipeline and set:
 
@@ -147,6 +148,13 @@ cd server
 cmd /c "set VECTOR_STORE_PROVIDER=local&& set RAG_CHUNK_STRATEGY=structured&& set RAG_CHUNK_OVERLAP=180&& npm.cmd run eval:synthetic -- evaluation/synthetic-corpus-chunking.json"
 ```
 
+Run the dedicated near-duplicate compare corpus with the current compare guard:
+
+```powershell
+cd server
+cmd /c "set VECTOR_STORE_PROVIDER=local&& npm.cmd run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json"
+```
+
 Run the chunking comparison baseline with simple fixed-window chunking and no overlap:
 
 ```powershell
@@ -178,11 +186,11 @@ The clearest before/after improvement in this branch is the chunking upgrade on 
 
 This tradeoff is intentional. The structured chunker is slower because it keeps more grounded evidence in play, but the accuracy gain on both single-document QA and cross-document comparison is much larger than the latency increase.
 
-The latest saved stress run in this repository is `server/evaluation/results/latest.*`, generated from `evaluation/synthetic-corpus-hybrid.json`. It currently reports an overall pass rate of `0.75`, a QA page hit rate of `1.0`, a compare document coverage rate of `1.0`, a compare page hit rate of `1.0`, an answer content hit rate of `1.0`, an upload resume success rate of `1.0`, and an abstain accuracy of `0.0`. In other words, retrieval coverage on the harder corpus is already stable, but abstention remains the weakest part of the pipeline.
+The latest tracked saved run in this repository is `server/evaluation/results/latest.*`, currently generated from `evaluation/synthetic-corpus-near-duplicate.json`. It reports an overall pass rate of `0.875`, a QA page hit rate of `1.0`, a compare document coverage rate of `1.0`, a compare page hit rate of `1.0`, an answer content hit rate of `0.8333`, an upload resume success rate of `1.0`, and an abstain accuracy of `1.0`. On that corpus, the compare guard reliably covers the high-similarity no-difference path, while lexical answer matching in QA remains the main source of residual evaluation misses.
 
 ## Current Limitations
 
-The compare router is still keyword-based rather than model-based. The default local vector store is optimized for single-user workloads rather than large corpora, while the optional Qdrant provider requires a separately running Qdrant service. Compare responses can be slower than normal QA because the compare path performs per-document retrieval and then asks GPT-5 to write a structured answer over a larger prompt. The evaluation suite is useful and reproducible, but real-document validation still depends on you supplying your own corpus file and expected evidence.
+The compare router is still keyword-based rather than model-based. The default local vector store is optimized for single-user workloads rather than large corpora, while the optional Qdrant provider requires a separately running Qdrant service. Compare responses can still be slower than normal QA when the evidence contains real conflicts, because those paths continue to rely on GPT-5 after per-document retrieval and comparison analysis. The evaluation suite is useful and reproducible, but real-document validation still depends on you supplying your own corpus file and expected evidence.
 
 ## Security Notes
 

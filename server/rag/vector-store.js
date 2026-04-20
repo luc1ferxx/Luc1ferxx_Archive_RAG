@@ -236,21 +236,19 @@ export const searchDocumentsPerDocument = async ({
   docIds,
   topKPerDoc,
 }) => {
-  const perDocumentResults = new Map();
-
-  for (const docId of docIds) {
-    perDocumentResults.set(
+  const resultsByDocument = await Promise.all(
+    docIds.map(async (docId) => [
       docId,
       await searchDocuments({
         queryVector,
         queryText,
         docIds: [docId],
         topK: topKPerDoc,
-      })
-    );
-  }
+      }),
+    ])
+  );
 
-  return perDocumentResults;
+  return new Map(resultsByDocument);
 };
 
 export const resetVectorStore = () => {

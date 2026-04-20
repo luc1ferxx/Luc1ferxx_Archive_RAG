@@ -14,6 +14,7 @@ import {
   getEmbeddingModel,
   getMaxComparisonSources,
   getMinRelevanceScore,
+  isNearDuplicateGuardEnabled,
   getRetrievalTopK,
 } from "../rag/config.js";
 import { resetDocumentRegistry } from "../rag/doc-registry.js";
@@ -45,6 +46,11 @@ const detectAbstain = (text) => {
 
   return abstainPatterns.some((pattern) => normalizedText.includes(pattern));
 };
+
+const getResponseAbstained = (response) =>
+  typeof response?.abstained === "boolean"
+    ? response.abstained
+    : detectAbstain(response?.text);
 
 const normalizeAnswerForMatch = (text) =>
   String(text ?? "")
@@ -120,7 +126,7 @@ const evaluateCase = async ({ testCase, docIdByKey, docKeyByDocId }) => {
   );
   const durationMs = Math.round(performance.now() - startedAt);
   const citations = summarizeCitations(response.citations ?? [], docKeyByDocId);
-  const abstained = detectAbstain(response.text);
+  const abstained = getResponseAbstained(response);
   const coverage = evaluateExpectedCoverage({
     citations,
     expectedEvidence: testCase.expectedEvidence,
@@ -144,6 +150,7 @@ const evaluateCase = async ({ testCase, docIdByKey, docKeyByDocId }) => {
     docKeys: testCase.docKeys,
     shouldAbstain: testCase.shouldAbstain,
     abstained,
+    abstainReason: response.abstainReason ?? (abstained ? response.text : null),
     docCoverageHit: coverage.docCoverageHit,
     pageCoverageHit: coverage.pageCoverageHit,
     answerExpectationHit,
@@ -330,6 +337,7 @@ const main = async () => {
       compareTopKPerDoc: getComparisonTopKPerDoc(),
       maxComparisonSources: getMaxComparisonSources(),
       minRelevanceScore: getMinRelevanceScore(),
+      nearDuplicateGuardEnabled: isNearDuplicateGuardEnabled(),
     },
     metrics: {
       overallPassRate: ratio(

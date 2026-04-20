@@ -108,6 +108,9 @@ const STOP_WORDS = new Set([
   "\u4ed6\u4eec",
 ]);
 
+const CODE_LIKE_PATTERN = /\b[a-z0-9]{2,}(?:-[a-z0-9]{1,})+\b/gi;
+const QUOTED_PHRASE_PATTERN = /"([^"\n]{2,})"|“([^”\n]{2,})”/g;
+
 const isCjkToken = (value) => /[\u4e00-\u9fff]/.test(value);
 
 export const normalizeWhitespace = (value = "") =>
@@ -124,6 +127,12 @@ export const normalizeToken = (value = "") =>
     .toLowerCase()
     .replace(/^[^a-z0-9\u4e00-\u9fff]+/i, "")
     .replace(/[^a-z0-9\u4e00-\u9fff]+$/i, "");
+
+export const normalizeSearchText = (value = "") =>
+  normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/gi, " ")
+    .trim();
 
 export const tokenize = (value = "") =>
   (value.match(/[A-Za-z0-9]+|[\u4e00-\u9fff]/g) ?? [])
@@ -167,6 +176,50 @@ export const extractTerms = (value = "", { limit = 10 } = {}) => {
       value: term,
       count,
     }));
+};
+
+const addAnchorGroup = (anchorGroups, seenKeys, rawValue, type) => {
+  const label = String(rawValue ?? "").trim();
+  const normalizedValue = normalizeSearchText(label);
+  const terms = [...new Set(extractMeaningfulTokens(label))];
+
+  if (!label || !normalizedValue || terms.length === 0) {
+    return;
+  }
+
+  const dedupeKey = `${type}:${normalizedValue}`;
+
+  if (seenKeys.has(dedupeKey)) {
+    return;
+  }
+
+  seenKeys.add(dedupeKey);
+  anchorGroups.push({
+    type,
+    label,
+    normalizedValue,
+    terms,
+  });
+};
+
+export const extractAnchorGroups = (value = "") => {
+  const anchorGroups = [];
+  const seenKeys = new Set();
+
+  for (const match of value.matchAll(CODE_LIKE_PATTERN)) {
+    addAnchorGroup(anchorGroups, seenKeys, match[0], "code");
+  }
+
+  for (const match of value.matchAll(QUOTED_PHRASE_PATTERN)) {
+    addAnchorGroup(
+      anchorGroups,
+      seenKeys,
+      match[1] ?? match[2] ?? "",
+      "quoted_phrase"
+    );
+  }
+
+  return anchorGroups;
 };
 
 export const splitParagraphs = (value = "") =>

@@ -1,5 +1,9 @@
 import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
-import { getMaxComparisonSources, getPromptVersion } from "./config.js";
+import {
+  getMaxComparisonSources,
+  getPromptVersion,
+  isNearDuplicateGuardEnabled,
+} from "./config.js";
 import {
   buildCitation,
   buildContextSection,
@@ -28,6 +32,30 @@ const comparisonPromptV1 = PromptTemplate.fromTemplate(
 Separate agreement, difference, and uncertainty.
 If a document lacks evidence, say so explicitly.
 Do not treat a related but different policy as evidence for the asked policy.
+Keep the answer concise and cite source labels such as Source 1 when making evidence-based claims.
+
+{questionBlock}
+
+Comparison diagnostics:
+{diagnostics}
+
+Evidence by document:
+{context}
+
+Write the answer using these sections:
+Summary:
+Per document:
+Agreements:
+Differences:
+Gaps or uncertainty:`
+);
+
+const guardedComparisonPromptV1 = PromptTemplate.fromTemplate(
+  `You compare uploaded documents using only the provided evidence.
+Separate agreement, difference, and uncertainty.
+If a document lacks evidence, say so explicitly.
+Do not treat a related but different policy as evidence for the asked policy.
+If the diagnostics indicate near-duplicate evidence without explicit conflicts, do not invent differences.
 Keep the answer concise and cite source labels such as Source 1 when making evidence-based claims.
 
 {questionBlock}
@@ -108,6 +136,44 @@ Use short bullets inside sections when helpful.`,
   ],
 ]);
 
+const guardedComparisonPromptV2 = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `You are a document-grounded comparison assistant for uploaded PDFs.
+Follow these rules strictly:
+- Compare only from the provided evidence.
+- Use the same language as the user's latest question.
+- Separate agreement, difference, and uncertainty clearly.
+- If any document lacks strong evidence, say so explicitly.
+- Do not treat a related but different policy as evidence for the asked policy.
+- Do not fill evidence gaps with assumptions.
+- If the diagnostics say the evidence is near-duplicate and no explicit conflict is present, do not invent differences.
+- Only describe a difference when the provided evidence shows a concrete difference.
+- Every evidence-based sentence must end with citations like [Source 1].
+- Do not cite a source unless it directly supports the sentence.
+- Keep the answer concise and structured.`,
+  ],
+  [
+    "human",
+    `{questionBlock}
+
+Comparison diagnostics:
+{diagnostics}
+
+Evidence by document:
+{context}
+
+Write the answer using these sections:
+Summary:
+Per document:
+Agreements:
+Differences:
+Gaps or uncertainty:
+
+Use short bullets inside sections when helpful.`,
+  ],
+]);
+
 const buildQuestionBlock = ({ query, resolvedQuery }) =>
   resolvedQuery && resolvedQuery !== query
     ? [
@@ -119,6 +185,87 @@ const buildQuestionBlock = ({ query, resolvedQuery }) =>
 
 const formatSelectedPrompt = async ({ v1Template, v2Template, values }) =>
   getPromptVersion() === "v1" ? v1Template.format(values) : v2Template.invoke(values);
+
+const formatPairLabels = (pairs) =>
+  pairs.map((pair) => `${pair.leftFileName} vs ${pair.rightFileName}`).join(", ");
+
+const formatSourceLabels = (ranks) =>
+  ranks.length > 0 ? ranks.map((rank) => `[Source ${rank}]`).join(" ") : "";
+
+const getRanksForDoc = (bundle, docId) =>
+  bundle.rankedResults
+    .filter((result) => result.document.metadata?.docId === docId)
+    .map((result) => result.rank);
+
+const buildComparisonDiagnostics = ({ analysis, nearDuplicateGuardEnabled }) => {
+  const diagnostics = [
+    analysis.sharedTerms.length > 0
+      ? `Shared focus terms: ${analysis.sharedTerms.join(", ")}`
+      : "Shared focus terms: none detected confidently",
+    `Evidence balance: ${analysis.evidenceBalance}`,
+    analysis.missingDocuments.length > 0
+      ? `Documents without strong evidence: ${analysis.missingDocuments
+          .map((document) => document.fileName)
+          .join(", ")}`
+      : "Documents without strong evidence: none",
+  ];
+
+  if (!nearDuplicateGuardEnabled) {
+    return diagnostics.join("\n");
+  }
+
+  diagnostics.push(
+    analysis.nearDuplicatePairs.length > 0
+      ? `Near-duplicate evidence pairs: ${formatPairLabels(analysis.nearDuplicatePairs)}`
+      : "Near-duplicate evidence pairs: none detected confidently",
+    analysis.explicitConflictPairs.length > 0
+      ? `Explicit conflict signals: ${analysis.explicitConflictPairs
+          .map((pair) => {
+            const conflictDetails = [
+              pair.numericTokensOnlyInLeft.length > 0
+                ? `${pair.leftFileName} only: ${pair.numericTokensOnlyInLeft.join(", ")}`
+                : null,
+              pair.numericTokensOnlyInRight.length > 0
+                ? `${pair.rightFileName} only: ${pair.numericTokensOnlyInRight.join(", ")}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" | ");
+
+            return `${pair.leftFileName} vs ${pair.rightFileName}${conflictDetails ? ` (${conflictDetails})` : ""}`;
+          })
+          .join("; ")}`
+      : "Explicit conflict signals: none",
+    analysis.likelyNoMaterialDifferencePairs.length > 0
+      ? `High-similarity pairs without explicit conflicts: ${formatPairLabels(
+          analysis.likelyNoMaterialDifferencePairs
+        )}`
+      : "High-similarity pairs without explicit conflicts: none"
+  );
+
+  return diagnostics.join("\n");
+};
+
+const buildNoMaterialDifferenceAnswer = ({ bundle, analysis }) => {
+  const summarySources = formatSourceLabels(bundle.rankedResults.map((result) => result.rank));
+  const perDocumentLines = analysis.perDocumentSummary.map((entry) => {
+    const sourceLabels = formatSourceLabels(getRanksForDoc(bundle, entry.docId));
+    return `- ${entry.fileName}: The retrieved evidence is highly similar to the matching evidence from the other selected documents.${sourceLabels ? ` ${sourceLabels}` : ""}`;
+  });
+
+  return [
+    "Summary:",
+    `No evidence-backed material differences were found across the selected documents based on the retrieved evidence.${summarySources ? ` ${summarySources}` : ""}`,
+    "Per document:",
+    ...perDocumentLines,
+    "Agreements:",
+    `- The retrieved passages align on the queried topic across the selected documents.${summarySources ? ` ${summarySources}` : ""}`,
+    "Differences:",
+    "- No evidence-backed material differences were found in the retrieved passages.",
+    "Gaps or uncertainty:",
+    "- This conclusion is limited to the retrieved passages and may miss uncited sections elsewhere in the documents.",
+  ].join("\n");
+};
 
 export const prepareQASourceBundle = ({ results }) => {
   const rankedResults = results.map((result, index) => ({
@@ -263,21 +410,33 @@ export const writeComparisonAnswer = async ({
   bundle,
   analysis,
 }) => {
-  const diagnostics = [
-    analysis.sharedTerms.length > 0
-      ? `Shared focus terms: ${analysis.sharedTerms.join(", ")}`
-      : "Shared focus terms: none detected confidently",
-    `Evidence balance: ${analysis.evidenceBalance}`,
-    analysis.missingDocuments.length > 0
-      ? `Documents without strong evidence: ${analysis.missingDocuments
-          .map((document) => document.fileName)
-          .join(", ")}`
-      : "Documents without strong evidence: none",
-  ].join("\n");
+  const nearDuplicateGuardEnabled = isNearDuplicateGuardEnabled();
+
+  if (
+    nearDuplicateGuardEnabled &&
+    analysis.shouldShortCircuitNoMaterialDifference
+  ) {
+    return {
+      text: buildNoMaterialDifferenceAnswer({
+        bundle,
+        analysis,
+      }),
+      citations: bundle.citations,
+    };
+  }
+
+  const diagnostics = buildComparisonDiagnostics({
+    analysis,
+    nearDuplicateGuardEnabled,
+  });
 
   const selectedPrompt = await formatSelectedPrompt({
-    v1Template: comparisonPromptV1,
-    v2Template: comparisonPromptV2,
+    v1Template: nearDuplicateGuardEnabled
+      ? guardedComparisonPromptV1
+      : comparisonPromptV1,
+    v2Template: nearDuplicateGuardEnabled
+      ? guardedComparisonPromptV2
+      : comparisonPromptV2,
     values: {
       questionBlock: buildQuestionBlock({
         query,

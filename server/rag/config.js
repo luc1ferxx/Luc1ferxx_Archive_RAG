@@ -124,3 +124,6 @@ export const getKeywordWeight = () =>
 
 export const getMinQueryTermCoverage = () =>
   Math.min(1, toPositiveNumber(process.env.RAG_MIN_QUERY_TERM_COVERAGE, 0.51));
+
+export const isNearDuplicateGuardEnabled = () =>
+  toBoolean(process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED, true);

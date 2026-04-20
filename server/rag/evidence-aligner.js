@@ -1,4 +1,28 @@
-import { buildTermSet, extractTerms } from "./text-utils.js";
+import { buildTermSet, extractTerms, normalizeWhitespace } from "./text-utils.js";
+
+const SENTENCE_BOUNDARY = /(?<=[.!?\u3002\uff01\uff1f])\s+|\n+/;
+const NUMBER_TOKEN_PATTERN = /\$?\d[\d,./-]*%?/g;
+
+const buildCanonicalSentenceSet = (text = "") =>
+  new Set(
+    normalizeWhitespace(text)
+      .split(SENTENCE_BOUNDARY)
+      .map((sentence) =>
+        sentence
+          .toLowerCase()
+          .replace(NUMBER_TOKEN_PATTERN, "<num>")
+          .replace(/\s+/g, " ")
+          .trim()
+      )
+      .filter(Boolean)
+  );
+
+const buildNumericTokenSet = (text = "") =>
+  new Set(
+    (normalizeWhitespace(text).match(NUMBER_TOKEN_PATTERN) ?? []).map((token) =>
+      token.toLowerCase()
+    )
+  );
 
 export const alignComparisonEvidence = ({
   query,
@@ -17,7 +41,10 @@ export const alignComparisonEvidence = ({
       fileName: document.fileName,
       document,
       results,
+      evidenceText,
       termSet,
+      canonicalSentenceSet: buildCanonicalSentenceSet(evidenceText),
+      numericTokenSet: buildNumericTokenSet(evidenceText),
       focusTerms: extractTerms(evidenceText, { limit: 5 }).map((term) => term.value),
       topScore: results[0]?.score ?? 0,
     };

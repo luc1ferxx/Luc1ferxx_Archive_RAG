@@ -1,0 +1,173 @@
+{
+  "documents": [
+    {
+      "key": "handbook_alpha",
+      "fileName": "handbook-alpha.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work remotely 2 days per week with manager approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "handbook_beta",
+      "fileName": "handbook-beta.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work remotely 2 days per week with manager approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "handbook_gamma",
+      "fileName": "handbook-gamma.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work remotely 3 days per week with manager approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 14 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "handbook_epsilon",
+      "fileName": "handbook-epsilon.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work remotely 2 days per week with manager approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "travel_manual",
+      "fileName": "travel-manual.pdf",
+      "pages": [
+        "Travel Reimbursement Policy\nMeals are capped at 40 dollars per day.\nHotel reimbursement requires pre-approval.",
+        "Conference Travel\nFlights above 500 dollars require director approval."
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "qa_remote_alpha",
+      "type": "qa",
+      "docKeys": ["handbook_alpha"],
+      "question": "What is the remote work policy?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["2", "manager approval"]
+    },
+    {
+      "id": "qa_badge_gamma",
+      "type": "qa",
+      "docKeys": ["handbook_gamma"],
+      "question": "What is the badge renewal window?",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_gamma",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["14", "months"]
+    },
+    {
+      "id": "compare_remote_no_material_difference_2way",
+      "type": "compare",
+      "docKeys": ["handbook_alpha", "handbook_beta"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_beta",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["No evidence-backed material differences were found"]
+    },
+    {
+      "id": "compare_remote_no_material_difference_3way",
+      "type": "compare",
+      "docKeys": ["handbook_alpha", "handbook_beta", "handbook_epsilon"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_beta",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_epsilon",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["No evidence-backed material differences were found"]
+    },
+    {
+      "id": "compare_remote_numeric_conflict",
+      "type": "compare",
+      "docKeys": ["handbook_alpha", "handbook_gamma"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_gamma",
+          "pages": [1]
+        }
+      ]
+    },
+    {
+      "id": "compare_remote_mixed_duplicate_conflict",
+      "type": "compare",
+      "docKeys": ["handbook_alpha", "handbook_beta", "handbook_gamma"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_beta",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_gamma",
+          "pages": [1]
+        }
+      ]
+    },
+    {
+      "id": "qa_satellite_stipend_abstain",
+      "type": "qa",
+      "docKeys": ["handbook_alpha"],
+      "question": "What is the satellite relocation stipend?",
+      "shouldAbstain": true,
+      "expectedEvidence": []
+    },
+    {
+      "id": "compare_remote_single_doc_abstain",
+      "type": "compare",
+      "docKeys": ["handbook_alpha", "travel_manual"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": true,
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        }
+      ]
+    }
+  ]
+}

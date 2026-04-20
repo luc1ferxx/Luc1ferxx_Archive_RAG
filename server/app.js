@@ -125,6 +125,12 @@ const buildChatResponse = async ({ ragService, webChatService, question, docIds,
         : question,
     ragMemoryApplied:
       ragResp.status === "fulfilled" ? Boolean(ragResp.value.memoryApplied) : false,
+    ragAbstained:
+      ragResp.status === "fulfilled" ? Boolean(ragResp.value.abstained) : null,
+    ragAbstainReason:
+      ragResp.status === "fulfilled"
+        ? ragResp.value.abstainReason ?? null
+        : null,
     mcpAnswer:
       mcpResp.status === "fulfilled"
         ? mcpResp.value.text

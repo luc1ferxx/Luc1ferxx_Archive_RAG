@@ -164,3 +164,61 @@ test("upload flow stores chunks, completes ingestion, and deletes documents", as
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("chat endpoint exposes explicit rag abstain fields", async () => {
+  const documents = new Map([
+    [
+      "doc-1",
+      {
+        docId: "doc-1",
+        fileName: "notes.pdf",
+      },
+    ],
+  ]);
+  const app = await createApp({
+    ragService: {
+      chat: async () => ({
+        text: "I couldn't find enough grounded evidence that specifically addresses NULPAR-DZ in the uploaded documents.",
+        citations: [],
+        abstained: true,
+        abstainReason:
+          "I couldn't find enough grounded evidence that specifically addresses NULPAR-DZ in the uploaded documents.",
+        resolvedQuery: "What is the NULPAR-DZ allocation amount?",
+        memoryApplied: false,
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: (docId) => documents.get(docId) ?? null,
+      ingestDocument: async () => null,
+      listDocuments: () => [...documents.values()],
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        docId: "doc-1",
+        question: "What is the NULPAR-DZ allocation amount?",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.ragAbstained, true);
+    assert.match(body.ragAbstainReason, /NULPAR-DZ/);
+    assert.equal(body.ragResolvedQuestion, "What is the NULPAR-DZ allocation amount?");
+  } finally {
+    await server.close();
+  }
+});

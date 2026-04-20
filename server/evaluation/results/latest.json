@@ -1,13 +1,13 @@
 {
   "summary": {
-    "runId": "2026-04-18T01-33-03-319Z",
-    "createdAt": "2026-04-18T01:34:03.867Z",
+    "runId": "2026-04-20T20-18-37-746Z",
+    "createdAt": "2026-04-20T20:20:10.152Z",
     "corpus": {
-      "path": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\synthetic-corpus-hybrid.json",
-      "documents": 3,
+      "path": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\synthetic-corpus-near-duplicate.json",
+      "documents": 5,
       "cases": 8,
-      "qaCases": 3,
-      "compareCases": 3,
+      "qaCases": 2,
+      "compareCases": 4,
       "abstainCases": 2
     },
     "models": {
@@ -22,413 +22,214 @@
       "compareTopKPerDoc": 3,
       "maxComparisonSources": 8,
       "minRelevanceScore": 0.32,
+      "nearDuplicateGuardEnabled": true,
       "uploadChunkSizeBytes": 180
     },
     "metrics": {
-      "overallPassRate": 0.75,
+      "overallPassRate": 0.875,
       "qaPageHitRate": 1,
       "compareDocCoverageRate": 1,
       "comparePageHitRate": 1,
-      "abstainAccuracy": 0,
-      "answerContentHitRate": 1,
+      "abstainAccuracy": 1,
+      "answerContentHitRate": 0.8333,
       "uploadResumeSuccessRate": 1,
-      "averageResponseTimeMs": 7421.13,
-      "averageCitationCount": 4.63,
+      "averageResponseTimeMs": 11059,
+      "averageCitationCount": 1.63,
       "totalSkippedBytesOnResume": 2700
     }
   },
   "documents": [
     {
-      "docKey": "catalog_alpha",
-      "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-      "fileName": "catalog-alpha.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-alpha.pdf",
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-alpha.pdf",
-      "pageCount": 4,
-      "chunkCount": 4
+      "docKey": "handbook_alpha",
+      "docId": "1305a52f-9867-4c0e-93d5-429da000ae19",
+      "fileName": "handbook-alpha.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\handbook-alpha.pdf",
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\handbook-alpha.pdf",
+      "pageCount": 2,
+      "chunkCount": 2
     },
     {
-      "docKey": "catalog_beta",
-      "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-      "fileName": "catalog-beta.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-beta.pdf",
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-beta.pdf",
-      "pageCount": 4,
-      "chunkCount": 4
+      "docKey": "handbook_beta",
+      "docId": "b441cd58-8fc7-4028-8ac0-a70a091a12dd",
+      "fileName": "handbook-beta.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\handbook-beta.pdf",
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\handbook-beta.pdf",
+      "pageCount": 2,
+      "chunkCount": 2
     },
     {
-      "docKey": "catalog_gamma",
-      "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-      "fileName": "catalog-gamma.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-gamma.pdf",
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-gamma.pdf",
-      "pageCount": 4,
-      "chunkCount": 4
+      "docKey": "handbook_gamma",
+      "docId": "af52604d-b8bb-42c0-9054-2e20ac1842fa",
+      "fileName": "handbook-gamma.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\handbook-gamma.pdf",
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\handbook-gamma.pdf",
+      "pageCount": 2,
+      "chunkCount": 2
+    },
+    {
+      "docKey": "handbook_epsilon",
+      "docId": "d6d2c0e4-62f9-4bc5-bec7-75d44ee6f6b3",
+      "fileName": "handbook-epsilon.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\handbook-epsilon.pdf",
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\handbook-epsilon.pdf",
+      "pageCount": 2,
+      "chunkCount": 2
+    },
+    {
+      "docKey": "travel_manual",
+      "docId": "39c45390-e7d8-469a-be0c-75be51c05403",
+      "fileName": "travel-manual.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\travel-manual.pdf",
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\travel-manual.pdf",
+      "pageCount": 2,
+      "chunkCount": 2
     }
   ],
   "uploads": [
     {
-      "fileName": "catalog-alpha.pdf",
-      "fileId": "synthetic-0-0abe2684-24ce-4b2c-b295-ed8773f073ad",
-      "totalBytes": 1628,
-      "totalChunks": 10,
+      "fileName": "handbook-alpha.pdf",
+      "fileId": "synthetic-0-0fbb1d54-34ab-4b56-8617-6d17f84fae0e",
+      "totalBytes": 1108,
+      "totalChunks": 7,
       "chunkSizeBytes": 180,
       "pausedUploadedChunks": [
         0,
         1,
-        2,
-        3,
-        4
+        2
       ],
-      "skippedChunksOnResume": 5,
-      "skippedBytesOnResume": 900,
-      "resumedBytesUploaded": 728,
+      "skippedChunksOnResume": 3,
+      "skippedBytesOnResume": 540,
+      "resumedBytesUploaded": 568,
       "mergedMatchesOriginal": true,
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-alpha.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-alpha.pdf"
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\handbook-alpha.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\handbook-alpha.pdf"
     },
     {
-      "fileName": "catalog-beta.pdf",
-      "fileId": "synthetic-1-dae9367e-23b4-4a81-91fd-6a89878d9f44",
-      "totalBytes": 1628,
-      "totalChunks": 10,
+      "fileName": "handbook-beta.pdf",
+      "fileId": "synthetic-1-978501d2-8741-475e-9b9a-653f66320fe5",
+      "totalBytes": 1108,
+      "totalChunks": 7,
       "chunkSizeBytes": 180,
       "pausedUploadedChunks": [
         0,
         1,
-        2,
-        3,
-        4
+        2
       ],
-      "skippedChunksOnResume": 5,
-      "skippedBytesOnResume": 900,
-      "resumedBytesUploaded": 728,
+      "skippedChunksOnResume": 3,
+      "skippedBytesOnResume": 540,
+      "resumedBytesUploaded": 568,
       "mergedMatchesOriginal": true,
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-beta.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-beta.pdf"
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\handbook-beta.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\handbook-beta.pdf"
     },
     {
-      "fileName": "catalog-gamma.pdf",
-      "fileId": "synthetic-2-aa16d178-ca6d-4685-b8e9-a64edc1a02f8",
-      "totalBytes": 1628,
-      "totalChunks": 10,
+      "fileName": "handbook-gamma.pdf",
+      "fileId": "synthetic-2-1e4dc97a-1b90-400d-a8c9-368b5ab0f18d",
+      "totalBytes": 1108,
+      "totalChunks": 7,
       "chunkSizeBytes": 180,
       "pausedUploadedChunks": [
         0,
         1,
-        2,
-        3,
-        4
+        2
       ],
-      "skippedChunksOnResume": 5,
-      "skippedBytesOnResume": 900,
-      "resumedBytesUploaded": 728,
+      "skippedChunksOnResume": 3,
+      "skippedBytesOnResume": 540,
+      "resumedBytesUploaded": 568,
       "mergedMatchesOriginal": true,
-      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\merged\\catalog-gamma.pdf",
-      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-18T01-33-03-319Z\\source\\catalog-gamma.pdf"
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\handbook-gamma.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\handbook-gamma.pdf"
+    },
+    {
+      "fileName": "handbook-epsilon.pdf",
+      "fileId": "synthetic-3-6adf4786-b343-405c-bf37-a9c114a2f1e7",
+      "totalBytes": 1108,
+      "totalChunks": 7,
+      "chunkSizeBytes": 180,
+      "pausedUploadedChunks": [
+        0,
+        1,
+        2
+      ],
+      "skippedChunksOnResume": 3,
+      "skippedBytesOnResume": 540,
+      "resumedBytesUploaded": 568,
+      "mergedMatchesOriginal": true,
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\handbook-epsilon.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\handbook-epsilon.pdf"
+    },
+    {
+      "fileName": "travel-manual.pdf",
+      "fileId": "synthetic-4-25e14b10-fdde-4800-919d-18f573ea2834",
+      "totalBytes": 1052,
+      "totalChunks": 6,
+      "chunkSizeBytes": 180,
+      "pausedUploadedChunks": [
+        0,
+        1,
+        2
+      ],
+      "skippedChunksOnResume": 3,
+      "skippedBytesOnResume": 540,
+      "resumedBytesUploaded": 512,
+      "mergedMatchesOriginal": true,
+      "mergedFilePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\merged\\travel-manual.pdf",
+      "sourcePath": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\generated\\2026-04-20T20-18-37-746Z\\source\\travel-manual.pdf"
     }
   ],
   "cases": [
     {
-      "id": "qa_nulpar_bq_beta",
+      "id": "qa_remote_alpha",
       "type": "qa",
-      "question": "What is the NULPAR-BQ allocation amount?",
+      "question": "What is the remote work policy?",
       "docKeys": [
-        "catalog_beta"
+        "handbook_alpha"
       ],
       "shouldAbstain": false,
       "abstained": false,
+      "abstainReason": null,
       "docCoverageHit": true,
       "pageCoverageHit": true,
-      "answerExpectationHit": true,
-      "passed": true,
-      "responseTimeMs": 2556,
-      "citationCount": 3,
-      "answer": "270 dollars per cycle (Source 1).",
+      "answerExpectationHit": false,
+      "passed": false,
+      "responseTimeMs": 3392,
+      "citationCount": 1,
+      "answer": "- Employees may work remotely two days per week with manager approval [Source 1].  \n- Security checklists must be completed before each remote day [Source 1].",
       "citations": [
         {
           "rank": 1,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 4,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 2,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 3,
-          "score": 0.7111,
-          "sectionHeading": null
-        },
-        {
-          "rank": 3,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
+          "docId": "1305a52f-9867-4c0e-93d5-429da000ae19",
+          "docKey": "handbook_alpha",
+          "fileName": "handbook-alpha.pdf",
           "pageNumber": 1,
-          "score": 0.6687,
-          "sectionHeading": null
+          "score": 1,
+          "sectionHeading": "Remote Work Policy"
         }
       ]
     },
     {
-      "id": "qa_nulpar_cr_gamma",
-      "type": "qa",
-      "question": "What is the NULPAR-CR allocation amount?",
-      "docKeys": [
-        "catalog_gamma"
-      ],
-      "shouldAbstain": false,
-      "abstained": false,
-      "docCoverageHit": true,
-      "pageCoverageHit": true,
-      "answerExpectationHit": true,
-      "passed": true,
-      "responseTimeMs": 2681,
-      "citationCount": 3,
-      "answer": "The NULPAR-CR allocation amount is 360 dollars per cycle (Source 1).",
-      "citations": [
-        {
-          "rank": 1,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 3,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 2,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 4,
-          "score": 0.7492,
-          "sectionHeading": null
-        },
-        {
-          "rank": 3,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 2,
-          "score": 0.7261,
-          "sectionHeading": null
-        }
-      ]
-    },
-    {
-      "id": "compare_nulpar_bq",
-      "type": "compare",
-      "question": "Compare the NULPAR-BQ allocation amount in these documents.",
-      "docKeys": [
-        "catalog_alpha",
-        "catalog_beta",
-        "catalog_gamma"
-      ],
-      "shouldAbstain": false,
-      "abstained": false,
-      "docCoverageHit": true,
-      "pageCoverageHit": true,
-      "answerExpectationHit": true,
-      "passed": true,
-      "responseTimeMs": 11777,
-      "citationCount": 8,
-      "answer": "Summary:\nThe NULPAR-BQ allocation amount differs across documents: 260, 270, and 280 dollars per cycle.\n\nPer document:\n- catalog-alpha.pdf: 260 dollars per cycle (Source 1).\n- catalog-beta.pdf: 270 dollars per cycle (Source 2).\n- catalog-gamma.pdf: 280 dollars per cycle (Source 3).\n\nAgreements:\n- All specify NULPAR-BQ allocation in dollars per cycle (Sources 1–3).\n\nDifferences:\n- Amounts vary by document: 260 (alpha) vs 270 (beta) vs 280 (gamma) dollars per cycle (Sources 1–3).\n\nGaps or uncertainty:\n- None of the documents lack direct evidence for NULPAR-BQ. The documents do not provide context (e.g., dates/effective periods) to explain the differing amounts.",
-      "citations": [
-        {
-          "rank": 1,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 2,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 2,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 4,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 3,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 2,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 4,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 1,
-          "score": 0.7064,
-          "sectionHeading": null
-        },
-        {
-          "rank": 5,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 3,
-          "score": 0.721,
-          "sectionHeading": null
-        },
-        {
-          "rank": 6,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 4,
-          "score": 0.707,
-          "sectionHeading": null
-        },
-        {
-          "rank": 7,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 3,
-          "score": 0.6729,
-          "sectionHeading": null
-        },
-        {
-          "rank": 8,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 1,
-          "score": 0.6602,
-          "sectionHeading": null
-        }
-      ]
-    },
-    {
-      "id": "compare_nulpar_cr",
-      "type": "compare",
-      "question": "Compare the NULPAR-CR allocation amount in these documents.",
-      "docKeys": [
-        "catalog_alpha",
-        "catalog_beta",
-        "catalog_gamma"
-      ],
-      "shouldAbstain": false,
-      "abstained": false,
-      "docCoverageHit": true,
-      "pageCoverageHit": true,
-      "answerExpectationHit": true,
-      "passed": true,
-      "responseTimeMs": 8955,
-      "citationCount": 8,
-      "answer": "Summary:\nEach document states a different NULPAR-CR allocation amount: 340 (catalog-alpha), 350 (catalog-beta), and 360 dollars per cycle (catalog-gamma) [Source 1; Source 2; Source 3].\n\nPer document:\n- catalog-alpha.pdf: 340 dollars per cycle (Source 1).\n- catalog-beta.pdf: 350 dollars per cycle (Source 2).\n- catalog-gamma.pdf: 360 dollars per cycle (Source 3).\n\nAgreements:\n- None. No two documents report the same amount.\n\nDifferences:\n- catalog-beta is $10 higher than catalog-alpha (350 vs 340) [Source 2 vs Source 1].\n- catalog-gamma is $10 higher than catalog-beta (360 vs 350) and $20 higher than catalog-alpha (360 vs 340) [Source 3 vs Source 2; Source 3 vs Source 1].\n\nGaps or uncertainty:\n- None. All documents provide explicit NULPAR-CR allocation amounts. Other program entries (e.g., NULPAR-AX, NULPAR-BQ) are not used as evidence for NULPAR-CR.",
-      "citations": [
-        {
-          "rank": 1,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 3,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 2,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 1,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 3,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 3,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 4,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 1,
-          "score": 0.7579,
-          "sectionHeading": null
-        },
-        {
-          "rank": 5,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 3,
-          "score": 0.7829,
-          "sectionHeading": null
-        },
-        {
-          "rank": 6,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 4,
-          "score": 0.763,
-          "sectionHeading": null
-        },
-        {
-          "rank": 7,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 2,
-          "score": 0.7389,
-          "sectionHeading": null
-        },
-        {
-          "rank": 8,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 4,
-          "score": 0.7425,
-          "sectionHeading": null
-        }
-      ]
-    },
-    {
-      "id": "qa_badge_window_beta",
+      "id": "qa_badge_gamma",
       "type": "qa",
       "question": "What is the badge renewal window?",
       "docKeys": [
-        "catalog_beta"
+        "handbook_gamma"
       ],
       "shouldAbstain": false,
       "abstained": false,
+      "abstainReason": null,
       "docCoverageHit": true,
       "pageCoverageHit": true,
       "answerExpectationHit": true,
       "passed": true,
-      "responseTimeMs": 3396,
+      "responseTimeMs": 5812,
       "citationCount": 1,
-      "answer": "Renew access badges every 14 months after the last successful audit (Source 1).",
+      "answer": "The badge renewal window is every 14 months after the last successful audit [Source 1].",
       "citations": [
         {
           "rank": 1,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
+          "docId": "af52604d-b8bb-42c0-9054-2e20ac1842fa",
+          "docKey": "handbook_gamma",
+          "fileName": "handbook-gamma.pdf",
           "pageNumber": 2,
           "score": 1,
           "sectionHeading": "Badge Renewal Window"
@@ -436,189 +237,227 @@
       ]
     },
     {
-      "id": "compare_badge_window",
+      "id": "compare_remote_no_material_difference_2way",
       "type": "compare",
-      "question": "Compare the badge renewal window in these documents.",
+      "question": "Compare the remote work policy in these documents.",
       "docKeys": [
-        "catalog_alpha",
-        "catalog_beta",
-        "catalog_gamma"
+        "handbook_alpha",
+        "handbook_beta"
       ],
       "shouldAbstain": false,
       "abstained": false,
+      "abstainReason": null,
       "docCoverageHit": true,
       "pageCoverageHit": true,
       "answerExpectationHit": true,
       "passed": true,
-      "responseTimeMs": 11579,
-      "citationCount": 3,
-      "answer": "Summary:\nAll three documents define a badge renewal window tied to the last successful audit, but they differ in the renewal interval: 12 months (alpha), 14 months (beta), and 16 months (gamma) after the audit (Source 1; Source 2; Source 3).\n\nPer document:\n- catalog-alpha.pdf: Renew access badges every 12 months after the last successful audit (Source 1).\n- catalog-beta.pdf: Renew access badges every 14 months after the last successful audit (Source 2).\n- catalog-gamma.pdf: Renew access badges every 16 months after the last successful audit (Source 3).\n\nAgreements:\n- All require renewal “after the last successful audit” and apply to access badges (Source 1; Source 2; Source 3).\n\nDifferences:\n- Renewal interval: 12 months vs 14 months vs 16 months (Source 1; Source 2; Source 3).\n\nGaps or uncertainty:\n- None of the documents specify window boundaries (e.g., earliest/latest renewal dates), grace periods, early renewal allowances, handling of partial months, or what qualifies as a “successful audit” (Source 1; Source 2; Source 3).",
+      "responseTimeMs": 335,
+      "citationCount": 2,
+      "answer": "Summary:\nNo evidence-backed material differences were found across the selected documents based on the retrieved evidence. [Source 1] [Source 2]\nPer document:\n- handbook-alpha.pdf: The retrieved evidence is highly similar to the matching evidence from the other selected documents. [Source 1]\n- handbook-beta.pdf: The retrieved evidence is highly similar to the matching evidence from the other selected documents. [Source 2]\nAgreements:\n- The retrieved passages align on the queried topic across the selected documents. [Source 1] [Source 2]\nDifferences:\n- No evidence-backed material differences were found in the retrieved passages.\nGaps or uncertainty:\n- This conclusion is limited to the retrieved passages and may miss uncited sections elsewhere in the documents.",
       "citations": [
         {
           "rank": 1,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 4,
+          "docId": "1305a52f-9867-4c0e-93d5-429da000ae19",
+          "docKey": "handbook_alpha",
+          "fileName": "handbook-alpha.pdf",
+          "pageNumber": 1,
           "score": 1,
-          "sectionHeading": "Badge Renewal Window"
+          "sectionHeading": "Remote Work Policy"
         },
         {
           "rank": 2,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 2,
-          "score": 1,
-          "sectionHeading": "Badge Renewal Window"
-        },
-        {
-          "rank": 3,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
+          "docId": "b441cd58-8fc7-4028-8ac0-a70a091a12dd",
+          "docKey": "handbook_beta",
+          "fileName": "handbook-beta.pdf",
           "pageNumber": 1,
           "score": 1,
-          "sectionHeading": "Badge Renewal Window"
+          "sectionHeading": "Remote Work Policy"
         }
       ]
     },
     {
-      "id": "qa_nulpar_dz_abstain",
-      "type": "qa",
-      "question": "What is the NULPAR-DZ allocation amount?",
-      "docKeys": [
-        "catalog_alpha"
-      ],
-      "shouldAbstain": true,
-      "abstained": false,
-      "docCoverageHit": false,
-      "pageCoverageHit": false,
-      "answerExpectationHit": true,
-      "passed": false,
-      "responseTimeMs": 5007,
-      "citationCount": 3,
-      "answer": "Insufficient evidence: the retrieved sources mention only NULPAR-AX, NULPAR-BQ, and NULPAR-CR; none include NULPAR-DZ, so I cannot determine its allocation amount.",
-      "citations": [
-        {
-          "rank": 1,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 1,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 2,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 2,
-          "score": 0.9794,
-          "sectionHeading": null
-        },
-        {
-          "rank": 3,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 3,
-          "score": 0.9699,
-          "sectionHeading": null
-        }
-      ]
-    },
-    {
-      "id": "compare_nulpar_dz_abstain",
+      "id": "compare_remote_no_material_difference_3way",
       "type": "compare",
-      "question": "Compare the NULPAR-DZ allocation amount in these documents.",
+      "question": "Compare the remote work policy in these documents.",
       "docKeys": [
-        "catalog_alpha",
-        "catalog_beta",
-        "catalog_gamma"
+        "handbook_alpha",
+        "handbook_beta",
+        "handbook_epsilon"
       ],
-      "shouldAbstain": true,
+      "shouldAbstain": false,
       "abstained": false,
-      "docCoverageHit": false,
-      "pageCoverageHit": false,
+      "abstainReason": null,
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
       "answerExpectationHit": true,
-      "passed": false,
-      "responseTimeMs": 13418,
-      "citationCount": 8,
-      "answer": "Summary:\nNo document provides an allocation amount for NULPAR-DZ. Each document lists allocations for other NULPAR programs (AX, BQ, and/or CR), but NULPAR-DZ is not mentioned.\n\nPer document:\n- catalog-alpha.pdf: No evidence of NULPAR-DZ. Only NULPAR-AX (180 dollars), NULPAR-BQ (260 dollars), and NULPAR-CR (340 dollars) are listed (Source 1; Source 4; Source 7).\n- catalog-beta.pdf: No evidence of NULPAR-DZ. Only NULPAR-AX (190 dollars), NULPAR-BQ (270 dollars), and NULPAR-CR (350 dollars) are listed (Source 2; Source 5; Source 8).\n- catalog-gamma.pdf: No evidence of NULPAR-DZ. Only NULPAR-AX (200 dollars) and NULPAR-BQ (280 dollars) are listed (Source 3; Source 6).\n\nAgreements:\n- All documents lack any mention of NULPAR-DZ allocation amount (in the provided evidence).\n\nDifferences:\n- None related to NULPAR-DZ; differences only exist for AX/BQ/CR amounts across documents (Sources 1–8), which are not evidence for DZ.\n\nGaps or uncertainty:\n- The allocation amount for NULPAR-DZ cannot be determined from the provided evidence. If NULPAR-DZ exists, it may be documented elsewhere not included in these excerpts.",
+      "passed": true,
+      "responseTimeMs": 134,
+      "citationCount": 3,
+      "answer": "Summary:\nNo evidence-backed material differences were found across the selected documents based on the retrieved evidence. [Source 1] [Source 2] [Source 3]\nPer document:\n- handbook-alpha.pdf: The retrieved evidence is highly similar to the matching evidence from the other selected documents. [Source 1]\n- handbook-beta.pdf: The retrieved evidence is highly similar to the matching evidence from the other selected documents. [Source 2]\n- handbook-epsilon.pdf: The retrieved evidence is highly similar to the matching evidence from the other selected documents. [Source 3]\nAgreements:\n- The retrieved passages align on the queried topic across the selected documents. [Source 1] [Source 2] [Source 3]\nDifferences:\n- No evidence-backed material differences were found in the retrieved passages.\nGaps or uncertainty:\n- This conclusion is limited to the retrieved passages and may miss uncited sections elsewhere in the documents.",
       "citations": [
         {
           "rank": 1,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
+          "docId": "1305a52f-9867-4c0e-93d5-429da000ae19",
+          "docKey": "handbook_alpha",
+          "fileName": "handbook-alpha.pdf",
           "pageNumber": 1,
           "score": 1,
-          "sectionHeading": null
+          "sectionHeading": "Remote Work Policy"
         },
         {
           "rank": 2,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 3,
+          "docId": "b441cd58-8fc7-4028-8ac0-a70a091a12dd",
+          "docKey": "handbook_beta",
+          "fileName": "handbook-beta.pdf",
+          "pageNumber": 1,
           "score": 1,
-          "sectionHeading": null
+          "sectionHeading": "Remote Work Policy"
         },
         {
           "rank": 3,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 4,
-          "score": 1,
-          "sectionHeading": null
-        },
-        {
-          "rank": 4,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 2,
-          "score": 0.9815,
-          "sectionHeading": null
-        },
-        {
-          "rank": 5,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
-          "pageNumber": 4,
-          "score": 0.9651,
-          "sectionHeading": null
-        },
-        {
-          "rank": 6,
-          "docId": "ab63a9df-d089-4589-9f24-65f00b0aee9c",
-          "docKey": "catalog_gamma",
-          "fileName": "catalog-gamma.pdf",
-          "pageNumber": 2,
-          "score": 0.9754,
-          "sectionHeading": null
-        },
-        {
-          "rank": 7,
-          "docId": "cfe85c49-e651-4197-8fb9-0e75f10d35c8",
-          "docKey": "catalog_alpha",
-          "fileName": "catalog-alpha.pdf",
-          "pageNumber": 3,
-          "score": 0.9551,
-          "sectionHeading": null
-        },
-        {
-          "rank": 8,
-          "docId": "b8f495b8-0c21-45fc-834d-1dd3e92a097b",
-          "docKey": "catalog_beta",
-          "fileName": "catalog-beta.pdf",
+          "docId": "d6d2c0e4-62f9-4bc5-bec7-75d44ee6f6b3",
+          "docKey": "handbook_epsilon",
+          "fileName": "handbook-epsilon.pdf",
           "pageNumber": 1,
-          "score": 0.9318,
-          "sectionHeading": null
+          "score": 1,
+          "sectionHeading": "Remote Work Policy"
+        }
+      ]
+    },
+    {
+      "id": "compare_remote_numeric_conflict",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "docKeys": [
+        "handbook_alpha",
+        "handbook_gamma"
+      ],
+      "shouldAbstain": false,
+      "abstained": false,
+      "abstainReason": null,
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
+      "answerExpectationHit": true,
+      "passed": true,
+      "responseTimeMs": 52481,
+      "citationCount": 2,
+      "answer": "Summary:\n- Both policies require manager approval for remote work and mandate completing security checklists before each remote day; they differ on the number of remote days allowed per week (2 vs 3) [Source 1][Source 2].\n\nPer document:\n- handbook-alpha.pdf: Remote work allowed 2 days per week with manager approval; security checklists required before each remote day [Source 1].\n- handbook-gamma.pdf: Remote work allowed 3 days per week with manager approval; security checklists required before each remote day [Source 2].\n\nAgreements:\n- Manager approval is required for remote work [Source 1][Source 2].\n- Security checklists must be completed before each remote day [Source 1][Source 2].\n\nDifferences:\n- Number of remote days allowed per week: 2 days (handbook-alpha.pdf) vs 3 days (handbook-gamma.pdf) [Source 1][Source 2].\n\nGaps or uncertainty:\n- None apparent for the elements shown; both specify limits, approval, and checklist requirements clearly [Source 1][Source 2].\n- Scope is limited to the provided excerpts; other potential conditions (e.g., eligibility, equipment, locations) are not shown and cannot be compared.",
+      "citations": [
+        {
+          "rank": 1,
+          "docId": "1305a52f-9867-4c0e-93d5-429da000ae19",
+          "docKey": "handbook_alpha",
+          "fileName": "handbook-alpha.pdf",
+          "pageNumber": 1,
+          "score": 1,
+          "sectionHeading": "Remote Work Policy"
+        },
+        {
+          "rank": 2,
+          "docId": "af52604d-b8bb-42c0-9054-2e20ac1842fa",
+          "docKey": "handbook_gamma",
+          "fileName": "handbook-gamma.pdf",
+          "pageNumber": 1,
+          "score": 1,
+          "sectionHeading": "Remote Work Policy"
+        }
+      ]
+    },
+    {
+      "id": "compare_remote_mixed_duplicate_conflict",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "docKeys": [
+        "handbook_alpha",
+        "handbook_beta",
+        "handbook_gamma"
+      ],
+      "shouldAbstain": false,
+      "abstained": false,
+      "abstainReason": null,
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
+      "answerExpectationHit": true,
+      "passed": true,
+      "responseTimeMs": 25874,
+      "citationCount": 3,
+      "answer": "Summary:\n- All three policies require manager approval and completion of security checklists before each remote day [Source 1][Source 2][Source 3].\n- Allowed remote days differ: handbook-alpha and handbook-beta allow 2 days/week; handbook-gamma allows 3 days/week [Source 1][Source 2][Source 3].\n\nPer document:\n- handbook-alpha: Up to 2 remote days per week with manager approval; security checklists required before each remote day [Source 1].\n- handbook-beta: Up to 2 remote days per week with manager approval; security checklists required before each remote day [Source 2].\n- handbook-gamma: Up to 3 remote days per week with manager approval; security checklists required before each remote day [Source 3].\n\nAgreements:\n- Manager approval is required for remote work in all three documents [Source 1][Source 2][Source 3].\n- Security checklists must be completed before each remote day in all three documents [Source 1][Source 2][Source 3].\n\nDifferences:\n- Maximum remote days per week: handbook-alpha and handbook-beta allow 2 days; handbook-gamma allows 3 days [Source 1][Source 2][Source 3].\n- No other differences are evident in the provided excerpts.\n\nGaps or uncertainty:\n- The excerpts do not provide details on eligibility criteria, equipment or stipend support, working hours expectations, location restrictions, or exception processes.",
+      "citations": [
+        {
+          "rank": 1,
+          "docId": "1305a52f-9867-4c0e-93d5-429da000ae19",
+          "docKey": "handbook_alpha",
+          "fileName": "handbook-alpha.pdf",
+          "pageNumber": 1,
+          "score": 1,
+          "sectionHeading": "Remote Work Policy"
+        },
+        {
+          "rank": 2,
+          "docId": "b441cd58-8fc7-4028-8ac0-a70a091a12dd",
+          "docKey": "handbook_beta",
+          "fileName": "handbook-beta.pdf",
+          "pageNumber": 1,
+          "score": 1,
+          "sectionHeading": "Remote Work Policy"
+        },
+        {
+          "rank": 3,
+          "docId": "af52604d-b8bb-42c0-9054-2e20ac1842fa",
+          "docKey": "handbook_gamma",
+          "fileName": "handbook-gamma.pdf",
+          "pageNumber": 1,
+          "score": 1,
+          "sectionHeading": "Remote Work Policy"
+        }
+      ]
+    },
+    {
+      "id": "qa_satellite_stipend_abstain",
+      "type": "qa",
+      "question": "What is the satellite relocation stipend?",
+      "docKeys": [
+        "handbook_alpha"
+      ],
+      "shouldAbstain": true,
+      "abstained": true,
+      "abstainReason": "I couldn't find enough grounded evidence in the uploaded documents to answer reliably.",
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
+      "answerExpectationHit": true,
+      "passed": true,
+      "responseTimeMs": 256,
+      "citationCount": 0,
+      "answer": "I couldn't find enough grounded evidence in the uploaded documents to answer reliably.",
+      "citations": []
+    },
+    {
+      "id": "compare_remote_single_doc_abstain",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "docKeys": [
+        "handbook_alpha",
+        "travel_manual"
+      ],
+      "shouldAbstain": true,
+      "abstained": true,
+      "abstainReason": "I only found strong evidence in 1 of the 2 selected documents, so the comparison would be unreliable.",
+      "docCoverageHit": true,
+      "pageCoverageHit": true,
+      "answerExpectationHit": true,
+      "passed": true,
+      "responseTimeMs": 188,
+      "citationCount": 1,
+      "answer": "I only found strong evidence in 1 of the 2 selected documents, so the comparison would be unreliable.",
+      "citations": [
+        {
+          "rank": 1,
+          "docId": "1305a52f-9867-4c0e-93d5-429da000ae19",
+          "docKey": "handbook_alpha",
+          "fileName": "handbook-alpha.pdf",
+          "pageNumber": 1,
+          "score": 1,
+          "sectionHeading": "Remote Work Policy"
         }
       ]
     }

@@ -174,8 +174,11 @@ const chat = async (docIds, query, options = {}) => {
   });
   const resolvedQuery = memoryResolution.resolvedQuery;
   const buildResponse = (response) => {
+    const abstained = Boolean(response.abstained);
     const result = {
       ...response,
+      abstained,
+      abstainReason: abstained ? response.abstainReason ?? response.text : null,
       resolvedQuery,
       memoryApplied: memoryResolution.memoryApplied,
     };
@@ -206,6 +209,7 @@ const chat = async (docIds, query, options = {}) => {
     const confidence = assessComparisonConfidence({
       docIds: normalizedDocIds,
       perDocumentResults,
+      queryText: resolvedQuery,
     });
     const alignment = alignComparisonEvidence({
       query: resolvedQuery,
@@ -223,6 +227,8 @@ const chat = async (docIds, query, options = {}) => {
       return buildResponse({
         text: confidence.reason,
         citations: bundle.citations,
+        abstained: true,
+        abstainReason: confidence.reason,
       });
     }
 
@@ -241,7 +247,10 @@ const chat = async (docIds, query, options = {}) => {
     queryText: resolvedQuery,
     docIds: normalizedDocIds,
   });
-  const confidence = assessQaConfidence(retrievalResults);
+  const confidence = assessQaConfidence({
+    results: retrievalResults,
+    queryText: resolvedQuery,
+  });
   const bundle = prepareQASourceBundle({
     results: confidence.usableResults,
   });
@@ -250,6 +259,8 @@ const chat = async (docIds, query, options = {}) => {
     return buildResponse({
       text: confidence.reason,
       citations: bundle.citations,
+      abstained: true,
+      abstainReason: confidence.reason,
     });
   }
 
