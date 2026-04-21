@@ -1,0 +1,219 @@
+{
+  "documents": [
+    {
+      "key": "handbook_alpha",
+      "fileName": "handbook-alpha.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work remotely 2 days per week with manager approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "handbook_beta",
+      "fileName": "handbook-beta.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work remotely 2 days per week with manager approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "handbook_gamma",
+      "fileName": "handbook-gamma.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work remotely 3 days per week with manager approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 14 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "handbook_eta",
+      "fileName": "handbook-eta.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work from home up to 2 days each week when a manager approves the arrangement.\nComplete the security checklist before every remote day.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "handbook_delta",
+      "fileName": "handbook-delta.pdf",
+      "pages": [
+        "Remote Work Policy\nOnly full-time engineering employees may work remotely 2 days per week with manager approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "handbook_zeta",
+      "fileName": "handbook-zeta.pdf",
+      "pages": [
+        "Remote Work Policy\nEmployees may work remotely 2 days per week with director approval.\nSecurity checklists must be completed before each remote day.",
+        "Badge Renewal Window\nRenew access badges every 12 months after the last successful audit."
+      ]
+    },
+    {
+      "key": "travel_manual",
+      "fileName": "travel-manual.pdf",
+      "pages": [
+        "Travel Reimbursement Policy\nMeals are capped at 40 dollars per day.\nHotel reimbursement requires pre-approval.",
+        "Conference Travel\nFlights above 500 dollars require director approval."
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "qa_remote_alpha_hard_control",
+      "type": "qa",
+      "docKeys": ["handbook_alpha"],
+      "question": "What is the remote work policy?",
+      "shouldAbstain": false,
+      "referenceAnswer": "Employees may work remotely 2 days per week with manager approval, and they must complete security checklists before each remote day.",
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["2", "manager approval", "security checklist"]
+    },
+    {
+      "id": "compare_remote_exact_duplicate_no_diff_hard",
+      "type": "compare",
+      "compareExpectation": "no_difference",
+      "docKeys": ["handbook_alpha", "handbook_beta"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "referenceAnswer": "There are no material differences between handbook_alpha and handbook_beta. Both allow remote work 2 days per week with manager approval and require security checklists before each remote day.",
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_beta",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": [
+        "No evidence-backed material differences were found",
+        "2 days per week",
+        "manager approval"
+      ]
+    },
+    {
+      "id": "compare_remote_paraphrase_no_diff_hard",
+      "type": "compare",
+      "compareExpectation": "no_difference",
+      "docKeys": ["handbook_alpha", "handbook_eta"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "referenceAnswer": "There are no material differences between handbook_alpha and handbook_eta. Both allow remote work 2 days per week with manager approval and require a security checklist before each remote day, even though handbook_eta paraphrases the wording.",
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_eta",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["2", "manager", "security checklist"]
+    },
+    {
+      "id": "compare_remote_numeric_conflict_hard",
+      "type": "compare",
+      "compareExpectation": "difference",
+      "docKeys": ["handbook_alpha", "handbook_gamma"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "referenceAnswer": "Both documents require manager approval and security checklists before each remote day, but handbook_alpha allows 2 remote days per week while handbook_gamma allows 3.",
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_gamma",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["2", "3", "manager approval"]
+    },
+    {
+      "id": "compare_remote_scope_conflict_hard",
+      "type": "compare",
+      "compareExpectation": "difference",
+      "docKeys": ["handbook_alpha", "handbook_delta"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "referenceAnswer": "Both documents allow remote work 2 days per week with manager approval and require security checklists, but handbook_delta adds an eligibility restriction limiting the policy to full-time engineering employees.",
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_delta",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["full-time", "engineering", "2"]
+    },
+    {
+      "id": "compare_remote_approval_conflict_hard",
+      "type": "compare",
+      "compareExpectation": "difference",
+      "docKeys": ["handbook_alpha", "handbook_zeta"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "referenceAnswer": "Both documents allow remote work 2 days per week and require security checklists, but handbook_alpha requires manager approval while handbook_zeta requires director approval.",
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_zeta",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["manager approval", "director approval"]
+    },
+    {
+      "id": "compare_remote_mixed_duplicate_conflict_hard",
+      "type": "compare",
+      "compareExpectation": "difference",
+      "docKeys": ["handbook_alpha", "handbook_beta", "handbook_gamma"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": false,
+      "referenceAnswer": "handbook_alpha and handbook_beta match each other: both allow remote work 2 days per week with manager approval and require security checklists before each remote day. handbook_gamma matches on approval and checklists but allows 3 remote days per week instead of 2.",
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_beta",
+          "pages": [1]
+        },
+        {
+          "docKey": "handbook_gamma",
+          "pages": [1]
+        }
+      ],
+      "expectedAnswerIncludes": ["2", "3", "manager approval"]
+    },
+    {
+      "id": "compare_remote_unrelated_abstain_hard",
+      "type": "compare",
+      "compareExpectation": "abstain",
+      "docKeys": ["handbook_alpha", "travel_manual"],
+      "question": "Compare the remote work policy in these documents.",
+      "shouldAbstain": true,
+      "expectedEvidence": [
+        {
+          "docKey": "handbook_alpha",
+          "pages": [1]
+        }
+      ]
+    }
+  ]
+}

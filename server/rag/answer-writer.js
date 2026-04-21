@@ -11,6 +11,7 @@ import {
   getResultKey,
 } from "./citations.js";
 import { completeText } from "./openai.js";
+import { normalizeWhitespace } from "./text-utils.js";
 
 const qaPromptV1 = PromptTemplate.fromTemplate(
   `You answer questions using only retrieved document evidence.
@@ -216,6 +217,10 @@ const formatSourceLabels = (ranks) =>
 const getPageNumber = (metadata = {}) =>
   metadata.pageNumber ?? metadata.loc?.pageNumber ?? metadata.page ?? null;
 
+const SENTENCE_BOUNDARY = /(?<=[.!?\u3002\uff01\uff1f])\s+|\n+/;
+const NUMBER_TOKEN_PATTERN = /\$?\d[\d,./-]*%?/g;
+const MAX_COMPARE_SELECTED_RESULTS_PER_DOC = 2;
+
 const buildRetrievedContextEntry = (result, rank) => ({
   rank,
   score: Number((result.score ?? 0).toFixed(4)),
@@ -227,10 +232,188 @@ const buildRetrievedContextEntry = (result, rank) => ({
   text: result.document.pageContent,
 });
 
-const getRanksForDoc = (bundle, docId) =>
-  bundle.rankedResults
-    .filter((result) => result.document.metadata?.docId === docId)
-    .map((result) => result.rank);
+const normalizeComparableSentence = (sentence = "") =>
+  normalizeWhitespace(sentence)
+    .toLowerCase()
+    .replace(NUMBER_TOKEN_PATTERN, "<num>")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const splitEvidenceSentences = (value = "") =>
+  normalizeWhitespace(value)
+    .split(SENTENCE_BOUNDARY)
+    .map((sentence) => normalizeWhitespace(sentence))
+    .filter((sentence) => sentence && /[.!?\u3002\uff01\uff1f]$/.test(sentence));
+
+const buildResultSignalSet = (result) => ({
+  canonicalSentenceSet: new Set(
+    splitEvidenceSentences(result.document.pageContent)
+      .map((sentence) => normalizeComparableSentence(sentence))
+      .filter(Boolean)
+  ),
+  numericTokenSet: new Set(
+    (normalizeWhitespace(result.document.pageContent).match(NUMBER_TOKEN_PATTERN) ?? []).map(
+      (token) => token.toLowerCase()
+    )
+  ),
+});
+
+const countSharedValues = (leftSet, rightSet) => {
+  let count = 0;
+
+  for (const value of leftSet) {
+    if (rightSet.has(value)) {
+      count += 1;
+    }
+  }
+
+  return count;
+};
+
+const buildUnionSetFromEntries = (entries, fieldName, excludedDocId) => {
+  const unionSet = new Set();
+
+  for (const entry of entries) {
+    if (entry.docId === excludedDocId) {
+      continue;
+    }
+
+    for (const value of entry[fieldName]) {
+      unionSet.add(value);
+    }
+  }
+
+  return unionSet;
+};
+
+const compareCandidatePriority = (left, right) =>
+  right.differentiationScore - left.differentiationScore ||
+  (right.result.score ?? 0) - (left.result.score ?? 0) ||
+  left.offset - right.offset ||
+  left.docId.localeCompare(right.docId);
+
+const buildComparisonExtraCandidates = (alignment) =>
+  alignment.perDocument.flatMap((entry) => {
+    const otherSentenceSet = buildUnionSetFromEntries(
+      alignment.perDocument,
+      "canonicalSentenceSet",
+      entry.docId
+    );
+    const otherNumericSet = buildUnionSetFromEntries(
+      alignment.perDocument,
+      "numericTokenSet",
+      entry.docId
+    );
+
+    return entry.results
+      .slice(1)
+      .map((result, index) => {
+        const signalSet = buildResultSignalSet(result);
+        const uniqueSentenceCount =
+          signalSet.canonicalSentenceSet.size -
+          countSharedValues(signalSet.canonicalSentenceSet, otherSentenceSet);
+        const uniqueNumericCount =
+          signalSet.numericTokenSet.size -
+          countSharedValues(signalSet.numericTokenSet, otherNumericSet);
+        const sharedSentenceCount = countSharedValues(
+          signalSet.canonicalSentenceSet,
+          otherSentenceSet
+        );
+
+        return {
+          docId: entry.docId,
+          result,
+          offset: index + 1,
+          differentiationScore:
+            uniqueNumericCount * 6 +
+            uniqueSentenceCount * 3 -
+            sharedSentenceCount * 0.5 +
+            (result.score ?? 0) * 0.01 -
+            index * 0.1,
+        };
+      })
+      .sort(compareCandidatePriority)
+      .slice(0, Math.max(0, MAX_COMPARE_SELECTED_RESULTS_PER_DOC - 1));
+  });
+
+const buildDocEvidenceEntries = (bundle) => {
+  const entriesByDocId = new Map();
+
+  for (const result of bundle.rankedResults) {
+    const docId = result.document.metadata?.docId ?? result.document.id;
+
+    if (!entriesByDocId.has(docId)) {
+      entriesByDocId.set(docId, {
+        docId,
+        fileName: result.document.metadata?.fileName ?? "Unknown document",
+        ranks: [],
+        sentences: [],
+      });
+    }
+
+    const entry = entriesByDocId.get(docId);
+    entry.ranks.push(result.rank);
+
+    for (const sentence of splitEvidenceSentences(result.document.pageContent)) {
+      const canonical = normalizeComparableSentence(sentence);
+
+      if (!canonical) {
+        continue;
+      }
+
+      entry.sentences.push({
+        text: sentence,
+        canonical,
+      });
+    }
+  }
+
+  return [...entriesByDocId.values()].map((entry) => ({
+    ...entry,
+    ranks: [...new Set(entry.ranks)].sort((left, right) => left - right),
+    sentences: entry.sentences.filter(
+      (sentence, index, allSentences) =>
+        allSentences.findIndex(
+          (candidate) => candidate.canonical === sentence.canonical
+        ) === index
+    ),
+  }));
+};
+
+const collectSharedFactLines = (docEntries, sourceLabels, limit = 3) => {
+  if (docEntries.length === 0) {
+    return [];
+  }
+
+  const canonicalCounts = new Map();
+
+  for (const entry of docEntries) {
+    for (const sentence of entry.sentences) {
+      canonicalCounts.set(
+        sentence.canonical,
+        (canonicalCounts.get(sentence.canonical) ?? 0) + 1
+      );
+    }
+  }
+
+  return docEntries[0].sentences
+    .filter((sentence) => canonicalCounts.get(sentence.canonical) === docEntries.length)
+    .slice(0, limit)
+    .map(
+      (sentence) => `- ${sentence.text}${sourceLabels ? ` ${sourceLabels}` : ""}`
+    );
+};
+
+const buildPerDocumentFactLines = (docEntries) =>
+  docEntries.map((entry) => {
+    const sourceLabels = formatSourceLabels(entry.ranks);
+    const sentenceSummary = entry.sentences
+      .slice(0, 2)
+      .map((sentence) => sentence.text.replace(/[.!?\u3002\uff01\uff1f]+$/, ""))
+      .join("; ");
+
+    return `- ${entry.fileName}: ${sentenceSummary || "The retrieved evidence aligns with the other selected documents."}${sourceLabels ? ` ${sourceLabels}` : ""}`;
+  });
 
 const buildComparisonDiagnostics = ({ analysis, nearDuplicateGuardEnabled }) => {
   const diagnostics = [
@@ -283,23 +466,35 @@ const buildComparisonDiagnostics = ({ analysis, nearDuplicateGuardEnabled }) => 
 
 const buildNoMaterialDifferenceAnswer = ({ bundle, analysis }) => {
   const summarySources = formatSourceLabels(bundle.rankedResults.map((result) => result.rank));
-  const perDocumentLines = analysis.perDocumentSummary.map((entry) => {
-    const sourceLabels = formatSourceLabels(getRanksForDoc(bundle, entry.docId));
-    return `- ${entry.fileName}: The retrieved evidence is highly similar to the matching evidence from the other selected documents.${sourceLabels ? ` ${sourceLabels}` : ""}`;
-  });
-
-  return [
+  const docEvidenceEntries = buildDocEvidenceEntries(bundle);
+  const agreementLines = collectSharedFactLines(docEvidenceEntries, summarySources);
+  const perDocumentLines = buildPerDocumentFactLines(docEvidenceEntries);
+  const lines = [
     "Summary:",
-    `No evidence-backed material differences were found across the selected documents based on the retrieved evidence.${summarySources ? ` ${summarySources}` : ""}`,
+    `- No evidence-backed material differences were found across the selected documents based on the retrieved evidence.${summarySources ? ` ${summarySources}` : ""}`,
+    `- The retrieved evidence aligns on the key facts below.${summarySources ? ` ${summarySources}` : ""}`,
     "Per document:",
     ...perDocumentLines,
     "Agreements:",
-    `- The retrieved passages align on the queried topic across the selected documents.${summarySources ? ` ${summarySources}` : ""}`,
+    ...(agreementLines.length > 0
+      ? agreementLines
+      : [
+          `- The retrieved passages align on the queried topic across the selected documents.${summarySources ? ` ${summarySources}` : ""}`,
+        ]),
     "Differences:",
-    "- No evidence-backed material differences were found in the retrieved passages.",
-    "Gaps or uncertainty:",
-    "- This conclusion is limited to the retrieved passages and may miss uncited sections elsewhere in the documents.",
-  ].join("\n");
+    `- No conflicting values or conditions were detected in the retrieved evidence.${summarySources ? ` ${summarySources}` : ""}`,
+  ];
+
+  if (analysis.missingDocuments.length > 0) {
+    lines.push(
+      "Gaps or uncertainty:",
+      `- Some selected documents lacked strong evidence: ${analysis.missingDocuments
+        .map((document) => document.fileName)
+        .join(", ")}.`
+    );
+  }
+
+  return lines.join("\n");
 };
 
 export const prepareQASourceBundle = ({ results }) => {
@@ -327,6 +522,13 @@ export const prepareQASourceBundle = ({ results }) => {
 export const prepareComparisonSourceBundle = ({ alignment }) => {
   const flattenedResults = [];
   const seenResultKeys = new Set();
+  const effectiveMaxComparisonSources = Math.min(
+    getMaxComparisonSources(),
+    Math.max(
+      alignment.perDocument.length,
+      alignment.perDocument.length * MAX_COMPARE_SELECTED_RESULTS_PER_DOC
+    )
+  );
   const appendResult = (result) => {
     const resultKey = getResultKey(result);
 
@@ -343,34 +545,21 @@ export const prepareComparisonSourceBundle = ({ alignment }) => {
       appendResult(entry.results[0]);
     }
 
-    if (flattenedResults.length >= getMaxComparisonSources()) {
+    if (flattenedResults.length >= effectiveMaxComparisonSources) {
       break;
     }
   }
 
-  for (
-    let offset = 1;
-    flattenedResults.length < getMaxComparisonSources();
-    offset += 1
-  ) {
-    let appendedInPass = false;
+  const extraCandidates = buildComparisonExtraCandidates(alignment).sort(
+    compareCandidatePriority
+  );
 
-    for (const entry of alignment.perDocument) {
-      if (!entry.results[offset]) {
-        continue;
-      }
-
-      appendResult(entry.results[offset]);
-      appendedInPass = true;
-
-      if (flattenedResults.length >= getMaxComparisonSources()) {
-        break;
-      }
-    }
-
-    if (!appendedInPass) {
+  for (const candidate of extraCandidates) {
+    if (flattenedResults.length >= effectiveMaxComparisonSources) {
       break;
     }
+
+    appendResult(candidate.result);
   }
 
   const rankedResults = flattenedResults.map((result, index) => ({

@@ -1,6 +1,6 @@
 # Synthetic RAG Evaluation
 
-- Run ID: `2026-04-21T09-12-35-365Z`
+- Run ID: `2026-04-21T20-42-35-142Z`
 - Corpus file: `C:\Users\Jxx\Desktop\agentai\server\evaluation\synthetic-corpus-near-duplicate.json`
 - Embedding model: `text-embedding-3-small`
 - Chat model: `gpt-5`
@@ -21,7 +21,7 @@
 | Abstain accuracy | 1 |
 | Answer content hit rate | 1 |
 | Upload resume success rate | 1 |
-| Avg response time (ms) | 7847.88 |
+| Avg response time (ms) | 6254.63 |
 | Avg citation count | 1.63 |
 | Resume saved bytes | 2700 |
 
@@ -39,11 +39,11 @@
 
 | Case | Type | Pass | Abstain | Doc Hit | Page Hit | Answer Hit | Time (ms) |
 | --- | --- | --- | --- | --- | --- | --- | ---: |
-| qa_remote_alpha | qa | yes | no | yes | yes | yes | 3132 |
-| qa_badge_gamma | qa | yes | no | yes | yes | yes | 5188 |
-| compare_remote_no_material_difference_2way | compare | yes | no | yes | yes | yes | 505 |
-| compare_remote_no_material_difference_3way | compare | yes | no | yes | yes | yes | 141 |
-| compare_remote_numeric_conflict | compare | yes | no | yes | yes | yes | 26505 |
-| compare_remote_mixed_duplicate_conflict | compare | yes | no | yes | yes | yes | 26816 |
-| qa_satellite_stipend_abstain | qa | yes | yes | yes | yes | yes | 333 |
-| compare_remote_single_doc_abstain | compare | yes | yes | yes | yes | yes | 163 |
+| qa_remote_alpha | qa | yes | no | yes | yes | yes | 3992 |
+| qa_badge_gamma | qa | yes | no | yes | yes | yes | 4663 |
+| compare_remote_no_material_difference_2way | compare | yes | no | yes | yes | yes | 187 |
+| compare_remote_no_material_difference_3way | compare | yes | no | yes | yes | yes | 125 |
+| compare_remote_numeric_conflict | compare | yes | no | yes | yes | yes | 20196 |
+| compare_remote_mixed_duplicate_conflict | compare | yes | no | yes | yes | yes | 20287 |
+| qa_satellite_stipend_abstain | qa | yes | yes | yes | yes | yes | 377 |
+| compare_remote_single_doc_abstain | compare | yes | yes | yes | yes | yes | 210 |

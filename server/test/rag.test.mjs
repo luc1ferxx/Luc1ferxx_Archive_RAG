@@ -33,6 +33,7 @@ import {
   listLongMemories,
   resetLongMemoryStore,
 } from "../rag/long-memory.js";
+import { prepareComparisonSourceBundle } from "../rag/answer-writer.js";
 import { analyzeComparison } from "../rag/comparison-engine.js";
 import { alignComparisonEvidence } from "../rag/evidence-aligner.js";
 import { planQaEvidenceGap } from "../rag/gap-planner.js";
@@ -784,7 +785,9 @@ test("near-duplicate compare flow short-circuits to no material difference", asy
   const citedDocIds = new Set(response.citations.map((citation) => citation.docId));
 
   assert.match(response.text, /No evidence-backed material differences were found/i);
+  assert.match(response.text, /2 days per week with manager approval/i);
   assert.doesNotMatch(response.text, /The weekly day limit differs/i);
+  assert.doesNotMatch(response.text, /Gaps or uncertainty:/i);
   assert.equal(citedDocIds.size, 2);
   assert.ok(citedDocIds.has("handbook-alpha"));
   assert.ok(citedDocIds.has("handbook-beta"));
@@ -943,6 +946,142 @@ test("comparison analysis keeps mixed duplicate and conflict evidence from short
   assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
 });
 
+test("comparison source bundle prefers differentiating extra evidence over shared extras", () => {
+  const documents = [
+    {
+      docId: "alpha",
+      fileName: "alpha.pdf",
+    },
+    {
+      docId: "beta",
+      fileName: "beta.pdf",
+    },
+  ];
+  const perDocumentResults = new Map([
+    [
+      "alpha",
+      [
+        {
+          document: {
+            id: "alpha:0",
+            pageContent:
+              "Remote work policy: employees may work remotely 2 days per week.",
+            metadata: {
+              docId: "alpha",
+              fileName: "alpha.pdf",
+              pageNumber: 1,
+              chunkIndex: 0,
+            },
+          },
+          score: 0.99,
+        },
+        {
+          document: {
+            id: "alpha:1",
+            pageContent:
+              "Shared rule: security checklists must be completed before each remote day.",
+            metadata: {
+              docId: "alpha",
+              fileName: "alpha.pdf",
+              pageNumber: 2,
+              chunkIndex: 1,
+            },
+          },
+          score: 0.96,
+        },
+        {
+          document: {
+            id: "alpha:2",
+            pageContent:
+              "Alpha equipment rule: monitor reimbursement needs manager sign-off.",
+            metadata: {
+              docId: "alpha",
+              fileName: "alpha.pdf",
+              pageNumber: 3,
+              chunkIndex: 2,
+            },
+          },
+          score: 0.95,
+        },
+      ],
+    ],
+    [
+      "beta",
+      [
+        {
+          document: {
+            id: "beta:0",
+            pageContent:
+              "Remote work policy: employees may work remotely 3 days per week.",
+            metadata: {
+              docId: "beta",
+              fileName: "beta.pdf",
+              pageNumber: 1,
+              chunkIndex: 0,
+            },
+          },
+          score: 0.99,
+        },
+        {
+          document: {
+            id: "beta:1",
+            pageContent:
+              "Shared rule: security checklists must be completed before each remote day.",
+            metadata: {
+              docId: "beta",
+              fileName: "beta.pdf",
+              pageNumber: 2,
+              chunkIndex: 1,
+            },
+          },
+          score: 0.96,
+        },
+        {
+          document: {
+            id: "beta:2",
+            pageContent:
+              "Beta equipment rule: monitor reimbursement needs finance sign-off.",
+            metadata: {
+              docId: "beta",
+              fileName: "beta.pdf",
+              pageNumber: 3,
+              chunkIndex: 2,
+            },
+          },
+          score: 0.95,
+        },
+      ],
+    ],
+  ]);
+  const alignment = alignComparisonEvidence({
+    query: "Compare the remote work policy and equipment approval in these documents.",
+    documents,
+    perDocumentResults,
+  });
+  const bundle = prepareComparisonSourceBundle({
+    alignment,
+  });
+  const retrievedTexts = bundle.retrievedContexts.map((context) => context.text);
+
+  assert.equal(retrievedTexts.length, 4);
+  assert.ok(
+    retrievedTexts.some((text) =>
+      text.includes("Alpha equipment rule: monitor reimbursement needs manager sign-off.")
+    )
+  );
+  assert.ok(
+    retrievedTexts.some((text) =>
+      text.includes("Beta equipment rule: monitor reimbursement needs finance sign-off.")
+    )
+  );
+  assert.equal(
+    retrievedTexts.filter((text) =>
+      text.includes("Shared rule: security checklists must be completed before each remote day.")
+    ).length,
+    0
+  );
+});
+
 test("comparison analysis does not mark unrelated evidence as near-duplicate", () => {
   const analysis = buildComparisonAnalysis({
     query: "Compare the remote work policy.",
@@ -1025,6 +1164,8 @@ test("near-duplicate compare flow short-circuits across three highly similar doc
   const citedDocIds = new Set(response.citations.map((citation) => citation.docId));
 
   assert.match(response.text, /No evidence-backed material differences were found/i);
+  assert.match(response.text, /12 months after the last successful audit/i);
+  assert.doesNotMatch(response.text, /Gaps or uncertainty:/i);
   assert.equal(citedDocIds.size, 3);
   assert.ok(citedDocIds.has("manual-alpha"));
   assert.ok(citedDocIds.has("manual-beta"));

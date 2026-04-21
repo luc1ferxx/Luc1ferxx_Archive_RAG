@@ -1,0 +1,249 @@
+{
+  "createdAt": "2026-04-21T21:02:41.264348+00:00",
+  "inputFile": "C:\\Users\\Jxx\\Desktop\\agentai\\server\\evaluation\\results\\compare-hard.json",
+  "sourceRunId": "2026-04-21T20-11-33-312Z",
+  "models": {
+    "judge": "gpt-4o-mini",
+    "embedding": "text-embedding-3-small"
+  },
+  "summary": {
+    "totalCases": 8,
+    "eligibleCases": 7,
+    "metrics": {
+      "answer_relevancy": 0.6658,
+      "faithfulness": 0.8939,
+      "context_utilization": 0.9286,
+      "context_precision": 1.0,
+      "context_recall": 0.8571,
+      "compare_rubric": 0.9333
+    },
+    "byType": {
+      "qa": {
+        "count": 1,
+        "metrics": {
+          "answer_relevancy": 0.606,
+          "faithfulness": 1.0,
+          "context_utilization": 1.0,
+          "context_precision": 1.0,
+          "context_recall": 1.0
+        }
+      },
+      "compare": {
+        "count": 6,
+        "metrics": {
+          "answer_relevancy": 0.6758,
+          "faithfulness": 0.8762,
+          "context_utilization": 0.9167,
+          "context_precision": 1.0,
+          "context_recall": 0.8333,
+          "compare_rubric": 0.9333
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "caseId": "qa_remote_alpha_hard_control",
+      "type": "qa",
+      "question": "What is the remote work policy?",
+      "reference": "Employees may work remotely 2 days per week with manager approval, and they must complete security checklists before each remote day.",
+      "normalizedReference": "Employees may work remotely 2 days per week with manager approval, and they must complete security checklists before each remote day.",
+      "retrievedContextCount": 1,
+      "rawResponse": "Employees may work remotely up to 2 days per week with manager approval. [Source 1]  \nSecurity checklists must be completed before each remote day. [Source 1]",
+      "normalizedResponse": "Employees may work remotely up to 2 days per week with manager approval. Security checklists must be completed before each remote day.",
+      "scores": {
+        "answer_relevancy": 0.606,
+        "faithfulness": 1.0,
+        "context_utilization": 1.0,
+        "context_precision": 1.0,
+        "context_recall": 1.0,
+        "compare_rubric": null
+      },
+      "errors": {},
+      "compareJudge": null
+    },
+    {
+      "caseId": "compare_remote_exact_duplicate_no_diff_hard",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "reference": "There are no material differences between handbook_alpha and handbook_beta. Both allow remote work 2 days per week with manager approval and require security checklists before each remote day.",
+      "normalizedReference": "There are no material differences between handbook_alpha and handbook_beta. Both allow remote work 2 days per week with manager approval and require security checklists before each remote day.",
+      "retrievedContextCount": 2,
+      "rawResponse": "Summary:\n- No evidence-backed material differences were found across the selected documents based on the retrieved evidence. [Source 1] [Source 2]\n- The retrieved evidence aligns on the key facts below. [Source 1] [Source 2]\nPer document:\n- handbook-alpha.pdf: Employees may work remotely 2 days per week with manager approval; Security checklists must be completed before each remote day [Source 1]\n- handbook-beta.pdf: Employees may work remotely 2 days per week with manager approval; Security checklists must be completed before each remote day [Source 2]\nAgreements:\n- Employees may work remotely 2 days per week with manager approval. [Source 1] [Source 2]\n- Security checklists must be completed before each remote day. [Source 1] [Source 2]\nDifferences:\n- No conflicting values or conditions were detected in the retrieved evidence. [Source 1] [Source 2]",
+      "normalizedResponse": "No evidence-backed material differences were found across the selected documents based on the retrieved evidence. The retrieved evidence aligns on the key facts below. Employees may work remotely 2 days per week with manager approval. Security checklists must be completed before each remote day. No conflicting values or conditions were detected in the retrieved evidence.",
+      "scores": {
+        "answer_relevancy": 0.4196,
+        "faithfulness": 0.4,
+        "context_utilization": 1.0,
+        "context_precision": 1.0,
+        "context_recall": 0.6667,
+        "compare_rubric": 1.0
+      },
+      "errors": {},
+      "compareJudge": {
+        "score": 1.0,
+        "verdict": "The candidate answer accurately identifies no material differences, but lacks depth in articulating the comparison.",
+        "strengths": [
+          "Identified agreement on remote work policy details."
+        ],
+        "issues": [
+          "Could have elaborated on the reasoning for no material differences."
+        ]
+      }
+    },
+    {
+      "caseId": "compare_remote_paraphrase_no_diff_hard",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "reference": "There are no material differences between handbook_alpha and handbook_eta. Both allow remote work 2 days per week with manager approval and require a security checklist before each remote day, even though handbook_eta paraphrases the wording.",
+      "normalizedReference": "There are no material differences between handbook_alpha and handbook_eta. Both allow remote work 2 days per week with manager approval and require a security checklist before each remote day, even though handbook_eta paraphrases the wording.",
+      "retrievedContextCount": 2,
+      "rawResponse": "Summary:\n- Both documents allow up to 2 days of remote work per week with manager approval and require completing a security checklist before each remote day [Source 1][Source 2].\n\nPer document:\n- handbook-alpha.pdf:\n  - May work remotely 2 days per week with manager approval [Source 1].\n  - Security checklists must be completed before each remote day [Source 1].\n- handbook-eta.pdf:\n  - May work from home up to 2 days each week when a manager approves the arrangement [Source 2].\n  - Complete the security checklist before every remote day [Source 2].\n\nAgreements:\n- Limit of 2 remote days per week [Source 1][Source 2].\n- Manager approval is required [Source 1][Source 2].\n- Security checklist must be completed before each remote day [Source 1][Source 2].\n\nDifferences:\n- No substantive policy differences are evident in the provided excerpts; wording varies slightly (“work remotely” vs. “work from home”) but requirements match [Source 1][Source 2].\n\nGaps or uncertainty:\n- The excerpts do not specify eligibility criteria, equipment/support, reimbursement, working hours/availability expectations, or processes for exceptions or fully remote arrangements.",
+      "normalizedResponse": "Both documents allow up to 2 days of remote work per week with manager approval and require completing a security checklist before each remote day . Limit of 2 remote days per week . Manager approval is required . Security checklist must be completed before each remote day . No substantive policy differences are evident in the provided excerpts; wording varies slightly (“work remotely” vs. “work from home”) but requirements match .",
+      "scores": {
+        "answer_relevancy": 0.7563,
+        "faithfulness": 1.0,
+        "context_utilization": 1.0,
+        "context_precision": 1.0,
+        "context_recall": 0.3333,
+        "compare_rubric": 1.0
+      },
+      "errors": {},
+      "compareJudge": {
+        "score": 1.0,
+        "verdict": "The candidate answer effectively summarizes the main agreements and acknowledges slight wording variations.",
+        "strengths": [
+          "Accurately captures main agreements between documents",
+          "Identifies slight variations in wording"
+        ],
+        "issues": [
+          "Minor redundancy in phrasing 'both documents allow up to 2 days of remote work per week' and 'limit of 2 remote days per week'"
+        ]
+      }
+    },
+    {
+      "caseId": "compare_remote_numeric_conflict_hard",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "reference": "Both documents require manager approval and security checklists before each remote day, but handbook_alpha allows 2 remote days per week while handbook_gamma allows 3.",
+      "normalizedReference": "Both documents require manager approval and security checklists before each remote day, but handbook_alpha allows 2 remote days per week while handbook_gamma allows 3.",
+      "retrievedContextCount": 2,
+      "rawResponse": "Summary:\n- Both documents require manager approval for remote work and mandate completing security checklists before each remote day [Source 1][Source 2].\n- They differ on the number of remote days allowed per week: 2 days (alpha) vs 3 days (gamma) [Source 1][Source 2].\n\nPer document:\n- handbook-alpha.pdf:\n  - Employees may work remotely 2 days per week with manager approval [Source 1].\n  - Security checklists must be completed before each remote day [Source 1].\n- handbook-gamma.pdf:\n  - Employees may work remotely 3 days per week with manager approval [Source 2].\n  - Security checklists must be completed before each remote day [Source 2].\n\nAgreements:\n- Manager approval is required for remote work [Source 1][Source 2].\n- Security checklists must be completed before each remote day [Source 1][Source 2].\n\nDifferences:\n- Allowed remote days per week: 2 days (alpha) vs 3 days (gamma) [Source 1][Source 2].\n\nGaps or uncertainty:\n- No evidence provided on eligibility criteria beyond manager approval.\n- No details on equipment/expense support, work hours, location restrictions, or exceptions/enforcement of the checklist requirement.",
+      "normalizedResponse": "Both documents require manager approval for remote work and mandate completing security checklists before each remote day . They differ on the number of remote days allowed per week: 2 days (alpha) vs 3 days (gamma) . Manager approval is required for remote work . Security checklists must be completed before each remote day . Allowed remote days per week: 2 days (alpha) vs 3 days (gamma) .",
+      "scores": {
+        "answer_relevancy": 0.606,
+        "faithfulness": 1.0,
+        "context_utilization": 0.5,
+        "context_precision": 1.0,
+        "context_recall": 1.0,
+        "compare_rubric": 0.9
+      },
+      "errors": {},
+      "compareJudge": {
+        "score": 0.9,
+        "verdict": "The candidate answer effectively captures the main agreements and differences between the documents.",
+        "strengths": [
+          "Accurately identifies the requirement for manager approval and security checklists.",
+          "Clearly distinguishes between the number of remote days allowed in each policy."
+        ],
+        "issues": [
+          "Repeated information about manager approval and security checklists, which could be more concise."
+        ]
+      }
+    },
+    {
+      "caseId": "compare_remote_scope_conflict_hard",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "reference": "Both documents allow remote work 2 days per week with manager approval and require security checklists, but handbook_delta adds an eligibility restriction limiting the policy to full-time engineering employees.",
+      "normalizedReference": "Both documents allow remote work 2 days per week with manager approval and require security checklists, but handbook_delta adds an eligibility restriction limiting the policy to full-time engineering employees.",
+      "retrievedContextCount": 2,
+      "rawResponse": "Summary:\n- Both policies allow remote work up to 2 days per week with manager approval and require completion of security checklists before each remote day. [Source 1][Source 2]\n- The delta handbook limits eligibility to full-time engineering employees, while the alpha handbook does not state such a limitation. [Source 2][Source 1]\n\nPer document:\n- handbook-alpha.pdf:\n  - Employees may work remotely 2 days per week with manager approval. [Source 1]\n  - Security checklists must be completed before each remote day. [Source 1]\n- handbook-delta.pdf:\n  - Only full-time engineering employees may work remotely 2 days per week with manager approval. [Source 2]\n  - Security checklists must be completed before each remote day. [Source 2]\n\nAgreements:\n- Remote work is limited to 2 days per week with manager approval in both documents. [Source 1][Source 2]\n- Security checklists are required before each remote day in both documents. [Source 1][Source 2]\n\nDifferences:\n- Eligibility scope: Delta restricts remote work to full-time engineering employees; Alpha does not specify any department or employment-status restriction in the provided excerpt. [Source 2][Source 1]\n\nGaps or uncertainty:\n- The alpha excerpt does not indicate whether other sections impose role- or status-based limits beyond “Employees.” [Source 1]\n- The approval process details and the contents/requirements of the security checklists are not described in either excerpt. [Source 1][Source 2]",
+      "normalizedResponse": "Both policies allow remote work up to 2 days per week with manager approval and require completion of security checklists before each remote day. The delta handbook limits eligibility to full-time engineering employees, while the alpha handbook does not state such a limitation. Remote work is limited to 2 days per week with manager approval in both documents. Security checklists are required before each remote day in both documents. Eligibility scope: Delta restricts remote work to full-time engineering employees; Alpha does not specify any department or employment-status restriction in the provided excerpt.",
+      "scores": {
+        "answer_relevancy": 0.6841,
+        "faithfulness": 1.0,
+        "context_utilization": 1.0,
+        "context_precision": 1.0,
+        "context_recall": 1.0,
+        "compare_rubric": 0.9
+      },
+      "errors": {},
+      "compareJudge": {
+        "score": 0.9,
+        "verdict": "The candidate answer accurately captures the main agreements and differences between the documents.",
+        "strengths": [
+          "Clearly states agreement on remote work days and security requirements.",
+          "Correctly identifies eligibility restriction in delta handbook."
+        ],
+        "issues": [
+          "Minor redundancy in stating remote work limitations."
+        ]
+      }
+    },
+    {
+      "caseId": "compare_remote_approval_conflict_hard",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "reference": "Both documents allow remote work 2 days per week and require security checklists, but handbook_alpha requires manager approval while handbook_zeta requires director approval.",
+      "normalizedReference": "Both documents allow remote work 2 days per week and require security checklists, but handbook_alpha requires manager approval while handbook_zeta requires director approval.",
+      "retrievedContextCount": 2,
+      "rawResponse": "Summary:\n- Both policies allow remote work up to 2 days per week and require completing security checklists before each remote day [Source 1][Source 2].\n- The only concrete difference shown is the approval authority: manager (alpha) vs director (zeta) [Source 1][Source 2].\n\nPer document:\n- handbook-alpha.pdf:\n  - Up to 2 remote days per week with manager approval [Source 1].\n  - Security checklists must be completed before each remote day [Source 1].\n- handbook-zeta.pdf:\n  - Up to 2 remote days per week with director approval [Source 2].\n  - Security checklists must be completed before each remote day [Source 2].\n\nAgreements:\n- 2 remote days per week are permitted [Source 1][Source 2].\n- Security checklists are required before each remote day [Source 1][Source 2].\n\nDifferences:\n- Approval authority:\n  - Alpha: manager approval required [Source 1].\n  - Zeta: director approval required [Source 2].\n\nGaps or uncertainty:\n- The excerpts do not indicate eligibility criteria, location constraints, equipment or expense policies, or details of the approval/checklist processes.",
+      "normalizedResponse": "Both policies allow remote work up to 2 days per week and require completing security checklists before each remote day . The only concrete difference shown is the approval authority: manager (alpha) vs director (zeta) . 2 remote days per week are permitted . Security checklists are required before each remote day . Approval authority: Alpha: manager approval required . Zeta: director approval required .",
+      "scores": {
+        "answer_relevancy": 0.8046,
+        "faithfulness": 0.8571,
+        "context_utilization": 1.0,
+        "context_precision": 1.0,
+        "context_recall": 1.0,
+        "compare_rubric": 1.0
+      },
+      "errors": {},
+      "compareJudge": {
+        "score": 1.0,
+        "verdict": "The candidate answer accurately captures the main agreements and differences in the remote work policies.",
+        "strengths": [
+          "Correctly identifies remote work days and security checklist requirement."
+        ],
+        "issues": [
+          "Minor redundancy in stating remote days and checklist requirements."
+        ]
+      }
+    },
+    {
+      "caseId": "compare_remote_mixed_duplicate_conflict_hard",
+      "type": "compare",
+      "question": "Compare the remote work policy in these documents.",
+      "reference": "handbook_alpha and handbook_beta match each other: both allow remote work 2 days per week with manager approval and require security checklists before each remote day. handbook_gamma matches on approval and checklists but allows 3 remote days per week instead of 2.",
+      "normalizedReference": "handbook_alpha and handbook_beta match each other: both allow remote work 2 days per week with manager approval and require security checklists before each remote day. handbook_gamma matches on approval and checklists but allows 3 remote days per week instead of 2.",
+      "retrievedContextCount": 3,
+      "rawResponse": "Summary:\n- All three policies require manager approval and completing a security checklist before each remote day; handbook-alpha and handbook-beta allow 2 remote days/week, while handbook-gamma allows 3 remote days/week [Source 1][Source 2][Source 3].\n\nPer document:\n- handbook-alpha: Remote work allowed 2 days/week with manager approval; security checklist required before each remote day [Source 1].\n- handbook-beta: Remote work allowed 2 days/week with manager approval; security checklist required before each remote day [Source 2].\n- handbook-gamma: Remote work allowed 3 days/week with manager approval; security checklist required before each remote day [Source 3].\n\nAgreements:\n- Manager approval is required for remote work in all three documents [Source 1][Source 2][Source 3].\n- Security checklists must be completed before each remote day in all three documents [Source 1][Source 2][Source 3].\n\nDifferences:\n- Maximum remote days per week: handbook-alpha = 2; handbook-beta = 2; handbook-gamma = 3 [Source 1][Source 2][Source 3].\n- handbook-alpha and handbook-beta present identical wording in the quoted sections; no differences observed between them in the provided excerpts [Source 1][Source 2].\n\nGaps or uncertainty:\n- It is unclear which maximum (2 vs 3 days/week) is current or authoritative due to the conflicting limits across documents [Source 1][Source 2][Source 3].",
+      "normalizedResponse": "All three policies require manager approval and completing a security checklist before each remote day; handbook-alpha and handbook-beta allow 2 remote days/week, while handbook-gamma allows 3 remote days/week . Manager approval is required for remote work in all three documents . Security checklists must be completed before each remote day in all three documents . Maximum remote days per week: handbook-alpha = 2; handbook-beta = 2; handbook-gamma = 3 . handbook-alpha and handbook-beta present identical wording in the quoted sections; no differences observed between them in the provided excerpts .",
+      "scores": {
+        "answer_relevancy": 0.7842,
+        "faithfulness": 1.0,
+        "context_utilization": 1.0,
+        "context_precision": 1.0,
+        "context_recall": 1.0,
+        "compare_rubric": 0.8
+      },
+      "errors": {},
+      "compareJudge": {
+        "score": 0.8,
+        "verdict": "The candidate answer is mostly accurate but lacks clarity in summarizing the main differences.",
+        "strengths": [
+          "Correctly identifies manager approval and security checklist requirements for all three policies."
+        ],
+        "issues": [
+          "Could better emphasize the key difference of remote work days allowed between the documents."
+        ]
+      }
+    }
+  ],
+  "skippedCases": [
+    {
+      "caseId": "compare_remote_unrelated_abstain_hard",
+      "reason": "Abstain case skipped by default."
+    }
+  ]
+}

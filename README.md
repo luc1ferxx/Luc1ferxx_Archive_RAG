@@ -166,6 +166,15 @@ Default local ports:
 
 ## Evaluation
 
+This repo uses a custom Node evaluation harness as the source-of-truth regression runner. It ingests the test corpus through the same upload / chunk / retrieval pipeline as the app, runs `chat(...)` end to end, and scores each case with project-specific checks for:
+
+- abstain behavior
+- document and page citation coverage
+- expected answer fragments
+- latency and citation count
+
+`ragas` runs as a second pass on top of the saved Node payloads. It is useful for semantic QA diagnostics and retrieval grounding, but compare quality is still primarily judged by the custom harness plus the compare rubric in `latest-ragas.*`.
+
 Run the default synthetic evaluation:
 
 ```powershell
@@ -178,6 +187,13 @@ Run the near-duplicate compare corpus:
 ```powershell
 cd server
 cmd /c "set VECTOR_STORE_PROVIDER=local&& npm.cmd run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json"
+```
+
+Run the harder compare corpus:
+
+```powershell
+cd server
+cmd /c "set VECTOR_STORE_PROVIDER=local&& npm.cmd run eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json"
 ```
 
 Run the chunking comparison corpus:
@@ -201,11 +217,19 @@ cd server
 evaluation\.venv-ragas\Scripts\python.exe evaluation\run-ragas-eval.py --input evaluation\results\latest.json
 ```
 
+Run `ragas` against the hard compare report:
+
+```powershell
+cd server
+evaluation\.venv-ragas\Scripts\python.exe evaluation\run-ragas-eval.py --input evaluation\results\compare-hard.json --output-json evaluation\results\compare-hard-ragas.json --output-md evaluation\results\compare-hard-ragas.md
+```
+
 Saved reports are written to `server/evaluation/results/`.
 
 - `latest.json` and `latest.md` come from the Node evaluation harness
 - `latest-ragas.json` and `latest-ragas.md` come from the Python `ragas` pass
-- The Node result payload now includes `retrievedContexts`, `referenceContexts`, and a normalized `ragasSample` per case so `ragas` can score the same run without re-querying the app
+- `compare-hard.json` / `compare-hard.md` and `compare-hard-ragas.json` / `compare-hard-ragas.md` are the tracked harder compare benchmark artifacts
+- The Node result payload now includes `retrievedContexts`, `referenceContexts`, `retrieved_context_ids`, `reference_context_ids`, and a normalized `ragasSample` per case so `ragas` can score the same run without re-querying the app
 
 ## Quantitative Results
 
@@ -236,18 +260,34 @@ The current tracked `latest.*` report comes from `evaluation/synthetic-corpus-ne
 - `comparePageHitRate`: `1.0`
 - `abstainAccuracy`: `1.0`
 - `answerContentHitRate`: `1.0`
-- `averageResponseTimeMs`: `7847.88`
+- `averageResponseTimeMs`: `6254.63`
 - `averageCitationCount`: `1.63`
 
 ### Latest `ragas` Eval
 
 The current tracked `latest-ragas.*` report on the same near-duplicate corpus reports:
 
-- `answerRelevancy`: `0.6039`
-- `faithfulness`: `0.576`
-- `contextUtilization`: `0.6667`
-- `contextPrecision`: `0.8333`
-- `contextRecall`: `0.8889`
+- overall: `answerRelevancy=0.6171`, `faithfulness=0.8`, `contextUtilization=1.0`, `contextPrecision=1.0`, `contextRecall=0.8333`, `compareRubric=0.95`
+- `qa` route: `answerRelevancy=0.6724`, `faithfulness=1.0`, `contextUtilization=1.0`, `contextPrecision=1.0`, `contextRecall=1.0`
+- `compare` route: `answerRelevancy=0.5895`, `faithfulness=0.7`, `contextUtilization=1.0`, `contextPrecision=1.0`, `contextRecall=0.75`, `compareRubric=0.95`
+
+### Hard Compare Benchmark
+
+The tracked `compare-hard.*` report comes from `evaluation/synthetic-corpus-compare-hard.json` and is meant to stress compare behavior beyond near-duplicates. The current Node harness report is:
+
+- `overallPassRate`: `1.0`
+- `qaPageHitRate`: `1.0`
+- `compareDocCoverageRate`: `1.0`
+- `comparePageHitRate`: `1.0`
+- `abstainAccuracy`: `1.0`
+- `answerContentHitRate`: `1.0`
+- `averageResponseTimeMs`: `16158.75`
+- `averageCitationCount`: `1.88`
+
+The current `compare-hard-ragas.*` report is:
+
+- overall: `answerRelevancy=0.6658`, `faithfulness=0.8939`, `contextUtilization=0.9286`, `contextPrecision=1.0`, `contextRecall=0.8571`, `compareRubric=0.9333`
+- `compare` route: `answerRelevancy=0.6758`, `faithfulness=0.8762`, `contextUtilization=0.9167`, `contextPrecision=1.0`, `contextRecall=0.8333`, `compareRubric=0.9333`
 
 This project still treats the custom Node metrics as the source of truth for abstain behavior, page-level evidence coverage, and compare-specific correctness. `ragas` is used as a semantic supplement, especially for QA quality and retrieval grounding, not as a replacement for the compare harness.
 

@@ -3,6 +3,9 @@ const roundScore = (value) =>
     ? Number(value.toFixed(4))
     : null;
 
+const buildContextId = ({ docKey = null, pageNumber = null }) =>
+  [docKey, pageNumber].filter((value) => value !== null && value !== undefined).join(":");
+
 export const summarizeRetrievedContexts = (retrievedContexts, docKeyByDocId) =>
   (retrievedContexts ?? []).map((context) => ({
     rank: context.rank ?? null,
@@ -62,8 +65,24 @@ export const buildRagasSample = ({
     user_input: testCase.question,
     response: response.text,
     retrieved_contexts: retrievedContexts.map((context) => context.text),
+    retrieved_context_ids: retrievedContexts
+      .map((context) =>
+        buildContextId({
+          docKey: context.docKey,
+          pageNumber: context.pageNumber,
+        })
+      )
+      .filter(Boolean),
     reference,
     reference_contexts: referenceContexts.map((context) => context.text),
+    reference_context_ids: referenceContexts
+      .map((context) =>
+        buildContextId({
+          docKey: context.docKey,
+          pageNumber: context.pageNumber,
+        })
+      )
+      .filter(Boolean),
     metadata: {
       type: testCase.type,
       docKeys: testCase.docKeys,
