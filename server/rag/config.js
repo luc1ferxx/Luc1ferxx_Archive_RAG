@@ -104,6 +104,18 @@ export const getSparseRetrievalTopK = () =>
 export const getComparisonTopKPerDoc = () =>
   Math.floor(toPositiveNumber(process.env.RAG_COMPARE_TOP_K_PER_DOC, 3));
 
+export const isRerankEnabled = () =>
+  toBoolean(process.env.RAG_RERANK_ENABLED, false);
+
+export const getRerankCandidateMultiplier = () =>
+  Math.max(
+    1,
+    Math.floor(toPositiveNumber(process.env.RAG_RERANK_CANDIDATE_MULTIPLIER, 3))
+  );
+
+export const getRerankWeight = () =>
+  Math.min(1, toNonNegativeNumber(process.env.RAG_RERANK_WEIGHT, 0.6));
+
 export const getMaxComparisonSources = () =>
   Math.floor(toPositiveNumber(process.env.RAG_MAX_COMPARISON_SOURCES, 8));
 

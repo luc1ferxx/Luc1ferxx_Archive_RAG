@@ -54,17 +54,25 @@ flowchart TD
 
 1. Embed the user query
 2. Retrieve top chunks across the selected documents
-3. Run a confidence gate
-4. Ask GPT-5 for a concise grounded answer with citations
+3. Optionally rerank the retrieved candidates after retrieval / hybrid fusion and before the confidence gate
+4. Run a confidence gate
+5. Build the source bundle and ask GPT-5 for a concise grounded answer with citations
 
 ### Compare
 
 1. Embed the user query once
 2. Retrieve evidence per document instead of global top-k
-3. Align evidence across documents
-4. Analyze shared terms, near-duplicate signals, and evidence balance
-5. If all evidence is highly similar and conflict-free, short-circuit to a deterministic no-difference answer
-6. Otherwise ask GPT-5 to write a structured comparison
+3. Optionally rerank candidates within each document before evidence alignment
+4. Align evidence across documents
+5. Analyze shared terms, near-duplicate signals, and evidence balance
+6. If all evidence is highly similar and conflict-free, short-circuit to a deterministic no-difference answer
+7. Otherwise ask GPT-5 to write a structured comparison
+
+### Optional Rerank
+
+Rerank is disabled by default (`RAG_RERANK_ENABLED=false`). When enabled, it runs after the retrieval stage (after dense + sparse hybrid fusion when hybrid retrieval is enabled) and before the confidence gate. The retriever first expands the candidate set to `candidateK = topK * RAG_RERANK_CANDIDATE_MULTIPLIER`, reranks those candidates, and then truncates back to the final top-k.
+
+QA uses one global rerank across the selected documents. Compare uses per-document rerank: each selected document expands, reranks, and truncates its own candidates independently so a strong document cannot push another document out through cross-document mixing. `RAG_RERANK_WEIGHT` controls the mixed score between the original retrieval / hybrid score and the heuristic `rerankScore`.
 
 ### Web Answer
 
@@ -134,6 +142,9 @@ OPENAI_CHAT_MODEL=gpt-5
 RAG_PROMPT_VERSION=v3
 RAG_CHUNK_STRATEGY=structured
 RAG_HYBRID_ENABLED=false
+RAG_RERANK_ENABLED=false
+RAG_RERANK_CANDIDATE_MULTIPLIER=3
+RAG_RERANK_WEIGHT=0.6
 RAG_CHUNK_SIZE=900
 RAG_CHUNK_OVERLAP=180
 RAG_RETRIEVAL_TOP_K=6
@@ -149,6 +160,10 @@ Notes:
 - `OPENAI_API_KEY` is required for embeddings and answer generation
 - `SERPAPI_KEY` is required for the MCP web answer path
 - `VECTOR_STORE_PROVIDER` supports `local` and `qdrant`
+- `RAG_RERANK_ENABLED` is disabled by default; when enabled, rerank runs after retrieval / hybrid fusion and before the confidence gate
+- `RAG_RERANK_CANDIDATE_MULTIPLIER` expands candidate recall before rerank with `candidateK = topK * multiplier`; rerank then truncates back to the final top-k
+- `RAG_RERANK_WEIGHT` controls the final mixed score between the original retrieval / hybrid score and the heuristic `rerankScore`
+- QA reranks globally across selected documents; compare reranks independently within each document to avoid cross-document mixing
 - `RAG_NEAR_DUPLICATE_GUARD_ENABLED` controls the no-difference short-circuit on highly similar compare evidence
 
 ## Run

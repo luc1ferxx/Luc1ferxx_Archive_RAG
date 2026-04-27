@@ -37,7 +37,11 @@ import { prepareComparisonSourceBundle } from "../rag/answer-writer.js";
 import { analyzeComparison } from "../rag/comparison-engine.js";
 import { alignComparisonEvidence } from "../rag/evidence-aligner.js";
 import { planQaEvidenceGap } from "../rag/gap-planner.js";
+import { getRerankCandidateMultiplier } from "../rag/config.js";
 import { buildTermSet } from "../rag/text-utils.js";
+import { rerankResults } from "../rag/reranker.js";
+import { retrieveGlobalContext } from "../rag/retrievers/global-retriever.js";
+import { retrievePerDocumentContext } from "../rag/retrievers/per-doc-retriever.js";
 
 const originalDataDirectory = getRagDataDirectory();
 const EMBEDDING_DIMENSIONS = 64;
@@ -61,6 +65,42 @@ const toEmbedding = (text) => {
   }
 
   return vector;
+};
+
+const buildVectorWithQuerySimilarity = (similarity) => {
+  const clampedSimilarity = Math.max(-1, Math.min(1, similarity));
+  const vector = new Array(EMBEDDING_DIMENSIONS).fill(0);
+  vector[0] = clampedSimilarity;
+  vector[1] = Math.sqrt(Math.max(0, 1 - clampedSimilarity ** 2));
+  return vector;
+};
+
+const RERANK_QUERY_VECTOR = buildVectorWithQuerySimilarity(1);
+
+const withEnv = async (overrides, callback) => {
+  const originalValues = new Map(
+    Object.keys(overrides).map((key) => [key, process.env[key]])
+  );
+
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  try {
+    return await callback();
+  } finally {
+    for (const [key, value] of originalValues.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 };
 
 const createFakeQdrantClient = () => {
@@ -1172,6 +1212,222 @@ test("near-duplicate compare flow short-circuits across three highly similar doc
   assert.ok(citedDocIds.has("manual-gamma"));
 });
 
+
+test("rerank candidate multiplier is clamped to at least one", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_CANDIDATE_MULTIPLIER: "0.5",
+    },
+    async () => {
+      assert.equal(getRerankCandidateMultiplier(), 1);
+    }
+  );
+});
+
+test("rerank disabled preserves existing topK order", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_ENABLED: "false",
+    },
+    async () => {
+      const results = [
+        {
+          document: {
+            id: "first",
+            pageContent: "General onboarding memo.",
+            metadata: { docId: "alpha" },
+          },
+          score: 0.2,
+        },
+        {
+          document: {
+            id: "exact",
+            pageContent: "Quartz capsule approval requires finance sign-off.",
+            metadata: { docId: "alpha" },
+          },
+          score: 0.9,
+        },
+      ];
+
+      assert.deepEqual(
+        rerankResults({
+          queryText: "quartz capsule approval",
+          results,
+          topK: 1,
+        }),
+        [results[0]]
+      );
+    }
+  );
+});
+
+test("heuristic rerank preserves originalScore and writes mixed rerank score", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_ENABLED: "true",
+      RAG_RERANK_WEIGHT: "0.95",
+    },
+    async () => {
+      const reranked = rerankResults({
+        queryText: "quartz capsule approval",
+        results: [
+          {
+            document: {
+              id: "unrelated",
+              pageContent: "General onboarding memo.",
+              metadata: { docId: "alpha" },
+            },
+            score: 0.9,
+          },
+          {
+            document: {
+              id: "exact",
+              pageContent: "Quartz capsule approval requires finance sign-off.",
+              metadata: { docId: "alpha" },
+            },
+            score: 0.2,
+          },
+        ],
+        topK: 1,
+      });
+
+      assert.equal(reranked.length, 1);
+      assert.equal(reranked[0].document.id, "exact");
+      assert.equal(reranked[0].originalScore, 0.2);
+      assert.equal(typeof reranked[0].rerankScore, "number");
+      assert.ok(reranked[0].rerankScore > 0.8);
+      assert.ok(reranked[0].score > reranked[0].originalScore);
+    }
+  );
+});
+
+test("rerank promotes strong keyword candidate beyond initial hybrid topK", async () => {
+  await withEnv(
+    {
+      RAG_HYBRID_ENABLED: "true",
+      RAG_RETRIEVAL_TOP_K: "1",
+      RAG_SPARSE_TOP_K: "3",
+      RAG_HYBRID_DENSE_WEIGHT: "0.8",
+      RAG_HYBRID_SPARSE_WEIGHT: "0.2",
+      RAG_RERANK_CANDIDATE_MULTIPLIER: "3",
+      RAG_RERANK_WEIGHT: "0.95",
+      RAG_RERANK_ENABLED: "false",
+    },
+    async () => {
+      configureOpenAIProvider({
+        ...provider,
+        embedTexts: async (texts) =>
+          texts.map((text) =>
+            /Quartz capsule approval/i.test(text)
+              ? buildVectorWithQuerySimilarity(0.2)
+              : buildVectorWithQuerySimilarity(1)
+          ),
+        embedQuery: async () => RERANK_QUERY_VECTOR,
+      });
+
+      await ingestFixture({
+        docId: "rerank-global",
+        fileName: "rerank-global.pdf",
+        pages: [
+          "General onboarding memo: welcome packet owners should archive the checklist.",
+          "Facilities snack memo: reorder markers before the monthly staff meeting.",
+          "Quartz capsule approval: the approved amount is 4200 dollars per cycle.",
+        ],
+      });
+
+      const baselineResults = await retrieveGlobalContext({
+        queryVector: RERANK_QUERY_VECTOR,
+        queryText: "What is the quartz capsule approval?",
+        docIds: ["rerank-global"],
+      });
+
+      assert.equal(baselineResults.length, 1);
+      assert.doesNotMatch(
+        baselineResults[0].document.pageContent,
+        /Quartz capsule approval/i
+      );
+
+      process.env.RAG_RERANK_ENABLED = "true";
+
+      const rerankedResults = await retrieveGlobalContext({
+        queryVector: RERANK_QUERY_VECTOR,
+        queryText: "What is the quartz capsule approval?",
+        docIds: ["rerank-global"],
+      });
+
+      assert.equal(rerankedResults.length, 1);
+      assert.match(
+        rerankedResults[0].document.pageContent,
+        /Quartz capsule approval/i
+      );
+      assert.equal(typeof rerankedResults[0].originalScore, "number");
+      assert.equal(typeof rerankedResults[0].rerankScore, "number");
+    }
+  );
+});
+
+test("compare rerank is applied independently per selected document", async () => {
+  await withEnv(
+    {
+      RAG_HYBRID_ENABLED: "true",
+      RAG_COMPARE_TOP_K_PER_DOC: "1",
+      RAG_SPARSE_TOP_K: "3",
+      RAG_HYBRID_DENSE_WEIGHT: "0.8",
+      RAG_HYBRID_SPARSE_WEIGHT: "0.2",
+      RAG_RERANK_ENABLED: "true",
+      RAG_RERANK_CANDIDATE_MULTIPLIER: "3",
+      RAG_RERANK_WEIGHT: "0.95",
+    },
+    async () => {
+      configureOpenAIProvider({
+        ...provider,
+        embedTexts: async (texts) =>
+          texts.map((text) =>
+            /Quartz capsule approval/i.test(text)
+              ? buildVectorWithQuerySimilarity(0.2)
+              : buildVectorWithQuerySimilarity(1)
+          ),
+        embedQuery: async () => RERANK_QUERY_VECTOR,
+      });
+
+      await ingestFixture({
+        docId: "alpha-manual",
+        fileName: "alpha-manual.pdf",
+        pages: [
+          "Quartz capsule approval: alpha primary amount is 100 dollars.",
+          "Quartz capsule approval: alpha secondary escalation goes to finance.",
+          "Quartz capsule approval: alpha tertiary archive is retained for seven years.",
+        ],
+      });
+      await ingestFixture({
+        docId: "beta-manual",
+        fileName: "beta-manual.pdf",
+        pages: [
+          "Beta onboarding memo: distribute welcome badges before orientation.",
+          "Beta facilities memo: reserve conference rooms before the demo.",
+          "Quartz capsule approval: beta amount is 200 dollars.",
+        ],
+      });
+
+      const perDocumentResults = await retrievePerDocumentContext({
+        queryVector: RERANK_QUERY_VECTOR,
+        queryText: "Compare the quartz capsule approval.",
+        docIds: ["alpha-manual", "beta-manual"],
+      });
+
+      assert.equal(perDocumentResults.get("alpha-manual")?.length, 1);
+      assert.equal(perDocumentResults.get("beta-manual")?.length, 1);
+      assert.match(
+        perDocumentResults.get("alpha-manual")[0].document.pageContent,
+        /Quartz capsule approval: alpha/i
+      );
+      assert.match(
+        perDocumentResults.get("beta-manual")[0].document.pageContent,
+        /Quartz capsule approval: beta/i
+      );
+    }
+  );
+});
 
 test("hybrid retrieval fuses sparse evidence when dense scores are flat", async () => {
   const originalHybridEnabled = process.env.RAG_HYBRID_ENABLED;

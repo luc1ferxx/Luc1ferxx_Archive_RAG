@@ -158,7 +158,8 @@ const searchHybridDocuments = async ({
   docIds,
   topK,
 }) => {
-  const denseTopK = Math.max(topK, getSparseRetrievalTopK());
+  const sparseTopK = Math.max(topK, getSparseRetrievalTopK());
+  const denseTopK = Math.max(topK, sparseTopK);
   const implementation = getVectorStoreImplementation();
   const [denseResults, sparseResults] = await Promise.all([
     implementation.searchDenseDocuments({
@@ -171,7 +172,7 @@ const searchHybridDocuments = async ({
     implementation.searchSparseDocuments({
       queryText,
       docIds,
-      topK: getSparseRetrievalTopK(),
+      topK: sparseTopK,
     }),
   ]);
 
