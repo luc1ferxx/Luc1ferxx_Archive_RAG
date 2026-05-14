@@ -1,328 +1,420 @@
-# DocCompare AI
+<div align="center">
 
-Luc1ferxx Archive is a multi-document RAG workspace built with React and Node.js. Users can upload PDFs, ask grounded questions, compare multiple documents, inspect citations in an inline PDF preview, and contrast document answers with a live web-search answer.
+# Luc1ferxx Archive RAG
 
-The project uses LangChain as the infrastructure layer for PDF loading, embeddings, and model calls, while the retrieval, comparison, confidence, upload, and evaluation logic are custom.
+**一个面向 PDF 档案的多文档 RAG 工作台：上传、问答、对比、引用预览、网页补充和评测，一套跑通。**
 
-## What It Does
+<p>
+  <img alt="React 18" src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=111111" />
+  <img alt="Node.js" src="https://img.shields.io/badge/Node.js-ESM-339933?logo=node.js&logoColor=ffffff" />
+  <img alt="Express" src="https://img.shields.io/badge/Express-API-000000?logo=express&logoColor=ffffff" />
+  <img alt="OpenAI" src="https://img.shields.io/badge/OpenAI-GPT--5-412991?logo=openai&logoColor=ffffff" />
+  <img alt="Vector Store" src="https://img.shields.io/badge/Vector-local%20%7C%20Qdrant-ff4f00" />
+  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-persistence-4169E1?logo=postgresql&logoColor=ffffff" />
+</p>
 
-- Upload one or more PDFs with resumable chunked upload
-- Ask document-grounded questions with citations
-- Compare multiple documents with a dedicated compare-aware retrieval path
-- Preview cited pages inside the app
-- Run a second answer path from live web search through MCP
-- Persist documents, vector data, and session memory across restarts
+[功能亮点](#功能亮点) · [系统架构](#系统架构) · [快速启动](#快速启动) · [评测结果](#评测结果) · [API](#api)
 
-## Flow
+</div>
+
+## 项目定位
+
+Luc1ferxx Archive RAG 不是普通的“上传 PDF 然后聊天”。它更像一个本地可运行的文档分析台：
+
+- 问单份或多份 PDF，并返回可点开的页级引用。
+- 对比多份文档时，不让某一份文档垄断检索结果。
+- 同时给出“文档内答案”和“实时网页答案”，方便核对内外部信息。
+- 用结构化 chunking、置信度门控、近重复保护和评测集，压低 RAG 在多文档对比里的幻觉风险。
+
+适合用来做政策手册、合同、研究报告、知识库 PDF、归档资料等需要“有出处地回答”和“认真比较差异”的场景。
+
+## 功能亮点
+
+| 能力 | 说明 |
+| --- | --- |
+| 多 PDF 工作区 | 支持一次上传多份 PDF，前端维护当前工作区、文档列表和页数统计。 |
+| 可恢复分片上传 | 默认 2 MB 分片上传，断点续传状态落到 `server/upload-sessions/`。 |
+| 文档问答 | 基于上传文档检索证据，回答时附带文件名、页码、chunk 和摘录。 |
+| 公平多文档对比 | compare 路由使用 per-document retrieval，每份文档独立取证，避免全局 top-k 偏向单一文档。 |
+| 引用页预览 | 点击 citation 后，右侧内嵌 PDF 预览直接定位到相关页。 |
+| 网页补充答案 | Express API 并行调用本地 MCP search server，通过 SerpAPI 获取网页证据并生成单独 web answer。 |
+| 会话记忆 | PostgreSQL 保存最近会话，用于改写追问里的“它”“上一份”“第二个”等指代。 |
+| 长期偏好记忆 | 可选开启长期记忆，例如默认回答语言、回答详略偏好。 |
+| 检索可观测性 | 可选 JSONL trace，记录 retrieval、rerank、confidence、comparison diagnostics 和 source bundle。 |
+| 评测体系 | Node synthetic/real eval 是主回归；`ragas` 作为语义与 grounding 补充评估。 |
+
+## 产品界面
+
+应用首屏就是工作台，不是落地页：
+
+- 左侧：上传 PDF、查看相关文档、管理工作区文档。
+- 中间：PDF 预览，点击引用后跳到对应页。
+- 右侧：对话记录，展示 document answer、citations、gap plan 和 web answer。
+- 底部：文本提问或 voice mode 语音提问。
+
+## 系统架构
 
 ```mermaid
-flowchart TD
-  subgraph Upload["Upload / Ingest"]
-    A[User uploads PDFs] --> B[Chunked resumable upload]
-    B --> C[PDFLoader]
-    C --> D[Structured chunker]
-    D --> E[Embeddings]
-    E --> F[Local store or Qdrant]
-  end
+flowchart LR
+  U["User"] --> UI["React 18 / Ant Design"]
+  UI --> API["Express API"]
 
-  subgraph Ask["Ask / Compare"]
-    G[User question] --> H[Route query]
-    H --> I[QA path]
-    H --> J[Compare path]
-    H --> K[Web answer path]
+  API --> Upload["Resumable PDF upload"]
+  API --> Chat["Chat endpoint"]
+  API --> Health["Health / readiness"]
 
-    I --> I1[Global retrieval]
-    I1 --> I2[Confidence gate]
-    I2 --> I3[GPT-5 grounded answer]
+  Upload --> PDF["PDFLoader"]
+  PDF --> Chunker["Structured chunker"]
+  Chunker --> Embed["OpenAI embeddings"]
+  Embed --> Vector["Local JSON vector store or Qdrant"]
+  Upload --> PGDocs["PostgreSQL document store"]
 
-    J --> J1[Per-document retrieval]
-    J1 --> J2[Evidence alignment + comparison analysis]
-    J2 --> J3[No-diff short-circuit or GPT-5 compare]
+  Chat --> Memory["Session memory / optional long memory"]
+  Chat --> Router["QA or Compare router"]
+  Router --> QA["Global retrieval for QA"]
+  Router --> Compare["Per-document retrieval for compare"]
+  QA --> Confidence["Confidence gate"]
+  Compare --> Alignment["Evidence alignment + compare analysis"]
+  Confidence --> Writer["GPT-5 grounded answer"]
+  Alignment --> Writer
 
-    K --> K1[MCP search tool]
-    K1 --> K2[GPT-5 web summary]
-  end
+  Chat --> MCP["Local MCP search server"]
+  MCP --> Web["SerpAPI web search"]
+  Web --> WebWriter["GPT-5 web answer"]
 
-  I3 --> L[Answer + citations]
-  J3 --> L
-  K2 --> L
+  Writer --> UI
+  WebWriter --> UI
 ```
 
-## Core RAG Logic
+## RAG 设计
 
-### QA
+### QA 路径
 
-1. Embed the user query
-2. Retrieve top chunks across the selected documents
-3. Optionally rerank the retrieved candidates after retrieval / hybrid fusion and before the confidence gate
-4. Run a confidence gate
-5. Build the source bundle and ask GPT-5 for a concise grounded answer with citations
+1. 将用户问题结合会话记忆改写成独立检索问题。
+2. 生成 query embedding。
+3. 在选中文档内做全局检索。
+4. 可选 hybrid dense + sparse fusion。
+5. 可选 rerank，位置在 retrieval/hybrid 之后、confidence gate 之前。
+6. 置信度门控过滤低相关或缺少 anchor coverage 的证据。
+7. 使用证据包生成带引用的 grounded answer。
 
-### Compare
+### Compare 路径
 
-1. Embed the user query once
-2. Retrieve evidence per document instead of global top-k
-3. Optionally rerank candidates within each document before evidence alignment
-4. Align evidence across documents
-5. Analyze shared terms, near-duplicate signals, and evidence balance
-6. If all evidence is highly similar and conflict-free, short-circuit to a deterministic no-difference answer
-7. Otherwise ask GPT-5 to write a structured comparison
+1. 通过关键词路由识别 compare / difference / vs / 区别 / 对比等信号。
+2. 对每份文档分别检索 `RAG_COMPARE_TOP_K_PER_DOC` 条证据。
+3. 对每份文档独立 rerank，避免强文档挤掉弱文档。
+4. 对齐证据，分析 shared terms、近重复、数值差异和显式冲突。
+5. 如果证据高度近似且无冲突，走 deterministic no-difference guard。
+6. 否则生成结构化 comparison answer：Summary、Per document、Agreements、Differences、Gaps。
 
-### Optional Rerank
+这套设计的重点是“对比要公平”。普通 RAG 的全局 top-k 很容易把所有证据都给到最匹配的一份文档，导致比较结果看似完整，实际漏掉其他文档。这里的 compare pipeline 从检索阶段就保留文档边界。
 
-Rerank is disabled by default (`RAG_RERANK_ENABLED=false`). When enabled, it runs after the retrieval stage (after dense + sparse hybrid fusion when hybrid retrieval is enabled) and before the confidence gate. The retriever first expands the candidate set to `candidateK = topK * RAG_RERANK_CANDIDATE_MULTIPLIER`, reranks those candidates, and then truncates back to the final top-k.
+## 技术栈
 
-QA uses one global rerank across the selected documents. Compare uses per-document rerank: each selected document expands, reranks, and truncates its own candidates independently so a strong document cannot push another document out through cross-document mixing. `RAG_RERANK_WEIGHT` controls the mixed score between the original retrieval / hybrid score and the heuristic `rerankScore`.
+| 层 | 技术 |
+| --- | --- |
+| Frontend | React 18, Create React App, Ant Design, axios, speech recognition, speak-tts |
+| Backend | Node.js ESM, Express, multer, zod |
+| RAG 基础设施 | LangChain PDFLoader, OpenAI embeddings, OpenAI chat model |
+| 自定义 RAG | chunker, query router, retrievers, confidence gate, reranker, evidence aligner, comparison engine |
+| Vector store | 默认 local JSON store；可切换 Qdrant |
+| Sparse retrieval | 本地 BM25 sparse store；Qdrant provider 下使用 Qdrant sparse search |
+| Persistence | PostgreSQL document bytes, session memory, optional long memory |
+| Web answer | MCP stdio client/server + SerpAPI |
+| Evaluation | Node custom harness, optional Python `ragas` |
 
-### RAG Observability
+## 快速启动
 
-RAG observability is disabled by default (`RAG_OBSERVABILITY_ENABLED=false`). When enabled, each QA or compare chat request appends one structured JSONL event to `server/data/rag-observability/events.jsonl` by default. The trace captures retrieval scores, rerank score fields when present, confidence-gate decisions, compare evidence summaries, and the final source bundle.
+### 1. 准备环境
 
-For privacy, `RAG_OBSERVABILITY_INCLUDE_CONTEXT=false` by default. In that mode traces store document metadata, scores, `excerptHash`, and an `excerptPreview` capped at 120 characters, but not full chunk `text` / `pageContent`. Set `RAG_OBSERVABILITY_INCLUDE_CONTEXT=true` only for local debugging when recording full retrieved chunk text is acceptable.
+建议环境：
 
-### Web Answer
+- Node.js 18+
+- npm
+- PostgreSQL，并准备一个可连接的数据库。
+- OpenAI API key
+- SerpAPI key，用于网页答案；只跑文档 RAG 时可以先不配，但 web answer 会不可用。
+- Qdrant 可选，默认使用本地 JSON vector store。
 
-1. Call a local MCP server
-2. Use SerpAPI-backed search results
-3. Ask GPT-5 to summarize the web evidence separately from the document answer
+### 2. 安装依赖
 
-## Why This Design
-
-- Standard RAG often fails on multi-document comparison because one document can dominate global top-k retrieval
-- This project routes comparison questions into a dedicated per-document retrieval path
-- Evidence stays document-aware through the full compare pipeline
-- Confidence gates reduce low-evidence answers
-- A near-duplicate no-difference guard reduces unnecessary compare hallucinations on highly similar documents
-
-## Main Features
-
-- Structured chunking using page, heading, paragraph, and sentence boundaries
-- Local persisted vector index with optional Qdrant backend
-- Optional hybrid retrieval with dense + sparse fusion
-- Compare-aware retrieval that preserves document fairness
-- Evidence alignment before comparison generation
-- Resumable uploads with saved chunk state
-- Synthetic and real-corpus evaluation harnesses
-
-## Repository Layout
-
-- `src/`: React frontend
-- `server/`: Express backend
-- `server/rag/`: custom RAG pipeline
-- `server/evaluation/`: synthetic and real evaluation harnesses
-- `server/mcp-server.js`: local MCP search server
-
-## Setup
-
-Install frontend dependencies from the repo root:
-
-```powershell
-cmd /c npm.cmd install
-```
-
-Install backend dependencies:
-
-```powershell
+```bash
+npm install
 cd server
-cmd /c npm.cmd install
+npm install
 cd ..
 ```
 
-Install optional Python dependencies for `ragas` evaluation:
+### 3. 创建数据库
 
-```powershell
-cd server
-python -m venv evaluation\.venv-ragas
-evaluation\.venv-ragas\Scripts\python.exe -m pip install -r evaluation\ragas-requirements.txt
-cd ..
+如果你本机已经安装 PostgreSQL，可以直接创建默认数据库：
+
+```bash
+createdb agentai
 ```
 
-Create `server/.env` from `server/.env.example` and fill in the required keys:
+如果使用远程 PostgreSQL，跳过这一步，稍后把 `POSTGRES_DATABASE_URL` 指向你的实例即可。
+
+### 4. 配置环境变量
+
+```bash
+cp .env.example .env
+cp server/.env.example server/.env
+```
+
+最小可用后端配置示例：
 
 ```env
 OPENAI_API_KEY=your_openai_api_key
 SERPAPI_KEY=your_serpapi_key
+
+POSTGRES_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/agentai
+POSTGRES_SSL_ENABLED=false
+
 VECTOR_STORE_PROVIDER=local
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_CHAT_MODEL=gpt-5
-RAG_PROMPT_VERSION=v3
+
 RAG_CHUNK_STRATEGY=structured
-RAG_HYBRID_ENABLED=false
-RAG_RERANK_ENABLED=false
-RAG_RERANK_CANDIDATE_MULTIPLIER=3
-RAG_RERANK_WEIGHT=0.6
-RAG_OBSERVABILITY_ENABLED=false
-RAG_OBSERVABILITY_INCLUDE_CONTEXT=false
 RAG_CHUNK_SIZE=900
 RAG_CHUNK_OVERLAP=180
 RAG_RETRIEVAL_TOP_K=6
-RAG_SPARSE_TOP_K=8
 RAG_COMPARE_TOP_K_PER_DOC=3
-RAG_MIN_RELEVANCE_SCORE=0.32
-RAG_MIN_QUERY_TERM_COVERAGE=0.51
-RAG_NEAR_DUPLICATE_GUARD_ENABLED=true
+
+STARTUP_HEALTH_STRICT=false
 ```
 
-Notes:
+前端默认会请求 `http://localhost:5001`。如需改后端地址，修改根目录 `.env`：
 
-- `OPENAI_API_KEY` is required for embeddings and answer generation
-- `SERPAPI_KEY` is required for the MCP web answer path
-- `VECTOR_STORE_PROVIDER` supports `local` and `qdrant`
-- `RAG_RERANK_ENABLED` is disabled by default; when enabled, rerank runs after retrieval / hybrid fusion and before the confidence gate
-- `RAG_RERANK_CANDIDATE_MULTIPLIER` expands candidate recall before rerank with `candidateK = topK * multiplier`; rerank then truncates back to the final top-k
-- `RAG_RERANK_WEIGHT` controls the final mixed score between the original retrieval / hybrid score and the heuristic `rerankScore`
-- QA reranks globally across selected documents; compare reranks independently within each document to avoid cross-document mixing
-- `RAG_NEAR_DUPLICATE_GUARD_ENABLED` controls the no-difference short-circuit on highly similar compare evidence
-
-## Run
-
-Start frontend and backend together from the repo root:
-
-```powershell
-cmd /c npm.cmd run dev
+```env
+REACT_APP_DOMAIN=http://localhost:5001
+REACT_APP_API_AUTH_TOKEN=
 ```
 
-Default local ports:
+### 5. 启动
 
-- frontend: `3000`
-- backend: `5001`
+```bash
+npm run dev
+```
 
-## Evaluation
+默认端口：
 
-This repo uses a custom Node evaluation harness as the source-of-truth regression runner. It ingests the test corpus through the same upload / chunk / retrieval pipeline as the app, runs `chat(...)` end to end, and scores each case with project-specific checks for:
+| 服务 | 地址 |
+| --- | --- |
+| Frontend | `http://localhost:3000` |
+| Backend | `http://localhost:5001` |
 
-- abstain behavior
-- document and page citation coverage
-- expected answer fragments
-- latency and citation count
+健康检查：
 
-`ragas` runs as a second pass on top of the saved Node payloads. It is useful for semantic QA diagnostics and retrieval grounding, but compare quality is still primarily judged by the custom harness plus the compare rubric in `latest-ragas.*`.
+```bash
+curl http://localhost:5001/health
+curl http://localhost:5001/ready
+```
 
-Run the default synthetic evaluation:
+## 常用命令
 
-```powershell
+| 命令 | 说明 |
+| --- | --- |
+| `npm run dev` | 从根目录同时启动前端和后端。 |
+| `npm start` | 只启动 React 前端。 |
+| `npm run server` | 从根目录启动 Express 后端。 |
+| `cd server && npm run start` | 在 `server/` 下启动后端。 |
+| `npm run build` | 构建前端生产包。 |
+| `CI=true npm test -- --watchAll=false` | 非 watch 模式运行前端测试。 |
+| `cd server && npm test` | 运行后端测试入口。 |
+| `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
+| `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
+| `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
+
+说明：当前 `server/test/run.test.mjs` 只导入 `app.test.mjs` 和 `rag.test.mjs`；`server/test/answer-match.test.mjs` 是否纳入默认测试入口仍是待确认项。
+
+`ragas` 是可选 Python 评测，需要额外安装依赖：
+
+```bash
 cd server
-cmd /c npm.cmd run eval:synthetic
+python3 -m venv evaluation/.venv-ragas
+evaluation/.venv-ragas/bin/python -m pip install -r evaluation/ragas-requirements.txt
+cd ..
 ```
 
-Run the near-duplicate compare corpus:
+## 配置指南
 
-```powershell
-cd server
-cmd /c "set VECTOR_STORE_PROVIDER=local&& npm.cmd run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json"
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | 无 | 生成 embeddings 和回答所需。 |
+| `SERPAPI_KEY` | 无 | MCP web answer 的搜索能力所需。 |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 文档 chunk 与 query 的 embedding 模型。 |
+| `OPENAI_CHAT_MODEL` | `gpt-5` | 文档答案、对比答案、网页摘要使用的模型。 |
+| `RAG_PROMPT_VERSION` | `v3` | prompt 版本；`server/.env.example` 当前显式设置为 `v2`。 |
+| `VECTOR_STORE_PROVIDER` | `local` | `local` 或 `qdrant`。 |
+| `QDRANT_URL` | `http://127.0.0.1:6333` | Qdrant provider 地址。 |
+| `POSTGRES_DATABASE_URL` | 示例值 | 文档、会话记忆和长期记忆共用连接。 |
+| `RAG_CHUNK_STRATEGY` | `structured` | `structured` 或 `simple`。 |
+| `RAG_CHUNK_SIZE` | `900` | chunk 最大长度。 |
+| `RAG_CHUNK_OVERLAP` | `180` | structured/simple chunk overlap。 |
+| `RAG_HYBRID_ENABLED` | `false` | 是否启用 dense + sparse fusion。 |
+| `RAG_RERANK_ENABLED` | `false` | 是否启用 heuristic rerank。 |
+| `RAG_COMPARE_TOP_K_PER_DOC` | `3` | compare 路由中每份文档保留的证据数。 |
+| `RAG_MIN_RELEVANCE_SCORE` | `0.32` | 置信度门控最低相关分。 |
+| `RAG_MIN_QUERY_TERM_COVERAGE` | `0.51` | query term coverage 门槛。 |
+| `RAG_NEAR_DUPLICATE_GUARD_ENABLED` | `true` | 近重复且无冲突时避免编造差异。 |
+| `RAG_OBSERVABILITY_ENABLED` | `false` | 是否写入 RAG JSONL trace。 |
+| `RAG_OBSERVABILITY_INCLUDE_CONTEXT` | `false` | trace 是否记录完整 chunk 文本。 |
+| `API_AUTH_ENABLED` | `false` | 是否启用 API token 鉴权。 |
+| `API_AUTH_TOKEN` | `change-me-for-local-dev` | 后端鉴权 token。 |
+| `REACT_APP_API_AUTH_TOKEN` | 空 | 前端通过 `x-api-key` 发送的 token。 |
+| `STARTUP_HEALTH_STRICT` | `false` | 健康检查失败时是否阻止启动。 |
+
+可观测性默认只保存 metadata、score、`excerptHash` 和短 preview。只有在本地调试且能接受完整 chunk 文本落盘时，才建议设置：
+
+```env
+RAG_OBSERVABILITY_INCLUDE_CONTEXT=true
 ```
 
-Run the harder compare corpus:
+## 评测结果
 
-```powershell
-cd server
-cmd /c "set VECTOR_STORE_PROVIDER=local&& npm.cmd run eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json"
-```
+项目把 Node 自定义评测作为主回归，因为它能覆盖 RAG 产品真正关心的行为：是否该拒答、页级引用是否命中、compare 是否覆盖多文档、答案关键片段是否出现、上传恢复是否成功。
 
-Run the chunking comparison corpus:
+### Latest synthetic
 
-```powershell
-cd server
-cmd /c "set VECTOR_STORE_PROVIDER=local&& set RAG_CHUNK_STRATEGY=structured&& set RAG_CHUNK_OVERLAP=180&& npm.cmd run eval:synthetic -- evaluation/synthetic-corpus-chunking.json"
-```
+当前追踪的 `latest.*` 来自 `evaluation/synthetic-corpus-near-duplicate.json`：
 
-Run a real-document evaluation:
+| 指标 | 结果 |
+| --- | ---: |
+| Overall pass rate | `1.0` |
+| QA page hit rate | `1.0` |
+| Compare doc coverage | `1.0` |
+| Compare page hit rate | `1.0` |
+| Abstain accuracy | `1.0` |
+| Answer content hit rate | `1.0` |
+| Upload resume success rate | `1.0` |
+| Avg response time | `6254.63 ms` |
+| Avg citation count | `1.63` |
 
-```powershell
-cd server
-cmd /c npm.cmd run eval:real -- evaluation/real-corpus.json
-```
+### Hard compare
 
-Run `ragas` against the latest saved Node evaluation:
+`evaluation/synthetic-corpus-compare-hard.json` 用来压测更难的多文档差异场景：
 
-```powershell
-cd server
-evaluation\.venv-ragas\Scripts\python.exe evaluation\run-ragas-eval.py --input evaluation\results\latest.json
-```
+| 指标 | 结果 |
+| --- | ---: |
+| Overall pass rate | `1.0` |
+| QA page hit rate | `1.0` |
+| Compare doc coverage | `1.0` |
+| Compare page hit rate | `1.0` |
+| Abstain accuracy | `1.0` |
+| Answer content hit rate | `1.0` |
+| Upload resume success rate | `1.0` |
+| Avg response time | `16158.75 ms` |
+| Avg citation count | `1.88` |
 
-Run `ragas` against the hard compare report:
+### Ragas supplement
 
-```powershell
-cd server
-evaluation\.venv-ragas\Scripts\python.exe evaluation\run-ragas-eval.py --input evaluation\results\compare-hard.json --output-json evaluation\results\compare-hard-ragas.json --output-md evaluation\results\compare-hard-ragas.md
-```
+`ragas` 不替代自定义 compare harness，但适合补充观察语义相关性和 grounding：
 
-Saved reports are written to `server/evaluation/results/`.
+| 报告 | Answer relevancy | Faithfulness | Context utilization | Context precision | Context recall | Compare rubric |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `latest-ragas.*` overall | `0.6171` | `0.8` | `1.0` | `1.0` | `0.8333` | `0.95` |
+| `compare-hard-ragas.*` overall | `0.6658` | `0.8939` | `0.9286` | `1.0` | `0.8571` | `0.9333` |
 
-- `latest.json` and `latest.md` come from the Node evaluation harness
-- `latest-ragas.json` and `latest-ragas.md` come from the Python `ragas` pass
-- `compare-hard.json` / `compare-hard.md` and `compare-hard-ragas.json` / `compare-hard-ragas.md` are the tracked harder compare benchmark artifacts
-- The Node result payload now includes `retrievedContexts`, `referenceContexts`, `retrieved_context_ids`, `reference_context_ids`, and a normalized `ragasSample` per case so `ragas` can score the same run without re-querying the app
+### Chunking benchmark
 
-## Quantitative Results
+结构化 chunking 是这个项目最明显的质量提升之一：
 
-### Chunking Benchmark
-
-The clearest accuracy improvement in this project came from moving from simple fixed-window chunking to the current structured chunker on `evaluation/synthetic-corpus-chunking.json`.
-
-| Metric | Before: simple `900/0` | After: structured `900/180` |
+| Metric | Simple `900/0` | Structured `900/180` |
 | --- | ---: | ---: |
-| Overall pass rate | 0.5 | 1 |
-| QA page hit rate | 0.3333 | 1 |
-| Compare doc coverage | 0.3333 | 1 |
-| Compare page hit rate | 0.3333 | 1 |
-| Answer content hit rate | 0.3333 | 1 |
-| Upload resume success rate | 1 | 1 |
-| Avg response time (ms) | 1310.63 | 3649.63 |
-| Avg citation count | 0.5 | 1.5 |
+| Overall pass rate | `0.5` | `1.0` |
+| QA page hit rate | `0.3333` | `1.0` |
+| Compare doc coverage | `0.3333` | `1.0` |
+| Compare page hit rate | `0.3333` | `1.0` |
+| Answer content hit rate | `0.3333` | `1.0` |
+| Avg response time | `1310.63 ms` | `3649.63 ms` |
 
-This tradeoff is intentional: the structured chunker is slower, but it keeps better-grounded evidence in play and improves both QA and compare accuracy.
+结论很直接：structured chunker 更慢，但显著改善页级证据命中和多文档对比质量。
 
-### Latest Tracked Eval
+## API
 
-The current tracked `latest.*` report comes from `evaluation/synthetic-corpus-near-duplicate.json` and reports:
+| Method | Path | 说明 |
+| --- | --- | --- |
+| `GET` | `/health` | 返回 OpenAI、auth、vector store、PostgreSQL、long memory 等健康状态。 |
+| `GET` | `/ready` | readiness check，整体异常时返回 `503`。 |
+| `GET` | `/documents` | 列出当前持久化文档。 |
+| `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
+| `POST` | `/documents/clear` | 清空工作区文档。 |
+| `GET` | `/documents/:docId/file` | 以内联 PDF 方式流式返回文档，支持 range request。 |
+| `POST` | `/upload/init` | 初始化分片上传会话。 |
+| `GET` | `/upload/status` | 查询分片上传进度。 |
+| `POST` | `/upload/chunk` | 上传单个文件分片。 |
+| `POST` | `/upload/complete` | 合并分片、解析 PDF、写入索引。 |
+| `POST` | `/upload` | 旧版直接上传接口，限制 50 MB。 |
+| `GET` / `POST` | `/chat` | 对选中文档提问，返回 `ragAnswer`、`ragSources`、`mcpAnswer` 等。 |
+| `DELETE` | `/sessions/:sessionId` | 清理指定会话记忆。 |
+| `GET` | `/memory` | 查询长期记忆。 |
+| `POST` | `/memory` | 写入长期记忆。 |
+| `DELETE` | `/memory/:memoryId` | 删除单条长期记忆。 |
+| `DELETE` | `/memory` | 清空某用户长期记忆。 |
 
-- `overallPassRate`: `1.0`
-- `qaPageHitRate`: `1.0`
-- `compareDocCoverageRate`: `1.0`
-- `comparePageHitRate`: `1.0`
-- `abstainAccuracy`: `1.0`
-- `answerContentHitRate`: `1.0`
-- `averageResponseTimeMs`: `6254.63`
-- `averageCitationCount`: `1.63`
+`/documents/:docId/file` 和健康检查在鉴权中间件之前；其他 API 在 `API_AUTH_ENABLED=true` 时需要 `x-api-key` 或 `Authorization: Bearer <token>`。
 
-### Latest `ragas` Eval
+## 仓库结构
 
-The current tracked `latest-ragas.*` report on the same near-duplicate corpus reports:
+```text
+.
+├── src/                         # React frontend
+│   ├── components/              # Uploader, chat, answer renderer, PDF preview
+│   ├── App.js                   # Three-column archive workspace
+│   └── config.js                # API domain and auth header helper
+├── server/
+│   ├── app.js                   # Express routes and upload/chat orchestration
+│   ├── chat-mcp.js              # MCP web-answer client
+│   ├── mcp-server.js            # SerpAPI-backed local MCP search server
+│   ├── health.js                # Startup/readiness health checks
+│   ├── db/migrations/           # PostgreSQL tables
+│   ├── rag/                     # Custom RAG pipeline
+│   │   ├── chunker.js
+│   │   ├── query-router.js
+│   │   ├── retrievers/
+│   │   ├── confidence.js
+│   │   ├── evidence-aligner.js
+│   │   ├── comparison-engine.js
+│   │   └── answer-writer.js
+│   ├── evaluation/              # Synthetic, real-corpus, ragas evaluation
+│   └── test/                    # Backend tests
+└── README.md
+```
 
-- overall: `answerRelevancy=0.6171`, `faithfulness=0.8`, `contextUtilization=1.0`, `contextPrecision=1.0`, `contextRecall=0.8333`, `compareRubric=0.95`
-- `qa` route: `answerRelevancy=0.6724`, `faithfulness=1.0`, `contextUtilization=1.0`, `contextPrecision=1.0`, `contextRecall=1.0`
-- `compare` route: `answerRelevancy=0.5895`, `faithfulness=0.7`, `contextUtilization=1.0`, `contextPrecision=1.0`, `contextRecall=0.75`, `compareRubric=0.95`
+运行时和生成路径一般不需要手动编辑：
 
-### Hard Compare Benchmark
+```text
+node_modules/
+build/
+server/node_modules/
+server/data/
+server/uploads/
+server/upload-sessions/
+server/evaluation/generated/
+server/evaluation/results/<timestamped-files>
+```
 
-The tracked `compare-hard.*` report comes from `evaluation/synthetic-corpus-compare-hard.json` and is meant to stress compare behavior beyond near-duplicates. The current Node harness report is:
+## 运行注意
 
-- `overallPassRate`: `1.0`
-- `qaPageHitRate`: `1.0`
-- `compareDocCoverageRate`: `1.0`
-- `comparePageHitRate`: `1.0`
-- `abstainAccuracy`: `1.0`
-- `answerContentHitRate`: `1.0`
-- `averageResponseTimeMs`: `16158.75`
-- `averageCitationCount`: `1.88`
+- `VECTOR_STORE_PROVIDER=local` 会把 dense vector index 写到 `server/data/rag/vector-index.json`。
+- 本地 sparse index 写到 `server/data/rag/sparse-index.json`。
+- PDF 原始字节持久化在 PostgreSQL 的 document table 中，上传目录里的临时合并文件会在 ingest 后清理。
+- `STARTUP_HEALTH_STRICT=false` 只表示健康检查报错时不主动阻止启动；当前文档和会话存储初始化、上传、会话记忆仍依赖可用的 PostgreSQL。
+- `RAG_LONG_MEMORY_ENABLED=false` 时长期记忆 API 会返回空或 no-op；会话记忆仍用于追问改写。
+- 不要提交 `server/.env`、私有 PDF、`server/data/` 或上传会话文件。
 
-The current `compare-hard-ragas.*` report is:
+## 当前限制
 
-- overall: `answerRelevancy=0.6658`, `faithfulness=0.8939`, `contextUtilization=0.9286`, `contextPrecision=1.0`, `contextRecall=0.8571`, `compareRubric=0.9333`
-- `compare` route: `answerRelevancy=0.6758`, `faithfulness=0.8762`, `contextUtilization=0.9167`, `contextPrecision=1.0`, `contextRecall=0.8333`, `compareRubric=0.9333`
+- compare router 仍是关键词规则，不是语义分类器。
+- 多文档真实冲突场景需要 GPT-5 生成结构化比较，响应会比普通 QA 慢。
+- local JSON vector store 适合小规模本地工作区；大规模语料建议切到 Qdrant。
+- 真实文档评测需要自行准备 `evaluation/real-corpus.json`。
+- `ragas` 对 compare 的判断只能作为辅助，compare 正确性仍以自定义 harness 为主。
 
-This project still treats the custom Node metrics as the source of truth for abstain behavior, page-level evidence coverage, and compare-specific correctness. `ragas` is used as a semantic supplement, especially for QA quality and retrieval grounding, not as a replacement for the compare harness.
+## 推荐下一步
 
-## Current Limits
-
-- The compare router is still keyword-based
-- Real-conflict compare cases still depend on GPT-5, so they can be slower than QA
-- The local vector store is fine for small workloads, but Qdrant is the better path for larger corpora
-- Real-document evaluation still depends on a user-supplied corpus
-
-## Security Notes
-
-- Do not commit `server/.env`
-- Do not commit private uploaded documents
-- Use `server/.env.example` as the public config template
+- 加一个 Docker Compose，把 PostgreSQL、可选 Qdrant 和 app 一次拉起。
+- 把 compare router 从关键词升级成轻量分类器。
+- 在 README 增加真实 UI 截图或短 GIF。
+- 将 `answer-match.test.mjs` 纳入默认后端测试入口，或明确保留为独立测试。
