@@ -634,6 +634,42 @@ test("qa flow returns grounded citations", async () => {
   assert.equal(response.citations[0].pageNumber, 1);
 });
 
+test("ingest rolls back vector entries when document registration fails", async () => {
+  const failingStore = {
+    ...createFakeDocumentRegistryStore(),
+    async upsert() {
+      throw new Error("document registry unavailable");
+    },
+  };
+  configureDocumentRegistryStore(failingStore);
+  await resetDocumentRegistry();
+
+  await assert.rejects(
+    ingestDocumentPages({
+      docId: "rollback-doc",
+      fileName: "rollback.pdf",
+      filePath: await writeFixtureFile("rollback.pdf"),
+      pages: [
+        {
+          pageNumber: 1,
+          text: "Rollback sentinel policy: approved amount is 9000 credits.",
+        },
+      ],
+    }),
+    /document registry unavailable/
+  );
+
+  assert.equal(getDocument("rollback-doc"), null);
+
+  const results = await retrieveGlobalContext({
+    queryVector: toEmbedding("Rollback sentinel policy approved amount"),
+    queryText: "Rollback sentinel policy approved amount",
+    docIds: ["rollback-doc"],
+  });
+
+  assert.equal(results.length, 0);
+});
+
 test("legacy prompt version remains supported", async () => {
   const originalPromptVersion = process.env.RAG_PROMPT_VERSION;
   process.env.RAG_PROMPT_VERSION = "v1";

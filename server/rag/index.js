@@ -102,21 +102,41 @@ export const ingestDocumentPages = async ({ docId, filePath, fileName, pages }) 
         metadata: chunk.metadata,
       })
   );
-  await addDocumentsToIndex({
-    documents: langChainDocuments,
-  });
+  let indexed = false;
 
-  await registerDocument({
-    docId,
-    fileName,
-    sourceFilePath: filePath,
-    publicFilePath,
-    chunkCount: chunks.length,
-    pageCount: pages.length,
-    uploadedAt: new Date().toISOString(),
-  });
+  try {
+    await addDocumentsToIndex({
+      documents: langChainDocuments,
+    });
+    indexed = true;
 
-  return getDocument(docId);
+    await registerDocument({
+      docId,
+      fileName,
+      sourceFilePath: filePath,
+      publicFilePath,
+      chunkCount: chunks.length,
+      pageCount: pages.length,
+      uploadedAt: new Date().toISOString(),
+    });
+
+    return getDocument(docId);
+  } catch (error) {
+    if (indexed) {
+      try {
+        await removeDocumentsFromIndex({
+          docIds: [docId],
+        });
+      } catch (rollbackError) {
+        console.error(
+          `Failed to roll back vector index entries for docId ${docId}.`,
+          rollbackError
+        );
+      }
+    }
+
+    throw error;
+  }
 };
 
 export const ingestDocument = async ({ docId, filePath, fileName }) => {
