@@ -23,6 +23,10 @@ import chat, {
   rememberLongMemory,
 } from "./chat.js";
 import chatMCP from "./chat-mcp.js";
+import {
+  readLatestQualityReport,
+  runSyntheticQualityEvaluation,
+} from "./evaluation/quality-report.js";
 import { buildHealthReport, runStartupHealthChecks } from "./health.js";
 import { runAgentRag } from "./rag/agent.js";
 import {
@@ -218,6 +222,10 @@ export const createApp = async (options = {}) => {
   const healthService = options.healthService ?? {
     buildHealthReport,
     runStartupHealthChecks,
+  };
+  const qualityService = options.qualityService ?? {
+    readLatestQualityReport,
+    runSyntheticQualityEvaluation,
   };
 
   const app = express();
@@ -506,6 +514,30 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to clear long-term memories."),
+      });
+    }
+  });
+
+  app.get("/quality/latest", async (req, res) => {
+    try {
+      return res.json(await qualityService.readLatestQualityReport());
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to load the latest quality report."),
+      });
+    }
+  });
+
+  app.post("/quality/synthetic", async (req, res) => {
+    try {
+      return res.json(
+        await qualityService.runSyntheticQualityEvaluation({
+          corpusPath: req.body.corpusPath,
+        })
+      );
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to run synthetic evaluation."),
       });
     }
   });

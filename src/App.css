@@ -197,6 +197,7 @@
 .archive-sidebar-top,
 .archive-upload-section,
 .archive-context-section,
+.archive-quality-section,
 .archive-sidebar-footer {
   flex-shrink: 0;
 }
@@ -1019,6 +1020,139 @@
 
 .archive-context-section .relevant-document-list {
   max-height: 148px;
+}
+
+.quality-panel {
+  display: grid;
+  gap: var(--archive-space-sm);
+}
+
+.quality-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--archive-space-sm);
+}
+
+.quality-action-button.ant-btn {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 10px;
+  font-size: 0.76rem;
+}
+
+.quality-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--archive-space-sm);
+  padding: 8px 10px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: 10px;
+  background: var(--archive-surface);
+  color: var(--archive-text-secondary);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.quality-status span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quality-status span:first-child {
+  color: var(--archive-text-primary);
+}
+
+.quality-status-ok {
+  border-color: rgba(145, 214, 171, 0.28);
+  background: rgba(145, 214, 171, 0.05);
+}
+
+.quality-status-warn {
+  border-color: rgba(255, 204, 102, 0.28);
+  background: rgba(255, 204, 102, 0.05);
+}
+
+.quality-status-fail {
+  border-color: rgba(255, 118, 118, 0.28);
+  background: rgba(255, 118, 118, 0.05);
+}
+
+.quality-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--archive-space-sm);
+}
+
+.quality-metric {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: 10px;
+  background: var(--archive-surface-overlay);
+}
+
+.quality-metric span {
+  color: var(--archive-text-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.quality-metric strong {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.quality-failure-list,
+.quality-recommendation-list {
+  display: grid;
+  gap: 6px;
+}
+
+.quality-failure-item,
+.quality-recommendation-item,
+.quality-empty-note {
+  padding: 8px 10px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: 10px;
+  background: var(--archive-surface-overlay);
+  color: var(--archive-text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.quality-failure-item {
+  border-color: rgba(255, 118, 118, 0.2);
+}
+
+.quality-failure-item span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--archive-text-primary);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.quality-failure-item p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.quality-recommendation-item {
+  color: rgba(243, 242, 239, 0.7);
+  overflow-wrap: anywhere;
 }
 
 .archive-empty-state-compact {

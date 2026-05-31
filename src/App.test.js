@@ -35,6 +35,7 @@ describe("App", () => {
     expect(await screen.findByText("benefits-2025.pdf")).toBeInTheDocument();
     expect(screen.getByText("Workspace documents")).toBeInTheDocument();
     expect(screen.getByText("Relevant documents")).toBeInTheDocument();
+    expect(screen.getByText("Quality Guard")).toBeInTheDocument();
     expect(axios.get).toHaveBeenCalledWith("http://localhost:5001/documents");
   });
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
+import { ExperimentOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Button, Layout, Typography, message } from "antd";
 import PdfUploader from "./components/PdfUploader";
 import ChatComponent from "./components/ChatComponent";
@@ -85,6 +86,25 @@ const requestSessionClear = async (sessionId) => {
   await axios.delete(`${API_DOMAIN}/sessions/${sessionId}`);
 };
 
+const fetchLatestQualityReport = async () => {
+  const requestConfig = buildApiRequestConfig();
+  const response = requestConfig
+    ? await axios.get(`${API_DOMAIN}/quality/latest`, requestConfig)
+    : await axios.get(`${API_DOMAIN}/quality/latest`);
+  return response.data;
+};
+
+const requestSyntheticQualityRun = async () => {
+  const payload = {
+    corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
+  };
+  const requestConfig = buildApiRequestConfig();
+  const response = requestConfig
+    ? await axios.post(`${API_DOMAIN}/quality/synthetic`, payload, requestConfig)
+    : await axios.post(`${API_DOMAIN}/quality/synthetic`, payload);
+  return response.data;
+};
+
 const formatPageCount = (pageCount) => {
   const parsed = Number.parseInt(pageCount ?? "0", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : "?";
@@ -98,6 +118,12 @@ const getDocumentTags = (document) =>
 
 const getDocumentSummary = (document) =>
   document?.summary ?? document?.profile?.summary ?? "";
+
+const formatQualityPercent = (value) =>
+  typeof value === "number" ? `${value.toFixed(value % 1 === 0 ? 0 : 1)}%` : "N/A";
+
+const formatQualityNumber = (value) =>
+  typeof value === "number" ? value.toFixed(value % 1 === 0 ? 0 : 1) : "N/A";
 
 const DocumentProfileSnippet = ({ document, compact = false }) => {
   const tags = getDocumentTags(document).slice(0, compact ? 3 : 5);
@@ -123,10 +149,104 @@ const DocumentProfileSnippet = ({ document, compact = false }) => {
   );
 };
 
+const QualityGuardPanel = ({
+  isQualityLoading,
+  onLoadLatest,
+  onRunSynthetic,
+  qualityReport,
+}) => {
+  const metrics = qualityReport?.summary?.metrics ?? {};
+  const failedCases = qualityReport?.failedCases ?? [];
+  const recommendations = qualityReport?.recommendations ?? [];
+  const status = qualityReport?.status ?? "idle";
+  const statusLabel =
+    {
+      ok: "OK",
+      warn: "Warn",
+      fail: "Fail",
+      idle: "Idle",
+    }[status] ?? status;
+
+  return (
+    <div className="quality-panel">
+      <div className="quality-actions">
+        <Button
+          className="archive-secondary-button quality-action-button"
+          icon={<ReloadOutlined />}
+          loading={isQualityLoading}
+          onClick={() => void onLoadLatest()}
+        >
+          Latest
+        </Button>
+        <Button
+          className="archive-secondary-button quality-action-button"
+          icon={<ExperimentOutlined />}
+          loading={isQualityLoading}
+          onClick={() => void onRunSynthetic()}
+        >
+          Run eval
+        </Button>
+      </div>
+
+      {qualityReport ? (
+        <>
+          <div className={`quality-status quality-status-${status}`}>
+            <span>{statusLabel}</span>
+            <span>{qualityReport.summary?.runId ?? "latest run"}</span>
+          </div>
+
+          <div className="quality-metrics">
+            <div className="quality-metric">
+              <span>Pass</span>
+              <strong>{formatQualityPercent(metrics.overallPassPercent)}</strong>
+            </div>
+            <div className="quality-metric">
+              <span>Page hit</span>
+              <strong>{formatQualityPercent(metrics.qaPageHitPercent)}</strong>
+            </div>
+            <div className="quality-metric">
+              <span>Citations</span>
+              <strong>{formatQualityNumber(metrics.averageCitationCount)}</strong>
+            </div>
+          </div>
+
+          {failedCases.length > 0 ? (
+            <div className="quality-failure-list">
+              {failedCases.slice(0, 3).map((caseResult) => (
+                <div key={caseResult.id} className="quality-failure-item">
+                  <span>{caseResult.id}</span>
+                  <p>{caseResult.reasons?.join(", ") ?? "Case failed"}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="quality-empty-note">No failed cases in the latest run.</div>
+          )}
+
+          <div className="quality-recommendation-list">
+            {recommendations.slice(0, 2).map((recommendation) => (
+              <div key={recommendation.label} className="quality-recommendation-item">
+                {recommendation.label}
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="archive-empty-state archive-empty-state-compact">
+          <div className="archive-empty-mark">No quality report loaded</div>
+          <div>Load the latest report or run the default synthetic corpus.</div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const App = () => {
   const [conversation, setConversation] = useState([]);
   const [activeTurnIndex, setActiveTurnIndex] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isQualityLoading, setIsQualityLoading] = useState(false);
+  const [qualityReport, setQualityReport] = useState(null);
   const [activeDocuments, setActiveDocuments] = useState([]);
   const [selectedSource, setSelectedSource] = useState(null);
   const [sessionId, setSessionId] = useState(() => readStoredSessionId());
@@ -253,6 +373,35 @@ const App = () => {
       const backendMessage =
         error.response?.data?.error ?? "Unable to clear documents.";
       message.error(backendMessage);
+    }
+  };
+
+  const loadLatestQualityReport = async () => {
+    setIsQualityLoading(true);
+
+    try {
+      setQualityReport(await fetchLatestQualityReport());
+    } catch (error) {
+      const backendMessage =
+        error.response?.data?.error ?? "Unable to load the latest quality report.";
+      message.error(backendMessage);
+    } finally {
+      setIsQualityLoading(false);
+    }
+  };
+
+  const runSyntheticQualityReport = async () => {
+    setIsQualityLoading(true);
+
+    try {
+      setQualityReport(await requestSyntheticQualityRun());
+      message.success("Synthetic evaluation complete.");
+    } catch (error) {
+      const backendMessage =
+        error.response?.data?.error ?? "Unable to run the synthetic evaluation.";
+      message.error(backendMessage);
+    } finally {
+      setIsQualityLoading(false);
     }
   };
 
@@ -465,6 +614,21 @@ const App = () => {
                   <div>Upload at least one PDF to start asking questions.</div>
                 </div>
               )}
+            </section>
+
+            <section className="archive-sidebar-section archive-quality-section">
+              <div className="archive-sidebar-section-head">
+                <span className="archive-sidebar-section-title">Quality Guard</span>
+                <span className="archive-sidebar-section-caption">
+                  Synthetic RAG checks and failure hints
+                </span>
+              </div>
+              <QualityGuardPanel
+                isQualityLoading={isQualityLoading}
+                onLoadLatest={loadLatestQualityReport}
+                onRunSynthetic={runSyntheticQualityReport}
+                qualityReport={qualityReport}
+              />
             </section>
 
             <section className="archive-sidebar-footer">

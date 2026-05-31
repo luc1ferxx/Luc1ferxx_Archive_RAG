@@ -907,3 +907,106 @@ test("document file route streams stored PDFs before auth middleware", async () 
     await server.close();
   }
 });
+
+test("quality latest endpoint returns guardrail report", async () => {
+  const app = await createApp({
+    healthService: okHealthService,
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+    },
+    qualityService: {
+      readLatestQualityReport: async () => ({
+        status: "warn",
+        summary: {
+          runId: "run-1",
+          createdAt: new Date().toISOString(),
+          metrics: {
+            overallPassRate: 0.875,
+            averageCitationCount: 1.5,
+          },
+        },
+        failedCases: [
+          {
+            id: "qa_remote",
+            question: "What is remote work?",
+            reasons: ["Page coverage missed"],
+          },
+        ],
+        recommendations: [
+          {
+            label: "Increase retrieval topK",
+            detail: "Page coverage missed on at least one case.",
+          },
+        ],
+      }),
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/quality/latest`);
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.status, "warn");
+    assert.equal(body.summary.metrics.overallPassRate, 0.875);
+    assert.equal(body.failedCases[0].id, "qa_remote");
+    assert.match(body.recommendations[0].label, /retrieval/i);
+  } finally {
+    await server.close();
+  }
+});
+
+test("quality synthetic endpoint invokes injected runner", async () => {
+  let requestedCorpusPath = null;
+  const app = await createApp({
+    healthService: okHealthService,
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+    },
+    qualityService: {
+      runSyntheticQualityEvaluation: async ({ corpusPath }) => {
+        requestedCorpusPath = corpusPath;
+
+        return {
+          status: "ok",
+          summary: {
+            runId: "run-2",
+            metrics: {
+              overallPassRate: 1,
+            },
+          },
+          failedCases: [],
+          recommendations: [],
+        };
+      },
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/quality/synthetic`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(requestedCorpusPath, "evaluation/synthetic-corpus-near-duplicate.json");
+    assert.equal(body.status, "ok");
+    assert.equal(body.summary.runId, "run-2");
+  } finally {
+    await server.close();
+  }
+});
