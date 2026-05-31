@@ -147,6 +147,18 @@ const formatQualityDelta = (value, scale = 1) => {
   return `${prefix}${scaledValue.toFixed(Math.abs(scaledValue) % 1 === 0 ? 0 : 1)}`;
 };
 
+const formatQualityGateDelta = (check) => {
+  if (!check) {
+    return "N/A";
+  }
+
+  if (check.metric === "failedCaseCount" || check.metric === "averageCitationCount") {
+    return formatQualityDelta(check.delta);
+  }
+
+  return `${formatQualityDelta(check.delta, 100)} pts`;
+};
+
 const formatQualityDate = (value) => {
   if (!value) {
     return "No date";
@@ -306,11 +318,7 @@ const QualityGuardPanel = ({
         <div className={`quality-gate quality-gate-${gateStatus}`}>
           <div className="quality-gate-head">
             <span>Gate {gateStatusLabel}</span>
-            <span>
-              {primaryGateCheck?.metric === "failedCaseCount"
-                ? formatQualityDelta(primaryGateCheck.delta)
-                : `${formatQualityDelta(primaryGateCheck?.delta, 100)} pts`}
-            </span>
+            <span>{formatQualityGateDelta(primaryGateCheck)}</span>
           </div>
           <p>{regressionGate.summary}</p>
         </div>

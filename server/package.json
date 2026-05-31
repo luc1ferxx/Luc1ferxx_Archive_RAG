@@ -8,6 +8,7 @@
     "eval:synthetic": "node evaluation/run-synthetic-eval.mjs",
     "eval:real": "node evaluation/run-real-eval.mjs",
     "eval:ragas": "python evaluation/run-ragas-eval.py",
+    "quality:gate": "node evaluation/check-quality-gate.mjs",
     "test": "node test/run.test.mjs"
   },
   "keywords": [],

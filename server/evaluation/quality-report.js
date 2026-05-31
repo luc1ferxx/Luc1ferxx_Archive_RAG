@@ -400,6 +400,33 @@ export const buildQualityHistoryResponse = ({
   };
 };
 
+export const buildQualityGateDecision = ({
+  allowUnknown = false,
+  failOnWarn = false,
+  history = {},
+} = {}) => {
+  const regressionGate = history.regressionGate ?? {};
+  const status = regressionGate.status ?? history.status ?? "unknown";
+  const summary =
+    regressionGate.summary ??
+    "No quality regression gate summary is available.";
+  const exitCode =
+    status === "fail"
+      ? 1
+      : status === "warn" && failOnWarn
+        ? 1
+        : status === "unknown" && !allowUnknown
+          ? 2
+          : 0;
+
+  return {
+    exitCode,
+    status,
+    passed: exitCode === 0,
+    summary,
+  };
+};
+
 export const readLatestQualityReport = async () => {
   let payload = null;
 

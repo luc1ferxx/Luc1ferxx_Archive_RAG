@@ -5,7 +5,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createApp } from "../app.js";
-import { buildQualityHistoryResponse } from "../evaluation/quality-report.js";
+import {
+  buildQualityGateDecision,
+  buildQualityHistoryResponse,
+} from "../evaluation/quality-report.js";
 
 const okHealthService = {
   buildHealthReport: async () => ({
@@ -1143,4 +1146,85 @@ test("quality history endpoint returns regression gate", async () => {
   } finally {
     await server.close();
   }
+});
+
+test("quality gate decision maps status to CI exit codes", () => {
+  assert.deepEqual(
+    buildQualityGateDecision({
+      history: {
+        regressionGate: {
+          status: "pass",
+          summary: "No regression detected.",
+        },
+      },
+    }),
+    {
+      exitCode: 0,
+      status: "pass",
+      passed: true,
+      summary: "No regression detected.",
+    }
+  );
+
+  assert.equal(
+    buildQualityGateDecision({
+      history: {
+        regressionGate: {
+          status: "fail",
+          summary: "Regression detected.",
+        },
+      },
+    }).exitCode,
+    1
+  );
+
+  assert.equal(
+    buildQualityGateDecision({
+      failOnWarn: true,
+      history: {
+        regressionGate: {
+          status: "warn",
+          summary: "Possible regression detected.",
+        },
+      },
+    }).exitCode,
+    1
+  );
+
+  assert.equal(
+    buildQualityGateDecision({
+      history: {
+        regressionGate: {
+          status: "warn",
+          summary: "Possible regression detected.",
+        },
+      },
+    }).exitCode,
+    0
+  );
+
+  assert.equal(
+    buildQualityGateDecision({
+      history: {
+        regressionGate: {
+          status: "unknown",
+          summary: "No previous synthetic run is available.",
+        },
+      },
+    }).exitCode,
+    2
+  );
+
+  assert.equal(
+    buildQualityGateDecision({
+      allowUnknown: true,
+      history: {
+        regressionGate: {
+          status: "unknown",
+          summary: "No previous synthetic run is available.",
+        },
+      },
+    }).exitCode,
+    0
+  );
 });
