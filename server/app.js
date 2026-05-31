@@ -24,6 +24,7 @@ import chat, {
 } from "./chat.js";
 import chatMCP from "./chat-mcp.js";
 import { buildHealthReport, runStartupHealthChecks } from "./health.js";
+import { runAgentRag } from "./rag/agent.js";
 import {
   clearUploadSession,
   configureUploadSessionDirectory,
@@ -167,61 +168,14 @@ const buildChatResponse = async ({
     throw error;
   }
 
-  const [ragResp, mcpResp] = await Promise.allSettled([
-    ragService.chat(docIds, question, {
-      sessionId,
-      userId,
-    }),
-    webChatService(question),
-  ]);
-
-  const response = {
-    ragAnswer:
-      ragResp.status === "fulfilled"
-        ? ragResp.value.text
-        : `RAG unavailable: ${serializeError(
-            ragResp.reason,
-            "Unable to answer from the document."
-          )}`,
-    ragSources:
-      ragResp.status === "fulfilled" ? ragResp.value.citations ?? [] : [],
-    ragResolvedQuestion:
-      ragResp.status === "fulfilled"
-        ? ragResp.value.resolvedQuery ?? question
-        : question,
-    ragMemoryApplied:
-      ragResp.status === "fulfilled" ? Boolean(ragResp.value.memoryApplied) : false,
-    ragAbstained:
-      ragResp.status === "fulfilled" ? Boolean(ragResp.value.abstained) : null,
-    ragAbstainReason:
-      ragResp.status === "fulfilled"
-        ? ragResp.value.abstainReason ?? null
-        : null,
-    ragGapPlan:
-      ragResp.status === "fulfilled" ? ragResp.value.gapPlan ?? null : null,
-    mcpAnswer:
-      mcpResp.status === "fulfilled"
-        ? mcpResp.value.text
-        : `Web search unavailable: ${serializeError(
-            mcpResp.reason,
-            "Unable to answer from web search."
-          )}`,
-    errors: {
-      rag:
-        ragResp.status === "rejected"
-          ? serializeError(ragResp.reason, "Unable to answer from the document.")
-          : null,
-      mcp:
-        mcpResp.status === "rejected"
-          ? serializeError(mcpResp.reason, "Unable to answer from web search.")
-          : null,
-    },
-  };
-
-  return {
-    status: ragResp.status === "rejected" && mcpResp.status === "rejected" ? 502 : 200,
-    body: response,
-  };
+  return runAgentRag({
+    ragService,
+    webChatService,
+    question,
+    docIds,
+    sessionId,
+    userId,
+  });
 };
 
 export const createApp = async (options = {}) => {
@@ -717,12 +671,6 @@ export const createApp = async (options = {}) => {
     if (!question) {
       return res.status(400).json({
         error: "Question is required.",
-      });
-    }
-
-    if (docIds.length === 0) {
-      return res.status(400).json({
-        error: "At least one docId is required. Upload a PDF before asking a question.",
       });
     }
 

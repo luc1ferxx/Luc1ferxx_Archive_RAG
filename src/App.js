@@ -93,6 +93,36 @@ const formatPageCount = (pageCount) => {
 const formatDocumentCount = (count) =>
   count === 1 ? "1 document" : `${count} documents`;
 
+const getDocumentTags = (document) =>
+  document?.tags ?? document?.profile?.tags ?? [];
+
+const getDocumentSummary = (document) =>
+  document?.summary ?? document?.profile?.summary ?? "";
+
+const DocumentProfileSnippet = ({ document, compact = false }) => {
+  const tags = getDocumentTags(document).slice(0, compact ? 3 : 5);
+  const summary = getDocumentSummary(document);
+
+  if (tags.length === 0 && !summary) {
+    return null;
+  }
+
+  return (
+    <div className={`document-profile ${compact ? "is-compact" : ""}`}>
+      {tags.length > 0 ? (
+        <div className="document-tag-list">
+          {tags.map((tag) => (
+            <span key={tag} className="document-tag">
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {summary ? <div className="document-summary">{summary}</div> : null}
+    </div>
+  );
+};
+
 const App = () => {
   const [conversation, setConversation] = useState([]);
   const [activeTurnIndex, setActiveTurnIndex] = useState(null);
@@ -272,6 +302,9 @@ const App = () => {
         docId: source.docId,
         fileName: source.fileName,
         pageCount: matchingDocument?.pageCount ?? null,
+        summary: getDocumentSummary(matchingDocument),
+        tags: getDocumentTags(matchingDocument),
+        profile: matchingDocument?.profile ?? null,
         pages: [],
         previewSource: buildPreviewSourceFromDocument(
           matchingDocument ?? {
@@ -366,6 +399,7 @@ const App = () => {
                           ? `Pages ${document.pages.join(", ")}`
                           : "Page 1"}
                       </div>
+                      <DocumentProfileSnippet document={document} compact />
                     </button>
                   ))}
                 </div>
@@ -411,6 +445,7 @@ const App = () => {
                           {formatPageCount(document.pageCount)} pages · ID{" "}
                           {document.docId.slice(0, 8)}
                         </div>
+                        <DocumentProfileSnippet document={document} />
                       </button>
 
                       <button
@@ -474,7 +509,7 @@ const App = () => {
                 <span className="section-label-caption">
                   {activeDocuments.length > 0
                     ? `Working with ${docLabel}`
-                    : "Upload a PDF to get started"}
+                    : "Agent workspace is empty"}
                 </span>
               </div>
               <Text className="archive-meta-text">

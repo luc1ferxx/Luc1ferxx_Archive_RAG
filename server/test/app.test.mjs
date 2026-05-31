@@ -99,6 +99,7 @@ test("upload flow stores chunks, completes ingestion, and deletes documents", as
       documents.set(docId, document);
       return document;
     },
+    initializeDocumentRegistry: async () => [],
     initializeSessionMemory: async () => true,
     listDocuments: () => [...documents.values()],
   };
@@ -229,6 +230,7 @@ test("chat endpoint exposes explicit rag abstain fields", async () => {
       deleteDocument: async () => null,
       getDocument: (docId) => documents.get(docId) ?? null,
       ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
       initializeSessionMemory: async () => true,
       listDocuments: () => [...documents.values()],
     },
@@ -260,6 +262,407 @@ test("chat endpoint exposes explicit rag abstain fields", async () => {
     assert.equal(body.ragResolvedQuestion, "What is the NULPAR-DZ allocation amount?");
     assert.equal(body.ragGapPlan.missingAspects[0].label, "NULPAR-DZ");
     assert.equal("possibleLocations" in body.ragGapPlan, false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("chat endpoint returns unified agent answer and trace while preserving legacy fields", async () => {
+  const documents = new Map([
+    [
+      "doc-1",
+      {
+        docId: "doc-1",
+        fileName: "notes.pdf",
+      },
+    ],
+  ]);
+  const app = await createApp({
+    ragService: {
+      chat: async () => ({
+        text: "The archive says annual leave is 15 days. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            fileName: "notes.pdf",
+            pageNumber: 2,
+            chunkIndex: 0,
+            excerpt: "Annual leave is 15 days.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: "What is annual leave?",
+        memoryApplied: false,
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: (docId) => documents.get(docId) ?? null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [...documents.values()],
+    },
+    chatMcp: async () => ({
+      text: "web should not be required",
+    }),
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        docId: "doc-1",
+        question: "What is annual leave?",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.agentMode, "document");
+    assert.equal(body.agentAnswer, body.ragAnswer);
+    assert.equal(body.ragAnswer, "The archive says annual leave is 15 days. [Source 1]");
+    assert.equal(body.mcpAnswer, "Web search not used: document evidence was sufficient.");
+    assert.ok(Array.isArray(body.agentTrace));
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      ["plan", "document_rag", "synthesis"]
+    );
+    assert.equal(body.agentTrace.every((step) => step.status === "completed"), true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("chat endpoint agent falls back to web when document evidence is insufficient", async () => {
+  const documents = new Map([
+    [
+      "doc-1",
+      {
+        docId: "doc-1",
+        fileName: "notes.pdf",
+      },
+    ],
+  ]);
+  const app = await createApp({
+    ragService: {
+      chat: async () => ({
+        text: "I found related material, but cannot confirm the launch date.",
+        citations: [],
+        abstained: true,
+        abstainReason: "I found related material, but cannot confirm the launch date.",
+        resolvedQuery: "What is the latest launch date?",
+        memoryApplied: false,
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: (docId) => documents.get(docId) ?? null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [...documents.values()],
+    },
+    chatMcp: async () => ({
+      text: "The public launch date is May 30, 2026.",
+    }),
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        docId: "doc-1",
+        question: "What is the latest launch date?",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.agentMode, "document_web");
+    assert.match(body.agentAnswer, /Document evidence/i);
+    assert.match(body.agentAnswer, /Web context/i);
+    assert.match(body.agentAnswer, /May 30, 2026/);
+    assert.equal(body.ragAbstained, true);
+    assert.equal(body.mcpAnswer, "The public launch date is May 30, 2026.");
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      ["plan", "document_rag", "web_search", "synthesis"]
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("chat endpoint agent can answer workspace inventory without selected documents", async () => {
+  const app = await createApp({
+    ragService: {
+      chat: async () => {
+        throw new Error("Document RAG should not run for inventory prompts.");
+      },
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [
+        {
+          docId: "doc-1",
+          fileName: "benefits.pdf",
+          pageCount: 12,
+          chunkCount: 20,
+        },
+      ],
+    },
+    chatMcp: async () => {
+      throw new Error("Web search should not run for inventory prompts.");
+    },
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        question: "What documents are indexed?",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.agentMode, "inventory");
+    assert.match(body.agentAnswer, /benefits\.pdf/);
+    assert.equal(body.ragAnswer, "");
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      ["plan", "inventory", "synthesis"]
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("chat endpoint agent discovers relevant documents from profile metadata", async () => {
+  const app = await createApp({
+    ragService: {
+      chat: async () => {
+        throw new Error("Document RAG should not run for workspace discovery prompts.");
+      },
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [
+        {
+          docId: "doc-remote",
+          fileName: "remote-work.pdf",
+          summary: "Remote work approvals, weekly remote days, and manager review.",
+          tags: ["remote", "approval", "work"],
+          entities: ["Remote Work"],
+          profile: {
+            summary: "Remote work approvals, weekly remote days, and manager review.",
+            tags: ["remote", "approval", "work"],
+            entities: ["Remote Work"],
+          },
+        },
+        {
+          docId: "doc-security",
+          fileName: "security.pdf",
+          summary: "MFA, encryption, and device security requirements.",
+          tags: ["security", "mfa", "encryption"],
+          entities: ["MFA"],
+          profile: {
+            summary: "MFA, encryption, and device security requirements.",
+            tags: ["security", "mfa", "encryption"],
+            entities: ["MFA"],
+          },
+        },
+      ],
+    },
+    chatMcp: async () => {
+      throw new Error("Web search should not run for workspace discovery prompts.");
+    },
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        question: "Which document covers remote work approval?",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.agentMode, "document_discovery");
+    assert.match(body.agentAnswer, /remote-work\.pdf/);
+    assert.doesNotMatch(body.agentAnswer, /security\.pdf/);
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      ["plan", "document_discovery", "synthesis"]
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("chat endpoint agent returns a structured research brief", async () => {
+  const documents = new Map([
+    [
+      "doc-contract",
+      {
+        docId: "doc-contract",
+        fileName: "refund-contract.pdf",
+        summary: "Refund terms, customer notice windows, and fee exceptions.",
+        tags: ["refund", "contract", "risk"],
+        entities: ["Refund"],
+        profile: {
+          summary: "Refund terms, customer notice windows, and fee exceptions.",
+          tags: ["refund", "contract", "risk"],
+          entities: ["Refund"],
+        },
+      },
+    ],
+  ]);
+  const askedQuestions = [];
+  const app = await createApp({
+    ragService: {
+      chat: async (_docIds, query) => {
+        askedQuestions.push(query);
+
+        return {
+          text: `Finding for ${query}: refunds require 30 days notice. [Source 1]`,
+          citations: [
+            {
+              rank: 1,
+              docId: "doc-contract",
+              fileName: "refund-contract.pdf",
+              pageNumber: 4,
+              chunkIndex: askedQuestions.length,
+              excerpt: "Refunds require 30 days notice.",
+            },
+          ],
+          abstained: false,
+          resolvedQuery: query,
+          memoryApplied: false,
+        };
+      },
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: (docId) => documents.get(docId) ?? null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [...documents.values()],
+    },
+    chatMcp: async () => {
+      throw new Error("Web search should not run for document-grounded research briefs.");
+    },
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        docId: "doc-contract",
+        question: "Create a research brief about refund risk.",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.agentMode, "research_brief");
+    assert.ok(askedQuestions.length >= 3);
+    assert.match(body.agentAnswer, /Executive Summary/i);
+    assert.match(body.agentAnswer, /Key Findings/i);
+    assert.equal(body.researchBrief.topic, "Create a research brief about refund risk.");
+    assert.equal(body.researchBrief.questions.length, askedQuestions.length);
+    assert.equal(body.ragSources.length, askedQuestions.length);
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      ["plan", "research_plan", "research_question", "research_question", "research_question", "synthesis"]
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("chat endpoint research brief requests require selected documents", async () => {
+  const app = await createApp({
+    ragService: {
+      chat: async () => {
+        throw new Error("Document RAG should not run without selected documents.");
+      },
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        question: "Create a research brief about refund risk.",
+      }),
+    });
+
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /At least one docId is required/i);
   } finally {
     await server.close();
   }
@@ -325,6 +728,7 @@ test("memory endpoints list, create, and delete long-term memories", async () =>
         return matchingMemories.length;
       },
       initializeSessionMemory: async () => true,
+      initializeDocumentRegistry: async () => [],
     },
     chatMcp: async () => ({
       text: "web",

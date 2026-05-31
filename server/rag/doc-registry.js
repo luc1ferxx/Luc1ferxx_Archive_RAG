@@ -37,9 +37,36 @@ const ensureTableName = () => {
 
 const normalizeDocId = (docId) => String(docId ?? "").trim();
 
+const normalizeStringArray = (values, { limit = 12 } = {}) => {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      values
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean)
+    ),
+  ].slice(0, limit);
+};
+
+const normalizeProfile = (document = {}) => {
+  const rawProfile =
+    document.profile && typeof document.profile === "object" ? document.profile : {};
+
+  return {
+    summary: String(rawProfile.summary ?? document.summary ?? "").trim(),
+    tags: normalizeStringArray(rawProfile.tags ?? document.tags),
+    entities: normalizeStringArray(rawProfile.entities ?? document.entities),
+    generatedAt: String(rawProfile.generatedAt ?? document.profileGeneratedAt ?? "").trim(),
+  };
+};
+
 const toStoredDocument = (document = {}) => {
   const docId = normalizeDocId(document.docId);
   const publicFilePath = buildPublicFilePath(docId);
+  const profile = normalizeProfile(document);
 
   return {
     docId,
@@ -50,6 +77,7 @@ const toStoredDocument = (document = {}) => {
     fileSize: toPositiveInteger(document.fileSize),
     chunkCount: toPositiveInteger(document.chunkCount),
     pageCount: toPositiveInteger(document.pageCount),
+    profile,
     uploadedAt: document.uploadedAt ?? new Date().toISOString(),
     storageBackend: "postgresql",
   };
@@ -63,6 +91,7 @@ const mapRowToStoredDocument = (row = {}) =>
     fileSize: row.file_size,
     chunkCount: row.chunk_count,
     pageCount: row.page_count,
+    profile: row.profile,
     uploadedAt: row.uploaded_at,
   });
 
@@ -77,6 +106,10 @@ const toPublicDocument = (document) =>
         fileSize: document.fileSize,
         chunkCount: document.chunkCount,
         pageCount: document.pageCount,
+        summary: document.profile?.summary ?? "",
+        tags: document.profile?.tags ?? [],
+        entities: document.profile?.entities ?? [],
+        profile: document.profile,
         uploadedAt: document.uploadedAt,
         storageBackend: document.storageBackend,
       }
@@ -166,7 +199,7 @@ const createDefaultStore = () => ({
     const tableName = ensureTableName();
     const result = await queryPostgres(
       `
-        SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, uploaded_at
+        SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, profile, uploaded_at
         FROM ${tableName}
         ORDER BY uploaded_at ASC, doc_id ASC
       `
@@ -198,9 +231,10 @@ const createDefaultStore = () => ({
           file_bytes,
           chunk_count,
           page_count,
+          profile,
           uploaded_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (doc_id)
         DO UPDATE SET
           file_name = EXCLUDED.file_name,
@@ -209,8 +243,9 @@ const createDefaultStore = () => ({
           file_bytes = EXCLUDED.file_bytes,
           chunk_count = EXCLUDED.chunk_count,
           page_count = EXCLUDED.page_count,
+          profile = EXCLUDED.profile,
           uploaded_at = EXCLUDED.uploaded_at
-        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, uploaded_at
+        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, profile, uploaded_at
       `,
       [
         normalizedDocument.docId,
@@ -220,6 +255,7 @@ const createDefaultStore = () => ({
         fileBuffer,
         normalizedDocument.chunkCount,
         normalizedDocument.pageCount,
+        normalizedDocument.profile,
         normalizedDocument.uploadedAt,
       ]
     );
@@ -237,7 +273,7 @@ const createDefaultStore = () => ({
     const tableName = ensureTableName();
     const result = await queryPostgres(
       `
-        SELECT doc_id, file_name, mime_type, file_size, file_bytes, chunk_count, page_count, uploaded_at
+        SELECT doc_id, file_name, mime_type, file_size, file_bytes, chunk_count, page_count, profile, uploaded_at
         FROM ${tableName}
         WHERE doc_id = $1
         LIMIT 1
@@ -271,7 +307,7 @@ const createDefaultStore = () => ({
       `
         DELETE FROM ${tableName}
         WHERE doc_id = $1
-        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, uploaded_at
+        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, profile, uploaded_at
       `,
       [normalizedDocId]
     );

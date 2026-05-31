@@ -382,6 +382,14 @@ const createFakeDocumentRegistryStore = () => {
         fileBuffer.byteLength,
       chunkCount: Number.parseInt(document.chunkCount ?? "0", 10) || 0,
       pageCount: Number.parseInt(document.pageCount ?? "0", 10) || 0,
+      profile: structuredClone(
+        document.profile ?? {
+          summary: "",
+          tags: [],
+          entities: [],
+          generatedAt: "",
+        }
+      ),
       uploadedAt: document.uploadedAt ?? new Date().toISOString(),
       storageBackend: "postgresql",
     };
@@ -632,6 +640,24 @@ test("qa flow returns grounded citations", async () => {
   assert.match(response.text, /Grounded answer/);
   assert.equal(response.citations.length, 1);
   assert.equal(response.citations[0].pageNumber, 1);
+});
+
+test("ingest stores automatic document profile metadata", async () => {
+  const document = await ingestFixture({
+    docId: "profiled-benefits",
+    fileName: "benefits-handbook.pdf",
+    pages: [
+      "Remote work policy: employees may work remotely two days per week with manager approval. Annual leave policy grants fifteen paid days.",
+      "Security requirements: employees must use MFA, encryption, and approved devices for customer data.",
+    ],
+  });
+
+  assert.match(document.summary, /Remote work policy/i);
+  assert.ok(document.tags.includes("remote"));
+  assert.ok(document.tags.includes("security"));
+  assert.ok(document.entities.includes("MFA"));
+  assert.deepEqual(document.profile.tags, document.tags);
+  assert.equal(getDocument("profiled-benefits").summary, document.summary);
 });
 
 test("ingest rolls back vector entries when document registration fails", async () => {

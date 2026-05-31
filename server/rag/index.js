@@ -25,6 +25,7 @@ import {
   registerDocument,
 } from "./doc-registry.js";
 import { buildPublicFilePath } from "./document-utils.js";
+import { buildDocumentProfile } from "./document-profiler.js";
 import { alignComparisonEvidence } from "./evidence-aligner.js";
 import { planQaEvidenceGap } from "./gap-planner.js";
 import {
@@ -117,6 +118,10 @@ export const ingestDocumentPages = async ({ docId, filePath, fileName, pages }) 
       publicFilePath,
       chunkCount: chunks.length,
       pageCount: pages.length,
+      profile: buildDocumentProfile({
+        fileName,
+        pages,
+      }),
       uploadedAt: new Date().toISOString(),
     });
 

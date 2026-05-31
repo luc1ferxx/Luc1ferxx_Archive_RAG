@@ -9,6 +9,17 @@ const formatLookupCount = (count) => {
   return count === 1 ? "1 result" : `${count} results`;
 };
 
+const formatAgentMode = (mode) => {
+  if (!mode) {
+    return "Agent";
+  }
+
+  return mode
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" + ");
+};
+
 const RenderQA = (props) => {
   const {
     conversation,
@@ -32,6 +43,8 @@ const RenderQA = (props) => {
     <div className="archive-log">
       {conversation?.map((each, index) => {
         const gapPlan = each.answer?.ragGapPlan;
+        const agentTrace = each.answer?.agentTrace ?? [];
+        const researchBrief = each.answer?.researchBrief;
 
         return (
           <article
@@ -49,6 +62,67 @@ const RenderQA = (props) => {
             </div>
 
             <section className="archive-response">
+              {each.answer?.agentAnswer ? (
+                <div className="archive-agent-panel">
+                  <div className="archive-answer-label-wrap">
+                    <div className="archive-answer-label">Agent answer</div>
+                    <span className="archive-answer-chip archive-answer-chip-agent">
+                      {formatAgentMode(each.answer.agentMode)}
+                    </span>
+                  </div>
+
+                  <div className="archive-answer-text archive-agent-answer">
+                    {each.answer.agentAnswer}
+                  </div>
+
+                  {agentTrace.length > 0 ? (
+                    <div className="archive-agent-trace">
+                      {agentTrace.map((step) => (
+                        <div
+                          key={step.id}
+                          className={`archive-agent-step is-${step.status}`}
+                        >
+                          <div className="archive-agent-step-head">
+                            <span>{step.label}</span>
+                            <span>{step.status}</span>
+                          </div>
+                          <div className="archive-agent-step-copy">
+                            {step.summary}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {researchBrief?.questions?.length > 0 ? (
+                    <div className="archive-research-panel">
+                      <div className="archive-source-section-label">
+                        Research brief
+                      </div>
+                      <div className="archive-research-meta">
+                        <span>
+                          {researchBrief.questions.length} subquestions
+                        </span>
+                        <span>
+                          {researchBrief.citations?.length ?? 0} citations
+                        </span>
+                      </div>
+                      <div className="archive-research-question-list">
+                        {researchBrief.questions.map((question) => (
+                          <div
+                            key={question.id}
+                            className={`archive-research-question is-${question.status}`}
+                          >
+                            <span>{question.question}</span>
+                            <span>{question.status}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
               <div className="archive-response-section">
                 <div className="archive-answer-label-wrap">
                   <div className="archive-answer-label">Document answer</div>

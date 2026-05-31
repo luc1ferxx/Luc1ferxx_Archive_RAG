@@ -76,11 +76,6 @@ const ChatComponent = (props) => {
 
   const onSearch = useCallback(
     async (question) => {
-      if (!hasDocuments) {
-        message.warning("Upload at least one PDF before asking a question.");
-        return;
-      }
-
       const trimmedQuestion = question.trim();
 
       if (!trimmedQuestion) {
@@ -101,7 +96,7 @@ const ChatComponent = (props) => {
         handleResp(trimmedQuestion, data);
 
         if (isChatModeOn) {
-          talk(data?.ragAnswer);
+          talk(data?.agentAnswer ?? data?.ragAnswer);
         }
       } catch (error) {
         console.error("Error fetching chat response:", error);
@@ -113,6 +108,8 @@ const ChatComponent = (props) => {
           ragAnswer: `RAG unavailable: ${backendMessage}`,
           ragSources: [],
           ragGapPlan: null,
+          agentAnswer: `Agent unavailable: ${backendMessage}`,
+          agentTrace: [],
           mcpAnswer: `Web search unavailable: ${backendMessage}`,
         });
       } finally {
@@ -122,7 +119,6 @@ const ChatComponent = (props) => {
     [
       docIds,
       handleResp,
-      hasDocuments,
       isChatModeOn,
       sessionId,
       setIsLoading,
@@ -206,7 +202,7 @@ const ChatComponent = (props) => {
       : "Voice mode is on. Press record to ask the next question."
     : hasDocuments
       ? `Working with ${docLabel}`
-      : "Upload a PDF to start asking questions.";
+      : "Agent can inspect the empty workspace or answer web-current questions.";
 
   return (
     <div className="archive-composer-bar">
@@ -250,8 +246,8 @@ const ChatComponent = (props) => {
             className="archive-search"
             placeholder={
               hasDocuments
-                ? "Ask a question about the current documents"
-                : "Upload a PDF to begin"
+                ? "Ask the agent about the current documents"
+                : "Ask the agent what documents are indexed"
             }
             enterButton="Ask"
             size="large"
@@ -259,7 +255,6 @@ const ChatComponent = (props) => {
             loading={isLoading}
             value={searchValue}
             onChange={(event) => setSearchValue(event.target.value)}
-            disabled={!hasDocuments}
           />
         )}
 
