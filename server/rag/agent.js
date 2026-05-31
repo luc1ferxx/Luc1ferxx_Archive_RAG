@@ -5,6 +5,13 @@ import {
   selectBetterRagResult,
 } from "./agent-self-check.js";
 import {
+  appendTraceStep,
+  buildBudgetLimitStep,
+  consumeBudget,
+  createAgentBudget,
+  getBudgetSnapshot,
+} from "./agent-budget.js";
+import {
   buildResearchPlan,
   formatResearchBrief,
 } from "./research-brief.js";
@@ -370,7 +377,7 @@ const callWebSearch = async ({ webChatService, question }) => {
   }
 };
 
-const runResearchBrief = async ({ ragService, question, docIds }) => {
+const runResearchBrief = async ({ budgetState, ragService, question, docIds }) => {
   const documents = ragService.listDocuments?.() ?? [];
   const selectedDocuments = documents.filter((document) => docIds.includes(document.docId));
   const plan = buildResearchPlan({
@@ -380,6 +387,23 @@ const runResearchBrief = async ({ ragService, question, docIds }) => {
   const results = [];
 
   for (const entry of plan.questions) {
+    const budget = consumeBudget(budgetState, "researchQuestions");
+
+    if (!budget.ok) {
+      results.push({
+        id: entry.id,
+        question: entry.question,
+        status: "skipped",
+        text: "",
+        citations: [],
+        abstained: false,
+        abstainReason: null,
+        resolvedQuery: entry.question,
+        error: budget.reason,
+      });
+      continue;
+    }
+
     try {
       const value = await ragService.chat(docIds, entry.question, {
         sessionId: null,
@@ -420,6 +444,7 @@ const runResearchBrief = async ({ ragService, question, docIds }) => {
 };
 
 export const runAgentRag = async ({
+  agentBudget,
   ragService,
   webChatService,
   question,
@@ -428,27 +453,45 @@ export const runAgentRag = async ({
   userId,
 }) => {
   const trace = [];
+  const budgetState = createAgentBudget(agentBudget);
+  const addTraceStep = (step) =>
+    appendTraceStep({
+      budgetState,
+      trace,
+      step: buildStep({
+        index: trace.length + 1,
+        ...step,
+      }),
+    });
+  const addBudgetLimitTrace = ({ reason, tool }) =>
+    appendTraceStep({
+      budgetState,
+      trace,
+      step: buildBudgetLimitStep({
+        index: trace.length + 1,
+        reason,
+        tool,
+      }),
+    });
   const plan = buildPlan({
     question,
     docIds,
   });
 
-  trace.push(
-    buildStep({
-      index: trace.length + 1,
-      type: "plan",
-      label: "Plan",
-      summary: plan.summary,
-      detail: {
-        mode: plan.mode,
+  addTraceStep({
+    type: "plan",
+    label: "Plan",
+    summary: plan.summary,
+    detail: {
+      mode: plan.mode,
+      docIds,
+      budget: getBudgetSnapshot(budgetState),
+      actions: buildPlannerActions({
+        plan,
         docIds,
-        actions: buildPlannerActions({
-          plan,
-          docIds,
-        }),
-      },
-    })
-  );
+      }),
+    },
+  });
 
   if (plan.requiresDocuments && docIds.length === 0) {
     const error = new Error(
@@ -473,41 +516,44 @@ export const runAgentRag = async ({
       documents: selectedDocuments,
     });
 
-    trace.push(
-      buildStep({
-        index: trace.length + 1,
-        type: "research_plan",
-        label: "Research Plan",
-        summary: `Planned ${researchPlan.questions.length} document-grounded research question${
-          researchPlan.questions.length === 1 ? "" : "s"
-        }.`,
-        detail: {
-          questions: researchPlan.questions,
-        },
-      })
-    );
+    addTraceStep({
+      type: "research_plan",
+      label: "Research Plan",
+      summary: `Planned ${researchPlan.questions.length} document-grounded research question${
+        researchPlan.questions.length === 1 ? "" : "s"
+      }.`,
+      detail: {
+        questions: researchPlan.questions,
+      },
+    });
 
     researchBrief = await runResearchBrief({
+      budgetState,
       ragService,
       question,
       docIds,
     });
 
     for (const finding of researchBrief.findings) {
-      trace.push(
-        buildStep({
-          index: trace.length + 1,
-          type: "research_question",
-          label: "Research Question",
-          status: finding.status === "completed" ? "completed" : "failed",
-          summary: finding.question,
-          detail: {
-            citations: finding.citations?.length ?? 0,
-            abstained: Boolean(finding.abstained),
-            error: finding.error ?? null,
-          },
-        })
-      );
+      if (finding.status === "skipped") {
+        addBudgetLimitTrace({
+          tool: "Research Question",
+          reason: finding.error ?? "Research question budget exhausted.",
+        });
+        continue;
+      }
+
+      addTraceStep({
+        type: "research_question",
+        label: "Research Question",
+        status: finding.status === "completed" ? "completed" : "failed",
+        summary: finding.question,
+        detail: {
+          citations: finding.citations?.length ?? 0,
+          abstained: Boolean(finding.abstained),
+          error: finding.error ?? null,
+        },
+      });
     }
   }
 
@@ -515,19 +561,16 @@ export const runAgentRag = async ({
     const documents = ragService.listDocuments?.() ?? [];
     inventoryAnswer = buildInventoryAnswer(documents);
 
-    trace.push(
-      buildStep({
-        index: trace.length + 1,
-        type: "inventory",
-        label: "Workspace Inventory",
-        summary:
-          documents.length === 0
-            ? "No indexed documents found."
-            : `Found ${documents.length} indexed document${
-                documents.length === 1 ? "" : "s"
-              }.`,
-      })
-    );
+    addTraceStep({
+      type: "inventory",
+      label: "Workspace Inventory",
+      summary:
+        documents.length === 0
+          ? "No indexed documents found."
+          : `Found ${documents.length} indexed document${
+              documents.length === 1 ? "" : "s"
+            }.`,
+    });
   }
 
   if (plan.wantsDiscovery) {
@@ -539,34 +582,43 @@ export const runAgentRag = async ({
     });
     discoveryAnswer = buildDiscoveryAnswer(matches);
 
-    trace.push(
-      buildStep({
-        index: trace.length + 1,
-        type: "document_discovery",
-        label: "Document Discovery",
-        summary:
-          matches.length === 0
-            ? "No strong metadata match found."
-            : `Found ${matches.length} likely matching document${
-                matches.length === 1 ? "" : "s"
-              }.`,
-      })
-    );
+    addTraceStep({
+      type: "document_discovery",
+      label: "Document Discovery",
+      summary:
+        matches.length === 0
+          ? "No strong metadata match found."
+          : `Found ${matches.length} likely matching document${
+              matches.length === 1 ? "" : "s"
+            }.`,
+    });
   }
 
   if (plan.wantsDocumentRag) {
-    const primaryRagResult = await callDocumentRag({
-      ragService,
-      docIds,
-      question,
-      sessionId,
-      userId,
-    });
+    const primaryBudget = consumeBudget(budgetState, "documentRagCalls");
+    const primaryRagResult = primaryBudget.ok
+      ? await callDocumentRag({
+          ragService,
+          docIds,
+          question,
+          sessionId,
+          userId,
+        })
+      : {
+          ok: false,
+          value: null,
+          error: new Error(primaryBudget.reason),
+        };
+
     ragResult = primaryRagResult;
 
-    trace.push(
-      buildStep({
-        index: trace.length + 1,
+    if (!primaryBudget.ok) {
+      addBudgetLimitTrace({
+        tool: "Document RAG",
+        reason: primaryBudget.reason,
+      });
+    } else {
+      addTraceStep({
         type: "document_rag",
         label: "Document RAG",
         status: primaryRagResult.ok ? "completed" : "failed",
@@ -582,41 +634,46 @@ export const runAgentRag = async ({
               primaryRagResult.error,
               "Unable to answer from the document."
             )}`,
-      })
-    );
+      });
+    }
 
     const primaryCheck = evaluateDocumentEvidence({
       ragResult: primaryRagResult,
       docIds,
     });
 
-    trace.push(
-      buildStep({
-        index: trace.length + 1,
+    if (primaryBudget.ok) {
+      addTraceStep({
         type: "self_check",
         label: "Self Check",
         status: primaryCheck.passed ? "completed" : "failed",
         summary: buildSelfCheckSummary(primaryCheck),
         detail: primaryCheck,
-      })
-    );
+      });
+    }
 
     if (primaryCheck.retryRecommended) {
       const retryQuestion = buildEvidenceRetryQuestion({
         question,
         check: primaryCheck,
       });
-      const retryRagResult = await callDocumentRag({
-        ragService,
-        docIds,
-        question: retryQuestion,
-        sessionId,
-        userId,
-      });
+      const retryBudget = consumeBudget(budgetState, "documentRagCalls");
 
-      trace.push(
-        buildStep({
-          index: trace.length + 1,
+      if (!retryBudget.ok) {
+        addBudgetLimitTrace({
+          tool: "Document retry",
+          reason: retryBudget.reason,
+        });
+      } else {
+        const retryRagResult = await callDocumentRag({
+          ragService,
+          docIds,
+          question: retryQuestion,
+          sessionId,
+          userId,
+        });
+
+        addTraceStep({
           type: "document_retry",
           label: "Document Retry",
           status: retryRagResult.ok ? "completed" : "failed",
@@ -633,46 +690,51 @@ export const runAgentRag = async ({
           detail: {
             retryQuestion,
           },
-        })
-      );
-
-      if (retryRagResult.ok) {
-        const retryCheck = evaluateDocumentEvidence({
-          ragResult: retryRagResult,
-          docIds,
         });
 
-        trace.push(
-          buildStep({
-            index: trace.length + 1,
+        if (retryRagResult.ok) {
+          const retryCheck = evaluateDocumentEvidence({
+            ragResult: retryRagResult,
+            docIds,
+          });
+
+          addTraceStep({
             type: "self_check",
             label: "Retry Self Check",
             status: retryCheck.passed ? "completed" : "failed",
             summary: buildSelfCheckSummary(retryCheck),
             detail: retryCheck,
-          })
-        );
-      }
+          });
+        }
 
-      ragResult = selectBetterRagResult({
-        primary: primaryRagResult,
-        retry: retryRagResult,
-      });
+        ragResult = selectBetterRagResult({
+          primary: primaryRagResult,
+          retry: retryRagResult,
+        });
+      }
     }
   }
 
   const shouldRunWeb =
     plan.wantsWeb || (ragResult?.ok && ragResult.value.abstained) || ragResult?.ok === false;
+  let skippedWebBecauseBudget = false;
 
   if (shouldRunWeb) {
-    webResult = await callWebSearch({
-      webChatService,
-      question,
-    });
+    const webBudget = consumeBudget(budgetState, "webSearchCalls");
 
-    trace.push(
-      buildStep({
-        index: trace.length + 1,
+    if (!webBudget.ok) {
+      skippedWebBecauseBudget = true;
+      addBudgetLimitTrace({
+        tool: "Web Search",
+        reason: webBudget.reason,
+      });
+    } else {
+      webResult = await callWebSearch({
+        webChatService,
+        question,
+      });
+
+      addTraceStep({
         type: "web_search",
         label: "Web Search",
         status: webResult.ok ? "completed" : "failed",
@@ -682,8 +744,8 @@ export const runAgentRag = async ({
               webResult.error,
               "Unable to answer from web search."
             )}`,
-      })
-    );
+      });
+    }
   }
 
   const agentAnswer = buildSynthesisAnswer({
@@ -700,14 +762,14 @@ export const runAgentRag = async ({
   const agentMode =
     ragResult?.ok && ragResult.value.abstained && webResult?.ok ? "document_web" : plan.mode;
 
-  trace.push(
-    buildStep({
-      index: trace.length + 1,
-      type: "synthesis",
-      label: "Synthesis",
-      summary: "Composed the final agent answer from completed tool results.",
-    })
-  );
+  addTraceStep({
+    type: "synthesis",
+    label: "Synthesis",
+    summary: "Composed the final agent answer from completed tool results.",
+    detail: {
+      budget: getBudgetSnapshot(budgetState),
+    },
+  });
 
   const ragError = ragResult?.ok === false
     ? serializeError(ragResult.error, "Unable to answer from the document.")
@@ -752,6 +814,8 @@ export const runAgentRag = async ({
         ? webResult.value.text
         : webResult?.ok === false
           ? `Web search unavailable: ${webError}`
+          : skippedWebBecauseBudget
+            ? "Web search not used: agent budget exhausted."
           : ["inventory", "document_discovery", "research_brief"].includes(plan.mode)
             ? "Web search not used for workspace metadata."
             : "Web search not used: document evidence was sufficient.",

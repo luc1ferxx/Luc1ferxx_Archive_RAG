@@ -447,6 +447,79 @@ test("chat endpoint agent retries document RAG when self-check finds missing cit
   }
 });
 
+test("chat endpoint agent skips document retry when document budget is exhausted", async () => {
+  const documents = new Map([
+    [
+      "doc-1",
+      {
+        docId: "doc-1",
+        fileName: "benefits.pdf",
+      },
+    ],
+  ]);
+  const askedQuestions = [];
+  const app = await createApp({
+    agentBudget: {
+      maxDocumentRagCalls: 1,
+    },
+    ragService: {
+      chat: async (_docIds, query) => {
+        askedQuestions.push(query);
+
+        return {
+          text: "Annual leave appears to be 15 days.",
+          citations: [],
+          abstained: false,
+          resolvedQuery: query,
+          memoryApplied: false,
+        };
+      },
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: (docId) => documents.get(docId) ?? null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [...documents.values()],
+    },
+    chatMcp: async () => {
+      throw new Error("Web search should not run for non-abstained document answers.");
+    },
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        docId: "doc-1",
+        question: "How many annual leave days are provided?",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(askedQuestions.length, 1);
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      ["plan", "document_rag", "self_check", "budget_limit", "synthesis"]
+    );
+    assert.match(
+      body.agentTrace.find((step) => step.type === "budget_limit").summary,
+      /Document retry/i
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test("chat endpoint agent falls back to web when document evidence is insufficient", async () => {
   const documents = new Map([
     [
@@ -508,6 +581,80 @@ test("chat endpoint agent falls back to web when document evidence is insufficie
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
       ["plan", "document_rag", "self_check", "web_search", "synthesis"]
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("chat endpoint agent skips web fallback when web budget is exhausted", async () => {
+  const documents = new Map([
+    [
+      "doc-1",
+      {
+        docId: "doc-1",
+        fileName: "notes.pdf",
+      },
+    ],
+  ]);
+  let webCalls = 0;
+  const app = await createApp({
+    agentBudget: {
+      maxWebSearchCalls: 0,
+    },
+    ragService: {
+      chat: async () => ({
+        text: "I found related material, but cannot confirm the launch date.",
+        citations: [],
+        abstained: true,
+        abstainReason: "I found related material, but cannot confirm the launch date.",
+        resolvedQuery: "What is the launch date?",
+        memoryApplied: false,
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: (docId) => documents.get(docId) ?? null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [...documents.values()],
+    },
+    chatMcp: async () => {
+      webCalls += 1;
+      return {
+        text: "web should not run",
+      };
+    },
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        docId: "doc-1",
+        question: "What is the launch date?",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(webCalls, 0);
+    assert.equal(body.mcpAnswer, "Web search not used: agent budget exhausted.");
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      ["plan", "document_rag", "self_check", "budget_limit", "synthesis"]
+    );
+    assert.match(
+      body.agentTrace.find((step) => step.type === "budget_limit").summary,
+      /Web Search/i
     );
   } finally {
     await server.close();

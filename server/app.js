@@ -154,6 +154,7 @@ const sendBufferedFile = ({ req, res, fileBuffer, fileName, mimeType }) => {
 };
 
 const buildChatResponse = async ({
+  agentBudget,
   ragService,
   webChatService,
   question,
@@ -174,6 +175,7 @@ const buildChatResponse = async ({
   }
 
   return runAgentRag({
+    agentBudget,
     ragService,
     webChatService,
     question,
@@ -229,6 +231,7 @@ export const createApp = async (options = {}) => {
     readQualityHistory,
     runSyntheticQualityEvaluation,
   };
+  const agentBudget = options.agentBudget ?? {};
 
   const app = express();
   app.use(cors());
@@ -720,6 +723,7 @@ export const createApp = async (options = {}) => {
 
     try {
       const response = await buildChatResponse({
+        agentBudget,
         ragService,
         webChatService,
         question,
