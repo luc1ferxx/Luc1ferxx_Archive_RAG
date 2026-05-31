@@ -338,9 +338,110 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
     assert.ok(Array.isArray(body.agentTrace));
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
-      ["plan", "document_rag", "synthesis"]
+      ["plan", "document_rag", "self_check", "synthesis"]
     );
     assert.equal(body.agentTrace.every((step) => step.status === "completed"), true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("chat endpoint agent retries document RAG when self-check finds missing citations", async () => {
+  const documents = new Map([
+    [
+      "doc-1",
+      {
+        docId: "doc-1",
+        fileName: "benefits.pdf",
+      },
+    ],
+  ]);
+  const askedQuestions = [];
+  const app = await createApp({
+    ragService: {
+      chat: async (_docIds, query) => {
+        askedQuestions.push(query);
+
+        if (askedQuestions.length === 1) {
+          return {
+            text: "Annual leave appears to be 15 days.",
+            citations: [],
+            abstained: false,
+            resolvedQuery: query,
+            memoryApplied: false,
+          };
+        }
+
+        return {
+          text: "The cited policy says annual leave is 15 days. [Source 1]",
+          citations: [
+            {
+              rank: 1,
+              docId: "doc-1",
+              fileName: "benefits.pdf",
+              pageNumber: 3,
+              chunkIndex: 2,
+              excerpt: "Annual leave is 15 days.",
+            },
+          ],
+          abstained: false,
+          resolvedQuery: query,
+          memoryApplied: false,
+        };
+      },
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: (docId) => documents.get(docId) ?? null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [...documents.values()],
+    },
+    chatMcp: async () => {
+      throw new Error("Web search should not run when document retry succeeds.");
+    },
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        docId: "doc-1",
+        question: "How many annual leave days are provided?",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(askedQuestions.length, 2);
+    assert.match(askedQuestions[1], /How many annual leave days are provided/);
+    assert.match(askedQuestions[1], /cited support/i);
+    assert.equal(body.agentMode, "document");
+    assert.equal(body.ragAnswer, "The cited policy says annual leave is 15 days. [Source 1]");
+    assert.equal(body.ragSources.length, 1);
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      [
+        "plan",
+        "document_rag",
+        "self_check",
+        "document_retry",
+        "self_check",
+        "synthesis",
+      ]
+    );
+    assert.equal(
+      body.agentTrace.find((step) => step.type === "document_retry").status,
+      "completed"
+    );
   } finally {
     await server.close();
   }
@@ -406,7 +507,7 @@ test("chat endpoint agent falls back to web when document evidence is insufficie
     assert.equal(body.mcpAnswer, "The public launch date is May 30, 2026.");
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
-      ["plan", "document_rag", "web_search", "synthesis"]
+      ["plan", "document_rag", "self_check", "web_search", "synthesis"]
     );
   } finally {
     await server.close();

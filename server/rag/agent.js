@@ -1,5 +1,10 @@
 import { extractMeaningfulTokens, normalizeSearchText } from "./text-utils.js";
 import {
+  buildEvidenceRetryQuestion,
+  evaluateDocumentEvidence,
+  selectBetterRagResult,
+} from "./agent-self-check.js";
+import {
   buildResearchPlan,
   formatResearchBrief,
 } from "./research-brief.js";
@@ -214,6 +219,77 @@ const buildPlan = ({ question, docIds }) => {
   };
 };
 
+const buildPlannerActions = ({ plan, docIds }) => {
+  const actions = [
+    {
+      id: "classify_request",
+      label: "Classify request",
+      summary: plan.summary,
+    },
+  ];
+
+  if (plan.wantsDocumentRag) {
+    actions.push(
+      {
+        id: "document_rag",
+        label: "Run document RAG",
+        summary: `Search ${docIds.length} selected document${
+          docIds.length === 1 ? "" : "s"
+        }.`,
+      },
+      {
+        id: "self_check",
+        label: "Verify evidence",
+        summary: "Check citation count and document coverage before synthesis.",
+      }
+    );
+  }
+
+  if (plan.wantsWeb) {
+    actions.push({
+      id: "web_search",
+      label: "Use web fallback",
+      summary: "Use web context only after document evidence is checked.",
+    });
+  }
+
+  if (plan.wantsResearch) {
+    actions.push({
+      id: "research_questions",
+      label: "Run research questions",
+      summary: "Break the request into deterministic document-grounded questions.",
+    });
+  }
+
+  if (plan.wantsInventory || plan.wantsDiscovery) {
+    actions.push({
+      id: "workspace_metadata",
+      label: "Inspect workspace metadata",
+      summary: "Use indexed document metadata without running document RAG.",
+    });
+  }
+
+  actions.push({
+    id: "synthesis",
+    label: "Synthesize answer",
+    summary: "Compose the final response from verified tool results.",
+  });
+
+  return actions;
+};
+
+const buildSelfCheckSummary = (check) => {
+  if (check.passed) {
+    return `Evidence check passed with ${check.citationCount} citation${
+      check.citationCount === 1 ? "" : "s"
+    } across ${check.citedDocCount} cited document${
+      check.citedDocCount === 1 ? "" : "s"
+    }.`;
+  }
+
+  return `Evidence check needs attention: ${check.reasons.join(" ")}`;
+};
+
 const buildSynthesisAnswer = ({
   plan,
   ragResult,
@@ -366,6 +442,10 @@ export const runAgentRag = async ({
       detail: {
         mode: plan.mode,
         docIds,
+        actions: buildPlannerActions({
+          plan,
+          docIds,
+        }),
       },
     })
   );
@@ -475,32 +555,110 @@ export const runAgentRag = async ({
   }
 
   if (plan.wantsDocumentRag) {
-    ragResult = await callDocumentRag({
+    const primaryRagResult = await callDocumentRag({
       ragService,
       docIds,
       question,
       sessionId,
       userId,
     });
+    ragResult = primaryRagResult;
 
     trace.push(
       buildStep({
         index: trace.length + 1,
         type: "document_rag",
         label: "Document RAG",
-        status: ragResult.ok ? "completed" : "failed",
-        summary: ragResult.ok
-          ? ragResult.value.abstained
+        status: primaryRagResult.ok ? "completed" : "failed",
+        summary: primaryRagResult.ok
+          ? primaryRagResult.value.abstained
             ? "Document RAG ran but reported insufficient evidence."
             : `Document RAG returned ${
-                ragResult.value.citations?.length ?? 0
-              } citation${ragResult.value.citations?.length === 1 ? "" : "s"}.`
+                primaryRagResult.value.citations?.length ?? 0
+              } citation${
+                primaryRagResult.value.citations?.length === 1 ? "" : "s"
+              }.`
           : `Document RAG failed: ${serializeError(
-              ragResult.error,
+              primaryRagResult.error,
               "Unable to answer from the document."
             )}`,
       })
     );
+
+    const primaryCheck = evaluateDocumentEvidence({
+      ragResult: primaryRagResult,
+      docIds,
+    });
+
+    trace.push(
+      buildStep({
+        index: trace.length + 1,
+        type: "self_check",
+        label: "Self Check",
+        status: primaryCheck.passed ? "completed" : "failed",
+        summary: buildSelfCheckSummary(primaryCheck),
+        detail: primaryCheck,
+      })
+    );
+
+    if (primaryCheck.retryRecommended) {
+      const retryQuestion = buildEvidenceRetryQuestion({
+        question,
+        check: primaryCheck,
+      });
+      const retryRagResult = await callDocumentRag({
+        ragService,
+        docIds,
+        question: retryQuestion,
+        sessionId,
+        userId,
+      });
+
+      trace.push(
+        buildStep({
+          index: trace.length + 1,
+          type: "document_retry",
+          label: "Document Retry",
+          status: retryRagResult.ok ? "completed" : "failed",
+          summary: retryRagResult.ok
+            ? `Focused retry returned ${
+                retryRagResult.value.citations?.length ?? 0
+              } citation${
+                retryRagResult.value.citations?.length === 1 ? "" : "s"
+              }.`
+            : `Focused retry failed: ${serializeError(
+                retryRagResult.error,
+                "Unable to retry document evidence lookup."
+              )}`,
+          detail: {
+            retryQuestion,
+          },
+        })
+      );
+
+      if (retryRagResult.ok) {
+        const retryCheck = evaluateDocumentEvidence({
+          ragResult: retryRagResult,
+          docIds,
+        });
+
+        trace.push(
+          buildStep({
+            index: trace.length + 1,
+            type: "self_check",
+            label: "Retry Self Check",
+            status: retryCheck.passed ? "completed" : "failed",
+            summary: buildSelfCheckSummary(retryCheck),
+            detail: retryCheck,
+          })
+        );
+      }
+
+      ragResult = selectBetterRagResult({
+        primary: primaryRagResult,
+        retry: retryRagResult,
+      });
+    }
   }
 
   const shouldRunWeb =
