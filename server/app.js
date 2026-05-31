@@ -25,6 +25,7 @@ import chat, {
 import chatMCP from "./chat-mcp.js";
 import {
   readLatestQualityReport,
+  readQualityHistory,
   runSyntheticQualityEvaluation,
 } from "./evaluation/quality-report.js";
 import { buildHealthReport, runStartupHealthChecks } from "./health.js";
@@ -225,6 +226,7 @@ export const createApp = async (options = {}) => {
   };
   const qualityService = options.qualityService ?? {
     readLatestQualityReport,
+    readQualityHistory,
     runSyntheticQualityEvaluation,
   };
 
@@ -538,6 +540,16 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to run synthetic evaluation."),
+      });
+    }
+  });
+
+  app.get("/quality/history", async (req, res) => {
+    try {
+      return res.json(await qualityService.readQualityHistory());
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to load quality history."),
       });
     }
   });

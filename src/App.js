@@ -1,6 +1,10 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
-import { ExperimentOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  BarChartOutlined,
+  ExperimentOutlined,
+  ReloadOutlined,
+} from "@ant-design/icons";
 import { Button, Layout, Typography, message } from "antd";
 import PdfUploader from "./components/PdfUploader";
 import ChatComponent from "./components/ChatComponent";
@@ -94,6 +98,14 @@ const fetchLatestQualityReport = async () => {
   return response.data;
 };
 
+const fetchQualityHistory = async () => {
+  const requestConfig = buildApiRequestConfig();
+  const response = requestConfig
+    ? await axios.get(`${API_DOMAIN}/quality/history`, requestConfig)
+    : await axios.get(`${API_DOMAIN}/quality/history`);
+  return response.data;
+};
+
 const requestSyntheticQualityRun = async () => {
   const payload = {
     corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
@@ -125,6 +137,33 @@ const formatQualityPercent = (value) =>
 const formatQualityNumber = (value) =>
   typeof value === "number" ? value.toFixed(value % 1 === 0 ? 0 : 1) : "N/A";
 
+const formatQualityDelta = (value, scale = 1) => {
+  if (typeof value !== "number") {
+    return "N/A";
+  }
+
+  const scaledValue = value * scale;
+  const prefix = scaledValue > 0 ? "+" : "";
+  return `${prefix}${scaledValue.toFixed(Math.abs(scaledValue) % 1 === 0 ? 0 : 1)}`;
+};
+
+const formatQualityDate = (value) => {
+  if (!value) {
+    return "No date";
+  }
+
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+};
+
 const DocumentProfileSnippet = ({ document, compact = false }) => {
   const tags = getDocumentTags(document).slice(0, compact ? 3 : 5);
   const summary = getDocumentSummary(document);
@@ -151,13 +190,22 @@ const DocumentProfileSnippet = ({ document, compact = false }) => {
 
 const QualityGuardPanel = ({
   isQualityLoading,
+  onLoadHistory,
   onLoadLatest,
   onRunSynthetic,
+  qualityHistory,
   qualityReport,
 }) => {
   const metrics = qualityReport?.summary?.metrics ?? {};
   const failedCases = qualityReport?.failedCases ?? [];
   const recommendations = qualityReport?.recommendations ?? [];
+  const regressionGate = qualityHistory?.regressionGate ?? null;
+  const recentRuns = qualityHistory?.runs ?? [];
+  const primaryGateCheck =
+    regressionGate?.checks?.find((check) => check.status === "fail") ??
+    regressionGate?.checks?.find((check) => check.status === "warn") ??
+    regressionGate?.checks?.[0] ??
+    null;
   const status = qualityReport?.status ?? "idle";
   const statusLabel =
     {
@@ -166,6 +214,14 @@ const QualityGuardPanel = ({
       fail: "Fail",
       idle: "Idle",
     }[status] ?? status;
+  const gateStatus = regressionGate?.status ?? "unknown";
+  const gateStatusLabel =
+    {
+      fail: "Fail",
+      pass: "Pass",
+      unknown: "No baseline",
+      warn: "Warn",
+    }[gateStatus] ?? gateStatus;
 
   return (
     <div className="quality-panel">
@@ -177,6 +233,14 @@ const QualityGuardPanel = ({
           onClick={() => void onLoadLatest()}
         >
           Latest
+        </Button>
+        <Button
+          className="archive-secondary-button quality-action-button"
+          icon={<BarChartOutlined />}
+          loading={isQualityLoading}
+          onClick={() => void onLoadHistory()}
+        >
+          History
         </Button>
         <Button
           className="archive-secondary-button quality-action-button"
@@ -237,6 +301,34 @@ const QualityGuardPanel = ({
           <div>Load the latest report or run the default synthetic corpus.</div>
         </div>
       )}
+
+      {regressionGate ? (
+        <div className={`quality-gate quality-gate-${gateStatus}`}>
+          <div className="quality-gate-head">
+            <span>Gate {gateStatusLabel}</span>
+            <span>
+              {primaryGateCheck?.metric === "failedCaseCount"
+                ? formatQualityDelta(primaryGateCheck.delta)
+                : `${formatQualityDelta(primaryGateCheck?.delta, 100)} pts`}
+            </span>
+          </div>
+          <p>{regressionGate.summary}</p>
+        </div>
+      ) : null}
+
+      {recentRuns.length > 0 ? (
+        <div className="quality-run-list">
+          {recentRuns.slice(0, 3).map((run) => (
+            <div key={`${run.runId}-${run.fileName}`} className="quality-run-item">
+              <span>
+                <strong>{formatQualityPercent(run.metrics?.overallPassPercent)}</strong>
+                {run.status}
+              </span>
+              <span>{formatQualityDate(run.createdAt)}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -246,6 +338,7 @@ const App = () => {
   const [activeTurnIndex, setActiveTurnIndex] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isQualityLoading, setIsQualityLoading] = useState(false);
+  const [qualityHistory, setQualityHistory] = useState(null);
   const [qualityReport, setQualityReport] = useState(null);
   const [activeDocuments, setActiveDocuments] = useState([]);
   const [selectedSource, setSelectedSource] = useState(null);
@@ -381,9 +474,24 @@ const App = () => {
 
     try {
       setQualityReport(await fetchLatestQualityReport());
+      setQualityHistory(await fetchQualityHistory());
     } catch (error) {
       const backendMessage =
         error.response?.data?.error ?? "Unable to load the latest quality report.";
+      message.error(backendMessage);
+    } finally {
+      setIsQualityLoading(false);
+    }
+  };
+
+  const loadQualityHistory = async () => {
+    setIsQualityLoading(true);
+
+    try {
+      setQualityHistory(await fetchQualityHistory());
+    } catch (error) {
+      const backendMessage =
+        error.response?.data?.error ?? "Unable to load quality history.";
       message.error(backendMessage);
     } finally {
       setIsQualityLoading(false);
@@ -395,6 +503,7 @@ const App = () => {
 
     try {
       setQualityReport(await requestSyntheticQualityRun());
+      setQualityHistory(await fetchQualityHistory());
       message.success("Synthetic evaluation complete.");
     } catch (error) {
       const backendMessage =
@@ -625,8 +734,10 @@ const App = () => {
               </div>
               <QualityGuardPanel
                 isQualityLoading={isQualityLoading}
+                onLoadHistory={loadQualityHistory}
                 onLoadLatest={loadLatestQualityReport}
                 onRunSynthetic={runSyntheticQualityReport}
+                qualityHistory={qualityHistory}
                 qualityReport={qualityReport}
               />
             </section>

@@ -36,6 +36,7 @@ describe("App", () => {
     expect(screen.getByText("Workspace documents")).toBeInTheDocument();
     expect(screen.getByText("Relevant documents")).toBeInTheDocument();
     expect(screen.getByText("Quality Guard")).toBeInTheDocument();
+    expect(screen.getByText("History")).toBeInTheDocument();
     expect(axios.get).toHaveBeenCalledWith("http://localhost:5001/documents");
   });
 

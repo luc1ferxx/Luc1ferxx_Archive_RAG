@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createApp } from "../app.js";
+import { buildQualityHistoryResponse } from "../evaluation/quality-report.js";
 
 const okHealthService = {
   buildHealthReport: async () => ({
@@ -1006,6 +1007,139 @@ test("quality synthetic endpoint invokes injected runner", async () => {
     assert.equal(requestedCorpusPath, "evaluation/synthetic-corpus-near-duplicate.json");
     assert.equal(body.status, "ok");
     assert.equal(body.summary.runId, "run-2");
+  } finally {
+    await server.close();
+  }
+});
+
+test("quality history response sorts runs and flags regressions", () => {
+  const previousPayload = {
+    summary: {
+      runId: "run-previous",
+      createdAt: "2026-05-31T09:00:00.000Z",
+      corpus: {
+        path: "evaluation/synthetic-corpus-near-duplicate.json",
+        cases: 3,
+      },
+      metrics: {
+        overallPassRate: 1,
+        qaPageHitRate: 1,
+        comparePageHitRate: 1,
+        averageCitationCount: 2,
+      },
+    },
+    cases: [
+      {
+        id: "qa-1",
+        passed: true,
+        docCoverageHit: true,
+        pageCoverageHit: true,
+        answerExpectationHit: true,
+      },
+    ],
+  };
+  const latestPayload = {
+    summary: {
+      runId: "run-latest",
+      createdAt: "2026-05-31T10:00:00.000Z",
+      corpus: {
+        path: "evaluation/synthetic-corpus-near-duplicate.json",
+        cases: 3,
+      },
+      metrics: {
+        overallPassRate: 0.9,
+        qaPageHitRate: 0.82,
+        comparePageHitRate: 1,
+        averageCitationCount: 1.2,
+      },
+    },
+    cases: [
+      {
+        id: "qa-1",
+        passed: false,
+        shouldAbstain: false,
+        abstained: false,
+        docCoverageHit: true,
+        pageCoverageHit: false,
+        answerExpectationHit: true,
+      },
+    ],
+  };
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    runPayloads: [
+      {
+        fileName: "run-previous.json",
+        payload: previousPayload,
+      },
+      {
+        fileName: "run-latest.json",
+        payload: latestPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.runs.length, 2);
+  assert.equal(history.runs[0].runId, "run-latest");
+  assert.equal(history.regressionGate.status, "fail");
+  assert.equal(history.regressionGate.baselineRunId, "run-previous");
+  assert.ok(
+    history.regressionGate.checks.some(
+      (check) => check.metric === "overallPassRate" && check.status === "fail"
+    )
+  );
+});
+
+test("quality history endpoint returns regression gate", async () => {
+  const app = await createApp({
+    healthService: okHealthService,
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+    },
+    qualityService: {
+      readQualityHistory: async () => ({
+        status: "fail",
+        runs: [
+          {
+            runId: "run-latest",
+            status: "warn",
+            failedCaseCount: 1,
+            metrics: {
+              overallPassPercent: 90,
+            },
+          },
+        ],
+        regressionGate: {
+          status: "fail",
+          currentRunId: "run-latest",
+          baselineRunId: "run-previous",
+          checks: [
+            {
+              metric: "overallPassRate",
+              status: "fail",
+              delta: -0.1,
+            },
+          ],
+          summary: "Regression detected against the previous synthetic run.",
+        },
+      }),
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/quality/history`);
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.status, "fail");
+    assert.equal(body.runs[0].runId, "run-latest");
+    assert.equal(body.regressionGate.baselineRunId, "run-previous");
+    assert.equal(body.regressionGate.checks[0].status, "fail");
   } finally {
     await server.close();
   }

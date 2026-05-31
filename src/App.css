@@ -1029,7 +1029,7 @@
 
 .quality-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--archive-space-sm);
 }
 
@@ -1153,6 +1153,95 @@
 .quality-recommendation-item {
   color: rgba(243, 242, 239, 0.7);
   overflow-wrap: anywhere;
+}
+
+.quality-gate {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: 10px;
+  background: var(--archive-surface-overlay);
+}
+
+.quality-gate-pass {
+  border-color: rgba(145, 214, 171, 0.24);
+  background: rgba(145, 214, 171, 0.04);
+}
+
+.quality-gate-warn {
+  border-color: rgba(255, 204, 102, 0.24);
+  background: rgba(255, 204, 102, 0.04);
+}
+
+.quality-gate-fail {
+  border-color: rgba(255, 118, 118, 0.24);
+  background: rgba(255, 118, 118, 0.04);
+}
+
+.quality-gate-head,
+.quality-run-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--archive-space-sm);
+}
+
+.quality-gate-head span {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.quality-gate-head span:last-child {
+  color: var(--archive-text-soft);
+  white-space: nowrap;
+}
+
+.quality-gate p {
+  margin: 0;
+  color: var(--archive-text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.quality-run-list {
+  display: grid;
+  gap: 6px;
+}
+
+.quality-run-item {
+  padding: 7px 9px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: 10px;
+  background: var(--archive-surface-overlay);
+  color: var(--archive-text-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.quality-run-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quality-run-item span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--archive-text-soft);
+  text-transform: uppercase;
+}
+
+.quality-run-item strong {
+  color: var(--archive-text-primary);
+  font-size: 0.78rem;
 }
 
 .archive-empty-state-compact {
