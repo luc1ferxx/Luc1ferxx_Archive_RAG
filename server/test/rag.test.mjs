@@ -38,8 +38,18 @@ import { analyzeComparison } from "../rag/comparison-engine.js";
 import { alignComparisonEvidence } from "../rag/evidence-aligner.js";
 import { planQaEvidenceGap } from "../rag/gap-planner.js";
 import { getRerankCandidateMultiplier } from "../rag/config.js";
+import { routeQuery } from "../rag/query-router.js";
 import { buildTermSet } from "../rag/text-utils.js";
-import { rerankResults } from "../rag/reranker.js";
+import {
+  configureCrossEncoderProvider,
+  configureCustomRerankProvider,
+  configureRerankMetricsCollector,
+  rerankResults,
+  rerankResultsWithProvider,
+  resetCrossEncoderProvider,
+  resetCustomRerankProvider,
+  resetRerankMetricsCollector,
+} from "../rag/reranker.js";
 import { retrieveGlobalContext } from "../rag/retrievers/global-retriever.js";
 import { retrievePerDocumentContext } from "../rag/retrievers/per-doc-retriever.js";
 
@@ -613,11 +623,17 @@ afterEach(async () => {
   resetVectorStore();
   await resetDocumentRegistryStore();
   resetOpenAIProvider();
+  resetCrossEncoderProvider();
+  resetCustomRerankProvider();
+  resetRerankMetricsCollector();
   resetQdrantClientFactory();
   configureRagDataDirectory(originalDataDirectory);
   await resetSessionMemoryStore();
   resetVectorStore();
   await resetDocumentRegistryStore();
+  resetCustomRerankProvider();
+  resetCrossEncoderProvider();
+  resetRerankMetricsCollector();
 
   if (tempRoot) {
     await rm(tempRoot, { recursive: true, force: true });
@@ -872,6 +888,72 @@ test("compare flow returns multi-document evidence", async () => {
   assert.equal(citedDocIds.size, 2);
   assert.ok(citedDocIds.has("benefits-2024"));
   assert.ok(citedDocIds.has("benefits-2025"));
+});
+
+test("intent classifier routes comparative questions without explicit compare keywords", () => {
+  const route = routeQuery({
+    query: "Which policy allows more remote days?",
+    docIds: ["benefits-2024", "benefits-2025"],
+  });
+
+  assert.equal(route.mode, "compare");
+  assert.ok(route.confidence >= 0.5);
+  assert.ok(route.signals.some((signal) => /comparative/i.test(signal)));
+});
+
+test("query decomposition retrieves evidence for separate requirements", async () => {
+  await withEnv(
+    {
+      RAG_QUERY_DECOMPOSITION_ENABLED: "true",
+      RAG_RETRIEVAL_TOP_K: "1",
+    },
+    async () => {
+      await ingestFixture({
+        docId: "refund-manual",
+        fileName: "refund-manual.pdf",
+        pages: [
+          "Effective Date\n\nRefund policy takes effect on July 1, 2026.",
+          "Regional Scope\n\nRefund policy applies to US and Canada regions.",
+          "Refund Procedure\n\nCustomers should contact support before shipping a return.",
+        ],
+      });
+
+      const response = await chat(
+        ["refund-manual"],
+        "When does the refund policy take effect and which regions does it apply to?"
+      );
+      const citedPages = new Set(
+        response.citations.map((citation) => citation.pageNumber)
+      );
+
+      assert.equal(response.abstained, false);
+      assert.ok(citedPages.has(1));
+      assert.ok(citedPages.has(2));
+      assert.ok(response.evidenceSummary.requirements.length >= 2);
+    }
+  );
+});
+
+test("chat response explains evidence confidence with scoring summary", async () => {
+  await ingestFixture({
+    docId: "benefits-summary",
+    fileName: "benefits-summary.pdf",
+    pages: [
+      "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+    ],
+  });
+
+  const response = await chat(
+    ["benefits-summary"],
+    "What is the remote work policy?"
+  );
+
+  assert.equal(response.evidenceSummary.confident, true);
+  assert.equal(response.evidenceSummary.mode, "qa");
+  assert.equal(response.evidenceSummary.retrievedCount >= 1, true);
+  assert.equal(response.evidenceSummary.usableCount >= 1, true);
+  assert.equal(typeof response.evidenceSummary.scoreRange.max, "number");
+  assert.deepEqual(response.evidenceSummary.docCoverage.missingDocIds, []);
 });
 
 test("observability disabled does not create events jsonl", async () => {
@@ -1643,6 +1725,163 @@ test("heuristic rerank preserves originalScore and writes mixed rerank score", a
   );
 });
 
+test("custom rerank provider can be selected by configuration", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_ENABLED: "true",
+      RAG_RERANK_PROVIDER: "custom",
+    },
+    async () => {
+      const results = [
+        {
+          document: {
+            id: "first",
+            pageContent: "General onboarding memo.",
+            metadata: { docId: "alpha" },
+          },
+          score: 0.9,
+        },
+        {
+          document: {
+            id: "semantic",
+            pageContent: "Quartz capsule approval requires finance sign-off.",
+            metadata: { docId: "alpha" },
+          },
+          score: 0.1,
+        },
+      ];
+
+      configureCustomRerankProvider({
+        rerank: async ({ results: candidateResults, topK }) =>
+          candidateResults
+            .slice()
+            .sort((left, right) =>
+              String(right.document.id).localeCompare(String(left.document.id))
+            )
+            .slice(0, topK),
+      });
+
+      const reranked = await rerankResultsWithProvider({
+        queryText: "quartz capsule approval",
+        results,
+        topK: 1,
+      });
+
+      assert.equal(reranked.length, 1);
+      assert.equal(reranked[0].document.id, "semantic");
+    }
+  );
+});
+
+test("cross-encoder rerank provider promotes the highest pair score", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_ENABLED: "true",
+      RAG_RERANK_PROVIDER: "cross-encoder",
+      RAG_RERANK_WEIGHT: "0.95",
+    },
+    async () => {
+      const results = [
+        {
+          document: {
+            id: "dense-first",
+            pageContent: "General onboarding memo.",
+            metadata: { docId: "alpha" },
+          },
+          score: 0.95,
+        },
+        {
+          document: {
+            id: "semantic",
+            pageContent: "Quartz capsule approval requires finance sign-off.",
+            metadata: { docId: "alpha" },
+          },
+          score: 0.1,
+        },
+      ];
+
+      configureCrossEncoderProvider({
+        score: async ({ queryText, pairs }) => {
+          assert.equal(queryText, "quartz capsule approval");
+          assert.equal(pairs.length, 2);
+
+          return pairs.map((pair) => (pair.id === "semantic" ? 0.99 : 0.05));
+        },
+      });
+
+      const reranked = await rerankResultsWithProvider({
+        queryText: "quartz capsule approval",
+        results,
+        topK: 1,
+      });
+
+      assert.equal(reranked.length, 1);
+      assert.equal(reranked[0].document.id, "semantic");
+      assert.equal(reranked[0].originalScore, 0.1);
+      assert.equal(reranked[0].rerankScore, 1);
+      assert.ok(reranked[0].score > reranked[0].originalScore);
+    }
+  );
+});
+
+test("cross-encoder rerank emits latency metric", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_ENABLED: "true",
+      RAG_RERANK_PROVIDER: "cross-encoder",
+      RAG_RERANK_WEIGHT: "0.95",
+    },
+    async () => {
+      const metrics = [];
+      const queryText = "quartz capsule approval";
+      const results = [
+        {
+          document: {
+            id: "dense-first",
+            pageContent: "General onboarding memo.",
+            metadata: { docId: "alpha" },
+          },
+          score: 0.95,
+        },
+        {
+          document: {
+            id: "semantic",
+            pageContent: "Quartz capsule approval requires finance sign-off.",
+            metadata: { docId: "alpha" },
+          },
+          score: 0.1,
+        },
+      ];
+
+      configureRerankMetricsCollector((metric) => {
+        metrics.push(metric);
+      });
+      configureCrossEncoderProvider({
+        score: async ({ pairs }) =>
+          pairs.map((pair) => (pair.id === "semantic" ? 0.99 : 0.05)),
+      });
+
+      const reranked = await rerankResultsWithProvider({
+        queryText,
+        results,
+        topK: 1,
+      });
+
+      assert.equal(reranked[0].document.id, "semantic");
+      assert.equal(metrics.length, 1);
+      assert.equal(metrics[0].stage, "cross-encoder-score");
+      assert.equal(metrics[0].provider, "cross-encoder");
+      assert.equal(metrics[0].transport, "custom-provider");
+      assert.equal(metrics[0].status, "ok");
+      assert.equal(metrics[0].candidateCount, 2);
+      assert.equal(metrics[0].queryCharacters, queryText.length);
+      assert.ok(metrics[0].totalTextCharacters > 0);
+      assert.equal(typeof metrics[0].latencyMs, "number");
+      assert.ok(metrics[0].latencyMs >= 0);
+    }
+  );
+});
+
 test("rerank promotes strong keyword candidate beyond initial hybrid topK", async () => {
   await withEnv(
     {
@@ -1767,6 +2006,55 @@ test("compare rerank is applied independently per selected document", async () =
         perDocumentResults.get("beta-manual")[0].document.pageContent,
         /Quartz capsule approval: beta/i
       );
+    }
+  );
+});
+
+test("hybrid retrieval can fuse dense and sparse ranks with RRF", async () => {
+  await withEnv(
+    {
+      RAG_HYBRID_ENABLED: "true",
+      RAG_HYBRID_FUSION: "rrf",
+      RAG_RRF_K: "1",
+      RAG_RETRIEVAL_TOP_K: "1",
+      RAG_SPARSE_TOP_K: "2",
+    },
+    async () => {
+      configureOpenAIProvider({
+        ...provider,
+        embedTexts: async (texts) =>
+          texts.map((text) =>
+            /Amber ceiling/i.test(text)
+              ? buildVectorWithQuerySimilarity(0.9)
+              : buildVectorWithQuerySimilarity(1)
+          ),
+        embedQuery: async () => RERANK_QUERY_VECTOR,
+      });
+
+      await ingestFixture({
+        docId: "dense-only",
+        fileName: "dense-only.pdf",
+        pages: [
+          "General onboarding memo: welcome packet owners should archive the checklist.",
+        ],
+      });
+      await ingestFixture({
+        docId: "amber-manual",
+        fileName: "amber.pdf",
+        pages: [
+          "Amber ceiling: approved amount is 2400 dollars per cycle.",
+        ],
+      });
+
+      const results = await retrieveGlobalContext({
+        queryVector: RERANK_QUERY_VECTOR,
+        queryText: "What is the amber ceiling?",
+        docIds: ["dense-only", "amber-manual"],
+      });
+
+      assert.equal(results.length, 1);
+      assert.equal(results[0].document.metadata.docId, "amber-manual");
+      assert.equal(typeof results[0].rrfScore, "number");
     }
   );
 });

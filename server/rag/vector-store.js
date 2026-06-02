@@ -1,7 +1,9 @@
 import {
+  getHybridFusionMethod,
   getHybridDenseWeight,
   getHybridSparseWeight,
   getRetrievalScoringMode,
+  getRrfK,
   getSparseRetrievalTopK,
   getVectorStoreProvider,
   isHybridRetrievalEnabled,
@@ -86,7 +88,7 @@ const getVectorStoreImplementation = () => {
   };
 };
 
-const fuseSearchResults = ({ denseResults, sparseResults, topK }) => {
+const fuseSearchResultsByWeightedScore = ({ denseResults, sparseResults, topK }) => {
   const { denseWeight, sparseWeight } = normalizeWeights();
   const denseMaximumScore = Math.max(
     0,
@@ -152,6 +154,87 @@ const fuseSearchResults = ({ denseResults, sparseResults, topK }) => {
     .slice(0, topK);
 };
 
+const getRrfContribution = ({ rankIndex, weight }) =>
+  weight / (getRrfK() + rankIndex + 1);
+
+const fuseSearchResultsByRrf = ({ denseResults, sparseResults, topK }) => {
+  const { denseWeight, sparseWeight } = normalizeWeights();
+  const fusedResultsByKey = new Map();
+
+  const ensureEntry = (result) => {
+    const resultKey = getResultKey(result);
+    const existing = fusedResultsByKey.get(resultKey);
+
+    if (existing) {
+      return existing;
+    }
+
+    const entry = {
+      document: result.document,
+      denseScore: 0,
+      sparseScore: 0,
+      keywordScore: null,
+      rrfScore: 0,
+      denseRank: Number.POSITIVE_INFINITY,
+      sparseRank: Number.POSITIVE_INFINITY,
+    };
+
+    fusedResultsByKey.set(resultKey, entry);
+    return entry;
+  };
+
+  denseResults.forEach((denseResult, index) => {
+    const entry = ensureEntry(denseResult);
+
+    entry.denseScore = denseResult.vectorScore ?? 0;
+    entry.keywordScore = denseResult.keywordScore ?? entry.keywordScore;
+    entry.denseRank = Math.min(entry.denseRank, index + 1);
+    entry.rrfScore += getRrfContribution({
+      rankIndex: index,
+      weight: denseWeight,
+    });
+  });
+
+  sparseResults.forEach((sparseResult, index) => {
+    const entry = ensureEntry(sparseResult);
+
+    entry.sparseScore = sparseResult.sparseScore ?? 0;
+    entry.keywordScore = Math.max(
+      entry.keywordScore ?? 0,
+      sparseResult.keywordScore ?? 0
+    );
+    entry.sparseRank = Math.min(entry.sparseRank, index + 1);
+    entry.rrfScore += getRrfContribution({
+      rankIndex: index,
+      weight: sparseWeight,
+    });
+  });
+
+  return [...fusedResultsByKey.values()]
+    .map((result) => ({
+      document: result.document,
+      score: result.rrfScore,
+      rrfScore: result.rrfScore,
+      vectorScore: result.denseScore,
+      sparseScore: result.sparseScore,
+      keywordScore: result.keywordScore,
+      denseRank: Number.isFinite(result.denseRank) ? result.denseRank : null,
+      sparseRank: Number.isFinite(result.sparseRank) ? result.sparseRank : null,
+    }))
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        (left.sparseRank ?? Number.POSITIVE_INFINITY) -
+          (right.sparseRank ?? Number.POSITIVE_INFINITY) ||
+        (left.denseRank ?? Number.POSITIVE_INFINITY) -
+          (right.denseRank ?? Number.POSITIVE_INFINITY) ||
+        right.sparseScore - left.sparseScore ||
+        right.vectorScore - left.vectorScore ||
+        (right.keywordScore ?? 0) - (left.keywordScore ?? 0)
+    )
+    .slice(0, topK);
+};
+
 const searchHybridDocuments = async ({
   queryVector,
   queryText = "",
@@ -176,7 +259,15 @@ const searchHybridDocuments = async ({
     }),
   ]);
 
-  return fuseSearchResults({
+  if (getHybridFusionMethod() === "rrf") {
+    return fuseSearchResultsByRrf({
+      denseResults,
+      sparseResults,
+      topK,
+    });
+  }
+
+  return fuseSearchResultsByWeightedScore({
     denseResults,
     sparseResults,
     topK,

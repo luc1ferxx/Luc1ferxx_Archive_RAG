@@ -810,6 +810,9 @@ export const runAgentRag = async ({
         ? ragResult.value.abstainReason ?? null
         : null,
       ragGapPlan: ragResult?.ok ? ragResult.value.gapPlan ?? null : null,
+      ragEvidenceSummary: ragResult?.ok
+        ? ragResult.value.evidenceSummary ?? null
+        : null,
       mcpAnswer: webResult?.ok
         ? webResult.value.text
         : webResult?.ok === false

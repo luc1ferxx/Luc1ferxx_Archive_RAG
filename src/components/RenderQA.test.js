@@ -107,4 +107,61 @@ describe("RenderQA", () => {
       )
     ).toBeInTheDocument();
   });
+
+  test("renders document evidence scoring summary", () => {
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "When does the refund policy take effect?",
+            answer: {
+              ragAnswer: "The refund policy takes effect on July 1, 2026.",
+              ragSources: [],
+              ragEvidenceSummary: {
+                mode: "qa",
+                confident: true,
+                retrievedCount: 3,
+                usableCount: 2,
+                scoreRange: {
+                  max: 0.91,
+                },
+                docCoverage: {
+                  selectedDocIds: ["refund"],
+                  coveredDocIds: ["refund"],
+                  missingDocIds: [],
+                },
+                requirements: [
+                  {
+                    id: "requirement-1",
+                    label: "When does the refund policy take effect",
+                    query: "When does the refund policy take effect",
+                  },
+                  {
+                    id: "requirement-2",
+                    label: "which regions does the refund policy apply to",
+                    query: "which regions does the refund policy apply to",
+                  },
+                ],
+                reasons: ["Evidence passed with 2 usable sources."],
+              },
+              mcpAnswer: "Web search not used.",
+            },
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getByText("Evidence")).toBeInTheDocument();
+    expect(screen.getByText("Confident")).toBeInTheDocument();
+    expect(screen.getByText("Retrieved")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("0.91")).toBeInTheDocument();
+    expect(
+      screen.getByText("which regions does the refund policy apply to")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Evidence passed with 2 usable sources.")
+    ).toBeInTheDocument();
+  });
 });

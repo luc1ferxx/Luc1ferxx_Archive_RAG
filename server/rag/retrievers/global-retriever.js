@@ -3,7 +3,7 @@ import {
   getRetrievalTopK,
   isRerankEnabled,
 } from "../config.js";
-import { rerankResults } from "../reranker.js";
+import { rerankResultsWithProvider } from "../reranker.js";
 import { searchDocuments } from "../vector-store.js";
 
 export const retrieveGlobalContext = async ({ queryVector, queryText, docIds }) => {
@@ -18,7 +18,7 @@ export const retrieveGlobalContext = async ({ queryVector, queryText, docIds }) 
     topK: candidateK,
   });
 
-  return rerankResults({
+  return rerankResultsWithProvider({
     queryText,
     results,
     topK,

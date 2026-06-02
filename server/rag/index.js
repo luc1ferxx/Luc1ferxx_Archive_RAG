@@ -4,8 +4,12 @@ import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { chunkDocument } from "./chunker.js";
 import {
   getRerankCandidateMultiplier,
+  getHybridFusionMethod,
+  getRerankProvider,
   getRerankWeight,
+  getRrfK,
   getRetrievalTopK,
+  isQueryDecompositionEnabled,
   isHybridRetrievalEnabled,
   isRerankEnabled,
 } from "./config.js";
@@ -26,6 +30,10 @@ import {
 } from "./doc-registry.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { buildDocumentProfile } from "./document-profiler.js";
+import {
+  buildComparisonEvidenceSummary,
+  buildQaEvidenceSummary,
+} from "./evidence-summary.js";
 import { alignComparisonEvidence } from "./evidence-aligner.js";
 import { planQaEvidenceGap } from "./gap-planner.js";
 import {
@@ -50,6 +58,10 @@ import {
   recordRagTrace,
 } from "./observability.js";
 import { embedQuery } from "./openai.js";
+import {
+  buildEvidenceRequirements,
+  buildRetrievalQueries,
+} from "./query-decomposer.js";
 import { routeQuery } from "./query-router.js";
 import { retrieveGlobalContext } from "./retrievers/global-retriever.js";
 import { retrievePerDocumentContext } from "./retrievers/per-doc-retriever.js";
@@ -173,24 +185,122 @@ const ensureDocumentsExist = (docIds) => {
   throw error;
 };
 
+const getResultMergeScore = (result = {}) =>
+  (Number(result.keywordScore) || 0) * 2 + (Number(result.score) || 0);
+
 const mergeRetrievedResults = (...resultGroups) => {
   const mergedResults = [];
-  const seenResultKeys = new Set();
+  const resultIndexByKey = new Map();
 
   for (const results of resultGroups) {
     for (const result of results ?? []) {
       const resultKey = getResultKey(result);
+      const existingIndex = resultIndexByKey.get(resultKey);
 
-      if (seenResultKeys.has(resultKey)) {
+      if (existingIndex !== undefined) {
+        if (
+          getResultMergeScore(result) >
+          getResultMergeScore(mergedResults[existingIndex])
+        ) {
+          mergedResults[existingIndex] = result;
+        }
         continue;
       }
 
-      seenResultKeys.add(resultKey);
+      resultIndexByKey.set(resultKey, mergedResults.length);
       mergedResults.push(result);
     }
   }
 
   return mergedResults;
+};
+
+const mergePerDocumentResults = (docIds, ...perDocumentResultGroups) => {
+  const mergedResultsByDoc = new Map(docIds.map((docId) => [docId, []]));
+  const resultIndexesByDoc = new Map(docIds.map((docId) => [docId, new Map()]));
+
+  for (const resultGroup of perDocumentResultGroups) {
+    if (!(resultGroup instanceof Map)) {
+      continue;
+    }
+
+    for (const docId of docIds) {
+      const resultIndexByKey = resultIndexesByDoc.get(docId);
+      const mergedResults = mergedResultsByDoc.get(docId);
+
+      for (const result of resultGroup.get(docId) ?? []) {
+        const resultKey = getResultKey(result);
+        const existingIndex = resultIndexByKey.get(resultKey);
+
+        if (existingIndex !== undefined) {
+          if (
+            getResultMergeScore(result) >
+            getResultMergeScore(mergedResults[existingIndex])
+          ) {
+            mergedResults[existingIndex] = result;
+          }
+          continue;
+        }
+
+        resultIndexByKey.set(resultKey, mergedResults.length);
+        mergedResults.push(result);
+      }
+    }
+  }
+
+  return mergedResultsByDoc;
+};
+
+const buildRequirementTrace = (requirements = []) =>
+  requirements.map((requirement) => ({
+    id: requirement.id,
+    label: requirement.label,
+    query: requirement.query,
+    primary: Boolean(requirement.primary),
+  }));
+
+const retrieveGlobalContextForQueries = async ({
+  docIds,
+  primaryQueryVector,
+  retrievalQueries,
+}) => {
+  const resultGroups = await Promise.all(
+    retrievalQueries.map(async (retrievalQuery) => {
+      const queryVector = retrievalQuery.primary
+        ? primaryQueryVector
+        : await embedQuery(retrievalQuery.query);
+
+      return retrieveGlobalContext({
+        queryVector,
+        queryText: retrievalQuery.query,
+        docIds,
+      });
+    })
+  );
+
+  return mergeRetrievedResults(...resultGroups);
+};
+
+const retrievePerDocumentContextForQueries = async ({
+  docIds,
+  primaryQueryVector,
+  retrievalQueries,
+}) => {
+  const resultGroups = await Promise.all(
+    retrievalQueries.map(async (retrievalQuery) => {
+      const queryVector = retrievalQuery.primary
+        ? primaryQueryVector
+        : await embedQuery(retrievalQuery.query);
+
+      return retrievePerDocumentContext({
+        queryVector,
+        queryText: retrievalQuery.query,
+        docIds,
+      });
+    })
+  );
+
+  return mergePerDocumentResults(docIds, ...resultGroups);
 };
 
 const buildQaGapPlan = async ({
@@ -264,7 +374,11 @@ const buildQaGapPlan = async ({
 
 const buildRetrievalConfigTrace = () => ({
   hybridEnabled: isHybridRetrievalEnabled(),
+  hybridFusionMethod: getHybridFusionMethod(),
+  rrfK: getRrfK(),
   rerankEnabled: isRerankEnabled(),
+  rerankProvider: getRerankProvider(),
+  queryDecompositionEnabled: isQueryDecompositionEnabled(),
   retrievalTopK: getRetrievalTopK(),
   rerankCandidateMultiplier: getRerankCandidateMultiplier(),
   rerankWeight: getRerankWeight(),
@@ -461,18 +575,32 @@ const chat = async (docIds, query, options = {}) => {
       docIds: normalizedDocIds,
     });
     routeMode = route.mode;
+    const evidenceRequirements = buildEvidenceRequirements({
+      query: resolvedQuery,
+      mode: routeMode,
+    });
+    const retrievalQueries = buildRetrievalQueries({
+      query: resolvedQuery,
+      requirements: evidenceRequirements,
+    });
     const queryVector = await embedQuery(resolvedQuery);
 
     if (routeMode === "compare") {
-      const perDocumentResults = await retrievePerDocumentContext({
-        queryVector,
-        queryText: resolvedQuery,
+      const perDocumentResults = await retrievePerDocumentContextForQueries({
+        primaryQueryVector: queryVector,
+        retrievalQueries,
         docIds: normalizedDocIds,
       });
       const confidence = assessComparisonConfidence({
         docIds: normalizedDocIds,
         perDocumentResults,
         queryText: resolvedQuery,
+      });
+      const evidenceSummary = buildComparisonEvidenceSummary({
+        confidence,
+        docIds: normalizedDocIds,
+        perDocumentResults,
+        requirements: evidenceRequirements,
       });
       const alignment = alignComparisonEvidence({
         query: resolvedQuery,
@@ -487,11 +615,14 @@ const chat = async (docIds, query, options = {}) => {
       });
       const traceFields = {
         retrievalConfig: buildRetrievalConfigTrace(),
+        queryIntent: route,
+        queryRequirements: buildRequirementTrace(evidenceRequirements),
         perDocumentResults: buildPerDocumentResultsTrace(
           normalizedDocIds,
           perDocumentResults
         ),
         confidence: buildConfidenceTrace(confidence),
+        evidenceSummary,
         alignmentSummary: buildAlignmentSummaryTrace(alignment),
         comparisonAnalysisSummary: buildComparisonAnalysisSummaryTrace(analysis),
         finalSourceBundle: buildBundleTrace(bundle),
@@ -504,6 +635,7 @@ const chat = async (docIds, query, options = {}) => {
             text: confidence.reason,
             citations: bundle.citations,
             retrievedContexts: bundle.retrievedContexts,
+            evidenceSummary,
             abstained: true,
             abstainReason: confidence.reason,
           },
@@ -521,26 +653,36 @@ const chat = async (docIds, query, options = {}) => {
             preferenceBlock: longMemoryContext.answerBlock,
           })),
           retrievedContexts: bundle.retrievedContexts,
+          evidenceSummary,
         },
       });
     }
 
-    const retrievalResults = await retrieveGlobalContext({
-      queryVector,
-      queryText: resolvedQuery,
+    const retrievalResults = await retrieveGlobalContextForQueries({
+      primaryQueryVector: queryVector,
+      retrievalQueries,
       docIds: normalizedDocIds,
     });
     const confidence = assessQaConfidence({
       results: retrievalResults,
       queryText: resolvedQuery,
     });
+    const evidenceSummary = buildQaEvidenceSummary({
+      confidence,
+      docIds: normalizedDocIds,
+      requirements: evidenceRequirements,
+      results: retrievalResults,
+    });
     const bundle = prepareQASourceBundle({
       results: confidence.usableResults,
     });
     const traceFields = {
       retrievalConfig: buildRetrievalConfigTrace(),
+      queryIntent: route,
+      queryRequirements: buildRequirementTrace(evidenceRequirements),
       retrievalResults: retrievalResults.map((result) => buildResultTrace(result)),
       confidence: buildConfidenceTrace(confidence),
+      evidenceSummary,
       finalSourceBundle: buildBundleTrace(bundle),
     };
 
@@ -558,6 +700,7 @@ const chat = async (docIds, query, options = {}) => {
           text: gapPlan.userMessage,
           citations: bundle.citations,
           retrievedContexts: bundle.retrievedContexts,
+          evidenceSummary,
           abstained: true,
           abstainReason: gapPlan.userMessage,
           gapPlan: {
@@ -578,6 +721,7 @@ const chat = async (docIds, query, options = {}) => {
           preferenceBlock: longMemoryContext.answerBlock,
         })),
         retrievedContexts: bundle.retrievedContexts,
+        evidenceSummary,
       },
     });
   } catch (error) {

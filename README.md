@@ -91,21 +91,23 @@ flowchart LR
 ### QA 路径
 
 1. 将用户问题结合会话记忆改写成独立检索问题。
-2. 生成 query embedding。
-3. 在选中文档内做全局检索。
-4. 可选 hybrid dense + sparse fusion。
-5. 可选 rerank，位置在 retrieval/hybrid 之后、confidence gate 之前。
-6. 置信度门控过滤低相关或缺少 anchor coverage 的证据。
-7. 使用证据包生成带引用的 grounded answer。
+2. 对复杂问题拆分 evidence requirements，例如时间、生效范围、适用地区等分别检索。
+3. 生成 query embedding。
+4. 在选中文档内做全局检索，并合并原问题与拆分需求的证据。
+5. 可选 hybrid dense + sparse fusion，融合方式支持 weighted score 或 RRF。
+6. 可选 rerank，位置在 retrieval/hybrid 之后、confidence gate 之前；默认 heuristic，也支持 cross-encoder endpoint 或注入 custom provider。
+7. 置信度门控过滤低相关或缺少 anchor coverage 的证据。
+8. 使用证据包生成带引用的 grounded answer，并返回 evidence summary 解释检索数量、可用证据、文档覆盖和分数范围。
 
 ### Compare 路径
 
-1. 通过关键词路由识别 compare / difference / vs / 区别 / 对比等信号。
-2. 对每份文档分别检索 `RAG_COMPARE_TOP_K_PER_DOC` 条证据。
-3. 对每份文档独立 rerank，避免强文档挤掉弱文档。
-4. 对齐证据，分析 shared terms、近重复、数值差异和显式冲突。
-5. 如果证据高度近似且无冲突，走 deterministic no-difference guard。
-6. 否则生成结构化 comparison answer：Summary、Per document、Agreements、Differences、Gaps。
+1. 通过轻量 intent classifier 识别显式对比、比较级问题、跨文档一致性等信号。
+2. 对复杂比较问题拆分 evidence requirements。
+3. 对每份文档分别检索 `RAG_COMPARE_TOP_K_PER_DOC` 条证据。
+4. 对每份文档独立 rerank，避免强文档挤掉弱文档。
+5. 对齐证据，分析 shared terms、近重复、数值差异和显式冲突。
+6. 如果证据高度近似且无冲突，走 deterministic no-difference guard。
+7. 否则生成结构化 comparison answer：Summary、Per document、Agreements、Differences、Gaps。
 
 这套设计的重点是“对比要公平”。普通 RAG 的全局 top-k 很容易把所有证据都给到最匹配的一份文档，导致比较结果看似完整，实际漏掉其他文档。这里的 compare pipeline 从检索阶段就保留文档边界。
 
@@ -180,6 +182,14 @@ RAG_CHUNK_SIZE=900
 RAG_CHUNK_OVERLAP=180
 RAG_RETRIEVAL_TOP_K=6
 RAG_COMPARE_TOP_K_PER_DOC=3
+RAG_QUERY_DECOMPOSITION_ENABLED=true
+RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS=4
+RAG_HYBRID_ENABLED=true
+RAG_HYBRID_FUSION=rrf
+RAG_RRF_K=60
+RAG_RERANK_ENABLED=true
+RAG_RERANK_PROVIDER=heuristic
+RAG_RERANK_CANDIDATE_MULTIPLIER=3
 
 STARTUP_HEALTH_STRICT=false
 ```
@@ -226,7 +236,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
 | `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
 
-说明：当前 `server/test/run.test.mjs` 只导入 `app.test.mjs` 和 `rag.test.mjs`；`server/test/answer-match.test.mjs` 是否纳入默认测试入口仍是待确认项。
+说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs` 和 `answer-match.test.mjs`。
 
 `ragas` 是可选 Python 评测，需要额外安装依赖：
 
@@ -253,8 +263,17 @@ cd ..
 | `RAG_CHUNK_SIZE` | `900` | chunk 最大长度。 |
 | `RAG_CHUNK_OVERLAP` | `180` | structured/simple chunk overlap。 |
 | `RAG_HYBRID_ENABLED` | `false` | 是否启用 dense + sparse fusion。 |
-| `RAG_RERANK_ENABLED` | `false` | 是否启用 heuristic rerank。 |
+| `RAG_HYBRID_FUSION` | `weighted` | hybrid 融合方式；`weighted` 使用分数加权，`rrf` 使用 Reciprocal Rank Fusion。 |
+| `RAG_RRF_K` | `60` | RRF 平滑常数，值越小越强调榜单前排。 |
+| `RAG_RERANK_ENABLED` | `false` | 是否启用 rerank；启用后会先召回 `topK * RAG_RERANK_CANDIDATE_MULTIPLIER` 个候选。 |
+| `RAG_RERANK_PROVIDER` | `heuristic` | rerank provider；支持 `heuristic`、`cross-encoder` 和代码内注入的 `custom` provider。 |
+| `RAG_RERANK_CANDIDATE_MULTIPLIER` | `3` | rerank 候选放大倍数。 |
+| `RAG_RERANK_WEIGHT` | `0.6` | rerank 分数与粗排原始分数混合时的 rerank 权重。 |
+| `RAG_CROSS_ENCODER_ENDPOINT` | 空 | `RAG_RERANK_PROVIDER=cross-encoder` 时调用的 HTTP endpoint，POST JSON：`query` 和 `texts`。 |
+| `RAG_CROSS_ENCODER_MODEL` | 空 | 传给 cross-encoder endpoint 的可选模型名。 |
 | `RAG_COMPARE_TOP_K_PER_DOC` | `3` | compare 路由中每份文档保留的证据数。 |
+| `RAG_QUERY_DECOMPOSITION_ENABLED` | `true` | 是否把复杂问题拆成多个 evidence requirements 分别检索。 |
+| `RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS` | `4` | 单次问题最多拆出的 evidence requirements 数。 |
 | `RAG_MIN_RELEVANCE_SCORE` | `0.32` | 置信度门控最低相关分。 |
 | `RAG_MIN_QUERY_TERM_COVERAGE` | `0.51` | query term coverage 门槛。 |
 | `RAG_NEAR_DUPLICATE_GUARD_ENABLED` | `true` | 近重复且无冲突时避免编造差异。 |
@@ -406,7 +425,7 @@ server/evaluation/results/<timestamped-files>
 
 ## 当前限制
 
-- compare router 仍是关键词规则，不是语义分类器。
+- intent classifier 仍是轻量规则/权重模型，不是训练好的语义分类器。
 - 多文档真实冲突场景需要 GPT-5 生成结构化比较，响应会比普通 QA 慢。
 - local JSON vector store 适合小规模本地工作区；大规模语料建议切到 Qdrant。
 - 真实文档评测需要自行准备 `evaluation/real-corpus.json`。
@@ -415,6 +434,4 @@ server/evaluation/results/<timestamped-files>
 ## 推荐下一步
 
 - 加一个 Docker Compose，把 PostgreSQL、可选 Qdrant 和 app 一次拉起。
-- 把 compare router 从关键词升级成轻量分类器。
 - 在 README 增加真实 UI 截图或短 GIF。
-- 将 `answer-match.test.mjs` 纳入默认后端测试入口，或明确保留为独立测试。

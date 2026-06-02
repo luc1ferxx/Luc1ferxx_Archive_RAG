@@ -952,6 +952,104 @@
   background: transparent;
 }
 
+.archive-evidence-panel {
+  display: grid;
+  gap: var(--archive-space-sm);
+  padding: 10px var(--archive-space-md);
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: 10px;
+  background: var(--archive-surface-overlay);
+}
+
+.archive-evidence-panel.is-confident {
+  border-color: rgba(145, 214, 171, 0.24);
+}
+
+.archive-evidence-panel.is-weak {
+  border-color: rgba(255, 183, 77, 0.3);
+}
+
+.archive-evidence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--archive-space-sm);
+  color: var(--archive-text-primary);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.archive-evidence-head span,
+.archive-evidence-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.archive-evidence-head strong {
+  color: var(--archive-text-soft);
+  font-size: 0.68rem;
+}
+
+.archive-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.archive-evidence-metric {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.archive-evidence-metric span {
+  display: block;
+  color: var(--archive-text-soft);
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.archive-evidence-metric strong {
+  display: block;
+  min-width: 0;
+  margin-top: 3px;
+  color: var(--archive-text-primary);
+  font-size: 0.74rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.archive-evidence-requirements {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.archive-evidence-requirements span {
+  max-width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: var(--archive-radius-pill);
+  color: var(--archive-text-secondary);
+  font-size: 0.7rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.archive-evidence-panel p {
+  margin: 0;
+  color: rgba(243, 242, 239, 0.68);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .archive-source-item {
   width: 100%;
   padding: 12px 14px;

@@ -3,7 +3,7 @@ import {
   getRerankCandidateMultiplier,
   isRerankEnabled,
 } from "../config.js";
-import { rerankResults } from "../reranker.js";
+import { rerankResultsWithProvider } from "../reranker.js";
 import { searchDocumentsPerDocument } from "../vector-store.js";
 
 export const retrievePerDocumentContext = async ({ queryVector, queryText, docIds }) => {
@@ -19,13 +19,15 @@ export const retrievePerDocumentContext = async ({ queryVector, queryText, docId
   });
 
   return new Map(
-    [...perDocumentCandidates.entries()].map(([docId, results]) => [
-      docId,
-      rerankResults({
-        queryText,
-        results,
-        topK: topKPerDoc,
-      }),
-    ])
+    await Promise.all(
+      [...perDocumentCandidates.entries()].map(async ([docId, results]) => [
+        docId,
+        await rerankResultsWithProvider({
+          queryText,
+          results,
+          topK: topKPerDoc,
+        }),
+      ])
+    )
   );
 };

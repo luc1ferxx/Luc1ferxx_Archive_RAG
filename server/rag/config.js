@@ -56,6 +56,12 @@ export const getChunkStrategy = () =>
 export const isHybridRetrievalEnabled = () =>
   toBoolean(process.env.RAG_HYBRID_ENABLED, false);
 
+export const getHybridFusionMethod = () =>
+  toChoice(process.env.RAG_HYBRID_FUSION, "weighted", ["weighted", "rrf"]);
+
+export const getRrfK = () =>
+  toNonNegativeNumber(process.env.RAG_RRF_K, 60);
+
 export const getRetrievalScoringMode = () =>
   (process.env.RAG_RETRIEVAL_SCORING_MODE || "combined").trim().toLowerCase();
 
@@ -107,6 +113,13 @@ export const getComparisonTopKPerDoc = () =>
 export const isRerankEnabled = () =>
   toBoolean(process.env.RAG_RERANK_ENABLED, false);
 
+export const getRerankProvider = () =>
+  toChoice(process.env.RAG_RERANK_PROVIDER, "heuristic", [
+    "heuristic",
+    "custom",
+    "cross-encoder",
+  ]);
+
 export const getRerankCandidateMultiplier = () =>
   Math.max(
     1,
@@ -115,6 +128,12 @@ export const getRerankCandidateMultiplier = () =>
 
 export const getRerankWeight = () =>
   Math.min(1, toNonNegativeNumber(process.env.RAG_RERANK_WEIGHT, 0.6));
+
+export const getCrossEncoderEndpoint = () =>
+  process.env.RAG_CROSS_ENCODER_ENDPOINT || "";
+
+export const getCrossEncoderModel = () =>
+  process.env.RAG_CROSS_ENCODER_MODEL || "";
 
 export const getMaxComparisonSources = () =>
   Math.floor(toPositiveNumber(process.env.RAG_MAX_COMPARISON_SOURCES, 8));
@@ -136,6 +155,12 @@ export const getKeywordWeight = () =>
 
 export const getMinQueryTermCoverage = () =>
   Math.min(1, toPositiveNumber(process.env.RAG_MIN_QUERY_TERM_COVERAGE, 0.51));
+
+export const isQueryDecompositionEnabled = () =>
+  toBoolean(process.env.RAG_QUERY_DECOMPOSITION_ENABLED, true);
+
+export const getMaxQueryRequirements = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS, 4));
 
 export const isNearDuplicateGuardEnabled = () =>
   toBoolean(process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED, true);
