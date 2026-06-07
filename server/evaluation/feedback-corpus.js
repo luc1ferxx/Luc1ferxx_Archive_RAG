@@ -66,6 +66,34 @@ const normalizeSkills = (skills) =>
         .filter((skill) => skill.skillId)
     : [];
 
+const normalizeClaimCheck = (claimCheck = {}) => ({
+  checked: Boolean(claimCheck.checked),
+  supportedClaimCount: Number.isFinite(Number(claimCheck.supportedClaimCount))
+    ? Number(claimCheck.supportedClaimCount)
+    : 0,
+  unsupportedClaimCount: Number.isFinite(Number(claimCheck.unsupportedClaimCount))
+    ? Number(claimCheck.unsupportedClaimCount)
+    : 0,
+  claims: Array.isArray(claimCheck.claims)
+    ? claimCheck.claims.slice(0, 12).map((claim) => ({
+        text: normalizeText(claim.text),
+        supported: Boolean(claim.supported),
+        tokenOverlap: Number.isFinite(claim.tokenOverlap)
+          ? claim.tokenOverlap
+          : null,
+        anchors: Array.isArray(claim.anchors)
+          ? claim.anchors.map(normalizeText).filter(Boolean).slice(0, 12)
+          : [],
+        missingAnchors: Array.isArray(claim.missingAnchors)
+          ? claim.missingAnchors.map(normalizeText).filter(Boolean).slice(0, 12)
+          : [],
+      }))
+    : [],
+});
+
+const normalizeClaimChecks = (claimChecks) =>
+  Array.isArray(claimChecks) ? claimChecks.map(normalizeClaimCheck).slice(0, 4) : [];
+
 const getFeedbackId = (record, index) =>
   normalizeText(record.feedbackId) || `feedback-${index + 1}`;
 
@@ -184,6 +212,7 @@ const buildFeedbackMetadata = ({ record, feedbackType }) => ({
   note: normalizeText(record.note),
   originalDocIds: normalizeDocIds(record.docIds),
   skills: normalizeSkills(record.skills),
+  claimChecks: normalizeClaimChecks(record.claimChecks),
   ...(feedbackType === "citation_error" ? { reviewRequired: true } : {}),
 });
 

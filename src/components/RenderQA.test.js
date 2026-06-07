@@ -59,6 +59,17 @@ describe("RenderQA", () => {
                     citedDocCount: 0,
                     requiredCitationCount: 1,
                     requiredDocCoverage: 1,
+                    claimSupport: {
+                      supportedClaimCount: 0,
+                      unsupportedClaimCount: 1,
+                      claims: [
+                        {
+                          text: "The satellite stipend is 500 dollars.",
+                          supported: false,
+                          missingAnchors: ["500"],
+                        },
+                      ],
+                    },
                   },
                 },
                 {
@@ -100,6 +111,11 @@ describe("RenderQA", () => {
     expect(screen.getByText("Docs")).toBeInTheDocument();
     expect(screen.getAllByText("0 / 1").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("Document answer has no citations.")).toBeInTheDocument();
+    expect(screen.getByText("Unsupported claims")).toBeInTheDocument();
+    expect(
+      screen.getByText("The satellite stipend is 500 dollars.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Missing anchors: 500")).toBeInTheDocument();
     expect(screen.getByText("document RAG budget exhausted.")).toBeInTheDocument();
     expect(
       screen.getByText(

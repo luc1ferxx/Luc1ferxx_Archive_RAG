@@ -87,6 +87,39 @@ const sanitizeSkill = (skill = {}) => ({
   status: normalizeString(skill.status),
 });
 
+const sanitizeClaimSupport = (claimSupport = {}) => ({
+  checked: Boolean(claimSupport.checked),
+  supportedClaimCount: Number.isFinite(Number(claimSupport.supportedClaimCount))
+    ? Number(claimSupport.supportedClaimCount)
+    : 0,
+  unsupportedClaimCount: Number.isFinite(Number(claimSupport.unsupportedClaimCount))
+    ? Number(claimSupport.unsupportedClaimCount)
+    : 0,
+  claims: Array.isArray(claimSupport.claims)
+    ? claimSupport.claims.slice(0, 12).map((claim) => ({
+        text: normalizeString(claim.text).slice(0, 500),
+        supported: Boolean(claim.supported),
+        tokenOverlap: Number.isFinite(claim.tokenOverlap)
+          ? claim.tokenOverlap
+          : null,
+        anchors: Array.isArray(claim.anchors)
+          ? claim.anchors.map(normalizeString).filter(Boolean).slice(0, 12)
+          : [],
+        missingAnchors: Array.isArray(claim.missingAnchors)
+          ? claim.missingAnchors.map(normalizeString).filter(Boolean).slice(0, 12)
+          : [],
+      }))
+    : [],
+});
+
+const extractClaimChecks = (answer = {}) =>
+  Array.isArray(answer.agentTrace)
+    ? answer.agentTrace
+        .filter((step) => step?.type === "self_check" && step.detail?.claimSupport)
+        .map((step) => sanitizeClaimSupport(step.detail.claimSupport))
+        .slice(0, 4)
+    : [];
+
 const getAnswerText = (payload = {}) => {
   if (typeof payload.answerText === "string") {
     return payload.answerText.trim();
@@ -160,6 +193,7 @@ export const buildFeedbackRecord = ({ payload = {}, accessScope = {} }) => {
       .map(sanitizeSkill)
       .filter((skill) => skill.skillId)
       .slice(0, 20),
+    claimChecks: extractClaimChecks(answer),
     citations: citations.map(sanitizeCitation).slice(0, 12),
   };
 };

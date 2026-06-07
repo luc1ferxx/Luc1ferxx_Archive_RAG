@@ -270,6 +270,44 @@ const TraceReasonList = ({ reasons }) => {
   );
 };
 
+const TraceClaimSupport = ({ claimSupport }) => {
+  if (!isPlainObject(claimSupport)) {
+    return null;
+  }
+
+  const unsupportedClaims = Array.isArray(claimSupport.claims)
+    ? claimSupport.claims.filter((claim) => claim && !claim.supported)
+    : [];
+
+  return (
+    <div className="archive-agent-detail-section">
+      <div className="archive-agent-detail-caption">Claims</div>
+      <TraceDetailRows
+        rows={[
+          {
+            label: "Supported",
+            value: formatDetailValue(claimSupport.supportedClaimCount),
+          },
+          {
+            label: "Unsupported",
+            value: formatDetailValue(claimSupport.unsupportedClaimCount),
+          },
+        ]}
+      />
+      <TraceActionList
+        label="Unsupported claims"
+        items={unsupportedClaims}
+        getTitle={(claim, index) => claim.text ?? `Claim ${index + 1}`}
+        getCopy={(claim) =>
+          Array.isArray(claim.missingAnchors) && claim.missingAnchors.length > 0
+            ? `Missing anchors: ${claim.missingAnchors.join(", ")}`
+            : null
+        }
+      />
+    </div>
+  );
+};
+
 const GenericTraceDetail = ({ detail, exclude = [] }) => {
   const excludedKeys = new Set(exclude);
   const rows = Object.entries(detail)
@@ -372,6 +410,7 @@ const AgentTraceDetail = ({ step }) => {
             <strong>{formatDetailValue(detail.passed)}</strong>
           </div>
         </div>
+        <TraceClaimSupport claimSupport={detail.claimSupport} />
         <TraceReasonList reasons={detail.reasons} />
       </div>
     );
