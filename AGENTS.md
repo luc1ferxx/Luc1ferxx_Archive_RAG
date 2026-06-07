@@ -31,6 +31,7 @@
 - Chunking comparison corpus: `cd server && RAG_CHUNK_STRATEGY=structured RAG_CHUNK_OVERLAP=180 npm run eval:synthetic -- evaluation/synthetic-corpus-chunking.json`.
 - Feedback corpus generation: `cd server && npm run feedback:corpus`.
 - Feedback regression eval: `cd server && npm run eval:feedback`; this writes ignored `evaluation/generated/feedback-corpus.json` and `evaluation/results/latest-feedback.*`.
+- Quality gate: `cd server && npm run quality:gate`; it reads `evaluation/results/latest-feedback.json` when present and reports feedback failures by `skillId@skillVersion`.
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 

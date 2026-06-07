@@ -319,6 +319,7 @@ const evaluateCase = async ({
     citationCount: citations.length,
     resolvedQuery: response.resolvedQuery ?? testCase.question,
     reference: testCase.referenceAnswer ?? null,
+    metadata: testCase.metadata ?? null,
     answer: response.text,
     citations,
     retrievedContexts,

@@ -236,6 +236,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
 | `cd server && npm run feedback:corpus` | 从已收集的负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用反馈语料运行 synthetic eval，输出 `latest-feedback.*`。 |
+| `cd server && npm run quality:gate` | 检查主线 synthetic regression；如果存在 `latest-feedback.json`，同时检查 feedback eval 并按 skill 汇总失败。 |
 | `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
 | `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
 
@@ -342,6 +343,8 @@ npm run eval:feedback
 ```
 
 `feedback:corpus` 默认读取 `server/data/feedback/feedback.jsonl`，只收集 `citation_error`、`incomplete` 和 `hallucination` 三类负反馈，输出到 `server/evaluation/generated/feedback-corpus.json`。`eval:feedback` 会先重建该语料，再运行 synthetic eval，并把最新报告写到 `server/evaluation/results/latest-feedback.json` 和 `server/evaluation/results/latest-feedback.md`，不会覆盖主线 `latest.*` 报告。
+
+`quality:gate` 会读取已生成的 `latest-feedback.json`。如果 feedback eval 存在失败 case，gate 会失败，并输出类似 `document_rag@1.0.0: 2 citation errors, 1 incomplete answer` 的 skill 级统计；如果还没有 feedback eval 报告，则 feedback gate 会标记为 skipped，不阻塞主线 synthetic regression gate。
 
 如需从临时文件构建语料，可直接传入路径：
 

@@ -8,6 +8,7 @@ const __dirname = path.dirname(__filename);
 const serverDirectory = path.join(__dirname, "..");
 const resultsDirectory = path.join(__dirname, "results");
 const latestResultPath = path.join(resultsDirectory, "latest.json");
+const latestFeedbackResultPath = path.join(resultsDirectory, "latest-feedback.json");
 const defaultHistoryLimit = 10;
 const statusRank = {
   unknown: 0,
@@ -64,6 +65,13 @@ const getCorpusName = (corpusPath) => {
   return String(corpusPath).split(/[\\/]/).pop() ?? corpusPath;
 };
 
+const isFeedbackResultPayload = (payload = {}) => {
+  const corpusPath = String(payload.summary?.corpus?.path ?? "");
+  const corpusName = getCorpusName(corpusPath);
+
+  return corpusName === "feedback-corpus.json";
+};
+
 const toTimestamp = (createdAt) => {
   const parsed = Date.parse(createdAt ?? "");
   return Number.isFinite(parsed) ? parsed : 0;
@@ -114,7 +122,113 @@ const buildFailedCases = (cases = []) =>
       responseTimeMs: caseResult.responseTimeMs ?? null,
       reasons: getFailedReasons(caseResult),
       citations: caseResult.citations ?? [],
+      metadata: caseResult.metadata ?? null,
     }));
+
+const getFeedbackMetadata = (caseResult = {}) => {
+  const metadata = caseResult.metadata && typeof caseResult.metadata === "object"
+    ? caseResult.metadata
+    : {};
+  const feedback = metadata.feedback && typeof metadata.feedback === "object"
+    ? metadata.feedback
+    : {};
+
+  return feedback;
+};
+
+const normalizeSkill = (skill = {}) => ({
+  skillId: String(skill.skillId ?? skill.id ?? "unknown").trim() || "unknown",
+  skillVersion:
+    String(skill.skillVersion ?? skill.version ?? "unknown").trim() || "unknown",
+  label: String(skill.label ?? skill.skillId ?? skill.id ?? "Unknown skill").trim() ||
+    "Unknown skill",
+});
+
+const getFeedbackSkills = (caseResult = {}) => {
+  const feedback = getFeedbackMetadata(caseResult);
+  const skills = Array.isArray(feedback.skills)
+    ? feedback.skills.map(normalizeSkill).filter((skill) => skill.skillId)
+    : [];
+
+  return skills.length > 0
+    ? skills
+    : [
+        {
+          skillId: "unknown",
+          skillVersion: "unknown",
+          label: "Unknown skill",
+        },
+      ];
+};
+
+const getFeedbackType = (caseResult = {}) =>
+  String(getFeedbackMetadata(caseResult).feedbackType ?? "unknown").trim() ||
+  "unknown";
+
+const incrementMapCount = (target, key) => {
+  target[key] = (target[key] ?? 0) + 1;
+};
+
+export const buildFeedbackSkillFailures = (cases = []) => {
+  const statsBySkill = new Map();
+
+  for (const caseResult of cases) {
+    if (caseResult.passed) {
+      continue;
+    }
+
+    const feedbackType = getFeedbackType(caseResult);
+
+    for (const skill of getFeedbackSkills(caseResult)) {
+      const skillKey = `${skill.skillId}@${skill.skillVersion}`;
+      const stats = statsBySkill.get(skillKey) ?? {
+        skillKey,
+        skillId: skill.skillId,
+        skillVersion: skill.skillVersion,
+        label: skill.label,
+        failedCaseCount: 0,
+        feedbackTypes: {},
+        failedCaseIds: [],
+      };
+
+      stats.failedCaseCount += 1;
+      incrementMapCount(stats.feedbackTypes, feedbackType);
+      stats.failedCaseIds.push(caseResult.id);
+      statsBySkill.set(skillKey, stats);
+    }
+  }
+
+  return [...statsBySkill.values()].sort(
+    (left, right) =>
+      right.failedCaseCount - left.failedCaseCount ||
+      left.skillKey.localeCompare(right.skillKey)
+  );
+};
+
+const feedbackTypeLabels = {
+  citation_error: ["citation error", "citation errors"],
+  incomplete: ["incomplete answer", "incomplete answers"],
+  hallucination: ["hallucination", "hallucinations"],
+  unknown: ["unknown feedback", "unknown feedback"],
+};
+
+const formatFeedbackTypeCount = ([feedbackType, count]) => {
+  const labels = feedbackTypeLabels[feedbackType] ?? [
+    feedbackType.replaceAll("_", " "),
+    `${feedbackType.replaceAll("_", " ")}s`,
+  ];
+
+  return `${count} ${count === 1 ? labels[0] : labels[1]}`;
+};
+
+export const formatFeedbackSkillFailureLine = (skillFailure = {}) => {
+  const feedbackTypeSummary = Object.entries(skillFailure.feedbackTypes ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(formatFeedbackTypeCount)
+    .join(", ");
+
+  return `${skillFailure.skillKey}: ${feedbackTypeSummary || "0 failures"}`;
+};
 
 const buildRecommendations = ({ metrics = {}, failedCases = [] }) => {
   const recommendations = [];
@@ -357,12 +471,120 @@ export const buildRegressionGate = ({ baselineRun = null, currentRun = null } = 
   };
 };
 
+export const buildFeedbackGate = ({ latestFeedbackPayload = null } = {}) => {
+  if (!latestFeedbackPayload) {
+    return {
+      status: "pass",
+      skipped: true,
+      currentRunId: null,
+      failedCaseCount: 0,
+      caseCount: 0,
+      skillFailures: [],
+      failedCases: [],
+      summary: "No feedback evaluation report is available; feedback gate skipped.",
+    };
+  }
+
+  const latestFeedbackRun = buildQualityRunSummary({
+    fileName: "latest-feedback.json",
+    payload: latestFeedbackPayload,
+  });
+  const cases = Array.isArray(latestFeedbackPayload.cases)
+    ? latestFeedbackPayload.cases
+    : [];
+  const failedCases = buildFailedCases(cases);
+  const skillFailures = buildFeedbackSkillFailures(cases);
+  const failedCaseCount = failedCases.length;
+  const status = failedCaseCount > 0 ? "fail" : "pass";
+  const summary = cases.length === 0
+    ? "Feedback evaluation has no cases yet."
+    : failedCaseCount > 0
+      ? `Feedback evaluation failed ${failedCaseCount} of ${cases.length} case${
+          cases.length === 1 ? "" : "s"
+        }.`
+      : `Feedback evaluation passed all ${cases.length} case${
+          cases.length === 1 ? "" : "s"
+        }.`;
+
+  return {
+    status,
+    skipped: false,
+    currentRunId: latestFeedbackRun?.runId ?? null,
+    latestRun: latestFeedbackRun,
+    failedCaseCount,
+    caseCount: cases.length,
+    skillFailures,
+    failedCases,
+    summary,
+  };
+};
+
+export const buildCombinedQualityGate = ({
+  regressionGate = {},
+  feedbackGate = {},
+} = {}) => {
+  if (feedbackGate.status === "fail") {
+    return {
+      status: "fail",
+      summary: feedbackGate.summary,
+      checks: [
+        ...(regressionGate.checks ?? []),
+        {
+          metric: "feedbackFailedCaseCount",
+          label: "Feedback failed cases",
+          status: "fail",
+          currentValue: feedbackGate.failedCaseCount,
+          baselineValue: 0,
+          delta: feedbackGate.failedCaseCount,
+        },
+      ],
+    };
+  }
+
+  if (regressionGate.status === "fail" || regressionGate.status === "warn") {
+    return {
+      status: regressionGate.status,
+      summary: regressionGate.summary,
+      checks: regressionGate.checks ?? [],
+    };
+  }
+
+  if (regressionGate.status === "unknown") {
+    return {
+      status: "unknown",
+      summary: regressionGate.summary,
+      checks: regressionGate.checks ?? [],
+    };
+  }
+
+  return {
+    status: "pass",
+    summary:
+      feedbackGate.skipped
+        ? regressionGate.summary
+        : `${regressionGate.summary} ${feedbackGate.summary}`,
+    checks: [
+      ...(regressionGate.checks ?? []),
+      {
+        metric: "feedbackFailedCaseCount",
+        label: "Feedback failed cases",
+        status: "pass",
+        currentValue: feedbackGate.failedCaseCount ?? 0,
+        baselineValue: 0,
+        delta: feedbackGate.failedCaseCount ?? 0,
+      },
+    ],
+  };
+};
+
 export const buildQualityHistoryResponse = ({
   latestPayload = null,
+  latestFeedbackPayload = null,
   limit = defaultHistoryLimit,
   runPayloads = [],
 } = {}) => {
   const runSummaries = runPayloads
+    .filter((entry) => !isFeedbackResultPayload(entry.payload))
     .map((entry) =>
       buildQualityRunSummary({
         fileName: entry.fileName,
@@ -391,12 +613,21 @@ export const buildQualityHistoryResponse = ({
     baselineRun,
     currentRun,
   });
+  const feedbackGate = buildFeedbackGate({
+    latestFeedbackPayload,
+  });
+  const qualityGate = buildCombinedQualityGate({
+    regressionGate,
+    feedbackGate,
+  });
 
   return {
-    status: regressionGate.status,
+    status: qualityGate.status,
     latestRun: currentRun,
     runs: sortedRuns.slice(0, limit),
     regressionGate,
+    feedbackGate,
+    qualityGate,
   };
 };
 
@@ -405,10 +636,10 @@ export const buildQualityGateDecision = ({
   failOnWarn = false,
   history = {},
 } = {}) => {
-  const regressionGate = history.regressionGate ?? {};
-  const status = regressionGate.status ?? history.status ?? "unknown";
+  const gate = history.qualityGate ?? history.regressionGate ?? {};
+  const status = gate.status ?? history.status ?? "unknown";
   const summary =
-    regressionGate.summary ??
+    gate.summary ??
     "No quality regression gate summary is available.";
   const exitCode =
     status === "fail"
@@ -447,9 +678,18 @@ export const readLatestQualityReport = async () => {
 
 export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) => {
   let latestPayload = null;
+  let latestFeedbackPayload = null;
 
   try {
     latestPayload = await readJsonFile(latestResultPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  try {
+    latestFeedbackPayload = await readJsonFile(latestFeedbackResultPath);
   } catch (error) {
     if (error.code !== "ENOENT") {
       throw error;
@@ -464,6 +704,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
     if (error.code === "ENOENT") {
       return buildQualityHistoryResponse({
         latestPayload,
+        latestFeedbackPayload,
         limit,
         runPayloads: [],
       });
@@ -490,6 +731,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
 
   return buildQualityHistoryResponse({
     latestPayload,
+    latestFeedbackPayload,
     limit,
     runPayloads,
   });

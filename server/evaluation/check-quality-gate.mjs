@@ -2,6 +2,7 @@
 
 import {
   buildQualityGateDecision,
+  formatFeedbackSkillFailureLine,
   readQualityHistory,
 } from "./quality-report.js";
 
@@ -82,6 +83,10 @@ const formatCheckDelta = (check) => {
     return formatDelta(check.delta);
   }
 
+  if (check.metric === "feedbackFailedCaseCount") {
+    return formatDelta(check.delta);
+  }
+
   if (check.metric === "averageCitationCount") {
     return formatDelta(check.delta);
   }
@@ -90,9 +95,11 @@ const formatCheckDelta = (check) => {
 };
 
 const printTextReport = ({ decision, history }) => {
+  const qualityGate = history.qualityGate ?? {};
   const gate = history.regressionGate ?? {};
+  const feedbackGate = history.feedbackGate ?? {};
   const latestRun = history.latestRun ?? {};
-  const checks = gate.checks ?? [];
+  const checks = qualityGate.checks ?? gate.checks ?? [];
 
   console.log(`Quality gate: ${decision.status.toUpperCase()}`);
   console.log(decision.summary);
@@ -111,6 +118,16 @@ const printTextReport = ({ decision, history }) => {
 
   for (const check of checks) {
     console.log(`- ${check.label}: ${check.status} (${formatCheckDelta(check)})`);
+  }
+
+  if (feedbackGate.status) {
+    const suffix = feedbackGate.skipped ? " (skipped)" : "";
+    console.log(`Feedback gate: ${feedbackGate.status}${suffix}`);
+    console.log(feedbackGate.summary);
+
+    for (const skillFailure of feedbackGate.skillFailures ?? []) {
+      console.log(`- ${formatFeedbackSkillFailureLine(skillFailure)}`);
+    }
   }
 };
 
