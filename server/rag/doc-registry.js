@@ -37,6 +37,43 @@ const ensureTableName = () => {
 
 const normalizeDocId = (docId) => String(docId ?? "").trim();
 
+const normalizeAccessScope = (accessScope = {}) => ({
+  userId: String(accessScope.userId ?? "").trim(),
+  workspaceId: String(accessScope.workspaceId ?? "").trim(),
+});
+
+const hasAccessScope = (accessScope = {}) => {
+  const scope = normalizeAccessScope(accessScope);
+
+  return Boolean(scope.userId || scope.workspaceId);
+};
+
+const documentMatchesAccessScope = (document = {}, accessScope = {}) => {
+  const safeDocument = document ?? {};
+  const scope = normalizeAccessScope(accessScope);
+
+  if (!scope.userId && !scope.workspaceId) {
+    return true;
+  }
+
+  const ownerUserId = String(safeDocument.ownerUserId ?? "").trim();
+  const workspaceId = String(safeDocument.workspaceId ?? "").trim();
+
+  if (!ownerUserId && !workspaceId) {
+    return false;
+  }
+
+  if (ownerUserId && (!scope.userId || ownerUserId !== scope.userId)) {
+    return false;
+  }
+
+  if (workspaceId && (!scope.workspaceId || workspaceId !== scope.workspaceId)) {
+    return false;
+  }
+
+  return true;
+};
+
 const normalizeStringArray = (values, { limit = 12 } = {}) => {
   if (!Array.isArray(values)) {
     return [];
@@ -77,6 +114,12 @@ const toStoredDocument = (document = {}) => {
     fileSize: toPositiveInteger(document.fileSize),
     chunkCount: toPositiveInteger(document.chunkCount),
     pageCount: toPositiveInteger(document.pageCount),
+    ownerUserId: String(
+      document.ownerUserId ?? document.userId ?? document.owner_user_id ?? ""
+    ).trim(),
+    workspaceId: String(
+      document.workspaceId ?? document.workspace_id ?? ""
+    ).trim(),
     profile,
     uploadedAt: document.uploadedAt ?? new Date().toISOString(),
     storageBackend: "postgresql",
@@ -91,6 +134,8 @@ const mapRowToStoredDocument = (row = {}) =>
     fileSize: row.file_size,
     chunkCount: row.chunk_count,
     pageCount: row.page_count,
+    ownerUserId: row.owner_user_id,
+    workspaceId: row.workspace_id,
     profile: row.profile,
     uploadedAt: row.uploaded_at,
   });
@@ -195,17 +240,19 @@ const createDefaultStore = () => ({
     return true;
   },
 
-  async list() {
+  async list(accessScope = {}) {
     const tableName = ensureTableName();
     const result = await queryPostgres(
       `
-        SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, profile, uploaded_at
+        SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
         FROM ${tableName}
         ORDER BY uploaded_at ASC, doc_id ASC
       `
     );
 
-    return result.rows.map(mapRowToStoredDocument);
+    return result.rows
+      .map(mapRowToStoredDocument)
+      .filter((document) => documentMatchesAccessScope(document, accessScope));
   },
 
   async upsert(document) {
@@ -231,10 +278,12 @@ const createDefaultStore = () => ({
           file_bytes,
           chunk_count,
           page_count,
+          owner_user_id,
+          workspace_id,
           profile,
           uploaded_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (doc_id)
         DO UPDATE SET
           file_name = EXCLUDED.file_name,
@@ -243,9 +292,11 @@ const createDefaultStore = () => ({
           file_bytes = EXCLUDED.file_bytes,
           chunk_count = EXCLUDED.chunk_count,
           page_count = EXCLUDED.page_count,
+          owner_user_id = EXCLUDED.owner_user_id,
+          workspace_id = EXCLUDED.workspace_id,
           profile = EXCLUDED.profile,
           uploaded_at = EXCLUDED.uploaded_at
-        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, profile, uploaded_at
+        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
       `,
       [
         normalizedDocument.docId,
@@ -255,6 +306,8 @@ const createDefaultStore = () => ({
         fileBuffer,
         normalizedDocument.chunkCount,
         normalizedDocument.pageCount,
+        normalizedDocument.ownerUserId,
+        normalizedDocument.workspaceId,
         normalizedDocument.profile,
         normalizedDocument.uploadedAt,
       ]
@@ -263,7 +316,7 @@ const createDefaultStore = () => ({
     return mapRowToStoredDocument(result.rows[0]);
   },
 
-  async getFile(docId) {
+  async getFile(docId, accessScope = {}) {
     const normalizedDocId = normalizeDocId(docId);
 
     if (!normalizedDocId) {
@@ -273,7 +326,7 @@ const createDefaultStore = () => ({
     const tableName = ensureTableName();
     const result = await queryPostgres(
       `
-        SELECT doc_id, file_name, mime_type, file_size, file_bytes, chunk_count, page_count, profile, uploaded_at
+        SELECT doc_id, file_name, mime_type, file_size, file_bytes, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
         FROM ${tableName}
         WHERE doc_id = $1
         LIMIT 1
@@ -286,8 +339,14 @@ const createDefaultStore = () => ({
       return null;
     }
 
+    const document = mapRowToStoredDocument(row);
+
+    if (!documentMatchesAccessScope(document, accessScope)) {
+      return null;
+    }
+
     return {
-      document: mapRowToStoredDocument(row),
+      document,
       fileBuffer: Buffer.from(row.file_bytes ?? []),
       mimeType: String(row.mime_type ?? "application/pdf"),
       fileName: String(row.file_name ?? "document.pdf"),
@@ -295,7 +354,7 @@ const createDefaultStore = () => ({
     };
   },
 
-  async delete(docId) {
+  async delete(docId, accessScope = {}) {
     const normalizedDocId = normalizeDocId(docId);
 
     if (!normalizedDocId) {
@@ -303,11 +362,17 @@ const createDefaultStore = () => ({
     }
 
     const tableName = ensureTableName();
+    const existingFile = await this.getFile(normalizedDocId, accessScope);
+
+    if (!existingFile) {
+      return null;
+    }
+
     const result = await queryPostgres(
       `
         DELETE FROM ${tableName}
         WHERE doc_id = $1
-        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, profile, uploaded_at
+        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
       `,
       [normalizedDocId]
     );
@@ -315,8 +380,27 @@ const createDefaultStore = () => ({
     return result.rows[0] ? mapRowToStoredDocument(result.rows[0]) : null;
   },
 
-  async clear() {
+  async clear(accessScope = {}) {
     const tableName = ensureTableName();
+
+    if (hasAccessScope(accessScope)) {
+      const scopedDocuments = await this.list(accessScope);
+      const scopedDocIds = scopedDocuments.map((document) => document.docId);
+
+      if (scopedDocIds.length === 0) {
+        return true;
+      }
+
+      await queryPostgres(
+        `
+          DELETE FROM ${tableName}
+          WHERE doc_id = ANY($1::text[])
+        `,
+        [scopedDocIds]
+      );
+      return true;
+    }
+
     await queryPostgres(`DELETE FROM ${tableName}`);
     return true;
   },
@@ -390,29 +474,34 @@ export const registerDocument = async (document) => {
 
 export const hasDocument = (docId) => documentRegistry.has(normalizeDocId(docId));
 
-export const getStoredDocument = (docId) =>
-  documentRegistry.get(normalizeDocId(docId)) ?? null;
+export const getStoredDocument = (docId, accessScope = {}) => {
+  const document = documentRegistry.get(normalizeDocId(docId)) ?? null;
 
-export const getDocument = (docId) => toPublicDocument(getStoredDocument(docId));
+  return documentMatchesAccessScope(document, accessScope) ? document : null;
+};
 
-export const getDocuments = (docIds) =>
+export const getDocument = (docId, accessScope = {}) =>
+  toPublicDocument(getStoredDocument(docId, accessScope));
+
+export const getDocuments = (docIds, accessScope = {}) =>
   normalizeDocIds(docIds)
-    .map((docId) => getDocument(docId))
+    .map((docId) => getDocument(docId, accessScope))
     .filter(Boolean);
 
-export const listDocuments = () =>
+export const listDocuments = (accessScope = {}) =>
   [...documentRegistry.values()]
+    .filter((document) => documentMatchesAccessScope(document, accessScope))
     .sort((left, right) => left.uploadedAt.localeCompare(right.uploadedAt))
     .map((document) => toPublicDocument(document));
 
-export const getDocumentFile = async (docId) => {
+export const getDocumentFile = async (docId, accessScope = {}) => {
   const store = getDocumentRegistryStore();
 
-  return store.getFile ? store.getFile(docId) : null;
+  return store.getFile ? store.getFile(docId, accessScope) : null;
 };
 
-export const deleteDocument = async (docId) => {
-  const storedDocument = getStoredDocument(docId);
+export const deleteDocument = async (docId, accessScope = {}) => {
+  const storedDocument = getStoredDocument(docId, accessScope);
 
   if (!storedDocument) {
     return null;
@@ -421,22 +510,29 @@ export const deleteDocument = async (docId) => {
   const store = getDocumentRegistryStore();
 
   if (store.delete) {
-    await store.delete(docId);
+    await store.delete(docId, accessScope);
   }
 
   documentRegistry.delete(normalizeDocId(docId));
   return toPublicDocument(storedDocument);
 };
 
-export const clearDocuments = async () => {
-  const documents = listDocuments();
+export const clearDocuments = async ({ accessScope = {} } = {}) => {
+  const documents = listDocuments(accessScope);
   const store = getDocumentRegistryStore();
 
   if (store.clear) {
-    await store.clear();
+    await store.clear(accessScope);
   }
 
-  documentRegistry = new Map();
+  if (hasAccessScope(accessScope)) {
+    for (const document of documents) {
+      documentRegistry.delete(normalizeDocId(document.docId));
+    }
+  } else {
+    documentRegistry = new Map();
+  }
+
   documentRegistryInitialized = true;
   return documents;
 };

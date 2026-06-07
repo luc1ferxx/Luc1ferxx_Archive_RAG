@@ -1030,6 +1030,71 @@ test("memory endpoints list, create, and delete long-term memories", async () =>
   }
 });
 
+test("memory endpoints use authenticated user scope over request userId", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
+  const requestedUserIds = [];
+
+  try {
+    process.env.API_AUTH_ENABLED = "true";
+    process.env.API_AUTH_TOKEN = "";
+    process.env.API_AUTH_TOKENS = JSON.stringify({
+      "alice-token": {
+        userId: "alice",
+        workspaceId: "workspace-a",
+      },
+    });
+
+    const app = await createApp({
+      ragService: {
+        listLongMemories: async ({ userId }) => {
+          requestedUserIds.push(userId);
+          return [];
+        },
+        initializeSessionMemory: async () => true,
+        initializeDocumentRegistry: async () => [],
+      },
+      chatMcp: async () => ({
+        text: "web",
+      }),
+      healthService: okHealthService,
+    });
+    const server = await startServer(app);
+
+    try {
+      const response = await fetch(`${server.baseUrl}/memory?userId=bob`, {
+        headers: {
+          "x-api-key": "alice-token",
+        },
+      });
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(requestedUserIds, ["alice"]);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
+  }
+});
+
 test("health and ready endpoints expose startup status", async () => {
   const healthService = {
     buildHealthReport: async () => ({
@@ -1120,43 +1185,342 @@ test("api auth protects document routes while leaving health public", async () =
   }
 });
 
-test("document file route streams stored PDFs before auth middleware", async () => {
+test("document file route requires auth and enforces document ownership", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
   const fileBuffer = Buffer.from("%PDF-test-document", "utf8");
-  const app = await createApp({
-    healthService: okHealthService,
-    ragService: {
-      initializeDocumentRegistry: async () => [],
-      initializeSessionMemory: async () => true,
-      getDocumentFile: async (docId) =>
-        docId === "doc-1"
-          ? {
-              document: {
-                docId,
-                fileName: "stored.pdf",
-              },
-              fileBuffer,
-              fileName: "stored.pdf",
-              mimeType: "application/pdf",
-              fileSize: fileBuffer.byteLength,
-            }
-          : null,
-    },
-  });
-  const server = await startServer(app);
 
   try {
-    const response = await fetch(`${server.baseUrl}/documents/doc-1/file`, {
-      headers: {
-        Range: "bytes=0-3",
+    process.env.API_AUTH_ENABLED = "true";
+    process.env.API_AUTH_TOKEN = "";
+    process.env.API_AUTH_TOKENS = JSON.stringify({
+      "owner-token": {
+        userId: "alice",
+        workspaceId: "workspace-a",
+      },
+      "intruder-token": {
+        userId: "bob",
+        workspaceId: "workspace-b",
       },
     });
 
-    assert.equal(response.status, 206);
-    assert.equal(response.headers.get("content-type"), "application/pdf");
-    assert.equal(response.headers.get("accept-ranges"), "bytes");
-    assert.equal(await response.text(), "%PDF");
+    const app = await createApp({
+      healthService: okHealthService,
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+        getDocumentFile: async (docId, accessScope) =>
+          docId === "doc-1" &&
+          accessScope?.userId === "alice" &&
+          accessScope?.workspaceId === "workspace-a"
+            ? {
+                document: {
+                  docId,
+                  fileName: "stored.pdf",
+                  ownerUserId: "alice",
+                  workspaceId: "workspace-a",
+                },
+                fileBuffer,
+                fileName: "stored.pdf",
+                mimeType: "application/pdf",
+                fileSize: fileBuffer.byteLength,
+              }
+            : null,
+      },
+    });
+    const server = await startServer(app);
+
+    try {
+      let response = await fetch(`${server.baseUrl}/documents/doc-1/file`, {
+        headers: {
+          Range: "bytes=0-3",
+        },
+      });
+      assert.equal(response.status, 401);
+
+      response = await fetch(`${server.baseUrl}/documents/doc-1/file`, {
+        headers: {
+          Range: "bytes=0-3",
+          "x-api-key": "intruder-token",
+        },
+      });
+      assert.equal(response.status, 404);
+
+      response = await fetch(`${server.baseUrl}/documents/doc-1/file`, {
+        headers: {
+          Range: "bytes=0-3",
+          "x-api-key": "owner-token",
+        },
+      });
+
+      assert.equal(response.status, 206);
+      assert.equal(response.headers.get("content-type"), "application/pdf");
+      assert.equal(response.headers.get("accept-ranges"), "bytes");
+      assert.equal(await response.text(), "%PDF");
+    } finally {
+      await server.close();
+    }
   } finally {
-    await server.close();
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
+  }
+});
+
+test("chat endpoint rejects documents outside the authenticated workspace", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
+
+  try {
+    process.env.API_AUTH_ENABLED = "true";
+    process.env.API_AUTH_TOKEN = "";
+    process.env.API_AUTH_TOKENS = JSON.stringify({
+      "owner-token": {
+        userId: "alice",
+        workspaceId: "workspace-a",
+      },
+      "intruder-token": {
+        userId: "bob",
+        workspaceId: "workspace-b",
+      },
+    });
+
+    const documents = new Map([
+      [
+        "doc-1",
+        {
+          docId: "doc-1",
+          fileName: "stored.pdf",
+          ownerUserId: "alice",
+          workspaceId: "workspace-a",
+        },
+      ],
+    ]);
+    let chatCallCount = 0;
+    const app = await createApp({
+      healthService: okHealthService,
+      ragService: {
+        chat: async () => {
+          chatCallCount += 1;
+          return {
+            text: "The stored document is visible to Alice.",
+            citations: [],
+            abstained: false,
+          };
+        },
+        clearDocuments: async () => [],
+        clearSessionMemory: () => true,
+        deleteDocument: async () => null,
+        getDocument: (docId, accessScope) => {
+          const document = documents.get(docId);
+
+          if (
+            !document ||
+            accessScope?.userId !== document.ownerUserId ||
+            accessScope?.workspaceId !== document.workspaceId
+          ) {
+            return null;
+          }
+
+          return document;
+        },
+        ingestDocument: async () => null,
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+        listDocuments: () => [...documents.values()],
+      },
+      chatMcp: async () => ({
+        text: "web",
+      }),
+    });
+    const server = await startServer(app);
+
+    try {
+      const requestBody = {
+        docId: "doc-1",
+        question: "What is visible?",
+      };
+      let response = await fetch(`${server.baseUrl}/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": "intruder-token",
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      assert.equal(response.status, 404);
+      assert.equal(chatCallCount, 0);
+
+      response = await fetch(`${server.baseUrl}/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": "owner-token",
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(chatCallCount > 0, true);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
+  }
+});
+
+test("feedback endpoints store and list scoped answer feedback", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
+  const recordedFeedback = [];
+  const listScopes = [];
+
+  try {
+    process.env.API_AUTH_ENABLED = "true";
+    process.env.API_AUTH_TOKEN = "";
+    process.env.API_AUTH_TOKENS = JSON.stringify({
+      "alice-token": {
+        userId: "alice",
+        workspaceId: "workspace-a",
+      },
+    });
+
+    const app = await createApp({
+      healthService: okHealthService,
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+      },
+      feedbackService: {
+        recordFeedback: async (feedback) => {
+          recordedFeedback.push(feedback);
+          return {
+            feedbackId: "feedback-1",
+            ...feedback,
+          };
+        },
+        listFeedback: async ({ accessScope, limit }) => {
+          listScopes.push({
+            accessScope,
+            limit,
+          });
+
+          return recordedFeedback;
+        },
+      },
+    });
+    const server = await startServer(app);
+
+    try {
+      let response = await fetch(`${server.baseUrl}/feedback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": "alice-token",
+        },
+        body: JSON.stringify({
+          userId: "bob",
+          workspaceId: "workspace-b",
+          question: "What does the policy say?",
+          docIds: ["doc-1"],
+          feedbackType: "citation_error",
+          note: "The page citation looks wrong.",
+          answer: {
+            agentAnswer: "The policy says remote work is allowed.",
+            ragSources: [
+              {
+                docId: "doc-1",
+                fileName: "policy.pdf",
+                pageNumber: 3,
+                chunkIndex: 1,
+                excerpt: "Remote work is allowed.",
+              },
+            ],
+            retrievedContexts: [
+              {
+                pageContent: "Sensitive full chunk text should not be stored.",
+              },
+            ],
+          },
+        }),
+      });
+
+      assert.equal(response.status, 201);
+      assert.equal(recordedFeedback.length, 1);
+      assert.equal(recordedFeedback[0].userId, "alice");
+      assert.equal(recordedFeedback[0].workspaceId, "workspace-a");
+      assert.equal(recordedFeedback[0].feedbackType, "citation_error");
+      assert.equal(recordedFeedback[0].answerText, "The policy says remote work is allowed.");
+      assert.equal(recordedFeedback[0].citations[0].pageNumber, 3);
+      assert.equal("retrievedContexts" in recordedFeedback[0], false);
+
+      response = await fetch(`${server.baseUrl}/feedback?limit=5`, {
+        headers: {
+          "x-api-key": "alice-token",
+        },
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).feedback.length, 1);
+      assert.equal(listScopes[0].accessScope.userId, "alice");
+      assert.equal(listScopes[0].accessScope.workspaceId, "workspace-a");
+      assert.equal(listScopes[0].limit, 5);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
   }
 });
 

@@ -338,11 +338,19 @@ const buildSynthesisAnswer = ({
   return "The agent could not complete the request because all selected tools failed.";
 };
 
-const callDocumentRag = async ({ ragService, docIds, question, sessionId, userId }) => {
+const callDocumentRag = async ({
+  ragService,
+  docIds,
+  question,
+  sessionId,
+  userId,
+  accessScope,
+}) => {
   try {
     const value = await ragService.chat(docIds, question, {
       sessionId,
       userId,
+      accessScope,
     });
 
     return {
@@ -377,8 +385,14 @@ const callWebSearch = async ({ webChatService, question }) => {
   }
 };
 
-const runResearchBrief = async ({ budgetState, ragService, question, docIds }) => {
-  const documents = ragService.listDocuments?.() ?? [];
+const runResearchBrief = async ({
+  budgetState,
+  ragService,
+  question,
+  docIds,
+  accessScope,
+}) => {
+  const documents = ragService.listDocuments?.(accessScope) ?? [];
   const selectedDocuments = documents.filter((document) => docIds.includes(document.docId));
   const plan = buildResearchPlan({
     question,
@@ -408,6 +422,7 @@ const runResearchBrief = async ({ budgetState, ragService, question, docIds }) =
       const value = await ragService.chat(docIds, entry.question, {
         sessionId: null,
         userId: null,
+        accessScope,
       });
 
       results.push({
@@ -451,6 +466,7 @@ export const runAgentRag = async ({
   docIds,
   sessionId,
   userId,
+  accessScope,
 }) => {
   const trace = [];
   const budgetState = createAgentBudget(agentBudget);
@@ -509,7 +525,7 @@ export const runAgentRag = async ({
 
   if (plan.wantsResearch) {
     const selectedDocuments = ragService
-      .listDocuments?.()
+      .listDocuments?.(accessScope)
       ?.filter((document) => docIds.includes(document.docId)) ?? [];
     const researchPlan = buildResearchPlan({
       question,
@@ -532,6 +548,7 @@ export const runAgentRag = async ({
       ragService,
       question,
       docIds,
+      accessScope,
     });
 
     for (const finding of researchBrief.findings) {
@@ -558,7 +575,7 @@ export const runAgentRag = async ({
   }
 
   if (plan.wantsInventory) {
-    const documents = ragService.listDocuments?.() ?? [];
+    const documents = ragService.listDocuments?.(accessScope) ?? [];
     inventoryAnswer = buildInventoryAnswer(documents);
 
     addTraceStep({
@@ -574,7 +591,7 @@ export const runAgentRag = async ({
   }
 
   if (plan.wantsDiscovery) {
-    const documents = ragService.listDocuments?.() ?? [];
+    const documents = ragService.listDocuments?.(accessScope) ?? [];
     const matches = discoverDocuments({
       documents,
       question,
@@ -603,6 +620,7 @@ export const runAgentRag = async ({
           question,
           sessionId,
           userId,
+          accessScope,
         })
       : {
           ok: false,
@@ -671,6 +689,7 @@ export const runAgentRag = async ({
           question: retryQuestion,
           sessionId,
           userId,
+          accessScope,
         });
 
         addTraceStep({

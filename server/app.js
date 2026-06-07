@@ -5,7 +5,7 @@ import multer from "multer";
 import { randomUUID } from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
-import { requireApiAuth } from "./auth.js";
+import { getRequestAccessScope, requireApiAuth } from "./auth.js";
 import chat, {
   clearDocuments,
   clearLongMemories,
@@ -28,6 +28,11 @@ import {
   readQualityHistory,
   runSyntheticQualityEvaluation,
 } from "./evaluation/quality-report.js";
+import {
+  buildFeedbackRecord,
+  listFeedback,
+  recordFeedback,
+} from "./feedback.js";
 import { buildHealthReport, runStartupHealthChecks } from "./health.js";
 import { runAgentRag } from "./rag/agent.js";
 import {
@@ -153,6 +158,9 @@ const sendBufferedFile = ({ req, res, fileBuffer, fileName, mimeType }) => {
   res.end(chunk);
 };
 
+const resolveScopedUserId = (req, rawUserId) =>
+  getRequestAccessScope(req).userId || rawUserId?.trim() || "";
+
 const buildChatResponse = async ({
   agentBudget,
   ragService,
@@ -161,8 +169,11 @@ const buildChatResponse = async ({
   docIds,
   sessionId,
   userId,
+  accessScope,
 }) => {
-  const missingDocIds = docIds.filter((docId) => !ragService.getDocument(docId));
+  const missingDocIds = docIds.filter(
+    (docId) => !ragService.getDocument(docId, accessScope)
+  );
 
   if (missingDocIds.length > 0) {
     const error = new Error(
@@ -182,6 +193,7 @@ const buildChatResponse = async ({
     docIds,
     sessionId,
     userId,
+    accessScope,
   });
 };
 
@@ -231,12 +243,15 @@ export const createApp = async (options = {}) => {
     readQualityHistory,
     runSyntheticQualityEvaluation,
   };
+  const feedbackService = options.feedbackService ?? {
+    listFeedback,
+    recordFeedback,
+  };
   const agentBudget = options.agentBudget ?? {};
 
   const app = express();
   app.use(cors());
   app.use(express.json({ limit: "2mb" }));
-  app.use("/uploads", express.static(uploadsDirectory));
 
   const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -295,6 +310,9 @@ export const createApp = async (options = {}) => {
     }
   });
 
+  app.use(requireApiAuth);
+  app.use("/uploads", express.static(uploadsDirectory));
+
   app.get("/documents/:docId/file", async (req, res) => {
     const docId = req.params.docId?.trim();
 
@@ -305,7 +323,10 @@ export const createApp = async (options = {}) => {
     }
 
     try {
-      const storedFile = await ragService.getDocumentFile?.(docId);
+      const storedFile = await ragService.getDocumentFile?.(
+        docId,
+        getRequestAccessScope(req)
+      );
 
       if (!storedFile) {
         return res.status(404).json({
@@ -328,10 +349,8 @@ export const createApp = async (options = {}) => {
     }
   });
 
-  app.use(requireApiAuth);
-
   app.get("/documents", (req, res) => {
-    return res.json(ragService.listDocuments());
+    return res.json(ragService.listDocuments(getRequestAccessScope(req)));
   });
 
   app.delete("/documents/:docId", async (req, res) => {
@@ -344,7 +363,9 @@ export const createApp = async (options = {}) => {
     }
 
     try {
-      const document = await ragService.deleteDocument(docId);
+      const document = await ragService.deleteDocument(docId, {
+        accessScope: getRequestAccessScope(req),
+      });
 
       if (!document) {
         return res.status(404).json({
@@ -365,7 +386,9 @@ export const createApp = async (options = {}) => {
 
   app.post("/documents/clear", async (req, res) => {
     try {
-      const documents = await ragService.clearDocuments();
+      const documents = await ragService.clearDocuments({
+        accessScope: getRequestAccessScope(req),
+      });
       return res.json({
         deletedCount: documents.length,
         documents,
@@ -398,7 +421,7 @@ export const createApp = async (options = {}) => {
   });
 
   app.get("/memory", async (req, res) => {
-    const userId = req.query.userId?.trim();
+    const userId = resolveScopedUserId(req, req.query.userId);
     const limit = Number.parseInt(req.query.limit ?? "50", 10);
 
     if (!userId) {
@@ -424,7 +447,7 @@ export const createApp = async (options = {}) => {
   });
 
   app.post("/memory", async (req, res) => {
-    const userId = req.body.userId?.trim();
+    const userId = resolveScopedUserId(req, req.body.userId);
     const text = req.body.text?.trim();
 
     if (!userId) {
@@ -461,7 +484,7 @@ export const createApp = async (options = {}) => {
   });
 
   app.delete("/memory/:memoryId", async (req, res) => {
-    const userId = req.query.userId?.trim();
+    const userId = resolveScopedUserId(req, req.query.userId);
     const memoryId = req.params.memoryId?.trim();
 
     if (!userId) {
@@ -500,7 +523,7 @@ export const createApp = async (options = {}) => {
   });
 
   app.delete("/memory", async (req, res) => {
-    const userId = req.query.userId?.trim();
+    const userId = resolveScopedUserId(req, req.query.userId);
 
     if (!userId) {
       return res.status(400).json({
@@ -553,6 +576,43 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to load quality history."),
+      });
+    }
+  });
+
+  app.get("/feedback", async (req, res) => {
+    const limit = Number.parseInt(req.query.limit ?? "25", 10);
+
+    try {
+      const feedback = await feedbackService.listFeedback({
+        accessScope: getRequestAccessScope(req),
+        limit,
+      });
+
+      return res.json({
+        feedback,
+      });
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to load answer feedback."),
+      });
+    }
+  });
+
+  app.post("/feedback", async (req, res) => {
+    try {
+      const feedback = buildFeedbackRecord({
+        payload: req.body,
+        accessScope: getRequestAccessScope(req),
+      });
+      const storedFeedback = await feedbackService.recordFeedback(feedback);
+
+      return res.status(201).json({
+        feedback: storedFeedback,
+      });
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to store answer feedback."),
       });
     }
   });
@@ -657,6 +717,7 @@ export const createApp = async (options = {}) => {
 
       const storedFileName = createStoredFileName(session.fileName);
       mergedFilePath = path.join(uploadsDirectory, storedFileName);
+      const accessScope = getRequestAccessScope(req);
 
       await uploadStore.finalizeUploadSession({
         fileId,
@@ -667,6 +728,8 @@ export const createApp = async (options = {}) => {
         docId: randomUUID(),
         filePath: mergedFilePath,
         fileName: session.fileName,
+        ownerUserId: accessScope.userId,
+        workspaceId: accessScope.workspaceId,
       });
 
       await cleanupUploadedFile(mergedFilePath);
@@ -691,10 +754,13 @@ export const createApp = async (options = {}) => {
     }
 
     try {
+      const accessScope = getRequestAccessScope(req);
       const document = await ragService.ingestDocument({
         docId: randomUUID(),
         filePath: req.file.path,
         fileName: req.file.originalname,
+        ownerUserId: accessScope.userId,
+        workspaceId: accessScope.workspaceId,
       });
 
       await cleanupUploadedFile(req.file.path);
@@ -713,7 +779,8 @@ export const createApp = async (options = {}) => {
     const question = payload.question?.trim();
     const docIds = parseDocIds(payload.docIds, payload.docId);
     const sessionId = payload.sessionId?.trim() || null;
-    const userId = payload.userId?.trim() || null;
+    const accessScope = getRequestAccessScope(req);
+    const userId = accessScope.userId || payload.userId?.trim() || null;
 
     if (!question) {
       return res.status(400).json({
@@ -730,6 +797,7 @@ export const createApp = async (options = {}) => {
         docIds,
         sessionId,
         userId,
+        accessScope,
       });
 
       return res.status(response.status).json(response.body);

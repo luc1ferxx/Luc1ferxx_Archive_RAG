@@ -1,5 +1,24 @@
-import React from "react";
+import React, { useState } from "react";
 import { Spin } from "antd";
+
+const FEEDBACK_ACTIONS = [
+  {
+    type: "helpful",
+    label: "Helpful",
+  },
+  {
+    type: "citation_error",
+    label: "Citation error",
+  },
+  {
+    type: "incomplete",
+    label: "Incomplete",
+  },
+  {
+    type: "hallucination",
+    label: "Hallucination",
+  },
+];
 
 const formatLookupCount = (count) => {
   if (!Number.isFinite(count)) {
@@ -403,7 +422,27 @@ const RenderQA = (props) => {
     selectedSource,
     onSelectSource,
     onSelectTurn,
+    onFeedback,
   } = props;
+  const [feedbackNotes, setFeedbackNotes] = useState({});
+
+  const updateFeedbackNote = (turnIndex, note) => {
+    setFeedbackNotes((prev) => ({
+      ...prev,
+      [turnIndex]: note,
+    }));
+  };
+
+  const submitFeedback = ({ turnIndex, feedbackType, turn }) => {
+    onFeedback?.({
+      turnIndex,
+      feedbackType,
+      note: feedbackNotes[turnIndex] ?? "",
+      question: turn.question,
+      answer: turn.answer,
+    });
+    updateFeedbackNote(turnIndex, "");
+  };
 
   if (!conversation?.length && !isLoading) {
     return (
@@ -595,6 +634,38 @@ const RenderQA = (props) => {
                     ))}
                   </div>
                 )}
+
+                <div
+                  className="archive-feedback-panel"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <input
+                    className="archive-feedback-input"
+                    placeholder="Optional feedback note"
+                    value={feedbackNotes[index] ?? ""}
+                    onChange={(event) =>
+                      updateFeedbackNote(index, event.target.value)
+                    }
+                  />
+                  <div className="archive-feedback-actions">
+                    {FEEDBACK_ACTIONS.map((action) => (
+                      <button
+                        key={action.type}
+                        type="button"
+                        className="archive-feedback-button"
+                        onClick={() =>
+                          submitFeedback({
+                            turnIndex: index,
+                            feedbackType: action.type,
+                            turn: each,
+                          })
+                        }
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               <div className="archive-response-divider" />

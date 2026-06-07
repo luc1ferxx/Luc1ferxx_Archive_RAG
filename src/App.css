@@ -1067,9 +1067,64 @@
   box-shadow: inset 3px 0 0 var(--archive-accent-rag);
 }
 
+.archive-feedback-panel {
+  display: grid;
+  gap: var(--archive-space-sm);
+  padding: 10px 0 0;
+}
+
+.archive-feedback-input {
+  width: 100%;
+  min-height: 38px;
+  padding: 9px 11px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: var(--archive-radius-sm);
+  background: rgba(10, 12, 16, 0.42);
+  color: var(--archive-text-primary);
+  font: inherit;
+  font-size: 0.78rem;
+  outline: none;
+}
+
+.archive-feedback-input::placeholder {
+  color: rgba(243, 242, 239, 0.42);
+}
+
+.archive-feedback-input:focus {
+  border-color: var(--archive-border-strong);
+  background: rgba(10, 12, 16, 0.6);
+}
+
+.archive-feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.archive-feedback-button {
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: var(--archive-radius-sm);
+  background: var(--archive-surface-overlay);
+  color: var(--archive-text-secondary);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.archive-feedback-button:hover,
+.archive-feedback-button:focus-visible {
+  border-color: var(--archive-border-strong);
+  color: var(--archive-text-primary);
+  outline: none;
+}
+
 .document-item-main-button:focus-visible,
 .document-item-remove:focus-visible,
-.archive-source-item:focus-visible {
+.archive-source-item:focus-visible,
+.archive-feedback-button:focus-visible {
   outline: 2px solid var(--archive-border-strong);
   outline-offset: -2px;
   border-color: var(--archive-border-strong);

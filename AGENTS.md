@@ -32,12 +32,13 @@
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 
-TODO: Confirm whether `server/test/answer-match.test.mjs` should be imported by `server/test/run.test.mjs`; the current `npm test` runner imports `app.test.mjs` and `rag.test.mjs` only.
+Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, and `answer-match.test.mjs`.
 
 ## Implementation Notes
 
 - Keep RAG changes inside `server/rag/` where possible; route/API behavior lives in `server/app.js`.
-- API auth is controlled by `API_AUTH_ENABLED` and `API_AUTH_TOKEN`; the frontend can send `REACT_APP_API_AUTH_TOKEN`, which becomes an `x-api-key` header.
+- API auth is controlled by `API_AUTH_ENABLED` plus either `API_AUTH_TOKEN` for single-token local use or `API_AUTH_TOKENS` for per-user/per-workspace token mapping; the frontend can send `REACT_APP_API_AUTH_TOKEN`, which becomes an `x-api-key` header.
+- When auth is enabled, document list/chat/delete/file access is filtered by the authenticated token's `userId` and `workspaceId`; keep new document routes scoped the same way.
 - `VECTOR_STORE_PROVIDER=local` is the default documented path; `qdrant` is supported via the Qdrant env vars in `server/.env.example`.
 - Startup health checks report OpenAI, auth, vector store, PostgreSQL document/session stores, and long memory. `STARTUP_HEALTH_STRICT=false` allows the server to start while reporting health errors.
 - For RAG debugging, `RAG_OBSERVABILITY_ENABLED=true` writes JSONL traces under `server/data/rag-observability/`; set `RAG_OBSERVABILITY_INCLUDE_CONTEXT=true` only for local debugging when full chunk text is acceptable.

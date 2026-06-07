@@ -22,7 +22,6 @@ import {
   getDocumentFile,
   getDocuments,
   getStoredDocument,
-  hasDocument,
   initializeDocumentRegistry,
   listDocuments,
   normalizeDocIds,
@@ -92,7 +91,14 @@ export {
 const getPageNumber = (metadata = {}, fallbackPageNumber = null) =>
   metadata.loc?.pageNumber ?? metadata.pageNumber ?? metadata.page ?? fallbackPageNumber;
 
-export const ingestDocumentPages = async ({ docId, filePath, fileName, pages }) => {
+export const ingestDocumentPages = async ({
+  docId,
+  filePath,
+  fileName,
+  pages,
+  ownerUserId = "",
+  workspaceId = "",
+}) => {
   const publicFilePath = buildPublicFilePath(docId);
   const chunks = chunkDocument({
     docId,
@@ -130,6 +136,8 @@ export const ingestDocumentPages = async ({ docId, filePath, fileName, pages }) 
       publicFilePath,
       chunkCount: chunks.length,
       pageCount: pages.length,
+      ownerUserId,
+      workspaceId,
       profile: buildDocumentProfile({
         fileName,
         pages,
@@ -156,7 +164,13 @@ export const ingestDocumentPages = async ({ docId, filePath, fileName, pages }) 
   }
 };
 
-export const ingestDocument = async ({ docId, filePath, fileName }) => {
+export const ingestDocument = async ({
+  docId,
+  filePath,
+  fileName,
+  ownerUserId = "",
+  workspaceId = "",
+}) => {
   const loader = new PDFLoader(filePath);
   const pageDocuments = await loader.load();
 
@@ -164,6 +178,8 @@ export const ingestDocument = async ({ docId, filePath, fileName }) => {
     docId,
     filePath,
     fileName,
+    ownerUserId,
+    workspaceId,
     pages: pageDocuments.map((document, index) => ({
       pageNumber: getPageNumber(document.metadata, index + 1),
       text: document.pageContent,
@@ -171,8 +187,10 @@ export const ingestDocument = async ({ docId, filePath, fileName }) => {
   });
 };
 
-const ensureDocumentsExist = (docIds) => {
-  const missingDocId = docIds.find((docId) => !hasDocument(docId));
+const ensureDocumentsExist = (docIds, accessScope = {}) => {
+  const missingDocId = docIds.find(
+    (docId) => !getDocument(docId, accessScope)
+  );
 
   if (!missingDocId) {
     return;
@@ -434,8 +452,14 @@ const buildErrorTrace = (error) => ({
   message: error?.message ?? String(error),
 });
 
-export const deleteDocument = async (docId, { deleteFile = true } = {}) => {
-  const storedDocument = getStoredDocument(docId);
+const hasScopedAccess = (accessScope = {}) =>
+  Boolean(accessScope?.userId || accessScope?.workspaceId);
+
+export const deleteDocument = async (
+  docId,
+  { deleteFile = true, accessScope = {} } = {}
+) => {
+  const storedDocument = getStoredDocument(docId, accessScope);
 
   if (!storedDocument) {
     return null;
@@ -444,15 +468,26 @@ export const deleteDocument = async (docId, { deleteFile = true } = {}) => {
   await removeDocumentsFromIndex({
     docIds: [docId],
   });
-  await deleteRegisteredDocument(docId);
+  await deleteRegisteredDocument(docId, accessScope);
 
   return storedDocument;
 };
 
-export const clearDocuments = async ({ deleteFiles = true } = {}) => {
-  const documents = await clearRegisteredDocuments();
+export const clearDocuments = async ({
+  deleteFiles = true,
+  accessScope = {},
+} = {}) => {
+  const documents = await clearRegisteredDocuments({
+    accessScope,
+  });
 
-  await clearVectorIndex();
+  if (hasScopedAccess(accessScope)) {
+    await removeDocumentsFromIndex({
+      docIds: documents.map((document) => document.docId),
+    });
+  } else {
+    await clearVectorIndex();
+  }
 
   return documents;
 };
@@ -462,6 +497,7 @@ const chat = async (docIds, query, options = {}) => {
     sessionId = null,
     userId = null,
     includeRetrievedContexts = false,
+    accessScope = {},
   } = options;
   const traceId = randomUUID();
   const timestamp = new Date().toISOString();
@@ -491,9 +527,9 @@ const chat = async (docIds, query, options = {}) => {
     }
 
     await initializeDocumentRegistry();
-    ensureDocumentsExist(normalizedDocIds);
+    ensureDocumentsExist(normalizedDocIds, accessScope);
 
-    const selectedDocuments = getDocuments(normalizedDocIds);
+    const selectedDocuments = getDocuments(normalizedDocIds, accessScope);
     let longMemoryContext = {
       memories: [],
       rewriteBlock: "",

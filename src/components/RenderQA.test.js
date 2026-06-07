@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import RenderQA from "./RenderQA";
 
 describe("RenderQA", () => {
@@ -163,5 +163,54 @@ describe("RenderQA", () => {
     expect(
       screen.getByText("Evidence passed with 2 usable sources.")
     ).toBeInTheDocument();
+  });
+
+  test("submits answer feedback with type and optional note", () => {
+    const handleFeedback = jest.fn();
+
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "What does the policy say about remote work?",
+            answer: {
+              agentAnswer: "Remote work is allowed with manager approval.",
+              agentMode: "document",
+              ragAnswer: "Remote work is allowed with manager approval.",
+              ragSources: [
+                {
+                  docId: "doc-1",
+                  fileName: "policy.pdf",
+                  pageNumber: 4,
+                  chunkIndex: 2,
+                  excerpt: "Remote work requires manager approval.",
+                },
+              ],
+              mcpAnswer: "Web search not used.",
+            },
+          },
+        ]}
+        onFeedback={handleFeedback}
+      />
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Optional feedback note"), {
+      target: {
+        value: "The cited page points to the wrong section.",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Citation error" }));
+
+    expect(handleFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        turnIndex: 0,
+        feedbackType: "citation_error",
+        note: "The cited page points to the wrong section.",
+        question: "What does the policy say about remote work?",
+        answer: expect.objectContaining({
+          agentAnswer: "Remote work is allowed with manager approval.",
+        }),
+      })
+    );
   });
 });

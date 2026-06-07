@@ -117,6 +117,15 @@ const requestSyntheticQualityRun = async () => {
   return response.data;
 };
 
+const requestAnswerFeedback = async (payload) => {
+  const requestConfig = buildApiRequestConfig();
+  const response = requestConfig
+    ? await axios.post(`${API_DOMAIN}/feedback`, payload, requestConfig)
+    : await axios.post(`${API_DOMAIN}/feedback`, payload);
+
+  return response.data;
+};
+
 const formatPageCount = (pageCount) => {
   const parsed = Number.parseInt(pageCount ?? "0", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : "?";
@@ -544,6 +553,20 @@ const App = () => {
   };
 
   const docIds = activeDocuments.map((document) => document.docId);
+  const submitAnswerFeedback = async (feedback) => {
+    try {
+      await requestAnswerFeedback({
+        ...feedback,
+        docIds: feedback.docIds ?? docIds,
+        sessionId,
+        userId,
+      });
+    } catch (error) {
+      const backendMessage =
+        error.response?.data?.error ?? "Unable to save feedback.";
+      message.error(backendMessage);
+    }
+  };
   const docLabel =
     activeDocuments.length === 1
       ? activeDocuments[0].fileName
@@ -808,6 +831,7 @@ const App = () => {
                 selectedSource={selectedSource}
                 onSelectSource={setSelectedSource}
                 onSelectTurn={handleSelectTurn}
+                onFeedback={(feedback) => void submitAnswerFeedback(feedback)}
               />
             </div>
 

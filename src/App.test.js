@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import axios from "axios";
 import App from "./App";
 
@@ -10,7 +10,25 @@ jest.mock("axios", () => ({
 
 jest.mock("./components/PdfUploader", () => () => <div>Uploader</div>);
 jest.mock("./components/ChatComponent", () => () => <div>Chat</div>);
-jest.mock("./components/RenderQA", () => () => <div>Conversation</div>);
+jest.mock("./components/RenderQA", () => (props) => (
+  <button
+    type="button"
+    onClick={() =>
+      props.onFeedback?.({
+        turnIndex: 0,
+        feedbackType: "hallucination",
+        note: "This answer is not supported.",
+        question: "What changed?",
+        answer: {
+          agentAnswer: "Unsupported answer.",
+          ragSources: [],
+        },
+      })
+    }
+  >
+    Send feedback
+  </button>
+));
 jest.mock("./components/PdfPreview", () => () => <div>Preview</div>);
 
 describe("App", () => {
@@ -51,6 +69,28 @@ describe("App", () => {
     );
     expect(axios.delete).toHaveBeenCalledWith(
       "http://localhost:5001/documents/doc-1"
+    );
+  });
+
+  test("posts answer feedback from the conversation panel", async () => {
+    render(<App />);
+
+    await screen.findByText("benefits-2025.pdf");
+    fireEvent.click(screen.getByText("Send feedback"));
+
+    await waitFor(() =>
+      expect(axios.post).toHaveBeenCalledWith(
+        "http://localhost:5001/feedback",
+        expect.objectContaining({
+          docIds: ["doc-1"],
+          feedbackType: "hallucination",
+          note: "This answer is not supported.",
+          question: "What changed?",
+          answer: expect.objectContaining({
+            agentAnswer: "Unsupported answer.",
+          }),
+        })
+      )
     );
   });
 });
