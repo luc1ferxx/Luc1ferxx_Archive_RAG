@@ -428,8 +428,52 @@ const buildMarkdownReport = ({
   return `${lines.join("\n")}\n`;
 };
 
+const optionsWithValues = new Set(["--latest-name"]);
+
+const getArgValue = (name) => {
+  const inlinePrefix = `${name}=`;
+  const inlineValue = process.argv.find((arg) => arg.startsWith(inlinePrefix));
+
+  if (inlineValue) {
+    return inlineValue.slice(inlinePrefix.length);
+  }
+
+  const index = process.argv.indexOf(name);
+
+  return index >= 0 ? process.argv[index + 1] : null;
+};
+
+const getPositionalArgs = () => {
+  const positionalArgs = [];
+
+  for (let index = 2; index < process.argv.length; index += 1) {
+    const arg = process.argv[index];
+
+    if (arg.startsWith("--")) {
+      if (optionsWithValues.has(arg)) {
+        index += 1;
+      }
+      continue;
+    }
+
+    positionalArgs.push(arg);
+  }
+
+  return positionalArgs;
+};
+
+const getLatestName = () => {
+  const latestName = getArgValue("--latest-name") ?? "latest";
+
+  if (!/^[A-Za-z0-9._-]+$/.test(latestName)) {
+    throw new Error("--latest-name must contain only letters, numbers, dots, underscores, or hyphens.");
+  }
+
+  return latestName;
+};
+
 const resolveCorpusPath = () => {
-  const requestedPath = process.argv[2] ?? defaultCorpusPath;
+  const requestedPath = getPositionalArgs()[0] ?? defaultCorpusPath;
   return path.resolve(process.cwd(), requestedPath);
 };
 
@@ -448,8 +492,9 @@ const main = async () => {
   const sourceDirectory = path.join(runDirectory, "source");
   const resultsRunJsonPath = path.join(resultsDirectory, `${runId}.json`);
   const resultsRunMarkdownPath = path.join(resultsDirectory, `${runId}.md`);
-  const latestJsonPath = path.join(resultsDirectory, "latest.json");
-  const latestMarkdownPath = path.join(resultsDirectory, "latest.md");
+  const latestName = getLatestName();
+  const latestJsonPath = path.join(resultsDirectory, `${latestName}.json`);
+  const latestMarkdownPath = path.join(resultsDirectory, `${latestName}.md`);
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
   const ragDataDirectory = path.join(runDirectory, "rag-data");
   const uploadSessionDirectory = path.join(runDirectory, "upload-sessions");

@@ -234,10 +234,12 @@ curl http://localhost:5001/ready
 | `CI=true npm test -- --watchAll=false` | 非 watch 模式运行前端测试。 |
 | `cd server && npm test` | 运行后端测试入口。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
+| `cd server && npm run feedback:corpus` | 从已收集的负反馈生成 synthetic 评测语料。 |
+| `cd server && npm run eval:feedback` | 用反馈语料运行 synthetic eval，输出 `latest-feedback.*`。 |
 | `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
 | `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
 
-说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs` 和 `answer-match.test.mjs`。
+说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs` 和 `feedback-corpus.test.mjs`。
 
 `ragas` 是可选 Python 评测，需要额外安装依赖：
 
@@ -328,6 +330,25 @@ RAG_OBSERVABILITY_INCLUDE_CONTEXT=true
 | Upload resume success rate | `1.0` |
 | Avg response time | `16158.75 ms` |
 | Avg citation count | `1.88` |
+
+### Feedback corpus
+
+用户在答案下标记的负反馈可以转成回归评测语料，让线上/多人使用中发现的问题进入质量门控：
+
+```bash
+cd server
+npm run feedback:corpus
+npm run eval:feedback
+```
+
+`feedback:corpus` 默认读取 `server/data/feedback/feedback.jsonl`，只收集 `citation_error`、`incomplete` 和 `hallucination` 三类负反馈，输出到 `server/evaluation/generated/feedback-corpus.json`。`eval:feedback` 会先重建该语料，再运行 synthetic eval，并把最新报告写到 `server/evaluation/results/latest-feedback.json` 和 `server/evaluation/results/latest-feedback.md`，不会覆盖主线 `latest.*` 报告。
+
+如需从临时文件构建语料，可直接传入路径：
+
+```bash
+cd server
+node evaluation/build-feedback-corpus.mjs --input /path/to/feedback.jsonl --output /path/to/feedback-corpus.json
+```
 
 ### Ragas supplement
 

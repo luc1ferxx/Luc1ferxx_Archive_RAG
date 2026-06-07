@@ -7,6 +7,8 @@
     "start": "node server.js",
     "eval:synthetic": "node evaluation/run-synthetic-eval.mjs",
     "eval:real": "node evaluation/run-real-eval.mjs",
+    "feedback:corpus": "node evaluation/build-feedback-corpus.mjs",
+    "eval:feedback": "node evaluation/build-feedback-corpus.mjs && node evaluation/run-synthetic-eval.mjs evaluation/generated/feedback-corpus.json --latest-name latest-feedback",
     "eval:ragas": "python evaluation/run-ragas-eval.py",
     "bench:rerank": "node evaluation/benchmark-rerank-latency.mjs",
     "quality:gate": "node evaluation/check-quality-gate.mjs",
