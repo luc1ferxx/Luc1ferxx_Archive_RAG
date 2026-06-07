@@ -410,6 +410,12 @@ API_AUTH_TOKENS={"alice-token":{"userId":"alice","workspaceId":"workspace-a"},"b
 上传的文档会保存当前 token 对应的 `userId/workspaceId`，后续 `/documents`、`/chat`、删除和 PDF 文件流都会按该访问范围过滤。
 启用带 `userId/workspaceId` 的 token 后，旧的无访问范围文档不会出现在 scoped 用户视图中；需要重新上传或通过迁移补齐 owner/workspace 元数据。
 
+## AgentRAG skills
+
+AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。当前内置 skills 包括 `document_rag`、`web_search`、`inventory`、`document_discovery` 和 `research_brief`。`server/rag/agent.js` 仍负责确定性 planner、budget、self-check 和 synthesis，具体工具执行由 registry 选择。
+
+每个 skill 都需要稳定的 `id`、`version`、`label`、`match()` 和 `execute()`；涉及文档或工作区数据时必须接收并传递 `accessScope`。`/chat` 响应会返回 `agentSkills`，反馈记录和 feedback corpus 会保留 `skillId/skillVersion`，方便把负反馈定位到具体能力版本。
+
 ## 仓库结构
 
 ```text
@@ -427,6 +433,7 @@ API_AUTH_TOKENS={"alice-token":{"userId":"alice","workspaceId":"workspace-a"},"b
 │   ├── rag/                     # Custom RAG pipeline
 │   │   ├── chunker.js
 │   │   ├── query-router.js
+│   │   ├── skills/              # AgentRAG skill registry and built-ins
 │   │   ├── retrievers/
 │   │   ├── confidence.js
 │   │   ├── evidence-aligner.js

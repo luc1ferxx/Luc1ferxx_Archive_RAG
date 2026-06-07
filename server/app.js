@@ -170,6 +170,7 @@ const buildChatResponse = async ({
   sessionId,
   userId,
   accessScope,
+  skillRegistry,
 }) => {
   const missingDocIds = docIds.filter(
     (docId) => !ragService.getDocument(docId, accessScope)
@@ -194,6 +195,7 @@ const buildChatResponse = async ({
     sessionId,
     userId,
     accessScope,
+    skillRegistry,
   });
 };
 
@@ -225,6 +227,7 @@ export const createApp = async (options = {}) => {
     ...(options.ragService ?? {}),
   };
   const webChatService = options.chatMcp ?? chatMCP;
+  const skillRegistry = options.skillRegistry ?? null;
   const uploadStore = options.uploadStore ?? {
     clearUploadSession,
     ensureUploadStorage,
@@ -798,6 +801,7 @@ export const createApp = async (options = {}) => {
         sessionId,
         userId,
         accessScope,
+        skillRegistry,
       });
 
       return res.status(response.status).json(response.body);

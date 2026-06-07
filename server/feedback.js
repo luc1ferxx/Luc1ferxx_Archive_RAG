@@ -80,6 +80,13 @@ const sanitizeCitation = (citation = {}) => ({
   excerpt: normalizeString(citation.excerpt).slice(0, 500),
 });
 
+const sanitizeSkill = (skill = {}) => ({
+  skillId: normalizeString(skill.skillId ?? skill.id),
+  skillVersion: normalizeString(skill.skillVersion ?? skill.version),
+  label: normalizeString(skill.label),
+  status: normalizeString(skill.status),
+});
+
 const getAnswerText = (payload = {}) => {
   if (typeof payload.answerText === "string") {
     return payload.answerText.trim();
@@ -127,6 +134,11 @@ export const buildFeedbackRecord = ({ payload = {}, accessScope = {} }) => {
     : Array.isArray(answer.ragSources)
       ? answer.ragSources
       : [];
+  const skills = Array.isArray(payload.skills)
+    ? payload.skills
+    : Array.isArray(answer.agentSkills)
+      ? answer.agentSkills
+      : [];
 
   return {
     feedbackId: randomUUID(),
@@ -144,6 +156,10 @@ export const buildFeedbackRecord = ({ payload = {}, accessScope = {} }) => {
     note: normalizeString(payload.note).slice(0, 1000),
     answerText: answerText.slice(0, 8000),
     agentMode: normalizeString(answer.agentMode ?? payload.agentMode),
+    skills: skills
+      .map(sanitizeSkill)
+      .filter((skill) => skill.skillId)
+      .slice(0, 20),
     citations: citations.map(sanitizeCitation).slice(0, 12),
   };
 };

@@ -52,6 +52,20 @@ const normalizeCitation = (citation = {}) => ({
   excerpt: normalizeText(citation.excerpt),
 });
 
+const normalizeSkill = (skill = {}) => ({
+  skillId: normalizeText(skill.skillId ?? skill.id),
+  skillVersion: normalizeText(skill.skillVersion ?? skill.version),
+  label: normalizeText(skill.label),
+  status: normalizeText(skill.status),
+});
+
+const normalizeSkills = (skills) =>
+  Array.isArray(skills)
+    ? skills
+        .map(normalizeSkill)
+        .filter((skill) => skill.skillId)
+    : [];
+
 const getFeedbackId = (record, index) =>
   normalizeText(record.feedbackId) || `feedback-${index + 1}`;
 
@@ -169,6 +183,7 @@ const buildFeedbackMetadata = ({ record, feedbackType }) => ({
   workspaceId: normalizeText(record.workspaceId),
   note: normalizeText(record.note),
   originalDocIds: normalizeDocIds(record.docIds),
+  skills: normalizeSkills(record.skills),
   ...(feedbackType === "citation_error" ? { reviewRequired: true } : {}),
 });
 

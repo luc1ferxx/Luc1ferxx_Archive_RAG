@@ -34,11 +34,12 @@
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 
-Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, and `feedback-corpus.test.mjs`.
+Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, and `agent-skills.test.mjs`.
 
 ## Implementation Notes
 
 - Keep RAG changes inside `server/rag/` where possible; route/API behavior lives in `server/app.js`.
+- AgentRAG skills are registered in `server/rag/skills/registry.js`; new skills need stable `id/version/label`, deterministic `match()`, and an `execute()` path that receives `accessScope` when reading user/workspace data.
 - API auth is controlled by `API_AUTH_ENABLED` plus either `API_AUTH_TOKEN` for single-token local use or `API_AUTH_TOKENS` for per-user/per-workspace token mapping; the frontend can send `REACT_APP_API_AUTH_TOKEN`, which becomes an `x-api-key` header.
 - When auth is enabled, document list/chat/delete/file access is filtered by the authenticated token's `userId` and `workspaceId`; keep new document routes scoped the same way.
 - `VECTOR_STORE_PROVIDER=local` is the default documented path; `qdrant` is supported via the Qdrant env vars in `server/.env.example`.

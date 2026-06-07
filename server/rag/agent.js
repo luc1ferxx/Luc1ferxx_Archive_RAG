@@ -1,4 +1,3 @@
-import { extractMeaningfulTokens, normalizeSearchText } from "./text-utils.js";
 import {
   buildEvidenceRetryQuestion,
   evaluateDocumentEvidence,
@@ -12,9 +11,11 @@ import {
   getBudgetSnapshot,
 } from "./agent-budget.js";
 import {
-  buildResearchPlan,
-  formatResearchBrief,
-} from "./research-brief.js";
+  AGENT_SKILL_IDS,
+  buildFailedSkillResult,
+  createBuiltInSkillRegistry,
+  executeAgentSkill,
+} from "./skills/registry.js";
 
 const WEB_SIGNAL_PATTERN =
   /\b(latest|current|currently|today|now|recent|news|live|online|internet|web|search the web|real[-\s]?time)\b|最新|当前|现在|今天|近日|实时|联网|网页|网络|新闻/i;
@@ -48,111 +49,6 @@ const buildStep = ({ index, type, label, status = "completed", summary, detail }
   summary,
   detail: detail ?? null,
 });
-
-const getDocumentLabel = (document) => {
-  const pageCount = Number.parseInt(document?.pageCount ?? "0", 10);
-  const chunkCount = Number.parseInt(document?.chunkCount ?? "0", 10);
-  const stats = [
-    Number.isFinite(pageCount) && pageCount > 0 ? `${pageCount} pages` : null,
-    Number.isFinite(chunkCount) && chunkCount > 0 ? `${chunkCount} chunks` : null,
-  ].filter(Boolean);
-
-  return `${document.fileName ?? "Untitled document"}${
-    stats.length > 0 ? ` (${stats.join(", ")})` : ""
-  }`;
-};
-
-const buildInventoryAnswer = (documents) => {
-  if (!documents.length) {
-    return "No documents are currently indexed in this workspace.";
-  }
-
-  return [
-    `The workspace currently has ${documents.length} indexed document${
-      documents.length === 1 ? "" : "s"
-    }:`,
-    ...documents.map((document, index) => `${index + 1}. ${getDocumentLabel(document)}`),
-  ].join("\n");
-};
-
-const getProfile = (document = {}) =>
-  document.profile && typeof document.profile === "object"
-    ? document.profile
-    : {
-        summary: document.summary ?? "",
-        tags: document.tags ?? [],
-        entities: document.entities ?? [],
-      };
-
-const getProfileSearchText = (document = {}) => {
-  const profile = getProfile(document);
-
-  return [
-    document.fileName,
-    profile.summary,
-    ...(profile.tags ?? []),
-    ...(profile.entities ?? []),
-  ]
-    .filter(Boolean)
-    .join(" ");
-};
-
-const scoreDocumentForQuery = ({ document, queryTerms }) => {
-  const normalizedProfileText = normalizeSearchText(getProfileSearchText(document));
-  let score = 0;
-
-  for (const term of queryTerms) {
-    if (normalizedProfileText.includes(term)) {
-      score += 1;
-    }
-  }
-
-  return score;
-};
-
-const discoverDocuments = ({ documents, question, docIds }) => {
-  const docIdFilter = new Set(docIds);
-  const candidateDocuments = docIdFilter.size > 0
-    ? documents.filter((document) => docIdFilter.has(document.docId))
-    : documents;
-  const queryTerms = [...new Set(extractMeaningfulTokens(question))];
-
-  return candidateDocuments
-    .map((document) => ({
-      document,
-      score: scoreDocumentForQuery({
-        document,
-        queryTerms,
-      }),
-    }))
-    .filter((entry) => entry.score > 0)
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        String(left.document.fileName).localeCompare(String(right.document.fileName))
-    )
-    .slice(0, 5);
-};
-
-const buildDiscoveryAnswer = (matches) => {
-  if (matches.length === 0) {
-    return "I could not find a strong matching document from the current workspace metadata.";
-  }
-
-  return [
-    `I found ${matches.length} likely matching document${
-      matches.length === 1 ? "" : "s"
-    }:`,
-    ...matches.map(({ document }) => {
-      const profile = getProfile(document);
-      const tags = (profile.tags ?? []).slice(0, 4);
-      const tagText = tags.length > 0 ? ` Tags: ${tags.join(", ")}.` : "";
-      const summaryText = profile.summary ? ` ${profile.summary}` : "";
-
-      return `- ${document.fileName}.${tagText}${summaryText}`;
-    }),
-  ].join("\n");
-};
 
 const buildPlan = ({ question, docIds }) => {
   const wantsResearch = RESEARCH_SIGNAL_PATTERN.test(question);
@@ -226,7 +122,7 @@ const buildPlan = ({ question, docIds }) => {
   };
 };
 
-const buildPlannerActions = ({ plan, docIds }) => {
+const buildPlannerActions = ({ plan, docIds, skills }) => {
   const actions = [
     {
       id: "classify_request",
@@ -235,45 +131,11 @@ const buildPlannerActions = ({ plan, docIds }) => {
     },
   ];
 
-  if (plan.wantsDocumentRag) {
-    actions.push(
-      {
-        id: "document_rag",
-        label: "Run document RAG",
-        summary: `Search ${docIds.length} selected document${
-          docIds.length === 1 ? "" : "s"
-        }.`,
-      },
-      {
-        id: "self_check",
-        label: "Verify evidence",
-        summary: "Check citation count and document coverage before synthesis.",
-      }
-    );
-  }
-
-  if (plan.wantsWeb) {
-    actions.push({
-      id: "web_search",
-      label: "Use web fallback",
-      summary: "Use web context only after document evidence is checked.",
-    });
-  }
-
-  if (plan.wantsResearch) {
-    actions.push({
-      id: "research_questions",
-      label: "Run research questions",
-      summary: "Break the request into deterministic document-grounded questions.",
-    });
-  }
-
-  if (plan.wantsInventory || plan.wantsDiscovery) {
-    actions.push({
-      id: "workspace_metadata",
-      label: "Inspect workspace metadata",
-      summary: "Use indexed document metadata without running document RAG.",
-    });
+  for (const skill of skills) {
+    actions.push(...(skill.plannerActions?.({
+      plan,
+      docIds,
+    }) ?? []));
   }
 
   actions.push({
@@ -338,126 +200,6 @@ const buildSynthesisAnswer = ({
   return "The agent could not complete the request because all selected tools failed.";
 };
 
-const callDocumentRag = async ({
-  ragService,
-  docIds,
-  question,
-  sessionId,
-  userId,
-  accessScope,
-}) => {
-  try {
-    const value = await ragService.chat(docIds, question, {
-      sessionId,
-      userId,
-      accessScope,
-    });
-
-    return {
-      ok: true,
-      value,
-      error: null,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      value: null,
-      error,
-    };
-  }
-};
-
-const callWebSearch = async ({ webChatService, question }) => {
-  try {
-    const value = await webChatService(question);
-
-    return {
-      ok: true,
-      value,
-      error: null,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      value: null,
-      error,
-    };
-  }
-};
-
-const runResearchBrief = async ({
-  budgetState,
-  ragService,
-  question,
-  docIds,
-  accessScope,
-}) => {
-  const documents = ragService.listDocuments?.(accessScope) ?? [];
-  const selectedDocuments = documents.filter((document) => docIds.includes(document.docId));
-  const plan = buildResearchPlan({
-    question,
-    documents: selectedDocuments,
-  });
-  const results = [];
-
-  for (const entry of plan.questions) {
-    const budget = consumeBudget(budgetState, "researchQuestions");
-
-    if (!budget.ok) {
-      results.push({
-        id: entry.id,
-        question: entry.question,
-        status: "skipped",
-        text: "",
-        citations: [],
-        abstained: false,
-        abstainReason: null,
-        resolvedQuery: entry.question,
-        error: budget.reason,
-      });
-      continue;
-    }
-
-    try {
-      const value = await ragService.chat(docIds, entry.question, {
-        sessionId: null,
-        userId: null,
-        accessScope,
-      });
-
-      results.push({
-        id: entry.id,
-        question: entry.question,
-        status: "completed",
-        text: value.text,
-        citations: value.citations ?? [],
-        abstained: Boolean(value.abstained),
-        abstainReason: value.abstainReason ?? null,
-        resolvedQuery: value.resolvedQuery ?? entry.question,
-      });
-    } catch (error) {
-      results.push({
-        id: entry.id,
-        question: entry.question,
-        status: "failed",
-        text: "",
-        citations: [],
-        abstained: false,
-        abstainReason: null,
-        resolvedQuery: entry.question,
-        error: serializeError(error, "Research lookup failed."),
-      });
-    }
-  }
-
-  return formatResearchBrief({
-    question,
-    documents: selectedDocuments,
-    plan,
-    results,
-  });
-};
-
 export const runAgentRag = async ({
   agentBudget,
   ragService,
@@ -467,9 +209,35 @@ export const runAgentRag = async ({
   sessionId,
   userId,
   accessScope,
+  skillRegistry,
 }) => {
   const trace = [];
   const budgetState = createAgentBudget(agentBudget);
+  const registry = skillRegistry ?? createBuiltInSkillRegistry();
+  const skillExecutions = new Map();
+  const recordSkillResult = (result) => {
+    if (!result?.skillId) {
+      return;
+    }
+
+    const status = result.ok ? "completed" : "failed";
+    const existing = skillExecutions.get(result.skillId);
+
+    if (!existing || (existing.status !== "completed" && status === "completed")) {
+      skillExecutions.set(result.skillId, {
+        skillId: result.skillId,
+        skillVersion: result.skillVersion,
+        label: result.label,
+        status,
+      });
+    }
+  };
+  const getAgentSkills = () => [...skillExecutions.values()];
+  const buildSkillTraceDetail = (result, detail = {}) => ({
+    skillId: result.skillId,
+    skillVersion: result.skillVersion,
+    ...detail,
+  });
   const addTraceStep = (step) =>
     appendTraceStep({
       budgetState,
@@ -493,6 +261,12 @@ export const runAgentRag = async ({
     question,
     docIds,
   });
+  const selectedSkills = registry.select({
+    plan,
+    docIds,
+  });
+  const getSelectedSkill = (skillId) =>
+    selectedSkills.find((skill) => skill.id === skillId) ?? null;
 
   addTraceStep({
     type: "plan",
@@ -505,6 +279,7 @@ export const runAgentRag = async ({
       actions: buildPlannerActions({
         plan,
         docIds,
+        skills: selectedSkills,
       }),
     },
   });
@@ -523,11 +298,13 @@ export const runAgentRag = async ({
   let ragResult = null;
   let webResult = null;
 
-  if (plan.wantsResearch) {
+  const researchSkill = getSelectedSkill(AGENT_SKILL_IDS.researchBrief);
+
+  if (researchSkill) {
     const selectedDocuments = ragService
       .listDocuments?.(accessScope)
       ?.filter((document) => docIds.includes(document.docId)) ?? [];
-    const researchPlan = buildResearchPlan({
+    const researchPlan = researchSkill.createPlan({
       question,
       documents: selectedDocuments,
     });
@@ -543,15 +320,31 @@ export const runAgentRag = async ({
       },
     });
 
-    researchBrief = await runResearchBrief({
+    const researchResult = await executeAgentSkill(researchSkill, {
       budgetState,
       ragService,
       question,
       docIds,
       accessScope,
+      researchPlan,
     });
+    recordSkillResult(researchResult);
+    researchBrief = researchResult.ok ? researchResult.value : null;
 
-    for (const finding of researchBrief.findings) {
+    if (!researchResult.ok) {
+      addTraceStep({
+        type: "research_question",
+        label: "Research Question",
+        status: "failed",
+        summary: `Research brief failed: ${serializeError(
+          researchResult.error,
+          "Unable to generate research brief."
+        )}`,
+        detail: buildSkillTraceDetail(researchResult),
+      });
+    }
+
+    for (const finding of researchBrief?.findings ?? []) {
       if (finding.status === "skipped") {
         addBudgetLimitTrace({
           tool: "Research Question",
@@ -569,52 +362,93 @@ export const runAgentRag = async ({
           citations: finding.citations?.length ?? 0,
           abstained: Boolean(finding.abstained),
           error: finding.error ?? null,
+          skillId: researchResult.skillId,
+          skillVersion: researchResult.skillVersion,
         },
       });
     }
   }
 
-  if (plan.wantsInventory) {
-    const documents = ragService.listDocuments?.(accessScope) ?? [];
-    inventoryAnswer = buildInventoryAnswer(documents);
+  const inventorySkill = getSelectedSkill(AGENT_SKILL_IDS.inventory);
 
+  if (inventorySkill) {
+    const inventoryResult = await executeAgentSkill(inventorySkill, {
+      ragService,
+      accessScope,
+    });
+    recordSkillResult(inventoryResult);
+    const documents = inventoryResult.value?.documents ?? [];
+    inventoryAnswer = inventoryResult.ok
+      ? inventoryResult.text
+      : `Workspace inventory unavailable: ${serializeError(
+          inventoryResult.error,
+          "Unable to list indexed documents."
+        )}`;
     addTraceStep({
       type: "inventory",
       label: "Workspace Inventory",
+      status: inventoryResult.ok ? "completed" : "failed",
       summary:
-        documents.length === 0
+        inventoryResult.ok && documents.length === 0
           ? "No indexed documents found."
-          : `Found ${documents.length} indexed document${
-              documents.length === 1 ? "" : "s"
-            }.`,
+          : inventoryResult.ok
+            ? `Found ${documents.length} indexed document${
+                documents.length === 1 ? "" : "s"
+              }.`
+            : `Workspace inventory failed: ${serializeError(
+                inventoryResult.error,
+                "Unable to list indexed documents."
+              )}`,
+      detail: buildSkillTraceDetail(inventoryResult, {
+        documentCount: documents.length,
+      }),
     });
   }
 
-  if (plan.wantsDiscovery) {
-    const documents = ragService.listDocuments?.(accessScope) ?? [];
-    const matches = discoverDocuments({
-      documents,
+  const discoverySkill = getSelectedSkill(AGENT_SKILL_IDS.documentDiscovery);
+
+  if (discoverySkill) {
+    const discoveryResult = await executeAgentSkill(discoverySkill, {
+      ragService,
       question,
       docIds,
+      accessScope,
     });
-    discoveryAnswer = buildDiscoveryAnswer(matches);
-
+    recordSkillResult(discoveryResult);
+    const matches = discoveryResult.value?.matches ?? [];
+    discoveryAnswer = discoveryResult.ok
+      ? discoveryResult.text
+      : `Document discovery unavailable: ${serializeError(
+          discoveryResult.error,
+          "Unable to inspect workspace metadata."
+        )}`;
     addTraceStep({
       type: "document_discovery",
       label: "Document Discovery",
+      status: discoveryResult.ok ? "completed" : "failed",
       summary:
-        matches.length === 0
+        discoveryResult.ok && matches.length === 0
           ? "No strong metadata match found."
-          : `Found ${matches.length} likely matching document${
-              matches.length === 1 ? "" : "s"
-            }.`,
+          : discoveryResult.ok
+            ? `Found ${matches.length} likely matching document${
+                matches.length === 1 ? "" : "s"
+              }.`
+            : `Document discovery failed: ${serializeError(
+                discoveryResult.error,
+                "Unable to inspect workspace metadata."
+              )}`,
+      detail: buildSkillTraceDetail(discoveryResult, {
+        matchCount: matches.length,
+      }),
     });
   }
 
-  if (plan.wantsDocumentRag) {
-    const primaryBudget = consumeBudget(budgetState, "documentRagCalls");
+  const documentRagSkill = getSelectedSkill(AGENT_SKILL_IDS.documentRag);
+
+  if (documentRagSkill) {
+    const primaryBudget = consumeBudget(budgetState, documentRagSkill.budgetKey);
     const primaryRagResult = primaryBudget.ok
-      ? await callDocumentRag({
+      ? await executeAgentSkill(documentRagSkill, {
           ragService,
           docIds,
           question,
@@ -622,13 +456,10 @@ export const runAgentRag = async ({
           userId,
           accessScope,
         })
-      : {
-          ok: false,
-          value: null,
-          error: new Error(primaryBudget.reason),
-        };
+      : buildFailedSkillResult(documentRagSkill, new Error(primaryBudget.reason));
 
     ragResult = primaryRagResult;
+    recordSkillResult(primaryRagResult);
 
     if (!primaryBudget.ok) {
       addBudgetLimitTrace({
@@ -652,6 +483,10 @@ export const runAgentRag = async ({
               primaryRagResult.error,
               "Unable to answer from the document."
             )}`,
+        detail: buildSkillTraceDetail(
+          primaryRagResult,
+          primaryRagResult.traceDetail ?? {}
+        ),
       });
     }
 
@@ -675,7 +510,7 @@ export const runAgentRag = async ({
         question,
         check: primaryCheck,
       });
-      const retryBudget = consumeBudget(budgetState, "documentRagCalls");
+      const retryBudget = consumeBudget(budgetState, documentRagSkill.budgetKey);
 
       if (!retryBudget.ok) {
         addBudgetLimitTrace({
@@ -683,7 +518,7 @@ export const runAgentRag = async ({
           reason: retryBudget.reason,
         });
       } else {
-        const retryRagResult = await callDocumentRag({
+        const retryRagResult = await executeAgentSkill(documentRagSkill, {
           ragService,
           docIds,
           question: retryQuestion,
@@ -691,6 +526,7 @@ export const runAgentRag = async ({
           userId,
           accessScope,
         });
+        recordSkillResult(retryRagResult);
 
         addTraceStep({
           type: "document_retry",
@@ -704,11 +540,11 @@ export const runAgentRag = async ({
               }.`
             : `Focused retry failed: ${serializeError(
                 retryRagResult.error,
-                "Unable to retry document evidence lookup."
-              )}`,
-          detail: {
+              "Unable to retry document evidence lookup."
+            )}`,
+          detail: buildSkillTraceDetail(retryRagResult, {
             retryQuestion,
-          },
+          }),
         });
 
         if (retryRagResult.ok) {
@@ -734,12 +570,17 @@ export const runAgentRag = async ({
     }
   }
 
+  const plannedWebSearchSkill = getSelectedSkill(AGENT_SKILL_IDS.webSearch);
+  const webSearchSkill = plannedWebSearchSkill ?? registry.get(AGENT_SKILL_IDS.webSearch);
   const shouldRunWeb =
-    plan.wantsWeb || (ragResult?.ok && ragResult.value.abstained) || ragResult?.ok === false;
+    Boolean(webSearchSkill) &&
+    (Boolean(plannedWebSearchSkill) ||
+      (ragResult?.ok && ragResult.value.abstained) ||
+      ragResult?.ok === false);
   let skippedWebBecauseBudget = false;
 
   if (shouldRunWeb) {
-    const webBudget = consumeBudget(budgetState, "webSearchCalls");
+    const webBudget = consumeBudget(budgetState, webSearchSkill.budgetKey);
 
     if (!webBudget.ok) {
       skippedWebBecauseBudget = true;
@@ -748,10 +589,11 @@ export const runAgentRag = async ({
         reason: webBudget.reason,
       });
     } else {
-      webResult = await callWebSearch({
+      webResult = await executeAgentSkill(webSearchSkill, {
         webChatService,
         question,
       });
+      recordSkillResult(webResult);
 
       addTraceStep({
         type: "web_search",
@@ -763,6 +605,7 @@ export const runAgentRag = async ({
               webResult.error,
               "Unable to answer from web search."
             )}`,
+        detail: buildSkillTraceDetail(webResult),
       });
     }
   }
@@ -809,6 +652,7 @@ export const runAgentRag = async ({
       agentAnswer,
       agentMode,
       agentTrace: trace,
+      agentSkills: getAgentSkills(),
       researchBrief,
       ragAnswer: researchBrief
         ? researchBrief.text

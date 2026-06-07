@@ -70,6 +70,7 @@ test("feedback corpus builder converts negative feedback into synthetic eval cas
     workspaceId: "workspace-a",
     note: "The answer missed the approval condition.",
     originalDocIds: ["doc-policy"],
+    skills: [],
   });
 
   const policyDocument = corpus.documents.find(
