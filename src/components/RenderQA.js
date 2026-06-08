@@ -172,6 +172,11 @@ const BUDGET_ITEMS = [
     limitKey: "maxResearchQuestions",
   },
   {
+    label: "Custom",
+    usedKey: "customSkillCalls",
+    limitKey: "maxCustomSkillCalls",
+  },
+  {
     label: "Trace",
     usedKey: "traceSteps",
     limitKey: "maxTraceSteps",

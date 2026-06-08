@@ -1,125 +1,85 @@
-import { consumeBudget } from "../agent-budget.js";
 import {
-  buildResearchPlan,
-  formatResearchBrief,
-} from "../research-brief.js";
-import { extractMeaningfulTokens, normalizeSearchText } from "../text-utils.js";
+  AGENT_SKILL_IDS,
+  createBuiltInSkills,
+} from "./built-ins.js";
+import {
+  CUSTOM_SKILL_IDS,
+  createCustomSkills,
+} from "./custom/index.js";
 
-export const AGENT_SKILL_IDS = {
-  documentRag: "document_rag",
-  webSearch: "web_search",
-  inventory: "inventory",
-  documentDiscovery: "document_discovery",
-  researchBrief: "research_brief",
-};
-
-const BUILT_IN_SKILL_VERSION = "1.0.0";
+export { AGENT_SKILL_IDS } from "./built-ins.js";
+export { CUSTOM_SKILL_IDS } from "./custom/index.js";
 
 const normalizeText = (value) => String(value ?? "").trim();
 
-const getDocumentLabel = (document) => {
-  const pageCount = Number.parseInt(document?.pageCount ?? "0", 10);
-  const chunkCount = Number.parseInt(document?.chunkCount ?? "0", 10);
-  const stats = [
-    Number.isFinite(pageCount) && pageCount > 0 ? `${pageCount} pages` : null,
-    Number.isFinite(chunkCount) && chunkCount > 0 ? `${chunkCount} chunks` : null,
-  ].filter(Boolean);
+const REQUIRED_SKILL_FIELDS = [
+  "id",
+  "version",
+  "label",
+  "budgetKey",
+  "requiresAccessScope",
+  "match",
+  "execute",
+];
 
-  return `${document.fileName ?? "Untitled document"}${
-    stats.length > 0 ? ` (${stats.join(", ")})` : ""
-  }`;
-};
+export const validateSkillContract = (skill = {}) => {
+  const errors = [];
 
-const buildInventoryAnswer = (documents) => {
-  if (!documents.length) {
-    return "No documents are currently indexed in this workspace.";
-  }
-
-  return [
-    `The workspace currently has ${documents.length} indexed document${
-      documents.length === 1 ? "" : "s"
-    }:`,
-    ...documents.map((document, index) => `${index + 1}. ${getDocumentLabel(document)}`),
-  ].join("\n");
-};
-
-const getProfile = (document = {}) =>
-  document.profile && typeof document.profile === "object"
-    ? document.profile
-    : {
-        summary: document.summary ?? "",
-        tags: document.tags ?? [],
-        entities: document.entities ?? [],
-      };
-
-const getProfileSearchText = (document = {}) => {
-  const profile = getProfile(document);
-
-  return [
-    document.fileName,
-    profile.summary,
-    ...(profile.tags ?? []),
-    ...(profile.entities ?? []),
-  ]
-    .filter(Boolean)
-    .join(" ");
-};
-
-const scoreDocumentForQuery = ({ document, queryTerms }) => {
-  const normalizedProfileText = normalizeSearchText(getProfileSearchText(document));
-  let score = 0;
-
-  for (const term of queryTerms) {
-    if (normalizedProfileText.includes(term)) {
-      score += 1;
+  for (const field of REQUIRED_SKILL_FIELDS) {
+    if (!(field in skill)) {
+      errors.push(`missing ${field}`);
     }
   }
 
-  return score;
-};
-
-const discoverDocuments = ({ documents, question, docIds }) => {
-  const docIdFilter = new Set(docIds);
-  const candidateDocuments = docIdFilter.size > 0
-    ? documents.filter((document) => docIdFilter.has(document.docId))
-    : documents;
-  const queryTerms = [...new Set(extractMeaningfulTokens(question))];
-
-  return candidateDocuments
-    .map((document) => ({
-      document,
-      score: scoreDocumentForQuery({
-        document,
-        queryTerms,
-      }),
-    }))
-    .filter((entry) => entry.score > 0)
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        String(left.document.fileName).localeCompare(String(right.document.fileName))
-    )
-    .slice(0, 5);
-};
-
-const buildDiscoveryAnswer = (matches) => {
-  if (matches.length === 0) {
-    return "I could not find a strong matching document from the current workspace metadata.";
+  if (!normalizeText(skill.id)) {
+    errors.push("id must be non-empty");
   }
 
-  return [
-    `I found ${matches.length} likely matching document${
-      matches.length === 1 ? "" : "s"
-    }:`,
-    ...matches.map(({ document }) => {
-      const profile = getProfile(document);
-      const tags = (profile.tags ?? []).slice(0, 4);
-      const tagText = tags.length > 0 ? ` Tags: ${tags.join(", ")}.` : "";
-      const summaryText = profile.summary ? ` ${profile.summary}` : "";
+  if (!normalizeText(skill.version)) {
+    errors.push("version must be non-empty");
+  }
 
-      return `- ${document.fileName}.${tagText}${summaryText}`;
-    }),
-  ].join("\n");
+  if (!normalizeText(skill.label)) {
+    errors.push("label must be non-empty");
+  }
+
+  if (skill.budgetKey !== null && typeof skill.budgetKey !== "string") {
+    errors.push("budgetKey must be a string or null");
+  }
+
+  if (typeof skill.requiresAccessScope !== "boolean") {
+    errors.push("requiresAccessScope must be boolean");
+  }
+
+  if (typeof skill.match !== "function") {
+    errors.push("match must be a function");
+  }
+
+  if (typeof skill.execute !== "function") {
+    errors.push("execute must be a function");
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      `Invalid AgentRAG skill contract for ${skill.id ?? "unknown"}: ${errors.join(", ")}.`
+    );
+  }
+
+  return skill;
+};
+
+const validateUniqueSkills = (skills = []) => {
+  const seen = new Set();
+
+  for (const skill of skills) {
+    validateSkillContract(skill);
+
+    if (seen.has(skill.id)) {
+      throw new Error(`Duplicate AgentRAG skill id: ${skill.id}`);
+    }
+
+    seen.add(skill.id);
+  }
 };
 
 const normalizeSkillResult = (skill, result = {}) => ({
@@ -155,250 +115,14 @@ export const executeAgentSkill = async (skill, context) => {
   }
 };
 
-const createDocumentRagSkill = () => ({
-  id: AGENT_SKILL_IDS.documentRag,
-  version: BUILT_IN_SKILL_VERSION,
-  label: "Document RAG",
-  budgetKey: "documentRagCalls",
-  match: ({ plan }) => Boolean(plan.wantsDocumentRag),
-  plannerActions: ({ docIds }) => [
-    {
-      id: "document_rag",
-      label: "Run document RAG",
-      summary: `Search ${docIds.length} selected document${
-        docIds.length === 1 ? "" : "s"
-      }.`,
-    },
-    {
-      id: "self_check",
-      label: "Verify evidence",
-      summary: "Check citation count and document coverage before synthesis.",
-    },
-  ],
-  execute: async ({
-    ragService,
-    docIds,
-    question,
-    sessionId,
-    userId,
-    accessScope,
-  }) => {
-    const value = await ragService.chat(docIds, question, {
-      sessionId,
-      userId,
-      accessScope,
-    });
-
-    return {
-      value,
-      text: value.text,
-      citations: value.citations ?? [],
-      abstained: Boolean(value.abstained),
-      traceDetail: {
-        citations: value.citations?.length ?? 0,
-        abstained: Boolean(value.abstained),
-      },
-    };
-  },
-});
-
-const createWebSearchSkill = () => ({
-  id: AGENT_SKILL_IDS.webSearch,
-  version: BUILT_IN_SKILL_VERSION,
-  label: "Web Search",
-  budgetKey: "webSearchCalls",
-  match: ({ plan }) => Boolean(plan.wantsWeb),
-  plannerActions: () => [
-    {
-      id: "web_search",
-      label: "Use web fallback",
-      summary: "Use web context only after document evidence is checked.",
-    },
-  ],
-  execute: async ({ webChatService, question }) => {
-    const value = await webChatService(question);
-
-    return {
-      value,
-      text: value.text,
-      citations: value.citations ?? [],
-      abstained: false,
-    };
-  },
-});
-
-const createInventorySkill = () => ({
-  id: AGENT_SKILL_IDS.inventory,
-  version: BUILT_IN_SKILL_VERSION,
-  label: "Workspace Inventory",
-  match: ({ plan }) => Boolean(plan.wantsInventory),
-  plannerActions: () => [
-    {
-      id: "workspace_metadata",
-      label: "Inspect workspace metadata",
-      summary: "Use indexed document metadata without running document RAG.",
-    },
-  ],
-  execute: async ({ ragService, accessScope }) => {
-    const documents = ragService.listDocuments?.(accessScope) ?? [];
-
-    return {
-      value: {
-        text: buildInventoryAnswer(documents),
-        documents,
-      },
-      text: buildInventoryAnswer(documents),
-      traceDetail: {
-        documentCount: documents.length,
-      },
-    };
-  },
-});
-
-const createDocumentDiscoverySkill = () => ({
-  id: AGENT_SKILL_IDS.documentDiscovery,
-  version: BUILT_IN_SKILL_VERSION,
-  label: "Document Discovery",
-  match: ({ plan }) => Boolean(plan.wantsDiscovery),
-  plannerActions: () => [
-    {
-      id: "workspace_metadata",
-      label: "Inspect workspace metadata",
-      summary: "Use indexed document metadata without running document RAG.",
-    },
-  ],
-  execute: async ({ ragService, question, docIds, accessScope }) => {
-    const documents = ragService.listDocuments?.(accessScope) ?? [];
-    const matches = discoverDocuments({
-      documents,
-      question,
-      docIds,
-    });
-
-    return {
-      value: {
-        text: buildDiscoveryAnswer(matches),
-        matches,
-      },
-      text: buildDiscoveryAnswer(matches),
-      traceDetail: {
-        matchCount: matches.length,
-      },
-    };
-  },
-});
-
-const createResearchBriefSkill = () => ({
-  id: AGENT_SKILL_IDS.researchBrief,
-  version: BUILT_IN_SKILL_VERSION,
-  label: "Research Brief",
-  match: ({ plan }) => Boolean(plan.wantsResearch),
-  plannerActions: () => [
-    {
-      id: "research_questions",
-      label: "Run research questions",
-      summary: "Break the request into deterministic document-grounded questions.",
-    },
-  ],
-  createPlan: ({ question, documents }) =>
-    buildResearchPlan({
-      question,
-      documents,
-    }),
-  execute: async ({
-    budgetState,
-    ragService,
-    question,
-    docIds,
-    accessScope,
-    researchPlan,
-  }) => {
-    const documents = ragService.listDocuments?.(accessScope) ?? [];
-    const selectedDocuments = documents.filter((document) => docIds.includes(document.docId));
-    const plan = researchPlan ?? buildResearchPlan({
-      question,
-      documents: selectedDocuments,
-    });
-    const results = [];
-
-    for (const entry of plan.questions) {
-      const budget = consumeBudget(budgetState, "researchQuestions");
-
-      if (!budget.ok) {
-        results.push({
-          id: entry.id,
-          question: entry.question,
-          status: "skipped",
-          text: "",
-          citations: [],
-          abstained: false,
-          abstainReason: null,
-          resolvedQuery: entry.question,
-          error: budget.reason,
-        });
-        continue;
-      }
-
-      try {
-        const value = await ragService.chat(docIds, entry.question, {
-          sessionId: null,
-          userId: null,
-          accessScope,
-        });
-
-        results.push({
-          id: entry.id,
-          question: entry.question,
-          status: "completed",
-          text: value.text,
-          citations: value.citations ?? [],
-          abstained: Boolean(value.abstained),
-          abstainReason: value.abstainReason ?? null,
-          resolvedQuery: value.resolvedQuery ?? entry.question,
-        });
-      } catch (error) {
-        results.push({
-          id: entry.id,
-          question: entry.question,
-          status: "failed",
-          text: "",
-          citations: [],
-          abstained: false,
-          abstainReason: null,
-          resolvedQuery: entry.question,
-          error: error instanceof Error ? error.message : "Research lookup failed.",
-        });
-      }
-    }
-
-    const brief = formatResearchBrief({
-      question,
-      documents: selectedDocuments,
-      plan,
-      results,
-    });
-
-    return {
-      value: brief,
-      text: brief.text,
-      citations: brief.citations ?? [],
-      abstained: brief.findings?.some((finding) => finding.abstained) ?? false,
-      traceDetail: {
-        questionCount: plan.questions.length,
-      },
-    };
-  },
-});
-
-export const createBuiltInSkills = () => [
-  createDocumentRagSkill(),
-  createWebSearchSkill(),
-  createInventorySkill(),
-  createDocumentDiscoverySkill(),
-  createResearchBriefSkill(),
+export const createDefaultSkills = () => [
+  ...createBuiltInSkills(),
+  ...createCustomSkills(),
 ];
 
-export const createSkillRegistry = (skills = createBuiltInSkills()) => {
+export const createSkillRegistry = (skills = createDefaultSkills()) => {
+  validateUniqueSkills(skills);
+
   const skillMap = new Map(skills.map((skill) => [skill.id, skill]));
 
   return {
@@ -416,3 +140,9 @@ export const createSkillRegistry = (skills = createBuiltInSkills()) => {
 
 export const createBuiltInSkillRegistry = () =>
   createSkillRegistry(createBuiltInSkills());
+
+export const createDefaultSkillRegistry = () =>
+  createSkillRegistry(createDefaultSkills());
+
+export const createCustomSkillRegistry = () =>
+  createSkillRegistry(createCustomSkills());

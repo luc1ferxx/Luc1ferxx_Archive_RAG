@@ -33,12 +33,14 @@ describe("RenderQA", () => {
                         maxDocumentRagCalls: 2,
                         maxWebSearchCalls: 1,
                         maxResearchQuestions: 3,
+                        maxCustomSkillCalls: 2,
                         maxTraceSteps: 12,
                       },
                       used: {
                         documentRagCalls: 0,
                         webSearchCalls: 0,
                         researchQuestions: 0,
+                        customSkillCalls: 0,
                         traceSteps: 1,
                       },
                       traceTruncated: false,
@@ -106,7 +108,8 @@ describe("RenderQA", () => {
 
     expect(screen.getByText("Run document RAG")).toBeInTheDocument();
     expect(screen.getByText("Doc RAG")).toBeInTheDocument();
-    expect(screen.getByText("0 / 2")).toBeInTheDocument();
+    expect(screen.getByText("Custom")).toBeInTheDocument();
+    expect(screen.getAllByText("0 / 2").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("Citations")).toBeInTheDocument();
     expect(screen.getByText("Docs")).toBeInTheDocument();
     expect(screen.getAllByText("0 / 1").length).toBeGreaterThanOrEqual(2);

@@ -13,8 +13,9 @@ import {
 } from "./agent-budget.js";
 import {
   AGENT_SKILL_IDS,
+  CUSTOM_SKILL_IDS,
   buildFailedSkillResult,
-  createBuiltInSkillRegistry,
+  createDefaultSkillRegistry,
   executeAgentSkill,
 } from "./skills/registry.js";
 
@@ -29,6 +30,9 @@ const DISCOVERY_SIGNAL_PATTERN =
 
 const RESEARCH_SIGNAL_PATTERN =
   /\b(research|brief|report|analy[sz]e|analysis|investigate|study|risk|risks|key findings|executive summary)\b|研究|简报|报告|分析|调研|风险|结论|发现|梳理/i;
+
+const TIMELINE_SIGNAL_PATTERN =
+  /\b(timeline|chronology|chronological|sequence|milestones?|key dates?|event order|date order)\b|时间线|时间顺序|按时间|大事记|里程碑|事件顺序|关键日期/i;
 
 const serializeError = (error, fallbackMessage) => {
   if (error instanceof Error) {
@@ -101,11 +105,27 @@ const buildPlan = ({ question, docIds }) => {
   const wantsInventory = INVENTORY_SIGNAL_PATTERN.test(question);
   const wantsDiscovery = DISCOVERY_SIGNAL_PATTERN.test(question);
   const wantsWeb = WEB_SIGNAL_PATTERN.test(question);
+  const wantsTimeline = TIMELINE_SIGNAL_PATTERN.test(question);
   const hasDocuments = docIds.length > 0;
+
+  if (wantsTimeline) {
+    return {
+      mode: CUSTOM_SKILL_IDS.extractTimeline,
+      wantsTimeline: true,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      requiresDocuments: true,
+      summary: "Extract a cited chronological timeline from selected documents.",
+    };
+  }
 
   if (wantsResearch) {
     return {
       mode: "research_brief",
+      wantsTimeline: false,
       wantsResearch: true,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -119,6 +139,7 @@ const buildPlan = ({ question, docIds }) => {
   if (wantsInventory && !hasDocuments) {
     return {
       mode: "inventory",
+      wantsTimeline: false,
       wantsResearch: false,
       wantsInventory: true,
       wantsDocumentRag: false,
@@ -131,6 +152,7 @@ const buildPlan = ({ question, docIds }) => {
   if (wantsDiscovery && !hasDocuments) {
     return {
       mode: "document_discovery",
+      wantsTimeline: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: true,
@@ -144,6 +166,7 @@ const buildPlan = ({ question, docIds }) => {
   if (!hasDocuments && wantsWeb) {
     return {
       mode: "web",
+      wantsTimeline: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -156,6 +179,7 @@ const buildPlan = ({ question, docIds }) => {
 
   return {
     mode: wantsWeb ? "document_web" : "document",
+    wantsTimeline: false,
     wantsResearch: false,
     wantsInventory,
     wantsDiscovery: false,
@@ -209,10 +233,19 @@ const buildSynthesisAnswer = ({
   plan,
   ragResult,
   webResult,
+  customSkillResults,
   inventoryAnswer,
   discoveryAnswer,
   researchBrief,
 }) => {
+  if (plan.mode === CUSTOM_SKILL_IDS.extractTimeline) {
+    const timelineResult = customSkillResults.find(
+      (result) => result.ok && result.skillId === CUSTOM_SKILL_IDS.extractTimeline
+    );
+
+    return timelineResult?.text ?? "The timeline could not be extracted.";
+  }
+
   if (plan.mode === "research_brief") {
     return researchBrief?.text ?? "The research brief could not be generated.";
   }
@@ -259,7 +292,7 @@ export const runAgentRag = async ({
 }) => {
   const trace = [];
   const budgetState = createAgentBudget(agentBudget);
-  const registry = skillRegistry ?? createBuiltInSkillRegistry();
+  const registry = skillRegistry ?? createDefaultSkillRegistry();
   const skillExecutions = new Map();
   const skillObservations = new Map();
   const skillRuns = [];
@@ -522,6 +555,7 @@ export const runAgentRag = async ({
   let researchBrief = null;
   let ragResult = null;
   let webResult = null;
+  const customSkillResults = [];
 
   const researchSkill = getSelectedSkill(AGENT_SKILL_IDS.researchBrief);
 
@@ -664,6 +698,62 @@ export const runAgentRag = async ({
               )}`,
       detail: buildSkillTraceDetail(discoveryResult, {
         matchCount: matches.length,
+      }),
+    });
+  }
+
+  const customSkills = selectedSkills.filter((skill) => skill.kind === "custom");
+
+  for (const customSkill of customSkills) {
+    const customBudget = customSkill.budgetKey
+      ? consumeBudget(budgetState, customSkill.budgetKey)
+      : null;
+    const customResult = customBudget && !customBudget.ok
+      ? buildFailedSkillResult(customSkill, new Error(customBudget.reason))
+      : await executeObservedSkill(customSkill, {
+          ragService,
+          question,
+          docIds,
+          sessionId,
+          userId,
+          accessScope,
+        }, {
+          phase: "primary",
+          budget: customBudget,
+        });
+
+    customSkillResults.push(customResult);
+    recordSkillResult(customResult);
+
+    if (customBudget && !customBudget.ok) {
+      recordSkippedSkill({
+        skill: customSkill,
+        result: customResult,
+        phase: "primary",
+        budget: customBudget,
+      });
+      addBudgetLimitTrace({
+        tool: customSkill.label,
+        reason: customBudget.reason,
+      });
+      continue;
+    }
+
+    addTraceStep({
+      type: "custom_skill",
+      label: customSkill.label,
+      status: customResult.ok ? "completed" : "failed",
+      summary: customResult.ok
+        ? `${customSkill.label} completed with ${customResult.citations?.length ?? 0} citation${
+            customResult.citations?.length === 1 ? "" : "s"
+          }.`
+        : `${customSkill.label} failed: ${serializeError(
+            customResult.error,
+            "Unable to run custom skill."
+          )}`,
+      detail: buildSkillTraceDetail(customResult, {
+        skillKind: customSkill.kind,
+        ...(customResult.traceDetail ?? {}),
       }),
     });
   }
@@ -872,12 +962,20 @@ export const runAgentRag = async ({
     },
     ragResult,
     webResult,
+    customSkillResults,
     inventoryAnswer,
     discoveryAnswer,
     researchBrief,
   });
   const agentMode =
     ragResult?.ok && ragResult.value.abstained && webResult?.ok ? "document_web" : plan.mode;
+  const primaryCustomResult = customSkillResults.find((result) => result.ok);
+  const directAnswerModes = new Set([
+    "inventory",
+    "document_discovery",
+    "research_brief",
+    ...customSkills.map((skill) => skill.id),
+  ]);
 
   addTraceStep({
     type: "synthesis",
@@ -895,7 +993,7 @@ export const runAgentRag = async ({
     ? serializeError(webResult.error, "Unable to answer from web search.")
     : null;
   const status =
-    !["inventory", "document_discovery", "research_brief"].includes(plan.mode) &&
+    !directAnswerModes.has(plan.mode) &&
     !ragResult?.ok &&
     (shouldRunWeb ? !webResult?.ok : true)
       ? 502
@@ -916,16 +1014,23 @@ export const runAgentRag = async ({
         ? researchBrief.text
         : ragResult?.ok
         ? ragResult.value.text
+        : primaryCustomResult?.text
+          ? primaryCustomResult.text
         : ragError
           ? `RAG unavailable: ${ragError}`
           : "",
-      ragSources: researchBrief?.citations ?? (ragResult?.ok ? ragResult.value.citations ?? [] : []),
+      ragSources: researchBrief?.citations ??
+        (ragResult?.ok
+          ? ragResult.value.citations ?? []
+          : primaryCustomResult?.citations ?? []),
       ragResolvedQuestion: ragResult?.ok ? ragResult.value.resolvedQuery ?? question : question,
       ragMemoryApplied: ragResult?.ok ? Boolean(ragResult.value.memoryApplied) : false,
       ragAbstained: researchBrief
         ? researchBrief.findings.some((finding) => finding.abstained)
         : ragResult?.ok
           ? Boolean(ragResult.value.abstained)
+          : primaryCustomResult
+            ? Boolean(primaryCustomResult.abstained)
           : null,
       ragAbstainReason: ragResult?.ok
         ? ragResult.value.abstainReason ?? null
@@ -940,8 +1045,8 @@ export const runAgentRag = async ({
           ? `Web search unavailable: ${webError}`
           : skippedWebBecauseBudget
             ? "Web search not used: agent budget exhausted."
-          : ["inventory", "document_discovery", "research_brief"].includes(plan.mode)
-            ? "Web search not used for workspace metadata."
+          : directAnswerModes.has(plan.mode)
+            ? "Web search not used for this direct agent skill."
             : "Web search not used: document evidence was sufficient.",
       errors: {
         rag: ragError,

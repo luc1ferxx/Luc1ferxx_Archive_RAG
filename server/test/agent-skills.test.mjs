@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { runAgentRag } from "../rag/agent.js";
 import {
   AGENT_SKILL_IDS,
+  CUSTOM_SKILL_IDS,
   createBuiltInSkillRegistry,
+  createDefaultSkillRegistry,
+  validateSkillContract,
 } from "../rag/skills/registry.js";
 import { buildFeedbackRecord } from "../feedback.js";
 import { buildFeedbackCorpusFromRecords } from "../evaluation/feedback-corpus.js";
@@ -28,6 +31,46 @@ test("built-in skill registry selects document and web skills with stable metada
   assert.deepEqual(
     selectedSkills.map((skill) => skill.version),
     ["1.0.0", "1.0.0"]
+  );
+});
+
+test("default skill registry whitelists custom skills separately from built-ins", () => {
+  const builtInRegistry = createBuiltInSkillRegistry();
+  const defaultRegistry = createDefaultSkillRegistry();
+
+  assert.equal(
+    builtInRegistry.get(CUSTOM_SKILL_IDS.extractTimeline),
+    null
+  );
+  assert.equal(
+    defaultRegistry.get(CUSTOM_SKILL_IDS.extractTimeline).version,
+    "1.0.0"
+  );
+  assert.deepEqual(
+    defaultRegistry.select({
+      plan: {
+        wantsTimeline: true,
+        wantsDocumentRag: false,
+        wantsWeb: false,
+        wantsResearch: false,
+        wantsInventory: false,
+        wantsDiscovery: false,
+      },
+      docIds: ["doc-1"],
+    }).map((skill) => skill.id),
+    [CUSTOM_SKILL_IDS.extractTimeline]
+  );
+});
+
+test("skill contract validation rejects incomplete custom skills", () => {
+  assert.throws(
+    () =>
+      validateSkillContract({
+        id: "custom_incomplete",
+        version: "1.0.0",
+        label: "Incomplete",
+      }),
+    /missing budgetKey/
   );
 });
 
@@ -110,6 +153,100 @@ test("agent rag executes selected skills with access scope and reports skill met
   assert.equal(documentObservation.budgetLimit, 2);
   assert.equal(response.body.agentObservability.runs[0].phase, "primary");
   assert.equal(response.body.agentObservability.runs[0].citationCount, 1);
+});
+
+test("agent rag executes whitelisted custom timeline skill with access scope", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  let listAccessScope = null;
+  let chatAccessScope = null;
+  let receivedQuestion = null;
+  let receivedDocIds = null;
+  const ragService = {
+    chat: async (docIds, question, options) => {
+      receivedDocIds = docIds;
+      receivedQuestion = question;
+      chatAccessScope = options.accessScope;
+
+      return {
+        text: "- 2024-01-10: Contract signed. [Source 1]\n- 2024-02-01: Renewal window opened. [Source 1]",
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "contract.pdf",
+            pageNumber: 2,
+            excerpt: "Contract signed on 2024-01-10. Renewal window opened on 2024-02-01.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: question,
+        memoryApplied: false,
+      };
+    },
+    listDocuments: (scope) => {
+      listAccessScope = scope;
+
+      return [
+        {
+          docId: "doc-1",
+          fileName: "contract.pdf",
+        },
+        {
+          docId: "other-workspace-doc",
+          fileName: "other.pdf",
+        },
+      ];
+    },
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Extract a timeline of the contract events.",
+    docIds: ["doc-1"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope,
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, CUSTOM_SKILL_IDS.extractTimeline);
+  assert.match(response.body.agentAnswer, /Contract signed/);
+  assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+  assert.equal(response.body.ragSources.length, 1);
+  assert.deepEqual(receivedDocIds, ["doc-1"]);
+  assert.deepEqual(listAccessScope, accessScope);
+  assert.deepEqual(chatAccessScope, accessScope);
+  assert.match(receivedQuestion, /chronological timeline/i);
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "custom_skill", "synthesis"]
+  );
+  assert.deepEqual(response.body.agentSkills, [
+    {
+      skillId: CUSTOM_SKILL_IDS.extractTimeline,
+      skillVersion: "1.0.0",
+      label: "Extract Timeline",
+      status: "completed",
+    },
+  ]);
+
+  const timelineObservation = response.body.agentObservability.skills.find(
+    (skill) => skill.skillId === CUSTOM_SKILL_IDS.extractTimeline
+  );
+  assert.equal(timelineObservation.selected, true);
+  assert.equal(timelineObservation.status, "completed");
+  assert.equal(timelineObservation.attempts, 1);
+  assert.equal(timelineObservation.budgetKey, "customSkillCalls");
+  assert.equal(timelineObservation.budgetUsed, 1);
+  assert.equal(timelineObservation.budgetLimit, 2);
+  assert.equal(timelineObservation.citationCount, 1);
+  assert.equal(response.body.agentObservability.runs[0].phase, "primary");
+  assert.equal(response.body.agentObservability.runs[0].skillId, CUSTOM_SKILL_IDS.extractTimeline);
 });
 
 test("feedback records and feedback eval cases retain skill metadata", () => {

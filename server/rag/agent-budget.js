@@ -1,11 +1,13 @@
 export const DEFAULT_AGENT_BUDGET = {
   maxTraceSteps: 16,
   maxDocumentRagCalls: 2,
+  maxCustomSkillCalls: 2,
   maxWebSearchCalls: 1,
   maxResearchQuestions: 3,
 };
 
 const limitKeyByBudgetKey = {
+  customSkillCalls: "maxCustomSkillCalls",
   documentRagCalls: "maxDocumentRagCalls",
   researchQuestions: "maxResearchQuestions",
   traceSteps: "maxTraceSteps",
@@ -13,6 +15,7 @@ const limitKeyByBudgetKey = {
 };
 
 const labelByBudgetKey = {
+  customSkillCalls: "custom skill",
   documentRagCalls: "document RAG",
   researchQuestions: "research question",
   traceSteps: "trace step",
@@ -37,6 +40,7 @@ export const createAgentBudget = (overrides = {}) => {
     limits,
     used: {
       documentRagCalls: 0,
+      customSkillCalls: 0,
       researchQuestions: 0,
       traceSteps: 0,
       webSearchCalls: 0,
