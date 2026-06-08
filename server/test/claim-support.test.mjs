@@ -125,6 +125,63 @@ test("agent rag retries when claim support check finds unsupported answer claims
   );
 });
 
+test("agent rag finalizer removes unsupported answer claims when retry is unavailable", async () => {
+  const ragService = {
+    chat: async (_docIds, query) => ({
+      text: "Remote work requires manager approval. The satellite stipend is 500 dollars. [Source 1]",
+      citations: [
+        {
+          docId: "doc-1",
+          fileName: "policy.pdf",
+          pageNumber: 2,
+          excerpt: "Remote work requires manager approval before the first remote day.",
+        },
+      ],
+      abstained: false,
+      resolvedQuery: query,
+      memoryApplied: false,
+    }),
+    listDocuments: () => [
+      {
+        docId: "doc-1",
+        fileName: "policy.pdf",
+      },
+    ],
+  };
+
+  const response = await runAgentRag({
+    agentBudget: {
+      maxDocumentRagCalls: 1,
+    },
+    ragService,
+    webChatService: async () => {
+      throw new Error("Web search should not run for a non-abstained document answer.");
+    },
+    question: "What does remote work require?",
+    docIds: ["doc-1"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.body.agentAnswer, /Remote work requires manager approval/i);
+  assert.doesNotMatch(response.body.agentAnswer, /satellite stipend/i);
+  assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+
+  const finalizerStep = response.body.agentTrace.find(
+    (step) => step.type === "answer_finalizer"
+  );
+  assert.equal(finalizerStep.status, "completed");
+  assert.equal(finalizerStep.detail.claimSupport.unsupportedClaimCount, 1);
+  assert.deepEqual(finalizerStep.detail.removedClaims, [
+    "The satellite stipend is 500 dollars",
+  ]);
+});
+
 test("feedback records and feedback eval metadata retain claim support checks", () => {
   const claimSupport = {
     supportedClaimCount: 1,

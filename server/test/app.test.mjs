@@ -338,7 +338,7 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
     assert.ok(Array.isArray(body.agentTrace));
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
-      ["plan", "document_rag", "self_check", "synthesis"]
+      ["plan", "document_rag", "self_check", "synthesis", "answer_finalizer"]
     );
     assert.equal(body.agentTrace.every((step) => step.status === "completed"), true);
   } finally {
@@ -436,6 +436,7 @@ test("chat endpoint agent retries document RAG when self-check finds missing cit
         "document_retry",
         "self_check",
         "synthesis",
+        "answer_finalizer",
       ]
     );
     assert.equal(

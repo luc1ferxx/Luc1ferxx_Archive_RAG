@@ -4,6 +4,7 @@ import {
   evaluateDocumentEvidence,
   selectBetterRagResult,
 } from "./agent-self-check.js";
+import { finalizeAgentAnswer } from "./agent-finalizer.js";
 import {
   appendTraceStep,
   buildBudgetLimitStep,
@@ -277,6 +278,24 @@ const buildSynthesisAnswer = ({
   }
 
   return "The agent could not complete the request because all selected tools failed.";
+};
+
+const buildFinalizerSummary = (finalizer) => {
+  if (!finalizer.changed) {
+    return `Final answer passed claim-level citation finalization with ${
+      finalizer.claimSupport.supportedClaimCount
+    } supported claim${finalizer.claimSupport.supportedClaimCount === 1 ? "" : "s"}.`;
+  }
+
+  if (finalizer.abstained) {
+    return `Finalizer removed ${finalizer.removedClaims.length} unsupported claim${
+      finalizer.removedClaims.length === 1 ? "" : "s"
+    } and returned an evidence-limited answer.`;
+  }
+
+  return `Finalizer removed ${finalizer.removedClaims.length} unsupported claim${
+    finalizer.removedClaims.length === 1 ? "" : "s"
+  } from the final answer.`;
 };
 
 export const runAgentRag = async ({
@@ -955,18 +974,6 @@ export const runAgentRag = async ({
     }
   }
 
-  const agentAnswer = buildSynthesisAnswer({
-    plan: {
-      ...plan,
-      mode: ragResult?.ok && ragResult.value.abstained && webResult?.ok ? "document_web" : plan.mode,
-    },
-    ragResult,
-    webResult,
-    customSkillResults,
-    inventoryAnswer,
-    discoveryAnswer,
-    researchBrief,
-  });
   const agentMode =
     ragResult?.ok && ragResult.value.abstained && webResult?.ok ? "document_web" : plan.mode;
   const primaryCustomResult = customSkillResults.find((result) => result.ok);
@@ -976,6 +983,26 @@ export const runAgentRag = async ({
     "research_brief",
     ...customSkills.map((skill) => skill.id),
   ]);
+  const ragSources = researchBrief?.citations ??
+    (ragResult?.ok
+      ? ragResult.value.citations ?? []
+      : primaryCustomResult?.citations ?? []);
+  const baseAgentAnswer = buildSynthesisAnswer({
+    plan: {
+      ...plan,
+      mode: agentMode,
+    },
+    ragResult,
+    webResult,
+    customSkillResults,
+    inventoryAnswer,
+    discoveryAnswer,
+    researchBrief,
+  });
+  const shouldFinalizeAnswer =
+    ragSources.length > 0 &&
+    (agentMode === "document" ||
+      (primaryCustomResult && agentMode === primaryCustomResult.skillId));
 
   addTraceStep({
     type: "synthesis",
@@ -986,12 +1013,58 @@ export const runAgentRag = async ({
     },
   });
 
+  const finalizer = shouldFinalizeAnswer
+    ? finalizeAgentAnswer({
+        answerText: baseAgentAnswer,
+        citations: ragSources,
+      })
+    : null;
+
+  if (finalizer) {
+    addTraceStep({
+      type: "answer_finalizer",
+      label: "Answer Finalizer",
+      summary: buildFinalizerSummary(finalizer),
+      detail: {
+        changed: finalizer.changed,
+        abstained: finalizer.abstained,
+        removedClaims: finalizer.removedClaims,
+        claimSupport: finalizer.claimSupport,
+      },
+    });
+  }
+
+  const agentAnswer = finalizer?.text ?? baseAgentAnswer;
+
   const ragError = ragResult?.ok === false
     ? serializeError(ragResult.error, "Unable to answer from the document.")
     : null;
   const webError = webResult?.ok === false
     ? serializeError(webResult.error, "Unable to answer from web search.")
     : null;
+  const rawRagAnswer = researchBrief
+    ? researchBrief.text
+    : ragResult?.ok
+    ? ragResult.value.text
+    : primaryCustomResult?.text
+      ? primaryCustomResult.text
+    : ragError
+      ? `RAG unavailable: ${ragError}`
+      : "";
+  const ragAnswer =
+    finalizer &&
+    (agentMode === "document" ||
+      (primaryCustomResult && agentMode === primaryCustomResult.skillId))
+      ? agentAnswer
+      : rawRagAnswer;
+  const rawRagAbstained = researchBrief
+    ? researchBrief.findings.some((finding) => finding.abstained)
+    : ragResult?.ok
+      ? Boolean(ragResult.value.abstained)
+      : primaryCustomResult
+        ? Boolean(primaryCustomResult.abstained)
+        : null;
+  const ragAbstained = finalizer?.abstained ? true : rawRagAbstained;
   const status =
     !directAnswerModes.has(plan.mode) &&
     !ragResult?.ok &&
@@ -1010,28 +1083,11 @@ export const runAgentRag = async ({
         agentMode,
       }),
       researchBrief,
-      ragAnswer: researchBrief
-        ? researchBrief.text
-        : ragResult?.ok
-        ? ragResult.value.text
-        : primaryCustomResult?.text
-          ? primaryCustomResult.text
-        : ragError
-          ? `RAG unavailable: ${ragError}`
-          : "",
-      ragSources: researchBrief?.citations ??
-        (ragResult?.ok
-          ? ragResult.value.citations ?? []
-          : primaryCustomResult?.citations ?? []),
+      ragAnswer,
+      ragSources,
       ragResolvedQuestion: ragResult?.ok ? ragResult.value.resolvedQuery ?? question : question,
       ragMemoryApplied: ragResult?.ok ? Boolean(ragResult.value.memoryApplied) : false,
-      ragAbstained: researchBrief
-        ? researchBrief.findings.some((finding) => finding.abstained)
-        : ragResult?.ok
-          ? Boolean(ragResult.value.abstained)
-          : primaryCustomResult
-            ? Boolean(primaryCustomResult.abstained)
-          : null,
+      ragAbstained,
       ragAbstainReason: ragResult?.ok
         ? ragResult.value.abstainReason ?? null
         : null,

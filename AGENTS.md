@@ -42,7 +42,8 @@ Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mj
 - Keep RAG changes inside `server/rag/` where possible; route/API behavior lives in `server/app.js`.
 - AgentRAG skills are registered in `server/rag/skills/registry.js`; built-ins live in `server/rag/skills/built-ins.js`, and whitelisted custom skills live under `server/rag/skills/custom/`.
 - New skills need stable `id/version/label/budgetKey/requiresAccessScope`, deterministic `match()`, and an `execute()` path that receives `accessScope` when reading user/workspace data. Custom skills must be exported from `server/rag/skills/custom/index.js`; do not let the model call arbitrary unregistered tools.
-- Agent self-check claim support logic lives in `server/rag/agent-self-check.js`; keep it deterministic and preserve `claimSupport` in agent trace, feedback records, and feedback corpus metadata.
+- Agent self-check claim support logic lives in `server/rag/agent-self-check.js`; final answer filtering lives in `server/rag/agent-finalizer.js`. Keep both deterministic and preserve `claimSupport` in agent trace, feedback records, and feedback corpus metadata.
+- AgentRAG optimization order is documented in README under "AgentRAG 优化路线"; continue in that order unless the user explicitly reprioritizes it.
 - `/chat` returns `agentObservability` with per-skill selected status, attempts, duration, citations, abstain, retry, budget, and error metrics. Preserve it when changing agent execution, feedback records, or feedback corpus metadata.
 - API auth is controlled by `API_AUTH_ENABLED` plus either `API_AUTH_TOKEN` for single-token local use or `API_AUTH_TOKENS` for per-user/per-workspace token mapping; the frontend can send `REACT_APP_API_AUTH_TOKEN`, which becomes an `x-api-key` header.
 - When auth is enabled, document list/chat/delete/file access is filtered by the authenticated token's `userId` and `workspaceId`; keep new document routes scoped the same way.

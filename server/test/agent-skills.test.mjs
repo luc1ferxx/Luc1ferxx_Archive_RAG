@@ -224,7 +224,12 @@ test("agent rag executes whitelisted custom timeline skill with access scope", a
   assert.match(receivedQuestion, /chronological timeline/i);
   assert.deepEqual(
     response.body.agentTrace.map((step) => step.type),
-    ["plan", "custom_skill", "synthesis"]
+    ["plan", "custom_skill", "synthesis", "answer_finalizer"]
+  );
+  assert.equal(
+    response.body.agentTrace.find((step) => step.type === "answer_finalizer")
+      .detail.claimSupport.unsupportedClaimCount,
+    0
   );
   assert.deepEqual(response.body.agentSkills, [
     {
