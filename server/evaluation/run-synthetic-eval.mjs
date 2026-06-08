@@ -24,6 +24,7 @@ import {
   isNearDuplicateGuardEnabled,
   getRetrievalTopK,
 } from "../rag/config.js";
+import { evaluateClaimSupport } from "../rag/agent-self-check.js";
 import { resetDocumentRegistry } from "../rag/doc-registry.js";
 import { resetSessionMemory } from "../rag/memory.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
@@ -295,13 +296,27 @@ const evaluateCase = async ({
     answer: response.text,
     expectedAnswerIncludes: testCase.expectedAnswerIncludes,
   });
+  const claimSupport = abstained
+    ? {
+        checked: false,
+        supportedClaimCount: 0,
+        unsupportedClaimCount: 0,
+        claims: [],
+      }
+    : evaluateClaimSupport({
+        answerText: response.text,
+        citations: response.citations ?? [],
+      });
+  const claimSupportHit =
+    !claimSupport.checked || claimSupport.unsupportedClaimCount === 0;
 
   const passed = testCase.shouldAbstain
     ? abstained
     : !abstained &&
       coverage.docCoverageHit &&
       coverage.pageCoverageHit &&
-      answerExpectationHit;
+      answerExpectationHit &&
+      claimSupportHit;
 
   return {
     id: testCase.id,
@@ -314,6 +329,7 @@ const evaluateCase = async ({
     docCoverageHit: coverage.docCoverageHit,
     pageCoverageHit: coverage.pageCoverageHit,
     answerExpectationHit,
+    claimSupportHit,
     passed,
     responseTimeMs: durationMs,
     citationCount: citations.length,
@@ -321,6 +337,7 @@ const evaluateCase = async ({
     reference: testCase.referenceAnswer ?? null,
     metadata: testCase.metadata ?? null,
     answer: response.text,
+    claimSupport,
     citations,
     retrievedContexts,
     referenceContexts,
@@ -375,6 +392,7 @@ const buildMarkdownReport = ({
     `| Compare page hit rate | ${summary.metrics.comparePageHitRate} |`,
     `| Abstain accuracy | ${summary.metrics.abstainAccuracy} |`,
     `| Answer content hit rate | ${summary.metrics.answerContentHitRate} |`,
+    `| Claim support hit rate | ${summary.metrics.claimSupportHitRate} |`,
     `| Upload resume success rate | ${summary.metrics.uploadResumeSuccessRate} |`,
     `| Avg response time (ms) | ${summary.metrics.averageResponseTimeMs} |`,
     `| Avg citation count | ${summary.metrics.averageCitationCount} |`,
@@ -396,13 +414,13 @@ const buildMarkdownReport = ({
     "",
     "## Case Results",
     "",
-    "| Case | Type | Pass | Abstain | Doc Hit | Page Hit | Answer Hit | Time (ms) |"
+    "| Case | Type | Pass | Abstain | Doc Hit | Page Hit | Answer Hit | Claim Support | Time (ms) |"
   );
-  lines.push("| --- | --- | --- | --- | --- | --- | --- | ---: |");
+  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | ---: |");
 
   for (const caseResult of caseResults) {
     lines.push(
-      `| ${caseResult.id} | ${caseResult.type} | ${caseResult.passed ? "yes" : "no"} | ${caseResult.abstained ? "yes" : "no"} | ${caseResult.docCoverageHit ? "yes" : "no"} | ${caseResult.pageCoverageHit ? "yes" : "no"} | ${caseResult.answerExpectationHit ? "yes" : "no"} | ${caseResult.responseTimeMs} |`
+      `| ${caseResult.id} | ${caseResult.type} | ${caseResult.passed ? "yes" : "no"} | ${caseResult.abstained ? "yes" : "no"} | ${caseResult.docCoverageHit ? "yes" : "no"} | ${caseResult.pageCoverageHit ? "yes" : "no"} | ${caseResult.answerExpectationHit ? "yes" : "no"} | ${caseResult.claimSupportHit ? "yes" : "no"} | ${caseResult.responseTimeMs} |`
     );
   }
 
@@ -417,6 +435,17 @@ const buildMarkdownReport = ({
       lines.push(`- Question: ${failedCase.question}`);
       lines.push(`- Answer: ${failedCase.answer}`);
       lines.push(`- Answer hit: ${failedCase.answerExpectationHit ? "yes" : "no"}`);
+      lines.push(
+        `- Claim support: ${failedCase.claimSupportHit ? "yes" : "no"}`
+      );
+      if ((failedCase.claimSupport?.unsupportedClaimCount ?? 0) > 0) {
+        lines.push(
+          `- Unsupported claims: ${failedCase.claimSupport.claims
+            .filter((claim) => !claim.supported)
+            .map((claim) => claim.text)
+            .join(" | ")}`
+        );
+      }
       lines.push(
         `- Citations: ${failedCase.citations
           .map((citation) => `${citation.docKey ?? "unknown"} p.${citation.pageNumber}`)
@@ -630,6 +659,12 @@ const main = async () => {
       answerContentHitRate: ratio(
         caseResults.filter(
           (caseResult) => !caseResult.shouldAbstain && caseResult.answerExpectationHit
+        ).length,
+        caseResults.filter((caseResult) => !caseResult.shouldAbstain).length
+      ),
+      claimSupportHitRate: ratio(
+        caseResults.filter(
+          (caseResult) => !caseResult.shouldAbstain && caseResult.claimSupportHit
         ).length,
         caseResults.filter((caseResult) => !caseResult.shouldAbstain).length
       ),

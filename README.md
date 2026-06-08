@@ -241,7 +241,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
 | `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
 
-说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs` 和 `feedback-corpus.test.mjs`。
+说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`quality-report.test.mjs` 和 `claim-support.test.mjs`。
 
 `ragas` 是可选 Python 评测，需要额外安装依赖：
 
@@ -345,7 +345,7 @@ npm run eval:feedback
 
 `feedback:corpus` 默认读取 `server/data/feedback/feedback.jsonl`，只收集 `citation_error`、`incomplete` 和 `hallucination` 三类负反馈，输出到 `server/evaluation/generated/feedback-corpus.json`。`eval:feedback` 会先重建该语料，再运行 synthetic eval，并把最新报告写到 `server/evaluation/results/latest-feedback.json` 和 `server/evaluation/results/latest-feedback.md`，不会覆盖主线 `latest.*` 报告。
 
-`quality:gate` 会读取已生成的 `latest-feedback.json`。如果 feedback eval 存在失败 case，gate 会失败，并输出类似 `document_rag@1.0.0: 2 citation errors, 1 incomplete answer` 的 skill 级统计；如果还没有 feedback eval 报告，则 feedback gate 会标记为 skipped，不阻塞主线 synthetic regression gate。
+`quality:gate` 会读取已生成的 `latest-feedback.json`。如果 feedback eval 存在失败 case 或当前 eval 回答出现 unsupported claim，gate 会失败，并输出类似 `document_rag@1.0.0: 2 citation errors, 1 incomplete answer, 1 unsupported claim` 的 skill 级统计；如果还没有 feedback eval 报告，则 feedback gate 会标记为 skipped，不阻塞主线 synthetic regression gate。
 
 如需从临时文件构建语料，可直接传入路径：
 

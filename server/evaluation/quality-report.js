@@ -107,23 +107,56 @@ const getFailedReasons = (caseResult = {}) => {
     reasons.push("Answer expectation missed");
   }
 
+  const currentClaimSummary = getCurrentClaimSummary(caseResult);
+
+  if (currentClaimSummary.unsupportedClaimCount > 0) {
+    reasons.push(
+      `${currentClaimSummary.unsupportedClaimCount} unsupported answer claim${
+        currentClaimSummary.unsupportedClaimCount === 1 ? "" : "s"
+      }`
+    );
+  }
+
+  const feedbackClaimSummary = getFeedbackClaimSummary(caseResult);
+
+  if (
+    currentClaimSummary.unsupportedClaimCount === 0 &&
+    feedbackClaimSummary.unsupportedClaimCount > 0
+  ) {
+    reasons.push(
+      `Feedback record flagged ${feedbackClaimSummary.unsupportedClaimCount} unsupported claim${
+        feedbackClaimSummary.unsupportedClaimCount === 1 ? "" : "s"
+      }`
+    );
+  }
+
   return reasons.length > 0 ? reasons : ["Case failed"];
 };
 
 const buildFailedCases = (cases = []) =>
   cases
-    .filter((caseResult) => !caseResult.passed)
-    .map((caseResult) => ({
-      id: caseResult.id,
-      type: caseResult.type,
-      question: caseResult.question,
-      answer: caseResult.answer,
-      citationCount: caseResult.citationCount ?? 0,
-      responseTimeMs: caseResult.responseTimeMs ?? null,
-      reasons: getFailedReasons(caseResult),
-      citations: caseResult.citations ?? [],
-      metadata: caseResult.metadata ?? null,
-    }));
+    .filter((caseResult) => !caseResult.passed || hasCurrentUnsupportedClaims(caseResult))
+    .map((caseResult) => {
+      const currentClaimSummary = getCurrentClaimSummary(caseResult);
+      const feedbackClaimSummary = getFeedbackClaimSummary(caseResult);
+
+      return {
+        id: caseResult.id,
+        type: caseResult.type,
+        question: caseResult.question,
+        answer: caseResult.answer,
+        citationCount: caseResult.citationCount ?? 0,
+        responseTimeMs: caseResult.responseTimeMs ?? null,
+        reasons: getFailedReasons(caseResult),
+        citations: caseResult.citations ?? [],
+        currentClaimSupport: currentClaimSummary,
+        feedbackClaimSupport: feedbackClaimSummary,
+        unsupportedClaimCount:
+          currentClaimSummary.unsupportedClaimCount +
+          feedbackClaimSummary.unsupportedClaimCount,
+        metadata: caseResult.metadata ?? null,
+      };
+    });
 
 const getFeedbackMetadata = (caseResult = {}) => {
   const metadata = caseResult.metadata && typeof caseResult.metadata === "object"
@@ -165,6 +198,119 @@ const getFeedbackType = (caseResult = {}) =>
   String(getFeedbackMetadata(caseResult).feedbackType ?? "unknown").trim() ||
   "unknown";
 
+const isRecord = (value) => value && typeof value === "object";
+
+const toNonNegativeInteger = (value, fallbackValue = 0) => {
+  const parsedValue = Number(value);
+
+  return Number.isFinite(parsedValue) && parsedValue >= 0
+    ? Math.floor(parsedValue)
+    : fallbackValue;
+};
+
+const normalizeClaimCheck = (claimCheck = {}) => {
+  const claims = Array.isArray(claimCheck.claims)
+    ? claimCheck.claims.slice(0, 12).map((claim) => ({
+        text: String(claim.text ?? "").trim(),
+        supported: Boolean(claim.supported),
+        tokenOverlap: Number.isFinite(Number(claim.tokenOverlap))
+          ? Number(claim.tokenOverlap)
+          : null,
+        anchors: Array.isArray(claim.anchors)
+          ? claim.anchors.map((anchor) => String(anchor ?? "").trim()).filter(Boolean)
+          : [],
+        missingAnchors: Array.isArray(claim.missingAnchors)
+          ? claim.missingAnchors
+              .map((anchor) => String(anchor ?? "").trim())
+              .filter(Boolean)
+          : [],
+      }))
+    : [];
+  const derivedUnsupportedClaimCount = claims.filter(
+    (claim) => !claim.supported
+  ).length;
+  const unsupportedClaimCount = toNonNegativeInteger(
+    claimCheck.unsupportedClaimCount,
+    derivedUnsupportedClaimCount
+  );
+
+  return {
+    checked: Boolean(claimCheck.checked),
+    supportedClaimCount: toNonNegativeInteger(claimCheck.supportedClaimCount),
+    unsupportedClaimCount,
+    claims,
+  };
+};
+
+const summarizeClaimChecks = (claimChecks = []) => {
+  const normalizedClaimChecks = claimChecks
+    .filter(isRecord)
+    .map(normalizeClaimCheck)
+    .filter(
+      (claimCheck) =>
+        claimCheck.checked ||
+        claimCheck.unsupportedClaimCount > 0 ||
+        claimCheck.claims.length > 0
+    );
+  const unsupportedClaims = normalizedClaimChecks
+    .flatMap((claimCheck) =>
+      claimCheck.claims
+        .filter((claim) => !claim.supported)
+        .map((claim) => ({
+          text: claim.text,
+          missingAnchors: claim.missingAnchors,
+        }))
+    )
+    .filter((claim) => claim.text)
+    .slice(0, 12);
+
+  return {
+    checked: normalizedClaimChecks.some((claimCheck) => claimCheck.checked),
+    claimChecks: normalizedClaimChecks,
+    unsupportedClaimCount: normalizedClaimChecks.reduce(
+      (sum, claimCheck) => sum + claimCheck.unsupportedClaimCount,
+      0
+    ),
+    unsupportedClaims,
+  };
+};
+
+const getCurrentClaimChecks = (caseResult = {}) => {
+  const metadata = isRecord(caseResult.metadata) ? caseResult.metadata : {};
+  const checks = [];
+
+  if (isRecord(caseResult.claimSupport)) {
+    checks.push(caseResult.claimSupport);
+  }
+
+  if (isRecord(metadata.claimSupport)) {
+    checks.push(metadata.claimSupport);
+  }
+
+  return checks;
+};
+
+const getFeedbackClaimChecks = (caseResult = {}) => {
+  const feedback = getFeedbackMetadata(caseResult);
+
+  return Array.isArray(feedback.claimChecks) ? feedback.claimChecks : [];
+};
+
+const getCurrentClaimSummary = (caseResult = {}) =>
+  summarizeClaimChecks(getCurrentClaimChecks(caseResult));
+
+const getFeedbackClaimSummary = (caseResult = {}) =>
+  summarizeClaimChecks(getFeedbackClaimChecks(caseResult));
+
+const getReportableClaimSummary = (caseResult = {}) =>
+  summarizeClaimChecks([
+    ...getCurrentClaimChecks(caseResult),
+    ...getFeedbackClaimChecks(caseResult),
+  ]);
+
+const hasCurrentUnsupportedClaims = (caseResult = {}) =>
+  getCurrentClaimSummary(caseResult).unsupportedClaimCount > 0;
+
 const incrementMapCount = (target, key) => {
   target[key] = (target[key] ?? 0) + 1;
 };
@@ -173,11 +319,12 @@ export const buildFeedbackSkillFailures = (cases = []) => {
   const statsBySkill = new Map();
 
   for (const caseResult of cases) {
-    if (caseResult.passed) {
+    if (caseResult.passed && !hasCurrentUnsupportedClaims(caseResult)) {
       continue;
     }
 
     const feedbackType = getFeedbackType(caseResult);
+    const claimSummary = getReportableClaimSummary(caseResult);
 
     for (const skill of getFeedbackSkills(caseResult)) {
       const skillKey = `${skill.skillId}@${skill.skillVersion}`;
@@ -188,11 +335,28 @@ export const buildFeedbackSkillFailures = (cases = []) => {
         label: skill.label,
         failedCaseCount: 0,
         feedbackTypes: {},
+        unsupportedClaimCount: 0,
+        unsupportedClaimCaseCount: 0,
+        unsupportedClaims: [],
         failedCaseIds: [],
       };
 
       stats.failedCaseCount += 1;
       incrementMapCount(stats.feedbackTypes, feedbackType);
+      stats.unsupportedClaimCount += claimSummary.unsupportedClaimCount;
+
+      if (claimSummary.unsupportedClaimCount > 0) {
+        stats.unsupportedClaimCaseCount += 1;
+        stats.unsupportedClaims.push(
+          ...claimSummary.unsupportedClaims.map((claim) => ({
+            caseId: caseResult.id,
+            text: claim.text,
+            missingAnchors: claim.missingAnchors,
+          }))
+        );
+        stats.unsupportedClaims = stats.unsupportedClaims.slice(0, 12);
+      }
+
       stats.failedCaseIds.push(caseResult.id);
       statsBySkill.set(skillKey, stats);
     }
@@ -221,13 +385,24 @@ const formatFeedbackTypeCount = ([feedbackType, count]) => {
   return `${count} ${count === 1 ? labels[0] : labels[1]}`;
 };
 
+const formatUnsupportedClaimCount = (count = 0) =>
+  count > 0
+    ? `${count} unsupported claim${count === 1 ? "" : "s"}`
+    : null;
+
 export const formatFeedbackSkillFailureLine = (skillFailure = {}) => {
   const feedbackTypeSummary = Object.entries(skillFailure.feedbackTypes ?? {})
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(formatFeedbackTypeCount)
-    .join(", ");
+    .map(formatFeedbackTypeCount);
+  const unsupportedClaimSummary = formatUnsupportedClaimCount(
+    skillFailure.unsupportedClaimCount ?? 0
+  );
+  const summaryParts = [
+    ...feedbackTypeSummary,
+    unsupportedClaimSummary,
+  ].filter(Boolean);
 
-  return `${skillFailure.skillKey}: ${feedbackTypeSummary || "0 failures"}`;
+  return `${skillFailure.skillKey}: ${summaryParts.join(", ") || "0 failures"}`;
 };
 
 const buildRecommendations = ({ metrics = {}, failedCases = [] }) => {
@@ -269,6 +444,16 @@ const buildRecommendations = ({ metrics = {}, failedCases = [] }) => {
     recommendations.push({
       label: "Tighten abstain confidence gates",
       detail: "Abstain misses indicate the confidence gate should be stricter for unsupported or cross-document questions.",
+    });
+  }
+
+  if (
+    (metrics.claimSupportHitRate ?? 1) < 1 ||
+    failedReasonText.includes("unsupported answer claim")
+  ) {
+    recommendations.push({
+      label: "Review unsupported answer claims",
+      detail: "Unsupported claims mean answers are saying more than the cited excerpts can prove.",
     });
   }
 
@@ -324,6 +509,7 @@ export const buildQualityReportFromResultPayload = (payload = {}) => {
         compareDocCoveragePercent: toPercent(metrics.compareDocCoverageRate),
         comparePageHitPercent: toPercent(metrics.comparePageHitRate),
         abstainAccuracyPercent: toPercent(metrics.abstainAccuracy),
+        claimSupportHitPercent: toPercent(metrics.claimSupportHitRate),
       },
     },
     failedCases,
@@ -478,6 +664,8 @@ export const buildFeedbackGate = ({ latestFeedbackPayload = null } = {}) => {
       skipped: true,
       currentRunId: null,
       failedCaseCount: 0,
+      unsupportedClaimCount: 0,
+      unsupportedClaimCaseCount: 0,
       caseCount: 0,
       skillFailures: [],
       failedCases: [],
@@ -495,13 +683,25 @@ export const buildFeedbackGate = ({ latestFeedbackPayload = null } = {}) => {
   const failedCases = buildFailedCases(cases);
   const skillFailures = buildFeedbackSkillFailures(cases);
   const failedCaseCount = failedCases.length;
+  const unsupportedClaimCount = failedCases.reduce(
+    (sum, caseResult) => sum + (caseResult.unsupportedClaimCount ?? 0),
+    0
+  );
+  const unsupportedClaimCaseCount = failedCases.filter(
+    (caseResult) => (caseResult.unsupportedClaimCount ?? 0) > 0
+  ).length;
   const status = failedCaseCount > 0 ? "fail" : "pass";
+  const claimSummary = unsupportedClaimCount > 0
+    ? ` ${unsupportedClaimCount} unsupported claim${
+        unsupportedClaimCount === 1 ? "" : "s"
+      } flagged.`
+    : "";
   const summary = cases.length === 0
     ? "Feedback evaluation has no cases yet."
     : failedCaseCount > 0
       ? `Feedback evaluation failed ${failedCaseCount} of ${cases.length} case${
           cases.length === 1 ? "" : "s"
-        }.`
+        }.${claimSummary}`
       : `Feedback evaluation passed all ${cases.length} case${
           cases.length === 1 ? "" : "s"
         }.`;
@@ -512,12 +712,33 @@ export const buildFeedbackGate = ({ latestFeedbackPayload = null } = {}) => {
     currentRunId: latestFeedbackRun?.runId ?? null,
     latestRun: latestFeedbackRun,
     failedCaseCount,
+    unsupportedClaimCount,
+    unsupportedClaimCaseCount,
     caseCount: cases.length,
     skillFailures,
     failedCases,
     summary,
   };
 };
+
+const buildFeedbackGateChecks = ({ feedbackGate = {} } = {}) => [
+  {
+    metric: "feedbackFailedCaseCount",
+    label: "Feedback failed cases",
+    status: (feedbackGate.failedCaseCount ?? 0) > 0 ? "fail" : "pass",
+    currentValue: feedbackGate.failedCaseCount ?? 0,
+    baselineValue: 0,
+    delta: feedbackGate.failedCaseCount ?? 0,
+  },
+  {
+    metric: "feedbackUnsupportedClaimCount",
+    label: "Feedback unsupported claims",
+    status: (feedbackGate.unsupportedClaimCount ?? 0) > 0 ? "fail" : "pass",
+    currentValue: feedbackGate.unsupportedClaimCount ?? 0,
+    baselineValue: 0,
+    delta: feedbackGate.unsupportedClaimCount ?? 0,
+  },
+];
 
 export const buildCombinedQualityGate = ({
   regressionGate = {},
@@ -529,14 +750,9 @@ export const buildCombinedQualityGate = ({
       summary: feedbackGate.summary,
       checks: [
         ...(regressionGate.checks ?? []),
-        {
-          metric: "feedbackFailedCaseCount",
-          label: "Feedback failed cases",
-          status: "fail",
-          currentValue: feedbackGate.failedCaseCount,
-          baselineValue: 0,
-          delta: feedbackGate.failedCaseCount,
-        },
+        ...buildFeedbackGateChecks({
+          feedbackGate,
+        }),
       ],
     };
   }
@@ -565,14 +781,9 @@ export const buildCombinedQualityGate = ({
         : `${regressionGate.summary} ${feedbackGate.summary}`,
     checks: [
       ...(regressionGate.checks ?? []),
-      {
-        metric: "feedbackFailedCaseCount",
-        label: "Feedback failed cases",
-        status: "pass",
-        currentValue: feedbackGate.failedCaseCount ?? 0,
-        baselineValue: 0,
-        delta: feedbackGate.failedCaseCount ?? 0,
-      },
+      ...buildFeedbackGateChecks({
+        feedbackGate,
+      }),
     ],
   };
 };

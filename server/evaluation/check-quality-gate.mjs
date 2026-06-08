@@ -87,6 +87,10 @@ const formatCheckDelta = (check) => {
     return formatDelta(check.delta);
   }
 
+  if (check.metric === "feedbackUnsupportedClaimCount") {
+    return formatDelta(check.delta);
+  }
+
   if (check.metric === "averageCitationCount") {
     return formatDelta(check.delta);
   }
