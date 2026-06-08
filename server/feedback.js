@@ -20,6 +20,14 @@ let feedbackDirectory =
 
 const normalizeString = (value) => String(value ?? "").trim();
 
+const isPlainObject = (value) => value && typeof value === "object" && !Array.isArray(value);
+
+const sanitizeNumber = (value, fallbackValue = 0) => {
+  const parsedValue = Number(value);
+
+  return Number.isFinite(parsedValue) ? Number(parsedValue) : fallbackValue;
+};
+
 const normalizeDocIds = (docIds) => {
   if (Array.isArray(docIds)) {
     return [...new Set(docIds.map((docId) => normalizeString(docId)).filter(Boolean))];
@@ -86,6 +94,116 @@ const sanitizeSkill = (skill = {}) => ({
   label: normalizeString(skill.label),
   status: normalizeString(skill.status),
 });
+
+const sanitizeBudgetSnapshot = (budget = {}) => ({
+  limits: isPlainObject(budget.limits) ? budget.limits : {},
+  used: isPlainObject(budget.used) ? budget.used : {},
+  traceTruncated: Boolean(budget.traceTruncated),
+});
+
+const sanitizeBudgetEvent = (budget = {}) => ({
+  ok: Boolean(budget.ok),
+  key: normalizeString(budget.key),
+  label: normalizeString(budget.label),
+  limit: Number.isFinite(Number(budget.limit)) ? Number(budget.limit) : null,
+  used: Number.isFinite(Number(budget.used)) ? Number(budget.used) : null,
+  remaining: Number.isFinite(Number(budget.remaining))
+    ? Number(budget.remaining)
+    : null,
+  reason: normalizeString(budget.reason).slice(0, 500),
+});
+
+const sanitizeBudgetDelta = (budgetDelta = {}) =>
+  isPlainObject(budgetDelta)
+    ? Object.fromEntries(
+        Object.entries(budgetDelta)
+          .map(([key, value]) => [normalizeString(key), sanitizeNumber(value)])
+          .filter(([key, value]) => key && value !== 0)
+          .slice(0, 12)
+      )
+    : {};
+
+const sanitizeObservabilitySkill = (skill = {}) => ({
+  skillId: normalizeString(skill.skillId ?? skill.id),
+  skillVersion: normalizeString(skill.skillVersion ?? skill.version),
+  label: normalizeString(skill.label),
+  budgetKey: normalizeString(skill.budgetKey),
+  selected: Boolean(skill.selected),
+  status: normalizeString(skill.status),
+  attempts: sanitizeNumber(skill.attempts),
+  skippedCount: sanitizeNumber(skill.skippedCount),
+  retryCount: sanitizeNumber(skill.retryCount),
+  totalDurationMs: sanitizeNumber(skill.totalDurationMs),
+  citationCount: sanitizeNumber(skill.citationCount),
+  lastCitationCount: sanitizeNumber(skill.lastCitationCount),
+  abstained: Boolean(skill.abstained),
+  errorCount: sanitizeNumber(skill.errorCount),
+  errors: Array.isArray(skill.errors)
+    ? skill.errors.map(normalizeString).filter(Boolean).slice(0, 5)
+    : [],
+  budgetUsed: Number.isFinite(Number(skill.budgetUsed))
+    ? Number(skill.budgetUsed)
+    : null,
+  budgetLimit: Number.isFinite(Number(skill.budgetLimit))
+    ? Number(skill.budgetLimit)
+    : null,
+  budgetRemaining: Number.isFinite(Number(skill.budgetRemaining))
+    ? Number(skill.budgetRemaining)
+    : null,
+  budgetDelta: sanitizeBudgetDelta(skill.budgetDelta),
+});
+
+const sanitizeObservabilityRun = (run = {}) => ({
+  skillId: normalizeString(run.skillId),
+  skillVersion: normalizeString(run.skillVersion),
+  label: normalizeString(run.label),
+  phase: normalizeString(run.phase),
+  status: normalizeString(run.status),
+  durationMs: sanitizeNumber(run.durationMs),
+  citationCount: sanitizeNumber(run.citationCount),
+  abstained: Boolean(run.abstained),
+  error: normalizeString(run.error).slice(0, 500),
+  budget: isPlainObject(run.budget) ? sanitizeBudgetEvent(run.budget) : null,
+  budgetDelta: sanitizeBudgetDelta(run.budgetDelta),
+});
+
+const sanitizeAgentObservability = (observability = {}, { feedbackType } = {}) => {
+  if (!isPlainObject(observability)) {
+    return null;
+  }
+
+  const skills = Array.isArray(observability.skills)
+    ? observability.skills
+        .map(sanitizeObservabilitySkill)
+        .filter((skill) => skill.skillId)
+        .slice(0, 20)
+    : [];
+  const runs = Array.isArray(observability.runs)
+    ? observability.runs
+        .map(sanitizeObservabilityRun)
+        .filter((run) => run.skillId)
+        .slice(0, 40)
+    : [];
+
+  if (skills.length === 0 && runs.length === 0) {
+    return null;
+  }
+
+  return {
+    feedbackType: normalizeString(feedbackType),
+    agentMode: normalizeString(observability.agentMode),
+    planMode: normalizeString(observability.planMode),
+    selectedSkills: Array.isArray(observability.selectedSkills)
+      ? observability.selectedSkills
+          .map(sanitizeSkill)
+          .filter((skill) => skill.skillId)
+          .slice(0, 20)
+      : [],
+    skills,
+    runs,
+    budget: sanitizeBudgetSnapshot(observability.budget),
+  };
+};
 
 const sanitizeClaimSupport = (claimSupport = {}) => ({
   checked: Boolean(claimSupport.checked),
@@ -194,6 +312,12 @@ export const buildFeedbackRecord = ({ payload = {}, accessScope = {} }) => {
       .filter((skill) => skill.skillId)
       .slice(0, 20),
     claimChecks: extractClaimChecks(answer),
+    agentObservability: sanitizeAgentObservability(
+      answer.agentObservability ?? payload.agentObservability,
+      {
+        feedbackType,
+      }
+    ),
     citations: citations.map(sanitizeCitation).slice(0, 12),
   };
 };

@@ -92,6 +92,24 @@ test("agent rag executes selected skills with access scope and reports skill met
   );
   assert.equal(documentStep.detail.skillId, AGENT_SKILL_IDS.documentRag);
   assert.equal(documentStep.detail.skillVersion, "1.0.0");
+  assert.ok(documentStep.detail.durationMs >= 0);
+
+  const documentObservation = response.body.agentObservability.skills.find(
+    (skill) => skill.skillId === AGENT_SKILL_IDS.documentRag
+  );
+  assert.equal(response.body.agentObservability.planMode, "document");
+  assert.equal(response.body.agentObservability.selectedSkills[0].skillId, AGENT_SKILL_IDS.documentRag);
+  assert.equal(documentObservation.selected, true);
+  assert.equal(documentObservation.status, "completed");
+  assert.equal(documentObservation.attempts, 1);
+  assert.equal(documentObservation.retryCount, 0);
+  assert.equal(documentObservation.citationCount, 1);
+  assert.equal(documentObservation.abstained, false);
+  assert.equal(documentObservation.budgetKey, "documentRagCalls");
+  assert.equal(documentObservation.budgetUsed, 1);
+  assert.equal(documentObservation.budgetLimit, 2);
+  assert.equal(response.body.agentObservability.runs[0].phase, "primary");
+  assert.equal(response.body.agentObservability.runs[0].citationCount, 1);
 });
 
 test("feedback records and feedback eval cases retain skill metadata", () => {
@@ -110,6 +128,64 @@ test("feedback records and feedback eval cases retain skill metadata", () => {
             status: "completed",
           },
         ],
+        agentObservability: {
+          agentMode: "document",
+          planMode: "document",
+          selectedSkills: [
+            {
+              skillId: AGENT_SKILL_IDS.documentRag,
+              skillVersion: "1.0.0",
+              label: "Document RAG",
+              status: "completed",
+            },
+          ],
+          skills: [
+            {
+              skillId: AGENT_SKILL_IDS.documentRag,
+              skillVersion: "1.0.0",
+              label: "Document RAG",
+              budgetKey: "documentRagCalls",
+              selected: true,
+              status: "completed",
+              attempts: 1,
+              skippedCount: 0,
+              retryCount: 0,
+              totalDurationMs: 12.34,
+              citationCount: 1,
+              lastCitationCount: 1,
+              abstained: false,
+              errorCount: 0,
+              budgetUsed: 1,
+              budgetLimit: 2,
+              budgetRemaining: 1,
+              budgetDelta: {
+                documentRagCalls: 1,
+              },
+            },
+          ],
+          runs: [
+            {
+              skillId: AGENT_SKILL_IDS.documentRag,
+              skillVersion: "1.0.0",
+              label: "Document RAG",
+              phase: "primary",
+              status: "completed",
+              durationMs: 12.34,
+              citationCount: 1,
+              abstained: false,
+              budgetDelta: {},
+            },
+          ],
+          budget: {
+            limits: {
+              maxDocumentRagCalls: 2,
+            },
+            used: {
+              documentRagCalls: 1,
+            },
+            traceTruncated: false,
+          },
+        },
         ragSources: [
           {
             docId: "doc-1",
@@ -135,7 +211,19 @@ test("feedback records and feedback eval cases retain skill metadata", () => {
       status: "completed",
     },
   ]);
+  assert.equal(feedback.agentObservability.feedbackType, "citation_error");
+  assert.equal(feedback.agentObservability.skills[0].skillId, AGENT_SKILL_IDS.documentRag);
+  assert.equal(feedback.agentObservability.skills[0].citationCount, 1);
+  assert.equal(feedback.agentObservability.skills[0].budgetDelta.documentRagCalls, 1);
 
   const corpus = buildFeedbackCorpusFromRecords([feedback]);
   assert.deepEqual(corpus.cases[0].metadata.feedback.skills, feedback.skills);
+  assert.equal(
+    corpus.cases[0].metadata.feedback.agentObservability.feedbackType,
+    "citation_error"
+  );
+  assert.equal(
+    corpus.cases[0].metadata.feedback.agentObservability.skills[0].skillId,
+    AGENT_SKILL_IDS.documentRag
+  );
 });

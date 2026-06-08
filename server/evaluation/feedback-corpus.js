@@ -94,6 +94,94 @@ const normalizeClaimCheck = (claimCheck = {}) => ({
 const normalizeClaimChecks = (claimChecks) =>
   Array.isArray(claimChecks) ? claimChecks.map(normalizeClaimCheck).slice(0, 4) : [];
 
+const normalizeNumber = (value, fallbackValue = 0) => {
+  const parsedValue = Number(value);
+
+  return Number.isFinite(parsedValue) ? Number(parsedValue) : fallbackValue;
+};
+
+const normalizeBudgetDelta = (budgetDelta = {}) =>
+  budgetDelta && typeof budgetDelta === "object" && !Array.isArray(budgetDelta)
+    ? Object.fromEntries(
+        Object.entries(budgetDelta)
+          .map(([key, value]) => [normalizeText(key), normalizeNumber(value)])
+          .filter(([key, value]) => key && value !== 0)
+          .slice(0, 12)
+      )
+    : {};
+
+const normalizeObservabilitySkill = (skill = {}) => ({
+  skillId: normalizeText(skill.skillId ?? skill.id),
+  skillVersion: normalizeText(skill.skillVersion ?? skill.version),
+  label: normalizeText(skill.label),
+  budgetKey: normalizeText(skill.budgetKey),
+  selected: Boolean(skill.selected),
+  status: normalizeText(skill.status),
+  attempts: normalizeNumber(skill.attempts),
+  skippedCount: normalizeNumber(skill.skippedCount),
+  retryCount: normalizeNumber(skill.retryCount),
+  totalDurationMs: normalizeNumber(skill.totalDurationMs),
+  citationCount: normalizeNumber(skill.citationCount),
+  lastCitationCount: normalizeNumber(skill.lastCitationCount),
+  abstained: Boolean(skill.abstained),
+  errorCount: normalizeNumber(skill.errorCount),
+  budgetUsed: Number.isFinite(Number(skill.budgetUsed))
+    ? Number(skill.budgetUsed)
+    : null,
+  budgetLimit: Number.isFinite(Number(skill.budgetLimit))
+    ? Number(skill.budgetLimit)
+    : null,
+  budgetRemaining: Number.isFinite(Number(skill.budgetRemaining))
+    ? Number(skill.budgetRemaining)
+    : null,
+  budgetDelta: normalizeBudgetDelta(skill.budgetDelta),
+});
+
+const normalizeObservabilityRun = (run = {}) => ({
+  skillId: normalizeText(run.skillId),
+  skillVersion: normalizeText(run.skillVersion),
+  label: normalizeText(run.label),
+  phase: normalizeText(run.phase),
+  status: normalizeText(run.status),
+  durationMs: normalizeNumber(run.durationMs),
+  citationCount: normalizeNumber(run.citationCount),
+  abstained: Boolean(run.abstained),
+  error: normalizeText(run.error),
+  budgetDelta: normalizeBudgetDelta(run.budgetDelta),
+});
+
+const normalizeAgentObservability = (observability = {}) => {
+  if (!observability || typeof observability !== "object") {
+    return null;
+  }
+
+  const skills = Array.isArray(observability.skills)
+    ? observability.skills
+        .map(normalizeObservabilitySkill)
+        .filter((skill) => skill.skillId)
+        .slice(0, 20)
+    : [];
+  const runs = Array.isArray(observability.runs)
+    ? observability.runs
+        .map(normalizeObservabilityRun)
+        .filter((run) => run.skillId)
+        .slice(0, 40)
+    : [];
+
+  if (skills.length === 0 && runs.length === 0) {
+    return null;
+  }
+
+  return {
+    feedbackType: normalizeText(observability.feedbackType),
+    agentMode: normalizeText(observability.agentMode),
+    planMode: normalizeText(observability.planMode),
+    selectedSkills: normalizeSkills(observability.selectedSkills),
+    skills,
+    runs,
+  };
+};
+
 const getFeedbackId = (record, index) =>
   normalizeText(record.feedbackId) || `feedback-${index + 1}`;
 
@@ -213,6 +301,7 @@ const buildFeedbackMetadata = ({ record, feedbackType }) => ({
   originalDocIds: normalizeDocIds(record.docIds),
   skills: normalizeSkills(record.skills),
   claimChecks: normalizeClaimChecks(record.claimChecks),
+  agentObservability: normalizeAgentObservability(record.agentObservability),
   ...(feedbackType === "citation_error" ? { reviewRequired: true } : {}),
 });
 

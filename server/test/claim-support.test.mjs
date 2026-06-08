@@ -111,6 +111,18 @@ test("agent rag retries when claim support check finds unsupported answer claims
   assert.equal(selfChecks[0].detail.claimSupport.unsupportedClaimCount, 1);
   assert.equal(selfChecks[1].status, "completed");
   assert.equal(selfChecks[1].detail.claimSupport.unsupportedClaimCount, 0);
+
+  const documentObservation = response.body.agentObservability.skills.find(
+    (skill) => skill.skillId === "document_rag"
+  );
+  assert.equal(documentObservation.attempts, 2);
+  assert.equal(documentObservation.retryCount, 1);
+  assert.equal(documentObservation.citationCount, 2);
+  assert.equal(documentObservation.budgetUsed, 2);
+  assert.deepEqual(
+    response.body.agentObservability.runs.map((run) => run.phase),
+    ["primary", "retry"]
+  );
 });
 
 test("feedback records and feedback eval metadata retain claim support checks", () => {

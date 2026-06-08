@@ -72,6 +72,7 @@ test("feedback corpus builder converts negative feedback into synthetic eval cas
     originalDocIds: ["doc-policy"],
     skills: [],
     claimChecks: [],
+    agentObservability: null,
   });
 
   const policyDocument = corpus.documents.find(
