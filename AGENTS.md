@@ -23,7 +23,7 @@
 
 ## Tests And Evaluation
 
-- Backend test runner: `cd server && npm test`.
+- Backend test runner: `cd server && npm test`; this also validates the GitHub Actions quality gate workflow contract.
 - Frontend test runner: `npm test` from the repo root. Use CRA's non-watch mode in automation, e.g. `CI=true npm test -- --watchAll=false`.
 - Default synthetic RAG eval: `cd server && npm run eval:synthetic`.
 - Current tracked `latest.*` synthetic report uses the near-duplicate corpus: `cd server && npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json`.
@@ -35,7 +35,7 @@
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 
-Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, `agent-skills.test.mjs`, `quality-report.test.mjs`, `claim-support.test.mjs`, and `observability-report.test.mjs`.
+Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, `agent-skills.test.mjs`, `quality-report.test.mjs`, `claim-support.test.mjs`, `observability-report.test.mjs`, and `ci-workflow.test.mjs`.
 
 ## Implementation Notes
 

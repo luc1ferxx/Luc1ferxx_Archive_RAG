@@ -6,3 +6,4 @@ import "./agent-skills.test.mjs";
 import "./quality-report.test.mjs";
 import "./claim-support.test.mjs";
 import "./observability-report.test.mjs";
+import "./ci-workflow.test.mjs";
