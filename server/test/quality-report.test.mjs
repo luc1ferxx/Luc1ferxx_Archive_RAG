@@ -305,6 +305,86 @@ test("quality history fails feedback gate when current eval claim support fails"
   );
 });
 
+test("quality history folds trajectory eval failures into gate decision", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+  const latestTrajectoryPayload = {
+    summary: {
+      runId: "trajectory-latest",
+      createdAt: "2026-06-08T10:10:00.000Z",
+      status: "fail",
+      metrics: {
+        caseCount: 2,
+        passedCaseCount: 1,
+        failedCaseCount: 1,
+        checkCount: 4,
+        passedCheckCount: 3,
+        failedCheckCount: 1,
+      },
+    },
+    cases: [
+      {
+        id: "skill_chain_contract_review",
+        label: "Contract review skill chain",
+        passed: true,
+        failedCheckCount: 0,
+        checks: [],
+      },
+      {
+        id: "comparison_requires_clarification",
+        label: "Comparison clarification gate",
+        passed: false,
+        failedCheckCount: 1,
+        checks: [
+          {
+            id: "clarification_trace",
+            label: "Trace records the clarification gate",
+            category: "clarification",
+            passed: false,
+          },
+        ],
+      },
+    ],
+  };
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestTrajectoryPayload,
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.regressionGate.status, "pass");
+  assert.equal(history.feedbackGate.status, "pass");
+  assert.equal(history.feedbackGate.skipped, true);
+  assert.equal(history.trajectoryGate.status, "fail");
+  assert.equal(history.trajectoryGate.failedCaseCount, 1);
+  assert.equal(history.qualityGate.status, "fail");
+  assert.equal(buildQualityGateDecision({ history }).exitCode, 1);
+  assert.ok(
+    history.qualityGate.checks.some(
+      (check) =>
+        check.metric === "trajectoryFailedCaseCount" &&
+        check.status === "fail" &&
+        check.currentValue === 1
+    )
+  );
+  assert.equal(
+    history.trajectoryGate.failedCases[0].failedChecks[0].label,
+    "Trace records the clarification gate"
+  );
+});
+
 test("quality history skips feedback gate when no feedback eval report exists", () => {
   const latestPayload = buildPassingSyntheticPayload({
     runId: "synthetic-latest",

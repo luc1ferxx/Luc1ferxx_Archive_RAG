@@ -91,6 +91,10 @@ const formatCheckDelta = (check) => {
     return formatDelta(check.delta);
   }
 
+  if (check.metric === "trajectoryFailedCaseCount") {
+    return formatDelta(check.delta);
+  }
+
   if (check.metric === "averageCitationCount") {
     return formatDelta(check.delta);
   }
@@ -102,6 +106,7 @@ const printTextReport = ({ decision, history }) => {
   const qualityGate = history.qualityGate ?? {};
   const gate = history.regressionGate ?? {};
   const feedbackGate = history.feedbackGate ?? {};
+  const trajectoryGate = history.trajectoryGate ?? {};
   const latestRun = history.latestRun ?? {};
   const checks = qualityGate.checks ?? gate.checks ?? [];
 
@@ -131,6 +136,23 @@ const printTextReport = ({ decision, history }) => {
 
     for (const skillFailure of feedbackGate.skillFailures ?? []) {
       console.log(`- ${formatFeedbackSkillFailureLine(skillFailure)}`);
+    }
+  }
+
+  if (trajectoryGate.status) {
+    const suffix = trajectoryGate.skipped ? " (skipped)" : "";
+    console.log(`Trajectory gate: ${trajectoryGate.status}${suffix}`);
+    console.log(trajectoryGate.summary);
+
+    for (const failedCase of trajectoryGate.failedCases ?? []) {
+      const failedCheckLabels = (failedCase.failedChecks ?? [])
+        .map((check) => check.label)
+        .join(", ");
+      console.log(
+        `- ${failedCase.id}: ${
+          failedCheckLabels || `${failedCase.failedCheckCount ?? 0} failed checks`
+        }`
+      );
     }
   }
 };

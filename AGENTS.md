@@ -32,11 +32,12 @@
 - Parameter sweep benchmark: `cd server && npm run eval:param-sweep`; use `-- --profile full` for the larger topK/overlap/rerank/hybrid matrix.
 - Feedback corpus generation: `cd server && npm run feedback:corpus`.
 - Feedback regression eval: `cd server && npm run eval:feedback`; this writes ignored `evaluation/generated/feedback-corpus.json` and `evaluation/results/latest-feedback.*`.
-- Quality gate: `cd server && npm run quality:gate`; it reads `evaluation/results/latest-feedback.json` when present and reports feedback failures by `skillId@skillVersion`.
+- Trajectory eval: `cd server && npm run eval:trajectory`; this writes ignored `evaluation/results/latest-trajectory.*` and checks skill selection, follow-up, clarification, access scope, and budget behavior.
+- Quality gate: `cd server && npm run quality:gate`; it reads `evaluation/results/latest-feedback.json` and `evaluation/results/latest-trajectory.json` when present and reports feedback failures by `skillId@skillVersion`.
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 
-Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, `agent-skills.test.mjs`, `quality-report.test.mjs`, `claim-support.test.mjs`, `observability-report.test.mjs`, `ci-workflow.test.mjs`, and `param-sweep.test.mjs`.
+Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, `agent-skills.test.mjs`, `quality-report.test.mjs`, `claim-support.test.mjs`, `observability-report.test.mjs`, `ci-workflow.test.mjs`, `param-sweep.test.mjs`, and `trajectory-eval.test.mjs`.
 
 ## Implementation Notes
 
@@ -49,6 +50,7 @@ Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mj
 - Agent working memory is run-scoped and lives in `server/rag/agent.js`; preserve `agentWorkingMemory` and `agentObservability.workingMemory` when changing execution, feedback records, or feedback corpus metadata. It must not be written to long-term memory unless explicitly requested.
 - Skill chaining is whitelist-only in `server/rag/agent.js`; preserve `agentObservability.skillChain`, the `skill_chain` trace step, accessScope propagation, and per-skill budget checks when adding or changing chains.
 - Agent trace UI lives in `src/components/RenderQA.js`; preserve the display of selected skills, skill chains, retrieval queries, evidence gaps, unsupported claims, and finalizer-removed claims when changing `/chat` response shape or frontend rendering.
+- Trajectory eval lives in `server/evaluation/trajectory-eval.js`; preserve checks for skill selection, follow-up retrieval, clarification gate, accessScope propagation, and budget limits when changing agent orchestration.
 - Observability reporting lives in `server/evaluation/observability-report.js` and `server/evaluation/build-observability-report.mjs`; preserve support for both `traceType: "agent"` events and lower-level RAG trace events.
 - AgentRAG optimization order is documented in README under "AgentRAG 优化路线"; continue in that order unless the user explicitly reprioritizes it.
 - `/chat` returns `agentObservability` with per-skill selected status, attempts, duration, citations, abstain, retry/follow-up, budget, execution loop, working memory, skill chain, clarification gate, and error metrics. Preserve it when changing agent execution, feedback records, or feedback corpus metadata.

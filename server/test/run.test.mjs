@@ -8,3 +8,4 @@ import "./claim-support.test.mjs";
 import "./observability-report.test.mjs";
 import "./ci-workflow.test.mjs";
 import "./param-sweep.test.mjs";
+import "./trajectory-eval.test.mjs";

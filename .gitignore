@@ -19,10 +19,12 @@ server/.env
 /server/evaluation/results/20*.json
 !/server/evaluation/results/latest.json
 /server/evaluation/results/latest-feedback.json
+/server/evaluation/results/latest-trajectory.json
 /server/evaluation/results/param-sweep*.json
 /server/evaluation/results/20*.md
 !/server/evaluation/results/latest.md
 /server/evaluation/results/latest-feedback.md
+/server/evaluation/results/latest-trajectory.md
 /server/evaluation/results/param-sweep*.md
 server/uploads/*
 !server/uploads/.gitkeep

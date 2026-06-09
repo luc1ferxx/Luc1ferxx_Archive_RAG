@@ -26,6 +26,7 @@ test("quality gate workflow runs server tests, saved gate, and conditional feedb
   assert.match(workflow, /cache-dependency-path:\s*server\/package-lock\.json/);
   assert.match(workflow, /run:\s*npm ci/);
   assert.match(workflow, /run:\s*npm test/);
+  assert.match(workflow, /run:\s*npm run eval:trajectory/);
   assert.match(workflow, /run:\s*npm run quality:gate -- --fail-on-warn/);
   assert.match(workflow, /id:\s*feedback/);
   assert.match(workflow, /server\/data\/feedback\/feedback\.jsonl/);

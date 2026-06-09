@@ -238,13 +238,14 @@ curl http://localhost:5001/ready
 | `cd server && npm test` | 运行后端测试入口，并验证 GitHub Actions quality gate workflow contract。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
 | `cd server && npm run eval:param-sweep` | 批量测试 topK、chunk overlap、rerank、hybrid 权重，并输出参数对比报告。 |
+| `cd server && npm run eval:trajectory` | 评测 AgentRAG 执行轨迹：skill 选择、follow-up、澄清、access scope 和 budget。 |
 | `cd server && npm run feedback:corpus` | 从已收集的负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用反馈语料运行 synthetic eval，输出 `latest-feedback.*`。 |
-| `cd server && npm run quality:gate` | 检查主线 synthetic regression；如果存在 `latest-feedback.json`，同时检查 feedback eval 并按 skill 汇总失败。 |
+| `cd server && npm run quality:gate` | 检查主线 synthetic regression；如果存在 `latest-feedback.json` / `latest-trajectory.json`，同时检查 feedback 和 trajectory gate。 |
 | `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
 | `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
 
-说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`quality-report.test.mjs`、`claim-support.test.mjs`、`observability-report.test.mjs`、`ci-workflow.test.mjs` 和 `param-sweep.test.mjs`。
+说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`quality-report.test.mjs`、`claim-support.test.mjs`、`observability-report.test.mjs`、`ci-workflow.test.mjs`、`param-sweep.test.mjs` 和 `trajectory-eval.test.mjs`。
 
 `ragas` 是可选 Python 评测，需要额外安装依赖：
 
@@ -384,13 +385,16 @@ npm run eval:feedback
 
 `quality:gate` 会读取已生成的 `latest-feedback.json`。如果 feedback eval 存在失败 case 或当前 eval 回答出现 unsupported claim，gate 会失败，并输出类似 `document_rag@1.0.0: 2 citation errors, 1 incomplete answer, 1 unsupported claim` 的 skill 级统计；如果还没有 feedback eval 报告，则 feedback gate 会标记为 skipped，不阻塞主线 synthetic regression gate。
 
-GitHub Actions 的 `Quality Gate` workflow 会在 PR 和 `main` push 时执行 `cd server && npm test` 与 `npm run quality:gate -- --fail-on-warn`。如果仓库工作区存在 `server/data/feedback/feedback.jsonl`，CI 还会运行 `npm run eval:feedback`，再执行一次 quality gate，把 feedback eval 失败和 `skillId@skillVersion` 统计纳入门控。
+Trajectory eval 会写入 `server/evaluation/results/latest-trajectory.json` 和 `.md`，检查 agent 是否选对 skill/chain、证据不足时是否 follow-up、该澄清时是否澄清、是否传递 `accessScope`，以及是否遵守 budget。`quality:gate` 会读取该报告；如果 trajectory eval 有失败 case，gate 会失败。没有 trajectory 报告时会标记为 skipped，不阻塞主线 synthetic regression gate。
+
+GitHub Actions 的 `Quality Gate` workflow 会在 PR 和 `main` push 时执行 `cd server && npm test`、`npm run eval:trajectory` 与 `npm run quality:gate -- --fail-on-warn`。如果仓库工作区存在 `server/data/feedback/feedback.jsonl`，CI 还会运行 `npm run eval:feedback`，再执行一次 quality gate，把 feedback eval 失败和 `skillId@skillVersion` 统计纳入门控。
 
 提交前建议至少运行：
 
 ```bash
 cd server
 npm test
+npm run eval:trajectory
 npm run quality:gate
 ```
 
@@ -498,7 +502,7 @@ Agent 化路线按这个顺序继续推进：
 3. Task memory / working memory：当前已完成 run 内 `agentWorkingMemory` 初版，记录已查 query、已有证据 claims 和未解决/已解决 gaps。
 4. Skill chaining：当前已完成白名单链路初版：`summarize_contract -> risk_review`、`compare_documents -> risk_review`、`extract_timeline -> compare_documents`。
 5. Agent trace UI：当前已完成前端初版，展示 skill 选择、检索 query、证据不足和 finalizer 删除的 claims。
-6. Trajectory eval：评测是否选对 skill、是否该重试、是否该澄清、是否遵守 access scope 和 budget。
+6. Trajectory eval：当前已完成初版，评测是否选对 skill、是否该重试、是否该澄清、是否遵守 access scope 和 budget，并接入 `quality:gate`。
 
 ## 仓库结构
 

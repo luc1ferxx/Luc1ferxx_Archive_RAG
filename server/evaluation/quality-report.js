@@ -9,6 +9,7 @@ const serverDirectory = path.join(__dirname, "..");
 const resultsDirectory = path.join(__dirname, "results");
 const latestResultPath = path.join(resultsDirectory, "latest.json");
 const latestFeedbackResultPath = path.join(resultsDirectory, "latest-feedback.json");
+const latestTrajectoryResultPath = path.join(resultsDirectory, "latest-trajectory.json");
 const defaultHistoryLimit = 10;
 const statusRank = {
   unknown: 0,
@@ -721,6 +722,62 @@ export const buildFeedbackGate = ({ latestFeedbackPayload = null } = {}) => {
   };
 };
 
+export const buildTrajectoryGate = ({ latestTrajectoryPayload = null } = {}) => {
+  if (!latestTrajectoryPayload) {
+    return {
+      status: "pass",
+      skipped: true,
+      currentRunId: null,
+      failedCaseCount: 0,
+      caseCount: 0,
+      failedCases: [],
+      summary:
+        "No trajectory evaluation report is available; trajectory gate skipped.",
+    };
+  }
+
+  const summary = latestTrajectoryPayload.summary ?? {};
+  const metrics = summary.metrics ?? {};
+  const cases = Array.isArray(latestTrajectoryPayload.cases)
+    ? latestTrajectoryPayload.cases
+    : [];
+  const failedCases = cases
+    .filter((caseResult) => !caseResult.passed)
+    .map((caseResult) => ({
+      id: caseResult.id,
+      label: caseResult.label,
+      failedCheckCount: caseResult.failedCheckCount ?? 0,
+      failedChecks: (caseResult.checks ?? [])
+        .filter((check) => !check.passed)
+        .map((check) => ({
+          id: check.id,
+          label: check.label,
+          category: check.category,
+          detail: check.detail ?? null,
+        })),
+    }));
+  const failedCaseCount = metrics.failedCaseCount ?? failedCases.length;
+  const caseCount = metrics.caseCount ?? cases.length;
+  const status = failedCaseCount > 0 || summary.status === "fail" ? "fail" : "pass";
+
+  return {
+    status,
+    skipped: false,
+    currentRunId: summary.runId ?? null,
+    failedCaseCount,
+    caseCount,
+    failedCases,
+    summary:
+      status === "fail"
+        ? `Trajectory evaluation failed ${failedCaseCount} of ${caseCount} case${
+            caseCount === 1 ? "" : "s"
+          }.`
+        : `Trajectory evaluation passed all ${caseCount} case${
+            caseCount === 1 ? "" : "s"
+          }.`,
+  };
+};
+
 const buildFeedbackGateChecks = ({ feedbackGate = {} } = {}) => [
   {
     metric: "feedbackFailedCaseCount",
@@ -740,9 +797,24 @@ const buildFeedbackGateChecks = ({ feedbackGate = {} } = {}) => [
   },
 ];
 
+const buildTrajectoryGateChecks = ({ trajectoryGate = {} } = {}) =>
+  trajectoryGate.skipped
+    ? []
+    : [
+        {
+          metric: "trajectoryFailedCaseCount",
+          label: "Trajectory failed cases",
+          status: (trajectoryGate.failedCaseCount ?? 0) > 0 ? "fail" : "pass",
+          currentValue: trajectoryGate.failedCaseCount ?? 0,
+          baselineValue: 0,
+          delta: trajectoryGate.failedCaseCount ?? 0,
+        },
+      ];
+
 export const buildCombinedQualityGate = ({
   regressionGate = {},
   feedbackGate = {},
+  trajectoryGate = {},
 } = {}) => {
   if (feedbackGate.status === "fail") {
     return {
@@ -752,6 +824,25 @@ export const buildCombinedQualityGate = ({
         ...(regressionGate.checks ?? []),
         ...buildFeedbackGateChecks({
           feedbackGate,
+        }),
+        ...buildTrajectoryGateChecks({
+          trajectoryGate,
+        }),
+      ],
+    };
+  }
+
+  if (trajectoryGate.status === "fail") {
+    return {
+      status: "fail",
+      summary: trajectoryGate.summary,
+      checks: [
+        ...(regressionGate.checks ?? []),
+        ...buildFeedbackGateChecks({
+          feedbackGate,
+        }),
+        ...buildTrajectoryGateChecks({
+          trajectoryGate,
         }),
       ],
     };
@@ -776,13 +867,20 @@ export const buildCombinedQualityGate = ({
   return {
     status: "pass",
     summary:
-      feedbackGate.skipped
-        ? regressionGate.summary
-        : `${regressionGate.summary} ${feedbackGate.summary}`,
+      [
+        regressionGate.summary,
+        feedbackGate.skipped ? null : feedbackGate.summary,
+        trajectoryGate.skipped ? null : trajectoryGate.summary,
+      ]
+        .filter(Boolean)
+        .join(" "),
     checks: [
       ...(regressionGate.checks ?? []),
       ...buildFeedbackGateChecks({
         feedbackGate,
+      }),
+      ...buildTrajectoryGateChecks({
+        trajectoryGate,
       }),
     ],
   };
@@ -791,6 +889,7 @@ export const buildCombinedQualityGate = ({
 export const buildQualityHistoryResponse = ({
   latestPayload = null,
   latestFeedbackPayload = null,
+  latestTrajectoryPayload = null,
   limit = defaultHistoryLimit,
   runPayloads = [],
 } = {}) => {
@@ -827,9 +926,13 @@ export const buildQualityHistoryResponse = ({
   const feedbackGate = buildFeedbackGate({
     latestFeedbackPayload,
   });
+  const trajectoryGate = buildTrajectoryGate({
+    latestTrajectoryPayload,
+  });
   const qualityGate = buildCombinedQualityGate({
     regressionGate,
     feedbackGate,
+    trajectoryGate,
   });
 
   return {
@@ -838,6 +941,7 @@ export const buildQualityHistoryResponse = ({
     runs: sortedRuns.slice(0, limit),
     regressionGate,
     feedbackGate,
+    trajectoryGate,
     qualityGate,
   };
 };
@@ -890,6 +994,7 @@ export const readLatestQualityReport = async () => {
 export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) => {
   let latestPayload = null;
   let latestFeedbackPayload = null;
+  let latestTrajectoryPayload = null;
 
   try {
     latestPayload = await readJsonFile(latestResultPath);
@@ -907,6 +1012,14 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
     }
   }
 
+  try {
+    latestTrajectoryPayload = await readJsonFile(latestTrajectoryResultPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
   let fileNames = [];
 
   try {
@@ -916,6 +1029,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
       return buildQualityHistoryResponse({
         latestPayload,
         latestFeedbackPayload,
+        latestTrajectoryPayload,
         limit,
         runPayloads: [],
       });
@@ -943,6 +1057,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
   return buildQualityHistoryResponse({
     latestPayload,
     latestFeedbackPayload,
+    latestTrajectoryPayload,
     limit,
     runPayloads,
   });

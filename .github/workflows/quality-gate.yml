@@ -31,6 +31,9 @@ jobs:
       - name: Run server tests
         run: npm test
 
+      - name: Run trajectory eval
+        run: npm run eval:trajectory
+
       - name: Check saved RAG quality gate
         run: npm run quality:gate -- --fail-on-warn
 
