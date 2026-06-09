@@ -259,6 +259,7 @@ const normalizeAgentObservability = (observability = {}) => {
     agentMode: normalizeText(observability.agentMode),
     planMode: normalizeText(observability.planMode),
     selectedSkills: normalizeSkills(observability.selectedSkills),
+    skillChain: normalizeSkills(observability.skillChain).slice(0, 10),
     skills,
     runs,
     workingMemory: normalizeWorkingMemory(observability.workingMemory),

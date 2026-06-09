@@ -674,6 +674,60 @@
   white-space: pre-wrap;
 }
 
+.archive-agent-inspector {
+  display: grid;
+  gap: var(--archive-space-sm);
+  min-width: 0;
+  padding-top: var(--archive-space-md);
+  border-top: 1px solid var(--archive-border-subtle);
+}
+
+.archive-agent-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--archive-space-md);
+  min-width: 0;
+}
+
+.archive-agent-inspector-head .archive-source-section-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.archive-agent-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.archive-agent-metric {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.archive-agent-metric span {
+  display: block;
+  color: var(--archive-text-soft);
+  font-size: 0.64rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.archive-agent-metric strong {
+  display: block;
+  min-width: 0;
+  margin-top: 3px;
+  color: var(--archive-text-primary);
+  font-size: 0.78rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
 .archive-agent-trace {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -692,6 +746,15 @@
 
 .archive-agent-step.is-failed {
   border-color: rgba(255, 118, 118, 0.28);
+}
+
+.archive-agent-step.is-needs_input {
+  border-color: rgba(255, 183, 77, 0.34);
+  background: rgba(255, 183, 77, 0.06);
+}
+
+.archive-agent-step.is-skipped {
+  opacity: 0.76;
 }
 
 .archive-agent-step-head {

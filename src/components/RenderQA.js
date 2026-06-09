@@ -47,6 +47,28 @@ const formatTraceStatus = (status) => {
   return status.replace(/_/g, " ");
 };
 
+const formatTraceCount = (count, singular, plural = `${singular}s`) => {
+  const safeCount = Number.isFinite(count) ? count : 0;
+
+  return `${safeCount} ${safeCount === 1 ? singular : plural}`;
+};
+
+const formatDuration = (value) => {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return `${Math.round(parsed)} ms`;
+};
+
+const formatMaybeVersion = (version) => {
+  const normalizedVersion = String(version ?? "").trim();
+
+  return normalizedVersion ? `@${normalizedVersion}` : "";
+};
+
 const isPlainObject = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
@@ -94,6 +116,68 @@ const formatBudgetCounter = (usedValue, limitValue) => {
 
 const formatEvidenceScore = (value) =>
   typeof value === "number" ? value.toFixed(2) : "N/A";
+
+const getSkillId = (skill = {}) => skill.skillId ?? skill.id ?? null;
+
+const getSkillVersion = (skill = {}) => skill.skillVersion ?? skill.version ?? null;
+
+const getSkillLabel = (skill = {}) =>
+  skill.label ?? getSkillId(skill) ?? "Unknown skill";
+
+const formatSkillRef = (skill = {}) => {
+  const label = getSkillLabel(skill);
+  const version = formatMaybeVersion(getSkillVersion(skill));
+
+  return `${label}${version}`;
+};
+
+const formatSkillMetricCopy = (skill = {}) => {
+  const parts = [
+    skill.status ? formatTraceStatus(skill.status) : null,
+    Number.isFinite(skill.attempts)
+      ? formatTraceCount(skill.attempts, "attempt")
+      : null,
+    Number.isFinite(skill.retryCount) && skill.retryCount > 0
+      ? formatTraceCount(skill.retryCount, "retry", "retries")
+      : null,
+    Number.isFinite(skill.followUpCount) && skill.followUpCount > 0
+      ? formatTraceCount(skill.followUpCount, "follow-up")
+      : null,
+    Number.isFinite(skill.citationCount)
+      ? formatTraceCount(skill.citationCount, "citation")
+      : null,
+    formatDuration(skill.totalDurationMs ?? skill.durationMs),
+    Number.isFinite(skill.budgetUsed) || Number.isFinite(skill.budgetLimit)
+      ? `budget ${formatBudgetCounter(skill.budgetUsed, skill.budgetLimit)}`
+      : null,
+  ].filter(Boolean);
+
+  return parts.join(" · ");
+};
+
+const formatGapType = (gap = {}) =>
+  formatTraceStatus(String(gap.type ?? "evidence_gap")).replace(/\b\w/g, (letter) =>
+    letter.toUpperCase()
+  );
+
+const getGapTitle = (gap = {}, index) =>
+  gap.claim ?? gap.message ?? gap.reason ?? `${formatGapType(gap)} ${index + 1}`;
+
+const getGapCopy = (gap = {}) => {
+  const anchors = Array.isArray(gap.missingAnchors) && gap.missingAnchors.length > 0
+    ? `missing anchors: ${gap.missingAnchors.join(", ")}`
+    : null;
+  const parts = [
+    formatGapType(gap),
+    gap.skillId
+      ? `${gap.skillId}${formatMaybeVersion(gap.skillVersion)}`
+      : null,
+    gap.phase ? `phase: ${formatTraceStatus(gap.phase)}` : null,
+    anchors,
+  ].filter(Boolean);
+
+  return parts.join(" · ");
+};
 
 const EvidenceSummaryPanel = ({ summary }) => {
   if (!isPlainObject(summary)) {
@@ -233,7 +317,12 @@ const TraceBudgetSnapshot = ({ budget }) => {
   );
 };
 
-const TraceActionList = ({ label, items, getTitle, getCopy }) => {
+const TraceActionList = ({
+  label,
+  items,
+  getTitle = (_item, index) => `Item ${index + 1}`,
+  getCopy = () => null,
+}) => {
   if (!Array.isArray(items) || items.length === 0) {
     return null;
   }
@@ -244,7 +333,7 @@ const TraceActionList = ({ label, items, getTitle, getCopy }) => {
       <div className="archive-agent-detail-list">
         {items.map((item, index) => (
           <div
-            key={item.id ?? `${label}-${index}`}
+            key={item?.id ?? item?.queryId ?? `${label}-${index}`}
             className="archive-agent-detail-list-item"
           >
             <span>{getTitle(item, index)}</span>
@@ -253,6 +342,78 @@ const TraceActionList = ({ label, items, getTitle, getCopy }) => {
         ))}
       </div>
     </div>
+  );
+};
+
+const TraceSkillList = ({ label = "Selected skills", skills }) => {
+  if (!Array.isArray(skills) || skills.length === 0) {
+    return null;
+  }
+
+  return (
+    <TraceActionList
+      label={label}
+      items={skills}
+      getTitle={(skill) => formatSkillRef(skill)}
+      getCopy={(skill) => formatSkillMetricCopy(skill)}
+    />
+  );
+};
+
+const TraceRetrievalQueries = ({ label = "Retrieval queries", queries }) => {
+  if (!Array.isArray(queries) || queries.length === 0) {
+    return null;
+  }
+
+  return (
+    <TraceActionList
+      label={label}
+      items={queries}
+      getTitle={(query, index) =>
+        query.label ?? query.queryId ?? query.id ?? `Query ${index + 1}`
+      }
+      getCopy={(query) =>
+        [
+          query.query,
+          query.skillId
+            ? `${query.skillId}${formatMaybeVersion(query.skillVersion)}`
+            : null,
+          query.phase ? `phase: ${formatTraceStatus(query.phase)}` : null,
+          query.primary ? "primary" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      }
+    />
+  );
+};
+
+const TraceGapList = ({ label = "Evidence gaps", gaps }) => {
+  if (!Array.isArray(gaps) || gaps.length === 0) {
+    return null;
+  }
+
+  return (
+    <TraceActionList
+      label={label}
+      items={gaps}
+      getTitle={getGapTitle}
+      getCopy={getGapCopy}
+    />
+  );
+};
+
+const TraceRemovedClaims = ({ claims }) => {
+  if (!Array.isArray(claims) || claims.length === 0) {
+    return null;
+  }
+
+  return (
+    <TraceActionList
+      label="Finalizer removed claims"
+      items={claims}
+      getTitle={(claim, index) => String(claim ?? `Claim ${index + 1}`)}
+    />
   );
 };
 
@@ -271,6 +432,19 @@ const TraceReasonList = ({ reasons }) => {
           </span>
         ))}
       </div>
+    </div>
+  );
+};
+
+const TracePromptText = ({ label, value }) => {
+  if (!value) {
+    return null;
+  }
+
+  return (
+    <div className="archive-agent-detail-section">
+      <div className="archive-agent-detail-caption">{label}</div>
+      <div className="archive-agent-detail-question">{value}</div>
     </div>
   );
 };
@@ -360,6 +534,40 @@ const AgentTraceDetail = ({ step }) => {
     );
   }
 
+  if (step.type === "query_planner") {
+    return (
+      <div className="archive-agent-detail">
+        <TraceDetailRows
+          rows={[
+            { label: "Intent", value: formatDetailValue(detail.intent) },
+            { label: "Phase", value: formatTraceStatus(detail.phase) },
+            {
+              label: "TopK",
+              value: formatDetailValue(detail.retrievalOptions?.topK),
+            },
+            {
+              label: "TopK/doc",
+              value: formatDetailValue(detail.retrievalOptions?.topKPerDoc),
+            },
+            {
+              label: "Profile",
+              value: formatDetailValue(detail.retrievalOptions?.profile),
+            },
+          ]}
+        />
+        <TraceRetrievalQueries queries={detail.retrievalQueries} />
+      </div>
+    );
+  }
+
+  if (step.type === "skill_chain") {
+    return (
+      <div className="archive-agent-detail">
+        <TraceSkillList label="Chain order" skills={detail.skills} />
+      </div>
+    );
+  }
+
   if (step.type === "research_plan") {
     return (
       <div className="archive-agent-detail">
@@ -383,6 +591,46 @@ const AgentTraceDetail = ({ step }) => {
             { label: "Error", value: formatDetailValue(detail.error) },
           ]}
         />
+      </div>
+    );
+  }
+
+  if (
+    step.type === "document_rag" ||
+    step.type === "custom_skill" ||
+    step.type === "follow_up_retrieval"
+  ) {
+    const prompt =
+      detail.riskQuestion ??
+      detail.summaryQuestion ??
+      detail.timelineQuestion ??
+      detail.comparisonQuestion ??
+      detail.followUpQuestion ??
+      null;
+
+    return (
+      <div className="archive-agent-detail">
+        <TraceDetailRows
+          rows={[
+            { label: "Skill", value: detail.skillId },
+            { label: "Version", value: detail.skillVersion },
+            { label: "Duration", value: formatDuration(detail.durationMs) },
+            { label: "Citations", value: formatDetailValue(detail.citations) },
+            { label: "Abstained", value: formatDetailValue(detail.abstained) },
+            {
+              label: "Selected docs",
+              value: formatDetailValue(detail.selectedDocumentCount),
+            },
+            { label: "Chain mode", value: formatDetailValue(detail.chainMode) },
+          ]}
+        />
+        <TraceRetrievalQueries
+          queries={
+            detail.retrievalPlan?.retrievalQueries ?? detail.retrievalQueries
+          }
+        />
+        <TraceGapList gaps={detail.gaps} />
+        <TracePromptText label="Skill request" value={prompt} />
       </div>
     );
   }
@@ -421,10 +669,60 @@ const AgentTraceDetail = ({ step }) => {
     );
   }
 
+  if (step.type === "gap_analysis") {
+    return (
+      <div className="archive-agent-detail">
+        <TraceDetailRows
+          rows={[
+            { label: "Skill", value: detail.skillId },
+            { label: "Version", value: detail.skillVersion },
+            {
+              label: "Follow-up",
+              value: formatDetailValue(detail.followUpRecommended),
+            },
+          ]}
+        />
+        <TraceGapList gaps={detail.gaps} />
+      </div>
+    );
+  }
+
   if (step.type === "document_retry") {
     return (
       <div className="archive-agent-detail">
         <div className="archive-agent-detail-question">{detail.retryQuestion}</div>
+      </div>
+    );
+  }
+
+  if (step.type === "clarification_gate") {
+    return (
+      <div className="archive-agent-detail">
+        <TraceDetailRows
+          rows={[
+            { label: "Reason", value: formatDetailValue(detail.reason) },
+          ]}
+        />
+        <TraceGapList gaps={detail.gaps} />
+        <TracePromptText
+          label="Clarification question"
+          value={detail.clarificationQuestion}
+        />
+      </div>
+    );
+  }
+
+  if (step.type === "answer_finalizer") {
+    return (
+      <div className="archive-agent-detail">
+        <TraceDetailRows
+          rows={[
+            { label: "Changed", value: formatDetailValue(detail.changed) },
+            { label: "Abstained", value: formatDetailValue(detail.abstained) },
+          ]}
+        />
+        <TraceRemovedClaims claims={detail.removedClaims} />
+        <TraceClaimSupport claimSupport={detail.claimSupport} />
       </div>
     );
   }
@@ -454,6 +752,125 @@ const AgentTraceDetail = ({ step }) => {
   return (
     <div className="archive-agent-detail">
       <GenericTraceDetail detail={detail} />
+    </div>
+  );
+};
+
+const getObservedSelectedSkills = ({ answer }) => {
+  const observability = answer?.agentObservability ?? {};
+  const selectedSkills = Array.isArray(observability.selectedSkills)
+    ? observability.selectedSkills
+    : [];
+  const agentSkills = Array.isArray(answer?.agentSkills) ? answer.agentSkills : [];
+  const observations = Array.isArray(observability.skills)
+    ? observability.skills
+    : [];
+  const observationById = new Map(
+    observations.map((skill) => [getSkillId(skill), skill])
+  );
+
+  const sourceSkills = selectedSkills.length > 0 ? selectedSkills : agentSkills;
+
+  return sourceSkills.map((skill) => ({
+    ...skill,
+    ...(observationById.get(getSkillId(skill)) ?? {}),
+  }));
+};
+
+const AgentTraceOverview = ({ answer, stepCount }) => {
+  const observability = answer?.agentObservability ?? {};
+  const workingMemory =
+    answer?.agentWorkingMemory ?? observability.workingMemory ?? {};
+  const selectedSkills = getObservedSelectedSkills({ answer });
+  const skillChain = Array.isArray(observability.skillChain)
+    ? observability.skillChain
+    : [];
+  const checkedQueries = Array.isArray(workingMemory.checkedQueries)
+    ? workingMemory.checkedQueries
+    : [];
+  const unresolvedGaps = Array.isArray(workingMemory.unresolvedGaps)
+    ? workingMemory.unresolvedGaps
+    : [];
+  const resolvedGaps = Array.isArray(workingMemory.resolvedGaps)
+    ? workingMemory.resolvedGaps
+    : [];
+  const unsupportedClaims = Array.isArray(workingMemory.unsupportedClaims)
+    ? workingMemory.unsupportedClaims
+    : [];
+  const finalizerStep = Array.isArray(answer?.agentTrace)
+    ? answer.agentTrace.find((step) => step.type === "answer_finalizer")
+    : null;
+  const removedClaims = Array.isArray(finalizerStep?.detail?.removedClaims)
+    ? finalizerStep.detail.removedClaims
+    : [];
+  const loop = observability.executionLoop ?? {};
+  const allGaps = unresolvedGaps.length > 0
+    ? unresolvedGaps
+    : Array.isArray(loop.gaps)
+      ? loop.gaps
+      : [];
+  const hasOverview =
+    selectedSkills.length > 0 ||
+    skillChain.length > 0 ||
+    checkedQueries.length > 0 ||
+    allGaps.length > 0 ||
+    resolvedGaps.length > 0 ||
+    unsupportedClaims.length > 0 ||
+    removedClaims.length > 0 ||
+    Number.isFinite(loop.followUpsRun);
+
+  if (!hasOverview) {
+    return null;
+  }
+
+  return (
+    <div className="archive-agent-inspector">
+      <div className="archive-agent-inspector-head">
+        <div className="archive-source-section-label">Agent trace</div>
+        <span className="archive-answer-chip archive-answer-chip-agent">
+          {formatTraceCount(selectedSkills.length, "skill")}
+        </span>
+      </div>
+
+      <div className="archive-agent-metric-grid">
+        <div className="archive-agent-metric">
+          <span>Steps</span>
+          <strong>{formatDetailValue(stepCount)}</strong>
+        </div>
+        <div className="archive-agent-metric">
+          <span>Queries</span>
+          <strong>{formatDetailValue(checkedQueries.length)}</strong>
+        </div>
+        <div className="archive-agent-metric">
+          <span>Follow-ups</span>
+          <strong>{formatDetailValue(loop.followUpsRun)}</strong>
+        </div>
+        <div className="archive-agent-metric">
+          <span>Open gaps</span>
+          <strong>{formatDetailValue(allGaps.length)}</strong>
+        </div>
+        <div className="archive-agent-metric">
+          <span>Removed</span>
+          <strong>{formatDetailValue(removedClaims.length)}</strong>
+        </div>
+      </div>
+
+      <TraceSkillList skills={selectedSkills} />
+      <TraceSkillList label="Skill chain" skills={skillChain} />
+      <TraceRetrievalQueries queries={checkedQueries} />
+      <TraceGapList gaps={allGaps} />
+      <TraceGapList label="Resolved gaps" gaps={resolvedGaps} />
+      <TraceActionList
+        label="Unsupported claims"
+        items={unsupportedClaims}
+        getTitle={(claim, index) => claim.text ?? `Claim ${index + 1}`}
+        getCopy={(claim) =>
+          Array.isArray(claim.missingAnchors) && claim.missingAnchors.length > 0
+            ? `Missing anchors: ${claim.missingAnchors.join(", ")}`
+            : null
+        }
+      />
+      <TraceRemovedClaims claims={removedClaims} />
     </div>
   );
 };
@@ -533,6 +950,11 @@ const RenderQA = (props) => {
                   <div className="archive-answer-text archive-agent-answer">
                     {each.answer.agentAnswer}
                   </div>
+
+                  <AgentTraceOverview
+                    answer={each.answer}
+                    stepCount={agentTrace.length}
+                  />
 
                   {agentTrace.length > 0 ? (
                     <div className="archive-agent-trace">

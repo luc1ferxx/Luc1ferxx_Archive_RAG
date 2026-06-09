@@ -694,6 +694,278 @@ test("agent rag executes whitelisted custom contract summary skill with access s
   assert.equal(customStep.detail.summaryQuestion, receivedQuestion);
 });
 
+test("agent rag chains contract summary into risk review", async () => {
+  const receivedQuestions = [];
+  const ragService = {
+    chat: async (_docIds, question) => {
+      receivedQuestions.push(question);
+
+      if (/risk review/i.test(question)) {
+        return {
+          text: "Risk Review\n- Risk: Early termination requires 60 days notice. [Source 1]",
+          citations: [
+            {
+              docId: "doc-1",
+              fileName: "contract.pdf",
+              pageNumber: 2,
+              excerpt: "Risk: Early termination requires 60 days notice.",
+            },
+          ],
+          abstained: false,
+          resolvedQuery: question,
+          memoryApplied: false,
+        };
+      }
+
+      return {
+        text: "Contract Summary\n- Acme contract renews every 12 months. [Source 1]",
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "contract.pdf",
+            pageNumber: 1,
+            excerpt: "Acme contract renews every 12 months.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: question,
+        memoryApplied: false,
+      };
+    },
+    listDocuments: () => [
+      {
+        docId: "doc-1",
+        fileName: "contract.pdf",
+      },
+    ],
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Review this contract for risks and key terms.",
+    docIds: ["doc-1"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "skill_chain");
+  assert.deepEqual(
+    response.body.agentObservability.skillChain.map((skill) => skill.skillId),
+    [CUSTOM_SKILL_IDS.summarizeContract, CUSTOM_SKILL_IDS.riskReview]
+  );
+  assert.match(receivedQuestions[0], /contract summary/i);
+  assert.match(receivedQuestions[1], /risk review/i);
+  assert.match(receivedQuestions[1], /Previous skill outputs/i);
+  assert.match(receivedQuestions[1], /Acme contract renews/i);
+  assert.match(response.body.agentAnswer, /Acme contract renews/i);
+  assert.match(response.body.agentAnswer, /Early termination requires 60 days/i);
+  assert.equal(response.body.ragSources.length, 2);
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    [
+      "plan",
+      "query_planner",
+      "skill_chain",
+      "custom_skill",
+      "custom_skill",
+      "synthesis",
+      "answer_finalizer",
+    ]
+  );
+  assert.deepEqual(
+    response.body.agentSkills.map((skill) => skill.skillId),
+    [CUSTOM_SKILL_IDS.summarizeContract, CUSTOM_SKILL_IDS.riskReview]
+  );
+});
+
+test("agent rag chains document comparison into risk review", async () => {
+  const receivedQuestions = [];
+  const ragService = {
+    chat: async (_docIds, question) => {
+      receivedQuestions.push(question);
+
+      if (/risk review/i.test(question)) {
+        return {
+          text: "Risk Review\n- Risk: Remote-day limits differ between the policies. [Source 1] [Source 2]",
+          citations: [
+            {
+              docId: "doc-1",
+              fileName: "policy-a.pdf",
+              pageNumber: 1,
+              excerpt: "Risk: Remote-day limits differ between the policies. Policy A allows 2 remote days.",
+            },
+            {
+              docId: "doc-2",
+              fileName: "policy-b.pdf",
+              pageNumber: 1,
+              excerpt: "Risk: Remote-day limits differ between the policies. Policy B allows 3 remote days.",
+            },
+          ],
+          abstained: false,
+          resolvedQuery: question,
+          memoryApplied: false,
+        };
+      }
+
+      return {
+        text: "Document Comparison\n- Policy A allows 2 remote days and Policy B allows 3 remote days. [Source 1] [Source 2]",
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "policy-a.pdf",
+            pageNumber: 1,
+            excerpt: "Policy A allows 2 remote days.",
+          },
+          {
+            docId: "doc-2",
+            fileName: "policy-b.pdf",
+            pageNumber: 1,
+            excerpt: "Policy B allows 3 remote days.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: question,
+        memoryApplied: false,
+      };
+    },
+    listDocuments: () => [
+      {
+        docId: "doc-1",
+        fileName: "policy-a.pdf",
+      },
+      {
+        docId: "doc-2",
+        fileName: "policy-b.pdf",
+      },
+    ],
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Compare these contracts for risk differences.",
+    docIds: ["doc-1", "doc-2"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "skill_chain");
+  assert.deepEqual(
+    response.body.agentObservability.skillChain.map((skill) => skill.skillId),
+    [CUSTOM_SKILL_IDS.compareDocuments, CUSTOM_SKILL_IDS.riskReview]
+  );
+  assert.match(receivedQuestions[0], /document comparison/i);
+  assert.match(receivedQuestions[1], /risk review/i);
+  assert.match(receivedQuestions[1], /Previous skill outputs/i);
+  assert.match(receivedQuestions[1], /Policy A allows 2 remote days/i);
+  assert.match(response.body.agentAnswer, /Remote-day limits differ/i);
+});
+
+test("agent rag chains timeline extraction into document comparison for project changes", async () => {
+  const receivedQuestions = [];
+  const ragService = {
+    chat: async (_docIds, question) => {
+      receivedQuestions.push(question);
+
+      if (/chronological timeline/i.test(question)) {
+        return {
+          text: "- 2024-01-01: Project Alpha started. [Source 1]\n- 2024-02-01: Project Alpha scope changed. [Source 2]",
+          citations: [
+            {
+              docId: "doc-1",
+              fileName: "jan.pdf",
+              pageNumber: 1,
+              excerpt: "Project Alpha started on 2024-01-01.",
+            },
+            {
+              docId: "doc-2",
+              fileName: "feb.pdf",
+              pageNumber: 1,
+              excerpt: "Project Alpha scope changed on 2024-02-01.",
+            },
+          ],
+          abstained: false,
+          resolvedQuery: question,
+          memoryApplied: false,
+        };
+      }
+
+      return {
+        text: "Document Comparison\n- Difference: Project Alpha changed scope after the January start. [Source 1] [Source 2]",
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "jan.pdf",
+            pageNumber: 1,
+            excerpt: "Project Alpha started on 2024-01-01.",
+          },
+          {
+            docId: "doc-2",
+            fileName: "feb.pdf",
+            pageNumber: 1,
+            excerpt: "Difference: Project Alpha changed scope after the January start on 2024-02-01.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: question,
+        memoryApplied: false,
+      };
+    },
+    listDocuments: () => [
+      {
+        docId: "doc-1",
+        fileName: "jan.pdf",
+      },
+      {
+        docId: "doc-2",
+        fileName: "feb.pdf",
+      },
+    ],
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Organize project changes across these documents.",
+    docIds: ["doc-1", "doc-2"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "skill_chain");
+  assert.deepEqual(
+    response.body.agentObservability.skillChain.map((skill) => skill.skillId),
+    [CUSTOM_SKILL_IDS.extractTimeline, CUSTOM_SKILL_IDS.compareDocuments]
+  );
+  assert.match(receivedQuestions[0], /chronological timeline/i);
+  assert.match(receivedQuestions[1], /document comparison/i);
+  assert.match(receivedQuestions[1], /Previous skill outputs/i);
+  assert.match(receivedQuestions[1], /Project Alpha started/i);
+  assert.match(response.body.agentAnswer, /Project Alpha changed scope/i);
+});
+
 test("agent rag asks for clarification when comparison has fewer than two documents", async () => {
   const ragService = {
     chat: async () => {
@@ -930,6 +1202,7 @@ test("feedback records and feedback eval cases retain skill metadata", () => {
               status: "completed",
             },
           ],
+          skillChain: [],
           skills: [
             {
               skillId: AGENT_SKILL_IDS.documentRag,
@@ -1034,6 +1307,7 @@ test("feedback records and feedback eval cases retain skill metadata", () => {
   ]);
   assert.equal(feedback.agentObservability.feedbackType, "citation_error");
   assert.equal(feedback.agentObservability.skills[0].skillId, AGENT_SKILL_IDS.documentRag);
+  assert.deepEqual(feedback.agentObservability.skillChain, []);
   assert.equal(feedback.agentObservability.skills[0].citationCount, 1);
   assert.equal(feedback.agentObservability.skills[0].budgetDelta.documentRagCalls, 1);
   assert.equal(
@@ -1050,6 +1324,10 @@ test("feedback records and feedback eval cases retain skill metadata", () => {
   assert.equal(
     corpus.cases[0].metadata.feedback.agentObservability.skills[0].skillId,
     AGENT_SKILL_IDS.documentRag
+  );
+  assert.deepEqual(
+    corpus.cases[0].metadata.feedback.agentObservability.skillChain,
+    []
   );
   assert.equal(
     corpus.cases[0].metadata.feedback.agentObservability.workingMemory

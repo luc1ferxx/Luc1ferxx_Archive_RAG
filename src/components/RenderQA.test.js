@@ -127,6 +127,212 @@ describe("RenderQA", () => {
     ).toBeInTheDocument();
   });
 
+  test("renders agent trace overview for skills, queries, gaps, and finalizer removals", () => {
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "Review renewal risk.",
+            answer: {
+              agentAnswer: "The agent kept only citation-backed renewal claims.",
+              agentMode: "document",
+              agentSkills: [
+                {
+                  skillId: "document_rag",
+                  skillVersion: "1.0.0",
+                  label: "Document RAG",
+                  status: "completed",
+                },
+              ],
+              agentObservability: {
+                selectedSkills: [
+                  {
+                    skillId: "document_rag",
+                    skillVersion: "1.0.0",
+                    label: "Document RAG",
+                  },
+                ],
+                skillChain: [
+                  {
+                    skillId: "summarize_contract",
+                    skillVersion: "1.0.0",
+                    label: "Contract Summary",
+                  },
+                  {
+                    skillId: "risk_review",
+                    skillVersion: "1.0.0",
+                    label: "Risk Review",
+                  },
+                ],
+                skills: [
+                  {
+                    skillId: "document_rag",
+                    skillVersion: "1.0.0",
+                    label: "Document RAG",
+                    status: "completed",
+                    attempts: 2,
+                    retryCount: 1,
+                    followUpCount: 1,
+                    totalDurationMs: 35,
+                    citationCount: 2,
+                    budgetUsed: 2,
+                    budgetLimit: 2,
+                  },
+                ],
+                executionLoop: {
+                  followUpsRun: 1,
+                  gapsIdentified: 1,
+                  stoppedReason: "follow_up_resolved",
+                  gaps: [
+                    {
+                      type: "unsupported_claim",
+                      claim: "Automatic renewal notice is 90 days.",
+                      skillId: "document_rag",
+                      skillVersion: "1.0.0",
+                    },
+                  ],
+                },
+              },
+              agentWorkingMemory: {
+                checkedQueries: [
+                  {
+                    skillId: "document_rag",
+                    skillVersion: "1.0.0",
+                    phase: "primary",
+                    queryId: "fact-citation",
+                    label: "Exact citation evidence",
+                    query: "Find exact cited evidence for renewal notice.",
+                    primary: false,
+                  },
+                ],
+                unsupportedClaims: [
+                  {
+                    text: "Automatic renewal notice is 90 days.",
+                    missingAnchors: ["90"],
+                  },
+                ],
+                unresolvedGaps: [
+                  {
+                    type: "unsupported_claim",
+                    claim: "Automatic renewal notice is 90 days.",
+                    skillId: "document_rag",
+                    skillVersion: "1.0.0",
+                    phase: "gap_analysis",
+                  },
+                ],
+                resolvedGaps: [
+                  {
+                    type: "missing_citation",
+                    message: "Follow-up found renewal citation.",
+                    skillId: "document_rag",
+                    skillVersion: "1.0.0",
+                    phase: "follow_up",
+                  },
+                ],
+              },
+              agentTrace: [
+                {
+                  id: "1-query-planner",
+                  type: "query_planner",
+                  label: "Query Planner",
+                  status: "completed",
+                  summary: "Planned focused retrieval queries.",
+                  detail: {
+                    source: "agent-query-planner",
+                    phase: "primary",
+                    intent: "analysis",
+                    retrievalQueries: [
+                      {
+                        id: "analysis-support",
+                        label: "Supporting evidence",
+                        query:
+                          "Find source excerpts that support renewal risk analysis.",
+                        primary: false,
+                      },
+                    ],
+                    retrievalOptions: {
+                      profile: "broad",
+                      topK: 10,
+                      topKPerDoc: 4,
+                    },
+                  },
+                },
+                {
+                  id: "2-gap-analysis",
+                  type: "gap_analysis",
+                  label: "Gap Analysis",
+                  status: "completed",
+                  summary: "Identified one unsupported claim.",
+                  detail: {
+                    skillId: "document_rag",
+                    skillVersion: "1.0.0",
+                    followUpRecommended: true,
+                    gaps: [
+                      {
+                        type: "unsupported_claim",
+                        claim: "Automatic renewal notice is 90 days.",
+                        skillId: "document_rag",
+                        skillVersion: "1.0.0",
+                        missingAnchors: ["90"],
+                      },
+                    ],
+                  },
+                },
+                {
+                  id: "3-answer-finalizer",
+                  type: "answer_finalizer",
+                  label: "Answer Finalizer",
+                  status: "completed",
+                  summary: "Removed unsupported claim from the final answer.",
+                  detail: {
+                    changed: true,
+                    abstained: false,
+                    removedClaims: ["Automatic renewal notice is 90 days."],
+                    claimSupport: {
+                      supportedClaimCount: 1,
+                      unsupportedClaimCount: 1,
+                      claims: [
+                        {
+                          text: "Automatic renewal notice is 90 days.",
+                          supported: false,
+                          missingAnchors: ["90"],
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+              ragAnswer: "Document answer",
+              ragSources: [],
+              mcpAnswer: "Web answer",
+            },
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getByText("Agent trace")).toBeInTheDocument();
+    expect(screen.getAllByText("Selected skills").length).toBeGreaterThan(0);
+    expect(screen.getByText("Document RAG@1.0.0")).toBeInTheDocument();
+    expect(screen.getByText("Skill chain")).toBeInTheDocument();
+    expect(screen.getByText("Contract Summary@1.0.0")).toBeInTheDocument();
+    expect(screen.getAllByText("Retrieval queries").length).toBeGreaterThan(0);
+    expect(screen.getByText("Exact citation evidence")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Find exact cited evidence for renewal notice/)
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Evidence gaps").length).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("Automatic renewal notice is 90 days.").length
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("Resolved gaps")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Finalizer removed claims").length
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByText("Supporting evidence").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("10").length).toBeGreaterThan(0);
+  });
+
   test("renders document evidence scoring summary", () => {
     render(
       <RenderQA

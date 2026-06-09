@@ -26,6 +26,7 @@ import {
 const WEB_SIGNAL_PATTERN =
   /\b(latest|current|currently|today|now|recent|news|live|online|internet|web|search the web|real[-\s]?time)\b|最新|当前|现在|今天|近日|实时|联网|网页|网络|新闻/i;
 
+const SKILL_CHAIN_MODE = "skill_chain";
 const MAX_AGENT_FOLLOW_UPS = 1;
 const MAX_CLARIFICATION_DOCUMENTS = 12;
 
@@ -49,6 +50,15 @@ const CONTRACT_SUMMARY_SIGNAL_PATTERN =
 
 const COMPARE_DOCUMENTS_SIGNAL_PATTERN =
   /\b(compare|comparison|differences?|different|versus|vs|same|similar|contrast|common ground|missing terms?|across|between)\b|对比|比较|差异|不同|相同|一致|共同点|缺失条款|遗漏条款|之间/i;
+
+const CONTRACT_REVIEW_CHAIN_SIGNAL_PATTERN =
+  /\b(review|audit|assess|analy[sz]e)\b.*\b(contract|agreement|msa|sow|nda)\b|\b(contract|agreement|msa|sow|nda)\b.*\b(review|audit|assess|analy[sz]e)\b|审查.*(?:合同|协议)|审核.*(?:合同|协议)|(?:合同|协议).*审查|(?:合同|协议).*审核/i;
+
+const RISK_CHAIN_SIGNAL_PATTERN =
+  /\brisks?\b|风险|risk review|risk analysis/i;
+
+const PROJECT_CHANGE_CHAIN_SIGNAL_PATTERN =
+  /\b(project changes?|change log|change history|changes across|evolution|what changed|changed across)\b|项目变化|项目变更|整理.*(?:变化|变更)|(?:变化|变更).*整理/i;
 
 const serializeError = (error, fallbackMessage) => {
   if (error instanceof Error) {
@@ -125,7 +135,67 @@ const buildPlan = ({ question, docIds }) => {
   const wantsRiskReview = RISK_REVIEW_SIGNAL_PATTERN.test(question);
   const wantsContractSummary = CONTRACT_SUMMARY_SIGNAL_PATTERN.test(question);
   const wantsCompareDocuments = COMPARE_DOCUMENTS_SIGNAL_PATTERN.test(question);
+  const wantsContractReviewChain =
+    (wantsRiskReview && wantsContractSummary) ||
+    CONTRACT_REVIEW_CHAIN_SIGNAL_PATTERN.test(question);
+  const wantsRiskComparisonChain =
+    wantsCompareDocuments && RISK_CHAIN_SIGNAL_PATTERN.test(question);
+  const wantsProjectChangeChain = PROJECT_CHANGE_CHAIN_SIGNAL_PATTERN.test(question);
   const hasDocuments = docIds.length > 0;
+
+  if (wantsRiskComparisonChain) {
+    return {
+      mode: SKILL_CHAIN_MODE,
+      skillChain: [CUSTOM_SKILL_IDS.compareDocuments, CUSTOM_SKILL_IDS.riskReview],
+      wantsTimeline: false,
+      wantsRiskReview: true,
+      wantsContractSummary: false,
+      wantsCompareDocuments: true,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      requiresDocuments: true,
+      summary: "Compare selected documents, then review the comparison for cited risks and gaps.",
+    };
+  }
+
+  if (wantsContractReviewChain) {
+    return {
+      mode: SKILL_CHAIN_MODE,
+      skillChain: [CUSTOM_SKILL_IDS.summarizeContract, CUSTOM_SKILL_IDS.riskReview],
+      wantsTimeline: false,
+      wantsRiskReview: true,
+      wantsContractSummary: true,
+      wantsCompareDocuments: false,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      requiresDocuments: true,
+      summary: "Summarize selected contract documents, then review them for cited risks and gaps.",
+    };
+  }
+
+  if (wantsProjectChangeChain) {
+    return {
+      mode: SKILL_CHAIN_MODE,
+      skillChain: [CUSTOM_SKILL_IDS.extractTimeline, CUSTOM_SKILL_IDS.compareDocuments],
+      wantsTimeline: true,
+      wantsRiskReview: false,
+      wantsContractSummary: false,
+      wantsCompareDocuments: true,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      requiresDocuments: true,
+      summary: "Extract a cited timeline, then compare selected documents for project changes.",
+    };
+  }
 
   if (wantsTimeline) {
     return {
@@ -334,6 +404,52 @@ const buildEvidenceClarification = ({ reason, check, gaps = [] } = {}) => ({
   },
 });
 
+const orderSelectedSkills = ({ selectedSkills = [], plan = {} } = {}) => {
+  if (!Array.isArray(plan.skillChain) || plan.skillChain.length === 0) {
+    return selectedSkills;
+  }
+
+  const byId = new Map(selectedSkills.map((skill) => [skill.id, skill]));
+  const chainSkills = plan.skillChain
+    .map((skillId) => byId.get(skillId))
+    .filter(Boolean);
+  const chainIds = new Set(chainSkills.map((skill) => skill.id));
+  const remainingSkills = selectedSkills.filter((skill) => !chainIds.has(skill.id));
+
+  return [...chainSkills, ...remainingSkills];
+};
+
+const buildSkillChainSummary = ({ chainSkills = [] } = {}) =>
+  `Chained ${chainSkills.length} skill${chainSkills.length === 1 ? "" : "s"}: ${
+    chainSkills.map((skill) => skill.label).join(" -> ")
+  }.`;
+
+const buildChainedSkillQuestion = ({
+  question,
+  previousResults = [],
+} = {}) => {
+  const usableResults = previousResults
+    .filter((result) => result?.ok && normalizeText(result.text))
+    .slice(-3);
+
+  if (usableResults.length === 0) {
+    return question;
+  }
+
+  return [
+    "Continue the same agent task using previous skill outputs as context.",
+    `Original request: ${normalizeText(question)}`,
+    "Previous skill outputs:",
+    ...usableResults.map((result) =>
+      [
+        `${result.label}:`,
+        normalizeText(result.text),
+      ].join("\n")
+    ),
+    "Use previous outputs to avoid repeating work, but verify every final claim against selected document citations.",
+  ].join("\n\n");
+};
+
 const buildPlannerActions = ({ plan, docIds, skills }) => {
   const actions = [
     {
@@ -392,6 +508,16 @@ const buildSynthesisAnswer = ({
   discoveryAnswer,
   researchBrief,
 }) => {
+  if (plan.mode === SKILL_CHAIN_MODE) {
+    const completedResults = customSkillResults
+      .filter((result) => result.ok && normalizeText(result.text))
+      .map((result) => normalizeText(result.text));
+
+    return completedResults.length > 0
+      ? completedResults.join("\n\n")
+      : "The skill chain could not complete the request.";
+  }
+
   if (Object.values(CUSTOM_SKILL_IDS).includes(plan.mode)) {
     const customResult = customSkillResults.find(
       (result) => result.ok && result.skillId === plan.mode
@@ -701,10 +827,18 @@ export const runAgentRag = async ({
     question,
     docIds,
   });
-  const selectedSkills = registry.select({
+  const selectedSkills = orderSelectedSkills({
+    selectedSkills: registry.select({
+      plan,
+      docIds,
+    }),
     plan,
-    docIds,
   });
+  const chainSkills = Array.isArray(plan.skillChain)
+    ? plan.skillChain
+        .map((skillId) => selectedSkills.find((skill) => skill.id === skillId))
+        .filter(Boolean)
+    : [];
   const selectedSkillKeys = new Set(selectedSkills.map((skill) => skill.id));
   const getSelectedSkill = (skillId) =>
     selectedSkills.find((skill) => skill.id === skillId) ?? null;
@@ -883,6 +1017,7 @@ export const runAgentRag = async ({
   const buildAgentObservability = ({ agentMode }) => ({
     agentMode,
     planMode: plan.mode,
+    skillChain: chainSkills.map((skill) => getSkillDescriptor(skill)),
     executionLoop,
     workingMemory,
     selectedSkills: selectedSkills.map((skill) => getSkillDescriptor(skill)),
@@ -1011,6 +1146,20 @@ export const runAgentRag = async ({
       label: "Query Planner",
       summary: buildQueryPlannerSummary(agentRetrievalPlan),
       detail: agentRetrievalPlan,
+    });
+  }
+
+  if (chainSkills.length > 0) {
+    addTraceStep({
+      type: "skill_chain",
+      label: "Skill Chain",
+      summary: buildSkillChainSummary({
+        chainSkills,
+      }),
+      detail: {
+        mode: plan.mode,
+        skills: chainSkills.map((skill) => getSkillDescriptor(skill)),
+      },
     });
   }
 
@@ -1160,8 +1309,15 @@ export const runAgentRag = async ({
   }
 
   const customSkills = selectedSkills.filter((skill) => skill.kind === "custom");
+  const previousChainResults = [];
 
   for (const customSkill of customSkills) {
+    const chainQuestion = plan.mode === SKILL_CHAIN_MODE
+      ? buildChainedSkillQuestion({
+          question,
+          previousResults: previousChainResults,
+        })
+      : question;
     const customBudget = customSkill.budgetKey
       ? consumeBudget(budgetState, customSkill.budgetKey)
       : null;
@@ -1169,7 +1325,7 @@ export const runAgentRag = async ({
       ? buildFailedSkillResult(customSkill, new Error(customBudget.reason))
       : await executeObservedSkill(customSkill, {
           ragService,
-          question,
+          question: chainQuestion,
           docIds,
           sessionId,
           userId,
@@ -1182,6 +1338,10 @@ export const runAgentRag = async ({
 
     customSkillResults.push(customResult);
     recordSkillResult(customResult);
+
+    if (customResult.ok) {
+      previousChainResults.push(customResult);
+    }
 
     if (customBudget && !customBudget.ok) {
       recordSkippedSkill({
@@ -1211,6 +1371,8 @@ export const runAgentRag = async ({
           )}`,
       detail: buildSkillTraceDetail(customResult, {
         skillKind: customSkill.kind,
+        chainMode: plan.mode === SKILL_CHAIN_MODE,
+        previousSkillCount: Math.max(0, previousChainResults.length - 1),
         ...(customResult.traceDetail ?? {}),
       }),
     });
@@ -1522,17 +1684,22 @@ export const runAgentRag = async ({
 
   const agentMode =
     ragResult?.ok && ragResult.value.abstained && webResult?.ok ? "document_web" : plan.mode;
+  const successfulCustomResults = customSkillResults.filter((result) => result.ok);
   const primaryCustomResult = customSkillResults.find((result) => result.ok);
+  const customCitations = successfulCustomResults.flatMap(
+    (result) => result.citations ?? []
+  );
   const directAnswerModes = new Set([
     "inventory",
     "document_discovery",
     "research_brief",
+    SKILL_CHAIN_MODE,
     ...customSkills.map((skill) => skill.id),
   ]);
   const ragSources = researchBrief?.citations ??
     (ragResult?.ok
       ? ragResult.value.citations ?? []
-      : primaryCustomResult?.citations ?? []);
+      : customCitations);
   const baseAgentAnswer = buildSynthesisAnswer({
     plan: {
       ...plan,
@@ -1548,6 +1715,7 @@ export const runAgentRag = async ({
   const shouldFinalizeAnswer =
     ragSources.length > 0 &&
     (agentMode === "document" ||
+      agentMode === SKILL_CHAIN_MODE ||
       (primaryCustomResult && agentMode === primaryCustomResult.skillId));
 
   addTraceStep({
@@ -1604,6 +1772,8 @@ export const runAgentRag = async ({
     ? researchBrief.text
     : ragResult?.ok
     ? ragResult.value.text
+    : agentMode === SKILL_CHAIN_MODE
+      ? baseAgentAnswer
     : primaryCustomResult?.text
       ? primaryCustomResult.text
     : ragError
@@ -1612,6 +1782,7 @@ export const runAgentRag = async ({
   const ragAnswer =
     finalizer &&
     (agentMode === "document" ||
+      agentMode === SKILL_CHAIN_MODE ||
       (primaryCustomResult && agentMode === primaryCustomResult.skillId))
       ? agentAnswer
       : rawRagAnswer;

@@ -281,6 +281,12 @@ const sanitizeAgentObservability = (observability = {}, { feedbackType } = {}) =
           .filter((skill) => skill.skillId)
           .slice(0, 20)
       : [],
+    skillChain: Array.isArray(observability.skillChain)
+      ? observability.skillChain
+          .map(sanitizeSkill)
+          .filter((skill) => skill.skillId)
+          .slice(0, 10)
+      : [],
     skills,
     runs,
     budget: sanitizeBudgetSnapshot(observability.budget),
