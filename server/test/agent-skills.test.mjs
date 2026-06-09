@@ -694,6 +694,96 @@ test("agent rag executes whitelisted custom contract summary skill with access s
   assert.equal(customStep.detail.summaryQuestion, receivedQuestion);
 });
 
+test("agent rag asks for clarification when comparison has fewer than two documents", async () => {
+  const ragService = {
+    chat: async () => {
+      throw new Error("Comparison skill should not run without two documents.");
+    },
+    listDocuments: () => [
+      {
+        docId: "doc-1",
+        fileName: "policy-2024.pdf",
+      },
+    ],
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Compare this policy with the other policy.",
+    docIds: ["doc-1"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "clarification");
+  assert.equal(
+    response.body.clarification.reason,
+    "comparison_requires_multiple_documents"
+  );
+  assert.match(response.body.agentAnswer, /Which two or more documents/i);
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "clarification_gate"]
+  );
+  assert.deepEqual(response.body.agentSkills, []);
+  assert.equal(
+    response.body.agentObservability.selectedSkills[0].skillId,
+    CUSTOM_SKILL_IDS.compareDocuments
+  );
+  assert.equal(
+    response.body.agentObservability.skills.find(
+      (skill) => skill.skillId === CUSTOM_SKILL_IDS.compareDocuments
+    ).status,
+    "not_run"
+  );
+});
+
+test("agent rag asks for clarification when too many documents are selected", async () => {
+  const docIds = Array.from({ length: 13 }, (_value, index) => `doc-${index + 1}`);
+  const ragService = {
+    chat: async () => {
+      throw new Error("Document RAG should not run before narrowing many documents.");
+    },
+    listDocuments: () =>
+      docIds.map((docId) => ({
+        docId,
+        fileName: `${docId}.pdf`,
+      })),
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Analyze these documents for policy obligations.",
+    docIds,
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "clarification");
+  assert.equal(response.body.clarification.reason, "too_many_documents");
+  assert.match(response.body.agentAnswer, /13 documents/i);
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "clarification_gate"]
+  );
+});
+
 test("agent rag executes whitelisted custom compare documents skill with access scope", async () => {
   const accessScope = {
     userId: "alice",

@@ -153,7 +153,7 @@ test("agent rag runs follow-up retrieval when claim support check finds unsuppor
   );
 });
 
-test("agent rag finalizer removes unsupported answer claims when retry is unavailable", async () => {
+test("agent rag asks for clarification when follow-up is unavailable", async () => {
   const ragService = {
     chat: async (_docIds, query) => ({
       text: "Remote work requires manager approval. The satellite stipend is 500 dollars. [Source 1]",
@@ -196,18 +196,22 @@ test("agent rag finalizer removes unsupported answer claims when retry is unavai
   });
 
   assert.equal(response.status, 200);
-  assert.match(response.body.agentAnswer, /Remote work requires manager approval/i);
-  assert.doesNotMatch(response.body.agentAnswer, /satellite stipend/i);
+  assert.equal(response.body.agentMode, "clarification");
+  assert.match(response.body.agentAnswer, /could not verify/i);
+  assert.equal(
+    response.body.clarification.reason,
+    "document_follow_up_budget_exhausted"
+  );
   assert.equal(response.body.ragAnswer, response.body.agentAnswer);
 
-  const finalizerStep = response.body.agentTrace.find(
-    (step) => step.type === "answer_finalizer"
+  const clarificationStep = response.body.agentTrace.find(
+    (step) => step.type === "clarification_gate"
   );
-  assert.equal(finalizerStep.status, "completed");
-  assert.equal(finalizerStep.detail.claimSupport.unsupportedClaimCount, 1);
-  assert.deepEqual(finalizerStep.detail.removedClaims, [
-    "The satellite stipend is 500 dollars",
-  ]);
+  assert.equal(clarificationStep.status, "needs_input");
+  assert.equal(
+    clarificationStep.detail.reason,
+    "document_follow_up_budget_exhausted"
+  );
 });
 
 test("answer finalizer preserves section headings without counting them as evidence claims", () => {

@@ -27,6 +27,7 @@ const WEB_SIGNAL_PATTERN =
   /\b(latest|current|currently|today|now|recent|news|live|online|internet|web|search the web|real[-\s]?time)\b|最新|当前|现在|今天|近日|实时|联网|网页|网络|新闻/i;
 
 const MAX_AGENT_FOLLOW_UPS = 1;
+const MAX_CLARIFICATION_DOCUMENTS = 12;
 
 const INVENTORY_SIGNAL_PATTERN =
   /\b(what documents|which documents|list documents|show documents|workspace documents|uploaded documents|what files|which files|list files)\b|有哪些(?:文档|资料|文件)|列出.*(?:文档|资料|文件)|当前.*(?:文档|资料|文件)|上传.*(?:文档|资料|文件)/i;
@@ -279,6 +280,60 @@ const buildPlan = ({ question, docIds }) => {
   };
 };
 
+const buildPreExecutionClarification = ({ plan, docIds = [] } = {}) => {
+  if (plan.wantsCompareDocuments && docIds.length < 2) {
+    return {
+      reason: "comparison_requires_multiple_documents",
+      summary: "The comparison request needs at least two selected documents.",
+      question:
+        "Which two or more documents should I compare? Select the documents, then send the comparison request again.",
+      detail: {
+        selectedDocumentCount: docIds.length,
+        requiredDocumentCount: 2,
+      },
+    };
+  }
+
+  if (plan.requiresDocuments && docIds.length === 0) {
+    return {
+      reason: "missing_required_documents",
+      summary: "The request needs selected document context before the agent can answer.",
+      question:
+        "Which document should I use for this request? Select at least one document, then send the request again.",
+      detail: {
+        selectedDocumentCount: 0,
+        requiredDocumentCount: 1,
+      },
+    };
+  }
+
+  if (plan.requiresDocuments && docIds.length > MAX_CLARIFICATION_DOCUMENTS) {
+    return {
+      reason: "too_many_documents",
+      summary: "The request has too many selected documents to answer reliably without narrowing scope.",
+      question: `You selected ${docIds.length} documents. Which ${MAX_CLARIFICATION_DOCUMENTS} or fewer should I focus on for this request?`,
+      detail: {
+        selectedDocumentCount: docIds.length,
+        maxDocumentCount: MAX_CLARIFICATION_DOCUMENTS,
+      },
+    };
+  }
+
+  return null;
+};
+
+const buildEvidenceClarification = ({ reason, check, gaps = [] } = {}) => ({
+  reason,
+  summary:
+    "The agent could not verify the answer from the selected document evidence.",
+  question:
+    "I could not verify the answer from the selected documents. Which specific section, term, date, or document should I focus on?",
+  detail: {
+    reasons: check?.reasons ?? [],
+    gaps,
+  },
+});
+
 const buildPlannerActions = ({ plan, docIds, skills }) => {
   const actions = [
     {
@@ -425,6 +480,7 @@ export const runAgentRag = async ({
   const skillExecutions = new Map();
   const skillObservations = new Map();
   const skillRuns = [];
+  let agentRetrievalPlan = null;
   const executionLoop = {
     version: "1.0",
     maxFollowUps: MAX_AGENT_FOLLOW_UPS,
@@ -678,6 +734,70 @@ export const runAgentRag = async ({
     runs: skillRuns,
     budget: getBudgetSnapshot(budgetState),
   });
+  const returnClarification = async (clarification) => {
+    const agentMode = "clarification";
+
+    addTraceStep({
+      type: "clarification_gate",
+      label: "Clarification Gate",
+      status: "needs_input",
+      summary: clarification.summary,
+      detail: {
+        reason: clarification.reason,
+        clarificationQuestion: clarification.question,
+        ...(clarification.detail ?? {}),
+      },
+    });
+
+    const agentObservability = buildAgentObservability({
+      agentMode,
+    });
+    const status = 200;
+
+    await recordRagTrace({
+      traceType: "agent",
+      timestamp: new Date().toISOString(),
+      agentMode,
+      planMode: plan.mode,
+      docIds,
+      agentSkills: getAgentSkills(),
+      agentObservability,
+      agentRetrievalPlan,
+      agentTraceSummary: buildAgentTraceSummary(trace),
+      status,
+    });
+
+    return {
+      status,
+      body: {
+        agentAnswer: clarification.question,
+        agentMode,
+        agentTrace: trace,
+        agentSkills: getAgentSkills(),
+        agentObservability,
+        researchBrief: null,
+        ragAnswer: clarification.question,
+        ragSources: [],
+        ragResolvedQuestion: question,
+        ragMemoryApplied: false,
+        ragAbstained: true,
+        ragAbstainReason: clarification.summary,
+        ragGapPlan: null,
+        ragEvidenceSummary: null,
+        mcpAnswer: "Web search not used: clarification needed.",
+        clarification: {
+          needed: true,
+          reason: clarification.reason,
+          question: clarification.question,
+          detail: clarification.detail ?? null,
+        },
+        errors: {
+          rag: null,
+          mcp: null,
+        },
+      },
+    };
+  };
 
   for (const skill of selectedSkills) {
     getOrCreateSkillObservation(skill);
@@ -699,12 +819,13 @@ export const runAgentRag = async ({
     },
   });
 
-  if (plan.requiresDocuments && docIds.length === 0) {
-    const error = new Error(
-      "At least one docId is required for document-grounded questions. Upload a PDF or ask what documents are indexed."
-    );
-    error.status = 400;
-    throw error;
+  const preExecutionClarification = buildPreExecutionClarification({
+    plan,
+    docIds,
+  });
+
+  if (preExecutionClarification) {
+    return returnClarification(preExecutionClarification);
   }
 
   let inventoryAnswer = null;
@@ -712,11 +833,12 @@ export const runAgentRag = async ({
   let researchBrief = null;
   let ragResult = null;
   let webResult = null;
+  let documentEvidenceClarification = null;
   const customSkillResults = [];
   const shouldPlanRetrieval = selectedSkills.some(
     (skill) => skill.id === AGENT_SKILL_IDS.documentRag || skill.kind === "custom"
   );
-  const agentRetrievalPlan = shouldPlanRetrieval
+  agentRetrievalPlan = shouldPlanRetrieval
     ? buildAgentRetrievalPlan({
         question,
         plan,
@@ -1056,6 +1178,11 @@ export const runAgentRag = async ({
 
       if (!followUpBudget.ok) {
         executionLoop.stoppedReason = "budget_exhausted";
+        documentEvidenceClarification = buildEvidenceClarification({
+          reason: "document_follow_up_budget_exhausted",
+          check: primaryCheck,
+          gaps,
+        });
         recordSkippedSkill({
           skill: documentRagSkill,
           result: buildFailedSkillResult(
@@ -1124,6 +1251,16 @@ export const runAgentRag = async ({
           executionLoop.stoppedReason = followUpCheck.passed
             ? "follow_up_resolved"
             : "follow_up_unresolved";
+
+          if (!followUpCheck.passed) {
+            documentEvidenceClarification = buildEvidenceClarification({
+              reason: "document_evidence_unresolved_after_follow_up",
+              check: followUpCheck,
+              gaps: followUpCheck.gaps?.length
+                ? followUpCheck.gaps
+                : buildEvidenceGaps(followUpCheck),
+            });
+          }
         }
 
         ragResult = selectBetterRagResult({
@@ -1133,7 +1270,18 @@ export const runAgentRag = async ({
       }
     } else if (primaryCheck.retryRecommended) {
       executionLoop.stoppedReason = "follow_up_limit_reached";
+      documentEvidenceClarification = buildEvidenceClarification({
+        reason: "document_follow_up_limit_reached",
+        check: primaryCheck,
+        gaps: primaryCheck.gaps?.length
+          ? primaryCheck.gaps
+          : buildEvidenceGaps(primaryCheck),
+      });
     }
+  }
+
+  if (documentEvidenceClarification && !plan.wantsWeb) {
+    return returnClarification(documentEvidenceClarification);
   }
 
   const plannedWebSearchSkill = getSelectedSkill(AGENT_SKILL_IDS.webSearch);

@@ -526,6 +526,13 @@ test("chat endpoint agent skips document follow-up when document budget is exhau
     const body = await response.json();
 
     assert.equal(askedQuestions.length, 1);
+    assert.equal(body.agentMode, "clarification");
+    assert.match(body.agentAnswer, /could not verify/i);
+    assert.equal(body.clarification.needed, true);
+    assert.equal(
+      body.clarification.reason,
+      "document_follow_up_budget_exhausted"
+    );
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
       [
@@ -535,7 +542,7 @@ test("chat endpoint agent skips document follow-up when document budget is exhau
         "self_check",
         "gap_analysis",
         "budget_limit",
-        "synthesis",
+        "clarification_gate",
       ]
     );
     assert.match(
@@ -944,8 +951,18 @@ test("chat endpoint research brief requests require selected documents", async (
       }),
     });
 
-    assert.equal(response.status, 400);
-    assert.match((await response.json()).error, /At least one docId is required/i);
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+
+    assert.equal(body.agentMode, "clarification");
+    assert.equal(body.clarification.needed, true);
+    assert.equal(body.clarification.reason, "missing_required_documents");
+    assert.match(body.agentAnswer, /Which document should I use/i);
+    assert.deepEqual(
+      body.agentTrace.map((step) => step.type),
+      ["plan", "clarification_gate"]
+    );
   } finally {
     await server.close();
   }
