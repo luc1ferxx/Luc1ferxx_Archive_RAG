@@ -61,8 +61,10 @@ export const classifyAgentQueryIntent = ({ question = "", plan = {}, docIds = []
 
   if (
     plan.wantsRiskReview ||
+    plan.wantsContractSummary ||
     plan.wantsResearch ||
     plan.mode === CUSTOM_SKILL_IDS.riskReview ||
+    plan.mode === CUSTOM_SKILL_IDS.summarizeContract ||
     plan.mode === "research_brief" ||
     ANALYSIS_SIGNAL_PATTERN.test(question)
   ) {

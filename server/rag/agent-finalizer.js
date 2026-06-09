@@ -3,7 +3,7 @@ import { evaluateClaimSupport } from "./agent-self-check.js";
 const SOURCE_LABEL_PATTERN = /\[(?:source|来源)\s*\d+\]/gi;
 const SENTENCE_END_PATTERN = /[.!?。！？]$/;
 const SECTION_HEADING_PATTERN =
-  /^(?:risk review|risks?|gaps?|conflicts?(?: or exceptions?)?|exceptions?|evidence limits?|executive summary|key findings|summary|evidence by document|recommended next questions)$/i;
+  /^(?:risk review|contract summary|parties|key terms?|obligations?|deadlines?|unknowns?|risks?|gaps?|conflicts?(?: or exceptions?)?|exceptions?|evidence limits?|executive summary|key findings|summary|evidence by document|recommended next questions)$/i;
 
 const hasText = (value) => typeof value === "string" && value.trim().length > 0;
 
@@ -42,7 +42,7 @@ const getPreservedHeadings = (answerText = "") =>
     .split(/\n+/g)
     .map(normalizeHeadingText)
     .filter((line) => line && isPreservedHeading(line))
-    .slice(0, 3);
+    .slice(0, 8);
 
 const normalizeClaimSupportForHeadings = (claimSupport) => {
   const claims = (claimSupport.claims ?? []).map((claim) =>

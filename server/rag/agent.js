@@ -40,6 +40,9 @@ const TIMELINE_SIGNAL_PATTERN =
 const RISK_REVIEW_SIGNAL_PATTERN =
   /\b(risk review|review risks?|risk analysis|gaps?|exceptions?|conflicts?|contradictions?|uncertaint(?:y|ies)|red flags?|missing terms?)\b|风险审查|风险|缺口|例外|冲突|矛盾|不确定|遗漏/i;
 
+const CONTRACT_SUMMARY_SIGNAL_PATTERN =
+  /\b(summarize|summary|summarise|contract summary|agreement summary|key terms?|parties|obligations?|deadlines?|effective date|renewal|termination)\b.*\b(contract|agreement|policy|terms|msa|sow|nda)\b|\b(contract|agreement|msa|sow|nda)\b.*\b(summarize|summary|summarise|key terms?|parties|obligations?|deadlines?|renewal|termination)\b|合同摘要|协议摘要|合同总结|关键条款|合同义务|协议义务|合同期限|续约|终止/i;
+
 const serializeError = (error, fallbackMessage) => {
   if (error instanceof Error) {
     return error.message;
@@ -113,6 +116,7 @@ const buildPlan = ({ question, docIds }) => {
   const wantsWeb = WEB_SIGNAL_PATTERN.test(question);
   const wantsTimeline = TIMELINE_SIGNAL_PATTERN.test(question);
   const wantsRiskReview = RISK_REVIEW_SIGNAL_PATTERN.test(question);
+  const wantsContractSummary = CONTRACT_SUMMARY_SIGNAL_PATTERN.test(question);
   const hasDocuments = docIds.length > 0;
 
   if (wantsTimeline) {
@@ -120,6 +124,7 @@ const buildPlan = ({ question, docIds }) => {
       mode: CUSTOM_SKILL_IDS.extractTimeline,
       wantsTimeline: true,
       wantsRiskReview: false,
+      wantsContractSummary: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -135,6 +140,7 @@ const buildPlan = ({ question, docIds }) => {
       mode: CUSTOM_SKILL_IDS.riskReview,
       wantsTimeline: false,
       wantsRiskReview: true,
+      wantsContractSummary: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -145,11 +151,28 @@ const buildPlan = ({ question, docIds }) => {
     };
   }
 
+  if (wantsContractSummary) {
+    return {
+      mode: CUSTOM_SKILL_IDS.summarizeContract,
+      wantsTimeline: false,
+      wantsRiskReview: false,
+      wantsContractSummary: true,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      requiresDocuments: true,
+      summary: "Summarize selected contract documents with cited key terms and obligations.",
+    };
+  }
+
   if (wantsResearch) {
     return {
       mode: "research_brief",
       wantsTimeline: false,
       wantsRiskReview: false,
+      wantsContractSummary: false,
       wantsResearch: true,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -165,6 +188,7 @@ const buildPlan = ({ question, docIds }) => {
       mode: "inventory",
       wantsTimeline: false,
       wantsRiskReview: false,
+      wantsContractSummary: false,
       wantsResearch: false,
       wantsInventory: true,
       wantsDocumentRag: false,
@@ -179,6 +203,7 @@ const buildPlan = ({ question, docIds }) => {
       mode: "document_discovery",
       wantsTimeline: false,
       wantsRiskReview: false,
+      wantsContractSummary: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: true,
@@ -194,6 +219,7 @@ const buildPlan = ({ question, docIds }) => {
       mode: "web",
       wantsTimeline: false,
       wantsRiskReview: false,
+      wantsContractSummary: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -208,6 +234,7 @@ const buildPlan = ({ question, docIds }) => {
     mode: wantsWeb ? "document_web" : "document",
     wantsTimeline: false,
     wantsRiskReview: false,
+    wantsContractSummary: false,
     wantsResearch: false,
     wantsInventory,
     wantsDiscovery: false,

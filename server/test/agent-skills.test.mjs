@@ -57,11 +57,16 @@ test("default skill registry whitelists custom skills separately from built-ins"
     defaultRegistry.get(CUSTOM_SKILL_IDS.riskReview).version,
     "1.0.0"
   );
+  assert.equal(
+    defaultRegistry.get(CUSTOM_SKILL_IDS.summarizeContract).version,
+    "1.0.0"
+  );
   assert.deepEqual(
     defaultRegistry.select({
       plan: {
         wantsTimeline: true,
         wantsRiskReview: false,
+        wantsContractSummary: false,
         wantsDocumentRag: false,
         wantsWeb: false,
         wantsResearch: false,
@@ -77,6 +82,7 @@ test("default skill registry whitelists custom skills separately from built-ins"
       plan: {
         wantsTimeline: false,
         wantsRiskReview: true,
+        wantsContractSummary: false,
         wantsDocumentRag: false,
         wantsWeb: false,
         wantsResearch: false,
@@ -86,6 +92,22 @@ test("default skill registry whitelists custom skills separately from built-ins"
       docIds: ["doc-1"],
     }).map((skill) => skill.id),
     [CUSTOM_SKILL_IDS.riskReview]
+  );
+  assert.deepEqual(
+    defaultRegistry.select({
+      plan: {
+        wantsTimeline: false,
+        wantsRiskReview: false,
+        wantsContractSummary: true,
+        wantsDocumentRag: false,
+        wantsWeb: false,
+        wantsResearch: false,
+        wantsInventory: false,
+        wantsDiscovery: false,
+      },
+      docIds: ["doc-1"],
+    }).map((skill) => skill.id),
+    [CUSTOM_SKILL_IDS.summarizeContract]
   );
 });
 
@@ -542,6 +564,110 @@ test("agent rag executes whitelisted custom risk review skill with access scope"
   );
   assert.equal(customStep.detail.skillId, CUSTOM_SKILL_IDS.riskReview);
   assert.equal(customStep.detail.riskQuestion, receivedQuestion);
+});
+
+test("agent rag executes whitelisted custom contract summary skill with access scope", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  let listAccessScope = null;
+  let chatAccessScope = null;
+  let summaryRetrievalPlan = null;
+  let receivedQuestion = null;
+  let receivedDocIds = null;
+  const ragService = {
+    chat: async (docIds, question, options) => {
+      receivedDocIds = docIds;
+      receivedQuestion = question;
+      chatAccessScope = options.accessScope;
+      summaryRetrievalPlan = options.retrievalPlan;
+
+      return {
+        text: [
+          "Contract Summary",
+          "- Parties: Acme Corp and Beta LLC are parties to the services agreement. [Source 1]",
+          "- Key Terms: The agreement renews every 12 months unless either party gives 30 days notice. [Source 1]",
+          "- Obligations: Beta LLC must provide monthly support reports. [Source 1]",
+        ].join("\n"),
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "services-agreement.pdf",
+            pageNumber: 1,
+            excerpt: "Acme Corp and Beta LLC are parties to the services agreement. The agreement renews every 12 months unless either party gives 30 days notice. Beta LLC must provide monthly support reports.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: question,
+        memoryApplied: false,
+      };
+    },
+    listDocuments: (scope) => {
+      listAccessScope = scope;
+
+      return [
+        {
+          docId: "doc-1",
+          fileName: "services-agreement.pdf",
+        },
+      ];
+    },
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Summarize this contract with key terms and obligations.",
+    docIds: ["doc-1"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope,
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, CUSTOM_SKILL_IDS.summarizeContract);
+  assert.match(response.body.agentAnswer, /Contract Summary/);
+  assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+  assert.equal(response.body.ragSources.length, 1);
+  assert.deepEqual(receivedDocIds, ["doc-1"]);
+  assert.deepEqual(listAccessScope, accessScope);
+  assert.deepEqual(chatAccessScope, accessScope);
+  assert.match(receivedQuestion, /contract summary/i);
+  assert.match(receivedQuestion, /key terms/i);
+  assert.equal(summaryRetrievalPlan.intent, "analysis");
+  assert.equal(summaryRetrievalPlan.retrievalOptions.topK, 10);
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "query_planner", "custom_skill", "synthesis", "answer_finalizer"]
+  );
+  assert.deepEqual(response.body.agentSkills, [
+    {
+      skillId: CUSTOM_SKILL_IDS.summarizeContract,
+      skillVersion: "1.0.0",
+      label: "Summarize Contract",
+      status: "completed",
+    },
+  ]);
+
+  const summaryObservation = response.body.agentObservability.skills.find(
+    (skill) => skill.skillId === CUSTOM_SKILL_IDS.summarizeContract
+  );
+  assert.equal(summaryObservation.selected, true);
+  assert.equal(summaryObservation.status, "completed");
+  assert.equal(summaryObservation.attempts, 1);
+  assert.equal(summaryObservation.budgetKey, "customSkillCalls");
+  assert.equal(summaryObservation.budgetUsed, 1);
+  assert.equal(summaryObservation.budgetLimit, 2);
+  assert.equal(summaryObservation.citationCount, 1);
+
+  const customStep = response.body.agentTrace.find(
+    (step) => step.type === "custom_skill"
+  );
+  assert.equal(customStep.detail.skillId, CUSTOM_SKILL_IDS.summarizeContract);
+  assert.equal(customStep.detail.summaryQuestion, receivedQuestion);
 });
 
 test("feedback records and feedback eval cases retain skill metadata", () => {

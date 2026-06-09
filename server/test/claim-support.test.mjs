@@ -213,6 +213,44 @@ test("answer finalizer preserves section headings without counting them as evide
   );
 });
 
+test("answer finalizer preserves contract summary section headings", () => {
+  const result = finalizeAgentAnswer({
+    answerText: [
+      "Contract Summary",
+      "Parties",
+      "- Acme Corp and Beta LLC are parties to the services agreement. [Source 1]",
+      "Key Terms",
+      "- The agreement renews every 12 months unless either party gives 30 days notice. [Source 1]",
+      "Obligations",
+      "- Beta LLC must provide monthly support reports. [Source 1]",
+      "Deadlines",
+      "- Unsupported: Payment is due by the fifth business day. [Source 1]",
+      "Unknowns",
+      "- The payment deadline is not specified. [Source 1]",
+    ].join("\n"),
+    citations: [
+      {
+        docId: "doc-1",
+        fileName: "services-agreement.pdf",
+        pageNumber: 1,
+        excerpt: "Acme Corp and Beta LLC are parties to the services agreement. The agreement renews every 12 months unless either party gives 30 days notice. Beta LLC must provide monthly support reports. The payment deadline is not specified.",
+      },
+    ],
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.abstained, false);
+  assert.match(result.text, /^Contract Summary\n/);
+  assert.match(result.text, /\nParties\n/);
+  assert.match(result.text, /\nKey Terms\n/);
+  assert.match(result.text, /\nObligations\n/);
+  assert.match(result.text, /\nDeadlines\n/);
+  assert.match(result.text, /\nUnknowns\n/);
+  assert.doesNotMatch(result.text, /fifth business day/i);
+  assert.equal(result.claimSupport.supportedClaimCount, 4);
+  assert.equal(result.claimSupport.unsupportedClaimCount, 1);
+});
+
 test("answer finalizer abstains when only a preserved heading is supported", () => {
   const result = finalizeAgentAnswer({
     answerText: "Risk Review",
