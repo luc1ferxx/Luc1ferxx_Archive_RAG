@@ -40,7 +40,7 @@ Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mj
 ## Implementation Notes
 
 - Keep RAG changes inside `server/rag/` where possible; route/API behavior lives in `server/app.js`.
-- AgentRAG skills are registered in `server/rag/skills/registry.js`; built-ins live in `server/rag/skills/built-ins.js`, and whitelisted custom skills live under `server/rag/skills/custom/`. Current custom skills include `extract_timeline`, `risk_review`, and `summarize_contract`.
+- AgentRAG skills are registered in `server/rag/skills/registry.js`; built-ins live in `server/rag/skills/built-ins.js`, and whitelisted custom skills live under `server/rag/skills/custom/`. Current custom skills include `extract_timeline`, `risk_review`, `summarize_contract`, and `compare_documents`.
 - New skills need stable `id/version/label/budgetKey/requiresAccessScope`, deterministic `match()`, and an `execute()` path that receives `accessScope` when reading user/workspace data. Custom skills must be exported from `server/rag/skills/custom/index.js`; do not let the model call arbitrary unregistered tools.
 - AgentRAG query planning lives in `server/rag/agent-query-planner.js`; document/custom skills should pass `retrievalPlan` through to `ragService.chat`, and RAG observability should preserve `agentRetrievalPlan` plus actual `retrievalQueries`.
 - Agent self-check claim support logic lives in `server/rag/agent-self-check.js`; final answer filtering lives in `server/rag/agent-finalizer.js`. Keep both deterministic and preserve `claimSupport` in agent trace, feedback records, and feedback corpus metadata.

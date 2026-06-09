@@ -3,7 +3,7 @@ import { evaluateClaimSupport } from "./agent-self-check.js";
 const SOURCE_LABEL_PATTERN = /\[(?:source|来源)\s*\d+\]/gi;
 const SENTENCE_END_PATTERN = /[.!?。！？]$/;
 const SECTION_HEADING_PATTERN =
-  /^(?:risk review|contract summary|parties|key terms?|obligations?|deadlines?|unknowns?|risks?|gaps?|conflicts?(?: or exceptions?)?|exceptions?|evidence limits?|executive summary|key findings|summary|evidence by document|recommended next questions)$/i;
+  /^(?:risk review|contract summary|document comparison|common ground|differences?|missing terms?|parties|key terms?|obligations?|deadlines?|unknowns?|risks?|gaps?|conflicts?(?: or exceptions?)?|exceptions?|evidence limits?|executive summary|key findings|summary|evidence by document|recommended next questions)$/i;
 
 const hasText = (value) => typeof value === "string" && value.trim().length > 0;
 

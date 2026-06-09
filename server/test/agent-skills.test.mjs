@@ -61,12 +61,17 @@ test("default skill registry whitelists custom skills separately from built-ins"
     defaultRegistry.get(CUSTOM_SKILL_IDS.summarizeContract).version,
     "1.0.0"
   );
+  assert.equal(
+    defaultRegistry.get(CUSTOM_SKILL_IDS.compareDocuments).version,
+    "1.0.0"
+  );
   assert.deepEqual(
     defaultRegistry.select({
       plan: {
         wantsTimeline: true,
         wantsRiskReview: false,
         wantsContractSummary: false,
+        wantsCompareDocuments: false,
         wantsDocumentRag: false,
         wantsWeb: false,
         wantsResearch: false,
@@ -83,6 +88,7 @@ test("default skill registry whitelists custom skills separately from built-ins"
         wantsTimeline: false,
         wantsRiskReview: true,
         wantsContractSummary: false,
+        wantsCompareDocuments: false,
         wantsDocumentRag: false,
         wantsWeb: false,
         wantsResearch: false,
@@ -99,6 +105,7 @@ test("default skill registry whitelists custom skills separately from built-ins"
         wantsTimeline: false,
         wantsRiskReview: false,
         wantsContractSummary: true,
+        wantsCompareDocuments: false,
         wantsDocumentRag: false,
         wantsWeb: false,
         wantsResearch: false,
@@ -108,6 +115,23 @@ test("default skill registry whitelists custom skills separately from built-ins"
       docIds: ["doc-1"],
     }).map((skill) => skill.id),
     [CUSTOM_SKILL_IDS.summarizeContract]
+  );
+  assert.deepEqual(
+    defaultRegistry.select({
+      plan: {
+        wantsTimeline: false,
+        wantsRiskReview: false,
+        wantsContractSummary: false,
+        wantsCompareDocuments: true,
+        wantsDocumentRag: false,
+        wantsWeb: false,
+        wantsResearch: false,
+        wantsInventory: false,
+        wantsDiscovery: false,
+      },
+      docIds: ["doc-1", "doc-2"],
+    }).map((skill) => skill.id),
+    [CUSTOM_SKILL_IDS.compareDocuments]
   );
 });
 
@@ -668,6 +692,125 @@ test("agent rag executes whitelisted custom contract summary skill with access s
   );
   assert.equal(customStep.detail.skillId, CUSTOM_SKILL_IDS.summarizeContract);
   assert.equal(customStep.detail.summaryQuestion, receivedQuestion);
+});
+
+test("agent rag executes whitelisted custom compare documents skill with access scope", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  let listAccessScope = null;
+  let chatAccessScope = null;
+  let compareRetrievalPlan = null;
+  let receivedQuestion = null;
+  let receivedDocIds = null;
+  const ragService = {
+    chat: async (docIds, question, options) => {
+      receivedDocIds = docIds;
+      receivedQuestion = question;
+      chatAccessScope = options.accessScope;
+      compareRetrievalPlan = options.retrievalPlan;
+
+      return {
+        text: [
+          "Document Comparison",
+          "Common Ground",
+          "- Both policies require manager approval for remote work. [Source 1] [Source 2]",
+          "Differences",
+          "- Policy 2024 allows 2 remote days per week, while Policy 2025 allows 3 remote days per week. [Source 1] [Source 2]",
+          "Conflicts",
+          "- No direct conflict is specified in the selected documents. [Source 1] [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "policy-2024.pdf",
+            pageNumber: 1,
+            excerpt: "Policy 2024 requires manager approval for remote work and allows 2 remote days per week. No direct conflict is specified.",
+          },
+          {
+            docId: "doc-2",
+            fileName: "policy-2025.pdf",
+            pageNumber: 1,
+            excerpt: "Policy 2025 requires manager approval for remote work and allows 3 remote days per week. No direct conflict is specified.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: question,
+        memoryApplied: false,
+      };
+    },
+    listDocuments: (scope) => {
+      listAccessScope = scope;
+
+      return [
+        {
+          docId: "doc-1",
+          fileName: "policy-2024.pdf",
+        },
+        {
+          docId: "doc-2",
+          fileName: "policy-2025.pdf",
+        },
+      ];
+    },
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Compare the selected policies for common ground, differences, conflicts, and missing terms.",
+    docIds: ["doc-1", "doc-2"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope,
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, CUSTOM_SKILL_IDS.compareDocuments);
+  assert.match(response.body.agentAnswer, /Document Comparison/);
+  assert.match(response.body.agentAnswer, /Common Ground/);
+  assert.match(response.body.agentAnswer, /Differences/);
+  assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+  assert.equal(response.body.ragSources.length, 2);
+  assert.deepEqual(receivedDocIds, ["doc-1", "doc-2"]);
+  assert.deepEqual(listAccessScope, accessScope);
+  assert.deepEqual(chatAccessScope, accessScope);
+  assert.match(receivedQuestion, /document comparison/i);
+  assert.match(receivedQuestion, /missing terms/i);
+  assert.equal(compareRetrievalPlan.intent, "comparison");
+  assert.equal(compareRetrievalPlan.retrievalOptions.topK, 8);
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "query_planner", "custom_skill", "synthesis", "answer_finalizer"]
+  );
+  assert.deepEqual(response.body.agentSkills, [
+    {
+      skillId: CUSTOM_SKILL_IDS.compareDocuments,
+      skillVersion: "1.0.0",
+      label: "Compare Documents",
+      status: "completed",
+    },
+  ]);
+
+  const compareObservation = response.body.agentObservability.skills.find(
+    (skill) => skill.skillId === CUSTOM_SKILL_IDS.compareDocuments
+  );
+  assert.equal(compareObservation.selected, true);
+  assert.equal(compareObservation.status, "completed");
+  assert.equal(compareObservation.attempts, 1);
+  assert.equal(compareObservation.budgetKey, "customSkillCalls");
+  assert.equal(compareObservation.budgetUsed, 1);
+  assert.equal(compareObservation.budgetLimit, 2);
+  assert.equal(compareObservation.citationCount, 2);
+
+  const customStep = response.body.agentTrace.find(
+    (step) => step.type === "custom_skill"
+  );
+  assert.equal(customStep.detail.skillId, CUSTOM_SKILL_IDS.compareDocuments);
+  assert.equal(customStep.detail.compareQuestion, receivedQuestion);
 });
 
 test("feedback records and feedback eval cases retain skill metadata", () => {

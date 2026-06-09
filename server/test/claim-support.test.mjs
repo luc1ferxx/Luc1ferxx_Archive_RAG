@@ -251,6 +251,47 @@ test("answer finalizer preserves contract summary section headings", () => {
   assert.equal(result.claimSupport.unsupportedClaimCount, 1);
 });
 
+test("answer finalizer preserves document comparison section headings", () => {
+  const result = finalizeAgentAnswer({
+    answerText: [
+      "Document Comparison",
+      "Common Ground",
+      "- Both policies require manager approval for remote work. [Source 1] [Source 2]",
+      "Differences",
+      "- Policy 2024 allows 2 remote days per week, while Policy 2025 allows 3 remote days per week. [Source 1] [Source 2]",
+      "Conflicts",
+      "- Unsupported: Policy 2025 provides a 500 dollar remote stipend. [Source 2]",
+      "Missing Terms",
+      "- No reimbursement term is specified in either policy. [Source 1] [Source 2]",
+    ].join("\n"),
+    citations: [
+      {
+        docId: "doc-1",
+        fileName: "policy-2024.pdf",
+        pageNumber: 1,
+        excerpt: "Policy 2024 requires manager approval for remote work and allows 2 remote days per week. No reimbursement term is specified.",
+      },
+      {
+        docId: "doc-2",
+        fileName: "policy-2025.pdf",
+        pageNumber: 1,
+        excerpt: "Policy 2025 requires manager approval for remote work and allows 3 remote days per week. No reimbursement term is specified.",
+      },
+    ],
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.abstained, false);
+  assert.match(result.text, /^Document Comparison\n/);
+  assert.match(result.text, /\nCommon Ground\n/);
+  assert.match(result.text, /\nDifferences\n/);
+  assert.match(result.text, /\nConflicts\n/);
+  assert.match(result.text, /\nMissing Terms\n/);
+  assert.doesNotMatch(result.text, /500 dollar/i);
+  assert.equal(result.claimSupport.supportedClaimCount, 3);
+  assert.equal(result.claimSupport.unsupportedClaimCount, 1);
+});
+
 test("answer finalizer abstains when only a preserved heading is supported", () => {
   const result = finalizeAgentAnswer({
     answerText: "Risk Review",

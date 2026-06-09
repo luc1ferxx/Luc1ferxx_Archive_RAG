@@ -60,6 +60,14 @@ export const classifyAgentQueryIntent = ({ question = "", plan = {}, docIds = []
   }
 
   if (
+    plan.wantsCompareDocuments ||
+    plan.mode === CUSTOM_SKILL_IDS.compareDocuments ||
+    (docIds.length > 1 && COMPARISON_SIGNAL_PATTERN.test(question))
+  ) {
+    return "comparison";
+  }
+
+  if (
     plan.wantsRiskReview ||
     plan.wantsContractSummary ||
     plan.wantsResearch ||
@@ -69,10 +77,6 @@ export const classifyAgentQueryIntent = ({ question = "", plan = {}, docIds = []
     ANALYSIS_SIGNAL_PATTERN.test(question)
   ) {
     return "analysis";
-  }
-
-  if (docIds.length > 1 && COMPARISON_SIGNAL_PATTERN.test(question)) {
-    return "comparison";
   }
 
   return "fact";

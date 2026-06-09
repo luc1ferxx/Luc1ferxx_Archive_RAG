@@ -43,6 +43,9 @@ const RISK_REVIEW_SIGNAL_PATTERN =
 const CONTRACT_SUMMARY_SIGNAL_PATTERN =
   /\b(summarize|summary|summarise|contract summary|agreement summary|key terms?|parties|obligations?|deadlines?|effective date|renewal|termination)\b.*\b(contract|agreement|policy|terms|msa|sow|nda)\b|\b(contract|agreement|msa|sow|nda)\b.*\b(summarize|summary|summarise|key terms?|parties|obligations?|deadlines?|renewal|termination)\b|合同摘要|协议摘要|合同总结|关键条款|合同义务|协议义务|合同期限|续约|终止/i;
 
+const COMPARE_DOCUMENTS_SIGNAL_PATTERN =
+  /\b(compare|comparison|differences?|different|versus|vs|same|similar|contrast|common ground|missing terms?|across|between)\b|对比|比较|差异|不同|相同|一致|共同点|缺失条款|遗漏条款|之间/i;
+
 const serializeError = (error, fallbackMessage) => {
   if (error instanceof Error) {
     return error.message;
@@ -117,6 +120,7 @@ const buildPlan = ({ question, docIds }) => {
   const wantsTimeline = TIMELINE_SIGNAL_PATTERN.test(question);
   const wantsRiskReview = RISK_REVIEW_SIGNAL_PATTERN.test(question);
   const wantsContractSummary = CONTRACT_SUMMARY_SIGNAL_PATTERN.test(question);
+  const wantsCompareDocuments = COMPARE_DOCUMENTS_SIGNAL_PATTERN.test(question);
   const hasDocuments = docIds.length > 0;
 
   if (wantsTimeline) {
@@ -125,6 +129,7 @@ const buildPlan = ({ question, docIds }) => {
       wantsTimeline: true,
       wantsRiskReview: false,
       wantsContractSummary: false,
+      wantsCompareDocuments: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -135,12 +140,30 @@ const buildPlan = ({ question, docIds }) => {
     };
   }
 
+  if (wantsCompareDocuments) {
+    return {
+      mode: CUSTOM_SKILL_IDS.compareDocuments,
+      wantsTimeline: false,
+      wantsRiskReview: false,
+      wantsContractSummary: false,
+      wantsCompareDocuments: true,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      requiresDocuments: true,
+      summary: "Compare selected documents for cited common ground, differences, conflicts, and missing terms.",
+    };
+  }
+
   if (wantsRiskReview) {
     return {
       mode: CUSTOM_SKILL_IDS.riskReview,
       wantsTimeline: false,
       wantsRiskReview: true,
       wantsContractSummary: false,
+      wantsCompareDocuments: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -157,6 +180,7 @@ const buildPlan = ({ question, docIds }) => {
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: true,
+      wantsCompareDocuments: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -173,6 +197,7 @@ const buildPlan = ({ question, docIds }) => {
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
+      wantsCompareDocuments: false,
       wantsResearch: true,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -189,6 +214,7 @@ const buildPlan = ({ question, docIds }) => {
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
+      wantsCompareDocuments: false,
       wantsResearch: false,
       wantsInventory: true,
       wantsDocumentRag: false,
@@ -204,6 +230,7 @@ const buildPlan = ({ question, docIds }) => {
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
+      wantsCompareDocuments: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: true,
@@ -220,6 +247,7 @@ const buildPlan = ({ question, docIds }) => {
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
+      wantsCompareDocuments: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -235,6 +263,7 @@ const buildPlan = ({ question, docIds }) => {
     wantsTimeline: false,
     wantsRiskReview: false,
     wantsContractSummary: false,
+    wantsCompareDocuments: false,
     wantsResearch: false,
     wantsInventory,
     wantsDiscovery: false,
