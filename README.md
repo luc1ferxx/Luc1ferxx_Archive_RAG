@@ -245,7 +245,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
 | `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
 
-说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`agent-planner.test.mjs`、`agent-response-builder.test.mjs`、`agent-skill-observability.test.mjs`、`agent-synthesis.test.mjs`、`agent-working-memory.test.mjs`、`quality-report.test.mjs`、`claim-support.test.mjs`、`observability-report.test.mjs`、`ci-workflow.test.mjs`、`param-sweep.test.mjs` 和 `trajectory-eval.test.mjs`。
+说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`agent-planner.test.mjs`、`agent-response-builder.test.mjs`、`agent-run-context.test.mjs`、`agent-skill-observability.test.mjs`、`agent-synthesis.test.mjs`、`agent-working-memory.test.mjs`、`quality-report.test.mjs`、`claim-support.test.mjs`、`observability-report.test.mjs`、`ci-workflow.test.mjs`、`param-sweep.test.mjs` 和 `trajectory-eval.test.mjs`。
 
 `ragas` 是可选 Python 评测，需要额外安装依赖：
 

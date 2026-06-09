@@ -12,7 +12,6 @@ import {
 } from "./agent-synthesis.js";
 import {
   buildAgentResponse,
-  buildClarificationResponse,
   buildEvidenceClarification,
   serializeAgentError as serializeError,
 } from "./agent-response-builder.js";
@@ -31,22 +30,14 @@ import {
   orderSelectedSkills,
 } from "./agent-planner.js";
 import { buildAgentRetrievalPlan } from "./agent-query-planner.js";
+import { createAgentRunContext } from "./agent-run-context.js";
 import {
-  buildAgentTraceSummary,
   buildFinalizerSummary,
   buildGapAnalysisSummary,
   buildQueryPlannerSummary,
   buildSelfCheckSummary,
-  buildStep,
 } from "./agent-trace.js";
-import { recordRagTrace } from "./observability.js";
-import {
-  appendTraceStep,
-  buildBudgetLimitStep,
-  consumeBudget,
-  createAgentBudget,
-  getBudgetSnapshot,
-} from "./agent-budget.js";
+import { consumeBudget } from "./agent-budget.js";
 import {
   AGENT_SKILL_IDS,
   buildFailedSkillResult,
@@ -66,10 +57,7 @@ export const runAgentRag = async ({
   accessScope,
   skillRegistry,
 }) => {
-  const trace = [];
-  const budgetState = createAgentBudget(agentBudget);
   const registry = skillRegistry ?? createDefaultSkillRegistry();
-  let agentRetrievalPlan = null;
   const {
     executionLoop,
     recordExecutionGaps,
@@ -83,25 +71,6 @@ export const runAgentRag = async ({
     maxFollowUps: MAX_AGENT_FOLLOW_UPS,
     question,
   });
-  const addTraceStep = (step) =>
-    appendTraceStep({
-      budgetState,
-      trace,
-      step: buildStep({
-        index: trace.length + 1,
-        ...step,
-      }),
-    });
-  const addBudgetLimitTrace = ({ reason, tool }) =>
-    appendTraceStep({
-      budgetState,
-      trace,
-      step: buildBudgetLimitStep({
-        index: trace.length + 1,
-        reason,
-        tool,
-      }),
-    });
   const plan = buildPlan({
     question,
     docIds,
@@ -120,6 +89,27 @@ export const runAgentRag = async ({
     : [];
   const getSelectedSkill = (skillId) =>
     selectedSkills.find((skill) => skill.id === skillId) ?? null;
+  const runContext = createAgentRunContext({
+    agentBudget,
+    chainSkills,
+    docIds,
+    executionLoop,
+    plan,
+    question,
+    selectedSkills,
+    workingMemory,
+  });
+  const {
+    addBudgetLimitTrace,
+    addTraceStep,
+    budgetState,
+    buildAgentObservability,
+    getBudgetSnapshot,
+    recordAgentTrace,
+    returnClarification,
+    setAgentRetrievalPlan,
+    trace,
+  } = runContext;
   const {
     buildSkillTraceDetail,
     executeObservedSkill,
@@ -134,61 +124,11 @@ export const runAgentRag = async ({
     recordWorkingMemoryQueries,
     selectedSkills,
   });
-  const buildAgentObservability = ({ agentMode }) => ({
-    agentMode,
-    planMode: plan.mode,
-    skillChain: chainSkills.map((skill) => getSkillDescriptor(skill)),
-    executionLoop,
-    workingMemory,
-    selectedSkills: selectedSkills.map((skill) => getSkillDescriptor(skill)),
-    skills: getSkillObservations(),
-    runs: getSkillRuns(),
-    budget: getBudgetSnapshot(budgetState),
+  runContext.setSkillTracker({
+    getAgentSkills,
+    getSkillObservations,
+    getSkillRuns,
   });
-  const returnClarification = async (clarification) => {
-    const agentMode = "clarification";
-
-    addTraceStep({
-      type: "clarification_gate",
-      label: "Clarification Gate",
-      status: "needs_input",
-      summary: clarification.summary,
-      detail: {
-        reason: clarification.reason,
-        clarificationQuestion: clarification.question,
-        ...(clarification.detail ?? {}),
-      },
-    });
-
-    const agentObservability = buildAgentObservability({
-      agentMode,
-    });
-    const status = 200;
-    const agentSkills = getAgentSkills();
-
-    await recordRagTrace({
-      traceType: "agent",
-      timestamp: new Date().toISOString(),
-      agentMode,
-      planMode: plan.mode,
-      docIds,
-      agentSkills,
-      agentObservability,
-      agentRetrievalPlan,
-      agentTraceSummary: buildAgentTraceSummary(trace),
-      status,
-    });
-
-    return buildClarificationResponse({
-      clarification,
-      agentMode,
-      trace,
-      agentSkills,
-      agentObservability,
-      workingMemory,
-      question,
-    });
-  };
 
   for (const skill of selectedSkills) {
     getOrCreateSkillObservation(skill);
@@ -201,7 +141,7 @@ export const runAgentRag = async ({
     detail: {
       mode: plan.mode,
       docIds,
-      budget: getBudgetSnapshot(budgetState),
+      budget: getBudgetSnapshot(),
       actions: buildPlannerActions({
         plan,
         docIds,
@@ -229,13 +169,15 @@ export const runAgentRag = async ({
   const shouldPlanRetrieval = selectedSkills.some(
     (skill) => skill.id === AGENT_SKILL_IDS.documentRag || skill.kind === "custom"
   );
-  agentRetrievalPlan = shouldPlanRetrieval
-    ? buildAgentRetrievalPlan({
-        question,
-        plan,
-        docIds,
-      })
-    : null;
+  const agentRetrievalPlan = setAgentRetrievalPlan(
+    shouldPlanRetrieval
+      ? buildAgentRetrievalPlan({
+          question,
+          plan,
+          docIds,
+        })
+      : null
+  );
 
   if (agentRetrievalPlan) {
     addTraceStep({
@@ -816,7 +758,7 @@ export const runAgentRag = async ({
     label: "Synthesis",
     summary: "Composed the final agent answer from completed tool results.",
     detail: {
-      budget: getBudgetSnapshot(budgetState),
+      budget: getBudgetSnapshot(),
     },
   });
 
@@ -877,16 +819,10 @@ export const runAgentRag = async ({
     webResult,
   });
 
-  await recordRagTrace({
-    traceType: "agent",
-    timestamp: new Date().toISOString(),
+  await recordAgentTrace({
     agentMode,
-    planMode: plan.mode,
-    docIds,
     agentSkills,
     agentObservability,
-    agentRetrievalPlan,
-    agentTraceSummary: buildAgentTraceSummary(trace),
     status: agentResponse.status,
   });
 

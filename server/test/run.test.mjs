@@ -5,6 +5,7 @@ import "./feedback-corpus.test.mjs";
 import "./agent-skills.test.mjs";
 import "./agent-planner.test.mjs";
 import "./agent-response-builder.test.mjs";
+import "./agent-run-context.test.mjs";
 import "./agent-skill-observability.test.mjs";
 import "./agent-synthesis.test.mjs";
 import "./agent-working-memory.test.mjs";
