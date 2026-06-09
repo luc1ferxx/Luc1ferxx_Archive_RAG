@@ -6,6 +6,17 @@ import {
 } from "./agent-self-check.js";
 import { finalizeAgentAnswer } from "./agent-finalizer.js";
 import {
+  buildDirectAnswerModes,
+  buildSynthesisAnswer,
+  shouldFinalizeAgentAnswer,
+} from "./agent-synthesis.js";
+import {
+  buildAgentResponse,
+  buildClarificationResponse,
+  buildEvidenceClarification,
+  serializeAgentError as serializeError,
+} from "./agent-response-builder.js";
+import {
   createAgentSkillTracker,
   getSkillDescriptor,
 } from "./agent-skill-observability.js";
@@ -38,96 +49,11 @@ import {
 } from "./agent-budget.js";
 import {
   AGENT_SKILL_IDS,
-  CUSTOM_SKILL_IDS,
   buildFailedSkillResult,
   createDefaultSkillRegistry,
 } from "./skills/registry.js";
 
 const MAX_AGENT_FOLLOW_UPS = 1;
-
-const serializeError = (error, fallbackMessage) => {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return fallbackMessage;
-};
-
-const hasText = (value) => typeof value === "string" && value.trim().length > 0;
-
-const normalizeText = (value) => (hasText(value) ? value.trim() : "");
-
-const buildEvidenceClarification = ({ reason, check, gaps = [] } = {}) => ({
-  reason,
-  summary:
-    "The agent could not verify the answer from the selected document evidence.",
-  question:
-    "I could not verify the answer from the selected documents. Which specific section, term, date, or document should I focus on?",
-  detail: {
-    reasons: check?.reasons ?? [],
-    gaps,
-  },
-});
-
-const buildSynthesisAnswer = ({
-  plan,
-  ragResult,
-  webResult,
-  customSkillResults,
-  inventoryAnswer,
-  discoveryAnswer,
-  researchBrief,
-}) => {
-  if (plan.mode === SKILL_CHAIN_MODE) {
-    const completedResults = customSkillResults
-      .filter((result) => result.ok && normalizeText(result.text))
-      .map((result) => normalizeText(result.text));
-
-    return completedResults.length > 0
-      ? completedResults.join("\n\n")
-      : "The skill chain could not complete the request.";
-  }
-
-  if (Object.values(CUSTOM_SKILL_IDS).includes(plan.mode)) {
-    const customResult = customSkillResults.find(
-      (result) => result.ok && result.skillId === plan.mode
-    );
-
-    return customResult?.text ?? "The custom skill could not complete the request.";
-  }
-
-  if (plan.mode === "research_brief") {
-    return researchBrief?.text ?? "The research brief could not be generated.";
-  }
-
-  if (plan.mode === "inventory") {
-    return inventoryAnswer;
-  }
-
-  if (plan.mode === "document_discovery") {
-    return discoveryAnswer;
-  }
-
-  if (ragResult?.ok && webResult?.ok) {
-    return [
-      "Document evidence:",
-      normalizeText(ragResult.value.text),
-      "",
-      "Web context:",
-      normalizeText(webResult.value.text),
-    ].join("\n");
-  }
-
-  if (ragResult?.ok) {
-    return normalizeText(ragResult.value.text);
-  }
-
-  if (webResult?.ok) {
-    return normalizeText(webResult.value.text);
-  }
-
-  return "The agent could not complete the request because all selected tools failed.";
-};
 
 export const runAgentRag = async ({
   agentBudget,
@@ -238,6 +164,7 @@ export const runAgentRag = async ({
       agentMode,
     });
     const status = 200;
+    const agentSkills = getAgentSkills();
 
     await recordRagTrace({
       traceType: "agent",
@@ -245,44 +172,22 @@ export const runAgentRag = async ({
       agentMode,
       planMode: plan.mode,
       docIds,
-      agentSkills: getAgentSkills(),
+      agentSkills,
       agentObservability,
       agentRetrievalPlan,
       agentTraceSummary: buildAgentTraceSummary(trace),
       status,
     });
 
-    return {
-      status,
-      body: {
-        agentAnswer: clarification.question,
-        agentMode,
-        agentTrace: trace,
-        agentSkills: getAgentSkills(),
-        agentObservability,
-        agentWorkingMemory: workingMemory,
-        researchBrief: null,
-        ragAnswer: clarification.question,
-        ragSources: [],
-        ragResolvedQuestion: question,
-        ragMemoryApplied: false,
-        ragAbstained: true,
-        ragAbstainReason: clarification.summary,
-        ragGapPlan: null,
-        ragEvidenceSummary: null,
-        mcpAnswer: "Web search not used: clarification needed.",
-        clarification: {
-          needed: true,
-          reason: clarification.reason,
-          question: clarification.question,
-          detail: clarification.detail ?? null,
-        },
-        errors: {
-          rag: null,
-          mcp: null,
-        },
-      },
-    };
+    return buildClarificationResponse({
+      clarification,
+      agentMode,
+      trace,
+      agentSkills,
+      agentObservability,
+      workingMemory,
+      question,
+    });
   };
 
   for (const skill of selectedSkills) {
@@ -881,13 +786,9 @@ export const runAgentRag = async ({
   const customCitations = successfulCustomResults.flatMap(
     (result) => result.citations ?? []
   );
-  const directAnswerModes = new Set([
-    "inventory",
-    "document_discovery",
-    "research_brief",
-    SKILL_CHAIN_MODE,
-    ...customSkills.map((skill) => skill.id),
-  ]);
+  const directAnswerModes = buildDirectAnswerModes({
+    customSkills,
+  });
   const ragSources = researchBrief?.citations ??
     (ragResult?.ok
       ? ragResult.value.citations ?? []
@@ -904,11 +805,11 @@ export const runAgentRag = async ({
     discoveryAnswer,
     researchBrief,
   });
-  const shouldFinalizeAnswer =
-    ragSources.length > 0 &&
-    (agentMode === "document" ||
-      agentMode === SKILL_CHAIN_MODE ||
-      (primaryCustomResult && agentMode === primaryCustomResult.skillId));
+  const shouldFinalizeAnswer = shouldFinalizeAgentAnswer({
+    agentMode,
+    primaryCustomResult,
+    ragSources,
+  });
 
   addTraceStep({
     type: "synthesis",
@@ -952,97 +853,42 @@ export const runAgentRag = async ({
     });
   }
 
-  const agentAnswer = finalizer?.text ?? baseAgentAnswer;
-
-  const ragError = ragResult?.ok === false
-    ? serializeError(ragResult.error, "Unable to answer from the document.")
-    : null;
-  const webError = webResult?.ok === false
-    ? serializeError(webResult.error, "Unable to answer from web search.")
-    : null;
-  const rawRagAnswer = researchBrief
-    ? researchBrief.text
-    : ragResult?.ok
-    ? ragResult.value.text
-    : agentMode === SKILL_CHAIN_MODE
-      ? baseAgentAnswer
-    : primaryCustomResult?.text
-      ? primaryCustomResult.text
-    : ragError
-      ? `RAG unavailable: ${ragError}`
-      : "";
-  const ragAnswer =
-    finalizer &&
-    (agentMode === "document" ||
-      agentMode === SKILL_CHAIN_MODE ||
-      (primaryCustomResult && agentMode === primaryCustomResult.skillId))
-      ? agentAnswer
-      : rawRagAnswer;
-  const rawRagAbstained = researchBrief
-    ? researchBrief.findings.some((finding) => finding.abstained)
-    : ragResult?.ok
-      ? Boolean(ragResult.value.abstained)
-      : primaryCustomResult
-        ? Boolean(primaryCustomResult.abstained)
-        : null;
-  const ragAbstained = finalizer?.abstained ? true : rawRagAbstained;
-  const status =
-    !directAnswerModes.has(plan.mode) &&
-    !ragResult?.ok &&
-    (shouldRunWeb ? !webResult?.ok : true)
-      ? 502
-      : 200;
   const agentObservability = buildAgentObservability({
     agentMode,
   });
+  const agentSkills = getAgentSkills();
+  const agentResponse = buildAgentResponse({
+    agentMode,
+    baseAgentAnswer,
+    directAnswerModes,
+    finalizer,
+    plan,
+    primaryCustomResult,
+    question,
+    ragResult,
+    ragSources,
+    researchBrief,
+    shouldRunWeb,
+    skippedWebBecauseBudget,
+    trace,
+    agentSkills,
+    agentObservability,
+    workingMemory,
+    webResult,
+  });
+
   await recordRagTrace({
     traceType: "agent",
     timestamp: new Date().toISOString(),
     agentMode,
     planMode: plan.mode,
     docIds,
-    agentSkills: getAgentSkills(),
+    agentSkills,
     agentObservability,
     agentRetrievalPlan,
     agentTraceSummary: buildAgentTraceSummary(trace),
-    status,
+    status: agentResponse.status,
   });
 
-  return {
-    status,
-    body: {
-      agentAnswer,
-      agentMode,
-      agentTrace: trace,
-      agentSkills: getAgentSkills(),
-      agentObservability,
-      agentWorkingMemory: workingMemory,
-      researchBrief,
-      ragAnswer,
-      ragSources,
-      ragResolvedQuestion: ragResult?.ok ? ragResult.value.resolvedQuery ?? question : question,
-      ragMemoryApplied: ragResult?.ok ? Boolean(ragResult.value.memoryApplied) : false,
-      ragAbstained,
-      ragAbstainReason: ragResult?.ok
-        ? ragResult.value.abstainReason ?? null
-        : null,
-      ragGapPlan: ragResult?.ok ? ragResult.value.gapPlan ?? null : null,
-      ragEvidenceSummary: ragResult?.ok
-        ? ragResult.value.evidenceSummary ?? null
-        : null,
-      mcpAnswer: webResult?.ok
-        ? webResult.value.text
-        : webResult?.ok === false
-          ? `Web search unavailable: ${webError}`
-          : skippedWebBecauseBudget
-            ? "Web search not used: agent budget exhausted."
-          : directAnswerModes.has(plan.mode)
-            ? "Web search not used for this direct agent skill."
-            : "Web search not used: document evidence was sufficient.",
-      errors: {
-        rag: ragError,
-        mcp: webError,
-      },
-    },
-  };
+  return agentResponse;
 };
