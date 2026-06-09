@@ -237,13 +237,14 @@ curl http://localhost:5001/ready
 | `CI=true npm test -- --watchAll=false` | 非 watch 模式运行前端测试。 |
 | `cd server && npm test` | 运行后端测试入口，并验证 GitHub Actions quality gate workflow contract。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
+| `cd server && npm run eval:param-sweep` | 批量测试 topK、chunk overlap、rerank、hybrid 权重，并输出参数对比报告。 |
 | `cd server && npm run feedback:corpus` | 从已收集的负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用反馈语料运行 synthetic eval，输出 `latest-feedback.*`。 |
 | `cd server && npm run quality:gate` | 检查主线 synthetic regression；如果存在 `latest-feedback.json`，同时检查 feedback eval 并按 skill 汇总失败。 |
 | `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
 | `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
 
-说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`quality-report.test.mjs`、`claim-support.test.mjs`、`observability-report.test.mjs` 和 `ci-workflow.test.mjs`。
+说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`quality-report.test.mjs`、`claim-support.test.mjs`、`observability-report.test.mjs`、`ci-workflow.test.mjs` 和 `param-sweep.test.mjs`。
 
 `ragas` 是可选 Python 评测，需要额外安装依赖：
 
@@ -334,6 +335,24 @@ npm run observability:report -- --input /path/to/events.jsonl
 | Upload resume success rate | `1.0` |
 | Avg response time | `6254.63 ms` |
 | Avg citation count | `1.63` |
+
+### Parameter sweep
+
+参数 sweep 会复用 synthetic eval，逐组设置检索参数并生成横向对比报告。默认 `quick` profile 覆盖当前默认值、扩大 topK、扩大 chunk overlap、启用 heuristic rerank、启用 weighted hybrid retrieval：
+
+```bash
+cd server
+npm run eval:param-sweep
+```
+
+完整矩阵会额外覆盖缩小 topK、缩小 chunk overlap 和 RRF hybrid：
+
+```bash
+cd server
+npm run eval:param-sweep -- --profile full
+```
+
+输出文件默认写入 `server/evaluation/results/param-sweep-latest.json` 和 `server/evaluation/results/param-sweep-latest.md`，并按质量得分、平均延迟、平均引用数排序。报告表会显示每个 variant 的 `overallPassRate`、`qaPageHitRate`、`comparePageHitRate`、`claimSupportHitRate`、`averageResponseTimeMs`、`averageCitationCount` 和参数覆盖值。
 
 ### Hard compare
 
