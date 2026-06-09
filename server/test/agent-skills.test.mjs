@@ -155,6 +155,86 @@ test("agent rag executes selected skills with access scope and reports skill met
   assert.equal(response.body.agentObservability.runs[0].citationCount, 1);
 });
 
+test("agent rag sends planned retrieval queries and dynamic topK to document rag", async () => {
+  const question = "What does remote work approval require?";
+  let receivedOptions = null;
+  const ragService = {
+    chat: async (_docIds, _question, options) => {
+      receivedOptions = options;
+
+      return {
+        text: "Remote work requires manager approval. [Source 1]",
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "policy.pdf",
+            pageNumber: 2,
+            excerpt: "Remote work requires manager approval.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: question,
+        memoryApplied: false,
+      };
+    },
+    listDocuments: () => [
+      {
+        docId: "doc-1",
+        fileName: "policy.pdf",
+      },
+    ],
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question,
+    docIds: ["doc-1"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(receivedOptions.retrievalPlan.intent, "fact");
+  assert.equal(receivedOptions.retrievalPlan.retrievalOptions.topK, 4);
+  assert.equal(receivedOptions.retrievalPlan.retrievalOptions.topKPerDoc, 2);
+  assert.equal(receivedOptions.retrievalPlan.retrievalQueries[0].query, question);
+  assert.notEqual(receivedOptions.retrievalPlan.retrievalQueries[1].query, question);
+  assert.match(
+    receivedOptions.retrievalPlan.retrievalQueries[1].query,
+    /exact cited evidence/i
+  );
+
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    [
+      "plan",
+      "query_planner",
+      "document_rag",
+      "self_check",
+      "synthesis",
+      "answer_finalizer",
+    ]
+  );
+  const plannerStep = response.body.agentTrace.find(
+    (step) => step.type === "query_planner"
+  );
+  assert.equal(plannerStep.detail.intent, "fact");
+  assert.equal(plannerStep.detail.retrievalQueries.length, 2);
+  assert.equal(plannerStep.detail.retrievalOptions.topK, 4);
+
+  const documentStep = response.body.agentTrace.find(
+    (step) => step.type === "document_rag"
+  );
+  assert.equal(documentStep.detail.retrievalPlan.intent, "fact");
+});
+
 test("agent rag executes whitelisted custom timeline skill with access scope", async () => {
   const accessScope = {
     userId: "alice",
@@ -162,6 +242,7 @@ test("agent rag executes whitelisted custom timeline skill with access scope", a
   };
   let listAccessScope = null;
   let chatAccessScope = null;
+  let timelineRetrievalPlan = null;
   let receivedQuestion = null;
   let receivedDocIds = null;
   const ragService = {
@@ -169,6 +250,7 @@ test("agent rag executes whitelisted custom timeline skill with access scope", a
       receivedDocIds = docIds;
       receivedQuestion = question;
       chatAccessScope = options.accessScope;
+      timelineRetrievalPlan = options.retrievalPlan;
 
       return {
         text: "- 2024-01-10: Contract signed. [Source 1]\n- 2024-02-01: Renewal window opened. [Source 1]",
@@ -222,9 +304,12 @@ test("agent rag executes whitelisted custom timeline skill with access scope", a
   assert.deepEqual(listAccessScope, accessScope);
   assert.deepEqual(chatAccessScope, accessScope);
   assert.match(receivedQuestion, /chronological timeline/i);
+  assert.equal(timelineRetrievalPlan.intent, "timeline");
+  assert.equal(timelineRetrievalPlan.retrievalOptions.topK, 9);
+  assert.equal(timelineRetrievalPlan.retrievalQueries.length, 3);
   assert.deepEqual(
     response.body.agentTrace.map((step) => step.type),
-    ["plan", "custom_skill", "synthesis", "answer_finalizer"]
+    ["plan", "query_planner", "custom_skill", "synthesis", "answer_finalizer"]
   );
   assert.equal(
     response.body.agentTrace.find((step) => step.type === "answer_finalizer")

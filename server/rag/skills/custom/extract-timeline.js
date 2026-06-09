@@ -48,7 +48,7 @@ export const createExtractTimelineSkill = () => ({
       }.`,
     },
   ],
-  execute: async ({ ragService, question, docIds, accessScope }) => {
+  execute: async ({ ragService, question, docIds, accessScope, retrievalPlan }) => {
     const selectedDocuments = getSelectedDocuments({
       ragService,
       docIds,
@@ -62,6 +62,7 @@ export const createExtractTimelineSkill = () => ({
       sessionId: null,
       userId: null,
       accessScope,
+      retrievalPlan,
     });
 
     return {
@@ -78,6 +79,7 @@ export const createExtractTimelineSkill = () => ({
         citations: value.citations?.length ?? 0,
         abstained: Boolean(value.abstained),
         timelineQuestion,
+        retrievalPlan,
       },
     };
   },

@@ -6,8 +6,15 @@ import {
 import { rerankResultsWithProvider } from "../reranker.js";
 import { searchDocuments } from "../vector-store.js";
 
-export const retrieveGlobalContext = async ({ queryVector, queryText, docIds }) => {
-  const topK = getRetrievalTopK();
+export const retrieveGlobalContext = async ({
+  queryVector,
+  queryText,
+  docIds,
+  topK: requestedTopK,
+}) => {
+  const topK = Number.isFinite(Number(requestedTopK)) && Number(requestedTopK) > 0
+    ? Math.floor(Number(requestedTopK))
+    : getRetrievalTopK();
   const candidateK = isRerankEnabled()
     ? topK * getRerankCandidateMultiplier()
     : topK;

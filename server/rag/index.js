@@ -277,14 +277,56 @@ const buildRequirementTrace = (requirements = []) =>
     primary: Boolean(requirement.primary),
   }));
 
+const toPositiveInteger = (value) =>
+  Number.isFinite(Number(value)) && Number(value) > 0
+    ? Math.floor(Number(value))
+    : null;
+
+const normalizeRetrievalPlan = (retrievalPlan = null) => {
+  if (!retrievalPlan || typeof retrievalPlan !== "object") {
+    return null;
+  }
+
+  const retrievalQueries = (retrievalPlan.retrievalQueries ?? [])
+    .map((query, index) => ({
+      id: String(query?.id || `agent-query-${index + 1}`),
+      label: String(query?.label || query?.id || `Agent query ${index + 1}`),
+      query: String(query?.query ?? "").trim(),
+      primary: Boolean(query?.primary),
+    }))
+    .filter((query) => query.query);
+
+  if (retrievalQueries.length === 0) {
+    return null;
+  }
+
+  const topK = toPositiveInteger(retrievalPlan.retrievalOptions?.topK);
+  const topKPerDoc = toPositiveInteger(retrievalPlan.retrievalOptions?.topKPerDoc);
+
+  return {
+    source: String(retrievalPlan.source || "agent-query-planner"),
+    phase: String(retrievalPlan.phase || "primary"),
+    intent: String(retrievalPlan.intent || "unknown"),
+    retrievalQueries,
+    retrievalOptions: {
+      profile: String(retrievalPlan.retrievalOptions?.profile || "default"),
+      ...(topK ? { topK } : {}),
+      ...(topKPerDoc ? { topKPerDoc } : {}),
+      queryCount: retrievalQueries.length,
+    },
+  };
+};
+
 const retrieveGlobalContextForQueries = async ({
   docIds,
   primaryQueryVector,
+  primaryQueryText,
   retrievalQueries,
+  retrievalOptions = {},
 }) => {
   const resultGroups = await Promise.all(
     retrievalQueries.map(async (retrievalQuery) => {
-      const queryVector = retrievalQuery.primary
+      const queryVector = retrievalQuery.primary && retrievalQuery.query === primaryQueryText
         ? primaryQueryVector
         : await embedQuery(retrievalQuery.query);
 
@@ -292,6 +334,7 @@ const retrieveGlobalContextForQueries = async ({
         queryVector,
         queryText: retrievalQuery.query,
         docIds,
+        topK: retrievalOptions.topK,
       });
     })
   );
@@ -302,11 +345,13 @@ const retrieveGlobalContextForQueries = async ({
 const retrievePerDocumentContextForQueries = async ({
   docIds,
   primaryQueryVector,
+  primaryQueryText,
   retrievalQueries,
+  retrievalOptions = {},
 }) => {
   const resultGroups = await Promise.all(
     retrievalQueries.map(async (retrievalQuery) => {
-      const queryVector = retrievalQuery.primary
+      const queryVector = retrievalQuery.primary && retrievalQuery.query === primaryQueryText
         ? primaryQueryVector
         : await embedQuery(retrievalQuery.query);
 
@@ -314,6 +359,7 @@ const retrievePerDocumentContextForQueries = async ({
         queryVector,
         queryText: retrievalQuery.query,
         docIds,
+        topKPerDoc: retrievalOptions.topKPerDoc,
       });
     })
   );
@@ -498,7 +544,9 @@ const chat = async (docIds, query, options = {}) => {
     userId = null,
     includeRetrievedContexts = false,
     accessScope = {},
+    retrievalPlan = null,
   } = options;
+  const agentRetrievalPlan = normalizeRetrievalPlan(retrievalPlan);
   const traceId = randomUUID();
   const timestamp = new Date().toISOString();
   const startedAt = Date.now();
@@ -619,12 +667,19 @@ const chat = async (docIds, query, options = {}) => {
       query: resolvedQuery,
       requirements: evidenceRequirements,
     });
+    const plannedRetrievalQueries =
+      agentRetrievalPlan?.retrievalQueries?.length
+        ? agentRetrievalPlan.retrievalQueries
+        : retrievalQueries;
+    const retrievalOptions = agentRetrievalPlan?.retrievalOptions ?? {};
     const queryVector = await embedQuery(resolvedQuery);
 
     if (routeMode === "compare") {
       const perDocumentResults = await retrievePerDocumentContextForQueries({
         primaryQueryVector: queryVector,
-        retrievalQueries,
+        primaryQueryText: resolvedQuery,
+        retrievalQueries: plannedRetrievalQueries,
+        retrievalOptions,
         docIds: normalizedDocIds,
       });
       const confidence = assessComparisonConfidence({
@@ -651,8 +706,10 @@ const chat = async (docIds, query, options = {}) => {
       });
       const traceFields = {
         retrievalConfig: buildRetrievalConfigTrace(),
+        agentRetrievalPlan,
         queryIntent: route,
         queryRequirements: buildRequirementTrace(evidenceRequirements),
+        retrievalQueries: buildRequirementTrace(plannedRetrievalQueries),
         perDocumentResults: buildPerDocumentResultsTrace(
           normalizedDocIds,
           perDocumentResults
@@ -696,7 +753,9 @@ const chat = async (docIds, query, options = {}) => {
 
     const retrievalResults = await retrieveGlobalContextForQueries({
       primaryQueryVector: queryVector,
-      retrievalQueries,
+      primaryQueryText: resolvedQuery,
+      retrievalQueries: plannedRetrievalQueries,
+      retrievalOptions,
       docIds: normalizedDocIds,
     });
     const confidence = assessQaConfidence({
@@ -714,8 +773,10 @@ const chat = async (docIds, query, options = {}) => {
     });
     const traceFields = {
       retrievalConfig: buildRetrievalConfigTrace(),
+      agentRetrievalPlan,
       queryIntent: route,
       queryRequirements: buildRequirementTrace(evidenceRequirements),
+      retrievalQueries: buildRequirementTrace(plannedRetrievalQueries),
       retrievalResults: retrievalResults.map((result) => buildResultTrace(result)),
       confidence: buildConfidenceTrace(confidence),
       evidenceSummary,

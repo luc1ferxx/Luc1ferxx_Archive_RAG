@@ -151,11 +151,13 @@ const createDocumentRagSkill = () => ({
     sessionId,
     userId,
     accessScope,
+    retrievalPlan,
   }) => {
     const value = await ragService.chat(docIds, question, {
       sessionId,
       userId,
       accessScope,
+      retrievalPlan,
     });
 
     return {
@@ -166,6 +168,7 @@ const createDocumentRagSkill = () => ({
       traceDetail: {
         citations: value.citations?.length ?? 0,
         abstained: Boolean(value.abstained),
+        retrievalPlan,
       },
     };
   },

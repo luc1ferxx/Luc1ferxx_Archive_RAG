@@ -6,8 +6,16 @@ import {
 import { rerankResultsWithProvider } from "../reranker.js";
 import { searchDocumentsPerDocument } from "../vector-store.js";
 
-export const retrievePerDocumentContext = async ({ queryVector, queryText, docIds }) => {
-  const topKPerDoc = getComparisonTopKPerDoc();
+export const retrievePerDocumentContext = async ({
+  queryVector,
+  queryText,
+  docIds,
+  topKPerDoc: requestedTopKPerDoc,
+}) => {
+  const topKPerDoc =
+    Number.isFinite(Number(requestedTopKPerDoc)) && Number(requestedTopKPerDoc) > 0
+      ? Math.floor(Number(requestedTopKPerDoc))
+      : getComparisonTopKPerDoc();
   const candidateKPerDoc = isRerankEnabled()
     ? topKPerDoc * getRerankCandidateMultiplier()
     : topKPerDoc;

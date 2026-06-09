@@ -5,6 +5,7 @@ import {
   selectBetterRagResult,
 } from "./agent-self-check.js";
 import { finalizeAgentAnswer } from "./agent-finalizer.js";
+import { buildAgentRetrievalPlan } from "./agent-query-planner.js";
 import {
   appendTraceStep,
   buildBudgetLimitStep,
@@ -298,6 +299,11 @@ const buildFinalizerSummary = (finalizer) => {
   } from the final answer.`;
 };
 
+const buildQueryPlannerSummary = (retrievalPlan) =>
+  `Planned ${retrievalPlan.retrievalQueries.length} ${retrievalPlan.intent} retrieval quer${
+    retrievalPlan.retrievalQueries.length === 1 ? "y" : "ies"
+  } with ${retrievalPlan.retrievalOptions.profile} topK profile.`;
+
 export const runAgentRag = async ({
   agentBudget,
   ragService,
@@ -575,6 +581,25 @@ export const runAgentRag = async ({
   let ragResult = null;
   let webResult = null;
   const customSkillResults = [];
+  const shouldPlanRetrieval = selectedSkills.some(
+    (skill) => skill.id === AGENT_SKILL_IDS.documentRag || skill.kind === "custom"
+  );
+  const agentRetrievalPlan = shouldPlanRetrieval
+    ? buildAgentRetrievalPlan({
+        question,
+        plan,
+        docIds,
+      })
+    : null;
+
+  if (agentRetrievalPlan) {
+    addTraceStep({
+      type: "query_planner",
+      label: "Query Planner",
+      summary: buildQueryPlannerSummary(agentRetrievalPlan),
+      detail: agentRetrievalPlan,
+    });
+  }
 
   const researchSkill = getSelectedSkill(AGENT_SKILL_IDS.researchBrief);
 
@@ -736,6 +761,7 @@ export const runAgentRag = async ({
           sessionId,
           userId,
           accessScope,
+          retrievalPlan: agentRetrievalPlan,
         }, {
           phase: "primary",
           budget: customBudget,
@@ -789,6 +815,7 @@ export const runAgentRag = async ({
           sessionId,
           userId,
           accessScope,
+          retrievalPlan: agentRetrievalPlan,
         }, {
           phase: "primary",
           budget: primaryBudget,
@@ -853,6 +880,19 @@ export const runAgentRag = async ({
         question,
         check: primaryCheck,
       });
+      const retryRetrievalPlan = buildAgentRetrievalPlan({
+        question: retryQuestion,
+        plan,
+        docIds,
+        phase: "retry",
+        focus: {
+          originalQuestion: question,
+          reasons: primaryCheck.reasons,
+          unsupportedClaims: primaryCheck.claimSupport?.claims
+            ?.filter((claim) => !claim.supported)
+            .map((claim) => claim.text) ?? [],
+        },
+      });
       const retryBudget = consumeBudget(budgetState, documentRagSkill.budgetKey);
 
       if (!retryBudget.ok) {
@@ -877,6 +917,7 @@ export const runAgentRag = async ({
           sessionId,
           userId,
           accessScope,
+          retrievalPlan: retryRetrievalPlan,
         }, {
           phase: "retry",
           budget: retryBudget,
@@ -899,6 +940,7 @@ export const runAgentRag = async ({
             )}`,
           detail: buildSkillTraceDetail(retryRagResult, {
             retryQuestion,
+            retrievalPlan: retryRetrievalPlan,
           }),
         });
 

@@ -1026,6 +1026,68 @@ test("observability enabled writes one qa jsonl event", async () => {
   );
 });
 
+test("chat uses an agent retrieval plan for observability and dynamic topK", async () => {
+  await ingestFixture({
+    docId: "benefits-agent-plan",
+    fileName: "benefits-agent-plan.pdf",
+    pages: [
+      "Remote work requires manager approval.",
+      "Remote work approvals are reviewed before the first remote day.",
+      "Annual leave is unrelated to remote work approval.",
+    ],
+  });
+
+  await withEnv(
+    {
+      RAG_OBSERVABILITY_ENABLED: "true",
+      RAG_RETRIEVAL_TOP_K: "1",
+    },
+    async () => {
+      await chat(
+        ["benefits-agent-plan"],
+        "What does remote work approval require?",
+        {
+          retrievalPlan: {
+            source: "agent-query-planner",
+            phase: "primary",
+            intent: "fact",
+            retrievalQueries: [
+              {
+                id: "primary",
+                label: "Original request",
+                query: "What does remote work approval require?",
+                primary: true,
+              },
+              {
+                id: "fact-citation",
+                label: "Exact citation evidence",
+                query: "Find exact cited evidence for remote work approval.",
+                primary: false,
+              },
+            ],
+            retrievalOptions: {
+              profile: "narrow",
+              topK: 2,
+              topKPerDoc: 2,
+              queryCount: 2,
+            },
+          },
+        }
+      );
+      const events = await readObservabilityEvents();
+
+      assert.equal(events.length, 1);
+      assert.equal(events[0].agentRetrievalPlan.intent, "fact");
+      assert.equal(events[0].agentRetrievalPlan.retrievalOptions.topK, 2);
+      assert.deepEqual(
+        events[0].agentRetrievalPlan.retrievalQueries.map((query) => query.id),
+        ["primary", "fact-citation"]
+      );
+      assert.ok(events[0].retrievalResults.length >= 2);
+    }
+  );
+});
+
 test("observability default trace omits full pageContent and text", async () => {
   const fullPolicyText = [
     "Annual leave policy: employees receive 10 paid annual leave days each year.",
@@ -1644,6 +1706,72 @@ test("rerank candidate multiplier is clamped to at least one", async () => {
     },
     async () => {
       assert.equal(getRerankCandidateMultiplier(), 1);
+    }
+  );
+});
+
+test("global retriever accepts dynamic topK overrides", async () => {
+  await withEnv(
+    {
+      RAG_RETRIEVAL_TOP_K: "1",
+      RAG_RERANK_ENABLED: "false",
+    },
+    async () => {
+      await ingestFixture({
+        docId: "dynamic-topk",
+        fileName: "dynamic-topk.pdf",
+        pages: [
+          "Remote work approval requires manager review.",
+          "Remote work approval requires advance notice.",
+          "Remote work approval has security requirements.",
+        ],
+      });
+
+      const results = await retrieveGlobalContext({
+        queryVector: toEmbedding("remote work approval"),
+        queryText: "remote work approval",
+        docIds: ["dynamic-topk"],
+        topK: 2,
+      });
+
+      assert.equal(results.length, 2);
+    }
+  );
+});
+
+test("per-document retriever accepts dynamic topK per document overrides", async () => {
+  await withEnv(
+    {
+      RAG_COMPARE_TOP_K_PER_DOC: "1",
+      RAG_RERANK_ENABLED: "false",
+    },
+    async () => {
+      await ingestFixture({
+        docId: "dynamic-topk-left",
+        fileName: "dynamic-topk-left.pdf",
+        pages: [
+          "Refund policy requires manager approval.",
+          "Refund policy requires customer notice.",
+        ],
+      });
+      await ingestFixture({
+        docId: "dynamic-topk-right",
+        fileName: "dynamic-topk-right.pdf",
+        pages: [
+          "Refund policy allows regional exceptions.",
+          "Refund policy requires finance approval.",
+        ],
+      });
+
+      const results = await retrievePerDocumentContext({
+        queryVector: toEmbedding("refund policy"),
+        queryText: "refund policy",
+        docIds: ["dynamic-topk-left", "dynamic-topk-right"],
+        topKPerDoc: 2,
+      });
+
+      assert.equal(results.get("dynamic-topk-left").length, 2);
+      assert.equal(results.get("dynamic-topk-right").length, 2);
     }
   );
 });
