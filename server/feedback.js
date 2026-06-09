@@ -167,6 +167,88 @@ const sanitizeObservabilityRun = (run = {}) => ({
   budgetDelta: sanitizeBudgetDelta(run.budgetDelta),
 });
 
+const sanitizeWorkingMemoryQuery = (query = {}) => ({
+  skillId: normalizeString(query.skillId),
+  skillVersion: normalizeString(query.skillVersion),
+  phase: normalizeString(query.phase),
+  queryId: normalizeString(query.queryId),
+  label: normalizeString(query.label).slice(0, 200),
+  query: normalizeString(query.query).slice(0, 1000),
+  primary: Boolean(query.primary),
+});
+
+const sanitizeWorkingMemoryClaim = (claim = {}) => ({
+  skillId: normalizeString(claim.skillId),
+  skillVersion: normalizeString(claim.skillVersion),
+  phase: normalizeString(claim.phase),
+  text: normalizeString(claim.text).slice(0, 1000),
+  tokenOverlap: Number.isFinite(Number(claim.tokenOverlap))
+    ? Number(claim.tokenOverlap)
+    : null,
+  anchors: Array.isArray(claim.anchors)
+    ? claim.anchors.map(normalizeString).filter(Boolean).slice(0, 12)
+    : [],
+  missingAnchors: Array.isArray(claim.missingAnchors)
+    ? claim.missingAnchors.map(normalizeString).filter(Boolean).slice(0, 12)
+    : [],
+});
+
+const sanitizeWorkingMemoryGap = (gap = {}) => ({
+  skillId: normalizeString(gap.skillId),
+  skillVersion: normalizeString(gap.skillVersion),
+  phase: normalizeString(gap.phase),
+  resolvedPhase: normalizeString(gap.resolvedPhase),
+  type: normalizeString(gap.type),
+  severity: normalizeString(gap.severity),
+  message: normalizeString(gap.message).slice(0, 1000),
+  claim: normalizeString(gap.claim).slice(0, 1000),
+  missingAnchors: Array.isArray(gap.missingAnchors)
+    ? gap.missingAnchors.map(normalizeString).filter(Boolean).slice(0, 12)
+    : [],
+});
+
+const sanitizeWorkingMemory = (workingMemory = {}) => {
+  if (!isPlainObject(workingMemory)) {
+    return null;
+  }
+
+  return {
+    version: normalizeString(workingMemory.version),
+    goal: normalizeString(workingMemory.goal).slice(0, 1000),
+    docIds: normalizeDocIds(workingMemory.docIds).slice(0, 50),
+    checkedQueries: Array.isArray(workingMemory.checkedQueries)
+      ? workingMemory.checkedQueries
+          .map(sanitizeWorkingMemoryQuery)
+          .filter((query) => query.query)
+          .slice(0, 20)
+      : [],
+    supportedClaims: Array.isArray(workingMemory.supportedClaims)
+      ? workingMemory.supportedClaims
+          .map(sanitizeWorkingMemoryClaim)
+          .filter((claim) => claim.text)
+          .slice(0, 20)
+      : [],
+    unsupportedClaims: Array.isArray(workingMemory.unsupportedClaims)
+      ? workingMemory.unsupportedClaims
+          .map(sanitizeWorkingMemoryClaim)
+          .filter((claim) => claim.text)
+          .slice(0, 20)
+      : [],
+    unresolvedGaps: Array.isArray(workingMemory.unresolvedGaps)
+      ? workingMemory.unresolvedGaps
+          .map(sanitizeWorkingMemoryGap)
+          .filter((gap) => gap.type || gap.message || gap.claim)
+          .slice(0, 20)
+      : [],
+    resolvedGaps: Array.isArray(workingMemory.resolvedGaps)
+      ? workingMemory.resolvedGaps
+          .map(sanitizeWorkingMemoryGap)
+          .filter((gap) => gap.type || gap.message || gap.claim)
+          .slice(0, 20)
+      : [],
+  };
+};
+
 const sanitizeAgentObservability = (observability = {}, { feedbackType } = {}) => {
   if (!isPlainObject(observability)) {
     return null;
@@ -202,6 +284,7 @@ const sanitizeAgentObservability = (observability = {}, { feedbackType } = {}) =
     skills,
     runs,
     budget: sanitizeBudgetSnapshot(observability.budget),
+    workingMemory: sanitizeWorkingMemory(observability.workingMemory),
   };
 };
 
@@ -291,6 +374,20 @@ export const buildFeedbackRecord = ({ payload = {}, accessScope = {} }) => {
       ? answer.agentSkills
       : [];
 
+  const rawAgentObservability =
+    answer.agentObservability ?? payload.agentObservability;
+  const rawWorkingMemory =
+    answer.agentWorkingMemory ?? payload.agentWorkingMemory;
+  const agentObservability =
+    isPlainObject(rawAgentObservability) &&
+    rawWorkingMemory &&
+    !rawAgentObservability.workingMemory
+      ? {
+          ...rawAgentObservability,
+          workingMemory: rawWorkingMemory,
+        }
+      : rawAgentObservability;
+
   return {
     feedbackId: randomUUID(),
     createdAt: new Date().toISOString(),
@@ -313,7 +410,7 @@ export const buildFeedbackRecord = ({ payload = {}, accessScope = {} }) => {
       .slice(0, 20),
     claimChecks: extractClaimChecks(answer),
     agentObservability: sanitizeAgentObservability(
-      answer.agentObservability ?? payload.agentObservability,
+      agentObservability,
       {
         feedbackType,
       }

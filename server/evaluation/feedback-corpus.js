@@ -150,6 +150,88 @@ const normalizeObservabilityRun = (run = {}) => ({
   budgetDelta: normalizeBudgetDelta(run.budgetDelta),
 });
 
+const normalizeWorkingMemoryQuery = (query = {}) => ({
+  skillId: normalizeText(query.skillId),
+  skillVersion: normalizeText(query.skillVersion),
+  phase: normalizeText(query.phase),
+  queryId: normalizeText(query.queryId),
+  label: normalizeText(query.label),
+  query: normalizeText(query.query),
+  primary: Boolean(query.primary),
+});
+
+const normalizeWorkingMemoryClaim = (claim = {}) => ({
+  skillId: normalizeText(claim.skillId),
+  skillVersion: normalizeText(claim.skillVersion),
+  phase: normalizeText(claim.phase),
+  text: normalizeText(claim.text),
+  tokenOverlap: Number.isFinite(Number(claim.tokenOverlap))
+    ? Number(claim.tokenOverlap)
+    : null,
+  anchors: Array.isArray(claim.anchors)
+    ? claim.anchors.map(normalizeText).filter(Boolean).slice(0, 12)
+    : [],
+  missingAnchors: Array.isArray(claim.missingAnchors)
+    ? claim.missingAnchors.map(normalizeText).filter(Boolean).slice(0, 12)
+    : [],
+});
+
+const normalizeWorkingMemoryGap = (gap = {}) => ({
+  skillId: normalizeText(gap.skillId),
+  skillVersion: normalizeText(gap.skillVersion),
+  phase: normalizeText(gap.phase),
+  resolvedPhase: normalizeText(gap.resolvedPhase),
+  type: normalizeText(gap.type),
+  severity: normalizeText(gap.severity),
+  message: normalizeText(gap.message),
+  claim: normalizeText(gap.claim),
+  missingAnchors: Array.isArray(gap.missingAnchors)
+    ? gap.missingAnchors.map(normalizeText).filter(Boolean).slice(0, 12)
+    : [],
+});
+
+const normalizeWorkingMemory = (workingMemory = {}) => {
+  if (!workingMemory || typeof workingMemory !== "object") {
+    return null;
+  }
+
+  return {
+    version: normalizeText(workingMemory.version),
+    goal: normalizeText(workingMemory.goal),
+    docIds: normalizeDocIds(workingMemory.docIds),
+    checkedQueries: Array.isArray(workingMemory.checkedQueries)
+      ? workingMemory.checkedQueries
+          .map(normalizeWorkingMemoryQuery)
+          .filter((query) => query.query)
+          .slice(0, 20)
+      : [],
+    supportedClaims: Array.isArray(workingMemory.supportedClaims)
+      ? workingMemory.supportedClaims
+          .map(normalizeWorkingMemoryClaim)
+          .filter((claim) => claim.text)
+          .slice(0, 20)
+      : [],
+    unsupportedClaims: Array.isArray(workingMemory.unsupportedClaims)
+      ? workingMemory.unsupportedClaims
+          .map(normalizeWorkingMemoryClaim)
+          .filter((claim) => claim.text)
+          .slice(0, 20)
+      : [],
+    unresolvedGaps: Array.isArray(workingMemory.unresolvedGaps)
+      ? workingMemory.unresolvedGaps
+          .map(normalizeWorkingMemoryGap)
+          .filter((gap) => gap.type || gap.message || gap.claim)
+          .slice(0, 20)
+      : [],
+    resolvedGaps: Array.isArray(workingMemory.resolvedGaps)
+      ? workingMemory.resolvedGaps
+          .map(normalizeWorkingMemoryGap)
+          .filter((gap) => gap.type || gap.message || gap.claim)
+          .slice(0, 20)
+      : [],
+  };
+};
+
 const normalizeAgentObservability = (observability = {}) => {
   if (!observability || typeof observability !== "object") {
     return null;
@@ -179,6 +261,7 @@ const normalizeAgentObservability = (observability = {}) => {
     selectedSkills: normalizeSkills(observability.selectedSkills),
     skills,
     runs,
+    workingMemory: normalizeWorkingMemory(observability.workingMemory),
   };
 };
 

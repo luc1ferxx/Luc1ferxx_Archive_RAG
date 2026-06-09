@@ -147,6 +147,22 @@ test("agent rag runs follow-up retrieval when claim support check finds unsuppor
     response.body.agentObservability.executionLoop.gaps[0].type,
     "unsupported_claim"
   );
+  assert.equal(response.body.agentWorkingMemory.goal, "What does remote work require?");
+  assert.deepEqual(
+    response.body.agentWorkingMemory.checkedQueries.map((query) => query.phase),
+    ["primary", "primary", "follow_up", "follow_up", "follow_up"]
+  );
+  assert.ok(
+    response.body.agentWorkingMemory.supportedClaims.some((claim) =>
+      /Remote work requires manager approval/i.test(claim.text)
+    )
+  );
+  assert.equal(response.body.agentWorkingMemory.unresolvedGaps.length, 0);
+  assert.equal(response.body.agentWorkingMemory.resolvedGaps[0].type, "unsupported_claim");
+  assert.equal(
+    response.body.agentObservability.workingMemory,
+    response.body.agentWorkingMemory
+  );
   assert.deepEqual(
     response.body.agentObservability.runs.map((run) => run.phase),
     ["primary", "follow_up"]
@@ -203,6 +219,12 @@ test("agent rag asks for clarification when follow-up is unavailable", async () 
     "document_follow_up_budget_exhausted"
   );
   assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+  assert.equal(response.body.agentWorkingMemory.checkedQueries.length, 2);
+  assert.equal(response.body.agentWorkingMemory.unresolvedGaps[0].type, "unsupported_claim");
+  assert.match(
+    response.body.agentWorkingMemory.unsupportedClaims[0].text,
+    /satellite stipend/i
+  );
 
   const clarificationStep = response.body.agentTrace.find(
     (step) => step.type === "clarification_gate"

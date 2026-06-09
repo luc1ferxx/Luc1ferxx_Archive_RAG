@@ -976,6 +976,36 @@ test("feedback records and feedback eval cases retain skill metadata", () => {
             },
             traceTruncated: false,
           },
+          workingMemory: {
+            version: "1.0",
+            goal: "What does remote work require?",
+            docIds: ["doc-1"],
+            checkedQueries: [
+              {
+                skillId: AGENT_SKILL_IDS.documentRag,
+                skillVersion: "1.0.0",
+                phase: "primary",
+                queryId: "primary",
+                label: "Original request",
+                query: "What does remote work require?",
+                primary: true,
+              },
+            ],
+            supportedClaims: [
+              {
+                skillId: AGENT_SKILL_IDS.documentRag,
+                skillVersion: "1.0.0",
+                phase: "primary",
+                text: "Remote work requires manager approval",
+                tokenOverlap: 0.8,
+                anchors: [],
+                missingAnchors: [],
+              },
+            ],
+            unsupportedClaims: [],
+            unresolvedGaps: [],
+            resolvedGaps: [],
+          },
         },
         ragSources: [
           {
@@ -1006,6 +1036,10 @@ test("feedback records and feedback eval cases retain skill metadata", () => {
   assert.equal(feedback.agentObservability.skills[0].skillId, AGENT_SKILL_IDS.documentRag);
   assert.equal(feedback.agentObservability.skills[0].citationCount, 1);
   assert.equal(feedback.agentObservability.skills[0].budgetDelta.documentRagCalls, 1);
+  assert.equal(
+    feedback.agentObservability.workingMemory.checkedQueries[0].query,
+    "What does remote work require?"
+  );
 
   const corpus = buildFeedbackCorpusFromRecords([feedback]);
   assert.deepEqual(corpus.cases[0].metadata.feedback.skills, feedback.skills);
@@ -1016,5 +1050,10 @@ test("feedback records and feedback eval cases retain skill metadata", () => {
   assert.equal(
     corpus.cases[0].metadata.feedback.agentObservability.skills[0].skillId,
     AGENT_SKILL_IDS.documentRag
+  );
+  assert.equal(
+    corpus.cases[0].metadata.feedback.agentObservability.workingMemory
+      .supportedClaims[0].text,
+    "Remote work requires manager approval"
   );
 });
