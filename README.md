@@ -245,7 +245,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:real -- evaluation/real-corpus.json` | 运行真实语料评测。 |
 | `cd server && npm run eval:ragas -- --input evaluation/results/latest.json` | 对保存的 Node eval payload 运行 `ragas`。 |
 
-说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`quality-report.test.mjs`、`claim-support.test.mjs`、`observability-report.test.mjs`、`ci-workflow.test.mjs`、`param-sweep.test.mjs` 和 `trajectory-eval.test.mjs`。
+说明：`server/test/run.test.mjs` 已纳入 `app.test.mjs`、`rag.test.mjs`、`answer-match.test.mjs`、`feedback-corpus.test.mjs`、`agent-skills.test.mjs`、`agent-planner.test.mjs`、`agent-skill-observability.test.mjs`、`agent-working-memory.test.mjs`、`quality-report.test.mjs`、`claim-support.test.mjs`、`observability-report.test.mjs`、`ci-workflow.test.mjs`、`param-sweep.test.mjs` 和 `trajectory-eval.test.mjs`。
 
 `ragas` 是可选 Python 评测，需要额外安装依赖：
 
@@ -468,6 +468,8 @@ API_AUTH_TOKENS={"alice-token":{"userId":"alice","workspaceId":"workspace-a"},"b
 ## AgentRAG skills
 
 AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。内置 skills 位于 `server/rag/skills/built-ins.js`，当前包括 `document_rag`、`web_search`、`inventory`、`document_discovery` 和 `research_brief`。白名单 custom skills 位于 `server/rag/skills/custom/`，当前包含 `extract_timeline`、`risk_review`、`summarize_contract` 和 `compare_documents`，分别用于从选中文档中提取带 citation 的时间线、生成带 citation 的风险/缺口/冲突/例外审查、输出带 citation 的合同摘要，以及生成结构化文档对比。
+
+`server/rag/agent-planner.js` 负责请求分类、skill/chain 选择、planner actions 和执行前澄清判断；`server/rag/agent-trace.js` 负责 trace step、self-check/gap/finalizer/query planner summary 和 compact trace serialization；`server/rag/agent-working-memory.js` 负责一次 agent run 内的 checked queries、supported/unsupported claims、unresolved/resolved gaps 和 execution loop counters；`server/rag/agent-skill-observability.js` 负责 per-skill attempts、duration、citations、abstain、retry/follow-up、budget 和 run records。`server/rag/agent.js` 保留 budget 消耗点和主流程编排，避免继续把 planner/trace/working-memory/observability 细节堆回主流程。
 
 `server/rag/agent-query-planner.js` 会在 document/custom skill 执行前生成 `retrievalPlan`。该计划包含 intent、实际检索 queries 和动态 `topK/topKPerDoc` profile；`/chat` 的 `agentTrace` 会出现 `query_planner` step，底层 RAG observability JSONL 会保留 `agentRetrievalPlan` 和实际 `retrievalQueries`。当 `RAG_OBSERVABILITY_ENABLED=true` 时，AgentRAG 也会写入 `traceType: "agent"` event，用于 `observability:report` 汇总 per-skill 指标。
 

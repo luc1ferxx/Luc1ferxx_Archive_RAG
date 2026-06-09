@@ -37,13 +37,17 @@
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 
-Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, `agent-skills.test.mjs`, `quality-report.test.mjs`, `claim-support.test.mjs`, `observability-report.test.mjs`, `ci-workflow.test.mjs`, `param-sweep.test.mjs`, and `trajectory-eval.test.mjs`.
+Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, `agent-skills.test.mjs`, `agent-planner.test.mjs`, `agent-skill-observability.test.mjs`, `agent-working-memory.test.mjs`, `quality-report.test.mjs`, `claim-support.test.mjs`, `observability-report.test.mjs`, `ci-workflow.test.mjs`, `param-sweep.test.mjs`, and `trajectory-eval.test.mjs`.
 
 ## Implementation Notes
 
 - Keep RAG changes inside `server/rag/` where possible; route/API behavior lives in `server/app.js`.
 - AgentRAG skills are registered in `server/rag/skills/registry.js`; built-ins live in `server/rag/skills/built-ins.js`, and whitelisted custom skills live under `server/rag/skills/custom/`. Current custom skills include `extract_timeline`, `risk_review`, `summarize_contract`, and `compare_documents`.
 - New skills need stable `id/version/label/budgetKey/requiresAccessScope`, deterministic `match()`, and an `execute()` path that receives `accessScope` when reading user/workspace data. Custom skills must be exported from `server/rag/skills/custom/index.js`; do not let the model call arbitrary unregistered tools.
+- Agent planning and skill-chain selection live in `server/rag/agent-planner.js`; keep request classification, planner actions, chain ordering, and pre-execution clarification checks there rather than adding them back to `server/rag/agent.js`.
+- Agent trace formatting lives in `server/rag/agent-trace.js`; keep trace step summaries and compact trace serialization there when adding new trace step types.
+- Agent run-scoped working memory lives in `server/rag/agent-working-memory.js`; preserve query dedupe, claim support updates, unresolved/resolved gap handling, and execution loop counters there rather than adding state mutation back to `server/rag/agent.js`.
+- Agent skill execution observability lives in `server/rag/agent-skill-observability.js`; keep per-skill attempts, duration, citations, abstain, retry/follow-up, budget, run records, and skill trace detail construction there.
 - AgentRAG query planning lives in `server/rag/agent-query-planner.js`; document/custom skills should pass `retrievalPlan` through to `ragService.chat`, and RAG observability should preserve `agentRetrievalPlan` plus actual `retrievalQueries`.
 - Agent self-check claim support and structured gap analysis live in `server/rag/agent-self-check.js`; final answer filtering lives in `server/rag/agent-finalizer.js`. Keep both deterministic and preserve `claimSupport`, `gap_analysis`, and follow-up loop metadata in agent trace, feedback records, and feedback corpus metadata.
 - Clarification gate behavior lives in `server/rag/agent.js`; when the agent needs user input it returns `agentMode: "clarification"` with `clarification.reason`, `clarification.question`, and a `clarification_gate` trace step instead of throwing for ordinary scope issues.
