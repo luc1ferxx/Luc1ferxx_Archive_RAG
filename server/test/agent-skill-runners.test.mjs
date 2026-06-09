@@ -3,11 +3,9 @@ import assert from "node:assert/strict";
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { SKILL_CHAIN_MODE } from "../rag/agent-planner.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
-import {
-  runCustomSkills,
-  runInventorySkill,
-  runWebSearchSkill,
-} from "../rag/agent-skill-runners.js";
+import { runInventorySkill } from "../rag/agent-built-in-skill-runners.js";
+import { runCustomSkills } from "../rag/agent-custom-skill-runner.js";
+import { runWebSearchSkill } from "../rag/agent-web-runner.js";
 
 const createSkill = ({
   budgetKey = "customSkillCalls",
