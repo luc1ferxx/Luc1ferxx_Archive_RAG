@@ -35,7 +35,7 @@
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 
-Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, `agent-skills.test.mjs`, `quality-report.test.mjs`, and `claim-support.test.mjs`.
+Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mjs`, `feedback-corpus.test.mjs`, `agent-skills.test.mjs`, `quality-report.test.mjs`, `claim-support.test.mjs`, and `observability-report.test.mjs`.
 
 ## Implementation Notes
 
@@ -44,6 +44,7 @@ Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mj
 - New skills need stable `id/version/label/budgetKey/requiresAccessScope`, deterministic `match()`, and an `execute()` path that receives `accessScope` when reading user/workspace data. Custom skills must be exported from `server/rag/skills/custom/index.js`; do not let the model call arbitrary unregistered tools.
 - AgentRAG query planning lives in `server/rag/agent-query-planner.js`; document/custom skills should pass `retrievalPlan` through to `ragService.chat`, and RAG observability should preserve `agentRetrievalPlan` plus actual `retrievalQueries`.
 - Agent self-check claim support logic lives in `server/rag/agent-self-check.js`; final answer filtering lives in `server/rag/agent-finalizer.js`. Keep both deterministic and preserve `claimSupport` in agent trace, feedback records, and feedback corpus metadata.
+- Observability reporting lives in `server/evaluation/observability-report.js` and `server/evaluation/build-observability-report.mjs`; preserve support for both `traceType: "agent"` events and lower-level RAG trace events.
 - AgentRAG optimization order is documented in README under "AgentRAG 优化路线"; continue in that order unless the user explicitly reprioritizes it.
 - `/chat` returns `agentObservability` with per-skill selected status, attempts, duration, citations, abstain, retry, budget, and error metrics. Preserve it when changing agent execution, feedback records, or feedback corpus metadata.
 - API auth is controlled by `API_AUTH_ENABLED` plus either `API_AUTH_TOKEN` for single-token local use or `API_AUTH_TOKENS` for per-user/per-workspace token mapping; the frontend can send `REACT_APP_API_AUTH_TOKEN`, which becomes an `x-api-key` header.

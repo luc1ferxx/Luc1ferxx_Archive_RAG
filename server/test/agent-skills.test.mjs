@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { runAgentRag } from "../rag/agent.js";
 import {
   AGENT_SKILL_IDS,
@@ -10,6 +13,10 @@ import {
 } from "../rag/skills/registry.js";
 import { buildFeedbackRecord } from "../feedback.js";
 import { buildFeedbackCorpusFromRecords } from "../evaluation/feedback-corpus.js";
+import {
+  configureRagDataDirectory,
+  getRagDataDirectory,
+} from "../rag/storage.js";
 
 test("built-in skill registry selects document and web skills with stable metadata", () => {
   const registry = createBuiltInSkillRegistry();
@@ -233,6 +240,81 @@ test("agent rag sends planned retrieval queries and dynamic topK to document rag
     (step) => step.type === "document_rag"
   );
   assert.equal(documentStep.detail.retrievalPlan.intent, "fact");
+});
+
+test("agent rag writes per-skill observability events when enabled", async () => {
+  const originalDataDirectory = getRagDataDirectory();
+  const originalObservabilityEnabled = process.env.RAG_OBSERVABILITY_ENABLED;
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agent-observability-"));
+
+  process.env.RAG_OBSERVABILITY_ENABLED = "true";
+  configureRagDataDirectory(path.join(tempRoot, "rag-data"));
+
+  try {
+    const ragService = {
+      chat: async () => ({
+        text: "Remote work requires manager approval. [Source 1]",
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "policy.pdf",
+            pageNumber: 2,
+            excerpt: "Remote work requires manager approval.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: "What does remote work require?",
+        memoryApplied: false,
+      }),
+      listDocuments: () => [
+        {
+          docId: "doc-1",
+          fileName: "policy.pdf",
+        },
+      ],
+    };
+
+    await runAgentRag({
+      ragService,
+      webChatService: async () => ({
+        text: "web should not run",
+      }),
+      question: "What does remote work require?",
+      docIds: ["doc-1"],
+      sessionId: "session-1",
+      userId: "alice",
+      accessScope: {
+        userId: "alice",
+        workspaceId: "workspace-a",
+      },
+    });
+
+    const eventsPath = path.join(tempRoot, "rag-observability", "events.jsonl");
+    const events = (await readFile(eventsPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].traceType, "agent");
+    assert.equal(events[0].agentObservability.skills[0].skillId, AGENT_SKILL_IDS.documentRag);
+    assert.equal(events[0].agentRetrievalPlan.intent, "fact");
+    assert.ok(
+      events[0].agentTraceSummary.some((step) => step.type === "query_planner")
+    );
+  } finally {
+    if (originalObservabilityEnabled === undefined) {
+      delete process.env.RAG_OBSERVABILITY_ENABLED;
+    } else {
+      process.env.RAG_OBSERVABILITY_ENABLED = originalObservabilityEnabled;
+    }
+
+    configureRagDataDirectory(originalDataDirectory);
+    await rm(tempRoot, {
+      recursive: true,
+      force: true,
+    });
+  }
 });
 
 test("agent rag executes whitelisted custom timeline skill with access scope", async () => {

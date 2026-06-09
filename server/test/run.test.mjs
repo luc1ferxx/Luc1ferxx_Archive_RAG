@@ -5,3 +5,4 @@ import "./feedback-corpus.test.mjs";
 import "./agent-skills.test.mjs";
 import "./quality-report.test.mjs";
 import "./claim-support.test.mjs";
+import "./observability-report.test.mjs";

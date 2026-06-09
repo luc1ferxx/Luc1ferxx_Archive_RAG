@@ -6,6 +6,7 @@ import {
 } from "./agent-self-check.js";
 import { finalizeAgentAnswer } from "./agent-finalizer.js";
 import { buildAgentRetrievalPlan } from "./agent-query-planner.js";
+import { recordRagTrace } from "./observability.js";
 import {
   appendTraceStep,
   buildBudgetLimitStep,
@@ -303,6 +304,13 @@ const buildQueryPlannerSummary = (retrievalPlan) =>
   `Planned ${retrievalPlan.retrievalQueries.length} ${retrievalPlan.intent} retrieval quer${
     retrievalPlan.retrievalQueries.length === 1 ? "y" : "ies"
   } with ${retrievalPlan.retrievalOptions.profile} topK profile.`;
+
+const buildAgentTraceSummary = (trace = []) =>
+  trace.map((step) => ({
+    type: step.type,
+    label: step.label,
+    status: step.status ?? "completed",
+  }));
 
 export const runAgentRag = async ({
   agentBudget,
@@ -1113,6 +1121,21 @@ export const runAgentRag = async ({
     (shouldRunWeb ? !webResult?.ok : true)
       ? 502
       : 200;
+  const agentObservability = buildAgentObservability({
+    agentMode,
+  });
+  await recordRagTrace({
+    traceType: "agent",
+    timestamp: new Date().toISOString(),
+    agentMode,
+    planMode: plan.mode,
+    docIds,
+    agentSkills: getAgentSkills(),
+    agentObservability,
+    agentRetrievalPlan,
+    agentTraceSummary: buildAgentTraceSummary(trace),
+    status,
+  });
 
   return {
     status,
@@ -1121,9 +1144,7 @@ export const runAgentRag = async ({
       agentMode,
       agentTrace: trace,
       agentSkills: getAgentSkills(),
-      agentObservability: buildAgentObservability({
-        agentMode,
-      }),
+      agentObservability,
       researchBrief,
       ragAnswer,
       ragSources,
