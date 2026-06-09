@@ -59,7 +59,13 @@ export const classifyAgentQueryIntent = ({ question = "", plan = {}, docIds = []
     return "timeline";
   }
 
-  if (plan.wantsResearch || plan.mode === "research_brief" || ANALYSIS_SIGNAL_PATTERN.test(question)) {
+  if (
+    plan.wantsRiskReview ||
+    plan.wantsResearch ||
+    plan.mode === CUSTOM_SKILL_IDS.riskReview ||
+    plan.mode === "research_brief" ||
+    ANALYSIS_SIGNAL_PATTERN.test(question)
+  ) {
     return "analysis";
   }
 

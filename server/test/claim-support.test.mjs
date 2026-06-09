@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { runAgentRag } from "../rag/agent.js";
 import { buildFeedbackRecord } from "../feedback.js";
 import { buildFeedbackCorpusFromRecords } from "../evaluation/feedback-corpus.js";
+import { finalizeAgentAnswer } from "../rag/agent-finalizer.js";
 import { evaluateDocumentEvidence } from "../rag/agent-self-check.js";
 
 test("document evidence check fails when an answer claim is unsupported by citations", () => {
@@ -180,6 +181,59 @@ test("agent rag finalizer removes unsupported answer claims when retry is unavai
   assert.deepEqual(finalizerStep.detail.removedClaims, [
     "The satellite stipend is 500 dollars",
   ]);
+});
+
+test("answer finalizer preserves section headings without counting them as evidence claims", () => {
+  const result = finalizeAgentAnswer({
+    answerText: [
+      "Risk Review",
+      "- Risk: Refund approval is required before issuing payment. [Source 1]",
+      "- Unsupported: The policy requires CFO approval. [Source 1]",
+    ].join("\n"),
+    citations: [
+      {
+        docId: "doc-1",
+        fileName: "refund-policy.pdf",
+        pageNumber: 4,
+        excerpt: "Refund approval is required before issuing payment.",
+      },
+    ],
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.abstained, false);
+  assert.match(result.text, /^Risk Review\n/);
+  assert.match(result.text, /Refund approval is required/i);
+  assert.doesNotMatch(result.text, /CFO approval/i);
+  assert.equal(result.claimSupport.supportedClaimCount, 1);
+  assert.equal(result.claimSupport.unsupportedClaimCount, 1);
+  assert.equal(
+    result.claimSupport.claims.find((claim) => claim.heading)?.text,
+    "Risk Review"
+  );
+});
+
+test("answer finalizer abstains when only a preserved heading is supported", () => {
+  const result = finalizeAgentAnswer({
+    answerText: "Risk Review",
+    citations: [
+      {
+        docId: "doc-1",
+        fileName: "refund-policy.pdf",
+        pageNumber: 4,
+        excerpt: "Refund approval is required before issuing payment.",
+      },
+    ],
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.abstained, true);
+  assert.equal(
+    result.text,
+    "I do not have enough citation-backed evidence to answer reliably."
+  );
+  assert.equal(result.claimSupport.supportedClaimCount, 0);
+  assert.equal(result.claimSupport.unsupportedClaimCount, 0);
 });
 
 test("feedback records and feedback eval metadata retain claim support checks", () => {

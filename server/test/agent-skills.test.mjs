@@ -53,10 +53,15 @@ test("default skill registry whitelists custom skills separately from built-ins"
     defaultRegistry.get(CUSTOM_SKILL_IDS.extractTimeline).version,
     "1.0.0"
   );
+  assert.equal(
+    defaultRegistry.get(CUSTOM_SKILL_IDS.riskReview).version,
+    "1.0.0"
+  );
   assert.deepEqual(
     defaultRegistry.select({
       plan: {
         wantsTimeline: true,
+        wantsRiskReview: false,
         wantsDocumentRag: false,
         wantsWeb: false,
         wantsResearch: false,
@@ -66,6 +71,21 @@ test("default skill registry whitelists custom skills separately from built-ins"
       docIds: ["doc-1"],
     }).map((skill) => skill.id),
     [CUSTOM_SKILL_IDS.extractTimeline]
+  );
+  assert.deepEqual(
+    defaultRegistry.select({
+      plan: {
+        wantsTimeline: false,
+        wantsRiskReview: true,
+        wantsDocumentRag: false,
+        wantsWeb: false,
+        wantsResearch: false,
+        wantsInventory: false,
+        wantsDiscovery: false,
+      },
+      docIds: ["doc-1"],
+    }).map((skill) => skill.id),
+    [CUSTOM_SKILL_IDS.riskReview]
   );
 });
 
@@ -419,6 +439,109 @@ test("agent rag executes whitelisted custom timeline skill with access scope", a
   assert.equal(timelineObservation.citationCount, 1);
   assert.equal(response.body.agentObservability.runs[0].phase, "primary");
   assert.equal(response.body.agentObservability.runs[0].skillId, CUSTOM_SKILL_IDS.extractTimeline);
+});
+
+test("agent rag executes whitelisted custom risk review skill with access scope", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  let listAccessScope = null;
+  let chatAccessScope = null;
+  let riskRetrievalPlan = null;
+  let receivedQuestion = null;
+  let receivedDocIds = null;
+  const ragService = {
+    chat: async (docIds, question, options) => {
+      receivedDocIds = docIds;
+      receivedQuestion = question;
+      chatAccessScope = options.accessScope;
+      riskRetrievalPlan = options.retrievalPlan;
+
+      return {
+        text: [
+          "Risk Review",
+          "- Risk: Refund approval is required before issuing payment. [Source 1]",
+          "- Gap: Regional exceptions are not specified. [Source 1]",
+        ].join("\n"),
+        citations: [
+          {
+            docId: "doc-1",
+            fileName: "refund-policy.pdf",
+            pageNumber: 4,
+            excerpt: "Refund approval is required before issuing payment. Regional exceptions are not specified.",
+          },
+        ],
+        abstained: false,
+        resolvedQuery: question,
+        memoryApplied: false,
+      };
+    },
+    listDocuments: (scope) => {
+      listAccessScope = scope;
+
+      return [
+        {
+          docId: "doc-1",
+          fileName: "refund-policy.pdf",
+        },
+      ];
+    },
+  };
+
+  const response = await runAgentRag({
+    ragService,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+    question: "Review the selected policy for risks, gaps, and exceptions.",
+    docIds: ["doc-1"],
+    sessionId: "session-1",
+    userId: "alice",
+    accessScope,
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, CUSTOM_SKILL_IDS.riskReview);
+  assert.match(response.body.agentAnswer, /Risk Review/);
+  assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+  assert.equal(response.body.ragSources.length, 1);
+  assert.deepEqual(receivedDocIds, ["doc-1"]);
+  assert.deepEqual(listAccessScope, accessScope);
+  assert.deepEqual(chatAccessScope, accessScope);
+  assert.match(receivedQuestion, /risk review/i);
+  assert.match(receivedQuestion, /gaps/i);
+  assert.equal(riskRetrievalPlan.intent, "analysis");
+  assert.equal(riskRetrievalPlan.retrievalOptions.topK, 10);
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "query_planner", "custom_skill", "synthesis", "answer_finalizer"]
+  );
+  assert.deepEqual(response.body.agentSkills, [
+    {
+      skillId: CUSTOM_SKILL_IDS.riskReview,
+      skillVersion: "1.0.0",
+      label: "Risk Review",
+      status: "completed",
+    },
+  ]);
+
+  const riskObservation = response.body.agentObservability.skills.find(
+    (skill) => skill.skillId === CUSTOM_SKILL_IDS.riskReview
+  );
+  assert.equal(riskObservation.selected, true);
+  assert.equal(riskObservation.status, "completed");
+  assert.equal(riskObservation.attempts, 1);
+  assert.equal(riskObservation.budgetKey, "customSkillCalls");
+  assert.equal(riskObservation.budgetUsed, 1);
+  assert.equal(riskObservation.budgetLimit, 2);
+  assert.equal(riskObservation.citationCount, 1);
+
+  const customStep = response.body.agentTrace.find(
+    (step) => step.type === "custom_skill"
+  );
+  assert.equal(customStep.detail.skillId, CUSTOM_SKILL_IDS.riskReview);
+  assert.equal(customStep.detail.riskQuestion, receivedQuestion);
 });
 
 test("feedback records and feedback eval cases retain skill metadata", () => {

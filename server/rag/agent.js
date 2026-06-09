@@ -37,6 +37,9 @@ const RESEARCH_SIGNAL_PATTERN =
 const TIMELINE_SIGNAL_PATTERN =
   /\b(timeline|chronology|chronological|sequence|milestones?|key dates?|event order|date order)\b|时间线|时间顺序|按时间|大事记|里程碑|事件顺序|关键日期/i;
 
+const RISK_REVIEW_SIGNAL_PATTERN =
+  /\b(risk review|review risks?|risk analysis|gaps?|exceptions?|conflicts?|contradictions?|uncertaint(?:y|ies)|red flags?|missing terms?)\b|风险审查|风险|缺口|例外|冲突|矛盾|不确定|遗漏/i;
+
 const serializeError = (error, fallbackMessage) => {
   if (error instanceof Error) {
     return error.message;
@@ -109,12 +112,14 @@ const buildPlan = ({ question, docIds }) => {
   const wantsDiscovery = DISCOVERY_SIGNAL_PATTERN.test(question);
   const wantsWeb = WEB_SIGNAL_PATTERN.test(question);
   const wantsTimeline = TIMELINE_SIGNAL_PATTERN.test(question);
+  const wantsRiskReview = RISK_REVIEW_SIGNAL_PATTERN.test(question);
   const hasDocuments = docIds.length > 0;
 
   if (wantsTimeline) {
     return {
       mode: CUSTOM_SKILL_IDS.extractTimeline,
       wantsTimeline: true,
+      wantsRiskReview: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -125,10 +130,26 @@ const buildPlan = ({ question, docIds }) => {
     };
   }
 
+  if (wantsRiskReview) {
+    return {
+      mode: CUSTOM_SKILL_IDS.riskReview,
+      wantsTimeline: false,
+      wantsRiskReview: true,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      requiresDocuments: true,
+      summary: "Review selected documents for cited risks, gaps, conflicts, and exceptions.",
+    };
+  }
+
   if (wantsResearch) {
     return {
       mode: "research_brief",
       wantsTimeline: false,
+      wantsRiskReview: false,
       wantsResearch: true,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -143,6 +164,7 @@ const buildPlan = ({ question, docIds }) => {
     return {
       mode: "inventory",
       wantsTimeline: false,
+      wantsRiskReview: false,
       wantsResearch: false,
       wantsInventory: true,
       wantsDocumentRag: false,
@@ -156,6 +178,7 @@ const buildPlan = ({ question, docIds }) => {
     return {
       mode: "document_discovery",
       wantsTimeline: false,
+      wantsRiskReview: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: true,
@@ -170,6 +193,7 @@ const buildPlan = ({ question, docIds }) => {
     return {
       mode: "web",
       wantsTimeline: false,
+      wantsRiskReview: false,
       wantsResearch: false,
       wantsInventory: false,
       wantsDiscovery: false,
@@ -183,6 +207,7 @@ const buildPlan = ({ question, docIds }) => {
   return {
     mode: wantsWeb ? "document_web" : "document",
     wantsTimeline: false,
+    wantsRiskReview: false,
     wantsResearch: false,
     wantsInventory,
     wantsDiscovery: false,
@@ -241,12 +266,12 @@ const buildSynthesisAnswer = ({
   discoveryAnswer,
   researchBrief,
 }) => {
-  if (plan.mode === CUSTOM_SKILL_IDS.extractTimeline) {
-    const timelineResult = customSkillResults.find(
-      (result) => result.ok && result.skillId === CUSTOM_SKILL_IDS.extractTimeline
+  if (Object.values(CUSTOM_SKILL_IDS).includes(plan.mode)) {
+    const customResult = customSkillResults.find(
+      (result) => result.ok && result.skillId === plan.mode
     );
 
-    return timelineResult?.text ?? "The timeline could not be extracted.";
+    return customResult?.text ?? "The custom skill could not complete the request.";
   }
 
   if (plan.mode === "research_brief") {
