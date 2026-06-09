@@ -36,7 +36,7 @@ test("document evidence check fails when an answer claim is unsupported by citat
   );
 });
 
-test("agent rag retries when claim support check finds unsupported answer claims", async () => {
+test("agent rag runs follow-up retrieval when claim support check finds unsupported answer claims", async () => {
   const askedQuestions = [];
   const ragService = {
     chat: async (_docIds, query) => {
@@ -85,7 +85,7 @@ test("agent rag retries when claim support check finds unsupported answer claims
   const response = await runAgentRag({
     ragService,
     webChatService: async () => {
-      throw new Error("Web search should not run when document retry succeeds.");
+      throw new Error("Web search should not run when document follow-up succeeds.");
     },
     question: "What does remote work require?",
     docIds: ["doc-1"],
@@ -113,16 +113,43 @@ test("agent rag retries when claim support check finds unsupported answer claims
   assert.equal(selfChecks[1].status, "completed");
   assert.equal(selfChecks[1].detail.claimSupport.unsupportedClaimCount, 0);
 
+  const gapAnalysis = response.body.agentTrace.find(
+    (step) => step.type === "gap_analysis"
+  );
+  assert.equal(gapAnalysis.status, "completed");
+  assert.equal(gapAnalysis.detail.gaps[0].type, "unsupported_claim");
+  assert.match(gapAnalysis.detail.gaps[0].claim, /satellite stipend/i);
+
+  const followUpRetrieval = response.body.agentTrace.find(
+    (step) => step.type === "follow_up_retrieval"
+  );
+  assert.equal(followUpRetrieval.status, "completed");
+  assert.equal(followUpRetrieval.detail.retrievalPlan.phase, "follow_up");
+  assert.deepEqual(
+    followUpRetrieval.detail.retrievalPlan.retrievalQueries.map((query) => query.id),
+    ["primary", "follow-up-evidence", "follow-up-source-check"]
+  );
+
   const documentObservation = response.body.agentObservability.skills.find(
     (skill) => skill.skillId === "document_rag"
   );
   assert.equal(documentObservation.attempts, 2);
   assert.equal(documentObservation.retryCount, 1);
+  assert.equal(documentObservation.followUpCount, 1);
   assert.equal(documentObservation.citationCount, 2);
   assert.equal(documentObservation.budgetUsed, 2);
+  assert.equal(response.body.agentObservability.executionLoop.followUpsRun, 1);
+  assert.equal(
+    response.body.agentObservability.executionLoop.stoppedReason,
+    "follow_up_resolved"
+  );
+  assert.equal(
+    response.body.agentObservability.executionLoop.gaps[0].type,
+    "unsupported_claim"
+  );
   assert.deepEqual(
     response.body.agentObservability.runs.map((run) => run.phase),
-    ["primary", "retry"]
+    ["primary", "follow_up"]
   );
 });
 

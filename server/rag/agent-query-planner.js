@@ -93,7 +93,7 @@ const buildIntentQueries = ({ question, intent, phase, focus }) => {
     },
   ];
 
-  if (phase === "retry") {
+  if (phase === "retry" || phase === "follow_up") {
     const issueText = [
       ...(focus?.reasons ?? []),
       ...(focus?.unsupportedClaims ?? []).map((claim) => `Unsupported claim: ${claim}`),
@@ -102,14 +102,14 @@ const buildIntentQueries = ({ question, intent, phase, focus }) => {
     return [
       ...baseQueries,
       {
-        id: "retry-evidence",
-        label: "Retry evidence repair",
+        id: "follow-up-evidence",
+        label: "Follow-up evidence repair",
         query: toQuery(`Find citation-backed evidence that fixes this issue: ${issueText || originalQuery}`),
         primary: false,
       },
       {
-        id: "retry-source-check",
-        label: "Retry source support",
+        id: "follow-up-source-check",
+        label: "Follow-up source support",
         query: toQuery(`Find source excerpts that directly support the final answer for: ${focus?.originalQuestion ?? originalQuery}`),
         primary: false,
       },

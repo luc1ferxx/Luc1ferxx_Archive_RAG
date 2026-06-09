@@ -114,7 +114,7 @@ const addSkillRun = (skillStatsByKey, run = {}) => {
     stats.attempts += 1;
   }
 
-  if (run.phase === "retry") {
+  if (run.phase === "retry" || run.phase === "follow_up") {
     stats.retryCount += 1;
   }
 

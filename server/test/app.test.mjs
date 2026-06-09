@@ -353,7 +353,7 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
   }
 });
 
-test("chat endpoint agent retries document RAG when self-check finds missing citations", async () => {
+test("chat endpoint agent runs follow-up document RAG when self-check finds missing citations", async () => {
   const documents = new Map([
     [
       "doc-1",
@@ -406,7 +406,7 @@ test("chat endpoint agent retries document RAG when self-check finds missing cit
       listDocuments: () => [...documents.values()],
     },
     chatMcp: async () => {
-      throw new Error("Web search should not run when document retry succeeds.");
+      throw new Error("Web search should not run when document follow-up succeeds.");
     },
     healthService: okHealthService,
   });
@@ -441,22 +441,32 @@ test("chat endpoint agent retries document RAG when self-check finds missing cit
         "query_planner",
         "document_rag",
         "self_check",
-        "document_retry",
+        "gap_analysis",
+        "follow_up_retrieval",
         "self_check",
         "synthesis",
         "answer_finalizer",
       ]
     );
     assert.equal(
-      body.agentTrace.find((step) => step.type === "document_retry").status,
+      body.agentTrace.find((step) => step.type === "gap_analysis").status,
       "completed"
+    );
+    assert.equal(
+      body.agentTrace.find((step) => step.type === "follow_up_retrieval").status,
+      "completed"
+    );
+    assert.equal(body.agentObservability.executionLoop.followUpsRun, 1);
+    assert.equal(
+      body.agentObservability.executionLoop.stoppedReason,
+      "follow_up_resolved"
     );
   } finally {
     await server.close();
   }
 });
 
-test("chat endpoint agent skips document retry when document budget is exhausted", async () => {
+test("chat endpoint agent skips document follow-up when document budget is exhausted", async () => {
   const documents = new Map([
     [
       "doc-1",
@@ -518,11 +528,23 @@ test("chat endpoint agent skips document retry when document budget is exhausted
     assert.equal(askedQuestions.length, 1);
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
-      ["plan", "query_planner", "document_rag", "self_check", "budget_limit", "synthesis"]
+      [
+        "plan",
+        "query_planner",
+        "document_rag",
+        "self_check",
+        "gap_analysis",
+        "budget_limit",
+        "synthesis",
+      ]
     );
     assert.match(
       body.agentTrace.find((step) => step.type === "budget_limit").summary,
-      /Document retry/i
+      /Document follow-up/i
+    );
+    assert.equal(
+      body.agentObservability.executionLoop.stoppedReason,
+      "budget_exhausted"
     );
   } finally {
     await server.close();

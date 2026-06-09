@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 import {
   buildEvidenceRetryQuestion,
+  buildEvidenceGaps,
   evaluateDocumentEvidence,
   selectBetterRagResult,
 } from "./agent-self-check.js";
@@ -24,6 +25,8 @@ import {
 
 const WEB_SIGNAL_PATTERN =
   /\b(latest|current|currently|today|now|recent|news|live|online|internet|web|search the web|real[-\s]?time)\b|最新|当前|现在|今天|近日|实时|联网|网页|网络|新闻/i;
+
+const MAX_AGENT_FOLLOW_UPS = 1;
 
 const INVENTORY_SIGNAL_PATTERN =
   /\b(what documents|which documents|list documents|show documents|workspace documents|uploaded documents|what files|which files|list files)\b|有哪些(?:文档|资料|文件)|列出.*(?:文档|资料|文件)|当前.*(?:文档|资料|文件)|上传.*(?:文档|资料|文件)/i;
@@ -313,6 +316,18 @@ const buildSelfCheckSummary = (check) => {
   return `Evidence check needs attention: ${check.reasons.join(" ")}`;
 };
 
+const buildGapAnalysisSummary = (gaps = []) => {
+  if (gaps.length === 0) {
+    return "No evidence gaps require follow-up.";
+  }
+
+  const gapTypes = [...new Set(gaps.map((gap) => gap.type ?? "evidence_gap"))];
+
+  return `Identified ${gaps.length} evidence gap${
+    gaps.length === 1 ? "" : "s"
+  } for follow-up: ${gapTypes.join(", ")}.`;
+};
+
 const buildSynthesisAnswer = ({
   plan,
   ragResult,
@@ -410,6 +425,28 @@ export const runAgentRag = async ({
   const skillExecutions = new Map();
   const skillObservations = new Map();
   const skillRuns = [];
+  const executionLoop = {
+    version: "1.0",
+    maxFollowUps: MAX_AGENT_FOLLOW_UPS,
+    followUpsRun: 0,
+    gapsIdentified: 0,
+    gaps: [],
+    stoppedReason: "not_needed",
+  };
+  const recordExecutionGaps = ({ skill, check }) => {
+    const descriptor = getSkillDescriptor(skill);
+    const gaps = check.gaps?.length ? check.gaps : buildEvidenceGaps(check);
+    const normalizedGaps = gaps.map((gap) => ({
+      ...gap,
+      skillId: descriptor.skillId,
+      skillVersion: descriptor.skillVersion,
+    }));
+
+    executionLoop.gaps.push(...normalizedGaps);
+    executionLoop.gapsIdentified = executionLoop.gaps.length;
+
+    return normalizedGaps;
+  };
   const recordSkillResult = (result) => {
     if (!result?.skillId) {
       return;
@@ -479,6 +516,7 @@ export const runAgentRag = async ({
       attempts: 0,
       skippedCount: 0,
       retryCount: 0,
+      followUpCount: 0,
       totalDurationMs: 0,
       citationCount: 0,
       lastCitationCount: 0,
@@ -546,8 +584,12 @@ export const runAgentRag = async ({
       observation.attempts += 1;
     }
 
-    if (phase === "retry") {
+    if (phase === "retry" || phase === "follow_up") {
       observation.retryCount += 1;
+    }
+
+    if (phase === "follow_up") {
+      observation.followUpCount += 1;
     }
 
     observation.totalDurationMs = roundDurationMs(
@@ -628,6 +670,7 @@ export const runAgentRag = async ({
   const buildAgentObservability = ({ agentMode }) => ({
     agentMode,
     planMode: plan.mode,
+    executionLoop,
     selectedSkills: selectedSkills.map((skill) => getSkillDescriptor(skill)),
     skills: [...skillObservations.values()].sort((left, right) =>
       left.skillId.localeCompare(right.skillId)
@@ -964,95 +1007,132 @@ export const runAgentRag = async ({
       });
     }
 
-    if (primaryCheck.retryRecommended) {
-      const retryQuestion = buildEvidenceRetryQuestion({
+    if (
+      primaryCheck.retryRecommended &&
+      executionLoop.followUpsRun < executionLoop.maxFollowUps
+    ) {
+      const gaps = recordExecutionGaps({
+        skill: documentRagSkill,
+        check: primaryCheck,
+      });
+
+      executionLoop.stoppedReason = "follow_up_planned";
+
+      addTraceStep({
+        type: "gap_analysis",
+        label: "Gap Analysis",
+        status: gaps.length > 0 ? "completed" : "skipped",
+        summary: buildGapAnalysisSummary(gaps),
+        detail: {
+          skillId: documentRagSkill.id,
+          skillVersion: documentRagSkill.version,
+          followUpRecommended: gaps.length > 0,
+          gaps,
+        },
+      });
+
+      const followUpQuestion = buildEvidenceRetryQuestion({
         question,
         check: primaryCheck,
       });
-      const retryRetrievalPlan = buildAgentRetrievalPlan({
-        question: retryQuestion,
+      const followUpRetrievalPlan = buildAgentRetrievalPlan({
+        question: followUpQuestion,
         plan,
         docIds,
-        phase: "retry",
+        phase: "follow_up",
         focus: {
           originalQuestion: question,
           reasons: primaryCheck.reasons,
           unsupportedClaims: primaryCheck.claimSupport?.claims
             ?.filter((claim) => !claim.supported)
             .map((claim) => claim.text) ?? [],
+          gaps,
         },
       });
-      const retryBudget = consumeBudget(budgetState, documentRagSkill.budgetKey);
+      const followUpBudget = consumeBudget(
+        budgetState,
+        documentRagSkill.budgetKey
+      );
 
-      if (!retryBudget.ok) {
+      if (!followUpBudget.ok) {
+        executionLoop.stoppedReason = "budget_exhausted";
         recordSkippedSkill({
           skill: documentRagSkill,
           result: buildFailedSkillResult(
             documentRagSkill,
-            new Error(retryBudget.reason)
+            new Error(followUpBudget.reason)
           ),
-          phase: "retry",
-          budget: retryBudget,
+          phase: "follow_up",
+          budget: followUpBudget,
         });
         addBudgetLimitTrace({
-          tool: "Document retry",
-          reason: retryBudget.reason,
+          tool: "Document follow-up",
+          reason: followUpBudget.reason,
         });
       } else {
-        const retryRagResult = await executeObservedSkill(documentRagSkill, {
+        const followUpRagResult = await executeObservedSkill(documentRagSkill, {
           ragService,
           docIds,
-          question: retryQuestion,
+          question: followUpQuestion,
           sessionId,
           userId,
           accessScope,
-          retrievalPlan: retryRetrievalPlan,
+          retrievalPlan: followUpRetrievalPlan,
         }, {
-          phase: "retry",
-          budget: retryBudget,
+          phase: "follow_up",
+          budget: followUpBudget,
         });
-        recordSkillResult(retryRagResult);
+        executionLoop.followUpsRun += 1;
+        executionLoop.stoppedReason = "follow_up_completed";
+        recordSkillResult(followUpRagResult);
 
         addTraceStep({
-          type: "document_retry",
-          label: "Document Retry",
-          status: retryRagResult.ok ? "completed" : "failed",
-          summary: retryRagResult.ok
-            ? `Focused retry returned ${
-                retryRagResult.value.citations?.length ?? 0
+          type: "follow_up_retrieval",
+          label: "Follow-up Retrieval",
+          status: followUpRagResult.ok ? "completed" : "failed",
+          summary: followUpRagResult.ok
+            ? `Focused follow-up returned ${
+                followUpRagResult.value.citations?.length ?? 0
               } citation${
-                retryRagResult.value.citations?.length === 1 ? "" : "s"
+                followUpRagResult.value.citations?.length === 1 ? "" : "s"
               }.`
-            : `Focused retry failed: ${serializeError(
-                retryRagResult.error,
-              "Unable to retry document evidence lookup."
+            : `Focused follow-up failed: ${serializeError(
+                followUpRagResult.error,
+              "Unable to run follow-up document evidence lookup."
             )}`,
-          detail: buildSkillTraceDetail(retryRagResult, {
-            retryQuestion,
-            retrievalPlan: retryRetrievalPlan,
+          detail: buildSkillTraceDetail(followUpRagResult, {
+            followUpQuestion,
+            retrievalPlan: followUpRetrievalPlan,
+            gaps,
           }),
         });
 
-        if (retryRagResult.ok) {
-          const retryCheck = evaluateDocumentEvidence({
-            ragResult: retryRagResult,
+        if (followUpRagResult.ok) {
+          const followUpCheck = evaluateDocumentEvidence({
+            ragResult: followUpRagResult,
             docIds,
           });
 
           addTraceStep({
             type: "self_check",
-            label: "Retry Self Check",
-            status: retryCheck.passed ? "completed" : "failed",
-            summary: buildSelfCheckSummary(retryCheck),
-            detail: retryCheck,
+            label: "Follow-up Self Check",
+            status: followUpCheck.passed ? "completed" : "failed",
+            summary: buildSelfCheckSummary(followUpCheck),
+            detail: followUpCheck,
           });
+
+          executionLoop.stoppedReason = followUpCheck.passed
+            ? "follow_up_resolved"
+            : "follow_up_unresolved";
         }
 
         ragResult = selectBetterRagResult({
           primary: primaryRagResult,
-          retry: retryRagResult,
+          retry: followUpRagResult,
         });
       }
+    } else if (primaryCheck.retryRecommended) {
+      executionLoop.stoppedReason = "follow_up_limit_reached";
     }
   }
 
