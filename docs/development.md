@@ -1,0 +1,102 @@
+# Development Notes
+
+这份文档放 API、目录结构和开发约束。README 只保留项目入口。
+
+## API
+
+| Method | Path | 说明 |
+| --- | --- | --- |
+| `GET` | `/health` | 返回 OpenAI、auth、vector store、PostgreSQL、long memory 等健康状态。 |
+| `GET` | `/ready` | Readiness check，整体异常时返回 `503`。 |
+| `GET` | `/documents` | 列出当前访问范围内的持久化文档。 |
+| `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
+| `POST` | `/documents/clear` | 清空工作区文档。 |
+| `GET` | `/documents/:docId/file` | 以内联 PDF 方式流式返回文档，支持 range request。 |
+| `POST` | `/upload/init` | 初始化分片上传会话。 |
+| `GET` | `/upload/status` | 查询分片上传进度。 |
+| `POST` | `/upload/chunk` | 上传单个文件分片。 |
+| `POST` | `/upload/complete` | 合并分片、解析 PDF、写入索引。 |
+| `POST` | `/upload` | 旧版直接上传接口，限制 50 MB。 |
+| `GET` / `POST` | `/chat` | 对选中文档提问，返回 RAG answer、sources、web answer 和 AgentRAG observability。 |
+| `DELETE` | `/sessions/:sessionId` | 清理指定会话记忆。 |
+| `GET` | `/memory` | 查询长期记忆。 |
+| `POST` | `/memory` | 写入长期记忆。 |
+| `DELETE` | `/memory/:memoryId` | 删除单条长期记忆。 |
+| `DELETE` | `/memory` | 清空某用户长期记忆。 |
+| `GET` | `/feedback` | 查询当前用户/工作区最近答案反馈。 |
+| `POST` | `/feedback` | 保存当前回答的反馈类型、备注、答案摘要和引用摘要。 |
+| `GET` | `/quality/latest` | 读取最新质量报告摘要。 |
+| `POST` | `/quality/synthetic` | 触发 synthetic quality run。 |
+| `GET` | `/quality/history` | 查询历史 quality run。 |
+
+只有 `/health` 和 `/ready` 是公开健康检查。文档列表、上传、chat、memory、quality、feedback 和 `/documents/:docId/file` 在 `API_AUTH_ENABLED=true` 时都需要 `x-api-key` 或 `Authorization: Bearer <token>`。
+
+## 仓库结构
+
+```text
+.
+├── src/                         # React frontend
+│   ├── components/              # Uploader, chat, answer renderer, PDF preview
+│   ├── App.js                   # Three-column archive workspace
+│   └── config.js                # API domain and auth header helper
+├── server/
+│   ├── app.js                   # Express routes and upload/chat orchestration
+│   ├── chat-mcp.js              # MCP web-answer client
+│   ├── mcp-server.js            # SerpAPI-backed local MCP search server
+│   ├── health.js                # Startup/readiness health checks
+│   ├── db/migrations/           # PostgreSQL tables
+│   ├── rag/                     # Custom RAG + AgentRAG pipeline
+│   │   ├── agent*.js            # Planner, run context, self-check, finalizer, trace, working memory
+│   │   ├── skills/              # Built-ins and whitelisted custom skills
+│   │   ├── retrievers/          # Global and per-document retrievers
+│   │   ├── chunker.js
+│   │   ├── confidence.js
+│   │   ├── evidence-aligner.js
+│   │   ├── comparison-engine.js
+│   │   ├── reranker.js
+│   │   └── vector-store*.js
+│   ├── evaluation/              # Synthetic, trajectory, feedback, rerank, ragas evaluation
+│   └── test/                    # Backend tests
+├── docs/
+└── README.md
+```
+
+## Runtime paths
+
+这些路径是运行时或生成内容，一般不手动编辑，也不提交：
+
+```text
+node_modules/
+build/
+server/node_modules/
+server/data/
+server/uploads/
+server/upload-sessions/
+server/evaluation/generated/
+server/evaluation/results/<timestamped-files>
+```
+
+## Development rules
+
+- RAG 变更优先放在 `server/rag/`，route/API 行为放在 `server/app.js`。
+- Agent planner、run context、document loop、skill runners、observability、synthesis、finalization 已拆成独立模块；不要把这些细节重新堆回 `server/rag/agent.js`。
+- 新增 custom skill 必须走白名单注册，并确认 `accessScope` 传递到文档读取和 RAG chat。
+- `/chat` response shape 会被前端 trace UI、feedback metadata 和 evaluation 使用，改字段时需要同步测试。
+- Working memory 是 run-scoped，不应写入长期记忆，除非用户明确要求。
+- `VECTOR_STORE_PROVIDER=local` 适合小规模本地工作区；大规模语料建议切到 Qdrant。
+- 不要提交 `server/.env`、私有 PDF、`server/data/`、上传会话文件、生成语料或 timestamped eval 结果。
+
+## Backend test entry
+
+`server/test/run.test.mjs` 聚合后端测试，包括 app、RAG、AgentRAG、feedback、quality report、observability report、CI workflow、param sweep、rerank 和 trajectory 相关测试。
+
+常用入口：
+
+```bash
+cd server
+npm test
+npm run coverage:gate
+npm run eval:trajectory
+npm run quality:gate
+```
+
