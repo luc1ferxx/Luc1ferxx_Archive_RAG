@@ -1330,6 +1330,503 @@ test("document file route requires auth and enforces document ownership", async 
   }
 });
 
+test("document file route handles full responses, invalid ranges, and stream errors", async () => {
+  const fileBuffer = Buffer.from("%PDF-test-document", "utf8");
+  const app = await createApp({
+    healthService: okHealthService,
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      getDocumentFile: async (docId) => {
+        if (docId === "boom") {
+          const error = new Error("storage unavailable");
+          error.status = 503;
+          throw error;
+        }
+
+        if (docId !== "doc-1") {
+          return null;
+        }
+
+        return {
+          document: {
+            docId,
+            fileName: "stored.pdf",
+          },
+          fileBuffer,
+          fileName: "stored.pdf",
+          mimeType: "application/pdf",
+          fileSize: fileBuffer.byteLength,
+        };
+      },
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/documents/doc-1/file`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-length"), String(fileBuffer.byteLength));
+    assert.equal(await response.text(), "%PDF-test-document");
+
+    response = await fetch(`${server.baseUrl}/documents/doc-1/file`, {
+      headers: {
+        Range: "bytes=5-999",
+      },
+    });
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get("content-range"), "bytes 5-17/18");
+    assert.equal(await response.text(), "test-document");
+
+    response = await fetch(`${server.baseUrl}/documents/doc-1/file`, {
+      headers: {
+        Range: "items=0-3",
+      },
+    });
+    assert.equal(response.status, 416);
+    assert.equal(response.headers.get("content-range"), "bytes */18");
+
+    response = await fetch(`${server.baseUrl}/documents/doc-1/file`, {
+      headers: {
+        Range: "bytes=10-1",
+      },
+    });
+    assert.equal(response.status, 416);
+    assert.equal(response.headers.get("content-range"), "bytes */18");
+
+    response = await fetch(`${server.baseUrl}/documents/missing/file`);
+    assert.equal(response.status, 404);
+
+    response = await fetch(`${server.baseUrl}/documents/boom/file`);
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /storage unavailable/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("upload routes report missing and invalid request boundaries", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-boundary-"));
+  const app = await createApp({
+    healthService: okHealthService,
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      ingestDocument: async () => ({
+        docId: "accepted",
+        fileName: "accepted.pdf",
+      }),
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/upload/status`);
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /fileId is required/);
+
+    response = await fetch(`${server.baseUrl}/upload/status?fileId=missing`);
+    assert.equal(response.status, 404);
+
+    response = await fetch(`${server.baseUrl}/upload/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId: "bad-init",
+        fileSize: 10,
+        totalChunks: 1,
+        chunkSize: 10,
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /fileName is required/);
+
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /No chunk uploaded/);
+
+    const missingFileIdForm = new FormData();
+    missingFileIdForm.append("chunkIndex", "0");
+    missingFileIdForm.append("totalChunks", "1");
+    missingFileIdForm.append("chunk", new Blob(["partial"]), "paper.pdf.part-0");
+
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: missingFileIdForm,
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /fileId is required/);
+
+    response = await fetch(`${server.baseUrl}/upload/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 400);
+
+    response = await fetch(`${server.baseUrl}/upload/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId: "missing",
+      }),
+    });
+    assert.equal(response.status, 404);
+
+    response = await fetch(`${server.baseUrl}/upload`, {
+      method: "POST",
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /PDF file is required/);
+
+    const directUploadForm = new FormData();
+    directUploadForm.append(
+      "file",
+      new Blob(["not a pdf"], {
+        type: "text/plain",
+      }),
+      "notes.txt"
+    );
+
+    response = await fetch(`${server.baseUrl}/upload`, {
+      method: "POST",
+      body: directUploadForm,
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /PDF file is required/);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("upload completion removes merged file when ingestion fails", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-failure-"));
+  let removedPath = null;
+  let clearedFileId = null;
+  const app = await createApp({
+    healthService: okHealthService,
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    uploadStore: {
+      ensureUploadStorage: async () => {},
+      initializeUploadSession: async () => {
+        throw new Error("not used");
+      },
+      getUploadSessionStatus: async (fileId) =>
+        fileId === "file-1"
+          ? {
+              fileId,
+              fileName: "paper.pdf",
+              totalChunks: 1,
+              uploadedChunks: [0],
+            }
+          : null,
+      storeUploadChunk: async () => {
+        throw new Error("not used");
+      },
+      finalizeUploadSession: async () => ({
+        fileId: "file-1",
+      }),
+      clearUploadSession: async (fileId) => {
+        clearedFileId = fileId;
+      },
+      removeMergedUpload: async (filePath) => {
+        removedPath = filePath;
+      },
+    },
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      ingestDocument: async () => {
+        const error = new Error("ingestion rejected");
+        error.status = 422;
+        throw error;
+      },
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/upload/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId: "file-1",
+      }),
+    });
+
+    assert.equal(response.status, 422);
+    assert.match((await response.json()).error, /ingestion rejected/);
+    assert.match(removedPath, /paper-/);
+    assert.equal(clearedFileId, null);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("api routes expose consistent error responses for route failures", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-route-errors-"));
+  const makeServiceError = (message, status = 503) => {
+    const error = new Error(message);
+    error.status = status;
+    return error;
+  };
+  const app = await createApp({
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    healthService: {
+      runStartupHealthChecks: async () => ({
+        status: "ok",
+        checks: {},
+      }),
+      buildHealthReport: async () => {
+        throw makeServiceError("health failed");
+      },
+    },
+    qualityService: {
+      readLatestQualityReport: async () => {
+        throw makeServiceError("latest failed");
+      },
+      readQualityHistory: async () => {
+        throw makeServiceError("history failed");
+      },
+      runSyntheticQualityEvaluation: async () => {
+        throw makeServiceError("synthetic failed", 502);
+      },
+    },
+    feedbackService: {
+      listFeedback: async () => {
+        throw makeServiceError("feedback list failed");
+      },
+      recordFeedback: async () => {
+        throw makeServiceError("feedback write failed", 409);
+      },
+    },
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+      deleteDocument: async (docId) => {
+        if (docId === "missing") {
+          return null;
+        }
+
+        throw makeServiceError("delete failed");
+      },
+      clearDocuments: async () => {
+        throw makeServiceError("clear failed");
+      },
+      clearSessionMemory: async () => {
+        throw makeServiceError("session clear failed");
+      },
+      listLongMemories: async () => {
+        throw makeServiceError("memory list failed");
+      },
+      rememberLongMemory: async () => {
+        throw makeServiceError("memory write failed");
+      },
+      deleteLongMemory: async ({ memoryId }) => {
+        if (memoryId === "missing") {
+          return null;
+        }
+
+        throw makeServiceError("memory delete failed");
+      },
+      clearLongMemories: async () => {
+        throw makeServiceError("memory clear failed");
+      },
+      ingestDocument: async () => {
+        throw makeServiceError("ingest failed", 422);
+      },
+      chat: async () => {
+        throw makeServiceError("chat failed");
+      },
+      getDocument: () => null,
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/health`);
+    assert.equal(response.status, 500);
+    assert.match((await response.json()).error, /health failed/);
+
+    response = await fetch(`${server.baseUrl}/ready`);
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /health failed/);
+
+    response = await fetch(`${server.baseUrl}/documents/missing`, {
+      method: "DELETE",
+    });
+    assert.equal(response.status, 404);
+
+    response = await fetch(`${server.baseUrl}/documents/boom`, {
+      method: "DELETE",
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /delete failed/);
+
+    response = await fetch(`${server.baseUrl}/documents/clear`, {
+      method: "POST",
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /clear failed/);
+
+    response = await fetch(`${server.baseUrl}/sessions/session-1`, {
+      method: "DELETE",
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /session clear failed/);
+
+    response = await fetch(`${server.baseUrl}/memory`);
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /userId is required/);
+
+    response = await fetch(`${server.baseUrl}/memory?userId=user-1`);
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /memory list failed/);
+
+    response = await fetch(`${server.baseUrl}/memory`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        userId: "user-1",
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /text is required/);
+
+    response = await fetch(`${server.baseUrl}/memory`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        userId: "user-1",
+        text: "remember this",
+      }),
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /memory write failed/);
+
+    response = await fetch(`${server.baseUrl}/memory/missing?userId=user-1`, {
+      method: "DELETE",
+    });
+    assert.equal(response.status, 404);
+
+    response = await fetch(`${server.baseUrl}/memory/boom?userId=user-1`, {
+      method: "DELETE",
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /memory delete failed/);
+
+    response = await fetch(`${server.baseUrl}/memory`, {
+      method: "DELETE",
+    });
+    assert.equal(response.status, 400);
+
+    response = await fetch(`${server.baseUrl}/memory?userId=user-1`, {
+      method: "DELETE",
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /memory clear failed/);
+
+    response = await fetch(`${server.baseUrl}/quality/latest`);
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /latest failed/);
+
+    response = await fetch(`${server.baseUrl}/quality/history`);
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /history failed/);
+
+    response = await fetch(`${server.baseUrl}/quality/synthetic`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 502);
+    assert.match((await response.json()).error, /synthetic failed/);
+
+    response = await fetch(`${server.baseUrl}/feedback`);
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /feedback list failed/);
+
+    response = await fetch(`${server.baseUrl}/feedback`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        feedbackType: "helpful",
+        question: "What changed?",
+        answerText: "The answer changed.",
+      }),
+    });
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /feedback write failed/);
+
+    response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /Question is required/);
+
+    response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        question: "What happened?",
+        docIds: ["doc-1"],
+      }),
+    });
+    assert.equal(response.status, 404);
+    assert.match((await response.json()).error, /Document not found/);
+
+    const pdfUpload = new FormData();
+    pdfUpload.append(
+      "file",
+      new Blob(["%PDF-1.4 fake"], {
+        type: "application/pdf",
+      }),
+      "paper.pdf"
+    );
+
+    response = await fetch(`${server.baseUrl}/upload`, {
+      method: "POST",
+      body: pdfUpload,
+    });
+    assert.equal(response.status, 422);
+    assert.match((await response.json()).error, /ingest failed/);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("chat endpoint rejects documents outside the authenticated workspace", async () => {
   const originalAuthEnabled = process.env.API_AUTH_ENABLED;
   const originalAuthToken = process.env.API_AUTH_TOKEN;

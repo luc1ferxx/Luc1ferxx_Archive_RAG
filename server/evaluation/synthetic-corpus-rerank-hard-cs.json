@@ -1,0 +1,195 @@
+{
+  "documents": [
+    {
+      "key": "activation_checkpointing_systems",
+      "fileName": "activation-checkpointing-systems.pdf",
+      "pages": [
+        "Training Systems Background\nThis paper discusses activation tensors, checkpoint storage, rollback experiments, and protocol design as separate concerns. The baseline evaluator records activation checkpoint rollback protocol vocabulary in an appendix index, but this page does not define the operational protocol.",
+        "Related Work On Recovery\nPrior systems use checkpoint barriers and rollback recovery after failed workers. A protocol may restore activation batches, but the discussion is historical and does not state the proposed activation checkpoint rollback protocol.",
+        "Activation Checkpoint Rollback Protocol\nThe proposed protocol restores the last verified activation checkpoint, rewinds the micro-batch cursor, reloads optimizer shards, and replays only the unfinished pipeline segment."
+      ]
+    },
+    {
+      "key": "speculative_cache_coherence",
+      "fileName": "speculative-cache-coherence.pdf",
+      "pages": [
+        "Cache Motivation\nThe design uses speculative reads, cache tags, invalidation notices, and window accounting. These terms appear in the introduction to motivate stale-read analysis, but no concrete invalidation window is defined here.",
+        "Negative Control: Speculation Window\nThe paper evaluates a speculation window for prefetching and an invalidation protocol for cache lines. The section is intentionally similar to the target phrasing but does not define the final speculative cache invalidation window.",
+        "Speculative Cache Invalidation Window\nThe system delays invalidation for 12 milliseconds after a speculative read when the writer has not crossed the commit barrier. If a conflicting write commits inside the window, the cache entry is evicted and the read is replayed."
+      ]
+    },
+    {
+      "key": "hnsw_index_maintenance_v1",
+      "fileName": "hnsw-index-maintenance-v1.pdf",
+      "pages": [
+        "Approximate Nearest Neighbor Maintenance\nThis paper studies HNSW graphs, tombstone markers, compaction jobs, and policy tuning. The introduction lists HNSW tombstone compaction policy as a search phrase but does not define the policy.",
+        "HNSW Tombstone Compaction Policy\nVersion 1 triggers compaction when deleted nodes exceed 18 percent of a layer or when the entry point has more than 3 deleted neighbors. The compactor rewires live neighbors before removing tombstone nodes.",
+        "Evaluation Notes\nThe ablation reports recall loss, memory usage, and rebuild time. It repeats the words HNSW, tombstone, compaction, and policy for metric labeling but contains no additional threshold."
+      ]
+    },
+    {
+      "key": "hnsw_index_maintenance_v2",
+      "fileName": "hnsw-index-maintenance-v2.pdf",
+      "pages": [
+        "HNSW Deletion Background\nThe paper reviews HNSW deletion, tombstone markers, compaction passes, and policy alternatives. This page is a background survey and should be treated as a hard negative.",
+        "HNSW Tombstone Compaction Policy\nVersion 2 triggers compaction when deleted nodes exceed 25 percent of a layer or when query latency rises by 9 percent for two consecutive windows. It preserves the entry point until the last repair phase.",
+        "Neighbor Repair Experiment\nThe experiment compares lazy deletion with eager rewiring. HNSW, tombstone, compaction, and policy appear in metric captions but the policy thresholds are not specified here."
+      ]
+    },
+    {
+      "key": "federated_secure_aggregation",
+      "fileName": "federated-secure-aggregation.pdf",
+      "pages": [
+        "Federated Learning Overview\nThe paper discusses secure aggregation, client dropout, threshold cryptography, and privacy accounting. These terms occur together in the overview without giving the final dropout threshold.",
+        "Secure Aggregation Dropout Threshold\nThe protocol tolerates up to 30 percent client dropout in each round. Above that threshold, the server aborts aggregation because the mask reconstruction quorum may reveal individual updates.",
+        "Privacy Accounting Appendix\nThis appendix repeats secure aggregation dropout threshold terminology while describing epsilon accounting. It does not change the 30 percent threshold."
+      ]
+    },
+    {
+      "key": "compiler_autotuning",
+      "fileName": "compiler-autotuning.pdf",
+      "pages": [
+        "Autotuning Search Space\nThe compiler explores tiling, vectorization, fusion, and rollback of failed schedules. It mentions checkpointed protocol logs for activation analysis as unrelated examples.",
+        "Kernel Fusion Cost Model\nThe cost model predicts memory traffic and register pressure. Cache invalidation, speculative windows, HNSW tombstones, and secure aggregation are absent from this section.",
+        "Ablation Study\nWeakly related systems terms are listed in a negative-control table to verify that retrieval ignores unrelated computer systems vocabulary."
+      ]
+    },
+    {
+      "key": "stream_replay_runtime",
+      "fileName": "stream-replay-runtime.pdf",
+      "pages": [
+        "Stream Replay Runtime\nThe runtime handles event logs, replay buffers, failure recovery, and deterministic scheduling. It uses checkpoint and rollback words, but it is not about activation checkpointing.",
+        "Replay Horizon Bound\nThe runtime stores 64 events per partition before forcing a snapshot. This horizon is about stream replay, not neural training recovery.",
+        "Failure Taxonomy\nWorker crashes, network partitions, and delayed acknowledgements are grouped by restart cost."
+      ]
+    },
+    {
+      "key": "retrieval_router_paper",
+      "fileName": "retrieval-router-paper.pdf",
+      "pages": [
+        "Router Architecture\nThe retrieval router chooses dense search, sparse search, or hybrid fusion. It includes a rerank module after candidate generation and before evidence filtering.",
+        "Rerank Candidate Multiplier\nThe router expands the initial candidate pool by a multiplier of 3 before reranking. This keeps hard negatives available long enough for the reranker to promote exact evidence.",
+        "User Study\nThe study tracks accepted answers, follow-up questions, and negative feedback after retrieval changes."
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "qa_activation_checkpoint_rollback_protocol",
+      "type": "qa",
+      "docKeys": ["activation_checkpointing_systems"],
+      "question": "What is the activation checkpoint rollback protocol?",
+      "shouldAbstain": false,
+      "referenceAnswer": "The protocol restores the last verified activation checkpoint, rewinds the micro-batch cursor, reloads optimizer shards, and replays only the unfinished pipeline segment.",
+      "expectedEvidence": [
+        {
+          "docKey": "activation_checkpointing_systems",
+          "pages": [3]
+        }
+      ],
+      "expectedAnswerIncludes": ["verified activation checkpoint", "micro-batch cursor", "optimizer shards"]
+    },
+    {
+      "id": "qa_speculative_cache_invalidation_window",
+      "type": "qa",
+      "docKeys": ["speculative_cache_coherence"],
+      "question": "What is the speculative cache invalidation window?",
+      "shouldAbstain": false,
+      "referenceAnswer": "The system delays invalidation for 12 milliseconds after a speculative read unless a conflicting write commits inside the window, in which case it evicts the entry and replays the read.",
+      "expectedEvidence": [
+        {
+          "docKey": "speculative_cache_coherence",
+          "pages": [3]
+        }
+      ],
+      "expectedAnswerIncludes": ["12", "conflicting write", "replayed"]
+    },
+    {
+      "id": "qa_secure_aggregation_dropout_threshold",
+      "type": "qa",
+      "docKeys": ["federated_secure_aggregation"],
+      "question": "What dropout threshold does the secure aggregation protocol tolerate?",
+      "shouldAbstain": false,
+      "referenceAnswer": "The protocol tolerates up to 30 percent client dropout in each round; above that threshold the server aborts aggregation.",
+      "expectedEvidence": [
+        {
+          "docKey": "federated_secure_aggregation",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["30"]
+    },
+    {
+      "id": "qa_rerank_candidate_multiplier",
+      "type": "qa",
+      "docKeys": ["retrieval_router_paper"],
+      "question": "What rerank candidate multiplier does the retrieval router use?",
+      "shouldAbstain": false,
+      "referenceAnswer": "The retrieval router expands the initial candidate pool by a multiplier of 3 before reranking.",
+      "expectedEvidence": [
+        {
+          "docKey": "retrieval_router_paper",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["3"]
+    },
+    {
+      "id": "qa_stream_replay_horizon",
+      "type": "qa",
+      "docKeys": ["stream_replay_runtime"],
+      "question": "What replay horizon does the stream replay runtime store?",
+      "shouldAbstain": false,
+      "referenceAnswer": "The runtime stores 64 events per partition before forcing a snapshot.",
+      "expectedEvidence": [
+        {
+          "docKey": "stream_replay_runtime",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["64 events", "partition"]
+    },
+    {
+      "id": "compare_hnsw_tombstone_compaction_policy",
+      "type": "compare",
+      "docKeys": ["hnsw_index_maintenance_v1", "hnsw_index_maintenance_v2"],
+      "question": "Compare the HNSW tombstone compaction policy in these papers.",
+      "shouldAbstain": false,
+      "referenceAnswer": "Version 1 compacts at 18 percent deleted nodes or more than 3 deleted entry-point neighbors. Version 2 compacts at 25 percent deleted nodes or after a 9 percent latency rise for two consecutive windows.",
+      "expectedEvidence": [
+        {
+          "docKey": "hnsw_index_maintenance_v1",
+          "pages": [2]
+        },
+        {
+          "docKey": "hnsw_index_maintenance_v2",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["18", "25", "9"]
+    },
+    {
+      "id": "compare_retrieval_noise_controls",
+      "type": "compare",
+      "docKeys": ["retrieval_router_paper", "compiler_autotuning"],
+      "question": "Compare whether these papers define a rerank candidate multiplier.",
+      "shouldAbstain": true,
+      "referenceAnswer": "The comparison should abstain because only the retrieval router paper defines a rerank candidate multiplier, while the compiler autotuning paper lacks grounded evidence for the requested property.",
+      "expectedEvidence": [
+        {
+          "docKey": "retrieval_router_paper",
+          "pages": [2]
+        }
+      ],
+      "expectedAnswerIncludes": ["multiplier of 3"]
+    },
+    {
+      "id": "qa_quantum_scheduler_abstain",
+      "type": "qa",
+      "docKeys": ["compiler_autotuning", "stream_replay_runtime"],
+      "question": "What lease duration does the quantum scheduler use?",
+      "shouldAbstain": true,
+      "expectedEvidence": []
+    }
+  ]
+}

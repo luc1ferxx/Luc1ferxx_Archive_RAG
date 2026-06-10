@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "name": "arxiv-computer-science-rerank-seed",
+  "description": "Fixed arXiv paper set for building a real-paper rerank evaluation corpus. Cases are annotated separately after PDF text extraction.",
+  "workflow": [
+    "Pin a stable set of arXiv papers in this manifest.",
+    "Run npm run corpus:arxiv to download PDFs and extract page text into evaluation/generated/arxiv-corpus.json.",
+    "Manually annotate cases with expectedEvidence, referenceAnswer, and shouldAbstain before running eval:rerank for report-quality metrics."
+  ],
+  "documents": [
+    {
+      "key": "rag_knowledge_intensive_nlp",
+      "arxivId": "2005.11401",
+      "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+      "fileName": "2005.11401-rag-knowledge-intensive-nlp.pdf",
+      "absUrl": "https://arxiv.org/abs/2005.11401",
+      "pdfUrl": "https://arxiv.org/pdf/2005.11401",
+      "primaryCategory": "cs.CL",
+      "tags": ["rag", "retrieval", "generation", "open-domain-qa"],
+      "annotationFocus": [
+        "RAG-Sequence vs RAG-Token formulation",
+        "non-parametric memory and dense vector index",
+        "knowledge-intensive NLP task evaluation"
+      ]
+    },
+    {
+      "key": "dense_passage_retrieval",
+      "arxivId": "2004.04906",
+      "title": "Dense Passage Retrieval for Open-Domain Question Answering",
+      "fileName": "2004.04906-dense-passage-retrieval.pdf",
+      "absUrl": "https://arxiv.org/abs/2004.04906",
+      "pdfUrl": "https://arxiv.org/pdf/2004.04906",
+      "primaryCategory": "cs.CL",
+      "tags": ["dense-retrieval", "dual-encoder", "open-domain-qa", "bm25-baseline"],
+      "annotationFocus": [
+        "dual-encoder dense retriever design",
+        "BM25 comparison and top-k passage retrieval",
+        "training data and negative sampling setup"
+      ]
+    },
+    {
+      "key": "colbert_late_interaction",
+      "arxivId": "2004.12832",
+      "title": "ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT",
+      "fileName": "2004.12832-colbert-late-interaction.pdf",
+      "absUrl": "https://arxiv.org/abs/2004.12832",
+      "pdfUrl": "https://arxiv.org/pdf/2004.12832",
+      "primaryCategory": "cs.IR",
+      "tags": ["reranking", "late-interaction", "passage-search", "bert"],
+      "annotationFocus": [
+        "late interaction scoring mechanism",
+        "offline document representation and query-time scoring",
+        "ranking effectiveness and efficiency claims"
+      ]
+    },
+    {
+      "key": "hnsw_approximate_nearest_neighbor",
+      "arxivId": "1603.09320",
+      "title": "Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs",
+      "fileName": "1603.09320-hnsw-ann.pdf",
+      "absUrl": "https://arxiv.org/abs/1603.09320",
+      "pdfUrl": "https://arxiv.org/pdf/1603.09320",
+      "primaryCategory": "cs.DS",
+      "tags": ["hnsw", "ann", "vector-search", "graph-index"],
+      "annotationFocus": [
+        "hierarchical NSW graph construction",
+        "search complexity and upper-layer traversal",
+        "neighbor selection heuristic"
+      ]
+    },
+    {
+      "key": "attention_is_all_you_need",
+      "arxivId": "1706.03762",
+      "title": "Attention Is All You Need",
+      "fileName": "1706.03762-attention-is-all-you-need.pdf",
+      "absUrl": "https://arxiv.org/abs/1706.03762",
+      "pdfUrl": "https://arxiv.org/pdf/1706.03762",
+      "primaryCategory": "cs.CL",
+      "tags": ["transformer", "attention", "sequence-transduction", "architecture"],
+      "annotationFocus": [
+        "scaled dot-product attention",
+        "multi-head attention",
+        "positional encoding and model architecture"
+      ]
+    },
+    {
+      "key": "react_reasoning_acting",
+      "arxivId": "2210.03629",
+      "title": "ReAct: Synergizing Reasoning and Acting in Language Models",
+      "fileName": "2210.03629-react-reasoning-acting.pdf",
+      "absUrl": "https://arxiv.org/abs/2210.03629",
+      "pdfUrl": "https://arxiv.org/pdf/2210.03629",
+      "primaryCategory": "cs.CL",
+      "tags": ["agents", "reasoning", "acting", "tool-use"],
+      "annotationFocus": [
+        "interleaving reasoning traces and actions",
+        "external interaction to reduce hallucination",
+        "HotpotQA, FEVER, ALFWorld, and WebShop evaluation"
+      ]
+    },
+    {
+      "key": "toolformer_self_supervised_tools",
+      "arxivId": "2302.04761",
+      "title": "Toolformer: Language Models Can Teach Themselves to Use Tools",
+      "fileName": "2302.04761-toolformer.pdf",
+      "absUrl": "https://arxiv.org/abs/2302.04761",
+      "pdfUrl": "https://arxiv.org/pdf/2302.04761",
+      "primaryCategory": "cs.CL",
+      "tags": ["tool-use", "self-supervised", "language-models", "api-calls"],
+      "annotationFocus": [
+        "self-supervised API call annotation pipeline",
+        "tool set including calculator, QA, search, translation, and calendar",
+        "zero-shot downstream task evaluation"
+      ]
+    },
+    {
+      "key": "self_rag_self_reflection",
+      "arxivId": "2310.11511",
+      "title": "Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection",
+      "fileName": "2310.11511-self-rag.pdf",
+      "absUrl": "https://arxiv.org/abs/2310.11511",
+      "pdfUrl": "https://arxiv.org/pdf/2310.11511",
+      "primaryCategory": "cs.CL",
+      "tags": ["rag", "self-reflection", "retrieval-control", "citation-accuracy"],
+      "annotationFocus": [
+        "reflection tokens and adaptive retrieval",
+        "retrieval necessity and passage relevance critique",
+        "factuality and citation accuracy evaluation"
+      ]
+    }
+  ]
+}

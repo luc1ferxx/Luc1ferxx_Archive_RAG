@@ -998,6 +998,8 @@ test("observability enabled writes one qa jsonl event", async () => {
     {
       RAG_OBSERVABILITY_ENABLED: "true",
       RAG_OBSERVABILITY_INCLUDE_CONTEXT: undefined,
+      RAG_HYBRID_ENABLED: "false",
+      RAG_RERANK_ENABLED: "false",
     },
     async () => {
       const response = await chat(
@@ -2014,12 +2016,14 @@ test("rerank promotes strong keyword candidate beyond initial hybrid topK", asyn
   await withEnv(
     {
       RAG_HYBRID_ENABLED: "true",
+      RAG_HYBRID_FUSION: "weighted",
       RAG_RETRIEVAL_TOP_K: "1",
       RAG_SPARSE_TOP_K: "3",
       RAG_HYBRID_DENSE_WEIGHT: "0.8",
       RAG_HYBRID_SPARSE_WEIGHT: "0.2",
       RAG_RERANK_CANDIDATE_MULTIPLIER: "3",
       RAG_RERANK_WEIGHT: "0.95",
+      RAG_RERANK_PROVIDER: "heuristic",
       RAG_RERANK_ENABLED: "false",
     },
     async () => {

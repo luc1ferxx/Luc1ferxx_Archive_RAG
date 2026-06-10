@@ -1,0 +1,633 @@
+{
+  "version": 1,
+  "description": "Human-labeled arXiv evaluation cases for real-paper rerank benchmarking.",
+  "cases": [
+    {
+      "id": "qa_rag_sequence_token_difference",
+      "type": "qa",
+      "question": "How do RAG-Sequence and RAG-Token differ in how they use retrieved documents during generation?",
+      "docKeys": ["rag_knowledge_intensive_nlp"],
+      "expectedEvidence": [
+        { "docKey": "rag_knowledge_intensive_nlp", "pages": [3], "score": 3 }
+      ],
+      "referenceAnswer": "RAG-Sequence uses the same retrieved document to generate the whole target sequence, while RAG-Token can choose a different retrieved document for each generated token.",
+      "expectedAnswerIncludes": ["RAG-Sequence", "same document", "RAG-Token", "different document", "token"],
+      "shouldAbstain": false,
+      "tags": ["rag", "generation", "architecture"]
+    },
+    {
+      "id": "qa_rag_non_parametric_memory",
+      "type": "qa",
+      "question": "What non-parametric memory component does RAG use to retrieve documents for generation?",
+      "docKeys": ["rag_knowledge_intensive_nlp"],
+      "expectedEvidence": [
+        { "docKey": "rag_knowledge_intensive_nlp", "pages": [2], "score": 3 }
+      ],
+      "referenceAnswer": "RAG combines a seq2seq generator with a non-parametric memory implemented as a dense vector index of Wikipedia, accessed through a neural retriever.",
+      "expectedAnswerIncludes": ["non-parametric memory", "dense vector index", "Wikipedia", "neural retriever"],
+      "shouldAbstain": false,
+      "tags": ["rag", "retrieval", "memory"]
+    },
+    {
+      "id": "qa_dpr_dual_encoder_architecture",
+      "type": "qa",
+      "question": "What encoder architecture does Dense Passage Retrieval use for questions and passages?",
+      "docKeys": ["dense_passage_retrieval"],
+      "expectedEvidence": [
+        { "docKey": "dense_passage_retrieval", "pages": [2, 3], "score": 3 }
+      ],
+      "referenceAnswer": "DPR uses a dual-encoder architecture with separate BERT encoders for questions and passages, represents each input with the CLS vector, and ranks passages using the inner product between the encoded vectors.",
+      "expectedAnswerIncludes": ["dual-encoder", "BERT", "question", "passage", "inner product"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "dpr", "dense"]
+    },
+    {
+      "id": "qa_dpr_bm25_top20_gain",
+      "type": "qa",
+      "question": "How did DPR compare with a strong Lucene-BM25 system on top-20 passage retrieval accuracy?",
+      "docKeys": ["dense_passage_retrieval"],
+      "expectedEvidence": [
+        { "docKey": "dense_passage_retrieval", "pages": [1, 5], "score": 3 }
+      ],
+      "referenceAnswer": "The DPR paper reports that dense retrieval outperformed a strong Lucene-BM25 baseline by 9 to 19 percentage points in absolute top-20 passage retrieval accuracy across open-domain QA datasets.",
+      "expectedAnswerIncludes": ["Lucene-BM25", "9", "19", "top-20", "absolute"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "dpr", "bm25", "metric"]
+    },
+    {
+      "id": "qa_colbert_late_interaction_mechanism",
+      "type": "qa",
+      "question": "What is ColBERT's late interaction mechanism for matching a query with a document?",
+      "docKeys": ["colbert_late_interaction"],
+      "expectedEvidence": [
+        { "docKey": "colbert_late_interaction", "pages": [4, 5], "score": 3 }
+      ],
+      "referenceAnswer": "ColBERT encodes query and document tokens independently into contextualized embeddings, then applies late interaction by comparing query embeddings with document embeddings through MaxSim-style similarity before aggregating scores.",
+      "expectedAnswerIncludes": ["query encoder", "document encoder", "contextualized embeddings", "late interaction", "MaxSim"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "colbert", "rerank"]
+    },
+    {
+      "id": "qa_colbert_efficiency_over_bert_rerankers",
+      "type": "qa",
+      "question": "Why is ColBERT more efficient than traditional BERT-based re-rankers?",
+      "docKeys": ["colbert_late_interaction"],
+      "expectedEvidence": [
+        { "docKey": "colbert_late_interaction", "pages": [1, 5, 7], "score": 3 }
+      ],
+      "referenceAnswer": "ColBERT avoids full cross-attention over each query-document pair at inference time by pre-computing document representations and using late interaction, which the paper reports as substantially reducing latency and FLOPs.",
+      "expectedAnswerIncludes": ["pre-compute", "document representations", "late interaction", "latency", "FLOPs"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "colbert", "efficiency"]
+    },
+    {
+      "id": "qa_hnsw_hierarchical_graph_structure",
+      "type": "qa",
+      "question": "What graph structure does HNSW build for approximate nearest neighbor search?",
+      "docKeys": ["hnsw_approximate_nearest_neighbor"],
+      "expectedEvidence": [
+        { "docKey": "hnsw_approximate_nearest_neighbor", "pages": [1], "score": 3 }
+      ],
+      "referenceAnswer": "HNSW builds a fully graph-based hierarchical navigable small-world structure with a multi-layer proximity graph. Upper layers contain randomly selected subsets of elements with exponentially decaying probability.",
+      "expectedAnswerIncludes": ["hierarchical", "navigable small world", "multi-layer", "proximity graph", "exponentially decaying"],
+      "shouldAbstain": false,
+      "tags": ["vector-search", "ann", "hnsw"]
+    },
+    {
+      "id": "qa_hnsw_logarithmic_search_complexity",
+      "type": "qa",
+      "question": "How does HNSW aim to achieve logarithmic search complexity?",
+      "docKeys": ["hnsw_approximate_nearest_neighbor"],
+      "expectedEvidence": [
+        { "docKey": "hnsw_approximate_nearest_neighbor", "pages": [5, 7], "score": 3 }
+      ],
+      "referenceAnswer": "HNSW uses a controllable hierarchy of graph layers with exponentially fewer elements at higher layers, enabling long-range navigation first and progressively more local search as it descends the hierarchy.",
+      "expectedAnswerIncludes": ["hierarchy", "exponentially", "higher layers", "descends", "logarithmic"],
+      "shouldAbstain": false,
+      "tags": ["vector-search", "ann", "complexity"]
+    },
+    {
+      "id": "qa_transformer_scaled_dot_product_attention",
+      "type": "qa",
+      "question": "What is scaled dot-product attention in the Transformer paper?",
+      "docKeys": ["attention_is_all_you_need"],
+      "expectedEvidence": [
+        { "docKey": "attention_is_all_you_need", "pages": [4], "score": 3 }
+      ],
+      "referenceAnswer": "Scaled dot-product attention computes dot products between queries and keys, scales them by the square root of the key dimension, applies softmax to obtain weights, and uses those weights to combine values.",
+      "expectedAnswerIncludes": ["queries", "keys", "values", "square root", "softmax"],
+      "shouldAbstain": false,
+      "tags": ["transformer", "attention", "architecture"]
+    },
+    {
+      "id": "qa_transformer_positional_encoding",
+      "type": "qa",
+      "question": "Why does the Transformer add positional encodings to token embeddings?",
+      "docKeys": ["attention_is_all_you_need"],
+      "expectedEvidence": [
+        { "docKey": "attention_is_all_you_need", "pages": [6], "score": 3 }
+      ],
+      "referenceAnswer": "Because the Transformer has no recurrence or convolution, it adds positional encodings to input embeddings so the model can use information about token order and relative or absolute positions.",
+      "expectedAnswerIncludes": ["no recurrence", "no convolution", "positional encodings", "token order", "positions"],
+      "shouldAbstain": false,
+      "tags": ["transformer", "positional-encoding"]
+    },
+    {
+      "id": "qa_react_reasoning_action_interleave",
+      "type": "qa",
+      "question": "What does ReAct interleave in language model prompting?",
+      "docKeys": ["react_reasoning_acting"],
+      "expectedEvidence": [
+        { "docKey": "react_reasoning_acting", "pages": [1], "score": 3 }
+      ],
+      "referenceAnswer": "ReAct prompts language models to generate reasoning traces and task-specific actions in an interleaved manner, so reasoning can guide action and actions can gather information for later reasoning.",
+      "expectedAnswerIncludes": ["reasoning traces", "task-specific actions", "interleaved", "guide", "external information"],
+      "shouldAbstain": false,
+      "tags": ["agent", "react", "reasoning"]
+    },
+    {
+      "id": "qa_toolformer_supported_tools",
+      "type": "qa",
+      "question": "Which external tools does Toolformer learn to use?",
+      "docKeys": ["toolformer_self_supervised_tools"],
+      "expectedEvidence": [
+        { "docKey": "toolformer_self_supervised_tools", "pages": [1, 4], "score": 3 }
+      ],
+      "referenceAnswer": "Toolformer learns to call tools such as a question answering system, a Wikipedia search engine, a calculator, a calendar, and a machine translation system.",
+      "expectedAnswerIncludes": ["question answering", "Wikipedia search", "calculator", "calendar", "machine translation"],
+      "shouldAbstain": false,
+      "tags": ["agent", "tool-use", "toolformer"]
+    },
+    {
+      "id": "qa_self_rag_reflection_tokens",
+      "type": "qa",
+      "question": "What reflection token types does Self-RAG use?",
+      "docKeys": ["self_rag_self_reflection"],
+      "expectedEvidence": [
+        { "docKey": "self_rag_self_reflection", "pages": [4], "score": 3 }
+      ],
+      "referenceAnswer": "Self-RAG uses reflection tokens for retrieval decisions, relevance, support, and utility, commonly described as Retrieve, ISREL, ISSUP, and ISUSE.",
+      "expectedAnswerIncludes": ["Retrieve", "ISREL", "ISSUP", "ISUSE", "reflection"],
+      "shouldAbstain": false,
+      "tags": ["rag", "self-rag", "reflection"]
+    },
+    {
+      "id": "compare_rag_self_rag_retrieval_control",
+      "type": "compare",
+      "question": "Compare how the original RAG paper and Self-RAG control retrieval during generation.",
+      "docKeys": ["rag_knowledge_intensive_nlp", "self_rag_self_reflection"],
+      "expectedEvidence": [
+        { "docKey": "rag_knowledge_intensive_nlp", "pages": [2, 3], "score": 3 },
+        { "docKey": "self_rag_self_reflection", "pages": [3, 4], "score": 3 }
+      ],
+      "referenceAnswer": "The original RAG model retrieves documents with a neural retriever and conditions generation on those retrieved documents through RAG-Sequence or RAG-Token. Self-RAG adds adaptive retrieval and reflection tokens so the model can decide when to retrieve and critique relevance, support, and utility.",
+      "expectedAnswerIncludes": ["RAG-Sequence", "RAG-Token", "adaptive retrieval", "reflection tokens", "relevance"],
+      "shouldAbstain": false,
+      "tags": ["rag", "self-rag", "compare"]
+    },
+    {
+      "id": "compare_react_toolformer_tool_use",
+      "type": "compare",
+      "question": "Compare ReAct and Toolformer in how they use external tools or actions.",
+      "docKeys": ["react_reasoning_acting", "toolformer_self_supervised_tools"],
+      "expectedEvidence": [
+        { "docKey": "react_reasoning_acting", "pages": [1, 3], "score": 3 },
+        { "docKey": "toolformer_self_supervised_tools", "pages": [1, 2, 4], "score": 3 }
+      ],
+      "referenceAnswer": "ReAct uses prompting to interleave reasoning traces with task-specific actions that can query external environments. Toolformer trains a model in a self-supervised way to insert useful API calls such as search, QA, calculator, calendar, and translation tools.",
+      "expectedAnswerIncludes": ["interleave", "reasoning", "actions", "self-supervised", "API calls"],
+      "shouldAbstain": false,
+      "tags": ["agent", "tool-use", "compare"]
+    },
+    {
+      "id": "compare_dpr_colbert_ranking_architecture",
+      "type": "compare",
+      "question": "Compare DPR and ColBERT in how they represent and score query-document matches.",
+      "docKeys": ["dense_passage_retrieval", "colbert_late_interaction"],
+      "expectedEvidence": [
+        { "docKey": "dense_passage_retrieval", "pages": [2, 3], "score": 3 },
+        { "docKey": "colbert_late_interaction", "pages": [4, 5], "score": 3 }
+      ],
+      "referenceAnswer": "DPR encodes each question and passage into a single dense vector and scores them with inner product. ColBERT keeps token-level contextualized embeddings and scores matches through late interaction with MaxSim-style comparisons.",
+      "expectedAnswerIncludes": ["single dense vector", "inner product", "token-level", "late interaction", "MaxSim"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "rerank", "compare"]
+    },
+    {
+      "id": "qa_rag_latent_document_training",
+      "type": "qa",
+      "question": "How does RAG train the retriever and generator when retrieved documents are latent variables?",
+      "docKeys": ["rag_knowledge_intensive_nlp"],
+      "expectedEvidence": [
+        { "docKey": "rag_knowledge_intensive_nlp", "pages": [3], "score": 3 }
+      ],
+      "referenceAnswer": "RAG treats the retrieved document as a latent variable and marginalizes over top-k retrieved documents so the retriever and generator can be trained end-to-end.",
+      "expectedAnswerIncludes": ["latent variable", "marginalize", "top-k", "retriever", "generator"],
+      "shouldAbstain": false,
+      "tags": ["rag", "training", "latent-document"]
+    },
+    {
+      "id": "qa_rag_fever_fact_verification",
+      "type": "qa",
+      "question": "How is the RAG model evaluated on FEVER-style fact verification?",
+      "docKeys": ["rag_knowledge_intensive_nlp"],
+      "expectedEvidence": [
+        { "docKey": "rag_knowledge_intensive_nlp", "pages": [5, 6], "score": 3 }
+      ],
+      "referenceAnswer": "The RAG paper includes FEVER as a knowledge-intensive fact verification task and reports performance for RAG-Sequence and RAG-Token alongside other baselines.",
+      "expectedAnswerIncludes": ["FEVER", "fact verification", "RAG-Sequence", "RAG-Token", "baseline"],
+      "shouldAbstain": false,
+      "tags": ["rag", "fact-verification", "metric"]
+    },
+    {
+      "id": "qa_rag_parametric_nonparametric_ablation",
+      "type": "qa",
+      "question": "What do RAG ablations show about using parametric and non-parametric knowledge together?",
+      "docKeys": ["rag_knowledge_intensive_nlp"],
+      "expectedEvidence": [
+        { "docKey": "rag_knowledge_intensive_nlp", "pages": [7, 8], "score": 3 }
+      ],
+      "referenceAnswer": "The ablations compare RAG variants and retrieval settings, showing that combining parametric generation with non-parametric retrieved knowledge contributes to task performance.",
+      "expectedAnswerIncludes": ["ablation", "parametric", "non-parametric", "retrieval", "performance"],
+      "shouldAbstain": false,
+      "tags": ["rag", "ablation", "hard-negative"]
+    },
+    {
+      "id": "qa_rag_factual_specific_generation",
+      "type": "qa",
+      "question": "What does the RAG paper claim about factual specificity in generated answers?",
+      "docKeys": ["rag_knowledge_intensive_nlp"],
+      "expectedEvidence": [
+        { "docKey": "rag_knowledge_intensive_nlp", "pages": [1, 9], "score": 3 }
+      ],
+      "referenceAnswer": "The paper claims RAG produces more specific, diverse, and factual language than a parametric seq2seq baseline because generation is grounded in retrieved documents.",
+      "expectedAnswerIncludes": ["specific", "diverse", "factual", "parametric", "retrieved documents"],
+      "shouldAbstain": false,
+      "tags": ["rag", "factuality", "weak-match"]
+    },
+    {
+      "id": "qa_dpr_in_batch_negatives",
+      "type": "qa",
+      "question": "How does Dense Passage Retrieval use in-batch negatives during training?",
+      "docKeys": ["dense_passage_retrieval"],
+      "expectedEvidence": [
+        { "docKey": "dense_passage_retrieval", "pages": [4], "score": 3 }
+      ],
+      "referenceAnswer": "DPR trains the dual encoder with positive question-passage pairs and uses other passages in the same batch as negatives to improve contrastive learning.",
+      "expectedAnswerIncludes": ["in-batch negatives", "positive", "question", "passage", "training"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "dpr", "training"]
+    },
+    {
+      "id": "qa_dpr_passage_index_inference",
+      "type": "qa",
+      "question": "How does DPR use the passage encoder at inference time?",
+      "docKeys": ["dense_passage_retrieval"],
+      "expectedEvidence": [
+        { "docKey": "dense_passage_retrieval", "pages": [3], "score": 3 }
+      ],
+      "referenceAnswer": "At inference time DPR encodes all passages into dense vectors, builds an index, and retrieves passages by inner product with the encoded question vector.",
+      "expectedAnswerIncludes": ["passage encoder", "all passages", "index", "inner product", "question vector"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "dpr", "inference"]
+    },
+    {
+      "id": "qa_dpr_bm25_qualitative_differences",
+      "type": "qa",
+      "question": "What qualitative differences does DPR report between BM25 and dense retrieval?",
+      "docKeys": ["dense_passage_retrieval"],
+      "expectedEvidence": [
+        { "docKey": "dense_passage_retrieval", "pages": [7], "score": 3 }
+      ],
+      "referenceAnswer": "The paper notes that BM25 is sensitive to selective keyword overlap, while DPR better captures lexical variation and semantic relationships between questions and passages.",
+      "expectedAnswerIncludes": ["BM25", "keywords", "lexical", "semantic", "DPR"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "dpr", "hard-negative"]
+    },
+    {
+      "id": "qa_dpr_open_domain_datasets",
+      "type": "qa",
+      "question": "Which kinds of open-domain QA datasets are used to evaluate DPR retrieval?",
+      "docKeys": ["dense_passage_retrieval"],
+      "expectedEvidence": [
+        { "docKey": "dense_passage_retrieval", "pages": [4, 5], "score": 3 }
+      ],
+      "referenceAnswer": "DPR is evaluated on multiple open-domain question answering datasets, with retrieval accuracy reported across benchmark datasets such as Natural Questions and TriviaQA-style tasks.",
+      "expectedAnswerIncludes": ["open-domain", "question answering", "datasets", "Natural Questions", "TriviaQA"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "dpr", "evaluation"]
+    },
+    {
+      "id": "qa_colbert_query_document_encoders",
+      "type": "qa",
+      "question": "What are the main components of ColBERT's query and document encoding architecture?",
+      "docKeys": ["colbert_late_interaction"],
+      "expectedEvidence": [
+        { "docKey": "colbert_late_interaction", "pages": [4], "score": 3 }
+      ],
+      "referenceAnswer": "ColBERT uses a query encoder, a document encoder, and a late interaction stage over contextualized token embeddings.",
+      "expectedAnswerIncludes": ["query encoder", "document encoder", "late interaction", "contextualized", "embeddings"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "colbert", "architecture"]
+    },
+    {
+      "id": "qa_colbert_maxsim_scoring",
+      "type": "qa",
+      "question": "How does ColBERT use MaxSim when scoring documents?",
+      "docKeys": ["colbert_late_interaction"],
+      "expectedEvidence": [
+        { "docKey": "colbert_late_interaction", "pages": [5], "score": 3 }
+      ],
+      "referenceAnswer": "ColBERT compares each query token embedding against document token embeddings with MaxSim and aggregates those maximum similarities into a document score.",
+      "expectedAnswerIncludes": ["MaxSim", "query token", "document token", "maximum", "score"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "colbert", "scoring"]
+    },
+    {
+      "id": "qa_colbert_precomputed_document_index",
+      "type": "qa",
+      "question": "Why can ColBERT pre-compute document representations before retrieval?",
+      "docKeys": ["colbert_late_interaction"],
+      "expectedEvidence": [
+        { "docKey": "colbert_late_interaction", "pages": [5, 6], "score": 3 }
+      ],
+      "referenceAnswer": "Because ColBERT encodes documents independently from queries, document token embeddings can be pre-computed and indexed before query-time late interaction.",
+      "expectedAnswerIncludes": ["documents independently", "pre-computed", "indexed", "token embeddings", "query-time"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "colbert", "indexing"]
+    },
+    {
+      "id": "qa_colbert_end_to_end_retrieval_latency",
+      "type": "qa",
+      "question": "What does ColBERT report about end-to-end retrieval latency compared with BERT re-ranking?",
+      "docKeys": ["colbert_late_interaction"],
+      "expectedEvidence": [
+        { "docKey": "colbert_late_interaction", "pages": [7], "score": 3 }
+      ],
+      "referenceAnswer": "ColBERT reports substantially lower latency and fewer FLOPs than traditional BERT re-ranking while preserving strong ranking effectiveness.",
+      "expectedAnswerIncludes": ["latency", "FLOPs", "BERT re-ranking", "effectiveness", "ColBERT"],
+      "shouldAbstain": false,
+      "tags": ["retrieval", "colbert", "latency"]
+    },
+    {
+      "id": "qa_hnsw_skip_list_analogy",
+      "type": "qa",
+      "question": "How does HNSW relate its hierarchy to skip lists or navigable small-world graphs?",
+      "docKeys": ["hnsw_approximate_nearest_neighbor"],
+      "expectedEvidence": [
+        { "docKey": "hnsw_approximate_nearest_neighbor", "pages": [3, 4], "score": 3 }
+      ],
+      "referenceAnswer": "HNSW uses a hierarchy inspired by skip lists and navigable small-world graphs, where upper layers provide long-range links and lower layers refine the search.",
+      "expectedAnswerIncludes": ["skip list", "hierarchy", "navigable small world", "upper layers", "search"],
+      "shouldAbstain": false,
+      "tags": ["vector-search", "hnsw", "analogy"]
+    },
+    {
+      "id": "qa_hnsw_efconstruction_parameter",
+      "type": "qa",
+      "question": "What role does efConstruction play when building an HNSW index?",
+      "docKeys": ["hnsw_approximate_nearest_neighbor"],
+      "expectedEvidence": [
+        { "docKey": "hnsw_approximate_nearest_neighbor", "pages": [5, 6], "score": 3 }
+      ],
+      "referenceAnswer": "The efConstruction parameter controls the breadth of candidate exploration during index construction, affecting index quality and construction cost.",
+      "expectedAnswerIncludes": ["efConstruction", "candidate", "construction", "quality", "cost"],
+      "shouldAbstain": false,
+      "tags": ["vector-search", "hnsw", "indexing"]
+    },
+    {
+      "id": "qa_hnsw_neighbor_selection_heuristic",
+      "type": "qa",
+      "question": "Why does HNSW use a neighbor selection heuristic instead of only choosing the nearest neighbors?",
+      "docKeys": ["hnsw_approximate_nearest_neighbor"],
+      "expectedEvidence": [
+        { "docKey": "hnsw_approximate_nearest_neighbor", "pages": [5], "score": 3 }
+      ],
+      "referenceAnswer": "HNSW uses neighbor selection heuristics to keep the graph navigable and diverse, improving search quality beyond simply connecting to the nearest points.",
+      "expectedAnswerIncludes": ["neighbor selection", "heuristic", "graph", "navigable", "search quality"],
+      "shouldAbstain": false,
+      "tags": ["vector-search", "hnsw", "hard-negative"]
+    },
+    {
+      "id": "qa_hnsw_exponential_layer_assignment",
+      "type": "qa",
+      "question": "How are upper layers selected in HNSW's hierarchy?",
+      "docKeys": ["hnsw_approximate_nearest_neighbor"],
+      "expectedEvidence": [
+        { "docKey": "hnsw_approximate_nearest_neighbor", "pages": [7], "score": 3 }
+      ],
+      "referenceAnswer": "HNSW assigns elements to upper layers randomly with an exponentially decaying probability, so higher layers contain fewer elements.",
+      "expectedAnswerIncludes": ["upper layers", "random", "exponentially", "probability", "fewer elements"],
+      "shouldAbstain": false,
+      "tags": ["vector-search", "hnsw", "complexity"]
+    },
+    {
+      "id": "qa_transformer_multi_head_attention_benefit",
+      "type": "qa",
+      "question": "What benefit does multi-head attention provide in the Transformer?",
+      "docKeys": ["attention_is_all_you_need"],
+      "expectedEvidence": [
+        { "docKey": "attention_is_all_you_need", "pages": [5], "score": 3 }
+      ],
+      "referenceAnswer": "Multi-head attention lets the model jointly attend to information from different representation subspaces at different positions.",
+      "expectedAnswerIncludes": ["multi-head attention", "jointly attend", "representation subspaces", "different positions"],
+      "shouldAbstain": false,
+      "tags": ["transformer", "attention", "architecture"]
+    },
+    {
+      "id": "qa_transformer_positionwise_feed_forward",
+      "type": "qa",
+      "question": "What are the position-wise feed-forward networks in the Transformer?",
+      "docKeys": ["attention_is_all_you_need"],
+      "expectedEvidence": [
+        { "docKey": "attention_is_all_you_need", "pages": [5], "score": 3 }
+      ],
+      "referenceAnswer": "Each Transformer layer includes a position-wise fully connected feed-forward network applied independently and identically to each position.",
+      "expectedAnswerIncludes": ["position-wise", "feed-forward", "independently", "identically", "position"],
+      "shouldAbstain": false,
+      "tags": ["transformer", "feed-forward"]
+    },
+    {
+      "id": "qa_transformer_encoder_decoder_stack",
+      "type": "qa",
+      "question": "How are the Transformer encoder and decoder stacks organized?",
+      "docKeys": ["attention_is_all_you_need"],
+      "expectedEvidence": [
+        { "docKey": "attention_is_all_you_need", "pages": [3], "score": 3 }
+      ],
+      "referenceAnswer": "The Transformer uses stacked encoder and decoder layers, with self-attention and feed-forward sublayers, and the decoder also attends to encoder outputs.",
+      "expectedAnswerIncludes": ["encoder", "decoder", "stack", "self-attention", "feed-forward"],
+      "shouldAbstain": false,
+      "tags": ["transformer", "encoder-decoder"]
+    },
+    {
+      "id": "qa_transformer_bleu_label_smoothing",
+      "type": "qa",
+      "question": "What BLEU results and regularization details are reported for the Transformer?",
+      "docKeys": ["attention_is_all_you_need"],
+      "expectedEvidence": [
+        { "docKey": "attention_is_all_you_need", "pages": [8], "score": 3 }
+      ],
+      "referenceAnswer": "The paper reports strong WMT BLEU scores and includes training details such as label smoothing as part of the Transformer setup.",
+      "expectedAnswerIncludes": ["BLEU", "WMT", "label smoothing", "Transformer", "training"],
+      "shouldAbstain": false,
+      "tags": ["transformer", "metric", "weak-match"]
+    },
+    {
+      "id": "qa_react_hotpotqa_fever_evaluation",
+      "type": "qa",
+      "question": "How does ReAct evaluate reasoning and acting on HotpotQA and FEVER?",
+      "docKeys": ["react_reasoning_acting"],
+      "expectedEvidence": [
+        { "docKey": "react_reasoning_acting", "pages": [3, 5], "score": 3 }
+      ],
+      "referenceAnswer": "ReAct evaluates knowledge-intensive reasoning on HotpotQA and FEVER, using external Wikipedia actions and reporting performance against prompting baselines.",
+      "expectedAnswerIncludes": ["HotpotQA", "FEVER", "Wikipedia", "actions", "baselines"],
+      "shouldAbstain": false,
+      "tags": ["agent", "react", "evaluation"]
+    },
+    {
+      "id": "qa_react_alfworld_webshop_tasks",
+      "type": "qa",
+      "question": "What kinds of decision-making tasks do ALFWorld and WebShop represent in the ReAct paper?",
+      "docKeys": ["react_reasoning_acting"],
+      "expectedEvidence": [
+        { "docKey": "react_reasoning_acting", "pages": [7, 8], "score": 3 }
+      ],
+      "referenceAnswer": "ALFWorld and WebShop are interactive decision-making benchmarks where ReAct uses reasoning traces and actions to operate in simulated or web shopping environments.",
+      "expectedAnswerIncludes": ["ALFWorld", "WebShop", "interactive", "decision-making", "actions"],
+      "shouldAbstain": false,
+      "tags": ["agent", "react", "decision-making"]
+    },
+    {
+      "id": "qa_react_wikipedia_api_actions",
+      "type": "qa",
+      "question": "How does ReAct use Wikipedia API actions in knowledge tasks?",
+      "docKeys": ["react_reasoning_acting"],
+      "expectedEvidence": [
+        { "docKey": "react_reasoning_acting", "pages": [3, 4], "score": 3 }
+      ],
+      "referenceAnswer": "For knowledge tasks, ReAct lets the model issue actions to a Wikipedia API, observe retrieved evidence, and continue reasoning from those observations.",
+      "expectedAnswerIncludes": ["Wikipedia API", "actions", "observe", "evidence", "reasoning"],
+      "shouldAbstain": false,
+      "tags": ["agent", "react", "tool-use"]
+    },
+    {
+      "id": "qa_react_interpretability_trajectories",
+      "type": "qa",
+      "question": "Why does ReAct claim its trajectories are more interpretable or trustworthy?",
+      "docKeys": ["react_reasoning_acting"],
+      "expectedEvidence": [
+        { "docKey": "react_reasoning_acting", "pages": [1, 3], "score": 3 }
+      ],
+      "referenceAnswer": "ReAct exposes interleaved reasoning traces, actions, and observations, making the model's behavior easier to inspect than final-answer-only prompting.",
+      "expectedAnswerIncludes": ["reasoning traces", "actions", "observations", "interpretable", "trustworthy"],
+      "shouldAbstain": false,
+      "tags": ["agent", "react", "interpretability"]
+    },
+    {
+      "id": "qa_toolformer_api_call_filtering",
+      "type": "qa",
+      "question": "How does Toolformer decide which generated API calls are useful enough to keep?",
+      "docKeys": ["toolformer_self_supervised_tools"],
+      "expectedEvidence": [
+        { "docKey": "toolformer_self_supervised_tools", "pages": [2, 3], "score": 3 }
+      ],
+      "referenceAnswer": "Toolformer samples potential API calls, measures whether they reduce language modeling loss, filters unhelpful calls, and fine-tunes on the remaining annotated examples.",
+      "expectedAnswerIncludes": ["API calls", "loss", "filter", "fine-tune", "self-supervised"],
+      "shouldAbstain": false,
+      "tags": ["agent", "toolformer", "training"]
+    },
+    {
+      "id": "qa_toolformer_calculator_arithmetic",
+      "type": "qa",
+      "question": "How does Toolformer use a calculator tool for arithmetic or math reasoning?",
+      "docKeys": ["toolformer_self_supervised_tools"],
+      "expectedEvidence": [
+        { "docKey": "toolformer_self_supervised_tools", "pages": [6], "score": 3 }
+      ],
+      "referenceAnswer": "Toolformer can insert calculator API calls for arithmetic expressions and use the returned result to improve predictions on math-related text.",
+      "expectedAnswerIncludes": ["calculator", "API calls", "arithmetic", "math", "returned result"],
+      "shouldAbstain": false,
+      "tags": ["agent", "toolformer", "calculator"]
+    },
+    {
+      "id": "qa_toolformer_wikipedia_search_qa",
+      "type": "qa",
+      "question": "How does Toolformer use Wikipedia search or question answering tools?",
+      "docKeys": ["toolformer_self_supervised_tools"],
+      "expectedEvidence": [
+        { "docKey": "toolformer_self_supervised_tools", "pages": [7], "score": 3 }
+      ],
+      "referenceAnswer": "Toolformer uses external search and question answering APIs, including Wikipedia search, to retrieve information that helps answer factual questions.",
+      "expectedAnswerIncludes": ["Wikipedia search", "question answering", "API", "retrieve", "factual"],
+      "shouldAbstain": false,
+      "tags": ["agent", "toolformer", "search"]
+    },
+    {
+      "id": "qa_toolformer_translation_calendar_tools",
+      "type": "qa",
+      "question": "What role do translation and calendar tools play in Toolformer's tool set?",
+      "docKeys": ["toolformer_self_supervised_tools"],
+      "expectedEvidence": [
+        { "docKey": "toolformer_self_supervised_tools", "pages": [4, 7, 8], "score": 3 }
+      ],
+      "referenceAnswer": "Toolformer's tool set includes machine translation and calendar APIs alongside QA, search, and calculator tools, though usage and downstream impact vary by task.",
+      "expectedAnswerIncludes": ["machine translation", "calendar", "API", "tool set", "task"],
+      "shouldAbstain": false,
+      "tags": ["agent", "toolformer", "weak-match"]
+    },
+    {
+      "id": "qa_self_rag_adaptive_retrieval",
+      "type": "qa",
+      "question": "How does Self-RAG make retrieval adaptive rather than always retrieving once?",
+      "docKeys": ["self_rag_self_reflection"],
+      "expectedEvidence": [
+        { "docKey": "self_rag_self_reflection", "pages": [3, 4, 6], "score": 3 }
+      ],
+      "referenceAnswer": "Self-RAG trains the model to emit retrieval and critique tokens, allowing it to decide when retrieval is needed and to evaluate retrieved passages during generation.",
+      "expectedAnswerIncludes": ["adaptive retrieval", "Retrieve", "critique tokens", "when retrieval", "generation"],
+      "shouldAbstain": false,
+      "tags": ["rag", "self-rag", "adaptive-retrieval"]
+    },
+    {
+      "id": "qa_self_rag_critic_training",
+      "type": "qa",
+      "question": "How does Self-RAG use a critic or critique data during training?",
+      "docKeys": ["self_rag_self_reflection"],
+      "expectedEvidence": [
+        { "docKey": "self_rag_self_reflection", "pages": [6, 7], "score": 3 }
+      ],
+      "referenceAnswer": "Self-RAG creates critique supervision with reflection tokens and trains the model to generate, retrieve, and critique its own output using relevance, support, and utility signals.",
+      "expectedAnswerIncludes": ["critic", "critique", "reflection tokens", "relevance", "support"],
+      "shouldAbstain": false,
+      "tags": ["rag", "self-rag", "training"]
+    },
+    {
+      "id": "qa_self_rag_citation_factuality_results",
+      "type": "qa",
+      "question": "What does Self-RAG report about factuality and citation accuracy?",
+      "docKeys": ["self_rag_self_reflection"],
+      "expectedEvidence": [
+        { "docKey": "self_rag_self_reflection", "pages": [8, 10], "score": 3 }
+      ],
+      "referenceAnswer": "Self-RAG reports improvements in factuality and citation-related measures by using retrieval and self-reflection during generation.",
+      "expectedAnswerIncludes": ["factuality", "citation", "accuracy", "retrieval", "self-reflection"],
+      "shouldAbstain": false,
+      "tags": ["rag", "self-rag", "metric"]
+    },
+    {
+      "id": "qa_self_rag_inference_ranking",
+      "type": "qa",
+      "question": "How does Self-RAG rank candidate generations during inference?",
+      "docKeys": ["self_rag_self_reflection"],
+      "expectedEvidence": [
+        { "docKey": "self_rag_self_reflection", "pages": [4, 5], "score": 3 }
+      ],
+      "referenceAnswer": "During inference, Self-RAG uses Retrieve, ISREL, ISSUP, and ISUSE-style critique signals to rank generated segments and retrieved passages.",
+      "expectedAnswerIncludes": ["inference", "Retrieve", "ISREL", "ISSUP", "ISUSE", "rank"],
+      "shouldAbstain": false,
+      "tags": ["rag", "self-rag", "inference"]
+    }
+  ]
+}

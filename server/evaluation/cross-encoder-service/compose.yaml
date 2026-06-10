@@ -1,0 +1,14 @@
+services:
+  reranker:
+    build:
+      context: .
+    image: luc1ferxx-rag-cross-encoder:local
+    environment:
+      HF_HOME: /models/huggingface
+      RAG_CROSS_ENCODER_BATCH_SIZE: ${RAG_CROSS_ENCODER_BATCH_SIZE:-8}
+      RAG_CROSS_ENCODER_MAX_LENGTH: ${RAG_CROSS_ENCODER_MAX_LENGTH:-384}
+      RAG_CROSS_ENCODER_MODEL: ${RAG_CROSS_ENCODER_MODEL:-cross-encoder/ms-marco-TinyBERT-L-2-v2}
+    ports:
+      - "8081:8081"
+    volumes:
+      - ../generated/huggingface:/models/huggingface
