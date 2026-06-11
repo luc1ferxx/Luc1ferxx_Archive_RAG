@@ -1,15 +1,7 @@
 import { createAgentSession } from "./agent-bootstrap.js";
-import { runDocumentRagLoop } from "./agent-document-loop.js";
+import { runAgentExecutionPlan } from "./agent-execution-plan-runner.js";
 import { finalizeAgentRun } from "./agent-finalization-flow.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
-import {
-  runCustomSkills,
-  runDocumentDiscoverySkill,
-  runInventorySkill,
-  runResearchBriefSkill,
-  runWebSearchSkill,
-} from "./agent-skill-runners.js";
-import { AGENT_SKILL_IDS } from "./skills/registry.js";
 
 export const runAgentRag = async ({
   agentBudget,
@@ -71,84 +63,17 @@ export const runAgentRag = async ({
     return preparationResult.response;
   }
 
-  let inventoryAnswer = null;
-  let discoveryAnswer = null;
-  let researchBrief = null;
-  let ragResult = null;
-  let webResult = null;
-  let customSkillResults = [];
   const agentRetrievalPlan = preparationResult.agentRetrievalPlan;
-
-  const researchSkill = getSelectedSkill(AGENT_SKILL_IDS.researchBrief);
-  researchBrief = await runResearchBriefSkill({
+  const executionResult = await runAgentExecutionPlan({
     accessScope,
     addBudgetLimitTrace,
     addTraceStep,
     budgetState,
     buildSkillTraceDetail,
     docIds,
-    executeObservedSkill,
-    question,
-    ragService,
-    recordSkillResult,
-    researchSkill,
-  });
-
-  const inventorySkill = getSelectedSkill(AGENT_SKILL_IDS.inventory);
-  inventoryAnswer = await runInventorySkill({
-    accessScope,
-    addTraceStep,
-    buildSkillTraceDetail,
-    executeObservedSkill,
-    inventorySkill,
-    ragService,
-    recordSkillResult,
-  });
-
-  const discoverySkill = getSelectedSkill(AGENT_SKILL_IDS.documentDiscovery);
-  discoveryAnswer = await runDocumentDiscoverySkill({
-    accessScope,
-    addTraceStep,
-    buildSkillTraceDetail,
-    discoverySkill,
-    docIds,
-    executeObservedSkill,
-    question,
-    ragService,
-    recordSkillResult,
-  });
-
-  const customSkills = selectedSkills.filter((skill) => skill.kind === "custom");
-  customSkillResults = await runCustomSkills({
-    accessScope,
-    addBudgetLimitTrace,
-    addTraceStep,
-    budgetState,
-    buildSkillTraceDetail,
-    customSkills,
-    docIds,
-    executeObservedSkill,
-    plan,
-    question,
-    ragService,
-    recordSkippedSkill,
-    recordSkillResult,
-    retrievalPlan: agentRetrievalPlan,
-    sessionId,
-    userId,
-  });
-
-  const documentRagSkill = getSelectedSkill(AGENT_SKILL_IDS.documentRag);
-  const documentLoopResult = await runDocumentRagLoop({
-    accessScope,
-    addBudgetLimitTrace,
-    addTraceStep,
-    budgetState,
-    buildSkillTraceDetail,
-    docIds,
-    documentRagSkill,
     executeObservedSkill,
     executionLoop,
+    getSelectedSkill,
     plan,
     question,
     ragService,
@@ -157,63 +82,40 @@ export const runAgentRag = async ({
     recordSkillResult,
     recordWorkingMemoryClaimSupport,
     recordWorkingMemoryGaps,
+    registry,
     resolveWorkingMemoryGaps,
     retrievalPlan: agentRetrievalPlan,
+    returnClarification,
+    selectedSkills,
     sessionId,
     userId,
-  });
-  ragResult = documentLoopResult.ragResult;
-  const documentEvidenceClarification =
-    documentLoopResult.documentEvidenceClarification;
-
-  if (documentEvidenceClarification && !plan.wantsWeb) {
-    return returnClarification(documentEvidenceClarification);
-  }
-
-  const plannedWebSearchSkill = getSelectedSkill(AGENT_SKILL_IDS.webSearch);
-  const webSearchSkill = plannedWebSearchSkill ?? registry.get(AGENT_SKILL_IDS.webSearch);
-  const shouldRunWeb =
-    Boolean(webSearchSkill) &&
-    (Boolean(plannedWebSearchSkill) ||
-      (ragResult?.ok && ragResult.value.abstained) ||
-      ragResult?.ok === false);
-  const webSearchResult = await runWebSearchSkill({
-    addBudgetLimitTrace,
-    addTraceStep,
-    budgetState,
-    buildSkillTraceDetail,
-    executeObservedSkill,
-    plannedWebSearchSkill,
-    question,
-    recordSkippedSkill,
-    recordSkillResult,
-    shouldRunWeb,
     webChatService,
-    webSearchSkill,
   });
-  webResult = webSearchResult.webResult;
-  const skippedWebBecauseBudget = webSearchResult.skippedWebBecauseBudget;
+
+  if (executionResult.response) {
+    return executionResult.response;
+  }
 
   return finalizeAgentRun({
     addTraceStep,
     buildAgentObservability,
-    customSkillResults,
-    customSkills,
-    discoveryAnswer,
-    documentRagSkill,
+    customSkillResults: executionResult.customSkillResults,
+    customSkills: executionResult.customSkills,
+    discoveryAnswer: executionResult.discoveryAnswer,
+    documentRagSkill: executionResult.documentRagSkill,
     getAgentSkills,
     getBudgetSnapshot,
-    inventoryAnswer,
+    inventoryAnswer: executionResult.inventoryAnswer,
     plan,
     question,
-    ragResult,
+    ragResult: executionResult.ragResult,
     recordAgentTrace,
     recordWorkingMemoryClaimSupport,
-    researchBrief,
-    shouldRunWeb,
-    skippedWebBecauseBudget,
+    researchBrief: executionResult.researchBrief,
+    shouldRunWeb: executionResult.shouldRunWeb,
+    skippedWebBecauseBudget: executionResult.skippedWebBecauseBudget,
     trace,
-    webResult,
+    webResult: executionResult.webResult,
     workingMemory,
   });
 };

@@ -1,354 +1,32 @@
 import React, { useEffect, useState } from "react";
-import axios from "axios";
-import {
-  BarChartOutlined,
-  ExperimentOutlined,
-  ReloadOutlined,
-} from "@ant-design/icons";
-import { Button, Layout, Typography, message } from "antd";
-import PdfUploader from "./components/PdfUploader";
+import { Layout, Typography, message } from "antd";
 import ChatComponent from "./components/ChatComponent";
 import RenderQA from "./components/RenderQA";
 import PdfPreview from "./components/PdfPreview";
-import { API_DOMAIN, buildApiRequestConfig } from "./config";
+import WorkspaceSidebar from "./components/WorkspaceSidebar";
+import {
+  fetchDocuments,
+  fetchLatestQualityReport,
+  fetchQualityHistory,
+  requestAnswerFeedback,
+  requestDocumentClear,
+  requestDocumentDelete,
+  requestSessionClear,
+  requestSyntheticQualityRun,
+} from "./archiveApi";
+import {
+  createSessionId,
+  persistSessionId,
+  persistUserId,
+  readStoredSessionId,
+  readStoredUserId,
+} from "./archiveSession";
+import {
+  buildRelevantDocuments,
+  formatDocumentCount,
+  getTotalPages,
+} from "./archiveWorkspace";
 import "./App.css";
-
-const SESSION_STORAGE_KEY = "archive-session-id";
-const USER_STORAGE_KEY = "archive-user-id";
-
-const createStableId = (prefix) =>
-  (typeof crypto !== "undefined" && crypto.randomUUID
-    ? crypto.randomUUID()
-    : null) ??
-  `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
-const createSessionId = () => createStableId("session");
-
-const createUserId = () => createStableId("user");
-
-const readStoredId = (storageKey, fallbackFactory) => {
-  try {
-    const storedValue = window.localStorage.getItem(storageKey);
-    return storedValue?.trim() ? storedValue : fallbackFactory();
-  } catch {
-    return fallbackFactory();
-  }
-};
-
-const readStoredSessionId = () => readStoredId(SESSION_STORAGE_KEY, createSessionId);
-
-const readStoredUserId = () => readStoredId(USER_STORAGE_KEY, createUserId);
-
-const persistStoredId = (storageKey, value) => {
-  try {
-    window.localStorage.setItem(storageKey, value);
-  } catch {
-    // Ignore localStorage failures for browsers with restricted storage access.
-  }
-};
-
-const persistSessionId = (sessionId) => persistStoredId(SESSION_STORAGE_KEY, sessionId);
-
-const persistUserId = (userId) => persistStoredId(USER_STORAGE_KEY, userId);
-
-const fetchDocuments = async () => {
-  const requestConfig = buildApiRequestConfig();
-  const response = requestConfig
-    ? await axios.get(`${API_DOMAIN}/documents`, requestConfig)
-    : await axios.get(`${API_DOMAIN}/documents`);
-  return response.data;
-};
-
-const requestDocumentDelete = async (docId) => {
-  const requestConfig = buildApiRequestConfig();
-  const response = requestConfig
-    ? await axios.delete(`${API_DOMAIN}/documents/${docId}`, requestConfig)
-    : await axios.delete(`${API_DOMAIN}/documents/${docId}`);
-  return response.data;
-};
-
-const requestDocumentClear = async () => {
-  const requestConfig = buildApiRequestConfig();
-  const response = requestConfig
-    ? await axios.post(`${API_DOMAIN}/documents/clear`, undefined, requestConfig)
-    : await axios.post(`${API_DOMAIN}/documents/clear`);
-  return response.data;
-};
-
-const requestSessionClear = async (sessionId) => {
-  if (!sessionId) {
-    return;
-  }
-
-  const requestConfig = buildApiRequestConfig();
-
-  if (requestConfig) {
-    await axios.delete(`${API_DOMAIN}/sessions/${sessionId}`, requestConfig);
-    return;
-  }
-
-  await axios.delete(`${API_DOMAIN}/sessions/${sessionId}`);
-};
-
-const fetchLatestQualityReport = async () => {
-  const requestConfig = buildApiRequestConfig();
-  const response = requestConfig
-    ? await axios.get(`${API_DOMAIN}/quality/latest`, requestConfig)
-    : await axios.get(`${API_DOMAIN}/quality/latest`);
-  return response.data;
-};
-
-const fetchQualityHistory = async () => {
-  const requestConfig = buildApiRequestConfig();
-  const response = requestConfig
-    ? await axios.get(`${API_DOMAIN}/quality/history`, requestConfig)
-    : await axios.get(`${API_DOMAIN}/quality/history`);
-  return response.data;
-};
-
-const requestSyntheticQualityRun = async () => {
-  const payload = {
-    corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
-  };
-  const requestConfig = buildApiRequestConfig();
-  const response = requestConfig
-    ? await axios.post(`${API_DOMAIN}/quality/synthetic`, payload, requestConfig)
-    : await axios.post(`${API_DOMAIN}/quality/synthetic`, payload);
-  return response.data;
-};
-
-const requestAnswerFeedback = async (payload) => {
-  const requestConfig = buildApiRequestConfig();
-  const response = requestConfig
-    ? await axios.post(`${API_DOMAIN}/feedback`, payload, requestConfig)
-    : await axios.post(`${API_DOMAIN}/feedback`, payload);
-
-  return response.data;
-};
-
-const formatPageCount = (pageCount) => {
-  const parsed = Number.parseInt(pageCount ?? "0", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : "?";
-};
-
-const formatDocumentCount = (count) =>
-  count === 1 ? "1 document" : `${count} documents`;
-
-const getDocumentTags = (document) =>
-  document?.tags ?? document?.profile?.tags ?? [];
-
-const getDocumentSummary = (document) =>
-  document?.summary ?? document?.profile?.summary ?? "";
-
-const formatQualityPercent = (value) =>
-  typeof value === "number" ? `${value.toFixed(value % 1 === 0 ? 0 : 1)}%` : "N/A";
-
-const formatQualityNumber = (value) =>
-  typeof value === "number" ? value.toFixed(value % 1 === 0 ? 0 : 1) : "N/A";
-
-const formatQualityDelta = (value, scale = 1) => {
-  if (typeof value !== "number") {
-    return "N/A";
-  }
-
-  const scaledValue = value * scale;
-  const prefix = scaledValue > 0 ? "+" : "";
-  return `${prefix}${scaledValue.toFixed(Math.abs(scaledValue) % 1 === 0 ? 0 : 1)}`;
-};
-
-const formatQualityGateDelta = (check) => {
-  if (!check) {
-    return "N/A";
-  }
-
-  if (check.metric === "failedCaseCount" || check.metric === "averageCitationCount") {
-    return formatQualityDelta(check.delta);
-  }
-
-  return `${formatQualityDelta(check.delta, 100)} pts`;
-};
-
-const formatQualityDate = (value) => {
-  if (!value) {
-    return "No date";
-  }
-
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(new Date(value));
-  } catch {
-    return value;
-  }
-};
-
-const DocumentProfileSnippet = ({ document, compact = false }) => {
-  const tags = getDocumentTags(document).slice(0, compact ? 3 : 5);
-  const summary = getDocumentSummary(document);
-
-  if (tags.length === 0 && !summary) {
-    return null;
-  }
-
-  return (
-    <div className={`document-profile ${compact ? "is-compact" : ""}`}>
-      {tags.length > 0 ? (
-        <div className="document-tag-list">
-          {tags.map((tag) => (
-            <span key={tag} className="document-tag">
-              {tag}
-            </span>
-          ))}
-        </div>
-      ) : null}
-      {summary ? <div className="document-summary">{summary}</div> : null}
-    </div>
-  );
-};
-
-const QualityGuardPanel = ({
-  isQualityLoading,
-  onLoadHistory,
-  onLoadLatest,
-  onRunSynthetic,
-  qualityHistory,
-  qualityReport,
-}) => {
-  const metrics = qualityReport?.summary?.metrics ?? {};
-  const failedCases = qualityReport?.failedCases ?? [];
-  const recommendations = qualityReport?.recommendations ?? [];
-  const regressionGate = qualityHistory?.regressionGate ?? null;
-  const recentRuns = qualityHistory?.runs ?? [];
-  const primaryGateCheck =
-    regressionGate?.checks?.find((check) => check.status === "fail") ??
-    regressionGate?.checks?.find((check) => check.status === "warn") ??
-    regressionGate?.checks?.[0] ??
-    null;
-  const status = qualityReport?.status ?? "idle";
-  const statusLabel =
-    {
-      ok: "OK",
-      warn: "Warn",
-      fail: "Fail",
-      idle: "Idle",
-    }[status] ?? status;
-  const gateStatus = regressionGate?.status ?? "unknown";
-  const gateStatusLabel =
-    {
-      fail: "Fail",
-      pass: "Pass",
-      unknown: "No baseline",
-      warn: "Warn",
-    }[gateStatus] ?? gateStatus;
-
-  return (
-    <div className="quality-panel">
-      <div className="quality-actions">
-        <Button
-          className="archive-secondary-button quality-action-button"
-          icon={<ReloadOutlined />}
-          loading={isQualityLoading}
-          onClick={() => void onLoadLatest()}
-        >
-          Latest
-        </Button>
-        <Button
-          className="archive-secondary-button quality-action-button"
-          icon={<BarChartOutlined />}
-          loading={isQualityLoading}
-          onClick={() => void onLoadHistory()}
-        >
-          History
-        </Button>
-        <Button
-          className="archive-secondary-button quality-action-button"
-          icon={<ExperimentOutlined />}
-          loading={isQualityLoading}
-          onClick={() => void onRunSynthetic()}
-        >
-          Run eval
-        </Button>
-      </div>
-
-      {qualityReport ? (
-        <>
-          <div className={`quality-status quality-status-${status}`}>
-            <span>{statusLabel}</span>
-            <span>{qualityReport.summary?.runId ?? "latest run"}</span>
-          </div>
-
-          <div className="quality-metrics">
-            <div className="quality-metric">
-              <span>Pass</span>
-              <strong>{formatQualityPercent(metrics.overallPassPercent)}</strong>
-            </div>
-            <div className="quality-metric">
-              <span>Page hit</span>
-              <strong>{formatQualityPercent(metrics.qaPageHitPercent)}</strong>
-            </div>
-            <div className="quality-metric">
-              <span>Citations</span>
-              <strong>{formatQualityNumber(metrics.averageCitationCount)}</strong>
-            </div>
-          </div>
-
-          {failedCases.length > 0 ? (
-            <div className="quality-failure-list">
-              {failedCases.slice(0, 3).map((caseResult) => (
-                <div key={caseResult.id} className="quality-failure-item">
-                  <span>{caseResult.id}</span>
-                  <p>{caseResult.reasons?.join(", ") ?? "Case failed"}</p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="quality-empty-note">No failed cases in the latest run.</div>
-          )}
-
-          <div className="quality-recommendation-list">
-            {recommendations.slice(0, 2).map((recommendation) => (
-              <div key={recommendation.label} className="quality-recommendation-item">
-                {recommendation.label}
-              </div>
-            ))}
-          </div>
-        </>
-      ) : (
-        <div className="archive-empty-state archive-empty-state-compact">
-          <div className="archive-empty-mark">No quality report loaded</div>
-          <div>Load the latest report or run the default synthetic corpus.</div>
-        </div>
-      )}
-
-      {regressionGate ? (
-        <div className={`quality-gate quality-gate-${gateStatus}`}>
-          <div className="quality-gate-head">
-            <span>Gate {gateStatusLabel}</span>
-            <span>{formatQualityGateDelta(primaryGateCheck)}</span>
-          </div>
-          <p>{regressionGate.summary}</p>
-        </div>
-      ) : null}
-
-      {recentRuns.length > 0 ? (
-        <div className="quality-run-list">
-          {recentRuns.slice(0, 3).map((run) => (
-            <div key={`${run.runId}-${run.fileName}`} className="quality-run-item">
-              <span>
-                <strong>{formatQualityPercent(run.metrics?.overallPassPercent)}</strong>
-                {run.status}
-              </span>
-              <span>{formatQualityDate(run.createdAt)}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-};
 
 const App = () => {
   const [conversation, setConversation] = useState([]);
@@ -428,15 +106,6 @@ const App = () => {
     setSessionId(nextSessionId);
     persistSessionId(nextSessionId);
   };
-
-  const buildPreviewSourceFromDocument = (document, citation = null) => ({
-    docId: document.docId,
-    fileName: document.fileName,
-    filePath: citation?.filePath || document.publicFilePath || "",
-    pageNumber: citation?.pageNumber ?? 1,
-    excerpt: citation?.excerpt ?? "",
-    chunkIndex: citation?.chunkIndex ?? null,
-  });
 
   const handleResp = (question, answer) => {
     const nextTurnIndex = conversation.length;
@@ -571,54 +240,17 @@ const App = () => {
     activeDocuments.length === 1
       ? activeDocuments[0].fileName
       : formatDocumentCount(activeDocuments.length);
-  const totalPages = activeDocuments.reduce(
-    (sum, document) => sum + (Number.parseInt(document.pageCount ?? "0", 10) || 0),
-    0
-  );
+  const totalPages = getTotalPages(activeDocuments);
   const currentTurn =
     activeTurnIndex !== null && conversation[activeTurnIndex]
       ? conversation[activeTurnIndex]
       : conversation[conversation.length - 1] ?? null;
   const currentSources = currentTurn?.answer?.ragSources ?? [];
   const selectedDocId = selectedSource?.docId ?? null;
-
-  const relevantDocuments = [...new Map(
-    currentSources.map((source) => {
-      const matchingDocument = activeDocuments.find(
-        (document) => document.docId === source.docId
-      );
-      const existingEntry = {
-        docId: source.docId,
-        fileName: source.fileName,
-        pageCount: matchingDocument?.pageCount ?? null,
-        summary: getDocumentSummary(matchingDocument),
-        tags: getDocumentTags(matchingDocument),
-        profile: matchingDocument?.profile ?? null,
-        pages: [],
-        previewSource: buildPreviewSourceFromDocument(
-          matchingDocument ?? {
-            docId: source.docId,
-            fileName: source.fileName,
-            publicFilePath: source.filePath,
-          },
-          source
-        ),
-      };
-
-      return [source.docId, existingEntry];
-    })
-  ).values()].map((entry) => ({
-    ...entry,
-    pages: [
-      ...new Set(
-        currentSources
-          .filter((source) => source.docId === entry.docId)
-          .map((source) => source.pageNumber)
-          .filter(Boolean)
-      ),
-    ].sort((left, right) => left - right),
-  }));
-
+  const relevantDocuments = buildRelevantDocuments({
+    activeDocuments,
+    currentSources,
+  });
   const previewStatus = selectedSource
     ? `${selectedSource.fileName} · page ${selectedSource.pageNumber ?? 1}`
     : "Choose a citation or relevant document";
@@ -627,173 +259,24 @@ const App = () => {
     <div className="archive-shell">
       <Layout className="archive-layout">
         <Content className="archive-app">
-          <aside className="archive-sidebar">
-            <div className="archive-sidebar-top">
-              <div className="archive-sidebar-title-row">
-                <div className="archive-sidebar-title-group">
-                  <div className="archive-sidebar-kicker">Workspace</div>
-                  <div className="archive-sidebar-title">Document Compare</div>
-                </div>
-
-                <div className="archive-sidebar-count">{activeDocuments.length}</div>
-              </div>
-
-              <div className="archive-sidebar-summary">
-                <span className="archive-sidebar-summary-chip">
-                  {formatDocumentCount(activeDocuments.length)}
-                </span>
-                <span className="archive-sidebar-summary-chip">
-                  {totalPages} pages indexed
-                </span>
-              </div>
-            </div>
-
-            <section className="archive-sidebar-section archive-upload-section">
-              <div className="archive-sidebar-section-head">
-                <span className="archive-sidebar-section-title">Upload</span>
-                <span className="archive-sidebar-section-caption">
-                  Add PDFs to the workspace
-                </span>
-              </div>
-              <PdfUploader onUploadSuccess={handleUploadSuccess} />
-            </section>
-
-            <section className="archive-sidebar-section archive-context-section">
-              <div className="archive-sidebar-section-head">
-                <span className="archive-sidebar-section-title">
-                  Relevant documents
-                </span>
-                <span className="archive-sidebar-section-caption">
-                  {currentTurn
-                    ? "Files referenced in the active answer"
-                    : "Ask a question to surface related files"}
-                </span>
-              </div>
-
-              {relevantDocuments.length > 0 ? (
-                <div className="relevant-document-list">
-                  {relevantDocuments.map((document) => (
-                    <button
-                      key={document.docId}
-                      type="button"
-                      className={`relevant-document-item ${
-                        selectedDocId === document.docId ? "is-selected" : ""
-                      }`}
-                      aria-pressed={selectedDocId === document.docId}
-                      onClick={() => setSelectedSource(document.previewSource)}
-                    >
-                      <div className="relevant-document-title">{document.fileName}</div>
-                      <div className="relevant-document-meta">
-                        {document.pages.length > 0
-                          ? `Pages ${document.pages.join(", ")}`
-                          : "Page 1"}
-                      </div>
-                      <DocumentProfileSnippet document={document} compact />
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div className="archive-empty-state archive-empty-state-compact">
-                  <div className="archive-empty-mark">No relevant documents yet</div>
-                  <div>The current answer has not cited any pages yet.</div>
-                </div>
-              )}
-            </section>
-
-            <section className="archive-sidebar-section archive-doc-section">
-              <div className="archive-sidebar-section-head">
-                <span className="archive-sidebar-section-title">
-                  Workspace documents
-                </span>
-                <span className="archive-sidebar-section-caption">
-                  {formatDocumentCount(activeDocuments.length)}
-                </span>
-              </div>
-
-              {activeDocuments.length > 0 ? (
-                <div className="document-list">
-                  {activeDocuments.map((document) => (
-                    <article
-                      key={document.docId}
-                      className={`document-item ${
-                        selectedDocId === document.docId ? "is-selected" : ""
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        className={`document-item-main document-item-main-button ${
-                          selectedDocId === document.docId ? "is-selected" : ""
-                        }`}
-                        aria-pressed={selectedDocId === document.docId}
-                        onClick={() =>
-                          setSelectedSource(buildPreviewSourceFromDocument(document))
-                        }
-                      >
-                        <div className="document-item-title">{document.fileName}</div>
-                        <div className="document-item-meta">
-                          {formatPageCount(document.pageCount)} pages · ID{" "}
-                          {document.docId.slice(0, 8)}
-                        </div>
-                        <DocumentProfileSnippet document={document} />
-                      </button>
-
-                      <button
-                        type="button"
-                        className="document-item-remove"
-                        aria-label={`Remove ${document.fileName}`}
-                        onClick={() => void removeDocument(document.docId)}
-                      >
-                        ×
-                      </button>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <div className="archive-empty-state">
-                  <div className="archive-empty-mark">No documents yet</div>
-                  <div>Upload at least one PDF to start asking questions.</div>
-                </div>
-              )}
-            </section>
-
-            <section className="archive-sidebar-section archive-quality-section">
-              <div className="archive-sidebar-section-head">
-                <span className="archive-sidebar-section-title">Quality Guard</span>
-                <span className="archive-sidebar-section-caption">
-                  Synthetic RAG checks and failure hints
-                </span>
-              </div>
-              <QualityGuardPanel
-                isQualityLoading={isQualityLoading}
-                onLoadHistory={loadQualityHistory}
-                onLoadLatest={loadLatestQualityReport}
-                onRunSynthetic={runSyntheticQualityReport}
-                qualityHistory={qualityHistory}
-                qualityReport={qualityReport}
-              />
-            </section>
-
-            <section className="archive-sidebar-footer">
-              <div className="archive-sidebar-stats">
-                <div className="archive-sidebar-stat">
-                  <span className="archive-meta-label">Responses</span>
-                  <span className="archive-meta-value">{conversation.length}</span>
-                </div>
-                <div className="archive-sidebar-stat">
-                  <span className="archive-meta-label">Pages</span>
-                  <span className="archive-meta-value">{totalPages}</span>
-                </div>
-              </div>
-
-              <Button
-                className="archive-secondary-button archive-sidebar-clear"
-                onClick={() => void clearDocuments()}
-                disabled={activeDocuments.length === 0}
-              >
-                Clear workspace
-              </Button>
-            </section>
-          </aside>
+          <WorkspaceSidebar
+            activeDocuments={activeDocuments}
+            conversationCount={conversation.length}
+            currentTurn={currentTurn}
+            isQualityLoading={isQualityLoading}
+            onClearDocuments={clearDocuments}
+            onLoadQualityHistory={loadQualityHistory}
+            onLoadQualityLatest={loadLatestQualityReport}
+            onRemoveDocument={removeDocument}
+            onRunSyntheticQuality={runSyntheticQualityReport}
+            onSelectSource={setSelectedSource}
+            onUploadSuccess={handleUploadSuccess}
+            qualityHistory={qualityHistory}
+            qualityReport={qualityReport}
+            relevantDocuments={relevantDocuments}
+            selectedDocId={selectedDocId}
+            totalPages={totalPages}
+          />
 
           <section className="archive-preview-column">
             <div className="archive-main-header archive-preview-header">

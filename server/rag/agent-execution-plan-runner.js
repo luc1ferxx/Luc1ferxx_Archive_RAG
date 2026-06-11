@@ -1,0 +1,252 @@
+import { runDocumentRagLoop } from "./agent-document-loop.js";
+import {
+  runCustomSkills,
+  runDocumentDiscoverySkill,
+  runInventorySkill,
+  runResearchBriefSkill,
+  runWebSearchSkill,
+} from "./agent-skill-runners.js";
+import { AGENT_SKILL_IDS } from "./skills/registry.js";
+
+export const AGENT_EXECUTION_STEP_IDS = {
+  researchBrief: "research_brief",
+  inventory: "inventory",
+  documentDiscovery: "document_discovery",
+  customSkills: "custom_skills",
+  documentRag: "document_rag",
+  webSearch: "web_search",
+};
+
+export const createDefaultAgentExecutionPlan = () => [
+  {
+    id: AGENT_EXECUTION_STEP_IDS.researchBrief,
+    skillId: AGENT_SKILL_IDS.researchBrief,
+  },
+  {
+    id: AGENT_EXECUTION_STEP_IDS.inventory,
+    skillId: AGENT_SKILL_IDS.inventory,
+  },
+  {
+    id: AGENT_EXECUTION_STEP_IDS.documentDiscovery,
+    skillId: AGENT_SKILL_IDS.documentDiscovery,
+  },
+  {
+    id: AGENT_EXECUTION_STEP_IDS.customSkills,
+  },
+  {
+    id: AGENT_EXECUTION_STEP_IDS.documentRag,
+    skillId: AGENT_SKILL_IDS.documentRag,
+  },
+  {
+    id: AGENT_EXECUTION_STEP_IDS.webSearch,
+    skillId: AGENT_SKILL_IDS.webSearch,
+  },
+];
+
+const getExecutionStepId = (step) =>
+  typeof step === "string" ? step : step?.id ?? null;
+
+const getCustomSkills = (selectedSkills = []) =>
+  selectedSkills.filter((skill) => skill.kind === "custom");
+
+export const runAgentExecutionPlan = async ({
+  accessScope,
+  addBudgetLimitTrace,
+  addTraceStep,
+  budgetState,
+  buildSkillTraceDetail,
+  docIds,
+  executeObservedSkill,
+  executionLoop,
+  executionPlan = createDefaultAgentExecutionPlan(),
+  getSelectedSkill,
+  plan,
+  question,
+  ragService,
+  recordExecutionGaps,
+  recordSkippedSkill,
+  recordSkillResult,
+  recordWorkingMemoryClaimSupport,
+  recordWorkingMemoryGaps,
+  registry,
+  resolveWorkingMemoryGaps,
+  retrievalPlan,
+  returnClarification,
+  selectedSkills = [],
+  sessionId,
+  userId,
+  webChatService,
+} = {}) => {
+  const state = {
+    customSkillResults: [],
+    customSkills: getCustomSkills(selectedSkills),
+    discoveryAnswer: null,
+    documentEvidenceClarification: null,
+    documentRagSkill: null,
+    inventoryAnswer: null,
+    ragResult: null,
+    researchBrief: null,
+    response: null,
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    webResult: null,
+  };
+
+  const stepHandlers = {
+    [AGENT_EXECUTION_STEP_IDS.researchBrief]: async () => {
+      const researchSkill = getSelectedSkill(AGENT_SKILL_IDS.researchBrief);
+
+      state.researchBrief = await runResearchBriefSkill({
+        accessScope,
+        addBudgetLimitTrace,
+        addTraceStep,
+        budgetState,
+        buildSkillTraceDetail,
+        docIds,
+        executeObservedSkill,
+        question,
+        ragService,
+        recordSkillResult,
+        researchSkill,
+      });
+    },
+
+    [AGENT_EXECUTION_STEP_IDS.inventory]: async () => {
+      const inventorySkill = getSelectedSkill(AGENT_SKILL_IDS.inventory);
+
+      state.inventoryAnswer = await runInventorySkill({
+        accessScope,
+        addTraceStep,
+        buildSkillTraceDetail,
+        executeObservedSkill,
+        inventorySkill,
+        ragService,
+        recordSkillResult,
+      });
+    },
+
+    [AGENT_EXECUTION_STEP_IDS.documentDiscovery]: async () => {
+      const discoverySkill = getSelectedSkill(AGENT_SKILL_IDS.documentDiscovery);
+
+      state.discoveryAnswer = await runDocumentDiscoverySkill({
+        accessScope,
+        addTraceStep,
+        buildSkillTraceDetail,
+        discoverySkill,
+        docIds,
+        executeObservedSkill,
+        question,
+        ragService,
+        recordSkillResult,
+      });
+    },
+
+    [AGENT_EXECUTION_STEP_IDS.customSkills]: async () => {
+      state.customSkillResults = await runCustomSkills({
+        accessScope,
+        addBudgetLimitTrace,
+        addTraceStep,
+        budgetState,
+        buildSkillTraceDetail,
+        customSkills: state.customSkills,
+        docIds,
+        executeObservedSkill,
+        plan,
+        question,
+        ragService,
+        recordSkippedSkill,
+        recordSkillResult,
+        retrievalPlan,
+        sessionId,
+        userId,
+      });
+    },
+
+    [AGENT_EXECUTION_STEP_IDS.documentRag]: async () => {
+      state.documentRagSkill = getSelectedSkill(AGENT_SKILL_IDS.documentRag);
+
+      const documentLoopResult = await runDocumentRagLoop({
+        accessScope,
+        addBudgetLimitTrace,
+        addTraceStep,
+        budgetState,
+        buildSkillTraceDetail,
+        docIds,
+        documentRagSkill: state.documentRagSkill,
+        executeObservedSkill,
+        executionLoop,
+        plan,
+        question,
+        ragService,
+        recordExecutionGaps,
+        recordSkippedSkill,
+        recordSkillResult,
+        recordWorkingMemoryClaimSupport,
+        recordWorkingMemoryGaps,
+        resolveWorkingMemoryGaps,
+        retrievalPlan,
+        sessionId,
+        userId,
+      });
+
+      state.ragResult = documentLoopResult.ragResult;
+      state.documentEvidenceClarification =
+        documentLoopResult.documentEvidenceClarification;
+
+      if (state.documentEvidenceClarification && !plan.wantsWeb) {
+        state.response = await returnClarification(
+          state.documentEvidenceClarification
+        );
+      }
+    },
+
+    [AGENT_EXECUTION_STEP_IDS.webSearch]: async () => {
+      const plannedWebSearchSkill = getSelectedSkill(AGENT_SKILL_IDS.webSearch);
+      const webSearchSkill =
+        plannedWebSearchSkill ??
+        registry?.get?.(AGENT_SKILL_IDS.webSearch) ??
+        null;
+
+      state.shouldRunWeb =
+        Boolean(webSearchSkill) &&
+        (Boolean(plannedWebSearchSkill) ||
+          (state.ragResult?.ok && state.ragResult.value.abstained) ||
+          state.ragResult?.ok === false);
+
+      const webSearchResult = await runWebSearchSkill({
+        addBudgetLimitTrace,
+        addTraceStep,
+        budgetState,
+        buildSkillTraceDetail,
+        executeObservedSkill,
+        plannedWebSearchSkill,
+        question,
+        recordSkippedSkill,
+        recordSkillResult,
+        shouldRunWeb: state.shouldRunWeb,
+        webChatService,
+        webSearchSkill,
+      });
+
+      state.webResult = webSearchResult.webResult;
+      state.skippedWebBecauseBudget = webSearchResult.skippedWebBecauseBudget;
+    },
+  };
+
+  for (const step of executionPlan) {
+    const stepId = getExecutionStepId(step);
+    const runStep = stepHandlers[stepId];
+
+    if (!runStep) {
+      throw new Error(`Unknown AgentRAG execution step: ${stepId ?? "unknown"}.`);
+    }
+
+    await runStep(step);
+
+    if (state.response) {
+      return state;
+    }
+  }
+
+  return state;
+};
