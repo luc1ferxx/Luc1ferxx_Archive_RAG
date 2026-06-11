@@ -29,6 +29,27 @@ const compactExecutionSchema = () =>
     skillId: schema.skillId ?? null,
   }));
 
+const getSelectedExecutionStepIds = (selectedSkills = []) => {
+  const selectedStepIds = new Set();
+  const selectedSkillIds = new Set(selectedSkills.map((skill) => skill.id));
+
+  for (const [stepId, schema] of Object.entries(AGENT_EXECUTION_STEP_SCHEMA)) {
+    if (schema.skillId && selectedSkillIds.has(schema.skillId)) {
+      selectedStepIds.add(stepId);
+    }
+  }
+
+  if (selectedSkills.some((skill) => skill.kind === "custom")) {
+    selectedStepIds.add(AGENT_EXECUTION_STEP_IDS.customSkills);
+  }
+
+  if (selectedStepIds.has(AGENT_EXECUTION_STEP_IDS.documentRag)) {
+    selectedStepIds.add(AGENT_EXECUTION_STEP_IDS.webSearch);
+  }
+
+  return selectedStepIds;
+};
+
 const extractJsonCandidate = (rawText) => {
   const text = String(rawText ?? "").trim();
 
@@ -100,14 +121,58 @@ const normalizePlannerStep = (step) => {
   return normalizedStep;
 };
 
-const normalizePlannerPayload = (payload) => {
+const normalizeCustomSkillPlannerStep = (step) => {
+  const reason = typeof step === "string" ? null : step.reason;
+  const condition = typeof step === "string" ? null : step.condition;
+
+  return {
+    id: AGENT_EXECUTION_STEP_IDS.customSkills,
+    ...(condition ? { condition } : {}),
+    ...(reason ? { reason } : {}),
+  };
+};
+
+const normalizePlannerPayload = (payload, plannerContext = {}) => {
   const rawSteps = Array.isArray(payload) ? payload : payload?.steps;
 
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
     throw new Error("LLM planner response must contain a non-empty steps array.");
   }
 
-  return rawSteps.map(normalizePlannerStep);
+  const normalizedSteps = [];
+  const selectedStepIds = getSelectedExecutionStepIds(
+    plannerContext.selectedSkills ?? []
+  );
+  let customSkillStepAdded = false;
+
+  for (const rawStep of rawSteps) {
+    const step = normalizePlannerStep(rawStep);
+    const stepId = typeof step === "string" ? step : step?.id;
+    const isKnownStep = Boolean(AGENT_EXECUTION_STEP_SCHEMA[stepId]);
+
+    if (isKnownStep && !selectedStepIds.has(stepId)) {
+      continue;
+    }
+
+    if (stepId === AGENT_EXECUTION_STEP_IDS.customSkills) {
+      if (!customSkillStepAdded) {
+        normalizedSteps.push(normalizeCustomSkillPlannerStep(step));
+        customSkillStepAdded = true;
+      }
+
+      continue;
+    }
+
+    normalizedSteps.push(step);
+  }
+
+  if (normalizedSteps.length === 0) {
+    throw new Error(
+      "LLM planner response did not include any selected execution steps."
+    );
+  }
+
+  return normalizedSteps;
 };
 
 const buildPlannerPrompt = ({
@@ -134,8 +199,9 @@ const buildPlannerPrompt = ({
     "Return only JSON. Do not include markdown, prose, or extra keys.",
     'The JSON shape must be: {"steps":[{"id":"...","skillId":"...","condition":"...","reason":"..."}]}.',
     "Use only the allowed step ids and conditions from the input.",
+    "Only include steps that correspond to the selectedSkills input, except web_search may follow document_rag as fallback.",
     "Do not invent tools, function names, skill ids, budget keys, or data access scopes.",
-    `Use ${AGENT_EXECUTION_STEP_IDS.customSkills} only for selected skills where kind is custom.`,
+    `Use a single ${AGENT_EXECUTION_STEP_IDS.customSkills} step for all selected skills where kind is custom; omit skillId on that step.`,
     `Use ${AGENT_EXECUTION_STEP_IDS.webSearch} only when web_search is selected or after document_rag as fallback.`,
     "Keep document_rag before web_search when both are needed.",
     "Input:",
@@ -148,6 +214,6 @@ export const llmPlannerAdapter = {
   createExecutionPlan: async (plannerContext = {}) => {
     const response = await completeText(buildPlannerPrompt(plannerContext));
 
-    return normalizePlannerPayload(parsePlannerJson(response));
+    return normalizePlannerPayload(parsePlannerJson(response), plannerContext);
   },
 };

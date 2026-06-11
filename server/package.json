@@ -8,6 +8,7 @@
     "eval:synthetic": "node evaluation/run-synthetic-eval.mjs",
     "eval:real": "node evaluation/run-real-eval.mjs",
     "eval:trajectory": "node evaluation/run-trajectory-eval.mjs",
+    "eval:planner": "node evaluation/run-planner-eval.mjs",
     "eval:param-sweep": "node evaluation/run-param-sweep.mjs",
     "eval:rerank": "node evaluation/run-rerank-eval.mjs",
     "eval:rerank:sweep": "node evaluation/run-rerank-sweep.mjs",

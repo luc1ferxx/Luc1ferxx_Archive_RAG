@@ -9,7 +9,10 @@ import {
   configureOpenAIProvider,
   resetOpenAIProvider,
 } from "../rag/openai.js";
-import { AGENT_SKILL_IDS } from "../rag/skills/registry.js";
+import {
+  AGENT_SKILL_IDS,
+  CUSTOM_SKILL_IDS,
+} from "../rag/skills/registry.js";
 
 test("llm planner adapter parses fenced JSON execution plan output", async () => {
   let renderedPrompt = "";
@@ -79,6 +82,77 @@ test("llm planner adapter rejects responses without execution steps", async () =
       () => llmPlannerAdapter.createExecutionPlan({ question: "Hello?" }),
       /non-empty steps array/
     );
+  } finally {
+    resetOpenAIProvider();
+  }
+});
+
+test("llm planner adapter collapses per-custom-skill steps into one custom step", async () => {
+  configureOpenAIProvider({
+    completeText: async () =>
+      JSON.stringify({
+        steps: [
+          {
+            condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
+            id: AGENT_EXECUTION_STEP_IDS.documentDiscovery,
+            reason: "Find relevant documents first.",
+            skillId: AGENT_SKILL_IDS.documentDiscovery,
+          },
+          {
+            condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
+            id: AGENT_EXECUTION_STEP_IDS.documentRag,
+            reason: "Run document RAG first.",
+            skillId: AGENT_SKILL_IDS.documentRag,
+          },
+          {
+            condition: AGENT_EXECUTION_CONDITIONS.selectedCustomSkills,
+            id: AGENT_EXECUTION_STEP_IDS.customSkills,
+            reason: "Run contract summary.",
+            skillId: CUSTOM_SKILL_IDS.summarizeContract,
+          },
+          {
+            condition: AGENT_EXECUTION_CONDITIONS.selectedCustomSkills,
+            id: AGENT_EXECUTION_STEP_IDS.customSkills,
+            reason: "Run risk review.",
+            skillId: CUSTOM_SKILL_IDS.riskReview,
+          },
+        ],
+      }),
+  });
+
+  try {
+    const executionPlan = await llmPlannerAdapter.createExecutionPlan({
+      docIds: ["contract-1"],
+      plan: {
+        mode: "skill_chain",
+        wantsWeb: false,
+      },
+      question: "Review this contract for risks and key terms.",
+      selectedSkills: [
+        {
+          budgetKey: "customSkillCalls",
+          id: CUSTOM_SKILL_IDS.summarizeContract,
+          kind: "custom",
+          label: "Summarize Contract",
+          requiresAccessScope: true,
+        },
+        {
+          budgetKey: "customSkillCalls",
+          id: CUSTOM_SKILL_IDS.riskReview,
+          kind: "custom",
+          label: "Risk Review",
+          requiresAccessScope: true,
+        },
+      ],
+    });
+
+    assert.deepEqual(executionPlan, [
+      {
+        condition: AGENT_EXECUTION_CONDITIONS.selectedCustomSkills,
+        id: AGENT_EXECUTION_STEP_IDS.customSkills,
+        reason: "Run contract summary.",
+      },
+    ]);
   } finally {
     resetOpenAIProvider();
   }
