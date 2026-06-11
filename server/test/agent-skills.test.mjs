@@ -214,6 +214,12 @@ test("agent rag executes selected skills with access scope and reports skill met
     (skill) => skill.skillId === AGENT_SKILL_IDS.documentRag
   );
   assert.equal(response.body.agentObservability.planMode, "document");
+  assert.equal(
+    response.body.agentObservability.executionPlanner.selectedPlannerId,
+    "deterministic"
+  );
+  assert.equal(response.body.agentObservability.executionPlanner.status, "selected");
+  assert.equal(response.body.agentObservability.executionPlanner.fallback, false);
   assert.equal(response.body.agentObservability.selectedSkills[0].skillId, AGENT_SKILL_IDS.documentRag);
   assert.equal(documentObservation.selected, true);
   assert.equal(documentObservation.status, "completed");

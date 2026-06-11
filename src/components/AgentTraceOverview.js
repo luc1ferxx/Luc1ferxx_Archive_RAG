@@ -10,6 +10,20 @@ import {
 
 const getSkillId = (skill = {}) => skill.skillId ?? skill.id ?? null;
 
+const formatPlannerLabel = (planner = {}) => {
+  if (planner.status === "not_run") {
+    return "Not run";
+  }
+
+  if (planner.fallback) {
+    return `${planner.requestedPlannerId ?? "unknown"} -> ${
+      planner.selectedPlannerId ?? "unknown"
+    }`;
+  }
+
+  return planner.selectedPlannerId ?? planner.requestedPlannerId ?? "Unknown";
+};
+
 const getObservedSelectedSkills = ({ answer }) => {
   const observability = answer?.agentObservability ?? {};
   const selectedSkills = Array.isArray(observability.selectedSkills)
@@ -36,6 +50,7 @@ const AgentTraceOverview = ({ answer, stepCount }) => {
   const workingMemory =
     answer?.agentWorkingMemory ?? observability.workingMemory ?? {};
   const selectedSkills = getObservedSelectedSkills({ answer });
+  const executionPlanner = observability.executionPlanner ?? {};
   const skillChain = Array.isArray(observability.skillChain)
     ? observability.skillChain
     : [];
@@ -63,7 +78,9 @@ const AgentTraceOverview = ({ answer, stepCount }) => {
     : Array.isArray(loop.gaps)
       ? loop.gaps
       : [];
+  const hasPlanner = Boolean(executionPlanner.status);
   const hasOverview =
+    hasPlanner ||
     selectedSkills.length > 0 ||
     skillChain.length > 0 ||
     checkedQueries.length > 0 ||
@@ -90,6 +107,12 @@ const AgentTraceOverview = ({ answer, stepCount }) => {
         <div className="archive-agent-metric">
           <span>Steps</span>
           <strong>{formatDetailValue(stepCount)}</strong>
+        </div>
+        <div className="archive-agent-metric">
+          <span>Planner</span>
+          <strong title={executionPlanner.fallbackReason ?? undefined}>
+            {formatPlannerLabel(executionPlanner)}
+          </strong>
         </div>
         <div className="archive-agent-metric">
           <span>Queries</span>

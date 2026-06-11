@@ -145,6 +145,14 @@ describe("RenderQA", () => {
                 },
               ],
               agentObservability: {
+                executionPlanner: {
+                  fallback: true,
+                  fallbackReason: "Invalid AgentRAG execution plan.",
+                  requestedPlannerId: "llm",
+                  selectedPlannerId: "deterministic",
+                  status: "fallback",
+                  stepIds: ["document_rag"],
+                },
                 selectedSkills: [
                   {
                     skillId: "document_rag",
@@ -312,6 +320,7 @@ describe("RenderQA", () => {
     );
 
     expect(screen.getByText("Agent trace")).toBeInTheDocument();
+    expect(screen.getByText("llm -> deterministic")).toBeInTheDocument();
     expect(screen.getAllByText("Selected skills").length).toBeGreaterThan(0);
     expect(screen.getByText("Document RAG@1.0.0")).toBeInTheDocument();
     expect(screen.getByText("Skill chain")).toBeInTheDocument();

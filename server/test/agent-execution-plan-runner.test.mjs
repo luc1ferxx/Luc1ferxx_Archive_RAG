@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { createAgentBudget } from "../rag/agent-budget.js";
 import {
   AGENT_EXECUTION_STEP_IDS,
+  createAgentExecutionPlanResult,
   createDeterministicAgentExecutionPlan,
+  createValidatedAgentExecutionPlan,
   deterministicPlannerAdapter,
   validateAgentExecutionPlan,
 } from "../rag/agent-execution-plan.js";
@@ -262,6 +264,125 @@ test("deterministic planner adapter emits the guarded default execution order", 
       AGENT_EXECUTION_STEP_IDS.documentRag,
       AGENT_EXECUTION_STEP_IDS.webSearch,
     ]
+  );
+});
+
+test("validated execution planner accepts a safe adapter proposal", async () => {
+  const documentSkill = createSkill({
+    budgetKey: "documentRagCalls",
+    execute: async () => ({}),
+    id: AGENT_SKILL_IDS.documentRag,
+    label: "Document RAG",
+  });
+  const proposedAdapter = {
+    id: "test-safe",
+    createExecutionPlan: async () => [
+      {
+        condition: "selected_skill",
+        id: AGENT_EXECUTION_STEP_IDS.documentRag,
+        reason: "Answer from selected documents.",
+        skillId: AGENT_SKILL_IDS.documentRag,
+      },
+    ],
+  };
+
+  const executionPlan = await createValidatedAgentExecutionPlan({
+    accessScope: {},
+    plannerAdapter: proposedAdapter,
+    registry: createRegistry([documentSkill]),
+    selectedSkills: [documentSkill],
+  });
+
+  assert.deepEqual(
+    executionPlan.map((step) => step.id),
+    [AGENT_EXECUTION_STEP_IDS.documentRag]
+  );
+  assert.equal(executionPlan[0].reason, "Answer from selected documents.");
+});
+
+test("execution planner result reports selected planner metadata", async () => {
+  const documentSkill = createSkill({
+    budgetKey: "documentRagCalls",
+    execute: async () => ({}),
+    id: AGENT_SKILL_IDS.documentRag,
+    label: "Document RAG",
+  });
+  const proposedAdapter = {
+    id: "llm",
+    createExecutionPlan: async () => [
+      {
+        condition: "selected_skill",
+        id: AGENT_EXECUTION_STEP_IDS.documentRag,
+        reason: "Use document evidence first.",
+        skillId: AGENT_SKILL_IDS.documentRag,
+      },
+    ],
+  };
+
+  const result = await createAgentExecutionPlanResult({
+    accessScope: {},
+    plannerAdapter: proposedAdapter,
+    registry: createRegistry([documentSkill]),
+    selectedSkills: [documentSkill],
+  });
+
+  assert.equal(result.planner.requestedPlannerId, "llm");
+  assert.equal(result.planner.selectedPlannerId, "llm");
+  assert.equal(result.planner.status, "selected");
+  assert.equal(result.planner.fallback, false);
+  assert.deepEqual(result.planner.stepIds, [AGENT_EXECUTION_STEP_IDS.documentRag]);
+});
+
+test("validated execution planner falls back from unsafe adapter output", async () => {
+  const unsafeAdapter = {
+    id: "llm",
+    createExecutionPlan: async () => [
+      {
+        id: "shell_tool",
+        reason: "Run arbitrary code.",
+      },
+    ],
+  };
+
+  const executionPlan = await createValidatedAgentExecutionPlan({
+    accessScope: {},
+    plannerAdapter: unsafeAdapter,
+    registry: createRegistry([]),
+    selectedSkills: [],
+  });
+
+  assert.deepEqual(
+    executionPlan.map((step) => step.id),
+    createDeterministicAgentExecutionPlan().map((step) => step.id)
+  );
+});
+
+test("execution planner result reports fallback metadata", async () => {
+  const unsafeAdapter = {
+    id: "llm",
+    createExecutionPlan: async () => [
+      {
+        id: "shell_tool",
+        reason: "Run arbitrary code.",
+      },
+    ],
+  };
+
+  const result = await createAgentExecutionPlanResult({
+    accessScope: {},
+    plannerAdapter: unsafeAdapter,
+    registry: createRegistry([]),
+    selectedSkills: [],
+  });
+
+  assert.equal(result.planner.requestedPlannerId, "llm");
+  assert.equal(result.planner.selectedPlannerId, "deterministic");
+  assert.equal(result.planner.status, "fallback");
+  assert.equal(result.planner.fallback, true);
+  assert.match(result.planner.fallbackReason, /unknown execution step shell_tool/);
+  assert.deepEqual(
+    result.planner.stepIds,
+    createDeterministicAgentExecutionPlan().map((step) => step.id)
   );
 });
 

@@ -43,6 +43,31 @@ test("agent run context appends trace steps and exposes budget snapshots", () =>
     ["1-plan", "2-budget_limit"]
   );
   assert.equal(context.getBudgetSnapshot().used.traceSteps, 2);
+  assert.equal(
+    context.buildAgentObservability({ agentMode: "document" }).executionPlanner.status,
+    "not_run"
+  );
+
+  context.setExecutionPlanner({
+    fallback: true,
+    fallbackReason: "Invalid AgentRAG execution plan.",
+    requestedPlannerId: "llm",
+    selectedPlannerId: "deterministic",
+    status: "fallback",
+    stepIds: ["document_rag"],
+  });
+
+  assert.deepEqual(
+    context.buildAgentObservability({ agentMode: "document" }).executionPlanner,
+    {
+      fallback: true,
+      fallbackReason: "Invalid AgentRAG execution plan.",
+      requestedPlannerId: "llm",
+      selectedPlannerId: "deterministic",
+      status: "fallback",
+      stepIds: ["document_rag"],
+    }
+  );
 });
 
 test("agent run context returns clarification response and records agent trace", async () => {
@@ -130,6 +155,7 @@ test("agent run context returns clarification response and records agent trace",
   assert.equal(response.body.agentAnswer, "Which document should I use?");
   assert.equal(response.body.agentTrace[0].type, "clarification_gate");
   assert.equal(response.body.agentObservability.planMode, "document");
+  assert.equal(response.body.agentObservability.executionPlanner.status, "not_run");
   assert.equal(response.body.agentObservability.skills[0].skillId, "document_rag");
   assert.equal(response.body.agentObservability.runs[0].phase, "primary");
   assert.equal(recordedEvents.length, 1);

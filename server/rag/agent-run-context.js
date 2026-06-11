@@ -15,6 +15,15 @@ const defaultSkillTracker = {
   getSkillRuns: () => [],
 };
 
+const createDefaultExecutionPlanner = () => ({
+  fallback: false,
+  fallbackReason: null,
+  requestedPlannerId: null,
+  selectedPlannerId: null,
+  status: "not_run",
+  stepIds: [],
+});
+
 export const createAgentRunContext = ({
   agentBudget,
   chainSkills = [],
@@ -30,6 +39,7 @@ export const createAgentRunContext = ({
   const trace = [];
   const budgetState = createAgentBudget(agentBudget);
   let agentRetrievalPlan = null;
+  let executionPlanner = createDefaultExecutionPlanner();
   let skillTracker = defaultSkillTracker;
 
   const getBudgetSnapshot = () => getAgentBudgetSnapshot(budgetState);
@@ -69,9 +79,20 @@ export const createAgentRunContext = ({
 
   const getAgentRetrievalPlan = () => agentRetrievalPlan;
 
+  const setExecutionPlanner = (planner = {}) => {
+    executionPlanner = {
+      ...createDefaultExecutionPlanner(),
+      ...planner,
+      stepIds: Array.isArray(planner.stepIds) ? planner.stepIds : [],
+    };
+
+    return executionPlanner;
+  };
+
   const buildAgentObservability = ({ agentMode }) => ({
     agentMode,
     planMode: plan.mode,
+    executionPlanner,
     skillChain: chainSkills.map((skill) => getSkillDescriptor(skill)),
     executionLoop,
     workingMemory,
@@ -149,6 +170,7 @@ export const createAgentRunContext = ({
     recordAgentTrace,
     returnClarification,
     setAgentRetrievalPlan,
+    setExecutionPlanner,
     setSkillTracker,
     trace,
   };

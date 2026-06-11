@@ -57,8 +57,29 @@ export const AGENT_EXECUTION_STEP_SCHEMA = {
 
 const normalizeText = (value) => String(value ?? "").trim();
 
+const normalizePlannerId = (plannerAdapter) =>
+  normalizeText(plannerAdapter?.id) || "unknown";
+
 const getStepId = (step) =>
   typeof step === "string" ? normalizeText(step) : normalizeText(step?.id);
+
+const serializePlannerError = (error) =>
+  normalizeText(error instanceof Error ? error.message : error).slice(0, 500);
+
+const buildPlannerSelection = ({
+  executionPlan,
+  fallback = false,
+  fallbackReason = null,
+  requestedPlannerId,
+  selectedPlannerId,
+}) => ({
+  fallback,
+  fallbackReason: fallbackReason ? serializePlannerError(fallbackReason) : null,
+  requestedPlannerId,
+  selectedPlannerId,
+  status: fallback ? "fallback" : "selected",
+  stepIds: executionPlan.map((step) => step.id),
+});
 
 const getSelectedSkill = (selectedSkills = [], skillId) =>
   selectedSkills.find((skill) => skill.id === skillId) ?? null;
@@ -346,4 +367,75 @@ export const createDeterministicAgentExecutionPlan = () => [
 export const deterministicPlannerAdapter = {
   id: "deterministic",
   createExecutionPlan: createDeterministicAgentExecutionPlan,
+};
+
+export const createAgentExecutionPlanResult = async ({
+  accessScope = {},
+  fallbackPlannerAdapter = deterministicPlannerAdapter,
+  plannerAdapter = fallbackPlannerAdapter,
+  plannerContext = {},
+  registry,
+  selectedSkills = [],
+} = {}) => {
+  const fallbackPlannerId = normalizePlannerId(fallbackPlannerAdapter);
+  const requestedPlannerId = normalizePlannerId(plannerAdapter);
+  const createFallbackPlan = async () =>
+    validateAgentExecutionPlan({
+      accessScope,
+      executionPlan: await fallbackPlannerAdapter.createExecutionPlan(
+        plannerContext
+      ),
+      registry,
+      selectedSkills,
+    });
+
+  if (!plannerAdapter || plannerAdapter === fallbackPlannerAdapter) {
+    const executionPlan = await createFallbackPlan();
+
+    return {
+      executionPlan,
+      planner: buildPlannerSelection({
+        executionPlan,
+        requestedPlannerId: fallbackPlannerId,
+        selectedPlannerId: fallbackPlannerId,
+      }),
+    };
+  }
+
+  try {
+    const executionPlan = validateAgentExecutionPlan({
+      accessScope,
+      executionPlan: await plannerAdapter.createExecutionPlan(plannerContext),
+      registry,
+      selectedSkills,
+    });
+
+    return {
+      executionPlan,
+      planner: buildPlannerSelection({
+        executionPlan,
+        requestedPlannerId,
+        selectedPlannerId: requestedPlannerId,
+      }),
+    };
+  } catch (error) {
+    const executionPlan = await createFallbackPlan();
+
+    return {
+      executionPlan,
+      planner: buildPlannerSelection({
+        executionPlan,
+        fallback: true,
+        fallbackReason: error,
+        requestedPlannerId,
+        selectedPlannerId: fallbackPlannerId,
+      }),
+    };
+  }
+};
+
+export const createValidatedAgentExecutionPlan = async (options = {}) => {
+  const result = await createAgentExecutionPlanResult(options);
+
+  return result.executionPlan;
 };

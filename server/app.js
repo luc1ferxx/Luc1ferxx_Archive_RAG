@@ -35,6 +35,9 @@ import {
 } from "./feedback.js";
 import { buildHealthReport, runStartupHealthChecks } from "./health.js";
 import { runAgentRag } from "./rag/agent.js";
+import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
+import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
+import { getAgentExecutionPlanner } from "./rag/config.js";
 import {
   clearUploadSession,
   configureUploadSessionDirectory,
@@ -53,6 +56,11 @@ const defaultUploadsDirectory = path.join(__dirname, "uploads");
 const DEFAULT_UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
 const MAX_DIRECT_UPLOAD_SIZE = 50 * 1024 * 1024;
 const MAX_CHUNK_UPLOAD_SIZE = 5 * 1024 * 1024;
+
+const createExecutionPlannerAdapter = () =>
+  getAgentExecutionPlanner() === "llm"
+    ? llmPlannerAdapter
+    : deterministicPlannerAdapter;
 
 const parseDocIds = (rawDocIds, fallbackDocId) => {
   if (Array.isArray(rawDocIds)) {
@@ -163,6 +171,7 @@ const resolveScopedUserId = (req, rawUserId) =>
 
 const buildChatResponse = async ({
   agentBudget,
+  executionPlannerAdapter,
   ragService,
   webChatService,
   question,
@@ -195,6 +204,7 @@ const buildChatResponse = async ({
     sessionId,
     userId,
     accessScope,
+    executionPlannerAdapter,
     skillRegistry,
   });
 };
@@ -251,6 +261,8 @@ export const createApp = async (options = {}) => {
     recordFeedback,
   };
   const agentBudget = options.agentBudget ?? {};
+  const executionPlannerAdapter =
+    options.executionPlannerAdapter ?? createExecutionPlannerAdapter();
 
   const app = express();
   app.use(cors());
@@ -801,6 +813,7 @@ export const createApp = async (options = {}) => {
         sessionId,
         userId,
         accessScope,
+        executionPlannerAdapter,
         skillRegistry,
       });
 
