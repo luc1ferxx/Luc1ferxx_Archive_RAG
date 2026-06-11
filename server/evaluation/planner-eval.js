@@ -12,6 +12,18 @@ import {
   normalizeArray,
 } from "../rag/chat-response-contract.js";
 import {
+  appendCaseCheckTable,
+  appendCategoryMetricsTable,
+  buildCheck,
+  buildMetricSummary,
+  buildScopedRagService,
+  buildSource,
+  createAccessScopeMatcher,
+  createCaseFinisher,
+  createEvalTelemetry,
+  runCaseSafely as runEvalCaseSafely,
+} from "./agent-eval-harness.js";
+import {
   AGENT_EXECUTION_STEP_IDS,
   AGENT_EXECUTION_STEP_SCHEMA,
 } from "../rag/agent-execution-plan.js";
@@ -63,106 +75,17 @@ const STEP_ORDER = [
   AGENT_EXECUTION_STEP_IDS.webSearch,
 ];
 
-const sameScope = (scope) =>
-  scope?.userId === DEFAULT_ACCESS_SCOPE.userId &&
-  scope?.workspaceId === DEFAULT_ACCESS_SCOPE.workspaceId;
+const sameScope = createAccessScopeMatcher(DEFAULT_ACCESS_SCOPE);
 
-const buildCheck = ({ id, label, category, passed, detail = null }) => ({
-  id,
-  label,
-  category,
-  passed: Boolean(passed),
-  detail,
+const finishCase = createCaseFinisher({
+  buildResponseSummary: buildCaseResponseSummary,
 });
 
-const buildSource = ({
-  docId = "doc-1",
-  fileName = "document.pdf",
-  pageNumber = 1,
-  excerpt,
-} = {}) => ({
-  docId,
-  fileName,
-  pageNumber,
-  excerpt,
-});
-
-const buildScopedRagService = ({
-  chat,
-  documents = [],
-  telemetry,
-}) => ({
-  chat: async (docIds, question, options = {}) => {
-    telemetry.chatCalls.push({
-      accessScope: options.accessScope ?? null,
-      docIds,
-      question,
-      retrievalPlan: options.retrievalPlan ?? null,
-    });
-
-    return chat({
-      callIndex: telemetry.chatCalls.length,
-      docIds,
-      options,
-      question,
-    });
-  },
-  listDocuments: (accessScope) => {
-    telemetry.listDocumentScopes.push(accessScope ?? null);
-
-    return sameScope(accessScope) ? documents : [];
-  },
-});
-
-const finishCase = ({
-  checks,
-  description,
-  id,
-  label,
-  response,
-  telemetry,
-}) => {
-  const failedChecks = checks.filter((check) => !check.passed);
-
-  return {
-    checks,
-    description,
-    failedCheckCount: failedChecks.length,
-    id,
-    label,
-    passed: failedChecks.length === 0,
-    response: buildCaseResponseSummary({
-      response,
-      telemetry,
-    }),
-  };
-};
-
-const runCaseSafely = async (caseDefinition) => {
-  try {
-    return await caseDefinition.run();
-  } catch (error) {
-    return finishCase({
-      checks: [
-        buildCheck({
-          category: "execution",
-          detail: error instanceof Error ? error.message : String(error),
-          id: "case_error",
-          label: "Case completed without throwing",
-          passed: false,
-        }),
-      ],
-      description: caseDefinition.description,
-      id: caseDefinition.id,
-      label: caseDefinition.label,
-      response: null,
-      telemetry: {
-        chatCalls: [],
-        listDocumentScopes: [],
-      },
-    });
-  }
-};
+const runCaseSafely = (caseDefinition) =>
+  runEvalCaseSafely(caseDefinition, {
+    errorCategory: "execution",
+    finishCase,
+  });
 
 const extractPromptPayload = (prompt) => {
   const text = String(prompt ?? "");
@@ -234,11 +157,9 @@ const createInventoryCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
   description:
     "The LLM planner should select the inventory step for a workspace document listing request.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           chunkCount: 14,
@@ -317,10 +238,7 @@ const createDocumentCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
   description:
     "The LLM planner should select document_rag for a selected-document QA request.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const citation = buildSource({
       docId: "policy-1",
       excerpt:
@@ -329,6 +247,7 @@ const createDocumentCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
       pageNumber: 2,
     });
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           docId: "policy-1",
@@ -401,11 +320,9 @@ const createWebCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
   description:
     "The LLM planner should select web_search for a current-information request without selected documents.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [],
       telemetry,
       chat: async () => {
@@ -470,10 +387,7 @@ const createCustomChainCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => (
   description:
     "The LLM planner should route a contract review chain through the custom_skills step.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const citation = buildSource({
       docId: "contract-1",
       excerpt:
@@ -482,6 +396,7 @@ const createCustomChainCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => (
       pageNumber: 3,
     });
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           docId: "contract-1",
@@ -573,10 +488,7 @@ const createInvalidFallbackCase = () => ({
   description:
     "An unsafe LLM-style execution plan should fail validation and fallback to deterministic execution.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const unsafePlannerAdapter = {
       id: "llm",
       createExecutionPlan: async () => [
@@ -587,6 +499,7 @@ const createInvalidFallbackCase = () => ({
       ],
     };
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           chunkCount: 4,
@@ -673,48 +586,6 @@ export const createDefaultPlannerCases = ({
   createInvalidFallbackCase(),
 ];
 
-const buildMetricSummary = (caseResults) => {
-  const checks = caseResults.flatMap((caseResult) => caseResult.checks);
-  const categoryEntries = Object.entries(CATEGORY_LABELS).map(([category, label]) => {
-    const categoryChecks = checks.filter((check) => check.category === category);
-    const passedCheckCount = categoryChecks.filter((check) => check.passed).length;
-
-    return [
-      category,
-      {
-        checkCount: categoryChecks.length,
-        failedCheckCount: categoryChecks.length - passedCheckCount,
-        label,
-        passedCheckCount,
-        passRate:
-          categoryChecks.length === 0
-            ? null
-            : Number((passedCheckCount / categoryChecks.length).toFixed(4)),
-      },
-    ];
-  });
-  const passedCaseCount = caseResults.filter((caseResult) => caseResult.passed).length;
-  const passedCheckCount = checks.filter((check) => check.passed).length;
-
-  return {
-    caseCount: caseResults.length,
-    checkCount: checks.length,
-    checkPassRate:
-      checks.length === 0
-        ? null
-        : Number((passedCheckCount / checks.length).toFixed(4)),
-    categories: Object.fromEntries(categoryEntries),
-    failedCaseCount: caseResults.length - passedCaseCount,
-    failedCheckCount: checks.length - passedCheckCount,
-    overallPassRate:
-      caseResults.length === 0
-        ? null
-        : Number((passedCaseCount / caseResults.length).toFixed(4)),
-    passedCaseCount,
-    passedCheckCount,
-  };
-};
-
 const configurePlannerProvider = ({ provider }) => {
   if (provider === "mock") {
     configureOpenAIProvider(createMockPlannerProvider());
@@ -751,7 +622,10 @@ export const runPlannerEvaluation = async ({
       caseResults.push(await runCaseSafely(caseDefinition));
     }
 
-    const metrics = buildMetricSummary(caseResults);
+    const metrics = buildMetricSummary({
+      caseResults,
+      categoryLabels: CATEGORY_LABELS,
+    });
     const status = metrics.failedCaseCount > 0 ? "fail" : "pass";
 
     return {
@@ -770,9 +644,6 @@ export const runPlannerEvaluation = async ({
   }
 };
 
-const formatPercent = (value) =>
-  typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "N/A";
-
 export const formatPlannerReportMarkdown = (report = {}) => {
   const summary = report.summary ?? {};
   const metrics = summary.metrics ?? {};
@@ -786,22 +657,12 @@ export const formatPlannerReportMarkdown = (report = {}) => {
     `- Status: \`${summary.status ?? "unknown"}\``,
     `- Cases: \`${metrics.passedCaseCount ?? 0}/${metrics.caseCount ?? 0}\` passed`,
     `- Checks: \`${metrics.passedCheckCount ?? 0}/${metrics.checkCount ?? 0}\` passed`,
-    "",
-    "## Category Metrics",
-    "",
-    "| Category | Passed | Failed | Pass rate |",
-    "| --- | ---: | ---: | ---: |",
   ];
 
-  for (const [category, categoryMetrics] of Object.entries(categories)) {
-    lines.push(
-      `| ${categoryMetrics.label ?? category} | ${
-        categoryMetrics.passedCheckCount ?? 0
-      } | ${categoryMetrics.failedCheckCount ?? 0} | ${formatPercent(
-        categoryMetrics.passRate
-      )} |`
-    );
-  }
+  appendCategoryMetricsTable({
+    categories,
+    lines,
+  });
 
   lines.push("", "## Cases", "");
 
@@ -820,19 +681,14 @@ export const formatPlannerReportMarkdown = (report = {}) => {
       }\``,
       `- Planner status: \`${planner.status ?? "unknown"}\``,
       `- Steps: \`${(planner.stepIds ?? []).join(" -> ")}\``,
-      `- Trace: \`${(caseResult.response?.traceTypes ?? []).join(" -> ")}\``,
-      "",
-      "| Check | Category | Status |",
-      "| --- | --- | --- |"
+      `- Trace: \`${(caseResult.response?.traceTypes ?? []).join(" -> ")}\``
     );
 
-    for (const check of caseResult.checks ?? []) {
-      lines.push(
-        `| ${check.label} | ${CATEGORY_LABELS[check.category] ?? check.category} | ${
-          check.passed ? "pass" : "fail"
-        } |`
-      );
-    }
+    appendCaseCheckTable({
+      categoryLabels: CATEGORY_LABELS,
+      checks: caseResult.checks,
+      lines,
+    });
 
     lines.push("");
   }

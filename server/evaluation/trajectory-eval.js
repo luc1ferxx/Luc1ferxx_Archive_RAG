@@ -17,6 +17,18 @@ import {
   hasTraceStep,
 } from "../rag/chat-response-contract.js";
 import {
+  appendCaseCheckTable,
+  appendCategoryMetricsTable,
+  buildCheck,
+  buildMetricSummary,
+  buildScopedRagService,
+  buildSource,
+  createAccessScopeMatcher,
+  createCaseFinisher,
+  createEvalTelemetry,
+  runCaseSafely as runEvalCaseSafely,
+} from "./agent-eval-harness.js";
+import {
   AGENT_SKILL_IDS,
   CUSTOM_SKILL_IDS,
 } from "../rag/skills/registry.js";
@@ -42,101 +54,17 @@ const CATEGORY_LABELS = {
   skill_selection: "Skill selection",
 };
 
-const sameScope = (scope) =>
-  scope?.userId === DEFAULT_ACCESS_SCOPE.userId &&
-  scope?.workspaceId === DEFAULT_ACCESS_SCOPE.workspaceId;
+const sameScope = createAccessScopeMatcher(DEFAULT_ACCESS_SCOPE);
 
-const buildCheck = ({ id, label, category, passed, detail = null }) => ({
-  id,
-  label,
-  category,
-  passed: Boolean(passed),
-  detail,
+const finishCase = createCaseFinisher({
+  buildResponseSummary: buildCaseResponseSummary,
 });
 
-const buildScopedRagService = ({
-  documents = [],
-  chat,
-  telemetry,
-}) => ({
-  chat: async (docIds, question, options = {}) => {
-    telemetry.chatCalls.push({
-      docIds,
-      question,
-      accessScope: options.accessScope ?? null,
-      retrievalPlan: options.retrievalPlan ?? null,
-    });
-
-    return chat({
-      callIndex: telemetry.chatCalls.length,
-      docIds,
-      question,
-      options,
-    });
-  },
-  listDocuments: (accessScope) => {
-    telemetry.listDocumentScopes.push(accessScope ?? null);
-
-    return sameScope(accessScope) ? documents : [];
-  },
-});
-
-const buildSource = ({
-  docId = "doc-1",
-  fileName = "document.pdf",
-  pageNumber = 1,
-  excerpt,
-} = {}) => ({
-  docId,
-  fileName,
-  pageNumber,
-  excerpt,
-});
-
-const finishCase = ({ id, label, description, checks, response, telemetry }) => {
-  const failedChecks = checks.filter((check) => !check.passed);
-
-  return {
-    id,
-    label,
-    description,
-    passed: failedChecks.length === 0,
-    failedCheckCount: failedChecks.length,
-    checks,
-    response: buildCaseResponseSummary({
-      response,
-      telemetry,
-    }),
-  };
-};
-
-const runCaseSafely = async (caseDefinition) => {
-  try {
-    return await caseDefinition.run();
-  } catch (error) {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
-
-    return finishCase({
-      id: caseDefinition.id,
-      label: caseDefinition.label,
-      description: caseDefinition.description,
-      response: null,
-      telemetry,
-      checks: [
-        buildCheck({
-          id: "case_error",
-          label: "Case completed without throwing",
-          category: "trajectory",
-          passed: false,
-          detail: error instanceof Error ? error.message : String(error),
-        }),
-      ],
-    });
-  }
-};
+const runCaseSafely = (caseDefinition) =>
+  runEvalCaseSafely(caseDefinition, {
+    errorCategory: "trajectory",
+    finishCase,
+  });
 
 const createSkillChainCase = () => ({
   id: "skill_chain_contract_review",
@@ -144,10 +72,7 @@ const createSkillChainCase = () => ({
   description:
     "A contract risk review should select the summarize_contract -> risk_review whitelist chain.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const citation = buildSource({
       docId: "contract-1",
       fileName: "services-agreement.pdf",
@@ -156,6 +81,7 @@ const createSkillChainCase = () => ({
         "Acme and Beta signed a services agreement. It renews every 12 months unless either party gives 30 days notice. Late notice creates renewal risk. Security audit timing is not specified.",
     });
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           docId: "contract-1",
@@ -249,11 +175,9 @@ const createFollowUpCase = () => ({
   description:
     "Unsupported document claims should trigger gap_analysis and a focused follow-up retrieval.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           docId: "policy-1",
@@ -391,11 +315,9 @@ const createClarificationCase = () => ({
   description:
     "A comparison request with only one selected document should ask for clarification instead of running tools.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           docId: "contract-1",
@@ -470,11 +392,9 @@ const createAccessScopeCase = () => ({
   description:
     "A custom skill must pass the authenticated accessScope to document listing and RAG chat.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           docId: "security-1",
@@ -566,11 +486,9 @@ const createBudgetCase = () => ({
   description:
     "When follow-up budget is exhausted, the agent should stop and ask for clarification instead of looping.",
   run: async () => {
-    const telemetry = {
-      chatCalls: [],
-      listDocumentScopes: [],
-    };
+    const telemetry = createEvalTelemetry();
     const ragService = buildScopedRagService({
+      sameScope,
       documents: [
         {
           docId: "policy-1",
@@ -665,48 +583,6 @@ export const createDefaultTrajectoryCases = () => [
   createBudgetCase(),
 ];
 
-const buildMetricSummary = (caseResults) => {
-  const checks = caseResults.flatMap((caseResult) => caseResult.checks);
-  const categoryEntries = Object.entries(CATEGORY_LABELS).map(([category, label]) => {
-    const categoryChecks = checks.filter((check) => check.category === category);
-    const passedCheckCount = categoryChecks.filter((check) => check.passed).length;
-
-    return [
-      category,
-      {
-        label,
-        checkCount: categoryChecks.length,
-        passedCheckCount,
-        failedCheckCount: categoryChecks.length - passedCheckCount,
-        passRate:
-          categoryChecks.length === 0
-            ? null
-            : Number((passedCheckCount / categoryChecks.length).toFixed(4)),
-      },
-    ];
-  });
-  const passedCaseCount = caseResults.filter((caseResult) => caseResult.passed).length;
-  const passedCheckCount = checks.filter((check) => check.passed).length;
-
-  return {
-    caseCount: caseResults.length,
-    passedCaseCount,
-    failedCaseCount: caseResults.length - passedCaseCount,
-    checkCount: checks.length,
-    passedCheckCount,
-    failedCheckCount: checks.length - passedCheckCount,
-    overallPassRate:
-      caseResults.length === 0
-        ? null
-        : Number((passedCaseCount / caseResults.length).toFixed(4)),
-    checkPassRate:
-      checks.length === 0
-        ? null
-        : Number((passedCheckCount / checks.length).toFixed(4)),
-    categories: Object.fromEntries(categoryEntries),
-  };
-};
-
 export const runTrajectoryEvaluation = async ({
   cases = createDefaultTrajectoryCases(),
   createdAt = new Date().toISOString(),
@@ -718,7 +594,10 @@ export const runTrajectoryEvaluation = async ({
     caseResults.push(await runCaseSafely(caseDefinition));
   }
 
-  const metrics = buildMetricSummary(caseResults);
+  const metrics = buildMetricSummary({
+    caseResults,
+    categoryLabels: CATEGORY_LABELS,
+  });
   const status = metrics.failedCaseCount > 0 ? "fail" : "pass";
 
   return {
@@ -733,9 +612,6 @@ export const runTrajectoryEvaluation = async ({
   };
 };
 
-const formatPercent = (value) =>
-  typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "N/A";
-
 export const formatTrajectoryReportMarkdown = (report = {}) => {
   const summary = report.summary ?? {};
   const metrics = summary.metrics ?? {};
@@ -748,22 +624,12 @@ export const formatTrajectoryReportMarkdown = (report = {}) => {
     `- Status: \`${summary.status ?? "unknown"}\``,
     `- Cases: \`${metrics.passedCaseCount ?? 0}/${metrics.caseCount ?? 0}\` passed`,
     `- Checks: \`${metrics.passedCheckCount ?? 0}/${metrics.checkCount ?? 0}\` passed`,
-    "",
-    "## Category Metrics",
-    "",
-    "| Category | Passed | Failed | Pass rate |",
-    "| --- | ---: | ---: | ---: |",
   ];
 
-  for (const [category, categoryMetrics] of Object.entries(categories)) {
-    lines.push(
-      `| ${categoryMetrics.label ?? category} | ${
-        categoryMetrics.passedCheckCount ?? 0
-      } | ${categoryMetrics.failedCheckCount ?? 0} | ${formatPercent(
-        categoryMetrics.passRate
-      )} |`
-    );
-  }
+  appendCategoryMetricsTable({
+    categories,
+    lines,
+  });
 
   lines.push("", "## Cases", "");
 
@@ -775,19 +641,14 @@ export const formatTrajectoryReportMarkdown = (report = {}) => {
       "",
       `- ID: \`${caseResult.id}\``,
       `- Agent mode: \`${caseResult.response?.agentMode ?? "unknown"}\``,
-      `- Trace: \`${(caseResult.response?.traceTypes ?? []).join(" -> ")}\``,
-      "",
-      "| Check | Category | Status |",
-      "| --- | --- | --- |"
+      `- Trace: \`${(caseResult.response?.traceTypes ?? []).join(" -> ")}\``
     );
 
-    for (const check of caseResult.checks ?? []) {
-      lines.push(
-        `| ${check.label} | ${CATEGORY_LABELS[check.category] ?? check.category} | ${
-          check.passed ? "pass" : "fail"
-        } |`
-      );
-    }
+    appendCaseCheckTable({
+      categoryLabels: CATEGORY_LABELS,
+      checks: caseResult.checks,
+      lines,
+    });
 
     lines.push("");
   }
