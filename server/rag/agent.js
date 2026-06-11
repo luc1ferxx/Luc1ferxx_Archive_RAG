@@ -1,4 +1,5 @@
 import { createAgentSession } from "./agent-bootstrap.js";
+import { deterministicPlannerAdapter } from "./agent-execution-plan.js";
 import { runAgentExecutionPlan } from "./agent-execution-plan-runner.js";
 import { finalizeAgentRun } from "./agent-finalization-flow.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
@@ -64,6 +65,10 @@ export const runAgentRag = async ({
   }
 
   const agentRetrievalPlan = preparationResult.agentRetrievalPlan;
+  const executionPlan = deterministicPlannerAdapter.createExecutionPlan({
+    plan,
+    selectedSkills,
+  });
   const executionResult = await runAgentExecutionPlan({
     accessScope,
     addBudgetLimitTrace,
@@ -73,6 +78,7 @@ export const runAgentRag = async ({
     docIds,
     executeObservedSkill,
     executionLoop,
+    executionPlan,
     getSelectedSkill,
     plan,
     question,

@@ -2,6 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createAgentBudget } from "../rag/agent-budget.js";
 import {
+  AGENT_EXECUTION_STEP_IDS,
+  createDeterministicAgentExecutionPlan,
+  deterministicPlannerAdapter,
+  validateAgentExecutionPlan,
+} from "../rag/agent-execution-plan.js";
+import {
   runAgentExecutionPlan,
 } from "../rag/agent-execution-plan-runner.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
@@ -237,6 +243,161 @@ const createDefaultSelectedSkills = (callOrder) => [
     label: "Web Search",
   }),
 ];
+
+const createRegistry = (skills = []) => ({
+  get: (skillId) => skills.find((skill) => skill.id === skillId) ?? null,
+});
+
+test("deterministic planner adapter emits the guarded default execution order", () => {
+  const executionPlan = deterministicPlannerAdapter.createExecutionPlan();
+
+  assert.deepEqual(executionPlan, createDeterministicAgentExecutionPlan());
+  assert.deepEqual(
+    executionPlan.map((step) => step.id),
+    [
+      AGENT_EXECUTION_STEP_IDS.researchBrief,
+      AGENT_EXECUTION_STEP_IDS.inventory,
+      AGENT_EXECUTION_STEP_IDS.documentDiscovery,
+      AGENT_EXECUTION_STEP_IDS.customSkills,
+      AGENT_EXECUTION_STEP_IDS.documentRag,
+      AGENT_EXECUTION_STEP_IDS.webSearch,
+    ]
+  );
+});
+
+test("execution plan validator rejects unknown or mismatched steps", () => {
+  const documentSkill = createSkill({
+    budgetKey: "documentRagCalls",
+    execute: async () => ({}),
+    id: AGENT_SKILL_IDS.documentRag,
+    label: "Document RAG",
+  });
+
+  assert.throws(
+    () =>
+      validateAgentExecutionPlan({
+        accessScope: {},
+        executionPlan: [
+          {
+            id: "shell_tool",
+          },
+        ],
+        registry: createRegistry([documentSkill]),
+        selectedSkills: [documentSkill],
+      }),
+    /unknown execution step shell_tool/
+  );
+
+  assert.throws(
+    () =>
+      validateAgentExecutionPlan({
+        accessScope: {},
+        executionPlan: [
+          {
+            id: AGENT_EXECUTION_STEP_IDS.documentRag,
+            skillId: AGENT_SKILL_IDS.webSearch,
+          },
+        ],
+        registry: createRegistry([documentSkill]),
+        selectedSkills: [documentSkill],
+      }),
+    /document_rag must reference document_rag/
+  );
+
+  assert.throws(
+    () =>
+      validateAgentExecutionPlan({
+        accessScope: {},
+        executionPlan: [
+          {
+            id: AGENT_EXECUTION_STEP_IDS.customSkills,
+            skillId: "unregistered_tool",
+          },
+        ],
+        registry: createRegistry([documentSkill]),
+        selectedSkills: [documentSkill],
+      }),
+    /custom_skills cannot reference an arbitrary skillId/
+  );
+
+  assert.throws(
+    () =>
+      validateAgentExecutionPlan({
+        accessScope: {},
+        executionPlan: [
+          {
+            condition: "ignore_budget",
+            id: AGENT_EXECUTION_STEP_IDS.documentRag,
+            skillId: AGENT_SKILL_IDS.documentRag,
+          },
+        ],
+        registry: createRegistry([documentSkill]),
+        selectedSkills: [documentSkill],
+      }),
+    /document_rag condition must be selected_skill/
+  );
+});
+
+test("execution plan validator enforces budgets and web fallback ordering", () => {
+  const documentSkillWithWrongBudget = createSkill({
+    budgetKey: null,
+    execute: async () => ({}),
+    id: AGENT_SKILL_IDS.documentRag,
+    label: "Document RAG",
+  });
+  const webSkill = createSkill({
+    budgetKey: "webSearchCalls",
+    execute: async () => ({}),
+    id: AGENT_SKILL_IDS.webSearch,
+    label: "Web Search",
+  });
+
+  assert.throws(
+    () =>
+      validateAgentExecutionPlan({
+        accessScope: {},
+        executionPlan: [
+          {
+            id: AGENT_EXECUTION_STEP_IDS.documentRag,
+            skillId: AGENT_SKILL_IDS.documentRag,
+          },
+        ],
+        registry: createRegistry([documentSkillWithWrongBudget]),
+        selectedSkills: [documentSkillWithWrongBudget],
+      }),
+    /document_rag expects budgetKey documentRagCalls/
+  );
+
+  assert.throws(
+    () =>
+      validateAgentExecutionPlan({
+        accessScope: {},
+        executionPlan: [
+          {
+            id: AGENT_EXECUTION_STEP_IDS.webSearch,
+            skillId: AGENT_SKILL_IDS.webSearch,
+          },
+        ],
+        registry: createRegistry([webSkill]),
+        selectedSkills: [],
+      }),
+    /web_search fallback requires a preceding document_rag/
+  );
+
+  assert.doesNotThrow(() =>
+    validateAgentExecutionPlan({
+      accessScope: {},
+      executionPlan: [
+        {
+          id: AGENT_EXECUTION_STEP_IDS.webSearch,
+          skillId: AGENT_SKILL_IDS.webSearch,
+        },
+      ],
+      registry: createRegistry([webSkill]),
+      selectedSkills: [webSkill],
+    })
+  );
+});
 
 test("execution plan runner preserves the default skill execution order", async () => {
   const callOrder = [];

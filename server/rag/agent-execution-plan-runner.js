@@ -1,5 +1,10 @@
 import { runDocumentRagLoop } from "./agent-document-loop.js";
 import {
+  AGENT_EXECUTION_STEP_IDS,
+  createDeterministicAgentExecutionPlan,
+  validateAgentExecutionPlan,
+} from "./agent-execution-plan.js";
+import {
   runCustomSkills,
   runDocumentDiscoverySkill,
   runInventorySkill,
@@ -7,44 +12,6 @@ import {
   runWebSearchSkill,
 } from "./agent-skill-runners.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
-
-export const AGENT_EXECUTION_STEP_IDS = {
-  researchBrief: "research_brief",
-  inventory: "inventory",
-  documentDiscovery: "document_discovery",
-  customSkills: "custom_skills",
-  documentRag: "document_rag",
-  webSearch: "web_search",
-};
-
-export const createDefaultAgentExecutionPlan = () => [
-  {
-    id: AGENT_EXECUTION_STEP_IDS.researchBrief,
-    skillId: AGENT_SKILL_IDS.researchBrief,
-  },
-  {
-    id: AGENT_EXECUTION_STEP_IDS.inventory,
-    skillId: AGENT_SKILL_IDS.inventory,
-  },
-  {
-    id: AGENT_EXECUTION_STEP_IDS.documentDiscovery,
-    skillId: AGENT_SKILL_IDS.documentDiscovery,
-  },
-  {
-    id: AGENT_EXECUTION_STEP_IDS.customSkills,
-  },
-  {
-    id: AGENT_EXECUTION_STEP_IDS.documentRag,
-    skillId: AGENT_SKILL_IDS.documentRag,
-  },
-  {
-    id: AGENT_EXECUTION_STEP_IDS.webSearch,
-    skillId: AGENT_SKILL_IDS.webSearch,
-  },
-];
-
-const getExecutionStepId = (step) =>
-  typeof step === "string" ? step : step?.id ?? null;
 
 const getCustomSkills = (selectedSkills = []) =>
   selectedSkills.filter((skill) => skill.kind === "custom");
@@ -58,7 +25,7 @@ export const runAgentExecutionPlan = async ({
   docIds,
   executeObservedSkill,
   executionLoop,
-  executionPlan = createDefaultAgentExecutionPlan(),
+  executionPlan = createDeterministicAgentExecutionPlan(),
   getSelectedSkill,
   plan,
   question,
@@ -77,6 +44,12 @@ export const runAgentExecutionPlan = async ({
   userId,
   webChatService,
 } = {}) => {
+  const validatedExecutionPlan = validateAgentExecutionPlan({
+    accessScope,
+    executionPlan,
+    registry,
+    selectedSkills,
+  });
   const state = {
     customSkillResults: [],
     customSkills: getCustomSkills(selectedSkills),
@@ -233,12 +206,11 @@ export const runAgentExecutionPlan = async ({
     },
   };
 
-  for (const step of executionPlan) {
-    const stepId = getExecutionStepId(step);
-    const runStep = stepHandlers[stepId];
+  for (const step of validatedExecutionPlan) {
+    const runStep = stepHandlers[step.id];
 
     if (!runStep) {
-      throw new Error(`Unknown AgentRAG execution step: ${stepId ?? "unknown"}.`);
+      throw new Error(`Unknown AgentRAG execution step: ${step.id}.`);
     }
 
     await runStep(step);
