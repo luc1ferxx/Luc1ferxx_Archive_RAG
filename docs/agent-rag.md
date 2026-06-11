@@ -100,7 +100,7 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 
 - `agentSkills`：本轮候选和实际选中的 skills。
 - `agentTrace`：plan、query planner、skill chain、document RAG、self-check、gap analysis、follow-up、finalizer 等步骤。
-- `agentObservability`：per-skill attempts、duration、citations、abstain、retry/follow-up、budget、error 和 working memory。
+- `agentObservability`：execution planner selected/fallback 状态、per-skill attempts、duration、citations、abstain、retry/follow-up、budget、error 和 working memory。
 - `agentWorkingMemory`：本次 run 内的检索 query、supported/unsupported claims、resolved/unresolved gaps。
 
 前端 trace UI 位于 `src/components/RenderQA.js`，会展示选中的 skills、skill chains、retrieval queries、evidence gaps、unsupported claims 和 finalizer 删除内容。
@@ -132,4 +132,3 @@ Working memory 是一次 agent run 内的短期状态，不写入长期记忆。
 - Execution loop counters
 
 Feedback record 和 feedback corpus metadata 会保留这些信息，方便把负反馈定位到具体 skill 和执行阶段。
-

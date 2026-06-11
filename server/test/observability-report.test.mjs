@@ -186,6 +186,94 @@ test("observability report aggregates query planner and rag trace metrics", () =
   assert.match(formatted, /avg retrieval queries: 2\.5/);
 });
 
+test("observability report aggregates execution planner metrics", () => {
+  const report = buildObservabilityReport({
+    events: [
+      {
+        traceType: "agent",
+        agentMode: "document",
+        agentObservability: {
+          executionPlanner: {
+            fallback: false,
+            fallbackReason: null,
+            requestedPlannerId: "deterministic",
+            selectedPlannerId: "deterministic",
+            status: "selected",
+            stepIds: ["document_rag"],
+          },
+        },
+      },
+      {
+        traceType: "agent",
+        agentMode: "inventory",
+        agentObservability: {
+          executionPlanner: {
+            fallback: false,
+            fallbackReason: null,
+            requestedPlannerId: "llm",
+            selectedPlannerId: "llm",
+            status: "selected",
+            stepIds: ["inventory"],
+          },
+        },
+      },
+      {
+        traceType: "agent",
+        agentMode: "inventory",
+        agentObservability: {
+          executionPlanner: {
+            fallback: true,
+            fallbackReason: "Invalid AgentRAG execution plan: unknown step.",
+            requestedPlannerId: "llm",
+            selectedPlannerId: "deterministic",
+            status: "fallback",
+            stepIds: ["inventory"],
+          },
+        },
+      },
+    ],
+  });
+
+  assert.equal(report.planner.eventCount, 3);
+  assert.equal(report.planner.llmSelectedCount, 1);
+  assert.equal(report.planner.fallbackCount, 1);
+  assert.equal(report.planner.fallbackRate, 0.3333);
+  assert.deepEqual(report.planner.requestedPlannerCounts, {
+    deterministic: 1,
+    llm: 2,
+  });
+  assert.deepEqual(report.planner.selectedPlannerCounts, {
+    deterministic: 2,
+    llm: 1,
+  });
+  assert.deepEqual(report.planner.statusCounts, {
+    fallback: 1,
+    selected: 2,
+  });
+  assert.deepEqual(report.planner.topFallbackReasons, [
+    {
+      count: 1,
+      value: "Invalid AgentRAG execution plan: unknown step.",
+    },
+  ]);
+  assert.deepEqual(report.planner.agentModeStepSequences, {
+    document: {
+      document_rag: 1,
+    },
+    inventory: {
+      inventory: 2,
+    },
+  });
+
+  const formatted = formatObservabilityReport(report);
+
+  assert.match(formatted, /Execution Planner/);
+  assert.match(formatted, /llm selected: 1/);
+  assert.match(formatted, /fallback rate: 33\.3%/);
+  assert.match(formatted, /Invalid AgentRAG execution plan: unknown step\.: 1/);
+  assert.match(formatted, /inventory:\n      inventory: 2/);
+});
+
 test("observability report reads jsonl from a file or directory", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "observability-report-"));
   const eventsPath = path.join(tempRoot, "events.jsonl");

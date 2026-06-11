@@ -101,6 +101,24 @@ npm run eval:planner -- --provider real
 
 真实模式需要 `OPENAI_API_KEY`，并会把结果写入 `server/evaluation/results/latest-planner.json` 和 `.md`。
 
+## Observability report
+
+```bash
+cd server
+npm run observability:report
+npm run observability:report -- --json
+```
+
+报告会汇总 RAG / AgentRAG JSONL trace，包括：
+
+- skill attempts、latency、citations、retry/failure/abstain rate
+- execution planner requested/selected provider 分布
+- LLM planner selected count、fallback count 和 fallback rate
+- planner fallback reason top list
+- 各 `agentMode` 下的 planner `stepIds` 分布
+- query planner intent、retrieval query 数量和 topK profile
+- RAG route mode、latency、citation 和 abstain 指标
+
 ## Feedback regression
 
 ```bash

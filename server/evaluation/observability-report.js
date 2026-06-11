@@ -144,6 +144,11 @@ const finalizeSkillStats = (stats) => {
 const getAgentObservability = (event = {}) =>
   isPlainObject(event.agentObservability) ? event.agentObservability : null;
 
+const getExecutionPlanner = (agentObservability = {}) =>
+  isPlainObject(agentObservability.executionPlanner)
+    ? agentObservability.executionPlanner
+    : null;
+
 const getAgentRetrievalPlan = (event = {}) => {
   if (isPlainObject(event.agentRetrievalPlan)) {
     return event.agentRetrievalPlan;
@@ -169,6 +174,94 @@ const isRagTraceEvent = (event = {}) =>
       event.finalSourceBundle
   );
 
+const createPlannerStats = () => ({
+  eventCount: 0,
+  requestedPlannerCounts: {},
+  selectedPlannerCounts: {},
+  statusCounts: {},
+  fallbackCount: 0,
+  fallbackRate: 0,
+  llmSelectedCount: 0,
+  fallbackReasonCounts: {},
+  topFallbackReasons: [],
+  stepSequences: {},
+  agentModeStepSequences: {},
+});
+
+const getPlannerId = (value, fallbackValue = "unknown") =>
+  String(value ?? fallbackValue).trim() || fallbackValue;
+
+const getPlannerStepSequence = (planner = {}) => {
+  const stepIds = Array.isArray(planner.stepIds) ? planner.stepIds : [];
+
+  return stepIds.length > 0 ? stepIds.join(" -> ") : "none";
+};
+
+const incrementNested = (counts, outerKey, innerKey, amount = 1) => {
+  const normalizedOuterKey = String(outerKey ?? "unknown").trim() || "unknown";
+  const normalizedInnerKey = String(innerKey ?? "unknown").trim() || "unknown";
+
+  counts[normalizedOuterKey] ??= {};
+  increment(counts[normalizedOuterKey], normalizedInnerKey, amount);
+};
+
+const formatTopCounts = (counts = {}, limit = 5) =>
+  Object.entries(counts)
+    .sort(
+      ([leftKey, leftCount], [rightKey, rightCount]) =>
+        rightCount - leftCount || leftKey.localeCompare(rightKey)
+    )
+    .slice(0, limit)
+    .map(([key, count]) => ({
+      count,
+      value: key,
+    }));
+
+const addPlannerSummary = ({ agentMode, plannerStats, executionPlanner }) => {
+  const requestedPlannerId = getPlannerId(
+    executionPlanner.requestedPlannerId,
+    "not_run"
+  );
+  const selectedPlannerId = getPlannerId(
+    executionPlanner.selectedPlannerId,
+    "not_run"
+  );
+  const status = getPlannerId(executionPlanner.status, "unknown");
+  const stepSequence = getPlannerStepSequence(executionPlanner);
+
+  plannerStats.eventCount += 1;
+  increment(plannerStats.requestedPlannerCounts, requestedPlannerId);
+  increment(plannerStats.selectedPlannerCounts, selectedPlannerId);
+  increment(plannerStats.statusCounts, status);
+  increment(plannerStats.stepSequences, stepSequence);
+  incrementNested(
+    plannerStats.agentModeStepSequences,
+    agentMode ?? "unknown",
+    stepSequence
+  );
+
+  if (selectedPlannerId === "llm") {
+    plannerStats.llmSelectedCount += 1;
+  }
+
+  if (executionPlanner.fallback) {
+    plannerStats.fallbackCount += 1;
+    increment(
+      plannerStats.fallbackReasonCounts,
+      executionPlanner.fallbackReason || "unknown"
+    );
+  }
+};
+
+const finalizePlannerStats = (plannerStats) => ({
+  ...plannerStats,
+  fallbackRate:
+    plannerStats.eventCount > 0
+      ? round(plannerStats.fallbackCount / plannerStats.eventCount, 4)
+      : 0,
+  topFallbackReasons: formatTopCounts(plannerStats.fallbackReasonCounts),
+});
+
 export const buildObservabilityReport = ({ events = [] } = {}) => {
   const skillStatsByKey = new Map();
   const queryPlanner = {
@@ -189,11 +282,22 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
     abstainCount: 0,
     abstainRate: 0,
   };
+  const plannerStats = createPlannerStats();
 
   for (const event of events) {
     const agentObservability = getAgentObservability(event);
 
     if (agentObservability) {
+      const executionPlanner = getExecutionPlanner(agentObservability);
+
+      if (executionPlanner) {
+        addPlannerSummary({
+          agentMode: event.agentMode ?? agentObservability.agentMode,
+          executionPlanner,
+          plannerStats,
+        });
+      }
+
       if (
         Array.isArray(agentObservability.skills) &&
         agentObservability.skills.length > 0
@@ -255,6 +359,7 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
           left.skillKey.localeCompare(right.skillKey)
       ),
     queryPlanner,
+    planner: finalizePlannerStats(plannerStats),
     rag: {
       ...rag,
       totalLatencyMs: round(rag.totalLatencyMs, 2),
@@ -266,6 +371,29 @@ const formatCountMap = (counts = {}, { indent = "  " } = {}) =>
   Object.entries(counts)
     .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
     .map(([key, value]) => `${indent}${key}: ${value}`);
+
+const formatNestedCountMap = (counts = {}, { indent = "  " } = {}) => {
+  const lines = [];
+
+  for (const [outerKey, innerCounts] of Object.entries(counts).sort(
+    ([leftKey], [rightKey]) => leftKey.localeCompare(rightKey)
+  )) {
+    lines.push(`${indent}${outerKey}:`);
+
+    const formattedInnerCounts = formatCountMap(innerCounts, {
+      indent: `${indent}  `,
+    });
+
+    lines.push(...(formattedInnerCounts.length > 0
+      ? formattedInnerCounts
+      : [`${indent}  none: 0`]));
+  }
+
+  return lines;
+};
+
+const formatTopCountList = (items = [], { indent = "  " } = {}) =>
+  items.map((item) => `${indent}${item.value}: ${item.count}`);
 
 const formatSkill = (skill) =>
   [
@@ -297,6 +425,65 @@ export const formatObservabilityReport = (report) => {
       lines.push(...formatSkill(skill), "");
     }
   }
+
+  lines.push(
+    "Execution Planner",
+    `  events: ${report.planner.eventCount}`,
+    `  llm selected: ${report.planner.llmSelectedCount}`,
+    `  fallback count: ${report.planner.fallbackCount}`,
+    `  fallback rate: ${toPercent(report.planner.fallbackRate)}`,
+    "  requested planners:"
+  );
+  lines.push(
+    ...(formatCountMap(report.planner.requestedPlannerCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.planner.requestedPlannerCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  selected planners:"
+  );
+  lines.push(
+    ...(formatCountMap(report.planner.selectedPlannerCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.planner.selectedPlannerCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  statuses:"
+  );
+  lines.push(
+    ...(formatCountMap(report.planner.statusCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.planner.statusCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  fallback reasons:"
+  );
+  lines.push(
+    ...(formatTopCountList(report.planner.topFallbackReasons, {
+      indent: "    ",
+    }).length
+      ? formatTopCountList(report.planner.topFallbackReasons, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  agent mode step sequences:"
+  );
+  lines.push(
+    ...(formatNestedCountMap(report.planner.agentModeStepSequences, {
+      indent: "    ",
+    }).length
+      ? formatNestedCountMap(report.planner.agentModeStepSequences, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    ""
+  );
 
   lines.push(
     "Query Planner",
