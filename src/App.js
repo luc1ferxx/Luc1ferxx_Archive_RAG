@@ -1,161 +1,94 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { Layout, Typography, message } from "antd";
 import ChatComponent from "./components/ChatComponent";
 import RenderQA from "./components/RenderQA";
 import PdfPreview from "./components/PdfPreview";
 import WorkspaceSidebar from "./components/WorkspaceSidebar";
 import {
-  fetchDocuments,
   fetchLatestQualityReport,
   fetchQualityHistory,
   requestAnswerFeedback,
-  requestDocumentClear,
-  requestDocumentDelete,
-  requestSessionClear,
   requestSyntheticQualityRun,
 } from "./archiveApi";
-import {
-  createSessionId,
-  persistSessionId,
-  persistUserId,
-  readStoredSessionId,
-  readStoredUserId,
-} from "./archiveSession";
-import {
-  buildRelevantDocuments,
-  formatDocumentCount,
-  getTotalPages,
-} from "./archiveWorkspace";
+import { useChatSession } from "./hooks/useChatSession";
+import { useDocumentSelection } from "./hooks/useDocumentSelection";
+import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
 import "./App.css";
 
 const App = () => {
-  const [conversation, setConversation] = useState([]);
-  const [activeTurnIndex, setActiveTurnIndex] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
   const [isQualityLoading, setIsQualityLoading] = useState(false);
   const [qualityHistory, setQualityHistory] = useState(null);
   const [qualityReport, setQualityReport] = useState(null);
-  const [activeDocuments, setActiveDocuments] = useState([]);
-  const [selectedSource, setSelectedSource] = useState(null);
-  const [sessionId, setSessionId] = useState(() => readStoredSessionId());
-  const [userId] = useState(() => readStoredUserId());
   const { Content } = Layout;
   const { Text } = Typography;
+  const {
+    activeTurnIndex,
+    addConversationTurn,
+    conversation,
+    currentTurn,
+    isLoading,
+    resetConversation,
+    rotateSession,
+    sessionId,
+    setActiveTurnIndex,
+    setIsLoading,
+    userId,
+  } = useChatSession();
+  const {
+    activeDocuments,
+    clearDocuments: clearWorkspaceDocuments,
+    docIds,
+    docLabel,
+    handleUploadSuccess,
+    removeDocument: removeWorkspaceDocument,
+    totalPages,
+  } = useWorkspaceDocuments();
+  const {
+    previewStatus,
+    relevantDocuments,
+    resetSelection,
+    selectedDocId,
+    selectedSource,
+    selectTurn,
+    setSelectedSource,
+  } = useDocumentSelection({
+    activeDocuments,
+    conversation,
+    currentTurn,
+    setActiveTurnIndex,
+  });
 
-  useEffect(() => {
-    persistSessionId(sessionId);
-  }, [sessionId]);
+  const resetWorkspaceSession = useCallback(async () => {
+    resetConversation();
+    resetSelection();
+    await rotateSession();
+  }, [resetConversation, resetSelection, rotateSession]);
 
-  useEffect(() => {
-    persistUserId(userId);
-  }, [userId]);
+  const handleResp = useCallback(
+    (question, answer) => {
+      addConversationTurn(question, answer);
+      setSelectedSource(answer?.ragSources?.[0] ?? null);
+    },
+    [addConversationTurn, setSelectedSource]
+  );
 
-  useEffect(() => {
-    let cancelled = false;
+  const removeDocument = useCallback(
+    (docId) =>
+      removeWorkspaceDocument(docId, {
+        afterSuccess: resetWorkspaceSession,
+      }),
+    [removeWorkspaceDocument, resetWorkspaceSession]
+  );
 
-    const loadDocuments = async () => {
-      try {
-        const documents = await fetchDocuments();
+  const clearDocuments = useCallback(
+    () =>
+      clearWorkspaceDocuments({
+        afterSuccess: resetWorkspaceSession,
+      }),
+    [clearWorkspaceDocuments, resetWorkspaceSession]
+  );
 
-        if (!cancelled) {
-          setActiveDocuments(documents);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          const backendMessage =
-            error.response?.data?.error ?? "Unable to load persisted documents.";
-          message.error(backendMessage);
-        }
-      }
-    };
-
-    void loadDocuments();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (conversation.length === 0) {
-      setActiveTurnIndex(null);
-      return;
-    }
-
-    if (activeTurnIndex === null || activeTurnIndex >= conversation.length) {
-      setActiveTurnIndex(conversation.length - 1);
-    }
-  }, [activeTurnIndex, conversation]);
-
-  const resetConversationState = () => {
-    setConversation([]);
-    setSelectedSource(null);
-    setActiveTurnIndex(null);
-  };
-
-  const rotateSession = async () => {
-    const previousSessionId = sessionId;
-    const nextSessionId = createSessionId();
-
-    try {
-      await requestSessionClear(previousSessionId);
-    } catch (error) {
-      console.error("Failed to clear persisted session memory:", error);
-    }
-
-    setSessionId(nextSessionId);
-    persistSessionId(nextSessionId);
-  };
-
-  const handleResp = (question, answer) => {
-    const nextTurnIndex = conversation.length;
-
-    setConversation((prev) => [...prev, { question, answer }]);
-    setActiveTurnIndex(nextTurnIndex);
-    setSelectedSource(answer?.ragSources?.[0] ?? null);
-  };
-
-  const handleUploadSuccess = (document) => {
-    setActiveDocuments((prev) => {
-      if (prev.some((existingDocument) => existingDocument.docId === document.docId)) {
-        return prev;
-      }
-
-      return [...prev, document];
-    });
-  };
-
-  const removeDocument = async (docId) => {
-    try {
-      await requestDocumentDelete(docId);
-      setActiveDocuments((prev) =>
-        prev.filter((document) => document.docId !== docId)
-      );
-      resetConversationState();
-      await rotateSession();
-      message.success("Document removed.");
-    } catch (error) {
-      const backendMessage =
-        error.response?.data?.error ?? "Unable to remove the document.";
-      message.error(backendMessage);
-    }
-  };
-
-  const clearDocuments = async () => {
-    try {
-      await requestDocumentClear();
-      setActiveDocuments([]);
-      resetConversationState();
-      await rotateSession();
-      message.success("All documents cleared.");
-    } catch (error) {
-      const backendMessage =
-        error.response?.data?.error ?? "Unable to clear documents.";
-      message.error(backendMessage);
-    }
-  };
-
-  const loadLatestQualityReport = async () => {
+  const loadLatestQualityReport = useCallback(async () => {
     setIsQualityLoading(true);
 
     try {
@@ -168,9 +101,9 @@ const App = () => {
     } finally {
       setIsQualityLoading(false);
     }
-  };
+  }, []);
 
-  const loadQualityHistory = async () => {
+  const loadQualityHistory = useCallback(async () => {
     setIsQualityLoading(true);
 
     try {
@@ -182,9 +115,9 @@ const App = () => {
     } finally {
       setIsQualityLoading(false);
     }
-  };
+  }, []);
 
-  const runSyntheticQualityReport = async () => {
+  const runSyntheticQualityReport = useCallback(async () => {
     setIsQualityLoading(true);
 
     try {
@@ -198,62 +131,25 @@ const App = () => {
     } finally {
       setIsQualityLoading(false);
     }
-  };
+  }, []);
 
-  const handleSelectTurn = (turnIndex) => {
-    setActiveTurnIndex(turnIndex);
-
-    const selectedTurn = conversation[turnIndex];
-
-    if (!selectedTurn) {
-      return;
-    }
-
-    const turnSources = selectedTurn.answer?.ragSources ?? [];
-    const selectionBelongsToTurn = turnSources.some(
-      (source) =>
-        source.docId === selectedSource?.docId &&
-        source.chunkIndex === selectedSource?.chunkIndex
-    );
-
-    if (!selectionBelongsToTurn) {
-      setSelectedSource(turnSources[0] ?? null);
-    }
-  };
-
-  const docIds = activeDocuments.map((document) => document.docId);
-  const submitAnswerFeedback = async (feedback) => {
-    try {
-      await requestAnswerFeedback({
-        ...feedback,
-        docIds: feedback.docIds ?? docIds,
-        sessionId,
-        userId,
-      });
-    } catch (error) {
-      const backendMessage =
-        error.response?.data?.error ?? "Unable to save feedback.";
-      message.error(backendMessage);
-    }
-  };
-  const docLabel =
-    activeDocuments.length === 1
-      ? activeDocuments[0].fileName
-      : formatDocumentCount(activeDocuments.length);
-  const totalPages = getTotalPages(activeDocuments);
-  const currentTurn =
-    activeTurnIndex !== null && conversation[activeTurnIndex]
-      ? conversation[activeTurnIndex]
-      : conversation[conversation.length - 1] ?? null;
-  const currentSources = currentTurn?.answer?.ragSources ?? [];
-  const selectedDocId = selectedSource?.docId ?? null;
-  const relevantDocuments = buildRelevantDocuments({
-    activeDocuments,
-    currentSources,
-  });
-  const previewStatus = selectedSource
-    ? `${selectedSource.fileName} · page ${selectedSource.pageNumber ?? 1}`
-    : "Choose a citation or relevant document";
+  const submitAnswerFeedback = useCallback(
+    async (feedback) => {
+      try {
+        await requestAnswerFeedback({
+          ...feedback,
+          docIds: feedback.docIds ?? docIds,
+          sessionId,
+          userId,
+        });
+      } catch (error) {
+        const backendMessage =
+          error.response?.data?.error ?? "Unable to save feedback.";
+        message.error(backendMessage);
+      }
+    },
+    [docIds, sessionId, userId]
+  );
 
   return (
     <div className="archive-shell">
@@ -313,7 +209,7 @@ const App = () => {
                 isLoading={isLoading}
                 selectedSource={selectedSource}
                 onSelectSource={setSelectedSource}
-                onSelectTurn={handleSelectTurn}
+                onSelectTurn={selectTurn}
                 onFeedback={(feedback) => void submitAnswerFeedback(feedback)}
               />
             </div>

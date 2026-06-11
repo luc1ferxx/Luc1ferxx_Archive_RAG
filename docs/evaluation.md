@@ -27,7 +27,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner、validator 和 fallback。 |
 | `cd server && npm run feedback:corpus` | 从负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用 feedback corpus 运行回归评测。 |
-| `cd server && npm run quality:gate` | 检查主线、feedback 和 trajectory gate。 |
+| `cd server && npm run quality:gate` | 检查主线、feedback、trajectory 和 planner gate。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
 | `cd server && npm run eval:rerank:sweep` | 批量对比 rerank 参数。 |
 | `cd server && npm run corpus:arxiv` | 生成 arXiv real-paper corpus 草稿。 |
@@ -100,6 +100,12 @@ npm run eval:planner -- --provider real
 ```
 
 真实模式需要 `OPENAI_API_KEY`，并会把结果写入 `server/evaluation/results/latest-planner.json` 和 `.md`。
+
+`quality:gate` 会读取 `latest-planner.json`；如果 planner eval 有失败 case 或 failed check，gate 会失败，并在文本 / JSON 输出里汇总 provider、失败 case 和失败 check 数。
+
+## Quality gate baseline
+
+`quality:gate` 的 synthetic regression baseline 会先排除比 current run 更新的历史结果，然后按优先级选择：同 corpus + 同 profile、同 corpus、同 profile、最后才是最近的 previous synthetic run。这样本地保存的 hard-cs、compare-hard 或其他实验 corpus 不会误作为 `latest.*` 的直接回归基线。
 
 ## Observability report
 

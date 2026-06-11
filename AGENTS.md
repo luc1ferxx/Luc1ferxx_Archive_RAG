@@ -33,7 +33,7 @@
 - Feedback corpus generation: `cd server && npm run feedback:corpus`.
 - Feedback regression eval: `cd server && npm run eval:feedback`; this writes ignored `evaluation/generated/feedback-corpus.json` and `evaluation/results/latest-feedback.*`.
 - Trajectory eval: `cd server && npm run eval:trajectory`; this writes ignored `evaluation/results/latest-trajectory.*` and checks skill selection, follow-up, clarification, access scope, and budget behavior.
-- Quality gate: `cd server && npm run quality:gate`; it reads `evaluation/results/latest-feedback.json` and `evaluation/results/latest-trajectory.json` when present and reports feedback failures by `skillId@skillVersion`.
+- Quality gate: `cd server && npm run quality:gate`; it reads `evaluation/results/latest-feedback.json`, `evaluation/results/latest-trajectory.json`, and `evaluation/results/latest-planner.json` when present and reports feedback failures by `skillId@skillVersion` plus trajectory/planner failed case checks.
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 
@@ -64,6 +64,7 @@ Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mj
 - Agent trace UI lives in `src/components/RenderQA.js`; preserve the display of selected skills, skill chains, retrieval queries, evidence gaps, unsupported claims, and finalizer-removed claims when changing `/chat` response shape or frontend rendering.
 - Trajectory eval lives in `server/evaluation/trajectory-eval.js`; preserve checks for skill selection, follow-up retrieval, clarification gate, accessScope propagation, and budget limits when changing agent orchestration.
 - Observability reporting lives in `server/evaluation/observability-report.js` and `server/evaluation/build-observability-report.mjs`; preserve support for both `traceType: "agent"` events and lower-level RAG trace events.
+- Quality gate assembly is split across `server/evaluation/quality-*.js`; keep `quality-report.js` as the compatibility export surface, result file I/O in `quality-result-reader.js`, run summaries in `quality-run-summary.js`, per-eval gates in their matching `quality-*-gate.js` modules, and final gate composition in `quality-combined-gate.js`.
 - AgentRAG optimization order is documented in README under "AgentRAG 优化路线"; continue in that order unless the user explicitly reprioritizes it.
 - `/chat` returns `agentObservability` with per-skill selected status, attempts, duration, citations, abstain, retry/follow-up, budget, execution loop, working memory, skill chain, clarification gate, and error metrics. Preserve it when changing agent execution, feedback records, or feedback corpus metadata.
 - API auth is controlled by `API_AUTH_ENABLED` plus either `API_AUTH_TOKEN` for single-token local use or `API_AUTH_TOKENS` for per-user/per-workspace token mapping; the frontend can send `REACT_APP_API_AUTH_TOKEN`, which becomes an `x-api-key` header.

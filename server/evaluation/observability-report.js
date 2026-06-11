@@ -1,5 +1,14 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
+import {
+  getAgentMode,
+  getExecutionPlanner,
+  getObservedSkills,
+  getSkillRuns,
+  getTraceSteps,
+  hasAgentObservability,
+  isPlainObject,
+} from "../rag/chat-response-contract.js";
 import { getRagDataDirectory } from "../rag/storage.js";
 
 const round = (value, digits = 4) =>
@@ -28,9 +37,6 @@ const toPercent = (value) => `${round(value * 100, 1)}%`;
 
 export const getDefaultObservabilityPath = () =>
   path.join(path.dirname(getRagDataDirectory()), "rag-observability");
-
-const isPlainObject = (value) =>
-  Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
 const getSkillKey = ({ skillId, skillVersion }) =>
   `${skillId || "unknown"}@${skillVersion || "unknown"}`;
@@ -141,22 +147,12 @@ const finalizeSkillStats = (stats) => {
   };
 };
 
-const getAgentObservability = (event = {}) =>
-  isPlainObject(event.agentObservability) ? event.agentObservability : null;
-
-const getExecutionPlanner = (agentObservability = {}) =>
-  isPlainObject(agentObservability.executionPlanner)
-    ? agentObservability.executionPlanner
-    : null;
-
 const getAgentRetrievalPlan = (event = {}) => {
   if (isPlainObject(event.agentRetrievalPlan)) {
     return event.agentRetrievalPlan;
   }
 
-  const queryPlannerStep = Array.isArray(event.agentTrace)
-    ? event.agentTrace.find((step) => step?.type === "query_planner")
-    : null;
+  const queryPlannerStep = getTraceSteps(event, "query_planner")[0] ?? null;
 
   return isPlainObject(queryPlannerStep?.detail) ? queryPlannerStep.detail : null;
 };
@@ -285,28 +281,25 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
   const plannerStats = createPlannerStats();
 
   for (const event of events) {
-    const agentObservability = getAgentObservability(event);
-
-    if (agentObservability) {
-      const executionPlanner = getExecutionPlanner(agentObservability);
+    if (hasAgentObservability(event)) {
+      const executionPlanner = getExecutionPlanner(event);
+      const observedSkills = getObservedSkills(event);
+      const skillRuns = getSkillRuns(event);
 
       if (executionPlanner) {
         addPlannerSummary({
-          agentMode: event.agentMode ?? agentObservability.agentMode,
+          agentMode: getAgentMode(event),
           executionPlanner,
           plannerStats,
         });
       }
 
-      if (
-        Array.isArray(agentObservability.skills) &&
-        agentObservability.skills.length > 0
-      ) {
-        for (const skill of agentObservability.skills) {
+      if (observedSkills.length > 0) {
+        for (const skill of observedSkills) {
           addSkillSummary(skillStatsByKey, skill);
         }
-      } else if (Array.isArray(agentObservability.runs)) {
-        for (const run of agentObservability.runs) {
+      } else {
+        for (const run of skillRuns) {
           addSkillRun(skillStatsByKey, run);
         }
       }

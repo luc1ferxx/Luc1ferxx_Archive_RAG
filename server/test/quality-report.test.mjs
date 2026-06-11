@@ -6,19 +6,29 @@ import {
   formatFeedbackSkillFailureLine,
 } from "../evaluation/quality-report.js";
 
-const buildPassingSyntheticPayload = ({ runId, createdAt }) => ({
+const buildPassingSyntheticPayload = ({
+  config = null,
+  corpusPath = "evaluation/synthetic-corpus-near-duplicate.json",
+  createdAt,
+  metrics = {},
+  models = null,
+  runId,
+} = {}) => ({
   summary: {
     runId,
     createdAt,
     corpus: {
-      path: "evaluation/synthetic-corpus-near-duplicate.json",
+      path: corpusPath,
       cases: 1,
     },
+    ...(config ? { config } : {}),
+    ...(models ? { models } : {}),
     metrics: {
       overallPassRate: 1,
       qaPageHitRate: 1,
       comparePageHitRate: 1,
       averageCitationCount: 2,
+      ...metrics,
     },
   },
   cases: [
@@ -30,6 +40,138 @@ const buildPassingSyntheticPayload = ({ runId, createdAt }) => ({
       docCoverageHit: true,
       pageCoverageHit: true,
       answerExpectationHit: true,
+    },
+  ],
+});
+
+const buildPassingPlannerPayload = ({ runId = "planner-latest" } = {}) => ({
+  summary: {
+    runId,
+    createdAt: "2026-06-08T10:15:00.000Z",
+    provider: "mock",
+    status: "pass",
+    version: "1.0.0",
+    metrics: {
+      caseCount: 2,
+      passedCaseCount: 2,
+      failedCaseCount: 0,
+      checkCount: 4,
+      passedCheckCount: 4,
+      failedCheckCount: 0,
+      overallPassRate: 1,
+      checkPassRate: 1,
+    },
+  },
+  cases: [
+    {
+      id: "planner_inventory",
+      label: "Inventory planner selection",
+      passed: true,
+      failedCheckCount: 0,
+      checks: [
+        {
+          id: "llm_planner_selected",
+          label: "LLM planner selected the inventory step",
+          category: "planner",
+          passed: true,
+        },
+        {
+          id: "inventory_mode",
+          label: "Agent answered in inventory mode",
+          category: "execution",
+          passed: true,
+        },
+      ],
+      response: {
+        planner: {
+          requestedPlannerId: "llm",
+          selectedPlannerId: "llm",
+          status: "selected",
+        },
+      },
+    },
+    {
+      id: "planner_fallback_invalid_step",
+      label: "Unsafe planner falls back",
+      passed: true,
+      failedCheckCount: 0,
+      checks: [
+        {
+          id: "llm_planner_fallback",
+          label: "Invalid LLM planner output fell back",
+          category: "fallback",
+          passed: true,
+        },
+        {
+          id: "fallback_observability",
+          label: "Observability records fallback reason",
+          category: "observability",
+          passed: true,
+        },
+      ],
+      response: {
+        planner: {
+          fallback: true,
+          requestedPlannerId: "llm",
+          selectedPlannerId: "deterministic",
+          status: "fallback",
+        },
+      },
+    },
+  ],
+});
+
+const buildFailingPlannerPayload = () => ({
+  ...buildPassingPlannerPayload({
+    runId: "planner-failing",
+  }),
+  summary: {
+    ...buildPassingPlannerPayload().summary,
+    runId: "planner-failing",
+    status: "fail",
+    metrics: {
+      ...buildPassingPlannerPayload().summary.metrics,
+      passedCaseCount: 1,
+      failedCaseCount: 1,
+      passedCheckCount: 3,
+      failedCheckCount: 1,
+      overallPassRate: 0.5,
+      checkPassRate: 0.75,
+    },
+  },
+  cases: [
+    buildPassingPlannerPayload().cases[0],
+    {
+      id: "planner_custom_chain",
+      label: "Custom chain planner selection",
+      passed: false,
+      failedCheckCount: 1,
+      checks: [
+        {
+          id: "llm_planner_selected",
+          label: "LLM planner selected custom_skills",
+          category: "planner",
+          passed: false,
+          detail: {
+            requestedPlannerId: "llm",
+            selectedPlannerId: "deterministic",
+            status: "fallback",
+          },
+        },
+        {
+          id: "custom_chain_observability",
+          label: "Skill chain observability recorded",
+          category: "observability",
+          passed: true,
+        },
+      ],
+      response: {
+        planner: {
+          requestedPlannerId: "llm",
+          selectedPlannerId: "deterministic",
+          status: "fallback",
+        },
+      },
     },
   ],
 });
@@ -385,6 +527,252 @@ test("quality history folds trajectory eval failures into gate decision", () => 
   );
 });
 
+test("quality history selects a same-corpus same-profile baseline first", () => {
+  const stableConfig = {
+    chunkStrategy: "structured",
+    chunkSize: 900,
+    chunkOverlap: 180,
+    retrievalTopK: 6,
+  };
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "near-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    config: stableConfig,
+    metrics: {
+      averageCitationCount: 2,
+    },
+  });
+  const sameCorpusSameProfilePayload = buildPassingSyntheticPayload({
+    runId: "near-same-profile",
+    createdAt: "2026-06-08T09:00:00.000Z",
+    config: stableConfig,
+    metrics: {
+      averageCitationCount: 2.1,
+    },
+  });
+  const sameCorpusDifferentProfilePayload = buildPassingSyntheticPayload({
+    runId: "near-different-profile",
+    createdAt: "2026-06-08T09:30:00.000Z",
+    config: {
+      ...stableConfig,
+      retrievalTopK: 10,
+    },
+    metrics: {
+      averageCitationCount: 3,
+    },
+  });
+  const differentCorpusSameProfilePayload = buildPassingSyntheticPayload({
+    runId: "compare-same-profile",
+    createdAt: "2026-06-08T09:45:00.000Z",
+    config: stableConfig,
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+    metrics: {
+      averageCitationCount: 3,
+    },
+  });
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    runPayloads: [
+      {
+        fileName: "near-same-profile.json",
+        payload: sameCorpusSameProfilePayload,
+      },
+      {
+        fileName: "near-different-profile.json",
+        payload: sameCorpusDifferentProfilePayload,
+      },
+      {
+        fileName: "compare-same-profile.json",
+        payload: differentCorpusSameProfilePayload,
+      },
+    ],
+  });
+
+  assert.equal(history.regressionGate.baselineRunId, "near-same-profile");
+  assert.equal(
+    history.regressionGate.baselineSelection.strategy,
+    "same_corpus_same_profile"
+  );
+  assert.equal(history.regressionGate.status, "pass");
+});
+
+test("quality history ignores future synthetic runs when choosing a baseline", () => {
+  const stableConfig = {
+    chunkStrategy: "structured",
+    chunkSize: 900,
+    chunkOverlap: 180,
+    retrievalTopK: 6,
+    compareTopKPerDoc: 3,
+  };
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "latest-near-duplicate",
+    createdAt: "2026-04-21T20:43:26.600Z",
+    config: stableConfig,
+    corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
+    metrics: {
+      averageCitationCount: 1.63,
+    },
+  });
+  const futureHardCorpusPayload = buildPassingSyntheticPayload({
+    runId: "future-hard-cs",
+    createdAt: "2026-06-09T17:27:50.812Z",
+    config: stableConfig,
+    corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+    metrics: {
+      averageCitationCount: 2.25,
+    },
+  });
+  const previousCompareHardPayload = buildPassingSyntheticPayload({
+    runId: "previous-compare-hard",
+    createdAt: "2026-04-21T20:13:44.597Z",
+    config: stableConfig,
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+    metrics: {
+      averageCitationCount: 1.88,
+    },
+  });
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    runPayloads: [
+      {
+        fileName: "future-hard-cs.json",
+        payload: futureHardCorpusPayload,
+      },
+      {
+        fileName: "previous-compare-hard.json",
+        payload: previousCompareHardPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.regressionGate.baselineRunId, "previous-compare-hard");
+  assert.equal(history.regressionGate.baselineSelection.strategy, "same_profile");
+  assert.equal(history.regressionGate.baselineSelection.previousCandidateCount, 1);
+  assert.equal(history.regressionGate.status, "pass");
+});
+
+test("quality history folds planner eval failures into gate decision", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestPlannerPayload: buildFailingPlannerPayload(),
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.regressionGate.status, "pass");
+  assert.equal(history.plannerGate.status, "fail");
+  assert.equal(history.plannerGate.provider, "mock");
+  assert.equal(history.plannerGate.failedCaseCount, 1);
+  assert.equal(history.plannerGate.failedCheckCount, 1);
+  assert.equal(history.qualityGate.status, "fail");
+  assert.equal(buildQualityGateDecision({ history }).exitCode, 1);
+  assert.ok(
+    history.qualityGate.checks.some(
+      (check) =>
+        check.metric === "plannerFailedCheckCount" &&
+        check.status === "fail" &&
+        check.currentValue === 1
+    )
+  );
+  assert.equal(
+    history.plannerGate.failedCases[0].failedChecks[0].label,
+    "LLM planner selected custom_skills"
+  );
+});
+
+test("quality history includes passing planner eval in the combined gate summary", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestPlannerPayload: buildPassingPlannerPayload(),
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.plannerGate.status, "pass");
+  assert.equal(history.plannerGate.skipped, false);
+  assert.equal(history.plannerGate.failedCaseCount, 0);
+  assert.equal(history.qualityGate.status, "pass");
+  assert.match(
+    history.qualityGate.summary,
+    /Planner evaluation \(mock\) passed all 2 cases and 4 checks\./
+  );
+  assert.ok(
+    history.qualityGate.checks.some(
+      (check) =>
+        check.metric === "plannerFailedCaseCount" &&
+        check.status === "pass" &&
+        check.currentValue === 0
+    )
+  );
+});
+
+test("quality history keeps planner gate summary when regression gate warns", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+
+  previousPayload.summary.metrics.averageCitationCount = 2.6;
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestPlannerPayload: buildPassingPlannerPayload(),
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.regressionGate.status, "warn");
+  assert.equal(history.qualityGate.status, "warn");
+  assert.match(
+    history.qualityGate.summary,
+    /Planner evaluation \(mock\) passed all 2 cases and 4 checks\./
+  );
+  assert.ok(
+    history.qualityGate.checks.some(
+      (check) =>
+        check.metric === "plannerFailedCheckCount" &&
+        check.status === "pass" &&
+        check.currentValue === 0
+    )
+  );
+});
+
 test("quality history skips feedback gate when no feedback eval report exists", () => {
   const latestPayload = buildPassingSyntheticPayload({
     runId: "synthetic-latest",
@@ -398,11 +786,13 @@ test("quality history skips feedback gate when no feedback eval report exists", 
 
   assert.equal(history.feedbackGate.status, "pass");
   assert.equal(history.feedbackGate.skipped, true);
+  assert.equal(history.plannerGate.status, "pass");
+  assert.equal(history.plannerGate.skipped, true);
   assert.equal(history.qualityGate.status, "unknown");
   assert.equal(history.qualityGate.summary, "No previous synthetic run is available for regression comparison.");
 });
 
-test("quality history excludes feedback eval runs from synthetic regression baselines", () => {
+test("quality history excludes non-synthetic eval runs from regression baselines", () => {
   const latestPayload = buildPassingSyntheticPayload({
     runId: "synthetic-latest",
     createdAt: "2026-06-08T10:00:00.000Z",
@@ -438,6 +828,33 @@ test("quality history excludes feedback eval runs from synthetic regression base
       },
     ],
   };
+  const timestampedPlannerPayload = buildPassingPlannerPayload({
+    runId: "planner-timestamped",
+  });
+  const timestampedRerankPayload = {
+    summary: {
+      runId: "rerank-timestamped",
+      createdAt: "2026-06-08T10:10:00.000Z",
+      corpus: {
+        path: "evaluation/generated/arxiv-corpus.json",
+        cases: 48,
+      },
+      metrics: {
+        baseline: {
+          ndcgAtK: 0.6,
+        },
+        reranked: {
+          ndcgAtK: 0.7,
+        },
+        noiseFilteringRate: 0.45,
+      },
+    },
+    cases: [
+      {
+        id: "rerank_case",
+      },
+    ],
+  };
 
   const history = buildQualityHistoryResponse({
     latestPayload,
@@ -446,6 +863,14 @@ test("quality history excludes feedback eval runs from synthetic regression base
       {
         fileName: "2026-feedback.json",
         payload: timestampedFeedbackPayload,
+      },
+      {
+        fileName: "2026-planner.json",
+        payload: timestampedPlannerPayload,
+      },
+      {
+        fileName: "2026-rerank.json",
+        payload: timestampedRerankPayload,
       },
       {
         fileName: "2026-synthetic-previous.json",
@@ -457,6 +882,14 @@ test("quality history excludes feedback eval runs from synthetic regression base
   assert.equal(history.regressionGate.baselineRunId, "synthetic-previous");
   assert.equal(
     history.runs.some((run) => run.runId === "feedback-timestamped"),
+    false
+  );
+  assert.equal(
+    history.runs.some((run) => run.runId === "planner-timestamped"),
+    false
+  );
+  assert.equal(
+    history.runs.some((run) => run.runId === "rerank-timestamped"),
     false
   );
 });

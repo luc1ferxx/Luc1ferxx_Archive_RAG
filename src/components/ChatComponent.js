@@ -1,29 +1,13 @@
 import React, { useCallback, useEffect, useState } from "react";
-import axios from "axios";
 import { Button, Input, message } from "antd";
 import { AudioOutlined } from "@ant-design/icons";
 import SpeechRecognition, {
   useSpeechRecognition,
 } from "react-speech-recognition";
 import Speech from "speak-tts";
-import { API_DOMAIN, buildApiRequestConfig } from "../config";
+import { requestChat } from "../archiveApi";
 
 const { Search } = Input;
-
-const requestChat = async ({ docIds, question, sessionId, userId }) => {
-  const payload = {
-    question,
-    docIds: docIds.join(","),
-    sessionId,
-    userId,
-  };
-  const requestConfig = buildApiRequestConfig();
-  const response = requestConfig
-    ? await axios.post(`${API_DOMAIN}/chat`, payload, requestConfig)
-    : await axios.post(`${API_DOMAIN}/chat`, payload);
-
-  return response.data;
-};
 
 const ChatComponent = (props) => {
   const {

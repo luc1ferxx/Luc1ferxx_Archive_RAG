@@ -1,33 +1,15 @@
-import axios from "axios";
-import { API_DOMAIN, buildApiRequestConfig } from "./config";
-
-const requestConfig = () => buildApiRequestConfig();
+import { apiDelete, apiGet, apiPost } from "./apiClient";
 
 export const fetchDocuments = async () => {
-  const config = requestConfig();
-  const response = config
-    ? await axios.get(`${API_DOMAIN}/documents`, config)
-    : await axios.get(`${API_DOMAIN}/documents`);
-
-  return response.data;
+  return apiGet("/documents");
 };
 
 export const requestDocumentDelete = async (docId) => {
-  const config = requestConfig();
-  const response = config
-    ? await axios.delete(`${API_DOMAIN}/documents/${docId}`, config)
-    : await axios.delete(`${API_DOMAIN}/documents/${docId}`);
-
-  return response.data;
+  return apiDelete(`/documents/${docId}`);
 };
 
 export const requestDocumentClear = async () => {
-  const config = requestConfig();
-  const response = config
-    ? await axios.post(`${API_DOMAIN}/documents/clear`, undefined, config)
-    : await axios.post(`${API_DOMAIN}/documents/clear`);
-
-  return response.data;
+  return apiPost("/documents/clear");
 };
 
 export const requestSessionClear = async (sessionId) => {
@@ -35,51 +17,36 @@ export const requestSessionClear = async (sessionId) => {
     return;
   }
 
-  const config = requestConfig();
-
-  if (config) {
-    await axios.delete(`${API_DOMAIN}/sessions/${sessionId}`, config);
-    return;
-  }
-
-  await axios.delete(`${API_DOMAIN}/sessions/${sessionId}`);
+  await apiDelete(`/sessions/${sessionId}`);
 };
 
 export const fetchLatestQualityReport = async () => {
-  const config = requestConfig();
-  const response = config
-    ? await axios.get(`${API_DOMAIN}/quality/latest`, config)
-    : await axios.get(`${API_DOMAIN}/quality/latest`);
-
-  return response.data;
+  return apiGet("/quality/latest");
 };
 
 export const fetchQualityHistory = async () => {
-  const config = requestConfig();
-  const response = config
-    ? await axios.get(`${API_DOMAIN}/quality/history`, config)
-    : await axios.get(`${API_DOMAIN}/quality/history`);
-
-  return response.data;
+  return apiGet("/quality/history");
 };
 
 export const requestSyntheticQualityRun = async () => {
   const payload = {
     corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
   };
-  const config = requestConfig();
-  const response = config
-    ? await axios.post(`${API_DOMAIN}/quality/synthetic`, payload, config)
-    : await axios.post(`${API_DOMAIN}/quality/synthetic`, payload);
 
-  return response.data;
+  return apiPost("/quality/synthetic", payload);
 };
 
 export const requestAnswerFeedback = async (payload) => {
-  const config = requestConfig();
-  const response = config
-    ? await axios.post(`${API_DOMAIN}/feedback`, payload, config)
-    : await axios.post(`${API_DOMAIN}/feedback`, payload);
+  return apiPost("/feedback", payload);
+};
 
-  return response.data;
+export const requestChat = async ({ docIds, question, sessionId, userId }) => {
+  const payload = {
+    question,
+    docIds: docIds.join(","),
+    sessionId,
+    userId,
+  };
+
+  return apiPost("/chat", payload);
 };

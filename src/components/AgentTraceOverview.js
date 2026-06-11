@@ -7,8 +7,7 @@ import {
   formatDetailValue,
   formatTraceCount,
 } from "./AgentTraceDetail";
-
-const getSkillId = (skill = {}) => skill.skillId ?? skill.id ?? null;
+import { getAnswerTraceOverview } from "../chatResponseContract";
 
 const formatPlannerLabel = (planner = {}) => {
   if (planner.status === "not_run") {
@@ -24,60 +23,18 @@ const formatPlannerLabel = (planner = {}) => {
   return planner.selectedPlannerId ?? planner.requestedPlannerId ?? "Unknown";
 };
 
-const getObservedSelectedSkills = ({ answer }) => {
-  const observability = answer?.agentObservability ?? {};
-  const selectedSkills = Array.isArray(observability.selectedSkills)
-    ? observability.selectedSkills
-    : [];
-  const agentSkills = Array.isArray(answer?.agentSkills) ? answer.agentSkills : [];
-  const observations = Array.isArray(observability.skills)
-    ? observability.skills
-    : [];
-  const observationById = new Map(
-    observations.map((skill) => [getSkillId(skill), skill])
-  );
-
-  const sourceSkills = selectedSkills.length > 0 ? selectedSkills : agentSkills;
-
-  return sourceSkills.map((skill) => ({
-    ...skill,
-    ...(observationById.get(getSkillId(skill)) ?? {}),
-  }));
-};
-
 const AgentTraceOverview = ({ answer, stepCount }) => {
-  const observability = answer?.agentObservability ?? {};
-  const workingMemory =
-    answer?.agentWorkingMemory ?? observability.workingMemory ?? {};
-  const selectedSkills = getObservedSelectedSkills({ answer });
-  const executionPlanner = observability.executionPlanner ?? {};
-  const skillChain = Array.isArray(observability.skillChain)
-    ? observability.skillChain
-    : [];
-  const checkedQueries = Array.isArray(workingMemory.checkedQueries)
-    ? workingMemory.checkedQueries
-    : [];
-  const unresolvedGaps = Array.isArray(workingMemory.unresolvedGaps)
-    ? workingMemory.unresolvedGaps
-    : [];
-  const resolvedGaps = Array.isArray(workingMemory.resolvedGaps)
-    ? workingMemory.resolvedGaps
-    : [];
-  const unsupportedClaims = Array.isArray(workingMemory.unsupportedClaims)
-    ? workingMemory.unsupportedClaims
-    : [];
-  const finalizerStep = Array.isArray(answer?.agentTrace)
-    ? answer.agentTrace.find((step) => step.type === "answer_finalizer")
-    : null;
-  const removedClaims = Array.isArray(finalizerStep?.detail?.removedClaims)
-    ? finalizerStep.detail.removedClaims
-    : [];
-  const loop = observability.executionLoop ?? {};
-  const allGaps = unresolvedGaps.length > 0
-    ? unresolvedGaps
-    : Array.isArray(loop.gaps)
-      ? loop.gaps
-      : [];
+  const {
+    allGaps,
+    checkedQueries,
+    executionPlanner,
+    loop,
+    removedClaims,
+    resolvedGaps,
+    selectedSkills,
+    skillChain,
+    unsupportedClaims,
+  } = getAnswerTraceOverview(answer);
   const hasPlanner = Boolean(executionPlanner.status);
   const hasOverview =
     hasPlanner ||

@@ -3,6 +3,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgentRag } from "../rag/agent.js";
 import {
+  buildPlannerResponseSummary as buildCaseResponseSummary,
+  getChatResponseBody,
+  getExecutionPlanner,
+  getSelectedSkillIds,
+  getSkillChain,
+  getTraceTypes,
+  normalizeArray,
+} from "../rag/chat-response-contract.js";
+import {
   AGENT_EXECUTION_STEP_IDS,
   AGENT_EXECUTION_STEP_SCHEMA,
 } from "../rag/agent-execution-plan.js";
@@ -54,22 +63,9 @@ const STEP_ORDER = [
   AGENT_EXECUTION_STEP_IDS.webSearch,
 ];
 
-const normalizeArray = (value) => (Array.isArray(value) ? value : []);
-
 const sameScope = (scope) =>
   scope?.userId === DEFAULT_ACCESS_SCOPE.userId &&
   scope?.workspaceId === DEFAULT_ACCESS_SCOPE.workspaceId;
-
-const getTraceTypes = (response) =>
-  normalizeArray(response?.body?.agentTrace).map((step) => step.type);
-
-const getPlanner = (response) =>
-  response?.body?.agentObservability?.executionPlanner ?? null;
-
-const getSelectedSkillIds = (response) =>
-  normalizeArray(response?.body?.agentObservability?.selectedSkills).map(
-    (skill) => skill.skillId
-  );
 
 const buildCheck = ({ id, label, category, passed, detail = null }) => ({
   id,
@@ -116,20 +112,6 @@ const buildScopedRagService = ({
 
     return sameScope(accessScope) ? documents : [];
   },
-});
-
-const buildCaseResponseSummary = ({ response, telemetry }) => ({
-  agentMode: response?.body?.agentMode ?? null,
-  agentSkills: response?.body?.agentSkills ?? [],
-  planner: getPlanner(response),
-  selectedSkills: response?.body?.agentObservability?.selectedSkills ?? [],
-  skillChain: response?.body?.agentObservability?.skillChain ?? [],
-  status: response?.status ?? null,
-  telemetry: {
-    chatCallCount: telemetry.chatCalls.length,
-    listDocumentCallCount: telemetry.listDocumentScopes.length,
-  },
-  traceTypes: getTraceTypes(response),
 });
 
 const finishCase = ({
@@ -288,7 +270,8 @@ const createInventoryCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
         throw new Error("Web search should not run for inventory prompts.");
       },
     });
-    const planner = getPlanner(response);
+    const planner = getExecutionPlanner(response);
+    const body = getChatResponseBody(response);
 
     return finishCase({
       checks: [
@@ -305,10 +288,10 @@ const createInventoryCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
         }),
         buildCheck({
           category: "execution",
-          detail: response.body.agentMode,
+          detail: body.agentMode,
           id: "inventory_mode",
           label: "Agent answered in inventory mode",
-          passed: response.body.agentMode === "inventory",
+          passed: body.agentMode === "inventory",
         }),
         buildCheck({
           category: "observability",
@@ -373,7 +356,7 @@ const createDocumentCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
         text: "web should not run",
       }),
     });
-    const planner = getPlanner(response);
+    const planner = getExecutionPlanner(response);
 
     return finishCase({
       checks: [
@@ -442,7 +425,7 @@ const createWebCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
         text: "Current web answer.",
       }),
     });
-    const planner = getPlanner(response);
+    const planner = getExecutionPlanner(response);
 
     return finishCase({
       checks: [
@@ -540,7 +523,8 @@ const createCustomChainCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => (
         text: "web should not run",
       }),
     });
-    const planner = getPlanner(response);
+    const planner = getExecutionPlanner(response);
+    const skillChain = getSkillChain(response);
 
     return finishCase({
       checks: [
@@ -556,13 +540,11 @@ const createCustomChainCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => (
         }),
         buildCheck({
           category: "execution",
-          detail: response.body.agentObservability.skillChain,
+          detail: skillChain,
           id: "custom_chain_order",
           label: "Custom skill chain order is preserved",
           passed:
-            response.body.agentObservability.skillChain
-              .map((skill) => skill.skillId)
-              .join(">") ===
+            skillChain.map((skill) => skill.skillId).join(">") ===
             `${CUSTOM_SKILL_IDS.summarizeContract}>${CUSTOM_SKILL_IDS.riskReview}`,
         }),
         buildCheck({
@@ -630,7 +612,8 @@ const createInvalidFallbackCase = () => ({
         throw new Error("Web search should not run for inventory prompts.");
       },
     });
-    const planner = getPlanner(response);
+    const planner = getExecutionPlanner(response);
+    const body = getChatResponseBody(response);
 
     return finishCase({
       checks: [
@@ -656,10 +639,10 @@ const createInvalidFallbackCase = () => ({
         }),
         buildCheck({
           category: "execution",
-          detail: response.body.agentMode,
+          detail: body.agentMode,
           id: "fallback_still_executes",
           label: "Fallback plan still executes the request",
-          passed: response.body.agentMode === "inventory",
+          passed: body.agentMode === "inventory",
         }),
       ],
       description:

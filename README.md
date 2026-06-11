@@ -166,7 +166,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:trajectory` | 评测 AgentRAG 执行轨迹。 |
 | `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner 和 fallback。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
-| `cd server && npm run quality:gate` | 检查主线、feedback 和 trajectory 质量门控。 |
+| `cd server && npm run quality:gate` | 检查主线、feedback、trajectory 和 planner 质量门控。 |
 
 完整评测命令见 [docs/evaluation.md](docs/evaluation.md)。
 

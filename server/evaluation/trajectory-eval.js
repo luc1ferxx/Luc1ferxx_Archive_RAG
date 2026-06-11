@@ -3,6 +3,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgentRag } from "../rag/agent.js";
 import {
+  buildChatResponseSummary as buildCaseResponseSummary,
+  getAgentWorkingMemory,
+  getChatResponseBody,
+  getClarification,
+  getExecutionLoop,
+  getObservedSkill,
+  getRunPhases,
+  getSelectedSkillIds,
+  getSkillChainIds,
+  getTraceSteps,
+  getTraceTypes,
+  hasTraceStep,
+} from "../rag/chat-response-contract.js";
+import {
   AGENT_SKILL_IDS,
   CUSTOM_SKILL_IDS,
 } from "../rag/skills/registry.js";
@@ -27,37 +41,6 @@ const CATEGORY_LABELS = {
   follow_up: "Follow-up",
   skill_selection: "Skill selection",
 };
-
-const normalizeArray = (value) => (Array.isArray(value) ? value : []);
-
-const hasTraceStep = (response, type) =>
-  normalizeArray(response?.body?.agentTrace).some((step) => step.type === type);
-
-const getTraceSteps = (response, type) =>
-  normalizeArray(response?.body?.agentTrace).filter((step) => step.type === type);
-
-const getTraceTypes = (response) =>
-  normalizeArray(response?.body?.agentTrace).map((step) => step.type);
-
-const getObservedSkill = (response, skillId) =>
-  normalizeArray(response?.body?.agentObservability?.skills).find(
-    (skill) => skill.skillId === skillId
-  ) ?? null;
-
-const getSkillChainIds = (response) =>
-  normalizeArray(response?.body?.agentObservability?.skillChain).map(
-    (skill) => skill.skillId
-  );
-
-const getSelectedSkillIds = (response) =>
-  normalizeArray(response?.body?.agentObservability?.selectedSkills).map(
-    (skill) => skill.skillId
-  );
-
-const getRunPhases = (response, skillId = null) =>
-  normalizeArray(response?.body?.agentObservability?.runs)
-    .filter((run) => !skillId || run.skillId === skillId)
-    .map((run) => run.phase);
 
 const sameScope = (scope) =>
   scope?.userId === DEFAULT_ACCESS_SCOPE.userId &&
@@ -108,32 +91,6 @@ const buildSource = ({
   fileName,
   pageNumber,
   excerpt,
-});
-
-const buildCaseResponseSummary = ({ response, telemetry }) => ({
-  status: response?.status ?? null,
-  agentMode: response?.body?.agentMode ?? null,
-  traceTypes: getTraceTypes(response),
-  agentSkills: response?.body?.agentSkills ?? [],
-  selectedSkills: response?.body?.agentObservability?.selectedSkills ?? [],
-  skillChain: response?.body?.agentObservability?.skillChain ?? [],
-  executionLoop: response?.body?.agentObservability?.executionLoop ?? null,
-  clarification: response?.body?.clarification ?? null,
-  budget: response?.body?.agentObservability?.budget ?? null,
-  workingMemory: {
-    checkedQueryCount:
-      response?.body?.agentWorkingMemory?.checkedQueries?.length ?? 0,
-    unresolvedGapCount:
-      response?.body?.agentWorkingMemory?.unresolvedGaps?.length ?? 0,
-    resolvedGapCount:
-      response?.body?.agentWorkingMemory?.resolvedGaps?.length ?? 0,
-    unsupportedClaimCount:
-      response?.body?.agentWorkingMemory?.unsupportedClaims?.length ?? 0,
-  },
-  telemetry: {
-    chatCallCount: telemetry.chatCalls.length,
-    listDocumentCallCount: telemetry.listDocumentScopes.length,
-  },
 });
 
 const finishCase = ({ id, label, description, checks, response, telemetry }) => {
@@ -241,6 +198,7 @@ const createSkillChainCase = () => ({
     });
     const chainIds = getSkillChainIds(response);
     const customSkillSteps = getTraceSteps(response, "custom_skill");
+    const body = getChatResponseBody(response);
 
     return finishCase({
       id: "skill_chain_contract_review",
@@ -254,8 +212,8 @@ const createSkillChainCase = () => ({
           id: "mode_is_skill_chain",
           label: "Agent mode is skill_chain",
           category: "skill_selection",
-          passed: response.body.agentMode === "skill_chain",
-          detail: response.body.agentMode,
+          passed: body.agentMode === "skill_chain",
+          detail: body.agentMode,
         }),
         buildCheck({
           id: "expected_chain_order",
@@ -354,7 +312,14 @@ const createFollowUpCase = () => ({
     });
     const selfChecks = getTraceSteps(response, "self_check");
     const documentObservation = getObservedSkill(response, AGENT_SKILL_IDS.documentRag);
-    const executionLoop = response.body.agentObservability.executionLoop;
+    const executionLoop = getExecutionLoop(response);
+    const workingMemory = getAgentWorkingMemory(response);
+    const unresolvedGaps = Array.isArray(workingMemory.unresolvedGaps)
+      ? workingMemory.unresolvedGaps
+      : [];
+    const resolvedGaps = Array.isArray(workingMemory.resolvedGaps)
+      ? workingMemory.resolvedGaps
+      : [];
 
     return finishCase({
       id: "document_follow_up_retrieval",
@@ -380,9 +345,8 @@ const createFollowUpCase = () => ({
           category: "follow_up",
           passed:
             hasTraceStep(response, "gap_analysis") &&
-            response.body.agentObservability.executionLoop.gaps?.[0]?.type ===
-              "unsupported_claim",
-          detail: response.body.agentObservability.executionLoop.gaps ?? [],
+            executionLoop.gaps?.[0]?.type === "unsupported_claim",
+          detail: executionLoop.gaps ?? [],
         }),
         buildCheck({
           id: "follow_up_retrieval_ran",
@@ -398,9 +362,9 @@ const createFollowUpCase = () => ({
           label: "Working memory resolved the evidence gap",
           category: "follow_up",
           passed:
-            response.body.agentWorkingMemory.unresolvedGaps.length === 0 &&
-            response.body.agentWorkingMemory.resolvedGaps.length > 0,
-          detail: response.body.agentWorkingMemory,
+            unresolvedGaps.length === 0 &&
+            resolvedGaps.length > 0,
+          detail: workingMemory,
         }),
         buildCheck({
           id: "document_budget_bounded",
@@ -454,6 +418,8 @@ const createClarificationCase = () => ({
       userId: DEFAULT_ACCESS_SCOPE.userId,
       accessScope: DEFAULT_ACCESS_SCOPE,
     });
+    const body = getChatResponseBody(response);
+    const clarification = getClarification(response);
 
     return finishCase({
       id: "comparison_requires_clarification",
@@ -467,17 +433,17 @@ const createClarificationCase = () => ({
           id: "agent_mode_clarification",
           label: "Agent returned clarification mode",
           category: "clarification",
-          passed: response.body.agentMode === "clarification",
-          detail: response.body.agentMode,
+          passed: body.agentMode === "clarification",
+          detail: body.agentMode,
         }),
         buildCheck({
           id: "comparison_reason",
           label: "Clarification reason identifies missing comparison document",
           category: "clarification",
           passed:
-            response.body.clarification?.reason ===
+            clarification?.reason ===
             "comparison_requires_multiple_documents",
-          detail: response.body.clarification,
+          detail: clarification,
         }),
         buildCheck({
           id: "clarification_trace",
@@ -644,6 +610,8 @@ const createBudgetCase = () => ({
       accessScope: DEFAULT_ACCESS_SCOPE,
     });
     const documentObservation = getObservedSkill(response, AGENT_SKILL_IDS.documentRag);
+    const body = getChatResponseBody(response);
+    const clarification = getClarification(response);
 
     return finishCase({
       id: "budget_exhaustion_clarification",
@@ -658,10 +626,10 @@ const createBudgetCase = () => ({
           label: "Clarification reason identifies exhausted document follow-up budget",
           category: "budget",
           passed:
-            response.body.agentMode === "clarification" &&
-            response.body.clarification?.reason ===
+            body.agentMode === "clarification" &&
+            clarification?.reason ===
               "document_follow_up_budget_exhausted",
-          detail: response.body.clarification,
+          detail: clarification,
         }),
         buildCheck({
           id: "budget_limit_trace",
@@ -846,4 +814,3 @@ export const writeTrajectoryEvaluationReport = async ({
     markdownPath,
   };
 };
-

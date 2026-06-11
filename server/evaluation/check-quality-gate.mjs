@@ -95,6 +95,14 @@ const formatCheckDelta = (check) => {
     return formatDelta(check.delta);
   }
 
+  if (check.metric === "plannerFailedCaseCount") {
+    return formatDelta(check.delta);
+  }
+
+  if (check.metric === "plannerFailedCheckCount") {
+    return formatDelta(check.delta);
+  }
+
   if (check.metric === "averageCitationCount") {
     return formatDelta(check.delta);
   }
@@ -107,6 +115,7 @@ const printTextReport = ({ decision, history }) => {
   const gate = history.regressionGate ?? {};
   const feedbackGate = history.feedbackGate ?? {};
   const trajectoryGate = history.trajectoryGate ?? {};
+  const plannerGate = history.plannerGate ?? {};
   const latestRun = history.latestRun ?? {};
   const checks = qualityGate.checks ?? gate.checks ?? [];
 
@@ -123,6 +132,10 @@ const printTextReport = ({ decision, history }) => {
 
   if (gate.baselineRunId) {
     console.log(`Baseline run: ${gate.baselineRunId}`);
+  }
+
+  if (gate.baselineSelection?.label) {
+    console.log(`Baseline selection: ${gate.baselineSelection.label}`);
   }
 
   for (const check of checks) {
@@ -145,6 +158,23 @@ const printTextReport = ({ decision, history }) => {
     console.log(trajectoryGate.summary);
 
     for (const failedCase of trajectoryGate.failedCases ?? []) {
+      const failedCheckLabels = (failedCase.failedChecks ?? [])
+        .map((check) => check.label)
+        .join(", ");
+      console.log(
+        `- ${failedCase.id}: ${
+          failedCheckLabels || `${failedCase.failedCheckCount ?? 0} failed checks`
+        }`
+      );
+    }
+  }
+
+  if (plannerGate.status) {
+    const suffix = plannerGate.skipped ? " (skipped)" : "";
+    console.log(`Planner gate: ${plannerGate.status}${suffix}`);
+    console.log(plannerGate.summary);
+
+    for (const failedCase of plannerGate.failedCases ?? []) {
       const failedCheckLabels = (failedCase.failedChecks ?? [])
         .map((check) => check.label)
         .join(", ");
