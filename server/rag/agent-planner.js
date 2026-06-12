@@ -7,6 +7,9 @@ const MAX_CLARIFICATION_DOCUMENTS = 12;
 const WEB_SIGNAL_PATTERN =
   /\b(latest|current|currently|today|now|recent|news|live|online|internet|web|search the web|real[-\s]?time)\b|最新|当前|现在|今天|近日|实时|联网|网页|网络|新闻/i;
 
+const ARXIV_IMPORT_SIGNAL_PATTERN =
+  /(?:\barxiv\b.*\b(fetch|download|import|ingest|collect|search)\b|\b(fetch|download|import|ingest|collect|search)\b.*\barxiv\b|\barxiv\b.*\b(papers?|pdfs?|preprints?)\b)|(?:arxiv|论文|预印本).*(?:抓取|下载|导入|收集|检索|搜索)|(?:抓取|下载|导入|收集|检索|搜索).*(?:arxiv|论文|预印本)/i;
+
 const INVENTORY_SIGNAL_PATTERN =
   /\b(what documents|which documents|list documents|show documents|workspace documents|uploaded documents|what files|which files|list files)\b|有哪些(?:文档|资料|文件)|列出.*(?:文档|资料|文件)|当前.*(?:文档|资料|文件)|上传.*(?:文档|资料|文件)/i;
 
@@ -41,6 +44,7 @@ const normalizeText = (value) =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : "";
 
 export const buildPlan = ({ question, docIds }) => {
+  const wantsArxivImport = ARXIV_IMPORT_SIGNAL_PATTERN.test(question);
   const wantsResearch = RESEARCH_SIGNAL_PATTERN.test(question);
   const wantsInventory = INVENTORY_SIGNAL_PATTERN.test(question);
   const wantsDiscovery = DISCOVERY_SIGNAL_PATTERN.test(question);
@@ -57,9 +61,28 @@ export const buildPlan = ({ question, docIds }) => {
   const wantsProjectChangeChain = PROJECT_CHANGE_CHAIN_SIGNAL_PATTERN.test(question);
   const hasDocuments = docIds.length > 0;
 
+  if (wantsArxivImport) {
+    return {
+      mode: "arxiv_import",
+      wantsArxivImport: true,
+      wantsTimeline: false,
+      wantsRiskReview: false,
+      wantsContractSummary: false,
+      wantsCompareDocuments: false,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      requiresDocuments: false,
+      summary: "Search arXiv for the requested topic and ingest matching PDFs.",
+    };
+  }
+
   if (wantsRiskComparisonChain) {
     return {
       mode: SKILL_CHAIN_MODE,
+      wantsArxivImport: false,
       skillChain: [CUSTOM_SKILL_IDS.compareDocuments, CUSTOM_SKILL_IDS.riskReview],
       wantsTimeline: false,
       wantsRiskReview: true,
@@ -78,6 +101,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsContractReviewChain) {
     return {
       mode: SKILL_CHAIN_MODE,
+      wantsArxivImport: false,
       skillChain: [CUSTOM_SKILL_IDS.summarizeContract, CUSTOM_SKILL_IDS.riskReview],
       wantsTimeline: false,
       wantsRiskReview: true,
@@ -96,6 +120,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsProjectChangeChain) {
     return {
       mode: SKILL_CHAIN_MODE,
+      wantsArxivImport: false,
       skillChain: [CUSTOM_SKILL_IDS.extractTimeline, CUSTOM_SKILL_IDS.compareDocuments],
       wantsTimeline: true,
       wantsRiskReview: false,
@@ -114,6 +139,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsTimeline) {
     return {
       mode: CUSTOM_SKILL_IDS.extractTimeline,
+      wantsArxivImport: false,
       wantsTimeline: true,
       wantsRiskReview: false,
       wantsContractSummary: false,
@@ -131,6 +157,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsCompareDocuments) {
     return {
       mode: CUSTOM_SKILL_IDS.compareDocuments,
+      wantsArxivImport: false,
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
@@ -148,6 +175,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsRiskReview) {
     return {
       mode: CUSTOM_SKILL_IDS.riskReview,
+      wantsArxivImport: false,
       wantsTimeline: false,
       wantsRiskReview: true,
       wantsContractSummary: false,
@@ -165,6 +193,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsContractSummary) {
     return {
       mode: CUSTOM_SKILL_IDS.summarizeContract,
+      wantsArxivImport: false,
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: true,
@@ -182,6 +211,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsResearch) {
     return {
       mode: "research_brief",
+      wantsArxivImport: false,
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
@@ -199,6 +229,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsInventory && !hasDocuments) {
     return {
       mode: "inventory",
+      wantsArxivImport: false,
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
@@ -215,6 +246,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (wantsDiscovery && !hasDocuments) {
     return {
       mode: "document_discovery",
+      wantsArxivImport: false,
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
@@ -232,6 +264,7 @@ export const buildPlan = ({ question, docIds }) => {
   if (!hasDocuments && wantsWeb) {
     return {
       mode: "web",
+      wantsArxivImport: false,
       wantsTimeline: false,
       wantsRiskReview: false,
       wantsContractSummary: false,
@@ -248,6 +281,7 @@ export const buildPlan = ({ question, docIds }) => {
 
   return {
     mode: wantsWeb ? "document_web" : "document",
+    wantsArxivImport: false,
     wantsTimeline: false,
     wantsRiskReview: false,
     wantsContractSummary: false,

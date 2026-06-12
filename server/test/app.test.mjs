@@ -200,6 +200,244 @@ test("upload flow stores chunks, completes ingestion, and deletes documents", as
   }
 });
 
+test("arxiv routes search and import topic papers", async () => {
+  const searched = [];
+  const imported = [];
+  const app = await createApp({
+    ragService: {
+      chat: async () => ({
+        text: "stub",
+        citations: [],
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    arxivService: {
+      search: async ({ maxResults, topic }) => {
+        searched.push({
+          maxResults,
+          topic,
+        });
+
+        return [
+          {
+            arxivId: "2401.00001v1",
+            title: "Retrieval Augmented Generation for Archives",
+            absUrl: "https://arxiv.org/abs/2401.00001v1",
+            pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+          },
+        ];
+      },
+    },
+    arxivImportService: {
+      importTopic: async ({ accessScope, maxResults, topic }) => {
+        imported.push({
+          accessScope,
+          maxResults,
+          topic,
+        });
+
+        return {
+          topic,
+          requestedMaxResults: maxResults,
+          foundCount: 1,
+          importedCount: 1,
+          skippedCount: 0,
+          failedCount: 0,
+          importedPapers: [
+            {
+              arxivId: "2401.00001v1",
+              title: "Retrieval Augmented Generation for Archives",
+              docId: "doc-1",
+              fileName: "arxiv-2401.00001.pdf",
+            },
+          ],
+          skippedPapers: [],
+          failedPapers: [],
+        };
+      },
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(
+      `${server.baseUrl}/arxiv/search?topic=rag&maxResults=99`
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).papers.length, 1);
+    assert.deepEqual(searched[0], {
+      maxResults: 10,
+      topic: "rag",
+    });
+
+    response = await fetch(`${server.baseUrl}/arxiv/import`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        maxResults: 2,
+        topic: "retrieval augmented generation",
+      }),
+    });
+
+    assert.equal(response.status, 201);
+    const body = await response.json();
+
+    assert.equal(body.importedCount, 1);
+    assert.equal(imported[0].topic, "retrieval augmented generation");
+    assert.equal(imported[0].maxResults, 2);
+    assert.deepEqual(imported[0].accessScope, {
+      authenticated: false,
+      userId: "",
+      workspaceId: "",
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("document arxiv enrichment routes suggest first and import after confirmation", async () => {
+  const calls = [];
+  const app = await createApp({
+    ragService: {
+      chat: async () => ({
+        text: "stub",
+        citations: [],
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    arxivEnrichmentService: {
+      suggestForDocument: async ({ accessScope, docId, maxResults }) => {
+        calls.push({
+          accessScope,
+          docId,
+          maxResults,
+          type: "suggest",
+        });
+
+        return {
+          document: {
+            docId,
+            fileName: "private-notes.pdf",
+          },
+          topic: "retrieval augmented generation",
+          requestedMaxResults: maxResults,
+          papers: [
+            {
+              arxivId: "2401.00001v1",
+              title: "Retrieval Augmented Generation for Archives",
+            },
+          ],
+          selectionToken: "selection-token-1",
+          reason: null,
+        };
+      },
+      importForDocument: async ({ accessScope, docId, selectionToken }) => {
+        calls.push({
+          accessScope,
+          docId,
+          selectionToken,
+          type: "import",
+        });
+
+        return {
+          document: {
+            docId,
+            fileName: "private-notes.pdf",
+          },
+          topic: "retrieval augmented generation",
+          requestedMaxResults: 3,
+          foundCount: 1,
+          importedCount: 1,
+          skippedCount: 0,
+          failedCount: 0,
+          importedPapers: [
+            {
+              arxivId: "2401.00001v1",
+              docId: "doc-arxiv",
+              fileName: "arxiv-2401.00001.pdf",
+              title: "Retrieval Augmented Generation for Archives",
+            },
+          ],
+          skippedPapers: [],
+          failedPapers: [],
+        };
+      },
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(
+      `${server.baseUrl}/documents/doc-1/arxiv/suggestions?maxResults=3`
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).papers.length, 1);
+
+    response = await fetch(`${server.baseUrl}/documents/doc-1/arxiv/import`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        selectionToken: "selection-token-1",
+      }),
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).importedCount, 1);
+    assert.deepEqual(
+      calls.map((call) => ({
+        docId: call.docId,
+        maxResults: call.maxResults,
+        selectionToken: call.selectionToken,
+        type: call.type,
+      })),
+      [
+        {
+          docId: "doc-1",
+          maxResults: 3,
+          selectionToken: undefined,
+          type: "suggest",
+        },
+        {
+          docId: "doc-1",
+          maxResults: undefined,
+          selectionToken: "selection-token-1",
+          type: "import",
+        },
+      ]
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test("chat endpoint exposes explicit rag abstain fields", async () => {
   const documents = new Map([
     [

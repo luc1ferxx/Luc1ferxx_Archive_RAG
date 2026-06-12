@@ -9,6 +9,7 @@ import { prepareAgentRun } from "./agent-preparation-flow.js";
 
 export const runAgentRag = async ({
   agentBudget,
+  arxivImportService,
   ragService,
   webChatService,
   question,
@@ -89,6 +90,7 @@ export const runAgentRag = async ({
     addBudgetLimitTrace,
     addTraceStep,
     budgetState,
+    arxivImportService,
     buildSkillTraceDetail,
     docIds,
     executeObservedSkill,
@@ -119,6 +121,7 @@ export const runAgentRag = async ({
 
   return finalizeAgentRun({
     addTraceStep,
+    arxivImportAnswer: executionResult.arxivImportAnswer,
     buildAgentObservability,
     customSkillResults: executionResult.customSkillResults,
     customSkills: executionResult.customSkills,

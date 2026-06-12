@@ -3,9 +3,14 @@ import {
   buildResearchPlan,
   formatResearchBrief,
 } from "../research-brief.js";
+import {
+  DEFAULT_ARXIV_MAX_RESULTS,
+  normalizeArxivMaxResults,
+} from "../arxiv-client.js";
 import { extractMeaningfulTokens, normalizeSearchText } from "../text-utils.js";
 
 export const AGENT_SKILL_IDS = {
+  arxivImport: "arxiv_import",
   documentRag: "document_rag",
   webSearch: "web_search",
   inventory: "inventory",
@@ -16,6 +21,91 @@ export const AGENT_SKILL_IDS = {
 export const BUILT_IN_SKILL_VERSION = "1.0.0";
 
 const normalizeText = (value) => String(value ?? "").trim();
+
+const CJK_PATTERN = /[\u3400-\u9fff]/;
+
+const ARXIV_COMMAND_PATTERN =
+  /\b(arxiv|paper|papers|pdfs?|publications?|preprints?|fetch|download|import|ingest|collect|search|topic|about|on|for|latest|recent|top)\b|论文|文章|预印本|抓取|下载|导入|收集|搜索|检索|主题|方向|关于|有关|最新|最近|篇/gi;
+
+const extractRequestedPaperCount = (question) => {
+  const countMatch = normalizeText(question).match(
+    /(?:top\s*)?(\d{1,2})\s*(?:papers?|pdfs?|preprints?|篇|个)?/i
+  );
+
+  return normalizeArxivMaxResults(
+    countMatch?.[1],
+    DEFAULT_ARXIV_MAX_RESULTS
+  );
+};
+
+const extractArxivTopic = (question) => {
+  const normalizedQuestion = normalizeText(question);
+  const explicitTopicMatch = normalizedQuestion.match(
+    /(?:topic|主题|方向|about|on|for|关于|有关)[:：]?\s*["“]?([^"”]+?)["”]?(?:\s*(?:papers?|论文|预印本))?$/i
+  );
+  const topicCandidate = explicitTopicMatch?.[1] ?? normalizedQuestion;
+  const cleanedTopic = topicCandidate
+    .replace(ARXIV_COMMAND_PATTERN, " ")
+    .replace(/(?:方面|相关|一些|几篇|的)/g, " ")
+    .replace(/\b\d{1,2}\b/g, " ")
+    .replace(/[，。！？、,.!?;；:："'“”()[\]{}<>]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleanedTopic || normalizedQuestion;
+};
+
+const formatPaperLine = (paper, index, language) => {
+  const id = paper.arxivId ? `arXiv:${paper.arxivId}` : "arXiv";
+  const doc = paper.docId ? `docId: ${paper.docId}` : "not indexed";
+
+  if (language === "zh") {
+    return `${index + 1}. ${paper.title || id}（${id}，${doc}）`;
+  }
+
+  return `${index + 1}. ${paper.title || id} (${id}, ${doc})`;
+};
+
+const formatArxivImportAnswer = ({ question, result }) => {
+  const language = CJK_PATTERN.test(question) ? "zh" : "en";
+  const completedPapers = [
+    ...(result.importedPapers ?? []),
+    ...(result.skippedPapers ?? []),
+  ];
+  const lines = completedPapers.map((paper, index) =>
+    formatPaperLine(paper, index, language)
+  );
+
+  if (language === "zh") {
+    return [
+      `已从 arXiv 搜索主题 "${result.topic}"，找到 ${result.foundCount} 篇；新导入 ${result.importedCount} 篇，已存在 ${result.skippedCount} 篇，失败 ${result.failedCount} 篇。`,
+      ...lines,
+      ...(result.failedPapers?.length
+        ? [
+            "失败项：",
+            ...result.failedPapers.map(
+              (paper, index) =>
+                `${index + 1}. ${paper.title || paper.arxivId}: ${paper.error}`
+            ),
+          ]
+        : []),
+    ].join("\n");
+  }
+
+  return [
+    `Searched arXiv for "${result.topic}". Found ${result.foundCount}; imported ${result.importedCount}, already indexed ${result.skippedCount}, failed ${result.failedCount}.`,
+    ...lines,
+    ...(result.failedPapers?.length
+      ? [
+          "Failures:",
+          ...result.failedPapers.map(
+            (paper, index) =>
+              `${index + 1}. ${paper.title || paper.arxivId}: ${paper.error}`
+          ),
+        ]
+      : []),
+  ].join("\n");
+};
 
 const getDocumentLabel = (document) => {
   const pageCount = Number.parseInt(document?.pageCount ?? "0", 10);
@@ -169,6 +259,69 @@ const createDocumentRagSkill = () => ({
         citations: value.citations?.length ?? 0,
         abstained: Boolean(value.abstained),
         retrievalPlan,
+      },
+    };
+  },
+});
+
+const createArxivImportSkill = () => ({
+  id: AGENT_SKILL_IDS.arxivImport,
+  version: BUILT_IN_SKILL_VERSION,
+  label: "arXiv Import",
+  kind: "built_in",
+  budgetKey: "arxivPaperFetches",
+  requiresAccessScope: true,
+  match: ({ plan }) => Boolean(plan.wantsArxivImport),
+  plannerActions: () => [
+    {
+      id: "arxiv_import",
+      label: "Import arXiv papers",
+      summary: "Search arXiv for the requested topic and ingest matching PDFs.",
+    },
+  ],
+  execute: async ({ arxivImportService, question, accessScope }) => {
+    const topic = extractArxivTopic(question);
+    const maxResults = extractRequestedPaperCount(question);
+    const result = await arxivImportService.importTopic({
+      accessScope,
+      maxResults,
+      topic,
+    });
+    const citations = [
+      ...(result.importedPapers ?? []),
+      ...(result.skippedPapers ?? []),
+    ].map((paper) => ({
+      arxivId: paper.arxivId,
+      title: paper.title,
+      url: paper.absUrl,
+      docId: paper.docId,
+      fileName: paper.fileName,
+    }));
+
+    return {
+      value: result,
+      text: formatArxivImportAnswer({
+        question,
+        result,
+      }),
+      citations,
+      abstained: result.foundCount === 0,
+      traceDetail: {
+        topic: result.topic,
+        requestedMaxResults: result.requestedMaxResults,
+        foundCount: result.foundCount,
+        importedCount: result.importedCount,
+        skippedCount: result.skippedCount,
+        failedCount: result.failedCount,
+        papers: [
+          ...(result.importedPapers ?? []),
+          ...(result.skippedPapers ?? []),
+        ].map((paper) => ({
+          arxivId: paper.arxivId,
+          title: paper.title,
+          docId: paper.docId,
+          status: paper.status,
+        })),
       },
     };
   },
@@ -374,6 +527,7 @@ const createResearchBriefSkill = () => ({
 });
 
 export const createBuiltInSkills = () => [
+  createArxivImportSkill(),
   createDocumentRagSkill(),
   createWebSearchSkill(),
   createInventorySkill(),

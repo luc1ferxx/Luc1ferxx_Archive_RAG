@@ -16,6 +16,13 @@ const getBackendMessage = (error, fallbackMessage) =>
 export const useWorkspaceDocuments = () => {
   const [activeDocuments, setActiveDocuments] = useState([]);
 
+  const refreshDocuments = useCallback(async () => {
+    const documents = await fetchDocuments();
+
+    setActiveDocuments(documents);
+    return documents;
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -108,6 +115,7 @@ export const useWorkspaceDocuments = () => {
     docIds,
     docLabel,
     handleUploadSuccess,
+    refreshDocuments,
     removeDocument,
     totalPages,
   };

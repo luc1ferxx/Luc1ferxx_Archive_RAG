@@ -148,6 +148,11 @@ const getGapCopy = (gap = {}) => {
 
 const BUDGET_ITEMS = [
   {
+    label: "arXiv",
+    usedKey: "arxivPaperFetches",
+    limitKey: "maxArxivPaperFetches",
+  },
+  {
     label: "Doc RAG",
     usedKey: "documentRagCalls",
     limitKey: "maxDocumentRagCalls",

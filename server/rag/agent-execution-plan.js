@@ -1,6 +1,7 @@
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
 
 export const AGENT_EXECUTION_STEP_IDS = {
+  arxivImport: "arxiv_import",
   researchBrief: "research_brief",
   inventory: "inventory",
   documentDiscovery: "document_discovery",
@@ -17,6 +18,12 @@ export const AGENT_EXECUTION_CONDITIONS = {
 };
 
 export const AGENT_EXECUTION_STEP_SCHEMA = {
+  [AGENT_EXECUTION_STEP_IDS.arxivImport]: {
+    budgetKey: "arxivPaperFetches",
+    condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
+    requiresAccessScope: true,
+    skillId: AGENT_SKILL_IDS.arxivImport,
+  },
   [AGENT_EXECUTION_STEP_IDS.researchBrief]: {
     budgetKey: "researchQuestions",
     condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
@@ -333,6 +340,11 @@ export const validateAgentExecutionPlan = ({
 };
 
 export const createDeterministicAgentExecutionPlan = () => [
+  {
+    id: AGENT_EXECUTION_STEP_IDS.arxivImport,
+    condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
+    skillId: AGENT_SKILL_IDS.arxivImport,
+  },
   {
     id: AGENT_EXECUTION_STEP_IDS.researchBrief,
     condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,

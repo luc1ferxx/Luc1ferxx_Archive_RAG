@@ -188,6 +188,7 @@ const buildPlannerPrompt = ({
     intentPlan: {
       mode: plan.mode ?? null,
       needsClarification: Boolean(plan.needsClarification),
+      wantsArxivImport: Boolean(plan.wantsArxivImport),
       wantsWeb: Boolean(plan.wantsWeb),
     },
     question: sanitizeText(question, 1000),

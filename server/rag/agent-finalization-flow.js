@@ -35,6 +35,7 @@ export const selectRagSources = ({
 
 export const finalizeAgentRun = async ({
   addTraceStep,
+  arxivImportAnswer,
   buildAgentObservability,
   customSkillResults = [],
   customSkills = [],
@@ -77,6 +78,7 @@ export const finalizeAgentRun = async ({
     ragResult,
     webResult,
     customSkillResults,
+    arxivImportAnswer,
     inventoryAnswer,
     discoveryAnswer,
     researchBrief,

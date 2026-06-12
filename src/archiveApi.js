@@ -12,6 +12,20 @@ export const requestDocumentClear = async () => {
   return apiPost("/documents/clear");
 };
 
+export const fetchDocumentArxivSuggestions = async (docId, maxResults = 3) => {
+  return apiGet(
+    `/documents/${docId}/arxiv/suggestions?maxResults=${encodeURIComponent(
+      maxResults
+    )}`
+  );
+};
+
+export const requestDocumentArxivImport = async (docId, selectionToken) => {
+  return apiPost(`/documents/${docId}/arxiv/import`, {
+    selectionToken,
+  });
+};
+
 export const requestSessionClear = async (sessionId) => {
   if (!sessionId) {
     return;

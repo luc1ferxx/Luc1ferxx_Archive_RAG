@@ -8,6 +8,19 @@ import {
 } from "../rag/agent-planner.js";
 import { CUSTOM_SKILL_IDS } from "../rag/skills/registry.js";
 
+test("agent planner routes arxiv topic imports without requiring documents", () => {
+  const plan = buildPlan({
+    question: "帮我从 arXiv 抓取 2 篇关于 retrieval augmented generation 的论文",
+    docIds: [],
+  });
+
+  assert.equal(plan.mode, "arxiv_import");
+  assert.equal(plan.wantsArxivImport, true);
+  assert.equal(plan.wantsDocumentRag, false);
+  assert.equal(plan.wantsWeb, false);
+  assert.equal(plan.requiresDocuments, false);
+});
+
 test("agent planner selects the contract review skill chain", () => {
   const plan = buildPlan({
     question: "Review this contract for risks and key terms.",

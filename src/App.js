@@ -20,6 +20,7 @@ import {
   requestSyntheticQualityRun,
 } from "./archiveApi";
 import { useChatSession } from "./hooks/useChatSession";
+import { useArxivEnrichment } from "./hooks/useArxivEnrichment";
 import { useDocumentSelection } from "./hooks/useDocumentSelection";
 import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
 import {
@@ -71,9 +72,20 @@ const App = () => {
     docIds,
     docLabel,
     handleUploadSuccess,
+    refreshDocuments,
     removeDocument: removeWorkspaceDocument,
     totalPages,
   } = useWorkspaceDocuments();
+  const {
+    clearSuggestion: clearArxivSuggestion,
+    importSuggestion: importArxivSuggestion,
+    isImporting: isArxivImporting,
+    isSuggestionLoading: isArxivSuggestionLoading,
+    requestSuggestions: requestArxivSuggestions,
+    suggestion: arxivSuggestion,
+  } = useArxivEnrichment({
+    onImportComplete: refreshDocuments,
+  });
   const {
     previewStatus,
     relevantDocuments,
@@ -111,17 +123,39 @@ const App = () => {
   const removeDocument = useCallback(
     (docId) =>
       removeWorkspaceDocument(docId, {
-        afterSuccess: resetWorkspaceSession,
+        afterSuccess: async () => {
+          if (arxivSuggestion?.document?.docId === docId) {
+            clearArxivSuggestion();
+          }
+
+          await resetWorkspaceSession();
+        },
       }),
-    [removeWorkspaceDocument, resetWorkspaceSession]
+    [
+      arxivSuggestion?.document?.docId,
+      clearArxivSuggestion,
+      removeWorkspaceDocument,
+      resetWorkspaceSession,
+    ]
   );
 
   const clearDocuments = useCallback(
     () =>
       clearWorkspaceDocuments({
-        afterSuccess: resetWorkspaceSession,
+        afterSuccess: async () => {
+          clearArxivSuggestion();
+          await resetWorkspaceSession();
+        },
       }),
-    [clearWorkspaceDocuments, resetWorkspaceSession]
+    [clearArxivSuggestion, clearWorkspaceDocuments, resetWorkspaceSession]
+  );
+
+  const handleWorkspaceUploadSuccess = useCallback(
+    (document) => {
+      handleUploadSuccess(document);
+      void requestArxivSuggestions(document);
+    },
+    [handleUploadSuccess, requestArxivSuggestions]
   );
 
   const loadLatestQualityReport = useCallback(async () => {
@@ -525,19 +559,26 @@ const App = () => {
           <WorkspaceSidebar
             activeDocuments={visibleDocuments}
             activeNavTarget={activeSidebarTarget}
+            arxivSuggestion={isDemoWorkbench ? null : arxivSuggestion}
             conversationCount={visibleConversation.length}
             currentTurn={visibleCurrentTurn}
             documentListRef={documentListRef}
+            isArxivImporting={isArxivImporting}
+            isArxivSuggestionLoading={
+              isDemoWorkbench ? false : isArxivSuggestionLoading
+            }
             isDemoWorkbench={isDemoWorkbench}
             isQualityLoading={isQualityLoading}
             onClearDocuments={clearDocuments}
+            onDismissArxivSuggestion={clearArxivSuggestion}
+            onImportArxivSuggestion={importArxivSuggestion}
             onLoadQualityHistory={loadQualityHistory}
             onLoadQualityLatest={loadLatestQualityReport}
             onRemoveDocument={removeDocument}
             onRunSyntheticQuality={runSyntheticQualityReport}
             onSelectSource={setSelectedSource}
             onNavigate={handleSidebarNavigate}
-            onUploadSuccess={handleUploadSuccess}
+            onUploadSuccess={handleWorkspaceUploadSuccess}
             qualityHistory={visibleQualityHistory}
             qualityReport={visibleQualityReport}
             qualityRef={qualityRef}

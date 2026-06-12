@@ -51,6 +51,8 @@ STARTUP_HEALTH_STRICT=false
 | `RAG_PROMPT_VERSION` | `v3` | Prompt 版本；`server/.env.example` 当前显式设置为 `v2`。 |
 | `STARTUP_HEALTH_STRICT` | `false` | 健康检查失败时是否阻止启动。 |
 
+arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要能访问 `https://export.arxiv.org/api/query` 和对应 PDF URL。
+
 ## 存储配置
 
 | 变量 | 默认值 | 作用 |
@@ -142,4 +144,3 @@ RAG_OBSERVABILITY_INCLUDE_CONTEXT=true
 cd server
 npm run observability:report
 ```
-

@@ -12,6 +12,8 @@
 | `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
 | `POST` | `/documents/clear` | 清空工作区文档。 |
 | `GET` | `/documents/:docId/file` | 以内联 PDF 方式流式返回文档，支持 range request。 |
+| `GET` | `/documents/:docId/arxiv/suggestions` | 基于文档 profile tags 返回相关 arXiv 候选和确认导入用的签名 token。 |
+| `POST` | `/documents/:docId/arxiv/import` | 使用 suggestions 返回的 `selectionToken` 导入同一批 arXiv 候选。 |
 | `POST` | `/upload/init` | 初始化分片上传会话。 |
 | `GET` | `/upload/status` | 查询分片上传进度。 |
 | `POST` | `/upload/chunk` | 上传单个文件分片。 |
@@ -99,4 +101,3 @@ npm run coverage:gate
 npm run eval:trajectory
 npm run quality:gate
 ```
-

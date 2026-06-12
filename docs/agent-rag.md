@@ -57,6 +57,7 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 
 内置 skills 位于 `server/rag/skills/built-ins.js`：
 
+- `arxiv_import`
 - `document_rag`
 - `web_search`
 - `inventory`
@@ -83,6 +84,10 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 | 模块 | 职责 |
 | --- | --- |
 | `server/rag/agent-planner.js` | 请求分类、planner actions、skill/chain 选择、执行前 clarification 判断。 |
+| `server/rag/arxiv-client.js` | arXiv Atom API 查询、feed 解析和 PDF 下载校验。 |
+| `server/rag/arxiv-enrichment.js` | 从已上传文档的本地 profile tags 生成 arXiv topic、返回签名候选 token，并在用户确认后导入同一批候选。 |
+| `server/rag/arxiv-importer.js` | 按 topic 或已确认候选列表下载 arXiv PDF，并通过现有文档 ingestion 写入索引。 |
+| `server/rag/arxiv-selection-token.js` | 对文档级 arXiv 推荐结果签名和验签，确保确认导入的是用户看到的候选。 |
 | `server/rag/agent-query-planner.js` | 为 document/custom skill 生成 retrieval plan、动态 topK 和实际检索 queries。 |
 | `server/rag/agent-document-loop.js` | Document RAG、self-check、gap analysis、follow-up retrieval、claim/gap 更新。 |
 | `server/rag/agent-run-context.js` | Trace append、budget snapshot、agent trace 记录、clarification 响应 orchestration。 |

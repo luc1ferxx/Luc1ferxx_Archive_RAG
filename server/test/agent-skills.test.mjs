@@ -41,6 +41,28 @@ test("built-in skill registry selects document and web skills with stable metada
   );
 });
 
+test("built-in skill registry selects arxiv import for topic fetches", () => {
+  const registry = createBuiltInSkillRegistry();
+  const selectedSkills = registry.select({
+    plan: {
+      wantsArxivImport: true,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+    },
+    docIds: [],
+  });
+
+  assert.deepEqual(
+    selectedSkills.map((skill) => skill.id),
+    [AGENT_SKILL_IDS.arxivImport]
+  );
+  assert.equal(selectedSkills[0].budgetKey, "arxivPaperFetches");
+  assert.equal(selectedSkills[0].requiresAccessScope, true);
+});
+
 test("default skill registry whitelists custom skills separately from built-ins", () => {
   const builtInRegistry = createBuiltInSkillRegistry();
   const defaultRegistry = createDefaultSkillRegistry();
@@ -232,6 +254,79 @@ test("agent rag executes selected skills with access scope and reports skill met
   assert.equal(documentObservation.budgetLimit, 2);
   assert.equal(response.body.agentObservability.runs[0].phase, "primary");
   assert.equal(response.body.agentObservability.runs[0].citationCount, 1);
+});
+
+test("agent rag imports arxiv papers as a direct built-in skill", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const imports = [];
+  const response = await runAgentRag({
+    accessScope,
+    arxivImportService: {
+      importTopic: async ({ accessScope: receivedScope, maxResults, topic }) => {
+        imports.push({
+          accessScope: receivedScope,
+          maxResults,
+          topic,
+        });
+
+        return {
+          topic,
+          requestedMaxResults: maxResults,
+          foundCount: 1,
+          importedCount: 1,
+          skippedCount: 0,
+          failedCount: 0,
+          importedPapers: [
+            {
+              arxivId: "2401.00001v1",
+              title: "Retrieval Augmented Generation for Archives",
+              absUrl: "https://arxiv.org/abs/2401.00001v1",
+              pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+              docId: "doc-arxiv",
+              fileName: "arxiv-2401.00001.pdf",
+              status: "imported",
+            },
+          ],
+          skippedPapers: [],
+          failedPapers: [],
+        };
+      },
+    },
+    docIds: [],
+    question: "帮我从 arXiv 抓取 2 篇关于 retrieval augmented generation 的论文",
+    ragService: {
+      listDocuments: () => [],
+    },
+    sessionId: "session-1",
+    userId: "alice",
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "arxiv_import");
+  assert.match(response.body.agentAnswer, /已从 arXiv 搜索主题/);
+  assert.equal(imports.length, 1);
+  assert.deepEqual(imports[0].accessScope, accessScope);
+  assert.equal(imports[0].maxResults, 2);
+  assert.equal(imports[0].topic, "retrieval augmented generation");
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "arxiv_import", "synthesis"]
+  );
+
+  const observation = response.body.agentObservability.skills.find(
+    (skill) => skill.skillId === AGENT_SKILL_IDS.arxivImport
+  );
+
+  assert.equal(observation.status, "completed");
+  assert.equal(observation.budgetKey, "arxivPaperFetches");
+  assert.equal(observation.budgetUsed, 1);
+  assert.equal(observation.budgetLimit, 1);
 });
 
 test("agent rag sends planned retrieval queries and dynamic topK to document rag", async () => {

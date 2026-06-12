@@ -15,6 +15,7 @@ import {
   formatPageCount,
 } from "../archiveWorkspace";
 import DocumentProfileSnippet from "./DocumentProfileSnippet";
+import ArxivSuggestionPanel from "./ArxivSuggestionPanel";
 import PdfUploader from "./PdfUploader";
 import QualityGuardPanel from "./QualityGuardPanel";
 import SpotlightCard from "./react-bits/SpotlightCard";
@@ -22,12 +23,17 @@ import SpotlightCard from "./react-bits/SpotlightCard";
 const WorkspaceSidebar = ({
   activeNavTarget,
   activeDocuments,
+  arxivSuggestion,
   conversationCount,
   currentTurn,
   documentListRef,
+  isArxivImporting,
+  isArxivSuggestionLoading,
   isDemoWorkbench,
   isQualityLoading,
   onClearDocuments,
+  onDismissArxivSuggestion,
+  onImportArxivSuggestion,
   onLoadQualityHistory,
   onLoadQualityLatest,
   onRemoveDocument,
@@ -144,6 +150,13 @@ const WorkspaceSidebar = ({
         </span>
       </div>
       <PdfUploader onUploadSuccess={onUploadSuccess} />
+      <ArxivSuggestionPanel
+        isImporting={isArxivImporting}
+        isLoading={isArxivSuggestionLoading}
+        onDismiss={onDismissArxivSuggestion}
+        onImport={onImportArxivSuggestion}
+        suggestion={arxivSuggestion}
+      />
     </section>
 
     <section className="archive-sidebar-section archive-context-section">

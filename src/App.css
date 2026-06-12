@@ -1674,6 +1674,109 @@
   text-align: left;
 }
 
+.arxiv-suggestion-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(15, 159, 122, 0.2);
+  border-radius: var(--archive-radius-md);
+  background: #f6fbfa;
+}
+
+.arxiv-suggestion-head,
+.arxiv-suggestion-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.arxiv-suggestion-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.arxiv-suggestion-title span,
+.arxiv-paper-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.arxiv-suggestion-title svg {
+  flex: 0 0 auto;
+  color: var(--archive-accent-agent);
+}
+
+.arxiv-suggestion-dismiss.ant-btn {
+  flex: 0 0 auto;
+  color: var(--archive-text-muted);
+}
+
+.arxiv-suggestion-copy,
+.arxiv-suggestion-loading {
+  min-width: 0;
+  color: var(--archive-text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.arxiv-paper-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.arxiv-paper-item {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: var(--archive-radius-sm);
+  background: #ffffff;
+}
+
+.arxiv-paper-item span {
+  color: var(--archive-text-muted);
+  font-size: 0.66rem;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.arxiv-paper-item strong {
+  display: -webkit-box;
+  color: var(--archive-text-primary);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.arxiv-suggestion-actions {
+  justify-content: flex-start;
+}
+
+.arxiv-suggestion-actions .ant-btn {
+  height: 32px;
+  border-radius: var(--archive-radius-md);
+  font-weight: 680;
+}
+
+.arxiv-suggestion-actions .ant-btn-primary {
+  border-color: var(--archive-accent-agent);
+  background: var(--archive-accent-agent);
+  color: #ffffff;
+}
+
 @media (max-width: 1279px) {
   .archive-app {
     grid-template-areas:

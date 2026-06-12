@@ -7,6 +7,7 @@ const normalizeText = (value) => (hasText(value) ? value.trim() : "");
 
 export const buildDirectAnswerModes = ({ customSkills = [] } = {}) =>
   new Set([
+    "arxiv_import",
     "inventory",
     "document_discovery",
     "research_brief",
@@ -28,6 +29,7 @@ export const shouldFinalizeAgentAnswer = ({
 
 export const buildSynthesisAnswer = ({
   plan,
+  arxivImportAnswer,
   ragResult,
   webResult,
   customSkillResults = [],
@@ -35,6 +37,10 @@ export const buildSynthesisAnswer = ({
   discoveryAnswer,
   researchBrief,
 }) => {
+  if (plan.mode === "arxiv_import") {
+    return arxivImportAnswer ?? "The arXiv import could not be completed.";
+  }
+
   if (plan.mode === SKILL_CHAIN_MODE) {
     const completedResults = customSkillResults
       .filter((result) => result.ok && normalizeText(result.text))

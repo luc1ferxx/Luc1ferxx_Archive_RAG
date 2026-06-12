@@ -1,6 +1,83 @@
+import { consumeBudget } from "./agent-budget.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
+
+export const runArxivImportSkill = async ({
+  accessScope,
+  addBudgetLimitTrace = noop,
+  addTraceStep = noop,
+  arxivImportService,
+  arxivImportSkill,
+  budgetState,
+  buildSkillTraceDetail = (result) => result,
+  executeObservedSkill,
+  question,
+  recordSkippedSkill = noop,
+  recordSkillResult = noop,
+} = {}) => {
+  if (!arxivImportSkill) {
+    return null;
+  }
+
+  const arxivBudget = consumeBudget(budgetState, arxivImportSkill.budgetKey);
+
+  if (!arxivBudget.ok) {
+    recordSkippedSkill({
+      skill: arxivImportSkill,
+      result: buildFailedSkillResult(
+        arxivImportSkill,
+        new Error(arxivBudget.reason)
+      ),
+      phase: "primary",
+      budget: arxivBudget,
+    });
+    addBudgetLimitTrace({
+      tool: "arXiv Import",
+      reason: arxivBudget.reason,
+    });
+
+    return null;
+  }
+
+  const arxivResult = await executeObservedSkill(
+    arxivImportSkill,
+    {
+      accessScope,
+      arxivImportService,
+      question,
+    },
+    {
+      budget: arxivBudget,
+      phase: "primary",
+    }
+  );
+  recordSkillResult(arxivResult);
+  const importedCount = arxivResult.value?.importedCount ?? 0;
+  const skippedCount = arxivResult.value?.skippedCount ?? 0;
+  const processedCount = importedCount + skippedCount;
+
+  addTraceStep({
+    type: "arxiv_import",
+    label: "arXiv Import",
+    status: arxivResult.ok ? "completed" : "failed",
+    summary: arxivResult.ok
+      ? `Processed ${processedCount} arXiv paper${
+          processedCount === 1 ? "" : "s"
+        } (${importedCount} imported, ${skippedCount} already indexed).`
+      : `arXiv import failed: ${serializeError(
+          arxivResult.error,
+          "Unable to import arXiv papers."
+        )}`,
+    detail: buildSkillTraceDetail(arxivResult, arxivResult.traceDetail ?? {}),
+  });
+
+  return arxivResult.ok ? arxivResult.text : `arXiv import unavailable: ${serializeError(
+    arxivResult.error,
+    "Unable to import arXiv papers."
+  )}`;
+};
 
 export const runResearchBriefSkill = async ({
   accessScope,

@@ -5,6 +5,7 @@ import {
   validateAgentExecutionPlan,
 } from "./agent-execution-plan.js";
 import {
+  runArxivImportSkill,
   runCustomSkills,
   runDocumentDiscoverySkill,
   runInventorySkill,
@@ -20,6 +21,7 @@ export const runAgentExecutionPlan = async ({
   accessScope,
   addBudgetLimitTrace,
   addTraceStep,
+  arxivImportService,
   budgetState,
   buildSkillTraceDetail,
   docIds,
@@ -51,6 +53,7 @@ export const runAgentExecutionPlan = async ({
     selectedSkills,
   });
   const state = {
+    arxivImportAnswer: null,
     customSkillResults: [],
     customSkills: getCustomSkills(selectedSkills),
     discoveryAnswer: null,
@@ -66,6 +69,24 @@ export const runAgentExecutionPlan = async ({
   };
 
   const stepHandlers = {
+    [AGENT_EXECUTION_STEP_IDS.arxivImport]: async () => {
+      const arxivImportSkill = getSelectedSkill(AGENT_SKILL_IDS.arxivImport);
+
+      state.arxivImportAnswer = await runArxivImportSkill({
+        accessScope,
+        addBudgetLimitTrace,
+        addTraceStep,
+        arxivImportService,
+        arxivImportSkill,
+        budgetState,
+        buildSkillTraceDetail,
+        executeObservedSkill,
+        question,
+        recordSkippedSkill,
+        recordSkillResult,
+      });
+    },
+
     [AGENT_EXECUTION_STEP_IDS.researchBrief]: async () => {
       const researchSkill = getSelectedSkill(AGENT_SKILL_IDS.researchBrief);
 

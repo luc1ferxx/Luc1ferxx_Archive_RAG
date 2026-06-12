@@ -257,6 +257,7 @@ test("deterministic planner adapter emits the guarded default execution order", 
   assert.deepEqual(
     executionPlan.map((step) => step.id),
     [
+      AGENT_EXECUTION_STEP_IDS.arxivImport,
       AGENT_EXECUTION_STEP_IDS.researchBrief,
       AGENT_EXECUTION_STEP_IDS.inventory,
       AGENT_EXECUTION_STEP_IDS.documentDiscovery,

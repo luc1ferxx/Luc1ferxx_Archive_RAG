@@ -1,5 +1,6 @@
 export const DEFAULT_AGENT_BUDGET = {
   maxTraceSteps: 16,
+  maxArxivPaperFetches: 1,
   maxDocumentRagCalls: 2,
   maxCustomSkillCalls: 2,
   maxWebSearchCalls: 1,
@@ -7,6 +8,7 @@ export const DEFAULT_AGENT_BUDGET = {
 };
 
 const limitKeyByBudgetKey = {
+  arxivPaperFetches: "maxArxivPaperFetches",
   customSkillCalls: "maxCustomSkillCalls",
   documentRagCalls: "maxDocumentRagCalls",
   researchQuestions: "maxResearchQuestions",
@@ -15,6 +17,7 @@ const limitKeyByBudgetKey = {
 };
 
 const labelByBudgetKey = {
+  arxivPaperFetches: "arXiv import",
   customSkillCalls: "custom skill",
   documentRagCalls: "document RAG",
   researchQuestions: "research question",
@@ -39,6 +42,7 @@ export const createAgentBudget = (overrides = {}) => {
   return {
     limits,
     used: {
+      arxivPaperFetches: 0,
       documentRagCalls: 0,
       customSkillCalls: 0,
       researchQuestions: 0,

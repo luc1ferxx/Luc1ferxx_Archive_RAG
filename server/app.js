@@ -34,6 +34,9 @@ import {
   recordFeedback,
 } from "./feedback.js";
 import { buildHealthReport, runStartupHealthChecks } from "./health.js";
+import { createArxivEnrichmentService } from "./rag/arxiv-enrichment.js";
+import { createArxivService, normalizeArxivMaxResults } from "./rag/arxiv-client.js";
+import { createArxivImportService } from "./rag/arxiv-importer.js";
 import { runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
@@ -171,6 +174,7 @@ const resolveScopedUserId = (req, rawUserId) =>
 
 const buildChatResponse = async ({
   agentBudget,
+  arxivImportService,
   executionPlannerAdapter,
   ragService,
   webChatService,
@@ -197,6 +201,7 @@ const buildChatResponse = async ({
 
   return runAgentRag({
     agentBudget,
+    arxivImportService,
     ragService,
     webChatService,
     question,
@@ -237,6 +242,19 @@ export const createApp = async (options = {}) => {
     ...(options.ragService ?? {}),
   };
   const webChatService = options.chatMcp ?? chatMCP;
+  const arxivService = options.arxivService ?? createArxivService();
+  const arxivImportService = options.arxivImportService ?? createArxivImportService({
+    arxivService,
+    ragService,
+    tempDirectory: path.join(uploadsDirectory, "arxiv-imports"),
+  });
+  const arxivEnrichmentService =
+    options.arxivEnrichmentService ??
+    createArxivEnrichmentService({
+      arxivImportService,
+      arxivService,
+      ragService,
+    });
   const skillRegistry = options.skillRegistry ?? null;
   const uploadStore = options.uploadStore ?? {
     clearUploadSession,
@@ -411,6 +429,104 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to clear documents."),
+      });
+    }
+  });
+
+  app.get("/arxiv/search", async (req, res) => {
+    const topic = req.query.topic?.trim();
+
+    if (!topic) {
+      return res.status(400).json({
+        error: "topic is required.",
+      });
+    }
+
+    try {
+      const papers = await arxivService.search({
+        topic,
+        maxResults: normalizeArxivMaxResults(req.query.maxResults),
+      });
+
+      return res.json({
+        topic,
+        papers,
+      });
+    } catch (error) {
+      return res.status(error.status ?? 502).json({
+        error: serializeError(error, "Failed to search arXiv."),
+      });
+    }
+  });
+
+  app.post("/arxiv/import", async (req, res) => {
+    const topic = req.body.topic?.trim();
+
+    if (!topic) {
+      return res.status(400).json({
+        error: "topic is required.",
+      });
+    }
+
+    try {
+      const result = await arxivImportService.importTopic({
+        accessScope: getRequestAccessScope(req),
+        topic,
+        maxResults: normalizeArxivMaxResults(req.body.maxResults),
+      });
+
+      return res.status(201).json(result);
+    } catch (error) {
+      return res.status(error.status ?? 502).json({
+        error: serializeError(error, "Failed to import arXiv papers."),
+      });
+    }
+  });
+
+  app.get("/documents/:docId/arxiv/suggestions", async (req, res) => {
+    const docId = req.params.docId?.trim();
+
+    if (!docId) {
+      return res.status(400).json({
+        error: "docId is required.",
+      });
+    }
+
+    try {
+      const result = await arxivEnrichmentService.suggestForDocument({
+        accessScope: getRequestAccessScope(req),
+        docId,
+        maxResults: normalizeArxivMaxResults(req.query.maxResults),
+      });
+
+      return res.json(result);
+    } catch (error) {
+      return res.status(error.status ?? 502).json({
+        error: serializeError(error, "Failed to find arXiv suggestions."),
+      });
+    }
+  });
+
+  app.post("/documents/:docId/arxiv/import", async (req, res) => {
+    const docId = req.params.docId?.trim();
+
+    if (!docId) {
+      return res.status(400).json({
+        error: "docId is required.",
+      });
+    }
+
+    try {
+      const result = await arxivEnrichmentService.importForDocument({
+        accessScope: getRequestAccessScope(req),
+        docId,
+        selectionToken: req.body.selectionToken,
+      });
+
+      return res.status(201).json(result);
+    } catch (error) {
+      return res.status(error.status ?? 502).json({
+        error: serializeError(error, "Failed to import arXiv suggestions."),
       });
     }
   });
@@ -806,6 +922,7 @@ export const createApp = async (options = {}) => {
     try {
       const response = await buildChatResponse({
         agentBudget,
+        arxivImportService,
         ragService,
         webChatService,
         question,
