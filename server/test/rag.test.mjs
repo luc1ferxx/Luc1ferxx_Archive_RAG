@@ -38,6 +38,7 @@ import { analyzeComparison } from "../rag/comparison-engine.js";
 import { alignComparisonEvidence } from "../rag/evidence-aligner.js";
 import { planQaEvidenceGap } from "../rag/gap-planner.js";
 import { getRerankCandidateMultiplier } from "../rag/config.js";
+import { buildArxivTitleHash } from "../rag/arxiv-identity.js";
 import { routeQuery } from "../rag/query-router.js";
 import { buildTermSet } from "../rag/text-utils.js";
 import {
@@ -670,7 +671,10 @@ test("ingest stores automatic document profile metadata", async () => {
     source: {
       sourceType: "arxiv",
       arxivId: "2401.00001v1",
+      absUrl: "https://arxiv.org/abs/2401.00001v1",
+      pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
       relatedToDocId: "private-notes",
+      titleHash: buildArxivTitleHash("Retrieval Augmented Generation for Archives"),
       importedByUserConfirmation: true,
     },
   });
@@ -683,7 +687,10 @@ test("ingest stores automatic document profile metadata", async () => {
   assert.deepEqual(document.source, {
     sourceType: "arxiv",
     arxivId: "2401.00001v1",
+    absUrl: "https://arxiv.org/abs/2401.00001v1",
+    pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
     relatedToDocId: "private-notes",
+    titleHash: buildArxivTitleHash("Retrieval Augmented Generation for Archives"),
     importedByUserConfirmation: true,
   });
   assert.equal(getDocument("profiled-benefits").summary, document.summary);

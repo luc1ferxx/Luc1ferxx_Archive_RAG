@@ -6,6 +6,10 @@ import {
   DEFAULT_ARXIV_MAX_RESULTS,
   normalizeArxivMaxResults,
 } from "./arxiv-client.js";
+import {
+  buildArxivPaperIdentity,
+  findExistingArxivDocument,
+} from "./arxiv-identity.js";
 
 const DEFAULT_IMPORT_DELAY_MS = 1000;
 
@@ -33,13 +37,17 @@ export const buildArxivPdfFileName = (paper = {}) => {
   return `arxiv-${arxivId}-${title}.pdf`;
 };
 
-const getExistingDocument = ({ fileName, ragService, accessScope }) => {
+const getExistingDocument = ({ fileName, paper, ragService, accessScope }) => {
   const documents = ragService.listDocuments?.(accessScope) ?? [];
 
-  return documents.find((document) => document.fileName === fileName) ?? null;
+  return findExistingArxivDocument({
+    documents,
+    fileName,
+    paper,
+  });
 };
 
-const serializeImportedPaper = ({ document, paper, status }) => ({
+const serializeImportedPaper = ({ document, duplicateMatch = null, paper, status }) => ({
   arxivId: paper.arxivId,
   title: paper.title,
   absUrl: paper.absUrl,
@@ -52,6 +60,7 @@ const serializeImportedPaper = ({ document, paper, status }) => ({
   docId: document?.docId ?? null,
   fileName: document?.fileName ?? buildArxivPdfFileName(paper),
   status,
+  ...(duplicateMatch ? { duplicateMatch } : {}),
 });
 
 const serializeFailedPaper = ({ error, paper }) => ({
@@ -62,12 +71,32 @@ const serializeFailedPaper = ({ error, paper }) => ({
   error: error instanceof Error ? error.message : String(error),
 });
 
-const buildArxivDocumentSource = ({ importContext = {}, paper = {} } = {}) => ({
-  sourceType: "arxiv",
-  arxivId: normalizeText(paper.arxivId),
-  relatedToDocId: normalizeText(importContext.relatedToDocId),
-  importedByUserConfirmation: Boolean(importContext.importedByUserConfirmation),
-});
+const buildArxivDocumentSource = ({ importContext = {}, paper = {} } = {}) => {
+  const identity = buildArxivPaperIdentity(paper);
+  const source = {
+    sourceType: "arxiv",
+    arxivId: normalizeText(paper.arxivId),
+    relatedToDocId: normalizeText(importContext.relatedToDocId),
+    importedByUserConfirmation: Boolean(importContext.importedByUserConfirmation),
+  };
+
+  const absUrl = normalizeText(paper.absUrl);
+  const pdfUrl = normalizeText(paper.pdfUrl);
+
+  if (absUrl) {
+    source.absUrl = absUrl;
+  }
+
+  if (pdfUrl) {
+    source.pdfUrl = pdfUrl;
+  }
+
+  if (identity.titleHash) {
+    source.titleHash = identity.titleHash;
+  }
+
+  return source;
+};
 
 export const importArxivTopic = async ({
   accessScope = {},
@@ -152,14 +181,16 @@ export const importArxivPapers = async ({
     const fileName = buildArxivPdfFileName(paper);
     const existingDocument = getExistingDocument({
       fileName,
+      paper,
       ragService,
       accessScope,
     });
 
-    if (existingDocument) {
+    if (existingDocument.document) {
       skippedPapers.push(
         serializeImportedPaper({
-          document: existingDocument,
+          document: existingDocument.document,
+          duplicateMatch: existingDocument.duplicateMatch,
           paper,
           status: "already_indexed",
         })
@@ -178,14 +209,14 @@ export const importArxivPapers = async ({
       const document = await ragService.ingestDocument({
         docId: randomUUID(),
         filePath: pdfPath,
-          fileName,
-          ownerUserId: accessScope.userId,
-          source: buildArxivDocumentSource({
-            importContext,
-            paper,
-          }),
-          workspaceId: accessScope.workspaceId,
-        });
+        fileName,
+        ownerUserId: accessScope.userId,
+        source: buildArxivDocumentSource({
+          importContext,
+          paper,
+        }),
+        workspaceId: accessScope.workspaceId,
+      });
 
       importedPapers.push(
         serializeImportedPaper({

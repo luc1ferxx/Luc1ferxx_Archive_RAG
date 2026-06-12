@@ -13,7 +13,7 @@
 | `POST` | `/documents/clear` | 清空工作区文档。 |
 | `GET` | `/documents/:docId/file` | 以内联 PDF 方式流式返回文档，支持 range request。 |
 | `GET` | `/documents/:docId/arxiv/suggestions` | 基于文档 profile 的本地 keyphrase 排名和 relevance check 返回相关 arXiv 候选和确认导入用的签名 token。 |
-| `POST` | `/documents/:docId/arxiv/import` | 使用 suggestions 返回的 `selectionToken`，可带 `selectedArxivIds`；导入前会复检所选候选相关性。 |
+| `POST` | `/documents/:docId/arxiv/import` | 使用 suggestions 返回的 `selectionToken`，可带 `selectedArxivIds`；导入前会复检所选候选相关性，并按 arXiv ID / PDF URL / title hash 跳过已索引论文。 |
 | `POST` | `/upload/init` | 初始化分片上传会话。 |
 | `GET` | `/upload/status` | 查询分片上传进度。 |
 | `POST` | `/upload/chunk` | 上传单个文件分片。 |

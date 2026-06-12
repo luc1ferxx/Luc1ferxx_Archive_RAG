@@ -99,12 +99,30 @@ const normalizeProfileSource = (source = {}) => {
     return null;
   }
 
-  return {
+  const normalizedSource = {
     sourceType,
     arxivId: String(source.arxivId ?? "").trim(),
     relatedToDocId: String(source.relatedToDocId ?? "").trim(),
     importedByUserConfirmation: Boolean(source.importedByUserConfirmation),
   };
+
+  const absUrl = String(source.absUrl ?? "").trim();
+  const pdfUrl = String(source.pdfUrl ?? "").trim();
+  const titleHash = String(source.titleHash ?? "").trim();
+
+  if (absUrl) {
+    normalizedSource.absUrl = absUrl;
+  }
+
+  if (pdfUrl) {
+    normalizedSource.pdfUrl = pdfUrl;
+  }
+
+  if (titleHash) {
+    normalizedSource.titleHash = titleHash;
+  }
+
+  return normalizedSource;
 };
 
 const normalizeProfile = (document = {}) => {

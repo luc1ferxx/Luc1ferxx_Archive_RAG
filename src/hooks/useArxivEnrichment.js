@@ -10,6 +10,9 @@ const DEFAULT_SUGGESTION_LIMIT = 3;
 const getBackendMessage = (error, fallbackMessage) =>
   error.response?.data?.error ?? fallbackMessage;
 
+const formatArxivPaperCount = (count) =>
+  `${count} arXiv paper${count === 1 ? "" : "s"}`;
+
 export const useArxivEnrichment = ({ onImportComplete } = {}) => {
   const [suggestion, setSuggestion] = useState(null);
   const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
@@ -72,12 +75,17 @@ export const useArxivEnrichment = ({ onImportComplete } = {}) => {
       await onImportComplete?.(result);
       setSuggestion(null);
 
-      if ((result.importedCount ?? 0) > 0) {
+      const importedCount = result.importedCount ?? 0;
+      const skippedCount = result.skippedCount ?? 0;
+
+      if (importedCount > 0 && skippedCount > 0) {
         message.success(
-          `Imported ${result.importedCount ?? 0} arXiv paper${
-            result.importedCount === 1 ? "" : "s"
-          }.`
+          `Imported ${formatArxivPaperCount(
+            importedCount
+          )}; ${formatArxivPaperCount(skippedCount)} already indexed.`
         );
+      } else if (importedCount > 0) {
+        message.success(`Imported ${formatArxivPaperCount(importedCount)}.`);
       } else if (completedCount > 0) {
         message.info("Suggested arXiv papers were already indexed.");
       } else {
