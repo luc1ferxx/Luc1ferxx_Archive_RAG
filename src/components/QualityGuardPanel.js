@@ -89,6 +89,7 @@ const QualityGuardPanel = ({
     <div className="quality-panel">
       <div className="quality-actions">
         <Button
+          aria-label="Latest"
           className="archive-secondary-button quality-action-button"
           icon={<ReloadOutlined />}
           loading={isQualityLoading}
@@ -97,6 +98,7 @@ const QualityGuardPanel = ({
           Latest
         </Button>
         <Button
+          aria-label="History"
           className="archive-secondary-button quality-action-button"
           icon={<BarChartOutlined />}
           loading={isQualityLoading}
@@ -105,6 +107,7 @@ const QualityGuardPanel = ({
           History
         </Button>
         <Button
+          aria-label="Run eval"
           className="archive-secondary-button quality-action-button"
           icon={<ExperimentOutlined />}
           loading={isQualityLoading}
@@ -119,6 +122,21 @@ const QualityGuardPanel = ({
           <div className={`quality-status quality-status-${status}`}>
             <span>{statusLabel}</span>
             <span>{qualityReport.summary?.runId ?? "latest run"}</span>
+          </div>
+
+          <div className="quality-score-card">
+            <div className="quality-score-ring">
+              <strong>
+                {typeof metrics.overallPassPercent === "number"
+                  ? Math.round(metrics.overallPassPercent)
+                  : "N/A"}
+              </strong>
+              <span>/100</span>
+            </div>
+            <div className="quality-score-copy">
+              <strong>Excellent</strong>
+              <span>Guard is blocking low-quality answers</span>
+            </div>
           </div>
 
           <div className="quality-metrics">

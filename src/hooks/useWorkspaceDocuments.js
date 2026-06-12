@@ -28,9 +28,13 @@ export const useWorkspaceDocuments = () => {
         }
       } catch (error) {
         if (!cancelled) {
-          message.error(
-            getBackendMessage(error, "Unable to load persisted documents.")
-          );
+          if (error.code === "ERR_NETWORK") {
+            console.warn("Persisted documents are unavailable:", error.message);
+          } else {
+            message.error(
+              getBackendMessage(error, "Unable to load persisted documents.")
+            );
+          }
         }
       }
     };

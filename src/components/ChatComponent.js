@@ -1,11 +1,19 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Button, Input, message } from "antd";
-import { AudioOutlined } from "@ant-design/icons";
+import {
+  AudioOutlined,
+  AppstoreOutlined,
+  PaperClipOutlined,
+  SendOutlined,
+  SoundOutlined,
+} from "@ant-design/icons";
 import SpeechRecognition, {
   useSpeechRecognition,
 } from "react-speech-recognition";
 import Speech from "speak-tts";
 import { requestChat } from "../archiveApi";
+import { DEMO_CONVERSATION } from "../demoWorkbench";
+import StarBorder from "./react-bits/StarBorder";
 
 const { Search } = Input;
 
@@ -16,14 +24,19 @@ const ChatComponent = (props) => {
     sessionId,
     userId,
     handleResp,
+    inputId,
+    isDemoWorkbench = false,
     isLoading,
+    onAttach,
     setIsLoading,
   } = props;
   const [searchValue, setSearchValue] = useState("");
   const [isChatModeOn, setIsChatModeOn] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isToolsOpen, setIsToolsOpen] = useState(false);
+  const [retrievalMode, setRetrievalMode] = useState("Auto");
   const [speech, setSpeech] = useState();
-  const hasDocuments = docIds.length > 0;
+  const hasDocuments = isDemoWorkbench || docIds.length > 0;
 
   const { transcript, listening, resetTranscript } = useSpeechRecognition();
 
@@ -67,6 +80,22 @@ const ChatComponent = (props) => {
       }
 
       setSearchValue("");
+
+      if (isDemoWorkbench) {
+        const demoAnswer = {
+          ...DEMO_CONVERSATION[0].answer,
+          agentAnswer: DEMO_CONVERSATION[0].answer.agentAnswer,
+        };
+
+        handleResp(trimmedQuestion, demoAnswer);
+
+        if (isChatModeOn) {
+          talk(demoAnswer.agentAnswer);
+        }
+
+        return;
+      }
+
       setIsLoading(true);
 
       try {
@@ -103,6 +132,7 @@ const ChatComponent = (props) => {
     [
       docIds,
       handleResp,
+      isDemoWorkbench,
       isChatModeOn,
       sessionId,
       setIsLoading,
@@ -113,21 +143,31 @@ const ChatComponent = (props) => {
 
   useEffect(() => {
     const initializedSpeech = new Speech();
+    const baseSpeechOptions = {
+      volume: 1,
+      lang: "en-US",
+      rate: 1,
+      pitch: 1,
+      splitSentences: false,
+    };
 
     initializedSpeech
       .init({
-        volume: 1,
-        lang: "en-US",
-        rate: 1,
-        pitch: 1,
         voice: "Google US English",
-        splitSentences: false,
+        ...baseSpeechOptions,
       })
       .then(() => {
         setSpeech(initializedSpeech);
       })
       .catch((error) => {
-        console.error("An error occurred while initializing speech:", error);
+        initializedSpeech
+          .init(baseSpeechOptions)
+          .then(() => {
+            setSpeech(initializedSpeech);
+          })
+          .catch((fallbackError) => {
+            console.warn("Speech synthesis is unavailable:", fallbackError ?? error);
+          });
       });
   }, []);
 
@@ -180,6 +220,23 @@ const ChatComponent = (props) => {
     }
   };
 
+  const cycleRetrievalMode = () => {
+    setRetrievalMode((currentMode) => {
+      if (currentMode === "Auto") {
+        message.info("Retrieval mode: Documents");
+        return "Docs";
+      }
+
+      if (currentMode === "Docs") {
+        message.info("Retrieval mode: Web");
+        return "Web";
+      }
+
+      message.info("Retrieval mode: Auto");
+      return "Auto";
+    });
+  };
+
   const transcriptLabel = isChatModeOn
     ? isRecording
       ? transcript || "Listening for your question."
@@ -189,62 +246,122 @@ const ChatComponent = (props) => {
       : "Agent can inspect the empty workspace or answer web-current questions.";
 
   return (
-    <div className="archive-composer-bar">
-      <div className="archive-composer-top">
-        <div className="archive-composer-summary">
-          <div className="archive-composer-kicker">Workspace</div>
-          <div className="archive-composer-meta">
-            {hasDocuments ? docLabel : "No active documents"}
-          </div>
-        </div>
-
-        <div className="archive-voice-buttons">
-          <Button
-            type="primary"
-            size="large"
-            className={`archive-action-button ${isChatModeOn ? "is-active" : ""}`}
-            onClick={chatModeClickHandler}
-          >
-            Voice
-          </Button>
-
-          {isChatModeOn && (
-            <Button
-              type="primary"
-              icon={<AudioOutlined />}
+    <StarBorder
+      as="div"
+      className="archive-composer-border"
+      color="rgba(39, 110, 241, 0.42)"
+      speed="9s"
+      thickness={1}
+    >
+      <div className={`archive-composer-bar ${isDemoWorkbench ? "is-demo" : ""}`}>
+        <div className="archive-composer-controls">
+          {!isChatModeOn ? (
+            <Search
+              id={inputId}
+              className="archive-search"
+              placeholder={
+                hasDocuments
+                  ? "Ask the agent about the current documents"
+                  : "Ask the agent what documents are indexed"
+              }
+              enterButton={
+                <span aria-label="Ask" className="archive-send-icon">
+                  <SendOutlined />
+                </span>
+              }
               size="large"
-              className={`archive-action-button ${
-                isRecording ? "is-recording" : ""
-              }`}
-              onClick={recordingClickHandler}
-            >
-              {isRecording ? "Listening" : "Record"}
-            </Button>
-          )}
+              onSearch={onSearch}
+              loading={isLoading}
+              value={searchValue}
+              onChange={(event) => setSearchValue(event.target.value)}
+            />
+          ) : null}
+
+          <div className="archive-composer-toolbar">
+            <div className="archive-composer-tools" aria-label="Composer tools">
+              <button
+                type="button"
+                aria-label="Attach file"
+                onClick={() => onAttach?.()}
+              >
+                <PaperClipOutlined />
+              </button>
+              <button
+                type="button"
+                aria-expanded={isToolsOpen}
+                aria-label="Tools"
+                onClick={() => setIsToolsOpen((isOpen) => !isOpen)}
+              >
+                <AppstoreOutlined />
+              </button>
+              <button
+                type="button"
+                aria-label={`Retrieval mode ${retrievalMode}`}
+                className="archive-auto-button"
+                onClick={cycleRetrievalMode}
+              >
+                {retrievalMode}
+              </button>
+            </div>
+
+            <div className="archive-voice-buttons">
+              <Button
+                type="primary"
+                size="large"
+                icon={<SoundOutlined />}
+                className={`archive-action-button ${isChatModeOn ? "is-active" : ""}`}
+                onClick={chatModeClickHandler}
+              >
+                Voice
+              </Button>
+
+              {isChatModeOn ? (
+                <Button
+                  type="primary"
+                  icon={<AudioOutlined />}
+                  size="large"
+                  className={`archive-action-button ${
+                    isRecording ? "is-recording" : ""
+                  }`}
+                  onClick={recordingClickHandler}
+                >
+                  {isRecording ? "Listening" : "Record"}
+                </Button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="archive-composer-transcript">
+            {isDemoWorkbench
+              ? "Enter to send · Shift + Enter for new line"
+              : transcriptLabel}
+          </div>
+
+          {isToolsOpen ? (
+            <div className="archive-composer-menu">
+              <button
+                type="button"
+                onClick={() => message.info("Document RAG is active for this workspace.")}
+              >
+                Document RAG
+              </button>
+              <button
+                type="button"
+                onClick={() => message.info("Quality Guard checks are shown in the sidebar.")}
+              >
+                Quality Guard
+              </button>
+              <button
+                type="button"
+                onClick={() => message.info("Web lookup runs only when the agent needs fresh external context.")}
+              >
+                Web lookup
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
-
-      <div className="archive-composer-controls">
-        {!isChatModeOn && (
-          <Search
-            className="archive-search"
-            placeholder={
-              hasDocuments
-                ? "Ask the agent about the current documents"
-                : "Ask the agent what documents are indexed"
-            }
-            enterButton="Ask"
-            size="large"
-            onSearch={onSearch}
-            loading={isLoading}
-            value={searchValue}
-            onChange={(event) => setSearchValue(event.target.value)}
-          />
-        )}
-
-        <div className="archive-composer-transcript">{transcriptLabel}</div>
-      </div>
-    </div>
+    </StarBorder>
   );
 };
 

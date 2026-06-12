@@ -1,0 +1,72 @@
+.rb-star-border {
+  position: relative;
+  display: block;
+  padding: var(--rb-star-thickness);
+  border-radius: inherit;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.rb-star-border__beam {
+  position: absolute;
+  z-index: 0;
+  width: 220%;
+  height: 38%;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, var(--rb-star-color), transparent 9%),
+    linear-gradient(90deg, transparent, var(--rb-star-color), transparent);
+  filter: blur(6px);
+  opacity: 0.78;
+  animation-duration: var(--rb-star-speed);
+  animation-iteration-count: infinite;
+  animation-timing-function: linear;
+  animation-direction: alternate;
+}
+
+.rb-star-border__beam-top {
+  top: calc(var(--rb-star-thickness) * -4);
+  left: -150%;
+  animation-name: rb-star-border-top;
+}
+
+.rb-star-border__beam-bottom {
+  right: -150%;
+  bottom: calc(var(--rb-star-thickness) * -4);
+  animation-name: rb-star-border-bottom;
+}
+
+.rb-star-border__content {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes rb-star-border-top {
+  from {
+    transform: translateX(0);
+    opacity: 0.85;
+  }
+
+  to {
+    transform: translateX(68%);
+    opacity: 0.35;
+  }
+}
+
+@keyframes rb-star-border-bottom {
+  from {
+    transform: translateX(0);
+    opacity: 0.34;
+  }
+
+  to {
+    transform: translateX(-68%);
+    opacity: 0.9;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rb-star-border__beam {
+    animation: none;
+  }
+}

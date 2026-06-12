@@ -1,5 +1,14 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Layout, Typography, message } from "antd";
+import {
+  BellOutlined,
+  BranchesOutlined,
+  DownOutlined,
+  FileSearchOutlined,
+  LockOutlined,
+  QuestionCircleOutlined,
+  SafetyCertificateOutlined,
+} from "@ant-design/icons";
 import ChatComponent from "./components/ChatComponent";
 import RenderQA from "./components/RenderQA";
 import PdfPreview from "./components/PdfPreview";
@@ -13,12 +22,34 @@ import {
 import { useChatSession } from "./hooks/useChatSession";
 import { useDocumentSelection } from "./hooks/useDocumentSelection";
 import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
+import {
+  DEMO_CONVERSATION,
+  DEMO_DOCUMENTS,
+  DEMO_PREVIEW_SOURCE,
+  DEMO_QUALITY_HISTORY,
+  DEMO_QUALITY_REPORT,
+  DEMO_RELEVANT_DOCUMENTS,
+} from "./demoWorkbench";
 import "./App.css";
+
+const CONVERSATION_VIEWS = [
+  { id: "chat", label: "Chat" },
+  { id: "trace", label: "Trace" },
+  { id: "sources", label: "Sources" },
+  { id: "tasks", label: "Tasks" },
+];
 
 const App = () => {
   const [isQualityLoading, setIsQualityLoading] = useState(false);
   const [qualityHistory, setQualityHistory] = useState(null);
   const [qualityReport, setQualityReport] = useState(null);
+  const [activeSidebarTarget, setActiveSidebarTarget] = useState("workspaces");
+  const [activeConversationView, setActiveConversationView] = useState("chat");
+  const mainRef = useRef(null);
+  const composerRef = useRef(null);
+  const uploadRef = useRef(null);
+  const documentListRef = useRef(null);
+  const qualityRef = useRef(null);
   const { Content } = Layout;
   const { Text } = Typography;
   const {
@@ -57,6 +88,11 @@ const App = () => {
     currentTurn,
     setActiveTurnIndex,
   });
+  const hasOnlyDemoConversation =
+    conversation.length === 0 ||
+    conversation.every((turn) => turn.answer?.demoWorkbench);
+  const isDemoWorkbench =
+    activeDocuments.length === 0 && hasOnlyDemoConversation && !isLoading;
 
   const resetWorkspaceSession = useCallback(async () => {
     resetConversation();
@@ -89,6 +125,13 @@ const App = () => {
   );
 
   const loadLatestQualityReport = useCallback(async () => {
+    if (isDemoWorkbench) {
+      setQualityReport(DEMO_QUALITY_REPORT);
+      setQualityHistory(DEMO_QUALITY_HISTORY);
+      message.success("Demo quality report loaded.");
+      return;
+    }
+
     setIsQualityLoading(true);
 
     try {
@@ -101,9 +144,15 @@ const App = () => {
     } finally {
       setIsQualityLoading(false);
     }
-  }, []);
+  }, [isDemoWorkbench]);
 
   const loadQualityHistory = useCallback(async () => {
+    if (isDemoWorkbench) {
+      setQualityHistory(DEMO_QUALITY_HISTORY);
+      message.success("Demo quality history loaded.");
+      return;
+    }
+
     setIsQualityLoading(true);
 
     try {
@@ -115,9 +164,16 @@ const App = () => {
     } finally {
       setIsQualityLoading(false);
     }
-  }, []);
+  }, [isDemoWorkbench]);
 
   const runSyntheticQualityReport = useCallback(async () => {
+    if (isDemoWorkbench) {
+      setQualityReport(DEMO_QUALITY_REPORT);
+      setQualityHistory(DEMO_QUALITY_HISTORY);
+      message.success("Demo synthetic evaluation complete.");
+      return;
+    }
+
     setIsQualityLoading(true);
 
     try {
@@ -131,7 +187,7 @@ const App = () => {
     } finally {
       setIsQualityLoading(false);
     }
-  }, []);
+  }, [isDemoWorkbench]);
 
   const submitAnswerFeedback = useCallback(
     async (feedback) => {
@@ -151,14 +207,328 @@ const App = () => {
     [docIds, sessionId, userId]
   );
 
+  const resetPageScroll = useCallback(() => {
+    window.scrollTo({ left: 0, top: 0, behavior: "auto" });
+  }, []);
+
+  const scrollSidebarSection = useCallback((ref) => {
+    const section = ref.current;
+    const sidebar = section?.closest(".archive-sidebar");
+
+    if (!section || !sidebar) {
+      return;
+    }
+
+    const targetTop = section.offsetTop - sidebar.offsetTop - 12;
+    sidebar.scrollTo({
+      behavior: "smooth",
+      top: Math.max(0, targetTop),
+    });
+  }, []);
+
+  const focusComposer = useCallback(() => {
+    window.setTimeout(() => {
+      document.getElementById("archive-agent-search")?.focus({
+        preventScroll: true,
+      });
+    }, 180);
+  }, []);
+
+  const selectConversationView = useCallback(
+    (view) => {
+      setActiveConversationView(view);
+      resetPageScroll();
+    },
+    [resetPageScroll]
+  );
+
+  const handleComposerAttach = useCallback(() => {
+    setActiveSidebarTarget("datasets");
+    scrollSidebarSection(uploadRef);
+    message.info("Use the Ingest dropzone to attach PDFs to this workspace.");
+  }, [scrollSidebarSection]);
+
+  const handleSidebarNavigate = useCallback(
+    async (target) => {
+      setActiveSidebarTarget(target);
+      resetPageScroll();
+
+      if (target === "new-chat") {
+        if (isDemoWorkbench) {
+          message.success("Demo chat is ready.");
+          focusComposer();
+          return;
+        }
+
+        await resetWorkspaceSession();
+        message.success("Started a new chat.");
+        focusComposer();
+        return;
+      }
+
+      if (target === "search") {
+        setActiveConversationView("chat");
+        focusComposer();
+        return;
+      }
+
+      if (target === "workspaces" || target === "datasets") {
+        scrollSidebarSection(target === "datasets" ? uploadRef : documentListRef);
+        return;
+      }
+
+      if (target === "agents") {
+        setActiveConversationView("trace");
+        return;
+      }
+
+      if (target === "evaluations") {
+        scrollSidebarSection(qualityRef);
+        return;
+      }
+
+      if (target === "settings") {
+        message.info("Settings are not configured for this local workbench yet.");
+      }
+    },
+    [
+      focusComposer,
+      isDemoWorkbench,
+      resetPageScroll,
+      resetWorkspaceSession,
+      scrollSidebarSection,
+    ]
+  );
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        void handleSidebarNavigate("search");
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [handleSidebarNavigate]);
+
+  const visibleDocuments = isDemoWorkbench ? DEMO_DOCUMENTS : activeDocuments;
+  const visibleConversation = isDemoWorkbench
+    ? conversation.length > 0
+      ? conversation
+      : DEMO_CONVERSATION
+    : conversation;
+  const visibleActiveTurnIndex = isDemoWorkbench ? 0 : activeTurnIndex;
+  const visibleCurrentTurn =
+    visibleConversation[visibleActiveTurnIndex] ??
+    (isDemoWorkbench ? DEMO_CONVERSATION[0] : currentTurn);
+  const visibleRelevantDocuments = isDemoWorkbench
+    ? DEMO_RELEVANT_DOCUMENTS
+    : relevantDocuments;
+  const visibleQualityReport =
+    isDemoWorkbench && !qualityReport ? DEMO_QUALITY_REPORT : qualityReport;
+  const visibleQualityHistory =
+    isDemoWorkbench && !qualityHistory ? DEMO_QUALITY_HISTORY : qualityHistory;
+  const visibleSelectedSource =
+    selectedSource ?? (isDemoWorkbench ? DEMO_PREVIEW_SOURCE : null);
+  const visibleTotalPages = isDemoWorkbench ? 182 : totalPages;
+  const visiblePreviewStatus = isDemoWorkbench
+    ? "Finance Policy Manual.pdf · Page 42"
+    : previewStatus;
+  const visibleDocLabel = isDemoWorkbench ? "Finance Policy QA" : docLabel;
+  const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? [];
+  const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? [];
+  const visibleTasks =
+    visibleTrace.length > 0
+      ? visibleTrace
+      : [
+          {
+            id: "idle-task",
+            label: "Awaiting question",
+            status: "pending",
+            summary: "Ask a document question to create an agent task trace.",
+          },
+        ];
+
+  const renderConversationView = () => {
+    if (activeConversationView === "trace") {
+      return (
+        <div className="archive-view-panel archive-trace-view">
+          <div className="archive-view-panel-head">
+            <span>Agent Trace</span>
+            <strong>{visibleTrace.length} steps</strong>
+          </div>
+          <div className="archive-view-grid">
+            {visibleTrace.map((step, index) => (
+              <button
+                key={step.id ?? `${step.label}-${index}`}
+                type="button"
+                className={`archive-view-item is-${step.status ?? "completed"}`}
+                onClick={() => {
+                  setActiveConversationView("chat");
+                  message.info(`${step.label}: ${step.summary}`);
+                }}
+              >
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <strong>{step.label}</strong>
+                <p>{step.summary}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (activeConversationView === "sources") {
+      return (
+        <div className="archive-view-panel archive-sources-view">
+          <div className="archive-view-panel-head">
+            <span>Sources</span>
+            <strong>{visibleSources.length} cited</strong>
+          </div>
+          <div className="archive-view-grid">
+            {visibleSources.map((source, index) => (
+              <button
+                key={`${source.docId}-${source.chunkIndex}-${source.rank}`}
+                type="button"
+                className={`archive-view-item ${
+                  visibleSelectedSource?.docId === source.docId ? "is-selected" : ""
+                }`}
+                onClick={() => {
+                  setSelectedSource(source);
+                  message.success(`Previewing ${source.fileName}`);
+                }}
+              >
+                <span>{index + 1}</span>
+                <strong>{source.fileName}</strong>
+                <p>{source.excerpt}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (activeConversationView === "tasks") {
+      return (
+        <div className="archive-view-panel archive-tasks-view">
+          <div className="archive-view-panel-head">
+            <span>Tasks</span>
+            <strong>{visibleTasks.length} active</strong>
+          </div>
+          <div className="archive-view-grid">
+            {visibleTasks.map((task, index) => (
+              <button
+                key={task.id ?? `${task.label}-${index}`}
+                type="button"
+                className={`archive-view-item is-${task.status ?? "pending"}`}
+                onClick={() => message.info(task.summary)}
+              >
+                <span>{task.status ?? "pending"}</span>
+                <strong>{task.label}</strong>
+                <p>{task.summary}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <RenderQA
+        conversation={visibleConversation}
+        activeTurnIndex={visibleActiveTurnIndex}
+        isLoading={isLoading}
+        selectedSource={visibleSelectedSource}
+        onSelectSource={setSelectedSource}
+        onSelectTurn={isDemoWorkbench ? undefined : selectTurn}
+        onFeedback={(feedback) => void submitAnswerFeedback(feedback)}
+      />
+    );
+  };
+
   return (
     <div className="archive-shell">
       <Layout className="archive-layout">
         <Content className="archive-app">
+          <header className="archive-global-header">
+            <div className="archive-breadcrumb">
+              <span>Workspaces</span>
+              <span>/</span>
+              <strong>Finance Policy QA</strong>
+              <DownOutlined />
+              <span className="archive-private-chip">
+                <LockOutlined />
+                Private
+              </span>
+            </div>
+
+            <div className="archive-workbench-tabs" aria-label="Workspace summary">
+              <button
+                type="button"
+                aria-label="Workspace documents summary"
+                className="archive-workbench-tab is-active"
+                onClick={() => void handleSidebarNavigate("workspaces")}
+              >
+                <FileSearchOutlined />
+                {visibleDocuments.length} docs
+              </button>
+              <button
+                type="button"
+                aria-label="Conversation turns summary"
+                className="archive-workbench-tab"
+                onClick={() => selectConversationView("chat")}
+              >
+                <BranchesOutlined />
+                {visibleConversation.length} turn
+              </button>
+              <button
+                type="button"
+                aria-label="Ready"
+                className="archive-workbench-tab"
+                onClick={() => message.success("AgentRAG is ready.")}
+              >
+                <SafetyCertificateOutlined />
+                Ready
+              </button>
+            </div>
+
+            <div className="archive-header-actions">
+              <button
+                type="button"
+                aria-label="Help"
+                onClick={() => message.info("Help is not configured in this local preview.")}
+              >
+                <QuestionCircleOutlined />
+              </button>
+              <button
+                type="button"
+                aria-label="Notifications"
+                onClick={() => message.info("No new workspace notifications.")}
+              >
+                <BellOutlined />
+              </button>
+              <button
+                type="button"
+                className="archive-user-avatar"
+                aria-label="Account"
+                onClick={() => message.info("Signed in as Archive RAG demo user.")}
+              >
+                AK
+              </button>
+            </div>
+          </header>
+
           <WorkspaceSidebar
-            activeDocuments={activeDocuments}
-            conversationCount={conversation.length}
-            currentTurn={currentTurn}
+            activeDocuments={visibleDocuments}
+            activeNavTarget={activeSidebarTarget}
+            conversationCount={visibleConversation.length}
+            currentTurn={visibleCurrentTurn}
+            documentListRef={documentListRef}
+            isDemoWorkbench={isDemoWorkbench}
             isQualityLoading={isQualityLoading}
             onClearDocuments={clearDocuments}
             onLoadQualityHistory={loadQualityHistory}
@@ -166,62 +536,76 @@ const App = () => {
             onRemoveDocument={removeDocument}
             onRunSyntheticQuality={runSyntheticQualityReport}
             onSelectSource={setSelectedSource}
+            onNavigate={handleSidebarNavigate}
             onUploadSuccess={handleUploadSuccess}
-            qualityHistory={qualityHistory}
-            qualityReport={qualityReport}
-            relevantDocuments={relevantDocuments}
-            selectedDocId={selectedDocId}
-            totalPages={totalPages}
+            qualityHistory={visibleQualityHistory}
+            qualityReport={visibleQualityReport}
+            qualityRef={qualityRef}
+            relevantDocuments={visibleRelevantDocuments}
+            selectedDocId={visibleSelectedSource?.docId ?? selectedDocId}
+            totalPages={visibleTotalPages}
+            uploadRef={uploadRef}
+            workspaceDocumentTotal={isDemoWorkbench ? 24 : visibleDocuments.length}
           />
 
           <section className="archive-preview-column">
             <div className="archive-main-header archive-preview-header">
               <div className="section-label">
                 <span className="section-label-title">Preview</span>
-                <span className="section-label-caption">{previewStatus}</span>
+                <span className="section-label-caption">{visiblePreviewStatus}</span>
               </div>
             </div>
 
             <div className="archive-card archive-preview-card">
-              <PdfPreview source={selectedSource} />
+              <PdfPreview source={visibleSelectedSource} />
             </div>
           </section>
 
-          <section className="archive-main">
+          <section className="archive-main" ref={mainRef}>
             <div className="archive-main-header">
               <div className="section-label">
-                <span className="section-label-title">Conversation</span>
+                <span className="section-label-title">
+                  {isDemoWorkbench ? "Finance Policy QA" : "Conversation"}
+                </span>
                 <span className="section-label-caption">
-                  {activeDocuments.length > 0
-                    ? `Working with ${docLabel}`
+                  {visibleDocuments.length > 0
+                    ? `Working with ${visibleDocLabel}`
                     : "Agent workspace is empty"}
                 </span>
               </div>
               <Text className="archive-meta-text">
-                {conversation.length} recorded turns
+                {visibleConversation.length} recorded turn
               </Text>
             </div>
 
-            <div className="archive-card archive-conversation-card">
-              <RenderQA
-                conversation={conversation}
-                activeTurnIndex={activeTurnIndex}
-                isLoading={isLoading}
-                selectedSource={selectedSource}
-                onSelectSource={setSelectedSource}
-                onSelectTurn={selectTurn}
-                onFeedback={(feedback) => void submitAnswerFeedback(feedback)}
-              />
+            <div className="archive-workbench-nav" aria-label="Conversation views">
+              {CONVERSATION_VIEWS.map((view) => (
+                <button
+                  key={view.id}
+                  type="button"
+                  className={activeConversationView === view.id ? "is-active" : ""}
+                  onClick={() => selectConversationView(view.id)}
+                >
+                  {view.label}
+                </button>
+              ))}
             </div>
 
-            <div className="archive-composer">
+            <div className="archive-card archive-conversation-card">
+              {renderConversationView()}
+            </div>
+
+            <div className="archive-composer" ref={composerRef}>
               <ChatComponent
                 docIds={docIds}
-                docLabel={docLabel}
+                docLabel={visibleDocLabel}
                 sessionId={sessionId}
                 userId={userId}
                 handleResp={handleResp}
+                inputId="archive-agent-search"
                 isLoading={isLoading}
+                isDemoWorkbench={isDemoWorkbench}
+                onAttach={handleComposerAttach}
                 setIsLoading={setIsLoading}
               />
             </div>

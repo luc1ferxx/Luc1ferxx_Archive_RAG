@@ -6,6 +6,7 @@ import AgentTraceDetail, {
 } from "./AgentTraceDetail";
 import AgentTraceOverview from "./AgentTraceOverview";
 import EvidenceSummaryPanel from "./EvidenceSummaryPanel";
+import SpotlightCard from "./react-bits/SpotlightCard";
 
 const FEEDBACK_ACTIONS = [
   {
@@ -32,6 +33,185 @@ const formatLookupCount = (count) => {
   }
 
   return count === 1 ? "1 result" : `${count} results`;
+};
+
+const AgentRunRail = ({ trace }) => {
+  const visibleSteps = trace.slice(0, 5);
+
+  if (visibleSteps.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="archive-run-rail" aria-label="Agent run steps">
+      {visibleSteps.map((step, stepIndex) => {
+        const stepStatus = step.status ?? "completed";
+
+        return (
+          <div
+            key={step.id ?? `${step.label}-${stepIndex}`}
+            className={`archive-run-stage is-${stepStatus}`}
+          >
+            <span className="archive-run-stage-index">{stepIndex + 1}</span>
+            <span className="archive-run-stage-label">{step.label}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const DemoWorkbenchAnswer = ({ answer, onSelectSource }) => {
+  const sources = answer.ragSources ?? [];
+  const trace = answer.agentTrace ?? [];
+  const [showAllSources, setShowAllSources] = useState(false);
+  const [isTraceVisible, setIsTraceVisible] = useState(true);
+  const [isDetailVisible, setIsDetailVisible] = useState(false);
+  const extendedSources = [
+    ...sources,
+    {
+      docId: "demo-procurement",
+      fileName: "Procurement Guidelines.docx",
+      filePath: "",
+      pageNumber: 18,
+      chunkIndex: 7,
+      rank: 4,
+      excerpt: "Vendor travel purchases require manager approval above policy thresholds.",
+    },
+    {
+      docId: "demo-vendor-management",
+      fileName: "Vendor Management Policy.pdf",
+      filePath: "",
+      pageNumber: 9,
+      chunkIndex: 5,
+      rank: 5,
+      excerpt: "Vendor reimbursement terms should be checked against active contracts.",
+    },
+  ];
+  const visibleSources = showAllSources ? extendedSources : sources;
+
+  return (
+    <SpotlightCard
+      as="div"
+      className="archive-demo-answer-card"
+      spotlightColor="rgba(39, 110, 241, 0.08)"
+    >
+      <div className="archive-demo-answer-head">
+        <div className="archive-demo-agent">
+          <span className="archive-agent-avatar">◎</span>
+          <strong>AgentRAG (v1)</strong>
+          <span>10:42 AM</span>
+          <span className="archive-status-dot" />
+        </div>
+        <span>2.8s</span>
+      </div>
+
+      <div className="archive-answer-text archive-agent-answer">
+        {answer.agentAnswer}
+      </div>
+
+      <div className="archive-demo-table-block">
+        <strong>Per diem limits (daily)</strong>
+        <table className="archive-demo-answer-table">
+          <thead>
+            <tr>
+              <th>Tier</th>
+              <th>Location Examples</th>
+              <th>Total Per Diem (USD)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Tier 1 (High Cost)</td>
+              <td>Switzerland, Norway, Japan</td>
+              <td>$320</td>
+            </tr>
+            <tr>
+              <td>Tier 2 (Mid Cost)</td>
+              <td>Germany, France, UAE</td>
+              <td>$260</td>
+            </tr>
+            <tr>
+              <td>Tier 3 (Lower Cost)</td>
+              <td>India, Mexico, Brazil</td>
+              <td>$180</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Receipts are required for expenses over $75. Alcohol is not reimbursable.</p>
+        <p>See policy for full details and exceptions.</p>
+      </div>
+
+      <div className="archive-demo-source-row">
+        {visibleSources.map((source, sourceIndex) => (
+          <button
+            key={`${source.docId}-${source.rank}`}
+            type="button"
+            className="archive-demo-source-chip"
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelectSource?.(source);
+            }}
+          >
+            <span>{sourceIndex + 1}</span>
+            <strong>{source.fileName}</strong>
+            <small>pp. {source.pageNumber}</small>
+          </button>
+        ))}
+        <button
+          type="button"
+          className="archive-demo-source-chip is-more"
+          onClick={() => setShowAllSources((isExpanded) => !isExpanded)}
+        >
+          {showAllSources ? "Show top 3 sources" : "View all 5 sources"}
+        </button>
+      </div>
+
+      <div className="archive-demo-trace-panel">
+        <div className="archive-demo-trace-head">
+          <button
+            type="button"
+            onClick={() => setIsTraceVisible((isVisible) => !isVisible)}
+          >
+            {isTraceVisible ? "⌃ Hide trace" : "⌄ Show trace"}
+          </button>
+        </div>
+        {isTraceVisible ? (
+          <div className="archive-demo-trace-row">
+            {trace.map((step, index) => (
+              <div key={step.id} className="archive-demo-trace-step">
+                <span className="archive-demo-check">✓</span>
+                <div className="archive-demo-trace-line" />
+                <strong>{step.label}</strong>
+                <small>{index === 0 ? "0.2s" : index === 1 ? "0.6s" : index === 2 ? "0.4s" : index === 3 ? "1.2s" : "0.4s"}</small>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {isDetailVisible ? (
+          <div className="archive-demo-detail-panel">
+            {trace.map((step) => (
+              <div key={`detail-${step.id}`}>
+                <strong>{step.label}</strong>
+                <span>{step.summary}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <div className="archive-demo-metric-footer">
+          <span>Groundedness 91%</span>
+          <span>Context coverage 92%</span>
+          <span>Tokens 1,732 ↓ 23%</span>
+          <button
+            type="button"
+            onClick={() => setIsDetailVisible((isVisible) => !isVisible)}
+          >
+            {isDetailVisible ? "Hide details" : "View details"}
+          </button>
+        </div>
+      </div>
+    </SpotlightCard>
+  );
 };
 
 const RenderQA = (props) => {
@@ -97,14 +277,27 @@ const RenderQA = (props) => {
             </div>
 
             <section className="archive-response">
+              {each.answer?.demoWorkbench ? (
+                <DemoWorkbenchAnswer
+                  answer={each.answer}
+                  onSelectSource={onSelectSource}
+                />
+              ) : (
+                <>
               {each.answer?.agentAnswer ? (
-                <div className="archive-agent-panel">
+                <SpotlightCard
+                  as="div"
+                  className="archive-agent-panel"
+                  spotlightColor="rgba(15, 159, 122, 0.08)"
+                >
                   <div className="archive-answer-label-wrap">
                     <div className="archive-answer-label">Agent answer</div>
                     <span className="archive-answer-chip archive-answer-chip-agent">
                       {formatAgentMode(each.answer.agentMode)}
                     </span>
                   </div>
+
+                  <AgentRunRail trace={agentTrace} />
 
                   <div className="archive-answer-text archive-agent-answer">
                     {each.answer.agentAnswer}
@@ -165,10 +358,14 @@ const RenderQA = (props) => {
                       </div>
                     </div>
                   ) : null}
-                </div>
+                </SpotlightCard>
               ) : null}
 
-              <div className="archive-response-section">
+              <SpotlightCard
+                as="div"
+                className="archive-response-section"
+                spotlightColor="rgba(39, 110, 241, 0.08)"
+              >
                 <div className="archive-answer-label-wrap">
                   <div className="archive-answer-label">Document answer</div>
                   {each.answer?.ragMemoryApplied ? (
@@ -232,7 +429,8 @@ const RenderQA = (props) => {
                     <div className="archive-source-section-label">Citations</div>
 
                     {each.answer.ragSources.map((source) => (
-                      <button
+                      <SpotlightCard
+                        as="button"
                         key={`${source.docId}-${source.chunkIndex}-${source.rank}`}
                         type="button"
                         className={`archive-source-item ${
@@ -246,6 +444,7 @@ const RenderQA = (props) => {
                           onSelectTurn?.(index);
                           onSelectSource?.(source);
                         }}
+                        spotlightColor="rgba(39, 110, 241, 0.1)"
                       >
                         <div className="archive-source-head">
                           <span>{source.fileName}</span>
@@ -254,7 +453,7 @@ const RenderQA = (props) => {
                           </span>
                         </div>
                         <div className="archive-source-copy">{source.excerpt}</div>
-                      </button>
+                      </SpotlightCard>
                     ))}
                   </div>
                 )}
@@ -290,11 +489,15 @@ const RenderQA = (props) => {
                     ))}
                   </div>
                 </div>
-              </div>
+              </SpotlightCard>
 
               <div className="archive-response-divider" />
 
-              <div className="archive-response-section archive-response-section-secondary">
+              <SpotlightCard
+                as="div"
+                className="archive-response-section archive-response-section-secondary"
+                spotlightColor="rgba(105, 120, 240, 0.08)"
+              >
                 <div className="archive-answer-label-wrap">
                   <div className="archive-answer-label">Web answer</div>
                   {each.answer?.errors?.mcp ? (
@@ -303,7 +506,9 @@ const RenderQA = (props) => {
                 </div>
 
                 <div className="archive-answer-text">{each.answer.mcpAnswer}</div>
-              </div>
+              </SpotlightCard>
+                </>
+              )}
             </section>
           </article>
         );

@@ -1,14 +1,14 @@
 :root {
   color-scheme: light;
-  --surface-canvas: #26282b;
-  --surface-panel: rgba(249, 248, 245, 0.94);
-  --surface-subtle: rgba(241, 239, 235, 0.9);
-  --surface-inverse: #0f1012;
-  --border-soft: #d7d3cb;
-  --border-strong: #b7b0a5;
-  --text-strong: #151618;
-  --text-muted: #56514a;
-  --text-faint: #7d766c;
+  --surface-canvas: #eef2f7;
+  --surface-panel: #ffffff;
+  --surface-subtle: #f7f9fc;
+  --surface-inverse: #111827;
+  --border-soft: #dde4ef;
+  --border-strong: #b8c4d6;
+  --text-strong: #111827;
+  --text-muted: #526072;
+  --text-faint: #8a97a8;
 }
 
 * {
@@ -24,11 +24,12 @@ body {
   min-height: 100%;
   margin: 0;
   background:
-    radial-gradient(circle at 14% 12%, rgba(255, 255, 255, 0.12), transparent 0 22rem),
-    radial-gradient(circle at 82% 10%, rgba(255, 255, 255, 0.08), transparent 0 18rem),
-    linear-gradient(135deg, #3a3d41 0%, #2b2d30 42%, #202225 100%);
+    linear-gradient(90deg, rgba(29, 78, 216, 0.035) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(17, 24, 39, 0.028) 1px, transparent 1px),
+    linear-gradient(135deg, #f7f9fd 0%, #eef3f9 48%, #e8eff8 100%);
+  background-size: 44px 44px, 44px 44px, auto;
   color: var(--text-strong);
-  font-family: "Avenir Next", "Helvetica Neue", "Segoe UI", sans-serif;
+  font-family: Inter, "Avenir Next", "Helvetica Neue", "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
@@ -52,8 +53,8 @@ textarea {
 }
 
 ::selection {
-  background: rgba(22, 22, 22, 0.12);
-  color: var(--text-strong);
+  background: rgba(39, 110, 241, 0.18);
+  color: #0f172a;
 }
 
 ::-webkit-scrollbar {
@@ -62,12 +63,12 @@ textarea {
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(23, 23, 23, 0.04);
+  background: rgba(17, 24, 39, 0.04);
 }
 
 ::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(23, 23, 23, 0.18);
+  background: rgba(100, 116, 139, 0.34);
 }
 
 @media (max-width: 960px) {
