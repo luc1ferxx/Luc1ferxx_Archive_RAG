@@ -88,16 +88,42 @@ const normalizeStringArray = (values, { limit = 12 } = {}) => {
   ].slice(0, limit);
 };
 
+const normalizeProfileSource = (source = {}) => {
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+
+  const sourceType = String(source.sourceType ?? "").trim();
+
+  if (!sourceType) {
+    return null;
+  }
+
+  return {
+    sourceType,
+    arxivId: String(source.arxivId ?? "").trim(),
+    relatedToDocId: String(source.relatedToDocId ?? "").trim(),
+    importedByUserConfirmation: Boolean(source.importedByUserConfirmation),
+  };
+};
+
 const normalizeProfile = (document = {}) => {
   const rawProfile =
     document.profile && typeof document.profile === "object" ? document.profile : {};
+  const source = normalizeProfileSource(rawProfile.source ?? document.source);
 
-  return {
+  const profile = {
     summary: String(rawProfile.summary ?? document.summary ?? "").trim(),
     tags: normalizeStringArray(rawProfile.tags ?? document.tags),
     entities: normalizeStringArray(rawProfile.entities ?? document.entities),
     generatedAt: String(rawProfile.generatedAt ?? document.profileGeneratedAt ?? "").trim(),
   };
+
+  if (source) {
+    profile.source = source;
+  }
+
+  return profile;
 };
 
 const toStoredDocument = (document = {}) => {
@@ -155,6 +181,7 @@ const toPublicDocument = (document) =>
         tags: document.profile?.tags ?? [],
         entities: document.profile?.entities ?? [],
         profile: document.profile,
+        source: document.profile?.source ?? null,
         uploadedAt: document.uploadedAt,
         storageBackend: document.storageBackend,
       }

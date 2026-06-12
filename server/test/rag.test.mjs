@@ -543,7 +543,7 @@ const writeFixtureFile = async (fileName) => {
   return filePath;
 };
 
-const ingestFixture = async ({ docId, fileName, pages }) =>
+const ingestFixture = async ({ docId, fileName, pages, source = null }) =>
   ingestDocumentPages({
     docId,
     fileName,
@@ -552,6 +552,7 @@ const ingestFixture = async ({ docId, fileName, pages }) =>
       pageNumber: index + 1,
       text,
     })),
+    source,
   });
 
 const getObservabilityEventsPath = () =>
@@ -666,6 +667,12 @@ test("ingest stores automatic document profile metadata", async () => {
       "Remote work policy: employees may work remotely two days per week with manager approval. Annual leave policy grants fifteen paid days.",
       "Security requirements: employees must use MFA, encryption, and approved devices for customer data.",
     ],
+    source: {
+      sourceType: "arxiv",
+      arxivId: "2401.00001v1",
+      relatedToDocId: "private-notes",
+      importedByUserConfirmation: true,
+    },
   });
 
   assert.match(document.summary, /Remote work policy/i);
@@ -673,6 +680,12 @@ test("ingest stores automatic document profile metadata", async () => {
   assert.ok(document.tags.includes("security"));
   assert.ok(document.entities.includes("MFA"));
   assert.deepEqual(document.profile.tags, document.tags);
+  assert.deepEqual(document.source, {
+    sourceType: "arxiv",
+    arxivId: "2401.00001v1",
+    relatedToDocId: "private-notes",
+    importedByUserConfirmation: true,
+  });
   assert.equal(getDocument("profiled-benefits").summary, document.summary);
 });
 

@@ -1090,6 +1090,7 @@
 
 .document-item-main-button {
   flex: 1;
+  min-width: 0;
   padding: 0;
   border: none;
   background: transparent;
@@ -1150,6 +1151,58 @@
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.document-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.document-source-badge {
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid #dce4ef;
+  border-radius: var(--archive-radius-pill);
+  background: #f7f9fc;
+  color: #526072;
+  font-size: 0.66rem;
+  font-weight: 760;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.document-source-badge.is-arxiv {
+  border-color: rgba(15, 159, 122, 0.22);
+  background: #effaf6;
+  color: #0f6f58;
+}
+
+.document-item-actions {
+  display: grid;
+  flex-shrink: 0;
+  gap: 5px;
+}
+
+.document-scope-toggle {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #dce4ef;
+  border-radius: var(--archive-radius-md);
+  background: #ffffff;
+  color: #526072;
+  cursor: pointer;
+}
+
+.document-scope-toggle:hover,
+.document-scope-toggle.is-active {
+  border-color: rgba(15, 159, 122, 0.26);
+  background: #effaf6;
+  color: #0f6f58;
 }
 
 .document-profile.is-compact .document-summary {
@@ -1240,6 +1293,7 @@
 
 .document-item-main-button:focus-visible,
 .document-item-remove:focus-visible,
+.document-scope-toggle:focus-visible,
 .archive-source-item:focus-visible,
 .relevant-document-item:focus-visible,
 .archive-feedback-button:focus-visible {
@@ -2711,6 +2765,46 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.archive-scope-segmented {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid #dce4ef;
+  border-radius: 8px;
+  background: #f7f9fc;
+}
+
+.archive-scope-segmented button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #526072;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 760;
+}
+
+.archive-scope-segmented button.is-active {
+  background: #ffffff;
+  color: #0f5fd7;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.1);
+}
+
+.archive-scope-segmented small {
+  color: inherit;
+  font-size: 0.62rem;
+  font-weight: 780;
+  opacity: 0.76;
 }
 
 .archive-composer-tools {

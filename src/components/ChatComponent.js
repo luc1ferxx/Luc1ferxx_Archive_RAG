@@ -21,6 +21,8 @@ const ChatComponent = (props) => {
   const {
     docIds = [],
     docLabel,
+    chatScopeMode = "uploaded",
+    chatScopeOptions = [],
     sessionId,
     userId,
     handleResp,
@@ -28,6 +30,7 @@ const ChatComponent = (props) => {
     isDemoWorkbench = false,
     isLoading,
     onAttach,
+    onChatScopeModeChange,
     setIsLoading,
   } = props;
   const [searchValue, setSearchValue] = useState("");
@@ -237,6 +240,15 @@ const ChatComponent = (props) => {
     });
   };
 
+  const handleScopeClick = (option) => {
+    if (option.count <= 0) {
+      message.info(`${option.label} scope has no documents.`);
+      return;
+    }
+
+    onChatScopeModeChange?.(option.id);
+  };
+
   const transcriptLabel = isChatModeOn
     ? isRecording
       ? transcript || "Listening for your question."
@@ -303,6 +315,26 @@ const ChatComponent = (props) => {
                 {retrievalMode}
               </button>
             </div>
+
+            {!isDemoWorkbench && chatScopeOptions.length > 0 ? (
+              <div className="archive-scope-segmented" aria-label="Chat scope">
+                {chatScopeOptions.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    aria-pressed={chatScopeMode === option.id}
+                    className={chatScopeMode === option.id ? "is-active" : ""}
+                    onClick={() => handleScopeClick(option)}
+                    title={`${option.label}: ${option.count} document${
+                      option.count === 1 ? "" : "s"
+                    }`}
+                  >
+                    <span>{option.label}</span>
+                    <small>{option.count}</small>
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             <div className="archive-voice-buttons">
               <Button

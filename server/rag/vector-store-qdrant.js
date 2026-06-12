@@ -119,6 +119,7 @@ const buildPointPayload = (document) => ({
   pageNumber: document.metadata?.pageNumber ?? null,
   chunkIndex: document.metadata?.chunkIndex ?? null,
   sectionHeading: document.metadata?.sectionHeading ?? null,
+  source: document.metadata?.source ?? null,
   pageContent: document.pageContent,
 });
 
@@ -130,6 +131,7 @@ const buildMetadataFromPayload = (payload = {}) => ({
   pageNumber: payload.pageNumber ?? null,
   chunkIndex: payload.chunkIndex ?? null,
   sectionHeading: payload.sectionHeading ?? null,
+  source: payload.source ?? null,
 });
 
 const toDenseSearchResult = (point, keywordScore, scoringMode) => {

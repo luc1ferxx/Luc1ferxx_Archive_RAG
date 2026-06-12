@@ -54,6 +54,7 @@ test("arxiv importer downloads PDFs into scoped document ingestion", async () =>
           fileName,
           filePath,
           ownerUserId,
+          source,
           workspaceId,
         }) => {
           ingested.push({
@@ -61,6 +62,7 @@ test("arxiv importer downloads PDFs into scoped document ingestion", async () =>
             docId,
             fileName,
             ownerUserId,
+            source,
             workspaceId,
           });
 
@@ -81,6 +83,12 @@ test("arxiv importer downloads PDFs into scoped document ingestion", async () =>
     assert.equal(ingested[0].ownerUserId, "alice");
     assert.equal(ingested[0].workspaceId, "workspace-a");
     assert.equal(ingested[0].fileName, buildArxivPdfFileName(paper));
+    assert.deepEqual(ingested[0].source, {
+      sourceType: "arxiv",
+      arxivId: "2401.00001v1",
+      relatedToDocId: "",
+      importedByUserConfirmation: false,
+    });
   } finally {
     await rm(tempDirectory, {
       recursive: true,
@@ -110,14 +118,19 @@ test("arxiv importer imports provided papers without running search", async () =
         },
       },
       delayMs: 0,
+      importContext: {
+        importedByUserConfirmation: true,
+        relatedToDocId: "doc-uploaded",
+      },
       maxResults: 1,
       papers: [paper],
       ragService: {
-        ingestDocument: async ({ docId, fileName, ownerUserId, workspaceId }) => {
+        ingestDocument: async ({ docId, fileName, ownerUserId, source, workspaceId }) => {
           ingested.push({
             docId,
             fileName,
             ownerUserId,
+            source,
             workspaceId,
           });
 
@@ -137,6 +150,12 @@ test("arxiv importer imports provided papers without running search", async () =
     assert.equal(ingested[0].fileName, buildArxivPdfFileName(paper));
     assert.equal(ingested[0].ownerUserId, "alice");
     assert.equal(ingested[0].workspaceId, "workspace-a");
+    assert.deepEqual(ingested[0].source, {
+      sourceType: "arxiv",
+      arxivId: "2401.00001v1",
+      relatedToDocId: "doc-uploaded",
+      importedByUserConfirmation: true,
+    });
   } finally {
     await rm(tempDirectory, {
       recursive: true,

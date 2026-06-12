@@ -25,7 +25,21 @@ jest.mock("./components/PdfUploader", () => ({ onUploadSuccess }) => (
     Upload mock
   </button>
 ));
-jest.mock("./components/ChatComponent", () => () => <div>Chat</div>);
+jest.mock("./components/ChatComponent", () => (props) => (
+  <div>
+    <div>Chat</div>
+    <div data-testid="chat-docids">{props.docIds.join(",")}</div>
+    {(props.chatScopeOptions ?? []).map((option) => (
+      <button
+        key={option.id}
+        type="button"
+        onClick={() => props.onChatScopeModeChange?.(option.id)}
+      >
+        {`scope-${option.id}-${option.count}`}
+      </button>
+    ))}
+  </div>
+));
 jest.mock("./components/RenderQA", () => (props) => (
   <button
     type="button"
@@ -72,6 +86,50 @@ describe("App", () => {
     expect(screen.getByText("Quality Guard")).toBeInTheDocument();
     expect(screen.getByText("History")).toBeInTheDocument();
     expect(axios.get).toHaveBeenCalledWith("http://localhost:5001/documents");
+  });
+
+  test("keeps arxiv documents out of chat scope until all scope is selected", async () => {
+    axios.get.mockResolvedValue({
+      data: [
+        {
+          docId: "doc-uploaded",
+          fileName: "private-notes.pdf",
+          pageCount: 2,
+        },
+        {
+          docId: "doc-arxiv",
+          fileName: "arxiv-2401.00001.pdf",
+          pageCount: 12,
+          profile: {
+            source: {
+              sourceType: "arxiv",
+              arxivId: "2401.00001v1",
+              relatedToDocId: "doc-uploaded",
+              importedByUserConfirmation: true,
+            },
+          },
+        },
+      ],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("private-notes.pdf")).toBeInTheDocument();
+    expect(screen.getByText("arXiv 2401.00001v1")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-docids")).toHaveTextContent("doc-uploaded");
+
+    fireEvent.click(screen.getByText("scope-all-2"));
+
+    expect(screen.getByTestId("chat-docids")).toHaveTextContent(
+      "doc-uploaded,doc-arxiv"
+    );
+
+    fireEvent.click(
+      screen.getByLabelText("Include arxiv-2401.00001.pdf in selected chat scope")
+    );
+    fireEvent.click(screen.getByText("scope-selected-1"));
+
+    expect(screen.getByTestId("chat-docids")).toHaveTextContent("doc-arxiv");
   });
 
   test("removes a document from the UI after delete succeeds", async () => {
@@ -162,6 +220,14 @@ describe("App", () => {
                   docId: "doc-arxiv",
                   fileName: "arxiv-2401.00001.pdf",
                   pageCount: 12,
+                  profile: {
+                    source: {
+                      sourceType: "arxiv",
+                      arxivId: "2401.00001v1",
+                      relatedToDocId: "doc-upload",
+                      importedByUserConfirmation: true,
+                    },
+                  },
                 },
               ]
             : [

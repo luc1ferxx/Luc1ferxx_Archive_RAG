@@ -134,6 +134,7 @@ const buildChunkRecord = ({
   chunkIndex,
   pageContent,
   sectionHeading = null,
+  source = null,
 }) => ({
   id: `${docId}:${chunkIndex}`,
   pageContent,
@@ -145,6 +146,7 @@ const buildChunkRecord = ({
     pageNumber,
     chunkIndex,
     sectionHeading,
+    ...(source ? { source } : {}),
   },
 });
 
@@ -153,6 +155,7 @@ const chunkPageWithFixedWindows = ({
   fileName,
   publicFilePath,
   page,
+  source = null,
   chunkSize,
   chunkOverlap,
   startingChunkIndex,
@@ -186,6 +189,7 @@ const chunkPageWithFixedWindows = ({
         pageNumber: page.pageNumber,
         chunkIndex,
         pageContent,
+        source,
       })
     );
     chunkIndex += 1;
@@ -206,6 +210,7 @@ const chunkPageWithStructure = ({
   fileName,
   publicFilePath,
   page,
+  source = null,
   chunkSize,
   chunkOverlap,
   startingChunkIndex,
@@ -240,6 +245,7 @@ const chunkPageWithStructure = ({
         chunkIndex,
         pageContent: buildChunkText(currentHeading, buffer),
         sectionHeading: currentHeading,
+        source,
       })
     );
 
@@ -275,7 +281,7 @@ const chunkPageWithStructure = ({
   };
 };
 
-export const chunkDocument = ({ docId, fileName, publicFilePath, pages }) => {
+export const chunkDocument = ({ docId, fileName, publicFilePath, pages, source = null }) => {
   const resolvedPublicFilePath =
     publicFilePath || buildPublicFilePath(docId);
   const chunkSize = getChunkSize();
@@ -292,6 +298,7 @@ export const chunkDocument = ({ docId, fileName, publicFilePath, pages }) => {
             fileName,
             publicFilePath: resolvedPublicFilePath,
             page,
+            source,
             chunkSize,
             chunkOverlap,
             startingChunkIndex: chunkIndex,
@@ -301,6 +308,7 @@ export const chunkDocument = ({ docId, fileName, publicFilePath, pages }) => {
             fileName,
             publicFilePath: resolvedPublicFilePath,
             page,
+            source,
             chunkSize,
             chunkOverlap,
             startingChunkIndex: chunkIndex,

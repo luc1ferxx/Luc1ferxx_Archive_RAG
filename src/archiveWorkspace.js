@@ -12,6 +12,15 @@ export const getDocumentTags = (document) =>
 export const getDocumentSummary = (document) =>
   document?.summary ?? document?.profile?.summary ?? "";
 
+export const getDocumentSource = (document) =>
+  document?.source ?? document?.profile?.source ?? null;
+
+export const getDocumentSourceType = (document) =>
+  getDocumentSource(document)?.sourceType ?? "uploaded";
+
+export const isArxivDocument = (document) =>
+  getDocumentSourceType(document) === "arxiv";
+
 export const getTotalPages = (documents = []) =>
   documents.reduce(
     (sum, document) => sum + (Number.parseInt(document.pageCount ?? "0", 10) || 0),

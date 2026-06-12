@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layout, Typography, message } from "antd";
 import {
   BellOutlined,
@@ -19,6 +19,7 @@ import {
   requestAnswerFeedback,
   requestSyntheticQualityRun,
 } from "./archiveApi";
+import { formatDocumentCount, isArxivDocument } from "./archiveWorkspace";
 import { useChatSession } from "./hooks/useChatSession";
 import { useArxivEnrichment } from "./hooks/useArxivEnrichment";
 import { useDocumentSelection } from "./hooks/useDocumentSelection";
@@ -40,12 +41,20 @@ const CONVERSATION_VIEWS = [
   { id: "tasks", label: "Tasks" },
 ];
 
+const CHAT_SCOPE_MODES = {
+  uploaded: "uploaded",
+  all: "all",
+  selected: "selected",
+};
+
 const App = () => {
   const [isQualityLoading, setIsQualityLoading] = useState(false);
   const [qualityHistory, setQualityHistory] = useState(null);
   const [qualityReport, setQualityReport] = useState(null);
   const [activeSidebarTarget, setActiveSidebarTarget] = useState("workspaces");
   const [activeConversationView, setActiveConversationView] = useState("chat");
+  const [chatScopeMode, setChatScopeMode] = useState(CHAT_SCOPE_MODES.uploaded);
+  const [selectedChatDocIds, setSelectedChatDocIds] = useState([]);
   const mainRef = useRef(null);
   const composerRef = useRef(null);
   const uploadRef = useRef(null);
@@ -69,8 +78,6 @@ const App = () => {
   const {
     activeDocuments,
     clearDocuments: clearWorkspaceDocuments,
-    docIds,
-    docLabel,
     handleUploadSuccess,
     refreshDocuments,
     removeDocument: removeWorkspaceDocument,
@@ -158,6 +165,103 @@ const App = () => {
     [handleUploadSuccess, requestArxivSuggestions]
   );
 
+  const uploadedDocuments = useMemo(
+    () => activeDocuments.filter((document) => !isArxivDocument(document)),
+    [activeDocuments]
+  );
+  const selectedChatDocuments = useMemo(
+    () =>
+      activeDocuments.filter((document) =>
+        selectedChatDocIds.includes(document.docId)
+      ),
+    [activeDocuments, selectedChatDocIds]
+  );
+  const chatScopeDocuments = useMemo(() => {
+    if (chatScopeMode === CHAT_SCOPE_MODES.all) {
+      return activeDocuments;
+    }
+
+    if (chatScopeMode === CHAT_SCOPE_MODES.selected) {
+      return selectedChatDocuments;
+    }
+
+    return uploadedDocuments;
+  }, [activeDocuments, chatScopeMode, selectedChatDocuments, uploadedDocuments]);
+  const chatDocIds = useMemo(
+    () => chatScopeDocuments.map((document) => document.docId),
+    [chatScopeDocuments]
+  );
+  const chatDocLabel = useMemo(
+    () =>
+      chatScopeDocuments.length > 0
+        ? formatDocumentCount(chatScopeDocuments.length)
+        : "no documents in scope",
+    [chatScopeDocuments.length]
+  );
+  const chatScopeOptions = useMemo(
+    () => [
+      {
+        count: uploadedDocuments.length,
+        id: CHAT_SCOPE_MODES.uploaded,
+        label: "Uploaded",
+      },
+      {
+        count: activeDocuments.length,
+        id: CHAT_SCOPE_MODES.all,
+        label: "All",
+      },
+      {
+        count: selectedChatDocuments.length,
+        id: CHAT_SCOPE_MODES.selected,
+        label: "Selected",
+      },
+    ],
+    [activeDocuments.length, selectedChatDocuments.length, uploadedDocuments.length]
+  );
+  const toggleChatScopeDocument = useCallback((docId) => {
+    setSelectedChatDocIds((currentDocIds) =>
+      currentDocIds.includes(docId)
+        ? currentDocIds.filter((currentDocId) => currentDocId !== docId)
+        : [...currentDocIds, docId]
+    );
+  }, []);
+
+  useEffect(() => {
+    const activeDocIdSet = new Set(activeDocuments.map((document) => document.docId));
+
+    setSelectedChatDocIds((currentDocIds) =>
+      currentDocIds.filter((docId) => activeDocIdSet.has(docId))
+    );
+  }, [activeDocuments]);
+
+  useEffect(() => {
+    if (activeDocuments.length === 0) {
+      return;
+    }
+
+    if (
+      chatScopeMode === CHAT_SCOPE_MODES.uploaded &&
+      uploadedDocuments.length === 0
+    ) {
+      setChatScopeMode(CHAT_SCOPE_MODES.all);
+      return;
+    }
+
+    if (
+      chatScopeMode === CHAT_SCOPE_MODES.selected &&
+      selectedChatDocuments.length === 0
+    ) {
+      setChatScopeMode(
+        uploadedDocuments.length > 0 ? CHAT_SCOPE_MODES.uploaded : CHAT_SCOPE_MODES.all
+      );
+    }
+  }, [
+    activeDocuments.length,
+    chatScopeMode,
+    selectedChatDocuments.length,
+    uploadedDocuments.length,
+  ]);
+
   const loadLatestQualityReport = useCallback(async () => {
     if (isDemoWorkbench) {
       setQualityReport(DEMO_QUALITY_REPORT);
@@ -228,7 +332,7 @@ const App = () => {
       try {
         await requestAnswerFeedback({
           ...feedback,
-          docIds: feedback.docIds ?? docIds,
+          docIds: feedback.docIds ?? chatDocIds,
           sessionId,
           userId,
         });
@@ -238,7 +342,7 @@ const App = () => {
         message.error(backendMessage);
       }
     },
-    [docIds, sessionId, userId]
+    [chatDocIds, sessionId, userId]
   );
 
   const resetPageScroll = useCallback(() => {
@@ -372,7 +476,7 @@ const App = () => {
   const visiblePreviewStatus = isDemoWorkbench
     ? "Finance Policy Manual.pdf · Page 42"
     : previewStatus;
-  const visibleDocLabel = isDemoWorkbench ? "Finance Policy QA" : docLabel;
+  const visibleDocLabel = isDemoWorkbench ? "Finance Policy QA" : chatDocLabel;
   const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? [];
   const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? [];
   const visibleTasks =
@@ -572,6 +676,7 @@ const App = () => {
             onClearDocuments={clearDocuments}
             onDismissArxivSuggestion={clearArxivSuggestion}
             onImportArxivSuggestion={importArxivSuggestion}
+            onToggleChatScopeDocument={toggleChatScopeDocument}
             onLoadQualityHistory={loadQualityHistory}
             onLoadQualityLatest={loadLatestQualityReport}
             onRemoveDocument={removeDocument}
@@ -583,6 +688,7 @@ const App = () => {
             qualityReport={visibleQualityReport}
             qualityRef={qualityRef}
             relevantDocuments={visibleRelevantDocuments}
+            selectedChatDocIds={isDemoWorkbench ? [] : selectedChatDocIds}
             selectedDocId={visibleSelectedSource?.docId ?? selectedDocId}
             totalPages={visibleTotalPages}
             uploadRef={uploadRef}
@@ -638,7 +744,9 @@ const App = () => {
 
             <div className="archive-composer" ref={composerRef}>
               <ChatComponent
-                docIds={docIds}
+                chatScopeMode={chatScopeMode}
+                chatScopeOptions={chatScopeOptions}
+                docIds={isDemoWorkbench ? [] : chatDocIds}
                 docLabel={visibleDocLabel}
                 sessionId={sessionId}
                 userId={userId}
@@ -646,6 +754,7 @@ const App = () => {
                 inputId="archive-agent-search"
                 isLoading={isLoading}
                 isDemoWorkbench={isDemoWorkbench}
+                onChatScopeModeChange={setChatScopeMode}
                 onAttach={handleComposerAttach}
                 setIsLoading={setIsLoading}
               />

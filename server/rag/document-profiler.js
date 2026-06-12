@@ -135,7 +135,7 @@ const buildEntities = ({ fileName, text }) => {
   );
 };
 
-export const buildDocumentProfile = ({ fileName, pages }) => {
+export const buildDocumentProfile = ({ fileName, pages, source = null }) => {
   const text = pages.map(getPageText).filter(Boolean).join("\n");
   const summary = buildSummary({
     fileName,
@@ -155,5 +155,6 @@ export const buildDocumentProfile = ({ fileName, pages }) => {
     tags,
     entities,
     generatedAt: new Date().toISOString(),
+    ...(source ? { source } : {}),
   };
 };

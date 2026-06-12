@@ -86,7 +86,7 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 | `server/rag/agent-planner.js` | 请求分类、planner actions、skill/chain 选择、执行前 clarification 判断。 |
 | `server/rag/arxiv-client.js` | arXiv Atom API 查询、feed 解析和 PDF 下载校验。 |
 | `server/rag/arxiv-enrichment.js` | 从已上传文档的本地 profile tags 生成 arXiv topic、返回签名候选 token，并在用户确认后导入同一批候选。 |
-| `server/rag/arxiv-importer.js` | 按 topic 或已确认候选列表下载 arXiv PDF，并通过现有文档 ingestion 写入索引。 |
+| `server/rag/arxiv-importer.js` | 按 topic 或已确认候选列表下载 arXiv PDF，写入 `profile.source` provenance，并通过现有文档 ingestion 写入索引。 |
 | `server/rag/arxiv-selection-token.js` | 对文档级 arXiv 推荐结果签名和验签，确保确认导入的是用户看到的候选。 |
 | `server/rag/agent-query-planner.js` | 为 document/custom skill 生成 retrieval plan、动态 topK 和实际检索 queries。 |
 | `server/rag/agent-document-loop.js` | Document RAG、self-check、gap analysis、follow-up retrieval、claim/gap 更新。 |
@@ -98,6 +98,8 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 | `server/rag/agent-trace.js` | Trace step summary 和 compact trace serialization。 |
 
 `server/rag/agent.js` 应保留为主流程编排，不应重新堆入 planner、trace、working memory、observability 或 finalization 细节。
+
+前端 Chat scope 控制只改变传给 `/chat` 的 `docIds`：默认 `Uploaded` 排除外部 arXiv 文档，`All` 包含工作区全部文档，`Selected` 使用用户在文档列表中勾选的文档。
 
 ## `/chat` observability
 

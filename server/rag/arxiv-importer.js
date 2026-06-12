@@ -62,10 +62,18 @@ const serializeFailedPaper = ({ error, paper }) => ({
   error: error instanceof Error ? error.message : String(error),
 });
 
+const buildArxivDocumentSource = ({ importContext = {}, paper = {} } = {}) => ({
+  sourceType: "arxiv",
+  arxivId: normalizeText(paper.arxivId),
+  relatedToDocId: normalizeText(importContext.relatedToDocId),
+  importedByUserConfirmation: Boolean(importContext.importedByUserConfirmation),
+});
+
 export const importArxivTopic = async ({
   accessScope = {},
   arxivService,
   delayMs = DEFAULT_IMPORT_DELAY_MS,
+  importContext = {},
   maxResults = DEFAULT_ARXIV_MAX_RESULTS,
   ragService,
   tempDirectory = path.join(os.tmpdir(), "luc1ferxx-arxiv-imports"),
@@ -93,6 +101,7 @@ export const importArxivTopic = async ({
     accessScope,
     arxivService,
     delayMs,
+    importContext,
     maxResults: requestedMaxResults,
     papers,
     ragService,
@@ -105,6 +114,7 @@ export const importArxivPapers = async ({
   accessScope = {},
   arxivService,
   delayMs = DEFAULT_IMPORT_DELAY_MS,
+  importContext = {},
   maxResults = DEFAULT_ARXIV_MAX_RESULTS,
   papers = [],
   ragService,
@@ -168,10 +178,14 @@ export const importArxivPapers = async ({
       const document = await ragService.ingestDocument({
         docId: randomUUID(),
         filePath: pdfPath,
-        fileName,
-        ownerUserId: accessScope.userId,
-        workspaceId: accessScope.workspaceId,
-      });
+          fileName,
+          ownerUserId: accessScope.userId,
+          source: buildArxivDocumentSource({
+            importContext,
+            paper,
+          }),
+          workspaceId: accessScope.workspaceId,
+        });
 
       importedPapers.push(
         serializeImportedPaper({

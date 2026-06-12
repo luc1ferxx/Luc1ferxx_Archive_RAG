@@ -13,12 +13,24 @@ import {
   buildPreviewSourceFromDocument,
   formatDocumentCount,
   formatPageCount,
+  getDocumentSource,
+  isArxivDocument,
 } from "../archiveWorkspace";
 import DocumentProfileSnippet from "./DocumentProfileSnippet";
 import ArxivSuggestionPanel from "./ArxivSuggestionPanel";
 import PdfUploader from "./PdfUploader";
 import QualityGuardPanel from "./QualityGuardPanel";
 import SpotlightCard from "./react-bits/SpotlightCard";
+
+const getDocumentSourceLabel = (document) => {
+  const source = getDocumentSource(document);
+
+  if (isArxivDocument(document)) {
+    return source?.arxivId ? `arXiv ${source.arxivId}` : "arXiv";
+  }
+
+  return "Uploaded";
+};
 
 const WorkspaceSidebar = ({
   activeNavTarget,
@@ -39,12 +51,14 @@ const WorkspaceSidebar = ({
   onRemoveDocument,
   onRunSyntheticQuality,
   onSelectSource,
+  onToggleChatScopeDocument,
   onNavigate,
   onUploadSuccess,
   qualityHistory,
   qualityReport,
   qualityRef,
   relevantDocuments,
+  selectedChatDocIds = [],
   selectedDocId,
   totalPages,
   uploadRef,
@@ -211,50 +225,78 @@ const WorkspaceSidebar = ({
 
       {activeDocuments.length > 0 ? (
         <div className="document-list">
-          {activeDocuments.map((document) => (
-            <SpotlightCard
-              as="article"
-              key={document.docId}
-              className={`document-item ${
-                selectedDocId === document.docId ? "is-selected" : ""
-              }`}
-              spotlightColor="rgba(39, 110, 241, 0.09)"
-            >
-              <button
-                type="button"
-                className={`document-item-main document-item-main-button ${
+          {activeDocuments.map((document) => {
+            const isInSelectedChatScope = selectedChatDocIds.includes(document.docId);
+
+            return (
+              <SpotlightCard
+                as="article"
+                key={document.docId}
+                className={`document-item ${
                   selectedDocId === document.docId ? "is-selected" : ""
                 }`}
-                aria-pressed={selectedDocId === document.docId}
-                onClick={() =>
-                  onSelectSource(
-                    document.previewSource ?? buildPreviewSourceFromDocument(document)
-                  )
-                }
+                spotlightColor="rgba(39, 110, 241, 0.09)"
               >
-                <div className="document-item-title">{document.fileName}</div>
-                <div className="document-item-meta">
-                  {formatPageCount(document.pageCount)} pages
-                  {document.version ? ` · ${document.version}` : ""}
-                  {document.age ? ` · ${document.age}` : ` · ID ${document.docId.slice(0, 8)}`}
-                </div>
-                <DocumentProfileSnippet document={document} />
-              </button>
-
-              {isDemoWorkbench ? (
-                <span className={`document-status-dot is-${document.status ?? "ready"}`} />
-              ) : (
                 <button
                   type="button"
-                  className="document-item-remove"
-                  aria-label={`Remove ${document.fileName}`}
-                  onClick={() => void onRemoveDocument(document.docId)}
+                  className={`document-item-main document-item-main-button ${
+                    selectedDocId === document.docId ? "is-selected" : ""
+                  }`}
+                  aria-pressed={selectedDocId === document.docId}
+                  onClick={() =>
+                    onSelectSource(
+                      document.previewSource ?? buildPreviewSourceFromDocument(document)
+                    )
+                  }
                 >
-                  ×
+                  <div className="document-item-title">{document.fileName}</div>
+                  <div className="document-item-meta">
+                    {formatPageCount(document.pageCount)} pages
+                    {document.version ? ` · ${document.version}` : ""}
+                    {document.age ? ` · ${document.age}` : ` · ID ${document.docId.slice(0, 8)}`}
+                  </div>
+                  <div className="document-source-row">
+                    <span
+                      className={`document-source-badge ${
+                        isArxivDocument(document) ? "is-arxiv" : "is-uploaded"
+                      }`}
+                    >
+                      {getDocumentSourceLabel(document)}
+                    </span>
+                  </div>
+                  <DocumentProfileSnippet document={document} />
                 </button>
-              )}
-            </SpotlightCard>
-          ))}
+
+                {isDemoWorkbench ? (
+                  <span className={`document-status-dot is-${document.status ?? "ready"}`} />
+                ) : (
+                  <div className="document-item-actions">
+                    <button
+                      type="button"
+                      className={`document-scope-toggle ${
+                        isInSelectedChatScope ? "is-active" : ""
+                      }`}
+                      aria-label={`${
+                        isInSelectedChatScope ? "Exclude" : "Include"
+                      } ${document.fileName} in selected chat scope`}
+                      aria-pressed={isInSelectedChatScope}
+                      onClick={() => void onToggleChatScopeDocument?.(document.docId)}
+                    >
+                      {isInSelectedChatScope ? <CheckSquareOutlined /> : <PlusCircleOutlined />}
+                    </button>
+                    <button
+                      type="button"
+                      className="document-item-remove"
+                      aria-label={`Remove ${document.fileName}`}
+                      onClick={() => void onRemoveDocument(document.docId)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+              </SpotlightCard>
+            );
+          })}
           {isDemoWorkbench ? (
             <button
               type="button"

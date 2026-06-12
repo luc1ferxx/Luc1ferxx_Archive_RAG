@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `GET` | `/health` | 返回 OpenAI、auth、vector store、PostgreSQL、long memory 等健康状态。 |
 | `GET` | `/ready` | Readiness check，整体异常时返回 `503`。 |
-| `GET` | `/documents` | 列出当前访问范围内的持久化文档。 |
+| `GET` | `/documents` | 列出当前访问范围内的持久化文档；外部导入文档会在 `profile.source` / `source` 暴露 provenance。 |
 | `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
 | `POST` | `/documents/clear` | 清空工作区文档。 |
 | `GET` | `/documents/:docId/file` | 以内联 PDF 方式流式返回文档，支持 range request。 |
@@ -32,6 +32,8 @@
 | `GET` | `/quality/history` | 查询历史 quality run。 |
 
 只有 `/health` 和 `/ready` 是公开健康检查。文档列表、上传、chat、memory、quality、feedback 和 `/documents/:docId/file` 在 `API_AUTH_ENABLED=true` 时都需要 `x-api-key` 或 `Authorization: Bearer <token>`。
+
+前端 Chat scope 控制通过不同 `docIds` 调用同一个 `/chat` endpoint；后端 RAG 仍只检索请求传入且通过 `accessScope` 校验的文档。
 
 ## 仓库结构
 

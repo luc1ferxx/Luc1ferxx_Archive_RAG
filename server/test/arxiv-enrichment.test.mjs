@@ -88,8 +88,9 @@ test("arxiv enrichment imports papers only after confirmation", async () => {
   const searches = [];
   const service = createArxivEnrichmentService({
     arxivImportService: {
-      importPapers: async ({ maxResults, papers, topic }) => {
+      importPapers: async ({ importContext, maxResults, papers, topic }) => {
         imports.push({
+          importContext,
           maxResults,
           paperIds: papers.map((paper) => paper.arxivId),
           topic,
@@ -167,6 +168,10 @@ test("arxiv enrichment imports papers only after confirmation", async () => {
   ]);
   assert.deepEqual(imports, [
     {
+      importContext: {
+        importedByUserConfirmation: true,
+        relatedToDocId: "doc-1",
+      },
       maxResults: 3,
       paperIds: ["2401.00001v1", "2401.00002v1", "2401.00003v1"],
       topic: "retrieval augmented generation",

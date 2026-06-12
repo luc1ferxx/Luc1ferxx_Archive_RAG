@@ -181,6 +181,10 @@ export const createArxivEnrichmentService = ({
       document: buildDocumentSummary(document),
       ...(await arxivImportService.importPapers({
         accessScope,
+        importContext: {
+          importedByUserConfirmation: true,
+          relatedToDocId: docId,
+        },
         maxResults: normalizeArxivMaxResults(
           selection.requestedMaxResults,
           selection.papers.length || DEFAULT_ARXIV_MAX_RESULTS

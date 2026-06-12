@@ -63,6 +63,7 @@ export const ingestDocumentPages = async ({
   pages,
   ownerUserId = "",
   workspaceId = "",
+  source = null,
 }) => {
   const publicFilePath = buildPublicFilePath(docId);
   const chunks = chunkDocument({
@@ -70,6 +71,7 @@ export const ingestDocumentPages = async ({
     fileName,
     publicFilePath,
     pages,
+    source,
   });
 
   if (chunks.length === 0) {
@@ -106,7 +108,9 @@ export const ingestDocumentPages = async ({
       profile: buildDocumentProfile({
         fileName,
         pages,
+        source,
       }),
+      source,
       uploadedAt: new Date().toISOString(),
     });
 
@@ -135,6 +139,7 @@ export const ingestDocument = async ({
   fileName,
   ownerUserId = "",
   workspaceId = "",
+  source = null,
 }) => {
   const loader = new PDFLoader(filePath);
   const pageDocuments = await loader.load();
@@ -145,6 +150,7 @@ export const ingestDocument = async ({
     fileName,
     ownerUserId,
     workspaceId,
+    source,
     pages: pageDocuments.map((document, index) => ({
       pageNumber: getPageNumber(document.metadata, index + 1),
       text: document.pageContent,
