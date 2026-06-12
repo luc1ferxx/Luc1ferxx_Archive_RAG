@@ -1,9 +1,12 @@
+import { useMemo, useState } from "react";
 import { Button } from "antd";
 import {
   CloseOutlined,
   DownloadOutlined,
   FileSearchOutlined,
 } from "@ant-design/icons";
+
+const EMPTY_PAPERS = [];
 
 const getPaperLabel = (paper = {}) =>
   paper.arxivId ? `arXiv:${paper.arxivId}` : "arXiv";
@@ -15,16 +18,51 @@ const ArxivSuggestionPanel = ({
   onImport,
   suggestion,
 }) => {
-  const papers = suggestion?.papers ?? [];
+  const papers = suggestion?.papers ?? EMPTY_PAPERS;
+  const paperIds = useMemo(
+    () => papers.map((paper) => paper.arxivId).filter(Boolean),
+    [papers]
+  );
+  const paperIdsKey = paperIds.join("\n");
+  const [selectionState, setSelectionState] = useState({
+    paperIdsKey: "",
+    selectedPaperIds: [],
+  });
 
   if (!isLoading && papers.length === 0) {
     return null;
   }
 
-  const importCount = Math.min(
-    suggestion?.requestedMaxResults ?? 3,
-    papers.length || 3
-  );
+  const selectedPaperIds =
+    selectionState.paperIdsKey === paperIdsKey
+      ? selectionState.selectedPaperIds
+      : paperIds;
+  const selectedCount = selectedPaperIds.length;
+
+  const handlePaperToggle = (paperId, checked) => {
+    setSelectionState((currentSelectionState) => {
+      const currentPaperIds =
+        currentSelectionState.paperIdsKey === paperIdsKey
+          ? currentSelectionState.selectedPaperIds
+          : paperIds;
+      let nextPaperIds;
+
+      if (checked) {
+        nextPaperIds = currentPaperIds.includes(paperId)
+          ? currentPaperIds
+          : [...currentPaperIds, paperId];
+      } else {
+        nextPaperIds = currentPaperIds.filter(
+          (currentPaperId) => currentPaperId !== paperId
+        );
+      }
+
+      return {
+        paperIdsKey,
+        selectedPaperIds: nextPaperIds,
+      };
+    });
+  };
 
   return (
     <div className="arxiv-suggestion-panel" aria-live="polite">
@@ -48,26 +86,53 @@ const ArxivSuggestionPanel = ({
       ) : (
         <>
           <div className="arxiv-suggestion-copy">
-            Found {papers.length} papers for {suggestion.topic}.
+            Found {papers.length} papers for {suggestion.topic}. Choose which
+            ones to import.
           </div>
           <div className="arxiv-paper-list">
-            {papers.slice(0, 3).map((paper) => (
-              <div className="arxiv-paper-item" key={paper.arxivId ?? paper.title}>
-                <span>{getPaperLabel(paper)}</span>
-                <strong>{paper.title}</strong>
-              </div>
-            ))}
+            {papers.map((paper) => {
+              const paperId = paper.arxivId;
+              const isSelected = selectedPaperIds.includes(paperId);
+
+              return (
+                <div
+                  className={`arxiv-paper-item ${isSelected ? "is-selected" : ""}`}
+                  key={paper.arxivId ?? paper.title}
+                >
+                  <label className="arxiv-paper-checkbox">
+                    <input
+                      aria-label={`Select ${paper.title || getPaperLabel(paper)}`}
+                      checked={isSelected}
+                      className="arxiv-paper-checkbox-input"
+                      disabled={!paperId || isImporting}
+                      onChange={(event) =>
+                        handlePaperToggle(paperId, event.target.checked)
+                      }
+                      type="checkbox"
+                    />
+                    <span className="arxiv-paper-body">
+                      <span className="arxiv-paper-id">{getPaperLabel(paper)}</span>
+                      <strong>{paper.title}</strong>
+                    </span>
+                  </label>
+                </div>
+              );
+            })}
+          </div>
+          <div className="arxiv-selection-summary">
+            {selectedCount} of {papers.length} selected
           </div>
           <div className="arxiv-suggestion-actions">
             <Button
               className="archive-secondary-button"
+              disabled={selectedCount === 0}
               icon={<DownloadOutlined />}
               loading={isImporting}
-              onClick={() => void onImport?.()}
+              onClick={() => void onImport?.(selectedPaperIds)}
               size="small"
               type="primary"
             >
-              Import {importCount}
+              Import {selectedCount}
             </Button>
             <Button
               className="archive-secondary-button"

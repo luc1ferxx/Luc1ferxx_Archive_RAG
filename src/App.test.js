@@ -271,12 +271,23 @@ describe("App", () => {
       await screen.findByText("Retrieval Augmented Generation for Archives")
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Import 3/i }));
+    const groundedPaperCheckbox = screen.getByLabelText(
+      "Select Grounded Question Answering with Documents"
+    );
+    expect(groundedPaperCheckbox).toBeChecked();
+    fireEvent.click(groundedPaperCheckbox);
+    expect(groundedPaperCheckbox).not.toBeChecked();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Import 2/i })).toBeEnabled()
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Import 2/i }));
 
     await waitFor(() =>
       expect(axios.post).toHaveBeenCalledWith(
         "http://localhost:5001/documents/doc-upload/arxiv/import",
         {
+          selectedArxivIds: ["2401.00001v1", "2401.00003v1"],
           selectionToken: "selection-token-1",
         }
       )

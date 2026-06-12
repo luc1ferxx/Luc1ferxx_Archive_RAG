@@ -45,11 +45,16 @@ export const useArxivEnrichment = ({ onImportComplete } = {}) => {
     }
   }, []);
 
-  const importSuggestion = useCallback(async () => {
+  const importSuggestion = useCallback(async (selectedArxivIds) => {
     const docId = suggestion?.document?.docId;
     const selectionToken = suggestion?.selectionToken;
 
     if (!docId || !selectionToken) {
+      return;
+    }
+
+    if (Array.isArray(selectedArxivIds) && selectedArxivIds.length === 0) {
+      message.info("Select at least one arXiv paper to import.");
       return;
     }
 
@@ -58,7 +63,8 @@ export const useArxivEnrichment = ({ onImportComplete } = {}) => {
     try {
       const result = await requestDocumentArxivImport(
         docId,
-        selectionToken
+        selectionToken,
+        selectedArxivIds
       );
       const completedCount =
         (result.importedCount ?? 0) + (result.skippedCount ?? 0);

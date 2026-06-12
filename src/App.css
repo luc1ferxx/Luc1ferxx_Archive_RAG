@@ -1799,7 +1799,41 @@
   background: #ffffff;
 }
 
-.arxiv-paper-item span {
+.arxiv-paper-item.is-selected {
+  border-color: rgba(15, 159, 122, 0.42);
+  background: #f9fffd;
+}
+
+.arxiv-paper-checkbox {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  color: inherit;
+  cursor: pointer;
+}
+
+.arxiv-paper-checkbox-input {
+  width: 14px;
+  height: 14px;
+  margin: 2px 0 0;
+  accent-color: var(--archive-accent-agent);
+  cursor: pointer;
+}
+
+.arxiv-paper-checkbox-input:disabled {
+  cursor: not-allowed;
+}
+
+.arxiv-paper-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.arxiv-paper-id {
   color: var(--archive-text-muted);
   font-size: 0.66rem;
   font-weight: 760;
@@ -1813,6 +1847,13 @@
   line-height: 1.35;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.arxiv-selection-summary {
+  color: var(--archive-text-muted);
+  font-size: 0.68rem;
+  font-weight: 720;
+  line-height: 1.25;
 }
 
 .arxiv-suggestion-actions {

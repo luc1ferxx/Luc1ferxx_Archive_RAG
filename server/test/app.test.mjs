@@ -352,10 +352,16 @@ test("document arxiv enrichment routes suggest first and import after confirmati
           reason: null,
         };
       },
-      importForDocument: async ({ accessScope, docId, selectionToken }) => {
+      importForDocument: async ({
+        accessScope,
+        docId,
+        selectedArxivIds,
+        selectionToken,
+      }) => {
         calls.push({
           accessScope,
           docId,
+          selectedArxivIds,
           selectionToken,
           type: "import",
         });
@@ -405,6 +411,7 @@ test("document arxiv enrichment routes suggest first and import after confirmati
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        selectedArxivIds: ["2401.00001v1"],
         selectionToken: "selection-token-1",
       }),
     });
@@ -415,6 +422,7 @@ test("document arxiv enrichment routes suggest first and import after confirmati
       calls.map((call) => ({
         docId: call.docId,
         maxResults: call.maxResults,
+        selectedArxivIds: call.selectedArxivIds,
         selectionToken: call.selectionToken,
         type: call.type,
       })),
@@ -422,12 +430,14 @@ test("document arxiv enrichment routes suggest first and import after confirmati
         {
           docId: "doc-1",
           maxResults: 3,
+          selectedArxivIds: undefined,
           selectionToken: undefined,
           type: "suggest",
         },
         {
           docId: "doc-1",
           maxResults: undefined,
+          selectedArxivIds: ["2401.00001v1"],
           selectionToken: "selection-token-1",
           type: "import",
         },

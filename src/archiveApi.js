@@ -20,10 +20,20 @@ export const fetchDocumentArxivSuggestions = async (docId, maxResults = 3) => {
   );
 };
 
-export const requestDocumentArxivImport = async (docId, selectionToken) => {
-  return apiPost(`/documents/${docId}/arxiv/import`, {
+export const requestDocumentArxivImport = async (
+  docId,
+  selectionToken,
+  selectedArxivIds
+) => {
+  const payload = {
     selectionToken,
-  });
+  };
+
+  if (Array.isArray(selectedArxivIds)) {
+    payload.selectedArxivIds = selectedArxivIds;
+  }
+
+  return apiPost(`/documents/${docId}/arxiv/import`, payload);
 };
 
 export const requestSessionClear = async (sessionId) => {

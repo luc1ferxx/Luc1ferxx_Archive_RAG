@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import {
   buildArxivTopicFromDocumentProfile,
   createArxivEnrichmentService,
+  evaluateArxivPaperRelevance,
+  rankArxivTopicCandidatesFromDocumentProfile,
 } from "../rag/arxiv-enrichment.js";
 
-test("arxiv enrichment derives a public topic from profile tags only", () => {
+test("arxiv enrichment derives a public topic while filtering profile entities", () => {
   const topic = buildArxivTopicFromDocumentProfile({
     fileName: "confidential-project-redwood.pdf",
     profile: {
@@ -18,6 +20,92 @@ test("arxiv enrichment derives a public topic from profile tags only", () => {
   assert.equal(topic, "retrieval augmented generation");
   assert.equal(topic.includes("Customer"), false);
   assert.equal(topic.includes("REDWOOD-917"), false);
+});
+
+test("arxiv enrichment ranks summary keyphrases when tags are generic", () => {
+  const topic = buildArxivTopicFromDocumentProfile({
+    fileName: "paper-notes.pdf",
+    profile: {
+      summary:
+        "Graph neural networks improve molecule property prediction. Graph neural networks support molecular representation learning.",
+      tags: ["document", "report"],
+      entities: [],
+    },
+  });
+
+  assert.equal(topic, "graph neural networks molecule");
+  assert.equal(topic.includes("improve"), false);
+  assert.equal(topic.includes("support"), false);
+});
+
+test("arxiv enrichment filters private entities and internal terms before ranking", () => {
+  const rankedTerms = rankArxivTopicCandidatesFromDocumentProfile(
+    {
+      fileName: "customer-alpha-redwood-917.pdf",
+      profile: {
+        summary:
+          "Customer Alpha REDWOOD-917 rollout notes. Retrieval augmented generation improves grounded question answering. Retrieval augmented generation pairs with hybrid retrieval for Project Redwood.",
+        tags: [
+          "alpha",
+          "redwood",
+          "generation",
+          "retrieval",
+          "internal",
+          "question",
+          "answering",
+        ],
+        entities: ["Customer Alpha", "REDWOOD-917", "Project Redwood"],
+      },
+    },
+    {
+      limit: 8,
+    }
+  );
+
+  assert.deepEqual(rankedTerms.slice(0, 4), [
+    "retrieval",
+    "augmented",
+    "generation",
+    "question",
+  ]);
+  assert.equal(rankedTerms.includes("alpha"), false);
+  assert.equal(rankedTerms.includes("redwood"), false);
+  assert.equal(rankedTerms.includes("redwood-917"), false);
+  assert.equal(rankedTerms.includes("customer"), false);
+  assert.equal(rankedTerms.includes("internal"), false);
+});
+
+test("arxiv enrichment scores paper relevance from title and summary overlap", () => {
+  const document = {
+    profile: {
+      summary: "Retrieval augmented generation improves grounded archives.",
+      tags: ["retrieval", "augmented", "generation"],
+    },
+  };
+  const relevantPaper = evaluateArxivPaperRelevance({
+    document,
+    paper: {
+      title: "Retrieval Augmented Generation for Archives",
+      summary: "Grounded document question answering with citations.",
+    },
+    topic: "retrieval augmented generation",
+  });
+  const irrelevantPaper = evaluateArxivPaperRelevance({
+    document,
+    paper: {
+      title: "Convolutional Networks for Image Segmentation",
+      summary: "Vision models for medical image masks.",
+    },
+    topic: "retrieval augmented generation",
+  });
+
+  assert.equal(relevantPaper.passed, true);
+  assert.deepEqual(relevantPaper.matchedTerms.slice(0, 3), [
+    "retrieval",
+    "augmented",
+    "generation",
+  ]);
+  assert.equal(irrelevantPaper.passed, false);
 });
 
 test("arxiv enrichment returns suggestions for a scoped document", async () => {
@@ -39,6 +127,7 @@ test("arxiv enrichment returns suggestions for a scoped document", async () => {
           {
             arxivId: "2401.00001v1",
             pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+            summary: "Retrieval augmented generation for archive search.",
             title: "Retrieval Augmented Generation for Archives",
           },
         ];
@@ -83,6 +172,92 @@ test("arxiv enrichment returns suggestions for a scoped document", async () => {
   ]);
 });
 
+test("arxiv enrichment filters irrelevant papers before returning suggestions", async () => {
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importTopic: async () => {
+        throw new Error("import should not run for suggestions");
+      },
+    },
+    arxivService: {
+      search: async () => [
+        {
+          arxivId: "2401.00001v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+          summary:
+            "Retrieval augmented generation improves grounded answers over archive documents.",
+          title: "Retrieval Augmented Generation for Archives",
+        },
+        {
+          arxivId: "2401.00002v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00002v1",
+          summary: "Vision models for medical image masks.",
+          title: "Convolutional Networks for Image Segmentation",
+        },
+      ],
+    },
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: {
+          tags: ["retrieval", "augmented", "generation"],
+        },
+      }),
+    },
+  });
+
+  const result = await service.suggestForDocument({
+    docId: "doc-1",
+    maxResults: 3,
+  });
+
+  assert.deepEqual(
+    result.papers.map((paper) => paper.arxivId),
+    ["2401.00001v1"]
+  );
+  assert.match(result.selectionToken, /^v1\./);
+  assert.equal(result.reason, null);
+});
+
+test("arxiv enrichment reports when search results fail relevance checks", async () => {
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importTopic: async () => {
+        throw new Error("import should not run for suggestions");
+      },
+    },
+    arxivService: {
+      search: async () => [
+        {
+          arxivId: "2401.00002v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00002v1",
+          summary: "Vision models for medical image masks.",
+          title: "Convolutional Networks for Image Segmentation",
+        },
+      ],
+    },
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: {
+          tags: ["retrieval", "augmented", "generation"],
+        },
+      }),
+    },
+  });
+
+  const result = await service.suggestForDocument({
+    docId: "doc-1",
+    maxResults: 3,
+  });
+
+  assert.deepEqual(result.papers, []);
+  assert.equal(result.selectionToken, null);
+  assert.equal(result.reason, "no_relevant_arxiv_matches");
+});
+
 test("arxiv enrichment imports papers only after confirmation", async () => {
   const imports = [];
   const searches = [];
@@ -120,16 +295,21 @@ test("arxiv enrichment imports papers only after confirmation", async () => {
           {
             arxivId: "2401.00001v1",
             pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+            summary: "Retrieval augmented generation for archive search.",
             title: "Retrieval Augmented Generation for Archives",
           },
           {
             arxivId: "2401.00002v1",
             pdfUrl: "https://arxiv.org/pdf/2401.00002v1",
+            summary:
+              "Retrieval augmented generation improves grounded question answering with private documents.",
             title: "Grounded Question Answering with Documents",
           },
           {
             arxivId: "2401.00003v1",
             pdfUrl: "https://arxiv.org/pdf/2401.00003v1",
+            summary:
+              "Hybrid retrieval supports retrieval augmented generation over private workspaces.",
             title: "Hybrid Retrieval for Private Workspaces",
           },
         ];
@@ -177,6 +357,174 @@ test("arxiv enrichment imports papers only after confirmation", async () => {
       topic: "retrieval augmented generation",
     },
   ]);
+});
+
+test("arxiv enrichment imports only selected recommended papers", async () => {
+  const imports = [];
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importPapers: async ({ maxResults, papers }) => {
+        imports.push({
+          maxResults,
+          paperIds: papers.map((paper) => paper.arxivId),
+        });
+
+        return {
+          topic: "retrieval augmented generation",
+          requestedMaxResults: maxResults,
+          foundCount: papers.length,
+          importedCount: papers.length,
+          skippedCount: 0,
+          failedCount: 0,
+          importedPapers: [],
+          skippedPapers: [],
+          failedPapers: [],
+        };
+      },
+    },
+    arxivService: {
+      search: async () => [
+        {
+          arxivId: "2401.00001v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+          summary: "Retrieval augmented generation for archive search.",
+          title: "Retrieval Augmented Generation for Archives",
+        },
+        {
+          arxivId: "2401.00002v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00002v1",
+          summary:
+            "Retrieval augmented generation improves grounded question answering with private documents.",
+          title: "Grounded Question Answering with Documents",
+        },
+        {
+          arxivId: "2401.00003v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00003v1",
+          summary:
+            "Hybrid retrieval supports retrieval augmented generation over private workspaces.",
+          title: "Hybrid Retrieval for Private Workspaces",
+        },
+      ],
+    },
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: {
+          tags: ["retrieval", "augmented", "generation"],
+        },
+      }),
+    },
+  });
+
+  const suggestion = await service.suggestForDocument({
+    docId: "doc-1",
+    maxResults: 3,
+  });
+
+  const result = await service.importForDocument({
+    docId: "doc-1",
+    selectedArxivIds: ["2401.00003v1", "2401.00001v1"],
+    selectionToken: suggestion.selectionToken,
+  });
+
+  assert.equal(result.importedCount, 2);
+  assert.deepEqual(imports, [
+    {
+      maxResults: 2,
+      paperIds: ["2401.00003v1", "2401.00001v1"],
+    },
+  ]);
+});
+
+test("arxiv enrichment rejects selected papers outside the signed recommendation set", async () => {
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importPapers: async () => {
+        throw new Error("import should not run for invalid selections");
+      },
+    },
+    arxivService: {
+      search: async () => [
+        {
+          arxivId: "2401.00001v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+          summary: "Retrieval augmented generation for archive search.",
+          title: "Retrieval Augmented Generation for Archives",
+        },
+      ],
+    },
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: {
+          tags: ["retrieval", "augmented", "generation"],
+        },
+      }),
+    },
+  });
+
+  const suggestion = await service.suggestForDocument({
+    docId: "doc-1",
+    maxResults: 3,
+  });
+
+  await assert.rejects(
+    () =>
+      service.importForDocument({
+        docId: "doc-1",
+        selectedArxivIds: ["2401.99999v1"],
+        selectionToken: suggestion.selectionToken,
+      }),
+    /not in this recommendation set/
+  );
+});
+
+test("arxiv enrichment rejects signed import candidates that fail relevance checks", async () => {
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importPapers: async () => {
+        throw new Error("import should not run for irrelevant papers");
+      },
+    },
+    arxivService: {
+      search: async () => [],
+    },
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: {
+          tags: ["retrieval", "augmented", "generation"],
+        },
+      }),
+    },
+    selectionTokenService: {
+      verifySelectionToken: () => ({
+        docId: "doc-1",
+        topic: "retrieval augmented generation",
+        requestedMaxResults: 1,
+        papers: [
+          {
+            arxivId: "2401.00002v1",
+            pdfUrl: "https://arxiv.org/pdf/2401.00002v1",
+            summary: "Vision models for medical image masks.",
+            title: "Convolutional Networks for Image Segmentation",
+          },
+        ],
+      }),
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      service.importForDocument({
+        docId: "doc-1",
+        selectionToken: "legacy-token",
+      }),
+    /no longer pass relevance checks/
+  );
 });
 
 test("arxiv enrichment requires a confirmed selection token before import", async () => {

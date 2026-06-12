@@ -520,6 +520,7 @@ export const createApp = async (options = {}) => {
       const result = await arxivEnrichmentService.importForDocument({
         accessScope: getRequestAccessScope(req),
         docId,
+        selectedArxivIds: req.body.selectedArxivIds,
         selectionToken: req.body.selectionToken,
       });
 
