@@ -11,6 +11,17 @@ const EMPTY_PAPERS = [];
 const getPaperLabel = (paper = {}) =>
   paper.arxivId ? `arXiv:${paper.arxivId}` : "arXiv";
 
+const getSanitizedTopic = (suggestion) => {
+  const safeSuggestion = suggestion ?? {};
+
+  return (
+    safeSuggestion.queryPolicy?.sanitizedQuery ||
+    safeSuggestion.trace?.externalQueryPolicy?.sanitizedQuery ||
+    safeSuggestion.topic ||
+    ""
+  );
+};
+
 const ArxivSuggestionPanel = ({
   isImporting,
   isLoading,
@@ -38,6 +49,7 @@ const ArxivSuggestionPanel = ({
       ? selectionState.selectedPaperIds
       : paperIds;
   const selectedCount = selectedPaperIds.length;
+  const sanitizedTopic = getSanitizedTopic(suggestion);
 
   const handlePaperToggle = (paperId, checked) => {
     setSelectionState((currentSelectionState) => {
@@ -86,9 +98,17 @@ const ArxivSuggestionPanel = ({
       ) : (
         <>
           <div className="arxiv-suggestion-copy">
-            Found {papers.length} papers for {suggestion.topic}. Choose which
+            Found {papers.length} papers for {sanitizedTopic}. Choose which
             ones to import.
           </div>
+          {sanitizedTopic ? (
+            <div className="arxiv-query-policy-note">
+              <span>arXiv search uses cleaned topic:</span>
+              <strong className="arxiv-query-policy-topic">
+                {sanitizedTopic}
+              </strong>
+            </div>
+          ) : null}
           <div className="arxiv-paper-list">
             {papers.map((paper) => {
               const paperId = paper.arxivId;

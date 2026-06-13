@@ -1827,6 +1827,28 @@
   overflow-wrap: anywhere;
 }
 
+.arxiv-query-policy-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(39, 110, 241, 0.14);
+  border-radius: var(--archive-radius-sm);
+  background: #ffffff;
+  color: var(--archive-text-muted);
+  font-size: 0.69rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.arxiv-query-policy-topic {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-weight: 760;
+}
+
 .arxiv-paper-list {
   display: grid;
   gap: 6px;

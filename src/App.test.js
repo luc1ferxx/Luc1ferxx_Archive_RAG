@@ -190,6 +190,23 @@ describe("App", () => {
               fileName: "rag-notes.pdf",
             },
             topic: "retrieval augmented generation",
+            queryPolicy: {
+              allowed: true,
+              policyVersion: "external_query_policy_v1",
+              removedTermCount: 2,
+              removedTerms: [
+                {
+                  reason: "sensitive_profile_term",
+                  value: "[redacted]",
+                },
+                {
+                  reason: "generic_or_restricted_term",
+                  value: "[redacted]",
+                },
+              ],
+              riskFlags: ["query_sanitized"],
+              sanitizedQuery: "retrieval augmented generation",
+            },
             requestedMaxResults: 3,
             selectionToken: "selection-token-1",
             papers: [
@@ -212,6 +229,11 @@ describe("App", () => {
               status: "waiting_for_user",
               label: "arXiv recommendations",
               summary: "Found 3 arXiv recommendations for review.",
+            },
+            trace: {
+              externalQueryPolicy: {
+                sanitizedQuery: "retrieval augmented generation",
+              },
             },
           },
         });
@@ -336,6 +358,10 @@ describe("App", () => {
     expect(
       await screen.findByText("Retrieval Augmented Generation for Archives")
     ).toBeInTheDocument();
+    expect(
+      screen.getByText("arXiv search uses cleaned topic:")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Customer Alpha|ACME-X42|Evelyn Stone/i)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /Not now/i }));
 

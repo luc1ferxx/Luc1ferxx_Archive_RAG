@@ -1,4 +1,5 @@
 import { createInMemoryRecommendationSnapshotStore } from "./recommendation-snapshots.js";
+import { buildSafeExternalDocumentSummary } from "./external-context-sanitizer.js";
 
 const ARXIV_RECOMMENDATION_PROVIDER = "arxiv";
 const DEFAULT_ARXIV_SNAPSHOT_MAX_RESULTS = 3;
@@ -13,10 +14,10 @@ const stripInternalSnapshotFields = (snapshot = {}) => {
   return publicSnapshot;
 };
 
-const buildDocumentSummary = (document = {}) => ({
-  docId: document.docId,
-  fileName: document.fileName,
-});
+const buildDocumentSummary = (document = {}) =>
+  buildSafeExternalDocumentSummary({
+    document,
+  });
 
 const buildSavedSuggestionSnapshot = ({
   existingSnapshot = null,

@@ -198,8 +198,8 @@ export const buildExternalQueryPolicy = ({
       appendRemovedTerm(
         removedTerms,
         riskFlags,
-        "generic_or_private_term",
-        "generic_or_private_term_removed"
+        "generic_or_restricted_term",
+        "generic_or_restricted_term_removed"
       );
       continue;
     }

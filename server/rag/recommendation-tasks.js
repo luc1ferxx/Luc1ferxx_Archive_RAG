@@ -1,4 +1,5 @@
 import { serializeExternalQueryPolicy } from "./external-query-policy.js";
+import { buildSafeExternalDocumentSummary } from "./external-context-sanitizer.js";
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
 
 export const RECOMMENDATION_TASK_TYPE = "external_recommendation";
@@ -20,11 +21,18 @@ const getProviderLabel = (provider) => {
 const buildRecommendationTaskId = ({ docId, provider }) =>
   `${RECOMMENDATION_TASK_TYPE}:${normalizeText(provider)}:${normalizeText(docId)}`;
 
-const buildDocumentSubject = (document = {}) => ({
-  id: normalizeText(document.docId),
-  kind: "document",
-  label: normalizeText(document.fileName) || normalizeText(document.docId),
-});
+const buildDocumentSubject = (document = {}) => {
+  const summary = buildSafeExternalDocumentSummary({
+    document,
+  });
+  const docId = normalizeText(summary.docId);
+
+  return {
+    id: docId,
+    kind: "document",
+    label: normalizeText(summary.fileName) || docId,
+  };
+};
 
 const buildProvider = (provider) => ({
   id: normalizeText(provider),

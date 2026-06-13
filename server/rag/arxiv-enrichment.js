@@ -4,6 +4,7 @@ import {
 } from "./arxiv-client.js";
 import { createArxivRecommendationSnapshotService } from "./arxiv-recommendation-snapshots.js";
 import { createArxivSelectionTokenService } from "./arxiv-selection-token.js";
+import { buildSafeExternalDocumentSummary } from "./external-context-sanitizer.js";
 import {
   buildExternalQueryPolicy,
   buildExternalQuerySensitiveTerms,
@@ -357,10 +358,10 @@ const getScopedDocument = ({ accessScope, docId, ragService }) => {
   return document;
 };
 
-const buildDocumentSummary = (document = {}) => ({
-  docId: document.docId,
-  fileName: document.fileName,
-});
+const buildDocumentSummary = (document = {}) =>
+  buildSafeExternalDocumentSummary({
+    document,
+  });
 
 const assertSelectionError = (message) => {
   const error = new Error(message);

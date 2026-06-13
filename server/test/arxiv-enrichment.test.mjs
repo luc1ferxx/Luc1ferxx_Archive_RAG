@@ -264,15 +264,24 @@ test("arxiv enrichment uses sanitized external query policy for search, task inp
     ragService: {
       getDocument: () => ({
         docId: "doc-1",
-        fileName: "customer-alpha-ACME-X42.pdf",
+        fileName: "customer-alpha-evelyn-stone-private-ACME-X42.pdf",
         profile: {
-          entities: ["Customer Alpha", "Project Redwood", "ACME-X42"],
+          entities: [
+            "Customer Alpha",
+            "Project Redwood",
+            "Evelyn Stone",
+            "ACME-X42",
+          ],
           summary:
-            "Customer Alpha ACME-X42 notes for Project Redwood. Retrieval augmented generation.",
+            "Customer Alpha ACME-X42 confidential private proprietary notes by Evelyn Stone for Project Redwood. Retrieval augmented generation.",
           tags: [
             "Customer Alpha",
             "Project Redwood",
+            "Evelyn Stone",
             "ACME-X42",
+            "confidential",
+            "private",
+            "proprietary",
             "retrieval",
             "augmented",
             "generation",
@@ -306,15 +315,21 @@ test("arxiv enrichment uses sanitized external query policy for search, task inp
 
   assert.deepEqual(searchCalls, ["retrieval augmented generation"]);
   assert.equal(result.topic, "retrieval augmented generation");
+  assert.equal(result.document.fileName, "Uploaded document");
   assert.equal(result.queryPolicy.sanitizedQuery, "retrieval augmented generation");
   assert.equal(
     result.trace.externalQueryPolicy.sanitizedQuery,
     "retrieval augmented generation"
   );
   assert.equal(tasks[0].input.topic, "retrieval augmented generation");
+  assert.equal(tasks[0].subject.label, "Uploaded document");
   assert.equal(
     tasks[0].input.queryPolicy.sanitizedQuery,
     "retrieval augmented generation"
+  );
+  assert.equal(
+    savedSuggestion.document.fileName,
+    "Uploaded document"
   );
   assert.equal(
     savedSuggestion.queryPolicy.sanitizedQuery,
@@ -324,13 +339,25 @@ test("arxiv enrichment uses sanitized external query policy for search, task inp
   const safePolicyPayload = JSON.stringify({
     resultPolicy: result.queryPolicy,
     savedPolicy: savedSuggestion.queryPolicy,
+    savedSuggestion,
+    task: tasks[0],
     taskPolicy: tasks[0].input.queryPolicy,
     tracePolicy: result.trace.externalQueryPolicy,
   }).toLowerCase();
 
-  assert.equal(safePolicyPayload.includes("customer alpha"), false);
-  assert.equal(safePolicyPayload.includes("acme-x42"), false);
-  assert.equal(safePolicyPayload.includes("redwood"), false);
+  for (const sensitiveTerm of [
+    "customer alpha",
+    "evelyn",
+    "stone",
+    "evelyn stone",
+    "acme-x42",
+    "redwood",
+    "confidential",
+    "private",
+    "proprietary",
+  ]) {
+    assert.equal(safePolicyPayload.includes(sensitiveTerm), false);
+  }
 });
 
 test("arxiv enrichment filters irrelevant papers before returning suggestions", async () => {
