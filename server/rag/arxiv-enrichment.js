@@ -4,6 +4,17 @@ import {
 } from "./arxiv-client.js";
 import { createArxivRecommendationSnapshotService } from "./arxiv-recommendation-snapshots.js";
 import { createArxivSelectionTokenService } from "./arxiv-selection-token.js";
+import {
+  buildExternalQueryPolicy,
+  buildExternalQuerySensitiveTerms,
+  EXTERNAL_QUERY_STOP_TERMS,
+  getExternalQueryInternalIdentifiers,
+  isExternalQueryPolicyAllowed,
+  isSearchableExternalQueryTerm,
+  normalizeExternalQueryTerm,
+  serializeExternalQueryPolicy,
+  splitExternalQueryTerms,
+} from "./external-query-policy.js";
 import { extractMeaningfulTokens } from "./text-utils.js";
 
 const ARXIV_RECOMMENDATION_PROVIDER = "arxiv";
@@ -15,74 +26,14 @@ const MAX_KEYPHRASE_TOKENS = 3;
 const DEFAULT_RELEVANCE_TERM_LIMIT = 8;
 const MIN_RELEVANCE_MATCHED_TERMS = 2;
 const MIN_RELEVANCE_SCORE = 2.5;
-const TOPIC_STOP_TERMS = new Set([
-  "confidential",
-  "customer",
-  "client",
-  "company",
-  "analysis",
-  "approach",
-  "approaches",
-  "based",
-  "internal",
-  "improve",
-  "improved",
-  "improves",
-  "method",
-  "methods",
-  "notes",
-  "note",
-  "private",
-  "project",
-  "proprietary",
-  "roadmap",
-  "draft",
-  "document",
-  "documents",
-  "file",
-  "files",
-  "policy",
-  "policies",
-  "report",
-  "study",
-  "studies",
-  "support",
-  "supported",
-  "supports",
-  "system",
-  "systems",
-  "using",
-  "workspace",
-  "workspaces",
-  "pdf",
-]);
-const INTERNAL_IDENTIFIER_PATTERN =
-  /\b(?:[A-Z][A-Z0-9]{1,}[-_][A-Z0-9._-]*\d[A-Z0-9._-]*|[A-Z]{2,}\d{2,}[A-Z0-9]*)\b/g;
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
-const normalizeTopicTerm = (value) =>
-  normalizeText(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, " ")
-    .trim();
-
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
-const splitTopicTerms = (value) =>
-  normalizeTopicTerm(value)
-    .split(/\s+/)
-    .map((term) => term.trim())
-    .filter(Boolean);
-
-const splitSensitiveParts = (value) =>
-  normalizeTopicTerm(value)
-    .split(/[\s._-]+/)
-    .map((term) => term.trim())
-    .filter(Boolean);
-
-const isSearchableTopicTerm = (term) =>
-  term.length >= 3 && /^[a-z][a-z0-9._-]*$/.test(term) && /[a-z]/.test(term);
+const normalizeTopicTerm = normalizeExternalQueryTerm;
+const splitTopicTerms = splitExternalQueryTerms;
+const isSearchableTopicTerm = isSearchableExternalQueryTerm;
 
 const uniq = (values) => [...new Set(values.filter(Boolean))];
 
@@ -93,55 +44,12 @@ const getProfile = (document = {}) =>
         tags: document.tags ?? [],
       };
 
-const addSensitiveValue = (sensitiveTerms, value) => {
-  const normalizedValue = normalizeTopicTerm(value);
-
-  if (!normalizedValue) {
-    return;
-  }
-
-  sensitiveTerms.add(normalizedValue);
-
-  for (const term of splitTopicTerms(normalizedValue)) {
-    sensitiveTerms.add(term);
-  }
-
-  for (const term of splitSensitiveParts(normalizedValue)) {
-    sensitiveTerms.add(term);
-  }
-};
-
-const getInternalIdentifiers = (value) =>
-  [...String(value ?? "").matchAll(INTERNAL_IDENTIFIER_PATTERN)].map(
-    (match) => match[0]
-  );
-
-const buildSensitiveTopicTerms = ({ document = {}, profile = {} } = {}) => {
-  const sensitiveTerms = new Set();
-  const privateSourceText = [
-    document.fileName,
-    profile.summary,
-    ...toArray(profile.tags),
-    ...toArray(profile.entities),
-  ].join("\n");
-
-  for (const entity of toArray(profile.entities)) {
-    addSensitiveValue(sensitiveTerms, entity);
-  }
-
-  for (const identifier of getInternalIdentifiers(privateSourceText)) {
-    addSensitiveValue(sensitiveTerms, identifier);
-  }
-
-  return sensitiveTerms;
-};
-
 const isSafeTopicCandidate = ({ rawValue, sensitiveTerms, terms }) => {
   if (terms.length === 0 || terms.length > MAX_KEYPHRASE_TOKENS) {
     return false;
   }
 
-  if (getInternalIdentifiers(rawValue).length > 0) {
+  if (getExternalQueryInternalIdentifiers(rawValue).length > 0) {
     return false;
   }
 
@@ -154,7 +62,7 @@ const isSafeTopicCandidate = ({ rawValue, sensitiveTerms, terms }) => {
   return terms.every(
     (term) =>
       isSearchableTopicTerm(term) &&
-      !TOPIC_STOP_TERMS.has(term) &&
+      !EXTERNAL_QUERY_STOP_TERMS.has(term) &&
       !sensitiveTerms.has(term)
   );
 };
@@ -249,7 +157,7 @@ export const rankArxivTopicCandidatesFromDocumentProfile = (
   { limit = DEFAULT_TOPIC_TAG_LIMIT } = {}
 ) => {
   const profile = getProfile(document);
-  const sensitiveTerms = buildSensitiveTopicTerms({
+  const sensitiveTerms = buildExternalQuerySensitiveTerms({
     document,
     profile,
   });
@@ -300,8 +208,29 @@ export const buildArxivTopicFromDocumentProfile = (
   const terms = rankArxivTopicCandidatesFromDocumentProfile(document, {
     limit: tagLimit,
   });
+  const queryPolicy = buildExternalQueryPolicy({
+    candidateQuery: terms.join(" "),
+    document,
+    profile: getProfile(document),
+  });
 
-  return terms.join(" ");
+  return queryPolicy.sanitizedQuery;
+};
+
+export const buildArxivQueryPolicyFromDocumentProfile = (
+  document = {},
+  { accessScope = {}, tagLimit = DEFAULT_TOPIC_TAG_LIMIT } = {}
+) => {
+  const terms = rankArxivTopicCandidatesFromDocumentProfile(document, {
+    limit: tagLimit,
+  });
+
+  return buildExternalQueryPolicy({
+    accessScope,
+    candidateQuery: terms.join(" "),
+    document,
+    profile: getProfile(document),
+  });
 };
 
 const buildArxivRelevanceContext = ({
@@ -495,10 +424,16 @@ export const createArxivEnrichmentService = ({
       docId,
       ragService,
     });
-    const topic = buildArxivTopicFromDocumentProfile(document);
+    const queryPolicy = serializeExternalQueryPolicy(
+      buildArxivQueryPolicyFromDocumentProfile(document, {
+        accessScope,
+      })
+    );
+    const topic = queryPolicy.sanitizedQuery;
 
     return {
       document,
+      queryPolicy,
       topic,
     };
   };
@@ -522,21 +457,25 @@ export const createArxivEnrichmentService = ({
     docId,
     maxResults = DEFAULT_ARXIV_MAX_RESULTS,
   } = {}) => {
-    const { document, topic } = resolveTopicForDocument({
+    const { document, queryPolicy, topic } = resolveTopicForDocument({
       accessScope,
       docId,
     });
     const requestedMaxResults = normalizeArxivMaxResults(maxResults);
 
-    if (!topic) {
+    if (!isExternalQueryPolicyAllowed(queryPolicy)) {
       const savedSuggestion = recommendationSnapshotService.save({
         accessScope,
         suggestion: {
           document: buildDocumentSummary(document),
-          topic: "",
+          queryPolicy,
+          topic,
           requestedMaxResults,
           papers: [],
-          reason: "no_profile_topic",
+          reason: "external_query_blocked",
+          trace: {
+            externalQueryPolicy: queryPolicy,
+          },
         },
       });
 
@@ -565,6 +504,7 @@ export const createArxivEnrichmentService = ({
 
     const suggestion = {
       document: buildDocumentSummary(document),
+      queryPolicy,
       topic,
       requestedMaxResults,
       papers,
@@ -583,6 +523,9 @@ export const createArxivEnrichmentService = ({
             ? "no_arxiv_matches"
             : "no_relevant_arxiv_matches"
           : null,
+      trace: {
+        externalQueryPolicy: queryPolicy,
+      },
     };
 
     const savedSuggestion = recommendationSnapshotService.save({
@@ -609,12 +552,12 @@ export const createArxivEnrichmentService = ({
     selectedArxivIds,
     selectionToken,
   } = {}) => {
-    const { document, topic } = resolveTopicForDocument({
+    const { document, queryPolicy, topic } = resolveTopicForDocument({
       accessScope,
       docId,
     });
 
-    if (!topic) {
+    if (!isExternalQueryPolicyAllowed(queryPolicy)) {
       const error = new Error(
         "No arXiv topic could be derived from this document profile."
       );
@@ -665,6 +608,7 @@ export const createArxivEnrichmentService = ({
     return {
       docId,
       document,
+      queryPolicy,
       relevantSelectedPapers,
       topic,
     };
@@ -675,6 +619,7 @@ export const createArxivEnrichmentService = ({
     docId,
     document,
     onPaperProgress,
+    queryPolicy,
     relevantSelectedPapers = [],
     topic,
   } = {}) => {
@@ -683,6 +628,7 @@ export const createArxivEnrichmentService = ({
       docId,
       document: buildDocumentSummary(document),
       provider: ARXIV_RECOMMENDATION_PROVIDER,
+      queryPolicy,
       selectedPapers: relevantSelectedPapers,
       topic,
     });
@@ -711,6 +657,7 @@ export const createArxivEnrichmentService = ({
         document: buildDocumentSummary(document),
         error,
         provider: ARXIV_RECOMMENDATION_PROVIDER,
+        queryPolicy,
         selectedPapers: relevantSelectedPapers,
         topic,
       });
@@ -731,6 +678,7 @@ export const createArxivEnrichmentService = ({
       document: buildDocumentSummary(document),
       importResult,
       provider: ARXIV_RECOMMENDATION_PROVIDER,
+      queryPolicy,
       remainingSuggestion,
       selectedPapers: relevantSelectedPapers,
       topic,
@@ -761,6 +709,7 @@ export const createArxivEnrichmentService = ({
       docId,
       fileName: task?.subject?.label,
     };
+    const queryPolicy = payload.queryPolicy ?? task?.input?.queryPolicy ?? null;
     const selectedPapers = toArray(payload.selectedPapers);
     const topic = payload.topic ?? task?.input?.topic ?? "";
 
@@ -780,6 +729,7 @@ export const createArxivEnrichmentService = ({
             status: event.status,
           });
         },
+        queryPolicy,
         relevantSelectedPapers: selectedPapers,
         topic,
       });
@@ -825,10 +775,12 @@ export const createArxivEnrichmentService = ({
       document: buildDocumentSummary(preparedImport.document),
       payload: {
         docId: preparedImport.docId,
+        queryPolicy: preparedImport.queryPolicy,
         selectedPapers: preparedImport.relevantSelectedPapers,
         topic: preparedImport.topic,
       },
       provider: ARXIV_RECOMMENDATION_PROVIDER,
+      queryPolicy: preparedImport.queryPolicy,
       runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
       selectedPapers: preparedImport.relevantSelectedPapers,
       topic: preparedImport.topic,

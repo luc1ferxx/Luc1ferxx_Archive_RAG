@@ -1,3 +1,4 @@
+import { serializeExternalQueryPolicy } from "./external-query-policy.js";
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
 
 export const RECOMMENDATION_TASK_TYPE = "external_recommendation";
@@ -28,6 +29,11 @@ const buildDocumentSubject = (document = {}) => ({
 const buildProvider = (provider) => ({
   id: normalizeText(provider),
   label: getProviderLabel(provider),
+});
+
+const buildExternalQueryInput = ({ queryPolicy, topic }) => ({
+  queryPolicy: serializeExternalQueryPolicy(queryPolicy),
+  topic: normalizeText(topic),
 });
 
 const getPaperId = (paper = {}) => normalizeText(paper.arxivId ?? paper.id);
@@ -193,8 +199,11 @@ export const createRecommendationTaskService = ({
           skipped: 0,
         },
         input: {
+          ...buildExternalQueryInput({
+            queryPolicy: suggestion.queryPolicy,
+            topic: suggestion.topic,
+          }),
           requestedMaxResults: suggestion.requestedMaxResults ?? papers.length,
-          topic: normalizeText(suggestion.topic),
         },
         items: buildPaperTaskItems({
           papers,
@@ -224,6 +233,7 @@ export const createRecommendationTaskService = ({
     document = {},
     payload = null,
     provider,
+    queryPolicy,
     runnerId,
     selectedPapers = [],
     topic = "",
@@ -254,7 +264,10 @@ export const createRecommendationTaskService = ({
           skipped: 0,
         },
         input: {
-          topic: normalizeText(topic),
+          ...buildExternalQueryInput({
+            queryPolicy,
+            topic,
+          }),
         },
         items: buildPaperTaskItems({
           papers: selectedPapers,
@@ -279,6 +292,7 @@ export const createRecommendationTaskService = ({
     docId,
     document = {},
     provider,
+    queryPolicy,
     selectedPapers = [],
     topic = "",
   } = {}) => {
@@ -304,7 +318,10 @@ export const createRecommendationTaskService = ({
           selected: selectedCount,
         },
         input: {
-          topic: normalizeText(topic),
+          ...buildExternalQueryInput({
+            queryPolicy,
+            topic,
+          }),
         },
         items: buildPaperTaskItems({
           papers: selectedPapers,
@@ -381,6 +398,7 @@ export const createRecommendationTaskService = ({
     document = {},
     importResult = {},
     provider,
+    queryPolicy,
     remainingSuggestion = null,
     selectedPapers = [],
     topic = "",
@@ -425,7 +443,10 @@ export const createRecommendationTaskService = ({
           skipped: skippedCount,
         },
         input: {
-          topic: normalizeText(topic),
+          ...buildExternalQueryInput({
+            queryPolicy,
+            topic,
+          }),
         },
         label:
           status === TASK_STATUSES.waitingForUser
@@ -476,6 +497,7 @@ export const createRecommendationTaskService = ({
     document = {},
     error,
     provider,
+    queryPolicy,
     selectedPapers = [],
     topic = "",
   } = {}) => {
@@ -502,7 +524,10 @@ export const createRecommendationTaskService = ({
         },
         error: normalizeText(error?.message) || "Unknown error.",
         input: {
-          topic: normalizeText(topic),
+          ...buildExternalQueryInput({
+            queryPolicy,
+            topic,
+          }),
         },
         label: `${providerLabel} import`,
         items: buildPaperTaskItems({

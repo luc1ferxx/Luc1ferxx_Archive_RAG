@@ -233,6 +233,106 @@ test("arxiv enrichment returns suggestions for a scoped document", async () => {
   assert.equal(tasks[0].counts.recommended, 1);
 });
 
+test("arxiv enrichment uses sanitized external query policy for search, task input, and trace", async () => {
+  const searchCalls = [];
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importTopic: async () => {
+        throw new Error("import should not run for suggestions");
+      },
+    },
+    arxivService: {
+      search: async ({ topic }) => {
+        searchCalls.push(topic);
+
+        return [
+          {
+            arxivId: "2401.00001v1",
+            pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+            summary: "Retrieval augmented generation for archive search.",
+            title: "Retrieval Augmented Generation for Archives",
+          },
+        ];
+      },
+    },
+    recommendationTaskService: createRecommendationTaskService({
+      taskService,
+    }),
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "customer-alpha-ACME-X42.pdf",
+        profile: {
+          entities: ["Customer Alpha", "Project Redwood", "ACME-X42"],
+          summary:
+            "Customer Alpha ACME-X42 notes for Project Redwood. Retrieval augmented generation.",
+          tags: [
+            "Customer Alpha",
+            "Project Redwood",
+            "ACME-X42",
+            "retrieval",
+            "augmented",
+            "generation",
+          ],
+        },
+      }),
+    },
+  });
+
+  const result = await service.suggestForDocument({
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+    docId: "doc-1",
+    maxResults: 3,
+  });
+  const tasks = (await taskService.listTasks({
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+    type: "external_recommendation",
+  })).tasks;
+  const savedSuggestion = service.listSavedSuggestions({
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  }).suggestions[0];
+
+  assert.deepEqual(searchCalls, ["retrieval augmented generation"]);
+  assert.equal(result.topic, "retrieval augmented generation");
+  assert.equal(result.queryPolicy.sanitizedQuery, "retrieval augmented generation");
+  assert.equal(
+    result.trace.externalQueryPolicy.sanitizedQuery,
+    "retrieval augmented generation"
+  );
+  assert.equal(tasks[0].input.topic, "retrieval augmented generation");
+  assert.equal(
+    tasks[0].input.queryPolicy.sanitizedQuery,
+    "retrieval augmented generation"
+  );
+  assert.equal(
+    savedSuggestion.queryPolicy.sanitizedQuery,
+    "retrieval augmented generation"
+  );
+
+  const safePolicyPayload = JSON.stringify({
+    resultPolicy: result.queryPolicy,
+    savedPolicy: savedSuggestion.queryPolicy,
+    taskPolicy: tasks[0].input.queryPolicy,
+    tracePolicy: result.trace.externalQueryPolicy,
+  }).toLowerCase();
+
+  assert.equal(safePolicyPayload.includes("customer alpha"), false);
+  assert.equal(safePolicyPayload.includes("acme-x42"), false);
+  assert.equal(safePolicyPayload.includes("redwood"), false);
+});
+
 test("arxiv enrichment filters irrelevant papers before returning suggestions", async () => {
   const service = createArxivEnrichmentService({
     arxivImportService: {

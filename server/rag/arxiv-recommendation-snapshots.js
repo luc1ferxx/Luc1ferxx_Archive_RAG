@@ -56,10 +56,11 @@ export const createArxivRecommendationSnapshotService = ({
     }
 
     let document;
+    let queryPolicy;
     let topic;
 
     try {
-      ({ document, topic } = resolveDocumentTopic({
+      ({ document, queryPolicy, topic } = resolveDocumentTopic({
         accessScope,
         docId: snapshot.document?.docId,
       }));
@@ -88,6 +89,10 @@ export const createArxivRecommendationSnapshotService = ({
     return {
       ...stripInternalSnapshotFields(snapshot),
       document: buildDocumentSummary(document),
+      queryPolicy: snapshot.queryPolicy ?? queryPolicy,
+      trace: snapshot.trace ?? {
+        externalQueryPolicy: snapshot.queryPolicy ?? queryPolicy,
+      },
     };
   };
 
@@ -203,7 +208,7 @@ export const createArxivRecommendationSnapshotService = ({
   });
 
   const getForDocument = ({ accessScope = {}, docId } = {}) => {
-    const { document, topic } = resolveDocumentTopic({
+    const { document, queryPolicy, topic } = resolveDocumentTopic({
       accessScope,
       docId,
     });
@@ -221,10 +226,14 @@ export const createArxivRecommendationSnapshotService = ({
       savedSuggestion ?? {
         document: buildDocumentSummary(document),
         topic,
+        queryPolicy,
         requestedMaxResults: DEFAULT_ARXIV_SNAPSHOT_MAX_RESULTS,
         papers: [],
         selectionToken: null,
         reason: "no_saved_arxiv_suggestions",
+        trace: {
+          externalQueryPolicy: queryPolicy,
+        },
       }
     );
   };
