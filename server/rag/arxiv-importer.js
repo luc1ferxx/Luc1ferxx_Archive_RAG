@@ -104,6 +104,7 @@ export const importArxivTopic = async ({
   delayMs = DEFAULT_IMPORT_DELAY_MS,
   importContext = {},
   maxResults = DEFAULT_ARXIV_MAX_RESULTS,
+  onPaperProgress,
   ragService,
   tempDirectory = path.join(os.tmpdir(), "luc1ferxx-arxiv-imports"),
   topic,
@@ -132,6 +133,7 @@ export const importArxivTopic = async ({
     delayMs,
     importContext,
     maxResults: requestedMaxResults,
+    onPaperProgress,
     papers,
     ragService,
     tempDirectory,
@@ -145,6 +147,7 @@ export const importArxivPapers = async ({
   delayMs = DEFAULT_IMPORT_DELAY_MS,
   importContext = {},
   maxResults = DEFAULT_ARXIV_MAX_RESULTS,
+  onPaperProgress,
   papers = [],
   ragService,
   tempDirectory = path.join(os.tmpdir(), "luc1ferxx-arxiv-imports"),
@@ -172,6 +175,13 @@ export const importArxivPapers = async ({
   const importedPapers = [];
   const failedPapers = [];
   const skippedPapers = [];
+  const reportPaperProgress = async (event) => {
+    try {
+      await onPaperProgress?.(event);
+    } catch {
+      // Progress reporting must not interrupt ingestion.
+    }
+  };
 
   await mkdir(tempDirectory, {
     recursive: true,
@@ -187,25 +197,38 @@ export const importArxivPapers = async ({
     });
 
     if (existingDocument.document) {
-      skippedPapers.push(
-        serializeImportedPaper({
-          document: existingDocument.document,
-          duplicateMatch: existingDocument.duplicateMatch,
-          paper,
-          status: "already_indexed",
-        })
-      );
+      const skippedPaper = serializeImportedPaper({
+        document: existingDocument.document,
+        duplicateMatch: existingDocument.duplicateMatch,
+        paper,
+        status: "already_indexed",
+      });
+
+      skippedPapers.push(skippedPaper);
+      await reportPaperProgress({
+        paper,
+        result: skippedPaper,
+        status: "skipped",
+      });
       continue;
     }
 
     let pdfPath = null;
 
     try {
+      await reportPaperProgress({
+        paper,
+        status: "downloading",
+      });
       const buffer = await arxivService.downloadPdf(paper);
 
       pdfPath = path.join(tempDirectory, `${randomUUID()}-${fileName}`);
       await writeFile(pdfPath, buffer);
 
+      await reportPaperProgress({
+        paper,
+        status: "ingesting",
+      });
       const document = await ragService.ingestDocument({
         docId: randomUUID(),
         filePath: pdfPath,
@@ -218,20 +241,32 @@ export const importArxivPapers = async ({
         workspaceId: accessScope.workspaceId,
       });
 
-      importedPapers.push(
-        serializeImportedPaper({
-          document,
-          paper,
-          status: "imported",
-        })
-      );
+      const importedPaper = serializeImportedPaper({
+        document,
+        paper,
+        status: "imported",
+      });
+
+      importedPapers.push(importedPaper);
+      await reportPaperProgress({
+        document,
+        paper,
+        result: importedPaper,
+        status: "imported",
+      });
     } catch (error) {
-      failedPapers.push(
-        serializeFailedPaper({
-          error,
-          paper,
-        })
-      );
+      const failedPaper = serializeFailedPaper({
+        error,
+        paper,
+      });
+
+      failedPapers.push(failedPaper);
+      await reportPaperProgress({
+        error,
+        paper,
+        result: failedPaper,
+        status: "failed",
+      });
     } finally {
       if (pdfPath) {
         await rm(pdfPath, {

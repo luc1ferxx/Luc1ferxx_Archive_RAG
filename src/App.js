@@ -23,7 +23,7 @@ import { formatDocumentCount, isArxivDocument } from "./archiveWorkspace";
 import { useChatSession } from "./hooks/useChatSession";
 import { useArxivEnrichment } from "./hooks/useArxivEnrichment";
 import { useDocumentSelection } from "./hooks/useDocumentSelection";
-import { useTaskLog } from "./hooks/useTaskLog";
+import { hasActiveTasks, useTaskLog } from "./hooks/useTaskLog";
 import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
 import {
   DEMO_CONVERSATION,
@@ -69,6 +69,7 @@ const App = () => {
   const [selectedChatDocIds, setSelectedChatDocIds] = useState([]);
   const mainRef = useRef(null);
   const composerRef = useRef(null);
+  const hadActiveTasksRef = useRef(false);
   const uploadRef = useRef(null);
   const documentListRef = useRef(null);
   const qualityRef = useRef(null);
@@ -568,6 +569,7 @@ const App = () => {
   const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? [];
   const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? [];
   const visibleTaskLog = isDemoWorkbench ? [] : taskLog;
+  const hasActiveTaskLog = hasActiveTasks(visibleTaskLog);
   let visibleTasks = IDLE_TASKS;
 
   if (visibleTrace.length > 0) {
@@ -577,6 +579,38 @@ const App = () => {
   if (visibleTaskLog.length > 0) {
     visibleTasks = visibleTaskLog;
   }
+
+  useEffect(() => {
+    if (isDemoWorkbench || !hasActiveTaskLog) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshTaskLog();
+    }, 1500);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [hasActiveTaskLog, isDemoWorkbench, refreshTaskLog]);
+
+  useEffect(() => {
+    if (isDemoWorkbench) {
+      return;
+    }
+
+    if (hadActiveTasksRef.current && !hasActiveTaskLog) {
+      void refreshDocuments();
+      void loadSavedArxivSuggestions();
+    }
+
+    hadActiveTasksRef.current = hasActiveTaskLog;
+  }, [
+    hasActiveTaskLog,
+    isDemoWorkbench,
+    loadSavedArxivSuggestions,
+    refreshDocuments,
+  ]);
 
   const renderConversationView = () => {
     if (activeConversationView === "trace") {
@@ -659,6 +693,22 @@ const App = () => {
                 <span>{formatTaskStatus(task.status)}</span>
                 <strong>{task.label}</strong>
                 <p>{task.summary}</p>
+                {(task.items ?? []).length > 0 ? (
+                  <div className="archive-task-item-list">
+                    {(task.items ?? []).slice(0, 4).map((item) => (
+                      <div
+                        className={`archive-task-item is-${
+                          item.status ?? "pending"
+                        }`}
+                        key={item.id}
+                      >
+                        <span>{formatTaskStatus(item.status)}</span>
+                        <strong>{item.label}</strong>
+                        {item.error ? <em>{item.error}</em> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </button>
             ))}
           </div>

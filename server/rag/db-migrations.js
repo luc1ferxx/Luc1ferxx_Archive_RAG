@@ -5,6 +5,8 @@ import {
   getDocumentsPostgresTable,
   getLongMemoryPostgresTable,
   getSessionMemoryPostgresTable,
+  getTaskEventsPostgresTable,
+  getTasksPostgresTable,
 } from "./config.js";
 import {
   isPostgresConfigured,
@@ -43,6 +45,14 @@ const getTableNames = () => ({
     getSessionMemoryPostgresTable(),
     "SESSION_MEMORY_POSTGRES_TABLE"
   ),
+  tasksTable: ensureSimpleTableName(
+    getTasksPostgresTable(),
+    "TASKS_POSTGRES_TABLE"
+  ),
+  taskEventsTable: ensureSimpleTableName(
+    getTaskEventsPostgresTable(),
+    "TASK_EVENTS_POSTGRES_TABLE"
+  ),
 });
 
 const renderMigrationSql = (sqlText) => {
@@ -51,7 +61,9 @@ const renderMigrationSql = (sqlText) => {
   return sqlText
     .replaceAll("__LONG_MEMORY_TABLE__", tableNames.longMemoryTable)
     .replaceAll("__DOCUMENTS_TABLE__", tableNames.documentsTable)
-    .replaceAll("__SESSION_MEMORY_TABLE__", tableNames.sessionMemoryTable);
+    .replaceAll("__SESSION_MEMORY_TABLE__", tableNames.sessionMemoryTable)
+    .replaceAll("__TASKS_TABLE__", tableNames.tasksTable)
+    .replaceAll("__TASK_EVENTS_TABLE__", tableNames.taskEventsTable);
 };
 
 const ensureMigrationsTable = async () => {

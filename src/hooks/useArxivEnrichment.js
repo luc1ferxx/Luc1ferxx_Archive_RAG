@@ -5,6 +5,7 @@ import {
   fetchSavedArxivSuggestions,
   fetchSavedDocumentArxivSuggestion,
   requestDocumentArxivImport,
+  requestTaskAction,
 } from "../archiveApi";
 
 const DEFAULT_SUGGESTION_LIMIT = 3;
@@ -167,6 +168,21 @@ export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
     setIsImporting(true);
 
     try {
+      const taskId = suggestion?.task?.id;
+
+      if (taskId) {
+        await requestTaskAction(taskId, "confirm", {
+          docId,
+          selectedArxivIds,
+          selectionToken,
+        });
+        await onTaskChange?.();
+        await loadSavedSuggestions();
+        setSuggestion(null);
+        message.success("arXiv import queued. Track progress in Tasks.");
+        return;
+      }
+
       const result = await requestDocumentArxivImport(
         docId,
         selectionToken,

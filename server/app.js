@@ -37,8 +37,10 @@ import { buildHealthReport, runStartupHealthChecks } from "./health.js";
 import { createArxivEnrichmentService } from "./rag/arxiv-enrichment.js";
 import { createArxivService, normalizeArxivMaxResults } from "./rag/arxiv-client.js";
 import { createArxivImportService } from "./rag/arxiv-importer.js";
+import { createJobOrchestrator } from "./rag/job-orchestrator.js";
 import { createRecommendationTaskService } from "./rag/recommendation-tasks.js";
-import { createInMemoryTaskStore, createTaskService } from "./rag/tasks.js";
+import { createDefaultTaskStore } from "./rag/task-store.js";
+import { createTaskService } from "./rag/tasks.js";
 import { runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
@@ -250,7 +252,7 @@ export const createApp = async (options = {}) => {
     ragService,
     tempDirectory: path.join(uploadsDirectory, "arxiv-imports"),
   });
-  const taskStore = options.taskStore ?? createInMemoryTaskStore();
+  const taskStore = options.taskStore ?? createDefaultTaskStore();
   const taskService = options.taskService ?? createTaskService({
     taskStore,
   });
@@ -267,6 +269,22 @@ export const createApp = async (options = {}) => {
       ragService,
       recommendationTaskService,
       recommendationSnapshotStore: options.recommendationSnapshotStore,
+    });
+  const jobRunners = {
+    ...(arxivEnrichmentService.importJobRunner?.id
+      ? {
+          [arxivEnrichmentService.importJobRunner.id]:
+            arxivEnrichmentService.importJobRunner,
+        }
+      : {}),
+    ...(options.jobRunners ?? {}),
+  };
+  const jobOrchestrator =
+    options.jobOrchestrator ??
+    createJobOrchestrator({
+      runners: jobRunners,
+      schedule: options.jobSchedule,
+      taskService,
     });
   const skillRegistry = options.skillRegistry ?? null;
   const uploadStore = options.uploadStore ?? {
@@ -329,6 +347,8 @@ export const createApp = async (options = {}) => {
   await ragService.initializeDocumentRegistry?.();
   await ragService.initializeLongMemory?.();
   await ragService.initializeSessionMemory?.();
+  await taskService.initialize?.();
+  await jobOrchestrator.recoverRunnableTasks?.();
   await healthService.runStartupHealthChecks?.();
 
   app.get("/health", async (req, res) => {
@@ -399,10 +419,10 @@ export const createApp = async (options = {}) => {
     return res.json(ragService.listDocuments(getRequestAccessScope(req)));
   });
 
-  app.get("/tasks", (req, res) => {
+  app.get("/tasks", async (req, res) => {
     try {
       return res.json(
-        taskService.listTasks({
+        await taskService.listTasks({
           accessScope: getRequestAccessScope(req),
           type: req.query.type,
         })
@@ -410,6 +430,69 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to list tasks."),
+      });
+    }
+  });
+
+  app.get("/tasks/:taskId", async (req, res) => {
+    const taskId = req.params.taskId?.trim();
+
+    if (!taskId) {
+      return res.status(400).json({
+        error: "taskId is required.",
+      });
+    }
+
+    try {
+      const task = await taskService.getTask({
+        accessScope: getRequestAccessScope(req),
+        taskId,
+      });
+
+      if (!task) {
+        return res.status(404).json({
+          error: "Task not found.",
+        });
+      }
+
+      return res.json(task);
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to read task."),
+      });
+    }
+  });
+
+  app.post("/tasks/:taskId/actions/:action", async (req, res) => {
+    const taskId = req.params.taskId?.trim();
+    const action = req.params.action?.trim();
+
+    if (!taskId) {
+      return res.status(400).json({
+        error: "taskId is required.",
+      });
+    }
+
+    if (!action) {
+      return res.status(400).json({
+        error: "action is required.",
+      });
+    }
+
+    try {
+      const task = await jobOrchestrator.resumeTask({
+        accessScope: getRequestAccessScope(req),
+        action,
+        payload: req.body,
+        taskId,
+      });
+
+      return res.status(202).json({
+        task,
+      });
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to update task."),
       });
     }
   });

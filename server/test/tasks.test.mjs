@@ -8,7 +8,7 @@ import {
   TASK_STATUSES,
 } from "../rag/tasks.js";
 
-test("task store isolates tasks by authenticated scope and type", () => {
+test("task store isolates tasks by authenticated scope and type", async () => {
   let tick = 0;
   const taskService = createTaskService({
     taskStore: createInMemoryTaskStore({
@@ -16,20 +16,31 @@ test("task store isolates tasks by authenticated scope and type", () => {
     }),
   });
 
-  taskService.upsertTask({
+  await taskService.upsertTask({
     accessScope: {
       userId: "alice",
       workspaceId: "workspace-a",
     },
     task: {
       id: "task-1",
+      items: [
+        {
+          id: "paper-1",
+          label: "Paper 1",
+          status: TASK_STATUSES.queued,
+        },
+      ],
       type: "external_recommendation",
       label: "arXiv recommendations",
+      payload: {
+        private: true,
+      },
+      runnerId: "arxiv_recommendation_import",
       status: TASK_STATUSES.waitingForUser,
       summary: "Found 3 papers.",
     },
   });
-  taskService.upsertTask({
+  await taskService.upsertTask({
     accessScope: {
       userId: "alice",
       workspaceId: "workspace-a",
@@ -44,19 +55,19 @@ test("task store isolates tasks by authenticated scope and type", () => {
   });
 
   assert.deepEqual(
-    taskService
-      .listTasks({
+    (
+      await taskService.listTasks({
         accessScope: {
           userId: "alice",
           workspaceId: "workspace-a",
         },
         type: "external_recommendation",
       })
-      .tasks.map((task) => task.id),
+    ).tasks.map((task) => task.id),
     ["task-1"]
   );
   assert.deepEqual(
-    taskService.listTasks({
+    await taskService.listTasks({
       accessScope: {
         userId: "bob",
         workspaceId: "workspace-a",
@@ -67,7 +78,7 @@ test("task store isolates tasks by authenticated scope and type", () => {
     }
   );
 
-  taskService.patchTask({
+  await taskService.patchTask({
     accessScope: {
       userId: "alice",
       workspaceId: "workspace-a",
@@ -81,7 +92,7 @@ test("task store isolates tasks by authenticated scope and type", () => {
     },
   });
 
-  const updatedTask = taskService.getTask({
+  const updatedTask = await taskService.getTask({
     accessScope: {
       userId: "alice",
       workspaceId: "workspace-a",
@@ -91,7 +102,45 @@ test("task store isolates tasks by authenticated scope and type", () => {
 
   assert.equal(updatedTask.status, TASK_STATUSES.running);
   assert.equal(updatedTask.counts.imported, 2);
+  assert.equal(updatedTask.items[0].id, "paper-1");
+  assert.equal(updatedTask.payload, undefined);
   assert.equal("scopeKey" in updatedTask, false);
+});
+
+test("task service exposes recoverable internal tasks without changing public shape", async () => {
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await taskService.upsertTask({
+    accessScope,
+    task: {
+      id: "task-1",
+      payload: {
+        selectedIds: ["paper-1"],
+      },
+      runnerId: "test_runner",
+      status: TASK_STATUSES.queued,
+      type: "external_recommendation",
+    },
+  });
+
+  const publicTask = await taskService.getTask({
+    accessScope,
+    taskId: "task-1",
+  });
+  const recoverableTasks = await taskService.listRecoverableTasks({
+    statuses: [TASK_STATUSES.queued],
+  });
+
+  assert.equal(publicTask.payload, undefined);
+  assert.equal(publicTask.accessScope, undefined);
+  assert.equal(recoverableTasks.tasks[0].payload.selectedIds[0], "paper-1");
+  assert.deepEqual(recoverableTasks.tasks[0].accessScope, accessScope);
 });
 
 test("task normalization rejects incomplete tasks and defaults unknown statuses", () => {
@@ -123,11 +172,14 @@ test("task normalization rejects incomplete tasks and defaults unknown statuses"
       summary: "Waiting",
       provider: null,
       subject: null,
+      runnerId: "",
       action: "",
       counts: {},
       input: {},
+      items: [],
       result: {},
       error: null,
+      payload: null,
       requiredUserAction: "",
       createdAt: "",
       updatedAt: "",

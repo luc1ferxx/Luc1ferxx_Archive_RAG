@@ -206,6 +206,13 @@ describe("App", () => {
                 title: "Hybrid Retrieval for Private Workspaces",
               },
             ],
+            task: {
+              id: "external_recommendation:arxiv:doc-upload",
+              type: "external_recommendation",
+              status: "waiting_for_user",
+              label: "arXiv recommendations",
+              summary: "Found 3 arXiv recommendations for review.",
+            },
           },
         });
       }
@@ -228,6 +235,13 @@ describe("App", () => {
                 status: "waiting_for_user",
                 label: "arXiv recommendations",
                 summary: "Found 3 arXiv recommendations for review.",
+                items: [
+                  {
+                    id: "2401.00001v1",
+                    label: "Retrieval Augmented Generation for Archives",
+                    status: "waiting_for_user",
+                  },
+                ],
               },
             ],
           },
@@ -274,6 +288,24 @@ describe("App", () => {
       });
     });
     axios.post.mockImplementation((url, payload) => {
+      if (
+        url.includes(
+          "/tasks/external_recommendation%3Aarxiv%3Adoc-upload/actions/confirm"
+        )
+      ) {
+        return Promise.resolve({
+          data: {
+            task: {
+              id: "external_recommendation:arxiv:doc-upload",
+              type: "external_recommendation",
+              status: "queued",
+              label: "arXiv import",
+              summary: "Queued 2 selected arXiv recommendations for import.",
+            },
+          },
+        });
+      }
+
       if (url.includes("/documents/doc-upload/arxiv/import")) {
         return Promise.resolve({
           data: {
@@ -343,13 +375,17 @@ describe("App", () => {
 
     await waitFor(() =>
       expect(axios.post).toHaveBeenCalledWith(
-        "http://localhost:5001/documents/doc-upload/arxiv/import",
+        "http://localhost:5001/tasks/external_recommendation%3Aarxiv%3Adoc-upload/actions/confirm",
         {
+          docId: "doc-upload",
           selectedArxivIds: ["2401.00001v1", "2401.00003v1"],
           selectionToken: "selection-token-1",
         }
       )
     );
-    expect(await screen.findByText("arxiv-2401.00001.pdf")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    expect(
+      await screen.findByText("Retrieval Augmented Generation for Archives")
+    ).toBeInTheDocument();
   });
 });

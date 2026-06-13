@@ -63,6 +63,9 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `SESSION_MEMORY_POSTGRES_TABLE` | `rag_session_memory` | 会话记忆表。 |
 | `LONG_MEMORY_POSTGRES_TABLE` | `long_memory_items` | 长期记忆表。 |
 | `RAG_LONG_MEMORY_ENABLED` | `false` | 是否启用长期记忆。 |
+| `TASK_STORE_PROVIDER` | `auto` | task/job 存储；`auto` 在 PostgreSQL 配好时使用 `postgres`，否则使用 `memory`。 |
+| `TASKS_POSTGRES_TABLE` | `rag_tasks` | task/job 当前快照表。 |
+| `TASK_EVENTS_POSTGRES_TABLE` | `rag_task_events` | task/job 审计事件表。 |
 
 ## Vector store
 

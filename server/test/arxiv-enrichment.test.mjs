@@ -220,13 +220,13 @@ test("arxiv enrichment returns suggestions for a scoped document", async () => {
     }
   );
 
-  const tasks = taskService.listTasks({
+  const tasks = (await taskService.listTasks({
     accessScope: {
       userId: "alice",
       workspaceId: "workspace-a",
     },
     type: "external_recommendation",
-  }).tasks;
+  })).tasks;
 
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0].status, TASK_STATUSES.waitingForUser);
@@ -514,14 +514,125 @@ test("arxiv enrichment imports only selected recommended papers", async () => {
   );
   assert.match(savedResult.suggestions[0].selectionToken, /^v1\./);
 
-  const tasks = taskService.listTasks({
+  const tasks = (await taskService.listTasks({
     type: "external_recommendation",
-  }).tasks;
+  })).tasks;
 
   assert.equal(tasks[0].status, TASK_STATUSES.waitingForUser);
   assert.equal(tasks[0].counts.imported, 2);
   assert.equal(tasks[0].counts.remaining, 1);
   assert.deepEqual(tasks[0].result.remainingPaperIds, ["2401.00002v1"]);
+});
+
+test("arxiv enrichment runner queues confirmed imports and records per-paper progress", async () => {
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const imports = [];
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importPapers: async ({ onPaperProgress, papers }) => {
+        imports.push(papers.map((paper) => paper.arxivId));
+        await onPaperProgress?.({
+          paper: papers[0],
+          status: "downloading",
+        });
+        await onPaperProgress?.({
+          paper: papers[0],
+          result: {
+            arxivId: papers[0].arxivId,
+            docId: "doc-arxiv",
+            fileName: "arxiv-2401.00001.pdf",
+            status: "imported",
+            title: papers[0].title,
+          },
+          status: "imported",
+        });
+
+        return {
+          topic: "retrieval augmented generation",
+          requestedMaxResults: papers.length,
+          foundCount: papers.length,
+          importedCount: 1,
+          skippedCount: 0,
+          failedCount: 0,
+          importedPapers: [
+            {
+              arxivId: papers[0].arxivId,
+              docId: "doc-arxiv",
+              fileName: "arxiv-2401.00001.pdf",
+              status: "imported",
+              title: papers[0].title,
+            },
+          ],
+          skippedPapers: [],
+          failedPapers: [],
+        };
+      },
+    },
+    arxivService: {
+      search: async () => [
+        {
+          arxivId: "2401.00001v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+          summary: "Retrieval augmented generation for archive search.",
+          title: "Retrieval Augmented Generation for Archives",
+        },
+      ],
+    },
+    recommendationTaskService: createRecommendationTaskService({
+      taskService,
+    }),
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: {
+          tags: ["retrieval", "augmented", "generation"],
+        },
+      }),
+    },
+  });
+
+  const suggestion = await service.suggestForDocument({
+    docId: "doc-1",
+    maxResults: 3,
+  });
+
+  assert.equal(suggestion.task.status, TASK_STATUSES.waitingForUser);
+  assert.equal(suggestion.task.payload, undefined);
+
+  const queuedTask = await service.importJobRunner.resume({
+    action: "confirm",
+    payload: {
+      selectedArxivIds: ["2401.00001v1"],
+      selectionToken: suggestion.selectionToken,
+    },
+    task: suggestion.task,
+  });
+
+  assert.equal(queuedTask.status, TASK_STATUSES.queued);
+  assert.equal(queuedTask.payload, undefined);
+
+  const internalTask = await taskService.getInternalTask({
+    taskId: suggestion.task.id,
+  });
+
+  assert.equal(internalTask.payload.selectedPapers.length, 1);
+
+  const finalTask = await service.importJobRunner.run({
+    patchTask: (patch) =>
+      taskService.patchTask({
+        taskId: suggestion.task.id,
+        patch,
+      }),
+    task: internalTask,
+  });
+
+  assert.deepEqual(imports, [["2401.00001v1"]]);
+  assert.equal(finalTask.status, TASK_STATUSES.completed);
+  assert.equal(finalTask.items[0].status, TASK_STATUSES.completed);
+  assert.equal(finalTask.items[0].result.docId, "doc-arxiv");
 });
 
 test("arxiv enrichment rejects selected papers outside the signed recommendation set", async () => {

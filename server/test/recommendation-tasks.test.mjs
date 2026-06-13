@@ -11,7 +11,7 @@ import {
   TASK_STATUSES,
 } from "../rag/tasks.js";
 
-test("recommendation task service records review and import lifecycle", () => {
+test("recommendation task service records review and import lifecycle", async () => {
   const taskService = createTaskService({
     taskStore: createInMemoryTaskStore(),
   });
@@ -23,7 +23,7 @@ test("recommendation task service records review and import lifecycle", () => {
     workspaceId: "workspace-a",
   };
 
-  recommendationTaskService.recordSuggestionResult({
+  await recommendationTaskService.recordSuggestionResult({
     accessScope,
     provider: "arxiv",
     suggestion: {
@@ -47,17 +47,70 @@ test("recommendation task service records review and import lifecycle", () => {
     },
   });
 
-  let tasks = taskService.listTasks({
+  let tasks = (await taskService.listTasks({
     accessScope,
     type: RECOMMENDATION_TASK_TYPE,
-  }).tasks;
+  })).tasks;
 
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0].status, TASK_STATUSES.waitingForUser);
   assert.equal(tasks[0].requiredUserAction, "confirm_import");
   assert.equal(tasks[0].counts.recommended, 2);
+  assert.equal(tasks[0].items[0].status, TASK_STATUSES.waitingForUser);
 
-  recommendationTaskService.recordImportStarted({
+  await recommendationTaskService.recordImportQueued({
+    accessScope,
+    docId: "doc-1",
+    document: {
+      docId: "doc-1",
+      fileName: "private-notes.pdf",
+    },
+    payload: {
+      selectedPapers: [
+        {
+          arxivId: "2401.00001v1",
+        },
+      ],
+    },
+    provider: "arxiv",
+    runnerId: "arxiv_recommendation_import",
+    selectedPapers: [
+      {
+        arxivId: "2401.00001v1",
+        title: "Retrieval Augmented Generation for Archives",
+      },
+    ],
+    topic: "retrieval augmented generation",
+  });
+  await recommendationTaskService.recordImportProgress({
+    accessScope,
+    docId: "doc-1",
+    paper: {
+      arxivId: "2401.00001v1",
+      title: "Retrieval Augmented Generation for Archives",
+    },
+    provider: "arxiv",
+    status: "downloading",
+  });
+
+  let queuedTask = await taskService.getInternalTask({
+    accessScope,
+    taskId: "external_recommendation:arxiv:doc-1",
+  });
+
+  assert.equal(queuedTask.payload.selectedPapers.length, 1);
+  assert.equal(queuedTask.items[0].status, TASK_STATUSES.running);
+  assert.equal(
+    (
+      await taskService.getTask({
+      accessScope,
+      taskId: "external_recommendation:arxiv:doc-1",
+      })
+    ).payload,
+    undefined
+  );
+
+  await recommendationTaskService.recordImportStarted({
     accessScope,
     docId: "doc-1",
     document: {
@@ -74,14 +127,16 @@ test("recommendation task service records review and import lifecycle", () => {
   });
 
   assert.equal(
-    taskService.getTask({
+    (
+      await taskService.getTask({
       accessScope,
       taskId: "external_recommendation:arxiv:doc-1",
-    }).status,
+      })
+    ).status,
     TASK_STATUSES.running
   );
 
-  recommendationTaskService.recordImportCompleted({
+  await recommendationTaskService.recordImportCompleted({
     accessScope,
     docId: "doc-1",
     document: {
@@ -119,10 +174,10 @@ test("recommendation task service records review and import lifecycle", () => {
     topic: "retrieval augmented generation",
   });
 
-  tasks = taskService.listTasks({
+  tasks = (await taskService.listTasks({
     accessScope,
     type: RECOMMENDATION_TASK_TYPE,
-  }).tasks;
+  })).tasks;
 
   assert.equal(tasks[0].status, TASK_STATUSES.waitingForUser);
   assert.equal(tasks[0].action, "review_remaining_recommendations");
@@ -131,7 +186,7 @@ test("recommendation task service records review and import lifecycle", () => {
   assert.deepEqual(tasks[0].result.remainingPaperIds, ["2401.00002v1"]);
 });
 
-test("recommendation task service records failed imports", () => {
+test("recommendation task service records failed imports", async () => {
   const taskService = createTaskService({
     taskStore: createInMemoryTaskStore(),
   });
@@ -143,7 +198,7 @@ test("recommendation task service records failed imports", () => {
     workspaceId: "workspace-a",
   };
 
-  recommendationTaskService.recordImportFailed({
+  await recommendationTaskService.recordImportFailed({
     accessScope,
     docId: "doc-1",
     error: new Error("network timeout"),
@@ -156,7 +211,7 @@ test("recommendation task service records failed imports", () => {
     topic: "retrieval augmented generation",
   });
 
-  const task = taskService.getTask({
+  const task = await taskService.getTask({
     accessScope,
     taskId: "external_recommendation:arxiv:doc-1",
   });

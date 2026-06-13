@@ -589,6 +589,119 @@ test("tasks endpoint lists scoped task records", async () => {
   }
 });
 
+test("task detail and action routes use scoped job orchestration", async () => {
+  const calls = [];
+  const app = await createApp({
+    ragService: {
+      chat: async () => ({
+        text: "stub",
+        citations: [],
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+    healthService: okHealthService,
+    jobOrchestrator: {
+      resumeTask: async ({ accessScope, action, payload, taskId }) => {
+        calls.push({
+          accessScope,
+          action,
+          payload,
+          taskId,
+          type: "resume",
+        });
+
+        return {
+          id: taskId,
+          status: "queued",
+          type: "external_recommendation",
+        };
+      },
+    },
+    taskService: {
+      getTask: ({ accessScope, taskId }) => {
+        calls.push({
+          accessScope,
+          taskId,
+          type: "get",
+        });
+
+        return {
+          id: taskId,
+          status: "waiting_for_user",
+          type: "external_recommendation",
+        };
+      },
+      listTasks: () => ({
+        tasks: [],
+      }),
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(
+      `${server.baseUrl}/tasks/external_recommendation%3Aarxiv%3Adoc-1`
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).status, "waiting_for_user");
+
+    response = await fetch(
+      `${server.baseUrl}/tasks/external_recommendation%3Aarxiv%3Adoc-1/actions/confirm`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          selectedArxivIds: ["2401.00001v1"],
+          selectionToken: "selection-token-1",
+        }),
+      }
+    );
+
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).task.status, "queued");
+    assert.deepEqual(
+      calls.map((call) => ({
+        action: call.action,
+        payload: call.payload,
+        taskId: call.taskId,
+        type: call.type,
+      })),
+      [
+        {
+          action: undefined,
+          payload: undefined,
+          taskId: "external_recommendation:arxiv:doc-1",
+          type: "get",
+        },
+        {
+          action: "confirm",
+          payload: {
+            selectedArxivIds: ["2401.00001v1"],
+            selectionToken: "selection-token-1",
+          },
+          taskId: "external_recommendation:arxiv:doc-1",
+          type: "resume",
+        },
+      ]
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test("chat endpoint exposes explicit rag abstain fields", async () => {
   const documents = new Map([
     [

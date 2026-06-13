@@ -7,6 +7,9 @@ import {
   getQdrantCollection,
   getQdrantUrl,
   getSessionMemoryPostgresTable,
+  getTaskEventsPostgresTable,
+  getTaskStoreProvider,
+  getTasksPostgresTable,
   getVectorStoreProvider,
   isApiAuthEnabled,
   isLongMemoryEnabled,
@@ -16,6 +19,7 @@ import { runPostgresMigrations } from "./rag/db-migrations.js";
 import {
   checkLongMemoryPostgresHealth,
   checkPostgresHealth,
+  isPostgresConfigured,
 } from "./rag/postgres.js";
 import { getOpenAIApiKey } from "./rag/openai.js";
 
@@ -194,16 +198,70 @@ const checkSessionMemoryHealth = async () => {
   }
 };
 
+const checkTaskStoreHealth = async () => {
+  const provider = getTaskStoreProvider();
+
+  if (provider === "memory" || (provider === "auto" && !isPostgresConfigured())) {
+    return buildEntry("ok", {
+      backend: "memory",
+      provider,
+      message: "Task store is using in-memory storage.",
+    });
+  }
+
+  const postgres = await checkPostgresHealth();
+
+  if (isErrorStatus(postgres.status)) {
+    return buildEntry("error", {
+      backend: "postgresql",
+      provider,
+      table: getTasksPostgresTable(),
+      eventsTable: getTaskEventsPostgresTable(),
+      message: postgres.message,
+    });
+  }
+
+  try {
+    const migrations = await runPostgresMigrations();
+
+    return buildEntry("ok", {
+      backend: "postgresql",
+      provider,
+      table: getTasksPostgresTable(),
+      eventsTable: getTaskEventsPostgresTable(),
+      appliedMigrations: migrations.appliedMigrations,
+      message: "PostgreSQL task storage is reachable and migrations are applied.",
+    });
+  } catch (error) {
+    return buildEntry("error", {
+      backend: "postgresql",
+      provider,
+      table: getTasksPostgresTable(),
+      eventsTable: getTaskEventsPostgresTable(),
+      message:
+        error instanceof Error ? error.message : "Task storage migration failed.",
+    });
+  }
+};
+
 export const buildHealthReport = async () => {
-  const [apiAuth, openai, vectorStore, documentStore, sessionMemory, longMemory] =
-    await Promise.all([
+  const [
+    apiAuth,
+    openai,
+    vectorStore,
+    documentStore,
+    sessionMemory,
+    longMemory,
+    taskStore,
+  ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
     checkQdrantHealth(),
     checkDocumentStoreHealth(),
     checkSessionMemoryHealth(),
     checkLongMemoryHealth(),
-    ]);
+    checkTaskStoreHealth(),
+  ]);
   const checks = {
     apiAuth,
     openai,
@@ -211,6 +269,7 @@ export const buildHealthReport = async () => {
     documentStore,
     sessionMemory,
     longMemory,
+    taskStore,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 

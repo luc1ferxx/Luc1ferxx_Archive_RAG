@@ -204,6 +204,19 @@ export const getDocumentsPostgresTable = () =>
 export const getSessionMemoryPostgresTable = () =>
   (process.env.SESSION_MEMORY_POSTGRES_TABLE || "rag_session_memory").trim();
 
+export const getTaskStoreProvider = () =>
+  toChoice(process.env.TASK_STORE_PROVIDER, "auto", [
+    "auto",
+    "memory",
+    "postgres",
+  ]);
+
+export const getTasksPostgresTable = () =>
+  (process.env.TASKS_POSTGRES_TABLE || "rag_tasks").trim();
+
+export const getTaskEventsPostgresTable = () =>
+  (process.env.TASK_EVENTS_POSTGRES_TABLE || "rag_task_events").trim();
+
 export const isApiAuthEnabled = () =>
   toBoolean(process.env.API_AUTH_ENABLED, false);
 

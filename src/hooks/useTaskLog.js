@@ -9,6 +9,11 @@ export const TASK_TYPES = {
   externalRecommendation: "external_recommendation",
 };
 
+export const ACTIVE_TASK_STATUSES = new Set(["queued", "running"]);
+
+export const hasActiveTasks = (tasks = []) =>
+  tasks.some((task) => ACTIVE_TASK_STATUSES.has(task.status));
+
 export const useTaskLog = () => {
   const [tasks, setTasks] = useState([]);
   const [isTaskLogLoading, setIsTaskLogLoading] = useState(false);

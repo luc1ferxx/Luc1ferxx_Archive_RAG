@@ -7,6 +7,8 @@ import { createArxivSelectionTokenService } from "./arxiv-selection-token.js";
 import { extractMeaningfulTokens } from "./text-utils.js";
 
 const ARXIV_RECOMMENDATION_PROVIDER = "arxiv";
+export const ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID =
+  "arxiv_recommendation_import";
 
 const DEFAULT_TOPIC_TAG_LIMIT = 4;
 const MAX_KEYPHRASE_TOKENS = 3;
@@ -507,9 +509,9 @@ export const createArxivEnrichmentService = ({
     resolveDocumentTopic: resolveTopicForDocument,
     selectionTokenService,
   });
-  const recordRecommendationTask = (methodName, payload) => {
+  const recordRecommendationTask = async (methodName, payload) => {
     try {
-      return recommendationTaskService?.[methodName]?.(payload) ?? null;
+      return (await recommendationTaskService?.[methodName]?.(payload)) ?? null;
     } catch {
       return null;
     }
@@ -538,13 +540,17 @@ export const createArxivEnrichmentService = ({
         },
       });
 
-      recordRecommendationTask("recordSuggestionResult", {
+      const task = await recordRecommendationTask("recordSuggestionResult", {
         accessScope,
         provider: ARXIV_RECOMMENDATION_PROVIDER,
+        runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
         suggestion: savedSuggestion,
       });
 
-      return savedSuggestion;
+      return {
+        ...savedSuggestion,
+        task,
+      };
     }
 
     const searchedPapers = await arxivService.search({
@@ -584,16 +590,20 @@ export const createArxivEnrichmentService = ({
       suggestion,
     });
 
-    recordRecommendationTask("recordSuggestionResult", {
+    const task = await recordRecommendationTask("recordSuggestionResult", {
       accessScope,
       provider: ARXIV_RECOMMENDATION_PROVIDER,
+      runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
       suggestion: savedSuggestion,
     });
 
-    return savedSuggestion;
+    return {
+      ...savedSuggestion,
+      task,
+    };
   };
 
-  const importForDocument = async ({
+  const prepareImportForDocument = ({
     accessScope = {},
     docId,
     selectedArxivIds,
@@ -652,7 +662,23 @@ export const createArxivEnrichmentService = ({
       throw error;
     }
 
-    recordRecommendationTask("recordImportStarted", {
+    return {
+      docId,
+      document,
+      relevantSelectedPapers,
+      topic,
+    };
+  };
+
+  const executePreparedImport = async ({
+    accessScope = {},
+    docId,
+    document,
+    onPaperProgress,
+    relevantSelectedPapers = [],
+    topic,
+  } = {}) => {
+    await recordRecommendationTask("recordImportStarted", {
       accessScope,
       docId,
       document: buildDocumentSummary(document),
@@ -674,11 +700,12 @@ export const createArxivEnrichmentService = ({
           relevantSelectedPapers.length,
           relevantSelectedPapers.length || DEFAULT_ARXIV_MAX_RESULTS
         ),
+        onPaperProgress,
         papers: relevantSelectedPapers,
         topic,
       });
     } catch (error) {
-      recordRecommendationTask("recordImportFailed", {
+      error.task = await recordRecommendationTask("recordImportFailed", {
         accessScope,
         docId,
         document: buildDocumentSummary(document),
@@ -698,7 +725,7 @@ export const createArxivEnrichmentService = ({
       topic,
     });
 
-    recordRecommendationTask("recordImportCompleted", {
+    const task = await recordRecommendationTask("recordImportCompleted", {
       accessScope,
       docId,
       document: buildDocumentSummary(document),
@@ -711,13 +738,113 @@ export const createArxivEnrichmentService = ({
 
     return {
       document: buildDocumentSummary(document),
+      task,
       ...importResult,
     };
+  };
+
+  const importForDocument = async (options = {}) => {
+    const preparedImport = prepareImportForDocument(options);
+
+    const { task, ...result } = await executePreparedImport({
+      ...preparedImport,
+      accessScope: options.accessScope,
+    });
+
+    return result;
+  };
+
+  const runImportTask = async ({ accessScope = {}, patchTask, task } = {}) => {
+    const payload = task?.payload ?? {};
+    const docId = payload.docId ?? task?.subject?.id;
+    const document = {
+      docId,
+      fileName: task?.subject?.label,
+    };
+    const selectedPapers = toArray(payload.selectedPapers);
+    const topic = payload.topic ?? task?.input?.topic ?? "";
+
+    try {
+      const result = await executePreparedImport({
+        accessScope,
+        docId,
+        document,
+        onPaperProgress: async (event) => {
+          await recordRecommendationTask("recordImportProgress", {
+            accessScope,
+            docId,
+            error: event.error,
+            paper: event.paper,
+            provider: ARXIV_RECOMMENDATION_PROVIDER,
+            result: event.result,
+            status: event.status,
+          });
+        },
+        relevantSelectedPapers: selectedPapers,
+        topic,
+      });
+
+      return {
+        ...(result.task ?? {}),
+        payload: null,
+      };
+    } catch (error) {
+      await patchTask?.({
+        payload: null,
+      });
+
+      return error.task ?? {
+        error: error instanceof Error ? error.message : String(error),
+        payload: null,
+        status: "failed",
+      };
+    }
+  };
+
+  const resumeImportTask = async ({
+    accessScope = {},
+    action,
+    payload = {},
+    task = {},
+  } = {}) => {
+    if (action !== "confirm") {
+      const error = new Error("Unsupported task action.");
+      error.status = 400;
+      throw error;
+    }
+
+    const preparedImport = prepareImportForDocument({
+      accessScope,
+      docId: payload.docId ?? task.subject?.id,
+      selectedArxivIds: payload.selectedArxivIds,
+      selectionToken: payload.selectionToken,
+    });
+    const queuedTask = await recordRecommendationTask("recordImportQueued", {
+      accessScope,
+      docId: preparedImport.docId,
+      document: buildDocumentSummary(preparedImport.document),
+      payload: {
+        docId: preparedImport.docId,
+        selectedPapers: preparedImport.relevantSelectedPapers,
+        topic: preparedImport.topic,
+      },
+      provider: ARXIV_RECOMMENDATION_PROVIDER,
+      runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
+      selectedPapers: preparedImport.relevantSelectedPapers,
+      topic: preparedImport.topic,
+    });
+
+    return queuedTask;
   };
 
   return {
     getSavedSuggestionForDocument: recommendationSnapshotService.getForDocument,
     importForDocument,
+    importJobRunner: {
+      id: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
+      resume: resumeImportTask,
+      run: runImportTask,
+    },
     listSavedSuggestions: recommendationSnapshotService.list,
     resolveTopicForDocument,
     suggestForDocument,

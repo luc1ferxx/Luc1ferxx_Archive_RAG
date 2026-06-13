@@ -18,6 +18,17 @@ export const fetchTasks = async (type) => {
   return apiGet(`/tasks${query}`);
 };
 
+export const fetchTask = async (taskId) => {
+  return apiGet(`/tasks/${encodeURIComponent(taskId)}`);
+};
+
+export const requestTaskAction = async (taskId, action, payload = {}) => {
+  return apiPost(
+    `/tasks/${encodeURIComponent(taskId)}/actions/${encodeURIComponent(action)}`,
+    payload
+  );
+};
+
 export const fetchDocumentArxivSuggestions = async (docId, maxResults = 3) => {
   return apiGet(
     `/documents/${docId}/arxiv/suggestions?maxResults=${encodeURIComponent(
