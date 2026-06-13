@@ -12,6 +12,7 @@ export const runArxivImportSkill = async ({
   arxivImportSkill,
   budgetState,
   buildSkillTraceDetail = (result) => result,
+  capabilityRegistry,
   executeObservedSkill,
   question,
   recordSkippedSkill = noop,
@@ -46,6 +47,7 @@ export const runArxivImportSkill = async ({
     {
       accessScope,
       arxivImportService,
+      capabilityRegistry,
       question,
     },
     {
@@ -170,6 +172,7 @@ export const runInventorySkill = async ({
   accessScope,
   addTraceStep = noop,
   buildSkillTraceDetail = (result) => result,
+  capabilityRegistry,
   executeObservedSkill,
   inventorySkill,
   ragService,
@@ -180,6 +183,7 @@ export const runInventorySkill = async ({
   }
 
   const inventoryResult = await executeObservedSkill(inventorySkill, {
+    capabilityRegistry,
     ragService,
     accessScope,
   });
@@ -219,6 +223,7 @@ export const runDocumentDiscoverySkill = async ({
   accessScope,
   addTraceStep = noop,
   buildSkillTraceDetail = (result) => result,
+  capabilityRegistry,
   discoverySkill,
   docIds = [],
   executeObservedSkill,
@@ -231,6 +236,7 @@ export const runDocumentDiscoverySkill = async ({
   }
 
   const discoveryResult = await executeObservedSkill(discoverySkill, {
+    capabilityRegistry,
     ragService,
     question,
     docIds,

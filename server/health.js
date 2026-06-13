@@ -1,4 +1,7 @@
 import {
+  getAgentRunEventsPostgresTable,
+  getAgentRunsPostgresTable,
+  getAgentRunStoreProvider,
   getApiAuthToken,
   getChatModel,
   getDocumentsPostgresTable,
@@ -244,6 +247,52 @@ const checkTaskStoreHealth = async () => {
   }
 };
 
+const checkAgentRunStoreHealth = async () => {
+  const provider = getAgentRunStoreProvider();
+
+  if (provider === "memory" || (provider === "auto" && !isPostgresConfigured())) {
+    return buildEntry("ok", {
+      backend: "memory",
+      provider,
+      message: "Agent run store is using in-memory storage.",
+    });
+  }
+
+  const postgres = await checkPostgresHealth();
+
+  if (isErrorStatus(postgres.status)) {
+    return buildEntry("error", {
+      backend: "postgresql",
+      provider,
+      table: getAgentRunsPostgresTable(),
+      eventsTable: getAgentRunEventsPostgresTable(),
+      message: postgres.message,
+    });
+  }
+
+  try {
+    const migrations = await runPostgresMigrations();
+
+    return buildEntry("ok", {
+      backend: "postgresql",
+      provider,
+      table: getAgentRunsPostgresTable(),
+      eventsTable: getAgentRunEventsPostgresTable(),
+      appliedMigrations: migrations.appliedMigrations,
+      message: "PostgreSQL agent run storage is reachable and migrations are applied.",
+    });
+  } catch (error) {
+    return buildEntry("error", {
+      backend: "postgresql",
+      provider,
+      table: getAgentRunsPostgresTable(),
+      eventsTable: getAgentRunEventsPostgresTable(),
+      message:
+        error instanceof Error ? error.message : "Agent run storage migration failed.",
+    });
+  }
+};
+
 export const buildHealthReport = async () => {
   const [
     apiAuth,
@@ -253,6 +302,7 @@ export const buildHealthReport = async () => {
     sessionMemory,
     longMemory,
     taskStore,
+    agentRunStore,
   ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
@@ -261,6 +311,7 @@ export const buildHealthReport = async () => {
     checkSessionMemoryHealth(),
     checkLongMemoryHealth(),
     checkTaskStoreHealth(),
+    checkAgentRunStoreHealth(),
   ]);
   const checks = {
     apiAuth,
@@ -270,6 +321,7 @@ export const buildHealthReport = async () => {
     sessionMemory,
     longMemory,
     taskStore,
+    agentRunStore,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 

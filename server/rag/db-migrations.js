@@ -3,6 +3,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import {
   getDocumentsPostgresTable,
+  getAgentRunEventsPostgresTable,
+  getAgentRunsPostgresTable,
   getLongMemoryPostgresTable,
   getSessionMemoryPostgresTable,
   getTaskEventsPostgresTable,
@@ -53,6 +55,14 @@ const getTableNames = () => ({
     getTaskEventsPostgresTable(),
     "TASK_EVENTS_POSTGRES_TABLE"
   ),
+  agentRunsTable: ensureSimpleTableName(
+    getAgentRunsPostgresTable(),
+    "AGENT_RUNS_POSTGRES_TABLE"
+  ),
+  agentRunEventsTable: ensureSimpleTableName(
+    getAgentRunEventsPostgresTable(),
+    "AGENT_RUN_EVENTS_POSTGRES_TABLE"
+  ),
 });
 
 const renderMigrationSql = (sqlText) => {
@@ -63,7 +73,9 @@ const renderMigrationSql = (sqlText) => {
     .replaceAll("__DOCUMENTS_TABLE__", tableNames.documentsTable)
     .replaceAll("__SESSION_MEMORY_TABLE__", tableNames.sessionMemoryTable)
     .replaceAll("__TASKS_TABLE__", tableNames.tasksTable)
-    .replaceAll("__TASK_EVENTS_TABLE__", tableNames.taskEventsTable);
+    .replaceAll("__TASK_EVENTS_TABLE__", tableNames.taskEventsTable)
+    .replaceAll("__AGENT_RUNS_TABLE__", tableNames.agentRunsTable)
+    .replaceAll("__AGENT_RUN_EVENTS_TABLE__", tableNames.agentRunEventsTable);
 };
 
 const ensureMigrationsTable = async () => {

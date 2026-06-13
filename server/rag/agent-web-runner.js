@@ -9,6 +9,7 @@ export const runWebSearchSkill = async ({
   addTraceStep = noop,
   budgetState,
   buildSkillTraceDetail = (result) => result,
+  capabilityRegistry,
   executeObservedSkill,
   plannedWebSearchSkill,
   question,
@@ -46,6 +47,7 @@ export const runWebSearchSkill = async ({
   }
 
   const webResult = await executeObservedSkill(webSearchSkill, {
+    capabilityRegistry,
     webChatService,
     question,
   }, {

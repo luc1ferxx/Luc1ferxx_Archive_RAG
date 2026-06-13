@@ -217,6 +217,19 @@ export const getTasksPostgresTable = () =>
 export const getTaskEventsPostgresTable = () =>
   (process.env.TASK_EVENTS_POSTGRES_TABLE || "rag_task_events").trim();
 
+export const getAgentRunStoreProvider = () =>
+  toChoice(process.env.AGENT_RUN_STORE_PROVIDER, "auto", [
+    "auto",
+    "memory",
+    "postgres",
+  ]);
+
+export const getAgentRunsPostgresTable = () =>
+  (process.env.AGENT_RUNS_POSTGRES_TABLE || "rag_agent_runs").trim();
+
+export const getAgentRunEventsPostgresTable = () =>
+  (process.env.AGENT_RUN_EVENTS_POSTGRES_TABLE || "rag_agent_run_events").trim();
+
 export const isApiAuthEnabled = () =>
   toBoolean(process.env.API_AUTH_ENABLED, false);
 

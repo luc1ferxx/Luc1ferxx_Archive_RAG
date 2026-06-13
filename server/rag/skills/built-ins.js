@@ -7,6 +7,7 @@ import {
   DEFAULT_ARXIV_MAX_RESULTS,
   normalizeArxivMaxResults,
 } from "../arxiv-client.js";
+import { CAPABILITY_IDS } from "../capabilities/index.js";
 import { extractMeaningfulTokens, normalizeSearchText } from "../text-utils.js";
 
 export const AGENT_SKILL_IDS = {
@@ -279,14 +280,27 @@ const createArxivImportSkill = () => ({
       summary: "Search arXiv for the requested topic and ingest matching PDFs.",
     },
   ],
-  execute: async ({ arxivImportService, question, accessScope }) => {
+  execute: async ({
+    accessScope,
+    arxivImportService,
+    capabilityRegistry,
+    question,
+  }) => {
     const topic = extractArxivTopic(question);
     const maxResults = extractRequestedPaperCount(question);
-    const result = await arxivImportService.importTopic({
-      accessScope,
-      maxResults,
-      topic,
-    });
+    const result = capabilityRegistry
+      ? await capabilityRegistry.execute(CAPABILITY_IDS.arxivImportTopic, {
+          accessScope,
+          input: {
+            maxResults,
+            topic,
+          },
+        })
+      : await arxivImportService.importTopic({
+          accessScope,
+          maxResults,
+          topic,
+        });
     const citations = [
       ...(result.importedPapers ?? []),
       ...(result.skippedPapers ?? []),
@@ -342,8 +356,14 @@ const createWebSearchSkill = () => ({
       summary: "Use web context only after document evidence is checked.",
     },
   ],
-  execute: async ({ webChatService, question }) => {
-    const value = await webChatService(question);
+  execute: async ({ capabilityRegistry, webChatService, question }) => {
+    const value = capabilityRegistry
+      ? await capabilityRegistry.execute(CAPABILITY_IDS.webSearch, {
+          input: {
+            question,
+          },
+        })
+      : await webChatService(question);
 
     return {
       value,
@@ -400,13 +420,33 @@ const createDocumentDiscoverySkill = () => ({
       summary: "Use indexed document metadata without running document RAG.",
     },
   ],
-  execute: async ({ ragService, question, docIds, accessScope }) => {
-    const documents = ragService.listDocuments?.(accessScope) ?? [];
-    const matches = discoverDocuments({
-      documents,
-      question,
-      docIds,
-    });
+  execute: async ({
+    accessScope,
+    capabilityRegistry,
+    docIds,
+    question,
+    ragService,
+  }) => {
+    const discovery = capabilityRegistry
+      ? await capabilityRegistry.execute(CAPABILITY_IDS.documentDiscovery, {
+          accessScope,
+          input: {
+            docIds,
+            question,
+          },
+        })
+      : {
+          documents: ragService.listDocuments?.(accessScope) ?? [],
+          matches: null,
+        };
+    const documents = discovery.documents ?? [];
+    const matches =
+      discovery.matches ??
+      discoverDocuments({
+        documents,
+        question,
+        docIds,
+      });
 
     return {
       value: {

@@ -834,6 +834,7 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
     const body = await response.json();
 
     assert.equal(body.agentMode, "document");
+    assert.ok(body.agentRunId);
     assert.equal(body.agentAnswer, body.ragAnswer);
     assert.equal(body.ragAnswer, "The archive says annual leave is 15 days. [Source 1]");
     assert.equal(body.mcpAnswer, "Web search not used: document evidence was sufficient.");
@@ -850,6 +851,40 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
       ]
     );
     assert.equal(body.agentTrace.every((step) => step.status === "completed"), true);
+
+    let auditResponse = await fetch(`${server.baseUrl}/agent-runs/${body.agentRunId}`);
+
+    assert.equal(auditResponse.status, 200);
+
+    const agentRun = await auditResponse.json();
+
+    assert.equal(agentRun.runId, body.agentRunId);
+    assert.equal(agentRun.status, "completed");
+    assert.equal(agentRun.goal, "What is annual leave?");
+    assert.equal(agentRun.result.agentMode, "document");
+    assert.deepEqual(
+      agentRun.events.map((event) => event.type),
+      ["run_created", "run_prepared", "execution_planned", "run_completed"]
+    );
+
+    auditResponse = await fetch(`${server.baseUrl}/agent-runs?status=completed`);
+
+    assert.equal(auditResponse.status, 200);
+    assert.equal((await auditResponse.json()).runs.length, 1);
+
+    const capabilitiesResponse = await fetch(`${server.baseUrl}/capabilities`);
+
+    assert.equal(capabilitiesResponse.status, 200);
+    assert.deepEqual(
+      (await capabilitiesResponse.json()).capabilities.map(
+        (capability) => capability.id
+      ),
+      [
+        "arxiv.import_topic",
+        "workspace.document_discovery",
+        "web.search",
+      ]
+    );
   } finally {
     await server.close();
   }

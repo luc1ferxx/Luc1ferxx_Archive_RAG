@@ -38,12 +38,15 @@ import { createArxivEnrichmentService } from "./rag/arxiv-enrichment.js";
 import { createArxivService, normalizeArxivMaxResults } from "./rag/arxiv-client.js";
 import { createArxivImportService } from "./rag/arxiv-importer.js";
 import { createJobOrchestrator } from "./rag/job-orchestrator.js";
+import { createDefaultAgentRunStore } from "./rag/agent-run-store.js";
+import { createAgentRunService } from "./rag/agent-runs.js";
 import { createRecommendationTaskService } from "./rag/recommendation-tasks.js";
 import { createDefaultTaskStore } from "./rag/task-store.js";
 import { createTaskService } from "./rag/tasks.js";
 import { runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
+import { createDefaultCapabilityRegistry } from "./rag/capabilities/index.js";
 import { getAgentExecutionPlanner } from "./rag/config.js";
 import {
   clearUploadSession,
@@ -178,7 +181,9 @@ const resolveScopedUserId = (req, rawUserId) =>
 
 const buildChatResponse = async ({
   agentBudget,
+  agentRunService,
   arxivImportService,
+  capabilityRegistry,
   executionPlannerAdapter,
   ragService,
   webChatService,
@@ -205,7 +210,9 @@ const buildChatResponse = async ({
 
   return runAgentRag({
     agentBudget,
+    agentRunService,
     arxivImportService,
+    capabilityRegistry,
     ragService,
     webChatService,
     question,
@@ -256,6 +263,13 @@ export const createApp = async (options = {}) => {
   const taskService = options.taskService ?? createTaskService({
     taskStore,
   });
+  const agentRunStore =
+    options.agentRunStore ?? createDefaultAgentRunStore();
+  const agentRunService =
+    options.agentRunService ??
+    createAgentRunService({
+      agentRunStore,
+    });
   const recommendationTaskService =
     options.recommendationTaskService ??
     createRecommendationTaskService({
@@ -287,6 +301,13 @@ export const createApp = async (options = {}) => {
       taskService,
     });
   const skillRegistry = options.skillRegistry ?? null;
+  const capabilityRegistry =
+    options.capabilityRegistry ??
+    createDefaultCapabilityRegistry({
+      arxivImportService,
+      ragService,
+      webChatService,
+    });
   const uploadStore = options.uploadStore ?? {
     clearUploadSession,
     ensureUploadStorage,
@@ -348,6 +369,7 @@ export const createApp = async (options = {}) => {
   await ragService.initializeLongMemory?.();
   await ragService.initializeSessionMemory?.();
   await taskService.initialize?.();
+  await agentRunService.initialize?.();
   await jobOrchestrator.recoverRunnableTasks?.();
   await healthService.runStartupHealthChecks?.();
 
@@ -462,6 +484,56 @@ export const createApp = async (options = {}) => {
       });
     }
   });
+
+  app.get("/agent-runs", async (req, res) => {
+    try {
+      return res.json(
+        await agentRunService.listRuns({
+          accessScope: getRequestAccessScope(req),
+          status: req.query.status,
+        })
+      );
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to list agent runs."),
+      });
+    }
+  });
+
+  app.get("/agent-runs/:runId", async (req, res) => {
+    const runId = req.params.runId?.trim();
+
+    if (!runId) {
+      return res.status(400).json({
+        error: "runId is required.",
+      });
+    }
+
+    try {
+      const run = await agentRunService.getRun({
+        accessScope: getRequestAccessScope(req),
+        runId,
+      });
+
+      if (!run) {
+        return res.status(404).json({
+          error: "Agent run not found.",
+        });
+      }
+
+      return res.json(run);
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to read agent run."),
+      });
+    }
+  });
+
+  app.get("/capabilities", (req, res) =>
+    res.json({
+      capabilities: capabilityRegistry.list?.() ?? [],
+    })
+  );
 
   app.post("/tasks/:taskId/actions/:action", async (req, res) => {
     const taskId = req.params.taskId?.trim();
@@ -1071,7 +1143,9 @@ export const createApp = async (options = {}) => {
     try {
       const response = await buildChatResponse({
         agentBudget,
+        agentRunService,
         arxivImportService,
+        capabilityRegistry,
         ragService,
         webChatService,
         question,

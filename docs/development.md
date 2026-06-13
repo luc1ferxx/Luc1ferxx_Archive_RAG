@@ -6,12 +6,15 @@
 
 | Method | Path | 说明 |
 | --- | --- | --- |
-| `GET` | `/health` | 返回 OpenAI、auth、vector store、PostgreSQL、long memory、task store 等健康状态。 |
+| `GET` | `/health` | 返回 OpenAI、auth、vector store、PostgreSQL、long memory、task store、agent run store 等健康状态。 |
 | `GET` | `/ready` | Readiness check，整体异常时返回 `503`。 |
 | `GET` | `/documents` | 列出当前访问范围内的持久化文档；外部导入文档会在 `profile.source` / `source` 暴露 provenance。 |
 | `GET` | `/tasks` | 列出当前访问范围内的 task log；可用 `type` 查询参数过滤，例如 `external_recommendation`。 |
 | `GET` | `/tasks/:taskId` | 读取当前访问范围内的单个 task；响应不暴露 runner 内部 `payload`。 |
 | `POST` | `/tasks/:taskId/actions/:action` | 对等待用户输入的 task 执行动作，例如 `confirm` 或 `cancel`；动作由 task 的 `runnerId` 分发给对应 runner。 |
+| `GET` | `/agent-runs` | 列出当前访问范围内的 AgentRAG run snapshots；可用 `status` 查询参数过滤。 |
+| `GET` | `/agent-runs/:runId` | 读取单个 agent run 的 goal、plan、steps、observations、decisions、approval gates、result/error 和 event log。 |
+| `GET` | `/capabilities` | 列出已注册 capability contract，不暴露具体执行函数。 |
 | `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
 | `POST` | `/documents/clear` | 清空工作区文档。 |
 | `GET` | `/documents/:docId/file` | 以内联 PDF 方式流式返回文档，支持 range request。 |

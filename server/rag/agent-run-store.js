@@ -1,0 +1,23 @@
+import { getAgentRunStoreProvider } from "./config.js";
+import { isPostgresConfigured } from "./postgres.js";
+import { createInMemoryAgentRunStore } from "./agent-runs.js";
+import { createPostgresAgentRunStore } from "./postgres-agent-run-store.js";
+
+export const AGENT_RUN_STORE_PROVIDERS = Object.freeze({
+  auto: "auto",
+  memory: "memory",
+  postgres: "postgres",
+});
+
+export const createDefaultAgentRunStore = (options = {}) => {
+  const provider = options.provider ?? getAgentRunStoreProvider();
+
+  if (
+    provider === AGENT_RUN_STORE_PROVIDERS.postgres ||
+    (provider === AGENT_RUN_STORE_PROVIDERS.auto && isPostgresConfigured())
+  ) {
+    return createPostgresAgentRunStore(options.postgres);
+  }
+
+  return createInMemoryAgentRunStore(options.memory);
+};
