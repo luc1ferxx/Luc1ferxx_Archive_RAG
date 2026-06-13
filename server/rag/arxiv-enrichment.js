@@ -2,8 +2,11 @@ import {
   DEFAULT_ARXIV_MAX_RESULTS,
   normalizeArxivMaxResults,
 } from "./arxiv-client.js";
+import { createArxivRecommendationSnapshotService } from "./arxiv-recommendation-snapshots.js";
 import { createArxivSelectionTokenService } from "./arxiv-selection-token.js";
 import { extractMeaningfulTokens } from "./text-utils.js";
+
+const ARXIV_RECOMMENDATION_PROVIDER = "arxiv";
 
 const DEFAULT_TOPIC_TAG_LIMIT = 4;
 const MAX_KEYPHRASE_TOKENS = 3;
@@ -478,7 +481,10 @@ const getSelectedPapers = ({ papers = [], selectedArxivIds }) => {
 export const createArxivEnrichmentService = ({
   arxivImportService,
   arxivService,
+  now = () => new Date().toISOString(),
   ragService,
+  recommendationTaskService,
+  recommendationSnapshotStore,
   selectionTokenService = createArxivSelectionTokenService(),
 } = {}) => {
   const resolveTopicForDocument = ({ accessScope = {}, docId }) => {
@@ -495,6 +501,20 @@ export const createArxivEnrichmentService = ({
     };
   };
 
+  const recommendationSnapshotService = createArxivRecommendationSnapshotService({
+    now,
+    recommendationSnapshotStore,
+    resolveDocumentTopic: resolveTopicForDocument,
+    selectionTokenService,
+  });
+  const recordRecommendationTask = (methodName, payload) => {
+    try {
+      return recommendationTaskService?.[methodName]?.(payload) ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   const suggestForDocument = async ({
     accessScope = {},
     docId,
@@ -507,13 +527,24 @@ export const createArxivEnrichmentService = ({
     const requestedMaxResults = normalizeArxivMaxResults(maxResults);
 
     if (!topic) {
-      return {
-        document: buildDocumentSummary(document),
-        topic: "",
-        requestedMaxResults,
-        papers: [],
-        reason: "no_profile_topic",
-      };
+      const savedSuggestion = recommendationSnapshotService.save({
+        accessScope,
+        suggestion: {
+          document: buildDocumentSummary(document),
+          topic: "",
+          requestedMaxResults,
+          papers: [],
+          reason: "no_profile_topic",
+        },
+      });
+
+      recordRecommendationTask("recordSuggestionResult", {
+        accessScope,
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
+        suggestion: savedSuggestion,
+      });
+
+      return savedSuggestion;
     }
 
     const searchedPapers = await arxivService.search({
@@ -526,7 +557,7 @@ export const createArxivEnrichmentService = ({
       topic,
     });
 
-    return {
+    const suggestion = {
       document: buildDocumentSummary(document),
       topic,
       requestedMaxResults,
@@ -547,6 +578,19 @@ export const createArxivEnrichmentService = ({
             : "no_relevant_arxiv_matches"
           : null,
     };
+
+    const savedSuggestion = recommendationSnapshotService.save({
+      accessScope,
+      suggestion,
+    });
+
+    recordRecommendationTask("recordSuggestionResult", {
+      accessScope,
+      provider: ARXIV_RECOMMENDATION_PROVIDER,
+      suggestion: savedSuggestion,
+    });
+
+    return savedSuggestion;
   };
 
   const importForDocument = async ({
@@ -608,9 +652,19 @@ export const createArxivEnrichmentService = ({
       throw error;
     }
 
-    return {
+    recordRecommendationTask("recordImportStarted", {
+      accessScope,
+      docId,
       document: buildDocumentSummary(document),
-      ...(await arxivImportService.importPapers({
+      provider: ARXIV_RECOMMENDATION_PROVIDER,
+      selectedPapers: relevantSelectedPapers,
+      topic,
+    });
+
+    let importResult;
+
+    try {
+      importResult = await arxivImportService.importPapers({
         accessScope,
         importContext: {
           importedByUserConfirmation: true,
@@ -622,12 +676,49 @@ export const createArxivEnrichmentService = ({
         ),
         papers: relevantSelectedPapers,
         topic,
-      })),
+      });
+    } catch (error) {
+      recordRecommendationTask("recordImportFailed", {
+        accessScope,
+        docId,
+        document: buildDocumentSummary(document),
+        error,
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
+        selectedPapers: relevantSelectedPapers,
+        topic,
+      });
+      throw error;
+    }
+
+    const remainingSuggestion = recommendationSnapshotService.updateAfterImport({
+      accessScope,
+      docId,
+      importResult,
+      selectedPapers: relevantSelectedPapers,
+      topic,
+    });
+
+    recordRecommendationTask("recordImportCompleted", {
+      accessScope,
+      docId,
+      document: buildDocumentSummary(document),
+      importResult,
+      provider: ARXIV_RECOMMENDATION_PROVIDER,
+      remainingSuggestion,
+      selectedPapers: relevantSelectedPapers,
+      topic,
+    });
+
+    return {
+      document: buildDocumentSummary(document),
+      ...importResult,
     };
   };
 
   return {
+    getSavedSuggestionForDocument: recommendationSnapshotService.getForDocument,
     importForDocument,
+    listSavedSuggestions: recommendationSnapshotService.list,
     resolveTopicForDocument,
     suggestForDocument,
   };

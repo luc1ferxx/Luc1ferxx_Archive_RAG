@@ -352,6 +352,55 @@ test("document arxiv enrichment routes suggest first and import after confirmati
           reason: null,
         };
       },
+      listSavedSuggestions: ({ accessScope }) => {
+        calls.push({
+          accessScope,
+          type: "list-saved",
+        });
+
+        return {
+          suggestions: [
+            {
+              document: {
+                docId: "doc-1",
+                fileName: "private-notes.pdf",
+              },
+              papers: [
+                {
+                  arxivId: "2401.00001v1",
+                  title: "Retrieval Augmented Generation for Archives",
+                },
+              ],
+              provider: "arxiv",
+              selectionToken: "selection-token-1",
+              topic: "retrieval augmented generation",
+            },
+          ],
+        };
+      },
+      getSavedSuggestionForDocument: ({ accessScope, docId }) => {
+        calls.push({
+          accessScope,
+          docId,
+          type: "get-saved",
+        });
+
+        return {
+          document: {
+            docId,
+            fileName: "private-notes.pdf",
+          },
+          papers: [
+            {
+              arxivId: "2401.00001v1",
+              title: "Retrieval Augmented Generation for Archives",
+            },
+          ],
+          provider: "arxiv",
+          selectionToken: "selection-token-1",
+          topic: "retrieval augmented generation",
+        };
+      },
       importForDocument: async ({
         accessScope,
         docId,
@@ -405,6 +454,18 @@ test("document arxiv enrichment routes suggest first and import after confirmati
     assert.equal(response.status, 200);
     assert.equal((await response.json()).papers.length, 1);
 
+    response = await fetch(`${server.baseUrl}/documents/arxiv/suggestions`);
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).suggestions.length, 1);
+
+    response = await fetch(
+      `${server.baseUrl}/documents/doc-1/arxiv/suggestions/saved`
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).papers.length, 1);
+
     response = await fetch(`${server.baseUrl}/documents/doc-1/arxiv/import`, {
       method: "POST",
       headers: {
@@ -435,6 +496,20 @@ test("document arxiv enrichment routes suggest first and import after confirmati
           type: "suggest",
         },
         {
+          docId: undefined,
+          maxResults: undefined,
+          selectedArxivIds: undefined,
+          selectionToken: undefined,
+          type: "list-saved",
+        },
+        {
+          docId: "doc-1",
+          maxResults: undefined,
+          selectedArxivIds: undefined,
+          selectionToken: undefined,
+          type: "get-saved",
+        },
+        {
           docId: "doc-1",
           maxResults: undefined,
           selectedArxivIds: ["2401.00001v1"],
@@ -443,6 +518,72 @@ test("document arxiv enrichment routes suggest first and import after confirmati
         },
       ]
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test("tasks endpoint lists scoped task records", async () => {
+  const calls = [];
+  const app = await createApp({
+    ragService: {
+      chat: async () => ({
+        text: "stub",
+        citations: [],
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+    healthService: okHealthService,
+    taskService: {
+      listTasks: ({ accessScope, type }) => {
+        calls.push({
+          accessScope,
+          type,
+        });
+
+        return {
+          tasks: [
+            {
+              id: "external_recommendation:arxiv:doc-1",
+              type: "external_recommendation",
+              status: "waiting_for_user",
+              label: "arXiv recommendations",
+              summary: "Found 3 arXiv recommendations for review.",
+            },
+          ],
+        };
+      },
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(
+      `${server.baseUrl}/tasks?type=external_recommendation`
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).tasks.length, 1);
+    assert.deepEqual(calls, [
+      {
+        accessScope: {
+          authenticated: false,
+          userId: "",
+          workspaceId: "",
+        },
+        type: "external_recommendation",
+      },
+    ]);
   } finally {
     await server.close();
   }

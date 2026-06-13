@@ -3,6 +3,7 @@ import {
   AppstoreOutlined,
   CheckSquareOutlined,
   DatabaseOutlined,
+  FileSearchOutlined,
   PlusCircleOutlined,
   RobotOutlined,
   SearchOutlined,
@@ -48,6 +49,7 @@ const WorkspaceSidebar = ({
   onImportArxivSuggestion,
   onLoadQualityHistory,
   onLoadQualityLatest,
+  onOpenSavedArxivSuggestion,
   onRemoveDocument,
   onRunSyntheticQuality,
   onSelectSource,
@@ -58,6 +60,7 @@ const WorkspaceSidebar = ({
   qualityReport,
   qualityRef,
   relevantDocuments,
+  savedArxivSuggestionsByDocId = {},
   selectedChatDocIds = [],
   selectedDocId,
   totalPages,
@@ -227,6 +230,12 @@ const WorkspaceSidebar = ({
         <div className="document-list">
           {activeDocuments.map((document) => {
             const isInSelectedChatScope = selectedChatDocIds.includes(document.docId);
+            const savedArxivSuggestion =
+              !isArxivDocument(document)
+                ? savedArxivSuggestionsByDocId[document.docId]
+                : null;
+            const savedArxivPaperCount =
+              savedArxivSuggestion?.papers?.length ?? 0;
 
             return (
               <SpotlightCard
@@ -266,6 +275,20 @@ const WorkspaceSidebar = ({
                   </div>
                   <DocumentProfileSnippet document={document} />
                 </button>
+
+                {savedArxivPaperCount > 0 ? (
+                  <button
+                    type="button"
+                    className="document-arxiv-recommendation-button"
+                    aria-label={`Review saved arXiv recommendations for ${document.fileName}`}
+                    onClick={() =>
+                      void onOpenSavedArxivSuggestion?.(document.docId)
+                    }
+                  >
+                    <FileSearchOutlined />
+                    <span>{savedArxivPaperCount} arXiv recommendations</span>
+                  </button>
+                ) : null}
 
                 {isDemoWorkbench ? (
                   <span className={`document-status-dot is-${document.status ?? "ready"}`} />

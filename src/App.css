@@ -1048,7 +1048,8 @@
 }
 
 .document-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
@@ -1089,6 +1090,7 @@
 }
 
 .document-item-main-button {
+  grid-column: 1;
   flex: 1;
   min-width: 0;
   padding: 0;
@@ -1179,10 +1181,52 @@
   color: #0f6f58;
 }
 
+.document-arxiv-recommendation-button {
+  display: inline-flex;
+  grid-column: 1;
+  align-items: center;
+  justify-self: flex-start;
+  gap: 6px;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 4px 8px;
+  border: 1px solid rgba(15, 159, 122, 0.22);
+  border-radius: var(--archive-radius-md);
+  background: #f6fbfa;
+  color: #0f6f58;
+  font-size: 0.68rem;
+  font-weight: 760;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.document-arxiv-recommendation-button:hover {
+  border-color: rgba(15, 159, 122, 0.38);
+  background: #effaf6;
+}
+
+.document-arxiv-recommendation-button svg {
+  flex: 0 0 auto;
+}
+
+.document-arxiv-recommendation-button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .document-item-actions {
   display: grid;
+  grid-column: 2;
+  grid-row: 1 / span 2;
   flex-shrink: 0;
   gap: 5px;
+}
+
+.document-status-dot {
+  grid-column: 2;
+  grid-row: 1 / span 2;
 }
 
 .document-scope-toggle {
@@ -2477,6 +2521,22 @@
   font-size: 0.72rem;
   font-weight: 820;
   text-transform: uppercase;
+}
+
+.archive-view-item.is-running span {
+  color: #8a5a00;
+}
+
+.archive-view-item.is-waiting_for_user span {
+  color: #0f6f58;
+}
+
+.archive-view-item.is-completed span {
+  color: #276ef1;
+}
+
+.archive-view-item.is-failed span {
+  color: #b42318;
 }
 
 .archive-view-item strong {

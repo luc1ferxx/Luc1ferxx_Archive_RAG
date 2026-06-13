@@ -12,12 +12,26 @@ export const requestDocumentClear = async () => {
   return apiPost("/documents/clear");
 };
 
+export const fetchTasks = async (type) => {
+  const query = type ? `?type=${encodeURIComponent(type)}` : "";
+
+  return apiGet(`/tasks${query}`);
+};
+
 export const fetchDocumentArxivSuggestions = async (docId, maxResults = 3) => {
   return apiGet(
     `/documents/${docId}/arxiv/suggestions?maxResults=${encodeURIComponent(
       maxResults
     )}`
   );
+};
+
+export const fetchSavedArxivSuggestions = async () => {
+  return apiGet("/documents/arxiv/suggestions");
+};
+
+export const fetchSavedDocumentArxivSuggestion = async (docId) => {
+  return apiGet(`/documents/${docId}/arxiv/suggestions/saved`);
 };
 
 export const requestDocumentArxivImport = async (

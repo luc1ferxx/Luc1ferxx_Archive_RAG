@@ -63,14 +63,24 @@ jest.mock("./components/PdfPreview", () => () => <div>Preview</div>);
 
 describe("App", () => {
   beforeEach(() => {
-    axios.get.mockResolvedValue({
-      data: [
-        {
-          docId: "doc-1",
-          fileName: "benefits-2025.pdf",
-          pageCount: 3,
-        },
-      ],
+    axios.get.mockImplementation((url) => {
+      if (url.endsWith("/tasks")) {
+        return Promise.resolve({
+          data: {
+            tasks: [],
+          },
+        });
+      }
+
+      return Promise.resolve({
+        data: [
+          {
+            docId: "doc-1",
+            fileName: "benefits-2025.pdf",
+            pageCount: 3,
+          },
+        ],
+      });
     });
     axios.post.mockResolvedValue({ data: {} });
     axios.delete.mockResolvedValue({ data: {} });
@@ -200,6 +210,30 @@ describe("App", () => {
         });
       }
 
+      if (url.endsWith("/documents/arxiv/suggestions")) {
+        return Promise.resolve({
+          data: {
+            suggestions: [],
+          },
+        });
+      }
+
+      if (url.endsWith("/tasks")) {
+        return Promise.resolve({
+          data: {
+            tasks: [
+              {
+                id: "external_recommendation:arxiv:doc-upload",
+                type: "external_recommendation",
+                status: "waiting_for_user",
+                label: "arXiv recommendations",
+                summary: "Found 3 arXiv recommendations for review.",
+              },
+            ],
+          },
+        });
+      }
+
       documentFetchCount += 1;
 
       return Promise.resolve({
@@ -270,6 +304,30 @@ describe("App", () => {
     expect(
       await screen.findByText("Retrieval Augmented Generation for Archives")
     ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Not now/i }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Retrieval Augmented Generation for Archives")
+      ).not.toBeInTheDocument()
+    );
+
+    fireEvent.click(
+      await screen.findByLabelText(
+        "Review saved arXiv recommendations for rag-notes.pdf"
+      )
+    );
+
+    expect(
+      await screen.findByText("Retrieval Augmented Generation for Archives")
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    expect(
+      await screen.findByText("Found 3 arXiv recommendations for review.")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
 
     const groundedPaperCheckbox = screen.getByLabelText(
       "Select Grounded Question Answering with Documents"

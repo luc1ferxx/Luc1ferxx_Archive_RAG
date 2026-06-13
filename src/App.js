@@ -23,6 +23,7 @@ import { formatDocumentCount, isArxivDocument } from "./archiveWorkspace";
 import { useChatSession } from "./hooks/useChatSession";
 import { useArxivEnrichment } from "./hooks/useArxivEnrichment";
 import { useDocumentSelection } from "./hooks/useDocumentSelection";
+import { useTaskLog } from "./hooks/useTaskLog";
 import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
 import {
   DEMO_CONVERSATION,
@@ -46,6 +47,17 @@ const CHAT_SCOPE_MODES = {
   all: "all",
   selected: "selected",
 };
+
+const IDLE_TASKS = [
+  {
+    id: "idle-task",
+    label: "Awaiting question",
+    status: "pending",
+    summary: "Ask a document question to create an agent task trace.",
+  },
+];
+
+const formatTaskStatus = (status) => String(status ?? "pending").replace(/_/g, " ");
 
 const App = () => {
   const [isQualityLoading, setIsQualityLoading] = useState(false);
@@ -84,14 +96,32 @@ const App = () => {
     totalPages,
   } = useWorkspaceDocuments();
   const {
+    clearTasks,
+    isTaskLogLoading,
+    loadTasks,
+    tasks: taskLog,
+  } = useTaskLog();
+  const refreshTaskLog = useCallback(
+    () =>
+      loadTasks({
+        silent: true,
+      }),
+    [loadTasks]
+  );
+  const {
     clearSuggestion: clearArxivSuggestion,
+    clearSavedSuggestions: clearSavedArxivSuggestions,
     importSuggestion: importArxivSuggestion,
     isImporting: isArxivImporting,
     isSuggestionLoading: isArxivSuggestionLoading,
+    loadSavedSuggestions: loadSavedArxivSuggestions,
+    openSavedSuggestion: openSavedArxivSuggestionForDocument,
     requestSuggestions: requestArxivSuggestions,
+    savedSuggestionsByDocId: savedArxivSuggestionsByDocId,
     suggestion: arxivSuggestion,
   } = useArxivEnrichment({
     onImportComplete: refreshDocuments,
+    onTaskChange: refreshTaskLog,
   });
   const {
     previewStatus,
@@ -135,6 +165,7 @@ const App = () => {
             clearArxivSuggestion();
           }
 
+          await refreshTaskLog();
           await resetWorkspaceSession();
         },
       }),
@@ -142,6 +173,7 @@ const App = () => {
       arxivSuggestion?.document?.docId,
       clearArxivSuggestion,
       removeWorkspaceDocument,
+      refreshTaskLog,
       resetWorkspaceSession,
     ]
   );
@@ -151,10 +183,18 @@ const App = () => {
       clearWorkspaceDocuments({
         afterSuccess: async () => {
           clearArxivSuggestion();
+          clearSavedArxivSuggestions();
+          clearTasks();
           await resetWorkspaceSession();
         },
       }),
-    [clearArxivSuggestion, clearWorkspaceDocuments, resetWorkspaceSession]
+    [
+      clearArxivSuggestion,
+      clearSavedArxivSuggestions,
+      clearWorkspaceDocuments,
+      clearTasks,
+      resetWorkspaceSession,
+    ]
   );
 
   const handleWorkspaceUploadSuccess = useCallback(
@@ -190,6 +230,10 @@ const App = () => {
   const chatDocIds = useMemo(
     () => chatScopeDocuments.map((document) => document.docId),
     [chatScopeDocuments]
+  );
+  const activeDocumentIdsKey = useMemo(
+    () => activeDocuments.map((document) => document.docId).join("\n"),
+    [activeDocuments]
   );
   const chatDocLabel = useMemo(
     () =>
@@ -260,6 +304,25 @@ const App = () => {
     chatScopeMode,
     selectedChatDocuments.length,
     uploadedDocuments.length,
+  ]);
+
+  useEffect(() => {
+    if (!activeDocumentIdsKey) {
+      clearSavedArxivSuggestions();
+      clearTasks();
+      return;
+    }
+
+    void loadSavedArxivSuggestions({
+      merge: true,
+    });
+    void refreshTaskLog();
+  }, [
+    activeDocumentIdsKey,
+    clearSavedArxivSuggestions,
+    clearTasks,
+    loadSavedArxivSuggestions,
+    refreshTaskLog,
   ]);
 
   const loadLatestQualityReport = useCallback(async () => {
@@ -346,6 +409,12 @@ const App = () => {
   );
 
   const resetPageScroll = useCallback(() => {
+    if (navigator.userAgent.toLowerCase().includes("jsdom")) {
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+      return;
+    }
+
     window.scrollTo({ left: 0, top: 0, behavior: "auto" });
   }, []);
 
@@ -358,10 +427,17 @@ const App = () => {
     }
 
     const targetTop = section.offsetTop - sidebar.offsetTop - 12;
-    sidebar.scrollTo({
-      behavior: "smooth",
-      top: Math.max(0, targetTop),
-    });
+    const nextTop = Math.max(0, targetTop);
+
+    if (typeof sidebar.scrollTo === "function") {
+      sidebar.scrollTo({
+        behavior: "smooth",
+        top: nextTop,
+      });
+      return;
+    }
+
+    sidebar.scrollTop = nextTop;
   }, []);
 
   const focusComposer = useCallback(() => {
@@ -371,6 +447,18 @@ const App = () => {
       });
     }, 180);
   }, []);
+
+  const openSavedArxivSuggestion = useCallback(
+    async (docId) => {
+      const opened = await openSavedArxivSuggestionForDocument(docId);
+
+      if (opened) {
+        scrollSidebarSection(uploadRef);
+        message.info("Reviewing saved arXiv recommendations.");
+      }
+    },
+    [openSavedArxivSuggestionForDocument, scrollSidebarSection]
+  );
 
   const selectConversationView = useCallback(
     (view) => {
@@ -479,17 +567,16 @@ const App = () => {
   const visibleDocLabel = isDemoWorkbench ? "Finance Policy QA" : chatDocLabel;
   const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? [];
   const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? [];
-  const visibleTasks =
-    visibleTrace.length > 0
-      ? visibleTrace
-      : [
-          {
-            id: "idle-task",
-            label: "Awaiting question",
-            status: "pending",
-            summary: "Ask a document question to create an agent task trace.",
-          },
-        ];
+  const visibleTaskLog = isDemoWorkbench ? [] : taskLog;
+  let visibleTasks = IDLE_TASKS;
+
+  if (visibleTrace.length > 0) {
+    visibleTasks = visibleTrace;
+  }
+
+  if (visibleTaskLog.length > 0) {
+    visibleTasks = visibleTaskLog;
+  }
 
   const renderConversationView = () => {
     if (activeConversationView === "trace") {
@@ -555,7 +642,11 @@ const App = () => {
         <div className="archive-view-panel archive-tasks-view">
           <div className="archive-view-panel-head">
             <span>Tasks</span>
-            <strong>{visibleTasks.length} active</strong>
+            <strong>
+              {isTaskLogLoading && !isDemoWorkbench
+                ? "loading"
+                : `${visibleTasks.length} active`}
+            </strong>
           </div>
           <div className="archive-view-grid">
             {visibleTasks.map((task, index) => (
@@ -565,7 +656,7 @@ const App = () => {
                 className={`archive-view-item is-${task.status ?? "pending"}`}
                 onClick={() => message.info(task.summary)}
               >
-                <span>{task.status ?? "pending"}</span>
+                <span>{formatTaskStatus(task.status)}</span>
                 <strong>{task.label}</strong>
                 <p>{task.summary}</p>
               </button>
@@ -676,6 +767,7 @@ const App = () => {
             onClearDocuments={clearDocuments}
             onDismissArxivSuggestion={clearArxivSuggestion}
             onImportArxivSuggestion={importArxivSuggestion}
+            onOpenSavedArxivSuggestion={openSavedArxivSuggestion}
             onToggleChatScopeDocument={toggleChatScopeDocument}
             onLoadQualityHistory={loadQualityHistory}
             onLoadQualityLatest={loadLatestQualityReport}
@@ -688,6 +780,9 @@ const App = () => {
             qualityReport={visibleQualityReport}
             qualityRef={qualityRef}
             relevantDocuments={visibleRelevantDocuments}
+            savedArxivSuggestionsByDocId={
+              isDemoWorkbench ? {} : savedArxivSuggestionsByDocId
+            }
             selectedChatDocIds={isDemoWorkbench ? [] : selectedChatDocIds}
             selectedDocId={visibleSelectedSource?.docId ?? selectedDocId}
             totalPages={visibleTotalPages}

@@ -6,6 +6,12 @@ import {
   evaluateArxivPaperRelevance,
   rankArxivTopicCandidatesFromDocumentProfile,
 } from "../rag/arxiv-enrichment.js";
+import { createRecommendationTaskService } from "../rag/recommendation-tasks.js";
+import {
+  createInMemoryTaskStore,
+  createTaskService,
+  TASK_STATUSES,
+} from "../rag/tasks.js";
 
 test("arxiv enrichment derives a public topic while filtering profile entities", () => {
   const topic = buildArxivTopicFromDocumentProfile({
@@ -110,6 +116,9 @@ test("arxiv enrichment scores paper relevance from title and summary overlap", (
 
 test("arxiv enrichment returns suggestions for a scoped document", async () => {
   const searchCalls = [];
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
   const service = createArxivEnrichmentService({
     arxivImportService: {
       importTopic: async () => {
@@ -133,13 +142,19 @@ test("arxiv enrichment returns suggestions for a scoped document", async () => {
         ];
       },
     },
+    recommendationTaskService: createRecommendationTaskService({
+      taskService,
+    }),
     ragService: {
       getDocument: (docId, accessScope) => {
         assert.equal(docId, "doc-1");
-        assert.deepEqual(accessScope, {
-          userId: "alice",
-          workspaceId: "workspace-a",
-        });
+
+        if (
+          accessScope?.userId !== "alice" ||
+          accessScope?.workspaceId !== "workspace-a"
+        ) {
+          return null;
+        }
 
         return {
           docId,
@@ -170,6 +185,52 @@ test("arxiv enrichment returns suggestions for a scoped document", async () => {
       topic: "retrieval augmented generation",
     },
   ]);
+
+  const savedResult = service.listSavedSuggestions({
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  assert.equal(savedResult.suggestions.length, 1);
+  assert.equal(savedResult.suggestions[0].document.docId, "doc-1");
+  assert.equal(savedResult.suggestions[0].provider, "arxiv");
+  assert.equal(savedResult.suggestions[0].papers.length, 1);
+
+  const savedDocumentResult = service.getSavedSuggestionForDocument({
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+    docId: "doc-1",
+  });
+
+  assert.equal(savedDocumentResult.papers[0].arxivId, "2401.00001v1");
+
+  assert.deepEqual(
+    service.listSavedSuggestions({
+      accessScope: {
+        userId: "bob",
+        workspaceId: "workspace-b",
+      },
+    }),
+    {
+      suggestions: [],
+    }
+  );
+
+  const tasks = taskService.listTasks({
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+    type: "external_recommendation",
+  }).tasks;
+
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].status, TASK_STATUSES.waitingForUser);
+  assert.equal(tasks[0].counts.recommended, 1);
 });
 
 test("arxiv enrichment filters irrelevant papers before returning suggestions", async () => {
@@ -357,10 +418,16 @@ test("arxiv enrichment imports papers only after confirmation", async () => {
       topic: "retrieval augmented generation",
     },
   ]);
+  assert.deepEqual(service.listSavedSuggestions(), {
+    suggestions: [],
+  });
 });
 
 test("arxiv enrichment imports only selected recommended papers", async () => {
   const imports = [];
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
   const service = createArxivEnrichmentService({
     arxivImportService: {
       importPapers: async ({ maxResults, papers }) => {
@@ -406,6 +473,9 @@ test("arxiv enrichment imports only selected recommended papers", async () => {
         },
       ],
     },
+    recommendationTaskService: createRecommendationTaskService({
+      taskService,
+    }),
     ragService: {
       getDocument: () => ({
         docId: "doc-1",
@@ -435,6 +505,23 @@ test("arxiv enrichment imports only selected recommended papers", async () => {
       paperIds: ["2401.00003v1", "2401.00001v1"],
     },
   ]);
+
+  const savedResult = service.listSavedSuggestions();
+
+  assert.deepEqual(
+    savedResult.suggestions[0].papers.map((paper) => paper.arxivId),
+    ["2401.00002v1"]
+  );
+  assert.match(savedResult.suggestions[0].selectionToken, /^v1\./);
+
+  const tasks = taskService.listTasks({
+    type: "external_recommendation",
+  }).tasks;
+
+  assert.equal(tasks[0].status, TASK_STATUSES.waitingForUser);
+  assert.equal(tasks[0].counts.imported, 2);
+  assert.equal(tasks[0].counts.remaining, 1);
+  assert.deepEqual(tasks[0].result.remainingPaperIds, ["2401.00002v1"]);
 });
 
 test("arxiv enrichment rejects selected papers outside the signed recommendation set", async () => {

@@ -37,6 +37,8 @@ import { buildHealthReport, runStartupHealthChecks } from "./health.js";
 import { createArxivEnrichmentService } from "./rag/arxiv-enrichment.js";
 import { createArxivService, normalizeArxivMaxResults } from "./rag/arxiv-client.js";
 import { createArxivImportService } from "./rag/arxiv-importer.js";
+import { createRecommendationTaskService } from "./rag/recommendation-tasks.js";
+import { createInMemoryTaskStore, createTaskService } from "./rag/tasks.js";
 import { runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
@@ -248,12 +250,23 @@ export const createApp = async (options = {}) => {
     ragService,
     tempDirectory: path.join(uploadsDirectory, "arxiv-imports"),
   });
+  const taskStore = options.taskStore ?? createInMemoryTaskStore();
+  const taskService = options.taskService ?? createTaskService({
+    taskStore,
+  });
+  const recommendationTaskService =
+    options.recommendationTaskService ??
+    createRecommendationTaskService({
+      taskService,
+    });
   const arxivEnrichmentService =
     options.arxivEnrichmentService ??
     createArxivEnrichmentService({
       arxivImportService,
       arxivService,
       ragService,
+      recommendationTaskService,
+      recommendationSnapshotStore: options.recommendationSnapshotStore,
     });
   const skillRegistry = options.skillRegistry ?? null;
   const uploadStore = options.uploadStore ?? {
@@ -386,6 +399,21 @@ export const createApp = async (options = {}) => {
     return res.json(ragService.listDocuments(getRequestAccessScope(req)));
   });
 
+  app.get("/tasks", (req, res) => {
+    try {
+      return res.json(
+        taskService.listTasks({
+          accessScope: getRequestAccessScope(req),
+          type: req.query.type,
+        })
+      );
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to list tasks."),
+      });
+    }
+  });
+
   app.delete("/documents/:docId", async (req, res) => {
     const docId = req.params.docId?.trim();
 
@@ -503,6 +531,43 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 502).json({
         error: serializeError(error, "Failed to find arXiv suggestions."),
+      });
+    }
+  });
+
+  app.get("/documents/arxiv/suggestions", async (req, res) => {
+    try {
+      const result = arxivEnrichmentService.listSavedSuggestions({
+        accessScope: getRequestAccessScope(req),
+      });
+
+      return res.json(result);
+    } catch (error) {
+      return res.status(error.status ?? 502).json({
+        error: serializeError(error, "Failed to list saved arXiv suggestions."),
+      });
+    }
+  });
+
+  app.get("/documents/:docId/arxiv/suggestions/saved", async (req, res) => {
+    const docId = req.params.docId?.trim();
+
+    if (!docId) {
+      return res.status(400).json({
+        error: "docId is required.",
+      });
+    }
+
+    try {
+      const result = arxivEnrichmentService.getSavedSuggestionForDocument({
+        accessScope: getRequestAccessScope(req),
+        docId,
+      });
+
+      return res.json(result);
+    } catch (error) {
+      return res.status(error.status ?? 502).json({
+        error: serializeError(error, "Failed to load saved arXiv suggestions."),
       });
     }
   });

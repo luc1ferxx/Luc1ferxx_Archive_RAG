@@ -2,6 +2,8 @@ import { useCallback, useState } from "react";
 import { message } from "antd";
 import {
   fetchDocumentArxivSuggestions,
+  fetchSavedArxivSuggestions,
+  fetchSavedDocumentArxivSuggestion,
   requestDocumentArxivImport,
 } from "../archiveApi";
 
@@ -13,14 +15,112 @@ const getBackendMessage = (error, fallbackMessage) =>
 const formatArxivPaperCount = (count) =>
   `${count} arXiv paper${count === 1 ? "" : "s"}`;
 
-export const useArxivEnrichment = ({ onImportComplete } = {}) => {
+const getSuggestionDocId = (suggestion) => suggestion?.document?.docId ?? "";
+
+const hasImportablePapers = (suggestion) =>
+  (suggestion?.papers ?? []).length > 0 && Boolean(suggestion?.selectionToken);
+
+const buildSavedSuggestionMap = (suggestions = []) =>
+  Object.fromEntries(
+    suggestions
+      .filter(hasImportablePapers)
+      .map((suggestion) => [getSuggestionDocId(suggestion), suggestion])
+      .filter(([docId]) => docId)
+  );
+
+export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
   const [suggestion, setSuggestion] = useState(null);
+  const [savedSuggestionsByDocId, setSavedSuggestionsByDocId] = useState({});
   const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
 
   const clearSuggestion = useCallback(() => {
     setSuggestion(null);
   }, []);
+
+  const clearSavedSuggestions = useCallback(() => {
+    setSavedSuggestionsByDocId({});
+  }, []);
+
+  const upsertSavedSuggestion = useCallback((nextSuggestion) => {
+    const docId = getSuggestionDocId(nextSuggestion);
+
+    if (!docId) {
+      return;
+    }
+
+    setSavedSuggestionsByDocId((currentSuggestionsByDocId) => {
+      if (!hasImportablePapers(nextSuggestion)) {
+        const remainingSuggestions = {
+          ...currentSuggestionsByDocId,
+        };
+
+        delete remainingSuggestions[docId];
+        return remainingSuggestions;
+      }
+
+      return {
+        ...currentSuggestionsByDocId,
+        [docId]: nextSuggestion,
+      };
+    });
+  }, []);
+
+  const loadSavedSuggestions = useCallback(async ({ merge = false } = {}) => {
+    try {
+      const result = await fetchSavedArxivSuggestions();
+      const savedSuggestions = Array.isArray(result?.suggestions)
+        ? result.suggestions
+        : [];
+      const nextSavedSuggestionMap = buildSavedSuggestionMap(savedSuggestions);
+
+      setSavedSuggestionsByDocId((currentSuggestionsByDocId) =>
+        merge
+          ? {
+              ...currentSuggestionsByDocId,
+              ...nextSavedSuggestionMap,
+            }
+          : nextSavedSuggestionMap
+      );
+      return savedSuggestions;
+    } catch (error) {
+      message.warning(
+        getBackendMessage(error, "Unable to load saved arXiv recommendations.")
+      );
+      return [];
+    }
+  }, []);
+
+  const openSavedSuggestion = useCallback(
+    async (docId) => {
+      const cachedSuggestion = savedSuggestionsByDocId[docId];
+
+      if (hasImportablePapers(cachedSuggestion)) {
+        setSuggestion(cachedSuggestion);
+        return true;
+      }
+
+      try {
+        const savedSuggestion = await fetchSavedDocumentArxivSuggestion(docId);
+
+        upsertSavedSuggestion(savedSuggestion);
+
+        if (hasImportablePapers(savedSuggestion)) {
+          setSuggestion(savedSuggestion);
+          return true;
+        }
+
+        message.info("No saved arXiv recommendations for this document.");
+        return false;
+      } catch (error) {
+        message.warning(
+          getBackendMessage(error, "Unable to load saved arXiv recommendations.")
+        );
+        return false;
+      }
+    },
+    [savedSuggestionsByDocId, upsertSavedSuggestion]
+  );
 
   const requestSuggestions = useCallback(async (document) => {
     if (!document?.docId) {
@@ -36,6 +136,9 @@ export const useArxivEnrichment = ({ onImportComplete } = {}) => {
         DEFAULT_SUGGESTION_LIMIT
       );
 
+      upsertSavedSuggestion(nextSuggestion);
+      await onTaskChange?.();
+
       if ((nextSuggestion.papers ?? []).length > 0) {
         setSuggestion(nextSuggestion);
       }
@@ -46,7 +149,7 @@ export const useArxivEnrichment = ({ onImportComplete } = {}) => {
     } finally {
       setIsSuggestionLoading(false);
     }
-  }, []);
+  }, [onTaskChange, upsertSavedSuggestion]);
 
   const importSuggestion = useCallback(async (selectedArxivIds) => {
     const docId = suggestion?.document?.docId;
@@ -73,6 +176,8 @@ export const useArxivEnrichment = ({ onImportComplete } = {}) => {
         (result.importedCount ?? 0) + (result.skippedCount ?? 0);
 
       await onImportComplete?.(result);
+      await onTaskChange?.();
+      await loadSavedSuggestions();
       setSuggestion(null);
 
       const importedCount = result.importedCount ?? 0;
@@ -98,14 +203,18 @@ export const useArxivEnrichment = ({ onImportComplete } = {}) => {
     } finally {
       setIsImporting(false);
     }
-  }, [onImportComplete, suggestion]);
+  }, [loadSavedSuggestions, onImportComplete, onTaskChange, suggestion]);
 
   return {
     clearSuggestion,
+    clearSavedSuggestions,
     importSuggestion,
     isImporting,
     isSuggestionLoading,
+    loadSavedSuggestions,
+    openSavedSuggestion,
     requestSuggestions,
+    savedSuggestionsByDocId,
     suggestion,
   };
 };
