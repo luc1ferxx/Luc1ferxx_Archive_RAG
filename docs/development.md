@@ -60,7 +60,7 @@
 │   ├── health.js                # Startup/readiness health checks
 │   ├── db/migrations/           # PostgreSQL tables
 │   ├── rag/                     # Custom RAG + AgentRAG pipeline
-│   │   ├── agent*.js            # Planner, run context, run steps, self-check, finalizer, trace, working memory
+│   │   ├── agent*.js            # Planner, run context, run steps/handlers, self-check, finalizer, trace, working memory
 │   │   ├── skills/              # Built-ins and whitelisted custom skills
 │   │   ├── retrievers/          # Global and per-document retrievers
 │   │   ├── chunker.js
