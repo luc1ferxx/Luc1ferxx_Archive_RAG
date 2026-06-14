@@ -3,6 +3,12 @@ import {
   buildTaskScopeKey,
   normalizeTaskAccessScope,
 } from "./tasks.js";
+import {
+  applyApprovalActionToSteps,
+  normalizeAgentRunSteps,
+  queueAgentRunStepRetry,
+  updateAgentRunStep,
+} from "./agent-run-steps.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -18,6 +24,11 @@ export const AGENT_RUN_STATUSES = Object.freeze({
   failed: "failed",
   running: "running",
   waitingForUser: "waiting_for_user",
+});
+
+export const AGENT_RUN_ACTIONS = Object.freeze({
+  approve: "approve",
+  deny: "deny",
 });
 
 const VALID_AGENT_RUN_STATUSES = new Set(Object.values(AGENT_RUN_STATUSES));
@@ -48,6 +59,66 @@ export const normalizeAgentRunEvent = (event = {}) => {
 const normalizeAgentRunEvents = (events) =>
   toArray(events).map(normalizeAgentRunEvent).filter(Boolean);
 
+const normalizeAction = (action) => normalizeText(action).toLowerCase();
+
+const normalizeApprovalGateStatus = ({ action, status }) => {
+  const normalizedStatus = normalizeText(status).toLowerCase();
+
+  if (normalizedStatus) {
+    return normalizedStatus;
+  }
+
+  return normalizeAction(action) === AGENT_RUN_ACTIONS.approve
+    ? "approved"
+    : "denied";
+};
+
+const getApprovalGateKey = (gate = {}) =>
+  normalizeText(gate.id) ||
+  `${normalizeText(gate.type)}:${normalizeText(gate.capabilityId)}`;
+
+const updateApprovalGatesForAction = ({
+  action,
+  gateId = "",
+  gates = [],
+  now,
+  payload = {},
+} = {}) => {
+  const normalizedGateId = normalizeText(gateId ?? payload.gateId);
+  let matchedGate = null;
+  let matched = false;
+  const updatedGates = toArray(gates).map((gate) => {
+    const gateKey = getApprovalGateKey(gate);
+    const isMatch =
+      (!normalizedGateId && gate.status === "pending" && !matched) ||
+      (normalizedGateId && gateKey === normalizedGateId);
+
+    if (!isMatch) {
+      return gate;
+    }
+
+    matched = true;
+    matchedGate = {
+      ...gate,
+      status: normalizeApprovalGateStatus({
+        action,
+        status: payload.status,
+      }),
+      decision: normalizeAction(action),
+      decidedAt: now(),
+      decisionReason: normalizeText(payload.reason),
+    };
+
+    return matchedGate;
+  });
+
+  return {
+    gate: matchedGate,
+    gates: updatedGates,
+    matched,
+  };
+};
+
 export const normalizeAgentRun = (run = {}) => {
   const runId = normalizeText(run.runId);
   const goal = normalizeText(run.goal);
@@ -62,7 +133,7 @@ export const normalizeAgentRun = (run = {}) => {
     goal,
     input: normalizeRecord(run.input),
     plan: normalizeRecord(run.plan),
-    steps: toArray(run.steps),
+    steps: normalizeAgentRunSteps(run.steps),
     observations: toArray(run.observations),
     decisions: toArray(run.decisions),
     approvalGates: toArray(run.approvalGates),
@@ -348,19 +419,24 @@ export const createAgentRunService = ({
     result = {},
     runId,
     status = AGENT_RUN_STATUSES.completed,
-    steps = [],
+    steps,
   } = {}) {
+    const patch = {
+      approvalGates,
+      decisions,
+      observations,
+      result,
+      status,
+    };
+
+    if (steps !== undefined) {
+      patch.steps = steps;
+    }
+
     const run = await this.updateRun({
       accessScope,
       runId,
-      patch: {
-        approvalGates,
-        decisions,
-        observations,
-        result,
-        status,
-        steps,
-      },
+      patch,
     });
 
     await this.appendRunEvent({
@@ -372,7 +448,12 @@ export const createAgentRunService = ({
       },
     });
 
-    return run;
+    return (
+      (await this.getRun({
+        accessScope,
+        runId,
+      })) ?? run
+    );
   },
 
   async failRun({ accessScope = {}, error, runId } = {}) {
@@ -394,7 +475,213 @@ export const createAgentRunService = ({
       },
     });
 
-    return run;
+    return (
+      (await this.getRun({
+        accessScope,
+        runId,
+      })) ?? run
+    );
+  },
+
+  async applyApprovalAction({
+    accessScope = {},
+    action,
+    gateId = "",
+    payload = {},
+    runId,
+  } = {}) {
+    const normalizedAction = normalizeAction(action);
+
+    if (!Object.values(AGENT_RUN_ACTIONS).includes(normalizedAction)) {
+      const error = new Error(`Unsupported agent run action: ${action}`);
+      error.status = 400;
+      throw error;
+    }
+
+    const existingRun = await this.getRun({
+      accessScope,
+      runId,
+    });
+
+    if (!existingRun) {
+      const error = new Error("Agent run not found.");
+      error.status = 404;
+      throw error;
+    }
+
+    if (existingRun.status !== AGENT_RUN_STATUSES.waitingForUser) {
+      const error = new Error("Agent run is not waiting for user input.");
+      error.status = 409;
+      throw error;
+    }
+
+    const updateResult = updateApprovalGatesForAction({
+      action: normalizedAction,
+      gateId,
+      gates: existingRun.approvalGates,
+      now: () => new Date().toISOString(),
+      payload,
+    });
+
+    if (!updateResult.matched) {
+      const error = new Error("Approval gate not found.");
+      error.status = 404;
+      throw error;
+    }
+
+    const nextStatus =
+      normalizedAction === AGENT_RUN_ACTIONS.approve
+        ? AGENT_RUN_STATUSES.running
+        : AGENT_RUN_STATUSES.completed;
+    const stepUpdateResult = applyApprovalActionToSteps({
+      action: normalizedAction,
+      gate: updateResult.gate,
+      steps: existingRun.steps,
+    });
+    const resultPatch =
+      normalizedAction === AGENT_RUN_ACTIONS.deny
+        ? {
+            approvalDenied: true,
+            deniedGateId: getApprovalGateKey(updateResult.gate),
+            status: 200,
+          }
+        : {};
+    const run = await this.updateRun({
+      accessScope,
+      runId,
+      patch: {
+        approvalGates: updateResult.gates,
+        result: resultPatch,
+        status: nextStatus,
+        steps: stepUpdateResult.steps,
+      },
+    });
+
+    await this.appendRunEvent({
+      accessScope,
+      runId,
+      type:
+        normalizedAction === AGENT_RUN_ACTIONS.approve
+          ? "approval_gate_approved"
+          : "approval_gate_denied",
+      payload: {
+        capabilityId: updateResult.gate?.capabilityId ?? null,
+        gateId: getApprovalGateKey(updateResult.gate),
+        reason: normalizeText(payload.reason),
+        stepId: stepUpdateResult.gateStep?.id ?? null,
+      },
+    });
+
+    return (
+      (await this.getRun({
+        accessScope,
+        runId,
+      })) ?? run
+    );
+  },
+
+  async updateRunStep({
+    accessScope = {},
+    eventType = "step_updated",
+    patch = {},
+    runId,
+    status,
+    stepId,
+  } = {}) {
+    const existingRun = await this.getRun({
+      accessScope,
+      runId,
+    });
+
+    if (!existingRun) {
+      return null;
+    }
+
+    const updateResult = updateAgentRunStep({
+      patch,
+      status,
+      stepId,
+      steps: existingRun.steps,
+    });
+
+    if (!updateResult.matched) {
+      return null;
+    }
+
+    const run = await this.updateRun({
+      accessScope,
+      runId,
+      patch: {
+        steps: updateResult.steps,
+      },
+    });
+
+    await this.appendRunEvent({
+      accessScope,
+      runId,
+      type: eventType,
+      payload: {
+        status: updateResult.step.status,
+        stepId: updateResult.step.id,
+      },
+    });
+
+    return (
+      (await this.getRun({
+        accessScope,
+        runId,
+      })) ?? run
+    );
+  },
+
+  async retryStep({ accessScope = {}, runId, stepId } = {}) {
+    const existingRun = await this.getRun({
+      accessScope,
+      runId,
+    });
+
+    if (!existingRun) {
+      const error = new Error("Agent run not found.");
+      error.status = 404;
+      throw error;
+    }
+
+    const retryResult = queueAgentRunStepRetry({
+      stepId,
+      steps: existingRun.steps,
+    });
+
+    if (!retryResult.matched) {
+      const error = new Error("Agent run step not found.");
+      error.status = 404;
+      throw error;
+    }
+
+    const run = await this.updateRun({
+      accessScope,
+      runId,
+      patch: {
+        status: AGENT_RUN_STATUSES.running,
+        steps: retryResult.steps,
+      },
+    });
+
+    await this.appendRunEvent({
+      accessScope,
+      runId,
+      type: "step_retry_queued",
+      payload: {
+        retryOfStepId: retryResult.retryStep.retryOfStepId,
+        stepId: retryResult.retryStep.id,
+      },
+    });
+
+    return (
+      (await this.getRun({
+        accessScope,
+        runId,
+      })) ?? run
+    );
   },
 
   async getRun({ accessScope = {}, runId } = {}) {

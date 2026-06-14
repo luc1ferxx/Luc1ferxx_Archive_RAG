@@ -14,6 +14,8 @@
 | `POST` | `/tasks/:taskId/actions/:action` | 对等待用户输入的 task 执行动作，例如 `confirm` 或 `cancel`；动作由 task 的 `runnerId` 分发给对应 runner。 |
 | `GET` | `/agent-runs` | 列出当前访问范围内的 AgentRAG run snapshots；可用 `status` 查询参数过滤。 |
 | `GET` | `/agent-runs/:runId` | 读取单个 agent run 的 goal、plan、steps、observations、decisions、approval gates、result/error 和 event log。 |
+| `POST` | `/agent-runs/:runId/actions/:action` | 对等待用户确认的 agent run 执行 `approve` / `deny`；approve 会恢复被暂停的 capability step，不重放整条 `/chat`。 |
+| `POST` | `/agent-runs/:runId/steps/:stepId/actions/retry` | 为单个已持久化 run step 排队 retry step，便于后续只重试失败步骤。 |
 | `GET` | `/capabilities` | 列出已注册 capability contract，不暴露具体执行函数。 |
 | `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
 | `POST` | `/documents/clear` | 清空工作区文档。 |
@@ -58,7 +60,7 @@
 │   ├── health.js                # Startup/readiness health checks
 │   ├── db/migrations/           # PostgreSQL tables
 │   ├── rag/                     # Custom RAG + AgentRAG pipeline
-│   │   ├── agent*.js            # Planner, run context, self-check, finalizer, trace, working memory
+│   │   ├── agent*.js            # Planner, run context, run steps, self-check, finalizer, trace, working memory
 │   │   ├── skills/              # Built-ins and whitelisted custom skills
 │   │   ├── retrievers/          # Global and per-document retrievers
 │   │   ├── chunker.js

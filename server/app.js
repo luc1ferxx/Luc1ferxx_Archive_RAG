@@ -40,6 +40,7 @@ import { createArxivImportService } from "./rag/arxiv-importer.js";
 import { createJobOrchestrator } from "./rag/job-orchestrator.js";
 import { createDefaultAgentRunStore } from "./rag/agent-run-store.js";
 import { createAgentRunService } from "./rag/agent-runs.js";
+import { createAgentRunStepExecutor } from "./rag/agent-run-step-executor.js";
 import { createRecommendationTaskService } from "./rag/recommendation-tasks.js";
 import { createDefaultTaskStore } from "./rag/task-store.js";
 import { createTaskService } from "./rag/tasks.js";
@@ -192,6 +193,8 @@ const buildChatResponse = async ({
   sessionId,
   userId,
   accessScope,
+  agentRunId,
+  capabilityApprovals,
   skillRegistry,
 }) => {
   const missingDocIds = docIds.filter(
@@ -220,6 +223,8 @@ const buildChatResponse = async ({
     sessionId,
     userId,
     accessScope,
+    agentRunId,
+    capabilityApprovals,
     executionPlannerAdapter,
     skillRegistry,
   });
@@ -307,6 +312,12 @@ export const createApp = async (options = {}) => {
       arxivImportService,
       ragService,
       webChatService,
+    });
+  const agentRunStepExecutor =
+    options.agentRunStepExecutor ??
+    createAgentRunStepExecutor({
+      agentRunService,
+      capabilityRegistry,
     });
   const uploadStore = options.uploadStore ?? {
     clearUploadSession,
@@ -525,6 +536,70 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to read agent run."),
+      });
+    }
+  });
+
+  app.post("/agent-runs/:runId/actions/:action", async (req, res) => {
+    const runId = req.params.runId?.trim();
+    const action = req.params.action?.trim();
+
+    if (!runId) {
+      return res.status(400).json({
+        error: "runId is required.",
+      });
+    }
+
+    if (!action) {
+      return res.status(400).json({
+        error: "action is required.",
+      });
+    }
+
+    try {
+      const result = await agentRunStepExecutor.applyApprovalAction({
+        accessScope: getRequestAccessScope(req),
+        action,
+        gateId: req.body.gateId,
+        payload: req.body,
+        runId,
+      });
+
+      return res.json(result);
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to update agent run."),
+      });
+    }
+  });
+
+  app.post("/agent-runs/:runId/steps/:stepId/actions/retry", async (req, res) => {
+    const runId = req.params.runId?.trim();
+    const stepId = req.params.stepId?.trim();
+
+    if (!runId) {
+      return res.status(400).json({
+        error: "runId is required.",
+      });
+    }
+
+    if (!stepId) {
+      return res.status(400).json({
+        error: "stepId is required.",
+      });
+    }
+
+    try {
+      const result = await agentRunStepExecutor.retryStep({
+        accessScope: getRequestAccessScope(req),
+        runId,
+        stepId,
+      });
+
+      return res.json(result);
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to retry agent run step."),
       });
     }
   });

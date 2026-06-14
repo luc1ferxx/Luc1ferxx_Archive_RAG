@@ -192,7 +192,7 @@ curl http://localhost:5001/ready
 | 分片上传 | `POST /upload/init`, `GET /upload/status`, `POST /upload/chunk`, `POST /upload/complete` |
 | 直接上传 | `POST /upload` |
 | 问答 | `GET /chat`, `POST /chat` |
-| Agent run 审计 | `GET /agent-runs`, `GET /agent-runs/:runId` |
+| Agent run 审计与恢复 | `GET /agent-runs`, `GET /agent-runs/:runId`, `POST /agent-runs/:runId/actions/:action`, `POST /agent-runs/:runId/steps/:stepId/actions/retry` |
 | Capability registry | `GET /capabilities` |
 | 会话和长期记忆 | `DELETE /sessions/:sessionId`, `GET/POST/DELETE /memory` |
 | 反馈和质量 | `GET/POST /feedback`, `GET/POST /quality/*` |

@@ -6,6 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import { createApp } from "../app.js";
 import {
+  CAPABILITY_IDS,
+  createCapabilityRegistry,
+} from "../rag/capabilities/index.js";
+import {
   buildQualityGateDecision,
   buildQualityHistoryResponse,
 } from "../evaluation/quality-report.js";
@@ -1156,6 +1160,140 @@ test("chat endpoint agent falls back to web when document evidence is insufficie
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
       ["plan", "query_planner", "document_rag", "self_check", "web_search", "synthesis"]
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("agent run approval action resumes a pending capability gate", async () => {
+  let webSearchCalls = 0;
+  const capabilityRegistry = createCapabilityRegistry([
+    {
+      id: CAPABILITY_IDS.webSearch,
+      version: "1.0.0",
+      label: "Web Search",
+      inputSchema: {
+        type: "object",
+        required: ["question"],
+        properties: {
+          question: {
+            type: "string",
+          },
+        },
+      },
+      accessScope: {
+        required: false,
+      },
+      approvalPolicy: {
+        mode: "user_confirmation",
+        writesWorkspace: false,
+        userConfirmationRequired: true,
+      },
+      privacyPolicy: {
+        externalCall: true,
+        sanitizedInputFields: ["question"],
+        storesResult: false,
+      },
+      execute: async ({ input }) => {
+        webSearchCalls += 1;
+
+        return {
+          text: `Approved web answer for: ${input.question}`,
+        };
+      },
+    },
+  ]);
+  const app = await createApp({
+    capabilityRegistry,
+    ragService: {
+      chat: async () => {
+        throw new Error("Document RAG should not run for direct web prompts.");
+      },
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    chatMcp: async () => {
+      throw new Error("Fallback web service should not run when registry is used.");
+    },
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        question: "Search the web for the current launch date",
+      }),
+    });
+
+    assert.equal(response.status, 200);
+
+    const pendingBody = await response.json();
+
+    assert.equal(webSearchCalls, 0);
+    assert.equal(pendingBody.clarification.reason, "capability_approval_required");
+    assert.equal(pendingBody.approvalGates[0].status, "pending");
+
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/${pendingBody.agentRunId}/actions/approve`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          gateId: pendingBody.approvalGates[0].id,
+        }),
+      }
+    );
+
+    assert.equal(response.status, 200);
+
+    const resumedBody = await response.json();
+
+    assert.equal(webSearchCalls, 1);
+    assert.equal(resumedBody.response.agentRunId, pendingBody.agentRunId);
+    assert.equal(resumedBody.response.agentMode, "web");
+    assert.match(resumedBody.response.agentAnswer, /Approved web answer/);
+    assert.equal(resumedBody.response.agentRunStatus, "completed");
+    assert.ok(
+      resumedBody.response.agentRunSteps.some(
+        (step) =>
+          step.kind === "capability_call" &&
+          step.status === "completed" &&
+          step.capabilityId === CAPABILITY_IDS.webSearch
+      )
+    );
+    assert.equal(resumedBody.run.status, "completed");
+    assert.equal(resumedBody.run.approvalGates[0].status, "approved");
+    assert.match(
+      resumedBody.run.approvalGates[0].stepId,
+      /\d+-capability_approval_gate/
+    );
+    assert.deepEqual(
+      resumedBody.run.events.map((event) => event.type),
+      [
+        "run_created",
+        "run_prepared",
+        "execution_planned",
+        "approval_gate_created",
+        "run_completed",
+        "approval_gate_approved",
+        "step_started",
+        "step_completed",
+        "run_completed",
+      ]
     );
   } finally {
     await server.close();

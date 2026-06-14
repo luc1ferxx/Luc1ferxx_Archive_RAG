@@ -9,6 +9,10 @@ import { prepareAgentRun } from "./agent-preparation-flow.js";
 import { AGENT_RUN_STATUSES } from "./agent-runs.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import { buildCapabilityApprovalClarification } from "./capabilities/index.js";
+import {
+  attachApprovalGateStepIds,
+  buildAgentRunStepsFromTrace,
+} from "./agent-run-steps.js";
 
 const getSkillDescriptor = (skill = {}) => ({
   skillId: skill.id,
@@ -44,9 +48,45 @@ const attachAgentRunId = (response, runId) =>
       }
     : response;
 
-const buildRunCompletionPayload = (response = {}) => {
+const attachAgentRunSnapshot = (response, run) =>
+  run
+    ? {
+        ...response,
+        body: {
+          ...response.body,
+          agentRunId: run.runId ?? response.body?.agentRunId,
+          agentRunStatus: run.status,
+          agentRunSteps: run.steps ?? [],
+        },
+      }
+    : response;
+
+const getGateKey = (gate = {}) => gate.id ?? `${gate.type}:${gate.capabilityId}`;
+
+const mergeApprovalGates = (...gateLists) => {
+  const gatesById = new Map();
+
+  for (const gate of gateLists.flat()) {
+    if (!gate || typeof gate !== "object") {
+      continue;
+    }
+
+    gatesById.set(getGateKey(gate), {
+      ...(gatesById.get(getGateKey(gate)) ?? {}),
+      ...gate,
+    });
+  }
+
+  return [...gatesById.values()];
+};
+
+const buildRunCompletionPayload = (response = {}, existingRun = {}) => {
   const body = response.body ?? {};
   const agentObservability = body.agentObservability ?? {};
+  const steps = buildAgentRunStepsFromTrace({
+    existingSteps: existingRun.steps ?? [],
+    trace: body.agentTrace ?? [],
+  });
   const status =
     response.status >= 400
       ? AGENT_RUN_STATUSES.failed
@@ -55,7 +95,15 @@ const buildRunCompletionPayload = (response = {}) => {
         : AGENT_RUN_STATUSES.completed;
 
   return {
-    approvalGates: extractApprovalGates(body.agentTrace),
+    approvalGates: attachApprovalGateStepIds({
+      gates: mergeApprovalGates(
+        existingRun.approvalGates ?? [],
+        (body.approvalGates ?? []).length > 0
+          ? body.approvalGates
+          : extractApprovalGates(body.agentTrace)
+      ),
+      steps,
+    }),
     decisions: [
       {
         type: "agent_mode",
@@ -75,7 +123,7 @@ const buildRunCompletionPayload = (response = {}) => {
       status: response.status,
     },
     status,
-    steps: body.agentTrace ?? [],
+    steps,
   };
 };
 
@@ -89,11 +137,31 @@ const completeRecordedRun = async ({
     return;
   }
 
-  await agentRunService.completeRun({
+  const existingRun = await agentRunService.getRun?.({
     accessScope,
     runId,
-    ...buildRunCompletionPayload(response),
   });
+
+  return agentRunService.completeRun({
+    accessScope,
+    runId,
+    ...buildRunCompletionPayload(response, existingRun ?? {}),
+  });
+};
+
+const withCapabilityApprovals = (capabilityRegistry, approvals = {}) => {
+  if (!capabilityRegistry || Object.keys(approvals).length === 0) {
+    return capabilityRegistry;
+  }
+
+  return {
+    ...capabilityRegistry,
+    execute: (capabilityId, payload = {}) =>
+      capabilityRegistry.execute(capabilityId, {
+        ...payload,
+        approval: payload.approval ?? approvals[capabilityId] ?? approvals["*"],
+      }),
+  };
 };
 
 export const runAgentRag = async ({
@@ -108,6 +176,8 @@ export const runAgentRag = async ({
   sessionId,
   userId,
   accessScope,
+  agentRunId: requestedAgentRunId,
+  capabilityApprovals = {},
   executionPlannerAdapter,
   skillRegistry,
 }) => {
@@ -144,9 +214,7 @@ export const runAgentRag = async ({
     question,
     skillRegistry,
   });
-  const agentRun = await agentRunService?.createRun?.({
-    accessScope,
-    goal: question,
+  const runSnapshot = {
     input: {
       docIds,
       sessionId,
@@ -157,8 +225,38 @@ export const runAgentRag = async ({
       summary: plan.summary,
       selectedSkills: selectedSkills.map(getSkillDescriptor),
     },
-  });
-  const agentRunId = agentRun?.runId ?? null;
+  };
+  const agentRun = requestedAgentRunId
+    ? await agentRunService?.updateRun?.({
+        accessScope,
+        runId: requestedAgentRunId,
+        patch: {
+          ...runSnapshot,
+          status: AGENT_RUN_STATUSES.running,
+        },
+      })
+    : await agentRunService?.createRun?.({
+        accessScope,
+        goal: question,
+        runId: requestedAgentRunId,
+        ...runSnapshot,
+      });
+  const agentRunId = agentRun?.runId ?? requestedAgentRunId ?? null;
+  const effectiveCapabilityRegistry = withCapabilityApprovals(
+    capabilityRegistry,
+    capabilityApprovals
+  );
+
+  if (requestedAgentRunId && agentRunId) {
+    await agentRunService?.appendRunEvent?.({
+      accessScope,
+      runId: agentRunId,
+      type: "run_resumed",
+      payload: {
+        approvedCapabilities: Object.keys(capabilityApprovals),
+      },
+    });
+  }
 
   try {
     const preparationResult = await prepareAgentRun({
@@ -185,14 +283,14 @@ export const runAgentRag = async ({
     if (preparationResult.response) {
       const response = attachAgentRunId(preparationResult.response, agentRunId);
 
-      await completeRecordedRun({
+      const completedRun = await completeRecordedRun({
         accessScope,
         agentRunService,
         response,
         runId: agentRunId,
       });
 
-      return response;
+      return attachAgentRunSnapshot(response, completedRun);
     }
 
     const agentRetrievalPlan = preparationResult.agentRetrievalPlan;
@@ -227,7 +325,7 @@ export const runAgentRag = async ({
       budgetState,
       arxivImportService,
       buildSkillTraceDetail,
-      capabilityRegistry,
+      capabilityRegistry: effectiveCapabilityRegistry,
       docIds,
       executeObservedSkill,
       executionLoop,
@@ -254,14 +352,14 @@ export const runAgentRag = async ({
     if (executionResult.response) {
       const response = attachAgentRunId(executionResult.response, agentRunId);
 
-      await completeRecordedRun({
+      const completedRun = await completeRecordedRun({
         accessScope,
         agentRunService,
         response,
         runId: agentRunId,
       });
 
-      return response;
+      return attachAgentRunSnapshot(response, completedRun);
     }
 
     const response = attachAgentRunId(
@@ -291,14 +389,14 @@ export const runAgentRag = async ({
       agentRunId
     );
 
-    await completeRecordedRun({
+    const completedRun = await completeRecordedRun({
       accessScope,
       agentRunService,
       response,
       runId: agentRunId,
     });
 
-    return response;
+    return attachAgentRunSnapshot(response, completedRun);
   } catch (error) {
     if (isAgentRunInterrupt(error)) {
       const clarification = buildCapabilityApprovalClarification(error);
@@ -318,14 +416,14 @@ export const runAgentRag = async ({
         agentRunId
       );
 
-      await completeRecordedRun({
+      const completedRun = await completeRecordedRun({
         accessScope,
         agentRunService,
         response,
         runId: agentRunId,
       });
 
-      return response;
+      return attachAgentRunSnapshot(response, completedRun);
     }
 
     await agentRunService?.failRun?.({
