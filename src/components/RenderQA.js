@@ -35,6 +35,81 @@ const formatLookupCount = (count) => {
   return count === 1 ? "1 result" : `${count} results`;
 };
 
+const formatRiskFlag = (flag) =>
+  String(flag ?? "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const getApprovalGates = (answer = {}) => {
+  const directGates = Array.isArray(answer.approvalGates)
+    ? answer.approvalGates
+    : [];
+  const detailGates = Array.isArray(answer.clarification?.detail?.approvalGates)
+    ? answer.clarification.detail.approvalGates
+    : [];
+  const detailGate = answer.clarification?.detail?.approvalGate;
+
+  if (directGates.length > 0) {
+    return directGates;
+  }
+
+  if (detailGates.length > 0) {
+    return detailGates;
+  }
+
+  return detailGate ? [detailGate] : [];
+};
+
+const ApprovalGatePanel = ({ gates }) => {
+  if (!Array.isArray(gates) || gates.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="archive-approval-panel" aria-label="Pending approvals">
+      <div className="archive-source-section-label">Pending approval</div>
+      {gates.map((gate, gateIndex) => {
+        const inputPreview = gate.inputPreview ?? {};
+        const previewEntries = Object.entries(inputPreview);
+        const riskFlags = Array.isArray(gate.riskFlags) ? gate.riskFlags : [];
+
+        return (
+          <div key={gate.id ?? gate.capabilityId ?? gateIndex} className="archive-approval-item">
+            <div className="archive-approval-head">
+              <strong>{gate.capabilityLabel ?? gate.capabilityId ?? "Capability"}</strong>
+              <span>{gate.status ?? "pending"}</span>
+            </div>
+            {gate.reason ? (
+              <div className="archive-approval-copy">{gate.reason}</div>
+            ) : null}
+            {previewEntries.length > 0 ? (
+              <div className="archive-approval-preview">
+                {previewEntries.map(([field, value]) => (
+                  <div key={field} className="archive-approval-preview-row">
+                    <span>{field}</span>
+                    <strong>{Array.isArray(value) ? value.join(", ") : String(value)}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="archive-approval-copy">Input preview hidden by policy.</div>
+            )}
+            {riskFlags.length > 0 ? (
+              <div className="archive-approval-risk-list">
+                {riskFlags.map((flag) => (
+                  <span key={flag} className="archive-answer-chip is-warning">
+                    {formatRiskFlag(flag)}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 const AgentRunRail = ({ trace }) => {
   const visibleSteps = trace.slice(0, 5);
 
@@ -258,6 +333,7 @@ const RenderQA = (props) => {
       {conversation?.map((each, index) => {
         const gapPlan = each.answer?.ragGapPlan;
         const agentTrace = each.answer?.agentTrace ?? [];
+        const approvalGates = getApprovalGates(each.answer);
         const evidenceSummary = each.answer?.ragEvidenceSummary;
         const researchBrief = each.answer?.researchBrief;
 
@@ -302,6 +378,8 @@ const RenderQA = (props) => {
                   <div className="archive-answer-text archive-agent-answer">
                     {each.answer.agentAnswer}
                   </div>
+
+                  <ApprovalGatePanel gates={approvalGates} />
 
                   <AgentTraceOverview
                     answer={each.answer}

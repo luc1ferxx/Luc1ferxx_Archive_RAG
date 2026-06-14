@@ -291,6 +291,11 @@ const createArxivImportSkill = () => ({
     const result = capabilityRegistry
       ? await capabilityRegistry.execute(CAPABILITY_IDS.arxivImportTopic, {
           accessScope,
+          approval: {
+            approved: true,
+            decision: "approved",
+            source: "explicit_user_request",
+          },
           input: {
             maxResults,
             topic,

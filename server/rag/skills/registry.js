@@ -2,6 +2,7 @@ import {
   AGENT_SKILL_IDS,
   createBuiltInSkills,
 } from "./built-ins.js";
+import { isAgentRunInterrupt } from "../agent-interrupts.js";
 import {
   CUSTOM_SKILL_IDS,
   createCustomSkills,
@@ -111,6 +112,10 @@ export const executeAgentSkill = async (skill, context) => {
   try {
     return normalizeSkillResult(skill, await skill.execute(context));
   } catch (error) {
+    if (isAgentRunInterrupt(error)) {
+      throw error;
+    }
+
     return buildFailedSkillResult(skill, error);
   }
 };

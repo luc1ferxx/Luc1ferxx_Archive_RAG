@@ -125,8 +125,8 @@ export const createAgentRunContext = ({
     const agentMode = "clarification";
 
     addTraceStep({
-      type: "clarification_gate",
-      label: "Clarification Gate",
+      type: clarification.traceType ?? "clarification_gate",
+      label: clarification.traceLabel ?? "Clarification Gate",
       status: "needs_input",
       summary: clarification.summary,
       detail: {

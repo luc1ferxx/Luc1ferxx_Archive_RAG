@@ -694,6 +694,12 @@
   background: #f7f9fc;
 }
 
+.archive-answer-chip.is-warning {
+  border-color: rgba(183, 121, 31, 0.24);
+  background: #fff8eb;
+  color: #8a5a12;
+}
+
 .archive-answer-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -933,13 +939,97 @@
 
 .archive-research-panel,
 .archive-evidence-panel,
-.archive-gap-panel {
+.archive-gap-panel,
+.archive-approval-panel {
   display: grid;
   gap: 9px;
   padding: 12px;
   border: 1px solid var(--archive-border-subtle);
   border-radius: var(--archive-radius-md);
   background: #f8fafc;
+}
+
+.archive-approval-panel {
+  border-color: rgba(183, 121, 31, 0.28);
+  background: #fffaf0;
+}
+
+.archive-approval-item {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(183, 121, 31, 0.2);
+  border-radius: var(--archive-radius-md);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.archive-approval-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.archive-approval-head strong {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.82rem;
+  font-weight: 780;
+  overflow-wrap: anywhere;
+}
+
+.archive-approval-head span {
+  color: var(--archive-warning);
+  font-size: 0.66rem;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.archive-approval-copy {
+  color: var(--archive-text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.archive-approval-preview {
+  display: grid;
+  gap: 6px;
+}
+
+.archive-approval-preview-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.28fr) minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: var(--archive-radius-sm);
+  background: #ffffff;
+}
+
+.archive-approval-preview-row span {
+  color: var(--archive-text-muted);
+  font-size: 0.66rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.archive-approval-preview-row strong {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.74rem;
+  font-weight: 760;
+  overflow-wrap: anywhere;
+}
+
+.archive-approval-risk-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
 }
 
 .archive-research-meta {

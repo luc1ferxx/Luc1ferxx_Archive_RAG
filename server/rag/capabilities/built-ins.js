@@ -102,9 +102,9 @@ export const createArxivImportTopicCapability = ({ arxivImportService } = {}) =>
     required: true,
   },
   approvalPolicy: {
-    mode: "direct",
+    mode: "user_confirmation",
     writesWorkspace: true,
-    userConfirmationRequired: false,
+    userConfirmationRequired: true,
   },
   privacyPolicy: {
     externalCall: true,

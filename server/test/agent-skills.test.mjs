@@ -5,6 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import { runAgentRag } from "../rag/agent.js";
 import {
+  AGENT_RUN_STATUSES,
+  createAgentRunService,
+  createInMemoryAgentRunStore,
+} from "../rag/agent-runs.js";
+import {
+  CAPABILITY_IDS,
+  createCapabilityRegistry,
+} from "../rag/capabilities/index.js";
+import {
   AGENT_SKILL_IDS,
   CUSTOM_SKILL_IDS,
   createBuiltInSkillRegistry,
@@ -327,6 +336,107 @@ test("agent rag imports arxiv papers as a direct built-in skill", async () => {
   assert.equal(observation.budgetKey, "arxivPaperFetches");
   assert.equal(observation.budgetUsed, 1);
   assert.equal(observation.budgetLimit, 1);
+});
+
+test("agent rag pauses on capability approval gates without executing the capability", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore({
+      now: () => "2026-06-14T00:00:00.000Z",
+    }),
+  });
+  let webExecuted = false;
+  const capabilityRegistry = createCapabilityRegistry([
+    {
+      id: CAPABILITY_IDS.webSearch,
+      version: "1.0.0",
+      label: "Web Search",
+      inputSchema: {
+        type: "object",
+        required: ["question"],
+        properties: {
+          question: {
+            type: "string",
+          },
+        },
+      },
+      accessScope: {
+        required: false,
+      },
+      approvalPolicy: {
+        mode: "user_confirmation",
+        writesWorkspace: false,
+        userConfirmationRequired: true,
+      },
+      privacyPolicy: {
+        externalCall: true,
+        sanitizedInputFields: ["question"],
+        storesResult: false,
+      },
+      execute: async () => {
+        webExecuted = true;
+
+        return {
+          text: "web should not execute",
+        };
+      },
+    },
+  ]);
+  const response = await runAgentRag({
+    accessScope,
+    agentRunService,
+    capabilityRegistry,
+    docIds: [],
+    question: "Search the web for the current launch date",
+    ragService: {
+      listDocuments: () => [],
+    },
+    sessionId: "session-1",
+    userId: "alice",
+    webChatService: async () => {
+      webExecuted = true;
+
+      return {
+        text: "web should not execute",
+      };
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(webExecuted, false);
+  assert.equal(response.body.agentMode, "clarification");
+  assert.equal(response.body.clarification.needed, true);
+  assert.equal(response.body.clarification.reason, "capability_approval_required");
+  assert.equal(response.body.approvalGates.length, 1);
+  assert.equal(response.body.approvalGates[0].capabilityId, CAPABILITY_IDS.webSearch);
+  assert.deepEqual(response.body.approvalGates[0].inputPreview, {
+    question: "Search the web for the current launch date",
+  });
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "capability_approval_gate"]
+  );
+
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId: response.body.agentRunId,
+  });
+
+  assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(run.approvalGates.length, 1);
+  assert.deepEqual(
+    run.events.map((event) => event.type),
+    [
+      "run_created",
+      "run_prepared",
+      "execution_planned",
+      "approval_gate_created",
+      "run_completed",
+    ]
+  );
 });
 
 test("agent rag sends planned retrieval queries and dynamic topK to document rag", async () => {

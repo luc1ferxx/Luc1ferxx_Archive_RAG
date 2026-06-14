@@ -7,6 +7,8 @@ import { runAgentExecutionPlan } from "./agent-execution-plan-runner.js";
 import { finalizeAgentRun } from "./agent-finalization-flow.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
 import { AGENT_RUN_STATUSES } from "./agent-runs.js";
+import { isAgentRunInterrupt } from "./agent-interrupts.js";
+import { buildCapabilityApprovalClarification } from "./capabilities/index.js";
 
 const getSkillDescriptor = (skill = {}) => ({
   skillId: skill.id,
@@ -298,6 +300,34 @@ export const runAgentRag = async ({
 
     return response;
   } catch (error) {
+    if (isAgentRunInterrupt(error)) {
+      const clarification = buildCapabilityApprovalClarification(error);
+
+      await agentRunService?.appendRunEvent?.({
+        accessScope,
+        runId: agentRunId,
+        type: "approval_gate_created",
+        payload: {
+          approvalGate: clarification.detail?.approvalGate ?? null,
+          interruptType: error.type,
+        },
+      });
+
+      const response = attachAgentRunId(
+        await returnClarification(clarification),
+        agentRunId
+      );
+
+      await completeRecordedRun({
+        accessScope,
+        agentRunService,
+        response,
+        runId: agentRunId,
+      });
+
+      return response;
+    }
+
     await agentRunService?.failRun?.({
       accessScope,
       error,

@@ -399,6 +399,76 @@ describe("RenderQA", () => {
     ).toBeInTheDocument();
   });
 
+  test("renders pending capability approval gates without private raw input", () => {
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "Search the web for the current launch date.",
+            answer: {
+              agentAnswer: "Approve Web Search?",
+              agentMode: "clarification",
+              agentTrace: [
+                {
+                  id: "approval:web.search:1.0.0",
+                  type: "capability_approval_gate",
+                  label: "Capability Approval",
+                  status: "needs_input",
+                  summary: "Web Search requires approval before execution.",
+                  detail: {
+                    approvalGates: [
+                      {
+                        id: "approval:web.search:1.0.0",
+                        capabilityId: "web.search",
+                        capabilityLabel: "Web Search",
+                        status: "pending",
+                        reason:
+                          "User confirmation is required before this capability can execute.",
+                        inputPreview: {
+                          question: "Search the web for the current launch date.",
+                        },
+                        riskFlags: ["external_call"],
+                      },
+                    ],
+                  },
+                },
+              ],
+              approvalGates: [
+                {
+                  id: "approval:web.search:1.0.0",
+                  capabilityId: "web.search",
+                  capabilityLabel: "Web Search",
+                  status: "pending",
+                  reason:
+                    "User confirmation is required before this capability can execute.",
+                  inputPreview: {
+                    question: "Search the web for the current launch date.",
+                  },
+                  riskFlags: ["external_call"],
+                },
+              ],
+              clarification: {
+                needed: true,
+                reason: "capability_approval_required",
+              },
+              ragAnswer: "Approve Web Search?",
+              ragSources: [],
+              mcpAnswer: "Web search not used: clarification needed.",
+            },
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getByText("Pending approval")).toBeInTheDocument();
+    expect(screen.getByText("Web Search")).toBeInTheDocument();
+    expect(screen.getByText("question")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Search the web for the current launch date.").length
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("External Call")).toBeInTheDocument();
+  });
+
   test("submits answer feedback with type and optional note", () => {
     const handleFeedback = jest.fn();
 

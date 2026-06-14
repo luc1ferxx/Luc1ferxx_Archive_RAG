@@ -1,3 +1,5 @@
+import { enforceCapabilityPolicy } from "./policy-enforcer.js";
+
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const normalizeRecord = (value, fallback = {}) =>
@@ -91,13 +93,19 @@ export const describeCapability = (capability = {}) => ({
 
 export const executeCapability = async (
   capability,
-  { accessScope = {}, input = {}, services = {} } = {}
+  { accessScope = {}, approval = {}, input = {}, services = {} } = {}
 ) => {
   validateCapabilityContract(capability);
+  const policyResult = enforceCapabilityPolicy(capability, {
+    accessScope,
+    approval,
+    input,
+  });
 
   return capability.execute({
     accessScope,
-    input,
+    input: policyResult.sanitizedInput,
+    policy: policyResult,
     services,
   });
 };

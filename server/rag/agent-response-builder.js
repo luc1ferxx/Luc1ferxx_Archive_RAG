@@ -47,6 +47,7 @@ export const buildClarificationResponse = ({
     ragGapPlan: null,
     ragEvidenceSummary: null,
     mcpAnswer: "Web search not used: clarification needed.",
+    approvalGates: clarification.detail?.approvalGates ?? [],
     clarification: {
       needed: true,
       reason: clarification.reason,
