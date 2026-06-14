@@ -61,6 +61,19 @@ export const useChatSession = () => {
     [conversation.length]
   );
 
+  const updateConversationTurn = useCallback((turnIndex, updater) => {
+    setConversation((prev) =>
+      prev.map((turn, index) => {
+        if (index !== turnIndex) {
+          return turn;
+        }
+
+        return typeof updater === "function" ? updater(turn) : updater;
+      })
+    );
+    setActiveTurnIndex(turnIndex);
+  }, []);
+
   const currentTurn = useMemo(
     () =>
       activeTurnIndex !== null && conversation[activeTurnIndex]
@@ -80,6 +93,7 @@ export const useChatSession = () => {
     sessionId,
     setActiveTurnIndex,
     setIsLoading,
+    updateConversationTurn,
     userId,
   };
 };

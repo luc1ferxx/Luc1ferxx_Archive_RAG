@@ -60,7 +60,25 @@ const getApprovalGates = (answer = {}) => {
   return detailGate ? [detailGate] : [];
 };
 
-const ApprovalGatePanel = ({ gates }) => {
+const getAgentRunSteps = (answer = {}) => {
+  if (Array.isArray(answer.agentRunSteps) && answer.agentRunSteps.length > 0) {
+    return answer.agentRunSteps;
+  }
+
+  return Array.isArray(answer.agentTrace)
+    ? answer.agentTrace.map((step) => ({
+        ...step,
+        kind: step.type,
+      }))
+    : [];
+};
+
+const formatStepKind = (kind) =>
+  String(kind ?? "step")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
   if (!Array.isArray(gates) || gates.length === 0) {
     return null;
   }
@@ -103,6 +121,38 @@ const ApprovalGatePanel = ({ gates }) => {
                 ))}
               </div>
             ) : null}
+            {onApprovalAction && gate.status === "pending" ? (
+              <div className="archive-approval-actions">
+                <button
+                  type="button"
+                  className="archive-approval-button is-primary"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onApprovalAction({
+                      action: "approve",
+                      gate,
+                      turnIndex,
+                    });
+                  }}
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  className="archive-approval-button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onApprovalAction({
+                      action: "deny",
+                      gate,
+                      turnIndex,
+                    });
+                  }}
+                >
+                  Deny
+                </button>
+              </div>
+            ) : null}
           </div>
         );
       })}
@@ -110,8 +160,8 @@ const ApprovalGatePanel = ({ gates }) => {
   );
 };
 
-const AgentRunRail = ({ trace }) => {
-  const visibleSteps = trace.slice(0, 5);
+const AgentRunRail = ({ steps }) => {
+  const visibleSteps = steps.slice(0, 5);
 
   if (visibleSteps.length === 0) {
     return null;
@@ -132,6 +182,45 @@ const AgentRunRail = ({ trace }) => {
           </div>
         );
       })}
+    </div>
+  );
+};
+
+const AgentRunTimeline = ({ steps }) => {
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="archive-run-timeline" aria-label="Agent run timeline">
+      <div className="archive-source-section-label">Run timeline</div>
+      <div className="archive-run-timeline-list">
+        {steps.map((step, stepIndex) => {
+          const stepStatus = step.status ?? "completed";
+
+          return (
+            <div
+              key={step.id ?? `${step.label}-${stepIndex}`}
+              className={`archive-run-timeline-item is-${stepStatus}`}
+            >
+              <span className="archive-run-timeline-dot" />
+              <div className="archive-run-timeline-body">
+                <div className="archive-run-timeline-head">
+                  <strong>{step.label ?? step.type ?? "Step"}</strong>
+                  <span>{formatTraceStatus(stepStatus)}</span>
+                </div>
+                <div className="archive-run-timeline-meta">
+                  <span>{formatStepKind(step.kind ?? step.type)}</span>
+                  {step.attempt > 1 ? <span>Attempt {step.attempt}</span> : null}
+                </div>
+                {step.summary ? (
+                  <div className="archive-run-timeline-copy">{step.summary}</div>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 };
@@ -297,6 +386,7 @@ const RenderQA = (props) => {
     selectedSource,
     onSelectSource,
     onSelectTurn,
+    onApprovalAction,
     onFeedback,
   } = props;
   const [feedbackNotes, setFeedbackNotes] = useState({});
@@ -333,6 +423,7 @@ const RenderQA = (props) => {
       {conversation?.map((each, index) => {
         const gapPlan = each.answer?.ragGapPlan;
         const agentTrace = each.answer?.agentTrace ?? [];
+        const agentRunSteps = getAgentRunSteps(each.answer);
         const approvalGates = getApprovalGates(each.answer);
         const evidenceSummary = each.answer?.ragEvidenceSummary;
         const researchBrief = each.answer?.researchBrief;
@@ -373,13 +464,19 @@ const RenderQA = (props) => {
                     </span>
                   </div>
 
-                  <AgentRunRail trace={agentTrace} />
+                  <AgentRunRail steps={agentRunSteps} />
 
                   <div className="archive-answer-text archive-agent-answer">
                     {each.answer.agentAnswer}
                   </div>
 
-                  <ApprovalGatePanel gates={approvalGates} />
+                  <ApprovalGatePanel
+                    gates={approvalGates}
+                    onApprovalAction={onApprovalAction}
+                    turnIndex={index}
+                  />
+
+                  <AgentRunTimeline steps={agentRunSteps} />
 
                   <AgentTraceOverview
                     answer={each.answer}

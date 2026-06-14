@@ -16,6 +16,7 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar";
 import {
   fetchLatestQualityReport,
   fetchQualityHistory,
+  requestAgentRunAction,
   requestAnswerFeedback,
   requestSyntheticQualityRun,
 } from "./archiveApi";
@@ -86,6 +87,7 @@ const App = () => {
     sessionId,
     setActiveTurnIndex,
     setIsLoading,
+    updateConversationTurn,
     userId,
   } = useChatSession();
   const {
@@ -409,6 +411,67 @@ const App = () => {
     [chatDocIds, sessionId, userId]
   );
 
+  const handleAgentApprovalAction = useCallback(
+    async ({ action, gate, turnIndex }) => {
+      const turn = conversation[turnIndex];
+      const runId = turn?.answer?.agentRunId;
+
+      if (!runId || !gate?.id) {
+        message.error("Unable to update approval: missing agent run metadata.");
+        return;
+      }
+
+      setIsLoading(true);
+
+      try {
+        const result = await requestAgentRunAction(runId, action, {
+          gateId: gate.id,
+        });
+
+        if (action === "approve" && result?.response) {
+          updateConversationTurn(turnIndex, {
+            question: turn.question,
+            answer: result.response,
+          });
+          setSelectedSource(result.response?.ragSources?.[0] ?? null);
+          message.success("Approval recorded. Agent run resumed.");
+          return;
+        }
+
+        const updatedGates = result?.run?.approvalGates ?? [];
+        const updatedSteps = result?.run?.steps ?? [];
+
+        updateConversationTurn(turnIndex, (currentTurn) => ({
+          ...currentTurn,
+          answer: {
+            ...currentTurn.answer,
+            agentAnswer: "Approval denied. The capability was not executed.",
+            agentRunStatus: result?.run?.status ?? currentTurn.answer?.agentRunStatus,
+            agentRunSteps: updatedSteps,
+            approvalGates: updatedGates,
+            clarification: {
+              ...(currentTurn.answer?.clarification ?? {}),
+              needed: false,
+            },
+          },
+        }));
+        message.info("Approval denied.");
+      } catch (error) {
+        const backendMessage =
+          error.response?.data?.error ?? "Unable to update approval.";
+        message.error(backendMessage);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [
+      conversation,
+      setIsLoading,
+      setSelectedSource,
+      updateConversationTurn,
+    ]
+  );
+
   const resetPageScroll = useCallback(() => {
     if (navigator.userAgent.toLowerCase().includes("jsdom")) {
       document.documentElement.scrollTop = 0;
@@ -724,6 +787,11 @@ const App = () => {
         selectedSource={visibleSelectedSource}
         onSelectSource={setSelectedSource}
         onSelectTurn={isDemoWorkbench ? undefined : selectTurn}
+        onApprovalAction={
+          isDemoWorkbench
+            ? undefined
+            : (payload) => void handleAgentApprovalAction(payload)
+        }
         onFeedback={(feedback) => void submitAnswerFeedback(feedback)}
       />
     );

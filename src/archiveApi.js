@@ -29,6 +29,24 @@ export const requestTaskAction = async (taskId, action, payload = {}) => {
   );
 };
 
+export const requestAgentRunAction = async (runId, action, payload = {}) => {
+  return apiPost(
+    `/agent-runs/${encodeURIComponent(runId)}/actions/${encodeURIComponent(
+      action
+    )}`,
+    payload
+  );
+};
+
+export const requestAgentRunStepRetry = async (runId, stepId) => {
+  return apiPost(
+    `/agent-runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(
+      stepId
+    )}/actions/retry`,
+    {}
+  );
+};
+
 export const fetchDocumentArxivSuggestions = async (docId, maxResults = 3) => {
   return apiGet(
     `/documents/${docId}/arxiv/suggestions?maxResults=${encodeURIComponent(

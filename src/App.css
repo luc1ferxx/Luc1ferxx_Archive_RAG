@@ -774,6 +774,111 @@
   opacity: 0.68;
 }
 
+.archive-run-stage.is-paused,
+.archive-run-stage.is-pending,
+.archive-run-stage.is-running {
+  border-color: rgba(183, 121, 31, 0.28);
+  background: #fff8eb;
+}
+
+.archive-run-timeline {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.archive-run-timeline-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.archive-run-timeline-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: var(--archive-radius-md);
+  background: #f8fafc;
+}
+
+.archive-run-timeline-item.is-paused,
+.archive-run-timeline-item.is-pending,
+.archive-run-timeline-item.is-running {
+  border-color: rgba(183, 121, 31, 0.24);
+  background: #fffaf0;
+}
+
+.archive-run-timeline-item.is-failed {
+  border-color: rgba(208, 82, 63, 0.28);
+  background: #fff4f2;
+}
+
+.archive-run-timeline-item.is-skipped {
+  opacity: 0.72;
+}
+
+.archive-run-timeline-dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border: 2px solid #0f9f7a;
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.archive-run-timeline-item.is-paused .archive-run-timeline-dot,
+.archive-run-timeline-item.is-pending .archive-run-timeline-dot,
+.archive-run-timeline-item.is-running .archive-run-timeline-dot {
+  border-color: var(--archive-warning);
+}
+
+.archive-run-timeline-item.is-failed .archive-run-timeline-dot {
+  border-color: var(--archive-danger);
+}
+
+.archive-run-timeline-body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.archive-run-timeline-head,
+.archive-run-timeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.archive-run-timeline-head strong {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.76rem;
+  font-weight: 780;
+  overflow-wrap: anywhere;
+}
+
+.archive-run-timeline-head span,
+.archive-run-timeline-meta span {
+  color: var(--archive-text-muted);
+  font-size: 0.64rem;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.archive-run-timeline-copy {
+  color: var(--archive-text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .archive-agent-inspector {
   padding-top: 12px;
   border-top: 1px solid var(--archive-border-subtle);
@@ -1030,6 +1135,37 @@
   flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
+}
+
+.archive-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.archive-approval-button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--archive-border-mid);
+  border-radius: var(--archive-radius-sm);
+  background: #ffffff;
+  color: var(--archive-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 760;
+}
+
+.archive-approval-button:hover {
+  border-color: rgba(39, 110, 241, 0.3);
+  color: #174ea6;
+}
+
+.archive-approval-button.is-primary {
+  border-color: rgba(15, 159, 122, 0.34);
+  background: #eefaf6;
+  color: #08745a;
 }
 
 .archive-research-meta {

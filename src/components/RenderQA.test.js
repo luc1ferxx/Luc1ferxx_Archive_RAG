@@ -399,7 +399,61 @@ describe("RenderQA", () => {
     ).toBeInTheDocument();
   });
 
+  test("renders persisted agent run steps in the timeline", () => {
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "Search the web for the current launch date.",
+            answer: {
+              agentAnswer: "Approved web answer.",
+              agentMode: "web",
+              agentRunSteps: [
+                {
+                  id: "1-plan",
+                  type: "plan",
+                  kind: "plan",
+                  label: "Plan",
+                  status: "completed",
+                  summary: "Planned a web search.",
+                },
+                {
+                  id: "2-approval",
+                  type: "capability_approval_gate",
+                  kind: "approval_gate",
+                  label: "Capability Approval",
+                  status: "completed",
+                  summary: "Web Search was approved.",
+                },
+                {
+                  id: "capability:web.search:approval:web.search:1.0.0",
+                  type: "capability_call",
+                  kind: "capability_call",
+                  label: "Web Search",
+                  status: "completed",
+                  summary: "Capability call completed.",
+                  attempt: 2,
+                },
+              ],
+              ragAnswer: "Approved web answer.",
+              ragSources: [],
+              mcpAnswer: "Approved web answer.",
+            },
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getByText("Run timeline")).toBeInTheDocument();
+    expect(screen.getByText("Approval Gate")).toBeInTheDocument();
+    expect(screen.getByText("Capability Call")).toBeInTheDocument();
+    expect(screen.getByText("Attempt 2")).toBeInTheDocument();
+    expect(screen.getByText("Capability call completed.")).toBeInTheDocument();
+  });
+
   test("renders pending capability approval gates without private raw input", () => {
+    const handleApprovalAction = jest.fn();
+
     render(
       <RenderQA
         conversation={[
@@ -457,6 +511,7 @@ describe("RenderQA", () => {
             },
           },
         ]}
+        onApprovalAction={handleApprovalAction}
       />
     );
 
@@ -467,6 +522,17 @@ describe("RenderQA", () => {
       screen.getAllByText("Search the web for the current launch date.").length
     ).toBeGreaterThan(0);
     expect(screen.getByText("External Call")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(handleApprovalAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "approve",
+        gate: expect.objectContaining({
+          id: "approval:web.search:1.0.0",
+        }),
+        turnIndex: 0,
+      })
+    );
   });
 
   test("submits answer feedback with type and optional note", () => {
