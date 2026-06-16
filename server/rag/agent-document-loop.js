@@ -54,20 +54,27 @@ export const runDocumentRagLoop = async ({
 
   let documentEvidenceClarification = null;
   let ragResult = null;
+  const primaryInput = {
+    docIds,
+    question,
+    retrievalPlan,
+    sessionId,
+    userId,
+  };
   const primaryBudget = consumeBudget(budgetState, documentRagSkill.budgetKey);
   const primaryRagResult = primaryBudget.ok
-    ? await executeObservedSkill(documentRagSkill, {
-        ragService,
-        docIds,
-        question,
-        sessionId,
-        userId,
-        accessScope,
-        retrievalPlan,
-      }, {
-        phase: "primary",
-        budget: primaryBudget,
-      })
+    ? await executeObservedSkill(
+        documentRagSkill,
+        {
+          ...primaryInput,
+          accessScope,
+          ragService,
+        },
+        {
+          phase: "primary",
+          budget: primaryBudget,
+        }
+      )
     : buildFailedSkillResult(documentRagSkill, new Error(primaryBudget.reason));
 
   ragResult = primaryRagResult;
@@ -101,6 +108,7 @@ export const runDocumentRagLoop = async ({
             primaryRagResult.error,
             "Unable to answer from the document."
           )}`,
+      input: primaryInput,
       detail: buildSkillTraceDetail(
         primaryRagResult,
         primaryRagResult.traceDetail ?? {}
@@ -197,18 +205,25 @@ export const runDocumentRagLoop = async ({
         reason: followUpBudget.reason,
       });
     } else {
-      const followUpRagResult = await executeObservedSkill(documentRagSkill, {
-        ragService,
+      const followUpInput = {
         docIds,
         question: followUpQuestion,
+        retrievalPlan: followUpRetrievalPlan,
         sessionId,
         userId,
-        accessScope,
-        retrievalPlan: followUpRetrievalPlan,
-      }, {
-        phase: "follow_up",
-        budget: followUpBudget,
-      });
+      };
+      const followUpRagResult = await executeObservedSkill(
+        documentRagSkill,
+        {
+          ...followUpInput,
+          accessScope,
+          ragService,
+        },
+        {
+          phase: "follow_up",
+          budget: followUpBudget,
+        }
+      );
       executionLoop.followUpsRun += 1;
       executionLoop.stoppedReason = "follow_up_completed";
       recordSkillResult(followUpRagResult);
@@ -227,6 +242,7 @@ export const runDocumentRagLoop = async ({
               followUpRagResult.error,
             "Unable to run follow-up document evidence lookup."
           )}`,
+        input: followUpInput,
         detail: buildSkillTraceDetail(followUpRagResult, {
           followUpQuestion,
           retrievalPlan: followUpRetrievalPlan,

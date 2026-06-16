@@ -41,6 +41,7 @@ import { createJobOrchestrator } from "./rag/job-orchestrator.js";
 import { createDefaultAgentRunStore } from "./rag/agent-run-store.js";
 import { createAgentRunService } from "./rag/agent-runs.js";
 import { createAgentRunStepExecutor } from "./rag/agent-run-step-executor.js";
+import { createDocumentRagStepExecutor } from "./rag/agent-run-step-handlers.js";
 import { createRecommendationTaskService } from "./rag/recommendation-tasks.js";
 import { createDefaultTaskStore } from "./rag/task-store.js";
 import { createTaskService } from "./rag/tasks.js";
@@ -318,6 +319,9 @@ export const createApp = async (options = {}) => {
     createAgentRunStepExecutor({
       agentRunService,
       capabilityRegistry,
+      executeDocumentRagStep: createDocumentRagStepExecutor({
+        ragService,
+      }),
     });
   const uploadStore = options.uploadStore ?? {
     clearUploadSession,

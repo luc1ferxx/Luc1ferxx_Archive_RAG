@@ -287,6 +287,12 @@ export const buildAgentRunStepsFromTrace = ({
     const approvalGate = getApprovalGateFromTraceStep(traceStep);
     const existingStep = existingById.get(traceStep.id);
     const status = normalizeAgentRunStepStatus(traceStep.status ?? "completed");
+    const detail = normalizeRecord(traceStep.detail, null);
+    const input =
+      normalizeRecord(traceStep.input, null) ??
+      normalizeRecord(detail?.input, null) ??
+      existingStep?.input ??
+      null;
     const timestamps = getStepTimestamps({
       existingStep,
       status,
@@ -303,9 +309,10 @@ export const buildAgentRunStepsFromTrace = ({
         label: traceStep.label,
         summary: traceStep.summary,
         detail: {
-          ...(normalizeRecord(traceStep.detail, null) ?? {}),
+          ...(detail ?? {}),
           traceStatus: traceStep.status ?? "completed",
         },
+        input,
         traceStepId: traceStep.id,
         approvalGateId: approvalGate?.id,
         capabilityId: approvalGate?.capabilityId,

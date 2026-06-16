@@ -8,6 +8,7 @@ import {
 } from "../rag/agent-runs.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
+  createDocumentRagStepExecutor,
   createDefaultAgentRunStepHandlerRegistry,
 } from "../rag/agent-run-step-handlers.js";
 import { CAPABILITY_IDS } from "../rag/capabilities/index.js";
@@ -65,12 +66,14 @@ const createPendingApprovalRun = async (agentRunService) => {
 
 const createCompletedRunWithSteps = async (agentRunService, {
   goal = "Retry a persisted agent step.",
+  input = {},
   runId,
   steps,
 } = {}) => {
   await agentRunService.createRun({
     accessScope,
     goal,
+    input,
     runId,
     status: AGENT_RUN_STATUSES.running,
   });
@@ -368,6 +371,175 @@ test("agent run step executor retries arxiv_import through the capability handle
   assert.equal(calls[0].payload.approval.source, "agent_run_step_retry");
   assert.equal(retried.response.agentMode, "arxiv_import");
   assert.match(retried.response.agentAnswer, /Imported topic/);
+});
+
+test("agent run step executor retries document_rag through the wired document handler", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeDocumentRagStep: createDocumentRagStepExecutor({
+      ragService: {
+        chat: async (docIds, question, options) => {
+          calls.push({
+            docIds,
+            options,
+            question,
+          });
+
+          return {
+            text: `Retried document answer: ${question} [Source 1]`,
+            citations: [
+              {
+                docId: "doc-1",
+                pageNumber: 2,
+                rank: 1,
+              },
+            ],
+            abstained: false,
+            evidenceSummary: {
+              supportedClaimCount: 1,
+            },
+            memoryApplied: false,
+            resolvedQuery: question,
+          };
+        },
+      },
+    }),
+  });
+  const retrievalPlan = {
+    retrievalQueries: [
+      {
+        id: "primary",
+        query: "annual leave",
+      },
+    ],
+    retrievalOptions: {
+      topK: 2,
+    },
+  };
+
+  await createCompletedRunWithSteps(agentRunService, {
+    goal: "What is annual leave?",
+    input: {
+      docIds: ["doc-1"],
+      sessionId: "session-1",
+      userId: "alice",
+    },
+    runId: "run-document-retry",
+    steps: [
+      {
+        id: "document-step",
+        type: "document_rag",
+        kind: "tool_call",
+        label: "Document RAG",
+        status: "completed",
+        detail: {
+          skillVersion: "1.0.0",
+        },
+        input: {
+          docIds: ["doc-1"],
+          question: "What is annual leave?",
+          retrievalPlan,
+          sessionId: "session-1",
+          userId: "alice",
+        },
+      },
+    ],
+  });
+
+  const retried = await executor.retryStep({
+    accessScope,
+    runId: "run-document-retry",
+    stepId: "document-step",
+  });
+  const retryStep = retried.run.steps.find(
+    (step) => step.retryOfStepId === "document-step"
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].docIds, ["doc-1"]);
+  assert.equal(calls[0].question, "What is annual leave?");
+  assert.deepEqual(calls[0].options.accessScope, accessScope);
+  assert.deepEqual(calls[0].options.retrievalPlan, retrievalPlan);
+  assert.equal(retried.response.agentMode, "document");
+  assert.match(retried.response.agentAnswer, /Retried document answer/);
+  assert.equal(retried.response.ragSources.length, 1);
+  assert.equal(retried.response.ragEvidenceSummary.supportedClaimCount, 1);
+  assert.equal(retried.run.status, AGENT_RUN_STATUSES.completed);
+  assert.equal(retryStep.status, "completed");
+  assert.equal(retryStep.attempt, 2);
+  assert.equal(retryStep.input.question, "What is annual leave?");
+  assert.equal(retryStep.output.citationCount, 1);
+  assert.deepEqual(
+    retried.run.events.map((event) => event.type),
+    [
+      "run_created",
+      "run_completed",
+      "step_retry_queued",
+      "step_started",
+      "step_completed",
+      "run_completed",
+    ]
+  );
+});
+
+test("agent run step executor validates document_rag retry input before queueing", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeDocumentRagStep: createDocumentRagStepExecutor({
+      ragService: {
+        chat: async () => {
+          throw new Error("Invalid document retry should not run.");
+        },
+      },
+    }),
+  });
+
+  await createCompletedRunWithSteps(agentRunService, {
+    goal: "What did the document say?",
+    runId: "run-document-retry-missing-input",
+    steps: [
+      {
+        id: "document-step",
+        type: "document_rag",
+        kind: "tool_call",
+        label: "Document RAG",
+        status: "completed",
+      },
+    ],
+  });
+
+  await assert.rejects(
+    () =>
+      executor.retryStep({
+        accessScope,
+        runId: "run-document-retry-missing-input",
+        stepId: "document-step",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /requires at least one document id/i);
+      return true;
+    }
+  );
+
+  const runAfterRejectedRetry = await agentRunService.getRun({
+    accessScope,
+    runId: "run-document-retry-missing-input",
+  });
+
+  assert.equal(
+    runAfterRejectedRetry.steps.some(
+      (step) => step.retryOfStepId === "document-step"
+    ),
+    false
+  );
 });
 
 test("agent run step executor returns stable 409 for document_rag until wired", async () => {

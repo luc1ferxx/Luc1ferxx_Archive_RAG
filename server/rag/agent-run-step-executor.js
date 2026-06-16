@@ -42,7 +42,10 @@ const fail = (message, status = 409) => {
 export const createAgentRunStepExecutor = ({
   agentRunService,
   capabilityRegistry,
-  stepHandlerRegistry = createDefaultAgentRunStepHandlerRegistry(),
+  executeDocumentRagStep,
+  stepHandlerRegistry = createDefaultAgentRunStepHandlerRegistry({
+    executeDocumentRagStep,
+  }),
 } = {}) => {
   const resolveStepHandler = ({ gate, run, step } = {}) => {
     const handler = stepHandlerRegistry.resolve?.({

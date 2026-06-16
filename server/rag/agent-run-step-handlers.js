@@ -14,6 +14,9 @@ const normalizeRecord = (value, fallback = {}) =>
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
+const normalizeTextList = (value) =>
+  toArray(value).map(normalizeText).filter(Boolean);
+
 const serializeError = (error, fallbackMessage) => {
   if (error instanceof Error) {
     return error.message;
@@ -31,6 +34,21 @@ const fail = (message, status = 409) => {
 const toTraceStatus = (status) => (status === "paused" ? "needs_input" : status);
 
 const getStepType = (step = {}) => normalizeText(step.type).toLowerCase();
+
+const buildAgentTraceFromRunSteps = (steps = []) =>
+  toArray(steps).map((runStep) => ({
+    id: runStep.traceStepId || runStep.id,
+    type: runStep.type,
+    label: runStep.label,
+    status: toTraceStatus(runStep.status),
+    summary: runStep.summary,
+    detail: {
+      ...(runStep.detail ?? {}),
+      attempt: runStep.attempt,
+      kind: runStep.kind,
+      retryOfStepId: runStep.retryOfStepId || null,
+    },
+  }));
 
 const getCapabilityAgentMode = (capabilityId, fallback = "capability") => {
   if (capabilityId === CAPABILITY_IDS.webSearch) {
@@ -76,19 +94,7 @@ export const buildCapabilityResumeResponse = ({
   const citations = getCapabilityResultCitations(capabilityResult);
   const agentMode = getCapabilityAgentMode(effectiveCapabilityId);
   const steps = run?.steps ?? [];
-  const agentTrace = steps.map((runStep) => ({
-    id: runStep.traceStepId || runStep.id,
-    type: runStep.type,
-    label: runStep.label,
-    status: toTraceStatus(runStep.status),
-    summary: runStep.summary,
-    detail: {
-      ...(runStep.detail ?? {}),
-      attempt: runStep.attempt,
-      kind: runStep.kind,
-      retryOfStepId: runStep.retryOfStepId || null,
-    },
-  }));
+  const agentTrace = buildAgentTraceFromRunSteps(steps);
 
   return {
     agentAnswer: answer,
@@ -172,6 +178,273 @@ const getArxivImportInput = ({ step = {} } = {}) => {
         topic,
       }
     : null;
+};
+
+const getDocumentRagInput = ({ run = {}, step = {} } = {}) => {
+  const stepInput = normalizeRecord(getStepInput(step), {});
+  const detail = normalizeRecord(step.detail, {});
+  const runInput = normalizeRecord(run.input, {});
+  const stepDocIds = normalizeTextList(stepInput.docIds);
+  const runDocIds = normalizeTextList(runInput.docIds);
+  const question =
+    normalizeText(stepInput.question) ||
+    normalizeText(detail.question) ||
+    normalizeText(run.goal);
+  const retrievalPlan =
+    normalizeRecord(stepInput.retrievalPlan, null) ??
+    normalizeRecord(detail.retrievalPlan, null) ??
+    null;
+  const sessionId =
+    normalizeText(stepInput.sessionId) || normalizeText(runInput.sessionId);
+  const userId =
+    normalizeText(stepInput.userId) || normalizeText(runInput.userId);
+
+  return {
+    docIds: stepDocIds.length > 0 ? stepDocIds : runDocIds,
+    question,
+    retrievalPlan,
+    sessionId: sessionId || null,
+    userId: userId || null,
+  };
+};
+
+const assertValidDocumentRagInput = (input = {}) => {
+  if (!input.question) {
+    fail("document_rag retry requires a question input.");
+  }
+
+  if (!toArray(input.docIds).length) {
+    fail("document_rag retry requires at least one document id.");
+  }
+};
+
+const getDocumentRagSkillVersion = (step = {}) =>
+  normalizeText(step.detail?.skillVersion) || "unknown";
+
+export const getDocumentRagResultText = (result = {}) =>
+  normalizeText(result.text) || "Document RAG completed.";
+
+export const getDocumentRagResultCitations = (result = {}) =>
+  Array.isArray(result.citations) ? result.citations : [];
+
+export const buildDocumentRagResumeResponse = ({
+  documentResult = {},
+  input = {},
+  run,
+  step,
+} = {}) => {
+  const answer = getDocumentRagResultText(documentResult);
+  const citations = getDocumentRagResultCitations(documentResult);
+  const agentMode = "document";
+  const steps = run?.steps ?? [];
+  const skillVersion = getDocumentRagSkillVersion(step);
+  const skillObservation = {
+    skillId: "document_rag",
+    skillVersion,
+    label: "Document RAG",
+    selected: true,
+    status: AGENT_RUN_STEP_STATUSES.completed,
+    attempts: step?.attempt ?? 1,
+    skippedCount: 0,
+    retryCount: step?.retryOfStepId ? 1 : 0,
+    followUpCount: 0,
+    totalDurationMs: 0,
+    citationCount: citations.length,
+    lastCitationCount: citations.length,
+    abstained: Boolean(documentResult.abstained),
+    errorCount: 0,
+    errors: [],
+    budgetUsed: null,
+    budgetLimit: null,
+    budgetRemaining: null,
+    budgetDelta: {},
+  };
+
+  return {
+    agentAnswer: answer,
+    agentMode,
+    agentRunId: run?.runId ?? null,
+    agentRunStatus: run?.status ?? null,
+    agentRunSteps: steps,
+    agentSkills: [
+      {
+        skillId: "document_rag",
+        skillVersion,
+        label: "Document RAG",
+        status: AGENT_RUN_STEP_STATUSES.completed,
+      },
+    ],
+    agentTrace: buildAgentTraceFromRunSteps(steps),
+    agentObservability: {
+      agentMode,
+      approvalGates: run?.approvalGates ?? [],
+      runs: [
+        {
+          skillId: "document_rag",
+          skillVersion,
+          label: "Document RAG",
+          phase: step?.retryOfStepId ? "retry" : "primary",
+          status: AGENT_RUN_STEP_STATUSES.completed,
+          citationCount: citations.length,
+          abstained: Boolean(documentResult.abstained),
+          error: null,
+        },
+      ],
+      selectedSkills: [
+        {
+          skillId: "document_rag",
+          skillVersion,
+          label: "Document RAG",
+          budgetKey: "documentRagCalls",
+        },
+      ],
+      skills: [skillObservation],
+      steps,
+      workingMemory: {},
+    },
+    agentWorkingMemory: {},
+    approvalGates: run?.approvalGates ?? [],
+    clarification: {
+      needed: false,
+      reason: null,
+      question: null,
+      detail: null,
+    },
+    errors: {
+      mcp: null,
+      rag: null,
+    },
+    mcpAnswer: "Web search not used: document retry completed.",
+    ragAbstained: Boolean(documentResult.abstained),
+    ragAbstainReason: documentResult.abstainReason ?? null,
+    ragAnswer: answer,
+    ragEvidenceSummary: documentResult.evidenceSummary ?? null,
+    ragGapPlan: documentResult.gapPlan ?? null,
+    ragMemoryApplied: Boolean(documentResult.memoryApplied),
+    ragResolvedQuestion:
+      normalizeText(documentResult.resolvedQuery) ||
+      normalizeText(input.question) ||
+      normalizeText(run?.goal),
+    ragSources: citations,
+    researchBrief: null,
+  };
+};
+
+export const createDocumentRagStepExecutor = ({ ragService } = {}) => async ({
+  accessScope = {},
+  agentRunService,
+  run,
+  step,
+} = {}) => {
+  if (!ragService?.chat) {
+    fail("Document RAG service is not available.", 500);
+  }
+
+  if (!step?.id) {
+    fail("Agent run step is missing a resumable step id.");
+  }
+
+  const input = getDocumentRagInput({
+    run,
+    step,
+  });
+
+  assertValidDocumentRagInput(input);
+
+  await agentRunService.updateRunStep({
+    accessScope,
+    eventType: "step_started",
+    patch: {
+      input,
+    },
+    runId: run.runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: step.id,
+  });
+
+  let documentResult;
+
+  try {
+    documentResult = await ragService.chat(input.docIds, input.question, {
+      accessScope,
+      retrievalPlan: input.retrievalPlan,
+      sessionId: input.sessionId,
+      userId: input.userId,
+    });
+  } catch (error) {
+    await agentRunService.updateRunStep({
+      accessScope,
+      eventType: "step_failed",
+      patch: {
+        error: {
+          message: serializeError(error, "Document RAG execution failed."),
+          name: error.name ?? "Error",
+        },
+        input,
+      },
+      runId: run.runId,
+      status: AGENT_RUN_STEP_STATUSES.failed,
+      stepId: step.id,
+    });
+    throw error;
+  }
+
+  const citations = getDocumentRagResultCitations(documentResult);
+  const runAfterStep = await agentRunService.updateRunStep({
+    accessScope,
+    eventType: "step_completed",
+    patch: {
+      input,
+      output: {
+        abstained: Boolean(documentResult.abstained),
+        citationCount: citations.length,
+        text: getDocumentRagResultText(documentResult),
+      },
+    },
+    runId: run.runId,
+    status: AGENT_RUN_STEP_STATUSES.completed,
+    stepId: step.id,
+  });
+  const responseBody = buildDocumentRagResumeResponse({
+    documentResult,
+    input,
+    run: runAfterStep,
+    step,
+  });
+  const completedRun = await agentRunService.completeRun({
+    accessScope,
+    approvalGates: runAfterStep.approvalGates ?? [],
+    decisions: runAfterStep.decisions ?? [],
+    observations: [
+      ...(runAfterStep.observations ?? []),
+      {
+        citationCount: citations.length,
+        skillId: "document_rag",
+        skillVersion: getDocumentRagSkillVersion(step),
+        status: AGENT_RUN_STEP_STATUSES.completed,
+        stepId: step.id,
+      },
+    ],
+    result: {
+      agentMode: responseBody.agentMode,
+      answer: responseBody.agentAnswer,
+      citationCount: citations.length,
+      ragAbstained: Boolean(responseBody.ragAbstained),
+      status: 200,
+    },
+    runId: run.runId,
+    status: AGENT_RUN_STATUSES.completed,
+    steps: runAfterStep.steps ?? [],
+  });
+
+  return {
+    response: {
+      ...responseBody,
+      agentRunStatus: completedRun.status,
+      agentRunSteps: completedRun.steps ?? [],
+    },
+    run: completedRun,
+  };
 };
 
 const executeCapabilityBackedStep = async ({
@@ -459,6 +732,13 @@ export const createDocumentRagStepHandler = ({
     if (retryCount >= 1) {
       fail("document_rag steps can only be retried once.");
     }
+
+    assertValidDocumentRagInput(
+      getDocumentRagInput({
+        run,
+        step,
+      })
+    );
 
     return {};
   },

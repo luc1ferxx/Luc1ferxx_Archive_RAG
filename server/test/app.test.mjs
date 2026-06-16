@@ -787,24 +787,39 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
       },
     ],
   ]);
+  const chatCalls = [];
   const app = await createApp({
     ragService: {
-      chat: async () => ({
-        text: "The archive says annual leave is 15 days. [Source 1]",
-        citations: [
-          {
-            rank: 1,
-            docId: "doc-1",
-            fileName: "notes.pdf",
-            pageNumber: 2,
-            chunkIndex: 0,
-            excerpt: "Annual leave is 15 days.",
+      chat: async (docIds, question, options = {}) => {
+        chatCalls.push({
+          docIds,
+          options,
+          question,
+        });
+
+        return {
+          text:
+            chatCalls.length === 1
+              ? "The archive says annual leave is 15 days. [Source 1]"
+              : "Retried archive says annual leave is 15 days. [Source 1]",
+          citations: [
+            {
+              rank: 1,
+              docId: "doc-1",
+              fileName: "notes.pdf",
+              pageNumber: 2,
+              chunkIndex: 0,
+              excerpt: "Annual leave is 15 days.",
+            },
+          ],
+          abstained: false,
+          evidenceSummary: {
+            supportedClaimCount: 1,
           },
-        ],
-        abstained: false,
-        resolvedQuery: "What is annual leave?",
-        memoryApplied: false,
-      }),
+          resolvedQuery: "What is annual leave?",
+          memoryApplied: false,
+        };
+      },
       clearDocuments: async () => [],
       clearSessionMemory: () => true,
       deleteDocument: async () => null,
@@ -866,10 +881,56 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
     assert.equal(agentRun.status, "completed");
     assert.equal(agentRun.goal, "What is annual leave?");
     assert.equal(agentRun.result.agentMode, "document");
+    const documentStep = agentRun.steps.find(
+      (step) => step.type === "document_rag"
+    );
+
+    assert.ok(documentStep);
+    assert.deepEqual(documentStep.input.docIds, ["doc-1"]);
+    assert.equal(documentStep.input.question, "What is annual leave?");
+    assert.equal(
+      documentStep.input.retrievalPlan.retrievalQueries.length > 0,
+      true
+    );
     assert.deepEqual(
       agentRun.events.map((event) => event.type),
       ["run_created", "run_prepared", "execution_planned", "run_completed"]
     );
+    assert.equal(chatCalls.length, 1);
+
+    const retryResponse = await fetch(
+      `${server.baseUrl}/agent-runs/${body.agentRunId}/steps/${encodeURIComponent(
+        documentStep.id
+      )}/actions/retry`,
+      {
+        method: "POST",
+      }
+    );
+
+    assert.equal(retryResponse.status, 200);
+
+    const retryBody = await retryResponse.json();
+    const retryStep = retryBody.run.steps.find(
+      (step) => step.retryOfStepId === documentStep.id
+    );
+
+    assert.equal(chatCalls.length, 2);
+    assert.deepEqual(chatCalls[1].docIds, ["doc-1"]);
+    assert.equal(chatCalls[1].question, "What is annual leave?");
+    assert.deepEqual(
+      chatCalls[1].options.retrievalPlan,
+      documentStep.input.retrievalPlan
+    );
+    assert.equal(retryBody.response.agentMode, "document");
+    assert.equal(
+      retryBody.response.agentAnswer,
+      "Retried archive says annual leave is 15 days. [Source 1]"
+    );
+    assert.equal(retryBody.response.ragSources.length, 1);
+    assert.equal(retryBody.response.agentRunStatus, "completed");
+    assert.equal(retryStep.status, "completed");
+    assert.equal(retryStep.input.question, "What is annual leave?");
+    assert.equal(retryStep.output.citationCount, 1);
 
     auditResponse = await fetch(`${server.baseUrl}/agent-runs?status=completed`);
 
