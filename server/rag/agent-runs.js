@@ -736,17 +736,29 @@ export const createAgentRunService = ({
   },
 
   async listRecoverableRuns({
+    includeAccessScope = false,
     statuses = [
       AGENT_RUN_STATUSES.running,
       AGENT_RUN_STATUSES.waitingForUser,
     ],
   } = {}) {
+    const stripRun = (run) => {
+      const publicRun = stripInternalRunFields(run);
+
+      return includeAccessScope
+        ? {
+            ...publicRun,
+            accessScope: run.accessScope,
+          }
+        : publicRun;
+    };
+
     return {
       runs: toArray(
         await agentRunStore.listRecoverable?.({
           statuses,
         })
-      ).map(stripInternalRunFields),
+      ).map(stripRun),
     };
   },
 });

@@ -39,6 +39,7 @@ import { createArxivService, normalizeArxivMaxResults } from "./rag/arxiv-client
 import { createArxivImportService } from "./rag/arxiv-importer.js";
 import { createJobOrchestrator } from "./rag/job-orchestrator.js";
 import { createDefaultAgentRunStore } from "./rag/agent-run-store.js";
+import { createAgentRunRecoveryService } from "./rag/agent-run-recovery.js";
 import { createAgentRunService } from "./rag/agent-runs.js";
 import { createAgentRunStepExecutor } from "./rag/agent-run-step-executor.js";
 import {
@@ -335,6 +336,11 @@ export const createApp = async (options = {}) => {
     createAgentRunService({
       agentRunStore,
     });
+  const agentRunRecoveryService =
+    options.agentRunRecoveryService ??
+    createAgentRunRecoveryService({
+      agentRunService,
+    });
   const recommendationTaskService =
     options.recommendationTaskService ??
     createRecommendationTaskService({
@@ -459,6 +465,7 @@ export const createApp = async (options = {}) => {
   await ragService.initializeSessionMemory?.();
   await taskService.initialize?.();
   await agentRunService.initialize?.();
+  await agentRunRecoveryService.recoverOnStartup?.();
   await jobOrchestrator.recoverRunnableTasks?.();
   await healthService.runStartupHealthChecks?.();
 
