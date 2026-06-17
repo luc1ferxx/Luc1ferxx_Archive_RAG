@@ -1045,13 +1045,228 @@
 .archive-research-panel,
 .archive-evidence-panel,
 .archive-gap-panel,
-.archive-approval-panel {
+.archive-approval-panel,
+.archive-run-control-panel {
   display: grid;
   gap: 9px;
   padding: 12px;
   border: 1px solid var(--archive-border-subtle);
   border-radius: var(--archive-radius-md);
   background: #f8fafc;
+}
+
+.archive-run-control-panel {
+  border-color: rgba(15, 159, 122, 0.18);
+  background: #f7fbfa;
+}
+
+.archive-run-control-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.archive-run-control-head > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.archive-run-control-head strong {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.84rem;
+  font-weight: 780;
+  overflow-wrap: anywhere;
+}
+
+.archive-run-control-button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--archive-border-mid);
+  border-radius: var(--archive-radius-sm);
+  background: #ffffff;
+  color: var(--archive-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.archive-run-control-button:hover:not(:disabled) {
+  border-color: rgba(39, 110, 241, 0.3);
+  color: #174ea6;
+}
+
+.archive-run-control-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.archive-run-control-button.is-primary {
+  border-color: rgba(15, 159, 122, 0.34);
+  background: #eefaf6;
+  color: #08745a;
+}
+
+.archive-run-control-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 7px;
+  min-width: 0;
+}
+
+.archive-run-control-metrics > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid rgba(15, 159, 122, 0.12);
+  border-radius: var(--archive-radius-sm);
+  background: #ffffff;
+}
+
+.archive-run-control-metrics span,
+.archive-run-control-detail span {
+  color: var(--archive-text-muted);
+  font-size: 0.64rem;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.archive-run-control-metrics strong {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.82rem;
+  font-weight: 780;
+  overflow-wrap: anywhere;
+}
+
+.archive-run-retry-panel,
+.archive-run-control-steps {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.archive-run-retry-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(208, 82, 63, 0.22);
+  border-radius: var(--archive-radius-md);
+  background: #fff7f5;
+}
+
+.archive-run-retry-item > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.archive-run-retry-item strong {
+  color: var(--archive-text-primary);
+  font-size: 0.78rem;
+  font-weight: 780;
+}
+
+.archive-run-retry-item span {
+  color: var(--archive-text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.archive-run-control-step {
+  min-width: 0;
+  border: 1px solid var(--archive-border-subtle);
+  border-radius: var(--archive-radius-md);
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.archive-run-control-step summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.archive-run-control-step summary::-webkit-details-marker {
+  display: none;
+}
+
+.archive-run-control-step summary span {
+  color: var(--archive-text-muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.archive-run-control-step summary strong {
+  min-width: 0;
+  color: var(--archive-text-primary);
+  font-size: 0.76rem;
+  font-weight: 780;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-run-control-step summary em {
+  color: var(--archive-text-muted);
+  font-size: 0.64rem;
+  font-style: normal;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.archive-run-control-step-body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 10px 10px;
+}
+
+.archive-run-control-detail {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.archive-run-control-detail pre,
+.archive-run-control-empty {
+  max-height: 220px;
+  margin: 0;
+  padding: 9px;
+  border-radius: var(--archive-radius-sm);
+  background: #f8fafc;
+  color: var(--archive-text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.archive-run-control-detail.is-error pre {
+  background: #fff4f2;
+  color: #9f2f1f;
+}
+
+.archive-run-control-empty {
+  margin: 0 10px 10px;
 }
 
 .archive-approval-panel {

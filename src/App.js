@@ -17,6 +17,7 @@ import {
   fetchLatestQualityReport,
   fetchQualityHistory,
   requestAgentRunAction,
+  requestAgentRunStepRetry,
   requestAnswerFeedback,
   requestSyntheticQualityRun,
 } from "./archiveApi";
@@ -472,6 +473,56 @@ const App = () => {
     ]
   );
 
+  const handleAgentStepRetry = useCallback(
+    async ({ step, turnIndex }) => {
+      const turn = conversation[turnIndex];
+      const runId = turn?.answer?.agentRunId;
+
+      if (!runId || !step?.id) {
+        message.error("Unable to retry step: missing agent run metadata.");
+        return;
+      }
+
+      setIsLoading(true);
+
+      try {
+        const result = await requestAgentRunStepRetry(runId, step.id);
+        const nextAnswer = result?.response
+          ? {
+              ...result.response,
+              agentRunSteps:
+                result?.run?.steps ?? result.response.agentRunSteps ?? [],
+              agentRunStatus:
+                result?.run?.status ?? result.response.agentRunStatus,
+            }
+          : {
+              ...(turn.answer ?? {}),
+              agentRunStatus: result?.run?.status ?? turn.answer?.agentRunStatus,
+              agentRunSteps: result?.run?.steps ?? turn.answer?.agentRunSteps,
+            };
+
+        updateConversationTurn(turnIndex, {
+          question: turn.question,
+          answer: nextAnswer,
+        });
+        setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+        message.success("Step retry completed.");
+      } catch (error) {
+        const backendMessage =
+          error.response?.data?.error ?? "Unable to retry this agent step.";
+        message.error(backendMessage);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [
+      conversation,
+      setIsLoading,
+      setSelectedSource,
+      updateConversationTurn,
+    ]
+  );
+
   const resetPageScroll = useCallback(() => {
     if (navigator.userAgent.toLowerCase().includes("jsdom")) {
       document.documentElement.scrollTop = 0;
@@ -530,6 +581,16 @@ const App = () => {
       resetPageScroll();
     },
     [resetPageScroll]
+  );
+
+  const handleAgentRunContinue = useCallback(
+    ({ turnIndex }) => {
+      selectTurn(turnIndex);
+      setActiveConversationView("chat");
+      resetPageScroll();
+      message.info("Agent run selected.");
+    },
+    [resetPageScroll, selectTurn]
   );
 
   const handleComposerAttach = useCallback(() => {
@@ -792,7 +853,17 @@ const App = () => {
             ? undefined
             : (payload) => void handleAgentApprovalAction(payload)
         }
+        onContinueRun={
+          isDemoWorkbench
+            ? undefined
+            : (payload) => handleAgentRunContinue(payload)
+        }
         onFeedback={(feedback) => void submitAnswerFeedback(feedback)}
+        onStepRetry={
+          isDemoWorkbench
+            ? undefined
+            : (payload) => void handleAgentStepRetry(payload)
+        }
       />
     );
   };

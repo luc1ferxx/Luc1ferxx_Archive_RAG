@@ -78,6 +78,38 @@ const formatStepKind = (kind) =>
     .replace(/_/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 
+const formatShortId = (value) => {
+  const text = String(value ?? "").trim();
+
+  if (!text) {
+    return "none";
+  }
+
+  return text.length > 12 ? `${text.slice(0, 6)}...${text.slice(-4)}` : text;
+};
+
+const stringifyDetailValue = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+const getStepStatus = (step = {}) => step.status ?? "completed";
+
+const isFailedStep = (step = {}) => getStepStatus(step) === "failed";
+
+const isPendingGate = (gate = {}) => (gate.status ?? "pending") === "pending";
+
 const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
   if (!Array.isArray(gates) || gates.length === 0) {
     return null;
@@ -156,6 +188,173 @@ const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
           </div>
         );
       })}
+    </div>
+  );
+};
+
+const AgentRunStepDetails = ({ step, stepIndex }) => {
+  const inputText = stringifyDetailValue(step.input);
+  const outputText = stringifyDetailValue(step.output);
+  const errorText = stringifyDetailValue(step.error);
+  const detailText = stringifyDetailValue(step.detail);
+  const hasDetails = inputText || outputText || errorText || detailText;
+
+  return (
+    <details className="archive-run-control-step">
+      <summary>
+        <span>{String(stepIndex + 1).padStart(2, "0")}</span>
+        <strong>{step.label ?? step.type ?? "Step"}</strong>
+        <em>{formatTraceStatus(getStepStatus(step))}</em>
+      </summary>
+      {hasDetails ? (
+        <div className="archive-run-control-step-body">
+          {inputText ? (
+            <div className="archive-run-control-detail">
+              <span>Input</span>
+              <pre>{inputText}</pre>
+            </div>
+          ) : null}
+          {outputText ? (
+            <div className="archive-run-control-detail">
+              <span>Output</span>
+              <pre>{outputText}</pre>
+            </div>
+          ) : null}
+          {errorText ? (
+            <div className="archive-run-control-detail is-error">
+              <span>Error</span>
+              <pre>{errorText}</pre>
+            </div>
+          ) : null}
+          {detailText ? (
+            <div className="archive-run-control-detail">
+              <span>Detail</span>
+              <pre>{detailText}</pre>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="archive-run-control-empty">No persisted step detail.</div>
+      )}
+    </details>
+  );
+};
+
+const AgentRunControlPanel = ({
+  answer = {},
+  gates = [],
+  isActionPending,
+  isActive,
+  onApprovalAction,
+  onContinueRun,
+  onStepRetry,
+  steps = [],
+  turnIndex,
+}) => {
+  const runId = answer.agentRunId;
+  const runStatus = answer.agentRunStatus ?? "unknown";
+  const pendingGates = gates.filter(isPendingGate);
+  const failedSteps = steps.filter(isFailedStep);
+  const retryableSteps = failedSteps.filter((step) => step.id);
+
+  if (!runId && steps.length === 0 && gates.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      className="archive-run-control-panel"
+      aria-label="Agent run control"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <div className="archive-run-control-head">
+        <div>
+          <div className="archive-source-section-label">Agent run</div>
+          <strong>{formatShortId(runId)}</strong>
+        </div>
+        {!isActive && runId ? (
+          <button
+            type="button"
+            className="archive-run-control-button"
+            onClick={() =>
+              onContinueRun?.({
+                runId,
+                turnIndex,
+              })
+            }
+          >
+            Continue run
+          </button>
+        ) : null}
+      </div>
+
+      <div className="archive-run-control-metrics">
+        <div>
+          <span>Status</span>
+          <strong>{formatTraceStatus(runStatus)}</strong>
+        </div>
+        <div>
+          <span>Steps</span>
+          <strong>{steps.length}</strong>
+        </div>
+        <div>
+          <span>Approvals</span>
+          <strong>{pendingGates.length}</strong>
+        </div>
+        <div>
+          <span>Failed</span>
+          <strong>{failedSteps.length}</strong>
+        </div>
+      </div>
+
+      <ApprovalGatePanel
+        gates={pendingGates}
+        onApprovalAction={onApprovalAction}
+        turnIndex={turnIndex}
+      />
+
+      {retryableSteps.length > 0 ? (
+        <div className="archive-run-retry-panel">
+          <div className="archive-source-section-label">Failed steps</div>
+          {retryableSteps.map((step) => (
+            <div key={step.id} className="archive-run-retry-item">
+              <div>
+                <strong>{step.label ?? step.type ?? "Step"}</strong>
+                <span>{step.error?.message ?? step.summary ?? "Step failed."}</span>
+              </div>
+              {onStepRetry && runId ? (
+                <button
+                  type="button"
+                  className="archive-run-control-button is-primary"
+                  disabled={Boolean(isActionPending)}
+                  onClick={() =>
+                    onStepRetry({
+                      runId,
+                      step,
+                      turnIndex,
+                    })
+                  }
+                >
+                  Retry
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {steps.length > 0 ? (
+        <div className="archive-run-control-steps">
+          <div className="archive-source-section-label">Step details</div>
+          {steps.map((step, stepIndex) => (
+            <AgentRunStepDetails
+              key={step.id ?? `${step.label}-${stepIndex}`}
+              step={step}
+              stepIndex={stepIndex}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -387,7 +586,9 @@ const RenderQA = (props) => {
     onSelectSource,
     onSelectTurn,
     onApprovalAction,
+    onContinueRun,
     onFeedback,
+    onStepRetry,
   } = props;
   const [feedbackNotes, setFeedbackNotes] = useState({});
 
@@ -470,9 +671,15 @@ const RenderQA = (props) => {
                     {each.answer.agentAnswer}
                   </div>
 
-                  <ApprovalGatePanel
+                  <AgentRunControlPanel
+                    answer={each.answer}
                     gates={approvalGates}
+                    isActionPending={isLoading}
+                    isActive={activeTurnIndex === index}
                     onApprovalAction={onApprovalAction}
+                    onContinueRun={onContinueRun}
+                    onStepRetry={onStepRetry}
+                    steps={agentRunSteps}
                     turnIndex={index}
                   />
 
