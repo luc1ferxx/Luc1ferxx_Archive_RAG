@@ -48,6 +48,9 @@ STARTUP_HEALTH_STRICT=false
 | `SERPAPI_KEY` | 无 | Web answer 搜索所需；只跑文档 RAG 可先不配。 |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 文档 chunk 与 query 的 embedding 模型。 |
 | `OPENAI_CHAT_MODEL` | `gpt-5` | 文档答案、对比答案、网页摘要使用的模型。 |
+| `AGENT_PLANNER_ROLLOUT` | `configured` | AgentRAG planner 灰度模式；`configured` 使用下面两个显式 planner 变量，`shadow` 执行 deterministic 主路径并把 LLM intent/execution proposal 记录到 `agentObservability.*Planner.shadow`，`guarded_llm` 让 LLM 作为主 planner 但继续由 validator/fallback 兜底，`llm`/`deterministic` 会同时覆盖 intent 和 execution planner。 |
+| `AGENT_INTENT_PLANNER` | `deterministic` | AgentRAG intent 选择器；`deterministic` 使用规则候选首选项，`llm` 让 LLM 在白名单候选 intent 中选择并由 validator 兜底。 |
+| `AGENT_EXECUTION_PLANNER` | `deterministic` | AgentRAG execution step 规划器；`deterministic` 使用固定 step schema，`llm` 让 LLM 在白名单 step 中排序并由 validator 兜底。 |
 | `RAG_PROMPT_VERSION` | `v3` | Prompt 版本；`server/.env.example` 当前显式设置为 `v2`。 |
 | `STARTUP_HEALTH_STRICT` | `false` | 健康检查失败时是否阻止启动。 |
 
@@ -63,6 +66,7 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `SESSION_MEMORY_POSTGRES_TABLE` | `rag_session_memory` | 会话记忆表。 |
 | `LONG_MEMORY_POSTGRES_TABLE` | `long_memory_items` | 长期记忆表。 |
 | `RAG_LONG_MEMORY_ENABLED` | `false` | 是否启用长期记忆。 |
+| `RAG_AGENT_EXPERIENCE_MEMORY_ENABLED` | `false` | 是否启用 Agent experience memory；只作为规划提示，不作为文档证据。 |
 | `TASK_STORE_PROVIDER` | `auto` | task/job 存储；`auto` 在 PostgreSQL 配好时使用 `postgres`，否则使用 `memory`。 |
 | `TASKS_POSTGRES_TABLE` | `rag_tasks` | task/job 当前快照表。 |
 | `TASK_EVENTS_POSTGRES_TABLE` | `rag_task_events` | task/job 审计事件表。 |

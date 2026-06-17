@@ -7,12 +7,12 @@ import {
 } from "./agent-execution-plan.js";
 import {
   runArxivImportSkill,
-  runCustomSkills,
   runDocumentDiscoverySkill,
   runInventorySkill,
   runResearchBriefSkill,
-  runWebSearchSkill,
-} from "./agent-skill-runners.js";
+} from "./agent-built-in-skill-runners.js";
+import { runCustomSkills } from "./agent-custom-skill-runner.js";
+import { runWebSearchSkill } from "./agent-web-runner.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
 
 const getCustomSkills = (selectedSkills = []) =>

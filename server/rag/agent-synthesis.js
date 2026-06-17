@@ -19,11 +19,17 @@ export const shouldFinalizeAgentAnswer = ({
   agentMode,
   primaryCustomResult,
   ragSources = [],
+  researchBrief,
+  webResult,
 } = {}) =>
   Boolean(
     ragSources.length > 0 &&
       (agentMode === "document" ||
+        agentMode === "document_web" ||
+        agentMode === "research_brief" ||
+        (agentMode === "web" && webResult?.ok) ||
         agentMode === SKILL_CHAIN_MODE ||
+        researchBrief ||
         (primaryCustomResult && agentMode === primaryCustomResult.skillId))
   );
 

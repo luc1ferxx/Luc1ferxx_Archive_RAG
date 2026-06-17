@@ -175,6 +175,75 @@ test("finalization flow finalizes cited document answers and records agent trace
   assert.equal(recordedAgentTraces[0].status, 200);
 });
 
+test("finalization flow verifies and finalizes research brief answers", async () => {
+  const trace = [];
+  const claimSupportRecords = [];
+  const gapRecords = [];
+  const response = await finalizeAgentRun({
+    addTraceStep: (step) => trace.push(step),
+    buildAgentObservability: ({ agentMode }) => ({
+      agentMode,
+      planMode: "research_brief",
+    }),
+    customSkillResults: [],
+    customSkills: [],
+    docIds: ["doc-1"],
+    getAgentSkills: () => [
+      {
+        skillId: "research_brief",
+        status: "completed",
+      },
+    ],
+    getBudgetSnapshot: () => ({
+      used: {
+        researchQuestions: 2,
+      },
+    }),
+    plan: {
+      mode: "research_brief",
+    },
+    question: "Create a research brief.",
+    recordAgentTrace: async () => {},
+    recordWorkingMemoryClaimSupport: (record) => claimSupportRecords.push(record),
+    recordWorkingMemoryGaps: (record) => gapRecords.push(record),
+    researchBrief: {
+      text: [
+        "Executive Summary",
+        "Refunds require 30 days notice. [Source 1]",
+        "CFO approval is required for every refund. [Source 1]",
+      ].join("\n"),
+      citations: [
+        {
+          docId: "doc-1",
+          excerpt: "Refunds require 30 days notice.",
+        },
+      ],
+      findings: [
+        {
+          abstained: false,
+        },
+      ],
+    },
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    trace,
+    webResult: null,
+    workingMemory: {},
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "research_brief");
+  assert.doesNotMatch(response.body.agentAnswer, /CFO approval/i);
+  assert.deepEqual(
+    trace.map((step) => step.type),
+    ["synthesis", "self_check", "gap_analysis", "answer_finalizer"]
+  );
+  assert.equal(trace[1].detail.claimSupport.unsupportedClaimCount, 1);
+  assert.equal(trace[2].detail.gaps[0].type, "unsupported_claim");
+  assert.equal(claimSupportRecords[0].phase, "final");
+  assert.equal(gapRecords[0].phase, "final");
+});
+
 test("finalization flow picks the first successful custom result", () => {
   assert.deepEqual(
     selectPrimaryCustomResult([

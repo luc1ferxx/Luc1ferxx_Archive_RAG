@@ -50,8 +50,23 @@ export const getChatModel = () => process.env.OPENAI_CHAT_MODEL || "gpt-5";
 export const getPromptVersion = () =>
   toChoice(process.env.RAG_PROMPT_VERSION, "v3", ["v1", "v2", "v3"]);
 
+export const getAgentPlannerRollout = () =>
+  toChoice(process.env.AGENT_PLANNER_ROLLOUT, "configured", [
+    "configured",
+    "deterministic",
+    "guarded_llm",
+    "llm",
+    "shadow",
+  ]);
+
 export const getAgentExecutionPlanner = () =>
   toChoice(process.env.AGENT_EXECUTION_PLANNER, "deterministic", [
+    "deterministic",
+    "llm",
+  ]);
+
+export const getAgentIntentPlanner = () =>
+  toChoice(process.env.AGENT_INTENT_PLANNER, "deterministic", [
     "deterministic",
     "llm",
   ]);
@@ -173,6 +188,9 @@ export const isNearDuplicateGuardEnabled = () =>
 
 export const isLongMemoryEnabled = () =>
   toBoolean(process.env.RAG_LONG_MEMORY_ENABLED, false);
+
+export const isAgentExperienceMemoryEnabled = () =>
+  toBoolean(process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED, false);
 
 export const isRagObservabilityEnabled = () =>
   toBoolean(process.env.RAG_OBSERVABILITY_ENABLED, false);

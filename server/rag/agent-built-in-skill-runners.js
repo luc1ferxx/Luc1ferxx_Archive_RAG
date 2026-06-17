@@ -4,6 +4,27 @@ import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
 
+const buildStepOutput = (result = {}) =>
+  result.status === "completed"
+    ? {
+        abstained: Boolean(result.abstained),
+        citationCount: result.citations?.length ?? 0,
+        resolvedQuery: result.resolvedQuery ?? result.question ?? "",
+        text: result.text ?? "",
+      }
+    : null;
+
+const buildStepError = (result = {}, fallbackMessage = "Step failed.") =>
+  result.status === "failed" || result.ok === false
+    ? {
+        message:
+          result.error instanceof Error
+            ? result.error.message
+            : String(result.error ?? fallbackMessage),
+        name: result.error?.name ?? "Error",
+      }
+    : null;
+
 export const runArxivImportSkill = async ({
   accessScope,
   addBudgetLimitTrace = noop,
@@ -137,6 +158,16 @@ export const runResearchBriefSkill = async ({
         researchResult.error,
         "Unable to generate research brief."
       )}`,
+      input: {
+        docIds,
+        question,
+        skillId: researchSkill.id,
+        skillVersion: researchSkill.version,
+      },
+      error: buildStepError(
+        researchResult,
+        "Unable to generate research brief."
+      ),
       detail: buildSkillTraceDetail(researchResult),
     });
   }
@@ -155,10 +186,22 @@ export const runResearchBriefSkill = async ({
       label: "Research Question",
       status: finding.status === "completed" ? "completed" : "failed",
       summary: finding.question,
+      input: {
+        docIds,
+        question: finding.question,
+        researchQuestionId: finding.id,
+        sessionId: null,
+        skillId: researchResult.skillId,
+        skillVersion: researchResult.skillVersion,
+        userId: null,
+      },
+      output: buildStepOutput(finding),
+      error: buildStepError(finding, "Research lookup failed."),
       detail: {
         citations: finding.citations?.length ?? 0,
         abstained: Boolean(finding.abstained),
         error: finding.error ?? null,
+        researchQuestionId: finding.id,
         skillId: researchResult.skillId,
         skillVersion: researchResult.skillVersion,
       },

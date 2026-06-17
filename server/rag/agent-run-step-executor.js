@@ -4,7 +4,7 @@ import {
   createDefaultAgentRunStepHandlerRegistry,
   getCapabilityResultCitations,
   getCapabilityResultText,
-} from "./agent-run-step-handlers.js";
+} from "./agent-run-step-handlers/index.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -42,9 +42,13 @@ const fail = (message, status = 409) => {
 export const createAgentRunStepExecutor = ({
   agentRunService,
   capabilityRegistry,
+  executeCustomSkillStep,
   executeDocumentRagStep,
+  executeResearchQuestionStep,
   stepHandlerRegistry = createDefaultAgentRunStepHandlerRegistry({
+    executeCustomSkillStep,
     executeDocumentRagStep,
+    executeResearchQuestionStep,
   }),
 } = {}) => {
   const resolveStepHandler = ({ gate, run, step } = {}) => {

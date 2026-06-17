@@ -948,6 +948,11 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
         "arxiv.import_topic",
         "workspace.document_discovery",
         "web.search",
+        "workspace.search_documents",
+        "citation.verify",
+        "report.export",
+        "recommendation.import_selected",
+        "document.compare_batch",
       ]
     );
   } finally {
@@ -1613,7 +1618,7 @@ test("chat endpoint agent returns a structured research brief", async () => {
               fileName: "refund-contract.pdf",
               pageNumber: 4,
               chunkIndex: askedQuestions.length,
-              excerpt: "Refunds require 30 days notice.",
+              excerpt: `Finding for ${query}: refunds require 30 days notice.`,
             },
           ],
           abstained: false,
@@ -1662,7 +1667,16 @@ test("chat endpoint agent returns a structured research brief", async () => {
     assert.equal(body.ragSources.length, askedQuestions.length);
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
-      ["plan", "research_plan", "research_question", "research_question", "research_question", "synthesis"]
+      [
+        "plan",
+        "research_plan",
+        "research_question",
+        "research_question",
+        "research_question",
+        "synthesis",
+        "self_check",
+        "answer_finalizer",
+      ]
     );
   } finally {
     await server.close();
@@ -2704,6 +2718,7 @@ test("feedback endpoints store and list scoped answer feedback", async () => {
   const originalAuthToken = process.env.API_AUTH_TOKEN;
   const originalAuthTokens = process.env.API_AUTH_TOKENS;
   const recordedFeedback = [];
+  const recordedExperienceFeedback = [];
   const listScopes = [];
 
   try {
@@ -2737,6 +2752,11 @@ test("feedback endpoints store and list scoped answer feedback", async () => {
           });
 
           return recordedFeedback;
+        },
+      },
+      agentExperienceMemoryService: {
+        recordFromFeedback: async ({ feedback }) => {
+          recordedExperienceFeedback.push(feedback);
         },
       },
     });
@@ -2784,6 +2804,9 @@ test("feedback endpoints store and list scoped answer feedback", async () => {
       assert.equal(recordedFeedback[0].answerText, "The policy says remote work is allowed.");
       assert.equal(recordedFeedback[0].citations[0].pageNumber, 3);
       assert.equal("retrievedContexts" in recordedFeedback[0], false);
+      assert.equal(recordedExperienceFeedback.length, 1);
+      assert.equal(recordedExperienceFeedback[0].feedbackId, recordedFeedback[0].feedbackId);
+      assert.equal(recordedExperienceFeedback[0].userId, "alice");
 
       response = await fetch(`${server.baseUrl}/feedback?limit=5`, {
         headers: {

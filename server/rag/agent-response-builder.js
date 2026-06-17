@@ -133,6 +133,14 @@ export const buildAgentResponse = ({
     (shouldRunWeb ? !webResult?.ok : true)
       ? 502
       : 200;
+  const finalizerAppliesToRagAnswer =
+    finalizer &&
+    (agentMode === "document" ||
+      agentMode === "document_web" ||
+      agentMode === "research_brief" ||
+      agentMode === "web" ||
+      agentMode === SKILL_CHAIN_MODE ||
+      (primaryCustomResult && agentMode === primaryCustomResult.skillId));
 
   return {
     status,
@@ -144,7 +152,7 @@ export const buildAgentResponse = ({
       agentObservability,
       agentWorkingMemory: workingMemory,
       researchBrief,
-      ragAnswer,
+      ragAnswer: finalizerAppliesToRagAnswer ? agentAnswer : ragAnswer,
       ragSources,
       ragResolvedQuestion: ragResult?.ok ? ragResult.value.resolvedQuery ?? question : question,
       ragMemoryApplied: ragResult?.ok ? Boolean(ragResult.value.memoryApplied) : false,

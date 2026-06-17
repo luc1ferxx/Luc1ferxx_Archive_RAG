@@ -1,157 +1,24 @@
-import { serializeExternalQueryPolicy } from "./external-query-policy.js";
-import { buildSafeExternalDocumentSummary } from "./external-context-sanitizer.js";
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
+import {
+  buildCompletedRecommendationPaperTaskItems,
+  buildRecommendationDocumentSubject,
+  buildRecommendationExternalQueryInput,
+  buildRecommendationFailureSummary,
+  buildRecommendationPaperTaskItem,
+  buildRecommendationPaperTaskItems,
+  buildRecommendationProvider,
+  buildRecommendationTaskId,
+  countRecommendationImportFailures,
+  countRemainingRecommendationPapers,
+  getRecommendationPaperId,
+  getRecommendationProviderLabel,
+  mapRecommendationPaperProgressStatus,
+  normalizeRecommendationTaskText,
+  RECOMMENDATION_TASK_TYPE,
+  toRecommendationTaskArray,
+} from "./recommendation-task-builders.js";
 
-export const RECOMMENDATION_TASK_TYPE = "external_recommendation";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
-
-const toArray = (value) => (Array.isArray(value) ? value : []);
-
-const getProviderLabel = (provider) => {
-  const normalizedProvider = normalizeText(provider);
-
-  if (normalizedProvider.toLowerCase() === "arxiv") {
-    return "arXiv";
-  }
-
-  return normalizedProvider || "External";
-};
-
-const buildRecommendationTaskId = ({ docId, provider }) =>
-  `${RECOMMENDATION_TASK_TYPE}:${normalizeText(provider)}:${normalizeText(docId)}`;
-
-const buildDocumentSubject = (document = {}) => {
-  const summary = buildSafeExternalDocumentSummary({
-    document,
-  });
-  const docId = normalizeText(summary.docId);
-
-  return {
-    id: docId,
-    kind: "document",
-    label: normalizeText(summary.fileName) || docId,
-  };
-};
-
-const buildProvider = (provider) => ({
-  id: normalizeText(provider),
-  label: getProviderLabel(provider),
-});
-
-const buildExternalQueryInput = ({ queryPolicy, topic }) => ({
-  queryPolicy: serializeExternalQueryPolicy(queryPolicy),
-  topic: normalizeText(topic),
-});
-
-const getPaperId = (paper = {}) => normalizeText(paper.arxivId ?? paper.id);
-
-const buildPaperTaskItem = ({ paper = {}, result = {}, status }) => {
-  const id = getPaperId(paper) || getPaperId(result);
-
-  if (!id) {
-    return null;
-  }
-
-  return {
-    id,
-    error: result.error ?? null,
-    label: normalizeText(paper.title ?? result.title) || id,
-    result: {
-      docId: normalizeText(result.docId),
-      fileName: normalizeText(result.fileName),
-      status: normalizeText(result.status),
-    },
-    status,
-    summary: normalizeText(result.error) || normalizeText(result.status) || status,
-  };
-};
-
-const buildPaperTaskItems = ({ papers = [], status }) =>
-  toArray(papers)
-    .map((paper) =>
-      buildPaperTaskItem({
-        paper,
-        status,
-      })
-    )
-    .filter(Boolean);
-
-const buildCompletedPaperTaskItems = ({ importResult = {}, selectedPapers = [] }) => {
-  const importedById = new Map(
-    toArray(importResult.importedPapers)
-      .map((paper) => [getPaperId(paper), paper])
-      .filter(([id]) => id)
-  );
-  const skippedById = new Map(
-    toArray(importResult.skippedPapers)
-      .map((paper) => [getPaperId(paper), paper])
-      .filter(([id]) => id)
-  );
-  const failedById = new Map(
-    toArray(importResult.failedPapers)
-      .map((paper) => [getPaperId(paper), paper])
-      .filter(([id]) => id)
-  );
-
-  return toArray(selectedPapers)
-    .map((paper) => {
-      const paperId = getPaperId(paper);
-
-      if (failedById.has(paperId)) {
-        return buildPaperTaskItem({
-          paper,
-          result: failedById.get(paperId),
-          status: TASK_STATUSES.failed,
-        });
-      }
-
-      if (skippedById.has(paperId)) {
-        return buildPaperTaskItem({
-          paper,
-          result: skippedById.get(paperId),
-          status: TASK_STATUSES.completed,
-        });
-      }
-
-      if (importedById.has(paperId)) {
-        return buildPaperTaskItem({
-          paper,
-          result: importedById.get(paperId),
-          status: TASK_STATUSES.completed,
-        });
-      }
-
-      return buildPaperTaskItem({
-        paper,
-        status: TASK_STATUSES.pending,
-      });
-    })
-    .filter(Boolean);
-};
-
-const countImportFailures = (importResult = {}) =>
-  Number(importResult.failedCount ?? toArray(importResult.failedPapers).length) || 0;
-
-const countRemainingPapers = (remainingSuggestion = {}) =>
-  toArray(remainingSuggestion?.papers).length;
-
-const buildFailureSummary = ({ error, providerLabel }) =>
-  `${providerLabel} import failed: ${normalizeText(error?.message) || "Unknown error."}`;
-
-const mapPaperProgressStatus = (status) => {
-  const normalizedStatus = normalizeText(status);
-
-  if (["imported", "skipped"].includes(normalizedStatus)) {
-    return TASK_STATUSES.completed;
-  }
-
-  if (normalizedStatus === "failed") {
-    return TASK_STATUSES.failed;
-  }
-
-  return TASK_STATUSES.running;
-};
+export { RECOMMENDATION_TASK_TYPE };
 
 export const createRecommendationTaskService = ({
   taskService = createTaskService(),
@@ -160,7 +27,7 @@ export const createRecommendationTaskService = ({
     taskService.upsertTask({
       accessScope,
       task: {
-        provider: buildProvider(provider),
+        provider: buildRecommendationProvider(provider),
         type: RECOMMENDATION_TASK_TYPE,
         ...task,
       },
@@ -173,14 +40,14 @@ export const createRecommendationTaskService = ({
     suggestion = {},
   } = {}) => {
     const document = suggestion.document ?? {};
-    const docId = normalizeText(document.docId);
+    const docId = normalizeRecommendationTaskText(document.docId);
 
     if (!docId) {
       return null;
     }
 
-    const papers = toArray(suggestion.papers);
-    const providerLabel = getProviderLabel(provider);
+    const papers = toRecommendationTaskArray(suggestion.papers);
+    const providerLabel = getRecommendationProviderLabel(provider);
     const hasImportableRecommendations =
       papers.length > 0 && Boolean(suggestion.selectionToken);
     const status = hasImportableRecommendations
@@ -207,13 +74,13 @@ export const createRecommendationTaskService = ({
           skipped: 0,
         },
         input: {
-          ...buildExternalQueryInput({
+          ...buildRecommendationExternalQueryInput({
             queryPolicy: suggestion.queryPolicy,
             topic: suggestion.topic,
           }),
           requestedMaxResults: suggestion.requestedMaxResults ?? papers.length,
         },
-        items: buildPaperTaskItems({
+        items: buildRecommendationPaperTaskItems({
           papers,
           status: hasImportableRecommendations
             ? TASK_STATUSES.waitingForUser
@@ -222,12 +89,12 @@ export const createRecommendationTaskService = ({
         label: `${providerLabel} recommendations`,
         requiredUserAction: hasImportableRecommendations ? "confirm_import" : "",
         result: {
-          paperIds: papers.map((paper) => normalizeText(paper.arxivId ?? paper.id)),
+          paperIds: papers.map((paper) => normalizeRecommendationTaskText(paper.arxivId ?? paper.id)),
           reason: suggestion.reason ?? null,
         },
         runnerId,
         status,
-        subject: buildDocumentSubject(document),
+        subject: buildRecommendationDocumentSubject(document),
         summary: hasImportableRecommendations
           ? `Found ${papers.length} ${providerLabel} recommendations for review.`
           : `No importable ${providerLabel} recommendations were found.`,
@@ -246,14 +113,14 @@ export const createRecommendationTaskService = ({
     selectedPapers = [],
     topic = "",
   } = {}) => {
-    const normalizedDocId = normalizeText(docId ?? document.docId);
+    const normalizedDocId = normalizeRecommendationTaskText(docId ?? document.docId);
 
     if (!normalizedDocId) {
       return null;
     }
 
-    const providerLabel = getProviderLabel(provider);
-    const selectedCount = toArray(selectedPapers).length;
+    const providerLabel = getRecommendationProviderLabel(provider);
+    const selectedCount = toRecommendationTaskArray(selectedPapers).length;
 
     return upsertRecommendationTask({
       accessScope,
@@ -272,12 +139,12 @@ export const createRecommendationTaskService = ({
           skipped: 0,
         },
         input: {
-          ...buildExternalQueryInput({
+          ...buildRecommendationExternalQueryInput({
             queryPolicy,
             topic,
           }),
         },
-        items: buildPaperTaskItems({
+        items: buildRecommendationPaperTaskItems({
           papers: selectedPapers,
           status: TASK_STATUSES.queued,
         }),
@@ -286,7 +153,7 @@ export const createRecommendationTaskService = ({
         requiredUserAction: "",
         runnerId,
         status: TASK_STATUSES.queued,
-        subject: buildDocumentSubject({
+        subject: buildRecommendationDocumentSubject({
           ...document,
           docId: normalizedDocId,
         }),
@@ -304,14 +171,14 @@ export const createRecommendationTaskService = ({
     selectedPapers = [],
     topic = "",
   } = {}) => {
-    const normalizedDocId = normalizeText(docId ?? document.docId);
+    const normalizedDocId = normalizeRecommendationTaskText(docId ?? document.docId);
 
     if (!normalizedDocId) {
       return null;
     }
 
-    const providerLabel = getProviderLabel(provider);
-    const selectedCount = toArray(selectedPapers).length;
+    const providerLabel = getRecommendationProviderLabel(provider);
+    const selectedCount = toRecommendationTaskArray(selectedPapers).length;
 
     return upsertRecommendationTask({
       accessScope,
@@ -326,19 +193,19 @@ export const createRecommendationTaskService = ({
           selected: selectedCount,
         },
         input: {
-          ...buildExternalQueryInput({
+          ...buildRecommendationExternalQueryInput({
             queryPolicy,
             topic,
           }),
         },
-        items: buildPaperTaskItems({
+        items: buildRecommendationPaperTaskItems({
           papers: selectedPapers,
           status: TASK_STATUSES.running,
         }),
         label: `${providerLabel} import`,
         requiredUserAction: "",
         status: TASK_STATUSES.running,
-        subject: buildDocumentSubject({
+        subject: buildRecommendationDocumentSubject({
           ...document,
           docId: normalizedDocId,
         }),
@@ -356,7 +223,7 @@ export const createRecommendationTaskService = ({
     result = {},
     status,
   } = {}) => {
-    const normalizedDocId = normalizeText(docId);
+    const normalizedDocId = normalizeRecommendationTaskText(docId);
     const taskId = buildRecommendationTaskId({
       docId: normalizedDocId,
       provider,
@@ -370,22 +237,22 @@ export const createRecommendationTaskService = ({
       return null;
     }
 
-    const paperId = getPaperId(paper) || getPaperId(result);
+    const paperId = getRecommendationPaperId(paper) || getRecommendationPaperId(result);
 
     if (!paperId) {
       return task;
     }
 
-    const nextItem = buildPaperTaskItem({
+    const nextItem = buildRecommendationPaperTaskItem({
       paper,
       result: {
         ...result,
         error: error instanceof Error ? error.message : result.error,
         status,
       },
-      status: mapPaperProgressStatus(status),
+      status: mapRecommendationPaperProgressStatus(status),
     });
-    const existingItems = toArray(task.items);
+    const existingItems = toRecommendationTaskArray(task.items);
     const hasItem = existingItems.some((item) => item.id === paperId);
     const items = hasItem
       ? existingItems.map((item) => (item.id === paperId ? nextItem : item))
@@ -411,18 +278,18 @@ export const createRecommendationTaskService = ({
     selectedPapers = [],
     topic = "",
   } = {}) => {
-    const normalizedDocId = normalizeText(docId ?? document.docId);
+    const normalizedDocId = normalizeRecommendationTaskText(docId ?? document.docId);
 
     if (!normalizedDocId) {
       return null;
     }
 
-    const failedCount = countImportFailures(importResult);
+    const failedCount = countRecommendationImportFailures(importResult);
     const importedCount = Number(importResult.importedCount ?? 0) || 0;
-    const remainingCount = countRemainingPapers(remainingSuggestion);
+    const remainingCount = countRemainingRecommendationPapers(remainingSuggestion);
     const skippedCount = Number(importResult.skippedCount ?? 0) || 0;
-    const selectedCount = toArray(selectedPapers).length;
-    const providerLabel = getProviderLabel(provider);
+    const selectedCount = toRecommendationTaskArray(selectedPapers).length;
+    const providerLabel = getRecommendationProviderLabel(provider);
     const status =
       failedCount > 0
         ? TASK_STATUSES.failed
@@ -451,7 +318,7 @@ export const createRecommendationTaskService = ({
           skipped: skippedCount,
         },
         input: {
-          ...buildExternalQueryInput({
+          ...buildRecommendationExternalQueryInput({
             queryPolicy,
             topic,
           }),
@@ -463,31 +330,31 @@ export const createRecommendationTaskService = ({
         requiredUserAction:
           status === TASK_STATUSES.waitingForUser ? "confirm_import" : "",
         result: {
-          failedPapers: toArray(importResult.failedPapers).map((paper) => ({
-            id: normalizeText(paper.arxivId ?? paper.id),
-            title: normalizeText(paper.title),
-            error: normalizeText(paper.error),
+          failedPapers: toRecommendationTaskArray(importResult.failedPapers).map((paper) => ({
+            id: normalizeRecommendationTaskText(paper.arxivId ?? paper.id),
+            title: normalizeRecommendationTaskText(paper.title),
+            error: normalizeRecommendationTaskText(paper.error),
           })),
-          importedPapers: toArray(importResult.importedPapers).map((paper) => ({
-            docId: normalizeText(paper.docId),
-            id: normalizeText(paper.arxivId ?? paper.id),
-            title: normalizeText(paper.title),
+          importedPapers: toRecommendationTaskArray(importResult.importedPapers).map((paper) => ({
+            docId: normalizeRecommendationTaskText(paper.docId),
+            id: normalizeRecommendationTaskText(paper.arxivId ?? paper.id),
+            title: normalizeRecommendationTaskText(paper.title),
           })),
-          remainingPaperIds: toArray(remainingSuggestion?.papers).map((paper) =>
-            normalizeText(paper.arxivId ?? paper.id)
+          remainingPaperIds: toRecommendationTaskArray(remainingSuggestion?.papers).map((paper) =>
+            normalizeRecommendationTaskText(paper.arxivId ?? paper.id)
           ),
-          skippedPapers: toArray(importResult.skippedPapers).map((paper) => ({
-            docId: normalizeText(paper.docId),
-            id: normalizeText(paper.arxivId ?? paper.id),
-            title: normalizeText(paper.title),
+          skippedPapers: toRecommendationTaskArray(importResult.skippedPapers).map((paper) => ({
+            docId: normalizeRecommendationTaskText(paper.docId),
+            id: normalizeRecommendationTaskText(paper.arxivId ?? paper.id),
+            title: normalizeRecommendationTaskText(paper.title),
           })),
         },
-        items: buildCompletedPaperTaskItems({
+        items: buildCompletedRecommendationPaperTaskItems({
           importResult,
           selectedPapers,
         }),
         status,
-        subject: buildDocumentSubject({
+        subject: buildRecommendationDocumentSubject({
           ...document,
           docId: normalizedDocId,
         }),
@@ -509,13 +376,13 @@ export const createRecommendationTaskService = ({
     selectedPapers = [],
     topic = "",
   } = {}) => {
-    const normalizedDocId = normalizeText(docId ?? document.docId);
+    const normalizedDocId = normalizeRecommendationTaskText(docId ?? document.docId);
 
     if (!normalizedDocId) {
       return null;
     }
 
-    const providerLabel = getProviderLabel(provider);
+    const providerLabel = getRecommendationProviderLabel(provider);
 
     return upsertRecommendationTask({
       accessScope,
@@ -527,28 +394,28 @@ export const createRecommendationTaskService = ({
         }),
         action: "import_recommendations",
         counts: {
-          failed: toArray(selectedPapers).length,
-          selected: toArray(selectedPapers).length,
+          failed: toRecommendationTaskArray(selectedPapers).length,
+          selected: toRecommendationTaskArray(selectedPapers).length,
         },
-        error: normalizeText(error?.message) || "Unknown error.",
+        error: normalizeRecommendationTaskText(error?.message) || "Unknown error.",
         input: {
-          ...buildExternalQueryInput({
+          ...buildRecommendationExternalQueryInput({
             queryPolicy,
             topic,
           }),
         },
         label: `${providerLabel} import`,
-        items: buildPaperTaskItems({
+        items: buildRecommendationPaperTaskItems({
           papers: selectedPapers,
           status: TASK_STATUSES.failed,
         }),
         requiredUserAction: "",
         status: TASK_STATUSES.failed,
-        subject: buildDocumentSubject({
+        subject: buildRecommendationDocumentSubject({
           ...document,
           docId: normalizedDocId,
         }),
-        summary: buildFailureSummary({
+        summary: buildRecommendationFailureSummary({
           error,
           providerLabel,
         }),

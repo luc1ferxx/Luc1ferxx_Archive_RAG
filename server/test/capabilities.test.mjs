@@ -36,6 +36,15 @@ test("capability registry validates and describes tool adapters", async () => {
   assert.equal(registry.describe("test.echo").label, "Echo");
   assert.equal(registry.list().length, 1);
   await assert.rejects(
+    () =>
+      registry.execute("shell.exec", {
+        input: {
+          command: "pwd",
+        },
+      }),
+    /Unknown AgentRAG capability id/
+  );
+  await assert.rejects(
     async () =>
       createCapabilityRegistry([
         capability,
@@ -47,10 +56,42 @@ test("capability registry validates and describes tool adapters", async () => {
   );
 });
 
-test("built-in capabilities execute arxiv, web, and document discovery adapters", async () => {
+test("built-in capabilities execute whitelisted adapters", async () => {
   const arxivCalls = [];
+  const compareCalls = [];
+  const importCalls = [];
   const webCalls = [];
   const registry = createDefaultCapabilityRegistry({
+    arxivEnrichmentService: {
+      importForDocument: async ({
+        accessScope,
+        docId,
+        selectedArxivIds,
+        selectionToken,
+      }) => {
+        importCalls.push({
+          accessScope,
+          docId,
+          selectedArxivIds,
+          selectionToken,
+        });
+
+        return {
+          importedCount: 1,
+          skippedCount: 0,
+          failedCount: 0,
+          importedPapers: [
+            {
+              arxivId: "2401.00001v1",
+              docId: "doc-imported",
+              fileName: "paper.pdf",
+              title: "Imported Paper",
+            },
+          ],
+          skippedPapers: [],
+        };
+      },
+    },
     arxivImportService: {
       importTopic: async ({ accessScope, maxResults, topic }) => {
         arxivCalls.push({
@@ -84,6 +125,31 @@ test("built-in capabilities execute arxiv, web, and document discovery adapters"
           },
         },
       ],
+      chat: async (docIds, question, options) => {
+        compareCalls.push({
+          docIds,
+          options,
+          question,
+        });
+
+        return {
+          text: "Remote work policies differ on allowed days. [Source 1] [Source 2]",
+          citations: [
+            {
+              docId: docIds[0],
+              fileName: "remote-work.pdf",
+              pageNumber: 1,
+              excerpt: "Policy A allows two remote days.",
+            },
+            {
+              docId: docIds[1],
+              fileName: "security.pdf",
+              pageNumber: 2,
+              excerpt: "Policy B allows three remote days.",
+            },
+          ],
+        };
+      },
     },
     webChatService: async (question) => {
       webCalls.push(question);
@@ -117,6 +183,77 @@ test("built-in capabilities execute arxiv, web, and document discovery adapters"
       question: "remote approval",
     },
   });
+  const searchResult = await registry.execute(
+    CAPABILITY_IDS.workspaceSearchDocuments,
+    {
+      accessScope,
+      approval: {
+        approved: true,
+      },
+      input: {
+        limit: 2,
+        query: "remote approval",
+      },
+    }
+  );
+  const citationResult = await registry.execute(CAPABILITY_IDS.citationVerify, {
+    input: {
+      answerText: "Remote work requires manager approval.",
+      citations: [
+        {
+          docId: "doc-remote",
+          fileName: "remote-work.pdf",
+          excerpt: "Remote work requires manager approval.",
+        },
+      ],
+    },
+  });
+  const reportResult = await registry.execute(CAPABILITY_IDS.reportExport, {
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    input: {
+      title: "Remote Work Report",
+      content: "Remote work requires approval.",
+      format: "markdown",
+      citations: [
+        {
+          docId: "doc-remote",
+          fileName: "remote-work.pdf",
+          pageNumber: 1,
+        },
+      ],
+    },
+  });
+  const importResult = await registry.execute(
+    CAPABILITY_IDS.recommendationImportSelected,
+    {
+      accessScope,
+      approval: {
+        approved: true,
+      },
+      input: {
+        provider: "arxiv",
+        docId: "doc-remote",
+        selectedIds: ["2401.00001v1"],
+        selectionToken: "selection-token",
+      },
+    }
+  );
+  const compareResult = await registry.execute(
+    CAPABILITY_IDS.documentCompareBatch,
+    {
+      accessScope,
+      approval: {
+        approved: true,
+      },
+      input: {
+        question: "Compare remote work limits.",
+        docIds: ["doc-remote", "doc-security"],
+      },
+    }
+  );
   const webResult = await registry.execute(CAPABILITY_IDS.webSearch, {
     approval: {
       approved: true,
@@ -130,6 +267,14 @@ test("built-in capabilities execute arxiv, web, and document discovery adapters"
   assert.equal(arxivCalls[0].maxResults, 10);
   assert.deepEqual(arxivCalls[0].accessScope, accessScope);
   assert.equal(discoveryResult.matches[0].document.docId, "doc-remote");
+  assert.equal(searchResult.matches[0].document.docId, "doc-remote");
+  assert.equal(citationResult.passed, true);
+  assert.equal(reportResult.report.fileName, "remote-work-report.md");
+  assert.equal(importResult.importedCount, 1);
+  assert.deepEqual(importCalls[0].selectedArxivIds, ["2401.00001v1"]);
+  assert.equal(compareResult.comparisons.length, 1);
+  assert.deepEqual(compareCalls[0].docIds, ["doc-remote", "doc-security"]);
+  assert.deepEqual(compareCalls[0].options.accessScope, accessScope);
   assert.equal(webResult.text, "web answer");
   assert.deepEqual(webCalls, ["latest policy"]);
   assert.equal(
@@ -147,6 +292,14 @@ test("built-in capability policies require approval before agent actions", async
     },
     ragService: {
       listDocuments: () => [],
+      chat: async () => {
+        throw new Error("Document compare should wait for approval.");
+      },
+    },
+    arxivEnrichmentService: {
+      importForDocument: async () => {
+        throw new Error("Recommendation import should wait for approval.");
+      },
     },
     webChatService: async () => {
       throw new Error("Web search should wait for approval.");
@@ -188,6 +341,56 @@ test("built-in capability policies require approval before agent actions", async
         question: "remote work policy",
       },
     },
+    {
+      id: CAPABILITY_IDS.workspaceSearchDocuments,
+      input: {
+        docIds: ["doc-1"],
+        limit: 3,
+        query: "remote work",
+      },
+      preview: {
+        docIds: ["doc-1"],
+        limit: 3,
+        query: "remote work",
+      },
+    },
+    {
+      id: CAPABILITY_IDS.reportExport,
+      input: {
+        title: "Risk report",
+        content: "Sensitive report body.",
+        format: "markdown",
+      },
+      preview: {
+        title: "Risk report",
+        format: "markdown",
+      },
+    },
+    {
+      id: CAPABILITY_IDS.recommendationImportSelected,
+      input: {
+        provider: "arxiv",
+        docId: "doc-1",
+        selectedIds: ["2401.00001v1"],
+        selectionToken: "selection-token",
+      },
+      preview: {
+        provider: "arxiv",
+        docId: "doc-1",
+        selectedIds: ["2401.00001v1"],
+      },
+    },
+    {
+      id: CAPABILITY_IDS.documentCompareBatch,
+      input: {
+        question: "Compare policies.",
+        docIds: ["doc-1", "doc-2"],
+      },
+      preview: {
+        question: "Compare policies.",
+        docIds: ["doc-1", "doc-2"],
+      },
+    },
   ];
 
   for (const testCase of cases) {
@@ -218,6 +421,24 @@ test("built-in capability policies require approval before agent actions", async
       }
     );
   }
+
+  const citationCapability = registry.get(CAPABILITY_IDS.citationVerify);
+  const citationPolicyResult = evaluateCapabilityPolicy(citationCapability, {
+    input: {
+      answerText: "Remote work requires manager approval.",
+      citations: [
+        {
+          docId: "doc-1",
+          excerpt: "Remote work requires manager approval.",
+        },
+      ],
+    },
+  });
+
+  assert.equal(
+    citationPolicyResult.decision,
+    CAPABILITY_POLICY_DECISIONS.allowed
+  );
 });
 
 test("capability policy blocks execution until required approval is granted", async () => {

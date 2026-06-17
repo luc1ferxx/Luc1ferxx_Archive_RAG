@@ -8,7 +8,7 @@ import {
   getTraceSteps,
   hasAgentObservability,
   isPlainObject,
-} from "../rag/chat-response-contract.js";
+} from "./chat-response-contract.js";
 import { getRagDataDirectory } from "../rag/storage.js";
 
 const round = (value, digits = 4) =>

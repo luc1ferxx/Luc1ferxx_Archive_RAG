@@ -9,6 +9,22 @@ import {
   queueAgentRunStepRetry,
   updateAgentRunStep,
 } from "./agent-run-steps.js";
+import {
+  AGENT_RUN_STATUSES,
+  assertAgentRunStatusTransition,
+  assertInitialAgentRunStatus,
+  isRetryableAgentRunStatus,
+  normalizeAgentRunStatus,
+} from "./agent-run-state-machine.js";
+
+export {
+  AGENT_RUN_STATUSES,
+  assertAgentRunStatusTransition,
+  assertInitialAgentRunStatus,
+  isKnownAgentRunStatus,
+  isRetryableAgentRunStatus,
+  normalizeAgentRunStatus,
+} from "./agent-run-state-machine.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -19,111 +35,10 @@ const normalizeRecord = (value, fallback = {}) =>
     ? value
     : fallback;
 
-export const AGENT_RUN_STATUSES = Object.freeze({
-  completed: "completed",
-  failed: "failed",
-  running: "running",
-  waitingForUser: "waiting_for_user",
-});
-
 export const AGENT_RUN_ACTIONS = Object.freeze({
   approve: "approve",
   deny: "deny",
 });
-
-const VALID_AGENT_RUN_STATUSES = new Set(Object.values(AGENT_RUN_STATUSES));
-const INITIAL_AGENT_RUN_STATUSES = new Set([
-  AGENT_RUN_STATUSES.running,
-  AGENT_RUN_STATUSES.waitingForUser,
-]);
-const RETRYABLE_AGENT_RUN_STATUSES = new Set([
-  AGENT_RUN_STATUSES.completed,
-  AGENT_RUN_STATUSES.failed,
-]);
-const AGENT_RUN_STATUS_TRANSITIONS = Object.freeze({
-  [AGENT_RUN_STATUSES.running]: new Set([
-    AGENT_RUN_STATUSES.completed,
-    AGENT_RUN_STATUSES.failed,
-    AGENT_RUN_STATUSES.running,
-    AGENT_RUN_STATUSES.waitingForUser,
-  ]),
-  [AGENT_RUN_STATUSES.waitingForUser]: new Set([
-    AGENT_RUN_STATUSES.completed,
-    AGENT_RUN_STATUSES.failed,
-    AGENT_RUN_STATUSES.running,
-    AGENT_RUN_STATUSES.waitingForUser,
-  ]),
-  [AGENT_RUN_STATUSES.completed]: new Set([
-    AGENT_RUN_STATUSES.completed,
-  ]),
-  [AGENT_RUN_STATUSES.failed]: new Set([
-    AGENT_RUN_STATUSES.failed,
-  ]),
-});
-
-const normalizeAgentRunStatus = (status) => {
-  const normalizedStatus = normalizeText(status);
-
-  return VALID_AGENT_RUN_STATUSES.has(normalizedStatus)
-    ? normalizedStatus
-    : AGENT_RUN_STATUSES.running;
-};
-
-const isKnownAgentRunStatus = (status) =>
-  VALID_AGENT_RUN_STATUSES.has(normalizeText(status));
-
-const buildRunStatusError = (message, status = 409) => {
-  const error = new Error(message);
-  error.status = status;
-  return error;
-};
-
-const assertKnownAgentRunStatus = (status) => {
-  if (!isKnownAgentRunStatus(status)) {
-    throw buildRunStatusError(`Unsupported agent run status: ${status}.`, 400);
-  }
-
-  return normalizeAgentRunStatus(status);
-};
-
-const assertInitialAgentRunStatus = (status) => {
-  const normalizedStatus = assertKnownAgentRunStatus(status);
-
-  if (!INITIAL_AGENT_RUN_STATUSES.has(normalizedStatus)) {
-    throw buildRunStatusError(
-      `Invalid initial agent run status: ${normalizedStatus}.`,
-      400
-    );
-  }
-
-  return normalizedStatus;
-};
-
-export const assertAgentRunStatusTransition = ({
-  allowRetryTransition = false,
-  from,
-  to,
-} = {}) => {
-  const fromStatus = assertKnownAgentRunStatus(from);
-  const toStatus = assertKnownAgentRunStatus(to);
-  const allowedStatuses = AGENT_RUN_STATUS_TRANSITIONS[fromStatus] ?? new Set();
-
-  if (
-    allowRetryTransition &&
-    RETRYABLE_AGENT_RUN_STATUSES.has(fromStatus) &&
-    toStatus === AGENT_RUN_STATUSES.running
-  ) {
-    return toStatus;
-  }
-
-  if (!allowedStatuses.has(toStatus)) {
-    throw buildRunStatusError(
-      `Invalid agent run status transition: ${fromStatus} -> ${toStatus}.`
-    );
-  }
-
-  return toStatus;
-};
 
 export const normalizeAgentRunEvent = (event = {}) => {
   const type = normalizeText(event.type ?? event.eventType);
@@ -753,7 +668,7 @@ export const createAgentRunService = ({
       throw error;
     }
 
-    if (!RETRYABLE_AGENT_RUN_STATUSES.has(existingRun.status)) {
+    if (!isRetryableAgentRunStatus(existingRun.status)) {
       const error = new Error(
         "Agent run steps can only be retried from completed or failed runs."
       );

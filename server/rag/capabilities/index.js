@@ -12,11 +12,30 @@ export {
   evaluateCapabilityPolicy,
 } from "./policy-enforcer.js";
 export {
-  BUILT_IN_CAPABILITY_VERSION,
-  CAPABILITY_IDS,
-  createArxivImportTopicCapability,
   createBuiltInCapabilities,
   createDefaultCapabilityRegistry,
-  createDocumentDiscoveryCapability,
-  createWebSearchCapability,
 } from "./built-ins.js";
+export {
+  BUILT_IN_CAPABILITY_VERSION,
+  CAPABILITY_IDS,
+} from "./shared.js";
+export {
+  createArxivImportTopicCapability,
+} from "./arxiv.js";
+export {
+  createCitationVerifyCapability,
+} from "./citation.js";
+export {
+  createDocumentCompareBatchCapability,
+  createDocumentDiscoveryCapability,
+  createWorkspaceSearchDocumentsCapability,
+} from "./documents.js";
+export {
+  createRecommendationImportSelectedCapability,
+} from "./recommendation.js";
+export {
+  createReportExportCapability,
+} from "./report.js";
+export {
+  createWebSearchCapability,
+} from "./web.js";

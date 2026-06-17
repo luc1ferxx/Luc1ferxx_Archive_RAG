@@ -94,7 +94,7 @@ test("agent synthesis exposes direct answer modes for selected custom skills", (
   assert.equal(directAnswerModes.has(CUSTOM_SKILL_IDS.compareDocuments), true);
 });
 
-test("agent synthesis finalizes only cited document, chain, or primary custom answers", () => {
+test("agent synthesis finalizes cited evidence-bearing agent answers", () => {
   assert.equal(
     shouldFinalizeAgentAnswer({
       agentMode: "document",
@@ -115,6 +115,32 @@ test("agent synthesis finalizes only cited document, chain, or primary custom an
       ragSources: [
         {
           docId: "doc-1",
+        },
+      ],
+    }),
+    true
+  );
+  assert.equal(
+    shouldFinalizeAgentAnswer({
+      agentMode: "research_brief",
+      researchBrief: {},
+      ragSources: [
+        {
+          docId: "doc-1",
+        },
+      ],
+    }),
+    true
+  );
+  assert.equal(
+    shouldFinalizeAgentAnswer({
+      agentMode: "web",
+      webResult: {
+        ok: true,
+      },
+      ragSources: [
+        {
+          url: "https://example.com",
         },
       ],
     }),

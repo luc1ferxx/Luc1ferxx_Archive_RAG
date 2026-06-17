@@ -18,6 +18,23 @@ import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
 
+const buildRagStepOutput = (result = {}) =>
+  result.ok
+    ? {
+        abstained: Boolean(result.value?.abstained),
+        citationCount: result.value?.citations?.length ?? 0,
+        text: result.text ?? result.value?.text ?? "",
+      }
+    : null;
+
+const buildRagStepError = (result = {}, fallbackMessage) =>
+  result.ok
+    ? null
+    : {
+        message: serializeError(result.error, fallbackMessage),
+        name: result.error?.name ?? "Error",
+      };
+
 export const runDocumentRagLoop = async ({
   accessScope,
   addBudgetLimitTrace = noop,
@@ -109,6 +126,11 @@ export const runDocumentRagLoop = async ({
             "Unable to answer from the document."
           )}`,
       input: primaryInput,
+      output: buildRagStepOutput(primaryRagResult),
+      error: buildRagStepError(
+        primaryRagResult,
+        "Unable to answer from the document."
+      ),
       detail: buildSkillTraceDetail(
         primaryRagResult,
         primaryRagResult.traceDetail ?? {}
@@ -240,9 +262,14 @@ export const runDocumentRagLoop = async ({
             }.`
           : `Focused follow-up failed: ${serializeError(
               followUpRagResult.error,
-            "Unable to run follow-up document evidence lookup."
-          )}`,
+              "Unable to run follow-up document evidence lookup."
+            )}`,
         input: followUpInput,
+        output: buildRagStepOutput(followUpRagResult),
+        error: buildRagStepError(
+          followUpRagResult,
+          "Unable to run follow-up document evidence lookup."
+        ),
         detail: buildSkillTraceDetail(followUpRagResult, {
           followUpQuestion,
           retrievalPlan: followUpRetrievalPlan,

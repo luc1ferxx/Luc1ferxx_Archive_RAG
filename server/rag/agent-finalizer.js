@@ -44,7 +44,7 @@ const getPreservedHeadings = (answerText = "") =>
     .filter((line) => line && isPreservedHeading(line))
     .slice(0, 8);
 
-const normalizeClaimSupportForHeadings = (claimSupport) => {
+export const normalizeClaimSupportForHeadings = (claimSupport) => {
   const claims = (claimSupport.claims ?? []).map((claim) =>
     !claim.supported && isPreservedHeading(claim.text)
       ? {

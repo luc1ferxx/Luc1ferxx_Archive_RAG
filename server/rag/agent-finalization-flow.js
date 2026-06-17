@@ -1,3 +1,7 @@
+import {
+  runFinalAnswerVerification,
+  shouldRunFinalAnswerVerification,
+} from "./agent-answer-verification.js";
 import { finalizeAgentAnswer } from "./agent-finalizer.js";
 import {
   buildDirectAnswerModes,
@@ -19,6 +23,7 @@ export const selectRagSources = ({
   customSkillResults = [],
   ragResult,
   researchBrief,
+  webResult,
 } = {}) => {
   if (researchBrief) {
     return researchBrief.citations ?? [];
@@ -26,6 +31,10 @@ export const selectRagSources = ({
 
   if (ragResult?.ok) {
     return ragResult.value.citations ?? [];
+  }
+
+  if (webResult?.ok) {
+    return webResult.citations ?? webResult.value?.citations ?? [];
   }
 
   return customSkillResults
@@ -43,12 +52,14 @@ export const finalizeAgentRun = async ({
   documentRagSkill,
   getAgentSkills,
   getBudgetSnapshot,
+  docIds = [],
   inventoryAnswer,
   plan,
   question,
   ragResult,
   recordAgentTrace,
   recordWorkingMemoryClaimSupport,
+  recordWorkingMemoryGaps,
   researchBrief,
   shouldRunWeb,
   skippedWebBecauseBudget,
@@ -69,6 +80,7 @@ export const finalizeAgentRun = async ({
     customSkillResults,
     ragResult,
     researchBrief,
+    webResult,
   });
   const baseAgentAnswer = buildSynthesisAnswer({
     plan: {
@@ -87,6 +99,8 @@ export const finalizeAgentRun = async ({
     agentMode,
     primaryCustomResult,
     ragSources,
+    researchBrief,
+    webResult,
   });
 
   addTraceStep({
@@ -98,14 +112,37 @@ export const finalizeAgentRun = async ({
     },
   });
 
-  const finalizer = shouldFinalizeAnswer
-    ? finalizeAgentAnswer({
+  const finalVerification = shouldRunFinalAnswerVerification({
+    agentMode,
+    primaryCustomResult,
+    researchBrief,
+    webResult,
+  })
+    ? runFinalAnswerVerification({
+        addTraceStep,
+        agentMode,
         answerText: baseAgentAnswer,
         citations: ragSources,
+        docIds,
+        documentRagSkill,
+        primaryCustomResult,
+        recordWorkingMemoryClaimSupport,
+        recordWorkingMemoryGaps,
+        researchBrief,
+        webResult,
       })
-    : null;
+    : {
+        check: null,
+        finalizer: null,
+      };
+  let finalizer = finalVerification.finalizer ?? null;
 
-  if (finalizer) {
+  if (!finalizer && shouldFinalizeAnswer && !finalVerification.check) {
+    finalizer = finalizeAgentAnswer({
+      answerText: baseAgentAnswer,
+      citations: ragSources,
+    });
+
     recordWorkingMemoryClaimSupport({
       skill: primaryCustomResult ?? documentRagSkill ?? {
         id: "answer_finalizer",

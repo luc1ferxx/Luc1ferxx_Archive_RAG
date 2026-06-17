@@ -8,9 +8,12 @@ import {
 } from "../rag/agent-runs.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
+  createCustomSkillStepExecutor,
   createDocumentRagStepExecutor,
   createDefaultAgentRunStepHandlerRegistry,
-} from "../rag/agent-run-step-handlers.js";
+  createResearchQuestionStepExecutor,
+} from "../rag/agent-run-step-handlers/index.js";
+import { buildAgentRunStepsFromTrace } from "../rag/agent-run-steps.js";
 import { CAPABILITY_IDS } from "../rag/capabilities/index.js";
 
 const accessScope = {
@@ -127,12 +130,91 @@ test("agent run step handler registry resolves known step handlers", () => {
   assert.equal(
     registry.resolve({
       step: {
+        type: "follow_up_retrieval",
+        kind: "tool_call",
+      },
+    })?.id,
+    "follow_up_retrieval"
+  );
+  assert.equal(
+    registry.resolve({
+      step: {
+        type: "custom_skill",
+        kind: "tool_call",
+      },
+    })?.id,
+    "custom_skill"
+  );
+  assert.equal(
+    registry.resolve({
+      step: {
+        type: "research_question",
+        kind: "tool_call",
+      },
+    })?.id,
+    "research_question"
+  );
+  assert.equal(
+    registry.resolve({
+      step: {
         type: "inventory",
         kind: "tool_call",
       },
     }),
     null
   );
+});
+
+test("agent run steps persist trace input, output, and failure reason", () => {
+  const steps = buildAgentRunStepsFromTrace({
+    now: () => "2026-06-17T00:00:00.000Z",
+    trace: [
+      {
+        id: "custom-step",
+        type: "custom_skill",
+        label: "Risk Review",
+        status: "completed",
+        summary: "Risk Review completed.",
+        input: {
+          docIds: ["doc-1"],
+          question: "Review risk.",
+          skillId: "risk_review",
+        },
+        output: {
+          citationCount: 1,
+          text: "Risk answer.",
+        },
+        detail: {
+          skillId: "risk_review",
+          skillVersion: "1.0.0",
+        },
+      },
+      {
+        id: "follow-up-step",
+        type: "follow_up_retrieval",
+        label: "Follow-up Retrieval",
+        status: "failed",
+        summary: "Focused follow-up failed: timeout.",
+        input: {
+          docIds: ["doc-1"],
+          question: "Find cited support.",
+        },
+        detail: {
+          skillId: "document_rag",
+          skillVersion: "1.0.0",
+        },
+      },
+    ],
+  });
+  const customStep = steps.find((step) => step.id === "custom-step");
+  const followUpStep = steps.find((step) => step.id === "follow-up-step");
+
+  assert.equal(customStep.kind, "tool_call");
+  assert.equal(customStep.input.skillId, "risk_review");
+  assert.equal(customStep.output.citationCount, 1);
+  assert.equal(followUpStep.kind, "tool_call");
+  assert.equal(followUpStep.input.question, "Find cited support.");
+  assert.equal(followUpStep.error.message, "Focused follow-up failed: timeout.");
 });
 
 test("agent run step executor resumes an approved capability step", async () => {
@@ -484,6 +566,310 @@ test("agent run step executor retries document_rag through the wired document ha
       "run_completed",
     ]
   );
+});
+
+test("agent run step executor retries follow_up_retrieval through the wired document handler", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeDocumentRagStep: createDocumentRagStepExecutor({
+      ragService: {
+        chat: async (docIds, question, options) => {
+          calls.push({
+            docIds,
+            options,
+            question,
+          });
+
+          return {
+            text: `Retried follow-up answer: ${question} [Source 1]`,
+            citations: [
+              {
+                docId: "doc-1",
+                pageNumber: 3,
+                rank: 1,
+              },
+            ],
+            abstained: false,
+            resolvedQuery: question,
+          };
+        },
+      },
+    }),
+  });
+
+  await createCompletedRunWithSteps(agentRunService, {
+    goal: "What cited support is missing?",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-follow-up-retry",
+    steps: [
+      {
+        id: "follow-up-step",
+        type: "follow_up_retrieval",
+        kind: "tool_call",
+        label: "Follow-up Retrieval",
+        status: "failed",
+        input: {
+          docIds: ["doc-1"],
+          question: "Find cited support for annual leave.",
+          retrievalPlan: {
+            phase: "follow_up",
+          },
+        },
+      },
+    ],
+  });
+
+  const retried = await executor.retryStep({
+    accessScope,
+    runId: "run-follow-up-retry",
+    stepId: "follow-up-step",
+  });
+  const retryStep = retried.run.steps.find(
+    (step) => step.retryOfStepId === "follow-up-step"
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].docIds, ["doc-1"]);
+  assert.equal(calls[0].question, "Find cited support for annual leave.");
+  assert.deepEqual(calls[0].options.retrievalPlan, {
+    phase: "follow_up",
+  });
+  assert.equal(retried.response.agentMode, "document");
+  assert.match(retried.response.agentAnswer, /Retried follow-up answer/);
+  assert.equal(retryStep.type, "follow_up_retrieval");
+  assert.equal(retryStep.status, "completed");
+  assert.equal(retryStep.output.citationCount, 1);
+});
+
+test("agent run step executor retries custom_skill through the wired custom handler", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const customSkill = {
+    id: "risk_review",
+    version: "1.0.0",
+    label: "Risk Review",
+    kind: "custom",
+    budgetKey: "customSkillCalls",
+    requiresAccessScope: true,
+    match: () => false,
+    execute: async (context) => {
+      calls.push(context);
+
+      return {
+        text: `Retried custom answer: ${context.question}`,
+        citations: [
+          {
+            docId: "doc-1",
+            pageNumber: 4,
+          },
+        ],
+        abstained: false,
+      };
+    },
+  };
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeCustomSkillStep: createCustomSkillStepExecutor({
+      ragService: {},
+      skillRegistry: {
+        get: (skillId) => (skillId === customSkill.id ? customSkill : null),
+      },
+    }),
+  });
+
+  await createCompletedRunWithSteps(agentRunService, {
+    goal: "Review risk.",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-custom-retry",
+    steps: [
+      {
+        id: "custom-step",
+        type: "custom_skill",
+        kind: "tool_call",
+        label: "Risk Review",
+        status: "failed",
+        input: {
+          docIds: ["doc-1"],
+          question: "Review risk.",
+          skillId: "risk_review",
+          skillVersion: "1.0.0",
+        },
+      },
+    ],
+  });
+
+  const retried = await executor.retryStep({
+    accessScope,
+    runId: "run-custom-retry",
+    stepId: "custom-step",
+  });
+  const retryStep = retried.run.steps.find(
+    (step) => step.retryOfStepId === "custom-step"
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].accessScope, accessScope);
+  assert.deepEqual(calls[0].docIds, ["doc-1"]);
+  assert.equal(calls[0].question, "Review risk.");
+  assert.equal(retried.response.agentMode, "risk_review");
+  assert.match(retried.response.agentAnswer, /Retried custom answer/);
+  assert.equal(retryStep.status, "completed");
+  assert.equal(retryStep.output.citationCount, 1);
+});
+
+test("agent run step executor retries research_question through the wired research handler", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeResearchQuestionStep: createResearchQuestionStepExecutor({
+      ragService: {
+        chat: async (docIds, question, options) => {
+          calls.push({
+            docIds,
+            options,
+            question,
+          });
+
+          return {
+            text: `Retried research answer: ${question} [Source 1]`,
+            citations: [
+              {
+                docId: "doc-1",
+                rank: 1,
+              },
+            ],
+            abstained: false,
+            resolvedQuery: question,
+          };
+        },
+      },
+    }),
+  });
+
+  await createCompletedRunWithSteps(agentRunService, {
+    goal: "Create a research brief.",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-research-retry",
+    steps: [
+      {
+        id: "research-step",
+        type: "research_question",
+        kind: "tool_call",
+        label: "Research Question",
+        status: "failed",
+        input: {
+          docIds: ["doc-1"],
+          question: "What facts matter?",
+          researchQuestionId: "rq-1",
+        },
+      },
+    ],
+  });
+
+  const retried = await executor.retryStep({
+    accessScope,
+    runId: "run-research-retry",
+    stepId: "research-step",
+  });
+  const retryStep = retried.run.steps.find(
+    (step) => step.retryOfStepId === "research-step"
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].docIds, ["doc-1"]);
+  assert.equal(calls[0].question, "What facts matter?");
+  assert.deepEqual(calls[0].options.accessScope, accessScope);
+  assert.equal(retried.response.agentMode, "research_brief");
+  assert.equal(retried.response.researchBrief.findings[0].id, "rq-1");
+  assert.match(retried.response.agentAnswer, /Retried research answer/);
+  assert.equal(retryStep.status, "completed");
+  assert.equal(retryStep.output.citationCount, 1);
+});
+
+test("agent run step executor persists failed custom_skill retry state", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const customSkill = {
+    id: "risk_review",
+    version: "1.0.0",
+    label: "Risk Review",
+    kind: "custom",
+    budgetKey: "customSkillCalls",
+    requiresAccessScope: true,
+    match: () => false,
+    execute: async () => {
+      throw new Error("custom retry failed");
+    },
+  };
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeCustomSkillStep: createCustomSkillStepExecutor({
+      ragService: {},
+      skillRegistry: {
+        get: (skillId) => (skillId === customSkill.id ? customSkill : null),
+      },
+    }),
+  });
+
+  await createCompletedRunWithSteps(agentRunService, {
+    goal: "Review risk.",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-custom-retry-fails",
+    steps: [
+      {
+        id: "custom-step",
+        type: "custom_skill",
+        kind: "tool_call",
+        label: "Risk Review",
+        status: "failed",
+        input: {
+          docIds: ["doc-1"],
+          question: "Review risk.",
+          skillId: "risk_review",
+        },
+      },
+    ],
+  });
+
+  await assert.rejects(
+    () =>
+      executor.retryStep({
+        accessScope,
+        runId: "run-custom-retry-fails",
+        stepId: "custom-step",
+      }),
+    /custom retry failed/
+  );
+
+  const failedRun = await agentRunService.getRun({
+    accessScope,
+    runId: "run-custom-retry-fails",
+  });
+  const failedRetryStep = failedRun.steps.find(
+    (step) => step.retryOfStepId === "custom-step"
+  );
+
+  assert.equal(failedRun.status, AGENT_RUN_STATUSES.failed);
+  assert.equal(failedRetryStep.status, "failed");
+  assert.equal(failedRetryStep.error.message, "custom retry failed");
 });
 
 test("agent run step executor validates document_rag retry input before queueing", async () => {

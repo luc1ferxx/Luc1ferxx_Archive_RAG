@@ -13,7 +13,7 @@ import {
   getTraceTypes,
   hasAgentObservability,
   hasTraceStep,
-} from "../rag/chat-response-contract.js";
+} from "../evaluation/chat-response-contract.js";
 
 const buildResponse = () => ({
   status: 200,

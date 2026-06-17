@@ -24,11 +24,25 @@ const createDefaultExecutionPlanner = () => ({
   stepIds: [],
 });
 
+const createDefaultIntentPlanner = () => ({
+  candidateIntentIds: [],
+  fallback: false,
+  fallbackReason: null,
+  requestedPlannerId: null,
+  selectedIntentId: null,
+  selectedMode: null,
+  selectedPlannerId: null,
+  selectionReason: null,
+  status: "not_run",
+});
+
 export const createAgentRunContext = ({
   agentBudget,
   chainSkills = [],
   docIds = [],
+  experienceMemory = null,
   executionLoop,
+  intentPlanner: initialIntentPlanner,
   plan,
   question,
   recordTrace = recordRagTrace,
@@ -40,6 +54,13 @@ export const createAgentRunContext = ({
   const budgetState = createAgentBudget(agentBudget);
   let agentRetrievalPlan = null;
   let executionPlanner = createDefaultExecutionPlanner();
+  let intentPlanner = {
+    ...createDefaultIntentPlanner(),
+    ...(initialIntentPlanner ?? {}),
+    candidateIntentIds: Array.isArray(initialIntentPlanner?.candidateIntentIds)
+      ? initialIntentPlanner.candidateIntentIds
+      : [],
+  };
   let skillTracker = defaultSkillTracker;
 
   const getBudgetSnapshot = () => getAgentBudgetSnapshot(budgetState);
@@ -89,9 +110,33 @@ export const createAgentRunContext = ({
     return executionPlanner;
   };
 
+  const setIntentPlanner = (planner = {}) => {
+    intentPlanner = {
+      ...createDefaultIntentPlanner(),
+      ...planner,
+      candidateIntentIds: Array.isArray(planner.candidateIntentIds)
+        ? planner.candidateIntentIds
+        : [],
+    };
+
+    return intentPlanner;
+  };
+
   const buildAgentObservability = ({ agentMode }) => ({
     agentMode,
+    experienceMemory: experienceMemory
+      ? {
+          applied: Boolean(experienceMemory.memoryApplied),
+          hintCount: experienceMemory.planningHints?.length ?? 0,
+          planningHints: experienceMemory.planningHints ?? [],
+        }
+      : {
+          applied: false,
+          hintCount: 0,
+          planningHints: [],
+        },
     planMode: plan.mode,
+    intentPlanner,
     executionPlanner,
     skillChain: chainSkills.map((skill) => getSkillDescriptor(skill)),
     executionLoop,
@@ -116,6 +161,7 @@ export const createAgentRunContext = ({
       docIds,
       agentSkills,
       agentObservability,
+      agentIntentPlanner: intentPlanner,
       agentRetrievalPlan,
       agentTraceSummary: buildAgentTraceSummary(trace),
       status,
@@ -172,6 +218,7 @@ export const createAgentRunContext = ({
     returnClarification,
     setAgentRetrievalPlan,
     setExecutionPlanner,
+    setIntentPlanner,
     setSkillTracker,
     trace,
   };

@@ -3,8 +3,8 @@ import {
   createAgentSkillTracker,
 } from "./agent-skill-observability.js";
 import { createAgentWorkingMemory } from "./agent-working-memory.js";
+import { buildPlan } from "./agent-intent-planner.js";
 import {
-  buildPlan,
   orderSelectedSkills,
 } from "./agent-planner.js";
 import { createDefaultSkillRegistry } from "./skills/registry.js";
@@ -14,7 +14,10 @@ export const DEFAULT_AGENT_MAX_FOLLOW_UPS = 1;
 export const createAgentSession = ({
   agentBudget,
   docIds = [],
+  experienceMemory = null,
+  intentPlanner,
   maxFollowUps = DEFAULT_AGENT_MAX_FOLLOW_UPS,
+  plan: providedPlan,
   question,
   skillRegistry,
 } = {}) => {
@@ -24,7 +27,7 @@ export const createAgentSession = ({
     maxFollowUps,
     question,
   });
-  const plan = buildPlan({
+  const plan = providedPlan ?? buildPlan({
     question,
     docIds,
   });
@@ -44,7 +47,9 @@ export const createAgentSession = ({
     agentBudget,
     chainSkills,
     docIds,
+    experienceMemory,
     executionLoop: workingMemoryState.executionLoop,
+    intentPlanner,
     plan,
     question,
     selectedSkills,

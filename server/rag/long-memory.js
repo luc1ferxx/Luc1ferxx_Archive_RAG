@@ -14,6 +14,7 @@ const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_CONTEXT_ITEMS = 6;
 const USER_NOTE_MIN_LENGTH = 4;
+const PUBLIC_MEMORY_CATEGORIES = Object.freeze(["preference", "note"]);
 
 const CHINESE_REPLY_PATTERNS = [
   /\u4ee5\u540e.*(?:\u7528\u4e2d\u6587|\u4e2d\u6587\u56de\u7b54)/i,
@@ -131,10 +132,23 @@ const createDefaultStore = () => ({
     return true;
   },
 
-  async list({ userId, limit = DEFAULT_LIST_LIMIT }) {
+  async list({ userId, limit = DEFAULT_LIST_LIMIT, categories = PUBLIC_MEMORY_CATEGORIES }) {
     const normalizedUserId = ensureUserId(userId);
+    const normalizedCategories = Array.isArray(categories)
+      ? [
+          ...new Set(
+            categories
+              .map((category) => String(category ?? "").trim())
+              .filter(Boolean)
+          ),
+        ]
+      : PUBLIC_MEMORY_CATEGORIES;
 
-    if (!isLongMemoryEnabled() || !normalizedUserId) {
+    if (
+      !isLongMemoryEnabled() ||
+      !normalizedUserId ||
+      normalizedCategories.length === 0
+    ) {
       return [];
     }
 
@@ -150,11 +164,13 @@ const createDefaultStore = () => ({
         SELECT memory_id, user_id, category, memory_key, memory_value, text, source,
           confidence, created_at, updated_at, last_used_at
         FROM ${tableName}
-        WHERE user_id = $1 AND archived = FALSE
+        WHERE user_id = $1
+          AND category = ANY($3::text[])
+          AND archived = FALSE
         ORDER BY updated_at DESC
         LIMIT $2
       `,
-      [normalizedUserId, safeLimit]
+      [normalizedUserId, safeLimit, normalizedCategories]
     );
 
     return result.rows.map(mapRowToMemory);
@@ -505,9 +521,13 @@ export const resetLongMemoryStore = async () => {
   await resetLongMemoryPostgresPool();
 };
 
-export const listLongMemories = async ({ userId, limit = DEFAULT_LIST_LIMIT }) => {
+export const listLongMemories = async ({
+  userId,
+  limit = DEFAULT_LIST_LIMIT,
+  categories = PUBLIC_MEMORY_CATEGORIES,
+}) => {
   const store = getLongMemoryStore();
-  return store.list ? store.list({ userId, limit }) : [];
+  return store.list ? store.list({ userId, limit, categories }) : [];
 };
 
 export const rememberLongMemory = async (input) => {
@@ -533,6 +553,7 @@ export const getLongMemoryContext = async ({ userId, query }) => {
   }
 
   const memories = await listLongMemories({
+    categories: PUBLIC_MEMORY_CATEGORIES,
     userId: normalizedUserId,
     limit: DEFAULT_LIST_LIMIT,
   });

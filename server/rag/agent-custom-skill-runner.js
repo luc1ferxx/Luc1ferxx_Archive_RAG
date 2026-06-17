@@ -8,6 +8,23 @@ import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
 
+const buildSkillStepOutput = (result = {}) =>
+  result.ok
+    ? {
+        abstained: Boolean(result.abstained),
+        citationCount: result.citations?.length ?? 0,
+        text: result.text ?? "",
+      }
+    : null;
+
+const buildSkillStepError = (result = {}) =>
+  result.ok
+    ? null
+    : {
+        message: serializeError(result.error, "Unable to run custom skill."),
+        name: result.error?.name ?? "Error",
+      };
+
 export const runCustomSkills = async ({
   accessScope,
   addBudgetLimitTrace = noop,
@@ -79,6 +96,16 @@ export const runCustomSkills = async ({
       continue;
     }
 
+    const customInput = {
+      docIds,
+      question: chainQuestion,
+      retrievalPlan,
+      sessionId: sessionId ?? null,
+      skillId: customSkill.id,
+      skillVersion: customSkill.version,
+      userId: userId ?? null,
+    };
+
     addTraceStep({
       type: "custom_skill",
       label: customSkill.label,
@@ -91,6 +118,9 @@ export const runCustomSkills = async ({
             customResult.error,
             "Unable to run custom skill."
           )}`,
+      input: customInput,
+      output: buildSkillStepOutput(customResult),
+      error: buildSkillStepError(customResult),
       detail: buildSkillTraceDetail(customResult, {
         skillKind: customSkill.kind,
         chainMode: plan.mode === SKILL_CHAIN_MODE,

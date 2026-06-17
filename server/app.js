@@ -41,15 +41,32 @@ import { createJobOrchestrator } from "./rag/job-orchestrator.js";
 import { createDefaultAgentRunStore } from "./rag/agent-run-store.js";
 import { createAgentRunService } from "./rag/agent-runs.js";
 import { createAgentRunStepExecutor } from "./rag/agent-run-step-executor.js";
-import { createDocumentRagStepExecutor } from "./rag/agent-run-step-handlers.js";
+import {
+  createCustomSkillStepExecutor,
+  createDocumentRagStepExecutor,
+  createResearchQuestionStepExecutor,
+} from "./rag/agent-run-step-handlers/index.js";
 import { createRecommendationTaskService } from "./rag/recommendation-tasks.js";
 import { createDefaultTaskStore } from "./rag/task-store.js";
 import { createTaskService } from "./rag/tasks.js";
 import { runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
+import {
+  deterministicIntentPlannerAdapter,
+  llmIntentPlannerAdapter,
+} from "./rag/agent-intent-planner.js";
+import {
+  withPlannerRollout,
+  withShadowPlanner,
+} from "./rag/agent-planner-shadow.js";
+import { recordAgentExperienceFromFeedback } from "./rag/agent-experience-memory.js";
 import { createDefaultCapabilityRegistry } from "./rag/capabilities/index.js";
-import { getAgentExecutionPlanner } from "./rag/config.js";
+import {
+  getAgentExecutionPlanner,
+  getAgentIntentPlanner,
+  getAgentPlannerRollout,
+} from "./rag/config.js";
 import {
   clearUploadSession,
   configureUploadSessionDirectory,
@@ -69,10 +86,50 @@ const DEFAULT_UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
 const MAX_DIRECT_UPLOAD_SIZE = 50 * 1024 * 1024;
 const MAX_CHUNK_UPLOAD_SIZE = 5 * 1024 * 1024;
 
+const createRolloutPlannerAdapter = ({
+  configuredPlanner,
+  deterministicPlanner,
+  llmPlanner,
+} = {}) => {
+  const rollout = getAgentPlannerRollout();
+
+  if (rollout === "shadow") {
+    return withPlannerRollout(
+      withShadowPlanner(deterministicPlanner, llmPlanner),
+      rollout
+    );
+  }
+
+  if (rollout === "guarded_llm" || rollout === "llm") {
+    return withPlannerRollout(llmPlanner, rollout);
+  }
+
+  if (rollout === "deterministic") {
+    return withPlannerRollout(deterministicPlanner, rollout);
+  }
+
+  return configuredPlanner();
+};
+
 const createExecutionPlannerAdapter = () =>
-  getAgentExecutionPlanner() === "llm"
-    ? llmPlannerAdapter
-    : deterministicPlannerAdapter;
+  createRolloutPlannerAdapter({
+    configuredPlanner: () =>
+      getAgentExecutionPlanner() === "llm"
+        ? llmPlannerAdapter
+        : deterministicPlannerAdapter,
+    deterministicPlanner: deterministicPlannerAdapter,
+    llmPlanner: llmPlannerAdapter,
+  });
+
+const createIntentPlannerAdapter = () =>
+  createRolloutPlannerAdapter({
+    configuredPlanner: () =>
+      getAgentIntentPlanner() === "llm"
+        ? llmIntentPlannerAdapter
+        : deterministicIntentPlannerAdapter,
+    deterministicPlanner: deterministicIntentPlannerAdapter,
+    llmPlanner: llmIntentPlannerAdapter,
+  });
 
 const parseDocIds = (rawDocIds, fallbackDocId) => {
   if (Array.isArray(rawDocIds)) {
@@ -187,6 +244,7 @@ const buildChatResponse = async ({
   arxivImportService,
   capabilityRegistry,
   executionPlannerAdapter,
+  intentPlannerAdapter,
   ragService,
   webChatService,
   question,
@@ -227,6 +285,7 @@ const buildChatResponse = async ({
     agentRunId,
     capabilityApprovals,
     executionPlannerAdapter,
+    intentPlannerAdapter,
     skillRegistry,
   });
 };
@@ -310,8 +369,11 @@ export const createApp = async (options = {}) => {
   const capabilityRegistry =
     options.capabilityRegistry ??
     createDefaultCapabilityRegistry({
+      arxivEnrichmentService,
       arxivImportService,
       ragService,
+      recommendationImportService: options.recommendationImportService,
+      reportExportService: options.reportExportService,
       webChatService,
     });
   const agentRunStepExecutor =
@@ -319,7 +381,14 @@ export const createApp = async (options = {}) => {
     createAgentRunStepExecutor({
       agentRunService,
       capabilityRegistry,
+      executeCustomSkillStep: createCustomSkillStepExecutor({
+        ragService,
+        skillRegistry,
+      }),
       executeDocumentRagStep: createDocumentRagStepExecutor({
+        ragService,
+      }),
+      executeResearchQuestionStep: createResearchQuestionStepExecutor({
         ragService,
       }),
     });
@@ -345,9 +414,14 @@ export const createApp = async (options = {}) => {
     listFeedback,
     recordFeedback,
   };
+  const agentExperienceMemoryService = options.agentExperienceMemoryService ?? {
+    recordFromFeedback: recordAgentExperienceFromFeedback,
+  };
   const agentBudget = options.agentBudget ?? {};
   const executionPlannerAdapter =
     options.executionPlannerAdapter ?? createExecutionPlannerAdapter();
+  const intentPlannerAdapter =
+    options.intentPlannerAdapter ?? createIntentPlannerAdapter();
 
   const app = express();
   app.use(cors());
@@ -1038,6 +1112,14 @@ export const createApp = async (options = {}) => {
       });
       const storedFeedback = await feedbackService.recordFeedback(feedback);
 
+      try {
+        await agentExperienceMemoryService.recordFromFeedback?.({
+          feedback: storedFeedback,
+        });
+      } catch (error) {
+        console.error("Failed to record agent experience from feedback.", error);
+      }
+
       return res.status(201).json({
         feedback: storedFeedback,
       });
@@ -1233,6 +1315,7 @@ export const createApp = async (options = {}) => {
         userId,
         accessScope,
         executionPlannerAdapter,
+        intentPlannerAdapter,
         skillRegistry,
       });
 

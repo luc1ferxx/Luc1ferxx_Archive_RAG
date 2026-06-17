@@ -720,7 +720,7 @@ test("agent rag executes whitelisted custom timeline skill with access scope", a
   assert.equal(timelineRetrievalPlan.retrievalQueries.length, 3);
   assert.deepEqual(
     response.body.agentTrace.map((step) => step.type),
-    ["plan", "query_planner", "custom_skill", "synthesis", "answer_finalizer"]
+    ["plan", "query_planner", "custom_skill", "synthesis", "self_check", "answer_finalizer"]
   );
   assert.equal(
     response.body.agentTrace.find((step) => step.type === "answer_finalizer")
@@ -824,7 +824,7 @@ test("agent rag executes whitelisted custom risk review skill with access scope"
   assert.equal(riskRetrievalPlan.retrievalOptions.topK, 10);
   assert.deepEqual(
     response.body.agentTrace.map((step) => step.type),
-    ["plan", "query_planner", "custom_skill", "synthesis", "answer_finalizer"]
+    ["plan", "query_planner", "custom_skill", "synthesis", "self_check", "answer_finalizer"]
   );
   assert.deepEqual(response.body.agentSkills, [
     {
@@ -928,7 +928,7 @@ test("agent rag executes whitelisted custom contract summary skill with access s
   assert.equal(summaryRetrievalPlan.retrievalOptions.topK, 10);
   assert.deepEqual(
     response.body.agentTrace.map((step) => step.type),
-    ["plan", "query_planner", "custom_skill", "synthesis", "answer_finalizer"]
+    ["plan", "query_planner", "custom_skill", "synthesis", "self_check", "answer_finalizer"]
   );
   assert.deepEqual(response.body.agentSkills, [
     {
@@ -1040,6 +1040,7 @@ test("agent rag chains contract summary into risk review", async () => {
       "custom_skill",
       "custom_skill",
       "synthesis",
+      "self_check",
       "answer_finalizer",
     ]
   );
@@ -1409,7 +1410,7 @@ test("agent rag executes whitelisted custom compare documents skill with access 
   assert.equal(compareRetrievalPlan.retrievalOptions.topK, 8);
   assert.deepEqual(
     response.body.agentTrace.map((step) => step.type),
-    ["plan", "query_planner", "custom_skill", "synthesis", "answer_finalizer"]
+    ["plan", "query_planner", "custom_skill", "synthesis", "self_check", "answer_finalizer"]
   );
   assert.deepEqual(response.body.agentSkills, [
     {

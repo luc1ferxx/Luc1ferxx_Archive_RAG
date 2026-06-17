@@ -1,12 +1,8 @@
 import { readFile } from "fs/promises";
 import { getDocumentsPostgresTable } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
+import { createDocumentLegacyImporter } from "./document-legacy-importer.js";
 import { buildPublicFilePath } from "./document-utils.js";
-import {
-  fileExistsSync,
-  getRagDataPath,
-  readJsonFileSync,
-} from "./storage.js";
 import { queryPostgres } from "./postgres.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -15,8 +11,6 @@ let configuredDocumentRegistryStore = null;
 let documentRegistry = new Map();
 let documentRegistryInitialized = false;
 let legacyImportAttempted = false;
-
-const registryPath = () => getRagDataPath("documents.json");
 
 const toPositiveInteger = (value, fallbackValue = 0) => {
   const parsedValue = Number.parseInt(value ?? fallbackValue, 10);
@@ -205,25 +199,6 @@ const toPublicDocument = (document) =>
       }
     : null;
 
-const loadLegacyDocuments = () => {
-  const entries = readJsonFileSync(registryPath(), []);
-
-  return entries
-    .map((entry) => ({
-      docId: normalizeDocId(entry.docId),
-      fileName: String(entry.fileName ?? "").trim(),
-      sourceFilePath: String(entry.filePath ?? "").trim(),
-      mimeType: String(entry.mimeType ?? "application/pdf").trim() || "application/pdf",
-      fileSize: toPositiveInteger(entry.fileSize),
-      chunkCount: toPositiveInteger(entry.chunkCount),
-      pageCount: toPositiveInteger(entry.pageCount),
-      uploadedAt: entry.uploadedAt ?? new Date().toISOString(),
-    }))
-    .filter(
-      (entry) => entry.docId && entry.fileName && entry.sourceFilePath && fileExistsSync(entry.sourceFilePath)
-    );
-};
-
 const resolveFileBuffer = async ({ fileBuffer = null, sourceFilePath = "" } = {}) => {
   if (Buffer.isBuffer(fileBuffer)) {
     return fileBuffer;
@@ -248,39 +223,29 @@ const createDefaultStore = () => ({
       return true;
     }
 
-    const legacyDocuments = loadLegacyDocuments();
     legacyImportAttempted = true;
+    const legacyImporter = createDocumentLegacyImporter();
 
-    if (legacyDocuments.length === 0) {
-      return true;
-    }
+    await legacyImporter.importMissingDocuments({
+      getExistingDocIds: async (docIds = []) => {
+        if (docIds.length === 0) {
+          return new Set();
+        }
 
-    const tableName = ensureTableName();
-    const existing = await queryPostgres(
-      `
-        SELECT doc_id
-        FROM ${tableName}
-        WHERE doc_id = ANY($1::text[])
-      `,
-      [legacyDocuments.map((document) => document.docId)]
-    );
-    const existingDocIds = new Set(existing.rows.map((row) => String(row.doc_id)));
+        const tableName = ensureTableName();
+        const existing = await queryPostgres(
+          `
+            SELECT doc_id
+            FROM ${tableName}
+            WHERE doc_id = ANY($1::text[])
+          `,
+          [docIds]
+        );
 
-    for (const document of legacyDocuments) {
-      if (existingDocIds.has(document.docId)) {
-        continue;
-      }
-
-      const fileBuffer = await resolveFileBuffer({
-        sourceFilePath: document.sourceFilePath,
-      });
-
-      await this.upsert({
-        ...document,
-        fileBuffer,
-        fileSize: document.fileSize || fileBuffer.byteLength,
-      });
-    }
+        return new Set(existing.rows.map((row) => String(row.doc_id)));
+      },
+      upsertDocument: (document) => this.upsert(document),
+    });
 
     return true;
   },

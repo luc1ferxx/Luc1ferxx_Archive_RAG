@@ -42,6 +42,14 @@ export const getExecutionPlanner = (responseOrBody = {}) => {
     : null;
 };
 
+export const getIntentPlanner = (responseOrBody = {}) => {
+  const observability = getAgentObservability(responseOrBody);
+
+  return isPlainObject(observability.intentPlanner)
+    ? observability.intentPlanner
+    : null;
+};
+
 export const getObservedSkills = (responseOrBody = {}) =>
   normalizeArray(getAgentObservability(responseOrBody).skills);
 
@@ -114,6 +122,7 @@ export const buildPlannerResponseSummary = ({ response, telemetry = {} } = {}) =
   return {
     agentMode: body.agentMode ?? null,
     agentSkills: body.agentSkills ?? [],
+    intentPlanner: getIntentPlanner(response),
     planner: getExecutionPlanner(response),
     selectedSkills: getSelectedSkills(response),
     skillChain: getSkillChain(response),

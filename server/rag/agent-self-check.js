@@ -1,10 +1,26 @@
 import { extractMeaningfulTokens, normalizeSearchText } from "./text-utils.js";
 
-const getCitationDocIds = (citations = []) =>
+export const CHECKABLE_CITATION_FIELDS = [
+  "excerpt",
+  "text",
+  "pageContent",
+  "content",
+];
+
+const normalizeEvidenceText = (value) => String(value ?? "").trim();
+
+export const getCitationDocIds = (citations = []) =>
   new Set(
     citations
       .map((citation) => citation?.docId)
       .filter((docId) => typeof docId === "string" && docId.trim())
+  );
+
+export const hasCheckableCitationText = (citations = []) =>
+  citations.some((citation) =>
+    CHECKABLE_CITATION_FIELDS.some((field) =>
+      normalizeEvidenceText(citation?.[field])
+    )
   );
 
 const SOURCE_LABEL_PATTERN = /\[(?:source|来源)\s*\d+\]/gi;
@@ -43,12 +59,7 @@ const extractClaimAnchors = (claimText = "") =>
 const buildCitationSupportText = (citations = []) =>
   citations
     .map((citation) =>
-      [
-        citation?.excerpt,
-        citation?.text,
-        citation?.pageContent,
-        citation?.content,
-      ]
+      CHECKABLE_CITATION_FIELDS.map((field) => citation?.[field])
         .filter(Boolean)
         .join(" ")
     )
@@ -140,6 +151,76 @@ const getEvidenceScore = (ragResult) => {
   );
 };
 
+export const evaluateAnswerEvidence = ({
+  answerLabel = "Document answer",
+  answerText = "",
+  citations = [],
+  docIds = [],
+  emptyAnswerReason = `${answerLabel} is empty.`,
+  initialReasons = [],
+  missingCheckableCitationReason = `${answerLabel} citations do not include checkable evidence text.`,
+  missingCitationReason = `${answerLabel} has no citations.`,
+  normalizeClaimSupport = (claimSupport) => claimSupport,
+  requireCheckableCitationText = false,
+  requireDocCoverage = true,
+  retryRecommended = false,
+  unsupportedClaimReason = (claimCount) =>
+    `${claimCount} answer claim${claimCount === 1 ? "" : "s"} lacks citation support.`,
+} = {}) => {
+  const safeCitations = Array.isArray(citations) ? citations : [];
+  const safeDocIds = Array.isArray(docIds) ? docIds : [];
+  const citedDocIds = getCitationDocIds(safeCitations);
+  const requiredDocCoverage = requireDocCoverage
+    ? Math.min(Math.max(safeDocIds.length, 1), 2)
+    : 0;
+  const claimSupport = normalizeClaimSupport(
+    evaluateClaimSupport({
+      answerText,
+      citations: safeCitations,
+    })
+  );
+  const reasons = [...initialReasons];
+
+  if (!normalizeEvidenceText(answerText)) {
+    reasons.push(emptyAnswerReason);
+  }
+
+  if (safeCitations.length === 0) {
+    reasons.push(missingCitationReason);
+  }
+
+  if (requireCheckableCitationText && !hasCheckableCitationText(safeCitations)) {
+    reasons.push(missingCheckableCitationReason);
+  }
+
+  if (requiredDocCoverage > 1 && citedDocIds.size < requiredDocCoverage) {
+    reasons.push(
+      `Citations cover ${citedDocIds.size} of ${requiredDocCoverage} required documents.`
+    );
+  }
+
+  if (claimSupport.unsupportedClaimCount > 0) {
+    reasons.push(unsupportedClaimReason(claimSupport.unsupportedClaimCount));
+  }
+
+  const result = {
+    answerLabel,
+    citationCount: safeCitations.length,
+    citedDocCount: citedDocIds.size,
+    claimSupport,
+    passed: reasons.length === 0,
+    reasons,
+    requiredCitationCount: 1,
+    requiredDocCoverage,
+    retryRecommended,
+  };
+
+  return {
+    ...result,
+    gaps: buildEvidenceGaps(result),
+  };
+};
+
 export const evaluateDocumentEvidence = ({ ragResult, docIds = [] } = {}) => {
   if (!ragResult?.ok) {
     return {
@@ -161,62 +242,30 @@ export const evaluateDocumentEvidence = ({ ragResult, docIds = [] } = {}) => {
   }
 
   const value = ragResult.value ?? {};
-  const citations = value.citations ?? [];
-  const citedDocIds = getCitationDocIds(citations);
-  const requiredDocCoverage = Math.min(Math.max(docIds.length, 1), 2);
-  const claimSupport = evaluateClaimSupport({
+  const result = evaluateAnswerEvidence({
+    answerLabel: "Document answer",
     answerText: value.text,
-    citations,
+    citations: value.citations ?? [],
+    docIds,
+    emptyAnswerReason: "Document answer is empty.",
+    initialReasons: value.abstained
+      ? ["Document RAG explicitly reported insufficient evidence."]
+      : [],
+    missingCitationReason: "Document answer has no citations.",
+    requireDocCoverage: true,
+    retryRecommended: false,
   });
-  const reasons = [];
-
-  if (value.abstained) {
-    reasons.push("Document RAG explicitly reported insufficient evidence.");
-  }
-
-  if (!value.text?.trim()) {
-    reasons.push("Document answer is empty.");
-  }
-
-  if (citations.length === 0) {
-    reasons.push("Document answer has no citations.");
-  }
-
-  if (docIds.length > 1 && citedDocIds.size < requiredDocCoverage) {
-    reasons.push(
-      `Citations cover ${citedDocIds.size} of ${requiredDocCoverage} required documents.`
-    );
-  }
-
-  if (claimSupport.unsupportedClaimCount > 0) {
-    reasons.push(
-      `${claimSupport.unsupportedClaimCount} answer claim${
-        claimSupport.unsupportedClaimCount === 1 ? "" : "s"
-      } lacks citation support.`
-    );
-  }
-
-  const passed = reasons.length === 0;
-
-  const result = {
-    passed,
-    retryRecommended: !passed && !value.abstained && ragResult.ok,
-    reasons,
-    citationCount: citations.length,
-    citedDocCount: citedDocIds.size,
-    requiredCitationCount: 1,
-    requiredDocCoverage,
-    claimSupport,
-  };
+  const retryRecommended = !result.passed && !value.abstained && ragResult.ok;
 
   return {
     ...result,
-    gaps: buildEvidenceGaps(result),
+    retryRecommended,
   };
 };
 
 export function buildEvidenceGaps(check = {}) {
   const gaps = [];
+  const answerLabel = check.answerLabel ?? "Document answer";
 
   if (check.reasons?.some((reason) => /insufficient evidence/i.test(reason))) {
     gaps.push({
@@ -230,7 +279,7 @@ export function buildEvidenceGaps(check = {}) {
     gaps.push({
       type: "empty_answer",
       severity: "blocking",
-      message: "Document answer is empty.",
+      message: `${answerLabel} is empty.`,
     });
   }
 
@@ -238,7 +287,7 @@ export function buildEvidenceGaps(check = {}) {
     gaps.push({
       type: "missing_citations",
       severity: "blocking",
-      message: "Document answer has no citations.",
+      message: `${answerLabel} has no citations.`,
     });
   }
 

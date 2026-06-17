@@ -1,4 +1,10 @@
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
+import {
+  getPlannerRolloutMode,
+  getShadowPlannerAdapter,
+  runShadowPlanner,
+  sameStringList,
+} from "./agent-planner-shadow.js";
 
 export const AGENT_EXECUTION_STEP_IDS = {
   arxivImport: "arxiv_import",
@@ -388,9 +394,18 @@ export const createAgentExecutionPlanResult = async ({
   plannerContext = {},
   registry,
   selectedSkills = [],
+  shadowPlannerAdapter = getShadowPlannerAdapter(plannerAdapter),
 } = {}) => {
   const fallbackPlannerId = normalizePlannerId(fallbackPlannerAdapter);
   const requestedPlannerId = normalizePlannerId(plannerAdapter);
+  const rolloutMode = getPlannerRolloutMode(plannerAdapter);
+  const withRolloutMetadata = (planner = {}) =>
+    rolloutMode
+      ? {
+          ...planner,
+          rolloutMode,
+        }
+      : planner;
   const createFallbackPlan = async () =>
     validateAgentExecutionPlan({
       accessScope,
@@ -401,17 +416,54 @@ export const createAgentExecutionPlanResult = async ({
       selectedSkills,
     });
 
+  const attachShadowPlanner = async (result) => {
+    const shadow = await runShadowPlanner({
+      compare: ({ primary, shadow }) =>
+        !sameStringList(
+          primary?.executionPlan?.map((step) => step.id),
+          shadow?.map((step) => step.id)
+        ),
+      describe: (shadowExecutionPlan) => ({
+        stepIds: shadowExecutionPlan.map((step) => step.id),
+      }),
+      execute: async (adapter) =>
+        validateAgentExecutionPlan({
+          accessScope,
+          executionPlan: await adapter.createExecutionPlan(plannerContext),
+          registry,
+          selectedSkills,
+        }),
+      primary: result,
+      shadowPlannerAdapter,
+    });
+
+    if (!shadow) {
+      return {
+        ...result,
+        planner: withRolloutMetadata(result.planner),
+      };
+    }
+
+    return {
+      ...result,
+      planner: {
+        ...withRolloutMetadata(result.planner),
+        shadow,
+      },
+    };
+  };
+
   if (!plannerAdapter || plannerAdapter === fallbackPlannerAdapter) {
     const executionPlan = await createFallbackPlan();
 
-    return {
+    return attachShadowPlanner({
       executionPlan,
       planner: buildPlannerSelection({
         executionPlan,
         requestedPlannerId: fallbackPlannerId,
         selectedPlannerId: fallbackPlannerId,
       }),
-    };
+    });
   }
 
   try {
@@ -422,18 +474,18 @@ export const createAgentExecutionPlanResult = async ({
       selectedSkills,
     });
 
-    return {
+    return attachShadowPlanner({
       executionPlan,
       planner: buildPlannerSelection({
         executionPlan,
         requestedPlannerId,
         selectedPlannerId: requestedPlannerId,
       }),
-    };
+    });
   } catch (error) {
     const executionPlan = await createFallbackPlan();
 
-    return {
+    return attachShadowPlanner({
       executionPlan,
       planner: buildPlannerSelection({
         executionPlan,
@@ -442,7 +494,7 @@ export const createAgentExecutionPlanResult = async ({
         requestedPlannerId,
         selectedPlannerId: fallbackPlannerId,
       }),
-    };
+    });
   }
 };
 

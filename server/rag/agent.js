@@ -4,7 +4,15 @@ import {
   deterministicPlannerAdapter,
 } from "./agent-execution-plan.js";
 import { runAgentExecutionPlan } from "./agent-execution-plan-runner.js";
+import {
+  getAgentExperienceMemoryContext,
+  recordAgentExperienceFromRun,
+} from "./agent-experience-memory.js";
 import { finalizeAgentRun } from "./agent-finalization-flow.js";
+import {
+  createAgentIntentPlanResult,
+  deterministicIntentPlannerAdapter,
+} from "./agent-intent-planner.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
 import { AGENT_RUN_STATUSES } from "./agent-runs.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
@@ -116,6 +124,10 @@ const buildRunCompletionPayload = (response = {}, existingRun = {}) => {
         type: "execution_planner",
         value: agentObservability.executionPlanner ?? null,
       },
+      {
+        type: "intent_planner",
+        value: agentObservability.intentPlanner ?? null,
+      },
     ],
     observations: agentObservability.skills ?? [],
     result: {
@@ -152,6 +164,74 @@ const completeRecordedRun = async ({
   });
 };
 
+const loadAgentExperienceMemorySafely = async ({
+  accessScope,
+  docIds,
+  question,
+  userId,
+} = {}) => {
+  try {
+    return await getAgentExperienceMemoryContext({
+      accessScope,
+      docIds,
+      question,
+      userId,
+    });
+  } catch (error) {
+    console.error("Failed to load agent experience memory.", error);
+
+    return {
+      memories: [],
+      memoryApplied: false,
+      plannerBlock: "",
+      planningHints: [],
+    };
+  }
+};
+
+const recordAgentExperienceSafely = async ({
+  accessScope,
+  question,
+  response,
+  userId,
+} = {}) => {
+  try {
+    await recordAgentExperienceFromRun({
+      accessScope,
+      question,
+      response,
+      userId,
+    });
+  } catch (error) {
+    console.error("Failed to record agent experience memory.", error);
+  }
+};
+
+const completeRecordedRunAndExperience = async ({
+  accessScope,
+  agentRunService,
+  question,
+  response,
+  runId,
+  userId,
+} = {}) => {
+  const completedRun = await completeRecordedRun({
+    accessScope,
+    agentRunService,
+    response,
+    runId,
+  });
+
+  await recordAgentExperienceSafely({
+    accessScope,
+    question,
+    response,
+    userId,
+  });
+
+  return completedRun;
+};
+
 const withCapabilityApprovals = (capabilityRegistry, approvals = {}) => {
   if (!capabilityRegistry || Object.keys(approvals).length === 0) {
     return capabilityRegistry;
@@ -182,8 +262,22 @@ export const runAgentRag = async ({
   agentRunId: requestedAgentRunId,
   capabilityApprovals = {},
   executionPlannerAdapter,
+  intentPlannerAdapter,
   skillRegistry,
 }) => {
+  const agentExperienceMemory = await loadAgentExperienceMemorySafely({
+    accessScope,
+    docIds,
+    question,
+    userId,
+  });
+  const intentPlanResult = await createAgentIntentPlanResult({
+    docIds,
+    experienceMemory: agentExperienceMemory,
+    fallbackPlannerAdapter: deterministicIntentPlannerAdapter,
+    plannerAdapter: intentPlannerAdapter ?? deterministicIntentPlannerAdapter,
+    question,
+  });
   const {
     addBudgetLimitTrace,
     addTraceStep,
@@ -214,6 +308,9 @@ export const runAgentRag = async ({
   } = createAgentSession({
     agentBudget,
     docIds,
+    experienceMemory: agentExperienceMemory,
+    intentPlanner: intentPlanResult.planner,
+    plan: intentPlanResult.plan,
     question,
     skillRegistry,
   });
@@ -293,11 +390,13 @@ export const runAgentRag = async ({
     if (preparationResult.response) {
       const response = attachAgentRunId(preparationResult.response, agentRunId);
 
-      const completedRun = await completeRecordedRun({
+      const completedRun = await completeRecordedRunAndExperience({
         accessScope,
         agentRunService,
+        question,
         response,
         runId: agentRunId,
+        userId,
       });
 
       return attachAgentRunSnapshot(response, completedRun);
@@ -362,11 +461,13 @@ export const runAgentRag = async ({
     if (executionResult.response) {
       const response = attachAgentRunId(executionResult.response, agentRunId);
 
-      const completedRun = await completeRecordedRun({
+      const completedRun = await completeRecordedRunAndExperience({
         accessScope,
         agentRunService,
+        question,
         response,
         runId: agentRunId,
+        userId,
       });
 
       return attachAgentRunSnapshot(response, completedRun);
@@ -380,6 +481,7 @@ export const runAgentRag = async ({
         customSkillResults: executionResult.customSkillResults,
         customSkills: executionResult.customSkills,
         discoveryAnswer: executionResult.discoveryAnswer,
+        docIds,
         documentRagSkill: executionResult.documentRagSkill,
         getAgentSkills,
         getBudgetSnapshot,
@@ -389,6 +491,7 @@ export const runAgentRag = async ({
         ragResult: executionResult.ragResult,
         recordAgentTrace,
         recordWorkingMemoryClaimSupport,
+        recordWorkingMemoryGaps,
         researchBrief: executionResult.researchBrief,
         shouldRunWeb: executionResult.shouldRunWeb,
         skippedWebBecauseBudget: executionResult.skippedWebBecauseBudget,
@@ -399,11 +502,13 @@ export const runAgentRag = async ({
       agentRunId
     );
 
-    const completedRun = await completeRecordedRun({
+    const completedRun = await completeRecordedRunAndExperience({
       accessScope,
       agentRunService,
+      question,
       response,
       runId: agentRunId,
+      userId,
     });
 
     return attachAgentRunSnapshot(response, completedRun);
@@ -428,11 +533,13 @@ export const runAgentRag = async ({
         agentRunId
       );
 
-      const completedRun = await completeRecordedRun({
+      const completedRun = await completeRecordedRunAndExperience({
         accessScope,
         agentRunService,
+        question,
         response,
         runId: agentRunId,
+        userId,
       });
 
       return attachAgentRunSnapshot(response, completedRun);
