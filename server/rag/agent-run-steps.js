@@ -35,6 +35,38 @@ export const AGENT_RUN_STEP_KINDS = Object.freeze({
 const VALID_STEP_STATUSES = new Set(Object.values(AGENT_RUN_STEP_STATUSES));
 const VALID_STEP_KINDS = new Set(Object.values(AGENT_RUN_STEP_KINDS));
 
+const AGENT_RUN_STEP_STATUS_TRANSITIONS = Object.freeze({
+  [AGENT_RUN_STEP_STATUSES.pending]: new Set([
+    AGENT_RUN_STEP_STATUSES.failed,
+    AGENT_RUN_STEP_STATUSES.paused,
+    AGENT_RUN_STEP_STATUSES.pending,
+    AGENT_RUN_STEP_STATUSES.running,
+    AGENT_RUN_STEP_STATUSES.skipped,
+  ]),
+  [AGENT_RUN_STEP_STATUSES.running]: new Set([
+    AGENT_RUN_STEP_STATUSES.completed,
+    AGENT_RUN_STEP_STATUSES.failed,
+    AGENT_RUN_STEP_STATUSES.paused,
+    AGENT_RUN_STEP_STATUSES.running,
+  ]),
+  [AGENT_RUN_STEP_STATUSES.paused]: new Set([
+    AGENT_RUN_STEP_STATUSES.completed,
+    AGENT_RUN_STEP_STATUSES.failed,
+    AGENT_RUN_STEP_STATUSES.paused,
+    AGENT_RUN_STEP_STATUSES.running,
+    AGENT_RUN_STEP_STATUSES.skipped,
+  ]),
+  [AGENT_RUN_STEP_STATUSES.completed]: new Set([
+    AGENT_RUN_STEP_STATUSES.completed,
+  ]),
+  [AGENT_RUN_STEP_STATUSES.failed]: new Set([
+    AGENT_RUN_STEP_STATUSES.failed,
+  ]),
+  [AGENT_RUN_STEP_STATUSES.skipped]: new Set([
+    AGENT_RUN_STEP_STATUSES.skipped,
+  ]),
+});
+
 const TOOL_TRACE_TYPES = new Set([
   "arxiv_import",
   "custom_skill",
@@ -76,6 +108,34 @@ export const normalizeAgentRunStepStatus = (status) => {
   return VALID_STEP_STATUSES.has(normalizedStatus)
     ? normalizedStatus
     : AGENT_RUN_STEP_STATUSES.pending;
+};
+
+const isKnownAgentRunStepStatus = (status) => {
+  const normalizedStatus = normalizeText(status).toLowerCase();
+
+  return (
+    normalizedStatus === "needs_input" ||
+    VALID_STEP_STATUSES.has(normalizedStatus)
+  );
+};
+
+const buildStepStatusError = (message, status = 409) => {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+};
+
+export const assertAgentRunStepStatusTransition = ({ from, to } = {}) => {
+  const fromStatus = normalizeAgentRunStepStatus(from);
+  const toStatus = normalizeAgentRunStepStatus(to);
+  const allowedStatuses =
+    AGENT_RUN_STEP_STATUS_TRANSITIONS[fromStatus] ?? new Set();
+
+  if (!allowedStatuses.has(toStatus)) {
+    throw buildStepStatusError(
+      `Invalid agent run step status transition: ${fromStatus} -> ${toStatus}.`
+    );
+  }
 };
 
 const normalizeAgentRunStepKind = (kind) => {
@@ -248,6 +308,18 @@ export const updateAgentRunStep = ({
 
     const nextStatus =
       status === undefined ? step.status : normalizeAgentRunStepStatus(status);
+    if (status !== undefined && !isKnownAgentRunStepStatus(status)) {
+      throw buildStepStatusError(
+        `Unsupported agent run step status: ${status}.`,
+        400
+      );
+    }
+    if (status !== undefined) {
+      assertAgentRunStepStatusTransition({
+        from: step.status,
+        to: nextStatus,
+      });
+    }
     const timestamps = getStepTimestamps({
       existingStep: step,
       status: nextStatus,

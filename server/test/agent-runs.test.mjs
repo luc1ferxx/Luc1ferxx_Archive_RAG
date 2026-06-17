@@ -222,3 +222,204 @@ test("agent run service queues a retry for a single persisted step", async () =>
     ["run_created", "run_failed", "step_retry_queued"]
   );
 });
+
+test("agent run service rejects invalid run status transitions", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await assert.rejects(
+    () =>
+      agentRunService.createRun({
+        accessScope,
+        goal: "Already done",
+        runId: "invalid-initial-run",
+        status: AGENT_RUN_STATUSES.completed,
+      }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(error.message, /Invalid initial agent run status: completed/);
+      return true;
+    }
+  );
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Terminal run",
+    runId: "terminal-run",
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    runId: "terminal-run",
+  });
+
+  await assert.rejects(
+    () =>
+      agentRunService.completeRun({
+        accessScope,
+        runId: "terminal-run",
+        status: AGENT_RUN_STATUSES.waitingForUser,
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(
+        error.message,
+        /Invalid agent run status transition: completed -> waiting_for_user/
+      );
+      return true;
+    }
+  );
+
+  await assert.rejects(
+    () =>
+      agentRunService.updateRun({
+        accessScope,
+        runId: "terminal-run",
+        patch: {
+          status: AGENT_RUN_STATUSES.running,
+        },
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(
+        error.message,
+        /Invalid agent run status transition: completed -> running/
+      );
+      return true;
+    }
+  );
+
+  await assert.rejects(
+    () =>
+      agentRunService.failRun({
+        accessScope,
+        error: new Error("Late failure"),
+        runId: "terminal-run",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(
+        error.message,
+        /Invalid agent run status transition: completed -> failed/
+      );
+      return true;
+    }
+  );
+
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId: "terminal-run",
+  });
+
+  assert.equal(run.status, AGENT_RUN_STATUSES.completed);
+  assert.deepEqual(
+    run.events.map((event) => event.type),
+    ["run_created", "run_completed"]
+  );
+});
+
+test("agent run service retries steps only from terminal runs", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Running run",
+    runId: "running-run",
+  });
+  await agentRunService.updateRun({
+    accessScope,
+    runId: "running-run",
+    patch: {
+      steps: [
+        {
+          id: "document-step",
+          type: "document_rag",
+          kind: "tool_call",
+          label: "Document RAG",
+          status: "completed",
+        },
+      ],
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      agentRunService.retryStep({
+        accessScope,
+        runId: "running-run",
+        stepId: "document-step",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /only be retried from completed or failed runs/);
+      return true;
+    }
+  );
+});
+
+test("agent run service rejects invalid step status transitions", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Step transition run",
+    runId: "step-transition-run",
+  });
+  await agentRunService.updateRun({
+    accessScope,
+    runId: "step-transition-run",
+    patch: {
+      steps: [
+        {
+          id: "document-step",
+          type: "document_rag",
+          kind: "tool_call",
+          label: "Document RAG",
+          status: "completed",
+        },
+      ],
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      agentRunService.updateRunStep({
+        accessScope,
+        runId: "step-transition-run",
+        status: "running",
+        stepId: "document-step",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(
+        error.message,
+        /Invalid agent run step status transition: completed -> running/
+      );
+      return true;
+    }
+  );
+
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId: "step-transition-run",
+  });
+
+  assert.equal(run.steps[0].status, "completed");
+  assert.deepEqual(run.events.map((event) => event.type), ["run_created"]);
+});

@@ -32,6 +32,34 @@ export const AGENT_RUN_ACTIONS = Object.freeze({
 });
 
 const VALID_AGENT_RUN_STATUSES = new Set(Object.values(AGENT_RUN_STATUSES));
+const INITIAL_AGENT_RUN_STATUSES = new Set([
+  AGENT_RUN_STATUSES.running,
+  AGENT_RUN_STATUSES.waitingForUser,
+]);
+const RETRYABLE_AGENT_RUN_STATUSES = new Set([
+  AGENT_RUN_STATUSES.completed,
+  AGENT_RUN_STATUSES.failed,
+]);
+const AGENT_RUN_STATUS_TRANSITIONS = Object.freeze({
+  [AGENT_RUN_STATUSES.running]: new Set([
+    AGENT_RUN_STATUSES.completed,
+    AGENT_RUN_STATUSES.failed,
+    AGENT_RUN_STATUSES.running,
+    AGENT_RUN_STATUSES.waitingForUser,
+  ]),
+  [AGENT_RUN_STATUSES.waitingForUser]: new Set([
+    AGENT_RUN_STATUSES.completed,
+    AGENT_RUN_STATUSES.failed,
+    AGENT_RUN_STATUSES.running,
+    AGENT_RUN_STATUSES.waitingForUser,
+  ]),
+  [AGENT_RUN_STATUSES.completed]: new Set([
+    AGENT_RUN_STATUSES.completed,
+  ]),
+  [AGENT_RUN_STATUSES.failed]: new Set([
+    AGENT_RUN_STATUSES.failed,
+  ]),
+});
 
 const normalizeAgentRunStatus = (status) => {
   const normalizedStatus = normalizeText(status);
@@ -39,6 +67,62 @@ const normalizeAgentRunStatus = (status) => {
   return VALID_AGENT_RUN_STATUSES.has(normalizedStatus)
     ? normalizedStatus
     : AGENT_RUN_STATUSES.running;
+};
+
+const isKnownAgentRunStatus = (status) =>
+  VALID_AGENT_RUN_STATUSES.has(normalizeText(status));
+
+const buildRunStatusError = (message, status = 409) => {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+};
+
+const assertKnownAgentRunStatus = (status) => {
+  if (!isKnownAgentRunStatus(status)) {
+    throw buildRunStatusError(`Unsupported agent run status: ${status}.`, 400);
+  }
+
+  return normalizeAgentRunStatus(status);
+};
+
+const assertInitialAgentRunStatus = (status) => {
+  const normalizedStatus = assertKnownAgentRunStatus(status);
+
+  if (!INITIAL_AGENT_RUN_STATUSES.has(normalizedStatus)) {
+    throw buildRunStatusError(
+      `Invalid initial agent run status: ${normalizedStatus}.`,
+      400
+    );
+  }
+
+  return normalizedStatus;
+};
+
+export const assertAgentRunStatusTransition = ({
+  allowRetryTransition = false,
+  from,
+  to,
+} = {}) => {
+  const fromStatus = assertKnownAgentRunStatus(from);
+  const toStatus = assertKnownAgentRunStatus(to);
+  const allowedStatuses = AGENT_RUN_STATUS_TRANSITIONS[fromStatus] ?? new Set();
+
+  if (
+    allowRetryTransition &&
+    RETRYABLE_AGENT_RUN_STATUSES.has(fromStatus) &&
+    toStatus === AGENT_RUN_STATUSES.running
+  ) {
+    return toStatus;
+  }
+
+  if (!allowedStatuses.has(toStatus)) {
+    throw buildRunStatusError(
+      `Invalid agent run status transition: ${fromStatus} -> ${toStatus}.`
+    );
+  }
+
+  return toStatus;
 };
 
 export const normalizeAgentRunEvent = (event = {}) => {
@@ -357,11 +441,12 @@ export const createAgentRunService = ({
     runId = randomUUID(),
     status = AGENT_RUN_STATUSES.running,
   } = {}) {
+    const initialStatus = assertInitialAgentRunStatus(status);
     const run = await agentRunStore.create({
       accessScope,
       run: {
         runId,
-        status,
+        status: initialStatus,
         goal,
         input,
         plan,
@@ -401,7 +486,29 @@ export const createAgentRunService = ({
     });
   },
 
-  async updateRun({ accessScope = {}, runId, patch = {} } = {}) {
+  async updateRun({
+    accessScope = {},
+    allowRetryTransition = false,
+    runId,
+    patch = {},
+  } = {}) {
+    const existingRun = await this.getRun({
+      accessScope,
+      runId,
+    });
+
+    if (!existingRun) {
+      return null;
+    }
+
+    if (patch.status !== undefined) {
+      assertAgentRunStatusTransition({
+        allowRetryTransition,
+        from: existingRun.status,
+        to: patch.status,
+      });
+    }
+
     const run = await agentRunStore.update?.({
       accessScope,
       runId,
@@ -646,6 +753,14 @@ export const createAgentRunService = ({
       throw error;
     }
 
+    if (!RETRYABLE_AGENT_RUN_STATUSES.has(existingRun.status)) {
+      const error = new Error(
+        "Agent run steps can only be retried from completed or failed runs."
+      );
+      error.status = 409;
+      throw error;
+    }
+
     const retryResult = queueAgentRunStepRetry({
       stepId,
       steps: existingRun.steps,
@@ -658,6 +773,7 @@ export const createAgentRunService = ({
     }
 
     const run = await this.updateRun({
+      allowRetryTransition: true,
       accessScope,
       runId,
       patch: {
