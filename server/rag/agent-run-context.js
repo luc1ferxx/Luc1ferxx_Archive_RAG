@@ -121,7 +121,7 @@ export const createAgentRunContext = ({
       status,
     });
 
-  const returnClarification = async (clarification) => {
+  const returnClarification = async (clarification, responseContext = {}) => {
     const agentMode = "clarification";
 
     addTraceStep({
@@ -157,6 +157,7 @@ export const createAgentRunContext = ({
       agentObservability,
       workingMemory,
       question,
+      ...responseContext,
     });
   };
 

@@ -265,7 +265,52 @@ test("agent rag executes selected skills with access scope and reports skill met
   assert.equal(response.body.agentObservability.runs[0].citationCount, 1);
 });
 
-test("agent rag imports arxiv papers as a direct built-in skill", async () => {
+test("agent rag pauses arxiv import behind a capability approval gate", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const imports = [];
+  const response = await runAgentRag({
+    accessScope,
+    arxivImportService: {
+      importTopic: async () => {
+        imports.push("called");
+
+        return {};
+      },
+    },
+    docIds: [],
+    question: "帮我从 arXiv 抓取 2 篇关于 retrieval augmented generation 的论文",
+    ragService: {
+      listDocuments: () => [],
+    },
+    sessionId: "session-1",
+    userId: "alice",
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(imports.length, 0);
+  assert.equal(response.body.agentMode, "clarification");
+  assert.equal(response.body.clarification.reason, "capability_approval_required");
+  assert.equal(
+    response.body.approvalGates[0].capabilityId,
+    CAPABILITY_IDS.arxivImportTopic
+  );
+  assert.deepEqual(response.body.approvalGates[0].inputPreview, {
+    maxResults: 2,
+    topic: "retrieval augmented generation",
+  });
+  assert.deepEqual(
+    response.body.agentTrace.map((step) => step.type),
+    ["plan", "capability_approval_gate"]
+  );
+});
+
+test("agent rag imports arxiv papers after approved capability boundary", async () => {
   const accessScope = {
     userId: "alice",
     workspaceId: "workspace-a",
@@ -302,6 +347,13 @@ test("agent rag imports arxiv papers as a direct built-in skill", async () => {
           skippedPapers: [],
           failedPapers: [],
         };
+      },
+    },
+    capabilityApprovals: {
+      [CAPABILITY_IDS.arxivImportTopic]: {
+        approved: true,
+        decision: "approved",
+        source: "test_approval",
       },
     },
     docIds: [],

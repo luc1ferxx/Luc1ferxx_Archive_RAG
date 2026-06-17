@@ -1,4 +1,5 @@
 import { runDocumentRagLoop } from "./agent-document-loop.js";
+import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import {
   AGENT_EXECUTION_STEP_IDS,
   createDeterministicAgentExecutionPlan,
@@ -239,7 +240,15 @@ export const runAgentExecutionPlan = async ({
       throw new Error(`Unknown AgentRAG execution step: ${step.id}.`);
     }
 
-    await runStep(step);
+    try {
+      await runStep(step);
+    } catch (error) {
+      if (isAgentRunInterrupt(error)) {
+        error.agentExecutionState = state;
+      }
+
+      throw error;
+    }
 
     if (state.response) {
       return state;

@@ -28,38 +28,52 @@ export const buildClarificationResponse = ({
   agentObservability,
   workingMemory,
   question,
-} = {}) => ({
-  status: 200,
-  body: {
-    agentAnswer: clarification.question,
-    agentMode,
-    agentTrace: trace,
-    agentSkills,
-    agentObservability,
-    agentWorkingMemory: workingMemory,
-    researchBrief: null,
-    ragAnswer: clarification.question,
-    ragSources: [],
-    ragResolvedQuestion: question,
-    ragMemoryApplied: false,
-    ragAbstained: true,
-    ragAbstainReason: clarification.summary,
-    ragGapPlan: null,
-    ragEvidenceSummary: null,
-    mcpAnswer: "Web search not used: clarification needed.",
-    approvalGates: clarification.detail?.approvalGates ?? [],
-    clarification: {
-      needed: true,
-      reason: clarification.reason,
-      question: clarification.question,
-      detail: clarification.detail ?? null,
+  ragResult,
+} = {}) => {
+  const hasRagResult = ragResult?.ok;
+  const ragValue = hasRagResult ? ragResult.value ?? {} : {};
+
+  return {
+    status: 200,
+    body: {
+      agentAnswer: clarification.question,
+      agentMode,
+      agentTrace: trace,
+      agentSkills,
+      agentObservability,
+      agentWorkingMemory: workingMemory,
+      researchBrief: null,
+      ragAnswer: hasRagResult ? ragValue.text : clarification.question,
+      ragSources: hasRagResult
+        ? ragResult.citations ?? ragValue.citations ?? []
+        : [],
+      ragResolvedQuestion: hasRagResult
+        ? ragValue.resolvedQuery ?? question
+        : question,
+      ragMemoryApplied: hasRagResult ? Boolean(ragValue.memoryApplied) : false,
+      ragAbstained: hasRagResult ? Boolean(ragValue.abstained) : true,
+      ragAbstainReason: hasRagResult
+        ? ragValue.abstainReason ?? null
+        : clarification.summary,
+      ragGapPlan: hasRagResult ? ragValue.gapPlan ?? null : null,
+      ragEvidenceSummary: hasRagResult
+        ? ragValue.evidenceSummary ?? null
+        : null,
+      mcpAnswer: "Web search not used: clarification needed.",
+      approvalGates: clarification.detail?.approvalGates ?? [],
+      clarification: {
+        needed: true,
+        reason: clarification.reason,
+        question: clarification.question,
+        detail: clarification.detail ?? null,
+      },
+      errors: {
+        rag: null,
+        mcp: null,
+      },
     },
-    errors: {
-      rag: null,
-      mcp: null,
-    },
-  },
-});
+  };
+};
 
 export const buildAgentResponse = ({
   agentMode,

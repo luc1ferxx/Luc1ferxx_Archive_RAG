@@ -1160,7 +1160,7 @@ test("chat endpoint agent skips document follow-up when document budget is exhau
   }
 });
 
-test("chat endpoint agent falls back to web when document evidence is insufficient", async () => {
+test("chat endpoint agent gates web fallback when document evidence is insufficient", async () => {
   const documents = new Map([
     [
       "doc-1",
@@ -1212,15 +1212,23 @@ test("chat endpoint agent falls back to web when document evidence is insufficie
 
     const body = await response.json();
 
-    assert.equal(body.agentMode, "document_web");
-    assert.match(body.agentAnswer, /Document evidence/i);
-    assert.match(body.agentAnswer, /Web context/i);
-    assert.match(body.agentAnswer, /May 30, 2026/);
+    assert.equal(body.agentMode, "clarification");
+    assert.equal(body.clarification.reason, "capability_approval_required");
+    assert.equal(body.approvalGates[0].capabilityId, CAPABILITY_IDS.webSearch);
+    assert.deepEqual(body.approvalGates[0].inputPreview, {
+      question: "What is the latest launch date?",
+    });
     assert.equal(body.ragAbstained, true);
-    assert.equal(body.mcpAnswer, "The public launch date is May 30, 2026.");
+    assert.equal(body.mcpAnswer, "Web search not used: clarification needed.");
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
-      ["plan", "query_planner", "document_rag", "self_check", "web_search", "synthesis"]
+      [
+        "plan",
+        "query_planner",
+        "document_rag",
+        "self_check",
+        "capability_approval_gate",
+      ]
     );
   } finally {
     await server.close();
@@ -1491,7 +1499,7 @@ test("chat endpoint agent can answer workspace inventory without selected docume
   }
 });
 
-test("chat endpoint agent discovers relevant documents from profile metadata", async () => {
+test("chat endpoint agent gates workspace document discovery", async () => {
   const app = await createApp({
     ragService: {
       chat: async () => {
@@ -1553,12 +1561,19 @@ test("chat endpoint agent discovers relevant documents from profile metadata", a
 
     const body = await response.json();
 
-    assert.equal(body.agentMode, "document_discovery");
-    assert.match(body.agentAnswer, /remote-work\.pdf/);
-    assert.doesNotMatch(body.agentAnswer, /security\.pdf/);
+    assert.equal(body.agentMode, "clarification");
+    assert.equal(body.clarification.reason, "capability_approval_required");
+    assert.equal(
+      body.approvalGates[0].capabilityId,
+      CAPABILITY_IDS.documentDiscovery
+    );
+    assert.deepEqual(body.approvalGates[0].inputPreview, {
+      docIds: [],
+      question: "Which document covers remote work approval?",
+    });
     assert.deepEqual(
       body.agentTrace.map((step) => step.type),
-      ["plan", "document_discovery", "synthesis"]
+      ["plan", "capability_approval_gate"]
     );
   } finally {
     await server.close();

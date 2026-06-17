@@ -110,11 +110,17 @@ test("built-in capabilities execute arxiv, web, and document discovery adapters"
   });
   const discoveryResult = await registry.execute(CAPABILITY_IDS.documentDiscovery, {
     accessScope,
+    approval: {
+      approved: true,
+    },
     input: {
       question: "remote approval",
     },
   });
   const webResult = await registry.execute(CAPABILITY_IDS.webSearch, {
+    approval: {
+      approved: true,
+    },
     input: {
       question: "latest policy",
     },
@@ -130,6 +136,88 @@ test("built-in capabilities execute arxiv, web, and document discovery adapters"
     registry.describe(CAPABILITY_IDS.arxivImportTopic).privacyPolicy.externalCall,
     true
   );
+});
+
+test("built-in capability policies require approval before agent actions", async () => {
+  const registry = createDefaultCapabilityRegistry({
+    arxivImportService: {
+      importTopic: async () => {
+        throw new Error("arXiv import should wait for approval.");
+      },
+    },
+    ragService: {
+      listDocuments: () => [],
+    },
+    webChatService: async () => {
+      throw new Error("Web search should wait for approval.");
+    },
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const cases = [
+    {
+      id: CAPABILITY_IDS.arxivImportTopic,
+      input: {
+        maxResults: 2,
+        topic: "retrieval augmented generation",
+      },
+      preview: {
+        maxResults: 2,
+        topic: "retrieval augmented generation",
+      },
+    },
+    {
+      id: CAPABILITY_IDS.webSearch,
+      input: {
+        question: "latest launch date",
+      },
+      preview: {
+        question: "latest launch date",
+      },
+    },
+    {
+      id: CAPABILITY_IDS.documentDiscovery,
+      input: {
+        docIds: ["doc-1"],
+        question: "remote work policy",
+      },
+      preview: {
+        docIds: ["doc-1"],
+        question: "remote work policy",
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const capability = registry.get(testCase.id);
+    const description = registry.describe(testCase.id);
+    const policyResult = evaluateCapabilityPolicy(capability, {
+      accessScope,
+      input: testCase.input,
+    });
+
+    assert.equal(description.approvalPolicy.userConfirmationRequired, true);
+    assert.deepEqual(
+      policyResult.decision,
+      CAPABILITY_POLICY_DECISIONS.needsApproval
+    );
+    assert.equal(policyResult.approvalGate.capabilityId, testCase.id);
+    assert.deepEqual(policyResult.approvalGate.inputPreview, testCase.preview);
+    await assert.rejects(
+      () =>
+        registry.execute(testCase.id, {
+          accessScope,
+          input: testCase.input,
+        }),
+      (error) => {
+        assert.equal(isAgentRunInterrupt(error), true);
+        assert.equal(error.type, "capability_approval_required");
+        return true;
+      }
+    );
+  }
 });
 
 test("capability policy blocks execution until required approval is granted", async () => {

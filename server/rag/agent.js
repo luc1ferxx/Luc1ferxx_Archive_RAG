@@ -8,7 +8,10 @@ import { finalizeAgentRun } from "./agent-finalization-flow.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
 import { AGENT_RUN_STATUSES } from "./agent-runs.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
-import { buildCapabilityApprovalClarification } from "./capabilities/index.js";
+import {
+  buildCapabilityApprovalClarification,
+  createDefaultCapabilityRegistry,
+} from "./capabilities/index.js";
 import {
   attachApprovalGateStepIds,
   buildAgentRunStepsFromTrace,
@@ -242,8 +245,15 @@ export const runAgentRag = async ({
         ...runSnapshot,
       });
   const agentRunId = agentRun?.runId ?? requestedAgentRunId ?? null;
+  const baseCapabilityRegistry =
+    capabilityRegistry ??
+    createDefaultCapabilityRegistry({
+      arxivImportService,
+      ragService,
+      webChatService,
+    });
   const effectiveCapabilityRegistry = withCapabilityApprovals(
-    capabilityRegistry,
+    baseCapabilityRegistry,
     capabilityApprovals
   );
 
@@ -412,7 +422,9 @@ export const runAgentRag = async ({
       });
 
       const response = attachAgentRunId(
-        await returnClarification(clarification),
+        await returnClarification(clarification, {
+          ragResult: error.agentExecutionState?.ragResult,
+        }),
         agentRunId
       );
 

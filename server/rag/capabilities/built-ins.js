@@ -108,7 +108,7 @@ export const createArxivImportTopicCapability = ({ arxivImportService } = {}) =>
   },
   privacyPolicy: {
     externalCall: true,
-    sanitizedInputFields: ["topic"],
+    sanitizedInputFields: ["topic", "maxResults"],
     storesResult: true,
   },
   execute: async ({ accessScope, input }) =>
@@ -148,13 +148,13 @@ export const createDocumentDiscoveryCapability = ({ ragService } = {}) => ({
     required: true,
   },
   approvalPolicy: {
-    mode: "direct",
+    mode: "user_confirmation",
     writesWorkspace: false,
-    userConfirmationRequired: false,
+    userConfirmationRequired: true,
   },
   privacyPolicy: {
     externalCall: false,
-    sanitizedInputFields: [],
+    sanitizedInputFields: ["question", "docIds", "limit"],
     storesResult: false,
   },
   execute: async ({ accessScope, input }) => {
@@ -189,13 +189,13 @@ export const createWebSearchCapability = ({ webChatService } = {}) => ({
     required: false,
   },
   approvalPolicy: {
-    mode: "direct",
+    mode: "user_confirmation",
     writesWorkspace: false,
-    userConfirmationRequired: false,
+    userConfirmationRequired: true,
   },
   privacyPolicy: {
     externalCall: true,
-    sanitizedInputFields: [],
+    sanitizedInputFields: ["question"],
     storesResult: false,
   },
   execute: async ({ input }) => webChatService(input.question),

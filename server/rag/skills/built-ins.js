@@ -8,7 +8,6 @@ import {
   normalizeArxivMaxResults,
 } from "../arxiv-client.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
-import { extractMeaningfulTokens, normalizeSearchText } from "../text-utils.js";
 
 export const AGENT_SKILL_IDS = {
   arxivImport: "arxiv_import",
@@ -108,6 +107,16 @@ const formatArxivImportAnswer = ({ question, result }) => {
   ].join("\n");
 };
 
+const requireCapabilityRegistry = (capabilityRegistry, capabilityId) => {
+  if (!capabilityRegistry?.execute) {
+    throw new Error(
+      `Capability registry is required to execute ${capabilityId}.`
+    );
+  }
+
+  return capabilityRegistry;
+};
+
 const getDocumentLabel = (document) => {
   const pageCount = Number.parseInt(document?.pageCount ?? "0", 10);
   const chunkCount = Number.parseInt(document?.chunkCount ?? "0", 10);
@@ -142,56 +151,6 @@ const getProfile = (document = {}) =>
         tags: document.tags ?? [],
         entities: document.entities ?? [],
       };
-
-const getProfileSearchText = (document = {}) => {
-  const profile = getProfile(document);
-
-  return [
-    document.fileName,
-    profile.summary,
-    ...(profile.tags ?? []),
-    ...(profile.entities ?? []),
-  ]
-    .filter(Boolean)
-    .join(" ");
-};
-
-const scoreDocumentForQuery = ({ document, queryTerms }) => {
-  const normalizedProfileText = normalizeSearchText(getProfileSearchText(document));
-  let score = 0;
-
-  for (const term of queryTerms) {
-    if (normalizedProfileText.includes(term)) {
-      score += 1;
-    }
-  }
-
-  return score;
-};
-
-const discoverDocuments = ({ documents, question, docIds }) => {
-  const docIdFilter = new Set(docIds);
-  const candidateDocuments = docIdFilter.size > 0
-    ? documents.filter((document) => docIdFilter.has(document.docId))
-    : documents;
-  const queryTerms = [...new Set(extractMeaningfulTokens(question))];
-
-  return candidateDocuments
-    .map((document) => ({
-      document,
-      score: scoreDocumentForQuery({
-        document,
-        queryTerms,
-      }),
-    }))
-    .filter((entry) => entry.score > 0)
-    .sort(
-      (left, right) =>
-        right.score - left.score ||
-        String(left.document.fileName).localeCompare(String(right.document.fileName))
-    )
-    .slice(0, 5);
-};
 
 const buildDiscoveryAnswer = (matches) => {
   if (matches.length === 0) {
@@ -282,30 +241,21 @@ const createArxivImportSkill = () => ({
   ],
   execute: async ({
     accessScope,
-    arxivImportService,
     capabilityRegistry,
     question,
   }) => {
     const topic = extractArxivTopic(question);
     const maxResults = extractRequestedPaperCount(question);
-    const result = capabilityRegistry
-      ? await capabilityRegistry.execute(CAPABILITY_IDS.arxivImportTopic, {
-          accessScope,
-          approval: {
-            approved: true,
-            decision: "approved",
-            source: "explicit_user_request",
-          },
-          input: {
-            maxResults,
-            topic,
-          },
-        })
-      : await arxivImportService.importTopic({
-          accessScope,
-          maxResults,
-          topic,
-        });
+    const result = await requireCapabilityRegistry(
+      capabilityRegistry,
+      CAPABILITY_IDS.arxivImportTopic
+    ).execute(CAPABILITY_IDS.arxivImportTopic, {
+      accessScope,
+      input: {
+        maxResults,
+        topic,
+      },
+    });
     const citations = [
       ...(result.importedPapers ?? []),
       ...(result.skippedPapers ?? []),
@@ -361,14 +311,15 @@ const createWebSearchSkill = () => ({
       summary: "Use web context only after document evidence is checked.",
     },
   ],
-  execute: async ({ capabilityRegistry, webChatService, question }) => {
-    const value = capabilityRegistry
-      ? await capabilityRegistry.execute(CAPABILITY_IDS.webSearch, {
-          input: {
-            question,
-          },
-        })
-      : await webChatService(question);
+  execute: async ({ capabilityRegistry, question }) => {
+    const value = await requireCapabilityRegistry(
+      capabilityRegistry,
+      CAPABILITY_IDS.webSearch
+    ).execute(CAPABILITY_IDS.webSearch, {
+      input: {
+        question,
+      },
+    });
 
     return {
       value,
@@ -430,28 +381,19 @@ const createDocumentDiscoverySkill = () => ({
     capabilityRegistry,
     docIds,
     question,
-    ragService,
   }) => {
-    const discovery = capabilityRegistry
-      ? await capabilityRegistry.execute(CAPABILITY_IDS.documentDiscovery, {
-          accessScope,
-          input: {
-            docIds,
-            question,
-          },
-        })
-      : {
-          documents: ragService.listDocuments?.(accessScope) ?? [],
-          matches: null,
-        };
-    const documents = discovery.documents ?? [];
-    const matches =
-      discovery.matches ??
-      discoverDocuments({
-        documents,
-        question,
+    const discovery = await requireCapabilityRegistry(
+      capabilityRegistry,
+      CAPABILITY_IDS.documentDiscovery
+    ).execute(CAPABILITY_IDS.documentDiscovery, {
+      accessScope,
+      input: {
         docIds,
-      });
+        question,
+      },
+    });
+    const documents = discovery.documents ?? [];
+    const matches = discovery.matches ?? [];
 
     return {
       value: {

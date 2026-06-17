@@ -343,6 +343,7 @@ const createWebCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
       }),
     });
     const planner = getExecutionPlanner(response);
+    const body = getChatResponseBody(response);
 
     return finishCase({
       checks: [
@@ -358,10 +359,18 @@ const createWebCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
         }),
         buildCheck({
           category: "execution",
-          detail: getTraceTypes(response),
-          id: "web_trace_ran",
-          label: "Web search trace ran",
-          passed: getTraceTypes(response).includes("web_search"),
+          detail: {
+            agentMode: body.agentMode,
+            clarification: body.clarification,
+            traceTypes: getTraceTypes(response),
+          },
+          id: "web_action_boundary_gate",
+          label: "Web search stops at the capability approval gate",
+          passed:
+            body.agentMode === "clarification" &&
+            body.clarification?.reason === "capability_approval_required" &&
+            getTraceTypes(response).includes("capability_approval_gate") &&
+            !getTraceTypes(response).includes("web_search"),
         }),
         buildCheck({
           category: "observability",
