@@ -44,11 +44,14 @@ const buildPassingSyntheticPayload = ({
   ],
 });
 
-const buildPassingPlannerPayload = ({ runId = "planner-latest" } = {}) => ({
+const buildPassingPlannerPayload = ({
+  provider = "mock",
+  runId = "planner-latest",
+} = {}) => ({
   summary: {
     runId,
     createdAt: "2026-06-08T10:15:00.000Z",
-    provider: "mock",
+    provider,
     status: "pass",
     version: "1.0.0",
     metrics: {
@@ -692,6 +695,56 @@ test("quality history folds planner eval failures into gate decision", () => {
   assert.equal(
     history.plannerGate.failedCases[0].failedChecks[0].label,
     "LLM planner selected custom_skills"
+  );
+});
+
+test("quality history folds multiple planner provider reports into gate decision", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+  const failingRealPlannerPayload = {
+    ...buildFailingPlannerPayload(),
+    summary: {
+      ...buildFailingPlannerPayload().summary,
+      provider: "real",
+      runId: "planner-real-failing",
+    },
+  };
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestPlannerPayloads: [
+      buildPassingPlannerPayload({
+        provider: "mock",
+        runId: "planner-mock-passing",
+      }),
+      failingRealPlannerPayload,
+    ],
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.plannerGate.status, "fail");
+  assert.deepEqual(history.plannerGate.providers, ["mock", "real"]);
+  assert.equal(history.plannerGate.provider, "mock, real");
+  assert.equal(history.plannerGate.failedCaseCount, 1);
+  assert.equal(history.plannerGate.failedCheckCount, 1);
+  assert.equal(history.plannerGate.caseCount, 4);
+  assert.equal(history.plannerGate.checkCount, 8);
+  assert.equal(history.plannerGate.failedCases[0].provider, "real");
+  assert.equal(history.qualityGate.status, "fail");
+  assert.match(
+    history.qualityGate.summary,
+    /Planner evaluations \(mock, real\) failed 1 of 4 cases and 1 of 8 checks\./
   );
 });
 

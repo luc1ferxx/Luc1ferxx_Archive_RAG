@@ -13,6 +13,21 @@ const resultsDirectory = path.join(__dirname, "..", "results");
 
 const LATEST_PLANNER_JSON = "latest-planner.json";
 const LATEST_PLANNER_MD = "latest-planner.md";
+const PLANNER_PROVIDER_FILE_SUFFIXES = new Set(["mock", "real"]);
+
+const normalizeProvider = (provider) => String(provider ?? "").trim().toLowerCase();
+
+export const getPlannerReportFileNames = ({ provider } = {}) => {
+  const normalizedProvider = normalizeProvider(provider);
+  const providerSuffix = PLANNER_PROVIDER_FILE_SUFFIXES.has(normalizedProvider)
+    ? `-${normalizedProvider}`
+    : "";
+
+  return {
+    json: `latest-planner${providerSuffix}.json`,
+    markdown: `latest-planner${providerSuffix}.md`,
+  };
+};
 
 export const formatPlannerReportMarkdown = (report = {}) => {
   const summary = report.summary ?? {};
@@ -69,19 +84,45 @@ export const formatPlannerReportMarkdown = (report = {}) => {
 export const writePlannerEvaluationReport = async ({
   outputDirectory = resultsDirectory,
   report,
+  writeLatestAlias = true,
+  writeProviderLatest = true,
 } = {}) => {
   await mkdir(outputDirectory, {
     recursive: true,
   });
 
-  const jsonPath = path.join(outputDirectory, LATEST_PLANNER_JSON);
-  const markdownPath = path.join(outputDirectory, LATEST_PLANNER_MD);
+  const providerFileNames = getPlannerReportFileNames({
+    provider: report?.summary?.provider,
+  });
+  const markdown = formatPlannerReportMarkdown(report);
+  const writtenPaths = {};
 
-  await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  await writeFile(markdownPath, formatPlannerReportMarkdown(report), "utf8");
+  if (writeProviderLatest) {
+    writtenPaths.providerJsonPath = path.join(outputDirectory, providerFileNames.json);
+    writtenPaths.providerMarkdownPath = path.join(
+      outputDirectory,
+      providerFileNames.markdown
+    );
 
-  return {
-    jsonPath,
-    markdownPath,
-  };
+    await writeFile(
+      writtenPaths.providerJsonPath,
+      `${JSON.stringify(report, null, 2)}\n`,
+      "utf8"
+    );
+    await writeFile(writtenPaths.providerMarkdownPath, markdown, "utf8");
+  }
+
+  if (writeLatestAlias) {
+    writtenPaths.jsonPath = path.join(outputDirectory, LATEST_PLANNER_JSON);
+    writtenPaths.markdownPath = path.join(outputDirectory, LATEST_PLANNER_MD);
+
+    await writeFile(
+      writtenPaths.jsonPath,
+      `${JSON.stringify(report, null, 2)}\n`,
+      "utf8"
+    );
+    await writeFile(writtenPaths.markdownPath, markdown, "utf8");
+  }
+
+  return writtenPaths;
 };

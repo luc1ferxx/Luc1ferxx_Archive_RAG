@@ -14,5 +14,6 @@ export {
 export { runPlannerEvaluation } from "./planner/run.js";
 export {
   formatPlannerReportMarkdown,
+  getPlannerReportFileNames,
   writePlannerEvaluationReport,
 } from "./planner/report.js";

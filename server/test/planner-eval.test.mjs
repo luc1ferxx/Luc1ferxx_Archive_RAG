@@ -1,8 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   formatPlannerReportMarkdown,
+  getPlannerReportFileNames,
   runPlannerEvaluation,
+  writePlannerEvaluationReport,
 } from "../evaluation/planner-eval.js";
 
 test("planner eval passes default mock LLM planner trajectories", async () => {
@@ -50,4 +55,44 @@ test("planner eval markdown summarizes planner and fallback cases", async () => 
   assert.match(markdown, /Inventory planner selection/);
   assert.match(markdown, /Invalid planner fallback/);
   assert.match(markdown, /PASS/);
+});
+
+test("planner eval writes provider-specific latest reports", async () => {
+  const outputDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "archive-rag-planner-eval-")
+  );
+
+  try {
+    const report = await runPlannerEvaluation({
+      createdAt: "2026-06-11T00:00:00.000Z",
+      provider: "mock",
+      runId: "planner-test",
+    });
+    const paths = await writePlannerEvaluationReport({
+      outputDirectory,
+      report,
+    });
+    const providerFileNames = getPlannerReportFileNames({
+      provider: "mock",
+    });
+
+    assert.equal(
+      path.basename(paths.providerJsonPath),
+      providerFileNames.json
+    );
+    assert.equal(path.basename(paths.jsonPath), "latest-planner.json");
+    assert.equal(
+      JSON.parse(await readFile(paths.providerJsonPath, "utf8")).summary.provider,
+      "mock"
+    );
+    assert.match(
+      await readFile(paths.providerMarkdownPath, "utf8"),
+      /Provider: `mock`/
+    );
+  } finally {
+    await rm(outputDirectory, {
+      force: true,
+      recursive: true,
+    });
+  }
 });

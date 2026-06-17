@@ -178,8 +178,9 @@ const printTextReport = ({ decision, history }) => {
       const failedCheckLabels = (failedCase.failedChecks ?? [])
         .map((check) => check.label)
         .join(", ");
+      const providerPrefix = failedCase.provider ? `${failedCase.provider}:` : "";
       console.log(
-        `- ${failedCase.id}: ${
+        `- ${providerPrefix}${failedCase.id}: ${
           failedCheckLabels || `${failedCase.failedCheckCount ?? 0} failed checks`
         }`
       );

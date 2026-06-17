@@ -14,6 +14,10 @@ const latestResultPath = path.join(resultsDirectory, "latest.json");
 const latestFeedbackResultPath = path.join(resultsDirectory, "latest-feedback.json");
 const latestTrajectoryResultPath = path.join(resultsDirectory, "latest-trajectory.json");
 const latestPlannerResultPath = path.join(resultsDirectory, "latest-planner.json");
+const latestPlannerProviderResultPaths = [
+  path.join(resultsDirectory, "latest-planner-mock.json"),
+  path.join(resultsDirectory, "latest-planner-real.json"),
+];
 
 const isQualityResultFile = (fileName) =>
   fileName.endsWith(".json") &&
@@ -21,6 +25,31 @@ const isQualityResultFile = (fileName) =>
   !fileName.includes("ragas");
 
 const readJsonFile = async (filePath) => JSON.parse(await readFile(filePath, "utf8"));
+
+const readOptionalJsonFile = async (filePath) => {
+  try {
+    return await readJsonFile(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+};
+
+const readLatestPlannerPayloads = async () => {
+  const providerPayloads = (
+    await Promise.all(latestPlannerProviderResultPaths.map(readOptionalJsonFile))
+  ).filter(Boolean);
+
+  if (providerPayloads.length > 0) {
+    return providerPayloads;
+  }
+
+  const legacyPayload = await readOptionalJsonFile(latestPlannerResultPath);
+  return legacyPayload ? [legacyPayload] : [];
+};
 
 export const readLatestQualityReport = async () => {
   let payload = null;
@@ -43,7 +72,7 @@ export const readLatestQualityReport = async () => {
 export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) => {
   let latestPayload = null;
   let latestFeedbackPayload = null;
-  let latestPlannerPayload = null;
+  let latestPlannerPayloads = [];
   let latestTrajectoryPayload = null;
 
   try {
@@ -70,13 +99,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
     }
   }
 
-  try {
-    latestPlannerPayload = await readJsonFile(latestPlannerResultPath);
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-  }
+  latestPlannerPayloads = await readLatestPlannerPayloads();
 
   let fileNames = [];
 
@@ -87,7 +110,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
       return buildQualityHistoryResponse({
         latestPayload,
         latestFeedbackPayload,
-        latestPlannerPayload,
+        latestPlannerPayloads,
         latestTrajectoryPayload,
         limit,
         runPayloads: [],
@@ -116,7 +139,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
   return buildQualityHistoryResponse({
     latestPayload,
     latestFeedbackPayload,
-    latestPlannerPayload,
+    latestPlannerPayloads,
     latestTrajectoryPayload,
     limit,
     runPayloads,

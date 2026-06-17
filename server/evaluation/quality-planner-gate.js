@@ -1,4 +1,15 @@
-export const buildPlannerGate = ({ latestPlannerPayload = null } = {}) => {
+const toPlannerPayloads = ({
+  latestPlannerPayload = null,
+  latestPlannerPayloads = null,
+} = {}) => {
+  if (Array.isArray(latestPlannerPayloads)) {
+    return latestPlannerPayloads.filter(Boolean);
+  }
+
+  return latestPlannerPayload ? [latestPlannerPayload] : [];
+};
+
+const buildPlannerProviderGate = ({ latestPlannerPayload = null } = {}) => {
   if (!latestPlannerPayload) {
     return {
       status: "pass",
@@ -68,6 +79,83 @@ export const buildPlannerGate = ({ latestPlannerPayload = null } = {}) => {
             checkCount === 1 ? "" : "s"
           }.`
         : `Planner evaluation (${provider}) passed all ${caseCount} case${
+            caseCount === 1 ? "" : "s"
+          } and ${checkCount} check${checkCount === 1 ? "" : "s"}.`,
+  };
+};
+
+export const buildPlannerGate = ({
+  latestPlannerPayload = null,
+  latestPlannerPayloads = null,
+} = {}) => {
+  const payloads = toPlannerPayloads({
+    latestPlannerPayload,
+    latestPlannerPayloads,
+  });
+
+  if (payloads.length <= 1) {
+    return buildPlannerProviderGate({
+      latestPlannerPayload: payloads[0] ?? null,
+    });
+  }
+
+  const providerGates = payloads.map((payload) =>
+    buildPlannerProviderGate({
+      latestPlannerPayload: payload,
+    })
+  );
+  const failedCaseCount = providerGates.reduce(
+    (sum, gate) => sum + (gate.failedCaseCount ?? 0),
+    0
+  );
+  const failedCheckCount = providerGates.reduce(
+    (sum, gate) => sum + (gate.failedCheckCount ?? 0),
+    0
+  );
+  const caseCount = providerGates.reduce(
+    (sum, gate) => sum + (gate.caseCount ?? 0),
+    0
+  );
+  const checkCount = providerGates.reduce(
+    (sum, gate) => sum + (gate.checkCount ?? 0),
+    0
+  );
+  const providers = providerGates
+    .map((gate) => gate.provider)
+    .filter(Boolean);
+  const currentRunIds = providerGates
+    .map((gate) => gate.currentRunId)
+    .filter(Boolean);
+  const failedCases = providerGates.flatMap((gate) =>
+    (gate.failedCases ?? []).map((failedCase) => ({
+      ...failedCase,
+      provider: gate.provider,
+    }))
+  );
+  const status = failedCaseCount > 0 || failedCheckCount > 0 ? "fail" : "pass";
+  const providerLabel = providers.join(", ");
+
+  return {
+    status,
+    skipped: false,
+    currentRunId: currentRunIds[0] ?? null,
+    currentRunIds,
+    provider: providerLabel,
+    providers,
+    failedCaseCount,
+    failedCheckCount,
+    caseCount,
+    checkCount,
+    failedCases,
+    providerGates,
+    summary:
+      status === "fail"
+        ? `Planner evaluations (${providerLabel}) failed ${failedCaseCount} of ${caseCount} case${
+            caseCount === 1 ? "" : "s"
+          } and ${failedCheckCount} of ${checkCount} check${
+            checkCount === 1 ? "" : "s"
+          }.`
+        : `Planner evaluations (${providerLabel}) passed all ${caseCount} case${
             caseCount === 1 ? "" : "s"
           } and ${checkCount} check${checkCount === 1 ? "" : "s"}.`,
   };

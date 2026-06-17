@@ -120,6 +120,7 @@ export const buildQualityHistoryResponse = ({
   latestPayload = null,
   latestFeedbackPayload = null,
   latestPlannerPayload = null,
+  latestPlannerPayloads = null,
   latestTrajectoryPayload = null,
   limit = defaultHistoryLimit,
   runPayloads = [],
@@ -165,6 +166,7 @@ export const buildQualityHistoryResponse = ({
   });
   const plannerGate = buildPlannerGate({
     latestPlannerPayload,
+    latestPlannerPayloads,
   });
   const qualityGate = buildCombinedQualityGate({
     regressionGate,

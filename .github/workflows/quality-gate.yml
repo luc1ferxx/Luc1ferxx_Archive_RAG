@@ -9,6 +9,8 @@ on:
 jobs:
   quality-gate:
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     defaults:
       run:
@@ -34,8 +36,12 @@ jobs:
       - name: Run trajectory eval
         run: npm run eval:trajectory
 
-      - name: Run planner eval
-        run: npm run eval:planner
+      - name: Run planner eval (mock)
+        run: npm run eval:planner -- --provider mock
+
+      - name: Run planner eval (real)
+        if: env.OPENAI_API_KEY != ''
+        run: npm run eval:planner -- --provider real
 
       - name: Check saved RAG quality gate
         run: npm run quality:gate -- --fail-on-warn
