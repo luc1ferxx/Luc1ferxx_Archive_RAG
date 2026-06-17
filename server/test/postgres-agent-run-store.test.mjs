@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AGENT_RUN_STEP_STATUSES,
+} from "../rag/agent-run-steps.js";
+import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
+import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
 } from "../rag/agent-runs.js";
@@ -28,7 +32,7 @@ const buildFakeRunRow = (values, existingRow = null) => ({
   updated_at: values[14] || values[15],
 });
 
-test("postgres agent run store persists scoped run snapshots and event records", async () => {
+const createFakePostgresAgentRunHarness = () => {
   const rows = new Map();
   const events = [];
   let migrationRuns = 0;
@@ -148,30 +152,44 @@ test("postgres agent run store persists scoped run snapshots and event records",
 
     throw new Error(`Unexpected query: ${queryText}`);
   };
-  const agentRunService = createAgentRunService({
-    agentRunStore: createPostgresAgentRunStore({
-      eventsTableName: "rag_agent_run_events_test",
-      now: () => "2026-06-14T00:00:00.000Z",
-      query,
-      runMigrations: async () => {
-        migrationRuns += 1;
-        return {
-          appliedMigrations: [],
-          status: "ok",
-        };
-      },
-      tableName: "rag_agent_runs_test",
-    }),
-  });
-  const accessScope = {
-    userId: "alice",
-    workspaceId: "workspace-a",
+  const createService = ({ now = () => "2026-06-14T00:00:00.000Z" } = {}) =>
+    createAgentRunService({
+      agentRunStore: createPostgresAgentRunStore({
+        eventsTableName: "rag_agent_run_events_test",
+        now,
+        query,
+        runMigrations: async () => {
+          migrationRuns += 1;
+          return {
+            appliedMigrations: [],
+            status: "ok",
+          };
+        },
+        tableName: "rag_agent_runs_test",
+      }),
+    });
+
+  return {
+    createService,
+    get migrationRuns() {
+      return migrationRuns;
+    },
   };
+};
+
+const accessScope = {
+  userId: "alice",
+  workspaceId: "workspace-a",
+};
+
+test("postgres agent run store persists scoped run snapshots and event records", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const agentRunService = harness.createService();
 
   await agentRunService.initialize();
   await agentRunService.initialize();
 
-  assert.equal(migrationRuns, 1);
+  assert.equal(harness.migrationRuns, 1);
 
   await agentRunService.createRun({
     accessScope,
@@ -217,4 +235,181 @@ test("postgres agent run store persists scoped run snapshots and event records",
   assert.equal(publicRun.accessScope, undefined);
   assert.equal(scopedRuns.runs.length, 1);
   assert.equal(recoverableRuns.runs[0].runId, "run-1");
+});
+
+test("postgres agent run service can approve a waiting run after restart", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const firstService = harness.createService();
+
+  await firstService.createRun({
+    accessScope,
+    goal: "Approve web search",
+    runId: "run-approval",
+  });
+  await firstService.completeRun({
+    accessScope,
+    approvalGates: [
+      {
+        id: "gate-web",
+        capabilityId: "web.search",
+        capabilityLabel: "Web Search",
+        inputPreview: {
+          question: "latest policy",
+        },
+        status: "pending",
+      },
+    ],
+    runId: "run-approval",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+    steps: [
+      {
+        id: "approval-web",
+        type: "capability_approval_gate",
+        status: AGENT_RUN_STEP_STATUSES.paused,
+        approvalGateId: "gate-web",
+        capabilityId: "web.search",
+      },
+    ],
+  });
+
+  const restartedService = harness.createService({
+    now: () => "2026-06-14T00:05:00.000Z",
+  });
+  const approvedRun = await restartedService.applyApprovalAction({
+    accessScope,
+    action: "approve",
+    gateId: "gate-web",
+    runId: "run-approval",
+  });
+
+  assert.equal(approvedRun.status, AGENT_RUN_STATUSES.running);
+  assert.equal(approvedRun.approvalGates[0].status, "approved");
+  assert.ok(
+    approvedRun.steps.some(
+      (step) =>
+        step.kind === "capability_call" &&
+        step.approvalGateId === "gate-web" &&
+        step.status === AGENT_RUN_STEP_STATUSES.pending
+    )
+  );
+  assert.ok(
+    approvedRun.events.some(
+      (event) => event.type === "approval_gate_approved"
+    )
+  );
+});
+
+test("postgres agent run service can queue retry after failed run restart", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const firstService = harness.createService();
+
+  await firstService.createRun({
+    accessScope,
+    goal: "Retry failed document step",
+    runId: "run-retry",
+  });
+  await firstService.completeRun({
+    accessScope,
+    runId: "run-retry",
+    status: AGENT_RUN_STATUSES.failed,
+    steps: [
+      {
+        id: "document-step",
+        type: "document_rag",
+        status: AGENT_RUN_STEP_STATUSES.failed,
+        input: {
+          docIds: ["doc-1"],
+          question: "What changed?",
+        },
+        error: {
+          message: "backend timeout",
+        },
+      },
+    ],
+  });
+
+  const restartedService = harness.createService({
+    now: () => "2026-06-14T00:05:00.000Z",
+  });
+  const retriedRun = await restartedService.retryStep({
+    accessScope,
+    runId: "run-retry",
+    stepId: "document-step",
+  });
+  const retryStep = retriedRun.steps.find(
+    (step) => step.retryOfStepId === "document-step"
+  );
+
+  assert.equal(retriedRun.status, AGENT_RUN_STATUSES.running);
+  assert.equal(retryStep.status, AGENT_RUN_STEP_STATUSES.pending);
+  assert.deepEqual(retryStep.input.docIds, ["doc-1"]);
+  assert.equal(retryStep.error, null);
+  assert.ok(
+    retriedRun.events.some((event) => event.type === "step_retry_queued")
+  );
+});
+
+test("postgres agent run recovery preserves completed steps after partial restart", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const firstService = harness.createService();
+
+  await firstService.createRun({
+    accessScope,
+    goal: "Recover partial run",
+    runId: "run-partial",
+  });
+  await firstService.updateRun({
+    accessScope,
+    runId: "run-partial",
+    patch: {
+      steps: [
+        {
+          id: "step-1",
+          type: "document_rag",
+          status: AGENT_RUN_STEP_STATUSES.completed,
+          input: {
+            docIds: ["doc-1"],
+            question: "What changed?",
+          },
+          output: {
+            citationCount: 1,
+            text: "Completed before restart.",
+          },
+        },
+        {
+          id: "step-2",
+          type: "self_check",
+          status: AGENT_RUN_STEP_STATUSES.running,
+          input: {
+            sourceStepId: "step-1",
+          },
+        },
+      ],
+    },
+  });
+
+  const restartedService = harness.createService({
+    now: () => "2026-06-14T00:05:00.000Z",
+  });
+  const recoveryService = createAgentRunRecoveryService({
+    agentRunService: restartedService,
+    now: () => "2026-06-14T00:06:00.000Z",
+  });
+  const recovery = await recoveryService.recoverOnStartup();
+  const recoveredRun = await restartedService.getRun({
+    accessScope,
+    runId: "run-partial",
+  });
+
+  assert.equal(recovery.recoveredCount, 1);
+  assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(recoveredRun.result.recovery.mode, "manual");
+  assert.equal(recoveredRun.steps[0].status, AGENT_RUN_STEP_STATUSES.completed);
+  assert.equal(recoveredRun.steps[0].output.citationCount, 1);
+  assert.equal(recoveredRun.steps[1].status, AGENT_RUN_STEP_STATUSES.running);
+  assert.ok(
+    recoveredRun.events.some(
+      (event) => event.type === "manual_recovery_required"
+    )
+  );
 });
