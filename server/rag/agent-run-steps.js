@@ -159,9 +159,57 @@ const normalizeErrorRecord = (value, fallbackMessage = "") => {
 
 const getTraceStepOutput = ({ detail, existingStep, traceStep } = {}) =>
   normalizeOutputRecord(traceStep?.output) ??
+  buildDerivedTraceStepOutput({
+    detail,
+    traceStep,
+  }) ??
   normalizeOutputRecord(detail?.output) ??
   existingStep?.output ??
   null;
+
+const countItems = (value) => (Array.isArray(value) ? value.length : 0);
+
+const countUnsupportedClaims = (claimSupport = {}) =>
+  typeof claimSupport.unsupportedClaimCount === "number"
+    ? claimSupport.unsupportedClaimCount
+    : countItems(
+        Array.isArray(claimSupport.claims)
+          ? claimSupport.claims.filter((claim) => !claim.supported)
+          : []
+      );
+
+const buildDerivedTraceStepOutput = ({ detail, traceStep } = {}) => {
+  const type = normalizeText(traceStep?.type).toLowerCase();
+
+  if (type === "self_check") {
+    return normalizeOutputRecord({
+      gapCount: countItems(detail?.gaps),
+      passed: Boolean(detail?.passed),
+      retryRecommended: Boolean(detail?.retryRecommended),
+      unsupportedClaimCount: countUnsupportedClaims(detail?.claimSupport),
+    });
+  }
+
+  if (type === "gap_analysis") {
+    return normalizeOutputRecord({
+      finalAnswer: Boolean(detail?.finalAnswer),
+      followUpRecommended: Boolean(detail?.followUpRecommended),
+      gapCount: countItems(detail?.gaps),
+    });
+  }
+
+  if (type === "answer_finalizer") {
+    return normalizeOutputRecord({
+      abstained: Boolean(detail?.abstained),
+      changed: Boolean(detail?.changed),
+      removedClaimCount: countItems(detail?.removedClaims),
+      skippedReason: detail?.skippedReason ?? "",
+      unsupportedClaimCount: countUnsupportedClaims(detail?.claimSupport),
+    });
+  }
+
+  return null;
+};
 
 const getTraceStepError = ({
   detail,

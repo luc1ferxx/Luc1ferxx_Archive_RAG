@@ -892,6 +892,22 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
       documentStep.input.retrievalPlan.retrievalQueries.length > 0,
       true
     );
+    assert.equal(documentStep.output.citationCount, 1);
+    assert.equal(
+      documentStep.output.text,
+      "The archive says annual leave is 15 days. [Source 1]"
+    );
+    const selfCheckStep = agentRun.steps.find((step) => step.type === "self_check");
+    const synthesisStep = agentRun.steps.find((step) => step.type === "synthesis");
+    const finalizerStep = agentRun.steps.find(
+      (step) => step.type === "answer_finalizer"
+    );
+
+    assert.equal(selfCheckStep.output.passed, true);
+    assert.equal(synthesisStep.input.agentMode, "document");
+    assert.equal(synthesisStep.output.sourceCount, 1);
+    assert.equal(finalizerStep.input.citationCount, 1);
+    assert.equal(finalizerStep.output.removedClaimCount, 0);
     assert.deepEqual(
       agentRun.events.map((event) => event.type),
       ["run_created", "run_prepared", "execution_planned", "run_completed"]

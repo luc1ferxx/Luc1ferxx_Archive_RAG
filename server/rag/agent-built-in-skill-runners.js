@@ -1,29 +1,12 @@
 import { consumeBudget } from "./agent-budget.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import {
+  buildStepError,
+  buildTextCitationStepOutput,
+} from "./agent-step-io.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
-
-const buildStepOutput = (result = {}) =>
-  result.status === "completed"
-    ? {
-        abstained: Boolean(result.abstained),
-        citationCount: result.citations?.length ?? 0,
-        resolvedQuery: result.resolvedQuery ?? result.question ?? "",
-        text: result.text ?? "",
-      }
-    : null;
-
-const buildStepError = (result = {}, fallbackMessage = "Step failed.") =>
-  result.status === "failed" || result.ok === false
-    ? {
-        message:
-          result.error instanceof Error
-            ? result.error.message
-            : String(result.error ?? fallbackMessage),
-        name: result.error?.name ?? "Error",
-      }
-    : null;
 
 export const runArxivImportSkill = async ({
   accessScope,
@@ -80,6 +63,11 @@ export const runArxivImportSkill = async ({
   const importedCount = arxivResult.value?.importedCount ?? 0;
   const skippedCount = arxivResult.value?.skippedCount ?? 0;
   const processedCount = importedCount + skippedCount;
+  const arxivInput = {
+    question,
+    maxResults: arxivResult.value?.requestedMaxResults ?? null,
+    topic: arxivResult.value?.topic ?? null,
+  };
 
   addTraceStep({
     type: "arxiv_import",
@@ -93,6 +81,14 @@ export const runArxivImportSkill = async ({
           arxivResult.error,
           "Unable to import arXiv papers."
         )}`,
+    input: arxivInput,
+    output: buildTextCitationStepOutput(arxivResult, {
+      failedCount: arxivResult.value?.failedCount ?? 0,
+      foundCount: arxivResult.value?.foundCount ?? 0,
+      importedCount,
+      skippedCount,
+    }),
+    error: buildStepError(arxivResult, "Unable to import arXiv papers."),
     detail: buildSkillTraceDetail(arxivResult, arxivResult.traceDetail ?? {}),
   });
 
@@ -195,7 +191,9 @@ export const runResearchBriefSkill = async ({
         skillVersion: researchResult.skillVersion,
         userId: null,
       },
-      output: buildStepOutput(finding),
+      output: buildTextCitationStepOutput(finding, {
+        researchQuestionId: finding.id,
+      }),
       error: buildStepError(finding, "Research lookup failed."),
       detail: {
         citations: finding.citations?.length ?? 0,
@@ -254,6 +252,13 @@ export const runInventorySkill = async ({
               inventoryResult.error,
               "Unable to list indexed documents."
             )}`,
+    input: {
+      scope: "workspace",
+    },
+    output: buildTextCitationStepOutput(inventoryResult, {
+      documentCount: documents.length,
+    }),
+    error: buildStepError(inventoryResult, "Unable to list indexed documents."),
     detail: buildSkillTraceDetail(inventoryResult, {
       documentCount: documents.length,
     }),
@@ -309,6 +314,17 @@ export const runDocumentDiscoverySkill = async ({
               discoveryResult.error,
               "Unable to inspect workspace metadata."
             )}`,
+    input: {
+      docIds,
+      question,
+    },
+    output: buildTextCitationStepOutput(discoveryResult, {
+      matchCount: matches.length,
+    }),
+    error: buildStepError(
+      discoveryResult,
+      "Unable to inspect workspace metadata."
+    ),
     detail: buildSkillTraceDetail(discoveryResult, {
       matchCount: matches.length,
     }),

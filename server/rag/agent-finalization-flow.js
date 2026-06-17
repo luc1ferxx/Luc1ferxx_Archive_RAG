@@ -107,6 +107,21 @@ export const finalizeAgentRun = async ({
     type: "synthesis",
     label: "Synthesis",
     summary: "Composed the final agent answer from completed tool results.",
+    input: {
+      agentMode,
+      customSkillResultCount: customSkillResults.length,
+      hasArxivImportAnswer: Boolean(arxivImportAnswer),
+      hasDiscoveryAnswer: Boolean(discoveryAnswer),
+      hasInventoryAnswer: Boolean(inventoryAnswer),
+      hasRagResult: Boolean(ragResult),
+      hasResearchBrief: Boolean(researchBrief),
+      hasWebResult: Boolean(webResult),
+      sourceCount: ragSources.length,
+    },
+    output: {
+      answerLength: baseAgentAnswer.length,
+      sourceCount: ragSources.length,
+    },
     detail: {
       budget: getBudgetSnapshot(),
     },
@@ -159,6 +174,17 @@ export const finalizeAgentRun = async ({
       type: "answer_finalizer",
       label: "Answer Finalizer",
       summary: buildFinalizerSummary(finalizer),
+      input: {
+        answerLength: baseAgentAnswer.length,
+        citationCount: ragSources.length,
+      },
+      output: {
+        abstained: Boolean(finalizer.abstained),
+        changed: Boolean(finalizer.changed),
+        removedClaimCount: finalizer.removedClaims?.length ?? 0,
+        unsupportedClaimCount:
+          finalizer.claimSupport?.unsupportedClaimCount ?? 0,
+      },
       detail: {
         changed: finalizer.changed,
         abstained: finalizer.abstained,

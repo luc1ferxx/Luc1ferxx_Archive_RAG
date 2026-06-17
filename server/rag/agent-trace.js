@@ -6,6 +6,8 @@ export const buildStep = ({
   summary,
   detail,
   input,
+  output,
+  error,
 }) => ({
   id: `${index}-${type}`,
   type,
@@ -14,6 +16,8 @@ export const buildStep = ({
   summary,
   detail: detail ?? null,
   ...(input === undefined ? {} : { input }),
+  ...(output === undefined ? {} : { output }),
+  ...(error === undefined ? {} : { error }),
 });
 
 export const buildSelfCheckSummary = (check) => {

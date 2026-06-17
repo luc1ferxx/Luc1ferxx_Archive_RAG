@@ -1,5 +1,9 @@
 import { consumeBudget } from "./agent-budget.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import {
+  buildStepError,
+  buildTextCitationStepOutput,
+} from "./agent-step-io.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
@@ -66,6 +70,11 @@ export const runWebSearchSkill = async ({
           webResult.error,
           "Unable to answer from web search."
         )}`,
+    input: {
+      question,
+    },
+    output: buildTextCitationStepOutput(webResult),
+    error: buildStepError(webResult, "Unable to answer from web search."),
     detail: buildSkillTraceDetail(webResult),
   });
 
