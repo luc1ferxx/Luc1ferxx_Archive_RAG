@@ -1,4 +1,5 @@
 import { AGENT_RUN_STEP_KINDS } from "./agent-run-steps.js";
+import { AGENT_RUN_STATUSES } from "./agent-runs.js";
 import {
   buildCapabilityResumeResponse,
   createDefaultAgentRunStepHandlerRegistry,
@@ -22,6 +23,12 @@ const findApprovalGate = ({ gateId = "", run } = {}) =>
       gate.status === "approved" &&
       (!gateId || gate.id === gateId || gate.stepId === gateId)
   );
+
+const findApprovedGateForStep = ({ run, step } = {}) =>
+  findApprovalGate({
+    gateId: step?.approvalGateId,
+    run,
+  });
 
 const findCapabilityStepForGate = ({ gate, run } = {}) =>
   (run?.steps ?? []).find(
@@ -94,6 +101,42 @@ export const createAgentRunStepExecutor = ({
   };
 
   return {
+    async resumeStep({ accessScope = {}, runId, stepId } = {}) {
+      const existingRun = await agentRunService.getRun({
+        accessScope,
+        runId,
+      });
+      const step = findStep({
+        run: existingRun,
+        stepId,
+      });
+
+      if (!step) {
+        fail("Agent run step not found.", 404);
+      }
+
+      const runningRun =
+        existingRun.status === AGENT_RUN_STATUSES.running
+          ? existingRun
+          : await agentRunService.updateRun({
+              accessScope,
+              runId,
+              patch: {
+                status: AGENT_RUN_STATUSES.running,
+              },
+            });
+
+      return executeStep({
+        accessScope,
+        gate: findApprovedGateForStep({
+          run: runningRun,
+          step,
+        }),
+        run: runningRun,
+        step,
+      });
+    },
+
     async applyApprovalAction({
       accessScope = {},
       action,

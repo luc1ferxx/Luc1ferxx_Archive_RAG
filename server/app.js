@@ -67,6 +67,7 @@ import {
   getAgentExecutionPlanner,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
+  getAgentRunRecoveryMode,
 } from "./rag/config.js";
 import {
   clearUploadSession,
@@ -336,11 +337,7 @@ export const createApp = async (options = {}) => {
     createAgentRunService({
       agentRunStore,
     });
-  const agentRunRecoveryService =
-    options.agentRunRecoveryService ??
-    createAgentRunRecoveryService({
-      agentRunService,
-    });
+  const configuredAgentRunRecoveryService = options.agentRunRecoveryService;
   const recommendationTaskService =
     options.recommendationTaskService ??
     createRecommendationTaskService({
@@ -397,6 +394,12 @@ export const createApp = async (options = {}) => {
       executeResearchQuestionStep: createResearchQuestionStepExecutor({
         ragService,
       }),
+    });
+  const agentRunRecoveryService =
+    configuredAgentRunRecoveryService ??
+    createAgentRunRecoveryService({
+      agentRunService,
+      agentRunStepExecutor,
     });
   const uploadStore = options.uploadStore ?? {
     clearUploadSession,
@@ -465,7 +468,9 @@ export const createApp = async (options = {}) => {
   await ragService.initializeSessionMemory?.();
   await taskService.initialize?.();
   await agentRunService.initialize?.();
-  await agentRunRecoveryService.recoverOnStartup?.();
+  await agentRunRecoveryService.recoverOnStartup?.({
+    mode: getAgentRunRecoveryMode(),
+  });
   await jobOrchestrator.recoverRunnableTasks?.();
   await healthService.runStartupHealthChecks?.();
 

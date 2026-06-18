@@ -285,6 +285,90 @@ test("agent run step executor resumes an approved capability step", async () => 
   );
 });
 
+test("agent run step executor resumes a persisted pending document step", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeDocumentRagStep: createDocumentRagStepExecutor({
+      ragService: {
+        chat: async (docIds, question) => {
+          calls.push({
+            docIds,
+            question,
+          });
+
+          return {
+            citations: [
+              {
+                docId: "doc-1",
+                title: "Policy",
+              },
+            ],
+            text: `Resumed document answer: ${question}`,
+          };
+        },
+      },
+    }),
+  });
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Resume document step",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-document-resume",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.updateRun({
+    accessScope,
+    runId: "run-document-resume",
+    patch: {
+      steps: [
+        {
+          id: "document-step",
+          input: {
+            docIds: ["doc-1"],
+            question: "What is annual leave?",
+          },
+          kind: "tool_call",
+          status: "pending",
+          type: "document_rag",
+        },
+      ],
+    },
+  });
+
+  const resumed = await executor.resumeStep({
+    accessScope,
+    runId: "run-document-resume",
+    stepId: "document-step",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].docIds, ["doc-1"]);
+  assert.equal(calls[0].question, "What is annual leave?");
+  assert.equal(resumed.run.status, AGENT_RUN_STATUSES.completed);
+  assert.equal(resumed.response.agentMode, "document");
+  assert.match(resumed.response.agentAnswer, /Resumed document answer/);
+  assert.equal(
+    resumed.run.steps.find((step) => step.id === "document-step").status,
+    "completed"
+  );
+  assert.deepEqual(
+    resumed.run.events.map((event) => event.type),
+    [
+      "run_created",
+      "step_started",
+      "step_completed",
+      "run_completed",
+    ]
+  );
+});
+
 test("agent run step executor retries an approved capability step", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),

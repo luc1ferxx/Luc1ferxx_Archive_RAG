@@ -5,6 +5,10 @@ import {
   AGENT_RUN_STEP_STATUSES,
 } from "../rag/agent-run-steps.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
+import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
+import {
+  createDocumentRagStepExecutor,
+} from "../rag/agent-run-step-handlers/index.js";
 import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
@@ -411,5 +415,90 @@ test("postgres agent run recovery preserves completed steps after partial restar
     recoveredRun.events.some(
       (event) => event.type === "manual_recovery_required"
     )
+  );
+});
+
+test("postgres agent run recovery auto resumes a safe pending step after restart", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const firstService = harness.createService();
+
+  await firstService.createRun({
+    accessScope,
+    goal: "Recover pending document run",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-auto-recovery",
+  });
+  await firstService.updateRun({
+    accessScope,
+    runId: "run-auto-recovery",
+    patch: {
+      steps: [
+        {
+          id: "document-step",
+          input: {
+            docIds: ["doc-1"],
+            question: "What changed?",
+          },
+          status: AGENT_RUN_STEP_STATUSES.pending,
+          type: "document_rag",
+        },
+      ],
+    },
+  });
+
+  const restartedService = harness.createService({
+    now: () => "2026-06-14T00:05:00.000Z",
+  });
+  const agentRunStepExecutor = createAgentRunStepExecutor({
+    agentRunService: restartedService,
+    executeDocumentRagStep: createDocumentRagStepExecutor({
+      ragService: {
+        chat: async () => ({
+          citations: [
+            {
+              docId: "doc-1",
+              title: "Policy",
+            },
+          ],
+          text: "Recovered from Postgres.",
+        }),
+      },
+    }),
+  });
+  const recoveryService = createAgentRunRecoveryService({
+    agentRunService: restartedService,
+    agentRunStepExecutor,
+    now: () => "2026-06-14T00:06:00.000Z",
+  });
+
+  const recovery = await recoveryService.recoverOnStartup({
+    mode: "auto",
+  });
+  const recoveredRun = await restartedService.getRun({
+    accessScope,
+    runId: "run-auto-recovery",
+  });
+
+  assert.equal(recovery.autoRecoveredCount, 1);
+  assert.equal(recovery.manualRecoveredCount, 0);
+  assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.completed);
+  assert.equal(recoveredRun.result.recovery.mode, "auto");
+  assert.equal(recoveredRun.result.answer, "Recovered from Postgres.");
+  assert.equal(
+    recoveredRun.steps[0].status,
+    AGENT_RUN_STEP_STATUSES.completed
+  );
+  assert.ok(
+    recoveredRun.events.some(
+      (event) => event.type === "auto_recovery_completed"
+    )
+  );
+  assert.equal(
+    recoveredRun.events.some(
+      (event) => event.type === "manual_recovery_required"
+    ),
+    false
   );
 });

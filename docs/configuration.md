@@ -71,6 +71,7 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `TASKS_POSTGRES_TABLE` | `rag_tasks` | task/job 当前快照表。 |
 | `TASK_EVENTS_POSTGRES_TABLE` | `rag_task_events` | task/job 审计事件表。 |
 | `AGENT_RUN_STORE_PROVIDER` | `auto` | Agent run 存储；`auto` 在 PostgreSQL 配好时使用 `postgres`，否则使用 `memory`。 |
+| `AGENT_RUN_RECOVERY_MODE` | `manual` | Agent run 启动恢复模式；`manual` 只标记 recoverable run 等待人工处理，`auto` 仅自动恢复安全的 RAG-only pending/running/paused step，遇到审批或不安全 step 会回落人工，`off` 跳过启动恢复。 |
 | `AGENT_RUNS_POSTGRES_TABLE` | `rag_agent_runs` | Agent run 当前快照表。 |
 | `AGENT_RUN_EVENTS_POSTGRES_TABLE` | `rag_agent_run_events` | Agent run 审计事件表。 |
 

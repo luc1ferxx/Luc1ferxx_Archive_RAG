@@ -242,6 +242,13 @@ export const getAgentRunStoreProvider = () =>
     "postgres",
   ]);
 
+export const getAgentRunRecoveryMode = () =>
+  toChoice(process.env.AGENT_RUN_RECOVERY_MODE, "manual", [
+    "auto",
+    "manual",
+    "off",
+  ]);
+
 export const getAgentRunsPostgresTable = () =>
   (process.env.AGENT_RUNS_POSTGRES_TABLE || "rag_agent_runs").trim();
 
