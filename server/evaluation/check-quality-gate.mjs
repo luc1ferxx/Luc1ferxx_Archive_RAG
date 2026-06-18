@@ -103,6 +103,14 @@ const formatCheckDelta = (check) => {
     return formatDelta(check.delta);
   }
 
+  if (
+    typeof check.metric === "string" &&
+    check.metric.startsWith("recovery") &&
+    check.metric.endsWith("Count")
+  ) {
+    return formatDelta(check.delta);
+  }
+
   if (check.metric === "averageCitationCount") {
     return formatDelta(check.delta);
   }
@@ -116,6 +124,7 @@ const printTextReport = ({ decision, history }) => {
   const feedbackGate = history.feedbackGate ?? {};
   const trajectoryGate = history.trajectoryGate ?? {};
   const plannerGate = history.plannerGate ?? {};
+  const recoveryGate = history.recoveryGate ?? {};
   const latestRun = history.latestRun ?? {};
   const checks = qualityGate.checks ?? gate.checks ?? [];
 
@@ -181,6 +190,27 @@ const printTextReport = ({ decision, history }) => {
       const providerPrefix = failedCase.provider ? `${failedCase.provider}:` : "";
       console.log(
         `- ${providerPrefix}${failedCase.id}: ${
+          failedCheckLabels || `${failedCase.failedCheckCount ?? 0} failed checks`
+        }`
+      );
+    }
+  }
+
+  if (recoveryGate.status) {
+    const suffix = recoveryGate.skipped ? " (skipped)" : "";
+    console.log(`Recovery gate: ${recoveryGate.status}${suffix}`);
+    console.log(recoveryGate.summary);
+
+    for (const failedCheck of recoveryGate.failedChecks ?? []) {
+      console.log(`- ${failedCheck.label}: ${failedCheck.currentValue}`);
+    }
+
+    for (const failedCase of recoveryGate.failedCases ?? []) {
+      const failedCheckLabels = (failedCase.failedChecks ?? [])
+        .map((check) => check.label)
+        .join(", ");
+      console.log(
+        `- ${failedCase.id}: ${
           failedCheckLabels || `${failedCase.failedCheckCount ?? 0} failed checks`
         }`
       );

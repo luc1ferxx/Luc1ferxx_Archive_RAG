@@ -14,6 +14,10 @@ const latestResultPath = path.join(resultsDirectory, "latest.json");
 const latestFeedbackResultPath = path.join(resultsDirectory, "latest-feedback.json");
 const latestTrajectoryResultPath = path.join(resultsDirectory, "latest-trajectory.json");
 const latestPlannerResultPath = path.join(resultsDirectory, "latest-planner.json");
+const latestRecoveryObservabilityResultPath = path.join(
+  resultsDirectory,
+  "latest-recovery-observability.json"
+);
 const latestPlannerProviderResultPaths = [
   path.join(resultsDirectory, "latest-planner-mock.json"),
   path.join(resultsDirectory, "latest-planner-real.json"),
@@ -73,6 +77,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
   let latestPayload = null;
   let latestFeedbackPayload = null;
   let latestPlannerPayloads = [];
+  let latestRecoveryPayload = null;
   let latestTrajectoryPayload = null;
 
   try {
@@ -101,6 +106,14 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
 
   latestPlannerPayloads = await readLatestPlannerPayloads();
 
+  try {
+    latestRecoveryPayload = await readJsonFile(latestRecoveryObservabilityResultPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
   let fileNames = [];
 
   try {
@@ -111,6 +124,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
         latestPayload,
         latestFeedbackPayload,
         latestPlannerPayloads,
+        latestRecoveryPayload,
         latestTrajectoryPayload,
         limit,
         runPayloads: [],
@@ -140,6 +154,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
     latestPayload,
     latestFeedbackPayload,
     latestPlannerPayloads,
+    latestRecoveryPayload,
     latestTrajectoryPayload,
     limit,
     runPayloads,

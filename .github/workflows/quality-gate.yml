@@ -43,6 +43,9 @@ jobs:
         if: env.OPENAI_API_KEY != ''
         run: npm run eval:planner -- --provider real
 
+      - name: Run recovery observability eval
+        run: npm run eval:recovery-observability
+
       - name: Check saved RAG quality gate
         run: npm run quality:gate -- --fail-on-warn
 

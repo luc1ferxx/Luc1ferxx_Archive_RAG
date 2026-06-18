@@ -113,5 +113,6 @@ cd server
 npm test
 npm run coverage:gate
 npm run eval:trajectory
+npm run eval:recovery-observability
 npm run quality:gate
 ```

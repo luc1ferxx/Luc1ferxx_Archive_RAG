@@ -5,6 +5,10 @@ import {
   buildQualityHistoryResponse,
   formatFeedbackSkillFailureLine,
 } from "../evaluation/quality-report.js";
+import {
+  buildRecoveryObservabilityEvaluationReport,
+  buildRecoveryObservabilityFixtureEvents,
+} from "../evaluation/recovery-observability-eval.js";
 
 const buildPassingSyntheticPayload = ({
   config = null,
@@ -787,6 +791,117 @@ test("quality history includes passing planner eval in the combined gate summary
   );
 });
 
+test("quality history folds passing recovery observability report into gate decision", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+  const latestRecoveryPayload = buildRecoveryObservabilityEvaluationReport({
+    createdAt: "2026-06-08T10:20:00.000Z",
+    runId: "recovery-latest",
+  });
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestRecoveryPayload,
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.recoveryGate.status, "pass");
+  assert.equal(history.recoveryGate.skipped, false);
+  assert.equal(history.recoveryGate.currentRunId, "recovery-latest");
+  assert.equal(history.recoveryGate.recovery.stepReplayFailureCount, 0);
+  assert.equal(history.recoveryGate.recovery.autoReplaySuccessRate, 1);
+  assert.equal(history.qualityGate.status, "pass");
+  assert.match(
+    history.qualityGate.summary,
+    /Recovery observability passed 4 cases; replay failures 0/
+  );
+  assert.ok(
+    history.qualityGate.checks.some(
+      (check) =>
+        check.metric === "recoveryStepReplayFailureCount" &&
+        check.status === "pass" &&
+        check.currentValue === 0
+    )
+  );
+});
+
+test("quality history folds recovery observability failures into gate decision", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+  const latestRecoveryPayload = buildRecoveryObservabilityEvaluationReport({
+    createdAt: "2026-06-08T10:20:00.000Z",
+    events: [
+      ...buildRecoveryObservabilityFixtureEvents(),
+      {
+        traceType: "agent_run_step_replay",
+        action: "resume_step",
+        status: "failed",
+        error: {
+          message: "Replay failed.",
+        },
+      },
+      {
+        traceType: "agent_run_recovery",
+        eventType: "manual_recovery_action",
+        action: "retry_failed_step",
+        status: "failed",
+        error: {
+          message: "Manual action failed.",
+        },
+      },
+    ],
+    runId: "recovery-failing",
+  });
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestRecoveryPayload,
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.regressionGate.status, "pass");
+  assert.equal(history.recoveryGate.status, "fail");
+  assert.equal(history.recoveryGate.failedCaseCount, 2);
+  assert.equal(history.recoveryGate.recovery.stepReplayFailureCount, 1);
+  assert.equal(history.recoveryGate.recovery.manualRecoveryActionFailureCount, 1);
+  assert.equal(history.qualityGate.status, "fail");
+  assert.equal(buildQualityGateDecision({ history }).exitCode, 1);
+  assert.ok(
+    history.recoveryGate.failedChecks.some(
+      (check) =>
+        check.metric === "recoveryStepReplayFailureCount" &&
+        check.status === "fail"
+    )
+  );
+  assert.ok(
+    history.recoveryGate.failedCases.some(
+      (caseResult) => caseResult.id === "step_replay_actions"
+    )
+  );
+});
+
 test("quality history keeps planner gate summary when regression gate warns", () => {
   const latestPayload = buildPassingSyntheticPayload({
     runId: "synthetic-latest",
@@ -841,6 +956,8 @@ test("quality history skips feedback gate when no feedback eval report exists", 
   assert.equal(history.feedbackGate.skipped, true);
   assert.equal(history.plannerGate.status, "pass");
   assert.equal(history.plannerGate.skipped, true);
+  assert.equal(history.recoveryGate.status, "pass");
+  assert.equal(history.recoveryGate.skipped, true);
   assert.equal(history.qualityGate.status, "unknown");
   assert.equal(history.qualityGate.summary, "No previous synthetic run is available for regression comparison.");
 });

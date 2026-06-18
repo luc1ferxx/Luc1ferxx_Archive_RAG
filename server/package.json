@@ -19,6 +19,7 @@
     "rerank:cross-encoder:local": "node evaluation/local-cross-encoder-endpoint.mjs",
     "feedback:corpus": "node evaluation/build-feedback-corpus.mjs",
     "eval:feedback": "node evaluation/build-feedback-corpus.mjs && node evaluation/run-synthetic-eval.mjs evaluation/generated/feedback-corpus.json --latest-name latest-feedback",
+    "eval:recovery-observability": "node evaluation/run-recovery-observability-eval.mjs",
     "eval:ragas": "python evaluation/run-ragas-eval.py",
     "bench:rerank": "node evaluation/benchmark-rerank-latency.mjs",
     "observability:report": "node evaluation/build-observability-report.mjs",

@@ -22,6 +22,8 @@ export { buildTrajectoryGate } from "./quality-trajectory-gate.js";
 
 export { buildPlannerGate } from "./quality-planner-gate.js";
 
+export { buildRecoveryGate } from "./quality-recovery-gate.js";
+
 export {
   buildCombinedQualityGate,
   buildQualityGateDecision,

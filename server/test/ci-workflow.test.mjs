@@ -39,6 +39,8 @@ test("quality gate workflow runs server tests, saved gate, and conditional feedb
   assert.match(workflow, /name:\s*Run planner eval \(real\)/);
   assert.match(workflow, /if:\s*env\.OPENAI_API_KEY != ''/);
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider real/);
+  assert.match(workflow, /name:\s*Run recovery observability eval/);
+  assert.match(workflow, /run:\s*npm run eval:recovery-observability/);
   assert.match(workflow, /run:\s*npm run quality:gate -- --fail-on-warn/);
   assert.match(workflow, /id:\s*feedback/);
   assert.match(workflow, /server\/data\/feedback\/feedback\.jsonl/);
