@@ -13,6 +13,12 @@ const workflowPath = path.join(
   "workflows",
   "quality-gate.yml"
 );
+const plannerRealGateWorkflowPath = path.join(
+  repositoryRoot,
+  ".github",
+  "workflows",
+  "planner-real-gate.yml"
+);
 
 test("quality gate workflow runs server tests, saved gate, and conditional feedback eval", async () => {
   const workflow = await readFile(workflowPath, "utf8");
@@ -38,4 +44,27 @@ test("quality gate workflow runs server tests, saved gate, and conditional feedb
   assert.match(workflow, /server\/data\/feedback\/feedback\.jsonl/);
   assert.match(workflow, /run:\s*npm run eval:feedback/);
   assert.match(workflow, /if:\s*steps\.feedback\.outputs\.has_feedback == 'true'/);
+});
+
+test("planner real provider workflow runs a required scheduled gate", async () => {
+  const workflow = await readFile(plannerRealGateWorkflowPath, "utf8");
+
+  assert.match(workflow, /name:\s*Planner Real Provider Gate/);
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /schedule:\s*\n\s*-\s*cron:\s*"0 9 \* \* \*"/);
+  assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
+  assert.match(workflow, /working-directory:\s*server/);
+  assert.match(workflow, /node-version:\s*"20"/);
+  assert.match(workflow, /run:\s*npm ci/);
+  assert.match(workflow, /run:\s*npm run eval:planner -- --provider mock/);
+  assert.match(workflow, /run:\s*npm run eval:planner -- --provider real/);
+  assert.doesNotMatch(
+    workflow,
+    /Run planner eval \(real\)[\s\S]*if:\s*env\.OPENAI_API_KEY != ''/
+  );
+  assert.match(
+    workflow,
+    /run:\s*npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0/
+  );
+  assert.match(workflow, /actions\/upload-artifact@v4/);
 });

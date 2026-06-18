@@ -22,6 +22,7 @@
     "eval:ragas": "python evaluation/run-ragas-eval.py",
     "bench:rerank": "node evaluation/benchmark-rerank-latency.mjs",
     "observability:report": "node evaluation/build-observability-report.mjs",
+    "planner:gate": "node evaluation/check-planner-provider-gate.mjs",
     "quality:gate": "node evaluation/check-quality-gate.mjs",
     "coverage:gate": "node test/coverage-gate.mjs",
     "coverage:targets": "node test/coverage-gate.mjs --strict-targets",
