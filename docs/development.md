@@ -114,5 +114,6 @@ npm test
 npm run coverage:gate
 npm run eval:trajectory
 npm run eval:recovery-observability
+npm run rollout:readiness
 npm run quality:gate
 ```

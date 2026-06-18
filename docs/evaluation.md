@@ -27,6 +27,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner、validator 和 fallback；`-- --provider real` 会生成真实 provider 报告。 |
 | `cd server && npm run eval:recovery-observability` | 生成 deterministic recovery/replay observability report，覆盖 manual recovery、auto replay、step retry/resume 和 planner fallback signal。 |
 | `cd server && npm run planner:gate -- --provider real` | 强制检查 real planner report、unexpected fallback rate 和 mock/real planner 分歧。 |
+| `cd server && npm run rollout:readiness` | 汇总 real planner gate、trajectory gate、recovery gate、fallback rate 和 mock/real divergence，生成默认启用 guarded LLM planner 前的 readiness signal。 |
 | `cd server && npm run feedback:corpus` | 从负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用 feedback corpus 运行回归评测。 |
 | `cd server && npm run quality:gate` | 检查主线、feedback、trajectory、planner 和 recovery gate。 |
@@ -46,6 +47,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：`5/5` cases passed，`20/20` checks passed。 |
 | `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback 和 planner observability；mock/real provider 会各自写入 provider-specific latest report。 |
 | `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：deterministic fixture 覆盖 recoverable run、manual recovery action、safe step retry/resume、auto replay success rate 和 planner fallback signal。 |
+| `evaluation/results/latest-rollout-readiness.{json,md}` | AgentRAG rollout readiness：只输出是否 ready 的信号，汇总 real planner provider gate、trajectory gate、recovery gate、unexpected fallback rate 和 mock/real planner divergence，不改变默认 planner 行为。 |
 | `evaluation/results/latest-rerank.*` | Near-duplicate rerank eval：baseline 已满分，heuristic rerank 无额外 lift。 |
 | `evaluation/results/arxiv-rerank-sweep-latest.*` | arXiv real-paper quick sweep 当前最佳 variant 为 `broad_topk`，NDCG `0.5831`，Recall `0.8177`，MRR `0.5891`。 |
 | `evaluation/results/compare-hard-ragas.*` | Ragas supplement：faithfulness `0.8939`，context precision `1.0`，compare rubric `0.9333`。 |
@@ -119,6 +121,16 @@ npm run planner:gate -- --provider real --compare-provider mock
 ```
 
 `planner:gate` 默认 `--provider real`，并在 real provider 下默认比较 `mock`。默认阈值为 `--max-unexpected-fallback-rate=0` 和 `--max-divergence-count=0`。Planner eval 中故意验证 validator 的 fallback case 会计入总 fallback 数，但不会计入 unexpected fallback。
+
+## Rollout readiness
+
+```bash
+cd server
+npm run rollout:readiness
+npm run rollout:readiness -- --json
+```
+
+`rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json` 和 `latest-recovery-observability.json`，生成 `latest-rollout-readiness.*`。这个 report 只用于发布/默认启用前判断，不会改变 runtime 行为；缺少 real planner report、trajectory/recovery gate 失败、unexpected fallback rate 大于 0，或 mock/real planner divergence 大于 0 都会标成 `not_ready`。
 
 ## Quality gate baseline
 
@@ -272,5 +284,6 @@ npm test
 npm run eval:trajectory
 npm run eval:planner
 npm run eval:recovery-observability
+npm run rollout:readiness
 npm run quality:gate
 ```

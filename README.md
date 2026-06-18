@@ -172,6 +172,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner 和 fallback；`-- --provider real` 会生成真实 provider 报告。 |
 | `cd server && npm run eval:recovery-observability` | 生成 deterministic recovery/replay observability report，供 quality gate 检查。 |
 | `cd server && npm run planner:gate -- --provider real` | 强制检查 real planner report、unexpected fallback rate 和 mock/real planner 分歧。 |
+| `cd server && npm run rollout:readiness` | 汇总 real planner、trajectory、recovery、fallback rate 和 mock/real divergence，生成 rollout readiness signal。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
 | `cd server && npm run quality:gate` | 检查主线、feedback、trajectory、planner 和 recovery 质量门控。 |
 
