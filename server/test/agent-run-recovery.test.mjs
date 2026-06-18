@@ -24,9 +24,11 @@ test("agent run recovery marks startup running runs for manual recovery", async 
       now: () => "2026-06-18T00:00:00.000Z",
     }),
   });
+  const recordedRecoveryEvents = [];
   const recoveryService = createAgentRunRecoveryService({
     agentRunService,
     now: () => "2026-06-18T00:01:00.000Z",
+    recordRecoveryTrace: async (event) => recordedRecoveryEvents.push(event),
   });
 
   await agentRunService.createRun({
@@ -51,6 +53,22 @@ test("agent run recovery marks startup running runs for manual recovery", async 
   assert.equal(result.skippedCount, 0);
   assert.equal(result.runs[0].runId, "run-recoverable");
   assert.equal(result.runs[0].status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.deepEqual(
+    {
+      autoReplayAttemptCount: recordedRecoveryEvents[0].autoReplayAttemptCount,
+      eventType: recordedRecoveryEvents[0].eventType,
+      manualRecoveryCount: recordedRecoveryEvents[0].manualRecoveryCount,
+      recoverableRunCount: recordedRecoveryEvents[0].recoverableRunCount,
+      traceType: recordedRecoveryEvents[0].traceType,
+    },
+    {
+      autoReplayAttemptCount: 0,
+      eventType: "startup_recovery_completed",
+      manualRecoveryCount: 1,
+      recoverableRunCount: 1,
+      traceType: "agent_run_recovery",
+    }
+  );
 
   const recoveredRun = await agentRunService.getRun({
     accessScope,

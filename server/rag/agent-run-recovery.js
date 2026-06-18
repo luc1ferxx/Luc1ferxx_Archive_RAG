@@ -3,6 +3,8 @@ import {
   AGENT_RUN_STEP_KINDS,
   AGENT_RUN_STEP_STATUSES,
 } from "./agent-run-steps.js";
+import { getAutoReplaySafeStepTypes } from "./agent-run-step-replay-safety.js";
+import { recordRagTrace } from "./observability.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -19,12 +21,9 @@ const AUTO_RECOVERY_STARTED_EVENT = "auto_recovery_started";
 const AUTO_RECOVERY_COMPLETED_EVENT = "auto_recovery_completed";
 const AUTO_RECOVERY_FAILED_EVENT = "auto_recovery_failed";
 
-export const DEFAULT_AUTO_RECOVERY_STEP_TYPES = Object.freeze([
-  "custom_skill",
-  "document_rag",
-  "follow_up_retrieval",
-  "research_question",
-]);
+export const DEFAULT_AUTO_RECOVERY_STEP_TYPES = Object.freeze(
+  getAutoReplaySafeStepTypes()
+);
 
 const AUTO_RECOVERY_STEP_STATUSES = new Set([
   AGENT_RUN_STEP_STATUSES.paused,
@@ -122,6 +121,7 @@ export const createAgentRunRecoveryService = ({
   agentRunService,
   agentRunStepExecutor,
   now = () => new Date().toISOString(),
+  recordRecoveryTrace = recordRagTrace,
   safeAutoRecoveryStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
 } = {}) => ({
   async recoverOnStartup({
@@ -328,6 +328,21 @@ export const createAgentRunRecoveryService = ({
         run,
       });
     }
+
+    await recordRecoveryTrace?.({
+      traceType: "agent_run_recovery",
+      timestamp: now(),
+      eventType: "startup_recovery_completed",
+      mode: recoveryMode,
+      reason,
+      recoverableRunCount: recoverableRuns.runs?.length ?? 0,
+      recoveredCount: recovered.length,
+      manualRecoveryCount: manualRecoveredCount,
+      skippedCount,
+      autoReplayAttemptCount: autoRecoveredCount + failedCount,
+      autoReplaySuccessCount: autoRecoveredCount,
+      autoReplayFailureCount: failedCount,
+    });
 
     return {
       autoRecoveredCount,

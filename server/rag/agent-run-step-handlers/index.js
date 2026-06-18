@@ -11,6 +11,7 @@ import {
   createDocumentRagStepHandler,
   createFollowUpRetrievalStepHandler,
 } from "./document-steps.js";
+import { getStepReplaySafetyPolicy } from "../agent-run-step-replay-safety.js";
 import { toArray } from "./shared.js";
 
 export * from "./capability-steps.js";
@@ -31,6 +32,8 @@ export const createAgentRunStepHandlerRegistry = (handlers = []) => {
       normalizedHandlers.map((handler) => ({
         id: handler.id,
         label: handler.label ?? handler.id,
+        replaySafety:
+          handler.replaySafety ?? getStepReplaySafetyPolicy(handler.id),
       })),
     resolve: (context = {}) =>
       normalizedHandlers.find((handler) => handler.canHandle(context)) ?? null,

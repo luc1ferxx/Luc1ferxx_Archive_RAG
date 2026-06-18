@@ -222,9 +222,11 @@ test("agent run recovery actions cancel manual recovery runs", async () => {
 
   await createManualRecoveryRun(agentRunService);
 
+  const recordedRecoveryEvents = [];
   const actionService = createAgentRunRecoveryActionService({
     agentRunService,
     agentRunStepExecutor: {},
+    recordRecoveryTrace: async (event) => recordedRecoveryEvents.push(event),
   });
   const result = await actionService.applyRecoveryAction({
     accessScope,
@@ -238,6 +240,22 @@ test("agent run recovery actions cancel manual recovery runs", async () => {
   assert.equal(result.run.status, AGENT_RUN_STATUSES.canceled);
   assert.equal(result.run.result.canceled, true);
   assert.equal(result.run.result.cancelReason, "operator_cancel");
+  assert.deepEqual(
+    {
+      action: recordedRecoveryEvents[0].action,
+      eventType: recordedRecoveryEvents[0].eventType,
+      runId: recordedRecoveryEvents[0].runId,
+      status: recordedRecoveryEvents[0].status,
+      traceType: recordedRecoveryEvents[0].traceType,
+    },
+    {
+      action: "cancel",
+      eventType: "manual_recovery_action",
+      runId: "run-manual",
+      status: "completed",
+      traceType: "agent_run_recovery",
+    }
+  );
   assert.equal(
     result.run.events.at(-1).type,
     "run_canceled"

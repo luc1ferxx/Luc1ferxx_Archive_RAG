@@ -184,6 +184,23 @@ const createPlannerStats = () => ({
   agentModeStepSequences: {},
 });
 
+const createRecoveryStats = () => ({
+  eventCount: 0,
+  recoverableRunCount: 0,
+  manualRecoveryCount: 0,
+  manualRecoveryActionCount: 0,
+  manualRecoveryActionFailureCount: 0,
+  autoReplayAttemptCount: 0,
+  autoReplaySuccessCount: 0,
+  autoReplayFailureCount: 0,
+  autoReplaySuccessRate: 0,
+  stepRetryCount: 0,
+  stepResumeCount: 0,
+  stepReplayFailureCount: 0,
+  plannerFallbackCount: 0,
+  actionCounts: {},
+});
+
 const getPlannerId = (value, fallbackValue = "unknown") =>
   String(value ?? fallbackValue).trim() || fallbackValue;
 
@@ -258,6 +275,67 @@ const finalizePlannerStats = (plannerStats) => ({
   topFallbackReasons: formatTopCounts(plannerStats.fallbackReasonCounts),
 });
 
+const isAgentRunRecoveryEvent = (event = {}) =>
+  event.traceType === "agent_run_recovery";
+
+const isAgentRunStepReplayEvent = (event = {}) =>
+  event.traceType === "agent_run_step_replay";
+
+const addRecoveryEvent = (recovery, event = {}) => {
+  recovery.eventCount += 1;
+
+  if (event.eventType === "startup_recovery_completed") {
+    recovery.recoverableRunCount += toNonNegativeInteger(
+      event.recoverableRunCount
+    );
+    recovery.manualRecoveryCount += toNonNegativeInteger(
+      event.manualRecoveryCount
+    );
+    recovery.autoReplayAttemptCount += toNonNegativeInteger(
+      event.autoReplayAttemptCount
+    );
+    recovery.autoReplaySuccessCount += toNonNegativeInteger(
+      event.autoReplaySuccessCount
+    );
+    recovery.autoReplayFailureCount += toNonNegativeInteger(
+      event.autoReplayFailureCount
+    );
+  }
+
+  if (event.eventType === "manual_recovery_action") {
+    recovery.manualRecoveryActionCount += 1;
+    increment(recovery.actionCounts, event.action);
+
+    if (event.status === "failed" || event.error) {
+      recovery.manualRecoveryActionFailureCount += 1;
+    }
+  }
+};
+
+const addStepReplayEvent = (recovery, event = {}) => {
+  recovery.eventCount += 1;
+
+  if (event.action === "retry_step") {
+    recovery.stepRetryCount += 1;
+  }
+
+  if (event.action === "resume_step") {
+    recovery.stepResumeCount += 1;
+  }
+
+  if (event.status === "failed" || event.error) {
+    recovery.stepReplayFailureCount += 1;
+  }
+};
+
+const finalizeRecoveryStats = (recovery) => ({
+  ...recovery,
+  autoReplaySuccessRate:
+    recovery.autoReplayAttemptCount > 0
+      ? round(recovery.autoReplaySuccessCount / recovery.autoReplayAttemptCount, 4)
+      : 0,
+});
+
 export const buildObservabilityReport = ({ events = [] } = {}) => {
   const skillStatsByKey = new Map();
   const queryPlanner = {
@@ -279,6 +357,7 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
     abstainRate: 0,
   };
   const plannerStats = createPlannerStats();
+  const recovery = createRecoveryStats();
 
   for (const event of events) {
     if (hasAgentObservability(event)) {
@@ -303,6 +382,14 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
           addSkillRun(skillStatsByKey, run);
         }
       }
+    }
+
+    if (isAgentRunRecoveryEvent(event)) {
+      addRecoveryEvent(recovery, event);
+    }
+
+    if (isAgentRunStepReplayEvent(event)) {
+      addStepReplayEvent(recovery, event);
     }
 
     const retrievalPlan = getAgentRetrievalPlan(event);
@@ -342,6 +429,8 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
   rag.abstainRate =
     rag.eventCount > 0 ? round(rag.abstainCount / rag.eventCount, 4) : 0;
 
+  const planner = finalizePlannerStats(plannerStats);
+
   return {
     eventCount: events.length,
     skills: [...skillStatsByKey.values()]
@@ -352,7 +441,11 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
           left.skillKey.localeCompare(right.skillKey)
       ),
     queryPlanner,
-    planner: finalizePlannerStats(plannerStats),
+    planner,
+    recovery: finalizeRecoveryStats({
+      ...recovery,
+      plannerFallbackCount: planner.fallbackCount,
+    }),
     rag: {
       ...rag,
       totalLatencyMs: round(rag.totalLatencyMs, 2),
@@ -472,6 +565,32 @@ export const formatObservabilityReport = (report) => {
       indent: "    ",
     }).length
       ? formatNestedCountMap(report.planner.agentModeStepSequences, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    ""
+  );
+
+  lines.push(
+    "Recovery / Replay",
+    `  events: ${report.recovery.eventCount}`,
+    `  recoverable runs: ${report.recovery.recoverableRunCount}`,
+    `  manual recovery marked: ${report.recovery.manualRecoveryCount}`,
+    `  manual recovery actions: ${report.recovery.manualRecoveryActionCount}`,
+    `  manual recovery action failures: ${report.recovery.manualRecoveryActionFailureCount}`,
+    `  auto replay attempts: ${report.recovery.autoReplayAttemptCount}`,
+    `  auto replay success rate: ${toPercent(report.recovery.autoReplaySuccessRate)}`,
+    `  step retry count: ${report.recovery.stepRetryCount}`,
+    `  step resume count: ${report.recovery.stepResumeCount}`,
+    `  step replay failures: ${report.recovery.stepReplayFailureCount}`,
+    `  planner fallback count: ${report.recovery.plannerFallbackCount}`,
+    "  manual actions:"
+  );
+  lines.push(
+    ...(formatCountMap(report.recovery.actionCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.recovery.actionCounts, {
           indent: "    ",
         })
       : ["    none: 0"]),

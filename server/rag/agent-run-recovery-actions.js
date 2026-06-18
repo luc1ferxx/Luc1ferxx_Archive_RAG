@@ -8,6 +8,7 @@ import {
   MANUAL_RECOVERY_EVENT,
   findAutoRecoverableStep,
 } from "./agent-run-recovery.js";
+import { recordRagTrace } from "./observability.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -146,6 +147,8 @@ export const withAgentRunRecoveryState = ({
 export const createAgentRunRecoveryActionService = ({
   agentRunService,
   agentRunStepExecutor,
+  now = () => new Date().toISOString(),
+  recordRecoveryTrace = recordRagTrace,
   safeAutoRecoveryStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
 } = {}) => {
   const listActionableRuns = async ({ accessScope = {} } = {}) => {
@@ -218,77 +221,116 @@ export const createAgentRunRecoveryActionService = ({
         runId,
       });
       const stepId = normalizeText(payload.stepId);
-
-      if (normalizedAction === AGENT_RUN_RECOVERY_ACTIONS.cancel) {
-        const cancelAction = findRecoveryAction({
-          actions: run.recovery.actions,
-          type: AGENT_RUN_RECOVERY_ACTIONS.cancel,
+      let selectedStepId = stepId;
+      const recordActionTrace = async ({ error, result } = {}) =>
+        recordRecoveryTrace?.({
+          traceType: "agent_run_recovery",
+          timestamp: now(),
+          eventType: "manual_recovery_action",
+          action: normalizedAction,
+          runId,
+          runStatus: result?.run?.status ?? run.status,
+          stepId: selectedStepId || null,
+          status: error ? "failed" : "completed",
+          error: error
+            ? {
+                message: error instanceof Error ? error.message : String(error),
+                status: error?.status ?? 500,
+              }
+            : null,
         });
 
-        if (!cancelAction) {
-          const error = new Error("Agent run is not waiting for manual recovery.");
-          error.status = 409;
-          throw error;
+      const applyAction = async () => {
+        if (normalizedAction === AGENT_RUN_RECOVERY_ACTIONS.cancel) {
+          const cancelAction = findRecoveryAction({
+            actions: run.recovery.actions,
+            type: AGENT_RUN_RECOVERY_ACTIONS.cancel,
+          });
+
+          if (!cancelAction) {
+            const error = new Error("Agent run is not waiting for manual recovery.");
+            error.status = 409;
+            throw error;
+          }
+
+          return {
+            run: await agentRunService.cancelRun({
+              accessScope,
+              reason: payload.reason ?? "manual_recovery_cancel",
+              runId,
+            }),
+          };
         }
 
-        return {
-          run: await agentRunService.cancelRun({
+        if (normalizedAction === AGENT_RUN_RECOVERY_ACTIONS.resumeFromStep) {
+          if (!agentRunStepExecutor?.resumeStep) {
+            const error = new Error("Agent run step resume is not available.");
+            error.status = 409;
+            throw error;
+          }
+
+          const resumeAction = findRecoveryAction({
+            actions: run.recovery.actions,
+            stepId,
+            type: AGENT_RUN_RECOVERY_ACTIONS.resumeFromStep,
+          });
+
+          if (!resumeAction) {
+            const error = new Error("Agent run has no safe step to resume.");
+            error.status = 409;
+            throw error;
+          }
+
+          selectedStepId = stepId || resumeAction.stepId;
+
+          return agentRunStepExecutor.resumeStep({
             accessScope,
-            reason: payload.reason ?? "manual_recovery_cancel",
             runId,
-          }),
-        };
-      }
-
-      if (normalizedAction === AGENT_RUN_RECOVERY_ACTIONS.resumeFromStep) {
-        if (!agentRunStepExecutor?.resumeStep) {
-          const error = new Error("Agent run step resume is not available.");
-          error.status = 409;
-          throw error;
+            stepId: selectedStepId,
+          });
         }
 
-        const resumeAction = findRecoveryAction({
+        const retryAction = findRecoveryAction({
           actions: run.recovery.actions,
           stepId,
-          type: AGENT_RUN_RECOVERY_ACTIONS.resumeFromStep,
+          type: AGENT_RUN_RECOVERY_ACTIONS.retryFailedStep,
         });
 
-        if (!resumeAction) {
-          const error = new Error("Agent run has no safe step to resume.");
+        if (!retryAction) {
+          const error = new Error("Agent run has no failed step to retry.");
           error.status = 409;
           throw error;
         }
 
-        return agentRunStepExecutor.resumeStep({
+        if (!agentRunStepExecutor?.retryStep) {
+          const error = new Error("Agent run step retry is not available.");
+          error.status = 409;
+          throw error;
+        }
+
+        selectedStepId = stepId || retryAction.stepId;
+
+        return agentRunStepExecutor.retryStep({
           accessScope,
           runId,
-          stepId: stepId || resumeAction.stepId,
+          stepId: selectedStepId,
         });
-      }
+      };
 
-      const retryAction = findRecoveryAction({
-        actions: run.recovery.actions,
-        stepId,
-        type: AGENT_RUN_RECOVERY_ACTIONS.retryFailedStep,
-      });
+      try {
+        const result = await applyAction();
 
-      if (!retryAction) {
-        const error = new Error("Agent run has no failed step to retry.");
-        error.status = 409;
+        await recordActionTrace({
+          result,
+        });
+
+        return result;
+      } catch (error) {
+        await recordActionTrace({
+          error,
+        });
         throw error;
       }
-
-      if (!agentRunStepExecutor?.retryStep) {
-        const error = new Error("Agent run step retry is not available.");
-        error.status = 409;
-        throw error;
-      }
-
-      return agentRunStepExecutor.retryStep({
-        accessScope,
-        runId,
-        stepId: stepId || retryAction.stepId,
-      });
     },
   };
 };

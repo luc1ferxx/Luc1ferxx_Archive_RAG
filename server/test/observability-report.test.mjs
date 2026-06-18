@@ -274,6 +274,89 @@ test("observability report aggregates execution planner metrics", () => {
   assert.match(formatted, /inventory:\n      inventory: 2/);
 });
 
+test("observability report aggregates recovery and replay metrics", () => {
+  const report = buildObservabilityReport({
+    events: [
+      {
+        traceType: "agent_run_recovery",
+        eventType: "startup_recovery_completed",
+        recoverableRunCount: 3,
+        manualRecoveryCount: 1,
+        autoReplayAttemptCount: 2,
+        autoReplaySuccessCount: 1,
+        autoReplayFailureCount: 1,
+      },
+      {
+        traceType: "agent_run_recovery",
+        eventType: "manual_recovery_action",
+        action: "cancel",
+        status: "completed",
+      },
+      {
+        traceType: "agent_run_recovery",
+        eventType: "manual_recovery_action",
+        action: "resume_from_step",
+        status: "failed",
+        error: {
+          message: "Step failed.",
+        },
+      },
+      {
+        traceType: "agent_run_step_replay",
+        action: "retry_step",
+        status: "completed",
+      },
+      {
+        traceType: "agent_run_step_replay",
+        action: "resume_step",
+        status: "failed",
+        error: {
+          message: "Replay failed.",
+        },
+      },
+      {
+        traceType: "agent",
+        agentObservability: {
+          executionPlanner: {
+            fallback: true,
+            fallbackReason: "validator_rejected",
+            requestedPlannerId: "llm",
+            selectedPlannerId: "deterministic",
+            status: "fallback",
+            stepIds: ["document_rag"],
+          },
+        },
+      },
+    ],
+  });
+
+  assert.equal(report.recovery.eventCount, 5);
+  assert.equal(report.recovery.recoverableRunCount, 3);
+  assert.equal(report.recovery.manualRecoveryCount, 1);
+  assert.equal(report.recovery.manualRecoveryActionCount, 2);
+  assert.equal(report.recovery.manualRecoveryActionFailureCount, 1);
+  assert.equal(report.recovery.autoReplayAttemptCount, 2);
+  assert.equal(report.recovery.autoReplaySuccessCount, 1);
+  assert.equal(report.recovery.autoReplayFailureCount, 1);
+  assert.equal(report.recovery.autoReplaySuccessRate, 0.5);
+  assert.equal(report.recovery.stepRetryCount, 1);
+  assert.equal(report.recovery.stepResumeCount, 1);
+  assert.equal(report.recovery.stepReplayFailureCount, 1);
+  assert.equal(report.recovery.plannerFallbackCount, 1);
+  assert.deepEqual(report.recovery.actionCounts, {
+    cancel: 1,
+    resume_from_step: 1,
+  });
+
+  const formatted = formatObservabilityReport(report);
+
+  assert.match(formatted, /Recovery \/ Replay/);
+  assert.match(formatted, /recoverable runs: 3/);
+  assert.match(formatted, /auto replay success rate: 50%/);
+  assert.match(formatted, /step retry count: 1/);
+  assert.match(formatted, /planner fallback count: 1/);
+});
+
 test("observability report reads jsonl from a file or directory", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "observability-report-"));
   const eventsPath = path.join(tempRoot, "events.jsonl");

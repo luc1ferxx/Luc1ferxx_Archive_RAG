@@ -290,6 +290,7 @@ test("agent run step executor resumes a persisted pending document step", async 
     agentRunStore: createInMemoryAgentRunStore(),
   });
   const calls = [];
+  const recordedReplayEvents = [];
   const executor = createAgentRunStepExecutor({
     agentRunService,
     executeDocumentRagStep: createDocumentRagStepExecutor({
@@ -312,6 +313,7 @@ test("agent run step executor resumes a persisted pending document step", async 
         },
       },
     }),
+    recordStepReplayTrace: async (event) => recordedReplayEvents.push(event),
   });
 
   await agentRunService.createRun({
@@ -354,6 +356,25 @@ test("agent run step executor resumes a persisted pending document step", async 
   assert.equal(resumed.run.status, AGENT_RUN_STATUSES.completed);
   assert.equal(resumed.response.agentMode, "document");
   assert.match(resumed.response.agentAnswer, /Resumed document answer/);
+  assert.equal(recordedReplayEvents.length, 1);
+  assert.deepEqual(
+    {
+      action: recordedReplayEvents[0].action,
+      runId: recordedReplayEvents[0].runId,
+      status: recordedReplayEvents[0].status,
+      stepId: recordedReplayEvents[0].stepId,
+      stepType: recordedReplayEvents[0].stepType,
+      traceType: recordedReplayEvents[0].traceType,
+    },
+    {
+      action: "resume_step",
+      runId: "run-document-resume",
+      status: "completed",
+      stepId: "document-step",
+      stepType: "document_rag",
+      traceType: "agent_run_step_replay",
+    }
+  );
   assert.equal(
     resumed.run.steps.find((step) => step.id === "document-step").status,
     "completed"
@@ -544,6 +565,7 @@ test("agent run step executor retries document_rag through the wired document ha
     agentRunStore: createInMemoryAgentRunStore(),
   });
   const calls = [];
+  const recordedReplayEvents = [];
   const executor = createAgentRunStepExecutor({
     agentRunService,
     executeDocumentRagStep: createDocumentRagStepExecutor({
@@ -574,6 +596,7 @@ test("agent run step executor retries document_rag through the wired document ha
         },
       },
     }),
+    recordStepReplayTrace: async (event) => recordedReplayEvents.push(event),
   });
   const retrievalPlan = {
     retrievalQueries: [
@@ -639,6 +662,27 @@ test("agent run step executor retries document_rag through the wired document ha
   assert.equal(retryStep.attempt, 2);
   assert.equal(retryStep.input.question, "What is annual leave?");
   assert.equal(retryStep.output.citationCount, 1);
+  assert.equal(recordedReplayEvents.length, 1);
+  assert.deepEqual(
+    {
+      action: recordedReplayEvents[0].action,
+      retryOfStepId: recordedReplayEvents[0].retryOfStepId,
+      runId: recordedReplayEvents[0].runId,
+      status: recordedReplayEvents[0].status,
+      stepId: recordedReplayEvents[0].stepId,
+      stepType: recordedReplayEvents[0].stepType,
+      traceType: recordedReplayEvents[0].traceType,
+    },
+    {
+      action: "retry_step",
+      retryOfStepId: "document-step",
+      runId: "run-document-retry",
+      status: "completed",
+      stepId: retryStep.id,
+      stepType: "document_rag",
+      traceType: "agent_run_step_replay",
+    }
+  );
   assert.deepEqual(
     retried.run.events.map((event) => event.type),
     [

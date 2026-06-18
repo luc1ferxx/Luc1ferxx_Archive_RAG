@@ -6,6 +6,7 @@ import {
   getCapabilityResultCitations,
   getCapabilityResultText,
 } from "./agent-run-step-handlers/index.js";
+import { recordRagTrace } from "./observability.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -52,12 +53,40 @@ export const createAgentRunStepExecutor = ({
   executeCustomSkillStep,
   executeDocumentRagStep,
   executeResearchQuestionStep,
+  now = () => new Date().toISOString(),
+  recordStepReplayTrace = recordRagTrace,
   stepHandlerRegistry = createDefaultAgentRunStepHandlerRegistry({
     executeCustomSkillStep,
     executeDocumentRagStep,
     executeResearchQuestionStep,
   }),
 } = {}) => {
+  const recordReplayTrace = async ({
+    action,
+    error,
+    result,
+    run,
+    step,
+  } = {}) =>
+    recordStepReplayTrace?.({
+      traceType: "agent_run_step_replay",
+      timestamp: now(),
+      action,
+      runId: run?.runId ?? null,
+      runStatus: result?.run?.status ?? run?.status ?? null,
+      stepId: step?.id ?? null,
+      stepKind: step?.kind ?? null,
+      stepType: step?.type ?? null,
+      retryOfStepId: step?.retryOfStepId ?? null,
+      status: error ? "failed" : "completed",
+      error: error
+        ? {
+            message: error instanceof Error ? error.message : String(error),
+            status: error?.status ?? 500,
+          }
+        : null,
+    });
+
   const resolveStepHandler = ({ gate, run, step } = {}) => {
     const handler = stepHandlerRegistry.resolve?.({
       gate,
@@ -126,15 +155,34 @@ export const createAgentRunStepExecutor = ({
               },
             });
 
-      return executeStep({
-        accessScope,
-        gate: findApprovedGateForStep({
+      try {
+        const result = await executeStep({
+          accessScope,
+          gate: findApprovedGateForStep({
+            run: runningRun,
+            step,
+          }),
           run: runningRun,
           step,
-        }),
-        run: runningRun,
-        step,
-      });
+        });
+
+        await recordReplayTrace({
+          action: "resume_step",
+          result,
+          run: runningRun,
+          step,
+        });
+
+        return result;
+      } catch (error) {
+        await recordReplayTrace({
+          action: "resume_step",
+          error,
+          run: runningRun,
+          step,
+        });
+        throw error;
+      }
     },
 
     async applyApprovalAction({
@@ -212,12 +260,31 @@ export const createAgentRunStepExecutor = ({
         .filter((step) => step.retryOfStepId === stepId)
         .at(-1);
 
-      return executeStep({
-        accessScope,
-        gate: retryContext.gate,
-        run: queuedRun,
-        step: retryStep,
-      });
+      try {
+        const result = await executeStep({
+          accessScope,
+          gate: retryContext.gate,
+          run: queuedRun,
+          step: retryStep,
+        });
+
+        await recordReplayTrace({
+          action: "retry_step",
+          result,
+          run: queuedRun,
+          step: retryStep,
+        });
+
+        return result;
+      } catch (error) {
+        await recordReplayTrace({
+          action: "retry_step",
+          error,
+          run: queuedRun,
+          step: retryStep,
+        });
+        throw error;
+      }
     },
   };
 };
