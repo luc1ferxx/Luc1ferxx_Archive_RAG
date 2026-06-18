@@ -10,6 +10,11 @@ import {
   createCapabilityRegistry,
 } from "../rag/capabilities/index.js";
 import {
+  AGENT_RUN_STATUSES,
+  createAgentRunService,
+  createInMemoryAgentRunStore,
+} from "../rag/agent-runs.js";
+import {
   buildQualityGateDecision,
   buildQualityHistoryResponse,
 } from "../evaluation/quality-report.js";
@@ -971,6 +976,107 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
         "document.compare_batch",
       ]
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test("agent run recovery endpoints list and cancel manual recovery runs", async () => {
+  const agentRunStore = createInMemoryAgentRunStore();
+  const agentRunService = createAgentRunService({
+    agentRunStore,
+  });
+
+  await agentRunService.createRun({
+    goal: "Recover interrupted document answer",
+    runId: "run-recovery",
+  });
+  await agentRunService.updateRun({
+    runId: "run-recovery",
+    patch: {
+      result: {
+        recovery: {
+          mode: "manual",
+          reason: "server_startup_recovery",
+        },
+      },
+      status: AGENT_RUN_STATUSES.waitingForUser,
+      steps: [
+        {
+          id: "step-document",
+          type: "document_rag",
+          kind: "tool_call",
+          label: "Document RAG",
+          status: "paused",
+        },
+      ],
+    },
+  });
+  await agentRunService.appendRunEvent({
+    runId: "run-recovery",
+    type: "manual_recovery_required",
+    payload: {
+      reason: "server_startup_recovery",
+    },
+  });
+
+  const app = await createApp({
+    agentRunStore,
+    healthService: okHealthService,
+    ragService: {
+      chat: async () => {
+        throw new Error("Recovery endpoint should not invoke document RAG.");
+      },
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/agent-runs/recovery`);
+
+    assert.equal(response.status, 200);
+
+    const recoveryBody = await response.json();
+
+    assert.equal(recoveryBody.runs.length, 1);
+    assert.equal(recoveryBody.runs[0].runId, "run-recovery");
+    assert.deepEqual(
+      recoveryBody.runs[0].recovery.actions.map((action) => action.type),
+      ["resume_from_step", "cancel"]
+    );
+
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/run-recovery/recovery/actions/cancel`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          reason: "operator_cancel",
+        }),
+      }
+    );
+
+    assert.equal(response.status, 200);
+
+    const cancelBody = await response.json();
+
+    assert.equal(cancelBody.run.status, "canceled");
+    assert.equal(cancelBody.run.result.canceled, true);
+
+    response = await fetch(`${server.baseUrl}/agent-runs/recovery`);
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).runs.length, 0);
   } finally {
     await server.close();
   }

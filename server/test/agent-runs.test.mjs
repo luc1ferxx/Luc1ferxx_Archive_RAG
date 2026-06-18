@@ -223,6 +223,56 @@ test("agent run service queues a retry for a single persisted step", async () =>
   );
 });
 
+test("agent run service cancels waiting runs as a terminal state", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Manual recovery run",
+    runId: "run-cancel",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+
+  const canceledRun = await agentRunService.cancelRun({
+    accessScope,
+    reason: "operator_cancel",
+    runId: "run-cancel",
+  });
+
+  assert.equal(canceledRun.status, AGENT_RUN_STATUSES.canceled);
+  assert.equal(canceledRun.result.canceled, true);
+  assert.equal(canceledRun.result.cancelReason, "operator_cancel");
+  assert.deepEqual(
+    canceledRun.events.map((event) => event.type),
+    ["run_created", "run_canceled"]
+  );
+
+  await assert.rejects(
+    () =>
+      agentRunService.updateRun({
+        accessScope,
+        runId: "run-cancel",
+        patch: {
+          status: AGENT_RUN_STATUSES.running,
+        },
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(
+        error.message,
+        /Invalid agent run status transition: canceled -> running/
+      );
+      return true;
+    }
+  );
+});
+
 test("agent run service rejects invalid run status transitions", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),

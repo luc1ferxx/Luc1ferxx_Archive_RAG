@@ -14,12 +14,12 @@ const normalizeMode = (value) => {
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
-const MANUAL_RECOVERY_EVENT = "manual_recovery_required";
+export const MANUAL_RECOVERY_EVENT = "manual_recovery_required";
 const AUTO_RECOVERY_STARTED_EVENT = "auto_recovery_started";
 const AUTO_RECOVERY_COMPLETED_EVENT = "auto_recovery_completed";
 const AUTO_RECOVERY_FAILED_EVENT = "auto_recovery_failed";
 
-const DEFAULT_AUTO_RECOVERY_STEP_TYPES = Object.freeze([
+export const DEFAULT_AUTO_RECOVERY_STEP_TYPES = Object.freeze([
   "custom_skill",
   "document_rag",
   "follow_up_retrieval",
@@ -54,7 +54,7 @@ const buildSafeStepTypeSet = (stepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES) =>
       .filter(Boolean)
   );
 
-const findAutoRecoverableStep = ({
+export const findAutoRecoverableStep = ({
   run = {},
   safeStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
 } = {}) => {

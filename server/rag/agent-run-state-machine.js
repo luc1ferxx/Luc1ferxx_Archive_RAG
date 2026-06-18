@@ -1,6 +1,7 @@
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 export const AGENT_RUN_STATUSES = Object.freeze({
+  canceled: "canceled",
   completed: "completed",
   failed: "failed",
   running: "running",
@@ -18,16 +19,21 @@ const RETRYABLE_AGENT_RUN_STATUSES = new Set([
 ]);
 const AGENT_RUN_STATUS_TRANSITIONS = Object.freeze({
   [AGENT_RUN_STATUSES.running]: new Set([
+    AGENT_RUN_STATUSES.canceled,
     AGENT_RUN_STATUSES.completed,
     AGENT_RUN_STATUSES.failed,
     AGENT_RUN_STATUSES.running,
     AGENT_RUN_STATUSES.waitingForUser,
   ]),
   [AGENT_RUN_STATUSES.waitingForUser]: new Set([
+    AGENT_RUN_STATUSES.canceled,
     AGENT_RUN_STATUSES.completed,
     AGENT_RUN_STATUSES.failed,
     AGENT_RUN_STATUSES.running,
     AGENT_RUN_STATUSES.waitingForUser,
+  ]),
+  [AGENT_RUN_STATUSES.canceled]: new Set([
+    AGENT_RUN_STATUSES.canceled,
   ]),
   [AGENT_RUN_STATUSES.completed]: new Set([
     AGENT_RUN_STATUSES.completed,

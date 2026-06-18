@@ -64,6 +64,14 @@ jest.mock("./components/PdfPreview", () => () => <div>Preview</div>);
 describe("App", () => {
   beforeEach(() => {
     axios.get.mockImplementation((url) => {
+      if (url.endsWith("/agent-runs/recovery")) {
+        return Promise.resolve({
+          data: {
+            runs: [],
+          },
+        });
+      }
+
       if (url.endsWith("/tasks")) {
         return Promise.resolve({
           data: {
@@ -99,27 +107,37 @@ describe("App", () => {
   });
 
   test("keeps arxiv documents out of chat scope until all scope is selected", async () => {
-    axios.get.mockResolvedValue({
-      data: [
-        {
-          docId: "doc-uploaded",
-          fileName: "private-notes.pdf",
-          pageCount: 2,
-        },
-        {
-          docId: "doc-arxiv",
-          fileName: "arxiv-2401.00001.pdf",
-          pageCount: 12,
-          profile: {
-            source: {
-              sourceType: "arxiv",
-              arxivId: "2401.00001v1",
-              relatedToDocId: "doc-uploaded",
-              importedByUserConfirmation: true,
+    axios.get.mockImplementation((url) => {
+      if (url.endsWith("/agent-runs/recovery")) {
+        return Promise.resolve({
+          data: {
+            runs: [],
+          },
+        });
+      }
+
+      return Promise.resolve({
+        data: [
+          {
+            docId: "doc-uploaded",
+            fileName: "private-notes.pdf",
+            pageCount: 2,
+          },
+          {
+            docId: "doc-arxiv",
+            fileName: "arxiv-2401.00001.pdf",
+            pageCount: 12,
+            profile: {
+              source: {
+                sourceType: "arxiv",
+                arxivId: "2401.00001v1",
+                relatedToDocId: "doc-uploaded",
+                importedByUserConfirmation: true,
+              },
             },
           },
-        },
-      ],
+        ],
+      });
     });
 
     render(<App />);
@@ -140,6 +158,88 @@ describe("App", () => {
     fireEvent.click(screen.getByText("scope-selected-1"));
 
     expect(screen.getByTestId("chat-docids")).toHaveTextContent("doc-arxiv");
+  });
+
+  test("shows agent run recovery actions in the Tasks view", async () => {
+    axios.get.mockImplementation((url) => {
+      if (url.endsWith("/agent-runs/recovery")) {
+        return Promise.resolve({
+          data: {
+            runs: [
+              {
+                runId: "run-recovery",
+                goal: "Recover interrupted document answer",
+                status: "waiting_for_user",
+                recovery: {
+                  actions: [
+                    {
+                      stepId: "step-document",
+                      type: "resume_from_step",
+                    },
+                    {
+                      type: "cancel",
+                    },
+                  ],
+                  reason: "server_startup_recovery",
+                },
+              },
+            ],
+          },
+        });
+      }
+
+      if (url.endsWith("/tasks")) {
+        return Promise.resolve({
+          data: {
+            tasks: [],
+          },
+        });
+      }
+
+      return Promise.resolve({
+        data: [
+          {
+            docId: "doc-1",
+            fileName: "benefits-2025.pdf",
+            pageCount: 3,
+          },
+        ],
+      });
+    });
+    axios.post.mockResolvedValue({
+      data: {
+        run: {
+          recovery: {
+            actions: [],
+          },
+          runId: "run-recovery",
+          status: "canceled",
+          steps: [],
+        },
+      },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("benefits-2025.pdf")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+
+    expect(
+      await screen.findByText("Recover interrupted document answer")
+    ).toBeInTheDocument();
+    expect(screen.getByText("server_startup_recovery")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Resume step" })
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() =>
+      expect(axios.post).toHaveBeenCalledWith(
+        "http://localhost:5001/agent-runs/run-recovery/recovery/actions/cancel",
+        {}
+      )
+    );
   });
 
   test("removes a document from the UI after delete succeeds", async () => {
@@ -182,6 +282,14 @@ describe("App", () => {
     let documentFetchCount = 0;
 
     axios.get.mockImplementation((url) => {
+      if (url.endsWith("/agent-runs/recovery")) {
+        return Promise.resolve({
+          data: {
+            runs: [],
+          },
+        });
+      }
+
       if (url.includes("/documents/doc-upload/arxiv/suggestions")) {
         return Promise.resolve({
           data: {

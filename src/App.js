@@ -16,6 +16,7 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar";
 import {
   fetchLatestQualityReport,
   fetchQualityHistory,
+  requestAgentRunRecoveryAction,
   requestAgentRunAction,
   requestAgentRunStepRetry,
   requestAnswerFeedback,
@@ -24,6 +25,7 @@ import {
 import { formatDocumentCount, isArxivDocument } from "./archiveWorkspace";
 import { useChatSession } from "./hooks/useChatSession";
 import { useArxivEnrichment } from "./hooks/useArxivEnrichment";
+import { useAgentRunRecovery } from "./hooks/useAgentRunRecovery";
 import { useDocumentSelection } from "./hooks/useDocumentSelection";
 import { hasActiveTasks, useTaskLog } from "./hooks/useTaskLog";
 import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
@@ -60,6 +62,47 @@ const IDLE_TASKS = [
 ];
 
 const formatTaskStatus = (status) => String(status ?? "pending").replace(/_/g, " ");
+
+const RECOVERY_ACTION_LABELS = {
+  cancel: "Cancel",
+  resume_from_step: "Resume step",
+  retry_failed_step: "Retry failed step",
+};
+
+const formatRecoveryActionLabel = (actionType) =>
+  RECOVERY_ACTION_LABELS[actionType] ??
+  String(actionType ?? "Action").replace(/_/g, " ");
+
+const buildAgentRunActionAnswer = (currentAnswer = {}, result = {}) => {
+  const run = result?.run;
+  const nextAnswer = result?.response
+    ? {
+        ...result.response,
+      }
+    : {
+        ...currentAnswer,
+      };
+
+  return {
+    ...nextAnswer,
+    agentRunRecovery: run?.recovery ?? nextAnswer.agentRunRecovery,
+    agentRunStatus: run?.status ?? nextAnswer.agentRunStatus,
+    agentRunSteps: run?.steps ?? nextAnswer.agentRunSteps,
+    approvalGates: run?.approvalGates ?? nextAnswer.approvalGates,
+  };
+};
+
+const getRecoveryActionSuccessMessage = (action) => {
+  if (action === "cancel") {
+    return "Agent run canceled.";
+  }
+
+  if (action === "resume_from_step") {
+    return "Agent run resumed.";
+  }
+
+  return "Agent run recovery action completed.";
+};
 
 const App = () => {
   const [isQualityLoading, setIsQualityLoading] = useState(false);
@@ -105,12 +148,25 @@ const App = () => {
     loadTasks,
     tasks: taskLog,
   } = useTaskLog();
+  const {
+    clearRecoveryRuns,
+    isRecoveryLoading,
+    loadRecoveryRuns,
+    runs: recoveryRuns,
+  } = useAgentRunRecovery();
   const refreshTaskLog = useCallback(
     () =>
       loadTasks({
         silent: true,
       }),
     [loadTasks]
+  );
+  const refreshAgentRunRecovery = useCallback(
+    () =>
+      loadRecoveryRuns({
+        silent: true,
+      }),
+    [loadRecoveryRuns]
   );
   const {
     clearSuggestion: clearArxivSuggestion,
@@ -170,6 +226,7 @@ const App = () => {
           }
 
           await refreshTaskLog();
+          await refreshAgentRunRecovery();
           await resetWorkspaceSession();
         },
       }),
@@ -177,6 +234,7 @@ const App = () => {
       arxivSuggestion?.document?.docId,
       clearArxivSuggestion,
       removeWorkspaceDocument,
+      refreshAgentRunRecovery,
       refreshTaskLog,
       resetWorkspaceSession,
     ]
@@ -188,6 +246,7 @@ const App = () => {
         afterSuccess: async () => {
           clearArxivSuggestion();
           clearSavedArxivSuggestions();
+          clearRecoveryRuns();
           clearTasks();
           await resetWorkspaceSession();
         },
@@ -195,6 +254,7 @@ const App = () => {
     [
       clearArxivSuggestion,
       clearSavedArxivSuggestions,
+      clearRecoveryRuns,
       clearWorkspaceDocuments,
       clearTasks,
       resetWorkspaceSession,
@@ -313,6 +373,7 @@ const App = () => {
   useEffect(() => {
     if (!activeDocumentIdsKey) {
       clearSavedArxivSuggestions();
+      clearRecoveryRuns();
       clearTasks();
       return;
     }
@@ -320,12 +381,15 @@ const App = () => {
     void loadSavedArxivSuggestions({
       merge: true,
     });
+    void refreshAgentRunRecovery();
     void refreshTaskLog();
   }, [
     activeDocumentIdsKey,
+    clearRecoveryRuns,
     clearSavedArxivSuggestions,
     clearTasks,
     loadSavedArxivSuggestions,
+    refreshAgentRunRecovery,
     refreshTaskLog,
   ]);
 
@@ -430,11 +494,14 @@ const App = () => {
         });
 
         if (action === "approve" && result?.response) {
+          const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
+
           updateConversationTurn(turnIndex, {
             question: turn.question,
-            answer: result.response,
+            answer: nextAnswer,
           });
-          setSelectedSource(result.response?.ragSources?.[0] ?? null);
+          setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+          await refreshAgentRunRecovery();
           message.success("Approval recorded. Agent run resumed.");
           return;
         }
@@ -456,6 +523,7 @@ const App = () => {
             },
           },
         }));
+        await refreshAgentRunRecovery();
         message.info("Approval denied.");
       } catch (error) {
         const backendMessage =
@@ -467,6 +535,7 @@ const App = () => {
     },
     [
       conversation,
+      refreshAgentRunRecovery,
       setIsLoading,
       setSelectedSource,
       updateConversationTurn,
@@ -487,25 +556,14 @@ const App = () => {
 
       try {
         const result = await requestAgentRunStepRetry(runId, step.id);
-        const nextAnswer = result?.response
-          ? {
-              ...result.response,
-              agentRunSteps:
-                result?.run?.steps ?? result.response.agentRunSteps ?? [],
-              agentRunStatus:
-                result?.run?.status ?? result.response.agentRunStatus,
-            }
-          : {
-              ...(turn.answer ?? {}),
-              agentRunStatus: result?.run?.status ?? turn.answer?.agentRunStatus,
-              agentRunSteps: result?.run?.steps ?? turn.answer?.agentRunSteps,
-            };
+        const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
 
         updateConversationTurn(turnIndex, {
           question: turn.question,
           answer: nextAnswer,
         });
         setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+        await refreshAgentRunRecovery();
         message.success("Step retry completed.");
       } catch (error) {
         const backendMessage =
@@ -517,6 +575,66 @@ const App = () => {
     },
     [
       conversation,
+      refreshAgentRunRecovery,
+      setIsLoading,
+      setSelectedSource,
+      updateConversationTurn,
+    ]
+  );
+
+  const handleAgentRecoveryAction = useCallback(
+    async ({ action, runId, stepId, turnIndex }) => {
+      const resolvedRunId = runId?.trim();
+      const resolvedTurnIndex = Number.isInteger(turnIndex)
+        ? turnIndex
+        : conversation.findIndex(
+            (turn) => turn?.answer?.agentRunId === resolvedRunId
+          );
+      const turn =
+        resolvedTurnIndex >= 0 ? conversation[resolvedTurnIndex] : null;
+
+      if (!resolvedRunId || !action) {
+        message.error("Unable to recover run: missing agent run metadata.");
+        return;
+      }
+
+      setIsLoading(true);
+
+      try {
+        const payload = stepId
+          ? {
+              stepId,
+            }
+          : {};
+        const result = await requestAgentRunRecoveryAction(
+          resolvedRunId,
+          action,
+          payload
+        );
+
+        if (turn) {
+          const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
+
+          updateConversationTurn(resolvedTurnIndex, {
+            question: turn.question,
+            answer: nextAnswer,
+          });
+          setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+        }
+
+        await refreshAgentRunRecovery();
+        message.success(getRecoveryActionSuccessMessage(action));
+      } catch (error) {
+        const backendMessage =
+          error.response?.data?.error ?? "Unable to recover this agent run.";
+        message.error(backendMessage);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [
+      conversation,
+      refreshAgentRunRecovery,
       setIsLoading,
       setSelectedSource,
       updateConversationTurn,
@@ -693,6 +811,7 @@ const App = () => {
   const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? [];
   const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? [];
   const visibleTaskLog = isDemoWorkbench ? [] : taskLog;
+  const visibleRecoveryRuns = isDemoWorkbench ? [] : recoveryRuns;
   const hasActiveTaskLog = hasActiveTasks(visibleTaskLog);
   let visibleTasks = IDLE_TASKS;
 
@@ -801,7 +920,7 @@ const App = () => {
           <div className="archive-view-panel-head">
             <span>Tasks</span>
             <strong>
-              {isTaskLogLoading && !isDemoWorkbench
+              {(isTaskLogLoading || isRecoveryLoading) && !isDemoWorkbench
                 ? "loading"
                 : `${visibleTasks.length} active`}
             </strong>
@@ -836,6 +955,54 @@ const App = () => {
               </button>
             ))}
           </div>
+          {!isDemoWorkbench ? (
+            <div className="archive-recovery-panel">
+              <div className="archive-view-panel-head">
+                <span>Recovery</span>
+                <strong>{visibleRecoveryRuns.length} waiting</strong>
+              </div>
+              {visibleRecoveryRuns.length > 0 ? (
+                <div className="archive-recovery-list">
+                  {visibleRecoveryRuns.map((run) => (
+                    <div className="archive-recovery-item" key={run.runId}>
+                      <div className="archive-recovery-item-main">
+                        <span>{formatTaskStatus(run.status)}</span>
+                        <strong>{run.goal ?? run.runId}</strong>
+                        <p>{run.recovery?.reason ?? "Manual recovery required."}</p>
+                      </div>
+                      <div className="archive-recovery-actions">
+                        {(run.recovery?.actions ?? []).map((action) => (
+                          <button
+                            key={`${run.runId}-${action.type}-${action.stepId}`}
+                            type="button"
+                            className={
+                              action.type === "cancel"
+                                ? "archive-run-control-button"
+                                : "archive-run-control-button is-primary"
+                            }
+                            disabled={isLoading}
+                            onClick={() =>
+                              void handleAgentRecoveryAction({
+                                action: action.type,
+                                runId: run.runId,
+                                stepId: action.stepId,
+                              })
+                            }
+                          >
+                            {formatRecoveryActionLabel(action.type)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="archive-recovery-empty">
+                  No agent runs are waiting for recovery.
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
       );
     }

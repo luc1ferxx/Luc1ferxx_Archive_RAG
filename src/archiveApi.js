@@ -47,6 +47,23 @@ export const requestAgentRunStepRetry = async (runId, stepId) => {
   );
 };
 
+export const fetchAgentRunRecoveryRuns = async () => {
+  return apiGet("/agent-runs/recovery");
+};
+
+export const requestAgentRunRecoveryAction = async (
+  runId,
+  action,
+  payload = {}
+) => {
+  return apiPost(
+    `/agent-runs/${encodeURIComponent(
+      runId
+    )}/recovery/actions/${encodeURIComponent(action)}`,
+    payload
+  );
+};
+
 export const fetchDocumentArxivSuggestions = async (docId, maxResults = 3) => {
   return apiGet(
     `/documents/${docId}/arxiv/suggestions?maxResults=${encodeURIComponent(

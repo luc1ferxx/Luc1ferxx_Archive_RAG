@@ -464,9 +464,70 @@ export const createAgentRunService = ({
     await this.appendRunEvent({
       accessScope,
       runId,
-      type: status === AGENT_RUN_STATUSES.failed ? "run_failed" : "run_completed",
+      type:
+        status === AGENT_RUN_STATUSES.failed
+          ? "run_failed"
+          : status === AGENT_RUN_STATUSES.canceled
+            ? "run_canceled"
+            : "run_completed",
       payload: {
         status,
+      },
+    });
+
+    return (
+      (await this.getRun({
+        accessScope,
+        runId,
+      })) ?? run
+    );
+  },
+
+  async cancelRun({ accessScope = {}, reason = "", runId } = {}) {
+    const existingRun = await this.getRun({
+      accessScope,
+      runId,
+    });
+
+    if (!existingRun) {
+      const error = new Error("Agent run not found.");
+      error.status = 404;
+      throw error;
+    }
+
+    if (
+      ![
+        AGENT_RUN_STATUSES.running,
+        AGENT_RUN_STATUSES.waitingForUser,
+      ].includes(existingRun.status)
+    ) {
+      const error = new Error(
+        "Only running or waiting agent runs can be canceled."
+      );
+      error.status = 409;
+      throw error;
+    }
+
+    const normalizedReason = normalizeText(reason);
+    const run = await this.updateRun({
+      accessScope,
+      runId,
+      patch: {
+        result: {
+          canceled: true,
+          cancelReason: normalizedReason,
+        },
+        status: AGENT_RUN_STATUSES.canceled,
+      },
+    });
+
+    await this.appendRunEvent({
+      accessScope,
+      runId,
+      type: "run_canceled",
+      payload: {
+        reason: normalizedReason,
+        status: AGENT_RUN_STATUSES.canceled,
       },
     });
 

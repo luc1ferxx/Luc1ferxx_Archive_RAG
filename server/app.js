@@ -39,6 +39,7 @@ import { createArxivService, normalizeArxivMaxResults } from "./rag/arxiv-client
 import { createArxivImportService } from "./rag/arxiv-importer.js";
 import { createJobOrchestrator } from "./rag/job-orchestrator.js";
 import { createDefaultAgentRunStore } from "./rag/agent-run-store.js";
+import { createAgentRunRecoveryActionService } from "./rag/agent-run-recovery-actions.js";
 import { createAgentRunRecoveryService } from "./rag/agent-run-recovery.js";
 import { createAgentRunService } from "./rag/agent-runs.js";
 import { createAgentRunStepExecutor } from "./rag/agent-run-step-executor.js";
@@ -401,6 +402,12 @@ export const createApp = async (options = {}) => {
       agentRunService,
       agentRunStepExecutor,
     });
+  const agentRunRecoveryActionService =
+    options.agentRunRecoveryActionService ??
+    createAgentRunRecoveryActionService({
+      agentRunService,
+      agentRunStepExecutor,
+    });
   const uploadStore = options.uploadStore ?? {
     clearUploadSession,
     ensureUploadStorage,
@@ -601,6 +608,20 @@ export const createApp = async (options = {}) => {
     }
   });
 
+  app.get("/agent-runs/recovery", async (req, res) => {
+    try {
+      return res.json(
+        await agentRunRecoveryActionService.listRecoveryRuns({
+          accessScope: getRequestAccessScope(req),
+        })
+      );
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to list recoverable agent runs."),
+      });
+    }
+  });
+
   app.get("/agent-runs/:runId", async (req, res) => {
     const runId = req.params.runId?.trim();
 
@@ -629,6 +650,41 @@ export const createApp = async (options = {}) => {
       });
     }
   });
+
+  app.post(
+    "/agent-runs/:runId/recovery/actions/:action",
+    async (req, res) => {
+      const runId = req.params.runId?.trim();
+      const action = req.params.action?.trim();
+
+      if (!runId) {
+        return res.status(400).json({
+          error: "runId is required.",
+        });
+      }
+
+      if (!action) {
+        return res.status(400).json({
+          error: "action is required.",
+        });
+      }
+
+      try {
+        const result = await agentRunRecoveryActionService.applyRecoveryAction({
+          accessScope: getRequestAccessScope(req),
+          action,
+          payload: req.body,
+          runId,
+        });
+
+        return res.json(result);
+      } catch (error) {
+        return res.status(error.status ?? 500).json({
+          error: serializeError(error, "Failed to recover agent run."),
+        });
+      }
+    }
+  );
 
   app.post("/agent-runs/:runId/actions/:action", async (req, res) => {
     const runId = req.params.runId?.trim();
