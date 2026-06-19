@@ -87,6 +87,13 @@ export const buildMockPlannerResponse = (prompt) => {
     selectedStepIds.push(AGENT_EXECUTION_STEP_IDS.customSkills);
   }
 
+  if (
+    selectedStepIds.includes(AGENT_EXECUTION_STEP_IDS.documentRag) &&
+    !selectedStepIds.includes(AGENT_EXECUTION_STEP_IDS.webSearch)
+  ) {
+    selectedStepIds.push(AGENT_EXECUTION_STEP_IDS.webSearch);
+  }
+
   const orderedStepIds = STEP_ORDER.filter((stepId) =>
     selectedStepIds.includes(stepId)
   );
@@ -194,7 +201,7 @@ const createDocumentCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
   id: "planner_document_rag",
   label: "Document planner selection",
   description:
-    "The LLM planner should select document_rag for a selected-document QA request.",
+    "The LLM planner should select document_rag with a conditional web fallback for a selected-document QA request.",
   run: async () => {
     const telemetry = createEvalTelemetry();
     const citation = buildSource({
@@ -229,9 +236,11 @@ const createDocumentCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
       ragService,
       sessionId: "planner-eval",
       userId: DEFAULT_ACCESS_SCOPE.userId,
-      webChatService: async () => ({
-        text: "web should not run",
-      }),
+      webChatService: async () => {
+        throw new Error(
+          "Web search should not run when document evidence is sufficient."
+        );
+      },
     });
     const planner = getExecutionPlanner(response);
 
@@ -248,11 +257,30 @@ const createDocumentCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
             planner?.stepIds?.includes(AGENT_EXECUTION_STEP_IDS.documentRag),
         }),
         buildCheck({
+          category: "planner",
+          detail: planner,
+          id: "llm_planner_kept_conditional_web_fallback",
+          label: "LLM planner kept web_search as a conditional fallback",
+          passed:
+            planner?.stepIds?.join(">") ===
+            [
+              AGENT_EXECUTION_STEP_IDS.documentRag,
+              AGENT_EXECUTION_STEP_IDS.webSearch,
+            ].join(">"),
+        }),
+        buildCheck({
           category: "execution",
           detail: getTraceTypes(response),
           id: "document_trace_ran",
           label: "Document RAG trace ran",
           passed: getTraceTypes(response).includes("document_rag"),
+        }),
+        buildCheck({
+          category: "execution",
+          detail: getTraceTypes(response),
+          id: "web_fallback_not_executed_when_document_sufficient",
+          label: "Web fallback did not execute when document evidence was sufficient",
+          passed: !getTraceTypes(response).includes("web_search"),
         }),
         buildCheck({
           category: "validator",
@@ -263,7 +291,7 @@ const createDocumentCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
         }),
       ],
       description:
-        "The LLM planner should select document_rag for a selected-document QA request.",
+        "The LLM planner should select document_rag with a conditional web fallback for a selected-document QA request.",
       id: "planner_document_rag",
       label: "Document planner selection",
       response,

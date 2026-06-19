@@ -21,6 +21,7 @@ server/.env
 /server/evaluation/results/latest-feedback.json
 /server/evaluation/results/latest-trajectory.json
 /server/evaluation/results/latest-planner.json
+/server/evaluation/results/latest-planner-*.json
 /server/evaluation/results/latest-recovery-observability.json
 /server/evaluation/results/latest-rollout-readiness.json
 /server/evaluation/results/param-sweep*.json
@@ -30,6 +31,7 @@ server/.env
 /server/evaluation/results/latest-feedback.md
 /server/evaluation/results/latest-trajectory.md
 /server/evaluation/results/latest-planner.md
+/server/evaluation/results/latest-planner-*.md
 /server/evaluation/results/latest-recovery-observability.md
 /server/evaluation/results/latest-rollout-readiness.md
 /server/evaluation/results/param-sweep*.md

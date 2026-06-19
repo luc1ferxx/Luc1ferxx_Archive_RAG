@@ -4,6 +4,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  buildPlannerRuntimeGate,
   buildRolloutReadinessReport,
   buildRolloutReadinessReportFromResults,
   formatRolloutReadinessReportMarkdown,
@@ -116,6 +117,14 @@ const buildTrajectoryPayload = ({ failed = false } = {}) => ({
   },
 });
 
+const pureLlmPlannerRuntime = {
+  executionPlanner: "deterministic",
+  intentPlanner: "deterministic",
+  plannerRollout: "llm",
+  effectiveExecutionPlanner: "llm",
+  effectiveIntentPlanner: "llm",
+};
+
 test("rollout readiness report marks all required signals ready", () => {
   const report = buildRolloutReadinessReport({
     createdAt: "2026-06-19T00:10:00.000Z",
@@ -128,6 +137,7 @@ test("rollout readiness report marks all required signals ready", () => {
     recoveryPayload: buildRecoveryObservabilityEvaluationReport({
       createdAt: "2026-06-19T00:08:00.000Z",
     }),
+    plannerRuntime: pureLlmPlannerRuntime,
     runId: "readiness-ready",
     trajectoryPayload: buildTrajectoryPayload(),
   });
@@ -141,7 +151,7 @@ test("rollout readiness report marks all required signals ready", () => {
   assert.equal(report.signals.recovery.status, "pass");
   assert.deepEqual(
     report.checks.map((check) => check.status),
-    ["pass", "pass", "pass", "pass", "pass"]
+    ["pass", "pass", "pass", "pass", "pass", "pass"]
   );
 
   const markdown = formatRolloutReadinessReportMarkdown(report);
@@ -149,6 +159,7 @@ test("rollout readiness report marks all required signals ready", () => {
   assert.match(markdown, /AgentRAG Rollout Readiness/);
   assert.match(markdown, /Status: `ready`/);
   assert.match(markdown, /Mock\/real divergence: `0`/);
+  assert.match(markdown, /Planner runtime target: `pass`/);
 });
 
 test("rollout readiness report blocks on planner, trajectory, and recovery signals", () => {
@@ -206,6 +217,13 @@ test("rollout readiness report blocks on planner, trajectory, and recovery signa
 
   const report = buildRolloutReadinessReport({
     mockPlannerPayload,
+    plannerRuntime: {
+      executionPlanner: "deterministic",
+      intentPlanner: "deterministic",
+      plannerRollout: "configured",
+      effectiveExecutionPlanner: "deterministic",
+      effectiveIntentPlanner: "deterministic",
+    },
     realPlannerPayload,
     recoveryPayload,
     trajectoryPayload: buildTrajectoryPayload({
@@ -228,6 +246,7 @@ test("rollout readiness report blocks on planner, trajectory, and recovery signa
     report.failedChecks.map((check) => check.id),
     [
       "real_planner_gate_passed",
+      "planner_runtime_pure_llm",
       "trajectory_gate_passed",
       "recovery_gate_passed",
       "unexpected_fallback_rate_zero",
@@ -264,6 +283,7 @@ test("rollout readiness report reads and writes latest result files", async () =
 
   const report = await buildRolloutReadinessReportFromResults({
     inputDirectory: outputDirectory,
+    plannerRuntime: pureLlmPlannerRuntime,
     runId: "readiness-from-files",
   });
   const paths = await writeRolloutReadinessReport({
@@ -280,4 +300,19 @@ test("rollout readiness report reads and writes latest result files", async () =
 
   assert.equal(writtenJson.summary.runId, "readiness-from-files");
   assert.match(writtenMarkdown, /Real planner fallback rate/);
+});
+
+test("planner runtime gate requires pure LLM rollout target", () => {
+  const gate = buildPlannerRuntimeGate({
+    current: {
+      executionPlanner: "llm",
+      intentPlanner: "llm",
+      plannerRollout: "configured",
+      effectiveExecutionPlanner: "llm",
+      effectiveIntentPlanner: "llm",
+    },
+  });
+
+  assert.equal(gate.status, "fail");
+  assert.ok(gate.failedReasons.includes("plannerRollout_mismatch"));
 });

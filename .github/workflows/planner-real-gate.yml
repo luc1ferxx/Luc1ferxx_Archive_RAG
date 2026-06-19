@@ -9,6 +9,9 @@ jobs:
   planner-real-gate:
     runs-on: ubuntu-latest
     env:
+      AGENT_EXECUTION_PLANNER: llm
+      AGENT_INTENT_PLANNER: llm
+      AGENT_PLANNER_ROLLOUT: llm
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     defaults:
@@ -35,13 +38,24 @@ jobs:
       - name: Run planner eval (real)
         run: npm run eval:planner -- --provider real
 
+      - name: Run trajectory eval
+        run: npm run eval:trajectory
+
+      - name: Run recovery observability eval
+        run: npm run eval:recovery-observability
+
       - name: Check real planner provider gate
         run: npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0
+
+      - name: Check rollout readiness
+        run: npm run rollout:readiness
 
       - name: Upload planner reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: planner-provider-reports
-          path: server/evaluation/results/latest-planner*.*
+          path: |
+            server/evaluation/results/latest-planner*.*
+            server/evaluation/results/latest-rollout-readiness.*
           if-no-files-found: ignore

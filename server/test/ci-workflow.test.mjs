@@ -55,11 +55,16 @@ test("planner real provider workflow runs a required scheduled gate", async () =
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /schedule:\s*\n\s*-\s*cron:\s*"0 9 \* \* \*"/);
   assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
+  assert.match(workflow, /AGENT_PLANNER_ROLLOUT:\s*llm/);
+  assert.match(workflow, /AGENT_INTENT_PLANNER:\s*llm/);
+  assert.match(workflow, /AGENT_EXECUTION_PLANNER:\s*llm/);
   assert.match(workflow, /working-directory:\s*server/);
   assert.match(workflow, /node-version:\s*"20"/);
   assert.match(workflow, /run:\s*npm ci/);
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider mock/);
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider real/);
+  assert.match(workflow, /run:\s*npm run eval:trajectory/);
+  assert.match(workflow, /run:\s*npm run eval:recovery-observability/);
   assert.doesNotMatch(
     workflow,
     /Run planner eval \(real\)[\s\S]*if:\s*env\.OPENAI_API_KEY != ''/
@@ -68,5 +73,7 @@ test("planner real provider workflow runs a required scheduled gate", async () =
     workflow,
     /run:\s*npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0/
   );
+  assert.match(workflow, /run:\s*npm run rollout:readiness/);
+  assert.match(workflow, /server\/evaluation\/results\/latest-rollout-readiness\.\*/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
 });

@@ -7,6 +7,11 @@ import {
 } from "./planner-provider-gate.js";
 import { buildRecoveryGate } from "./quality-recovery-gate.js";
 import { buildTrajectoryGate } from "./quality-trajectory-gate.js";
+import {
+  getAgentExecutionPlanner,
+  getAgentIntentPlanner,
+  getAgentPlannerRollout,
+} from "../rag/config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,8 +55,84 @@ const buildMaxMetricCheck = ({
   };
 };
 
+const DEFAULT_REQUIRED_PLANNER_RUNTIME = Object.freeze({
+  effectiveExecutionPlanner: "llm",
+  effectiveIntentPlanner: "llm",
+  plannerRollout: "llm",
+});
+
+const normalizeRuntimeValue = (value) =>
+  String(value ?? "").trim().toLowerCase();
+
+export const getCurrentPlannerRuntime = () => {
+  const plannerRollout = getAgentPlannerRollout();
+  const intentPlanner = getAgentIntentPlanner();
+  const executionPlanner = getAgentExecutionPlanner();
+
+  return {
+    executionPlanner,
+    intentPlanner,
+    plannerRollout,
+    effectiveExecutionPlanner:
+      plannerRollout === "llm" || plannerRollout === "deterministic"
+        ? plannerRollout
+        : executionPlanner,
+    effectiveIntentPlanner:
+      plannerRollout === "llm" || plannerRollout === "deterministic"
+        ? plannerRollout
+        : intentPlanner,
+  };
+};
+
+export const buildPlannerRuntimeGate = ({
+  current = getCurrentPlannerRuntime(),
+  required = DEFAULT_REQUIRED_PLANNER_RUNTIME,
+} = {}) => {
+  const normalizedCurrent = {
+    executionPlanner: normalizeRuntimeValue(current.executionPlanner),
+    intentPlanner: normalizeRuntimeValue(current.intentPlanner),
+    plannerRollout: normalizeRuntimeValue(current.plannerRollout),
+    effectiveExecutionPlanner: normalizeRuntimeValue(
+      current.effectiveExecutionPlanner
+    ),
+    effectiveIntentPlanner: normalizeRuntimeValue(current.effectiveIntentPlanner),
+  };
+  const normalizedRequired = {
+    effectiveExecutionPlanner: normalizeRuntimeValue(
+      required.effectiveExecutionPlanner
+    ),
+    effectiveIntentPlanner: normalizeRuntimeValue(required.effectiveIntentPlanner),
+    plannerRollout: normalizeRuntimeValue(required.plannerRollout),
+  };
+  const failedReasons = [];
+
+  for (const key of Object.keys(normalizedRequired)) {
+    if (
+      normalizedRequired[key] &&
+      normalizedCurrent[key] !== normalizedRequired[key]
+    ) {
+      failedReasons.push(`${key}_mismatch`);
+    }
+  }
+
+  const status = failedReasons.length > 0 ? "fail" : "pass";
+
+  return {
+    status,
+    current: normalizedCurrent,
+    failedReasons,
+    required: normalizedRequired,
+    skipped: false,
+    summary:
+      status === "pass"
+        ? "Planner runtime target is pure LLM."
+        : `Planner runtime target is not pure LLM: ${failedReasons.join(", ")}.`,
+  };
+};
+
 const buildReadinessChecks = ({
   plannerProviderGate = {},
+  plannerRuntimeGate = {},
   recoveryGate = {},
   trajectoryGate = {},
 } = {}) => [
@@ -59,6 +140,11 @@ const buildReadinessChecks = ({
     gate: plannerProviderGate,
     id: "real_planner_gate_passed",
     label: "Real planner provider gate passed",
+  }),
+  buildGateCheck({
+    gate: plannerRuntimeGate,
+    id: "planner_runtime_pure_llm",
+    label: "Planner runtime target is pure LLM",
   }),
   buildGateCheck({
     gate: trajectoryGate,
@@ -89,6 +175,8 @@ export const buildRolloutReadinessReport = ({
   maxDivergenceCount = 0,
   maxUnexpectedFallbackRate = 0,
   mockPlannerPayload = null,
+  plannerRuntime = getCurrentPlannerRuntime(),
+  requiredPlannerRuntime = DEFAULT_REQUIRED_PLANNER_RUNTIME,
   realPlannerPayload = null,
   recoveryPayload = null,
   runId = null,
@@ -109,8 +197,13 @@ export const buildRolloutReadinessReport = ({
   const recoveryGate = buildRecoveryGate({
     latestRecoveryPayload: recoveryPayload,
   });
+  const plannerRuntimeGate = buildPlannerRuntimeGate({
+    current: plannerRuntime,
+    required: requiredPlannerRuntime,
+  });
   const checks = buildReadinessChecks({
     plannerProviderGate,
+    plannerRuntimeGate,
     recoveryGate,
     trajectoryGate,
   });
@@ -166,9 +259,17 @@ export const buildRolloutReadinessReport = ({
         plannerFallbackCount: recoveryGate.recovery?.plannerFallbackCount ?? null,
         summary: recoveryGate.summary,
       },
+      runtime: {
+        status: plannerRuntimeGate.status,
+        current: plannerRuntimeGate.current,
+        failedReasons: plannerRuntimeGate.failedReasons,
+        required: plannerRuntimeGate.required,
+        summary: plannerRuntimeGate.summary,
+      },
     },
     gates: {
       plannerProviderGate,
+      plannerRuntimeGate,
       trajectoryGate,
       recoveryGate,
     },
@@ -242,6 +343,7 @@ export const formatRolloutReadinessReportMarkdown = (report = {}) => {
   const planner = report.signals?.planner ?? {};
   const trajectory = report.signals?.trajectory ?? {};
   const recovery = report.signals?.recovery ?? {};
+  const runtime = report.signals?.runtime ?? {};
   const lines = [
     "# AgentRAG Rollout Readiness",
     "",
@@ -260,6 +362,8 @@ export const formatRolloutReadinessReportMarkdown = (report = {}) => {
       planner.unexpectedFallbackRate
     )}\``,
     `- Mock/real divergence: \`${planner.divergenceCount ?? "N/A"}\``,
+    `- Planner runtime target: \`${runtime.status ?? "unknown"}\``,
+    `- Planner rollout: \`${runtime.current?.plannerRollout ?? "unknown"}\``,
     `- Trajectory gate: \`${trajectory.status ?? "unknown"}\``,
     `- Recovery gate: \`${recovery.status ?? "unknown"}\``,
     `- Recovery step replay failures: \`${
@@ -275,6 +379,7 @@ export const formatRolloutReadinessReportMarkdown = (report = {}) => {
     "## Gate Summaries",
     "",
     `- Planner: ${planner.summary ?? "N/A"}`,
+    `- Runtime: ${runtime.summary ?? "N/A"}`,
     `- Trajectory: ${trajectory.summary ?? "N/A"}`,
     `- Recovery: ${recovery.summary ?? "N/A"}`,
   ];
