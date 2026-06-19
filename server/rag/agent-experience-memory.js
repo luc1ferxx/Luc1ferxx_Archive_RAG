@@ -3,6 +3,7 @@ import {
   isAgentExperienceMemoryEnabled,
 } from "./config.js";
 import {
+  deleteLongMemory,
   listLongMemories,
   rememberLongMemory,
 } from "./long-memory.js";
@@ -15,12 +16,32 @@ export const AGENT_EXPERIENCE_MEMORY_CATEGORY = "agent_experience";
 
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_PLANNING_HINTS = 6;
+const MAX_STORED_EXPERIENCE_MEMORIES_PER_SCOPE = 40;
+const RETENTION_SCAN_LIMIT = 500;
+const RETENTION_MAX_PASSES = 10;
 const MIN_CONFIDENCE = 0.45;
 const NEGATIVE_FEEDBACK_TYPES = new Set([
   "citation_error",
   "hallucination",
   "incomplete",
 ]);
+const WRITE_STATUSES = Object.freeze({
+  error: "error",
+  skipped: "skipped",
+  stored: "stored",
+});
+export const AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS = Object.freeze({
+  approvalPending: "approval_pending",
+  clarificationPending: "clarification_pending",
+  disabled: "disabled",
+  feedbackNotNegative: "feedback_not_negative",
+  missingQuestion: "missing_question",
+  missingUser: "missing_user",
+  noEvidence: "no_evidence",
+  noRecords: "no_records",
+  responseError: "response_error",
+  storeRejected: "store_rejected",
+});
 
 let configuredAgentExperienceMemoryStore = null;
 
@@ -76,11 +97,101 @@ const sanitizePlanningHint = (hint = {}) => ({
   type: hint.type ?? "",
 });
 
+const sanitizeStoredRecord = (record = {}) => ({
+  confidence: record.confidence,
+  gapTypes: record.gapTypes ?? [],
+  intentId: record.intentId ?? "",
+  memoryId: record.memoryId ?? "",
+  mode: record.mode ?? "",
+  retrievalProfile: record.retrievalProfile ?? "",
+  skillChain: record.skillChain ?? [],
+  suggestedActions: record.suggestedActions ?? [],
+  type: record.type ?? "",
+});
+
+const createWriteResult = ({
+  enabled = false,
+  error = null,
+  prunedCount = 0,
+  recordCount = 0,
+  records = [],
+  skippedReason = null,
+  status = WRITE_STATUSES.skipped,
+  storedCount = 0,
+  storedRecords = [],
+  writeAttempted = false,
+} = {}) => {
+  const normalizedStoredRecords = toArray(storedRecords).map(
+    normalizeExperienceRecord
+  );
+  const normalizedRecords = toArray(records);
+  const safeRecordCount = Number.isFinite(Number(recordCount))
+    ? Number(recordCount)
+    : normalizedRecords.length;
+  const safeStoredCount = Number.isFinite(Number(storedCount))
+    ? Number(storedCount)
+    : normalizedStoredRecords.length;
+
+  const result = {
+    enabled: Boolean(enabled),
+    error,
+    prunedCount: Math.max(0, Number(prunedCount) || 0),
+    recordCount: safeRecordCount,
+    records: normalizedRecords,
+    skippedReason,
+    status,
+    storedCount: safeStoredCount,
+    storedRecords: normalizedStoredRecords,
+    writeAttempted: Boolean(writeAttempted),
+  };
+
+  return {
+    ...result,
+    observability: buildAgentExperienceMemoryWriteObservability(result),
+  };
+};
+
+export const buildAgentExperienceMemoryWriteObservability = (result = {}) => {
+  const safeResult = result ?? {};
+  const storedRecords = toArray(safeResult.storedRecords).map(sanitizeStoredRecord);
+  const recordTypes = [
+    ...new Set(
+      [
+        ...toArray(safeResult.records).map((record) => record.type),
+        ...storedRecords.map((record) => record.type),
+      ]
+        .map(normalizeText)
+        .filter(Boolean)
+    ),
+  ];
+  const skippedReason =
+    safeResult.skippedReason ??
+    (safeResult.writeAttempted ? null : "not_attempted");
+
+  return {
+    enabled: Boolean(safeResult.enabled),
+    error: safeResult.error ?? null,
+    prunedCount: Math.max(0, Number(safeResult.prunedCount) || 0),
+    recordCount: Number.isFinite(Number(safeResult.recordCount))
+      ? Number(safeResult.recordCount)
+      : toArray(safeResult.records).length,
+    recordTypes,
+    skippedReason,
+    status: safeResult.status ?? WRITE_STATUSES.skipped,
+    storedCount: Number.isFinite(Number(safeResult.storedCount))
+      ? Number(safeResult.storedCount)
+      : storedRecords.length,
+    storedRecords,
+    writeAttempted: Boolean(safeResult.writeAttempted),
+  };
+};
+
 export const buildAgentExperienceMemoryObservability = (context = {}) => {
   const safeContext = context ?? {};
   const sanitizedHints = toArray(safeContext.planningHints).map(
     sanitizePlanningHint
   );
+  const write = buildAgentExperienceMemoryWriteObservability(safeContext.write);
 
   return {
     applied: Boolean(safeContext.memoryApplied),
@@ -94,8 +205,20 @@ export const buildAgentExperienceMemoryObservability = (context = {}) => {
     planningHints: sanitizedHints,
     reason: safeContext.reason ?? null,
     status: safeContext.status ?? (safeContext.enabled ? "ready" : "disabled"),
+    storedCount: write.storedCount,
+    write,
+    writeAttempted: write.writeAttempted,
+    writeSkippedReason: write.skippedReason,
   };
 };
+
+export const createAgentExperienceMemoryWriteErrorResult = (error) =>
+  createWriteResult({
+    enabled: getAgentExperienceMemoryConfigStatus().enabled,
+    error: error instanceof Error ? error.message : "write_failed",
+    status: WRITE_STATUSES.error,
+    writeAttempted: true,
+  });
 
 const normalizeText = (value = "") =>
   normalizeWhitespace(String(value ?? "")).replace(/\s+/g, " ").trim();
@@ -301,6 +424,21 @@ const createLongMemoryBackedAgentExperienceStore = () => ({
       userId: record.userId,
     });
   },
+
+  async delete({ memoryId, userId } = {}) {
+    if (
+      !isAgentExperienceMemoryEnabled() ||
+      !normalizeText(userId) ||
+      !normalizeText(memoryId)
+    ) {
+      return null;
+    }
+
+    return deleteLongMemory({
+      memoryId,
+      userId,
+    });
+  },
 });
 
 export const createInMemoryAgentExperienceStore = ({
@@ -365,6 +503,23 @@ export const createInMemoryAgentExperienceStore = ({
       return storedRecord;
     },
 
+    async delete({ memoryId, userId } = {}) {
+      const normalizedUserId = normalizeText(userId);
+      const normalizedMemoryId = normalizeText(memoryId);
+      const index = records.findIndex(
+        (record) =>
+          record.userId === normalizedUserId &&
+          record.memoryId === normalizedMemoryId
+      );
+
+      if (index === -1) {
+        return null;
+      }
+
+      const [deleted] = records.splice(index, 1);
+      return deleted;
+    },
+
     snapshot() {
       return [...records];
     },
@@ -387,6 +542,183 @@ const recordAgentExperience = async (record = {}) => {
   const store = getAgentExperienceMemoryStore();
 
   return store.remember ? store.remember(record) : null;
+};
+
+const hasPendingApprovalGate = (body = {}) => {
+  const approvalGates = [
+    ...toArray(body.approvalGates),
+    ...toArray(body.clarification?.detail?.approvalGates),
+  ];
+
+  return approvalGates.some((gate) => gate?.status === "pending");
+};
+
+const getWorkingMemory = (body = {}, agentObservability = {}) =>
+  body.agentWorkingMemory ?? agentObservability.workingMemory ?? {};
+
+const hasEvidenceSupport = (body = {}, agentObservability = {}) => {
+  if (
+    [
+      body.ragSources,
+      body.citations,
+      body.sources,
+    ].some((sources) => toArray(sources).length > 0)
+  ) {
+    return true;
+  }
+
+  if (
+    [...toArray(agentObservability.runs), ...toArray(agentObservability.skills)]
+      .some((entry) => Number(entry?.citationCount ?? 0) > 0)
+  ) {
+    return true;
+  }
+
+  const workingMemory = getWorkingMemory(body, agentObservability);
+
+  return (
+    toArray(workingMemory.supportedClaims).length > 0 ||
+    toArray(workingMemory.resolvedGaps).length > 0
+  );
+};
+
+const buildRunWritePolicy = (input = {}) => {
+  const configStatus = getAgentExperienceMemoryConfigStatus();
+  const response = input.response ?? {};
+  const body = response.body ?? {};
+  const agentObservability = body.agentObservability ?? {};
+  const effectiveUserId = getScopedUserId(input);
+
+  if (!configStatus.enabled) {
+    return {
+      allowed: false,
+      enabled: false,
+      reason: configStatus.reason ?? AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.disabled,
+      records: [],
+    };
+  }
+
+  if (!effectiveUserId) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.missingUser,
+      records: [],
+    };
+  }
+
+  if (response.status >= 400) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.responseError,
+      records: [],
+    };
+  }
+
+  if (hasPendingApprovalGate(body)) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.approvalPending,
+      records: [],
+    };
+  }
+
+  if (body.clarification?.needed) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.clarificationPending,
+      records: [],
+    };
+  }
+
+  const records = buildPositiveRunRecords(input);
+
+  if (records.length === 0) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.noRecords,
+      records,
+    };
+  }
+
+  if (!hasEvidenceSupport(body, agentObservability)) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.noEvidence,
+      records,
+    };
+  }
+
+  return {
+    allowed: true,
+    enabled: true,
+    reason: null,
+    records,
+  };
+};
+
+const pruneExperienceMemoryScope = async ({
+  userId,
+  workspaceId,
+  limit = MAX_STORED_EXPERIENCE_MEMORIES_PER_SCOPE,
+} = {}) => {
+  const store = getAgentExperienceMemoryStore();
+
+  if (!store.list || !store.delete || !normalizeText(userId)) {
+    return 0;
+  }
+
+  let prunedCount = 0;
+  const normalizedLimit = Math.max(
+    1,
+    Number(limit) || MAX_STORED_EXPERIENCE_MEMORIES_PER_SCOPE
+  );
+  const scanLimit = Math.max(normalizedLimit + 1, RETENTION_SCAN_LIMIT);
+
+  for (let pass = 0; pass < RETENTION_MAX_PASSES; pass += 1) {
+    const records = (await store.list({
+      limit: scanLimit,
+      userId,
+      workspaceId,
+    }))
+      .map(normalizeExperienceRecord)
+      .filter(
+        (record) =>
+          !normalizeText(workspaceId) ||
+          !record.workspaceId ||
+          record.workspaceId === normalizeText(workspaceId)
+      )
+      .sort((left, right) =>
+        String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""))
+      );
+    const extras = records.slice(normalizedLimit);
+
+    if (extras.length === 0) {
+      break;
+    }
+
+    for (const record of extras) {
+      if (!record.memoryId) {
+        continue;
+      }
+
+      const deleted = await store.delete({
+        memoryId: record.memoryId,
+        userId,
+      });
+
+      if (deleted) {
+        prunedCount += 1;
+      }
+    }
+  }
+
+  return prunedCount;
 };
 
 const buildPositiveRunRecords = ({
@@ -490,7 +822,20 @@ const buildPositiveRunRecords = ({
 };
 
 export const recordAgentExperienceFromRun = async (input = {}) => {
-  const records = buildPositiveRunRecords(input);
+  const policy = buildRunWritePolicy(input);
+
+  if (!policy.allowed) {
+    return createWriteResult({
+      enabled: policy.enabled,
+      recordCount: policy.records.length,
+      records: policy.records,
+      skippedReason: policy.reason,
+      status: WRITE_STATUSES.skipped,
+      writeAttempted: false,
+    });
+  }
+
+  const records = policy.records;
   const storedRecords = [];
 
   for (const record of records) {
@@ -501,21 +846,47 @@ export const recordAgentExperienceFromRun = async (input = {}) => {
     }
   }
 
-  return storedRecords;
+  const workspaceId = getScopedWorkspaceId(input);
+  const userId = getScopedUserId(input);
+  const prunedCount =
+    storedRecords.length > 0
+      ? await pruneExperienceMemoryScope({
+          userId,
+          workspaceId,
+        })
+      : 0;
+
+  return createWriteResult({
+    enabled: true,
+    prunedCount,
+    recordCount: records.length,
+    records,
+    skippedReason:
+      storedRecords.length > 0
+        ? null
+        : AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.storeRejected,
+    status:
+      storedRecords.length > 0
+        ? WRITE_STATUSES.stored
+        : WRITE_STATUSES.skipped,
+    storedCount: storedRecords.length,
+    storedRecords,
+    writeAttempted: true,
+  });
 };
 
-export const recordAgentExperienceFromFeedback = async ({ feedback } = {}) => {
+const buildNegativeFeedbackRecord = ({ feedback } = {}) => {
   const feedbackType = normalizeText(feedback?.feedbackType);
 
   if (!NEGATIVE_FEEDBACK_TYPES.has(feedbackType)) {
-    return [];
+    return null;
   }
 
   const userId = normalizeText(feedback.userId);
   const workspaceId = normalizeText(feedback.workspaceId);
 
   if (!userId) {
-    return [];
+    return null;
   }
 
   const agentObservability = feedback.agentObservability ?? {};
@@ -542,7 +913,7 @@ export const recordAgentExperienceFromFeedback = async ({ feedback } = {}) => {
     skillChain,
     type,
   });
-  const storedRecord = await recordAgentExperience({
+  return {
     confidence: 0.6,
     gapTypes,
     intentId,
@@ -562,9 +933,117 @@ export const recordAgentExperienceFromFeedback = async ({ feedback } = {}) => {
     type,
     userId,
     workspaceId,
-  });
+  };
+};
 
-  return storedRecord ? [normalizeExperienceRecord(storedRecord)] : [];
+const buildFeedbackWritePolicy = ({ feedback } = {}) => {
+  const configStatus = getAgentExperienceMemoryConfigStatus();
+  const feedbackType = normalizeText(feedback?.feedbackType);
+  const userId = normalizeText(feedback?.userId);
+  const question = normalizeText(feedback?.question);
+
+  if (!configStatus.enabled) {
+    return {
+      allowed: false,
+      enabled: false,
+      reason: configStatus.reason ?? AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.disabled,
+      records: [],
+    };
+  }
+
+  if (!NEGATIVE_FEEDBACK_TYPES.has(feedbackType)) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.feedbackNotNegative,
+      records: [],
+    };
+  }
+
+  if (!userId) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.missingUser,
+      records: [],
+    };
+  }
+
+  if (!question) {
+    return {
+      allowed: false,
+      enabled: true,
+      reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.missingQuestion,
+      records: [],
+    };
+  }
+
+  const record = buildNegativeFeedbackRecord({ feedback });
+
+  return record
+    ? {
+        allowed: true,
+        enabled: true,
+        reason: null,
+        records: [record],
+      }
+    : {
+        allowed: false,
+        enabled: true,
+        reason: AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.noRecords,
+        records: [],
+      };
+};
+
+export const recordAgentExperienceFromFeedback = async ({ feedback } = {}) => {
+  const policy = buildFeedbackWritePolicy({ feedback });
+
+  if (!policy.allowed) {
+    return createWriteResult({
+      enabled: policy.enabled,
+      recordCount: policy.records.length,
+      records: policy.records,
+      skippedReason: policy.reason,
+      status: WRITE_STATUSES.skipped,
+      writeAttempted: false,
+    });
+  }
+
+  const storedRecords = [];
+
+  for (const record of policy.records) {
+    const storedRecord = await recordAgentExperience(record);
+
+    if (storedRecord) {
+      storedRecords.push(normalizeExperienceRecord(storedRecord));
+    }
+  }
+
+  const prunedCount =
+    storedRecords.length > 0
+      ? await pruneExperienceMemoryScope({
+          userId: normalizeText(feedback.userId),
+          workspaceId: normalizeText(feedback.workspaceId),
+        })
+      : 0;
+
+  return createWriteResult({
+    enabled: true,
+    prunedCount,
+    recordCount: policy.records.length,
+    records: policy.records,
+    skippedReason:
+      storedRecords.length > 0
+        ? null
+        : AGENT_EXPERIENCE_MEMORY_WRITE_SKIP_REASONS.storeRejected,
+    status:
+      storedRecords.length > 0
+        ? WRITE_STATUSES.stored
+        : WRITE_STATUSES.skipped,
+    storedCount: storedRecords.length,
+    storedRecords,
+    writeAttempted: true,
+  });
 };
 
 const scoreExperience = (experience, queryTerms) => {

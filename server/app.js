@@ -1179,16 +1179,24 @@ export const createApp = async (options = {}) => {
         accessScope: getRequestAccessScope(req),
       });
       const storedFeedback = await feedbackService.recordFeedback(feedback);
+      let agentExperienceMemory = null;
 
       try {
-        await agentExperienceMemoryService.recordFromFeedback?.({
+        const writeResult = await agentExperienceMemoryService.recordFromFeedback?.({
           feedback: storedFeedback,
         });
+        agentExperienceMemory = writeResult?.observability ?? null;
       } catch (error) {
         console.error("Failed to record agent experience from feedback.", error);
+        agentExperienceMemory = {
+          error: error instanceof Error ? error.message : "write_failed",
+          status: "error",
+          writeAttempted: true,
+        };
       }
 
       return res.status(201).json({
+        agentExperienceMemory,
         feedback: storedFeedback,
       });
     } catch (error) {

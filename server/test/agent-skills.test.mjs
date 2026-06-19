@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { runAgentRag } from "../rag/agent.js";
 import {
+  configureAgentExperienceMemoryStore,
+  createInMemoryAgentExperienceStore,
+} from "../rag/agent-experience-memory.js";
+import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
   createInMemoryAgentRunStore,
@@ -26,6 +30,7 @@ import {
   configureRagDataDirectory,
   getRagDataDirectory,
 } from "../rag/storage.js";
+import { withAgentExperienceMemoryEnabled } from "./agent-experience-memory-test-helpers.mjs";
 
 test("built-in skill registry selects document and web skills with stable metadata", () => {
   const registry = createBuiltInSkillRegistry();
@@ -1048,6 +1053,80 @@ test("agent rag chains contract summary into risk review", async () => {
     response.body.agentSkills.map((skill) => skill.skillId),
     [CUSTOM_SKILL_IDS.summarizeContract, CUSTOM_SKILL_IDS.riskReview]
   );
+});
+
+test("agent rag reports sanitized experience memory write observability", async () => {
+  await withAgentExperienceMemoryEnabled(async () => {
+    const store = createInMemoryAgentExperienceStore();
+    configureAgentExperienceMemoryStore(store);
+    const ragService = {
+      chat: async (_docIds, question) => {
+        if (/risk review/i.test(question)) {
+          return {
+            text: "Risk Review\n- Risk: Early termination requires notice. [Source 1]",
+            citations: [
+              {
+                docId: "doc-1",
+                fileName: "contract.pdf",
+                pageNumber: 2,
+                excerpt: "Early termination requires 60 days notice.",
+              },
+            ],
+            abstained: false,
+            resolvedQuery: question,
+          };
+        }
+
+        return {
+          text: "Contract Summary\n- Acme contract renews annually. [Source 1]",
+          citations: [
+            {
+              docId: "doc-1",
+              fileName: "contract.pdf",
+              pageNumber: 1,
+              excerpt: "Acme contract renews annually.",
+            },
+          ],
+          abstained: false,
+          resolvedQuery: question,
+        };
+      },
+      listDocuments: () => [
+        {
+          docId: "doc-1",
+          fileName: "contract.pdf",
+        },
+      ],
+    };
+
+    const response = await runAgentRag({
+      accessScope: {
+        userId: "alice",
+        workspaceId: "workspace-a",
+      },
+      docIds: ["doc-1"],
+      question: "Review this contract for risks and key terms.",
+      ragService,
+      sessionId: "session-1",
+      userId: "alice",
+      webChatService: async () => ({
+        text: "web should not run",
+      }),
+    });
+
+    const experienceMemory = response.body.agentObservability.experienceMemory;
+
+    assert.equal(response.status, 200);
+    assert.equal(experienceMemory.writeAttempted, true);
+    assert.equal(experienceMemory.writeSkippedReason, null);
+    assert.equal(experienceMemory.storedCount, 1);
+    assert.equal(experienceMemory.write.status, "stored");
+    assert.equal(experienceMemory.write.recordTypes[0], "successful_plan");
+    assert.equal(experienceMemory.write.storedRecords[0].type, "successful_plan");
+    assert.equal("text" in experienceMemory.write.storedRecords[0], false);
+    assert.equal("signatureTerms" in experienceMemory.write.storedRecords[0], false);
+    assert.equal(store.snapshot().length, 1);
+  });
 });
 
 test("agent rag chains document comparison into risk review", async () => {

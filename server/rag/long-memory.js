@@ -13,6 +13,7 @@ import { extractMeaningfulTokens, normalizeWhitespace } from "./text-utils.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_LIST_LIMIT = 50;
+const MAX_LIST_LIMIT = 500;
 const MAX_CONTEXT_ITEMS = 6;
 const USER_NOTE_MIN_LENGTH = 4;
 const PUBLIC_MEMORY_CATEGORIES = Object.freeze(["preference", "note"]);
@@ -166,7 +167,7 @@ const createDefaultStore = () => ({
     const tableName = ensureTableName();
     const safeLimit = Math.max(
       1,
-      Math.min(DEFAULT_LIST_LIMIT, Number(limit) || DEFAULT_LIST_LIMIT)
+      Math.min(MAX_LIST_LIMIT, Number(limit) || DEFAULT_LIST_LIMIT)
     );
     const result = await queryLongMemoryPostgres(
       `
