@@ -4,10 +4,14 @@ import {
 } from "./agent-runs.js";
 import { AGENT_RUN_STEP_STATUSES } from "./agent-run-steps.js";
 import {
+  AUTO_RECOVERY_STEP_STATUS_VALUES,
   DEFAULT_AUTO_RECOVERY_STEP_TYPES,
   MANUAL_RECOVERY_EVENT,
   findAutoRecoverableStep,
 } from "./agent-run-recovery.js";
+import {
+  buildStepReplaySafetyAssessment,
+} from "./agent-run-step-replay-safety.js";
 import { recordRagTrace } from "./observability.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
@@ -35,6 +39,10 @@ const RESUMABLE_RUN_STATUSES = new Set([
 ]);
 
 const FAILED_STEP_STATUSES = new Set([AGENT_RUN_STEP_STATUSES.failed]);
+const RECOVERY_REPLAY_STEP_STATUSES = new Set([
+  ...AUTO_RECOVERY_STEP_STATUS_VALUES,
+  AGENT_RUN_STEP_STATUSES.failed,
+]);
 
 const hasManualRecoveryEvent = (run = {}) =>
   toArray(run.events).some((event) => event.type === MANUAL_RECOVERY_EVENT);
@@ -68,13 +76,45 @@ const findRecoveryAction = ({ actions = [], stepId = "", type } = {}) => {
   );
 };
 
-const buildStepAction = ({ reason, step, type } = {}) => ({
+const buildStepAction = ({ reason, safety = null, step, type } = {}) => ({
   label: step?.label ?? step?.type ?? "Step",
   reason,
+  safety,
   stepId: step?.id ?? "",
   stepType: step?.type ?? "",
   type,
 });
+
+const buildAgentRunReplaySafetyState = ({
+  run = {},
+  safeAutoRecoveryStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
+} = {}) => {
+  const steps = toArray(run.steps)
+    .filter(
+      (step) => step?.id && RECOVERY_REPLAY_STEP_STATUSES.has(step.status)
+    )
+    .map((step) => ({
+      ...buildStepReplaySafetyAssessment({
+        autoReplayStepTypes: safeAutoRecoveryStepTypes,
+        run,
+        step,
+      }),
+      kind: step.kind ?? "",
+      status: step.status ?? "",
+    }));
+  const reasonCodes = [
+    ...new Set(steps.flatMap((step) => step.reasonCodes ?? [])),
+  ];
+
+  return {
+    canAutoReplay: steps.some(
+      (step) =>
+        step.canAutoReplay && AUTO_RECOVERY_STEP_STATUS_VALUES.includes(step.status)
+    ),
+    reasonCodes,
+    steps,
+  };
+};
 
 export const buildAgentRunRecoveryState = ({
   run = {},
@@ -86,6 +126,13 @@ export const buildAgentRunRecoveryState = ({
     safeStepTypes: safeAutoRecoveryStepTypes,
   });
   const failedStep = findFailedStep(run);
+  const replaySafety = buildAgentRunReplaySafetyState({
+    run,
+    safeAutoRecoveryStepTypes,
+  });
+  const safetyByStepId = new Map(
+    replaySafety.steps.map((stepSafety) => [stepSafety.stepId, stepSafety])
+  );
   const actions = [];
 
   if (
@@ -96,6 +143,10 @@ export const buildAgentRunRecoveryState = ({
     actions.push(
       buildStepAction({
         reason: resumeCandidate.reason,
+        safety:
+          resumeCandidate.safety ??
+          safetyByStepId.get(resumeCandidate.step.id) ??
+          null,
         step: resumeCandidate.step,
         type: AGENT_RUN_RECOVERY_ACTIONS.resumeFromStep,
       })
@@ -106,6 +157,7 @@ export const buildAgentRunRecoveryState = ({
     actions.push(
       buildStepAction({
         reason: "failed_step_ready",
+        safety: safetyByStepId.get(failedStep.id) ?? null,
         step: failedStep,
         type: AGENT_RUN_RECOVERY_ACTIONS.retryFailedStep,
       })
@@ -129,6 +181,7 @@ export const buildAgentRunRecoveryState = ({
       (failedStep ? "failed_step_ready" : resumeCandidate.reason),
     required: actions.length > 0,
     requestedMode: recoveryRecord?.requestedMode ?? recoveryRecord?.mode ?? "",
+    replaySafety,
     stepId: recoveryRecord?.stepId ?? resumeCandidate.step?.id ?? failedStep?.id ?? "",
   };
 };

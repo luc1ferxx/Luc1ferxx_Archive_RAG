@@ -73,6 +73,25 @@ const formatRecoveryActionLabel = (actionType) =>
   RECOVERY_ACTION_LABELS[actionType] ??
   String(actionType ?? "Action").replace(/_/g, " ");
 
+const getRecoveryReplaySafetyItems = (recovery) =>
+  Array.isArray(recovery?.replaySafety?.steps)
+    ? recovery.replaySafety.steps
+    : [];
+
+const formatReplaySafetyCodeLine = (safety = {}) => {
+  if (safety.canAutoReplay) {
+    return "auto_replay_safe";
+  }
+
+  const reasonCodes = Array.isArray(safety.reasonCodes)
+    ? safety.reasonCodes.filter(Boolean)
+    : [];
+
+  return reasonCodes.length > 0
+    ? reasonCodes.join(", ")
+    : "manual_recovery_required";
+};
+
 const buildAgentRunActionAnswer = (currentAnswer = {}, result = {}) => {
   const run = result?.run;
   const nextAnswer = result?.response
@@ -963,38 +982,65 @@ const App = () => {
               </div>
               {visibleRecoveryRuns.length > 0 ? (
                 <div className="archive-recovery-list">
-                  {visibleRecoveryRuns.map((run) => (
-                    <div className="archive-recovery-item" key={run.runId}>
-                      <div className="archive-recovery-item-main">
-                        <span>{formatTaskStatus(run.status)}</span>
-                        <strong>{run.goal ?? run.runId}</strong>
-                        <p>{run.recovery?.reason ?? "Manual recovery required."}</p>
+                  {visibleRecoveryRuns.map((run) => {
+                    const replaySafetyItems = getRecoveryReplaySafetyItems(
+                      run.recovery
+                    );
+
+                    return (
+                      <div className="archive-recovery-item" key={run.runId}>
+                        <div className="archive-recovery-item-main">
+                          <span>{formatTaskStatus(run.status)}</span>
+                          <strong>{run.goal ?? run.runId}</strong>
+                          <p>
+                            {run.recovery?.reason ??
+                              "Manual recovery required."}
+                          </p>
+                          {replaySafetyItems.length > 0 ? (
+                            <div className="archive-recovery-safety-list">
+                              {replaySafetyItems.map((safety) => (
+                                <div
+                                  className="archive-recovery-safety-item"
+                                  key={
+                                    safety.stepId ??
+                                    `${safety.stepType}-${formatReplaySafetyCodeLine(
+                                      safety
+                                    )}`
+                                  }
+                                >
+                                  <span>{safety.stepType ?? "step"}</span>
+                                  <p>{formatReplaySafetyCodeLine(safety)}</p>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="archive-recovery-actions">
+                          {(run.recovery?.actions ?? []).map((action) => (
+                            <button
+                              key={`${run.runId}-${action.type}-${action.stepId}`}
+                              type="button"
+                              className={
+                                action.type === "cancel"
+                                  ? "archive-run-control-button"
+                                  : "archive-run-control-button is-primary"
+                              }
+                              disabled={isLoading}
+                              onClick={() =>
+                                void handleAgentRecoveryAction({
+                                  action: action.type,
+                                  runId: run.runId,
+                                  stepId: action.stepId,
+                                })
+                              }
+                            >
+                              {formatRecoveryActionLabel(action.type)}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                      <div className="archive-recovery-actions">
-                        {(run.recovery?.actions ?? []).map((action) => (
-                          <button
-                            key={`${run.runId}-${action.type}-${action.stepId}`}
-                            type="button"
-                            className={
-                              action.type === "cancel"
-                                ? "archive-run-control-button"
-                                : "archive-run-control-button is-primary"
-                            }
-                            disabled={isLoading}
-                            onClick={() =>
-                              void handleAgentRecoveryAction({
-                                action: action.type,
-                                runId: run.runId,
-                                stepId: action.stepId,
-                              })
-                            }
-                          >
-                            {formatRecoveryActionLabel(action.type)}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="archive-recovery-empty">

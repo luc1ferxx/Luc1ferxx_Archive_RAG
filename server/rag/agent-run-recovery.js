@@ -3,7 +3,10 @@ import {
   AGENT_RUN_STEP_KINDS,
   AGENT_RUN_STEP_STATUSES,
 } from "./agent-run-steps.js";
-import { getAutoReplaySafeStepTypes } from "./agent-run-step-replay-safety.js";
+import {
+  buildStepReplaySafetyAssessment,
+  getAutoReplaySafeStepTypes,
+} from "./agent-run-step-replay-safety.js";
 import { recordRagTrace } from "./observability.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
@@ -25,11 +28,13 @@ export const DEFAULT_AUTO_RECOVERY_STEP_TYPES = Object.freeze(
   getAutoReplaySafeStepTypes()
 );
 
-const AUTO_RECOVERY_STEP_STATUSES = new Set([
+export const AUTO_RECOVERY_STEP_STATUS_VALUES = Object.freeze([
   AGENT_RUN_STEP_STATUSES.paused,
   AGENT_RUN_STEP_STATUSES.pending,
   AGENT_RUN_STEP_STATUSES.running,
 ]);
+
+const AUTO_RECOVERY_STEP_STATUSES = new Set(AUTO_RECOVERY_STEP_STATUS_VALUES);
 
 const hasManualRecoveryEvent = (run = {}) =>
   toArray(run.events).some((event) => event.type === MANUAL_RECOVERY_EVENT);
@@ -44,15 +49,6 @@ const hasPendingApprovalGate = (run = {}) =>
       AUTO_RECOVERY_STEP_STATUSES.has(step.status)
   );
 
-const getStepType = (step = {}) => normalizeText(step.type).toLowerCase();
-
-const buildSafeStepTypeSet = (stepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES) =>
-  new Set(
-    toArray(stepTypes)
-      .map((stepType) => normalizeText(stepType).toLowerCase())
-      .filter(Boolean)
-  );
-
 export const findAutoRecoverableStep = ({
   run = {},
   safeStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
@@ -60,19 +56,33 @@ export const findAutoRecoverableStep = ({
   if (hasPendingApprovalGate(run)) {
     return {
       reason: "pending_approval_gate",
+      safety: null,
       step: null,
     };
   }
 
-  const safeTypes = buildSafeStepTypeSet(safeStepTypes);
-  const step = toArray(run.steps).find(
-    (runStep) =>
-      safeTypes.has(getStepType(runStep)) &&
-      AUTO_RECOVERY_STEP_STATUSES.has(runStep.status)
-  );
+  const assessments = toArray(run.steps)
+    .filter((runStep) => AUTO_RECOVERY_STEP_STATUSES.has(runStep.status))
+    .map((runStep) =>
+      buildStepReplaySafetyAssessment({
+        autoReplayStepTypes: safeStepTypes,
+        run,
+        step: runStep,
+      })
+    );
+  const safeAssessment =
+    assessments.find((assessment) => assessment.canAutoReplay) ?? null;
+  const blockedAssessment =
+    assessments.find((assessment) => assessment.reasonCodes.length > 0) ?? null;
+  const step = safeAssessment
+    ? toArray(run.steps).find((runStep) => runStep.id === safeAssessment.stepId)
+    : null;
 
   return {
-    reason: step ? "safe_step_ready" : "no_safe_recoverable_step",
+    reason: safeAssessment
+      ? "safe_step_ready"
+      : blockedAssessment?.reasonCodes[0] ?? "no_safe_recoverable_step",
+    safety: safeAssessment ?? blockedAssessment,
     step: step ?? null,
   };
 };

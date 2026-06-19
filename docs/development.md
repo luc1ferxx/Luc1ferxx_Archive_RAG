@@ -13,7 +13,7 @@
 | `GET` | `/tasks/:taskId` | 读取当前访问范围内的单个 task；响应不暴露 runner 内部 `payload`。 |
 | `POST` | `/tasks/:taskId/actions/:action` | 对等待用户输入的 task 执行动作，例如 `confirm` 或 `cancel`；动作由 task 的 `runnerId` 分发给对应 runner。 |
 | `GET` | `/agent-runs` | 列出当前访问范围内的 AgentRAG run snapshots；可用 `status` 查询参数过滤。 |
-| `GET` | `/agent-runs/recovery` | 列出当前访问范围内等待人工恢复或失败重试的 agent runs，并返回可执行 recovery actions。 |
+| `GET` | `/agent-runs/recovery` | 列出当前访问范围内等待人工恢复或失败重试的 agent runs，并返回可执行 recovery actions 以及从 replay safety matrix 派生的 step safety reasons。 |
 | `GET` | `/agent-runs/:runId` | 读取单个 agent run 的 goal、plan、steps、observations、decisions、approval gates、result/error 和 event log。 |
 | `POST` | `/agent-runs/:runId/actions/:action` | 对等待用户确认的 agent run 执行 `approve` / `deny`；approve 会恢复被暂停的 capability step，不重放整条 `/chat`。 |
 | `POST` | `/agent-runs/:runId/recovery/actions/:action` | 执行 recovery 操作：`resume_from_step`、`retry_failed_step` 或 `cancel`；具体 step 安全性由 replay safety matrix 和 step executor 控制。 |

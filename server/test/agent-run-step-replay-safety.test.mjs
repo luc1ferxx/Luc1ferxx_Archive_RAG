@@ -10,6 +10,8 @@ import {
 import {
   STEP_REPLAY_APPROVAL_POLICIES,
   STEP_REPLAY_IDEMPOTENCY,
+  STEP_REPLAY_SAFETY_REASON_CODES,
+  buildStepReplaySafetyAssessment,
   getAutoReplaySafeStepTypes,
   getStepReplaySafetyPolicy,
   listStepReplaySafetyPolicies,
@@ -97,4 +99,106 @@ test("step handler registry exposes replay safety contracts", () => {
   );
   assert.equal(webHandler.replaySafety.autoReplaySafe, false);
   assert.equal(webHandler.replaySafety.requiredInput[0], "question");
+});
+
+test("step replay safety assessment derives replay reasons from the matrix", () => {
+  const safeDocument = buildStepReplaySafetyAssessment({
+    step: {
+      id: "step-document",
+      input: {
+        docIds: ["doc-1"],
+        question: "What changed?",
+      },
+      type: "document_rag",
+    },
+  });
+
+  assert.equal(safeDocument.canAutoReplay, true);
+  assert.deepEqual(safeDocument.reasonCodes, []);
+  assert.equal(safeDocument.idempotency, STEP_REPLAY_IDEMPOTENCY.readOnlyRag);
+
+  const missingDocumentInput = buildStepReplaySafetyAssessment({
+    step: {
+      id: "step-document-missing",
+      input: {
+        docIds: ["doc-1"],
+      },
+      type: "document_rag",
+    },
+  });
+
+  assert.equal(missingDocumentInput.canAutoReplay, false);
+  assert.deepEqual(missingDocumentInput.missingInput, ["question"]);
+  assert.deepEqual(missingDocumentInput.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.missingInput,
+  ]);
+
+  const webSearch = buildStepReplaySafetyAssessment({
+    step: {
+      id: "step-web",
+      input: {
+        question: "What changed today?",
+      },
+      type: "web_search",
+    },
+  });
+
+  assert.equal(webSearch.canAutoReplay, false);
+  assert.deepEqual(webSearch.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval,
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+  ]);
+
+  const arxivImport = buildStepReplaySafetyAssessment({
+    step: {
+      id: "step-arxiv",
+      input: {
+        topic: "retrieval augmented generation",
+      },
+      type: "arxiv_import",
+    },
+  });
+
+  assert.equal(arxivImport.canAutoReplay, false);
+  assert.ok(
+    arxivImport.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.externalWrite
+    )
+  );
+  assert.ok(
+    arxivImport.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval
+    )
+  );
+
+  const capabilityCall = buildStepReplaySafetyAssessment({
+    run: {
+      approvalGates: [
+        {
+          id: "gate-web",
+          status: "pending",
+        },
+      ],
+    },
+    step: {
+      approvalGateId: "gate-web",
+      id: "step-capability",
+      input: {
+        question: "Search the web.",
+      },
+      type: "capability_call",
+    },
+  });
+
+  assert.equal(capabilityCall.canAutoReplay, false);
+  assert.ok(
+    capabilityCall.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval
+    )
+  );
+  assert.ok(
+    capabilityCall.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent
+    )
+  );
 });

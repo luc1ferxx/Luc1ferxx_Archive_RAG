@@ -5,6 +5,9 @@ import {
   createAgentRunRecoveryActionService,
 } from "../rag/agent-run-recovery-actions.js";
 import {
+  STEP_REPLAY_SAFETY_REASON_CODES,
+} from "../rag/agent-run-step-replay-safety.js";
+import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
   createInMemoryAgentRunStore,
@@ -35,6 +38,10 @@ const createManualRecoveryRun = async (agentRunService) => {
       steps: [
         {
           id: "step-document",
+          input: {
+            docIds: ["doc-1"],
+            question: "What changed?",
+          },
           type: "document_rag",
           kind: "tool_call",
           label: "Document RAG",
@@ -97,12 +104,143 @@ test("agent run recovery actions list safe resume and retry operations", async (
       .recovery.actions.map((action) => action.type),
     ["resume_from_step", "cancel"]
   );
+  assert.equal(
+    result.runs.find((run) => run.runId === "run-manual").recovery.actions[0]
+      .safety.canAutoReplay,
+    true
+  );
+  assert.deepEqual(
+    result.runs.find((run) => run.runId === "run-manual").recovery.replaySafety
+      .steps[0].reasonCodes,
+    []
+  );
   assert.deepEqual(
     result.runs
       .find((run) => run.runId === "run-failed")
       .recovery.actions.map((action) => action.type),
     ["retry_failed_step"]
   );
+});
+
+test("agent run recovery actions expose blocked replay safety reasons", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Recover web search",
+    runId: "run-web-manual",
+  });
+  await agentRunService.updateRun({
+    accessScope,
+    runId: "run-web-manual",
+    patch: {
+      result: {
+        recovery: {
+          mode: "manual",
+          reason: "requires_approval",
+        },
+      },
+      status: AGENT_RUN_STATUSES.waitingForUser,
+      steps: [
+        {
+          id: "step-web",
+          input: {
+            question: "What changed online?",
+          },
+          kind: "tool_call",
+          label: "Web Search",
+          status: "paused",
+          type: "web_search",
+        },
+      ],
+    },
+  });
+  await agentRunService.appendRunEvent({
+    accessScope,
+    runId: "run-web-manual",
+    type: "manual_recovery_required",
+    payload: {
+      reason: "requires_approval",
+    },
+  });
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Recover document with missing input",
+    runId: "run-document-missing-input",
+  });
+  await agentRunService.updateRun({
+    accessScope,
+    runId: "run-document-missing-input",
+    patch: {
+      result: {
+        recovery: {
+          mode: "manual",
+          reason: "missing_input",
+        },
+      },
+      status: AGENT_RUN_STATUSES.waitingForUser,
+      steps: [
+        {
+          id: "step-document-missing",
+          input: {
+            docIds: ["doc-1"],
+          },
+          kind: "tool_call",
+          label: "Document RAG",
+          status: "paused",
+          type: "document_rag",
+        },
+      ],
+    },
+  });
+  await agentRunService.appendRunEvent({
+    accessScope,
+    runId: "run-document-missing-input",
+    type: "manual_recovery_required",
+    payload: {
+      reason: "missing_input",
+    },
+  });
+
+  const actionService = createAgentRunRecoveryActionService({
+    agentRunService,
+    agentRunStepExecutor: {},
+  });
+  const result = await actionService.listRecoveryRuns({
+    accessScope,
+  });
+  const run = result.runs.find(
+    (listedRun) => listedRun.runId === "run-web-manual"
+  );
+  const missingInputRun = result.runs.find(
+    (listedRun) => listedRun.runId === "run-document-missing-input"
+  );
+
+  assert.deepEqual(
+    run.recovery.actions.map((action) => action.type),
+    ["cancel"]
+  );
+  assert.deepEqual(run.recovery.replaySafety.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval,
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+  ]);
+  assert.deepEqual(run.recovery.replaySafety.steps[0].reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval,
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+  ]);
+  assert.equal(run.recovery.replaySafety.steps[0].canAutoReplay, false);
+  assert.deepEqual(
+    missingInputRun.recovery.actions.map((action) => action.type),
+    ["cancel"]
+  );
+  assert.deepEqual(missingInputRun.recovery.replaySafety.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.missingInput,
+  ]);
+  assert.deepEqual(missingInputRun.recovery.replaySafety.steps[0].missingInput, [
+    "question",
+  ]);
 });
 
 test("agent run recovery actions execute through the step executor", async () => {

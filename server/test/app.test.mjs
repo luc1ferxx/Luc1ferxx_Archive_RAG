@@ -1004,6 +1004,10 @@ test("agent run recovery endpoints list and cancel manual recovery runs", async 
       steps: [
         {
           id: "step-document",
+          input: {
+            docIds: ["doc-1"],
+            question: "What changed?",
+          },
           type: "document_rag",
           kind: "tool_call",
           label: "Document RAG",
@@ -1051,6 +1055,14 @@ test("agent run recovery endpoints list and cancel manual recovery runs", async 
     assert.deepEqual(
       recoveryBody.runs[0].recovery.actions.map((action) => action.type),
       ["resume_from_step", "cancel"]
+    );
+    assert.equal(
+      recoveryBody.runs[0].recovery.replaySafety.steps[0].canAutoReplay,
+      true
+    );
+    assert.deepEqual(
+      recoveryBody.runs[0].recovery.actions[0].safety.reasonCodes,
+      []
     );
 
     response = await fetch(

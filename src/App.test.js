@@ -173,6 +173,12 @@ describe("App", () => {
                 recovery: {
                   actions: [
                     {
+                      safety: {
+                        canAutoReplay: true,
+                        reasonCodes: [],
+                        stepId: "step-document",
+                        stepType: "document_rag",
+                      },
                       stepId: "step-document",
                       type: "resume_from_step",
                     },
@@ -181,6 +187,39 @@ describe("App", () => {
                     },
                   ],
                   reason: "server_startup_recovery",
+                  replaySafety: {
+                    steps: [
+                      {
+                        canAutoReplay: true,
+                        reasonCodes: [],
+                        stepId: "step-document",
+                        stepType: "document_rag",
+                      },
+                    ],
+                  },
+                },
+              },
+              {
+                runId: "run-web-recovery",
+                goal: "Recover interrupted web search",
+                status: "waiting_for_user",
+                recovery: {
+                  actions: [
+                    {
+                      type: "cancel",
+                    },
+                  ],
+                  reason: "requires_approval",
+                  replaySafety: {
+                    steps: [
+                      {
+                        canAutoReplay: false,
+                        reasonCodes: ["requires_approval", "non_idempotent"],
+                        stepId: "step-web",
+                        stepType: "web_search",
+                      },
+                    ],
+                  },
                 },
               },
             ],
@@ -231,8 +270,14 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: "Resume step" })
     ).toBeInTheDocument();
+    expect(screen.getByText("document_rag")).toBeInTheDocument();
+    expect(screen.getByText("auto_replay_safe")).toBeInTheDocument();
+    expect(screen.getByText("web_search")).toBeInTheDocument();
+    expect(
+      screen.getByText("requires_approval, non_idempotent")
+    ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Cancel" })[0]);
 
     await waitFor(() =>
       expect(axios.post).toHaveBeenCalledWith(

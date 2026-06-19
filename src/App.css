@@ -3130,6 +3130,35 @@
   overflow-wrap: anywhere;
 }
 
+.archive-recovery-safety-list {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.archive-recovery-safety-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.archive-recovery-safety-item span {
+  flex: 0 0 auto;
+  color: #6b7280;
+  font-size: 0.65rem;
+  font-weight: 760;
+  text-transform: none;
+}
+
+.archive-recovery-safety-item p {
+  min-width: 0;
+  color: #8a5a00;
+  font-size: 0.68rem;
+  font-weight: 740;
+}
+
 .archive-recovery-actions {
   display: flex;
   flex-wrap: wrap;
