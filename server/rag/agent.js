@@ -5,6 +5,7 @@ import {
 } from "./agent-execution-plan.js";
 import { runAgentExecutionPlan } from "./agent-execution-plan-runner.js";
 import {
+  createAgentExperienceMemoryUnavailableContext,
   getAgentExperienceMemoryContext,
   recordAgentExperienceFromRun,
 } from "./agent-experience-memory.js";
@@ -180,12 +181,11 @@ const loadAgentExperienceMemorySafely = async ({
   } catch (error) {
     console.error("Failed to load agent experience memory.", error);
 
-    return {
-      memories: [],
-      memoryApplied: false,
-      plannerBlock: "",
-      planningHints: [],
-    };
+    return createAgentExperienceMemoryUnavailableContext({
+      error: error instanceof Error ? error.message : "load_failed",
+      reason: "load_failed",
+      status: "error",
+    });
   }
 };
 

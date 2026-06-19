@@ -65,8 +65,8 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `DOCUMENTS_POSTGRES_TABLE` | `rag_documents` | 文档表。 |
 | `SESSION_MEMORY_POSTGRES_TABLE` | `rag_session_memory` | 会话记忆表。 |
 | `LONG_MEMORY_POSTGRES_TABLE` | `long_memory_items` | 长期记忆表。 |
-| `RAG_LONG_MEMORY_ENABLED` | `false` | 是否启用长期记忆。 |
-| `RAG_AGENT_EXPERIENCE_MEMORY_ENABLED` | `false` | 是否启用 Agent experience memory；只作为规划提示，不作为文档证据。 |
+| `RAG_LONG_MEMORY_ENABLED` | PostgreSQL configured -> `true`，否则 `false` | 是否启用长期记忆；显式设为 `false` 会覆盖 PostgreSQL 默认开启。 |
+| `RAG_AGENT_EXPERIENCE_MEMORY_ENABLED` | long memory enabled -> `true`，否则 `false` | 是否启用 Agent experience memory；只作为规划提示，不作为文档证据，依赖 long memory。 |
 | `TASK_STORE_PROVIDER` | `auto` | task/job 存储；`auto` 在 PostgreSQL 配好时使用 `postgres`，否则使用 `memory`。 |
 | `TASKS_POSTGRES_TABLE` | `rag_tasks` | task/job 当前快照表。 |
 | `TASK_EVENTS_POSTGRES_TABLE` | `rag_task_events` | task/job 审计事件表。 |

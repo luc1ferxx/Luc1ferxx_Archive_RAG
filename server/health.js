@@ -3,9 +3,11 @@ import {
   getAgentRunsPostgresTable,
   getAgentRunStoreProvider,
   getApiAuthToken,
+  getAgentExperienceMemoryConfigStatus,
   getChatModel,
   getDocumentsPostgresTable,
   getEmbeddingModel,
+  getLongMemoryConfigStatus,
   getLongMemoryPostgresTable,
   getQdrantCollection,
   getQdrantUrl,
@@ -15,7 +17,6 @@ import {
   getTasksPostgresTable,
   getVectorStoreProvider,
   isApiAuthEnabled,
-  isLongMemoryEnabled,
   isStartupHealthStrict,
 } from "./rag/config.js";
 import { runPostgresMigrations } from "./rag/db-migrations.js";
@@ -106,8 +107,13 @@ const checkQdrantHealth = async () => {
 };
 
 const checkLongMemoryHealth = async () => {
-  if (!isLongMemoryEnabled()) {
+  const configStatus = getLongMemoryConfigStatus();
+
+  if (!configStatus.enabled) {
     return buildEntry("disabled", {
+      enabled: false,
+      postgresConfigured: configStatus.postgresConfigured,
+      reason: configStatus.reason,
       message: "Long-term memory is disabled.",
     });
   }
@@ -127,6 +133,8 @@ const checkLongMemoryHealth = async () => {
 
     return buildEntry("ok", {
       backend: "postgresql",
+      enabled: true,
+      reason: configStatus.reason,
       table: getLongMemoryPostgresTable(),
       appliedMigrations: migrations.appliedMigrations,
       message: "PostgreSQL is reachable and migrations are applied.",
@@ -139,6 +147,29 @@ const checkLongMemoryHealth = async () => {
         error instanceof Error ? error.message : "Long-term memory migration failed.",
     });
   }
+};
+
+const checkAgentExperienceMemoryHealth = async () => {
+  const configStatus = getAgentExperienceMemoryConfigStatus();
+
+  if (!configStatus.enabled) {
+    return buildEntry("disabled", {
+      enabled: false,
+      longMemoryEnabled: configStatus.longMemoryEnabled,
+      postgresConfigured: configStatus.postgresConfigured,
+      reason: configStatus.reason,
+      message: "Agent experience memory is disabled.",
+    });
+  }
+
+  return buildEntry("ok", {
+    backend: "long_memory",
+    enabled: true,
+    longMemoryEnabled: configStatus.longMemoryEnabled,
+    postgresConfigured: configStatus.postgresConfigured,
+    reason: configStatus.reason,
+    message: "Agent experience memory is enabled for planning hints.",
+  });
 };
 
 const checkDocumentStoreHealth = async () => {
@@ -301,6 +332,7 @@ export const buildHealthReport = async () => {
     documentStore,
     sessionMemory,
     longMemory,
+    agentExperienceMemory,
     taskStore,
     agentRunStore,
   ] = await Promise.all([
@@ -310,6 +342,7 @@ export const buildHealthReport = async () => {
     checkDocumentStoreHealth(),
     checkSessionMemoryHealth(),
     checkLongMemoryHealth(),
+    checkAgentExperienceMemoryHealth(),
     checkTaskStoreHealth(),
     checkAgentRunStoreHealth(),
   ]);
@@ -320,6 +353,7 @@ export const buildHealthReport = async () => {
     documentStore,
     sessionMemory,
     longMemory,
+    agentExperienceMemory,
     taskStore,
     agentRunStore,
   };

@@ -4,9 +4,11 @@ import {
   createAgentBudget,
   getBudgetSnapshot as getAgentBudgetSnapshot,
 } from "./agent-budget.js";
+import { buildAgentExperienceMemoryObservability } from "./agent-experience-memory.js";
 import { buildClarificationResponse } from "./agent-response-builder.js";
 import { getSkillDescriptor } from "./agent-skill-observability.js";
 import { buildAgentTraceSummary, buildStep } from "./agent-trace.js";
+import { createLongMemoryObservability } from "./long-memory.js";
 import { recordRagTrace } from "./observability.js";
 
 const defaultSkillTracker = {
@@ -43,6 +45,7 @@ export const createAgentRunContext = ({
   experienceMemory = null,
   executionLoop,
   intentPlanner: initialIntentPlanner,
+  longMemory = null,
   plan,
   question,
   recordTrace = recordRagTrace,
@@ -124,17 +127,11 @@ export const createAgentRunContext = ({
 
   const buildAgentObservability = ({ agentMode }) => ({
     agentMode,
-    experienceMemory: experienceMemory
-      ? {
-          applied: Boolean(experienceMemory.memoryApplied),
-          hintCount: experienceMemory.planningHints?.length ?? 0,
-          planningHints: experienceMemory.planningHints ?? [],
-        }
-      : {
-          applied: false,
-          hintCount: 0,
-          planningHints: [],
-        },
+    longMemory:
+      longMemory?.observability ??
+      longMemory ??
+      createLongMemoryObservability(),
+    experienceMemory: buildAgentExperienceMemoryObservability(experienceMemory),
     planMode: plan.mode,
     intentPlanner,
     executionPlanner,

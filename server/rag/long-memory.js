@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import {
+  getLongMemoryConfigStatus,
   getLongMemoryPostgresTable,
   isLongMemoryEnabled,
 } from "./config.js";
@@ -53,8 +54,16 @@ const DETAILED_PATTERNS = [
 
 let configuredLongMemoryStore = null;
 
-const createDisabledContext = () => ({
+export const createLongMemoryObservability = (status = getLongMemoryConfigStatus()) => ({
+  enabled: Boolean(status.enabled),
+  postgresConfigured: Boolean(status.postgresConfigured),
+  reason: status.reason ?? null,
+  status: status.enabled ? "ready" : "disabled",
+});
+
+const createDisabledContext = (status = getLongMemoryConfigStatus()) => ({
   memories: [],
+  observability: createLongMemoryObservability(status),
   rewriteBlock: "",
   answerBlock: "",
 });
@@ -508,7 +517,20 @@ const buildMemoryBlock = (memories) => {
 
 export const initializeLongMemory = async () => {
   const store = getLongMemoryStore();
-  return store.initialize ? store.initialize() : false;
+
+  if (!store.initialize) {
+    return false;
+  }
+
+  try {
+    return await store.initialize();
+  } catch (error) {
+    console.warn(
+      "Long-term memory initialization failed; startup health will report the database status.",
+      error
+    );
+    return false;
+  }
 };
 
 export const configureLongMemoryStore = (store) => {
@@ -547,9 +569,17 @@ export const clearLongMemories = async ({ userId }) => {
 
 export const getLongMemoryContext = async ({ userId, query }) => {
   const normalizedUserId = ensureUserId(userId);
+  const configStatus = getLongMemoryConfigStatus();
 
-  if (!isLongMemoryEnabled() || !normalizedUserId) {
-    return createDisabledContext();
+  if (!configStatus.enabled || !normalizedUserId) {
+    return createDisabledContext(
+      !normalizedUserId && configStatus.enabled
+        ? {
+            ...configStatus,
+            reason: "missing_user",
+          }
+        : configStatus
+    );
   }
 
   const memories = await listLongMemories({
@@ -584,6 +614,11 @@ export const getLongMemoryContext = async ({ userId, query }) => {
 
   return {
     memories: rankedMemories,
+    observability: {
+      ...createLongMemoryObservability(configStatus),
+      applied: rankedMemories.length > 0,
+      hitCount: rankedMemories.length,
+    },
     rewriteBlock: buildMemoryBlock(rankedMemories),
     answerBlock: buildMemoryBlock(rankedMemories),
   };

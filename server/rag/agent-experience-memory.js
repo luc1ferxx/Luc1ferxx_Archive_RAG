@@ -1,4 +1,7 @@
-import { isAgentExperienceMemoryEnabled } from "./config.js";
+import {
+  getAgentExperienceMemoryConfigStatus,
+  isAgentExperienceMemoryEnabled,
+} from "./config.js";
 import {
   listLongMemories,
   rememberLongMemory,
@@ -20,6 +23,79 @@ const NEGATIVE_FEEDBACK_TYPES = new Set([
 ]);
 
 let configuredAgentExperienceMemoryStore = null;
+
+const createExperienceMemoryContext = ({
+  enabled = false,
+  error = null,
+  hitCount = null,
+  memories = [],
+  memoryApplied = false,
+  plannerBlock = "",
+  planningHints = [],
+  reason = null,
+  status = "disabled",
+} = {}) => ({
+  enabled,
+  error,
+  hitCount: Number.isFinite(Number(hitCount))
+    ? Number(hitCount)
+    : planningHints.length,
+  memories,
+  memoryApplied,
+  plannerBlock,
+  planningHints,
+  reason,
+  status,
+});
+
+export const createAgentExperienceMemoryUnavailableContext = ({
+  error = null,
+  reason = null,
+  status = "disabled",
+} = {}) => {
+  const configStatus = getAgentExperienceMemoryConfigStatus();
+
+  return createExperienceMemoryContext({
+    enabled: Boolean(configStatus.enabled),
+    error,
+    reason: reason ?? configStatus.reason,
+    status,
+  });
+};
+
+const sanitizePlanningHint = (hint = {}) => ({
+  confidence: hint.confidence,
+  gapTypes: hint.gapTypes ?? [],
+  intentId: hint.intentId ?? "",
+  memoryId: hint.memoryId ?? "",
+  mode: hint.mode ?? "",
+  retrievalProfile: hint.retrievalProfile ?? "",
+  score: hint.score,
+  skillChain: hint.skillChain ?? [],
+  suggestedActions: hint.suggestedActions ?? [],
+  type: hint.type ?? "",
+});
+
+export const buildAgentExperienceMemoryObservability = (context = {}) => {
+  const safeContext = context ?? {};
+  const sanitizedHints = toArray(safeContext.planningHints).map(
+    sanitizePlanningHint
+  );
+
+  return {
+    applied: Boolean(safeContext.memoryApplied),
+    enabled: Boolean(safeContext.enabled),
+    error: safeContext.error ?? null,
+    hintCount: sanitizedHints.length,
+    hints: sanitizedHints,
+    hitCount: Number.isFinite(Number(safeContext.hitCount))
+      ? Number(safeContext.hitCount)
+      : sanitizedHints.length,
+    planningHints: sanitizedHints,
+    reason: safeContext.reason ?? null,
+    status: safeContext.status ?? (safeContext.enabled ? "ready" : "disabled"),
+  };
+};
 
 const normalizeText = (value = "") =>
   normalizeWhitespace(String(value ?? "")).replace(/\s+/g, " ").trim();
@@ -530,6 +606,16 @@ export const getAgentExperienceMemoryContext = async ({
   question,
   userId,
 } = {}) => {
+  const configStatus = getAgentExperienceMemoryConfigStatus();
+
+  if (!configStatus.enabled) {
+    return createExperienceMemoryContext({
+      enabled: false,
+      reason: configStatus.reason,
+      status: "disabled",
+    });
+  }
+
   const effectiveUserId = getScopedUserId({
     accessScope,
     userId,
@@ -539,12 +625,11 @@ export const getAgentExperienceMemoryContext = async ({
   });
 
   if (!effectiveUserId) {
-    return {
-      memories: [],
-      memoryApplied: false,
-      plannerBlock: "",
-      planningHints: [],
-    };
+    return createExperienceMemoryContext({
+      enabled: true,
+      reason: "missing_user",
+      status: "skipped",
+    });
   }
 
   const store = getAgentExperienceMemoryStore();
@@ -582,23 +667,29 @@ export const getAgentExperienceMemoryContext = async ({
       score: Number(score.toFixed(4)),
     }));
 
-  return {
+  const planningHints = ranked.map((experience) => ({
+    confidence: experience.confidence,
+    gapTypes: experience.gapTypes,
+    intentId: experience.intentId,
+    memoryId: experience.memoryId,
+    mode: experience.mode,
+    retrievalProfile: experience.retrievalProfile,
+    score: experience.score,
+    signatureTerms: experience.signatureTerms,
+    skillChain: experience.skillChain,
+    suggestedActions: experience.suggestedActions,
+    text: experience.text,
+    type: experience.type,
+  }));
+
+  return createExperienceMemoryContext({
+    enabled: true,
+    hitCount: ranked.length,
     memories: ranked,
     memoryApplied: ranked.length > 0,
     plannerBlock: buildPlannerBlock(ranked),
-    planningHints: ranked.map((experience) => ({
-      confidence: experience.confidence,
-      gapTypes: experience.gapTypes,
-      intentId: experience.intentId,
-      memoryId: experience.memoryId,
-      mode: experience.mode,
-      retrievalProfile: experience.retrievalProfile,
-      score: experience.score,
-      signatureTerms: experience.signatureTerms,
-      skillChain: experience.skillChain,
-      suggestedActions: experience.suggestedActions,
-      text: experience.text,
-      type: experience.type,
-    })),
-  };
+    planningHints,
+    reason: ranked.length > 0 ? "matched_planning_hints" : "no_matching_hints",
+    status: "ready",
+  });
 };

@@ -32,6 +32,9 @@ const toBoolean = (rawValue, fallbackValue = false) => {
   return fallbackValue;
 };
 
+const hasEnvValue = (rawValue) =>
+  typeof rawValue === "string" && rawValue.trim() !== "";
+
 const toChoice = (rawValue, fallbackValue, allowedValues) => {
   if (typeof rawValue !== "string") {
     return fallbackValue;
@@ -186,12 +189,6 @@ export const getMaxQueryRequirements = () =>
 export const isNearDuplicateGuardEnabled = () =>
   toBoolean(process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED, true);
 
-export const isLongMemoryEnabled = () =>
-  toBoolean(process.env.RAG_LONG_MEMORY_ENABLED, false);
-
-export const isAgentExperienceMemoryEnabled = () =>
-  toBoolean(process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED, false);
-
 export const isRagObservabilityEnabled = () =>
   toBoolean(process.env.RAG_OBSERVABILITY_ENABLED, false);
 
@@ -200,6 +197,66 @@ export const shouldIncludeRagObservabilityContext = () =>
 
 export const getPostgresDatabaseUrl = () =>
   process.env.POSTGRES_DATABASE_URL || process.env.LONG_MEMORY_DATABASE_URL || "";
+
+export const isPostgresDatabaseConfigured = () =>
+  Boolean(getPostgresDatabaseUrl().trim());
+
+export const getLongMemoryConfigStatus = () => {
+  const postgresConfigured = isPostgresDatabaseConfigured();
+  const explicitlyConfigured = hasEnvValue(process.env.RAG_LONG_MEMORY_ENABLED);
+  const enabled = toBoolean(
+    process.env.RAG_LONG_MEMORY_ENABLED,
+    postgresConfigured
+  );
+
+  return {
+    enabled,
+    explicit: explicitlyConfigured,
+    postgresConfigured,
+    reason: enabled
+      ? explicitlyConfigured
+        ? "env_enabled"
+        : "postgres_configured_default"
+      : explicitlyConfigured
+        ? "env_disabled"
+        : "postgres_not_configured",
+  };
+};
+
+export const isLongMemoryEnabled = () =>
+  getLongMemoryConfigStatus().enabled;
+
+export const getAgentExperienceMemoryConfigStatus = () => {
+  const longMemory = getLongMemoryConfigStatus();
+  const explicitlyConfigured = hasEnvValue(
+    process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED
+  );
+  const requested = toBoolean(
+    process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED,
+    longMemory.enabled
+  );
+  const enabled = requested && longMemory.enabled;
+
+  return {
+    enabled,
+    explicit: explicitlyConfigured,
+    longMemoryEnabled: longMemory.enabled,
+    postgresConfigured: longMemory.postgresConfigured,
+    requested,
+    reason: enabled
+      ? explicitlyConfigured
+        ? "env_enabled"
+        : "postgres_configured_default"
+      : explicitlyConfigured && !requested
+        ? "env_disabled"
+        : requested && !longMemory.enabled
+          ? "long_memory_disabled"
+          : longMemory.reason,
+  };
+};
+
+export const isAgentExperienceMemoryEnabled = () =>
+  getAgentExperienceMemoryConfigStatus().enabled;
 
 export const isPostgresSslEnabled = () =>
   toBoolean(

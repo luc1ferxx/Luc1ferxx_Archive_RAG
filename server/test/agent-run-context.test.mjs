@@ -12,6 +12,12 @@ test("agent run context appends trace steps and exposes budget snapshots", () =>
       followUpsRun: 0,
       maxFollowUps: 1,
     },
+    longMemory: {
+      enabled: true,
+      postgresConfigured: true,
+      reason: "postgres_configured_default",
+      status: "ready",
+    },
     plan: {
       mode: "document",
     },
@@ -46,6 +52,19 @@ test("agent run context appends trace steps and exposes budget snapshots", () =>
   assert.equal(
     context.buildAgentObservability({ agentMode: "document" }).executionPlanner.status,
     "not_run"
+  );
+  assert.deepEqual(
+    context.buildAgentObservability({ agentMode: "document" }).longMemory,
+    {
+      enabled: true,
+      postgresConfigured: true,
+      reason: "postgres_configured_default",
+      status: "ready",
+    }
+  );
+  assert.equal(
+    context.buildAgentObservability({ agentMode: "document" }).experienceMemory.status,
+    "disabled"
   );
 
   context.setExecutionPlanner({

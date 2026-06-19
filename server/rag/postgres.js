@@ -23,7 +23,7 @@ export const getPostgresPool = () => {
 
   if (!connectionString) {
     throw new Error(
-      "LONG_MEMORY_DATABASE_URL is required when RAG_LONG_MEMORY_ENABLED is true."
+      "POSTGRES_DATABASE_URL or LONG_MEMORY_DATABASE_URL is required when PostgreSQL-backed storage is enabled."
     );
   }
 
