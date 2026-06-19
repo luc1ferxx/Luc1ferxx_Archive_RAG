@@ -21,6 +21,32 @@ const configurePlannerProvider = ({ provider }) => {
   resetOpenAIProvider();
 };
 
+const withEnvironmentOverrides = async (overrides, callback) => {
+  const originalValues = new Map(
+    Object.keys(overrides).map((key) => [key, process.env[key]])
+  );
+
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  try {
+    return await callback();
+  } finally {
+    for (const [key, value] of originalValues.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+};
+
 export const runPlannerEvaluation = async ({
   cases,
   createdAt = new Date().toISOString(),
@@ -42,29 +68,37 @@ export const runPlannerEvaluation = async ({
       createDefaultPlannerCases({
         plannerAdapter,
       });
-    const caseResults = [];
-
-    for (const caseDefinition of caseDefinitions) {
-      caseResults.push(await runPlannerCaseSafely(caseDefinition));
-    }
-
-    const metrics = buildMetricSummary({
-      caseResults,
-      categoryLabels: CATEGORY_LABELS,
-    });
-    const status = metrics.failedCaseCount > 0 ? "fail" : "pass";
-
-    return {
-      cases: caseResults,
-      summary: {
-        createdAt,
-        metrics,
-        provider,
-        runId,
-        status,
-        version: PLANNER_REPORT_VERSION,
+    return await withEnvironmentOverrides(
+      {
+        RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
+        RAG_LONG_MEMORY_ENABLED: "false",
       },
-    };
+      async () => {
+        const caseResults = [];
+
+        for (const caseDefinition of caseDefinitions) {
+          caseResults.push(await runPlannerCaseSafely(caseDefinition));
+        }
+
+        const metrics = buildMetricSummary({
+          caseResults,
+          categoryLabels: CATEGORY_LABELS,
+        });
+        const status = metrics.failedCaseCount > 0 ? "fail" : "pass";
+
+        return {
+          cases: caseResults,
+          summary: {
+            createdAt,
+            metrics,
+            provider,
+            runId,
+            status,
+            version: PLANNER_REPORT_VERSION,
+          },
+        };
+      }
+    );
   } finally {
     resetOpenAIProvider();
   }

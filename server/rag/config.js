@@ -54,7 +54,7 @@ export const getPromptVersion = () =>
   toChoice(process.env.RAG_PROMPT_VERSION, "v3", ["v1", "v2", "v3"]);
 
 export const getAgentPlannerRollout = () =>
-  toChoice(process.env.AGENT_PLANNER_ROLLOUT, "configured", [
+  toChoice(process.env.AGENT_PLANNER_ROLLOUT, "llm", [
     "configured",
     "deterministic",
     "guarded_llm",
@@ -63,13 +63,13 @@ export const getAgentPlannerRollout = () =>
   ]);
 
 export const getAgentExecutionPlanner = () =>
-  toChoice(process.env.AGENT_EXECUTION_PLANNER, "deterministic", [
+  toChoice(process.env.AGENT_EXECUTION_PLANNER, "llm", [
     "deterministic",
     "llm",
   ]);
 
 export const getAgentIntentPlanner = () =>
-  toChoice(process.env.AGENT_INTENT_PLANNER, "deterministic", [
+  toChoice(process.env.AGENT_INTENT_PLANNER, "llm", [
     "deterministic",
     "llm",
   ]);

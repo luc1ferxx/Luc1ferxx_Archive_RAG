@@ -4,7 +4,11 @@ import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createApp } from "../app.js";
+import { createApp as createProductionApp } from "../app.js";
+import { deterministicPlannerAdapter } from "../rag/agent-execution-plan.js";
+import {
+  deterministicIntentPlannerAdapter,
+} from "../rag/agent-intent-planner.js";
 import {
   CAPABILITY_IDS,
   createCapabilityRegistry,
@@ -29,6 +33,13 @@ const okHealthService = {
     checks: {},
   }),
 };
+
+const createApp = (options = {}) =>
+  createProductionApp({
+    executionPlannerAdapter: deterministicPlannerAdapter,
+    intentPlannerAdapter: deterministicIntentPlannerAdapter,
+    ...options,
+  });
 
 const startServer = async (app) => {
   const server = createServer(app);

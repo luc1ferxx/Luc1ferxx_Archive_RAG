@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  getAgentExecutionPlanner,
+  getAgentIntentPlanner,
+  getAgentPlannerRollout,
   getAgentExperienceMemoryConfigStatus,
   getLongMemoryConfigStatus,
   isAgentExperienceMemoryEnabled,
@@ -32,6 +35,21 @@ const withEnv = async (overrides, callback) => {
     }
   }
 };
+
+test("agent planner defaults target pure LLM runtime", async () => {
+  await withEnv(
+    {
+      AGENT_EXECUTION_PLANNER: undefined,
+      AGENT_INTENT_PLANNER: undefined,
+      AGENT_PLANNER_ROLLOUT: undefined,
+    },
+    async () => {
+      assert.equal(getAgentPlannerRollout(), "llm");
+      assert.equal(getAgentIntentPlanner(), "llm");
+      assert.equal(getAgentExecutionPlanner(), "llm");
+    }
+  );
+});
 
 test("memory defaults stay disabled when PostgreSQL is not configured", async () => {
   await withEnv(

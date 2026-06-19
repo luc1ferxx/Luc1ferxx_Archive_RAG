@@ -42,6 +42,51 @@ test("planner eval passes default mock LLM planner trajectories", async () => {
   );
 });
 
+test("planner eval isolates memory configuration from local runtime", async () => {
+  const originalAgentExperienceMemory =
+    process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
+  const originalLongMemory = process.env.RAG_LONG_MEMORY_ENABLED;
+
+  process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED = "true";
+  process.env.RAG_LONG_MEMORY_ENABLED = "true";
+
+  try {
+    const report = await runPlannerEvaluation({
+      createdAt: "2026-06-11T00:00:00.000Z",
+      provider: "mock",
+      runId: "planner-memory-isolation-test",
+    });
+    const inventoryCase = report.cases.find(
+      (caseResult) => caseResult.id === "planner_inventory"
+    );
+
+    assert.equal(report.summary.status, "pass");
+    assert.equal(
+      inventoryCase.response.intentPlanner.experienceMemory.applied,
+      false
+    );
+    assert.equal(
+      inventoryCase.response.intentPlanner.experienceMemory.hintCount,
+      0
+    );
+    assert.equal(process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED, "true");
+    assert.equal(process.env.RAG_LONG_MEMORY_ENABLED, "true");
+  } finally {
+    if (originalAgentExperienceMemory === undefined) {
+      delete process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
+    } else {
+      process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED =
+        originalAgentExperienceMemory;
+    }
+
+    if (originalLongMemory === undefined) {
+      delete process.env.RAG_LONG_MEMORY_ENABLED;
+    } else {
+      process.env.RAG_LONG_MEMORY_ENABLED = originalLongMemory;
+    }
+  }
+});
+
 test("planner eval markdown summarizes planner and fallback cases", async () => {
   const report = await runPlannerEvaluation({
     createdAt: "2026-06-11T00:00:00.000Z",
