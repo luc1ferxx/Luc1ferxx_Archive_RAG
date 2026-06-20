@@ -8,11 +8,27 @@ on:
 jobs:
   planner-real-gate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: agentai_smoke
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentai_smoke"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       AGENT_EXECUTION_PLANNER: llm
       AGENT_INTENT_PLANNER: llm
       AGENT_PLANNER_ROLLOUT: llm
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_smoke
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_smoke
 
     defaults:
       run:
@@ -50,6 +66,9 @@ jobs:
       - name: Check rollout readiness
         run: npm run rollout:readiness
 
+      - name: Run pure LLM runtime smoke
+        run: npm run runtime:smoke
+
       - name: Upload planner reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -58,4 +77,5 @@ jobs:
           path: |
             server/evaluation/results/latest-planner*.*
             server/evaluation/results/latest-rollout-readiness.*
+            server/evaluation/results/latest-runtime-smoke.*
           if-no-files-found: ignore

@@ -55,6 +55,18 @@ test("planner real provider workflow runs a required scheduled gate", async () =
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /schedule:\s*\n\s*-\s*cron:\s*"0 9 \* \* \*"/);
   assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
+  assert.match(workflow, /services:\s*\n\s*postgres:/);
+  assert.match(workflow, /image:\s*postgres:16/);
+  assert.match(workflow, /POSTGRES_DB:\s*agentai_smoke/);
+  assert.match(workflow, /--health-cmd "pg_isready -U postgres -d agentai_smoke"/);
+  assert.match(
+    workflow,
+    /POSTGRES_DATABASE_URL:\s*postgresql:\/\/postgres:postgres@127\.0\.0\.1:5432\/agentai_smoke/
+  );
+  assert.match(
+    workflow,
+    /LONG_MEMORY_DATABASE_URL:\s*postgresql:\/\/postgres:postgres@127\.0\.0\.1:5432\/agentai_smoke/
+  );
   assert.match(workflow, /AGENT_PLANNER_ROLLOUT:\s*llm/);
   assert.match(workflow, /AGENT_INTENT_PLANNER:\s*llm/);
   assert.match(workflow, /AGENT_EXECUTION_PLANNER:\s*llm/);
@@ -74,6 +86,9 @@ test("planner real provider workflow runs a required scheduled gate", async () =
     /run:\s*npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0/
   );
   assert.match(workflow, /run:\s*npm run rollout:readiness/);
+  assert.match(workflow, /name:\s*Run pure LLM runtime smoke/);
+  assert.match(workflow, /run:\s*npm run runtime:smoke/);
   assert.match(workflow, /server\/evaluation\/results\/latest-rollout-readiness\.\*/);
+  assert.match(workflow, /server\/evaluation\/results\/latest-runtime-smoke\.\*/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
 });

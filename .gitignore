@@ -25,6 +25,7 @@ server/.env
 /server/evaluation/results/latest-planner-*.json
 /server/evaluation/results/latest-recovery-observability.json
 /server/evaluation/results/latest-rollout-readiness.json
+/server/evaluation/results/latest-runtime-smoke.json
 /server/evaluation/results/param-sweep*.json
 /server/evaluation/results/*rerank*.json
 /server/evaluation/results/20*.md
@@ -35,6 +36,7 @@ server/.env
 /server/evaluation/results/latest-planner-*.md
 /server/evaluation/results/latest-recovery-observability.md
 /server/evaluation/results/latest-rollout-readiness.md
+/server/evaluation/results/latest-runtime-smoke.md
 /server/evaluation/results/param-sweep*.md
 /server/evaluation/results/*rerank*.md
 server/uploads/*
