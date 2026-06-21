@@ -299,12 +299,58 @@ export const getAgentRunStoreProvider = () =>
     "postgres",
   ]);
 
+export const getAgentRunStoreConfigStatus = ({
+  provider = getAgentRunStoreProvider(),
+} = {}) => {
+  const postgresConfigured = isPostgresDatabaseConfigured();
+  const backend =
+    provider === "postgres" || (provider === "auto" && postgresConfigured)
+      ? "postgres"
+      : "memory";
+
+  return {
+    backend,
+    persistent: backend === "postgres",
+    postgresConfigured,
+    provider,
+    reason:
+      provider === "postgres"
+        ? "env_postgres"
+        : provider === "memory"
+          ? "env_memory"
+          : postgresConfigured
+            ? "postgres_configured_default"
+            : "postgres_not_configured",
+  };
+};
+
+const getDefaultAgentRunRecoveryMode = () =>
+  getAgentRunStoreConfigStatus().persistent ? "auto" : "manual";
+
+export const getAgentRunRecoveryModeConfigStatus = () => {
+  const explicit = hasEnvValue(process.env.AGENT_RUN_RECOVERY_MODE);
+  const defaultMode = getDefaultAgentRunRecoveryMode();
+  const mode = toChoice(
+    process.env.AGENT_RUN_RECOVERY_MODE,
+    defaultMode,
+    ["auto", "manual", "off"]
+  );
+
+  return {
+    agentRunStore: getAgentRunStoreConfigStatus(),
+    defaultMode,
+    explicit,
+    mode,
+    reason: explicit
+      ? "env_configured"
+      : mode === "auto"
+        ? "postgres_agent_run_store_default"
+        : "non_persistent_agent_run_store_default",
+  };
+};
+
 export const getAgentRunRecoveryMode = () =>
-  toChoice(process.env.AGENT_RUN_RECOVERY_MODE, "manual", [
-    "auto",
-    "manual",
-    "off",
-  ]);
+  getAgentRunRecoveryModeConfigStatus().mode;
 
 export const getAgentRunsPostgresTable = () =>
   (process.env.AGENT_RUNS_POSTGRES_TABLE || "rag_agent_runs").trim();

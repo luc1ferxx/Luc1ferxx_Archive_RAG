@@ -1,5 +1,6 @@
 import {
   getAgentRunEventsPostgresTable,
+  getAgentRunRecoveryModeConfigStatus,
   getAgentRunsPostgresTable,
   getAgentRunStoreProvider,
   getApiAuthToken,
@@ -280,11 +281,14 @@ const checkTaskStoreHealth = async () => {
 
 const checkAgentRunStoreHealth = async () => {
   const provider = getAgentRunStoreProvider();
+  const recoveryMode = getAgentRunRecoveryModeConfigStatus();
 
   if (provider === "memory" || (provider === "auto" && !isPostgresConfigured())) {
     return buildEntry("ok", {
       backend: "memory",
       provider,
+      recoveryMode: recoveryMode.mode,
+      recoveryModeReason: recoveryMode.reason,
       message: "Agent run store is using in-memory storage.",
     });
   }
@@ -307,6 +311,8 @@ const checkAgentRunStoreHealth = async () => {
     return buildEntry("ok", {
       backend: "postgresql",
       provider,
+      recoveryMode: recoveryMode.mode,
+      recoveryModeReason: recoveryMode.reason,
       table: getAgentRunsPostgresTable(),
       eventsTable: getAgentRunEventsPostgresTable(),
       appliedMigrations: migrations.appliedMigrations,

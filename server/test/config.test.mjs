@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   getAgentExecutionPlanner,
+  getAgentRunRecoveryMode,
+  getAgentRunRecoveryModeConfigStatus,
+  getAgentRunStoreConfigStatus,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
   getAgentExperienceMemoryConfigStatus,
@@ -109,6 +112,60 @@ test("explicit memory disable overrides PostgreSQL default", async () => {
         getAgentExperienceMemoryConfigStatus().reason,
         "env_disabled"
       );
+    }
+  );
+});
+
+test("agent run recovery defaults to manual without persistent run storage", async () => {
+  await withEnv(
+    {
+      AGENT_RUN_RECOVERY_MODE: undefined,
+      AGENT_RUN_STORE_PROVIDER: undefined,
+      LONG_MEMORY_DATABASE_URL: undefined,
+      POSTGRES_DATABASE_URL: undefined,
+    },
+    async () => {
+      assert.equal(getAgentRunRecoveryMode(), "manual");
+      assert.equal(getAgentRunStoreConfigStatus().backend, "memory");
+      assert.equal(
+        getAgentRunRecoveryModeConfigStatus().reason,
+        "non_persistent_agent_run_store_default"
+      );
+    }
+  );
+});
+
+test("PostgreSQL-backed agent run storage enables auto recovery by default", async () => {
+  await withEnv(
+    {
+      AGENT_RUN_RECOVERY_MODE: undefined,
+      AGENT_RUN_STORE_PROVIDER: undefined,
+      LONG_MEMORY_DATABASE_URL: undefined,
+      POSTGRES_DATABASE_URL: "postgres://user:pass@localhost:5432/rag",
+    },
+    async () => {
+      assert.equal(getAgentRunRecoveryMode(), "auto");
+      assert.equal(getAgentRunStoreConfigStatus().backend, "postgres");
+      assert.equal(
+        getAgentRunRecoveryModeConfigStatus().reason,
+        "postgres_agent_run_store_default"
+      );
+    }
+  );
+});
+
+test("explicit agent run recovery mode overrides the storage-derived default", async () => {
+  await withEnv(
+    {
+      AGENT_RUN_RECOVERY_MODE: "manual",
+      AGENT_RUN_STORE_PROVIDER: undefined,
+      LONG_MEMORY_DATABASE_URL: undefined,
+      POSTGRES_DATABASE_URL: "postgres://user:pass@localhost:5432/rag",
+    },
+    async () => {
+      assert.equal(getAgentRunRecoveryMode(), "manual");
+      assert.equal(getAgentRunRecoveryModeConfigStatus().explicit, true);
+      assert.equal(getAgentRunRecoveryModeConfigStatus().reason, "env_configured");
     }
   );
 });
