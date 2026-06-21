@@ -2,76 +2,152 @@
 
 # Luc1ferxx Archive RAG
 
-**一个面向多 PDF 档案的可信文档智能体系统。**
+**可信文档智能体工作台：上传 PDF，围绕证据提问、对比、审查，并保留完整执行轨迹。**
 
-上传文档，提出问题，获得带页级引用的回答；对比多份文档时保留文档边界；证据不足时让 AgentRAG 继续检索、澄清或降级回答，而不是硬编结论。
+它不是一个简单的“PDF 聊天框”。核心目标是让每个重要回答都能回到页级引用、检索记录、claim self-check、gap analysis 和质量门控，方便排查、复现和持续迭代。
 
 <p>
   <img alt="React 18" src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=111111" />
-  <img alt="Node.js" src="https://img.shields.io/badge/Node.js-ESM-339933?logo=node.js&logoColor=ffffff" />
-  <img alt="Express" src="https://img.shields.io/badge/Express-API-000000?logo=express&logoColor=ffffff" />
+  <img alt="Create React App" src="https://img.shields.io/badge/CRA-workbench-09D3AC?logo=react&logoColor=111111" />
+  <img alt="Node.js ESM" src="https://img.shields.io/badge/Node.js-ESM-339933?logo=node.js&logoColor=ffffff" />
+  <img alt="Express API" src="https://img.shields.io/badge/Express-API-000000?logo=express&logoColor=ffffff" />
   <img alt="OpenAI" src="https://img.shields.io/badge/OpenAI-GPT--5-412991?logo=openai&logoColor=ffffff" />
-  <img alt="Vector Store" src="https://img.shields.io/badge/Vector-local%20%7C%20Qdrant-ff4f00" />
-  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-persistence-4169E1?logo=postgresql&logoColor=ffffff" />
+  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-docs%20%7C%20runs%20%7C%20tasks-4169E1?logo=postgresql&logoColor=ffffff" />
+  <img alt="Vector Store" src="https://img.shields.io/badge/Vector-local%20%7C%20Qdrant-FF4F00" />
 </p>
 
-[快速启动](#快速启动) · [当前状态](#当前状态) · [核心设计](#核心设计) · [文档入口](#文档入口) · [常用命令](#常用命令)
+[快速启动](#快速启动) · [架构](#系统架构) · [能力](#核心能力) · [命令](#常用命令) · [文档](#文档入口)
 
 </div>
 
-## 这是什么
+## 项目定位
 
-Luc1ferxx Archive RAG 是一个本地可运行的文档分析工作台，重点不是“让模型读 PDF”，而是让回答能被检查：
+Luc1ferxx Archive RAG 是一个本地优先的多 PDF 档案分析系统。它适合处理合同、政策、研究论文、知识库导出、归档资料这类需要“可追溯回答”的文档集合。
 
-- 每个关键结论尽量回到 citation excerpt 和 PDF 页码。
-- 多文档对比使用 per-document retrieval，避免某一份文档垄断检索结果。
-- AgentRAG 会记录规划、skill 选择、检索 query、self-check、gap analysis、follow-up retrieval 和 finalizer。
-- 证据不足时返回 clarification 或 evidence-limited answer。
-- Synthetic eval、trajectory eval、feedback eval、recovery observability eval、rerank eval、coverage gate 和 CI quality gate 用来防止质量回退。
+用户在前端工作台上传文档后，可以：
 
-适合政策手册、合同、研究论文、知识库 PDF、归档资料等需要“有出处地回答”和“认真比较差异”的场景。
+- 在选中文档、已上传文档或整个工作区范围内提问。
+- 获得带页码、excerpt 和来源文件的回答。
+- 对多份文档做结构化比较，避免单个高相关文档垄断检索结果。
+- 让 AgentRAG 自动选择白名单 skill、补充检索、请求澄清或降级回答。
+- 查看 planner、skill chain、检索 query、unsupported claims、resolved gaps 和 finalizer 删除记录。
+- 通过反馈、synthetic eval、trajectory eval、planner gate、recovery gate 和 quality gate 持续防回退。
 
-## 当前状态
+## 核心能力
 
-| 方向 | 状态 |
+| 方向 | 当前能力 |
 | --- | --- |
-| 工作台体验 | React 三栏式上传、PDF 预览、对话、citation 跳页和 Chat scope 控制已完成。 |
-| 文档处理 | 直接上传和分片上传已完成，默认 2 MB 分片，支持断点续传。 |
-| arXiv 导入 | 上传后基于本地 profile keyphrase 和 relevance check 推荐相关 arXiv 论文，保存可稍后查看的推荐 snapshot，并写入通用 task log；用户勾选确认后通过异步 job runner 下载/导入，按 arXiv ID / PDF URL / title hash 去重并带 provenance 导入索引。 |
-| 文档 RAG | Structured chunking、query decomposition、confidence gate、page citation 已接入。 |
-| 多文档对比 | Per-document retrieval、证据对齐、近重复保护、结构化比较回答已接入。 |
-| AgentRAG | Planner、白名单 skill chain、self-check、gap analysis、follow-up retrieval、finalizer、scope-aware task log 和 runner-based job orchestration 已完成初版；task/job 与 agent run 都支持 PostgreSQL 持久化和审计事件，外部/工作区工具能力通过 capability registry 暴露统一 contract。 |
-| 可观测性 | `/chat` 返回 `agentTrace`、`agentObservability`、`agentWorkingMemory`；可写 JSONL trace。 |
-| 评测与门控 | Synthetic、trajectory、feedback、rerank、coverage gate 和 GitHub Actions quality gate 已接入。 |
-| 数据隔离 | API token 可绑定 `userId/workspaceId`，文档、chat、删除和文件访问按 scope 过滤。 |
+| 文档工作台 | React 三栏式工作台，包含上传、文档列表、PDF 预览、聊天、sources、trace、tasks 和 quality 面板。 |
+| PDF ingestion | 支持直接上传和分片上传；解析页文本，生成 document profile，写入 PostgreSQL 文档表和向量索引。 |
+| 文档 RAG | Structured chunking、query decomposition、dense retrieval、可选 sparse hybrid、可选 rerank、confidence gate 和页级 citation。 |
+| 多文档对比 | Compare 请求走 per-document retrieval，每份文档独立召回和 rerank，再做 evidence alignment、近重复保护和结构化差异输出。 |
+| AgentRAG | LLM/deterministic planner 可配置，执行前校验 access scope；支持 clarification gate、approval gate、白名单 skill chain、self-check、gap analysis、follow-up retrieval 和 finalizer。 |
+| Skills 和 capabilities | 内置 `document_rag`、`web_search`、`arxiv_import`、`inventory`、`document_discovery`、`research_brief`；custom skills 只从白名单加载。Capability registry 暴露统一 contract，不让模型调用任意工具。 |
+| arXiv enrichment | 基于已上传文档 profile 生成清理后的 arXiv topic，返回可签名确认的候选论文；用户选择后通过异步 task runner 导入，并按 arXiv ID / PDF URL / title hash 去重。 |
+| 执行持久化 | PostgreSQL-backed task store 和 agent run store 保存 task/run snapshot、steps、events、approval gates 和 recovery 状态；没有持久化后端的 task/run 可回落内存实现。 |
+| 记忆 | Session memory 用于追问改写；long memory 和 agent experience memory 在 PostgreSQL 配置后默认启用。Experience memory 只进入 planner hints，不作为 citation 或答案证据。 |
+| 可观测性 | `/chat` 返回 `agentTrace`、`agentObservability`、`agentWorkingMemory`；可选写 JSONL trace，前端可展示 planner、skills、queries、gaps 和 removed claims。 |
+| 质量体系 | 覆盖 synthetic、real、feedback、trajectory、planner、recovery observability、rerank、param sweep、coverage gate、Ragas 辅助评测和 GitHub Actions quality gate。 |
+| 访问隔离 | `API_AUTH_ENABLED` 配合 `API_AUTH_TOKEN` 或 `API_AUTH_TOKENS` 后，文档列表、上传、chat、删除、PDF 文件、memory、feedback、quality 等接口按 `userId/workspaceId` scope 过滤。 |
 
-## 核心设计
+## 系统架构
+
+```mermaid
+flowchart TB
+  subgraph Frontend["React 18 / Create React App"]
+    Workspace["Archive workspace"]
+    Upload["PDF uploader"]
+    Chat["Chat composer"]
+    TraceUI["Trace / Sources / Tasks / Quality panels"]
+  end
+
+  subgraph API["Node ESM Express API"]
+    Routes["server/app.js"]
+    Auth["auth + accessScope"]
+    UploadRoutes["upload routes"]
+    ChatRoute["/chat"]
+    TaskRoutes["tasks / agent-runs / quality"]
+  end
+
+  subgraph RAG["server/rag"]
+    Ingest["PDF ingest + chunker + profiler"]
+    Planner["Agent planner"]
+    Skills["Skill registry + capability registry"]
+    Retrieval["retrievers + vector store + reranker"]
+    Loop["document loop + self-check + gap analysis"]
+    Finalizer["answer synthesis + finalizer"]
+    Runs["task store + agent run store + recovery"]
+  end
+
+  subgraph Storage["Storage"]
+    Postgres["PostgreSQL documents, memories, tasks, runs"]
+    Vector["Local JSON vector store or Qdrant"]
+    UploadSessions["upload sessions"]
+    TraceFiles["optional JSONL traces"]
+  end
+
+  Workspace --> Upload
+  Workspace --> Chat
+  Workspace --> TraceUI
+  Upload --> UploadRoutes
+  Chat --> ChatRoute
+  TraceUI --> TaskRoutes
+  Routes --> Auth
+  UploadRoutes --> Ingest
+  ChatRoute --> Planner
+  Planner --> Skills
+  Skills --> Retrieval
+  Retrieval --> Loop
+  Loop --> Finalizer
+  Finalizer --> ChatRoute
+  TaskRoutes --> Runs
+  Ingest --> Postgres
+  Ingest --> Vector
+  Retrieval --> Vector
+  Runs --> Postgres
+  Loop --> TraceFiles
+```
+
+## AgentRAG 闭环
 
 ```mermaid
 flowchart LR
-  U["User question"] --> P["Agent planner"]
-  P --> S["Skill or skill chain"]
-  S --> R["Document retrieval"]
-  R --> D["Draft answer with citations"]
-  D --> C["Claim self-check"]
-  C -->|supported| F["Finalizer"]
-  C -->|gap found| G["Gap analysis"]
-  G --> B["Budget guard"]
-  B -->|retry| R2["Follow-up retrieval"]
-  R2 --> C
-  B -->|stop| Q["Clarification / evidence-limited answer"]
-  F --> T["Trace, feedback, quality gate"]
-  Q --> T
+  Q["User question"] --> P["Intent + execution planner"]
+  P --> C{"Needs clarification or approval?"}
+  C -->|yes| G["Clarification / approval gate"]
+  C -->|no| S["Whitelisted skill or skill chain"]
+  S --> R["Scoped retrieval"]
+  R --> A["Grounded draft with citations"]
+  A --> V["Claim support self-check"]
+  V -->|supported| F["Finalizer"]
+  V -->|gap found| GP["Gap analysis"]
+  GP --> B{"Budget left?"}
+  B -->|yes| FR["Focused follow-up retrieval"]
+  FR --> V
+  B -->|no| L["Evidence-limited answer"]
+  F --> O["Trace + feedback metadata + quality gates"]
+  L --> O
+  G --> O
 ```
 
-核心原则：
+关键规则：
 
-- **先规划再检索**：AgentRAG 先判断任务、文档数量、access scope 和是否需要 custom skill。
-- **对比保留边界**：compare 请求按文档独立召回和 rerank，再做证据对齐。
-- **答案要自检**：self-check 用 citation excerpt 检查数字、日期、专有名词和关键 claim。
-- **失败要可解释**：回答会带 trace、working memory、unsupported claims 和 finalizer 删除记录。
+- Planner 只在已注册 intent、skill、capability 和 step schema 里选择。
+- 文档读取、skill 执行、task 和 agent run 都携带 `accessScope`。
+- Working memory 是 run-scoped，只记录本轮 queries、claims、gaps 和 loop counters。
+- Agent experience memory 是规划提示，不是事实来源；答案证据仍必须来自 citations。
+- 对外部工具调用先经过 query policy 和 approval policy，避免把敏感实体直接带出工作区。
 
-更细的 AgentRAG 设计见 [docs/agent-rag.md](docs/agent-rag.md)。
+## 关键调用链
+
+| 场景 | 谁调用 | 谁决定 | 谁执行 |
+| --- | --- | --- | --- |
+| 上传 PDF | `src/components/PdfUploader.js` 调 `/upload` 或分片上传接口 | `server/app.js` 校验文件、session 和 access scope | `server/rag/index.js` 解析 PDF，`chunker.js` 切块，`doc-registry.js` 写 PostgreSQL，`vector-store*.js` 写索引 |
+| 普通问答 | `src/components/ChatComponent.js` 调 `/chat` | `server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
+| 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
+| arXiv 推荐导入 | 前端 arXiv panel 调 suggestion / task action | `arxiv-enrichment.js` 生成清理后的 topic 和签名候选，task service 记录等待确认 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
+| Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*` | `agent-run-recovery.js` 和 replay safety matrix 判断能否自动恢复 | `agent-run-step-executor.js` 只恢复安全 step、审批后的 capability step 或显式 retry step |
+| 质量门控 | CLI、前端 Quality 面板或 CI 调 eval/gate | `server/evaluation/quality-*.js` 组合各类报告 | synthetic、trajectory、planner、recovery、feedback、rerank、coverage 等 runner 执行 |
 
 ## 快速启动
 
@@ -84,28 +160,30 @@ npm install
 cd ..
 ```
 
-### 2. 准备环境变量
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
 cp server/.env.example server/.env
 ```
 
-最小后端配置：
+常用最小配置：
 
 ```env
+# server/.env
 OPENAI_API_KEY=your_openai_api_key
 SERPAPI_KEY=your_serpapi_key
 
 POSTGRES_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/agentai
 POSTGRES_SSL_ENABLED=false
-TASK_STORE_PROVIDER=auto
-AGENT_RUN_STORE_PROVIDER=auto
 
 VECTOR_STORE_PROVIDER=local
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_CHAT_MODEL=gpt-5
-AGENT_PLANNER_ROLLOUT=configured
+
+AGENT_PLANNER_ROLLOUT=llm
+AGENT_INTENT_PLANNER=llm
+AGENT_EXECUTION_PLANNER=llm
 
 RAG_CHUNK_STRATEGY=structured
 RAG_CHUNK_SIZE=900
@@ -116,32 +194,26 @@ RAG_COMPARE_TOP_K_PER_DOC=3
 STARTUP_HEALTH_STRICT=false
 ```
 
-前端默认请求 `http://localhost:5001`：
-
 ```env
+# .env
 REACT_APP_DOMAIN=http://localhost:5001
 REACT_APP_API_AUTH_TOKEN=
 ```
 
-完整配置说明见 [docs/configuration.md](docs/configuration.md)。
+说明：
 
-### 3. 准备数据库
+- PostgreSQL 是当前文档持久化、PDF 文件流、task、agent run、long memory 的主路径；本地可用 `createdb agentai` 创建默认库。
+- `VECTOR_STORE_PROVIDER=local` 会把向量和 sparse index 写到 `server/data/rag/`；更大语料可以切到 Qdrant。
+- 只做文档 RAG 时 `SERPAPI_KEY` 可以先留空；web search 能力需要它。
+- 完整配置见 [docs/configuration.md](docs/configuration.md)。
 
-本机 PostgreSQL 可直接创建默认数据库：
-
-```bash
-createdb agentai
-```
-
-如果使用远程 PostgreSQL，把 `POSTGRES_DATABASE_URL` 指向你的实例即可。
-
-### 4. 启动
+### 3. 启动
 
 ```bash
 npm run dev
 ```
 
-默认端口：
+默认地址：
 
 | 服务 | 地址 |
 | --- | --- |
@@ -159,69 +231,89 @@ curl http://localhost:5001/ready
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run dev` | 同时启动前端和后端。 |
-| `npm start` | 只启动 React 前端。 |
-| `npm run server` | 从根目录启动 Express 后端。 |
+| `npm run dev` | 从根目录同时启动 React 前端和 Express 后端。 |
+| `npm start` | 只启动前端。 |
+| `npm run server` | 从根目录启动后端，等价于进入 `server/` 后运行 `npm run start`。 |
 | `npm run build` | 构建前端生产包。 |
 | `CI=true npm test -- --watchAll=false` | 非 watch 模式运行前端测试。 |
 | `cd server && npm test` | 运行后端聚合测试。 |
-| `cd server && npm run coverage:gate` | 运行后端 coverage minimum gate。 |
+| `cd server && npm run coverage:gate` | 检查后端覆盖率最低门槛。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
-| `cd server && npm run eval:trajectory` | 评测 AgentRAG 执行轨迹。 |
-| `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner 和 fallback；`-- --provider real` 会生成真实 provider 报告。 |
-| `cd server && npm run eval:recovery-observability` | 生成 deterministic recovery/replay observability report，供 quality gate 检查。 |
-| `cd server && npm run planner:gate -- --provider real` | 强制检查 real planner report、unexpected fallback rate 和 mock/real planner 分歧。 |
-| `cd server && npm run rollout:readiness` | 汇总 real planner、trajectory、recovery、fallback rate 和 mock/real divergence，生成 rollout readiness signal。 |
-| `cd server && npm run runtime:smoke` | 用真实 LLM planner + PostgreSQL smoke `/health` 和 `/chat` runtime。 |
+| `cd server && npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json` | 运行当前 tracked `latest.*` 使用的 near-duplicate corpus。 |
+| `cd server && npm run eval:trajectory` | 检查 skill selection、follow-up retrieval、clarification、access scope 和 budget 行为。 |
+| `cd server && npm run eval:feedback` | 从反馈生成回归语料并运行 latest-feedback eval。 |
+| `cd server && npm run eval:planner` | 评测 planner mock provider；`-- --provider real` 生成真实 provider 报告。 |
+| `cd server && npm run planner:gate -- --provider real` | 检查 real planner report、fallback rate 和 mock/real divergence。 |
+| `cd server && npm run eval:recovery-observability` | 检查 recovery/replay observability。 |
+| `cd server && npm run rollout:readiness` | 汇总 planner、trajectory、recovery、fallback 和 divergence rollout signal。 |
+| `cd server && npm run runtime:smoke` | 用真实 planner 和 PostgreSQL smoke `/health`、`/chat` runtime。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
-| `cd server && npm run quality:gate` | 检查主线、feedback、trajectory、planner 和 recovery 质量门控。 |
-
-完整评测命令见 [docs/evaluation.md](docs/evaluation.md)。
+| `cd server && npm run eval:param-sweep` | 跑 topK、overlap、rerank、hybrid 参数扫描；`-- --profile full` 扩大矩阵。 |
+| `cd server && npm run quality:gate` | 组合 feedback、trajectory、planner、recovery 等报告并执行质量门控。 |
 
 ## 文档入口
 
 | 文档 | 内容 |
 | --- | --- |
-| [docs/configuration.md](docs/configuration.md) | 环境变量、auth、vector store、observability 配置。 |
-| [docs/agent-rag.md](docs/agent-rag.md) | QA/compare 路径、AgentRAG loop、skills、trace 字段。 |
-| [docs/evaluation.md](docs/evaluation.md) | Synthetic、trajectory、feedback、rerank、arXiv corpus、coverage 和 CI gate。 |
-| [docs/development.md](docs/development.md) | API、目录结构、运行时路径、开发注意。 |
+| [docs/configuration.md](docs/configuration.md) | 环境变量、auth、PostgreSQL、vector store、retrieval、rerank、observability 配置。 |
+| [docs/agent-rag.md](docs/agent-rag.md) | AgentRAG 闭环、QA/compare 路径、skill registry、关键模块和 `/chat` observability。 |
+| [docs/evaluation.md](docs/evaluation.md) | Synthetic、trajectory、feedback、planner、recovery、rerank、Ragas、coverage 和 CI gate。 |
+| [docs/development.md](docs/development.md) | 完整 API 表、目录结构、runtime paths 和开发约束。 |
 
-## API 概览
+## API 摘要
 
-| 能力 | Endpoint |
+完整接口表维护在 [docs/development.md#api](docs/development.md#api)。首页只保留能力分组：
+
+| 能力 | Endpoint 组 |
 | --- | --- |
 | 健康检查 | `GET /health`, `GET /ready` |
-| 文档管理 | `GET /documents`, `DELETE /documents/:docId`, `POST /documents/clear` |
-| PDF 文件 | `GET /documents/:docId/file` |
-| 分片上传 | `POST /upload/init`, `GET /upload/status`, `POST /upload/chunk`, `POST /upload/complete` |
-| 直接上传 | `POST /upload` |
+| 文档管理 | `/documents`, `/documents/:docId/file`, `/documents/clear` |
+| 上传 | `/upload/init`, `/upload/status`, `/upload/chunk`, `/upload/complete`, `/upload` |
 | 问答 | `GET /chat`, `POST /chat` |
-| Agent run 审计与恢复 | `GET /agent-runs`, `GET /agent-runs/:runId`, `POST /agent-runs/:runId/actions/:action`, `POST /agent-runs/:runId/steps/:stepId/actions/retry` |
-| Capability registry | `GET /capabilities` |
-| 会话和长期记忆 | `DELETE /sessions/:sessionId`, `GET/POST/DELETE /memory` |
-| 反馈和质量 | `GET/POST /feedback`, `GET/POST /quality/*` |
-
-完整 API 说明见 [docs/development.md](docs/development.md#api)。
+| Tasks | `/tasks`, `/tasks/:taskId`, `/tasks/:taskId/actions/:action` |
+| Agent runs | `/agent-runs`, `/agent-runs/recovery`, `/agent-runs/:runId`, approval/recovery/retry actions |
+| Capabilities | `GET /capabilities` |
+| arXiv | `/arxiv/search`, `/arxiv/import`, `/documents/*/arxiv/*` |
+| Memory | `/sessions/:sessionId`, `/memory` |
+| Feedback / quality | `/feedback`, `/quality/latest`, `/quality/synthetic`, `/quality/history` |
 
 ## 仓库结构
 
 ```text
 .
-├── src/               # React frontend
+├── src/                         # React workspace UI
+│   ├── components/              # Upload, chat, PDF preview, trace, tasks, quality
+│   ├── hooks/                   # Workspace, selection, task, recovery, arXiv state
+│   └── archiveApi.js            # Frontend API client surface
 ├── server/
-│   ├── app.js         # Express routes
-│   ├── rag/           # RAG + AgentRAG pipeline
-│   ├── evaluation/    # Evaluation and benchmark scripts
-│   └── test/          # Backend tests
-├── docs/              # Project docs
-└── README.md
+│   ├── app.js                   # Express routes and API orchestration
+│   ├── auth.js                  # API token and accessScope handling
+│   ├── health.js                # Startup/readiness checks
+│   ├── rag/                     # RAG, AgentRAG, skills, capabilities, stores
+│   ├── evaluation/              # Eval runners, reports, quality gates
+│   ├── test/                    # Backend aggregate tests
+│   └── db/migrations/           # PostgreSQL tables
+├── docs/                        # Deep documentation
+└── README.md                    # Project entry page
 ```
+
+运行时和生成路径通常不要手改或提交：`node_modules/`、`build/`、`server/node_modules/`、`server/data/`、`server/uploads/`、`server/upload-sessions/`、`server/evaluation/generated/`、timestamped `server/evaluation/results/`。
+
+## AgentRAG 优化路线
+
+当前主线遵循低耦合、避免重复代码、复用现有模块边界的原则：
+
+| 顺序 | 主题 | 当前落点 |
+| --- | --- | --- |
+| 1 | Planner eval gate | 已接入 `eval:planner`、`planner:gate`、`rollout:readiness` 和 `quality:gate`。 |
+| 2 | 持久化主执行路径 | Task store、agent run store、step snapshots/events 已通过 PostgreSQL-backed adapter 持久化。 |
+| 3 | Agent run recovery | 已有 startup recovery、manual/auto recovery、approval resume、step retry 和 replay safety matrix。 |
+| 4 | PostgreSQL restart 覆盖 | 持续加固 approval-after-restart、retry-after-failure、partial-step resume 这类恢复回归场景。 |
 
 ## 当前限制
 
-- Intent classifier 仍是轻量规则/权重模型。
-- 多文档真实冲突场景会比普通 QA 慢。
-- Local JSON vector store 适合本地和小规模语料，大规模语料建议切到 Qdrant。
-- arXiv corpus 目前主要服务 rerank/排序评测，不等同于完整真实业务评测集。
-- `ragas` 对 compare 的判断只能作为辅助，compare 正确性仍以自定义 harness 为主。
+- 这是本地优先的工程型工作台，不是完整 SaaS 权限系统；多人部署应使用 `API_AUTH_TOKENS` 并补齐外围鉴权、审计和网络隔离。
+- PostgreSQL 是文档持久化主路径；`STARTUP_HEALTH_STRICT=false` 可以让服务在依赖异常时启动，但完整上传/检索工作流仍需要数据库和 OpenAI key。
+- Local vector store 适合本地开发和小规模工作区；大规模语料建议切到 Qdrant 并单独压测。
+- Web search 和 arXiv 导入依赖外部网络；web search 需要 SerpAPI key，arXiv 使用公开 Atom/PDF 地址。
+- Ragas eval 只是辅助信号；多文档 compare 和 citation 正确性主要依赖自定义 harness、trajectory 和 quality gate。
