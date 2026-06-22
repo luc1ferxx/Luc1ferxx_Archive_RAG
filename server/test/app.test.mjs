@@ -1077,6 +1077,10 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
         "report.export",
         "recommendation.import_selected",
         "document.compare_batch",
+        "task.create",
+        "document.organize",
+        "summary.create",
+        "external.import",
       ]
     );
   } finally {

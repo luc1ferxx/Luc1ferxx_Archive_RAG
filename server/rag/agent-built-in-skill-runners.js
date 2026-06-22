@@ -5,11 +5,15 @@ import {
   buildStepError,
   buildTextCitationStepOutput,
 } from "./agent-step-io.js";
-import { buildArxivImportSkillInput } from "./skills/built-ins.js";
+import {
+  buildArxivImportSkillInput,
+  buildWorkspaceActionSkillInput,
+} from "./skills/built-ins.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
 const ARXIV_IMPORT_STEP_ID = "arxiv_import:primary";
+const WORKSPACE_ACTION_STEP_ID = "workspace_action:primary";
 const DOCUMENT_DISCOVERY_STEP_ID = "document_discovery:primary";
 const INVENTORY_STEP_ID = "inventory:primary";
 
@@ -138,6 +142,68 @@ export const runArxivImportSkill = async ({
     arxivResult.error,
     "Unable to import arXiv papers."
   )}`;
+};
+
+export const runWorkspaceActionSkill = async ({
+  accessScope,
+  addTraceStep = noop,
+  buildSkillTraceDetail = (result) => result,
+  capabilityRegistry,
+  docIds = [],
+  executeObservedSkill,
+  plan,
+  question,
+  recordSkillResult = noop,
+  workspaceActionSkill,
+} = {}) => {
+  if (!workspaceActionSkill) {
+    return null;
+  }
+
+  const actionInput = buildWorkspaceActionSkillInput({
+    docIds,
+    plan,
+    question,
+  });
+  const actionResult = await executeObservedSkill(workspaceActionSkill, {
+    accessScope,
+    capabilityRegistry,
+    docIds,
+    plan,
+    question,
+  });
+  recordSkillResult(actionResult);
+
+  addTraceStep({
+    id: WORKSPACE_ACTION_STEP_ID,
+    type: "capability_call",
+    label: "Workspace Action",
+    status: actionResult.ok ? "completed" : "failed",
+    summary: actionResult.ok
+      ? `Executed ${actionInput.capabilityId}.`
+      : `Workspace action failed: ${serializeError(
+          actionResult.error,
+          "Unable to execute workspace action."
+        )}`,
+    input: {
+      capabilityId: actionInput.capabilityId,
+      ...actionInput.input,
+    },
+    output: buildTextCitationStepOutput(actionResult, {
+      capabilityId: actionInput.capabilityId,
+    }),
+    error: buildStepError(actionResult, "Unable to execute workspace action."),
+    detail: buildSkillTraceDetail(actionResult, {
+      capabilityId: actionInput.capabilityId,
+    }),
+  });
+
+  return actionResult.ok
+    ? actionResult.text
+    : `Workspace action unavailable: ${serializeError(
+        actionResult.error,
+        "Unable to execute workspace action."
+      )}`;
 };
 
 export const runResearchBriefSkill = async ({

@@ -17,11 +17,19 @@ export const AGENT_SKILL_IDS = {
   inventory: "inventory",
   documentDiscovery: "document_discovery",
   researchBrief: "research_brief",
+  workspaceAction: "workspace_action",
 };
 
 export const BUILT_IN_SKILL_VERSION = "1.0.0";
 
 const normalizeText = (value) => String(value ?? "").trim();
+
+const normalizeSentence = (value, fallback = "Workspace action") => {
+  const text = normalizeText(value).replace(/\s+/g, " ") || fallback;
+  const capitalized = `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+
+  return /[.!?。！？]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+};
 
 const buildInterruptStepDetail = (error = {}) => ({
   approvalGate: error.detail?.approvalGate ?? null,
@@ -66,6 +74,113 @@ export const buildArxivImportSkillInput = (question) => ({
   question: normalizeText(question),
   topic: extractArxivTopic(question),
 });
+
+const URL_PATTERN = /https?:\/\/[^\s)]+/i;
+
+const ACTION_TASK_PATTERN =
+  /(?:create|add|generate|make)\s+(?:a\s+)?(?:task|todo|to-do|follow[-\s]?up)(?:\s+to|:)?\s*(.+)$/i;
+
+const stripActionCommand = (question, capabilityId) => {
+  const normalizedQuestion = normalizeText(question);
+
+  if (capabilityId === CAPABILITY_IDS.taskCreate) {
+    return normalizedQuestion.match(ACTION_TASK_PATTERN)?.[1] ?? normalizedQuestion;
+  }
+
+  return normalizedQuestion;
+};
+
+const detectWorkspaceActionCapabilityId = ({ plan = {}, question = "" } = {}) => {
+  if (plan.actionCapabilityId) {
+    return plan.actionCapabilityId;
+  }
+
+  if (ACTION_TASK_PATTERN.test(question)) {
+    return CAPABILITY_IDS.taskCreate;
+  }
+
+  if (/\b(organize|organise|arrange|group|folder|cluster)\b|整理/i.test(question)) {
+    return CAPABILITY_IDS.documentOrganize;
+  }
+
+  if (/\b(create|save|record|store)\b.*\b(summary|summaries)\b|(?:创建|保存|记录).*(?:摘要|总结)/i.test(question)) {
+    return CAPABILITY_IDS.summaryCreate;
+  }
+
+  if (/\b(import|ingest|add)\b.*\b(external|url|source|link|web document)\b|导入.*(?:外部|链接|资料|来源)/i.test(question)) {
+    return CAPABILITY_IDS.externalImport;
+  }
+
+  return null;
+};
+
+export const buildWorkspaceActionSkillInput = ({
+  docIds = [],
+  plan = {},
+  question = "",
+} = {}) => {
+  const capabilityId = detectWorkspaceActionCapabilityId({
+    plan,
+    question,
+  });
+  const normalizedQuestion = normalizeText(question);
+  const selectedDocIds = Array.isArray(docIds) ? docIds : [];
+
+  if (capabilityId === CAPABILITY_IDS.taskCreate) {
+    const title = normalizeSentence(
+      stripActionCommand(normalizedQuestion, capabilityId),
+      "Follow up"
+    );
+
+    return {
+      capabilityId,
+      input: {
+        description: normalizedQuestion,
+        title,
+      },
+    };
+  }
+
+  if (capabilityId === CAPABILITY_IDS.documentOrganize) {
+    return {
+      capabilityId,
+      input: {
+        docIds: selectedDocIds,
+        strategy: "profile_tags",
+        title: "Workspace Document Organization",
+      },
+    };
+  }
+
+  if (capabilityId === CAPABILITY_IDS.summaryCreate) {
+    return {
+      capabilityId,
+      input: {
+        docIds: selectedDocIds,
+        summary: normalizedQuestion,
+        title: "Workspace Summary",
+      },
+    };
+  }
+
+  if (capabilityId === CAPABILITY_IDS.externalImport) {
+    const sourceUrl = normalizedQuestion.match(URL_PATTERN)?.[0] ?? "";
+
+    return {
+      capabilityId,
+      input: {
+        provider: sourceUrl ? "url" : "manual",
+        sourceUrl,
+        title: sourceUrl || "External Source",
+      },
+    };
+  }
+
+  return {
+    capabilityId: null,
+    input: {},
+  };
+};
 
 const formatPaperLine = (paper, index, language) => {
   const id = paper.arxivId ? `arXiv:${paper.arxivId}` : "arXiv";
@@ -302,6 +417,58 @@ const createArxivImportSkill = () => ({
           docId: paper.docId,
           status: paper.status,
         })),
+      },
+    };
+  },
+});
+
+const createWorkspaceActionSkill = () => ({
+  id: AGENT_SKILL_IDS.workspaceAction,
+  version: BUILT_IN_SKILL_VERSION,
+  label: "Workspace Action",
+  kind: "built_in",
+  budgetKey: null,
+  requiresAccessScope: true,
+  match: ({ plan }) => Boolean(plan.wantsAction),
+  plannerActions: ({ plan }) => [
+    {
+      id: "workspace_action",
+      label: "Run workspace action",
+      summary: `Execute ${plan.actionCapabilityId ?? "a workspace action"} through the capability registry.`,
+    },
+  ],
+  execute: async ({
+    accessScope,
+    capabilityRegistry,
+    docIds,
+    plan,
+    question,
+  }) => {
+    const actionInput = buildWorkspaceActionSkillInput({
+      docIds,
+      plan,
+      question,
+    });
+
+    if (!actionInput.capabilityId) {
+      throw new Error("Workspace action capability could not be resolved.");
+    }
+
+    const value = await requireCapabilityRegistry(
+      capabilityRegistry,
+      actionInput.capabilityId
+    ).execute(actionInput.capabilityId, {
+      accessScope,
+      input: actionInput.input,
+    });
+
+    return {
+      value,
+      text: value.text,
+      citations: value.citations ?? [],
+      abstained: false,
+      traceDetail: {
+        capabilityId: actionInput.capabilityId,
       },
     };
   },
@@ -573,6 +740,7 @@ const createResearchBriefSkill = () => ({
 
 export const createBuiltInSkills = () => [
   createArxivImportSkill(),
+  createWorkspaceActionSkill(),
   createDocumentRagSkill(),
   createWebSearchSkill(),
   createInventorySkill(),

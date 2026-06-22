@@ -16,6 +16,15 @@ export {
   createDefaultCapabilityRegistry,
 } from "./built-ins.js";
 export {
+  ACTION_TASK_TYPE,
+  createActionTaskService,
+  createDocumentOrganizeCapability,
+  createExternalImportCapability,
+  createInMemoryActionTaskService,
+  createSummaryCreateCapability,
+  createTaskCreateCapability,
+} from "./actions.js";
+export {
   BUILT_IN_CAPABILITY_VERSION,
   CAPABILITY_IDS,
 } from "./shared.js";

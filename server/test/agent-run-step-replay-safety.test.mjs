@@ -8,6 +8,9 @@ import {
   createDefaultAgentRunStepHandlerRegistry,
 } from "../rag/agent-run-step-handlers/index.js";
 import {
+  CAPABILITY_IDS,
+} from "../rag/capabilities/index.js";
+import {
   STEP_REPLAY_APPROVAL_POLICIES,
   STEP_REPLAY_IDEMPOTENCY,
   STEP_REPLAY_SAFETY_REASON_CODES,
@@ -201,4 +204,37 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
       STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent
     )
   );
+});
+
+test("action capability replay inherits the capability call safety matrix", () => {
+  const actionCapabilityCall = buildStepReplaySafetyAssessment({
+    run: {
+      approvalGates: [
+        {
+          capabilityId: CAPABILITY_IDS.taskCreate,
+          id: "approval:task.create:1.0.0",
+          inputPreview: {
+            title: "Review renewal risks",
+          },
+          status: "approved",
+        },
+      ],
+    },
+    step: {
+      approvalGateId: "approval:task.create:1.0.0",
+      capabilityId: CAPABILITY_IDS.taskCreate,
+      id: "step-action-capability",
+      input: {
+        title: "Review renewal risks",
+      },
+      type: "capability_call",
+    },
+  });
+
+  assert.equal(actionCapabilityCall.policy.stepType, "capability_call");
+  assert.equal(actionCapabilityCall.canAutoReplay, false);
+  assert.equal(actionCapabilityCall.replayRequiresApproval, true);
+  assert.deepEqual(actionCapabilityCall.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+  ]);
 });

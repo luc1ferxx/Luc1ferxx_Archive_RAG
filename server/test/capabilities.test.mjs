@@ -5,6 +5,7 @@ import {
   CAPABILITY_IDS,
   CAPABILITY_POLICY_DECISIONS,
   createCapabilityRegistry,
+  createInMemoryActionTaskService,
   createDefaultCapabilityRegistry,
   evaluateCapabilityPolicy,
   validateCapabilityContract,
@@ -60,8 +61,10 @@ test("built-in capabilities execute whitelisted adapters", async () => {
   const arxivCalls = [];
   const compareCalls = [];
   const importCalls = [];
+  const actionTaskService = createInMemoryActionTaskService();
   const webCalls = [];
   const registry = createDefaultCapabilityRegistry({
+    actionTaskService,
     arxivEnrichmentService: {
       importForDocument: async ({
         accessScope,
@@ -262,6 +265,60 @@ test("built-in capabilities execute whitelisted adapters", async () => {
       question: "latest policy",
     },
   });
+  const taskResult = await registry.execute(CAPABILITY_IDS.taskCreate, {
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    input: {
+      description: "Review renewal risks before Friday.",
+      priority: "high",
+      tags: ["renewal", "risk"],
+      title: "Review renewal risks",
+    },
+  });
+  const organizeResult = await registry.execute(CAPABILITY_IDS.documentOrganize, {
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    input: {
+      docIds: ["doc-remote", "doc-security"],
+      strategy: "profile_tags",
+      title: "Policy folders",
+    },
+  });
+  const summaryResult = await registry.execute(CAPABILITY_IDS.summaryCreate, {
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    input: {
+      citations: [
+        {
+          docId: "doc-remote",
+          pageNumber: 1,
+        },
+      ],
+      docIds: ["doc-remote"],
+      summary: "Remote work requires manager approval.",
+      title: "Remote Work Summary",
+    },
+  });
+  const externalImportResult = await registry.execute(
+    CAPABILITY_IDS.externalImport,
+    {
+      accessScope,
+      approval: {
+        approved: true,
+      },
+      input: {
+        provider: "url",
+        sourceUrl: "https://example.test/policy.pdf",
+        title: "External policy",
+      },
+    }
+  );
 
   assert.equal(arxivResult.importedCount, 1);
   assert.equal(arxivCalls[0].maxResults, 10);
@@ -277,6 +334,15 @@ test("built-in capabilities execute whitelisted adapters", async () => {
   assert.deepEqual(compareCalls[0].options.accessScope, accessScope);
   assert.equal(webResult.text, "web answer");
   assert.deepEqual(webCalls, ["latest policy"]);
+  assert.equal(taskResult.task.status, "pending");
+  assert.equal(taskResult.task.type, "agent_action");
+  assert.equal(taskResult.task.action, "task.create");
+  assert.equal(organizeResult.task.status, "completed");
+  assert.deepEqual(organizeResult.organization.groups[0].docIds, ["doc-remote"]);
+  assert.equal(summaryResult.task.status, "completed");
+  assert.equal(summaryResult.summary.title, "Remote Work Summary");
+  assert.equal(externalImportResult.task.status, "queued");
+  assert.equal(externalImportResult.importRequest.sourceUrl, "https://example.test/policy.pdf");
   assert.equal(
     registry.describe(CAPABILITY_IDS.arxivImportTopic).privacyPolicy.externalCall,
     true
@@ -389,6 +455,58 @@ test("built-in capability policies require approval before agent actions", async
       preview: {
         question: "Compare policies.",
         docIds: ["doc-1", "doc-2"],
+      },
+    },
+    {
+      id: CAPABILITY_IDS.taskCreate,
+      input: {
+        title: "Follow up on renewal risk",
+        description: "Track renewal risk review.",
+        priority: "high",
+      },
+      preview: {
+        title: "Follow up on renewal risk",
+        description: "Track renewal risk review.",
+        priority: "high",
+      },
+    },
+    {
+      id: CAPABILITY_IDS.documentOrganize,
+      input: {
+        title: "Policy folders",
+        docIds: ["doc-1"],
+        strategy: "profile_tags",
+      },
+      preview: {
+        title: "Policy folders",
+        docIds: ["doc-1"],
+        strategy: "profile_tags",
+      },
+    },
+    {
+      id: CAPABILITY_IDS.summaryCreate,
+      input: {
+        title: "Policy summary",
+        summary: "Remote work requires manager approval.",
+        docIds: ["doc-1"],
+      },
+      preview: {
+        title: "Policy summary",
+        summary: "Remote work requires manager approval.",
+        docIds: ["doc-1"],
+      },
+    },
+    {
+      id: CAPABILITY_IDS.externalImport,
+      input: {
+        provider: "url",
+        sourceUrl: "https://example.test/policy.pdf",
+        title: "External policy",
+      },
+      preview: {
+        provider: "url",
+        sourceUrl: "https://example.test/policy.pdf",
+        title: "External policy",
       },
     },
   ];

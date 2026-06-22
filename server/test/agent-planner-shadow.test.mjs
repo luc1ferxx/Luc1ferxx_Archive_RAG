@@ -124,6 +124,7 @@ test("execution planner shadow records alternate steps without changing executio
     result.executionPlan.map((step) => step.id),
     [
       AGENT_EXECUTION_STEP_IDS.arxivImport,
+      AGENT_EXECUTION_STEP_IDS.workspaceAction,
       AGENT_EXECUTION_STEP_IDS.researchBrief,
       AGENT_EXECUTION_STEP_IDS.inventory,
       AGENT_EXECUTION_STEP_IDS.documentDiscovery,
@@ -267,6 +268,7 @@ test("guarded LLM execution planner falls back when validation rejects a step", 
     result.executionPlan.map((step) => step.id),
     [
       AGENT_EXECUTION_STEP_IDS.arxivImport,
+      AGENT_EXECUTION_STEP_IDS.workspaceAction,
       AGENT_EXECUTION_STEP_IDS.researchBrief,
       AGENT_EXECUTION_STEP_IDS.inventory,
       AGENT_EXECUTION_STEP_IDS.documentDiscovery,

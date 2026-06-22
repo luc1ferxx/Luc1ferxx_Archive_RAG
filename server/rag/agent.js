@@ -521,6 +521,7 @@ export const runAgentRag = async ({
 
     const response = attachAgentRunId(
       await finalizeAgentRun({
+        actionAnswer: executionResult.actionAnswer,
         addTraceStep,
         arxivImportAnswer: executionResult.arxivImportAnswer,
         buildAgentObservability,

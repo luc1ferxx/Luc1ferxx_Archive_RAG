@@ -1,4 +1,5 @@
 import { SKILL_CHAIN_MODE } from "./agent-planner.js";
+import { CAPABILITY_IDS } from "./capabilities/shared.js";
 import { CUSTOM_SKILL_IDS } from "./skills/registry.js";
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
@@ -8,6 +9,29 @@ const WEB_SIGNAL_PATTERN =
 
 const ARXIV_IMPORT_SIGNAL_PATTERN =
   /(?:\barxiv\b.*\b(fetch|download|import|ingest|collect|search)\b|\b(fetch|download|import|ingest|collect|search)\b.*\barxiv\b|\barxiv\b.*\b(papers?|pdfs?|preprints?)\b)|(?:arxiv|论文|预印本).*(?:抓取|下载|导入|收集|检索|搜索)|(?:抓取|下载|导入|收集|检索|搜索).*(?:arxiv|论文|预印本)/i;
+
+const ACTION_SIGNAL_PATTERNS = [
+  {
+    capabilityId: CAPABILITY_IDS.taskCreate,
+    pattern:
+      /\b(create|add|generate|make)\b.*\b(task|todo|to-do|follow[-\s]?up)\b|\b(task|todo|to-do|follow[-\s]?up)\b.*\b(create|add|generate|make)\b|(?:创建|生成|新增|添加).*(?:任务|待办|事项)|(?:任务|待办|事项).*(?:创建|生成|新增|添加)/i,
+  },
+  {
+    capabilityId: CAPABILITY_IDS.documentOrganize,
+    pattern:
+      /\b(organize|organise|arrange|group|folder|cluster)\b.*\b(documents?|files?|workspace)\b|\b(documents?|files?|workspace)\b.*\b(organize|organise|arrange|group|folder|cluster)\b|整理.*(?:文档|文件|资料)|(?:文档|文件|资料).*整理/i,
+  },
+  {
+    capabilityId: CAPABILITY_IDS.summaryCreate,
+    pattern:
+      /\b(create|save|record|store)\b.*\b(summary|summaries)\b|\b(summary|summaries)\b.*\b(create|save|record|store)\b|(?:创建|保存|记录).*(?:摘要|总结)|(?:摘要|总结).*(?:创建|保存|记录)/i,
+  },
+  {
+    capabilityId: CAPABILITY_IDS.externalImport,
+    pattern:
+      /\b(import|ingest|add)\b.*\b(external|url|source|link|web document)\b|\b(external|url|source|link|web document)\b.*\b(import|ingest|add)\b|导入.*(?:外部|链接|资料|来源)|(?:外部|链接|资料|来源).*导入/i,
+  },
+];
 
 const INVENTORY_SIGNAL_PATTERN =
   /\b(what documents|which documents|list documents|show documents|workspace documents|uploaded documents|what files|which files|list files)\b|有哪些(?:文档|资料|文件)|列出.*(?:文档|资料|文件)|当前.*(?:文档|资料|文件)|上传.*(?:文档|资料|文件)/i;
@@ -41,6 +65,7 @@ const PROJECT_CHANGE_CHAIN_SIGNAL_PATTERN =
 
 export const AGENT_INTENT_IDS = Object.freeze({
   arxivImport: "arxiv_import",
+  workspaceAction: "workspace_action",
   compareRiskChain: "skill_chain_compare_risk",
   contractReviewChain: "skill_chain_contract_review",
   projectChangeChain: "skill_chain_project_change",
@@ -56,8 +81,13 @@ export const AGENT_INTENT_IDS = Object.freeze({
   document: "document",
 });
 
+const detectActionCapabilityId = (question) =>
+  ACTION_SIGNAL_PATTERNS.find(({ pattern }) => pattern.test(question))
+    ?.capabilityId ?? null;
+
 export const detectPlanSignals = ({ question = "", docIds = [] } = {}) => {
   const wantsArxivImport = ARXIV_IMPORT_SIGNAL_PATTERN.test(question);
+  const actionCapabilityId = detectActionCapabilityId(question);
   const wantsResearch = RESEARCH_SIGNAL_PATTERN.test(question);
   const wantsInventory = INVENTORY_SIGNAL_PATTERN.test(question);
   const wantsDiscovery = DISCOVERY_SIGNAL_PATTERN.test(question);
@@ -76,6 +106,8 @@ export const detectPlanSignals = ({ question = "", docIds = [] } = {}) => {
 
   return {
     hasDocuments,
+    actionCapabilityId,
+    wantsAction: Boolean(actionCapabilityId),
     wantsArxivImport,
     wantsCompareDocuments,
     wantsContractReviewChain,
@@ -94,6 +126,8 @@ export const detectPlanSignals = ({ question = "", docIds = [] } = {}) => {
 const createBasePlan = (overrides = {}) => ({
   mode: "document",
   wantsArxivImport: false,
+  wantsAction: false,
+  actionCapabilityId: null,
   wantsTimeline: false,
   wantsRiskReview: false,
   wantsContractSummary: false,
@@ -115,6 +149,16 @@ const buildIntentPlan = ({ intentId, signals = {} } = {}) => {
       wantsArxivImport: true,
       requiresDocuments: false,
       summary: "Search arXiv for the requested topic and ingest matching PDFs.",
+    });
+  }
+
+  if (intentId === AGENT_INTENT_IDS.workspaceAction) {
+    return createBasePlan({
+      mode: "workspace_action",
+      actionCapabilityId: signals.actionCapabilityId,
+      wantsAction: true,
+      requiresDocuments: false,
+      summary: "Execute a scoped workspace action through the capability registry.",
     });
   }
 
@@ -275,6 +319,21 @@ export const buildIntentPlanCandidates = ({ question = "", docIds = [] } = {}) =
 
   if (signals.wantsArxivImport) {
     addCandidate(AGENT_INTENT_IDS.arxivImport, "The request asks to import arXiv papers.");
+  }
+
+  const actionConflictsWithProjectChangeChain =
+    signals.actionCapabilityId === CAPABILITY_IDS.documentOrganize &&
+    signals.wantsProjectChangeChain;
+
+  if (
+    !signals.wantsArxivImport &&
+    signals.wantsAction &&
+    !actionConflictsWithProjectChangeChain
+  ) {
+    addCandidate(
+      AGENT_INTENT_IDS.workspaceAction,
+      "The request asks the agent to perform a workspace action."
+    );
   }
 
   if (signals.wantsRiskComparisonChain) {

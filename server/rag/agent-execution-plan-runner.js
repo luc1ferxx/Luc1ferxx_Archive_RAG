@@ -10,6 +10,7 @@ import {
   runDocumentDiscoverySkill,
   runInventorySkill,
   runResearchBriefSkill,
+  runWorkspaceActionSkill,
 } from "./agent-built-in-skill-runners.js";
 import { runCustomSkills } from "./agent-custom-skill-runner.js";
 import { runWebSearchSkill } from "./agent-web-runner.js";
@@ -57,6 +58,7 @@ export const runAgentExecutionPlan = async ({
   });
   const state = {
     arxivImportAnswer: null,
+    actionAnswer: null,
     customSkillResults: [],
     customSkills: getCustomSkills(selectedSkills),
     discoveryAnswer: null,
@@ -89,6 +91,25 @@ export const runAgentExecutionPlan = async ({
         recordSkippedSkill,
         recordSkillResult,
         stepLifecycle,
+      });
+    },
+
+    [AGENT_EXECUTION_STEP_IDS.workspaceAction]: async () => {
+      const workspaceActionSkill = getSelectedSkill(
+        AGENT_SKILL_IDS.workspaceAction
+      );
+
+      state.actionAnswer = await runWorkspaceActionSkill({
+        accessScope,
+        addTraceStep,
+        buildSkillTraceDetail,
+        capabilityRegistry,
+        docIds,
+        executeObservedSkill,
+        plan,
+        question,
+        recordSkillResult,
+        workspaceActionSkill,
       });
     },
 

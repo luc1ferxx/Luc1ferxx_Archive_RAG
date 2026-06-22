@@ -43,6 +43,7 @@ export const selectRagSources = ({
 };
 
 export const finalizeAgentRun = async ({
+  actionAnswer,
   addTraceStep,
   arxivImportAnswer,
   buildAgentObservability,
@@ -87,6 +88,7 @@ export const finalizeAgentRun = async ({
       ...plan,
       mode: agentMode,
     },
+    actionAnswer,
     ragResult,
     webResult,
     customSkillResults,
@@ -110,6 +112,7 @@ export const finalizeAgentRun = async ({
     input: {
       agentMode,
       customSkillResultCount: customSkillResults.length,
+      hasActionAnswer: Boolean(actionAnswer),
       hasArxivImportAnswer: Boolean(arxivImportAnswer),
       hasDiscoveryAnswer: Boolean(discoveryAnswer),
       hasInventoryAnswer: Boolean(inventoryAnswer),

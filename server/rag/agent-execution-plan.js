@@ -8,6 +8,7 @@ import {
 
 export const AGENT_EXECUTION_STEP_IDS = {
   arxivImport: "arxiv_import",
+  workspaceAction: "workspace_action",
   researchBrief: "research_brief",
   inventory: "inventory",
   documentDiscovery: "document_discovery",
@@ -29,6 +30,12 @@ export const AGENT_EXECUTION_STEP_SCHEMA = {
     condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
     requiresAccessScope: true,
     skillId: AGENT_SKILL_IDS.arxivImport,
+  },
+  [AGENT_EXECUTION_STEP_IDS.workspaceAction]: {
+    budgetKey: null,
+    condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
+    requiresAccessScope: true,
+    skillId: AGENT_SKILL_IDS.workspaceAction,
   },
   [AGENT_EXECUTION_STEP_IDS.researchBrief]: {
     budgetKey: "researchQuestions",
@@ -350,6 +357,11 @@ export const createDeterministicAgentExecutionPlan = () => [
     id: AGENT_EXECUTION_STEP_IDS.arxivImport,
     condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
     skillId: AGENT_SKILL_IDS.arxivImport,
+  },
+  {
+    id: AGENT_EXECUTION_STEP_IDS.workspaceAction,
+    condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
+    skillId: AGENT_SKILL_IDS.workspaceAction,
   },
   {
     id: AGENT_EXECUTION_STEP_IDS.researchBrief,

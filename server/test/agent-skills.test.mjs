@@ -17,6 +17,8 @@ import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
 import {
   CAPABILITY_IDS,
   createCapabilityRegistry,
+  createDefaultCapabilityRegistry,
+  createInMemoryActionTaskService,
 } from "../rag/capabilities/index.js";
 import {
   AGENT_SKILL_IDS,
@@ -76,6 +78,83 @@ test("built-in skill registry selects arxiv import for topic fetches", () => {
   );
   assert.equal(selectedSkills[0].budgetKey, "arxivPaperFetches");
   assert.equal(selectedSkills[0].requiresAccessScope, true);
+});
+
+test("built-in skill registry selects workspace action for explicit actions", () => {
+  const registry = createBuiltInSkillRegistry();
+  const selectedSkills = registry.select({
+    plan: {
+      wantsAction: true,
+      wantsArxivImport: false,
+      wantsDocumentRag: false,
+      wantsWeb: false,
+      wantsResearch: false,
+      wantsInventory: false,
+      wantsDiscovery: false,
+    },
+    docIds: [],
+  });
+
+  assert.deepEqual(
+    selectedSkills.map((skill) => skill.id),
+    [AGENT_SKILL_IDS.workspaceAction]
+  );
+  assert.equal(selectedSkills[0].budgetKey, null);
+  assert.equal(selectedSkills[0].requiresAccessScope, true);
+});
+
+test("agent rag pauses explicit task creation behind an action capability gate", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore({
+      now: () => "2026-06-23T00:00:00.000Z",
+    }),
+  });
+  const actionTaskService = createInMemoryActionTaskService();
+  const capabilityRegistry = createDefaultCapabilityRegistry({
+    actionTaskService,
+    ragService: {
+      listDocuments: () => [],
+    },
+  });
+  const response = await runAgentRag({
+    accessScope,
+    agentRunService,
+    capabilityRegistry,
+    docIds: [],
+    question: "Create a task to review renewal risks.",
+    ragService: {
+      listDocuments: () => [],
+    },
+    sessionId: "session-action",
+    userId: "alice",
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "clarification");
+  assert.equal(response.body.clarification.reason, "capability_approval_required");
+  assert.equal(response.body.approvalGates[0].capabilityId, CAPABILITY_IDS.taskCreate);
+  assert.deepEqual(response.body.approvalGates[0].inputPreview, {
+    description: "Create a task to review renewal risks.",
+    title: "Review renewal risks.",
+  });
+  assert.deepEqual(
+    response.body.agentObservability.skills
+      .filter((skill) => skill.selected)
+      .map((skill) => skill.skillId),
+    [AGENT_SKILL_IDS.workspaceAction]
+  );
+
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId: response.body.agentRunId,
+  });
+
+  assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(run.approvalGates[0].capabilityId, CAPABILITY_IDS.taskCreate);
 });
 
 test("default skill registry whitelists custom skills separately from built-ins", () => {

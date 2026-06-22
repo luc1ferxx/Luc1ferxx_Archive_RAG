@@ -3,8 +3,12 @@ export const CAPABILITY_IDS = Object.freeze({
   citationVerify: "citation.verify",
   documentCompareBatch: "document.compare_batch",
   documentDiscovery: "workspace.document_discovery",
+  documentOrganize: "document.organize",
+  externalImport: "external.import",
   recommendationImportSelected: "recommendation.import_selected",
   reportExport: "report.export",
+  summaryCreate: "summary.create",
+  taskCreate: "task.create",
   workspaceSearchDocuments: "workspace.search_documents",
   webSearch: "web.search",
 });

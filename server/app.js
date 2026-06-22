@@ -363,11 +363,14 @@ export const createApp = async (options = {}) => {
   const capabilityRegistry =
     options.capabilityRegistry ??
     createDefaultCapabilityRegistry({
+      actionTaskService: options.actionTaskService,
       arxivEnrichmentService,
       arxivImportService,
+      externalImportService: options.externalImportService,
       ragService,
       recommendationImportService: options.recommendationImportService,
       reportExportService: options.reportExportService,
+      taskService,
       webChatService,
     });
   const agentTaskRunner =
