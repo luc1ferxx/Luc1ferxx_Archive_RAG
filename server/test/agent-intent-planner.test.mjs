@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildIntentPlanCandidates,
+  buildIntentPlannerPrompt,
   buildPlan,
   createAgentIntentPlanResult,
   deterministicIntentPlannerAdapter,
@@ -160,6 +161,42 @@ test("LLM intent planner parses a provider-selected candidate id", async () => {
   } finally {
     resetOpenAIProvider();
   }
+});
+
+test("LLM intent planner prompt treats task memory as planning-only context", () => {
+  const prompt = buildIntentPlannerPrompt({
+    candidates: buildIntentPlanCandidates({
+      docIds: ["doc-1"],
+      question: "Continue the renewal review.",
+    }),
+    docIds: ["doc-1"],
+    question: "Continue the renewal review.",
+    taskMemory: {
+      completedSteps: [
+        {
+          agentMode: "document",
+          answer: "Renewal terms found.",
+          question: "Summarize renewal terms.",
+        },
+      ],
+      evidencePolicy: "planning_context_only",
+      goal: "Review renewal terms.",
+      nextCandidates: ["Check renewal risk."],
+      userPreferences: ["Use concise bullets."],
+    },
+  });
+  const payload = JSON.parse(prompt.split("Input:\n")[1]);
+
+  assert.match(prompt, /Task memory, when present, is planning context only/i);
+  assert.equal(payload.taskMemoryPlanningContext.goal, "Review renewal terms.");
+  assert.equal(
+    payload.taskMemoryPlanningContext.evidencePolicy,
+    "planning_context_only"
+  );
+  assert.deepEqual(payload.taskMemoryPlanningContext.nextCandidates, [
+    "Check renewal risk.",
+  ]);
+  assert.equal("ragSources" in payload.taskMemoryPlanningContext, false);
 });
 
 test("deterministic intent planner adapter is exported for app wiring", () => {

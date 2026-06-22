@@ -21,6 +21,7 @@ export const createAgentSession = ({
   plan: providedPlan,
   question,
   skillRegistry,
+  taskMemory = null,
 } = {}) => {
   const registry = skillRegistry ?? createDefaultSkillRegistry();
   const workingMemoryState = createAgentWorkingMemory({
@@ -55,6 +56,7 @@ export const createAgentSession = ({
     plan,
     question,
     selectedSkills,
+    taskMemory,
     workingMemory: workingMemoryState.workingMemory,
   });
   const skillTracker = createAgentSkillTracker({

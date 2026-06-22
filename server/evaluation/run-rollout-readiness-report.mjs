@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   buildRolloutReadinessReportFromResults,
   formatRolloutReadinessReportMarkdown,
+  getRolloutReadinessExitCode,
   writeRolloutReadinessReport,
 } from "./rollout-readiness-report.js";
 
@@ -13,6 +14,7 @@ const usage = `Usage: npm run rollout:readiness -- [options]
 Options:
   --results-directory <path>  Directory containing latest eval reports.
   --json                      Print the readiness report as JSON.
+  --no-fail                   Always exit 0 after writing the report.
   --help                      Show this message.
 `;
 
@@ -42,6 +44,7 @@ const parseArgs = (args) => {
   const options = {
     help: false,
     json: false,
+    noFail: false,
     resultsDirectory: "",
   };
 
@@ -55,6 +58,11 @@ const parseArgs = (args) => {
 
     if (arg === "--json") {
       options.json = true;
+      continue;
+    }
+
+    if (arg === "--no-fail") {
+      options.noFail = true;
       continue;
     }
 
@@ -100,12 +108,19 @@ const main = async () => {
 
   if (options.json) {
     console.log(JSON.stringify(report, null, 2));
+    if (!options.noFail) {
+      process.exitCode = getRolloutReadinessExitCode(report);
+    }
     return;
   }
 
   console.log(formatRolloutReadinessReportMarkdown(report).trimEnd());
   console.log(`JSON: ${paths.jsonPath}`);
   console.log(`Markdown: ${paths.markdownPath}`);
+
+  if (!options.noFail) {
+    process.exitCode = getRolloutReadinessExitCode(report);
+  }
 };
 
 try {

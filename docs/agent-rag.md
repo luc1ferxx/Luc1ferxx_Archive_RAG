@@ -155,3 +155,15 @@ Working memory 是一次 agent run 内的短期状态，不写入长期记忆。
 - Execution loop counters
 
 Feedback record 和 feedback corpus metadata 会保留这些信息，方便把负反馈定位到具体 skill 和执行阶段。
+
+## Task memory
+
+Durable agent task loop 使用 `server/rag/agent-task-memory.js` 维护 task-scoped memory。它保存在 task 内部 `payload.taskMemory`，不会出现在公开 task payload 中。内容只包括：
+
+- 原始 goal。
+- 已完成步骤的问题、agent mode 和短答案摘要。
+- 失败原因摘要。
+- 用户偏好。
+- 下一步候选。
+
+Task memory 只会作为 intent/execution planner 的 planning context 传入，并带有 `evidencePolicy: "planning_context_only"`。它不能作为 citation、RAG source、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 的实际执行结果。

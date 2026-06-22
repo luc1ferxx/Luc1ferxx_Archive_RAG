@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  buildAgentTaskPlanningContext,
+  updateAgentTaskMemory,
+} from "./agent-task-memory.js";
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
 
 export const AGENT_TASK_TYPE = "agent_goal";
@@ -53,12 +57,14 @@ const buildPublicInput = ({
   maxIterations = DEFAULT_MAX_ITERATIONS,
   question = "",
   sessionId = "",
+  userPreferences = [],
   userId = "",
 } = {}) => ({
   docIds: normalizeDocIds(docIds),
   maxIterations: normalizeMaxIterations(maxIterations),
   question: normalizeText(question),
   sessionId: normalizeText(sessionId),
+  userPreferences: toArray(userPreferences).map(normalizeText).filter(Boolean),
   userId: normalizeText(userId),
 });
 
@@ -68,6 +74,10 @@ const buildInitialPayload = (input = {}) => ({
   capabilityApprovals: {},
   iterations: [],
   pending: null,
+  taskMemory: buildAgentTaskPlanningContext({
+    goal: input.question,
+    userPreferences: input.userPreferences,
+  }),
 });
 
 const normalizePayload = (task = {}) => {
@@ -83,6 +93,15 @@ const normalizePayload = (task = {}) => {
     maxIterations: normalizeMaxIterations(payload.maxIterations ?? input.maxIterations),
     question: normalizeText(payload.question || input.question),
     sessionId: normalizeText(payload.sessionId || input.sessionId),
+    taskMemory: buildAgentTaskPlanningContext(
+      payload.taskMemory ?? {
+        goal: payload.question || input.question,
+        userPreferences: payload.userPreferences ?? input.userPreferences,
+      }
+    ),
+    userPreferences: toArray(payload.userPreferences ?? input.userPreferences)
+      .map(normalizeText)
+      .filter(Boolean),
     userId: normalizeText(payload.userId || input.userId),
   };
 };
@@ -159,6 +178,7 @@ const buildResult = ({
   clarification: body.clarification ?? null,
   responseStatus,
   stoppedReason,
+  taskMemory: buildAgentTaskPlanningContext(payload.taskMemory),
 });
 
 const buildProgressPatch = ({
@@ -220,6 +240,7 @@ export const createAgentTaskService = ({
     maxIterations = DEFAULT_MAX_ITERATIONS,
     question,
     sessionId = "",
+    userPreferences = [],
     userId = "",
   } = {}) {
     const input = buildPublicInput({
@@ -227,6 +248,7 @@ export const createAgentTaskService = ({
       maxIterations,
       question,
       sessionId,
+      userPreferences,
       userId,
     });
 
@@ -283,6 +305,7 @@ export const createAgentTaskRunner = ({
         docIds: payload.docIds,
         question,
         sessionId: payload.sessionId,
+        taskMemory: buildAgentTaskPlanningContext(payload.taskMemory),
         userId: payload.userId,
       });
       const body = normalizeRecord(response?.body);
@@ -311,6 +334,12 @@ export const createAgentTaskRunner = ({
         lastQuestion: question,
         nextQuestion: "",
         pending: null,
+        taskMemory: updateAgentTaskMemory({
+          body,
+          memory: payload.taskMemory,
+          question,
+          responseStatus,
+        }),
       };
 
       await patchTask({
@@ -465,6 +494,18 @@ export const createAgentTaskRunner = ({
           maxIterations,
           nextQuestion,
           question: nextQuestion,
+          taskMemory: buildAgentTaskPlanningContext({
+            ...nextPayload.taskMemory,
+            goal: nextPayload.taskMemory?.goal || nextPayload.question,
+            userPreferences: [
+              ...(nextPayload.taskMemory?.userPreferences ?? []),
+              ...toArray(payload.userPreferences),
+            ],
+          }),
+          userPreferences: [
+            ...taskPayload.userPreferences,
+            ...toArray(payload.userPreferences).map(normalizeText).filter(Boolean),
+          ],
         },
         status: TASK_STATUSES.queued,
         summary: "Agent task queued with user clarification.",

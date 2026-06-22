@@ -8,6 +8,7 @@ import {
   buildRolloutReadinessReport,
   buildRolloutReadinessReportFromResults,
   formatRolloutReadinessReportMarkdown,
+  getRolloutReadinessExitCode,
   writeRolloutReadinessReport,
 } from "../evaluation/rollout-readiness-report.js";
 import {
@@ -117,6 +118,35 @@ const buildTrajectoryPayload = ({ failed = false } = {}) => ({
   },
 });
 
+const buildRuntimeSmokePayload = ({ status = "pass" } = {}) => ({
+  completedAt: "2026-06-19T00:09:00.000Z",
+  startedAt: "2026-06-19T00:08:30.000Z",
+  status,
+  checks: {
+    agentExperienceMemory: {
+      healthReason: "postgres_configured_default",
+      healthStatus: "ok",
+      secondRunHintCount: 1,
+      writeStatus: "stored",
+    },
+    longMemory: {
+      healthReason: "postgres_configured_default",
+      healthStatus: "ok",
+    },
+    planners: {
+      executionPlanner: status === "pass" ? "llm" : "deterministic",
+      executionPlannerStatus: status === "pass" ? "selected" : "fallback",
+      intentPlanner: status === "pass" ? "llm" : "deterministic",
+      intentPlannerStatus: status === "pass" ? "selected" : "fallback",
+    },
+    sources: {
+      firstRunSourceCount: 2,
+      secondRunSourceCount: 2,
+      sourceDocIds: ["runtime-smoke-contract"],
+    },
+  },
+});
+
 const pureLlmPlannerRuntime = {
   executionPlanner: "deterministic",
   intentPlanner: "deterministic",
@@ -138,6 +168,7 @@ test("rollout readiness report marks all required signals ready", () => {
       createdAt: "2026-06-19T00:08:00.000Z",
     }),
     plannerRuntime: pureLlmPlannerRuntime,
+    runtimeSmokePayload: buildRuntimeSmokePayload(),
     runId: "readiness-ready",
     trajectoryPayload: buildTrajectoryPayload(),
   });
@@ -151,8 +182,10 @@ test("rollout readiness report marks all required signals ready", () => {
   assert.equal(report.signals.recovery.status, "pass");
   assert.deepEqual(
     report.checks.map((check) => check.status),
-    ["pass", "pass", "pass", "pass", "pass", "pass"]
+    ["pass", "pass", "pass", "pass", "pass", "pass", "pass"]
   );
+  assert.equal(report.signals.runtimeSmoke.status, "pass");
+  assert.equal(getRolloutReadinessExitCode(report), 0);
 
   const markdown = formatRolloutReadinessReportMarkdown(report);
 
@@ -160,6 +193,7 @@ test("rollout readiness report marks all required signals ready", () => {
   assert.match(markdown, /Status: `ready`/);
   assert.match(markdown, /Mock\/real divergence: `0`/);
   assert.match(markdown, /Planner runtime target: `pass`/);
+  assert.match(markdown, /Runtime smoke: `pass`/);
 });
 
 test("rollout readiness report blocks on planner, trajectory, and recovery signals", () => {
@@ -226,6 +260,9 @@ test("rollout readiness report blocks on planner, trajectory, and recovery signa
     },
     realPlannerPayload,
     recoveryPayload,
+    runtimeSmokePayload: buildRuntimeSmokePayload({
+      status: "fail",
+    }),
     trajectoryPayload: buildTrajectoryPayload({
       failed: true,
     }),
@@ -247,12 +284,15 @@ test("rollout readiness report blocks on planner, trajectory, and recovery signa
     [
       "real_planner_gate_passed",
       "planner_runtime_pure_llm",
+      "runtime_smoke_passed",
       "trajectory_gate_passed",
       "recovery_gate_passed",
       "unexpected_fallback_rate_zero",
       "mock_real_divergence_zero",
     ]
   );
+  assert.equal(report.signals.runtimeSmoke.status, "fail");
+  assert.equal(getRolloutReadinessExitCode(report), 1);
 });
 
 test("rollout readiness report reads and writes latest result files", async () => {
@@ -280,6 +320,11 @@ test("rollout readiness report reads and writes latest result files", async () =
     `${JSON.stringify(buildRecoveryObservabilityEvaluationReport(), null, 2)}\n`,
     "utf8"
   );
+  await writeFile(
+    path.join(outputDirectory, "latest-runtime-smoke.json"),
+    `${JSON.stringify(buildRuntimeSmokePayload(), null, 2)}\n`,
+    "utf8"
+  );
 
   const report = await buildRolloutReadinessReportFromResults({
     inputDirectory: outputDirectory,
@@ -300,6 +345,7 @@ test("rollout readiness report reads and writes latest result files", async () =
 
   assert.equal(writtenJson.summary.runId, "readiness-from-files");
   assert.match(writtenMarkdown, /Real planner fallback rate/);
+  assert.match(writtenMarkdown, /Runtime smoke/);
 });
 
 test("planner runtime gate requires pure LLM rollout target", () => {

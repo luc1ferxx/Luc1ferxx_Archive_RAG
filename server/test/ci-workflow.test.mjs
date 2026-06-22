@@ -85,9 +85,10 @@ test("planner real provider workflow runs a required scheduled gate", async () =
     workflow,
     /run:\s*npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0/
   );
-  assert.match(workflow, /run:\s*npm run rollout:readiness/);
-  assert.match(workflow, /name:\s*Run pure LLM runtime smoke/);
-  assert.match(workflow, /run:\s*npm run runtime:smoke/);
+  assert.match(
+    workflow,
+    /name:\s*Run pure LLM runtime smoke[\s\S]*run:\s*npm run runtime:smoke[\s\S]*name:\s*Check rollout readiness[\s\S]*run:\s*npm run rollout:readiness/
+  );
   assert.match(workflow, /server\/evaluation\/results\/latest-rollout-readiness\.\*/);
   assert.match(workflow, /server\/evaluation\/results\/latest-runtime-smoke\.\*/);
   assert.match(workflow, /actions\/upload-artifact@v4/);

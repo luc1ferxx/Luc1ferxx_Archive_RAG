@@ -3,6 +3,7 @@ import {
   AGENT_EXECUTION_STEP_IDS,
   AGENT_EXECUTION_STEP_SCHEMA,
 } from "./agent-execution-plan.js";
+import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
 import { completeText } from "./openai.js";
 
 const MAX_REASON_LENGTH = 220;
@@ -180,6 +181,7 @@ const buildPlannerPrompt = ({
   plan = {},
   question,
   selectedSkills = [],
+  taskMemory = null,
 } = {}) => {
   const payload = {
     allowedConditions: AGENT_EXECUTION_CONDITIONS,
@@ -193,6 +195,7 @@ const buildPlannerPrompt = ({
     },
     question: sanitizeText(question, 1000),
     selectedSkills: selectedSkills.map(compactSelectedSkill),
+    taskMemoryPlanningContext: buildAgentTaskPlanningContext(taskMemory),
   };
 
   return [
@@ -202,6 +205,7 @@ const buildPlannerPrompt = ({
     "Use only the allowed step ids and conditions from the input.",
     "Only include steps that correspond to the selectedSkills input, except web_search may follow document_rag as a conditional fallback.",
     "Do not invent tools, function names, skill ids, budget keys, or data access scopes.",
+    "Task memory, when present, is planning context only and must never be treated as document evidence.",
     `Use a single ${AGENT_EXECUTION_STEP_IDS.customSkills} step for all selected skills where kind is custom; omit skillId on that step.`,
     `Use ${AGENT_EXECUTION_STEP_IDS.webSearch} as a primary step only when web_search is selected.`,
     `When ${AGENT_EXECUTION_STEP_IDS.documentRag} is selected, keep ${AGENT_EXECUTION_STEP_IDS.webSearch} after it only as ${AGENT_EXECUTION_CONDITIONS.selectedOrDocumentFallback}; runtime will skip it unless document evidence abstains or fails.`,

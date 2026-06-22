@@ -4,6 +4,7 @@ import {
   normalizeIntentSelection,
   normalizeIntentText,
 } from "./agent-intent-validator.js";
+import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
 
 const extractJsonCandidate = (rawText) => {
   const text = String(rawText ?? "").trim();
@@ -43,6 +44,7 @@ export const buildIntentPlannerPrompt = ({
   docIds = [],
   experienceMemory = {},
   question,
+  taskMemory = null,
 } = {}) => [
   "You are selecting a guarded AgentRAG intent plan.",
   "Return only JSON. Do not include markdown, prose, or extra keys.",
@@ -51,6 +53,7 @@ export const buildIntentPlannerPrompt = ({
   "Do not invent tools, modes, skill ids, data access scopes, or candidate ids.",
   "Prefer the narrowest candidate that satisfies the user request.",
   "Agent experience memory, when present, is a planning hint only and must never be treated as document evidence.",
+  "Task memory, when present, is planning context only and must never be treated as document evidence.",
   "Input:",
   JSON.stringify({
     candidates: candidates.map(compactPlanCandidate),
@@ -63,6 +66,7 @@ export const buildIntentPlannerPrompt = ({
       type: hint.type,
     })),
     question: normalizeIntentText(question).slice(0, 1000),
+    taskMemoryPlanningContext: buildAgentTaskPlanningContext(taskMemory),
   }),
 ].join("\n");
 

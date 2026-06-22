@@ -50,6 +50,7 @@ export const createAgentRunContext = ({
   question,
   recordTrace = recordRagTrace,
   selectedSkills = [],
+  taskMemory = null,
   timestamp = () => new Date().toISOString(),
   workingMemory,
 } = {}) => {
@@ -135,6 +136,7 @@ export const createAgentRunContext = ({
     planMode: plan.mode,
     intentPlanner,
     executionPlanner,
+    taskMemory,
     skillChain: chainSkills.map((skill) => getSkillDescriptor(skill)),
     executionLoop,
     workingMemory,

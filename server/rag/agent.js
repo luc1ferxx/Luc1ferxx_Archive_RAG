@@ -25,6 +25,9 @@ import {
   createDefaultCapabilityRegistry,
 } from "./capabilities/index.js";
 import {
+  buildAgentTaskPlanningContext,
+} from "./agent-task-memory.js";
+import {
   attachApprovalGateStepIds,
   buildAgentRunStepsFromTrace,
 } from "./agent-run-steps.js";
@@ -295,10 +298,14 @@ export const runAgentRag = async ({
   accessScope,
   agentRunId: requestedAgentRunId,
   capabilityApprovals = {},
+  taskMemory = null,
   executionPlannerAdapter,
   intentPlannerAdapter,
   skillRegistry,
 }) => {
+  const taskMemoryContext = taskMemory
+    ? buildAgentTaskPlanningContext(taskMemory)
+    : null;
   const agentExperienceMemory = await loadAgentExperienceMemorySafely({
     accessScope,
     docIds,
@@ -311,6 +318,7 @@ export const runAgentRag = async ({
     fallbackPlannerAdapter: deterministicIntentPlannerAdapter,
     plannerAdapter: intentPlannerAdapter ?? deterministicIntentPlannerAdapter,
     question,
+    taskMemory: taskMemoryContext,
   });
   const {
     addBudgetLimitTrace,
@@ -347,6 +355,7 @@ export const runAgentRag = async ({
     plan: intentPlanResult.plan,
     question,
     skillRegistry,
+    taskMemory: taskMemoryContext,
   });
   const runSnapshot = {
     input: {
@@ -449,6 +458,7 @@ export const runAgentRag = async ({
         plan,
         question,
         selectedSkills,
+        taskMemory: taskMemoryContext,
       },
       registry,
       selectedSkills,

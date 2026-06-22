@@ -37,6 +37,58 @@ const buildGateCheck = ({ gate = {}, id, label } = {}) => ({
   summary: gate.summary ?? null,
 });
 
+const buildRuntimeSmokeGate = ({ payload = null } = {}) => {
+  if (!payload) {
+    return {
+      status: "fail",
+      failedReasons: ["runtime_smoke_missing"],
+      skipped: false,
+      summary: "Runtime smoke report is missing.",
+    };
+  }
+
+  const checks = payload.checks ?? {};
+  const planners = checks.planners ?? {};
+  const failedReasons = [];
+
+  if (payload.status !== "pass") {
+    failedReasons.push("runtime_smoke_failed");
+  }
+  if (planners.intentPlanner !== "llm") {
+    failedReasons.push("intentPlanner_mismatch");
+  }
+  if (planners.intentPlannerStatus !== "selected") {
+    failedReasons.push("intentPlannerStatus_mismatch");
+  }
+  if (planners.executionPlanner !== "llm") {
+    failedReasons.push("executionPlanner_mismatch");
+  }
+  if (planners.executionPlannerStatus !== "selected") {
+    failedReasons.push("executionPlannerStatus_mismatch");
+  }
+  if ((checks.agentExperienceMemory?.secondRunHintCount ?? 0) < 1) {
+    failedReasons.push("experienceMemory_hint_missing");
+  }
+  if ((checks.sources?.sourceDocIds ?? []).length < 1) {
+    failedReasons.push("document_sources_missing");
+  }
+
+  const status = failedReasons.length > 0 ? "fail" : "pass";
+
+  return {
+    status,
+    completedAt: payload.completedAt ?? null,
+    currentRunId: payload.runId ?? payload.runtime?.userId ?? null,
+    failedReasons,
+    plannerChecks: planners,
+    skipped: false,
+    summary:
+      status === "pass"
+        ? "Runtime smoke passed on pure LLM planner path."
+        : `Runtime smoke is not ready: ${failedReasons.join(", ")}.`,
+  };
+};
+
 const buildMaxMetricCheck = ({
   currentValue,
   id,
@@ -134,6 +186,7 @@ const buildReadinessChecks = ({
   plannerProviderGate = {},
   plannerRuntimeGate = {},
   recoveryGate = {},
+  runtimeSmokeGate = {},
   trajectoryGate = {},
 } = {}) => [
   buildGateCheck({
@@ -145,6 +198,11 @@ const buildReadinessChecks = ({
     gate: plannerRuntimeGate,
     id: "planner_runtime_pure_llm",
     label: "Planner runtime target is pure LLM",
+  }),
+  buildGateCheck({
+    gate: runtimeSmokeGate,
+    id: "runtime_smoke_passed",
+    label: "Pure LLM runtime smoke passed",
   }),
   buildGateCheck({
     gate: trajectoryGate,
@@ -180,6 +238,7 @@ export const buildRolloutReadinessReport = ({
   realPlannerPayload = null,
   recoveryPayload = null,
   runId = null,
+  runtimeSmokePayload = null,
   trajectoryPayload = null,
 } = {}) => {
   const plannerProviderGate = buildRequiredPlannerProviderGate({
@@ -201,10 +260,14 @@ export const buildRolloutReadinessReport = ({
     current: plannerRuntime,
     required: requiredPlannerRuntime,
   });
+  const runtimeSmokeGate = buildRuntimeSmokeGate({
+    payload: runtimeSmokePayload,
+  });
   const checks = buildReadinessChecks({
     plannerProviderGate,
     plannerRuntimeGate,
     recoveryGate,
+    runtimeSmokeGate,
     trajectoryGate,
   });
   const failedChecks = checks.filter((check) => check.status === "fail");
@@ -266,12 +329,21 @@ export const buildRolloutReadinessReport = ({
         required: plannerRuntimeGate.required,
         summary: plannerRuntimeGate.summary,
       },
+      runtimeSmoke: {
+        status: runtimeSmokeGate.status,
+        completedAt: runtimeSmokeGate.completedAt ?? null,
+        currentRunId: runtimeSmokeGate.currentRunId ?? null,
+        failedReasons: runtimeSmokeGate.failedReasons ?? [],
+        plannerChecks: runtimeSmokeGate.plannerChecks ?? {},
+        summary: runtimeSmokeGate.summary,
+      },
     },
     gates: {
       plannerProviderGate,
       plannerRuntimeGate,
       trajectoryGate,
       recoveryGate,
+      runtimeSmokeGate,
     },
   };
 };
@@ -292,29 +364,38 @@ export const readRolloutReadinessInputs = async ({
   inputDirectory = resultsDirectory,
 } = {}) => {
   const resolvedInputDirectory = path.resolve(inputDirectory);
-  const [mockPlannerPayload, realPlannerPayload, trajectoryPayload, recoveryPayload] =
-    await Promise.all([
-      readLatestPlannerProviderReport({
-        provider: "mock",
-        resultsDirectory: resolvedInputDirectory,
-      }),
-      readLatestPlannerProviderReport({
-        provider: "real",
-        resultsDirectory: resolvedInputDirectory,
-      }),
-      readOptionalJsonFile(
-        path.join(resolvedInputDirectory, "latest-trajectory.json")
-      ),
-      readOptionalJsonFile(
-        path.join(resolvedInputDirectory, "latest-recovery-observability.json")
-      ),
-    ]);
+  const [
+    mockPlannerPayload,
+    realPlannerPayload,
+    trajectoryPayload,
+    recoveryPayload,
+    runtimeSmokePayload,
+  ] = await Promise.all([
+    readLatestPlannerProviderReport({
+      provider: "mock",
+      resultsDirectory: resolvedInputDirectory,
+    }),
+    readLatestPlannerProviderReport({
+      provider: "real",
+      resultsDirectory: resolvedInputDirectory,
+    }),
+    readOptionalJsonFile(
+      path.join(resolvedInputDirectory, "latest-trajectory.json")
+    ),
+    readOptionalJsonFile(
+      path.join(resolvedInputDirectory, "latest-recovery-observability.json")
+    ),
+    readOptionalJsonFile(
+      path.join(resolvedInputDirectory, "latest-runtime-smoke.json")
+    ),
+  ]);
 
   return {
     inputDirectory: resolvedInputDirectory,
     mockPlannerPayload,
     realPlannerPayload,
     recoveryPayload,
+    runtimeSmokePayload,
     trajectoryPayload,
   };
 };
@@ -344,6 +425,7 @@ export const formatRolloutReadinessReportMarkdown = (report = {}) => {
   const trajectory = report.signals?.trajectory ?? {};
   const recovery = report.signals?.recovery ?? {};
   const runtime = report.signals?.runtime ?? {};
+  const runtimeSmoke = report.signals?.runtimeSmoke ?? {};
   const lines = [
     "# AgentRAG Rollout Readiness",
     "",
@@ -364,6 +446,7 @@ export const formatRolloutReadinessReportMarkdown = (report = {}) => {
     `- Mock/real divergence: \`${planner.divergenceCount ?? "N/A"}\``,
     `- Planner runtime target: \`${runtime.status ?? "unknown"}\``,
     `- Planner rollout: \`${runtime.current?.plannerRollout ?? "unknown"}\``,
+    `- Runtime smoke: \`${runtimeSmoke.status ?? "unknown"}\``,
     `- Trajectory gate: \`${trajectory.status ?? "unknown"}\``,
     `- Recovery gate: \`${recovery.status ?? "unknown"}\``,
     `- Recovery step replay failures: \`${
@@ -380,6 +463,7 @@ export const formatRolloutReadinessReportMarkdown = (report = {}) => {
     "",
     `- Planner: ${planner.summary ?? "N/A"}`,
     `- Runtime: ${runtime.summary ?? "N/A"}`,
+    `- Runtime smoke: ${runtimeSmoke.summary ?? "N/A"}`,
     `- Trajectory: ${trajectory.summary ?? "N/A"}`,
     `- Recovery: ${recovery.summary ?? "N/A"}`,
   ];
@@ -406,3 +490,6 @@ export const writeRolloutReadinessReport = async ({
     markdownPath,
   };
 };
+
+export const getRolloutReadinessExitCode = (report = {}) =>
+  report.summary?.status === "ready" ? 0 : 1;

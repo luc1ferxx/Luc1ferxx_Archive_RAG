@@ -261,6 +261,7 @@ const buildChatResponse = async ({
   accessScope,
   agentRunId,
   capabilityApprovals,
+  taskMemory,
   skillRegistry,
 }) => {
   const missingDocIds = docIds.filter(
@@ -291,6 +292,7 @@ const buildChatResponse = async ({
     accessScope,
     agentRunId,
     capabilityApprovals,
+    taskMemory,
     executionPlannerAdapter,
     intentPlannerAdapter,
     skillRegistry,
@@ -378,6 +380,7 @@ export const createApp = async (options = {}) => {
         docIds,
         question,
         sessionId,
+        taskMemory,
         userId,
       }) =>
         buildChatResponse({
@@ -395,6 +398,7 @@ export const createApp = async (options = {}) => {
           ragService,
           sessionId,
           skillRegistry,
+          taskMemory,
           userId,
           webChatService,
         }),
@@ -657,6 +661,7 @@ export const createApp = async (options = {}) => {
         maxIterations: payload.maxIterations,
         question,
         sessionId: payload.sessionId?.trim() || null,
+        userPreferences: payload.userPreferences,
         userId: resolveScopedUserId(req, payload.userId),
       });
 

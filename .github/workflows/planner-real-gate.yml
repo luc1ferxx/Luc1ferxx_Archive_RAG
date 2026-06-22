@@ -63,11 +63,11 @@ jobs:
       - name: Check real planner provider gate
         run: npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0
 
-      - name: Check rollout readiness
-        run: npm run rollout:readiness
-
       - name: Run pure LLM runtime smoke
         run: npm run runtime:smoke
+
+      - name: Check rollout readiness
+        run: npm run rollout:readiness
 
       - name: Upload planner reports
         if: always()

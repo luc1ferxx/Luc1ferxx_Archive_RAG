@@ -55,10 +55,26 @@ test("llm planner adapter parses fenced JSON execution plan output", async () =>
           requiresAccessScope: true,
         },
       ],
+      taskMemory: {
+        completedSteps: [
+          {
+            agentMode: "document",
+            answer: "Policy summary found.",
+            question: "Summarize the policy.",
+          },
+        ],
+        evidencePolicy: "planning_context_only",
+        goal: "Review policy obligations.",
+        nextCandidates: ["Check exceptions."],
+        userPreferences: ["Keep answers short."],
+      },
     });
 
     assert.equal(llmPlannerAdapter.id, "llm");
     assert.match(renderedPrompt, /allowedSteps/);
+    assert.match(renderedPrompt, /Task memory, when present, is planning context only/i);
+    assert.match(renderedPrompt, /taskMemoryPlanningContext/);
+    assert.doesNotMatch(renderedPrompt, /ragSources/);
     assert.deepEqual(executionPlan, [
       {
         condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,

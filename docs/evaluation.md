@@ -131,7 +131,7 @@ npm run rollout:readiness
 npm run rollout:readiness -- --json
 ```
 
-`rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json` 和 `latest-recovery-observability.json`，并检查当前 runtime 是否已经达到纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 都是 `llm`），生成 `latest-rollout-readiness.*`。这个 report 只用于发布/默认启用前判断，不会改变 runtime 行为；缺少 real planner report、runtime target 未到纯 LLM、trajectory/recovery gate 失败、unexpected fallback rate 大于 0，或 mock/real planner divergence 大于 0 都会标成 `not_ready`。
+`rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，并检查当前 runtime 是否已经达到纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 都是 `llm`），生成 `latest-rollout-readiness.*`。缺少 real planner report、runtime smoke report、runtime target 未到纯 LLM、trajectory/recovery gate 失败、runtime smoke 失败、unexpected fallback rate 大于 0，或 mock/real planner divergence 大于 0 都会标成 `not_ready`，并让命令以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`。
 
 ## Runtime smoke
 
@@ -150,7 +150,7 @@ Smoke 断言：
 - 第二次请求加载该 memory 为 planning hint
 - `ragSources` 只包含 smoke document source，不包含 `agent_experience` 或 `successful_plan`
 
-报告写入 `evaluation/results/latest-runtime-smoke.json` 和 `.md`。`Planner Real Provider Gate` scheduled workflow 会启动 PostgreSQL service，在纯 LLM planner env 下运行这个 smoke，并把 report 上传到 artifact。
+报告写入 `evaluation/results/latest-runtime-smoke.json` 和 `.md`。`Planner Real Provider Gate` scheduled workflow 会启动 PostgreSQL service，在纯 LLM planner env 下先运行这个 smoke，再运行 `rollout:readiness` 把 smoke、real/mock planner gate、trajectory 和 recovery 汇总成最终发布门。
 
 ## Quality gate baseline
 

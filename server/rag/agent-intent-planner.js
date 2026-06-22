@@ -53,6 +53,7 @@ export const createAgentIntentPlanResult = async ({
   plannerAdapter = fallbackPlannerAdapter,
   shadowPlannerAdapter = getShadowPlannerAdapter(plannerAdapter),
   question,
+  taskMemory = null,
 } = {}) => {
   const candidates = applyExperienceHintsToCandidates({
     candidates: providedCandidates ?? buildIntentPlanCandidates({
@@ -78,6 +79,7 @@ export const createAgentIntentPlanResult = async ({
       candidates,
       docIds,
       question,
+      taskMemory,
     });
     const fallbackSelection = resolveSelectedCandidate({
       candidates,
@@ -116,6 +118,7 @@ export const createAgentIntentPlanResult = async ({
           docIds,
           experienceMemory,
           question,
+          taskMemory,
         });
 
         return resolveSelectedCandidate({
@@ -153,6 +156,7 @@ export const createAgentIntentPlanResult = async ({
       docIds,
       experienceMemory,
       question,
+      taskMemory,
     });
     const selected = resolveSelectedCandidate({
       candidates,
