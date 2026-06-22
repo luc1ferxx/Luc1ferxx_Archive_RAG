@@ -7,6 +7,7 @@ import {
   buildRecoveryObservabilityCases,
   buildRecoveryObservabilityEvaluationReport,
   buildRecoveryObservabilityFixtureEvents,
+  buildRecoveryObservabilityProductionEvents,
   formatRecoveryObservabilityReportMarkdown,
   writeRecoveryObservabilityEvaluationReport,
 } from "../evaluation/recovery-observability-eval.js";
@@ -65,6 +66,28 @@ test("recovery observability eval builds a deterministic passing report", () => 
   assert.match(markdown, /Primary step started: `2`/);
   assert.match(markdown, /PASS Startup recovery summary/);
   assert.match(markdown, /PASS Primary persisted step lifecycle/);
+});
+
+test("recovery observability eval production events pass the report contract", async () => {
+  const events = await buildRecoveryObservabilityProductionEvents();
+  const report = buildRecoveryObservabilityEvaluationReport({
+    createdAt: "2026-06-19T00:00:00.000Z",
+    events,
+    runId: "recovery-production-events",
+  });
+
+  assert.equal(report.summary.status, "pass");
+  assert.equal(report.summary.metrics.caseCount, 5);
+  assert.equal(report.recovery.recoverableRunCount, 3);
+  assert.equal(report.recovery.manualRecoveryCount, 1);
+  assert.equal(report.recovery.manualRecoveryActionCount, 3);
+  assert.equal(report.recovery.autoReplayAttemptCount, 2);
+  assert.equal(report.recovery.autoReplaySuccessRate, 1);
+  assert.equal(report.recovery.primaryStepStartedCount, 2);
+  assert.equal(report.recovery.primaryStepCompletedCount, 1);
+  assert.equal(report.recovery.primaryStepFailedCount, 1);
+  assert.ok(report.recovery.stepResumeCount >= 1);
+  assert.ok(report.recovery.stepRetryCount >= 1);
 });
 
 test("recovery observability eval fails when primary lifecycle coverage is missing", () => {

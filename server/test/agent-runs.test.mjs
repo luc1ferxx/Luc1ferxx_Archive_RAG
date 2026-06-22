@@ -174,6 +174,78 @@ test("agent run service records approval gate actions", async () => {
   );
 });
 
+test("agent run service resolves paused primary tool step when approval is approved", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore({
+      now: () => "2026-06-14T00:00:00.000Z",
+    }),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Search the web.",
+    runId: "run-approved-primary",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [
+      {
+        id: "approval:web.search:1.0.0",
+        capabilityId: "web.search",
+        inputPreview: {
+          question: "Search the web.",
+        },
+        status: "pending",
+      },
+    ],
+    runId: "run-approved-primary",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+    steps: [
+      {
+        detail: {
+          approvalGate: {
+            id: "approval:web.search:1.0.0",
+            capabilityId: "web.search",
+          },
+          interruptType: "capability_approval_required",
+        },
+        id: "web_search:primary",
+        input: {
+          question: "Search the web.",
+        },
+        label: "Web Search",
+        status: AGENT_RUN_STEP_STATUSES.paused,
+        type: "web_search",
+      },
+    ],
+  });
+
+  const approvedRun = await agentRunService.applyApprovalAction({
+    accessScope,
+    action: "approve",
+    gateId: "approval:web.search:1.0.0",
+    runId: "run-approved-primary",
+  });
+  const primaryStep = approvedRun.steps.find(
+    (step) => step.id === "web_search:primary"
+  );
+  const capabilityStep = approvedRun.steps.find(
+    (step) => step.id === "capability:web.search:approval:web.search:1.0.0"
+  );
+
+  assert.equal(approvedRun.status, AGENT_RUN_STATUSES.running);
+  assert.equal(approvedRun.approvalGates[0].status, "approved");
+  assert.equal(primaryStep.status, AGENT_RUN_STEP_STATUSES.skipped);
+  assert.equal(primaryStep.detail.approvalDelegated, true);
+  assert.equal(primaryStep.detail.delegatedStepId, capabilityStep.id);
+  assert.equal(capabilityStep.status, AGENT_RUN_STEP_STATUSES.pending);
+});
+
 test("agent run service skips paused primary tool step when approval is denied", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore({

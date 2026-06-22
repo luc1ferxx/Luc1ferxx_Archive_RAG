@@ -2,10 +2,14 @@
 
 import {
   buildRecoveryObservabilityEvaluationReport,
+  buildRecoveryObservabilityProductionEvents,
   writeRecoveryObservabilityEvaluationReport,
 } from "./recovery-observability-eval.js";
 
-const report = buildRecoveryObservabilityEvaluationReport();
+const events = await buildRecoveryObservabilityProductionEvents();
+const report = buildRecoveryObservabilityEvaluationReport({
+  events,
+});
 const paths = await writeRecoveryObservabilityEvaluationReport({
   report,
 });

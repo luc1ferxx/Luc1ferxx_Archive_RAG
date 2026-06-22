@@ -8,6 +8,23 @@ import {
   buildMetricSummary,
 } from "./agent-eval-harness.js";
 import { buildObservabilityReport } from "./observability-report.js";
+import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
+import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
+import {
+  createAgentRunRecoveryActionService,
+} from "../rag/agent-run-recovery-actions.js";
+import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
+import {
+  createDocumentRagStepExecutor,
+} from "../rag/agent-run-step-handlers/index.js";
+import {
+  AGENT_RUN_STEP_STATUSES,
+} from "../rag/agent-run-steps.js";
+import {
+  AGENT_RUN_STATUSES,
+  createAgentRunService,
+  createInMemoryAgentRunStore,
+} from "../rag/agent-runs.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +46,335 @@ const toIsoDate = (date = new Date()) =>
 
 const toRunId = (createdAt) =>
   `recovery-observability-${createdAt.replace(/[:.]/g, "-")}`;
+
+const productionFixtureAccessScope = Object.freeze({
+  userId: "recovery-eval-user",
+  workspaceId: "recovery-eval-workspace",
+});
+
+const productionFixtureNow = () => "2026-06-19T00:00:00.000Z";
+
+const createProductionFixtureRunService = () =>
+  createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore({
+      now: productionFixtureNow,
+    }),
+  });
+
+const createProductionFixtureDocumentExecutor = ({
+  agentRunService,
+  replayEvents,
+  text = "Recovered document answer.",
+} = {}) =>
+  createAgentRunStepExecutor({
+    agentRunService,
+    executeDocumentRagStep: createDocumentRagStepExecutor({
+      ragService: {
+        chat: async () => ({
+          citations: [
+            {
+              docId: "doc-1",
+              title: "Policy",
+            },
+          ],
+          text,
+        }),
+      },
+    }),
+    now: productionFixtureNow,
+    recordStepReplayTrace: async (event) => replayEvents.push(event),
+  });
+
+const createManualRecoveryRun = async ({
+  agentRunService,
+  runId,
+  status = AGENT_RUN_STEP_STATUSES.paused,
+  stepId,
+  type = "document_rag",
+} = {}) => {
+  await agentRunService.createRun({
+    accessScope: productionFixtureAccessScope,
+    goal: "Recover a persisted document step.",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId,
+  });
+  await agentRunService.updateRun({
+    accessScope: productionFixtureAccessScope,
+    runId,
+    patch: {
+      result: {
+        recovery: {
+          mode: "manual",
+          reason: "recovery_observability_eval_fixture",
+        },
+      },
+      status: AGENT_RUN_STATUSES.waitingForUser,
+      steps: [
+        {
+          id: stepId,
+          input: {
+            docIds: ["doc-1"],
+            question: "What changed?",
+          },
+          status,
+          type,
+        },
+      ],
+    },
+  });
+  await agentRunService.appendRunEvent({
+    accessScope: productionFixtureAccessScope,
+    runId,
+    type: "manual_recovery_required",
+    payload: {
+      reason: "recovery_observability_eval_fixture",
+    },
+  });
+};
+
+const collectRunEvents = async ({ agentRunService, runIds = [] } = {}) => {
+  const events = [];
+
+  for (const runId of runIds) {
+    const run = await agentRunService.getRun({
+      accessScope: productionFixtureAccessScope,
+      runId,
+    });
+
+    events.push(...(run?.events ?? []));
+  }
+
+  return events;
+};
+
+const buildProductionLifecycleEvents = async () => {
+  const agentRunService = createProductionFixtureRunService();
+
+  await agentRunService.createRun({
+    accessScope: productionFixtureAccessScope,
+    goal: "Record a completed primary step.",
+    runId: "lifecycle-completed",
+  });
+  const completedLifecycle = createAgentRunStepLifecycle({
+    accessScope: productionFixtureAccessScope,
+    agentRunService,
+    runId: "lifecycle-completed",
+  });
+  await completedLifecycle.startStep({
+    id: "document_rag:primary",
+    input: {
+      docIds: ["doc-1"],
+      question: "What changed?",
+    },
+    label: "Document RAG",
+    type: "document_rag",
+  });
+  await completedLifecycle.completeStep({
+    id: "document_rag:primary",
+    output: {
+      citationCount: 1,
+      text: "Completed primary step.",
+    },
+  });
+
+  await agentRunService.createRun({
+    accessScope: productionFixtureAccessScope,
+    goal: "Record a failed primary step.",
+    runId: "lifecycle-failed",
+  });
+  const failedLifecycle = createAgentRunStepLifecycle({
+    accessScope: productionFixtureAccessScope,
+    agentRunService,
+    runId: "lifecycle-failed",
+  });
+  await failedLifecycle.startStep({
+    id: "document_rag:primary",
+    input: {
+      docIds: ["doc-1"],
+      question: "What changed?",
+    },
+    label: "Document RAG",
+    type: "document_rag",
+  });
+  await failedLifecycle.failStep({
+    error: new Error("Primary step failed."),
+    id: "document_rag:primary",
+  });
+
+  return collectRunEvents({
+    agentRunService,
+    runIds: ["lifecycle-completed", "lifecycle-failed"],
+  });
+};
+
+const buildProductionStartupRecoveryEvents = async () => {
+  const agentRunService = createProductionFixtureRunService();
+  const recoveryEvents = [];
+  const replayEvents = [];
+  const agentRunStepExecutor = createProductionFixtureDocumentExecutor({
+    agentRunService,
+    replayEvents,
+  });
+
+  for (const runId of ["auto-document-1", "auto-document-2"]) {
+    await agentRunService.createRun({
+      accessScope: productionFixtureAccessScope,
+      goal: "Recover a safe document step.",
+      input: {
+        docIds: ["doc-1"],
+      },
+      runId,
+    });
+    await agentRunService.updateRun({
+      accessScope: productionFixtureAccessScope,
+      runId,
+      patch: {
+        steps: [
+          {
+            id: `${runId}:step`,
+            input: {
+              docIds: ["doc-1"],
+              question: "What changed?",
+            },
+            status: AGENT_RUN_STEP_STATUSES.running,
+            type: "document_rag",
+          },
+        ],
+      },
+    });
+  }
+
+  await agentRunService.createRun({
+    accessScope: productionFixtureAccessScope,
+    goal: "Recover an unsafe web step.",
+    runId: "manual-web-search",
+  });
+  await agentRunService.updateRun({
+    accessScope: productionFixtureAccessScope,
+    runId: "manual-web-search",
+    patch: {
+      steps: [
+        {
+          id: "web_search:primary",
+          input: {
+            question: "Search the web.",
+          },
+          status: AGENT_RUN_STEP_STATUSES.running,
+          type: "web_search",
+        },
+      ],
+    },
+  });
+
+  const recoveryService = createAgentRunRecoveryService({
+    agentRunService,
+    agentRunStepExecutor,
+    now: productionFixtureNow,
+    recordRecoveryTrace: async (event) => recoveryEvents.push(event),
+  });
+
+  await recoveryService.recoverOnStartup({
+    mode: "auto",
+  });
+
+  return [...recoveryEvents, ...replayEvents];
+};
+
+const buildProductionManualActionEvents = async () => {
+  const agentRunService = createProductionFixtureRunService();
+  const recoveryEvents = [];
+  const replayEvents = [];
+  const agentRunStepExecutor = createProductionFixtureDocumentExecutor({
+    agentRunService,
+    replayEvents,
+  });
+  const actionService = createAgentRunRecoveryActionService({
+    agentRunService,
+    agentRunStepExecutor,
+    now: productionFixtureNow,
+    recordRecoveryTrace: async (event) => recoveryEvents.push(event),
+  });
+
+  await createManualRecoveryRun({
+    agentRunService,
+    runId: "manual-resume",
+    stepId: "manual-resume-step",
+  });
+  await createManualRecoveryRun({
+    agentRunService,
+    runId: "manual-cancel",
+    stepId: "manual-cancel-step",
+  });
+  await agentRunService.createRun({
+    accessScope: productionFixtureAccessScope,
+    goal: "Retry a failed document step.",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "manual-retry",
+  });
+  await agentRunService.completeRun({
+    accessScope: productionFixtureAccessScope,
+    runId: "manual-retry",
+    status: AGENT_RUN_STATUSES.failed,
+    steps: [
+      {
+        error: {
+          message: "Document step failed.",
+        },
+        id: "manual-retry-step",
+        input: {
+          docIds: ["doc-1"],
+          question: "What changed?",
+        },
+        status: AGENT_RUN_STEP_STATUSES.failed,
+        type: "document_rag",
+      },
+    ],
+  });
+
+  await actionService.applyRecoveryAction({
+    accessScope: productionFixtureAccessScope,
+    action: "resume_from_step",
+    runId: "manual-resume",
+  });
+  await actionService.applyRecoveryAction({
+    accessScope: productionFixtureAccessScope,
+    action: "retry_failed_step",
+    runId: "manual-retry",
+  });
+  await actionService.applyRecoveryAction({
+    accessScope: productionFixtureAccessScope,
+    action: "cancel",
+    payload: {
+      reason: "operator_cancel",
+    },
+    runId: "manual-cancel",
+  });
+
+  return [...recoveryEvents, ...replayEvents];
+};
+
+export const buildRecoveryObservabilityProductionEvents = async () => [
+  ...(await buildProductionStartupRecoveryEvents()),
+  ...(await buildProductionManualActionEvents()),
+  ...(await buildProductionLifecycleEvents()),
+  {
+    traceType: "agent",
+    agentMode: "document",
+    agentObservability: {
+      executionPlanner: {
+        fallback: false,
+        requestedPlannerId: "deterministic",
+        selectedPlannerId: "deterministic",
+        status: "selected",
+        stepIds: ["document_rag"],
+      },
+    },
+  },
+];
 
 export const buildRecoveryObservabilityFixtureEvents = () => [
   {

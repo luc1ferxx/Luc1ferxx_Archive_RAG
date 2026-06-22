@@ -465,15 +465,18 @@ const getStepApprovalGateId = (step = {}) =>
   normalizeText(step.detail?.approvalGateId) ||
   normalizeText(step.detail?.approvalGate?.id);
 
-const skipDeniedPausedPrimarySteps = ({
+const resolvePausedPrimaryApprovalSteps = ({
+  action,
+  capabilityStepId = "",
   gate = {},
   now,
   steps = [],
 } = {}) => {
+  const normalizedAction = normalizeText(action).toLowerCase();
   const gateId = normalizeText(gate.id);
   let nextSteps = steps;
 
-  if (!gateId) {
+  if (!gateId || !["approve", "deny"].includes(normalizedAction)) {
     return nextSteps;
   }
 
@@ -490,16 +493,25 @@ const skipDeniedPausedPrimarySteps = ({
     const updateResult = updateAgentRunStep({
       now,
       patch: {
-        decision: "deny",
+        decision: normalizedAction,
         detail: {
           ...(step.detail ?? {}),
-          approvalDenied: true,
+          ...(normalizedAction === "approve"
+            ? {
+                approvalDelegated: true,
+                delegatedStepId: capabilityStepId,
+              }
+            : {
+                approvalDenied: true,
+              }),
           approvalGateId: gateId,
           capabilityId: gate.capabilityId ?? step.capabilityId,
         },
         summary:
           step.summary ||
-          `${step.label || step.type || "Step"} was skipped because approval was denied.`,
+          (normalizedAction === "approve"
+            ? `${step.label || step.type || "Step"} was delegated to the approved capability call.`
+            : `${step.label || step.type || "Step"} was skipped because approval was denied.`),
       },
       status: AGENT_RUN_STEP_STATUSES.skipped,
       stepId: step.id,
@@ -521,6 +533,7 @@ export const applyApprovalActionToSteps = ({
   const normalizedAction = normalizeText(action).toLowerCase();
   const timestamp = now();
   const gateStepId = normalizeText(gate.stepId);
+  const capabilityStepId = buildCapabilityStepId(gate);
   let nextSteps = normalizeAgentRunSteps(steps);
   let gateStep = null;
 
@@ -543,8 +556,10 @@ export const applyApprovalActionToSteps = ({
     gateStep = updateResult.step;
   }
 
-  if (normalizedAction === "deny") {
-    nextSteps = skipDeniedPausedPrimarySteps({
+  if (["approve", "deny"].includes(normalizedAction)) {
+    nextSteps = resolvePausedPrimaryApprovalSteps({
+      action: normalizedAction,
+      capabilityStepId,
       gate,
       now,
       steps: nextSteps,
@@ -552,7 +567,7 @@ export const applyApprovalActionToSteps = ({
   }
 
   const capabilityStep = normalizeAgentRunStep({
-    id: buildCapabilityStepId(gate),
+    id: capabilityStepId,
     type: "capability_call",
     kind: AGENT_RUN_STEP_KINDS.capabilityCall,
     status:
