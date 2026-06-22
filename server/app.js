@@ -51,6 +51,10 @@ import {
 import { createRecommendationTaskService } from "./rag/recommendation-tasks.js";
 import { createDefaultTaskStore } from "./rag/task-store.js";
 import { createTaskService } from "./rag/tasks.js";
+import {
+  createAgentTaskRunner,
+  createAgentTaskService,
+} from "./rag/agent-tasks.js";
 import { runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
@@ -353,11 +357,58 @@ export const createApp = async (options = {}) => {
       recommendationTaskService,
       recommendationSnapshotStore: options.recommendationSnapshotStore,
     });
+  const skillRegistry = options.skillRegistry ?? null;
+  const capabilityRegistry =
+    options.capabilityRegistry ??
+    createDefaultCapabilityRegistry({
+      arxivEnrichmentService,
+      arxivImportService,
+      ragService,
+      recommendationImportService: options.recommendationImportService,
+      reportExportService: options.reportExportService,
+      webChatService,
+    });
+  const agentTaskRunner =
+    options.agentTaskRunner ??
+    createAgentTaskRunner({
+      runAgentTask: ({
+        accessScope,
+        agentRunId,
+        capabilityApprovals,
+        docIds,
+        question,
+        sessionId,
+        userId,
+      }) =>
+        buildChatResponse({
+          accessScope,
+          agentBudget,
+          agentRunId,
+          agentRunService,
+          arxivImportService,
+          capabilityApprovals,
+          capabilityRegistry,
+          docIds,
+          executionPlannerAdapter,
+          intentPlannerAdapter,
+          question,
+          ragService,
+          sessionId,
+          skillRegistry,
+          userId,
+          webChatService,
+        }),
+    });
   const jobRunners = {
     ...(arxivEnrichmentService.importJobRunner?.id
       ? {
           [arxivEnrichmentService.importJobRunner.id]:
             arxivEnrichmentService.importJobRunner,
+        }
+      : {}),
+    ...(agentTaskRunner.id
+      ? {
+          [agentTaskRunner.id]: agentTaskRunner,
         }
       : {}),
     ...(options.jobRunners ?? {}),
@@ -369,16 +420,12 @@ export const createApp = async (options = {}) => {
       schedule: options.jobSchedule,
       taskService,
     });
-  const skillRegistry = options.skillRegistry ?? null;
-  const capabilityRegistry =
-    options.capabilityRegistry ??
-    createDefaultCapabilityRegistry({
-      arxivEnrichmentService,
-      arxivImportService,
-      ragService,
-      recommendationImportService: options.recommendationImportService,
-      reportExportService: options.reportExportService,
-      webChatService,
+  const agentTaskService =
+    options.agentTaskService ??
+    createAgentTaskService({
+      createTaskId: options.createAgentTaskId,
+      jobOrchestrator,
+      taskService,
     });
   const agentRunStepExecutor =
     options.agentRunStepExecutor ??
@@ -589,6 +636,36 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to read task."),
+      });
+    }
+  });
+
+  app.post("/agent-tasks", async (req, res) => {
+    const payload = req.body ?? {};
+    const question = payload.question?.trim();
+
+    if (!question) {
+      return res.status(400).json({
+        error: "Question is required.",
+      });
+    }
+
+    try {
+      const task = await agentTaskService.createTask({
+        accessScope: getRequestAccessScope(req),
+        docIds: parseDocIds(payload.docIds, payload.docId),
+        maxIterations: payload.maxIterations,
+        question,
+        sessionId: payload.sessionId?.trim() || null,
+        userId: resolveScopedUserId(req, payload.userId),
+      });
+
+      return res.status(202).json({
+        task,
+      });
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to create agent task."),
       });
     }
   });
