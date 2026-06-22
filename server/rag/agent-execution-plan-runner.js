@@ -45,6 +45,7 @@ export const runAgentExecutionPlan = async ({
   returnClarification,
   selectedSkills = [],
   sessionId,
+  stepLifecycle,
   userId,
   webChatService,
 } = {}) => {
@@ -185,6 +186,7 @@ export const runAgentExecutionPlan = async ({
         resolveWorkingMemoryGaps,
         retrievalPlan,
         sessionId,
+        stepLifecycle,
         userId,
       });
 

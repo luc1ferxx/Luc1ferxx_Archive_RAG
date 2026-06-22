@@ -4,6 +4,7 @@ import {
   deterministicPlannerAdapter,
 } from "./agent-execution-plan.js";
 import { runAgentExecutionPlan } from "./agent-execution-plan-runner.js";
+import { createAgentRunStepLifecycle } from "./agent-run-step-lifecycle.js";
 import {
   buildAgentExperienceMemoryWriteObservability,
   createAgentExperienceMemoryUnavailableContext,
@@ -375,6 +376,11 @@ export const runAgentRag = async ({
         ...runSnapshot,
       });
   const agentRunId = agentRun?.runId ?? requestedAgentRunId ?? null;
+  const stepLifecycle = createAgentRunStepLifecycle({
+    accessScope,
+    agentRunService,
+    runId: agentRunId,
+  });
   const baseCapabilityRegistry =
     capabilityRegistry ??
     createDefaultCapabilityRegistry({
@@ -485,6 +491,7 @@ export const runAgentRag = async ({
       returnClarification,
       selectedSkills,
       sessionId,
+      stepLifecycle,
       userId,
       webChatService,
     });

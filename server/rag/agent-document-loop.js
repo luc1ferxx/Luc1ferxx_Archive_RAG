@@ -35,6 +35,21 @@ const buildRagStepError = (result = {}, fallbackMessage) =>
         name: result.error?.name ?? "Error",
       };
 
+const buildLifecycleStepError = (result = {}, fallbackMessage) => {
+  const serialized = buildRagStepError(result, fallbackMessage);
+
+  if (!serialized) {
+    return null;
+  }
+
+  const error = new Error(serialized.message);
+  error.name = serialized.name;
+
+  return error;
+};
+
+const DOCUMENT_RAG_PRIMARY_STEP_ID = "document_rag:primary";
+
 export const runDocumentRagLoop = async ({
   accessScope,
   addBudgetLimitTrace = noop,
@@ -60,6 +75,7 @@ export const runDocumentRagLoop = async ({
   resolveWorkingMemoryGaps = noop,
   retrievalPlan,
   sessionId,
+  stepLifecycle,
   userId,
 } = {}) => {
   if (!documentRagSkill) {
@@ -79,8 +95,18 @@ export const runDocumentRagLoop = async ({
     userId,
   };
   const primaryBudget = consumeBudget(budgetState, documentRagSkill.budgetKey);
-  const primaryRagResult = primaryBudget.ok
-    ? await executeObservedSkill(
+  let primaryRagResult = null;
+
+  if (primaryBudget.ok) {
+    await stepLifecycle?.startStep?.({
+      id: DOCUMENT_RAG_PRIMARY_STEP_ID,
+      input: primaryInput,
+      label: "Document RAG",
+      type: "document_rag",
+    });
+
+    try {
+      primaryRagResult = await executeObservedSkill(
         documentRagSkill,
         {
           ...primaryInput,
@@ -91,8 +117,36 @@ export const runDocumentRagLoop = async ({
           phase: "primary",
           budget: primaryBudget,
         }
-      )
-    : buildFailedSkillResult(documentRagSkill, new Error(primaryBudget.reason));
+      );
+    } catch (error) {
+      await stepLifecycle?.failStep?.({
+        error,
+        id: DOCUMENT_RAG_PRIMARY_STEP_ID,
+      });
+      throw error;
+    }
+
+    if (primaryRagResult.ok) {
+      await stepLifecycle?.completeStep?.({
+        id: DOCUMENT_RAG_PRIMARY_STEP_ID,
+        output: buildRagStepOutput(primaryRagResult),
+      });
+    } else {
+      await stepLifecycle?.failStep?.({
+        error: buildLifecycleStepError(
+          primaryRagResult,
+          "Unable to answer from the document."
+        ),
+        id: DOCUMENT_RAG_PRIMARY_STEP_ID,
+        output: buildRagStepOutput(primaryRagResult),
+      });
+    }
+  } else {
+    primaryRagResult = buildFailedSkillResult(
+      documentRagSkill,
+      new Error(primaryBudget.reason)
+    );
+  }
 
   ragResult = primaryRagResult;
   recordSkillResult(primaryRagResult);
@@ -110,6 +164,7 @@ export const runDocumentRagLoop = async ({
     });
   } else {
     addTraceStep({
+      id: DOCUMENT_RAG_PRIMARY_STEP_ID,
       type: "document_rag",
       label: "Document RAG",
       status: primaryRagResult.ok ? "completed" : "failed",
@@ -234,23 +289,62 @@ export const runDocumentRagLoop = async ({
         sessionId,
         userId,
       };
-      const followUpRagResult = await executeObservedSkill(
-        documentRagSkill,
-        {
-          ...followUpInput,
-          accessScope,
-          ragService,
-        },
-        {
-          phase: "follow_up",
-          budget: followUpBudget,
-        }
-      );
+      const followUpStepId = `follow_up_retrieval:${
+        executionLoop.followUpsRun + 1
+      }`;
+
+      await stepLifecycle?.startStep?.({
+        id: followUpStepId,
+        input: followUpInput,
+        label: "Follow-up Retrieval",
+        type: "follow_up_retrieval",
+      });
+
+      let followUpRagResult = null;
+
+      try {
+        followUpRagResult = await executeObservedSkill(
+          documentRagSkill,
+          {
+            ...followUpInput,
+            accessScope,
+            ragService,
+          },
+          {
+            phase: "follow_up",
+            budget: followUpBudget,
+          }
+        );
+      } catch (error) {
+        await stepLifecycle?.failStep?.({
+          error,
+          id: followUpStepId,
+        });
+        throw error;
+      }
+
+      if (followUpRagResult.ok) {
+        await stepLifecycle?.completeStep?.({
+          id: followUpStepId,
+          output: buildRagStepOutput(followUpRagResult),
+        });
+      } else {
+        await stepLifecycle?.failStep?.({
+          error: buildLifecycleStepError(
+            followUpRagResult,
+            "Unable to run follow-up document evidence lookup."
+          ),
+          id: followUpStepId,
+          output: buildRagStepOutput(followUpRagResult),
+        });
+      }
+
       executionLoop.followUpsRun += 1;
       executionLoop.stoppedReason = "follow_up_completed";
       recordSkillResult(followUpRagResult);
 
       addTraceStep({
+        id: followUpStepId,
         type: "follow_up_retrieval",
         label: "Follow-up Retrieval",
         status: followUpRagResult.ok ? "completed" : "failed",

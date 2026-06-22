@@ -926,7 +926,14 @@ test("chat endpoint returns unified agent answer and trace while preserving lega
     assert.equal(finalizerStep.output.removedClaimCount, 0);
     assert.deepEqual(
       agentRun.events.map((event) => event.type),
-      ["run_created", "run_prepared", "execution_planned", "run_completed"]
+      [
+        "run_created",
+        "run_prepared",
+        "execution_planned",
+        "step_started",
+        "step_completed",
+        "run_completed",
+      ]
     );
     assert.equal(chatCalls.length, 1);
 
