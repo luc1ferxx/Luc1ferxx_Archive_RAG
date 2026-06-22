@@ -88,6 +88,11 @@ const buildMetricChecks = ({
   const minAutoReplayAttemptCount = thresholds.minAutoReplayAttemptCount ?? 1;
   const minAutoReplaySuccessRate = thresholds.minAutoReplaySuccessRate ?? 1;
   const maxAutoReplayFailureCount = thresholds.maxAutoReplayFailureCount ?? 0;
+  const minPrimaryStepStartedCount =
+    thresholds.minPrimaryStepStartedCount ?? 1;
+  const minPrimaryStepCompletedCount =
+    thresholds.minPrimaryStepCompletedCount ?? 1;
+  const minPrimaryStepFailedCount = thresholds.minPrimaryStepFailedCount ?? 0;
   const minStepRetryCount = thresholds.minStepRetryCount ?? 1;
   const minStepResumeCount = thresholds.minStepResumeCount ?? 1;
   const maxStepReplayFailureCount = thresholds.maxStepReplayFailureCount ?? 0;
@@ -135,6 +140,24 @@ const buildMetricChecks = ({
       label: "Auto replay attempts observed",
       minimum: minAutoReplayAttemptCount,
       metric: "recoveryAutoReplayAttemptCount",
+    }),
+    buildMinCheck({
+      currentValue: recovery.primaryStepStartedCount ?? 0,
+      label: "Primary persisted step starts observed",
+      minimum: minPrimaryStepStartedCount,
+      metric: "recoveryPrimaryStepStartedCount",
+    }),
+    buildMinCheck({
+      currentValue: recovery.primaryStepCompletedCount ?? 0,
+      label: "Primary persisted step completions observed",
+      minimum: minPrimaryStepCompletedCount,
+      metric: "recoveryPrimaryStepCompletedCount",
+    }),
+    buildMinCheck({
+      currentValue: recovery.primaryStepFailedCount ?? 0,
+      label: "Primary persisted step failures observed",
+      minimum: minPrimaryStepFailedCount,
+      metric: "recoveryPrimaryStepFailedCount",
     }),
     buildMinCheck({
       currentValue: recovery.autoReplaySuccessRate ?? 0,
@@ -228,12 +251,20 @@ export const buildRecoveryGate = ({
             failedChecks.length === 1 ? "" : "s"
           }; replay failures ${recovery.stepReplayFailureCount ?? 0}, manual action failures ${
             recovery.manualRecoveryActionFailureCount ?? 0
-          }, auto replay success rate ${recovery.autoReplaySuccessRate ?? 0}.`
+          }, primary lifecycle ${recovery.primaryStepStartedCount ?? 0}/${
+            recovery.primaryStepCompletedCount ?? 0
+          }/${recovery.primaryStepFailedCount ?? 0}, auto replay success rate ${
+            recovery.autoReplaySuccessRate ?? 0
+          }.`
         : `Recovery observability passed ${metrics.caseCount} case${
             metrics.caseCount === 1 ? "" : "s"
           }; replay failures ${recovery.stepReplayFailureCount ?? 0}, manual action failures ${
             recovery.manualRecoveryActionFailureCount ?? 0
-          }, auto replay success rate ${recovery.autoReplaySuccessRate ?? 0}.`,
+          }, primary lifecycle ${recovery.primaryStepStartedCount ?? 0}/${
+            recovery.primaryStepCompletedCount ?? 0
+          }/${recovery.primaryStepFailedCount ?? 0}, auto replay success rate ${
+            recovery.autoReplaySuccessRate ?? 0
+          }.`,
   };
 };
 

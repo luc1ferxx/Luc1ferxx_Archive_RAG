@@ -194,11 +194,17 @@ const createRecoveryStats = () => ({
   autoReplaySuccessCount: 0,
   autoReplayFailureCount: 0,
   autoReplaySuccessRate: 0,
+  stepLifecycleEventCount: 0,
+  primaryStepStartedCount: 0,
+  primaryStepCompletedCount: 0,
+  primaryStepFailedCount: 0,
   stepRetryCount: 0,
   stepResumeCount: 0,
   stepReplayFailureCount: 0,
   plannerFallbackCount: 0,
   actionCounts: {},
+  primaryStepLifecycleCounts: {},
+  stepLifecycleCounts: {},
 });
 
 const getPlannerId = (value, fallbackValue = "unknown") =>
@@ -281,6 +287,52 @@ const isAgentRunRecoveryEvent = (event = {}) =>
 const isAgentRunStepReplayEvent = (event = {}) =>
   event.traceType === "agent_run_step_replay";
 
+const STEP_LIFECYCLE_EVENT_TYPES = new Set([
+  "step_started",
+  "step_completed",
+  "step_failed",
+]);
+
+const getEventType = (event = {}) =>
+  String(event.eventType ?? event.type ?? "").trim();
+
+const getTraceType = (event = {}) => String(event.traceType ?? "").trim();
+
+const getEventPayload = (event = {}) =>
+  isPlainObject(event.payload) ? event.payload : {};
+
+const getStepId = (event = {}) => {
+  const payload = getEventPayload(event);
+
+  return String(event.stepId ?? payload.stepId ?? "").trim();
+};
+
+const isAgentRunStepLifecycleEvent = (event = {}) =>
+  STEP_LIFECYCLE_EVENT_TYPES.has(getEventType(event)) &&
+  Boolean(getStepId(event)) &&
+  (getTraceType(event) === "agent_run_step_lifecycle" || !getTraceType(event));
+
+const hasPrimaryStepMarker = (event = {}) => {
+  const payload = getEventPayload(event);
+  const stepId = getStepId(event);
+  const markers = [
+    event.primary,
+    event.phase,
+    event.stepRole,
+    payload.primary,
+    payload.phase,
+    payload.stepRole,
+  ];
+
+  return (
+    stepId.endsWith(":primary") ||
+    markers.some(
+      (marker) =>
+        marker === true || String(marker ?? "").trim().toLowerCase() === "primary"
+    )
+  );
+};
+
 const addRecoveryEvent = (recovery, event = {}) => {
   recovery.eventCount += 1;
 
@@ -309,6 +361,32 @@ const addRecoveryEvent = (recovery, event = {}) => {
     if (event.status === "failed" || event.error) {
       recovery.manualRecoveryActionFailureCount += 1;
     }
+  }
+};
+
+const addStepLifecycleEvent = (recovery, event = {}) => {
+  const eventType = getEventType(event);
+
+  recovery.eventCount += 1;
+  recovery.stepLifecycleEventCount += 1;
+  increment(recovery.stepLifecycleCounts, eventType);
+
+  if (!hasPrimaryStepMarker(event)) {
+    return;
+  }
+
+  increment(recovery.primaryStepLifecycleCounts, eventType);
+
+  if (eventType === "step_started") {
+    recovery.primaryStepStartedCount += 1;
+  }
+
+  if (eventType === "step_completed") {
+    recovery.primaryStepCompletedCount += 1;
+  }
+
+  if (eventType === "step_failed") {
+    recovery.primaryStepFailedCount += 1;
   }
 };
 
@@ -390,6 +468,10 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
 
     if (isAgentRunStepReplayEvent(event)) {
       addStepReplayEvent(recovery, event);
+    }
+
+    if (isAgentRunStepLifecycleEvent(event)) {
+      addStepLifecycleEvent(recovery, event);
     }
 
     const retrievalPlan = getAgentRetrievalPlan(event);
@@ -580,6 +662,10 @@ export const formatObservabilityReport = (report) => {
     `  manual recovery action failures: ${report.recovery.manualRecoveryActionFailureCount}`,
     `  auto replay attempts: ${report.recovery.autoReplayAttemptCount}`,
     `  auto replay success rate: ${toPercent(report.recovery.autoReplaySuccessRate)}`,
+    `  step lifecycle events: ${report.recovery.stepLifecycleEventCount}`,
+    `  primary step started: ${report.recovery.primaryStepStartedCount}`,
+    `  primary step completed: ${report.recovery.primaryStepCompletedCount}`,
+    `  primary step failed: ${report.recovery.primaryStepFailedCount}`,
     `  step retry count: ${report.recovery.stepRetryCount}`,
     `  step resume count: ${report.recovery.stepResumeCount}`,
     `  step replay failures: ${report.recovery.stepReplayFailureCount}`,

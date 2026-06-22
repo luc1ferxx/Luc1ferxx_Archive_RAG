@@ -19,6 +19,7 @@ const LATEST_RECOVERY_OBSERVABILITY_MD = "latest-recovery-observability.md";
 export const RECOVERY_OBSERVABILITY_CATEGORY_LABELS = {
   coverage: "Coverage",
   manual_recovery: "Manual recovery",
+  primary_lifecycle: "Primary lifecycle",
   replay: "Replay",
   planner: "Planner",
 };
@@ -38,6 +39,34 @@ export const buildRecoveryObservabilityFixtureEvents = () => [
     autoReplayAttemptCount: 2,
     autoReplaySuccessCount: 2,
     autoReplayFailureCount: 0,
+  },
+  {
+    type: "step_started",
+    payload: {
+      status: "running",
+      stepId: "document_rag:primary",
+    },
+  },
+  {
+    type: "step_completed",
+    payload: {
+      status: "completed",
+      stepId: "document_rag:primary",
+    },
+  },
+  {
+    type: "step_started",
+    payload: {
+      status: "running",
+      stepId: "document_rag:primary",
+    },
+  },
+  {
+    type: "step_failed",
+    payload: {
+      status: "failed",
+      stepId: "document_rag:primary",
+    },
   },
   {
     traceType: "agent_run_recovery",
@@ -93,15 +122,15 @@ const buildStartupCoverageCase = (recovery = {}) => ({
     }),
     buildCheck({
       category: "coverage",
-      id: "manual_recovery_recorded",
+      id: "manual_recovery_required",
       label: "Manual recovery requirement was recorded",
       passed: (recovery.manualRecoveryCount ?? 0) >= 1,
       detail: `manualRecoveryCount=${recovery.manualRecoveryCount ?? 0}`,
     }),
     buildCheck({
       category: "replay",
-      id: "auto_replay_attempts_recorded",
-      label: "Auto replay attempts were recorded",
+      id: "auto_recovery_attempted",
+      label: "Auto recovery attempt was recorded",
       passed: (recovery.autoReplayAttemptCount ?? 0) >= 1,
       detail: `autoReplayAttemptCount=${recovery.autoReplayAttemptCount ?? 0}`,
     }),
@@ -134,6 +163,46 @@ const buildStartupCoverageCase = (recovery = {}) => ({
   },
 });
 
+const buildPrimaryStepLifecycleCase = (recovery = {}) => ({
+  checks: [
+    buildCheck({
+      category: "primary_lifecycle",
+      id: "primary_step_started",
+      label: "Primary persisted step start was recorded",
+      passed: (recovery.primaryStepStartedCount ?? 0) >= 1,
+      detail: `primaryStepStartedCount=${
+        recovery.primaryStepStartedCount ?? 0
+      }`,
+    }),
+    buildCheck({
+      category: "primary_lifecycle",
+      id: "primary_step_completed",
+      label: "Primary persisted step completion was recorded",
+      passed: (recovery.primaryStepCompletedCount ?? 0) >= 1,
+      detail: `primaryStepCompletedCount=${
+        recovery.primaryStepCompletedCount ?? 0
+      }`,
+    }),
+    buildCheck({
+      category: "primary_lifecycle",
+      id: "primary_step_failed",
+      label: "Primary persisted step failure was recorded",
+      passed: (recovery.primaryStepFailedCount ?? 0) >= 1,
+      detail: `primaryStepFailedCount=${recovery.primaryStepFailedCount ?? 0}`,
+    }),
+  ],
+  description:
+    "Persisted primary agent run steps should expose start, completion, and failure lifecycle events to recovery reporting.",
+  id: "primary_step_lifecycle",
+  label: "Primary persisted step lifecycle",
+  response: {
+    primaryStepCompletedCount: recovery.primaryStepCompletedCount ?? 0,
+    primaryStepFailedCount: recovery.primaryStepFailedCount ?? 0,
+    primaryStepStartedCount: recovery.primaryStepStartedCount ?? 0,
+    primaryStepLifecycleCounts: recovery.primaryStepLifecycleCounts ?? {},
+  },
+});
+
 const buildManualRecoveryCase = (recovery = {}) => ({
   checks: [
     buildCheck({
@@ -147,15 +216,15 @@ const buildManualRecoveryCase = (recovery = {}) => ({
     }),
     buildCheck({
       category: "manual_recovery",
-      id: "resume_action_recorded",
-      label: "Resume action was recorded",
+      id: "resume_after_partial_step_recorded",
+      label: "Resume after partial step was recorded",
       passed: (recovery.actionCounts?.resume_from_step ?? 0) >= 1,
       detail: `resume_from_step=${recovery.actionCounts?.resume_from_step ?? 0}`,
     }),
     buildCheck({
       category: "manual_recovery",
-      id: "retry_action_recorded",
-      label: "Retry action was recorded",
+      id: "retry_after_failed_step_recorded",
+      label: "Retry after failed step was recorded",
       passed: (recovery.actionCounts?.retry_failed_step ?? 0) >= 1,
       detail: `retry_failed_step=${recovery.actionCounts?.retry_failed_step ?? 0}`,
     }),
@@ -255,6 +324,7 @@ const finishRecoveryCase = (caseResult) => {
 export const buildRecoveryObservabilityCases = ({ recovery = {} } = {}) =>
   [
     buildStartupCoverageCase(recovery),
+    buildPrimaryStepLifecycleCase(recovery),
     buildManualRecoveryCase(recovery),
     buildStepReplayCase(recovery),
     buildPlannerFallbackCase(recovery),
@@ -316,6 +386,10 @@ export const formatRecoveryObservabilityReportMarkdown = (report = {}) => {
     `- Auto replay attempts: \`${recovery.autoReplayAttemptCount ?? 0}\``,
     `- Auto replay success rate: \`${recovery.autoReplaySuccessRate ?? 0}\``,
     `- Auto replay failures: \`${recovery.autoReplayFailureCount ?? 0}\``,
+    `- Step lifecycle events: \`${recovery.stepLifecycleEventCount ?? 0}\``,
+    `- Primary step started: \`${recovery.primaryStepStartedCount ?? 0}\``,
+    `- Primary step completed: \`${recovery.primaryStepCompletedCount ?? 0}\``,
+    `- Primary step failed: \`${recovery.primaryStepFailedCount ?? 0}\``,
     `- Step retry count: \`${recovery.stepRetryCount ?? 0}\``,
     `- Step resume count: \`${recovery.stepResumeCount ?? 0}\``,
     `- Step replay failures: \`${recovery.stepReplayFailureCount ?? 0}\``,
