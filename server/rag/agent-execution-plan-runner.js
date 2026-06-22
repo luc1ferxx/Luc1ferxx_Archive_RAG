@@ -88,6 +88,7 @@ export const runAgentExecutionPlan = async ({
         question,
         recordSkippedSkill,
         recordSkillResult,
+        stepLifecycle,
       });
     },
 
@@ -106,6 +107,9 @@ export const runAgentExecutionPlan = async ({
         ragService,
         recordSkillResult,
         researchSkill,
+        sessionId,
+        stepLifecycle,
+        userId,
       });
     },
 
@@ -121,6 +125,7 @@ export const runAgentExecutionPlan = async ({
         inventorySkill,
         ragService,
         recordSkillResult,
+        stepLifecycle,
       });
     },
 
@@ -138,6 +143,7 @@ export const runAgentExecutionPlan = async ({
         question,
         ragService,
         recordSkillResult,
+        stepLifecycle,
       });
     },
 
@@ -158,6 +164,7 @@ export const runAgentExecutionPlan = async ({
         recordSkillResult,
         retrievalPlan,
         sessionId,
+        stepLifecycle,
         userId,
       });
     },
@@ -226,6 +233,7 @@ export const runAgentExecutionPlan = async ({
         recordSkippedSkill,
         recordSkillResult,
         shouldRunWeb: state.shouldRunWeb,
+        stepLifecycle,
         webChatService,
         webSearchSkill,
       });

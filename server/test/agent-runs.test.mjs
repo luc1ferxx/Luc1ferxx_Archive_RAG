@@ -6,6 +6,7 @@ import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
 
 test("agent run service records scoped runs, events, and completion snapshots", async () => {
   const agentRunService = createAgentRunService({
@@ -169,6 +170,88 @@ test("agent run service records approval gate actions", async () => {
       "run_created",
       "run_completed",
       "approval_gate_approved",
+    ]
+  );
+});
+
+test("agent run service skips paused primary tool step when approval is denied", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore({
+      now: () => "2026-06-14T00:00:00.000Z",
+    }),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Search the web.",
+    runId: "run-denial",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [
+      {
+        id: "approval:web.search:1.0.0",
+        capabilityId: "web.search",
+        inputPreview: {
+          question: "Search the web.",
+        },
+        status: "pending",
+      },
+    ],
+    runId: "run-denial",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+    steps: [
+      {
+        detail: {
+          approvalGate: {
+            id: "approval:web.search:1.0.0",
+            capabilityId: "web.search",
+          },
+          interruptType: "capability_approval_required",
+        },
+        id: "web_search:primary",
+        input: {
+          question: "Search the web.",
+        },
+        label: "Web Search",
+        status: AGENT_RUN_STEP_STATUSES.paused,
+        type: "web_search",
+      },
+    ],
+  });
+
+  const deniedRun = await agentRunService.applyApprovalAction({
+    accessScope,
+    action: "deny",
+    gateId: "approval:web.search:1.0.0",
+    payload: {
+      reason: "No external calls.",
+    },
+    runId: "run-denial",
+  });
+  const primaryStep = deniedRun.steps.find(
+    (step) => step.id === "web_search:primary"
+  );
+  const capabilityStep = deniedRun.steps.find(
+    (step) => step.id === "capability:web.search:approval:web.search:1.0.0"
+  );
+
+  assert.equal(deniedRun.status, AGENT_RUN_STATUSES.completed);
+  assert.equal(deniedRun.approvalGates[0].status, "denied");
+  assert.equal(primaryStep.status, AGENT_RUN_STEP_STATUSES.skipped);
+  assert.equal(primaryStep.detail.approvalDenied, true);
+  assert.equal(capabilityStep.status, AGENT_RUN_STEP_STATUSES.skipped);
+  assert.deepEqual(
+    deniedRun.events.map((event) => event.type),
+    [
+      "run_created",
+      "run_completed",
+      "approval_gate_denied",
     ]
   );
 });

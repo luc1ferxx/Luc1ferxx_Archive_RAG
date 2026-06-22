@@ -460,6 +460,58 @@ export const attachApprovalGateStepIds = ({ gates = [], steps = [] } = {}) => {
 const buildCapabilityStepId = (gate = {}) =>
   `capability:${normalizeText(gate.capabilityId)}:${normalizeText(gate.id)}`;
 
+const getStepApprovalGateId = (step = {}) =>
+  normalizeText(step.approvalGateId) ||
+  normalizeText(step.detail?.approvalGateId) ||
+  normalizeText(step.detail?.approvalGate?.id);
+
+const skipDeniedPausedPrimarySteps = ({
+  gate = {},
+  now,
+  steps = [],
+} = {}) => {
+  const gateId = normalizeText(gate.id);
+  let nextSteps = steps;
+
+  if (!gateId) {
+    return nextSteps;
+  }
+
+  for (const step of normalizeAgentRunSteps(nextSteps)) {
+    if (
+      step.status !== AGENT_RUN_STEP_STATUSES.paused ||
+      step.kind === AGENT_RUN_STEP_KINDS.approvalGate ||
+      step.kind === AGENT_RUN_STEP_KINDS.capabilityCall ||
+      getStepApprovalGateId(step) !== gateId
+    ) {
+      continue;
+    }
+
+    const updateResult = updateAgentRunStep({
+      now,
+      patch: {
+        decision: "deny",
+        detail: {
+          ...(step.detail ?? {}),
+          approvalDenied: true,
+          approvalGateId: gateId,
+          capabilityId: gate.capabilityId ?? step.capabilityId,
+        },
+        summary:
+          step.summary ||
+          `${step.label || step.type || "Step"} was skipped because approval was denied.`,
+      },
+      status: AGENT_RUN_STEP_STATUSES.skipped,
+      stepId: step.id,
+      steps: nextSteps,
+    });
+
+    nextSteps = updateResult.steps;
+  }
+
+  return nextSteps;
+};
+
 export const applyApprovalActionToSteps = ({
   action,
   gate = {},
@@ -489,6 +541,14 @@ export const applyApprovalActionToSteps = ({
     });
     nextSteps = updateResult.steps;
     gateStep = updateResult.step;
+  }
+
+  if (normalizedAction === "deny") {
+    nextSteps = skipDeniedPausedPrimarySteps({
+      gate,
+      now,
+      steps: nextSteps,
+    });
   }
 
   const capabilityStep = normalizeAgentRunStep({

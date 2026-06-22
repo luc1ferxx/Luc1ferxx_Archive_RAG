@@ -200,6 +200,8 @@ export const createApprovalResumeCase = () => ({
               "run_created",
               "run_prepared",
               "execution_planned",
+              "step_started",
+              "step_paused",
               "approval_gate_created",
               "run_completed",
               "approval_gate_approved",
@@ -436,6 +438,9 @@ export const createWebApprovalDenyCase = () => ({
         step.kind === "capability_call" &&
         step.capabilityId === CAPABILITY_IDS.webSearch
     );
+    const skippedPrimaryStep = (deniedRun?.steps ?? []).find(
+      (step) => step.id === "web_search:primary"
+    );
 
     return finishCase({
       id: "web_approval_deny",
@@ -468,11 +473,13 @@ export const createWebApprovalDenyCase = () => ({
             webSearchCalls === 0 &&
             deniedRun?.status === AGENT_RUN_STATUSES.completed &&
             deniedRun?.result?.approvalDenied === true &&
-            skippedStep?.status === "skipped",
+            skippedStep?.status === "skipped" &&
+            skippedPrimaryStep?.status === "skipped",
           detail: {
             runStatus: deniedRun?.status ?? null,
             result: deniedRun?.result ?? null,
             skippedStep: skippedStep ?? null,
+            skippedPrimaryStep: skippedPrimaryStep ?? null,
             webSearchCalls,
           },
         }),
@@ -482,7 +489,8 @@ export const createWebApprovalDenyCase = () => ({
           category: "approval",
           passed:
             eventTypes.includes("approval_gate_denied") &&
-            !eventTypes.includes("step_started") &&
+            eventTypes.includes("step_started") &&
+            eventTypes.includes("step_paused") &&
             !eventTypes.includes("step_completed"),
           detail: eventTypes,
         }),

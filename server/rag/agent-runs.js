@@ -358,9 +358,16 @@ const buildStepError = (error) => {
     return undefined;
   }
 
+  if (error && typeof error === "object" && !Array.isArray(error)) {
+    return {
+      message: normalizeText(error.message) || "Step failed.",
+      name: normalizeText(error.name) || "Error",
+    };
+  }
+
   return {
-    message: error instanceof Error ? error.message : normalizeText(error),
-    name: error instanceof Error ? error.name : "Error",
+    message: normalizeText(error) || "Step failed.",
+    name: "Error",
   };
 };
 

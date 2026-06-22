@@ -1513,6 +1513,8 @@ test("agent run approval action resumes a pending capability gate", async () => 
         "run_created",
         "run_prepared",
         "execution_planned",
+        "step_started",
+        "step_paused",
         "approval_gate_created",
         "run_completed",
         "approval_gate_approved",

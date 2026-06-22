@@ -13,6 +13,7 @@ import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
 import {
   CAPABILITY_IDS,
   createCapabilityRegistry,
@@ -484,12 +485,21 @@ test("agent rag pauses on capability approval gates without executing the capabi
 
   assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
   assert.equal(run.approvalGates.length, 1);
+  const webStep = run.steps.find((step) => step.id === "web_search:primary");
+  assert.equal(webStep.type, "web_search");
+  assert.equal(webStep.status, AGENT_RUN_STEP_STATUSES.paused);
+  assert.equal(
+    webStep.detail.interruptType,
+    "capability_approval_required"
+  );
   assert.deepEqual(
     run.events.map((event) => event.type),
     [
       "run_created",
       "run_prepared",
       "execution_planned",
+      "step_started",
+      "step_paused",
       "approval_gate_created",
       "run_completed",
     ]
