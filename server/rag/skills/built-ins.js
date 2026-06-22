@@ -7,6 +7,7 @@ import {
   DEFAULT_ARXIV_MAX_RESULTS,
   normalizeArxivMaxResults,
 } from "../arxiv-client.js";
+import { isAgentRunInterrupt } from "../agent-interrupts.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
 
 export const AGENT_SKILL_IDS = {
@@ -21,6 +22,11 @@ export const AGENT_SKILL_IDS = {
 export const BUILT_IN_SKILL_VERSION = "1.0.0";
 
 const normalizeText = (value) => String(value ?? "").trim();
+
+const buildInterruptStepDetail = (error = {}) => ({
+  approvalGate: error.detail?.approvalGate ?? null,
+  interruptType: error.type ?? null,
+});
 
 const CJK_PATTERN = /[\u3400-\u9fff]/;
 
@@ -54,6 +60,12 @@ const extractArxivTopic = (question) => {
 
   return cleanedTopic || normalizedQuestion;
 };
+
+export const buildArxivImportSkillInput = (question) => ({
+  maxResults: extractRequestedPaperCount(question),
+  question: normalizeText(question),
+  topic: extractArxivTopic(question),
+});
 
 const formatPaperLine = (paper, index, language) => {
   const id = paper.arxivId ? `arXiv:${paper.arxivId}` : "arXiv";
@@ -244,8 +256,7 @@ const createArxivImportSkill = () => ({
     capabilityRegistry,
     question,
   }) => {
-    const topic = extractArxivTopic(question);
-    const maxResults = extractRequestedPaperCount(question);
+    const { maxResults, topic } = buildArxivImportSkillInput(question);
     const result = await requireCapabilityRegistry(
       capabilityRegistry,
       CAPABILITY_IDS.arxivImportTopic
@@ -429,12 +440,15 @@ const createResearchBriefSkill = () => ({
       documents,
     }),
   execute: async ({
-    budgetState,
-    ragService,
-    question,
-    docIds,
     accessScope,
+    budgetState,
+    docIds,
+    question,
+    ragService,
     researchPlan,
+    sessionId,
+    stepLifecycle,
+    userId,
   }) => {
     const documents = ragService.listDocuments?.(accessScope) ?? [];
     const selectedDocuments = documents.filter((document) => docIds.includes(document.docId));
@@ -462,24 +476,68 @@ const createResearchBriefSkill = () => ({
         continue;
       }
 
+      const researchQuestionStepId = `research_question:${entry.id}`;
+      const researchQuestionInput = {
+        docIds,
+        question: entry.question,
+        researchQuestionId: entry.id,
+        sessionId: sessionId ?? null,
+        skillId: AGENT_SKILL_IDS.researchBrief,
+        skillVersion: BUILT_IN_SKILL_VERSION,
+        userId: userId ?? null,
+      };
+
+      await stepLifecycle?.startStep?.({
+        id: researchQuestionStepId,
+        input: researchQuestionInput,
+        label: "Research Question",
+        type: "research_question",
+      });
+
       try {
         const value = await ragService.chat(docIds, entry.question, {
-          sessionId: null,
-          userId: null,
+          sessionId: sessionId ?? null,
+          userId: userId ?? null,
           accessScope,
         });
-
-        results.push({
+        const citations = value.citations ?? [];
+        const result = {
           id: entry.id,
           question: entry.question,
           status: "completed",
           text: value.text,
-          citations: value.citations ?? [],
+          citations,
           abstained: Boolean(value.abstained),
           abstainReason: value.abstainReason ?? null,
           resolvedQuery: value.resolvedQuery ?? entry.question,
+        };
+
+        await stepLifecycle?.completeStep?.({
+          id: researchQuestionStepId,
+          output: {
+            abstained: result.abstained,
+            citationCount: citations.length,
+            researchQuestionId: entry.id,
+            resolvedQuery: result.resolvedQuery,
+            text: result.text ?? "",
+          },
         });
+
+        results.push(result);
       } catch (error) {
+        if (isAgentRunInterrupt(error)) {
+          await stepLifecycle?.pauseStep?.({
+            detail: buildInterruptStepDetail(error),
+            id: researchQuestionStepId,
+          });
+          throw error;
+        }
+
+        await stepLifecycle?.failStep?.({
+          error,
+          id: researchQuestionStepId,
+        });
+
         results.push({
           id: entry.id,
           question: entry.question,

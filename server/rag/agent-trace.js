@@ -1,4 +1,5 @@
 export const buildStep = ({
+  id,
   index,
   type,
   label,
@@ -9,7 +10,7 @@ export const buildStep = ({
   output,
   error,
 }) => ({
-  id: `${index}-${type}`,
+  id: id ?? `${index}-${type}`,
   type,
   label,
   status,

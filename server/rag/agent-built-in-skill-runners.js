@@ -1,12 +1,22 @@
 import { consumeBudget } from "./agent-budget.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
 import {
   buildStepError,
   buildTextCitationStepOutput,
 } from "./agent-step-io.js";
+import { buildArxivImportSkillInput } from "./skills/built-ins.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
+const ARXIV_IMPORT_STEP_ID = "arxiv_import:primary";
+const DOCUMENT_DISCOVERY_STEP_ID = "document_discovery:primary";
+const INVENTORY_STEP_ID = "inventory:primary";
+
+const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+
+const buildResultStepError = (fallbackMessage) => (result = {}) =>
+  buildStepError(result, fallbackMessage);
 
 export const runArxivImportSkill = async ({
   accessScope,
@@ -21,6 +31,7 @@ export const runArxivImportSkill = async ({
   question,
   recordSkippedSkill = noop,
   recordSkillResult = noop,
+  stepLifecycle,
 } = {}) => {
   if (!arxivImportSkill) {
     return null;
@@ -46,30 +57,61 @@ export const runArxivImportSkill = async ({
     return null;
   }
 
-  const arxivResult = await executeObservedSkill(
-    arxivImportSkill,
-    {
-      accessScope,
-      arxivImportService,
-      capabilityRegistry,
-      question,
-    },
-    {
-      budget: arxivBudget,
-      phase: "primary",
-    }
-  );
+  const arxivStartInput = buildArxivImportSkillInput(question);
+  const arxivResult = await runLifecycleStep({
+    buildError: buildResultStepError("Unable to import arXiv papers."),
+    buildOutput: (result) =>
+      buildTextCitationStepOutput(result, {
+        failedCount: result.value?.failedCount ?? 0,
+        foundCount: result.value?.foundCount ?? 0,
+        importedCount: result.value?.importedCount ?? 0,
+        skippedCount: result.value?.skippedCount ?? 0,
+      }),
+    completeDetail: ({ result }) => ({
+      foundCount: result.value?.foundCount ?? 0,
+      importedCount: result.value?.importedCount ?? 0,
+      requestedMaxResults: result.value?.requestedMaxResults ?? null,
+      skippedCount: result.value?.skippedCount ?? 0,
+      topic: result.value?.topic ?? arxivStartInput.topic,
+    }),
+    execute: () =>
+      executeObservedSkill(
+        arxivImportSkill,
+        {
+          accessScope,
+          arxivImportService,
+          capabilityRegistry,
+          question,
+        },
+        {
+          budget: arxivBudget,
+          phase: "primary",
+        }
+      ),
+    failDetail: ({ result }) => ({
+      requestedMaxResults:
+        result?.value?.requestedMaxResults ?? arxivStartInput.maxResults,
+      topic: result?.value?.topic ?? arxivStartInput.topic,
+    }),
+    id: ARXIV_IMPORT_STEP_ID,
+    input: arxivStartInput,
+    label: "arXiv Import",
+    stepLifecycle,
+    type: "arxiv_import",
+  });
   recordSkillResult(arxivResult);
   const importedCount = arxivResult.value?.importedCount ?? 0;
   const skippedCount = arxivResult.value?.skippedCount ?? 0;
   const processedCount = importedCount + skippedCount;
   const arxivInput = {
-    question,
-    maxResults: arxivResult.value?.requestedMaxResults ?? null,
-    topic: arxivResult.value?.topic ?? null,
+    question: normalizeText(question),
+    maxResults:
+      arxivResult.value?.requestedMaxResults ?? arxivStartInput.maxResults,
+    topic: arxivResult.value?.topic ?? arxivStartInput.topic,
   };
 
   addTraceStep({
+    id: ARXIV_IMPORT_STEP_ID,
     type: "arxiv_import",
     label: "arXiv Import",
     status: arxivResult.ok ? "completed" : "failed",
@@ -110,6 +152,9 @@ export const runResearchBriefSkill = async ({
   ragService,
   recordSkillResult = noop,
   researchSkill,
+  sessionId,
+  stepLifecycle,
+  userId,
 } = {}) => {
   if (!researchSkill) {
     return null;
@@ -141,6 +186,9 @@ export const runResearchBriefSkill = async ({
     docIds,
     accessScope,
     researchPlan,
+    sessionId,
+    stepLifecycle,
+    userId,
   });
   recordSkillResult(researchResult);
   const researchBrief = researchResult.ok ? researchResult.value : null;
@@ -178,6 +226,7 @@ export const runResearchBriefSkill = async ({
     }
 
     addTraceStep({
+      id: `research_question:${finding.id}`,
       type: "research_question",
       label: "Research Question",
       status: finding.status === "completed" ? "completed" : "failed",
@@ -186,10 +235,10 @@ export const runResearchBriefSkill = async ({
         docIds,
         question: finding.question,
         researchQuestionId: finding.id,
-        sessionId: null,
+        sessionId: sessionId ?? null,
         skillId: researchResult.skillId,
         skillVersion: researchResult.skillVersion,
-        userId: null,
+        userId: userId ?? null,
       },
       output: buildTextCitationStepOutput(finding, {
         researchQuestionId: finding.id,
@@ -218,15 +267,32 @@ export const runInventorySkill = async ({
   inventorySkill,
   ragService,
   recordSkillResult = noop,
+  stepLifecycle,
 } = {}) => {
   if (!inventorySkill) {
     return null;
   }
 
-  const inventoryResult = await executeObservedSkill(inventorySkill, {
-    capabilityRegistry,
-    ragService,
-    accessScope,
+  const inventoryInput = {
+    scope: "workspace",
+  };
+  const inventoryResult = await runLifecycleStep({
+    buildError: buildResultStepError("Unable to list indexed documents."),
+    buildOutput: (result) =>
+      buildTextCitationStepOutput(result, {
+        documentCount: result.value?.documents?.length ?? 0,
+      }),
+    execute: () =>
+      executeObservedSkill(inventorySkill, {
+        capabilityRegistry,
+        ragService,
+        accessScope,
+      }),
+    id: INVENTORY_STEP_ID,
+    input: inventoryInput,
+    label: "Workspace Inventory",
+    stepLifecycle,
+    type: "inventory",
   });
   recordSkillResult(inventoryResult);
   const documents = inventoryResult.value?.documents ?? [];
@@ -238,6 +304,7 @@ export const runInventorySkill = async ({
       )}`;
 
   addTraceStep({
+    id: INVENTORY_STEP_ID,
     type: "inventory",
     label: "Workspace Inventory",
     status: inventoryResult.ok ? "completed" : "failed",
@@ -253,7 +320,7 @@ export const runInventorySkill = async ({
               "Unable to list indexed documents."
             )}`,
     input: {
-      scope: "workspace",
+      ...inventoryInput,
     },
     output: buildTextCitationStepOutput(inventoryResult, {
       documentCount: documents.length,
@@ -278,17 +345,35 @@ export const runDocumentDiscoverySkill = async ({
   question,
   ragService,
   recordSkillResult = noop,
+  stepLifecycle,
 } = {}) => {
   if (!discoverySkill) {
     return null;
   }
 
-  const discoveryResult = await executeObservedSkill(discoverySkill, {
-    capabilityRegistry,
-    ragService,
-    question,
+  const discoveryInput = {
     docIds,
-    accessScope,
+    question,
+  };
+  const discoveryResult = await runLifecycleStep({
+    buildError: buildResultStepError("Unable to inspect workspace metadata."),
+    buildOutput: (result) =>
+      buildTextCitationStepOutput(result, {
+        matchCount: result.value?.matches?.length ?? 0,
+      }),
+    execute: () =>
+      executeObservedSkill(discoverySkill, {
+        capabilityRegistry,
+        ragService,
+        question,
+        docIds,
+        accessScope,
+      }),
+    id: DOCUMENT_DISCOVERY_STEP_ID,
+    input: discoveryInput,
+    label: "Document Discovery",
+    stepLifecycle,
+    type: "document_discovery",
   });
   recordSkillResult(discoveryResult);
   const matches = discoveryResult.value?.matches ?? [];
@@ -300,6 +385,7 @@ export const runDocumentDiscoverySkill = async ({
       )}`;
 
   addTraceStep({
+    id: DOCUMENT_DISCOVERY_STEP_ID,
     type: "document_discovery",
     label: "Document Discovery",
     status: discoveryResult.ok ? "completed" : "failed",
@@ -314,10 +400,7 @@ export const runDocumentDiscoverySkill = async ({
               discoveryResult.error,
               "Unable to inspect workspace metadata."
             )}`,
-    input: {
-      docIds,
-      question,
-    },
+    input: discoveryInput,
     output: buildTextCitationStepOutput(discoveryResult, {
       matchCount: matches.length,
     }),

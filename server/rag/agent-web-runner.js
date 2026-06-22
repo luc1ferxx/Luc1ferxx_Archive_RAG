@@ -1,5 +1,6 @@
 import { consumeBudget } from "./agent-budget.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
 import {
   buildStepError,
   buildTextCitationStepOutput,
@@ -7,6 +8,7 @@ import {
 import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
+const WEB_SEARCH_PRIMARY_STEP_ID = "web_search:primary";
 
 export const runWebSearchSkill = async ({
   addBudgetLimitTrace = noop,
@@ -20,6 +22,7 @@ export const runWebSearchSkill = async ({
   recordSkippedSkill = noop,
   recordSkillResult = noop,
   shouldRunWeb,
+  stepLifecycle,
   webChatService,
   webSearchSkill,
 } = {}) => {
@@ -50,17 +53,36 @@ export const runWebSearchSkill = async ({
     };
   }
 
-  const webResult = await executeObservedSkill(webSearchSkill, {
-    capabilityRegistry,
-    webChatService,
+  const webInput = {
     question,
-  }, {
-    phase: plannedWebSearchSkill ? "primary" : "fallback",
-    budget: webBudget,
+  };
+  const webResult = await runLifecycleStep({
+    buildError: (result) =>
+      buildStepError(result, "Unable to answer from web search."),
+    buildOutput: buildTextCitationStepOutput,
+    execute: () =>
+      executeObservedSkill(
+        webSearchSkill,
+        {
+          capabilityRegistry,
+          webChatService,
+          question,
+        },
+        {
+          phase: plannedWebSearchSkill ? "primary" : "fallback",
+          budget: webBudget,
+        }
+      ),
+    id: WEB_SEARCH_PRIMARY_STEP_ID,
+    input: webInput,
+    label: "Web Search",
+    stepLifecycle,
+    type: "web_search",
   });
   recordSkillResult(webResult);
 
   addTraceStep({
+    id: WEB_SEARCH_PRIMARY_STEP_ID,
     type: "web_search",
     label: "Web Search",
     status: webResult.ok ? "completed" : "failed",
@@ -70,9 +92,7 @@ export const runWebSearchSkill = async ({
           webResult.error,
           "Unable to answer from web search."
         )}`,
-    input: {
-      question,
-    },
+    input: webInput,
     output: buildTextCitationStepOutput(webResult),
     error: buildStepError(webResult, "Unable to answer from web search."),
     detail: buildSkillTraceDetail(webResult),

@@ -302,6 +302,27 @@ test("observability report aggregates recovery and replay metrics", () => {
         },
       },
       {
+        type: "step_started",
+        payload: {
+          status: "running",
+          stepId: "document_rag:primary",
+        },
+      },
+      {
+        type: "step_completed",
+        payload: {
+          status: "completed",
+          stepId: "document_rag:primary",
+        },
+      },
+      {
+        type: "step_failed",
+        payload: {
+          status: "failed",
+          stepId: "document_rag:primary",
+        },
+      },
+      {
         traceType: "agent_run_step_replay",
         action: "retry_step",
         status: "completed",
@@ -330,7 +351,7 @@ test("observability report aggregates recovery and replay metrics", () => {
     ],
   });
 
-  assert.equal(report.recovery.eventCount, 5);
+  assert.equal(report.recovery.eventCount, 8);
   assert.equal(report.recovery.recoverableRunCount, 3);
   assert.equal(report.recovery.manualRecoveryCount, 1);
   assert.equal(report.recovery.manualRecoveryActionCount, 2);
@@ -339,6 +360,10 @@ test("observability report aggregates recovery and replay metrics", () => {
   assert.equal(report.recovery.autoReplaySuccessCount, 1);
   assert.equal(report.recovery.autoReplayFailureCount, 1);
   assert.equal(report.recovery.autoReplaySuccessRate, 0.5);
+  assert.equal(report.recovery.stepLifecycleEventCount, 3);
+  assert.equal(report.recovery.primaryStepStartedCount, 1);
+  assert.equal(report.recovery.primaryStepCompletedCount, 1);
+  assert.equal(report.recovery.primaryStepFailedCount, 1);
   assert.equal(report.recovery.stepRetryCount, 1);
   assert.equal(report.recovery.stepResumeCount, 1);
   assert.equal(report.recovery.stepReplayFailureCount, 1);
@@ -353,8 +378,47 @@ test("observability report aggregates recovery and replay metrics", () => {
   assert.match(formatted, /Recovery \/ Replay/);
   assert.match(formatted, /recoverable runs: 3/);
   assert.match(formatted, /auto replay success rate: 50%/);
+  assert.match(formatted, /primary step completed: 1/);
   assert.match(formatted, /step retry count: 1/);
   assert.match(formatted, /planner fallback count: 1/);
+});
+
+test("observability report only counts scoped run step lifecycle events", () => {
+  const report = buildObservabilityReport({
+    events: [
+      {
+        traceType: "agent_run_recovery",
+        eventType: "step_failed",
+        payload: {
+          stepId: "document_rag:primary",
+        },
+      },
+      {
+        type: "step_completed",
+        phase: "primary",
+      },
+      {
+        type: "step_started",
+        payload: {
+          stepId: "document_rag:primary",
+        },
+      },
+      {
+        traceType: "agent_run_step_lifecycle",
+        eventType: "step_completed",
+        stepId: "custom_skill:primary",
+      },
+      {
+        traceType: "agent_run_step_lifecycle",
+        eventType: "step_failed",
+      },
+    ],
+  });
+
+  assert.equal(report.recovery.stepLifecycleEventCount, 2);
+  assert.equal(report.recovery.primaryStepStartedCount, 1);
+  assert.equal(report.recovery.primaryStepCompletedCount, 1);
+  assert.equal(report.recovery.primaryStepFailedCount, 0);
 });
 
 test("observability report reads jsonl from a file or directory", async () => {

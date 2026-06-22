@@ -819,12 +819,15 @@ test("quality history folds passing recovery observability report into gate deci
   assert.equal(history.recoveryGate.status, "pass");
   assert.equal(history.recoveryGate.skipped, false);
   assert.equal(history.recoveryGate.currentRunId, "recovery-latest");
+  assert.equal(history.recoveryGate.recovery.primaryStepStartedCount, 2);
+  assert.equal(history.recoveryGate.recovery.primaryStepCompletedCount, 1);
+  assert.equal(history.recoveryGate.recovery.primaryStepFailedCount, 1);
   assert.equal(history.recoveryGate.recovery.stepReplayFailureCount, 0);
   assert.equal(history.recoveryGate.recovery.autoReplaySuccessRate, 1);
   assert.equal(history.qualityGate.status, "pass");
   assert.match(
     history.qualityGate.summary,
-    /Recovery observability passed 4 cases; replay failures 0/
+    /Recovery observability passed 5 cases; replay failures 0/
   );
   assert.ok(
     history.qualityGate.checks.some(
@@ -834,6 +837,89 @@ test("quality history folds passing recovery observability report into gate deci
         check.currentValue === 0
     )
   );
+  assert.ok(
+    history.qualityGate.checks.some(
+      (check) =>
+        check.metric === "recoveryPrimaryStepStartedCount" &&
+        check.status === "pass" &&
+        check.currentValue === 2
+    )
+  );
+});
+
+test("quality history does not require primary step failures in healthy recovery reports", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+  const latestRecoveryPayload = {
+    summary: {
+      runId: "recovery-no-primary-failures",
+      status: "pass",
+      metrics: {
+        caseCount: 1,
+        checkCount: 1,
+        failedCaseCount: 0,
+        failedCheckCount: 0,
+      },
+    },
+    recovery: {
+      recoverableRunCount: 1,
+      manualRecoveryCount: 1,
+      manualRecoveryActionCount: 1,
+      manualRecoveryActionFailureCount: 0,
+      autoReplayAttemptCount: 1,
+      autoReplaySuccessRate: 1,
+      autoReplayFailureCount: 0,
+      primaryStepStartedCount: 1,
+      primaryStepCompletedCount: 1,
+      primaryStepFailedCount: 0,
+      stepRetryCount: 1,
+      stepResumeCount: 1,
+      stepReplayFailureCount: 0,
+      plannerFallbackCount: 0,
+    },
+    cases: [
+      {
+        id: "healthy_recovery",
+        label: "Healthy recovery",
+        passed: true,
+        checks: [
+          {
+            id: "healthy",
+            label: "Healthy recovery",
+            passed: true,
+          },
+        ],
+      },
+    ],
+  };
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestRecoveryPayload,
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.recoveryGate.status, "pass");
+  assert.ok(
+    history.recoveryGate.checks.some(
+      (check) =>
+        check.metric === "recoveryPrimaryStepFailedCount" &&
+        check.status === "pass" &&
+        check.currentValue === 0
+    )
+  );
+  assert.equal(history.qualityGate.status, "pass");
 });
 
 test("quality history folds recovery observability failures into gate decision", () => {

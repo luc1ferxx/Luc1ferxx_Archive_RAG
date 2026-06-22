@@ -112,6 +112,34 @@ export const createApprovalResumeCase = () => ({
     };
     const resumedBody = getChatResponseBody(resumedResponse);
     const eventTypes = resumeResult.run?.events?.map((event) => event.type) ?? [];
+    const findEventAfter = (eventType, afterIndex = -1) =>
+      eventTypes.findIndex(
+        (type, index) => index > afterIndex && type === eventType
+      );
+    const gateCreatedIndex = eventTypes.indexOf("approval_gate_created");
+    const approvedIndex = eventTypes.indexOf("approval_gate_approved");
+    const pausedIndex = eventTypes.indexOf("step_paused");
+    const resumedStepStartedIndex = findEventAfter("step_started", approvedIndex);
+    const resumedStepCompletedIndex = findEventAfter(
+      "step_completed",
+      resumedStepStartedIndex
+    );
+    const finalRunCompletedIndex = findEventAfter(
+      "run_completed",
+      resumedStepCompletedIndex
+    );
+    const approvalResumeEventsRecorded =
+      ["run_created", "run_prepared", "execution_planned"].every((eventType) =>
+        eventTypes.includes(eventType)
+      ) &&
+      gateCreatedIndex !== -1 &&
+      approvedIndex !== -1 &&
+      pausedIndex !== -1 &&
+      gateCreatedIndex < approvedIndex &&
+      pausedIndex < approvedIndex &&
+      resumedStepStartedIndex !== -1 &&
+      resumedStepCompletedIndex !== -1 &&
+      finalRunCompletedIndex !== -1;
     const capabilityStep = (resumeResult.run?.steps ?? []).find(
       (step) =>
         step.kind === "capability_call" &&
@@ -194,20 +222,16 @@ export const createApprovalResumeCase = () => ({
           id: "approval_resume_events_recorded",
           label: "Run events record gate creation, approval, step execution, and completion",
           category: "approval",
-          passed:
-            eventTypes.join(">") ===
-            [
-              "run_created",
-              "run_prepared",
-              "execution_planned",
-              "approval_gate_created",
-              "run_completed",
-              "approval_gate_approved",
-              "step_started",
-              "step_completed",
-              "run_completed",
-            ].join(">"),
-          detail: eventTypes,
+          passed: approvalResumeEventsRecorded,
+          detail: {
+            eventTypes,
+            finalRunCompletedIndex,
+            gateCreatedIndex,
+            approvedIndex,
+            pausedIndex,
+            resumedStepCompletedIndex,
+            resumedStepStartedIndex,
+          },
         }),
       ],
     });
@@ -436,6 +460,9 @@ export const createWebApprovalDenyCase = () => ({
         step.kind === "capability_call" &&
         step.capabilityId === CAPABILITY_IDS.webSearch
     );
+    const skippedPrimaryStep = (deniedRun?.steps ?? []).find(
+      (step) => step.id === "web_search:primary"
+    );
 
     return finishCase({
       id: "web_approval_deny",
@@ -468,11 +495,13 @@ export const createWebApprovalDenyCase = () => ({
             webSearchCalls === 0 &&
             deniedRun?.status === AGENT_RUN_STATUSES.completed &&
             deniedRun?.result?.approvalDenied === true &&
-            skippedStep?.status === "skipped",
+            skippedStep?.status === "skipped" &&
+            skippedPrimaryStep?.status === "skipped",
           detail: {
             runStatus: deniedRun?.status ?? null,
             result: deniedRun?.result ?? null,
             skippedStep: skippedStep ?? null,
+            skippedPrimaryStep: skippedPrimaryStep ?? null,
             webSearchCalls,
           },
         }),
@@ -482,7 +511,8 @@ export const createWebApprovalDenyCase = () => ({
           category: "approval",
           passed:
             eventTypes.includes("approval_gate_denied") &&
-            !eventTypes.includes("step_started") &&
+            eventTypes.includes("step_started") &&
+            eventTypes.includes("step_paused") &&
             !eventTypes.includes("step_completed"),
           detail: eventTypes,
         }),

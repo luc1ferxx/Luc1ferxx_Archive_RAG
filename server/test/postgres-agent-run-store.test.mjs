@@ -11,6 +11,9 @@ import {
   createDocumentRagStepExecutor,
 } from "../rag/agent-run-step-handlers/index.js";
 import {
+  STEP_REPLAY_SAFETY_REASON_CODES,
+} from "../rag/agent-run-step-replay-safety.js";
+import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
 } from "../rag/agent-runs.js";
@@ -195,16 +198,25 @@ const createPostgresDocumentStepExecutor = ({
       title: "Policy",
     },
   ],
+  calls = [],
   text = "Recovered from Postgres.",
 } = {}) =>
   createAgentRunStepExecutor({
     agentRunService,
     executeDocumentRagStep: createDocumentRagStepExecutor({
       ragService: {
-        chat: async () => ({
-          citations,
-          text,
-        }),
+        chat: async (docIds, question, options) => {
+          calls.push({
+            docIds,
+            options,
+            question,
+          });
+
+          return {
+            citations,
+            text,
+          };
+        },
       },
     }),
   });
@@ -584,6 +596,298 @@ test("postgres agent run recovery auto resumes a safe pending step after restart
       (event) => event.type === "manual_recovery_required"
     ),
     false
+  );
+});
+
+test("postgres agent run recovery auto resumes a safe running primary document step after restart", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const firstService = harness.createService();
+
+  await firstService.createRun({
+    accessScope,
+    goal: "Recover running document run",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-running-auto-recovery",
+  });
+  await firstService.updateRun({
+    accessScope,
+    runId: "run-running-auto-recovery",
+    patch: {
+      steps: [
+        {
+          id: "document-step",
+          input: {
+            docIds: ["doc-1"],
+            question: "What changed while the server restarted?",
+            retrievalPlan: {
+              queries: ["policy change"],
+            },
+          },
+          status: AGENT_RUN_STEP_STATUSES.running,
+          type: "document_rag",
+        },
+      ],
+    },
+  });
+
+  const restartedService = harness.createService({
+    now: () => "2026-06-14T00:05:00.000Z",
+  });
+  const ragCalls = [];
+  const agentRunStepExecutor = createPostgresDocumentStepExecutor({
+    agentRunService: restartedService,
+    calls: ragCalls,
+    text: "Recovered running primary step.",
+  });
+  const recoveryService = createAgentRunRecoveryService({
+    agentRunService: restartedService,
+    agentRunStepExecutor,
+    now: () => "2026-06-14T00:06:00.000Z",
+  });
+
+  const recovery = await recoveryService.recoverOnStartup({
+    mode: "auto",
+  });
+  const recoveredRun = await restartedService.getRun({
+    accessScope,
+    runId: "run-running-auto-recovery",
+  });
+
+  assert.equal(recovery.autoRecoveredCount, 1);
+  assert.equal(recovery.manualRecoveredCount, 0);
+  assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.completed);
+  assert.deepEqual(
+    {
+      mode: recoveredRun.result.recovery.mode,
+      stepId: recoveredRun.result.recovery.stepId,
+      stepType: recoveredRun.result.recovery.stepType,
+    },
+    {
+      mode: "auto",
+      stepId: "document-step",
+      stepType: "document_rag",
+    }
+  );
+  assert.equal(ragCalls.length, 1);
+  assert.deepEqual(ragCalls[0].docIds, ["doc-1"]);
+  assert.equal(
+    ragCalls[0].question,
+    "What changed while the server restarted?"
+  );
+  assert.deepEqual(ragCalls[0].options.retrievalPlan, {
+    queries: ["policy change"],
+  });
+  assert.equal(recoveredRun.result.answer, "Recovered running primary step.");
+  assert.equal(
+    recoveredRun.steps[0].status,
+    AGENT_RUN_STEP_STATUSES.completed
+  );
+  assert.ok(
+    recoveredRun.events.some(
+      (event) => event.type === "auto_recovery_completed"
+    )
+  );
+});
+
+test("postgres agent run recovery resumes the next safe step after restart without replaying completed work", async () => {
+  for (const nextStepStatus of [
+    AGENT_RUN_STEP_STATUSES.pending,
+    AGENT_RUN_STEP_STATUSES.running,
+  ]) {
+    const harness = createFakePostgresAgentRunHarness();
+    const firstService = harness.createService();
+    const runId = `run-next-step-${nextStepStatus}`;
+
+    await firstService.createRun({
+      accessScope,
+      goal: "Recover the next document step",
+      input: {
+        docIds: ["doc-1"],
+      },
+      runId,
+    });
+    await firstService.updateRun({
+      accessScope,
+      runId,
+      patch: {
+        steps: [
+          {
+            id: "step-completed",
+            input: {
+              docIds: ["doc-1"],
+              question: "What changed first?",
+            },
+            output: {
+              citationCount: 1,
+              text: "Completed before restart.",
+            },
+            status: AGENT_RUN_STEP_STATUSES.completed,
+            type: "document_rag",
+          },
+          {
+            id: "step-next",
+            input: {
+              docIds: ["doc-2"],
+              question: `What changed next from ${nextStepStatus}?`,
+            },
+            status: nextStepStatus,
+            type: "document_rag",
+          },
+        ],
+      },
+    });
+
+    const restartedService = harness.createService({
+      now: () => "2026-06-14T00:05:00.000Z",
+    });
+    const ragCalls = [];
+    const recoveryService = createAgentRunRecoveryService({
+      agentRunService: restartedService,
+      agentRunStepExecutor: createPostgresDocumentStepExecutor({
+        agentRunService: restartedService,
+        calls: ragCalls,
+        text: `Recovered ${nextStepStatus} second step.`,
+      }),
+      now: () => "2026-06-14T00:06:00.000Z",
+    });
+
+    const recovery = await recoveryService.recoverOnStartup({
+      mode: "auto",
+    });
+    const recoveredRun = await restartedService.getRun({
+      accessScope,
+      runId,
+    });
+    const completedStep = recoveredRun.steps.find(
+      (step) => step.id === "step-completed"
+    );
+    const resumedStep = recoveredRun.steps.find(
+      (step) => step.id === "step-next"
+    );
+    assert.equal(recovery.autoRecoveredCount, 1);
+    assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.completed);
+    assert.equal(recoveredRun.result.recovery.stepId, "step-next");
+    assert.equal(ragCalls.length, 1);
+    assert.deepEqual(ragCalls[0].docIds, ["doc-2"]);
+    assert.equal(
+      ragCalls[0].question,
+      `What changed next from ${nextStepStatus}?`
+    );
+    assert.equal(completedStep.status, AGENT_RUN_STEP_STATUSES.completed);
+    assert.equal(completedStep.output.text, "Completed before restart.");
+    assert.equal(resumedStep.status, AGENT_RUN_STEP_STATUSES.completed);
+    assert.equal(
+      resumedStep.output.text,
+      `Recovered ${nextStepStatus} second step.`
+    );
+  }
+});
+
+test("postgres agent run recovery does not auto replay a running unsafe external write step after restart", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const firstService = harness.createService();
+
+  await firstService.createRun({
+    accessScope,
+    goal: "Recover unsafe external write",
+    runId: "run-unsafe-write",
+  });
+  await firstService.updateRun({
+    accessScope,
+    runId: "run-unsafe-write",
+    patch: {
+      steps: [
+        {
+          id: "arxiv-import-step",
+          input: {
+            topic: "agent recovery",
+          },
+          status: AGENT_RUN_STEP_STATUSES.running,
+          type: "arxiv_import",
+        },
+      ],
+    },
+  });
+
+  const restartedService = harness.createService({
+    now: () => "2026-06-14T00:05:00.000Z",
+  });
+  let resumeAttemptCount = 0;
+  const recoveryService = createAgentRunRecoveryService({
+    agentRunService: restartedService,
+    agentRunStepExecutor: {
+      resumeStep: async () => {
+        resumeAttemptCount += 1;
+        throw new Error("Unsafe write steps must not auto replay.");
+      },
+    },
+    now: () => "2026-06-14T00:06:00.000Z",
+  });
+
+  const recovery = await recoveryService.recoverOnStartup({
+    mode: "auto",
+  });
+  const actionService = createAgentRunRecoveryActionService({
+    agentRunService: restartedService,
+  });
+  const recoveryRuns = await actionService.listRecoveryRuns({
+    accessScope,
+  });
+  const recoveredRun = await restartedService.getRun({
+    accessScope,
+    runId: "run-unsafe-write",
+  });
+  const listedRun = recoveryRuns.runs.find(
+    (run) => run.runId === "run-unsafe-write"
+  );
+  const unsafeStepSafety = listedRun.recovery.replaySafety.steps.find(
+    (step) => step.stepId === "arxiv-import-step"
+  );
+
+  assert.equal(resumeAttemptCount, 0);
+  assert.equal(recovery.autoRecoveredCount, 0);
+  assert.equal(recovery.manualRecoveredCount, 1);
+  assert.equal(recovery.recoveredCount, 1);
+  assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.deepEqual(
+    {
+      mode: recoveredRun.result.recovery.mode,
+      reason: recoveredRun.result.recovery.reason,
+      requestedMode: recoveredRun.result.recovery.requestedMode,
+    },
+    {
+      mode: "manual",
+      reason: STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval,
+      requestedMode: "auto",
+    }
+  );
+  assert.equal(unsafeStepSafety.canAutoReplay, false);
+  assert.ok(
+    unsafeStepSafety.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.externalWrite
+    )
+  );
+  assert.ok(
+    unsafeStepSafety.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval
+    )
+  );
+  assert.deepEqual(
+    listedRun.recovery.actions.map((action) => action.type),
+    ["cancel"]
+  );
+  assert.equal(
+    recoveredRun.events.some(
+      (event) => event.type === "auto_recovery_started"
+    ),
+    false
+  );
+  assert.ok(
+    recoveredRun.events.some(
+      (event) => event.type === "manual_recovery_required"
+    )
   );
 });
 

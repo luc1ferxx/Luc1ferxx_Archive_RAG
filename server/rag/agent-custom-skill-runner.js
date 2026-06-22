@@ -4,18 +4,26 @@ import {
   buildChainedSkillQuestion,
 } from "./agent-planner.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
 
-const buildSkillStepOutput = (result = {}) =>
-  result.ok
+const buildSkillStepOutput = (result = {}) => {
+  const hasOutput =
+    result.ok ||
+    Boolean(result.text) ||
+    Boolean(result.citations?.length) ||
+    Boolean(result.abstained);
+
+  return hasOutput
     ? {
         abstained: Boolean(result.abstained),
         citationCount: result.citations?.length ?? 0,
         text: result.text ?? "",
       }
     : null;
+};
 
 const buildSkillStepError = (result = {}) =>
   result.ok
@@ -45,10 +53,12 @@ export const runCustomSkills = async ({
   recordSkillResult = noop,
   retrievalPlan,
   sessionId,
+  stepLifecycle,
   userId,
 } = {}) => {
   const customSkillResults = [];
   const previousChainResults = [];
+  const skillExecutionCounts = new Map();
 
   for (const customSkill of customSkills) {
     const chainQuestion = plan.mode === SKILL_CHAIN_MODE
@@ -62,27 +72,11 @@ export const runCustomSkills = async ({
       : null;
     const customResult = customBudget && !customBudget.ok
       ? buildFailedSkillResult(customSkill, new Error(customBudget.reason))
-      : await executeObservedSkill(customSkill, {
-          ragService,
-          question: chainQuestion,
-          docIds,
-          sessionId,
-          userId,
-          accessScope,
-          retrievalPlan,
-        }, {
-          phase: "primary",
-          budget: customBudget,
-        });
-
-    customSkillResults.push(customResult);
-    recordSkillResult(customResult);
-
-    if (customResult.ok) {
-      previousChainResults.push(customResult);
-    }
+      : null;
 
     if (customBudget && !customBudget.ok) {
+      customSkillResults.push(customResult);
+      recordSkillResult(customResult);
       recordSkippedSkill({
         skill: customSkill,
         result: customResult,
@@ -96,6 +90,12 @@ export const runCustomSkills = async ({
       continue;
     }
 
+    const executionCount = skillExecutionCounts.get(customSkill.id) ?? 0;
+    skillExecutionCounts.set(customSkill.id, executionCount + 1);
+    const customStepId =
+      executionCount === 0
+        ? `custom_skill:${customSkill.id}`
+        : `custom_skill:${customSkill.id}:${executionCount + 1}`;
     const customInput = {
       docIds,
       question: chainQuestion,
@@ -105,27 +105,61 @@ export const runCustomSkills = async ({
       skillVersion: customSkill.version,
       userId: userId ?? null,
     };
+    const executedCustomResult = await runLifecycleStep({
+      buildError: buildSkillStepError,
+      buildOutput: buildSkillStepOutput,
+      execute: () =>
+        executeObservedSkill(
+          customSkill,
+          {
+            ragService,
+            question: chainQuestion,
+            docIds,
+            sessionId,
+            userId,
+            accessScope,
+            retrievalPlan,
+          },
+          {
+            phase: "primary",
+            budget: customBudget,
+          }
+        ),
+      id: customStepId,
+      input: customInput,
+      label: customSkill.label,
+      stepLifecycle,
+      type: "custom_skill",
+    });
+
+    customSkillResults.push(executedCustomResult);
+    recordSkillResult(executedCustomResult);
+
+    if (executedCustomResult.ok) {
+      previousChainResults.push(executedCustomResult);
+    }
 
     addTraceStep({
+      id: customStepId,
       type: "custom_skill",
       label: customSkill.label,
-      status: customResult.ok ? "completed" : "failed",
-      summary: customResult.ok
-        ? `${customSkill.label} completed with ${customResult.citations?.length ?? 0} citation${
-            customResult.citations?.length === 1 ? "" : "s"
+      status: executedCustomResult.ok ? "completed" : "failed",
+      summary: executedCustomResult.ok
+        ? `${customSkill.label} completed with ${executedCustomResult.citations?.length ?? 0} citation${
+            executedCustomResult.citations?.length === 1 ? "" : "s"
           }.`
         : `${customSkill.label} failed: ${serializeError(
-            customResult.error,
+            executedCustomResult.error,
             "Unable to run custom skill."
           )}`,
       input: customInput,
-      output: buildSkillStepOutput(customResult),
-      error: buildSkillStepError(customResult),
-      detail: buildSkillTraceDetail(customResult, {
+      output: buildSkillStepOutput(executedCustomResult),
+      error: buildSkillStepError(executedCustomResult),
+      detail: buildSkillTraceDetail(executedCustomResult, {
         skillKind: customSkill.kind,
         chainMode: plan.mode === SKILL_CHAIN_MODE,
         previousSkillCount: Math.max(0, previousChainResults.length - 1),
-        ...(customResult.traceDetail ?? {}),
+        ...(executedCustomResult.traceDetail ?? {}),
       }),
     });
   }

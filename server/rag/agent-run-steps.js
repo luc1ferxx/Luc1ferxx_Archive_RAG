@@ -460,6 +460,70 @@ export const attachApprovalGateStepIds = ({ gates = [], steps = [] } = {}) => {
 const buildCapabilityStepId = (gate = {}) =>
   `capability:${normalizeText(gate.capabilityId)}:${normalizeText(gate.id)}`;
 
+const getStepApprovalGateId = (step = {}) =>
+  normalizeText(step.approvalGateId) ||
+  normalizeText(step.detail?.approvalGateId) ||
+  normalizeText(step.detail?.approvalGate?.id);
+
+const resolvePausedPrimaryApprovalSteps = ({
+  action,
+  capabilityStepId = "",
+  gate = {},
+  now,
+  steps = [],
+} = {}) => {
+  const normalizedAction = normalizeText(action).toLowerCase();
+  const gateId = normalizeText(gate.id);
+  let nextSteps = steps;
+
+  if (!gateId || !["approve", "deny"].includes(normalizedAction)) {
+    return nextSteps;
+  }
+
+  for (const step of normalizeAgentRunSteps(nextSteps)) {
+    if (
+      step.status !== AGENT_RUN_STEP_STATUSES.paused ||
+      step.kind === AGENT_RUN_STEP_KINDS.approvalGate ||
+      step.kind === AGENT_RUN_STEP_KINDS.capabilityCall ||
+      getStepApprovalGateId(step) !== gateId
+    ) {
+      continue;
+    }
+
+    const updateResult = updateAgentRunStep({
+      now,
+      patch: {
+        decision: normalizedAction,
+        detail: {
+          ...(step.detail ?? {}),
+          ...(normalizedAction === "approve"
+            ? {
+                approvalDelegated: true,
+                delegatedStepId: capabilityStepId,
+              }
+            : {
+                approvalDenied: true,
+              }),
+          approvalGateId: gateId,
+          capabilityId: gate.capabilityId ?? step.capabilityId,
+        },
+        summary:
+          step.summary ||
+          (normalizedAction === "approve"
+            ? `${step.label || step.type || "Step"} was delegated to the approved capability call.`
+            : `${step.label || step.type || "Step"} was skipped because approval was denied.`),
+      },
+      status: AGENT_RUN_STEP_STATUSES.skipped,
+      stepId: step.id,
+      steps: nextSteps,
+    });
+
+    nextSteps = updateResult.steps;
+  }
+
+  return nextSteps;
+};
+
 export const applyApprovalActionToSteps = ({
   action,
   gate = {},
@@ -469,6 +533,7 @@ export const applyApprovalActionToSteps = ({
   const normalizedAction = normalizeText(action).toLowerCase();
   const timestamp = now();
   const gateStepId = normalizeText(gate.stepId);
+  const capabilityStepId = buildCapabilityStepId(gate);
   let nextSteps = normalizeAgentRunSteps(steps);
   let gateStep = null;
 
@@ -491,8 +556,18 @@ export const applyApprovalActionToSteps = ({
     gateStep = updateResult.step;
   }
 
+  if (["approve", "deny"].includes(normalizedAction)) {
+    nextSteps = resolvePausedPrimaryApprovalSteps({
+      action: normalizedAction,
+      capabilityStepId,
+      gate,
+      now,
+      steps: nextSteps,
+    });
+  }
+
   const capabilityStep = normalizeAgentRunStep({
-    id: buildCapabilityStepId(gate),
+    id: capabilityStepId,
     type: "capability_call",
     kind: AGENT_RUN_STEP_KINDS.capabilityCall,
     status:
