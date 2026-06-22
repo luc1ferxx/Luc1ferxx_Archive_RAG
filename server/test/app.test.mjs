@@ -609,6 +609,91 @@ test("tasks endpoint lists scoped task records", async () => {
   }
 });
 
+test("agent task endpoint creates scoped durable goal tasks", async () => {
+  const calls = [];
+  const app = await createApp({
+    agentTaskService: {
+      createTask: async ({ accessScope, docIds, maxIterations, question, sessionId, userId }) => {
+        calls.push({
+          accessScope,
+          docIds,
+          maxIterations,
+          question,
+          sessionId,
+          userId,
+        });
+
+        return {
+          id: "agent_goal:task-1",
+          input: {
+            docIds,
+            maxIterations,
+            question,
+            sessionId,
+            userId,
+          },
+          status: "queued",
+          type: "agent_goal",
+        };
+      },
+    },
+    ragService: {
+      chat: async () => ({
+        text: "stub",
+        citations: [],
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/agent-tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        docIds: ["doc-1"],
+        maxIterations: 2,
+        question: "Summarize the renewal terms.",
+        sessionId: "session-1",
+        userId: "alice",
+      }),
+    });
+
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).task.id, "agent_goal:task-1");
+    assert.deepEqual(calls, [
+      {
+        accessScope: {
+          authenticated: false,
+          userId: "alice",
+          workspaceId: "",
+        },
+        docIds: ["doc-1"],
+        maxIterations: 2,
+        question: "Summarize the renewal terms.",
+        sessionId: "session-1",
+        userId: "alice",
+      },
+    ]);
+  } finally {
+    await server.close();
+  }
+});
+
 test("task detail and action routes use scoped job orchestration", async () => {
   const calls = [];
   const app = await createApp({
