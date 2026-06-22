@@ -5,9 +5,14 @@ import {
 } from "./tasks.js";
 import {
   applyApprovalActionToSteps,
+  AGENT_RUN_STEP_STATUSES,
+  createUnsupportedAgentRunStepStatusError,
+  isKnownAgentRunStepStatus,
   normalizeAgentRunSteps,
+  normalizeAgentRunStepStatus,
   queueAgentRunStepRetry,
   updateAgentRunStep,
+  upsertAgentRunStep,
 } from "./agent-run-steps.js";
 import {
   AGENT_RUN_STATUSES,
@@ -59,6 +64,13 @@ const normalizeAgentRunEvents = (events) =>
   toArray(events).map(normalizeAgentRunEvent).filter(Boolean);
 
 const normalizeAction = (action) => normalizeText(action).toLowerCase();
+
+const AGENT_RUN_STEP_STATUS_EVENTS = Object.freeze({
+  [AGENT_RUN_STEP_STATUSES.completed]: "step_completed",
+  [AGENT_RUN_STEP_STATUSES.failed]: "step_failed",
+  [AGENT_RUN_STEP_STATUSES.paused]: "step_paused",
+  [AGENT_RUN_STEP_STATUSES.running]: "step_started",
+});
 
 const normalizeApprovalGateStatus = ({ action, status }) => {
   const normalizedStatus = normalizeText(status).toLowerCase();
@@ -339,6 +351,113 @@ const buildRunError = (error) => {
     message: error instanceof Error ? error.message : normalizeText(error),
     name: error instanceof Error ? error.name : "Error",
   };
+};
+
+const buildStepError = (error) => {
+  if (!error) {
+    return undefined;
+  }
+
+  return {
+    message: error instanceof Error ? error.message : normalizeText(error),
+    name: error instanceof Error ? error.name : "Error",
+  };
+};
+
+const buildStepPatch = ({
+  detail,
+  error,
+  input,
+  label,
+  output,
+  type,
+} = {}) => {
+  const patch = {};
+
+  if (type !== undefined) {
+    patch.type = type;
+  }
+  if (label !== undefined) {
+    patch.label = label;
+  }
+  if (input !== undefined) {
+    patch.input = input;
+  }
+  if (output !== undefined) {
+    patch.output = output;
+  }
+  if (detail !== undefined) {
+    patch.detail = detail;
+  }
+  if (error !== undefined) {
+    patch.error = buildStepError(error);
+  }
+
+  return patch;
+};
+
+const buildNewStepTimestamps = ({ status, timestamp } = {}) => ({
+  completedAt:
+    status === AGENT_RUN_STEP_STATUSES.completed ||
+    status === AGENT_RUN_STEP_STATUSES.failed
+      ? timestamp
+      : "",
+  createdAt: timestamp,
+  pausedAt: status === AGENT_RUN_STEP_STATUSES.paused ? timestamp : "",
+  startedAt:
+    status === AGENT_RUN_STEP_STATUSES.pending ? "" : timestamp,
+  updatedAt: timestamp,
+});
+
+const getRunStepEventType = ({ eventType, status } = {}) =>
+  normalizeText(eventType) ||
+  AGENT_RUN_STEP_STATUS_EVENTS[status] ||
+  "step_updated";
+
+const NEW_AGENT_RUN_STEP_STATUSES = new Set([
+  AGENT_RUN_STEP_STATUSES.paused,
+  AGENT_RUN_STEP_STATUSES.pending,
+  AGENT_RUN_STEP_STATUSES.running,
+]);
+
+const createInvalidNewRunStepStatusError = (status) => {
+  const error = new Error(
+    `New agent run steps must start as running, pending, or paused: ${status}.`
+  );
+  error.status = 409;
+  return error;
+};
+
+const getNewRunStepStatus = (status) => {
+  if (status === undefined) {
+    return AGENT_RUN_STEP_STATUSES.pending;
+  }
+  if (!isKnownAgentRunStepStatus(status)) {
+    throw createUnsupportedAgentRunStepStatusError(status);
+  }
+
+  const normalizedStatus = normalizeAgentRunStepStatus(status);
+
+  if (!NEW_AGENT_RUN_STEP_STATUSES.has(normalizedStatus)) {
+    throw createInvalidNewRunStepStatusError(normalizedStatus);
+  }
+
+  return normalizedStatus;
+};
+
+const getRequestedRunStepStatus = (status) =>
+  status === undefined ? undefined : normalizeAgentRunStepStatus(status);
+
+const assertNewRunStepEventType = ({ eventType, status } = {}) => {
+  if (status !== AGENT_RUN_STEP_STATUSES.pending || normalizeText(eventType)) {
+    return;
+  }
+
+  const error = new Error(
+    "Pending agent run step creation requires an explicit eventType."
+  );
+  error.status = 400;
+  throw error;
 };
 
 export const createAgentRunService = ({
@@ -706,6 +825,113 @@ export const createAgentRunService = ({
       payload: {
         status: updateResult.step.status,
         stepId: updateResult.step.id,
+      },
+    });
+
+    return (
+      (await this.getRun({
+        accessScope,
+        runId,
+      })) ?? run
+    );
+  },
+
+  async recordRunStep({
+    accessScope = {},
+    detail,
+    error,
+    eventType = "",
+    input,
+    label,
+    output,
+    runId,
+    status,
+    stepId,
+    type,
+  } = {}) {
+    const existingRun = await this.getRun({
+      accessScope,
+      runId,
+    });
+
+    if (!existingRun) {
+      return null;
+    }
+
+    const normalizedStepId = normalizeText(stepId);
+
+    if (!normalizedStepId) {
+      return null;
+    }
+
+    const patch = buildStepPatch({
+      detail,
+      error,
+      input,
+      label,
+      output,
+      type,
+    });
+    const existingSteps = normalizeAgentRunSteps(existingRun.steps);
+    const existingStep = existingSteps.find(
+      (step) => step.id === normalizedStepId
+    );
+    let requestedStatus = getRequestedRunStepStatus(status);
+    let nextSteps = existingSteps;
+    let recordedStep = null;
+
+    if (existingStep) {
+      const updateResult = updateAgentRunStep({
+        patch,
+        status,
+        stepId: normalizedStepId,
+        steps: existingSteps,
+      });
+      nextSteps = updateResult.steps;
+      recordedStep = updateResult.step;
+    } else {
+      const timestamp = new Date().toISOString();
+      const nextStatus = getNewRunStepStatus(status);
+      requestedStatus = nextStatus;
+      assertNewRunStepEventType({
+        eventType,
+        status: nextStatus,
+      });
+      recordedStep = {
+        ...buildNewStepTimestamps({
+          status: nextStatus,
+          timestamp,
+        }),
+        ...patch,
+        id: normalizedStepId,
+        status: nextStatus,
+      };
+      nextSteps = upsertAgentRunStep({
+        steps: existingSteps,
+        step: recordedStep,
+      });
+      recordedStep = nextSteps.find((step) => step.id === normalizedStepId);
+    }
+
+    const run = await this.updateRun({
+      accessScope,
+      runId,
+      patch: {
+        steps: nextSteps,
+      },
+    });
+    const typeToRecord = getRunStepEventType({
+      eventType,
+      status: requestedStatus,
+    });
+
+    await this.appendRunEvent({
+      accessScope,
+      runId,
+      type: typeToRecord,
+      payload: {
+        status: recordedStep.status,
+        stepId: recordedStep.id,
       },
     });
 
