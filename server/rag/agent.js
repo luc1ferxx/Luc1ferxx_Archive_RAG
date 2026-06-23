@@ -39,6 +39,55 @@ const getSkillDescriptor = (skill = {}) => ({
   budgetKey: skill.budgetKey ?? null,
 });
 
+const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+
+const getTaskContinuationCandidates = ({ question = "", taskMemory = null } = {}) => {
+  const currentQuestion = normalizeText(question).toLowerCase();
+
+  return (taskMemory?.nextCandidates ?? [])
+    .map(normalizeText)
+    .filter((candidate) => candidate && candidate.toLowerCase() !== currentQuestion);
+};
+
+const attachAgentTaskContinuation = ({
+  question,
+  response = {},
+  taskMemory = null,
+} = {}) => {
+  const body = response.body ?? {};
+
+  if (
+    !taskMemory ||
+    response.status >= 400 ||
+    body.clarification?.needed === true ||
+    body.agentTask?.continue !== undefined
+  ) {
+    return response;
+  }
+
+  const nextCandidates = getTaskContinuationCandidates({
+    question,
+    taskMemory,
+  });
+  const nextQuestion = nextCandidates[0] ?? "";
+
+  if (!nextQuestion) {
+    return response;
+  }
+
+  return {
+    ...response,
+    body: {
+      ...body,
+      agentTask: {
+        continue: true,
+        nextCandidates,
+        nextQuestion,
+      },
+    },
+  };
+};
+
 const extractApprovalGates = (trace = []) =>
   trace
     .filter(
@@ -246,16 +295,22 @@ const completeRecordedRunAndExperience = async ({
   question,
   response,
   runId,
+  taskMemory,
   userId,
 } = {}) => {
+  const responseWithTaskContinuation = attachAgentTaskContinuation({
+    question,
+    response,
+    taskMemory,
+  });
   const writeResult = await recordAgentExperienceSafely({
     accessScope,
     question,
-    response,
+    response: responseWithTaskContinuation,
     userId,
   });
   const responseWithExperienceMemory = attachAgentExperienceMemoryWrite(
-    response,
+    responseWithTaskContinuation,
     writeResult
   );
 
@@ -444,6 +499,7 @@ export const runAgentRag = async ({
         question,
         response,
         runId: agentRunId,
+        taskMemory: taskMemoryContext,
         userId,
       });
     }
@@ -515,6 +571,7 @@ export const runAgentRag = async ({
         question,
         response,
         runId: agentRunId,
+        taskMemory: taskMemoryContext,
         userId,
       });
     }
@@ -555,6 +612,7 @@ export const runAgentRag = async ({
       question,
       response,
       runId: agentRunId,
+      taskMemory: taskMemoryContext,
       userId,
     });
   } catch (error) {
@@ -584,6 +642,7 @@ export const runAgentRag = async ({
         question,
         response,
         runId: agentRunId,
+        taskMemory: taskMemoryContext,
         userId,
       });
     }

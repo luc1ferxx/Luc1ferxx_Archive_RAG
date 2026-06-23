@@ -298,9 +298,13 @@ export const createAgentTaskRunner = ({
     let lastStatus = 200;
 
     while (payload.iterations.length < payload.maxIterations) {
+      const requestedAgentRunId =
+        payload.resumeAgentRunId === true
+          ? normalizeText(payload.agentRunId) || undefined
+          : undefined;
       const response = await runAgentTask({
         accessScope,
-        agentRunId: payload.agentRunId,
+        agentRunId: requestedAgentRunId,
         capabilityApprovals: payload.capabilityApprovals,
         docIds: payload.docIds,
         question,
@@ -314,6 +318,8 @@ export const createAgentTaskRunner = ({
         body,
         payload,
       });
+      const shouldContinue = shouldContinueFromBody(body);
+      const nextQuestion = shouldContinue ? getNextQuestion(body) : "";
       const iterations = [
         ...payload.iterations,
         buildIterationRecord({
@@ -332,8 +338,9 @@ export const createAgentTaskRunner = ({
         capabilityApprovals: {},
         iterations,
         lastQuestion: question,
-        nextQuestion: "",
+        nextQuestion,
         pending: null,
+        resumeAgentRunId: false,
         taskMemory: updateAgentTaskMemory({
           body,
           memory: payload.taskMemory,
@@ -397,7 +404,7 @@ export const createAgentTaskRunner = ({
         };
       }
 
-      if (!shouldContinueFromBody(body)) {
+      if (!shouldContinue) {
         return {
           ...buildProgressPatch({
             body,
@@ -411,7 +418,7 @@ export const createAgentTaskRunner = ({
         };
       }
 
-      question = getNextQuestion(body);
+      question = nextQuestion;
       payload = {
         ...payload,
         nextQuestion: question,
@@ -449,6 +456,12 @@ export const createAgentTaskRunner = ({
     };
 
     if (normalizedAction === AGENT_TASK_ACTIONS.approve) {
+      const nextQuestion =
+        normalizeText(taskPayload.lastQuestion) ||
+        normalizeText(taskPayload.nextQuestion) ||
+        normalizeText(taskPayload.pending?.question) ||
+        taskPayload.question;
+
       return {
         payload: {
           ...nextPayload,
@@ -456,6 +469,8 @@ export const createAgentTaskRunner = ({
             payload,
             task,
           }),
+          nextQuestion,
+          resumeAgentRunId: true,
         },
         status: TASK_STATUSES.queued,
         summary: "Agent task queued after approval.",
@@ -469,6 +484,7 @@ export const createAgentTaskRunner = ({
         normalizeText(payload.userInput) ||
         normalizeText(taskPayload.nextQuestion) ||
         normalizeText(taskPayload.pending?.question) ||
+        normalizeText(taskPayload.lastQuestion) ||
         taskPayload.question;
       const maxIterations = getResumeMaxIterations({
         payload,
@@ -494,6 +510,9 @@ export const createAgentTaskRunner = ({
           maxIterations,
           nextQuestion,
           question: nextQuestion,
+          resumeAgentRunId:
+            task.status === TASK_STATUSES.failed ||
+            Boolean(taskPayload.pending?.agentRunId),
           taskMemory: buildAgentTaskPlanningContext({
             ...nextPayload.taskMemory,
             goal: nextPayload.taskMemory?.goal || nextPayload.question,
