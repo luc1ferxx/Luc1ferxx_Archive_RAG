@@ -96,6 +96,14 @@ const buildMetricChecks = ({
   const minStepRetryCount = thresholds.minStepRetryCount ?? 1;
   const minStepResumeCount = thresholds.minStepResumeCount ?? 1;
   const maxStepReplayFailureCount = thresholds.maxStepReplayFailureCount ?? 0;
+  const minTaskRecoveryScheduledCount =
+    thresholds.minTaskRecoveryScheduledCount ?? 1;
+  const minTaskRecoveryResumeActionCount =
+    thresholds.minTaskRecoveryResumeActionCount ?? 1;
+  const maxTaskRecoveryResumeFailureCount =
+    thresholds.maxTaskRecoveryResumeFailureCount ?? 0;
+  const minTaskRecoveryCompletedCount =
+    thresholds.minTaskRecoveryCompletedCount ?? 1;
   const maxPlannerFallbackCount = thresholds.maxPlannerFallbackCount ?? 0;
 
   return [
@@ -189,6 +197,30 @@ const buildMetricChecks = ({
       maximum: maxStepReplayFailureCount,
       metric: "recoveryStepReplayFailureCount",
     }),
+    buildMinCheck({
+      currentValue: recovery.taskRecoveryScheduledCount ?? 0,
+      label: "Agent task recovery scheduled",
+      minimum: minTaskRecoveryScheduledCount,
+      metric: "recoveryTaskRecoveryScheduledCount",
+    }),
+    buildMinCheck({
+      currentValue: recovery.taskRecoveryResumeActionCount ?? 0,
+      label: "Agent task resume actions observed",
+      minimum: minTaskRecoveryResumeActionCount,
+      metric: "recoveryTaskRecoveryResumeActionCount",
+    }),
+    buildMaxCheck({
+      currentValue: recovery.taskRecoveryResumeFailureCount ?? 0,
+      label: "Agent task resume failures",
+      maximum: maxTaskRecoveryResumeFailureCount,
+      metric: "recoveryTaskRecoveryResumeFailureCount",
+    }),
+    buildMinCheck({
+      currentValue: recovery.taskRecoveryCompletedCount ?? 0,
+      label: "Agent tasks completed after recovery",
+      minimum: minTaskRecoveryCompletedCount,
+      metric: "recoveryTaskRecoveryCompletedCount",
+    }),
     buildMaxCheck({
       currentValue: recovery.plannerFallbackCount ?? 0,
       label: "Observed planner fallbacks",
@@ -251,6 +283,8 @@ export const buildRecoveryGate = ({
             failedChecks.length === 1 ? "" : "s"
           }; replay failures ${recovery.stepReplayFailureCount ?? 0}, manual action failures ${
             recovery.manualRecoveryActionFailureCount ?? 0
+          }, task resume failures ${
+            recovery.taskRecoveryResumeFailureCount ?? 0
           }, primary lifecycle ${recovery.primaryStepStartedCount ?? 0}/${
             recovery.primaryStepCompletedCount ?? 0
           }/${recovery.primaryStepFailedCount ?? 0}, auto replay success rate ${
@@ -260,6 +294,8 @@ export const buildRecoveryGate = ({
             metrics.caseCount === 1 ? "" : "s"
           }; replay failures ${recovery.stepReplayFailureCount ?? 0}, manual action failures ${
             recovery.manualRecoveryActionFailureCount ?? 0
+          }, task resume failures ${
+            recovery.taskRecoveryResumeFailureCount ?? 0
           }, primary lifecycle ${recovery.primaryStepStartedCount ?? 0}/${
             recovery.primaryStepCompletedCount ?? 0
           }/${recovery.primaryStepFailedCount ?? 0}, auto replay success rate ${

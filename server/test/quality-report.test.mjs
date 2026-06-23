@@ -824,10 +824,14 @@ test("quality history folds passing recovery observability report into gate deci
   assert.equal(history.recoveryGate.recovery.primaryStepFailedCount, 1);
   assert.equal(history.recoveryGate.recovery.stepReplayFailureCount, 0);
   assert.equal(history.recoveryGate.recovery.autoReplaySuccessRate, 1);
+  assert.equal(history.recoveryGate.recovery.taskRecoveryScheduledCount, 1);
+  assert.equal(history.recoveryGate.recovery.taskRecoveryResumeActionCount, 1);
+  assert.equal(history.recoveryGate.recovery.taskRecoveryResumeFailureCount, 0);
+  assert.equal(history.recoveryGate.recovery.taskRecoveryCompletedCount, 1);
   assert.equal(history.qualityGate.status, "pass");
   assert.match(
     history.qualityGate.summary,
-    /Recovery observability passed 5 cases; replay failures 0/
+    /Recovery observability passed 6 cases; replay failures 0, manual action failures 0, task resume failures 0/
   );
   assert.ok(
     history.qualityGate.checks.some(
@@ -843,6 +847,14 @@ test("quality history folds passing recovery observability report into gate deci
         check.metric === "recoveryPrimaryStepStartedCount" &&
         check.status === "pass" &&
         check.currentValue === 2
+    )
+  );
+  assert.ok(
+    history.qualityGate.checks.some(
+      (check) =>
+        check.metric === "recoveryTaskRecoveryResumeFailureCount" &&
+        check.status === "pass" &&
+        check.currentValue === 0
     )
   );
 });
@@ -881,6 +893,10 @@ test("quality history does not require primary step failures in healthy recovery
       stepRetryCount: 1,
       stepResumeCount: 1,
       stepReplayFailureCount: 0,
+      taskRecoveryScheduledCount: 1,
+      taskRecoveryResumeActionCount: 1,
+      taskRecoveryResumeFailureCount: 0,
+      taskRecoveryCompletedCount: 1,
       plannerFallbackCount: 0,
     },
     cases: [
@@ -952,6 +968,16 @@ test("quality history folds recovery observability failures into gate decision",
           message: "Manual action failed.",
         },
       },
+      {
+        traceType: "agent_task_recovery",
+        eventType: "task_resume_action",
+        action: "confirm",
+        errorStatus: 409,
+        resultStatus: "waiting_for_user",
+        runnerId: "agent_task",
+        status: "failed",
+        taskId: "task-failed",
+      },
     ],
     runId: "recovery-failing",
   });
@@ -969,9 +995,10 @@ test("quality history folds recovery observability failures into gate decision",
 
   assert.equal(history.regressionGate.status, "pass");
   assert.equal(history.recoveryGate.status, "fail");
-  assert.equal(history.recoveryGate.failedCaseCount, 2);
+  assert.equal(history.recoveryGate.failedCaseCount, 3);
   assert.equal(history.recoveryGate.recovery.stepReplayFailureCount, 1);
   assert.equal(history.recoveryGate.recovery.manualRecoveryActionFailureCount, 1);
+  assert.equal(history.recoveryGate.recovery.taskRecoveryResumeFailureCount, 1);
   assert.equal(history.qualityGate.status, "fail");
   assert.equal(buildQualityGateDecision({ history }).exitCode, 1);
   assert.ok(
@@ -984,6 +1011,18 @@ test("quality history folds recovery observability failures into gate decision",
   assert.ok(
     history.recoveryGate.failedCases.some(
       (caseResult) => caseResult.id === "step_replay_actions"
+    )
+  );
+  assert.ok(
+    history.recoveryGate.failedChecks.some(
+      (check) =>
+        check.metric === "recoveryTaskRecoveryResumeFailureCount" &&
+        check.status === "fail"
+    )
+  );
+  assert.ok(
+    history.recoveryGate.failedCases.some(
+      (caseResult) => caseResult.id === "agent_task_recovery"
     )
   );
 });

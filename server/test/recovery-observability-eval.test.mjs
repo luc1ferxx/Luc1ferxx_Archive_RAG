@@ -26,9 +26,9 @@ test("recovery observability eval builds a deterministic passing report", () => 
 
   assert.equal(report.summary.runId, "recovery-deterministic");
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 5);
+  assert.equal(report.summary.metrics.caseCount, 6);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
-  assert.equal(report.summary.metrics.checkCount, 17);
+  assert.equal(report.summary.metrics.checkCount, 19);
   assert.equal(report.recovery.recoverableRunCount, 3);
   assert.equal(report.recovery.manualRecoveryCount, 1);
   assert.equal(report.recovery.manualRecoveryActionCount, 3);
@@ -42,12 +42,17 @@ test("recovery observability eval builds a deterministic passing report", () => 
   assert.equal(report.recovery.stepRetryCount, 1);
   assert.equal(report.recovery.stepResumeCount, 1);
   assert.equal(report.recovery.stepReplayFailureCount, 0);
+  assert.equal(report.recovery.taskRecoveryScheduledCount, 1);
+  assert.equal(report.recovery.taskRecoveryResumeActionCount, 1);
+  assert.equal(report.recovery.taskRecoveryResumeFailureCount, 0);
+  assert.equal(report.recovery.taskRecoveryCompletedCount, 1);
 
   for (const caseId of [
     "startup_recovery_summary",
     "primary_step_lifecycle",
     "manual_recovery_actions",
     "step_replay_actions",
+    "agent_task_recovery",
     "planner_fallback_signal",
   ]) {
     assert.ok(findCase(report, caseId), `${caseId} case should be present`);
@@ -64,7 +69,9 @@ test("recovery observability eval builds a deterministic passing report", () => 
   assert.match(markdown, /AgentRAG Recovery Observability Eval/);
   assert.match(markdown, /Recoverable runs: `3`/);
   assert.match(markdown, /Primary step started: `2`/);
+  assert.match(markdown, /Task recovery scheduled: `1`/);
   assert.match(markdown, /PASS Startup recovery summary/);
+  assert.match(markdown, /PASS Agent task recovery/);
   assert.match(markdown, /PASS Primary persisted step lifecycle/);
 });
 
@@ -77,7 +84,7 @@ test("recovery observability eval production events pass the report contract", a
   });
 
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 5);
+  assert.equal(report.summary.metrics.caseCount, 6);
   assert.equal(report.recovery.recoverableRunCount, 3);
   assert.equal(report.recovery.manualRecoveryCount, 1);
   assert.equal(report.recovery.manualRecoveryActionCount, 3);
@@ -88,6 +95,10 @@ test("recovery observability eval production events pass the report contract", a
   assert.equal(report.recovery.primaryStepFailedCount, 1);
   assert.ok(report.recovery.stepResumeCount >= 1);
   assert.ok(report.recovery.stepRetryCount >= 1);
+  assert.equal(report.recovery.taskRecoveryScheduledCount, 1);
+  assert.equal(report.recovery.taskRecoveryResumeActionCount, 1);
+  assert.equal(report.recovery.taskRecoveryResumeFailureCount, 0);
+  assert.equal(report.recovery.taskRecoveryCompletedCount, 1);
 });
 
 test("recovery observability eval fails when primary lifecycle coverage is missing", () => {
@@ -148,6 +159,35 @@ test("recovery observability eval fails when replay or manual action failures ar
 
   assert.ok(failedCaseIds.includes("manual_recovery_actions"));
   assert.ok(failedCaseIds.includes("step_replay_actions"));
+});
+
+test("recovery observability eval fails when task resume failures are observed", () => {
+  const report = buildRecoveryObservabilityEvaluationReport({
+    createdAt: "2026-06-19T00:00:00.000Z",
+    events: [
+      ...buildRecoveryObservabilityFixtureEvents(),
+      {
+        traceType: "agent_task_recovery",
+        eventType: "task_resume_action",
+        action: "confirm",
+        errorStatus: 409,
+        resultStatus: "waiting_for_user",
+        runnerId: "agent_task",
+        status: "failed",
+        taskId: "task-failed",
+      },
+    ],
+  });
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(report.recovery.taskRecoveryResumeFailureCount, 1);
+  assert.equal(
+    findCheck(
+      findCase(report, "agent_task_recovery"),
+      "agent_task_resume_failures_zero"
+    )?.passed,
+    false
+  );
 });
 
 test("recovery observability eval writes latest json and markdown reports", async () => {

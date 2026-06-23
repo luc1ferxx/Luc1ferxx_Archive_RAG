@@ -17,6 +17,7 @@ import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import {
   createDocumentRagStepExecutor,
 } from "../rag/agent-run-step-handlers/index.js";
+import { createJobOrchestrator, TASK_ACTIONS } from "../rag/job-orchestrator.js";
 import {
   AGENT_RUN_STEP_STATUSES,
 } from "../rag/agent-run-steps.js";
@@ -25,6 +26,11 @@ import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import {
+  createInMemoryTaskStore,
+  createTaskService,
+  TASK_STATUSES,
+} from "../rag/tasks.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,6 +44,7 @@ export const RECOVERY_OBSERVABILITY_CATEGORY_LABELS = {
   manual_recovery: "Manual recovery",
   primary_lifecycle: "Primary lifecycle",
   replay: "Replay",
+  task_recovery: "Task recovery",
   planner: "Planner",
 };
 
@@ -357,10 +364,83 @@ const buildProductionManualActionEvents = async () => {
   return [...recoveryEvents, ...replayEvents];
 };
 
+const buildProductionTaskRecoveryEvents = async () => {
+  const scheduledWork = [];
+  const taskRecoveryEvents = [];
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore({
+      now: productionFixtureNow,
+    }),
+  });
+  const runnerId = "agent_task";
+
+  await taskService.upsertTask({
+    accessScope: productionFixtureAccessScope,
+    task: {
+      id: "task-recoverable",
+      runnerId,
+      status: TASK_STATUSES.queued,
+      type: "agent_task",
+    },
+  });
+  await taskService.upsertTask({
+    accessScope: productionFixtureAccessScope,
+    task: {
+      id: "task-waiting",
+      requiredUserAction: "confirm_agent_task",
+      runnerId,
+      status: TASK_STATUSES.waitingForUser,
+      type: "agent_task",
+    },
+  });
+
+  const orchestrator = createJobOrchestrator({
+    recordTaskRecoveryTrace: async (event) => taskRecoveryEvents.push(event),
+    runners: {
+      [runnerId]: {
+        resume: ({ action }) => {
+          if (action !== TASK_ACTIONS.confirm) {
+            const error = new Error("Unsupported action.");
+            error.status = 400;
+            throw error;
+          }
+
+          return {
+            status: TASK_STATUSES.queued,
+            summary: "Task queued after approval.",
+          };
+        },
+        run: () => ({
+          result: {
+            completed: true,
+          },
+          status: TASK_STATUSES.completed,
+          summary: "Task completed after recovery.",
+        }),
+      },
+    },
+    schedule: (work) => scheduledWork.push(work),
+    taskService,
+    now: productionFixtureNow,
+  });
+
+  await orchestrator.recoverRunnableTasks();
+  await scheduledWork.shift()?.();
+  await orchestrator.resumeTask({
+    accessScope: productionFixtureAccessScope,
+    action: TASK_ACTIONS.confirm,
+    runImmediately: false,
+    taskId: "task-waiting",
+  });
+
+  return taskRecoveryEvents;
+};
+
 export const buildRecoveryObservabilityProductionEvents = async () => [
   ...(await buildProductionStartupRecoveryEvents()),
   ...(await buildProductionManualActionEvents()),
   ...(await buildProductionLifecycleEvents()),
+  ...(await buildProductionTaskRecoveryEvents()),
   {
     traceType: "agent",
     agentMode: "document",
@@ -441,6 +521,35 @@ export const buildRecoveryObservabilityFixtureEvents = () => [
     traceType: "agent_run_step_replay",
     action: "retry_step",
     status: "completed",
+  },
+  {
+    traceType: "agent_task_recovery",
+    eventType: "task_recovery_scheduled",
+    scheduledCount: 1,
+    taskRefs: [
+      {
+        runnerId: "agent_task",
+        status: "queued",
+        taskId: "task-recoverable",
+      },
+    ],
+  },
+  {
+    traceType: "agent_task_recovery",
+    eventType: "task_recovery_run",
+    resultStatus: "completed",
+    runnerId: "agent_task",
+    status: "completed",
+    taskId: "task-recoverable",
+  },
+  {
+    traceType: "agent_task_recovery",
+    eventType: "task_resume_action",
+    action: "confirm",
+    resultStatus: "queued",
+    runnerId: "agent_task",
+    status: "completed",
+    taskId: "task-waiting",
   },
   {
     traceType: "agent",
@@ -638,6 +747,42 @@ const buildStepReplayCase = (recovery = {}) => ({
   },
 });
 
+const buildAgentTaskRecoveryCase = (recovery = {}) => ({
+  checks: [
+    buildCheck({
+      category: "task_recovery",
+      id: "agent_task_recovery_recorded",
+      label: "Agent task recovery was recorded",
+      passed:
+        (recovery.taskRecoveryScheduledCount ?? 0) >= 1 &&
+        (recovery.taskRecoveryCompletedCount ?? 0) >= 1,
+      detail: `scheduled=${recovery.taskRecoveryScheduledCount ?? 0}, completed=${
+        recovery.taskRecoveryCompletedCount ?? 0
+      }`,
+    }),
+    buildCheck({
+      category: "task_recovery",
+      id: "agent_task_resume_failures_zero",
+      label: "Agent task resume failures stayed at zero",
+      passed: (recovery.taskRecoveryResumeFailureCount ?? 0) === 0,
+      detail: `taskRecoveryResumeFailureCount=${
+        recovery.taskRecoveryResumeFailureCount ?? 0
+      }`,
+    }),
+  ],
+  description:
+    "PostgreSQL-backed agent task recovery should be visible in observability without leaking task payloads.",
+  id: "agent_task_recovery",
+  label: "Agent task recovery",
+  response: {
+    taskRecoveryCompletedCount: recovery.taskRecoveryCompletedCount ?? 0,
+    taskRecoveryResumeActionCount: recovery.taskRecoveryResumeActionCount ?? 0,
+    taskRecoveryResumeFailureCount:
+      recovery.taskRecoveryResumeFailureCount ?? 0,
+    taskRecoveryScheduledCount: recovery.taskRecoveryScheduledCount ?? 0,
+  },
+});
+
 const buildPlannerFallbackCase = (recovery = {}) => ({
   checks: [
     buildCheck({
@@ -673,6 +818,7 @@ export const buildRecoveryObservabilityCases = ({ recovery = {} } = {}) =>
     buildPrimaryStepLifecycleCase(recovery),
     buildManualRecoveryCase(recovery),
     buildStepReplayCase(recovery),
+    buildAgentTaskRecoveryCase(recovery),
     buildPlannerFallbackCase(recovery),
   ].map(finishRecoveryCase);
 
@@ -739,6 +885,14 @@ export const formatRecoveryObservabilityReportMarkdown = (report = {}) => {
     `- Step retry count: \`${recovery.stepRetryCount ?? 0}\``,
     `- Step resume count: \`${recovery.stepResumeCount ?? 0}\``,
     `- Step replay failures: \`${recovery.stepReplayFailureCount ?? 0}\``,
+    `- Task recovery scheduled: \`${recovery.taskRecoveryScheduledCount ?? 0}\``,
+    `- Task recovery resume actions: \`${
+      recovery.taskRecoveryResumeActionCount ?? 0
+    }\``,
+    `- Task recovery resume failures: \`${
+      recovery.taskRecoveryResumeFailureCount ?? 0
+    }\``,
+    `- Task recovery completed: \`${recovery.taskRecoveryCompletedCount ?? 0}\``,
     `- Planner fallback count: \`${recovery.plannerFallbackCount ?? 0}\``,
   ];
 

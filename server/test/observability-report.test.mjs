@@ -383,6 +383,72 @@ test("observability report aggregates recovery and replay metrics", () => {
   assert.match(formatted, /planner fallback count: 1/);
 });
 
+test("observability report aggregates agent task recovery metrics", () => {
+  const report = buildObservabilityReport({
+    events: [
+      {
+        traceType: "agent_task_recovery",
+        eventType: "task_recovery_scheduled",
+        scheduledCount: 2,
+        taskRefs: [
+          {
+            runnerId: "agent_task",
+            status: "queued",
+            taskId: "task-queued",
+          },
+          {
+            runnerId: "agent_task",
+            status: "running",
+            taskId: "task-running",
+          },
+        ],
+      },
+      {
+        traceType: "agent_task_recovery",
+        eventType: "task_resume_action",
+        action: "confirm",
+        resultStatus: "queued",
+        runnerId: "agent_task",
+        status: "completed",
+        taskId: "task-waiting",
+      },
+      {
+        traceType: "agent_task_recovery",
+        eventType: "task_resume_action",
+        action: "confirm",
+        errorStatus: 409,
+        resultStatus: "waiting_for_user",
+        runnerId: "agent_task",
+        status: "failed",
+        taskId: "task-failed",
+      },
+      {
+        traceType: "agent_task_recovery",
+        eventType: "task_recovery_run",
+        resultStatus: "completed",
+        runnerId: "agent_task",
+        status: "completed",
+        taskId: "task-queued",
+      },
+    ],
+  });
+
+  assert.equal(report.recovery.taskRecoveryScheduledCount, 2);
+  assert.equal(report.recovery.taskRecoveryResumeActionCount, 2);
+  assert.equal(report.recovery.taskRecoveryResumeFailureCount, 1);
+  assert.equal(report.recovery.taskRecoveryCompletedCount, 1);
+  assert.deepEqual(report.recovery.taskRecoveryActionCounts, {
+    confirm: 2,
+  });
+
+  const formatted = formatObservabilityReport(report);
+
+  assert.match(formatted, /task recovery scheduled: 2/);
+  assert.match(formatted, /task recovery resume actions: 2/);
+  assert.match(formatted, /task recovery resume failures: 1/);
+  assert.match(formatted, /task recovery completed: 1/);
+});
+
 test("observability report only counts scoped run step lifecycle events", () => {
   const report = buildObservabilityReport({
     events: [

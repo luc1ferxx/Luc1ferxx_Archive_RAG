@@ -205,6 +205,11 @@ const createRecoveryStats = () => ({
   actionCounts: {},
   primaryStepLifecycleCounts: {},
   stepLifecycleCounts: {},
+  taskRecoveryScheduledCount: 0,
+  taskRecoveryResumeActionCount: 0,
+  taskRecoveryResumeFailureCount: 0,
+  taskRecoveryCompletedCount: 0,
+  taskRecoveryActionCounts: {},
 });
 
 const getPlannerId = (value, fallbackValue = "unknown") =>
@@ -286,6 +291,9 @@ const isAgentRunRecoveryEvent = (event = {}) =>
 
 const isAgentRunStepReplayEvent = (event = {}) =>
   event.traceType === "agent_run_step_replay";
+
+const isAgentTaskRecoveryEvent = (event = {}) =>
+  event.traceType === "agent_task_recovery";
 
 const STEP_LIFECYCLE_EVENT_TYPES = new Set([
   "step_started",
@@ -406,6 +414,38 @@ const addStepReplayEvent = (recovery, event = {}) => {
   }
 };
 
+const addTaskRecoveryEvent = (recovery, event = {}) => {
+  const eventType = getEventType(event);
+
+  recovery.eventCount += 1;
+
+  if (eventType === "task_recovery_scheduled") {
+    recovery.taskRecoveryScheduledCount += toNonNegativeInteger(
+      event.scheduledCount,
+      Array.isArray(event.taskRefs) ? event.taskRefs.length : 0
+    );
+    return;
+  }
+
+  if (eventType === "task_resume_action") {
+    recovery.taskRecoveryResumeActionCount += 1;
+    increment(recovery.taskRecoveryActionCounts, event.action);
+
+    if (event.status === "failed" || event.error || event.errorStatus) {
+      recovery.taskRecoveryResumeFailureCount += 1;
+    }
+
+    return;
+  }
+
+  if (
+    eventType === "task_recovery_run" &&
+    (event.resultStatus === "completed" || event.status === "completed")
+  ) {
+    recovery.taskRecoveryCompletedCount += 1;
+  }
+};
+
 const finalizeRecoveryStats = (recovery) => ({
   ...recovery,
   autoReplaySuccessRate:
@@ -468,6 +508,10 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
 
     if (isAgentRunStepReplayEvent(event)) {
       addStepReplayEvent(recovery, event);
+    }
+
+    if (isAgentTaskRecoveryEvent(event)) {
+      addTaskRecoveryEvent(recovery, event);
     }
 
     if (isAgentRunStepLifecycleEvent(event)) {
@@ -670,6 +714,10 @@ export const formatObservabilityReport = (report) => {
     `  step resume count: ${report.recovery.stepResumeCount}`,
     `  step replay failures: ${report.recovery.stepReplayFailureCount}`,
     `  planner fallback count: ${report.recovery.plannerFallbackCount}`,
+    `  task recovery scheduled: ${report.recovery.taskRecoveryScheduledCount}`,
+    `  task recovery resume actions: ${report.recovery.taskRecoveryResumeActionCount}`,
+    `  task recovery resume failures: ${report.recovery.taskRecoveryResumeFailureCount}`,
+    `  task recovery completed: ${report.recovery.taskRecoveryCompletedCount}`,
     "  manual actions:"
   );
   lines.push(
@@ -677,6 +725,16 @@ export const formatObservabilityReport = (report) => {
       indent: "    ",
     }).length
       ? formatCountMap(report.recovery.actionCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  task recovery actions:"
+  );
+  lines.push(
+    ...(formatCountMap(report.recovery.taskRecoveryActionCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.recovery.taskRecoveryActionCounts, {
           indent: "    ",
         })
       : ["    none: 0"]),
