@@ -188,3 +188,163 @@ test("job orchestrator schedules recoverable queued and running tasks", async ()
 
   assert.equal(completedTask.status, TASK_STATUSES.completed);
 });
+
+test("job orchestrator records task recovery and resume traces without payloads", async () => {
+  const scheduledWork = [];
+  const traceEvents = [];
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await taskService.upsertTask({
+    accessScope,
+    task: {
+      id: "task-queued",
+      runnerId: "test_runner",
+      status: TASK_STATUSES.queued,
+      type: "agent_task",
+    },
+  });
+  await taskService.upsertTask({
+    accessScope,
+    task: {
+      id: "task-waiting",
+      requiredUserAction: "confirm_task",
+      runnerId: "test_runner",
+      status: TASK_STATUSES.waitingForUser,
+      type: "agent_task",
+    },
+  });
+
+  const orchestrator = createJobOrchestrator({
+    recordTaskRecoveryTrace: async (event) => traceEvents.push(event),
+    runners: {
+      test_runner: {
+        resume: () => ({
+          status: TASK_STATUSES.queued,
+        }),
+        run: () => ({
+          status: TASK_STATUSES.completed,
+        }),
+      },
+    },
+    schedule: (work) => scheduledWork.push(work),
+    taskService,
+  });
+
+  await orchestrator.recoverRunnableTasks();
+  assert.deepEqual(traceEvents[0], {
+    traceType: "agent_task_recovery",
+    eventType: "task_recovery_scheduled",
+    scheduledCount: 1,
+    taskRefs: [
+      {
+        runnerId: "test_runner",
+        status: TASK_STATUSES.queued,
+        taskId: "task-queued",
+      },
+    ],
+  });
+
+  await scheduledWork[0]();
+  assert.deepEqual(traceEvents[1], {
+    traceType: "agent_task_recovery",
+    eventType: "task_recovery_run",
+    resultStatus: TASK_STATUSES.completed,
+    runnerId: "test_runner",
+    status: "completed",
+    taskId: "task-queued",
+  });
+
+  await orchestrator.resumeTask({
+    accessScope,
+    action: TASK_ACTIONS.confirm,
+    payload: {
+      secret: "do-not-log",
+    },
+    runImmediately: false,
+    taskId: "task-waiting",
+  });
+  assert.deepEqual(traceEvents[2], {
+    traceType: "agent_task_recovery",
+    action: TASK_ACTIONS.confirm,
+    eventType: "task_resume_action",
+    resultStatus: TASK_STATUSES.queued,
+    runnerId: "test_runner",
+    status: "completed",
+    taskId: "task-waiting",
+  });
+
+  for (const event of traceEvents) {
+    assert.equal(Object.hasOwn(event, "payload"), false);
+    assert.equal(Object.hasOwn(event, "accessScope"), false);
+  }
+});
+
+test("job orchestrator records failed task resume traces without payloads", async () => {
+  const traceEvents = [];
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await taskService.upsertTask({
+    accessScope,
+    task: {
+      id: "task-waiting",
+      requiredUserAction: "confirm_task",
+      runnerId: "test_runner",
+      status: TASK_STATUSES.waitingForUser,
+      type: "agent_task",
+    },
+  });
+
+  const orchestrator = createJobOrchestrator({
+    recordTaskRecoveryTrace: async (event) => traceEvents.push(event),
+    runners: {
+      test_runner: {
+        resume: () => {
+          const error = new Error("Approval failed.");
+          error.status = 409;
+          throw error;
+        },
+      },
+    },
+    taskService,
+  });
+
+  await assert.rejects(
+    () =>
+      orchestrator.resumeTask({
+        accessScope,
+        action: TASK_ACTIONS.confirm,
+        payload: {
+          secret: "do-not-log",
+        },
+        taskId: "task-waiting",
+      }),
+    /Approval failed/
+  );
+
+  assert.deepEqual(traceEvents, [
+    {
+      traceType: "agent_task_recovery",
+      action: TASK_ACTIONS.confirm,
+      errorStatus: 409,
+      eventType: "task_resume_action",
+      resultStatus: TASK_STATUSES.waitingForUser,
+      runnerId: "test_runner",
+      status: "failed",
+      taskId: "task-waiting",
+    },
+  ]);
+  assert.equal(Object.hasOwn(traceEvents[0], "payload"), false);
+  assert.equal(Object.hasOwn(traceEvents[0], "accessScope"), false);
+});

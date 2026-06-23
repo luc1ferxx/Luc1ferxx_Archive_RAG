@@ -1,4 +1,5 @@
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
+import { recordRagTrace } from "./observability.js";
 
 export const TASK_ACTIONS = Object.freeze({
   cancel: "cancel",
@@ -18,10 +19,23 @@ const defaultSchedule = (work) => {
 };
 
 export const createJobOrchestrator = ({
+  recordTaskRecoveryTrace = recordRagTrace,
   runners = {},
   schedule = defaultSchedule,
   taskService = createTaskService(),
 } = {}) => {
+  const recordTaskTrace = async (event = {}) =>
+    recordTaskRecoveryTrace?.({
+      traceType: "agent_task_recovery",
+      ...event,
+    });
+
+  const buildTaskRef = (task = {}) => ({
+    runnerId: normalizeText(task.runnerId),
+    status: normalizeText(task.status),
+    taskId: normalizeText(task.id),
+  });
+
   const getRunner = (task) => {
     const runnerId = normalizeText(task?.runnerId);
     const runner = runners[runnerId];
@@ -47,7 +61,7 @@ export const createJobOrchestrator = ({
     return task;
   };
 
-  const runTask = async ({ accessScope = {}, taskId } = {}) => {
+  const runTask = async ({ accessScope = {}, recovery = false, taskId } = {}) => {
     const task = taskService.getInternalTask
       ? await taskService.getInternalTask({
           accessScope,
@@ -59,6 +73,17 @@ export const createJobOrchestrator = ({
         });
 
     if (!task) {
+      if (recovery) {
+        await recordTaskTrace({
+          eventType: "task_recovery_run",
+          errorStatus: 404,
+          resultStatus: "",
+          runnerId: "",
+          status: "failed",
+          taskId,
+        });
+      }
+
       throw buildJobError("Task not found.", 404);
     }
 
@@ -69,7 +94,24 @@ export const createJobOrchestrator = ({
       });
     }
 
-    const runner = getRunner(task);
+    let runner = null;
+
+    try {
+      runner = getRunner(task);
+    } catch (error) {
+      if (recovery) {
+        await recordTaskTrace({
+          eventType: "task_recovery_run",
+          errorStatus: error?.status ?? 500,
+          resultStatus: task.status,
+          runnerId: normalizeText(task.runnerId),
+          status: "failed",
+          taskId,
+        });
+      }
+
+      throw error;
+    }
 
     await patchTask({
       accessScope,
@@ -93,7 +135,7 @@ export const createJobOrchestrator = ({
           taskService,
         })) ?? {};
 
-      return patchTask({
+      const completedTask = await patchTask({
         accessScope,
         taskId,
         patch: {
@@ -101,8 +143,20 @@ export const createJobOrchestrator = ({
           ...resultPatch,
         },
       });
+
+      if (recovery) {
+        await recordTaskTrace({
+          eventType: "task_recovery_run",
+          resultStatus: completedTask.status,
+          runnerId: normalizeText(task.runnerId),
+          status: "completed",
+          taskId,
+        });
+      }
+
+      return completedTask;
     } catch (error) {
-      return patchTask({
+      const failedTask = await patchTask({
         accessScope,
         taskId,
         patch: {
@@ -110,13 +164,27 @@ export const createJobOrchestrator = ({
           status: TASK_STATUSES.failed,
         },
       });
+
+      if (recovery) {
+        await recordTaskTrace({
+          eventType: "task_recovery_run",
+          errorStatus: error?.status ?? 500,
+          resultStatus: failedTask.status,
+          runnerId: normalizeText(task.runnerId),
+          status: "failed",
+          taskId,
+        });
+      }
+
+      return failedTask;
     }
   };
 
-  const scheduleTaskRun = ({ accessScope = {}, taskId } = {}) => {
+  const scheduleTaskRun = ({ accessScope = {}, recovery = false, taskId } = {}) => {
     schedule(() => {
       return runTask({
         accessScope,
+        recovery,
         taskId,
       }).catch((error) => {
         console.error("Task runner failed before task state could be updated.", error);
@@ -139,9 +207,16 @@ export const createJobOrchestrator = ({
     for (const task of tasks) {
       scheduleTaskRun({
         accessScope: task.accessScope,
+        recovery: true,
         taskId: task.id,
       });
     }
+
+    await recordTaskTrace({
+      eventType: "task_recovery_scheduled",
+      scheduledCount: tasks.length,
+      taskRefs: tasks.map(buildTaskRef),
+    });
 
     return {
       scheduledCount: tasks.length,
@@ -155,60 +230,96 @@ export const createJobOrchestrator = ({
     runImmediately = true,
     taskId,
   } = {}) => {
-    const task = taskService.getInternalTask
-      ? await taskService.getInternalTask({
+    const normalizedAction = normalizeText(action);
+    let task = null;
+    let runnerId = "";
+    const recordResumeTrace = async ({ error, resultTask } = {}) => {
+      await recordTaskTrace({
+        action: normalizedAction,
+        eventType: "task_resume_action",
+        resultStatus: resultTask?.status ?? task?.status ?? "",
+        runnerId,
+        status: error ? "failed" : "completed",
+        taskId,
+        ...(error
+          ? {
+              errorStatus: error?.status ?? 500,
+            }
+          : {}),
+      });
+    };
+
+    try {
+      task = taskService.getInternalTask
+        ? await taskService.getInternalTask({
+            accessScope,
+            taskId,
+          })
+        : await taskService.getTask({
+            accessScope,
+            taskId,
+          });
+
+      if (!task) {
+        throw buildJobError("Task not found.", 404);
+      }
+
+      runnerId = normalizeText(task.runnerId);
+
+      if (normalizedAction === TASK_ACTIONS.cancel) {
+        const canceledTask = await patchTask({
           accessScope,
           taskId,
-        })
-      : await taskService.getTask({
-          accessScope,
-          taskId,
+          patch: {
+            requiredUserAction: "",
+            status: TASK_STATUSES.canceled,
+          },
         });
 
-    if (!task) {
-      throw buildJobError("Task not found.", 404);
-    }
+        await recordResumeTrace({
+          resultTask: canceledTask,
+        });
 
-    const normalizedAction = normalizeText(action);
+        return canceledTask;
+      }
 
-    if (normalizedAction === TASK_ACTIONS.cancel) {
-      return patchTask({
+      const runner = getRunner(task);
+      const nextPatch =
+        (await runner.resume?.({
+          accessScope,
+          action: normalizedAction,
+          payload,
+          task,
+          taskService,
+        })) ?? {};
+      const nextTask = await patchTask({
         accessScope,
         taskId,
         patch: {
           requiredUserAction: "",
-          status: TASK_STATUSES.canceled,
+          status: TASK_STATUSES.queued,
+          ...nextPatch,
         },
       });
-    }
 
-    const runner = getRunner(task);
-    const nextPatch =
-      (await runner.resume?.({
-        accessScope,
-        action: normalizedAction,
-        payload,
-        task,
-        taskService,
-      })) ?? {};
-    const nextTask = await patchTask({
-      accessScope,
-      taskId,
-      patch: {
-        requiredUserAction: "",
-        status: TASK_STATUSES.queued,
-        ...nextPatch,
-      },
-    });
+      if (runImmediately) {
+        scheduleTaskRun({
+          accessScope,
+          taskId,
+        });
+      }
 
-    if (runImmediately) {
-      scheduleTaskRun({
-        accessScope,
-        taskId,
+      await recordResumeTrace({
+        resultTask: nextTask,
       });
-    }
 
-    return nextTask;
+      return nextTask;
+    } catch (error) {
+      await recordResumeTrace({
+        error,
+      });
+      throw error;
+    }
   };
 
   return {
