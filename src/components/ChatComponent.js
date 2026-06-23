@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Button, Input, message } from "antd";
+import { Input, message } from "antd";
 import {
   AudioOutlined,
   AppstoreOutlined,
@@ -13,7 +13,6 @@ import SpeechRecognition, {
 import Speech from "speak-tts";
 import { requestChat } from "../archiveApi";
 import { DEMO_CONVERSATION } from "../demoWorkbench";
-import StarBorder from "./react-bits/StarBorder";
 
 const { Search } = Input;
 
@@ -258,119 +257,98 @@ const ChatComponent = (props) => {
       : "Agent can inspect the empty workspace or answer web-current questions.";
 
   return (
-    <StarBorder
-      as="div"
-      className="archive-composer-border"
-      color="rgba(39, 110, 241, 0.42)"
-      speed="9s"
-      thickness={1}
-    >
-      <div className={`archive-composer-bar ${isDemoWorkbench ? "is-demo" : ""}`}>
+    <div className="archive-composer-border">
+      <div
+        className={`archive-composer-bar ${isDemoWorkbench ? "is-demo" : ""} ${
+          isLoading ? "is-running" : ""
+        }`}
+      >
         <div className="archive-composer-controls">
-          {!isChatModeOn ? (
-            <Search
-              id={inputId}
-              className="archive-search"
-              placeholder={
-                hasDocuments
-                  ? "Ask the agent about the current documents"
-                  : "Ask the agent what documents are indexed"
-              }
-              enterButton={
-                <span aria-label="Ask" className="archive-send-icon">
-                  <SendOutlined />
-                </span>
-              }
-              size="large"
-              onSearch={onSearch}
-              loading={isLoading}
-              value={searchValue}
-              onChange={(event) => setSearchValue(event.target.value)}
-            />
-          ) : null}
+          <Search
+            id={inputId}
+            className="archive-search"
+            placeholder={
+              hasDocuments
+                ? "Ask the agent about the current documents"
+                : "Ask the agent what documents are indexed"
+            }
+            enterButton={
+              <span aria-label="Ask" className="archive-send-icon">
+                <SendOutlined />
+              </span>
+            }
+            size="large"
+            onSearch={onSearch}
+            loading={isLoading}
+            value={searchValue}
+            onChange={(event) => setSearchValue(event.target.value)}
+          />
 
           <div className="archive-composer-toolbar">
-            <div className="archive-composer-tools" aria-label="Composer tools">
-              <button
-                type="button"
-                aria-label="Attach file"
-                onClick={() => onAttach?.()}
-              >
-                <PaperClipOutlined />
-              </button>
-              <button
-                type="button"
-                aria-expanded={isToolsOpen}
-                aria-label="Tools"
-                onClick={() => setIsToolsOpen((isOpen) => !isOpen)}
-              >
-                <AppstoreOutlined />
-              </button>
-              <button
-                type="button"
-                aria-label={`Retrieval mode ${retrievalMode}`}
-                className="archive-auto-button"
-                onClick={cycleRetrievalMode}
-              >
-                {retrievalMode}
-              </button>
-            </div>
-
-            {!isDemoWorkbench && chatScopeOptions.length > 0 ? (
-              <div className="archive-scope-segmented" aria-label="Chat scope">
-                {chatScopeOptions.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    aria-pressed={chatScopeMode === option.id}
-                    className={chatScopeMode === option.id ? "is-active" : ""}
-                    onClick={() => handleScopeClick(option)}
-                    title={`${option.label}: ${option.count} document${
-                      option.count === 1 ? "" : "s"
-                    }`}
-                  >
-                    <span>{option.label}</span>
-                    <small>{option.count}</small>
-                  </button>
-                ))}
+            <div className="archive-composer-context">
+              <div className="archive-composer-transcript">
+                {isDemoWorkbench
+                  ? "Enter to send · Shift + Enter for new line"
+                  : transcriptLabel}
               </div>
-            ) : null}
 
-            <div className="archive-voice-buttons">
-              <Button
-                type="primary"
-                size="large"
-                icon={<SoundOutlined />}
-                className={`archive-action-button ${isChatModeOn ? "is-active" : ""}`}
-                onClick={chatModeClickHandler}
-              >
-                Voice
-              </Button>
-
-              {isChatModeOn ? (
-                <Button
-                  type="primary"
-                  icon={<AudioOutlined />}
-                  size="large"
-                  className={`archive-action-button ${
-                    isRecording ? "is-recording" : ""
-                  }`}
-                  onClick={recordingClickHandler}
-                >
-                  {isRecording ? "Listening" : "Record"}
-                </Button>
+              {!isDemoWorkbench && chatScopeOptions.length > 0 ? (
+                <div className="archive-scope-segmented" aria-label="Chat scope">
+                  {chatScopeOptions.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      aria-pressed={chatScopeMode === option.id}
+                      className={chatScopeMode === option.id ? "is-active" : ""}
+                      onClick={() => handleScopeClick(option)}
+                      title={`${option.label}: ${option.count} document${
+                        option.count === 1 ? "" : "s"
+                      }`}
+                    >
+                      <span>{option.label}</span>
+                      <small>{option.count}</small>
+                    </button>
+                  ))}
+                </div>
               ) : null}
             </div>
-          </div>
 
-          <div className="archive-composer-transcript">
-            {isDemoWorkbench
-              ? "Enter to send · Shift + Enter for new line"
-              : transcriptLabel}
+            <button
+              type="button"
+              className="archive-composer-tools-trigger"
+              aria-expanded={isToolsOpen}
+              aria-label="Composer tools"
+              onClick={() => setIsToolsOpen((isOpen) => !isOpen)}
+            >
+              <AppstoreOutlined />
+              Tools
+            </button>
           </div>
 
           {isToolsOpen ? (
             <div className="archive-composer-menu">
+              <button type="button" onClick={() => onAttach?.()}>
+                <PaperClipOutlined />
+                Attach PDFs
+              </button>
+              <button type="button" onClick={cycleRetrievalMode}>
+                <AppstoreOutlined />
+                Retrieval: {retrievalMode}
+              </button>
+              <button type="button" onClick={chatModeClickHandler}>
+                <SoundOutlined />
+                {isChatModeOn ? "Voice on" : "Voice mode"}
+              </button>
+              {isChatModeOn ? (
+                <button
+                  type="button"
+                  className={isRecording ? "is-recording" : ""}
+                  onClick={recordingClickHandler}
+                >
+                  <AudioOutlined />
+                  {isRecording ? "Listening" : "Record"}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => message.info("Document RAG is active for this workspace.")}
@@ -393,7 +371,7 @@ const ChatComponent = (props) => {
           ) : null}
         </div>
       </div>
-    </StarBorder>
+    </div>
   );
 };
 

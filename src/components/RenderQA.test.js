@@ -319,8 +319,8 @@ describe("RenderQA", () => {
       />
     );
 
-    expect(screen.getByText("Agent trace")).toBeInTheDocument();
-    expect(screen.getByText("llm -> deterministic")).toBeInTheDocument();
+    expect(screen.getByText("Evidence spine")).toBeInTheDocument();
+    expect(screen.getAllByText("llm -> deterministic").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Selected skills").length).toBeGreaterThan(0);
     expect(screen.getByText("Document RAG@1.0.0")).toBeInTheDocument();
     expect(screen.getByText("Skill chain")).toBeInTheDocument();

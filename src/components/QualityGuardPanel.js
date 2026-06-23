@@ -23,11 +23,20 @@ const formatQualityDelta = (value, scale = 1) => {
 
 const formatQualityGateDelta = (check) => {
   if (!check) {
-    return "N/A";
+    return "No checks";
   }
 
   if (check.metric === "failedCaseCount" || check.metric === "averageCitationCount") {
     return formatQualityDelta(check.delta);
+  }
+
+  if (typeof check.delta !== "number") {
+    const value =
+      check.currentValue ?? check.value ?? check.actual ?? check.threshold ?? null;
+
+    return value === null || value === undefined
+      ? check.status ?? "reported"
+      : String(value);
   }
 
   return `${formatQualityDelta(check.delta, 100)} pts`;
@@ -50,6 +59,91 @@ const formatQualityDate = (value) => {
   }
 };
 
+const formatQualityGateStatus = (status) =>
+  ({
+    fail: "Fail",
+    idle: "Idle",
+    ok: "OK",
+    pass: "Pass",
+    skipped: "Skipped",
+    unknown: "Not reported",
+    warn: "Warn",
+  }[status] ?? String(status ?? "Not reported"));
+
+const getPrimaryGateCheck = (gate) =>
+  gate?.checks?.find((check) => check.status === "fail") ??
+  gate?.checks?.find((check) => check.status === "warn") ??
+  gate?.checks?.[0] ??
+  null;
+
+const normalizeGateStatus = (status) => status ?? "unknown";
+
+const formatRecoveryPercent = (value) =>
+  typeof value === "number" ? formatQualityPercent(value * 100) : "N/A";
+
+const QualityGateCard = ({ gate, label = "Quality gate" }) => {
+  if (!gate) {
+    return (
+      <div className="quality-gate quality-gate-unknown">
+        <div className="quality-gate-head">
+          <span>{label} not reported</span>
+          <span>No checks</span>
+        </div>
+        <p>No backend gate state is loaded.</p>
+      </div>
+    );
+  }
+
+  const gateStatus = normalizeGateStatus(gate.status);
+  const primaryGateCheck = getPrimaryGateCheck(gate);
+
+  return (
+    <div className={`quality-gate quality-gate-${gateStatus}`}>
+      <div className="quality-gate-head">
+        <span>
+          {label} {formatQualityGateStatus(gateStatus)}
+        </span>
+        <span>{formatQualityGateDelta(primaryGateCheck)}</span>
+      </div>
+      <p>{gate.summary ?? "No backend gate summary is available."}</p>
+    </div>
+  );
+};
+
+const RecoveryGateCard = ({ gate }) => {
+  if (!gate) {
+    return null;
+  }
+
+  const recovery = gate.recovery ?? {};
+
+  return (
+    <div className={`quality-gate quality-gate-${normalizeGateStatus(gate.status)}`}>
+      <div className="quality-gate-head">
+        <span>Recovery gate {formatQualityGateStatus(gate.status)}</span>
+        <span>{gate.skipped ? "Skipped" : gate.currentRunId ?? "latest"}</span>
+      </div>
+      <p>{gate.summary ?? "No recovery gate summary is available."}</p>
+      <div className="quality-gate-metrics">
+        <div>
+          <span>Replay failures</span>
+          <strong>{formatQualityNumber(recovery.stepReplayFailureCount)}</strong>
+        </div>
+        <div>
+          <span>Manual failures</span>
+          <strong>
+            {formatQualityNumber(recovery.manualRecoveryActionFailureCount)}
+          </strong>
+        </div>
+        <div>
+          <span>Auto replay</span>
+          <strong>{formatRecoveryPercent(recovery.autoReplaySuccessRate)}</strong>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const QualityGuardPanel = ({
   isQualityLoading,
   onLoadHistory,
@@ -62,12 +156,9 @@ const QualityGuardPanel = ({
   const failedCases = qualityReport?.failedCases ?? [];
   const recommendations = qualityReport?.recommendations ?? [];
   const regressionGate = qualityHistory?.regressionGate ?? null;
+  const qualityGate = qualityHistory?.qualityGate ?? regressionGate;
+  const recoveryGate = qualityHistory?.recoveryGate ?? null;
   const recentRuns = qualityHistory?.runs ?? [];
-  const primaryGateCheck =
-    regressionGate?.checks?.find((check) => check.status === "fail") ??
-    regressionGate?.checks?.find((check) => check.status === "warn") ??
-    regressionGate?.checks?.[0] ??
-    null;
   const status = qualityReport?.status ?? "idle";
   const statusLabel =
     {
@@ -76,14 +167,7 @@ const QualityGuardPanel = ({
       fail: "Fail",
       idle: "Idle",
     }[status] ?? status;
-  const gateStatus = regressionGate?.status ?? "unknown";
-  const gateStatusLabel =
-    {
-      fail: "Fail",
-      pass: "Pass",
-      unknown: "No baseline",
-      warn: "Warn",
-    }[gateStatus] ?? gateStatus;
+  const gateStatus = normalizeGateStatus(qualityGate?.status);
 
   return (
     <div className="quality-panel">
@@ -124,7 +208,7 @@ const QualityGuardPanel = ({
             <span>{qualityReport.summary?.runId ?? "latest run"}</span>
           </div>
 
-          <div className="quality-score-card">
+          <div className={`quality-score-card quality-score-${gateStatus}`}>
             <div className="quality-score-ring">
               <strong>
                 {typeof metrics.overallPassPercent === "number"
@@ -134,8 +218,11 @@ const QualityGuardPanel = ({
               <span>/100</span>
             </div>
             <div className="quality-score-copy">
-              <strong>Excellent</strong>
-              <span>Guard is blocking low-quality answers</span>
+              <strong>Gate {formatQualityGateStatus(gateStatus)}</strong>
+              <span>
+                {qualityGate?.summary ??
+                  "No backend quality gate summary is loaded."}
+              </span>
             </div>
           </div>
 
@@ -182,15 +269,13 @@ const QualityGuardPanel = ({
         </div>
       )}
 
-      {regressionGate ? (
-        <div className={`quality-gate quality-gate-${gateStatus}`}>
-          <div className="quality-gate-head">
-            <span>Gate {gateStatusLabel}</span>
-            <span>{formatQualityGateDelta(primaryGateCheck)}</span>
-          </div>
-          <p>{regressionGate.summary}</p>
-        </div>
+      <QualityGateCard gate={qualityGate} label="Quality gate" />
+
+      {regressionGate && qualityGate !== regressionGate ? (
+        <QualityGateCard gate={regressionGate} label="Regression gate" />
       ) : null}
+
+      <RecoveryGateCard gate={recoveryGate} />
 
       {recentRuns.length > 0 ? (
         <div className="quality-run-list">

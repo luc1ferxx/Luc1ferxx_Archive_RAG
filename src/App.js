@@ -35,8 +35,11 @@ import {
   DEMO_PREVIEW_SOURCE,
   DEMO_QUALITY_HISTORY,
   DEMO_QUALITY_REPORT,
-  DEMO_RELEVANT_DOCUMENTS,
 } from "./demoWorkbench";
+import {
+  formatTaskStatus,
+  getRecoveryActionSuccessMessage,
+} from "./components/workbenchFormatters";
 import "./App.css";
 
 const CONVERSATION_VIEWS = [
@@ -61,37 +64,6 @@ const IDLE_TASKS = [
   },
 ];
 
-const formatTaskStatus = (status) => String(status ?? "pending").replace(/_/g, " ");
-
-const RECOVERY_ACTION_LABELS = {
-  cancel: "Cancel",
-  resume_from_step: "Resume step",
-  retry_failed_step: "Retry failed step",
-};
-
-const formatRecoveryActionLabel = (actionType) =>
-  RECOVERY_ACTION_LABELS[actionType] ??
-  String(actionType ?? "Action").replace(/_/g, " ");
-
-const getRecoveryReplaySafetyItems = (recovery) =>
-  Array.isArray(recovery?.replaySafety?.steps)
-    ? recovery.replaySafety.steps
-    : [];
-
-const formatReplaySafetyCodeLine = (safety = {}) => {
-  if (safety.canAutoReplay) {
-    return "auto_replay_safe";
-  }
-
-  const reasonCodes = Array.isArray(safety.reasonCodes)
-    ? safety.reasonCodes.filter(Boolean)
-    : [];
-
-  return reasonCodes.length > 0
-    ? reasonCodes.join(", ")
-    : "manual_recovery_required";
-};
-
 const buildAgentRunActionAnswer = (currentAnswer = {}, result = {}) => {
   const run = result?.run;
   const nextAnswer = result?.response
@@ -111,23 +83,10 @@ const buildAgentRunActionAnswer = (currentAnswer = {}, result = {}) => {
   };
 };
 
-const getRecoveryActionSuccessMessage = (action) => {
-  if (action === "cancel") {
-    return "Agent run canceled.";
-  }
-
-  if (action === "resume_from_step") {
-    return "Agent run resumed.";
-  }
-
-  return "Agent run recovery action completed.";
-};
-
 const App = () => {
   const [isQualityLoading, setIsQualityLoading] = useState(false);
   const [qualityHistory, setQualityHistory] = useState(null);
   const [qualityReport, setQualityReport] = useState(null);
-  const [activeSidebarTarget, setActiveSidebarTarget] = useState("workspaces");
   const [activeConversationView, setActiveConversationView] = useState("chat");
   const [chatScopeMode, setChatScopeMode] = useState(CHAT_SCOPE_MODES.uploaded);
   const [selectedChatDocIds, setSelectedChatDocIds] = useState([]);
@@ -204,9 +163,7 @@ const App = () => {
   });
   const {
     previewStatus,
-    relevantDocuments,
     resetSelection,
-    selectedDocId,
     selectedSource,
     selectTurn,
     setSelectedSource,
@@ -731,14 +688,12 @@ const App = () => {
   );
 
   const handleComposerAttach = useCallback(() => {
-    setActiveSidebarTarget("datasets");
     scrollSidebarSection(uploadRef);
     message.info("Use the Ingest dropzone to attach PDFs to this workspace.");
   }, [scrollSidebarSection]);
 
   const handleSidebarNavigate = useCallback(
     async (target) => {
-      setActiveSidebarTarget(target);
       resetPageScroll();
 
       if (target === "new-chat") {
@@ -813,9 +768,6 @@ const App = () => {
   const visibleCurrentTurn =
     visibleConversation[visibleActiveTurnIndex] ??
     (isDemoWorkbench ? DEMO_CONVERSATION[0] : currentTurn);
-  const visibleRelevantDocuments = isDemoWorkbench
-    ? DEMO_RELEVANT_DOCUMENTS
-    : relevantDocuments;
   const visibleQualityReport =
     isDemoWorkbench && !qualityReport ? DEMO_QUALITY_REPORT : qualityReport;
   const visibleQualityHistory =
@@ -974,81 +926,6 @@ const App = () => {
               </button>
             ))}
           </div>
-          {!isDemoWorkbench ? (
-            <div className="archive-recovery-panel">
-              <div className="archive-view-panel-head">
-                <span>Recovery</span>
-                <strong>{visibleRecoveryRuns.length} waiting</strong>
-              </div>
-              {visibleRecoveryRuns.length > 0 ? (
-                <div className="archive-recovery-list">
-                  {visibleRecoveryRuns.map((run) => {
-                    const replaySafetyItems = getRecoveryReplaySafetyItems(
-                      run.recovery
-                    );
-
-                    return (
-                      <div className="archive-recovery-item" key={run.runId}>
-                        <div className="archive-recovery-item-main">
-                          <span>{formatTaskStatus(run.status)}</span>
-                          <strong>{run.goal ?? run.runId}</strong>
-                          <p>
-                            {run.recovery?.reason ??
-                              "Manual recovery required."}
-                          </p>
-                          {replaySafetyItems.length > 0 ? (
-                            <div className="archive-recovery-safety-list">
-                              {replaySafetyItems.map((safety) => (
-                                <div
-                                  className="archive-recovery-safety-item"
-                                  key={
-                                    safety.stepId ??
-                                    `${safety.stepType}-${formatReplaySafetyCodeLine(
-                                      safety
-                                    )}`
-                                  }
-                                >
-                                  <span>{safety.stepType ?? "step"}</span>
-                                  <p>{formatReplaySafetyCodeLine(safety)}</p>
-                                </div>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                        <div className="archive-recovery-actions">
-                          {(run.recovery?.actions ?? []).map((action) => (
-                            <button
-                              key={`${run.runId}-${action.type}-${action.stepId}`}
-                              type="button"
-                              className={
-                                action.type === "cancel"
-                                  ? "archive-run-control-button"
-                                  : "archive-run-control-button is-primary"
-                              }
-                              disabled={isLoading}
-                              onClick={() =>
-                                void handleAgentRecoveryAction({
-                                  action: action.type,
-                                  runId: run.runId,
-                                  stepId: action.stepId,
-                                })
-                              }
-                            >
-                              {formatRecoveryActionLabel(action.type)}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="archive-recovery-empty">
-                  No agent runs are waiting for recovery.
-                </div>
-              )}
-            </div>
-          ) : null}
         </div>
       );
     }
@@ -1155,12 +1032,12 @@ const App = () => {
 
           <WorkspaceSidebar
             activeDocuments={visibleDocuments}
-            activeNavTarget={activeSidebarTarget}
             arxivSuggestion={isDemoWorkbench ? null : arxivSuggestion}
             conversationCount={visibleConversation.length}
-            currentTurn={visibleCurrentTurn}
             documentListRef={documentListRef}
             isArxivImporting={isArxivImporting}
+            isActionPending={isLoading}
+            isRecoveryLoading={isDemoWorkbench ? false : isRecoveryLoading}
             isArxivSuggestionLoading={
               isDemoWorkbench ? false : isArxivSuggestionLoading
             }
@@ -1170,23 +1047,26 @@ const App = () => {
             onDismissArxivSuggestion={clearArxivSuggestion}
             onImportArxivSuggestion={importArxivSuggestion}
             onOpenSavedArxivSuggestion={openSavedArxivSuggestion}
+            onRecoveryAction={
+              isDemoWorkbench
+                ? undefined
+                : (payload) => void handleAgentRecoveryAction(payload)
+            }
             onToggleChatScopeDocument={toggleChatScopeDocument}
             onLoadQualityHistory={loadQualityHistory}
             onLoadQualityLatest={loadLatestQualityReport}
             onRemoveDocument={removeDocument}
             onRunSyntheticQuality={runSyntheticQualityReport}
-            onSelectSource={setSelectedSource}
             onNavigate={handleSidebarNavigate}
             onUploadSuccess={handleWorkspaceUploadSuccess}
             qualityHistory={visibleQualityHistory}
             qualityReport={visibleQualityReport}
             qualityRef={qualityRef}
-            relevantDocuments={visibleRelevantDocuments}
+            recoveryRuns={visibleRecoveryRuns}
             savedArxivSuggestionsByDocId={
               isDemoWorkbench ? {} : savedArxivSuggestionsByDocId
             }
             selectedChatDocIds={isDemoWorkbench ? [] : selectedChatDocIds}
-            selectedDocId={visibleSelectedSource?.docId ?? selectedDocId}
             totalPages={visibleTotalPages}
             uploadRef={uploadRef}
             workspaceDocumentTotal={isDemoWorkbench ? 24 : visibleDocuments.length}

@@ -1,68 +1,48 @@
 import {
-  formatBudgetCounter,
-  formatDetailValue,
   isPlainObject,
 } from "./AgentTraceDetail";
+import { getEvidenceSummaryDetails } from "./evidenceSpine";
 
-const formatEvidenceScore = (value) =>
-  typeof value === "number" ? value.toFixed(2) : "N/A";
-
-const EvidenceSummaryPanel = ({ summary }) => {
-  if (!isPlainObject(summary)) {
+const EvidenceSummaryPanel = ({ summary, sourceCount, variant = "card" }) => {
+  if (!isPlainObject(summary) && !Number.isFinite(sourceCount)) {
     return null;
   }
 
-  const docCoverage = isPlainObject(summary.docCoverage)
-    ? summary.docCoverage
-    : {};
-  const scoreRange = isPlainObject(summary.scoreRange)
-    ? summary.scoreRange
-    : {};
-  const requirements = Array.isArray(summary.requirements)
-    ? summary.requirements
-    : [];
-  const reasons = Array.isArray(summary.reasons) ? summary.reasons : [];
+  const details = getEvidenceSummaryDetails(summary, sourceCount);
+
+  if (!details.hasEvidence) {
+    return null;
+  }
 
   return (
-    <div className={`archive-evidence-panel ${summary.confident ? "is-confident" : "is-weak"}`}>
+    <div
+      className={`archive-evidence-panel archive-evidence-panel-${variant} ${
+        details.confident ? "is-confident" : "is-weak"
+      }`}
+    >
       <div className="archive-evidence-head">
         <span>Evidence</span>
-        <strong>{summary.confident ? "Confident" : "Limited"}</strong>
+        <strong>{details.statusLabel}</strong>
       </div>
 
       <div className="archive-evidence-grid">
-        <div className="archive-evidence-metric">
-          <span>Retrieved</span>
-          <strong>{formatDetailValue(summary.retrievedCount)}</strong>
-        </div>
-        <div className="archive-evidence-metric">
-          <span>Usable</span>
-          <strong>{formatDetailValue(summary.usableCount)}</strong>
-        </div>
-        <div className="archive-evidence-metric">
-          <span>Docs</span>
-          <strong>
-            {formatBudgetCounter(
-              docCoverage.coveredDocIds?.length,
-              docCoverage.selectedDocIds?.length
-            )}
-          </strong>
-        </div>
-        <div className="archive-evidence-metric">
-          <span>Max score</span>
-          <strong>{formatEvidenceScore(scoreRange.max)}</strong>
-        </div>
+        {details.metrics.map((metric) => (
+          <div key={metric.label} className="archive-evidence-metric">
+            <span>{metric.label}</span>
+            <strong>{metric.value}</strong>
+          </div>
+        ))}
       </div>
 
-      {requirements.length > 1 ? (
+      {details.requirements.length > 1 ? (
         <div className="archive-evidence-requirements">
-          {requirements.map((requirement) => (
+          {details.requirements.map((requirement) => (
             <span key={requirement.id}>{requirement.label}</span>
           ))}
         </div>
       ) : null}
 
-      {reasons[0] ? <p>{reasons[0]}</p> : null}
+      {details.reasons[0] ? <p>{details.reasons[0]}</p> : null}
     </div>
   );
 };

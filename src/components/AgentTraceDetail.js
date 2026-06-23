@@ -84,21 +84,22 @@ export const formatBudgetCounter = (usedValue, limitValue) => {
   return `${used} / ${limitValue}`;
 };
 
-const getSkillId = (skill = {}) => skill.skillId ?? skill.id ?? null;
+export const getSkillId = (skill = {}) => skill.skillId ?? skill.id ?? null;
 
-const getSkillVersion = (skill = {}) => skill.skillVersion ?? skill.version ?? null;
+export const getSkillVersion = (skill = {}) =>
+  skill.skillVersion ?? skill.version ?? null;
 
-const getSkillLabel = (skill = {}) =>
+export const getSkillLabel = (skill = {}) =>
   skill.label ?? getSkillId(skill) ?? "Unknown skill";
 
-const formatSkillRef = (skill = {}) => {
+export const formatSkillRef = (skill = {}) => {
   const label = getSkillLabel(skill);
   const version = formatMaybeVersion(getSkillVersion(skill));
 
   return `${label}${version}`;
 };
 
-const formatSkillMetricCopy = (skill = {}) => {
+export const formatSkillMetricCopy = (skill = {}) => {
   const parts = [
     skill.status ? formatTraceStatus(skill.status) : null,
     Number.isFinite(skill.attempts)
@@ -122,15 +123,15 @@ const formatSkillMetricCopy = (skill = {}) => {
   return parts.join(" · ");
 };
 
-const formatGapType = (gap = {}) =>
+export const formatGapType = (gap = {}) =>
   formatTraceStatus(String(gap.type ?? "evidence_gap")).replace(/\b\w/g, (letter) =>
     letter.toUpperCase()
   );
 
-const getGapTitle = (gap = {}, index) =>
+export const getGapTitle = (gap = {}, index) =>
   gap.claim ?? gap.message ?? gap.reason ?? `${formatGapType(gap)} ${index + 1}`;
 
-const getGapCopy = (gap = {}) => {
+export const getGapCopy = (gap = {}) => {
   const anchors = Array.isArray(gap.missingAnchors) && gap.missingAnchors.length > 0
     ? `missing anchors: ${gap.missingAnchors.join(", ")}`
     : null;

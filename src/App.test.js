@@ -99,9 +99,10 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByText("benefits-2025.pdf")).toBeInTheDocument();
-    expect(screen.getByText("Workspace documents")).toBeInTheDocument();
-    expect(screen.getByText("Relevant documents")).toBeInTheDocument();
-    expect(screen.getByText("Quality Guard")).toBeInTheDocument();
+    expect(screen.getByText("Corpus")).toBeInTheDocument();
+    expect(screen.getByText("Scope")).toBeInTheDocument();
+    expect(screen.getByText("Quality")).toBeInTheDocument();
+    expect(screen.getByText("Recovery")).toBeInTheDocument();
     expect(screen.getByText("History")).toBeInTheDocument();
     expect(axios.get).toHaveBeenCalledWith("http://localhost:5001/documents");
   });
@@ -160,7 +161,7 @@ describe("App", () => {
     expect(screen.getByTestId("chat-docids")).toHaveTextContent("doc-arxiv");
   });
 
-  test("shows agent run recovery actions in the Tasks view", async () => {
+  test("shows agent run recovery actions in the sidebar", async () => {
     axios.get.mockImplementation((url) => {
       if (url.endsWith("/agent-runs/recovery")) {
         return Promise.resolve({
@@ -261,7 +262,6 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByText("benefits-2025.pdf")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
 
     expect(
       await screen.findByText("Recover interrupted document answer")
@@ -270,12 +270,16 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: "Resume step" })
     ).toBeInTheDocument();
+    expect(screen.getAllByText("Run status").length).toBeGreaterThan(0);
     expect(screen.getByText("document_rag")).toBeInTheDocument();
-    expect(screen.getByText("auto_replay_safe")).toBeInTheDocument();
+    expect(screen.getAllByText("Auto replay allowed").length).toBeGreaterThan(0);
     expect(screen.getByText("web_search")).toBeInTheDocument();
     expect(
-      screen.getByText("requires_approval, non_idempotent")
-    ).toBeInTheDocument();
+      screen.getAllByText("Auto replay blocked").length
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("requires_approval, non_idempotent").length
+    ).toBeGreaterThan(0);
 
     fireEvent.click(screen.getAllByRole("button", { name: "Cancel" })[0]);
 

@@ -540,16 +540,12 @@ const DemoWorkbenchAnswer = ({ answer, onSelectSource }) => {
           </button>
         </div>
         {isTraceVisible ? (
-          <div className="archive-demo-trace-row">
-            {trace.map((step, index) => (
-              <div key={step.id} className="archive-demo-trace-step">
-                <span className="archive-demo-check">✓</span>
-                <div className="archive-demo-trace-line" />
-                <strong>{step.label}</strong>
-                <small>{index === 0 ? "0.2s" : index === 1 ? "0.6s" : index === 2 ? "0.4s" : index === 3 ? "1.2s" : "0.4s"}</small>
-              </div>
-            ))}
-          </div>
+          <AgentTraceOverview
+            answer={answer}
+            evidenceSummary={answer.ragEvidenceSummary}
+            sourceCount={sources.length}
+            stepCount={trace.length}
+          />
         ) : null}
         {isDetailVisible ? (
           <div className="archive-demo-detail-panel">
@@ -628,6 +624,9 @@ const RenderQA = (props) => {
         const approvalGates = getApprovalGates(each.answer);
         const evidenceSummary = each.answer?.ragEvidenceSummary;
         const researchBrief = each.answer?.researchBrief;
+        const ragSourceCount = Array.isArray(each.answer?.ragSources)
+          ? each.answer.ragSources.length
+          : undefined;
 
         return (
           <article
@@ -687,6 +686,8 @@ const RenderQA = (props) => {
 
                   <AgentTraceOverview
                     answer={each.answer}
+                    evidenceSummary={evidenceSummary}
+                    sourceCount={ragSourceCount}
                     stepCount={agentTrace.length}
                   />
 
@@ -757,7 +758,12 @@ const RenderQA = (props) => {
 
                 <div className="archive-answer-text">{each.answer.ragAnswer}</div>
 
-                <EvidenceSummaryPanel summary={evidenceSummary} />
+                {!each.answer?.agentAnswer ? (
+                  <EvidenceSummaryPanel
+                    summary={evidenceSummary}
+                    sourceCount={ragSourceCount}
+                  />
+                ) : null}
 
                 {gapPlan ? (
                   <div className="archive-gap-panel">
@@ -810,9 +816,8 @@ const RenderQA = (props) => {
                   <div className="archive-source-list">
                     <div className="archive-source-section-label">Citations</div>
 
-                    {each.answer.ragSources.map((source) => (
-                      <SpotlightCard
-                        as="button"
+                    {each.answer.ragSources.map((source, sourceIndex) => (
+                      <button
                         key={`${source.docId}-${source.chunkIndex}-${source.rank}`}
                         type="button"
                         className={`archive-source-item ${
@@ -826,16 +831,28 @@ const RenderQA = (props) => {
                           onSelectTurn?.(index);
                           onSelectSource?.(source);
                         }}
-                        spotlightColor="rgba(39, 110, 241, 0.1)"
                       >
                         <div className="archive-source-head">
-                          <span>{source.fileName}</span>
+                          <span>
+                            {sourceIndex + 1}. {source.fileName}
+                          </span>
                           <span>
                             {source.pageNumber ? `Page ${source.pageNumber}` : ""}
                           </span>
                         </div>
+                        <div className="archive-source-meta-row">
+                          {Number.isFinite(source.rank) ? (
+                            <span>Rank #{source.rank}</span>
+                          ) : null}
+                          {Number.isFinite(source.chunkIndex) ? (
+                            <span>Chunk {source.chunkIndex}</span>
+                          ) : null}
+                          {Number.isFinite(source.score) ? (
+                            <span>Score {source.score.toFixed(2)}</span>
+                          ) : null}
+                        </div>
                         <div className="archive-source-copy">{source.excerpt}</div>
-                      </SpotlightCard>
+                      </button>
                     ))}
                   </div>
                 )}

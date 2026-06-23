@@ -154,6 +154,76 @@ export const DEMO_CONVERSATION = [
         ],
         reasons: ["All answer claims are backed by retrieved policy sections."],
       },
+      agentObservability: {
+        executionPlanner: {
+          selectedPlannerId: "deterministic",
+          status: "selected",
+          stepIds: ["document_rag", "self_check", "answer_finalizer"],
+        },
+        selectedSkills: [
+          {
+            skillId: "document_rag",
+            skillVersion: "1.0.0",
+            label: "Document RAG",
+          },
+        ],
+        skills: [
+          {
+            skillId: "document_rag",
+            skillVersion: "1.0.0",
+            label: "Document RAG",
+            status: "completed",
+            attempts: 1,
+            followUpCount: 1,
+            citationCount: 5,
+            totalDurationMs: 2800,
+          },
+        ],
+        skillChain: [
+          {
+            skillId: "summarize_contract",
+            skillVersion: "1.0.0",
+            label: "Policy Summary",
+          },
+        ],
+        executionLoop: {
+          followUpsRun: 1,
+          gaps: [],
+        },
+      },
+      agentWorkingMemory: {
+        checkedQueries: [
+          {
+            skillId: "document_rag",
+            skillVersion: "1.0.0",
+            phase: "primary",
+            queryId: "travel-expense-rules",
+            label: "Travel expense rules",
+            query: "Find international travel expense approval and booking rules.",
+            primary: true,
+          },
+          {
+            skillId: "document_rag",
+            skillVersion: "1.0.0",
+            phase: "follow_up",
+            queryId: "per-diem-tier-evidence",
+            label: "Per diem tier evidence",
+            query: "Find daily per diem limits by location cost tier.",
+            primary: false,
+          },
+        ],
+        resolvedGaps: [
+          {
+            type: "missing_citation",
+            message: "Follow-up retrieval found the per diem tier table.",
+            skillId: "document_rag",
+            skillVersion: "1.0.0",
+            phase: "follow_up",
+          },
+        ],
+        unresolvedGaps: [],
+        unsupportedClaims: [],
+      },
       agentTrace: [
         {
           id: "demo-query",
@@ -212,9 +282,26 @@ export const DEMO_QUALITY_REPORT = {
 };
 
 export const DEMO_QUALITY_HISTORY = {
+  qualityGate: {
+    status: "pass",
+    summary:
+      "Regression passed. Recovery observability passed 5 cases; replay failures 0, manual action failures 0.",
+    checks: [
+      {
+        status: "pass",
+        metric: "overallPassPercent",
+        delta: 0.03,
+      },
+      {
+        status: "pass",
+        metric: "recoveryStepReplayFailureCount",
+        currentValue: 0,
+      },
+    ],
+  },
   regressionGate: {
     status: "pass",
-    summary: "Guard is blocking low-quality answers.",
+    summary: "Regression passed against the previous synthetic baseline.",
     checks: [
       {
         status: "pass",
@@ -222,6 +309,21 @@ export const DEMO_QUALITY_HISTORY = {
         delta: 0.03,
       },
     ],
+  },
+  recoveryGate: {
+    status: "pass",
+    skipped: false,
+    currentRunId: "demo-recovery-observability",
+    summary:
+      "Recovery observability passed 5 cases; replay failures 0, manual action failures 0, primary lifecycle 2/1/1, auto replay success rate 1.",
+    recovery: {
+      autoReplaySuccessRate: 1,
+      manualRecoveryActionFailureCount: 0,
+      primaryStepCompletedCount: 1,
+      primaryStepFailedCount: 1,
+      primaryStepStartedCount: 2,
+      stepReplayFailureCount: 0,
+    },
   },
   runs: [
     {

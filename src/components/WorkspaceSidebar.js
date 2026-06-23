@@ -1,17 +1,11 @@
 import { Button } from "antd";
 import {
-  AppstoreOutlined,
   CheckSquareOutlined,
-  DatabaseOutlined,
   FileSearchOutlined,
   PlusCircleOutlined,
-  RobotOutlined,
   SearchOutlined,
-  SettingOutlined,
-  UploadOutlined,
 } from "@ant-design/icons";
 import {
-  buildPreviewSourceFromDocument,
   formatDocumentCount,
   formatPageCount,
   getDocumentSource,
@@ -21,7 +15,14 @@ import DocumentProfileSnippet from "./DocumentProfileSnippet";
 import ArxivSuggestionPanel from "./ArxivSuggestionPanel";
 import PdfUploader from "./PdfUploader";
 import QualityGuardPanel from "./QualityGuardPanel";
-import SpotlightCard from "./react-bits/SpotlightCard";
+import {
+  formatRecoveryActionLabel,
+  formatReplaySafetyCodeLine,
+  formatReplaySafetyDecision,
+  formatReplaySafetyReasonCodes,
+  formatTaskStatus,
+  getRecoveryReplaySafetyItems,
+} from "./workbenchFormatters";
 
 const getDocumentSourceLabel = (document) => {
   const source = getDocumentSource(document);
@@ -33,138 +34,248 @@ const getDocumentSourceLabel = (document) => {
   return "Uploaded";
 };
 
+const SidebarSection = ({ caption, children, className = "", sectionRef, title }) => (
+  <section
+    className={`archive-sidebar-section ${className}`.trim()}
+    ref={sectionRef}
+  >
+    <div className="archive-sidebar-section-head">
+      <span className="archive-sidebar-section-title">{title}</span>
+      {caption ? (
+        <span className="archive-sidebar-section-caption">{caption}</span>
+      ) : null}
+    </div>
+    {children}
+  </section>
+);
+
+const SidebarMetric = ({ label, value }) => (
+  <div className="archive-sidebar-stat">
+    <span className="archive-meta-label">{label}</span>
+    <span className="archive-meta-value">{value}</span>
+  </div>
+);
+
+const RecoveryFactRow = ({ label, value }) => {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  return (
+    <div className="archive-recovery-fact-row">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+};
+
+const ReplaySafetyItem = ({ safety }) => {
+  const reasonText = formatReplaySafetyReasonCodes(safety);
+  const reasonDetails = Array.isArray(safety.reasons) ? safety.reasons : [];
+
+  return (
+    <div className="archive-recovery-safety-item">
+      <div className="archive-recovery-safety-head">
+        <span>{safety.stepType ?? "step"}</span>
+        <strong>{formatReplaySafetyDecision(safety)}</strong>
+      </div>
+      <p>{reasonText}</p>
+      {safety.summary ? <p>{safety.summary}</p> : null}
+      {reasonDetails.length > 0 ? (
+        <div className="archive-recovery-reason-list">
+          {reasonDetails.map((reason) => (
+            <span key={reason.code ?? reason.label}>
+              {reason.label ?? reason.code}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const RecoveryActionSafety = ({ action }) => {
+  if (!action?.safety) {
+    return null;
+  }
+
+  return (
+    <div className="archive-recovery-action-safety">
+      <span>{formatRecoveryActionLabel(action.type)}</span>
+      <strong>{formatReplaySafetyCodeLine(action.safety)}</strong>
+    </div>
+  );
+};
+
+const RecoveryQueuePanel = ({
+  isActionPending,
+  isLoading,
+  onRecoveryAction,
+  runs = [],
+}) => {
+  if (isLoading) {
+    return (
+      <div className="archive-recovery-empty">Loading recovery queue.</div>
+    );
+  }
+
+  if (runs.length === 0) {
+    return (
+      <div className="archive-recovery-empty">
+        No agent runs are waiting for recovery.
+      </div>
+    );
+  }
+
+  return (
+    <div className="archive-recovery-list">
+      {runs.map((run) => {
+        const replaySafetyItems = getRecoveryReplaySafetyItems(run.recovery);
+        const replaySafety = run.recovery?.replaySafety ?? {};
+        const runStatus = formatTaskStatus(run.status);
+
+        return (
+          <div className="archive-recovery-item" key={run.runId}>
+            <div className="archive-recovery-item-main">
+              <span>{runStatus}</span>
+              <strong>{run.goal ?? run.runId}</strong>
+              <p>{run.recovery?.reason ?? "Manual recovery required."}</p>
+              <div className="archive-recovery-facts">
+                <RecoveryFactRow label="Run status" value={runStatus} />
+                <RecoveryFactRow
+                  label="Recovery mode"
+                  value={run.recovery?.requestedMode}
+                />
+                <RecoveryFactRow label="Step" value={run.recovery?.stepId} />
+                <RecoveryFactRow
+                  label="Replay"
+                  value={formatReplaySafetyDecision(replaySafety)}
+                />
+              </div>
+              {replaySafetyItems.length > 0 ? (
+                <div className="archive-recovery-safety-list">
+                  {replaySafetyItems.map((safety) => (
+                    <ReplaySafetyItem
+                      key={
+                        safety.stepId ??
+                        `${safety.stepType}-${formatReplaySafetyCodeLine(safety)}`
+                      }
+                      safety={safety}
+                    />
+                  ))}
+                </div>
+              ) : null}
+              {(run.recovery?.actions ?? []).some((action) => action.safety) ? (
+                <div className="archive-recovery-action-safety-list">
+                  {(run.recovery?.actions ?? []).map((action) => (
+                    <RecoveryActionSafety
+                      action={action}
+                      key={`${run.runId}-${action.type}-${action.stepId ?? ""}-safety`}
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <div className="archive-recovery-actions">
+              {(run.recovery?.actions ?? []).map((action) => (
+                <button
+                  key={`${run.runId}-${action.type}-${action.stepId}`}
+                  type="button"
+                  className={
+                    action.type === "cancel"
+                      ? "archive-run-control-button"
+                      : "archive-run-control-button is-primary"
+                  }
+                  disabled={Boolean(isActionPending)}
+                  onClick={() =>
+                    onRecoveryAction?.({
+                      action: action.type,
+                      runId: run.runId,
+                      stepId: action.stepId,
+                    })
+                  }
+                >
+                  {formatRecoveryActionLabel(action.type)}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 const WorkspaceSidebar = ({
-  activeNavTarget,
   activeDocuments,
   arxivSuggestion,
   conversationCount,
-  currentTurn,
   documentListRef,
+  isActionPending,
   isArxivImporting,
   isArxivSuggestionLoading,
   isDemoWorkbench,
   isQualityLoading,
+  isRecoveryLoading,
   onClearDocuments,
   onDismissArxivSuggestion,
   onImportArxivSuggestion,
   onLoadQualityHistory,
   onLoadQualityLatest,
   onOpenSavedArxivSuggestion,
+  onRecoveryAction,
   onRemoveDocument,
   onRunSyntheticQuality,
-  onSelectSource,
   onToggleChatScopeDocument,
   onNavigate,
   onUploadSuccess,
   qualityHistory,
   qualityReport,
   qualityRef,
-  relevantDocuments,
+  recoveryRuns,
   savedArxivSuggestionsByDocId = {},
   selectedChatDocIds = [],
-  selectedDocId,
   totalPages,
   uploadRef,
   workspaceDocumentTotal,
 }) => (
-  <aside className="archive-sidebar">
+  <aside className="archive-sidebar" aria-label="Workspace controls">
     <div className="archive-sidebar-top">
       <div className="archive-sidebar-title-row">
         <div className="archive-sidebar-brand">
           <div className="archive-brand-mark">A</div>
           <div className="archive-sidebar-title-group">
-            <div className="archive-sidebar-kicker">Workspace</div>
+            <div className="archive-sidebar-kicker">Trusted workspace</div>
             <div className="archive-sidebar-title">Archive RAG</div>
           </div>
         </div>
-
-        <div className="archive-sidebar-count">{activeDocuments.length}</div>
       </div>
 
-      <div className="archive-sidebar-summary">
-        <span className="archive-sidebar-summary-chip">
-          {formatDocumentCount(activeDocuments.length)}
-        </span>
-        <span className="archive-sidebar-summary-chip">
-          {totalPages} pages indexed
-        </span>
+      <div className="archive-sidebar-action-row">
+        <button type="button" onClick={() => void onNavigate?.("new-chat")}>
+          <PlusCircleOutlined />
+          New chat
+        </button>
+        <button type="button" onClick={() => void onNavigate?.("search")}>
+          <SearchOutlined />
+          Search
+        </button>
       </div>
     </div>
 
-    <nav className="archive-sidebar-nav" aria-label="Primary">
-      <button
-        type="button"
-        aria-label="New chat"
-        className={activeNavTarget === "new-chat" ? "is-active" : ""}
-        onClick={() => void onNavigate?.("new-chat")}
-      >
-        <PlusCircleOutlined />
-        New chat
-        <span>+</span>
-      </button>
-      <button
-        type="button"
-        aria-label="Search"
-        className={activeNavTarget === "search" ? "is-active" : ""}
-        onClick={() => void onNavigate?.("search")}
-      >
-        <SearchOutlined />
-        Search
-        <span>⌘K</span>
-      </button>
-      <button
-        type="button"
-        aria-label="Workspaces"
-        className={activeNavTarget === "workspaces" ? "is-active" : ""}
-        onClick={() => void onNavigate?.("workspaces")}
-      >
-        <AppstoreOutlined />
-        Workspaces
-      </button>
-      <button
-        type="button"
-        aria-label="Datasets"
-        className={activeNavTarget === "datasets" ? "is-active" : ""}
-        onClick={() => void onNavigate?.("datasets")}
-      >
-        <DatabaseOutlined />
-        Datasets
-      </button>
-      <button
-        type="button"
-        aria-label="Agents"
-        className={activeNavTarget === "agents" ? "is-active" : ""}
-        onClick={() => void onNavigate?.("agents")}
-      >
-        <RobotOutlined />
-        Agents
-      </button>
-      <button
-        type="button"
-        aria-label="Evaluations"
-        className={activeNavTarget === "evaluations" ? "is-active" : ""}
-        onClick={() => void onNavigate?.("evaluations")}
-      >
-        <CheckSquareOutlined />
-        Evaluations
-      </button>
-      <button
-        type="button"
-        aria-label="Settings"
-        className={activeNavTarget === "settings" ? "is-active" : ""}
-        onClick={() => void onNavigate?.("settings")}
-      >
-        <SettingOutlined />
-        Settings
-      </button>
-    </nav>
-
-    <section className="archive-sidebar-section archive-upload-section" ref={uploadRef}>
-      <div className="archive-sidebar-section-head">
-        <span className="archive-sidebar-section-title">Ingest</span>
-        <span className="archive-sidebar-section-caption">
-          Upload documents
-        </span>
+    <SidebarSection
+      caption={`${formatDocumentCount(activeDocuments.length)} · ${totalPages} pages`}
+      className="archive-upload-section"
+      sectionRef={uploadRef}
+      title="Corpus"
+    >
+      <div className="archive-sidebar-stats">
+        <SidebarMetric
+          label="Sources"
+          value={formatDocumentCount(activeDocuments.length)}
+        />
+        <SidebarMetric label="Pages" value={totalPages} />
+        <SidebarMetric label="Turns" value={conversationCount} />
       </div>
       <PdfUploader onUploadSuccess={onUploadSuccess} />
       <ArxivSuggestionPanel
@@ -174,57 +285,14 @@ const WorkspaceSidebar = ({
         onImport={onImportArxivSuggestion}
         suggestion={arxivSuggestion}
       />
-    </section>
+    </SidebarSection>
 
-    <section className="archive-sidebar-section archive-context-section">
-      <div className="archive-sidebar-section-head">
-        <span className="archive-sidebar-section-title">Relevant documents</span>
-        <span className="archive-sidebar-section-caption">
-          {currentTurn
-            ? "Files referenced in the active answer"
-            : "Ask a question to surface related files"}
-        </span>
-      </div>
-
-      {relevantDocuments.length > 0 ? (
-        <div className="relevant-document-list">
-          {relevantDocuments.map((document) => (
-            <SpotlightCard
-              as="button"
-              key={document.docId}
-              type="button"
-              className={`relevant-document-item ${
-                selectedDocId === document.docId ? "is-selected" : ""
-              }`}
-              aria-pressed={selectedDocId === document.docId}
-              onClick={() => onSelectSource(document.previewSource)}
-              spotlightColor="rgba(15, 159, 122, 0.1)"
-            >
-              <div className="relevant-document-title">{document.fileName}</div>
-              <div className="relevant-document-meta">
-                {document.pages.length > 0
-                  ? `Pages ${document.pages.join(", ")}`
-                  : "Page 1"}
-              </div>
-              <DocumentProfileSnippet document={document} compact />
-            </SpotlightCard>
-          ))}
-        </div>
-      ) : (
-        <div className="archive-empty-state archive-empty-state-compact">
-          <div className="archive-empty-mark">No relevant documents yet</div>
-          <div>The current answer has not cited any pages yet.</div>
-        </div>
-      )}
-    </section>
-
-    <section className="archive-sidebar-section archive-doc-section" ref={documentListRef}>
-      <div className="archive-sidebar-section-head">
-        <span className="archive-sidebar-section-title">Workspace documents</span>
-        <span className="archive-sidebar-section-caption">
-          {formatDocumentCount(workspaceDocumentTotal ?? activeDocuments.length)}
-        </span>
-      </div>
+    <SidebarSection
+      caption={formatDocumentCount(workspaceDocumentTotal ?? activeDocuments.length)}
+      className="archive-doc-section"
+      sectionRef={documentListRef}
+      title="Scope"
+    >
 
       {activeDocuments.length > 0 ? (
         <div className="document-list">
@@ -238,24 +306,20 @@ const WorkspaceSidebar = ({
               savedArxivSuggestion?.papers?.length ?? 0;
 
             return (
-              <SpotlightCard
-                as="article"
+              <article
                 key={document.docId}
                 className={`document-item ${
-                  selectedDocId === document.docId ? "is-selected" : ""
+                  isInSelectedChatScope ? "is-selected" : ""
                 }`}
-                spotlightColor="rgba(39, 110, 241, 0.09)"
               >
                 <button
                   type="button"
                   className={`document-item-main document-item-main-button ${
-                    selectedDocId === document.docId ? "is-selected" : ""
+                    isInSelectedChatScope ? "is-selected" : ""
                   }`}
-                  aria-pressed={selectedDocId === document.docId}
+                  aria-pressed={isInSelectedChatScope}
                   onClick={() =>
-                    onSelectSource(
-                      document.previewSource ?? buildPreviewSourceFromDocument(document)
-                    )
+                    onToggleChatScopeDocument?.(document.docId)
                   }
                 >
                   <div className="document-item-title">{document.fileName}</div>
@@ -317,7 +381,7 @@ const WorkspaceSidebar = ({
                     </button>
                   </div>
                 )}
-              </SpotlightCard>
+              </article>
             );
           })}
           {isDemoWorkbench ? (
@@ -336,15 +400,14 @@ const WorkspaceSidebar = ({
           <div>Upload at least one PDF to start asking questions.</div>
         </div>
       )}
-    </section>
+    </SidebarSection>
 
-    <section className="archive-sidebar-section archive-quality-section" ref={qualityRef}>
-      <div className="archive-sidebar-section-head">
-        <span className="archive-sidebar-section-title">Quality Guard</span>
-        <span className="archive-sidebar-section-caption">
-          Synthetic RAG checks and failure hints
-        </span>
-      </div>
+    <SidebarSection
+      caption="Synthetic RAG checks and failure hints"
+      className="archive-quality-section"
+      sectionRef={qualityRef}
+      title="Quality"
+    >
       <QualityGuardPanel
         isQualityLoading={isQualityLoading}
         onLoadHistory={onLoadQualityHistory}
@@ -353,20 +416,22 @@ const WorkspaceSidebar = ({
         qualityHistory={qualityHistory}
         qualityReport={qualityReport}
       />
-    </section>
+    </SidebarSection>
+
+    <SidebarSection
+      caption={`${recoveryRuns?.length ?? 0} waiting`}
+      className="archive-recovery-panel"
+      title="Recovery"
+    >
+      <RecoveryQueuePanel
+        isActionPending={isActionPending}
+        isLoading={isRecoveryLoading}
+        onRecoveryAction={onRecoveryAction}
+        runs={recoveryRuns}
+      />
+    </SidebarSection>
 
     <section className="archive-sidebar-footer">
-      <div className="archive-sidebar-stats">
-        <div className="archive-sidebar-stat">
-          <span className="archive-meta-label">Responses</span>
-          <span className="archive-meta-value">{conversationCount}</span>
-        </div>
-        <div className="archive-sidebar-stat">
-          <span className="archive-meta-label">Pages</span>
-          <span className="archive-meta-value">{totalPages}</span>
-        </div>
-      </div>
-
       <Button
         className="archive-secondary-button archive-sidebar-clear"
         onClick={() => void onClearDocuments()}
@@ -374,12 +439,6 @@ const WorkspaceSidebar = ({
       >
         Clear workspace
       </Button>
-
-      <div className="archive-enterprise-card">
-        <UploadOutlined />
-        <span>Archive RAG Enterprise</span>
-        <span>›</span>
-      </div>
     </section>
   </aside>
 );
