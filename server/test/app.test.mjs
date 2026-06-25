@@ -14,10 +14,17 @@ import {
   createCapabilityRegistry,
 } from "../rag/capabilities/index.js";
 import {
+  AGENT_TASK_ACTIONS,
+  createAgentTaskRunner,
+} from "../rag/agent-tasks.js";
+import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import {
+  createInMemoryTaskStore,
+} from "../rag/tasks.js";
 import {
   buildQualityGateDecision,
   buildQualityHistoryResponse,
@@ -689,6 +696,229 @@ test("agent task endpoint creates scoped durable goal tasks", async () => {
         userId: "alice",
       },
     ]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("agent task API runs multi-step goals and resumes after approval", async () => {
+  const approvalGate = {
+    capabilityId: "web.search",
+    id: "approval:web.search:1.0.0",
+    status: "pending",
+  };
+  const calls = [];
+  const scheduledWork = [];
+  const schedule = (work) => {
+    scheduledWork.push(Promise.resolve().then(work));
+  };
+  const drainScheduledWork = async () => {
+    while (scheduledWork.length > 0) {
+      const batch = scheduledWork.splice(0);
+      await Promise.all(batch);
+    }
+  };
+  const agentTaskRunner = createAgentTaskRunner({
+    runAgentTask: async (request) => {
+      calls.push(request);
+
+      if (calls.length === 1) {
+        return {
+          status: 200,
+          body: {
+            agentAnswer: "Renewal terms found.",
+            agentMode: "document",
+            agentRunId: "run-task-http",
+            agentTask: {
+              continue: true,
+              nextCandidates: ["Check renewal risk."],
+              nextQuestion: "Check renewal risk.",
+              userPreferences: ["Keep risk notes short."],
+            },
+            clarification: {
+              needed: false,
+            },
+            ragSources: [
+              {
+                excerpt: "Secret evidence should stay out of task memory.",
+              },
+            ],
+          },
+        };
+      }
+
+      if (calls.length === 2) {
+        return {
+          status: 200,
+          body: {
+            agentAnswer: "Approve Web Search?",
+            agentMode: "clarification",
+            agentRunId: "run-task-http",
+            approvalGates: [approvalGate],
+            clarification: {
+              detail: {
+                approvalGates: [approvalGate],
+              },
+              needed: true,
+              question: "Approve Web Search?",
+              reason: "capability_approval_required",
+            },
+          },
+        };
+      }
+
+      return {
+        status: 200,
+        body: {
+          agentAnswer: "Renewal risk checked with approved web evidence.",
+          agentMode: "web",
+          agentRunId: "run-task-http",
+          clarification: {
+            needed: false,
+          },
+        },
+      };
+    },
+  });
+  const app = await createApp({
+    agentTaskRunner,
+    createAgentTaskId: () => "api-loop",
+    healthService: okHealthService,
+    jobSchedule: schedule,
+    ragService: {
+      chat: async () => ({
+        text: "stub",
+        citations: [],
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    taskStore: createInMemoryTaskStore(),
+  });
+  const server = await startServer(app);
+  const taskId = "agent_goal:api-loop";
+  const taskUrl = `${server.baseUrl}/tasks/${encodeURIComponent(taskId)}`;
+  const scopeHeaders = {
+    "x-user-id": "alice",
+  };
+
+  try {
+    let response = await fetch(`${server.baseUrl}/agent-tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...scopeHeaders,
+      },
+      body: JSON.stringify({
+        docIds: ["doc-1"],
+        maxIterations: 3,
+        question: "Summarize renewal terms.",
+        sessionId: "session-1",
+        userId: "alice",
+        userPreferences: ["Use concise bullets."],
+      }),
+    });
+
+    assert.equal(response.status, 202);
+    const createdBody = await response.json();
+    assert.equal(createdBody.task.id, taskId);
+    assert.equal(createdBody.task.status, "queued");
+    assert.equal("payload" in createdBody.task, false);
+
+    await drainScheduledWork();
+
+    response = await fetch(taskUrl, {
+      headers: scopeHeaders,
+    });
+    assert.equal(response.status, 200);
+    let task = await response.json();
+    assert.equal(task.status, "waiting_for_user");
+    assert.equal(task.requiredUserAction, "approve_capability");
+    assert.equal(task.counts.iterations, 2);
+    assert.equal(task.result.agentRunId, "run-task-http");
+    assert.equal(task.result.stoppedReason, "waiting_for_user");
+    assert.equal("payload" in task, false);
+    assert.doesNotMatch(
+      JSON.stringify(task),
+      /Secret evidence should stay out of task memory/
+    );
+
+    assert.deepEqual(
+      calls.map((call) => call.question),
+      ["Summarize renewal terms.", "Check renewal risk."]
+    );
+    assert.equal(calls[0].taskMemory.goal, "Summarize renewal terms.");
+    assert.equal(calls[0].taskMemory.evidencePolicy, "planning_context_only");
+    assert.deepEqual(calls[0].taskMemory.userPreferences, [
+      "Use concise bullets.",
+    ]);
+    assert.equal(
+      calls[1].taskMemory.completedSteps[0].answer,
+      "Renewal terms found."
+    );
+    assert.deepEqual(calls[1].taskMemory.nextCandidates, [
+      "Check renewal risk.",
+    ]);
+    assert.deepEqual(calls[1].taskMemory.userPreferences, [
+      "Use concise bullets.",
+      "Keep risk notes short.",
+    ]);
+
+    response = await fetch(
+      `${taskUrl}/actions/${AGENT_TASK_ACTIONS.approve}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...scopeHeaders,
+        },
+        body: JSON.stringify({
+          approval: {
+            approved: true,
+            decision: "approved",
+            source: "task_action",
+          },
+          capabilityId: "web.search",
+        }),
+      }
+    );
+
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).task.status, "queued");
+
+    await drainScheduledWork();
+
+    response = await fetch(taskUrl, {
+      headers: scopeHeaders,
+    });
+    assert.equal(response.status, 200);
+    task = await response.json();
+    assert.equal(task.status, "completed");
+    assert.equal(task.counts.iterations, 3);
+    assert.equal(
+      task.result.answer,
+      "Renewal risk checked with approved web evidence."
+    );
+    assert.equal(task.result.agentRunId, "run-task-http");
+    assert.equal(
+      task.result.taskMemory.evidencePolicy,
+      "planning_context_only"
+    );
+    assert.equal("payload" in task, false);
+    assert.equal(calls[2].agentRunId, "run-task-http");
+    assert.deepEqual(calls[2].capabilityApprovals, {
+      "web.search": {
+        approved: true,
+        decision: "approved",
+        source: "task_action",
+      },
+    });
   } finally {
     await server.close();
   }
