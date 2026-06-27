@@ -46,7 +46,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | 报告 | 结果摘要 |
 | --- | --- |
 | `evaluation/results/latest.*` | 主 synthetic regression 报告。`eval:robust-suite` 会用 compare-hard corpus 刷新它，避免长期只追踪 near-duplicate 满分小语料。 |
-| `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：`5/5` cases passed，`20/20` checks passed。 |
+| `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `13/13` cases passed，`52/52` checks passed，包含 goal lifecycle completion。 |
 | `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback 和 planner observability；mock/real provider 会各自写入 provider-specific latest report。 |
 | `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：deterministic fixture 覆盖 recoverable run、manual recovery action、safe step retry/resume、auto replay success rate 和 planner fallback signal。 |
 | `evaluation/results/latest-rollout-readiness.{json,md}` | AgentRAG rollout readiness：只输出是否 ready 的信号，汇总 real planner provider gate、trajectory gate、recovery gate、unexpected fallback rate 和 mock/real planner divergence，不改变默认 planner 行为。 |
@@ -106,6 +106,7 @@ Trajectory eval 检查 AgentRAG 行为，而不是只看答案文本：
 - 该澄清时是否 clarification
 - Custom skill 是否传递 `accessScope`
 - Budget 是否阻止无限重试
+- Goal lifecycle 是否验证 plan steps、unresolved gaps、deliverables、pending approval 和 research phases
 
 ```bash
 cd server
