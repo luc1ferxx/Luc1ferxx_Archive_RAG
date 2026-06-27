@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { robustEvalSuite } from "./eval-suite.js";
 import { defaultHistoryLimit } from "./quality-shared.js";
 import { buildQualityReportFromResultPayload } from "./quality-run-summary.js";
 import { buildQualityHistoryResponse } from "./quality-combined-gate.js";
@@ -22,6 +23,10 @@ const latestPlannerProviderResultPaths = [
   path.join(resultsDirectory, "latest-planner-mock.json"),
   path.join(resultsDirectory, "latest-planner-real.json"),
 ];
+const latestRobustSuiteResultPaths = robustEvalSuite.reports.map((report) => ({
+  reportId: report.id,
+  filePath: path.join(resultsDirectory, `${report.latestName}.json`),
+}));
 
 const isQualityResultFile = (fileName) =>
   fileName.endsWith(".json") &&
@@ -55,6 +60,14 @@ const readLatestPlannerPayloads = async () => {
   return legacyPayload ? [legacyPayload] : [];
 };
 
+const readLatestRobustPayloads = async () =>
+  Promise.all(
+    latestRobustSuiteResultPaths.map(async ({ filePath, reportId }) => ({
+      reportId,
+      payload: await readOptionalJsonFile(filePath),
+    }))
+  );
+
 export const readLatestQualityReport = async () => {
   let payload = null;
 
@@ -73,11 +86,15 @@ export const readLatestQualityReport = async () => {
   return buildQualityReportFromResultPayload(payload);
 };
 
-export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) => {
+export const readQualityHistory = async ({
+  limit = defaultHistoryLimit,
+  requireRobustSuite = false,
+} = {}) => {
   let latestPayload = null;
   let latestFeedbackPayload = null;
   let latestPlannerPayloads = [];
   let latestRecoveryPayload = null;
+  let latestRobustPayloads = [];
   let latestTrajectoryPayload = null;
 
   try {
@@ -105,6 +122,7 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
   }
 
   latestPlannerPayloads = await readLatestPlannerPayloads();
+  latestRobustPayloads = await readLatestRobustPayloads();
 
   try {
     latestRecoveryPayload = await readJsonFile(latestRecoveryObservabilityResultPath);
@@ -125,8 +143,10 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
         latestFeedbackPayload,
         latestPlannerPayloads,
         latestRecoveryPayload,
+        latestRobustPayloads,
         latestTrajectoryPayload,
         limit,
+        requireRobustSuite,
         runPayloads: [],
       });
     }
@@ -155,8 +175,10 @@ export const readQualityHistory = async ({ limit = defaultHistoryLimit } = {}) =
     latestFeedbackPayload,
     latestPlannerPayloads,
     latestRecoveryPayload,
+    latestRobustPayloads,
     latestTrajectoryPayload,
     limit,
+    requireRobustSuite,
     runPayloads,
   });
 };

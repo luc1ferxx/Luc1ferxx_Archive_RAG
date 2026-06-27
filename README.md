@@ -239,9 +239,10 @@ curl http://localhost:5001/ready
 | `cd server && npm test` | 运行后端聚合测试。 |
 | `cd server && npm run coverage:gate` | 检查后端覆盖率最低门槛。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
-| `cd server && npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json` | 运行当前 tracked `latest.*` 使用的 near-duplicate corpus。 |
+| `cd server && npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json` | 运行 legacy near-duplicate corpus；它不再是 hard/real robust signal 的主入口。 |
 | `cd server && npm run eval:trajectory` | 检查 skill selection、follow-up retrieval、clarification、access scope 和 budget 行为。 |
-| `cd server && npm run eval:feedback` | 从反馈生成回归语料并运行 latest-feedback eval。 |
+| `cd server && npm run eval:feedback` | 从 seed + runtime 反馈生成回归语料并运行 deterministic latest-feedback eval。 |
+| `cd server && npm run eval:robust-suite` | 固定周期运行 compare-hard synthetic、hard-CS rerank 和 arXiv real-paper rerank。 |
 | `cd server && npm run eval:planner` | 评测 planner mock provider；`-- --provider real` 生成真实 provider 报告。 |
 | `cd server && npm run planner:gate -- --provider real` | 检查 real planner report、fallback rate 和 mock/real divergence。 |
 | `cd server && npm run eval:recovery-observability` | 检查 recovery/replay observability。 |
@@ -249,7 +250,21 @@ curl http://localhost:5001/ready
 | `cd server && npm run runtime:smoke` | 用真实 planner 和 PostgreSQL smoke `/health`、`/chat` runtime。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
 | `cd server && npm run eval:param-sweep` | 跑 topK、overlap、rerank、hybrid 参数扫描；`-- --profile full` 扩大矩阵。 |
-| `cd server && npm run quality:gate` | 组合 feedback、trajectory、planner、recovery 等报告并执行质量门控。 |
+| `cd server && npm run quality:gate` | 组合 feedback、trajectory、planner、recovery 等报告并执行质量门控；`-- --require-robust-suite` 会强制检查 hard/real suite。 |
+
+## 评测优化结果
+
+优化前，主 synthetic `latest.*` 和 legacy rerank 报告长期依赖 near-duplicate 小语料。旧 `latest-rerank.md` 只有 `6` 个 ranking cases，NDCG、Recall、MRR 都是 `1.0000 -> 1.0000`，lift 为 `0.0000`，无法证明 rerank 对困难检索有真实收益。
+
+这次优化把固定周期入口改为 `eval:robust-suite`：用 compare-hard 刷新主 synthetic regression，把 hard-CS rerank 和 arXiv real-paper rerank 写成独立 latest reports，并交给 `quality:gate -- --require-robust-suite` 强制检查。suite 定义集中在 `server/evaluation/eval-suite.js`，runner 只消费配置；质量门通过 `quality-robust-suite-gate.js` 统一检查 report 是否存在、语料是否匹配、case 数量是否非空、NDCG/Recall 是否不回退，以及 NDCG lift 是否退化成 `0`。
+
+前后对比如下：
+
+| 评测层 | 优化前 | 优化后 | 变化 |
+| --- | --- | --- | --- |
+| 主 synthetic regression | `latest.*` 长期追踪 near-duplicate，小语料容易满分饱和。 | `eval:robust-suite` 用 compare-hard corpus 刷新 `latest.*`。 | 主报告从容易饱和的近重复集，切到更难的 compare 回归集。 |
+| Legacy rerank signal | near-duplicate `latest-rerank.md`：NDCG `1.0000 -> 1.0000`，Recall `1.0000 -> 1.0000`，MRR `1.0000 -> 1.0000`，lift `0.0000`。 | hard-CS rerank probe：NDCG `0.9385 -> 1.0`，MRR `0.9167 -> 1.0`。 | baseline 不再满分，rerank 在困难 CS 语料上有可见 lift。 |
+| Real-paper rerank coverage | legacy 小语料不覆盖长论文、跨论文比较和 hard negative。 | arXiv real-paper rerank probe：NDCG `0.4698 -> 0.5394`，Recall `0.6215 -> 0.6771`，MRR `0.476 -> 0.5615`。 | 固定 gate 开始覆盖真实论文语料，能观察长文档排序收益。 |
 
 ## 文档入口
 
@@ -308,7 +323,8 @@ curl http://localhost:5001/ready
 | 1 | Planner eval gate | 已接入 `eval:planner`、`planner:gate`、`rollout:readiness` 和 `quality:gate`。 |
 | 2 | 持久化主执行路径 | Task store、agent run store、step snapshots/events 已通过 PostgreSQL-backed adapter 持久化。 |
 | 3 | Agent run recovery | 已有 startup recovery、manual/auto recovery、approval resume、step retry 和 replay safety matrix。 |
-| 4 | PostgreSQL restart 覆盖 | 持续加固 approval-after-restart、retry-after-failure、partial-step resume 这类恢复回归场景。 |
+| 4 | PostgreSQL restart 覆盖 | 已补 HTTP/API 级 paused document resume、failed step retry 和 blocked approval safety 覆盖，继续复用 replay safety matrix 和 step executor。 |
+| 5 | 真实/困难语料评测 | 已用 `eval:robust-suite` 把 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 纳入固定周期 gate，替代只看 near-duplicate 饱和分数。 |
 
 ## 当前限制
 

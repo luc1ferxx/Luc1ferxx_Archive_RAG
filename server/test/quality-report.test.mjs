@@ -48,6 +48,48 @@ const buildPassingSyntheticPayload = ({
   ],
 });
 
+const buildPassingRerankPayload = ({
+  corpusPath,
+  runId,
+} = {}) => ({
+  summary: {
+    runId,
+    createdAt: "2026-06-08T10:30:00.000Z",
+    corpus: {
+      path: corpusPath,
+      cases: 2,
+    },
+    caseCount: 2,
+    metrics: {
+      baseline: {
+        ndcgAtK: 0.75,
+        recallAtK: 0.8,
+        mrr: 0.7,
+      },
+      reranked: {
+        ndcgAtK: 0.9,
+        recallAtK: 0.8,
+        mrr: 0.85,
+      },
+      lift: {
+        ndcgAtK: {
+          absolute: 0.15,
+          relative: 0.2,
+        },
+      },
+      noiseFilteringRate: 0.4,
+    },
+  },
+  cases: [
+    {
+      id: "rerank-1",
+    },
+    {
+      id: "rerank-2",
+    },
+  ],
+});
+
 const buildPassingPlannerPayload = ({
   provider = "mock",
   runId = "planner-latest",
@@ -791,6 +833,107 @@ test("quality history includes passing planner eval in the combined gate summary
   );
 });
 
+test("quality history requires robust hard and real eval suite when requested", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestRobustPayloads: [
+      {
+        reportId: "compare-hard-synthetic",
+        payload: latestPayload,
+      },
+      {
+        reportId: "rerank-hard-cs",
+        payload: buildPassingRerankPayload({
+          corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+          runId: "hard-cs-rerank",
+        }),
+      },
+      {
+        reportId: "arxiv-real-paper-rerank",
+        payload: buildPassingRerankPayload({
+          corpusPath: "evaluation/generated/arxiv-corpus.json",
+          runId: "arxiv-rerank",
+        }),
+      },
+    ],
+    requireRobustSuite: true,
+    runPayloads: [
+      {
+        fileName: "compare-hard-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.regressionGate.status, "pass");
+  assert.equal(history.robustSuiteGate.status, "pass");
+  assert.equal(history.robustSuiteGate.skipped, false);
+  assert.equal(history.robustSuiteGate.reports.length, 3);
+  assert.equal(history.qualityGate.status, "pass");
+  assert.match(
+    history.qualityGate.summary,
+    /Robust eval suite passed 3 reports/
+  );
+  assert.ok(
+    history.qualityGate.checks.some(
+      (check) =>
+        check.metric === "robustSuiteRerankNdcgLift" &&
+        check.reportId === "arxiv-real-paper-rerank" &&
+        check.status === "pass"
+    )
+  );
+});
+
+test("quality history fails when required robust suite reports are missing", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestRobustPayloads: [
+      {
+        reportId: "compare-hard-synthetic",
+        payload: latestPayload,
+      },
+    ],
+    requireRobustSuite: true,
+    runPayloads: [
+      {
+        fileName: "compare-hard-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.equal(history.robustSuiteGate.failedReports.length, 2);
+  assert.deepEqual(
+    history.robustSuiteGate.failedReports.map((report) => report.reportId),
+    ["rerank-hard-cs", "arxiv-real-paper-rerank"]
+  );
+  assert.equal(history.qualityGate.status, "fail");
+  assert.equal(buildQualityGateDecision({ history }).exitCode, 1);
+});
+
 test("quality history folds passing recovery observability report into gate decision", () => {
   const latestPayload = buildPassingSyntheticPayload({
     runId: "synthetic-latest",
@@ -1083,8 +1226,43 @@ test("quality history skips feedback gate when no feedback eval report exists", 
   assert.equal(history.plannerGate.skipped, true);
   assert.equal(history.recoveryGate.status, "pass");
   assert.equal(history.recoveryGate.skipped, true);
+  assert.equal(history.robustSuiteGate.status, "pass");
+  assert.equal(history.robustSuiteGate.skipped, true);
   assert.equal(history.qualityGate.status, "unknown");
   assert.equal(history.qualityGate.summary, "No previous synthetic run is available for regression comparison.");
+});
+
+test("quality history fails feedback gate when latest feedback report is empty", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const latestFeedbackPayload = {
+    summary: {
+      runId: "feedback-empty",
+      createdAt: "2026-06-08T10:05:00.000Z",
+      corpus: {
+        path: "evaluation/generated/feedback-corpus.json",
+        cases: 0,
+      },
+      metrics: {
+        overallPassRate: null,
+      },
+    },
+    cases: [],
+  };
+
+  const history = buildQualityHistoryResponse({
+    latestFeedbackPayload,
+    latestPayload,
+    runPayloads: [],
+  });
+
+  assert.equal(history.feedbackGate.status, "fail");
+  assert.equal(history.feedbackGate.skipped, false);
+  assert.equal(history.feedbackGate.caseCount, 0);
+  assert.equal(history.feedbackGate.summary, "Feedback evaluation has no cases yet.");
+  assert.equal(history.qualityGate.status, "fail");
 });
 
 test("quality history excludes non-synthetic eval runs from regression baselines", () => {

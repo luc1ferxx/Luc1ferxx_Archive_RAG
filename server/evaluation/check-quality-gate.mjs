@@ -12,6 +12,8 @@ Options:
   --json            Print the full quality history and gate decision as JSON.
   --fail-on-warn    Treat warning-level regressions as failures.
   --allow-unknown   Exit successfully when there is no baseline run yet.
+  --require-robust-suite
+                    Require compare-hard, hard-CS rerank, and arXiv rerank reports.
   --limit=<number>  Limit returned run history. Default: 10.
   --help            Show this message.
 `;
@@ -23,6 +25,7 @@ const parseArgs = (argv) => {
     json: false,
     help: false,
     limit: 10,
+    requireRobustSuite: false,
   };
 
   for (const arg of argv) {
@@ -33,6 +36,11 @@ const parseArgs = (argv) => {
 
     if (arg === "--fail-on-warn") {
       options.failOnWarn = true;
+      continue;
+    }
+
+    if (arg === "--require-robust-suite") {
+      options.requireRobustSuite = true;
       continue;
     }
 
@@ -111,6 +119,14 @@ const formatCheckDelta = (check) => {
     return formatDelta(check.delta);
   }
 
+  if (
+    typeof check.metric === "string" &&
+    check.metric.startsWith("robustSuite") &&
+    check.metric.endsWith("Count")
+  ) {
+    return formatDelta(check.delta ?? check.currentValue);
+  }
+
   if (check.metric === "averageCitationCount") {
     return formatDelta(check.delta);
   }
@@ -125,6 +141,7 @@ const printTextReport = ({ decision, history }) => {
   const trajectoryGate = history.trajectoryGate ?? {};
   const plannerGate = history.plannerGate ?? {};
   const recoveryGate = history.recoveryGate ?? {};
+  const robustSuiteGate = history.robustSuiteGate ?? {};
   const latestRun = history.latestRun ?? {};
   const checks = qualityGate.checks ?? gate.checks ?? [];
 
@@ -158,6 +175,20 @@ const printTextReport = ({ decision, history }) => {
 
     for (const skillFailure of feedbackGate.skillFailures ?? []) {
       console.log(`- ${formatFeedbackSkillFailureLine(skillFailure)}`);
+    }
+  }
+
+  if (robustSuiteGate.status) {
+    const suffix = robustSuiteGate.skipped ? " (skipped)" : "";
+    console.log(`Robust eval suite: ${robustSuiteGate.status}${suffix}`);
+    console.log(robustSuiteGate.summary);
+
+    for (const failedReport of robustSuiteGate.failedReports ?? []) {
+      console.log(`- ${failedReport.label}: ${failedReport.status}`);
+    }
+
+    for (const warningReport of robustSuiteGate.warningReports ?? []) {
+      console.log(`- ${warningReport.label}: ${warningReport.status}`);
     }
   }
 
@@ -228,6 +259,7 @@ const main = async () => {
 
   const history = await readQualityHistory({
     limit: options.limit,
+    requireRobustSuite: options.requireRobustSuite,
   });
   const decision = buildQualityGateDecision({
     allowUnknown: options.allowUnknown,

@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   buildFeedbackCorpusFromRecords,
   buildFeedbackCorpusFromJsonlFile,
+  buildFeedbackCorpusFromJsonlFiles,
 } from "../evaluation/feedback-corpus.js";
 
 test("feedback corpus builder converts negative feedback into synthetic eval cases", () => {
@@ -66,6 +67,7 @@ test("feedback corpus builder converts negative feedback into synthetic eval cas
     feedbackId: "feedback-incomplete",
     feedbackType: "incomplete",
     createdAt: "2026-06-07T08:00:00.000Z",
+    source: "runtime",
     userId: "alice",
     workspaceId: "workspace-a",
     note: "The answer missed the approval condition.",
@@ -90,6 +92,73 @@ test("feedback corpus builder converts negative feedback into synthetic eval cas
   );
   assert.equal(hallucinationCase.shouldAbstain, true);
   assert.deepEqual(hallucinationCase.expectedEvidence, []);
+});
+
+test("feedback corpus builder merges seed and runtime jsonl files", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "feedback-corpus-merge-test-"));
+  const seedInputPath = path.join(tempRoot, "feedback-seed.jsonl");
+  const runtimeInputPath = path.join(tempRoot, "feedback.jsonl");
+  const outputPath = path.join(tempRoot, "feedback-corpus.json");
+
+  try {
+    await writeFile(
+      seedInputPath,
+      `${JSON.stringify({
+        feedbackId: "seed-feedback",
+        feedbackType: "citation_error",
+        source: "seed",
+        question: "Where is manager approval documented?",
+        docIds: ["doc-seed"],
+        note: "Use the manager approval citation.",
+        citations: [
+          {
+            docId: "doc-seed",
+            fileName: "seed.pdf",
+            pageNumber: 1,
+            excerpt: "Remote work requires manager approval.",
+          },
+        ],
+      })}\n`,
+      "utf8"
+    );
+    await writeFile(
+      runtimeInputPath,
+      `${JSON.stringify({
+        feedbackId: "runtime-feedback",
+        feedbackType: "incomplete",
+        question: "What is the renewal window?",
+        docIds: ["doc-runtime"],
+        note: "The answer missed the 30 day window.",
+        citations: [
+          {
+            docId: "doc-runtime",
+            fileName: "runtime.pdf",
+            pageNumber: 2,
+            excerpt: "Renewal must happen within 30 days after audit completion.",
+          },
+        ],
+      })}\n`,
+      "utf8"
+    );
+
+    const corpus = await buildFeedbackCorpusFromJsonlFiles({
+      inputPaths: [seedInputPath, runtimeInputPath, path.join(tempRoot, "missing.jsonl")],
+      outputPath,
+    });
+    const persistedCorpus = JSON.parse(await readFile(outputPath, "utf8"));
+
+    assert.deepEqual(persistedCorpus, corpus);
+    assert.equal(corpus.cases.length, 2);
+    assert.deepEqual(
+      corpus.cases.map((testCase) => testCase.metadata.feedback.source).sort(),
+      ["runtime", "seed"]
+    );
+  } finally {
+    await rm(tempRoot, {
+      recursive: true,
+      force: true,
+    });
+  }
 });
 
 test("feedback corpus builder reads jsonl files and writes stable corpus output", async () => {

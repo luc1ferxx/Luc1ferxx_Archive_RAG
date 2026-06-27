@@ -37,6 +37,11 @@ import {
   initializeUploadSession,
   storeUploadChunk,
 } from "../upload-session-store.js";
+import {
+  configureOpenAIProvider,
+  resetOpenAIProvider,
+} from "../rag/openai.js";
+import { buildTermSet } from "../rag/text-utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +50,7 @@ const resultsDirectory = path.join(__dirname, "results");
 const generatedDirectory = path.join(__dirname, "generated");
 const defaultCorpusPath = path.join(__dirname, "synthetic-corpus.json");
 const uploadChunkSizeBytes = 180;
+const deterministicEmbeddingDimensions = 64;
 const abstainPatterns = [
   "couldn't find enough grounded evidence",
   "comparison would be unreliable",
@@ -53,6 +59,60 @@ const abstainPatterns = [
 ];
 
 const toRunId = () => new Date().toISOString().replace(/[:.]/g, "-");
+
+const hashToken = (token) => {
+  let hash = 0;
+
+  for (const character of token) {
+    hash = (hash * 31 + character.codePointAt(0)) % deterministicEmbeddingDimensions;
+  }
+
+  return hash;
+};
+
+const toDeterministicEmbedding = (text) => {
+  const vector = new Array(deterministicEmbeddingDimensions).fill(0);
+
+  for (const term of buildTermSet(text)) {
+    vector[hashToken(term)] += 1;
+  }
+
+  return vector;
+};
+
+const extractFirstEvidenceSentence = (prompt = "") => {
+  const match = String(prompt).match(
+    /Evidence:\n([\s\S]*?)(?:\n\nSource \d+|\n\n---|\n\nQuestion:|\n\nInstructions:|$)/
+  );
+  const evidenceText = String(match?.[1] ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!evidenceText) {
+    return "I could not find enough grounded evidence in the selected documents.";
+  }
+
+  const sentence = evidenceText.match(/.*?(?:[.!?]|$)/)?.[0]?.trim() || evidenceText;
+  return `${sentence} [Source 1]`;
+};
+
+const configureDeterministicOpenAIProvider = () => {
+  process.env.RAG_RERANK_PROVIDER = "heuristic";
+  configureOpenAIProvider({
+    embedTexts: async (texts) => texts.map((text) => toDeterministicEmbedding(text)),
+    embedQuery: async (query) => toDeterministicEmbedding(query),
+    completeText: async (prompt) => {
+      if (String(prompt).includes("preserved_ambiguity")) {
+        return JSON.stringify({
+          preserved_ambiguity: true,
+          rewritten_query: "",
+        });
+      }
+
+      return extractFirstEvidenceSentence(prompt);
+    },
+  });
+};
 
 const escapePdfText = (text) =>
   text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
@@ -458,7 +518,7 @@ const buildMarkdownReport = ({
   return `${lines.join("\n")}\n`;
 };
 
-const optionsWithValues = new Set(["--latest-name"]);
+const optionsWithValues = new Set(["--latest-name", "--openai-provider"]);
 
 const getArgValue = (name) => {
   const inlinePrefix = `${name}=`;
@@ -502,6 +562,16 @@ const getLatestName = () => {
   return latestName;
 };
 
+const getOpenAIProviderMode = () => {
+  const providerMode = getArgValue("--openai-provider") ?? "real";
+
+  if (!["deterministic", "real"].includes(providerMode)) {
+    throw new Error("--openai-provider must be either deterministic or real.");
+  }
+
+  return providerMode;
+};
+
 const resolveCorpusPath = () => {
   const requestedPath = getPositionalArgs()[0] ?? defaultCorpusPath;
   return path.resolve(process.cwd(), requestedPath);
@@ -523,6 +593,7 @@ const main = async () => {
   const resultsRunJsonPath = path.join(resultsDirectory, `${runId}.json`);
   const resultsRunMarkdownPath = path.join(resultsDirectory, `${runId}.md`);
   const latestName = getLatestName();
+  const openAIProviderMode = getOpenAIProviderMode();
   const latestJsonPath = path.join(resultsDirectory, `${latestName}.json`);
   const latestMarkdownPath = path.join(resultsDirectory, `${latestName}.md`);
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
@@ -534,6 +605,11 @@ const main = async () => {
   await mkdir(mergedDirectory, { recursive: true });
 
   configureEvaluationStores();
+  if (openAIProviderMode === "deterministic") {
+    configureDeterministicOpenAIProvider();
+  } else {
+    resetOpenAIProvider();
+  }
   configureRagDataDirectory(ragDataDirectory);
   resetDocumentRegistry();
   resetVectorStore();
@@ -620,10 +696,14 @@ const main = async () => {
       compareCases: compareCases.length,
       abstainCases: abstainCases.length,
     },
-    models: {
-      embedding: getEmbeddingModel(),
-      chat: getChatModel(),
-    },
+      models: {
+        embedding: openAIProviderMode === "deterministic"
+          ? "deterministic"
+          : getEmbeddingModel(),
+        chat: openAIProviderMode === "deterministic"
+          ? "deterministic"
+          : getChatModel(),
+      },
     config: {
       chunkStrategy: getChunkStrategy(),
       chunkSize: getChunkSize(),

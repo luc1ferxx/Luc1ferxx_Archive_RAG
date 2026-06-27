@@ -379,6 +379,7 @@ const buildFeedbackMetadata = ({ record, feedbackType }) => ({
   feedbackId: normalizeText(record.feedbackId),
   feedbackType,
   createdAt: normalizeText(record.createdAt),
+  source: normalizeText(record.source) || "runtime",
   userId: normalizeText(record.userId),
   workspaceId: normalizeText(record.workspaceId),
   note: normalizeText(record.note),
@@ -486,6 +487,25 @@ export const buildFeedbackCorpusFromJsonlFile = async ({
   outputPath,
 }) => {
   const records = await readFeedbackJsonl(inputPath);
+  const corpus = buildFeedbackCorpusFromRecords(records);
+
+  if (outputPath) {
+    await mkdir(path.dirname(outputPath), {
+      recursive: true,
+    });
+    await writeFile(outputPath, `${JSON.stringify(corpus, null, 2)}\n`, "utf8");
+  }
+
+  return corpus;
+};
+
+export const buildFeedbackCorpusFromJsonlFiles = async ({
+  inputPaths = [],
+  outputPath,
+}) => {
+  const records = (
+    await Promise.all(inputPaths.map((inputPath) => readFeedbackJsonl(inputPath)))
+  ).flat();
   const corpus = buildFeedbackCorpusFromRecords(records);
 
   if (outputPath) {

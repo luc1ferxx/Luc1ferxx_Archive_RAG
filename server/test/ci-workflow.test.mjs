@@ -19,8 +19,14 @@ const plannerRealGateWorkflowPath = path.join(
   "workflows",
   "planner-real-gate.yml"
 );
+const robustEvalSuiteWorkflowPath = path.join(
+  repositoryRoot,
+  ".github",
+  "workflows",
+  "robust-eval-suite.yml"
+);
 
-test("quality gate workflow runs server tests, saved gate, and conditional feedback eval", async () => {
+test("quality gate workflow runs server tests and required feedback eval", async () => {
   const workflow = await readFile(workflowPath, "utf8");
 
   assert.match(workflow, /name:\s*Quality Gate/);
@@ -41,11 +47,13 @@ test("quality gate workflow runs server tests, saved gate, and conditional feedb
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider real/);
   assert.match(workflow, /name:\s*Run recovery observability eval/);
   assert.match(workflow, /run:\s*npm run eval:recovery-observability/);
-  assert.match(workflow, /run:\s*npm run quality:gate -- --fail-on-warn/);
-  assert.match(workflow, /id:\s*feedback/);
-  assert.match(workflow, /server\/data\/feedback\/feedback\.jsonl/);
+  assert.match(workflow, /name:\s*Run feedback regression eval/);
   assert.match(workflow, /run:\s*npm run eval:feedback/);
-  assert.match(workflow, /if:\s*steps\.feedback\.outputs\.has_feedback == 'true'/);
+  assert.match(workflow, /name:\s*Check quality gate/);
+  assert.match(workflow, /run:\s*npm run quality:gate -- --fail-on-warn/);
+  assert.doesNotMatch(workflow, /id:\s*feedback/);
+  assert.doesNotMatch(workflow, /server\/data\/feedback\/feedback\.jsonl/);
+  assert.doesNotMatch(workflow, /if:\s*steps\.feedback\.outputs\.has_feedback == 'true'/);
 });
 
 test("planner real provider workflow runs a required scheduled gate", async () => {
@@ -91,5 +99,29 @@ test("planner real provider workflow runs a required scheduled gate", async () =
   );
   assert.match(workflow, /server\/evaluation\/results\/latest-rollout-readiness\.\*/);
   assert.match(workflow, /server\/evaluation\/results\/latest-runtime-smoke\.\*/);
+  assert.match(workflow, /actions\/upload-artifact@v4/);
+});
+
+test("robust eval suite workflow runs hard and real reports on a schedule", async () => {
+  const workflow = await readFile(robustEvalSuiteWorkflowPath, "utf8");
+
+  assert.match(workflow, /name:\s*Robust Eval Suite/);
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /schedule:\s*\n\s*-\s*cron:\s*"0 10 \* \* 1"/);
+  assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
+  assert.match(workflow, /working-directory:\s*server/);
+  assert.match(workflow, /node-version:\s*"20"/);
+  assert.match(workflow, /cache-dependency-path:\s*server\/package-lock\.json/);
+  assert.match(workflow, /run:\s*npm ci/);
+  assert.match(workflow, /name:\s*Require OpenAI key/);
+  assert.match(workflow, /run:\s*test -n "\$OPENAI_API_KEY"/);
+  assert.match(workflow, /run:\s*npm run eval:robust-suite/);
+  assert.match(
+    workflow,
+    /run:\s*npm run quality:gate -- --fail-on-warn --require-robust-suite/
+  );
+  assert.match(workflow, /server\/evaluation\/results\/latest\.\*/);
+  assert.match(workflow, /server\/evaluation\/results\/latest-rerank-hard-cs\.\*/);
+  assert.match(workflow, /server\/evaluation\/results\/latest-arxiv-rerank\.\*/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
 });

@@ -1,0 +1,50 @@
+name: Robust Eval Suite
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 10 * * 1"
+
+jobs:
+  robust-eval-suite:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies
+        run: npm ci
+
+      - name: Require OpenAI key
+        run: test -n "$OPENAI_API_KEY"
+
+      - name: Run robust hard and real eval suite
+        run: npm run eval:robust-suite
+
+      - name: Check robust quality gate
+        run: npm run quality:gate -- --fail-on-warn --require-robust-suite
+
+      - name: Upload robust eval reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robust-eval-reports
+          path: |
+            server/evaluation/results/latest.*
+            server/evaluation/results/latest-rerank-hard-cs.*
+            server/evaluation/results/latest-arxiv-rerank.*
+          if-no-files-found: ignore

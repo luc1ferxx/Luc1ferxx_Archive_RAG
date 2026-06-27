@@ -46,23 +46,8 @@ jobs:
       - name: Run recovery observability eval
         run: npm run eval:recovery-observability
 
-      - name: Check saved RAG quality gate
-        run: npm run quality:gate -- --fail-on-warn
-
-      - name: Check feedback data
-        id: feedback
-        working-directory: .
-        run: |
-          if [ -s server/data/feedback/feedback.jsonl ]; then
-            echo "has_feedback=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_feedback=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Run feedback regression eval
-        if: steps.feedback.outputs.has_feedback == 'true'
         run: npm run eval:feedback
 
-      - name: Check feedback quality gate
-        if: steps.feedback.outputs.has_feedback == 'true'
+      - name: Check quality gate
         run: npm run quality:gate -- --fail-on-warn

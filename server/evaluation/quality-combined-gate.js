@@ -23,17 +23,23 @@ import {
   buildRecoveryGate,
   buildRecoveryGateChecks,
 } from "./quality-recovery-gate.js";
+import {
+  buildRobustSuiteGate,
+  buildRobustSuiteGateChecks,
+} from "./quality-robust-suite-gate.js";
 
 const buildCombinedGateSummary = ({
   regressionGate = {},
   feedbackGate = {},
   plannerGate = {},
   recoveryGate = {},
+  robustSuiteGate = {},
   trajectoryGate = {},
 } = {}) =>
   [
     regressionGate.summary,
     feedbackGate.skipped ? null : feedbackGate.summary,
+    robustSuiteGate.skipped ? null : robustSuiteGate.summary,
     trajectoryGate.skipped ? null : trajectoryGate.summary,
     plannerGate.skipped ? null : plannerGate.summary,
     recoveryGate.skipped ? null : recoveryGate.summary,
@@ -46,12 +52,16 @@ export const buildCombinedQualityGate = ({
   feedbackGate = {},
   plannerGate = {},
   recoveryGate = {},
+  robustSuiteGate = {},
   trajectoryGate = {},
 } = {}) => {
   const combinedChecks = [
     ...(regressionGate.checks ?? []),
     ...buildFeedbackGateChecks({
       feedbackGate,
+    }),
+    ...buildRobustSuiteGateChecks({
+      robustSuiteGate,
     }),
     ...buildTrajectoryGateChecks({
       trajectoryGate,
@@ -68,6 +78,14 @@ export const buildCombinedQualityGate = ({
     return {
       status: "fail",
       summary: feedbackGate.summary,
+      checks: combinedChecks,
+    };
+  }
+
+  if (robustSuiteGate.status === "fail") {
+    return {
+      status: "fail",
+      summary: robustSuiteGate.summary,
       checks: combinedChecks,
     };
   }
@@ -96,14 +114,19 @@ export const buildCombinedQualityGate = ({
     };
   }
 
-  if (regressionGate.status === "fail" || regressionGate.status === "warn") {
+  if (
+    regressionGate.status === "fail" ||
+    regressionGate.status === "warn" ||
+    robustSuiteGate.status === "warn"
+  ) {
     return {
-      status: regressionGate.status,
+      status: regressionGate.status === "fail" ? "fail" : "warn",
       summary: buildCombinedGateSummary({
         regressionGate,
         feedbackGate,
         plannerGate,
         recoveryGate,
+        robustSuiteGate,
         trajectoryGate,
       }),
       checks: combinedChecks,
@@ -118,6 +141,7 @@ export const buildCombinedQualityGate = ({
         feedbackGate,
         plannerGate,
         recoveryGate,
+        robustSuiteGate,
         trajectoryGate,
       }),
       checks: combinedChecks,
@@ -131,6 +155,7 @@ export const buildCombinedQualityGate = ({
       feedbackGate,
       plannerGate,
       recoveryGate,
+      robustSuiteGate,
       trajectoryGate,
     }),
     checks: combinedChecks,
@@ -143,8 +168,10 @@ export const buildQualityHistoryResponse = ({
   latestPlannerPayload = null,
   latestPlannerPayloads = null,
   latestRecoveryPayload = null,
+  latestRobustPayloads = null,
   latestTrajectoryPayload = null,
   limit = defaultHistoryLimit,
+  requireRobustSuite = false,
   runPayloads = [],
 } = {}) => {
   const runSummaries = runPayloads
@@ -183,6 +210,10 @@ export const buildQualityHistoryResponse = ({
   const feedbackGate = buildFeedbackGate({
     latestFeedbackPayload,
   });
+  const robustSuiteGate = buildRobustSuiteGate({
+    latestRobustPayloads,
+    requireRobustSuite,
+  });
   const trajectoryGate = buildTrajectoryGate({
     latestTrajectoryPayload,
   });
@@ -198,6 +229,7 @@ export const buildQualityHistoryResponse = ({
     feedbackGate,
     plannerGate,
     recoveryGate,
+    robustSuiteGate,
     trajectoryGate,
   });
 
@@ -207,6 +239,7 @@ export const buildQualityHistoryResponse = ({
     runs: sortedRuns.slice(0, limit),
     regressionGate,
     feedbackGate,
+    robustSuiteGate,
     trajectoryGate,
     plannerGate,
     recoveryGate,

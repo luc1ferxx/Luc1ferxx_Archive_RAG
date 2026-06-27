@@ -25,6 +25,11 @@ export { buildPlannerGate } from "./quality-planner-gate.js";
 export { buildRecoveryGate } from "./quality-recovery-gate.js";
 
 export {
+  buildRobustSuiteGate,
+  buildRobustSuiteGateChecks,
+} from "./quality-robust-suite-gate.js";
+
+export {
   buildCombinedQualityGate,
   buildQualityGateDecision,
   buildQualityHistoryResponse,

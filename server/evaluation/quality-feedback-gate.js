@@ -159,7 +159,7 @@ export const buildFeedbackGate = ({ latestFeedbackPayload = null } = {}) => {
   const unsupportedClaimCaseCount = failedCases.filter(
     (caseResult) => (caseResult.unsupportedClaimCount ?? 0) > 0
   ).length;
-  const status = failedCaseCount > 0 ? "fail" : "pass";
+  const status = cases.length === 0 || failedCaseCount > 0 ? "fail" : "pass";
   const claimSummary = unsupportedClaimCount > 0
     ? ` ${unsupportedClaimCount} unsupported claim${
         unsupportedClaimCount === 1 ? "" : "s"
