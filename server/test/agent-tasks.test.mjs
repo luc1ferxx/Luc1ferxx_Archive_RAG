@@ -18,6 +18,9 @@ import {
   createAgentTaskService,
 } from "../rag/agent-tasks.js";
 import {
+  CAPABILITY_IDS,
+} from "../rag/capabilities/index.js";
+import {
   buildAgentTaskPlanningContext,
 } from "../rag/agent-task-memory.js";
 import { createPostgresAgentRunStore } from "../rag/postgres-agent-run-store.js";
@@ -384,6 +387,100 @@ const createRealAgentTaskRunner = ({ agentRunService, ragService } = {}) =>
       }),
   });
 
+const createDeliverableCapabilityRegistry = () => {
+  const calls = [];
+  const labels = {
+    [CAPABILITY_IDS.documentOrganize]: "Organize Documents",
+    [CAPABILITY_IDS.reportExport]: "Report Export",
+    [CAPABILITY_IDS.summaryCreate]: "Create Summary",
+    [CAPABILITY_IDS.taskCreate]: "Create Task",
+  };
+  const buildTask = ({ id, summary, type = "agent_action" }) => ({
+    id,
+    status: TASK_STATUSES.completed,
+    summary,
+    type,
+  });
+
+  return {
+    calls,
+    describe: (capabilityId) => ({
+      id: capabilityId,
+      version: "1.0.0",
+      label: labels[capabilityId] ?? capabilityId,
+      approvalPolicy: {
+        writesWorkspace: true,
+      },
+      privacyPolicy: {
+        externalCall: false,
+        storesResult: true,
+      },
+    }),
+    execute: async (capabilityId, payload = {}) => {
+      calls.push({
+        capabilityId,
+        payload,
+      });
+
+      if (capabilityId === CAPABILITY_IDS.documentOrganize) {
+        return {
+          organization: {
+            documentCount: payload.input.docIds.length,
+            groups: [
+              {
+                label: "papers",
+              },
+            ],
+          },
+          task: buildTask({
+            id: "agent_action:organize",
+            summary: "Organized documents.",
+          }),
+          text: "Document organization recorded.",
+        };
+      }
+
+      if (capabilityId === CAPABILITY_IDS.reportExport) {
+        return {
+          report: {
+            fileName: "risk-report.md",
+            format: "markdown",
+            mimeType: "text/markdown",
+          },
+          stored: false,
+          text: "Prepared report export risk-report.md.",
+        };
+      }
+
+      if (capabilityId === CAPABILITY_IDS.summaryCreate) {
+        return {
+          summary: {
+            docIds: payload.input.docIds,
+            title: payload.input.title,
+          },
+          task: buildTask({
+            id: "agent_action:summary",
+            summary: "Saved summary.",
+          }),
+          text: "Summary recorded.",
+        };
+      }
+
+      if (capabilityId === CAPABILITY_IDS.taskCreate) {
+        return {
+          task: buildTask({
+            id: "agent_action:follow-up",
+            summary: payload.input.description,
+          }),
+          text: "Task recorded.",
+        };
+      }
+
+      throw new Error(`Unexpected capability: ${capabilityId}`);
+    },
+  };
+};
+
 test("agent task service creates queued durable goal tasks without leaking internal payload", async () => {
   const scheduledRuns = [];
   const taskService = createTaskService({
@@ -412,6 +509,18 @@ test("agent task service creates queued durable goal tasks without leaking inter
   assert.equal(task.runnerId, AGENT_TASK_RUNNER_ID);
   assert.equal(task.status, TASK_STATUSES.queued);
   assert.equal(task.payload, undefined);
+  assert.deepEqual(
+    task.items.map((item) => [item.id, item.status]),
+    [
+      ["goal", TASK_STATUSES.completed],
+      ["agent-loop", TASK_STATUSES.queued],
+      ["deliverable", TASK_STATUSES.pending],
+    ]
+  );
+  assert.equal(task.result.goalPlan.goal, "Summarize the renewal terms.");
+  assert.equal(task.result.goalPlan.status, TASK_STATUSES.queued);
+  assert.equal(task.result.goalPlan.currentStepId, "agent-loop");
+  assert.equal(task.result.goalCompletion.status, "running");
   assert.deepEqual(task.input, {
     docIds: ["doc-1"],
     maxIterations: 2,
@@ -441,6 +550,350 @@ test("agent task service creates queued durable goal tasks without leaking inter
     goal: "Summarize the renewal terms.",
     nextCandidates: [],
     userPreferences: ["Use concise bullets."],
+  });
+});
+
+test("agent task creates approved goal deliverables through existing capabilities", async () => {
+  const capabilityRegistry = createDeliverableCapabilityRegistry();
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const runner = createAgentTaskRunner({
+    capabilityRegistry,
+    runAgentTask: async () => ({
+      body: {
+        agentAnswer:
+          "Risk review completed. Main risk is evidence drift across papers.",
+        agentMode: "document",
+        agentRunId: "run-risk",
+        ragSources: [
+          {
+            docId: "doc-1",
+            title: "Paper A",
+          },
+        ],
+      },
+      status: 200,
+    }),
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: {
+      [AGENT_TASK_RUNNER_ID]: runner,
+    },
+    taskService,
+  });
+  const agentTaskService = createAgentTaskService({
+    createTaskId: () => "risk-report",
+    jobOrchestrator: null,
+    taskService,
+  });
+
+  await agentTaskService.createTask({
+    accessScope,
+    docIds: ["doc-1", "doc-2"],
+    maxIterations: 2,
+    question: "整理这些论文并生成风险报告",
+    sessionId: "session-risk",
+    userId: "alice",
+  });
+
+  await orchestrator.runTask({
+    accessScope,
+    taskId: "agent_goal:risk-report",
+  });
+
+  let task = await taskService.getInternalTask({
+    accessScope,
+    taskId: "agent_goal:risk-report",
+  });
+
+  assert.equal(task.status, TASK_STATUSES.waitingForUser);
+  assert.equal(task.requiredUserAction, AGENT_TASK_ACTIONS.approveDeliverables);
+  assert.equal(task.payload.deliverables.status, "waiting_for_approval");
+  assert.deepEqual(
+    task.payload.deliverables.specs.map((spec) => spec.capabilityId),
+    [
+      CAPABILITY_IDS.documentOrganize,
+      CAPABILITY_IDS.reportExport,
+      CAPABILITY_IDS.summaryCreate,
+      CAPABILITY_IDS.taskCreate,
+    ]
+  );
+  assert.equal(task.result.goalPlan.requiredUserAction, "approve_deliverables");
+  assert.equal(task.result.goalPlan.currentStepId, "user-input");
+  assert.equal(task.result.goalPlan.deliverables.status, "waiting_for_approval");
+  assert.equal(task.result.goalPlan.deliverables.counts.planned, 4);
+  assert.equal(task.result.goalCompletion.status, "pending");
+  assert.equal(
+    task.result.goalCompletion.checks.find(
+      (check) => check.id === "deliverables_created"
+    )?.passed,
+    false
+  );
+  assert.equal(
+    task.result.goalCompletion.checks.find(
+      (check) => check.id === "no_pending_user_action"
+    )?.passed,
+    false
+  );
+  assert.equal(capabilityRegistry.calls.length, 0);
+
+  await orchestrator.resumeTask({
+    accessScope,
+    action: AGENT_TASK_ACTIONS.approveDeliverables,
+    payload: {
+      approval: {
+        approved: true,
+        decision: "approved",
+        source: "test",
+      },
+    },
+    runImmediately: false,
+    taskId: "agent_goal:risk-report",
+  });
+
+  await orchestrator.runTask({
+    accessScope,
+    taskId: "agent_goal:risk-report",
+  });
+
+  task = await taskService.getInternalTask({
+    accessScope,
+    taskId: "agent_goal:risk-report",
+  });
+
+  assert.equal(task.status, TASK_STATUSES.completed);
+  assert.equal(
+    task.result.answer,
+    "Risk review completed. Main risk is evidence drift across papers."
+  );
+  assert.deepEqual(
+    capabilityRegistry.calls.map((call) => call.capabilityId),
+    [
+      CAPABILITY_IDS.documentOrganize,
+      CAPABILITY_IDS.reportExport,
+      CAPABILITY_IDS.summaryCreate,
+      CAPABILITY_IDS.taskCreate,
+    ]
+  );
+  assert.ok(
+    capabilityRegistry.calls.every(
+      (call) =>
+        call.payload.approval.approved === true &&
+        call.payload.approval.source === "test"
+    )
+  );
+  assert.equal(task.payload.deliverables.status, "completed");
+  assert.equal(task.result.goalPlan.status, TASK_STATUSES.completed);
+  assert.equal(task.result.goalCompletion.status, "completed");
+  assert.ok(
+    task.result.goalCompletion.checks.every((check) => check.passed),
+    JSON.stringify(task.result.goalCompletion.checks)
+  );
+  assert.equal(task.result.goalPlan.deliverables.status, "completed");
+  assert.equal(task.result.goalPlan.deliverables.counts.completed, 4);
+  assert.equal(
+    task.result.goalPlan.deliverables.items.find(
+      (item) => item.capabilityId === CAPABILITY_IDS.reportExport
+    )?.output.fileName,
+    "risk-report.md"
+  );
+  assert.equal(task.items.at(-1).id, "deliverable");
+  assert.equal(task.items.at(-1).status, TASK_STATUSES.completed);
+});
+
+test("agent task runs a staged research dossier flow before report delivery", async () => {
+  const questions = [];
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const runner = createAgentTaskRunner({
+    runAgentTask: async ({ question }) => {
+      questions.push(question);
+
+      return {
+        body: {
+          agentAnswer: `Answer for research phase ${questions.length}.`,
+          agentMode: "document",
+          agentRunId: `run-research-${questions.length}`,
+          ragSources: [
+            {
+              docId: `doc-${questions.length}`,
+              title: `Source ${questions.length}`,
+            },
+          ],
+        },
+        status: 200,
+      };
+    },
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: {
+      [AGENT_TASK_RUNNER_ID]: runner,
+    },
+    taskService,
+  });
+  const agentTaskService = createAgentTaskService({
+    createTaskId: () => "research-dossier",
+    jobOrchestrator: null,
+    taskService,
+  });
+
+  await agentTaskService.createTask({
+    accessScope,
+    docIds: ["doc-a", "doc-b"],
+    question: "research_task: 整理这些论文并生成 dossier 风险报告",
+    sessionId: "session-research",
+    userId: "alice",
+  });
+
+  await orchestrator.runTask({
+    accessScope,
+    taskId: "agent_goal:research-dossier",
+  });
+
+  const task = await taskService.getInternalTask({
+    accessScope,
+    taskId: "agent_goal:research-dossier",
+  });
+  const reportSpec = task.payload.deliverables.specs.find(
+    (spec) => spec.capabilityId === CAPABILITY_IDS.reportExport
+  );
+
+  assert.equal(task.status, TASK_STATUSES.waitingForUser);
+  assert.equal(task.input.researchTask, undefined);
+  assert.equal(task.input.maxIterations, 10);
+  assert.equal(task.requiredUserAction, AGENT_TASK_ACTIONS.approveDeliverables);
+  assert.deepEqual(
+    task.payload.researchTask.phases.map((phase) => [phase.id, phase.status]),
+    [
+      ["local_research", "completed"],
+      ["web_supplement", "completed"],
+      ["arxiv_supplement", "completed"],
+      ["compare_risk_review", "completed"],
+      ["citation_self_check", "completed"],
+      ["final_dossier", "completed"],
+    ]
+  );
+  assert.equal(task.result.researchTask.counts.completed, 6);
+  assert.equal(task.result.goalPlan.researchTask.counts.completed, 6);
+  assert.equal(task.result.goalPlan.researchTask.counts.total, 6);
+  assert.equal(task.result.goalCompletion.status, "pending");
+  assert.equal(
+    task.result.goalCompletion.checks.find(
+      (check) => check.id === "research_phases_completed"
+    )?.passed,
+    true
+  );
+  assert.deepEqual(
+    task.payload.iterations.map((iteration) => iteration.researchTaskPhase.id),
+    [
+      "local_research",
+      "web_supplement",
+      "arxiv_supplement",
+      "compare_risk_review",
+      "citation_self_check",
+      "final_dossier",
+    ]
+  );
+  assert.match(questions[0], /document-grounded research brief/);
+  assert.match(questions[1], /Search the web/);
+  assert.match(questions[2], /Search arXiv/);
+  assert.match(questions[3], /Compare the selected documents/);
+  assert.match(questions[4], /citation self-check/);
+  assert.match(questions[5], /final research dossier/);
+  assert.match(reportSpec.input.content, /## Research Flow/);
+  assert.match(reportSpec.input.content, /### Local document research/);
+  assert.match(reportSpec.input.content, /### Web supplement/);
+  assert.match(reportSpec.input.content, /### arXiv supplement/);
+  assert.equal(reportSpec.input.citations.length, 6);
+});
+
+test("agent task goal completion reports unresolved evidence gaps", async () => {
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const runner = createAgentTaskRunner({
+    runAgentTask: async () => ({
+      body: {
+        agentAnswer: "The answer still has an unresolved evidence gap.",
+        agentMode: "document",
+        agentRunId: "run-gap",
+        agentWorkingMemory: {
+          checkedQueries: ["Check unsupported claim."],
+          resolvedGaps: [],
+          unsupportedClaims: [
+            {
+              claim: "Unsupported market claim.",
+            },
+          ],
+          unresolvedGaps: [
+            {
+              question: "Find source for the market claim.",
+            },
+          ],
+        },
+      },
+      status: 200,
+    }),
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: {
+      [AGENT_TASK_RUNNER_ID]: runner,
+    },
+    taskService,
+  });
+
+  await taskService.upsertTask({
+    accessScope,
+    task: {
+      id: "agent_goal:gaps",
+      input: {
+        docIds: ["doc-1"],
+        maxIterations: 1,
+        question: "Summarize unresolved evidence.",
+        sessionId: "session-gap",
+        userId: "alice",
+      },
+      payload: {
+        agentRunId: null,
+        capabilityApprovals: {},
+        docIds: ["doc-1"],
+        iterations: [],
+        maxIterations: 1,
+        question: "Summarize unresolved evidence.",
+        sessionId: "session-gap",
+        userId: "alice",
+      },
+      runnerId: AGENT_TASK_RUNNER_ID,
+      status: TASK_STATUSES.queued,
+      type: AGENT_TASK_TYPE,
+    },
+  });
+
+  await orchestrator.runTask({
+    accessScope,
+    taskId: "agent_goal:gaps",
+  });
+
+  const task = await taskService.getInternalTask({
+    accessScope,
+    taskId: "agent_goal:gaps",
+  });
+  const evidenceCheck = task.result.goalCompletion.checks.find(
+    (check) => check.id === "evidence_gaps_resolved"
+  );
+
+  assert.equal(task.status, TASK_STATUSES.completed);
+  assert.equal(task.result.goalCompletion.status, "blocked");
+  assert.equal(evidenceCheck?.passed, false);
+  assert.equal(evidenceCheck?.detail.unresolvedGapCount, 1);
+  assert.equal(evidenceCheck?.detail.unsupportedClaimCount, 1);
+  assert.deepEqual(task.payload.iterations[0].workingMemory, {
+    checkedQueryCount: 1,
+    resolvedGapCount: 0,
+    unsupportedClaimCount: 1,
+    unresolvedGapCount: 1,
   });
 });
 
@@ -1270,6 +1723,17 @@ test("agent task runner continues until blocked and resumes with preserved run c
   assert.equal(task.payload.agentRunId, "run-1");
   assert.equal(task.payload.iterations.length, 2);
   assert.deepEqual(
+    task.items.map((item) => [item.id, item.status]),
+    [
+      ["goal", TASK_STATUSES.completed],
+      ["iteration-1", TASK_STATUSES.completed],
+      ["iteration-2", TASK_STATUSES.waitingForUser],
+      ["user-input", TASK_STATUSES.waitingForUser],
+      ["deliverable", TASK_STATUSES.waitingForUser],
+    ]
+  );
+  assert.equal(task.result.goalPlan.requiredUserAction, "approve_capability");
+  assert.deepEqual(
     calls.map((call) => call.question),
     [
       "Summarize the renewal terms.",
@@ -1305,6 +1769,9 @@ test("agent task runner continues until blocked and resumes with preserved run c
   assert.equal(task.counts.iterations, 3);
   assert.equal(task.result.answer, "Renewal answer with approved web evidence.");
   assert.equal(task.result.agentRunId, "run-1");
+  assert.equal(task.result.goalPlan.status, TASK_STATUSES.completed);
+  assert.equal(task.items.at(-1).id, "deliverable");
+  assert.equal(task.items.at(-1).status, TASK_STATUSES.completed);
   assert.equal(calls[2].agentRunId, "run-1");
   assert.deepEqual(calls[2].capabilityApprovals, {
     "web.search": {

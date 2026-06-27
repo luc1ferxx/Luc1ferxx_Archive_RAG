@@ -12,10 +12,11 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   });
 
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 12);
+  assert.equal(report.summary.metrics.caseCount, 13);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
   assert.equal(report.summary.metrics.categories.skill_selection.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.follow_up.failedCheckCount, 0);
+  assert.equal(report.summary.metrics.categories.goal_lifecycle.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.clarification.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.access_scope.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.budget.failedCheckCount, 0);
@@ -73,6 +74,13 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   );
   assert.ok(report.cases.some((caseResult) => caseResult.id === "planner_fallback"));
   assert.ok(report.cases.some((caseResult) => caseResult.id === "privacy_sanitization"));
+  assert.ok(
+    report.cases.some(
+      (caseResult) =>
+        caseResult.id === "agent_goal_lifecycle_completion" &&
+        caseResult.passed
+    )
+  );
 });
 
 test("trajectory eval markdown summarizes categories and failed checks", async () => {
@@ -86,6 +94,7 @@ test("trajectory eval markdown summarizes categories and failed checks", async (
   assert.match(markdown, /Skill selection/);
   assert.match(markdown, /Approval/);
   assert.match(markdown, /Follow-up/);
+  assert.match(markdown, /Goal lifecycle/);
   assert.match(markdown, /Retry/);
   assert.match(markdown, /Memory/);
   assert.match(markdown, /Conflict/);
@@ -95,5 +104,6 @@ test("trajectory eval markdown summarizes categories and failed checks", async (
   assert.match(markdown, /Capability approval resume/);
   assert.match(markdown, /Custom skill retry/);
   assert.match(markdown, /Privacy sanitization/);
+  assert.match(markdown, /Agent goal lifecycle completion/);
   assert.match(markdown, /PASS/);
 });

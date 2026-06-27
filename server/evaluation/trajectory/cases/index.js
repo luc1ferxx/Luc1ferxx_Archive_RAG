@@ -9,6 +9,7 @@ import {
   createMemoryNotEvidenceCase,
   createMultiDocConflictCase,
 } from "./evidence-memory.js";
+import { createGoalLifecycleCase } from "./goal-lifecycle.js";
 import {
   createPlannerFallbackCase,
   createPrivacySanitizationCase,
@@ -32,4 +33,5 @@ export const createDefaultTrajectoryCases = () => [
   createMultiDocConflictCase(),
   createPlannerFallbackCase(),
   createPrivacySanitizationCase(),
+  createGoalLifecycleCase(),
 ];

@@ -376,6 +376,7 @@ export const createApp = async (options = {}) => {
   const agentTaskRunner =
     options.agentTaskRunner ??
     createAgentTaskRunner({
+      capabilityRegistry,
       runAgentTask: ({
         accessScope,
         agentRunId,

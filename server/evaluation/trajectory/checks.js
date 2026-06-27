@@ -20,6 +20,7 @@ export const CATEGORY_LABELS = {
   clarification: "Clarification",
   conflict: "Conflict",
   follow_up: "Follow-up",
+  goal_lifecycle: "Goal lifecycle",
   memory: "Memory",
   planner: "Planner",
   privacy: "Privacy",
