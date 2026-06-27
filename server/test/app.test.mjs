@@ -23,6 +23,13 @@ import {
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
 import {
+  AGENT_RUN_STEP_KINDS,
+  AGENT_RUN_STEP_STATUSES,
+} from "../rag/agent-run-steps.js";
+import {
+  STEP_REPLAY_SAFETY_REASON_CODES,
+} from "../rag/agent-run-step-replay-safety.js";
+import {
   createInMemoryTaskStore,
 } from "../rag/tasks.js";
 import {
@@ -72,6 +79,77 @@ const startServer = async (app) => {
       });
     },
   };
+};
+
+const recoveryAccessScope = {
+  userId: "alice",
+  workspaceId: "workspace-a",
+};
+
+const recoveryScopeHeaders = {
+  "x-user-id": recoveryAccessScope.userId,
+  "x-workspace-id": recoveryAccessScope.workspaceId,
+};
+
+const createRecoveryRagService = (overrides = {}) => ({
+  chat: async () => ({
+    citations: [],
+    text: "stub",
+  }),
+  clearDocuments: async () => [],
+  clearSessionMemory: () => true,
+  deleteDocument: async () => null,
+  getDocument: () => null,
+  ingestDocument: async () => null,
+  initializeDocumentRegistry: async () => [],
+  initializeSessionMemory: async () => true,
+  listDocuments: () => [],
+  ...overrides,
+});
+
+const createNoopStartupRecoveryService = () => ({
+  recoverOnStartup: async () => ({
+    mode: "manual",
+    recoveredCount: 0,
+    runs: [],
+  }),
+});
+
+const seedRecoverableAgentRun = async ({
+  accessScope = recoveryAccessScope,
+  agentRunStore,
+  goal = "Recover interrupted run",
+  manualRecovery = false,
+  patch,
+  runId,
+} = {}) => {
+  const agentRunService = createAgentRunService({
+    agentRunStore,
+  });
+
+  await agentRunService.createRun({
+    accessScope,
+    goal,
+    runId,
+  });
+  await agentRunService.updateRun({
+    accessScope,
+    patch,
+    runId,
+  });
+
+  if (manualRecovery) {
+    await agentRunService.appendRunEvent({
+      accessScope,
+      runId,
+      type: "manual_recovery_required",
+      payload: {
+        reason: patch?.result?.recovery?.reason ?? "server_startup_recovery",
+      },
+    });
+  }
+
+  return agentRunService;
 };
 
 test("upload flow stores chunks, completes ingestion, and deletes documents", async () => {
@@ -1426,6 +1504,342 @@ test("agent run recovery endpoints list and cancel manual recovery runs", async 
 
     assert.equal(response.status, 200);
     assert.equal((await response.json()).runs.length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("agent run recovery API resumes a paused document step after restart", async () => {
+  const agentRunStore = createInMemoryAgentRunStore();
+  const calls = [];
+
+  await seedRecoverableAgentRun({
+    agentRunStore,
+    manualRecovery: true,
+    patch: {
+      result: {
+        recovery: {
+          mode: "manual",
+          reason: "server_startup_recovery",
+        },
+      },
+      status: AGENT_RUN_STATUSES.waitingForUser,
+      steps: [
+        {
+          id: "step-document-paused",
+          input: {
+            docIds: ["doc-1"],
+            question: "What changed after restart?",
+            retrievalPlan: {
+              retrievalQueries: ["restart change"],
+            },
+            sessionId: "session-restart",
+            userId: "alice",
+          },
+          kind: AGENT_RUN_STEP_KINDS.toolCall,
+          label: "Document RAG",
+          status: AGENT_RUN_STEP_STATUSES.paused,
+          type: "document_rag",
+        },
+      ],
+    },
+    runId: "run-http-restart-resume",
+  });
+
+  const app = await createApp({
+    agentRunRecoveryService: createNoopStartupRecoveryService(),
+    agentRunStore,
+    healthService: okHealthService,
+    ragService: createRecoveryRagService({
+      chat: async (docIds, question, options) => {
+        calls.push({
+          docIds,
+          options,
+          question,
+        });
+
+        return {
+          citations: [
+            {
+              chunkIndex: 1,
+              docId: "doc-1",
+              excerpt: "Restarted recovery keeps the persisted input.",
+              fileName: "restart.pdf",
+              pageNumber: 2,
+              rank: 1,
+            },
+          ],
+          resolvedQuery: question,
+          text: "Recovered after restart. [Source 1]",
+        };
+      },
+    }),
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/agent-runs/recovery`, {
+      headers: recoveryScopeHeaders,
+    });
+
+    assert.equal(response.status, 200);
+
+    let body = await response.json();
+
+    assert.equal(body.runs.length, 1);
+    assert.equal(body.runs[0].runId, "run-http-restart-resume");
+    assert.deepEqual(
+      body.runs[0].recovery.actions.map((action) => action.type),
+      ["resume_from_step", "cancel"]
+    );
+    assert.equal(body.runs[0].recovery.replaySafety.canAutoReplay, true);
+
+    response = await fetch(`${server.baseUrl}/agent-runs/recovery`, {
+      headers: {
+        "x-user-id": "bob",
+        "x-workspace-id": "workspace-a",
+      },
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).runs.length, 0);
+
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/run-http-restart-resume/recovery/actions/resume_from_step`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...recoveryScopeHeaders,
+        },
+        body: JSON.stringify({
+          stepId: "step-document-paused",
+        }),
+      }
+    );
+
+    assert.equal(response.status, 200);
+    body = await response.json();
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].docIds, ["doc-1"]);
+    assert.equal(calls[0].question, "What changed after restart?");
+    assert.equal(calls[0].options.accessScope.userId, recoveryAccessScope.userId);
+    assert.equal(
+      calls[0].options.accessScope.workspaceId,
+      recoveryAccessScope.workspaceId
+    );
+    assert.deepEqual(calls[0].options.retrievalPlan, {
+      retrievalQueries: ["restart change"],
+    });
+    assert.equal(body.response.agentMode, "document");
+    assert.equal(body.response.agentRunStatus, "completed");
+    assert.equal(body.response.agentAnswer, "Recovered after restart. [Source 1]");
+    assert.equal(body.run.status, AGENT_RUN_STATUSES.completed);
+    assert.equal(
+      body.run.steps.find((step) => step.id === "step-document-paused").status,
+      AGENT_RUN_STEP_STATUSES.completed
+    );
+
+    response = await fetch(`${server.baseUrl}/agent-runs/recovery`, {
+      headers: recoveryScopeHeaders,
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).runs.length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("agent run recovery API retries a failed document step after restart", async () => {
+  const agentRunStore = createInMemoryAgentRunStore();
+  const calls = [];
+
+  await seedRecoverableAgentRun({
+    agentRunStore,
+    patch: {
+      error: {
+        message: "Simulated process failure.",
+      },
+      result: {
+        error: "Document RAG failed before restart.",
+      },
+      status: AGENT_RUN_STATUSES.failed,
+      steps: [
+        {
+          error: {
+            message: "Simulated process failure.",
+          },
+          id: "step-document-failed",
+          input: {
+            docIds: ["doc-1"],
+            question: "Retry after failure?",
+          },
+          kind: AGENT_RUN_STEP_KINDS.toolCall,
+          label: "Document RAG",
+          status: AGENT_RUN_STEP_STATUSES.failed,
+          type: "document_rag",
+        },
+      ],
+    },
+    runId: "run-http-restart-retry",
+  });
+
+  const app = await createApp({
+    agentRunRecoveryService: createNoopStartupRecoveryService(),
+    agentRunStore,
+    healthService: okHealthService,
+    ragService: createRecoveryRagService({
+      chat: async (docIds, question, options) => {
+        calls.push({
+          docIds,
+          options,
+          question,
+        });
+
+        return {
+          citations: [],
+          resolvedQuery: question,
+          text: "Retried after restart.",
+        };
+      },
+    }),
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/agent-runs/recovery`, {
+      headers: recoveryScopeHeaders,
+    });
+
+    assert.equal(response.status, 200);
+
+    let body = await response.json();
+
+    assert.deepEqual(
+      body.runs[0].recovery.actions.map((action) => action.type),
+      ["retry_failed_step"]
+    );
+    assert.equal(body.runs[0].recovery.actions[0].stepId, "step-document-failed");
+
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/run-http-restart-retry/recovery/actions/retry_failed_step`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...recoveryScopeHeaders,
+        },
+        body: JSON.stringify({
+          stepId: "step-document-failed",
+        }),
+      }
+    );
+
+    assert.equal(response.status, 200);
+    body = await response.json();
+
+    const retryStep = body.run.steps.find(
+      (step) => step.retryOfStepId === "step-document-failed"
+    );
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].docIds, ["doc-1"]);
+    assert.equal(calls[0].question, "Retry after failure?");
+    assert.equal(calls[0].options.accessScope.userId, recoveryAccessScope.userId);
+    assert.equal(
+      calls[0].options.accessScope.workspaceId,
+      recoveryAccessScope.workspaceId
+    );
+    assert.equal(body.response.agentAnswer, "Retried after restart.");
+    assert.equal(body.run.status, AGENT_RUN_STATUSES.completed);
+    assert.equal(retryStep.status, AGENT_RUN_STEP_STATUSES.completed);
+    assert.equal(retryStep.input.question, "Retry after failure?");
+  } finally {
+    await server.close();
+  }
+});
+
+test("agent run recovery API exposes blocked approval safety after restart", async () => {
+  const agentRunStore = createInMemoryAgentRunStore();
+
+  await seedRecoverableAgentRun({
+    agentRunStore,
+    manualRecovery: true,
+    patch: {
+      result: {
+        recovery: {
+          mode: "manual",
+          reason: "requires_approval",
+        },
+      },
+      status: AGENT_RUN_STATUSES.waitingForUser,
+      steps: [
+        {
+          id: "step-web-paused",
+          input: {
+            question: "What changed online?",
+          },
+          kind: AGENT_RUN_STEP_KINDS.toolCall,
+          label: "Web Search",
+          status: AGENT_RUN_STEP_STATUSES.paused,
+          type: "web_search",
+        },
+      ],
+    },
+    runId: "run-http-restart-blocked-web",
+  });
+
+  const app = await createApp({
+    agentRunRecoveryService: createNoopStartupRecoveryService(),
+    agentRunStore,
+    healthService: okHealthService,
+    ragService: createRecoveryRagService({
+      chat: async () => {
+        throw new Error("Blocked recovery should not invoke document RAG.");
+      },
+    }),
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/agent-runs/recovery`, {
+      headers: recoveryScopeHeaders,
+    });
+
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+    const run = body.runs[0];
+
+    assert.equal(run.runId, "run-http-restart-blocked-web");
+    assert.deepEqual(
+      run.recovery.actions.map((action) => action.type),
+      ["cancel"]
+    );
+    assert.deepEqual(run.recovery.replaySafety.reasonCodes, [
+      STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval,
+      STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+    ]);
+    assert.equal(run.recovery.replaySafety.steps[0].canAutoReplay, false);
+
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/run-http-restart-blocked-web/recovery/actions/resume_from_step`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...recoveryScopeHeaders,
+        },
+        body: JSON.stringify({
+          stepId: "step-web-paused",
+        }),
+      }
+    );
+
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /no safe step to resume/i);
   } finally {
     await server.close();
   }
