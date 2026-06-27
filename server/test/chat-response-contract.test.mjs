@@ -5,6 +5,8 @@ import {
   buildPlannerResponseSummary,
   getAgentMode,
   getAgentObservability,
+  getAgentWorkingMemory,
+  getClarification,
   getExecutionPlanner,
   getObservedSkill,
   getRunPhases,
@@ -175,6 +177,68 @@ test("chat response contract treats missing observability as empty", () => {
   assert.deepEqual(summary.workingMemory, {
     checkedQueryCount: 0,
     unresolvedGapCount: 0,
+    resolvedGapCount: 0,
+    unsupportedClaimCount: 0,
+  });
+});
+
+test("chat response contract summarizes clarification and error payloads", () => {
+  const response = {
+    status: 200,
+    body: {
+      agentTrace: [
+        {
+          type: "clarification_gate",
+        },
+      ],
+      agentObservability: {
+        agentMode: "clarification",
+        executionLoop: {
+          stoppedReason: "budget_exhausted",
+        },
+      },
+      agentWorkingMemory: {
+        checkedQueries: "not-an-array",
+        unresolvedGaps: [
+          {
+            type: "missing_citation",
+          },
+        ],
+      },
+      clarification: {
+        needed: true,
+        reason: "document_follow_up_budget_exhausted",
+        question: "Which section should I inspect?",
+      },
+      errors: {
+        rag: "Document RAG failed.",
+        mcp: null,
+      },
+    },
+  };
+
+  assert.equal(getAgentMode(response), "clarification");
+  assert.equal(
+    getClarification(response).reason,
+    "document_follow_up_budget_exhausted"
+  );
+  assert.deepEqual(getAgentWorkingMemory(response).unresolvedGaps, [
+    {
+      type: "missing_citation",
+    },
+  ]);
+  assert.equal(hasTraceStep(response, "clarification_gate"), true);
+
+  const summary = buildChatResponseSummary({
+    response,
+  });
+
+  assert.equal(summary.agentMode, null);
+  assert.equal(summary.clarification.needed, true);
+  assert.equal(summary.executionLoop.stoppedReason, "budget_exhausted");
+  assert.deepEqual(summary.workingMemory, {
+    checkedQueryCount: 0,
+    unresolvedGapCount: 1,
     resolvedGapCount: 0,
     unsupportedClaimCount: 0,
   });

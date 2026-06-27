@@ -1,9 +1,9 @@
-import { readFile } from "fs/promises";
+import { readFile as readBinaryFile } from "fs/promises";
 import { getDocumentsPostgresTable } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
-import { createDocumentLegacyImporter } from "./document-legacy-importer.js";
+import { createDocumentLegacyImporter as createDefaultDocumentLegacyImporter } from "./document-legacy-importer.js";
 import { buildPublicFilePath } from "./document-utils.js";
-import { queryPostgres } from "./postgres.js";
+import { queryPostgres as queryDefaultPostgres } from "./postgres.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -17,8 +17,8 @@ const toPositiveInteger = (value, fallbackValue = 0) => {
   return Number.isInteger(parsedValue) && parsedValue >= 0 ? parsedValue : fallbackValue;
 };
 
-const ensureTableName = () => {
-  const tableName = getDocumentsPostgresTable();
+const ensureTableName = (getTableName = getDocumentsPostgresTable) => {
+  const tableName = getTableName();
 
   if (!TABLE_NAME_PATTERN.test(tableName)) {
     throw new Error(
@@ -199,7 +199,11 @@ const toPublicDocument = (document) =>
       }
     : null;
 
-const resolveFileBuffer = async ({ fileBuffer = null, sourceFilePath = "" } = {}) => {
+const resolveFileBuffer = async ({
+  fileBuffer = null,
+  readFile = readBinaryFile,
+  sourceFilePath = "",
+} = {}) => {
   if (Buffer.isBuffer(fileBuffer)) {
     return fileBuffer;
   }
@@ -215,9 +219,15 @@ const resolveFileBuffer = async ({ fileBuffer = null, sourceFilePath = "" } = {}
   throw new Error("Document ingestion requires a PDF buffer or source file path.");
 };
 
-const createDefaultStore = () => ({
+export const createDocumentRegistryStore = ({
+  createDocumentLegacyImporter = createDefaultDocumentLegacyImporter,
+  getDocumentsTable = getDocumentsPostgresTable,
+  queryPostgres = queryDefaultPostgres,
+  readFile = readBinaryFile,
+  runMigrations = runPostgresMigrations,
+} = {}) => ({
   async initialize() {
-    await runPostgresMigrations();
+    await runMigrations();
 
     if (legacyImportAttempted) {
       return true;
@@ -232,7 +242,7 @@ const createDefaultStore = () => ({
           return new Set();
         }
 
-        const tableName = ensureTableName();
+        const tableName = ensureTableName(getDocumentsTable);
         const existing = await queryPostgres(
           `
             SELECT doc_id
@@ -251,7 +261,7 @@ const createDefaultStore = () => ({
   },
 
   async list(accessScope = {}) {
-    const tableName = ensureTableName();
+    const tableName = ensureTableName(getDocumentsTable);
     const result = await queryPostgres(
       `
         SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
@@ -272,9 +282,10 @@ const createDefaultStore = () => ({
       throw new Error("Document registration requires both docId and fileName.");
     }
 
-    const tableName = ensureTableName();
+    const tableName = ensureTableName(getDocumentsTable);
     const fileBuffer = await resolveFileBuffer({
       fileBuffer: document.fileBuffer,
+      readFile,
       sourceFilePath: document.sourceFilePath,
     });
     const fileSize = normalizedDocument.fileSize || fileBuffer.byteLength;
@@ -333,7 +344,7 @@ const createDefaultStore = () => ({
       return null;
     }
 
-    const tableName = ensureTableName();
+    const tableName = ensureTableName(getDocumentsTable);
     const result = await queryPostgres(
       `
         SELECT doc_id, file_name, mime_type, file_size, file_bytes, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
@@ -371,7 +382,7 @@ const createDefaultStore = () => ({
       return null;
     }
 
-    const tableName = ensureTableName();
+    const tableName = ensureTableName(getDocumentsTable);
     const existingFile = await this.getFile(normalizedDocId, accessScope);
 
     if (!existingFile) {
@@ -391,7 +402,7 @@ const createDefaultStore = () => ({
   },
 
   async clear(accessScope = {}) {
-    const tableName = ensureTableName();
+    const tableName = ensureTableName(getDocumentsTable);
 
     if (hasAccessScope(accessScope)) {
       const scopedDocuments = await this.list(accessScope);
@@ -417,7 +428,7 @@ const createDefaultStore = () => ({
 });
 
 const getDocumentRegistryStore = () =>
-  configuredDocumentRegistryStore ?? createDefaultStore();
+  configuredDocumentRegistryStore ?? createDocumentRegistryStore();
 
 const setDocumentRegistry = (documents = []) => {
   documentRegistry = new Map(
