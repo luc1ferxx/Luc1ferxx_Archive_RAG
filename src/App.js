@@ -10,6 +10,7 @@ import {
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
 import ChatComponent from "./components/ChatComponent";
+import AgentRunCenter from "./components/AgentRunCenter";
 import RenderQA from "./components/RenderQA";
 import PdfPreview from "./components/PdfPreview";
 import WorkspaceSidebar from "./components/WorkspaceSidebar";
@@ -21,6 +22,7 @@ import {
   requestAgentRunStepRetry,
   requestAnswerFeedback,
   requestSyntheticQualityRun,
+  requestTaskAction,
 } from "./archiveApi";
 import { formatDocumentCount, isArxivDocument } from "./archiveWorkspace";
 import { useChatSession } from "./hooks/useChatSession";
@@ -36,10 +38,7 @@ import {
   DEMO_QUALITY_HISTORY,
   DEMO_QUALITY_REPORT,
 } from "./demoWorkbench";
-import {
-  formatTaskStatus,
-  getRecoveryActionSuccessMessage,
-} from "./components/workbenchFormatters";
+import { getRecoveryActionSuccessMessage } from "./components/workbenchFormatters";
 import "./App.css";
 
 const CONVERSATION_VIEWS = [
@@ -63,6 +62,9 @@ const IDLE_TASKS = [
     summary: "Ask a document question to create an agent task trace.",
   },
 ];
+
+const getBackendErrorMessage = (error, fallbackMessage) =>
+  error.response?.data?.error ?? fallbackMessage;
 
 const buildAgentRunActionAnswer = (currentAnswer = {}, result = {}) => {
   const run = result?.run;
@@ -138,6 +140,24 @@ const App = () => {
         silent: true,
       }),
     [loadTasks]
+  );
+  const handleTaskAction = useCallback(
+    async (task, action, payload = {}) => {
+      if (!task?.id || !action) {
+        return;
+      }
+
+      try {
+        await requestTaskAction(task.id, action, payload);
+        message.success("Agent task updated.");
+        await refreshTaskLog();
+      } catch (error) {
+        message.warning(
+          getBackendErrorMessage(error, "Unable to update the agent task.")
+        );
+      }
+    },
+    [refreshTaskLog]
   );
   const refreshAgentRunRecovery = useCallback(
     () =>
@@ -887,46 +907,11 @@ const App = () => {
 
     if (activeConversationView === "tasks") {
       return (
-        <div className="archive-view-panel archive-tasks-view">
-          <div className="archive-view-panel-head">
-            <span>Tasks</span>
-            <strong>
-              {(isTaskLogLoading || isRecoveryLoading) && !isDemoWorkbench
-                ? "loading"
-                : `${visibleTasks.length} active`}
-            </strong>
-          </div>
-          <div className="archive-view-grid">
-            {visibleTasks.map((task, index) => (
-              <button
-                key={task.id ?? `${task.label}-${index}`}
-                type="button"
-                className={`archive-view-item is-${task.status ?? "pending"}`}
-                onClick={() => message.info(task.summary)}
-              >
-                <span>{formatTaskStatus(task.status)}</span>
-                <strong>{task.label}</strong>
-                <p>{task.summary}</p>
-                {(task.items ?? []).length > 0 ? (
-                  <div className="archive-task-item-list">
-                    {(task.items ?? []).slice(0, 4).map((item) => (
-                      <div
-                        className={`archive-task-item is-${
-                          item.status ?? "pending"
-                        }`}
-                        key={item.id}
-                      >
-                        <span>{formatTaskStatus(item.status)}</span>
-                        <strong>{item.label}</strong>
-                        {item.error ? <em>{item.error}</em> : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </button>
-            ))}
-          </div>
-        </div>
+        <AgentRunCenter
+          isLoading={(isTaskLogLoading || isRecoveryLoading) && !isDemoWorkbench}
+          onTaskAction={isDemoWorkbench ? undefined : handleTaskAction}
+          tasks={visibleTasks}
+        />
       );
     }
 
