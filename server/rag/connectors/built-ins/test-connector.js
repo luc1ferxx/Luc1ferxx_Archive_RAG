@@ -68,6 +68,19 @@ export const createTestConnectorSpec = () => ({
         summary:
           "Connector capabilities replay only through approved capability_call gates.",
       },
+      sandboxPolicy: {
+        allowNetwork: true,
+        allowWorkspaceWrite: false,
+        maxOutputBytes: 65536,
+        profile: "connector_external_read",
+        retryable: false,
+        timeoutMs: 30000,
+      },
+      secretPolicy: {
+        exposure: "refs_only",
+        optionalSecretRefs: [],
+        requiredSecretRefs: ["TEST_CONNECTOR_API_TOKEN"],
+      },
     },
   ],
   metadata: {

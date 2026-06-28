@@ -4,6 +4,13 @@ import {
 } from "../agent-run-step-replay-safety.js";
 import { validateCapabilityContract } from "../capabilities/registry.js";
 import { normalizeText, toArray } from "../capabilities/shared.js";
+import {
+  buildExecutionBoundaryContext,
+  filterInputForExecutionBoundary,
+  normalizeSandboxPolicy,
+  normalizeSecretPolicy,
+  validateExecutionBoundaryPolicy,
+} from "../execution-boundary.js";
 
 export const AGENT_CONNECTOR_TYPE = "agent_connector";
 export const AGENT_CONNECTOR_SPEC_VERSION = "1.0.0";
@@ -93,6 +100,8 @@ export const normalizeConnectorCapabilitySpec = (
     label: normalizeBoundedText(capabilityRecord.label, 160),
     privacyPolicy: cloneJson(capabilityRecord.privacyPolicy),
     replaySafety: normalizeReplaySafety(capabilityRecord.replaySafety),
+    sandboxPolicy: normalizeSandboxPolicy(capabilityRecord.sandboxPolicy),
+    secretPolicy: normalizeSecretPolicy(capabilityRecord.secretPolicy),
     source: {
       connectorId: normalizeBoundedText(connectorRecord.id, 120),
       connectorVersion: normalizeBoundedText(connectorRecord.version, 40),
@@ -153,6 +162,8 @@ const validateConnectorCapability = ({ capability = {}, errors = [] } = {}) => {
     "accessScope",
     "approvalPolicy",
     "privacyPolicy",
+    "sandboxPolicy",
+    "secretPolicy",
   ]) {
     if (
       !capability[objectField] ||
@@ -203,6 +214,17 @@ const validateConnectorCapability = ({ capability = {}, errors = [] } = {}) => {
     );
   }
 
+  const boundaryValidation = validateExecutionBoundaryPolicy({
+    approvalPolicy: capability.approvalPolicy,
+    capabilityId: capability.id,
+    privacyPolicy: capability.privacyPolicy,
+    sandboxPolicy: capability.sandboxPolicy,
+    secretPolicy: capability.secretPolicy,
+  });
+
+  if (!boundaryValidation.valid) {
+    errors.push(...boundaryValidation.errors);
+  }
 };
 
 export const validateAgentConnectorSpec = (connector = {}) => {
@@ -271,6 +293,13 @@ const compactConnectorCapabilityForExecutor = (capability = {}) => ({
   id: normalizeBoundedText(capability.id, 160),
   label: normalizeBoundedText(capability.label, 160),
   replaySafety: cloneJson(capability.replaySafety),
+  sandboxPolicy: cloneJson(capability.sandboxPolicy),
+  secretPolicy: {
+    exposure: capability.secretPolicy?.exposure,
+    optionalSecretRefs: toArray(capability.secretPolicy?.optionalSecretRefs),
+    requiredSecretRefs: toArray(capability.secretPolicy?.requiredSecretRefs),
+    version: capability.secretPolicy?.version,
+  },
   source: cloneJson(capability.source),
   version: normalizeBoundedText(capability.version, 40),
 });
@@ -302,6 +331,13 @@ export const createConnectorCapabilityAdapter = ({
       action: cloneJson(normalizedCapability.connectorAction),
       id: normalizedConnector.id,
       replaySafety: cloneJson(normalizedCapability.replaySafety),
+      sandboxPolicy: cloneJson(normalizedCapability.sandboxPolicy),
+      secretPolicy: {
+        exposure: normalizedCapability.secretPolicy.exposure,
+        optionalSecretRefs: normalizedCapability.secretPolicy.optionalSecretRefs,
+        requiredSecretRefs: normalizedCapability.secretPolicy.requiredSecretRefs,
+        version: normalizedCapability.secretPolicy.version,
+      },
       transport: cloneJson(normalizedConnector.transport),
       version: normalizedConnector.version,
     },
@@ -312,13 +348,22 @@ export const createConnectorCapabilityAdapter = ({
     version: normalizedCapability.version,
     id: normalizedCapability.id,
     execute: async ({ accessScope = {}, input = {}, policy = {}, services = {} } = {}) => {
+      const filteredInput = filterInputForExecutionBoundary({
+        input,
+        inputSchema: normalizedCapability.inputSchema,
+      });
+
       return executeConnector({
         accessScope,
         connector: compactConnectorForExecutor(normalizedConnector),
         connectorCapability: compactConnectorCapabilityForExecutor(
           normalizedCapability
         ),
-        input,
+        executionBoundary: buildExecutionBoundaryContext({
+          sandboxPolicy: normalizedCapability.sandboxPolicy,
+          secretPolicy: normalizedCapability.secretPolicy,
+        }),
+        input: filteredInput,
         policy,
         services,
       });

@@ -108,6 +108,7 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 | `server/rag/agent-goal-plan.js` | 从 agent task payload / iteration / pending action 生成公开 goal plan；只写入 task `items` 和 `result.goalPlan`，不读取私有 evidence 或重新执行 planner。 |
 | `server/rag/agent-goal-completion.js` | 生成 task-level 目标完成自检；只消费 plan item 状态、deliverable compact status、research phase status、required user action 和 working memory 计数。 |
 | `server/rag/agent-goal-deliverables.js` | 从已完成 agent task 的 goal/answer/docIds 推导目标产物，统一构造 capability input、approval gates 和 compact result；runner 只调用 prepare/execute，不直接写 report、summary 或 follow-up task。 |
+| `server/rag/execution-boundary.js` | 定义 capability / connector 执行前的 sandbox 和 secret policy 合同；只做规范化、校验、refs-only secret context 和 schema 外输入过滤，不执行真实 sandbox。 |
 | `server/rag/connectors/` | 定义 connector/MCP adapter contract、白名单 registry 和 connector-backed capability adapter；connector capability 必须映射成现有 capability contract，默认不配置 executor 时拒绝执行。 |
 | `server/rag/capabilities/` | 定义 capability registry 和 built-in adapters；capability contract 包含 `id/version/inputSchema/accessScope/approvalPolicy/privacyPolicy/execute()`，当前覆盖 arXiv topic import、web search、workspace document discovery、report export、recommendation import、document compare 和 action capabilities。 |
 | `server/rag/arxiv-selection-token.js` | 对文档级 arXiv 推荐结果签名和验签，确保确认导入的是用户看到的候选。 |
@@ -139,13 +140,14 @@ Agent task 的最终产物也复用同一套 capability registry。`server/rag/a
 
 ## Connector contracts
 
-Connector / MCP adapter 层目前是 contract-only，不会自动加载真实外部工具。`server/rag/connectors/` 提供：
+Connector / MCP adapter 层目前是 contract-only，不会自动加载真实外部工具。`server/rag/connectors/` 和 `server/rag/execution-boundary.js` 提供：
 
-- `schema.js`：规范化和校验 connector spec。每个 connector capability 必须声明 `inputSchema`、`accessScope`、`approvalPolicy`、`privacyPolicy` 和 `replaySafety`，并且必须要求 user approval。
+- `schema.js`：规范化和校验 connector spec。每个 connector capability 必须声明 `inputSchema`、`accessScope`、`approvalPolicy`、`privacyPolicy`、`sandboxPolicy`、`secretPolicy` 和 `replaySafety`，并且必须要求 user approval。
 - `registry.js`：白名单注册 connector spec，按 connector id 和 capability id 去重，并把 connector capability 映射成现有 capability contract。
 - `built-ins/test-connector.js`：测试用 connector spec，只用于合同测试，不进入默认 capability registry。
+- `execution-boundary.js`：规范化和校验 `sandboxPolicy` / `secretPolicy`。外部调用必须声明允许 network 的 sandbox profile；workspace write 必须声明允许 workspace write；secret 只能以 uppercase ref name 暴露给 executor，不能传 secret value。
 
-Connector capability 执行仍走 `server/rag/capabilities/registry.js` 的 `executeCapability()`，因此会先经过 approval gate、input schema、access scope 和 privacy sanitization。Batch 4 不新增 runner 行为，也不让模型直接调用任意 MCP/tool；未注入 executor 的 connector capability 即使获得批准也会返回稳定错误，避免 contract-only 阶段产生隐式外部调用。
+Connector capability 执行仍走 `server/rag/capabilities/registry.js` 的 `executeCapability()`，因此会先经过 approval gate、input schema、access scope 和 privacy sanitization。Batch 4/5 不新增 runner 行为，也不让模型直接调用任意 MCP/tool；未注入 executor 的 connector capability 即使获得批准也会返回稳定错误，避免 contract-only 阶段产生隐式外部调用。执行前还会过滤 schema 外输入，避免用户传入的 secret-like 字段被带进 connector executor。
 
 ## Research task / dossier
 
