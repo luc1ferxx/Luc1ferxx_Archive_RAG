@@ -1,3 +1,9 @@
+import { createDefaultAgentWorkflowRegistry } from "./agent-workflows/registry.js";
+import {
+  renderAgentWorkflowTemplate,
+  resolveAgentWorkflowPhase,
+} from "./agent-workflows/schema.js";
+
 export const AGENT_RESEARCH_TASK_VERSION = "1.0.0";
 export const AGENT_RESEARCH_TASK_TYPE = "research_task";
 
@@ -16,14 +22,10 @@ const toArray = (value) => (Array.isArray(value) ? value : []);
 const normalizeDocIds = (value) =>
   toArray(value).map((item) => normalizeText(item)).filter(Boolean);
 
-const RESEARCH_TASK_PATTERN =
-  /\b(research[_\s-]?task|dossier|deep research|research report|risk report)\b|研究型任务|研究任务|研究档案|调研报告|风险报告|深度研究/i;
-
 const isClarificationResponse = (body = {}) =>
   body.clarification?.needed === true || body.agentMode === "clarification";
 
-export const isResearchTaskGoal = ({ question = "" } = {}) =>
-  RESEARCH_TASK_PATTERN.test(normalizeText(question));
+const defaultWorkflowRegistry = createDefaultAgentWorkflowRegistry();
 
 const buildPhase = ({
   expectedCapability = "",
@@ -42,124 +44,105 @@ const buildPhase = ({
   summary: normalizeText(summary),
 });
 
-const buildLocalResearchQuestion = ({ goal = "" } = {}) =>
-  [
-    "Create a document-grounded research brief for this dossier.",
-    "Use the selected local documents first. Extract key findings, cited evidence, conflicts, and unresolved gaps.",
-    "Do not use web or arXiv in this step.",
-    `Original goal: ${goal}`,
-  ].join("\n\n");
+const selectResearchTaskWorkflow = ({
+  question = "",
+  workflowRegistry = defaultWorkflowRegistry,
+} = {}) => workflowRegistry?.select?.({ question }) ?? null;
 
-const buildWebSupplementQuestion = ({ goal = "" } = {}) =>
-  [
-    "Search the web for current external context that can supplement this research dossier.",
-    "Use web context only for freshness or external validation. Keep document evidence separate from web context.",
-    "Return concise findings, source links, and any uncertainty.",
-    `Original goal: ${goal}`,
-  ].join("\n\n");
+export const isResearchTaskGoal = ({
+  question = "",
+  workflowRegistry = defaultWorkflowRegistry,
+} = {}) =>
+  Boolean(
+    selectResearchTaskWorkflow({
+      question: normalizeText(question),
+      workflowRegistry,
+    })
+  );
 
-const buildArxivSupplementQuestion = ({ goal = "" } = {}) =>
-  [
-    "Search arXiv and import the most relevant papers for this research dossier topic.",
-    "Keep the import narrow and relevant to the original goal.",
-    `Topic and goal: ${goal}`,
-  ].join("\n\n");
-
-const buildCompareRiskQuestion = ({ docIds = [], goal = "" } = {}) => {
-  if (docIds.length > 1) {
-    return [
-      "Compare the selected documents, then perform a citation-backed risk review.",
-      "Identify common ground, differences, conflicts, missing terms, risks, gaps, exceptions, and evidence limits.",
-      "Every evidence-backed bullet must include document citations.",
-      `Original goal: ${goal}`,
-    ].join("\n\n");
+const normalizeOptionalNumber = (value) => {
+  if (value === null || value === undefined || value === "") {
+    return null;
   }
 
-  return [
-    "Perform a citation-backed risk review for the selected document.",
-    "Identify risks, gaps, conflicts, exceptions, missing terms, uncertainty, and evidence limits.",
-    "Every evidence-backed bullet must include document citations.",
-    `Original goal: ${goal}`,
-  ].join("\n\n");
+  const parsedValue = Number(value);
+
+  return Number.isFinite(parsedValue) ? parsedValue : null;
 };
 
-const buildCitationCheckQuestion = ({ goal = "" } = {}) =>
-  [
-    "Run a citation self-check for this research dossier.",
-    "Verify which claims are supported by selected document citations, which claims remain unsupported, and what gaps are unresolved.",
-    "Return only supported claims, unsupported claims, unresolved gaps, and recommended follow-up retrieval questions.",
-    `Original goal: ${goal}`,
-  ].join("\n\n");
+function compactWorkflowDeliverable(deliverable = {}) {
+  const deliverableRecord = normalizeRecord(deliverable);
 
-const buildFinalDossierQuestion = ({ goal = "" } = {}) =>
-  [
-    "Create the final research dossier answer.",
-    "Synthesize the local document research, external context, arXiv supplement, compare/risk review, and citation self-check into a concise cited dossier.",
-    "Keep document-cited claims separate from web/arXiv context when evidence types differ. Do not invent unsupported claims.",
-    "End with unresolved gaps and follow-up actions.",
-    `Original goal: ${goal}`,
-  ].join("\n\n");
+  return {
+    approvalRequired: deliverableRecord.approvalRequired !== false,
+    artifactType: normalizeText(deliverableRecord.artifactType, 80),
+    capabilityId: normalizeText(deliverableRecord.capabilityId, 120),
+    label: normalizeText(deliverableRecord.label, 120),
+    optional: deliverableRecord.optional === true,
+    title: normalizeText(deliverableRecord.title, 160),
+  };
+}
 
-const buildResearchTaskPhases = ({ docIds = [], goal = "" } = {}) => [
-  buildPhase({
-    expectedSkill: "research_brief",
-    id: "local_research",
-    label: "Local document research",
-    question: buildLocalResearchQuestion({
-      goal,
-    }),
-    summary: "Search selected local documents and build a cited research brief.",
-  }),
-  buildPhase({
-    expectedCapability: "web.search",
-    id: "web_supplement",
-    label: "Web supplement",
-    question: buildWebSupplementQuestion({
-      goal,
-    }),
-    summary: "Use current web context as supplemental, separately labeled evidence.",
-  }),
-  buildPhase({
-    expectedCapability: "arxiv.import_topic",
-    id: "arxiv_supplement",
-    label: "arXiv supplement",
-    question: buildArxivSupplementQuestion({
-      goal,
-    }),
-    summary: "Search/import relevant arXiv papers for the dossier topic.",
-  }),
-  buildPhase({
-    expectedSkill: docIds.length > 1 ? "compare_documents>risk_review" : "risk_review",
-    id: "compare_risk_review",
-    label: docIds.length > 1 ? "Compare and risk review" : "Risk review",
-    question: buildCompareRiskQuestion({
-      docIds,
-      goal,
-    }),
-    summary:
-      docIds.length > 1
-        ? "Compare selected documents, then review risks and gaps."
-        : "Review risks and gaps in the selected document.",
-  }),
-  buildPhase({
-    expectedSkill: "document_rag",
-    id: "citation_self_check",
-    label: "Citation self-check",
-    question: buildCitationCheckQuestion({
-      goal,
-    }),
-    summary: "Check supported claims, unsupported claims, and unresolved gaps.",
-  }),
-  buildPhase({
-    expectedSkill: "document_rag",
-    id: "final_dossier",
-    label: "Final dossier",
-    question: buildFinalDossierQuestion({
-      goal,
-    }),
-    summary: "Synthesize the final cited dossier before report export.",
-  }),
-];
+const buildWorkflowSnapshot = (workflow = {}) => {
+  const workflowRecord = normalizeRecord(workflow);
+  const workflowId = normalizeText(workflowRecord.id, 120);
+
+  if (!workflowId) {
+    return null;
+  }
+
+  return {
+    completionChecks: toArray(workflowRecord.completionChecks).map((item) =>
+      normalizeText(item, 120)
+    ),
+    deliverables: toArray(workflowRecord.deliverables).map(
+      compactWorkflowDeliverable
+    ),
+    id: workflowId,
+    label: normalizeText(workflowRecord.label, 160),
+    type: normalizeText(workflowRecord.type, 80),
+    version: normalizeText(workflowRecord.version, 40),
+  };
+};
+
+const getWorkflowMaxIterations = ({ phaseCount = 0, workflow = {} } = {}) => {
+  const budget = normalizeRecord(workflow.iterationBudget);
+  const phaseBuffer = normalizeOptionalNumber(budget.phaseBuffer) ?? 4;
+  const fallbackMaxIterations = Math.min(phaseCount + phaseBuffer, 10);
+  const maxIterations = normalizeOptionalNumber(budget.maxIterations);
+
+  return maxIterations !== null
+    ? Math.min(Math.max(1, Math.trunc(maxIterations)), 10)
+    : fallbackMaxIterations;
+};
+
+const buildResearchTaskPhasesFromWorkflow = ({
+  docIds = [],
+  goal = "",
+  workflow = {},
+} = {}) => {
+  const context = {
+    docIds,
+    goal,
+    question: goal,
+  };
+
+  return toArray(workflow.phases).map((phase) => {
+    const resolvedPhase = resolveAgentWorkflowPhase(phase, context);
+
+    return buildPhase({
+      expectedCapability: resolvedPhase.expectedCapability,
+      expectedSkill: resolvedPhase.expectedSkill,
+      id: resolvedPhase.id,
+      label: resolvedPhase.label,
+      question: renderAgentWorkflowTemplate(
+        resolvedPhase.questionTemplate,
+        context
+      ),
+      summary: resolvedPhase.summary,
+    });
+  });
+};
 
 const getFirstPendingPhase = (phases = []) =>
   phases.find((phase) => phase.status === "pending") ?? null;
@@ -170,19 +153,23 @@ const getPhaseIndex = ({ phases = [], phaseId = "" } = {}) =>
 export const createResearchTaskFlow = ({
   docIds = [],
   question = "",
+  workflowRegistry = defaultWorkflowRegistry,
 } = {}) => {
   const goal = normalizeText(question);
-
-  if (!isResearchTaskGoal({
+  const workflow = selectResearchTaskWorkflow({
     question: goal,
-  })) {
+    workflowRegistry,
+  });
+
+  if (!workflow) {
     return null;
   }
 
   const normalizedDocIds = normalizeDocIds(docIds);
-  const phases = buildResearchTaskPhases({
+  const phases = buildResearchTaskPhasesFromWorkflow({
     docIds: normalizedDocIds,
     goal,
+    workflow,
   });
   const firstPhase = phases[0] ?? null;
 
@@ -193,6 +180,7 @@ export const createResearchTaskFlow = ({
     status: firstPhase ? "running" : "completed",
     currentPhaseId: firstPhase?.id ?? null,
     docIds: normalizedDocIds,
+    workflow: buildWorkflowSnapshot(workflow),
     phases: firstPhase
       ? [
           {
@@ -202,7 +190,10 @@ export const createResearchTaskFlow = ({
           ...phases.slice(1),
         ]
       : [],
-    maxIterations: Math.min(phases.length + 4, 10),
+    maxIterations: getWorkflowMaxIterations({
+      phaseCount: phases.length,
+      workflow,
+    }),
   };
 };
 
@@ -237,6 +228,7 @@ export const normalizeResearchTaskFlow = (flow = null) => {
     status: normalizeText(normalizedFlow.status, 80) || "running",
     currentPhaseId,
     docIds: normalizeDocIds(normalizedFlow.docIds),
+    workflow: buildWorkflowSnapshot(normalizedFlow.workflow),
     phases,
     maxIterations: Number.isFinite(Number(normalizedFlow.maxIterations))
       ? Number(normalizedFlow.maxIterations)
