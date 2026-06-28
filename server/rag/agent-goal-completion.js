@@ -2,6 +2,7 @@ import {
   AGENT_GOAL_DELIVERABLE_STATUSES,
   compactAgentGoalDeliverables,
 } from "./agent-goal-deliverables.js";
+import { compactResearchTaskFlow } from "./agent-research-task.js";
 import { TASK_STATUSES } from "./tasks.js";
 
 export const AGENT_GOAL_COMPLETION_VERSION = "1.0.0";
@@ -108,6 +109,52 @@ const getResearchTaskCounts = (researchTask = null) => {
   };
 };
 
+const getResearchTaskWorkflowLifecycle = (researchTask = null) =>
+  compactResearchTaskFlow(researchTask)?.workflow ?? null;
+
+const hasWorkflowLifecycleContract = (workflow = null) => {
+  const lifecycle = normalizeRecord(workflow, null);
+
+  if (!lifecycle) {
+    return false;
+  }
+
+  const completionChecks = toArray(lifecycle.completionChecks);
+  const deliverables = toArray(lifecycle.deliverables);
+
+  return (
+    Boolean(normalizeText(lifecycle.id, 120)) &&
+    Boolean(normalizeText(lifecycle.version, 40)) &&
+    completionChecks.length > 0 &&
+    completionChecks.every((checkId) => normalizeText(checkId, 120)) &&
+    deliverables.length > 0 &&
+    deliverables.every((deliverable) =>
+      normalizeText(deliverable.capabilityId, 120)
+    ) &&
+    (Boolean(normalizeText(lifecycle.currentPhaseId, 80)) ||
+      normalizeText(lifecycle.status, 80) === "completed")
+  );
+};
+
+const compactWorkflowLifecycleDetail = (workflow = null) => {
+  const lifecycle = normalizeRecord(workflow, {});
+
+  return {
+    completionCheckIds: toArray(lifecycle.completionChecks).map((checkId) =>
+      normalizeText(checkId, 120)
+    ),
+    currentPhaseId: normalizeText(lifecycle.currentPhaseId, 80) || null,
+    deliverableCapabilityIds: toArray(lifecycle.deliverables).map(
+      (deliverable) => normalizeText(deliverable.capabilityId, 120)
+    ),
+    phaseCounts: normalizeRecord(lifecycle.counts),
+    status: normalizeText(lifecycle.status, 80),
+    workflowId: normalizeText(lifecycle.id, 120),
+    workflowType: normalizeText(lifecycle.type, 80),
+    workflowVersion: normalizeText(lifecycle.version, 40),
+  };
+};
+
 const hasPendingUserAction = ({
   deliverables = {},
   payload = {},
@@ -187,6 +234,7 @@ export const buildAgentGoalCompletion = ({
     payload,
   });
   const researchTaskCounts = getResearchTaskCounts(researchTask);
+  const researchTaskWorkflow = getResearchTaskWorkflowLifecycle(researchTask);
   const normalizedRequiredUserAction =
     normalizeText(requiredUserAction) ||
     normalizeText(goalPlan.requiredUserAction);
@@ -265,7 +313,16 @@ export const buildAgentGoalCompletion = ({
         completed: researchTaskCounts.completed,
         status: normalizeText(researchTask?.status, 80),
         total: researchTaskCounts.total,
+        workflowId: normalizeText(researchTaskWorkflow?.id, 120),
+        workflowVersion: normalizeText(researchTaskWorkflow?.version, 40),
       },
+    }),
+    buildCheck({
+      id: "workflow_lifecycle_recorded",
+      label: "Workflow lifecycle contract is recorded when requested",
+      passed:
+        !researchTask || hasWorkflowLifecycleContract(researchTaskWorkflow),
+      detail: compactWorkflowLifecycleDetail(researchTaskWorkflow),
     }),
   ];
   const blockers = checks.filter((check) => !check.passed);

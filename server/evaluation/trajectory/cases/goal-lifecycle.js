@@ -9,6 +9,9 @@ import {
   CAPABILITY_IDS,
 } from "../../../rag/capabilities/index.js";
 import {
+  RESEARCH_DOSSIER_WORKFLOW_ID,
+} from "../../../rag/agent-workflows/built-ins/research-dossier.js";
+import {
   createInMemoryTaskStore,
   createTaskService,
   TASK_STATUSES,
@@ -192,6 +195,12 @@ export const createGoalLifecycleCase = () => ({
       completion,
       "deliverables_created"
     );
+    const workflowLifecycle =
+      completedTask.result.goalPlan.researchTask?.workflow ?? null;
+    const workflowLifecycleCheck = getCompletionCheck(
+      completion,
+      "workflow_lifecycle_recorded"
+    );
 
     return finishCase({
       id: "agent_goal_lifecycle_completion",
@@ -266,6 +275,28 @@ export const createGoalLifecycleCase = () => ({
               (call) => call.capabilityId
             ),
             deliverableCheck,
+          },
+        }),
+        buildCheck({
+          id: "goal_lifecycle_workflow_contract_recorded",
+          label: "Lifecycle check verifies workflow contract is recorded",
+          category: "goal_lifecycle",
+          passed:
+            workflowLifecycle?.id === RESEARCH_DOSSIER_WORKFLOW_ID &&
+            workflowLifecycle?.version === "1.0.0" &&
+            workflowLifecycle?.currentPhaseId === null &&
+            workflowLifecycle?.counts?.completed === 6 &&
+            workflowLifecycle?.completionChecks?.includes(
+              "research_phases_completed"
+            ) &&
+            workflowLifecycle?.deliverables?.some(
+              (deliverable) =>
+                deliverable.capabilityId === CAPABILITY_IDS.reportExport
+            ) &&
+            workflowLifecycleCheck?.passed === true,
+          detail: {
+            workflowLifecycle,
+            workflowLifecycleCheck,
           },
         }),
         buildCheck({

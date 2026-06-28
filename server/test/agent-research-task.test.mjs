@@ -92,18 +92,45 @@ test("research task flow uses injected workflow registry without runner coupling
   assert.match(flow.phases.at(-1).question, /final research dossier/);
 });
 
-test("research task compact contract hides internal workflow prompt details", () => {
+test("research task compact contract exposes workflow lifecycle without prompts", () => {
   const flow = createResearchTaskFlow({
     docIds: ["doc-a", "doc-b"],
     question: "research_task: Build a dossier.",
   });
   const compactFlow = compactResearchTaskFlow(flow);
 
-  assert.equal(compactFlow.workflow, undefined);
+  assert.equal(compactFlow.workflow.id, RESEARCH_DOSSIER_WORKFLOW_ID);
+  assert.equal(compactFlow.workflow.version, "1.0.0");
+  assert.equal(compactFlow.workflow.currentPhaseId, "local_research");
+  assert.equal(compactFlow.workflow.status, "running");
+  assert.deepEqual(compactFlow.workflow.counts, compactFlow.counts);
+  assert.ok(
+    compactFlow.workflow.completionChecks.includes(
+      "research_phases_completed"
+    )
+  );
+  assert.deepEqual(
+    compactFlow.workflow.deliverables.map((deliverable) => [
+      deliverable.artifactType,
+      deliverable.capabilityId,
+    ]),
+    [
+      ["document_organization", "document.organize"],
+      ["markdown_report", "report.export"],
+      ["saved_summary", "summary.create"],
+      ["follow_up_task", "task.create"],
+    ]
+  );
   assert.equal(compactFlow.phases[0].question, undefined);
+  assert.equal(compactFlow.workflow.phases, undefined);
+  assert.equal(compactFlow.workflow.deliverables[0].triggerPatterns, undefined);
   assert.deepEqual(compactFlow.counts, {
     completed: 0,
+    failed: 0,
+    pending: 5,
+    running: 1,
     total: 6,
+    waiting: 0,
   });
 });
 

@@ -150,6 +150,42 @@ const getFirstPendingPhase = (phases = []) =>
 const getPhaseIndex = ({ phases = [], phaseId = "" } = {}) =>
   phases.findIndex((phase) => phase.id === phaseId);
 
+const countResearchTaskPhases = (phases = []) => {
+  const phaseList = toArray(phases);
+
+  return {
+    completed: phaseList.filter((phase) => phase.status === "completed").length,
+    failed: phaseList.filter((phase) => phase.status === "failed").length,
+    pending: phaseList.filter((phase) => phase.status === "pending").length,
+    running: phaseList.filter((phase) => phase.status === "running").length,
+    total: phaseList.length,
+    waiting: phaseList.filter((phase) => phase.status === "waiting").length,
+  };
+};
+
+const compactWorkflowLifecycle = (flow = null) => {
+  const normalizedFlow = normalizeResearchTaskFlow(flow);
+  const workflow = normalizeRecord(normalizedFlow?.workflow, null);
+
+  if (!normalizedFlow || !workflow) {
+    return null;
+  }
+
+  return {
+    id: normalizeText(workflow.id, 120),
+    version: normalizeText(workflow.version, 40),
+    type: normalizeText(workflow.type, 80),
+    label: normalizeText(workflow.label, 160),
+    status: normalizeText(normalizedFlow.status, 80),
+    currentPhaseId: normalizeText(normalizedFlow.currentPhaseId, 80) || null,
+    counts: countResearchTaskPhases(normalizedFlow.phases),
+    completionChecks: toArray(workflow.completionChecks)
+      .map((item) => normalizeText(item, 120))
+      .filter(Boolean),
+    deliverables: toArray(workflow.deliverables).map(compactWorkflowDeliverable),
+  };
+};
+
 export const createResearchTaskFlow = ({
   docIds = [],
   question = "",
@@ -351,12 +387,8 @@ export const compactResearchTaskFlow = (flow = null) => {
     goal: normalizedFlow.goal,
     status: normalizedFlow.status,
     currentPhaseId: normalizedFlow.currentPhaseId,
-    counts: {
-      completed: normalizedFlow.phases.filter(
-        (phase) => phase.status === "completed"
-      ).length,
-      total: normalizedFlow.phases.length,
-    },
+    counts: countResearchTaskPhases(normalizedFlow.phases),
+    workflow: compactWorkflowLifecycle(normalizedFlow),
     phases: normalizedFlow.phases.map((phase) => ({
       expectedCapability: phase.expectedCapability,
       expectedSkill: phase.expectedSkill,

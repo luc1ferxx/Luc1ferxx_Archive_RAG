@@ -23,6 +23,9 @@ import {
 import {
   buildAgentTaskPlanningContext,
 } from "../rag/agent-task-memory.js";
+import {
+  RESEARCH_DOSSIER_WORKFLOW_ID,
+} from "../rag/agent-workflows/built-ins/research-dossier.js";
 import { createPostgresAgentRunStore } from "../rag/postgres-agent-run-store.js";
 import { createPostgresTaskStore } from "../rag/postgres-task-store.js";
 import {
@@ -778,10 +781,39 @@ test("agent task runs a staged research dossier flow before report delivery", as
   assert.equal(task.result.researchTask.counts.completed, 6);
   assert.equal(task.result.goalPlan.researchTask.counts.completed, 6);
   assert.equal(task.result.goalPlan.researchTask.counts.total, 6);
+  assert.equal(
+    task.result.goalPlan.researchTask.workflow.id,
+    RESEARCH_DOSSIER_WORKFLOW_ID
+  );
+  assert.equal(task.result.goalPlan.researchTask.workflow.version, "1.0.0");
+  assert.equal(task.result.goalPlan.researchTask.workflow.currentPhaseId, null);
+  assert.equal(task.result.goalPlan.researchTask.workflow.counts.completed, 6);
+  assert.ok(
+    task.result.goalPlan.researchTask.workflow.completionChecks.includes(
+      "research_phases_completed"
+    )
+  );
+  assert.deepEqual(
+    task.result.goalPlan.researchTask.workflow.deliverables.map(
+      (deliverable) => deliverable.capabilityId
+    ),
+    [
+      CAPABILITY_IDS.documentOrganize,
+      CAPABILITY_IDS.reportExport,
+      CAPABILITY_IDS.summaryCreate,
+      CAPABILITY_IDS.taskCreate,
+    ]
+  );
   assert.equal(task.result.goalCompletion.status, "pending");
   assert.equal(
     task.result.goalCompletion.checks.find(
       (check) => check.id === "research_phases_completed"
+    )?.passed,
+    true
+  );
+  assert.equal(
+    task.result.goalCompletion.checks.find(
+      (check) => check.id === "workflow_lifecycle_recorded"
     )?.passed,
     true
   );
