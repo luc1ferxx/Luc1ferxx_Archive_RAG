@@ -7,6 +7,15 @@ import {
   isRerankEnabled,
 } from "./config.js";
 import {
+  MODEL_CAPABILITIES,
+  MODEL_ROUTE_IDS,
+  resolveModelRouteForRuntime,
+} from "./model-providers/index.js";
+import {
+  LLMOPS_OPERATIONS,
+  recordLlmOpsMetric,
+} from "./llmops-metrics.js";
+import {
   buildTermSet,
   extractAnchorGroups,
   extractMeaningfulTokens,
@@ -193,6 +202,69 @@ const buildCrossEncoderMetricBase = ({ queryText, pairs, transport }) => ({
   ),
 });
 
+const buildCustomCrossEncoderModelRoute = () => ({
+  candidateModelIds: [],
+  capability: MODEL_CAPABILITIES.rerank,
+  fallbackModelIds: [],
+  modelId: null,
+  providerId: "custom_cross_encoder_provider",
+  rejectedModelIds: [],
+  routeId: null,
+  status: "custom_provider",
+});
+
+const buildConfiguredCrossEncoderModelRoute = (configuredModel) => ({
+  candidateModelIds: [configuredModel].filter(Boolean),
+  capability: MODEL_CAPABILITIES.rerank,
+  fallbackModelIds: [],
+  modelId: configuredModel || null,
+  providerId: "cross_encoder_http",
+  rejectedModelIds: [],
+  routeId: MODEL_ROUTE_IDS.rerankCrossEncoderDefault,
+  status: "configured_model",
+});
+
+const resolveHttpCrossEncoderModelRoute = () => {
+  const configuredModel = getCrossEncoderModel().trim();
+
+  if (configuredModel) {
+    return {
+      model: configuredModel,
+      modelRoute: buildConfiguredCrossEncoderModelRoute(configuredModel),
+    };
+  }
+
+  const route = resolveModelRouteForRuntime({
+    capability: MODEL_CAPABILITIES.rerank,
+    routeId: MODEL_ROUTE_IDS.rerankCrossEncoderDefault,
+  });
+
+  return {
+    model: route.modelName,
+    modelRoute: route.publicRoute,
+  };
+};
+
+const recordCrossEncoderLlmOpsMetric = async ({
+  error = null,
+  latencyMs,
+  metricBase = {},
+  modelRoute,
+  status,
+} = {}) =>
+  recordLlmOpsMetric({
+    error,
+    inputCharacters:
+      toFiniteNumber(metricBase.queryCharacters) +
+      toFiniteNumber(metricBase.totalTextCharacters),
+    itemCount: toFiniteNumber(metricBase.candidateCount),
+    latencyMs,
+    modelRoute,
+    operation: LLMOPS_OPERATIONS.rerank,
+    stage: "cross_encoder_score",
+    status,
+  });
+
 const normalizeScores = (scores) => {
   const finiteScores = scores.map((score) => toFiniteNumber(score, 0));
   const minimumScore = Math.min(...finiteScores);
@@ -311,7 +383,7 @@ const parseCrossEncoderScores = (payload, expectedCount) => {
   return scores;
 };
 
-const scoreWithHttpCrossEncoder = async ({ queryText, pairs }) => {
+const scoreWithHttpCrossEncoder = async ({ queryText, pairs, model = "" }) => {
   const endpoint = getCrossEncoderEndpoint().trim();
 
   if (!endpoint) {
@@ -320,7 +392,6 @@ const scoreWithHttpCrossEncoder = async ({ queryText, pairs }) => {
     );
   }
 
-  const model = getCrossEncoderModel().trim();
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
@@ -345,6 +416,12 @@ const scoreWithHttpCrossEncoder = async ({ queryText, pairs }) => {
 const scoreWithCrossEncoder = async ({ queryText, results }) => {
   const pairs = buildCrossEncoderPairs(results);
   const transport = crossEncoderProvider?.score ? "custom-provider" : "http";
+  const routeSelection = crossEncoderProvider?.score
+    ? {
+        model: "",
+        modelRoute: buildCustomCrossEncoderModelRoute(),
+      }
+    : resolveHttpCrossEncoderModelRoute();
   const metricBase = buildCrossEncoderMetricBase({
     queryText,
     pairs,
@@ -361,23 +438,40 @@ const scoreWithCrossEncoder = async ({ queryText, results }) => {
         })
       : await scoreWithHttpCrossEncoder({
           queryText,
+          model: routeSelection.model,
           pairs,
         });
+    const latencyMs = toMetricNumber(performance.now() - startedAt);
 
     emitRerankMetric({
       ...metricBase,
       status: "ok",
-      latencyMs: toMetricNumber(performance.now() - startedAt),
+      latencyMs,
+    });
+    await recordCrossEncoderLlmOpsMetric({
+      latencyMs,
+      metricBase,
+      modelRoute: routeSelection.modelRoute,
+      status: "ok",
     });
 
     return scores;
   } catch (error) {
+    const latencyMs = toMetricNumber(performance.now() - startedAt);
+
     emitRerankMetric({
       ...metricBase,
       status: "error",
-      latencyMs: toMetricNumber(performance.now() - startedAt),
+      latencyMs,
       errorName: error?.name ?? "Error",
       errorMessage: error?.message ?? String(error),
+    });
+    await recordCrossEncoderLlmOpsMetric({
+      error,
+      latencyMs,
+      metricBase,
+      modelRoute: routeSelection.modelRoute,
+      status: "error",
     });
 
     throw error;

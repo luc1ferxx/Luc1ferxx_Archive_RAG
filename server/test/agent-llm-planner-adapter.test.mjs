@@ -75,6 +75,8 @@ test("llm planner adapter parses fenced JSON execution plan output", async () =>
     assert.match(renderedPrompt, /Task memory, when present, is planning context only/i);
     assert.match(renderedPrompt, /taskMemoryPlanningContext/);
     assert.doesNotMatch(renderedPrompt, /ragSources/);
+    assert.equal(executionPlan.modelRoute.status, "custom_provider");
+    assert.equal(executionPlan.modelRoute.providerId, "custom_provider");
     assert.deepEqual(executionPlan, [
       {
         condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,

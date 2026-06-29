@@ -311,14 +311,29 @@ test("execution planner result reports selected planner metadata", async () => {
   });
   const proposedAdapter = {
     id: "llm",
-    createExecutionPlan: async () => [
-      {
-        condition: "selected_skill",
-        id: AGENT_EXECUTION_STEP_IDS.documentRag,
-        reason: "Use document evidence first.",
-        skillId: AGENT_SKILL_IDS.documentRag,
-      },
-    ],
+    createExecutionPlan: async () => {
+      const plan = [
+        {
+          condition: "selected_skill",
+          id: AGENT_EXECUTION_STEP_IDS.documentRag,
+          reason: "Use document evidence first.",
+          skillId: AGENT_SKILL_IDS.documentRag,
+        },
+      ];
+
+      Object.defineProperty(plan, "modelRoute", {
+        enumerable: false,
+        value: {
+          capability: "execution_planner",
+          modelId: "openai.chat",
+          providerId: "openai",
+          routeId: "planner.execution.default",
+          status: "selected",
+        },
+      });
+
+      return plan;
+    },
   };
 
   const result = await createAgentExecutionPlanResult({
@@ -332,6 +347,13 @@ test("execution planner result reports selected planner metadata", async () => {
   assert.equal(result.planner.selectedPlannerId, "llm");
   assert.equal(result.planner.status, "selected");
   assert.equal(result.planner.fallback, false);
+  assert.deepEqual(result.planner.modelRoute, {
+    capability: "execution_planner",
+    modelId: "openai.chat",
+    providerId: "openai",
+    routeId: "planner.execution.default",
+    status: "selected",
+  });
   assert.deepEqual(result.planner.stepIds, [AGENT_EXECUTION_STEP_IDS.documentRag]);
 });
 

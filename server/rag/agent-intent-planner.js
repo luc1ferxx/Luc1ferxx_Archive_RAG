@@ -91,6 +91,7 @@ export const createAgentIntentPlanResult = async ({
       planner: buildPlannerSelection({
         candidates,
         experienceMemory,
+        modelRoute: fallbackSelection.modelRoute,
         requestedPlannerId: fallbackPlannerId,
         selectedCandidate: fallbackSelection.selectedCandidate,
         selectedPlannerId: fallbackPlannerId,
@@ -168,6 +169,7 @@ export const createAgentIntentPlanResult = async ({
       planner: buildPlannerSelection({
         candidates,
         experienceMemory,
+        modelRoute: selected.modelRoute,
         requestedPlannerId,
         selectedCandidate: selected.selectedCandidate,
         selectedPlannerId: requestedPlannerId,

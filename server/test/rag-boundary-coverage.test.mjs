@@ -21,6 +21,13 @@ import {
   resetCustomRerankProvider,
   resetRerankMetricsCollector,
 } from "../rag/reranker.js";
+import {
+  MODEL_CAPABILITIES,
+  MODEL_ROUTE_IDS,
+  configureModelProviderRegistry,
+  createModelProviderRegistry,
+  resetModelProviderRegistry,
+} from "../rag/model-providers/index.js";
 
 const originalFetch = globalThis.fetch;
 const originalConsoleError = console.error;
@@ -88,6 +95,7 @@ afterEach(() => {
   resetCrossEncoderProvider();
   resetCustomRerankProvider();
   resetRerankMetricsCollector();
+  resetModelProviderRegistry();
   globalThis.fetch = originalFetch;
   console.error = originalConsoleError;
 });
@@ -582,6 +590,68 @@ test("http cross-encoder rerank parses score arrays and indexed data payloads", 
       });
 
       assert.equal(reranked[0].document.id, "semantic");
+    }
+  );
+});
+
+test("http cross-encoder rerank can read model name from model provider route", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_ENABLED: "true",
+      RAG_RERANK_PROVIDER: "cross-encoder",
+      RAG_RERANK_WEIGHT: "0.95",
+      RAG_CROSS_ENCODER_ENDPOINT: "https://rerank.example.test/score",
+      RAG_CROSS_ENCODER_MODEL: undefined,
+    },
+    async () => {
+      const requestBodies = [];
+
+      configureModelProviderRegistry(
+        createModelProviderRegistry({
+          providers: [
+            {
+              id: "cross_encoder",
+              label: "Cross Encoder",
+              models: [
+                {
+                  capabilities: [MODEL_CAPABILITIES.rerank],
+                  id: "cross_encoder.default",
+                  label: "Default cross encoder",
+                  modelName: "registry-cross-encoder",
+                },
+              ],
+              routes: [
+                {
+                  capability: MODEL_CAPABILITIES.rerank,
+                  id: MODEL_ROUTE_IDS.rerankCrossEncoderDefault,
+                  primaryModelId: "cross_encoder.default",
+                },
+              ],
+              transport: {
+                type: "http",
+              },
+            },
+          ],
+        })
+      );
+
+      globalThis.fetch = async (_url, options) => {
+        requestBodies.push(JSON.parse(options.body));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [0.1, 0.9],
+        };
+      };
+
+      const reranked = await rerankResultsWithProvider({
+        queryText: "quartz capsule approval",
+        results: makeRerankResults(),
+        topK: 1,
+      });
+
+      assert.equal(reranked[0].document.id, "semantic");
+      assert.equal(requestBodies[0].model, "registry-cross-encoder");
     }
   );
 });

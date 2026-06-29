@@ -21,6 +21,7 @@ import {
 } from "../feedback.js";
 import {
   completeText,
+  completeTextWithMetadata,
   configureOpenAIProvider,
   embedQuery,
   embedTexts,
@@ -685,6 +686,16 @@ test("OpenAI adapter contract normalizes custom providers and surfaces configura
       ],
     }),
     /SYSTEM:\nUse evidence\.\n\nHUMAN:\nAnswer the question\./
+  );
+  const completionWithMetadata = await completeTextWithMetadata(
+    "prompt with sk-test-secret-value"
+  );
+
+  assert.equal(completionWithMetadata.modelRoute.status, "custom_provider");
+  assert.equal(completionWithMetadata.modelRoute.providerId, "custom_provider");
+  assert.doesNotMatch(
+    JSON.stringify(completionWithMetadata.modelRoute),
+    /sk-test-secret-value/
   );
 
   configureOpenAIProvider({

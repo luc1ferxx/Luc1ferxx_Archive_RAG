@@ -90,16 +90,26 @@ const buildPlannerSelection = ({
   executionPlan,
   fallback = false,
   fallbackReason = null,
+  modelRoute = null,
   requestedPlannerId,
   selectedPlannerId,
-}) => ({
-  fallback,
-  fallbackReason: fallbackReason ? serializePlannerError(fallbackReason) : null,
-  requestedPlannerId,
-  selectedPlannerId,
-  status: fallback ? "fallback" : "selected",
-  stepIds: executionPlan.map((step) => step.id),
-});
+}) => {
+  const planner = {
+    fallback,
+    fallbackReason: fallbackReason ? serializePlannerError(fallbackReason) : null,
+    requestedPlannerId,
+    selectedPlannerId,
+    status: fallback ? "fallback" : "selected",
+    stepIds: executionPlan.map((step) => step.id),
+  };
+
+  return modelRoute
+    ? {
+        ...planner,
+        modelRoute,
+      }
+    : planner;
+};
 
 const getSelectedSkill = (selectedSkills = [], skillId) =>
   selectedSkills.find((skill) => skill.id === skillId) ?? null;
@@ -419,14 +429,34 @@ export const createAgentExecutionPlanResult = async ({
         }
       : planner;
   const createFallbackPlan = async () =>
-    validateAgentExecutionPlan({
+    createValidatedPlanWithMetadata({
       accessScope,
-      executionPlan: await fallbackPlannerAdapter.createExecutionPlan(
-        plannerContext
-      ),
+      plannerAdapter: fallbackPlannerAdapter,
+      plannerContext,
       registry,
       selectedSkills,
     });
+  const createValidatedPlanWithMetadata = async ({
+    accessScope,
+    plannerAdapter,
+    plannerContext,
+    registry,
+    selectedSkills,
+  } = {}) => {
+    const rawExecutionPlan = await plannerAdapter.createExecutionPlan(
+      plannerContext
+    );
+
+    return {
+      executionPlan: validateAgentExecutionPlan({
+        accessScope,
+        executionPlan: rawExecutionPlan,
+        registry,
+        selectedSkills,
+      }),
+      modelRoute: rawExecutionPlan?.modelRoute ?? null,
+    };
+  };
 
   const attachShadowPlanner = async (result) => {
     const shadow = await runShadowPlanner({
@@ -438,13 +468,17 @@ export const createAgentExecutionPlanResult = async ({
       describe: (shadowExecutionPlan) => ({
         stepIds: shadowExecutionPlan.map((step) => step.id),
       }),
-      execute: async (adapter) =>
-        validateAgentExecutionPlan({
+      execute: async (adapter) => {
+        const result = await createValidatedPlanWithMetadata({
           accessScope,
-          executionPlan: await adapter.createExecutionPlan(plannerContext),
+          plannerAdapter: adapter,
+          plannerContext,
           registry,
           selectedSkills,
-        }),
+        });
+
+        return result.executionPlan;
+      },
       primary: result,
       shadowPlannerAdapter,
     });
@@ -466,12 +500,14 @@ export const createAgentExecutionPlanResult = async ({
   };
 
   if (!plannerAdapter || plannerAdapter === fallbackPlannerAdapter) {
-    const executionPlan = await createFallbackPlan();
+    const fallbackPlan = await createFallbackPlan();
+    const { executionPlan } = fallbackPlan;
 
     return attachShadowPlanner({
       executionPlan,
       planner: buildPlannerSelection({
         executionPlan,
+        modelRoute: fallbackPlan.modelRoute,
         requestedPlannerId: fallbackPlannerId,
         selectedPlannerId: fallbackPlannerId,
       }),
@@ -479,23 +515,27 @@ export const createAgentExecutionPlanResult = async ({
   }
 
   try {
-    const executionPlan = validateAgentExecutionPlan({
+    const selectedPlan = await createValidatedPlanWithMetadata({
       accessScope,
-      executionPlan: await plannerAdapter.createExecutionPlan(plannerContext),
+      plannerAdapter,
+      plannerContext,
       registry,
       selectedSkills,
     });
+    const { executionPlan } = selectedPlan;
 
     return attachShadowPlanner({
       executionPlan,
       planner: buildPlannerSelection({
         executionPlan,
+        modelRoute: selectedPlan.modelRoute,
         requestedPlannerId,
         selectedPlannerId: requestedPlannerId,
       }),
     });
   } catch (error) {
-    const executionPlan = await createFallbackPlan();
+    const fallbackPlan = await createFallbackPlan();
+    const { executionPlan } = fallbackPlan;
 
     return attachShadowPlanner({
       executionPlan,
@@ -503,6 +543,7 @@ export const createAgentExecutionPlanResult = async ({
         executionPlan,
         fallback: true,
         fallbackReason: error,
+        modelRoute: fallbackPlan.modelRoute,
         requestedPlannerId,
         selectedPlannerId: fallbackPlannerId,
       }),

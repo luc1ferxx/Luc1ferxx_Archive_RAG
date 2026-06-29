@@ -4,7 +4,11 @@ import {
   AGENT_EXECUTION_STEP_SCHEMA,
 } from "./agent-execution-plan.js";
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
-import { completeText } from "./openai.js";
+import { completeTextWithMetadata } from "./openai.js";
+import {
+  MODEL_CAPABILITIES,
+  MODEL_ROUTE_IDS,
+} from "./model-providers/index.js";
 
 const MAX_REASON_LENGTH = 220;
 
@@ -176,6 +180,16 @@ const normalizePlannerPayload = (payload, plannerContext = {}) => {
   return normalizedSteps;
 };
 
+const attachModelRoute = (executionPlan = [], modelRoute = null) => {
+  Object.defineProperty(executionPlan, "modelRoute", {
+    configurable: true,
+    enumerable: false,
+    value: modelRoute,
+  });
+
+  return executionPlan;
+};
+
 const buildPlannerPrompt = ({
   docIds = [],
   plan = {},
@@ -218,8 +232,17 @@ const buildPlannerPrompt = ({
 export const llmPlannerAdapter = {
   id: "llm",
   createExecutionPlan: async (plannerContext = {}) => {
-    const response = await completeText(buildPlannerPrompt(plannerContext));
+    const completion = await completeTextWithMetadata(
+      buildPlannerPrompt(plannerContext),
+      {
+        capability: MODEL_CAPABILITIES.executionPlanner,
+        routeId: MODEL_ROUTE_IDS.executionPlannerDefault,
+      }
+    );
 
-    return normalizePlannerPayload(parsePlannerJson(response), plannerContext);
+    return attachModelRoute(
+      normalizePlannerPayload(parsePlannerJson(completion.text), plannerContext),
+      completion.modelRoute
+    );
   },
 };

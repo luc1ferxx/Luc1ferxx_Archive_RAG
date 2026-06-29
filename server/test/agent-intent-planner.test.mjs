@@ -158,6 +158,8 @@ test("LLM intent planner parses a provider-selected candidate id", async () => {
     assert.equal(result.planner.selectedPlannerId, "llm");
     assert.equal(result.planner.selectedIntentId, CUSTOM_SKILL_IDS.riskReview);
     assert.equal(result.planner.status, "selected");
+    assert.equal(result.planner.modelRoute.status, "custom_provider");
+    assert.equal(result.planner.modelRoute.providerId, "custom_provider");
   } finally {
     resetOpenAIProvider();
   }

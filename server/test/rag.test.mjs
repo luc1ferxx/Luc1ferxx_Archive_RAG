@@ -566,6 +566,20 @@ const readObservabilityEvents = async () =>
     .filter(Boolean)
     .map((line) => JSON.parse(line));
 
+const isRagTraceEvent = (event = {}) =>
+  Boolean(
+    event.routeMode ||
+      event.retrievalResults ||
+      event.perDocumentResults ||
+      event.finalSourceBundle
+  );
+
+const isLlmOpsMetricEvent = (event = {}) =>
+  event.traceType === "llmops" && event.eventType === "llmops_metric";
+
+const readRagObservabilityEvents = async () =>
+  (await readObservabilityEvents()).filter(isRagTraceEvent);
+
 const buildComparisonAnalysis = ({ query, entries }) => {
   const documents = entries.map((entry) => ({
     docId: entry.docId,
@@ -1005,7 +1019,7 @@ test("observability disabled does not create events jsonl", async () => {
   });
 });
 
-test("observability enabled writes one qa jsonl event", async () => {
+test("observability enabled writes one qa trace plus llmops events", async () => {
   await ingestFixture({
     docId: "benefits-observe-on",
     fileName: "benefits-observe-on.pdf",
@@ -1027,23 +1041,31 @@ test("observability enabled writes one qa jsonl event", async () => {
         "What is the annual leave policy?"
       );
       const events = await readObservabilityEvents();
+      const ragEvents = events.filter(isRagTraceEvent);
+      const llmopsEvents = events.filter(isLlmOpsMetricEvent);
+      const [event] = ragEvents;
 
       assert.match(response.text, /Grounded answer/);
-      assert.equal(events.length, 1);
-      assert.equal(events[0].routeMode, "qa");
-      assert.equal(events[0].query, "What is the annual leave policy?");
-      assert.equal(events[0].resolvedQuery, "What is the annual leave policy?");
-      assert.deepEqual(events[0].docIds, ["benefits-observe-on"]);
-      assert.equal(events[0].retrievalConfig.hybridEnabled, false);
-      assert.equal(events[0].retrievalConfig.rerankEnabled, false);
-      assert.equal(events[0].retrievalConfig.retrievalTopK, 6);
-      assert.ok(events[0].traceId);
-      assert.ok(events[0].timestamp);
-      assert.ok(events[0].latencyMs >= 0);
-      assert.equal(events[0].abstained, false);
-      assert.equal(events[0].answerLength, response.text.length);
-      assert.ok(events[0].retrievalResults.length > 0);
-      assert.ok(events[0].finalSourceBundle.sources.length > 0);
+      assert.equal(ragEvents.length, 1);
+      assert.ok(llmopsEvents.length >= 2);
+      assert.deepEqual(
+        [...new Set(llmopsEvents.map((metric) => metric.operation))].sort(),
+        ["embedding", "llm_completion"]
+      );
+      assert.equal(event.routeMode, "qa");
+      assert.equal(event.query, "What is the annual leave policy?");
+      assert.equal(event.resolvedQuery, "What is the annual leave policy?");
+      assert.deepEqual(event.docIds, ["benefits-observe-on"]);
+      assert.equal(event.retrievalConfig.hybridEnabled, false);
+      assert.equal(event.retrievalConfig.rerankEnabled, false);
+      assert.equal(event.retrievalConfig.retrievalTopK, 6);
+      assert.ok(event.traceId);
+      assert.ok(event.timestamp);
+      assert.ok(event.latencyMs >= 0);
+      assert.equal(event.abstained, false);
+      assert.equal(event.answerLength, response.text.length);
+      assert.ok(event.retrievalResults.length > 0);
+      assert.ok(event.finalSourceBundle.sources.length > 0);
     }
   );
 });
@@ -1096,7 +1118,7 @@ test("chat uses an agent retrieval plan for observability and dynamic topK", asy
           },
         }
       );
-      const events = await readObservabilityEvents();
+      const events = await readRagObservabilityEvents();
 
       assert.equal(events.length, 1);
       assert.equal(events[0].agentRetrievalPlan.intent, "fact");
@@ -1132,7 +1154,7 @@ test("observability default trace omits full pageContent and text", async () => 
         ["benefits-observe-private"],
         "What is the annual leave policy?"
       );
-      const [event] = await readObservabilityEvents();
+      const [event] = await readRagObservabilityEvents();
       const [resultTrace] = event.retrievalResults;
       const serializedEvent = JSON.stringify(event);
 
@@ -1167,7 +1189,7 @@ test("observability include context records full pageContent and text", async ()
         ["benefits-observe-context"],
         "What is the annual leave policy?"
       );
-      const [event] = await readObservabilityEvents();
+      const [event] = await readRagObservabilityEvents();
       const [resultTrace] = event.retrievalResults;
 
       assert.equal(resultTrace.pageContent, fullPolicyText);
@@ -1202,7 +1224,7 @@ test("compare observability groups per-document results by docId", async () => {
         ["benefits-observe-2024", "benefits-observe-2025"],
         "Compare the remote work policy."
       );
-      const [event] = await readObservabilityEvents();
+      const [event] = await readRagObservabilityEvents();
 
       assert.equal(event.routeMode, "compare");
       assert.deepEqual(Object.keys(event.perDocumentResults).sort(), [
@@ -1255,7 +1277,7 @@ test("rerank observability includes originalScore and rerankScore", async () => 
           ["benefits-observe-rerank"],
           "What is the annual leave policy?"
         );
-        const [event] = await readObservabilityEvents();
+        const [event] = await readRagObservabilityEvents();
         const [resultTrace] = event.retrievalResults;
 
         assert.equal(event.retrievalConfig.rerankEnabled, true);

@@ -1,10 +1,14 @@
-import { completeText } from "./openai.js";
+import { completeTextWithMetadata } from "./openai.js";
 import {
   compactPlanCandidate,
   normalizeIntentSelection,
   normalizeIntentText,
 } from "./agent-intent-validator.js";
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
+import {
+  MODEL_CAPABILITIES,
+  MODEL_ROUTE_IDS,
+} from "./model-providers/index.js";
 
 const extractJsonCandidate = (rawText) => {
   const text = String(rawText ?? "").trim();
@@ -80,10 +84,18 @@ export const deterministicIntentPlannerAdapter = {
 
 export const llmIntentPlannerAdapter = {
   id: "llm",
-  selectIntentPlan: async (plannerContext = {}) =>
-    normalizeIntentSelection(
-      parseIntentPlannerJson(
-        await completeText(buildIntentPlannerPrompt(plannerContext))
-      )
-    ),
+  selectIntentPlan: async (plannerContext = {}) => {
+    const completion = await completeTextWithMetadata(
+      buildIntentPlannerPrompt(plannerContext),
+      {
+        capability: MODEL_CAPABILITIES.intentPlanner,
+        routeId: MODEL_ROUTE_IDS.intentPlannerDefault,
+      }
+    );
+
+    return {
+      ...normalizeIntentSelection(parseIntentPlannerJson(completion.text)),
+      modelRoute: completion.modelRoute,
+    };
+  },
 };

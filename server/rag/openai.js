@@ -1,8 +1,16 @@
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
-import { getChatModel, getEmbeddingModel } from "./config.js";
+import {
+  MODEL_CAPABILITIES,
+  MODEL_ROUTE_IDS,
+  resolveModelRouteForRuntime,
+} from "./model-providers/index.js";
+import {
+  LLMOPS_OPERATIONS,
+  runWithLlmOpsMetric,
+} from "./llmops-metrics.js";
 
-let embeddingsInstance = null;
-let chatModelInstance = null;
+let embeddingsInstances = new Map();
+let chatModelInstances = new Map();
 let customProvider = null;
 
 const RETRY_DELAYS_MS = [250, 750, 1500];
@@ -68,38 +76,133 @@ export const getOpenAIApiKey = () => {
   return apiKey;
 };
 
-export const getEmbeddings = () => {
-  if (customProvider?.getEmbeddings) {
-    return customProvider.getEmbeddings();
+const buildCustomProviderRoute = (capability) => ({
+  candidateModelIds: [],
+  capability,
+  fallbackModelIds: [],
+  modelId: null,
+  providerId: "custom_provider",
+  rejectedModelIds: [],
+  routeId: null,
+  status: "custom_provider",
+});
+
+const assertSelectedModelRoute = ({ modelName, publicRoute }) => {
+  if (modelName) {
+    return;
   }
 
-  if (embeddingsInstance) {
-    return embeddingsInstance;
-  }
-
-  embeddingsInstance = new OpenAIEmbeddings({
-    apiKey: getOpenAIApiKey(),
-    model: getEmbeddingModel(),
-  });
-
-  return embeddingsInstance;
+  const error = new Error(
+    `Model route did not select a model: ${publicRoute?.routeId || publicRoute?.capability || "unknown"}.`
+  );
+  error.status = 500;
+  throw error;
 };
 
-const getChatModelInstance = () => {
+const getRouteCacheKey = ({ modelName, publicRoute }) =>
+  [publicRoute?.providerId, publicRoute?.modelId, modelName]
+    .filter(Boolean)
+    .join(":");
+
+const getTextCharacters = (value) => String(value ?? "").length;
+
+const getTextListCharacters = (texts = []) =>
+  (Array.isArray(texts) ? texts : []).reduce(
+    (sum, text) => sum + getTextCharacters(text),
+    0
+  );
+
+const getEmbeddingMetricBase = ({ stage, modelRoute, inputCharacters, itemCount }) => ({
+  inputCharacters,
+  itemCount,
+  modelRoute,
+  operation: LLMOPS_OPERATIONS.embedding,
+  stage,
+});
+
+const getEmbeddingsInstance = (options = {}) => {
+  if (customProvider?.getEmbeddings) {
+    return {
+      instance: customProvider.getEmbeddings(),
+      modelRoute: buildCustomProviderRoute(MODEL_CAPABILITIES.embedding),
+    };
+  }
+
+  const route = resolveModelRouteForRuntime({
+    capability: MODEL_CAPABILITIES.embedding,
+    routeId: MODEL_ROUTE_IDS.embeddingDefault,
+    workspacePolicy: options.workspacePolicy,
+  });
+
+  assertSelectedModelRoute(route);
+
+  const cacheKey = getRouteCacheKey(route);
+  const cachedInstance = embeddingsInstances.get(cacheKey);
+
+  if (cachedInstance) {
+    return {
+      instance: cachedInstance,
+      modelRoute: route.publicRoute,
+    };
+  }
+
+  const embeddingsInstance = new OpenAIEmbeddings({
+    apiKey: getOpenAIApiKey(),
+    model: route.modelName,
+  });
+
+  embeddingsInstances.set(cacheKey, embeddingsInstance);
+  return {
+    instance: embeddingsInstance,
+    modelRoute: route.publicRoute,
+  };
+};
+
+export const getEmbeddings = (options = {}) => {
+  const { instance } = getEmbeddingsInstance(options);
+
+  return instance;
+};
+
+const getChatModelInstance = (options = {}) => {
   if (customProvider?.getChatModel) {
-    return customProvider.getChatModel();
+    return {
+      instance: customProvider.getChatModel(),
+      modelRoute: buildCustomProviderRoute(
+        options.capability ?? MODEL_CAPABILITIES.chat
+      ),
+    };
   }
 
-  if (chatModelInstance) {
-    return chatModelInstance;
+  const route = resolveModelRouteForRuntime({
+    capability: options.capability ?? MODEL_CAPABILITIES.chat,
+    routeId: options.routeId ?? MODEL_ROUTE_IDS.chatDefault,
+    workspacePolicy: options.workspacePolicy,
+  });
+
+  assertSelectedModelRoute(route);
+
+  const cacheKey = getRouteCacheKey(route);
+  const cachedInstance = chatModelInstances.get(cacheKey);
+
+  if (cachedInstance) {
+    return {
+      instance: cachedInstance,
+      modelRoute: route.publicRoute,
+    };
   }
 
-  chatModelInstance = new ChatOpenAI({
-    model: getChatModel(),
+  const chatModelInstance = new ChatOpenAI({
+    model: route.modelName,
     apiKey: getOpenAIApiKey(),
   });
 
-  return chatModelInstance;
+  chatModelInstances.set(cacheKey, chatModelInstance);
+
+  return {
+    instance: chatModelInstance,
+    modelRoute: route.publicRoute,
+  };
 };
 
 const normalizeContent = (content) => {
@@ -179,8 +282,8 @@ const renderPromptInput = (prompt) => {
 
 export const configureOpenAIProvider = (provider) => {
   customProvider = provider ?? null;
-  embeddingsInstance = null;
-  chatModelInstance = null;
+  embeddingsInstances = new Map();
+  chatModelInstances = new Map();
 };
 
 export const resetOpenAIProvider = () => {
@@ -188,35 +291,124 @@ export const resetOpenAIProvider = () => {
 };
 
 export const embedTexts = async (texts) => {
+  const safeTexts = Array.isArray(texts) ? texts : [];
+
   if (customProvider?.embedTexts) {
-    return customProvider.embedTexts(texts);
+    const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
+
+    return runWithLlmOpsMetric({
+      action: () => customProvider.embedTexts(texts),
+      metric: getEmbeddingMetricBase({
+        inputCharacters: getTextListCharacters(safeTexts),
+        itemCount: safeTexts.length,
+        modelRoute,
+        stage: "embed_documents",
+      }),
+    });
   }
 
-  return withRetry(
-    async () => getEmbeddings().embedDocuments(texts),
-    "Embedding request failed."
-  );
+  const { instance, modelRoute } = getEmbeddingsInstance();
+
+  return runWithLlmOpsMetric({
+    action: () =>
+      withRetry(
+        async () => instance.embedDocuments(texts),
+        "Embedding request failed."
+      ),
+    metric: getEmbeddingMetricBase({
+      inputCharacters: getTextListCharacters(safeTexts),
+      itemCount: safeTexts.length,
+      modelRoute,
+      stage: "embed_documents",
+    }),
+  });
 };
 
 export const embedQuery = async (query) => {
   if (customProvider?.embedQuery) {
-    return customProvider.embedQuery(query);
+    const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
+
+    return runWithLlmOpsMetric({
+      action: () => customProvider.embedQuery(query),
+      metric: getEmbeddingMetricBase({
+        inputCharacters: getTextCharacters(query),
+        itemCount: 1,
+        modelRoute,
+        stage: "embed_query",
+      }),
+    });
   }
 
-  return withRetry(
-    async () => getEmbeddings().embedQuery(query),
-    "Query embedding request failed."
-  );
+  const { instance, modelRoute } = getEmbeddingsInstance();
+
+  return runWithLlmOpsMetric({
+    action: () =>
+      withRetry(
+        async () => instance.embedQuery(query),
+        "Query embedding request failed."
+      ),
+    metric: getEmbeddingMetricBase({
+      inputCharacters: getTextCharacters(query),
+      itemCount: 1,
+      modelRoute,
+      stage: "embed_query",
+    }),
+  });
 };
 
 export const completeText = async (prompt) => {
+  const completion = await completeTextWithMetadata(prompt);
+
+  return completion.text;
+};
+
+export const completeTextWithMetadata = async (prompt, options = {}) => {
+  const inputText = renderPromptInput(prompt);
+  const capability = options.capability ?? MODEL_CAPABILITIES.chat;
+
   if (customProvider?.completeText) {
-    return customProvider.completeText(renderPromptInput(prompt));
+    const modelRoute = buildCustomProviderRoute(capability);
+    const text = await runWithLlmOpsMetric({
+      action: () => customProvider.completeText(inputText),
+      metric: {
+        inputCharacters: inputText.length,
+        itemCount: 1,
+        modelRoute,
+        operation: LLMOPS_OPERATIONS.completion,
+        stage: "complete_text",
+      },
+      successMetric: (result) => ({
+        outputCharacters: getTextCharacters(result),
+      }),
+    });
+
+    return {
+      modelRoute,
+      text,
+    };
   }
 
-  const response = await withRetry(
-    async () => getChatModelInstance().invoke(prompt),
-    "Chat completion failed."
-  );
-  return normalizeContent(response.content);
+  const { instance, modelRoute } = getChatModelInstance(options);
+  const response = await runWithLlmOpsMetric({
+    action: () =>
+      withRetry(
+        async () => instance.invoke(prompt),
+        "Chat completion failed."
+      ),
+    metric: {
+      inputCharacters: inputText.length,
+      itemCount: 1,
+      modelRoute,
+      operation: LLMOPS_OPERATIONS.completion,
+      stage: "complete_text",
+    },
+    successMetric: (result) => ({
+      outputCharacters: getTextCharacters(normalizeContent(result?.content)),
+    }),
+  });
+
+  return {
+    modelRoute,
+    text: normalizeContent(response.content),
+  };
 };
