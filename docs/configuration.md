@@ -56,6 +56,23 @@ STARTUP_HEALTH_STRICT=false
 
 arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要能访问 `https://export.arxiv.org/api/query` 和对应 PDF URL。
 
+## Model/provider registry
+
+`server/rag/model-providers/` 是 provider/model registry 和 runtime route resolver。`server/rag/openai.js` 通过它选择 chat/embedding model name；LLM intent/execution planner 会把公开 `modelRoute` 写入 observability；LLMOps metrics 也复用同一份公开 `modelRoute` 作为 completion/embedding/rerank 的聚合维度；cross-encoder rerank 在 `RAG_CROSS_ENCODER_MODEL` 未显式配置时，可以从 registry route 读取 model name。
+
+默认 registry 从现有变量生成 OpenAI routes：
+
+| Route | Capability | 默认模型来源 |
+| --- | --- | --- |
+| `chat.default` | `chat` | `OPENAI_CHAT_MODEL` |
+| `embedding.default` | `embedding` | `OPENAI_EMBEDDING_MODEL` |
+| `planner.intent.default` | `intent_planner` | `OPENAI_CHAT_MODEL` |
+| `planner.execution.default` | `execution_planner` | `OPENAI_CHAT_MODEL` |
+
+每个 model contract 记录 stable model id、provider model name、capabilities、latency、pricing 和 workspace policy tags。Route resolution 支持 primary/fallback model，以及 workspace policy 的 allowed/blocked model/provider ids 和 required policy tags。后续接线多 provider 或 fallback 时，应复用这个 registry，而不是在 OpenAI、planner、embedding、rerank 模块各自解析一套模型配置。
+
+公开 `modelRoute` metadata 只包含 route/model/provider id、状态、candidate/fallback/rejected model ids，不包含 API key、secret ref value、transport 或 prompt。当前 registry 负责模型选择，LLMOps metric contract 负责把公开 route、latency、status 和输入/输出规模写入 observability；真实 cost、token accounting、latency SLO、annotation 和 alerts 属于后续集成。
+
 ## 存储配置
 
 | 变量 | 默认值 | 作用 |
@@ -145,7 +162,7 @@ API_AUTH_TOKENS={"alice-token":{"userId":"alice","workspaceId":"workspace-a"},"b
 | `RAG_OBSERVABILITY_INCLUDE_CONTEXT` | `false` | Trace 是否记录完整 chunk 文本。 |
 | `FEEDBACK_DIRECTORY` | `server/data/feedback` | 答案反馈 JSONL 存储目录。 |
 
-默认 trace 只保存 metadata、score、`excerptHash` 和短 preview。只有本地调试且能接受完整 chunk 文本落盘时，才建议设置：
+默认 trace 只保存 metadata、score、`excerptHash` 和短 preview。启用后，completion、embedding 和 cross-encoder rerank 还会写入 `llmops_metric` 事件，用于 `observability:report` 汇总 operation / model route 的 count、平均延迟和 error rate；这些事件不包含 prompt 原文或 secret。只有本地调试且能接受完整 chunk 文本落盘时，才建议设置：
 
 ```env
 RAG_OBSERVABILITY_INCLUDE_CONTEXT=true

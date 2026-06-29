@@ -274,6 +274,96 @@ test("observability report aggregates execution planner metrics", () => {
   assert.match(formatted, /inventory:\n      inventory: 2/);
 });
 
+test("observability report aggregates LLMOps metrics by operation and route", () => {
+  const report = buildObservabilityReport({
+    events: [
+      {
+        traceType: "llmops",
+        eventType: "llmops_metric",
+        operation: "llm_completion",
+        stage: "complete_text",
+        status: "ok",
+        latencyMs: 100,
+        inputCharacters: 400,
+        outputCharacters: 120,
+        itemCount: 1,
+        modelRoute: {
+          capability: "chat",
+          modelId: "openai.chat",
+          providerId: "openai",
+          routeId: "chat.default",
+          status: "selected",
+        },
+      },
+      {
+        traceType: "llmops",
+        eventType: "llmops_metric",
+        operation: "embedding",
+        stage: "embed_documents",
+        status: "ok",
+        latencyMs: 50,
+        inputCharacters: 200,
+        itemCount: 2,
+        modelRoute: {
+          capability: "embedding",
+          modelId: "openai.embedding",
+          providerId: "openai",
+          routeId: "embedding.default",
+          status: "selected",
+        },
+      },
+      {
+        traceType: "llmops",
+        eventType: "llmops_metric",
+        operation: "llm_completion",
+        stage: "complete_text",
+        status: "error",
+        latencyMs: 300,
+        inputCharacters: 250,
+        itemCount: 1,
+        errorName: "RateLimitError",
+        errorMessage: "rate limited",
+        modelRoute: {
+          capability: "chat",
+          modelId: "openai.chat",
+          providerId: "openai",
+          routeId: "chat.default",
+          status: "selected",
+        },
+      },
+    ],
+  });
+
+  assert.equal(report.llmops.eventCount, 3);
+  assert.equal(report.llmops.okCount, 2);
+  assert.equal(report.llmops.errorCount, 1);
+  assert.equal(report.llmops.errorRate, 0.3333);
+  assert.equal(report.llmops.avgLatencyMs, 150);
+  assert.equal(report.llmops.totalInputCharacters, 850);
+  assert.deepEqual(report.llmops.statusCounts, {
+    error: 1,
+    ok: 2,
+  });
+  assert.equal(report.llmops.byOperation.llm_completion.eventCount, 2);
+  assert.equal(report.llmops.byOperation.llm_completion.errorRate, 0.5);
+  assert.equal(report.llmops.byOperation.embedding.avgItemCount, 2);
+  assert.equal(
+    report.llmops.byRoute["openai:chat.default:openai.chat"].eventCount,
+    2
+  );
+  assert.equal(
+    report.llmops.byRoute["openai:embedding.default:openai.embedding"].avgLatencyMs,
+    50
+  );
+
+  const formatted = formatObservabilityReport(report);
+
+  assert.match(formatted, /LLMOps Metrics/);
+  assert.match(formatted, /llm_completion: 2 event\(s\), avg latency: 200ms/);
+  assert.match(formatted, /embedding: 1 event\(s\), avg latency: 50ms/);
+  assert.match(formatted, /openai:chat\.default:openai\.chat: 2 event\(s\)/);
+});
+
 test("observability report aggregates recovery and replay metrics", () => {
   const report = buildObservabilityReport({
     events: [

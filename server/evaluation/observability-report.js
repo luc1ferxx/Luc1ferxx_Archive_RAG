@@ -212,6 +212,28 @@ const createRecoveryStats = () => ({
   taskRecoveryActionCounts: {},
 });
 
+const createLlmOpsBucketStats = () => ({
+  eventCount: 0,
+  okCount: 0,
+  errorCount: 0,
+  errorRate: 0,
+  statusCounts: {},
+  totalLatencyMs: 0,
+  avgLatencyMs: 0,
+  totalInputCharacters: 0,
+  avgInputCharacters: 0,
+  totalOutputCharacters: 0,
+  avgOutputCharacters: 0,
+  totalItemCount: 0,
+  avgItemCount: 0,
+});
+
+const createLlmOpsStats = () => ({
+  ...createLlmOpsBucketStats(),
+  byOperation: {},
+  byRoute: {},
+});
+
 const getPlannerId = (value, fallbackValue = "unknown") =>
   String(value ?? fallbackValue).trim() || fallbackValue;
 
@@ -308,6 +330,88 @@ const getTraceType = (event = {}) => String(event.traceType ?? "").trim();
 
 const getEventPayload = (event = {}) =>
   isPlainObject(event.payload) ? event.payload : {};
+
+const isLlmOpsMetricEvent = (event = {}) =>
+  getTraceType(event) === "llmops" && getEventType(event) === "llmops_metric";
+
+const getLlmOpsStatus = (event = {}) =>
+  String(event.status ?? "unknown").trim().toLowerCase() || "unknown";
+
+const getLlmOpsRouteKey = (event = {}) => {
+  const modelRoute = isPlainObject(event.modelRoute) ? event.modelRoute : {};
+  const providerId = String(modelRoute.providerId ?? "unknown_provider").trim() ||
+    "unknown_provider";
+  const routeId = String(
+    modelRoute.routeId ?? modelRoute.capability ?? "unknown_route"
+  ).trim() || "unknown_route";
+  const modelId = String(modelRoute.modelId ?? modelRoute.status ?? "unknown_model")
+    .trim() || "unknown_model";
+
+  return `${providerId}:${routeId}:${modelId}`;
+};
+
+const getLlmOpsBucket = (buckets = {}, key) => {
+  const normalizedKey = String(key ?? "unknown").trim() || "unknown";
+
+  buckets[normalizedKey] ??= createLlmOpsBucketStats();
+  return buckets[normalizedKey];
+};
+
+const addLlmOpsCounters = (stats, event = {}) => {
+  const status = getLlmOpsStatus(event);
+
+  stats.eventCount += 1;
+  stats.totalLatencyMs += toNumber(event.latencyMs);
+  stats.totalInputCharacters += toNonNegativeInteger(event.inputCharacters);
+  stats.totalOutputCharacters += toNonNegativeInteger(event.outputCharacters);
+  stats.totalItemCount += toNonNegativeInteger(event.itemCount);
+  increment(stats.statusCounts, status);
+
+  if (status === "ok") {
+    stats.okCount += 1;
+  }
+
+  if (status === "error") {
+    stats.errorCount += 1;
+  }
+};
+
+const addLlmOpsEvent = (llmops, event = {}) => {
+  addLlmOpsCounters(llmops, event);
+  addLlmOpsCounters(
+    getLlmOpsBucket(llmops.byOperation, event.operation),
+    event
+  );
+  addLlmOpsCounters(getLlmOpsBucket(llmops.byRoute, getLlmOpsRouteKey(event)), event);
+};
+
+const finalizeLlmOpsBucketStats = (stats = createLlmOpsBucketStats()) => {
+  const denominator = Math.max(stats.eventCount, 1);
+
+  return {
+    ...stats,
+    avgInputCharacters: round(stats.totalInputCharacters / denominator, 2),
+    avgItemCount: round(stats.totalItemCount / denominator, 4),
+    avgLatencyMs: round(stats.totalLatencyMs / denominator, 2),
+    avgOutputCharacters: round(stats.totalOutputCharacters / denominator, 2),
+    errorRate:
+      stats.eventCount > 0 ? round(stats.errorCount / stats.eventCount, 4) : 0,
+    totalLatencyMs: round(stats.totalLatencyMs, 2),
+  };
+};
+
+const finalizeLlmOpsBucketMap = (buckets = {}) =>
+  Object.fromEntries(
+    Object.entries(buckets)
+      .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+      .map(([key, stats]) => [key, finalizeLlmOpsBucketStats(stats)])
+  );
+
+const finalizeLlmOpsStats = (llmops) => ({
+  ...finalizeLlmOpsBucketStats(llmops),
+  byOperation: finalizeLlmOpsBucketMap(llmops.byOperation),
+  byRoute: finalizeLlmOpsBucketMap(llmops.byRoute),
+});
 
 const getStepId = (event = {}) => {
   const payload = getEventPayload(event);
@@ -476,8 +580,13 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
   };
   const plannerStats = createPlannerStats();
   const recovery = createRecoveryStats();
+  const llmops = createLlmOpsStats();
 
   for (const event of events) {
+    if (isLlmOpsMetricEvent(event)) {
+      addLlmOpsEvent(llmops, event);
+    }
+
     if (hasAgentObservability(event)) {
       const executionPlanner = getExecutionPlanner(event);
       const observedSkills = getObservedSkills(event);
@@ -572,6 +681,7 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
       ...recovery,
       plannerFallbackCount: planner.fallbackCount,
     }),
+    llmops: finalizeLlmOpsStats(llmops),
     rag: {
       ...rag,
       totalLatencyMs: round(rag.totalLatencyMs, 2),
@@ -606,6 +716,17 @@ const formatNestedCountMap = (counts = {}, { indent = "  " } = {}) => {
 
 const formatTopCountList = (items = [], { indent = "  " } = {}) =>
   items.map((item) => `${indent}${item.value}: ${item.count}`);
+
+const formatLlmOpsBucketMap = (buckets = {}, { indent = "  " } = {}) =>
+  Object.entries(buckets)
+    .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+    .map(
+      ([key, stats]) =>
+        `${indent}${key}: ${stats.eventCount} event(s), avg latency: ${round(
+          stats.avgLatencyMs,
+          1
+        )}ms, error rate: ${toPercent(stats.errorRate)}`
+    );
 
 const formatSkill = (skill) =>
   [
@@ -691,6 +812,34 @@ export const formatObservabilityReport = (report) => {
       indent: "    ",
     }).length
       ? formatNestedCountMap(report.planner.agentModeStepSequences, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    ""
+  );
+
+  lines.push(
+    "LLMOps Metrics",
+    `  events: ${report.llmops.eventCount}`,
+    `  avg latency: ${round(report.llmops.avgLatencyMs, 1)}ms`,
+    `  error rate: ${toPercent(report.llmops.errorRate)}`,
+    "  operations:"
+  );
+  lines.push(
+    ...(formatLlmOpsBucketMap(report.llmops.byOperation, {
+      indent: "    ",
+    }).length
+      ? formatLlmOpsBucketMap(report.llmops.byOperation, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  model routes:"
+  );
+  lines.push(
+    ...(formatLlmOpsBucketMap(report.llmops.byRoute, {
+      indent: "    ",
+    }).length
+      ? formatLlmOpsBucketMap(report.llmops.byRoute, {
           indent: "    ",
         })
       : ["    none: 0"]),

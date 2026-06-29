@@ -110,6 +110,8 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 | `server/rag/agent-goal-deliverables.js` | 从已完成 agent task 的 goal/answer/docIds 推导目标产物，统一构造 capability input、approval gates 和 compact result；runner 只调用 prepare/execute，不直接写 report、summary 或 follow-up task。 |
 | `server/rag/execution-boundary.js` | 定义 capability / connector 执行前的 sandbox 和 secret policy 合同；只做规范化、校验、refs-only secret context 和 schema 外输入过滤，不执行真实 sandbox。 |
 | `server/rag/connectors/` | 定义 connector/MCP adapter contract、白名单 registry 和 connector-backed capability adapter；connector capability 必须映射成现有 capability contract，默认不配置 executor 时拒绝执行。 |
+| `server/rag/model-providers/` | 定义 provider/model/route contract、默认 OpenAI registry、runtime route resolution 和 workspace policy；`openai.js`、LLM planner adapter 和 cross-encoder model name 通过这里选择模型。 |
+| `server/rag/llmops-metrics.js` | 定义 LLMOps metric event contract，统一记录 completion、embedding 和 cross-encoder rerank 的 operation、stage、status、latency、公开 `modelRoute` 和输入/输出规模，不记录 prompt 原文或 secret。 |
 | `server/rag/capabilities/` | 定义 capability registry 和 built-in adapters；capability contract 包含 `id/version/inputSchema/accessScope/approvalPolicy/privacyPolicy/execute()`，当前覆盖 arXiv topic import、web search、workspace document discovery、report export、recommendation import、document compare 和 action capabilities。 |
 | `server/rag/arxiv-selection-token.js` | 对文档级 arXiv 推荐结果签名和验签，确保确认导入的是用户看到的候选。 |
 | `server/rag/agent-query-planner.js` | 为 document/custom skill 生成 retrieval plan、动态 topK 和实际检索 queries。 |
@@ -148,6 +150,28 @@ Connector / MCP adapter 层目前是 contract-only，不会自动加载真实外
 - `execution-boundary.js`：规范化和校验 `sandboxPolicy` / `secretPolicy`。外部调用必须声明允许 network 的 sandbox profile；workspace write 必须声明允许 workspace write；secret 只能以 uppercase ref name 暴露给 executor，不能传 secret value。
 
 Connector capability 执行仍走 `server/rag/capabilities/registry.js` 的 `executeCapability()`，因此会先经过 approval gate、input schema、access scope 和 privacy sanitization。Batch 4/5 不新增 runner 行为，也不让模型直接调用任意 MCP/tool；未注入 executor 的 connector capability 即使获得批准也会返回稳定错误，避免 contract-only 阶段产生隐式外部调用。执行前还会过滤 schema 外输入，避免用户传入的 secret-like 字段被带进 connector executor。
+
+## Model provider contracts
+
+Model/provider registry 是模型选择的统一 contract 和 runtime resolver。`server/rag/model-providers/` 提供：
+
+- `schema.js`：规范化和校验 model provider spec。每个 model 声明 stable id、provider model name、capabilities、pricing、latency 和 workspace policy tags。
+- `registry.js`：注册 provider spec，按 provider/model/route id 去重，并解析 route 的 primary/fallback model。
+- `runtime.js`：为运行时返回内部 model name 和公开 `modelRoute` metadata；公开 metadata 只包含 route/model/provider id、状态和 fallback/rejected id，不暴露 secret 或 transport。
+- `built-ins/openai.js`：把现有 `OPENAI_CHAT_MODEL` 和 `OPENAI_EMBEDDING_MODEL` 声明成默认 OpenAI chat、embedding、intent planner 和 execution planner routes。
+
+Route resolution 会消费 workspace policy，例如 blocked/allowed model ids、provider ids 和 required policy tags；如果 primary model 被 policy 拦截，会尝试 fallback model。`server/rag/openai.js` 现在通过 registry 选择 chat/embedding model name；LLM intent/execution planner 会把选中的 `modelRoute` 写入 planner observability；cross-encoder rerank 在 `RAG_CROSS_ENCODER_MODEL` 未显式配置时，可以从 `rerank.cross_encoder.default` route 读取 model name。
+
+## LLMOps metrics
+
+`server/rag/llmops-metrics.js` 提供 LLMOps metric contract 和 recorder。运行时接线保持在模型调用边界：
+
+- `openai.js` 在 chat completion、embedding documents 和 embedding query 后写入 `traceType: "llmops"` / `eventType: "llmops_metric"`。
+- `reranker.js` 在 cross-encoder rerank 成功或失败后写入同一 contract，同时保留原来的 rerank metrics collector。
+- 事件只记录 operation、stage、status、latencyMs、公开 `modelRoute`、inputCharacters、outputCharacters 和 itemCount；不记录 prompt 原文、chunk 原文、API key、secret ref value 或 transport。
+- `server/evaluation/observability-report.js` 会从同一个 RAG observability JSONL 中汇总 LLMOps events，按 operation 和 model route 输出 count、平均延迟和 error rate。
+
+当前 LLMOps 薄切片不做真实 token accounting、cost aggregation、latency SLO、annotation 或 alert；后续这些能力应继续消费同一 metric event contract，而不是在各个模型调用点重复统计。
 
 ## Research task / dossier
 
