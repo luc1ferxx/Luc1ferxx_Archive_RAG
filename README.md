@@ -334,7 +334,7 @@ curl http://localhost:5001/ready
 
 - 这是本地优先的工程型工作台，不是完整 SaaS 权限系统；多人部署应使用 `API_AUTH_TOKENS` 并补齐外围鉴权、审计和网络隔离。
 - Connector / MCP adapter 和 sandbox/secret boundary 目前是 contract-only；默认不会加载真实外部工具或真实沙箱，未注入 executor 的 connector capability 即使获得批准也不会执行。
-- Model/provider registry 已接管 chat、embedding、LLM planner 和可选 cross-encoder model name 的选择；LLMOps metrics contract + observability report reader 已覆盖 completion、embedding 和 cross-encoder rerank 的 route/status/latency/error 聚合；真实 cost、token accounting、latency SLO、annotation 和 alerts 仍属于后续集成。
+- Model/provider registry 已接管 chat、embedding、LLM planner 和可选 cross-encoder model name 的选择；LLMOps metrics contract + observability report reader 已覆盖 completion、embedding 和 cross-encoder rerank 的 route/status/latency/error、token usage/source、estimated cost/pricing source 和 report-only latency SLO 聚合；annotation、alerts 和 budget enforcement 仍属于后续集成。
 - PostgreSQL 是文档持久化主路径；`STARTUP_HEALTH_STRICT=false` 可以让服务在依赖异常时启动，但完整上传/检索工作流仍需要数据库和 OpenAI key。
 - Local vector store 适合本地开发和小规模工作区；大规模语料建议切到 Qdrant 并单独压测。
 - Web search 和 arXiv 导入依赖外部网络；web search 需要 SerpAPI key，arXiv 使用公开 Atom/PDF 地址。

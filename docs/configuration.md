@@ -71,7 +71,7 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 
 每个 model contract 记录 stable model id、provider model name、capabilities、latency、pricing 和 workspace policy tags。Route resolution 支持 primary/fallback model，以及 workspace policy 的 allowed/blocked model/provider ids 和 required policy tags。后续接线多 provider 或 fallback 时，应复用这个 registry，而不是在 OpenAI、planner、embedding、rerank 模块各自解析一套模型配置。
 
-公开 `modelRoute` metadata 只包含 route/model/provider id、状态、candidate/fallback/rejected model ids，不包含 API key、secret ref value、transport 或 prompt。当前 registry 负责模型选择，LLMOps metric contract 负责把公开 route、latency、status 和输入/输出规模写入 observability；真实 cost、token accounting、latency SLO、annotation 和 alerts 属于后续集成。
+公开 `modelRoute` metadata 只包含 route/model/provider id、状态、candidate/fallback/rejected model ids，不包含 API key、secret ref value、transport、prompt、pricing rate 或内部 model name。当前 registry 负责模型选择，LLMOps metric contract 负责把公开 route、latency、status、输入/输出规模、token usage/source、estimated cost/pricing source 和 report-only latency SLO 写入 observability；annotation、alerts 和 budget enforcement 属于后续集成。
 
 ## 存储配置
 
