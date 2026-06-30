@@ -182,6 +182,52 @@ test("chat response contract treats missing observability as empty", () => {
   });
 });
 
+test("chat response contract summarizes null responses as empty failure payloads", () => {
+  assert.deepEqual(getTraceTypes(null), []);
+  assert.equal(hasAgentObservability(null), false);
+  assert.deepEqual(getAgentObservability(null), {});
+  assert.equal(getAgentMode(null), null);
+
+  const chatSummary = buildChatResponseSummary({
+    response: null,
+    telemetry: {
+      chatCalls: [{ question: "Should not matter." }],
+      listDocumentScopes: [{ userId: "user-1" }],
+    },
+  });
+
+  assert.deepEqual(chatSummary, {
+    status: null,
+    agentMode: null,
+    traceTypes: [],
+    agentSkills: [],
+    selectedSkills: [],
+    skillChain: [],
+    executionLoop: null,
+    clarification: null,
+    budget: null,
+    workingMemory: {
+      checkedQueryCount: 0,
+      unresolvedGapCount: 0,
+      resolvedGapCount: 0,
+      unsupportedClaimCount: 0,
+    },
+    telemetry: {
+      chatCallCount: 1,
+      listDocumentCallCount: 1,
+    },
+  });
+
+  const plannerSummary = buildPlannerResponseSummary({
+    response: null,
+  });
+
+  assert.equal(plannerSummary.status, null);
+  assert.equal(plannerSummary.agentMode, null);
+  assert.equal(plannerSummary.planner, null);
+  assert.deepEqual(plannerSummary.traceTypes, []);
+});
+
 test("chat response contract summarizes clarification and error payloads", () => {
   const response = {
     status: 200,

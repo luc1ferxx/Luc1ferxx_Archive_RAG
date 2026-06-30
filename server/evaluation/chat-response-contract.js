@@ -3,8 +3,13 @@ export const normalizeArray = (value) => (Array.isArray(value) ? value : []);
 export const isPlainObject = (value) =>
   Boolean(value && typeof value === "object" && !Array.isArray(value));
 
-export const getChatResponseBody = (responseOrBody = {}) =>
-  isPlainObject(responseOrBody.body) ? responseOrBody.body : responseOrBody;
+export const getChatResponseBody = (responseOrBody = {}) => {
+  if (!isPlainObject(responseOrBody)) {
+    return {};
+  }
+
+  return isPlainObject(responseOrBody.body) ? responseOrBody.body : responseOrBody;
+};
 
 export const getAgentTrace = (responseOrBody = {}) =>
   normalizeArray(getChatResponseBody(responseOrBody).agentTrace);
