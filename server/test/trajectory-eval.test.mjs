@@ -83,6 +83,54 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   );
 });
 
+test("trajectory eval isolates memory configuration from CI runtime", async () => {
+  const originalAgentExperienceMemory =
+    process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
+  const originalLongMemory = process.env.RAG_LONG_MEMORY_ENABLED;
+
+  process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED = "true";
+  process.env.RAG_LONG_MEMORY_ENABLED = "true";
+
+  try {
+    const report = await runTrajectoryEvaluation({
+      createdAt: "2026-06-09T00:00:00.000Z",
+      runId: "trajectory-memory-isolation-test",
+    });
+    const skillChainCase = report.cases.find(
+      (caseResult) => caseResult.id === "skill_chain_contract_review"
+    );
+
+    assert.equal(report.summary.status, "pass");
+    assert.equal(
+      skillChainCase.response.selectedSkills.some(
+        (skill) => skill.experienceMemoryApplied
+      ),
+      false
+    );
+    assert.equal(
+      skillChainCase.response.selectedSkills.some(
+        (skill) => skill.experienceHintCount > 0
+      ),
+      false
+    );
+    assert.equal(process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED, "true");
+    assert.equal(process.env.RAG_LONG_MEMORY_ENABLED, "true");
+  } finally {
+    if (originalAgentExperienceMemory === undefined) {
+      delete process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
+    } else {
+      process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED =
+        originalAgentExperienceMemory;
+    }
+
+    if (originalLongMemory === undefined) {
+      delete process.env.RAG_LONG_MEMORY_ENABLED;
+    } else {
+      process.env.RAG_LONG_MEMORY_ENABLED = originalLongMemory;
+    }
+  }
+});
+
 test("trajectory eval markdown summarizes categories and failed checks", async () => {
   const report = await runTrajectoryEvaluation({
     createdAt: "2026-06-09T00:00:00.000Z",
