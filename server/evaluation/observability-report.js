@@ -20,6 +20,12 @@ const toNumber = (value, fallbackValue = 0) => {
   return Number.isFinite(parsedValue) ? parsedValue : fallbackValue;
 };
 
+const toFiniteNumberOrNull = (value) => {
+  const parsedValue = Number(value);
+
+  return Number.isFinite(parsedValue) ? parsedValue : null;
+};
+
 const toNonNegativeInteger = (value, fallbackValue = 0) => {
   const parsedValue = Number(value);
 
@@ -218,14 +224,27 @@ const createLlmOpsBucketStats = () => ({
   errorCount: 0,
   errorRate: 0,
   statusCounts: {},
+  tokenSourceCounts: {},
+  pricingSourceCounts: {},
+  latencySloStatusCounts: {},
   totalLatencyMs: 0,
   avgLatencyMs: 0,
   totalInputCharacters: 0,
   avgInputCharacters: 0,
   totalOutputCharacters: 0,
   avgOutputCharacters: 0,
+  totalInputTokens: 0,
+  avgInputTokens: 0,
+  totalOutputTokens: 0,
+  avgOutputTokens: 0,
+  totalTokens: 0,
+  avgTotalTokens: 0,
+  estimatedCostUsd: 0,
   totalItemCount: 0,
   avgItemCount: 0,
+  latencySloObservedCount: 0,
+  latencySloBreachedCount: 0,
+  latencySloBreachRate: 0,
 });
 
 const createLlmOpsStats = () => ({
@@ -337,6 +356,33 @@ const isLlmOpsMetricEvent = (event = {}) =>
 const getLlmOpsStatus = (event = {}) =>
   String(event.status ?? "unknown").trim().toLowerCase() || "unknown";
 
+const getLlmOpsTokenSource = (event = {}) =>
+  String(event.tokenSource ?? "unavailable").trim().toLowerCase() ||
+  "unavailable";
+
+const getLlmOpsPricingSource = (event = {}) =>
+  String(event.pricingSource ?? "unavailable").trim().toLowerCase() ||
+  "unavailable";
+
+const getLlmOpsLatencySloStatus = (event = {}) => {
+  const explicitStatus = String(event.latencySloStatus ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (["pass", "breach", "unavailable"].includes(explicitStatus)) {
+    return explicitStatus;
+  }
+
+  const latencyMs = toFiniteNumberOrNull(event.latencyMs);
+  const latencySloMs = toFiniteNumberOrNull(event.latencySloMs);
+
+  if (latencyMs === null || latencySloMs === null) {
+    return "unavailable";
+  }
+
+  return latencyMs <= latencySloMs ? "pass" : "breach";
+};
+
 const getLlmOpsRouteKey = (event = {}) => {
   const modelRoute = isPlainObject(event.modelRoute) ? event.modelRoute : {};
   const providerId = String(modelRoute.providerId ?? "unknown_provider").trim() ||
@@ -359,13 +405,23 @@ const getLlmOpsBucket = (buckets = {}, key) => {
 
 const addLlmOpsCounters = (stats, event = {}) => {
   const status = getLlmOpsStatus(event);
+  const latencySloStatus = getLlmOpsLatencySloStatus(event);
+  const pricingSource = getLlmOpsPricingSource(event);
+  const tokenSource = getLlmOpsTokenSource(event);
 
   stats.eventCount += 1;
   stats.totalLatencyMs += toNumber(event.latencyMs);
   stats.totalInputCharacters += toNonNegativeInteger(event.inputCharacters);
   stats.totalOutputCharacters += toNonNegativeInteger(event.outputCharacters);
+  stats.totalInputTokens += toNonNegativeInteger(event.inputTokens);
+  stats.totalOutputTokens += toNonNegativeInteger(event.outputTokens);
+  stats.totalTokens += toNonNegativeInteger(event.totalTokens);
+  stats.estimatedCostUsd += toNumber(event.estimatedCostUsd);
   stats.totalItemCount += toNonNegativeInteger(event.itemCount);
   increment(stats.statusCounts, status);
+  increment(stats.tokenSourceCounts, tokenSource);
+  increment(stats.pricingSourceCounts, pricingSource);
+  increment(stats.latencySloStatusCounts, latencySloStatus);
 
   if (status === "ok") {
     stats.okCount += 1;
@@ -373,6 +429,14 @@ const addLlmOpsCounters = (stats, event = {}) => {
 
   if (status === "error") {
     stats.errorCount += 1;
+  }
+
+  if (latencySloStatus !== "unavailable") {
+    stats.latencySloObservedCount += 1;
+  }
+
+  if (latencySloStatus === "breach") {
+    stats.latencySloBreachedCount += 1;
   }
 };
 
@@ -391,11 +455,19 @@ const finalizeLlmOpsBucketStats = (stats = createLlmOpsBucketStats()) => {
   return {
     ...stats,
     avgInputCharacters: round(stats.totalInputCharacters / denominator, 2),
+    avgInputTokens: round(stats.totalInputTokens / denominator, 2),
     avgItemCount: round(stats.totalItemCount / denominator, 4),
     avgLatencyMs: round(stats.totalLatencyMs / denominator, 2),
     avgOutputCharacters: round(stats.totalOutputCharacters / denominator, 2),
+    avgOutputTokens: round(stats.totalOutputTokens / denominator, 2),
+    avgTotalTokens: round(stats.totalTokens / denominator, 2),
+    estimatedCostUsd: round(stats.estimatedCostUsd, 8),
     errorRate:
       stats.eventCount > 0 ? round(stats.errorCount / stats.eventCount, 4) : 0,
+    latencySloBreachRate:
+      stats.latencySloObservedCount > 0
+        ? round(stats.latencySloBreachedCount / stats.latencySloObservedCount, 4)
+        : 0,
     totalLatencyMs: round(stats.totalLatencyMs, 2),
   };
 };
@@ -717,6 +789,8 @@ const formatNestedCountMap = (counts = {}, { indent = "  " } = {}) => {
 const formatTopCountList = (items = [], { indent = "  " } = {}) =>
   items.map((item) => `${indent}${item.value}: ${item.count}`);
 
+const formatUsd = (value) => `$${round(value, 6).toFixed(6)}`;
+
 const formatLlmOpsBucketMap = (buckets = {}, { indent = "  " } = {}) =>
   Object.entries(buckets)
     .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
@@ -725,7 +799,11 @@ const formatLlmOpsBucketMap = (buckets = {}, { indent = "  " } = {}) =>
         `${indent}${key}: ${stats.eventCount} event(s), avg latency: ${round(
           stats.avgLatencyMs,
           1
-        )}ms, error rate: ${toPercent(stats.errorRate)}`
+        )}ms, error rate: ${toPercent(
+          stats.errorRate
+        )}, tokens: ${stats.totalTokens}, cost: ${formatUsd(
+          stats.estimatedCostUsd
+        )}, SLO breach rate: ${toPercent(stats.latencySloBreachRate)}`
     );
 
 const formatSkill = (skill) =>
@@ -823,6 +901,39 @@ export const formatObservabilityReport = (report) => {
     `  events: ${report.llmops.eventCount}`,
     `  avg latency: ${round(report.llmops.avgLatencyMs, 1)}ms`,
     `  error rate: ${toPercent(report.llmops.errorRate)}`,
+    `  total tokens: ${report.llmops.totalTokens}`,
+    `  estimated cost: ${formatUsd(report.llmops.estimatedCostUsd)}`,
+    `  latency SLO breach rate: ${toPercent(report.llmops.latencySloBreachRate)}`,
+    "  token sources:"
+  );
+  lines.push(
+    ...(formatCountMap(report.llmops.tokenSourceCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.llmops.tokenSourceCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  pricing sources:"
+  );
+  lines.push(
+    ...(formatCountMap(report.llmops.pricingSourceCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.llmops.pricingSourceCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  latency SLO statuses:"
+  );
+  lines.push(
+    ...(formatCountMap(report.llmops.latencySloStatusCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.llmops.latencySloStatusCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
     "  operations:"
   );
   lines.push(

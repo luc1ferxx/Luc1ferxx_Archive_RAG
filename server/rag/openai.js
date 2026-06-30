@@ -8,6 +8,10 @@ import {
   LLMOPS_OPERATIONS,
   runWithLlmOpsMetric,
 } from "./llmops-metrics.js";
+import {
+  buildLlmOpsRouteContext,
+  buildLlmOpsUsageMetric,
+} from "./llmops-usage.js";
 
 let embeddingsInstances = new Map();
 let chatModelInstances = new Map();
@@ -120,10 +124,40 @@ const getEmbeddingMetricBase = ({ stage, modelRoute, inputCharacters, itemCount 
   stage,
 });
 
+const buildRouteMetricContext = (route = {}) => {
+  const routeContext = buildLlmOpsRouteContext(route.resolvedRoute);
+
+  return {
+    latencySloMs: routeContext.latencySloMs,
+    pricing: routeContext.pricing,
+  };
+};
+
+const buildCustomRouteMetricContext = () => ({
+  latencySloMs: null,
+  pricing: null,
+});
+
+const buildUsageMetricFields = ({
+  inputCharacters,
+  metricContext = {},
+  outputCharacters = 0,
+  response = null,
+} = {}) => ({
+  latencySloMs: metricContext.latencySloMs,
+  ...buildLlmOpsUsageMetric({
+    inputCharacters,
+    outputCharacters,
+    pricing: metricContext.pricing,
+    response,
+  }),
+});
+
 const getEmbeddingsInstance = (options = {}) => {
   if (customProvider?.getEmbeddings) {
     return {
       instance: customProvider.getEmbeddings(),
+      metricContext: buildCustomRouteMetricContext(),
       modelRoute: buildCustomProviderRoute(MODEL_CAPABILITIES.embedding),
     };
   }
@@ -142,6 +176,7 @@ const getEmbeddingsInstance = (options = {}) => {
   if (cachedInstance) {
     return {
       instance: cachedInstance,
+      metricContext: buildRouteMetricContext(route),
       modelRoute: route.publicRoute,
     };
   }
@@ -154,6 +189,7 @@ const getEmbeddingsInstance = (options = {}) => {
   embeddingsInstances.set(cacheKey, embeddingsInstance);
   return {
     instance: embeddingsInstance,
+    metricContext: buildRouteMetricContext(route),
     modelRoute: route.publicRoute,
   };
 };
@@ -168,6 +204,7 @@ const getChatModelInstance = (options = {}) => {
   if (customProvider?.getChatModel) {
     return {
       instance: customProvider.getChatModel(),
+      metricContext: buildCustomRouteMetricContext(),
       modelRoute: buildCustomProviderRoute(
         options.capability ?? MODEL_CAPABILITIES.chat
       ),
@@ -188,6 +225,7 @@ const getChatModelInstance = (options = {}) => {
   if (cachedInstance) {
     return {
       instance: cachedInstance,
+      metricContext: buildRouteMetricContext(route),
       modelRoute: route.publicRoute,
     };
   }
@@ -201,6 +239,7 @@ const getChatModelInstance = (options = {}) => {
 
   return {
     instance: chatModelInstance,
+    metricContext: buildRouteMetricContext(route),
     modelRoute: route.publicRoute,
   };
 };
@@ -295,11 +334,17 @@ export const embedTexts = async (texts) => {
 
   if (customProvider?.embedTexts) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
+    const metricContext = buildCustomRouteMetricContext();
+    const inputCharacters = getTextListCharacters(safeTexts);
 
     return runWithLlmOpsMetric({
       action: () => customProvider.embedTexts(texts),
       metric: getEmbeddingMetricBase({
-        inputCharacters: getTextListCharacters(safeTexts),
+        ...buildUsageMetricFields({
+          inputCharacters,
+          metricContext,
+        }),
+        inputCharacters,
         itemCount: safeTexts.length,
         modelRoute,
         stage: "embed_documents",
@@ -307,7 +352,8 @@ export const embedTexts = async (texts) => {
     });
   }
 
-  const { instance, modelRoute } = getEmbeddingsInstance();
+  const { instance, metricContext, modelRoute } = getEmbeddingsInstance();
+  const inputCharacters = getTextListCharacters(safeTexts);
 
   return runWithLlmOpsMetric({
     action: () =>
@@ -316,7 +362,11 @@ export const embedTexts = async (texts) => {
         "Embedding request failed."
       ),
     metric: getEmbeddingMetricBase({
-      inputCharacters: getTextListCharacters(safeTexts),
+      ...buildUsageMetricFields({
+        inputCharacters,
+        metricContext,
+      }),
+      inputCharacters,
       itemCount: safeTexts.length,
       modelRoute,
       stage: "embed_documents",
@@ -327,11 +377,17 @@ export const embedTexts = async (texts) => {
 export const embedQuery = async (query) => {
   if (customProvider?.embedQuery) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
+    const metricContext = buildCustomRouteMetricContext();
+    const inputCharacters = getTextCharacters(query);
 
     return runWithLlmOpsMetric({
       action: () => customProvider.embedQuery(query),
       metric: getEmbeddingMetricBase({
-        inputCharacters: getTextCharacters(query),
+        ...buildUsageMetricFields({
+          inputCharacters,
+          metricContext,
+        }),
+        inputCharacters,
         itemCount: 1,
         modelRoute,
         stage: "embed_query",
@@ -339,7 +395,8 @@ export const embedQuery = async (query) => {
     });
   }
 
-  const { instance, modelRoute } = getEmbeddingsInstance();
+  const { instance, metricContext, modelRoute } = getEmbeddingsInstance();
+  const inputCharacters = getTextCharacters(query);
 
   return runWithLlmOpsMetric({
     action: () =>
@@ -348,7 +405,11 @@ export const embedQuery = async (query) => {
         "Query embedding request failed."
       ),
     metric: getEmbeddingMetricBase({
-      inputCharacters: getTextCharacters(query),
+      ...buildUsageMetricFields({
+        inputCharacters,
+        metricContext,
+      }),
+      inputCharacters,
       itemCount: 1,
       modelRoute,
       stage: "embed_query",
@@ -368,9 +429,14 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
 
   if (customProvider?.completeText) {
     const modelRoute = buildCustomProviderRoute(capability);
+    const metricContext = buildCustomRouteMetricContext();
     const text = await runWithLlmOpsMetric({
       action: () => customProvider.completeText(inputText),
       metric: {
+        ...buildUsageMetricFields({
+          inputCharacters: inputText.length,
+          metricContext,
+        }),
         inputCharacters: inputText.length,
         itemCount: 1,
         modelRoute,
@@ -378,6 +444,12 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         stage: "complete_text",
       },
       successMetric: (result) => ({
+        ...buildUsageMetricFields({
+          inputCharacters: inputText.length,
+          outputCharacters: getTextCharacters(result),
+          metricContext,
+          response: result,
+        }),
         outputCharacters: getTextCharacters(result),
       }),
     });
@@ -388,7 +460,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
     };
   }
 
-  const { instance, modelRoute } = getChatModelInstance(options);
+  const { instance, metricContext, modelRoute } = getChatModelInstance(options);
   const response = await runWithLlmOpsMetric({
     action: () =>
       withRetry(
@@ -396,6 +468,10 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         "Chat completion failed."
       ),
     metric: {
+      ...buildUsageMetricFields({
+        inputCharacters: inputText.length,
+        metricContext,
+      }),
       inputCharacters: inputText.length,
       itemCount: 1,
       modelRoute,
@@ -403,6 +479,12 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
       stage: "complete_text",
     },
     successMetric: (result) => ({
+      ...buildUsageMetricFields({
+        inputCharacters: inputText.length,
+        outputCharacters: getTextCharacters(normalizeContent(result?.content)),
+        metricContext,
+        response: result,
+      }),
       outputCharacters: getTextCharacters(normalizeContent(result?.content)),
     }),
   });

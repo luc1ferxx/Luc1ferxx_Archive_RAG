@@ -284,8 +284,16 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
         stage: "complete_text",
         status: "ok",
         latencyMs: 100,
+        latencySloMs: 150,
         inputCharacters: 400,
         outputCharacters: 120,
+        inputTokens: 40,
+        outputTokens: 12,
+        totalTokens: 52,
+        tokenSource: "actual",
+        estimatedCostUsd: 0.00012,
+        pricingSource: "model_contract",
+        costCurrency: "USD",
         itemCount: 1,
         modelRoute: {
           capability: "chat",
@@ -302,7 +310,15 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
         stage: "embed_documents",
         status: "ok",
         latencyMs: 50,
+        latencySloMs: 40,
         inputCharacters: 200,
+        inputTokens: 20,
+        outputTokens: 0,
+        totalTokens: 20,
+        tokenSource: "estimated",
+        estimatedCostUsd: 0.00002,
+        pricingSource: "model_contract",
+        costCurrency: "USD",
         itemCount: 2,
         modelRoute: {
           capability: "embedding",
@@ -320,6 +336,11 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
         status: "error",
         latencyMs: 300,
         inputCharacters: 250,
+        inputTokens: 25,
+        outputTokens: 0,
+        totalTokens: 25,
+        tokenSource: "estimated",
+        pricingSource: "unavailable",
         itemCount: 1,
         errorName: "RateLimitError",
         errorMessage: "rate limited",
@@ -340,13 +361,37 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
   assert.equal(report.llmops.errorRate, 0.3333);
   assert.equal(report.llmops.avgLatencyMs, 150);
   assert.equal(report.llmops.totalInputCharacters, 850);
+  assert.equal(report.llmops.totalInputTokens, 85);
+  assert.equal(report.llmops.totalOutputTokens, 12);
+  assert.equal(report.llmops.totalTokens, 97);
+  assert.equal(report.llmops.avgTotalTokens, 32.33);
+  assert.equal(report.llmops.estimatedCostUsd, 0.00014);
+  assert.equal(report.llmops.latencySloObservedCount, 2);
+  assert.equal(report.llmops.latencySloBreachedCount, 1);
+  assert.equal(report.llmops.latencySloBreachRate, 0.5);
   assert.deepEqual(report.llmops.statusCounts, {
     error: 1,
     ok: 2,
   });
+  assert.deepEqual(report.llmops.tokenSourceCounts, {
+    actual: 1,
+    estimated: 2,
+  });
+  assert.deepEqual(report.llmops.pricingSourceCounts, {
+    model_contract: 2,
+    unavailable: 1,
+  });
+  assert.deepEqual(report.llmops.latencySloStatusCounts, {
+    breach: 1,
+    pass: 1,
+    unavailable: 1,
+  });
   assert.equal(report.llmops.byOperation.llm_completion.eventCount, 2);
   assert.equal(report.llmops.byOperation.llm_completion.errorRate, 0.5);
+  assert.equal(report.llmops.byOperation.llm_completion.totalTokens, 77);
+  assert.equal(report.llmops.byOperation.llm_completion.estimatedCostUsd, 0.00012);
   assert.equal(report.llmops.byOperation.embedding.avgItemCount, 2);
+  assert.equal(report.llmops.byOperation.embedding.latencySloBreachRate, 1);
   assert.equal(
     report.llmops.byRoute["openai:chat.default:openai.chat"].eventCount,
     2
@@ -359,8 +404,20 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
   const formatted = formatObservabilityReport(report);
 
   assert.match(formatted, /LLMOps Metrics/);
-  assert.match(formatted, /llm_completion: 2 event\(s\), avg latency: 200ms/);
-  assert.match(formatted, /embedding: 1 event\(s\), avg latency: 50ms/);
+  assert.match(formatted, /total tokens: 97/);
+  assert.match(formatted, /estimated cost: \$0\.000140/);
+  assert.match(formatted, /latency SLO breach rate: 50%/);
+  assert.match(formatted, /actual: 1/);
+  assert.match(formatted, /model_contract: 2/);
+  assert.match(formatted, /breach: 1/);
+  assert.match(
+    formatted,
+    /llm_completion: 2 event\(s\), avg latency: 200ms, error rate: 50%, tokens: 77, cost: \$0\.000120, SLO breach rate: 0%/
+  );
+  assert.match(
+    formatted,
+    /embedding: 1 event\(s\), avg latency: 50ms, error rate: 0%, tokens: 20, cost: \$0\.000020, SLO breach rate: 100%/
+  );
   assert.match(formatted, /openai:chat\.default:openai\.chat: 2 event\(s\)/);
 });
 

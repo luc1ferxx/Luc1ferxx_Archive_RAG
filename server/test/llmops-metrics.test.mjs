@@ -14,7 +14,9 @@ import {
 test("LLMOps metric contract normalizes public fields only", () => {
   const event = normalizeLlmOpsMetricEvent({
     inputCharacters: 123.9,
+    inputTokens: 12.9,
     latencyMs: 12.34567,
+    latencySloMs: 10.9,
     modelRoute: {
       candidateModelIds: ["openai.chat"],
       capability: "chat",
@@ -32,18 +34,37 @@ test("LLMOps metric contract normalizes public fields only", () => {
     },
     operation: LLMOPS_OPERATIONS.completion,
     outputCharacters: 42,
+    outputTokens: 4,
+    pricing: {
+      inputPerMillionTokens: 1,
+      outputPerMillionTokens: 5,
+    },
+    pricingSource: "model_contract",
     prompt: "do not serialize prompt text",
     stage: "complete_text",
     status: "ok",
     timestamp: "2026-06-29T00:00:00.000Z",
+    totalTokens: 17,
+    tokenSource: "actual",
+    estimatedCostUsd: 0.000012345,
   });
 
   assert.equal(event.traceType, LLMOPS_TRACE_TYPE);
   assert.equal(event.eventType, LLMOPS_METRIC_EVENT_TYPE);
   assert.equal(event.version, LLMOPS_METRIC_VERSION);
   assert.equal(event.latencyMs, 12.346);
+  assert.equal(event.latencySloMs, 10);
+  assert.equal(event.latencySloStatus, "breach");
   assert.equal(event.inputCharacters, 123);
   assert.equal(event.outputCharacters, 42);
+  assert.equal(event.inputTokens, 12);
+  assert.equal(event.outputTokens, 4);
+  assert.equal(event.totalTokens, 17);
+  assert.equal(event.tokenSource, "actual");
+  assert.equal(event.estimatedCostUsd, 0.00001234);
+  assert.equal(event.pricingSource, "model_contract");
+  assert.equal(event.costCurrency, null);
+  assert.equal(event.pricing, undefined);
   assert.equal(event.prompt, undefined);
   assert.equal(event.modelRoute.modelName, undefined);
   assert.equal(event.modelRoute.secretRef, undefined);

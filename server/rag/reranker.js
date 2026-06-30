@@ -16,6 +16,10 @@ import {
   recordLlmOpsMetric,
 } from "./llmops-metrics.js";
 import {
+  buildLlmOpsRouteContext,
+  buildLlmOpsUsageMetric,
+} from "./llmops-usage.js";
+import {
   buildTermSet,
   extractAnchorGroups,
   extractMeaningfulTokens,
@@ -213,6 +217,11 @@ const buildCustomCrossEncoderModelRoute = () => ({
   status: "custom_provider",
 });
 
+const buildEmptyLlmOpsRouteContext = () => ({
+  latencySloMs: null,
+  pricing: null,
+});
+
 const buildConfiguredCrossEncoderModelRoute = (configuredModel) => ({
   candidateModelIds: [configuredModel].filter(Boolean),
   capability: MODEL_CAPABILITIES.rerank,
@@ -229,6 +238,7 @@ const resolveHttpCrossEncoderModelRoute = () => {
 
   if (configuredModel) {
     return {
+      llmOpsContext: buildEmptyLlmOpsRouteContext(),
       model: configuredModel,
       modelRoute: buildConfiguredCrossEncoderModelRoute(configuredModel),
     };
@@ -240,23 +250,34 @@ const resolveHttpCrossEncoderModelRoute = () => {
   });
 
   return {
+    llmOpsContext: buildLlmOpsRouteContext(route.resolvedRoute),
     model: route.modelName,
     modelRoute: route.publicRoute,
   };
 };
 
+const getCrossEncoderInputCharacters = (metricBase = {}) =>
+  toFiniteNumber(metricBase.queryCharacters) +
+  toFiniteNumber(metricBase.totalTextCharacters);
+
 const recordCrossEncoderLlmOpsMetric = async ({
   error = null,
   latencyMs,
   metricBase = {},
+  metricContext = {},
   modelRoute,
   status,
-} = {}) =>
-  recordLlmOpsMetric({
+} = {}) => {
+  const inputCharacters = getCrossEncoderInputCharacters(metricBase);
+
+  return recordLlmOpsMetric({
     error,
-    inputCharacters:
-      toFiniteNumber(metricBase.queryCharacters) +
-      toFiniteNumber(metricBase.totalTextCharacters),
+    latencySloMs: metricContext.latencySloMs,
+    ...buildLlmOpsUsageMetric({
+      inputCharacters,
+      pricing: metricContext.pricing,
+    }),
+    inputCharacters,
     itemCount: toFiniteNumber(metricBase.candidateCount),
     latencyMs,
     modelRoute,
@@ -264,6 +285,7 @@ const recordCrossEncoderLlmOpsMetric = async ({
     stage: "cross_encoder_score",
     status,
   });
+};
 
 const normalizeScores = (scores) => {
   const finiteScores = scores.map((score) => toFiniteNumber(score, 0));
@@ -418,6 +440,7 @@ const scoreWithCrossEncoder = async ({ queryText, results }) => {
   const transport = crossEncoderProvider?.score ? "custom-provider" : "http";
   const routeSelection = crossEncoderProvider?.score
     ? {
+        llmOpsContext: buildEmptyLlmOpsRouteContext(),
         model: "",
         modelRoute: buildCustomCrossEncoderModelRoute(),
       }
@@ -450,6 +473,7 @@ const scoreWithCrossEncoder = async ({ queryText, results }) => {
     });
     await recordCrossEncoderLlmOpsMetric({
       latencyMs,
+      metricContext: routeSelection.llmOpsContext,
       metricBase,
       modelRoute: routeSelection.modelRoute,
       status: "ok",
@@ -469,6 +493,7 @@ const scoreWithCrossEncoder = async ({ queryText, results }) => {
     await recordCrossEncoderLlmOpsMetric({
       error,
       latencyMs,
+      metricContext: routeSelection.llmOpsContext,
       metricBase,
       modelRoute: routeSelection.modelRoute,
       status: "error",

@@ -33,9 +33,18 @@ const createFallbackProviderSpec = () => ({
       capabilities: [MODEL_CAPABILITIES.chat],
       id: "openai.chat_fallback",
       label: "Fallback chat",
+      latency: {
+        tier: "remote",
+        timeoutMs: 4500,
+      },
       modelName: "fallback-chat",
       policy: {
         workspacePolicyTags: ["remote_llm", "chat"],
+      },
+      pricing: {
+        currency: "USD",
+        inputPerMillionTokens: 0.25,
+        outputPerMillionTokens: 1.5,
       },
     },
   ],
@@ -166,12 +175,23 @@ test("runtime model route exposes model name internally but only public ids exte
   });
 
   assert.equal(route.modelName, "fallback-chat");
+  assert.deepEqual(route.resolvedRoute.selectedModel.latency, {
+    tier: "remote",
+    timeoutMs: 4500,
+  });
+  assert.deepEqual(route.resolvedRoute.selectedModel.pricing, {
+    currency: "USD",
+    inputPerMillionTokens: 0.25,
+    outputPerMillionTokens: 1.5,
+  });
   assert.equal(route.publicRoute.status, "selected");
   assert.equal(route.publicRoute.routeId, "chat.with_fallback");
   assert.equal(route.publicRoute.modelId, "openai.chat_fallback");
   assert.equal(route.publicRoute.providerId, OPENAI_MODEL_PROVIDER_ID);
   assert.deepEqual(route.publicRoute.rejectedModelIds, [OPENAI_CHAT_MODEL_ID]);
   assert.equal(route.publicRoute.modelName, undefined);
+  assert.equal(route.publicRoute.pricing, undefined);
+  assert.equal(route.publicRoute.latency, undefined);
   assert.equal(route.publicRoute.transport, undefined);
   assert.equal(route.publicRoute.secretRef, undefined);
 });

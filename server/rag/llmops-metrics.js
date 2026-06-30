@@ -13,6 +13,9 @@ export const LLMOPS_OPERATIONS = Object.freeze({
 
 const MAX_TEXT_LENGTH = 500;
 const VALID_METRIC_STATUSES = new Set(["ok", "error", "skipped"]);
+const VALID_TOKEN_SOURCES = new Set(["actual", "estimated", "unavailable"]);
+const VALID_PRICING_SOURCES = new Set(["model_contract", "unavailable"]);
+const VALID_LATENCY_SLO_STATUSES = new Set(["pass", "breach", "unavailable"]);
 
 const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
   String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
@@ -42,6 +45,12 @@ const roundMetricNumber = (value) => {
   return parsedValue === null ? null : Number(parsedValue.toFixed(3));
 };
 
+const roundCostNumber = (value) => {
+  const parsedValue = normalizeOptionalNonNegativeNumber(value);
+
+  return parsedValue === null ? null : Number(parsedValue.toFixed(8));
+};
+
 export const normalizeLlmOpsModelRoute = (modelRoute = {}) => {
   if (!modelRoute || typeof modelRoute !== "object" || Array.isArray(modelRoute)) {
     return null;
@@ -67,6 +76,33 @@ const normalizeMetricStatus = (status) => {
     : "unknown";
 };
 
+const normalizeKnownValue = ({ fallbackValue, maxLength = 80, validValues, value }) => {
+  const normalizedValue = normalizeText(value, maxLength).toLowerCase();
+
+  return validValues.has(normalizedValue) ? normalizedValue : fallbackValue;
+};
+
+const normalizeCostCurrency = (value) =>
+  normalizeText(value, 20).toUpperCase() || null;
+
+const getLatencySloStatus = ({ latencyMs, latencySloMs, latencySloStatus }) => {
+  const explicitStatus = normalizeKnownValue({
+    fallbackValue: "",
+    validValues: VALID_LATENCY_SLO_STATUSES,
+    value: latencySloStatus,
+  });
+
+  if (explicitStatus) {
+    return explicitStatus;
+  }
+
+  if (latencyMs === null || latencySloMs === null) {
+    return "unavailable";
+  }
+
+  return latencyMs <= latencySloMs ? "pass" : "breach";
+};
+
 const normalizeErrorFields = ({ error, errorName, errorMessage } = {}) => ({
   errorMessage:
     normalizeText(errorMessage ?? error?.message, MAX_TEXT_LENGTH) || null,
@@ -75,6 +111,8 @@ const normalizeErrorFields = ({ error, errorName, errorMessage } = {}) => ({
 
 export const normalizeLlmOpsMetricEvent = (metric = {}) => {
   const errorFields = normalizeErrorFields(metric);
+  const latencyMs = roundMetricNumber(metric.latencyMs);
+  const latencySloMs = normalizeOptionalNonNegativeInteger(metric.latencySloMs);
 
   return {
     traceType: LLMOPS_TRACE_TYPE,
@@ -84,11 +122,32 @@ export const normalizeLlmOpsMetricEvent = (metric = {}) => {
     operation: normalizeText(metric.operation, 120) || "unknown",
     stage: normalizeText(metric.stage, 120) || "unknown",
     status: normalizeMetricStatus(metric.status),
-    latencyMs: roundMetricNumber(metric.latencyMs),
+    latencyMs,
+    latencySloMs,
+    latencySloStatus: getLatencySloStatus({
+      latencyMs,
+      latencySloMs,
+      latencySloStatus: metric.latencySloStatus,
+    }),
     modelRoute: normalizeLlmOpsModelRoute(metric.modelRoute),
     inputCharacters: normalizeOptionalNonNegativeInteger(metric.inputCharacters),
     outputCharacters: normalizeOptionalNonNegativeInteger(metric.outputCharacters),
     itemCount: normalizeOptionalNonNegativeInteger(metric.itemCount),
+    inputTokens: normalizeOptionalNonNegativeInteger(metric.inputTokens),
+    outputTokens: normalizeOptionalNonNegativeInteger(metric.outputTokens),
+    totalTokens: normalizeOptionalNonNegativeInteger(metric.totalTokens),
+    tokenSource: normalizeKnownValue({
+      fallbackValue: "unavailable",
+      validValues: VALID_TOKEN_SOURCES,
+      value: metric.tokenSource,
+    }),
+    estimatedCostUsd: roundCostNumber(metric.estimatedCostUsd),
+    pricingSource: normalizeKnownValue({
+      fallbackValue: "unavailable",
+      validValues: VALID_PRICING_SOURCES,
+      value: metric.pricingSource,
+    }),
+    costCurrency: normalizeCostCurrency(metric.costCurrency),
     ...errorFields,
   };
 };
