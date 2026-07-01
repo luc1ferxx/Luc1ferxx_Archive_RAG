@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   buildAgentTaskPlanningContext,
@@ -20,10 +20,13 @@ import {
 } from "./agent-goal-deliverables.js";
 import { compactAgentGoalWorkingMemory } from "./agent-goal-completion.js";
 import { buildAgentGoalPlanTaskFields } from "./agent-goal-plan.js";
+import {
+  AGENT_TASK_RUNNER_ID,
+  AGENT_TASK_TYPE,
+} from "./agent-task-contract.js";
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
 
-export const AGENT_TASK_TYPE = "agent_goal";
-export const AGENT_TASK_RUNNER_ID = "agent_goal_runner";
+export { AGENT_TASK_RUNNER_ID, AGENT_TASK_TYPE };
 
 export const AGENT_TASK_ACTIONS = Object.freeze({
   approve: "approve",
@@ -67,6 +70,21 @@ const buildTaskError = (message, status = 400) => {
   const error = new Error(message);
   error.status = status;
   return error;
+};
+
+const buildIdempotentAgentTaskId = (idempotencyKey) => {
+  const normalizedKey = normalizeText(idempotencyKey);
+
+  if (!normalizedKey) {
+    return null;
+  }
+
+  const digest = createHash("sha256")
+    .update(normalizedKey)
+    .digest("hex")
+    .slice(0, 32);
+
+  return buildAgentTaskId(`idempotent-${digest}`);
 };
 
 const buildPublicInput = ({
@@ -323,6 +341,7 @@ export const createAgentTaskService = ({
   async createTask({
     accessScope = {},
     docIds = [],
+    idempotencyKey = "",
     maxIterations = DEFAULT_MAX_ITERATIONS,
     question,
     sessionId = "",
@@ -354,7 +373,20 @@ export const createAgentTaskService = ({
       };
     }
 
-    const taskId = buildAgentTaskId(createTaskId());
+    const taskId =
+      buildIdempotentAgentTaskId(idempotencyKey) ??
+      buildAgentTaskId(createTaskId());
+    const existingTask = idempotencyKey
+      ? await taskService.getTask({
+          accessScope,
+          taskId,
+        })
+      : null;
+
+    if (existingTask) {
+      return existingTask;
+    }
+
     const payload = buildInitialPayload(input, {
       researchTask,
     });
