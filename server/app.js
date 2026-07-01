@@ -55,6 +55,8 @@ import {
   createAgentTaskRunner,
   createAgentTaskService,
 } from "./rag/agent-tasks.js";
+import { createAgentTriggerDispatcher } from "./rag/agent-trigger-dispatcher.js";
+import { createDefaultAgentTriggerRegistry } from "./rag/agent-triggers/registry.js";
 import { runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
@@ -167,6 +169,35 @@ const serializeError = (error, fallbackMessage) => {
   }
 
   return fallbackMessage;
+};
+
+const normalizeBooleanQuery = (value) =>
+  String(value ?? "").trim().toLowerCase() === "true";
+
+const buildTriggerDispatchRequest = (req) => {
+  const payload = req.body ?? {};
+  const request = {
+    ...(payload.request && typeof payload.request === "object"
+      ? payload.request
+      : {}),
+  };
+  const idempotencyKey =
+    request.id ??
+    payload.idempotencyKey ??
+    req.get("x-idempotency-key") ??
+    req.get("x-request-id");
+
+  if (idempotencyKey !== undefined) {
+    request.id = String(idempotencyKey).trim();
+  }
+
+  return {
+    event: payload.event,
+    input: payload.input ?? payload.payload ?? payload,
+    mode: payload.mode,
+    payload: payload.payload,
+    request,
+  };
 };
 
 const cleanupUploadedFile = async (filePath) => {
@@ -435,6 +466,14 @@ export const createApp = async (options = {}) => {
       jobOrchestrator,
       taskService,
     });
+  const agentTriggerRegistry =
+    options.agentTriggerRegistry ?? createDefaultAgentTriggerRegistry();
+  const agentTriggerDispatcher =
+    options.agentTriggerDispatcher ??
+    createAgentTriggerDispatcher({
+      agentTaskService,
+      triggerRegistry: agentTriggerRegistry,
+    });
   const agentRunStepExecutor =
     options.agentRunStepExecutor ??
     createAgentRunStepExecutor({
@@ -675,6 +714,44 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to create agent task."),
+      });
+    }
+  });
+
+  app.get("/agent-triggers", async (req, res) => {
+    try {
+      return res.json({
+        triggers: agentTriggerRegistry.listPublic({
+          enabledOnly: normalizeBooleanQuery(req.query.enabledOnly),
+        }),
+      });
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to list agent triggers."),
+      });
+    }
+  });
+
+  app.post("/agent-triggers/:triggerId/dispatch", async (req, res) => {
+    const triggerId = req.params.triggerId?.trim();
+
+    if (!triggerId) {
+      return res.status(400).json({
+        error: "triggerId is required.",
+      });
+    }
+
+    try {
+      const result = await agentTriggerDispatcher.dispatch({
+        accessScope: getRequestAccessScope(req),
+        triggerId,
+        ...buildTriggerDispatchRequest(req),
+      });
+
+      return res.status(202).json(result);
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to dispatch agent trigger."),
       });
     }
   });

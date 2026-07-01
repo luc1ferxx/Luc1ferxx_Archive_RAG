@@ -286,7 +286,7 @@ curl http://localhost:5001/ready
 | 文档管理 | `/documents`, `/documents/:docId/file`, `/documents/clear` |
 | 上传 | `/upload/init`, `/upload/status`, `/upload/chunk`, `/upload/complete`, `/upload` |
 | 问答 | `GET /chat`, `POST /chat` |
-| Tasks | `/tasks`, `/agent-tasks`, `/tasks/:taskId`, `/tasks/:taskId/actions/:action` |
+| Tasks | `/tasks`, `/agent-tasks`, `/agent-triggers`, `/tasks/:taskId`, `/tasks/:taskId/actions/:action` |
 | Agent runs | `/agent-runs`, `/agent-runs/recovery`, `/agent-runs/:runId`, approval/recovery/retry actions |
 | Capabilities | `GET /capabilities` |
 | arXiv | `/arxiv/search`, `/arxiv/import`, `/documents/*/arxiv/*` |

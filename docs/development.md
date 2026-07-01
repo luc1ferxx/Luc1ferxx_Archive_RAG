@@ -13,6 +13,8 @@
 | `GET` | `/tasks/:taskId` | 读取当前访问范围内的单个 task；响应不暴露 runner 内部 `payload`。 |
 | `POST` | `/tasks/:taskId/actions/:action` | 对等待用户输入的 task 执行动作，例如 `confirm` 或 `cancel`；动作由 task 的 `runnerId` 分发给对应 runner。 |
 | `POST` | `/agent-tasks` | 创建 durable AgentRAG goal task，后台通过现有 job orchestrator 运行，并在 blocked 时转成 `waiting_for_user` task；内部 task memory 只作为 planner context。 |
+| `GET` | `/agent-triggers` | 列出公开 automation trigger contract；响应不暴露 question template、default input 或 raw payload。 |
+| `POST` | `/agent-triggers/:triggerId/dispatch` | 通过 trigger dispatcher 创建 scoped durable AgentRAG goal task；请求应提供 `x-idempotency-key` 或 `request.id`，执行仍走现有 agent task runner。 |
 | `GET` | `/agent-runs` | 列出当前访问范围内的 AgentRAG run snapshots；可用 `status` 查询参数过滤。 |
 | `GET` | `/agent-runs/recovery` | 列出当前访问范围内等待人工恢复或失败重试的 agent runs，并返回可执行 recovery actions 以及从 replay safety matrix 派生的 step safety reasons。 |
 | `GET` | `/agent-runs/:runId` | 读取单个 agent run 的 goal、plan、steps、observations、decisions、approval gates、result/error 和 event log。 |

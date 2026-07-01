@@ -779,6 +779,164 @@ test("agent task endpoint creates scoped durable goal tasks", async () => {
   }
 });
 
+test("agent trigger endpoints expose public contracts and dispatch scoped tasks", async () => {
+  const calls = [];
+  const app = await createApp({
+    agentTaskService: {
+      createTask: async (request) => {
+        calls.push(request);
+
+        return {
+          id: "agent_goal:from-trigger",
+          input: {
+            docIds: request.docIds,
+            question: request.question,
+            userId: request.userId,
+          },
+          status: "queued",
+          type: "agent_goal",
+        };
+      },
+    },
+    ragService: {
+      chat: async () => ({
+        text: "stub",
+        citations: [],
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const listResponse = await fetch(`${server.baseUrl}/agent-triggers`);
+    const listBody = await listResponse.json();
+
+    assert.equal(listResponse.status, 200);
+    assert.deepEqual(
+      listBody.triggers.map((trigger) => trigger.id),
+      ["research_dossier_manual"]
+    );
+    assert.equal(listBody.triggers[0].target.workflowId, "research_dossier");
+    assert.equal(listBody.triggers[0].target.questionTemplate, undefined);
+    assert.doesNotMatch(JSON.stringify(listBody), /research_task/);
+
+    const dispatchResponse = await fetch(
+      `${server.baseUrl}/agent-triggers/research_dossier_manual/dispatch`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-idempotency-key": "request-1",
+          "x-user-id": "alice",
+          "x-workspace-id": "workspace-a",
+        },
+        body: JSON.stringify({
+          input: {
+            apiKey: "sk-secret-value",
+            docIds: ["doc-1"],
+            question: "Build a risk report",
+            userId: "mallory",
+          },
+        }),
+      }
+    );
+    const dispatchBody = await dispatchResponse.json();
+
+    assert.equal(dispatchResponse.status, 202);
+    assert.equal(dispatchBody.task.id, "agent_goal:from-trigger");
+    assert.equal(dispatchBody.triggerDispatch.triggerId, "research_dossier_manual");
+    assert.deepEqual(calls, [
+      {
+        accessScope: {
+          authenticated: false,
+          userId: "alice",
+          workspaceId: "workspace-a",
+        },
+        docIds: ["doc-1"],
+        idempotencyKey: "research_dossier_manual:request-1",
+        maxIterations: 10,
+        question: "research_task: Build a risk report",
+        sessionId: undefined,
+        userPreferences: undefined,
+        userId: "alice",
+      },
+    ]);
+    assert.doesNotMatch(JSON.stringify(dispatchBody), /sk-secret-value/);
+    assert.doesNotMatch(JSON.stringify(calls), /mallory/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("agent trigger dispatch reports contract errors without creating tasks", async () => {
+  let createTaskCalled = false;
+  const app = await createApp({
+    agentTaskService: {
+      createTask: async () => {
+        createTaskCalled = true;
+      },
+    },
+    ragService: {
+      chat: async () => ({
+        text: "stub",
+        citations: [],
+      }),
+      clearDocuments: async () => [],
+      clearSessionMemory: () => true,
+      deleteDocument: async () => null,
+      getDocument: () => null,
+      ingestDocument: async () => null,
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    chatMcp: async () => ({
+      text: "web",
+    }),
+    healthService: okHealthService,
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(
+      `${server.baseUrl}/agent-triggers/research_dossier_manual/dispatch`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-idempotency-key": "request-missing-question",
+          "x-user-id": "alice",
+          "x-workspace-id": "workspace-a",
+        },
+        body: JSON.stringify({
+          input: {
+            docIds: ["doc-1"],
+          },
+        }),
+      }
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.match(body.error, /Trigger input missing required field\(s\): question/);
+    assert.equal(createTaskCalled, false);
+  } finally {
+    await server.close();
+  }
+});
+
 test("agent task API runs multi-step goals and resumes after approval", async () => {
   const approvalGate = {
     capabilityId: "web.search",
