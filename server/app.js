@@ -55,6 +55,7 @@ import {
   createAgentTaskRunner,
   createAgentTaskService,
 } from "./rag/agent-tasks.js";
+import { createAdminStatusService } from "./rag/admin-status.js";
 import { createAgentTriggerDispatcher } from "./rag/agent-trigger-dispatcher.js";
 import { createDefaultAgentTriggerRegistry } from "./rag/agent-triggers/registry.js";
 import { runAgentRag } from "./rag/agent.js";
@@ -524,6 +525,16 @@ export const createApp = async (options = {}) => {
     listFeedback,
     recordFeedback,
   };
+  const adminStatusService =
+    options.adminStatusService ??
+    createAdminStatusService({
+      agentRunRecoveryActionService,
+      agentRunService,
+      healthService,
+      qualityService,
+      taskService,
+      triggerRegistry: agentTriggerRegistry,
+    });
   const agentExperienceMemoryService = options.agentExperienceMemoryService ?? {
     recordFromFeedback: recordAgentExperienceFromFeedback,
   };
@@ -602,6 +613,20 @@ export const createApp = async (options = {}) => {
 
   app.use(requireApiAuth);
   app.use("/uploads", express.static(uploadsDirectory));
+
+  app.get("/admin/status", async (req, res) => {
+    try {
+      return res.json(
+        await adminStatusService.buildStatus({
+          accessScope: getRequestAccessScope(req),
+        })
+      );
+    } catch {
+      return res.status(500).json({
+        error: "Failed to load admin status.",
+      });
+    }
+  });
 
   app.get("/documents/:docId/file", async (req, res) => {
     const docId = req.params.docId?.trim();

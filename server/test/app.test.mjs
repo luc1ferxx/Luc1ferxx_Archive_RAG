@@ -3043,6 +3043,261 @@ test("api auth protects document routes while leaving health public", async () =
   }
 });
 
+test("admin status endpoint returns scoped compact snapshot behind auth", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
+  const calls = [];
+
+  process.env.API_AUTH_ENABLED = "true";
+  process.env.API_AUTH_TOKEN = "";
+  process.env.API_AUTH_TOKENS = JSON.stringify({
+    "admin-token": {
+      userId: "admin-user",
+      workspaceId: "admin-workspace",
+    },
+  });
+
+  try {
+    const app = await createApp({
+      agentRunRecoveryActionService: {
+        listRecoveryRuns: async ({ accessScope }) => {
+          calls.push(["recovery", accessScope]);
+
+          return {
+            runs: [
+              {
+                recovery: {
+                  actions: [
+                    {
+                      type: "resume_from_step",
+                    },
+                  ],
+                  required: true,
+                },
+                result: {
+                  recovery: {
+                    mode: "manual",
+                    rawPrompt: "admin raw prompt should not leak",
+                  },
+                },
+                status: AGENT_RUN_STATUSES.waitingForUser,
+              },
+            ],
+          };
+        },
+      },
+      agentRunRecoveryService: createNoopStartupRecoveryService(),
+      agentRunService: {
+        initialize: async () => true,
+        listRuns: async ({ accessScope, status }) => {
+          calls.push(["runs", status, accessScope]);
+
+          if (status === AGENT_RUN_STATUSES.failed) {
+            return {
+              runs: [
+                {
+                  input: {
+                    prompt: "admin private run prompt",
+                  },
+                  status,
+                },
+              ],
+            };
+          }
+
+          return {
+            runs: [],
+          };
+        },
+      },
+      agentTriggerRegistry: {
+        listPublic: () => [
+          {
+            enabled: true,
+            id: "enabled-trigger",
+          },
+          {
+            enabled: false,
+            id: "disabled-trigger",
+          },
+        ],
+      },
+      healthService: {
+        buildHealthReport: async () => ({
+          checks: {
+            openai: {
+              message: "OPENAI_API_KEY missing sk-secret-openai",
+              status: "error",
+            },
+          },
+          status: "error",
+        }),
+        runStartupHealthChecks: async () => ({
+          checks: {},
+          status: "ok",
+        }),
+      },
+      jobOrchestrator: {
+        recoverRunnableTasks: async () => ({
+          scheduledCount: 0,
+        }),
+      },
+      qualityService: {
+        readLatestQualityReport: async () => ({
+          failedCases: [
+            {
+              answer: "admin quality answer should not leak",
+              question: "admin quality question should not leak",
+            },
+          ],
+          status: "fail",
+          summary: {
+            metrics: {
+              overallPassPercent: 50,
+              overallPassRate: 0.5,
+            },
+            runId: "admin-quality-run",
+          },
+        }),
+      },
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+      },
+      taskService: {
+        initialize: async () => true,
+        listTasks: async ({ accessScope }) => {
+          calls.push(["tasks", accessScope]);
+
+          return {
+            tasks: [
+              {
+                payload: {
+                  secret: "sk-secret-task",
+                },
+                status: "queued",
+              },
+              {
+                result: {
+                  text: "admin private task result",
+                },
+                status: "failed",
+              },
+            ],
+          };
+        },
+      },
+    });
+    const server = await startServer(app);
+
+    try {
+      let response = await fetch(`${server.baseUrl}/admin/status`);
+      assert.equal(response.status, 401);
+
+      response = await fetch(`${server.baseUrl}/admin/status`, {
+        headers: {
+          "x-api-key": "admin-token",
+        },
+      });
+      assert.equal(response.status, 200);
+
+      const body = await response.json();
+      const serialized = JSON.stringify(body);
+
+      assert.equal(body.status, "error");
+      assert.equal(body.deployment.apiAuthEnabled, true);
+      assert.equal(body.health.checks.openai.status, "error");
+      assert.equal(body.quality.runId, "admin-quality-run");
+      assert.equal(body.quality.failedCaseCount, 1);
+      assert.equal(body.tasks.total, 2);
+      assert.equal(body.tasks.failedCount, 1);
+      assert.equal(body.agentRuns.failedCount, 1);
+      assert.equal(body.agentRuns.recoveryCount, 1);
+      assert.equal(body.triggers.enabledCount, 1);
+      assert.equal(body.triggers.disabledCount, 1);
+      assert.ok(
+        body.warnings.some((warning) => warning.id === "health_openai_error")
+      );
+      assert.ok(body.warnings.some((warning) => warning.id === "quality_fail"));
+      assert.deepEqual(calls.find(([type]) => type === "tasks"), [
+        "tasks",
+        {
+          authenticated: true,
+          userId: "admin-user",
+          workspaceId: "admin-workspace",
+        },
+      ]);
+      assert.doesNotMatch(serialized, /sk-secret/);
+      assert.doesNotMatch(serialized, /admin raw prompt/);
+      assert.doesNotMatch(serialized, /admin private run prompt/);
+      assert.doesNotMatch(serialized, /admin quality answer/);
+      assert.doesNotMatch(serialized, /admin quality question/);
+      assert.doesNotMatch(serialized, /admin private task result/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
+  }
+});
+
+test("admin status endpoint returns a generic route error", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+
+  process.env.API_AUTH_ENABLED = "false";
+
+  try {
+    const app = await createApp({
+      adminStatusService: {
+        buildStatus: async () => {
+          throw new Error("admin status failed with sk-secret-admin");
+        },
+      },
+      healthService: okHealthService,
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+      },
+    });
+    const server = await startServer(app);
+
+    try {
+      const response = await fetch(`${server.baseUrl}/admin/status`);
+      const body = await response.json();
+      const serialized = JSON.stringify(body);
+
+      assert.equal(response.status, 500);
+      assert.equal(body.error, "Failed to load admin status.");
+      assert.doesNotMatch(serialized, /sk-secret-admin/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+  }
+});
+
 test("document file route requires auth and enforces document ownership", async () => {
   const originalAuthEnabled = process.env.API_AUTH_ENABLED;
   const originalAuthToken = process.env.API_AUTH_TOKEN;
