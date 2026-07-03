@@ -17,6 +17,7 @@ import {
   AGENT_TASK_ACTIONS,
   createAgentTaskRunner,
 } from "../rag/agent-tasks.js";
+import { ADMIN_ACTION_IDS } from "../rag/admin-actions.js";
 import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
@@ -3286,6 +3287,306 @@ test("admin status endpoint returns a generic route error", async () => {
       assert.equal(response.status, 500);
       assert.equal(body.error, "Failed to load admin status.");
       assert.doesNotMatch(serialized, /sk-secret-admin/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+  }
+});
+
+test("admin actions endpoint runs controlled actions behind auth", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
+  const calls = [];
+
+  process.env.API_AUTH_ENABLED = "true";
+  process.env.API_AUTH_TOKEN = "";
+  process.env.API_AUTH_TOKENS = JSON.stringify({
+    "admin-action-token": {
+      userId: "admin-user",
+      workspaceId: "admin-workspace",
+    },
+  });
+
+  try {
+    const app = await createApp({
+      agentRunRecoveryActionService: {
+        listRecoveryRuns: async ({ accessScope }) => {
+          calls.push(["recovery-scan", accessScope]);
+
+          return {
+            runs: [
+              {
+                input: {
+                  prompt: "admin action private run prompt",
+                },
+                recovery: {
+                  actions: [
+                    {
+                      label: "Resume document RAG",
+                      reason: "safe_step_ready",
+                      stepId: "step-1",
+                      stepType: "document_rag",
+                      type: "resume_from_step",
+                    },
+                  ],
+                  reason: "safe_step_ready",
+                  replaySafety: {
+                    canAutoReplay: true,
+                    reasonCodes: [],
+                    steps: [
+                      {
+                        input: {
+                          question: "admin private replay input",
+                        },
+                      },
+                    ],
+                  },
+                  required: true,
+                  stepId: "step-1",
+                },
+                runId: "run-admin-action",
+                status: AGENT_RUN_STATUSES.waitingForUser,
+              },
+            ],
+          };
+        },
+      },
+      agentRunRecoveryService: createNoopStartupRecoveryService(),
+      agentRunService: {
+        initialize: async () => true,
+        listRuns: async () => ({
+          runs: [],
+        }),
+      },
+      healthService: okHealthService,
+      jobOrchestrator: {
+        recoverRunnableTasks: async () => {
+          calls.push(["recover-tasks"]);
+
+          return {
+            scheduledCount: 3,
+            tasks: [
+              {
+                payload: {
+                  secret: "sk-secret-task",
+                },
+              },
+            ],
+          };
+        },
+        recoverRunnableTasksCalled: true,
+      },
+      qualityService: {
+        readLatestQualityReport: async () => ({
+          status: "pass",
+          summary: {},
+        }),
+        runSyntheticQualityEvaluation: async ({ corpusPath }) => {
+          calls.push(["quality-refresh", corpusPath]);
+
+          return {
+            failedCases: [
+              {
+                question: "admin action private quality question",
+              },
+            ],
+            status: "pass",
+            summary: {
+              corpus: {
+                cases: 1,
+                path: corpusPath,
+              },
+              metrics: {
+                overallPassPercent: 100,
+              },
+              runId: "admin-action-quality",
+            },
+          };
+        },
+      },
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+      },
+    });
+    const server = await startServer(app);
+    const headers = {
+      "Content-Type": "application/json",
+      "x-api-key": "admin-action-token",
+    };
+
+    try {
+      let response = await fetch(
+        `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.recoverTasks}`,
+        {
+          method: "POST",
+        }
+      );
+      assert.equal(response.status, 401);
+
+      response = await fetch(
+        `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.recoverTasks}`,
+        {
+          headers,
+          method: "POST",
+        }
+      );
+      let body = await response.json();
+      let serialized = JSON.stringify(body);
+
+      assert.equal(response.status, 200);
+      assert.equal(body.action.id, ADMIN_ACTION_IDS.recoverTasks);
+      assert.deepEqual(body.result, {
+        scheduledCount: 3,
+      });
+      assert.doesNotMatch(serialized, /sk-secret-task/);
+
+      response = await fetch(
+        `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.recoveryScan}`,
+        {
+          headers,
+          method: "POST",
+        }
+      );
+      body = await response.json();
+      serialized = JSON.stringify(body);
+
+      assert.equal(response.status, 200);
+      assert.equal(body.action.id, ADMIN_ACTION_IDS.recoveryScan);
+      assert.equal(body.result.total, 1);
+      assert.equal(body.result.actionCount, 1);
+      assert.equal(body.result.runs[0].runId, "run-admin-action");
+      assert.deepEqual(
+        calls.find(([type]) => type === "recovery-scan"),
+        [
+          "recovery-scan",
+          {
+            authenticated: true,
+            userId: "admin-user",
+            workspaceId: "admin-workspace",
+          },
+        ]
+      );
+      assert.doesNotMatch(serialized, /admin action private run prompt/);
+      assert.doesNotMatch(serialized, /admin private replay input/);
+
+      response = await fetch(
+        `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.qualityRefresh}`,
+        {
+          body: JSON.stringify({
+            corpusPath: " evaluation/synthetic-corpus-compare-hard.json ",
+          }),
+          headers,
+          method: "POST",
+        }
+      );
+      body = await response.json();
+      serialized = JSON.stringify(body);
+
+      assert.equal(response.status, 200);
+      assert.equal(body.action.id, ADMIN_ACTION_IDS.qualityRefresh);
+      assert.equal(body.result.quality.runId, "admin-action-quality");
+      assert.equal(body.result.quality.failedCaseCount, 1);
+      assert.deepEqual(
+        calls.find(([type]) => type === "quality-refresh"),
+        ["quality-refresh", "evaluation/synthetic-corpus-compare-hard.json"]
+      );
+      assert.doesNotMatch(serialized, /admin action private quality question/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
+  }
+});
+
+test("admin actions endpoint exposes only controlled route errors", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+
+  process.env.API_AUTH_ENABLED = "false";
+
+  try {
+    const app = await createApp({
+      adminActionRegistry: {
+        runAction: async () => {
+          throw new Error("admin action failed with sk-secret-admin-action");
+        },
+      },
+      healthService: okHealthService,
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+      },
+    });
+    const server = await startServer(app);
+
+    try {
+      let response = await fetch(
+        `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.recoverTasks}`,
+        {
+          method: "POST",
+        }
+      );
+      let body = await response.json();
+
+      assert.equal(response.status, 500);
+      assert.equal(body.error, "Failed to run admin action.");
+      assert.doesNotMatch(JSON.stringify(body), /sk-secret-admin-action/);
+
+      const controlledApp = await createApp({
+        adminActionRegistry: {
+          runAction: async () => {
+            const error = new Error("Admin action not found.");
+            error.expose = true;
+            error.status = 404;
+            throw error;
+          },
+        },
+        healthService: okHealthService,
+        ragService: {
+          initializeDocumentRegistry: async () => [],
+          initializeSessionMemory: async () => true,
+        },
+      });
+      const controlledServer = await startServer(controlledApp);
+
+      try {
+        response = await fetch(
+          `${controlledServer.baseUrl}/admin/actions/unknown-action`,
+          {
+            method: "POST",
+          }
+        );
+        body = await response.json();
+
+        assert.equal(response.status, 404);
+        assert.equal(body.error, "Admin action not found.");
+      } finally {
+        await controlledServer.close();
+      }
     } finally {
       await server.close();
     }

@@ -55,6 +55,7 @@ import {
   createAgentTaskRunner,
   createAgentTaskService,
 } from "./rag/agent-tasks.js";
+import { createAdminActionRegistry } from "./rag/admin-actions.js";
 import { createAdminStatusService } from "./rag/admin-status.js";
 import { createAgentTriggerDispatcher } from "./rag/agent-trigger-dispatcher.js";
 import { createDefaultAgentTriggerRegistry } from "./rag/agent-triggers/registry.js";
@@ -535,6 +536,13 @@ export const createApp = async (options = {}) => {
       taskService,
       triggerRegistry: agentTriggerRegistry,
     });
+  const adminActionRegistry =
+    options.adminActionRegistry ??
+    createAdminActionRegistry({
+      agentRunRecoveryActionService,
+      jobOrchestrator,
+      qualityService,
+    });
   const agentExperienceMemoryService = options.agentExperienceMemoryService ?? {
     recordFromFeedback: recordAgentExperienceFromFeedback,
   };
@@ -624,6 +632,25 @@ export const createApp = async (options = {}) => {
     } catch {
       return res.status(500).json({
         error: "Failed to load admin status.",
+      });
+    }
+  });
+
+  app.post("/admin/actions/:action", async (req, res) => {
+    try {
+      return res.json(
+        await adminActionRegistry.runAction({
+          accessScope: getRequestAccessScope(req),
+          actionId: req.params.action,
+          payload: req.body,
+        })
+      );
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error:
+          error?.expose === true
+            ? error.message
+            : "Failed to run admin action.",
       });
     }
   });
