@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { addAccessPrincipalAuthorizationMetadata } from "./access-scope.js";
 import { getApiAuthToken, isApiAuthEnabled } from "./rag/config.js";
 
 const PUBLIC_PATH_PREFIXES = ["/health", "/ready"];
@@ -32,13 +33,16 @@ const normalizeTokenPrincipal = (token, principal = {}) => {
     };
   }
 
-  return {
-    token,
-    userId: normalizeString(principal.userId ?? principal.user_id),
-    workspaceId: normalizeString(
-      principal.workspaceId ?? principal.workspace_id
-    ),
-  };
+  return addAccessPrincipalAuthorizationMetadata(
+    {
+      token,
+      userId: normalizeString(principal.userId ?? principal.user_id),
+      workspaceId: normalizeString(
+        principal.workspaceId ?? principal.workspace_id
+      ),
+    },
+    principal
+  );
 };
 
 const parseConfiguredTokenPrincipals = () => {
@@ -105,17 +109,21 @@ const findTokenPrincipal = (providedToken) =>
     constantTimeEqual(providedToken, entry.token)
   );
 
-const buildAccessScope = (req, principal = {}) => ({
-  authenticated: Boolean(principal.authenticated),
-  userId:
-    normalizeString(principal.userId) ||
-    getRequestValue(req, "x-user-id") ||
-    getRequestValue(req, "userId"),
-  workspaceId:
-    normalizeString(principal.workspaceId) ||
-    getRequestValue(req, "x-workspace-id") ||
-    getRequestValue(req, "workspaceId"),
-});
+const buildAccessScope = (req, principal = {}) =>
+  addAccessPrincipalAuthorizationMetadata(
+    {
+      authenticated: Boolean(principal.authenticated),
+      userId:
+        normalizeString(principal.userId) ||
+        getRequestValue(req, "x-user-id") ||
+        getRequestValue(req, "userId"),
+      workspaceId:
+        normalizeString(principal.workspaceId) ||
+        getRequestValue(req, "x-workspace-id") ||
+        getRequestValue(req, "workspaceId"),
+    },
+    principal
+  );
 
 export const getRequestAccessScope = (req) => req.accessScope ?? {};
 
