@@ -40,6 +40,10 @@ import {
   resetPostgresMigrations,
   runPostgresMigrations,
 } from "../rag/db-migrations.js";
+import {
+  ADMIN_PERMISSION_IDS,
+  ADMIN_ROLE_IDS,
+} from "../rag/admin-permissions.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -364,6 +368,8 @@ test("API auth middleware contract preserves public paths and scoped principals"
       API_AUTH_TOKENS: JSON.stringify([
         {
           token: "bearer-token",
+          permission_ids: [ADMIN_PERMISSION_IDS.adminActionQualityRefresh],
+          roles: [ADMIN_ROLE_IDS.viewer],
           user_id: "alice",
           workspace_id: "workspace-a",
         },
@@ -379,6 +385,8 @@ test("API auth middleware contract preserves public paths and scoped principals"
       assert.equal(result.nextCalled, true);
       assert.deepEqual(result.accessScope, {
         authenticated: true,
+        permissionIds: [ADMIN_PERMISSION_IDS.adminActionQualityRefresh],
+        roleIds: [ADMIN_ROLE_IDS.viewer],
         userId: "alice",
         workspaceId: "workspace-a",
       });
