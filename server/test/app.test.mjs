@@ -37,6 +37,11 @@ import {
   buildQualityGateDecision,
   buildQualityHistoryResponse,
 } from "../evaluation/quality-report.js";
+import {
+  ADMIN_PERMISSION_IDS,
+  ADMIN_PERMISSION_REASONS,
+  ADMIN_ROLE_IDS,
+} from "../rag/admin-permissions.js";
 
 const okHealthService = {
   buildHealthReport: async () => ({
@@ -3054,6 +3059,7 @@ test("admin status endpoint returns scoped compact snapshot behind auth", async 
   process.env.API_AUTH_TOKEN = "";
   process.env.API_AUTH_TOKENS = JSON.stringify({
     "admin-token": {
+      roles: [ADMIN_ROLE_IDS.viewer],
       userId: "admin-user",
       workspaceId: "admin-workspace",
     },
@@ -3225,6 +3231,7 @@ test("admin status endpoint returns scoped compact snapshot behind auth", async 
         "tasks",
         {
           authenticated: true,
+          roleIds: [ADMIN_ROLE_IDS.viewer],
           userId: "admin-user",
           workspaceId: "admin-workspace",
         },
@@ -3299,6 +3306,274 @@ test("admin status endpoint returns a generic route error", async () => {
   }
 });
 
+test("admin endpoints enforce configured role permissions", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
+  const actionCalls = [];
+  let statusCalls = 0;
+
+  process.env.API_AUTH_ENABLED = "true";
+  process.env.API_AUTH_TOKEN = "";
+  process.env.API_AUTH_TOKENS = JSON.stringify({
+    "no-admin-token": {
+      userId: "plain-user",
+      workspaceId: "workspace-a",
+    },
+    "quality-token": {
+      permissions: [ADMIN_PERMISSION_IDS.adminActionQualityRefresh],
+      userId: "quality-user",
+      workspaceId: "workspace-a",
+    },
+    "viewer-token": {
+      roles: [ADMIN_ROLE_IDS.viewer],
+      userId: "viewer-user",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  try {
+    const app = await createApp({
+      adminActionRegistry: {
+        runAction: async ({ actionId, accessScope }) => {
+          actionCalls.push([actionId, accessScope]);
+
+          return {
+            action: {
+              id: actionId,
+              label: "Stub admin action",
+            },
+            result: {
+              ok: true,
+            },
+            status: "completed",
+          };
+        },
+      },
+      adminStatusService: {
+        buildStatus: async ({ accessScope }) => {
+          statusCalls += 1;
+
+          return {
+            accessScope,
+            status: "ok",
+          };
+        },
+      },
+      healthService: okHealthService,
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+      },
+    });
+    const server = await startServer(app);
+
+    try {
+      let response = await fetch(`${server.baseUrl}/admin/status`, {
+        headers: {
+          "x-api-key": "no-admin-token",
+        },
+      });
+      let body = await response.json();
+
+      assert.equal(response.status, 403);
+      assert.equal(body.error, "Forbidden.");
+      assert.deepEqual(body.adminAuthorization, {
+        permissionId: ADMIN_PERMISSION_IDS.adminStatusRead,
+        reason: ADMIN_PERMISSION_REASONS.deniedMissingPermission,
+      });
+      assert.equal(statusCalls, 0);
+
+      response = await fetch(`${server.baseUrl}/admin/status`, {
+        headers: {
+          "x-api-key": "viewer-token",
+        },
+      });
+      body = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(statusCalls, 1);
+      assert.deepEqual(body.accessScope, {
+        authenticated: true,
+        roleIds: [ADMIN_ROLE_IDS.viewer],
+        userId: "viewer-user",
+        workspaceId: "workspace-a",
+      });
+
+      response = await fetch(
+        `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.recoverTasks}`,
+        {
+          headers: {
+            "x-api-key": "viewer-token",
+          },
+          method: "POST",
+        }
+      );
+      body = await response.json();
+
+      assert.equal(response.status, 403);
+      assert.deepEqual(body.adminAuthorization, {
+        permissionId: ADMIN_PERMISSION_IDS.adminActionRecoverTasks,
+        reason: ADMIN_PERMISSION_REASONS.deniedMissingPermission,
+      });
+      assert.deepEqual(actionCalls, []);
+
+      response = await fetch(
+        `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.qualityRefresh}`,
+        {
+          headers: {
+            "x-api-key": "quality-token",
+          },
+          method: "POST",
+        }
+      );
+      body = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(body.action.id, ADMIN_ACTION_IDS.qualityRefresh);
+      assert.deepEqual(actionCalls, [
+        [
+          ADMIN_ACTION_IDS.qualityRefresh,
+          {
+            authenticated: true,
+            permissionIds: [ADMIN_PERMISSION_IDS.adminActionQualityRefresh],
+            userId: "quality-user",
+            workspaceId: "workspace-a",
+          },
+        ],
+      ]);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
+  }
+});
+
+test("admin audit endpoint exposes compact authorization decisions", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
+
+  process.env.API_AUTH_ENABLED = "true";
+  process.env.API_AUTH_TOKEN = "";
+  process.env.API_AUTH_TOKENS = JSON.stringify({
+    "operator-token": {
+      roles: [ADMIN_ROLE_IDS.operator],
+      userId: "operator-user",
+      workspaceId: "workspace-a",
+    },
+    "plain-token": {
+      userId: "plain-user",
+      workspaceId: "workspace-a",
+    },
+    "viewer-token": {
+      roles: [ADMIN_ROLE_IDS.viewer],
+      userId: "viewer-user",
+      workspaceId: "workspace-a",
+    },
+  });
+
+  try {
+    const app = await createApp({
+      adminStatusService: {
+        buildStatus: async () => ({
+          status: "ok",
+        }),
+      },
+      healthService: okHealthService,
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+      },
+    });
+    const server = await startServer(app);
+
+    try {
+      let response = await fetch(`${server.baseUrl}/admin/status`, {
+        headers: {
+          "x-api-key": "plain-token",
+        },
+      });
+      assert.equal(response.status, 403);
+
+      response = await fetch(`${server.baseUrl}/admin/audit`, {
+        headers: {
+          "x-api-key": "viewer-token",
+        },
+      });
+      assert.equal(response.status, 403);
+
+      response = await fetch(`${server.baseUrl}/admin/audit?limit=10`, {
+        headers: {
+          "x-api-key": "operator-token",
+        },
+      });
+      const body = await response.json();
+      const serialized = JSON.stringify(body);
+
+      assert.equal(response.status, 200);
+      assert.equal(body.status, "ok");
+      assert.equal(body.total, 3);
+      assert.equal(body.events.length, 3);
+      assert.deepEqual(
+        body.events.map((event) => event.authorization.permissionId),
+        [
+          ADMIN_PERMISSION_IDS.adminAuditRead,
+          ADMIN_PERMISSION_IDS.adminAuditRead,
+          ADMIN_PERMISSION_IDS.adminStatusRead,
+        ]
+      );
+      assert.deepEqual(
+        body.events.map((event) => event.result),
+        ["allowed", "denied", "denied"]
+      );
+      assert.equal(body.events[0].principal.userId, "operator-user");
+      assert.equal(body.events[1].principal.userId, "viewer-user");
+      assert.equal(body.events[2].principal.userId, "plain-user");
+      assert.doesNotMatch(serialized, /operator-token/);
+      assert.doesNotMatch(serialized, /viewer-token/);
+      assert.doesNotMatch(serialized, /plain-token/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
+  }
+});
+
 test("admin actions endpoint runs controlled actions behind auth", async () => {
   const originalAuthEnabled = process.env.API_AUTH_ENABLED;
   const originalAuthToken = process.env.API_AUTH_TOKEN;
@@ -3309,6 +3584,7 @@ test("admin actions endpoint runs controlled actions behind auth", async () => {
   process.env.API_AUTH_TOKEN = "";
   process.env.API_AUTH_TOKENS = JSON.stringify({
     "admin-action-token": {
+      roles: [ADMIN_ROLE_IDS.operator],
       userId: "admin-user",
       workspaceId: "admin-workspace",
     },
@@ -3469,6 +3745,7 @@ test("admin actions endpoint runs controlled actions behind auth", async () => {
           "recovery-scan",
           {
             authenticated: true,
+            roleIds: [ADMIN_ROLE_IDS.operator],
             userId: "admin-user",
             workspaceId: "admin-workspace",
           },

@@ -154,6 +154,12 @@ API_AUTH_TOKENS={"alice-token":{"userId":"alice","workspaceId":"workspace-a"},"b
 
 启用带 `userId/workspaceId` 的 token 后，文档列表、chat、删除和 PDF 文件流都会按访问范围过滤。旧的无 scope 文档不会出现在 scoped 用户视图中，需要重新上传或迁移 owner/workspace 元数据。
 
+Admin 端点还会读取 token principal 上的 `roles` / `roleIds` 和 `permissions` / `permissionIds`。内置角色包括 `admin.viewer`、`admin.quality_operator`、`admin.recovery_operator`、`admin.operator`、`admin.owner`；也可以直接授予 `admin.status.read`、`admin.audit.read`、`admin.actions.recovery_scan`、`admin.actions.quality_refresh`、`admin.actions.recover_tasks` 等权限：
+
+```env
+API_AUTH_TOKENS={"admin-token":{"userId":"admin","workspaceId":"workspace-a","roles":["admin.operator"]}}
+```
+
 ## Observability
 
 | 变量 | 默认值 | 作用 |
