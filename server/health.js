@@ -1,4 +1,7 @@
 import {
+  getAdminAuditEventsPostgresTable,
+  getAdminAuditRetentionDays,
+  getAdminAuditStoreProvider,
   getAgentRunEventsPostgresTable,
   getAgentRunRecoveryModeConfigStatus,
   getAgentRunsPostgresTable,
@@ -330,6 +333,52 @@ const checkAgentRunStoreHealth = async () => {
   }
 };
 
+const checkAdminAuditStoreHealth = async () => {
+  const provider = getAdminAuditStoreProvider();
+
+  if (provider === "memory" || (provider === "auto" && !isPostgresConfigured())) {
+    return buildEntry("ok", {
+      backend: "memory",
+      provider,
+      message: "Admin audit store is using in-memory storage.",
+    });
+  }
+
+  const postgres = await checkPostgresHealth();
+
+  if (isErrorStatus(postgres.status)) {
+    return buildEntry("error", {
+      backend: "postgresql",
+      provider,
+      retentionDays: getAdminAuditRetentionDays(),
+      table: getAdminAuditEventsPostgresTable(),
+      message: postgres.message,
+    });
+  }
+
+  try {
+    const migrations = await runPostgresMigrations();
+
+    return buildEntry("ok", {
+      backend: "postgresql",
+      provider,
+      retentionDays: getAdminAuditRetentionDays(),
+      table: getAdminAuditEventsPostgresTable(),
+      appliedMigrations: migrations.appliedMigrations,
+      message: "PostgreSQL admin audit storage is reachable and migrations are applied.",
+    });
+  } catch (error) {
+    return buildEntry("error", {
+      backend: "postgresql",
+      provider,
+      retentionDays: getAdminAuditRetentionDays(),
+      table: getAdminAuditEventsPostgresTable(),
+      message:
+        error instanceof Error ? error.message : "Admin audit storage migration failed.",
+    });
+  }
+};
+
 export const buildHealthReport = async () => {
   const [
     apiAuth,
@@ -341,6 +390,7 @@ export const buildHealthReport = async () => {
     agentExperienceMemory,
     taskStore,
     agentRunStore,
+    adminAuditStore,
   ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
@@ -351,6 +401,7 @@ export const buildHealthReport = async () => {
     checkAgentExperienceMemoryHealth(),
     checkTaskStoreHealth(),
     checkAgentRunStoreHealth(),
+    checkAdminAuditStoreHealth(),
   ]);
   const checks = {
     apiAuth,
@@ -362,6 +413,7 @@ export const buildHealthReport = async () => {
     agentExperienceMemory,
     taskStore,
     agentRunStore,
+    adminAuditStore,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 

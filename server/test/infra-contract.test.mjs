@@ -149,6 +149,8 @@ test("health report contracts expose missing dependencies and strict startup fai
       assert.equal(report.checks.taskStore.backend, "memory");
       assert.equal(report.checks.agentRunStore.status, "ok");
       assert.equal(report.checks.agentRunStore.backend, "memory");
+      assert.equal(report.checks.adminAuditStore.status, "ok");
+      assert.equal(report.checks.adminAuditStore.backend, "memory");
 
       const logs = [];
       const startupReport = await runStartupHealthChecks({
@@ -202,6 +204,7 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
     await withEnv(
       {
         AGENT_RUN_STORE_PROVIDER: "postgres",
+        ADMIN_AUDIT_STORE_PROVIDER: "postgres",
         API_AUTH_ENABLED: "true",
         API_AUTH_TOKEN: "",
         LONG_MEMORY_DATABASE_URL: undefined,
@@ -234,6 +237,8 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
         assert.equal(report.checks.taskStore.backend, "postgresql");
         assert.equal(report.checks.agentRunStore.status, "error");
         assert.equal(report.checks.agentRunStore.backend, "postgresql");
+        assert.equal(report.checks.adminAuditStore.status, "error");
+        assert.equal(report.checks.adminAuditStore.backend, "postgresql");
       }
     );
 

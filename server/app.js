@@ -56,7 +56,7 @@ import {
   createAgentTaskService,
 } from "./rag/agent-tasks.js";
 import { createAdminActionRegistry } from "./rag/admin-actions.js";
-import { createAdminAuditService } from "./rag/admin-audit.js";
+import { createDefaultAdminAuditService } from "./rag/admin-audit-store.js";
 import {
   getAdminActionPermissionForRequest,
   getAdminAuditReadPermission,
@@ -551,7 +551,7 @@ export const createApp = async (options = {}) => {
       qualityService,
     });
   const adminAuditService =
-    options.adminAuditService ?? createAdminAuditService();
+    options.adminAuditService ?? createDefaultAdminAuditService();
   const agentExperienceMemoryService = options.agentExperienceMemoryService ?? {
     recordFromFeedback: recordAgentExperienceFromFeedback,
   };
@@ -597,6 +597,7 @@ export const createApp = async (options = {}) => {
   await ragService.initializeSessionMemory?.();
   await taskService.initialize?.();
   await agentRunService.initialize?.();
+  await adminAuditService.initialize?.();
   await agentRunRecoveryService.recoverOnStartup?.({
     mode: getAgentRunRecoveryMode(),
   });
@@ -686,7 +687,9 @@ export const createApp = async (options = {}) => {
         return res.json(
           await adminAuditService.listEvents({
             accessScope: getRequestAccessScope(req),
+            filters: req.query ?? {},
             limit: req.query?.limit,
+            offset: req.query?.offset,
           })
         );
       } catch {

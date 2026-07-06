@@ -3550,6 +3550,23 @@ test("admin audit endpoint exposes compact authorization decisions", async () =>
       assert.doesNotMatch(serialized, /operator-token/);
       assert.doesNotMatch(serialized, /viewer-token/);
       assert.doesNotMatch(serialized, /plain-token/);
+
+      response = await fetch(
+        `${server.baseUrl}/admin/audit?result=denied&userId=plain-user&limit=5`,
+        {
+          headers: {
+            "x-api-key": "operator-token",
+          },
+        }
+      );
+      const filteredBody = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(filteredBody.status, "ok");
+      assert.equal(filteredBody.total, 1);
+      assert.equal(filteredBody.events.length, 1);
+      assert.equal(filteredBody.events[0].principal.userId, "plain-user");
+      assert.equal(filteredBody.events[0].result, "denied");
     } finally {
       await server.close();
     }

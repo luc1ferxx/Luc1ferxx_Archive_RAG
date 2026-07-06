@@ -358,6 +358,44 @@ export const getAgentRunsPostgresTable = () =>
 export const getAgentRunEventsPostgresTable = () =>
   (process.env.AGENT_RUN_EVENTS_POSTGRES_TABLE || "rag_agent_run_events").trim();
 
+export const getAdminAuditStoreProvider = () =>
+  toChoice(process.env.ADMIN_AUDIT_STORE_PROVIDER, "auto", [
+    "auto",
+    "memory",
+    "postgres",
+  ]);
+
+export const getAdminAuditStoreConfigStatus = ({
+  provider = getAdminAuditStoreProvider(),
+} = {}) => {
+  const postgresConfigured = isPostgresDatabaseConfigured();
+  const backend =
+    provider === "postgres" || (provider === "auto" && postgresConfigured)
+      ? "postgres"
+      : "memory";
+
+  return {
+    backend,
+    persistent: backend === "postgres",
+    postgresConfigured,
+    provider,
+    reason:
+      provider === "postgres"
+        ? "env_postgres"
+        : provider === "memory"
+          ? "env_memory"
+          : postgresConfigured
+            ? "postgres_configured_default"
+            : "postgres_not_configured",
+  };
+};
+
+export const getAdminAuditEventsPostgresTable = () =>
+  (process.env.ADMIN_AUDIT_EVENTS_POSTGRES_TABLE || "rag_admin_audit_events").trim();
+
+export const getAdminAuditRetentionDays = () =>
+  Math.floor(toNonNegativeNumber(process.env.ADMIN_AUDIT_RETENTION_DAYS, 90));
+
 export const isApiAuthEnabled = () =>
   toBoolean(process.env.API_AUTH_ENABLED, false);
 

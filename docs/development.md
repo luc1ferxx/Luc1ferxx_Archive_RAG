@@ -47,7 +47,7 @@
 | `GET` | `/quality/history` | 查询历史 quality run。 |
 | `GET` | `/admin/status` | 读取 compact admin snapshot。 |
 | `POST` | `/admin/actions/:action` | 执行受控 admin action：`recover-tasks`、`recovery-scan` 或 `quality-refresh`。 |
-| `GET` | `/admin/audit` | 读取 compact admin authorization audit events，不包含 token、payload、prompt 或 raw trace。 |
+| `GET` | `/admin/audit` | 读取 compact admin authorization audit events，支持 `limit`、`offset`、`userId`、`workspaceId`、`actionId`、`permissionId` 和 `result` 过滤；不包含 token、payload、prompt 或 raw trace。 |
 
 只有 `/health` 和 `/ready` 是公开健康检查。文档列表、上传、chat、memory、quality、feedback、admin status/actions/audit 和 `/documents/:docId/file` 在 `API_AUTH_ENABLED=true` 时都需要 `x-api-key` 或 `Authorization: Bearer <token>`；admin status/actions/audit 还需要 token principal 携带匹配的 `roles` 或 `permissions`。
 

@@ -91,6 +91,9 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `AGENT_RUN_RECOVERY_MODE` | PostgreSQL-backed run store 时为 `auto`，否则 `manual` | Agent run 启动恢复模式；不显式设置时，PostgreSQL-backed agent run store 会默认自动恢复安全的 RAG-only pending/running/paused step，非持久化 run store 仍默认 `manual`；显式 `manual` 只标记 recoverable run 等待人工处理，`auto` 遇到审批或不安全 step 会回落人工，`off` 跳过启动恢复。 |
 | `AGENT_RUNS_POSTGRES_TABLE` | `rag_agent_runs` | Agent run 当前快照表。 |
 | `AGENT_RUN_EVENTS_POSTGRES_TABLE` | `rag_agent_run_events` | Agent run 审计事件表。 |
+| `ADMIN_AUDIT_STORE_PROVIDER` | `auto` | Admin audit 存储；`auto` 在 PostgreSQL 配好时使用 append-only PostgreSQL event store，否则使用内存 ring buffer。 |
+| `ADMIN_AUDIT_EVENTS_POSTGRES_TABLE` | `rag_admin_audit_events` | Admin authorization audit append-only 事件表。 |
+| `ADMIN_AUDIT_RETENTION_DAYS` | `90` | PostgreSQL admin audit retention；设为 `0` 可关闭自动裁剪。 |
 
 Agent experience memory 只进入 planner hints，不进入 citations/evidence。写入策略集中在后端：成功 run 只有在完成、未等待审批/澄清、且有文档证据或 claim support 时才会写入规划经验；负反馈只把 `citation_error`、`hallucination`、`incomplete` 写成严格核验证据的提示；普通 helpful feedback 不写。每个 user/workspace 最多保留 40 条经验，旧记录会在新写入后裁剪。`/chat` 的 `agentObservability.experienceMemory.write` 和 `/feedback` 的 `agentExperienceMemory` 会报告 `status`、`writeAttempted`、`skippedReason`、`storedCount`、`prunedCount` 和已脱敏的 `storedRecords`。
 
@@ -159,6 +162,8 @@ Admin 端点还会读取 token principal 上的 `roles` / `roleIds` 和 `permiss
 ```env
 API_AUTH_TOKENS={"admin-token":{"userId":"admin","workspaceId":"workspace-a","roles":["admin.operator"]}}
 ```
+
+`GET /admin/audit` 默认只返回当前 token workspace 下的 compact authorization events；支持 `limit`、`offset`、`userId`、`workspaceId`、`actionId`、`permissionId`、`result=allowed|denied`、`from` 和 `to` 查询参数。事件只包含 compact principal、request 和 authorization decision，不保存 token、payload、prompt 或 raw trace。
 
 ## Observability
 

@@ -30,6 +30,7 @@ const withEnv = async (overrides, callback) => {
 };
 
 const tableNames = () => ({
+  adminAuditEventsTable: "rag_admin_audit_events",
   agentRunEventsTable: "rag_agent_run_events",
   agentRunsTable: "rag_agent_runs",
   documentsTable: "rag_documents",
@@ -80,6 +81,7 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
         "CREATE TABLE __TASK_EVENTS_TABLE__ (id text);",
         "CREATE TABLE __AGENT_RUNS_TABLE__ (id text);",
         "CREATE TABLE __AGENT_RUN_EVENTS_TABLE__ (id text);",
+        "CREATE TABLE __ADMIN_AUDIT_EVENTS_TABLE__ (id text);",
       ].join("\n");
     },
     readdir: async () => [
@@ -119,6 +121,7 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
   assert.match(clientCalls[1].sql, /CREATE TABLE rag_documents/);
   assert.match(clientCalls[1].sql, /CREATE TABLE long_memory_items/);
   assert.match(clientCalls[1].sql, /CREATE TABLE rag_agent_run_events/);
+  assert.match(clientCalls[1].sql, /CREATE TABLE rag_admin_audit_events/);
   assert.deepEqual(clientCalls[2], {
     sql: "INSERT INTO schema_migrations (id) VALUES ($1)",
     values: ["002_apply.sql"],
@@ -232,6 +235,7 @@ test("PostgreSQL migrator rejects missing configuration and invalid table names"
 test("PostgreSQL migrator resolves table names from runtime environment", async () => {
   await withEnv(
     {
+      ADMIN_AUDIT_EVENTS_POSTGRES_TABLE: "env_admin_audit_events",
       AGENT_RUN_EVENTS_POSTGRES_TABLE: "env_agent_run_events",
       AGENT_RUNS_POSTGRES_TABLE: "env_agent_runs",
       DOCUMENTS_POSTGRES_TABLE: "env_documents",
@@ -262,6 +266,7 @@ test("PostgreSQL migrator resolves table names from runtime environment", async 
             "__TASK_EVENTS_TABLE__",
             "__AGENT_RUNS_TABLE__",
             "__AGENT_RUN_EVENTS_TABLE__",
+            "__ADMIN_AUDIT_EVENTS_TABLE__",
           ].join(" "),
         readdir: async () => ["001_runtime_tables.sql"],
         withPostgresClient: async (callback) =>
@@ -287,6 +292,7 @@ test("PostgreSQL migrator resolves table names from runtime environment", async 
           "env_task_events",
           "env_agent_runs",
           "env_agent_run_events",
+          "env_admin_audit_events",
         ].join(" ")
       );
     }

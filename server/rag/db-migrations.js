@@ -2,6 +2,7 @@ import { readdir as readDirectory, readFile as readTextFile } from "fs/promises"
 import path from "path";
 import { fileURLToPath } from "url";
 import {
+  getAdminAuditEventsPostgresTable,
   getDocumentsPostgresTable,
   getAgentRunEventsPostgresTable,
   getAgentRunsPostgresTable,
@@ -61,6 +62,10 @@ const getTableNames = () => ({
     getAgentRunEventsPostgresTable(),
     "AGENT_RUN_EVENTS_POSTGRES_TABLE"
   ),
+  adminAuditEventsTable: ensureSimpleTableName(
+    getAdminAuditEventsPostgresTable(),
+    "ADMIN_AUDIT_EVENTS_POSTGRES_TABLE"
+  ),
 });
 
 const validateTableNames = (tableNames = {}) => ({
@@ -92,6 +97,10 @@ const validateTableNames = (tableNames = {}) => ({
     tableNames.agentRunEventsTable,
     "AGENT_RUN_EVENTS_POSTGRES_TABLE"
   ),
+  adminAuditEventsTable: ensureSimpleTableName(
+    tableNames.adminAuditEventsTable,
+    "ADMIN_AUDIT_EVENTS_POSTGRES_TABLE"
+  ),
 });
 
 const renderMigrationSql = (sqlText, tableNames = getTableNames()) => {
@@ -104,7 +113,8 @@ const renderMigrationSql = (sqlText, tableNames = getTableNames()) => {
     .replaceAll("__TASKS_TABLE__", safeTableNames.tasksTable)
     .replaceAll("__TASK_EVENTS_TABLE__", safeTableNames.taskEventsTable)
     .replaceAll("__AGENT_RUNS_TABLE__", safeTableNames.agentRunsTable)
-    .replaceAll("__AGENT_RUN_EVENTS_TABLE__", safeTableNames.agentRunEventsTable);
+    .replaceAll("__AGENT_RUN_EVENTS_TABLE__", safeTableNames.agentRunEventsTable)
+    .replaceAll("__ADMIN_AUDIT_EVENTS_TABLE__", safeTableNames.adminAuditEventsTable);
 };
 
 export const createPostgresMigrator = ({
