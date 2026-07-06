@@ -49,7 +49,9 @@
 | `POST` | `/admin/actions/:action` | 执行受控 admin action：`recover-tasks`、`recovery-scan` 或 `quality-refresh`。 |
 | `GET` | `/admin/audit` | 读取 compact admin authorization audit events，支持 `limit`、`offset`、`userId`、`workspaceId`、`actionId`、`permissionId` 和 `result` 过滤；不包含 token、payload、prompt 或 raw trace。 |
 
-只有 `/health` 和 `/ready` 是公开健康检查。文档列表、上传、chat、memory、quality、feedback、admin status/actions/audit 和 `/documents/:docId/file` 在 `API_AUTH_ENABLED=true` 时都需要 `x-api-key` 或 `Authorization: Bearer <token>`；admin status/actions/audit 还需要 token principal 携带匹配的 `roles` 或 `permissions`。
+只有 `/health` 和 `/ready` 是公开健康检查。文档列表、上传、chat、memory、quality、feedback、admin status/actions/audit 和 `/documents/:docId/file` 在 `API_AUTH_ENABLED=true` 时都需要 `x-api-key` 或 `Authorization: Bearer <token>`；token 可以来自 `API_AUTH_TOKEN`、`API_AUTH_TOKENS` 或启用 `API_AUTH_JWT_ENABLED=true` 后的 HS256 JWT。admin status/actions/audit 还需要 principal 携带匹配的 `roles` 或 `permissions`。
+
+Admin audit 默认 `ADMIN_AUDIT_STORE_PROVIDER=auto`：PostgreSQL 配好时写入 append-only `rag_admin_audit_events` 表并按 `ADMIN_AUDIT_RETENTION_DAYS` 裁剪，未配置 PostgreSQL 时回退到内存 ring buffer。
 
 前端 Chat scope 控制通过不同 `docIds` 调用同一个 `/chat` endpoint；后端 RAG 仍只检索请求传入且通过 `accessScope` 校验的文档。
 

@@ -10,6 +10,9 @@ import {
   requireApiAuth,
 } from "../auth.js";
 import {
+  createHs256Jwt,
+} from "../auth-jwt.js";
+import {
   buildHealthReport,
   runStartupHealthChecks,
 } from "../health.js";
@@ -206,7 +209,11 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
         AGENT_RUN_STORE_PROVIDER: "postgres",
         ADMIN_AUDIT_STORE_PROVIDER: "postgres",
         API_AUTH_ENABLED: "true",
+        API_AUTH_JWT_ENABLED: undefined,
+        API_AUTH_JWT_HS256_SECRET: undefined,
+        API_AUTH_JWT_SECRET: undefined,
         API_AUTH_TOKEN: "",
+        API_AUTH_TOKENS: "",
         LONG_MEMORY_DATABASE_URL: undefined,
         OPENAI_API_KEY: "test-key",
         POSTGRES_DATABASE_URL: undefined,
@@ -250,7 +257,11 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
     await withEnv(
       {
         API_AUTH_ENABLED: "true",
+        API_AUTH_JWT_ENABLED: undefined,
+        API_AUTH_JWT_HS256_SECRET: undefined,
+        API_AUTH_JWT_SECRET: undefined,
         API_AUTH_TOKEN: "local-token",
+        API_AUTH_TOKENS: "",
         OPENAI_API_KEY: "test-key",
         QDRANT_COLLECTION: "healthy_chunks",
         QDRANT_URL: "http://qdrant.local",
@@ -264,8 +275,50 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
           report.checks.apiAuth.header,
           "x-api-key or Authorization: Bearer <token>"
         );
+        assert.deepEqual(report.checks.apiAuth.modes, ["static_token"]);
+        assert.equal(report.checks.apiAuth.workspaceRequired, false);
         assert.equal(report.checks.vectorStore.status, "ok");
         assert.equal(report.checks.vectorStore.collection, "healthy_chunks");
+      }
+    );
+
+    await withEnv(
+      {
+        API_AUTH_ENABLED: "true",
+        API_AUTH_JWT_ENABLED: "true",
+        API_AUTH_JWT_HS256_SECRET: "jwt-secret",
+        API_AUTH_JWT_SECRET: undefined,
+        API_AUTH_REQUIRE_WORKSPACE: "true",
+        API_AUTH_TOKEN: "",
+        API_AUTH_TOKENS: "",
+        OPENAI_API_KEY: "test-key",
+        VECTOR_STORE_PROVIDER: "local",
+      },
+      async () => {
+        const report = await buildHealthReport();
+
+        assert.equal(report.checks.apiAuth.status, "ok");
+        assert.deepEqual(report.checks.apiAuth.modes, ["jwt"]);
+        assert.equal(report.checks.apiAuth.workspaceRequired, true);
+      }
+    );
+
+    await withEnv(
+      {
+        API_AUTH_ENABLED: "true",
+        API_AUTH_JWT_ENABLED: "true",
+        API_AUTH_JWT_HS256_SECRET: "",
+        API_AUTH_JWT_SECRET: "",
+        API_AUTH_TOKEN: "local-token",
+        API_AUTH_TOKENS: "",
+        OPENAI_API_KEY: "test-key",
+        VECTOR_STORE_PROVIDER: "local",
+      },
+      async () => {
+        const report = await buildHealthReport();
+
+        assert.equal(report.checks.apiAuth.status, "error");
+        assert.match(report.checks.apiAuth.message, /API_AUTH_JWT/);
       }
     );
 
@@ -295,6 +348,9 @@ test("API auth middleware contract preserves public paths and scoped principals"
   await withEnv(
     {
       API_AUTH_ENABLED: "false",
+      API_AUTH_JWT_ENABLED: undefined,
+      API_AUTH_JWT_HS256_SECRET: undefined,
+      API_AUTH_JWT_SECRET: undefined,
       API_AUTH_TOKEN: undefined,
       API_AUTH_TOKENS: undefined,
     },
@@ -320,6 +376,9 @@ test("API auth middleware contract preserves public paths and scoped principals"
   await withEnv(
     {
       API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: undefined,
+      API_AUTH_JWT_HS256_SECRET: undefined,
+      API_AUTH_JWT_SECRET: undefined,
       API_AUTH_TOKEN: undefined,
       API_AUTH_TOKENS: "{not-json",
     },
@@ -341,6 +400,9 @@ test("API auth middleware contract preserves public paths and scoped principals"
   await withEnv(
     {
       API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: undefined,
+      API_AUTH_JWT_HS256_SECRET: undefined,
+      API_AUTH_JWT_SECRET: undefined,
       API_AUTH_TOKEN: undefined,
       API_AUTH_TOKENS: JSON.stringify(false),
     },
@@ -355,6 +417,9 @@ test("API auth middleware contract preserves public paths and scoped principals"
   await withEnv(
     {
       API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: undefined,
+      API_AUTH_JWT_HS256_SECRET: undefined,
+      API_AUTH_JWT_SECRET: undefined,
       API_AUTH_TOKEN: undefined,
       API_AUTH_TOKENS: undefined,
     },
@@ -362,13 +427,16 @@ test("API auth middleware contract preserves public paths and scoped principals"
       const result = runAuthMiddleware();
 
       assert.equal(result.statusCode, 500);
-      assert.match(result.jsonPayload.error, /no API token/);
+      assert.match(result.jsonPayload.error, /authentication method/);
     }
   );
 
   await withEnv(
     {
       API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: undefined,
+      API_AUTH_JWT_HS256_SECRET: undefined,
+      API_AUTH_JWT_SECRET: undefined,
       API_AUTH_TOKEN: undefined,
       API_AUTH_TOKENS: JSON.stringify([
         {
@@ -390,6 +458,7 @@ test("API auth middleware contract preserves public paths and scoped principals"
       assert.equal(result.nextCalled, true);
       assert.deepEqual(result.accessScope, {
         authenticated: true,
+        authProvider: "static_token",
         permissionIds: [ADMIN_PERMISSION_IDS.adminActionQualityRefresh],
         roleIds: [ADMIN_ROLE_IDS.viewer],
         userId: "alice",
@@ -401,6 +470,9 @@ test("API auth middleware contract preserves public paths and scoped principals"
   await withEnv(
     {
       API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: undefined,
+      API_AUTH_JWT_HS256_SECRET: undefined,
+      API_AUTH_JWT_SECRET: undefined,
       API_AUTH_TOKEN: undefined,
       API_AUTH_TOKENS: JSON.stringify({
         "legacy-token": "legacy-user",
@@ -419,6 +491,7 @@ test("API auth middleware contract preserves public paths and scoped principals"
       assert.equal(result.nextCalled, true);
       assert.deepEqual(result.accessScope, {
         authenticated: true,
+        authProvider: "static_token",
         userId: "legacy-user",
         workspaceId: "legacy-workspace",
       });
@@ -431,6 +504,116 @@ test("API auth middleware contract preserves public paths and scoped principals"
 
       assert.equal(unauthorizedResult.statusCode, 401);
       assert.equal(unauthorizedResult.jsonPayload.error, "Unauthorized.");
+    }
+  );
+
+  await withEnv(
+    {
+      API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: undefined,
+      API_AUTH_JWT_HS256_SECRET: undefined,
+      API_AUTH_JWT_SECRET: undefined,
+      API_AUTH_TOKEN: undefined,
+      API_AUTH_TOKENS: JSON.stringify([
+        {
+          allowedWorkspaceIds: ["workspace-a", "workspace-b"],
+          token: "tenant-token",
+          userId: "tenant-user",
+        },
+      ]),
+      API_AUTH_REQUIRE_WORKSPACE: "true",
+    },
+    async () => {
+      const allowedResult = runAuthMiddleware({
+        headers: {
+          "x-api-key": "tenant-token",
+        },
+        query: {
+          workspaceId: "workspace-b",
+        },
+      });
+
+      assert.equal(allowedResult.nextCalled, true);
+      assert.deepEqual(allowedResult.accessScope, {
+        allowedWorkspaceIds: ["workspace-a", "workspace-b"],
+        authenticated: true,
+        authProvider: "static_token",
+        userId: "tenant-user",
+        workspaceId: "workspace-b",
+      });
+
+      const deniedResult = runAuthMiddleware({
+        headers: {
+          "x-api-key": "tenant-token",
+        },
+        query: {
+          workspaceId: "workspace-c",
+        },
+      });
+
+      assert.equal(deniedResult.statusCode, 403);
+      assert.match(
+        deniedResult.jsonPayload.error,
+        /outside authenticated scope/
+      );
+    }
+  );
+
+  await withEnv(
+    {
+      API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: "true",
+      API_AUTH_JWT_HS256_SECRET: "jwt-secret",
+      API_AUTH_JWT_SECRET: undefined,
+      API_AUTH_TOKEN: undefined,
+      API_AUTH_TOKENS: undefined,
+      API_AUTH_REQUIRE_WORKSPACE: "true",
+    },
+    async () => {
+      const token = createHs256Jwt({
+        payload: {
+          exp: Math.floor(Date.now() / 1000) + 60,
+          permissions: [ADMIN_PERMISSION_IDS.adminAuditRead],
+          roles: [ADMIN_ROLE_IDS.viewer],
+          sub: "jwt-user",
+          workspaces: ["workspace-a", "workspace-b"],
+        },
+        secret: "jwt-secret",
+      });
+      const allowedResult = runAuthMiddleware({
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+        query: {
+          workspaceId: "workspace-a",
+        },
+      });
+
+      assert.equal(allowedResult.nextCalled, true);
+      assert.deepEqual(allowedResult.accessScope, {
+        allowedWorkspaceIds: ["workspace-a", "workspace-b"],
+        authenticated: true,
+        authProvider: "jwt",
+        permissionIds: [ADMIN_PERMISSION_IDS.adminAuditRead],
+        roleIds: [ADMIN_ROLE_IDS.viewer],
+        userId: "jwt-user",
+        workspaceId: "workspace-a",
+      });
+
+      const deniedResult = runAuthMiddleware({
+        headers: {
+          authorization: `Bearer ${token}`,
+        },
+        query: {
+          workspaceId: "workspace-c",
+        },
+      });
+
+      assert.equal(deniedResult.statusCode, 403);
+      assert.match(
+        deniedResult.jsonPayload.error,
+        /outside authenticated scope/
+      );
     }
   );
 });

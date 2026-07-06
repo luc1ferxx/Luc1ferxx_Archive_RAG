@@ -401,5 +401,72 @@ export const isApiAuthEnabled = () =>
 
 export const getApiAuthToken = () => process.env.API_AUTH_TOKEN || "";
 
+export const getApiAuthTokens = () => process.env.API_AUTH_TOKENS || "";
+
+export const isApiAuthJwtEnabled = () =>
+  toBoolean(process.env.API_AUTH_JWT_ENABLED, false);
+
+export const getApiAuthJwtSecret = () =>
+  process.env.API_AUTH_JWT_HS256_SECRET || process.env.API_AUTH_JWT_SECRET || "";
+
+export const getApiAuthJwtIssuer = () =>
+  (process.env.API_AUTH_JWT_ISSUER || "").trim();
+
+export const getApiAuthJwtAudience = () =>
+  (process.env.API_AUTH_JWT_AUDIENCE || "").trim();
+
+export const getApiAuthJwtUserClaim = () =>
+  (process.env.API_AUTH_JWT_USER_CLAIM || "sub").trim();
+
+export const getApiAuthJwtWorkspaceClaim = () =>
+  (process.env.API_AUTH_JWT_WORKSPACE_CLAIM || "workspace_id").trim();
+
+export const getApiAuthJwtWorkspacesClaim = () =>
+  (process.env.API_AUTH_JWT_WORKSPACES_CLAIM || "workspaces").trim();
+
+export const getApiAuthJwtRolesClaim = () =>
+  (process.env.API_AUTH_JWT_ROLES_CLAIM || "roles").trim();
+
+export const getApiAuthJwtPermissionsClaim = () =>
+  (process.env.API_AUTH_JWT_PERMISSIONS_CLAIM || "permissions").trim();
+
+export const getApiAuthRevokedTokenHashes = () =>
+  (process.env.API_AUTH_REVOKED_TOKEN_HASHES || "").trim();
+
+export const getApiAuthRevokedJtis = () =>
+  (process.env.API_AUTH_REVOKED_JTIS || "").trim();
+
+export const isApiAuthWorkspaceRequired = () =>
+  toBoolean(process.env.API_AUTH_REQUIRE_WORKSPACE, false);
+
+export const getApiAuthConfigStatus = () => {
+  const enabled = isApiAuthEnabled();
+  const jwtEnabled = isApiAuthJwtEnabled();
+  const jwtSecretConfigured = Boolean(getApiAuthJwtSecret().trim());
+  const staticTokenConfigured = Boolean(
+    getApiAuthToken().trim() || getApiAuthTokens().trim()
+  );
+  const status = !enabled
+    ? "disabled"
+    : jwtEnabled && !jwtSecretConfigured
+      ? "error"
+      : staticTokenConfigured || (jwtEnabled && jwtSecretConfigured)
+        ? "ok"
+        : "error";
+
+  return {
+    enabled,
+    jwtEnabled,
+    jwtSecretConfigured,
+    staticTokenConfigured,
+    workspaceRequired: isApiAuthWorkspaceRequired(),
+    modes: [
+      ...(staticTokenConfigured ? ["static_token"] : []),
+      ...(jwtEnabled ? ["jwt"] : []),
+    ],
+    status,
+  };
+};
+
 export const isStartupHealthStrict = () =>
   toBoolean(process.env.STARTUP_HEALTH_STRICT, false);

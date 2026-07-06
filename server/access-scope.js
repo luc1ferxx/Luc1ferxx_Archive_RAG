@@ -33,12 +33,25 @@ export const normalizeAccessPrincipalRoles = (principal = {}) =>
     principal.roleIds ?? principal.role_ids ?? principal.roles ?? principal.role
   );
 
+export const normalizeAccessPrincipalWorkspaceIds = (principal = {}) =>
+  normalizeScopeIds(
+    principal.allowedWorkspaceIds ??
+      principal.allowed_workspace_ids ??
+      principal.workspaceIds ??
+      principal.workspace_ids ??
+      principal.workspaces ??
+      principal.tenants ??
+      principal.tenantIds ??
+      principal.tenant_ids
+  );
+
 export const addAccessPrincipalAuthorizationMetadata = (
   target,
   principal = {}
 ) => {
   const permissionIds = normalizeAccessPrincipalPermissions(principal);
   const roleIds = normalizeAccessPrincipalRoles(principal);
+  const allowedWorkspaceIds = normalizeAccessPrincipalWorkspaceIds(principal);
 
   if (permissionIds.length > 0) {
     target.permissionIds = permissionIds;
@@ -46,6 +59,10 @@ export const addAccessPrincipalAuthorizationMetadata = (
 
   if (roleIds.length > 0) {
     target.roleIds = roleIds;
+  }
+
+  if (allowedWorkspaceIds.length > 0) {
+    target.allowedWorkspaceIds = allowedWorkspaceIds;
   }
 
   return target;

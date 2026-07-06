@@ -6,7 +6,7 @@ import {
   getAgentRunRecoveryModeConfigStatus,
   getAgentRunsPostgresTable,
   getAgentRunStoreProvider,
-  getApiAuthToken,
+  getApiAuthConfigStatus,
   getAgentExperienceMemoryConfigStatus,
   getChatModel,
   getDocumentsPostgresTable,
@@ -20,7 +20,6 @@ import {
   getTaskStoreProvider,
   getTasksPostgresTable,
   getVectorStoreProvider,
-  isApiAuthEnabled,
   isStartupHealthStrict,
 } from "./rag/config.js";
 import { runPostgresMigrations } from "./rag/db-migrations.js";
@@ -55,20 +54,36 @@ const checkOpenAIHealth = async () => {
 };
 
 const checkApiAuthHealth = async () => {
-  if (!isApiAuthEnabled()) {
+  const configStatus = getApiAuthConfigStatus();
+
+  if (!configStatus.enabled) {
     return buildEntry("disabled", {
       message: "API authentication is disabled.",
     });
   }
 
-  if (!getApiAuthToken().trim()) {
+  if (configStatus.jwtEnabled && !configStatus.jwtSecretConfigured) {
     return buildEntry("error", {
-      message: "API authentication is enabled, but API_AUTH_TOKEN is missing.",
+      modes: configStatus.modes,
+      workspaceRequired: configStatus.workspaceRequired,
+      message:
+        "API authentication JWT mode is enabled, but API_AUTH_JWT_HS256_SECRET or API_AUTH_JWT_SECRET is missing.",
+    });
+  }
+
+  if (configStatus.status !== "ok") {
+    return buildEntry("error", {
+      modes: configStatus.modes,
+      workspaceRequired: configStatus.workspaceRequired,
+      message:
+        "API authentication is enabled, but no API_AUTH_TOKEN, API_AUTH_TOKENS, or configured JWT auth method is available.",
     });
   }
 
   return buildEntry("ok", {
     header: "x-api-key or Authorization: Bearer <token>",
+    modes: configStatus.modes,
+    workspaceRequired: configStatus.workspaceRequired,
     message: "API authentication is enabled.",
   });
 };

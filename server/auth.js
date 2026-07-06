@@ -1,10 +1,30 @@
 import crypto from "crypto";
-import { addAccessPrincipalAuthorizationMetadata } from "./access-scope.js";
-import { getApiAuthToken, isApiAuthEnabled } from "./rag/config.js";
+import {
+  addAccessPrincipalAuthorizationMetadata,
+  normalizeAccessPrincipalWorkspaceIds,
+  normalizeScopeId,
+} from "./access-scope.js";
+import { verifyJwtAuthToken } from "./auth-jwt.js";
+import {
+  getApiAuthConfigStatus,
+  getApiAuthToken,
+  getApiAuthTokens,
+  isApiAuthEnabled,
+  isApiAuthJwtEnabled,
+  isApiAuthWorkspaceRequired,
+} from "./rag/config.js";
 
 const PUBLIC_PATH_PREFIXES = ["/health", "/ready"];
 
 const normalizeString = (value) => String(value ?? "").trim();
+
+class AccessScopeError extends Error {
+  constructor(message, { status = 403 } = {}) {
+    super(message);
+    this.name = "AccessScopeError";
+    this.status = status;
+  }
+}
 
 const getRequestValue = (req, key) =>
   normalizeString(req.get(key)) ||
@@ -27,6 +47,7 @@ const getProvidedToken = (req) => {
 const normalizeTokenPrincipal = (token, principal = {}) => {
   if (typeof principal === "string") {
     return {
+      authProvider: "static_token",
       token,
       userId: principal.trim(),
       workspaceId: "",
@@ -35,6 +56,7 @@ const normalizeTokenPrincipal = (token, principal = {}) => {
 
   return addAccessPrincipalAuthorizationMetadata(
     {
+      authProvider: "static_token",
       token,
       userId: normalizeString(principal.userId ?? principal.user_id),
       workspaceId: normalizeString(
@@ -46,7 +68,7 @@ const normalizeTokenPrincipal = (token, principal = {}) => {
 };
 
 const parseConfiguredTokenPrincipals = () => {
-  const rawTokenMap = process.env.API_AUTH_TOKENS?.trim();
+  const rawTokenMap = getApiAuthTokens().trim();
 
   if (rawTokenMap) {
     let parsedTokens = null;
@@ -85,6 +107,7 @@ const parseConfiguredTokenPrincipals = () => {
   return fallbackToken
     ? [
         {
+          authProvider: "static_token",
           token: fallbackToken,
           userId: "",
           workspaceId: "",
@@ -104,26 +127,95 @@ const constantTimeEqual = (left, right) => {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer);
 };
 
-const findTokenPrincipal = (providedToken) =>
-  parseConfiguredTokenPrincipals().find((entry) =>
-    constantTimeEqual(providedToken, entry.token)
-  );
+const resolveWorkspaceId = (req, principal = {}) => {
+  const requestedWorkspaceId =
+    getRequestValue(req, "x-workspace-id") ||
+    getRequestValue(req, "workspaceId");
+  const principalWorkspaceId = normalizeString(principal.workspaceId);
+  const allowedWorkspaceIds = normalizeAccessPrincipalWorkspaceIds(principal);
 
-const buildAccessScope = (req, principal = {}) =>
-  addAccessPrincipalAuthorizationMetadata(
-    {
-      authenticated: Boolean(principal.authenticated),
-      userId:
-        normalizeString(principal.userId) ||
-        getRequestValue(req, "x-user-id") ||
-        getRequestValue(req, "userId"),
-      workspaceId:
-        normalizeString(principal.workspaceId) ||
-        getRequestValue(req, "x-workspace-id") ||
-        getRequestValue(req, "workspaceId"),
-    },
-    principal
-  );
+  if (principalWorkspaceId) {
+    if (
+      allowedWorkspaceIds.length > 0 &&
+      !allowedWorkspaceIds.includes(normalizeScopeId(principalWorkspaceId))
+    ) {
+      throw new AccessScopeError(
+        "Authenticated workspace is outside allowed workspace scope."
+      );
+    }
+
+    if (
+      requestedWorkspaceId &&
+      normalizeScopeId(requestedWorkspaceId) !==
+        normalizeScopeId(principalWorkspaceId)
+    ) {
+      throw new AccessScopeError(
+        "Requested workspace is outside authenticated scope."
+      );
+    }
+
+    return principalWorkspaceId;
+  }
+
+  if (requestedWorkspaceId) {
+    if (
+      allowedWorkspaceIds.length > 0 &&
+      !allowedWorkspaceIds.includes(normalizeScopeId(requestedWorkspaceId))
+    ) {
+      throw new AccessScopeError(
+        "Requested workspace is outside authenticated scope."
+      );
+    }
+
+    return requestedWorkspaceId;
+  }
+
+  if (allowedWorkspaceIds.length === 1) {
+    return allowedWorkspaceIds[0];
+  }
+
+  if (isApiAuthWorkspaceRequired() && Boolean(principal.authenticated)) {
+    throw new AccessScopeError("Authenticated requests require a workspace scope.");
+  }
+
+  return "";
+};
+
+const buildAccessScope = (req, principal = {}) => {
+  const target = {
+    authenticated: Boolean(principal.authenticated),
+    authProvider: normalizeString(principal.authProvider),
+    userId:
+      normalizeString(principal.userId) ||
+      getRequestValue(req, "x-user-id") ||
+      getRequestValue(req, "userId"),
+    workspaceId: resolveWorkspaceId(req, principal),
+  };
+
+  if (!target.authProvider) {
+    delete target.authProvider;
+  }
+
+  return addAccessPrincipalAuthorizationMetadata(target, principal);
+};
+
+const resolveAuthenticatedPrincipal = ({ providedToken, staticPrincipals }) => {
+  const staticPrincipal = providedToken
+    ? staticPrincipals.find((entry) =>
+        constantTimeEqual(providedToken, entry.token)
+      )
+    : null;
+
+  if (staticPrincipal) {
+    return staticPrincipal;
+  }
+
+  if (providedToken && isApiAuthJwtEnabled()) {
+    return verifyJwtAuthToken(providedToken);
+  }
+
+  return null;
+};
 
 export const getRequestAccessScope = (req) => req.accessScope ?? {};
 
@@ -147,22 +239,31 @@ export const requireApiAuth = (req, res, next) => {
 
   try {
     const configuredPrincipals = parseConfiguredTokenPrincipals();
+    const authConfig = getApiAuthConfigStatus();
 
-    if (configuredPrincipals.length === 0) {
+    if (authConfig.status !== "ok") {
       res.status(500).json({
-        error: "API authentication is enabled, but no API token is configured.",
+        error: "API authentication is enabled, but no authentication method is configured.",
       });
       return;
     }
 
     const providedToken = getProvidedToken(req);
-    principal = providedToken ? findTokenPrincipal(providedToken) : null;
+    principal = resolveAuthenticatedPrincipal({
+      providedToken,
+      staticPrincipals: configuredPrincipals,
+    });
   } catch (error) {
-    res.status(500).json({
-      error:
-        error instanceof Error
+    const status = Number(error?.status ?? 500) || 500;
+    const message =
+      status === 401
+        ? "Unauthorized."
+        : error instanceof Error
           ? error.message
-          : "API authentication configuration is invalid.",
+          : "API authentication configuration is invalid.";
+
+    res.status(status).json({
+      error: message,
     });
     return;
   }
@@ -174,10 +275,17 @@ export const requireApiAuth = (req, res, next) => {
     return;
   }
 
-  req.accessScope = buildAccessScope(req, {
-    ...principal,
-    authenticated: true,
-  });
+  try {
+    req.accessScope = buildAccessScope(req, {
+      ...principal,
+      authenticated: true,
+    });
+  } catch (error) {
+    res.status(error?.status ?? 403).json({
+      error: error instanceof Error ? error.message : "Forbidden.",
+    });
+    return;
+  }
 
   next();
 };

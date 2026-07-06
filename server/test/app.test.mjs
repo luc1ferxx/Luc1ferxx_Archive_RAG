@@ -5,6 +5,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createApp as createProductionApp } from "../app.js";
+import {
+  createHs256Jwt,
+} from "../auth-jwt.js";
 import { deterministicPlannerAdapter } from "../rag/agent-execution-plan.js";
 import {
   deterministicIntentPlannerAdapter,
@@ -3049,6 +3052,105 @@ test("api auth protects document routes while leaving health public", async () =
   }
 });
 
+test("jwt auth maps claims to scoped document access and rejects workspace escapes", async () => {
+  const authEnvKeys = [
+    "API_AUTH_ENABLED",
+    "API_AUTH_JWT_AUDIENCE",
+    "API_AUTH_JWT_ENABLED",
+    "API_AUTH_JWT_HS256_SECRET",
+    "API_AUTH_JWT_ISSUER",
+    "API_AUTH_JWT_SECRET",
+    "API_AUTH_REQUIRE_WORKSPACE",
+    "API_AUTH_TOKEN",
+    "API_AUTH_TOKENS",
+  ];
+  const originalEnv = new Map(
+    authEnvKeys.map((key) => [key, process.env[key]])
+  );
+  const observedScopes = [];
+  const jwtSecret = "integration-jwt-secret";
+
+  process.env.API_AUTH_ENABLED = "true";
+  process.env.API_AUTH_JWT_AUDIENCE = "archive-rag";
+  process.env.API_AUTH_JWT_ENABLED = "true";
+  process.env.API_AUTH_JWT_HS256_SECRET = jwtSecret;
+  process.env.API_AUTH_JWT_ISSUER = "https://issuer.example";
+  process.env.API_AUTH_JWT_SECRET = "";
+  process.env.API_AUTH_REQUIRE_WORKSPACE = "true";
+  process.env.API_AUTH_TOKEN = "";
+  process.env.API_AUTH_TOKENS = "";
+
+  const token = createHs256Jwt({
+    payload: {
+      aud: "archive-rag",
+      exp: Math.floor(Date.now() / 1000) + 60,
+      iss: "https://issuer.example",
+      permissions: [ADMIN_PERMISSION_IDS.adminAuditRead],
+      roles: [ADMIN_ROLE_IDS.viewer],
+      sub: "jwt-user",
+      workspaces: ["workspace-a", "workspace-b"],
+    },
+    secret: jwtSecret,
+  });
+
+  try {
+    const app = await createApp({
+      healthService: okHealthService,
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+        listDocuments: (accessScope) => {
+          observedScopes.push(accessScope);
+          return [];
+        },
+      },
+    });
+    const server = await startServer(app);
+
+    try {
+      let response = await fetch(`${server.baseUrl}/documents`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          "x-workspace-id": "workspace-b",
+        },
+      });
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(observedScopes, [
+        {
+          allowedWorkspaceIds: ["workspace-a", "workspace-b"],
+          authenticated: true,
+          authProvider: "jwt",
+          permissionIds: [ADMIN_PERMISSION_IDS.adminAuditRead],
+          roleIds: [ADMIN_ROLE_IDS.viewer],
+          userId: "jwt-user",
+          workspaceId: "workspace-b",
+        },
+      ]);
+
+      response = await fetch(`${server.baseUrl}/documents`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          "x-workspace-id": "workspace-c",
+        },
+      });
+
+      assert.equal(response.status, 403);
+      assert.equal(observedScopes.length, 1);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    for (const [key, value] of originalEnv.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
 test("admin status endpoint returns scoped compact snapshot behind auth", async () => {
   const originalAuthEnabled = process.env.API_AUTH_ENABLED;
   const originalAuthToken = process.env.API_AUTH_TOKEN;
@@ -3231,6 +3333,7 @@ test("admin status endpoint returns scoped compact snapshot behind auth", async 
         "tasks",
         {
           authenticated: true,
+          authProvider: "static_token",
           roleIds: [ADMIN_ROLE_IDS.viewer],
           userId: "admin-user",
           workspaceId: "admin-workspace",
@@ -3395,6 +3498,7 @@ test("admin endpoints enforce configured role permissions", async () => {
       assert.equal(statusCalls, 1);
       assert.deepEqual(body.accessScope, {
         authenticated: true,
+        authProvider: "static_token",
         roleIds: [ADMIN_ROLE_IDS.viewer],
         userId: "viewer-user",
         workspaceId: "workspace-a",
@@ -3436,6 +3540,7 @@ test("admin endpoints enforce configured role permissions", async () => {
           ADMIN_ACTION_IDS.qualityRefresh,
           {
             authenticated: true,
+            authProvider: "static_token",
             permissionIds: [ADMIN_PERMISSION_IDS.adminActionQualityRefresh],
             userId: "quality-user",
             workspaceId: "workspace-a",
@@ -3762,6 +3867,7 @@ test("admin actions endpoint runs controlled actions behind auth", async () => {
           "recovery-scan",
           {
             authenticated: true,
+            authProvider: "static_token",
             roleIds: [ADMIN_ROLE_IDS.operator],
             userId: "admin-user",
             workspaceId: "admin-workspace",
@@ -4666,7 +4772,7 @@ test("feedback endpoints store and list scoped answer feedback", async () => {
         },
         body: JSON.stringify({
           userId: "bob",
-          workspaceId: "workspace-b",
+          workspaceId: "workspace-a",
           question: "What does the policy say?",
           docIds: ["doc-1"],
           feedbackType: "citation_error",
