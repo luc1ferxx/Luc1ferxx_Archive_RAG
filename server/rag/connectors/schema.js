@@ -5,7 +5,7 @@ import {
 import { validateCapabilityContract } from "../capabilities/registry.js";
 import { normalizeText, toArray } from "../capabilities/shared.js";
 import {
-  buildExecutionBoundaryContext,
+  executeWithinExecutionBoundary,
   filterInputForExecutionBoundary,
   normalizeSandboxPolicy,
   normalizeSecretPolicy,
@@ -353,18 +353,19 @@ export const createConnectorCapabilityAdapter = ({
         inputSchema: normalizedCapability.inputSchema,
       });
 
-      return executeConnector({
-        accessScope,
-        connector: compactConnectorForExecutor(normalizedConnector),
-        connectorCapability: compactConnectorCapabilityForExecutor(
-          normalizedCapability
-        ),
-        executionBoundary: buildExecutionBoundaryContext({
-          sandboxPolicy: normalizedCapability.sandboxPolicy,
-          secretPolicy: normalizedCapability.secretPolicy,
-        }),
-        input: filteredInput,
-        policy,
+      return executeWithinExecutionBoundary({
+        executor: executeConnector,
+        payload: {
+          accessScope,
+          connector: compactConnectorForExecutor(normalizedConnector),
+          connectorCapability: compactConnectorCapabilityForExecutor(
+            normalizedCapability
+          ),
+          input: filteredInput,
+          policy,
+        },
+        sandboxPolicy: normalizedCapability.sandboxPolicy,
+        secretPolicy: normalizedCapability.secretPolicy,
         services,
       });
     },

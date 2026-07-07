@@ -11,6 +11,11 @@ import {
   validateCapabilityContract,
 } from "../rag/capabilities/index.js";
 import { isAgentRunInterrupt } from "../rag/agent-interrupts.js";
+import {
+  TEST_CONNECTOR_CAPABILITY_ID,
+  TEST_CONNECTOR_ID,
+  createTestConnectorSpec,
+} from "../rag/connectors/index.js";
 
 test("capability registry validates and describes tool adapters", async () => {
   const capability = {
@@ -55,6 +60,70 @@ test("capability registry validates and describes tool adapters", async () => {
       ]),
     /Duplicate AgentRAG capability id/
   );
+});
+
+test("default capability registry can mount connector capabilities explicitly", async () => {
+  const calls = [];
+  const registry = createDefaultCapabilityRegistry({
+    connectorExecutors: {
+      [TEST_CONNECTOR_CAPABILITY_ID]: async ({
+        connector,
+        connectorCapability,
+        executionBoundary,
+        input,
+      }) => {
+        calls.push({
+          connector,
+          connectorCapability,
+          executionBoundary,
+          input,
+        });
+
+        return {
+          connectorId: connector.id,
+          text: input.message,
+        };
+      },
+    },
+    connectors: [createTestConnectorSpec()],
+  });
+  const description = registry.describe(TEST_CONNECTOR_CAPABILITY_ID);
+
+  assert.equal(description.id, TEST_CONNECTOR_CAPABILITY_ID);
+  assert.equal(description.label, "Connector Echo");
+
+  const result = await registry.execute(TEST_CONNECTOR_CAPABILITY_ID, {
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+    approval: {
+      approved: true,
+    },
+    input: {
+      apiKey: "sk-test-secret-value",
+      message: "hello connector",
+    },
+    services: {
+      secretResolver: {
+        TEST_CONNECTOR_API_TOKEN: "sk-test-secret-value",
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    connectorId: TEST_CONNECTOR_ID,
+    text: "hello connector",
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].connector.id, TEST_CONNECTOR_ID);
+  assert.deepEqual(calls[0].input, {
+    message: "hello connector",
+  });
+  assert.deepEqual(calls[0].executionBoundary.secrets.availableRefs, [
+    "TEST_CONNECTOR_API_TOKEN",
+  ]);
+  assert.doesNotMatch(JSON.stringify(calls), /sk-test-secret-value/);
 });
 
 test("built-in capabilities execute whitelisted adapters", async () => {

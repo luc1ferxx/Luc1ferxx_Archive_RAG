@@ -142,14 +142,14 @@ Agent task 的最终产物也复用同一套 capability registry。`server/rag/a
 
 ## Connector contracts
 
-Connector / MCP adapter 层目前是 contract-only，不会自动加载真实外部工具。`server/rag/connectors/` 和 `server/rag/execution-boundary.js` 提供：
+Connector / MCP adapter 层不会自动加载任意外部工具；只有显式注册 connector spec、注入 executor，并在执行时提供 required secret refs / 可选 sandbox runner 后才会执行。`server/rag/connectors/` 和 `server/rag/execution-boundary.js` 提供：
 
 - `schema.js`：规范化和校验 connector spec。每个 connector capability 必须声明 `inputSchema`、`accessScope`、`approvalPolicy`、`privacyPolicy`、`sandboxPolicy`、`secretPolicy` 和 `replaySafety`，并且必须要求 user approval。
-- `registry.js`：白名单注册 connector spec，按 connector id 和 capability id 去重，并把 connector capability 映射成现有 capability contract。
+- `registry.js`：白名单注册 connector spec，按 connector id 和 capability id 去重，并把 connector capability 映射成现有 capability contract；`createDefaultCapabilityRegistry()` 可以显式接收 `connectors`、`connectorRegistry` 和 `connectorExecutors`，再和 built-in capabilities 合并到同一 registry。
 - `built-ins/test-connector.js`：测试用 connector spec，只用于合同测试，不进入默认 capability registry。
-- `execution-boundary.js`：规范化和校验 `sandboxPolicy` / `secretPolicy`。外部调用必须声明允许 network 的 sandbox profile；workspace write 必须声明允许 workspace write；secret 只能以 uppercase ref name 暴露给 executor，不能传 secret value。
+- `execution-boundary.js`：规范化和校验 `sandboxPolicy` / `secretPolicy`，并在 executor 前执行 boundary wrapper。外部调用必须声明允许 network 的 sandbox profile；workspace write 必须声明允许 workspace write；required secret refs 必须由 `secretResolver` 确认可用；secret value 不会传给 connector executor；输出受 `maxOutputBytes` 限制，执行受 `timeoutMs` 限制，可选 `sandboxRunner` 可以接管实际隔离运行。
 
-Connector capability 执行仍走 `server/rag/capabilities/registry.js` 的 `executeCapability()`，因此会先经过 approval gate、input schema、access scope 和 privacy sanitization。Batch 4/5 不新增 runner 行为，也不让模型直接调用任意 MCP/tool；未注入 executor 的 connector capability 即使获得批准也会返回稳定错误，避免 contract-only 阶段产生隐式外部调用。执行前还会过滤 schema 外输入，避免用户传入的 secret-like 字段被带进 connector executor。
+Connector capability 执行仍走 `server/rag/capabilities/registry.js` 的 `executeCapability()`，因此会先经过 approval gate、input schema、access scope 和 privacy sanitization。不允许模型直接调用任意 MCP/tool；未注入 executor 的 connector capability 即使获得批准也会返回稳定错误。执行前还会过滤 schema 外输入，避免用户传入的 secret-like 字段被带进 connector executor。
 
 ## Model provider contracts
 

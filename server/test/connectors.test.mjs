@@ -192,6 +192,11 @@ test("connector registry maps connector capabilities through capability approval
       apiKey: "sk-test-secret-value",
       message: "  hello connector  ",
     },
+    services: {
+      secretResolver: {
+        TEST_CONNECTOR_API_TOKEN: "sk-test-secret-value",
+      },
+    },
   });
 
   assert.deepEqual(result, {
@@ -209,6 +214,10 @@ test("connector registry maps connector capabilities through capability approval
   });
   assert.equal(calls[0].input.apiKey, undefined);
   assert.equal(calls[0].executionBoundary.sandbox.profile, "connector_external_read");
+  assert.deepEqual(calls[0].executionBoundary.secrets.availableRefs, [
+    "TEST_CONNECTOR_API_TOKEN",
+  ]);
+  assert.deepEqual(calls[0].executionBoundary.secrets.missingRequiredRefs, []);
   assert.deepEqual(calls[0].executionBoundary.secrets.requiredRefs, [
     "TEST_CONNECTOR_API_TOKEN",
   ]);
@@ -247,6 +256,25 @@ test("connector registry rejects duplicate capability ids and disabled executors
         },
         input: {
           message: "hello",
+        },
+      }),
+    /missing required secret refs/
+  );
+
+  await assert.rejects(
+    () =>
+      capabilityRegistry.execute(TEST_CONNECTOR_CAPABILITY_ID, {
+        accessScope,
+        approval: {
+          approved: true,
+        },
+        input: {
+          message: "hello",
+        },
+        services: {
+          secretResolver: {
+            TEST_CONNECTOR_API_TOKEN: "sk-test-secret-value",
+          },
         },
       }),
     /Connector capability executor is not configured/

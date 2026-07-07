@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   buildExecutionBoundaryContext,
+  executeWithinExecutionBoundary,
   filterInputForExecutionBoundary,
+  resolveExecutionBoundarySecretRefs,
   validateExecutionBoundaryPolicy,
 } from "../rag/execution-boundary.js";
 
@@ -110,7 +112,9 @@ test("execution boundary context exposes secret refs only and filters extra inpu
   });
 
   assert.deepEqual(context.secrets, {
+    availableRefs: [],
     exposure: "refs_only",
+    missingRequiredRefs: [],
     optionalRefs: [],
     requiredRefs: ["TEST_CONNECTOR_API_TOKEN"],
   });
@@ -118,4 +122,148 @@ test("execution boundary context exposes secret refs only and filters extra inpu
   assert.deepEqual(input, {
     message: "hello",
   });
+});
+
+test("execution boundary resolves secret refs without exposing values", async () => {
+  const resolved = await resolveExecutionBoundarySecretRefs({
+    secretPolicy: {
+      optionalSecretRefs: ["OPTIONAL_TEST_TOKEN"],
+      requiredSecretRefs: ["TEST_CONNECTOR_API_TOKEN"],
+    },
+    secretResolver: {
+      TEST_CONNECTOR_API_TOKEN: "sk-test-secret-value",
+    },
+  });
+
+  assert.deepEqual(resolved, {
+    availableRefs: ["TEST_CONNECTOR_API_TOKEN"],
+    missingRequiredRefs: [],
+    optionalRefs: ["OPTIONAL_TEST_TOKEN"],
+    requiredRefs: ["TEST_CONNECTOR_API_TOKEN"],
+  });
+  assert.doesNotMatch(JSON.stringify(resolved), /sk-test-secret-value/);
+
+  const missing = await resolveExecutionBoundarySecretRefs({
+    secretPolicy: {
+      requiredSecretRefs: ["MISSING_TOKEN"],
+    },
+  });
+
+  assert.deepEqual(missing.missingRequiredRefs, ["MISSING_TOKEN"]);
+});
+
+test("execution boundary wraps executors with required secret and output controls", async () => {
+  const calls = [];
+  const result = await executeWithinExecutionBoundary({
+    executor: async ({ executionBoundary, input, services }) => {
+      calls.push({
+        executionBoundary,
+        hasSecretResolver: Boolean(services.secretResolver),
+        input,
+      });
+
+      return {
+        text: input.message,
+      };
+    },
+    payload: {
+      input: {
+        message: "hello",
+      },
+    },
+    sandboxPolicy: {
+      maxOutputBytes: 128,
+      profile: "connector_external_read",
+      timeoutMs: 1000,
+    },
+    secretPolicy: {
+      requiredSecretRefs: ["TEST_CONNECTOR_API_TOKEN"],
+    },
+    services: {
+      secretResolver: {
+        TEST_CONNECTOR_API_TOKEN: "sk-test-secret-value",
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    text: "hello",
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].hasSecretResolver, false);
+  assert.deepEqual(calls[0].executionBoundary.secrets.availableRefs, [
+    "TEST_CONNECTOR_API_TOKEN",
+  ]);
+  assert.deepEqual(calls[0].executionBoundary.secrets.missingRequiredRefs, []);
+  assert.doesNotMatch(JSON.stringify(calls), /sk-test-secret-value/);
+
+  await assert.rejects(
+    () =>
+      executeWithinExecutionBoundary({
+        executor: async () => ({
+          text: "hello",
+        }),
+        sandboxPolicy: {
+          profile: "connector_external_read",
+        },
+        secretPolicy: {
+          requiredSecretRefs: ["MISSING_TOKEN"],
+        },
+      }),
+    /missing required secret refs/
+  );
+
+  await assert.rejects(
+    () =>
+      executeWithinExecutionBoundary({
+        executor: async () => ({
+          text: "x".repeat(200),
+        }),
+        sandboxPolicy: {
+          maxOutputBytes: 32,
+          profile: "connector_external_read",
+        },
+        secretPolicy: {
+          requiredSecretRefs: [],
+        },
+      }),
+    /maxOutputBytes/
+  );
+});
+
+test("execution boundary delegates execution through an injected sandbox runner", async () => {
+  const calls = [];
+  const result = await executeWithinExecutionBoundary({
+    executor: async ({ input }) => ({
+      text: input.message,
+    }),
+    payload: {
+      input: {
+        message: "from sandbox",
+      },
+    },
+    sandboxPolicy: {
+      profile: "connector_external_read",
+    },
+    secretPolicy: {
+      requiredSecretRefs: [],
+    },
+    services: {
+      sandboxRunner: async ({ execute, executionBoundary, payload }) => {
+        calls.push({
+          executionBoundary,
+          payload,
+        });
+
+        return execute();
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    text: "from sandbox",
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].executionBoundary.sandbox.profile, "connector_external_read");
+  assert.doesNotMatch(JSON.stringify(calls[0]), /sk-test-secret-value/);
 });

@@ -16,11 +16,35 @@ import {
 import { createRecommendationImportSelectedCapability } from "./recommendation.js";
 import { createReportExportCapability } from "./report.js";
 import { createWebSearchCapability } from "./web.js";
+import { createConnectorRegistry } from "../connectors/registry.js";
+
+const toArray = (value) => (Array.isArray(value) ? value : []);
+
+const createConnectorCapabilities = ({
+  connectorExecutors = {},
+  connectorRegistry,
+  connectors = [],
+} = {}) => {
+  const registry =
+    connectorRegistry ??
+    (toArray(connectors).length > 0
+      ? createConnectorRegistry({
+          connectors,
+        })
+      : null);
+
+  return registry?.createCapabilities?.({
+    executors: connectorExecutors,
+  }) ?? [];
+};
 
 export const createBuiltInCapabilities = ({
   actionTaskService: providedActionTaskService,
   arxivEnrichmentService,
   arxivImportService,
+  connectorExecutors,
+  connectorRegistry,
+  connectors,
   externalImportService,
   ragService,
   recommendationImportService,
@@ -34,43 +58,50 @@ export const createBuiltInCapabilities = ({
     });
 
   return [
-    createArxivImportTopicCapability({
-      arxivImportService,
+    ...createConnectorCapabilities({
+      connectorExecutors,
+      connectorRegistry,
+      connectors,
     }),
-    createDocumentDiscoveryCapability({
-      ragService,
-    }),
-    createWebSearchCapability({
-      webChatService,
-    }),
-    createWorkspaceSearchDocumentsCapability({
-      ragService,
-    }),
-    createCitationVerifyCapability(),
-    createReportExportCapability({
-      reportExportService,
-    }),
-    createRecommendationImportSelectedCapability({
-      arxivEnrichmentService,
-      recommendationImportService,
-    }),
-    createDocumentCompareBatchCapability({
-      ragService,
-    }),
-    createTaskCreateCapability({
-      actionTaskService,
-    }),
-    createDocumentOrganizeCapability({
-      actionTaskService,
-      ragService,
-    }),
-    createSummaryCreateCapability({
-      actionTaskService,
-    }),
-    createExternalImportCapability({
-      actionTaskService,
-      externalImportService,
-    }),
+    ...[
+      createArxivImportTopicCapability({
+        arxivImportService,
+      }),
+      createDocumentDiscoveryCapability({
+        ragService,
+      }),
+      createWebSearchCapability({
+        webChatService,
+      }),
+      createWorkspaceSearchDocumentsCapability({
+        ragService,
+      }),
+      createCitationVerifyCapability(),
+      createReportExportCapability({
+        reportExportService,
+      }),
+      createRecommendationImportSelectedCapability({
+        arxivEnrichmentService,
+        recommendationImportService,
+      }),
+      createDocumentCompareBatchCapability({
+        ragService,
+      }),
+      createTaskCreateCapability({
+        actionTaskService,
+      }),
+      createDocumentOrganizeCapability({
+        actionTaskService,
+        ragService,
+      }),
+      createSummaryCreateCapability({
+        actionTaskService,
+      }),
+      createExternalImportCapability({
+        actionTaskService,
+        externalImportService,
+      }),
+    ],
   ];
 };
 
