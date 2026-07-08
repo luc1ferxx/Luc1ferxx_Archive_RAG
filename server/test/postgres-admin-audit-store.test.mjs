@@ -84,7 +84,7 @@ const createFakePostgresAuditHarness = () => {
         method: values[7],
         path: values[8],
         route: values[9],
-        authorization: parseJson(values[10], {}),
+        authorization_decision: parseJson(values[10], {}),
         principal: parseJson(values[11], {}),
         request: parseJson(values[12], {}),
         created_at: values[13],

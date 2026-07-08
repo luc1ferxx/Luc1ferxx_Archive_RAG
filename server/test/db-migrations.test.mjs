@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { createPostgresMigrator } from "../rag/db-migrations.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const withEnv = async (overrides, callback) => {
   const originalValues = new Map(
@@ -136,6 +142,16 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
     appliedMigrations: [],
   });
   assert.equal(queryCalls.length, queryCount);
+});
+
+test("admin audit migration avoids reserved authorization column name", async () => {
+  const migrationSql = await readFile(
+    path.join(__dirname, "../db/migrations/008_create_admin_audit_events.sql"),
+    "utf8"
+  );
+
+  assert.match(migrationSql, /authorization_decision JSONB NOT NULL/);
+  assert.doesNotMatch(migrationSql, /\bauthorization JSONB\b/);
 });
 
 test("PostgreSQL migrator rolls back failed migration files and can be retried", async () => {

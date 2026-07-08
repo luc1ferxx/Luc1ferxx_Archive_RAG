@@ -79,7 +79,7 @@ const buildRetentionCutoff = ({ now, retentionDays }) => {
 
 const mapRowToAuditEvent = (row = {}) => ({
   ...compactAdminAuditEvent({
-    authorization: parseJsonValue(row.authorization, {}),
+    authorization: parseJsonValue(row.authorization_decision ?? row.authorization, {}),
     createdAt: toIsoText(row.created_at),
     eventId: row.event_id,
     principal: parseJsonValue(row.principal, {}),
@@ -205,7 +205,7 @@ export const createPostgresAdminAuditStore = ({
             id,
             event_id,
             event_type,
-            authorization,
+            authorization_decision,
             principal,
             request,
             created_at
@@ -243,7 +243,7 @@ export const createPostgresAdminAuditStore = ({
             method,
             path,
             route,
-            authorization,
+            authorization_decision,
             principal,
             request,
             created_at

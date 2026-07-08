@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS __ADMIN_AUDIT_EVENTS_TABLE__ (
   method TEXT NOT NULL DEFAULT '',
   path TEXT NOT NULL DEFAULT '',
   route TEXT NOT NULL DEFAULT '',
-  authorization JSONB NOT NULL DEFAULT '{}'::jsonb,
+  authorization_decision JSONB NOT NULL DEFAULT '{}'::jsonb,
   principal JSONB NOT NULL DEFAULT '{}'::jsonb,
   request JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
