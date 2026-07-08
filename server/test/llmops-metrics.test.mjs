@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  LlmOpsBudgetExceededError,
   LLMOPS_METRIC_EVENT_TYPE,
   LLMOPS_METRIC_VERSION,
   LLMOPS_OPERATIONS,
@@ -66,6 +67,20 @@ test("LLMOps metric contract normalizes public fields only", () => {
   assert.equal(event.costCurrency, null);
   assert.equal(event.pricing, undefined);
   assert.equal(event.prompt, undefined);
+  assert.deepEqual(event.budget, {
+    exceededKeys: [],
+    limits: {
+      maxEstimatedCostUsdPerEvent: null,
+      maxTotalTokensPerEvent: null,
+    },
+    observed: {
+      estimatedCostUsd: null,
+      totalTokens: null,
+    },
+    status: "unavailable",
+  });
+  assert.deepEqual(event.annotations, []);
+  assert.deepEqual(event.alerts, []);
   assert.equal(event.modelRoute.modelName, undefined);
   assert.equal(event.modelRoute.secretRef, undefined);
   assert.equal(event.modelRoute.transport, undefined);
@@ -85,13 +100,30 @@ test("recordLlmOpsMetric writes normalized events through the injected recorder"
   const recordedEvents = [];
   const event = await recordLlmOpsMetric(
     {
+      annotations: [
+        {
+          category: "human_review",
+          id: "manual_cost_annotation",
+          severity: "info",
+          source: "admin",
+        },
+      ],
+      estimatedCostUsd: 0.002,
       itemCount: 2,
       operation: LLMOPS_OPERATIONS.embedding,
       stage: "embed_documents",
       status: "ok",
+      tokenSource: "estimated",
+      totalTokens: 120,
     },
     {
       now: () => "2026-06-29T01:00:00.000Z",
+      policy: {
+        budget: {
+          maxEstimatedCostUsdPerEvent: 0.001,
+          maxTotalTokensPerEvent: 100,
+        },
+      },
       recorder: async (recordedEvent) => {
         recordedEvents.push(recordedEvent);
       },
@@ -103,6 +135,27 @@ test("recordLlmOpsMetric writes normalized events through the injected recorder"
   assert.equal(event.timestamp, "2026-06-29T01:00:00.000Z");
   assert.equal(event.operation, LLMOPS_OPERATIONS.embedding);
   assert.equal(event.itemCount, 2);
+  assert.deepEqual(event.budget, {
+    exceededKeys: ["estimated_cost_usd", "total_tokens"],
+    limits: {
+      maxEstimatedCostUsdPerEvent: 0.001,
+      maxTotalTokensPerEvent: 100,
+    },
+    observed: {
+      estimatedCostUsd: 0.002,
+      totalTokens: 120,
+    },
+    status: "exceeded",
+  });
+  assert.deepEqual(event.annotations.map((annotation) => annotation.id), [
+    "manual_cost_annotation",
+    "llmops_usage_estimated",
+    "llmops_pricing_unavailable",
+    "llmops_budget_exceeded",
+  ]);
+  assert.deepEqual(event.alerts.map((alert) => alert.id), [
+    "llmops_budget_exceeded",
+  ]);
 });
 
 test("runWithLlmOpsMetric records success and error outcomes", async () => {
@@ -147,4 +200,52 @@ test("runWithLlmOpsMetric records success and error outcomes", async () => {
   assert.equal(recordedEvents[1].status, "error");
   assert.equal(recordedEvents[1].errorName, "TypeError");
   assert.equal(recordedEvents[1].errorMessage, "provider failed");
+  assert.deepEqual(recordedEvents[1].annotations.map((annotation) => annotation.id), [
+    "llmops_status_error",
+    "llmops_pricing_unavailable",
+  ]);
+  assert.deepEqual(recordedEvents[1].alerts.map((alert) => alert.id), [
+    "llmops_status_error",
+  ]);
+});
+
+test("runWithLlmOpsMetric can block calls that exceed LLMOps budget policy", async () => {
+  const recordedEvents = [];
+  let actionCalled = false;
+
+  await assert.rejects(
+    runWithLlmOpsMetric({
+      action: async () => {
+        actionCalled = true;
+      },
+      metric: {
+        estimatedCostUsd: 0.05,
+        operation: LLMOPS_OPERATIONS.completion,
+        stage: "complete_text",
+        tokenSource: "estimated",
+        totalTokens: 5000,
+      },
+      now: () => "2026-06-29T04:00:00.000Z",
+      policy: {
+        budget: {
+          maxEstimatedCostUsdPerEvent: 0.01,
+          maxTotalTokensPerEvent: 1000,
+        },
+        enforcementMode: "block",
+      },
+      recorder: async (event) => {
+        recordedEvents.push(event);
+      },
+    }),
+    LlmOpsBudgetExceededError
+  );
+
+  assert.equal(actionCalled, false);
+  assert.equal(recordedEvents.length, 1);
+  assert.equal(recordedEvents[0].status, "skipped");
+  assert.equal(recordedEvents[0].errorName, "LlmOpsBudgetExceededError");
+  assert.equal(recordedEvents[0].budget.status, "exceeded");
+  assert.deepEqual(recordedEvents[0].alerts.map((alert) => alert.id), [
+    "llmops_budget_exceeded",
+  ]);
 });

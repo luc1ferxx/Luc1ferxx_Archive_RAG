@@ -195,6 +195,49 @@ export const isRagObservabilityEnabled = () =>
 export const shouldIncludeRagObservabilityContext = () =>
   toBoolean(process.env.RAG_OBSERVABILITY_INCLUDE_CONTEXT, false);
 
+const getLlmOpsMaxTokensPerEvent = () => {
+  const value = toNonNegativeNumber(
+    process.env.RAG_LLMOPS_MAX_TOKENS_PER_EVENT,
+    null
+  );
+
+  return value === null ? null : Math.floor(value);
+};
+
+export const getLlmOpsPolicy = () => ({
+  alerts: {
+    budgetExceeded: toBoolean(
+      process.env.RAG_LLMOPS_ALERT_BUDGET_EXCEEDED,
+      true
+    ),
+    errorStatus: toBoolean(process.env.RAG_LLMOPS_ALERT_ERRORS, true),
+    estimatedUsage: toBoolean(
+      process.env.RAG_LLMOPS_ALERT_ESTIMATED_USAGE,
+      false
+    ),
+    latencySloBreach: toBoolean(
+      process.env.RAG_LLMOPS_ALERT_LATENCY_SLO,
+      true
+    ),
+    pricingUnavailable: toBoolean(
+      process.env.RAG_LLMOPS_ALERT_PRICING_UNAVAILABLE,
+      false
+    ),
+  },
+  budget: {
+    maxEstimatedCostUsdPerEvent: toNonNegativeNumber(
+      process.env.RAG_LLMOPS_MAX_COST_USD_PER_EVENT,
+      null
+    ),
+    maxTotalTokensPerEvent: getLlmOpsMaxTokensPerEvent(),
+  },
+  enabled: toBoolean(process.env.RAG_LLMOPS_POLICY_ENABLED, true),
+  enforcementMode: toChoice(process.env.RAG_LLMOPS_ENFORCEMENT_MODE, "record", [
+    "block",
+    "record",
+  ]),
+});
+
 export const getPostgresDatabaseUrl = () =>
   process.env.POSTGRES_DATABASE_URL || process.env.LONG_MEMORY_DATABASE_URL || "";
 

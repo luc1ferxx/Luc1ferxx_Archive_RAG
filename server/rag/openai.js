@@ -1,4 +1,5 @@
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
+import { getLlmOpsPolicy } from "./config.js";
 import {
   MODEL_CAPABILITIES,
   MODEL_ROUTE_IDS,
@@ -18,6 +19,8 @@ let chatModelInstances = new Map();
 let customProvider = null;
 
 const RETRY_DELAYS_MS = [250, 750, 1500];
+
+const getRuntimeLlmOpsPolicy = () => getLlmOpsPolicy();
 
 const sleep = (durationMs) =>
   new Promise((resolve) => {
@@ -349,6 +352,7 @@ export const embedTexts = async (texts) => {
         modelRoute,
         stage: "embed_documents",
       }),
+      policy: getRuntimeLlmOpsPolicy(),
     });
   }
 
@@ -371,6 +375,7 @@ export const embedTexts = async (texts) => {
       modelRoute,
       stage: "embed_documents",
     }),
+    policy: getRuntimeLlmOpsPolicy(),
   });
 };
 
@@ -392,6 +397,7 @@ export const embedQuery = async (query) => {
         modelRoute,
         stage: "embed_query",
       }),
+      policy: getRuntimeLlmOpsPolicy(),
     });
   }
 
@@ -414,6 +420,7 @@ export const embedQuery = async (query) => {
       modelRoute,
       stage: "embed_query",
     }),
+    policy: getRuntimeLlmOpsPolicy(),
   });
 };
 
@@ -452,6 +459,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         }),
         outputCharacters: getTextCharacters(result),
       }),
+      policy: getRuntimeLlmOpsPolicy(),
     });
 
     return {
@@ -487,6 +495,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
       }),
       outputCharacters: getTextCharacters(normalizeContent(result?.content)),
     }),
+    policy: getRuntimeLlmOpsPolicy(),
   });
 
   return {

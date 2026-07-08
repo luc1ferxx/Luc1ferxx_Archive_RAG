@@ -11,6 +11,7 @@ import {
   getAgentIntentPlanner,
   getAgentPlannerRollout,
   getAgentExperienceMemoryConfigStatus,
+  getLlmOpsPolicy,
   getLongMemoryConfigStatus,
   isAgentExperienceMemoryEnabled,
   isLongMemoryEnabled,
@@ -169,6 +170,67 @@ test("explicit agent run recovery mode overrides the storage-derived default", a
       assert.equal(getAgentRunRecoveryMode(), "manual");
       assert.equal(getAgentRunRecoveryModeConfigStatus().explicit, true);
       assert.equal(getAgentRunRecoveryModeConfigStatus().reason, "env_configured");
+    }
+  );
+});
+
+test("LLMOps policy defaults to record-only and parses optional block thresholds", async () => {
+  await withEnv(
+    {
+      RAG_LLMOPS_ALERT_BUDGET_EXCEEDED: undefined,
+      RAG_LLMOPS_ALERT_ERRORS: undefined,
+      RAG_LLMOPS_ALERT_ESTIMATED_USAGE: undefined,
+      RAG_LLMOPS_ALERT_LATENCY_SLO: undefined,
+      RAG_LLMOPS_ALERT_PRICING_UNAVAILABLE: undefined,
+      RAG_LLMOPS_ENFORCEMENT_MODE: undefined,
+      RAG_LLMOPS_MAX_COST_USD_PER_EVENT: undefined,
+      RAG_LLMOPS_MAX_TOKENS_PER_EVENT: undefined,
+      RAG_LLMOPS_POLICY_ENABLED: undefined,
+    },
+    async () => {
+      assert.deepEqual(getLlmOpsPolicy(), {
+        alerts: {
+          budgetExceeded: true,
+          errorStatus: true,
+          estimatedUsage: false,
+          latencySloBreach: true,
+          pricingUnavailable: false,
+        },
+        budget: {
+          maxEstimatedCostUsdPerEvent: null,
+          maxTotalTokensPerEvent: null,
+        },
+        enabled: true,
+        enforcementMode: "record",
+      });
+    }
+  );
+
+  await withEnv(
+    {
+      RAG_LLMOPS_ALERT_ESTIMATED_USAGE: "true",
+      RAG_LLMOPS_ALERT_PRICING_UNAVAILABLE: "true",
+      RAG_LLMOPS_ENFORCEMENT_MODE: "block",
+      RAG_LLMOPS_MAX_COST_USD_PER_EVENT: "0.015",
+      RAG_LLMOPS_MAX_TOKENS_PER_EVENT: "1234.9",
+      RAG_LLMOPS_POLICY_ENABLED: "false",
+    },
+    async () => {
+      assert.deepEqual(getLlmOpsPolicy(), {
+        alerts: {
+          budgetExceeded: true,
+          errorStatus: true,
+          estimatedUsage: true,
+          latencySloBreach: true,
+          pricingUnavailable: true,
+        },
+        budget: {
+          maxEstimatedCostUsdPerEvent: 0.015,
+          maxTotalTokensPerEvent: 1234,
+        },
+        enabled: false,
+        enforcementMode: "block",
+      });
     }
   );
 });

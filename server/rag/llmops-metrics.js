@@ -1,5 +1,15 @@
 import { performance } from "node:perf_hooks";
+import {
+  assertLlmOpsBudgetAllowed,
+  evaluateLlmOpsPolicy,
+  LlmOpsBudgetExceededError,
+  normalizeLlmOpsAlerts,
+  normalizeLlmOpsAnnotations,
+  normalizeLlmOpsBudget,
+} from "./llmops-policy.js";
 import { recordRagTrace } from "./observability.js";
+
+export { LlmOpsBudgetExceededError } from "./llmops-policy.js";
 
 export const LLMOPS_TRACE_TYPE = "llmops";
 export const LLMOPS_METRIC_EVENT_TYPE = "llmops_metric";
@@ -109,6 +119,31 @@ const normalizeErrorFields = ({ error, errorName, errorMessage } = {}) => ({
   errorName: normalizeText(errorName ?? error?.name, 160) || null,
 });
 
+const mergeSignalList = (left = [], right = []) => {
+  const seen = new Set();
+  const merged = [];
+
+  for (const signal of [...left, ...right]) {
+    const key = [
+      signal?.id,
+      signal?.category,
+      signal?.severity,
+      signal?.source,
+      signal?.threshold,
+      signal?.observed,
+    ].join(":");
+
+    if (!signal?.id || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    merged.push(signal);
+  }
+
+  return merged;
+};
+
 export const normalizeLlmOpsMetricEvent = (metric = {}) => {
   const errorFields = normalizeErrorFields(metric);
   const latencyMs = roundMetricNumber(metric.latencyMs);
@@ -148,6 +183,9 @@ export const normalizeLlmOpsMetricEvent = (metric = {}) => {
       value: metric.pricingSource,
     }),
     costCurrency: normalizeCostCurrency(metric.costCurrency),
+    annotations: normalizeLlmOpsAnnotations(metric.annotations),
+    alerts: normalizeLlmOpsAlerts(metric.alerts),
+    budget: normalizeLlmOpsBudget(metric.budget),
     ...errorFields,
   };
 };
@@ -156,12 +194,26 @@ export const recordLlmOpsMetric = async (
   metric = {},
   {
     now = () => new Date().toISOString(),
+    policy = {},
     recorder = recordRagTrace,
   } = {}
 ) => {
-  const event = normalizeLlmOpsMetricEvent({
+  const baseEvent = normalizeLlmOpsMetricEvent({
     ...metric,
     timestamp: metric.timestamp ?? now(),
+  });
+  const policySignals = evaluateLlmOpsPolicy({
+    metric: baseEvent,
+    policy,
+  });
+  const event = normalizeLlmOpsMetricEvent({
+    ...baseEvent,
+    ...policySignals,
+    alerts: mergeSignalList(baseEvent.alerts, policySignals.alerts),
+    annotations: mergeSignalList(
+      baseEvent.annotations,
+      policySignals.annotations
+    ),
   });
 
   try {
@@ -177,6 +229,7 @@ export const runWithLlmOpsMetric = async ({
   action,
   metric = {},
   now,
+  policy = {},
   recorder,
   successMetric = () => ({}),
 } = {}) => {
@@ -185,8 +238,18 @@ export const runWithLlmOpsMetric = async ({
   }
 
   const startedAt = performance.now();
+  const preflightEvent = normalizeLlmOpsMetricEvent(metric);
+  const preflightPolicySignals = evaluateLlmOpsPolicy({
+    metric: preflightEvent,
+    policy,
+  });
 
   try {
+    assertLlmOpsBudgetAllowed({
+      budget: preflightPolicySignals.budget,
+      policy,
+    });
+
     const result = await action();
     await recordLlmOpsMetric(
       {
@@ -197,6 +260,7 @@ export const runWithLlmOpsMetric = async ({
       },
       {
         now,
+        policy,
         recorder,
       }
     );
@@ -208,10 +272,11 @@ export const runWithLlmOpsMetric = async ({
         ...metric,
         error,
         latencyMs: performance.now() - startedAt,
-        status: "error",
+        status: error instanceof LlmOpsBudgetExceededError ? "skipped" : "error",
       },
       {
         now,
+        policy,
         recorder,
       }
     );
