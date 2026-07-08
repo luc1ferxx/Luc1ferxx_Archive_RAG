@@ -81,6 +81,20 @@ const safeReadSection = async ({ component, read, warnings }) => {
   }
 };
 
+const safeReadOptionalSection = async ({ component, read, warnings }) => {
+  if (typeof read !== "function") {
+    return {
+      status: ADMIN_STATUS_VALUES.unavailable,
+    };
+  }
+
+  return safeReadSection({
+    component,
+    read,
+    warnings,
+  });
+};
+
 const countStatuses = ({ items = [], statuses = [] } = {}) => {
   const counts = Object.fromEntries(statuses.map((status) => [status, 0]));
 
@@ -177,6 +191,47 @@ export const compactAdminQualityReport = (report = {}) => {
   };
 };
 
+export const compactAdminLlmOpsReport = (report = {}) => {
+  const llmops = normalizeRecord(report.llmops);
+
+  if (!llmops || Object.keys(llmops).length === 0) {
+    return {
+      status: ADMIN_STATUS_VALUES.unavailable,
+    };
+  }
+
+  const budgetExceededCount = Number(llmops.budgetExceededCount ?? 0);
+  const errorCount = Number(llmops.errorCount ?? 0);
+  const alertEventCount = Number(llmops.alertEventCount ?? 0);
+  const latencySloBreachRate = Number(llmops.latencySloBreachRate ?? 0);
+  const status =
+    errorCount > 0 || budgetExceededCount > 0
+      ? ADMIN_STATUS_VALUES.error
+      : alertEventCount > 0 || latencySloBreachRate > 0
+        ? ADMIN_STATUS_VALUES.warn
+        : ADMIN_STATUS_VALUES.ok;
+
+  return {
+    alertCounts: normalizeRecord(llmops.alertCounts),
+    alertEventCount: Number.isFinite(alertEventCount) ? alertEventCount : 0,
+    annotationCounts: normalizeRecord(llmops.annotationCounts),
+    budgetExceededCount: Number.isFinite(budgetExceededCount)
+      ? budgetExceededCount
+      : 0,
+    budgetExceededRate: llmops.budgetExceededRate ?? 0,
+    budgetStatusCounts: normalizeRecord(llmops.budgetStatusCounts),
+    errorCount: Number.isFinite(errorCount) ? errorCount : 0,
+    errorRate: llmops.errorRate ?? 0,
+    estimatedCostUsd: llmops.estimatedCostUsd ?? 0,
+    eventCount: llmops.eventCount ?? 0,
+    latencySloBreachRate: Number.isFinite(latencySloBreachRate)
+      ? latencySloBreachRate
+      : 0,
+    status,
+    totalTokens: llmops.totalTokens ?? 0,
+  };
+};
+
 const buildQualityWarnings = ({ quality = {}, warnings }) => {
   if (quality.status === ADMIN_STATUS_VALUES.unavailable) {
     return;
@@ -189,6 +244,44 @@ const buildQualityWarnings = ({ quality = {}, warnings }) => {
         id: `quality_${quality.status}`,
         message: `Quality status is ${quality.status}.`,
         severity: quality.status === "fail" ? "error" : "warn",
+      })
+    );
+  }
+};
+
+const buildLlmOpsWarnings = ({ llmOps = {}, warnings }) => {
+  if (llmOps.status === ADMIN_STATUS_VALUES.unavailable) {
+    return;
+  }
+
+  if ((llmOps.errorCount ?? 0) > 0) {
+    warnings.push(
+      createWarning({
+        component: "llmOps",
+        id: "llmops_errors",
+        message: "One or more LLMOps events failed.",
+        severity: "error",
+      })
+    );
+  }
+
+  if ((llmOps.budgetExceededCount ?? 0) > 0) {
+    warnings.push(
+      createWarning({
+        component: "llmOps",
+        id: "llmops_budget_exceeded",
+        message: "One or more LLMOps events exceeded budget policy.",
+        severity: "error",
+      })
+    );
+  }
+
+  if ((llmOps.alertEventCount ?? 0) > 0) {
+    warnings.push(
+      createWarning({
+        component: "llmOps",
+        id: "llmops_alerts",
+        message: "LLMOps alert events are present.",
       })
     );
   }
@@ -422,6 +515,7 @@ export const createAdminStatusService = ({
   healthService = {
     buildHealthReport,
   },
+  llmOpsService = null,
   now = () => new Date().toISOString(),
   processEnv = process.env,
   processVersion = process.version,
@@ -442,7 +536,7 @@ export const createAdminStatusService = ({
       processEnv,
       processVersion,
     });
-    const [health, quality, tasks, agentRuns, triggers] = await Promise.all([
+    const [health, quality, llmOps, tasks, agentRuns, triggers] = await Promise.all([
       safeReadSection({
         component: "health",
         read: async () =>
@@ -453,6 +547,16 @@ export const createAdminStatusService = ({
         component: "quality",
         read: async () =>
           compactAdminQualityReport(await qualityService.readLatestQualityReport()),
+        warnings,
+      }),
+      safeReadOptionalSection({
+        component: "llmOps",
+        read: llmOpsService?.readLatestObservabilityReport
+          ? async () =>
+              compactAdminLlmOpsReport(
+                await llmOpsService.readLatestObservabilityReport()
+              )
+          : null,
         warnings,
       }),
       safeReadSection({
@@ -502,6 +606,10 @@ export const createAdminStatusService = ({
       quality,
       warnings,
     });
+    buildLlmOpsWarnings({
+      llmOps,
+      warnings,
+    });
     buildTaskWarnings({
       tasks,
       warnings,
@@ -520,6 +628,7 @@ export const createAdminStatusService = ({
       checkedAt: now(),
       deployment,
       health,
+      llmOps,
       quality,
       status: buildOverallStatus({
         health,

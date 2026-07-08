@@ -366,3 +366,105 @@ test("admin status reports ok when dependencies are healthy and no work is block
   assert.equal(status.agentRuns.total, 0);
   assert.equal(status.triggers.enabledCount, 1);
 });
+
+test("admin status exposes compact LLMOps policy signals", async () => {
+  const service = createAdminStatusService({
+    agentRunRecoveryActionService: {
+      listRecoveryRuns: async () => ({
+        runs: [],
+      }),
+    },
+    agentRunService: {
+      listRuns: async () => ({
+        runs: [],
+      }),
+    },
+    config: createConfig(),
+    healthService: {
+      buildHealthReport: async () => ({
+        checks: {
+          openai: {
+            status: "ok",
+          },
+        },
+        status: "ok",
+      }),
+    },
+    llmOpsService: {
+      readLatestObservabilityReport: async () => ({
+        llmops: {
+          alertCounts: {
+            llmops_budget_exceeded: 1,
+            llmops_status_error: 1,
+          },
+          alertEventCount: 2,
+          annotationCounts: {
+            llmops_usage_estimated: 1,
+          },
+          budgetExceededCount: 1,
+          budgetExceededRate: 0.5,
+          budgetStatusCounts: {
+            exceeded: 1,
+            ok: 1,
+          },
+          errorCount: 1,
+          errorRate: 0.5,
+          estimatedCostUsd: 0.12345678,
+          eventCount: 2,
+          latencySloBreachRate: 0,
+          rawPrompt: "private prompt should not leak",
+          secret: "sk-secret-llmops",
+          totalTokens: 1234,
+        },
+      }),
+    },
+    qualityService: {
+      readLatestQualityReport: async () => ({
+        failedCases: [],
+        status: "ok",
+        summary: {
+          metrics: {
+            overallPassPercent: 100,
+            overallPassRate: 1,
+          },
+        },
+      }),
+    },
+    taskService: {
+      listTasks: async () => ({
+        tasks: [],
+      }),
+    },
+    triggerRegistry: {
+      listPublic: () => [
+        {
+          enabled: true,
+          id: "research_dossier_manual",
+        },
+      ],
+    },
+  });
+
+  const status = await service.buildStatus({
+    accessScope,
+  });
+  const serialized = JSON.stringify(status);
+
+  assert.equal(status.status, ADMIN_STATUS_VALUES.error);
+  assert.equal(status.llmOps.status, ADMIN_STATUS_VALUES.error);
+  assert.equal(status.llmOps.eventCount, 2);
+  assert.equal(status.llmOps.errorCount, 1);
+  assert.equal(status.llmOps.budgetExceededCount, 1);
+  assert.equal(status.llmOps.totalTokens, 1234);
+  assert.deepEqual(status.llmOps.alertCounts, {
+    llmops_budget_exceeded: 1,
+    llmops_status_error: 1,
+  });
+  assert.ok(status.warnings.some((warning) => warning.id === "llmops_errors"));
+  assert.ok(
+    status.warnings.some((warning) => warning.id === "llmops_budget_exceeded")
+  );
+  assert.ok(status.warnings.some((warning) => warning.id === "llmops_alerts"));
+  assert.doesNotMatch(serialized, /private prompt/);
+  assert.doesNotMatch(serialized, /sk-secret-llmops/);
+});

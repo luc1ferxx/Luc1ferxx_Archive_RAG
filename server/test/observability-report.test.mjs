@@ -295,6 +295,24 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
         pricingSource: "model_contract",
         costCurrency: "USD",
         itemCount: 1,
+        annotations: [
+          {
+            category: "budget",
+            id: "llmops_budget_exceeded",
+            severity: "warn",
+          },
+        ],
+        alerts: [
+          {
+            category: "budget",
+            id: "llmops_budget_exceeded",
+            severity: "warn",
+          },
+        ],
+        budget: {
+          exceededKeys: ["estimated_cost_usd"],
+          status: "exceeded",
+        },
         modelRoute: {
           capability: "chat",
           modelId: "openai.chat",
@@ -320,6 +338,16 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
         pricingSource: "model_contract",
         costCurrency: "USD",
         itemCount: 2,
+        annotations: [
+          {
+            category: "usage",
+            id: "llmops_usage_estimated",
+            severity: "info",
+          },
+        ],
+        budget: {
+          status: "ok",
+        },
         modelRoute: {
           capability: "embedding",
           modelId: "openai.embedding",
@@ -344,6 +372,23 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
         itemCount: 1,
         errorName: "RateLimitError",
         errorMessage: "rate limited",
+        annotations: [
+          {
+            category: "status",
+            id: "llmops_status_error",
+            severity: "error",
+          },
+        ],
+        alerts: [
+          {
+            category: "status",
+            id: "llmops_status_error",
+            severity: "error",
+          },
+        ],
+        budget: {
+          status: "unavailable",
+        },
         modelRoute: {
           capability: "chat",
           modelId: "openai.chat",
@@ -366,6 +411,9 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
   assert.equal(report.llmops.totalTokens, 97);
   assert.equal(report.llmops.avgTotalTokens, 32.33);
   assert.equal(report.llmops.estimatedCostUsd, 0.00014);
+  assert.equal(report.llmops.alertEventCount, 2);
+  assert.equal(report.llmops.budgetExceededCount, 1);
+  assert.equal(report.llmops.budgetExceededRate, 0.3333);
   assert.equal(report.llmops.latencySloObservedCount, 2);
   assert.equal(report.llmops.latencySloBreachedCount, 1);
   assert.equal(report.llmops.latencySloBreachRate, 0.5);
@@ -385,6 +433,20 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
     breach: 1,
     pass: 1,
     unavailable: 1,
+  });
+  assert.deepEqual(report.llmops.budgetStatusCounts, {
+    exceeded: 1,
+    ok: 1,
+    unavailable: 1,
+  });
+  assert.deepEqual(report.llmops.annotationCounts, {
+    llmops_budget_exceeded: 1,
+    llmops_status_error: 1,
+    llmops_usage_estimated: 1,
+  });
+  assert.deepEqual(report.llmops.alertCounts, {
+    llmops_budget_exceeded: 1,
+    llmops_status_error: 1,
   });
   assert.equal(report.llmops.byOperation.llm_completion.eventCount, 2);
   assert.equal(report.llmops.byOperation.llm_completion.errorRate, 0.5);
@@ -407,9 +469,14 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
   assert.match(formatted, /total tokens: 97/);
   assert.match(formatted, /estimated cost: \$0\.000140/);
   assert.match(formatted, /latency SLO breach rate: 50%/);
+  assert.match(formatted, /alert events: 2/);
+  assert.match(formatted, /budget exceeded rate: 33\.3%/);
   assert.match(formatted, /actual: 1/);
   assert.match(formatted, /model_contract: 2/);
   assert.match(formatted, /breach: 1/);
+  assert.match(formatted, /exceeded: 1/);
+  assert.match(formatted, /llmops_budget_exceeded: 1/);
+  assert.match(formatted, /llmops_status_error: 1/);
   assert.match(
     formatted,
     /llm_completion: 2 event\(s\), avg latency: 200ms, error rate: 50%, tokens: 77, cost: \$0\.000120, SLO breach rate: 0%/

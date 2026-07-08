@@ -542,6 +542,7 @@ export const createApp = async (options = {}) => {
       agentRunRecoveryActionService,
       agentRunService,
       healthService,
+      llmOpsService: options.llmOpsService,
       qualityService,
       taskService,
       triggerRegistry: agentTriggerRegistry,

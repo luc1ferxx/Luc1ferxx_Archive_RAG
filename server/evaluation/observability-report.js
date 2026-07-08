@@ -219,6 +219,12 @@ const createRecoveryStats = () => ({
 });
 
 const createLlmOpsBucketStats = () => ({
+  alertCounts: {},
+  alertEventCount: 0,
+  annotationCounts: {},
+  budgetExceededCount: 0,
+  budgetExceededRate: 0,
+  budgetStatusCounts: {},
   eventCount: 0,
   okCount: 0,
   errorCount: 0,
@@ -383,6 +389,14 @@ const getLlmOpsLatencySloStatus = (event = {}) => {
   return latencyMs <= latencySloMs ? "pass" : "breach";
 };
 
+const getLlmOpsBudgetStatus = (event = {}) => {
+  const explicitStatus = String(event.budget?.status ?? "")
+    .trim()
+    .toLowerCase();
+
+  return explicitStatus || "unavailable";
+};
+
 const getLlmOpsRouteKey = (event = {}) => {
   const modelRoute = isPlainObject(event.modelRoute) ? event.modelRoute : {};
   const providerId = String(modelRoute.providerId ?? "unknown_provider").trim() ||
@@ -405,6 +419,7 @@ const getLlmOpsBucket = (buckets = {}, key) => {
 
 const addLlmOpsCounters = (stats, event = {}) => {
   const status = getLlmOpsStatus(event);
+  const budgetStatus = getLlmOpsBudgetStatus(event);
   const latencySloStatus = getLlmOpsLatencySloStatus(event);
   const pricingSource = getLlmOpsPricingSource(event);
   const tokenSource = getLlmOpsTokenSource(event);
@@ -422,6 +437,23 @@ const addLlmOpsCounters = (stats, event = {}) => {
   increment(stats.tokenSourceCounts, tokenSource);
   increment(stats.pricingSourceCounts, pricingSource);
   increment(stats.latencySloStatusCounts, latencySloStatus);
+  increment(stats.budgetStatusCounts, budgetStatus);
+
+  for (const annotation of Array.isArray(event.annotations)
+    ? event.annotations
+    : []) {
+    increment(stats.annotationCounts, annotation.id);
+  }
+
+  const alerts = Array.isArray(event.alerts) ? event.alerts : [];
+
+  if (alerts.length > 0) {
+    stats.alertEventCount += 1;
+  }
+
+  for (const alert of alerts) {
+    increment(stats.alertCounts, alert.id);
+  }
 
   if (status === "ok") {
     stats.okCount += 1;
@@ -437,6 +469,10 @@ const addLlmOpsCounters = (stats, event = {}) => {
 
   if (latencySloStatus === "breach") {
     stats.latencySloBreachedCount += 1;
+  }
+
+  if (budgetStatus === "exceeded") {
+    stats.budgetExceededCount += 1;
   }
 };
 
@@ -464,6 +500,10 @@ const finalizeLlmOpsBucketStats = (stats = createLlmOpsBucketStats()) => {
     estimatedCostUsd: round(stats.estimatedCostUsd, 8),
     errorRate:
       stats.eventCount > 0 ? round(stats.errorCount / stats.eventCount, 4) : 0,
+    budgetExceededRate:
+      stats.eventCount > 0
+        ? round(stats.budgetExceededCount / stats.eventCount, 4)
+        : 0,
     latencySloBreachRate:
       stats.latencySloObservedCount > 0
         ? round(stats.latencySloBreachedCount / stats.latencySloObservedCount, 4)
@@ -904,6 +944,8 @@ export const formatObservabilityReport = (report) => {
     `  total tokens: ${report.llmops.totalTokens}`,
     `  estimated cost: ${formatUsd(report.llmops.estimatedCostUsd)}`,
     `  latency SLO breach rate: ${toPercent(report.llmops.latencySloBreachRate)}`,
+    `  alert events: ${report.llmops.alertEventCount}`,
+    `  budget exceeded rate: ${toPercent(report.llmops.budgetExceededRate)}`,
     "  token sources:"
   );
   lines.push(
@@ -931,6 +973,36 @@ export const formatObservabilityReport = (report) => {
       indent: "    ",
     }).length
       ? formatCountMap(report.llmops.latencySloStatusCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  budget statuses:"
+  );
+  lines.push(
+    ...(formatCountMap(report.llmops.budgetStatusCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.llmops.budgetStatusCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  annotations:"
+  );
+  lines.push(
+    ...(formatCountMap(report.llmops.annotationCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.llmops.annotationCounts, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  alerts:"
+  );
+  lines.push(
+    ...(formatCountMap(report.llmops.alertCounts, {
+      indent: "    ",
+    }).length
+      ? formatCountMap(report.llmops.alertCounts, {
           indent: "    ",
         })
       : ["    none: 0"]),
