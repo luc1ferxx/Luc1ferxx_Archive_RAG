@@ -1,7 +1,11 @@
 import { Button } from "antd";
 import {
+  AppstoreOutlined,
+  BranchesOutlined,
   CheckSquareOutlined,
   FileSearchOutlined,
+  FolderOpenOutlined,
+  PlayCircleOutlined,
   PlusCircleOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
@@ -24,15 +28,54 @@ import {
   getRecoveryReplaySafetyItems,
 } from "./workbenchFormatters";
 
-const getDocumentSourceLabel = (document) => {
+const defaultT = (key, values = {}) =>
+  Object.entries(values).reduce(
+    (result, [valueKey, value]) => result.split(`{${valueKey}}`).join(String(value)),
+    key
+  );
+
+const getDocumentSourceLabel = (document, t) => {
   const source = getDocumentSource(document);
 
   if (isArxivDocument(document)) {
     return source?.arxivId ? `arXiv ${source.arxivId}` : "arXiv";
   }
 
-  return "Uploaded";
+  return t("sidebar.uploaded");
 };
+
+const WORKSPACE_NAV_ITEMS = [
+  {
+    icon: AppstoreOutlined,
+    id: "workspace",
+    labelKey: "sidebar.workspace",
+    target: "workspaces",
+  },
+  {
+    icon: BranchesOutlined,
+    id: "skills",
+    labelKey: "home.skills",
+    target: "skills",
+  },
+  {
+    icon: PlayCircleOutlined,
+    id: "workflows",
+    labelKey: "sidebar.workflows",
+    target: "workflows",
+  },
+  {
+    icon: FolderOpenOutlined,
+    id: "drive",
+    labelKey: "sidebar.drive",
+    target: "drive",
+  },
+  {
+    icon: FileSearchOutlined,
+    id: "runs",
+    labelKey: "home.nav.runs",
+    target: "runs",
+  },
+];
 
 const SidebarSection = ({ caption, children, className = "", sectionRef, title }) => (
   <section
@@ -112,17 +155,18 @@ const RecoveryQueuePanel = ({
   isLoading,
   onRecoveryAction,
   runs = [],
+  t = defaultT,
 }) => {
   if (isLoading) {
     return (
-      <div className="archive-recovery-empty">Loading recovery queue.</div>
+      <div className="archive-recovery-empty">{t("sidebar.loadingRecovery")}</div>
     );
   }
 
   if (runs.length === 0) {
     return (
       <div className="archive-recovery-empty">
-        No agent runs are waiting for recovery.
+        {t("sidebar.noRecoveryRuns")}
       </div>
     );
   }
@@ -139,16 +183,16 @@ const RecoveryQueuePanel = ({
             <div className="archive-recovery-item-main">
               <span>{runStatus}</span>
               <strong>{run.goal ?? run.runId}</strong>
-              <p>{run.recovery?.reason ?? "Manual recovery required."}</p>
+              <p>{run.recovery?.reason ?? t("sidebar.manualRecoveryRequired")}</p>
               <div className="archive-recovery-facts">
-                <RecoveryFactRow label="Run status" value={runStatus} />
+                <RecoveryFactRow label={t("sidebar.runStatus")} value={runStatus} />
                 <RecoveryFactRow
-                  label="Recovery mode"
+                  label={t("sidebar.recoveryMode")}
                   value={run.recovery?.requestedMode}
                 />
-                <RecoveryFactRow label="Step" value={run.recovery?.stepId} />
+                <RecoveryFactRow label={t("sidebar.step")} value={run.recovery?.stepId} />
                 <RecoveryFactRow
-                  label="Replay"
+                  label={t("sidebar.replay")}
                   value={formatReplaySafetyDecision(replaySafety)}
                 />
               </div>
@@ -207,6 +251,7 @@ const RecoveryQueuePanel = ({
 };
 
 const WorkspaceSidebar = ({
+  activeNavItem,
   activeDocuments,
   arxivSuggestion,
   conversationCount,
@@ -235,17 +280,19 @@ const WorkspaceSidebar = ({
   recoveryRuns,
   savedArxivSuggestionsByDocId = {},
   selectedChatDocIds = [],
+  locale = "en",
+  t = defaultT,
   totalPages,
   uploadRef,
   workspaceDocumentTotal,
 }) => (
-  <aside className="archive-sidebar" aria-label="Workspace controls">
+  <aside className="archive-sidebar" aria-label={t("sidebar.workspaceControls")}>
     <div className="archive-sidebar-top">
       <div className="archive-sidebar-title-row">
         <div className="archive-sidebar-brand">
-          <div className="archive-brand-mark">A</div>
-          <div className="archive-sidebar-title-group">
-            <div className="archive-sidebar-kicker">Trusted workspace</div>
+            <div className="archive-brand-mark">A</div>
+            <div className="archive-sidebar-title-group">
+            <div className="archive-sidebar-kicker">{t("sidebar.trustedWorkspace")}</div>
             <div className="archive-sidebar-title">Archive RAG</div>
           </div>
         </div>
@@ -254,28 +301,49 @@ const WorkspaceSidebar = ({
       <div className="archive-sidebar-action-row">
         <button type="button" onClick={() => void onNavigate?.("new-chat")}>
           <PlusCircleOutlined />
-          New chat
+          {t("sidebar.newChat")}
         </button>
         <button type="button" onClick={() => void onNavigate?.("search")}>
           <SearchOutlined />
-          Search
+          {t("sidebar.search")}
         </button>
       </div>
+
+      <nav className="archive-product-nav" aria-label={t("sidebar.workspaceNavigation")}>
+        {WORKSPACE_NAV_ITEMS.map((item) => {
+          const NavIcon = item.icon;
+
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={activeNavItem === item.id ? "is-active" : ""}
+              onClick={() => void onNavigate?.(item.target)}
+            >
+              <NavIcon />
+              <span>{t(item.labelKey)}</span>
+            </button>
+          );
+        })}
+      </nav>
     </div>
 
     <SidebarSection
-      caption={`${formatDocumentCount(activeDocuments.length)} · ${totalPages} pages`}
+      caption={t("sidebar.pagesCaption", {
+        documents: formatDocumentCount(activeDocuments.length),
+        pages: totalPages,
+      })}
       className="archive-upload-section"
       sectionRef={uploadRef}
-      title="Corpus"
+      title={t("sidebar.corpus")}
     >
       <div className="archive-sidebar-stats">
         <SidebarMetric
-          label="Sources"
+          label={t("sidebar.sources")}
           value={formatDocumentCount(activeDocuments.length)}
         />
-        <SidebarMetric label="Pages" value={totalPages} />
-        <SidebarMetric label="Turns" value={conversationCount} />
+        <SidebarMetric label={t("home.stat.pages")} value={totalPages} />
+        <SidebarMetric label={t("sidebar.turns")} value={conversationCount} />
       </div>
       <PdfUploader onUploadSuccess={onUploadSuccess} />
       <ArxivSuggestionPanel
@@ -291,7 +359,7 @@ const WorkspaceSidebar = ({
       caption={formatDocumentCount(workspaceDocumentTotal ?? activeDocuments.length)}
       className="archive-doc-section"
       sectionRef={documentListRef}
-      title="Scope"
+      title={t("sidebar.scope")}
     >
 
       {activeDocuments.length > 0 ? (
@@ -324,7 +392,7 @@ const WorkspaceSidebar = ({
                 >
                   <div className="document-item-title">{document.fileName}</div>
                   <div className="document-item-meta">
-                    {formatPageCount(document.pageCount)} pages
+                    {formatPageCount(document.pageCount)} {t("common.pages")}
                     {document.version ? ` · ${document.version}` : ""}
                     {document.age ? ` · ${document.age}` : ` · ID ${document.docId.slice(0, 8)}`}
                   </div>
@@ -334,7 +402,7 @@ const WorkspaceSidebar = ({
                         isArxivDocument(document) ? "is-arxiv" : "is-uploaded"
                       }`}
                     >
-                      {getDocumentSourceLabel(document)}
+                      {getDocumentSourceLabel(document, t)}
                     </span>
                   </div>
                   <DocumentProfileSnippet document={document} />
@@ -344,13 +412,19 @@ const WorkspaceSidebar = ({
                   <button
                     type="button"
                     className="document-arxiv-recommendation-button"
-                    aria-label={`Review saved arXiv recommendations for ${document.fileName}`}
+                    aria-label={t("sidebar.reviewSavedArxiv", {
+                      fileName: document.fileName,
+                    })}
                     onClick={() =>
                       void onOpenSavedArxivSuggestion?.(document.docId)
                     }
                   >
                     <FileSearchOutlined />
-                    <span>{savedArxivPaperCount} arXiv recommendations</span>
+                    <span>
+                      {t("sidebar.arxivRecommendations", {
+                        count: savedArxivPaperCount,
+                      })}
+                    </span>
                   </button>
                 ) : null}
 
@@ -363,9 +437,14 @@ const WorkspaceSidebar = ({
                       className={`document-scope-toggle ${
                         isInSelectedChatScope ? "is-active" : ""
                       }`}
-                      aria-label={`${
-                        isInSelectedChatScope ? "Exclude" : "Include"
-                      } ${document.fileName} in selected chat scope`}
+                      aria-label={t(
+                        isInSelectedChatScope
+                          ? "sidebar.excludeFromScope"
+                          : "sidebar.includeInScope",
+                        {
+                          fileName: document.fileName,
+                        }
+                      )}
                       aria-pressed={isInSelectedChatScope}
                       onClick={() => void onToggleChatScopeDocument?.(document.docId)}
                     >
@@ -374,7 +453,9 @@ const WorkspaceSidebar = ({
                     <button
                       type="button"
                       className="document-item-remove"
-                      aria-label={`Remove ${document.fileName}`}
+                      aria-label={t("sidebar.removeDocument", {
+                        fileName: document.fileName,
+                      })}
                       onClick={() => void onRemoveDocument(document.docId)}
                     >
                       ×
@@ -390,23 +471,23 @@ const WorkspaceSidebar = ({
               className="archive-show-more-button"
               onClick={() => void onNavigate?.("datasets")}
             >
-              Show 19 more
+              {t("sidebar.showMore", { count: 19 })}
             </button>
           ) : null}
         </div>
       ) : (
         <div className="archive-empty-state">
-          <div className="archive-empty-mark">No documents yet</div>
-          <div>Upload at least one PDF to start asking questions.</div>
+          <div className="archive-empty-mark">{t("sidebar.emptyDocumentsTitle")}</div>
+          <div>{t("sidebar.emptyDocumentsHint")}</div>
         </div>
       )}
     </SidebarSection>
 
     <SidebarSection
-      caption="Synthetic RAG checks and failure hints"
+      caption={t("sidebar.qualityCaption")}
       className="archive-quality-section"
       sectionRef={qualityRef}
-      title="Quality"
+      title={t("sidebar.quality")}
     >
       <QualityGuardPanel
         isQualityLoading={isQualityLoading}
@@ -415,19 +496,24 @@ const WorkspaceSidebar = ({
         onRunSynthetic={onRunSyntheticQuality}
         qualityHistory={qualityHistory}
         qualityReport={qualityReport}
+        locale={locale}
+        t={t}
       />
     </SidebarSection>
 
     <SidebarSection
-      caption={`${recoveryRuns?.length ?? 0} waiting`}
+      caption={t("sidebar.recoveryWaiting", {
+        count: recoveryRuns?.length ?? 0,
+      })}
       className="archive-recovery-panel"
-      title="Recovery"
+      title={t("sidebar.recovery")}
     >
       <RecoveryQueuePanel
         isActionPending={isActionPending}
         isLoading={isRecoveryLoading}
         onRecoveryAction={onRecoveryAction}
         runs={recoveryRuns}
+        t={t}
       />
     </SidebarSection>
 
@@ -437,7 +523,7 @@ const WorkspaceSidebar = ({
         onClick={() => void onClearDocuments()}
         disabled={activeDocuments.length === 0}
       >
-        Clear workspace
+        {t("sidebar.clearWorkspace")}
       </Button>
     </section>
   </aside>

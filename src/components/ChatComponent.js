@@ -16,12 +16,19 @@ import { DEMO_CONVERSATION } from "../demoWorkbench";
 
 const { Search } = Input;
 
+const defaultT = (key, values = {}) =>
+  Object.entries(values).reduce(
+    (result, [valueKey, value]) => result.split(`{${valueKey}}`).join(String(value)),
+    key
+  );
+
 const ChatComponent = (props) => {
   const {
     docIds = [],
     docLabel,
     chatScopeMode = "uploaded",
     chatScopeOptions = [],
+    draftQuestion = "",
     sessionId,
     userId,
     handleResp,
@@ -30,13 +37,16 @@ const ChatComponent = (props) => {
     isLoading,
     onAttach,
     onChatScopeModeChange,
+    onDraftQuestionConsumed,
     setIsLoading,
+    locale = "en",
+    t = defaultT,
   } = props;
   const [searchValue, setSearchValue] = useState("");
   const [isChatModeOn, setIsChatModeOn] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isToolsOpen, setIsToolsOpen] = useState(false);
-  const [retrievalMode, setRetrievalMode] = useState("Auto");
+  const [retrievalMode, setRetrievalMode] = useState("auto");
   const [speech, setSpeech] = useState();
   const hasDocuments = isDemoWorkbench || docIds.length > 0;
 
@@ -117,15 +127,21 @@ const ChatComponent = (props) => {
         console.error("Error fetching chat response:", error);
 
         const backendMessage =
-          error.response?.data?.error ?? "Unable to complete the request.";
+          error.response?.data?.error ?? t("chat.errorRequest");
 
         handleResp(trimmedQuestion, {
-          ragAnswer: `RAG unavailable: ${backendMessage}`,
+          ragAnswer: t("chat.errorRagUnavailable", {
+            message: backendMessage,
+          }),
           ragSources: [],
           ragGapPlan: null,
-          agentAnswer: `Agent unavailable: ${backendMessage}`,
+          agentAnswer: t("chat.errorAgentUnavailable", {
+            message: backendMessage,
+          }),
           agentTrace: [],
-          mcpAnswer: `Web search unavailable: ${backendMessage}`,
+          mcpAnswer: t("chat.errorWebUnavailable", {
+            message: backendMessage,
+          }),
         });
       } finally {
         setIsLoading(false);
@@ -139,25 +155,39 @@ const ChatComponent = (props) => {
       sessionId,
       setIsLoading,
       talk,
+      t,
       userId,
     ]
   );
 
   useEffect(() => {
+    if (!draftQuestion) {
+      return;
+    }
+
+    setSearchValue(draftQuestion);
+    onDraftQuestionConsumed?.();
+  }, [draftQuestion, onDraftQuestionConsumed]);
+
+  useEffect(() => {
     const initializedSpeech = new Speech();
     const baseSpeechOptions = {
       volume: 1,
-      lang: "en-US",
+      lang: locale === "zh" ? "zh-CN" : "en-US",
       rate: 1,
       pitch: 1,
       splitSentences: false,
     };
+    const speechOptions =
+      locale === "zh"
+        ? baseSpeechOptions
+        : {
+            voice: "Google US English",
+            ...baseSpeechOptions,
+          };
 
     initializedSpeech
-      .init({
-        voice: "Google US English",
-        ...baseSpeechOptions,
-      })
+      .init(speechOptions)
       .then(() => {
         setSpeech(initializedSpeech);
       })
@@ -171,7 +201,7 @@ const ChatComponent = (props) => {
             console.warn("Speech synthesis is unavailable:", fallbackError ?? error);
           });
       });
-  }, []);
+  }, [locale]);
 
   useEffect(() => {
     if (!listening && transcript) {
@@ -196,7 +226,7 @@ const ChatComponent = (props) => {
 
   const chatModeClickHandler = () => {
     if (!hasDocuments) {
-      message.warning("Upload at least one PDF before starting voice mode.");
+      message.warning(t("chat.noDocumentsForVoice"));
       return;
     }
 
@@ -208,7 +238,7 @@ const ChatComponent = (props) => {
 
   const recordingClickHandler = () => {
     if (!hasDocuments) {
-      message.warning("Upload at least one PDF before recording a question.");
+      message.warning(t("chat.noDocumentsForRecording"));
       return;
     }
 
@@ -224,24 +254,24 @@ const ChatComponent = (props) => {
 
   const cycleRetrievalMode = () => {
     setRetrievalMode((currentMode) => {
-      if (currentMode === "Auto") {
-        message.info("Retrieval mode: Documents");
-        return "Docs";
+      if (currentMode === "auto") {
+        message.info(t("chat.retrievalModeDocs"));
+        return "docs";
       }
 
-      if (currentMode === "Docs") {
-        message.info("Retrieval mode: Web");
-        return "Web";
+      if (currentMode === "docs") {
+        message.info(t("chat.retrievalModeWeb"));
+        return "web";
       }
 
-      message.info("Retrieval mode: Auto");
-      return "Auto";
+      message.info(t("chat.retrievalModeAuto"));
+      return "auto";
     });
   };
 
   const handleScopeClick = (option) => {
     if (option.count <= 0) {
-      message.info(`${option.label} scope has no documents.`);
+      message.info(t("chat.scopeEmpty", { label: option.label }));
       return;
     }
 
@@ -250,11 +280,16 @@ const ChatComponent = (props) => {
 
   const transcriptLabel = isChatModeOn
     ? isRecording
-      ? transcript || "Listening for your question."
-      : "Voice mode is on. Press record to ask the next question."
+      ? transcript || t("chat.listeningForQuestion")
+      : t("chat.voicePrompt")
     : hasDocuments
-      ? `Working with ${docLabel}`
-      : "Agent can inspect the empty workspace or answer web-current questions.";
+      ? t("chat.workingWith", { label: docLabel })
+      : t("chat.agentEmptyWorkspace");
+  const retrievalLabelByMode = {
+    auto: t("chat.retrievalAuto"),
+    docs: t("chat.retrievalDocs"),
+    web: t("chat.retrievalWeb"),
+  };
 
   return (
     <div className="archive-composer-border">
@@ -269,11 +304,11 @@ const ChatComponent = (props) => {
             className="archive-search"
             placeholder={
               hasDocuments
-                ? "Ask the agent about the current documents"
-                : "Ask the agent what documents are indexed"
+                ? t("chat.placeholderWithDocuments")
+                : t("chat.placeholderWithoutDocuments")
             }
             enterButton={
-              <span aria-label="Ask" className="archive-send-icon">
+              <span aria-label={t("chat.ask")} className="archive-send-icon">
                 <SendOutlined />
               </span>
             }
@@ -288,12 +323,12 @@ const ChatComponent = (props) => {
             <div className="archive-composer-context">
               <div className="archive-composer-transcript">
                 {isDemoWorkbench
-                  ? "Enter to send · Shift + Enter for new line"
+                  ? t("chat.demoTranscript")
                   : transcriptLabel}
               </div>
 
               {!isDemoWorkbench && chatScopeOptions.length > 0 ? (
-                <div className="archive-scope-segmented" aria-label="Chat scope">
+                <div className="archive-scope-segmented" aria-label={t("chat.scope")}>
                   {chatScopeOptions.map((option) => (
                     <button
                       key={option.id}
@@ -317,11 +352,11 @@ const ChatComponent = (props) => {
               type="button"
               className="archive-composer-tools-trigger"
               aria-expanded={isToolsOpen}
-              aria-label="Composer tools"
+              aria-label={t("chat.composerTools")}
               onClick={() => setIsToolsOpen((isOpen) => !isOpen)}
             >
               <AppstoreOutlined />
-              Tools
+              {t("chat.tools")}
             </button>
           </div>
 
@@ -329,15 +364,15 @@ const ChatComponent = (props) => {
             <div className="archive-composer-menu">
               <button type="button" onClick={() => onAttach?.()}>
                 <PaperClipOutlined />
-                Attach PDFs
+                {t("chat.attachPdfs")}
               </button>
               <button type="button" onClick={cycleRetrievalMode}>
                 <AppstoreOutlined />
-                Retrieval: {retrievalMode}
+                {t("chat.retrievalPrefix")}: {retrievalLabelByMode[retrievalMode]}
               </button>
               <button type="button" onClick={chatModeClickHandler}>
                 <SoundOutlined />
-                {isChatModeOn ? "Voice on" : "Voice mode"}
+                {isChatModeOn ? t("chat.voiceOn") : t("chat.voiceMode")}
               </button>
               {isChatModeOn ? (
                 <button
@@ -346,26 +381,26 @@ const ChatComponent = (props) => {
                   onClick={recordingClickHandler}
                 >
                   <AudioOutlined />
-                  {isRecording ? "Listening" : "Record"}
+                  {isRecording ? t("chat.listening") : t("chat.record")}
                 </button>
               ) : null}
               <button
                 type="button"
-                onClick={() => message.info("Document RAG is active for this workspace.")}
+                onClick={() => message.info(t("chat.documentRagActive"))}
               >
-                Document RAG
+                {t("chat.documentRag")}
               </button>
               <button
                 type="button"
-                onClick={() => message.info("Quality Guard checks are shown in the sidebar.")}
+                onClick={() => message.info(t("chat.qualityGuardHint"))}
               >
-                Quality Guard
+                {t("chat.qualityGuard")}
               </button>
               <button
                 type="button"
-                onClick={() => message.info("Web lookup runs only when the agent needs fresh external context.")}
+                onClick={() => message.info(t("chat.webLookupHint"))}
               >
-                Web lookup
+                {t("chat.webLookup")}
               </button>
             </div>
           ) : null}

@@ -13,7 +13,10 @@ import ChatComponent from "./components/ChatComponent";
 import AgentRunCenter from "./components/AgentRunCenter";
 import RenderQA from "./components/RenderQA";
 import PdfPreview from "./components/PdfPreview";
+import PdfUploader from "./components/PdfUploader";
 import WorkspaceSidebar from "./components/WorkspaceSidebar";
+import WorkspaceEntryPanel from "./components/WorkspaceEntryPanel";
+import LocaleSwitch from "./components/LocaleSwitch";
 import {
   fetchLatestQualityReport,
   fetchQualityHistory,
@@ -24,7 +27,7 @@ import {
   requestSyntheticQualityRun,
   requestTaskAction,
 } from "./archiveApi";
-import { formatDocumentCount, isArxivDocument } from "./archiveWorkspace";
+import { isArxivDocument } from "./archiveWorkspace";
 import { useChatSession } from "./hooks/useChatSession";
 import { useArxivEnrichment } from "./hooks/useArxivEnrichment";
 import { useAgentRunRecovery } from "./hooks/useAgentRunRecovery";
@@ -39,13 +42,18 @@ import {
   DEMO_QUALITY_REPORT,
 } from "./demoWorkbench";
 import { getRecoveryActionSuccessMessage } from "./components/workbenchFormatters";
+import {
+  createTranslator,
+  getInitialLocale,
+  LOCALE_STORAGE_KEY,
+} from "./archiveI18n";
 import "./App.css";
 
 const CONVERSATION_VIEWS = [
-  { id: "chat", label: "Chat" },
-  { id: "trace", label: "Trace" },
-  { id: "sources", label: "Sources" },
-  { id: "tasks", label: "Tasks" },
+  { id: "chat", labelKey: "view.chat" },
+  { id: "trace", labelKey: "view.trace" },
+  { id: "sources", labelKey: "view.sources" },
+  { id: "tasks", labelKey: "view.tasks" },
 ];
 
 const CHAT_SCOPE_MODES = {
@@ -54,14 +62,14 @@ const CHAT_SCOPE_MODES = {
   selected: "selected",
 };
 
-const IDLE_TASKS = [
-  {
-    id: "idle-task",
-    label: "Awaiting question",
-    status: "pending",
-    summary: "Ask a document question to create an agent task trace.",
-  },
-];
+const HOME_NAV_SECTIONS = new Set([
+  "home",
+  "skills",
+  "workflows",
+  "drive",
+  "runs",
+  "more",
+]);
 
 const getBackendErrorMessage = (error, fallbackMessage) =>
   error.response?.data?.error ?? fallbackMessage;
@@ -90,16 +98,29 @@ const App = () => {
   const [qualityHistory, setQualityHistory] = useState(null);
   const [qualityReport, setQualityReport] = useState(null);
   const [activeConversationView, setActiveConversationView] = useState("chat");
+  const [activeWorkspaceNav, setActiveWorkspaceNav] = useState("workspace");
+  const [locale, setLocale] = useState(getInitialLocale);
   const [chatScopeMode, setChatScopeMode] = useState(CHAT_SCOPE_MODES.uploaded);
+  const [isWorkbenchOpen, setIsWorkbenchOpen] = useState(false);
+  const [activeHomeSection, setActiveHomeSection] = useState("home");
+  const [homeDraftQuestion, setHomeDraftQuestion] = useState("");
+  const [pendingHomeTask, setPendingHomeTask] = useState(null);
+  const [selectedHomeSkillId, setSelectedHomeSkillId] = useState("document_rag");
   const [selectedChatDocIds, setSelectedChatDocIds] = useState([]);
   const mainRef = useRef(null);
   const composerRef = useRef(null);
+  const homeUploadRef = useRef(null);
   const hadActiveTasksRef = useRef(false);
   const uploadRef = useRef(null);
   const documentListRef = useRef(null);
   const qualityRef = useRef(null);
   const { Content } = Layout;
   const { Text } = Typography;
+  const t = useMemo(() => createTranslator(locale), [locale]);
+  const handleLocaleChange = useCallback((nextLocale) => {
+    setLocale(nextLocale);
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, nextLocale);
+  }, []);
   const {
     activeTurnIndex,
     addConversationTurn,
@@ -149,15 +170,15 @@ const App = () => {
 
       try {
         await requestTaskAction(task.id, action, payload);
-        message.success("Agent task updated.");
+        message.success(t("app.taskUpdated"));
         await refreshTaskLog();
       } catch (error) {
         message.warning(
-          getBackendErrorMessage(error, "Unable to update the agent task.")
+          getBackendErrorMessage(error, t("app.taskUpdateFailed"))
         );
       }
     },
-    [refreshTaskLog]
+    [refreshTaskLog, t]
   );
   const refreshAgentRunRecovery = useCallback(
     () =>
@@ -207,6 +228,11 @@ const App = () => {
 
   const handleResp = useCallback(
     (question, answer) => {
+      setIsWorkbenchOpen(true);
+      setHomeDraftQuestion("");
+      setPendingHomeTask(null);
+      setActiveConversationView("chat");
+      setActiveWorkspaceNav("workspace");
       addConversationTurn(question, answer);
       setSelectedSource(answer?.ragSources?.[0] ?? null);
     },
@@ -264,6 +290,13 @@ const App = () => {
     },
     [handleUploadSuccess, requestArxivSuggestions]
   );
+  const handleHomeUploadSuccess = useCallback(
+    (document) => {
+      handleWorkspaceUploadSuccess(document);
+      setActiveHomeSection("drive");
+    },
+    [handleWorkspaceUploadSuccess]
+  );
 
   const uploadedDocuments = useMemo(
     () => activeDocuments.filter((document) => !isArxivDocument(document)),
@@ -298,29 +331,29 @@ const App = () => {
   const chatDocLabel = useMemo(
     () =>
       chatScopeDocuments.length > 0
-        ? formatDocumentCount(chatScopeDocuments.length)
-        : "no documents in scope",
-    [chatScopeDocuments.length]
+        ? t("common.docs", { count: chatScopeDocuments.length })
+        : t("common.noDocumentsInScope"),
+    [chatScopeDocuments.length, t]
   );
   const chatScopeOptions = useMemo(
     () => [
       {
         count: uploadedDocuments.length,
         id: CHAT_SCOPE_MODES.uploaded,
-        label: "Uploaded",
+        label: t("common.uploaded"),
       },
       {
         count: activeDocuments.length,
         id: CHAT_SCOPE_MODES.all,
-        label: "All",
+        label: t("common.all"),
       },
       {
         count: selectedChatDocuments.length,
         id: CHAT_SCOPE_MODES.selected,
-        label: "Selected",
+        label: t("common.selected"),
       },
     ],
-    [activeDocuments.length, selectedChatDocuments.length, uploadedDocuments.length]
+    [activeDocuments.length, selectedChatDocuments.length, t, uploadedDocuments.length]
   );
   const toggleChatScopeDocument = useCallback((docId) => {
     setSelectedChatDocIds((currentDocIds) =>
@@ -393,7 +426,7 @@ const App = () => {
     if (isDemoWorkbench) {
       setQualityReport(DEMO_QUALITY_REPORT);
       setQualityHistory(DEMO_QUALITY_HISTORY);
-      message.success("Demo quality report loaded.");
+      message.success(t("app.demoQualityLoaded"));
       return;
     }
 
@@ -404,17 +437,17 @@ const App = () => {
       setQualityHistory(await fetchQualityHistory());
     } catch (error) {
       const backendMessage =
-        error.response?.data?.error ?? "Unable to load the latest quality report.";
+        error.response?.data?.error ?? t("app.latestQualityFailed");
       message.error(backendMessage);
     } finally {
       setIsQualityLoading(false);
     }
-  }, [isDemoWorkbench]);
+  }, [isDemoWorkbench, t]);
 
   const loadQualityHistory = useCallback(async () => {
     if (isDemoWorkbench) {
       setQualityHistory(DEMO_QUALITY_HISTORY);
-      message.success("Demo quality history loaded.");
+      message.success(t("app.demoQualityHistoryLoaded"));
       return;
     }
 
@@ -424,18 +457,18 @@ const App = () => {
       setQualityHistory(await fetchQualityHistory());
     } catch (error) {
       const backendMessage =
-        error.response?.data?.error ?? "Unable to load quality history.";
+        error.response?.data?.error ?? t("app.qualityHistoryFailed");
       message.error(backendMessage);
     } finally {
       setIsQualityLoading(false);
     }
-  }, [isDemoWorkbench]);
+  }, [isDemoWorkbench, t]);
 
   const runSyntheticQualityReport = useCallback(async () => {
     if (isDemoWorkbench) {
       setQualityReport(DEMO_QUALITY_REPORT);
       setQualityHistory(DEMO_QUALITY_HISTORY);
-      message.success("Demo synthetic evaluation complete.");
+      message.success(t("app.demoSyntheticComplete"));
       return;
     }
 
@@ -444,15 +477,15 @@ const App = () => {
     try {
       setQualityReport(await requestSyntheticQualityRun());
       setQualityHistory(await fetchQualityHistory());
-      message.success("Synthetic evaluation complete.");
+      message.success(t("app.syntheticComplete"));
     } catch (error) {
       const backendMessage =
-        error.response?.data?.error ?? "Unable to run the synthetic evaluation.";
+        error.response?.data?.error ?? t("app.syntheticFailed");
       message.error(backendMessage);
     } finally {
       setIsQualityLoading(false);
     }
-  }, [isDemoWorkbench]);
+  }, [isDemoWorkbench, t]);
 
   const submitAnswerFeedback = useCallback(
     async (feedback) => {
@@ -465,11 +498,11 @@ const App = () => {
         });
       } catch (error) {
         const backendMessage =
-          error.response?.data?.error ?? "Unable to save feedback.";
+          error.response?.data?.error ?? t("app.feedbackFailed");
         message.error(backendMessage);
       }
     },
-    [chatDocIds, sessionId, userId]
+    [chatDocIds, sessionId, t, userId]
   );
 
   const handleAgentApprovalAction = useCallback(
@@ -478,7 +511,7 @@ const App = () => {
       const runId = turn?.answer?.agentRunId;
 
       if (!runId || !gate?.id) {
-        message.error("Unable to update approval: missing agent run metadata.");
+        message.error(t("app.approvalMissing"));
         return;
       }
 
@@ -498,7 +531,7 @@ const App = () => {
           });
           setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
           await refreshAgentRunRecovery();
-          message.success("Approval recorded. Agent run resumed.");
+          message.success(t("app.approvalRecorded"));
           return;
         }
 
@@ -509,7 +542,7 @@ const App = () => {
           ...currentTurn,
           answer: {
             ...currentTurn.answer,
-            agentAnswer: "Approval denied. The capability was not executed.",
+            agentAnswer: t("app.approvalDeniedAnswer"),
             agentRunStatus: result?.run?.status ?? currentTurn.answer?.agentRunStatus,
             agentRunSteps: updatedSteps,
             approvalGates: updatedGates,
@@ -520,10 +553,10 @@ const App = () => {
           },
         }));
         await refreshAgentRunRecovery();
-        message.info("Approval denied.");
+        message.info(t("app.approvalDenied"));
       } catch (error) {
         const backendMessage =
-          error.response?.data?.error ?? "Unable to update approval.";
+          error.response?.data?.error ?? t("app.approvalMissing");
         message.error(backendMessage);
       } finally {
         setIsLoading(false);
@@ -535,6 +568,7 @@ const App = () => {
       setIsLoading,
       setSelectedSource,
       updateConversationTurn,
+      t,
     ]
   );
 
@@ -544,7 +578,7 @@ const App = () => {
       const runId = turn?.answer?.agentRunId;
 
       if (!runId || !step?.id) {
-        message.error("Unable to retry step: missing agent run metadata.");
+        message.error(t("app.retryMissing"));
         return;
       }
 
@@ -560,10 +594,10 @@ const App = () => {
         });
         setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
         await refreshAgentRunRecovery();
-        message.success("Step retry completed.");
+        message.success(t("app.retryComplete"));
       } catch (error) {
         const backendMessage =
-          error.response?.data?.error ?? "Unable to retry this agent step.";
+          error.response?.data?.error ?? t("app.retryFailed");
         message.error(backendMessage);
       } finally {
         setIsLoading(false);
@@ -575,6 +609,7 @@ const App = () => {
       setIsLoading,
       setSelectedSource,
       updateConversationTurn,
+      t,
     ]
   );
 
@@ -590,7 +625,7 @@ const App = () => {
         resolvedTurnIndex >= 0 ? conversation[resolvedTurnIndex] : null;
 
       if (!resolvedRunId || !action) {
-        message.error("Unable to recover run: missing agent run metadata.");
+        message.error(t("app.recoverMissing"));
         return;
       }
 
@@ -622,7 +657,7 @@ const App = () => {
         message.success(getRecoveryActionSuccessMessage(action));
       } catch (error) {
         const backendMessage =
-          error.response?.data?.error ?? "Unable to recover this agent run.";
+          error.response?.data?.error ?? t("app.recoverFailed");
         message.error(backendMessage);
       } finally {
         setIsLoading(false);
@@ -634,6 +669,7 @@ const App = () => {
       setIsLoading,
       setSelectedSource,
       updateConversationTurn,
+      t,
     ]
   );
 
@@ -669,9 +705,9 @@ const App = () => {
     sidebar.scrollTop = nextTop;
   }, []);
 
-  const focusComposer = useCallback(() => {
+  const focusComposer = useCallback((inputId = "archive-agent-search") => {
     window.setTimeout(() => {
-      document.getElementById("archive-agent-search")?.focus({
+      document.getElementById(inputId)?.focus({
         preventScroll: true,
       });
     }, 180);
@@ -683,14 +719,22 @@ const App = () => {
 
       if (opened) {
         scrollSidebarSection(uploadRef);
-        message.info("Reviewing saved arXiv recommendations.");
+        message.info(t("app.reviewingSavedArxiv"));
       }
     },
-    [openSavedArxivSuggestionForDocument, scrollSidebarSection]
+    [openSavedArxivSuggestionForDocument, scrollSidebarSection, t]
   );
 
   const selectConversationView = useCallback(
     (view) => {
+      if (view === "tasks" || view === "trace") {
+        setActiveWorkspaceNav("runs");
+      }
+
+      if (view === "sources") {
+        setActiveWorkspaceNav("drive");
+      }
+
       setActiveConversationView(view);
       resetPageScroll();
     },
@@ -702,30 +746,144 @@ const App = () => {
       selectTurn(turnIndex);
       setActiveConversationView("chat");
       resetPageScroll();
-      message.info("Agent run selected.");
+      message.info(t("app.agentRunSelected"));
     },
-    [resetPageScroll, selectTurn]
+    [resetPageScroll, selectTurn, t]
   );
 
   const handleComposerAttach = useCallback(() => {
     scrollSidebarSection(uploadRef);
-    message.info("Use the Ingest dropzone to attach PDFs to this workspace.");
-  }, [scrollSidebarSection]);
+    message.info(t("app.searchAttachHint"));
+  }, [scrollSidebarSection, t]);
+  const handleHomeUploadClick = useCallback(() => {
+    setActiveHomeSection("drive");
+    window.setTimeout(() => {
+      homeUploadRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }, 0);
+  }, []);
+
+  const openWorkbench = useCallback(
+    ({ nav = "workspace", view = "chat" } = {}) => {
+      setIsWorkbenchOpen(true);
+      setActiveWorkspaceNav(nav);
+      setActiveConversationView(view);
+      resetPageScroll();
+    },
+    [resetPageScroll]
+  );
+
+  const handleHomeSkillSelect = useCallback(
+    (skill) => {
+      setSelectedHomeSkillId(skill?.id ?? "document_rag");
+      setActiveHomeSection(skill?.id === "compare_documents" ? "workflows" : "skills");
+      resetPageScroll();
+    },
+    [resetPageScroll]
+  );
+
+  const handleHomeDraftQuestionConsumed = useCallback(() => {
+    setHomeDraftQuestion("");
+  }, []);
+
+  const handleHomePrepareTask = useCallback(
+    ({ documentIds = [], question = "", skill } = {}) => {
+      const nextDocumentIds = documentIds.filter(Boolean);
+
+      if (nextDocumentIds.length > 0) {
+        setSelectedChatDocIds(nextDocumentIds);
+        setChatScopeMode(CHAT_SCOPE_MODES.selected);
+      }
+
+      if (skill?.id) {
+        setSelectedHomeSkillId(skill.id);
+      }
+
+      setHomeDraftQuestion(question);
+      setPendingHomeTask({
+        documentCount: nextDocumentIds.length,
+        question,
+        skillId: skill?.id ?? "document_rag",
+      });
+      focusComposer("archive-home-agent-search");
+      message.success(
+        t("app.taskReady", {
+          skill: t(skill?.labelKey ?? "skill.document.label"),
+        })
+      );
+    },
+    [focusComposer, t]
+  );
+
+  const handleHomeNavigate = useCallback(
+    (target) => {
+      if (HOME_NAV_SECTIONS.has(target)) {
+        setActiveHomeSection(target);
+        setIsWorkbenchOpen(false);
+        resetPageScroll();
+        return;
+      }
+
+      openWorkbench({
+        nav: "workspace",
+        view: "chat",
+      });
+    },
+    [openWorkbench, resetPageScroll]
+  );
 
   const handleSidebarNavigate = useCallback(
     async (target) => {
+      const navTargetByAction = {
+        drive: "drive",
+        runs: "runs",
+        skills: "skills",
+        workflows: "workflows",
+        workspaces: "workspace",
+      };
+
+      if (navTargetByAction[target]) {
+        setActiveWorkspaceNav(navTargetByAction[target]);
+      }
+
       resetPageScroll();
 
       if (target === "new-chat") {
+        setActiveHomeSection("home");
         if (isDemoWorkbench) {
-          message.success("Demo chat is ready.");
-          focusComposer();
+          message.success(t("app.chatReady"));
+          setIsWorkbenchOpen(false);
+          focusComposer("archive-home-agent-search");
           return;
         }
 
         await resetWorkspaceSession();
-        message.success("Started a new chat.");
+        message.success(t("app.startedNewChat"));
+        setIsWorkbenchOpen(false);
+        return;
+      }
+
+      if (target === "skills") {
+        setActiveConversationView("chat");
         focusComposer();
+        return;
+      }
+
+      if (target === "workflows") {
+        setActiveConversationView("tasks");
+        message.info(t("app.workflowsHint"));
+        return;
+      }
+
+      if (target === "drive") {
+        scrollSidebarSection(uploadRef);
+        return;
+      }
+
+      if (target === "runs") {
+        setActiveConversationView("tasks");
         return;
       }
 
@@ -751,7 +909,7 @@ const App = () => {
       }
 
       if (target === "settings") {
-        message.info("Settings are not configured for this local workbench yet.");
+        message.info(t("app.settingsUnavailable"));
       }
     },
     [
@@ -760,6 +918,7 @@ const App = () => {
       resetPageScroll,
       resetWorkspaceSession,
       scrollSidebarSection,
+      t,
     ]
   );
 
@@ -796,15 +955,28 @@ const App = () => {
     selectedSource ?? (isDemoWorkbench ? DEMO_PREVIEW_SOURCE : null);
   const visibleTotalPages = isDemoWorkbench ? 182 : totalPages;
   const visiblePreviewStatus = isDemoWorkbench
-    ? "Finance Policy Manual.pdf · Page 42"
+    ? `Finance Policy Manual.pdf · ${t("common.page")} 42`
     : previewStatus;
-  const visibleDocLabel = isDemoWorkbench ? "Finance Policy QA" : chatDocLabel;
+  const visibleDocLabel = isDemoWorkbench
+    ? t("workbench.financePolicyQa")
+    : chatDocLabel;
   const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? [];
   const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? [];
   const visibleTaskLog = isDemoWorkbench ? [] : taskLog;
   const visibleRecoveryRuns = isDemoWorkbench ? [] : recoveryRuns;
   const hasActiveTaskLog = hasActiveTasks(visibleTaskLog);
-  let visibleTasks = IDLE_TASKS;
+  const idleTasks = useMemo(
+    () => [
+      {
+        id: "idle-task",
+        label: t("tasks.idle.label"),
+        status: "pending",
+        summary: t("tasks.idle.summary"),
+      },
+    ],
+    [t]
+  );
+  let visibleTasks = idleTasks;
 
   if (visibleTrace.length > 0) {
     visibleTasks = visibleTrace;
@@ -851,8 +1023,8 @@ const App = () => {
       return (
         <div className="archive-view-panel archive-trace-view">
           <div className="archive-view-panel-head">
-            <span>Agent Trace</span>
-            <strong>{visibleTrace.length} steps</strong>
+            <span>{t("workbench.agentTrace")}</span>
+            <strong>{t("workbench.steps", { count: visibleTrace.length })}</strong>
           </div>
           <div className="archive-view-grid">
             {visibleTrace.map((step, index) => (
@@ -879,8 +1051,8 @@ const App = () => {
       return (
         <div className="archive-view-panel archive-sources-view">
           <div className="archive-view-panel-head">
-            <span>Sources</span>
-            <strong>{visibleSources.length} cited</strong>
+            <span>{t("workbench.sources")}</span>
+            <strong>{t("common.cited", { count: visibleSources.length })}</strong>
           </div>
           <div className="archive-view-grid">
             {visibleSources.map((source, index) => (
@@ -892,7 +1064,11 @@ const App = () => {
                 }`}
                 onClick={() => {
                   setSelectedSource(source);
-                  message.success(`Previewing ${source.fileName}`);
+                  message.success(
+                    t("workbench.previewing", {
+                      fileName: source.fileName,
+                    })
+                  );
                 }}
               >
                 <span>{index + 1}</span>
@@ -943,72 +1119,145 @@ const App = () => {
     );
   };
 
+  const renderAgentComposer = ({ inputId, ref } = {}) => (
+    <div className="archive-composer" ref={ref}>
+      <ChatComponent
+        chatScopeMode={chatScopeMode}
+        chatScopeOptions={chatScopeOptions}
+        draftQuestion={inputId === "archive-home-agent-search" ? homeDraftQuestion : ""}
+        docIds={isWorkbenchOpen && isDemoWorkbench ? [] : chatDocIds}
+        docLabel={isWorkbenchOpen && isDemoWorkbench ? visibleDocLabel : chatDocLabel}
+        sessionId={sessionId}
+        userId={userId}
+        handleResp={handleResp}
+        inputId={inputId}
+        isLoading={isLoading}
+        isDemoWorkbench={isWorkbenchOpen && isDemoWorkbench}
+        onChatScopeModeChange={setChatScopeMode}
+        onDraftQuestionConsumed={handleHomeDraftQuestionConsumed}
+        onAttach={isWorkbenchOpen ? handleComposerAttach : handleHomeUploadClick}
+        setIsLoading={setIsLoading}
+        locale={locale}
+        t={t}
+      />
+    </div>
+  );
+
+  if (!isWorkbenchOpen) {
+    return (
+      <div className="archive-shell archive-home-shell">
+        <WorkspaceEntryPanel
+          activeSection={activeHomeSection}
+          documentCount={activeDocuments.length}
+          documents={activeDocuments}
+          onNavigate={handleHomeNavigate}
+          onOpenWorkspace={openWorkbench}
+          onPrepareTask={handleHomePrepareTask}
+          onSkillSelect={handleHomeSkillSelect}
+          onUploadClick={handleHomeUploadClick}
+          pageCount={totalPages}
+          pendingTask={pendingHomeTask}
+          recoveryRuns={recoveryRuns}
+          selectedSkillId={selectedHomeSkillId}
+          taskCount={taskLog.length + recoveryRuns.length}
+          tasks={taskLog}
+          t={t}
+          languageSlot={
+            <LocaleSwitch
+              locale={locale}
+              onLocaleChange={handleLocaleChange}
+              t={t}
+            />
+          }
+          uploadSlot={
+            <div ref={homeUploadRef}>
+              <PdfUploader onUploadSuccess={handleHomeUploadSuccess} />
+            </div>
+          }
+        >
+          {renderAgentComposer({
+            inputId: "archive-home-agent-search",
+            ref: null,
+          })}
+        </WorkspaceEntryPanel>
+      </div>
+    );
+  }
+
   return (
     <div className="archive-shell">
       <Layout className="archive-layout">
         <Content className="archive-app">
           <header className="archive-global-header">
             <div className="archive-breadcrumb">
-              <span>Workspaces</span>
+              <span>{t("app.workspaces")}</span>
               <span>/</span>
-              <strong>Finance Policy QA</strong>
+              <strong>{t("workbench.financePolicyQa")}</strong>
               <DownOutlined />
               <span className="archive-private-chip">
                 <LockOutlined />
-                Private
+                {t("app.private")}
               </span>
             </div>
 
-            <div className="archive-workbench-tabs" aria-label="Workspace summary">
+            <div
+              className="archive-workbench-tabs"
+              aria-label={t("app.workspaceSummary")}
+            >
               <button
                 type="button"
-                aria-label="Workspace documents summary"
+                aria-label={t("app.workspaceDocumentsSummary")}
                 className="archive-workbench-tab is-active"
                 onClick={() => void handleSidebarNavigate("workspaces")}
               >
                 <FileSearchOutlined />
-                {visibleDocuments.length} docs
+                {t("app.docsSummary", { count: visibleDocuments.length })}
               </button>
               <button
                 type="button"
-                aria-label="Conversation turns summary"
+                aria-label={t("app.conversationTurnsSummary")}
                 className="archive-workbench-tab"
                 onClick={() => selectConversationView("chat")}
               >
                 <BranchesOutlined />
-                {visibleConversation.length} turn
+                {t("app.turnShort", { count: visibleConversation.length })}
               </button>
               <button
                 type="button"
-                aria-label="Ready"
+                aria-label={t("workbench.ready")}
                 className="archive-workbench-tab"
-                onClick={() => message.success("AgentRAG is ready.")}
+                onClick={() => message.success(t("app.agentReady"))}
               >
                 <SafetyCertificateOutlined />
-                Ready
+                {t("workbench.ready")}
               </button>
             </div>
 
             <div className="archive-header-actions">
+              <LocaleSwitch
+                locale={locale}
+                onLocaleChange={handleLocaleChange}
+                t={t}
+              />
               <button
                 type="button"
-                aria-label="Help"
-                onClick={() => message.info("Help is not configured in this local preview.")}
+                aria-label={t("app.help")}
+                onClick={() => message.info(t("app.helpUnavailable"))}
               >
                 <QuestionCircleOutlined />
               </button>
               <button
                 type="button"
-                aria-label="Notifications"
-                onClick={() => message.info("No new workspace notifications.")}
+                aria-label={t("app.notifications")}
+                onClick={() => message.info(t("app.noNotifications"))}
               >
                 <BellOutlined />
               </button>
               <button
                 type="button"
                 className="archive-user-avatar"
-                aria-label="Account"
-                onClick={() => message.info("Signed in as Archive RAG demo user.")}
+                aria-label={t("app.account")}
+                onClick={() => message.info(t("app.signedInDemo"))}
               >
                 AK
               </button>
@@ -1016,6 +1265,7 @@ const App = () => {
           </header>
 
           <WorkspaceSidebar
+            activeNavItem={activeWorkspaceNav}
             activeDocuments={visibleDocuments}
             arxivSuggestion={isDemoWorkbench ? null : arxivSuggestion}
             conversationCount={visibleConversation.length}
@@ -1052,6 +1302,8 @@ const App = () => {
               isDemoWorkbench ? {} : savedArxivSuggestionsByDocId
             }
             selectedChatDocIds={isDemoWorkbench ? [] : selectedChatDocIds}
+            locale={locale}
+            t={t}
             totalPages={visibleTotalPages}
             uploadRef={uploadRef}
             workspaceDocumentTotal={isDemoWorkbench ? 24 : visibleDocuments.length}
@@ -1060,7 +1312,7 @@ const App = () => {
           <section className="archive-preview-column">
             <div className="archive-main-header archive-preview-header">
               <div className="section-label">
-                <span className="section-label-title">Preview</span>
+                <span className="section-label-title">{t("app.preview")}</span>
                 <span className="section-label-caption">{visiblePreviewStatus}</span>
               </div>
             </div>
@@ -1074,20 +1326,27 @@ const App = () => {
             <div className="archive-main-header">
               <div className="section-label">
                 <span className="section-label-title">
-                  {isDemoWorkbench ? "Finance Policy QA" : "Conversation"}
+                  {isDemoWorkbench
+                    ? t("workbench.financePolicyQa")
+                    : t("app.conversation")}
                 </span>
                 <span className="section-label-caption">
                   {visibleDocuments.length > 0
-                    ? `Working with ${visibleDocLabel}`
-                    : "Agent workspace is empty"}
+                    ? t("app.workingWith", { label: visibleDocLabel })
+                    : t("app.agentWorkspaceEmpty")}
                 </span>
               </div>
               <Text className="archive-meta-text">
-                {visibleConversation.length} recorded turn
+                {t("app.recordedTurn", {
+                  count: visibleConversation.length,
+                })}
               </Text>
             </div>
 
-            <div className="archive-workbench-nav" aria-label="Conversation views">
+            <div
+              className="archive-workbench-nav"
+              aria-label={t("workbench.conversationViews")}
+            >
               {CONVERSATION_VIEWS.map((view) => (
                 <button
                   key={view.id}
@@ -1095,7 +1354,7 @@ const App = () => {
                   className={activeConversationView === view.id ? "is-active" : ""}
                   onClick={() => selectConversationView(view.id)}
                 >
-                  {view.label}
+                  {t(view.labelKey)}
                 </button>
               ))}
             </div>
@@ -1104,23 +1363,10 @@ const App = () => {
               {renderConversationView()}
             </div>
 
-            <div className="archive-composer" ref={composerRef}>
-              <ChatComponent
-                chatScopeMode={chatScopeMode}
-                chatScopeOptions={chatScopeOptions}
-                docIds={isDemoWorkbench ? [] : chatDocIds}
-                docLabel={visibleDocLabel}
-                sessionId={sessionId}
-                userId={userId}
-                handleResp={handleResp}
-                inputId="archive-agent-search"
-                isLoading={isLoading}
-                isDemoWorkbench={isDemoWorkbench}
-                onChatScopeModeChange={setChatScopeMode}
-                onAttach={handleComposerAttach}
-                setIsLoading={setIsLoading}
-              />
-            </div>
+            {renderAgentComposer({
+              inputId: "archive-agent-search",
+              ref: composerRef,
+            })}
           </section>
         </Content>
       </Layout>

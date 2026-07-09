@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import axios from "axios";
 import App from "./App";
 
@@ -29,6 +29,22 @@ jest.mock("./components/ChatComponent", () => (props) => (
   <div>
     <div>Chat</div>
     <div data-testid="chat-docids">{props.docIds.join(",")}</div>
+    {props.draftQuestion ? (
+      <div data-testid="chat-draft">{props.draftQuestion}</div>
+    ) : null}
+    <button
+      type="button"
+      onClick={() =>
+        props.handleResp?.("Mock question", {
+          agentAnswer: "Mock answer",
+          ragAnswer: "Mock document answer",
+          ragSources: [],
+          agentTrace: [],
+        })
+      }
+    >
+      Submit mock chat
+    </button>
     {(props.chatScopeOptions ?? []).map((option) => (
       <button
         key={option.id}
@@ -41,25 +57,36 @@ jest.mock("./components/ChatComponent", () => (props) => (
   </div>
 ));
 jest.mock("./components/RenderQA", () => (props) => (
-  <button
-    type="button"
-    onClick={() =>
-      props.onFeedback?.({
-        turnIndex: 0,
-        feedbackType: "hallucination",
-        note: "This answer is not supported.",
-        question: "What changed?",
-        answer: {
-          agentAnswer: "Unsupported answer.",
-          ragSources: [],
-        },
-      })
-    }
-  >
-    Send feedback
-  </button>
+  <div>
+    {props.conversation?.map((turn, index) => (
+      <div key={`${turn.question}-${index}`}>
+        {turn.answer?.agentAnswer ?? turn.answer?.ragAnswer}
+      </div>
+    ))}
+    <button
+      type="button"
+      onClick={() =>
+        props.onFeedback?.({
+          turnIndex: 0,
+          feedbackType: "hallucination",
+          note: "This answer is not supported.",
+          question: "What changed?",
+          answer: {
+            agentAnswer: "Unsupported answer.",
+            ragSources: [],
+          },
+        })
+      }
+    >
+      Send feedback
+    </button>
+  </div>
 ));
 jest.mock("./components/PdfPreview", () => () => <div>Preview</div>);
+
+const openWorkspace = async () => {
+  fireEvent.click(await screen.findByRole("button", { name: "Open workspace" }));
+};
 
 describe("App", () => {
   beforeEach(() => {
@@ -95,8 +122,14 @@ describe("App", () => {
     window.localStorage.clear();
   });
 
-  test("loads persisted documents on startup", async () => {
+  test("starts on the launch page and opens persisted documents in the workspace", async () => {
     render(<App />);
+
+    expect(
+      await screen.findByText("Document AI workspace")
+    ).toBeInTheDocument();
+
+    await openWorkspace();
 
     expect(await screen.findByText("benefits-2025.pdf")).toBeInTheDocument();
     expect(screen.getByText("Corpus")).toBeInTheDocument();
@@ -105,6 +138,131 @@ describe("App", () => {
     expect(screen.getByText("Recovery")).toBeInTheDocument();
     expect(screen.getByText("History")).toBeInTheDocument();
     expect(axios.get).toHaveBeenCalledWith("http://localhost:5001/documents");
+  });
+
+  test("switches the launch page and workspace shell between English and Chinese", async () => {
+    render(<App />);
+
+    expect(
+      await screen.findByText("Document AI workspace")
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Switch language to 中文" })
+    );
+
+    expect(await screen.findByText("文档智能工作台")).toBeInTheDocument();
+    expect(window.localStorage.getItem("archive-rag.locale")).toBe("zh");
+
+    const homeNavigation = screen.getByRole("navigation", {
+      name: "首页导航",
+    });
+
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "技能" }));
+    expect(screen.getByRole("region", { name: "文档技能" })).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开工作台" }));
+
+    expect(await screen.findByText("语料")).toBeInTheDocument();
+    expect(screen.getByText("范围")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "切换语言到English" })
+    ).toBeInTheDocument();
+  });
+
+  test("keeps home navigation on the launch surface until the workspace is opened", async () => {
+    render(<App />);
+
+    expect(
+      await screen.findByText("Document AI workspace")
+    ).toBeInTheDocument();
+
+    const homeNavigation = screen.getByRole("navigation", {
+      name: "Home navigation",
+    });
+
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "Skills" }));
+    expect(
+      screen.getByRole("region", { name: "Document skills" })
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      within(homeNavigation).getByRole("button", { name: "Workflows" })
+    );
+    expect(
+      screen.getByRole("region", { name: "Document workflows" })
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "Drive" }));
+    expect(
+      screen.getByRole("region", { name: "Workspace drive" })
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "Runs" }));
+    expect(screen.getByRole("region", { name: "Recent runs" })).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+  });
+
+  test("keeps the launch page on Drive after uploading from home", async () => {
+    render(<App />);
+
+    const homeNavigation = await screen.findByRole("navigation", {
+      name: "Home navigation",
+    });
+
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "Drive" }));
+    fireEvent.click(screen.getByText("Upload mock"));
+
+    expect(
+      await screen.findByRole("region", { name: "Workspace drive" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("rag-notes.pdf")).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+  });
+
+  test("prepares a document comparison on the launch page without opening the workspace", async () => {
+    render(<App />);
+
+    const homeNavigation = await screen.findByRole("navigation", {
+      name: "Home navigation",
+    });
+
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "Drive" }));
+    expect(await screen.findByText("benefits-2025.pdf")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Upload mock"));
+    expect(await screen.findByText("rag-notes.pdf")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Compare documents" }));
+    fireEvent.click(screen.getByLabelText(/benefits-2025\.pdf/i));
+    fireEvent.click(screen.getByLabelText(/rag-notes\.pdf/i));
+    fireEvent.click(screen.getByRole("button", { name: "Stage comparison" }));
+
+    expect(screen.getByTestId("chat-docids")).toHaveTextContent(
+      "doc-1,doc-upload"
+    );
+    expect(screen.getByTestId("chat-draft")).toHaveTextContent(
+      "Compare the selected documents"
+    );
+    expect(screen.getByText("Staged task")).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+  });
+
+  test("opens the workspace after a successful home chat submission", async () => {
+    render(<App />);
+
+    expect(
+      await screen.findByText("Document AI workspace")
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Submit mock chat" }));
+
+    expect(await screen.findByText("Corpus")).toBeInTheDocument();
+    expect(screen.getByText("Mock answer")).toBeInTheDocument();
   });
 
   test("keeps arxiv documents out of chat scope until all scope is selected", async () => {
@@ -142,6 +300,7 @@ describe("App", () => {
     });
 
     render(<App />);
+    await openWorkspace();
 
     expect(await screen.findByText("private-notes.pdf")).toBeInTheDocument();
     expect(screen.getByText("arXiv 2401.00001v1")).toBeInTheDocument();
@@ -260,6 +419,7 @@ describe("App", () => {
     });
 
     render(<App />);
+    await openWorkspace();
 
     expect(await screen.findByText("benefits-2025.pdf")).toBeInTheDocument();
 
@@ -293,6 +453,7 @@ describe("App", () => {
 
   test("removes a document from the UI after delete succeeds", async () => {
     render(<App />);
+    await openWorkspace();
 
     const removeButton = await screen.findByLabelText("Remove benefits-2025.pdf");
     removeButton.click();
@@ -307,6 +468,7 @@ describe("App", () => {
 
   test("posts answer feedback from the conversation panel", async () => {
     render(<App />);
+    await openWorkspace();
 
     await screen.findByText("benefits-2025.pdf");
     fireEvent.click(screen.getByText("Send feedback"));
@@ -507,6 +669,7 @@ describe("App", () => {
     });
 
     render(<App />);
+    await openWorkspace();
 
     await screen.findByText("benefits-2025.pdf");
     fireEvent.click(screen.getByText("Upload mock"));

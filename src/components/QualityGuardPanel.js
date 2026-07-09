@@ -4,6 +4,7 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import { Button } from "antd";
+import { createTranslator } from "../archiveI18n";
 
 const formatQualityPercent = (value) =>
   typeof value === "number" ? `${value.toFixed(value % 1 === 0 ? 0 : 1)}%` : "N/A";
@@ -21,9 +22,9 @@ const formatQualityDelta = (value, scale = 1) => {
   return `${prefix}${scaledValue.toFixed(Math.abs(scaledValue) % 1 === 0 ? 0 : 1)}`;
 };
 
-const formatQualityGateDelta = (check) => {
+const formatQualityGateDelta = (check, t = defaultT) => {
   if (!check) {
-    return "No checks";
+    return t("quality.noChecks");
   }
 
   if (check.metric === "failedCaseCount" || check.metric === "averageCitationCount") {
@@ -42,9 +43,9 @@ const formatQualityGateDelta = (check) => {
   return `${formatQualityDelta(check.delta, 100)} pts`;
 };
 
-const formatQualityDate = (value) => {
+const formatQualityDate = (value, locale = "en") => {
   if (!value) {
-    return "No date";
+    return locale === "zh" ? "无日期" : "No date";
   }
 
   try {
@@ -59,16 +60,18 @@ const formatQualityDate = (value) => {
   }
 };
 
-const formatQualityGateStatus = (status) =>
+const defaultT = createTranslator("en");
+
+const formatQualityGateStatus = (status, t = defaultT) =>
   ({
-    fail: "Fail",
-    idle: "Idle",
-    ok: "OK",
-    pass: "Pass",
-    skipped: "Skipped",
-    unknown: "Not reported",
-    warn: "Warn",
-  }[status] ?? String(status ?? "Not reported"));
+    fail: t("quality.fail"),
+    idle: t("quality.idle"),
+    ok: t("quality.ok"),
+    pass: t("quality.pass"),
+    skipped: t("quality.skipped"),
+    unknown: t("quality.notReported"),
+    warn: t("quality.warn"),
+  }[status] ?? String(status ?? t("quality.notReported")));
 
 const getPrimaryGateCheck = (gate) =>
   gate?.checks?.find((check) => check.status === "fail") ??
@@ -81,15 +84,17 @@ const normalizeGateStatus = (status) => status ?? "unknown";
 const formatRecoveryPercent = (value) =>
   typeof value === "number" ? formatQualityPercent(value * 100) : "N/A";
 
-const QualityGateCard = ({ gate, label = "Quality gate" }) => {
+const QualityGateCard = ({ gate, label = "Quality gate", t = defaultT }) => {
   if (!gate) {
     return (
       <div className="quality-gate quality-gate-unknown">
         <div className="quality-gate-head">
-          <span>{label} not reported</span>
-          <span>No checks</span>
+          <span>
+            {label} {t("quality.notReported")}
+          </span>
+          <span>{t("quality.noChecks")}</span>
         </div>
-        <p>No backend gate state is loaded.</p>
+        <p>{t("quality.gateUnknown")}</p>
       </div>
     );
   }
@@ -101,16 +106,16 @@ const QualityGateCard = ({ gate, label = "Quality gate" }) => {
     <div className={`quality-gate quality-gate-${gateStatus}`}>
       <div className="quality-gate-head">
         <span>
-          {label} {formatQualityGateStatus(gateStatus)}
+          {label} {formatQualityGateStatus(gateStatus, t)}
         </span>
-        <span>{formatQualityGateDelta(primaryGateCheck)}</span>
+        <span>{formatQualityGateDelta(primaryGateCheck, t)}</span>
       </div>
-      <p>{gate.summary ?? "No backend gate summary is available."}</p>
+      <p>{gate.summary ?? t("quality.gateUnknown")}</p>
     </div>
   );
 };
 
-const RecoveryGateCard = ({ gate }) => {
+const RecoveryGateCard = ({ gate, t = defaultT }) => {
   if (!gate) {
     return null;
   }
@@ -120,23 +125,25 @@ const RecoveryGateCard = ({ gate }) => {
   return (
     <div className={`quality-gate quality-gate-${normalizeGateStatus(gate.status)}`}>
       <div className="quality-gate-head">
-        <span>Recovery gate {formatQualityGateStatus(gate.status)}</span>
-        <span>{gate.skipped ? "Skipped" : gate.currentRunId ?? "latest"}</span>
+        <span>
+          {t("quality.recoveryGate")} {formatQualityGateStatus(gate.status, t)}
+        </span>
+        <span>{gate.skipped ? t("quality.skipped") : gate.currentRunId ?? t("common.latest")}</span>
       </div>
-      <p>{gate.summary ?? "No recovery gate summary is available."}</p>
+      <p>{gate.summary ?? t("quality.noRecoverySummary")}</p>
       <div className="quality-gate-metrics">
         <div>
-          <span>Replay failures</span>
+          <span>{t("quality.replayFailures")}</span>
           <strong>{formatQualityNumber(recovery.stepReplayFailureCount)}</strong>
         </div>
         <div>
-          <span>Manual failures</span>
+          <span>{t("quality.manualFailures")}</span>
           <strong>
             {formatQualityNumber(recovery.manualRecoveryActionFailureCount)}
           </strong>
         </div>
         <div>
-          <span>Auto replay</span>
+          <span>{t("quality.autoReplay")}</span>
           <strong>{formatRecoveryPercent(recovery.autoReplaySuccessRate)}</strong>
         </div>
       </div>
@@ -151,6 +158,8 @@ const QualityGuardPanel = ({
   onRunSynthetic,
   qualityHistory,
   qualityReport,
+  locale = "en",
+  t = defaultT,
 }) => {
   const metrics = qualityReport?.summary?.metrics ?? {};
   const failedCases = qualityReport?.failedCases ?? [];
@@ -162,10 +171,10 @@ const QualityGuardPanel = ({
   const status = qualityReport?.status ?? "idle";
   const statusLabel =
     {
-      ok: "OK",
-      warn: "Warn",
-      fail: "Fail",
-      idle: "Idle",
+      ok: t("quality.ok"),
+      warn: t("quality.warn"),
+      fail: t("quality.fail"),
+      idle: t("quality.idle"),
     }[status] ?? status;
   const gateStatus = normalizeGateStatus(qualityGate?.status);
 
@@ -173,31 +182,31 @@ const QualityGuardPanel = ({
     <div className="quality-panel">
       <div className="quality-actions">
         <Button
-          aria-label="Latest"
+          aria-label={t("quality.latest")}
           className="archive-secondary-button quality-action-button"
           icon={<ReloadOutlined />}
           loading={isQualityLoading}
           onClick={() => void onLoadLatest()}
         >
-          Latest
+          {t("quality.latest")}
         </Button>
         <Button
-          aria-label="History"
+          aria-label={t("quality.history")}
           className="archive-secondary-button quality-action-button"
           icon={<BarChartOutlined />}
           loading={isQualityLoading}
           onClick={() => void onLoadHistory()}
         >
-          History
+          {t("quality.history")}
         </Button>
         <Button
-          aria-label="Run eval"
+          aria-label={t("quality.runEval")}
           className="archive-secondary-button quality-action-button"
           icon={<ExperimentOutlined />}
           loading={isQualityLoading}
           onClick={() => void onRunSynthetic()}
         >
-          Run eval
+          {t("quality.runEval")}
         </Button>
       </div>
 
@@ -205,7 +214,7 @@ const QualityGuardPanel = ({
         <>
           <div className={`quality-status quality-status-${status}`}>
             <span>{statusLabel}</span>
-            <span>{qualityReport.summary?.runId ?? "latest run"}</span>
+            <span>{qualityReport.summary?.runId ?? t("common.latestRun")}</span>
           </div>
 
           <div className={`quality-score-card quality-score-${gateStatus}`}>
@@ -218,25 +227,27 @@ const QualityGuardPanel = ({
               <span>/100</span>
             </div>
             <div className="quality-score-copy">
-              <strong>Gate {formatQualityGateStatus(gateStatus)}</strong>
+              <strong>
+                {t("quality.gateShort")} {formatQualityGateStatus(gateStatus, t)}
+              </strong>
               <span>
                 {qualityGate?.summary ??
-                  "No backend quality gate summary is loaded."}
+                  t("quality.gateSummaryMissing")}
               </span>
             </div>
           </div>
 
           <div className="quality-metrics">
             <div className="quality-metric">
-              <span>Pass</span>
+              <span>{t("quality.pass")}</span>
               <strong>{formatQualityPercent(metrics.overallPassPercent)}</strong>
             </div>
             <div className="quality-metric">
-              <span>Page hit</span>
+              <span>{t("quality.pageHit")}</span>
               <strong>{formatQualityPercent(metrics.qaPageHitPercent)}</strong>
             </div>
             <div className="quality-metric">
-              <span>Citations</span>
+              <span>{t("quality.citations")}</span>
               <strong>{formatQualityNumber(metrics.averageCitationCount)}</strong>
             </div>
           </div>
@@ -246,12 +257,12 @@ const QualityGuardPanel = ({
               {failedCases.slice(0, 3).map((caseResult) => (
                 <div key={caseResult.id} className="quality-failure-item">
                   <span>{caseResult.id}</span>
-                  <p>{caseResult.reasons?.join(", ") ?? "Case failed"}</p>
+                  <p>{caseResult.reasons?.join(", ") ?? t("quality.caseFailed")}</p>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="quality-empty-note">No failed cases in the latest run.</div>
+            <div className="quality-empty-note">{t("quality.failedCasesEmpty")}</div>
           )}
 
           <div className="quality-recommendation-list">
@@ -264,18 +275,22 @@ const QualityGuardPanel = ({
         </>
       ) : (
         <div className="archive-empty-state archive-empty-state-compact">
-          <div className="archive-empty-mark">No quality report loaded</div>
-          <div>Load the latest report or run the default synthetic corpus.</div>
+          <div className="archive-empty-mark">{t("quality.emptyReport")}</div>
+          <div>{t("quality.emptyHint")}</div>
         </div>
       )}
 
-      <QualityGateCard gate={qualityGate} label="Quality gate" />
+      <QualityGateCard gate={qualityGate} label={t("quality.gate")} t={t} />
 
       {regressionGate && qualityGate !== regressionGate ? (
-        <QualityGateCard gate={regressionGate} label="Regression gate" />
+        <QualityGateCard
+          gate={regressionGate}
+          label={t("quality.regressionGate")}
+          t={t}
+        />
       ) : null}
 
-      <RecoveryGateCard gate={recoveryGate} />
+      <RecoveryGateCard gate={recoveryGate} t={t} />
 
       {recentRuns.length > 0 ? (
         <div className="quality-run-list">
@@ -285,7 +300,7 @@ const QualityGuardPanel = ({
                 <strong>{formatQualityPercent(run.metrics?.overallPassPercent)}</strong>
                 {run.status}
               </span>
-              <span>{formatQualityDate(run.createdAt)}</span>
+              <span>{formatQualityDate(run.createdAt, locale)}</span>
             </div>
           ))}
         </div>
