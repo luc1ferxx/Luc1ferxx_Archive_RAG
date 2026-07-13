@@ -29,6 +29,19 @@ jest.mock("./components/ChatComponent", () => (props) => (
   <div>
     <div>Chat</div>
     <div data-testid="chat-docids">{props.docIds.join(",")}</div>
+    {props.showQuickActions ? (
+      <button type="button">
+        {`${props.t("chat.sources")} · ${
+          props.chatScopeOptions.find(
+            (option) => option.id === props.chatScopeMode
+          )?.label ?? ""
+        } ${
+          props.chatScopeOptions.find(
+            (option) => option.id === props.chatScopeMode
+          )?.count ?? 0
+        }`}
+      </button>
+    ) : null}
     {props.draftQuestion ? (
       <div data-testid="chat-draft">{props.draftQuestion}</div>
     ) : null}
@@ -126,8 +139,30 @@ describe("App", () => {
     render(<App />);
 
     expect(
-      await screen.findByText("Document AI workspace")
+      await screen.findByText("Archive RAG Workspace")
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Sources · Uploaded \d+/ })
+    ).toBeInTheDocument();
+
+    const capabilities = screen.getByRole("group", {
+      name: "Workspace capabilities",
+    });
+
+    [
+      "Upload PDFs",
+      "Cited QA",
+      "Compare documents",
+      "Risk review",
+      "Timeline",
+      "View runs",
+    ].forEach((label) => {
+      expect(within(capabilities).getByRole("button", { name: label })).toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByRole("region", { name: "Workspace overview" })
+    ).not.toBeInTheDocument();
 
     await openWorkspace();
 
@@ -144,14 +179,19 @@ describe("App", () => {
     render(<App />);
 
     expect(
-      await screen.findByText("Document AI workspace")
+      await screen.findByText("Archive RAG Workspace")
     ).toBeInTheDocument();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Switch language to 中文" })
     );
 
-    expect(await screen.findByText("文档智能工作台")).toBeInTheDocument();
+    expect(await screen.findByText("Archive RAG 文档工作台")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /来源 · 已上传 \d+/ })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "上传 PDF" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "引用问答" })).toBeInTheDocument();
     expect(window.localStorage.getItem("archive-rag.locale")).toBe("zh");
 
     const homeNavigation = screen.getByRole("navigation", {
@@ -175,7 +215,7 @@ describe("App", () => {
     render(<App />);
 
     expect(
-      await screen.findByText("Document AI workspace")
+      await screen.findByText("Archive RAG Workspace")
     ).toBeInTheDocument();
 
     const homeNavigation = screen.getByRole("navigation", {
@@ -204,6 +244,47 @@ describe("App", () => {
 
     fireEvent.click(within(homeNavigation).getByRole("button", { name: "Runs" }));
     expect(screen.getByRole("region", { name: "Recent runs" })).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "More" }));
+    expect(screen.getByRole("region", { name: "Workspace details" })).toBeInTheDocument();
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+  });
+
+  test("uses the full Home hero and compact layout for secondary home sections", async () => {
+    render(<App />);
+
+    const home = await screen.findByRole("main", { name: "Archive RAG home" });
+    expect(home).toHaveClass("is-home");
+
+    fireEvent.click(screen.getByRole("button", { name: "Workflows" }));
+
+    expect(home).toHaveClass("is-compact");
+    expect(home).toHaveAttribute("data-home-section", "workflows");
+    expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+  });
+
+  test("New clears the staged home draft and returns to Home", async () => {
+    render(<App />);
+
+    const capabilities = await screen.findByRole("group", {
+      name: "Workspace capabilities",
+    });
+    fireEvent.click(within(capabilities).getByRole("button", { name: "Cited QA" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stage task" }));
+
+    expect(screen.getByTestId("chat-draft")).toHaveTextContent(
+      "Answer my document question"
+    );
+    expect(screen.getByText("Staged task")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+
+    expect(screen.getByRole("main", { name: "Archive RAG home" })).toHaveClass(
+      "is-home"
+    );
+    expect(screen.queryByTestId("chat-draft")).not.toBeInTheDocument();
+    expect(screen.queryByText("Staged task")).not.toBeInTheDocument();
     expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
   });
 
@@ -256,7 +337,7 @@ describe("App", () => {
     render(<App />);
 
     expect(
-      await screen.findByText("Document AI workspace")
+      await screen.findByText("Archive RAG Workspace")
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Submit mock chat" }));
