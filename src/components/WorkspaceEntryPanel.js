@@ -10,12 +10,20 @@ import {
   FolderOpenOutlined,
   HomeOutlined,
   PlayCircleOutlined,
+  PlusOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
 
 const HOME_SECTION_IDS = ["home", "skills", "workflows", "drive", "runs", "more"];
 
 const HOME_NAV_ITEMS = [
+  {
+    id: "new",
+    icon: PlusOutlined,
+    kind: "command",
+    labelKey: "home.nav.new",
+    target: "new",
+  },
   {
     id: "home",
     icon: HomeOutlined,
@@ -55,48 +63,104 @@ const HOME_NAV_ITEMS = [
   },
 ];
 
-const HOME_ACTIONS = [
+const CAPABILITY_DEFINITIONS = [
   {
     id: "upload",
-    labelKey: "home.action.upload",
+    actionLabelKey: "home.action.upload",
+    group: "sources",
     icon: CloudUploadOutlined,
     type: "upload",
   },
   {
-    id: "qa",
-    labelKey: "home.action.citedQa",
+    id: "document_rag",
+    actionLabelKey: "home.action.citedQa",
+    group: "sources",
     icon: FileSearchOutlined,
-    skillId: "document_rag",
+    labelKey: "skill.document.label",
+    metaKey: "skill.document.meta",
+    summaryKey: "skill.document.summary",
     target: "skills",
+    draftKey: "workflow.document.draft",
   },
   {
-    id: "compare",
-    labelKey: "home.action.compare",
+    id: "compare_documents",
+    actionLabelKey: "home.action.compare",
+    group: "analysis",
     icon: BranchesOutlined,
-    skillId: "compare_documents",
+    labelKey: "skill.compare.label",
+    metaKey: "skill.compare.meta",
+    summaryKey: "skill.compare.summary",
     target: "workflows",
+    workflowLabelKey: "workflow.compare.label",
+    workflowSummaryKey: "workflow.compare.summary",
+    draftKey: "workflow.compare.draft",
   },
   {
-    id: "risk",
-    labelKey: "home.action.risk",
+    id: "risk_review",
+    actionLabelKey: "home.action.risk",
+    group: "analysis",
     icon: SafetyCertificateOutlined,
-    skillId: "risk_review",
+    labelKey: "skill.risk.label",
+    metaKey: "skill.risk.meta",
+    summaryKey: "skill.risk.summary",
     target: "workflows",
+    workflowLabelKey: "workflow.risk.label",
+    workflowSummaryKey: "workflow.risk.summary",
+    draftKey: "workflow.risk.draft",
   },
   {
-    id: "timeline",
-    labelKey: "home.action.timeline",
+    id: "extract_timeline",
+    actionLabelKey: "home.action.timeline",
+    group: "analysis",
     icon: AuditOutlined,
-    skillId: "extract_timeline",
+    labelKey: "skill.timeline.label",
+    metaKey: "skill.timeline.meta",
+    summaryKey: "skill.timeline.summary",
     target: "workflows",
+    workflowLabelKey: "workflow.timeline.label",
+    workflowSummaryKey: "workflow.timeline.summary",
+    draftKey: "workflow.timeline.draft",
+  },
+  {
+    id: "summarize_contract",
+    group: "analysis",
+    icon: FileDoneOutlined,
+    labelKey: "skill.contract.label",
+    metaKey: "skill.contract.meta",
+    summaryKey: "skill.contract.summary",
+    draftKey: "workflow.contract.draft",
   },
   {
     id: "runs",
-    labelKey: "home.action.viewRuns",
+    actionLabelKey: "home.action.viewRuns",
+    group: "workspace",
     icon: PlayCircleOutlined,
     target: "runs",
   },
 ];
+
+const CAPABILITY_GROUPS = ["sources", "analysis", "workspace"];
+
+const DOCUMENT_SKILLS = CAPABILITY_DEFINITIONS.filter(
+  (capability) => capability.labelKey
+);
+
+const WORKFLOW_TEMPLATES = CAPABILITY_DEFINITIONS.filter(
+  (capability) => capability.workflowLabelKey
+).map((capability) => ({
+  id: capability.id,
+  labelKey: capability.workflowLabelKey,
+  skillId: capability.id,
+  summaryKey: capability.workflowSummaryKey,
+}));
+
+const HOME_ACTIONS = CAPABILITY_DEFINITIONS.filter(
+  (capability) => capability.actionLabelKey
+).map((capability) => ({
+  ...capability,
+  labelKey: capability.actionLabelKey,
+  skillId: capability.labelKey ? capability.id : undefined,
+}));
 
 const WORKSPACE_STATS = [
   {
@@ -115,73 +179,6 @@ const WORKSPACE_STATS = [
     valueKey: "taskCount",
   },
 ];
-
-const DOCUMENT_SKILLS = [
-  {
-    id: "document_rag",
-    labelKey: "skill.document.label",
-    metaKey: "skill.document.meta",
-    icon: FileSearchOutlined,
-    summaryKey: "skill.document.summary",
-  },
-  {
-    id: "compare_documents",
-    labelKey: "skill.compare.label",
-    metaKey: "skill.compare.meta",
-    icon: BranchesOutlined,
-    summaryKey: "skill.compare.summary",
-  },
-  {
-    id: "risk_review",
-    labelKey: "skill.risk.label",
-    metaKey: "skill.risk.meta",
-    icon: SafetyCertificateOutlined,
-    summaryKey: "skill.risk.summary",
-  },
-  {
-    id: "extract_timeline",
-    labelKey: "skill.timeline.label",
-    metaKey: "skill.timeline.meta",
-    icon: AuditOutlined,
-    summaryKey: "skill.timeline.summary",
-  },
-  {
-    id: "summarize_contract",
-    labelKey: "skill.contract.label",
-    metaKey: "skill.contract.meta",
-    icon: FileDoneOutlined,
-    summaryKey: "skill.contract.summary",
-  },
-];
-
-const WORKFLOW_TEMPLATES = [
-  {
-    id: "compare",
-    labelKey: "workflow.compare.label",
-    skillId: "compare_documents",
-    summaryKey: "workflow.compare.summary",
-  },
-  {
-    id: "risk",
-    labelKey: "workflow.risk.label",
-    skillId: "risk_review",
-    summaryKey: "workflow.risk.summary",
-  },
-  {
-    id: "timeline",
-    labelKey: "workflow.timeline.label",
-    skillId: "extract_timeline",
-    summaryKey: "workflow.timeline.summary",
-  },
-];
-
-const SKILL_DRAFT_KEYS = {
-  compare_documents: "workflow.compare.draft",
-  risk_review: "workflow.risk.draft",
-  extract_timeline: "workflow.timeline.draft",
-  summarize_contract: "workflow.contract.draft",
-  document_rag: "workflow.document.draft",
-};
 
 const defaultT = (key, values = {}) =>
   Object.entries(values).reduce(
@@ -206,7 +203,7 @@ const getSkillById = (skillId) =>
   DOCUMENT_SKILLS.find((skill) => skill.id === skillId);
 
 const getSkillDraftQuestion = (skill, t) =>
-  t(SKILL_DRAFT_KEYS[skill?.id] ?? SKILL_DRAFT_KEYS.document_rag);
+  t(skill?.draftKey ?? getSkillById("document_rag").draftKey);
 
 const getPendingTaskScopeLabel = (pendingTask, t) => {
   if (!pendingTask) {
@@ -233,6 +230,7 @@ const WorkspaceEntryPanel = ({
   documentCount = 0,
   documents = [],
   onNavigate,
+  onNew,
   onOpenWorkspace,
   onPrepareTask,
   onSkillSelect,
@@ -271,6 +269,11 @@ const WorkspaceEntryPanel = ({
   }, [documents]);
 
   const handleNavigate = (target) => {
+    if (target === "new") {
+      onNew?.();
+      return;
+    }
+
     onNavigate?.(target);
   };
 
@@ -425,33 +428,6 @@ const WorkspaceEntryPanel = ({
       </div>
     );
   };
-
-  const renderHomeSection = () => (
-    <section
-      className="archive-home-section-grid archive-home-overview-grid"
-      aria-label={t("workbench.workspaceOverview")}
-    >
-      <div className="archive-home-section">
-        <div className="archive-home-section-head">
-          <span>{t("home.documentSkills")}</span>
-          <button type="button" onClick={() => handleNavigate("skills")}>
-            {t("home.viewAll")}
-          </button>
-        </div>
-        {renderSkillGrid()}
-      </div>
-      <div className="archive-home-section archive-home-side-panel">
-        {renderSelectedSkill()}
-        <button
-          type="button"
-          className="archive-home-primary-action"
-          onClick={() => handleNavigate("workflows")}
-        >
-          {t("home.buildWorkflow")}
-        </button>
-      </div>
-    </section>
-  );
 
   const renderSkillsSection = () => (
     <section className="archive-home-section-grid" aria-label={t("home.documentSkills")}>
@@ -637,19 +613,23 @@ const WorkspaceEntryPanel = ({
       return renderMoreSection();
     }
 
-    return renderHomeSection();
+    return null;
   };
 
   return (
-    <main className="archive-home" aria-label={t("workbench.workspaceHome")}>
+    <main
+      className={`archive-home ${activeSection === "home" ? "is-home" : "is-compact"}`}
+      aria-label={t("workbench.workspaceHome")}
+      data-home-section={activeSection}
+    >
       <header className="archive-home-nav">
         <button
           type="button"
           className="archive-home-brand"
+          aria-label={t("home.brand")}
           onClick={() => handleNavigate("home")}
         >
           <span className="archive-home-brand-mark">A</span>
-          <strong>{t("home.brand")}</strong>
         </button>
 
         <nav aria-label={t("home.navigation")}>
@@ -662,7 +642,12 @@ const WorkspaceEntryPanel = ({
                 type="button"
                 aria-label={t(item.labelKey)}
                 aria-current={activeSection === item.id ? "page" : undefined}
-                className={activeSection === item.id ? "is-active" : ""}
+                className={[
+                  activeSection === item.id ? "is-active" : "",
+                  item.kind === "command" ? "is-command" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
                 onClick={() => handleNavigate(item.target)}
               >
                 <NavIcon aria-hidden="true" />
@@ -674,48 +659,62 @@ const WorkspaceEntryPanel = ({
           })}
         </nav>
 
-        {languageSlot}
-
-        <button
-          type="button"
-          className="archive-home-open-button"
-          onClick={() => onOpenWorkspace?.()}
-        >
-          {t("home.openWorkspace")}
-        </button>
+        <div className="archive-home-nav-footer">
+          <button
+            type="button"
+            className="archive-home-open-button"
+            onClick={() => onOpenWorkspace?.()}
+          >
+            <FolderOpenOutlined aria-hidden="true" />
+            <span>{t("home.openWorkspace")}</span>
+          </button>
+          {languageSlot}
+        </div>
       </header>
 
       <section className="archive-home-hero">
         <div className="archive-home-title-block">
-          <span>{t("home.subtitle")}</span>
           <h1>{t("home.title")}</h1>
         </div>
 
         <div className="archive-home-task-input">{children}</div>
 
-        <div className="archive-home-action-row">
-          {HOME_ACTIONS.map((action) => {
-            const ActionIcon = action.icon;
+        <div
+          className="archive-home-action-row"
+          role="group"
+          aria-label={t("home.capabilities")}
+        >
+          {CAPABILITY_GROUPS.map((group) => (
+            <div className={`archive-home-action-group is-${group}`} key={group}>
+              <span>{t(`home.group.${group}`)}</span>
+              <div>
+                {HOME_ACTIONS.filter((action) => action.group === group).map(
+                  (action) => {
+                    const ActionIcon = action.icon;
 
-            return (
-              <button
-                key={action.id}
-                type="button"
-                onClick={() => handleAction(action)}
-              >
-                <ActionIcon aria-hidden="true" />
-                {t(action.labelKey)}
-              </button>
-            );
-          })}
+                    return (
+                      <button
+                        key={action.id}
+                        type="button"
+                        onClick={() => handleAction(action)}
+                      >
+                        <span className="archive-home-action-icon">
+                          <ActionIcon aria-hidden="true" />
+                        </span>
+                        <strong>{t(action.labelKey)}</strong>
+                      </button>
+                    );
+                  }
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       </section>
 
       {renderPendingTask()}
 
-      {HOME_SECTION_IDS.includes(activeSection)
-        ? renderActiveSection()
-        : renderHomeSection()}
+      {HOME_SECTION_IDS.includes(activeSection) ? renderActiveSection() : null}
     </main>
   );
 };

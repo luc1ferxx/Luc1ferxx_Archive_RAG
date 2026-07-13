@@ -104,6 +104,7 @@ const App = () => {
   const [isWorkbenchOpen, setIsWorkbenchOpen] = useState(false);
   const [activeHomeSection, setActiveHomeSection] = useState("home");
   const [homeDraftQuestion, setHomeDraftQuestion] = useState("");
+  const [homeComposerResetKey, setHomeComposerResetKey] = useState(0);
   const [pendingHomeTask, setPendingHomeTask] = useState(null);
   const [selectedHomeSkillId, setSelectedHomeSkillId] = useState("document_rag");
   const [selectedChatDocIds, setSelectedChatDocIds] = useState([]);
@@ -834,6 +835,18 @@ const App = () => {
     [openWorkbench, resetPageScroll]
   );
 
+  const handleHomeNew = useCallback(() => {
+    setActiveHomeSection("home");
+    setIsWorkbenchOpen(false);
+    setHomeDraftQuestion("");
+    setPendingHomeTask(null);
+    setSelectedHomeSkillId("document_rag");
+    setSelectedChatDocIds([]);
+    setChatScopeMode(CHAT_SCOPE_MODES.uploaded);
+    setHomeComposerResetKey((currentKey) => currentKey + 1);
+    resetPageScroll();
+  }, [resetPageScroll]);
+
   const handleSidebarNavigate = useCallback(
     async (target) => {
       const navTargetByAction = {
@@ -1119,7 +1132,7 @@ const App = () => {
     );
   };
 
-  const renderAgentComposer = ({ inputId, ref } = {}) => (
+  const renderAgentComposer = ({ inputId, ref, resetKey, showQuickActions = false } = {}) => (
     <div className="archive-composer" ref={ref}>
       <ChatComponent
         chatScopeMode={chatScopeMode}
@@ -1136,7 +1149,9 @@ const App = () => {
         onChatScopeModeChange={setChatScopeMode}
         onDraftQuestionConsumed={handleHomeDraftQuestionConsumed}
         onAttach={isWorkbenchOpen ? handleComposerAttach : handleHomeUploadClick}
+        resetKey={resetKey}
         setIsLoading={setIsLoading}
+        showQuickActions={showQuickActions}
         locale={locale}
         t={t}
       />
@@ -1151,6 +1166,7 @@ const App = () => {
           documentCount={activeDocuments.length}
           documents={activeDocuments}
           onNavigate={handleHomeNavigate}
+          onNew={handleHomeNew}
           onOpenWorkspace={openWorkbench}
           onPrepareTask={handleHomePrepareTask}
           onSkillSelect={handleHomeSkillSelect}
@@ -1178,6 +1194,8 @@ const App = () => {
           {renderAgentComposer({
             inputId: "archive-home-agent-search",
             ref: null,
+            resetKey: homeComposerResetKey,
+            showQuickActions: true,
           })}
         </WorkspaceEntryPanel>
       </div>

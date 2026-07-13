@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Input, message } from "antd";
 import {
   AudioOutlined,
   AppstoreOutlined,
+  DownOutlined,
   PaperClipOutlined,
   SendOutlined,
   SoundOutlined,
@@ -38,16 +39,20 @@ const ChatComponent = (props) => {
     onAttach,
     onChatScopeModeChange,
     onDraftQuestionConsumed,
+    resetKey,
     setIsLoading,
+    showQuickActions = false,
     locale = "en",
     t = defaultT,
   } = props;
   const [searchValue, setSearchValue] = useState("");
   const [isChatModeOn, setIsChatModeOn] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isScopeOpen, setIsScopeOpen] = useState(false);
   const [isToolsOpen, setIsToolsOpen] = useState(false);
   const [retrievalMode, setRetrievalMode] = useState("auto");
   const [speech, setSpeech] = useState();
+  const sourceControlRef = useRef(null);
   const hasDocuments = isDemoWorkbench || docIds.length > 0;
 
   const { transcript, listening, resetTranscript } = useSpeechRecognition();
@@ -170,6 +175,30 @@ const ChatComponent = (props) => {
   }, [draftQuestion, onDraftQuestionConsumed]);
 
   useEffect(() => {
+    setSearchValue("");
+    setIsScopeOpen(false);
+    setIsToolsOpen(false);
+  }, [resetKey]);
+
+  useEffect(() => {
+    if (!isScopeOpen) {
+      return undefined;
+    }
+
+    const closeScopeMenu = (event) => {
+      if (!sourceControlRef.current?.contains(event.target)) {
+        setIsScopeOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", closeScopeMenu);
+
+    return () => {
+      document.removeEventListener("pointerdown", closeScopeMenu);
+    };
+  }, [isScopeOpen]);
+
+  useEffect(() => {
     const initializedSpeech = new Speech();
     const baseSpeechOptions = {
       volume: 1,
@@ -276,6 +305,7 @@ const ChatComponent = (props) => {
     }
 
     onChatScopeModeChange?.(option.id);
+    setIsScopeOpen(false);
   };
 
   const transcriptLabel = isChatModeOn
@@ -290,6 +320,10 @@ const ChatComponent = (props) => {
     docs: t("chat.retrievalDocs"),
     web: t("chat.retrievalWeb"),
   };
+  const activeScopeOption =
+    chatScopeOptions.find((option) => option.id === chatScopeMode) ??
+    chatScopeOptions[0];
+  const sourcesMenuId = `${inputId ?? "archive-agent-search"}-sources-menu`;
 
   return (
     <div className="archive-composer-border">
@@ -299,28 +333,68 @@ const ChatComponent = (props) => {
         }`}
       >
         <div className="archive-composer-controls">
-          <Search
-            id={inputId}
-            className="archive-search"
-            placeholder={
-              hasDocuments
-                ? t("chat.placeholderWithDocuments")
-                : t("chat.placeholderWithoutDocuments")
-            }
-            enterButton={
-              <span aria-label={t("chat.ask")} className="archive-send-icon">
-                <SendOutlined />
-              </span>
-            }
-            size="large"
-            onSearch={onSearch}
-            loading={isLoading}
-            value={searchValue}
-            onChange={(event) => setSearchValue(event.target.value)}
-          />
+          {showQuickActions ? (
+            <Input
+              id={inputId}
+              className="archive-search"
+              aria-label={t("chat.ask")}
+              placeholder={
+                hasDocuments
+                  ? t("chat.placeholderWithDocuments")
+                  : t("chat.placeholderWithoutDocuments")
+              }
+              size="large"
+              value={searchValue}
+              onChange={(event) => setSearchValue(event.target.value)}
+              onPressEnter={(event) => void onSearch(event.currentTarget.value)}
+            />
+          ) : (
+            <Search
+              id={inputId}
+              className="archive-search"
+              placeholder={
+                hasDocuments
+                  ? t("chat.placeholderWithDocuments")
+                  : t("chat.placeholderWithoutDocuments")
+              }
+              enterButton={
+                <span aria-label={t("chat.ask")} className="archive-send-icon">
+                  <SendOutlined />
+                </span>
+              }
+              size="large"
+              onSearch={onSearch}
+              loading={isLoading}
+              value={searchValue}
+              onChange={(event) => setSearchValue(event.target.value)}
+            />
+          )}
 
           <div className="archive-composer-toolbar">
             <div className="archive-composer-context">
+              {showQuickActions ? (
+                <button
+                  type="button"
+                  className="archive-composer-quick-action"
+                  onClick={() => onAttach?.()}
+                >
+                  <PaperClipOutlined aria-hidden="true" />
+                  {t("chat.attachPdfs")}
+                </button>
+              ) : null}
+
+              {showQuickActions ? (
+                <button
+                  type="button"
+                  className="archive-composer-quick-action"
+                  aria-expanded={isToolsOpen}
+                  onClick={() => setIsToolsOpen((isOpen) => !isOpen)}
+                >
+                  <AppstoreOutlined aria-hidden="true" />
+                  {t("chat.skill")}
+                </button>
+              ) : null}
+
               <div className="archive-composer-transcript">
                 {isDemoWorkbench
                   ? t("chat.demoTranscript")
@@ -328,36 +402,111 @@ const ChatComponent = (props) => {
               </div>
 
               {!isDemoWorkbench && chatScopeOptions.length > 0 ? (
-                <div className="archive-scope-segmented" aria-label={t("chat.scope")}>
-                  {chatScopeOptions.map((option) => (
+                showQuickActions ? (
+                  <div
+                    className="archive-sources-control"
+                    ref={sourceControlRef}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        setIsScopeOpen(false);
+                      }
+                    }}
+                  >
                     <button
-                      key={option.id}
                       type="button"
-                      aria-pressed={chatScopeMode === option.id}
-                      className={chatScopeMode === option.id ? "is-active" : ""}
-                      onClick={() => handleScopeClick(option)}
-                      title={`${option.label}: ${option.count} document${
-                        option.count === 1 ? "" : "s"
-                      }`}
+                      className="archive-sources-trigger"
+                      aria-controls={sourcesMenuId}
+                      aria-expanded={isScopeOpen}
+                      aria-haspopup="listbox"
+                      onClick={() => setIsScopeOpen((isOpen) => !isOpen)}
                     >
-                      <span>{option.label}</span>
-                      <small>{option.count}</small>
+                      <span>{t("chat.sources")}</span>
+                      <small>
+                        {`· ${activeScopeOption?.label ?? ""} ${
+                          activeScopeOption?.count ?? 0
+                        }`}
+                      </small>
+                      <DownOutlined aria-hidden="true" />
                     </button>
-                  ))}
-                </div>
+
+                    {isScopeOpen ? (
+                      <div
+                        id={sourcesMenuId}
+                        className="archive-sources-menu"
+                        role="listbox"
+                        aria-label={t("chat.scope")}
+                      >
+                        {chatScopeOptions.map((option) => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            role="option"
+                            aria-selected={chatScopeMode === option.id}
+                            className={chatScopeMode === option.id ? "is-active" : ""}
+                            onClick={() => handleScopeClick(option)}
+                          >
+                            <span>{option.label}</span>
+                            <small>{option.count}</small>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="archive-scope-segmented" aria-label={t("chat.scope")}>
+                    {chatScopeOptions.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        aria-pressed={chatScopeMode === option.id}
+                        className={chatScopeMode === option.id ? "is-active" : ""}
+                        onClick={() => handleScopeClick(option)}
+                        title={`${option.label}: ${option.count} document${
+                          option.count === 1 ? "" : "s"
+                        }`}
+                      >
+                        <span>{option.label}</span>
+                        <small>{option.count}</small>
+                      </button>
+                    ))}
+                  </div>
+                )
               ) : null}
             </div>
 
-            <button
-              type="button"
-              className="archive-composer-tools-trigger"
-              aria-expanded={isToolsOpen}
-              aria-label={t("chat.composerTools")}
-              onClick={() => setIsToolsOpen((isOpen) => !isOpen)}
-            >
-              <AppstoreOutlined />
-              {t("chat.tools")}
-            </button>
+            {showQuickActions ? (
+              <div className="archive-composer-end-actions">
+                <button
+                  type="button"
+                  className="archive-composer-voice-trigger"
+                  aria-pressed={isChatModeOn}
+                  aria-label={t("chat.voiceMode")}
+                  onClick={chatModeClickHandler}
+                >
+                  <AudioOutlined aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="archive-composer-submit"
+                  aria-label={t("chat.ask")}
+                  disabled={isLoading || !searchValue.trim()}
+                  onClick={() => void onSearch(searchValue)}
+                >
+                  <SendOutlined aria-hidden="true" />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="archive-composer-tools-trigger"
+                aria-expanded={isToolsOpen}
+                aria-label={t("chat.composerTools")}
+                onClick={() => setIsToolsOpen((isOpen) => !isOpen)}
+              >
+                <AppstoreOutlined />
+                {t("chat.tools")}
+              </button>
+            )}
           </div>
 
           {isToolsOpen ? (
