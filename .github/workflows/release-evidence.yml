@@ -1,0 +1,116 @@
+name: Release Evidence Gate
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 11 * * 1"
+
+jobs:
+  release-evidence:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: agentai_smoke
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentai_smoke"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AGENT_EXECUTION_PLANNER: llm
+      AGENT_INTENT_PLANNER: llm
+      AGENT_PLANNER_ROLLOUT: llm
+      EVAL_EVIDENCE_PROFILE: release
+      EVAL_TARGET_COMMIT_SHA: ${{ github.sha }}
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_smoke
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_smoke
+
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout target commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EVAL_TARGET_COMMIT_SHA }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies
+        run: npm ci
+
+      - name: Require OpenAI key
+        run: test -n "$OPENAI_API_KEY"
+
+      - name: Run robust hard and real eval suite
+        if: ${{ !cancelled() }}
+        run: npm run eval:robust-suite
+
+      - name: Run planner eval (mock)
+        if: ${{ !cancelled() }}
+        run: npm run eval:planner -- --provider mock
+
+      - name: Run planner eval (real)
+        if: ${{ !cancelled() }}
+        run: npm run eval:planner -- --provider real
+
+      - name: Run trajectory eval
+        if: ${{ !cancelled() }}
+        run: npm run eval:trajectory
+
+      - name: Run recovery observability eval
+        if: ${{ !cancelled() }}
+        run: npm run eval:recovery-observability
+
+      - name: Run pure LLM runtime smoke
+        if: ${{ !cancelled() }}
+        run: npm run runtime:smoke
+
+      - name: Check rollout readiness
+        if: ${{ !cancelled() }}
+        run: npm run rollout:readiness
+
+      - name: Check release evidence gate
+        if: ${{ !cancelled() }}
+        run: npm run release:gate -- --target-commit "$EVAL_TARGET_COMMIT_SHA"
+
+      - name: Upload release evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ env.EVAL_TARGET_COMMIT_SHA }}
+          path: |
+            server/evaluation/results/latest.json
+            server/evaluation/results/latest.md
+            server/evaluation/results/latest-rerank-hard-cs.json
+            server/evaluation/results/latest-rerank-hard-cs.md
+            server/evaluation/results/latest-arxiv-rerank.json
+            server/evaluation/results/latest-arxiv-rerank.md
+            server/evaluation/results/latest-planner-mock.json
+            server/evaluation/results/latest-planner-mock.md
+            server/evaluation/results/latest-planner-real.json
+            server/evaluation/results/latest-planner-real.md
+            server/evaluation/results/latest-trajectory.json
+            server/evaluation/results/latest-trajectory.md
+            server/evaluation/results/latest-recovery-observability.json
+            server/evaluation/results/latest-recovery-observability.md
+            server/evaluation/results/latest-runtime-smoke.json
+            server/evaluation/results/latest-runtime-smoke.md
+            server/evaluation/results/latest-rollout-readiness.json
+            server/evaluation/results/latest-rollout-readiness.md
+            server/evaluation/results/latest-release-evidence.json
+            server/evaluation/results/latest-release-evidence.md
+          if-no-files-found: error

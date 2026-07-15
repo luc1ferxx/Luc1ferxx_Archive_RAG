@@ -25,6 +25,12 @@ const robustEvalSuiteWorkflowPath = path.join(
   "workflows",
   "robust-eval-suite.yml"
 );
+const releaseEvidenceWorkflowPath = path.join(
+  repositoryRoot,
+  ".github",
+  "workflows",
+  "release-evidence.yml"
+);
 
 test("quality gate workflow runs server tests and required feedback eval", async () => {
   const workflow = await readFile(workflowPath, "utf8");
@@ -124,4 +130,139 @@ test("robust eval suite workflow runs hard and real reports on a schedule", asyn
   assert.match(workflow, /server\/evaluation\/results\/latest-rerank-hard-cs\.\*/);
   assert.match(workflow, /server\/evaluation\/results\/latest-arxiv-rerank\.\*/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
+});
+
+test("release evidence workflow pins manual and scheduled runs to one target SHA", async () => {
+  const workflow = await readFile(releaseEvidenceWorkflowPath, "utf8");
+
+  assert.match(workflow, /name:\s*Release Evidence Gate/);
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /schedule:\s*\n\s*-\s*cron:/);
+  assert.doesNotMatch(workflow, /pull_request:/);
+  assert.match(
+    workflow,
+    /EVAL_TARGET_COMMIT_SHA:\s*\$\{\{\s*github\.sha\s*\}\}/
+  );
+  assert.match(workflow, /EVAL_EVIDENCE_PROFILE:\s*release/);
+  assert.match(
+    workflow,
+    /uses:\s*actions\/checkout@v4[\s\S]*ref:\s*\$\{\{\s*env\.EVAL_TARGET_COMMIT_SHA\s*\}\}/
+  );
+});
+
+test("release evidence workflow generates every required report in one Postgres-backed job", async () => {
+  const workflow = await readFile(releaseEvidenceWorkflowPath, "utf8");
+
+  assert.match(workflow, /services:\s*\n\s*postgres:/);
+  assert.match(workflow, /image:\s*postgres:16/);
+  assert.match(workflow, /POSTGRES_DB:\s*agentai_smoke/);
+  assert.match(
+    workflow,
+    /--health-cmd "pg_isready -U postgres -d agentai_smoke"/
+  );
+  assert.match(
+    workflow,
+    /POSTGRES_DATABASE_URL:\s*postgresql:\/\/postgres:postgres@127\.0\.0\.1:5432\/agentai_smoke/
+  );
+  assert.match(
+    workflow,
+    /LONG_MEMORY_DATABASE_URL:\s*postgresql:\/\/postgres:postgres@127\.0\.0\.1:5432\/agentai_smoke/
+  );
+  assert.match(
+    workflow,
+    /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/
+  );
+  assert.equal(
+    workflow.match(/\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/g)?.length,
+    1
+  );
+  assert.doesNotMatch(workflow, /run:\s*[^\n]*secrets\./);
+  assert.match(workflow, /working-directory:\s*server/);
+  assert.match(workflow, /node-version:\s*"20"/);
+  assert.match(workflow, /cache-dependency-path:\s*server\/package-lock\.json/);
+  assert.match(workflow, /run:\s*npm ci/);
+  assert.match(workflow, /name:\s*Require OpenAI key/);
+  assert.match(workflow, /run:\s*test -n "\$OPENAI_API_KEY"/);
+
+  const reportCommands = [
+    "npm run eval:robust-suite",
+    "npm run eval:planner -- --provider mock",
+    "npm run eval:planner -- --provider real",
+    "npm run eval:trajectory",
+    "npm run eval:recovery-observability",
+    "npm run runtime:smoke",
+    "npm run rollout:readiness",
+  ];
+  let previousCommandIndex = -1;
+
+  for (const command of reportCommands) {
+    const commandIndex = workflow.indexOf(`run: ${command}`);
+    assert.ok(commandIndex > previousCommandIndex, `${command} must run in order`);
+    previousCommandIndex = commandIndex;
+  }
+});
+
+test("release evidence workflow gates the generated reports against its target SHA", async () => {
+  const workflow = await readFile(releaseEvidenceWorkflowPath, "utf8");
+  const readinessCommandIndex = workflow.indexOf(
+    "run: npm run rollout:readiness"
+  );
+  const releaseGateCommand =
+    'run: npm run release:gate -- --target-commit "$EVAL_TARGET_COMMIT_SHA"';
+  const releaseGateCommandIndex = workflow.indexOf(releaseGateCommand);
+
+  assert.ok(readinessCommandIndex >= 0);
+  assert.ok(releaseGateCommandIndex > readinessCommandIndex);
+  assert.doesNotMatch(workflow, /release:gate[^\n]*--no-fail/);
+});
+
+test("release evidence workflow still emits gate evidence after an eval failure", async () => {
+  const workflow = await readFile(releaseEvidenceWorkflowPath, "utf8");
+  const continueAfterFailure = "if: ${{ !cancelled() }}";
+
+  assert.equal(
+    workflow.split(continueAfterFailure).length - 1,
+    8,
+    "all report generators and the release gate must run after prior failures"
+  );
+  assert.match(
+    workflow,
+    /name:\s*Check release evidence gate\s+if:\s*\$\{\{\s*!cancelled\(\)\s*\}\}\s+run:\s*npm run release:gate/
+  );
+});
+
+test("release evidence workflow uploads the complete JSON and Markdown evidence bundle", async () => {
+  const workflow = await readFile(releaseEvidenceWorkflowPath, "utf8");
+
+  assert.match(workflow, /if:\s*always\(\)/);
+  assert.match(workflow, /uses:\s*actions\/upload-artifact@v4/);
+  assert.match(
+    workflow,
+    /name:\s*release-evidence-\$\{\{\s*env\.EVAL_TARGET_COMMIT_SHA\s*\}\}/
+  );
+  assert.match(workflow, /if-no-files-found:\s*error/);
+
+  const reportNames = [
+    "latest",
+    "latest-rerank-hard-cs",
+    "latest-arxiv-rerank",
+    "latest-planner-mock",
+    "latest-planner-real",
+    "latest-trajectory",
+    "latest-recovery-observability",
+    "latest-runtime-smoke",
+    "latest-rollout-readiness",
+    "latest-release-evidence",
+  ];
+
+  for (const reportName of reportNames) {
+    for (const extension of ["json", "md"]) {
+      assert.ok(
+        workflow.includes(
+          `server/evaluation/results/${reportName}.${extension}`
+        ),
+        `${reportName}.${extension} must be uploaded`
+      );
+    }
+  }
 });
