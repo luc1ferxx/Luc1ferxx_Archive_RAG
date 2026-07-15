@@ -895,6 +895,143 @@ test("quality history requires robust hard and real eval suite when requested", 
   );
 });
 
+test("quality history preserves legacy pass and skip semantics without release evidence", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-latest-legacy",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-previous-legacy",
+    createdAt: "2026-06-08T09:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const latestFeedbackPayload = {
+    summary: {
+      runId: "feedback-legacy",
+      createdAt: "2026-06-08T10:05:00.000Z",
+      corpus: {
+        path: "evaluation/generated/feedback-corpus.json",
+        cases: 1,
+      },
+      metrics: {
+        overallPassRate: 1,
+      },
+    },
+    cases: [
+      {
+        id: "feedback-pass-legacy",
+        passed: true,
+      },
+    ],
+  };
+  const latestTrajectoryPayload = {
+    summary: {
+      runId: "trajectory-legacy",
+      createdAt: "2026-06-08T10:10:00.000Z",
+      status: "pass",
+      metrics: {
+        caseCount: 1,
+        passedCaseCount: 1,
+        failedCaseCount: 0,
+        checkCount: 1,
+        passedCheckCount: 1,
+        failedCheckCount: 0,
+      },
+    },
+    cases: [
+      {
+        id: "trajectory-pass-legacy",
+        label: "Legacy trajectory",
+        passed: true,
+        failedCheckCount: 0,
+        checks: [],
+      },
+    ],
+  };
+  const latestPlannerPayload = buildPassingPlannerPayload({
+    runId: "planner-legacy",
+  });
+  const latestRecoveryPayload = buildRecoveryObservabilityEvaluationReport({
+    createdAt: "2026-06-08T10:20:00.000Z",
+    runId: "recovery-legacy",
+  });
+  const latestRobustPayloads = [
+    {
+      reportId: "compare-hard-synthetic",
+      payload: latestPayload,
+    },
+    {
+      reportId: "rerank-hard-cs",
+      payload: buildPassingRerankPayload({
+        corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+        runId: "hard-cs-rerank-legacy",
+      }),
+    },
+    {
+      reportId: "arxiv-real-paper-rerank",
+      payload: buildPassingRerankPayload({
+        corpusPath: "evaluation/generated/arxiv-corpus.json",
+        runId: "arxiv-rerank-legacy",
+      }),
+    },
+  ];
+  const legacyPayloads = [
+    latestPayload,
+    previousPayload,
+    latestFeedbackPayload,
+    latestTrajectoryPayload,
+    latestPlannerPayload,
+    latestRecoveryPayload,
+    ...latestRobustPayloads.map(({ payload }) => payload),
+  ];
+  const buildLegacyHistory = (requireRobustSuite = false) =>
+    buildQualityHistoryResponse({
+      latestPayload,
+      latestFeedbackPayload,
+      latestPlannerPayload,
+      latestRecoveryPayload,
+      latestRobustPayloads,
+      latestTrajectoryPayload,
+      requireRobustSuite,
+      runPayloads: [
+        {
+          fileName: "compare-hard-previous-legacy.json",
+          payload: previousPayload,
+        },
+      ],
+    });
+
+  assert.ok(legacyPayloads.every((payload) => payload.evidence === undefined));
+
+  const defaultHistory = buildLegacyHistory();
+
+  assert.equal(defaultHistory.regressionGate.status, "pass");
+  assert.equal(defaultHistory.feedbackGate.status, "pass");
+  assert.equal(defaultHistory.feedbackGate.skipped, false);
+  assert.equal(defaultHistory.trajectoryGate.status, "pass");
+  assert.equal(defaultHistory.trajectoryGate.skipped, false);
+  assert.equal(defaultHistory.plannerGate.status, "pass");
+  assert.equal(defaultHistory.plannerGate.skipped, false);
+  assert.equal(defaultHistory.recoveryGate.status, "pass");
+  assert.equal(defaultHistory.recoveryGate.skipped, false);
+  assert.equal(defaultHistory.robustSuiteGate.status, "pass");
+  assert.equal(defaultHistory.robustSuiteGate.skipped, true);
+  assert.equal(defaultHistory.qualityGate.status, "pass");
+  assert.equal(buildQualityGateDecision({ history: defaultHistory }).exitCode, 0);
+
+  const requiredRobustHistory = buildLegacyHistory(true);
+
+  assert.equal(requiredRobustHistory.robustSuiteGate.status, "pass");
+  assert.equal(requiredRobustHistory.robustSuiteGate.skipped, false);
+  assert.equal(requiredRobustHistory.robustSuiteGate.reports.length, 3);
+  assert.equal(requiredRobustHistory.qualityGate.status, "pass");
+  assert.equal(
+    buildQualityGateDecision({ history: requiredRobustHistory }).exitCode,
+    0
+  );
+});
+
 test("quality history fails when required robust suite reports are missing", () => {
   const latestPayload = buildPassingSyntheticPayload({
     runId: "compare-hard-latest",

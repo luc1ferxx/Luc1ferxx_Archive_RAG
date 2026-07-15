@@ -5,6 +5,7 @@ import {
   appendCaseCheckTable,
   appendCategoryMetricsTable,
 } from "../agent-eval-harness.js";
+import { attachEvaluationEvidence } from "../eval-evidence.js";
 import { CATEGORY_LABELS } from "./checks.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -68,9 +69,25 @@ export const writeTrajectoryEvaluationReport = async ({
 
   const jsonPath = path.join(outputDirectory, LATEST_TRAJECTORY_JSON);
   const markdownPath = path.join(outputDirectory, LATEST_TRAJECTORY_MD);
+  const writtenReport = report?.evidence
+    ? report
+    : await attachEvaluationEvidence(report, {
+        command: "npm run eval:trajectory",
+        profile: process.env.EVAL_EVIDENCE_PROFILE ?? "default",
+        provider: {
+          id: "agent-eval",
+          mode: "deterministic",
+        },
+        reportId: "trajectory",
+        reportType: "trajectory",
+      });
 
-  await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  await writeFile(markdownPath, formatTrajectoryReportMarkdown(report), "utf8");
+  await writeFile(jsonPath, `${JSON.stringify(writtenReport, null, 2)}\n`, "utf8");
+  await writeFile(
+    markdownPath,
+    formatTrajectoryReportMarkdown(writtenReport),
+    "utf8"
+  );
 
   return {
     jsonPath,

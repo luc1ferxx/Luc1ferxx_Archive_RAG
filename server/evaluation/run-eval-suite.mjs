@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  hashCanonicalJson,
+  resolveEvaluationGitState,
+} from "./eval-evidence.js";
 import { robustEvalSuite } from "./eval-suite.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -84,14 +89,14 @@ const parseArgs = (argv) => {
   return options;
 };
 
-const runNodeStep = async ({ args, label }) => {
+const runNodeStep = async ({ args, environment, label }) => {
   console.log(`\n==> ${label}`);
   console.log(`node ${args.join(" ")}`);
 
   await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
       cwd: serverDirectory,
-      env: process.env,
+      env: environment ?? process.env,
       stdio: "inherit",
     });
 
@@ -170,15 +175,47 @@ const main = async () => {
       report,
     })
   );
+  const gitState = await resolveEvaluationGitState({
+    targetCommit: process.env.EVAL_TARGET_COMMIT_SHA ?? "",
+  });
+  const suiteRunId = `robust-${new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
+  const suiteConfigHash = hashCanonicalJson({
+    id: robustEvalSuite.id,
+    reports: robustEvalSuite.reports.map((report) => ({
+      corpusPath: report.corpusPath,
+      id: report.id,
+      latestName: report.latestName,
+      reportType: report.reportType,
+      rerankProvider: report.rerankProvider ?? null,
+    })),
+    syntheticProvider: options.syntheticProvider,
+  });
+  const environment = {
+    ...process.env,
+    EVAL_EVIDENCE_SUITE_CONFIG_HASH: suiteConfigHash,
+    EVAL_EVIDENCE_SUITE_ID: robustEvalSuite.id,
+    EVAL_EVIDENCE_SUITE_RUN_ID: suiteRunId,
+  };
+
+  if (gitState.commitSha !== "unknown") {
+    environment.EVAL_TARGET_COMMIT_SHA = gitState.commitSha;
+  }
 
   for (const step of steps) {
-    await runNodeStep(step);
+    await runNodeStep({
+      ...step,
+      environment,
+    });
   }
 
   console.log(
     JSON.stringify(
       {
         suite: robustEvalSuite.id,
+        suiteRunId,
+        suiteConfigHash,
         reports: robustEvalSuite.reports.map((report) => ({
           id: report.id,
           latestName: report.latestName,

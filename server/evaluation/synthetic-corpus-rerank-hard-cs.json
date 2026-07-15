@@ -1,4 +1,6 @@
 {
+  "id": "synthetic-corpus-rerank-hard-cs",
+  "version": "1",
   "documents": [
     {
       "key": "activation_checkpointing_systems",

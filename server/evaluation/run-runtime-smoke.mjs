@@ -13,6 +13,8 @@ import { createInMemoryAgentRunStore } from "../rag/agent-runs.js";
 import { resetAgentExperienceMemoryStore } from "../rag/agent-experience-memory.js";
 import { clearLongMemories, resetLongMemoryStore } from "../rag/long-memory.js";
 import { createInMemoryTaskStore } from "../rag/tasks.js";
+import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
+import { attachEvaluationEvidence } from "./eval-evidence.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -300,8 +302,10 @@ const buildReport = ({ calls, health, first, second, startedAt, userId }) => {
 
   return {
     completedAt,
+    runId: `runtime-smoke-${startedAt.replace(/[:.]/g, "-")}`,
     startedAt,
     status: "pass",
+    version: "1.0.0",
     checks: {
       agentExperienceMemory: {
         healthReason: health.checks?.agentExperienceMemory?.reason ?? null,
@@ -397,13 +401,26 @@ const main = async () => {
       sessionId: `runtime-smoke-${randomUUID()}`,
       userId,
     });
-    const report = buildReport({
+    const baseReport = buildReport({
       calls,
       first,
       health: healthResponse.json,
       second,
       startedAt,
       userId,
+    });
+    const report = await attachEvaluationEvidence(baseReport, {
+      command: "npm run runtime:smoke",
+      generatedAt: baseReport.completedAt,
+      modelRouteId: MODEL_ROUTE_IDS.executionPlannerDefault,
+      profile: process.env.EVAL_EVIDENCE_PROFILE ?? "release",
+      provider: {
+        id: "openai",
+        mode: "real",
+      },
+      reportId: "runtime-smoke",
+      reportType: "runtime_smoke",
+      runId: baseReport.runId,
     });
 
     await writeReport(report);

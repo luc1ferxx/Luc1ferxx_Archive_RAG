@@ -5,7 +5,9 @@ import {
   appendCaseCheckTable,
   appendCategoryMetricsTable,
 } from "../agent-eval-harness.js";
+import { attachEvaluationEvidence } from "../eval-evidence.js";
 import { CATEGORY_LABELS } from "./checks.js";
+import { MODEL_ROUTE_IDS } from "../../rag/model-providers/schema.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -94,7 +96,22 @@ export const writePlannerEvaluationReport = async ({
   const providerFileNames = getPlannerReportFileNames({
     provider: report?.summary?.provider,
   });
-  const markdown = formatPlannerReportMarkdown(report);
+  const provider = normalizeProvider(report?.summary?.provider) || "unknown";
+  const writtenReport = report?.evidence
+    ? report
+    : await attachEvaluationEvidence(report, {
+        command: "npm run eval:planner",
+        modelRouteId:
+          provider === "real" ? MODEL_ROUTE_IDS.executionPlannerDefault : null,
+        profile: process.env.EVAL_EVIDENCE_PROFILE ?? "default",
+        provider: {
+          id: provider === "real" ? "openai" : "mock",
+          mode: provider,
+        },
+        reportId: `planner-${provider}`,
+        reportType: "planner",
+      });
+  const markdown = formatPlannerReportMarkdown(writtenReport);
   const writtenPaths = {};
 
   if (writeProviderLatest) {
@@ -106,7 +123,7 @@ export const writePlannerEvaluationReport = async ({
 
     await writeFile(
       writtenPaths.providerJsonPath,
-      `${JSON.stringify(report, null, 2)}\n`,
+      `${JSON.stringify(writtenReport, null, 2)}\n`,
       "utf8"
     );
     await writeFile(writtenPaths.providerMarkdownPath, markdown, "utf8");
@@ -118,7 +135,7 @@ export const writePlannerEvaluationReport = async ({
 
     await writeFile(
       writtenPaths.jsonPath,
-      `${JSON.stringify(report, null, 2)}\n`,
+      `${JSON.stringify(writtenReport, null, 2)}\n`,
       "utf8"
     );
     await writeFile(writtenPaths.markdownPath, markdown, "utf8");

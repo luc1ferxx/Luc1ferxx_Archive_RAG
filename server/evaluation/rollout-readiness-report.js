@@ -12,6 +12,10 @@ import {
   getAgentIntentPlanner,
   getAgentPlannerRollout,
 } from "../rag/config.js";
+import {
+  attachEvaluationEvidence,
+  buildSourceReportReference,
+} from "./eval-evidence.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -403,13 +407,34 @@ export const readRolloutReadinessInputs = async ({
 export const buildRolloutReadinessReportFromResults = async ({
   inputDirectory = resultsDirectory,
   ...options
-} = {}) =>
-  buildRolloutReadinessReport({
-    ...(await readRolloutReadinessInputs({
-      inputDirectory,
-    })),
+} = {}) => {
+  const inputs = await readRolloutReadinessInputs({
+    inputDirectory,
+  });
+  const report = buildRolloutReadinessReport({
+    ...inputs,
     ...options,
   });
+  const sourceReports = [
+    inputs.mockPlannerPayload,
+    inputs.realPlannerPayload,
+    inputs.trajectoryPayload,
+    inputs.recoveryPayload,
+    inputs.runtimeSmokePayload,
+  ].map(buildSourceReportReference);
+
+  return attachEvaluationEvidence(report, {
+    command: "npm run rollout:readiness",
+    profile: process.env.EVAL_EVIDENCE_PROFILE ?? "release",
+    provider: {
+      id: "release-readiness",
+      mode: "aggregate",
+    },
+    reportId: "rollout-readiness",
+    reportType: "rollout_readiness",
+    sourceReports,
+  });
+};
 
 const formatPercent = (value) =>
   typeof value === "number" ? `${(value * 100).toFixed(2)}%` : "N/A";

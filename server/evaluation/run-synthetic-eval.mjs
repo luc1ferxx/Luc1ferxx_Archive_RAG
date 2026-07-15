@@ -6,7 +6,15 @@ import path from "path";
 import { fileURLToPath } from "url";
 import chat, { ingestDocument } from "../chat.js";
 import { evaluateAnswerExpectation } from "./answer-match.js";
+import {
+  attachEvaluationEvidence,
+  getCorpusIdentity,
+  getEvaluationSuiteContext,
+  resolveEvaluationProfile,
+  toRepoRelativePath,
+} from "./eval-evidence.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
+import { robustEvalSuite } from "./eval-suite.js";
 import {
   buildRagasSample,
   buildReferenceContextsFromPages,
@@ -42,6 +50,7 @@ import {
   resetOpenAIProvider,
 } from "../rag/openai.js";
 import { buildTermSet } from "../rag/text-utils.js";
+import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -577,6 +586,14 @@ const resolveCorpusPath = () => {
   return path.resolve(process.cwd(), requestedPath);
 };
 
+const findRobustReport = ({ corpusPath, latestName }) =>
+  robustEvalSuite.reports.find(
+    (report) =>
+      report.reportType === "synthetic" &&
+      report.latestName === latestName &&
+      path.resolve(__dirname, "..", report.corpusPath) === corpusPath
+  ) ?? null;
+
 const main = async () => {
   const corpusPath = resolveCorpusPath();
 
@@ -597,6 +614,10 @@ const main = async () => {
   const latestJsonPath = path.join(resultsDirectory, `${latestName}.json`);
   const latestMarkdownPath = path.join(resultsDirectory, `${latestName}.md`);
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  const corpusIdentity = getCorpusIdentity({
+    corpus,
+    corpusPath,
+  });
   const ragDataDirectory = path.join(runDirectory, "rag-data");
   const uploadSessionDirectory = path.join(runDirectory, "upload-sessions");
 
@@ -689,7 +710,7 @@ const main = async () => {
     runId,
     createdAt: new Date().toISOString(),
     corpus: {
-      path: corpusPath,
+      path: toRepoRelativePath(corpusPath),
       documents: corpus.documents.length,
       cases: corpus.cases.length,
       qaCases: qaCases.length,
@@ -765,16 +786,45 @@ const main = async () => {
     },
   };
 
-  const resultPayload = {
+  const baseResultPayload = {
     summary,
-    documents: documentRecords,
-    uploads: uploadResults,
+    documents: documentRecords.map((documentRecord) => ({
+      ...documentRecord,
+      mergedFilePath: toRepoRelativePath(documentRecord.mergedFilePath),
+      sourcePath: toRepoRelativePath(documentRecord.sourcePath),
+    })),
+    uploads: uploadResults.map((uploadResult) => ({
+      ...uploadResult,
+      mergedFilePath: toRepoRelativePath(uploadResult.mergedFilePath),
+      sourcePath: toRepoRelativePath(uploadResult.sourcePath),
+    })),
     cases: caseResults,
   };
+  const robustReport = findRobustReport({
+    corpusPath,
+    latestName,
+  });
+  const resultPayload = await attachEvaluationEvidence(baseResultPayload, {
+    command: "npm run eval:synthetic",
+    corpus: {
+      ...corpusIdentity,
+      path: corpusPath,
+    },
+    modelRouteId:
+      openAIProviderMode === "real" ? MODEL_ROUTE_IDS.chatDefault : null,
+    profile: resolveEvaluationProfile(robustReport ? "robust" : "default"),
+    provider: {
+      id: openAIProviderMode === "real" ? "openai" : "deterministic",
+      mode: openAIProviderMode,
+    },
+    reportId: robustReport?.id ?? `synthetic-${latestName}`,
+    reportType: "synthetic",
+    suite: getEvaluationSuiteContext(),
+  });
   const markdownReport = buildMarkdownReport({
     runId,
     summary,
-    corpusPath,
+    corpusPath: summary.corpus.path,
     uploadResults,
     caseResults,
   });

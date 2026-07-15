@@ -155,6 +155,34 @@ const pureLlmPlannerRuntime = {
   effectiveIntentPlanner: "llm",
 };
 
+const SOURCE_COMMIT = "a".repeat(40);
+
+const withLineage = (
+  payload,
+  { providerMode, reportId, reportType, runId }
+) => ({
+  ...payload,
+  evidence: {
+    schemaVersion: "1.0.0",
+    reportType,
+    reportId,
+    runId,
+    generatedAt: "2026-06-19T00:09:00.000Z",
+    git: {
+      commitSha: SOURCE_COMMIT,
+      dirty: false,
+    },
+    configHash: `${reportId}-config`,
+    corpus: {
+      id: "unknown",
+    },
+    provider: {
+      id: providerMode,
+      mode: providerMode,
+    },
+  },
+});
+
 test("rollout readiness report marks all required signals ready", () => {
   const report = buildRolloutReadinessReport({
     createdAt: "2026-06-19T00:10:00.000Z",
@@ -302,27 +330,72 @@ test("rollout readiness report reads and writes latest result files", async () =
 
   await writeFile(
     path.join(outputDirectory, "latest-planner-mock.json"),
-    `${JSON.stringify(buildPlannerPayload({ provider: "mock" }), null, 2)}\n`,
+    `${JSON.stringify(
+      withLineage(buildPlannerPayload({ provider: "mock" }), {
+        providerMode: "mock",
+        reportId: "planner-mock",
+        reportType: "planner",
+        runId: "planner-mock",
+      }),
+      null,
+      2
+    )}\n`,
     "utf8"
   );
   await writeFile(
     path.join(outputDirectory, "latest-planner-real.json"),
-    `${JSON.stringify(buildPlannerPayload({ provider: "real" }), null, 2)}\n`,
+    `${JSON.stringify(
+      withLineage(buildPlannerPayload({ provider: "real" }), {
+        providerMode: "real",
+        reportId: "planner-real",
+        reportType: "planner",
+        runId: "planner-real",
+      }),
+      null,
+      2
+    )}\n`,
     "utf8"
   );
   await writeFile(
     path.join(outputDirectory, "latest-trajectory.json"),
-    `${JSON.stringify(buildTrajectoryPayload(), null, 2)}\n`,
+    `${JSON.stringify(
+      withLineage(buildTrajectoryPayload(), {
+        providerMode: "deterministic",
+        reportId: "trajectory",
+        reportType: "trajectory",
+        runId: "trajectory-latest",
+      }),
+      null,
+      2
+    )}\n`,
     "utf8"
   );
   await writeFile(
     path.join(outputDirectory, "latest-recovery-observability.json"),
-    `${JSON.stringify(buildRecoveryObservabilityEvaluationReport(), null, 2)}\n`,
+    `${JSON.stringify(
+      withLineage(buildRecoveryObservabilityEvaluationReport(), {
+        providerMode: "deterministic",
+        reportId: "recovery-observability",
+        reportType: "recovery_observability",
+        runId: "recovery-latest",
+      }),
+      null,
+      2
+    )}\n`,
     "utf8"
   );
   await writeFile(
     path.join(outputDirectory, "latest-runtime-smoke.json"),
-    `${JSON.stringify(buildRuntimeSmokePayload(), null, 2)}\n`,
+    `${JSON.stringify(
+      withLineage(buildRuntimeSmokePayload(), {
+        providerMode: "real",
+        reportId: "runtime-smoke",
+        reportType: "runtime_smoke",
+        runId: "runtime-smoke-latest",
+      }),
+      null,
+      2
+    )}\n`,
     "utf8"
   );
 
@@ -337,6 +410,22 @@ test("rollout readiness report reads and writes latest result files", async () =
   });
 
   assert.equal(report.summary.status, "ready");
+  assert.deepEqual(
+    report.evidence.sourceReports.map((sourceReport) => sourceReport.reportId),
+    [
+      "planner-mock",
+      "planner-real",
+      "trajectory",
+      "recovery-observability",
+      "runtime-smoke",
+    ]
+  );
+  assert.equal(
+    report.evidence.sourceReports.every(
+      (sourceReport) => sourceReport.commitSha === SOURCE_COMMIT
+    ),
+    true
+  );
   assert.equal(path.basename(paths.jsonPath), "latest-rollout-readiness.json");
   assert.equal(path.basename(paths.markdownPath), "latest-rollout-readiness.md");
 
@@ -344,6 +433,8 @@ test("rollout readiness report reads and writes latest result files", async () =
   const writtenMarkdown = await readFile(paths.markdownPath, "utf8");
 
   assert.equal(writtenJson.summary.runId, "readiness-from-files");
+  assert.equal(writtenJson.evidence.reportType, "rollout_readiness");
+  assert.equal(writtenJson.evidence.sourceReports.length, 5);
   assert.match(writtenMarkdown, /Real planner fallback rate/);
   assert.match(writtenMarkdown, /Runtime smoke/);
 });

@@ -113,6 +113,7 @@ server/evaluation/results/<timestamped-files>
 - `/chat` response shape 会被前端 trace UI、feedback metadata 和 evaluation 使用，改字段时需要同步测试。
 - Working memory 是 run-scoped，不应写入长期记忆，除非用户明确要求。
 - `VECTOR_STORE_PROVIDER=local` 适合小规模本地工作区；大规模语料建议切到 Qdrant。
+- 评测报告的 `evidence` 必须通过 `server/evaluation/eval-evidence.js` 统一生成；不要手写 commit、dirty、corpus hash、config hash 或 source lineage，也不要回填旧 `latest.*`。
 - 不要提交 `server/.env`、私有 PDF、`server/data/`、上传会话文件、生成语料或 timestamped eval 结果。
 
 ## Backend test entry
@@ -130,3 +131,5 @@ npm run eval:recovery-observability
 npm run rollout:readiness
 npm run quality:gate
 ```
+
+`quality:gate` 是默认轻量开发/PR gate。完整发布批次必须在同一 target SHA 上重新生成 compare-hard、Hard-CS、arXiv、trajectory、planner-real、recovery observability、runtime smoke 和 rollout readiness 8 份报告，再运行 `npm run release:gate`；已有、过期或缺少 lineage 的 `latest.*` 不能代替当前 commit 的发布证据。

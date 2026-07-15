@@ -56,6 +56,15 @@ STARTUP_HEALTH_STRICT=false
 
 arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要能访问 `https://export.arxiv.org/api/query` 和对应 PDF URL。
 
+## Evaluation evidence 配置
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `EVAL_TARGET_COMMIT_SHA` | 当前 `HEAD` | CI 可显式绑定评测 target SHA；若设置值与 checkout 的 `HEAD` 不一致，runner 会失败而不是生成错误 lineage。 |
+| `EVAL_EVIDENCE_PROFILE` | 各 runner 的默认 profile | 写入公开 `evidence.profile`；完整发布 workflow 固定为 `release`。 |
+
+`eval:robust-suite` 会在同一次运行内自行传递 suite ID、run ID 和 config hash，不需要手工设置 suite 环境变量。严格发布 freshness 默认是 `24` 小时，可用 `npm run release:gate -- --max-age-hours <hours>` 临时覆盖；target commit 也可通过 `--target-commit <sha>` 显式指定。完整 CLI 和 lineage 合同见 [evaluation.md](evaluation.md#release-evidence-gate)。
+
 ## Model/provider registry
 
 `server/rag/model-providers/` 是 provider/model registry 和 runtime route resolver。`server/rag/openai.js` 通过它选择 chat/embedding model name；LLM intent/execution planner 会把公开 `modelRoute` 写入 observability；LLMOps metrics 也复用同一份公开 `modelRoute` 作为 completion/embedding/rerank 的聚合维度；cross-encoder rerank 在 `RAG_CROSS_ENCODER_MODEL` 未显式配置时，可以从 registry route 读取 model name。

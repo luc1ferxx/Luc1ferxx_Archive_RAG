@@ -262,6 +262,9 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
 | `cd server && npm run eval:param-sweep` | 跑 topK、overlap、rerank、hybrid 参数扫描；`-- --profile full` 扩大矩阵。 |
 | `cd server && npm run quality:gate` | 组合 feedback、trajectory、planner、recovery 等报告并执行质量门控；`-- --require-robust-suite` 会强制检查 hard/real suite。 |
+| `cd server && npm run release:gate` | 严格检查当前 commit 的 8 份发布证据，包括 freshness、clean worktree、corpus/provider 和 source lineage。 |
+
+`quality:gate` 继续作为轻量 PR gate，并兼容没有 lineage metadata 的旧报告；`release:gate` 才是发布入口。后者不会把仓库中已有的旧 `latest.*` 当成当前版本证据：报告缺少统一 `evidence`、来自其他 commit、由 dirty worktree 生成、已过期，或 corpus/provider/source lineage 不一致时都会失败。
 
 ## 评测优化结果
 

@@ -34,6 +34,7 @@
 - Feedback regression eval: `cd server && npm run eval:feedback`; this writes ignored `evaluation/generated/feedback-corpus.json` and `evaluation/results/latest-feedback.*`.
 - Trajectory eval: `cd server && npm run eval:trajectory`; this writes ignored `evaluation/results/latest-trajectory.*` and checks skill selection, follow-up, clarification, access scope, and budget behavior.
 - Quality gate: `cd server && npm run quality:gate`; it reads `evaluation/results/latest-feedback.json`, `evaluation/results/latest-trajectory.json`, and `evaluation/results/latest-planner.json` when present and reports feedback failures by `skillId@skillVersion` plus trajectory/planner failed case checks.
+- Strict release evidence gate: `cd server && npm run release:gate`; it requires the complete robust/planner/recovery/runtime/readiness report set to carry current-commit, clean-worktree, fresh, corpus/provider-consistent lineage. Use `-- --no-fail` only for diagnostics; it does not change a failing report to pass.
 - Real-corpus eval expects a local corpus file created from `evaluation/real-corpus.example.json` or passed explicitly: `cd server && npm run eval:real -- evaluation/real-corpus.json`.
 - Ragas eval runs against saved Node eval payloads: `cd server && npm run eval:ragas -- --input evaluation/results/latest.json`. It requires optional dependencies plus `OPENAI_API_KEY`; see `server/evaluation/ragas-requirements.txt`.
 

@@ -4,6 +4,7 @@ import pdfParse from "pdf-parse";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { toRepoRelativePath } from "./eval-evidence.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -309,7 +310,7 @@ const buildCorpus = async ({
     downloadRecords.push({
       key: documentSpec.key,
       arxivId: documentSpec.arxivId,
-      pdfPath,
+      pdfPath: toRepoRelativePath(pdfPath),
       cached: cached && !forceDownload,
       downloadedBytes,
       pageCount: extracted.pageCount,
@@ -325,7 +326,7 @@ const buildCorpus = async ({
       source: "arxiv",
       manifestName: manifest.name ?? null,
       manifestVersion: manifest.version ?? null,
-      casesSource: casesSource ?? null,
+      casesSource: casesSource ? toRepoRelativePath(casesSource) : null,
       maxPages: maxPages ?? null,
     },
     documents,

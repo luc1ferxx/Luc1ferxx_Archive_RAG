@@ -16,10 +16,19 @@ import { resetDocumentRegistry } from "../rag/doc-registry.js";
 import { configureOpenAIProvider, embedQuery, resetOpenAIProvider } from "../rag/openai.js";
 import { rerankResultsWithProvider } from "../rag/reranker.js";
 import { resetSessionMemory } from "../rag/memory.js";
+import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
 import { buildTermSet } from "../rag/text-utils.js";
 import { resetVectorStore, searchDocuments } from "../rag/vector-store.js";
+import {
+  attachEvaluationEvidence,
+  getCorpusIdentity,
+  getEvaluationSuiteContext,
+  resolveEvaluationProfile,
+  toRepoRelativePath,
+} from "./eval-evidence.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
+import { robustEvalSuite } from "./eval-suite.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -161,6 +170,14 @@ const resolveCorpusPath = (requestedPath) =>
 const writeJson = async (filePath, value) => {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 };
+
+const findRobustReport = ({ corpusPath, latestName }) =>
+  robustEvalSuite.reports.find(
+    (report) =>
+      report.reportType === "rerank" &&
+      report.latestName === latestName &&
+      path.resolve(__dirname, "..", report.corpusPath) === corpusPath
+  ) ?? null;
 
 const buildExpectedUnits = (expectedEvidence = []) => {
   const units = [];
@@ -754,6 +771,10 @@ export const runRerankEvaluation = async ({
   const runJsonPath = path.join(resultsDirectory, `${runId}-rerank.json`);
   const runMarkdownPath = path.join(resultsDirectory, `${runId}-rerank.md`);
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  const corpusIdentity = getCorpusIdentity({
+    corpus,
+    corpusPath,
+  });
 
   await mkdir(resultsDirectory, { recursive: true });
   await mkdir(runDirectory, { recursive: true });
@@ -835,7 +856,7 @@ export const runRerankEvaluation = async ({
       runId,
       createdAt: new Date().toISOString(),
       corpus: {
-        path: corpusPath,
+        path: toRepoRelativePath(corpusPath),
         documents: corpus.documents?.length ?? 0,
         cases: corpus.cases?.length ?? 0,
       },
@@ -851,14 +872,37 @@ export const runRerankEvaluation = async ({
       },
       metrics: buildSummaryMetrics(caseResults),
     };
-    const report = {
+    const baseReport = {
       summary,
       skippedCases,
       cases: caseResults,
     };
+    const robustReport = findRobustReport({
+      corpusPath,
+      latestName,
+    });
+    const report = await attachEvaluationEvidence(baseReport, {
+      command: "npm run eval:rerank",
+      corpus: {
+        ...corpusIdentity,
+        path: corpusPath,
+      },
+      modelRouteId:
+        getRerankProvider() === "cross-encoder"
+          ? MODEL_ROUTE_IDS.rerankCrossEncoderDefault
+          : null,
+      profile: resolveEvaluationProfile(robustReport ? "robust" : "default"),
+      provider: {
+        id: "rerank",
+        mode: getRerankProvider(),
+      },
+      reportId: robustReport?.id ?? `rerank-${latestName}`,
+      reportType: "rerank",
+      suite: getEvaluationSuiteContext(),
+    });
     const markdownReport = buildMarkdownReport({
       runId,
-      corpusPath,
+      corpusPath: summary.corpus.path,
       summary,
       caseResults,
     });

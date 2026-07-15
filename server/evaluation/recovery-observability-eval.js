@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { attachEvaluationEvidence } from "./eval-evidence.js";
 import {
   appendCaseCheckTable,
   appendCategoryMetricsTable,
@@ -934,11 +935,23 @@ export const writeRecoveryObservabilityEvaluationReport = async ({
 
   const jsonPath = path.join(outputDirectory, LATEST_RECOVERY_OBSERVABILITY_JSON);
   const markdownPath = path.join(outputDirectory, LATEST_RECOVERY_OBSERVABILITY_MD);
+  const writtenReport = report?.evidence
+    ? report
+    : await attachEvaluationEvidence(report, {
+        command: "npm run eval:recovery-observability",
+        profile: process.env.EVAL_EVIDENCE_PROFILE ?? "default",
+        provider: {
+          id: "agent-observability",
+          mode: "deterministic",
+        },
+        reportId: "recovery-observability",
+        reportType: "recovery_observability",
+      });
 
-  await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  await writeFile(jsonPath, `${JSON.stringify(writtenReport, null, 2)}\n`, "utf8");
   await writeFile(
     markdownPath,
-    formatRecoveryObservabilityReportMarkdown(report),
+    formatRecoveryObservabilityReportMarkdown(writtenReport),
     "utf8"
   );
 
