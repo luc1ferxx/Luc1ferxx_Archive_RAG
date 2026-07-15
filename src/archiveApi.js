@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost } from "./apiClient";
+import { apiDelete, apiDownload, apiGet, apiPost } from "./apiClient";
 
 export const fetchDocuments = async () => {
   return apiGet("/documents");
@@ -11,6 +11,41 @@ export const requestDocumentDelete = async (docId) => {
 export const requestDocumentClear = async () => {
   return apiPost("/documents/clear");
 };
+
+export const fetchWorkspaceArtifacts = async ({
+  artifactType,
+  limit,
+  offset,
+  status = "active",
+} = {}) => {
+  const params = new URLSearchParams();
+
+  if (artifactType) {
+    params.set("artifactType", artifactType);
+  }
+  if (limit !== undefined) {
+    params.set("limit", String(limit));
+  }
+  if (offset !== undefined) {
+    params.set("offset", String(offset));
+  }
+  if (status) {
+    params.set("status", status);
+  }
+
+  const query = params.toString();
+
+  return apiGet(`/artifacts${query ? `?${query}` : ""}`);
+};
+
+export const fetchWorkspaceArtifact = async (artifactId) =>
+  apiGet(`/artifacts/${encodeURIComponent(artifactId)}`);
+
+export const downloadWorkspaceArtifact = async (artifactId) =>
+  apiDownload(`/artifacts/${encodeURIComponent(artifactId)}/download`);
+
+export const requestWorkspaceArtifactArchive = async (artifactId) =>
+  apiPost(`/artifacts/${encodeURIComponent(artifactId)}/archive`, {});
 
 export const fetchTasks = async (type) => {
   const query = type ? `?type=${encodeURIComponent(type)}` : "";

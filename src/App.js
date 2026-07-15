@@ -16,6 +16,7 @@ import PdfPreview from "./components/PdfPreview";
 import PdfUploader from "./components/PdfUploader";
 import WorkspaceSidebar from "./components/WorkspaceSidebar";
 import WorkspaceEntryPanel from "./components/WorkspaceEntryPanel";
+import WorkspaceArtifactsPanel from "./components/WorkspaceArtifactsPanel";
 import LocaleSwitch from "./components/LocaleSwitch";
 import {
   fetchLatestQualityReport,
@@ -1163,6 +1164,7 @@ const App = () => {
       <div className="archive-shell archive-home-shell">
         <WorkspaceEntryPanel
           activeSection={activeHomeSection}
+          artifactSlot={<WorkspaceArtifactsPanel locale={locale} t={t} />}
           documentCount={activeDocuments.length}
           documents={activeDocuments}
           onNavigate={handleHomeNavigate}
