@@ -23,6 +23,11 @@ import {
 import {
   buildAgentTaskPlanningContext,
 } from "../rag/agent-task-memory.js";
+import { buildAgentGoalCompletion } from "../rag/agent-goal-completion.js";
+import {
+  buildAgentGoalDeliverableSpecs,
+  executeAgentGoalDeliverables,
+} from "../rag/agent-goal-deliverables.js";
 import {
   RESEARCH_DOSSIER_WORKFLOW_ID,
 } from "../rag/agent-workflows/built-ins/research-dossier.js";
@@ -427,6 +432,17 @@ const createDeliverableCapabilityRegistry = () => {
 
       if (capabilityId === CAPABILITY_IDS.documentOrganize) {
         return {
+          artifact: {
+            artifactId: "artifact-organization",
+            artifactType: "document_collection",
+            fileName: "risk-report-organization.json",
+            format: "json",
+            mimeType: "application/json",
+            sourceRunId: "run-risk",
+            sourceTaskId: "agent_goal:risk-report",
+            status: "active",
+            title: payload.input.title,
+          },
           organization: {
             documentCount: payload.input.docIds.length,
             groups: [
@@ -445,18 +461,40 @@ const createDeliverableCapabilityRegistry = () => {
 
       if (capabilityId === CAPABILITY_IDS.reportExport) {
         return {
+          artifact: {
+            artifactId: "artifact-report",
+            artifactType: "report",
+            fileName: "risk-report.md",
+            format: "markdown",
+            mimeType: "text/markdown",
+            sourceRunId: "run-risk",
+            sourceTaskId: "agent_goal:risk-report",
+            status: "active",
+            title: payload.input.title,
+          },
           report: {
             fileName: "risk-report.md",
             format: "markdown",
             mimeType: "text/markdown",
           },
-          stored: false,
+          stored: true,
           text: "Prepared report export risk-report.md.",
         };
       }
 
       if (capabilityId === CAPABILITY_IDS.summaryCreate) {
         return {
+          artifact: {
+            artifactId: "artifact-summary",
+            artifactType: "summary",
+            fileName: "risk-report-summary.md",
+            format: "markdown",
+            mimeType: "text/markdown",
+            sourceRunId: "run-risk",
+            sourceTaskId: "agent_goal:risk-report",
+            status: "active",
+            title: payload.input.title,
+          },
           summary: {
             docIds: payload.input.docIds,
             title: payload.input.title,
@@ -556,7 +594,7 @@ test("agent task service creates queued durable goal tasks without leaking inter
   });
 });
 
-test("agent task creates approved goal deliverables through existing capabilities", async () => {
+test("agent task creates approved goal deliverables without promoting artifacts to answer evidence", async () => {
   const capabilityRegistry = createDeliverableCapabilityRegistry();
   const taskService = createTaskService({
     taskStore: createInMemoryTaskStore(),
@@ -686,6 +724,19 @@ test("agent task creates approved goal deliverables through existing capabilitie
         call.payload.approval.source === "test"
     )
   );
+  assert.ok(
+    capabilityRegistry.calls
+      .filter((call) => call.capabilityId !== CAPABILITY_IDS.taskCreate)
+      .every(
+        (call) =>
+          call.payload.services.artifactExecution.sourceTaskId ===
+            "agent_goal:risk-report" &&
+          call.payload.services.artifactExecution.sourceRunId === "run-risk" &&
+          call.payload.services.artifactExecution.idempotencyKey.startsWith(
+            "goal-deliverable:agent_goal:risk-report:"
+          )
+      )
+  );
   assert.equal(task.payload.deliverables.status, "completed");
   assert.equal(task.result.goalPlan.status, TASK_STATUSES.completed);
   assert.equal(task.result.goalCompletion.status, "completed");
@@ -701,8 +752,306 @@ test("agent task creates approved goal deliverables through existing capabilitie
     )?.output.fileName,
     "risk-report.md"
   );
+  assert.deepEqual(
+    task.result.goalPlan.deliverables.items
+      .filter((item) => item.output.artifactId)
+      .map((item) => [
+        item.output.artifactId,
+        item.output.artifactType,
+        item.output.status,
+      ]),
+    [
+      ["artifact-organization", "document_collection", "active"],
+      ["artifact-report", "report", "active"],
+      ["artifact-summary", "summary", "active"],
+    ]
+  );
+  assert.equal("ragSources" in task.result, false);
+  assert.equal("claimSupport" in task.result, false);
+  assert.ok(
+    task.result.goalPlan.deliverables.items
+      .filter((item) => item.output.artifactId)
+      .every(
+        (item) =>
+          !("ragSources" in item.output) &&
+          !("claimSupport" in item.output) &&
+          !("evidence" in item.output) &&
+          !("content" in item.output) &&
+          !("citationManifest" in item.output)
+      )
+  );
   assert.equal(task.items.at(-1).id, "deliverable");
   assert.equal(task.items.at(-1).status, TASK_STATUSES.completed);
+});
+
+test("artifact storage failure keeps an approved agent task and goal completion failed", async () => {
+  const capabilityRegistry = createDeliverableCapabilityRegistry();
+  const executeCapability = capabilityRegistry.execute;
+
+  capabilityRegistry.execute = async (capabilityId, payload) => {
+    if (capabilityId === CAPABILITY_IDS.reportExport) {
+      throw new Error("Workspace artifact storage is unavailable.");
+    }
+
+    return executeCapability(capabilityId, payload);
+  };
+
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const runner = createAgentTaskRunner({
+    capabilityRegistry,
+    runAgentTask: async () => ({
+      body: {
+        agentAnswer: "Risk report answer backed by the selected documents.",
+        agentMode: "document",
+        agentRunId: "run-storage-failure",
+        ragSources: [
+          {
+            docId: "doc-1",
+            title: "Paper A",
+          },
+        ],
+      },
+      status: 200,
+    }),
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: {
+      [AGENT_TASK_RUNNER_ID]: runner,
+    },
+    taskService,
+  });
+  const agentTaskService = createAgentTaskService({
+    createTaskId: () => "storage-failure",
+    jobOrchestrator: null,
+    taskService,
+  });
+
+  await agentTaskService.createTask({
+    accessScope,
+    docIds: ["doc-1"],
+    maxIterations: 1,
+    question: "生成风险报告",
+    sessionId: "session-storage-failure",
+    userId: "alice",
+  });
+  await orchestrator.runTask({
+    accessScope,
+    taskId: "agent_goal:storage-failure",
+  });
+  await orchestrator.resumeTask({
+    accessScope,
+    action: AGENT_TASK_ACTIONS.approveDeliverables,
+    payload: {
+      approval: {
+        approved: true,
+        decision: "approved",
+        source: "test",
+      },
+    },
+    runImmediately: false,
+    taskId: "agent_goal:storage-failure",
+  });
+  await orchestrator.runTask({
+    accessScope,
+    taskId: "agent_goal:storage-failure",
+  });
+
+  const task = await taskService.getInternalTask({
+    accessScope,
+    taskId: "agent_goal:storage-failure",
+  });
+  const reportDeliverable = task.result.goalPlan.deliverables.items.find(
+    (item) => item.capabilityId === CAPABILITY_IDS.reportExport
+  );
+
+  assert.equal(task.status, TASK_STATUSES.failed);
+  assert.equal(task.payload.deliverables.status, "failed");
+  assert.equal(reportDeliverable.status, "failed");
+  assert.equal(reportDeliverable.output.artifactId, undefined);
+  assert.equal(task.result.goalCompletion.status, "failed");
+  assert.equal(
+    task.result.goalCompletion.checks.find(
+      (check) => check.id === "deliverables_created"
+    )?.passed,
+    false
+  );
+  assert.equal(task.items.at(-1).status, TASK_STATUSES.failed);
+});
+
+test("goal completion rejects completed deliverables with invalid artifact references", () => {
+  const completion = buildAgentGoalCompletion({
+    items: [
+      {
+        id: "goal",
+        status: TASK_STATUSES.completed,
+      },
+    ],
+    payload: {
+      deliverables: {
+        approvalGates: [],
+        results: [
+          {
+            artifactType: "markdown_report",
+            capabilityId: CAPABILITY_IDS.reportExport,
+            id: "markdown_report:report.export",
+            output: {
+              artifactId: "not-a-stored-artifact",
+              artifactType: "report",
+              fileName: "report.md",
+              status: "failed",
+              stored: true,
+            },
+            status: "completed",
+            title: "Report",
+          },
+        ],
+        specs: [
+          {
+            artifactType: "markdown_report",
+            capabilityId: CAPABILITY_IDS.reportExport,
+            id: "markdown_report:report.export",
+            status: "completed",
+            title: "Report",
+          },
+        ],
+        status: "completed",
+      },
+      iterations: [],
+    },
+    stoppedReason: "completed",
+    taskStatus: TASK_STATUSES.completed,
+  });
+  const deliverableCheck = completion.checks.find(
+    (check) => check.id === "deliverables_created"
+  );
+
+  assert.equal(completion.status, "blocked");
+  assert.equal(deliverableCheck.passed, false);
+  assert.deepEqual(deliverableCheck.detail, {
+    artifactCompleted: 0,
+    artifactPlanned: 1,
+    completed: 1,
+    failed: 0,
+    missingArtifactCapabilityIds: [CAPABILITY_IDS.reportExport],
+    planned: 1,
+    status: "completed",
+  });
+});
+
+test("goal deliverable execution fails when capability compatibility output lacks an artifact", async () => {
+  const deliverables = await executeAgentGoalDeliverables({
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    capabilityRegistry: {
+      execute: async () => ({
+        fileName: "report.md",
+        stored: true,
+        text: "Report exported.",
+      }),
+    },
+    deliverables: {
+      specs: [
+        {
+          artifactExecution: {
+            artifactType: "report",
+            idempotencyKey: "goal-deliverable:task-1:report",
+            sourceTaskId: "task-1",
+          },
+          artifactType: "markdown_report",
+          capabilityId: CAPABILITY_IDS.reportExport,
+          id: "markdown_report:report.export",
+          input: {
+            content: "Report body",
+            title: "Report",
+          },
+          label: "Report",
+          status: "approved",
+          title: "Report",
+        },
+      ],
+    },
+  });
+
+  assert.equal(deliverables.status, "failed");
+  assert.equal(deliverables.results[0].status, "failed");
+  assert.match(
+    deliverables.results[0].error,
+    /did not return a stored workspace artifact reference/
+  );
+});
+
+test("goal deliverable execution rejects a stored artifact reference of the wrong type", async () => {
+  const deliverables = await executeAgentGoalDeliverables({
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    capabilityRegistry: {
+      execute: async () => ({
+        artifact: {
+          artifactId: "artifact-wrong-type",
+          artifactType: "summary",
+          status: "active",
+          title: "Wrong type",
+        },
+        stored: true,
+        text: "Report exported.",
+      }),
+    },
+    deliverables: {
+      specs: [
+        {
+          artifactExecution: {
+            artifactType: "report",
+            idempotencyKey: "goal-deliverable:task-1:report",
+            sourceTaskId: "task-1",
+          },
+          artifactType: "markdown_report",
+          capabilityId: CAPABILITY_IDS.reportExport,
+          id: "markdown_report:report.export",
+          input: {
+            content: "Report body",
+            title: "Report",
+          },
+          label: "Report",
+          status: "approved",
+          title: "Report",
+        },
+      ],
+    },
+  });
+
+  assert.equal(deliverables.status, "failed");
+  assert.equal(deliverables.results[0].status, "failed");
+  assert.match(
+    deliverables.results[0].error,
+    /did not return a stored workspace artifact reference/
+  );
+});
+
+test("long task ids produce bounded distinct artifact idempotency keys", () => {
+  const specs = buildAgentGoalDeliverableSpecs({
+    body: {
+      agentAnswer: "Risk report answer.",
+      agentRunId: "run-long-task",
+    },
+    payload: {
+      docIds: ["doc-1"],
+      question: "整理文档并生成风险报告",
+    },
+    sourceTaskId: `agent_goal:${"task-segment-".repeat(30)}`,
+  });
+  const keys = specs
+    .map((spec) => spec.artifactExecution?.idempotencyKey)
+    .filter(Boolean);
+
+  assert.equal(keys.length, 3);
+  assert.equal(new Set(keys).size, 3);
+  assert.ok(keys.every((key) => key.length <= 180));
 });
 
 test("agent task runs a staged research dossier flow before report delivery", async () => {

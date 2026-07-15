@@ -305,6 +305,96 @@ describe("App", () => {
     expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
   });
 
+  test("opens generated artifacts in the Drive without treating them as documents", async () => {
+    axios.get.mockImplementation((url) => {
+      if (url.endsWith("/agent-runs/recovery")) {
+        return Promise.resolve({ data: { runs: [] } });
+      }
+
+      if (url.endsWith("/tasks")) {
+        return Promise.resolve({ data: { tasks: [] } });
+      }
+
+      if (url.endsWith("/artifacts?limit=50&offset=0&status=active")) {
+        return Promise.resolve({
+          data: {
+            artifacts: [
+              {
+                artifactId: "artifact-1",
+                artifactType: "report",
+                citationCount: 1,
+                createdAt: "2026-07-15T08:30:00.000Z",
+                docCount: 1,
+                fileName: "workspace-risk-report.md",
+                format: "markdown",
+                mimeType: "text/markdown",
+                sourceRunId: "run-1",
+                sourceTaskId: "task-1",
+                status: "active",
+                title: "Workspace risk report",
+                updatedAt: "2026-07-15T08:30:00.000Z",
+              },
+            ],
+            limit: 50,
+            offset: 0,
+            total: 1,
+          },
+        });
+      }
+
+      if (url.endsWith("/artifacts/artifact-1")) {
+        return Promise.resolve({
+          data: {
+            artifact: {
+              artifactId: "artifact-1",
+              artifactType: "report",
+              citationCount: 1,
+              citationManifest: [{ docId: "doc-1", title: "Policy" }],
+              content: "Stored risk result",
+              createdAt: "2026-07-15T08:30:00.000Z",
+              docCount: 1,
+              docIds: ["doc-1"],
+              fileName: "workspace-risk-report.md",
+              format: "markdown",
+              mimeType: "text/markdown",
+              payload: {},
+              sourceRunId: "run-1",
+              sourceTaskId: "task-1",
+              status: "active",
+              title: "Workspace risk report",
+              updatedAt: "2026-07-15T08:30:00.000Z",
+              version: "1.0.0",
+            },
+          },
+        });
+      }
+
+      return Promise.resolve({
+        data: [
+          {
+            docId: "doc-1",
+            fileName: "benefits-2025.pdf",
+            pageCount: 3,
+          },
+        ],
+      });
+    });
+    render(<App />);
+
+    const homeNavigation = await screen.findByRole("navigation", {
+      name: "Home navigation",
+    });
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "Drive" }));
+
+    expect(
+      await screen.findByRole("region", { name: "Workspace artifacts" })
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Workspace risk report")).toBeInTheDocument();
+    expect(await screen.findByText("Stored risk result")).toBeInTheDocument();
+    expect(screen.getByText("Not an evidence source")).toBeInTheDocument();
+    expect(screen.getByText("benefits-2025.pdf")).toBeInTheDocument();
+  });
+
   test("prepares a document comparison on the launch page without opening the workspace", async () => {
     render(<App />);
 

@@ -13,6 +13,9 @@ import {
   getAgentExperienceMemoryConfigStatus,
   getLlmOpsPolicy,
   getLongMemoryConfigStatus,
+  getWorkspaceArtifactStoreConfigStatus,
+  getWorkspaceArtifactStoreProvider,
+  getWorkspaceArtifactsPostgresTable,
   isAgentExperienceMemoryEnabled,
   isLongMemoryEnabled,
 } from "../rag/config.js";
@@ -170,6 +173,62 @@ test("explicit agent run recovery mode overrides the storage-derived default", a
       assert.equal(getAgentRunRecoveryMode(), "manual");
       assert.equal(getAgentRunRecoveryModeConfigStatus().explicit, true);
       assert.equal(getAgentRunRecoveryModeConfigStatus().reason, "env_configured");
+    }
+  );
+});
+
+test("workspace artifact storage follows explicit and PostgreSQL-derived providers", async () => {
+  await withEnv(
+    {
+      POSTGRES_DATABASE_URL: undefined,
+      WORKSPACE_ARTIFACT_STORE_PROVIDER: undefined,
+      WORKSPACE_ARTIFACTS_POSTGRES_TABLE: undefined,
+    },
+    async () => {
+      assert.equal(getWorkspaceArtifactStoreProvider(), "auto");
+      assert.deepEqual(getWorkspaceArtifactStoreConfigStatus(), {
+        backend: "memory",
+        persistent: false,
+        postgresConfigured: false,
+        provider: "auto",
+        reason: "postgres_not_configured",
+      });
+      assert.equal(
+        getWorkspaceArtifactsPostgresTable(),
+        "rag_workspace_artifacts"
+      );
+    }
+  );
+
+  await withEnv(
+    {
+      POSTGRES_DATABASE_URL: "postgres://user:pass@localhost:5432/rag",
+      WORKSPACE_ARTIFACT_STORE_PROVIDER: undefined,
+      WORKSPACE_ARTIFACTS_POSTGRES_TABLE: "rag_workspace_artifacts_custom",
+    },
+    async () => {
+      assert.equal(getWorkspaceArtifactStoreConfigStatus().backend, "postgres");
+      assert.equal(getWorkspaceArtifactStoreConfigStatus().persistent, true);
+      assert.equal(
+        getWorkspaceArtifactStoreConfigStatus().reason,
+        "postgres_configured_default"
+      );
+      assert.equal(
+        getWorkspaceArtifactsPostgresTable(),
+        "rag_workspace_artifacts_custom"
+      );
+    }
+  );
+
+  await withEnv(
+    {
+      POSTGRES_DATABASE_URL: "postgres://user:pass@localhost:5432/rag",
+      WORKSPACE_ARTIFACT_STORE_PROVIDER: "memory",
+    },
+    async () => {
+      assert.equal(getWorkspaceArtifactStoreConfigStatus().backend, "memory");
+      assert.equal(getWorkspaceArtifactStoreConfigStatus().persistent, false);
+      assert.equal(getWorkspaceArtifactStoreConfigStatus().reason, "env_memory");
     }
   );
 });

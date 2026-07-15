@@ -51,11 +51,13 @@ export const createBuiltInCapabilities = ({
   reportExportService,
   taskService,
   webChatService,
+  workspaceArtifactService: providedWorkspaceArtifactService,
 } = {}) => {
   const actionTaskService =
     providedActionTaskService ?? createActionTaskService({
       taskService,
     });
+  const workspaceArtifactService = providedWorkspaceArtifactService;
 
   return [
     ...createConnectorCapabilities({
@@ -79,6 +81,7 @@ export const createBuiltInCapabilities = ({
       createCitationVerifyCapability(),
       createReportExportCapability({
         reportExportService,
+        workspaceArtifactService,
       }),
       createRecommendationImportSelectedCapability({
         arxivEnrichmentService,
@@ -93,9 +96,11 @@ export const createBuiltInCapabilities = ({
       createDocumentOrganizeCapability({
         actionTaskService,
         ragService,
+        workspaceArtifactService,
       }),
       createSummaryCreateCapability({
         actionTaskService,
+        workspaceArtifactService,
       }),
       createExternalImportCapability({
         actionTaskService,

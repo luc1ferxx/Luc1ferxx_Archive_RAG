@@ -3,7 +3,15 @@ import {
   compactAgentGoalDeliverables,
 } from "./agent-goal-deliverables.js";
 import { compactResearchTaskFlow } from "./agent-research-task.js";
+import { CAPABILITY_IDS } from "./capabilities/index.js";
 import { TASK_STATUSES } from "./tasks.js";
+import { ARTIFACT_STATUSES } from "./workspace-artifacts/index.js";
+
+const ARTIFACT_TYPES_BY_CAPABILITY = Object.freeze({
+  [CAPABILITY_IDS.documentOrganize]: "document_collection",
+  [CAPABILITY_IDS.reportExport]: "report",
+  [CAPABILITY_IDS.summaryCreate]: "summary",
+});
 
 export const AGENT_GOAL_COMPLETION_VERSION = "1.0.0";
 
@@ -225,6 +233,22 @@ export const buildAgentGoalCompletion = ({
     payload.deliverables ?? goalPlan.deliverables
   );
   const deliverablesRequested = (deliverables.counts.planned ?? 0) > 0;
+  const artifactDeliverables = toArray(deliverables.items).filter(
+    (item) => ARTIFACT_TYPES_BY_CAPABILITY[item.capabilityId]
+  );
+  const completedArtifactDeliverables = artifactDeliverables.filter(
+    (item) =>
+      item.status === AGENT_GOAL_DELIVERABLE_STATUSES.completed &&
+      Boolean(normalizeText(item.output?.artifactId, 180)) &&
+      normalizeText(item.output?.artifactType, 80) ===
+        ARTIFACT_TYPES_BY_CAPABILITY[item.capabilityId] &&
+      Object.values(ARTIFACT_STATUSES).includes(
+        normalizeText(item.output?.status, 80)
+      )
+  );
+  const missingArtifactCapabilityIds = artifactDeliverables
+    .filter((item) => !completedArtifactDeliverables.includes(item))
+    .map((item) => normalizeText(item.capabilityId, 120));
   const workingMemory = getWorkingMemoryCounts({
     body,
     payload,
@@ -284,10 +308,14 @@ export const buildAgentGoalCompletion = ({
         !deliverablesRequested ||
         (deliverables.status === AGENT_GOAL_DELIVERABLE_STATUSES.completed &&
           deliverables.counts.completed === deliverables.counts.planned &&
-          deliverables.counts.failed === 0),
+          deliverables.counts.failed === 0 &&
+          missingArtifactCapabilityIds.length === 0),
       detail: {
+        artifactCompleted: completedArtifactDeliverables.length,
+        artifactPlanned: artifactDeliverables.length,
         completed: deliverables.counts.completed ?? 0,
         failed: deliverables.counts.failed ?? 0,
+        missingArtifactCapabilityIds,
         planned: deliverables.counts.planned ?? 0,
         status: deliverables.status,
       },

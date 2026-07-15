@@ -1,5 +1,6 @@
 import { AGENT_RUN_STEP_KINDS, AGENT_RUN_STEP_STATUSES } from "../agent-run-steps.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
+import { buildCapabilityArtifactIdempotencyKey } from "../capabilities/artifacts.js";
 import { runRetriableStep } from "./retriable-step-runner.js";
 import {
   buildAgentTraceFromRunSteps,
@@ -25,6 +26,29 @@ const getCapabilityAgentMode = (capabilityId, fallback = "capability") => {
   }
 
   return fallback;
+};
+
+const getRootStepId = ({ run = {}, step = {} } = {}) => {
+  const stepsById = new Map(
+    (Array.isArray(run.steps) ? run.steps : []).map((entry) => [entry.id, entry])
+  );
+  const seen = new Set([step.id]);
+  let rootStepId = step.id;
+  let currentStep = step;
+
+  while (currentStep?.retryOfStepId) {
+    const parentStepId = currentStep.retryOfStepId;
+
+    if (seen.has(parentStepId)) {
+      break;
+    }
+
+    seen.add(parentStepId);
+    rootStepId = parentStepId;
+    currentStep = stepsById.get(parentStepId);
+  }
+
+  return rootStepId;
 };
 
 export const getCapabilityResultText = (result = {}, gate = {}) =>
@@ -153,6 +177,11 @@ const executeCapabilityBackedStep = async ({
     fail("Agent run step is missing a resumable step id.");
   }
 
+  const rootStepId = getRootStepId({
+    run,
+    step,
+  });
+
   return runRetriableStep({
     accessScope,
     agentMode: getCapabilityAgentMode(capabilityId),
@@ -187,6 +216,14 @@ const executeCapabilityBackedStep = async ({
         accessScope,
         approval,
         input,
+        services: {
+          artifactExecution: {
+            idempotencyKey: buildCapabilityArtifactIdempotencyKey({
+              parts: [run.runId, rootStepId, capabilityId],
+            }),
+            sourceRunId: run.runId,
+          },
+        },
       }),
     failureMessage: "Capability execution failed.",
     getCitations: getCapabilityResultCitations,

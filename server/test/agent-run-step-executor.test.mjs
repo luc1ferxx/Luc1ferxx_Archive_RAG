@@ -14,7 +14,14 @@ import {
   createResearchQuestionStepExecutor,
 } from "../rag/agent-run-step-handlers/index.js";
 import { buildAgentRunStepsFromTrace } from "../rag/agent-run-steps.js";
-import { CAPABILITY_IDS } from "../rag/capabilities/index.js";
+import {
+  CAPABILITY_IDS,
+  createDefaultCapabilityRegistry,
+} from "../rag/capabilities/index.js";
+import {
+  createInMemoryWorkspaceArtifactStore,
+  createWorkspaceArtifactService,
+} from "../rag/workspace-artifacts/index.js";
 
 const accessScope = {
   userId: "alice",
@@ -395,11 +402,13 @@ test("agent run step executor retries an approved capability step", async () => 
     agentRunStore: createInMemoryAgentRunStore(),
   });
   let callCount = 0;
+  const artifactExecutionContexts = [];
   const executor = createAgentRunStepExecutor({
     agentRunService,
     capabilityRegistry: {
-      execute: async () => {
+      execute: async (_capabilityId, payload) => {
         callCount += 1;
+        artifactExecutionContexts.push(payload.services?.artifactExecution);
 
         return {
           text: `Web answer ${callCount}`,
@@ -424,11 +433,33 @@ test("agent run step executor retries an approved capability step", async () => 
     runId: "run-approval",
     stepId: capabilityStep.id,
   });
+  const firstRetryStep = retried.run.steps.find(
+    (step) => step.retryOfStepId === capabilityStep.id
+  );
+  const retriedAgain = await executor.retryStep({
+    accessScope,
+    runId: "run-approval",
+    stepId: firstRetryStep.id,
+  });
 
-  assert.equal(callCount, 2);
-  assert.equal(retried.run.status, AGENT_RUN_STATUSES.completed);
+  assert.equal(callCount, 3);
+  assert.deepEqual(artifactExecutionContexts, [
+    {
+      idempotencyKey: `capability-artifact:run-approval:${capabilityStep.id}:web.search`,
+      sourceRunId: "run-approval",
+    },
+    {
+      idempotencyKey: `capability-artifact:run-approval:${capabilityStep.id}:web.search`,
+      sourceRunId: "run-approval",
+    },
+    {
+      idempotencyKey: `capability-artifact:run-approval:${capabilityStep.id}:web.search`,
+      sourceRunId: "run-approval",
+    },
+  ]);
+  assert.equal(retriedAgain.run.status, AGENT_RUN_STATUSES.completed);
   assert.ok(
-    retried.run.steps.some(
+    retriedAgain.run.steps.some(
       (step) =>
         step.retryOfStepId === capabilityStep.id &&
         step.status === "completed" &&
@@ -436,11 +467,107 @@ test("agent run step executor retries an approved capability step", async () => 
     )
   );
   assert.ok(
-    retried.run.events
+    retriedAgain.run.steps.some(
+      (step) =>
+        step.retryOfStepId === firstRetryStep.id &&
+        step.status === "completed"
+    )
+  );
+  assert.ok(
+    retriedAgain.run.events
       .map((event) => event.type)
       .includes("step_retry_queued")
   );
-  assert.match(retried.response.agentAnswer, /Web answer 2/);
+  assert.match(retriedAgain.response.agentAnswer, /Web answer 3/);
+});
+
+test("approved report artifact resume and nested retries create one stored artifact", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  let artifactId = 0;
+  const workspaceArtifactService = createWorkspaceArtifactService({
+    createArtifactId: () => `artifact-${(artifactId += 1)}`,
+    now: () => "2026-07-15T00:00:00.000Z",
+    store: createInMemoryWorkspaceArtifactStore(),
+  });
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    capabilityRegistry: createDefaultCapabilityRegistry({
+      workspaceArtifactService,
+    }),
+  });
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Export a replay-safe report.",
+    runId: "run-report-approval",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [
+      {
+        id: "approval:report.export:1.0.0",
+        capabilityId: CAPABILITY_IDS.reportExport,
+        capabilityLabel: "Report Export",
+        inputPreview: {
+          content: "Replay-safe report content.",
+          format: "markdown",
+          title: "Replay-safe report",
+        },
+        status: "pending",
+        stepId: "2-capability_approval_gate",
+      },
+    ],
+    runId: "run-report-approval",
+    status: AGENT_RUN_STATUSES.waitingForUser,
+    steps: [
+      {
+        id: "2-capability_approval_gate",
+        type: "capability_approval_gate",
+        kind: "approval_gate",
+        label: "Capability Approval",
+        status: "paused",
+        summary: "Report Export requires approval.",
+        approvalGateId: "approval:report.export:1.0.0",
+        capabilityId: CAPABILITY_IDS.reportExport,
+      },
+    ],
+  });
+
+  const approved = await executor.applyApprovalAction({
+    accessScope,
+    action: "approve",
+    gateId: "approval:report.export:1.0.0",
+    runId: "run-report-approval",
+  });
+  const capabilityStep = approved.run.steps.find(
+    (step) => step.kind === "capability_call"
+  );
+  const firstRetry = await executor.retryStep({
+    accessScope,
+    runId: "run-report-approval",
+    stepId: capabilityStep.id,
+  });
+  const firstRetryStep = firstRetry.run.steps.find(
+    (step) => step.retryOfStepId === capabilityStep.id
+  );
+
+  await executor.retryStep({
+    accessScope,
+    runId: "run-report-approval",
+    stepId: firstRetryStep.id,
+  });
+
+  const stored = await workspaceArtifactService.listArtifacts({
+    accessScope,
+  });
+
+  assert.equal(stored.total, 1);
+  assert.equal(stored.artifacts[0].artifactId, "artifact-1");
+  assert.equal(stored.artifacts[0].artifactType, "report");
+  assert.equal(artifactId, 3);
 });
 
 test("agent run step executor retries web_search through the capability handler", async () => {

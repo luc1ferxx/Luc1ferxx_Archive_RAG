@@ -226,6 +226,7 @@ const getPendingTaskScopeLabel = (pendingTask, t) => {
 
 const WorkspaceEntryPanel = ({
   activeSection = "home",
+  artifactSlot,
   children,
   documentCount = 0,
   documents = [],
@@ -504,6 +505,9 @@ const WorkspaceEntryPanel = ({
 
   const renderDriveSection = () => (
     <section className="archive-home-section-grid" aria-label={t("workbench.workspaceDrive")}>
+      {artifactSlot ? (
+        <div className="archive-home-artifact-slot">{artifactSlot}</div>
+      ) : null}
       <div className="archive-home-section">
         <div className="archive-home-section-head">
           <span>{t("home.drive")}</span>

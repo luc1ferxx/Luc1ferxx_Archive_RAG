@@ -35,6 +35,9 @@ export const buildStepError = (result = {}, fallbackMessage = "Step failed.") =>
     : normalizeText(error) || fallbackMessage;
 
   return {
+    ...(normalizeText(error?.code)
+      ? { code: normalizeText(error.code) }
+      : {}),
     message,
     name: error?.name ?? "Error",
   };

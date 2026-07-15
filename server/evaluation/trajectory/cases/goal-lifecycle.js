@@ -7,6 +7,7 @@ import {
 } from "../../../rag/agent-tasks.js";
 import {
   CAPABILITY_IDS,
+  createDefaultCapabilityRegistry,
 } from "../../../rag/capabilities/index.js";
 import {
   RESEARCH_DOSSIER_WORKFLOW_ID,
@@ -16,6 +17,10 @@ import {
   createTaskService,
   TASK_STATUSES,
 } from "../../../rag/tasks.js";
+import {
+  createInMemoryWorkspaceArtifactStore,
+  createWorkspaceArtifactService,
+} from "../../../rag/workspace-artifacts/index.js";
 import { createEvalTelemetry } from "../../agent-eval-harness.js";
 import {
   DEFAULT_ACCESS_SCOPE,
@@ -26,70 +31,26 @@ import {
 const getCompletionCheck = (completion = {}, id) =>
   (completion.checks ?? []).find((check) => check.id === id) ?? null;
 
-const createGoalLifecycleCapabilityRegistry = () => {
+const createGoalLifecycleCapabilityRegistry = ({
+  taskService,
+  workspaceArtifactService,
+} = {}) => {
   const calls = [];
+  const registry = createDefaultCapabilityRegistry({
+    taskService,
+    workspaceArtifactService,
+  });
 
   return {
     calls,
-    describe: (capabilityId) => ({
-      id: capabilityId,
-      version: "1.0.0",
-      label: capabilityId,
-      approvalPolicy: {
-        writesWorkspace: true,
-      },
-      privacyPolicy: {
-        externalCall: false,
-        storesResult: true,
-      },
-    }),
+    describe: (capabilityId) => registry.describe(capabilityId),
     execute: async (capabilityId, payload = {}) => {
       calls.push({
         capabilityId,
         payload,
       });
 
-      if (capabilityId === CAPABILITY_IDS.reportExport) {
-        return {
-          report: {
-            fileName: "trajectory-risk-report.md",
-            format: "markdown",
-            mimeType: "text/markdown",
-          },
-          stored: false,
-          text: "Report export created.",
-        };
-      }
-
-      if (capabilityId === CAPABILITY_IDS.summaryCreate) {
-        return {
-          summary: {
-            docIds: payload.input.docIds,
-            title: payload.input.title,
-          },
-          task: {
-            id: "agent_action:trajectory-summary",
-            status: TASK_STATUSES.completed,
-            summary: "Summary saved.",
-            type: "agent_action",
-          },
-          text: "Summary saved.",
-        };
-      }
-
-      if (capabilityId === CAPABILITY_IDS.taskCreate) {
-        return {
-          task: {
-            id: "agent_action:trajectory-follow-up",
-            status: TASK_STATUSES.completed,
-            summary: payload.input.description,
-            type: "agent_action",
-          },
-          text: "Follow-up task created.",
-        };
-      }
-
-      throw new Error(`Unexpected capability in goal lifecycle eval: ${capabilityId}`);
+      return registry.execute(capabilityId, payload);
     },
   };
 };
@@ -101,9 +62,15 @@ export const createGoalLifecycleCase = () => ({
     "An agent goal should remain incomplete while approval is pending, then pass goal-completion checks after approved deliverables are created.",
   run: async () => {
     const telemetry = createEvalTelemetry();
-    const capabilityRegistry = createGoalLifecycleCapabilityRegistry();
     const taskService = createTaskService({
       taskStore: createInMemoryTaskStore(),
+    });
+    const workspaceArtifactService = createWorkspaceArtifactService({
+      store: createInMemoryWorkspaceArtifactStore(),
+    });
+    const capabilityRegistry = createGoalLifecycleCapabilityRegistry({
+      taskService,
+      workspaceArtifactService,
     });
     const runner = createAgentTaskRunner({
       capabilityRegistry,
@@ -190,6 +157,9 @@ export const createGoalLifecycleCase = () => ({
       accessScope: DEFAULT_ACCESS_SCOPE,
       taskId: "agent_goal:trajectory-goal",
     });
+    const storedArtifacts = await workspaceArtifactService.listArtifacts({
+      accessScope: DEFAULT_ACCESS_SCOPE,
+    });
     const completion = completedTask.result.goalCompletion;
     const deliverableCheck = getCompletionCheck(
       completion,
@@ -269,12 +239,14 @@ export const createGoalLifecycleCase = () => ({
           passed:
             deliverableCheck?.passed === true &&
             deliverableCheck.detail.planned === 3 &&
-            capabilityRegistry.calls.length === 3,
+            capabilityRegistry.calls.length === 3 &&
+            storedArtifacts.total === 2,
           detail: {
             capabilityIds: capabilityRegistry.calls.map(
               (call) => call.capabilityId
             ),
             deliverableCheck,
+            storedArtifactCount: storedArtifacts.total,
           },
         }),
         buildCheck({

@@ -23,6 +23,7 @@ export const runAgentExecutionPlan = async ({
   accessScope,
   addBudgetLimitTrace,
   addTraceStep,
+  agentRunId,
   arxivImportService,
   budgetState,
   buildSkillTraceDetail,
@@ -102,6 +103,7 @@ export const runAgentExecutionPlan = async ({
       state.actionAnswer = await runWorkspaceActionSkill({
         accessScope,
         addTraceStep,
+        agentRunId,
         buildSkillTraceDetail,
         capabilityRegistry,
         docIds,

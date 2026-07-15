@@ -135,6 +135,7 @@ test("health report contracts expose missing dependencies and strict startup fai
       STARTUP_HEALTH_STRICT: "false",
       TASK_STORE_PROVIDER: "memory",
       VECTOR_STORE_PROVIDER: "local",
+      WORKSPACE_ARTIFACT_STORE_PROVIDER: "memory",
     },
     async () => {
       const report = await buildHealthReport();
@@ -154,6 +155,8 @@ test("health report contracts expose missing dependencies and strict startup fai
       assert.equal(report.checks.agentRunStore.backend, "memory");
       assert.equal(report.checks.adminAuditStore.status, "ok");
       assert.equal(report.checks.adminAuditStore.backend, "memory");
+      assert.equal(report.checks.workspaceArtifactStore.status, "ok");
+      assert.equal(report.checks.workspaceArtifactStore.backend, "memory");
 
       const logs = [];
       const startupReport = await runStartupHealthChecks({
@@ -224,6 +227,7 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
         STARTUP_HEALTH_STRICT: "false",
         TASK_STORE_PROVIDER: "postgres",
         VECTOR_STORE_PROVIDER: "qdrant",
+        WORKSPACE_ARTIFACT_STORE_PROVIDER: "postgres",
       },
       async () => {
         const report = await buildHealthReport();
@@ -246,6 +250,8 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
         assert.equal(report.checks.agentRunStore.backend, "postgresql");
         assert.equal(report.checks.adminAuditStore.status, "error");
         assert.equal(report.checks.adminAuditStore.backend, "postgresql");
+        assert.equal(report.checks.workspaceArtifactStore.status, "error");
+        assert.equal(report.checks.workspaceArtifactStore.backend, "postgresql");
       }
     );
 

@@ -108,6 +108,7 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 | `server/rag/agent-goal-plan.js` | 从 agent task payload / iteration / pending action 生成公开 goal plan；只写入 task `items` 和 `result.goalPlan`，不读取私有 evidence 或重新执行 planner。 |
 | `server/rag/agent-goal-completion.js` | 生成 task-level 目标完成自检；只消费 plan item 状态、deliverable compact status、research phase status、required user action 和 working memory 计数。 |
 | `server/rag/agent-goal-deliverables.js` | 从已完成 agent task 的 goal/answer/docIds 推导目标产物，统一构造 capability input、approval gates 和 compact result；runner 只调用 prepare/execute，不直接写 report、summary 或 follow-up task。 |
+| `server/rag/workspace-artifacts/` | 定义版本化 artifact contract、scope-aware service、memory/PostgreSQL stores、安全投影和下载格式；生成结果与文档证据存储完全分离。 |
 | `server/rag/execution-boundary.js` | 定义 capability / connector 执行前的 sandbox 和 secret policy 合同；只做规范化、校验、refs-only secret context 和 schema 外输入过滤，不执行真实 sandbox。 |
 | `server/rag/connectors/` | 定义 connector/MCP adapter contract、白名单 registry 和 connector-backed capability adapter；connector capability 必须映射成现有 capability contract，默认不配置 executor 时拒绝执行。 |
 | `server/rag/model-providers/` | 定义 provider/model/route contract、默认 OpenAI registry、runtime route resolution 和 workspace policy；`openai.js`、LLM planner adapter 和 cross-encoder model name 通过这里选择模型。 |
@@ -132,14 +133,17 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 
 真实 action 必须通过 `server/rag/capabilities/` 注册，不能绕过 capability registry 直接在 planner 或 runner 里写入状态。当前内置 action capabilities：
 
+- `report.export`：把 markdown 报告写入 scoped workspace artifact，并保留兼容的导出 metadata。
 - `task.create`：创建 scoped action task。
-- `document.organize`：根据 workspace document profile/tags 生成并保存文档整理结果。
-- `summary.create`：保存已生成的摘要及其 doc/citation metadata。
+- `document.organize`：把文档整理结果写为 `document_collection` artifact；不会改写、移动或删除源文档。
+- `summary.create`：把摘要及 doc/citation metadata 写为 `summary` artifact。
 - `external.import`：通过外部导入服务执行，或创建 scoped external import task。
 
 这些 action 都使用 `user_confirmation` approval policy，并把可恢复执行所需的 sanitized input 固化到 approval gate `inputPreview`。用户批准后，恢复层创建 `capability_call` step；重试/恢复安全性继续由 `server/rag/agent-run-step-replay-safety.js` 的 `capability_call` policy 决定。Action 结果可以写入 task log，但不能作为 citation、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 实际返回的证据字段。
 
-Agent task 的最终产物也复用同一套 capability registry。`server/rag/agent-goal-deliverables.js` 只根据公开目标、最终回答和 docIds 生成产物规格，例如 markdown report、document organization、saved summary 和 follow-up task；`agent-tasks.js` 在回答完成后把 task 暂停为 `requiredUserAction: "approve_deliverables"`，用户批准后才执行这些 capability。这样目标交付不会绕过 action capability 的审批边界，也不会把产物结果误当成 RAG citation。
+Agent task 的最终产物也复用同一套 capability registry。`server/rag/agent-goal-deliverables.js` 只根据公开目标、最终回答和 docIds 生成产物规格，例如 markdown report、document organization、saved summary 和 follow-up task；`agent-tasks.js` 在回答完成后把 task 暂停为 `requiredUserAction: "approve_deliverables"`，用户批准后才执行这些 capability。Artifact deliverable 只有在真实存储成功并返回 compact artifact ref 后才算 created；写入失败会保持任务未完成。这样目标交付不会绕过 action capability 的审批边界，也不会把产物结果误当成 RAG citation。
+
+Workspace artifact 是生成结果，不是证据来源。它不会注册成 document、写入向量索引、进入 `ragSources`、citation、claim support 或 final-answer evidence；即使 artifact 引用源文档，其 `citationManifest` 也只记录 provenance。持久化前会过滤 prompt、raw trace、token、secret、auth、cookie 和完整 approval payload 等敏感字段。
 
 ## Connector contracts
 
@@ -202,7 +206,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 - 生成逻辑集中在 `server/rag/agent-goal-plan.js`；`agent-tasks.js` 只在 create / run / resume 边界调用它。
 - Goal plan 是展示和恢复控制合同，不作为 citation、claim support 或答案证据。
 
-`task.result.goalPlan.deliverables` 是目标产物的公开 contract：等待批准时列出 planned deliverables，执行后列出 compact outputs，例如 report fileName 或 action task id。完整 capability input 和内部 task payload 不从 API 暴露。
+`task.result.goalPlan.deliverables` 是目标产物的公开 contract：等待批准时列出 planned deliverables，执行后 artifact 本身只以 compact ref（`artifactId/artifactType/title/status/fileName/format/mimeType/sourceTaskId/sourceRunId`）暴露，同时保留 `stored`、document/group counts、docIds 和 action task id 等既有安全兼容字段。完整 artifact 内容、capability input 和内部 task payload 不从 task API 暴露；需要正文时由调用方通过 scoped `/artifacts/:artifactId` API 单独读取。
 
 `task.result.goalPlan.researchTask` 是 research/dossier 流程的公开 contract：暴露 phase id、label、status、summary、expected skill/capability、counts，以及不含 prompt 的 `workflow` lifecycle snapshot。这个 snapshot 包含 workflow id/version/type/label、当前 phase、completion check id、预期 deliverables 和 phase counts；不暴露完整 prompt、trigger patterns 或内部 task payload。
 

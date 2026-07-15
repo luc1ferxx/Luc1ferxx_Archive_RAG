@@ -10,6 +10,10 @@ import {
   buildWorkspaceActionSkillInput,
 } from "./skills/built-ins.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
+import {
+  buildCapabilityArtifactIdempotencyKey,
+  isWorkspaceArtifactWriteError,
+} from "./capabilities/artifacts.js";
 
 const noop = () => {};
 const ARXIV_IMPORT_STEP_ID = "arxiv_import:primary";
@@ -147,6 +151,7 @@ export const runArxivImportSkill = async ({
 export const runWorkspaceActionSkill = async ({
   accessScope,
   addTraceStep = noop,
+  agentRunId,
   buildSkillTraceDetail = (result) => result,
   capabilityRegistry,
   docIds = [],
@@ -165,12 +170,28 @@ export const runWorkspaceActionSkill = async ({
     plan,
     question,
   });
+  const normalizedRunId = normalizeText(agentRunId);
+  const services = normalizedRunId
+    ? {
+        artifactExecution: {
+          idempotencyKey: buildCapabilityArtifactIdempotencyKey({
+            parts: [
+              normalizedRunId,
+              WORKSPACE_ACTION_STEP_ID,
+              actionInput.capabilityId,
+            ],
+          }),
+          sourceRunId: normalizedRunId,
+        },
+      }
+    : undefined;
   const actionResult = await executeObservedSkill(workspaceActionSkill, {
     accessScope,
     capabilityRegistry,
     docIds,
     plan,
     question,
+    services,
   });
   recordSkillResult(actionResult);
 
@@ -197,6 +218,13 @@ export const runWorkspaceActionSkill = async ({
       capabilityId: actionInput.capabilityId,
     }),
   });
+
+  if (
+    !actionResult.ok &&
+    isWorkspaceArtifactWriteError(actionResult.error)
+  ) {
+    throw actionResult.error;
+  }
 
   return actionResult.ok
     ? actionResult.text

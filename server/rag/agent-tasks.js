@@ -314,7 +314,10 @@ const isDeliverableApprovalPending = (deliverables = {}) =>
   deliverables.status === AGENT_GOAL_DELIVERABLE_STATUSES.waitingForApproval;
 
 const isDeliverableExecutionApproved = (deliverables = {}) =>
-  deliverables.status === AGENT_GOAL_DELIVERABLE_STATUSES.approved;
+  [
+    AGENT_GOAL_DELIVERABLE_STATUSES.approved,
+    AGENT_GOAL_DELIVERABLE_STATUSES.running,
+  ].includes(deliverables.status);
 
 const buildDeliverableApprovalQuestion = (deliverables = {}) => {
   const labels = toArray(deliverables.specs)
@@ -654,6 +657,7 @@ export const createAgentTaskRunner = ({
         const deliverables = await deliverableService.prepare({
           body,
           payload,
+          sourceTaskId: task.id,
         });
 
         if (isDeliverableApprovalPending(deliverables)) {

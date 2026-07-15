@@ -4,6 +4,11 @@ import {
   normalizeText,
   toArray,
 } from "./shared.js";
+import {
+  ARTIFACT_TYPES,
+  sanitizeWorkspaceArtifactStructuredValue,
+} from "../workspace-artifacts/index.js";
+import { persistCapabilityArtifact } from "./artifacts.js";
 
 const slugify = (value = "report") => {
   const slug = normalizeText(value)
@@ -60,8 +65,10 @@ const buildReportExport = ({
         {
           title: normalizedTitle,
           content: normalizeText(content),
-          citations: toArray(citations),
-          metadata,
+          citations:
+            sanitizeWorkspaceArtifactStructuredValue(toArray(citations)) ?? [],
+          metadata:
+            sanitizeWorkspaceArtifactStructuredValue(metadata) ?? {},
         },
         null,
         2
@@ -94,7 +101,38 @@ const buildReportExport = ({
   };
 };
 
-export const createReportExportCapability = ({ reportExportService } = {}) => ({
+const buildArtifactReport = ({ input = {}, report = {} } = {}) => {
+  if (normalizeReportFormat(report.format || input.format) !== "json") {
+    return report;
+  }
+
+  let structuredReport;
+
+  try {
+    structuredReport = JSON.parse(String(report.content ?? ""));
+  } catch {
+    structuredReport = {
+      citations: toArray(input.citations),
+      content: normalizeText(input.content),
+      metadata: input.metadata ?? {},
+      title: normalizeText(input.title) || "Agent report",
+    };
+  }
+
+  return {
+    ...report,
+    content: JSON.stringify(
+      sanitizeWorkspaceArtifactStructuredValue(structuredReport) ?? {},
+      null,
+      2
+    ),
+  };
+};
+
+export const createReportExportCapability = ({
+  reportExportService,
+  workspaceArtifactService,
+} = {}) => ({
   id: CAPABILITY_IDS.reportExport,
   version: BUILT_IN_CAPABILITY_VERSION,
   label: "Report Export",
@@ -132,9 +170,9 @@ export const createReportExportCapability = ({ reportExportService } = {}) => ({
     sanitizedInputFields: ["title", "format"],
     storesResult: true,
   },
-  execute: async ({ accessScope, input }) => {
-    if (reportExportService?.exportReport) {
-      return reportExportService.exportReport({
+  execute: async ({ accessScope, input, services }) => {
+    const compatibilityResult = reportExportService?.exportReport
+      ? await reportExportService.exportReport({
         accessScope,
         report: {
           citations: toArray(input.citations),
@@ -143,21 +181,50 @@ export const createReportExportCapability = ({ reportExportService } = {}) => ({
           metadata: input.metadata ?? {},
           title: input.title,
         },
-      });
-    }
+      })
+      : null;
 
-    const report = buildReportExport({
-      citations: input.citations,
-      content: input.content,
-      format: input.format,
-      metadata: input.metadata ?? {},
-      title: input.title,
+    const report = compatibilityResult?.report ??
+      buildReportExport({
+        citations: input.citations,
+        content: input.content,
+        format: input.format,
+        metadata: input.metadata ?? {},
+        title: input.title,
+      });
+    const artifactReport = buildArtifactReport({
+      input,
+      report,
+    });
+    const { reference } = await persistCapabilityArtifact({
+      accessScope,
+      artifact: {
+        artifactType: ARTIFACT_TYPES.report,
+        citationManifest: toArray(input.citations),
+        content: artifactReport.content,
+        docIds: toArray(input.citations).map((citation) => citation?.docId),
+        fileName: report.fileName,
+        format: report.format,
+        mimeType: report.mimeType,
+        payload: {
+          metadata: input.metadata ?? {},
+        },
+        title: input.title,
+      },
+      capabilityId: CAPABILITY_IDS.reportExport,
+      input,
+      services,
+      workspaceArtifactService,
     });
 
     return {
+      ...(compatibilityResult ?? {}),
+      artifact: reference,
       report,
-      stored: false,
-      text: `Prepared report export ${report.fileName}.`,
+      stored: true,
+      text:
+        normalizeText(compatibilityResult?.text) ||
+        `Prepared report export ${report.fileName}.`,
     };
   },
 });

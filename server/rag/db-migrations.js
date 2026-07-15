@@ -10,6 +10,7 @@ import {
   getSessionMemoryPostgresTable,
   getTaskEventsPostgresTable,
   getTasksPostgresTable,
+  getWorkspaceArtifactsPostgresTable,
 } from "./config.js";
 import {
   isPostgresConfigured,
@@ -66,6 +67,10 @@ const getTableNames = () => ({
     getAdminAuditEventsPostgresTable(),
     "ADMIN_AUDIT_EVENTS_POSTGRES_TABLE"
   ),
+  workspaceArtifactsTable: ensureSimpleTableName(
+    getWorkspaceArtifactsPostgresTable(),
+    "WORKSPACE_ARTIFACTS_POSTGRES_TABLE"
+  ),
 });
 
 const validateTableNames = (tableNames = {}) => ({
@@ -101,6 +106,10 @@ const validateTableNames = (tableNames = {}) => ({
     tableNames.adminAuditEventsTable,
     "ADMIN_AUDIT_EVENTS_POSTGRES_TABLE"
   ),
+  workspaceArtifactsTable: ensureSimpleTableName(
+    tableNames.workspaceArtifactsTable,
+    "WORKSPACE_ARTIFACTS_POSTGRES_TABLE"
+  ),
 });
 
 const renderMigrationSql = (sqlText, tableNames = getTableNames()) => {
@@ -114,7 +123,11 @@ const renderMigrationSql = (sqlText, tableNames = getTableNames()) => {
     .replaceAll("__TASK_EVENTS_TABLE__", safeTableNames.taskEventsTable)
     .replaceAll("__AGENT_RUNS_TABLE__", safeTableNames.agentRunsTable)
     .replaceAll("__AGENT_RUN_EVENTS_TABLE__", safeTableNames.agentRunEventsTable)
-    .replaceAll("__ADMIN_AUDIT_EVENTS_TABLE__", safeTableNames.adminAuditEventsTable);
+    .replaceAll("__ADMIN_AUDIT_EVENTS_TABLE__", safeTableNames.adminAuditEventsTable)
+    .replaceAll(
+      "__WORKSPACE_ARTIFACTS_TABLE__",
+      safeTableNames.workspaceArtifactsTable
+    );
 };
 
 export const createPostgresMigrator = ({
