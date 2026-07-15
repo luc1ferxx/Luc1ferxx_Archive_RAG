@@ -534,6 +534,7 @@ export const runAgentRag = async ({
       accessScope,
       addBudgetLimitTrace,
       addTraceStep,
+      agentRunId,
       budgetState,
       arxivImportService,
       buildSkillTraceDetail,

@@ -12,6 +12,11 @@ import {
 } from "../rag/capabilities/index.js";
 import { isAgentRunInterrupt } from "../rag/agent-interrupts.js";
 import {
+  ARTIFACT_TYPES,
+  createInMemoryWorkspaceArtifactStore,
+  createWorkspaceArtifactService,
+} from "../rag/workspace-artifacts/index.js";
+import {
   TEST_CONNECTOR_CAPABILITY_ID,
   TEST_CONNECTOR_ID,
   createTestConnectorSpec,
@@ -131,6 +136,9 @@ test("built-in capabilities execute whitelisted adapters", async () => {
   const compareCalls = [];
   const importCalls = [];
   const actionTaskService = createInMemoryActionTaskService();
+  const workspaceArtifactService = createWorkspaceArtifactService({
+    store: createInMemoryWorkspaceArtifactStore(),
+  });
   const webCalls = [];
   const registry = createDefaultCapabilityRegistry({
     actionTaskService,
@@ -178,6 +186,7 @@ test("built-in capabilities execute whitelisted adapters", async () => {
         };
       },
     },
+    workspaceArtifactService,
     ragService: {
       listDocuments: () => [
         {
@@ -354,6 +363,7 @@ test("built-in capabilities execute whitelisted adapters", async () => {
     input: {
       docIds: ["doc-remote", "doc-security"],
       strategy: "profile_tags",
+      taskId: "organization-task",
       title: "Policy folders",
     },
   });
@@ -371,6 +381,7 @@ test("built-in capabilities execute whitelisted adapters", async () => {
       ],
       docIds: ["doc-remote"],
       summary: "Remote work requires manager approval.",
+      taskId: "summary-task",
       title: "Remote Work Summary",
     },
   });
@@ -407,14 +418,393 @@ test("built-in capabilities execute whitelisted adapters", async () => {
   assert.equal(taskResult.task.type, "agent_action");
   assert.equal(taskResult.task.action, "task.create");
   assert.equal(organizeResult.task.status, "completed");
+  assert.equal(organizeResult.task.id, "organization-task");
   assert.deepEqual(organizeResult.organization.groups[0].docIds, ["doc-remote"]);
   assert.equal(summaryResult.task.status, "completed");
+  assert.equal(summaryResult.task.id, "summary-task");
   assert.equal(summaryResult.summary.title, "Remote Work Summary");
   assert.equal(externalImportResult.task.status, "queued");
   assert.equal(externalImportResult.importRequest.sourceUrl, "https://example.test/policy.pdf");
   assert.equal(
     registry.describe(CAPABILITY_IDS.arxivImportTopic).privacyPolicy.externalCall,
     true
+  );
+});
+
+test("report export persists one replay-safe workspace artifact", async () => {
+  let artifactId = 0;
+  const workspaceArtifactService = createWorkspaceArtifactService({
+    createArtifactId: () => `artifact-${(artifactId += 1)}`,
+    now: () => "2026-07-15T00:00:00.000Z",
+    store: createInMemoryWorkspaceArtifactStore(),
+  });
+  const registry = createDefaultCapabilityRegistry({
+    workspaceArtifactService,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const payload = {
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    input: {
+      citations: [
+        {
+          docId: "doc-1",
+          excerpt: "Evidence excerpt",
+          pageNumber: 2,
+          title: "Source",
+        },
+      ],
+      content: "Grounded report body.",
+      format: "markdown",
+      title: "Grounded report",
+    },
+    services: {
+      artifactExecution: {
+        idempotencyKey: "goal-deliverable:task-1:report",
+        sourceRunId: "run-1",
+        sourceTaskId: "task-1",
+      },
+    },
+  };
+
+  const result = await registry.execute(CAPABILITY_IDS.reportExport, payload);
+  const replay = await registry.execute(CAPABILITY_IDS.reportExport, payload);
+
+  assert.equal(result.stored, true);
+  assert.equal(result.report.fileName, "grounded-report.md");
+  assert.deepEqual(result.artifact, {
+    artifactId: "artifact-1",
+    artifactType: ARTIFACT_TYPES.report,
+    fileName: "grounded-report.md",
+    format: "markdown",
+    mimeType: "text/markdown",
+    sourceRunId: "run-1",
+    sourceTaskId: "task-1",
+    status: "active",
+    title: "Grounded report",
+  });
+  assert.deepEqual(replay.artifact, result.artifact);
+  assert.equal(
+    (
+      await workspaceArtifactService.listArtifacts({
+        accessScope,
+      })
+    ).total,
+    1
+  );
+  assert.equal(
+    (
+      await workspaceArtifactService.getArtifact({
+        accessScope,
+        artifactId: result.artifact.artifactId,
+      })
+    ).citationManifest[0].docId,
+    "doc-1"
+  );
+  assert.equal(result.citations, undefined);
+});
+
+test("JSON report artifacts filter sensitive metadata while preserving compatibility output", async () => {
+  const workspaceArtifactService = createWorkspaceArtifactService({
+    createArtifactId: () => "artifact-json-report",
+    now: () => "2026-07-15T00:00:00.000Z",
+    store: createInMemoryWorkspaceArtifactStore(),
+  });
+  const registry = createDefaultCapabilityRegistry({
+    reportExportService: {
+      exportReport: async () => ({
+        marker: "compatibility-marker",
+        report: {
+          content: JSON.stringify({
+            citations: [
+              {
+                authorizationHeader: "Bearer report-secret",
+                docId: "doc-1",
+                prompt: "private citation prompt",
+                title: "Public source",
+              },
+            ],
+            content: "Safe generated report content.",
+            metadata: {
+              apiKey: "private-api-key",
+              password: "private-password",
+              rawTrace: "private-trace",
+              safeLabel: "public-label",
+              token: "private-token",
+            },
+            title: "JSON report",
+          }),
+          fileName: "custom-report.json",
+          format: "json",
+          mimeType: "application/json",
+        },
+        text: "Custom export completed.",
+      }),
+    },
+    workspaceArtifactService,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const result = await registry.execute(CAPABILITY_IDS.reportExport, {
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    input: {
+      citations: [{ docId: "doc-1", title: "Public source" }],
+      content: "Safe generated report content.",
+      format: "json",
+      metadata: {
+        safeLabel: "public-label",
+      },
+      title: "JSON report",
+    },
+  });
+  const stored = await workspaceArtifactService.getArtifact({
+    accessScope,
+    artifactId: result.artifact.artifactId,
+  });
+  const storedReport = JSON.parse(stored.content);
+
+  assert.equal(result.marker, "compatibility-marker");
+  assert.equal(result.text, "Custom export completed.");
+  assert.equal(result.report.fileName, "custom-report.json");
+  assert.equal(storedReport.metadata.safeLabel, "public-label");
+  assert.equal(storedReport.citations[0].docId, "doc-1");
+  assert.doesNotMatch(
+    stored.content,
+    /report-secret|private citation prompt|private-api-key|private-password|private-trace|private-token/
+  );
+});
+
+test("summary create persists a workspace artifact and compatible action task", async () => {
+  let artifactId = 0;
+  const workspaceArtifactService = createWorkspaceArtifactService({
+    createArtifactId: () => `artifact-${(artifactId += 1)}`,
+    now: () => "2026-07-15T00:00:00.000Z",
+    store: createInMemoryWorkspaceArtifactStore(),
+  });
+  const registry = createDefaultCapabilityRegistry({
+    actionTaskService: createInMemoryActionTaskService(),
+    workspaceArtifactService,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const payload = {
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    input: {
+      citations: [{ docId: "doc-1", pageNumber: 1 }],
+      docIds: ["doc-1"],
+      metadata: {
+        kind: "goal_summary",
+      },
+      summary: "Remote work requires manager approval.",
+      title: "Remote Work Summary",
+    },
+    services: {
+      artifactExecution: {
+        idempotencyKey: "goal-deliverable:task-1:summary",
+        sourceRunId: "run-1",
+        sourceTaskId: "task-1",
+      },
+    },
+  };
+
+  const result = await registry.execute(CAPABILITY_IDS.summaryCreate, payload);
+  const replay = await registry.execute(CAPABILITY_IDS.summaryCreate, payload);
+  const stored = await workspaceArtifactService.getArtifact({
+    accessScope,
+    artifactId: result.artifact.artifactId,
+  });
+
+  assert.equal(result.summary.title, "Remote Work Summary");
+  assert.equal(result.task.status, "completed");
+  assert.equal(replay.task.id, result.task.id);
+  assert.equal(result.artifact.artifactType, ARTIFACT_TYPES.summary);
+  assert.deepEqual(replay.artifact, result.artifact);
+  assert.equal(stored.content, "Remote work requires manager approval.");
+  assert.deepEqual(stored.docIds, ["doc-1"]);
+  assert.equal(stored.citationManifest[0].docId, "doc-1");
+  assert.deepEqual(stored.payload, {
+    metadata: {
+      kind: "goal_summary",
+    },
+  });
+});
+
+test("document organize persists a collection artifact without mutating documents", async () => {
+  let artifactId = 0;
+  let mutationCalls = 0;
+  const workspaceArtifactService = createWorkspaceArtifactService({
+    createArtifactId: () => `artifact-${(artifactId += 1)}`,
+    now: () => "2026-07-15T00:00:00.000Z",
+    store: createInMemoryWorkspaceArtifactStore(),
+  });
+  const registry = createDefaultCapabilityRegistry({
+    actionTaskService: createInMemoryActionTaskService(),
+    ragService: {
+      deleteDocument: () => {
+        mutationCalls += 1;
+      },
+      ingestDocument: () => {
+        mutationCalls += 1;
+      },
+      listDocuments: () => [
+        {
+          docId: "doc-1",
+          fileName: "policy.pdf",
+          profile: {
+            tags: ["policy"],
+          },
+        },
+        {
+          docId: "doc-2",
+          fileName: "security.pdf",
+          profile: {
+            tags: ["security"],
+          },
+        },
+      ],
+    },
+    workspaceArtifactService,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const payload = {
+    accessScope,
+    approval: {
+      approved: true,
+    },
+    input: {
+      docIds: ["doc-1", "doc-2"],
+      strategy: "profile_tags",
+      title: "Policy collection",
+    },
+    services: {
+      artifactExecution: {
+        idempotencyKey: "goal-deliverable:task-1:collection",
+        sourceRunId: "run-1",
+        sourceTaskId: "task-1",
+      },
+    },
+  };
+
+  const result = await registry.execute(
+    CAPABILITY_IDS.documentOrganize,
+    payload
+  );
+  const replay = await registry.execute(
+    CAPABILITY_IDS.documentOrganize,
+    payload
+  );
+  const stored = await workspaceArtifactService.getArtifact({
+    accessScope,
+    artifactId: result.artifact.artifactId,
+  });
+
+  assert.equal(mutationCalls, 0);
+  assert.equal(result.organization.documentCount, 2);
+  assert.equal(result.task.status, "completed");
+  assert.equal(replay.task.id, result.task.id);
+  assert.equal(
+    result.artifact.artifactType,
+    ARTIFACT_TYPES.documentCollection
+  );
+  assert.deepEqual(replay.artifact, result.artifact);
+  assert.deepEqual(stored.docIds, ["doc-1", "doc-2"]);
+  assert.deepEqual(stored.payload, {
+    documentCount: 2,
+    groups: [
+      {
+        docIds: ["doc-1"],
+        label: "policy",
+      },
+      {
+        docIds: ["doc-2"],
+        label: "security",
+      },
+    ],
+    strategy: "profile_tags",
+  });
+});
+
+test("artifact-producing capability fails before recording success when storage fails", async () => {
+  let actionTaskCalls = 0;
+  const registry = createDefaultCapabilityRegistry({
+    actionTaskService: {
+      createActionTask: async () => {
+        actionTaskCalls += 1;
+        return {
+          id: "unexpected-task",
+        };
+      },
+    },
+    workspaceArtifactService: {
+      createArtifact: async () => {
+        throw new Error("database unavailable");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      registry.execute(CAPABILITY_IDS.summaryCreate, {
+        accessScope: {
+          userId: "alice",
+          workspaceId: "workspace-a",
+        },
+        approval: {
+          approved: true,
+        },
+        input: {
+          summary: "Summary that must not be marked stored.",
+          title: "Unavailable summary",
+        },
+      }),
+    (error) =>
+      error.code === "workspace_artifact_write_failed" &&
+      error.status === 500 &&
+      /database unavailable/.test(error.message)
+  );
+  assert.equal(actionTaskCalls, 0);
+});
+
+test("artifact-producing capability reports missing storage as a typed write failure", async () => {
+  const registry = createDefaultCapabilityRegistry();
+
+  await assert.rejects(
+    () =>
+      registry.execute(CAPABILITY_IDS.reportExport, {
+        accessScope: {
+          userId: "alice",
+          workspaceId: "workspace-a",
+        },
+        approval: {
+          approved: true,
+        },
+        input: {
+          content: "Report body",
+          title: "Unconfigured report",
+        },
+      }),
+    (error) =>
+      error.code === "workspace_artifact_write_failed" &&
+      error.status === 500 &&
+      /service is required/.test(error.message)
   );
 });
 

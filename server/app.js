@@ -80,6 +80,12 @@ import {
 import { recordAgentExperienceFromFeedback } from "./rag/agent-experience-memory.js";
 import { createDefaultCapabilityRegistry } from "./rag/capabilities/index.js";
 import {
+  createDefaultWorkspaceArtifactStore,
+  createWorkspaceArtifactService,
+  toWorkspaceArtifactDetail,
+  toWorkspaceArtifactSummary,
+} from "./rag/workspace-artifacts/index.js";
+import {
   getAgentExecutionPlanner,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
@@ -234,16 +240,28 @@ const isPdfFile = (file) => {
   return extension === ".pdf" || mimeType === "application/pdf";
 };
 
-const buildContentDisposition = (fileName = "document.pdf") =>
-  `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+const buildContentDisposition = (
+  fileName = "document.pdf",
+  disposition = "inline"
+) => `${disposition}; filename*=UTF-8''${encodeURIComponent(fileName)}`;
 
-const sendBufferedFile = ({ req, res, fileBuffer, fileName, mimeType }) => {
+const sendBufferedFile = ({
+  req,
+  res,
+  fileBuffer,
+  fileName,
+  mimeType,
+  disposition = "inline",
+}) => {
   const totalSize = fileBuffer.byteLength;
   const rangeHeader = req.headers.range?.trim();
 
   res.setHeader("Accept-Ranges", "bytes");
   res.setHeader("Content-Type", mimeType || "application/pdf");
-  res.setHeader("Content-Disposition", buildContentDisposition(fileName));
+  res.setHeader(
+    "Content-Disposition",
+    buildContentDisposition(fileName, disposition)
+  );
   res.setHeader("Cache-Control", "private, max-age=300");
 
   if (!rangeHeader) {
@@ -384,6 +402,13 @@ export const createApp = async (options = {}) => {
     createAgentRunService({
       agentRunStore,
     });
+  const workspaceArtifactStore =
+    options.workspaceArtifactStore ?? createDefaultWorkspaceArtifactStore();
+  const workspaceArtifactService =
+    options.workspaceArtifactService ??
+    createWorkspaceArtifactService({
+      store: workspaceArtifactStore,
+    });
   const configuredAgentRunRecoveryService = options.agentRunRecoveryService;
   const recommendationTaskService =
     options.recommendationTaskService ??
@@ -415,6 +440,7 @@ export const createApp = async (options = {}) => {
       reportExportService: options.reportExportService,
       taskService,
       webChatService,
+      workspaceArtifactService,
     });
   const agentTaskRunner =
     options.agentTaskRunner ??
@@ -566,7 +592,11 @@ export const createApp = async (options = {}) => {
     options.intentPlannerAdapter ?? createIntentPlannerAdapter();
 
   const app = express();
-  app.use(cors());
+  app.use(
+    cors({
+      exposedHeaders: ["Content-Disposition"],
+    })
+  );
   app.use(express.json({ limit: "2mb" }));
 
   const storage = multer.diskStorage({
@@ -602,6 +632,7 @@ export const createApp = async (options = {}) => {
   await taskService.initialize?.();
   await agentRunService.initialize?.();
   await adminAuditService.initialize?.();
+  await workspaceArtifactService.initialize?.();
   await agentRunRecoveryService.recoverOnStartup?.({
     mode: getAgentRunRecoveryMode(),
   });
@@ -635,6 +666,128 @@ export const createApp = async (options = {}) => {
 
   app.use(requireApiAuth);
   app.use("/uploads", express.static(uploadsDirectory));
+
+  app.get("/artifacts", async (req, res) => {
+    try {
+      const result = await workspaceArtifactService.listArtifacts({
+        accessScope: getRequestAccessScope(req),
+        artifactType: req.query.artifactType,
+        limit: req.query.limit,
+        offset: req.query.offset,
+        status: req.query.status,
+      });
+
+      return res.json({
+        ...result,
+        artifacts: (result.artifacts ?? []).map(toWorkspaceArtifactSummary),
+      });
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        ...(error.code ? { code: error.code } : {}),
+        error: serializeError(error, "Failed to list workspace artifacts."),
+      });
+    }
+  });
+
+  app.get("/artifacts/:artifactId/download", async (req, res) => {
+    const artifactId = req.params.artifactId?.trim();
+
+    if (!artifactId) {
+      return res.status(400).json({
+        error: "artifactId is required.",
+      });
+    }
+
+    try {
+      const download = await workspaceArtifactService.getArtifactDownload({
+        accessScope: getRequestAccessScope(req),
+        artifactId,
+      });
+
+      if (!download) {
+        return res.status(404).json({
+          error: "Workspace artifact not found.",
+        });
+      }
+
+      sendBufferedFile({
+        req,
+        res,
+        disposition: "attachment",
+        ...download,
+      });
+      return;
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        ...(error.code ? { code: error.code } : {}),
+        error: serializeError(error, "Failed to download workspace artifact."),
+      });
+    }
+  });
+
+  app.post("/artifacts/:artifactId/archive", async (req, res) => {
+    const artifactId = req.params.artifactId?.trim();
+
+    if (!artifactId) {
+      return res.status(400).json({
+        error: "artifactId is required.",
+      });
+    }
+
+    try {
+      const artifact = await workspaceArtifactService.archiveArtifact({
+        accessScope: getRequestAccessScope(req),
+        artifactId,
+      });
+
+      if (!artifact) {
+        return res.status(404).json({
+          error: "Workspace artifact not found.",
+        });
+      }
+
+      return res.json({
+        artifact: toWorkspaceArtifactDetail(artifact),
+      });
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        ...(error.code ? { code: error.code } : {}),
+        error: serializeError(error, "Failed to archive workspace artifact."),
+      });
+    }
+  });
+
+  app.get("/artifacts/:artifactId", async (req, res) => {
+    const artifactId = req.params.artifactId?.trim();
+
+    if (!artifactId) {
+      return res.status(400).json({
+        error: "artifactId is required.",
+      });
+    }
+
+    try {
+      const artifact = await workspaceArtifactService.getArtifact({
+        accessScope: getRequestAccessScope(req),
+        artifactId,
+      });
+
+      if (!artifact) {
+        return res.status(404).json({
+          error: "Workspace artifact not found.",
+        });
+      }
+
+      return res.json({
+        artifact: toWorkspaceArtifactDetail(artifact),
+      });
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        ...(error.code ? { code: error.code } : {}),
+        error: serializeError(error, "Failed to load workspace artifact."),
+      });
+    }
+  });
 
   app.get(
     "/admin/status",

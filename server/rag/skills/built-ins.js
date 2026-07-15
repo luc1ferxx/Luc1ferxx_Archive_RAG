@@ -443,6 +443,7 @@ const createWorkspaceActionSkill = () => ({
     docIds,
     plan,
     question,
+    services,
   }) => {
     const actionInput = buildWorkspaceActionSkillInput({
       docIds,
@@ -460,6 +461,7 @@ const createWorkspaceActionSkill = () => ({
     ).execute(actionInput.capabilityId, {
       accessScope,
       input: actionInput.input,
+      services,
     });
 
     return {

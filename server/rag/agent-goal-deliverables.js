@@ -1,5 +1,10 @@
 import { CAPABILITY_IDS } from "./capabilities/index.js";
+import { buildCapabilityArtifactIdempotencyKey } from "./capabilities/artifacts.js";
 import { TASK_STATUSES } from "./tasks.js";
+import {
+  ARTIFACT_STATUSES,
+  ARTIFACT_TYPES,
+} from "./workspace-artifacts/index.js";
 
 export const AGENT_GOAL_DELIVERABLE_STATUSES = Object.freeze({
   approved: "approved",
@@ -12,6 +17,12 @@ export const AGENT_GOAL_DELIVERABLE_STATUSES = Object.freeze({
 
 const MAX_TEXT_LENGTH = 240;
 const MAX_CONTENT_LENGTH = 12000;
+
+const ARTIFACT_TYPES_BY_CAPABILITY = Object.freeze({
+  [CAPABILITY_IDS.documentOrganize]: ARTIFACT_TYPES.documentCollection,
+  [CAPABILITY_IDS.reportExport]: ARTIFACT_TYPES.report,
+  [CAPABILITY_IDS.summaryCreate]: ARTIFACT_TYPES.summary,
+});
 
 const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
   String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
@@ -186,20 +197,41 @@ const buildSpec = ({
   capabilityId,
   input = {},
   label,
+  sourceRunId = "",
+  sourceTaskId = "",
   title,
-} = {}) => ({
-  id: `${artifactType}:${capabilityId}`,
-  artifactType,
-  capabilityId,
-  input: normalizeRecord(input),
-  label: normalizeText(label, 120),
-  status: AGENT_GOAL_DELIVERABLE_STATUSES.waitingForApproval,
-  title: normalizeText(title, 160),
-});
+} = {}) => {
+  const id = `${artifactType}:${capabilityId}`;
+  const canonicalArtifactType = ARTIFACT_TYPES_BY_CAPABILITY[capabilityId];
+
+  return {
+    ...(canonicalArtifactType
+      ? {
+          artifactExecution: {
+            artifactType: canonicalArtifactType,
+            idempotencyKey: buildCapabilityArtifactIdempotencyKey({
+              namespace: "goal-deliverable",
+              parts: [sourceTaskId, id],
+            }),
+            sourceRunId: normalizeText(sourceRunId, 120),
+            sourceTaskId: normalizeText(sourceTaskId, 160),
+          },
+        }
+      : {}),
+    id,
+    artifactType,
+    capabilityId,
+    input: normalizeRecord(input),
+    label: normalizeText(label, 120),
+    status: AGENT_GOAL_DELIVERABLE_STATUSES.waitingForApproval,
+    title: normalizeText(title, 160),
+  };
+};
 
 export const buildAgentGoalDeliverableSpecs = ({
   body = {},
   payload = {},
+  sourceTaskId = "",
 } = {}) => {
   const goal = getGoal({
     payload,
@@ -219,6 +251,10 @@ export const buildAgentGoalDeliverableSpecs = ({
     goal,
     payload,
   });
+  const sourceRunId = getAgentRunId({
+    body,
+    payload,
+  });
   const specs = [];
 
   if (wantsOrganization(goal)) {
@@ -232,6 +268,8 @@ export const buildAgentGoalDeliverableSpecs = ({
           title: `${baseTitle} organization`,
         },
         label: "Document organization",
+        sourceRunId,
+        sourceTaskId,
         title: `${baseTitle} organization`,
       })
     );
@@ -254,6 +292,8 @@ export const buildAgentGoalDeliverableSpecs = ({
           title: `${baseTitle} report`,
         },
         label: "Markdown report",
+        sourceRunId,
+        sourceTaskId,
         title: `${baseTitle} report`,
       })
     );
@@ -276,6 +316,8 @@ export const buildAgentGoalDeliverableSpecs = ({
           title: `${baseTitle} summary`,
         },
         label: "Saved summary",
+        sourceRunId,
+        sourceTaskId,
         title: `${baseTitle} summary`,
       })
     );
@@ -348,6 +390,7 @@ export const prepareAgentGoalDeliverables = ({
   body = {},
   capabilityRegistry,
   payload = {},
+  sourceTaskId = "",
 } = {}) => {
   const existing = normalizeRecord(payload.deliverables, null);
 
@@ -358,6 +401,7 @@ export const prepareAgentGoalDeliverables = ({
   const specs = buildAgentGoalDeliverableSpecs({
     body,
     payload,
+    sourceTaskId,
   });
 
   if (specs.length === 0) {
@@ -405,13 +449,39 @@ const compactTaskOutput = (task = {}) => ({
   type: normalizeText(task.type, 80),
 });
 
+const compactArtifactOutput = (artifact = {}) => ({
+  artifactId: normalizeText(artifact.artifactId, 180),
+  artifactType: normalizeText(artifact.artifactType, 80),
+  fileName: normalizeText(artifact.fileName, 160),
+  format: normalizeText(artifact.format, 40),
+  mimeType: normalizeText(artifact.mimeType, 120),
+  sourceRunId: normalizeText(artifact.sourceRunId, 120),
+  sourceTaskId: normalizeText(artifact.sourceTaskId, 160),
+  status: normalizeText(artifact.status, 80),
+  title: normalizeText(artifact.title, 160),
+});
+
+const hasStoredArtifactReference = ({ artifact = {}, capabilityId } = {}) =>
+  Boolean(
+    normalizeText(artifact.artifactId, 180) &&
+      normalizeText(artifact.artifactType, 80) ===
+        ARTIFACT_TYPES_BY_CAPABILITY[capabilityId] &&
+      Object.values(ARTIFACT_STATUSES).includes(
+        normalizeText(artifact.status, 80)
+      )
+  );
+
 const compactCapabilityOutput = ({ capabilityId, result = {} } = {}) => {
   if (capabilityId === CAPABILITY_IDS.reportExport) {
-    return compactReportOutput(result);
+    return {
+      ...compactReportOutput(result),
+      ...compactArtifactOutput(result.artifact),
+    };
   }
 
   if (capabilityId === CAPABILITY_IDS.documentOrganize) {
     return {
+      ...compactArtifactOutput(result.artifact),
       documentCount: result.organization?.documentCount ?? 0,
       groupCount: toArray(result.organization?.groups).length,
       task: compactTaskOutput(result.task),
@@ -420,6 +490,7 @@ const compactCapabilityOutput = ({ capabilityId, result = {} } = {}) => {
 
   if (capabilityId === CAPABILITY_IDS.summaryCreate) {
     return {
+      ...compactArtifactOutput(result.artifact),
       docIds: normalizeDocIds(result.summary?.docIds),
       task: compactTaskOutput(result.task),
       title: normalizeText(result.summary?.title, 160),
@@ -493,7 +564,24 @@ export const executeAgentGoalDeliverables = async ({
         accessScope,
         approval,
         input: spec.input,
+        services: spec.artifactExecution
+          ? {
+              artifactExecution: spec.artifactExecution,
+            }
+          : {},
       });
+
+      if (
+        ARTIFACT_TYPES_BY_CAPABILITY[spec.capabilityId] &&
+        !hasStoredArtifactReference({
+          artifact: result.artifact,
+          capabilityId: spec.capabilityId,
+        })
+      ) {
+        throw new Error(
+          `${spec.label} did not return a stored workspace artifact reference.`
+        );
+      }
 
       results.push(
         completeSpec({

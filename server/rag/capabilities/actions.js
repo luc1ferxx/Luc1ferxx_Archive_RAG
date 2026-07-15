@@ -11,6 +11,8 @@ import {
   normalizeTextList,
   toArray,
 } from "./shared.js";
+import { ARTIFACT_TYPES } from "../workspace-artifacts/index.js";
+import { persistCapabilityArtifact } from "./artifacts.js";
 
 export const ACTION_TASK_TYPE = "agent_action";
 
@@ -25,6 +27,13 @@ const normalizeActionId = (value, fallback) =>
     .replace(/[^a-z0-9_.:-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 120) || fallback;
+
+const slugify = (value, fallback = "artifact") =>
+  normalizeText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || fallback;
 
 const compactDocument = (document = {}) => ({
   docId: normalizeText(document.docId),
@@ -86,6 +95,7 @@ const persistActionTask = async ({
   status,
   subject,
   summary,
+  taskId = "",
 } = {}) => {
   if (!actionTaskService?.createActionTask) {
     throw new Error("Action task service is required for action capabilities.");
@@ -100,7 +110,7 @@ const persistActionTask = async ({
     status,
     subject,
     summary,
-    taskId: input.taskId,
+    taskId: taskId || input.taskId,
   });
 };
 
@@ -216,6 +226,7 @@ const groupDocumentsByTags = (documents = []) => {
 export const createDocumentOrganizeCapability = ({
   actionTaskService,
   ragService,
+  workspaceArtifactService,
 } = {}) => ({
   id: CAPABILITY_IDS.documentOrganize,
   version: BUILT_IN_CAPABILITY_VERSION,
@@ -251,7 +262,7 @@ export const createDocumentOrganizeCapability = ({
     sanitizedInputFields: ["taskId", "title", "docIds", "strategy"],
     storesResult: true,
   },
-  execute: async ({ accessScope, input }) => {
+  execute: async ({ accessScope, input, services }) => {
     const selectedDocIds = new Set(normalizeTextList(input.docIds));
     const documents = toArray(ragService?.listDocuments?.(accessScope)).filter(
       (document) => selectedDocIds.size === 0 || selectedDocIds.has(document.docId)
@@ -262,6 +273,30 @@ export const createDocumentOrganizeCapability = ({
       strategy: normalizeText(input.strategy) || "profile_tags",
       title: normalizeText(input.title),
     };
+    const { reference } = await persistCapabilityArtifact({
+      accessScope,
+      artifact: {
+        artifactType: ARTIFACT_TYPES.documentCollection,
+        content: "",
+        docIds: documents.map((document) => document.docId),
+        fileName: `${slugify(organization.title, "document-collection")}.json`,
+        format: "json",
+        mimeType: "application/json",
+        payload: {
+          documentCount: organization.documentCount,
+          groups: organization.groups.map((group) => ({
+            docIds: group.docIds,
+            label: group.label,
+          })),
+          strategy: organization.strategy,
+        },
+        title: organization.title,
+      },
+      capabilityId: CAPABILITY_IDS.documentOrganize,
+      input,
+      services,
+      workspaceArtifactService,
+    });
     const task = await persistActionTask({
       accessScope,
       action: CAPABILITY_IDS.documentOrganize,
@@ -277,9 +312,13 @@ export const createDocumentOrganizeCapability = ({
         type: "documents",
       },
       summary: `Organized ${documents.length} document${documents.length === 1 ? "" : "s"}.`,
+      taskId:
+        normalizeText(input.taskId) ||
+        `artifact-action:${reference.artifactId}`,
     });
 
     return {
+      artifact: reference,
       organization,
       task,
       text: buildTaskText({
@@ -291,7 +330,10 @@ export const createDocumentOrganizeCapability = ({
   },
 });
 
-export const createSummaryCreateCapability = ({ actionTaskService } = {}) => ({
+export const createSummaryCreateCapability = ({
+  actionTaskService,
+  workspaceArtifactService,
+} = {}) => ({
   id: CAPABILITY_IDS.summaryCreate,
   version: BUILT_IN_CAPABILITY_VERSION,
   label: "Create Summary",
@@ -339,7 +381,7 @@ export const createSummaryCreateCapability = ({ actionTaskService } = {}) => ({
     ],
     storesResult: true,
   },
-  execute: async ({ accessScope, input }) => {
+  execute: async ({ accessScope, input, services }) => {
     const summary = {
       citations: toArray(input.citations),
       docIds: normalizeTextList(input.docIds),
@@ -347,6 +389,26 @@ export const createSummaryCreateCapability = ({ actionTaskService } = {}) => ({
       text: normalizeText(input.summary),
       title: normalizeText(input.title),
     };
+    const { reference } = await persistCapabilityArtifact({
+      accessScope,
+      artifact: {
+        artifactType: ARTIFACT_TYPES.summary,
+        citationManifest: summary.citations,
+        content: summary.text,
+        docIds: summary.docIds,
+        fileName: `${slugify(summary.title, "summary")}.md`,
+        format: "markdown",
+        mimeType: "text/markdown",
+        payload: {
+          metadata: summary.metadata,
+        },
+        title: summary.title,
+      },
+      capabilityId: CAPABILITY_IDS.summaryCreate,
+      input,
+      services,
+      workspaceArtifactService,
+    });
     const task = await persistActionTask({
       accessScope,
       action: CAPABILITY_IDS.summaryCreate,
@@ -362,9 +424,13 @@ export const createSummaryCreateCapability = ({ actionTaskService } = {}) => ({
         type: "summary",
       },
       summary: summary.text,
+      taskId:
+        normalizeText(input.taskId) ||
+        `artifact-action:${reference.artifactId}`,
     });
 
     return {
+      artifact: reference,
       summary,
       task,
       text: buildTaskText({
