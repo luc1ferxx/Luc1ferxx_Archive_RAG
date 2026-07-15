@@ -44,6 +44,7 @@ const tableNames = () => ({
   sessionMemoryTable: "rag_session_memory",
   taskEventsTable: "rag_task_events",
   tasksTable: "rag_tasks",
+  workspaceArtifactsTable: "rag_workspace_artifacts",
 });
 
 test("PostgreSQL migrator applies new SQL files transactionally and skips applied files", async () => {
@@ -88,6 +89,7 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
         "CREATE TABLE __AGENT_RUNS_TABLE__ (id text);",
         "CREATE TABLE __AGENT_RUN_EVENTS_TABLE__ (id text);",
         "CREATE TABLE __ADMIN_AUDIT_EVENTS_TABLE__ (id text);",
+        "CREATE TABLE __WORKSPACE_ARTIFACTS_TABLE__ (id text);",
       ].join("\n");
     },
     readdir: async () => [
@@ -128,6 +130,7 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
   assert.match(clientCalls[1].sql, /CREATE TABLE long_memory_items/);
   assert.match(clientCalls[1].sql, /CREATE TABLE rag_agent_run_events/);
   assert.match(clientCalls[1].sql, /CREATE TABLE rag_admin_audit_events/);
+  assert.match(clientCalls[1].sql, /CREATE TABLE rag_workspace_artifacts/);
   assert.deepEqual(clientCalls[2], {
     sql: "INSERT INTO schema_migrations (id) VALUES ($1)",
     values: ["002_apply.sql"],
@@ -152,6 +155,26 @@ test("admin audit migration avoids reserved authorization column name", async ()
 
   assert.match(migrationSql, /authorization_decision JSONB NOT NULL/);
   assert.doesNotMatch(migrationSql, /\bauthorization JSONB\b/);
+});
+
+test("workspace artifact migration enforces scoped idempotency", async () => {
+  const migrationSql = await readFile(
+    path.join(
+      __dirname,
+      "../db/migrations/009_create_workspace_artifacts.sql"
+    ),
+    "utf8"
+  );
+
+  assert.match(
+    migrationSql,
+    /UNIQUE\s*\(owner_user_id, workspace_id, idempotency_key\)/i
+  );
+  assert.match(
+    migrationSql,
+    /PRIMARY KEY\s*\(owner_user_id, workspace_id, artifact_id\)/i
+  );
+  assert.match(migrationSql, /status IN \('active', 'archived'\)/i);
 });
 
 test("PostgreSQL migrator rolls back failed migration files and can be retried", async () => {
@@ -259,6 +282,7 @@ test("PostgreSQL migrator resolves table names from runtime environment", async 
       SESSION_MEMORY_POSTGRES_TABLE: "env_session_memory",
       TASK_EVENTS_POSTGRES_TABLE: "env_task_events",
       TASKS_POSTGRES_TABLE: "env_tasks",
+      WORKSPACE_ARTIFACTS_POSTGRES_TABLE: "env_workspace_artifacts",
     },
     async () => {
       const renderedSql = [];
@@ -283,6 +307,7 @@ test("PostgreSQL migrator resolves table names from runtime environment", async 
             "__AGENT_RUNS_TABLE__",
             "__AGENT_RUN_EVENTS_TABLE__",
             "__ADMIN_AUDIT_EVENTS_TABLE__",
+            "__WORKSPACE_ARTIFACTS_TABLE__",
           ].join(" "),
         readdir: async () => ["001_runtime_tables.sql"],
         withPostgresClient: async (callback) =>
@@ -309,6 +334,7 @@ test("PostgreSQL migrator resolves table names from runtime environment", async 
           "env_agent_runs",
           "env_agent_run_events",
           "env_admin_audit_events",
+          "env_workspace_artifacts",
         ].join(" ")
       );
     }

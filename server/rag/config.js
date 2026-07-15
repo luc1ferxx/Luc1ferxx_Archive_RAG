@@ -335,6 +335,44 @@ export const getTasksPostgresTable = () =>
 export const getTaskEventsPostgresTable = () =>
   (process.env.TASK_EVENTS_POSTGRES_TABLE || "rag_task_events").trim();
 
+export const getWorkspaceArtifactStoreProvider = () =>
+  toChoice(process.env.WORKSPACE_ARTIFACT_STORE_PROVIDER, "auto", [
+    "auto",
+    "memory",
+    "postgres",
+  ]);
+
+export const getWorkspaceArtifactStoreConfigStatus = ({
+  postgresConfigured = isPostgresDatabaseConfigured(),
+  provider = getWorkspaceArtifactStoreProvider(),
+} = {}) => {
+  const backend =
+    provider === "postgres" || (provider === "auto" && postgresConfigured)
+      ? "postgres"
+      : "memory";
+
+  return {
+    backend,
+    persistent: backend === "postgres",
+    postgresConfigured,
+    provider,
+    reason:
+      provider === "postgres"
+        ? "env_postgres"
+        : provider === "memory"
+          ? "env_memory"
+          : postgresConfigured
+            ? "postgres_configured_default"
+            : "postgres_not_configured",
+  };
+};
+
+export const getWorkspaceArtifactsPostgresTable = () =>
+  (
+    process.env.WORKSPACE_ARTIFACTS_POSTGRES_TABLE ||
+    "rag_workspace_artifacts"
+  ).trim();
+
 export const getAgentRunStoreProvider = () =>
   toChoice(process.env.AGENT_RUN_STORE_PROVIDER, "auto", [
     "auto",

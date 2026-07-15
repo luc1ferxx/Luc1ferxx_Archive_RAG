@@ -20,6 +20,8 @@ import {
   getTaskStoreProvider,
   getTasksPostgresTable,
   getVectorStoreProvider,
+  getWorkspaceArtifactStoreConfigStatus,
+  getWorkspaceArtifactsPostgresTable,
   isStartupHealthStrict,
 } from "./rag/config.js";
 import { runPostgresMigrations } from "./rag/db-migrations.js";
@@ -394,6 +396,58 @@ const checkAdminAuditStoreHealth = async () => {
   }
 };
 
+const checkWorkspaceArtifactStoreHealth = async () => {
+  const configStatus = getWorkspaceArtifactStoreConfigStatus();
+
+  if (configStatus.backend === "memory") {
+    return buildEntry("ok", {
+      backend: "memory",
+      persistent: false,
+      provider: configStatus.provider,
+      reason: configStatus.reason,
+      message: "Workspace artifacts are using in-memory storage.",
+    });
+  }
+
+  const postgres = await checkPostgresHealth();
+
+  if (isErrorStatus(postgres.status)) {
+    return buildEntry("error", {
+      backend: "postgresql",
+      persistent: true,
+      provider: configStatus.provider,
+      table: getWorkspaceArtifactsPostgresTable(),
+      message: postgres.message,
+    });
+  }
+
+  try {
+    const migrations = await runPostgresMigrations();
+
+    return buildEntry("ok", {
+      backend: "postgresql",
+      persistent: true,
+      provider: configStatus.provider,
+      reason: configStatus.reason,
+      table: getWorkspaceArtifactsPostgresTable(),
+      appliedMigrations: migrations.appliedMigrations,
+      message:
+        "PostgreSQL workspace artifact storage is reachable and migrations are applied.",
+    });
+  } catch (error) {
+    return buildEntry("error", {
+      backend: "postgresql",
+      persistent: true,
+      provider: configStatus.provider,
+      table: getWorkspaceArtifactsPostgresTable(),
+      message:
+        error instanceof Error
+          ? error.message
+          : "Workspace artifact storage migration failed.",
+    });
+  }
+};
+
 export const buildHealthReport = async () => {
   const [
     apiAuth,
@@ -406,6 +460,7 @@ export const buildHealthReport = async () => {
     taskStore,
     agentRunStore,
     adminAuditStore,
+    workspaceArtifactStore,
   ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
@@ -417,6 +472,7 @@ export const buildHealthReport = async () => {
     checkTaskStoreHealth(),
     checkAgentRunStoreHealth(),
     checkAdminAuditStoreHealth(),
+    checkWorkspaceArtifactStoreHealth(),
   ]);
   const checks = {
     apiAuth,
@@ -429,6 +485,7 @@ export const buildHealthReport = async () => {
     taskStore,
     agentRunStore,
     adminAuditStore,
+    workspaceArtifactStore,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 
