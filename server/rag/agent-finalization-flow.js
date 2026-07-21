@@ -10,6 +10,8 @@ import {
 } from "./agent-synthesis.js";
 import { buildAgentResponse } from "./agent-response-builder.js";
 import { buildFinalizerSummary } from "./agent-trace.js";
+import { rebaseEvidenceResults } from "./source-labels.js";
+import { attachRetrievedEvidence } from "./citations.js";
 
 export const resolveAgentMode = ({ plan, ragResult, webResult } = {}) =>
   ragResult?.ok && ragResult.value.abstained && webResult?.ok
@@ -18,6 +20,20 @@ export const resolveAgentMode = ({ plan, ragResult, webResult } = {}) =>
 
 export const selectPrimaryCustomResult = (customSkillResults = []) =>
   customSkillResults.find((result) => result.ok);
+
+const getComparisonAnalysisSummary = (result) =>
+  result?.comparisonAnalysisSummary ??
+  result?.value?.comparisonAnalysisSummary ??
+  null;
+
+const attachResultRetrievedEvidence = (result = {}) => ({
+  ...result,
+  citations: attachRetrievedEvidence({
+    citations: result.citations ?? result.value?.citations ?? [],
+    retrievedContexts:
+      result.retrievedContexts ?? result.value?.retrievedContexts ?? [],
+  }),
+});
 
 export const selectRagSources = ({
   customSkillResults = [],
@@ -73,16 +89,36 @@ export const finalizeAgentRun = async ({
     ragResult,
     webResult,
   });
-  const primaryCustomResult = selectPrimaryCustomResult(customSkillResults);
+  const rebasedCustomSkillResults = rebaseEvidenceResults(
+    customSkillResults
+  ).results;
+  const rebasedCustomEvidenceResults = rebaseEvidenceResults(
+    customSkillResults.map(attachResultRetrievedEvidence)
+  ).results;
+  const primaryCustomResult = selectPrimaryCustomResult(
+    rebasedCustomSkillResults
+  );
   const directAnswerModes = buildDirectAnswerModes({
     customSkills,
   });
   const ragSources = selectRagSources({
-    customSkillResults,
+    customSkillResults: rebasedCustomSkillResults,
     ragResult,
     researchBrief,
     webResult,
   });
+  const verificationSources = researchBrief
+    ? researchBrief.evidenceCitations ?? ragSources
+    : ragResult?.ok
+    ? attachRetrievedEvidence({
+        citations: ragSources,
+        retrievedContexts: ragResult.value?.retrievedContexts ?? [],
+      })
+    : webResult?.ok
+    ? ragSources
+    : selectRagSources({
+        customSkillResults: rebasedCustomEvidenceResults,
+      });
   const baseAgentAnswer = buildSynthesisAnswer({
     plan: {
       ...plan,
@@ -91,7 +127,7 @@ export const finalizeAgentRun = async ({
     actionAnswer,
     ragResult,
     webResult,
-    customSkillResults,
+    customSkillResults: rebasedCustomSkillResults,
     arxivImportAnswer,
     inventoryAnswer,
     discoveryAnswer,
@@ -104,6 +140,14 @@ export const finalizeAgentRun = async ({
     researchBrief,
     webResult,
   });
+  const customComparisonResult = rebasedCustomSkillResults.find(
+    (result) => result.ok && getComparisonAnalysisSummary(result)
+  );
+  const comparisonAnalysisSummary = customComparisonResult
+    ? getComparisonAnalysisSummary(customComparisonResult)
+    : !primaryCustomResult && !researchBrief && ragResult?.ok && !webResult?.ok
+    ? ragResult.value.comparisonAnalysisSummary ?? null
+    : null;
 
   addTraceStep({
     type: "synthesis",
@@ -141,6 +185,8 @@ export const finalizeAgentRun = async ({
         agentMode,
         answerText: baseAgentAnswer,
         citations: ragSources,
+        evidenceCitations: verificationSources,
+        comparisonAnalysisSummary,
         docIds,
         documentRagSkill,
         primaryCustomResult,
@@ -159,6 +205,8 @@ export const finalizeAgentRun = async ({
     finalizer = finalizeAgentAnswer({
       answerText: baseAgentAnswer,
       citations: ragSources,
+      evidenceCitations: verificationSources,
+      comparisonAnalysisSummary,
     });
 
     recordWorkingMemoryClaimSupport({

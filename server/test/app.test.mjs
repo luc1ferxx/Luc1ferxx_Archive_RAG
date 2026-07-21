@@ -2664,7 +2664,7 @@ test("chat endpoint agent returns a structured research brief", async () => {
         askedQuestions.push(query);
 
         return {
-          text: `Finding for ${query}: refunds require 30 days notice. [Source 1]`,
+          text: "Refunds require 30 days notice. [Source 1]",
           citations: [
             {
               rank: 1,
@@ -2672,7 +2672,7 @@ test("chat endpoint agent returns a structured research brief", async () => {
               fileName: "refund-contract.pdf",
               pageNumber: 4,
               chunkIndex: askedQuestions.length,
-              excerpt: `Finding for ${query}: refunds require 30 days notice.`,
+              excerpt: "Refunds require 30 days notice.",
             },
           ],
           abstained: false,

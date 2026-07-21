@@ -33,6 +33,8 @@ import {
   getRetrievalTopK,
 } from "../rag/config.js";
 import { evaluateClaimSupport } from "../rag/agent-self-check.js";
+import { attachRetrievedEvidence } from "../rag/citations.js";
+import { filterCitationsToSourceRanks } from "../rag/source-labels.js";
 import { resetDocumentRegistry } from "../rag/doc-registry.js";
 import { resetSessionMemory } from "../rag/memory.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
@@ -347,7 +349,6 @@ const evaluateCase = async ({
     { includeRetrievedContexts: true }
   );
   const durationMs = Math.round(performance.now() - startedAt);
-  const citations = summarizeCitations(response.citations ?? [], docKeyByDocId);
   const retrievedContexts = summarizeRetrievedContexts(
     response.retrievedContexts,
     docKeyByDocId
@@ -357,10 +358,6 @@ const evaluateCase = async ({
     pagesByDocKey,
   });
   const abstained = getResponseAbstained(response);
-  const coverage = evaluateExpectedCoverage({
-    citations,
-    expectedEvidence: testCase.expectedEvidence,
-  });
   const answerExpectationHit = evaluateAnswerExpectation({
     answer: response.text,
     expectedAnswerIncludes: testCase.expectedAnswerIncludes,
@@ -374,10 +371,27 @@ const evaluateCase = async ({
       }
     : evaluateClaimSupport({
         answerText: response.text,
-        citations: response.citations ?? [],
+        citations: attachRetrievedEvidence({
+          citations: response.citations ?? [],
+          retrievedContexts: response.retrievedContexts ?? [],
+        }),
+        comparisonAnalysisSummary: response.comparisonAnalysisSummary,
       });
   const claimSupportHit =
     !claimSupport.checked || claimSupport.unsupportedClaimCount === 0;
+  const answerCitations = abstained
+    ? response.citations ?? []
+    : filterCitationsToSourceRanks({
+        sourceRanks: claimSupport.claims.flatMap(
+          (claim) => claim.supportedSourceRanks ?? []
+        ),
+        citations: response.citations ?? [],
+      });
+  const citations = summarizeCitations(answerCitations, docKeyByDocId);
+  const coverage = evaluateExpectedCoverage({
+    citations,
+    expectedEvidence: testCase.expectedEvidence,
+  });
 
   const passed = testCase.shouldAbstain
     ? abstained
@@ -412,7 +426,10 @@ const evaluateCase = async ({
     referenceContexts,
     ragasSample: buildRagasSample({
       testCase,
-      response,
+      response: {
+        ...response,
+        citations: answerCitations,
+      },
       docKeyByDocId,
       referenceContexts,
     }),

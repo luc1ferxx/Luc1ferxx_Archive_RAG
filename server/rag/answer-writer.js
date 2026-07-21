@@ -36,6 +36,13 @@ const comparisonPromptV1 = PromptTemplate.fromTemplate(
 Separate agreement, difference, and uncertainty.
 If a document lacks evidence, say so explicitly.
 Do not treat a related but different policy as evidence for the asked policy.
+Write one atomic evidence claim per bullet; do not join separate facts or document-specific values with "and" or semicolons.
+Prefer the evidence wording and do not strengthen "may" or "with approval" into "required".
+For claims using both, only, differ, while, or versus, cite every source participating in the relationship.
+Put all source labels together at the end of the claim without semicolons between labels.
+Only state that there are no material or substantive differences when "High-similarity pairs without explicit conflicts" covers every selected document pair.
+Do not infer that an excerpt omits unspecified topics or speculate that details may exist elsewhere.
+When diagnostics report "Documents without strong evidence: none", leave the Gaps or uncertainty section empty.
 Use long-term memory only for user preferences or stable notes, never as document evidence.
 Keep the answer concise and cite source labels such as Source 1 when making evidence-based claims.
 
@@ -63,6 +70,13 @@ Separate agreement, difference, and uncertainty.
 If a document lacks evidence, say so explicitly.
 Do not treat a related but different policy as evidence for the asked policy.
 If the diagnostics indicate near-duplicate evidence without explicit conflicts, do not invent differences.
+Write one atomic evidence claim per bullet; do not join separate facts or document-specific values with "and" or semicolons.
+Prefer the evidence wording and do not strengthen "may" or "with approval" into "required".
+For claims using both, only, differ, while, or versus, cite every source participating in the relationship.
+Put all source labels together at the end of the claim without semicolons between labels.
+Only state that there are no material or substantive differences when "High-similarity pairs without explicit conflicts" covers every selected document pair.
+Do not infer that an excerpt omits unspecified topics or speculate that details may exist elsewhere.
+When diagnostics report "Documents without strong evidence: none", leave the Gaps or uncertainty section empty.
 Use long-term memory only for user preferences or stable notes, never as document evidence.
 Keep the answer concise and cite source labels such as Source 1 when making evidence-based claims.
 
@@ -125,6 +139,13 @@ Follow these rules strictly:
 - Use long-term memory only for user preferences or stable notes, never as document evidence or a citation source.
 - Do not treat a related but different policy as evidence for the asked policy.
 - Do not fill evidence gaps with assumptions.
+- Write one atomic evidence claim per bullet; do not join separate facts or document-specific values with "and" or semicolons.
+- Prefer the evidence wording and do not strengthen "may" or "with approval" into "required".
+- For claims using both, only, differ, while, or versus, cite every source participating in the relationship.
+- Put all source labels together at the end of the claim without semicolons between labels.
+- Only state that there are no material or substantive differences when "High-similarity pairs without explicit conflicts" covers every selected document pair.
+- Do not infer that an excerpt omits unspecified topics or speculate that details may exist elsewhere.
+- When diagnostics report "Documents without strong evidence: none", leave the Gaps or uncertainty section empty.
 - Every evidence-based sentence must end with citations like [Source 1].
 - Do not cite a source unless it directly supports the sentence.
 - Keep the answer concise and structured.`,
@@ -166,6 +187,13 @@ Follow these rules strictly:
 - Do not fill evidence gaps with assumptions.
 - If the diagnostics say the evidence is near-duplicate and no explicit conflict is present, do not invent differences.
 - Only describe a difference when the provided evidence shows a concrete difference.
+- Write one atomic evidence claim per bullet; do not join separate facts or document-specific values with "and" or semicolons.
+- Prefer the evidence wording and do not strengthen "may" or "with approval" into "required".
+- For claims using both, only, differ, while, or versus, cite every source participating in the relationship.
+- Put all source labels together at the end of the claim without semicolons between labels.
+- Only state that there are no material or substantive differences when "High-similarity pairs without explicit conflicts" covers every selected document pair.
+- Do not infer that an excerpt omits unspecified topics or speculate that details may exist elsewhere.
+- When diagnostics report "Documents without strong evidence: none", leave the Gaps or uncertainty section empty.
 - Every evidence-based sentence must end with citations like [Source 1].
 - Do not cite a source unless it directly supports the sentence.
 - Keep the answer concise and structured.`,
@@ -243,7 +271,7 @@ const splitEvidenceSentences = (value = "") =>
   normalizeWhitespace(value)
     .split(SENTENCE_BOUNDARY)
     .map((sentence) => normalizeWhitespace(sentence))
-    .filter((sentence) => sentence && /[.!?\u3002\uff01\uff1f]$/.test(sentence));
+    .filter(Boolean);
 
 const buildResultSignalSet = (result) => ({
   canonicalSentenceSet: new Set(
@@ -364,6 +392,7 @@ const buildDocEvidenceEntries = (bundle) => {
       entry.sentences.push({
         text: sentence,
         canonical,
+        rank: result.rank,
       });
     }
   }
@@ -380,7 +409,7 @@ const buildDocEvidenceEntries = (bundle) => {
   }));
 };
 
-const collectSharedFactLines = (docEntries, sourceLabels, limit = 3) => {
+const collectSharedFactLines = (docEntries, limit = 3) => {
   if (docEntries.length === 0) {
     return [];
   }
@@ -399,21 +428,31 @@ const collectSharedFactLines = (docEntries, sourceLabels, limit = 3) => {
   return docEntries[0].sentences
     .filter((sentence) => canonicalCounts.get(sentence.canonical) === docEntries.length)
     .slice(0, limit)
-    .map(
-      (sentence) => `- ${sentence.text}${sourceLabels ? ` ${sourceLabels}` : ""}`
-    );
+    .map((sentence) => {
+      const sourceLabels = formatSourceLabels(
+        docEntries
+          .map(
+            (entry) =>
+              entry.sentences.find(
+                (candidate) => candidate.canonical === sentence.canonical
+              )?.rank
+          )
+          .filter(Boolean)
+      );
+
+      return `- ${sentence.text}${sourceLabels ? ` ${sourceLabels}` : ""}`;
+    });
 };
 
 const buildPerDocumentFactLines = (docEntries) =>
-  docEntries.map((entry) => {
-    const sourceLabels = formatSourceLabels(entry.ranks);
-    const sentenceSummary = entry.sentences
-      .slice(0, 2)
-      .map((sentence) => sentence.text.replace(/[.!?\u3002\uff01\uff1f]+$/, ""))
-      .join("; ");
+  docEntries.flatMap((entry) => [
+    `${entry.fileName}:`,
+    ...entry.sentences.slice(0, 2).map((sentence) => {
+      const sourceLabels = formatSourceLabels([sentence.rank]);
 
-    return `- ${entry.fileName}: ${sentenceSummary || "The retrieved evidence aligns with the other selected documents."}${sourceLabels ? ` ${sourceLabels}` : ""}`;
-  });
+      return `- ${sentence.text}${sourceLabels ? ` ${sourceLabels}` : ""}`;
+    }),
+  ]);
 
 const buildComparisonDiagnostics = ({ analysis, nearDuplicateGuardEnabled }) => {
   const diagnostics = [
@@ -465,9 +504,11 @@ const buildComparisonDiagnostics = ({ analysis, nearDuplicateGuardEnabled }) => 
 };
 
 const buildNoMaterialDifferenceAnswer = ({ bundle, analysis }) => {
-  const summarySources = formatSourceLabels(bundle.rankedResults.map((result) => result.rank));
   const docEvidenceEntries = buildDocEvidenceEntries(bundle);
-  const agreementLines = collectSharedFactLines(docEvidenceEntries, summarySources);
+  const summarySources = formatSourceLabels(
+    docEvidenceEntries.map((entry) => entry.ranks[0]).filter(Boolean)
+  );
+  const agreementLines = collectSharedFactLines(docEvidenceEntries);
   const perDocumentLines = buildPerDocumentFactLines(docEvidenceEntries);
   const lines = [
     "Summary:",

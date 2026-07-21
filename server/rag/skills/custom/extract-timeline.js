@@ -61,6 +61,7 @@ export const createExtractTimelineSkill = () => ({
     const value = await ragService.chat(docIds, timelineQuestion, {
       sessionId: null,
       userId: null,
+      includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,
     });

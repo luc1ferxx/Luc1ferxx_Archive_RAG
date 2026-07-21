@@ -279,7 +279,7 @@ test("built-in capabilities execute whitelisted adapters", async () => {
   );
   const citationResult = await registry.execute(CAPABILITY_IDS.citationVerify, {
     input: {
-      answerText: "Remote work requires manager approval.",
+      answerText: "Remote work requires manager approval. [Source 1]",
       citations: [
         {
           docId: "doc-remote",

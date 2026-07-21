@@ -175,6 +175,246 @@ test("finalization flow finalizes cited document answers and records agent trace
   assert.equal(recordedAgentTraces[0].status, 200);
 });
 
+test("finalization flow preserves comparison conclusions backed by the matching analysis", async () => {
+  const trace = [];
+  const response = await finalizeAgentRun({
+    addTraceStep: (step) => trace.push(step),
+    buildAgentObservability: ({ agentMode }) => ({ agentMode }),
+    customSkillResults: [],
+    customSkills: [],
+    documentRagSkill: {
+      id: "document_rag",
+      version: "1.0.0",
+      label: "Document RAG",
+    },
+    getAgentSkills: () => [],
+    getBudgetSnapshot: () => ({ used: { documentRagCalls: 1 } }),
+    plan: { mode: "document" },
+    question: "Compare the remote work policies.",
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "No evidence-backed material differences were found across the selected documents based on the retrieved evidence. [Source 1] [Source 2]",
+          "Employees may work remotely 2 days per week with manager approval. [Source 1] [Source 2]",
+        ].join("\n"),
+        comparisonAnalysisSummary: {
+          comparedDocIds: ["doc-alpha", "doc-beta"],
+          explicitConflictPairs: [],
+          shouldShortCircuitNoMaterialDifference: true,
+        },
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            excerpt:
+              "Employees may work remotely 2 days per week with manager approval.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            excerpt:
+              "Employees may work remotely 2 days per week with manager approval.",
+          },
+        ],
+        abstained: false,
+      },
+    },
+    recordAgentTrace: async () => {},
+    recordWorkingMemoryClaimSupport: () => {},
+    researchBrief: null,
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    trace,
+    webResult: null,
+    workingMemory: {},
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(
+    response.body.agentAnswer,
+    /No evidence-backed material differences were found/i
+  );
+  assert.equal(
+    trace.find((step) => step.type === "answer_finalizer")?.detail.changed,
+    false
+  );
+});
+
+test("finalization flow preserves comparison conclusions from a later custom skill result", async () => {
+  const trace = [];
+  const response = await finalizeAgentRun({
+    addTraceStep: (step) => trace.push(step),
+    buildAgentObservability: ({ agentMode }) => ({ agentMode }),
+    customSkillResults: [
+      {
+        ok: true,
+        skillId: "extract_timeline",
+        skillVersion: "1.0.0",
+        label: "Extract Timeline",
+        text: "Employees may work remotely 2 days per week with manager approval. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            excerpt:
+              "Employees may work remotely 2 days per week with manager approval.",
+          },
+        ],
+        value: {},
+      },
+      {
+        ok: true,
+        skillId: "compare_documents",
+        skillVersion: "1.0.0",
+        label: "Compare Documents",
+        text: [
+          "No evidence-backed material differences were found across the selected documents based on the retrieved evidence. [Source 1] [Source 2]",
+          "Employees may work remotely 2 days per week with manager approval. [Source 1] [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            excerpt:
+              "Employees may work remotely 2 days per week with manager approval.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            excerpt:
+              "Employees may work remotely 2 days per week with manager approval.",
+          },
+        ],
+        value: {
+          comparisonAnalysisSummary: {
+            comparedDocIds: ["doc-alpha", "doc-beta"],
+            explicitConflictPairs: [],
+            shouldShortCircuitNoMaterialDifference: true,
+          },
+        },
+      },
+    ],
+    customSkills: [],
+    docIds: ["doc-alpha", "doc-beta"],
+    getAgentSkills: () => [],
+    getBudgetSnapshot: () => ({ used: { customSkillCalls: 2 } }),
+    plan: { mode: "skill_chain" },
+    question: "Build a timeline and compare project changes.",
+    recordAgentTrace: async () => {},
+    recordWorkingMemoryClaimSupport: () => {},
+    recordWorkingMemoryGaps: () => {},
+    researchBrief: null,
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    trace,
+    webResult: null,
+    workingMemory: {},
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(
+    response.body.agentAnswer,
+    /No evidence-backed material differences were found/i
+  );
+  assert.equal(
+    trace.find((step) => step.type === "answer_finalizer")?.detail.changed,
+    false
+  );
+});
+
+test("finalization hydrates rebased custom source ranks without exposing full evidence", async () => {
+  const trace = [];
+  const response = await finalizeAgentRun({
+    addTraceStep: (step) => trace.push(step),
+    buildAgentObservability: ({ agentMode }) => ({ agentMode }),
+    customSkillResults: [
+      {
+        ok: true,
+        skillId: "extract_timeline",
+        skillVersion: "1.0.0",
+        label: "Extract Timeline",
+        text: "Alpha requires archive-owner approval. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            chunkIndex: 1,
+            excerpt: "Alpha background without the approval rule.",
+          },
+        ],
+        value: {
+          retrievedContexts: [
+            {
+              rank: 1,
+              docId: "doc-alpha",
+              chunkIndex: 1,
+              text: "Alpha requires archive-owner approval.",
+            },
+          ],
+        },
+      },
+      {
+        ok: true,
+        skillId: "risk_review",
+        skillVersion: "1.0.0",
+        label: "Risk Review",
+        text: "Beta requires security-owner approval. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-beta",
+            chunkIndex: 2,
+            excerpt: "Beta background without the approval rule.",
+          },
+        ],
+        value: {
+          retrievedContexts: [
+            {
+              rank: 1,
+              docId: "doc-beta",
+              chunkIndex: 2,
+              text: "Beta requires security-owner approval.",
+            },
+          ],
+        },
+      },
+    ],
+    customSkills: [],
+    docIds: ["doc-alpha", "doc-beta"],
+    getAgentSkills: () => [],
+    getBudgetSnapshot: () => ({ used: { customSkillCalls: 2 } }),
+    plan: { mode: "skill_chain" },
+    question: "Review both policies.",
+    recordAgentTrace: async () => {},
+    recordWorkingMemoryClaimSupport: () => {},
+    recordWorkingMemoryGaps: () => {},
+    researchBrief: null,
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    trace,
+    webResult: null,
+    workingMemory: {},
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.body.agentAnswer, /archive-owner approval/i);
+  assert.match(response.body.agentAnswer, /security-owner approval/i);
+  assert.deepEqual(
+    response.body.ragSources.map((citation) => citation.rank),
+    [1, 2]
+  );
+  assert.ok(
+    response.body.ragSources.every(
+      (citation) => citation.evidenceText === undefined
+    )
+  );
+  assert.equal(
+    trace.find((step) => step.label === "Final Self Check")?.status,
+    "completed"
+  );
+});
+
 test("finalization flow verifies and finalizes research brief answers", async () => {
   const trace = [];
   const claimSupportRecords = [];

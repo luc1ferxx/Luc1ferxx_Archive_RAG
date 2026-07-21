@@ -145,7 +145,7 @@ test("follow-up retrieval persists a deterministic completed run step", async ()
         memoryApplied: false,
         resolvedQuery: question,
         text:
-          "Remote work requires manager approval. The satellite stipend is 500 dollars. [Source 1]",
+          "Remote work requires manager approval. [Source 1] The satellite stipend is 500 dollars. [Source 1]",
       },
       {
         abstained: false,

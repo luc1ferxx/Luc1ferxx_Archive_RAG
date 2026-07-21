@@ -1,4 +1,5 @@
 import { normalizeWhitespace } from "./text-utils.js";
+import { rebaseEvidenceResults } from "./source-labels.js";
 
 const MAX_QUESTIONS = 3;
 
@@ -105,10 +106,18 @@ const formatFinding = (result, index) => {
 };
 
 export const formatResearchBrief = ({ question, documents = [], plan, results }) => {
-  const citations = dedupeResearchCitations(results);
-  const completedResults = results.filter((result) => result.status === "completed");
-  const failedResults = results.filter((result) => result.status === "failed");
-  const abstainedResults = results.filter((result) => result.abstained);
+  const rebasedEvidence = rebaseEvidenceResults(results);
+  const normalizedResults = rebasedEvidence.results;
+  const citations = rebasedEvidence.citations;
+  const completedResults = normalizedResults.filter(
+    (result) => result.status === "completed"
+  );
+  const failedResults = normalizedResults.filter(
+    (result) => result.status === "failed"
+  );
+  const abstainedResults = normalizedResults.filter(
+    (result) => result.abstained
+  );
   const text = [
     "Executive Summary",
     completedResults.length > 0
@@ -148,7 +157,7 @@ export const formatResearchBrief = ({ question, documents = [], plan, results })
       status:
         results.find((result) => result.id === entry.id)?.status ?? entry.status,
     })),
-    findings: results,
+    findings: normalizedResults,
     citations,
     text,
   };

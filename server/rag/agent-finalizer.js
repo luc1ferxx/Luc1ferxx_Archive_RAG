@@ -1,4 +1,5 @@
 import { evaluateClaimSupport } from "./agent-self-check.js";
+import { filterCitationsToSourceRanks } from "./source-labels.js";
 
 const SOURCE_LABEL_PATTERN = /\[(?:source|来源)\s*\d+\]/gi;
 const SENTENCE_END_PATTERN = /[.!?。！？]$/;
@@ -21,7 +22,6 @@ const buildSourceLabelSuffix = (citations = [], allCitations = citations) =>
       normalizeSourceLabel(citation, allCitations.indexOf(citation))
     )
     .filter(Boolean)
-    .slice(0, 4)
     .join(" ");
 
 const stripSourceLabels = (value = "") =>
@@ -70,33 +70,19 @@ export const normalizeClaimSupportForHeadings = (claimSupport) => {
 const ensureTerminalPunctuation = (value = "") =>
   SENTENCE_END_PATTERN.test(value) ? value : `${value}.`;
 
-const getSupportingCitations = ({ claimText, citations = [] }) => {
-  const supportingCitations = citations.filter((citation) => {
-    const check = evaluateClaimSupport({
-      answerText: claimText,
-      citations: [citation],
-    });
-
-    return (
-      check.checked &&
-      check.supportedClaimCount > 0 &&
-      check.unsupportedClaimCount === 0
-    );
-  });
-
-  return supportingCitations.length > 0 ? supportingCitations : citations;
-};
-
-const formatSupportedClaim = ({ claimText, citations }) => {
-  const stripped = stripSourceLabels(claimText).replace(/^[-*]\s+/, "").trim();
+const formatSupportedClaim = ({ claim, citations }) => {
+  const stripped = stripSourceLabels(claim.text)
+    .replace(/^[-*]\s+/, "")
+    .trim();
 
   if (!hasText(stripped)) {
     return "";
   }
 
   const sentence = ensureTerminalPunctuation(stripped);
-  const supportingCitations = getSupportingCitations({
-    claimText: stripped,
+  const verifiedSourceRanks = claim.supportedSourceRanks ?? [];
+  const supportingCitations = filterCitationsToSourceRanks({
+    sourceRanks: verifiedSourceRanks,
     citations,
   });
   const sourceLabelSuffix = buildSourceLabelSuffix(supportingCitations, citations);
@@ -116,7 +102,7 @@ const buildFinalizedText = ({ answerText, claimSupport, citations }) => {
   const finalizedClaims = supportedEvidenceClaims
     .map((claim) =>
       formatSupportedClaim({
-        claimText: claim.text,
+        claim,
         citations,
       })
     )
@@ -125,11 +111,17 @@ const buildFinalizedText = ({ answerText, claimSupport, citations }) => {
   return [...preservedHeadings, ...finalizedClaims].join("\n");
 };
 
-export const finalizeAgentAnswer = ({ answerText = "", citations = [] } = {}) => {
+export const finalizeAgentAnswer = ({
+  answerText = "",
+  citations = [],
+  evidenceCitations = citations,
+  comparisonAnalysisSummary = null,
+} = {}) => {
   const text = String(answerText ?? "").trim();
   const claimSupport = evaluateClaimSupport({
     answerText: text,
-    citations,
+    citations: evidenceCitations,
+    comparisonAnalysisSummary,
   });
 
   if (!hasText(text) || citations.length === 0 || !claimSupport.checked) {

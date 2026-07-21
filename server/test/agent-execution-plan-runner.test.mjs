@@ -593,7 +593,7 @@ test("execution plan runner returns clarification before web fallback when docum
         callOrder.push(AGENT_SKILL_IDS.documentRag);
 
         return {
-          text: "Remote work requires manager approval. The satellite stipend is 500 dollars. [Source 1]",
+          text: "Remote work requires manager approval. [Source 1] The satellite stipend is 500 dollars. [Source 1]",
           citations: [
             {
               docId: "doc-1",

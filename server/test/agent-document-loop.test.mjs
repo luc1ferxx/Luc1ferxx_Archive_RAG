@@ -112,7 +112,7 @@ test("document loop runs focused follow-up when primary evidence lacks claim sup
   const harness = createLoopHarness({
     ragResponses: [
       {
-        text: "Remote work requires manager approval. The satellite stipend is 500 dollars. [Source 1]",
+        text: "Remote work requires manager approval. [Source 1] The satellite stipend is 500 dollars. [Source 1]",
         citations: [
           {
             docId: "doc-1",
@@ -165,7 +165,7 @@ test("document loop returns clarification when follow-up budget is exhausted", a
     },
     ragResponses: [
       {
-        text: "Remote work requires manager approval. The satellite stipend is 500 dollars. [Source 1]",
+        text: "Remote work requires manager approval. [Source 1] The satellite stipend is 500 dollars. [Source 1]",
         citations: [
           {
             docId: "doc-1",

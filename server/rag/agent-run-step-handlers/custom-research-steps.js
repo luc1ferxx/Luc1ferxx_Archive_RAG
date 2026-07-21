@@ -439,6 +439,7 @@ export const createResearchQuestionStepExecutor = ({ ragService } = {}) => async
     execute: async ({ input: stepInput }) =>
       ragService.chat(stepInput.docIds, stepInput.question, {
         accessScope,
+        includeRetrievedContexts: true,
         retrievalPlan: stepInput.retrievalPlan,
         sessionId: stepInput.sessionId,
         userId: stepInput.userId,

@@ -302,9 +302,10 @@ test("agent run step executor resumes a persisted pending document step", async 
     agentRunService,
     executeDocumentRagStep: createDocumentRagStepExecutor({
       ragService: {
-        chat: async (docIds, question) => {
+        chat: async (docIds, question, options) => {
           calls.push({
             docIds,
+            options,
             question,
           });
 
@@ -360,6 +361,7 @@ test("agent run step executor resumes a persisted pending document step", async 
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].docIds, ["doc-1"]);
   assert.equal(calls[0].question, "What is annual leave?");
+  assert.equal(calls[0].options.includeRetrievedContexts, true);
   assert.equal(resumed.run.status, AGENT_RUN_STATUSES.completed);
   assert.equal(resumed.response.agentMode, "document");
   assert.match(resumed.response.agentAnswer, /Resumed document answer/);
@@ -1049,6 +1051,7 @@ test("agent run step executor retries research_question through the wired resear
   assert.deepEqual(calls[0].docIds, ["doc-1"]);
   assert.equal(calls[0].question, "What facts matter?");
   assert.deepEqual(calls[0].options.accessScope, accessScope);
+  assert.equal(calls[0].options.includeRetrievedContexts, true);
   assert.equal(retried.response.agentMode, "research_brief");
   assert.equal(retried.response.researchBrief.findings[0].id, "rq-1");
   assert.match(retried.response.agentAnswer, /Retried research answer/);

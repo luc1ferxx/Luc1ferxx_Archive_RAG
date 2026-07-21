@@ -61,6 +61,7 @@ export const createSummarizeContractSkill = () => ({
     const value = await ragService.chat(docIds, summaryQuestion, {
       sessionId: null,
       userId: null,
+      includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,
     });

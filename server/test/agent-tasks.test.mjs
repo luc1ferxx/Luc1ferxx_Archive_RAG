@@ -1459,7 +1459,7 @@ test("postgres-backed real agent task restart continues with persisted run steps
         ],
         memoryApplied: false,
         resolvedQuery: "What renewal risk does the selected document describe?",
-        text: "Renewal risk is low because auto-renewal requires notice. [Source 1]",
+        text: "Auto-renewal requires notice before the deadline. [Source 1]",
       },
     ],
   });

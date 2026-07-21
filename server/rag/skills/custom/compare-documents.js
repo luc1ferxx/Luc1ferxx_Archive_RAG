@@ -61,6 +61,7 @@ export const createCompareDocumentsSkill = () => ({
     const value = await ragService.chat(docIds, compareQuestion, {
       sessionId: null,
       userId: null,
+      includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,
     });

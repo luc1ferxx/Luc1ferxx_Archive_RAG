@@ -318,6 +318,9 @@ const buildComparisonPairTrace = (pair = {}) => ({
 });
 
 const buildComparisonAnalysisSummaryTrace = (analysis = {}) => ({
+  comparedDocIds: (analysis.perDocumentSummary ?? [])
+    .map((entry) => entry.docId)
+    .filter(Boolean),
   evidenceBalance: analysis.evidenceBalance ?? null,
   nearDuplicatePairs: (analysis.nearDuplicatePairs ?? []).map(
     buildComparisonPairTrace
@@ -419,6 +422,8 @@ const executeComparisonRag = async ({
   const bundle = prepareComparisonSourceBundle({
     alignment,
   });
+  const comparisonAnalysisSummary =
+    buildComparisonAnalysisSummaryTrace(analysis);
   const traceFields = {
     ...buildCommonTraceFields({
       agentRetrievalPlan,
@@ -430,7 +435,7 @@ const executeComparisonRag = async ({
     confidence: buildConfidenceTrace(confidence),
     evidenceSummary,
     alignmentSummary: buildAlignmentSummaryTrace(alignment),
-    comparisonAnalysisSummary: buildComparisonAnalysisSummaryTrace(analysis),
+    comparisonAnalysisSummary,
     finalSourceBundle: buildBundleTrace(bundle),
   };
 
@@ -443,25 +448,28 @@ const executeComparisonRag = async ({
         citations: bundle.citations,
         retrievedContexts: bundle.retrievedContexts,
         evidenceSummary,
+        comparisonAnalysisSummary,
         abstained: true,
         abstainReason: confidence.reason,
       },
     };
   }
 
+  const generatedAnswer = await writeComparisonAnswer({
+    query,
+    resolvedQuery,
+    bundle,
+    analysis,
+    preferenceBlock,
+  });
   return {
     routeMode: route.mode,
     traceFields,
     response: {
-      ...(await writeComparisonAnswer({
-        query,
-        resolvedQuery,
-        bundle,
-        analysis,
-        preferenceBlock,
-      })),
+      ...generatedAnswer,
       retrievedContexts: bundle.retrievedContexts,
       evidenceSummary,
+      comparisonAnalysisSummary,
     },
   };
 };

@@ -19,13 +19,16 @@ export { hasCheckableCitationText };
 export const evaluateFinalAnswerEvidence = ({
   answerText = "",
   citations = [],
+  evidenceCitations = citations,
+  comparisonAnalysisSummary = null,
   docIds = [],
   requireDocCoverage = false,
 } = {}) =>
   evaluateAnswerEvidence({
     answerLabel: "Final answer",
     answerText,
-    citations,
+    citations: evidenceCitations,
+    comparisonAnalysisSummary,
     docIds,
     emptyAnswerReason: "Final answer is empty.",
     missingCheckableCitationReason:
@@ -107,6 +110,8 @@ export const runFinalAnswerVerification = ({
   agentMode,
   answerText,
   citations = [],
+  evidenceCitations = citations,
+  comparisonAnalysisSummary = null,
   docIds = [],
   documentRagSkill,
   primaryCustomResult,
@@ -147,6 +152,8 @@ export const runFinalAnswerVerification = ({
   const check = evaluateFinalAnswerEvidence({
     answerText: verificationAnswerText || answerText,
     citations,
+    evidenceCitations,
+    comparisonAnalysisSummary,
     docIds,
     requireDocCoverage:
       agentMode === SKILL_CHAIN_MODE || Boolean(primaryCustomResult || researchBrief),
@@ -198,7 +205,7 @@ export const runFinalAnswerVerification = ({
     });
   }
 
-  if (!hasCheckableCitationText(citations)) {
+  if (!hasCheckableCitationText(evidenceCitations)) {
     addTraceStep?.({
       type: "answer_finalizer",
       label: "Answer Finalizer",
@@ -224,6 +231,8 @@ export const runFinalAnswerVerification = ({
     const researchFinalizer = finalizeAgentAnswer({
       answerText: verificationAnswerText || answerText,
       citations,
+      evidenceCitations,
+      comparisonAnalysisSummary,
     });
     const finalizer = researchFinalizer.changed
       ? {
@@ -260,6 +269,8 @@ export const runFinalAnswerVerification = ({
   const finalizer = finalizeAgentAnswer({
     answerText,
     citations,
+    evidenceCitations,
+    comparisonAnalysisSummary,
   });
 
   addTraceStep?.({

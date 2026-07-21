@@ -58,6 +58,48 @@ test("built-in skill registry selects document and web skills with stable metada
   );
 });
 
+test("document-backed custom skills retain retrieved contexts for internal verification", async () => {
+  const registry = createDefaultSkillRegistry();
+
+  for (const skillId of Object.values(CUSTOM_SKILL_IDS)) {
+    let receivedOptions = null;
+    const skill = registry.get(skillId);
+
+    await skill.execute({
+      accessScope: {
+        userId: "alice",
+        workspaceId: "workspace-a",
+      },
+      docIds: ["doc-1", "doc-2"],
+      question: "Review the selected documents.",
+      ragService: {
+        chat: async (_docIds, _question, options) => {
+          receivedOptions = options;
+
+          return {
+            abstained: false,
+            citations: [],
+            text: "No supported finding.",
+          };
+        },
+        listDocuments: () => [
+          { docId: "doc-1", fileName: "alpha.pdf" },
+          { docId: "doc-2", fileName: "beta.pdf" },
+        ],
+      },
+      retrievalPlan: {
+        intent: "fact",
+      },
+    });
+
+    assert.equal(
+      receivedOptions.includeRetrievedContexts,
+      true,
+      `${skillId} must retain internal retrieved evidence`
+    );
+  }
+});
+
 test("built-in skill registry selects arxiv import for topic fetches", () => {
   const registry = createBuiltInSkillRegistry();
   const selectedSkills = registry.select({
@@ -1338,7 +1380,7 @@ test("agent rag chains timeline extraction into document comparison for project 
       }
 
       return {
-        text: "Document Comparison\n- Difference: Project Alpha changed scope after the January start. [Source 1] [Source 2]",
+        text: "Document Comparison\n- Project Alpha started on 2024-01-01. [Source 1]\n- Project Alpha changed scope on 2024-02-01. [Source 2]",
         citations: [
           {
             docId: "doc-1",
@@ -1350,7 +1392,7 @@ test("agent rag chains timeline extraction into document comparison for project 
             docId: "doc-2",
             fileName: "feb.pdf",
             pageNumber: 1,
-            excerpt: "Difference: Project Alpha changed scope after the January start on 2024-02-01.",
+            excerpt: "Project Alpha changed scope on 2024-02-01.",
           },
         ],
         abstained: false,
@@ -1513,7 +1555,7 @@ test("agent rag executes whitelisted custom compare documents skill with access 
           "Differences",
           "- Policy 2024 allows 2 remote days per week, while Policy 2025 allows 3 remote days per week. [Source 1] [Source 2]",
           "Conflicts",
-          "- No direct conflict is specified in the selected documents. [Source 1] [Source 2]",
+          "- No direct conflict is specified. [Source 1] [Source 2]",
         ].join("\n"),
         citations: [
           {

@@ -9,6 +9,8 @@ import {
 } from "../arxiv-client.js";
 import { isAgentRunInterrupt } from "../agent-interrupts.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
+import { attachRetrievedEvidence } from "../citations.js";
+import { rebaseEvidenceResults } from "../source-labels.js";
 
 export const AGENT_SKILL_IDS = {
   arxivImport: "arxiv_import",
@@ -333,6 +335,7 @@ const createDocumentRagSkill = () => ({
     const value = await ragService.chat(docIds, question, {
       sessionId,
       userId,
+      includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,
     });
@@ -626,6 +629,7 @@ const createResearchBriefSkill = () => ({
       documents: selectedDocuments,
     });
     const results = [];
+    const evidenceResults = [];
 
     for (const entry of plan.questions) {
       const budget = consumeBudget(budgetState, "researchQuestions");
@@ -667,6 +671,7 @@ const createResearchBriefSkill = () => ({
         const value = await ragService.chat(docIds, entry.question, {
           sessionId: sessionId ?? null,
           userId: userId ?? null,
+          includeRetrievedContexts: true,
           accessScope,
         });
         const citations = value.citations ?? [];
@@ -693,6 +698,13 @@ const createResearchBriefSkill = () => ({
         });
 
         results.push(result);
+        evidenceResults.push({
+          ...result,
+          citations: attachRetrievedEvidence({
+            citations,
+            retrievedContexts: value.retrievedContexts ?? [],
+          }),
+        });
       } catch (error) {
         if (isAgentRunInterrupt(error)) {
           await stepLifecycle?.pauseStep?.({
@@ -727,9 +739,13 @@ const createResearchBriefSkill = () => ({
       plan,
       results,
     });
+    const evidenceCitations = rebaseEvidenceResults(evidenceResults).citations;
 
     return {
-      value: brief,
+      value: {
+        ...brief,
+        evidenceCitations,
+      },
       text: brief.text,
       citations: brief.citations ?? [],
       abstained: brief.findings?.some((finding) => finding.abstained) ?? false,

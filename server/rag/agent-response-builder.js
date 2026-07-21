@@ -1,5 +1,16 @@
 import { SKILL_CHAIN_MODE } from "./agent-planner.js";
 
+const buildPublicResearchBrief = (researchBrief) => {
+  if (!researchBrief) {
+    return researchBrief;
+  }
+
+  const { evidenceCitations: _evidenceCitations, ...publicResearchBrief } =
+    researchBrief;
+
+  return publicResearchBrief;
+};
+
 export const serializeAgentError = (error, fallbackMessage) => {
   if (error instanceof Error) {
     return error.message;
@@ -94,6 +105,7 @@ export const buildAgentResponse = ({
   workingMemory,
   webResult,
 } = {}) => {
+  const publicResearchBrief = buildPublicResearchBrief(researchBrief);
   const agentAnswer = finalizer?.text ?? baseAgentAnswer;
   const ragError = ragResult?.ok === false
     ? serializeAgentError(ragResult.error, "Unable to answer from the document.")
@@ -151,7 +163,7 @@ export const buildAgentResponse = ({
       agentSkills,
       agentObservability,
       agentWorkingMemory: workingMemory,
-      researchBrief,
+      researchBrief: publicResearchBrief,
       ragAnswer: finalizerAppliesToRagAnswer ? agentAnswer : ragAnswer,
       ragSources,
       ragResolvedQuestion: ragResult?.ok ? ragResult.value.resolvedQuery ?? question : question,

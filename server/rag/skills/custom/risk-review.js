@@ -61,6 +61,7 @@ export const createRiskReviewSkill = () => ({
     const value = await ragService.chat(docIds, riskQuestion, {
       sessionId: null,
       userId: null,
+      includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,
     });

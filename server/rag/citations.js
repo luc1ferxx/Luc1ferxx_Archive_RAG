@@ -59,3 +59,45 @@ export const dedupeCitations = (citations, limit = citations.length) => {
 
   return dedupedCitations;
 };
+
+const normalizePositiveRank = (value) => {
+  const rank = Number(value);
+
+  return Number.isInteger(rank) && rank > 0 ? rank : null;
+};
+
+const hasSameEvidenceIdentity = (citation = {}, context = {}) => {
+  const citationRank = normalizePositiveRank(citation.rank);
+  const contextRank = normalizePositiveRank(context.rank);
+
+  if (citationRank && contextRank) {
+    return citationRank === contextRank;
+  }
+
+  return Boolean(
+    citation.docId &&
+      context.docId &&
+      citation.docId === context.docId &&
+      citation.chunkIndex !== null &&
+      citation.chunkIndex !== undefined &&
+      citation.chunkIndex === context.chunkIndex
+  );
+};
+
+export const attachRetrievedEvidence = ({
+  citations = [],
+  retrievedContexts = [],
+} = {}) =>
+  citations.map((citation) => {
+    const context = retrievedContexts.find((candidate) =>
+      hasSameEvidenceIdentity(citation, candidate)
+    );
+    const evidenceText = String(context?.text ?? "").trim();
+
+    return evidenceText
+      ? {
+          ...citation,
+          evidenceText,
+        }
+      : citation;
+  });
