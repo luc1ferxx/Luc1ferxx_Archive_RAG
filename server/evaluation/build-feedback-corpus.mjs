@@ -2,6 +2,7 @@ import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFeedbackCorpusFromJsonlFiles } from "./feedback-corpus.js";
+import { getArgValue } from "./eval-cli.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,19 +10,6 @@ const serverDirectory = path.join(__dirname, "..");
 const defaultInputPath = path.join(serverDirectory, "data", "feedback", "feedback.jsonl");
 const defaultSeedInputPath = path.join(__dirname, "feedback-seed.jsonl");
 const defaultOutputPath = path.join(__dirname, "generated", "feedback-corpus.json");
-
-const getArgValue = (name) => {
-  const inlinePrefix = `${name}=`;
-  const inlineValue = process.argv.find((arg) => arg.startsWith(inlinePrefix));
-
-  if (inlineValue) {
-    return inlineValue.slice(inlinePrefix.length);
-  }
-
-  const index = process.argv.indexOf(name);
-
-  return index >= 0 ? process.argv[index + 1] : null;
-};
 
 const resolvePathArg = (name, fallbackPath) =>
   path.resolve(process.cwd(), getArgValue(name) ?? fallbackPath);

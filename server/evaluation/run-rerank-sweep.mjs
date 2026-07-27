@@ -10,6 +10,13 @@ import {
   getRerankSweepVariants,
   renderRerankSweepMarkdown,
 } from "./rerank-sweep.js";
+import {
+  getArgValue,
+  resolveCorpusPath as resolveCorpusPathGeneric,
+  toRunId,
+  validateLatestName,
+  writeJson,
+} from "./eval-cli.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,21 +51,6 @@ const envKeysToRestore = [
   "VECTOR_STORE_PROVIDER",
 ];
 
-const toRunId = () => new Date().toISOString().replace(/[:.]/g, "-");
-
-const getArgValue = (name) => {
-  const inlinePrefix = `${name}=`;
-  const inlineValue = process.argv.find((arg) => arg.startsWith(inlinePrefix));
-
-  if (inlineValue) {
-    return inlineValue.slice(inlinePrefix.length);
-  }
-
-  const index = process.argv.indexOf(name);
-
-  return index >= 0 ? process.argv[index + 1] : null;
-};
-
 const parseArgs = () => {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     return {
@@ -66,17 +58,13 @@ const parseArgs = () => {
     };
   }
 
-  const latestPrefix = getArgValue("--latest-prefix") ?? defaultLatestPrefix;
-
-  if (!/^[A-Za-z0-9._-]+$/.test(latestPrefix)) {
-    throw new Error("--latest-prefix must contain only letters, numbers, dots, underscores, or hyphens.");
-  }
+  const latestPrefix = validateLatestName(getArgValue("--latest-prefix"), { defaultName: defaultLatestPrefix, optionName: "--latest-prefix" });
 
   return {
     help: false,
     latestPrefix,
     profile: getArgValue("--profile") ?? "quick",
-    corpusPath: path.resolve(process.cwd(), getArgValue("--corpus") ?? defaultCorpusPath),
+    corpusPath: resolveCorpusPathGeneric(getArgValue("--corpus"), defaultCorpusPath),
     variantIds: (getArgValue("--variants") ?? "")
       .split(",")
       .map((variantId) => variantId.trim())
@@ -84,10 +72,6 @@ const parseArgs = () => {
     includeOpenAI: process.argv.includes("--include-openai"),
     includeCrossEncoder: process.argv.includes("--include-cross-encoder"),
   };
-};
-
-const writeJson = async (filePath, value) => {
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 };
 
 const summarizeError = (error) => {

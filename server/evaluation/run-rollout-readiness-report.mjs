@@ -8,6 +8,7 @@ import {
   getRolloutReadinessExitCode,
   writeRolloutReadinessReport,
 } from "./rollout-readiness-report.js";
+import { readOptionValue } from "./eval-cli.js";
 
 const usage = `Usage: npm run rollout:readiness -- [options]
 
@@ -17,28 +18,6 @@ Options:
   --no-fail                   Always exit 0 after writing the report.
   --help                      Show this message.
 `;
-
-const readOptionValue = ({ arg, args, index, option }) => {
-  const inlinePrefix = `${option}=`;
-  let value;
-  let nextIndex = index;
-
-  if (arg.startsWith(inlinePrefix)) {
-    value = arg.slice(inlinePrefix.length);
-  } else {
-    nextIndex = index + 1;
-    value = args[index + 1];
-  }
-
-  if (!value || String(value).startsWith("--")) {
-    throw new Error(`${option} requires a value.`);
-  }
-
-  return {
-    nextIndex,
-    value,
-  };
-};
 
 const parseArgs = (args) => {
   const options = {

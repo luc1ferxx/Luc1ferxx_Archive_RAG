@@ -8,6 +8,16 @@ import chat, { ingestDocument } from "../chat.js";
 import { evaluateAnswerExpectation } from "./answer-match.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
 import {
+  evaluateExpectedCoverage,
+  getResponseAbstained,
+  summarizeCitations,
+} from "./eval-case-helpers.js";
+import {
+  resolveCorpusPath as resolveCorpusPathGeneric,
+  toRunId,
+  writeJson,
+} from "./eval-cli.js";
+import {
   buildRagasSample,
   buildReferenceContextsFromPages,
   summarizeRetrievedContexts,
@@ -36,64 +46,6 @@ const __dirname = path.dirname(__filename);
 const resultsDirectory = path.join(__dirname, "results");
 const generatedDirectory = path.join(__dirname, "generated");
 const defaultCorpusPath = path.join(__dirname, "real-corpus.json");
-const abstainPatterns = [
-  "couldn't find enough grounded evidence",
-  "comparison would be unreliable",
-  "selected documents, so the comparison would be unreliable",
-  "uploaded documents to answer reliably",
-];
-
-const toRunId = () => new Date().toISOString().replace(/[:.]/g, "-");
-
-const writeJson = async (filePath, value) => {
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-};
-
-const detectAbstain = (text) => {
-  const normalizedText = String(text ?? "").toLowerCase();
-
-  return abstainPatterns.some((pattern) => normalizedText.includes(pattern));
-};
-
-const getResponseAbstained = (response) =>
-  typeof response?.abstained === "boolean"
-    ? response.abstained
-    : detectAbstain(response?.text);
-
-const summarizeCitations = (citations, docKeyByDocId) =>
-  citations.map((citation) => ({
-    rank: citation.rank,
-    docId: citation.docId,
-    docKey: docKeyByDocId.get(citation.docId) ?? null,
-    fileName: citation.fileName,
-    pageNumber: citation.pageNumber,
-    score: citation.score,
-    sectionHeading: citation.sectionHeading,
-  }));
-
-const evaluateExpectedCoverage = ({ citations, expectedEvidence }) => {
-  if (!expectedEvidence || expectedEvidence.length === 0) {
-    return {
-      docCoverageHit: citations.length === 0,
-      pageCoverageHit: citations.length === 0,
-    };
-  }
-
-  return {
-    docCoverageHit: expectedEvidence.every((expected) =>
-      citations.some((citation) => citation.docKey === expected.docKey)
-    ),
-    pageCoverageHit: expectedEvidence.every((expected) =>
-      expected.pages.length === 0
-        ? citations.some((citation) => citation.docKey === expected.docKey)
-        : citations.some(
-            (citation) =>
-              citation.docKey === expected.docKey &&
-              expected.pages.includes(citation.pageNumber)
-          )
-    ),
-  };
-};
 
 const ratio = (numerator, denominator) =>
   denominator === 0 ? null : Number((numerator / denominator).toFixed(4));
@@ -253,10 +205,8 @@ const buildMarkdownReport = ({ runId, corpusPath, summary, documentRecords, case
   return `${lines.join("\n")}\n`;
 };
 
-const resolveCorpusPath = () => {
-  const requestedPath = process.argv[2] ?? defaultCorpusPath;
-  return path.resolve(process.cwd(), requestedPath);
-};
+const resolveCorpusPath = () =>
+  resolveCorpusPathGeneric(process.argv[2], defaultCorpusPath);
 
 const main = async () => {
   const corpusPath = resolveCorpusPath();

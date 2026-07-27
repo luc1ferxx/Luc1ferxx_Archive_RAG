@@ -13,6 +13,7 @@ import {
   readReleaseEvidenceInputs,
   writeReleaseEvidenceReport,
 } from "./release-evidence-gate.js";
+import { readOptionValue } from "./eval-cli.js";
 
 const usage = `Usage: npm run release:gate -- [options]
 
@@ -24,21 +25,6 @@ Options:
   --no-fail                Always exit 0 without changing the report status.
   --help                   Show this message.
 `;
-
-const readOptionValue = ({ arg, args, index, option }) => {
-  const inlinePrefix = `${option}=`;
-  const inline = arg.startsWith(inlinePrefix);
-  const value = inline ? arg.slice(inlinePrefix.length) : args[index + 1];
-
-  if (!value || String(value).startsWith("--")) {
-    throw new Error(`${option} requires a value.`);
-  }
-
-  return {
-    nextIndex: inline ? index : index + 1,
-    value,
-  };
-};
 
 const parseArgs = (args) => {
   const options = {

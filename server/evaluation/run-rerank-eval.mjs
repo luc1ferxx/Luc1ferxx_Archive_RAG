@@ -18,7 +18,6 @@ import { rerankResultsWithProvider } from "../rag/reranker.js";
 import { resetSessionMemory } from "../rag/memory.js";
 import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
-import { buildTermSet } from "../rag/text-utils.js";
 import { resetVectorStore, searchDocuments } from "../rag/vector-store.js";
 import {
   attachEvaluationEvidence,
@@ -28,7 +27,18 @@ import {
   toRepoRelativePath,
 } from "./eval-evidence.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
-import { robustEvalSuite } from "./eval-suite.js";
+import {
+  findRobustReport as findRobustReportGeneric,
+  hashToken,
+  toDeterministicEmbedding,
+} from "./eval-case-helpers.js";
+import {
+  resolveCorpusPath as resolveCorpusPathGeneric,
+  toPositiveInteger,
+  toRunId,
+  validateLatestName,
+  writeJson,
+} from "./eval-cli.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,9 +46,6 @@ const __dirname = path.dirname(__filename);
 const resultsDirectory = path.join(__dirname, "results");
 const generatedDirectory = path.join(__dirname, "generated");
 const defaultCorpusPath = path.join(__dirname, "synthetic-corpus-near-duplicate.json");
-const embeddingDimensions = 64;
-
-const toRunId = () => new Date().toISOString().replace(/[:.]/g, "-");
 
 const round = (value, precision = 4) =>
   Number.isFinite(value) ? Number(value.toFixed(precision)) : null;
@@ -54,26 +61,6 @@ const average = (values) => {
   }
 
   return round(safeValues.reduce((sum, value) => sum + value, 0) / safeValues.length);
-};
-
-const hashToken = (token) => {
-  let hash = 0;
-
-  for (const character of token) {
-    hash = (hash * 31 + character.codePointAt(0)) % embeddingDimensions;
-  }
-
-  return hash;
-};
-
-const toDeterministicEmbedding = (text) => {
-  const vector = new Array(embeddingDimensions).fill(0);
-
-  for (const term of buildTermSet(text)) {
-    vector[hashToken(term)] += 1;
-  }
-
-  return vector;
 };
 
 const configureDeterministicEmbeddingProvider = () => {
@@ -112,20 +99,6 @@ const parseArgs = (argv) => {
   return args;
 };
 
-const toPositiveInteger = (value, fallbackValue, name) => {
-  if (value === undefined) {
-    return fallbackValue;
-  }
-
-  const parsedValue = Number(value);
-
-  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
-    throw new Error(`${name} must be a positive integer.`);
-  }
-
-  return parsedValue;
-};
-
 const toChoice = (value, fallbackValue, allowedValues, name) => {
   if (value === undefined) {
     return fallbackValue;
@@ -154,30 +127,11 @@ const toUnitNumber = (value, fallbackValue, name) => {
   return parsedValue;
 };
 
-const getLatestName = (value) => {
-  const latestName = String(value ?? "latest-rerank");
-
-  if (!/^[A-Za-z0-9._-]+$/.test(latestName)) {
-    throw new Error("--latest-name must contain only letters, numbers, dots, underscores, or hyphens.");
-  }
-
-  return latestName;
-};
-
 const resolveCorpusPath = (requestedPath) =>
-  path.resolve(process.cwd(), requestedPath ?? defaultCorpusPath);
-
-const writeJson = async (filePath, value) => {
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-};
+  resolveCorpusPathGeneric(requestedPath, defaultCorpusPath);
 
 const findRobustReport = ({ corpusPath, latestName }) =>
-  robustEvalSuite.reports.find(
-    (report) =>
-      report.reportType === "rerank" &&
-      report.latestName === latestName &&
-      path.resolve(__dirname, "..", report.corpusPath) === corpusPath
-  ) ?? null;
+  findRobustReportGeneric({ corpusPath, latestName, reportType: "rerank" });
 
 const buildExpectedUnits = (expectedEvidence = []) => {
   const units = [];
@@ -958,7 +912,7 @@ const main = async () => {
     undefined,
     "--rerank-weight"
   );
-  const latestName = getLatestName(args["latest-name"]);
+  const latestName = validateLatestName(args["latest-name"], { defaultName: "latest-rerank", optionName: "--latest-name" });
   const result = await runRerankEvaluation({
     corpusPath,
     latestName,

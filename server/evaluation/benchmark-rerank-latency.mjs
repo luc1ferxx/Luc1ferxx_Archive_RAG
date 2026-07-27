@@ -10,6 +10,7 @@ import {
   resetRerankMetricsCollector,
 } from "../rag/reranker.js";
 import { getCrossEncoderEndpoint, getCrossEncoderModel } from "../rag/config.js";
+import { toPositiveInteger } from "./eval-cli.js";
 
 const defaultQuery = "What is the quartz capsule approval policy?";
 
@@ -37,20 +38,6 @@ const parseArgs = (argv) => {
   }
 
   return args;
-};
-
-const toPositiveInteger = (value, fallbackValue, name) => {
-  if (value === undefined) {
-    return fallbackValue;
-  }
-
-  const parsedValue = Number(value);
-
-  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
-    throw new Error(`${name} must be a positive integer.`);
-  }
-
-  return parsedValue;
 };
 
 const toNonNegativeNumber = (value, fallbackValue, name) => {

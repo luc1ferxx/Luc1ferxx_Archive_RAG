@@ -5,6 +5,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { toRepoRelativePath } from "./eval-evidence.js";
+import { toPositiveInteger } from "./eval-cli.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,20 +58,6 @@ const parseArgs = (argv) => {
   }
 
   return args;
-};
-
-const toPositiveInteger = (value, fallbackValue, name) => {
-  if (value === undefined) {
-    return fallbackValue;
-  }
-
-  const parsedValue = Number(value);
-
-  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
-    throw new Error(`${name} must be a positive integer.`);
-  }
-
-  return parsedValue;
 };
 
 const toNonNegativeInteger = (value, fallbackValue, name) => {

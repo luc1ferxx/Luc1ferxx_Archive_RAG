@@ -14,7 +14,19 @@ import {
   toRepoRelativePath,
 } from "./eval-evidence.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
-import { robustEvalSuite } from "./eval-suite.js";
+import {
+  evaluateExpectedCoverage,
+  findRobustReport as findRobustReportGeneric,
+  getResponseAbstained,
+  summarizeCitations,
+  toDeterministicEmbedding,
+} from "./eval-case-helpers.js";
+import {
+  getArgValue,
+  toRunId,
+  validateLatestName,
+  writeJson,
+} from "./eval-cli.js";
 import {
   buildRagasSample,
   buildReferenceContextsFromPages,
@@ -51,7 +63,6 @@ import {
   configureOpenAIProvider,
   resetOpenAIProvider,
 } from "../rag/openai.js";
-import { buildTermSet } from "../rag/text-utils.js";
 import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -61,35 +72,6 @@ const resultsDirectory = path.join(__dirname, "results");
 const generatedDirectory = path.join(__dirname, "generated");
 const defaultCorpusPath = path.join(__dirname, "synthetic-corpus.json");
 const uploadChunkSizeBytes = 180;
-const deterministicEmbeddingDimensions = 64;
-const abstainPatterns = [
-  "couldn't find enough grounded evidence",
-  "comparison would be unreliable",
-  "selected documents, so the comparison would be unreliable",
-  "uploaded documents to answer reliably",
-];
-
-const toRunId = () => new Date().toISOString().replace(/[:.]/g, "-");
-
-const hashToken = (token) => {
-  let hash = 0;
-
-  for (const character of token) {
-    hash = (hash * 31 + character.codePointAt(0)) % deterministicEmbeddingDimensions;
-  }
-
-  return hash;
-};
-
-const toDeterministicEmbedding = (text) => {
-  const vector = new Array(deterministicEmbeddingDimensions).fill(0);
-
-  for (const term of buildTermSet(text)) {
-    vector[hashToken(term)] += 1;
-  }
-
-  return vector;
-};
 
 const extractFirstEvidenceSentence = (prompt = "") => {
   const match = String(prompt).match(
@@ -201,56 +183,6 @@ const buildPdfBuffer = (pages) => {
   pdf += `trailer\n<< /Root 1 0 R /Size ${sortedObjects.length + 1} >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
 
   return Buffer.from(pdf, "utf8");
-};
-
-const writeJson = async (filePath, value) => {
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-};
-
-const detectAbstain = (text) => {
-  const normalizedText = String(text ?? "").toLowerCase();
-
-  return abstainPatterns.some((pattern) => normalizedText.includes(pattern));
-};
-
-const getResponseAbstained = (response) =>
-  typeof response?.abstained === "boolean"
-    ? response.abstained
-    : detectAbstain(response?.text);
-
-const summarizeCitations = (citations, docKeyByDocId) =>
-  citations.map((citation) => ({
-    rank: citation.rank,
-    docId: citation.docId,
-    docKey: docKeyByDocId.get(citation.docId) ?? null,
-    fileName: citation.fileName,
-    pageNumber: citation.pageNumber,
-    score: citation.score,
-    sectionHeading: citation.sectionHeading,
-  }));
-
-const evaluateExpectedCoverage = ({ citations, expectedEvidence }) => {
-  if (!expectedEvidence || expectedEvidence.length === 0) {
-    return {
-      docCoverageHit: citations.length === 0,
-      pageCoverageHit: citations.length === 0,
-    };
-  }
-
-  return {
-    docCoverageHit: expectedEvidence.every((expected) =>
-      citations.some((citation) => citation.docKey === expected.docKey)
-    ),
-    pageCoverageHit: expectedEvidence.every((expected) =>
-      expected.pages.length === 0
-        ? citations.some((citation) => citation.docKey === expected.docKey)
-        : citations.some(
-            (citation) =>
-              citation.docKey === expected.docKey &&
-              expected.pages.includes(citation.pageNumber)
-          )
-    ),
-  };
 };
 
 const runUploadResumeFlow = async ({ buffer, fileName, runDirectory, uploadIndex }) => {
@@ -546,19 +478,6 @@ const buildMarkdownReport = ({
 
 const optionsWithValues = new Set(["--latest-name", "--openai-provider"]);
 
-const getArgValue = (name) => {
-  const inlinePrefix = `${name}=`;
-  const inlineValue = process.argv.find((arg) => arg.startsWith(inlinePrefix));
-
-  if (inlineValue) {
-    return inlineValue.slice(inlinePrefix.length);
-  }
-
-  const index = process.argv.indexOf(name);
-
-  return index >= 0 ? process.argv[index + 1] : null;
-};
-
 const getPositionalArgs = () => {
   const positionalArgs = [];
 
@@ -578,15 +497,8 @@ const getPositionalArgs = () => {
   return positionalArgs;
 };
 
-const getLatestName = () => {
-  const latestName = getArgValue("--latest-name") ?? "latest";
-
-  if (!/^[A-Za-z0-9._-]+$/.test(latestName)) {
-    throw new Error("--latest-name must contain only letters, numbers, dots, underscores, or hyphens.");
-  }
-
-  return latestName;
-};
+const getLatestName = () =>
+  validateLatestName(getArgValue("--latest-name"), { defaultName: "latest", optionName: "--latest-name" });
 
 const getOpenAIProviderMode = () => {
   const providerMode = getArgValue("--openai-provider") ?? "real";
@@ -604,12 +516,7 @@ const resolveCorpusPath = () => {
 };
 
 const findRobustReport = ({ corpusPath, latestName }) =>
-  robustEvalSuite.reports.find(
-    (report) =>
-      report.reportType === "synthetic" &&
-      report.latestName === latestName &&
-      path.resolve(__dirname, "..", report.corpusPath) === corpusPath
-  ) ?? null;
+  findRobustReportGeneric({ corpusPath, latestName, reportType: "synthetic" });
 
 const main = async () => {
   const corpusPath = resolveCorpusPath();

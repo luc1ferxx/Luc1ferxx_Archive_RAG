@@ -5,6 +5,7 @@ import {
   buildRequiredPlannerProviderGate,
   readLatestPlannerProviderReport,
 } from "./planner-provider-gate.js";
+import { readOptionValue } from "./eval-cli.js";
 
 const usage = `Usage: npm run planner:gate -- [options]
 
@@ -18,28 +19,6 @@ Options:
   --json                                    Print full gate payload as JSON.
   --help                                    Show this message.
 `;
-
-const readOptionValue = ({ arg, args, index, option }) => {
-  const inlinePrefix = `${option}=`;
-  let value;
-  let nextIndex = index;
-
-  if (arg.startsWith(inlinePrefix)) {
-    value = arg.slice(inlinePrefix.length);
-  } else {
-    nextIndex = index + 1;
-    value = args[index + 1];
-  }
-
-  if (!value || String(value).startsWith("--")) {
-    throw new Error(`${option} requires a value.`);
-  }
-
-  return {
-    nextIndex,
-    value,
-  };
-};
 
 const parseNumberOption = ({ name, value }) => {
   const parsed = Number(value);
