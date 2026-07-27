@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { vi } from "vitest";
 import RenderQA from "./RenderQA";
 
 describe("RenderQA", () => {
@@ -452,7 +453,7 @@ describe("RenderQA", () => {
   });
 
   test("renders pending capability approval gates without private raw input", () => {
-    const handleApprovalAction = jest.fn();
+    const handleApprovalAction = vi.fn();
 
     render(
       <RenderQA
@@ -536,7 +537,7 @@ describe("RenderQA", () => {
   });
 
   test("submits answer feedback with type and optional note", () => {
-    const handleFeedback = jest.fn();
+    const handleFeedback = vi.fn();
 
     render(
       <RenderQA

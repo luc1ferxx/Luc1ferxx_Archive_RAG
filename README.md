@@ -8,7 +8,7 @@
 
 <p>
   <img alt="React 18" src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=111111" />
-  <img alt="Create React App" src="https://img.shields.io/badge/CRA-workbench-09D3AC?logo=react&logoColor=111111" />
+  <img alt="Vite" src="https://img.shields.io/badge/Vite-workbench-646CFF?logo=vite&logoColor=ffffff" />
   <img alt="Node.js ESM" src="https://img.shields.io/badge/Node.js-ESM-339933?logo=node.js&logoColor=ffffff" />
   <img alt="Express API" src="https://img.shields.io/badge/Express-API-000000?logo=express&logoColor=ffffff" />
   <img alt="OpenAI" src="https://img.shields.io/badge/OpenAI-GPT--5-412991?logo=openai&logoColor=ffffff" />
@@ -54,7 +54,7 @@ Luc1ferxx Archive RAG 是一个本地优先的多 PDF 档案分析系统。它�
 
 ```mermaid
 flowchart TB
-  subgraph Frontend["React 18 / Create React App"]
+  subgraph Frontend["React 18 / Vite"]
     Workspace["Archive workspace"]
     Upload["PDF uploader"]
     Chat["Chat composer"]
@@ -206,8 +206,8 @@ STARTUP_HEALTH_STRICT=false
 
 ```env
 # .env
-REACT_APP_DOMAIN=http://localhost:5001
-REACT_APP_API_AUTH_TOKEN=
+VITE_DOMAIN=http://localhost:5001
+VITE_API_AUTH_TOKEN=
 ```
 
 说明：
@@ -246,7 +246,7 @@ curl http://localhost:5001/ready
 | `npm start` | 只启动前端。 |
 | `npm run server` | 从根目录启动后端，等价于进入 `server/` 后运行 `npm run start`。 |
 | `npm run build` | 构建前端生产包。 |
-| `CI=true npm test -- --watchAll=false` | 非 watch 模式运行前端测试。 |
+| `npm test` | 运行前端测试。 |
 | `cd server && npm test` | 运行后端聚合测试。 |
 | `cd server && npm run coverage:gate` | 检查后端覆盖率最低门槛。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |

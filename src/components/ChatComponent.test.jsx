@@ -1,35 +1,36 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { vi } from "vitest";
 
 let mockRequestChat;
 
-jest.mock("react-speech-recognition", () => ({
+vi.mock("react-speech-recognition", () => ({
   __esModule: true,
   default: {
-    startListening: jest.fn(),
-    stopListening: jest.fn(),
+    startListening: vi.fn(),
+    stopListening: vi.fn(),
   },
   useSpeechRecognition: () => ({
     transcript: "",
     listening: false,
-    resetTranscript: jest.fn(),
+    resetTranscript: vi.fn(),
   }),
 }));
 
-jest.mock("speak-tts", () => {
+vi.mock("speak-tts", () => {
   function MockSpeech() {
-    this.init = jest.fn().mockResolvedValue(undefined);
-    this.speak = jest.fn().mockResolvedValue(undefined);
-    this.cancel = jest.fn();
+    this.init = vi.fn().mockResolvedValue(undefined);
+    this.speak = vi.fn().mockResolvedValue(undefined);
+    this.cancel = vi.fn();
   }
-  return MockSpeech;
+  return { default: MockSpeech };
 });
 
-jest.mock("../archiveApi", () => ({
+vi.mock("../archiveApi", () => ({
   requestChat: (...args) => mockRequestChat(...args),
 }));
 
-jest.mock("../demoWorkbench", () => ({
+vi.mock("../demoWorkbench", () => ({
   DEMO_CONVERSATION: [
     {
       question: "Demo question",
@@ -42,16 +43,16 @@ jest.mock("../demoWorkbench", () => ({
   ],
 }));
 
-const ChatComponent = require("./ChatComponent").default;
+const { default: ChatComponent } = await import("./ChatComponent");
 
 describe("ChatComponent", () => {
   let handleResp;
   let setIsLoading;
 
   beforeEach(() => {
-    handleResp = jest.fn();
-    setIsLoading = jest.fn();
-    mockRequestChat = jest.fn().mockResolvedValue({
+    handleResp = vi.fn();
+    setIsLoading = vi.fn();
+    mockRequestChat = vi.fn().mockResolvedValue({
       agentAnswer: "Answer",
       ragAnswer: "Document answer",
       ragSources: [],
@@ -85,7 +86,7 @@ describe("ChatComponent", () => {
 
     let callCount = 0;
 
-    mockRequestChat = jest.fn(() => {
+    mockRequestChat = vi.fn(() => {
       callCount += 1;
 
       if (callCount === 1) {
@@ -142,7 +143,7 @@ describe("ChatComponent", () => {
   test("does not show error for deliberately aborted requests", async () => {
     let rejectRequest;
 
-    mockRequestChat = jest.fn(
+    mockRequestChat = vi.fn(
       () =>
         new Promise((_resolve, reject) => {
           rejectRequest = reject;
@@ -175,7 +176,7 @@ describe("ChatComponent", () => {
 
     let callCount = 0;
 
-    mockRequestChat = jest.fn(() => {
+    mockRequestChat = vi.fn(() => {
       callCount += 1;
 
       if (callCount === 1) {

@@ -2,7 +2,7 @@
 
 ## Project Shape
 
-- Root app: React 18 / Create React App frontend in `src/`.
+- Root app: React 18 / Vite frontend in `src/`.
 - Backend: Node ESM Express API in `server/`, with custom RAG logic in `server/rag/`.
 - Runtime/generated paths to avoid editing unless requested: `node_modules/`, `build/`, `server/node_modules/`, `server/data/`, `server/uploads/`, `server/upload-sessions/`, `server/evaluation/generated/`, and timestamped files under `server/evaluation/results/`.
 
@@ -24,7 +24,7 @@
 ## Tests And Evaluation
 
 - Backend test runner: `cd server && npm test`; this also validates the GitHub Actions quality gate workflow contract.
-- Frontend test runner: `npm test` from the repo root. Use CRA's non-watch mode in automation, e.g. `CI=true npm test -- --watchAll=false`.
+- Frontend test runner: `npm test` from the repo root. Watch mode: `npm run test:watch`.
 - Default synthetic RAG eval: `cd server && npm run eval:synthetic`.
 - Current tracked `latest.*` synthetic report uses the near-duplicate corpus: `cd server && npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json`.
 - Run a specific synthetic corpus: `cd server && npm run eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json`.
@@ -68,7 +68,7 @@ Backend `npm test` imports `app.test.mjs`, `rag.test.mjs`, `answer-match.test.mj
 - Quality gate assembly is split across `server/evaluation/quality-*.js`; keep `quality-report.js` as the compatibility export surface, result file I/O in `quality-result-reader.js`, run summaries in `quality-run-summary.js`, per-eval gates in their matching `quality-*-gate.js` modules, and final gate composition in `quality-combined-gate.js`.
 - AgentRAG optimization order is documented in README under "AgentRAG 优化路线"; continue in that order unless the user explicitly reprioritizes it.
 - `/chat` returns `agentObservability` with per-skill selected status, attempts, duration, citations, abstain, retry/follow-up, budget, execution loop, working memory, skill chain, clarification gate, and error metrics. Preserve it when changing agent execution, feedback records, or feedback corpus metadata.
-- API auth is controlled by `API_AUTH_ENABLED` plus either `API_AUTH_TOKEN` for single-token local use or `API_AUTH_TOKENS` for per-user/per-workspace token mapping; the frontend can send `REACT_APP_API_AUTH_TOKEN`, which becomes an `x-api-key` header.
+- API auth is controlled by `API_AUTH_ENABLED` plus either `API_AUTH_TOKEN` for single-token local use or `API_AUTH_TOKENS` for per-user/per-workspace token mapping; the frontend can send `VITE_API_AUTH_TOKEN`, which becomes an `x-api-key` header.
 - When auth is enabled, document list/chat/delete/file access is filtered by the authenticated token's `userId` and `workspaceId`; keep new document routes scoped the same way.
 - `VECTOR_STORE_PROVIDER=local` is the default documented path; `qdrant` is supported via the Qdrant env vars in `server/.env.example`.
 - Startup health checks report OpenAI, auth, vector store, PostgreSQL document/session stores, and long memory. `STARTUP_HEALTH_STRICT=false` allows the server to start while reporting health errors.

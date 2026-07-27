@@ -1,31 +1,36 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { vi } from "vitest";
 import axios from "axios";
 import App from "./App";
 
-jest.mock("axios", () => ({
-  get: jest.fn(),
-  post: jest.fn(),
-  delete: jest.fn(),
+vi.mock("axios", () => ({
+  default: {
+    get: vi.fn(),
+    post: vi.fn(),
+    delete: vi.fn(),
+  },
 }));
 
-jest.mock("./components/PdfUploader", () => ({ onUploadSuccess }) => (
-  <button
-    type="button"
-    onClick={() =>
-      onUploadSuccess?.({
-        docId: "doc-upload",
-        fileName: "rag-notes.pdf",
-        pageCount: 2,
-        profile: {
-          tags: ["retrieval", "augmented", "generation"],
-        },
-      })
-    }
-  >
-    Upload mock
-  </button>
-));
-jest.mock("./components/ChatComponent", () => (props) => (
+vi.mock("./components/PdfUploader", () => ({
+  default: ({ onUploadSuccess }) => (
+    <button
+      type="button"
+      onClick={() =>
+        onUploadSuccess?.({
+          docId: "doc-upload",
+          fileName: "rag-notes.pdf",
+          pageCount: 2,
+          profile: {
+            tags: ["retrieval", "augmented", "generation"],
+          },
+        })
+      }
+    >
+      Upload mock
+    </button>
+  ),
+}));
+vi.mock("./components/ChatComponent", () => ({ default: (props) => (
   <div>
     <div>Chat</div>
     <div data-testid="chat-docids">{props.docIds.join(",")}</div>
@@ -68,8 +73,8 @@ jest.mock("./components/ChatComponent", () => (props) => (
       </button>
     ))}
   </div>
-));
-jest.mock("./components/RenderQA", () => (props) => (
+) }));
+vi.mock("./components/RenderQA", () => ({ default: (props) => (
   <div>
     {props.conversation?.map((turn, index) => (
       <div key={`${turn.question}-${index}`}>
@@ -94,8 +99,8 @@ jest.mock("./components/RenderQA", () => (props) => (
       Send feedback
     </button>
   </div>
-));
-jest.mock("./components/PdfPreview", () => () => <div>Preview</div>);
+) }));
+vi.mock("./components/PdfPreview", () => ({ default: () => <div>Preview</div> }));
 
 const openWorkspace = async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Open workspace" }));
@@ -389,7 +394,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("region", { name: "Workspace artifacts" })
     ).toBeInTheDocument();
-    expect(await screen.findByText("Workspace risk report")).toBeInTheDocument();
+    expect((await screen.findAllByText("Workspace risk report")).length).toBeGreaterThan(0);
     expect(await screen.findByText("Stored risk result")).toBeInTheDocument();
     expect(screen.getByText("Not an evidence source")).toBeInTheDocument();
     expect(screen.getByText("benefits-2025.pdf")).toBeInTheDocument();

@@ -37,8 +37,8 @@ STARTUP_HEALTH_STRICT=false
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `REACT_APP_DOMAIN` | `http://localhost:5001` | 后端 API 地址。 |
-| `REACT_APP_API_AUTH_TOKEN` | 空 | 启用 API auth 时，前端通过 `x-api-key` 发送的 token。 |
+| `VITE_DOMAIN` | `http://localhost:5001` | 后端 API 地址。 |
+| `VITE_API_AUTH_TOKEN` | 空 | 启用 API auth 时，前端通过 `x-api-key` 发送的 token。 |
 
 ## 后端基础配置
 

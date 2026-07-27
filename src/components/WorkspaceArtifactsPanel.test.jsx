@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { vi } from "vitest";
 
 import {
   downloadWorkspaceArtifact,
@@ -9,11 +10,11 @@ import {
 import { createTranslator } from "../archiveI18n";
 import WorkspaceArtifactsPanel from "./WorkspaceArtifactsPanel";
 
-jest.mock("../archiveApi", () => ({
-  downloadWorkspaceArtifact: jest.fn(),
-  fetchWorkspaceArtifact: jest.fn(),
-  fetchWorkspaceArtifacts: jest.fn(),
-  requestWorkspaceArtifactArchive: jest.fn(),
+vi.mock("../archiveApi", () => ({
+  downloadWorkspaceArtifact: vi.fn(),
+  fetchWorkspaceArtifact: vi.fn(),
+  fetchWorkspaceArtifacts: vi.fn(),
+  requestWorkspaceArtifactArchive: vi.fn(),
 }));
 
 const t = createTranslator("en");
@@ -78,9 +79,9 @@ const createDeferred = () => {
 };
 
 describe("WorkspaceArtifactsPanel", () => {
-  const createObjectURL = jest.fn(() => "blob:workspace-artifact");
-  const revokeObjectURL = jest.fn();
-  const click = jest.fn();
+  const createObjectURL = vi.fn(() => "blob:workspace-artifact");
+  const revokeObjectURL = vi.fn();
+  const click = vi.fn();
 
   beforeEach(() => {
     createObjectURL.mockReset().mockReturnValue("blob:workspace-artifact");
@@ -116,11 +117,11 @@ describe("WorkspaceArtifactsPanel", () => {
       configurable: true,
       value: revokeObjectURL,
     });
-    jest.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(click);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(click);
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    vi.restoreAllMocks();
   });
 
   test("loads compact results and opens a safe artifact detail", async () => {

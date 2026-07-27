@@ -1,7 +1,7 @@
 export const API_DOMAIN =
-  process.env.REACT_APP_DOMAIN || "http://localhost:5001";
+  import.meta.env.VITE_DOMAIN || "http://localhost:5001";
 
-export const API_AUTH_TOKEN = process.env.REACT_APP_API_AUTH_TOKEN || "";
+export const API_AUTH_TOKEN = import.meta.env.VITE_API_AUTH_TOKEN || "";
 
 export const buildApiRequestConfig = (config = {}) => {
   const nextConfig = { ...config };

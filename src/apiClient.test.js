@@ -1,9 +1,12 @@
+import { vi } from "vitest";
 import axios from "axios";
 
 import { apiDownload } from "./apiClient";
 
-jest.mock("axios", () => ({
-  get: jest.fn(),
+vi.mock("axios", () => ({
+  default: {
+    get: vi.fn(),
+  },
 }));
 
 test("apiDownload keeps request configuration and parses UTF-8 filenames", async () => {

@@ -1,0 +1,19 @@
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 3000,
+  },
+  build: {
+    outDir: "build",
+  },
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: "./src/setupTests.js",
+    css: false,
+    include: ["src/**/*.{test,spec}.{js,jsx,ts,tsx}"],
+  },
+});

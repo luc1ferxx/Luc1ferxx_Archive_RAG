@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { vi } from "vitest";
 import AgentRunCenter from "./AgentRunCenter";
 
 describe("AgentRunCenter", () => {
@@ -134,7 +135,7 @@ describe("AgentRunCenter", () => {
   });
 
   test("forwards approval actions through the task action callback", () => {
-    const onTaskAction = jest.fn();
+    const onTaskAction = vi.fn();
     const task = {
       id: "agent_goal:approval",
       type: "agent_goal",
@@ -173,7 +174,7 @@ describe("AgentRunCenter", () => {
   });
 
   test("forwards deliverable approval through the task action callback", () => {
-    const onTaskAction = jest.fn();
+    const onTaskAction = vi.fn();
     const task = {
       id: "agent_goal:deliverables",
       type: "agent_goal",
