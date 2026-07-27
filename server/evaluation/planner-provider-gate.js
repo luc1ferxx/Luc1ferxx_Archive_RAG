@@ -3,12 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getPlannerReportFileNames } from "./planner/report.js";
 import { buildPlannerGate } from "./quality-planner-gate.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultResultsDirectory = path.join(__dirname, "results");
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const normalizeProvider = (value, fallback = "") =>
   normalizeText(value).toLowerCase() || fallback;

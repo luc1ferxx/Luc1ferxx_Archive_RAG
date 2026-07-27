@@ -8,14 +8,13 @@ import {
   splitExternalQueryTerms,
 } from "./external-query-policy.js";
 import { extractMeaningfulTokens } from "./text-utils.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_TOPIC_TAG_LIMIT = 4;
 const MAX_KEYPHRASE_TOKENS = 3;
 const DEFAULT_RELEVANCE_TERM_LIMIT = 8;
 const MIN_RELEVANCE_MATCHED_TERMS = 2;
 const MIN_RELEVANCE_SCORE = 2.5;
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 

@@ -1,11 +1,11 @@
+import { normalizeTrimmedText as normalizeText } from "../../../lib/normalize-text.js";
+
 export const SUMMARIZE_CONTRACT_SKILL_ID = "summarize_contract";
 
 export const CONTRACT_SUMMARY_SIGNAL_PATTERN =
   /\b(summarize|summary|summarise|contract summary|agreement summary|key terms?|parties|obligations?|deadlines?|effective date|renewal|termination)\b.*\b(contract|agreement|policy|terms|msa|sow|nda)\b|\b(contract|agreement|msa|sow|nda)\b.*\b(summarize|summary|summarise|key terms?|parties|obligations?|deadlines?|renewal|termination)\b|合同摘要|协议摘要|合同总结|关键条款|合同义务|协议义务|合同期限|续约|终止/i;
 
 const CUSTOM_SKILL_VERSION = "1.0.0";
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const getSelectedDocuments = ({ ragService, docIds = [], accessScope }) => {
   const selectedDocIds = new Set(docIds);

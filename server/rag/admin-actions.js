@@ -1,4 +1,5 @@
 import { compactAdminQualityReport } from "./admin-status.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 export const ADMIN_ACTION_IDS = Object.freeze({
   qualityRefresh: "quality-refresh",
@@ -9,8 +10,6 @@ export const ADMIN_ACTION_IDS = Object.freeze({
 export const ADMIN_ACTION_STATUSES = Object.freeze({
   completed: "completed",
 });
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

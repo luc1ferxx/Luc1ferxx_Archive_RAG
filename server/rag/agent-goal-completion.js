@@ -6,6 +6,7 @@ import { compactResearchTaskFlow } from "./agent-research-task.js";
 import { CAPABILITY_IDS } from "./capabilities/index.js";
 import { TASK_STATUSES } from "./tasks.js";
 import { ARTIFACT_STATUSES } from "./workspace-artifacts/index.js";
+import { normalizeClampedText } from "../lib/normalize-text.js";
 
 const ARTIFACT_TYPES_BY_CAPABILITY = Object.freeze({
   [CAPABILITY_IDS.documentOrganize]: "document_collection",
@@ -25,8 +26,7 @@ export const AGENT_GOAL_COMPLETION_STATUSES = Object.freeze({
 
 const MAX_TEXT_LENGTH = 240;
 
-const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

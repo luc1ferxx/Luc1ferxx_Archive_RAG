@@ -5,6 +5,7 @@ import {
   runShadowPlanner,
   sameStringList,
 } from "./agent-planner-shadow.js";
+import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 export const AGENT_EXECUTION_STEP_IDS = {
   arxivImport: "arxiv_import",
@@ -74,8 +75,6 @@ export const AGENT_EXECUTION_STEP_SCHEMA = {
     skillId: AGENT_SKILL_IDS.webSearch,
   },
 };
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const normalizePlannerId = (plannerAdapter) =>
   normalizeText(plannerAdapter?.id) || "unknown";

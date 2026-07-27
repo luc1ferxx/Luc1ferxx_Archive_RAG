@@ -1,11 +1,11 @@
+import { normalizeTrimmedText as normalizeText } from "../../../lib/normalize-text.js";
+
 export const EXTRACT_TIMELINE_SKILL_ID = "extract_timeline";
 
 export const TIMELINE_SIGNAL_PATTERN =
   /\b(timeline|chronology|chronological|sequence|milestones?|key dates?|event order|date order)\b|时间线|时间顺序|按时间|大事记|里程碑|事件顺序|关键日期/i;
 
 const CUSTOM_SKILL_VERSION = "1.0.0";
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const getSelectedDocuments = ({ ragService, docIds = [], accessScope }) => {
   const selectedDocIds = new Set(docIds);

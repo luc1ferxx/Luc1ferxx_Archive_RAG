@@ -1,3 +1,5 @@
+import { normalizeClampedText } from "../../lib/normalize-text.js";
+
 export const WORKSPACE_ARTIFACT_VERSION = "1.0.0";
 
 export const ARTIFACT_TYPES = Object.freeze({
@@ -26,8 +28,7 @@ const MAX_ID_LENGTH = 180;
 const MAX_TITLE_LENGTH = 240;
 const MAX_STRUCTURED_DEPTH = 12;
 
-const normalizeText = (value, maxLength = MAX_TITLE_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TITLE_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeUnboundedText = (value) =>
   String(value ?? "").replace(/\s+/g, " ").trim();

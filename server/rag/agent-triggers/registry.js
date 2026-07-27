@@ -6,8 +6,7 @@ import {
   validateAgentTriggerSpec,
 } from "./schema.js";
 
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
-
+import { normalizeText } from "../../lib/normalize-text.js";
 const cloneTriggerSpec = (trigger = {}) =>
   JSON.parse(JSON.stringify(trigger ?? {}));
 

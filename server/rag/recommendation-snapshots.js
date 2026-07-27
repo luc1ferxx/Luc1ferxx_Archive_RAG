@@ -1,4 +1,4 @@
-const normalizeText = (value) => String(value ?? "").trim();
+import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 const normalizeAccessScope = (accessScope = {}) => ({
   userId: normalizeText(accessScope.userId),

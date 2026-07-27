@@ -13,6 +13,7 @@ import {
   buildTaskScopeKey,
   normalizeTaskAccessScope,
 } from "./tasks.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -25,8 +26,6 @@ const ensureTableName = (tableName, envName) => {
 
   return tableName;
 };
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 

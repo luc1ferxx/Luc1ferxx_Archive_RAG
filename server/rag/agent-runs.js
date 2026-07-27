@@ -30,8 +30,7 @@ export {
   isRetryableAgentRunStatus,
   normalizeAgentRunStatus,
 } from "./agent-run-state-machine.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../lib/normalize-text.js";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 

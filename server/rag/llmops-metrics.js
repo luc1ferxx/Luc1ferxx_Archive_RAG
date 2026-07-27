@@ -8,6 +8,7 @@ import {
   normalizeLlmOpsBudget,
 } from "./llmops-policy.js";
 import { recordRagTrace } from "./observability.js";
+import { normalizeClampedText } from "../lib/normalize-text.js";
 
 export { LlmOpsBudgetExceededError } from "./llmops-policy.js";
 
@@ -27,8 +28,7 @@ const VALID_TOKEN_SOURCES = new Set(["actual", "estimated", "unavailable"]);
 const VALID_PRICING_SOURCES = new Set(["model_contract", "unavailable"]);
 const VALID_LATENCY_SLO_STATUSES = new Set(["pass", "breach", "unavailable"]);
 
-const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeArray = (value) =>
   (Array.isArray(value) ? value : []).map((item) => normalizeText(item)).filter(Boolean);

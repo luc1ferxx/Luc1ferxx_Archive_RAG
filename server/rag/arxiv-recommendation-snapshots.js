@@ -1,10 +1,9 @@
 import { createInMemoryRecommendationSnapshotStore } from "./recommendation-snapshots.js";
 import { buildSafeExternalDocumentSummary } from "./external-context-sanitizer.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 const ARXIV_RECOMMENDATION_PROVIDER = "arxiv";
 const DEFAULT_ARXIV_SNAPSHOT_MAX_RESULTS = 3;
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 

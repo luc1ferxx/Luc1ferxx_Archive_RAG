@@ -1,12 +1,11 @@
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
 import { recordRagTrace } from "./observability.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 export const TASK_ACTIONS = Object.freeze({
   cancel: "cancel",
   confirm: "confirm",
 });
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const buildJobError = (message, status = 400) => {
   const error = new Error(message);

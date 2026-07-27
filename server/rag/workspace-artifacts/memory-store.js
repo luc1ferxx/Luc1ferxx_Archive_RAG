@@ -2,8 +2,7 @@ import {
   ARTIFACT_STATUSES,
   buildWorkspaceArtifactScopeKey,
 } from "./schema.js";
-
-const normalizeText = (value) => String(value ?? "").trim();
+import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.js";
 
 const cloneArtifact = (artifact) =>
   artifact === null || artifact === undefined ? null : structuredClone(artifact);

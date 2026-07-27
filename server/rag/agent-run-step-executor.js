@@ -7,8 +7,7 @@ import {
   getCapabilityResultText,
 } from "./agent-run-step-handlers/index.js";
 import { recordRagTrace } from "./observability.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../lib/normalize-text.js";
 
 const normalizeAction = (action) => normalizeText(action).toLowerCase();
 

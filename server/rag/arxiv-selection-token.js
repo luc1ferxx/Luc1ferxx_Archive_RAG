@@ -1,10 +1,9 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_SELECTION_TTL_MS = 15 * 60 * 1000;
 const TOKEN_VERSION = "v1";
 const TOKEN_PURPOSE = "arxiv_document_selection";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 

@@ -3,8 +3,7 @@ import {
   AGENT_TRIGGER_MODES,
   renderAgentTriggerTemplate,
 } from "./agent-triggers/schema.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../lib/normalize-text.js";
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

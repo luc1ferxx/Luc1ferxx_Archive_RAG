@@ -1,6 +1,7 @@
 import { getWorkspaceArtifactsPostgresTable } from "../config.js";
 import { runPostgresMigrations } from "../db-migrations.js";
 import { queryPostgres } from "../postgres.js";
+import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -13,8 +14,6 @@ const ensureTableName = (tableName) => {
 
   return tableName;
 };
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const parseJsonValue = (value, fallback) => {
   if (value === null || value === undefined) {

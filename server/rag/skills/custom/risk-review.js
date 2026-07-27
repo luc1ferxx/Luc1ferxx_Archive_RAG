@@ -1,11 +1,11 @@
+import { normalizeTrimmedText as normalizeText } from "../../../lib/normalize-text.js";
+
 export const RISK_REVIEW_SKILL_ID = "risk_review";
 
 export const RISK_REVIEW_SIGNAL_PATTERN =
   /\b(risk review|review risks?|risk analysis|gaps?|exceptions?|conflicts?|contradictions?|uncertaint(?:y|ies)|red flags?|missing terms?)\b|风险审查|风险|缺口|例外|冲突|矛盾|不确定|遗漏/i;
 
 const CUSTOM_SKILL_VERSION = "1.0.0";
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const getSelectedDocuments = ({ ragService, docIds = [], accessScope }) => {
   const selectedDocIds = new Set(docIds);

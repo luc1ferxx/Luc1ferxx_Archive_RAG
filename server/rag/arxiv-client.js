@@ -1,4 +1,5 @@
 import { XMLParser } from "fast-xml-parser";
+import { normalizeText } from "../lib/normalize-text.js";
 
 export const DEFAULT_ARXIV_API_URL = "https://export.arxiv.org/api/query";
 export const DEFAULT_ARXIV_MAX_RESULTS = 3;
@@ -20,11 +21,6 @@ const asArray = (value) => {
 
   return Array.isArray(value) ? value : [value];
 };
-
-const normalizeText = (value) =>
-  String(value ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
 
 export const normalizeArxivMaxResults = (
   value,

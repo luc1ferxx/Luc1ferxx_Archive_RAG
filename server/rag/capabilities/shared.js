@@ -15,8 +15,8 @@ export const CAPABILITY_IDS = Object.freeze({
 
 export const BUILT_IN_CAPABILITY_VERSION = "1.0.0";
 
-export const normalizeText = (value) =>
-  String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../../lib/normalize-text.js";
+export { normalizeText };
 
 export const toArray = (value) => (Array.isArray(value) ? value : []);
 

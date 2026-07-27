@@ -10,10 +10,9 @@ import {
   buildArxivPaperIdentity,
   findExistingArxivDocument,
 } from "./arxiv-identity.js";
+import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_IMPORT_DELAY_MS = 1000;
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const sleep = (durationMs) =>
   new Promise((resolve) => {

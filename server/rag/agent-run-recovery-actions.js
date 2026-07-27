@@ -13,8 +13,7 @@ import {
   buildStepReplaySafetyAssessment,
 } from "./agent-run-step-replay-safety.js";
 import { recordRagTrace } from "./observability.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../lib/normalize-text.js";
 
 const normalizeAction = (value) => normalizeText(value).toLowerCase();
 

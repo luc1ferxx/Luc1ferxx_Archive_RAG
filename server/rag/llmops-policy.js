@@ -1,3 +1,5 @@
+import { normalizeClampedText } from "../lib/normalize-text.js";
+
 export class LlmOpsBudgetExceededError extends Error {
   constructor({ budget = null } = {}) {
     super("LLMOps budget exceeded.");
@@ -24,8 +26,7 @@ const VALID_ALERT_SEVERITIES = new Set(Object.values(LLMOPS_ALERT_SEVERITIES));
 const VALID_BUDGET_STATUSES = new Set(Object.values(LLMOPS_BUDGET_STATUSES));
 const VALID_ENFORCEMENT_MODES = new Set(["block", "record"]);
 
-const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

@@ -2,6 +2,7 @@ import {
   AGENT_INTERRUPT_TYPES,
   AgentRunInterruptError,
 } from "../agent-interrupts.js";
+import { normalizeText } from "../../lib/normalize-text.js";
 
 export const CAPABILITY_POLICY_DECISIONS = Object.freeze({
   allowed: "allowed",
@@ -21,8 +22,6 @@ const APPROVED_DECISIONS = new Set([
   "confirm",
   "confirmed",
 ]);
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

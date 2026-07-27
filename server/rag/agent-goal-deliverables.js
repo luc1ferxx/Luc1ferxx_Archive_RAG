@@ -5,6 +5,7 @@ import {
   ARTIFACT_STATUSES,
   ARTIFACT_TYPES,
 } from "./workspace-artifacts/index.js";
+import { normalizeClampedText } from "../lib/normalize-text.js";
 
 export const AGENT_GOAL_DELIVERABLE_STATUSES = Object.freeze({
   approved: "approved",
@@ -24,8 +25,7 @@ const ARTIFACT_TYPES_BY_CAPABILITY = Object.freeze({
   [CAPABILITY_IDS.summaryCreate]: ARTIFACT_TYPES.summary,
 });
 
-const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

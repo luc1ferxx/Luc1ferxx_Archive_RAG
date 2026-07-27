@@ -1,13 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 const NEGATIVE_FEEDBACK_TYPES = new Set([
   "citation_error",
   "incomplete",
   "hallucination",
 ]);
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const toIdentifier = (value, fallbackValue = "item") => {
   const normalized = normalizeText(value)

@@ -1,3 +1,5 @@
+import { normalizeClampedText } from "../../lib/normalize-text.js";
+
 export const AGENT_WORKFLOW_TYPE = "agent_workflow";
 export const AGENT_WORKFLOW_SPEC_VERSION = "1.0.0";
 
@@ -11,8 +13,7 @@ const VALID_PHASE_TYPES = new Set(Object.values(AGENT_WORKFLOW_PHASE_TYPES));
 const MAX_TEXT_LENGTH = 320;
 const MAX_TEMPLATE_LENGTH = 1200;
 
-const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeTemplateText = (value) =>
   String(value ?? "").replace(/\r\n/g, "\n").trim().slice(0, MAX_TEMPLATE_LENGTH);

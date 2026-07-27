@@ -10,8 +10,7 @@ import {
 
 export { AGENT_SKILL_IDS } from "./built-ins.js";
 export { CUSTOM_SKILL_IDS } from "./custom/index.js";
-
-const normalizeText = (value) => String(value ?? "").trim();
+import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.js";
 
 const REQUIRED_SKILL_FIELDS = [
   "id",

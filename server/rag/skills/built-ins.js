@@ -11,6 +11,7 @@ import { isAgentRunInterrupt } from "../agent-interrupts.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
 import { attachRetrievedEvidence } from "../citations.js";
 import { rebaseEvidenceResults } from "../source-labels.js";
+import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.js";
 
 export const AGENT_SKILL_IDS = {
   arxivImport: "arxiv_import",
@@ -23,8 +24,6 @@ export const AGENT_SKILL_IDS = {
 };
 
 export const BUILT_IN_SKILL_VERSION = "1.0.0";
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const normalizeSentence = (value, fallback = "Workspace action") => {
   const text = normalizeText(value).replace(/\s+/g, " ") || fallback;

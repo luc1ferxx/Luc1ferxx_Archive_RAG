@@ -11,6 +11,7 @@ import {
   getApiAuthRevokedJtis,
   getApiAuthRevokedTokenHashes,
 } from "./rag/config.js";
+import { normalizeTrimmedText as normalizeText } from "./lib/normalize-text.js";
 
 const JWT_ALGORITHM = "HS256";
 
@@ -21,8 +22,6 @@ class JwtAuthError extends Error {
     this.status = status;
   }
 }
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const toList = (value) => {
   if (Array.isArray(value)) {

@@ -1,8 +1,9 @@
+import { normalizeClampedText } from "../lib/normalize-text.js";
+
 const MAX_LIST_ITEMS = 8;
 const MAX_TEXT_LENGTH = 300;
 
-const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

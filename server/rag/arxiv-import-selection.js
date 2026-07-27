@@ -1,7 +1,6 @@
 import { isExternalQueryPolicyAllowed } from "./external-query-policy.js";
 import { filterRelevantArxivPapers } from "./arxiv-query-policy.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../lib/normalize-text.js";
 
 const assertSelectionError = (message) => {
   const error = new Error(message);

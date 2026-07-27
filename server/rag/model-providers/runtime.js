@@ -1,9 +1,8 @@
 import { createDefaultModelProviderRegistry } from "./registry.js";
 import { MODEL_CAPABILITIES, MODEL_ROUTE_IDS } from "./schema.js";
+import { normalizeText } from "../../lib/normalize-text.js";
 
 let configuredModelProviderRegistry = null;
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 

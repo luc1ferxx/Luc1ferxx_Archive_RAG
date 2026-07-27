@@ -1,6 +1,5 @@
 import { enforceCapabilityPolicy } from "./policy-enforcer.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../../lib/normalize-text.js";
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

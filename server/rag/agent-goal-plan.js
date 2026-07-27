@@ -9,13 +9,13 @@ import {
   compactAgentGoalCompletion,
 } from "./agent-goal-completion.js";
 import { compactResearchTaskFlow } from "./agent-research-task.js";
+import { normalizeClampedText } from "../lib/normalize-text.js";
 
 export const AGENT_GOAL_PLAN_VERSION = "1.0.0";
 
 const MAX_TEXT_LENGTH = 220;
 
-const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

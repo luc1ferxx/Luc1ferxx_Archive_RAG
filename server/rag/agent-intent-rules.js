@@ -1,8 +1,7 @@
 import { SKILL_CHAIN_MODE } from "./agent-planner.js";
 import { CAPABILITY_IDS } from "./capabilities/shared.js";
 import { CUSTOM_SKILL_IDS } from "./skills/registry.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../lib/normalize-text.js";
 
 const WEB_SIGNAL_PATTERN =
   /\b(latest|current|currently|today|now|recent|news|live|online|internet|web|search the web|real[-\s]?time)\b|最新|当前|现在|今天|近日|实时|联网|网页|网络|新闻/i;

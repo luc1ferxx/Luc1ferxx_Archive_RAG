@@ -3,14 +3,14 @@ import {
   renderAgentWorkflowTemplate,
   resolveAgentWorkflowPhase,
 } from "./agent-workflows/schema.js";
+import { normalizeClampedText } from "../lib/normalize-text.js";
 
 export const AGENT_RESEARCH_TASK_VERSION = "1.0.0";
 export const AGENT_RESEARCH_TASK_TYPE = "research_task";
 
 const MAX_TEXT_LENGTH = 320;
 
-const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) =>
-  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+const normalizeText = (value, maxLength = MAX_TEXT_LENGTH) => normalizeClampedText(value, maxLength);
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

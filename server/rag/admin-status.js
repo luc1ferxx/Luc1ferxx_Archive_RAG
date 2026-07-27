@@ -15,6 +15,7 @@ import {
 } from "./agent-runs.js";
 import { createDefaultAgentTriggerRegistry } from "./agent-triggers/registry.js";
 import { TASK_STATUSES } from "./tasks.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 export const ADMIN_STATUS_VALUES = Object.freeze({
   error: "error",
@@ -22,8 +23,6 @@ export const ADMIN_STATUS_VALUES = Object.freeze({
   unavailable: "unavailable",
   warn: "warn",
 });
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

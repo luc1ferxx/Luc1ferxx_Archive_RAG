@@ -31,6 +31,7 @@ import {
   attachApprovalGateStepIds,
   buildAgentRunStepsFromTrace,
 } from "./agent-run-steps.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 const getSkillDescriptor = (skill = {}) => ({
   skillId: skill.id,
@@ -38,8 +39,6 @@ const getSkillDescriptor = (skill = {}) => ({
   label: skill.label,
   budgetKey: skill.budgetKey ?? null,
 });
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const getTaskContinuationCandidates = ({ question = "", taskMemory = null } = {}) => {
   const currentQuestion = normalizeText(question).toLowerCase();

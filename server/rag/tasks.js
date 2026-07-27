@@ -1,4 +1,5 @@
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../lib/normalize-text.js";
+
 
 export const normalizeTaskAccessScope = (accessScope = {}) => ({
   userId: normalizeText(accessScope.userId),

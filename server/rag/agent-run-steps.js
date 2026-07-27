@@ -17,8 +17,7 @@ export {
   normalizeAgentRunStepKind,
   normalizeAgentRunStepStatus,
 } from "./agent-run-transitions.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../lib/normalize-text.js";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 

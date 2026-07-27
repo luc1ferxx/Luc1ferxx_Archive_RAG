@@ -25,6 +25,7 @@ import {
   AGENT_TASK_TYPE,
 } from "./agent-task-contract.js";
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 export { AGENT_TASK_RUNNER_ID, AGENT_TASK_TYPE };
 
@@ -35,8 +36,6 @@ export const AGENT_TASK_ACTIONS = Object.freeze({
 });
 
 const DEFAULT_MAX_ITERATIONS = 3;
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { toWorkspaceArtifactReference } from "../workspace-artifacts/index.js";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+import { normalizeText } from "../../lib/normalize-text.js";
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

@@ -1,8 +1,8 @@
+import { normalizeText } from "../lib/normalize-text.js";
+
 export const AGENT_INTERRUPT_TYPES = Object.freeze({
   capabilityApprovalRequired: "capability_approval_required",
 });
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)

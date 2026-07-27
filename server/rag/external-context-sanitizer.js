@@ -3,6 +3,7 @@ import {
   getExternalQueryInternalIdentifiers,
   splitExternalQueryTerms,
 } from "./external-query-policy.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_SAFE_DOCUMENT_LABEL = "Uploaded document";
 
@@ -16,8 +17,6 @@ const LABEL_SENSITIVE_TERMS = new Set([
   "project",
   "proprietary",
 ]);
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const getProfile = (document = {}, profile = document.profile ?? {}) =>
   profile && typeof profile === "object" ? profile : {};

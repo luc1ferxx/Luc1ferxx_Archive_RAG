@@ -1,11 +1,11 @@
+import { normalizeTrimmedText as normalizeText } from "../../../lib/normalize-text.js";
+
 export const COMPARE_DOCUMENTS_SKILL_ID = "compare_documents";
 
 export const COMPARE_DOCUMENTS_SIGNAL_PATTERN =
   /\b(compare|comparison|differences?|different|versus|vs|same|similar|contrast|common ground|missing terms?|across|between)\b|对比|比较|差异|不同|相同|一致|共同点|缺失条款|遗漏条款|之间/i;
 
 const CUSTOM_SKILL_VERSION = "1.0.0";
-
-const normalizeText = (value) => String(value ?? "").trim();
 
 const getSelectedDocuments = ({ ragService, docIds = [], accessScope }) => {
   const selectedDocIds = new Set(docIds);

@@ -1,3 +1,5 @@
+import { normalizeText } from "../lib/normalize-text.js";
+
 export const EXTERNAL_QUERY_POLICY_VERSION = "external_query_policy_v1";
 
 const DEFAULT_MAX_QUERY_TERMS = 8;
@@ -49,8 +51,6 @@ const INTERNAL_IDENTIFIER_PATTERN =
   /\b(?:[A-Z][A-Z0-9]{1,}[-_][A-Z0-9._-]*\d[A-Z0-9._-]*|[A-Z]{2,}\d{2,}[A-Z0-9]*)\b/g;
 const SENSITIVE_PHRASE_PATTERN =
   /\b(?:customer|client|project|codename)\s+[A-Z][A-Za-z0-9._-]*(?:\s+[A-Z][A-Za-z0-9._-]*){0,3}/g;
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 export const normalizeExternalQueryTerm = (value) =>
   normalizeText(value)

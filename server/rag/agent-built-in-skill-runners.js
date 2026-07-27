@@ -14,14 +14,13 @@ import {
   buildCapabilityArtifactIdempotencyKey,
   isWorkspaceArtifactWriteError,
 } from "./capabilities/artifacts.js";
+import { normalizeText } from "../lib/normalize-text.js";
 
 const noop = () => {};
 const ARXIV_IMPORT_STEP_ID = "arxiv_import:primary";
 const WORKSPACE_ACTION_STEP_ID = "workspace_action:primary";
 const DOCUMENT_DISCOVERY_STEP_ID = "document_discovery:primary";
 const INVENTORY_STEP_ID = "inventory:primary";
-
-const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const buildResultStepError = (fallbackMessage) => (result = {}) =>
   buildStepError(result, fallbackMessage);
