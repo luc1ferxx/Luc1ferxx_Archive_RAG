@@ -39,6 +39,8 @@ server/.env
 /server/evaluation/results/latest-runtime-smoke.md
 /server/evaluation/results/param-sweep*.md
 /server/evaluation/results/*rerank*.md
+/server/evaluation/results/latest-ragas.json
+/server/evaluation/results/latest-ragas.md
 server/uploads/*
 !server/uploads/.gitkeep
 /.npm-cache/
