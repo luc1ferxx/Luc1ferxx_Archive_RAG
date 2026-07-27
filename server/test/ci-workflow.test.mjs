@@ -44,6 +44,17 @@ test("quality gate workflow runs server tests and required feedback eval", async
   assert.match(workflow, /cache-dependency-path:\s*server\/package-lock\.json/);
   assert.match(workflow, /run:\s*npm ci/);
   assert.match(workflow, /run:\s*npm test/);
+  assert.match(workflow, /jobs:\s*\n\s*server-tests:/);
+  assert.match(
+    workflow,
+    /server-tests:[\s\S]*run:\s*npm test[\s\S]*quality-gate:/,
+    "server tests must run as a parallel job, not a quality-gate step"
+  );
+  assert.doesNotMatch(
+    workflow,
+    /quality-gate:[\s\S]*run:\s*npm test/,
+    "the quality-gate job must not repeat the server test suite"
+  );
   assert.match(workflow, /run:\s*npm run eval:trajectory/);
   assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
   assert.match(workflow, /name:\s*Run planner eval \(mock\)/);
