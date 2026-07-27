@@ -394,7 +394,9 @@ describe("App", () => {
     expect(
       await screen.findByRole("region", { name: "Workspace artifacts" })
     ).toBeInTheDocument();
-    expect((await screen.findAllByText("Workspace risk report")).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(screen.getAllByText("Workspace risk report")).toHaveLength(2);
+    });
     expect(await screen.findByText("Stored risk result")).toBeInTheDocument();
     expect(screen.getByText("Not an evidence source")).toBeInTheDocument();
     expect(screen.getByText("benefits-2025.pdf")).toBeInTheDocument();
