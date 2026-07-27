@@ -2,7 +2,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
+import {
+  createChatPromptTemplate,
+  createPromptTemplate,
+} from "./lib/prompt-template.js";
 import { completeText } from "./rag/openai.js";
 import { getPromptVersion } from "./rag/config.js";
 
@@ -90,7 +93,7 @@ const withRetry = async (operation) => {
   throw lastError;
 };
 
-const webAnswerPromptV1 = PromptTemplate.fromTemplate(
+const webAnswerPromptV1 = createPromptTemplate(
   `Use the search results to answer the user's question.
 Be concise and say when the results are insufficient.
 When possible, mention the source titles directly in the answer.
@@ -104,7 +107,7 @@ Search Results:
 Helpful Answer:`
 );
 
-const webAnswerPromptV2 = ChatPromptTemplate.fromMessages([
+const webAnswerPromptV2 = createChatPromptTemplate([
   [
     "system",
     `You answer questions using live web search snippets.

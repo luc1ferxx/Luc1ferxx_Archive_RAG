@@ -1,4 +1,7 @@
-import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
+import {
+  createChatPromptTemplate,
+  createPromptTemplate,
+} from "../lib/prompt-template.js";
 import { completeText } from "./openai.js";
 import {
   getPromptVersion,
@@ -24,7 +27,7 @@ let configuredSessionMemoryStore = null;
 let sessionMemoryInitialized = false;
 let lastSessionCleanupAt = 0;
 
-const rewritePromptV1 = PromptTemplate.fromTemplate(
+const rewritePromptV1 = createPromptTemplate(
   `You rewrite follow-up questions into standalone retrieval queries for a document-grounded RAG system.
 Use the conversation only to resolve references, ellipsis, and document scope.
 Use long-term memory only as user-provided preferences or stable notes, never as document evidence.
@@ -47,7 +50,7 @@ Latest user question:
 Standalone retrieval question:`
 );
 
-const rewritePromptV2 = ChatPromptTemplate.fromMessages([
+const rewritePromptV2 = createChatPromptTemplate([
   [
     "system",
     `You rewrite follow-up questions into standalone retrieval queries for a document-grounded RAG system.
@@ -77,7 +80,7 @@ Standalone retrieval question:`,
   ],
 ]);
 
-const rewritePromptV3 = ChatPromptTemplate.fromMessages([
+const rewritePromptV3 = createChatPromptTemplate([
   [
     "system",
     `You rewrite follow-up questions into standalone retrieval queries for a document-grounded RAG system.

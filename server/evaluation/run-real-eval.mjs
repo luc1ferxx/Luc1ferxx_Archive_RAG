@@ -4,7 +4,6 @@ import { randomUUID } from "crypto";
 import { access, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
-import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import chat, { ingestDocument } from "../chat.js";
 import { evaluateAnswerExpectation } from "./answer-match.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
@@ -27,6 +26,7 @@ import {
 } from "../rag/config.js";
 import { resetDocumentRegistry } from "../rag/doc-registry.js";
 import { resetSessionMemory } from "../rag/memory.js";
+import { loadPdfPages } from "../rag/pdf-loader.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
 import { resetVectorStore } from "../rag/vector-store.js";
 
@@ -108,10 +108,8 @@ const average = (values) =>
       );
 
 const loadDocumentPages = async (filePath) => {
-  const loader = new PDFLoader(filePath);
-  const pageDocuments = await loader.load();
-
-  return pageDocuments.map((document) => document.pageContent);
+  const pages = await loadPdfPages(filePath);
+  return pages.map((page) => page.text);
 };
 
 const evaluateCase = async ({

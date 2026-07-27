@@ -1,4 +1,7 @@
-import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
+import {
+  createChatPromptTemplate,
+  createPromptTemplate,
+} from "../lib/prompt-template.js";
 import {
   getMaxComparisonSources,
   getPromptVersion,
@@ -13,7 +16,7 @@ import {
 import { completeText } from "./openai.js";
 import { normalizeWhitespace } from "./text-utils.js";
 
-const qaPromptV1 = PromptTemplate.fromTemplate(
+const qaPromptV1 = createPromptTemplate(
   `You answer questions using only retrieved document evidence.
 If the evidence is insufficient, say so directly.
 Do not substitute adjacent topics for the asked topic.
@@ -31,7 +34,7 @@ Retrieved Evidence:
 Grounded Answer:`
 );
 
-const comparisonPromptV1 = PromptTemplate.fromTemplate(
+const comparisonPromptV1 = createPromptTemplate(
   `You compare uploaded documents using only the provided evidence.
 Separate agreement, difference, and uncertainty.
 If a document lacks evidence, say so explicitly.
@@ -64,7 +67,7 @@ Differences:
 Gaps or uncertainty:`
 );
 
-const guardedComparisonPromptV1 = PromptTemplate.fromTemplate(
+const guardedComparisonPromptV1 = createPromptTemplate(
   `You compare uploaded documents using only the provided evidence.
 Separate agreement, difference, and uncertainty.
 If a document lacks evidence, say so explicitly.
@@ -98,7 +101,7 @@ Differences:
 Gaps or uncertainty:`
 );
 
-const qaPromptV2 = ChatPromptTemplate.fromMessages([
+const qaPromptV2 = createChatPromptTemplate([
   [
     "system",
     `You are a document-grounded assistant for uploaded PDFs.
@@ -127,7 +130,7 @@ Grounded Answer:`,
   ],
 ]);
 
-const comparisonPromptV2 = ChatPromptTemplate.fromMessages([
+const comparisonPromptV2 = createChatPromptTemplate([
   [
     "system",
     `You are a document-grounded comparison assistant for uploaded PDFs.
@@ -173,7 +176,7 @@ Use short bullets inside sections when helpful.`,
   ],
 ]);
 
-const guardedComparisonPromptV2 = ChatPromptTemplate.fromMessages([
+const guardedComparisonPromptV2 = createChatPromptTemplate([
   [
     "system",
     `You are a document-grounded comparison assistant for uploaded PDFs.

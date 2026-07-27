@@ -1,4 +1,4 @@
-import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
+import { createChatClient, createEmbeddingsClient } from "./openai-client.js";
 import { getLlmOpsPolicy } from "./config.js";
 import {
   MODEL_CAPABILITIES,
@@ -184,7 +184,7 @@ const getEmbeddingsInstance = (options = {}) => {
     };
   }
 
-  const embeddingsInstance = new OpenAIEmbeddings({
+  const embeddingsInstance = createEmbeddingsClient({
     apiKey: getOpenAIApiKey(),
     model: route.modelName,
   });
@@ -233,7 +233,7 @@ const getChatModelInstance = (options = {}) => {
     };
   }
 
-  const chatModelInstance = new ChatOpenAI({
+  const chatModelInstance = createChatClient({
     model: route.modelName,
     apiKey: getOpenAIApiKey(),
   });

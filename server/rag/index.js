@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { Document } from "@langchain/core/documents";
-import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { chunkDocument } from "./chunker.js";
 import {
   clearDocuments as clearRegisteredDocuments,
@@ -36,6 +34,7 @@ import {
   resolveQueryWithSessionMemory,
 } from "./memory.js";
 import { recordRagTrace } from "./observability.js";
+import { loadPdfPages } from "./pdf-loader.js";
 import { addDocumentsToIndex, clearVectorIndex, removeDocumentsFromIndex } from "./vector-store.js";
 
 export {
@@ -80,19 +79,16 @@ export const ingestDocumentPages = async ({
     throw error;
   }
 
-  const langChainDocuments = chunks.map(
-    (chunk) =>
-      new Document({
-        id: chunk.id,
-        pageContent: chunk.pageContent,
-        metadata: chunk.metadata,
-      })
-  );
+  const documents = chunks.map((chunk) => ({
+    id: chunk.id,
+    pageContent: chunk.pageContent,
+    metadata: chunk.metadata,
+  }));
   let indexed = false;
 
   try {
     await addDocumentsToIndex({
-      documents: langChainDocuments,
+      documents,
     });
     indexed = true;
 
@@ -141,8 +137,7 @@ export const ingestDocument = async ({
   workspaceId = "",
   source = null,
 }) => {
-  const loader = new PDFLoader(filePath);
-  const pageDocuments = await loader.load();
+  const pages = await loadPdfPages(filePath);
 
   return ingestDocumentPages({
     docId,
@@ -151,10 +146,7 @@ export const ingestDocument = async ({
     ownerUserId,
     workspaceId,
     source,
-    pages: pageDocuments.map((document, index) => ({
-      pageNumber: getPageNumber(document.metadata, index + 1),
-      text: document.pageContent,
-    })),
+    pages,
   });
 };
 
