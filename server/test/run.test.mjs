@@ -24,15 +24,15 @@ const collectTestFiles = async () => {
 
 const runTests = async (testFiles) =>
   new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      ["--test", "--test-concurrency=1", ...testFiles],
-      {
-        cwd: serverDirectory,
-        env: process.env,
-        stdio: "inherit",
-      }
-    );
+    // Each test file runs in its own child process (node --test default
+    // isolation), so per-process state (process.env, globalThis.fetch,
+    // module singletons) never leaks across files even when they run
+    // concurrently.
+    const child = spawn(process.execPath, ["--test", ...testFiles], {
+      cwd: serverDirectory,
+      env: process.env,
+      stdio: "inherit",
+    });
 
     child.on("close", (exitCode) => {
       resolve(exitCode ?? 1);
