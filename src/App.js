@@ -19,20 +19,16 @@ import WorkspaceEntryPanel from "./components/WorkspaceEntryPanel";
 import WorkspaceArtifactsPanel from "./components/WorkspaceArtifactsPanel";
 import LocaleSwitch from "./components/LocaleSwitch";
 import {
-  fetchLatestQualityReport,
-  fetchQualityHistory,
-  requestAgentRunRecoveryAction,
-  requestAgentRunAction,
-  requestAgentRunStepRetry,
   requestAnswerFeedback,
-  requestSyntheticQualityRun,
   requestTaskAction,
 } from "./archiveApi";
-import { isArxivDocument } from "./archiveWorkspace";
 import { useChatSession } from "./hooks/useChatSession";
 import { useArxivEnrichment } from "./hooks/useArxivEnrichment";
+import { useAgentRunActions } from "./hooks/useAgentRunActions";
 import { useAgentRunRecovery } from "./hooks/useAgentRunRecovery";
+import { useChatScope, CHAT_SCOPE_MODES } from "./hooks/useChatScope";
 import { useDocumentSelection } from "./hooks/useDocumentSelection";
+import { useQualityReports } from "./hooks/useQualityReports";
 import { hasActiveTasks, useTaskLog } from "./hooks/useTaskLog";
 import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
 import {
@@ -42,7 +38,6 @@ import {
   DEMO_QUALITY_HISTORY,
   DEMO_QUALITY_REPORT,
 } from "./demoWorkbench";
-import { getRecoveryActionSuccessMessage } from "./components/workbenchFormatters";
 import {
   createTranslator,
   getInitialLocale,
@@ -57,12 +52,6 @@ const CONVERSATION_VIEWS = [
   { id: "tasks", labelKey: "view.tasks" },
 ];
 
-const CHAT_SCOPE_MODES = {
-  uploaded: "uploaded",
-  all: "all",
-  selected: "selected",
-};
-
 const HOME_NAV_SECTIONS = new Set([
   "home",
   "skills",
@@ -75,40 +64,16 @@ const HOME_NAV_SECTIONS = new Set([
 const getBackendErrorMessage = (error, fallbackMessage) =>
   error.response?.data?.error ?? fallbackMessage;
 
-const buildAgentRunActionAnswer = (currentAnswer = {}, result = {}) => {
-  const run = result?.run;
-  const nextAnswer = result?.response
-    ? {
-        ...result.response,
-      }
-    : {
-        ...currentAnswer,
-      };
-
-  return {
-    ...nextAnswer,
-    agentRunRecovery: run?.recovery ?? nextAnswer.agentRunRecovery,
-    agentRunStatus: run?.status ?? nextAnswer.agentRunStatus,
-    agentRunSteps: run?.steps ?? nextAnswer.agentRunSteps,
-    approvalGates: run?.approvalGates ?? nextAnswer.approvalGates,
-  };
-};
-
 const App = () => {
-  const [isQualityLoading, setIsQualityLoading] = useState(false);
-  const [qualityHistory, setQualityHistory] = useState(null);
-  const [qualityReport, setQualityReport] = useState(null);
   const [activeConversationView, setActiveConversationView] = useState("chat");
   const [activeWorkspaceNav, setActiveWorkspaceNav] = useState("workspace");
   const [locale, setLocale] = useState(getInitialLocale);
-  const [chatScopeMode, setChatScopeMode] = useState(CHAT_SCOPE_MODES.uploaded);
   const [isWorkbenchOpen, setIsWorkbenchOpen] = useState(false);
   const [activeHomeSection, setActiveHomeSection] = useState("home");
   const [homeDraftQuestion, setHomeDraftQuestion] = useState("");
   const [homeComposerResetKey, setHomeComposerResetKey] = useState(0);
   const [pendingHomeTask, setPendingHomeTask] = useState(null);
   const [selectedHomeSkillId, setSelectedHomeSkillId] = useState("document_rag");
-  const [selectedChatDocIds, setSelectedChatDocIds] = useState([]);
   const mainRef = useRef(null);
   const composerRef = useRef(null);
   const homeUploadRef = useRef(null);
@@ -222,6 +187,44 @@ const App = () => {
   const isDemoWorkbench =
     activeDocuments.length === 0 && hasOnlyDemoConversation && !isLoading;
 
+  const {
+    chatDocIds,
+    chatDocLabel,
+    chatScopeMode,
+    chatScopeOptions,
+    selectedChatDocIds,
+    setChatScopeMode,
+    setSelectedChatDocIds,
+    toggleChatScopeDocument,
+  } = useChatScope({ activeDocuments, t });
+
+  const {
+    isQualityLoading,
+    loadLatestQualityReport,
+    loadQualityHistory,
+    qualityHistory,
+    qualityReport,
+    runSyntheticQualityReport,
+  } = useQualityReports({
+    demoQualityHistory: DEMO_QUALITY_HISTORY,
+    demoQualityReport: DEMO_QUALITY_REPORT,
+    isDemoWorkbench,
+    t,
+  });
+
+  const {
+    handleAgentApprovalAction,
+    handleAgentRecoveryAction,
+    handleAgentStepRetry,
+  } = useAgentRunActions({
+    conversation,
+    refreshAgentRunRecovery,
+    setIsLoading,
+    setSelectedSource,
+    updateConversationTurn,
+    t,
+  });
+
   const resetWorkspaceSession = useCallback(async () => {
     resetConversation();
     resetSelection();
@@ -300,106 +303,28 @@ const App = () => {
     [handleWorkspaceUploadSuccess]
   );
 
-  const uploadedDocuments = useMemo(
-    () => activeDocuments.filter((document) => !isArxivDocument(document)),
-    [activeDocuments]
+  const submitAnswerFeedback = useCallback(
+    async (feedback) => {
+      try {
+        await requestAnswerFeedback({
+          ...feedback,
+          docIds: feedback.docIds ?? chatDocIds,
+          sessionId,
+          userId,
+        });
+      } catch (error) {
+        const backendMessage =
+          error.response?.data?.error ?? t("app.feedbackFailed");
+        message.error(backendMessage);
+      }
+    },
+    [chatDocIds, sessionId, t, userId]
   );
-  const selectedChatDocuments = useMemo(
-    () =>
-      activeDocuments.filter((document) =>
-        selectedChatDocIds.includes(document.docId)
-      ),
-    [activeDocuments, selectedChatDocIds]
-  );
-  const chatScopeDocuments = useMemo(() => {
-    if (chatScopeMode === CHAT_SCOPE_MODES.all) {
-      return activeDocuments;
-    }
 
-    if (chatScopeMode === CHAT_SCOPE_MODES.selected) {
-      return selectedChatDocuments;
-    }
-
-    return uploadedDocuments;
-  }, [activeDocuments, chatScopeMode, selectedChatDocuments, uploadedDocuments]);
-  const chatDocIds = useMemo(
-    () => chatScopeDocuments.map((document) => document.docId),
-    [chatScopeDocuments]
-  );
   const activeDocumentIdsKey = useMemo(
     () => activeDocuments.map((document) => document.docId).join("\n"),
     [activeDocuments]
   );
-  const chatDocLabel = useMemo(
-    () =>
-      chatScopeDocuments.length > 0
-        ? t("common.docs", { count: chatScopeDocuments.length })
-        : t("common.noDocumentsInScope"),
-    [chatScopeDocuments.length, t]
-  );
-  const chatScopeOptions = useMemo(
-    () => [
-      {
-        count: uploadedDocuments.length,
-        id: CHAT_SCOPE_MODES.uploaded,
-        label: t("common.uploaded"),
-      },
-      {
-        count: activeDocuments.length,
-        id: CHAT_SCOPE_MODES.all,
-        label: t("common.all"),
-      },
-      {
-        count: selectedChatDocuments.length,
-        id: CHAT_SCOPE_MODES.selected,
-        label: t("common.selected"),
-      },
-    ],
-    [activeDocuments.length, selectedChatDocuments.length, t, uploadedDocuments.length]
-  );
-  const toggleChatScopeDocument = useCallback((docId) => {
-    setSelectedChatDocIds((currentDocIds) =>
-      currentDocIds.includes(docId)
-        ? currentDocIds.filter((currentDocId) => currentDocId !== docId)
-        : [...currentDocIds, docId]
-    );
-  }, []);
-
-  useEffect(() => {
-    const activeDocIdSet = new Set(activeDocuments.map((document) => document.docId));
-
-    setSelectedChatDocIds((currentDocIds) =>
-      currentDocIds.filter((docId) => activeDocIdSet.has(docId))
-    );
-  }, [activeDocuments]);
-
-  useEffect(() => {
-    if (activeDocuments.length === 0) {
-      return;
-    }
-
-    if (
-      chatScopeMode === CHAT_SCOPE_MODES.uploaded &&
-      uploadedDocuments.length === 0
-    ) {
-      setChatScopeMode(CHAT_SCOPE_MODES.all);
-      return;
-    }
-
-    if (
-      chatScopeMode === CHAT_SCOPE_MODES.selected &&
-      selectedChatDocuments.length === 0
-    ) {
-      setChatScopeMode(
-        uploadedDocuments.length > 0 ? CHAT_SCOPE_MODES.uploaded : CHAT_SCOPE_MODES.all
-      );
-    }
-  }, [
-    activeDocuments.length,
-    chatScopeMode,
-    selectedChatDocuments.length,
-    uploadedDocuments.length,
-  ]);
 
   useEffect(() => {
     if (!activeDocumentIdsKey) {
@@ -423,257 +348,6 @@ const App = () => {
     refreshAgentRunRecovery,
     refreshTaskLog,
   ]);
-
-  const loadLatestQualityReport = useCallback(async () => {
-    if (isDemoWorkbench) {
-      setQualityReport(DEMO_QUALITY_REPORT);
-      setQualityHistory(DEMO_QUALITY_HISTORY);
-      message.success(t("app.demoQualityLoaded"));
-      return;
-    }
-
-    setIsQualityLoading(true);
-
-    try {
-      setQualityReport(await fetchLatestQualityReport());
-      setQualityHistory(await fetchQualityHistory());
-    } catch (error) {
-      const backendMessage =
-        error.response?.data?.error ?? t("app.latestQualityFailed");
-      message.error(backendMessage);
-    } finally {
-      setIsQualityLoading(false);
-    }
-  }, [isDemoWorkbench, t]);
-
-  const loadQualityHistory = useCallback(async () => {
-    if (isDemoWorkbench) {
-      setQualityHistory(DEMO_QUALITY_HISTORY);
-      message.success(t("app.demoQualityHistoryLoaded"));
-      return;
-    }
-
-    setIsQualityLoading(true);
-
-    try {
-      setQualityHistory(await fetchQualityHistory());
-    } catch (error) {
-      const backendMessage =
-        error.response?.data?.error ?? t("app.qualityHistoryFailed");
-      message.error(backendMessage);
-    } finally {
-      setIsQualityLoading(false);
-    }
-  }, [isDemoWorkbench, t]);
-
-  const runSyntheticQualityReport = useCallback(async () => {
-    if (isDemoWorkbench) {
-      setQualityReport(DEMO_QUALITY_REPORT);
-      setQualityHistory(DEMO_QUALITY_HISTORY);
-      message.success(t("app.demoSyntheticComplete"));
-      return;
-    }
-
-    setIsQualityLoading(true);
-
-    try {
-      setQualityReport(await requestSyntheticQualityRun());
-      setQualityHistory(await fetchQualityHistory());
-      message.success(t("app.syntheticComplete"));
-    } catch (error) {
-      const backendMessage =
-        error.response?.data?.error ?? t("app.syntheticFailed");
-      message.error(backendMessage);
-    } finally {
-      setIsQualityLoading(false);
-    }
-  }, [isDemoWorkbench, t]);
-
-  const submitAnswerFeedback = useCallback(
-    async (feedback) => {
-      try {
-        await requestAnswerFeedback({
-          ...feedback,
-          docIds: feedback.docIds ?? chatDocIds,
-          sessionId,
-          userId,
-        });
-      } catch (error) {
-        const backendMessage =
-          error.response?.data?.error ?? t("app.feedbackFailed");
-        message.error(backendMessage);
-      }
-    },
-    [chatDocIds, sessionId, t, userId]
-  );
-
-  const handleAgentApprovalAction = useCallback(
-    async ({ action, gate, turnIndex }) => {
-      const turn = conversation[turnIndex];
-      const runId = turn?.answer?.agentRunId;
-
-      if (!runId || !gate?.id) {
-        message.error(t("app.approvalMissing"));
-        return;
-      }
-
-      setIsLoading(true);
-
-      try {
-        const result = await requestAgentRunAction(runId, action, {
-          gateId: gate.id,
-        });
-
-        if (action === "approve" && result?.response) {
-          const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
-
-          updateConversationTurn(turnIndex, {
-            question: turn.question,
-            answer: nextAnswer,
-          });
-          setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
-          await refreshAgentRunRecovery();
-          message.success(t("app.approvalRecorded"));
-          return;
-        }
-
-        const updatedGates = result?.run?.approvalGates ?? [];
-        const updatedSteps = result?.run?.steps ?? [];
-
-        updateConversationTurn(turnIndex, (currentTurn) => ({
-          ...currentTurn,
-          answer: {
-            ...currentTurn.answer,
-            agentAnswer: t("app.approvalDeniedAnswer"),
-            agentRunStatus: result?.run?.status ?? currentTurn.answer?.agentRunStatus,
-            agentRunSteps: updatedSteps,
-            approvalGates: updatedGates,
-            clarification: {
-              ...(currentTurn.answer?.clarification ?? {}),
-              needed: false,
-            },
-          },
-        }));
-        await refreshAgentRunRecovery();
-        message.info(t("app.approvalDenied"));
-      } catch (error) {
-        const backendMessage =
-          error.response?.data?.error ?? t("app.approvalMissing");
-        message.error(backendMessage);
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [
-      conversation,
-      refreshAgentRunRecovery,
-      setIsLoading,
-      setSelectedSource,
-      updateConversationTurn,
-      t,
-    ]
-  );
-
-  const handleAgentStepRetry = useCallback(
-    async ({ step, turnIndex }) => {
-      const turn = conversation[turnIndex];
-      const runId = turn?.answer?.agentRunId;
-
-      if (!runId || !step?.id) {
-        message.error(t("app.retryMissing"));
-        return;
-      }
-
-      setIsLoading(true);
-
-      try {
-        const result = await requestAgentRunStepRetry(runId, step.id);
-        const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
-
-        updateConversationTurn(turnIndex, {
-          question: turn.question,
-          answer: nextAnswer,
-        });
-        setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
-        await refreshAgentRunRecovery();
-        message.success(t("app.retryComplete"));
-      } catch (error) {
-        const backendMessage =
-          error.response?.data?.error ?? t("app.retryFailed");
-        message.error(backendMessage);
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [
-      conversation,
-      refreshAgentRunRecovery,
-      setIsLoading,
-      setSelectedSource,
-      updateConversationTurn,
-      t,
-    ]
-  );
-
-  const handleAgentRecoveryAction = useCallback(
-    async ({ action, runId, stepId, turnIndex }) => {
-      const resolvedRunId = runId?.trim();
-      const resolvedTurnIndex = Number.isInteger(turnIndex)
-        ? turnIndex
-        : conversation.findIndex(
-            (turn) => turn?.answer?.agentRunId === resolvedRunId
-          );
-      const turn =
-        resolvedTurnIndex >= 0 ? conversation[resolvedTurnIndex] : null;
-
-      if (!resolvedRunId || !action) {
-        message.error(t("app.recoverMissing"));
-        return;
-      }
-
-      setIsLoading(true);
-
-      try {
-        const payload = stepId
-          ? {
-              stepId,
-            }
-          : {};
-        const result = await requestAgentRunRecoveryAction(
-          resolvedRunId,
-          action,
-          payload
-        );
-
-        if (turn) {
-          const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
-
-          updateConversationTurn(resolvedTurnIndex, {
-            question: turn.question,
-            answer: nextAnswer,
-          });
-          setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
-        }
-
-        await refreshAgentRunRecovery();
-        message.success(getRecoveryActionSuccessMessage(action));
-      } catch (error) {
-        const backendMessage =
-          error.response?.data?.error ?? t("app.recoverFailed");
-        message.error(backendMessage);
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [
-      conversation,
-      refreshAgentRunRecovery,
-      setIsLoading,
-      setSelectedSource,
-      updateConversationTurn,
-      t,
-    ]
-  );
 
   const resetPageScroll = useCallback(() => {
     if (navigator.userAgent.toLowerCase().includes("jsdom")) {
@@ -816,7 +490,7 @@ const App = () => {
         })
       );
     },
-    [focusComposer, t]
+    [focusComposer, setChatScopeMode, setSelectedChatDocIds, t]
   );
 
   const handleHomeNavigate = useCallback(
@@ -846,7 +520,7 @@ const App = () => {
     setChatScopeMode(CHAT_SCOPE_MODES.uploaded);
     setHomeComposerResetKey((currentKey) => currentKey + 1);
     resetPageScroll();
-  }, [resetPageScroll]);
+  }, [resetPageScroll, setChatScopeMode, setSelectedChatDocIds]);
 
   const handleSidebarNavigate = useCallback(
     async (target) => {
