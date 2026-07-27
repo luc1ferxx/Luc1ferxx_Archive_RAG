@@ -8,7 +8,8 @@
 
 <p>
   <img alt="React 18" src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=111111" />
-  <img alt="Vite" src="https://img.shields.io/badge/Vite-workbench-646CFF?logo=vite&logoColor=ffffff" />
+  <img alt="Vite" src="https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=ffffff" />
+  <img alt="Vitest" src="https://img.shields.io/badge/Vitest-3-6E9F18?logo=vitest&logoColor=ffffff" />
   <img alt="Node.js ESM" src="https://img.shields.io/badge/Node.js-ESM-339933?logo=node.js&logoColor=ffffff" />
   <img alt="Express API" src="https://img.shields.io/badge/Express-API-000000?logo=express&logoColor=ffffff" />
   <img alt="OpenAI" src="https://img.shields.io/badge/OpenAI-GPT--5-412991?logo=openai&logoColor=ffffff" />
@@ -38,8 +39,8 @@ Luc1ferxx Archive RAG 是一个本地优先的多 PDF 档案分析系统。它�
 | 方向 | 当前能力 |
 | --- | --- |
 | 文档工作台 | React 三栏式工作台，包含上传、文档列表、PDF 预览、聊天、sources、trace、Agent Run Center、quality 面板，以及与源文档分离的 Drive 生成结果列表。 |
-| PDF ingestion | 支持直接上传和分片上传；解析页文本，生成 document profile，写入 PostgreSQL 文档表和向量索引。 |
-| 文档 RAG | Structured chunking、query decomposition、dense retrieval、可选 sparse hybrid、可选 rerank、confidence gate 和页级 citation。 |
+| PDF ingestion | 支持直接上传和分片上传；文件名与 `%PDF` 魔数双重校验；解析页文本，生成 document profile，写入 PostgreSQL 文档表和向量索引。 |
+| 文档 RAG | Structured chunking、query decomposition、dense retrieval、可选 sparse hybrid、可选 rerank、confidence gate 和页级 citation。查询 embedding 走 LRU 缓存。 |
 | 多文档对比 | Compare 请求走 per-document retrieval，每份文档独立召回和 rerank，再做 evidence alignment、近重复保护和结构化差异输出。 |
 | AgentRAG | LLM/deterministic planner 可配置，执行前校验 access scope；支持 clarification gate、approval gate、白名单 skill chain、self-check、gap analysis、follow-up retrieval、finalizer、research_task/dossier 流程、agent task 产物交付，以及显式注入的 connector/MCP adapter、sandbox/secret boundary、runtime model/provider registry 和 LLMOps policy/admin health surface。 |
 | Skills 和 capabilities | 内置 `document_rag`、`web_search`、`arxiv_import`、`inventory`、`document_discovery`、`research_brief`；custom skills 只从白名单加载。Capability registry 暴露 `report.export` 和 action capabilities 的统一 contract，不让模型调用任意工具。 |
@@ -48,7 +49,7 @@ Luc1ferxx Archive RAG 是一个本地优先的多 PDF 档案分析系统。它�
 | 记忆 | Session memory 用于追问改写；long memory 和 agent experience memory 在 PostgreSQL 配置后默认启用。Experience memory 只进入 planner hints，不作为 citation 或答案证据。 |
 | 可观测性 | `/chat` 返回 `agentTrace`、`agentObservability`、`agentWorkingMemory`；可选写 JSONL trace，前端可展示 planner、skills、queries、gaps 和 removed claims。 |
 | 质量体系 | 覆盖 synthetic、real、feedback、trajectory、planner、recovery observability、rerank、param sweep、coverage gate、Ragas 辅助评测和 GitHub Actions quality gate。 |
-| 访问隔离 | `API_AUTH_ENABLED` 配合 `API_AUTH_TOKEN`、`API_AUTH_TOKENS` 或 HS256 JWT 后，文档、artifacts、上传、chat、删除、文件、memory、feedback、quality 等接口按 `userId/workspaceId` scope 过滤；Admin status/actions/audit 额外按 roles/permissions 授权，audit 在 PostgreSQL 配好时写入 append-only event store。 |
+| 访问隔离 | `API_AUTH_ENABLED` 配合 `API_AUTH_TOKEN`、`API_AUTH_TOKENS` 或 HS256 JWT 后，文档、artifacts、上传、chat、删除、文件、memory、feedback、quality 等接口按 `userId/workspaceId` scope 过滤；Admin status/actions/audit 额外按 roles/permissions 授权，audit 在 PostgreSQL 配好时写入 append-only event store。CORS 白名单、helmet 和分级限流默认开启。 |
 
 ## 系统架构
 
@@ -62,15 +63,13 @@ flowchart TB
   end
 
   subgraph API["Node ESM Express API"]
-    Routes["server/app.js"]
-    Auth["auth + accessScope"]
-    UploadRoutes["upload routes"]
-    ChatRoute["/chat"]
-    TaskRoutes["tasks / agent-runs / artifacts / quality"]
+    Composition["app.js composition root + app-services.js"]
+    Auth["auth + accessScope + rate limits"]
+    Routers["server/routes/ feature routers (zod validated)"]
   end
 
   subgraph RAG["server/rag"]
-    Ingest["PDF ingest + chunker + profiler"]
+    Ingest["pdf-loader + chunker + profiler"]
     Planner["Agent planner"]
     Skills["Skill registry + capability registry"]
     Retrieval["retrievers + vector store + reranker"]
@@ -89,24 +88,33 @@ flowchart TB
   Workspace --> Upload
   Workspace --> Chat
   Workspace --> TraceUI
-  Upload --> UploadRoutes
-  Chat --> ChatRoute
-  TraceUI --> TaskRoutes
-  Routes --> Auth
-  UploadRoutes --> Ingest
-  ChatRoute --> Planner
+  Upload --> Routers
+  Chat --> Routers
+  TraceUI --> Routers
+  Composition --> Auth
+  Auth --> Routers
+  Routers --> Ingest
+  Routers --> Planner
   Planner --> Skills
   Skills --> Retrieval
   Retrieval --> Loop
   Loop --> Finalizer
-  Finalizer --> ChatRoute
-  TaskRoutes --> Runs
+  Finalizer --> Routers
+  Routers --> Runs
   Ingest --> Postgres
   Ingest --> Vector
   Retrieval --> Vector
   Runs --> Postgres
   Loop --> TraceFiles
 ```
+
+后端分层遵循“组合根 + 特性 Router + 领域模块”的结构：
+
+- `server/app.js` 是 171 行的组合根：解析配置，交给 `app-services.js` 装配全部服务，按序执行启动恢复（storage → registries → memories → tasks → runs → recovery → health），然后先挂载 `/health`、`/ready`，再套限流和鉴权，最后挂载 `server/routes/` 下的特性 Router（documents、uploads、chat、tasks、arxiv、memory、quality、artifacts、admin）。
+- 路由入参统一经 `routes/validation.js` 的 zod schema 校验；错误消息和状态码保持稳定 contract。
+- LLM 接入不依赖任何框架：`server/lib/prompt-template.js`（f-string 模板渲染）、`server/rag/openai-client.js`（OpenAI 兼容 fetch client，支持 `OPENAI_BASE_URL` 代理端点、错误 status 传播和真实 token usage 上报）、`server/rag/pdf-loader.js`（页级 PDF 提取，ingestion 和评测共用同一条管线）。后端直接依赖仅 13 个。
+- Claim self-check 拆分在 `server/rag/self-check/`（patterns、text、modality、attribution、claims、support、evaluate、gaps），`agent-self-check.js` 作为稳定的对外出口。
+- 文本归一化收敛在 `server/lib/normalize-text.js` 三个变体（collapse / trim / clamp），全仓复用。
 
 ## AgentRAG 闭环
 
@@ -143,8 +151,8 @@ flowchart LR
 
 | 场景 | 谁调用 | 谁决定 | 谁执行 |
 | --- | --- | --- | --- |
-| 上传 PDF | `src/components/PdfUploader.js` 调 `/upload` 或分片上传接口 | `server/app.js` 校验文件、session 和 access scope | `server/rag/index.js` 解析 PDF，`chunker.js` 切块，`doc-registry.js` 写 PostgreSQL，`vector-store*.js` 写索引 |
-| 普通问答 | `src/components/ChatComponent.js` 调 `/chat` | `server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
+| 上传 PDF | `src/components/PdfUploader.jsx` 调 `/upload` 或分片上传接口 | `server/routes/uploads.js` 校验文件名、魔数、session 和 access scope | `server/rag/index.js` 用 `pdf-loader.js` 解析 PDF，`chunker.js` 切块，`doc-registry.js` 写 PostgreSQL，`vector-store*.js` 写索引 |
+| 普通问答 | `src/components/ChatComponent.jsx` 调 `/chat` | `server/routes/chat.js` 接请求，`server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
 | 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
 | arXiv 推荐导入 | 前端 arXiv panel 调 suggestion / task action | `arxiv-enrichment.js` 生成清理后的 topic 和签名候选，task service 记录等待确认 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
 | Agent goal task | `/agent-tasks` 创建 durable goal，前端 Agent Run Center 消费 `/tasks` 返回的公开 plan | `agent-tasks.js` 驱动多轮 task loop，`agent-goal-plan.js` 生成公开计划合同 | `job-orchestrator.js` 调 runner，`runAgentRag()` 执行每轮 `/chat` 路径，task action 可继续或批准 |
@@ -174,6 +182,8 @@ cp server/.env.example server/.env
 ```env
 # server/.env
 OPENAI_API_KEY=your_openai_api_key
+# 可选：OpenAI 兼容代理 / 自建端点
+# OPENAI_BASE_URL=
 SERPAPI_KEY=your_serpapi_key
 
 POSTGRES_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/agentai
@@ -201,6 +211,9 @@ RAG_LLMOPS_ENFORCEMENT_MODE=record
 RAG_LLMOPS_MAX_COST_USD_PER_EVENT=
 RAG_LLMOPS_MAX_TOKENS_PER_EVENT=
 
+ALLOWED_ORIGINS=http://localhost:3000
+RATE_LIMIT_ENABLED=true
+
 STARTUP_HEALTH_STRICT=false
 ```
 
@@ -216,6 +229,7 @@ VITE_API_AUTH_TOKEN=
 - Workspace artifact 的 `auto` provider 在 PostgreSQL 可用时持久化到 `rag_workspace_artifacts`；回退的 memory adapter 仅适合本地开发，重启后会丢失生成结果。
 - `VECTOR_STORE_PROVIDER=local` 会把向量和 sparse index 写到 `server/data/rag/`；更大语料可以切到 Qdrant。
 - 只做文档 RAG 时 `SERPAPI_KEY` 可以先留空；web search 能力需要它。
+- 前端 dev server 固定跑在 `3000` 端口，与 `ALLOWED_ORIGINS` 的 CORS 白名单一致；改端口时两边要同步。
 - 完整配置见 [docs/configuration.md](docs/configuration.md)。
 
 ### 3. 启动
@@ -243,11 +257,12 @@ curl http://localhost:5001/ready
 | 命令 | 说明 |
 | --- | --- |
 | `npm run dev` | 从根目录同时启动 React 前端和 Express 后端。 |
-| `npm start` | 只启动前端。 |
+| `npm start` | 只启动前端（Vite dev server，端口 3000）。 |
 | `npm run server` | 从根目录启动后端，等价于进入 `server/` 后运行 `npm run start`。 |
-| `npm run build` | 构建前端生产包。 |
-| `npm test` | 运行前端测试。 |
-| `cd server && npm test` | 运行后端聚合测试。 |
+| `npm run build` | 构建前端生产包（Vite，输出 `build/`）。 |
+| `npm test` | 运行前端测试（Vitest，单次运行约 7s）。 |
+| `npm run test:watch` | 前端测试 watch 模式。 |
+| `cd server && npm test` | 运行后端聚合测试（每个测试文件独立进程并行，约 4s）。 |
 | `cd server && npm run coverage:gate` | 检查后端覆盖率最低门槛。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
 | `cd server && npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json` | 运行 legacy near-duplicate corpus；它不再是 hard/real robust signal 的主入口。 |
@@ -266,6 +281,8 @@ curl http://localhost:5001/ready
 
 `quality:gate` 继续作为轻量 PR gate，并兼容没有 lineage metadata 的旧报告；`release:gate` 才是发布入口。后者不会把仓库中已有的旧 `latest.*` 当成当前版本证据：报告缺少统一 `evidence`、来自其他 commit、由 dirty worktree 生成、已过期，或 corpus/provider/source lineage 不一致时都会失败。
 
+CI 侧，`quality-gate.yml` 把后端测试和 eval+gate 拆成两个并行 job；planner real gate、robust suite 和 release evidence 各有独立的定时 workflow。
+
 ## 评测优化结果
 
 优化前，主 synthetic `latest.*` 和 legacy rerank 报告长期依赖 near-duplicate 小语料。旧 `latest-rerank.md` 只有 `6` 个 ranking cases，NDCG、Recall、MRR 都是 `1.0000 -> 1.0000`，lift 为 `0.0000`，无法证明 rerank 对困难检索有真实收益。
@@ -279,6 +296,19 @@ curl http://localhost:5001/ready
 | 主 synthetic regression | `latest.*` 长期追踪 near-duplicate，小语料容易满分饱和。 | `eval:robust-suite` 用 compare-hard corpus 刷新 `latest.*`。 | 主报告从容易饱和的近重复集，切到更难的 compare 回归集。 |
 | Legacy rerank signal | near-duplicate `latest-rerank.md`：NDCG `1.0000 -> 1.0000`，Recall `1.0000 -> 1.0000`，MRR `1.0000 -> 1.0000`，lift `0.0000`。 | hard-CS rerank probe：NDCG `0.9385 -> 1.0`，MRR `0.9167 -> 1.0`。 | baseline 不再满分，rerank 在困难 CS 语料上有可见 lift。 |
 | Real-paper rerank coverage | legacy 小语料不覆盖长论文、跨论文比较和 hard negative。 | arXiv real-paper rerank probe：NDCG `0.4698 -> 0.5394`，Recall `0.6215 -> 0.6771`，MRR `0.476 -> 0.5615`。 | 固定 gate 开始覆盖真实论文语料，能观察长文档排序收益。 |
+
+## 工程化基线
+
+代码库经过四级系统性优化（安全 → 性能 → 架构 → 工程化），当前基线：
+
+| 层级 | 落点 |
+| --- | --- |
+| 安全 | CORS 白名单（`ALLOWED_ORIGINS`）、helmet、分级限流（全局/chat/upload/destructive）、上传文件名 + `%PDF` 魔数双重校验、无静态 `/uploads` 暴露。 |
+| 性能与可靠性 | 存储层异步原子写 + 写锁 + 增量 BM25 统计；embedding LRU 缓存；外部 fetch 全部带超时；上传 session TTL 清扫；store `list()` 分页；前端 `/chat` AbortController + 组件 memo 化。 |
+| 架构 | `app.js` 组合根（171 行）+ `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 8 个模块；`normalizeText` 收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块，后端直接依赖 18 → 13。 |
+| 工程化 | 前端 CRA → Vite 7 + Vitest 3（测试 97s → ~7s，构建 ~8s）；后端测试并行化（24s → ~4s，含 Windows 全平台通过）；CI 后端测试与 eval gate 拆并行 job；评测脚本共享 helper 收敛到 `eval-cli.js` / `eval-case-helpers.js`。 |
+
+前后端测试基线：后端 `733` 个用例、前端 `44` 个用例全绿。
 
 ## 文档入口
 
@@ -312,21 +342,29 @@ curl http://localhost:5001/ready
 
 ```text
 .
+├── index.html                   # Vite 入口 HTML
+├── vite.config.js               # Vite + Vitest 配置（端口 3000、outDir build/）
 ├── src/                         # React workspace UI
-│   ├── components/              # Upload, chat, PDF preview, trace, Agent Run Center, quality
-│   ├── hooks/                   # Workspace, selection, task, recovery, arXiv state
-│   └── archiveApi.js            # Frontend API client surface
+│   ├── components/              # 上传、聊天、PDF 预览、trace、Agent Run Center、quality（.jsx）
+│   ├── hooks/                   # workspace、selection、task、recovery、arXiv、chat scope 等状态
+│   ├── styles/                  # App.css 的 11 个有序样式切片
+│   └── archiveApi.js            # 前端 API client surface
 ├── server/
-│   ├── app.js                   # Express routes and API orchestration
-│   ├── auth.js                  # API token and accessScope handling
-│   ├── health.js                # Startup/readiness checks
-│   ├── rag/                     # RAG, AgentRAG, skills, capabilities, stores
-│   │   └── workspace-artifacts/ # Scoped generated-result persistence
-│   ├── evaluation/              # Eval runners, reports, quality gates
-│   ├── test/                    # Backend aggregate tests
-│   └── db/migrations/           # PostgreSQL tables
-├── docs/                        # Deep documentation
-└── README.md                    # Project entry page
+│   ├── server.js                # 进程入口（加载 dotenv 后启动 app）
+│   ├── app.js                   # 组合根：中间件、限流、启动序列、挂载 Router
+│   ├── app-services.js          # createAppServices 服务装配
+│   ├── routes/                  # 特性 Router（documents/uploads/chat/tasks/...）+ zod 校验
+│   ├── auth.js                  # API token 和 accessScope 处理
+│   ├── health.js                # 启动/就绪检查
+│   ├── lib/                     # normalize-text、prompt-template 等共享工具
+│   ├── rag/                     # RAG、AgentRAG、skills、capabilities、stores
+│   │   ├── self-check/          # claim/evidence 自检模块
+│   │   └── workspace-artifacts/ # Scoped 生成结果持久化
+│   ├── evaluation/              # Eval runners、共享 helper、quality gates
+│   ├── test/                    # 后端聚合测试（并行执行）
+│   └── db/migrations/           # PostgreSQL 表
+├── docs/                        # 深入文档
+└── README.md                    # 项目入口页
 ```
 
 运行时和生成路径通常不要手改或提交：`node_modules/`、`build/`、`server/node_modules/`、`server/data/`、`server/uploads/`、`server/upload-sessions/`、`server/evaluation/generated/`、timestamped `server/evaluation/results/`。
