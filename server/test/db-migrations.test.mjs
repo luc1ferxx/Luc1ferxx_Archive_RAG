@@ -122,7 +122,7 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
   assert.deepEqual(readFileCalls, [
     {
       encoding: "utf8",
-      filePath: "/fake/migrations/002_apply.sql",
+      filePath: path.join("/fake/migrations", "002_apply.sql"),
     },
   ]);
   assert.equal(clientCalls[0].sql, "BEGIN");
