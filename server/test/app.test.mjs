@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createApp as createProductionApp } from "../app.js";
@@ -235,7 +235,7 @@ test("upload flow stores chunks, completes ingestion, and deletes documents", as
 
   try {
     const fileId = "test-file-id";
-    const content = "fake-pdf-content";
+    const content = "%PDF-1.4-fakepdf";
 
     let response = await fetch(`${server.baseUrl}/upload/init`, {
       method: "POST",
@@ -4276,6 +4276,90 @@ test("upload routes report missing and invalid request boundaries", async () => 
   }
 });
 
+test("chunked upload rejects non-PDF file names and disguised non-PDF content", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-nonpdf-"));
+  let ingested = false;
+  const app = await createApp({
+    healthService: okHealthService,
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      ingestDocument: async () => {
+        ingested = true;
+        return { docId: "unexpected", fileName: "unexpected.pdf" };
+      },
+    },
+  });
+  const server = await startServer(app);
+
+  try {
+    let response = await fetch(`${server.baseUrl}/upload/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId: "html-file",
+        fileName: "malicious.html",
+        fileSize: 16,
+        totalChunks: 1,
+        chunkSize: 16,
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /Only PDF files/);
+
+    const fileId = "disguised-content";
+    const content = "<html>bad</html>";
+
+    response = await fetch(`${server.baseUrl}/upload/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId,
+        fileName: "disguised.pdf",
+        fileSize: content.length,
+        lastModified: 0,
+        totalChunks: 1,
+        chunkSize: 16,
+      }),
+    });
+    assert.equal(response.status, 201);
+
+    const chunkForm = new FormData();
+    chunkForm.append("fileId", fileId);
+    chunkForm.append("chunkIndex", "0");
+    chunkForm.append("totalChunks", "1");
+    chunkForm.append("chunk", new Blob([content]), "disguised.pdf.part-0");
+
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: chunkForm,
+    });
+    assert.equal(response.status, 201);
+
+    response = await fetch(`${server.baseUrl}/upload/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId,
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /not a valid PDF/);
+    assert.equal(ingested, false);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("upload completion removes merged file when ingestion fails", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-failure-"));
   let removedPath = null;
@@ -4301,9 +4385,10 @@ test("upload completion removes merged file when ingestion fails", async () => {
       storeUploadChunk: async () => {
         throw new Error("not used");
       },
-      finalizeUploadSession: async () => ({
-        fileId: "file-1",
-      }),
+      finalizeUploadSession: async ({ destinationPath }) => {
+        await writeFile(destinationPath, "%PDF-1.4 merged");
+        return { fileId: "file-1" };
+      },
       clearUploadSession: async (fileId) => {
         clearedFileId = fileId;
       },

@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
-import { mkdir, rm } from "fs/promises";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { mkdir, open, rm } from "fs/promises";
 import multer from "multer";
 import { randomUUID } from "crypto";
 import path from "path";
@@ -90,6 +92,7 @@ import {
   getAgentIntentPlanner,
   getAgentPlannerRollout,
   getAgentRunRecoveryMode,
+  isApiAuthEnabled,
 } from "./rag/config.js";
 import {
   clearUploadSession,
@@ -239,6 +242,54 @@ const isPdfFile = (file) => {
 
   return extension === ".pdf" || mimeType === "application/pdf";
 };
+
+const isPdfFileName = (fileName) =>
+  path.extname(String(fileName ?? "")).toLowerCase() === ".pdf";
+
+const PDF_MAGIC = Buffer.from("%PDF");
+// The PDF spec allows the %PDF header to appear within the first 1024 bytes.
+const PDF_MAGIC_SCAN_WINDOW = 1024;
+
+const hasPdfMagicBytes = async (filePath) => {
+  const fileHandle = await open(filePath, "r");
+
+  try {
+    const headBuffer = Buffer.alloc(PDF_MAGIC_SCAN_WINDOW);
+    const { bytesRead } = await fileHandle.read(
+      headBuffer,
+      0,
+      PDF_MAGIC_SCAN_WINDOW,
+      0
+    );
+
+    return headBuffer.subarray(0, bytesRead).includes(PDF_MAGIC);
+  } finally {
+    await fileHandle.close();
+  }
+};
+
+const parseAllowedOrigins = () =>
+  String(process.env.ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+const isRateLimitEnabled = () =>
+  String(process.env.RATE_LIMIT_ENABLED ?? "").trim().toLowerCase() === "true";
+
+const toRateLimitMax = (rawValue, fallbackValue) => {
+  const parsed = Number.parseInt(String(rawValue ?? "").trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallbackValue;
+};
+
+const createRateLimiter = ({ max }) =>
+  rateLimit({
+    windowMs: 60 * 1000,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests. Please retry later." },
+  });
 
 const buildContentDisposition = (
   fileName = "document.pdf",
@@ -592,8 +643,39 @@ export const createApp = async (options = {}) => {
     options.intentPlannerAdapter ?? createIntentPlannerAdapter();
 
   const app = express();
+  const allowedOrigins = parseAllowedOrigins();
+  const rateLimitEnabled = isRateLimitEnabled();
+
+  if (!isApiAuthEnabled()) {
+    console.warn(
+      "[security] API authentication is DISABLED (API_AUTH_ENABLED is not true). Every endpoint, including destructive ones, is reachable without credentials. Do not expose this server beyond localhost."
+    );
+  }
+
+  if (allowedOrigins.length === 0) {
+    console.warn(
+      "[security] ALLOWED_ORIGINS is not set; CORS accepts any origin. Set ALLOWED_ORIGINS (comma-separated) for any non-local deployment."
+    );
+  }
+
+  if (!rateLimitEnabled) {
+    console.warn(
+      "[security] Rate limiting is disabled. Set RATE_LIMIT_ENABLED=true to protect /chat, uploads, and destructive endpoints."
+    );
+  }
+
+  // frameguard/CSP frame-ancestors and CORP stay off: the workbench iframes
+  // PDF previews from a different origin (frontend :3000 -> API :5001).
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      frameguard: false,
+      crossOriginResourcePolicy: { policy: "cross-origin" },
+    })
+  );
   app.use(
     cors({
+      origin: allowedOrigins.length > 0 ? allowedOrigins : true,
       exposedHeaders: ["Content-Disposition"],
     })
   );
@@ -664,8 +746,33 @@ export const createApp = async (options = {}) => {
     }
   });
 
+  if (rateLimitEnabled) {
+    app.use(
+      createRateLimiter({
+        max: toRateLimitMax(process.env.RATE_LIMIT_GLOBAL_MAX, 300),
+      })
+    );
+    app.use(
+      "/chat",
+      createRateLimiter({
+        max: toRateLimitMax(process.env.RATE_LIMIT_CHAT_MAX, 30),
+      })
+    );
+    app.use(
+      "/upload",
+      createRateLimiter({
+        max: toRateLimitMax(process.env.RATE_LIMIT_UPLOAD_MAX, 120),
+      })
+    );
+    app.use(
+      "/documents/clear",
+      createRateLimiter({
+        max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5),
+      })
+    );
+  }
+
   app.use(requireApiAuth);
-  app.use("/uploads", express.static(uploadsDirectory));
 
   app.get("/artifacts", async (req, res) => {
     try {
@@ -1624,6 +1731,12 @@ export const createApp = async (options = {}) => {
   });
 
   app.post("/upload/init", async (req, res) => {
+    if (req.body?.fileName != null && !isPdfFileName(req.body.fileName)) {
+      return res.status(400).json({
+        error: "Only PDF files are supported.",
+      });
+    }
+
     try {
       const session = await uploadStore.initializeUploadSession({
         fileId: req.body.fileId,
@@ -1721,6 +1834,14 @@ export const createApp = async (options = {}) => {
         });
       }
 
+      if (!isPdfFileName(session.fileName)) {
+        await uploadStore.clearUploadSession(fileId);
+
+        return res.status(400).json({
+          error: "Only PDF files are supported.",
+        });
+      }
+
       const storedFileName = createStoredFileName(session.fileName);
       mergedFilePath = path.join(uploadsDirectory, storedFileName);
       const accessScope = getRequestAccessScope(req);
@@ -1729,6 +1850,16 @@ export const createApp = async (options = {}) => {
         fileId,
         destinationPath: mergedFilePath,
       });
+
+      if (!(await hasPdfMagicBytes(mergedFilePath))) {
+        await uploadStore.removeMergedUpload(mergedFilePath);
+        mergedFilePath = null;
+        await uploadStore.clearUploadSession(fileId);
+
+        return res.status(400).json({
+          error: "The uploaded file is not a valid PDF.",
+        });
+      }
 
       const document = await ragService.ingestDocument({
         docId: randomUUID(),
@@ -1760,6 +1891,14 @@ export const createApp = async (options = {}) => {
     }
 
     try {
+      if (!(await hasPdfMagicBytes(req.file.path))) {
+        await cleanupUploadedFile(req.file.path);
+
+        return res.status(400).json({
+          error: "The uploaded file is not a valid PDF.",
+        });
+      }
+
       const accessScope = getRequestAccessScope(req);
       const document = await ragService.ingestDocument({
         docId: randomUUID(),
