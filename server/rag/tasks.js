@@ -89,6 +89,36 @@ export const normalizeTask = (task = {}) => {
   };
 };
 
+const DEFAULT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = 1000;
+const MIN_LIST_LIMIT = 1;
+
+const normalizePaginationParams = ({ limit, offset } = {}) => {
+  let normalizedLimit = Number(limit);
+
+  if (limit === "all") {
+    // Internal callers pass "all" when correctness needs the complete result
+    // set (status counts, recovery scans). HTTP-facing callers stay capped.
+    normalizedLimit = null;
+  } else if (!Number.isFinite(normalizedLimit) || normalizedLimit < MIN_LIST_LIMIT) {
+    normalizedLimit = DEFAULT_LIST_LIMIT;
+  } else if (normalizedLimit > MAX_LIST_LIMIT) {
+    normalizedLimit = MAX_LIST_LIMIT;
+  } else {
+    normalizedLimit = Math.floor(normalizedLimit);
+  }
+
+  let normalizedOffset = Number(offset);
+
+  if (!Number.isFinite(normalizedOffset) || normalizedOffset < 0) {
+    normalizedOffset = 0;
+  } else {
+    normalizedOffset = Math.floor(normalizedOffset);
+  }
+
+  return { limit: normalizedLimit, offset: normalizedOffset };
+};
+
 export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() } = {}) => {
   const tasks = new Map();
 
@@ -120,9 +150,10 @@ export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() }
       );
     },
 
-    list({ accessScope = {}, type = "" } = {}) {
+    list({ accessScope = {}, type = "", limit, offset } = {}) {
       const scopeKey = buildTaskScopeKey(accessScope);
       const normalizedType = normalizeText(type);
+      const pagination = normalizePaginationParams({ limit, offset });
 
       return [...tasks.values()]
         .filter(
@@ -132,6 +163,12 @@ export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() }
         )
         .sort((left, right) =>
           String(right.updatedAt).localeCompare(String(left.updatedAt))
+        )
+        .slice(
+          pagination.offset,
+          pagination.limit === null
+            ? undefined
+            : pagination.offset + pagination.limit
         );
     },
 
@@ -261,12 +298,14 @@ export const createTaskService = ({
     });
   },
 
-  async listTasks({ accessScope = {}, type = "" } = {}) {
+  async listTasks({ accessScope = {}, type = "", limit, offset } = {}) {
     return {
       tasks: toArray(
         await taskStore.list({
           accessScope,
           type,
+          limit,
+          offset,
         })
       ).map(stripInternalTaskFields),
     };

@@ -159,7 +159,7 @@ export const requestAnswerFeedback = async (payload) => {
   return apiPost("/feedback", payload);
 };
 
-export const requestChat = async ({ docIds, question, sessionId, userId }) => {
+export const requestChat = async ({ docIds, question, sessionId, userId, signal }) => {
   const payload = {
     question,
     docIds: docIds.join(","),
@@ -167,5 +167,5 @@ export const requestChat = async ({ docIds, question, sessionId, userId }) => {
     userId,
   };
 
-  return apiPost("/chat", payload);
+  return apiPost("/chat", payload, signal ? { signal } : undefined);
 };

@@ -46,6 +46,36 @@ const parseJsonValue = (value, fallback) => {
 const toJsonParam = (value) =>
   value === null || value === undefined ? null : JSON.stringify(value);
 
+const DEFAULT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = 1000;
+const MIN_LIST_LIMIT = 1;
+
+const normalizePaginationParams = ({ limit, offset } = {}) => {
+  let normalizedLimit = Number(limit);
+
+  if (limit === "all") {
+    // Internal callers pass "all" when correctness needs the complete result
+    // set; LIMIT NULL means no limit in PostgreSQL.
+    normalizedLimit = null;
+  } else if (!Number.isFinite(normalizedLimit) || normalizedLimit < MIN_LIST_LIMIT) {
+    normalizedLimit = DEFAULT_LIST_LIMIT;
+  } else if (normalizedLimit > MAX_LIST_LIMIT) {
+    normalizedLimit = MAX_LIST_LIMIT;
+  } else {
+    normalizedLimit = Math.floor(normalizedLimit);
+  }
+
+  let normalizedOffset = Number(offset);
+
+  if (!Number.isFinite(normalizedOffset) || normalizedOffset < 0) {
+    normalizedOffset = 0;
+  } else {
+    normalizedOffset = Math.floor(normalizedOffset);
+  }
+
+  return { limit: normalizedLimit, offset: normalizedOffset };
+};
+
 const toJsonObjectParam = (value) =>
   JSON.stringify(
     value && typeof value === "object" && !Array.isArray(value) ? value : {}
@@ -236,11 +266,12 @@ export const createPostgresTaskStore = ({
       return result.rows[0] ? mapRowToTask(result.rows[0]) : null;
     },
 
-    async list({ accessScope = {}, type = "" } = {}) {
+    async list({ accessScope = {}, type = "", limit, offset } = {}) {
       await initialize();
 
       const scope = normalizeTaskAccessScope(accessScope);
       const normalizedType = normalizeText(type);
+      const pagination = normalizePaginationParams({ limit, offset });
       const result = await query(
         `
           SELECT ${taskSelectColumns}
@@ -249,8 +280,9 @@ export const createPostgresTaskStore = ({
             AND workspace_id = $2
             AND ($3 = '' OR type = $3)
           ORDER BY updated_at DESC, task_id ASC
+          LIMIT $4 OFFSET $5
         `,
-        [scope.userId, scope.workspaceId, normalizedType]
+        [scope.userId, scope.workspaceId, normalizedType, pagination.limit, pagination.offset]
       );
 
       return result.rows.map(mapRowToTask).filter(Boolean);

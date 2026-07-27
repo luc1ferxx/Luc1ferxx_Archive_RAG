@@ -62,6 +62,7 @@ import {
 } from "../rag/reranker.js";
 import { retrieveGlobalContext } from "../rag/retrievers/global-retriever.js";
 import { retrievePerDocumentContext } from "../rag/retrievers/per-doc-retriever.js";
+import { resetEmbeddingCache } from "../rag/embedding-cache.js";
 
 const originalDataDirectory = getRagDataDirectory();
 const EMBEDDING_DIMENSIONS = 64;
@@ -628,6 +629,7 @@ beforeEach(async () => {
   configureSessionMemoryStore(createFakeSessionMemoryStore());
   resetSessionMemory();
   await resetLongMemoryStore();
+  resetEmbeddingCache();
   configureOpenAIProvider(provider);
   resetQdrantClientFactory();
 });
@@ -641,6 +643,7 @@ afterEach(async () => {
   resetVectorStore();
   await resetDocumentRegistryStore();
   resetOpenAIProvider();
+  resetEmbeddingCache();
   resetCrossEncoderProvider();
   resetCustomRerankProvider();
   resetRerankMetricsCollector();

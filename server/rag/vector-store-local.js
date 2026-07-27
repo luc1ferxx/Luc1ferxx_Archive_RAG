@@ -1,7 +1,7 @@
 import { getKeywordWeight, getVectorWeight } from "./config.js";
 import { embedTexts } from "./openai.js";
 import { buildTermSet } from "./text-utils.js";
-import { getRagDataPath, readJsonFileSync, writeJsonFileSync } from "./storage.js";
+import { getRagDataPath, readJsonFileSync, writeJsonFileSync, writeJsonFileAsync } from "./storage.js";
 
 const vectorIndexPath = () => getRagDataPath("vector-index.json");
 
@@ -33,9 +33,20 @@ const loadVectorEntries = () => {
 
 let vectorEntries = loadVectorEntries();
 
+let writeQueue = Promise.resolve();
+
+const withWriteLock = (task) => {
+  const run = writeQueue.then(task, task);
+  writeQueue = run.catch(() => {});
+  return run;
+};
+
 const persistVectorEntries = () => {
   writeJsonFileSync(vectorIndexPath(), vectorEntries);
 };
+
+const persistVectorEntriesAsync = () =>
+  writeJsonFileAsync(vectorIndexPath(), vectorEntries);
 
 const magnitude = (vector) =>
   Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
@@ -130,11 +141,13 @@ export const addDocumentsToLocalIndex = async ({ documents }) => {
       vector: vectors[index],
     })
   );
-  const replacementIds = new Set(nextEntries.map((entry) => entry.id));
 
-  vectorEntries = vectorEntries.filter((entry) => !replacementIds.has(entry.id));
-  vectorEntries.push(...nextEntries);
-  persistVectorEntries();
+  await withWriteLock(async () => {
+    const replacementIds = new Set(nextEntries.map((entry) => entry.id));
+    vectorEntries = vectorEntries.filter((entry) => !replacementIds.has(entry.id));
+    vectorEntries.push(...nextEntries);
+    await persistVectorEntriesAsync();
+  });
 };
 
 export const removeDocumentsFromLocalIndex = async ({ docIds }) => {
@@ -142,14 +155,18 @@ export const removeDocumentsFromLocalIndex = async ({ docIds }) => {
     return;
   }
 
-  const docIdSet = new Set(docIds);
-  vectorEntries = vectorEntries.filter((entry) => !docIdSet.has(entry.metadata.docId));
-  persistVectorEntries();
+  await withWriteLock(async () => {
+    const docIdSet = new Set(docIds);
+    vectorEntries = vectorEntries.filter((entry) => !docIdSet.has(entry.metadata.docId));
+    await persistVectorEntriesAsync();
+  });
 };
 
 export const clearLocalVectorIndex = async () => {
-  vectorEntries = [];
-  persistVectorEntries();
+  await withWriteLock(async () => {
+    vectorEntries = [];
+    await persistVectorEntriesAsync();
+  });
 };
 
 export const searchLocalDocuments = async ({
@@ -185,10 +202,8 @@ export const searchLocalDocumentsPerDocument = async ({
   topKPerDoc,
   scoringMode = "combined",
 }) => {
-  const perDocumentResults = new Map();
-
-  for (const docId of docIds) {
-    perDocumentResults.set(
+  const entries = await Promise.all(
+    docIds.map(async (docId) => [
       docId,
       await searchLocalDocuments({
         queryVector,
@@ -196,11 +211,11 @@ export const searchLocalDocumentsPerDocument = async ({
         docIds: [docId],
         topK: topKPerDoc,
         scoringMode,
-      })
-    );
-  }
+      }),
+    ])
+  );
 
-  return perDocumentResults;
+  return new Map(entries);
 };
 
 export const resetLocalVectorStore = () => {

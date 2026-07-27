@@ -2,7 +2,7 @@ import {
   buildTermFrequencyMap,
   extractMeaningfulTokens,
 } from "./text-utils.js";
-import { getRagDataPath, readJsonFileSync, writeJsonFileSync } from "./storage.js";
+import { getRagDataPath, readJsonFileSync, writeJsonFileSync, writeJsonFileAsync } from "./storage.js";
 
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
@@ -61,13 +61,46 @@ const loadSparseEntries = () => {
 let sparseEntries = loadSparseEntries();
 let documentFrequencyByTerm = new Map();
 let averageDocumentLength = 0;
+let totalDocumentLength = 0;
+
+let writeQueue = Promise.resolve();
+
+const withWriteLock = (task) => {
+  const run = writeQueue.then(task, task);
+  writeQueue = run.catch(() => {});
+  return run;
+};
+
+const subtractEntryStats = (entry) => {
+  totalDocumentLength -= entry.documentLength;
+  for (const term of entry.termSet) {
+    const current = documentFrequencyByTerm.get(term) ?? 0;
+    if (current <= 1) {
+      documentFrequencyByTerm.delete(term);
+    } else {
+      documentFrequencyByTerm.set(term, current - 1);
+    }
+  }
+};
+
+const addEntryStats = (entry) => {
+  totalDocumentLength += entry.documentLength;
+  for (const term of entry.termSet) {
+    documentFrequencyByTerm.set(term, (documentFrequencyByTerm.get(term) ?? 0) + 1);
+  }
+};
+
+const recalcAverageDocumentLength = () => {
+  averageDocumentLength =
+    sparseEntries.length > 0 ? totalDocumentLength / sparseEntries.length : 0;
+};
 
 const rebuildSparseStatistics = () => {
   const nextDocumentFrequencyByTerm = new Map();
-  let totalDocumentLength = 0;
+  let nextTotalDocumentLength = 0;
 
   for (const entry of sparseEntries) {
-    totalDocumentLength += entry.documentLength;
+    nextTotalDocumentLength += entry.documentLength;
 
     for (const term of entry.termSet) {
       nextDocumentFrequencyByTerm.set(term, (nextDocumentFrequencyByTerm.get(term) ?? 0) + 1);
@@ -75,8 +108,9 @@ const rebuildSparseStatistics = () => {
   }
 
   documentFrequencyByTerm = nextDocumentFrequencyByTerm;
+  totalDocumentLength = nextTotalDocumentLength;
   averageDocumentLength =
-    sparseEntries.length > 0 ? totalDocumentLength / sparseEntries.length : 0;
+    sparseEntries.length > 0 ? nextTotalDocumentLength / sparseEntries.length : 0;
 };
 
 const persistSparseEntries = () => {
@@ -85,6 +119,12 @@ const persistSparseEntries = () => {
     sparseEntries.map((entry) => toStoredEntry(entry))
   );
 };
+
+const persistSparseEntriesAsync = () =>
+  writeJsonFileAsync(
+    sparseIndexPath(),
+    sparseEntries.map((entry) => toStoredEntry(entry))
+  );
 
 const getKeywordScore = (queryTerms, entry) => {
   if (queryTerms.length === 0) {
@@ -165,12 +205,21 @@ export const addDocumentsToSparseIndex = async ({ documents }) => {
       metadata: document.metadata,
     })
   );
-  const replacementIds = new Set(nextEntries.map((entry) => entry.id));
 
-  sparseEntries = sparseEntries.filter((entry) => !replacementIds.has(entry.id));
-  sparseEntries.push(...nextEntries);
-  rebuildSparseStatistics();
-  persistSparseEntries();
+  await withWriteLock(async () => {
+    const replacementIds = new Set(nextEntries.map((entry) => entry.id));
+    const removedEntries = sparseEntries.filter((entry) => replacementIds.has(entry.id));
+    for (const entry of removedEntries) {
+      subtractEntryStats(entry);
+    }
+    sparseEntries = sparseEntries.filter((entry) => !replacementIds.has(entry.id));
+    for (const entry of nextEntries) {
+      addEntryStats(entry);
+    }
+    sparseEntries.push(...nextEntries);
+    recalcAverageDocumentLength();
+    await persistSparseEntriesAsync();
+  });
 };
 
 export const removeDocumentsFromSparseIndex = async ({ docIds }) => {
@@ -178,16 +227,24 @@ export const removeDocumentsFromSparseIndex = async ({ docIds }) => {
     return;
   }
 
-  const docIdSet = new Set(docIds);
-  sparseEntries = sparseEntries.filter((entry) => !docIdSet.has(entry.metadata.docId));
-  rebuildSparseStatistics();
-  persistSparseEntries();
+  await withWriteLock(async () => {
+    const docIdSet = new Set(docIds);
+    const removedEntries = sparseEntries.filter((entry) => docIdSet.has(entry.metadata.docId));
+    for (const entry of removedEntries) {
+      subtractEntryStats(entry);
+    }
+    sparseEntries = sparseEntries.filter((entry) => !docIdSet.has(entry.metadata.docId));
+    recalcAverageDocumentLength();
+    await persistSparseEntriesAsync();
+  });
 };
 
 export const clearSparseIndex = async () => {
-  sparseEntries = [];
-  rebuildSparseStatistics();
-  persistSparseEntries();
+  await withWriteLock(async () => {
+    sparseEntries = [];
+    rebuildSparseStatistics();
+    await persistSparseEntriesAsync();
+  });
 };
 
 export const searchSparseDocuments = async ({ queryText = "", docIds, topK }) => {
@@ -221,24 +278,33 @@ export const searchSparseDocumentsPerDocument = async ({
   docIds,
   topKPerDoc,
 }) => {
-  const perDocumentResults = new Map();
-
-  for (const docId of docIds) {
-    perDocumentResults.set(
+  const entries = await Promise.all(
+    docIds.map(async (docId) => [
       docId,
       await searchSparseDocuments({
         queryText,
         docIds: [docId],
         topK: topKPerDoc,
-      })
-    );
-  }
+      }),
+    ])
+  );
 
-  return perDocumentResults;
+  return new Map(entries);
 };
 
 export const resetSparseStore = () => {
   sparseEntries = loadSparseEntries();
+  rebuildSparseStatistics();
+};
+
+export const getSparseStatisticsSnapshot = () => ({
+  documentFrequencyByTerm: new Map(documentFrequencyByTerm),
+  averageDocumentLength,
+  totalDocumentLength,
+  entryCount: sparseEntries.length,
+});
+
+export const forceRebuildSparseStatistics = () => {
   rebuildSparseStatistics();
 };
 

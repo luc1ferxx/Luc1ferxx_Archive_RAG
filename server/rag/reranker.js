@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import {
   getCrossEncoderEndpoint,
   getCrossEncoderModel,
+  getCrossEncoderTimeoutMs,
   getRerankProvider,
   getRerankWeight,
   isRerankEnabled,
@@ -414,17 +415,31 @@ const scoreWithHttpCrossEncoder = async ({ queryText, pairs, model = "" }) => {
     );
   }
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      query: queryText,
-      texts: pairs.map((pair) => pair.text),
-      ...(model ? { model } : {}),
-    }),
-  });
+  const timeoutMs = getCrossEncoderTimeoutMs();
+  let response;
+
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        query: queryText,
+        texts: pairs.map((pair) => pair.text),
+        ...(model ? { model } : {}),
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw new Error(
+        `Cross-encoder request timed out after ${timeoutMs}ms.`
+      );
+    }
+
+    throw error;
+  }
 
   if (!response.ok) {
     throw new Error(

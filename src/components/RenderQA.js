@@ -923,4 +923,4 @@ const RenderQA = (props) => {
   );
 };
 
-export default RenderQA;
+export default React.memo(RenderQA);

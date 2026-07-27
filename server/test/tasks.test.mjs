@@ -143,6 +143,124 @@ test("task service exposes recoverable internal tasks without changing public sh
   assert.deepEqual(recoverableTasks.tasks[0].accessScope, accessScope);
 });
 
+test("in-memory task store list() applies default limit of 200 and supports explicit limit/offset", async () => {
+  let tick = 0;
+  const store = createInMemoryTaskStore({
+    now: () => `2026-06-13T00:00:${String(tick++).padStart(2, "0")}.000Z`,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  for (let i = 0; i < 5; i++) {
+    store.upsert({
+      accessScope,
+      task: {
+        id: `task-${i}`,
+        type: "test",
+        status: TASK_STATUSES.pending,
+      },
+    });
+  }
+
+  const defaultResult = store.list({ accessScope });
+  assert.equal(defaultResult.length, 5, "should return all 5 tasks within default limit");
+
+  const limitedResult = store.list({ accessScope, limit: 2 });
+  assert.equal(limitedResult.length, 2, "explicit limit of 2 should return 2 tasks");
+
+  const offsetResult = store.list({ accessScope, limit: 2, offset: 3 });
+  assert.equal(offsetResult.length, 2, "limit 2 offset 3 should return 2 tasks");
+
+  const beyondResult = store.list({ accessScope, limit: 2, offset: 10 });
+  assert.equal(beyondResult.length, 0, "offset beyond total should return empty");
+
+  const invalidLimitResult = store.list({ accessScope, limit: -5 });
+  assert.equal(invalidLimitResult.length, 5, "invalid limit should fall back to default 200");
+
+  const overLimitResult = store.list({ accessScope, limit: 5000 });
+  assert.equal(overLimitResult.length, 5, "limit above 1000 should clamp to 1000");
+
+  const nonNumericResult = store.list({ accessScope, limit: "bad", offset: "bad" });
+  assert.equal(nonNumericResult.length, 5, "non-numeric limit/offset should fall back to defaults");
+});
+
+test("in-memory task store list() via service plumbs limit/offset through", async () => {
+  let tick = 0;
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore({
+      now: () => `2026-06-13T00:00:${String(tick++).padStart(2, "0")}.000Z`,
+    }),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  for (let i = 0; i < 5; i++) {
+    await taskService.upsertTask({
+      accessScope,
+      task: {
+        id: `task-${i}`,
+        type: "test",
+        status: TASK_STATUSES.pending,
+      },
+    });
+  }
+
+  const allTasks = await taskService.listTasks({ accessScope });
+  assert.equal(allTasks.tasks.length, 5);
+
+  const limited = await taskService.listTasks({ accessScope, limit: 3 });
+  assert.equal(limited.tasks.length, 3);
+
+  const withOffset = await taskService.listTasks({ accessScope, limit: 2, offset: 3 });
+  assert.equal(withOffset.tasks.length, 2);
+});
+
+test("in-memory task store list() returns the complete set for limit \"all\"", async () => {
+  let tick = 0;
+  const store = createInMemoryTaskStore({
+    now: () => `2026-06-13T00:${String(Math.floor(tick / 60)).padStart(2, "0")}:${String(tick++ % 60).padStart(2, "0")}.000Z`,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  for (let i = 0; i < 250; i++) {
+    store.upsert({
+      accessScope,
+      task: {
+        id: `task-${i}`,
+        type: "test",
+        status: i < 10 ? TASK_STATUSES.failed : TASK_STATUSES.pending,
+      },
+    });
+  }
+
+  const capped = store.list({ accessScope });
+  assert.equal(capped.length, 200, "default list should cap at 200");
+  assert.equal(
+    capped.filter((task) => task.status === TASK_STATUSES.failed).length,
+    0,
+    "oldest failed tasks fall outside the default page"
+  );
+
+  const complete = store.list({ accessScope, limit: "all" });
+  assert.equal(complete.length, 250, "limit \"all\" should bypass the cap");
+  assert.equal(
+    complete.filter((task) => task.status === TASK_STATUSES.failed).length,
+    10,
+    "limit \"all\" should include the oldest failed tasks"
+  );
+
+  const completeViaService = await createTaskService({ taskStore: store })
+    .listTasks({ accessScope, limit: "all" });
+  assert.equal(completeViaService.tasks.length, 250);
+});
+
 test("task normalization rejects incomplete tasks and defaults unknown statuses", () => {
   assert.equal(
     normalizeTask({

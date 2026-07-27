@@ -95,6 +95,7 @@ import {
   isApiAuthEnabled,
 } from "./rag/config.js";
 import {
+  cleanupExpiredUploadSessions,
   clearUploadSession,
   configureUploadSessionDirectory,
   ensureUploadStorage,
@@ -592,6 +593,7 @@ export const createApp = async (options = {}) => {
       agentRunStepExecutor,
     });
   const uploadStore = options.uploadStore ?? {
+    cleanupExpiredUploadSessions,
     clearUploadSession,
     ensureUploadStorage,
     finalizeUploadSession,
@@ -708,6 +710,7 @@ export const createApp = async (options = {}) => {
 
   await mkdir(uploadsDirectory, { recursive: true });
   await uploadStore.ensureUploadStorage();
+  await uploadStore.cleanupExpiredUploadSessions?.();
   await ragService.initializeDocumentRegistry?.();
   await ragService.initializeLongMemory?.();
   await ragService.initializeSessionMemory?.();

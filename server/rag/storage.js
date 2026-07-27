@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { mkdir, writeFile, rename, unlink } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
+import { randomBytes } from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,7 +39,28 @@ export const readJsonFileSync = (filePath, fallbackValue) => {
 
 export const writeJsonFileSync = (filePath, value) => {
   mkdirSync(path.dirname(filePath), { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  writeFileSync(filePath, `${JSON.stringify(value)}\n`, "utf8");
+};
+
+export const writeJsonFileAsync = async (filePath, value) => {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(tempPath, `${JSON.stringify(value)}\n`, "utf8");
+  try {
+    await rename(tempPath, filePath);
+  } catch (renameError) {
+    try {
+      await unlink(filePath);
+      await rename(tempPath, filePath);
+    } catch (fallbackError) {
+      try {
+        await unlink(tempPath);
+      } catch (_) {
+        /* best-effort cleanup */
+      }
+      throw fallbackError;
+    }
+  }
 };
 
 export const fileExistsSync = (filePath) => existsSync(filePath);

@@ -328,6 +328,8 @@ const buildDeploymentWarnings = ({ deployment = {}, warnings }) => {
 const buildTaskStatus = async ({ accessScope = {}, taskService }) => {
   const listedTasks = await taskService.listTasks({
     accessScope,
+    // Status counts must reflect every task, not the default page.
+    limit: "all",
   });
   const tasks = toArray(listedTasks?.tasks);
   const counts = countStatuses({
@@ -366,6 +368,8 @@ const listRunsByStatus = async ({ accessScope = {}, agentRunService, status }) =
   const listedRuns = await agentRunService.listRuns({
     accessScope,
     status,
+    // Status counts must reflect every run, not the default page.
+    limit: "all",
   });
 
   return toArray(listedRuns?.runs);

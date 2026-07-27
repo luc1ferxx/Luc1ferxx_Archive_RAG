@@ -5245,3 +5245,27 @@ test("quality gate decision maps status to CI exit codes", () => {
     0
   );
 });
+
+test("createApp invokes cleanupExpiredUploadSessions on startup", async () => {
+  let cleanupCalled = false;
+  const app = await createApp({
+    healthService: okHealthService,
+    ragService: createRecoveryRagService(),
+    uploadStore: {
+      ensureUploadStorage: async () => {},
+      cleanupExpiredUploadSessions: async () => {
+        cleanupCalled = true;
+        return { removedSessions: 0 };
+      },
+      clearUploadSession: async () => {},
+      finalizeUploadSession: async () => ({}),
+      getUploadSessionStatus: async () => null,
+      initializeUploadSession: async () => ({}),
+      removeMergedUpload: async () => {},
+      storeUploadChunk: async () => ({}),
+    },
+  });
+
+  assert.equal(cleanupCalled, true, "cleanupExpiredUploadSessions must be called during startup");
+  assert.ok(app);
+});

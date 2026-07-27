@@ -122,6 +122,30 @@ test("agent run recovery actions list safe resume and retry operations", async (
   );
 });
 
+test("agent run recovery actions request the complete run list per status", async () => {
+  // A capped page would hide stuck runs beyond position 200 from recovery.
+  const requestedLimits = [];
+  const actionService = createAgentRunRecoveryActionService({
+    agentRunService: {
+      listRuns: async ({ limit }) => {
+        requestedLimits.push(limit);
+        return { runs: [] };
+      },
+    },
+    agentRunStepExecutor: {},
+  });
+
+  await actionService.listRecoveryRuns({
+    accessScope,
+  });
+
+  assert.ok(requestedLimits.length > 0, "listRuns should be called per status");
+  assert.ok(
+    requestedLimits.every((limit) => limit === "all"),
+    'every per-status listRuns call should pass limit "all"'
+  );
+});
+
 test("agent run recovery actions expose blocked replay safety reasons", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),

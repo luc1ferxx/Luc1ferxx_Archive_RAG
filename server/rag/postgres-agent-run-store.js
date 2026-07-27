@@ -46,6 +46,36 @@ const parseJsonValue = (value, fallback) => {
   }
 };
 
+const DEFAULT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = 1000;
+const MIN_LIST_LIMIT = 1;
+
+const normalizePaginationParams = ({ limit, offset } = {}) => {
+  let normalizedLimit = Number(limit);
+
+  if (limit === "all") {
+    // Internal callers pass "all" when correctness needs the complete result
+    // set; LIMIT NULL means no limit in PostgreSQL.
+    normalizedLimit = null;
+  } else if (!Number.isFinite(normalizedLimit) || normalizedLimit < MIN_LIST_LIMIT) {
+    normalizedLimit = DEFAULT_LIST_LIMIT;
+  } else if (normalizedLimit > MAX_LIST_LIMIT) {
+    normalizedLimit = MAX_LIST_LIMIT;
+  } else {
+    normalizedLimit = Math.floor(normalizedLimit);
+  }
+
+  let normalizedOffset = Number(offset);
+
+  if (!Number.isFinite(normalizedOffset) || normalizedOffset < 0) {
+    normalizedOffset = 0;
+  } else {
+    normalizedOffset = Math.floor(normalizedOffset);
+  }
+
+  return { limit: normalizedLimit, offset: normalizedOffset };
+};
+
 const toJsonObjectParam = (value) =>
   JSON.stringify(
     value && typeof value === "object" && !Array.isArray(value) ? value : {}
@@ -348,11 +378,12 @@ export const createPostgresAgentRunStore = ({
       );
     },
 
-    async list({ accessScope = {}, status = "" } = {}) {
+    async list({ accessScope = {}, status = "", limit, offset } = {}) {
       await initialize();
 
       const scope = normalizeTaskAccessScope(accessScope);
       const normalizedStatus = normalizeText(status);
+      const pagination = normalizePaginationParams({ limit, offset });
       const result = await query(
         `
           SELECT ${agentRunSelectColumns}
@@ -361,8 +392,9 @@ export const createPostgresAgentRunStore = ({
             AND workspace_id = $2
             AND ($3 = '' OR status = $3)
           ORDER BY updated_at DESC, run_id ASC
+          LIMIT $4 OFFSET $5
         `,
-        [scope.userId, scope.workspaceId, normalizedStatus]
+        [scope.userId, scope.workspaceId, normalizedStatus, pagination.limit, pagination.offset]
       );
 
       return result.rows.map((row) => mapRowToAgentRun(row)).filter(Boolean);

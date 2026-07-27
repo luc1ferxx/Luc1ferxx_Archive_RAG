@@ -72,8 +72,8 @@ export const apiGet = async (path) => {
   return response.data;
 };
 
-export const apiPost = async (path, payload) => {
-  const config = buildApiRequestConfig();
+export const apiPost = async (path, payload, requestConfig) => {
+  const config = buildApiRequestConfig(requestConfig ?? {});
   const url = buildUrl(path);
   const response = config
     ? await axios.post(url, payload, config)

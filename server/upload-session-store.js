@@ -292,3 +292,77 @@ export const removeMergedUpload = async (filePath) => {
     }
   }
 };
+
+const DEFAULT_UPLOAD_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+export const cleanupExpiredUploadSessions = async ({
+  ttlMs = DEFAULT_UPLOAD_SESSION_TTL_MS,
+  now = Date.now(),
+} = {}) => {
+  const parsedEnvTtl = Number.parseInt(process.env.UPLOAD_SESSION_TTL_MS, 10);
+  const effectiveTtl =
+    Number.isInteger(parsedEnvTtl) && parsedEnvTtl > 0 ? parsedEnvTtl : ttlMs;
+
+  let entries;
+  try {
+    entries = await readdir(uploadSessionsDirectory, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { removedSessions: 0 };
+    }
+    throw error;
+  }
+
+  let removedSessions = 0;
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const sessionDir = path.join(uploadSessionsDirectory, entry.name);
+
+    try {
+      let lastActivity;
+
+      let innerEntries;
+      try {
+        innerEntries = await readdir(sessionDir, { withFileTypes: true });
+      } catch (innerError) {
+        if (innerError.code === "ENOENT") {
+          continue;
+        }
+        const dirStat = await stat(sessionDir);
+        lastActivity = dirStat.mtimeMs;
+        innerEntries = null;
+      }
+
+      if (innerEntries !== null && innerEntries.length === 0) {
+        const dirStat = await stat(sessionDir);
+        lastActivity = dirStat.mtimeMs;
+      } else if (innerEntries !== null) {
+        let newest = 0;
+        for (const inner of innerEntries) {
+          const innerPath = path.join(sessionDir, inner.name);
+          const innerStat = await stat(innerPath);
+          if (innerStat.mtimeMs > newest) {
+            newest = innerStat.mtimeMs;
+          }
+        }
+        lastActivity = newest;
+      }
+
+      if (now - lastActivity >= effectiveTtl) {
+        await rm(sessionDir, { recursive: true, force: true });
+        removedSessions += 1;
+      }
+    } catch (sessionError) {
+      console.error(
+        `cleanupExpiredUploadSessions: failed to process session "${entry.name}":`,
+        sessionError
+      );
+    }
+  }
+
+  return { removedSessions };
+};

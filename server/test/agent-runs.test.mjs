@@ -628,3 +628,107 @@ test("agent run service rejects invalid step status transitions", async () => {
   assert.equal(run.steps[0].status, "completed");
   assert.deepEqual(run.events.map((event) => event.type), ["run_created"]);
 });
+
+test("in-memory agent run store list() applies default limit of 200 and supports explicit limit/offset", async () => {
+  let tick = 0;
+  const store = createInMemoryAgentRunStore({
+    now: () => `2026-06-14T00:00:${String(tick++).padStart(2, "0")}.000Z`,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  for (let i = 0; i < 5; i++) {
+    store.create({
+      accessScope,
+      run: {
+        runId: `run-${i}`,
+        goal: `Goal ${i}`,
+      },
+    });
+  }
+
+  const defaultResult = store.list({ accessScope });
+  assert.equal(defaultResult.length, 5, "should return all 5 runs within default limit");
+
+  const limitedResult = store.list({ accessScope, limit: 2 });
+  assert.equal(limitedResult.length, 2, "explicit limit of 2 should return 2 runs");
+
+  const offsetResult = store.list({ accessScope, limit: 2, offset: 3 });
+  assert.equal(offsetResult.length, 2, "limit 2 offset 3 should return 2 runs");
+
+  const beyondResult = store.list({ accessScope, limit: 2, offset: 10 });
+  assert.equal(beyondResult.length, 0, "offset beyond total should return empty");
+
+  const invalidLimitResult = store.list({ accessScope, limit: -5 });
+  assert.equal(invalidLimitResult.length, 5, "invalid limit should fall back to default 200");
+
+  const overLimitResult = store.list({ accessScope, limit: 5000 });
+  assert.equal(overLimitResult.length, 5, "limit above 1000 should clamp to 1000");
+
+  const nonNumericResult = store.list({ accessScope, limit: "bad", offset: "bad" });
+  assert.equal(nonNumericResult.length, 5, "non-numeric limit/offset should fall back to defaults");
+});
+
+test("in-memory agent run store list() via service plumbs limit/offset through", async () => {
+  let tick = 0;
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore({
+      now: () => `2026-06-14T00:00:${String(tick++).padStart(2, "0")}.000Z`,
+    }),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  for (let i = 0; i < 5; i++) {
+    await agentRunService.createRun({
+      accessScope,
+      goal: `Goal ${i}`,
+      runId: `run-${i}`,
+    });
+  }
+
+  const allRuns = await agentRunService.listRuns({ accessScope });
+  assert.equal(allRuns.runs.length, 5);
+
+  const limited = await agentRunService.listRuns({ accessScope, limit: 3 });
+  assert.equal(limited.runs.length, 3);
+
+  const withOffset = await agentRunService.listRuns({ accessScope, limit: 2, offset: 3 });
+  assert.equal(withOffset.runs.length, 2);
+});
+
+test("in-memory agent run store list() returns the complete set for limit \"all\"", async () => {
+  let tick = 0;
+  const store = createInMemoryAgentRunStore({
+    now: () => `2026-06-14T00:${String(Math.floor(tick / 60)).padStart(2, "0")}:${String(tick++ % 60).padStart(2, "0")}.000Z`,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  for (let i = 0; i < 250; i++) {
+    store.create({
+      accessScope,
+      run: {
+        runId: `run-${i}`,
+        goal: `Goal ${i}`,
+      },
+    });
+  }
+
+  assert.equal(store.list({ accessScope }).length, 200, "default list should cap at 200");
+  assert.equal(
+    store.list({ accessScope, limit: "all" }).length,
+    250,
+    "limit \"all\" should bypass the cap"
+  );
+
+  const completeViaService = await createAgentRunService({ agentRunStore: store })
+    .listRuns({ accessScope, limit: "all" });
+  assert.equal(completeViaService.runs.length, 250);
+});

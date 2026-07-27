@@ -159,6 +159,9 @@ export const getCrossEncoderEndpoint = () =>
 export const getCrossEncoderModel = () =>
   process.env.RAG_CROSS_ENCODER_MODEL || "";
 
+export const getCrossEncoderTimeoutMs = () =>
+  toPositiveNumber(process.env.RAG_CROSS_ENCODER_TIMEOUT_MS, 30_000);
+
 export const getMaxComparisonSources = () =>
   Math.floor(toPositiveNumber(process.env.RAG_MAX_COMPARISON_SOURCES, 8));
 

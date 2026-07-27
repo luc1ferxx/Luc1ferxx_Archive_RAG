@@ -166,6 +166,36 @@ const stripInternalRunFields = (run = {}) => {
   return publicRun;
 };
 
+const DEFAULT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT = 1000;
+const MIN_LIST_LIMIT = 1;
+
+const normalizePaginationParams = ({ limit, offset } = {}) => {
+  let normalizedLimit = Number(limit);
+
+  if (limit === "all") {
+    // Internal callers pass "all" when correctness needs the complete result
+    // set (status counts, recovery scans). HTTP-facing callers stay capped.
+    normalizedLimit = null;
+  } else if (!Number.isFinite(normalizedLimit) || normalizedLimit < MIN_LIST_LIMIT) {
+    normalizedLimit = DEFAULT_LIST_LIMIT;
+  } else if (normalizedLimit > MAX_LIST_LIMIT) {
+    normalizedLimit = MAX_LIST_LIMIT;
+  } else {
+    normalizedLimit = Math.floor(normalizedLimit);
+  }
+
+  let normalizedOffset = Number(offset);
+
+  if (!Number.isFinite(normalizedOffset) || normalizedOffset < 0) {
+    normalizedOffset = 0;
+  } else {
+    normalizedOffset = Math.floor(normalizedOffset);
+  }
+
+  return { limit: normalizedLimit, offset: normalizedOffset };
+};
+
 export const createInMemoryAgentRunStore = ({
   now = () => new Date().toISOString(),
 } = {}) => {
@@ -228,9 +258,10 @@ export const createInMemoryAgentRunStore = ({
         : null;
     },
 
-    list({ accessScope = {}, status = "" } = {}) {
+    list({ accessScope = {}, status = "", limit, offset } = {}) {
       const scopeKey = buildTaskScopeKey(accessScope);
       const normalizedStatus = normalizeText(status);
+      const pagination = normalizePaginationParams({ limit, offset });
 
       return [...runs.values()]
         .filter(
@@ -240,6 +271,12 @@ export const createInMemoryAgentRunStore = ({
         )
         .sort((left, right) =>
           String(right.updatedAt).localeCompare(String(left.updatedAt))
+        )
+        .slice(
+          pagination.offset,
+          pagination.limit === null
+            ? undefined
+            : pagination.offset + pagination.limit
         );
     },
 
@@ -1018,12 +1055,14 @@ export const createAgentRunService = ({
     return run ? stripInternalRunFields(run) : null;
   },
 
-  async listRuns({ accessScope = {}, status = "" } = {}) {
+  async listRuns({ accessScope = {}, status = "", limit, offset } = {}) {
     return {
       runs: toArray(
         await agentRunStore.list?.({
           accessScope,
           status,
+          limit,
+          offset,
         })
       ).map(stripInternalRunFields),
     };

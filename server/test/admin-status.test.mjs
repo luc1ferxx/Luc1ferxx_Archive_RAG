@@ -367,6 +367,75 @@ test("admin status reports ok when dependencies are healthy and no work is block
   assert.equal(status.triggers.enabledCount, 1);
 });
 
+test("admin status counts tasks and runs beyond the default list page", async () => {
+  // Mimic the store contract: results are capped at 200 unless the caller
+  // passes limit "all". Failed tasks sit beyond position 200, so a capped
+  // read would miss them and wrongly report ok.
+  const tasks = Array.from({ length: 250 }, (_, index) => ({
+    id: `task-${index}`,
+    status: index >= 240 ? TASK_STATUSES.failed : TASK_STATUSES.completed,
+  }));
+  const failedRuns = Array.from({ length: 230 }, (_, index) => ({
+    runId: `run-${index}`,
+    status: AGENT_RUN_STATUSES.failed,
+  }));
+  const applyListCap = (items, limit) =>
+    limit === "all" ? items : items.slice(0, 200);
+  const service = createAdminStatusService({
+    agentRunRecoveryActionService: {
+      listRecoveryRuns: async () => ({
+        runs: [],
+      }),
+    },
+    agentRunService: {
+      listRuns: async ({ status, limit }) => ({
+        runs: applyListCap(
+          status === AGENT_RUN_STATUSES.failed ? failedRuns : [],
+          limit
+        ),
+      }),
+    },
+    config: createConfig(),
+    healthService: {
+      buildHealthReport: async () => ({
+        checks: {},
+        status: "ok",
+      }),
+    },
+    qualityService: {
+      readLatestQualityReport: async () => ({
+        failedCases: [],
+        status: "ok",
+        summary: {
+          metrics: {
+            overallPassPercent: 100,
+            overallPassRate: 1,
+          },
+          runId: "quality-ok",
+        },
+      }),
+    },
+    taskService: {
+      listTasks: async ({ limit }) => ({
+        tasks: applyListCap(tasks, limit),
+      }),
+    },
+    triggerRegistry: {
+      listPublic: () => [],
+    },
+  });
+
+  const status = await service.buildStatus({
+    accessScope,
+  });
+
+  assert.equal(status.tasks.total, 250);
+  assert.equal(status.tasks.failedCount, 10);
+  assert.equal(status.tasks.status, ADMIN_STATUS_VALUES.warn);
+  assert.equal(status.agentRuns.counts[AGENT_RUN_STATUSES.failed], 230);
+  assert.ok(status.warnings.some((warning) => warning.id === "tasks_failed"));
+});
+
 test("admin status exposes compact LLMOps policy signals", async () => {
   const service = createAdminStatusService({
     agentRunRecoveryActionService: {

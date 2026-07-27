@@ -211,6 +211,8 @@ export const createAgentRunRecoveryActionService = ({
       const listedRuns = await agentRunService.listRuns?.({
         accessScope,
         status,
+        // Recovery must see every run; a capped page would hide stuck runs.
+        limit: "all",
       });
 
       for (const run of listedRuns?.runs ?? []) {

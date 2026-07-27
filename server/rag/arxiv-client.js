@@ -143,8 +143,21 @@ export const parseArxivFeed = (xml) => {
 export const createArxivService = ({
   apiUrl = DEFAULT_ARXIV_API_URL,
   fetchImpl = fetch,
+  requestTimeoutMs = 30_000,
   userAgent = "Luc1ferxx-Archive-RAG arXiv importer (local research)",
 } = {}) => {
+  const wrapTimeoutError = (error, operation) => {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      const wrapped = new Error(
+        `arXiv ${operation} timed out after ${requestTimeoutMs}ms.`
+      );
+      wrapped.status = 504;
+      return wrapped;
+    }
+
+    return error;
+  };
+
   const search = async ({
     maxResults = DEFAULT_ARXIV_MAX_RESULTS,
     sortBy = "submittedDate",
@@ -160,12 +173,20 @@ export const createArxivService = ({
       start,
       topic,
     });
-    const response = await fetchImpl(url, {
-      headers: {
-        "accept": "application/atom+xml,application/xml,text/xml,*/*;q=0.8",
-        "user-agent": userAgent,
-      },
-    });
+
+    let response;
+
+    try {
+      response = await fetchImpl(url, {
+        headers: {
+          "accept": "application/atom+xml,application/xml,text/xml,*/*;q=0.8",
+          "user-agent": userAgent,
+        },
+        signal: AbortSignal.timeout(requestTimeoutMs),
+      });
+    } catch (error) {
+      throw wrapTimeoutError(error, "search");
+    }
 
     if (!response.ok) {
       const error = new Error(`arXiv search failed with HTTP ${response.status}.`);
@@ -183,12 +204,19 @@ export const createArxivService = ({
       throw new Error(`Missing arXiv PDF URL for ${paper.arxivId ?? "paper"}.`);
     }
 
-    const response = await fetchImpl(pdfUrl, {
-      headers: {
-        "accept": "application/pdf,*/*;q=0.8",
-        "user-agent": userAgent,
-      },
-    });
+    let response;
+
+    try {
+      response = await fetchImpl(pdfUrl, {
+        headers: {
+          "accept": "application/pdf,*/*;q=0.8",
+          "user-agent": userAgent,
+        },
+        signal: AbortSignal.timeout(requestTimeoutMs),
+      });
+    } catch (error) {
+      throw wrapTimeoutError(error, "downloadPdf");
+    }
 
     if (!response.ok) {
       const error = new Error(

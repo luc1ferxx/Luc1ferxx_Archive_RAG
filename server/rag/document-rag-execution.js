@@ -22,7 +22,7 @@ import {
   buildConfidenceTrace,
   buildResultTrace,
 } from "./observability.js";
-import { embedQuery } from "./openai.js";
+import { embedQueryCached } from "./embedding-cache.js";
 import {
   buildEvidenceRequirements,
   buildRetrievalQueries,
@@ -164,7 +164,7 @@ const retrieveGlobalContextForQueries = async ({
       const queryVector =
         retrievalQuery.primary && retrievalQuery.query === primaryQueryText
           ? primaryQueryVector
-          : await embedQuery(retrievalQuery.query);
+          : await embedQueryCached(retrievalQuery.query);
 
       return retrieveGlobalContext({
         queryVector,
@@ -190,7 +190,7 @@ const retrievePerDocumentContextForQueries = async ({
       const queryVector =
         retrievalQuery.primary && retrievalQuery.query === primaryQueryText
           ? primaryQueryVector
-          : await embedQuery(retrievalQuery.query);
+          : await embedQueryCached(retrievalQuery.query);
 
       return retrievePerDocumentContext({
         queryVector,
@@ -230,7 +230,7 @@ const buildQaGapPlan = async ({
 
   const supplementalSearches = await Promise.all(
     supplementalQueries.map(async (supplementalQuery) => {
-      const supplementalVector = await embedQuery(supplementalQuery.query);
+      const supplementalVector = await embedQueryCached(supplementalQuery.query);
       const supplementalResults = await retrieveGlobalContext({
         queryVector: supplementalVector,
         queryText: supplementalQuery.query,
@@ -355,7 +355,7 @@ const buildRetrievalInputs = async ({
       ? agentRetrievalPlan.retrievalQueries
       : retrievalQueries;
   const retrievalOptions = agentRetrievalPlan?.retrievalOptions ?? {};
-  const queryVector = await embedQuery(resolvedQuery);
+  const queryVector = await embedQueryCached(resolvedQuery);
 
   return {
     agentRetrievalPlan,

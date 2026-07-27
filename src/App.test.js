@@ -904,5 +904,7 @@ describe("App", () => {
     expect(
       await screen.findByText("Retrieval Augmented Generation for Archives")
     ).toBeInTheDocument();
-  });
+    // The task-log poll now ticks every 5s, so this end-to-end flow can
+    // outlast jest's default 5s test timeout.
+  }, 20000);
 });

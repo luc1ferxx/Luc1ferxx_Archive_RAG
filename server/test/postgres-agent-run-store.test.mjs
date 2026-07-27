@@ -145,16 +145,30 @@ const createFakePostgresAgentRunHarness = () => {
     }
 
     if (queryText.includes("FROM rag_agent_runs_test")) {
-      const [userId, workspaceId, status] = values;
+      const [userId, workspaceId, status, limit, offset] = values;
+      const filtered = [...rows.values()].filter(
+        (row) =>
+          row.user_id === userId &&
+          row.workspace_id === workspaceId &&
+          (!status || row.status === status)
+      );
+
+      if (limit !== undefined && offset !== undefined) {
+        const start = Number(offset) || 0;
+
+        return {
+          rowCount: 0,
+          // LIMIT NULL means no limit in PostgreSQL.
+          rows:
+            limit === null
+              ? filtered.slice(start)
+              : filtered.slice(start, start + Number(limit)),
+        };
+      }
 
       return {
         rowCount: 0,
-        rows: [...rows.values()].filter(
-          (row) =>
-            row.user_id === userId &&
-            row.workspace_id === workspaceId &&
-            (!status || row.status === status)
-        ),
+        rows: filtered,
       };
     }
 
@@ -1106,4 +1120,158 @@ test("postgres canceled manual recovery runs stay terminal across startup recove
       return true;
     }
   );
+});
+
+test("postgres agent run store list() appends parameterized LIMIT and OFFSET", async () => {
+  const capturedQueries = [];
+  const query = async (queryText, values = []) => {
+    capturedQueries.push({ queryText, values });
+
+    if (queryText.includes("INSERT INTO rag_agent_runs_test")) {
+      const row = buildFakeRunRow(values);
+      return { rowCount: 1, rows: [row] };
+    }
+
+    if (queryText.includes("INSERT INTO rag_agent_run_events_test")) {
+      return {
+        rowCount: 1,
+        rows: [{
+          event_id: 1,
+          event_type: values[3],
+          event_payload: parseJson(values[4], {}),
+          created_at: "2026-06-14T00:00:00.000Z",
+        }],
+      };
+    }
+
+    if (queryText.includes("UPDATE rag_agent_runs_test")) {
+      return { rowCount: 1, rows: [] };
+    }
+
+    if (queryText.includes("FROM rag_agent_run_events_test")) {
+      return { rowCount: 0, rows: [] };
+    }
+
+    return { rowCount: 0, rows: [] };
+  };
+  const store = createPostgresAgentRunStore({
+    eventsTableName: "rag_agent_run_events_test",
+    now: () => "2026-06-14T00:00:00.000Z",
+    query,
+    runMigrations: async () => ({ appliedMigrations: [], status: "ok" }),
+    tableName: "rag_agent_runs_test",
+  });
+
+  await store.list({
+    accessScope: { userId: "alice", workspaceId: "workspace-a" },
+  });
+
+  const defaultQuery = capturedQueries.find(
+    (q) => q.queryText.includes("LIMIT") && q.queryText.includes("OFFSET")
+  );
+
+  assert.ok(defaultQuery, "list query should contain LIMIT and OFFSET");
+  assert.equal(defaultQuery.values[3], 200, "default limit should be 200");
+  assert.equal(defaultQuery.values[4], 0, "default offset should be 0");
+
+  capturedQueries.length = 0;
+  await store.list({
+    accessScope: { userId: "alice", workspaceId: "workspace-a" },
+    limit: 10,
+    offset: 20,
+  });
+
+  const explicitQuery = capturedQueries.find(
+    (q) => q.queryText.includes("LIMIT")
+  );
+
+  assert.equal(explicitQuery.values[3], 10, "explicit limit should be 10");
+  assert.equal(explicitQuery.values[4], 20, "explicit offset should be 20");
+
+  capturedQueries.length = 0;
+  await store.list({
+    accessScope: { userId: "alice", workspaceId: "workspace-a" },
+    limit: 5000,
+  });
+
+  const clampedQuery = capturedQueries.find(
+    (q) => q.queryText.includes("LIMIT")
+  );
+
+  assert.equal(clampedQuery.values[3], 1000, "limit above 1000 should clamp to 1000");
+
+  capturedQueries.length = 0;
+  await store.list({
+    accessScope: { userId: "alice", workspaceId: "workspace-a" },
+    limit: -5,
+    offset: -10,
+  });
+
+  const invalidQuery = capturedQueries.find(
+    (q) => q.queryText.includes("LIMIT")
+  );
+
+  assert.equal(invalidQuery.values[3], 200, "invalid limit should fall back to 200");
+  assert.equal(invalidQuery.values[4], 0, "invalid offset should fall back to 0");
+
+  capturedQueries.length = 0;
+  await store.list({
+    accessScope: { userId: "alice", workspaceId: "workspace-a" },
+    limit: "abc",
+    offset: null,
+  });
+
+  const nonNumericQuery = capturedQueries.find(
+    (q) => q.queryText.includes("LIMIT")
+  );
+
+  assert.equal(nonNumericQuery.values[3], 200, "non-numeric limit should fall back to 200");
+  assert.equal(nonNumericQuery.values[4], 0, "non-numeric offset should fall back to 0");
+
+  capturedQueries.length = 0;
+  await store.list({
+    accessScope: { userId: "alice", workspaceId: "workspace-a" },
+    limit: "all",
+  });
+
+  const unboundedQuery = capturedQueries.find(
+    (q) => q.queryText.includes("LIMIT")
+  );
+
+  assert.equal(
+    unboundedQuery.values[3],
+    null,
+    'limit "all" should pass NULL (LIMIT NULL = no limit in PostgreSQL)'
+  );
+  assert.equal(unboundedQuery.values[4], 0, 'limit "all" keeps offset 0 by default');
+});
+
+test("postgres agent run store list() uses parameterized LIMIT/OFFSET (never interpolated)", async () => {
+  const capturedQueries = [];
+  const query = async (queryText, values = []) => {
+    capturedQueries.push({ queryText, values });
+    return { rowCount: 0, rows: [] };
+  };
+  const store = createPostgresAgentRunStore({
+    eventsTableName: "rag_agent_run_events_test",
+    now: () => "2026-06-14T00:00:00.000Z",
+    query,
+    runMigrations: async () => ({ appliedMigrations: [], status: "ok" }),
+    tableName: "rag_agent_runs_test",
+  });
+
+  await store.list({
+    accessScope: { userId: "alice", workspaceId: "workspace-a" },
+    limit: 50,
+    offset: 25,
+  });
+
+  const listQuery = capturedQueries.find(
+    (q) => q.queryText.includes("LIMIT $4 OFFSET $5")
+  );
+
+  assert.ok(listQuery, "LIMIT and OFFSET should use parameterized placeholders $4 and $5");
+  assert.equal(listQuery.values.length, 5);
+  assert.equal(listQuery.values[3], 50);
+  assert.equal(listQuery.values[4], 25);
 });

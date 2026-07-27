@@ -1007,7 +1007,7 @@ const App = () => {
 
     const intervalId = window.setInterval(() => {
       void refreshTaskLog();
-    }, 1500);
+    }, 5000);
 
     return () => {
       window.clearInterval(intervalId);
@@ -1031,6 +1031,36 @@ const App = () => {
     loadSavedArxivSuggestions,
     refreshDocuments,
   ]);
+
+  const renderQASelectTurn = useMemo(
+    () => (isDemoWorkbench ? undefined : selectTurn),
+    [isDemoWorkbench, selectTurn]
+  );
+  const renderQAApprovalAction = useMemo(
+    () =>
+      isDemoWorkbench
+        ? undefined
+        : (payload) => void handleAgentApprovalAction(payload),
+    [isDemoWorkbench, handleAgentApprovalAction]
+  );
+  const renderQAContinueRun = useMemo(
+    () =>
+      isDemoWorkbench
+        ? undefined
+        : (payload) => handleAgentRunContinue(payload),
+    [isDemoWorkbench, handleAgentRunContinue]
+  );
+  const renderQAFeedback = useCallback(
+    (feedback) => void submitAnswerFeedback(feedback),
+    [submitAnswerFeedback]
+  );
+  const renderQAStepRetry = useMemo(
+    () =>
+      isDemoWorkbench
+        ? undefined
+        : (payload) => void handleAgentStepRetry(payload),
+    [isDemoWorkbench, handleAgentStepRetry]
+  );
 
   const renderConversationView = () => {
     if (activeConversationView === "trace") {
@@ -1112,23 +1142,11 @@ const App = () => {
         isLoading={isLoading}
         selectedSource={visibleSelectedSource}
         onSelectSource={setSelectedSource}
-        onSelectTurn={isDemoWorkbench ? undefined : selectTurn}
-        onApprovalAction={
-          isDemoWorkbench
-            ? undefined
-            : (payload) => void handleAgentApprovalAction(payload)
-        }
-        onContinueRun={
-          isDemoWorkbench
-            ? undefined
-            : (payload) => handleAgentRunContinue(payload)
-        }
-        onFeedback={(feedback) => void submitAnswerFeedback(feedback)}
-        onStepRetry={
-          isDemoWorkbench
-            ? undefined
-            : (payload) => void handleAgentStepRetry(payload)
-        }
+        onSelectTurn={renderQASelectTurn}
+        onApprovalAction={renderQAApprovalAction}
+        onContinueRun={renderQAContinueRun}
+        onFeedback={renderQAFeedback}
+        onStepRetry={renderQAStepRetry}
       />
     );
   };

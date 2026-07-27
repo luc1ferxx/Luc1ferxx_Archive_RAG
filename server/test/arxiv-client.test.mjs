@@ -92,3 +92,97 @@ test("arxiv service searches and validates PDF downloads", async () => {
   assert.equal(Buffer.from(buffer).subarray(0, 5).toString("utf8"), "%PDF-");
   assert.equal(requests.length, 2);
 });
+
+test("arxiv service passes AbortSignal.timeout to fetchImpl for search", async () => {
+  const capturedOptions = [];
+  const service = createArxivService({
+    apiUrl: "https://example.test/query",
+    requestTimeoutMs: 5_000,
+    fetchImpl: async (_url, options) => {
+      capturedOptions.push(options);
+
+      return {
+        ok: true,
+        text: async () => sampleFeed,
+      };
+    },
+  });
+
+  await service.search({ topic: "RAG" });
+
+  assert.equal(capturedOptions.length, 1);
+  assert.ok(capturedOptions[0].signal, "signal must be passed to fetch");
+  assert.ok(
+    capturedOptions[0].signal instanceof AbortSignal,
+    "signal must be an AbortSignal"
+  );
+});
+
+test("arxiv service passes AbortSignal.timeout to fetchImpl for downloadPdf", async () => {
+  const capturedOptions = [];
+  const service = createArxivService({
+    requestTimeoutMs: 10_000,
+    fetchImpl: async (_url, options) => {
+      capturedOptions.push(options);
+      const pdfBuffer = Buffer.from("%PDF-1.7 fake");
+
+      return {
+        ok: true,
+        arrayBuffer: async () =>
+          pdfBuffer.buffer.slice(
+            pdfBuffer.byteOffset,
+            pdfBuffer.byteOffset + pdfBuffer.byteLength
+          ),
+      };
+    },
+  });
+
+  await service.downloadPdf({ pdfUrl: "https://arxiv.org/pdf/2401.00001v2", arxivId: "2401.00001v2" });
+
+  assert.equal(capturedOptions.length, 1);
+  assert.ok(capturedOptions[0].signal, "signal must be passed to fetch");
+  assert.ok(
+    capturedOptions[0].signal instanceof AbortSignal,
+    "signal must be an AbortSignal"
+  );
+});
+
+test("arxiv service wraps TimeoutError as 504 for search", async () => {
+  const service = createArxivService({
+    apiUrl: "https://example.test/query",
+    requestTimeoutMs: 2_000,
+    fetchImpl: async () => {
+      const err = new Error("The operation was aborted due to timeout");
+      err.name = "TimeoutError";
+      throw err;
+    },
+  });
+
+  await assert.rejects(
+    service.search({ topic: "RAG" }),
+    (error) => {
+      assert.equal(error.status, 504);
+      assert.match(error.message, /arXiv search timed out after 2000ms/);
+      return true;
+    }
+  );
+});
+
+test("arxiv service wraps AbortError as 504 for downloadPdf", async () => {
+  const service = createArxivService({
+    requestTimeoutMs: 7_000,
+    fetchImpl: async () => {
+      const err = new DOMException("signal is aborted", "AbortError");
+      throw err;
+    },
+  });
+
+  await assert.rejects(
+    service.downloadPdf({ pdfUrl: "https://arxiv.org/pdf/2401.00001v2", arxivId: "2401.00001v2" }),
+    (error) => {
+      assert.equal(error.status, 504);
+      assert.match(error.message, /arXiv downloadPdf timed out after 7000ms/);
+      return true;
+    }
+  );
+});

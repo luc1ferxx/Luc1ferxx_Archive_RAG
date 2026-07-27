@@ -52,6 +52,9 @@ const ChatComponent = (props) => {
   const [isToolsOpen, setIsToolsOpen] = useState(false);
   const [retrievalMode, setRetrievalMode] = useState("auto");
   const [speech, setSpeech] = useState();
+  const abortControllerRef = useRef(null);
+  const requestSeqRef = useRef(0);
+  const speechRef = useRef(null);
   const sourceControlRef = useRef(null);
   const hasDocuments = isDemoWorkbench || docIds.length > 0;
 
@@ -113,6 +116,11 @@ const ChatComponent = (props) => {
         return;
       }
 
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      const seq = ++requestSeqRef.current;
+
       setIsLoading(true);
 
       try {
@@ -121,7 +129,12 @@ const ChatComponent = (props) => {
           question: trimmedQuestion,
           sessionId,
           userId,
+          signal: controller.signal,
         });
+
+        if (controller.signal.aborted || seq !== requestSeqRef.current) {
+          return;
+        }
 
         handleResp(trimmedQuestion, data);
 
@@ -129,6 +142,14 @@ const ChatComponent = (props) => {
           talk(data?.agentAnswer ?? data?.ragAnswer);
         }
       } catch (error) {
+        if (controller.signal.aborted || seq !== requestSeqRef.current) {
+          return;
+        }
+
+        if (error?.name === "AbortError" || error?.code === "ERR_CANCELED") {
+          return;
+        }
+
         console.error("Error fetching chat response:", error);
 
         const backendMessage =
@@ -149,7 +170,9 @@ const ChatComponent = (props) => {
           }),
         });
       } finally {
-        setIsLoading(false);
+        if (seq === requestSeqRef.current) {
+          setIsLoading(false);
+        }
       }
     },
     [
@@ -199,6 +222,9 @@ const ChatComponent = (props) => {
   }, [isScopeOpen]);
 
   useEffect(() => {
+    speechRef.current?.cancel();
+
+    let cancelled = false;
     const initializedSpeech = new Speech();
     const baseSpeechOptions = {
       volume: 1,
@@ -218,18 +244,29 @@ const ChatComponent = (props) => {
     initializedSpeech
       .init(speechOptions)
       .then(() => {
-        setSpeech(initializedSpeech);
+        if (!cancelled) {
+          speechRef.current = initializedSpeech;
+          setSpeech(initializedSpeech);
+        }
       })
       .catch((error) => {
         initializedSpeech
           .init(baseSpeechOptions)
           .then(() => {
-            setSpeech(initializedSpeech);
+            if (!cancelled) {
+              speechRef.current = initializedSpeech;
+              setSpeech(initializedSpeech);
+            }
           })
           .catch((fallbackError) => {
             console.warn("Speech synthesis is unavailable:", fallbackError ?? error);
           });
       });
+
+    return () => {
+      cancelled = true;
+      initializedSpeech.cancel();
+    };
   }, [locale]);
 
   useEffect(() => {
@@ -252,6 +289,12 @@ const ChatComponent = (props) => {
       resetTranscript();
     }
   }, [hasDocuments, resetTranscript]);
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   const chatModeClickHandler = () => {
     if (!hasDocuments) {
@@ -559,4 +602,4 @@ const ChatComponent = (props) => {
   );
 };
 
-export default ChatComponent;
+export default React.memo(ChatComponent);
