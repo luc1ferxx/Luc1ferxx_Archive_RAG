@@ -177,7 +177,10 @@ describe("App", () => {
     expect(screen.getByText("Quality")).toBeInTheDocument();
     expect(screen.getByText("Recovery")).toBeInTheDocument();
     expect(screen.getByText("History")).toBeInTheDocument();
-    expect(axios.get).toHaveBeenCalledWith("http://localhost:5001/documents");
+    expect(axios.get).toHaveBeenCalledWith(
+      "http://localhost:5001/documents",
+      expect.objectContaining({ timeout: 30000 })
+    );
   });
 
   test("switches the launch page and workspace shell between English and Chinese", async () => {
@@ -624,7 +627,8 @@ describe("App", () => {
     await waitFor(() =>
       expect(axios.post).toHaveBeenCalledWith(
         "http://localhost:5001/agent-runs/run-recovery/recovery/actions/cancel",
-        {}
+        {},
+        expect.objectContaining({ timeout: 0 })
       )
     );
   });
@@ -640,7 +644,8 @@ describe("App", () => {
       expect(screen.queryByText("benefits-2025.pdf")).not.toBeInTheDocument()
     );
     expect(axios.delete).toHaveBeenCalledWith(
-      "http://localhost:5001/documents/doc-1"
+      "http://localhost:5001/documents/doc-1",
+      expect.objectContaining({ timeout: 30000 })
     );
   });
 
@@ -662,7 +667,8 @@ describe("App", () => {
           answer: expect.objectContaining({
             agentAnswer: "Unsupported answer.",
           }),
-        })
+        }),
+        expect.objectContaining({ timeout: 30000 })
       )
     );
   });
@@ -904,7 +910,8 @@ describe("App", () => {
           docId: "doc-upload",
           selectedArxivIds: ["2401.00001v1", "2401.00003v1"],
           selectionToken: "selection-token-1",
-        }
+        },
+        expect.objectContaining({ timeout: 0 })
       )
     );
     fireEvent.click(screen.getByRole("button", { name: "Tasks" }));

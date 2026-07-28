@@ -1,11 +1,13 @@
 import { vi } from "vitest";
 import axios from "axios";
 
-import { apiDownload } from "./apiClient";
+import { apiDelete, apiDownload, apiGet, apiPost } from "./apiClient";
 
 vi.mock("axios", () => ({
   default: {
     get: vi.fn(),
+    post: vi.fn(),
+    delete: vi.fn(),
   },
 }));
 
@@ -91,5 +93,58 @@ test("apiDownload exposes a structured 404 response from a blob error", async ()
   expect(rejection?.response?.status).toBe(404);
   expect(rejection?.response?.data?.error).toBe(
     "Workspace artifact not found."
+  );
+});
+
+test("apiGet passes default timeout of 30000", async () => {
+  axios.get.mockResolvedValue({ data: { ok: true } });
+
+  await apiGet("/documents");
+
+  expect(axios.get).toHaveBeenCalledWith(
+    "http://localhost:5001/documents",
+    expect.objectContaining({ timeout: 30000 })
+  );
+});
+
+test("apiDownload passes timeout of 120000 and keeps responseType blob", async () => {
+  const blob = new Blob(["data"]);
+  axios.get.mockResolvedValue({
+    data: blob,
+    headers: {
+      "content-disposition": "attachment; filename=\"file.bin\"",
+      "content-type": "application/octet-stream",
+    },
+  });
+
+  await apiDownload("/artifacts/a1/download");
+
+  expect(axios.get).toHaveBeenCalledWith(
+    "http://localhost:5001/artifacts/a1/download",
+    expect.objectContaining({ timeout: 120000, responseType: "blob" })
+  );
+});
+
+test("apiPost with timeout 0 preserves the explicit zero", async () => {
+  axios.post.mockResolvedValue({ data: {} });
+
+  await apiPost("/chat", { question: "hi" }, { timeout: 0 });
+
+  expect(axios.post).toHaveBeenCalledWith(
+    "http://localhost:5001/chat",
+    { question: "hi" },
+    expect.objectContaining({ timeout: 0 })
+  );
+});
+
+test("apiPost applies default timeout of 30000 when no config given", async () => {
+  axios.post.mockResolvedValue({ data: {} });
+
+  await apiPost("/feedback", { rating: 5 });
+
+  expect(axios.post).toHaveBeenCalledWith(
+    "http://localhost:5001/feedback",
+    { rating: 5 },
+    expect.objectContaining({ timeout: 30000 })
   );
 });

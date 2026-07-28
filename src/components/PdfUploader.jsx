@@ -3,9 +3,25 @@ import axios from "axios";
 import { InboxOutlined } from "@ant-design/icons";
 import { message, Upload } from "antd";
 import { API_DOMAIN, buildApiRequestConfig } from "../config";
+import { createTranslator, getInitialLocale } from "../archiveI18n";
 
 const { Dragger } = Upload;
 const CHUNK_SIZE_BYTES = 2 * 1024 * 1024;
+
+export const MAX_UPLOAD_SIZE_MB = 100;
+const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
+export const validatePdfFile = (file) => {
+  const hasValidExtension = /\.pdf$/i.test(file.name);
+  const hasValidMime = file.type === "application/pdf";
+  if (!hasValidExtension && !hasValidMime) {
+    return { ok: false, reason: "invalidType" };
+  }
+  if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+    return { ok: false, reason: "tooLarge" };
+  }
+  return { ok: true };
+};
 
 const buildFileId = (file) =>
   [file.name, file.size, file.lastModified].join("__");
@@ -98,13 +114,27 @@ const uploadToBackend = async (file, onProgress) => {
   return completeUpload(fileId);
 };
 
-const PdfUploader = ({ onUploadSuccess }) => {
+const defaultT = createTranslator(getInitialLocale());
+
+const PdfUploader = ({ onUploadSuccess, t = defaultT }) => {
   const attributes = {
     name: "file",
     multiple: true,
     accept: ".pdf",
     showUploadList: false,
     className: "archive-uploader",
+    beforeUpload(file) {
+      const result = validatePdfFile(file);
+      if (!result.ok) {
+        if (result.reason === "invalidType") {
+          message.error(t("uploader.invalidType", { fileName: file.name }));
+        } else if (result.reason === "tooLarge") {
+          message.error(t("uploader.tooLarge", { fileName: file.name, maxSizeMb: MAX_UPLOAD_SIZE_MB }));
+        }
+        return Upload.LIST_IGNORE;
+      }
+      return true;
+    },
     customRequest: async ({ file, onSuccess, onError, onProgress }) => {
       try {
         const response = await uploadToBackend(file, onProgress);
@@ -119,14 +149,14 @@ const PdfUploader = ({ onUploadSuccess }) => {
       const { status } = info.file;
 
       if (status === "done") {
-        message.success(`${info.file.name} uploaded successfully.`);
+        message.success(t("uploader.uploadSuccess", { fileName: info.file.name }));
       } else if (status === "error") {
         const errorMessage =
           info.file.error?.response?.data?.error ??
           info.file.error?.message ??
           "Upload failed";
 
-        message.error(`${info.file.name} upload failed: ${errorMessage}`);
+        message.error(t("uploader.uploadFailed", { fileName: info.file.name, message: errorMessage }));
       }
     },
   };
@@ -139,9 +169,9 @@ const PdfUploader = ({ onUploadSuccess }) => {
         </div>
 
         <div className="archive-uploader-copy-wrap">
-          <p className="archive-uploader-title">Add PDFs</p>
+          <p className="archive-uploader-title">{t("uploader.title")}</p>
           <p className="archive-uploader-copy">
-            Drop files here or click to browse.
+            {t("uploader.copy")}
           </p>
         </div>
       </div>

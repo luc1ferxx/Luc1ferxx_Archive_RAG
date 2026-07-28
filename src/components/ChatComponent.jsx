@@ -11,7 +11,6 @@ import {
 import SpeechRecognition, {
   useSpeechRecognition,
 } from "react-speech-recognition";
-import Speech from "speak-tts";
 import { requestChat } from "../archiveApi";
 import { DEMO_CONVERSATION } from "../demoWorkbench";
 
@@ -51,14 +50,78 @@ const ChatComponent = (props) => {
   const [isScopeOpen, setIsScopeOpen] = useState(false);
   const [isToolsOpen, setIsToolsOpen] = useState(false);
   const [retrievalMode, setRetrievalMode] = useState("auto");
-  const [speech, setSpeech] = useState();
   const abortControllerRef = useRef(null);
   const requestSeqRef = useRef(0);
   const speechRef = useRef(null);
+  const initPromiseRef = useRef(null);
   const sourceControlRef = useRef(null);
   const hasDocuments = isDemoWorkbench || docIds.length > 0;
 
-  const { transcript, listening, resetTranscript } = useSpeechRecognition();
+  // Hook must be called unconditionally; dynamic import("speak-tts") is intercepted by the test mock
+  const { transcript, listening, resetTranscript, browserSupportsSpeechRecognition } =
+    useSpeechRecognition();
+
+  const ensureSpeech = useCallback(async (loc) => {
+    if (speechRef.current?.locale === loc) {
+      return speechRef.current.instance;
+    }
+
+    if (initPromiseRef.current) {
+      await initPromiseRef.current;
+      if (speechRef.current?.locale === loc) {
+        return speechRef.current.instance;
+      }
+    }
+
+    if (speechRef.current) {
+      speechRef.current.instance.cancel();
+      speechRef.current = null;
+    }
+
+    const promise = (async () => {
+      try {
+        const { default: Speech } = await import("speak-tts");
+        const instance = new Speech();
+        const baseOptions = {
+          volume: 1,
+          lang: loc === "zh" ? "zh-CN" : "en-US",
+          rate: 1,
+          pitch: 1,
+          splitSentences: false,
+        };
+        const speechOptions =
+          loc === "zh"
+            ? baseOptions
+            : { voice: "Google US English", ...baseOptions };
+
+        try {
+          await instance.init(speechOptions);
+        } catch (error) {
+          try {
+            await instance.init(baseOptions);
+          } catch (fallbackError) {
+            console.warn(
+              "Speech synthesis is unavailable:",
+              fallbackError ?? error
+            );
+            initPromiseRef.current = null;
+            return null;
+          }
+        }
+
+        speechRef.current = { instance, locale: loc };
+        initPromiseRef.current = null;
+        return instance;
+      } catch (error) {
+        initPromiseRef.current = null;
+        console.warn("Speech synthesis is unavailable:", error);
+        return null;
+      }
+    })();
+
+    initPromiseRef.current = promise;
+    return promise;
+  }, []);
 
   const userStartConvo = useCallback(() => {
     if (!hasDocuments) {
@@ -71,12 +134,13 @@ const ChatComponent = (props) => {
   }, [hasDocuments, resetTranscript]);
 
   const talk = useCallback(
-    (whatToSay) => {
-      if (!speech) {
+    async (whatToSay) => {
+      const instance = await ensureSpeech(locale);
+      if (!instance) {
         return;
       }
 
-      speech
+      instance
         .speak({
           text: whatToSay,
           queue: false,
@@ -88,7 +152,7 @@ const ChatComponent = (props) => {
           console.error("An error occurred during speech:", error);
         });
     },
-    [speech, userStartConvo]
+    [ensureSpeech, locale, userStartConvo]
   );
 
   const onSearch = useCallback(
@@ -222,52 +286,10 @@ const ChatComponent = (props) => {
   }, [isScopeOpen]);
 
   useEffect(() => {
-    speechRef.current?.cancel();
-
-    let cancelled = false;
-    const initializedSpeech = new Speech();
-    const baseSpeechOptions = {
-      volume: 1,
-      lang: locale === "zh" ? "zh-CN" : "en-US",
-      rate: 1,
-      pitch: 1,
-      splitSentences: false,
-    };
-    const speechOptions =
-      locale === "zh"
-        ? baseSpeechOptions
-        : {
-            voice: "Google US English",
-            ...baseSpeechOptions,
-          };
-
-    initializedSpeech
-      .init(speechOptions)
-      .then(() => {
-        if (!cancelled) {
-          speechRef.current = initializedSpeech;
-          setSpeech(initializedSpeech);
-        }
-      })
-      .catch((error) => {
-        initializedSpeech
-          .init(baseSpeechOptions)
-          .then(() => {
-            if (!cancelled) {
-              speechRef.current = initializedSpeech;
-              setSpeech(initializedSpeech);
-            }
-          })
-          .catch((fallbackError) => {
-            console.warn("Speech synthesis is unavailable:", fallbackError ?? error);
-          });
-      });
-
     return () => {
-      cancelled = true;
-      initializedSpeech.cancel();
+      speechRef.current?.instance.cancel();
     };
-  }, [locale]);
+  }, []);
 
   useEffect(() => {
     if (!listening && transcript) {
@@ -302,6 +324,17 @@ const ChatComponent = (props) => {
       return;
     }
 
+    if (!isChatModeOn && !browserSupportsSpeechRecognition) {
+      message.warning(t("chat.voiceUnsupported"));
+      return;
+    }
+
+    if (!isChatModeOn) {
+      ensureSpeech(locale);
+    } else {
+      speechRef.current?.instance.cancel();
+    }
+
     setIsChatModeOn((prev) => !prev);
     setIsRecording(false);
     SpeechRecognition.stopListening();
@@ -319,6 +352,10 @@ const ChatComponent = (props) => {
       SpeechRecognition.stopListening();
       resetTranscript();
     } else {
+      if (!browserSupportsSpeechRecognition) {
+        message.warning(t("chat.voiceUnsupported"));
+        return;
+      }
       setIsRecording(true);
       SpeechRecognition.startListening();
     }

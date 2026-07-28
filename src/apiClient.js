@@ -1,6 +1,9 @@
 import axios from "axios";
 import { API_DOMAIN, buildApiRequestConfig } from "./config";
 
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+
 const buildUrl = (path) => `${API_DOMAIN}${path}`;
 
 const getResponseHeader = (headers, name) => {
@@ -64,31 +67,26 @@ const normalizeDownloadError = async (error) => {
 };
 
 export const apiGet = async (path) => {
-  const config = buildApiRequestConfig();
-  const response = config
-    ? await axios.get(buildUrl(path), config)
-    : await axios.get(buildUrl(path));
+  const config = buildApiRequestConfig({ timeout: DEFAULT_TIMEOUT_MS });
+  const response = await axios.get(buildUrl(path), config);
 
   return response.data;
 };
 
 export const apiPost = async (path, payload, requestConfig) => {
-  const config = buildApiRequestConfig(requestConfig ?? {});
+  const config = buildApiRequestConfig({
+    timeout: DEFAULT_TIMEOUT_MS,
+    ...(requestConfig ?? {}),
+  });
   const url = buildUrl(path);
-  const response = config
-    ? await axios.post(url, payload, config)
-    : payload === undefined
-      ? await axios.post(url)
-      : await axios.post(url, payload);
+  const response = await axios.post(url, payload, config);
 
   return response.data;
 };
 
 export const apiDelete = async (path) => {
-  const config = buildApiRequestConfig();
-  const response = config
-    ? await axios.delete(buildUrl(path), config)
-    : await axios.delete(buildUrl(path));
+  const config = buildApiRequestConfig({ timeout: DEFAULT_TIMEOUT_MS });
+  const response = await axios.delete(buildUrl(path), config);
 
   return response.data;
 };
@@ -99,6 +97,7 @@ export const apiDownload = async (path) => {
       buildUrl(path),
       buildApiRequestConfig({
         responseType: "blob",
+        timeout: DOWNLOAD_TIMEOUT_MS,
       })
     );
 

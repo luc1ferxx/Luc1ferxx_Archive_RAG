@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { message } from "antd";
 import { vi } from "vitest";
 
 let mockRequestChat;
@@ -17,8 +18,13 @@ vi.mock("react-speech-recognition", () => ({
   }),
 }));
 
+const { speechConstructCount } = vi.hoisted(() => ({
+  speechConstructCount: { value: 0 },
+}));
+
 vi.mock("speak-tts", () => {
   function MockSpeech() {
+    speechConstructCount.value += 1;
     this.init = vi.fn().mockResolvedValue(undefined);
     this.speak = vi.fn().mockResolvedValue(undefined);
     this.cancel = vi.fn();
@@ -220,5 +226,27 @@ describe("ChatComponent", () => {
     await waitFor(() =>
       expect(setIsLoading).toHaveBeenCalledWith(false)
     );
+  });
+
+  test("shows a warning when voice mode is toggled in an unsupported browser", async () => {
+    const warnSpy = vi.spyOn(message, "warning").mockImplementation(() => {});
+
+    renderChat({ showQuickActions: true });
+
+    const voiceButton = screen.getByRole("button", { name: "chat.voiceMode" });
+    expect(voiceButton).toHaveAttribute("aria-pressed", "false");
+
+    await userEvent.click(voiceButton);
+
+    expect(warnSpy).toHaveBeenCalledWith("chat.voiceUnsupported");
+    expect(voiceButton).toHaveAttribute("aria-pressed", "false");
+
+    warnSpy.mockRestore();
+  });
+
+  test("does not construct speak-tts on mount", () => {
+    const before = speechConstructCount.value;
+    renderChat();
+    expect(speechConstructCount.value).toBe(before);
   });
 });

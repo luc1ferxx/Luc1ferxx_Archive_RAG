@@ -9,7 +9,7 @@ export const requestDocumentDelete = async (docId) => {
 };
 
 export const requestDocumentClear = async () => {
-  return apiPost("/documents/clear");
+  return apiPost("/documents/clear", undefined, { timeout: 0 });
 };
 
 export const fetchWorkspaceArtifacts = async ({
@@ -60,7 +60,8 @@ export const fetchTask = async (taskId) => {
 export const requestTaskAction = async (taskId, action, payload = {}) => {
   return apiPost(
     `/tasks/${encodeURIComponent(taskId)}/actions/${encodeURIComponent(action)}`,
-    payload
+    payload,
+    { timeout: 0 }
   );
 };
 
@@ -69,7 +70,8 @@ export const requestAgentRunAction = async (runId, action, payload = {}) => {
     `/agent-runs/${encodeURIComponent(runId)}/actions/${encodeURIComponent(
       action
     )}`,
-    payload
+    payload,
+    { timeout: 0 }
   );
 };
 
@@ -78,7 +80,8 @@ export const requestAgentRunStepRetry = async (runId, stepId) => {
     `/agent-runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(
       stepId
     )}/actions/retry`,
-    {}
+    {},
+    { timeout: 0 }
   );
 };
 
@@ -95,7 +98,8 @@ export const requestAgentRunRecoveryAction = async (
     `/agent-runs/${encodeURIComponent(
       runId
     )}/recovery/actions/${encodeURIComponent(action)}`,
-    payload
+    payload,
+    { timeout: 0 }
   );
 };
 
@@ -128,7 +132,7 @@ export const requestDocumentArxivImport = async (
     payload.selectedArxivIds = selectedArxivIds;
   }
 
-  return apiPost(`/documents/${docId}/arxiv/import`, payload);
+  return apiPost(`/documents/${docId}/arxiv/import`, payload, { timeout: 0 });
 };
 
 export const requestSessionClear = async (sessionId) => {
@@ -152,7 +156,7 @@ export const requestSyntheticQualityRun = async () => {
     corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
   };
 
-  return apiPost("/quality/synthetic", payload);
+  return apiPost("/quality/synthetic", payload, { timeout: 0 });
 };
 
 export const requestAnswerFeedback = async (payload) => {
@@ -167,5 +171,5 @@ export const requestChat = async ({ docIds, question, sessionId, userId, signal 
     userId,
   };
 
-  return apiPost("/chat", payload, signal ? { signal } : undefined);
+  return apiPost("/chat", payload, { signal, timeout: 0 });
 };
