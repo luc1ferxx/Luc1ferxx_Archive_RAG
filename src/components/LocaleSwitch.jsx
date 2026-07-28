@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { getLocaleMeta, getNextLocale } from "../archiveI18n";
 
 const LocaleSwitch = ({ locale, onLocaleChange, t }) => {
@@ -21,4 +22,4 @@ const LocaleSwitch = ({ locale, onLocaleChange, t }) => {
   );
 };
 
-export default LocaleSwitch;
+export default memo(LocaleSwitch);

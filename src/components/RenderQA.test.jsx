@@ -584,4 +584,142 @@ describe("RenderQA", () => {
       })
     );
   });
+
+  test("keyboard Enter on turn article triggers onSelectTurn", () => {
+    const handleSelectTurn = vi.fn();
+
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "First question about policy",
+            answer: {
+              ragAnswer: "Document answer.",
+              ragSources: [],
+              mcpAnswer: "Web answer.",
+            },
+          },
+          {
+            question: "Second question about billing",
+            answer: {
+              ragAnswer: "Document answer two.",
+              ragSources: [],
+              mcpAnswer: "Web answer two.",
+            },
+          },
+        ]}
+        activeTurnIndex={0}
+        onSelectTurn={handleSelectTurn}
+      />
+    );
+
+    const articles = screen.getAllByRole("article");
+    fireEvent.keyDown(articles[1], { key: "Enter" });
+    expect(handleSelectTurn).toHaveBeenCalledWith(1);
+  });
+
+  test("keyboard Space on turn article triggers onSelectTurn and prevents default", () => {
+    const handleSelectTurn = vi.fn();
+
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "Question about scheduling",
+            answer: {
+              ragAnswer: "Document answer.",
+              ragSources: [],
+              mcpAnswer: "Web answer.",
+            },
+          },
+        ]}
+        activeTurnIndex={0}
+        onSelectTurn={handleSelectTurn}
+      />
+    );
+
+    const article = screen.getByRole("article");
+    const event = fireEvent.keyDown(article, { key: " " });
+    expect(handleSelectTurn).toHaveBeenCalledWith(0);
+    expect(event).toBe(false);
+  });
+
+  test("keydown on nested button does not trigger turn selection", () => {
+    const handleSelectTurn = vi.fn();
+
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "Question about refunds",
+            answer: {
+              ragAnswer: "Document answer.",
+              ragSources: [],
+              mcpAnswer: "Web answer.",
+            },
+          },
+        ]}
+        activeTurnIndex={0}
+        onSelectTurn={handleSelectTurn}
+        onFeedback={vi.fn()}
+      />
+    );
+
+    const feedbackButton = screen.getByRole("button", { name: "Helpful" });
+    fireEvent.keyDown(feedbackButton, { key: "Enter" });
+    expect(handleSelectTurn).not.toHaveBeenCalled();
+  });
+
+  test("demo mode without onSelectTurn renders article without tabIndex", () => {
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "Demo question",
+            answer: {
+              ragAnswer: "Document answer.",
+              ragSources: [],
+              mcpAnswer: "Web answer.",
+            },
+          },
+        ]}
+      />
+    );
+
+    const article = screen.getByRole("article");
+    expect(article).not.toHaveAttribute("tabindex");
+  });
+
+  test("aria-current is set on active turn and absent on inactive turns", () => {
+    const handleSelectTurn = vi.fn();
+
+    render(
+      <RenderQA
+        conversation={[
+          {
+            question: "Active turn question",
+            answer: {
+              ragAnswer: "Document answer.",
+              ragSources: [],
+              mcpAnswer: "Web answer.",
+            },
+          },
+          {
+            question: "Inactive turn question",
+            answer: {
+              ragAnswer: "Document answer two.",
+              ragSources: [],
+              mcpAnswer: "Web answer two.",
+            },
+          },
+        ]}
+        activeTurnIndex={0}
+        onSelectTurn={handleSelectTurn}
+      />
+    );
+
+    const articles = screen.getAllByRole("article");
+    expect(articles[0]).toHaveAttribute("aria-current", "true");
+    expect(articles[1]).not.toHaveAttribute("aria-current");
+  });
 });

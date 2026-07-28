@@ -61,6 +61,9 @@ const HOME_NAV_SECTIONS = new Set([
   "more",
 ]);
 
+const EMPTY_ARRAY = [];
+const EMPTY_OBJECT = {};
+
 const getBackendErrorMessage = (error, fallbackMessage) =>
   error.response?.data?.error ?? fallbackMessage;
 
@@ -648,10 +651,10 @@ const App = () => {
   const visibleDocLabel = isDemoWorkbench
     ? t("workbench.financePolicyQa")
     : chatDocLabel;
-  const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? [];
-  const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? [];
-  const visibleTaskLog = isDemoWorkbench ? [] : taskLog;
-  const visibleRecoveryRuns = isDemoWorkbench ? [] : recoveryRuns;
+  const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? EMPTY_ARRAY;
+  const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? EMPTY_ARRAY;
+  const visibleTaskLog = isDemoWorkbench ? EMPTY_ARRAY : taskLog;
+  const visibleRecoveryRuns = isDemoWorkbench ? EMPTY_ARRAY : recoveryRuns;
   const hasActiveTaskLog = hasActiveTasks(visibleTaskLog);
   const idleTasks = useMemo(
     () => [
@@ -735,6 +738,33 @@ const App = () => {
         : (payload) => void handleAgentStepRetry(payload),
     [isDemoWorkbench, handleAgentStepRetry]
   );
+  const sidebarRecoveryAction = useMemo(
+    () =>
+      isDemoWorkbench
+        ? undefined
+        : (payload) => void handleAgentRecoveryAction(payload),
+    [isDemoWorkbench, handleAgentRecoveryAction]
+  );
+  const taskAction = useMemo(
+    () => (isDemoWorkbench ? undefined : handleTaskAction),
+    [isDemoWorkbench, handleTaskAction]
+  );
+  const artifactSlot = useMemo(
+    () => <WorkspaceArtifactsPanel locale={locale} t={t} />,
+    [locale, t]
+  );
+  const languageSlot = useMemo(
+    () => <LocaleSwitch locale={locale} onLocaleChange={handleLocaleChange} t={t} />,
+    [handleLocaleChange, locale, t]
+  );
+  const uploadSlot = useMemo(
+    () => (
+      <div ref={homeUploadRef}>
+        <PdfUploader onUploadSuccess={handleHomeUploadSuccess} t={t} />
+      </div>
+    ),
+    [handleHomeUploadSuccess, t]
+  );
 
   const renderConversationView = () => {
     if (activeConversationView === "trace") {
@@ -803,7 +833,7 @@ const App = () => {
       return (
         <AgentRunCenter
           isLoading={(isTaskLogLoading || isRecoveryLoading) && !isDemoWorkbench}
-          onTaskAction={isDemoWorkbench ? undefined : handleTaskAction}
+          onTaskAction={taskAction}
           tasks={visibleTasks}
         />
       );
@@ -831,7 +861,7 @@ const App = () => {
         chatScopeMode={chatScopeMode}
         chatScopeOptions={chatScopeOptions}
         draftQuestion={inputId === "archive-home-agent-search" ? homeDraftQuestion : ""}
-        docIds={isWorkbenchOpen && isDemoWorkbench ? [] : chatDocIds}
+        docIds={isWorkbenchOpen && isDemoWorkbench ? EMPTY_ARRAY : chatDocIds}
         docLabel={isWorkbenchOpen && isDemoWorkbench ? visibleDocLabel : chatDocLabel}
         sessionId={sessionId}
         userId={userId}
@@ -856,7 +886,7 @@ const App = () => {
       <div className="archive-shell archive-home-shell">
         <WorkspaceEntryPanel
           activeSection={activeHomeSection}
-          artifactSlot={<WorkspaceArtifactsPanel locale={locale} t={t} />}
+          artifactSlot={artifactSlot}
           documentCount={activeDocuments.length}
           documents={activeDocuments}
           onNavigate={handleHomeNavigate}
@@ -872,18 +902,8 @@ const App = () => {
           taskCount={taskLog.length + recoveryRuns.length}
           tasks={taskLog}
           t={t}
-          languageSlot={
-            <LocaleSwitch
-              locale={locale}
-              onLocaleChange={handleLocaleChange}
-              t={t}
-            />
-          }
-          uploadSlot={
-            <div ref={homeUploadRef}>
-              <PdfUploader onUploadSuccess={handleHomeUploadSuccess} />
-            </div>
-          }
+          languageSlot={languageSlot}
+          uploadSlot={uploadSlot}
         >
           {renderAgentComposer({
             inputId: "archive-home-agent-search",
@@ -994,11 +1014,7 @@ const App = () => {
             onDismissArxivSuggestion={clearArxivSuggestion}
             onImportArxivSuggestion={importArxivSuggestion}
             onOpenSavedArxivSuggestion={openSavedArxivSuggestion}
-            onRecoveryAction={
-              isDemoWorkbench
-                ? undefined
-                : (payload) => void handleAgentRecoveryAction(payload)
-            }
+            onRecoveryAction={sidebarRecoveryAction}
             onToggleChatScopeDocument={toggleChatScopeDocument}
             onLoadQualityHistory={loadQualityHistory}
             onLoadQualityLatest={loadLatestQualityReport}
@@ -1011,9 +1027,9 @@ const App = () => {
             qualityRef={qualityRef}
             recoveryRuns={visibleRecoveryRuns}
             savedArxivSuggestionsByDocId={
-              isDemoWorkbench ? {} : savedArxivSuggestionsByDocId
+              isDemoWorkbench ? EMPTY_OBJECT : savedArxivSuggestionsByDocId
             }
-            selectedChatDocIds={isDemoWorkbench ? [] : selectedChatDocIds}
+            selectedChatDocIds={isDemoWorkbench ? EMPTY_ARRAY : selectedChatDocIds}
             locale={locale}
             t={t}
             totalPages={visibleTotalPages}

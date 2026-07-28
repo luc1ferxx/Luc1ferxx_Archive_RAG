@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import {
   AuditOutlined,
   CloudUploadOutlined,
@@ -723,4 +723,4 @@ const WorkspaceEntryPanel = ({
   );
 };
 
-export default WorkspaceEntryPanel;
+export default memo(WorkspaceEntryPanel);

@@ -388,4 +388,4 @@ const PdfPreview = ({ source }) => {
   );
 };
 
-export default PdfPreview;
+export default React.memo(PdfPreview);

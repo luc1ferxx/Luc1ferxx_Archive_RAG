@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import "./SpotlightCard.css";
 
 const SpotlightCard = ({
@@ -10,18 +10,31 @@ const SpotlightCard = ({
   ...rest
 }) => {
   const elementRef = useRef(null);
+  const mouseRef = useRef({ x: 0, y: 0 });
+  const rafRef = useRef(0);
 
   const handleMouseMove = (event) => {
-    const element = elementRef.current;
+    mouseRef.current.x = event.clientX;
+    mouseRef.current.y = event.clientY;
 
-    if (!element) {
+    if (rafRef.current) {
       return;
     }
 
-    const rect = element.getBoundingClientRect();
-    element.style.setProperty("--rb-spotlight-x", `${event.clientX - rect.left}px`);
-    element.style.setProperty("--rb-spotlight-y", `${event.clientY - rect.top}px`);
+    rafRef.current = requestAnimationFrame(() => {
+      const element = elementRef.current;
+
+      if (element) {
+        const rect = element.getBoundingClientRect();
+        element.style.setProperty("--rb-spotlight-x", `${mouseRef.current.x - rect.left}px`);
+        element.style.setProperty("--rb-spotlight-y", `${mouseRef.current.y - rect.top}px`);
+      }
+
+      rafRef.current = 0;
+    });
   };
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
 
   return (
     <Component

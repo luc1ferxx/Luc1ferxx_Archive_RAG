@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import { Spin } from "antd";
 import AgentTraceDetail, {
   formatAgentMode,
@@ -588,14 +588,14 @@ const RenderQA = (props) => {
   } = props;
   const [feedbackNotes, setFeedbackNotes] = useState({});
 
-  const updateFeedbackNote = (turnIndex, note) => {
+  const updateFeedbackNote = useCallback((turnIndex, note) => {
     setFeedbackNotes((prev) => ({
       ...prev,
       [turnIndex]: note,
     }));
-  };
+  }, []);
 
-  const submitFeedback = ({ turnIndex, feedbackType, turn }) => {
+  const submitFeedback = useCallback(({ turnIndex, feedbackType, turn }) => {
     onFeedback?.({
       turnIndex,
       feedbackType,
@@ -603,8 +603,19 @@ const RenderQA = (props) => {
       question: turn.question,
       answer: turn.answer,
     });
-    updateFeedbackNote(turnIndex, "");
-  };
+    setFeedbackNotes((prev) => ({
+      ...prev,
+      [turnIndex]: "",
+    }));
+  }, [onFeedback, feedbackNotes]);
+
+  const handleTurnKeyDown = useCallback((event, index) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onSelectTurn?.(index);
+    }
+  }, [onSelectTurn]);
 
   if (!conversation?.length && !isLoading) {
     return (
@@ -635,6 +646,14 @@ const RenderQA = (props) => {
               activeTurnIndex === index ? "is-active" : ""
             }`}
             onClick={() => onSelectTurn?.(index)}
+            {...(onSelectTurn
+              ? {
+                  tabIndex: 0,
+                  onKeyDown: (event) => handleTurnKeyDown(event, index),
+                  "aria-current": activeTurnIndex === index ? "true" : undefined,
+                  "aria-label": each.question,
+                }
+              : {})}
           >
             <div className="archive-entry-eyebrow">Prompt {index + 1}</div>
 

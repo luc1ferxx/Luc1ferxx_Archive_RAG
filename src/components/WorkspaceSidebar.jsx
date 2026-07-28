@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Button } from "antd";
 import {
   AppstoreOutlined,
@@ -345,7 +346,7 @@ const WorkspaceSidebar = ({
         <SidebarMetric label={t("home.stat.pages")} value={totalPages} />
         <SidebarMetric label={t("sidebar.turns")} value={conversationCount} />
       </div>
-      <PdfUploader onUploadSuccess={onUploadSuccess} />
+      <PdfUploader onUploadSuccess={onUploadSuccess} t={t} />
       <ArxivSuggestionPanel
         isImporting={isArxivImporting}
         isLoading={isArxivSuggestionLoading}
@@ -529,4 +530,4 @@ const WorkspaceSidebar = ({
   </aside>
 );
 
-export default WorkspaceSidebar;
+export default memo(WorkspaceSidebar);

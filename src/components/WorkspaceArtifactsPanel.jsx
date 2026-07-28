@@ -1,3 +1,4 @@
+import { memo } from "react";
 import {
   ClusterOutlined,
   DownloadOutlined,
@@ -351,4 +352,4 @@ const WorkspaceArtifactsPanel = ({ locale = "en", t = defaultT }) => {
   );
 };
 
-export default WorkspaceArtifactsPanel;
+export default memo(WorkspaceArtifactsPanel);

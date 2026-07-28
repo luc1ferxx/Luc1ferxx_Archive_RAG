@@ -5,6 +5,23 @@ import { fetchTasks } from "../archiveApi";
 const getBackendMessage = (error, fallbackMessage) =>
   error.response?.data?.error ?? fallbackMessage;
 
+const deepEqual = (a, b) => {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== typeof b) return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((v, i) => deepEqual(v, b[i]));
+  }
+  if (typeof a === "object") {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((k) => Object.prototype.hasOwnProperty.call(b, k) && deepEqual(a[k], b[k]));
+  }
+  return false;
+};
+
 export const TASK_TYPES = {
   externalRecommendation: "external_recommendation",
 };
@@ -23,13 +40,15 @@ export const useTaskLog = () => {
   }, []);
 
   const loadTasks = useCallback(async ({ silent = false, type } = {}) => {
-    setIsTaskLogLoading(true);
+    if (!silent) {
+      setIsTaskLogLoading(true);
+    }
 
     try {
       const result = await fetchTasks(type);
       const nextTasks = Array.isArray(result?.tasks) ? result.tasks : [];
 
-      setTasks(nextTasks);
+      setTasks((prev) => deepEqual(prev, nextTasks) ? prev : nextTasks);
       return nextTasks;
     } catch (error) {
       if (!silent) {
@@ -38,7 +57,9 @@ export const useTaskLog = () => {
 
       return [];
     } finally {
-      setIsTaskLogLoading(false);
+      if (!silent) {
+        setIsTaskLogLoading(false);
+      }
     }
   }, []);
 

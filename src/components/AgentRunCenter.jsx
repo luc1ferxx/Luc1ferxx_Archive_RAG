@@ -292,4 +292,4 @@ const AgentRunCenter = ({ isLoading = false, onTaskAction, tasks = [] }) => (
   </div>
 );
 
-export default AgentRunCenter;
+export default React.memo(AgentRunCenter);
