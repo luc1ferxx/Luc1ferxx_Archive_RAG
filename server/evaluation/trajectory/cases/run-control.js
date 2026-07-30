@@ -104,6 +104,9 @@ export const createApprovalResumeCase = () => ({
       accessScope: DEFAULT_ACCESS_SCOPE,
       action: "approve",
       gateId: gate?.id,
+      payload: {
+        approvalObjectHash: gate?.approvalObjectHash,
+      },
       runId: pendingBody.agentRunId,
     });
     const resumedResponse = {
@@ -503,6 +506,7 @@ export const createWebApprovalDenyCase = () => ({
       action: "deny",
       gateId: gate?.id,
       payload: {
+        approvalObjectHash: gate?.approvalObjectHash,
         reason: "Trajectory test denial.",
       },
       runId: pendingBody.agentRunId,

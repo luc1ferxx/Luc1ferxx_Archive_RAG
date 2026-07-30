@@ -19,6 +19,8 @@ test("admin recover-tasks action calls the existing job recovery runner", async 
         calls.push(args);
 
         return {
+          authoritativeForCurrentCommit: false,
+          evidenceScope: "historical",
           scheduledCount: 2,
           tasks: [
             {

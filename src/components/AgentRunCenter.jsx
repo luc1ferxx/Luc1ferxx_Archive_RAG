@@ -1,5 +1,6 @@
 import React from "react";
 import { Button } from "antd";
+import ApprovalGatePreviewList from "./ApprovalGatePreviewList";
 import { formatTaskStatus } from "./workbenchFormatters";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
@@ -18,7 +19,17 @@ const getGoalCompletion = (task = {}) =>
   getGoalPlan(task)?.goalCompletion ?? task.result?.goalCompletion ?? null;
 
 const getApprovalGate = (task = {}) =>
-  toArray(task.result?.approvalGates).find((gate) => gate?.capabilityId) ?? null;
+  toArray(task.result?.approvalGates).find(
+    (gate) => gate?.status === "pending"
+  ) ?? null;
+
+const getApprovalGates = (task = {}) =>
+  toArray(task.result?.approvalGates).filter(
+    (gate) => gate?.status === "pending"
+  );
+
+const normalizeApprovalBinding = (value) =>
+  typeof value === "string" ? value.trim() : "";
 
 const getPrimaryAction = (task = {}) => {
   if (task.type !== "agent_goal") {
@@ -27,10 +38,14 @@ const getPrimaryAction = (task = {}) => {
 
   if (task.requiredUserAction === "approve_capability") {
     const gate = getApprovalGate(task);
+    const approvalObjectHash = normalizeApprovalBinding(
+      gate?.approvalObjectHash
+    );
+    const gateId = normalizeApprovalBinding(gate?.id);
 
     return {
       action: "approve",
-      disabled: !gate?.capabilityId,
+      disabled: !gateId || !approvalObjectHash,
       label: "Approve",
       payload: {
         approval: {
@@ -38,22 +53,30 @@ const getPrimaryAction = (task = {}) => {
           decision: "approved",
           source: "agent_run_center",
         },
-        capabilityId: gate?.capabilityId,
+        approvalObjectHash,
+        gateId,
       },
     };
   }
 
   if (task.requiredUserAction === "approve_deliverables") {
+    const approvalBindings = getApprovalGates(task).map((gate) => ({
+      approvalObjectHash: normalizeApprovalBinding(
+        gate?.approvalObjectHash
+      ),
+      gateId: normalizeApprovalBinding(gate?.id),
+    }));
+
     return {
       action: "approve_deliverables",
-      disabled: false,
+      disabled:
+        approvalBindings.length === 0 ||
+        approvalBindings.some(
+          (binding) => !binding.gateId || !binding.approvalObjectHash
+        ),
       label: "Approve deliverables",
       payload: {
-        approval: {
-          approved: true,
-          decision: "approved",
-          source: "agent_run_center",
-        },
+        approvalBindings,
       },
     };
   }
@@ -232,6 +255,14 @@ const AgentTaskGoalCompletion = ({ task }) => {
 const AgentTaskCard = ({ onTaskAction, task }) => {
   const primaryAction = getPrimaryAction(task);
   const goalPlan = getGoalPlan(task);
+  const pendingApprovalGates = getApprovalGates(task);
+  const showsApprovalAction =
+    primaryAction?.action === "approve" ||
+    primaryAction?.action === "approve_deliverables";
+  const displayedApprovalGates =
+    primaryAction?.action === "approve_deliverables"
+      ? pendingApprovalGates
+      : pendingApprovalGates.slice(0, 1);
 
   return (
     <article className={`archive-agent-task is-${task.status ?? "pending"}`}>
@@ -254,6 +285,17 @@ const AgentTaskCard = ({ onTaskAction, task }) => {
 
       {goalPlan && task.summary ? (
         <p className="archive-agent-task-summary">{task.summary}</p>
+      ) : null}
+
+      {showsApprovalAction ? (
+        <ApprovalGatePreviewList
+          ariaLabel={
+            primaryAction.action === "approve_deliverables"
+              ? "Pending deliverable approvals"
+              : "Pending capability approvals"
+          }
+          gates={displayedApprovalGates}
+        />
       ) : null}
 
       {primaryAction ? (

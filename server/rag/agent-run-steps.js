@@ -504,6 +504,7 @@ const resolvePausedPrimaryApprovalSteps = ({
                 approvalDenied: true,
               }),
           approvalGateId: gateId,
+          approvalObjectHash: gate.approvalObjectHash,
           capabilityId: gate.capabilityId ?? step.capabilityId,
         },
         summary:
@@ -544,6 +545,7 @@ export const applyApprovalActionToSteps = ({
         detail: {
           action: normalizedAction,
           approvalGateId: gate.id,
+          approvalObjectHash: gate.approvalObjectHash,
           capabilityId: gate.capabilityId,
         },
       },
@@ -582,7 +584,10 @@ export const applyApprovalActionToSteps = ({
     approvalGateId: gate.id,
     capabilityId: gate.capabilityId,
     capabilityVersion: gate.capabilityVersion,
-    input: gate.inputPreview ?? null,
+    input: null,
+    detail: {
+      approvalObjectHash: gate.approvalObjectHash,
+    },
     createdAt: timestamp,
     startedAt: normalizedAction === "approve" ? "" : timestamp,
     completedAt: normalizedAction === "approve" ? "" : timestamp,

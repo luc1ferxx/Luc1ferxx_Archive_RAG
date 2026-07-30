@@ -12,6 +12,13 @@ export {
   evaluateCapabilityPolicy,
 } from "./policy-enforcer.js";
 export {
+  APPROVAL_EXECUTION_SNAPSHOT_ERROR_CODES,
+  APPROVAL_EXECUTION_SNAPSHOT_VERSION,
+  cloneApprovalExecutionInput,
+  createApprovalExecutionSnapshot,
+  verifyApprovalExecutionSnapshot,
+} from "./approval-execution-snapshot.js";
+export {
   createBuiltInCapabilities,
   createDefaultCapabilityRegistry,
 } from "./built-ins.js";

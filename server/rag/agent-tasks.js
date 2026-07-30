@@ -15,6 +15,7 @@ import {
 } from "./agent-research-task.js";
 import {
   AGENT_GOAL_DELIVERABLE_STATUSES,
+  approveAgentGoalDeliverables,
   executeAgentGoalDeliverables,
   prepareAgentGoalDeliverables,
 } from "./agent-goal-deliverables.js";
@@ -213,17 +214,24 @@ const buildResult = ({
   payload = {},
   responseStatus,
   stoppedReason,
-} = {}) => ({
-  agentMode: normalizeText(body.agentMode),
-  agentRunId: getAgentRunId({ body, payload }),
-  answer: normalizeText(body.agentAnswer),
-  approvalGates: getPendingApprovalGates(body),
-  clarification: body.clarification ?? null,
-  responseStatus,
-  researchTask: compactResearchTaskFlow(payload.researchTask),
-  stoppedReason,
-  taskMemory: buildAgentTaskPlanningContext(payload.taskMemory),
-});
+} = {}) => {
+  const bodyApprovalGates = getPendingApprovalGates(body);
+
+  return {
+    agentMode: normalizeText(body.agentMode),
+    agentRunId: getAgentRunId({ body, payload }),
+    answer: normalizeText(body.agentAnswer),
+    approvalGates:
+      bodyApprovalGates.length > 0
+        ? bodyApprovalGates
+        : toArray(payload.pending?.approvalGates),
+    clarification: body.clarification ?? null,
+    responseStatus,
+    researchTask: compactResearchTaskFlow(payload.researchTask),
+    stoppedReason,
+    taskMemory: buildAgentTaskPlanningContext(payload.taskMemory),
+  };
+};
 
 const getLastIteration = (payload = {}) => toArray(payload.iterations).at(-1) ?? {};
 
@@ -281,20 +289,64 @@ const buildProgressPatch = ({
 };
 
 const buildApprovalMap = ({ payload = {}, task = {} } = {}) => {
-  const capabilityId =
-    normalizeText(payload.capabilityId) ||
-    normalizeText(task.payload?.pending?.approvalGates?.[0]?.capabilityId);
+  const gateId = normalizeText(payload.gateId);
+
+  if (!gateId) {
+    throw buildTaskError("gateId is required for capability approval.", 400);
+  }
+
+  const gate = toArray(task.payload?.pending?.approvalGates).find(
+    (candidate) =>
+      normalizeText(candidate?.id) === gateId &&
+      normalizeText(candidate?.status).toLowerCase() === "pending"
+  );
+
+  if (!gate) {
+    throw buildTaskError("Pending capability approval gate not found.", 409);
+  }
+
+  const capabilityId = normalizeText(gate.capabilityId);
+  const clientCapabilityId = normalizeText(payload.capabilityId);
 
   if (!capabilityId) {
-    throw buildTaskError("capabilityId is required for approval.", 400);
+    throw buildTaskError("Pending approval gate is missing capabilityId.", 409);
+  }
+
+  if (clientCapabilityId && clientCapabilityId !== capabilityId) {
+    throw buildTaskError(
+      "Capability approval does not match the pending gate.",
+      409
+    );
+  }
+
+  const approvalObjectHash = normalizeText(payload.approvalObjectHash);
+  const expectedApprovalObjectHash = normalizeText(gate.approvalObjectHash);
+
+  if (!approvalObjectHash) {
+    throw buildTaskError(
+      "approvalObjectHash is required for capability approval.",
+      400
+    );
+  }
+
+  if (
+    !expectedApprovalObjectHash ||
+    approvalObjectHash !== expectedApprovalObjectHash
+  ) {
+    throw buildTaskError(
+      "Capability approval object does not match the pending gate.",
+      409
+    );
   }
 
   return {
     [capabilityId]: {
-      approved: true,
-      decision: "approved",
-      source: "task_action",
       ...normalizeRecord(payload.approval),
+      approved: true,
+      approvalObjectHash,
+      decision: "approved",
+      gateId,
+      source: "task_action",
     },
   };
 };
@@ -327,13 +379,6 @@ const buildDeliverableApprovalQuestion = (deliverables = {}) => {
     labels.length === 1 ? "" : "s"
   }${labels.length > 0 ? `: ${labels.join(", ")}` : ""}.`;
 };
-
-const buildDeliverableApproval = (payload = {}) => ({
-  approved: true,
-  decision: "approved",
-  source: "task_action",
-  ...normalizeRecord(payload.approval),
-});
 
 export const createAgentTaskService = ({
   createTaskId = randomUUID,
@@ -450,9 +495,12 @@ export const createAgentTaskRunner = ({
 
   const runApprovedDeliverables = async ({
     accessScope = {},
+    assertClaimActive,
     patchTask = async () => {},
     payload = {},
+    signal,
   } = {}) => {
+    assertClaimActive?.();
     const body = buildBodyFromPayload(payload);
     const responseStatus = getLastResponseStatus(payload);
     let nextPayload = {
@@ -476,12 +524,14 @@ export const createAgentTaskRunner = ({
       status: TASK_STATUSES.running,
       summary: "Agent task is creating approved deliverables.",
     });
+    assertClaimActive?.();
 
     const deliverables = await deliverableService.execute({
       accessScope,
-      approval: nextPayload.deliverables.approval,
       deliverables: nextPayload.deliverables,
+      signal,
     });
+    assertClaimActive?.();
     const taskStatus =
       deliverables.status === AGENT_GOAL_DELIVERABLE_STATUSES.failed
         ? TASK_STATUSES.failed
@@ -514,7 +564,14 @@ export const createAgentTaskRunner = ({
     };
   };
 
-  const run = async ({ accessScope = {}, patchTask = async () => {}, task = {} } = {}) => {
+  const run = async ({
+    accessScope = {},
+    assertClaimActive,
+    patchTask = async () => {},
+    signal,
+    task = {},
+  } = {}) => {
+    assertClaimActive?.();
     let payload = normalizePayload(task);
     let question =
       getResearchTaskQuestion(payload.researchTask) ||
@@ -526,12 +583,15 @@ export const createAgentTaskRunner = ({
     if (isDeliverableExecutionApproved(payload.deliverables)) {
       return runApprovedDeliverables({
         accessScope,
+        assertClaimActive,
         patchTask,
         payload,
+        signal,
       });
     }
 
     while (payload.iterations.length < payload.maxIterations) {
+      assertClaimActive?.();
       const researchTaskPhase = getResearchTaskIterationPhase(payload.researchTask);
       const requestedAgentRunId =
         payload.resumeAgentRunId === true
@@ -544,9 +604,11 @@ export const createAgentTaskRunner = ({
         docIds: payload.docIds,
         question,
         sessionId: payload.sessionId,
+        signal,
         taskMemory: buildAgentTaskPlanningContext(payload.taskMemory),
         userId: payload.userId,
       });
+      assertClaimActive?.();
       const body = normalizeRecord(response?.body);
       const responseStatus = Number(response?.status ?? 200);
       const agentRunId = getAgentRunId({
@@ -605,6 +667,7 @@ export const createAgentTaskRunner = ({
         status: TASK_STATUSES.running,
         summary: `Agent task completed ${iterations.length} iteration(s).`,
       });
+      assertClaimActive?.();
 
       if (responseStatus >= 400) {
         return {
@@ -653,11 +716,15 @@ export const createAgentTaskRunner = ({
       }
 
       if (!shouldContinue) {
+        assertClaimActive?.();
         const deliverables = await deliverableService.prepare({
+          accessScope,
           body,
           payload,
+          signal,
           sourceTaskId: task.id,
         });
+        assertClaimActive?.();
 
         if (isDeliverableApprovalPending(deliverables)) {
           payload = {
@@ -786,11 +853,11 @@ export const createAgentTaskRunner = ({
 
       const resumedPayload = {
         ...nextPayload,
-        deliverables: {
-          ...deliverables,
-          approval: buildDeliverableApproval(payload),
-          status: AGENT_GOAL_DELIVERABLE_STATUSES.approved,
-        },
+        deliverables: approveAgentGoalDeliverables({
+          accessScope: task.accessScope,
+          approvalBindings: payload.approvalBindings,
+          deliverables,
+        }),
         nextQuestion: "",
         resumeAgentRunId: false,
       };

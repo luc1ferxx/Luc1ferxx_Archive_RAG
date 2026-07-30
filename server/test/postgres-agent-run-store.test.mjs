@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   AGENT_RUN_STEP_STATUSES,
 } from "../rag/agent-run-steps.js";
+import {
+  createApprovalExecutionSnapshot,
+} from "../rag/capabilities/approval-execution-snapshot.js";
 import { createAgentRunRecoveryActionService } from "../rag/agent-run-recovery-actions.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
@@ -36,24 +39,106 @@ const buildFakeRunRow = (values, existingRow = null) => ({
   approval_gates: parseJson(values[10], []),
   result: parseJson(values[11], {}),
   error: parseJson(values[12]),
+  revision: existingRow?.revision ?? 0,
   created_at: values[13] || existingRow?.created_at || values[15],
   updated_at: values[14] || values[15],
 });
 
 const createFakePostgresAgentRunHarness = () => {
   const rows = new Map();
+  const approvalSnapshots = new Map();
   const events = [];
+  const queries = [];
+  let failNextAtomicEvent = false;
+  let failNextAtomicSnapshot = false;
   let migrationRuns = 0;
   const buildKey = ({ runId, userId, workspaceId }) =>
     `${userId}\u0000${workspaceId}\u0000${runId}`;
+  const buildApprovalSnapshotKey = ({
+    gateId,
+    runId,
+    userId,
+    workspaceId,
+  }) => `${buildKey({ runId, userId, workspaceId })}\u0000${gateId}`;
+  const buildEventRow = ({
+    eventPayload,
+    eventType,
+    runId,
+    userId,
+    workspaceId,
+  }) => ({
+    event_id: events.length + 1,
+    user_id: userId,
+    workspace_id: workspaceId,
+    run_id: runId,
+    event_type: eventType,
+    event_payload: parseJson(eventPayload, {}),
+    created_at: "2026-06-14T00:00:00.000Z",
+  });
   const query = async (queryText, values = []) => {
-    if (queryText.includes("INSERT INTO rag_agent_runs_test")) {
+    queries.push({
+      queryText,
+      values,
+    });
+
+    if (
+      queryText.includes("WITH inserted_run AS") &&
+      queryText.includes("recorded_event AS")
+    ) {
       const key = buildKey({
         runId: values[2],
         userId: values[0],
         workspaceId: values[1],
       });
-      const row = buildFakeRunRow(values, rows.get(key));
+
+      if (rows.has(key)) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      const row = buildFakeRunRow(values);
+      const event = buildEventRow({
+        eventPayload: values[17],
+        eventType: values[16],
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+
+      if (failNextAtomicEvent) {
+        failNextAtomicEvent = false;
+        throw new Error("Simulated atomic event insert failure.");
+      }
+
+      rows.set(key, row);
+      events.push(event);
+
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes("INSERT INTO rag_agent_runs_test") &&
+      !queryText.includes("INSERT INTO rag_agent_runs_test_approval_snapshots")
+    ) {
+      const key = buildKey({
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+
+      if (rows.has(key)) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      const row = buildFakeRunRow(values);
 
       rows.set(key, row);
       return {
@@ -62,16 +147,263 @@ const createFakePostgresAgentRunHarness = () => {
       };
     }
 
-    if (queryText.includes("INSERT INTO rag_agent_run_events_test")) {
-      const row = {
-        event_id: events.length + 1,
+    if (
+      queryText.includes("WITH requested_approval_snapshots AS") &&
+      queryText.includes("inserted_approval_snapshots AS") &&
+      queryText.includes("recorded_event AS")
+    ) {
+      const key = buildKey({
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+      const existingRow = rows.get(key);
+
+      if (!existingRow || existingRow.revision !== values[3]) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      const requestedSnapshots = parseJson(values[17], []);
+      const snapshotRows = requestedSnapshots.map((snapshot) => ({
         user_id: values[0],
         workspace_id: values[1],
         run_id: values[2],
-        event_type: values[3],
-        event_payload: parseJson(values[4], {}),
-        created_at: "2026-06-14T00:00:00.000Z",
+        gate_id: snapshot.gateId,
+        capability_id: snapshot.capabilityId,
+        capability_version: snapshot.capabilityVersion,
+        approval_object_hash: snapshot.approvalObjectHash,
+        snapshot_version: snapshot.snapshotVersion,
+        execution_input: snapshot.executionInput,
+      }));
+      const hasConflict = snapshotRows.some((snapshotRow) => {
+        const existingSnapshot = approvalSnapshots.get(
+          buildApprovalSnapshotKey({
+            gateId: snapshotRow.gate_id,
+            runId: snapshotRow.run_id,
+            userId: snapshotRow.user_id,
+            workspaceId: snapshotRow.workspace_id,
+          })
+        );
+
+        return (
+          existingSnapshot &&
+          JSON.stringify(existingSnapshot) !== JSON.stringify(snapshotRow)
+        );
+      });
+
+      if (hasConflict) {
+        const error = new Error(
+          "division by zero from approval snapshot rollback guard"
+        );
+        error.code = "22012";
+        throw error;
+      }
+
+      if (failNextAtomicSnapshot) {
+        failNextAtomicSnapshot = false;
+        throw new Error(
+          "Simulated atomic approval snapshot insert failure."
+        );
+      }
+
+      const row = {
+        ...existingRow,
+        status: values[4],
+        goal: values[5],
+        input: parseJson(values[6], {}),
+        plan: parseJson(values[7], {}),
+        steps: parseJson(values[8], []),
+        observations: parseJson(values[9], []),
+        decisions: parseJson(values[10], []),
+        approval_gates: parseJson(values[11], []),
+        result: parseJson(values[12], {}),
+        error: parseJson(values[13]),
+        revision: existingRow.revision + 1,
+        updated_at: values[14],
       };
+      const event = buildEventRow({
+        eventPayload: values[16],
+        eventType: values[15],
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+
+      if (failNextAtomicEvent) {
+        failNextAtomicEvent = false;
+        throw new Error("Simulated atomic event insert failure.");
+      }
+
+      rows.set(key, row);
+      for (const snapshotRow of snapshotRows) {
+        approvalSnapshots.set(
+          buildApprovalSnapshotKey({
+            gateId: snapshotRow.gate_id,
+            runId: snapshotRow.run_id,
+            userId: snapshotRow.user_id,
+            workspaceId: snapshotRow.workspace_id,
+          }),
+          snapshotRow
+        );
+      }
+      events.push(event);
+
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes("WITH updated_run AS") &&
+      queryText.includes("recorded_event AS")
+    ) {
+      const key = buildKey({
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+      const existingRow = rows.get(key);
+
+      if (!existingRow || existingRow.revision !== values[3]) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      const row = {
+        ...existingRow,
+        status: values[4],
+        goal: values[5],
+        input: parseJson(values[6], {}),
+        plan: parseJson(values[7], {}),
+        steps: parseJson(values[8], []),
+        observations: parseJson(values[9], []),
+        decisions: parseJson(values[10], []),
+        approval_gates: parseJson(values[11], []),
+        result: parseJson(values[12], {}),
+        error: parseJson(values[13]),
+        revision: existingRow.revision + 1,
+        updated_at: values[14],
+      };
+      const event = buildEventRow({
+        eventPayload: values[16],
+        eventType: values[15],
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+
+      if (failNextAtomicEvent) {
+        failNextAtomicEvent = false;
+        throw new Error("Simulated atomic event insert failure.");
+      }
+
+      rows.set(key, row);
+      events.push(event);
+
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes("UPDATE rag_agent_runs_test") &&
+      queryText.includes("revision = revision + 1")
+    ) {
+      const key = buildKey({
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+      const existingRow = rows.get(key);
+
+      if (!existingRow || existingRow.revision !== values[3]) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      const row = {
+        ...existingRow,
+        status: values[4],
+        goal: values[5],
+        input: parseJson(values[6], {}),
+        plan: parseJson(values[7], {}),
+        steps: parseJson(values[8], []),
+        observations: parseJson(values[9], []),
+        decisions: parseJson(values[10], []),
+        approval_gates: parseJson(values[11], []),
+        result: parseJson(values[12], {}),
+        error: parseJson(values[13]),
+        revision: existingRow.revision + 1,
+        updated_at: values[14],
+      };
+
+      rows.set(key, row);
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes("WITH touched_run AS") &&
+      queryText.includes("recorded_event AS")
+    ) {
+      const key = buildKey({
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+      const existingRow = rows.get(key);
+
+      if (!existingRow) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      const event = buildEventRow({
+        eventPayload: values[4],
+        eventType: values[3],
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+
+      if (failNextAtomicEvent) {
+        failNextAtomicEvent = false;
+        throw new Error("Simulated atomic event insert failure.");
+      }
+
+      rows.set(key, {
+        ...existingRow,
+        updated_at: "2026-06-14T00:00:00.000Z",
+      });
+      events.push(event);
+
+      return {
+        rowCount: 1,
+        rows: [event],
+      };
+    }
+
+    if (queryText.includes("INSERT INTO rag_agent_run_events_test")) {
+      const row = buildEventRow({
+        eventPayload: values[4],
+        eventType: values[3],
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
 
       events.push(row);
       return {
@@ -112,6 +444,23 @@ const createFakePostgresAgentRunHarness = () => {
             event.workspace_id === workspaceId &&
             event.run_id === runId
         ),
+      };
+    }
+
+    if (queryText.includes("FROM rag_agent_runs_test_approval_snapshots")) {
+      const [userId, workspaceId, runId, gateId] = values;
+      const row = approvalSnapshots.get(
+        buildApprovalSnapshotKey({
+          gateId,
+          runId,
+          userId,
+          workspaceId,
+        })
+      );
+
+      return {
+        rowCount: row ? 1 : 0,
+        rows: row ? [row] : [],
       };
     }
 
@@ -174,9 +523,10 @@ const createFakePostgresAgentRunHarness = () => {
 
     throw new Error(`Unexpected query: ${queryText}`);
   };
-  const createService = ({ now = () => "2026-06-14T00:00:00.000Z" } = {}) =>
-    createAgentRunService({
-      agentRunStore: createPostgresAgentRunStore({
+  const createStore = ({
+    now = () => "2026-06-14T00:00:00.000Z",
+  } = {}) =>
+    createPostgresAgentRunStore({
         eventsTableName: "rag_agent_run_events_test",
         now,
         query,
@@ -188,14 +538,28 @@ const createFakePostgresAgentRunHarness = () => {
           };
         },
         tableName: "rag_agent_runs_test",
-      }),
+      });
+  const createService = (options = {}) =>
+    createAgentRunService({
+      agentRunStore: createStore(options),
     });
 
   return {
+    approvalSnapshots,
     createService,
+    createStore,
+    events,
+    failNextAtomicEvent() {
+      failNextAtomicEvent = true;
+    },
+    failNextAtomicSnapshot() {
+      failNextAtomicSnapshot = true;
+    },
     get migrationRuns() {
       return migrationRuns;
     },
+    queries,
+    rows,
   };
 };
 
@@ -340,6 +704,21 @@ test("postgres agent run store persists scoped run snapshots and event records",
 test("postgres agent run service can approve a waiting run after restart", async () => {
   const harness = createFakePostgresAgentRunHarness();
   const firstService = harness.createService();
+  const capabilityId = "web.search";
+  const capabilityVersion = "1.0.0";
+  const executionInput = {
+    question: "latest policy",
+  };
+  const inputPreview = {
+    question: "latest policy",
+  };
+  const snapshotBinding = createApprovalExecutionSnapshot({
+    accessScope,
+    capabilityId,
+    capabilityVersion,
+    executionInput,
+    inputPreview,
+  });
 
   await firstService.createRun({
     accessScope,
@@ -351,12 +730,23 @@ test("postgres agent run service can approve a waiting run after restart", async
     approvalGates: [
       {
         id: "gate-web",
-        capabilityId: "web.search",
+        capabilityId,
         capabilityLabel: "Web Search",
-        inputPreview: {
-          question: "latest policy",
-        },
+        capabilityVersion,
+        approvalObjectHash: snapshotBinding.approvalObjectHash,
+        snapshotVersion: snapshotBinding.snapshotVersion,
+        inputPreview,
         status: "pending",
+      },
+    ],
+    approvalSnapshots: [
+      {
+        gateId: "gate-web",
+        capabilityId,
+        capabilityVersion,
+        approvalObjectHash: snapshotBinding.approvalObjectHash,
+        snapshotVersion: snapshotBinding.snapshotVersion,
+        executionInput: snapshotBinding.privateSnapshot.executionInput,
       },
     ],
     runId: "run-approval",
@@ -379,6 +769,9 @@ test("postgres agent run service can approve a waiting run after restart", async
     accessScope,
     action: "approve",
     gateId: "gate-web",
+    payload: {
+      approvalObjectHash: snapshotBinding.approvalObjectHash,
+    },
     runId: "run-approval",
   });
 
@@ -404,6 +797,9 @@ test("postgres agent run service can approve a waiting run after restart", async
         accessScope,
         action: "approve",
         gateId: "gate-web",
+        payload: {
+          approvalObjectHash: snapshotBinding.approvalObjectHash,
+        },
         runId: "run-approval",
       }),
     (error) => {
@@ -1274,4 +1670,842 @@ test("postgres agent run store list() uses parameterized LIMIT/OFFSET (never int
   assert.equal(listQuery.values.length, 5);
   assert.equal(listQuery.values[3], 50);
   assert.equal(listQuery.values[4], 25);
+});
+
+test("postgres agent run creates are insert-only and reject duplicate run ids", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Preserve the first run",
+      result: {
+        marker: "first",
+      },
+      runId: "run-insert-only",
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      store.create({
+        accessScope,
+        run: {
+          goal: "Overwrite the first run",
+          result: {
+            marker: "second",
+          },
+          runId: "run-insert-only",
+          status: AGENT_RUN_STATUSES.completed,
+        },
+      }),
+    (error) => {
+      assert.equal(error.code, "AGENT_RUN_ALREADY_EXISTS");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+
+  const persistedRun = await store.get({
+    accessScope,
+    runId: "run-insert-only",
+  });
+  const createQuery = harness.queries.find(
+    ({ queryText }) =>
+      queryText.includes("INSERT INTO rag_agent_runs_test") &&
+      !queryText.includes("WITH inserted_run AS")
+  );
+
+  assert.equal(persistedRun.goal, "Preserve the first run");
+  assert.equal(persistedRun.result.marker, "first");
+  assert.equal(persistedRun.revision, 0);
+  assert.match(createQuery.queryText, /ON CONFLICT[\s\S]*DO NOTHING/);
+  assert.doesNotMatch(createQuery.queryText, /DO UPDATE/);
+});
+
+test("postgres agent run createWithEvent commits the run and event atomically", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const run = {
+    goal: "Create an observable run",
+    runId: "run-create-with-event",
+    status: AGENT_RUN_STATUSES.running,
+  };
+  const event = {
+    payload: {
+      source: "test",
+    },
+    type: "run_created",
+  };
+
+  harness.failNextAtomicEvent();
+  await assert.rejects(
+    () =>
+      store.createWithEvent({
+        accessScope,
+        event,
+        run,
+      }),
+    /Simulated atomic event insert failure/
+  );
+  assert.equal(
+    await store.get({
+      accessScope,
+      runId: run.runId,
+    }),
+    null
+  );
+  assert.equal(harness.events.length, 0);
+
+  const createdRun = await store.createWithEvent({
+    accessScope,
+    event,
+    run,
+  });
+
+  assert.equal(createdRun.revision, 0);
+  assert.deepEqual(
+    createdRun.events.map(({ type }) => type),
+    ["run_created"]
+  );
+  assert.equal(createdRun.events[0].payload.source, "test");
+
+  await assert.rejects(
+    () =>
+      store.createWithEvent({
+        accessScope,
+        event: {
+          type: "duplicate_run_created",
+        },
+        run,
+      }),
+    (error) => {
+      assert.equal(error.code, "AGENT_RUN_ALREADY_EXISTS");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+  assert.equal(harness.events.length, 1);
+
+  const atomicCreateQuery = harness.queries.find(({ queryText }) =>
+    queryText.includes("WITH inserted_run AS")
+  );
+
+  assert.match(atomicCreateQuery.queryText, /recorded_event AS/);
+  assert.match(atomicCreateQuery.queryText, /FROM inserted_run/);
+  assert.match(atomicCreateQuery.queryText, /DO NOTHING/);
+  assert.doesNotMatch(atomicCreateQuery.queryText, /DO UPDATE/);
+});
+
+test("postgres agent run updateWithEvent binds revision CAS and event insertion", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Commit state with its event",
+      runId: "run-update-with-event",
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+
+  const updatedRun = await store.updateWithEvent({
+    accessScope,
+    event: {
+      payload: {
+        phase: "first",
+      },
+      type: "step_completed",
+    },
+    expectedRevision: 0,
+    patch: {
+      result: {
+        phase: "first",
+      },
+    },
+    runId: "run-update-with-event",
+  });
+
+  assert.equal(updatedRun.revision, 1);
+  assert.equal(updatedRun.result.phase, "first");
+  assert.deepEqual(
+    updatedRun.events.map(({ type }) => type),
+    ["step_completed"]
+  );
+
+  await assert.rejects(
+    () =>
+      store.updateWithEvent({
+        accessScope,
+        event: {
+          type: "stale_step_completed",
+        },
+        expectedRevision: 0,
+        patch: {
+          result: {
+            phase: "stale",
+          },
+        },
+        runId: "run-update-with-event",
+      }),
+    (error) => {
+      assert.equal(error.code, "AGENT_RUN_REVISION_CONFLICT");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+  assert.equal(harness.events.length, 1);
+
+  harness.failNextAtomicEvent();
+  await assert.rejects(
+    () =>
+      store.updateWithEvent({
+        accessScope,
+        event: {
+          type: "failed_event_insert",
+        },
+        expectedRevision: 1,
+        patch: {
+          result: {
+            phase: "must-not-commit",
+          },
+        },
+        runId: "run-update-with-event",
+      }),
+    /Simulated atomic event insert failure/
+  );
+
+  const persistedRun = await store.get({
+    accessScope,
+    runId: "run-update-with-event",
+  });
+  const atomicUpdateQuery = harness.queries.find(({ queryText }) =>
+    queryText.includes("WITH updated_run AS")
+  );
+
+  assert.equal(persistedRun.revision, 1);
+  assert.equal(persistedRun.result.phase, "first");
+  assert.deepEqual(
+    persistedRun.events.map(({ type }) => type),
+    ["step_completed"]
+  );
+  assert.match(atomicUpdateQuery.queryText, /AND revision = \$4/);
+  assert.match(atomicUpdateQuery.queryText, /recorded_event AS/);
+  assert.match(atomicUpdateQuery.queryText, /FROM updated_run/);
+  assert.match(
+    atomicUpdateQuery.queryText,
+    /INSERT INTO rag_agent_run_events_test\s*\(\s*user_id,\s*workspace_id,\s*run_id,\s*event_type,\s*event_payload\s*\)\s*SELECT \$1, \$2, \$3, \$16, \$17::jsonb/s
+  );
+});
+
+test("postgres agent run appendEvent cannot create orphan events or partially touch a run", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+
+  const missingRunEvent = await store.appendEvent({
+    accessScope,
+    event: {
+      type: "orphan_event",
+    },
+    runId: "missing-run",
+  });
+
+  assert.equal(missingRunEvent, null);
+  assert.equal(harness.events.length, 0);
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Append a bound event",
+      runId: "run-append-event",
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+  const beforeFailure = await store.get({
+    accessScope,
+    runId: "run-append-event",
+  });
+
+  harness.failNextAtomicEvent();
+  await assert.rejects(
+    () =>
+      store.appendEvent({
+        accessScope,
+        event: {
+          type: "failed_append",
+        },
+        runId: "run-append-event",
+      }),
+    /Simulated atomic event insert failure/
+  );
+
+  const afterFailure = await store.get({
+    accessScope,
+    runId: "run-append-event",
+  });
+
+  assert.equal(afterFailure.updatedAt, beforeFailure.updatedAt);
+  assert.deepEqual(afterFailure.events, []);
+
+  const appendedEvent = await store.appendEvent({
+    accessScope,
+    event: {
+      payload: {
+        phase: "committed",
+      },
+      type: "run_observed",
+    },
+    runId: "run-append-event",
+  });
+  const appendQuery = harness.queries.find(({ queryText }) =>
+    queryText.includes("WITH touched_run AS")
+  );
+
+  assert.equal(appendedEvent.type, "run_observed");
+  assert.equal(appendedEvent.payload.phase, "committed");
+  assert.equal(harness.events.length, 1);
+  assert.match(appendQuery.queryText, /recorded_event AS/);
+  assert.match(appendQuery.queryText, /FROM touched_run/);
+});
+
+test("postgres agent run updates use revision CAS and keep revision internal", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Verify revision CAS",
+      runId: "run-revision-cas",
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+  const firstUpdate = await store.update({
+    accessScope,
+    expectedRevision: 0,
+    patch: {
+      result: {
+        phase: "first",
+      },
+    },
+    runId: "run-revision-cas",
+  });
+
+  assert.equal(firstUpdate.revision, 1);
+  await assert.rejects(
+    () =>
+      store.update({
+        accessScope,
+        expectedRevision: 0,
+        patch: {
+          result: {
+            phase: "stale",
+          },
+        },
+        runId: "run-revision-cas",
+      }),
+    (error) => {
+      assert.equal(error.code, "AGENT_RUN_REVISION_CONFLICT");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+
+  const casQuery = harness.queries.find(({ queryText }) =>
+    queryText.includes("revision = revision + 1")
+  );
+
+  assert.ok(casQuery);
+  assert.match(casQuery.queryText, /AND revision = \$4/);
+  assert.equal(casQuery.values[3], 0);
+
+  const service = harness.createService();
+  const publicRun = await service.getRun({
+    accessScope,
+    runId: "run-revision-cas",
+  });
+
+  assert.equal("revision" in publicRun, false);
+  assert.equal(publicRun.result.phase, "first");
+});
+
+test("postgres agent run store scopes private approval snapshot reads by run and gate", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+
+  const snapshot = await store.getApprovalSnapshot({
+    accessScope,
+    gateId: "gate-missing",
+    runId: "run-missing",
+  });
+
+  assert.equal(snapshot, null);
+  const readQuery = harness.queries.find(({ queryText }) =>
+    queryText.includes("FROM rag_agent_runs_test_approval_snapshots")
+  );
+
+  assert.ok(readQuery);
+  assert.match(readQuery.queryText, /user_id = \$1/);
+  assert.match(readQuery.queryText, /workspace_id = \$2/);
+  assert.match(readQuery.queryText, /run_id = \$3/);
+  assert.match(readQuery.queryText, /gate_id = \$4/);
+  assert.deepEqual(readQuery.values, [
+    accessScope.userId,
+    accessScope.workspaceId,
+    "run-missing",
+    "gate-missing",
+  ]);
+});
+
+test("postgres agent run store rejects a derived approval snapshot identifier that PostgreSQL would truncate", () => {
+  assert.throws(
+    () =>
+      createPostgresAgentRunStore({
+        eventsTableName: "rag_agent_run_events_test",
+        tableName: "a".repeat(50),
+      }),
+    /derived agent run approval snapshots table.*63 bytes/i
+  );
+});
+
+test("postgres agent run updateWithEvent atomically persists a full private approval snapshot", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const runId = "run-private-approval";
+  const snapshot = {
+    gateId: "gate-private",
+    capabilityId: "report.export",
+    capabilityVersion: "1.0.0",
+    approvalObjectHash: "sha256:approval-object",
+    snapshotVersion: 1,
+    executionInput: {
+      content: "x".repeat(300),
+      citations: Array.from({ length: 12 }, (_, index) => ({
+        id: `citation-${index + 1}`,
+      })),
+      metadata: {
+        nested: {
+          preserved: true,
+        },
+      },
+    },
+  };
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Persist exact approved report input",
+      runId,
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+
+  const updatedRun = await store.updateWithEvent({
+    accessScope,
+    approvalSnapshots: [snapshot],
+    event: {
+      type: "approval_gate_created",
+    },
+    expectedRevision: 0,
+    patch: {
+      status: AGENT_RUN_STATUSES.waitingForUser,
+    },
+    runId,
+  });
+  const persistedSnapshot = await store.getApprovalSnapshot({
+    accessScope,
+    gateId: snapshot.gateId,
+    runId,
+  });
+  const publicRunSnapshot = await store.get({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(updatedRun.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(updatedRun.revision, 1);
+  assert.deepEqual(persistedSnapshot, snapshot);
+  assert.equal("approvalSnapshots" in publicRunSnapshot, false);
+  assert.doesNotMatch(
+    JSON.stringify(publicRunSnapshot),
+    /\"nested\":\{\"preserved\":true\}/
+  );
+  assert.equal(
+    await store.getApprovalSnapshot({
+      accessScope: {
+        ...accessScope,
+        workspaceId: "workspace-b",
+      },
+      gateId: snapshot.gateId,
+      runId,
+    }),
+    null
+  );
+  const atomicQuery = harness.queries.find(
+    ({ queryText }) =>
+      queryText.includes("WITH requested_approval_snapshots AS") &&
+      queryText.includes("updated_run AS") &&
+      queryText.includes("inserted_approval_snapshots AS")
+  );
+
+  assert.ok(atomicQuery);
+  assert.match(
+    atomicQuery.queryText,
+    /approval_snapshot_write_guard AS/
+  );
+  assert.match(
+    atomicQuery.queryText,
+    /WHEN NOT run_updated THEN TRUE/
+  );
+  assert.match(atomicQuery.queryText, /recorded_event AS/);
+});
+
+test("postgres agent run approval snapshots reject a different hash without partially updating the run or event", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const runId = "run-approval-hash-conflict";
+  const originalSnapshot = {
+    gateId: "gate-conflict",
+    capabilityId: "report.export",
+    capabilityVersion: "1.0.0",
+    approvalObjectHash: "sha256:original",
+    snapshotVersion: 1,
+    executionInput: {
+      content: "Approved content",
+    },
+  };
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Reject approval snapshot replacement",
+      runId,
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+  await store.updateWithEvent({
+    accessScope,
+    approvalSnapshots: [originalSnapshot],
+    event: {
+      type: "approval_gate_created",
+    },
+    expectedRevision: 0,
+    patch: {
+      result: {
+        phase: "original",
+      },
+      status: AGENT_RUN_STATUSES.waitingForUser,
+    },
+    runId,
+  });
+
+  await assert.rejects(
+    () =>
+      store.updateWithEvent({
+        accessScope,
+        approvalSnapshots: [
+          {
+            ...originalSnapshot,
+            approvalObjectHash: "sha256:replacement",
+            executionInput: {
+              content: "Replacement content",
+            },
+          },
+        ],
+        event: {
+          type: "approval_gate_replaced",
+        },
+        expectedRevision: 1,
+        patch: {
+          result: {
+            phase: "replacement",
+          },
+        },
+        runId,
+      }),
+    (error) => {
+      assert.equal(error.code, "AGENT_RUN_APPROVAL_SNAPSHOT_CONFLICT");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+
+  const persistedRun = await store.get({
+    accessScope,
+    runId,
+  });
+  const persistedSnapshot = await store.getApprovalSnapshot({
+    accessScope,
+    gateId: originalSnapshot.gateId,
+    runId,
+  });
+
+  assert.equal(persistedRun.revision, 1);
+  assert.equal(persistedRun.result.phase, "original");
+  assert.deepEqual(
+    persistedRun.events.map((event) => event.type),
+    ["approval_gate_created"]
+  );
+  assert.deepEqual(persistedSnapshot, originalSnapshot);
+});
+
+test("postgres agent run approval snapshot writes preserve stale revision conflict semantics", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const runId = "run-approval-stale-revision";
+  const snapshot = {
+    gateId: "gate-stale",
+    capabilityId: "web.search",
+    capabilityVersion: "1.0.0",
+    approvalObjectHash: "sha256:stale",
+    snapshotVersion: 1,
+    executionInput: {
+      question: "Do not persist this stale snapshot",
+    },
+  };
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Keep revision CAS authoritative",
+      runId,
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+  await store.updateWithEvent({
+    accessScope,
+    event: {
+      type: "run_advanced",
+    },
+    expectedRevision: 0,
+    patch: {
+      result: {
+        phase: "current",
+      },
+    },
+    runId,
+  });
+
+  await assert.rejects(
+    () =>
+      store.updateWithEvent({
+        accessScope,
+        approvalSnapshots: [snapshot],
+        event: {
+          type: "approval_gate_created",
+        },
+        expectedRevision: 0,
+        patch: {
+          result: {
+            phase: "stale",
+          },
+        },
+        runId,
+      }),
+    (error) => {
+      assert.equal(error.code, "AGENT_RUN_REVISION_CONFLICT");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+
+  const persistedRun = await store.get({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(persistedRun.revision, 1);
+  assert.equal(persistedRun.result.phase, "current");
+  assert.deepEqual(
+    persistedRun.events.map((event) => event.type),
+    ["run_advanced"]
+  );
+  assert.equal(
+    await store.getApprovalSnapshot({
+      accessScope,
+      gateId: snapshot.gateId,
+      runId,
+    }),
+    null
+  );
+});
+
+test("postgres agent run approval snapshot update rolls back snapshot and run when its event insert fails", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const runId = "run-approval-event-failure";
+  const snapshot = {
+    gateId: "gate-event-failure",
+    capabilityId: "report.export",
+    capabilityVersion: "1.0.0",
+    approvalObjectHash: "sha256:event-failure",
+    snapshotVersion: 1,
+    executionInput: {
+      content: "Must roll back with the event.",
+    },
+  };
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Keep approval persistence atomic",
+      runId,
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+  harness.failNextAtomicEvent();
+
+  await assert.rejects(
+    () =>
+      store.updateWithEvent({
+        accessScope,
+        approvalSnapshots: [snapshot],
+        event: {
+          type: "approval_gate_created",
+        },
+        expectedRevision: 0,
+        patch: {
+          status: AGENT_RUN_STATUSES.waitingForUser,
+        },
+        runId,
+      }),
+    /Simulated atomic event insert failure/
+  );
+
+  const persistedRun = await store.get({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(persistedRun.revision, 0);
+  assert.equal(persistedRun.status, AGENT_RUN_STATUSES.running);
+  assert.deepEqual(persistedRun.events, []);
+  assert.equal(
+    await store.getApprovalSnapshot({
+      accessScope,
+      gateId: snapshot.gateId,
+      runId,
+    }),
+    null
+  );
+});
+
+test("postgres agent run approval snapshot insert failure cannot partially update the run or event", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const runId = "run-approval-snapshot-failure";
+  const snapshot = {
+    gateId: "gate-snapshot-failure",
+    capabilityId: "report.export",
+    capabilityVersion: "1.0.0",
+    approvalObjectHash: "sha256:snapshot-failure",
+    snapshotVersion: 1,
+    executionInput: {
+      content: "The failing snapshot must not leave partial state.",
+    },
+  };
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Roll back a failed private snapshot insert",
+      runId,
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+  harness.failNextAtomicSnapshot();
+
+  await assert.rejects(
+    () =>
+      store.updateWithEvent({
+        accessScope,
+        approvalSnapshots: [snapshot],
+        event: {
+          type: "approval_gate_created",
+        },
+        expectedRevision: 0,
+        patch: {
+          result: {
+            phase: "must-not-commit",
+          },
+          status: AGENT_RUN_STATUSES.waitingForUser,
+        },
+        runId,
+      }),
+    /Simulated atomic approval snapshot insert failure/
+  );
+
+  const persistedRun = await store.get({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(persistedRun.revision, 0);
+  assert.equal(persistedRun.status, AGENT_RUN_STATUSES.running);
+  assert.equal(persistedRun.result.phase, undefined);
+  assert.deepEqual(persistedRun.events, []);
+  assert.equal(
+    await store.getApprovalSnapshot({
+      accessScope,
+      gateId: snapshot.gateId,
+      runId,
+    }),
+    null
+  );
+});
+
+test("postgres agent run approval snapshots cannot be written without a bound event", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const runId = "run-approval-without-event";
+
+  await store.create({
+    accessScope,
+    run: {
+      goal: "Require an event for private approval state",
+      runId,
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      store.updateWithEvent({
+        accessScope,
+        approvalSnapshots: [
+          {
+            gateId: "gate-without-event",
+            capabilityId: "report.export",
+            capabilityVersion: "1.0.0",
+            approvalObjectHash: "sha256:without-event",
+            snapshotVersion: 1,
+            executionInput: {
+              content: "Must not persist without an event.",
+            },
+          },
+        ],
+        event: null,
+        expectedRevision: 0,
+        patch: {
+          status: AGENT_RUN_STATUSES.waitingForUser,
+        },
+        runId,
+      }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(error.message, /event/i);
+      return true;
+    }
+  );
+
+  const persistedRun = await store.get({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(persistedRun.revision, 0);
+  assert.equal(persistedRun.status, AGENT_RUN_STATUSES.running);
 });

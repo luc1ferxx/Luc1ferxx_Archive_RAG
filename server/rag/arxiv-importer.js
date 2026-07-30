@@ -13,6 +13,27 @@ import {
 import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_IMPORT_DELAY_MS = 1000;
+const TASK_CLAIM_LOST = "TASK_CLAIM_LOST";
+
+const isCooperativeAbortError = (error) =>
+  error?.code === TASK_CLAIM_LOST || error?.name === "AbortError";
+
+const assertExecutionActive = ({ assertClaimActive, signal } = {}) => {
+  assertClaimActive?.();
+
+  if (!signal?.aborted) {
+    return;
+  }
+
+  if (signal.reason instanceof Error) {
+    throw signal.reason;
+  }
+
+  const error = new Error("arXiv import was aborted.");
+
+  error.name = "AbortError";
+  throw error;
+};
 
 const sleep = (durationMs) =>
   new Promise((resolve) => {
@@ -100,11 +121,13 @@ const buildArxivDocumentSource = ({ importContext = {}, paper = {} } = {}) => {
 export const importArxivTopic = async ({
   accessScope = {},
   arxivService,
+  assertClaimActive,
   delayMs = DEFAULT_IMPORT_DELAY_MS,
   importContext = {},
   maxResults = DEFAULT_ARXIV_MAX_RESULTS,
   onPaperProgress,
   ragService,
+  signal,
   tempDirectory = path.join(os.tmpdir(), "luc1ferxx-arxiv-imports"),
   topic,
 } = {}) => {
@@ -121,20 +144,44 @@ export const importArxivTopic = async ({
   }
 
   const requestedMaxResults = normalizeArxivMaxResults(maxResults);
-  const papers = await arxivService.search({
-    topic: normalizedTopic,
-    maxResults: requestedMaxResults,
+  assertExecutionActive({
+    assertClaimActive,
+    signal,
+  });
+  let papers = null;
+
+  try {
+    papers = await arxivService.search({
+      topic: normalizedTopic,
+      maxResults: requestedMaxResults,
+      signal,
+    });
+  } catch (error) {
+    if (signal?.aborted) {
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
+      });
+    }
+
+    throw error;
+  }
+  assertExecutionActive({
+    assertClaimActive,
+    signal,
   });
 
   return importArxivPapers({
     accessScope,
     arxivService,
+    assertClaimActive,
     delayMs,
     importContext,
     maxResults: requestedMaxResults,
     onPaperProgress,
     papers,
     ragService,
+    signal,
     tempDirectory,
     topic: normalizedTopic,
   });
@@ -143,12 +190,14 @@ export const importArxivTopic = async ({
 export const importArxivPapers = async ({
   accessScope = {},
   arxivService,
+  assertClaimActive,
   delayMs = DEFAULT_IMPORT_DELAY_MS,
   importContext = {},
   maxResults = DEFAULT_ARXIV_MAX_RESULTS,
   onPaperProgress,
   papers = [],
   ragService,
+  signal,
   tempDirectory = path.join(os.tmpdir(), "luc1ferxx-arxiv-imports"),
   topic = "",
 } = {}) => {
@@ -175,24 +224,61 @@ export const importArxivPapers = async ({
   const failedPapers = [];
   const skippedPapers = [];
   const reportPaperProgress = async (event) => {
+    assertExecutionActive({
+      assertClaimActive,
+      signal,
+    });
+
     try {
       await onPaperProgress?.(event);
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) {
+        assertExecutionActive({
+          assertClaimActive,
+          signal,
+        });
+      }
+
+      if (isCooperativeAbortError(error)) {
+        throw error;
+      }
+
       // Progress reporting must not interrupt ingestion.
     }
+
+    assertExecutionActive({
+      assertClaimActive,
+      signal,
+    });
   };
 
+  assertExecutionActive({
+    assertClaimActive,
+    signal,
+  });
   await mkdir(tempDirectory, {
     recursive: true,
   });
+  assertExecutionActive({
+    assertClaimActive,
+    signal,
+  });
 
   for (const [index, paper] of selectedPapers.entries()) {
+    assertExecutionActive({
+      assertClaimActive,
+      signal,
+    });
     const fileName = buildArxivPdfFileName(paper);
     const existingDocument = getExistingDocument({
       fileName,
       paper,
       ragService,
       accessScope,
+    });
+    assertExecutionActive({
+      assertClaimActive,
+      signal,
     });
 
     if (existingDocument.document) {
@@ -219,14 +305,44 @@ export const importArxivPapers = async ({
         paper,
         status: "downloading",
       });
-      const buffer = await arxivService.downloadPdf(paper);
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
+      });
+      const buffer = await arxivService.downloadPdf(paper, {
+        signal,
+      });
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
+      });
 
       pdfPath = path.join(tempDirectory, `${randomUUID()}-${fileName}`);
-      await writeFile(pdfPath, buffer);
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
+      });
+      await writeFile(
+        pdfPath,
+        buffer,
+        signal
+          ? {
+              signal,
+            }
+          : undefined
+      );
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
+      });
 
       await reportPaperProgress({
         paper,
         status: "ingesting",
+      });
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
       });
       const document = await ragService.ingestDocument({
         docId: randomUUID(),
@@ -237,7 +353,12 @@ export const importArxivPapers = async ({
           importContext,
           paper,
         }),
+        signal,
         workspaceId: accessScope.workspaceId,
+      });
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
       });
 
       const importedPaper = serializeImportedPaper({
@@ -254,6 +375,17 @@ export const importArxivPapers = async ({
         status: "imported",
       });
     } catch (error) {
+      if (signal?.aborted) {
+        assertExecutionActive({
+          assertClaimActive,
+          signal,
+        });
+      }
+
+      if (isCooperativeAbortError(error)) {
+        throw error;
+      }
+
       const failedPaper = serializeFailedPaper({
         error,
         paper,
@@ -275,7 +407,15 @@ export const importArxivPapers = async ({
     }
 
     if (delayMs > 0 && index < selectedPapers.length - 1) {
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
+      });
       await sleep(delayMs);
+      assertExecutionActive({
+        assertClaimActive,
+        signal,
+      });
     }
   }
 

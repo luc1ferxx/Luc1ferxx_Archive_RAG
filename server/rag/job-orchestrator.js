@@ -1,4 +1,12 @@
-import { createTaskService, TASK_STATUSES } from "./tasks.js";
+import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import {
+  buildTaskScopeKey,
+  createTaskService,
+  DEFAULT_TASK_CLAIM_LEASE_MS,
+  TASK_MUTATION_OUTCOMES,
+  TASK_STATUSES,
+} from "./tasks.js";
 import { recordRagTrace } from "./observability.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
@@ -13,16 +21,54 @@ const buildJobError = (message, status = 400) => {
   return error;
 };
 
-const defaultSchedule = (work) => {
-  setTimeout(work, 0);
+const defaultSchedule = (work, delayMs = 0) => {
+  setTimeout(work, delayMs);
+};
+
+const TASK_CLAIM_LOST = "TASK_CLAIM_LOST";
+
+const buildTaskClaimLostError = () => {
+  const error = buildJobError("Task execution claim is no longer active.", 409);
+
+  error.code = TASK_CLAIM_LOST;
+
+  return error;
+};
+
+const isTaskClaimLostError = (error) => error?.code === TASK_CLAIM_LOST;
+
+const getClaimRetryDelayMs = ({ retryAfterMs, retryAt } = {}) => {
+  const hasRetryAfterMs =
+    retryAfterMs !== undefined && retryAfterMs !== null && retryAfterMs !== "";
+  const normalizedRetryAfterMs = Number(retryAfterMs);
+
+  if (
+    hasRetryAfterMs &&
+    Number.isFinite(normalizedRetryAfterMs) &&
+    normalizedRetryAfterMs >= 0
+  ) {
+    return Math.floor(normalizedRetryAfterMs);
+  }
+
+  const retryTimestamp = new Date(retryAt).getTime();
+
+  return Number.isFinite(retryTimestamp)
+    ? Math.max(0, retryTimestamp - Date.now())
+    : null;
 };
 
 export const createJobOrchestrator = ({
+  claimLeaseMs = DEFAULT_TASK_CLAIM_LEASE_MS,
+  clearTaskClaimHeartbeat = clearInterval,
+  createTaskClaimId = randomUUID,
+  now = () => performance.now(),
   recordTaskRecoveryTrace = recordRagTrace,
   runners = {},
   schedule = defaultSchedule,
+  startTaskClaimHeartbeat = setInterval,
   taskService = createTaskService(),
 } = {}) => {
+  const activeTaskExecutions = new Map();
   const recordTaskTrace = async (event = {}) =>
     recordTaskRecoveryTrace?.({
       traceType: "agent_task_recovery",
@@ -46,18 +92,104 @@ export const createJobOrchestrator = ({
     return runner;
   };
 
-  const patchTask = async ({ accessScope = {}, taskId, patch }) => {
-    const task = await taskService.patchTask({
+  const getPublicTask = ({ accessScope = {}, taskId } = {}) =>
+    taskService.getTask({
       accessScope,
       taskId,
-      patch,
     });
+  const getActiveTaskExecutionKey = ({ accessScope = {}, taskId } = {}) =>
+    `${buildTaskScopeKey(accessScope)}\u0000${normalizeText(taskId)}`;
 
-    if (!task) {
-      throw buildJobError("Task not found.", 404);
-    }
+  const createClaimHeartbeat = ({
+    accessScope = {},
+    attemptCount,
+    claimId,
+    onClaimLost,
+    taskId,
+  } = {}) => {
+    const heartbeatMs = Math.max(1, Math.floor(claimLeaseMs / 3));
+    const readLocalTime = () => {
+      const value = Number(now());
 
-    return task;
+      return Number.isFinite(value) ? value : performance.now();
+    };
+    let heartbeat = null;
+    let lastSuccessfulRenewalAt = readLocalTime();
+    let renewInFlight = false;
+    let stopped = false;
+
+    const stop = () => {
+      stopped = true;
+
+      if (heartbeat !== null) {
+        clearTaskClaimHeartbeat(heartbeat);
+        heartbeat = null;
+      }
+    };
+    const abortForLostClaim = () => {
+      const error = buildTaskClaimLostError();
+
+      stop();
+      onClaimLost?.(error);
+    };
+
+    heartbeat = startTaskClaimHeartbeat(() => {
+      if (stopped) {
+        return;
+      }
+
+      if (readLocalTime() - lastSuccessfulRenewalAt >= claimLeaseMs) {
+        abortForLostClaim();
+        return;
+      }
+
+      if (renewInFlight) {
+        return;
+      }
+
+      renewInFlight = true;
+      Promise.resolve()
+        .then(() =>
+          taskService.renewTaskClaim({
+            accessScope,
+            attemptCount,
+            claimId,
+            taskId,
+          })
+        )
+        .then((result) => {
+          if (stopped) {
+            return;
+          }
+
+          if (result?.applied) {
+            lastSuccessfulRenewalAt = readLocalTime();
+            return;
+          }
+
+          if (
+            [
+              TASK_MUTATION_OUTCOMES.claimLost,
+              TASK_MUTATION_OUTCOMES.notFound,
+            ].includes(result?.outcome)
+          ) {
+            abortForLostClaim();
+          }
+        })
+        .catch((error) => {
+          if (stopped) {
+            return;
+          }
+
+          console.error("Task claim heartbeat failed.", error);
+        })
+        .finally(() => {
+          renewInFlight = false;
+        });
+    }, heartbeatMs);
+    heartbeat?.unref?.();
+
+    return stop;
   };
 
   const runTask = async ({ accessScope = {}, recovery = false, taskId } = {}) => {
@@ -112,35 +244,162 @@ export const createJobOrchestrator = ({
       throw error;
     }
 
-    await patchTask({
+    const claimId = normalizeText(createTaskClaimId());
+    const claimResult = await taskService.claimTaskForRun({
       accessScope,
+      claimId,
+      leaseMs: claimLeaseMs,
       taskId,
-      patch: {
-        status: TASK_STATUSES.running,
-      },
     });
 
+    if (claimResult?.outcome === TASK_MUTATION_OUTCOMES.notFound) {
+      if (recovery) {
+        await recordTaskTrace({
+          eventType: "task_recovery_run",
+          errorStatus: 404,
+          resultStatus: "",
+          runnerId: normalizeText(task.runnerId),
+          status: "failed",
+          taskId,
+        });
+      }
+
+      throw buildJobError("Task not found.", 404);
+    }
+
+    if (!claimResult?.applied) {
+      if (
+        recovery &&
+        claimResult?.outcome === TASK_MUTATION_OUTCOMES.notRunnable
+      ) {
+        const delayMs = getClaimRetryDelayMs(claimResult);
+
+        if (delayMs !== null) {
+          scheduleTaskRun({
+            accessScope,
+            delayMs,
+            recovery: true,
+            taskId,
+          });
+        }
+      }
+
+      if (recovery) {
+        await recordTaskTrace({
+          eventType: "task_recovery_run",
+          resultStatus: claimResult?.task?.status ?? "",
+          runnerId: normalizeText(task.runnerId),
+          status: "skipped",
+          taskId,
+        });
+      }
+
+      return getPublicTask({
+        accessScope,
+        taskId,
+      });
+    }
+
+    const claimedTask = claimResult.task;
+    const attemptCount = claimResult.attemptCount;
+    const executionController = new AbortController();
+    const activeTaskExecutionKey = getActiveTaskExecutionKey({
+      accessScope,
+      taskId,
+    });
+    const abortExecution = (error = buildTaskClaimLostError()) => {
+      if (!executionController.signal.aborted) {
+        executionController.abort(error);
+      }
+    };
+    const assertClaimActive = () => {
+      if (!executionController.signal.aborted) {
+        return;
+      }
+
+      throw executionController.signal.reason instanceof Error
+        ? executionController.signal.reason
+        : buildTaskClaimLostError();
+    };
+    const execution = {
+      abort: abortExecution,
+      claimId,
+    };
+    const previousExecution = activeTaskExecutions.get(activeTaskExecutionKey);
+
+    previousExecution?.abort(buildTaskClaimLostError());
+    activeTaskExecutions.set(activeTaskExecutionKey, execution);
+
+    const stopClaimHeartbeat = createClaimHeartbeat({
+      accessScope,
+      attemptCount,
+      claimId,
+      onClaimLost: abortExecution,
+      taskId,
+    });
+    let writeQueue = Promise.resolve();
+    const patchClaimedTask = (nextPatch = {}) => {
+      const write = writeQueue.then(() =>
+        taskService.patchClaimedTask({
+          accessScope,
+          attemptCount,
+          claimId,
+          patch: nextPatch,
+          taskId,
+        })
+      );
+
+      writeQueue = write.catch(() => {});
+
+      return write.then((result) => {
+        if (!result?.applied) {
+          const error = buildTaskClaimLostError();
+
+          abortExecution(error);
+          throw error;
+        }
+
+        return result.task;
+      });
+    };
+    const taskWriter = {
+      getTask: () =>
+        getPublicTask({
+          accessScope,
+          taskId,
+        }),
+      patchTask: ({ patch = {}, taskId: requestedTaskId } = {}) => {
+        if (requestedTaskId && normalizeText(requestedTaskId) !== taskId) {
+          throw buildJobError("Runner cannot write a different task.", 403);
+        }
+
+        return patchClaimedTask(patch);
+      },
+      upsertTask: ({ task: nextTask = {} } = {}) => {
+        if (nextTask.id && normalizeText(nextTask.id) !== taskId) {
+          throw buildJobError("Runner cannot write a different task.", 403);
+        }
+
+        return patchClaimedTask(nextTask);
+      },
+    };
+
     try {
+      assertClaimActive();
       const resultPatch =
         (await runner.run?.({
           accessScope,
-          patchTask: (patch) =>
-            patchTask({
-              accessScope,
-              taskId,
-              patch,
-            }),
-          task,
-          taskService,
+          assertClaimActive,
+          patchTask: patchClaimedTask,
+          signal: executionController.signal,
+          task: claimedTask,
+          taskWriter,
         })) ?? {};
 
-      const completedTask = await patchTask({
-        accessScope,
-        taskId,
-        patch: {
-          status: TASK_STATUSES.completed,
-          ...resultPatch,
-        },
+      assertClaimActive();
+      const completedTask = await patchClaimedTask({
+        status: TASK_STATUSES.completed,
+        ...resultPatch,
       });
 
       if (recovery) {
@@ -155,40 +414,78 @@ export const createJobOrchestrator = ({
 
       return completedTask;
     } catch (error) {
-      const failedTask = await patchTask({
-        accessScope,
-        taskId,
-        patch: {
-          error: error instanceof Error ? error.message : String(error),
-          status: TASK_STATUSES.failed,
-        },
-      });
+      let claimWasLost = isTaskClaimLostError(error);
+      let failedTask = null;
+
+      if (claimWasLost) {
+        failedTask = await getPublicTask({
+          accessScope,
+          taskId,
+        });
+      } else {
+        try {
+          failedTask = await patchClaimedTask({
+            error: error instanceof Error ? error.message : String(error),
+            status: TASK_STATUSES.failed,
+          });
+        } catch (claimError) {
+          if (!isTaskClaimLostError(claimError)) {
+            throw claimError;
+          }
+
+          claimWasLost = true;
+          failedTask = await getPublicTask({
+            accessScope,
+            taskId,
+          });
+        }
+      }
 
       if (recovery) {
+        const executionWasFenced =
+          claimWasLost || failedTask?.status === TASK_STATUSES.canceled;
+
         await recordTaskTrace({
           eventType: "task_recovery_run",
-          errorStatus: error?.status ?? 500,
-          resultStatus: failedTask.status,
+          errorStatus: executionWasFenced ? 409 : error?.status ?? 500,
+          resultStatus: failedTask?.status ?? "",
           runnerId: normalizeText(task.runnerId),
-          status: "failed",
+          status: executionWasFenced ? "skipped" : "failed",
           taskId,
         });
       }
 
       return failedTask;
+    } finally {
+      stopClaimHeartbeat();
+
+      if (activeTaskExecutions.get(activeTaskExecutionKey) === execution) {
+        activeTaskExecutions.delete(activeTaskExecutionKey);
+      }
     }
   };
 
-  const scheduleTaskRun = ({ accessScope = {}, recovery = false, taskId } = {}) => {
-    schedule(() => {
-      return runTask({
-        accessScope,
-        recovery,
-        taskId,
-      }).catch((error) => {
-        console.error("Task runner failed before task state could be updated.", error);
-      });
-    });
+  const scheduleTaskRun = ({
+    accessScope = {},
+    delayMs = 0,
+    recovery = false,
+    taskId,
+  } = {}) => {
+    schedule(
+      () => {
+        return runTask({
+          accessScope,
+          recovery,
+          taskId,
+        }).catch((error) => {
+          console.error(
+            "Task runner failed before task state could be updated.",
+            error
+          );
+        });
+      },
+      delayMs
+    );
   };
 
   const recoverRunnableTasks = async ({
@@ -266,14 +563,37 @@ export const createJobOrchestrator = ({
       runnerId = normalizeText(task.runnerId);
 
       if (normalizedAction === TASK_ACTIONS.cancel) {
-        const canceledTask = await patchTask({
+        const transition = await taskService.transitionTask({
           accessScope,
+          expectedStatuses: [
+            TASK_STATUSES.pending,
+            TASK_STATUSES.queued,
+            TASK_STATUSES.running,
+            TASK_STATUSES.waitingForUser,
+          ],
           taskId,
           patch: {
             requiredUserAction: "",
             status: TASK_STATUSES.canceled,
           },
         });
+
+        if (transition?.outcome === TASK_MUTATION_OUTCOMES.notFound) {
+          throw buildJobError("Task not found.", 404);
+        }
+
+        const canceledTask = transition.task;
+
+        if (canceledTask?.status === TASK_STATUSES.canceled) {
+          activeTaskExecutions
+            .get(
+              getActiveTaskExecutionKey({
+                accessScope,
+                taskId,
+              })
+            )
+            ?.abort(buildTaskClaimLostError());
+        }
 
         await recordResumeTrace({
           resultTask: canceledTask,
@@ -287,12 +607,16 @@ export const createJobOrchestrator = ({
         (await runner.resume?.({
           accessScope,
           action: normalizedAction,
+          deferTaskPersistence: true,
           payload,
           task,
-          taskService,
         })) ?? {};
-      const nextTask = await patchTask({
+      const transition = await taskService.transitionTask({
         accessScope,
+        expectedStatuses: [
+          TASK_STATUSES.failed,
+          TASK_STATUSES.waitingForUser,
+        ],
         taskId,
         patch: {
           requiredUserAction: "",
@@ -301,7 +625,13 @@ export const createJobOrchestrator = ({
         },
       });
 
-      if (runImmediately) {
+      if (transition?.outcome === TASK_MUTATION_OUTCOMES.notFound) {
+        throw buildJobError("Task not found.", 404);
+      }
+
+      const nextTask = transition.task;
+
+      if (transition.applied && runImmediately) {
         scheduleTaskRun({
           accessScope,
           taskId,

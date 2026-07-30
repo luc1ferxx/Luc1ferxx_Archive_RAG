@@ -78,15 +78,20 @@ const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
   capability_call: freezePolicy({
     autoReplaySafe: false,
     idempotency: STEP_REPLAY_IDEMPOTENCY.capabilityDefined,
-    optionalInput: ["approvalGateId", "capabilityVersion"],
+    optionalInput: ["capabilityVersion"],
     replayActions: ["approve", "deny", "retry_failed_step"],
     replayRequiresApproval: true,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.approvedCapabilityGate,
-    requiredInput: ["approvedGate.capabilityId", "step.input|approvedGate.inputPreview"],
+    requiredInput: [
+      "approvedGate.capabilityId",
+      "approvedGate.approvalObjectHash",
+      "step.approvalGateId",
+      "step.detail.approvalObjectHash",
+    ],
     retryable: true,
     stepType: "capability_call",
     summary:
-      "Capability calls replay only after an approved gate; idempotency is delegated to the capability adapter.",
+      "Capability calls replay only from a hash-bound approved gate and private execution snapshot; idempotency is delegated to the capability adapter.",
   }),
   custom_skill: freezePolicy({
     autoReplaySafe: true,
@@ -271,7 +276,13 @@ const hasReplayApproval = ({ context, policy }) => {
     policy.replayApprovalPolicy ===
     STEP_REPLAY_APPROVAL_POLICIES.approvedCapabilityGate
   ) {
-    return Boolean(context.approvedGate);
+    return Boolean(
+      context.approvedGate &&
+        normalizeText(context.step?.approvalGateId) ===
+          normalizeText(context.approvedGate.id) &&
+        normalizeText(context.step?.detail?.approvalObjectHash) ===
+          normalizeText(context.approvedGate.approvalObjectHash)
+    );
   }
 
   return false;

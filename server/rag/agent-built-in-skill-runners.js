@@ -103,6 +103,7 @@ export const runArxivImportSkill = async ({
     id: ARXIV_IMPORT_STEP_ID,
     input: arxivStartInput,
     label: "arXiv Import",
+    persistedInput: null,
     stepLifecycle,
     type: "arxiv_import",
   });
@@ -465,6 +466,7 @@ export const runDocumentDiscoverySkill = async ({
     id: DOCUMENT_DISCOVERY_STEP_ID,
     input: discoveryInput,
     label: "Document Discovery",
+    persistedInput: null,
     stepLifecycle,
     type: "document_discovery",
   });

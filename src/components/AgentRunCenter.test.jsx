@@ -2,6 +2,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
 import AgentRunCenter from "./AgentRunCenter";
 
+const APPROVAL_OBJECT_HASH = `sha256:${"a".repeat(64)}`;
+
 describe("AgentRunCenter", () => {
   test("renders goal plan steps from the task contract", () => {
     render(
@@ -17,7 +19,10 @@ describe("AgentRunCenter", () => {
             result: {
               approvalGates: [
                 {
+                  approvalObjectHash: APPROVAL_OBJECT_HASH,
                   capabilityId: "web.search",
+                  id: "approval:web.search:1.0.0",
+                  status: "pending",
                 },
               ],
               goalPlan: {
@@ -145,7 +150,14 @@ describe("AgentRunCenter", () => {
       result: {
         approvalGates: [
           {
+            approvalObjectHash: APPROVAL_OBJECT_HASH,
             capabilityId: "web.search",
+            capabilityLabel: "Web search",
+            id: "approval:web.search:1.0.0",
+            inputPreview: {
+              query: "current renewal rules",
+            },
+            status: "pending",
           },
         ],
         goalPlan: {
@@ -161,6 +173,12 @@ describe("AgentRunCenter", () => {
     };
 
     render(<AgentRunCenter onTaskAction={onTaskAction} tasks={[task]} />);
+    expect(
+      screen.getByRole("region", { name: "Pending capability approvals" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("Web search")).toBeInTheDocument();
+    expect(screen.getByText("query")).toBeInTheDocument();
+    expect(screen.getByText("current renewal rules")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     expect(onTaskAction).toHaveBeenCalledWith(task, "approve", {
@@ -169,8 +187,36 @@ describe("AgentRunCenter", () => {
         decision: "approved",
         source: "agent_run_center",
       },
-      capabilityId: "web.search",
+      approvalObjectHash: APPROVAL_OBJECT_HASH,
+      gateId: "approval:web.search:1.0.0",
     });
+  });
+
+  test("does not submit a capability approval without an approval object hash", () => {
+    const onTaskAction = vi.fn();
+    const task = {
+      id: "agent_goal:missing-approval-hash",
+      type: "agent_goal",
+      status: "waiting_for_user",
+      requiredUserAction: "approve_capability",
+      result: {
+        approvalGates: [
+          {
+            capabilityId: "web.search",
+            id: "approval:web.search:1.0.0",
+            status: "pending",
+          },
+        ],
+      },
+      items: [],
+    };
+
+    render(<AgentRunCenter onTaskAction={onTaskAction} tasks={[task]} />);
+
+    const approveButton = screen.getByRole("button", { name: "Approve" });
+    expect(approveButton).toBeDisabled();
+    fireEvent.click(approveButton);
+    expect(onTaskAction).not.toHaveBeenCalled();
   });
 
   test("forwards deliverable approval through the task action callback", () => {
@@ -182,6 +228,28 @@ describe("AgentRunCenter", () => {
       label: "Agent task",
       requiredUserAction: "approve_deliverables",
       result: {
+        approvalGates: [
+          {
+            approvalObjectHash: `sha256:${"a".repeat(64)}`,
+            capabilityLabel: "Report export",
+            id: "approval:report.export:1.0.0:report",
+            inputPreview: {
+              format: "markdown",
+              title: "Risk report",
+            },
+            status: "pending",
+          },
+          {
+            approvalObjectHash: `sha256:${"b".repeat(64)}`,
+            capabilityLabel: "Follow-up task",
+            id: "approval:task.create:1.0.0:follow-up",
+            inputPreview: {
+              priority: "medium",
+              tags: ["agent-goal", "follow-up"],
+            },
+            status: "pending",
+          },
+        ],
         goalPlan: {
           counts: {
             completed: 2,
@@ -206,16 +274,39 @@ describe("AgentRunCenter", () => {
     };
 
     render(<AgentRunCenter onTaskAction={onTaskAction} tasks={[task]} />);
+    expect(
+      screen.getByRole("region", { name: "Pending deliverable approvals" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Long values and lists may be truncated or hidden; approval remains bound to the full input/
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText("Report export")).toBeInTheDocument();
+    expect(screen.getByText("format")).toBeInTheDocument();
+    expect(screen.getByText("markdown")).toBeInTheDocument();
+    expect(screen.getByText("title")).toBeInTheDocument();
+    expect(screen.getAllByText("Risk report")).toHaveLength(2);
+    expect(screen.getByText("Follow-up task")).toBeInTheDocument();
+    expect(screen.getByText("priority")).toBeInTheDocument();
+    expect(screen.getByText("medium")).toBeInTheDocument();
+    expect(screen.getByText("tags")).toBeInTheDocument();
+    expect(screen.getByText("agent-goal, follow-up")).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "Approve deliverables" })
     );
 
     expect(onTaskAction).toHaveBeenCalledWith(task, "approve_deliverables", {
-      approval: {
-        approved: true,
-        decision: "approved",
-        source: "agent_run_center",
-      },
+      approvalBindings: [
+        {
+          approvalObjectHash: `sha256:${"a".repeat(64)}`,
+          gateId: "approval:report.export:1.0.0:report",
+        },
+        {
+          approvalObjectHash: `sha256:${"b".repeat(64)}`,
+          gateId: "approval:task.create:1.0.0:follow-up",
+        },
+      ],
     });
   });
 });

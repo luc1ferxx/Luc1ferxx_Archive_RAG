@@ -536,3 +536,106 @@ test("recordRunStep enforces invalid existing-step transitions through step help
     ["run_created", "step_started", "step_completed"]
   );
 });
+
+test("recordRunStep preserves distinct steps recorded concurrently", async () => {
+  const agentRunService = createAgentRunService();
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Record concurrent steps",
+    runId: "run-concurrent-steps",
+  });
+
+  await Promise.all([
+    agentRunService.recordRunStep({
+      accessScope,
+      eventType: "step_started",
+      label: "Step A",
+      runId: "run-concurrent-steps",
+      status: AGENT_RUN_STEP_STATUSES.running,
+      stepId: "step-a",
+      type: "document_rag",
+    }),
+    agentRunService.recordRunStep({
+      accessScope,
+      eventType: "step_started",
+      label: "Step B",
+      runId: "run-concurrent-steps",
+      status: AGENT_RUN_STEP_STATUSES.running,
+      stepId: "step-b",
+      type: "web_search",
+    }),
+  ]);
+
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId: "run-concurrent-steps",
+  });
+
+  assert.deepEqual(
+    run.steps.map((step) => step.id).sort(),
+    ["step-a", "step-b"]
+  );
+  assert.deepEqual(
+    run.events
+      .filter((event) => event.type === "step_started")
+      .map((event) => event.payload.stepId)
+      .sort(),
+    ["step-a", "step-b"]
+  );
+});
+
+test("recordRunStep commits only one conflicting terminal transition and event", async () => {
+  const agentRunService = createAgentRunService();
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Resolve a terminal step race",
+    runId: "run-terminal-race",
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    runId: "run-terminal-race",
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "step-race",
+    type: "document_rag",
+  });
+
+  const results = await Promise.allSettled([
+    agentRunService.recordRunStep({
+      accessScope,
+      runId: "run-terminal-race",
+      status: AGENT_RUN_STEP_STATUSES.completed,
+      stepId: "step-race",
+    }),
+    agentRunService.recordRunStep({
+      accessScope,
+      error: new Error("competing failure"),
+      runId: "run-terminal-race",
+      status: AGENT_RUN_STEP_STATUSES.failed,
+      stepId: "step-race",
+    }),
+  ]);
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId: "run-terminal-race",
+  });
+  const terminalEvents = run.events.filter((event) =>
+    ["step_completed", "step_failed"].includes(event.type)
+  );
+
+  assert.equal(
+    results.filter((result) => result.status === "fulfilled").length,
+    1
+  );
+  assert.equal(
+    results.filter((result) => result.status === "rejected").length,
+    1
+  );
+  assert.equal(terminalEvents.length, 1);
+  assert.equal(
+    terminalEvents[0].payload.status,
+    run.steps.find((step) => step.id === "step-race").status
+  );
+});

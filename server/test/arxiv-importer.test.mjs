@@ -339,3 +339,208 @@ test("arxiv importer skips papers already indexed by normalized title hash", asy
     paper,
   });
 });
+
+test("arxiv importer propagates claim loss from progress reporting before download", async () => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "arxiv-importer-"));
+  const claimLostError = new Error("Task execution claim is no longer active.");
+  let downloadCount = 0;
+
+  claimLostError.code = "TASK_CLAIM_LOST";
+
+  try {
+    await assert.rejects(
+      importArxivPapers({
+        arxivService: {
+          downloadPdf: async () => {
+            downloadCount += 1;
+            return Buffer.from("%PDF-1.7 stale");
+          },
+        },
+        delayMs: 0,
+        onPaperProgress: async ({ status }) => {
+          if (status === "downloading") {
+            throw claimLostError;
+          }
+        },
+        papers: [createPaper()],
+        ragService: {
+          ingestDocument: async () => {
+            throw new Error("ingest should not run after claim loss");
+          },
+          listDocuments: () => [],
+        },
+        tempDirectory,
+      }),
+      (error) => error === claimLostError
+    );
+
+    assert.equal(downloadCount, 0);
+  } finally {
+    await rm(tempDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
+test("arxiv importer stops before writing or ingesting when download loses its claim", async () => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "arxiv-importer-"));
+  const controller = new AbortController();
+  const claimLostError = new Error("Task execution claim is no longer active.");
+  let ingestCount = 0;
+
+  claimLostError.code = "TASK_CLAIM_LOST";
+
+  try {
+    await assert.rejects(
+      importArxivPapers({
+        arxivService: {
+          downloadPdf: async () => {
+            controller.abort(claimLostError);
+            return Buffer.from("%PDF-1.7 stale");
+          },
+        },
+        delayMs: 0,
+        papers: [createPaper()],
+        ragService: {
+          ingestDocument: async () => {
+            ingestCount += 1;
+          },
+          listDocuments: () => [],
+        },
+        signal: controller.signal,
+        tempDirectory,
+      }),
+      (error) => error === claimLostError
+    );
+
+    assert.equal(ingestCount, 0);
+  } finally {
+    await rm(tempDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
+test("arxiv topic import stops after claim loss during search", async () => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "arxiv-importer-"));
+  const controller = new AbortController();
+  const claimLostError = new Error("Task execution claim is no longer active.");
+  let downloadCount = 0;
+
+  claimLostError.code = "TASK_CLAIM_LOST";
+
+  try {
+    await assert.rejects(
+      importArxivTopic({
+        arxivService: {
+          search: async ({ signal }) => {
+            assert.equal(signal, controller.signal);
+            controller.abort(claimLostError);
+            return [createPaper()];
+          },
+          downloadPdf: async () => {
+            downloadCount += 1;
+            return Buffer.from("%PDF-1.7 stale");
+          },
+        },
+        delayMs: 0,
+        maxResults: 1,
+        ragService: {
+          ingestDocument: async () => {
+            throw new Error("ingest should not run after claim loss");
+          },
+          listDocuments: () => [],
+        },
+        signal: controller.signal,
+        tempDirectory,
+        topic: "retrieval augmented generation",
+      }),
+      (error) => error === claimLostError
+    );
+
+    assert.equal(downloadCount, 0);
+  } finally {
+    await rm(tempDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
+test("arxiv importer rechecks its claim before document ingestion", async () => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "arxiv-importer-"));
+  const controller = new AbortController();
+  const claimLostError = new Error("Task execution claim is no longer active.");
+  let ingestCount = 0;
+
+  claimLostError.code = "TASK_CLAIM_LOST";
+
+  try {
+    await assert.rejects(
+      importArxivPapers({
+        arxivService: {
+          downloadPdf: async () => Buffer.from("%PDF-1.7 stale"),
+        },
+        delayMs: 0,
+        onPaperProgress: async ({ status }) => {
+          if (status === "ingesting") {
+            controller.abort(claimLostError);
+          }
+        },
+        papers: [createPaper()],
+        ragService: {
+          ingestDocument: async () => {
+            ingestCount += 1;
+          },
+          listDocuments: () => [],
+        },
+        signal: controller.signal,
+        tempDirectory,
+      }),
+      (error) => error === claimLostError
+    );
+
+    assert.equal(ingestCount, 0);
+  } finally {
+    await rm(tempDirectory, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
+test("arxiv importer checks its claim before each paper lookup", async () => {
+  const controller = new AbortController();
+  const claimLostError = new Error("Task execution claim is no longer active.");
+  let documentLookupCount = 0;
+
+  claimLostError.code = "TASK_CLAIM_LOST";
+  controller.abort(claimLostError);
+
+  await assert.rejects(
+    importArxivPapers({
+      arxivService: {
+        downloadPdf: async () => {
+          throw new Error("download should not run after claim loss");
+        },
+      },
+      delayMs: 0,
+      papers: [createPaper()],
+      ragService: {
+        ingestDocument: async () => {
+          throw new Error("ingest should not run after claim loss");
+        },
+        listDocuments: () => {
+          documentLookupCount += 1;
+          return [];
+        },
+      },
+      signal: controller.signal,
+    }),
+    (error) => error === claimLostError
+  );
+
+  assert.equal(documentLookupCount, 0);
+});

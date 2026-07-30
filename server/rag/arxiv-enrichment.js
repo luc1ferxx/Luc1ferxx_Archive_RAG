@@ -23,6 +23,8 @@ import {
   buildArxivRecommendationSuggestion,
   buildBlockedArxivSuggestion,
 } from "./arxiv-recommendation-builder.js";
+import { createRecommendationTaskService } from "./recommendation-tasks.js";
+import { TASK_STATUSES } from "./tasks.js";
 
 export {
   ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
@@ -32,6 +34,29 @@ export {
 };
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
+const TASK_CLAIM_LOST = "TASK_CLAIM_LOST";
+
+const isCooperativeAbortError = (error, signal) =>
+  signal?.aborted ||
+  error?.code === TASK_CLAIM_LOST ||
+  error?.name === "AbortError";
+
+const assertImportActive = ({ assertClaimActive, signal } = {}) => {
+  assertClaimActive?.();
+
+  if (!signal?.aborted) {
+    return;
+  }
+
+  if (signal.reason instanceof Error) {
+    throw signal.reason;
+  }
+
+  const error = new Error("arXiv import was aborted.");
+
+  error.name = "AbortError";
+  throw error;
+};
 
 const getScopedDocument = ({ accessScope, docId, ragService }) => {
   const document = ragService.getDocument?.(docId, accessScope) ?? null;
@@ -80,10 +105,26 @@ export const createArxivEnrichmentService = ({
     resolveDocumentTopic: resolveTopicForDocument,
     selectionTokenService,
   });
-  const recordRecommendationTask = async (methodName, payload) => {
+  const recommendationTaskBuilder = createRecommendationTaskService({
+    taskService: {
+      upsertTask: async ({ task }) => task,
+    },
+  });
+  const recordRecommendationTask = async (
+    methodName,
+    payload,
+    {
+      recorder = recommendationTaskService,
+      strict = false,
+    } = {}
+  ) => {
     try {
-      return (await recommendationTaskService?.[methodName]?.(payload)) ?? null;
-    } catch {
+      return (await recorder?.[methodName]?.(payload)) ?? null;
+    } catch (error) {
+      if (strict) {
+        throw error;
+      }
+
       return null;
     }
   };
@@ -180,21 +221,40 @@ export const createArxivEnrichmentService = ({
 
   const executePreparedImport = async ({
     accessScope = {},
+    assertClaimActive,
     docId,
     document,
     onPaperProgress,
     queryPolicy,
     relevantSelectedPapers = [],
+    signal,
+    taskRecorder = recommendationTaskService,
+    taskWritesStrict = false,
     topic,
   } = {}) => {
-    await recordRecommendationTask("recordImportStarted", {
-      accessScope,
-      docId,
-      document: buildArxivDocumentSummary(document),
-      provider: ARXIV_RECOMMENDATION_PROVIDER,
-      queryPolicy,
-      selectedPapers: relevantSelectedPapers,
-      topic,
+    assertImportActive({
+      assertClaimActive,
+      signal,
+    });
+    await recordRecommendationTask(
+      "recordImportStarted",
+      {
+        accessScope,
+        docId,
+        document: buildArxivDocumentSummary(document),
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
+        queryPolicy,
+        selectedPapers: relevantSelectedPapers,
+        topic,
+      },
+      {
+        recorder: taskRecorder,
+        strict: taskWritesStrict,
+      }
+    );
+    assertImportActive({
+      assertClaimActive,
+      signal,
     });
 
     let importResult;
@@ -202,6 +262,7 @@ export const createArxivEnrichmentService = ({
     try {
       importResult = await arxivImportService.importPapers({
         accessScope,
+        assertClaimActive,
         importContext: {
           importedByUserConfirmation: true,
           relatedToDocId: docId,
@@ -212,22 +273,42 @@ export const createArxivEnrichmentService = ({
         ),
         onPaperProgress,
         papers: relevantSelectedPapers,
+        signal,
         topic,
       });
     } catch (error) {
-      error.task = await recordRecommendationTask("recordImportFailed", {
-        accessScope,
-        docId,
-        document: buildArxivDocumentSummary(document),
-        error,
-        provider: ARXIV_RECOMMENDATION_PROVIDER,
-        queryPolicy,
-        selectedPapers: relevantSelectedPapers,
-        topic,
-      });
+      if (isCooperativeAbortError(error, signal)) {
+        assertImportActive({
+          assertClaimActive,
+          signal,
+        });
+        throw error;
+      }
+
+      error.task = await recordRecommendationTask(
+        "recordImportFailed",
+        {
+          accessScope,
+          docId,
+          document: buildArxivDocumentSummary(document),
+          error,
+          provider: ARXIV_RECOMMENDATION_PROVIDER,
+          queryPolicy,
+          selectedPapers: relevantSelectedPapers,
+          topic,
+        },
+        {
+          recorder: taskRecorder,
+          strict: taskWritesStrict,
+        }
+      );
       throw error;
     }
 
+    assertImportActive({
+      assertClaimActive,
+      signal,
+    });
     const remainingSuggestion = recommendationSnapshotService.updateAfterImport({
       accessScope,
       docId,
@@ -236,16 +317,31 @@ export const createArxivEnrichmentService = ({
       topic,
     });
 
-    const task = await recordRecommendationTask("recordImportCompleted", {
-      accessScope,
-      docId,
-      document: buildArxivDocumentSummary(document),
-      importResult,
-      provider: ARXIV_RECOMMENDATION_PROVIDER,
-      queryPolicy,
-      remainingSuggestion,
-      selectedPapers: relevantSelectedPapers,
-      topic,
+    assertImportActive({
+      assertClaimActive,
+      signal,
+    });
+    const task = await recordRecommendationTask(
+      "recordImportCompleted",
+      {
+        accessScope,
+        docId,
+        document: buildArxivDocumentSummary(document),
+        importResult,
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
+        queryPolicy,
+        remainingSuggestion,
+        selectedPapers: relevantSelectedPapers,
+        topic,
+      },
+      {
+        recorder: taskRecorder,
+        strict: taskWritesStrict,
+      }
+    );
+    assertImportActive({
+      assertClaimActive,
+      signal,
     });
 
     return {
@@ -261,12 +357,21 @@ export const createArxivEnrichmentService = ({
     const { task, ...result } = await executePreparedImport({
       ...preparedImport,
       accessScope: options.accessScope,
+      assertClaimActive: options.assertClaimActive,
+      signal: options.signal,
     });
 
     return result;
   };
 
-  const runImportTask = async ({ accessScope = {}, patchTask, task } = {}) => {
+  const runImportTask = async ({
+    accessScope = {},
+    assertClaimActive,
+    patchTask,
+    signal,
+    task,
+    taskWriter,
+  } = {}) => {
     const payload = task?.payload ?? {};
     const docId = payload.docId ?? task?.subject?.id;
     const document = {
@@ -276,25 +381,53 @@ export const createArxivEnrichmentService = ({
     const queryPolicy = payload.queryPolicy ?? task?.input?.queryPolicy ?? null;
     const selectedPapers = toArray(payload.selectedPapers);
     const topic = payload.topic ?? task?.input?.topic ?? "";
+    const jobTaskWriter = taskWriter
+      ? {
+          getTask: taskWriter.getTask,
+          patchTask: taskWriter.patchTask,
+          upsertTask: ({ task: nextTask = {} } = {}) =>
+            nextTask.status === TASK_STATUSES.running
+              ? taskWriter.upsertTask({
+                  task: nextTask,
+                })
+              : nextTask,
+        }
+      : null;
+    const taskRecorder = taskWriter
+      ? createRecommendationTaskService({
+          taskService: jobTaskWriter,
+        })
+      : recommendationTaskService;
 
     try {
       const result = await executePreparedImport({
         accessScope,
+        assertClaimActive,
         docId,
         document,
         onPaperProgress: async (event) => {
-          await recordRecommendationTask("recordImportProgress", {
-            accessScope,
-            docId,
-            error: event.error,
-            paper: event.paper,
-            provider: ARXIV_RECOMMENDATION_PROVIDER,
-            result: event.result,
-            status: event.status,
-          });
+          await recordRecommendationTask(
+            "recordImportProgress",
+            {
+              accessScope,
+              docId,
+              error: event.error,
+              paper: event.paper,
+              provider: ARXIV_RECOMMENDATION_PROVIDER,
+              result: event.result,
+              status: event.status,
+            },
+            {
+              recorder: taskRecorder,
+              strict: Boolean(taskWriter),
+            }
+          );
         },
         queryPolicy,
         relevantSelectedPapers: selectedPapers,
+        signal,
+        taskRecorder,
+        taskWritesStrict: Boolean(taskWriter),
         topic,
       });
 
@@ -303,6 +436,14 @@ export const createArxivEnrichmentService = ({
         payload: null,
       };
     } catch (error) {
+      if (isCooperativeAbortError(error, signal)) {
+        assertImportActive({
+          assertClaimActive,
+          signal,
+        });
+        throw error;
+      }
+
       await patchTask?.({
         payload: null,
       });
@@ -318,6 +459,7 @@ export const createArxivEnrichmentService = ({
   const resumeImportTask = async ({
     accessScope = {},
     action,
+    deferTaskPersistence = false,
     payload = {},
     task = {},
   } = {}) => {
@@ -333,22 +475,31 @@ export const createArxivEnrichmentService = ({
       selectedArxivIds: payload.selectedArxivIds,
       selectionToken: payload.selectionToken,
     });
-    const queuedTask = await recordRecommendationTask("recordImportQueued", {
-      accessScope,
-      docId: preparedImport.docId,
-      document: buildArxivDocumentSummary(preparedImport.document),
-      payload: {
+    const queuedTask = await recordRecommendationTask(
+      "recordImportQueued",
+      {
+        accessScope,
         docId: preparedImport.docId,
+        document: buildArxivDocumentSummary(preparedImport.document),
+        payload: {
+          docId: preparedImport.docId,
+          queryPolicy: preparedImport.queryPolicy,
+          selectedPapers: preparedImport.relevantSelectedPapers,
+          topic: preparedImport.topic,
+        },
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
         queryPolicy: preparedImport.queryPolicy,
+        runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
         selectedPapers: preparedImport.relevantSelectedPapers,
         topic: preparedImport.topic,
       },
-      provider: ARXIV_RECOMMENDATION_PROVIDER,
-      queryPolicy: preparedImport.queryPolicy,
-      runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
-      selectedPapers: preparedImport.relevantSelectedPapers,
-      topic: preparedImport.topic,
-    });
+      {
+        recorder: deferTaskPersistence
+          ? recommendationTaskBuilder
+          : recommendationTaskService,
+        strict: true,
+      }
+    );
 
     return queuedTask;
   };

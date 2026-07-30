@@ -1,7 +1,9 @@
 import {
   AGENT_INTERRUPT_TYPES,
   AgentRunInterruptError,
+  setAgentRunInterruptPrivateDetail,
 } from "../agent-interrupts.js";
+import { createApprovalExecutionSnapshot } from "./approval-execution-snapshot.js";
 import { normalizeText } from "../../lib/normalize-text.js";
 
 export const CAPABILITY_POLICY_DECISIONS = Object.freeze({
@@ -36,11 +38,39 @@ const getPolicyMode = (approvalPolicy = {}) =>
 const hasAccessScope = (accessScope = {}) =>
   Boolean(accessScope && typeof accessScope === "object" && !Array.isArray(accessScope));
 
-const isApprovalGranted = (approval = {}) =>
+const BOUND_APPROVAL_SOURCES = new Set([
+  "agent_run_action",
+  "agent_run_step_retry",
+  "task_action",
+]);
+
+const isApprovalIntentGranted = (approval = {}) =>
   approval.approved === true ||
   APPROVED_DECISIONS.has(
     normalizeText(approval.decision ?? approval.action).toLowerCase()
   );
+
+const isApprovalGranted = ({ approval = {}, approvalGate = null } = {}) => {
+  if (!isApprovalIntentGranted(approval)) {
+    return false;
+  }
+
+  const approvalSource = normalizeText(approval.source).toLowerCase();
+  const suppliedHash = normalizeText(approval.approvalObjectHash);
+  const suppliedGateId = normalizeText(approval.gateId);
+  const requiresBinding =
+    BOUND_APPROVAL_SOURCES.has(approvalSource) || Boolean(suppliedHash);
+
+  if (!requiresBinding) {
+    return true;
+  }
+
+  return (
+    Boolean(approvalGate) &&
+    suppliedHash === approvalGate.approvalObjectHash &&
+    (!suppliedGateId || suppliedGateId === approvalGate.id)
+  );
+};
 
 const getPrimitivePreviewValue = (value) => {
   if (typeof value === "string") {
@@ -200,34 +230,72 @@ const requiresApproval = (approvalPolicy = {}) =>
   Boolean(approvalPolicy.requiresApproval) ||
   APPROVAL_MODES.has(getPolicyMode(approvalPolicy));
 
+const attachPrivateSanitizedInput = (policyResult, sanitizedInput) => {
+  Object.defineProperty(policyResult, "sanitizedInput", {
+    configurable: false,
+    enumerable: false,
+    value: sanitizedInput,
+    writable: false,
+  });
+
+  return policyResult;
+};
+
 const buildApprovalGate = ({
+  accessScope = {},
   capability = {},
   input = {},
   policyResult = {},
-} = {}) => ({
-  id: `approval:${normalizeText(capability.id)}:${normalizeText(
-    capability.version
-  )}`,
-  type: "capability_approval",
-  status: "pending",
-  capabilityId: normalizeText(capability.id),
-  capabilityVersion: normalizeText(capability.version),
-  capabilityLabel: normalizeText(capability.label),
-  inputPreview: buildInputPreview({
+} = {}) => {
+  const capabilityId = normalizeText(capability.id);
+  const capabilityVersion = normalizeText(capability.version);
+  const inputPreview = buildInputPreview({
     input,
     privacyPolicy: capability.privacyPolicy,
-  }),
-  policy: {
-    mode: getPolicyMode(capability.approvalPolicy) || "direct",
-    externalCall: Boolean(capability.privacyPolicy?.externalCall),
-    storesResult: Boolean(capability.privacyPolicy?.storesResult),
-    writesWorkspace: Boolean(capability.approvalPolicy?.writesWorkspace),
-  },
-  reason:
-    normalizeText(capability.approvalPolicy?.reason) ||
-    "User confirmation is required before this capability can execute.",
-  riskFlags: policyResult.riskFlags ?? [],
-});
+  });
+  const executionSnapshot = createApprovalExecutionSnapshot({
+    accessScope,
+    capabilityId,
+    capabilityVersion,
+    executionInput: input,
+    inputPreview,
+  });
+  const gate = {
+    id: `approval:${capabilityId}:${capabilityVersion}:${executionSnapshot.approvalObjectHash.slice(
+      "sha256:".length
+    )}`,
+    type: "capability_approval",
+    status: "pending",
+    approvalObjectHash: executionSnapshot.approvalObjectHash,
+    snapshotVersion: executionSnapshot.snapshotVersion,
+    capabilityId,
+    capabilityVersion,
+    capabilityLabel: normalizeText(capability.label),
+    inputPreview,
+    policy: {
+      mode: getPolicyMode(capability.approvalPolicy) || "direct",
+      externalCall: Boolean(capability.privacyPolicy?.externalCall),
+      storesResult: Boolean(capability.privacyPolicy?.storesResult),
+      writesWorkspace: Boolean(capability.approvalPolicy?.writesWorkspace),
+    },
+    reason:
+      normalizeText(capability.approvalPolicy?.reason) ||
+      "User confirmation is required before this capability can execute.",
+    riskFlags: policyResult.riskFlags ?? [],
+  };
+
+  return {
+    approvalGate: gate,
+    approvalSnapshot: {
+      gateId: gate.id,
+      capabilityId,
+      capabilityVersion,
+      approvalObjectHash: executionSnapshot.approvalObjectHash,
+      snapshotVersion: executionSnapshot.snapshotVersion,
+      executionInput: executionSnapshot.privateSnapshot.executionInput,
+    },
+  };
+};
 
 export class CapabilityPolicyError extends Error {
   constructor({ message, policyResult } = {}) {
@@ -263,38 +331,66 @@ export const evaluateCapabilityPolicy = (
       missingAccessScope ? "accessScope is required" : null,
     ].filter(Boolean);
 
-    return {
-      decision: CAPABILITY_POLICY_DECISIONS.blocked,
-      reasons,
-      riskFlags,
-      sanitizedInput,
-    };
+    return attachPrivateSanitizedInput(
+      {
+        decision: CAPABILITY_POLICY_DECISIONS.blocked,
+        reasons,
+        riskFlags,
+      },
+      sanitizedInput
+    );
   }
 
-  if (approvalRequired && !isApprovalGranted(approval)) {
-    const policyResult = {
-      decision: CAPABILITY_POLICY_DECISIONS.needsApproval,
-      reasons: ["user_confirmation_required"],
-      riskFlags,
-      sanitizedInput,
-    };
-
-    return {
-      ...policyResult,
-      approvalGate: buildApprovalGate({
+  const approvalBinding = approvalRequired
+    ? buildApprovalGate({
+        accessScope,
         capability,
         input: sanitizedInput,
-        policyResult,
-      }),
+        policyResult: {
+          riskFlags,
+        },
+      })
+    : null;
+
+  if (
+    approvalRequired &&
+    !isApprovalGranted({
+      approval,
+      approvalGate: approvalBinding?.approvalGate,
+    })
+  ) {
+    const policyResult = attachPrivateSanitizedInput(
+      {
+        decision: CAPABILITY_POLICY_DECISIONS.needsApproval,
+        reasons: ["user_confirmation_required"],
+        riskFlags,
+      },
+      sanitizedInput
+    );
+
+    const approvalResult = {
+      ...policyResult,
+      approvalGate: approvalBinding.approvalGate,
     };
+
+    Object.defineProperty(approvalResult, "approvalSnapshot", {
+      configurable: false,
+      enumerable: false,
+      value: approvalBinding.approvalSnapshot,
+      writable: false,
+    });
+
+    return approvalResult;
   }
 
-  return {
-    decision: CAPABILITY_POLICY_DECISIONS.allowed,
-    reasons: [],
-    riskFlags,
-    sanitizedInput,
-  };
+  return attachPrivateSanitizedInput(
+    {
+      decision: CAPABILITY_POLICY_DECISIONS.allowed,
+      reasons: [],
+      riskFlags,
+    },
+    sanitizedInput
+  );
 };
 
 export const enforceCapabilityPolicy = (
@@ -319,20 +415,25 @@ export const enforceCapabilityPolicy = (
   if (policyResult.decision === CAPABILITY_POLICY_DECISIONS.needsApproval) {
     const approvalGate = policyResult.approvalGate;
 
-    throw new AgentRunInterruptError({
-      type: AGENT_INTERRUPT_TYPES.capabilityApprovalRequired,
-      message: `Capability ${capability.id} requires user approval.`,
-      publicMessage: `${approvalGate.capabilityLabel} requires approval before execution.`,
-      detail: {
-        approvalGate,
-        capabilityId: approvalGate.capabilityId,
-        policyResult: {
-          decision: policyResult.decision,
-          reasons: policyResult.reasons,
-          riskFlags: policyResult.riskFlags,
+    throw setAgentRunInterruptPrivateDetail(
+      new AgentRunInterruptError({
+        type: AGENT_INTERRUPT_TYPES.capabilityApprovalRequired,
+        message: `Capability ${capability.id} requires user approval.`,
+        publicMessage: `${approvalGate.capabilityLabel} requires approval before execution.`,
+        detail: {
+          approvalGate,
+          capabilityId: approvalGate.capabilityId,
+          policyResult: {
+            decision: policyResult.decision,
+            reasons: policyResult.reasons,
+            riskFlags: policyResult.riskFlags,
+          },
         },
-      },
-    });
+      }),
+      {
+        approvalSnapshot: policyResult.approvalSnapshot,
+      }
+    );
   }
 
   return policyResult;

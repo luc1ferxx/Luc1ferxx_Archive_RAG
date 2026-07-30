@@ -11,6 +11,7 @@ const noop = () => {};
 const WEB_SEARCH_PRIMARY_STEP_ID = "web_search:primary";
 
 export const runWebSearchSkill = async ({
+  accessScope,
   addBudgetLimitTrace = noop,
   addTraceStep = noop,
   budgetState,
@@ -64,6 +65,7 @@ export const runWebSearchSkill = async ({
       executeObservedSkill(
         webSearchSkill,
         {
+          accessScope,
           capabilityRegistry,
           webChatService,
           question,
@@ -76,6 +78,7 @@ export const runWebSearchSkill = async ({
     id: WEB_SEARCH_PRIMARY_STEP_ID,
     input: webInput,
     label: "Web Search",
+    persistedInput: null,
     stepLifecycle,
     type: "web_search",
   });

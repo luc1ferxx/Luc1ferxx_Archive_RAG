@@ -10,7 +10,10 @@ import {
   evaluateCapabilityPolicy,
   validateCapabilityContract,
 } from "../rag/capabilities/index.js";
-import { isAgentRunInterrupt } from "../rag/agent-interrupts.js";
+import {
+  getAgentRunInterruptPrivateDetail,
+  isAgentRunInterrupt,
+} from "../rag/agent-interrupts.js";
 import {
   ARTIFACT_TYPES,
   createInMemoryWorkspaceArtifactStore,
@@ -783,6 +786,48 @@ test("artifact-producing capability fails before recording success when storage 
   assert.equal(actionTaskCalls, 0);
 });
 
+test("task creation reuses the execution idempotency key when replay input has no task id", async () => {
+  const taskIds = [];
+  const registry = createDefaultCapabilityRegistry({
+    actionTaskService: {
+      createActionTask: async ({ taskId }) => {
+        taskIds.push(taskId);
+        return {
+          id: taskId,
+          status: "pending",
+          type: "agent_action",
+        };
+      },
+    },
+  });
+  const payload = {
+    accessScope: {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+    approval: {
+      approved: true,
+    },
+    input: {
+      description: "Review the approved operation.",
+      title: "Review approval",
+    },
+    services: {
+      artifactExecution: {
+        idempotencyKey: "capability-artifact:run-1:step-1:task.create",
+      },
+    },
+  };
+
+  await registry.execute(CAPABILITY_IDS.taskCreate, payload);
+  await registry.execute(CAPABILITY_IDS.taskCreate, payload);
+
+  assert.deepEqual(taskIds, [
+    "capability-artifact:run-1:step-1:task.create",
+    "capability-artifact:run-1:step-1:task.create",
+  ]);
+});
+
 test("artifact-producing capability reports missing storage as a typed write failure", async () => {
   const registry = createDefaultCapabilityRegistry();
 
@@ -1020,6 +1065,7 @@ test("built-in capability policies require approval before agent actions", async
 
 test("capability policy blocks execution until required approval is granted", async () => {
   const calls = [];
+  const privateSentinel = "private-approval-snapshot-sentinel";
   const capability = {
     id: "paper.import",
     version: "1.0.0",
@@ -1065,6 +1111,9 @@ test("capability policy blocks execution until required approval is granted", as
   const policyResult = evaluateCapabilityPolicy(capability, {
     accessScope,
     input: {
+      metadata: {
+        secret: privateSentinel,
+      },
       topic: "  retrieval augmented generation  ",
     },
   });
@@ -1076,12 +1125,21 @@ test("capability policy blocks execution until required approval is granted", as
     "writes_workspace",
     "stores_result",
   ]);
+  assert.equal(Object.keys(policyResult).includes("approvalSnapshot"), false);
+  assert.doesNotMatch(JSON.stringify(policyResult), new RegExp(privateSentinel));
+  assert.equal(
+    policyResult.approvalSnapshot.executionInput.metadata.secret,
+    privateSentinel
+  );
 
   await assert.rejects(
     async () =>
       registry.execute("paper.import", {
         accessScope,
         input: {
+          metadata: {
+            secret: privateSentinel,
+          },
           topic: "  retrieval augmented generation  ",
         },
       }),
@@ -1091,6 +1149,13 @@ test("capability policy blocks execution until required approval is granted", as
       assert.equal(
         error.detail.approvalGate.inputPreview.topic,
         "retrieval augmented generation"
+      );
+      assert.equal("approvalSnapshot" in error.detail, false);
+      assert.doesNotMatch(JSON.stringify(error), new RegExp(privateSentinel));
+      assert.equal(
+        getAgentRunInterruptPrivateDetail(error).approvalSnapshot.executionInput
+          .metadata.secret,
+        privateSentinel
       );
       return true;
     }
@@ -1110,4 +1175,80 @@ test("capability policy blocks execution until required approval is granted", as
   assert.equal(result.topic, "retrieval augmented generation");
   assert.equal(calls.length, 1);
   assert.equal(calls[0].policy.decision, CAPABILITY_POLICY_DECISIONS.allowed);
+});
+
+test("bound task approval cannot authorize a replanned capability input", () => {
+  const capability = {
+    id: "task.create",
+    version: "1.0.0",
+    label: "Create Task",
+    inputSchema: {
+      type: "object",
+      required: ["title"],
+      properties: {
+        title: {
+          type: "string",
+        },
+      },
+    },
+    accessScope: {
+      required: true,
+    },
+    approvalPolicy: {
+      mode: "user_confirmation",
+      userConfirmationRequired: true,
+    },
+    privacyPolicy: {
+      externalCall: false,
+      sanitizedInputFields: ["title"],
+      storesResult: true,
+    },
+  };
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const approvedInput = {
+    metadata: {
+      priority: "high",
+    },
+    title: "Review renewal risk",
+  };
+  const pending = evaluateCapabilityPolicy(capability, {
+    accessScope,
+    input: approvedInput,
+  });
+  const approval = {
+    approved: true,
+    approvalObjectHash: pending.approvalGate.approvalObjectHash,
+    decision: "approved",
+    gateId: pending.approvalGate.id,
+    source: "task_action",
+  };
+  const exactReplay = evaluateCapabilityPolicy(capability, {
+    accessScope,
+    approval,
+    input: approvedInput,
+  });
+  const driftedReplay = evaluateCapabilityPolicy(capability, {
+    accessScope,
+    approval,
+    input: {
+      metadata: {
+        priority: "critical",
+      },
+      title: "Review renewal risk",
+    },
+  });
+
+  assert.equal(exactReplay.decision, CAPABILITY_POLICY_DECISIONS.allowed);
+  assert.equal(
+    driftedReplay.decision,
+    CAPABILITY_POLICY_DECISIONS.needsApproval
+  );
+  assert.notEqual(
+    driftedReplay.approvalGate.approvalObjectHash,
+    approval.approvalObjectHash
+  );
+  assert.notEqual(driftedReplay.approvalGate.id, approval.gateId);
 });

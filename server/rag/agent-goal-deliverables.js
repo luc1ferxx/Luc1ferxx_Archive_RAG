@@ -1,4 +1,9 @@
-import { CAPABILITY_IDS } from "./capabilities/index.js";
+import {
+  CAPABILITY_IDS,
+  CAPABILITY_POLICY_DECISIONS,
+  evaluateCapabilityPolicy,
+  verifyApprovalExecutionSnapshot,
+} from "./capabilities/index.js";
 import { buildCapabilityArtifactIdempotencyKey } from "./capabilities/artifacts.js";
 import { TASK_STATUSES } from "./tasks.js";
 import {
@@ -334,6 +339,10 @@ export const buildAgentGoalDeliverableSpecs = ({
             `Review the completed agent goal and capture follow-up actions: ${goal}`,
           priority: wantsReport(goal) ? "medium" : "",
           tags: ["agent-goal", "follow-up"].filter(Boolean),
+          taskId: buildCapabilityArtifactIdempotencyKey({
+            namespace: "goal-follow-up",
+            parts: [sourceTaskId, CAPABILITY_IDS.taskCreate],
+          }),
           title: `Review follow-ups for ${baseTitle}`,
         },
         label: "Follow-up task",
@@ -345,48 +354,82 @@ export const buildAgentGoalDeliverableSpecs = ({
   return specs;
 };
 
-const compactInputPreview = (input = {}) => ({
-  docIds: normalizeDocIds(input.docIds),
-  format: normalizeText(input.format, 40),
-  provider: normalizeText(input.provider, 80),
-  sourceUrl: normalizeText(input.sourceUrl, 160),
-  title: normalizeText(input.title, 160),
-});
+const buildDeliverableApprovalError = (message, status = 409) => {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+};
 
-const buildApprovalGate = ({ capability = {}, spec = {} } = {}) => ({
-  id: `deliverable:${normalizeText(spec.id, 160)}`,
-  type: "goal_deliverable_approval",
-  status: "pending",
-  capabilityId: normalizeText(spec.capabilityId, 120),
-  capabilityVersion: normalizeText(capability.version, 80),
-  capabilityLabel: normalizeText(capability.label || spec.label, 120),
-  inputPreview: Object.fromEntries(
-    Object.entries(compactInputPreview(spec.input)).filter(([, value]) =>
-      Array.isArray(value) ? value.length > 0 : Boolean(value)
-    )
-  ),
-  policy: {
-    externalCall: Boolean(capability.privacyPolicy?.externalCall),
-    storesResult: Boolean(capability.privacyPolicy?.storesResult),
-    writesWorkspace: Boolean(capability.approvalPolicy?.writesWorkspace),
-  },
-  reason: "Approval is required before the agent creates goal deliverables.",
-  riskFlags: [
-    capability.approvalPolicy?.writesWorkspace ? "writes_workspace" : null,
-    capability.privacyPolicy?.storesResult ? "stores_result" : null,
-    capability.privacyPolicy?.externalCall ? "external_call" : null,
-  ].filter(Boolean),
-});
+const buildDeliverableApprovalBinding = ({
+  accessScope = {},
+  capabilityRegistry,
+  spec = {},
+} = {}) => {
+  const capability = capabilityRegistry?.describe?.(spec.capabilityId);
 
-const buildApprovalGates = ({ capabilityRegistry, specs = [] } = {}) =>
+  if (!capability) {
+    throw buildDeliverableApprovalError(
+      `Capability ${spec.capabilityId || "unknown"} is unavailable for goal deliverable approval.`,
+      500
+    );
+  }
+
+  const policyResult = evaluateCapabilityPolicy(capability, {
+    accessScope,
+    input: spec.input,
+  });
+
+  if (policyResult.decision === CAPABILITY_POLICY_DECISIONS.blocked) {
+    throw buildDeliverableApprovalError(
+      `Goal deliverable ${spec.id || spec.capabilityId} is invalid: ${policyResult.reasons.join(
+        ", "
+      )}.`,
+      400
+    );
+  }
+
+  if (
+    policyResult.decision !== CAPABILITY_POLICY_DECISIONS.needsApproval ||
+    !policyResult.approvalGate ||
+    !policyResult.approvalSnapshot
+  ) {
+    throw buildDeliverableApprovalError(
+      `Goal deliverable ${spec.id || spec.capabilityId} must use a snapshot-bound approval capability.`
+    );
+  }
+
+  const approvalGate = {
+    ...policyResult.approvalGate,
+    deliverableId: spec.id,
+    type: "goal_deliverable_approval",
+  };
+  const { input: _privateInput, ...boundSpec } = spec;
+
+  return {
+    approvalGate,
+    approvalSnapshot: policyResult.approvalSnapshot,
+    spec: {
+      ...boundSpec,
+      approvalGateId: approvalGate.id,
+    },
+  };
+};
+
+const buildDeliverableApprovalBindings = ({
+  accessScope = {},
+  capabilityRegistry,
+  specs = [],
+} = {}) =>
   specs.map((spec) =>
-    buildApprovalGate({
-      capability: capabilityRegistry?.describe?.(spec.capabilityId) ?? {},
+    buildDeliverableApprovalBinding({
+      accessScope,
+      capabilityRegistry,
       spec,
     })
   );
 
 export const prepareAgentGoalDeliverables = ({
+  accessScope = {},
   body = {},
   capabilityRegistry,
   payload = {},
@@ -398,13 +441,13 @@ export const prepareAgentGoalDeliverables = ({
     return existing;
   }
 
-  const specs = buildAgentGoalDeliverableSpecs({
+  const rawSpecs = buildAgentGoalDeliverableSpecs({
     body,
     payload,
     sourceTaskId,
   });
 
-  if (specs.length === 0) {
+  if (rawSpecs.length === 0) {
     return {
       approvalGates: [],
       results: [],
@@ -413,14 +456,186 @@ export const prepareAgentGoalDeliverables = ({
     };
   }
 
+  const bindings = buildDeliverableApprovalBindings({
+    accessScope,
+    capabilityRegistry,
+    specs: rawSpecs,
+  });
+
   return {
-    approvalGates: buildApprovalGates({
-      capabilityRegistry,
-      specs,
-    }),
+    approvalGates: bindings.map((binding) => binding.approvalGate),
+    approvalSnapshots: bindings.map((binding) => binding.approvalSnapshot),
     results: [],
-    specs,
+    specs: bindings.map((binding) => binding.spec),
     status: AGENT_GOAL_DELIVERABLE_STATUSES.waitingForApproval,
+  };
+};
+
+const indexUniqueBy = ({ items = [], key, label }) => {
+  const indexed = new Map();
+
+  for (const item of toArray(items)) {
+    const itemKey = normalizeText(key(item), 240);
+
+    if (!itemKey || indexed.has(itemKey)) {
+      throw buildDeliverableApprovalError(
+        `${label} must contain unique non-empty approval gate ids.`
+      );
+    }
+
+    indexed.set(itemKey, item);
+  }
+
+  return indexed;
+};
+
+const resolveApprovedDeliverableExecutions = ({
+  accessScope = {},
+  approvals = {},
+  deliverables = {},
+} = {}) => {
+  const specs = toArray(deliverables.specs);
+  const gates = toArray(deliverables.approvalGates);
+  const snapshots = toArray(deliverables.approvalSnapshots);
+
+  if (
+    specs.length === 0 ||
+    gates.length !== specs.length ||
+    snapshots.length !== specs.length
+  ) {
+    throw buildDeliverableApprovalError(
+      "Goal deliverable approval snapshots are missing; request approval again."
+    );
+  }
+
+  const gatesById = indexUniqueBy({
+    items: gates,
+    key: (gate) => gate.id,
+    label: "Goal deliverable approval gates",
+  });
+  indexUniqueBy({
+    items: specs,
+    key: (spec) => spec.approvalGateId,
+    label: "Goal deliverable specs",
+  });
+  const snapshotsByGateId = indexUniqueBy({
+    items: snapshots,
+    key: (snapshot) => snapshot.gateId,
+    label: "Goal deliverable approval snapshots",
+  });
+
+  return specs.map((spec) => {
+    const gateId = normalizeText(spec.approvalGateId, 240);
+    const gate = gatesById.get(gateId);
+    const snapshot = snapshotsByGateId.get(gateId);
+    const approval = normalizeRecord(approvals[gateId], null);
+
+    if (
+      !gate ||
+      !snapshot ||
+      !approval ||
+      normalizeText(gate.deliverableId, 160) !== normalizeText(spec.id, 160) ||
+      normalizeText(gate.capabilityId, 120) !==
+        normalizeText(spec.capabilityId, 120) ||
+      normalizeText(snapshot.capabilityId, 120) !==
+        normalizeText(spec.capabilityId, 120) ||
+      normalizeText(snapshot.capabilityVersion, 80) !==
+        normalizeText(gate.capabilityVersion, 80) ||
+      normalizeText(snapshot.approvalObjectHash, 120) !==
+        normalizeText(gate.approvalObjectHash, 120) ||
+      Number(snapshot.snapshotVersion) !== Number(gate.snapshotVersion)
+    ) {
+      throw buildDeliverableApprovalError(
+        "Goal deliverable approval metadata does not match the private execution snapshot."
+      );
+    }
+
+    if (
+      approval.approved !== true ||
+      normalizeText(approval.source).toLowerCase() !== "task_action" ||
+      normalizeText(approval.gateId, 240) !== gateId ||
+      normalizeText(approval.approvalObjectHash, 120) !==
+        normalizeText(gate.approvalObjectHash, 120)
+    ) {
+      throw buildDeliverableApprovalError(
+        "Goal deliverable execution requires an exact snapshot-bound approval."
+      );
+    }
+
+    const input = verifyApprovalExecutionSnapshot({
+      accessScope,
+      approvalObjectHash: gate.approvalObjectHash,
+      capabilityId: gate.capabilityId,
+      capabilityVersion: gate.capabilityVersion,
+      inputPreview: gate.inputPreview,
+      privateSnapshot: {
+        executionInput: snapshot.executionInput,
+        snapshotVersion: snapshot.snapshotVersion,
+      },
+    });
+
+    return {
+      approval,
+      gate,
+      input,
+      spec,
+    };
+  });
+};
+
+export const approveAgentGoalDeliverables = ({
+  accessScope = {},
+  approvalBindings = [],
+  deliverables = {},
+} = {}) => {
+  const gates = toArray(deliverables.approvalGates);
+  const suppliedBindings = toArray(approvalBindings);
+
+  if (gates.length === 0 || suppliedBindings.length !== gates.length) {
+    throw buildDeliverableApprovalError(
+      "Approval requires the complete set of goal deliverable gate bindings.",
+      400
+    );
+  }
+
+  const suppliedByGateId = indexUniqueBy({
+    items: suppliedBindings,
+    key: (binding) => binding.gateId,
+    label: "Goal deliverable approval bindings",
+  });
+  const approvals = {};
+
+  for (const gate of gates) {
+    const gateId = normalizeText(gate.id, 240);
+    const supplied = suppliedByGateId.get(gateId);
+    const expectedHash = normalizeText(gate.approvalObjectHash, 120);
+    const suppliedHash = normalizeText(supplied?.approvalObjectHash, 120);
+
+    if (!supplied || !expectedHash || suppliedHash !== expectedHash) {
+      throw buildDeliverableApprovalError(
+        "Goal deliverable approval object does not match the pending gate."
+      );
+    }
+
+    approvals[gateId] = {
+      approved: true,
+      approvalObjectHash: expectedHash,
+      decision: "approved",
+      gateId,
+      source: "task_action",
+    };
+  }
+
+  resolveApprovedDeliverableExecutions({
+    accessScope,
+    approvals,
+    deliverables,
+  });
+
+  return {
+    ...deliverables,
+    approvals,
+    status: AGENT_GOAL_DELIVERABLE_STATUSES.approved,
   };
 };
 
@@ -539,7 +754,6 @@ const getOverallStatus = (results = []) =>
 
 export const executeAgentGoalDeliverables = async ({
   accessScope = {},
-  approval = {},
   capabilityRegistry,
   deliverables = {},
 } = {}) => {
@@ -558,12 +772,20 @@ export const executeAgentGoalDeliverables = async ({
     throw new Error("Capability registry is required to create goal deliverables.");
   }
 
-  for (const spec of specs) {
+  const executions = resolveApprovedDeliverableExecutions({
+    accessScope,
+    approvals: normalizeRecord(deliverables.approvals),
+    deliverables,
+  });
+
+  for (const execution of executions) {
+    const { approval, input, spec } = execution;
+
     try {
       const result = await capabilityRegistry.execute(spec.capabilityId, {
         accessScope,
         approval,
-        input: spec.input,
+        input,
         services: spec.artifactExecution
           ? {
               artifactExecution: spec.artifactExecution,

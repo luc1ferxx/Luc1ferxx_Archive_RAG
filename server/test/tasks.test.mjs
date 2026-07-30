@@ -143,6 +143,172 @@ test("task service exposes recoverable internal tasks without changing public sh
   assert.deepEqual(recoverableTasks.tasks[0].accessScope, accessScope);
 });
 
+test("task claims are exclusive, fenced by attempt, and hidden from public tasks", async () => {
+  let currentTime = "2026-06-13T00:00:00.000Z";
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore({
+      now: () => currentTime,
+    }),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await taskService.upsertTask({
+    accessScope,
+    task: {
+      id: "task-claimed",
+      runnerId: "test_runner",
+      status: TASK_STATUSES.queued,
+      type: "agent_task",
+    },
+  });
+
+  const [firstClaim, competingClaim] = await Promise.all([
+    taskService.claimTaskForRun({
+      accessScope,
+      claimId: "claim-1",
+      leaseMs: 60_000,
+      taskId: "task-claimed",
+    }),
+    taskService.claimTaskForRun({
+      accessScope,
+      claimId: "claim-2",
+      leaseMs: 60_000,
+      taskId: "task-claimed",
+    }),
+  ]);
+
+  assert.equal(firstClaim.applied, true);
+  assert.equal(firstClaim.attemptCount, 1);
+  assert.equal(competingClaim.applied, false);
+
+  const publicTask = await taskService.getTask({
+    accessScope,
+    taskId: "task-claimed",
+  });
+  const internalTask = await taskService.getInternalTask({
+    accessScope,
+    taskId: "task-claimed",
+  });
+
+  assert.equal("attemptCount" in publicTask, false);
+  assert.equal("claimedAt" in publicTask, false);
+  assert.equal("claimedBy" in publicTask, false);
+  assert.equal(internalTask.claimedBy, "claim-1");
+  assert.equal(internalTask.attemptCount, 1);
+
+  currentTime = "2026-06-13T00:02:00.000Z";
+  const recoveredClaim = await taskService.claimTaskForRun({
+    accessScope,
+    claimId: "claim-3",
+    leaseMs: 60_000,
+    taskId: "task-claimed",
+  });
+
+  assert.equal(recoveredClaim.applied, true);
+  assert.equal(recoveredClaim.attemptCount, 2);
+
+  const protectedProgress = await taskService.patchClaimedTask({
+    accessScope,
+    attemptCount: recoveredClaim.attemptCount,
+    claimId: "claim-3",
+    patch: {
+      attemptCount: 999,
+      status: TASK_STATUSES.running,
+    },
+    taskId: "task-claimed",
+  });
+
+  assert.equal(protectedProgress.applied, true);
+  assert.equal(
+    (
+      await taskService.getInternalTask({
+        accessScope,
+        taskId: "task-claimed",
+      })
+    ).attemptCount,
+    2
+  );
+
+  const staleWrite = await taskService.patchClaimedTask({
+    accessScope,
+    attemptCount: firstClaim.attemptCount,
+    claimId: "claim-1",
+    patch: {
+      status: TASK_STATUSES.completed,
+    },
+    taskId: "task-claimed",
+  });
+
+  assert.equal(staleWrite.applied, false);
+  assert.equal(
+    (
+      await taskService.getInternalTask({
+        accessScope,
+        taskId: "task-claimed",
+      })
+    ).claimedBy,
+    "claim-3"
+  );
+});
+
+test("task cancellation clears the claim and rejects the old runner terminal write", async () => {
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await taskService.upsertTask({
+    accessScope,
+    task: {
+      id: "task-cancel-fence",
+      runnerId: "test_runner",
+      status: TASK_STATUSES.queued,
+      type: "agent_task",
+    },
+  });
+  const claim = await taskService.claimTaskForRun({
+    accessScope,
+    claimId: "claim-cancel",
+    taskId: "task-cancel-fence",
+  });
+  const cancellation = await taskService.transitionTask({
+    accessScope,
+    expectedStatuses: [TASK_STATUSES.running],
+    patch: {
+      status: TASK_STATUSES.canceled,
+    },
+    taskId: "task-cancel-fence",
+  });
+  const staleCompletion = await taskService.patchClaimedTask({
+    accessScope,
+    attemptCount: claim.attemptCount,
+    claimId: "claim-cancel",
+    patch: {
+      status: TASK_STATUSES.completed,
+    },
+    taskId: "task-cancel-fence",
+  });
+
+  assert.equal(cancellation.applied, true);
+  assert.equal(staleCompletion.applied, false);
+  assert.equal(staleCompletion.task.status, TASK_STATUSES.canceled);
+  assert.equal(
+    (
+      await taskService.getInternalTask({
+        accessScope,
+        taskId: "task-cancel-fence",
+      })
+    ).claimedBy,
+    ""
+  );
+});
+
 test("in-memory task store list() applies default limit of 200 and supports explicit limit/offset", async () => {
   let tick = 0;
   const store = createInMemoryTaskStore({

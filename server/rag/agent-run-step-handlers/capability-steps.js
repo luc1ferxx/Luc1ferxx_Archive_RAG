@@ -6,9 +6,7 @@ import {
   buildAgentTraceFromRunSteps,
   buildErrorPayload,
   fail,
-  getStepInput,
   getStepType,
-  normalizeRecord,
   normalizeText,
 } from "./shared.js";
 
@@ -120,39 +118,10 @@ export const buildCapabilityResumeResponse = ({
   };
 };
 
-const getWebSearchInput = ({ run = {}, step = {} } = {}) => {
-  const stepInput = getStepInput(step);
-
-  if (stepInput?.question) {
-    return stepInput;
-  }
-
-  const detail = normalizeRecord(step.detail, {});
-  const question =
-    normalizeText(detail.question) ||
-    normalizeText(detail.query) ||
-    normalizeText(run.goal);
-
-  return question ? { question } : null;
-};
-
-const getArxivImportInput = ({ step = {} } = {}) => {
-  const stepInput = getStepInput(step);
-
-  if (stepInput?.topic) {
-    return stepInput;
-  }
-
-  const detail = normalizeRecord(step.detail, {});
-  const topic = normalizeText(detail.topic);
-
-  return topic
-    ? {
-        maxResults: detail.requestedMaxResults,
-        topic,
-      }
-    : null;
-};
+const rejectUnboundCapabilityRetry = () =>
+  fail(
+    "Approval-capable primary steps cannot be retried directly; retry the hash-bound capability_call step after approval."
+  );
 
 const executeCapabilityBackedStep = async ({
   accessScope = {},
@@ -245,8 +214,15 @@ export const createCapabilityCallStepHandler = () => ({
         approvalGate.id === step.approvalGateId &&
         approvalGate.status === "approved"
     );
+    const stepApprovalObjectHash = normalizeText(
+      step.detail?.approvalObjectHash
+    );
 
-    if (!gate) {
+    if (
+      !gate ||
+      !stepApprovalObjectHash ||
+      stepApprovalObjectHash !== normalizeText(gate.approvalObjectHash)
+    ) {
       fail("Retry requires an approved capability gate.");
     }
 
@@ -266,19 +242,48 @@ export const createCapabilityCallStepHandler = () => ({
       fail("Approved capability gate is missing capabilityId.");
     }
 
+    if (
+      typeof agentRunService?.getApprovedCapabilityExecution !== "function"
+    ) {
+      fail("Approval execution snapshot resolver is unavailable.");
+    }
+
+    const approvalObjectHash = normalizeText(
+      step.detail?.approvalObjectHash
+    );
+    const execution = await agentRunService.getApprovedCapabilityExecution({
+      accessScope,
+      approvalObjectHash,
+      gateId: step.approvalGateId,
+      runId: run.runId,
+    });
+
+    if (
+      execution.gate.id !== gate.id ||
+      execution.capabilityId !== normalizeText(gate.capabilityId) ||
+      execution.capabilityVersion !== normalizeText(gate.capabilityVersion) ||
+      (normalizeText(step.capabilityId) &&
+        normalizeText(step.capabilityId) !== execution.capabilityId) ||
+      (normalizeText(step.capabilityVersion) &&
+        normalizeText(step.capabilityVersion) !== execution.capabilityVersion)
+    ) {
+      fail("Approved capability execution binding does not match the step.");
+    }
+
     return executeCapabilityBackedStep({
       accessScope,
       agentRunService,
       approval: {
         approved: true,
+        approvalObjectHash: execution.approvalObjectHash,
         decision: "approved",
-        gateId: gate.id,
+        gateId: execution.gate.id,
         source: "agent_run_action",
       },
-      capabilityId: gate.capabilityId,
+      capabilityId: execution.capabilityId,
       capabilityRegistry,
-      gate,
-      input: getStepInput(step) ?? gate.inputPreview ?? {},
+      gate: execution.gate,
+      input: execution.input,
       run,
       step,
     });
@@ -289,98 +294,14 @@ export const createWebSearchStepHandler = () => ({
   id: "web_search",
   label: "Web Search",
   canHandle: ({ step } = {}) => getStepType(step) === "web_search",
-  prepareRetry({ run = {}, step = {} } = {}) {
-    const input = getWebSearchInput({
-      run,
-      step,
-    });
-
-    if (!input?.question) {
-      fail("web_search retry requires a question input.");
-    }
-
-    return {
-      input,
-    };
-  },
-  async execute({
-    accessScope = {},
-    agentRunService,
-    capabilityRegistry,
-    run,
-    step,
-  } = {}) {
-    const input = getWebSearchInput({
-      run,
-      step,
-    });
-
-    if (!input?.question) {
-      fail("web_search retry requires a question input.");
-    }
-
-    return executeCapabilityBackedStep({
-      accessScope,
-      agentRunService,
-      approval: {
-        approved: true,
-        decision: "approved",
-        source: "agent_run_step_retry",
-      },
-      capabilityId: CAPABILITY_IDS.webSearch,
-      capabilityRegistry,
-      input,
-      run,
-      step,
-    });
-  },
+  prepareRetry: rejectUnboundCapabilityRetry,
+  execute: rejectUnboundCapabilityRetry,
 });
 
 export const createArxivImportStepHandler = () => ({
   id: "arxiv_import",
   label: "arXiv Import",
   canHandle: ({ step } = {}) => getStepType(step) === "arxiv_import",
-  prepareRetry({ step = {} } = {}) {
-    const input = getArxivImportInput({
-      step,
-    });
-
-    if (!input?.topic) {
-      fail("arxiv_import retry requires a sanitized topic input.");
-    }
-
-    return {
-      input,
-    };
-  },
-  async execute({
-    accessScope = {},
-    agentRunService,
-    capabilityRegistry,
-    run,
-    step,
-  } = {}) {
-    const input = getArxivImportInput({
-      step,
-    });
-
-    if (!input?.topic) {
-      fail("arxiv_import retry requires a sanitized topic input.");
-    }
-
-    return executeCapabilityBackedStep({
-      accessScope,
-      agentRunService,
-      approval: {
-        approved: true,
-        decision: "approved",
-        source: "agent_run_step_retry",
-      },
-      capabilityId: CAPABILITY_IDS.arxivImportTopic,
-      capabilityRegistry,
-      input,
-      run,
-      step,
-    });
-  },
+  prepareRetry: rejectUnboundCapabilityRetry,
+  execute: rejectUnboundCapabilityRetry,
 });

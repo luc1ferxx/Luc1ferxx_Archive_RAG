@@ -16,13 +16,14 @@ export const runLifecycleStep = async ({
   id,
   input,
   label,
+  persistedInput = input,
   stepLifecycle,
   succeeded = (result) => result?.ok !== false,
   type,
 } = {}) => {
   await (stepLifecycle?.startStep ?? noop)({
     id,
-    input,
+    input: persistedInput,
     label,
     type,
   });
@@ -36,6 +37,7 @@ export const runLifecycleStep = async ({
       await (stepLifecycle?.pauseStep ?? noop)({
         detail: buildInterruptStepDetail(error),
         id,
+        input: null,
       });
       throw error;
     }

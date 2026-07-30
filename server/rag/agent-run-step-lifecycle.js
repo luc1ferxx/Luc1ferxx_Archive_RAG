@@ -40,9 +40,10 @@ export const createAgentRunStepLifecycle = ({
       });
     },
 
-    pauseStep({ detail, id } = {}) {
+    pauseStep({ detail, id, input = null } = {}) {
       return recordStep({
         detail,
+        input,
         status: AGENT_RUN_STEP_STATUSES.paused,
         stepId: id,
       });

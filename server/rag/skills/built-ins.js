@@ -493,11 +493,12 @@ const createWebSearchSkill = () => ({
       summary: "Use web context only after document evidence is checked.",
     },
   ],
-  execute: async ({ capabilityRegistry, question }) => {
+  execute: async ({ accessScope, capabilityRegistry, question }) => {
     const value = await requireCapabilityRegistry(
       capabilityRegistry,
       CAPABILITY_IDS.webSearch
     ).execute(CAPABILITY_IDS.webSearch, {
+      accessScope,
       input: {
         question,
       },

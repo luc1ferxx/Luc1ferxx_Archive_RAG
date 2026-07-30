@@ -591,6 +591,10 @@ test("agent rag pauses on capability approval gates without executing the capabi
   assert.equal(response.body.clarification.reason, "capability_approval_required");
   assert.equal(response.body.approvalGates.length, 1);
   assert.equal(response.body.approvalGates[0].capabilityId, CAPABILITY_IDS.webSearch);
+  assert.match(
+    response.body.approvalGates[0].approvalObjectHash,
+    /^sha256:[a-f0-9]{64}$/
+  );
   assert.deepEqual(response.body.approvalGates[0].inputPreview, {
     question: "Search the web for the current launch date",
   });
@@ -609,6 +613,7 @@ test("agent rag pauses on capability approval gates without executing the capabi
   const webStep = run.steps.find((step) => step.id === "web_search:primary");
   assert.equal(webStep.type, "web_search");
   assert.equal(webStep.status, AGENT_RUN_STEP_STATUSES.paused);
+  assert.equal(webStep.input, null);
   assert.equal(
     webStep.detail.interruptType,
     "capability_approval_required"
@@ -622,8 +627,11 @@ test("agent rag pauses on capability approval gates without executing the capabi
       "step_started",
       "step_paused",
       "approval_gate_created",
-      "run_completed",
     ]
+  );
+  assert.equal(
+    run.events.at(-1).payload.approvalObjectHash,
+    run.approvalGates[0].approvalObjectHash
   );
 });
 

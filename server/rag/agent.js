@@ -19,7 +19,10 @@ import {
 } from "./agent-intent-planner.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
 import { AGENT_RUN_STATUSES } from "./agent-runs.js";
-import { isAgentRunInterrupt } from "./agent-interrupts.js";
+import {
+  getAgentRunInterruptPrivateDetail,
+  isAgentRunInterrupt,
+} from "./agent-interrupts.js";
 import {
   buildCapabilityApprovalClarification,
   createDefaultCapabilityRegistry,
@@ -146,7 +149,11 @@ const mergeApprovalGates = (...gateLists) => {
   return [...gatesById.values()];
 };
 
-const buildRunCompletionPayload = (response = {}, existingRun = {}) => {
+const buildRunCompletionPayload = (
+  response = {},
+  existingRun = {},
+  { approvalSnapshots = [] } = {}
+) => {
   const body = response.body ?? {};
   const agentObservability = body.agentObservability ?? {};
   const steps = buildAgentRunStepsFromTrace({
@@ -161,6 +168,7 @@ const buildRunCompletionPayload = (response = {}, existingRun = {}) => {
         : AGENT_RUN_STATUSES.completed;
 
   return {
+    approvalSnapshots,
     approvalGates: attachApprovalGateStepIds({
       gates: mergeApprovalGates(
         existingRun.approvalGates ?? [],
@@ -200,6 +208,7 @@ const buildRunCompletionPayload = (response = {}, existingRun = {}) => {
 const completeRecordedRun = async ({
   accessScope,
   agentRunService,
+  approvalSnapshots = [],
   response,
   runId,
 } = {}) => {
@@ -215,7 +224,9 @@ const completeRecordedRun = async ({
   return agentRunService.completeRun({
     accessScope,
     runId,
-    ...buildRunCompletionPayload(response, existingRun ?? {}),
+    ...buildRunCompletionPayload(response, existingRun ?? {}, {
+      approvalSnapshots,
+    }),
   });
 };
 
@@ -291,6 +302,7 @@ const attachAgentExperienceMemoryWrite = (response = {}, writeResult = {}) => {
 const completeRecordedRunAndExperience = async ({
   accessScope,
   agentRunService,
+  approvalSnapshots = [],
   question,
   response,
   runId,
@@ -316,6 +328,7 @@ const completeRecordedRunAndExperience = async ({
   const completedRun = await completeRecordedRun({
     accessScope,
     agentRunService,
+    approvalSnapshots,
     response: responseWithExperienceMemory,
     runId,
   });
@@ -618,16 +631,8 @@ export const runAgentRag = async ({
   } catch (error) {
     if (isAgentRunInterrupt(error)) {
       const clarification = buildCapabilityApprovalClarification(error);
-
-      await agentRunService?.appendRunEvent?.({
-        accessScope,
-        runId: agentRunId,
-        type: "approval_gate_created",
-        payload: {
-          approvalGate: clarification.detail?.approvalGate ?? null,
-          interruptType: error.type,
-        },
-      });
+      const privateInterruptDetail =
+        getAgentRunInterruptPrivateDetail(error);
 
       const response = attachAgentRunId(
         await returnClarification(clarification, {
@@ -639,6 +644,9 @@ export const runAgentRag = async ({
       return completeRecordedRunAndExperience({
         accessScope,
         agentRunService,
+        approvalSnapshots: privateInterruptDetail?.approvalSnapshot
+          ? [privateInterruptDetail.approvalSnapshot]
+          : [],
         question,
         response,
         runId: agentRunId,

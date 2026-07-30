@@ -6,6 +6,10 @@ import {
   evaluateArxivPaperRelevance,
   rankArxivTopicCandidatesFromDocumentProfile,
 } from "../rag/arxiv-enrichment.js";
+import {
+  createJobOrchestrator,
+  TASK_ACTIONS,
+} from "../rag/job-orchestrator.js";
 import { createRecommendationTaskService } from "../rag/recommendation-tasks.js";
 import {
   createInMemoryTaskStore,
@@ -760,6 +764,121 @@ test("arxiv enrichment runner queues confirmed imports and records per-paper pro
   assert.equal(finalTask.status, TASK_STATUSES.completed);
   assert.equal(finalTask.items[0].status, TASK_STATUSES.completed);
   assert.equal(finalTask.items[0].result.docId, "doc-arxiv");
+});
+
+test("arxiv background task writes remain fenced after cancellation", async () => {
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  let releaseImport;
+  let markImportStarted;
+  let importAssertClaimActive;
+  let importCompleted = false;
+  let importSignal;
+  const importStarted = new Promise((resolve) => {
+    markImportStarted = resolve;
+  });
+  const importReleased = new Promise((resolve) => {
+    releaseImport = resolve;
+  });
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importPapers: async ({ assertClaimActive, papers, signal }) => {
+        importAssertClaimActive = assertClaimActive;
+        importSignal = signal;
+        markImportStarted();
+        await importReleased;
+        assertClaimActive();
+        importCompleted = true;
+
+        return {
+          failedCount: 0,
+          failedPapers: [],
+          foundCount: papers.length,
+          importedCount: 1,
+          importedPapers: [
+            {
+              arxivId: papers[0].arxivId,
+              docId: "doc-imported-after-cancel",
+              status: "imported",
+              title: papers[0].title,
+            },
+          ],
+          requestedMaxResults: papers.length,
+          skippedCount: 0,
+          skippedPapers: [],
+          topic: "retrieval augmented generation",
+        };
+      },
+    },
+    arxivService: {
+      search: async () => [
+        {
+          arxivId: "2401.00001v1",
+          pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+          summary: "Retrieval augmented generation for archive search.",
+          title: "Retrieval Augmented Generation for Archives",
+        },
+      ],
+    },
+    recommendationTaskService: createRecommendationTaskService({
+      taskService,
+    }),
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: {
+          tags: ["retrieval", "augmented", "generation"],
+        },
+      }),
+    },
+  });
+  const suggestion = await service.suggestForDocument({
+    docId: "doc-1",
+    maxResults: 3,
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: {
+      [service.importJobRunner.id]: service.importJobRunner,
+    },
+    taskService,
+  });
+
+  await orchestrator.resumeTask({
+    action: TASK_ACTIONS.confirm,
+    payload: {
+      selectedArxivIds: ["2401.00001v1"],
+      selectionToken: suggestion.selectionToken,
+    },
+    runImmediately: false,
+    taskId: suggestion.task.id,
+  });
+  const running = orchestrator.runTask({
+    taskId: suggestion.task.id,
+  });
+
+  await importStarted;
+  const canceled = await orchestrator.resumeTask({
+    action: TASK_ACTIONS.cancel,
+    taskId: suggestion.task.id,
+  });
+  assert.equal(importSignal?.aborted, true);
+  assert.throws(
+    () => importAssertClaimActive?.(),
+    (error) => error?.code === "TASK_CLAIM_LOST"
+  );
+  releaseImport();
+  await running;
+
+  const finalTask = await taskService.getTask({
+    taskId: suggestion.task.id,
+  });
+
+  assert.equal(canceled.status, TASK_STATUSES.canceled);
+  assert.equal(finalTask.status, TASK_STATUSES.canceled);
+  assert.equal(finalTask.result.importedPapers, undefined);
+  assert.equal(importCompleted, false);
 });
 
 test("arxiv enrichment rejects selected papers outside the signed recommendation set", async () => {

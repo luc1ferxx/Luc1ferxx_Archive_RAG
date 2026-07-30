@@ -138,11 +138,12 @@ export const createGoalLifecycleCase = () => ({
       accessScope: DEFAULT_ACCESS_SCOPE,
       action: AGENT_TASK_ACTIONS.approveDeliverables,
       payload: {
-        approval: {
-          approved: true,
-          decision: "approved",
-          source: "trajectory_eval",
-        },
+        approvalBindings: (pendingTask.result.approvalGates ?? []).map(
+          (gate) => ({
+            approvalObjectHash: gate.approvalObjectHash,
+            gateId: gate.id,
+          })
+        ),
       },
       runImmediately: false,
       taskId: "agent_goal:trajectory-goal",

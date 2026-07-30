@@ -17,12 +17,17 @@ export {
   getCapabilityResultText,
 };
 
-const findApprovalGate = ({ gateId = "", run } = {}) =>
-  (run?.approvalGates ?? []).find(
+const findApprovalGate = ({ gateId = "", run } = {}) => {
+  const normalizedGateId = normalizeText(gateId);
+
+  return (run?.approvalGates ?? []).find(
     (gate) =>
       gate.status === "approved" &&
-      (!gateId || gate.id === gateId || gate.stepId === gateId)
+      (!normalizedGateId ||
+        normalizeText(gate.id) === normalizedGateId ||
+        normalizeText(gate.stepId) === normalizedGateId)
   );
+};
 
 const findApprovedGateForStep = ({ run, step } = {}) =>
   findApprovalGate({
@@ -192,10 +197,11 @@ export const createAgentRunStepExecutor = ({
       runId,
     } = {}) {
       const normalizedAction = normalizeAction(action);
+      const normalizedGateId = normalizeText(gateId);
       const run = await agentRunService.applyApprovalAction({
         accessScope,
         action: normalizedAction,
-        gateId,
+        gateId: normalizedGateId,
         payload,
         runId,
       });
@@ -207,7 +213,7 @@ export const createAgentRunStepExecutor = ({
       }
 
       const gate = findApprovalGate({
-        gateId,
+        gateId: normalizedGateId,
         run,
       });
       const step = findCapabilityStepForGate({

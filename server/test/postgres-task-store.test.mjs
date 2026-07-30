@@ -56,7 +56,9 @@ test("postgres task store persists scoped task snapshots and event records", asy
       };
     }
 
-    if (queryText.includes("INSERT INTO rag_task_events_test")) {
+    if (
+      queryText.trimStart().startsWith("INSERT INTO rag_task_events_test")
+    ) {
       events.push({
         eventPayload: parseJson(values[4], {}),
         eventType: values[3],
@@ -375,4 +377,236 @@ test("postgres task store list() uses parameterized LIMIT/OFFSET (never interpol
   assert.equal(listQuery.values.length, 5);
   assert.equal(listQuery.values[3], 50);
   assert.equal(listQuery.values[4], 25);
+});
+
+test("postgres task store claims atomically and fences writes by claim and attempt", async () => {
+  const capturedQueries = [];
+  let row = null;
+  const query = async (queryText, values = []) => {
+    capturedQueries.push({
+      queryText,
+      values,
+    });
+
+    if (queryText.includes("INSERT INTO rag_tasks_test")) {
+      row = buildFakeTaskRow(values, row);
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.trimStart().startsWith("INSERT INTO rag_task_events_test")
+    ) {
+      return {
+        rowCount: 1,
+        rows: [],
+      };
+    }
+
+    if (
+      queryText.includes("UPDATE rag_tasks_test") &&
+      queryText.includes("attempt_count = task.attempt_count + 1")
+    ) {
+      if (!row || row.status !== TASK_STATUSES.queued) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      Object.assign(row, {
+        attempt_count: row.attempt_count + 1,
+        claimed_at: "2026-06-13T00:00:00.000Z",
+        claimed_by: values[3],
+        next_run_at: null,
+        status: values[5],
+        updated_at: "2026-06-13T00:00:00.000Z",
+      });
+
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes("UPDATE rag_tasks_test") &&
+      queryText.includes("type = $8")
+    ) {
+      const expectedStatuses = new Set(values[3]);
+      const matches =
+        row &&
+        expectedStatuses.has(row.status) &&
+        (!values[4] ||
+          (row.claimed_by === values[5] &&
+            row.attempt_count === values[6]));
+
+      if (!matches) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      Object.assign(row, {
+        action: values[14],
+        claimed_at: values[23] ? "2026-06-13T00:00:00.000Z" : null,
+        claimed_by: values[23],
+        counts: parseJson(values[15], {}),
+        error: parseJson(values[19]),
+        input: parseJson(values[16], {}),
+        items: parseJson(values[17], []),
+        label: values[9],
+        next_run_at: values[22] || null,
+        payload: parseJson(values[20]),
+        provider: parseJson(values[11]),
+        required_user_action: values[21],
+        result: parseJson(values[18], {}),
+        runner_id: values[13],
+        status: values[8],
+        subject: parseJson(values[12]),
+        summary: values[10],
+        type: values[7],
+        updated_at: values[24],
+      });
+
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes("task_id = $3") &&
+      queryText.includes("FROM rag_tasks_test")
+    ) {
+      return {
+        rowCount: row ? 1 : 0,
+        rows: row ? [row] : [],
+      };
+    }
+
+    throw new Error(`Unexpected query: ${queryText}`);
+  };
+  const store = createPostgresTaskStore({
+    eventsTableName: "rag_task_events_test",
+    now: () => "2026-06-13T00:00:00.000Z",
+    query,
+    runMigrations: async () => ({ appliedMigrations: [], status: "ok" }),
+    tableName: "rag_tasks_test",
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await store.upsert({
+    accessScope,
+    task: {
+      id: "task-cas",
+      runnerId: "test_runner",
+      status: TASK_STATUSES.queued,
+      type: "agent_task",
+    },
+  });
+  const emptyTransition = await store.transition({
+    accessScope,
+    expectedStatuses: [],
+    patch: {
+      status: TASK_STATUSES.canceled,
+    },
+    taskId: "task-cas",
+  });
+  const claim = await store.claim({
+    accessScope,
+    claimId: "claim-a",
+    leaseMs: 60_000,
+    taskId: "task-cas",
+  });
+  const competingClaim = await store.claim({
+    accessScope,
+    claimId: "claim-b",
+    leaseMs: 60_000,
+    taskId: "task-cas",
+  });
+  const protectedProgress = await store.patchClaimed({
+    accessScope,
+    attemptCount: claim.attemptCount,
+    claimId: "claim-a",
+    patch: {
+      attemptCount: 999,
+      status: TASK_STATUSES.running,
+    },
+    taskId: "task-cas",
+  });
+  const completion = await store.patchClaimed({
+    accessScope,
+    attemptCount: claim.attemptCount,
+    claimId: "claim-a",
+    patch: {
+      status: TASK_STATUSES.completed,
+    },
+    taskId: "task-cas",
+  });
+  const staleWrite = await store.patchClaimed({
+    accessScope,
+    attemptCount: claim.attemptCount,
+    claimId: "claim-a",
+    patch: {
+      status: TASK_STATUSES.failed,
+    },
+    taskId: "task-cas",
+  });
+
+  assert.equal(emptyTransition.applied, false);
+  assert.equal(claim.applied, true);
+  assert.equal(claim.attemptCount, 1);
+  assert.equal(competingClaim.applied, false);
+  assert.equal(competingClaim.retryAfterMs, 60_000);
+  assert.equal(protectedProgress.applied, true);
+  assert.equal(protectedProgress.task.attemptCount, 1);
+  assert.equal(completion.applied, true);
+  assert.equal(completion.task.status, TASK_STATUSES.completed);
+  assert.equal(staleWrite.applied, false);
+  assert.equal(staleWrite.task.status, TASK_STATUSES.completed);
+
+  const claimQuery = capturedQueries.find(({ queryText }) =>
+    queryText.includes("attempt_count = task.attempt_count + 1")
+  );
+  const fencedQuery = capturedQueries.find(({ queryText }) =>
+    queryText.includes("type = $8")
+  );
+  const retryDelayQuery = capturedQueries.find(({ queryText }) =>
+    queryText.includes("AS retry_after_ms")
+  );
+
+  assert.match(
+    claimQuery.queryText,
+    /COALESCE\(task\.claimed_at, task\.updated_at\)/
+  );
+  assert.match(claimQuery.queryText, /next_run_at <= task_clock\.current_time/);
+  assert.match(claimQuery.queryText, /clock_timestamp\(\)/);
+  assert.match(claimQuery.queryText, /INTERVAL '1 millisecond'/);
+  assert.match(claimQuery.queryText, /recorded_event AS/);
+  assert.match(claimQuery.queryText, /CROSS JOIN recorded_event/);
+  assert.equal(claimQuery.values[3], "claim-a");
+  assert.match(fencedQuery.queryText, /status = ANY\(\$4::text\[\]\)/);
+  assert.doesNotMatch(fencedQuery.queryText, /CARDINALITY/);
+  assert.match(fencedQuery.queryText, /task\.claimed_by = \$6/);
+  assert.match(fencedQuery.queryText, /task\.attempt_count = \$7/);
+  assert.doesNotMatch(fencedQuery.queryText, /attempt_count = \$23/);
+  assert.match(fencedQuery.queryText, /recorded_event AS/);
+  assert.match(fencedQuery.queryText, /CROSS JOIN recorded_event/);
+  assert.match(retryDelayQuery.queryText, /clock_timestamp\(\)/);
+  assert.deepEqual(fencedQuery.values.slice(0, 7), [
+    "alice",
+    "workspace-a",
+    "task-cas",
+    [TASK_STATUSES.running],
+    true,
+    "claim-a",
+    1,
+  ]);
 });

@@ -41,8 +41,13 @@ export const useAgentRunActions = ({
     async ({ action, gate, turnIndex }) => {
       const turn = conversation[turnIndex];
       const runId = turn?.answer?.agentRunId;
+      const approvalObjectHash =
+        typeof gate?.approvalObjectHash === "string"
+          ? gate.approvalObjectHash.trim()
+          : "";
+      const gateId = typeof gate?.id === "string" ? gate.id.trim() : "";
 
-      if (!runId || !gate?.id) {
+      if (!runId || !gateId || !approvalObjectHash) {
         message.error(t("app.approvalMissing"));
         return;
       }
@@ -51,7 +56,8 @@ export const useAgentRunActions = ({
 
       try {
         const result = await requestAgentRunAction(runId, action, {
-          gateId: gate.id,
+          approvalObjectHash,
+          gateId,
         });
 
         if (action === "approve" && result?.response) {

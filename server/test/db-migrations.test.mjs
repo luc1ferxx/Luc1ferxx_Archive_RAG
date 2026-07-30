@@ -88,6 +88,7 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
         "CREATE TABLE __TASK_EVENTS_TABLE__ (id text);",
         "CREATE TABLE __AGENT_RUNS_TABLE__ (id text);",
         "CREATE TABLE __AGENT_RUN_EVENTS_TABLE__ (id text);",
+        "CREATE TABLE __AGENT_RUN_APPROVAL_SNAPSHOTS_TABLE__ (id text);",
         "CREATE TABLE __ADMIN_AUDIT_EVENTS_TABLE__ (id text);",
         "CREATE TABLE __WORKSPACE_ARTIFACTS_TABLE__ (id text);",
       ].join("\n");
@@ -129,6 +130,10 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
   assert.match(clientCalls[1].sql, /CREATE TABLE rag_documents/);
   assert.match(clientCalls[1].sql, /CREATE TABLE long_memory_items/);
   assert.match(clientCalls[1].sql, /CREATE TABLE rag_agent_run_events/);
+  assert.match(
+    clientCalls[1].sql,
+    /CREATE TABLE rag_agent_runs_approval_snapshots/
+  );
   assert.match(clientCalls[1].sql, /CREATE TABLE rag_admin_audit_events/);
   assert.match(clientCalls[1].sql, /CREATE TABLE rag_workspace_artifacts/);
   assert.deepEqual(clientCalls[2], {
@@ -175,6 +180,46 @@ test("workspace artifact migration enforces scoped idempotency", async () => {
     /PRIMARY KEY\s*\(owner_user_id, workspace_id, artifact_id\)/i
   );
   assert.match(migrationSql, /status IN \('active', 'archived'\)/i);
+});
+
+test("agent run revision migration adds an internal monotonic CAS column", async () => {
+  const migrationSql = await readFile(
+    path.join(
+      __dirname,
+      "../db/migrations/010_add_agent_run_revision.sql"
+    ),
+    "utf8"
+  );
+
+  assert.match(
+    migrationSql,
+    /ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0/i
+  );
+});
+
+test("agent run approval snapshot migration keeps private execution input scoped to its run", async () => {
+  const migrationSql = await readFile(
+    path.join(
+      __dirname,
+      "../db/migrations/011_create_agent_run_approval_snapshots.sql"
+    ),
+    "utf8"
+  );
+
+  assert.match(
+    migrationSql,
+    /CREATE TABLE IF NOT EXISTS __AGENT_RUN_APPROVAL_SNAPSHOTS_TABLE__/i
+  );
+  assert.match(
+    migrationSql,
+    /PRIMARY KEY\s*\(user_id, workspace_id, run_id, gate_id\)/i
+  );
+  assert.match(
+    migrationSql,
+    /FOREIGN KEY\s*\(user_id, workspace_id, run_id\)[\s\S]*REFERENCES __AGENT_RUNS_TABLE__/i
+  );
+  assert.match(migrationSql, /approval_object_hash TEXT NOT NULL/i);
+  assert.match(migrationSql, /execution_input JSONB NOT NULL/i);
 });
 
 test("PostgreSQL migrator rolls back failed migration files and can be retried", async () => {
@@ -268,6 +313,35 @@ test("PostgreSQL migrator rejects missing configuration and invalid table names"
   await assert.rejects(
     () => invalidTableMigrator.run(),
     /DOCUMENTS_POSTGRES_TABLE.*simple PostgreSQL identifier/
+  );
+});
+
+test("PostgreSQL migrator rejects a derived approval snapshot identifier that would be truncated", async () => {
+  const migrator = createPostgresMigrator({
+    getTableNames: () => ({
+      ...tableNames(),
+      agentRunsTable: "a".repeat(50),
+    }),
+    isPostgresConfigured: () => true,
+    queryPostgres: async (sql) =>
+      /SELECT id FROM schema_migrations/.test(sql)
+        ? {
+            rows: [],
+          }
+        : {
+            rows: [],
+          },
+    readFile: async () =>
+      "CREATE TABLE __AGENT_RUN_APPROVAL_SNAPSHOTS_TABLE__ (id text);",
+    readdir: async () => ["011_approval_snapshots.sql"],
+    withPostgresClient: async () => {
+      throw new Error("migration should not reach the database client");
+    },
+  });
+
+  await assert.rejects(
+    () => migrator.run(),
+    /derived agent run approval snapshots table.*63 bytes/i
   );
 });
 

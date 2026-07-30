@@ -245,6 +245,7 @@ export const runAgentExecutionPlan = async ({
           state.ragResult?.ok === false);
 
       const webSearchResult = await runWebSearchSkill({
+        accessScope,
         addBudgetLimitTrace,
         addTraceStep,
         budgetState,

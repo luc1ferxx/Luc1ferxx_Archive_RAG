@@ -7,6 +7,56 @@ import {
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
 import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
+import { createApprovalExecutionSnapshot } from "../rag/capabilities/approval-execution-snapshot.js";
+
+const buildApprovalFixture = ({
+  accessScope,
+  capabilityId = "web.search",
+  capabilityLabel = "Web Search",
+  capabilityVersion = "1.0.0",
+  executionInput = {
+    question: "Search the web.",
+  },
+  gateId,
+  inputPreview = executionInput,
+  stepId,
+} = {}) => {
+  const snapshot = createApprovalExecutionSnapshot({
+    accessScope,
+    capabilityId,
+    capabilityVersion,
+    executionInput,
+    inputPreview,
+  });
+  const resolvedGateId =
+    gateId ||
+    `approval:${capabilityId}:${capabilityVersion}:${snapshot.approvalObjectHash.slice(
+      "sha256:".length
+    )}`;
+  const gate = {
+    approvalObjectHash: snapshot.approvalObjectHash,
+    capabilityId,
+    capabilityLabel,
+    capabilityVersion,
+    id: resolvedGateId,
+    inputPreview,
+    snapshotVersion: snapshot.snapshotVersion,
+    status: "pending",
+    ...(stepId ? { stepId } : {}),
+  };
+
+  return {
+    gate,
+    snapshot: {
+      approvalObjectHash: snapshot.approvalObjectHash,
+      capabilityId,
+      capabilityVersion,
+      executionInput: snapshot.privateSnapshot.executionInput,
+      gateId: resolvedGateId,
+      snapshotVersion: snapshot.snapshotVersion,
+    },
+  };
+};
 
 test("agent run service records scoped runs, events, and completion snapshots", async () => {
   const agentRunService = createAgentRunService({
@@ -102,6 +152,324 @@ test("agent run service records scoped runs, events, and completion snapshots", 
   );
 });
 
+test("agent run creation is insert-only for a scoped run id", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Original goal",
+    runId: "run-duplicate",
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    label: "Original step",
+    runId: "run-duplicate",
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "step-original",
+  });
+
+  await assert.rejects(
+    () =>
+      agentRunService.createRun({
+        accessScope,
+        goal: "Replacement goal",
+        runId: "run-duplicate",
+      }),
+    (error) => {
+      assert.equal(error.code, "AGENT_RUN_ALREADY_EXISTS");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+
+  const storedRun = await agentRunService.getRun({
+    accessScope,
+    runId: "run-duplicate",
+  });
+
+  assert.equal(storedRun.goal, "Original goal");
+  assert.deepEqual(storedRun.steps.map((step) => step.id), ["step-original"]);
+});
+
+test("in-memory updateWithEvent rolls back the snapshot when event persistence fails", async () => {
+  const store = createInMemoryAgentRunStore({
+    now: () => "2026-06-14T00:00:00.000Z",
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+
+  store.create({
+    accessScope,
+    run: {
+      goal: "Keep the snapshot and event in one commit.",
+      runId: "run-atomic-update",
+    },
+  });
+  const originalAppendEvent = store.appendEvent;
+  store.appendEvent = () => {
+    throw new Error("Simulated event persistence failure.");
+  };
+
+  await assert.rejects(
+    () =>
+      store.updateWithEvent({
+        accessScope,
+        event: {
+          type: "run_completed",
+        },
+        expectedRevision: 0,
+        patch: {
+          status: AGENT_RUN_STATUSES.completed,
+        },
+        runId: "run-atomic-update",
+      }),
+    /Simulated event persistence failure/
+  );
+
+  store.appendEvent = originalAppendEvent;
+  const run = store.get({
+    accessScope,
+    runId: "run-atomic-update",
+  });
+
+  assert.equal(run.revision, 0);
+  assert.equal(run.status, AGENT_RUN_STATUSES.running);
+  assert.deepEqual(run.events, []);
+});
+
+test("agent run completion merges stale incoming steps without deleting newer persisted steps", async () => {
+  const agentRunService = createAgentRunService();
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-stale-completion-steps";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Preserve every persisted step.",
+    runId,
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    label: "Step A",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "step-a",
+    type: "document_rag",
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    output: {
+      text: "A",
+    },
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.completed,
+    stepId: "step-a",
+  });
+
+  const staleRun = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  await agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    label: "Step B",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "step-b",
+    type: "web_search",
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    output: {
+      text: "B",
+    },
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.completed,
+    stepId: "step-b",
+  });
+
+  const completedRun = await agentRunService.completeRun({
+    accessScope,
+    runId,
+    status: AGENT_RUN_STATUSES.completed,
+    steps: staleRun.steps.map((step) =>
+      step.id === "step-a"
+        ? {
+            ...step,
+            summary: "Updated by completion.",
+          }
+        : step
+    ),
+  });
+
+  assert.deepEqual(
+    completedRun.steps.map((step) => step.id),
+    ["step-a", "step-b"]
+  );
+  assert.equal(
+    completedRun.steps.find((step) => step.id === "step-a").summary,
+    "Updated by completion."
+  );
+  assert.equal(
+    completedRun.steps.find((step) => step.id === "step-b").output.text,
+    "B"
+  );
+});
+
+test("agent run completion retries a concurrent step write and rejects post-terminal steps", async () => {
+  const baseStore = createInMemoryAgentRunStore();
+  let completeUpdateStarted;
+  let releaseCompleteUpdate;
+  let shouldDelayCompletion = true;
+  const completionUpdateStarted = new Promise((resolve) => {
+    completeUpdateStarted = resolve;
+  });
+  const completionUpdateReleased = new Promise((resolve) => {
+    releaseCompleteUpdate = resolve;
+  });
+  const agentRunStore = {
+    ...baseStore,
+    async update(options = {}) {
+      if (
+        shouldDelayCompletion &&
+        options.patch?.status === AGENT_RUN_STATUSES.completed
+      ) {
+        shouldDelayCompletion = false;
+        completeUpdateStarted();
+        await completionUpdateReleased;
+      }
+
+      return baseStore.update(options);
+    },
+  };
+  const agentRunService = createAgentRunService({
+    agentRunStore,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-complete-step-race";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Complete after the last concurrent step write.",
+    runId,
+  });
+
+  const completing = agentRunService.completeRun({
+    accessScope,
+    result: {
+      answer: "Done.",
+    },
+    runId,
+  });
+
+  await completionUpdateStarted;
+
+  const recording = agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    label: "Concurrent step",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "step-concurrent",
+    type: "document_rag",
+  });
+
+  await recording;
+  releaseCompleteUpdate();
+
+  const completedRun = await completing;
+
+  assert.equal(completedRun.status, AGENT_RUN_STATUSES.completed);
+  assert.deepEqual(
+    completedRun.steps.map((step) => step.id),
+    ["step-concurrent"]
+  );
+
+  await assert.rejects(
+    () =>
+      agentRunService.recordRunStep({
+        accessScope,
+        eventType: "step_started",
+        runId,
+        status: AGENT_RUN_STEP_STATUSES.running,
+        stepId: "step-after-completion",
+        type: "web_search",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(
+        error.message,
+        /Agent run steps cannot be changed while run is completed/
+      );
+      return true;
+    }
+  );
+});
+
+test("agent run service preserves ten distinct steps recorded concurrently", async () => {
+  const agentRunService = createAgentRunService();
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-ten-concurrent-steps";
+  const stepIds = Array.from({ length: 10 }, (_, index) => `step-${index + 1}`);
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Record a wider concurrent step fan-out.",
+    runId,
+  });
+
+  await Promise.all(
+    stepIds.map((stepId) =>
+      agentRunService.recordRunStep({
+        accessScope,
+        eventType: "step_started",
+        label: stepId,
+        runId,
+        status: AGENT_RUN_STEP_STATUSES.running,
+        stepId,
+        type: "document_rag",
+      })
+    )
+  );
+
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  assert.deepEqual(
+    run.steps.map((step) => step.id).sort(),
+    [...stepIds].sort()
+  );
+  assert.deepEqual(
+    run.events
+      .filter((event) => event.type === "step_started")
+      .map((event) => event.payload.stepId)
+      .sort(),
+    [...stepIds].sort()
+  );
+});
+
 test("agent run service exposes recoverable running runs", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
@@ -132,6 +500,9 @@ test("agent run service records approval gate actions", async () => {
     userId: "alice",
     workspaceId: "workspace-a",
   };
+  const approval = buildApprovalFixture({
+    accessScope,
+  });
 
   await agentRunService.createRun({
     accessScope,
@@ -141,13 +512,8 @@ test("agent run service records approval gate actions", async () => {
   });
   await agentRunService.completeRun({
     accessScope,
-    approvalGates: [
-      {
-        id: "approval:web.search:1.0.0",
-        capabilityId: "web.search",
-        status: "pending",
-      },
-    ],
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
     runId: "run-approval",
     status: AGENT_RUN_STATUSES.waitingForUser,
   });
@@ -155,7 +521,10 @@ test("agent run service records approval gate actions", async () => {
   const approvedRun = await agentRunService.applyApprovalAction({
     accessScope,
     action: "approve",
-    gateId: "approval:web.search:1.0.0",
+    gateId: approval.gate.id,
+    payload: {
+      approvalObjectHash: approval.gate.approvalObjectHash,
+    },
     runId: "run-approval",
   });
 
@@ -164,13 +533,444 @@ test("agent run service records approval gate actions", async () => {
   assert.equal(approvedRun.steps[0].kind, "capability_call");
   assert.equal(approvedRun.steps[0].status, "pending");
   assert.equal(approvedRun.steps[0].capabilityId, "web.search");
+  assert.equal(approvedRun.steps[0].input, null);
+  assert.equal(
+    approvedRun.steps[0].detail.approvalObjectHash,
+    approval.gate.approvalObjectHash
+  );
   assert.deepEqual(
     approvedRun.events.map((event) => event.type),
     [
       "run_created",
-      "run_completed",
+      "approval_gate_created",
       "approval_gate_approved",
     ]
+  );
+});
+
+test("agent run service rejects legacy approval gates without a private snapshot without changing state", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const approval = buildApprovalFixture({
+    accessScope,
+  });
+  const runId = "run-legacy-approval";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Do not execute a lossy legacy approval.",
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [approval.gate],
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  const beforeApproval = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  await assert.rejects(
+    () =>
+      agentRunService.applyApprovalAction({
+        accessScope,
+        action: "approve",
+        gateId: approval.gate.id,
+        payload: {
+          approvalObjectHash: approval.gate.approvalObjectHash,
+        },
+        runId,
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.equal(error.code, "approval_snapshot_missing");
+      return true;
+    }
+  );
+
+  const afterApproval = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  assert.deepEqual(afterApproval, beforeApproval);
+  assert.equal(afterApproval.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(afterApproval.approvalGates[0].status, "pending");
+  assert.deepEqual(
+    afterApproval.events.map((event) => event.type),
+    ["run_created", "approval_gate_created"]
+  );
+});
+
+test("agent run service rejects conflicting approval gate ids before mutating the run", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const approval = buildApprovalFixture({
+    accessScope,
+  });
+  const runId = "run-conflicting-approval-gate-ids";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Bind the decision to one approval gate.",
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  const beforeApproval = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  await assert.rejects(
+    () =>
+      agentRunService.applyApprovalAction({
+        accessScope,
+        action: "approve",
+        gateId: approval.gate.id,
+        payload: {
+          approvalObjectHash: approval.gate.approvalObjectHash,
+          gateId: "approval:another-capability:1.0.0",
+        },
+        runId,
+      }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(error.message, /conflicting gate ids/i);
+      return true;
+    }
+  );
+
+  assert.deepEqual(
+    await agentRunService.getRun({
+      accessScope,
+      runId,
+    }),
+    beforeApproval
+  );
+});
+
+test("agent run public projections cannot mutate a persisted approval binding", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const approval = buildApprovalFixture({
+    accessScope,
+  });
+  const runId = "run-public-approval-clone";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Keep the approval object immutable.",
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+
+  const publicRun = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+  publicRun.approvalGates[0].approvalObjectHash = `sha256:${"0".repeat(64)}`;
+  publicRun.approvalGates[0].inputPreview.question = "tampered";
+  const [listedRun] = (
+    await agentRunService.listRuns({
+      accessScope,
+    })
+  ).runs;
+  listedRun.approvalGates[0].status = "approved";
+
+  const persistedRun = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(
+    persistedRun.approvalGates[0].approvalObjectHash,
+    approval.gate.approvalObjectHash
+  );
+  assert.equal(
+    persistedRun.approvalGates[0].inputPreview.question,
+    approval.gate.inputPreview.question
+  );
+  assert.equal(persistedRun.approvalGates[0].status, "pending");
+});
+
+test("in-memory approval snapshots are immutable even when a replacement reuses the stored hash", async () => {
+  const agentRunStore = createInMemoryAgentRunStore();
+  const agentRunService = createAgentRunService({
+    agentRunStore,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const approval = buildApprovalFixture({
+    accessScope,
+    executionInput: {
+      metadata: {
+        audience: "internal",
+      },
+      question: "Search the complete approved query.",
+    },
+    inputPreview: {
+      question: "Search the complete approved query.",
+    },
+  });
+  const runId = "run-immutable-private-approval-snapshot";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Do not replace an immutable private approval snapshot.",
+    runId,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
+    result: {
+      phase: "original",
+    },
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  const originalRun = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+  const originalSnapshot = await agentRunStore.getApprovalSnapshot({
+    accessScope,
+    gateId: approval.gate.id,
+    runId,
+  });
+
+  await assert.rejects(
+    () =>
+      agentRunService.completeRun({
+        accessScope,
+        approvalGates: [approval.gate],
+        approvalSnapshots: [
+          {
+            ...approval.snapshot,
+            executionInput: {
+              metadata: {
+                audience: "attacker-controlled",
+              },
+              question: "Execute a different operation.",
+            },
+          },
+        ],
+        result: {
+          phase: "replacement",
+        },
+        runId,
+        status: AGENT_RUN_STATUSES.waitingForUser,
+      }),
+    (error) => {
+      assert.equal(error.code, "AGENT_RUN_APPROVAL_SNAPSHOT_CONFLICT");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+
+  assert.deepEqual(
+    await agentRunService.getRun({
+      accessScope,
+      runId,
+    }),
+    originalRun
+  );
+  assert.deepEqual(
+    await agentRunStore.getApprovalSnapshot({
+      accessScope,
+      gateId: approval.gate.id,
+      runId,
+    }),
+    originalSnapshot
+  );
+});
+
+test("in-memory approval snapshot validation fails atomically before malformed private state can persist", async () => {
+  const agentRunStore = createInMemoryAgentRunStore();
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-malformed-private-approval-snapshot";
+
+  await agentRunStore.createWithEvent({
+    accessScope,
+    event: {
+      type: "run_created",
+    },
+    run: {
+      goal: "Reject malformed private approval state.",
+      runId,
+      status: AGENT_RUN_STATUSES.running,
+    },
+  });
+  const originalRun = await agentRunStore.get({
+    accessScope,
+    runId,
+  });
+
+  await assert.rejects(
+    () =>
+      agentRunStore.updateWithEvent({
+        accessScope,
+        approvalSnapshots: [
+          {
+            approvalObjectHash: "sha256:unbound",
+            gateId: "approval:malformed",
+          },
+        ],
+        event: {
+          type: "approval_gate_created",
+        },
+        expectedRevision: originalRun.revision,
+        patch: {
+          status: AGENT_RUN_STATUSES.waitingForUser,
+        },
+        runId,
+      }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(
+        error.message,
+        /requires gateId, capabilityId, capabilityVersion/
+      );
+      return true;
+    }
+  );
+
+  assert.deepEqual(
+    await agentRunStore.get({
+      accessScope,
+      runId,
+    }),
+    originalRun
+  );
+  assert.equal(
+    await agentRunStore.getApprovalSnapshot({
+      accessScope,
+      gateId: "approval:malformed",
+      runId,
+    }),
+    null
+  );
+});
+
+test("agent run service admits exactly one concurrent approval decision", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const approval = buildApprovalFixture({
+    accessScope,
+  });
+  const runId = "run-concurrent-approval-decision";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Resolve one approval decision.",
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+
+  const decisions = await Promise.allSettled([
+    agentRunService.applyApprovalAction({
+      accessScope,
+      action: "approve",
+      gateId: approval.gate.id,
+      payload: {
+        approvalObjectHash: approval.gate.approvalObjectHash,
+      },
+      runId,
+    }),
+    agentRunService.applyApprovalAction({
+      accessScope,
+      action: "deny",
+      gateId: approval.gate.id,
+      payload: {
+        approvalObjectHash: approval.gate.approvalObjectHash,
+      },
+      runId,
+    }),
+  ]);
+  const fulfilled = decisions.filter((decision) => decision.status === "fulfilled");
+  const rejected = decisions.filter((decision) => decision.status === "rejected");
+  const finalRun = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+  const gate = finalRun.approvalGates[0];
+  const capabilityStep = finalRun.steps.find(
+    (step) => step.kind === "capability_call"
+  );
+  const decisionEvents = finalRun.events.filter((event) =>
+    ["approval_gate_approved", "approval_gate_denied"].includes(event.type)
+  );
+
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].reason.status, 409);
+  assert.equal(decisionEvents.length, 1);
+  assert.equal(
+    decisionEvents[0].type,
+    gate.status === "approved"
+      ? "approval_gate_approved"
+      : "approval_gate_denied"
+  );
+  assert.equal(
+    capabilityStep.status,
+    gate.status === "approved"
+      ? AGENT_RUN_STEP_STATUSES.pending
+      : AGENT_RUN_STEP_STATUSES.skipped
+  );
+  assert.equal(Boolean(finalRun.result.approvalDenied), gate.status === "denied");
+  assert.equal(
+    capabilityStep.status === AGENT_RUN_STEP_STATUSES.pending &&
+      finalRun.result.approvalDenied === true,
+    false
   );
 });
 
@@ -184,6 +984,15 @@ test("agent run service resolves paused primary tool step when approval is appro
     userId: "alice",
     workspaceId: "workspace-a",
   };
+  const approval = buildApprovalFixture({
+    accessScope,
+    executionInput: {
+      question: "Search the web.",
+    },
+    inputPreview: {
+      question: "Search the web.",
+    },
+  });
 
   await agentRunService.createRun({
     accessScope,
@@ -193,23 +1002,15 @@ test("agent run service resolves paused primary tool step when approval is appro
   });
   await agentRunService.completeRun({
     accessScope,
-    approvalGates: [
-      {
-        id: "approval:web.search:1.0.0",
-        capabilityId: "web.search",
-        inputPreview: {
-          question: "Search the web.",
-        },
-        status: "pending",
-      },
-    ],
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
     runId: "run-approved-primary",
     status: AGENT_RUN_STATUSES.waitingForUser,
     steps: [
       {
         detail: {
           approvalGate: {
-            id: "approval:web.search:1.0.0",
+            id: approval.gate.id,
             capabilityId: "web.search",
           },
           interruptType: "capability_approval_required",
@@ -228,14 +1029,17 @@ test("agent run service resolves paused primary tool step when approval is appro
   const approvedRun = await agentRunService.applyApprovalAction({
     accessScope,
     action: "approve",
-    gateId: "approval:web.search:1.0.0",
+    gateId: approval.gate.id,
+    payload: {
+      approvalObjectHash: approval.gate.approvalObjectHash,
+    },
     runId: "run-approved-primary",
   });
   const primaryStep = approvedRun.steps.find(
     (step) => step.id === "web_search:primary"
   );
   const capabilityStep = approvedRun.steps.find(
-    (step) => step.id === "capability:web.search:approval:web.search:1.0.0"
+    (step) => step.id === `capability:web.search:${approval.gate.id}`
   );
 
   assert.equal(approvedRun.status, AGENT_RUN_STATUSES.running);
@@ -244,6 +1048,7 @@ test("agent run service resolves paused primary tool step when approval is appro
   assert.equal(primaryStep.detail.approvalDelegated, true);
   assert.equal(primaryStep.detail.delegatedStepId, capabilityStep.id);
   assert.equal(capabilityStep.status, AGENT_RUN_STEP_STATUSES.pending);
+  assert.equal(capabilityStep.input, null);
 });
 
 test("agent run service skips paused primary tool step when approval is denied", async () => {
@@ -256,6 +1061,15 @@ test("agent run service skips paused primary tool step when approval is denied",
     userId: "alice",
     workspaceId: "workspace-a",
   };
+  const approval = buildApprovalFixture({
+    accessScope,
+    executionInput: {
+      question: "Search the web.",
+    },
+    inputPreview: {
+      question: "Search the web.",
+    },
+  });
 
   await agentRunService.createRun({
     accessScope,
@@ -265,23 +1079,14 @@ test("agent run service skips paused primary tool step when approval is denied",
   });
   await agentRunService.completeRun({
     accessScope,
-    approvalGates: [
-      {
-        id: "approval:web.search:1.0.0",
-        capabilityId: "web.search",
-        inputPreview: {
-          question: "Search the web.",
-        },
-        status: "pending",
-      },
-    ],
+    approvalGates: [approval.gate],
     runId: "run-denial",
     status: AGENT_RUN_STATUSES.waitingForUser,
     steps: [
       {
         detail: {
           approvalGate: {
-            id: "approval:web.search:1.0.0",
+            id: approval.gate.id,
             capabilityId: "web.search",
           },
           interruptType: "capability_approval_required",
@@ -300,8 +1105,9 @@ test("agent run service skips paused primary tool step when approval is denied",
   const deniedRun = await agentRunService.applyApprovalAction({
     accessScope,
     action: "deny",
-    gateId: "approval:web.search:1.0.0",
+    gateId: approval.gate.id,
     payload: {
+      approvalObjectHash: approval.gate.approvalObjectHash,
       reason: "No external calls.",
     },
     runId: "run-denial",
@@ -310,7 +1116,7 @@ test("agent run service skips paused primary tool step when approval is denied",
     (step) => step.id === "web_search:primary"
   );
   const capabilityStep = deniedRun.steps.find(
-    (step) => step.id === "capability:web.search:approval:web.search:1.0.0"
+    (step) => step.id === `capability:web.search:${approval.gate.id}`
   );
 
   assert.equal(deniedRun.status, AGENT_RUN_STATUSES.completed);
@@ -322,7 +1128,7 @@ test("agent run service skips paused primary tool step when approval is denied",
     deniedRun.events.map((event) => event.type),
     [
       "run_created",
-      "run_completed",
+      "approval_gate_created",
       "approval_gate_denied",
     ]
   );
@@ -375,6 +1181,69 @@ test("agent run service queues a retry for a single persisted step", async () =>
   assert.deepEqual(
     retriedRun.events.map((event) => event.type),
     ["run_created", "run_failed", "step_retry_queued"]
+  );
+});
+
+test("agent run service admits only one concurrent retry command", async () => {
+  const agentRunService = createAgentRunService();
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-concurrent-retry";
+  const stepId = "document-step";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Retry one failed step once.",
+    runId,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    runId,
+    status: AGENT_RUN_STATUSES.failed,
+    steps: [
+      {
+        id: stepId,
+        label: "Document step",
+        status: AGENT_RUN_STEP_STATUSES.failed,
+        type: "document_rag",
+      },
+    ],
+  });
+
+  const results = await Promise.allSettled([
+    agentRunService.retryStep({
+      accessScope,
+      runId,
+      stepId,
+    }),
+    agentRunService.retryStep({
+      accessScope,
+      runId,
+      stepId,
+    }),
+  ]);
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(
+    results.filter((result) => result.status === "fulfilled").length,
+    1
+  );
+  assert.equal(
+    results.filter((result) => result.status === "rejected").length,
+    1
+  );
+  assert.equal(
+    run.steps.filter((step) => step.retryOfStepId === stepId).length,
+    1
+  );
+  assert.equal(
+    run.events.filter((event) => event.type === "step_retry_queued").length,
+    1
   );
 });
 

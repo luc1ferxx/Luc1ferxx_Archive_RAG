@@ -67,7 +67,9 @@ test("step replay safety matrix fixes contracts for core replay paths", () => {
 
   assert.deepEqual(matrix.capability_call.requiredInput, [
     "approvedGate.capabilityId",
-    "step.input|approvedGate.inputPreview",
+    "approvedGate.approvalObjectHash",
+    "step.approvalGateId",
+    "step.detail.approvalObjectHash",
   ]);
   assert.equal(
     matrix.capability_call.replayApprovalPolicy,
@@ -178,6 +180,7 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     run: {
       approvalGates: [
         {
+          capabilityId: CAPABILITY_IDS.webSearch,
           id: "gate-web",
           status: "pending",
         },
@@ -186,9 +189,7 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     step: {
       approvalGateId: "gate-web",
       id: "step-capability",
-      input: {
-        question: "Search the web.",
-      },
+      input: null,
       type: "capability_call",
     },
   });
@@ -201,8 +202,47 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
   );
   assert.ok(
     capabilityCall.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.missingInput
+    )
+  );
+  assert.ok(
+    capabilityCall.reasonCodes.includes(
       STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent
     )
+  );
+
+  const mismatchedApprovalHash = buildStepReplaySafetyAssessment({
+    run: {
+      approvalGates: [
+        {
+          approvalObjectHash: `sha256:${"a".repeat(64)}`,
+          capabilityId: CAPABILITY_IDS.webSearch,
+          id: "gate-web-mismatch",
+          status: "approved",
+        },
+      ],
+    },
+    step: {
+      approvalGateId: "gate-web-mismatch",
+      detail: {
+        approvalObjectHash: `sha256:${"b".repeat(64)}`,
+      },
+      id: "step-capability-mismatch",
+      input: null,
+      type: "capability_call",
+    },
+  });
+
+  assert.ok(
+    mismatchedApprovalHash.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval
+    )
+  );
+  assert.equal(
+    mismatchedApprovalHash.reasonCodes.includes(
+      STEP_REPLAY_SAFETY_REASON_CODES.missingInput
+    ),
+    false
   );
 });
 
@@ -211,11 +251,9 @@ test("action capability replay inherits the capability call safety matrix", () =
     run: {
       approvalGates: [
         {
+          approvalObjectHash: `sha256:${"a".repeat(64)}`,
           capabilityId: CAPABILITY_IDS.taskCreate,
           id: "approval:task.create:1.0.0",
-          inputPreview: {
-            title: "Review renewal risks",
-          },
           status: "approved",
         },
       ],
@@ -223,10 +261,11 @@ test("action capability replay inherits the capability call safety matrix", () =
     step: {
       approvalGateId: "approval:task.create:1.0.0",
       capabilityId: CAPABILITY_IDS.taskCreate,
-      id: "step-action-capability",
-      input: {
-        title: "Review renewal risks",
+      detail: {
+        approvalObjectHash: `sha256:${"a".repeat(64)}`,
       },
+      id: "step-action-capability",
+      input: null,
       type: "capability_call",
     },
   });

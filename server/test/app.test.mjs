@@ -1362,8 +1362,11 @@ test("agent trigger dispatch reports contract errors without creating tasks", as
 
 test("agent task API runs multi-step goals and resumes after approval", async () => {
   const approvalGate = {
+    approvalObjectHash: `sha256:${"a".repeat(64)}`,
     capabilityId: "web.search",
-    id: "approval:web.search:1.0.0",
+    capabilityVersion: "1.0.0",
+    id: `approval:web.search:1.0.0:${"a".repeat(64)}`,
+    snapshotVersion: 1,
     status: "pending",
   };
   const calls = [];
@@ -1538,12 +1541,8 @@ test("agent task API runs multi-step goals and resumes after approval", async ()
           ...scopeHeaders,
         },
         body: JSON.stringify({
-          approval: {
-            approved: true,
-            decision: "approved",
-            source: "task_action",
-          },
-          capabilityId: "web.search",
+          approvalObjectHash: approvalGate.approvalObjectHash,
+          gateId: approvalGate.id,
         }),
       }
     );
@@ -1574,7 +1573,9 @@ test("agent task API runs multi-step goals and resumes after approval", async ()
     assert.deepEqual(calls[2].capabilityApprovals, {
       "web.search": {
         approved: true,
+        approvalObjectHash: approvalGate.approvalObjectHash,
         decision: "approved",
+        gateId: approvalGate.id,
         source: "task_action",
       },
     });
@@ -2708,6 +2709,11 @@ test("chat endpoint agent gates web fallback when document evidence is insuffici
 
 test("agent run approval action resumes a pending capability gate", async () => {
   let webSearchCalls = 0;
+  let executedQuestion = "";
+  const privateSentinel = "PRIVATE-EXECUTION-SENTINEL-c725a91f";
+  const fullQuestion =
+    "Search the web for the current launch date and preserve this complete approval payload: " +
+    `${"release-window ".repeat(24)}${privateSentinel}`;
   const capabilityRegistry = createCapabilityRegistry([
     {
       id: CAPABILITY_IDS.webSearch,
@@ -2737,6 +2743,7 @@ test("agent run approval action resumes a pending capability gate", async () => 
       },
       execute: async ({ input }) => {
         webSearchCalls += 1;
+        executedQuestion = input.question;
 
         return {
           text: `Approved web answer for: ${input.question}`,
@@ -2773,7 +2780,7 @@ test("agent run approval action resumes a pending capability gate", async () => 
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        question: "Search the web for the current launch date",
+        question: fullQuestion,
       }),
     });
 
@@ -2784,6 +2791,27 @@ test("agent run approval action resumes a pending capability gate", async () => 
     assert.equal(webSearchCalls, 0);
     assert.equal(pendingBody.clarification.reason, "capability_approval_required");
     assert.equal(pendingBody.approvalGates[0].status, "pending");
+    assert.equal(pendingBody.approvalGates[0].inputPreview.question.length, 240);
+    assert.notEqual(
+      pendingBody.approvalGates[0].inputPreview.question,
+      fullQuestion
+    );
+    assert.match(
+      pendingBody.approvalGates[0].approvalObjectHash,
+      /^sha256:[a-f0-9]{64}$/
+    );
+    assert.equal(pendingBody.approvalGates[0].snapshotVersion, 1);
+    const pausedCapabilityStep = pendingBody.agentRunSteps.find(
+      (step) =>
+        step.status === "paused" &&
+        step.detail?.approvalGate?.id === pendingBody.approvalGates[0].id
+    );
+    assert.ok(pausedCapabilityStep);
+    assert.equal(pausedCapabilityStep.input, null);
+    assert.doesNotMatch(
+      JSON.stringify(pausedCapabilityStep),
+      new RegExp(privateSentinel)
+    );
 
     response = await fetch(
       `${server.baseUrl}/agent-runs/${pendingBody.agentRunId}/actions/approve`,
@@ -2793,7 +2821,41 @@ test("agent run approval action resumes a pending capability gate", async () => 
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          approvalObjectHash: `sha256:${"0".repeat(64)}`,
           gateId: pendingBody.approvalGates[0].id,
+        }),
+      }
+    );
+
+    assert.equal(response.status, 409);
+    assert.equal(webSearchCalls, 0);
+
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/${pendingBody.agentRunId}`
+    );
+    assert.equal(response.status, 200);
+    const unchangedRun = await response.json();
+    assert.equal(unchangedRun.status, "waiting_for_user");
+    assert.equal(unchangedRun.approvalGates[0].status, "pending");
+    assert.equal(
+      unchangedRun.events.some(
+        (event) => event.type === "approval_gate_approved"
+      ),
+      false
+    );
+
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/${pendingBody.agentRunId}/actions/approve`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          approvalObjectHash:
+            pendingBody.approvalGates[0].approvalObjectHash,
+          gateId: pendingBody.approvalGates[0].id,
+          status: "denied",
         }),
       }
     );
@@ -2803,6 +2865,7 @@ test("agent run approval action resumes a pending capability gate", async () => 
     const resumedBody = await response.json();
 
     assert.equal(webSearchCalls, 1);
+    assert.equal(executedQuestion, fullQuestion);
     assert.equal(resumedBody.response.agentRunId, pendingBody.agentRunId);
     assert.equal(resumedBody.response.agentMode, "web");
     assert.match(resumedBody.response.agentAnswer, /Approved web answer/);
@@ -2817,6 +2880,14 @@ test("agent run approval action resumes a pending capability gate", async () => 
     );
     assert.equal(resumedBody.run.status, "completed");
     assert.equal(resumedBody.run.approvalGates[0].status, "approved");
+    const completedCapabilityStep = resumedBody.run.steps.find(
+      (step) => step.kind === "capability_call"
+    );
+    assert.equal(completedCapabilityStep.input, null);
+    assert.equal(
+      completedCapabilityStep.detail.approvalObjectHash,
+      pendingBody.approvalGates[0].approvalObjectHash
+    );
     assert.match(
       resumedBody.run.approvalGates[0].stepId,
       /\d+-capability_approval_gate/
@@ -2830,7 +2901,6 @@ test("agent run approval action resumes a pending capability gate", async () => 
         "step_started",
         "step_paused",
         "approval_gate_created",
-        "run_completed",
         "approval_gate_approved",
         "step_started",
         "step_completed",

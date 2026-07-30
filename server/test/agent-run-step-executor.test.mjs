@@ -18,6 +18,7 @@ import {
   CAPABILITY_IDS,
   createDefaultCapabilityRegistry,
 } from "../rag/capabilities/index.js";
+import { createApprovalExecutionSnapshot } from "../rag/capabilities/approval-execution-snapshot.js";
 import {
   createInMemoryWorkspaceArtifactStore,
   createWorkspaceArtifactService,
@@ -28,7 +29,67 @@ const accessScope = {
   workspaceId: "workspace-a",
 };
 
+const buildApprovalFixture = ({
+  capabilityId,
+  capabilityLabel,
+  capabilityVersion = "1.0.0",
+  executionInput,
+  gateId,
+  inputPreview,
+  stepId = "2-capability_approval_gate",
+} = {}) => {
+  const snapshot = createApprovalExecutionSnapshot({
+    accessScope,
+    capabilityId,
+    capabilityVersion,
+    executionInput,
+    inputPreview,
+  });
+  const resolvedGateId =
+    gateId ||
+    `approval:${capabilityId}:${capabilityVersion}:${snapshot.approvalObjectHash.slice(
+      "sha256:".length
+    )}`;
+  const gate = {
+    approvalObjectHash: snapshot.approvalObjectHash,
+    capabilityId,
+    capabilityLabel,
+    capabilityVersion,
+    id: resolvedGateId,
+    inputPreview,
+    snapshotVersion: snapshot.snapshotVersion,
+    status: "pending",
+    stepId,
+  };
+
+  return {
+    executionInput: snapshot.privateSnapshot.executionInput,
+    gate,
+    snapshot: {
+      approvalObjectHash: snapshot.approvalObjectHash,
+      capabilityId,
+      capabilityVersion,
+      executionInput: snapshot.privateSnapshot.executionInput,
+      gateId: resolvedGateId,
+      snapshotVersion: snapshot.snapshotVersion,
+    },
+  };
+};
+
 const createPendingApprovalRun = async (agentRunService) => {
+  const completeQuestion =
+    `Search the web for the launch date. ${"complete approved context ".repeat(14)}`;
+  const approval = buildApprovalFixture({
+    capabilityId: "web.search",
+    capabilityLabel: "Web Search",
+    executionInput: {
+      question: completeQuestion,
+    },
+    inputPreview: {
+      question: completeQuestion.slice(0, 240),
+    },
+  });
+
   await agentRunService.createRun({
     accessScope,
     goal: "Search the web for the launch date.",
@@ -37,18 +98,8 @@ const createPendingApprovalRun = async (agentRunService) => {
   });
   await agentRunService.completeRun({
     accessScope,
-    approvalGates: [
-      {
-        id: "approval:web.search:1.0.0",
-        capabilityId: "web.search",
-        capabilityLabel: "Web Search",
-        inputPreview: {
-          question: "Search the web for the launch date.",
-        },
-        status: "pending",
-        stepId: "2-capability_approval_gate",
-      },
-    ],
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
     runId: "run-approval",
     status: AGENT_RUN_STATUSES.waitingForUser,
     steps: [
@@ -67,11 +118,13 @@ const createPendingApprovalRun = async (agentRunService) => {
         label: "Capability Approval",
         status: "paused",
         summary: "Web Search requires approval.",
-        approvalGateId: "approval:web.search:1.0.0",
+        approvalGateId: approval.gate.id,
         capabilityId: "web.search",
       },
     ],
   });
+
+  return approval;
 };
 
 const createCompletedRunWithSteps = async (agentRunService, {
@@ -251,39 +304,44 @@ test("agent run step executor resumes an approved capability step", async () => 
     },
   });
 
-  await createPendingApprovalRun(agentRunService);
+  const approval = await createPendingApprovalRun(agentRunService);
 
   const result = await executor.applyApprovalAction({
     accessScope,
     action: "approve",
-    gateId: "approval:web.search:1.0.0",
+    gateId: `  ${approval.gate.id}  `,
+    payload: {
+      approvalObjectHash: approval.gate.approvalObjectHash,
+    },
     runId: "run-approval",
   });
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].capabilityId, "web.search");
   assert.equal(calls[0].payload.approval.approved, true);
-  assert.equal(
-    calls[0].payload.input.question,
-    "Search the web for the launch date."
-  );
+  assert.deepEqual(calls[0].payload.input, approval.executionInput);
+  assert.ok(calls[0].payload.input.question.length > 240);
   assert.equal(result.response.agentMode, "web");
   assert.match(result.response.agentAnswer, /Approved answer/);
   assert.equal(result.run.status, AGENT_RUN_STATUSES.completed);
   assert.equal(result.run.approvalGates[0].status, "approved");
-  assert.ok(
-    result.run.steps.some(
-      (step) =>
-        step.kind === "capability_call" &&
-        step.status === "completed" &&
-        step.capabilityId === "web.search"
-    )
+  const capabilityStep = result.run.steps.find(
+    (step) =>
+      step.kind === "capability_call" &&
+      step.status === "completed" &&
+      step.capabilityId === "web.search"
+  );
+  assert.ok(capabilityStep);
+  assert.equal(capabilityStep.input, null);
+  assert.equal(
+    capabilityStep.detail.approvalObjectHash,
+    approval.gate.approvalObjectHash
   );
   assert.deepEqual(
     result.run.events.map((event) => event.type),
     [
       "run_created",
-      "run_completed",
+      "approval_gate_created",
       "approval_gate_approved",
       "step_started",
       "step_completed",
@@ -419,11 +477,14 @@ test("agent run step executor retries an approved capability step", async () => 
     },
   });
 
-  await createPendingApprovalRun(agentRunService);
+  const approval = await createPendingApprovalRun(agentRunService);
   const approved = await executor.applyApprovalAction({
     accessScope,
     action: "approve",
-    gateId: "approval:web.search:1.0.0",
+    gateId: approval.gate.id,
+    payload: {
+      approvalObjectHash: approval.gate.approvalObjectHash,
+    },
     runId: "run-approval",
   });
   const capabilityStep = approved.run.steps.find(
@@ -499,6 +560,29 @@ test("approved report artifact resume and nested retries create one stored artif
       workspaceArtifactService,
     }),
   });
+  const reportInput = {
+    citations: [
+      {
+        docId: "doc-1",
+        excerpt: "Complete approved report evidence.",
+      },
+    ],
+    content: "Replay-safe report content.",
+    format: "markdown",
+    metadata: {
+      approvedFromSnapshot: true,
+    },
+    title: "Replay-safe report",
+  };
+  const approval = buildApprovalFixture({
+    capabilityId: CAPABILITY_IDS.reportExport,
+    capabilityLabel: "Report Export",
+    executionInput: reportInput,
+    inputPreview: {
+      format: reportInput.format,
+      title: reportInput.title,
+    },
+  });
 
   await agentRunService.createRun({
     accessScope,
@@ -508,20 +592,8 @@ test("approved report artifact resume and nested retries create one stored artif
   });
   await agentRunService.completeRun({
     accessScope,
-    approvalGates: [
-      {
-        id: "approval:report.export:1.0.0",
-        capabilityId: CAPABILITY_IDS.reportExport,
-        capabilityLabel: "Report Export",
-        inputPreview: {
-          content: "Replay-safe report content.",
-          format: "markdown",
-          title: "Replay-safe report",
-        },
-        status: "pending",
-        stepId: "2-capability_approval_gate",
-      },
-    ],
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
     runId: "run-report-approval",
     status: AGENT_RUN_STATUSES.waitingForUser,
     steps: [
@@ -532,21 +604,40 @@ test("approved report artifact resume and nested retries create one stored artif
         label: "Capability Approval",
         status: "paused",
         summary: "Report Export requires approval.",
-        approvalGateId: "approval:report.export:1.0.0",
+        approvalGateId: approval.gate.id,
         capabilityId: CAPABILITY_IDS.reportExport,
       },
     ],
   });
+  const publicPendingRun = await agentRunService.getRun({
+    accessScope,
+    runId: "run-report-approval",
+  });
+
+  assert.doesNotMatch(
+    JSON.stringify(publicPendingRun),
+    /Replay-safe report content/
+  );
+  assert.equal(
+    Object.hasOwn(publicPendingRun, "approvalSnapshots"),
+    false
+  );
 
   const approved = await executor.applyApprovalAction({
     accessScope,
     action: "approve",
-    gateId: "approval:report.export:1.0.0",
+    gateId: approval.gate.id,
+    payload: {
+      approvalObjectHash: approval.gate.approvalObjectHash,
+    },
     runId: "run-report-approval",
   });
   const capabilityStep = approved.run.steps.find(
     (step) => step.kind === "capability_call"
   );
+  assert.equal(capabilityStep.input, null);
+  assert.equal(approval.gate.inputPreview.content, undefined);
+  assert.equal(approval.executionInput.content, reportInput.content);
   const firstRetry = await executor.retryStep({
     accessScope,
     runId: "run-report-approval",
@@ -572,7 +663,119 @@ test("approved report artifact resume and nested retries create one stored artif
   assert.equal(artifactId, 3);
 });
 
-test("agent run step executor retries web_search through the capability handler", async () => {
+test("denied approval-capable primary steps cannot be retried through an unbound execution path", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  let externalCallCount = 0;
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    capabilityRegistry: {
+      execute: async () => {
+        externalCallCount += 1;
+        return {
+          text: "This call must never happen.",
+        };
+      },
+    },
+  });
+  const approval = buildApprovalFixture({
+    capabilityId: CAPABILITY_IDS.webSearch,
+    capabilityLabel: "Web Search",
+    executionInput: {
+      question: "Search for denied external context.",
+    },
+    inputPreview: {
+      question: "Search for denied external context.",
+    },
+    stepId: "approval-gate-step",
+  });
+  const runId = "run-denied-web-primary-retry";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Search for denied external context.",
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+    steps: [
+      {
+        approvalGateId: approval.gate.id,
+        capabilityId: CAPABILITY_IDS.webSearch,
+        id: "approval-gate-step",
+        kind: "approval_gate",
+        label: "Capability Approval",
+        status: "paused",
+        type: "capability_approval_gate",
+      },
+      {
+        detail: {
+          approvalGate: {
+            id: approval.gate.id,
+            capabilityId: CAPABILITY_IDS.webSearch,
+          },
+          interruptType: "capability_approval_required",
+        },
+        id: "web_search:primary",
+        input: null,
+        kind: "tool_call",
+        label: "Web Search",
+        status: "paused",
+        type: "web_search",
+      },
+    ],
+  });
+  const denied = await executor.applyApprovalAction({
+    accessScope,
+    action: "deny",
+    gateId: approval.gate.id,
+    payload: {
+      approvalObjectHash: approval.gate.approvalObjectHash,
+    },
+    runId,
+  });
+  const beforeRetry = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(denied.run.approvalGates[0].status, "denied");
+  assert.equal(
+    denied.run.steps.find((step) => step.id === "web_search:primary").status,
+    "skipped"
+  );
+
+  await assert.rejects(
+    () =>
+      executor.retryStep({
+        accessScope,
+        runId,
+        stepId: "web_search:primary",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /hash-bound capability_call/i);
+      return true;
+    }
+  );
+
+  assert.equal(externalCallCount, 0);
+  assert.deepEqual(
+    await agentRunService.getRun({
+      accessScope,
+      runId,
+    }),
+    beforeRetry
+  );
+});
+
+test("agent run step executor rejects legacy web_search retry without a bound approval snapshot", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
@@ -593,7 +796,7 @@ test("agent run step executor retries web_search through the capability handler"
     },
   });
 
-  await createCompletedRunWithSteps(agentRunService, {
+  const originalRun = await createCompletedRunWithSteps(agentRunService, {
     goal: "Find launch news.",
     runId: "run-web-retry",
     steps: [
@@ -610,29 +813,30 @@ test("agent run step executor retries web_search through the capability handler"
     ],
   });
 
-  const retried = await executor.retryStep({
-    accessScope,
-    runId: "run-web-retry",
-    stepId: "web-step",
-  });
-
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].capabilityId, CAPABILITY_IDS.webSearch);
-  assert.equal(calls[0].payload.input.question, "Find launch news.");
-  assert.equal(calls[0].payload.approval.source, "agent_run_step_retry");
-  assert.equal(retried.response.agentMode, "web");
-  assert.match(retried.response.agentAnswer, /Web retry/);
-  assert.ok(
-    retried.run.steps.some(
-      (step) =>
-        step.retryOfStepId === "web-step" &&
-        step.status === "completed" &&
-        step.type === "web_search"
-    )
+  await assert.rejects(
+    () =>
+      executor.retryStep({
+        accessScope,
+        runId: "run-web-retry",
+        stepId: "web-step",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /hash-bound capability_call/i);
+      return true;
+    }
+  );
+  assert.equal(calls.length, 0);
+  assert.deepEqual(
+    await agentRunService.getRun({
+      accessScope,
+      runId: "run-web-retry",
+    }),
+    originalRun
   );
 });
 
-test("agent run step executor retries arxiv_import through the capability handler", async () => {
+test("agent run step executor rejects legacy arxiv_import retry without a bound approval snapshot", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
@@ -656,7 +860,7 @@ test("agent run step executor retries arxiv_import through the capability handle
     },
   });
 
-  await createCompletedRunWithSteps(agentRunService, {
+  const originalRun = await createCompletedRunWithSteps(agentRunService, {
     goal: "Import papers about retrieval augmented generation.",
     runId: "run-arxiv-retry",
     steps: [
@@ -674,19 +878,27 @@ test("agent run step executor retries arxiv_import through the capability handle
     ],
   });
 
-  const retried = await executor.retryStep({
-    accessScope,
-    runId: "run-arxiv-retry",
-    stepId: "arxiv-step",
-  });
-
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].capabilityId, CAPABILITY_IDS.arxivImportTopic);
-  assert.equal(calls[0].payload.input.topic, "retrieval augmented generation");
-  assert.equal(calls[0].payload.input.maxResults, 3);
-  assert.equal(calls[0].payload.approval.source, "agent_run_step_retry");
-  assert.equal(retried.response.agentMode, "arxiv_import");
-  assert.match(retried.response.agentAnswer, /Imported topic/);
+  await assert.rejects(
+    () =>
+      executor.retryStep({
+        accessScope,
+        runId: "run-arxiv-retry",
+        stepId: "arxiv-step",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /hash-bound capability_call/i);
+      return true;
+    }
+  );
+  assert.equal(calls.length, 0);
+  assert.deepEqual(
+    await agentRunService.getRun({
+      accessScope,
+      runId: "run-arxiv-retry",
+    }),
+    originalRun
+  );
 });
 
 test("agent run step executor retries document_rag through the wired document handler", async () => {

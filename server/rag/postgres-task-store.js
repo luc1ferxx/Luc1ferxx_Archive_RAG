@@ -6,8 +6,10 @@ import { runPostgresMigrations } from "./db-migrations.js";
 import { queryPostgres } from "./postgres.js";
 import {
   buildTaskScopeKey,
+  DEFAULT_TASK_CLAIM_LEASE_MS,
   normalizeTask,
   normalizeTaskAccessScope,
+  TASK_MUTATION_OUTCOMES,
   TASK_STATUSES,
 } from "./tasks.js";
 import { normalizeText } from "../lib/normalize-text.js";
@@ -89,6 +91,78 @@ const toIsoText = (value) => {
 
   return Number.isNaN(date.getTime()) ? normalizeText(value) : date.toISOString();
 };
+
+const normalizeAttemptCount = (value) => {
+  const attemptCount = Number(value);
+
+  return Number.isSafeInteger(attemptCount) && attemptCount >= 0
+    ? attemptCount
+    : 0;
+};
+
+const normalizeLeaseMs = (value) => {
+  const leaseMs = Number(value);
+
+  return Number.isFinite(leaseMs) && leaseMs > 0
+    ? Math.floor(leaseMs)
+    : DEFAULT_TASK_CLAIM_LEASE_MS;
+};
+
+const getRetryAt = ({ leaseMs, task } = {}) => {
+  if (!task) {
+    return "";
+  }
+
+  if (task.status === TASK_STATUSES.queued && task.nextRunAt) {
+    return toIsoText(task.nextRunAt);
+  }
+
+  if (task.status !== TASK_STATUSES.running) {
+    return "";
+  }
+
+  const leaseStartedAt = new Date(task.claimedAt || task.updatedAt).getTime();
+
+  return Number.isFinite(leaseStartedAt)
+    ? new Date(leaseStartedAt + normalizeLeaseMs(leaseMs)).toISOString()
+    : "";
+};
+
+const mergeTaskPatch = ({ existingTask, patch = {}, timestamp } = {}) => ({
+  ...existingTask,
+  ...patch,
+  attemptCount:
+    patch.attemptCount === undefined
+      ? normalizeAttemptCount(existingTask.attemptCount)
+      : normalizeAttemptCount(patch.attemptCount),
+  claimedAt:
+    patch.claimedAt === undefined
+      ? normalizeText(existingTask.claimedAt)
+      : normalizeText(patch.claimedAt),
+  claimedBy:
+    patch.claimedBy === undefined
+      ? normalizeText(existingTask.claimedBy)
+      : normalizeText(patch.claimedBy),
+  counts: {
+    ...existingTask.counts,
+    ...(patch.counts && typeof patch.counts === "object" ? patch.counts : {}),
+  },
+  input: {
+    ...existingTask.input,
+    ...(patch.input && typeof patch.input === "object" ? patch.input : {}),
+  },
+  items: patch.items ?? existingTask.items,
+  nextRunAt:
+    patch.nextRunAt === undefined
+      ? normalizeText(existingTask.nextRunAt)
+      : normalizeText(patch.nextRunAt),
+  payload: patch.payload === undefined ? existingTask.payload : patch.payload,
+  result: {
+    ...existingTask.result,
+    ...(patch.result && typeof patch.result === "object" ? patch.result : {}),
+  },
+  updatedAt: patch.updatedAt || timestamp,
+});
 
 const taskSelectColumns = `
   user_id,
@@ -211,6 +285,226 @@ export const createPostgresTaskStore = ({
     );
   };
 
+  const getTask = async ({ accessScope = {}, taskId } = {}) => {
+    await initialize();
+
+    const scope = normalizeTaskAccessScope(accessScope);
+    const result = await query(
+      `
+        SELECT ${taskSelectColumns}
+        FROM ${tasksTable}
+        WHERE user_id = $1
+          AND workspace_id = $2
+          AND task_id = $3
+        LIMIT 1
+      `,
+      [scope.userId, scope.workspaceId, normalizeText(taskId)]
+    );
+
+    return result.rows[0] ? mapRowToTask(result.rows[0]) : null;
+  };
+
+  const getTaskClaimState = async ({
+    accessScope = {},
+    leaseMs = DEFAULT_TASK_CLAIM_LEASE_MS,
+    taskId,
+  } = {}) => {
+    const scope = normalizeTaskAccessScope(accessScope);
+    const normalizedLeaseMs = normalizeLeaseMs(leaseMs);
+    const result = await query(
+      `
+        SELECT
+          ${taskSelectColumns},
+          CASE
+            WHEN status = $5 AND next_run_at IS NOT NULL THEN next_run_at
+            WHEN status = $6 THEN
+              COALESCE(claimed_at, updated_at)
+                + ($4::double precision * INTERVAL '1 millisecond')
+            ELSE NULL
+          END AS retry_at,
+          CASE
+            WHEN status = $5 AND next_run_at IS NOT NULL THEN
+              GREATEST(
+                0,
+                CEIL(
+                  EXTRACT(EPOCH FROM (next_run_at - clock_timestamp())) * 1000
+                )
+              )::bigint
+            WHEN status = $6 THEN
+              GREATEST(
+                0,
+                CEIL(
+                  EXTRACT(
+                    EPOCH FROM (
+                      COALESCE(claimed_at, updated_at)
+                        + ($4::double precision * INTERVAL '1 millisecond')
+                        - clock_timestamp()
+                    )
+                  ) * 1000
+                )
+              )::bigint
+            ELSE 0
+          END AS retry_after_ms
+        FROM ${tasksTable}
+        WHERE user_id = $1
+          AND workspace_id = $2
+          AND task_id = $3
+        LIMIT 1
+      `,
+      [
+        scope.userId,
+        scope.workspaceId,
+        normalizeText(taskId),
+        normalizedLeaseMs,
+        TASK_STATUSES.queued,
+        TASK_STATUSES.running,
+      ]
+    );
+    const row = result.rows[0];
+
+    if (!row) {
+      return {
+        retryAfterMs: 0,
+        retryAt: "",
+        task: null,
+      };
+    }
+
+    const retryAfterMs = Number(row.retry_after_ms);
+
+    return {
+      retryAfterMs:
+        Number.isFinite(retryAfterMs) && retryAfterMs >= 0
+          ? Math.ceil(retryAfterMs)
+          : normalizedLeaseMs,
+      retryAt: toIsoText(row.retry_at) || getRetryAt({
+        leaseMs: normalizedLeaseMs,
+        task: mapRowToTask(row),
+      }),
+      task: mapRowToTask(row),
+    };
+  };
+
+  const updateTaskSnapshot = async ({
+    accessScope = {},
+    expectedAttemptCount,
+    expectedClaimId,
+    expectedStatuses = [],
+    eventType,
+    existingTask,
+    patch = {},
+    requireClaim = false,
+    taskId,
+  } = {}) => {
+    const scope = normalizeTaskAccessScope(accessScope);
+    const timestamp = now();
+    const nextTask = mergeTaskPatch({
+      existingTask,
+      patch,
+      timestamp,
+    });
+    const normalizedTask = normalizeTask(nextTask);
+    const result = await query(
+      `
+        WITH updated_task AS (
+          UPDATE ${tasksTable} AS task
+          SET
+            type = $8,
+            status = $9,
+            label = $10,
+            summary = $11,
+            provider = $12::jsonb,
+            subject = $13::jsonb,
+            runner_id = $14,
+            action = $15,
+            counts = $16::jsonb,
+            input = $17::jsonb,
+            items = $18::jsonb,
+            result = $19::jsonb,
+            error = $20::jsonb,
+            payload = $21::jsonb,
+            required_user_action = $22,
+            next_run_at = NULLIF($23::text, '')::timestamptz,
+            claimed_by = $24,
+            claimed_at = CASE
+              WHEN NULLIF($24::text, '') IS NULL THEN NULL
+              ELSE clock_timestamp()
+            END,
+            updated_at = $25::timestamptz
+          WHERE task.user_id = $1
+            AND task.workspace_id = $2
+            AND task.task_id = $3
+            AND task.status = ANY($4::text[])
+            AND (
+              $5::boolean = false
+              OR (
+                task.claimed_by = $6
+                AND task.attempt_count = $7
+              )
+            )
+          RETURNING ${taskSelectColumns}
+        ),
+        recorded_event AS (
+          INSERT INTO ${taskEventsTable} (
+            user_id,
+            workspace_id,
+            task_id,
+            event_type,
+            event_payload
+          )
+          SELECT
+            $1,
+            $2,
+            $3,
+            $26,
+            jsonb_build_object(
+              'attemptCount',
+              updated_task.attempt_count,
+              'status',
+              updated_task.status
+            )
+          FROM updated_task
+          RETURNING 1
+        )
+        SELECT updated_task.*
+        FROM updated_task
+        CROSS JOIN recorded_event
+      `,
+      [
+        scope.userId,
+        scope.workspaceId,
+        normalizeText(taskId),
+        toArray(expectedStatuses).map(normalizeText).filter(Boolean),
+        Boolean(requireClaim),
+        normalizeText(expectedClaimId),
+        expectedAttemptCount === undefined
+          ? null
+          : normalizeAttemptCount(expectedAttemptCount),
+        normalizedTask.type,
+        normalizedTask.status,
+        normalizedTask.label,
+        normalizedTask.summary,
+        toJsonParam(normalizedTask.provider),
+        toJsonParam(normalizedTask.subject),
+        normalizedTask.runnerId,
+        normalizedTask.action,
+        toJsonObjectParam(normalizedTask.counts),
+        toJsonObjectParam(normalizedTask.input),
+        JSON.stringify(normalizedTask.items),
+        toJsonObjectParam(normalizedTask.result),
+        toJsonParam(normalizedTask.error),
+        toJsonParam(normalizedTask.payload),
+        normalizedTask.requiredUserAction,
+        normalizeText(nextTask.nextRunAt),
+        normalizeText(nextTask.claimedBy),
+        normalizedTask.updatedAt || timestamp,
+        normalizeText(eventType),
+      ]
+    );
+
+    return result.rows[0] ? mapRowToTask(result.rows[0]) : null;
+  };
+
   return {
     async initialize() {
       return initialize();
@@ -247,22 +541,10 @@ export const createPostgresTaskStore = ({
     },
 
     async get({ accessScope = {}, taskId } = {}) {
-      await initialize();
-
-      const scope = normalizeTaskAccessScope(accessScope);
-      const result = await query(
-        `
-          SELECT ${taskSelectColumns}
-          FROM ${tasksTable}
-          WHERE user_id = $1
-            AND workspace_id = $2
-            AND task_id = $3
-          LIMIT 1
-        `,
-        [scope.userId, scope.workspaceId, normalizeText(taskId)]
-      );
-
-      return result.rows[0] ? mapRowToTask(result.rows[0]) : null;
+      return getTask({
+        accessScope,
+        taskId,
+      });
     },
 
     async list({ accessScope = {}, type = "", limit, offset } = {}) {
@@ -311,6 +593,342 @@ export const createPostgresTaskStore = ({
       );
 
       return result.rows.map(mapRowToTask).filter(Boolean);
+    },
+
+    async claim({
+      accessScope = {},
+      claimId,
+      leaseMs = DEFAULT_TASK_CLAIM_LEASE_MS,
+      taskId,
+    } = {}) {
+      await initialize();
+
+      const scope = normalizeTaskAccessScope(accessScope);
+      const normalizedClaimId = normalizeText(claimId);
+      const normalizedLeaseMs = normalizeLeaseMs(leaseMs);
+
+      if (!normalizedClaimId) {
+        const claimState = await getTaskClaimState({
+          accessScope: scope,
+          leaseMs: normalizedLeaseMs,
+          taskId,
+        });
+        const currentTask = claimState.task;
+
+        return {
+          applied: false,
+          outcome: currentTask
+            ? TASK_MUTATION_OUTCOMES.notRunnable
+            : TASK_MUTATION_OUTCOMES.notFound,
+          retryAfterMs: claimState.retryAfterMs,
+          retryAt: claimState.retryAt,
+          task: currentTask,
+        };
+      }
+
+      const result = await query(
+        `
+          WITH task_clock AS (
+            SELECT clock_timestamp() AS current_time
+          ),
+          claimed_task AS (
+            UPDATE ${tasksTable} AS task
+            SET
+              status = $6,
+              attempt_count = task.attempt_count + 1,
+              next_run_at = NULL,
+              claimed_by = $4,
+              claimed_at = task_clock.current_time,
+              updated_at = task_clock.current_time
+            FROM task_clock
+            WHERE task.user_id = $1
+              AND task.workspace_id = $2
+              AND task.task_id = $3
+              AND (
+                (
+                  task.status = $7
+                  AND (
+                    task.next_run_at IS NULL
+                    OR task.next_run_at <= task_clock.current_time
+                  )
+                )
+                OR (
+                  task.status = $6
+                  AND COALESCE(task.claimed_at, task.updated_at)
+                    <= task_clock.current_time
+                      - ($5::double precision * INTERVAL '1 millisecond')
+                )
+              )
+            RETURNING ${taskSelectColumns}
+          ),
+          recorded_event AS (
+            INSERT INTO ${taskEventsTable} (
+              user_id,
+              workspace_id,
+              task_id,
+              event_type,
+              event_payload
+            )
+            SELECT
+              $1,
+              $2,
+              $3,
+              $8,
+              jsonb_build_object(
+                'attemptCount',
+                claimed_task.attempt_count,
+                'status',
+                claimed_task.status
+              )
+            FROM claimed_task
+            RETURNING 1
+          )
+          SELECT claimed_task.*
+          FROM claimed_task
+          CROSS JOIN recorded_event
+        `,
+        [
+          scope.userId,
+          scope.workspaceId,
+          normalizeText(taskId),
+          normalizedClaimId,
+          normalizedLeaseMs,
+          TASK_STATUSES.running,
+          TASK_STATUSES.queued,
+          "task_claim",
+        ]
+      );
+      const task = result.rows[0] ? mapRowToTask(result.rows[0]) : null;
+
+      if (task) {
+        return {
+          applied: true,
+          attemptCount: task.attemptCount,
+          outcome: TASK_MUTATION_OUTCOMES.claimed,
+          retryAfterMs: 0,
+          retryAt: "",
+          task,
+        };
+      }
+
+      const claimState = await getTaskClaimState({
+        accessScope: scope,
+        leaseMs: normalizedLeaseMs,
+        taskId,
+      });
+      const currentTask = claimState.task;
+
+      return {
+        applied: false,
+        outcome: currentTask
+          ? TASK_MUTATION_OUTCOMES.notRunnable
+          : TASK_MUTATION_OUTCOMES.notFound,
+        retryAfterMs: claimState.retryAfterMs,
+        retryAt: claimState.retryAt,
+        task: currentTask,
+      };
+    },
+
+    async patchClaimed({
+      accessScope = {},
+      attemptCount,
+      claimId,
+      patch = {},
+      taskId,
+    } = {}) {
+      const existingTask = await getTask({
+        accessScope,
+        taskId,
+      });
+
+      if (!existingTask) {
+        return {
+          applied: false,
+          outcome: TASK_MUTATION_OUTCOMES.notFound,
+          task: null,
+        };
+      }
+
+      const normalizedAttempt = normalizeAttemptCount(attemptCount);
+      const normalizedClaimId = normalizeText(claimId);
+
+      if (!normalizedClaimId || normalizedAttempt <= 0) {
+        return {
+          applied: false,
+          outcome: TASK_MUTATION_OUTCOMES.claimLost,
+          task: existingTask,
+        };
+      }
+
+      const nextStatus =
+        patch.status === undefined
+          ? existingTask.status
+          : normalizeText(patch.status);
+      const shouldReleaseClaim = nextStatus !== TASK_STATUSES.running;
+      const task = await updateTaskSnapshot({
+        accessScope,
+        eventType: "task_claim_patch",
+        expectedAttemptCount: normalizedAttempt,
+        expectedClaimId: normalizedClaimId,
+        expectedStatuses: [TASK_STATUSES.running],
+        existingTask,
+        patch: {
+          ...patch,
+          claimedAt: "",
+          claimedBy: shouldReleaseClaim ? "" : normalizedClaimId,
+        },
+        requireClaim: true,
+        taskId,
+      });
+
+      if (!task) {
+        return {
+          applied: false,
+          outcome: TASK_MUTATION_OUTCOMES.claimLost,
+          task: await getTask({
+            accessScope,
+            taskId,
+          }),
+        };
+      }
+
+      return {
+        applied: true,
+        outcome: TASK_MUTATION_OUTCOMES.updated,
+        task,
+      };
+    },
+
+    async renewClaim({
+      accessScope = {},
+      attemptCount,
+      claimId,
+      taskId,
+    } = {}) {
+      await initialize();
+
+      const scope = normalizeTaskAccessScope(accessScope);
+      const normalizedAttempt = normalizeAttemptCount(attemptCount);
+      const normalizedClaimId = normalizeText(claimId);
+
+      if (!normalizedClaimId || normalizedAttempt <= 0) {
+        const currentTask = await getTask({
+          accessScope: scope,
+          taskId,
+        });
+
+        return {
+          applied: false,
+          outcome: currentTask
+            ? TASK_MUTATION_OUTCOMES.claimLost
+            : TASK_MUTATION_OUTCOMES.notFound,
+          task: currentTask,
+        };
+      }
+
+      const result = await query(
+        `
+          UPDATE ${tasksTable}
+          SET
+            claimed_at = clock_timestamp(),
+            updated_at = clock_timestamp()
+          WHERE user_id = $1
+            AND workspace_id = $2
+            AND task_id = $3
+            AND status = $4
+            AND claimed_by = $5
+            AND attempt_count = $6
+          RETURNING ${taskSelectColumns}
+        `,
+        [
+          scope.userId,
+          scope.workspaceId,
+          normalizeText(taskId),
+          TASK_STATUSES.running,
+          normalizedClaimId,
+          normalizedAttempt,
+        ]
+      );
+      const task = result.rows[0] ? mapRowToTask(result.rows[0]) : null;
+
+      return {
+        applied: Boolean(task),
+        outcome: task
+          ? TASK_MUTATION_OUTCOMES.renewed
+          : TASK_MUTATION_OUTCOMES.claimLost,
+        task:
+          task ??
+          (await getTask({
+            accessScope: scope,
+            taskId,
+          })),
+      };
+    },
+
+    async transition({
+      accessScope = {},
+      expectedStatuses = [],
+      patch = {},
+      taskId,
+    } = {}) {
+      const existingTask = await getTask({
+        accessScope,
+        taskId,
+      });
+
+      if (!existingTask) {
+        return {
+          applied: false,
+          outcome: TASK_MUTATION_OUTCOMES.notFound,
+          task: null,
+        };
+      }
+
+      const normalizedExpectedStatuses = toArray(expectedStatuses)
+        .map(normalizeText)
+        .filter(Boolean);
+
+      if (normalizedExpectedStatuses.length === 0) {
+        return {
+          applied: false,
+          outcome: TASK_MUTATION_OUTCOMES.notAllowed,
+          task: existingTask,
+        };
+      }
+
+      const nextStatus =
+        patch.status === undefined
+          ? existingTask.status
+          : normalizeText(patch.status);
+      const task = await updateTaskSnapshot({
+        accessScope,
+        eventType: "task_transition",
+        expectedStatuses: normalizedExpectedStatuses,
+        existingTask,
+        patch: {
+          ...patch,
+          claimedAt: "",
+          claimedBy: "",
+        },
+        taskId,
+      });
+
+      if (!task) {
+        return {
+          applied: false,
+          outcome: TASK_MUTATION_OUTCOMES.notAllowed,
+          task: await getTask({
+            accessScope,
+            taskId,
+          }),
+        };
+      }
+
+      return {
+        applied: true,
+        outcome: TASK_MUTATION_OUTCOMES.transitioned,
+        task,
+      };
     },
 
     async patch({ accessScope = {}, taskId, patch = {} } = {}) {

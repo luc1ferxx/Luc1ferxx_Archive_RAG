@@ -19,14 +19,17 @@ import {
 } from "../rag/agent-tasks.js";
 import {
   CAPABILITY_IDS,
+  createApprovalExecutionSnapshot,
 } from "../rag/capabilities/index.js";
 import {
   buildAgentTaskPlanningContext,
 } from "../rag/agent-task-memory.js";
 import { buildAgentGoalCompletion } from "../rag/agent-goal-completion.js";
 import {
+  approveAgentGoalDeliverables,
   buildAgentGoalDeliverableSpecs,
   executeAgentGoalDeliverables,
+  prepareAgentGoalDeliverables,
 } from "../rag/agent-goal-deliverables.js";
 import {
   RESEARCH_DOSSIER_WORKFLOW_ID,
@@ -43,6 +46,86 @@ const accessScope = {
   userId: "alice",
   workspaceId: "workspace-a",
 };
+
+const buildApprovedReportDeliverables = ({
+  input = {
+    content: "Report body",
+    title: "Report",
+  },
+} = {}) => {
+  const capabilityId = CAPABILITY_IDS.reportExport;
+  const capabilityVersion = "1.0.0";
+  const deliverableId = "markdown_report:report.export";
+  const inputPreview = {
+    title: input.title,
+  };
+  const snapshot = createApprovalExecutionSnapshot({
+    accessScope,
+    capabilityId,
+    capabilityVersion,
+    executionInput: input,
+    inputPreview,
+  });
+  const gateId =
+    `approval:${capabilityId}:${capabilityVersion}:` +
+    snapshot.approvalObjectHash.slice("sha256:".length);
+  const deliverables = {
+    approvalGates: [
+      {
+        approvalObjectHash: snapshot.approvalObjectHash,
+        capabilityId,
+        capabilityLabel: "Report Export",
+        capabilityVersion,
+        deliverableId,
+        id: gateId,
+        inputPreview,
+        snapshotVersion: snapshot.snapshotVersion,
+        status: "pending",
+        type: "goal_deliverable_approval",
+      },
+    ],
+    approvalSnapshots: [
+      {
+        approvalObjectHash: snapshot.approvalObjectHash,
+        capabilityId,
+        capabilityVersion,
+        executionInput: snapshot.privateSnapshot.executionInput,
+        gateId,
+        snapshotVersion: snapshot.snapshotVersion,
+      },
+    ],
+    results: [],
+    specs: [
+      {
+        approvalGateId: gateId,
+        artifactExecution: {
+          artifactType: "report",
+          idempotencyKey: "goal-deliverable:task-1:report",
+          sourceTaskId: "task-1",
+        },
+        artifactType: "markdown_report",
+        capabilityId,
+        id: deliverableId,
+        label: "Report",
+        status: "waiting_for_approval",
+        title: "Report",
+      },
+    ],
+    status: "waiting_for_approval",
+  };
+
+  return approveAgentGoalDeliverables({
+    accessScope,
+    approvalBindings: [
+      {
+        approvalObjectHash: snapshot.approvalObjectHash,
+        gateId,
+      },
+    ],
+    deliverables,
+  });
+};
+const APPROVAL_OBJECT_HASH = `sha256:${"a".repeat(64)}`;
 
 const parseJson = (value, fallback = null) =>
   value === null || value === undefined ? fallback : JSON.parse(value);
@@ -79,6 +162,7 @@ const createFakePostgresTaskHarness = () => {
   const events = [];
   const tableName = "rag_tasks_agent_task_restart";
   const eventsTableName = "rag_task_events_agent_task_restart";
+  let databaseNow = "2026-06-23T00:00:00.000Z";
   const buildKey = ({ taskId, userId, workspaceId }) =>
     `${userId}\u0000${workspaceId}\u0000${taskId}`;
   const query = async (queryText, values = []) => {
@@ -91,6 +175,137 @@ const createFakePostgresTaskHarness = () => {
       const row = buildFakeTaskRow(values, rows.get(key));
 
       rows.set(key, row);
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes(`UPDATE ${tableName}`) &&
+      queryText.includes("attempt_count = task.attempt_count + 1")
+    ) {
+      const key = buildKey({
+        taskId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+      const row = rows.get(key);
+      const nowTimestamp = new Date(databaseNow).getTime();
+      const nextRunAt = row?.next_run_at
+        ? new Date(row.next_run_at).getTime()
+        : null;
+      const leaseStartedAt = row
+        ? new Date(row.claimed_at || row.updated_at).getTime()
+        : null;
+      const runnable =
+        row &&
+        ((row.status === values[6] &&
+          (nextRunAt === null || nextRunAt <= nowTimestamp)) ||
+          (row.status === values[5] &&
+            leaseStartedAt <= nowTimestamp - Number(values[4])));
+
+      if (!runnable) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      Object.assign(row, {
+        attempt_count: row.attempt_count + 1,
+        claimed_at: databaseNow,
+        claimed_by: values[3],
+        next_run_at: null,
+        status: values[5],
+        updated_at: databaseNow,
+      });
+
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes(`UPDATE ${tableName}`) &&
+      queryText.includes("type = $8")
+    ) {
+      const key = buildKey({
+        taskId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+      const row = rows.get(key);
+      const expectedStatuses = new Set(values[3]);
+      const matches =
+        row &&
+        expectedStatuses.has(row.status) &&
+        (!values[4] ||
+          (row.claimed_by === values[5] &&
+            row.attempt_count === values[6]));
+
+      if (!matches) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      Object.assign(row, {
+        type: values[7],
+        status: values[8],
+        label: values[9],
+        summary: values[10],
+        provider: parseJson(values[11]),
+        subject: parseJson(values[12]),
+        runner_id: values[13],
+        action: values[14],
+        counts: parseJson(values[15], {}),
+        input: parseJson(values[16], {}),
+        items: parseJson(values[17], []),
+        result: parseJson(values[18], {}),
+        error: parseJson(values[19]),
+        payload: parseJson(values[20]),
+        required_user_action: values[21],
+        next_run_at: values[22] || null,
+        claimed_by: values[23],
+        claimed_at: values[23] ? databaseNow : null,
+        updated_at: values[24],
+      });
+
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes(`UPDATE ${tableName}`) &&
+      queryText.includes("claimed_at = clock_timestamp()")
+    ) {
+      const key = buildKey({
+        taskId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+      const row = rows.get(key);
+      const matches =
+        row &&
+        row.status === values[3] &&
+        row.claimed_by === values[4] &&
+        row.attempt_count === values[5];
+
+      if (!matches) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      row.claimed_at = "2026-06-23T00:00:00.000Z";
+      row.updated_at = "2026-06-23T00:00:00.000Z";
+
       return {
         rowCount: 1,
         rows: [row],
@@ -159,6 +374,8 @@ const createFakePostgresTaskHarness = () => {
 
   return {
     createService({ now = () => "2026-06-23T00:00:00.000Z" } = {}) {
+      databaseNow = now();
+
       return createTaskService({
         taskStore: createPostgresTaskStore({
           eventsTableName,
@@ -191,6 +408,7 @@ const buildFakeRunRow = (values, existingRow = null) => ({
   approval_gates: parseJson(values[10], []),
   result: parseJson(values[11], {}),
   error: parseJson(values[12]),
+  revision: existingRow?.revision ?? 0,
   created_at: values[13] || existingRow?.created_at || values[15],
   updated_at: values[14] || values[15],
 });
@@ -210,6 +428,47 @@ const createFakePostgresAgentRunHarness = () => {
         workspaceId: values[1],
       });
       const row = buildFakeRunRow(values, rows.get(key));
+
+      rows.set(key, row);
+      return {
+        rowCount: 1,
+        rows: [row],
+      };
+    }
+
+    if (
+      queryText.includes(`UPDATE ${tableName}`) &&
+      queryText.includes("revision = revision + 1")
+    ) {
+      const key = buildKey({
+        runId: values[2],
+        userId: values[0],
+        workspaceId: values[1],
+      });
+      const existingRow = rows.get(key);
+
+      if (!existingRow || existingRow.revision !== values[3]) {
+        return {
+          rowCount: 0,
+          rows: [],
+        };
+      }
+
+      const row = {
+        ...existingRow,
+        status: values[4],
+        goal: values[5],
+        input: parseJson(values[6], {}),
+        plan: parseJson(values[7], {}),
+        steps: parseJson(values[8], []),
+        observations: parseJson(values[9], []),
+        decisions: parseJson(values[10], []),
+        approval_gates: parseJson(values[11], []),
+        result: parseJson(values[12], {}),
+        error: parseJson(values[13]),
+        revision: existingRow.revision + 1,
+        updated_at: values[14],
+      };
 
       rows.set(key, row);
       return {
@@ -417,10 +676,26 @@ const createDeliverableCapabilityRegistry = () => {
       version: "1.0.0",
       label: labels[capabilityId] ?? capabilityId,
       approvalPolicy: {
+        mode: "user_confirmation",
+        userConfirmationRequired: true,
         writesWorkspace: true,
       },
       privacyPolicy: {
         externalCall: false,
+        sanitizedInputFields: [
+          "taskId",
+          "title",
+          "description",
+          "priority",
+          "tags",
+          "docIds",
+          "strategy",
+          "content",
+          "format",
+          "citations",
+          "metadata",
+          "summary",
+        ],
         storesResult: true,
       },
     }),
@@ -678,16 +953,67 @@ test("agent task creates approved goal deliverables without promoting artifacts 
     false
   );
   assert.equal(capabilityRegistry.calls.length, 0);
+  const publicWaitingTask = await taskService.getTask({
+    accessScope,
+    taskId: "agent_goal:risk-report",
+  });
+
+  assert.equal(publicWaitingTask.payload, undefined);
+  assert.equal(
+    JSON.stringify(publicWaitingTask).includes("approvalSnapshots"),
+    false
+  );
+  assert.equal(
+    task.payload.deliverables.specs.some((spec) =>
+      Object.hasOwn(spec, "input")
+    ),
+    false
+  );
+  const approvalBindings = task.result.approvalGates.map((gate) => ({
+    approvalObjectHash: gate.approvalObjectHash,
+    gateId: gate.id,
+  }));
+
+  assert.equal(approvalBindings.length, 4);
+  assert.ok(
+    approvalBindings.every(
+      (binding) =>
+        binding.gateId &&
+        /^sha256:[a-f0-9]{64}$/.test(binding.approvalObjectHash)
+    )
+  );
+
+  await assert.rejects(
+    () =>
+      orchestrator.resumeTask({
+        accessScope,
+        action: AGENT_TASK_ACTIONS.approveDeliverables,
+        payload: {
+          approvalBindings: approvalBindings.map((binding, index) =>
+            index === 0
+              ? {
+                  ...binding,
+                  approvalObjectHash: `sha256:${"0".repeat(64)}`,
+                }
+              : binding
+          ),
+        },
+        runImmediately: false,
+        taskId: "agent_goal:risk-report",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /approval object does not match/i);
+      return true;
+    }
+  );
+  assert.equal(capabilityRegistry.calls.length, 0);
 
   await orchestrator.resumeTask({
     accessScope,
     action: AGENT_TASK_ACTIONS.approveDeliverables,
     payload: {
-      approval: {
-        approved: true,
-        decision: "approved",
-        source: "test",
-      },
+      approvalBindings,
     },
     runImmediately: false,
     taskId: "agent_goal:risk-report",
@@ -721,9 +1047,22 @@ test("agent task creates approved goal deliverables without promoting artifacts 
     capabilityRegistry.calls.every(
       (call) =>
         call.payload.approval.approved === true &&
-        call.payload.approval.source === "test"
+        call.payload.approval.source === "task_action" &&
+        call.payload.approval.gateId &&
+        call.payload.approval.approvalObjectHash
     )
   );
+  const reportCall = capabilityRegistry.calls.find(
+    (call) => call.capabilityId === CAPABILITY_IDS.reportExport
+  );
+  const reportSpec = task.payload.deliverables.specs.find(
+    (spec) => spec.capabilityId === CAPABILITY_IDS.reportExport
+  );
+  const reportSnapshot = task.payload.deliverables.approvalSnapshots.find(
+    (snapshot) => snapshot.gateId === reportSpec.approvalGateId
+  );
+
+  assert.deepEqual(reportCall.payload.input, reportSnapshot.executionInput);
   assert.ok(
     capabilityRegistry.calls
       .filter((call) => call.capabilityId !== CAPABILITY_IDS.taskCreate)
@@ -840,15 +1179,18 @@ test("artifact storage failure keeps an approved agent task and goal completion 
     accessScope,
     taskId: "agent_goal:storage-failure",
   });
+  const pendingStorageTask = await taskService.getInternalTask({
+    accessScope,
+    taskId: "agent_goal:storage-failure",
+  });
   await orchestrator.resumeTask({
     accessScope,
     action: AGENT_TASK_ACTIONS.approveDeliverables,
     payload: {
-      approval: {
-        approved: true,
-        decision: "approved",
-        source: "test",
-      },
+      approvalBindings: pendingStorageTask.result.approvalGates.map((gate) => ({
+        approvalObjectHash: gate.approvalObjectHash,
+        gateId: gate.id,
+      })),
     },
     runImmediately: false,
     taskId: "agent_goal:storage-failure",
@@ -943,9 +1285,6 @@ test("goal completion rejects completed deliverables with invalid artifact refer
 test("goal deliverable execution fails when capability compatibility output lacks an artifact", async () => {
   const deliverables = await executeAgentGoalDeliverables({
     accessScope,
-    approval: {
-      approved: true,
-    },
     capabilityRegistry: {
       execute: async () => ({
         fileName: "report.md",
@@ -953,27 +1292,7 @@ test("goal deliverable execution fails when capability compatibility output lack
         text: "Report exported.",
       }),
     },
-    deliverables: {
-      specs: [
-        {
-          artifactExecution: {
-            artifactType: "report",
-            idempotencyKey: "goal-deliverable:task-1:report",
-            sourceTaskId: "task-1",
-          },
-          artifactType: "markdown_report",
-          capabilityId: CAPABILITY_IDS.reportExport,
-          id: "markdown_report:report.export",
-          input: {
-            content: "Report body",
-            title: "Report",
-          },
-          label: "Report",
-          status: "approved",
-          title: "Report",
-        },
-      ],
-    },
+    deliverables: buildApprovedReportDeliverables(),
   });
 
   assert.equal(deliverables.status, "failed");
@@ -987,9 +1306,6 @@ test("goal deliverable execution fails when capability compatibility output lack
 test("goal deliverable execution rejects a stored artifact reference of the wrong type", async () => {
   const deliverables = await executeAgentGoalDeliverables({
     accessScope,
-    approval: {
-      approved: true,
-    },
     capabilityRegistry: {
       execute: async () => ({
         artifact: {
@@ -1002,27 +1318,7 @@ test("goal deliverable execution rejects a stored artifact reference of the wron
         text: "Report exported.",
       }),
     },
-    deliverables: {
-      specs: [
-        {
-          artifactExecution: {
-            artifactType: "report",
-            idempotencyKey: "goal-deliverable:task-1:report",
-            sourceTaskId: "task-1",
-          },
-          artifactType: "markdown_report",
-          capabilityId: CAPABILITY_IDS.reportExport,
-          id: "markdown_report:report.export",
-          input: {
-            content: "Report body",
-            title: "Report",
-          },
-          label: "Report",
-          status: "approved",
-          title: "Report",
-        },
-      ],
-    },
+    deliverables: buildApprovedReportDeliverables(),
   });
 
   assert.equal(deliverables.status, "failed");
@@ -1033,7 +1329,70 @@ test("goal deliverable execution rejects a stored artifact reference of the wron
   );
 });
 
-test("long task ids produce bounded distinct artifact idempotency keys", () => {
+test("goal deliverable preflight rejects snapshot or scope drift before any capability executes", async () => {
+  const capabilityRegistry = createDeliverableCapabilityRegistry();
+  const pending = prepareAgentGoalDeliverables({
+    accessScope,
+    body: {
+      agentAnswer: "Private full report content.",
+      agentRunId: "run-preflight",
+    },
+    capabilityRegistry,
+    payload: {
+      docIds: ["doc-1"],
+      question: "生成风险报告",
+    },
+    sourceTaskId: "agent_goal:preflight",
+  });
+  const approved = approveAgentGoalDeliverables({
+    accessScope,
+    approvalBindings: pending.approvalGates.map((gate) => ({
+      approvalObjectHash: gate.approvalObjectHash,
+      gateId: gate.id,
+    })),
+    deliverables: pending,
+  });
+  const tampered = structuredClone(approved);
+
+  tampered.approvalSnapshots.at(-1).executionInput.title =
+    "Unapproved replacement title";
+
+  await assert.rejects(
+    () =>
+      executeAgentGoalDeliverables({
+        accessScope,
+        capabilityRegistry,
+        deliverables: tampered,
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /does not match the persisted execution snapshot/i);
+      return true;
+    }
+  );
+  assert.equal(capabilityRegistry.calls.length, 0);
+
+  await assert.rejects(
+    () =>
+      executeAgentGoalDeliverables({
+        accessScope: {
+          ...accessScope,
+          workspaceId: "workspace-b",
+        },
+        capabilityRegistry,
+        deliverables: approved,
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /does not match the persisted execution snapshot/i);
+      return true;
+    }
+  );
+  assert.equal(capabilityRegistry.calls.length, 0);
+});
+
+test("long task ids produce bounded artifact keys and a deterministic follow-up task id", () => {
+  const sourceTaskId = `agent_goal:${"task-segment-".repeat(30)}`;
   const specs = buildAgentGoalDeliverableSpecs({
     body: {
       agentAnswer: "Risk report answer.",
@@ -1043,15 +1402,49 @@ test("long task ids produce bounded distinct artifact idempotency keys", () => {
       docIds: ["doc-1"],
       question: "整理文档并生成风险报告",
     },
-    sourceTaskId: `agent_goal:${"task-segment-".repeat(30)}`,
+    sourceTaskId,
+  });
+  const repeatedSpecs = buildAgentGoalDeliverableSpecs({
+    body: {
+      agentAnswer: "Risk report answer.",
+      agentRunId: "run-long-task",
+    },
+    payload: {
+      docIds: ["doc-1"],
+      question: "整理文档并生成风险报告",
+    },
+    sourceTaskId,
+  });
+  const otherTaskSpecs = buildAgentGoalDeliverableSpecs({
+    body: {
+      agentAnswer: "Risk report answer.",
+      agentRunId: "run-long-task",
+    },
+    payload: {
+      docIds: ["doc-1"],
+      question: "整理文档并生成风险报告",
+    },
+    sourceTaskId: `${sourceTaskId}:other`,
   });
   const keys = specs
     .map((spec) => spec.artifactExecution?.idempotencyKey)
     .filter(Boolean);
+  const followUpTaskId = specs.find(
+    (spec) => spec.capabilityId === CAPABILITY_IDS.taskCreate
+  )?.input.taskId;
+  const repeatedFollowUpTaskId = repeatedSpecs.find(
+    (spec) => spec.capabilityId === CAPABILITY_IDS.taskCreate
+  )?.input.taskId;
+  const otherFollowUpTaskId = otherTaskSpecs.find(
+    (spec) => spec.capabilityId === CAPABILITY_IDS.taskCreate
+  )?.input.taskId;
 
   assert.equal(keys.length, 3);
   assert.equal(new Set(keys).size, 3);
   assert.ok(keys.every((key) => key.length <= 180));
+  assert.equal(followUpTaskId, repeatedFollowUpTaskId);
+  assert.notEqual(followUpTaskId, otherFollowUpTaskId);
+  assert.ok(followUpTaskId.length <= 180);
 });
 
 test("agent task runs a staged research dossier flow before report delivery", async () => {
@@ -1060,6 +1453,7 @@ test("agent task runs a staged research dossier flow before report delivery", as
     taskStore: createInMemoryTaskStore(),
   });
   const runner = createAgentTaskRunner({
+    capabilityRegistry: createDeliverableCapabilityRegistry(),
     runAgentTask: async ({ question }) => {
       questions.push(question);
 
@@ -1110,6 +1504,9 @@ test("agent task runs a staged research dossier flow before report delivery", as
   });
   const reportSpec = task.payload.deliverables.specs.find(
     (spec) => spec.capabilityId === CAPABILITY_IDS.reportExport
+  );
+  const reportSnapshot = task.payload.deliverables.approvalSnapshots.find(
+    (snapshot) => snapshot.gateId === reportSpec.approvalGateId
   );
 
   assert.equal(task.status, TASK_STATUSES.waitingForUser);
@@ -1183,11 +1580,15 @@ test("agent task runs a staged research dossier flow before report delivery", as
   assert.match(questions[3], /Compare the selected documents/);
   assert.match(questions[4], /citation self-check/);
   assert.match(questions[5], /final research dossier/);
-  assert.match(reportSpec.input.content, /## Research Flow/);
-  assert.match(reportSpec.input.content, /### Local document research/);
-  assert.match(reportSpec.input.content, /### Web supplement/);
-  assert.match(reportSpec.input.content, /### arXiv supplement/);
-  assert.equal(reportSpec.input.citations.length, 6);
+  assert.equal(reportSpec.input, undefined);
+  assert.match(reportSnapshot.executionInput.content, /## Research Flow/);
+  assert.match(
+    reportSnapshot.executionInput.content,
+    /### Local document research/
+  );
+  assert.match(reportSnapshot.executionInput.content, /### Web supplement/);
+  assert.match(reportSnapshot.executionInput.content, /### arXiv supplement/);
+  assert.equal(reportSnapshot.executionInput.citations.length, 6);
 });
 
 test("agent task goal completion reports unresolved evidence gaps", async () => {
@@ -1639,6 +2040,151 @@ test("postgres-backed real agent task restart continues with persisted run steps
   );
 });
 
+const buildPendingCapabilityApprovalTask = ({
+  approvalObjectHash = APPROVAL_OBJECT_HASH,
+  capabilityId = "web.search",
+  gateId = "approval:web.search:1.0.0",
+  status = "pending",
+} = {}) => ({
+  input: {
+    question: "Search the web.",
+  },
+  payload: {
+    pending: {
+      approvalGates: [
+        {
+          approvalObjectHash,
+          capabilityId,
+          id: gateId,
+          status,
+        },
+      ],
+      question: "Search the web.",
+    },
+    question: "Search the web.",
+  },
+});
+
+test("agent task capability approval requires a gate id and approval object hash", async () => {
+  const runner = createAgentTaskRunner();
+  const task = buildPendingCapabilityApprovalTask();
+
+  await assert.rejects(
+    () =>
+      runner.resume({
+        action: AGENT_TASK_ACTIONS.approve,
+        payload: {
+          approvalObjectHash: APPROVAL_OBJECT_HASH,
+        },
+        task,
+      }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(error.message, /gateId is required/);
+      return true;
+    }
+  );
+
+  await assert.rejects(
+    () =>
+      runner.resume({
+        action: AGENT_TASK_ACTIONS.approve,
+        payload: {
+          gateId: "approval:web.search:1.0.0",
+        },
+        task,
+      }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(error.message, /approvalObjectHash is required/);
+      return true;
+    }
+  );
+});
+
+test("agent task capability approval rejects stale or mismatched bindings", async () => {
+  const runner = createAgentTaskRunner();
+  const task = buildPendingCapabilityApprovalTask();
+
+  for (const testCase of [
+    {
+      expectedMessage: /gate not found/,
+      payload: {
+        approvalObjectHash: APPROVAL_OBJECT_HASH,
+        gateId: "approval:web.search:stale",
+      },
+    },
+    {
+      expectedMessage: /gate not found/,
+      payload: {
+        approvalObjectHash: APPROVAL_OBJECT_HASH,
+        gateId: "approval:web.search:1.0.0",
+      },
+      task: buildPendingCapabilityApprovalTask({
+        status: "approved",
+      }),
+    },
+    {
+      expectedMessage: /object does not match/,
+      payload: {
+        approvalObjectHash: "b".repeat(64),
+        gateId: "approval:web.search:1.0.0",
+      },
+    },
+    {
+      expectedMessage: /does not match the pending gate/,
+      payload: {
+        approvalObjectHash: APPROVAL_OBJECT_HASH,
+        capabilityId: "report.export",
+        gateId: "approval:web.search:1.0.0",
+      },
+    },
+  ]) {
+    await assert.rejects(
+      () =>
+        runner.resume({
+          action: AGENT_TASK_ACTIONS.approve,
+          payload: testCase.payload,
+          task: testCase.task ?? task,
+        }),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.match(error.message, testCase.expectedMessage);
+        return true;
+      }
+    );
+  }
+});
+
+test("agent task capability approval locks server-owned binding fields", async () => {
+  const runner = createAgentTaskRunner();
+  const result = await runner.resume({
+    action: AGENT_TASK_ACTIONS.approve,
+    payload: {
+      approval: {
+        approved: false,
+        approvalObjectHash: "b".repeat(64),
+        decision: "denied",
+        gateId: "client-forged-gate",
+        source: "client_forged",
+      },
+      approvalObjectHash: APPROVAL_OBJECT_HASH,
+      gateId: "approval:web.search:1.0.0",
+    },
+    task: buildPendingCapabilityApprovalTask(),
+  });
+
+  assert.deepEqual(result.payload.capabilityApprovals, {
+    "web.search": {
+      approved: true,
+      approvalObjectHash: APPROVAL_OBJECT_HASH,
+      decision: "approved",
+      gateId: "approval:web.search:1.0.0",
+      source: "task_action",
+    },
+  });
+});
+
 test("postgres-backed agent task approval resumes the paused question after restart", async () => {
   const calls = [];
   const harness = createFakePostgresTaskHarness();
@@ -1674,6 +2220,7 @@ test("postgres-backed agent task approval resumes the paused question after rest
           agentRunId: "run-approval-restart",
           approvalGates: [
             {
+              approvalObjectHash: APPROVAL_OBJECT_HASH,
               capabilityId: "web.search",
               id: "approval:web.search:1.0.0",
               status: "pending",
@@ -1683,6 +2230,7 @@ test("postgres-backed agent task approval resumes the paused question after rest
             detail: {
               approvalGates: [
                 {
+                  approvalObjectHash: APPROVAL_OBJECT_HASH,
                   capabilityId: "web.search",
                   id: "approval:web.search:1.0.0",
                   status: "pending",
@@ -1778,12 +2326,13 @@ test("postgres-backed agent task approval resumes the paused question after rest
     accessScope,
     action: AGENT_TASK_ACTIONS.approve,
     payload: {
+      approvalObjectHash: APPROVAL_OBJECT_HASH,
       approval: {
         approved: true,
         decision: "approved",
         source: "task_action",
       },
-      capabilityId: "web.search",
+      gateId: "approval:web.search:1.0.0",
     },
     runImmediately: false,
     taskId,
@@ -1812,7 +2361,9 @@ test("postgres-backed agent task approval resumes the paused question after rest
   assert.deepEqual(calls[2].capabilityApprovals, {
     "web.search": {
       approved: true,
+      approvalObjectHash: APPROVAL_OBJECT_HASH,
       decision: "approved",
+      gateId: "approval:web.search:1.0.0",
       source: "task_action",
     },
   });
@@ -2019,6 +2570,7 @@ test("agent task runner continues until blocked and resumes with preserved run c
             agentRunId: "run-1",
             approvalGates: [
               {
+                approvalObjectHash: APPROVAL_OBJECT_HASH,
                 capabilityId: "web.search",
                 id: "approval:web.search:1.0.0",
                 status: "pending",
@@ -2028,6 +2580,7 @@ test("agent task runner continues until blocked and resumes with preserved run c
               detail: {
                 approvalGates: [
                   {
+                    approvalObjectHash: APPROVAL_OBJECT_HASH,
                     capabilityId: "web.search",
                     id: "approval:web.search:1.0.0",
                     status: "pending",
@@ -2126,12 +2679,13 @@ test("agent task runner continues until blocked and resumes with preserved run c
     accessScope,
     action: AGENT_TASK_ACTIONS.approve,
     payload: {
+      approvalObjectHash: APPROVAL_OBJECT_HASH,
       approval: {
         approved: true,
         decision: "approved",
         source: "task_action",
       },
-      capabilityId: "web.search",
+      gateId: "approval:web.search:1.0.0",
     },
     runImmediately: false,
     taskId: "agent_goal:task-1",
@@ -2157,7 +2711,9 @@ test("agent task runner continues until blocked and resumes with preserved run c
   assert.deepEqual(calls[2].capabilityApprovals, {
     "web.search": {
       approved: true,
+      approvalObjectHash: APPROVAL_OBJECT_HASH,
       decision: "approved",
+      gateId: "approval:web.search:1.0.0",
       source: "task_action",
     },
   });
@@ -2277,6 +2833,62 @@ test("agent task runner persists task memory as planning-only context", async ()
     /Secret evidence should not be copied/
   );
   assert.equal(task.result.taskMemory.evidencePolicy, "planning_context_only");
+});
+
+test("agent task runner stops before progress writes after its claim is lost", async () => {
+  const claimLostError = new Error("Task execution claim is no longer active.");
+  claimLostError.code = "TASK_CLAIM_LOST";
+  let claimActive = true;
+  let patchCalls = 0;
+  const runner = createAgentTaskRunner({
+    runAgentTask: async () => {
+      claimActive = false;
+
+      return {
+        status: 200,
+        body: {
+          agentAnswer: "Stale result",
+          agentMode: "document",
+          clarification: {
+            needed: false,
+          },
+        },
+      };
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      runner.run({
+        accessScope,
+        assertClaimActive: () => {
+          if (!claimActive) {
+            throw claimLostError;
+          }
+        },
+        patchTask: async () => {
+          patchCalls += 1;
+        },
+        task: {
+          id: "agent_goal:claim-lost",
+          input: {
+            maxIterations: 1,
+            question: "Do not persist stale work.",
+          },
+          payload: {
+            iterations: [],
+            maxIterations: 1,
+            question: "Do not persist stale work.",
+          },
+        },
+      }),
+    (error) => {
+      assert.equal(error.code, "TASK_CLAIM_LOST");
+      return true;
+    }
+  );
+
+  assert.equal(patchCalls, 0);
 });
 
 test("agent task runner can continue after iteration budget is exhausted", async () => {

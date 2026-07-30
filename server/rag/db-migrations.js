@@ -31,6 +31,12 @@ const ensureSimpleTableName = (tableName, envName) => {
     );
   }
 
+  if (Buffer.byteLength(tableName, "utf8") > 63) {
+    throw new Error(
+      `${envName} must be at most 63 bytes so PostgreSQL does not truncate it.`
+    );
+  }
+
   return tableName;
 };
 
@@ -114,6 +120,10 @@ const validateTableNames = (tableNames = {}) => ({
 
 const renderMigrationSql = (sqlText, tableNames = getTableNames()) => {
   const safeTableNames = validateTableNames(tableNames);
+  const agentRunApprovalSnapshotsTable = ensureSimpleTableName(
+    `${safeTableNames.agentRunsTable}_approval_snapshots`,
+    "derived agent run approval snapshots table"
+  );
 
   return sqlText
     .replaceAll("__LONG_MEMORY_TABLE__", safeTableNames.longMemoryTable)
@@ -123,6 +133,10 @@ const renderMigrationSql = (sqlText, tableNames = getTableNames()) => {
     .replaceAll("__TASK_EVENTS_TABLE__", safeTableNames.taskEventsTable)
     .replaceAll("__AGENT_RUNS_TABLE__", safeTableNames.agentRunsTable)
     .replaceAll("__AGENT_RUN_EVENTS_TABLE__", safeTableNames.agentRunEventsTable)
+    .replaceAll(
+      "__AGENT_RUN_APPROVAL_SNAPSHOTS_TABLE__",
+      agentRunApprovalSnapshotsTable
+    )
     .replaceAll("__ADMIN_AUDIT_EVENTS_TABLE__", safeTableNames.adminAuditEventsTable)
     .replaceAll(
       "__WORKSPACE_ARTIFACTS_TABLE__",

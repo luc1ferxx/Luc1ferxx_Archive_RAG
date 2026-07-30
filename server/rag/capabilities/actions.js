@@ -169,7 +169,7 @@ export const createTaskCreateCapability = ({ actionTaskService } = {}) => ({
     ],
     storesResult: true,
   },
-  execute: async ({ accessScope, input }) => {
+  execute: async ({ accessScope, input, services }) => {
     const task = await persistActionTask({
       accessScope,
       action: CAPABILITY_IDS.taskCreate,
@@ -189,6 +189,9 @@ export const createTaskCreateCapability = ({ actionTaskService } = {}) => ({
         title: normalizeText(input.title),
       },
       summary: normalizeText(input.description) || normalizeText(input.title),
+      taskId:
+        normalizeText(input.taskId) ||
+        normalizeText(services?.artifactExecution?.idempotencyKey),
     });
 
     return {
