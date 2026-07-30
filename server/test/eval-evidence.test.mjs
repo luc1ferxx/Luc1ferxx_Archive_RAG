@@ -281,11 +281,15 @@ test("evaluation Git state ignores controlled evaluation outputs but detects sou
       return `${commitSha}\n`;
     }
 
-    if (args.join(" ") === "status --porcelain --untracked-files=all") {
+    if (
+      args.join(" ") ===
+      "status --porcelain=v1 -z --untracked-files=all"
+    ) {
       return [
         " M server/evaluation/results/latest.json",
         "?? server/evaluation/generated/arxiv-corpus.json",
-      ].join("\n");
+        "",
+      ].join("\0");
     }
 
     throw new Error(`Unexpected git args: ${args.join(" ")}`);
@@ -311,6 +315,45 @@ test("evaluation Git state ignores controlled evaluation outputs but detects sou
       dirty: true,
     }
   );
+});
+
+test("evaluation Git state detects a source rename into controlled outputs", async () => {
+  const commitSha = "c".repeat(40);
+  const runGit = async (args) => {
+    if (args[0] === "rev-parse") {
+      return `${commitSha}\n`;
+    }
+
+    if (args[0] === "status") {
+      return "R  server/evaluation/results/app.js\0server/app.js\0";
+    }
+
+    throw new Error(`Unexpected git args: ${args.join(" ")}`);
+  };
+
+  assert.deepEqual(await resolveEvaluationGitState({ runGit }), {
+    commitSha,
+    dirty: true,
+  });
+});
+
+test("evaluation Git state does not normalize raw NUL-delimited paths into controlled outputs", async () => {
+  const commitSha = "d".repeat(40);
+  const statusPayloads = [
+    "??  server/evaluation/results/leading-space.js\0",
+    '?? "server/evaluation/results/quoted.js"\0',
+    "?? server\\evaluation\\results\\backslash.js\0",
+  ];
+
+  for (const status of statusPayloads) {
+    const runGit = async (args) =>
+      args[0] === "rev-parse" ? `${commitSha}\n` : status;
+
+    assert.deepEqual(await resolveEvaluationGitState({ runGit }), {
+      commitSha,
+      dirty: true,
+    });
+  }
 });
 
 test("evaluation source references retain only release lineage fields", () => {

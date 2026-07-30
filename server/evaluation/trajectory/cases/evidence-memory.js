@@ -104,6 +104,17 @@ export const createMemoryNotEvidenceCase = () => ({
       label: "Memory is not evidence",
       description:
         "Long-memory hints may affect context, but unsupported memory-derived claims must not count as document evidence.",
+      observed: {
+        clarificationReason: body.clarification?.reason ?? null,
+        ragAbstained: body.ragAbstained === true,
+        ragMemoryApplied: body.ragMemoryApplied === true,
+        selfCheckStatus: selfCheck?.status ?? null,
+        sourceDocIds: (body.ragSources ?? [])
+          .map((source) => source.docId)
+          .filter(Boolean),
+        traceTypes: getTraceTypes(response),
+        unsupportedClaimTexts: unsupportedClaims.map((claim) => claim.text),
+      },
       response,
       telemetry,
       checks: [
@@ -219,6 +230,14 @@ export const createMultiDocConflictCase = () => ({
       label: "Multi-doc conflict",
       description:
         "A multi-document comparison should surface conflicts with evidence from each selected document.",
+      observed: {
+        agentMode: body.agentMode ?? null,
+        answerHasConflict: /conflict/i.test(body.agentAnswer ?? ""),
+        citationDocIds: [...citationDocIds],
+        selectedDocumentCount:
+          customStep?.detail?.selectedDocumentCount ?? null,
+        selectedSkillIds: getSelectedSkillIds(response),
+      },
       response,
       telemetry,
       checks: [

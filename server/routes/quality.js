@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { getRequestAccessScope } from "../auth.js";
+import { markHistoricalQualityEvidence } from "../evaluation/quality-evidence-scope.js";
 import { buildFeedbackRecord } from "../feedback.js";
 
 import { serializeError } from "./helpers.js";
@@ -11,7 +12,11 @@ export const createQualityRouter = (services) => {
 
   router.get("/quality/latest", async (req, res) => {
     try {
-      return res.json(await qualityService.readLatestQualityReport());
+      return res.json(
+        markHistoricalQualityEvidence(
+          await qualityService.readLatestQualityReport()
+        )
+      );
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to load the latest quality report."),
@@ -22,9 +27,11 @@ export const createQualityRouter = (services) => {
   router.post("/quality/synthetic", async (req, res) => {
     try {
       return res.json(
-        await qualityService.runSyntheticQualityEvaluation({
-          corpusPath: req.body.corpusPath,
-        })
+        markHistoricalQualityEvidence(
+          await qualityService.runSyntheticQualityEvaluation({
+            corpusPath: req.body.corpusPath,
+          })
+        )
       );
     } catch (error) {
       return res.status(error.status ?? 500).json({
@@ -35,7 +42,11 @@ export const createQualityRouter = (services) => {
 
   router.get("/quality/history", async (req, res) => {
     try {
-      return res.json(await qualityService.readQualityHistory());
+      return res.json(
+        markHistoricalQualityEvidence(
+          await qualityService.readQualityHistory()
+        )
+      );
     } catch (error) {
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to load quality history."),

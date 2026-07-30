@@ -276,12 +276,13 @@ curl http://localhost:5001/ready
 | `cd server && npm run runtime:smoke` | 用真实 planner 和 PostgreSQL smoke `/health`、`/chat` runtime。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
 | `cd server && npm run eval:param-sweep` | 跑 topK、overlap、rerank、hybrid 参数扫描；`-- --profile full` 扩大矩阵。 |
-| `cd server && npm run quality:gate` | 组合 feedback、trajectory、planner、recovery 等报告并执行质量门控；`-- --require-robust-suite` 会强制检查 hard/real suite。 |
+| `cd server && npm run quality:gate` | 查看兼容旧 payload 的历史 metrics；即使输出 PASS，也不代表当前 commit 已验证。 |
+| `cd server && npm run quality:current` | 校验 PR 轻量评测是否全部来自当前 commit、24 小时内且由 clean worktree 生成；证据未验证时 metrics 只保留诊断值并标记为 unverified。 |
 | `cd server && npm run release:gate` | 严格检查当前 commit 的 8 份发布证据，包括 freshness、clean worktree、corpus/provider 和 source lineage。 |
 
-`quality:gate` 继续作为轻量 PR gate，并兼容没有 lineage metadata 的旧报告；`release:gate` 才是发布入口。后者不会把仓库中已有的旧 `latest.*` 当成当前版本证据：报告缺少统一 `evidence`、来自其他 commit、由 dirty worktree 生成、已过期，或 corpus/provider/source lineage 不一致时都会失败。
+`quality:gate` 保留为兼容旧 payload 的历史 metrics 查看器，输出 PASS 不再代表当前 commit 已通过。默认 PR 入口是 `quality:current`：CI 会重新生成独立的 deterministic `latest-quality.*`，要求 synthetic、feedback、trajectory、planner-mock 和 recovery 报告自身通过并绑定同一 SHA；存在 planner-real 时也必须通过逐报告校验。门禁还会用版本化 suite manifest 固定必需 case/check IDs、关键 case 语义、语料页、事实 claim/来源归属、拒答输出和 deterministic 上传身份；citation 必须对应本次 raw retrieval，recovery cases 从原始 recovery summary 独立重算，planner/trajectory 必须匹配稳定 response projection，其中高风险 trajectory 另持久化 privacy-safe `case.response.observed` 原始观测，避免把 `check.detail` 或 `check.passed` 当证据。再由门禁独立重算 claim support、断点续传不变量和汇总指标，防止删减覆盖面、伪造 raw verdict 或用 summary 掩盖 failure；只要 worktree、lineage、报告契约或 baseline 任一证据检查失败，对外 metrics 状态就是 `unverified`，原始 metrics 判断只作为 diagnostics 保留。回归比较只使用受版本控制的 `server/evaluation/baselines/quality-near-duplicate-deterministic-v1.json`，旧 `latest.json` 或残留 timestamped 报告不能替换 baseline。`release:gate` 仍是更完整、也更昂贵的发布入口；current gate 校验报告契约与 current-SHA lineage，自身不构成 runner 执行证明、完整内部事件重放或密码学来源证明，实际运行 provenance 仍由 CI 步骤顺序与 artifact 提供。
 
-CI 侧，`quality-gate.yml` 把后端测试和 eval+gate 拆成两个并行 job；planner real gate、robust suite 和 release evidence 各有独立的定时 workflow。
+CI 侧，`quality-gate.yml` 把后端测试和 current eval+gate 拆成两个并行 job；所有 producer 失败后仍会继续生成可用诊断，最后上传 current gate JSON/Markdown 与原始报告。planner real gate、robust suite 和 release evidence 各有独立的定时 workflow。
 
 ## 评测优化结果
 

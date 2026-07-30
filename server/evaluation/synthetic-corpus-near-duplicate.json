@@ -130,7 +130,8 @@
           "docKey": "handbook_gamma",
           "pages": [1]
         }
-      ]
+      ],
+      "expectedAnswerIncludes": ["2", "3"]
     },
     {
       "id": "compare_remote_mixed_duplicate_conflict",
@@ -152,7 +153,8 @@
           "docKey": "handbook_gamma",
           "pages": [1]
         }
-      ]
+      ],
+      "expectedAnswerIncludes": ["2", "3"]
     },
     {
       "id": "qa_satellite_stipend_abstain",

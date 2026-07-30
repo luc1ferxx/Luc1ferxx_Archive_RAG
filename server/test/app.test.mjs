@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createApp as createProductionApp } from "../app.js";
 import {
   createHs256Jwt,
@@ -45,6 +47,7 @@ import {
   ADMIN_PERMISSION_IDS,
   ADMIN_PERMISSION_REASONS,
   ADMIN_ROLE_IDS,
+  getAdminPermissionContract,
 } from "../rag/admin-permissions.js";
 import { MAX_CHUNK_UPLOAD_SIZE } from "../upload-policy.js";
 import * as uploadSessionStore from "../upload-session-store.js";
@@ -5666,6 +5669,12 @@ test("quality latest endpoint returns guardrail report", async () => {
     const body = await response.json();
 
     assert.equal(body.status, "warn");
+    assert.equal(body.authoritativeForCurrentCommit, false);
+    assert.equal(body.evidenceScope, "historical");
+    assert.deepEqual(body.verification, {
+      currentCommitVerified: false,
+      scope: "historical",
+    });
     assert.equal(body.summary.metrics.overallPassRate, 0.875);
     assert.equal(body.failedCases[0].id, "qa_remote");
     assert.match(body.recommendations[0].label, /retrieval/i);
@@ -5719,6 +5728,12 @@ test("quality synthetic endpoint invokes injected runner", async () => {
 
     assert.equal(requestedCorpusPath, "evaluation/synthetic-corpus-near-duplicate.json");
     assert.equal(body.status, "ok");
+    assert.equal(body.authoritativeForCurrentCommit, false);
+    assert.equal(body.evidenceScope, "historical");
+    assert.deepEqual(body.verification, {
+      currentCommitVerified: false,
+      scope: "historical",
+    });
     assert.equal(body.summary.runId, "run-2");
   } finally {
     await server.close();
@@ -5850,6 +5865,12 @@ test("quality history endpoint returns regression gate", async () => {
     const body = await response.json();
 
     assert.equal(body.status, "fail");
+    assert.equal(body.authoritativeForCurrentCommit, false);
+    assert.equal(body.evidenceScope, "historical");
+    assert.deepEqual(body.verification, {
+      currentCommitVerified: false,
+      scope: "historical",
+    });
     assert.equal(body.runs[0].runId, "run-latest");
     assert.equal(body.regressionGate.baselineRunId, "run-previous");
     assert.equal(body.regressionGate.checks[0].status, "fail");
@@ -5936,6 +5957,40 @@ test("quality gate decision maps status to CI exit codes", () => {
       },
     }).exitCode,
     0
+  );
+});
+
+test("legacy quality CLI preserves its prefix while marking output historical-only", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(
+        new URL("../evaluation/check-quality-gate.mjs", import.meta.url)
+      ),
+      "--allow-unknown",
+    ],
+    {
+      encoding: "utf8",
+    }
+  );
+
+  assert.equal(result.error, undefined);
+  assert.match(
+    result.stdout,
+    /^Quality gate: (?:PASS|WARN|FAIL|UNKNOWN) \(HISTORICAL ONLY\b/
+  );
+  assert.match(
+    result.stdout,
+    /not authoritative evidence for the current commit/i
+  );
+});
+
+test("quality refresh permission identifies the operation as historical metrics", () => {
+  assert.equal(
+    getAdminPermissionContract(
+      ADMIN_PERMISSION_IDS.adminActionQualityRefresh
+    )?.label,
+    "Refresh historical quality metrics"
   );
 });
 

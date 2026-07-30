@@ -34,6 +34,8 @@ jobs:
   quality-gate:
     runs-on: ubuntu-latest
     env:
+      EVAL_EVIDENCE_PROFILE: quality-current
+      EVAL_TARGET_COMMIT_SHA: ${{ github.sha }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     defaults:
@@ -54,21 +56,49 @@ jobs:
       - name: Install server dependencies
         run: npm ci
 
+      - name: Run current synthetic eval
+        if: ${{ !cancelled() }}
+        run: npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json --latest-name latest-quality --openai-provider deterministic
+
       - name: Run trajectory eval
+        if: ${{ !cancelled() }}
         run: npm run eval:trajectory
 
       - name: Run planner eval (mock)
+        if: ${{ !cancelled() }}
         run: npm run eval:planner -- --provider mock
 
       - name: Run planner eval (real)
-        if: env.OPENAI_API_KEY != ''
+        if: ${{ !cancelled() && env.OPENAI_API_KEY != '' }}
         run: npm run eval:planner -- --provider real
 
       - name: Run recovery observability eval
+        if: ${{ !cancelled() }}
         run: npm run eval:recovery-observability
 
       - name: Run feedback regression eval
+        if: ${{ !cancelled() }}
         run: npm run eval:feedback
 
-      - name: Check quality gate
-        run: npm run quality:gate -- --fail-on-warn
+      - name: Check current quality gate
+        if: ${{ !cancelled() && env.OPENAI_API_KEY == '' }}
+        run: npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA"
+
+      - name: Check current quality gate (planner real)
+        if: ${{ !cancelled() && env.OPENAI_API_KEY != '' }}
+        run: npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA" --require-planner-real
+
+      - name: Upload current quality evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-quality-${{ env.EVAL_TARGET_COMMIT_SHA }}
+          path: |
+            server/evaluation/results/latest-quality.*
+            server/evaluation/results/latest-feedback.*
+            server/evaluation/results/latest-trajectory.*
+            server/evaluation/results/latest-planner-mock.*
+            server/evaluation/results/latest-planner-real.*
+            server/evaluation/results/latest-recovery-observability.*
+            server/evaluation/results/latest-current-quality-gate.*
+          if-no-files-found: error

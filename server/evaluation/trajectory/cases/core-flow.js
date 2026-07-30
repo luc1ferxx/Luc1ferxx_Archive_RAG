@@ -230,6 +230,16 @@ export const createFollowUpCase = () => ({
       label: "Document evidence follow-up",
       description:
         "Unsupported document claims should trigger gap_analysis and a focused follow-up retrieval.",
+      observed: {
+        selfCheckStatuses: selfChecks.map((step) => step.status),
+        gapTypes: (executionLoop.gaps ?? []).map((gap) => gap.type),
+        documentRunPhases: getRunPhases(
+          response,
+          AGENT_SKILL_IDS.documentRag
+        ),
+        documentAttempts: documentObservation?.attempts ?? null,
+        documentBudgetUsed: documentObservation?.budgetUsed ?? null,
+      },
       response,
       telemetry,
       checks: [
@@ -422,6 +432,14 @@ export const createAccessScopeCase = () => ({
       label: "Custom skill access scope",
       description:
         "A custom skill must pass the authenticated accessScope to document listing and RAG chat.",
+      observed: {
+        listDocumentScopes: telemetry.listDocumentScopes,
+        chatScopes: telemetry.chatCalls.map(
+          (call) => call.accessScope
+        ),
+        selectedDocumentCount:
+          customStep?.detail?.selectedDocumentCount ?? null,
+      },
       response,
       telemetry,
       checks: [
@@ -519,6 +537,10 @@ export const createBudgetCase = () => ({
       label: "Budget exhaustion clarification",
       description:
         "When follow-up budget is exhausted, the agent should stop and ask for clarification instead of looping.",
+      observed: {
+        documentAttempts: documentObservation?.attempts ?? null,
+        documentBudgetUsed: documentObservation?.budgetUsed ?? null,
+      },
       response,
       telemetry,
       checks: [

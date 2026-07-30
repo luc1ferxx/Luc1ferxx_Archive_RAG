@@ -29,6 +29,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "quality:gate": "cd server && npm run quality:gate",
+    "quality:current": "cd server && npm run quality:current --",
     "release:gate": "cd server && npm run release:gate",
     "eval:param-sweep": "cd server && npm run eval:param-sweep"
   }

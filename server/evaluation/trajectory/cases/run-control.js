@@ -151,6 +151,38 @@ export const createApprovalResumeCase = () => ({
       label: "Capability approval resume",
       description:
         "A risky external capability should pause before execution and resume on the same agent run after approval.",
+      observed: {
+        approvalGate: {
+          capabilityId: gate?.capabilityId ?? null,
+          inputPreviewKeys: Object.keys(gate?.inputPreview ?? {}).sort(),
+          inputQuestion: gate?.inputPreview?.question ?? null,
+          riskFlags: [...(gate?.riskFlags ?? [])].sort(),
+        },
+        capabilityStep: {
+          approvalGateMatches:
+            Boolean(gate?.id) && capabilityStep?.approvalGateId === gate.id,
+          capabilityId: capabilityStep?.capabilityId ?? null,
+          decision: capabilityStep?.decision ?? null,
+          status: capabilityStep?.status ?? null,
+        },
+        eventTypes,
+        pending: {
+          agentMode: pendingBody.agentMode ?? null,
+          clarificationReason: pendingBody.clarification?.reason ?? null,
+          runStatus: pendingRun?.status ?? null,
+          webSearchCalls: webSearchCallsBeforeResume,
+        },
+        resumed: {
+          agentMode: resumedBody.agentMode ?? null,
+          responseStatus: resumedBody.agentRunStatus ?? null,
+          runStatus: resumeResult.run?.status ?? null,
+          sameRun:
+            Boolean(pendingBody.agentRunId) &&
+            resumedBody.agentRunId === pendingBody.agentRunId,
+          webSearchCalls,
+        },
+        selectedSkillIds: getSelectedSkillIds(pendingResponse),
+      },
       response: resumedResponse,
       telemetry,
       checks: [
@@ -336,6 +368,28 @@ export const createCustomSkillRetryCase = () => ({
       label: "Custom skill retry",
       description:
         "A failed custom skill step should persist input/output/error and retry from the failed step.",
+      observed: {
+        chatCallCount: telemetry.chatCalls.length,
+        failedStep: {
+          errorMessage: failedStep?.error?.message ?? null,
+          hasQuestion: Boolean(failedStep?.input?.question),
+          skillId: failedStep?.input?.skillId ?? null,
+          status: failedStep?.status ?? null,
+        },
+        retry: {
+          attempt: retryStep?.attempt ?? null,
+          citationCount: retryStep?.output?.citationCount ?? null,
+          retryError,
+          retryOfOriginalStep:
+            Boolean(failedStep?.id) &&
+            retryStep?.retryOfStepId === failedStep.id,
+          runStatus: retryResult?.run?.status ?? null,
+          sameRun:
+            Boolean(initialBody.agentRunId) &&
+            retryResult?.response?.agentRunId === initialBody.agentRunId,
+          stepStatus: retryStep?.status ?? null,
+        },
+      },
       response: retryResponse,
       telemetry,
       checks: [
@@ -469,6 +523,21 @@ export const createWebApprovalDenyCase = () => ({
       label: "Web approval deny",
       description:
         "Denying a web capability approval should complete the run without executing the external call.",
+      observed: {
+        denied: {
+          approvalDenied: deniedRun?.result?.approvalDenied ?? null,
+          runStatus: deniedRun?.status ?? null,
+          skippedCapabilityStatus: skippedStep?.status ?? null,
+          skippedPrimaryStatus: skippedPrimaryStep?.status ?? null,
+          webSearchCalls,
+        },
+        eventTypes,
+        pending: {
+          clarificationReason: pendingBody.clarification?.reason ?? null,
+          runStatus: pendingRun?.status ?? null,
+          webSearchCalls: webSearchCallsBeforeDeny,
+        },
+      },
       response: pendingResponse,
       telemetry,
       checks: [

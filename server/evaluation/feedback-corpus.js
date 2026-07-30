@@ -36,6 +36,11 @@ const normalizeDocIds = (docIds) => {
   return [];
 };
 
+const normalizeExpectedAnswerIncludes = (value) =>
+  Array.isArray(value)
+    ? [...new Set(value.map((item) => normalizeText(item)).filter(Boolean))]
+    : [];
+
 const normalizePageNumber = (pageNumber) => {
   const parsedPageNumber = Number.parseInt(pageNumber ?? "1", 10);
 
@@ -436,6 +441,9 @@ export const buildFeedbackCorpusFromRecords = (records = []) => {
         expectedEvidence,
       }),
       referenceAnswer: normalizeText(record.note) || normalizeText(record.answerText),
+      expectedAnswerIncludes: normalizeExpectedAnswerIncludes(
+        record.expectedAnswerIncludes
+      ),
       expectedEvidence,
       metadata: {
         feedback: buildFeedbackMetadata({

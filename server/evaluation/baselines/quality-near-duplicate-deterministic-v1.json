@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "1.0.0",
+  "baseline": {
+    "id": "quality-near-duplicate-deterministic-v1",
+    "purpose": "Pinned regression baseline for the deterministic PR quality profile.",
+    "providerMode": "deterministic",
+    "corpusId": "synthetic-corpus-near-duplicate"
+  },
+  "summary": {
+    "runId": "quality-near-duplicate-deterministic-v1",
+    "createdAt": "2026-07-29T00:00:00.000Z",
+    "corpus": {
+      "path": "server/evaluation/synthetic-corpus-near-duplicate.json",
+      "documents": 5,
+      "cases": 8,
+      "qaCases": 2,
+      "compareCases": 4,
+      "abstainCases": 2
+    },
+    "models": {
+      "embedding": "deterministic",
+      "chat": "deterministic"
+    },
+    "config": {
+      "chunkStrategy": "structured",
+      "chunkSize": 900,
+      "chunkOverlap": 180,
+      "retrievalTopK": 6,
+      "compareTopKPerDoc": 3,
+      "maxComparisonSources": 8,
+      "minRelevanceScore": 0.32,
+      "nearDuplicateGuardEnabled": true,
+      "uploadChunkSizeBytes": 180
+    },
+    "metrics": {
+      "overallPassRate": 1,
+      "qaPageHitRate": 1,
+      "compareDocCoverageRate": 1,
+      "comparePageHitRate": 1,
+      "abstainAccuracy": 1,
+      "answerContentHitRate": 1,
+      "claimSupportHitRate": 1,
+      "uploadResumeSuccessRate": 1,
+      "averageCitationCount": 1.63,
+      "totalSkippedBytesOnResume": 2700
+    }
+  },
+  "cases": [
+    {
+      "id": "qa_remote_alpha",
+      "passed": true
+    },
+    {
+      "id": "qa_badge_gamma",
+      "passed": true
+    },
+    {
+      "id": "compare_remote_no_material_difference_2way",
+      "passed": true
+    },
+    {
+      "id": "compare_remote_no_material_difference_3way",
+      "passed": true
+    },
+    {
+      "id": "compare_remote_numeric_conflict",
+      "passed": true
+    },
+    {
+      "id": "compare_remote_mixed_duplicate_conflict",
+      "passed": true
+    },
+    {
+      "id": "qa_satellite_stipend_abstain",
+      "passed": true
+    },
+    {
+      "id": "compare_remote_single_doc_abstain",
+      "passed": true
+    }
+  ]
+}

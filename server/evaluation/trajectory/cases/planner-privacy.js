@@ -116,6 +116,27 @@ export const createPlannerFallbackCase = () => ({
       label: "Planner fallback",
       description:
         "Invalid intent and execution planner adapter output should fall back to deterministic whitelisted plans.",
+      observed: {
+        executionPlanner: {
+          fallback: executionPlanner?.fallback === true,
+          fallbackReason: executionPlanner?.fallbackReason ?? null,
+          requestedPlannerId: executionPlanner?.requestedPlannerId ?? null,
+          selectedPlannerId: executionPlanner?.selectedPlannerId ?? null,
+          status: executionPlanner?.status ?? null,
+          stepIds: executionPlanner?.stepIds ?? [],
+        },
+        intentPlanner: {
+          fallback: intentPlanner?.fallback === true,
+          fallbackReason: intentPlanner?.fallbackReason ?? null,
+          requestedPlannerId: intentPlanner?.requestedPlannerId ?? null,
+          selectedIntentId: intentPlanner?.selectedIntentId ?? null,
+          selectedMode: intentPlanner?.selectedMode ?? null,
+          selectedPlannerId: intentPlanner?.selectedPlannerId ?? null,
+          status: intentPlanner?.status ?? null,
+        },
+        selectedSkillIds: getSelectedSkillIds(response),
+        traceTypes: getTraceTypes(response),
+      },
       response,
       telemetry,
       checks: [
@@ -202,6 +223,23 @@ export const createPrivacySanitizationCase = () => ({
       label: "Privacy sanitization",
       description:
         "Capability approval previews should expose only whitelisted sanitized fields, not private selection tokens.",
+      observed: {
+        approvalCapabilityId:
+          policyResult.approvalGate?.capabilityId ?? null,
+        decision: policyResult.decision ?? null,
+        preview: {
+          docId: preview.docId ?? null,
+          provider: preview.provider ?? null,
+          selectedIds: Array.isArray(preview.selectedIds)
+            ? preview.selectedIds
+            : [],
+        },
+        previewKeys: Object.keys(preview).sort(),
+        riskFlags: policyResult.riskFlags ?? [],
+        selectionTokenPresent:
+          Object.hasOwn(preview, "selectionToken") ||
+          previewText.includes(secretToken),
+      },
       response,
       telemetry,
       checks: [

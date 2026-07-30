@@ -80,7 +80,7 @@ export const ADMIN_PERMISSION_CONTRACTS = Object.freeze({
   [ADMIN_PERMISSION_IDS.adminActionQualityRefresh]: freezeContract({
     actionIds: [ADMIN_ACTION_IDS.qualityRefresh],
     id: ADMIN_PERMISSION_IDS.adminActionQualityRefresh,
-    label: "Refresh quality report",
+    label: "Refresh historical quality metrics",
     resource: "admin.actions",
     risk: "controlled_compute",
   }),

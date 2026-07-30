@@ -177,6 +177,47 @@ export const createGoalLifecycleCase = () => ({
       label: "Agent goal lifecycle completion",
       description:
         "An agent goal should remain incomplete while approval is pending, then pass goal-completion checks after approved deliverables are created.",
+      observed: {
+        completed: {
+          completionChecks: (completion.checks ?? []).map((check) => ({
+            id: check.id,
+            passed: check.passed === true,
+          })),
+          completionStatus: completion.status,
+          requiredUserAction: completedTask.requiredUserAction,
+          taskStatus: completedTask.status,
+        },
+        deliverables: {
+          capabilityIds: capabilityRegistry.calls.map(
+            (call) => call.capabilityId
+          ),
+          planned: deliverableCheck?.detail?.planned ?? null,
+          storedArtifactCount: storedArtifacts.total,
+        },
+        pending: {
+          completionStatus: pendingCompletion.status,
+          noPendingUserActionPassed:
+            getCompletionCheck(
+              pendingCompletion,
+              "no_pending_user_action"
+            )?.passed === true,
+          requiredUserAction: pendingTask.requiredUserAction,
+          taskStatus: pendingTask.status,
+        },
+        workflow: {
+          completedCount: workflowLifecycle?.counts?.completed ?? null,
+          completionChecks: workflowLifecycle?.completionChecks ?? [],
+          currentPhaseId: workflowLifecycle?.currentPhaseId ?? null,
+          id: workflowLifecycle?.id ?? null,
+          reportExportPlanned:
+            workflowLifecycle?.deliverables?.some(
+              (deliverable) =>
+                deliverable.capabilityId === CAPABILITY_IDS.reportExport
+            ) === true,
+          validationPassed: workflowLifecycleCheck?.passed === true,
+          version: workflowLifecycle?.version ?? null,
+        },
+      },
       response: {
         status: 200,
         body: {

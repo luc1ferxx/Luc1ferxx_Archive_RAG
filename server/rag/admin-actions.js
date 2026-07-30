@@ -148,7 +148,7 @@ const createRecoveryScanAction = ({ agentRunRecoveryActionService }) => ({
 
 const createQualityRefreshAction = ({ qualityService }) => ({
   id: ADMIN_ACTION_IDS.qualityRefresh,
-  label: "Refresh quality report",
+  label: "Refresh historical quality metrics",
   async run({ payload }) {
     const runSyntheticQualityEvaluation = requireActionHandler({
       handler: qualityService?.runSyntheticQualityEvaluation,

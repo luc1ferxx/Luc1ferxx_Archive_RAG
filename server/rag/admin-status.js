@@ -167,8 +167,18 @@ const buildHealthWarnings = ({ health = {}, warnings }) => {
 export const compactAdminQualityReport = (report = {}) => {
   const summary = normalizeRecord(report.summary);
   const metrics = normalizeRecord(summary.metrics);
+  const inputVerification = normalizeRecord(report.verification);
+  const verificationScope = normalizeText(inputVerification.scope);
+  const currentCommitVerified =
+    inputVerification.currentCommitVerified === true &&
+    verificationScope === "current";
+  const evidenceScope =
+    verificationScope ||
+    normalizeText(report.evidenceScope) ||
+    "unverified";
 
   return {
+    authoritativeForCurrentCommit: currentCommitVerified,
     corpus: normalizeRecord(summary.corpus, null)
       ? {
           cases: summary.corpus.cases ?? null,
@@ -176,6 +186,7 @@ export const compactAdminQualityReport = (report = {}) => {
         }
       : null,
     createdAt: normalizeText(summary.createdAt),
+    evidenceScope,
     failedCaseCount: toArray(report.failedCases).length,
     metrics: {
       abstainAccuracyPercent: metrics.abstainAccuracyPercent ?? null,
@@ -187,6 +198,10 @@ export const compactAdminQualityReport = (report = {}) => {
     },
     runId: normalizeText(summary.runId),
     status: normalizeText(report.status) || "unknown",
+    verification: {
+      currentCommitVerified,
+      scope: evidenceScope,
+    },
   };
 };
 
@@ -237,12 +252,33 @@ const buildQualityWarnings = ({ quality = {}, warnings }) => {
   }
 
   if (["fail", "warn", "unknown"].includes(quality.status)) {
+    const currentCommitVerified =
+      quality.verification?.currentCommitVerified === true;
+
     warnings.push(
       createWarning({
         component: "quality",
         id: `quality_${quality.status}`,
         message: `Quality status is ${quality.status}.`,
-        severity: quality.status === "fail" ? "error" : "warn",
+        severity:
+          quality.status === "fail" && currentCommitVerified
+            ? "error"
+            : "warn",
+      })
+    );
+  }
+
+  if (quality.verification?.currentCommitVerified !== true) {
+    const historical = quality.evidenceScope === "historical";
+
+    warnings.push(
+      createWarning({
+        component: "quality",
+        id: historical ? "quality_historical" : "quality_unverified",
+        message:
+          historical
+            ? "Quality result is historical and is not current-commit evidence."
+            : "Quality result is not verified against the current commit.",
       })
     );
   }
@@ -485,7 +521,8 @@ const buildTriggerWarnings = ({ triggers = {}, warnings }) => {
 const buildOverallStatus = ({ health = {}, quality = {}, warnings = [] } = {}) => {
   if (
     health.status === ADMIN_STATUS_VALUES.error ||
-    quality.status === "fail" ||
+    (quality.status === "fail" &&
+      quality.verification?.currentCommitVerified === true) ||
     warnings.some((warning) => warning.severity === "error")
   ) {
     return ADMIN_STATUS_VALUES.error;

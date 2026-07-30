@@ -1,3 +1,5 @@
+import { summarizeQualityCaseResults } from "./quality-case-results.js";
+
 export const buildTrajectoryGate = ({ latestTrajectoryPayload = null } = {}) => {
   if (!latestTrajectoryPayload) {
     return {
@@ -14,42 +16,33 @@ export const buildTrajectoryGate = ({ latestTrajectoryPayload = null } = {}) => 
 
   const summary = latestTrajectoryPayload.summary ?? {};
   const metrics = summary.metrics ?? {};
-  const cases = Array.isArray(latestTrajectoryPayload.cases)
-    ? latestTrajectoryPayload.cases
-    : [];
-  const failedCases = cases
-    .filter((caseResult) => !caseResult.passed)
-    .map((caseResult) => ({
-      id: caseResult.id,
-      label: caseResult.label,
-      failedCheckCount: caseResult.failedCheckCount ?? 0,
-      failedChecks: (caseResult.checks ?? [])
-        .filter((check) => !check.passed)
-        .map((check) => ({
-          id: check.id,
-          label: check.label,
-          category: check.category,
-          detail: check.detail ?? null,
-        })),
-    }));
-  const failedCaseCount = metrics.failedCaseCount ?? failedCases.length;
-  const caseCount = metrics.caseCount ?? cases.length;
-  const status = failedCaseCount > 0 || summary.status === "fail" ? "fail" : "pass";
+  const caseSummary = summarizeQualityCaseResults({
+    cases: latestTrajectoryPayload.cases,
+    metrics,
+  });
+  const status =
+    caseSummary.failedCaseCount > 0 ||
+    caseSummary.failedCheckCount > 0 ||
+    summary.status === "fail"
+      ? "fail"
+      : "pass";
 
   return {
     status,
     skipped: false,
     currentRunId: summary.runId ?? null,
-    failedCaseCount,
-    caseCount,
-    failedCases,
+    failedCaseCount: caseSummary.failedCaseCount,
+    failedCheckCount: caseSummary.failedCheckCount,
+    caseCount: caseSummary.caseCount,
+    checkCount: caseSummary.checkCount,
+    failedCases: caseSummary.failedCases,
     summary:
       status === "fail"
-        ? `Trajectory evaluation failed ${failedCaseCount} of ${caseCount} case${
-            caseCount === 1 ? "" : "s"
+        ? `Trajectory evaluation failed ${caseSummary.failedCaseCount} of ${caseSummary.caseCount} case${
+            caseSummary.caseCount === 1 ? "" : "s"
           }.`
-        : `Trajectory evaluation passed all ${caseCount} case${
-            caseCount === 1 ? "" : "s"
+        : `Trajectory evaluation passed all ${caseSummary.caseCount} case${
+            caseSummary.caseCount === 1 ? "" : "s"
           }.`,
   };
 };

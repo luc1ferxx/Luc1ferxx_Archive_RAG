@@ -81,6 +81,23 @@ const getPrimaryGateCheck = (gate) =>
 
 const normalizeGateStatus = (status) => status ?? "unknown";
 
+const getQualityVerificationState = (payload) => {
+  if (!payload) {
+    return null;
+  }
+
+  const verification = payload.verification ?? {};
+  const verificationScope = verification.scope;
+  const scope = verificationScope ?? payload.evidenceScope ?? "unverified";
+
+  return {
+    currentCommitVerified:
+      verification.currentCommitVerified === true &&
+      verificationScope === "current",
+    scope,
+  };
+};
+
 const formatRecoveryPercent = (value) =>
   typeof value === "number" ? formatQualityPercent(value * 100) : "N/A";
 
@@ -169,6 +186,17 @@ const QualityGuardPanel = ({
   const recoveryGate = qualityHistory?.recoveryGate ?? null;
   const recentRuns = qualityHistory?.runs ?? [];
   const status = qualityReport?.status ?? "idle";
+  const verificationStates = [
+    getQualityVerificationState(qualityReport),
+    getQualityVerificationState(qualityHistory),
+  ].filter(Boolean);
+  const currentCommitVerified =
+    verificationStates.length > 0 &&
+    verificationStates.every((item) => item.currentCommitVerified);
+  const isHistoricalEvidence = verificationStates.some(
+    (item) => item.scope === "historical"
+  );
+  const isUnverifiedEvidence = !currentCommitVerified;
   const statusLabel =
     {
       ok: t("quality.ok"),
@@ -210,6 +238,16 @@ const QualityGuardPanel = ({
         </Button>
       </div>
 
+      {isUnverifiedEvidence ? (
+        <div className="quality-empty-note">
+          {t(
+            isHistoricalEvidence
+              ? "quality.historicalNotice"
+              : "quality.unverifiedNotice"
+          )}
+        </div>
+      ) : null}
+
       {qualityReport ? (
         <>
           <div className={`quality-status quality-status-${status}`}>
@@ -228,7 +266,14 @@ const QualityGuardPanel = ({
             </div>
             <div className="quality-score-copy">
               <strong>
-                {t("quality.gateShort")} {formatQualityGateStatus(gateStatus, t)}
+                {t(
+                  isHistoricalEvidence
+                    ? "quality.historicalGateShort"
+                    : isUnverifiedEvidence
+                      ? "quality.unverifiedGateShort"
+                      : "quality.gateShort"
+                )}{" "}
+                {formatQualityGateStatus(gateStatus, t)}
               </strong>
               <span>
                 {qualityGate?.summary ??
@@ -280,7 +325,17 @@ const QualityGuardPanel = ({
         </div>
       )}
 
-      <QualityGateCard gate={qualityGate} label={t("quality.gate")} t={t} />
+      <QualityGateCard
+        gate={qualityGate}
+        label={t(
+          isHistoricalEvidence
+            ? "quality.historicalGate"
+            : isUnverifiedEvidence
+              ? "quality.unverifiedGate"
+              : "quality.gate"
+        )}
+        t={t}
+      />
 
       {regressionGate && qualityGate !== regressionGate ? (
         <QualityGateCard

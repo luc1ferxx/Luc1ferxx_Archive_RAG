@@ -1,10 +1,4 @@
-const toNonNegativeNumber = (value, fallbackValue = 0) => {
-  const parsed = Number(value);
-
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallbackValue;
-};
-
-const toArray = (value) => (Array.isArray(value) ? value : []);
+import { summarizeQualityCaseResults } from "./quality-case-results.js";
 
 const getRecoveryStats = (payload = {}) =>
   payload?.recovery ?? payload?.observability?.recovery ?? payload?.report?.recovery ?? {};
@@ -27,49 +21,23 @@ const buildMaxCheck = ({ currentValue, label, metric, maximum }) => ({
   delta: currentValue - maximum,
 });
 
-const buildFailedCases = (cases = []) =>
-  toArray(cases)
-    .filter((caseResult) => !caseResult.passed)
-    .map((caseResult) => ({
-      id: caseResult.id,
-      label: caseResult.label,
-      failedCheckCount: caseResult.failedCheckCount ?? 0,
-      failedChecks: toArray(caseResult.checks)
-        .filter((check) => !check.passed)
-        .map((check) => ({
-          id: check.id,
-          label: check.label,
-          category: check.category,
-          detail: check.detail ?? null,
-        })),
-    }));
-
-const sumFailedChecks = (failedCases = []) =>
-  failedCases.reduce(
-    (sum, caseResult) =>
-      sum + (caseResult.failedChecks?.length ?? caseResult.failedCheckCount ?? 0),
-    0
-  );
-
-const getMetrics = ({ failedCases, payload = {} }) => {
+const getMetrics = ({ payload = {} }) => {
   const summaryMetrics = payload.summary?.metrics ?? {};
-  const cases = toArray(payload.cases);
   const summaryFailed = payload.summary?.status === "fail";
-  const failedCaseCount = Math.max(
-    toNonNegativeNumber(summaryMetrics.failedCaseCount, failedCases.length),
-    summaryFailed ? 1 : 0
-  );
+  const caseSummary = summarizeQualityCaseResults({
+    cases: payload.cases,
+    metrics: summaryMetrics,
+  });
 
   return {
-    caseCount: toNonNegativeNumber(summaryMetrics.caseCount, cases.length),
-    checkCount: toNonNegativeNumber(
-      summaryMetrics.checkCount,
-      cases.reduce((sum, caseResult) => sum + toArray(caseResult.checks).length, 0)
+    ...caseSummary,
+    failedCaseCount: Math.max(
+      caseSummary.failedCaseCount,
+      summaryFailed ? 1 : 0
     ),
-    failedCaseCount,
     failedCheckCount: Math.max(
-      toNonNegativeNumber(summaryMetrics.failedCheckCount, sumFailedChecks(failedCases)),
-      summaryFailed && failedCaseCount === 0 ? 1 : 0
+      caseSummary.failedCheckCount,
+      summaryFailed && caseSummary.failedCaseCount === 0 ? 1 : 0
     ),
   };
 };
@@ -252,9 +220,7 @@ export const buildRecoveryGate = ({
   }
 
   const recovery = getRecoveryStats(latestRecoveryPayload);
-  const failedCases = buildFailedCases(latestRecoveryPayload.cases);
   const metrics = getMetrics({
-    failedCases,
     payload: latestRecoveryPayload,
   });
   const checks = buildMetricChecks({
@@ -273,7 +239,7 @@ export const buildRecoveryGate = ({
     checkCount: metrics.checkCount,
     failedCaseCount: metrics.failedCaseCount,
     failedCheckCount: metrics.failedCheckCount,
-    failedCases,
+    failedCases: metrics.failedCases,
     failedChecks,
     recovery,
     checks,

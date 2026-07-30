@@ -1,3 +1,5 @@
+import { summarizeQualityCaseResults } from "./quality-case-results.js";
+
 const toPlannerPayloads = ({
   latestPlannerPayload = null,
   latestPlannerPayloads = null,
@@ -27,60 +29,41 @@ const buildPlannerProviderGate = ({ latestPlannerPayload = null } = {}) => {
 
   const summary = latestPlannerPayload.summary ?? {};
   const metrics = summary.metrics ?? {};
-  const cases = Array.isArray(latestPlannerPayload.cases)
-    ? latestPlannerPayload.cases
-    : [];
-  const failedCases = cases
-    .filter((caseResult) => !caseResult.passed)
-    .map((caseResult) => ({
-      id: caseResult.id,
-      label: caseResult.label,
-      failedCheckCount: caseResult.failedCheckCount ?? 0,
-      failedChecks: (caseResult.checks ?? [])
-        .filter((check) => !check.passed)
-        .map((check) => ({
-          id: check.id,
-          label: check.label,
-          category: check.category,
-          detail: check.detail ?? null,
-        })),
-    }));
-  const failedCaseCount = metrics.failedCaseCount ?? failedCases.length;
-  const failedCheckCount = metrics.failedCheckCount ??
-    failedCases.reduce(
-      (sum, caseResult) =>
-        sum + (caseResult.failedChecks?.length ?? caseResult.failedCheckCount ?? 0),
-      0
-    );
-  const caseCount = metrics.caseCount ?? cases.length;
-  const checkCount = metrics.checkCount ??
-    cases.reduce((sum, caseResult) => sum + (caseResult.checks?.length ?? 0), 0);
+  const caseSummary = summarizeQualityCaseResults({
+    cases: latestPlannerPayload.cases,
+    metrics,
+  });
   const provider = summary.provider ?? "unknown";
   const status =
-    failedCaseCount > 0 || failedCheckCount > 0 || summary.status === "fail"
+    caseSummary.failedCaseCount > 0 ||
+    caseSummary.failedCheckCount > 0 ||
+    summary.status === "fail"
       ? "fail"
       : "pass";
 
   return {
     status,
     skipped: false,
+    failedProviderCount: status === "fail" ? 1 : 0,
     currentRunId: summary.runId ?? null,
     provider,
-    failedCaseCount,
-    failedCheckCount,
-    caseCount,
-    checkCount,
-    failedCases,
+    failedCaseCount: caseSummary.failedCaseCount,
+    failedCheckCount: caseSummary.failedCheckCount,
+    caseCount: caseSummary.caseCount,
+    checkCount: caseSummary.checkCount,
+    failedCases: caseSummary.failedCases,
     summary:
       status === "fail"
-        ? `Planner evaluation (${provider}) failed ${failedCaseCount} of ${caseCount} case${
-            caseCount === 1 ? "" : "s"
-          } and ${failedCheckCount} of ${checkCount} check${
-            checkCount === 1 ? "" : "s"
+        ? `Planner evaluation (${provider}) failed ${caseSummary.failedCaseCount} of ${caseSummary.caseCount} case${
+            caseSummary.caseCount === 1 ? "" : "s"
+          } and ${caseSummary.failedCheckCount} of ${caseSummary.checkCount} check${
+            caseSummary.checkCount === 1 ? "" : "s"
           }.`
-        : `Planner evaluation (${provider}) passed all ${caseCount} case${
-            caseCount === 1 ? "" : "s"
-          } and ${checkCount} check${checkCount === 1 ? "" : "s"}.`,
+        : `Planner evaluation (${provider}) passed all ${caseSummary.caseCount} case${
+            caseSummary.caseCount === 1 ? "" : "s"
+          } and ${caseSummary.checkCount} check${
+            caseSummary.checkCount === 1 ? "" : "s"
+          }.`,
   };
 };
 
@@ -132,7 +115,13 @@ export const buildPlannerGate = ({
       provider: gate.provider,
     }))
   );
-  const status = failedCaseCount > 0 || failedCheckCount > 0 ? "fail" : "pass";
+  const failedProviderCount = providerGates.filter(
+    (gate) => gate.status === "fail"
+  ).length;
+  const status =
+    failedProviderCount > 0 || failedCaseCount > 0 || failedCheckCount > 0
+      ? "fail"
+      : "pass";
   const providerLabel = providers.join(", ");
 
   return {
@@ -144,17 +133,22 @@ export const buildPlannerGate = ({
     providers,
     failedCaseCount,
     failedCheckCount,
+    failedProviderCount,
     caseCount,
     checkCount,
     failedCases,
     providerGates,
     summary:
-      status === "fail"
+      status === "fail" && failedCaseCount + failedCheckCount > 0
         ? `Planner evaluations (${providerLabel}) failed ${failedCaseCount} of ${caseCount} case${
             caseCount === 1 ? "" : "s"
           } and ${failedCheckCount} of ${checkCount} check${
             checkCount === 1 ? "" : "s"
           }.`
+        : status === "fail"
+          ? `Planner evaluations (${providerLabel}) include ${failedProviderCount} failing provider report${
+              failedProviderCount === 1 ? "" : "s"
+            }.`
         : `Planner evaluations (${providerLabel}) passed all ${caseCount} case${
             caseCount === 1 ? "" : "s"
           } and ${checkCount} check${checkCount === 1 ? "" : "s"}.`,
@@ -165,6 +159,14 @@ export const buildPlannerGateChecks = ({ plannerGate = {} } = {}) =>
   plannerGate.skipped
     ? []
     : [
+        {
+          metric: "plannerFailedProviderCount",
+          label: "Planner failed providers",
+          status: (plannerGate.failedProviderCount ?? 0) > 0 ? "fail" : "pass",
+          currentValue: plannerGate.failedProviderCount ?? 0,
+          baselineValue: 0,
+          delta: plannerGate.failedProviderCount ?? 0,
+        },
         {
           metric: "plannerFailedCaseCount",
           label: "Planner failed cases",

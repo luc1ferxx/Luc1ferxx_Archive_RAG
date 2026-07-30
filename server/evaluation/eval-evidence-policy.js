@@ -1,22 +1,10 @@
 import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
+import { EVALUATION_EVIDENCE_REASON_CODES } from "./eval-evidence-validation.js";
 
 export const DEFAULT_RELEASE_EVIDENCE_MAX_AGE_HOURS = 24;
 
 export const RELEASE_EVIDENCE_REASON_CODES = Object.freeze({
-  ok: "ok",
-  missingReport: "missing_report",
-  missingLineage: "missing_lineage",
-  unknownCommit: "unknown_commit",
-  commitMismatch: "commit_mismatch",
-  dirtyWorktree: "dirty_worktree",
-  staleReport: "stale_report",
-  futureReport: "future_report",
-  invalidGeneratedAt: "invalid_generated_at",
-  reportFailed: "report_failed",
-  configHashMismatch: "config_hash_mismatch",
-  wrongCorpus: "wrong_corpus",
-  wrongProvider: "wrong_provider",
-  wrongModelRoute: "wrong_model_route",
+  ...EVALUATION_EVIDENCE_REASON_CODES,
   sourceReportLineageMismatch: "source_report_lineage_mismatch",
   robustLineageSplit: "robust_lineage_split",
 });

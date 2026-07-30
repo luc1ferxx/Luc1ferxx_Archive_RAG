@@ -4,10 +4,14 @@ import { fileURLToPath } from "node:url";
 import {
   buildSourceReportReference,
   evaluationRepositoryRoot,
-  getPublicEvaluationConfig,
   hashCorpusContent,
-  hashCanonicalJson,
 } from "./eval-evidence.js";
+import {
+  SHA256_PATTERN,
+  buildEvaluationEvidenceCheck as buildCheck,
+  getEvaluationEvidenceFailureReason,
+  toEvaluationEvidenceActualSummary as toActualSummary,
+} from "./eval-evidence-validation.js";
 import {
   DEFAULT_RELEASE_EVIDENCE_MAX_AGE_HOURS,
   RELEASE_EVIDENCE_REASON_CODES,
@@ -22,66 +26,6 @@ const __dirname = path.dirname(__filename);
 const resultsDirectory = path.join(__dirname, "results");
 const LATEST_RELEASE_EVIDENCE_JSON = "latest-release-evidence.json";
 const LATEST_RELEASE_EVIDENCE_MD = "latest-release-evidence.md";
-const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
-
-const toActualSummary = (report = {}) => ({
-  reportType: report.evidence?.reportType ?? "unknown",
-  runId: report.evidence?.runId ?? "unknown",
-  generatedAt: report.evidence?.generatedAt ?? "unknown",
-  commitSha: report.evidence?.git?.commitSha ?? "unknown",
-  corpus: report.evidence?.corpus ?? null,
-  provider: report.evidence?.provider ?? null,
-  modelRouteId: report.evidence?.modelRouteId ?? null,
-});
-
-const buildCheck = ({
-  actual,
-  expected,
-  id,
-  reasonCode = RELEASE_EVIDENCE_REASON_CODES.ok,
-  report,
-  reportType,
-} = {}) => ({
-  id,
-  status:
-    reasonCode === RELEASE_EVIDENCE_REASON_CODES.ok ? "pass" : "fail",
-  reasonCode,
-  expected,
-  actual,
-  reportType: reportType ?? report?.evidence?.reportType ?? "unknown",
-  runId: report?.evidence?.runId ?? null,
-  generatedAt: report?.evidence?.generatedAt ?? null,
-  commitSha: report?.evidence?.git?.commitSha ?? null,
-  corpus: report?.evidence?.corpus ?? null,
-  provider: report?.evidence?.provider ?? null,
-});
-
-const hasCompleteLineage = (report, spec) => {
-  const evidence = report?.evidence;
-
-  return Boolean(
-    evidence &&
-      evidence.schemaVersion &&
-      evidence.reportType === spec.reportType &&
-      evidence.reportId === spec.id &&
-      evidence.runId &&
-      evidence.generatedAt &&
-      evidence.git &&
-      evidence.command &&
-      evidence.profile &&
-      evidence.corpus &&
-      evidence.corpus.id &&
-      evidence.corpus.relativePath &&
-      evidence.corpus.contentHash &&
-      evidence.corpus.version &&
-      evidence.configHash &&
-      evidence.provider?.id &&
-      evidence.provider?.mode &&
-      Object.hasOwn(evidence, "modelRouteId") &&
-      Array.isArray(evidence.sourceReports) &&
-      evidence.generatorVersion
-  );
-};
 
 const getRobustReportStatuses = (reports) => {
   const gate = buildRobustSuiteGate({
@@ -121,92 +65,6 @@ const reportPassed = ({ report, spec, robustStatuses }) => {
   }
 
   return report.summary?.status === "pass";
-};
-
-const getReportFailureReason = ({
-  maxAgeHours,
-  nowMs,
-  report,
-  robustStatuses,
-  spec,
-  targetCommit,
-  expectedCorpusHash,
-}) => {
-  if (!report) {
-    return RELEASE_EVIDENCE_REASON_CODES.missingReport;
-  }
-
-  if (!hasCompleteLineage(report, spec)) {
-    return RELEASE_EVIDENCE_REASON_CODES.missingLineage;
-  }
-
-  if (!reportPassed({ report, spec, robustStatuses })) {
-    return RELEASE_EVIDENCE_REASON_CODES.reportFailed;
-  }
-
-  const evidence = report.evidence;
-
-  if (evidence.git.commitSha === "unknown") {
-    return RELEASE_EVIDENCE_REASON_CODES.unknownCommit;
-  }
-
-  if (evidence.git.commitSha !== targetCommit) {
-    return RELEASE_EVIDENCE_REASON_CODES.commitMismatch;
-  }
-
-  if (evidence.git.dirty !== false) {
-    return RELEASE_EVIDENCE_REASON_CODES.dirtyWorktree;
-  }
-
-  const generatedAtMs = Date.parse(evidence.generatedAt);
-
-  if (!Number.isFinite(generatedAtMs)) {
-    return RELEASE_EVIDENCE_REASON_CODES.invalidGeneratedAt;
-  }
-
-  if (generatedAtMs > nowMs) {
-    return RELEASE_EVIDENCE_REASON_CODES.futureReport;
-  }
-
-  if (nowMs - generatedAtMs > maxAgeHours * 60 * 60 * 1000) {
-    return RELEASE_EVIDENCE_REASON_CODES.staleReport;
-  }
-
-  const expectedConfigHash = hashCanonicalJson(
-    getPublicEvaluationConfig({ report, reportType: spec.reportType })
-  );
-
-  if (
-    !SHA256_PATTERN.test(evidence.configHash) ||
-    evidence.configHash !== expectedConfigHash
-  ) {
-    return RELEASE_EVIDENCE_REASON_CODES.configHashMismatch;
-  }
-
-  if (
-    spec.corpus &&
-    (evidence.corpus.id !== spec.corpus.id ||
-      evidence.corpus.relativePath !== spec.corpus.relativePath ||
-      evidence.corpus.version !== spec.corpus.version ||
-      !SHA256_PATTERN.test(evidence.corpus.contentHash) ||
-      (expectedCorpusHash !== undefined &&
-        evidence.corpus.contentHash !== expectedCorpusHash))
-  ) {
-    return RELEASE_EVIDENCE_REASON_CODES.wrongCorpus;
-  }
-
-  if (
-    evidence.provider.id !== spec.providerId ||
-    evidence.provider.mode !== spec.providerMode
-  ) {
-    return RELEASE_EVIDENCE_REASON_CODES.wrongProvider;
-  }
-
-  if (evidence.modelRouteId !== spec.modelRouteId) {
-    return RELEASE_EVIDENCE_REASON_CODES.wrongModelRoute;
-  }
-
-  return RELEASE_EVIDENCE_REASON_CODES.ok;
 };
 
 const buildRobustLineageCheck = ({ reports, targetCommit }) => {
@@ -281,14 +139,16 @@ export const buildReleaseEvidenceReport = ({
   const robustStatuses = getRobustReportStatuses(reports);
   const reportChecks = RELEASE_EVIDENCE_REPORT_SPECS.map((spec) => {
     const report = reports[spec.id] ?? null;
-    const reasonCode = getReportFailureReason({
+    const reasonCode = getEvaluationEvidenceFailureReason({
+      expectedCorpusHash: expectedCorpusHashes[spec.id],
       maxAgeHours,
       nowMs,
       report,
-      robustStatuses,
+      reportPassed: report
+        ? reportPassed({ report, spec, robustStatuses })
+        : false,
       spec,
       targetCommit,
-      expectedCorpusHash: expectedCorpusHashes[spec.id],
     });
 
     return buildCheck({
@@ -312,11 +172,13 @@ export const buildReleaseEvidenceReport = ({
   });
   const sourceChecks = RELEASE_EVIDENCE_SOURCE_SPECS.map((spec) => {
     const report = reports[spec.id] ?? null;
-    const reasonCode = getReportFailureReason({
+    const reasonCode = getEvaluationEvidenceFailureReason({
       maxAgeHours,
       nowMs,
       report,
-      robustStatuses,
+      reportPassed: report
+        ? reportPassed({ report, spec, robustStatuses })
+        : false,
       spec,
       targetCommit,
     });

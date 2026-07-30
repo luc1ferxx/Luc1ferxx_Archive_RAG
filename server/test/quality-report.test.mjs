@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildPlannerGate,
   buildQualityGateDecision,
   buildQualityHistoryResponse,
+  buildRecoveryGate,
+  buildTrajectoryGate,
   formatFeedbackSkillFailureLine,
 } from "../evaluation/quality-report.js";
 import {
@@ -223,6 +226,117 @@ const buildFailingPlannerPayload = () => ({
       },
     },
   ],
+});
+
+test("trajectory gate does not let zero summary counters hide raw failed checks", () => {
+  const gate = buildTrajectoryGate({
+    latestTrajectoryPayload: {
+      summary: {
+        runId: "trajectory-contradictory",
+        status: "pass",
+        metrics: {
+          caseCount: 1,
+          failedCaseCount: 0,
+        },
+      },
+      cases: [
+        {
+          id: "trajectory-raw-failure",
+          label: "Raw failure",
+          passed: true,
+          checks: [
+            {
+              id: "raw-failed-check",
+              label: "Raw failed check",
+              passed: false,
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.equal(gate.status, "fail");
+  assert.equal(gate.failedCaseCount, 1);
+  assert.equal(gate.failedCases[0].failedChecks[0].id, "raw-failed-check");
+});
+
+test("planner gate does not let zero summary counters hide raw failed checks", () => {
+  const payload = buildPassingPlannerPayload();
+
+  payload.cases[0].checks[0].passed = false;
+  payload.cases[0].passed = true;
+  payload.summary.status = "pass";
+  payload.summary.metrics.failedCaseCount = 0;
+  payload.summary.metrics.failedCheckCount = 0;
+
+  const gate = buildPlannerGate({
+    latestPlannerPayload: payload,
+  });
+
+  assert.equal(gate.status, "fail");
+  assert.equal(gate.failedCaseCount, 1);
+  assert.equal(gate.failedCheckCount, 1);
+  assert.equal(gate.failedCases[0].failedChecks[0].id, "llm_planner_selected");
+});
+
+test("recovery gate does not let zero summary counters hide raw failed checks", () => {
+  const payload = {
+    summary: {
+      runId: "recovery-contradictory",
+      status: "pass",
+      metrics: {
+        caseCount: 1,
+        checkCount: 1,
+        failedCaseCount: 0,
+        failedCheckCount: 0,
+      },
+    },
+    recovery: {
+      recoverableRunCount: 1,
+      manualRecoveryCount: 1,
+      manualRecoveryActionCount: 1,
+      manualRecoveryActionFailureCount: 0,
+      autoReplayAttemptCount: 1,
+      autoReplaySuccessRate: 1,
+      autoReplayFailureCount: 0,
+      primaryStepStartedCount: 1,
+      primaryStepCompletedCount: 1,
+      primaryStepFailedCount: 0,
+      stepRetryCount: 1,
+      stepResumeCount: 1,
+      stepReplayFailureCount: 0,
+      taskRecoveryScheduledCount: 1,
+      taskRecoveryResumeActionCount: 1,
+      taskRecoveryResumeFailureCount: 0,
+      taskRecoveryCompletedCount: 1,
+      plannerFallbackCount: 0,
+    },
+    cases: [
+      {
+        id: "recovery-raw-failure",
+        label: "Raw recovery failure",
+        passed: true,
+        failedCheckCount: 0,
+        checks: [
+          {
+            id: "raw-failed-check",
+            label: "Raw failed check",
+            passed: false,
+          },
+        ],
+      },
+    ],
+  };
+
+  const gate = buildRecoveryGate({
+    latestRecoveryPayload: payload,
+  });
+
+  assert.equal(gate.status, "fail");
+  assert.equal(gate.failedCaseCount, 1);
+  assert.equal(gate.failedCheckCount, 1);
+  assert.equal(gate.failedCases[0].failedChecks[0].id, "raw-failed-check");
 });
 
 test("quality history folds feedback eval failures into gate decision by skill", () => {
@@ -792,6 +906,49 @@ test("quality history folds multiple planner provider reports into gate decision
     history.qualityGate.summary,
     /Planner evaluations \(mock, real\) failed 1 of 4 cases and 1 of 8 checks\./
   );
+});
+
+test("quality history fails when any planner provider reports a failing summary", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-latest",
+    createdAt: "2026-06-08T10:00:00.000Z",
+  });
+  const previousPayload = buildPassingSyntheticPayload({
+    runId: "synthetic-previous",
+    createdAt: "2026-06-08T09:00:00.000Z",
+  });
+  const failingRealPlannerPayload = buildPassingPlannerPayload({
+    provider: "real",
+    runId: "planner-real-summary-failing",
+  });
+
+  failingRealPlannerPayload.summary.status = "fail";
+
+  const history = buildQualityHistoryResponse({
+    latestPayload,
+    latestPlannerPayloads: [
+      buildPassingPlannerPayload({
+        provider: "mock",
+        runId: "planner-mock-passing",
+      }),
+      failingRealPlannerPayload,
+    ],
+    runPayloads: [
+      {
+        fileName: "synthetic-previous.json",
+        payload: previousPayload,
+      },
+    ],
+  });
+
+  assert.equal(history.plannerGate.status, "fail");
+  assert.equal(
+    history.plannerGate.providerGates.find(
+      (gate) => gate.provider === "real"
+    )?.status,
+    "fail"
+  );
+  assert.equal(history.qualityGate.status, "fail");
 });
 
 test("quality history includes passing planner eval in the combined gate summary", () => {

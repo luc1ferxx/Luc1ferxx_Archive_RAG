@@ -167,6 +167,10 @@ test("admin quality-refresh action uses the existing quality runner and compacts
             },
             runId: "quality-refresh-run",
           },
+          verification: {
+            currentCommitVerified: false,
+            scope: "historical",
+          },
         };
       },
     },
@@ -181,7 +185,14 @@ test("admin quality-refresh action uses the existing quality runner and compacts
   const serialized = JSON.stringify(result);
 
   assert.deepEqual(calls, ["evaluation/synthetic-corpus-compare-hard.json"]);
+  assert.equal(result.action.id, ADMIN_ACTION_IDS.qualityRefresh);
+  assert.equal(result.action.label, "Refresh historical quality metrics");
   assert.equal(result.result.quality.status, "fail");
+  assert.equal(result.result.quality.evidenceScope, "historical");
+  assert.equal(
+    result.result.quality.verification.currentCommitVerified,
+    false
+  );
   assert.equal(result.result.quality.runId, "quality-refresh-run");
   assert.equal(result.result.quality.failedCaseCount, 1);
   assert.equal(result.result.quality.corpus.cases, 3);

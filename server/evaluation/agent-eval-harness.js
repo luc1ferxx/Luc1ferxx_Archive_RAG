@@ -61,10 +61,15 @@ export const finishCase = ({
   description,
   id,
   label,
+  observed,
   response,
   telemetry = createEvalTelemetry(),
 }) => {
   const failedChecks = checks.filter((check) => !check.passed);
+  const responseSummary = buildResponseSummary({
+    response,
+    telemetry,
+  });
 
   return {
     checks,
@@ -73,10 +78,13 @@ export const finishCase = ({
     id,
     label,
     passed: failedChecks.length === 0,
-    response: buildResponseSummary({
-      response,
-      telemetry,
-    }),
+    response:
+      observed === undefined
+        ? responseSummary
+        : {
+            ...responseSummary,
+            observed,
+          },
   };
 };
 

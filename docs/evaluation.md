@@ -32,7 +32,8 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run feedback:corpus` | 从负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用 seed + runtime feedback corpus 运行 deterministic 回归评测。 |
 | `cd server && npm run eval:robust-suite` | 固定周期运行 compare-hard synthetic、hard-CS rerank 和 arXiv real-paper rerank。 |
-| `cd server && npm run quality:gate` | 检查主线、feedback、trajectory、planner 和 recovery gate。 |
+| `cd server && npm run quality:gate` | 兼容旧 payload 的历史 metrics gate；PASS 不代表当前 commit 已验证。 |
+| `cd server && npm run quality:current` | 校验当前 commit 的轻量报告 lineage、freshness、clean worktree 和 metrics。 |
 | `cd server && npm run release:gate` | 严格检查当前 commit 的完整发布证据 lineage 和 freshness。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
 | `cd server && npm run eval:rerank:sweep` | 批量对比 rerank 参数。 |
@@ -47,6 +48,9 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | 报告 | 结果摘要 |
 | --- | --- |
 | `evaluation/results/latest.*` | 主 synthetic regression 报告。`eval:robust-suite` 会用 compare-hard corpus 刷新它，避免长期只追踪 near-duplicate 满分小语料。 |
+| `evaluation/results/latest-quality.*` | PR current gate 专用 deterministic near-duplicate synthetic 报告；不会覆盖 robust/release 使用的 `latest.*`。 |
+| `evaluation/results/latest-current-quality-gate.{json,md}` | 当前 commit 的轻量质量证据；逐项记录 SHA、freshness、dirty、corpus/provider/config 和 metrics 检查。 |
+| `evaluation/baselines/quality-near-duplicate-deterministic-v1.json` | PR deterministic profile 的固定 100% regression baseline；运行目录中的旧报告不能替换它。 |
 | `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `13/13` cases passed，`52/52` checks passed，包含 goal lifecycle completion。 |
 | `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback 和 planner observability；mock/real provider 会各自写入 provider-specific latest report。 |
 | `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：deterministic fixture 覆盖 recoverable run、manual recovery action、safe step retry/resume、auto replay success rate 和 planner fallback signal。 |
@@ -58,7 +62,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `evaluation/results/arxiv-rerank-sweep-latest.*` | arXiv real-paper quick sweep 当前最佳 variant 为 `broad_topk`，NDCG `0.5831`，Recall `0.8177`，MRR `0.5891`。 |
 | `evaluation/results/compare-hard-ragas.*` | Ragas supplement：faithfulness `0.8939`，context precision `1.0`，compare rubric `0.9333`。 |
 
-说明：仓库内旧的 `latest.*` snapshot 可能仍来自 near-duplicate，或尚未包含统一 lineage metadata；不要为这些旧报告补写或伪造 metadata。固定周期入口 `eval:robust-suite` 会用真实运行结果刷新 compare-hard、hard-CS 和 arXiv 三份报告；旧报告仍可由默认 `quality:gate` 读取，但严格 `release:gate` 会把缺少 lineage 的报告判为 `missing_lineage`。
+说明：仓库内旧的 `latest.*` snapshot 可能仍来自 near-duplicate，或尚未包含统一 lineage metadata；不要为这些旧报告补写或伪造 metadata。固定周期入口 `eval:robust-suite` 会用真实运行结果刷新 compare-hard、hard-CS 和 arXiv 三份报告。旧报告只可由 `quality:gate` 查看，不能充当 current evidence，也不能参与 `quality:current` 的 baseline 竞争；缺 lineage 的当前报告会得到 `missing_lineage`。
 
 ## Evidence metadata
 
@@ -73,7 +77,36 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 
 路径会正规化为 repo-relative；仓库外路径写为 `unknown`。公开配置会移除 API key、token、secret、authorization、prompt、原始文档内容、完整环境变量和内部 model name。无 Git 环境时 commit/dirty 记为 `unknown`：普通开发流程可以继续读取，严格发布门会失败。`eval:robust-suite` 还会把同一个 target commit、suite run ID 和 suite config hash 传给 compare-hard、Hard-CS 与 arXiv 三个 runner，防止把不同批次结果拼成一次 robust 证据。
 
-CI 可通过 `EVAL_TARGET_COMMIT_SHA` 把报告绑定到指定 SHA；它必须等于 runner 所在 checkout 的 `HEAD`。本地默认直接读取当前 `HEAD`。生成报告时除受控的 `server/evaluation/generated/` 与 `server/evaluation/results/` 输出外，只要 worktree 仍有其他改动，`git.dirty` 就会为 `true`，该报告不能通过严格发布门。
+CI 可通过 `EVAL_TARGET_COMMIT_SHA` 把报告绑定到指定 SHA；它必须等于 runner 所在 checkout 的 `HEAD`。本地默认直接读取当前 `HEAD`。生成报告时除受控的 `server/evaluation/generated/` 与 `server/evaluation/results/` 输出外，只要 worktree 仍有其他改动，`git.dirty` 就会为 `true`，该报告不能通过 current 或 release evidence gate。Git 状态使用 NUL 分隔的 porcelain 解析，rename/copy 的源和目标都会检查，不能通过把源文件移入受控输出目录来伪装 clean。
+
+## Current quality gate
+
+`quality:current` 是 PR 的 fail-closed 轻量入口。它不调用评测 runner，只读取本次 workflow 已生成的报告，并同时检查：
+
+- gate 执行时 checkout 必须仍是 target SHA 且 clean；
+- `latest-quality.json`、feedback、trajectory、planner-mock 和 recovery 五份 required reports 必须存在；
+- evidence profile 必须是 `quality-current`；trajectory/planner/recovery 必须精确匹配版本化 manifest 中的 case/check IDs，synthetic 与 feedback 必须匹配 corpus case，并保留固定的 8 个 near-duplicate cases 和 2 个 feedback seed cases；固定 case 的问题、答案片段、事实 claim/来源归属、证据页、文档页内容和拒答输出也必须匹配 manifest；
+- synthetic/feedback 会交叉校验 document/upload/citation 身份、固定 chunk/byte/path 关系和 evidence schema；每个 citation 必须对应本次 raw `retrievedContexts`，Ragas context identity 由 raw retrieval 重建。门禁再从版本化 corpus page 重建 citation evidence，并复用生产 claim checker 独立重算 answer claims 与 claim support；upload resume 和 summary metrics 也会从 raw payload 重算，summary 或自报 `supported=true` 不能覆盖 raw failure；
+- planner/trajectory 的关键模式、技能链、planner、budget、loop、telemetry 与 trace 字段必须匹配版本化 response projection；作用域、approval resume/deny、retry、memory、privacy 与 goal lifecycle 等高风险 case 还必须携带最小化、privacy-safe 的 `case.response.observed` 原始观测。`check.detail` 只用于诊断，不作为 verdict oracle；recovery cases/checks 则由独立共享 builder 从 `report.recovery` 重新计算；
+- 每份报告必须包含完整 evidence、来自同一 target SHA、`git.dirty=false`，且默认不超过 24 小时；
+- 每份报告必须通过自身的绝对 gate；稳定复现的失败不能靠“与同样失败的 baseline 无回退”获得 PASS；
+- synthetic/feedback corpus hash、provider、公开 config hash 和 model route 必须与当前 checkout 相符；
+- metrics gate 必须通过；它只有在 worktree、逐报告 lineage/contract 和 baseline 全部验证后才公开 PASS/FAIL，否则公开状态为 `unverified`，原始 metrics 判断只保留为 diagnostics。回归比较只接受版本控制的 deterministic baseline，旧 `latest.json`、timestamped 文件和本地残留不能抢占；
+- planner-real 默认可选，但只要文件存在就必须是 fresh、clean、同 SHA；传入 `--require-planner-real` 后缺失也会失败。
+
+```bash
+cd server
+npm run quality:current
+npm run quality:current -- --target-commit <sha> --max-age-hours <hours>
+npm run quality:current -- --input-directory evaluation/results --json
+npm run quality:current -- --require-planner-real
+```
+
+默认每次检查会写入 `evaluation/results/latest-current-quality-gate.json` 和 `.md`。即使 producer 留下 malformed JSON，reader 也会把它记录为 `invalid_report` 后继续写 gate diagnostics。其他稳定失败原因包括 `missing_report`、`missing_lineage`、`report_failed`、`report_integrity_failed`、`suite_contract_mismatch`、`unknown_commit`、`commit_mismatch`、`dirty_worktree`、`stale_report`、`future_report`、`invalid_generated_at`、`config_hash_mismatch`、`wrong_corpus`、`wrong_provider`、`wrong_profile`、`wrong_model_route`、`quality_metrics_unverified` 和 `quality_metrics_failed`。这份报告明确标记 `robustSuiteCurrentEvidence=false`；未要求 robust suite 时的历史 `pass (skipped)` 不能被解释为当前 robust evidence。
+
+证据边界：`quality:current` 是 fail-closed 的 report contract/lineage validator，不是密码学 attestation。单独运行 CLI 不能证明 runner、真实上传或检索一定发生；`evidence.command` 也是声明字段。PR 的实际执行 provenance 来自同一 GitHub Actions job 中先 producer、后 gate 的固定步骤以及上传的原始 artifacts。当前 lightweight report 不包含完整内部事件签名、上传源文件/合并文件 digest 或不可伪造的 chunk transcript；若威胁模型包含恶意 producer，需要另加签名事件链和内容 digest，不能把 current gate 的 PASS 描述成该级别证明。
+
+旧的 `/quality/latest`、`/quality/synthetic`、`/quality/history` 与 `quality:gate` 继续保留兼容结构和退出码，但响应会附带 `verification.scope=historical`、`currentCommitVerified=false`，CLI/UI/admin 也会明确显示历史或未验证状态。缺少 verification marker 的旧后端响应按未验证处理。
 
 ## Release evidence gate
 
@@ -116,7 +149,7 @@ CLI 选项：
 
 ### 与 quality gate 的兼容边界
 
-默认 `quality:gate` 的成本和历史语义不变：它仍兼容旧 synthetic/feedback/trajectory/planner/recovery payload，且未传 `--require-robust-suite` 时 robust gate 继续显示 pass + skipped。`quality:gate -- --require-robust-suite` 继续执行既有三报告 metrics/corpus 合同，但不追加 release lineage 要求。旧报告的 `missing_lineage`、target commit、dirty 和 freshness 只由 `release:gate` 严格拦截，因此 PR 默认 workflow 不需要真实 OpenAI，也不会下载 arXiv corpus。
+默认 `quality:gate` 的成本和历史语义不变：它仍兼容旧 synthetic/feedback/trajectory/planner/recovery payload，且未传 `--require-robust-suite` 时 robust gate 继续显示 pass + skipped。`quality:gate -- --require-robust-suite` 继续执行既有三报告 metrics/corpus 合同，但不追加 current/release lineage 要求。PR workflow 用独立的 `quality:current` 拦截轻量 current evidence；`release:gate` 再验证完整发布批次。因此默认 PR 不需要真实 OpenAI，也不会下载 arXiv corpus。
 
 ## Synthetic regression
 
@@ -385,12 +418,15 @@ npm run eval:ragas -- --input evaluation/results/latest.json
 GitHub Actions 的 `Quality Gate` workflow 会在 PR 和 `main` push 时执行：
 
 1. `cd server && npm test`
-2. `npm run eval:trajectory`
-3. `npm run eval:planner -- --provider mock`
-4. 如果配置了 `OPENAI_API_KEY`，再运行 `npm run eval:planner -- --provider real`
-5. `npm run eval:recovery-observability`
-6. `npm run eval:feedback`
-7. `npm run quality:gate -- --fail-on-warn`
+2. 用 near-duplicate corpus 和 deterministic provider 生成独立 `latest-quality.*`
+3. `npm run eval:trajectory`
+4. `npm run eval:planner -- --provider mock`
+5. 如果配置了 `OPENAI_API_KEY`，再运行 `npm run eval:planner -- --provider real`
+6. `npm run eval:recovery-observability`
+7. `npm run eval:feedback`
+8. `npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA"`；存在真实 provider 时同时要求 planner-real
+
+eval producer 和 current gate 都使用 `!cancelled()`，因此单个 producer 失败后仍会运行其余诊断；job 保持失败，最后通过 `always()` 上传原始 latest reports 与 `latest-current-quality-gate.*`。workflow 不再把兼容命令 `quality:gate` 的历史 PASS 当作 PR current 证据。
 
 `Planner Real Provider Gate` workflow 通过 `workflow_dispatch` 和每日 schedule 触发。它不使用 conditional real step：会在纯 LLM planner runtime env 下强制运行 mock planner eval、real planner eval、trajectory eval、recovery observability eval，并执行 `npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0`、`npm run rollout:readiness` 和 `npm run runtime:smoke`。该 workflow 会启动 PostgreSQL service，让 smoke 覆盖 Postgres default-on memory 和 runtime `/chat` observability。如果没有配置 `OPENAI_API_KEY` secret，real provider eval 或 runtime smoke 会失败，从而暴露配置缺口。
 
@@ -408,4 +444,5 @@ npm run eval:planner
 npm run eval:recovery-observability
 npm run rollout:readiness
 npm run quality:gate
+npm run quality:current
 ```

@@ -122,14 +122,51 @@ const CONTROLLED_EVALUATION_OUTPUT_PREFIXES = Object.freeze([
   "server/evaluation/results/",
 ]);
 
-const getGitStatusPath = (line) => {
-  const statusPath = String(line ?? "").slice(3).trim();
-  const renamedPath = statusPath.includes(" -> ")
-    ? statusPath.split(" -> ").at(-1)
-    : statusPath;
+const normalizeGitStatusPath = (value) =>
+  normalizeRelativePath(String(value ?? "").trim().replace(/^"|"$/g, ""));
 
-  return normalizeRelativePath(renamedPath.replace(/^"|"$/g, ""));
+const getLegacyGitStatusPaths = (line) => {
+  const statusPath = String(line ?? "").slice(3).trim();
+
+  return statusPath
+    .split(" -> ")
+    .map(normalizeGitStatusPath)
+    .filter(Boolean);
 };
+
+const getNullDelimitedGitStatusPaths = (status) => {
+  const records = String(status ?? "").split("\0");
+  const paths = [];
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+
+    if (!record) {
+      continue;
+    }
+
+    const statusCode = record.slice(0, 2);
+    paths.push(record.slice(3));
+
+    if (
+      (statusCode.includes("R") || statusCode.includes("C")) &&
+      records[index + 1]
+    ) {
+      paths.push(records[index + 1]);
+      index += 1;
+    }
+  }
+
+  return paths.filter(Boolean);
+};
+
+const getGitStatusPaths = (status) =>
+  String(status ?? "").includes("\0")
+    ? getNullDelimitedGitStatusPaths(status)
+    : String(status ?? "")
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .flatMap(getLegacyGitStatusPaths);
 
 const isControlledEvaluationOutput = (filePath) =>
   CONTROLLED_EVALUATION_OUTPUT_PREFIXES.some((prefix) =>
@@ -162,12 +199,14 @@ export const resolveEvaluationGitState = async ({
     }
 
     const status = String(
-      await executeGit(["status", "--porcelain", "--untracked-files=all"])
+      await executeGit([
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+      ])
     );
-    const dirty = status
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map(getGitStatusPath)
+    const dirty = getGitStatusPaths(status)
       .some((filePath) => !isControlledEvaluationOutput(filePath));
 
     return {

@@ -263,6 +263,8 @@ export const DEMO_CONVERSATION = [
 ];
 
 export const DEMO_QUALITY_REPORT = {
+  authoritativeForCurrentCommit: false,
+  evidenceScope: "demo",
   status: "ok",
   summary: {
     runId: "demo-policy-rag",
@@ -279,9 +281,15 @@ export const DEMO_QUALITY_REPORT = {
     { label: "Consistency 93" },
     { label: "Freshness 90" },
   ],
+  verification: {
+    currentCommitVerified: false,
+    scope: "demo",
+  },
 };
 
 export const DEMO_QUALITY_HISTORY = {
+  authoritativeForCurrentCommit: false,
+  evidenceScope: "demo",
   qualityGate: {
     status: "pass",
     summary:
@@ -336,4 +344,8 @@ export const DEMO_QUALITY_HISTORY = {
       },
     },
   ],
+  verification: {
+    currentCommitVerified: false,
+    scope: "demo",
+  },
 };

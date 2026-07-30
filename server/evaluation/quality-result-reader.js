@@ -6,6 +6,9 @@ import { robustEvalSuite } from "./eval-suite.js";
 import { defaultHistoryLimit } from "./quality-shared.js";
 import { buildQualityReportFromResultPayload } from "./quality-run-summary.js";
 import { buildQualityHistoryResponse } from "./quality-combined-gate.js";
+import { markHistoricalQualityEvidence } from "./quality-evidence-scope.js";
+
+export { markHistoricalQualityEvidence } from "./quality-evidence-scope.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,7 +86,9 @@ export const readLatestQualityReport = async () => {
     throw error;
   }
 
-  return buildQualityReportFromResultPayload(payload);
+  return markHistoricalQualityEvidence(
+    buildQualityReportFromResultPayload(payload)
+  );
 };
 
 export const readQualityHistory = async ({
@@ -138,17 +143,19 @@ export const readQualityHistory = async ({
     fileNames = await readdir(resultsDirectory);
   } catch (error) {
     if (error.code === "ENOENT") {
-      return buildQualityHistoryResponse({
-        latestPayload,
-        latestFeedbackPayload,
-        latestPlannerPayloads,
-        latestRecoveryPayload,
-        latestRobustPayloads,
-        latestTrajectoryPayload,
-        limit,
-        requireRobustSuite,
-        runPayloads: [],
-      });
+      return markHistoricalQualityEvidence(
+        buildQualityHistoryResponse({
+          latestPayload,
+          latestFeedbackPayload,
+          latestPlannerPayloads,
+          latestRecoveryPayload,
+          latestRobustPayloads,
+          latestTrajectoryPayload,
+          limit,
+          requireRobustSuite,
+          runPayloads: [],
+        })
+      );
     }
 
     throw error;
@@ -170,17 +177,19 @@ export const readQualityHistory = async ({
     )
   ).filter(Boolean);
 
-  return buildQualityHistoryResponse({
-    latestPayload,
-    latestFeedbackPayload,
-    latestPlannerPayloads,
-    latestRecoveryPayload,
-    latestRobustPayloads,
-    latestTrajectoryPayload,
-    limit,
-    requireRobustSuite,
-    runPayloads,
-  });
+  return markHistoricalQualityEvidence(
+    buildQualityHistoryResponse({
+      latestPayload,
+      latestFeedbackPayload,
+      latestPlannerPayloads,
+      latestRecoveryPayload,
+      latestRobustPayloads,
+      latestTrajectoryPayload,
+      limit,
+      requireRobustSuite,
+      runPayloads,
+    })
+  );
 };
 
 export const runSyntheticQualityEvaluation = async ({ corpusPath = "" } = {}) => {

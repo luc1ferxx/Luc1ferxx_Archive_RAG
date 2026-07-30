@@ -8,6 +8,9 @@ import {
 
 const usage = `Usage: npm run quality:gate -- [options]
 
+Reads historical quality snapshots only. Use npm run quality:current for
+current-commit evidence.
+
 Options:
   --json            Print the full quality history and gate decision as JSON.
   --fail-on-warn    Treat warning-level regressions as failures.
@@ -145,12 +148,17 @@ const printTextReport = ({ decision, history }) => {
   const latestRun = history.latestRun ?? {};
   const checks = qualityGate.checks ?? gate.checks ?? [];
 
-  console.log(`Quality gate: ${decision.status.toUpperCase()}`);
+  console.log(
+    `Quality gate: ${decision.status.toUpperCase()} (HISTORICAL ONLY — current commit not verified)`
+  );
+  console.log(
+    "This result is not authoritative evidence for the current commit."
+  );
   console.log(decision.summary);
 
   if (latestRun.runId) {
     console.log(
-      `Latest run: ${latestRun.runId} (${formatPercent(
+      `Historical latest run: ${latestRun.runId} (${formatPercent(
         latestRun.metrics?.overallPassPercent
       )} pass)`
     );
@@ -266,12 +274,21 @@ const main = async () => {
     failOnWarn: options.failOnWarn,
     history,
   });
+  const scopedDecision = {
+    ...decision,
+    authoritativeForCurrentCommit: false,
+    evidenceScope: "historical",
+    verification: {
+      currentCommitVerified: false,
+      scope: "historical",
+    },
+  };
 
   if (options.json) {
     console.log(
       JSON.stringify(
         {
-          decision,
+          decision: scopedDecision,
           history,
         },
         null,

@@ -65,6 +65,9 @@ import {
   resetOpenAIProvider,
 } from "../rag/openai.js";
 import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
+import {
+  buildDeterministicEvidenceAnswer,
+} from "./deterministic-evidence-answer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,22 +76,6 @@ const resultsDirectory = path.join(__dirname, "results");
 const generatedDirectory = path.join(__dirname, "generated");
 const defaultCorpusPath = path.join(__dirname, "synthetic-corpus.json");
 const uploadChunkSizeBytes = 180;
-
-const extractFirstEvidenceSentence = (prompt = "") => {
-  const match = String(prompt).match(
-    /Evidence:\n([\s\S]*?)(?:\n\nSource \d+|\n\n---|\n\nQuestion:|\n\nInstructions:|$)/
-  );
-  const evidenceText = String(match?.[1] ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!evidenceText) {
-    return "I could not find enough grounded evidence in the selected documents.";
-  }
-
-  const sentence = evidenceText.match(/.*?(?:[.!?]|$)/)?.[0]?.trim() || evidenceText;
-  return `${sentence} [Source 1]`;
-};
 
 const configureDeterministicOpenAIProvider = () => {
   process.env.RAG_RERANK_PROVIDER = "heuristic";
@@ -103,7 +90,7 @@ const configureDeterministicOpenAIProvider = () => {
         });
       }
 
-      return extractFirstEvidenceSentence(prompt);
+      return buildDeterministicEvidenceAnswer(prompt);
     },
   });
 };
@@ -651,6 +638,11 @@ const main = async () => {
   const summary = {
     runId,
     createdAt: new Date().toISOString(),
+    status:
+      caseResults.every((caseResult) => caseResult.passed) &&
+      successfulUploads.length === uploadResults.length
+        ? "pass"
+        : "fail",
     corpus: {
       path: toRepoRelativePath(corpusPath),
       documents: corpus.documents.length,

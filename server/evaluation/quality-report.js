@@ -40,3 +40,18 @@ export {
   readQualityHistory,
   runSyntheticQualityEvaluation,
 } from "./quality-result-reader.js";
+
+export {
+  CURRENT_QUALITY_BASELINE_RUN_ID,
+  CURRENT_QUALITY_REASON_CODES,
+  CURRENT_QUALITY_REPORT_SPECS,
+  DEFAULT_CURRENT_QUALITY_BASELINE_PATH,
+  DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS,
+  buildCurrentQualityGateReport,
+  formatCurrentQualityGateMarkdown,
+  getCurrentQualityGateExitCode,
+  readCurrentQualityCorpusHashes,
+  readCurrentQualityCorpusExpectations,
+  readCurrentQualityInputs,
+  writeCurrentQualityGateReport,
+} from "./quality-current-gate.js";

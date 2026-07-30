@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   ADMIN_STATUS_VALUES,
+  compactAdminQualityReport,
   createAdminStatusService,
 } from "../rag/admin-status.js";
 import { AGENT_RUN_STATUSES } from "../rag/agent-runs.js";
@@ -330,6 +331,8 @@ test("admin status reports ok when dependencies are healthy and no work is block
     },
     qualityService: {
       readLatestQualityReport: async () => ({
+        authoritativeForCurrentCommit: true,
+        evidenceScope: "current",
         failedCases: [],
         status: "ok",
         summary: {
@@ -338,6 +341,10 @@ test("admin status reports ok when dependencies are healthy and no work is block
             overallPassRate: 1,
           },
           runId: "quality-ok",
+        },
+        verification: {
+          currentCommitVerified: true,
+          scope: "current",
         },
       }),
     },
@@ -365,6 +372,108 @@ test("admin status reports ok when dependencies are healthy and no work is block
   assert.equal(status.tasks.total, 0);
   assert.equal(status.agentRuns.total, 0);
   assert.equal(status.triggers.enabledCount, 1);
+});
+
+test("admin quality compaction treats a missing verification marker as unverified", () => {
+  const quality = compactAdminQualityReport({
+    authoritativeForCurrentCommit: true,
+    failedCases: [],
+    status: "ok",
+    summary: {
+      metrics: {
+        overallPassRate: 1,
+      },
+    },
+  });
+
+  assert.equal(quality.authoritativeForCurrentCommit, false);
+  assert.equal(quality.evidenceScope, "unverified");
+  assert.deepEqual(quality.verification, {
+    currentCommitVerified: false,
+    scope: "unverified",
+  });
+});
+
+test("admin quality compaction rejects a root alias that contradicts canonical verification", () => {
+  const quality = compactAdminQualityReport({
+    authoritativeForCurrentCommit: true,
+    evidenceScope: "current",
+    failedCases: [],
+    status: "ok",
+    verification: {
+      currentCommitVerified: true,
+      scope: "historical",
+    },
+  });
+
+  assert.equal(quality.authoritativeForCurrentCommit, false);
+  assert.equal(quality.evidenceScope, "historical");
+  assert.deepEqual(quality.verification, {
+    currentCommitVerified: false,
+    scope: "historical",
+  });
+});
+
+test("admin status does not treat a historical quality pass as current health", async () => {
+  const service = createAdminStatusService({
+    agentRunRecoveryActionService: {
+      listRecoveryRuns: async () => ({
+        runs: [],
+      }),
+    },
+    agentRunService: {
+      listRuns: async () => ({
+        runs: [],
+      }),
+    },
+    config: createConfig(),
+    healthService: {
+      buildHealthReport: async () => ({
+        checks: {},
+        status: "ok",
+      }),
+    },
+    qualityService: {
+      readLatestQualityReport: async () => ({
+        authoritativeForCurrentCommit: false,
+        evidenceScope: "historical",
+        failedCases: [],
+        status: "ok",
+        summary: {
+          metrics: {
+            overallPassPercent: 100,
+            overallPassRate: 1,
+          },
+          runId: "old-quality-pass",
+        },
+      }),
+    },
+    taskService: {
+      listTasks: async () => ({
+        tasks: [],
+      }),
+    },
+    triggerRegistry: {
+      listPublic: () => [
+        {
+          enabled: true,
+          id: "research_dossier_manual",
+        },
+      ],
+    },
+  });
+
+  const status = await service.buildStatus({
+    accessScope,
+  });
+
+  assert.equal(status.quality.status, "ok");
+  assert.equal(status.quality.evidenceScope, "historical");
+  assert.equal(status.quality.authoritativeForCurrentCommit, false);
+  assert.equal(status.status, ADMIN_STATUS_VALUES.warn);
+  assert.ok(
+    status.warnings.some((warning) => warning.id === "quality_historical")
+  );
 });
 
 test("admin status counts tasks and runs beyond the default list page", async () => {

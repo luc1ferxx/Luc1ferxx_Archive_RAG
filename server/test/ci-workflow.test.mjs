@@ -31,8 +31,18 @@ const releaseEvidenceWorkflowPath = path.join(
   "workflows",
   "release-evidence.yml"
 );
+const rootPackagePath = path.join(repositoryRoot, "package.json");
 
-test("quality gate workflow runs server tests and required feedback eval", async () => {
+test("root current quality alias forwards command-line arguments", async () => {
+  const packageJson = JSON.parse(await readFile(rootPackagePath, "utf8"));
+
+  assert.equal(
+    packageJson.scripts?.["quality:current"],
+    "cd server && npm run quality:current --"
+  );
+});
+
+test("quality gate workflow regenerates and validates current-commit evidence", async () => {
   const workflow = await readFile(workflowPath, "utf8");
 
   assert.match(workflow, /name:\s*Quality Gate/);
@@ -55,22 +65,81 @@ test("quality gate workflow runs server tests and required feedback eval", async
     /quality-gate:[\s\S]*run:\s*npm test/,
     "the quality-gate job must not repeat the server test suite"
   );
+  assert.match(
+    workflow,
+    /EVAL_TARGET_COMMIT_SHA:\s*\$\{\{\s*github\.sha\s*\}\}/
+  );
+  assert.match(workflow, /EVAL_EVIDENCE_PROFILE:\s*quality-current/);
+  assert.match(workflow, /name:\s*Run current synthetic eval/);
+  assert.match(
+    workflow,
+    /run:\s*npm run eval:synthetic -- evaluation\/synthetic-corpus-near-duplicate\.json --latest-name latest-quality --openai-provider deterministic/
+  );
   assert.match(workflow, /run:\s*npm run eval:trajectory/);
   assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
   assert.match(workflow, /name:\s*Run planner eval \(mock\)/);
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider mock/);
   assert.match(workflow, /name:\s*Run planner eval \(real\)/);
-  assert.match(workflow, /if:\s*env\.OPENAI_API_KEY != ''/);
+  assert.match(
+    workflow,
+    /if:\s*\$\{\{\s*!cancelled\(\) && env\.OPENAI_API_KEY != ''\s*\}\}/
+  );
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider real/);
   assert.match(workflow, /name:\s*Run recovery observability eval/);
   assert.match(workflow, /run:\s*npm run eval:recovery-observability/);
   assert.match(workflow, /name:\s*Run feedback regression eval/);
   assert.match(workflow, /run:\s*npm run eval:feedback/);
-  assert.match(workflow, /name:\s*Check quality gate/);
-  assert.match(workflow, /run:\s*npm run quality:gate -- --fail-on-warn/);
+  assert.match(workflow, /name:\s*Check current quality gate/);
+  assert.match(
+    workflow,
+    /run:\s*npm run quality:current -- --target-commit "\$EVAL_TARGET_COMMIT_SHA"/
+  );
+  assert.match(
+    workflow,
+    /run:\s*npm run quality:current -- --target-commit "\$EVAL_TARGET_COMMIT_SHA" --require-planner-real/
+  );
+  assert.doesNotMatch(workflow, /run:\s*npm run quality:gate/);
+  assert.ok(
+    workflow.indexOf("run: npm run eval:synthetic") <
+      workflow.indexOf("run: npm run quality:current"),
+    "the current synthetic producer must run before the current gate"
+  );
   assert.doesNotMatch(workflow, /id:\s*feedback/);
   assert.doesNotMatch(workflow, /server\/data\/feedback\/feedback\.jsonl/);
   assert.doesNotMatch(workflow, /if:\s*steps\.feedback\.outputs\.has_feedback == 'true'/);
+});
+
+test("quality gate workflow preserves diagnostics after an eval failure", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+  const producerNames = [
+    "Run current synthetic eval",
+    "Run trajectory eval",
+    "Run planner eval (mock)",
+    "Run recovery observability eval",
+    "Run feedback regression eval",
+  ];
+
+  for (const name of producerNames) {
+    assert.match(
+      workflow,
+      new RegExp(
+        `name:\\s*${name.replace(
+          /[.*+?^${}()|[\]\\]/g,
+          "\\$&"
+        )}\\s+if:\\s*\\$\\{\\{\\s*!cancelled\\(\\)\\s*\\}\\}`
+      ),
+      `${name} must still run after a prior producer failure`
+    );
+  }
+
+  assert.match(workflow, /name:\s*Upload current quality evidence/);
+  assert.match(workflow, /if:\s*always\(\)/);
+  assert.match(workflow, /uses:\s*actions\/upload-artifact@v4/);
+  assert.match(
+    workflow,
+    /server\/evaluation\/results\/latest-current-quality-gate\.\*/
+  );
+  assert.match(workflow, /if-no-files-found:\s*error/);
 });
 
 test("planner real provider workflow runs a required scheduled gate", async () => {

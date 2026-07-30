@@ -29,6 +29,10 @@ test("feedback corpus builder converts negative feedback into synthetic eval cas
       docIds: ["doc-policy"],
       note: "The answer missed the approval condition.",
       answerText: "Remote work is allowed.",
+      expectedAnswerIncludes: [
+        "manager approval",
+        "first remote day",
+      ],
       citations: [
         {
           docId: "doc-policy",
@@ -62,6 +66,10 @@ test("feedback corpus builder converts negative feedback into synthetic eval cas
       docKey: "feedback_incomplete_doc_policy",
       pages: [4],
     },
+  ]);
+  assert.deepEqual(incompleteCase.expectedAnswerIncludes, [
+    "manager approval",
+    "first remote day",
   ]);
   assert.deepEqual(incompleteCase.metadata.feedback, {
     feedbackId: "feedback-incomplete",
