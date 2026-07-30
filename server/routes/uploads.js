@@ -5,6 +5,10 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
+import {
+  MAX_UPLOAD_MULTIPART_FIELD_BYTES,
+  MAX_UPLOAD_MULTIPART_FIELDS,
+} from "../upload-policy.js";
 
 import {
   cleanupUploadedFile,
@@ -27,23 +31,43 @@ const fileIdBodySchema = z.object({
   fileId: requiredTrimmedString("fileId is required."),
 });
 
+const uploadChunkBodySchema = z
+  .object({
+    fileId: requiredTrimmedString("fileId is required."),
+    chunkIndex: requiredTrimmedString("chunkIndex is required."),
+    totalChunks: requiredTrimmedString("totalChunks is required."),
+    chunkSha256: z.string().trim().optional(),
+  })
+  .strict();
+
 export const createUploadsRouter = (services) => {
   const router = Router();
   const { ragService, uploadStore, uploadsDirectory } = services;
+  const runBestEffort = async (label, operation) => {
+    try {
+      await operation();
+    } catch (error) {
+      console.error(`[upload-cleanup] ${label}`, error);
+    }
+  };
 
   const storage = multer.diskStorage({
     destination: (req, file, cb) => {
       cb(null, uploadsDirectory);
     },
     filename: (req, file, cb) => {
-      cb(null, createStoredFileName(file.originalname));
+      cb(null, createStoredFileName());
     },
   });
 
   const upload = multer({
     storage,
     limits: {
-      fileSize: MAX_DIRECT_UPLOAD_SIZE,
+      fileSize: MAX_DIRECT_UPLOAD_SIZE + 1,
+      files: 1,
+      fields: 0,
+      parts: 2,
+      fieldSize: MAX_UPLOAD_MULTIPART_FIELD_BYTES,
     },
     fileFilter: (req, file, cb) => {
       cb(null, isPdfFile(file));
@@ -52,7 +76,14 @@ export const createUploadsRouter = (services) => {
   const chunkUpload = multer({
     storage: multer.memoryStorage(),
     limits: {
-      fileSize: MAX_CHUNK_UPLOAD_SIZE,
+      // Busboy marks a file as truncated when it reaches its transport limit.
+      // Keep that limit one byte above the public maximum; the store remains
+      // authoritative for the declared and actual chunk geometry.
+      fileSize: MAX_CHUNK_UPLOAD_SIZE + 1,
+      files: 1,
+      fields: MAX_UPLOAD_MULTIPART_FIELDS,
+      parts: MAX_UPLOAD_MULTIPART_FIELDS + 2,
+      fieldSize: MAX_UPLOAD_MULTIPART_FIELD_BYTES,
     },
   });
 
@@ -64,13 +95,16 @@ export const createUploadsRouter = (services) => {
     }
 
     try {
+      const accessScope = getRequestAccessScope(req);
       const session = await uploadStore.initializeUploadSession({
+        accessScope,
         fileId: req.body.fileId,
         fileName: req.body.fileName,
         fileSize: req.body.fileSize,
         lastModified: req.body.lastModified,
         totalChunks: req.body.totalChunks,
         chunkSize: req.body.chunkSize ?? DEFAULT_UPLOAD_CHUNK_SIZE,
+        fileSha256: req.body.fileSha256,
       });
 
       return res.status(201).json(session);
@@ -87,7 +121,11 @@ export const createUploadsRouter = (services) => {
     const { fileId } = parsed;
 
     try {
-      const session = await uploadStore.getUploadSessionStatus(fileId);
+      const accessScope = getRequestAccessScope(req);
+      const session = await uploadStore.getUploadSessionStatus({
+        accessScope,
+        fileId,
+      });
 
       if (!session) {
         return res.status(404).json({
@@ -111,17 +149,18 @@ export const createUploadsRouter = (services) => {
     }
 
     try {
-      const chunkIndex = Number.parseInt(req.body.chunkIndex, 10);
-      const totalChunks = Number.parseInt(req.body.totalChunks, 10);
-      const parsed = parseOrRespond(fileIdBodySchema, req.body ?? {}, res);
+      const parsed = parseOrRespond(uploadChunkBodySchema, req.body ?? {}, res);
       if (!parsed) return;
-      const { fileId } = parsed;
+      const { fileId, chunkIndex, totalChunks, chunkSha256 } = parsed;
+      const accessScope = getRequestAccessScope(req);
 
       const result = await uploadStore.storeUploadChunk({
+        accessScope,
         fileId,
         chunkIndex,
         totalChunks,
         chunkBuffer: req.file.buffer,
+        chunkSha256,
       });
 
       return res.status(201).json(result);
@@ -138,37 +177,54 @@ export const createUploadsRouter = (services) => {
     const { fileId } = parsed;
 
     let mergedFilePath = null;
+    let accessScope = null;
+    let finalizationClaimToken = null;
+    let ingestionSucceeded = false;
 
     try {
-      const session = await uploadStore.getUploadSessionStatus(fileId);
+      accessScope = getRequestAccessScope(req);
+      const finalizationClaim =
+        await uploadStore.claimUploadSessionFinalization({
+          accessScope,
+          fileId,
+        });
+      finalizationClaimToken = finalizationClaim.claimToken;
+      const session = finalizationClaim.session;
 
       if (!session) {
-        return res.status(404).json({
-          error: "Upload session not found.",
-        });
+        const missingSessionError = new Error("Upload session not found.");
+        missingSessionError.status = 404;
+        throw missingSessionError;
       }
 
       if (!isPdfFileName(session.fileName)) {
-        await uploadStore.clearUploadSession(fileId);
+        await uploadStore.clearUploadSession({
+          accessScope,
+          fileId,
+        });
 
         return res.status(400).json({
           error: "Only PDF files are supported.",
         });
       }
 
-      const storedFileName = createStoredFileName(session.fileName);
+      const storedFileName = createStoredFileName();
       mergedFilePath = path.join(uploadsDirectory, storedFileName);
-      const accessScope = getRequestAccessScope(req);
 
       await uploadStore.finalizeUploadSession({
+        accessScope,
         fileId,
+        claimToken: finalizationClaimToken,
         destinationPath: mergedFilePath,
       });
 
       if (!(await hasPdfMagicBytes(mergedFilePath))) {
         await uploadStore.removeMergedUpload(mergedFilePath);
         mergedFilePath = null;
-        await uploadStore.clearUploadSession(fileId);
+        await uploadStore.clearUploadSession({
+          accessScope,
+          fileId,
+        });
 
         return res.status(400).json({
           error: "The uploaded file is not a valid PDF.",
@@ -176,20 +232,38 @@ export const createUploadsRouter = (services) => {
       }
 
       const document = await ragService.ingestDocument({
-        docId: randomUUID(),
+        docId: session.sessionId,
         filePath: mergedFilePath,
         fileName: session.fileName,
         ownerUserId: accessScope.userId,
         workspaceId: accessScope.workspaceId,
       });
+      ingestionSucceeded = true;
 
       await cleanupUploadedFile(mergedFilePath);
       mergedFilePath = null;
-      await uploadStore.clearUploadSession(fileId);
+      await runBestEffort("failed to clear an ingested upload session", () =>
+        uploadStore.clearUploadSession({
+          accessScope,
+          fileId,
+        })
+      );
 
       return res.status(201).json(document);
     } catch (error) {
-      await uploadStore.removeMergedUpload(mergedFilePath);
+      await runBestEffort("failed to remove a merged upload", () =>
+        uploadStore.removeMergedUpload(mergedFilePath)
+      );
+
+      if (finalizationClaimToken && !ingestionSucceeded) {
+        await runBestEffort("failed to release a finalization claim", () =>
+          uploadStore.releaseUploadSessionFinalization({
+            accessScope,
+            fileId,
+            claimToken: finalizationClaimToken,
+          })
+        );
+      }
 
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to finalize the uploaded PDF."),
@@ -205,6 +279,22 @@ export const createUploadsRouter = (services) => {
     }
 
     try {
+      if (Object.keys(req.body ?? {}).length > 0) {
+        await cleanupUploadedFile(req.file.path);
+
+        return res.status(400).json({
+          error: "Unexpected multipart fields.",
+        });
+      }
+
+      if (req.file.size > MAX_DIRECT_UPLOAD_SIZE) {
+        await cleanupUploadedFile(req.file.path);
+
+        return res.status(413).json({
+          error: "Uploaded file exceeds the allowed size limit.",
+        });
+      }
+
       if (!(await hasPdfMagicBytes(req.file.path))) {
         await cleanupUploadedFile(req.file.path);
 
@@ -231,6 +321,24 @@ export const createUploadsRouter = (services) => {
         error: serializeError(error, "Failed to ingest uploaded PDF."),
       });
     }
+  });
+
+  router.use((error, req, res, next) => {
+    if (!(error instanceof multer.MulterError)) {
+      next(error);
+      return;
+    }
+
+    if (error.code === "LIMIT_FILE_SIZE") {
+      res.status(413).json({
+        error: "Uploaded file exceeds the allowed size limit.",
+      });
+      return;
+    }
+
+    res.status(400).json({
+      error: "Failed to process uploaded file.",
+    });
   });
 
   return router;

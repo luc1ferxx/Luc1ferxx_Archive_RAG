@@ -52,6 +52,7 @@ import { resetSessionMemory } from "../rag/memory.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
 import { resetVectorStore } from "../rag/vector-store.js";
 import {
+  claimUploadSessionFinalization,
   clearUploadSession,
   configureUploadSessionDirectory,
   finalizeUploadSession,
@@ -187,11 +188,13 @@ const buildPdfBuffer = (pages) => {
 
 const runUploadResumeFlow = async ({ buffer, fileName, runDirectory, uploadIndex }) => {
   const fileId = `synthetic-${uploadIndex}-${randomUUID()}`;
+  const accessScope = {};
   const totalChunks = Math.max(1, Math.ceil(buffer.length / uploadChunkSizeBytes));
   const initiallyUploadedChunkCount = Math.max(1, Math.floor(totalChunks / 2));
   const mergedFilePath = path.join(runDirectory, fileName);
 
   await initializeUploadSession({
+    accessScope,
     fileId,
     fileName,
     fileSize: buffer.length,
@@ -205,6 +208,7 @@ const runUploadResumeFlow = async ({ buffer, fileName, runDirectory, uploadIndex
     const end = Math.min(start + uploadChunkSizeBytes, buffer.length);
 
     await storeUploadChunk({
+      accessScope,
       fileId,
       chunkIndex,
       totalChunks,
@@ -212,8 +216,12 @@ const runUploadResumeFlow = async ({ buffer, fileName, runDirectory, uploadIndex
     });
   }
 
-  const pausedStatus = await getUploadSessionStatus(fileId);
+  const pausedStatus = await getUploadSessionStatus({
+    accessScope,
+    fileId,
+  });
   const resumedSession = await initializeUploadSession({
+    accessScope,
     fileId,
     fileName,
     fileSize: buffer.length,
@@ -235,6 +243,7 @@ const runUploadResumeFlow = async ({ buffer, fileName, runDirectory, uploadIndex
 
     resumedBytesUploaded += chunkBuffer.length;
     await storeUploadChunk({
+      accessScope,
       fileId,
       chunkIndex,
       totalChunks,
@@ -242,13 +251,22 @@ const runUploadResumeFlow = async ({ buffer, fileName, runDirectory, uploadIndex
     });
   }
 
-  await finalizeUploadSession({
+  const finalizationClaim = await claimUploadSessionFinalization({
+    accessScope,
     fileId,
+  });
+  await finalizeUploadSession({
+    accessScope,
+    fileId,
+    claimToken: finalizationClaim.claimToken,
     destinationPath: mergedFilePath,
   });
 
   const mergedBuffer = await readFile(mergedFilePath);
-  await clearUploadSession(fileId);
+  await clearUploadSession({
+    accessScope,
+    fileId,
+  });
 
   const skippedChunksOnResume = resumedSession.uploadedChunks.length;
   const skippedBytesOnResume = Math.max(0, buffer.length - resumedBytesUploaded);

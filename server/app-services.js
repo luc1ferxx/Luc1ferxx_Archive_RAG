@@ -73,12 +73,15 @@ import {
   getAgentPlannerRollout,
 } from "./rag/config.js";
 import {
+  claimUploadSessionFinalization,
   cleanupExpiredUploadSessions,
   clearUploadSession,
   ensureUploadStorage,
   finalizeUploadSession,
   getUploadSessionStatus,
   initializeUploadSession,
+  recoverInterruptedUploadFinalizations,
+  releaseUploadSessionFinalization,
   removeMergedUpload,
   storeUploadChunk,
 } from "./upload-session-store.js";
@@ -363,12 +366,15 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
       agentRunStepExecutor,
     });
   const uploadStore = options.uploadStore ?? {
+    claimUploadSessionFinalization,
     cleanupExpiredUploadSessions,
     clearUploadSession,
     ensureUploadStorage,
     finalizeUploadSession,
     getUploadSessionStatus,
     initializeUploadSession,
+    recoverInterruptedUploadFinalizations,
+    releaseUploadSessionFinalization,
     removeMergedUpload,
     storeUploadChunk,
   };

@@ -3,10 +3,13 @@ import { open, rm } from "fs/promises";
 import path from "path";
 
 import { getRequestAccessScope } from "../auth.js";
+import { isSafeUploadFileName } from "../upload-policy.js";
 
-export const DEFAULT_UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024;
-export const MAX_DIRECT_UPLOAD_SIZE = 50 * 1024 * 1024;
-export const MAX_CHUNK_UPLOAD_SIZE = 5 * 1024 * 1024;
+export {
+  DEFAULT_UPLOAD_CHUNK_SIZE,
+  MAX_CHUNK_UPLOAD_SIZE,
+  MAX_DIRECT_UPLOAD_SIZE,
+} from "../upload-policy.js";
 
 export const PDF_MAGIC = Buffer.from("%PDF");
 // The PDF spec allows the %PDF header to appear within the first 1024 bytes.
@@ -84,21 +87,22 @@ export const cleanupUploadedFile = async (filePath) => {
   }
 };
 
-export const createStoredFileName = (originalFileName) => {
-  const extension = path.extname(originalFileName);
-  const baseName = path.basename(originalFileName, extension);
-  return `${baseName}-${randomUUID()}${extension}`;
-};
+export const createStoredFileName = () => `${randomUUID()}.pdf`;
 
 export const isPdfFile = (file) => {
-  const extension = path.extname(file.originalname ?? "").toLowerCase();
+  const originalName = String(file.originalname ?? "");
+  const extension = path.extname(originalName).toLowerCase();
   const mimeType = String(file.mimetype ?? "").toLowerCase();
 
-  return extension === ".pdf" || mimeType === "application/pdf";
+  return (
+    isSafeUploadFileName(originalName) &&
+    (extension === ".pdf" || mimeType === "application/pdf")
+  );
 };
 
 export const isPdfFileName = (fileName) =>
-  path.extname(String(fileName ?? "")).toLowerCase() === ".pdf";
+  isSafeUploadFileName(fileName) &&
+  path.extname(String(fileName)).toLowerCase() === ".pdf";
 
 export const hasPdfMagicBytes = async (filePath) => {
   const fileHandle = await open(filePath, "r");

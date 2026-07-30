@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createApp as createProductionApp } from "../app.js";
@@ -45,6 +46,8 @@ import {
   ADMIN_PERMISSION_REASONS,
   ADMIN_ROLE_IDS,
 } from "../rag/admin-permissions.js";
+import { MAX_CHUNK_UPLOAD_SIZE } from "../upload-policy.js";
+import * as uploadSessionStore from "../upload-session-store.js";
 
 const okHealthService = {
   buildHealthReport: async () => ({
@@ -253,6 +256,7 @@ test("upload flow stores chunks, completes ingestion, and deletes documents", as
     });
 
     assert.equal(response.status, 201);
+    const initializedSession = await response.json();
 
     const chunkOne = new FormData();
     chunkOne.append("fileId", fileId);
@@ -292,6 +296,7 @@ test("upload flow stores chunks, completes ingestion, and deletes documents", as
 
     assert.equal(response.status, 201);
     const uploadedDocument = await response.json();
+    assert.equal(uploadedDocument.docId, initializedSession.sessionId);
     assert.equal(uploadedDocument.fileName, "notes.pdf");
     assert.equal(mergedContent, content);
 
@@ -310,6 +315,412 @@ test("upload flow stores chunks, completes ingestion, and deletes documents", as
     assert.equal(documents.size, 0);
   } finally {
     await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("chunked upload sessions enforce tenant ownership across every HTTP step", async () => {
+  const originalAuthEnabled = process.env.API_AUTH_ENABLED;
+  const originalAuthToken = process.env.API_AUTH_TOKEN;
+  const originalAuthTokens = process.env.API_AUTH_TOKENS;
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-scope-"));
+  const uploadsDirectory = path.join(tempRoot, "uploads");
+  const uploadSessionDirectory = path.join(tempRoot, "upload-sessions");
+  const ingestedDocuments = [];
+
+  try {
+    process.env.API_AUTH_ENABLED = "true";
+    process.env.API_AUTH_TOKEN = "";
+    process.env.API_AUTH_TOKENS = JSON.stringify({
+      "alice-token": {
+        userId: "alice",
+        workspaceId: "workspace-a",
+      },
+      "bob-token": {
+        userId: "bob",
+        workspaceId: "workspace-b",
+      },
+    });
+
+    const app = await createApp({
+      healthService: okHealthService,
+      uploadSessionDirectory,
+      uploadsDirectory,
+      ragService: {
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+        ingestDocument: async (document) => {
+          ingestedDocuments.push({
+            ...document,
+            content: await readFile(document.filePath, "utf8"),
+          });
+          return {
+            docId: document.docId,
+            fileName: document.fileName,
+            ownerUserId: document.ownerUserId,
+            workspaceId: document.workspaceId,
+          };
+        },
+      },
+    });
+    const server = await startServer(app);
+    const ownerHeaders = {
+      "Content-Type": "application/json",
+      "x-api-key": "alice-token",
+    };
+    const intruderHeaders = {
+      "Content-Type": "application/json",
+      "x-api-key": "bob-token",
+    };
+    const fileId = "shared-name__15__1";
+    const content = "%PDF-1.4 owner";
+
+    try {
+      let response = await fetch(`${server.baseUrl}/upload/init`, {
+        method: "POST",
+        headers: ownerHeaders,
+        body: JSON.stringify({
+          fileId,
+          fileName: "owner.pdf",
+          fileSize: Buffer.byteLength(content),
+          lastModified: 1,
+          totalChunks: 1,
+          chunkSize: Buffer.byteLength(content),
+        }),
+      });
+      assert.equal(response.status, 201);
+
+      const ownerChunk = new FormData();
+      ownerChunk.append("fileId", fileId);
+      ownerChunk.append("chunkIndex", "0");
+      ownerChunk.append("totalChunks", "1");
+      ownerChunk.append("chunk", new Blob([content]), "owner.pdf.part-0");
+      response = await fetch(`${server.baseUrl}/upload/chunk`, {
+        method: "POST",
+        headers: {
+          "x-api-key": "alice-token",
+        },
+        body: ownerChunk,
+      });
+      assert.equal(response.status, 201);
+
+      response = await fetch(
+        `${server.baseUrl}/upload/status?fileId=${encodeURIComponent(fileId)}`,
+        {
+          headers: {
+            "x-api-key": "bob-token",
+          },
+        }
+      );
+      assert.equal(response.status, 404);
+
+      const intruderChunk = new FormData();
+      intruderChunk.append("fileId", fileId);
+      intruderChunk.append("chunkIndex", "0");
+      intruderChunk.append("totalChunks", "1");
+      intruderChunk.append("chunk", new Blob(["%PDF-1.4 bobxx"]), "owner.pdf.part-0");
+      response = await fetch(`${server.baseUrl}/upload/chunk`, {
+        method: "POST",
+        headers: {
+          "x-api-key": "bob-token",
+        },
+        body: intruderChunk,
+      });
+      assert.equal(response.status, 404);
+
+      response = await fetch(`${server.baseUrl}/upload/complete`, {
+        method: "POST",
+        headers: intruderHeaders,
+        body: JSON.stringify({ fileId }),
+      });
+      assert.equal(response.status, 404);
+      assert.equal(ingestedDocuments.length, 0);
+
+      response = await fetch(`${server.baseUrl}/upload/init`, {
+        method: "POST",
+        headers: intruderHeaders,
+        body: JSON.stringify({
+          fileId,
+          fileName: "bob.pdf",
+          fileSize: 8,
+          lastModified: 2,
+          totalChunks: 1,
+          chunkSize: 8,
+        }),
+      });
+      assert.equal(response.status, 201);
+      assert.deepEqual((await response.json()).uploadedChunks, []);
+
+      response = await fetch(
+        `${server.baseUrl}/upload/status?fileId=${encodeURIComponent(fileId)}`,
+        {
+          headers: {
+            "x-api-key": "alice-token",
+          },
+        }
+      );
+      assert.equal(response.status, 200);
+      assert.deepEqual((await response.json()).uploadedChunks, [0]);
+
+      response = await fetch(`${server.baseUrl}/upload/complete`, {
+        method: "POST",
+        headers: ownerHeaders,
+        body: JSON.stringify({ fileId }),
+      });
+      assert.equal(response.status, 201);
+      assert.equal(ingestedDocuments.length, 1);
+      assert.equal(ingestedDocuments[0].ownerUserId, "alice");
+      assert.equal(ingestedDocuments[0].workspaceId, "workspace-a");
+      assert.equal(ingestedDocuments[0].content, content);
+
+      response = await fetch(
+        `${server.baseUrl}/upload/status?fileId=${encodeURIComponent(fileId)}`,
+        {
+          headers: {
+            "x-api-key": "bob-token",
+          },
+        }
+      );
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).fileName, "bob.pdf");
+    } finally {
+      await server.close();
+    }
+  } finally {
+    if (originalAuthEnabled === undefined) {
+      delete process.env.API_AUTH_ENABLED;
+    } else {
+      process.env.API_AUTH_ENABLED = originalAuthEnabled;
+    }
+
+    if (originalAuthToken === undefined) {
+      delete process.env.API_AUTH_TOKEN;
+    } else {
+      process.env.API_AUTH_TOKEN = originalAuthToken;
+    }
+
+    if (originalAuthTokens === undefined) {
+      delete process.env.API_AUTH_TOKENS;
+    } else {
+      process.env.API_AUTH_TOKENS = originalAuthTokens;
+    }
+
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("chunked upload completion is claimed exactly once across concurrent requests", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-complete-race-"));
+  const uploadsDirectory = path.join(tempRoot, "uploads");
+  const uploadSessionDirectory = path.join(tempRoot, "upload-sessions");
+  let ingestCalls = 0;
+  let releaseFirstIngest;
+  let markFirstIngestStarted;
+  const firstIngestStarted = new Promise((resolve) => {
+    markFirstIngestStarted = resolve;
+  });
+  const firstIngestCanFinish = new Promise((resolve) => {
+    releaseFirstIngest = resolve;
+  });
+
+  const app = await createApp({
+    healthService: okHealthService,
+    uploadSessionDirectory,
+    uploadsDirectory,
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      ingestDocument: async ({ docId, fileName }) => {
+        ingestCalls += 1;
+
+        if (ingestCalls === 1) {
+          markFirstIngestStarted();
+          await firstIngestCanFinish;
+        }
+
+        return {
+          docId,
+          fileName,
+        };
+      },
+    },
+  });
+  const server = await startServer(app);
+  const fileId = "complete-once";
+  const content = "%PDF-complete-once";
+
+  try {
+    let response = await fetch(`${server.baseUrl}/upload/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId,
+        fileName: "complete-once.pdf",
+        fileSize: Buffer.byteLength(content),
+        lastModified: 0,
+        totalChunks: 1,
+        chunkSize: Buffer.byteLength(content),
+      }),
+    });
+    assert.equal(response.status, 201);
+
+    const chunk = new FormData();
+    chunk.append("fileId", fileId);
+    chunk.append("chunkIndex", "0");
+    chunk.append("totalChunks", "1");
+    chunk.append("chunk", new Blob([content]), "complete-once.pdf.part-0");
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: chunk,
+    });
+    assert.equal(response.status, 201);
+
+    const completeRequest = () =>
+      fetch(`${server.baseUrl}/upload/complete`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ fileId }),
+      });
+    const firstResponsePromise = completeRequest();
+    await firstIngestStarted;
+    const secondResponse = await completeRequest();
+    releaseFirstIngest();
+    const firstResponse = await firstResponsePromise;
+
+    assert.equal(firstResponse.status, 201);
+    assert.equal(secondResponse.status, 409);
+    assert.match((await secondResponse.json()).error, /being finalized/i);
+    assert.equal(ingestCalls, 1);
+  } finally {
+    releaseFirstIngest();
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("chunked upload recovery reuses the session document id after post-ingest interruption", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-recovery-id-"));
+  const uploadsDirectory = path.join(tempRoot, "uploads");
+  const uploadSessionDirectory = path.join(tempRoot, "upload-sessions");
+  const ingestedDocumentIds = [];
+  const documents = new Map();
+  const ragService = {
+    initializeDocumentRegistry: async () => [...documents.values()],
+    initializeSessionMemory: async () => true,
+    ingestDocument: async ({ docId, fileName }) => {
+      ingestedDocumentIds.push(docId);
+      const document = {
+        docId,
+        fileName,
+      };
+      documents.set(docId, document);
+      return document;
+    },
+  };
+  const fileId = "recover-stable-document-id";
+  const content = "%PDF-recover-stable-document-id";
+  let firstServer;
+  let secondServer;
+
+  try {
+    const firstApp = await createApp({
+      healthService: okHealthService,
+      uploadSessionDirectory,
+      uploadsDirectory,
+      ragService,
+      uploadStore: {
+        ...uploadSessionStore,
+        // Model a process stopping after ingestion commits but before the
+        // finalization claim and resumable session are removed.
+        clearUploadSession: async () => {},
+      },
+    });
+    firstServer = await startServer(firstApp);
+
+    let response = await fetch(`${firstServer.baseUrl}/upload/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId,
+        fileName: "recover.pdf",
+        fileSize: Buffer.byteLength(content),
+        lastModified: 0,
+        totalChunks: 1,
+        chunkSize: Buffer.byteLength(content),
+      }),
+    });
+    assert.equal(response.status, 201);
+    const initializedSession = await response.json();
+
+    const chunk = new FormData();
+    chunk.append("fileId", fileId);
+    chunk.append("chunkIndex", "0");
+    chunk.append("totalChunks", "1");
+    chunk.append("chunk", new Blob([content]), "recover.pdf.part-0");
+    response = await fetch(`${firstServer.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: chunk,
+    });
+    assert.equal(response.status, 201);
+
+    response = await fetch(`${firstServer.baseUrl}/upload/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ fileId }),
+    });
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).docId, initializedSession.sessionId);
+    await firstServer.close();
+    firstServer = null;
+
+    const [sessionDirectoryName] = await readdir(uploadSessionDirectory);
+    const claimPath = path.join(
+      uploadSessionDirectory,
+      sessionDirectoryName,
+      "finalizing.json"
+    );
+    const interruptedClaim = JSON.parse(await readFile(claimPath, "utf8"));
+    await writeFile(
+      claimPath,
+      JSON.stringify({
+        ...interruptedClaim,
+        ownerPid: 2147483647,
+      })
+    );
+
+    const secondApp = await createApp({
+      healthService: okHealthService,
+      uploadSessionDirectory,
+      uploadsDirectory,
+      ragService,
+    });
+    secondServer = await startServer(secondApp);
+    response = await fetch(`${secondServer.baseUrl}/upload/complete`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ fileId }),
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).docId, initializedSession.sessionId);
+    assert.deepEqual(ingestedDocumentIds, [
+      initializedSession.sessionId,
+      initializedSession.sessionId,
+    ]);
+    assert.equal(documents.size, 1);
+  } finally {
+    await firstServer?.close();
+    await secondServer?.close();
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
@@ -4276,6 +4687,266 @@ test("upload routes report missing and invalid request boundaries", async () => 
   }
 });
 
+test("chunked upload rejects malformed indexes and oversized chunks with JSON errors", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-limits-"));
+  const app = await createApp({
+    healthService: okHealthService,
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      ingestDocument: async () => ({
+        docId: "unexpected",
+      }),
+    },
+  });
+  const server = await startServer(app);
+  const fileId = "bounded-upload";
+
+  try {
+    const exactBoundaryFileId = "exact-boundary-upload";
+    let response = await fetch(`${server.baseUrl}/upload/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId: exactBoundaryFileId,
+        fileName: "exact-boundary.pdf",
+        fileSize: MAX_CHUNK_UPLOAD_SIZE,
+        lastModified: 0,
+        totalChunks: 1,
+        chunkSize: MAX_CHUNK_UPLOAD_SIZE,
+      }),
+    });
+    assert.equal(response.status, 201);
+
+    const exactBoundaryChunk = new FormData();
+    exactBoundaryChunk.append("fileId", exactBoundaryFileId);
+    exactBoundaryChunk.append("chunkIndex", "0");
+    exactBoundaryChunk.append("totalChunks", "1");
+    exactBoundaryChunk.append(
+      "chunk",
+      new Blob([Buffer.alloc(MAX_CHUNK_UPLOAD_SIZE)]),
+      "exact-boundary.pdf.part-0"
+    );
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: exactBoundaryChunk,
+    });
+    assert.equal(response.status, 201);
+
+    response = await fetch(`${server.baseUrl}/upload/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId,
+        fileName: "bounded.pdf",
+        fileSize: MAX_CHUNK_UPLOAD_SIZE + 1,
+        lastModified: 0,
+        totalChunks: 2,
+        chunkSize: MAX_CHUNK_UPLOAD_SIZE,
+      }),
+    });
+    assert.equal(response.status, 201);
+
+    const malformedIndex = new FormData();
+    malformedIndex.append("fileId", fileId);
+    malformedIndex.append("chunkIndex", "0junk");
+    malformedIndex.append("totalChunks", "2");
+    malformedIndex.append("chunk", new Blob(["x"]), "bounded.pdf.part-0");
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: malformedIndex,
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /chunkIndex/);
+
+    const oversizedChunk = new FormData();
+    oversizedChunk.append("fileId", fileId);
+    oversizedChunk.append("chunkIndex", "0");
+    oversizedChunk.append("totalChunks", "2");
+    oversizedChunk.append(
+      "chunk",
+      new Blob([Buffer.alloc(MAX_CHUNK_UPLOAD_SIZE + 1)]),
+      "bounded.pdf.part-0"
+    );
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: oversizedChunk,
+    });
+    assert.equal(response.status, 413);
+    assert.match(response.headers.get("content-type"), /application\/json/);
+    assert.match((await response.json()).error, /size limit/i);
+
+    const tooManyFields = new FormData();
+    tooManyFields.append("fileId", fileId);
+    tooManyFields.append("chunkIndex", "0");
+    tooManyFields.append("totalChunks", "2");
+    tooManyFields.append("extraOne", "x");
+    tooManyFields.append("extraTwo", "y");
+    tooManyFields.append("chunk", new Blob(["x"]));
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: tooManyFields,
+    });
+    assert.equal(response.status, 400);
+    assert.match(response.headers.get("content-type"), /application\/json/);
+
+    response = await fetch(
+      `${server.baseUrl}/upload/status?fileId=${encodeURIComponent(fileId)}`
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).uploadedChunks, []);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("chunked upload rejects unsafe display names without destabilizing the server", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-file-name-"));
+  const app = await createApp({
+    healthService: okHealthService,
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      ingestDocument: async () => ({
+        docId: "unexpected",
+      }),
+    },
+  });
+  const server = await startServer(app);
+  const unsafeNames = [
+    "a\u0000.pdf",
+    `${"a".repeat(300)}.pdf`,
+    `${"文".repeat(100)}.pdf`,
+  ];
+
+  try {
+    for (const [index, fileName] of unsafeNames.entries()) {
+      const response = await fetch(`${server.baseUrl}/upload/init`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          fileId: `unsafe-name-${index}`,
+          fileName,
+          fileSize: 6,
+          lastModified: 0,
+          totalChunks: 1,
+          chunkSize: 6,
+        }),
+      });
+
+      assert.equal(response.status, 400);
+    }
+
+    const healthResponse = await fetch(`${server.baseUrl}/health`);
+    assert.equal(healthResponse.status, 200);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("chunked upload enforces declared chunk and file SHA-256 digests over HTTP", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-digest-"));
+  let ingested = false;
+  const app = await createApp({
+    healthService: okHealthService,
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      ingestDocument: async () => {
+        ingested = true;
+        return {
+          docId: "unexpected",
+        };
+      },
+    },
+  });
+  const server = await startServer(app);
+  const fileId = "digest-upload";
+  const content = "%PDF-digest";
+  const badDigest = "0".repeat(64);
+  const chunkDigest = createHash("sha256").update(content).digest("hex");
+
+  try {
+    let response = await fetch(`${server.baseUrl}/upload/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileId,
+        fileName: "digest.pdf",
+        fileSize: Buffer.byteLength(content),
+        lastModified: 0,
+        totalChunks: 1,
+        chunkSize: Buffer.byteLength(content),
+        fileSha256: badDigest,
+      }),
+    });
+    assert.equal(response.status, 201);
+
+    const badChunkDigest = new FormData();
+    badChunkDigest.append("fileId", fileId);
+    badChunkDigest.append("chunkIndex", "0");
+    badChunkDigest.append("totalChunks", "1");
+    badChunkDigest.append("chunkSha256", badDigest);
+    badChunkDigest.append("chunk", new Blob([content]), "digest.pdf.part-0");
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: badChunkDigest,
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /chunkSha256 does not match/i);
+
+    const validChunkDigest = new FormData();
+    validChunkDigest.append("fileId", fileId);
+    validChunkDigest.append("chunkIndex", "0");
+    validChunkDigest.append("totalChunks", "1");
+    validChunkDigest.append("chunkSha256", chunkDigest);
+    validChunkDigest.append("chunk", new Blob([content]), "digest.pdf.part-0");
+    response = await fetch(`${server.baseUrl}/upload/chunk`, {
+      method: "POST",
+      body: validChunkDigest,
+    });
+    assert.equal(response.status, 201);
+
+    const completeUpload = () =>
+      fetch(`${server.baseUrl}/upload/complete`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ fileId }),
+      });
+
+    response = await completeUpload();
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /fileSha256/i);
+    assert.equal(ingested, false);
+
+    response = await completeUpload();
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /fileSha256/i);
+    assert.equal(ingested, false);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("chunked upload rejects non-PDF file names and disguised non-PDF content", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-nonpdf-"));
   let ingested = false;
@@ -4364,16 +5035,29 @@ test("upload completion removes merged file when ingestion fails", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-upload-failure-"));
   let removedPath = null;
   let clearedFileId = null;
+  let releasedClaimToken = null;
   const app = await createApp({
     healthService: okHealthService,
     uploadSessionDirectory: path.join(tempRoot, "sessions"),
     uploadsDirectory: path.join(tempRoot, "uploads"),
     uploadStore: {
       ensureUploadStorage: async () => {},
+      claimUploadSessionFinalization: async ({ fileId }) => ({
+        claimToken: "test-claim",
+        session:
+          fileId === "file-1"
+            ? {
+                fileId,
+                fileName: "paper.pdf",
+                totalChunks: 1,
+                uploadedChunks: [0],
+              }
+            : null,
+      }),
       initializeUploadSession: async () => {
         throw new Error("not used");
       },
-      getUploadSessionStatus: async (fileId) =>
+      getUploadSessionStatus: async ({ fileId }) =>
         fileId === "file-1"
           ? {
               fileId,
@@ -4389,8 +5073,12 @@ test("upload completion removes merged file when ingestion fails", async () => {
         await writeFile(destinationPath, "%PDF-1.4 merged");
         return { fileId: "file-1" };
       },
-      clearUploadSession: async (fileId) => {
+      clearUploadSession: async ({ fileId }) => {
         clearedFileId = fileId;
+      },
+      releaseUploadSessionFinalization: async ({ claimToken }) => {
+        releasedClaimToken = claimToken;
+        return true;
       },
       removeMergedUpload: async (filePath) => {
         removedPath = filePath;
@@ -4421,8 +5109,13 @@ test("upload completion removes merged file when ingestion fails", async () => {
 
     assert.equal(response.status, 422);
     assert.match((await response.json()).error, /ingestion rejected/);
-    assert.match(removedPath, /paper-/);
+    assert.match(
+      path.basename(removedPath),
+      /^[0-9a-f]{8}-[0-9a-f-]{27}\.pdf$/i
+    );
+    assert.ok(!path.basename(removedPath).includes("paper"));
     assert.equal(clearedFileId, null);
+    assert.equal(releasedClaimToken, "test-claim");
   } finally {
     await server.close();
     await rm(tempRoot, { recursive: true, force: true });
@@ -5246,26 +5939,41 @@ test("quality gate decision maps status to CI exit codes", () => {
   );
 });
 
-test("createApp invokes cleanupExpiredUploadSessions on startup", async () => {
+test("createApp recovers finalization claims and cleans expired upload sessions on startup", async () => {
+  let recoveryCalled = false;
   let cleanupCalled = false;
   const app = await createApp({
     healthService: okHealthService,
     ragService: createRecoveryRagService(),
     uploadStore: {
       ensureUploadStorage: async () => {},
+      recoverInterruptedUploadFinalizations: async () => {
+        recoveryCalled = true;
+        return { recoveredClaims: 0 };
+      },
       cleanupExpiredUploadSessions: async () => {
         cleanupCalled = true;
         return { removedSessions: 0 };
       },
       clearUploadSession: async () => {},
+      claimUploadSessionFinalization: async () => ({
+        claimToken: "unused",
+        session: null,
+      }),
       finalizeUploadSession: async () => ({}),
       getUploadSessionStatus: async () => null,
       initializeUploadSession: async () => ({}),
+      releaseUploadSessionFinalization: async () => true,
       removeMergedUpload: async () => {},
       storeUploadChunk: async () => ({}),
     },
   });
 
+  assert.equal(
+    recoveryCalled,
+    true,
+    "recoverInterruptedUploadFinalizations must be called during startup"
+  );
   assert.equal(cleanupCalled, true, "cleanupExpiredUploadSessions must be called during startup");
   assert.ok(app);
 });

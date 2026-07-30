@@ -113,6 +113,7 @@ export const createApp = async (options = {}) => {
 
   await mkdir(uploadsDirectory, { recursive: true });
   await uploadStore.ensureUploadStorage();
+  await uploadStore.recoverInterruptedUploadFinalizations?.();
   await uploadStore.cleanupExpiredUploadSessions?.();
   await ragService.initializeDocumentRegistry?.();
   await ragService.initializeLongMemory?.();
