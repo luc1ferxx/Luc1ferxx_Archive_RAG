@@ -1,5 +1,9 @@
-import pdfParse from "pdf-parse";
 import { readFile } from "node:fs/promises";
+import {
+  getDocument,
+  version as pdfJsVersion,
+  VerbosityLevel,
+} from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const normalizePageText = (text = "") =>
   String(text)
@@ -13,8 +17,7 @@ const normalizePageText = (text = "") =>
 
 const renderPdfPageText = async (pageData) => {
   const textContent = await pageData.getTextContent({
-    normalizeWhitespace: false,
-    disableCombineTextItems: false,
+    disableNormalization: false,
   });
   let text = "";
   let lastY = null;
@@ -39,20 +42,77 @@ const renderPdfPageText = async (pageData) => {
   return text;
 };
 
-export const loadPdfPages = async (filePath) => {
+const resolvePageLimit = ({ maxPages, pageCount }) => {
+  if (maxPages === undefined || maxPages === null || maxPages === 0) {
+    return pageCount;
+  }
+
+  if (!Number.isInteger(maxPages) || maxPages < 0) {
+    throw new TypeError("maxPages must be a non-negative integer.");
+  }
+
+  return Math.min(maxPages, pageCount);
+};
+
+export const loadPdfDocument = async (
+  filePath,
+  {
+    maxPages = 0,
+    includeMetadata = false,
+  } = {}
+) => {
   const dataBuffer = await readFile(filePath);
   const pages = [];
-
-  await pdfParse(dataBuffer, {
-    pagerender: async (pageData) => {
-      const text = await renderPdfPageText(pageData);
-      pages.push(normalizePageText(text));
-      return text;
-    },
+  let pageCount = 0;
+  let info = null;
+  const loadingTask = getDocument({
+    data: new Uint8Array(dataBuffer),
+    isEvalSupported: false,
+    verbosity: VerbosityLevel.ERRORS,
   });
 
-  return pages.map((text, index) => ({
-    pageNumber: index + 1,
-    text,
-  }));
+  try {
+    const document = await loadingTask.promise;
+    pageCount = document.numPages;
+    const renderedPageCount = resolvePageLimit({
+      maxPages,
+      pageCount,
+    });
+
+    for (
+      let pageNumber = 1;
+      pageNumber <= renderedPageCount;
+      pageNumber += 1
+    ) {
+      const pageData = await document.getPage(pageNumber);
+
+      try {
+        const text = await renderPdfPageText(pageData);
+        pages.push({
+          pageNumber,
+          text: normalizePageText(text),
+        });
+      } finally {
+        pageData.cleanup();
+      }
+    }
+
+    if (includeMetadata) {
+      const metadata = await document.getMetadata();
+      info = metadata.info ?? null;
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+
+  return {
+    pages,
+    pageCount,
+    renderedPageCount: pages.length,
+    pdfVersion: pdfJsVersion,
+    info,
+  };
 };
+
+export const loadPdfPages = async (filePath) =>
+  (await loadPdfDocument(filePath)).pages;

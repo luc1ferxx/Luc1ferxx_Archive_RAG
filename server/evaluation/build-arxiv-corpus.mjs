@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import pdfParse from "pdf-parse";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadPdfDocument } from "../rag/pdf-loader.js";
 import { toRepoRelativePath } from "./eval-evidence.js";
 import { toPositiveInteger } from "./eval-cli.js";
 
@@ -132,62 +132,18 @@ const buildPdfPath = ({ pdfDirectory, documentSpec }) =>
     documentSpec.fileName || `${normalizeArxivIdForFile(documentSpec.arxivId)}.pdf`
   );
 
-const normalizePageText = (text = "") =>
-  String(text)
-    .replace(/\u0000/g, "")
-    .replace(/\r/g, "")
-    .replace(/-\n(?=[a-z])/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-const renderPdfPageText = async (pageData) => {
-  const textContent = await pageData.getTextContent({
-    normalizeWhitespace: false,
-    disableCombineTextItems: false,
-  });
-  let text = "";
-  let lastY = null;
-
-  for (const item of textContent.items) {
-    const y = item.transform?.[5];
-    const value = item.str ?? "";
-
-    if (!value) {
-      continue;
-    }
-
-    if (lastY === null || lastY === y) {
-      text += value;
-    } else {
-      text += `\n${value}`;
-    }
-
-    lastY = y;
-  }
-
-  return text;
-};
-
 const extractPdfPages = async ({ pdfPath, maxPages }) => {
-  const dataBuffer = await readFile(pdfPath);
-  const pages = [];
-  const result = await pdfParse(dataBuffer, {
-    max: maxPages ?? 0,
-    pagerender: async (pageData) => {
-      const text = await renderPdfPageText(pageData);
-      pages.push(normalizePageText(text));
-      return text;
-    },
+  const result = await loadPdfDocument(pdfPath, {
+    maxPages: maxPages ?? 0,
+    includeMetadata: true,
   });
 
   return {
-    pages,
-    pageCount: result.numpages,
-    renderedPageCount: result.numrender,
-    pdfVersion: result.version,
-    info: result.info ?? null,
+    pages: result.pages.map((page) => page.text),
+    pageCount: result.pageCount,
+    renderedPageCount: result.renderedPageCount,
+    pdfVersion: result.pdfVersion,
+    info: result.info,
   };
 };
 

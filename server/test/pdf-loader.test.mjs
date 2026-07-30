@@ -3,112 +3,157 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { loadPdfPages } from "../rag/pdf-loader.js";
+import {
+  loadPdfDocument,
+  loadPdfPages,
+} from "../rag/pdf-loader.js";
 
-test("loadPdfPages extracts text from a valid PDF", async () => {
+const escapePdfText = (text) =>
+  text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+
+const buildValidPdfBuffer = (pages) => {
+  const pageObjectIds = pages.map((_, index) => 4 + index * 2);
+  const contentObjectIds = pages.map((_, index) => 5 + index * 2);
+  const objects = [
+    {
+      id: 1,
+      body: "<< /Type /Catalog /Pages 2 0 R >>",
+    },
+    {
+      id: 2,
+      body: `<< /Type /Pages /Kids [${pageObjectIds
+        .map((id) => `${id} 0 R`)
+        .join(" ")}] /Count ${pages.length} >>`,
+    },
+    {
+      id: 3,
+      body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    },
+  ];
+
+  pages.forEach((pageText, index) => {
+    const stream = [
+      "BT",
+      "/F1 12 Tf",
+      "72 720 Td",
+      `(${escapePdfText(pageText)}) Tj`,
+      "ET",
+    ].join("\n");
+
+    objects.push({
+      id: pageObjectIds[index],
+      body: `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contentObjectIds[index]} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`,
+    });
+    objects.push({
+      id: contentObjectIds[index],
+      body: `<< /Length ${Buffer.byteLength(stream, "utf8")} >>\nstream\n${stream}\nendstream`,
+    });
+  });
+
+  objects.sort((left, right) => left.id - right.id);
+  let pdf = "%PDF-1.4\n";
+  const offsets = new Map();
+
+  for (const entry of objects) {
+    offsets.set(entry.id, Buffer.byteLength(pdf, "utf8"));
+    pdf += `${entry.id} 0 obj\n${entry.body}\nendobj\n`;
+  }
+
+  const xrefOffset = Buffer.byteLength(pdf, "utf8");
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+
+  for (const entry of objects) {
+    pdf += `${String(offsets.get(entry.id)).padStart(10, "0")} 00000 n \n`;
+  }
+
+  pdf += `trailer\n<< /Root 1 0 R /Size ${objects.length + 1} >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(pdf, "utf8");
+};
+
+test("loadPdfPages extracts text from a valid byte-offset PDF", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-loader-test-"));
   const pdfPath = path.join(tempDir, "test.pdf");
 
-  // Minimal valid PDF with one page containing "Hello RAG"
-  // This uses a basic PDF 1.4 structure with a text stream
-  const pdfContent = [
-    "%PDF-1.4",
-    "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj",
-    "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj",
-    "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj",
-    "4 0 obj<</Length 44>>stream",
-    "BT /F1 12 Tf 100 700 Td (Hello RAG) Tj ET",
-    "endstream endobj",
-    "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj",
-    "xref",
-    "0 6",
-    "0000000000 65535 f ",
-    "0000000009 00000 n ",
-    "0000000058 00000 n ",
-    "0000000115 00000 n ",
-    "0000000266 00000 n ",
-    "0000000360 00000 n ",
-    "trailer<</Size 6/Root 1 0 R>>",
-    "startxref",
-    "430",
-    "%%EOF",
-  ].join("\n");
-
   try {
-    await writeFile(pdfPath, pdfContent);
+    await writeFile(
+      pdfPath,
+      buildValidPdfBuffer([
+        "Remote work requires manager approval before the first remote day.",
+      ])
+    );
     const pages = await loadPdfPages(pdfPath);
 
-    assert.ok(Array.isArray(pages), "should return an array");
-    assert.ok(pages.length >= 1, "should have at least one page");
-    assert.equal(pages[0].pageNumber, 1);
-    assert.match(pages[0].text, /Hello RAG/);
-  } catch (error) {
-    // Hand-crafted minimal PDFs are routinely rejected by pdf-parse
-    // because xref byte offsets must be exact. This is acceptable -
-    // the function contract is validated by shape and error tests.
-    console.log(
-      "Hand-crafted PDF not parseable by pdf-parse:",
-      error.message
-    );
+    assert.deepEqual(pages, [
+      {
+        pageNumber: 1,
+        text: "Remote work requires manager approval before the first remote day.",
+      },
+    ]);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
 
-test("loadPdfPages returns pages with pageNumber and text fields", async () => {
-  // This test validates the shape contract of loadPdfPages output
-  // using a real minimal PDF from pdf-parse's own test fixtures
+test("loadPdfPages preserves page order and text shape", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-loader-shape-"));
   const pdfPath = path.join(tempDir, "shape.pdf");
 
-  // A slightly different valid minimal PDF - uses raw bytes for xref offsets
-  const header = "%PDF-1.0\n";
-  const obj1 = "1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n";
-  const obj2 = "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n";
-  const stream = "BT /F1 12 Tf 72 720 Td (Test Page) Tj ET";
-  const obj4 = `4 0 obj<</Length ${stream.length}>>stream\n${stream}\nendstream endobj\n`;
-  const obj3 = `3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n`;
-  const obj5 = "5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n";
+  try {
+    await writeFile(
+      pdfPath,
+      buildValidPdfBuffer([
+        "First page (overview).",
+        "Second page uses a backslash: C:\\Archive.",
+      ])
+    );
+    const pages = await loadPdfPages(pdfPath);
 
-  const body = header + obj1 + obj2 + obj3 + obj4 + obj5;
-  const xrefOffset = body.length;
+    assert.deepEqual(pages, [
+      {
+        pageNumber: 1,
+        text: "First page (overview).",
+      },
+      {
+        pageNumber: 2,
+        text: "Second page uses a backslash: C:\\Archive.",
+      },
+    ]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
-  const xref = [
-    "xref",
-    "0 6",
-    `0000000000 65535 f `,
-    `${String(header.length).padStart(10, "0")} 00000 n `,
-    `${String(header.length + obj1.length).padStart(10, "0")} 00000 n `,
-    `${String(header.length + obj1.length + obj2.length).padStart(10, "0")} 00000 n `,
-    `${String(header.length + obj1.length + obj2.length + obj3.length).padStart(10, "0")} 00000 n `,
-    `${String(header.length + obj1.length + obj2.length + obj3.length + obj4.length).padStart(10, "0")} 00000 n `,
-    `trailer<</Size 6/Root 1 0 R>>`,
-    "startxref",
-    `${xrefOffset}`,
-    "%%EOF",
-  ].join("\n");
-
-  const fullPdf = body + xref;
+test("loadPdfDocument limits rendered pages and returns parser metadata", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-loader-document-"));
+  const pdfPath = path.join(tempDir, "document.pdf");
 
   try {
-    await writeFile(pdfPath, fullPdf);
-    const pages = await loadPdfPages(pdfPath);
-    assert.ok(Array.isArray(pages));
+    await writeFile(
+      pdfPath,
+      buildValidPdfBuffer([
+        "First document page.",
+        "Second document page.",
+      ])
+    );
+    const result = await loadPdfDocument(pdfPath, {
+      maxPages: 1,
+      includeMetadata: true,
+    });
 
-    if (pages.length > 0) {
-      assert.equal(typeof pages[0].pageNumber, "number");
-      assert.equal(typeof pages[0].text, "string");
-      assert.equal(pages[0].pageNumber, 1);
-    }
-  } catch (error) {
-    // pdf-parse may reject minimal hand-crafted PDFs -
-    // this is acceptable; the function contract is still validated
-    // by the first test and integration tests
-    if (error.message && !error.message.includes("loadPdfPages")) {
-      console.log("Minimal PDF not accepted by pdf-parse:", error.message);
-    } else {
-      throw error;
-    }
+    assert.equal(result.pageCount, 2);
+    assert.equal(result.renderedPageCount, 1);
+    assert.deepEqual(result.pages, [
+      {
+        pageNumber: 1,
+        text: "First document page.",
+      },
+    ]);
+    assert.equal(typeof result.pdfVersion, "string");
+    assert.ok(result.pdfVersion.length > 0);
+    assert.equal(typeof result.info, "object");
+    assert.ok(result.info);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -119,4 +164,20 @@ test("loadPdfPages rejects non-existent file", async () => {
     () => loadPdfPages("/non/existent/path.pdf"),
     (error) => error.code === "ENOENT"
   );
+});
+
+test("loadPdfPages rejects malformed PDF bytes", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-loader-malformed-"));
+  const pdfPath = path.join(tempDir, "malformed.pdf");
+
+  try {
+    await writeFile(pdfPath, "%PDF-1.4\nnot-a-document\n%%EOF\n");
+
+    await assert.rejects(
+      () => loadPdfPages(pdfPath),
+      (error) => error instanceof Error
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
