@@ -7,6 +7,29 @@ on:
       - main
 
 jobs:
+  frontend-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
   server-tests:
     runs-on: ubuntu-latest
 
@@ -30,6 +53,9 @@ jobs:
 
       - name: Run server tests
         run: npm test
+
+      - name: Enforce backend coverage
+        run: npm run coverage:gate
 
   quality-gate:
     runs-on: ubuntu-latest

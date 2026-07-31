@@ -268,7 +268,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json` | 运行 legacy near-duplicate corpus；它不再是 hard/real robust signal 的主入口。 |
 | `cd server && npm run eval:trajectory` | 检查 skill selection、follow-up retrieval、clarification、access scope 和 budget 行为。 |
 | `cd server && npm run eval:feedback` | 从 seed + runtime 反馈生成回归语料并运行 deterministic latest-feedback eval。 |
-| `cd server && npm run eval:robust-suite` | 固定周期运行 compare-hard synthetic、hard-CS rerank 和 arXiv real-paper rerank。 |
+| `cd server && npm run eval:robust-suite` | 手动运行 compare-hard synthetic、hard-CS rerank 和 arXiv real-paper rerank；每周由 Release Evidence Gate 复用同一 suite。 |
 | `cd server && npm run eval:planner` | 评测 planner mock provider；`-- --provider real` 生成真实 provider 报告。 |
 | `cd server && npm run planner:gate -- --provider real` | 检查 real planner report、fallback rate 和 mock/real divergence。 |
 | `cd server && npm run eval:recovery-observability` | 检查 recovery/replay observability。 |
@@ -282,13 +282,13 @@ curl http://localhost:5001/ready
 
 `quality:gate` 保留为兼容旧 payload 的历史 metrics 查看器，输出 PASS 不再代表当前 commit 已通过。默认 PR 入口是 `quality:current`：CI 会重新生成独立的 deterministic `latest-quality.*`，要求 synthetic、feedback、trajectory、planner-mock 和 recovery 报告自身通过并绑定同一 SHA；存在 planner-real 时也必须通过逐报告校验。门禁还会用版本化 suite manifest 固定必需 case/check IDs、关键 case 语义、语料页、事实 claim/来源归属、拒答输出和 deterministic 上传身份；citation 必须对应本次 raw retrieval，recovery cases 从原始 recovery summary 独立重算，planner/trajectory 必须匹配稳定 response projection，其中高风险 trajectory 另持久化 privacy-safe `case.response.observed` 原始观测，避免把 `check.detail` 或 `check.passed` 当证据。再由门禁独立重算 claim support、断点续传不变量和汇总指标，防止删减覆盖面、伪造 raw verdict 或用 summary 掩盖 failure；只要 worktree、lineage、报告契约或 baseline 任一证据检查失败，对外 metrics 状态就是 `unverified`，原始 metrics 判断只作为 diagnostics 保留。回归比较只使用受版本控制的 `server/evaluation/baselines/quality-near-duplicate-deterministic-v1.json`，旧 `latest.json` 或残留 timestamped 报告不能替换 baseline。`release:gate` 仍是更完整、也更昂贵的发布入口；current gate 校验报告契约与 current-SHA lineage，自身不构成 runner 执行证明、完整内部事件重放或密码学来源证明，实际运行 provenance 仍由 CI 步骤顺序与 artifact 提供。
 
-CI 侧，`quality-gate.yml` 把后端测试和 current eval+gate 拆成两个并行 job；所有 producer 失败后仍会继续生成可用诊断，最后上传 current gate JSON/Markdown 与原始报告。planner real gate、robust suite 和 release evidence 各有独立的定时 workflow。
+CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 current eval+gate 拆成三个并行 job；所有 producer 失败后仍会继续生成可用诊断，最后上传 current gate JSON/Markdown 与原始报告。planner real gate 和 release evidence 保留独立的定时 workflow；standalone Robust Eval Suite 仅供手动运行，每周 Release Evidence Gate 会先运行同一 robust suite 和历史 regression gate，再执行严格发布门禁，避免削弱检查范围，同时去掉重复的周期任务和失败通知来源。
 
 ## 评测优化结果
 
 优化前，主 synthetic `latest.*` 和 legacy rerank 报告长期依赖 near-duplicate 小语料。旧 `latest-rerank.md` 只有 `6` 个 ranking cases，NDCG、Recall、MRR 都是 `1.0000 -> 1.0000`，lift 为 `0.0000`，无法证明 rerank 对困难检索有真实收益。
 
-这次优化把固定周期入口改为 `eval:robust-suite`：用 compare-hard 刷新主 synthetic regression，把 hard-CS rerank 和 arXiv real-paper rerank 写成独立 latest reports，并交给 `quality:gate -- --require-robust-suite` 强制检查。suite 定义集中在 `server/evaluation/eval-suite.js`，runner 只消费配置；质量门通过 `quality-robust-suite-gate.js` 统一检查 report 是否存在、语料是否匹配、case 数量是否非空、NDCG/Recall 是否不回退，以及 NDCG lift 是否退化成 `0`。
+这次优化把 robust 评测统一到 `eval:robust-suite`：用 compare-hard 刷新主 synthetic regression，把 hard-CS rerank 和 arXiv real-paper rerank 写成独立 latest reports，并交给 `quality:gate -- --fail-on-warn --require-robust-suite` 强制检查。standalone workflow 负责手动诊断，固定周期由 Release Evidence Gate 运行同一命令并继续执行 strict release gate。suite 定义集中在 `server/evaluation/eval-suite.js`，runner 只消费配置；质量门通过 `quality-robust-suite-gate.js` 统一检查 report 是否存在、语料是否匹配、case 数量是否非空、NDCG/Recall 是否不回退，以及 NDCG lift 是否退化成 `0`。
 
 前后对比如下：
 

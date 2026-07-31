@@ -59,6 +59,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: npm run eval:robust-suite
 
+      - name: Check robust quality gate
+        if: ${{ !cancelled() }}
+        run: npm run quality:gate -- --fail-on-warn --require-robust-suite
+
       - name: Run planner eval (mock)
         if: ${{ !cancelled() }}
         run: npm run eval:planner -- --provider mock

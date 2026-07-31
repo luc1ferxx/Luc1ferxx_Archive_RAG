@@ -2,8 +2,6 @@ name: Robust Eval Suite
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 10 * * 1"
 
 jobs:
   robust-eval-suite:

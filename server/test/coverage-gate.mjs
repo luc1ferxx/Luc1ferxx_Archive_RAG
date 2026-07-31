@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeChildProcessClose } from "./coverage-process-result.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -96,6 +97,7 @@ const COVERAGE_GROUPS = [
     include: [
       /^server\/app\.js$/,
       /^server\/auth\.js$/,
+      /^server\/routes\//,
     ],
     minimum: {
       line: 70,
@@ -224,9 +226,9 @@ const runCoverage = async (testFiles) =>
       stderr += text;
       process.stderr.write(text);
     });
-    child.on("close", (exitCode) => {
+    child.on("close", (exitCode, signal) => {
       resolve({
-        exitCode,
+        ...normalizeChildProcessClose({ exitCode, signal }),
         output: `${stdout}\n${stderr}`,
       });
     });
@@ -443,6 +445,11 @@ const main = async () => {
   const coverageResult = await runCoverage(testFiles);
 
   if (coverageResult.exitCode !== 0) {
+    if (coverageResult.signal) {
+      console.error(
+        `Coverage test process terminated by signal ${coverageResult.signal}.`
+      );
+    }
     process.exitCode = coverageResult.exitCode;
     return;
   }

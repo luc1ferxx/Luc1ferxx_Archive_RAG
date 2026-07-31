@@ -42,6 +42,72 @@ test("root current quality alias forwards command-line arguments", async () => {
   );
 });
 
+test("root historical quality alias forwards command-line arguments", async () => {
+  const packageJson = JSON.parse(await readFile(rootPackagePath, "utf8"));
+
+  assert.equal(
+    packageJson.scripts?.["quality:gate"],
+    "cd server && npm run quality:gate --"
+  );
+});
+
+test("root release evidence alias forwards command-line arguments", async () => {
+  const packageJson = JSON.parse(await readFile(rootPackagePath, "utf8"));
+
+  assert.equal(
+    packageJson.scripts?.["release:gate"],
+    "cd server && npm run release:gate --"
+  );
+});
+
+test("quality gate workflow runs frontend checks in an independent root job", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+  const frontendJobMatch = workflow.match(
+    /\n  frontend-checks:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:\n|$)/
+  );
+
+  assert.ok(frontendJobMatch, "frontend-checks must be a top-level job");
+
+  const frontendJob = frontendJobMatch[0];
+
+  assert.match(frontendJob, /runs-on:\s*ubuntu-latest/);
+  assert.match(frontendJob, /node-version:\s*"20"/);
+  assert.match(frontendJob, /cache-dependency-path:\s*package-lock\.json/);
+  assert.doesNotMatch(frontendJob, /working-directory:\s*server/);
+
+  const commands = ["npm ci", "npm test", "npm run build"];
+  let previousCommandIndex = -1;
+
+  for (const command of commands) {
+    const commandIndex = frontendJob.indexOf(`run: ${command}`);
+
+    assert.ok(
+      commandIndex > previousCommandIndex,
+      `${command} must run in order`
+    );
+    previousCommandIndex = commandIndex;
+  }
+});
+
+test("quality gate workflow enforces backend route coverage", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+  const serverJobMatch = workflow.match(
+    /\n  server-tests:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:\n|$)/
+  );
+
+  assert.ok(serverJobMatch, "server-tests must be a top-level job");
+
+  const serverJob = serverJobMatch[0];
+  const testIndex = serverJob.indexOf("run: npm test");
+  const coverageIndex = serverJob.indexOf("run: npm run coverage:gate");
+
+  assert.ok(testIndex >= 0, "server-tests must run the backend tests");
+  assert.ok(
+    coverageIndex > testIndex,
+    "server-tests must enforce coverage after the backend tests"
+  );
+});
+
 test("quality gate workflow regenerates and validates current-commit evidence", async () => {
   const workflow = await readFile(workflowPath, "utf8");
 
@@ -54,7 +120,7 @@ test("quality gate workflow regenerates and validates current-commit evidence", 
   assert.match(workflow, /cache-dependency-path:\s*server\/package-lock\.json/);
   assert.match(workflow, /run:\s*npm ci/);
   assert.match(workflow, /run:\s*npm test/);
-  assert.match(workflow, /jobs:\s*\n\s*server-tests:/);
+  assert.match(workflow, /\n  server-tests:\n/);
   assert.match(
     workflow,
     /server-tests:[\s\S]*run:\s*npm test[\s\S]*quality-gate:/,
@@ -188,12 +254,13 @@ test("planner real provider workflow runs a required scheduled gate", async () =
   assert.match(workflow, /actions\/upload-artifact@v4/);
 });
 
-test("robust eval suite workflow runs hard and real reports on a schedule", async () => {
+test("robust eval suite is manual-only because the scheduled release gate owns the same suite", async () => {
   const workflow = await readFile(robustEvalSuiteWorkflowPath, "utf8");
 
   assert.match(workflow, /name:\s*Robust Eval Suite/);
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /schedule:\s*\n\s*-\s*cron:\s*"0 10 \* \* 1"/);
+  assert.doesNotMatch(workflow, /schedule:/);
+  assert.doesNotMatch(workflow, /cron:/);
   assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
   assert.match(workflow, /working-directory:\s*server/);
   assert.match(workflow, /node-version:\s*"20"/);
@@ -264,6 +331,20 @@ test("release evidence workflow generates every required report in one Postgres-
   assert.match(workflow, /name:\s*Require OpenAI key/);
   assert.match(workflow, /run:\s*test -n "\$OPENAI_API_KEY"/);
 
+  const robustSuiteIndex = workflow.indexOf(
+    "run: npm run eval:robust-suite"
+  );
+  const robustGateCommand =
+    "run: npm run quality:gate -- --fail-on-warn --require-robust-suite";
+  const robustGateIndex = workflow.indexOf(robustGateCommand);
+
+  assert.ok(robustSuiteIndex >= 0);
+  assert.ok(
+    robustGateIndex > robustSuiteIndex,
+    "the scheduled release job must preserve the historical robust regression gate"
+  );
+  assert.doesNotMatch(workflow, /quality:gate[^\n]*--no-fail/);
+
   const reportCommands = [
     "npm run eval:robust-suite",
     "npm run eval:planner -- --provider mock",
@@ -302,8 +383,12 @@ test("release evidence workflow still emits gate evidence after an eval failure"
 
   assert.equal(
     workflow.split(continueAfterFailure).length - 1,
-    8,
-    "all report generators and the release gate must run after prior failures"
+    9,
+    "all report generators and both gates must run after prior failures"
+  );
+  assert.match(
+    workflow,
+    /name:\s*Check robust quality gate\s+if:\s*\$\{\{\s*!cancelled\(\)\s*\}\}\s+run:\s*npm run quality:gate -- --fail-on-warn --require-robust-suite/
   );
   assert.match(
     workflow,
