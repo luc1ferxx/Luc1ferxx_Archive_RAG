@@ -7,6 +7,7 @@ import {
 import {
   applyApprovalActionToSteps,
   AGENT_RUN_STEP_STATUSES,
+  assertAgentRunStepStatusTransition,
   createUnsupportedAgentRunStepStatusError,
   isKnownAgentRunStepStatus,
   normalizeAgentRunSteps,
@@ -866,6 +867,11 @@ const AGENT_RUN_STEP_MUTABLE_STATUSES = new Set([
   AGENT_RUN_STATUSES.running,
   AGENT_RUN_STATUSES.waitingForUser,
 ]);
+const TERMINAL_AGENT_RUN_STATUSES = new Set([
+  AGENT_RUN_STATUSES.canceled,
+  AGENT_RUN_STATUSES.completed,
+  AGENT_RUN_STATUSES.failed,
+]);
 
 const assertAgentRunAcceptsStepMutation = (status) => {
   const normalizedStatus = normalizeAgentRunStatus(status);
@@ -881,18 +887,135 @@ const assertAgentRunAcceptsStepMutation = (status) => {
   throw error;
 };
 
+const TERMINAL_AGENT_RUN_STEP_STATUSES = new Set([
+  AGENT_RUN_STEP_STATUSES.completed,
+  AGENT_RUN_STEP_STATUSES.failed,
+  AGENT_RUN_STEP_STATUSES.skipped,
+]);
+const ACTIVE_AGENT_RUN_STEP_STATUSES = new Set([
+  AGENT_RUN_STEP_STATUSES.paused,
+  AGENT_RUN_STEP_STATUSES.pending,
+  AGENT_RUN_STEP_STATUSES.running,
+]);
+
+const mergePersistedRunStepSnapshot = ({
+  currentStep,
+  incomingStep,
+} = {}) => {
+  if (!currentStep) {
+    return incomingStep;
+  }
+
+  const currentStepIsTerminal = TERMINAL_AGENT_RUN_STEP_STATUSES.has(
+    currentStep.status
+  );
+
+  if (!currentStepIsTerminal) {
+    assertAgentRunStepStatusTransition({
+      from: currentStep.status,
+      to: incomingStep.status,
+    });
+  }
+  const hasPersistedStepType = currentStep.type !== "step";
+  const hasPersistedLabel =
+    currentStep.label !== "step" || hasPersistedStepType;
+
+  return {
+    ...incomingStep,
+    type: hasPersistedStepType ? currentStep.type : incomingStep.type,
+    kind: hasPersistedStepType ? currentStep.kind : incomingStep.kind,
+    status: currentStepIsTerminal ? currentStep.status : incomingStep.status,
+    label: hasPersistedLabel ? currentStep.label : incomingStep.label,
+    summary: currentStep.summary || incomingStep.summary,
+    detail:
+      currentStep.detail || incomingStep.detail
+        ? {
+            ...(incomingStep.detail ?? {}),
+            ...(currentStep.detail ?? {}),
+          }
+        : null,
+    parentStepId: currentStep.parentStepId || incomingStep.parentStepId,
+    traceStepId: currentStep.traceStepId || incomingStep.traceStepId,
+    approvalGateId:
+      currentStep.approvalGateId || incomingStep.approvalGateId,
+    capabilityId: currentStep.capabilityId || incomingStep.capabilityId,
+    capabilityVersion:
+      currentStep.capabilityVersion || incomingStep.capabilityVersion,
+    input: currentStep.input ?? incomingStep.input,
+    attempt: currentStep.attempt,
+    retryOfStepId:
+      currentStep.retryOfStepId || incomingStep.retryOfStepId,
+    decision: currentStep.decision || incomingStep.decision,
+    error:
+      currentStepIsTerminal
+        ? currentStep.status === AGENT_RUN_STEP_STATUSES.failed
+          ? currentStep.error ?? incomingStep.error
+          : currentStep.error
+        : currentStep.error ?? incomingStep.error,
+    output:
+      currentStepIsTerminal
+        ? currentStep.status === AGENT_RUN_STEP_STATUSES.completed
+          ? currentStep.output ?? incomingStep.output
+          : currentStep.output
+        : currentStep.output ?? incomingStep.output,
+    createdAt: currentStep.createdAt || incomingStep.createdAt,
+    startedAt: currentStep.startedAt || incomingStep.startedAt,
+    pausedAt: currentStep.pausedAt || incomingStep.pausedAt,
+    completedAt: currentStep.completedAt || incomingStep.completedAt,
+    updatedAt: currentStep.updatedAt || incomingStep.updatedAt,
+  };
+};
+
 const mergeAgentRunStepSnapshots = ({
   currentSteps = [],
   incomingSteps = [],
-} = {}) =>
-  normalizeAgentRunSteps(incomingSteps).reduce(
+} = {}) => {
+  const normalizedCurrentSteps = normalizeAgentRunSteps(currentSteps);
+  const normalizedIncomingSteps = normalizeAgentRunSteps(incomingSteps);
+  const currentStepsById = new Map(
+    normalizedCurrentSteps.map((step) => [step.id, step])
+  );
+
+  // Completion callers provide the full logical trace snapshot in display
+  // order. A CAS retry may reveal newer persisted-only steps; append those,
+  // but never let the older snapshot regress a terminal execution lifecycle.
+  const mergedSteps = normalizedIncomingSteps.reduce(
     (steps, step) =>
       upsertAgentRunStep({
         steps,
-        step,
+        step: mergePersistedRunStepSnapshot({
+          currentStep: currentStepsById.get(step.id),
+          incomingStep: step,
+        }),
       }),
-    normalizeAgentRunSteps(currentSteps)
+    normalizedCurrentSteps
   );
+  const mergedStepsById = new Map(
+    mergedSteps.map((step) => [step.id, step])
+  );
+  const orderedStepIds = [
+    ...normalizedIncomingSteps,
+    ...normalizedCurrentSteps,
+  ].map((step) => step.id);
+
+  return [...new Set(orderedStepIds)]
+    .map((stepId) => mergedStepsById.get(stepId))
+    .filter(Boolean);
+};
+
+const getActiveAgentRunStep = (steps = []) =>
+  normalizeAgentRunSteps(steps).find((step) =>
+    ACTIVE_AGENT_RUN_STEP_STATUSES.has(step.status)
+  ) ?? null;
+
+const createActiveRunStepCompletionConflictError = ({ status, step } = {}) => {
+  const error = new Error(
+    `Agent run cannot become ${status} with concurrent active step ${step.id} (${step.status}).`
+  );
+  error.code = "AGENT_RUN_ACTIVE_STEP_CONFLICT";
+  error.status = 409;
+  return error;
+};
 
 const DEFAULT_AGENT_RUN_MUTATION_RETRIES = 32;
 
@@ -939,6 +1062,17 @@ export const createAgentRunService = ({
           from: existingRun.status,
           to: patch.status,
         });
+      }
+
+      if (
+        TERMINAL_AGENT_RUN_STATUSES.has(existingRun.status) &&
+        !allowRetryTransition
+      ) {
+        const error = new Error(
+          `Terminal agent run cannot be updated: ${existingRun.status}.`
+        );
+        error.status = 409;
+        throw error;
       }
 
       try {
@@ -1063,13 +1197,11 @@ export const createAgentRunService = ({
 
   async updateRun({
     accessScope = {},
-    allowRetryTransition = false,
     runId,
     patch = {},
   } = {}) {
     const mutation = await mutateStoredRun({
       accessScope,
-      allowRetryTransition,
       runId,
       mutate: () => ({
         patch,
@@ -1096,6 +1228,8 @@ export const createAgentRunService = ({
     const completionEventType =
       status === AGENT_RUN_STATUSES.waitingForUser && pendingApprovalGate
         ? "approval_gate_created"
+        : status === AGENT_RUN_STATUSES.waitingForUser
+          ? "run_waiting_for_user"
         : status === AGENT_RUN_STATUSES.failed
           ? "run_failed"
           : status === AGENT_RUN_STATUSES.canceled
@@ -1106,6 +1240,32 @@ export const createAgentRunService = ({
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
       runId,
       mutate: (existingRun) => {
+        if (TERMINAL_AGENT_RUN_STATUSES.has(existingRun.status)) {
+          assertAgentRunStatusTransition({
+            from: existingRun.status,
+            to: status,
+          });
+          return null;
+        }
+
+        const mergedSteps =
+          steps === undefined
+            ? existingRun.steps
+            : mergeAgentRunStepSnapshots({
+                currentSteps: existingRun.steps,
+                incomingSteps: steps,
+              });
+        const activeStep = TERMINAL_AGENT_RUN_STATUSES.has(status)
+          ? getActiveAgentRunStep(mergedSteps)
+          : null;
+
+        if (activeStep) {
+          throw createActiveRunStepCompletionConflictError({
+            status,
+            step: activeStep,
+          });
+        }
+
         const patch = {
           approvalGates: mergeAgentRunApprovalGates(
             existingRun.approvalGates,
@@ -1118,10 +1278,7 @@ export const createAgentRunService = ({
         };
 
         if (steps !== undefined) {
-          patch.steps = mergeAgentRunStepSnapshots({
-            currentSteps: existingRun.steps,
-            incomingSteps: steps,
-          });
+          patch.steps = mergedSteps;
         }
 
         return {

@@ -6,6 +6,7 @@ import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import { buildStepReplaySafetyAssessment } from "../rag/agent-run-step-replay-safety.js";
 import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
 import { createApprovalExecutionSnapshot } from "../rag/capabilities/approval-execution-snapshot.js";
 
@@ -330,7 +331,361 @@ test("agent run completion merges stale incoming steps without deleting newer pe
   );
 });
 
-test("agent run completion retries a concurrent step write and rejects post-terminal steps", async () => {
+test("agent run completion preserves snapshot order while appending persisted-only terminal steps", async () => {
+  const agentRunService = createAgentRunService();
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-ordered-completion-steps";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Preserve logical trace order.",
+    runId,
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    label: "Web search",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "web-search-primary",
+    type: "web_search",
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    label: "Concurrent observation",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "concurrent-observation",
+    type: "tool_observation",
+  });
+  await agentRunService.updateRunStep({
+    accessScope,
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.completed,
+    stepId: "concurrent-observation",
+  });
+
+  const completedRun = await agentRunService.completeRun({
+    accessScope,
+    runId,
+    status: AGENT_RUN_STATUSES.completed,
+    steps: [
+      {
+        id: "plan",
+        label: "Plan",
+        status: AGENT_RUN_STEP_STATUSES.completed,
+        type: "plan",
+      },
+      {
+        id: "approval-gate",
+        label: "Approval gate",
+        status: AGENT_RUN_STEP_STATUSES.completed,
+        type: "capability_approval_gate",
+      },
+      {
+        id: "web-search-primary",
+        label: "Web search",
+        status: AGENT_RUN_STEP_STATUSES.completed,
+        summary: "Completed after approval.",
+        type: "web_search",
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    completedRun.steps.map((step) => step.id),
+    [
+      "plan",
+      "approval-gate",
+      "web-search-primary",
+      "concurrent-observation",
+    ]
+  );
+  assert.equal(
+    completedRun.steps.find((step) => step.id === "web-search-primary")
+      .summary,
+    "Completed after approval."
+  );
+});
+
+test("agent run completion cannot regress terminal step lifecycle from a stale snapshot", async () => {
+  const agentRunService = createAgentRunService();
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-stale-terminal-step";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Keep the newest persisted step lifecycle.",
+    runId,
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    detail: {
+      approvalObjectHash: "fresh-approval-hash",
+    },
+    eventType: "step_started",
+    input: {
+      docIds: ["doc-1"],
+      question: "fresh input",
+    },
+    label: "Fresh step",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "step-fresh",
+    type: "web_search",
+  });
+  await agentRunService.updateRunStep({
+    accessScope,
+    patch: {
+      approvalGateId: "gate-fresh",
+      capabilityId: "web.search",
+      capabilityVersion: "1.0.0",
+    },
+    runId,
+    stepId: "step-fresh",
+  });
+  const runWithCompletedStep = await agentRunService.recordRunStep({
+    accessScope,
+    output: {
+      text: "fresh output",
+    },
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.completed,
+    stepId: "step-fresh",
+  });
+  const persistedStep = runWithCompletedStep.steps.find(
+    (step) => step.id === "step-fresh"
+  );
+
+  const completedRun = await agentRunService.completeRun({
+    accessScope,
+    runId,
+    status: AGENT_RUN_STATUSES.completed,
+    steps: [
+      {
+        ...persistedStep,
+        approvalGateId: "gate-stale",
+        capabilityId: "document.read",
+        capabilityVersion: "9.9.9",
+        completedAt: "",
+        detail: {
+          approvalObjectHash: "stale-approval-hash",
+          skillId: "web_search",
+          traceStatus: "completed",
+        },
+        error: {
+          message: "stale error",
+        },
+        input: {
+          query: "stale input",
+        },
+        output: {
+          text: "stale output",
+        },
+        status: AGENT_RUN_STEP_STATUSES.running,
+        type: "document_rag",
+      },
+    ],
+  });
+  const completedStep = completedRun.steps.find(
+    (step) => step.id === "step-fresh"
+  );
+
+  assert.equal(completedStep.status, AGENT_RUN_STEP_STATUSES.completed);
+  assert.deepEqual(completedStep.output, {
+    text: "fresh output",
+  });
+  assert.deepEqual(completedStep.input, {
+    docIds: ["doc-1"],
+    question: "fresh input",
+  });
+  assert.equal(completedStep.error, null);
+  assert.equal(completedStep.completedAt, persistedStep.completedAt);
+  assert.equal(completedStep.type, "web_search");
+  assert.equal(completedStep.approvalGateId, "gate-fresh");
+  assert.equal(completedStep.capabilityId, "web.search");
+  assert.equal(completedStep.capabilityVersion, "1.0.0");
+  assert.deepEqual(completedStep.detail, {
+    approvalObjectHash: "fresh-approval-hash",
+    skillId: "web_search",
+    traceStatus: "completed",
+  });
+
+  const replaySafety = buildStepReplaySafetyAssessment({
+    step: completedStep,
+  });
+
+  assert.equal(replaySafety.canAutoReplay, false);
+  assert.equal(replaySafety.replayRequiresApproval, true);
+});
+
+test("agent run completion is idempotent after the first terminal commit", async () => {
+  const baseStore = createInMemoryAgentRunStore();
+  let lateUpdateStarted;
+  let releaseLateUpdate;
+  const lateUpdateStart = new Promise((resolve) => {
+    lateUpdateStarted = resolve;
+  });
+  const lateUpdateRelease = new Promise((resolve) => {
+    releaseLateUpdate = resolve;
+  });
+  const agentRunStore = {
+    ...baseStore,
+    async update(options = {}) {
+      if (options.patch?.result?.answer === "late conflicting answer") {
+        lateUpdateStarted();
+        await lateUpdateRelease;
+      }
+
+      return baseStore.update(options);
+    },
+  };
+  const agentRunService = createAgentRunService({ agentRunStore });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-idempotent-terminal-completion";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Keep the first terminal result.",
+    runId,
+  });
+
+  const lateCompletion = agentRunService.completeRun({
+    accessScope,
+    result: {
+      answer: "late conflicting answer",
+    },
+    runId,
+    status: AGENT_RUN_STATUSES.completed,
+  });
+  await lateUpdateStart;
+
+  const firstCompletion = await agentRunService.completeRun({
+    accessScope,
+    result: {
+      answer: "first answer",
+    },
+    runId,
+    status: AGENT_RUN_STATUSES.completed,
+  });
+  releaseLateUpdate();
+
+  const duplicateCompletion = await lateCompletion;
+
+  assert.deepEqual(duplicateCompletion.result, firstCompletion.result);
+  assert.equal(
+    duplicateCompletion.events.filter(
+      (event) => event.type === "run_completed"
+    ).length,
+    1
+  );
+});
+
+test("generic run updates cannot mutate or revive terminal runs", async () => {
+  const agentRunStore = createInMemoryAgentRunStore();
+  const agentRunService = createAgentRunService({ agentRunStore });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-terminal-update-fence";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Keep the terminal snapshot immutable.",
+    runId,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    result: {
+      answer: "first answer",
+    },
+    runId,
+  });
+
+  const terminalSnapshot = structuredClone(
+    await agentRunStore.get({
+      accessScope,
+      runId,
+    })
+  );
+  const rejectedUpdates = [
+    {
+      result: {
+        answer: "late answer",
+      },
+      steps: [
+        {
+          id: "late-step",
+          status: AGENT_RUN_STEP_STATUSES.running,
+          type: "web_search",
+        },
+      ],
+    },
+    {
+      result: {
+        answer: "same-status overwrite",
+      },
+      status: AGENT_RUN_STATUSES.completed,
+    },
+  ];
+
+  for (const patch of rejectedUpdates) {
+    await assert.rejects(
+      () =>
+        agentRunService.updateRun({
+          accessScope,
+          patch,
+          runId,
+        }),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.match(error.message, /terminal agent run cannot be updated/i);
+        return true;
+      }
+    );
+  }
+
+  await assert.rejects(
+    () =>
+      agentRunService.updateRun({
+        accessScope,
+        allowRetryTransition: true,
+        patch: {
+          status: AGENT_RUN_STATUSES.running,
+        },
+        runId,
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(
+        error.message,
+        /Invalid agent run status transition: completed -> running/
+      );
+      return true;
+    }
+  );
+
+  assert.deepEqual(
+    await agentRunStore.get({
+      accessScope,
+      runId,
+    }),
+    terminalSnapshot
+  );
+});
+
+test("agent run completion rejects a concurrent active step before sealing the run", async () => {
   const baseStore = createInMemoryAgentRunStore();
   let completeUpdateStarted;
   let releaseCompleteUpdate;
@@ -370,6 +725,15 @@ test("agent run completion retries a concurrent step write and rejects post-term
     goal: "Complete after the last concurrent step write.",
     runId,
   });
+  await agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    label: "Primary step",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "step-primary",
+    type: "document_rag",
+  });
 
   const completing = agentRunService.completeRun({
     accessScope,
@@ -377,6 +741,20 @@ test("agent run completion retries a concurrent step write and rejects post-term
       answer: "Done.",
     },
     runId,
+    steps: [
+      {
+        id: "plan",
+        label: "Plan",
+        status: AGENT_RUN_STEP_STATUSES.completed,
+        type: "plan",
+      },
+      {
+        id: "step-primary",
+        label: "Primary step",
+        status: AGENT_RUN_STEP_STATUSES.completed,
+        type: "document_rag",
+      },
+    ],
   });
 
   await completionUpdateStarted;
@@ -394,12 +772,62 @@ test("agent run completion retries a concurrent step write and rejects post-term
   await recording;
   releaseCompleteUpdate();
 
-  const completedRun = await completing;
+  await assert.rejects(
+    () => completing,
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /concurrent active step/i);
+      assert.match(error.message, /step-concurrent/);
+      return true;
+    }
+  );
+
+  const runningRun = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(runningRun.status, AGENT_RUN_STATUSES.running);
+  assert.deepEqual(
+    runningRun.steps.map((step) => step.id),
+    ["step-primary", "step-concurrent"]
+  );
+  assert.ok(
+    runningRun.steps.every(
+      (step) => step.status === AGENT_RUN_STEP_STATUSES.running
+    )
+  );
+
+  await agentRunService.updateRunStep({
+    accessScope,
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.completed,
+    stepId: "step-primary",
+  });
+  const runWithCompletedSteps = await agentRunService.updateRunStep({
+    accessScope,
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.completed,
+    stepId: "step-concurrent",
+  });
+  const completedRun = await agentRunService.completeRun({
+    accessScope,
+    result: {
+      answer: "Done after concurrent work finished.",
+    },
+    runId,
+    steps: runWithCompletedSteps.steps,
+  });
 
   assert.equal(completedRun.status, AGENT_RUN_STATUSES.completed);
-  assert.deepEqual(
-    completedRun.steps.map((step) => step.id),
-    ["step-concurrent"]
+  assert.ok(
+    completedRun.steps.every((step) =>
+      [
+        AGENT_RUN_STEP_STATUSES.completed,
+        AGENT_RUN_STEP_STATUSES.failed,
+        AGENT_RUN_STEP_STATUSES.skipped,
+      ].includes(step.status)
+    )
   );
 
   await assert.rejects(
@@ -421,6 +849,258 @@ test("agent run completion retries a concurrent step write and rejects post-term
       return true;
     }
   );
+});
+
+test("agent run completion snapshots cannot bypass persisted step transitions", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-completion-step-transition-fence";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Reject stale or impossible completion snapshots.",
+    runId,
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    eventType: "step_started",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId: "step-primary",
+    type: "document_rag",
+  });
+
+  for (const invalidStatus of [
+    AGENT_RUN_STEP_STATUSES.pending,
+    AGENT_RUN_STEP_STATUSES.skipped,
+  ]) {
+    await assert.rejects(
+      () =>
+        agentRunService.completeRun({
+          accessScope,
+          runId,
+          status:
+            invalidStatus === AGENT_RUN_STEP_STATUSES.pending
+              ? AGENT_RUN_STATUSES.waitingForUser
+              : AGENT_RUN_STATUSES.completed,
+          steps: [
+            {
+              id: "step-primary",
+              status: invalidStatus,
+              type: "document_rag",
+            },
+          ],
+        }),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.match(
+          error.message,
+          new RegExp(`running -> ${invalidStatus}`)
+        );
+        return true;
+      }
+    );
+  }
+
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId,
+  });
+
+  assert.equal(run.status, AGENT_RUN_STATUSES.running);
+  assert.equal(run.steps[0].status, AGENT_RUN_STEP_STATUSES.running);
+  assert.deepEqual(
+    run.events.map((event) => event.type),
+    ["run_created", "step_started"]
+  );
+});
+
+test("ordinary clarification waits record a waiting event instead of completion", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-clarification-event-truth";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Wait for a clarification without claiming completion.",
+    runId,
+  });
+  const run = await agentRunService.completeRun({
+    accessScope,
+    result: {
+      clarification: {
+        question: "Which workspace should I use?",
+      },
+    },
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+
+  assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.deepEqual(
+    run.events.map((event) => event.type),
+    ["run_created", "run_waiting_for_user"]
+  );
+  assert.equal(
+    run.events.some((event) => event.type === "run_completed"),
+    false
+  );
+});
+
+test("agent run completion preserves newer same-step fields after a CAS retry", async () => {
+  const baseStore = createInMemoryAgentRunStore();
+  let completeUpdateStarted;
+  let releaseCompleteUpdate;
+  let shouldDelayCompletion = true;
+  const completionUpdateStarted = new Promise((resolve) => {
+    completeUpdateStarted = resolve;
+  });
+  const completionUpdateReleased = new Promise((resolve) => {
+    releaseCompleteUpdate = resolve;
+  });
+  const agentRunStore = {
+    ...baseStore,
+    async update(options = {}) {
+      if (
+        shouldDelayCompletion &&
+        options.patch?.status === AGENT_RUN_STATUSES.completed
+      ) {
+        shouldDelayCompletion = false;
+        completeUpdateStarted();
+        await completionUpdateReleased;
+      }
+
+      return baseStore.update(options);
+    },
+  };
+  const agentRunService = createAgentRunService({ agentRunStore });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const runId = "run-complete-same-step-race";
+  const stepId = "step-primary";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Preserve the newest durable step snapshot.",
+    runId,
+  });
+  await agentRunService.recordRunStep({
+    accessScope,
+    detail: {
+      shared: "initial",
+    },
+    eventType: "step_started",
+    input: {
+      version: "initial",
+    },
+    label: "Initial step",
+    runId,
+    status: AGENT_RUN_STEP_STATUSES.running,
+    stepId,
+    type: "web_search",
+  });
+
+  const completing = agentRunService.completeRun({
+    accessScope,
+    result: {
+      answer: "Done.",
+    },
+    runId,
+    steps: [
+      {
+        approvalGateId: "gate-stale",
+        capabilityId: "document.read",
+        capabilityVersion: "0.0.1",
+        completedAt: "2026-07-31T00:00:03.000Z",
+        detail: {
+          completionOnly: true,
+          shared: "stale",
+        },
+        id: stepId,
+        input: {
+          version: "stale",
+        },
+        label: "Stale completion step",
+        output: {
+          version: "stale",
+        },
+        status: AGENT_RUN_STEP_STATUSES.completed,
+        summary: "stale summary",
+        type: "document_rag",
+        updatedAt: "2026-07-31T00:00:01.000Z",
+      },
+    ],
+  });
+
+  await completionUpdateStarted;
+  await agentRunService.recordRunStep({
+    accessScope,
+    detail: {
+      concurrentOnly: true,
+      shared: "fresh",
+    },
+    eventType: "step_updated",
+    input: {
+      version: "fresh",
+    },
+    label: "Fresh step",
+    output: {
+      version: "fresh",
+    },
+    runId,
+    stepId,
+    type: "web_search",
+  });
+  const freshRun = await agentRunService.updateRunStep({
+    accessScope,
+    patch: {
+      approvalGateId: "gate-fresh",
+      capabilityId: "web.search",
+      capabilityVersion: "1.0.0",
+      summary: "fresh summary",
+    },
+    runId,
+    stepId,
+  });
+  const freshStep = freshRun.steps.find((step) => step.id === stepId);
+
+  releaseCompleteUpdate();
+
+  const completedRun = await completing;
+  const completedStep = completedRun.steps.find((step) => step.id === stepId);
+
+  assert.equal(completedStep.status, AGENT_RUN_STEP_STATUSES.completed);
+  assert.equal(completedStep.type, "web_search");
+  assert.equal(completedStep.label, "Fresh step");
+  assert.equal(completedStep.summary, "fresh summary");
+  assert.equal(completedStep.approvalGateId, "gate-fresh");
+  assert.equal(completedStep.capabilityId, "web.search");
+  assert.equal(completedStep.capabilityVersion, "1.0.0");
+  assert.deepEqual(completedStep.input, {
+    version: "fresh",
+  });
+  assert.deepEqual(completedStep.output, {
+    version: "fresh",
+  });
+  assert.deepEqual(completedStep.detail, {
+    completionOnly: true,
+    concurrentOnly: true,
+    shared: "fresh",
+  });
+  assert.equal(completedStep.completedAt, "2026-07-31T00:00:03.000Z");
+  assert.equal(completedStep.updatedAt, freshStep.updatedAt);
 });
 
 test("agent run service preserves ten distinct steps recorded concurrently", async () => {

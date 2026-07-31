@@ -674,6 +674,7 @@ test("postgres agent run store persists scoped run snapshots and event records",
     runId: "run-1",
     steps: [
       {
+        status: AGENT_RUN_STEP_STATUSES.completed,
         type: "plan",
       },
     ],

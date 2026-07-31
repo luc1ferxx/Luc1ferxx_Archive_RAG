@@ -785,7 +785,6 @@ const trajectoryResponseProjections = {
         "step_started",
         "step_paused",
         "approval_gate_created",
-        "run_completed",
         "approval_gate_approved",
         "step_started",
         "step_completed",
@@ -923,7 +922,6 @@ const trajectoryResponseProjections = {
         "step_started",
         "step_paused",
         "approval_gate_created",
-        "run_completed",
         "approval_gate_denied",
       ],
       pending: {

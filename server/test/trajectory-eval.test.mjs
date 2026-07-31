@@ -4,6 +4,13 @@ import {
   formatTrajectoryReportMarkdown,
   runTrajectoryEvaluation,
 } from "../evaluation/trajectory-eval.js";
+import {
+  EVAL_EVIDENCE_GENERATOR_VERSION,
+  EVAL_EVIDENCE_SCHEMA_VERSION,
+} from "../evaluation/eval-evidence.js";
+import {
+  validateCurrentQualitySuiteReport,
+} from "../evaluation/quality-current-suite-validator.js";
 
 test("trajectory eval passes default deterministic agent trajectories", async () => {
   const report = await runTrajectoryEvaluation({
@@ -81,6 +88,23 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
         caseResult.passed
     )
   );
+
+  const suiteValidation = validateCurrentQualitySuiteReport({
+    report: {
+      ...report,
+      evidence: {
+        generatedAt: report.summary.createdAt,
+        generatorVersion: EVAL_EVIDENCE_GENERATOR_VERSION,
+        runId: report.summary.runId,
+        schemaVersion: EVAL_EVIDENCE_SCHEMA_VERSION,
+      },
+    },
+    specId: "trajectory",
+  });
+
+  assert.deepEqual(suiteValidation.contractErrors, []);
+  assert.deepEqual(suiteValidation.integrityErrors, []);
+  assert.equal(suiteValidation.resultPassed, true);
 });
 
 test("trajectory eval isolates memory configuration from CI runtime", async () => {
