@@ -6,7 +6,7 @@ import {
   ExpandOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
-import { API_DOMAIN } from "../config";
+import { useAuthenticatedDocumentPreview } from "../hooks/useAuthenticatedDocumentPreview";
 import { buildSourceEvidenceObject } from "./evidenceSpine";
 
 const formatTabLabel = (singular, plural, count) =>
@@ -75,6 +75,13 @@ const PdfPreview = ({ source }) => {
     () => (evidence ? getPreviewTabs(evidence) : []),
     [evidence]
   );
+  const hasProtectedPdf = Boolean(evidence?.filePath && !source?.demoPreview);
+  const hasDocumentId = Boolean(String(source?.docId ?? "").trim());
+  const canLoadProtectedPdf = Boolean(hasProtectedPdf && hasDocumentId);
+  const authenticatedPreview = useAuthenticatedDocumentPreview({
+    docId: source?.docId,
+    enabled: canLoadProtectedPdf,
+  });
 
   useEffect(() => {
     setActiveTab("preview");
@@ -95,8 +102,8 @@ const PdfPreview = ({ source }) => {
   }
 
   const pageNumber = displayPage;
-  const previewUrl = evidence.filePath
-    ? `${API_DOMAIN}/${evidence.filePath}#page=${pageNumber}&view=FitH`
+  const previewUrl = authenticatedPreview.objectUrl
+    ? `${authenticatedPreview.objectUrl}#page=${pageNumber}&view=FitH`
     : null;
 
   const updatePage = (delta) => {
@@ -203,12 +210,47 @@ const PdfPreview = ({ source }) => {
       return renderDemoPage();
     }
 
+    if (hasProtectedPdf && !hasDocumentId) {
+      return (
+        <div className="archive-preview-summary-page" role="alert">
+          <div className="archive-preview-summary-mark">{evidence.fileType}</div>
+          <strong>Preview unavailable</strong>
+          <p>The selected source does not identify its document.</p>
+        </div>
+      );
+    }
+
+    if (
+      canLoadProtectedPdf &&
+      (authenticatedPreview.status === "idle" ||
+        authenticatedPreview.status === "loading")
+    ) {
+      return (
+        <div className="archive-preview-summary-page" aria-live="polite">
+          <div className="archive-preview-summary-mark">{evidence.fileType}</div>
+          <strong>Loading secure preview…</strong>
+          <p>Fetching the selected document with your current access scope.</p>
+        </div>
+      );
+    }
+
+    if (canLoadProtectedPdf && authenticatedPreview.status === "error") {
+      return (
+        <div className="archive-preview-summary-page" role="alert">
+          <div className="archive-preview-summary-mark">{evidence.fileType}</div>
+          <strong>Preview unavailable</strong>
+          <p>The document could not be loaded or was not a valid PDF.</p>
+        </div>
+      );
+    }
+
     if (previewUrl) {
       return (
         <iframe
           className="archive-preview-frame"
           src={previewUrl}
           title={`${evidence.fileName} preview`}
+          referrerPolicy="no-referrer"
         />
       );
     }
@@ -369,7 +411,7 @@ const PdfPreview = ({ source }) => {
             className="archive-secondary-button archive-preview-open-button"
             href={previewUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             icon={<DownloadOutlined />}
           >
             Open

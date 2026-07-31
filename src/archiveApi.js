@@ -12,6 +12,19 @@ export const requestDocumentClear = async () => {
   return apiPost("/documents/clear", undefined, { timeout: 0 });
 };
 
+export const fetchDocumentFile = async (docId, requestConfig) => {
+  const normalizedDocId = String(docId ?? "").trim();
+
+  if (!normalizedDocId) {
+    throw new Error("A document ID is required to fetch its file.");
+  }
+
+  return apiDownload(
+    `/documents/${encodeURIComponent(normalizedDocId)}/file`,
+    requestConfig
+  );
+};
+
 export const fetchWorkspaceArtifacts = async ({
   artifactType,
   limit,

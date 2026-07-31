@@ -125,6 +125,23 @@ test("apiDownload passes timeout of 120000 and keeps responseType blob", async (
   );
 });
 
+test("apiDownload treats a null request config as the default config", async () => {
+  axios.get.mockResolvedValue({
+    data: new Blob(["data"]),
+    headers: {},
+  });
+
+  await apiDownload("/artifacts/a1/download", null);
+
+  expect(axios.get).toHaveBeenCalledWith(
+    "http://localhost:5001/artifacts/a1/download",
+    expect.objectContaining({
+      responseType: "blob",
+      timeout: 120000,
+    })
+  );
+});
+
 test("apiPost with timeout 0 preserves the explicit zero", async () => {
   axios.post.mockResolvedValue({ data: {} });
 

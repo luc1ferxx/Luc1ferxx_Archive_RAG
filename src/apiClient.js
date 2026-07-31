@@ -91,13 +91,16 @@ export const apiDelete = async (path) => {
   return response.data;
 };
 
-export const apiDownload = async (path) => {
+export const apiDownload = async (path, requestConfig = {}) => {
+  const normalizedRequestConfig = requestConfig ?? {};
+
   try {
     const response = await axios.get(
       buildUrl(path),
       buildApiRequestConfig({
+        ...normalizedRequestConfig,
         responseType: "blob",
-        timeout: DOWNLOAD_TIMEOUT_MS,
+        timeout: normalizedRequestConfig.timeout ?? DOWNLOAD_TIMEOUT_MS,
       })
     );
 
