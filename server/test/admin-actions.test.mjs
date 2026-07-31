@@ -145,8 +145,8 @@ test("admin quality-refresh action uses the existing quality runner and compacts
   const calls = [];
   const registry = createAdminActionRegistry({
     qualityService: {
-      runSyntheticQualityEvaluation: async ({ corpusPath }) => {
-        calls.push(corpusPath);
+      runSyntheticQualityEvaluation: async ({ corpusId }) => {
+        calls.push(corpusId);
 
         return {
           failedCases: [
@@ -159,7 +159,7 @@ test("admin quality-refresh action uses the existing quality runner and compacts
           summary: {
             corpus: {
               cases: 3,
-              path: corpusPath,
+              path: `evaluation/${corpusId}.json`,
             },
             createdAt: "2026-07-02T00:00:00.000Z",
             metrics: {
@@ -181,12 +181,12 @@ test("admin quality-refresh action uses the existing quality runner and compacts
   const result = await registry.runAction({
     actionId: ADMIN_ACTION_IDS.qualityRefresh,
     payload: {
-      corpusPath: " evaluation/synthetic-corpus-compare-hard.json ",
+      corpusId: " compare-hard ",
     },
   });
   const serialized = JSON.stringify(result);
 
-  assert.deepEqual(calls, ["evaluation/synthetic-corpus-compare-hard.json"]);
+  assert.deepEqual(calls, ["compare-hard"]);
   assert.equal(result.action.id, ADMIN_ACTION_IDS.qualityRefresh);
   assert.equal(result.action.label, "Refresh historical quality metrics");
   assert.equal(result.result.quality.status, "fail");
@@ -201,6 +201,33 @@ test("admin quality-refresh action uses the existing quality runner and compacts
   assert.equal(result.result.quality.metrics.overallPassPercent, 66.7);
   assert.doesNotMatch(serialized, /private answer/);
   assert.doesNotMatch(serialized, /private question/);
+});
+
+test("admin quality-refresh rejects filesystem paths before invoking the runner", async () => {
+  let runCount = 0;
+  const registry = createAdminActionRegistry({
+    qualityService: {
+      runSyntheticQualityEvaluation: async () => {
+        runCount += 1;
+        return {};
+      },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      registry.runAction({
+        actionId: ADMIN_ACTION_IDS.qualityRefresh,
+        payload: {
+          corpusPath: "../../package.json",
+        },
+      }),
+    {
+      expose: true,
+      status: 400,
+    }
+  );
+  assert.equal(runCount, 0);
 });
 
 test("admin actions expose unknown and unavailable actions as controlled errors", async () => {

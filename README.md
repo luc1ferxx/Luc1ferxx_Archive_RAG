@@ -336,8 +336,8 @@ CI 侧，`quality-gate.yml` 把后端测试和 current eval+gate 拆成两个并
 | Capabilities | `GET /capabilities` |
 | arXiv | `/arxiv/search`, `/arxiv/import`, `/documents/*/arxiv/*` |
 | Memory | `/sessions/:sessionId`, `/memory` |
-| Feedback / quality | `/feedback`, `/quality/latest`, `/quality/synthetic`, `/quality/history` |
-| Admin / governance | `/admin/status`, `/admin/actions/:action`, `/admin/audit` |
+| Feedback / quality | `/feedback`, `/quality/latest`, `/quality/history` |
+| Admin / governance | `/admin/status`, `/admin/actions/:action`（含受控的 `quality-refresh`）, `/admin/audit` |
 
 ## 仓库结构
 

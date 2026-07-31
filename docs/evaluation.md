@@ -106,7 +106,7 @@ npm run quality:current -- --require-planner-real
 
 证据边界：`quality:current` 是 fail-closed 的 report contract/lineage validator，不是密码学 attestation。单独运行 CLI 不能证明 runner、真实上传或检索一定发生；`evidence.command` 也是声明字段。PR 的实际执行 provenance 来自同一 GitHub Actions job 中先 producer、后 gate 的固定步骤以及上传的原始 artifacts。当前 lightweight report 不包含完整内部事件签名、上传源文件/合并文件 digest 或不可伪造的 chunk transcript；若威胁模型包含恶意 producer，需要另加签名事件链和内容 digest，不能把 current gate 的 PASS 描述成该级别证明。
 
-旧的 `/quality/latest`、`/quality/synthetic`、`/quality/history` 与 `quality:gate` 继续保留兼容结构和退出码，但响应会附带 `verification.scope=historical`、`currentCommitVerified=false`，CLI/UI/admin 也会明确显示历史或未验证状态。缺少 verification marker 的旧后端响应按未验证处理。
+`/quality/latest`、`/quality/history` 与 `quality:gate` 继续保留历史兼容结构和退出码，但响应会附带 `verification.scope=historical`、`currentCommitVerified=false`，CLI/UI/admin 也会明确显示历史或未验证状态。缺少 verification marker 的旧后端响应按未验证处理。HTTP 刷新统一走受 RBAC 和审计保护的 `POST /admin/actions/quality-refresh`，请求只接受注册的 `corpusId`；自定义文件系统路径仅保留给本地可信 CLI。
 
 ## Release evidence gate
 

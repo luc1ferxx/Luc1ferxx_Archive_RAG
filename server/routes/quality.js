@@ -24,22 +24,6 @@ export const createQualityRouter = (services) => {
     }
   });
 
-  router.post("/quality/synthetic", async (req, res) => {
-    try {
-      return res.json(
-        markHistoricalQualityEvidence(
-          await qualityService.runSyntheticQualityEvaluation({
-            corpusPath: req.body.corpusPath,
-          })
-        )
-      );
-    } catch (error) {
-      return res.status(error.status ?? 500).json({
-        error: serializeError(error, "Failed to run synthetic evaluation."),
-      });
-    }
-  });
-
   router.get("/quality/history", async (req, res) => {
     try {
       return res.json(

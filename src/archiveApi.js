@@ -165,11 +165,15 @@ export const fetchQualityHistory = async () => {
 };
 
 export const requestSyntheticQualityRun = async () => {
-  const payload = {
-    corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
-  };
+  await apiPost(
+    "/admin/actions/quality-refresh",
+    {
+      corpusId: "near-duplicate",
+    },
+    { timeout: 0 }
+  );
 
-  return apiPost("/quality/synthetic", payload, { timeout: 0 });
+  return fetchLatestQualityReport();
 };
 
 export const requestAnswerFeedback = async (payload) => {

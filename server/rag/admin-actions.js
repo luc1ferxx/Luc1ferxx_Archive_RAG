@@ -150,12 +150,29 @@ const createQualityRefreshAction = ({ qualityService }) => ({
   id: ADMIN_ACTION_IDS.qualityRefresh,
   label: "Refresh historical quality metrics",
   async run({ payload }) {
+    if (Object.prototype.hasOwnProperty.call(payload, "corpusPath")) {
+      throw createAdminActionError({
+        message:
+          "corpusPath is not supported. Select a registered corpusId instead.",
+        status: 400,
+      });
+    }
+
+    const corpusId = normalizeText(payload?.corpusId);
+
+    if (!corpusId) {
+      throw createAdminActionError({
+        message: "corpusId is required.",
+        status: 400,
+      });
+    }
+
     const runSyntheticQualityEvaluation = requireActionHandler({
       handler: qualityService?.runSyntheticQualityEvaluation,
       name: "Quality refresh",
     });
     const report = await runSyntheticQualityEvaluation({
-      corpusPath: normalizeText(payload?.corpusPath),
+      corpusId,
     });
 
     return {

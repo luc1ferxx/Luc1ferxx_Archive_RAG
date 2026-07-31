@@ -47,10 +47,9 @@
 | `GET` | `/feedback` | 查询当前用户/工作区最近答案反馈。 |
 | `POST` | `/feedback` | 保存当前回答的反馈类型、备注、答案摘要和引用摘要。 |
 | `GET` | `/quality/latest` | 读取历史质量快照摘要；响应明确标记 `verification.scope=historical`，不能作为当前 commit 证据。 |
-| `POST` | `/quality/synthetic` | 触发供本地观察的 synthetic quality run；结果仍是历史/未验证快照，不替代 `quality:current`。 |
 | `GET` | `/quality/history` | 查询历史 quality run，并返回非 current-commit 的 verification marker。 |
 | `GET` | `/admin/status` | 读取 compact admin snapshot。 |
-| `POST` | `/admin/actions/:action` | 执行受控 admin action：`recover-tasks`、`recovery-scan` 或刷新历史质量 metrics 的 `quality-refresh`。 |
+| `POST` | `/admin/actions/:action` | 执行受控 admin action：`recover-tasks`、`recovery-scan` 或刷新历史质量 metrics 的 `quality-refresh`。`quality-refresh` 需要 `admin.actions.quality_refresh` 权限，只接受注册的 `corpusId`，并以 single-flight、固定 deterministic provider 和有限超时运行。 |
 | `GET` | `/admin/audit` | 读取 compact admin authorization audit events，支持 `limit`、`offset`、`userId`、`workspaceId`、`actionId`、`permissionId` 和 `result` 过滤；不包含 token、payload、prompt 或 raw trace。 |
 
 只有 `/health` 和 `/ready` 是公开健康检查。文档列表、artifacts、上传、chat、memory、quality、feedback、admin status/actions/audit 和 `/documents/:docId/file` 在 `API_AUTH_ENABLED=true` 时都需要 `x-api-key` 或 `Authorization: Bearer <token>`；token 可以来自 `API_AUTH_TOKEN`、`API_AUTH_TOKENS` 或启用 `API_AUTH_JWT_ENABLED=true` 后的 HS256 JWT。admin status/actions/audit 还需要 principal 携带匹配的 `roles` 或 `permissions`。

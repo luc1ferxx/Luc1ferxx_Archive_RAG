@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +6,7 @@ import { defaultHistoryLimit } from "./quality-shared.js";
 import { buildQualityReportFromResultPayload } from "./quality-run-summary.js";
 import { buildQualityHistoryResponse } from "./quality-combined-gate.js";
 import { markHistoricalQualityEvidence } from "./quality-evidence-scope.js";
+import { createSyntheticQualityEvaluationRunner } from "./quality-synthetic-runner.js";
 
 export { markHistoricalQualityEvidence } from "./quality-evidence-scope.js";
 
@@ -192,39 +192,8 @@ export const readQualityHistory = async ({
   );
 };
 
-export const runSyntheticQualityEvaluation = async ({ corpusPath = "" } = {}) => {
-  const args = ["evaluation/run-synthetic-eval.mjs"];
-
-  if (corpusPath) {
-    args.push(corpusPath);
-  }
-
-  await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, {
-      cwd: serverDirectory,
-      env: process.env,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    const stderr = [];
-
-    child.stderr.on("data", (chunk) => {
-      stderr.push(chunk.toString("utf8"));
-    });
-
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      const error = new Error(
-        `Synthetic evaluation failed with exit code ${code}: ${stderr.join("").slice(-1200)}`
-      );
-      error.status = 500;
-      reject(error);
-    });
+export const runSyntheticQualityEvaluation =
+  createSyntheticQualityEvaluationRunner({
+    readLatestReport: readLatestQualityReport,
+    serverDirectory,
   });
-
-  return readLatestQualityReport();
-};

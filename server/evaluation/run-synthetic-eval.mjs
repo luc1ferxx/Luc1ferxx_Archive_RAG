@@ -68,6 +68,7 @@ import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
 import {
   buildDeterministicEvidenceAnswer,
 } from "./deterministic-evidence-answer.js";
+import { validateSyntheticCorpus } from "./synthetic-corpus-validation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -542,7 +543,9 @@ const main = async () => {
   const openAIProviderMode = getOpenAIProviderMode();
   const latestJsonPath = path.join(resultsDirectory, `${latestName}.json`);
   const latestMarkdownPath = path.join(resultsDirectory, `${latestName}.md`);
-  const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  const corpus = validateSyntheticCorpus(
+    JSON.parse(await readFile(corpusPath, "utf8"))
+  );
   const corpusIdentity = getCorpusIdentity({
     corpus,
     corpusPath,

@@ -4270,8 +4270,8 @@ test("admin actions endpoint runs controlled actions behind auth", async () => {
           status: "pass",
           summary: {},
         }),
-        runSyntheticQualityEvaluation: async ({ corpusPath }) => {
-          calls.push(["quality-refresh", corpusPath]);
+        runSyntheticQualityEvaluation: async ({ corpusId }) => {
+          calls.push(["quality-refresh", corpusId]);
 
           return {
             failedCases: [
@@ -4283,7 +4283,7 @@ test("admin actions endpoint runs controlled actions behind auth", async () => {
             summary: {
               corpus: {
                 cases: 1,
-                path: corpusPath,
+                path: `evaluation/${corpusId}.json`,
               },
               metrics: {
                 overallPassPercent: 100,
@@ -4365,7 +4365,26 @@ test("admin actions endpoint runs controlled actions behind auth", async () => {
         `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.qualityRefresh}`,
         {
           body: JSON.stringify({
-            corpusPath: " evaluation/synthetic-corpus-compare-hard.json ",
+            corpusPath: "../../package.json",
+          }),
+          headers,
+          method: "POST",
+        }
+      );
+      body = await response.json();
+
+      assert.equal(response.status, 400);
+      assert.match(body.error, /registered corpusId/);
+      assert.equal(
+        calls.filter(([type]) => type === "quality-refresh").length,
+        0
+      );
+
+      response = await fetch(
+        `${server.baseUrl}/admin/actions/${ADMIN_ACTION_IDS.qualityRefresh}`,
+        {
+          body: JSON.stringify({
+            corpusId: " compare-hard ",
           }),
           headers,
           method: "POST",
@@ -4380,7 +4399,7 @@ test("admin actions endpoint runs controlled actions behind auth", async () => {
       assert.equal(body.result.quality.failedCaseCount, 1);
       assert.deepEqual(
         calls.find(([type]) => type === "quality-refresh"),
-        ["quality-refresh", "evaluation/synthetic-corpus-compare-hard.json"]
+        ["quality-refresh", "compare-hard"]
       );
       assert.doesNotMatch(serialized, /admin action private quality question/);
     } finally {
@@ -5379,8 +5398,7 @@ test("api routes expose consistent error responses for route failures", async ()
       },
       body: JSON.stringify({}),
     });
-    assert.equal(response.status, 502);
-    assert.match((await response.json()).error, /synthetic failed/);
+    assert.equal(response.status, 404);
 
     response = await fetch(`${server.baseUrl}/feedback`);
     assert.equal(response.status, 503);
@@ -5753,8 +5771,8 @@ test("quality latest endpoint returns guardrail report", async () => {
   }
 });
 
-test("quality synthetic endpoint invokes injected runner", async () => {
-  let requestedCorpusPath = null;
+test("legacy quality synthetic endpoint cannot start an evaluation", async () => {
+  let runCount = 0;
   const app = await createApp({
     healthService: okHealthService,
     ragService: {
@@ -5762,9 +5780,8 @@ test("quality synthetic endpoint invokes injected runner", async () => {
       initializeSessionMemory: async () => true,
     },
     qualityService: {
-      runSyntheticQualityEvaluation: async ({ corpusPath }) => {
-        requestedCorpusPath = corpusPath;
-
+      runSyntheticQualityEvaluation: async () => {
+        runCount += 1;
         return {
           status: "ok",
           summary: {
@@ -5788,23 +5805,12 @@ test("quality synthetic endpoint invokes injected runner", async () => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        corpusPath: "evaluation/synthetic-corpus-near-duplicate.json",
+        corpusPath: "../../package.json",
       }),
     });
 
-    assert.equal(response.status, 200);
-
-    const body = await response.json();
-
-    assert.equal(requestedCorpusPath, "evaluation/synthetic-corpus-near-duplicate.json");
-    assert.equal(body.status, "ok");
-    assert.equal(body.authoritativeForCurrentCommit, false);
-    assert.equal(body.evidenceScope, "historical");
-    assert.deepEqual(body.verification, {
-      currentCommitVerified: false,
-      scope: "historical",
-    });
-    assert.equal(body.summary.runId, "run-2");
+    assert.equal(response.status, 404);
+    assert.equal(runCount, 0);
   } finally {
     await server.close();
   }
