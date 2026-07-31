@@ -16,11 +16,20 @@ import {
 import { completeText } from "./openai.js";
 import { normalizeWhitespace } from "./text-utils.js";
 
+const EVIDENCE_CLAIM_SAFETY_RULES = `- Preserve the evidence wording and its modality, quantity scope, and named actors.
+- For a bare numeric value such as "2 days", do not add quantity qualifiers such as "up to", "at most", "maximum", "limit of", "limited to", "only", or "exactly" unless the same qualifier appears in the cited evidence.`;
+
+const COMPARISON_CLAIM_SAFETY_RULES = `${EVIDENCE_CLAIM_SAFETY_RULES}
+- Express every contrast as paired document-specific atomic bullets. Each bullet must name one document and its explicit evidence-backed value or condition with that document's citation.
+- Do not replace those explicit document-value bindings with an abstract relation-only claim such as "approval authority differs".
+- If there is no evidence-backed gap, leave the Gaps or uncertainty section body empty; never write "None identified", "No gaps", or similar filler.`;
+
 const qaPromptV1 = createPromptTemplate(
   `You answer questions using only retrieved document evidence.
 If the evidence is insufficient, say so directly.
 Do not substitute adjacent topics for the asked topic.
 Use long-term memory only for user preferences or stable notes, never as document evidence.
+${EVIDENCE_CLAIM_SAFETY_RULES}
 Keep the answer concise, within five sentences.
 When you rely on evidence, cite source labels such as Source 1.
 
@@ -46,6 +55,7 @@ Put all source labels together at the end of the claim without semicolons betwee
 Only state that there are no material or substantive differences when "High-similarity pairs without explicit conflicts" covers every selected document pair.
 Do not infer that an excerpt omits unspecified topics or speculate that details may exist elsewhere.
 When diagnostics report "Documents without strong evidence: none", leave the Gaps or uncertainty section empty.
+${COMPARISON_CLAIM_SAFETY_RULES}
 Use long-term memory only for user preferences or stable notes, never as document evidence.
 Keep the answer concise and cite source labels such as Source 1 when making evidence-based claims.
 
@@ -80,6 +90,7 @@ Put all source labels together at the end of the claim without semicolons betwee
 Only state that there are no material or substantive differences when "High-similarity pairs without explicit conflicts" covers every selected document pair.
 Do not infer that an excerpt omits unspecified topics or speculate that details may exist elsewhere.
 When diagnostics report "Documents without strong evidence: none", leave the Gaps or uncertainty section empty.
+${COMPARISON_CLAIM_SAFETY_RULES}
 Use long-term memory only for user preferences or stable notes, never as document evidence.
 Keep the answer concise and cite source labels such as Source 1 when making evidence-based claims.
 
@@ -113,6 +124,7 @@ Follow these rules strictly:
 - Use long-term memory only for user preferences or stable notes, never as document evidence or a citation source.
 - Do not substitute related topics, adjacent policies, or likely assumptions for the asked topic.
 - If the evidence is insufficient, say exactly what is missing and do not guess.
+${EVIDENCE_CLAIM_SAFETY_RULES}
 - Every evidence-based sentence must end with citations like [Source 1].
 - Do not cite a source unless it directly supports the sentence.
 - Keep the answer concise, usually within five sentences.`,
@@ -149,6 +161,7 @@ Follow these rules strictly:
 - Only state that there are no material or substantive differences when "High-similarity pairs without explicit conflicts" covers every selected document pair.
 - Do not infer that an excerpt omits unspecified topics or speculate that details may exist elsewhere.
 - When diagnostics report "Documents without strong evidence: none", leave the Gaps or uncertainty section empty.
+${COMPARISON_CLAIM_SAFETY_RULES}
 - Every evidence-based sentence must end with citations like [Source 1].
 - Do not cite a source unless it directly supports the sentence.
 - Keep the answer concise and structured.`,
@@ -197,6 +210,7 @@ Follow these rules strictly:
 - Only state that there are no material or substantive differences when "High-similarity pairs without explicit conflicts" covers every selected document pair.
 - Do not infer that an excerpt omits unspecified topics or speculate that details may exist elsewhere.
 - When diagnostics report "Documents without strong evidence: none", leave the Gaps or uncertainty section empty.
+${COMPARISON_CLAIM_SAFETY_RULES}
 - Every evidence-based sentence must end with citations like [Source 1].
 - Do not cite a source unless it directly supports the sentence.
 - Keep the answer concise and structured.`,

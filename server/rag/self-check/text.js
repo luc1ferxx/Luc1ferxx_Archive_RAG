@@ -4,9 +4,11 @@ import {
   CLAIM_LEAD_LABEL_PATTERN,
   DOTTED_ABBREVIATION_PATTERN,
   FACT_TERM_ALIASES,
+  GROUPED_SOURCE_LABEL_PATTERN,
   NEGATIVE_POLARITY_PATTERN,
   NUMBER_PATTERN,
   NUMERIC_CONSTRAINT_PATTERNS,
+  REPORTIVE_STATED_WRAPPER_PATTERN,
   SOURCE_LABEL_PATTERN,
   SOURCE_LABEL_CAPTURE_PATTERN,
 } from "./patterns.js";
@@ -22,11 +24,19 @@ export const normalizeDottedAbbreviationsForTokens = (value = "") =>
     match.replaceAll(".", "")
   );
 
+export const normalizeReportiveWrappersForTokens = (value = "") =>
+  String(value ?? "").replace(
+    REPORTIVE_STATED_WRAPPER_PATTERN,
+    "$1 to be"
+  );
+
 export const extractFactTerms = (value = "") =>
   uniqueValues(
-    extractMeaningfulTokens(normalizeDottedAbbreviationsForTokens(value)).map(
-      canonicalizeFactTerm
-    )
+    extractMeaningfulTokens(
+      normalizeReportiveWrappersForTokens(
+        normalizeDottedAbbreviationsForTokens(value)
+      )
+    ).map(canonicalizeFactTerm)
   );
 
 export const stripSourceLabels = (value = "") =>
@@ -44,6 +54,13 @@ export const extractSourceRanks = (value = "") =>
       (match) => Number(match[1])
     )
   ).filter((rank) => Number.isInteger(rank) && rank > 0);
+
+export const normalizeGroupedSourceLabels = (value = "") =>
+  String(value ?? "").replace(GROUPED_SOURCE_LABEL_PATTERN, (group) =>
+    [...group.matchAll(/(?:source|来源)\s*(\d+)/gi)]
+      .map((match) => `[Source ${match[1]}]`)
+      .join(" ")
+  );
 
 export const normalizeNumericAnchor = (value = "") => {
   const compact = String(value ?? "")

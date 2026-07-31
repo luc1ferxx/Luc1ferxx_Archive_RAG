@@ -8,6 +8,8 @@ export const CHECKABLE_CITATION_FIELDS = [
 
 export const SOURCE_LABEL_PATTERN = /\[(?:source|来源)\s*\d+\]/gi;
 export const SOURCE_LABEL_CAPTURE_PATTERN = /\[(?:source|来源)\s*(\d+)\]/gi;
+export const GROUPED_SOURCE_LABEL_PATTERN =
+  /\[(?:(?:source|来源)\s*\d+\s*){2,}\]/gi;
 export const NUMBER_PATTERN =
   /(?<![\w.+-])[+-]?\$?\d+(?:,\d{3})*(?:\.\d+)?%?(?![\w%]|\.\d)/g;
 export const NUMERIC_CONSTRAINT_PATTERNS = [
@@ -37,6 +39,8 @@ export const CONTRAST_RELATION_PATTERN =
   /(?:\b(?:differ(?:s|ent)?|while|whereas|versus|vs)\b|而|但是?|然而|相比|相较)/i;
 export const AGREEMENT_RELATION_PATTERN =
   /(?:\b(?:both|all(?:\s+(?:\w+|\d+)){0,2}|each)\s+(?:documents?|polic(?:y|ies)|handbooks?|sources?|agreements?|contracts?)\b|(?:两份|所有|各)(?:文档|政策|手册|来源).*都)/i;
+export const BARE_BOTH_AGREEMENT_PATTERN =
+  /^\s*(?:[-*]\s*)?both\s+(?:allow(?:ed|s|ing)?|permit(?:s|ted|ting)?|prohibit(?:ed|s|ing)?|require(?:d|s|ing)?|include(?:d|s|ing)?|provide(?:d|s|ing)?|limit(?:ed|s|ing)?|state(?:d|s|ing)?|specif(?:y|ies|ied)|use(?:d|s|ing)?|complete(?:d|s|ing)?)\b/i;
 export const EITHER_DOCUMENT_RELATION_PATTERN =
   /\beither\s+(?:documents?|polic(?:y|ies)|handbooks?|sources?|agreements?|contracts?)\b/i;
 export const EXCLUSIVE_RELATION_PATTERN =
@@ -209,7 +213,13 @@ export const FILE_EXTENSION_TERMS = new Set([
 export const CHINESE_MODALITY_SURFACE_PATTERN =
   /允许|可以|禁止|不得|不能|不可|要求|需要|必须|应当|无需|不需要|非必须|可选|自愿|豁免/g;
 export const FACT_TERM_ALIASES = new Map([
+  ["complete", "complete"],
+  ["completed", "complete"],
+  ["completing", "complete"],
+  ["completion", "complete"],
   ["remotely", "remote"],
 ]);
+export const REPORTIVE_STATED_WRAPPER_PATTERN =
+  /\b(is|was)\s+stated\s+to\s+be\b/gi;
 export const CLAIM_LEAD_LABEL_PATTERN =
   /^(?:risk|unsupported|unknown|gap|difference|agreement|parties|key terms?|obligations?|deadlines?|finding)\s*:\s*/i;

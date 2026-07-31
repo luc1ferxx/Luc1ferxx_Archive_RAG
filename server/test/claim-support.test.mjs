@@ -432,6 +432,308 @@ test("document evidence check supports grounded Chinese contrast relations", () 
   assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [1, 2]);
 });
 
+test("document evidence check supports grouped source labels from model output", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "Both documents allow remote work 2 days per week with manager approval. [Source 1 Source 2]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt:
+              "Employees may work remotely 2 days per week with manager approval.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt:
+              "Employees may work remotely 2 days per week with manager approval.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+  assert.deepEqual(check.claimSupport.claims[0].sourceRanks, [1, 2]);
+  assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [1, 2]);
+});
+
+test("document evidence check rejects unknown ranks inside grouped source labels", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha"],
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "Employees may work remotely 2 days per week. [Source 1 Source 999]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            excerpt: "Employees may work remotely 2 days per week.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.deepEqual(check.claimSupport.claims[0].sourceRanks, [1, 999]);
+  assert.deepEqual(check.claimSupport.claims[0].missingSourceRanks, [999]);
+});
+
+test("document evidence check binds standalone Both allow claims to two supporting documents", () => {
+  const evaluateBothAllow = (citations) =>
+    evaluateDocumentEvidence({
+      docIds: [...new Set(citations.map((citation) => citation.docId))],
+      ragResult: {
+        ok: true,
+        value: {
+          text:
+            "Both allow employees to work remotely 2 days per week. [Source 1] [Source 2]" +
+            (citations.length > 2 ? " [Source 3]" : ""),
+          citations,
+        },
+      },
+    });
+
+  const supporting = evaluateBothAllow([
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      excerpt: "Employees may work remotely 2 days per week.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      excerpt: "Employees are allowed to work remotely 2 days per week.",
+    },
+  ]);
+  const oneDocument = evaluateBothAllow([
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      excerpt: "Employees may work remotely 2 days per week.",
+    },
+    {
+      rank: 2,
+      docId: "doc-alpha",
+      excerpt: "Employees are allowed to work remotely 2 days per week.",
+    },
+  ]);
+  const oppositeModality = evaluateBothAllow([
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      excerpt: "Employees may work remotely 2 days per week.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      excerpt: "Employees are prohibited from working remotely 2 days per week.",
+    },
+  ]);
+  const wrongNumber = evaluateBothAllow([
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      excerpt: "Employees may work remotely 2 days per week.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      excerpt: "Employees may work remotely 3 days per week.",
+    },
+  ]);
+  const unrelatedExtraSource = evaluateBothAllow([
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      excerpt: "Employees may work remotely 2 days per week.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      excerpt: "Employees may work remotely 2 days per week.",
+    },
+    {
+      rank: 3,
+      docId: "doc-gamma",
+      excerpt: "The cafeteria opens at 8 AM.",
+    },
+  ]);
+
+  assert.equal(supporting.passed, true);
+  assert.deepEqual(
+    supporting.claimSupport.claims[0].supportedSourceRanks,
+    [1, 2]
+  );
+  assert.equal(oneDocument.passed, false);
+  assert.equal(oppositeModality.passed, false);
+  assert.equal(wrongNumber.passed, false);
+  assert.equal(unrelatedExtraSource.passed, false);
+});
+
+test("document evidence check canonicalizes only controlled completion inflections", () => {
+  for (const evidence of [
+    "Employees must complete the security checklist before remote work.",
+    "The security checklist must be completed before remote work.",
+    "The policy requires completing the security checklist before remote work.",
+    "Security checklist completion is required before remote work.",
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text:
+            "Security checklist completion is required before remote work. [Source 1]",
+          citations: [{ rank: 1, docId: "doc-1", excerpt: evidence }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, true, evidence);
+  }
+
+  for (const evidence of [
+    "Completing the security checklist is optional before remote work.",
+    "The security checklist is incomplete before remote work.",
+    "The policy requires completing security training before remote work.",
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text:
+            "Security checklist completion is required before remote work. [Source 1]",
+          citations: [{ rank: 1, docId: "doc-1", excerpt: evidence }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, evidence);
+  }
+});
+
+test("document evidence check treats only is or was stated to be as a reportive wrapper", () => {
+  const evaluateClaim = ({ claim, evidence }) =>
+    evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: `${claim} [Source 1]`,
+          citations: [{ rank: 1, docId: "doc-1", excerpt: evidence }],
+        },
+      },
+    });
+
+  assert.equal(
+    evaluateClaim({
+      claim: "Manager approval is stated to be required for remote work.",
+      evidence: "Manager approval is required for remote work.",
+    }).passed,
+    true
+  );
+  assert.equal(
+    evaluateClaim({
+      claim: "Manager approval was stated to be required for remote work.",
+      evidence: "Manager approval is required for remote work.",
+    }).passed,
+    true
+  );
+
+  for (const { claim, evidence } of [
+    {
+      claim: "Manager approval is stated to be required for remote work.",
+      evidence: "Director approval is required for remote work.",
+    },
+    {
+      claim: "Manager approval is stated to be required for remote work.",
+      evidence: "Manager approval is required for business travel.",
+    },
+    {
+      claim:
+        "Manager approval is stated to be required for 2 remote days per week.",
+      evidence: "Manager approval is required for 3 remote days per week.",
+    },
+    {
+      claim: "Manager approval is repeatedly stated to be required for remote work.",
+      evidence: "Manager approval is required for remote work.",
+    },
+  ]) {
+    assert.equal(evaluateClaim({ claim, evidence }).passed, false, claim);
+  }
+});
+
+test("document evidence check rejects unbound generic differences and requires explicit distinct values", () => {
+  const evaluateContrast = ({ claim, citations }) =>
+    evaluateDocumentEvidence({
+      docIds: citations.map((citation) => citation.docId),
+      ragResult: {
+        ok: true,
+        value: {
+          text: `${claim} [Source 1] [Source 2]`,
+          citations,
+        },
+      },
+    });
+  const sameApproval = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt: "Remote work requires manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt: "Remote work requires manager approval.",
+    },
+  ];
+  const differentApproval = [
+    sameApproval[0],
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt: "Remote work requires director approval.",
+    },
+  ];
+
+  assert.equal(
+    evaluateContrast({ claim: "Approval differs.", citations: sameApproval })
+      .passed,
+    false
+  );
+  assert.equal(
+    evaluateContrast({
+      claim: "Approval differs.",
+      citations: differentApproval,
+    }).passed,
+    false
+  );
+  assert.equal(
+    evaluateContrast({
+      claim:
+        "handbook-alpha requires manager approval, while handbook-beta requires director approval.",
+      citations: differentApproval,
+    }).passed,
+    true
+  );
+});
+
 test("document evidence check binds native Chinese document aliases", () => {
   const check = evaluateDocumentEvidence({
     docIds: ["doc-alpha", "doc-beta"],
@@ -934,6 +1236,7 @@ test("document evidence check distinguishes obligation and optionality variants"
 test("document evidence check preserves numeric constraint direction", () => {
   const cases = [
     ["Remote work is allowed 2-3 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed up to 2 days. [Source 1]", "Remote work is allowed 2 days."],
     ["Remote work is allowed at least 2 days. [Source 1]", "Remote work is allowed up to 2 days."],
     ["The limit is <2 days. [Source 1]", "The limit is >2 days."],
     ["The tolerance is ±2 units. [Source 1]", "The tolerance is 2 units."],

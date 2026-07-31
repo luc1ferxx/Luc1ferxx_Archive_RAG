@@ -1276,19 +1276,19 @@ test("agent rag chains document comparison into risk review", async () => {
 
       if (/risk review/i.test(question)) {
         return {
-          text: "Risk Review\n- Risk: Remote-day limits differ between the policies. [Source 1] [Source 2]",
+          text: "Risk Review\n- policy-a allows 2 remote days, while policy-b allows 3 remote days. [Source 1] [Source 2]",
           citations: [
             {
               docId: "doc-1",
               fileName: "policy-a.pdf",
               pageNumber: 1,
-              excerpt: "Risk: Remote-day limits differ between the policies. Policy A allows 2 remote days.",
+              excerpt: "Policy A allows 2 remote days.",
             },
             {
               docId: "doc-2",
               fileName: "policy-b.pdf",
               pageNumber: 1,
-              excerpt: "Risk: Remote-day limits differ between the policies. Policy B allows 3 remote days.",
+              excerpt: "Policy B allows 3 remote days.",
             },
           ],
           abstained: false,
@@ -1355,7 +1355,10 @@ test("agent rag chains document comparison into risk review", async () => {
   assert.match(receivedQuestions[1], /risk review/i);
   assert.match(receivedQuestions[1], /Previous skill outputs/i);
   assert.match(receivedQuestions[1], /Policy A allows 2 remote days/i);
-  assert.match(response.body.agentAnswer, /Remote-day limits differ/i);
+  assert.match(
+    response.body.agentAnswer,
+    /policy-a allows 2 remote days, while policy-b allows 3 remote days/i
+  );
 });
 
 test("agent rag chains timeline extraction into document comparison for project changes", async () => {

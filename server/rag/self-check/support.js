@@ -1,5 +1,6 @@
 import { extractMeaningfulTokens, normalizeSearchText } from "../text-utils.js";
 import {
+  BARE_BOTH_AGREEMENT_PATTERN,
   COMPARISON_RELATION_PATTERN,
   COMPARISON_SCAFFOLD_TERMS,
   CONTRAST_RELATION_PATTERN,
@@ -371,32 +372,7 @@ export const evaluateContrastClaimSupport = ({
   );
 
   if (!mentionsComparedDocument) {
-    const documentSupport = documentGroups.map((group) =>
-      evaluateDocumentGroupSupport({
-        claimText,
-        group,
-        documentLabelCitations: scopedCitations,
-        scopedCitations,
-        sourceRanks,
-      })
-    );
-    const documentChecks = documentSupport.map((result) => result.check);
-
-    return {
-      supported: documentChecks.every((check) => check.supported),
-      tokenOverlap: Math.min(
-        ...documentChecks.map((check) => check.tokenOverlap)
-      ),
-      anchors: uniqueValues(
-        documentChecks.flatMap((check) => check.anchors)
-      ),
-      missingAnchors: uniqueValues(
-        documentChecks.flatMap((check) => check.missingAnchors)
-      ),
-      supportedSourceRanks: uniqueValues(
-        documentSupport.flatMap((result) => result.supportedSourceRanks)
-      ),
-    };
+    return buildUnsupportedRelationCheck(claimText);
   }
 
   if (documentGroups.length < 2 || sourceRanks.length === 0) {
@@ -466,7 +442,10 @@ export const evaluateAgreementClaimSupport = ({
   scopedCitations,
   sourceRanks = [],
 } = {}) => {
-  if (!AGREEMENT_RELATION_PATTERN.test(claimText)) {
+  if (
+    !AGREEMENT_RELATION_PATTERN.test(claimText) &&
+    !BARE_BOTH_AGREEMENT_PATTERN.test(claimText)
+  ) {
     return null;
   }
 

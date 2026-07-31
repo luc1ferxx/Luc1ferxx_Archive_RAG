@@ -18,6 +18,7 @@ import {
   extractFactTerms,
   extractNumericConstraintTexts,
   extractSourceRanks,
+  normalizeGroupedSourceLabels,
   normalizeNumericConstraint,
   stripClaimLeadLabel,
   stripSourceLabels,
@@ -118,7 +119,12 @@ export const splitAnswerClaims = (answerText = "", citations = []) =>
     .split(/\n+/g)
     .flatMap((line) => {
       const protectedLine = moveTrailingSourceLabelsBeforePunctuation(
-        protectDottedAbbreviations(line.replace(/\bvs\./gi, `vs${PROTECTED_PERIOD}`))
+        protectDottedAbbreviations(
+          normalizeGroupedSourceLabels(line).replace(
+            /\bvs\./gi,
+            `vs${PROTECTED_PERIOD}`
+          )
+        )
       );
 
       return protectedLine

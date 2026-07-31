@@ -38,6 +38,7 @@ import {
 import {
   prepareComparisonSourceBundle,
   writeComparisonAnswer,
+  writeQaAnswer,
 } from "../rag/answer-writer.js";
 import { analyzeComparison } from "../rag/comparison-engine.js";
 import { alignComparisonEvidence } from "../rag/evidence-aligner.js";
@@ -1613,6 +1614,114 @@ test("comparison prompt requires atomic claims and diagnostics-backed gaps", asy
     } else {
       process.env.RAG_PROMPT_VERSION = originalPromptVersion;
     }
+  }
+});
+
+test("all QA prompts preserve evidence numeric scope", async () => {
+  const prompts = [];
+  const bundle = {
+    citations: [],
+    context:
+      "Employees may work remotely 2 days per week with manager approval. [Source 1]",
+  };
+
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      prompts.push(String(prompt));
+      return "Employees may work remotely 2 days per week. [Source 1]";
+    },
+  });
+
+  for (const promptVersion of ["v1", "v2"]) {
+    await withEnv(
+      {
+        RAG_PROMPT_VERSION: promptVersion,
+      },
+      () =>
+        writeQaAnswer({
+          query: "How many remote days are allowed?",
+          resolvedQuery: "How many remote days are allowed?",
+          bundle,
+        })
+    );
+  }
+
+  assert.equal(prompts.length, 2);
+
+  for (const prompt of prompts) {
+    assert.match(prompt, /preserve the evidence wording/i);
+    assert.match(
+      prompt,
+      /do not add (?:quantity )?qualifiers[\s\S]*up to[\s\S]*at most[\s\S]*maximum[\s\S]*limit of[\s\S]*limited to[\s\S]*only[\s\S]*exactly/i
+    );
+    assert.match(prompt, /unless the same qualifier appears in the cited evidence/i);
+  }
+});
+
+test("all comparison prompts fail closed against unsupported semantic rewrites", async () => {
+  const prompts = [];
+  const analysis = {
+    sharedTerms: ["remote", "work"],
+    evidenceBalance: "balanced",
+    missingDocuments: [],
+    nearDuplicatePairs: [],
+    explicitConflictPairs: [],
+    likelyNoMaterialDifferencePairs: [],
+    shouldShortCircuitNoMaterialDifference: false,
+  };
+  const bundle = {
+    citations: [],
+    context: [
+      "Document: alpha.pdf",
+      "Employees may work remotely 2 days per week with manager approval. [Source 1]",
+      "Document: beta.pdf",
+      "Employees may work remotely 2 days per week with finance approval. [Source 2]",
+    ].join("\n"),
+  };
+
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      prompts.push(String(prompt));
+      return "Summary:\n- Evidence-bound comparison.";
+    },
+  });
+
+  for (const promptVersion of ["v1", "v2"]) {
+    for (const nearDuplicateGuardEnabled of ["true", "false"]) {
+      await withEnv(
+        {
+          RAG_PROMPT_VERSION: promptVersion,
+          RAG_NEAR_DUPLICATE_GUARD_ENABLED: nearDuplicateGuardEnabled,
+        },
+        () =>
+          writeComparisonAnswer({
+            query: "Compare remote-work limits and approvers.",
+            resolvedQuery: "Compare remote-work limits and approvers.",
+            bundle,
+            analysis,
+          })
+      );
+    }
+  }
+
+  assert.equal(prompts.length, 4);
+
+  for (const prompt of prompts) {
+    assert.match(
+      prompt,
+      /do not add (?:quantity )?qualifiers[\s\S]*up to[\s\S]*at most[\s\S]*maximum[\s\S]*limit of[\s\S]*limited to[\s\S]*only[\s\S]*exactly/i
+    );
+    assert.match(prompt, /unless the same qualifier appears in the cited evidence/i);
+    assert.match(prompt, /paired document-specific atomic bullets/i);
+    assert.match(
+      prompt,
+      /Each bullet must name one document and its explicit evidence-backed value or condition/i
+    );
+    assert.match(prompt, /approval authority differs/i);
+    assert.match(prompt, /preserve the evidence wording/i);
+    assert.match(prompt, /never write "None identified"/i);
   }
 });
 
