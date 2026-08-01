@@ -5,11 +5,33 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeChildProcessClose } from "./coverage-process-result.mjs";
+import {
+  isTestCoverageRow,
+  parseCoverageReport,
+  stripStructuredCoverageEvents,
+  summarizeCoverageTotals,
+} from "./coverage-report-parser.mjs";
+import {
+  COVERAGE_GROUPS,
+  findMissingEnforcedCoverage,
+  findMissingGlobalCoverage,
+  GLOBAL_COVERAGE_EXCLUDED_PATHS,
+  GLOBAL_GATE,
+  isGlobalCoverageSourcePath,
+  isReportOnlyCoverageRow,
+  summarizeCoverageGroup,
+} from "./coverage-policy.mjs";
+import { collectTrackedBackendSourcePaths } from "./coverage-source-inventory.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const serverDirectory = path.join(__dirname, "..");
+const repositoryDirectory = path.dirname(serverDirectory);
 const testDirectory = path.join(serverDirectory, "test");
+const coverageReporterPath = path.join(
+  testDirectory,
+  "coverage-event-reporter.mjs"
+);
 
 const parseArgs = () => {
   const args = new Set(process.argv.slice(2));
@@ -34,157 +56,8 @@ const TEST_FILE_EXCLUDES = new Set([
   "run.test.mjs",
 ]);
 
-const COVERAGE_GROUPS = [
-  {
-    id: "rag_agent_core",
-    label: "RAG / AgentRAG core",
-    enforce: true,
-    include: [
-      /^server\/rag\/agent(?:-|\.js)/,
-      /^server\/rag\/comparison-engine\.js$/,
-      /^server\/rag\/evidence-aligner\.js$/,
-      /^server\/rag\/evidence-summary\.js$/,
-      /^server\/rag\/query-decomposer\.js$/,
-      /^server\/rag\/query-router\.js$/,
-      /^server\/rag\/research-brief\.js$/,
-      /^server\/rag\/skills\/registry\.js$/,
-      /^server\/rag\/skills\/custom\//,
-    ],
-    minimum: {
-      line: 90,
-      branch: 75,
-      funcs: 80,
-    },
-    target: {
-      line: 95,
-      branch: 80,
-      funcs: 90,
-    },
-  },
-  {
-    id: "rerank_retrieval",
-    label: "Rerank / retrieval",
-    enforce: true,
-    include: [
-      /^server\/rag\/reranker\.js$/,
-      /^server\/rag\/retrievers\//,
-      /^server\/rag\/vector-store(?:-|\.js)/,
-      /^server\/rag\/sparse-store\.js$/,
-      /^server\/rag\/text-utils\.js$/,
-      /^server\/rag\/chunker\.js$/,
-      /^server\/rag\/citations\.js$/,
-      /^server\/rag\/confidence\.js$/,
-    ],
-    exclude: [
-      /^server\/rag\/vector-store-local\.js$/,
-      /^server\/rag\/vector-store-qdrant\.js$/,
-    ],
-    minimum: {
-      line: 80,
-      branch: 65,
-      funcs: 80,
-    },
-    target: {
-      line: 95,
-      branch: 85,
-      funcs: 95,
-    },
-  },
-  {
-    id: "api_routes",
-    label: "API routes",
-    enforce: true,
-    include: [
-      /^server\/app\.js$/,
-      /^server\/auth\.js$/,
-      /^server\/routes\//,
-    ],
-    minimum: {
-      line: 70,
-      branch: 45,
-      funcs: 70,
-    },
-    target: {
-      line: 85,
-      branch: 70,
-      funcs: 85,
-    },
-  },
-  {
-    id: "infra_external_cli",
-    label: "DB / OpenAI / CLI scripts",
-    enforce: false,
-    include: [
-      /^server\/rag\/openai\.js$/,
-      /^server\/rag\/postgres\.js$/,
-      /^server\/rag\/db-migrations\.js$/,
-      /^server\/rag\/vector-store-local\.js$/,
-      /^server\/rag\/vector-store-qdrant\.js$/,
-      /^server\/rag\/doc-registry\.js$/,
-      /^server\/rag\/long-memory\.js$/,
-      /^server\/rag\/memory\.js$/,
-      /^server\/health\.js$/,
-      /^server\/chat-mcp\.js$/,
-      /^server\/feedback\.js$/,
-      /^server\/upload-session-store\.js$/,
-      /^server\/evaluation\/run-/,
-      /^server\/evaluation\/eval-store-overrides\.js$/,
-    ],
-    minimum: {
-      line: 0,
-      branch: 0,
-      funcs: 0,
-    },
-    target: {
-      line: 70,
-      branch: 70,
-      funcs: 70,
-    },
-  },
-];
-
-const GLOBAL_GATE = {
-  label: "Global backend",
-  enforce: true,
-  minimum: {
-    line: 78,
-    branch: 65,
-    funcs: 80,
-  },
-  target: {
-    line: 85,
-    branch: 75,
-    funcs: 90,
-  },
-};
-
-const round = (value) =>
-  Number.isFinite(value) ? Number(value.toFixed(2)) : null;
-
 const formatPercent = (value) =>
   Number.isFinite(value) ? `${value.toFixed(2)}%` : "N/A";
-
-const average = (values) => {
-  const safeValues = values.filter((value) => Number.isFinite(value));
-
-  if (safeValues.length === 0) {
-    return null;
-  }
-
-  return round(safeValues.reduce((sum, value) => sum + value, 0) / safeValues.length);
-};
-
-const parsePercentColumn = (value) => {
-  const trimmedValue = String(value ?? "").trim();
-
-  if (!trimmedValue) {
-    return null;
-  }
-
-  const parsedValue = Number(trimmedValue);
-
-  return Number.isFinite(parsedValue) ? parsedValue : null;
-};
 
 const collectTestFiles = async () => {
   const entries = await readdir(testDirectory, {
@@ -206,7 +79,15 @@ const runCoverage = async (testFiles) =>
   new Promise((resolve) => {
     const child = spawn(
       process.execPath,
-      ["--test", "--experimental-test-coverage", ...testFiles],
+      [
+        "--test",
+        "--experimental-test-coverage",
+        "--test-reporter=spec",
+        "--test-reporter-destination=stdout",
+        `--test-reporter=${coverageReporterPath}`,
+        "--test-reporter-destination=stdout",
+        ...testFiles,
+      ],
       {
         cwd: serverDirectory,
         env: process.env,
@@ -219,7 +100,6 @@ const runCoverage = async (testFiles) =>
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
       stdout += text;
-      process.stdout.write(text);
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
@@ -227,6 +107,10 @@ const runCoverage = async (testFiles) =>
       process.stderr.write(text);
     });
     child.on("close", (exitCode, signal) => {
+      const visibleStdout = stripStructuredCoverageEvents(stdout);
+      if (visibleStdout) {
+        process.stdout.write(visibleStdout);
+      }
       resolve({
         ...normalizeChildProcessClose({ exitCode, signal }),
         output: `${stdout}\n${stderr}`,
@@ -234,112 +118,13 @@ const runCoverage = async (testFiles) =>
     });
   });
 
-const parseCoverageReport = (output) => {
-  const rows = [];
-  const stack = [];
-  let allFilesSummary = null;
-
-  for (const rawLine of output.split(/\r?\n/g)) {
-    const line = rawLine.replace(/^ℹ\s?/, "");
-
-    if (!line.includes("|")) {
-      continue;
-    }
-
-    const columns = line.split("|");
-
-    if (columns.length < 4) {
-      continue;
-    }
-
-    const rawNameColumn = columns[0];
-    const name = rawNameColumn.trim();
-
-    if (!name || name === "file" || /^-+$/.test(name)) {
-      continue;
-    }
-
-    const linePercent = parsePercentColumn(columns[1]);
-    const branchPercent = parsePercentColumn(columns[2]);
-    const funcsPercent = parsePercentColumn(columns[3]);
-    const indent = rawNameColumn.search(/\S/);
-
-    if (name === "all files") {
-      allFilesSummary = {
-        fileCount: null,
-        line: linePercent,
-        branch: branchPercent,
-        funcs: funcsPercent,
-      };
-      continue;
-    }
-
-    if (!Number.isFinite(linePercent)) {
-      stack[indent] = name;
-      stack.length = indent + 1;
-      continue;
-    }
-
-    const parentPath = stack
-      .slice(0, indent)
-      .filter(Boolean)
-      .join("/");
-    const filePath = [parentPath, name].filter(Boolean).join("/");
-    const normalizedFilePath = filePath.startsWith("server/")
-      ? filePath
-      : `server/${filePath}`;
-
-    rows.push({
-      filePath: normalizedFilePath,
-      line: linePercent,
-      branch: branchPercent,
-      funcs: funcsPercent,
-    });
-  }
-
-  return {
-    rows,
-    allFilesSummary,
-  };
-};
-
-const matchesGroup = (row, group) =>
-  group.include.some((pattern) => pattern.test(row.filePath)) &&
-  !(group.exclude ?? []).some((pattern) => pattern.test(row.filePath));
-
-const summarizeRows = (rows) => ({
-  fileCount: rows.length,
-  line: average(rows.map((row) => row.line)),
-  branch: average(rows.map((row) => row.branch)),
-  funcs: average(rows.map((row) => row.funcs)),
-});
-
-const isReportOnlyRow = (row) =>
-  COVERAGE_GROUPS.some((group) => !group.enforce && matchesGroup(row, group));
-
-const summarizeGlobalCoverage = ({ rows, allFilesSummary, strictTargets }) => {
-  if (!strictTargets && allFilesSummary) {
-    return {
-      ...allFilesSummary,
-      fileCount: rows.length,
-    };
-  }
-
+const summarizeGlobalCoverage = ({ rows, strictTargets }) => {
   const includedRows = strictTargets
-    ? rows.filter((row) => !isReportOnlyRow(row))
+    ? rows.filter((row) => !isReportOnlyCoverageRow(row))
     : rows;
 
-  return summarizeRows(includedRows);
+  return summarizeCoverageTotals(includedRows);
 };
-
-const summarizeGroup = (rows, group) => ({
-  id: group.id,
-  label: group.label,
-  enforce: group.enforce,
-  minimum: group.minimum,
-  target: group.target,
-  ...summarizeRows(rows.filter((row) => matchesGroup(row, group))),
-});
 
 const metricEntries = [
   ["line", "Line"],
@@ -347,14 +132,32 @@ const metricEntries = [
   ["funcs", "Funcs"],
 ];
 
-const collectFailures = (summary, thresholds) =>
-  metricEntries
-    .filter(([key]) => Number(summary[key]) < thresholds[key])
-    .map(([key, label]) => ({
-      metric: label,
-      actual: summary[key],
-      expected: thresholds[key],
-    }));
+const collectFailures = (summary, thresholds) => {
+  const failures = [];
+
+  if (!Number.isInteger(summary.fileCount) || summary.fileCount < 1) {
+    failures.push({
+      metric: "Files",
+      actual: summary.fileCount ?? 0,
+      expected: 1,
+    });
+  }
+
+  failures.push(
+    ...metricEntries
+      .filter(
+        ([key]) =>
+          !Number.isFinite(summary[key]) || summary[key] < thresholds[key]
+      )
+      .map(([key, label]) => ({
+        metric: label,
+        actual: summary[key],
+        expected: thresholds[key],
+      }))
+  );
+
+  return failures;
+};
 
 const renderGateRow = ({ label, summary, thresholds, enforced }) => {
   const failures = collectFailures(summary, thresholds);
@@ -454,14 +257,76 @@ const main = async () => {
     return;
   }
 
-  const { rows, allFilesSummary } = parseCoverageReport(coverageResult.output);
+  const { rows, errors } = parseCoverageReport(coverageResult.output, {
+    serverDirectory,
+  });
+
+  if (errors.length > 0) {
+    console.error("Coverage report parsing failed:");
+    for (const error of errors) {
+      console.error(`- ${error}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  const sourceRows = rows.filter((row) => !isTestCoverageRow(row));
+  const trackedSourcePaths = await collectTrackedBackendSourcePaths({
+    repositoryDirectory,
+  });
+  const trackedSourceSet = new Set(trackedSourcePaths);
+  const staleGlobalExclusions = GLOBAL_COVERAGE_EXCLUDED_PATHS.filter(
+    (filePath) => !trackedSourceSet.has(filePath)
+  );
+  const unexpectedSourcePaths = sourceRows
+    .map((row) => row.filePath)
+    .filter((filePath) => !trackedSourceSet.has(filePath));
+  const missingEnforcedCoverage = findMissingEnforcedCoverage({
+    expectedPaths: trackedSourcePaths,
+    observedRows: sourceRows,
+  });
+  const missingEnforcedPaths = new Set(
+    missingEnforcedCoverage.map((missing) => missing.filePath)
+  );
+  const missingGlobalCoverage = findMissingGlobalCoverage({
+    expectedPaths: trackedSourcePaths,
+    observedRows: sourceRows,
+  }).filter((filePath) => !missingEnforcedPaths.has(filePath));
+
+  if (
+    unexpectedSourcePaths.length > 0 ||
+    staleGlobalExclusions.length > 0 ||
+    missingEnforcedCoverage.length > 0 ||
+    missingGlobalCoverage.length > 0
+  ) {
+    console.error("Coverage source inventory failed:");
+    for (const filePath of unexpectedSourcePaths) {
+      console.error(`- untracked source appeared in coverage: ${filePath}`);
+    }
+    for (const filePath of staleGlobalExclusions) {
+      console.error(`- stale global coverage exclusion: ${filePath}`);
+    }
+    for (const missing of missingEnforcedCoverage) {
+      console.error(
+        `- ${missing.groupLabel} is missing tracked source: ${missing.filePath}`
+      );
+    }
+    for (const filePath of missingGlobalCoverage) {
+      console.error(`- Global backend is missing tracked source: ${filePath}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  const globalCoverageRows = sourceRows.filter((row) =>
+    isGlobalCoverageSourcePath(row.filePath)
+  );
   const globalSummary = summarizeGlobalCoverage({
-    rows,
-    allFilesSummary,
+    rows: globalCoverageRows,
     strictTargets: options.strictTargets,
   });
   const groupSummaries = COVERAGE_GROUPS.map((group) =>
-    summarizeGroup(rows, group)
+    summarizeCoverageGroup(sourceRows, group)
   );
   const enforcedSummaries = [
     {
@@ -498,8 +363,14 @@ const main = async () => {
   if (failures.length > 0) {
     console.error("\nCoverage gate failed:");
     for (const failure of failures) {
+      const actual = failure.metric === "Files"
+        ? String(failure.actual)
+        : formatPercent(failure.actual);
+      const expected = failure.metric === "Files"
+        ? String(failure.expected)
+        : formatPercent(failure.expected);
       console.error(
-        `- ${failure.group} ${failure.metric}: ${formatPercent(failure.actual)} < ${formatPercent(failure.expected)}`
+        `- ${failure.group} ${failure.metric}: ${actual} < ${expected}`
       );
     }
     process.exitCode = 1;

@@ -325,6 +325,13 @@ cd server
 npm run coverage:gate
 ```
 
+门禁从 Node `test:coverage` 结构化事件读取原始 covered/total 计数；Global
+和各分组都在排除测试文件后按计数加权聚合，避免 Node 20 把测试源码计入
+`all files`，也避免小文件与大文件等权造成假通过。
+受控源码清单来自 Git tracked files，任何未出现在报告中的 Global、RAG、检索或
+route 源文件都会 fail closed。确实需要外部进程或服务的入口脚本必须显式列入
+`test/coverage-policy.mjs` 的 exclusion 清单，新增源码默认不能静默逃逸门禁。
+
 目标阈值分组：
 
 | 分组 | 目标 |
