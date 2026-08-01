@@ -17,7 +17,9 @@ import { completeText } from "./openai.js";
 import { normalizeWhitespace } from "./text-utils.js";
 
 const EVIDENCE_CLAIM_SAFETY_RULES = `- Preserve the evidence wording and its modality, quantity scope, and named actors.
-- For a bare numeric value such as "2 days", do not add quantity qualifiers such as "up to", "at most", "maximum", "limit of", "limited to", "only", or "exactly" unless the same qualifier appears in the cited evidence.`;
+- Preserve each numeric occurrence with its own fact subject, measurement, sign, range, and qualifier; never move a value or qualifier to another fact.
+- For a bare numeric value such as "2 days", do not add quantity qualifiers such as "up to", "at most", "maximum", "limit of", "limited to", "only", or "exactly" unless the same qualifier appears in the cited evidence.
+- Do not remove a qualifier either. Keep "at least", "more than", "less than", and "within" semantically distinct from a bare value and from each other unless the cited evidence uses an equivalent form.`;
 
 const COMPARISON_CLAIM_SAFETY_RULES = `${EVIDENCE_CLAIM_SAFETY_RULES}
 - Express every contrast as paired document-specific atomic bullets. Each bullet must name one document and its explicit evidence-backed value or condition with that document's citation.

@@ -11,13 +11,100 @@ export const SOURCE_LABEL_CAPTURE_PATTERN = /\[(?:source|来源)\s*(\d+)\]/gi;
 export const GROUPED_SOURCE_LABEL_PATTERN =
   /\[(?:(?:source|来源)\s*\d+\s*){2,}\]/gi;
 export const NUMBER_PATTERN =
-  /(?<![\w.+-])[+-]?\$?\d+(?:,\d{3})*(?:\.\d+)?%?(?![\w%]|\.\d)/g;
+  /(?<![\w.+-])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?(?![\w%]|\.\d)/g;
 export const NUMERIC_CONSTRAINT_PATTERNS = [
-  /\b(?:at\s+least|minimum(?:\s+of)?|no\s+fewer\s+than|up\s+to|at\s+most|maximum(?:\s+of)?|no\s+more\s+than)\s+\$?\d+(?:,\d{3})*(?:\.\d+)?%?/gi,
-  /(?:<=|>=|<|>)\s*\$?\d+(?:,\d{3})*(?:\.\d+)?%?/g,
-  /±\s*\$?\d+(?:,\d{3})*(?:\.\d+)?%?/g,
-  /(?<![\d-])\d+(?:,\d{3})*(?:\.\d+)?%?\s*(?:-|–|—|to)\s*\d+(?:,\d{3})*(?:\.\d+)?%?(?![\d-])/gi,
+  /\b(?:at\s+least|at\s+or\s+above|greater\s+than\s+or\s+equal\s+to|higher\s+than\s+or\s+equal\s+to|minimum(?:\s+of)?|no\s+fewer\s+than|up\s+to|at\s+most|at\s+or\s+below|less\s+than\s+or\s+equal\s+to|lower\s+than\s+or\s+equal\s+to|maximum(?:\s+of)?|no\s+more\s+than|limit\s+of|limited\s+to|capped\s+at|within|more\s+than|greater\s+than|higher\s+than|over|above|exceeding|less\s+than|fewer\s+than|lower\s+than|under|below)\s+(?:about|approx(?:imately)?(?:\s+equal\s+to)?|around|ca\.?|circa|close\s+to|near|roughly)\s+[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/gi,
+  /\b(?:at\s+least|at\s+or\s+above|greater\s+than\s+or\s+equal\s+to|higher\s+than\s+or\s+equal\s+to|minimum(?:\s+of)?|no\s+fewer\s+than|up\s+to|at\s+most|at\s+or\s+below|less\s+than\s+or\s+equal\s+to|lower\s+than\s+or\s+equal\s+to|maximum(?:\s+of)?|no\s+more\s+than|limit\s+of|limited\s+to|capped\s+at|within|more\s+than|greater\s+than|higher\s+than|over|above|exceeding|less\s+than|fewer\s+than|lower\s+than|under|below)\s+[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/gi,
+  /\b(?:only|just|exactly|equal\s+to)\s+[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/gi,
+  /(?:\b(?:about|approx(?:imately)?(?:\s+equal\s+to)?|around|ca\.?|circa|close\s+to|near|nearly|almost|roughly)\s+|[~≈]\s*)[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/gi,
+  /(?:<=|>=|[<>=≤≥≦≧])\s*[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/g,
+  /±\s*[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/g,
+  /\b(?:except(?:ing)?|excluding|outside(?:\s+of)?)\s+(?:(?:between|from)\s+)?[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s*(?:[-–—]|and|through|to)\s*[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/gi,
+  /\b(?:between|from)\s+[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s+(?:and|through|to)\s+[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/gi,
+  /(?<![\w.+-])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s*(?:[-–—]|to|through)\s*[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?(?![\w%]|\.\d)/gi,
+  /(?<![\w.])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s*(?:\+|(?:[a-z]+\s+){0,3}(?:or|and)\s+(?:above|below|more|fewer|greater|higher|less|lower|longer|over))(?!\d)/gi,
+  /(?<![\w.])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s+(?:[a-z]+\s+){0,3}(?:at\s+least|at\s+most|no\s+(?:fewer|more)\s+than)\b/gi,
+  /(?<![\w.])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s+(?:[a-z]+\s+){0,3}(?:about|approx(?:imately)?|around|circa|nearly|roughly)\b/gi,
+  /(?<![\w.])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s+(?:[a-z]+\s+){1,3}(?:only|just)\b(?=\s*(?:[.!?。！？,;，；]|$))/gi,
+  /(?<![\w.])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s+(?:[a-z]+\s+){0,3}(?:max(?:imum)?|tops?|minimum|min)\b/gi,
+  /(?:最多|至多|不超过|至少|不少于|少于|低于|超过|高于|恰好|仅)(?:允许|可以|为|是)?\s*[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/g,
+  /(?:最多|至多|不超过|至少|不少于|少于|低于|超过|高于)(?:允许|可以|为|是)?\s*(?:约|大约|大概|近)(?:为|是)?\s*[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/g,
+  /(?:约|大约|大概|近)(?:为|是)?\s*[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?/g,
+  /(?<![\w.])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?\s*(?:个?工作日|天|日|周|月|年|小时|分钟|个|人|次|项|元|席|页)?\s*(?:及|或)?(?:以上|以下|以内|左右|内|起)/g,
 ];
+export const NUMERIC_CONSTRAINT_SURFACE_TERMS = new Set([
+  "at",
+  "equal",
+  "exactly",
+  "fewer",
+  "just",
+  "least",
+  "less",
+  "limit",
+  "limited",
+  "maximum",
+  "minimum",
+  "more",
+  "most",
+  "only",
+  "than",
+  "to",
+  "up",
+  "within",
+  "above",
+  "about",
+  "almost",
+  "approx",
+  "approximately",
+  "around",
+  "below",
+  "capped",
+  "ca",
+  "circa",
+  "close",
+  "except",
+  "excepting",
+  "excluding",
+  "exceeding",
+  "greater",
+  "higher",
+  "max",
+  "min",
+  "nearly",
+  "near",
+  "outside",
+  "over",
+  "roughly",
+  "tops",
+  "under",
+  "lower",
+  "longer",
+  "上",
+  "下",
+  "不",
+  "于",
+  "以内",
+  "以",
+  "仅",
+  "低",
+  "及",
+  "右",
+  "大",
+  "多",
+  "最",
+  "少",
+  "左",
+  "恰",
+  "或",
+  "概",
+  "约",
+  "至",
+  "超",
+  "近",
+  "过",
+  "高",
+  "好",
+]);
 export const MONTH_PATTERN =
   /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?\b/gi;
 export const DATE_PATTERN = /\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b/g;
@@ -32,11 +119,11 @@ export const CLAIM_PREDICATE_PATTERN =
   /\b(?:is|are|was|were|be|been|being|may|must|can|cannot|can't|will|shall|should|has|have|had|allow(?:ed|s|ing)?|permit(?:s|ted|ting)?|prohibit(?:ed|s|ing)?|require(?:d|s|ing)?|include(?:d|s|ing)?|provide(?:d|s|ing)?|limit(?:ed|s|ing)?|specif(?:y|ies|ied)|state(?:d|s|ing)?|use(?:d|s|ing)?|refer(?:red|s|ring)?|receive(?:d|s|ing)?|exist(?:ed|s|ing)?|complete(?:d|s|ing)?|differ(?:s|ed|ent)?)\b/i;
 export const SUPPORT_TOKEN_OVERLAP_THRESHOLD = 0.6;
 export const STRUCTURAL_SECTION_HEADING_PATTERN =
-  /^(?:summary|per document|agreements?|differences?|gaps? or uncertainty|摘要|逐文档|共同点|差异|缺口或不确定性)$/i;
+  /^(?:risk review|contract summary|document comparison|common ground|agreements?|differences?|missing terms?|parties|key terms?|obligations?|deadlines?|unknowns?|risks?|gaps?|gaps? or uncertainty|conflicts?(?: or exceptions?)?|exceptions?|evidence limits?|executive summary|key findings|summary|per document|evidence by document|recommended next questions|摘要|逐文档|共同点|差异|缺口或不确定性)$/i;
 export const COMPARISON_RELATION_PATTERN =
   /(?:\b(?:all|both|each|either|differ(?:s|ent)?|while|whereas|only|same|aligns?|conflicts?|versus|vs)\b|(?:两份|所有|各)(?:文档|政策|手册|来源).*都|而|但是?|然而|相比|相较)/i;
 export const CONTRAST_RELATION_PATTERN =
-  /(?:\b(?:differ(?:s|ent)?|while|whereas|versus|vs)\b|而|但是?|然而|相比|相较)/i;
+  /(?:\b(?:but|differ(?:s|ent)?|however|unlike|while|whilst|whereas|yet|versus|vs)\b|而|但是?|然而|相比|相较)/i;
 export const AGREEMENT_RELATION_PATTERN =
   /(?:\b(?:both|all(?:\s+(?:\w+|\d+)){0,2}|each)\s+(?:documents?|polic(?:y|ies)|handbooks?|sources?|agreements?|contracts?)\b|(?:两份|所有|各)(?:文档|政策|手册|来源).*都)/i;
 export const BARE_BOTH_AGREEMENT_PATTERN =
@@ -107,7 +194,7 @@ export const NEGATIVE_POLARITY_TERMS = new Set([
   "without",
 ]);
 export const MODALITY_CLAUSE_SPLIT_PATTERN =
-  /(?<=[.!?。！？])\s+|\n+|[,;，；]\s*|\b(?:and|but|whereas|while)\b/gi;
+  /(?<=[.!?。！？])\s+|\n+|[;；]+\s*|(?:[,，]\s*)?\b(?:but|however|whereas|while|whilst|yet)\b\s*|(?:[,，]\s*)?(?:而|但是?|然而|相比之下|相较之下)\s*/gi;
 export const MODALITY_CLAIM_TERMS = new Set([
   "allow",
   "allowed",

@@ -432,6 +432,36 @@ test("document evidence check supports grounded Chinese contrast relations", () 
   assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [1, 2]);
 });
 
+test("document evidence check treats controlled number words as distinct contrast values", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "handbook-alpha allows two remote days, while handbook-beta allows three remote days. [Source 1] [Source 2]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "The handbook allows two remote days.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "The handbook allows three remote days.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+});
+
 test("document evidence check supports grouped source labels from model output", () => {
   const check = evaluateDocumentEvidence({
     docIds: ["doc-alpha", "doc-beta"],
@@ -732,6 +762,401 @@ test("document evidence check rejects unbound generic differences and requires e
     }).passed,
     true
   );
+});
+
+test("document evidence check rejects identical facts presented as a Differences section", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt: "Remote work requires manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt: "Remote work requires manager approval.",
+    },
+  ];
+  const evaluateSection = ({ alphaApprover, betaApprover }) =>
+    evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: [
+            "Differences:",
+            `- handbook-alpha requires ${alphaApprover} approval. [Source 1]`,
+            `- handbook-beta requires ${betaApprover} approval. [Source 2]`,
+          ].join("\n"),
+          citations:
+            betaApprover === "manager"
+              ? citations
+              : [
+                  citations[0],
+                  {
+                    ...citations[1],
+                    excerpt: "Remote work requires director approval.",
+                  },
+                ],
+        },
+      },
+    });
+
+  const identical = evaluateSection({
+    alphaApprover: "manager",
+    betaApprover: "manager",
+  });
+  const distinct = evaluateSection({
+    alphaApprover: "manager",
+    betaApprover: "director",
+  });
+
+  assert.equal(identical.passed, false);
+  assert.equal(identical.claimSupport.unsupportedClaimCount, 2);
+  assert.equal(distinct.passed, true);
+  assert.equal(distinct.claimSupport.unsupportedClaimCount, 0);
+});
+
+test("document evidence check rejects numeric contrasts across different fact subjects", () => {
+  for (const fixture of [
+    {
+      claims: [
+        "- handbook-alpha allows remote work 2 days. [Source 1]",
+        "- handbook-beta allows safety training 3 days. [Source 2]",
+      ],
+      excerpts: [
+        "The handbook allows remote work 2 days.",
+        "The handbook allows safety training 3 days.",
+      ],
+    },
+    {
+      claims: [
+        "- handbook-alpha sets a remote work budget of $500. [Source 1]",
+        "- handbook-beta sets a safety training budget of $700. [Source 2]",
+      ],
+      excerpts: [
+        "The handbook sets a remote work budget of $500.",
+        "The handbook sets a safety training budget of $700.",
+      ],
+    },
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: ["Differences:", ...fixture.claims].join("\n"),
+          citations: [
+            {
+              rank: 1,
+              docId: "doc-alpha",
+              fileName: "handbook-alpha.pdf",
+              excerpt: fixture.excerpts[0],
+            },
+            {
+              rank: 2,
+              docId: "doc-beta",
+              fileName: "handbook-beta.pdf",
+              excerpt: fixture.excerpts[1],
+            },
+          ],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, fixture.claims.join(" "));
+    assert.equal(check.claimSupport.unsupportedClaimCount, 2);
+  }
+});
+
+test("document evidence check keeps Differences active across document subheadings", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "handbook-alpha.pdf:",
+          "- handbook-alpha requires manager approval. [Source 1]",
+          "handbook-beta.pdf:",
+          "- handbook-beta requires manager approval. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "Remote work requires manager approval.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "Remote work requires manager approval.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 2);
+});
+
+test("document evidence check rejects an unpaired Differences bullet", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Summary:",
+          "- handbook-beta requires manager approval. [Source 2]",
+          "Differences:",
+          "- handbook-alpha requires manager approval. [Source 1]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "Remote work requires manager approval.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "Remote work requires manager approval.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 1);
+});
+
+test("document evidence check validates every adjacent Differences pair", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha requires manager approval. [Source 1]",
+          "- handbook-beta requires manager approval. [Source 2]",
+          "- handbook-alpha requires 2 training days. [Source 1]",
+          "- handbook-beta requires 3 training days. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt:
+              "Remote work requires manager approval. Remote work requires 2 training days.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt:
+              "Remote work requires manager approval. Remote work requires 3 training days.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 4);
+});
+
+test("document evidence check invalidates a Differences section before filtering unsupported bullets", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha requires manager approval. [Source 1]",
+          "- handbook-beta requires manager approval. [Source 2]",
+          "- handbook-alpha provides a satellite stipend. [Source 1]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "Remote work requires manager approval.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "Remote work requires manager approval.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 3);
+});
+
+test("document evidence check accepts multiple independently valid Differences pairs", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha specifies a remote allowance of 2 days. [Source 1]",
+          "- handbook-beta specifies a remote allowance of 3 days. [Source 2]",
+          "- handbook-alpha states an equipment budget of $500. [Source 1]",
+          "- handbook-beta states an equipment budget of $700. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt:
+              "The handbook specifies a remote allowance of 2 days and states an equipment budget of $500.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt:
+              "The handbook specifies a remote allowance of 3 days and states an equipment budget of $700.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+});
+
+test("document evidence check rejects synonymous relation wording as a substantive contrast", () => {
+  for (const fixture of [
+    {
+      answer:
+        "handbook-alpha says the approval authority is manager, while handbook-beta says the approver is manager. [Source 1] [Source 2]",
+      excerpts: [
+        "The approval authority is manager.",
+        "The approver is manager.",
+      ],
+    },
+    {
+      answer:
+        "handbook-alpha uses manager sign-off, while handbook-beta uses manager approval. [Source 1] [Source 2]",
+      excerpts: [
+        "Remote work uses manager sign-off.",
+        "Remote work uses manager approval.",
+      ],
+    },
+    {
+      answer:
+        "handbook-alpha requires HR approval, while handbook-beta requires human resources approval. [Source 1] [Source 2]",
+      excerpts: [
+        "Remote work requires HR approval.",
+        "Remote work requires human resources approval.",
+      ],
+    },
+    {
+      answer:
+        "handbook-alpha requires CEO approval, while handbook-beta requires chief executive officer approval. [Source 1] [Source 2]",
+      excerpts: [
+        "Remote work requires CEO approval.",
+        "Remote work requires chief executive officer approval.",
+      ],
+    },
+    {
+      answer:
+        "handbook-alpha covers U.S. employees, while handbook-beta covers United States employees. [Source 1] [Source 2]",
+      excerpts: [
+        "The policy covers U.S. employees.",
+        "The policy covers United States employees.",
+      ],
+    },
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: fixture.answer,
+          citations: [
+            {
+              rank: 1,
+              docId: "doc-alpha",
+              fileName: "handbook-alpha.pdf",
+              excerpt: fixture.excerpts[0],
+            },
+            {
+              rank: 2,
+              docId: "doc-beta",
+              fileName: "handbook-beta.pdf",
+              excerpt: fixture.excerpts[1],
+            },
+          ],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, fixture.answer);
+    assert.equal(check.claimSupport.unsupportedClaimCount, 1, fixture.answer);
+  }
+});
+
+test("explicit document claims cannot use another document citation to fake coverage", () => {
+  for (const sourceLabels of [
+    "[Source 1 Source 2]",
+    "[Source 1] [Source 2]",
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: `handbook-alpha requires manager approval. ${sourceLabels}`,
+          citations: [
+            {
+              rank: 1,
+              docId: "doc-alpha",
+              fileName: "handbook-alpha.pdf",
+              excerpt: "Remote work requires manager approval.",
+            },
+            {
+              rank: 2,
+              docId: "doc-beta",
+              fileName: "handbook-beta.pdf",
+              excerpt: "Remote work requires manager approval.",
+            },
+          ],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, sourceLabels);
+    assert.equal(check.claimSupport.unsupportedClaimCount, 1, sourceLabels);
+    assert.deepEqual(
+      check.claimSupport.claims[0].verifiedSourceRanks,
+      [1],
+      sourceLabels
+    );
+  }
 });
 
 test("document evidence check binds native Chinese document aliases", () => {
@@ -1237,6 +1662,27 @@ test("document evidence check preserves numeric constraint direction", () => {
   const cases = [
     ["Remote work is allowed 2-3 days. [Source 1]", "Remote work is allowed 2 days."],
     ["Remote work is allowed up to 2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed only 2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed exactly 2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is limited to 2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work has a limit of 2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed =2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed ≤2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed ≥2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed 2+ days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed 2 days only. [Source 1]", "Remote work is allowed 2 days."],
+    [
+      "Remote work is allowed only 2 days per week. [Source 1]",
+      "Remote work is allowed 2 days per week only during summer.",
+    ],
+    [
+      "Remote work is allowed only 2 days. [Source 1]",
+      "Only 2 days after onboarding, remote work is allowed.",
+    ],
+    [
+      "Remote work is limited to 2 days, while training is allowed 3 days. [Source 1]",
+      "Remote work is allowed 2 days, while training is limited to 2 days and allowed 3 days.",
+    ],
     ["Remote work is allowed at least 2 days. [Source 1]", "Remote work is allowed up to 2 days."],
     ["The limit is <2 days. [Source 1]", "The limit is >2 days."],
     ["The tolerance is ±2 units. [Source 1]", "The tolerance is 2 units."],
@@ -1255,6 +1701,117 @@ test("document evidence check preserves numeric constraint direction", () => {
     });
 
     assert.equal(check.claimSupport.unsupportedClaimCount, 1, answer);
+  }
+});
+
+test("numeric binding rejects the wrong clause without dropping a valid inherited subject", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "Remote work is limited to 2 days and training is allowed 3 days. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt:
+              "Remote work is allowed 2 days, while training is limited to 2 days and allowed 3 days.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.claims.length, 2);
+  assert.equal(check.claimSupport.claims[0].supported, false);
+  assert.equal(check.claimSupport.claims[1].supported, true);
+});
+
+test("numeric binding ignores a structural lead label when matching fact context", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "- Key Terms: The agreement renews every 12 months unless either party gives 30 days notice. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt:
+              "The agreement renews every 12 months unless either party gives 30 days notice.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+});
+
+test("comparison quantity qualifiers cannot hide behind comparison scaffold terms", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt: "Employees may work remotely 2 days per week.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt: "Employees may work remotely 2 days per week.",
+    },
+  ];
+
+  for (const answer of [
+    "Both allow employees to work remotely only 2 days per week. [Source 1] [Source 2]",
+    "Only 2 days per week are allowed by both documents. [Source 1] [Source 2]",
+    "Both allow employees to work remotely ≤2 days per week. [Source 1] [Source 2]",
+    "Both allow employees to work remotely ≧2 days per week. [Source 1] [Source 2]",
+    "Both allow employees to work remotely 2+ days per week. [Source 1] [Source 2]",
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations,
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, answer);
+    assert.equal(check.claimSupport.unsupportedClaimCount, 1, answer);
+  }
+});
+
+test("equivalent numeric constraint surfaces normalize to the same direction", () => {
+  for (const [answer, excerpt] of [
+    ["Remote work is allowed only 2 days. [Source 1]", "Remote work is allowed exactly 2 days."],
+    ["Remote work is allowed ≤2 days. [Source 1]", "Remote work is allowed up to 2 days."],
+    ["Remote work is allowed ≧2 days. [Source 1]", "Remote work is allowed at least 2 days."],
+    ["Remote work is allowed 2+ days. [Source 1]", "Remote work is allowed at least 2 days."],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, true, `${answer} <- ${excerpt}`);
   }
 });
 
@@ -2397,10 +2954,7 @@ test("answer finalizer preserves section headings without counting them as evide
   assert.doesNotMatch(result.text, /CFO approval/i);
   assert.equal(result.claimSupport.supportedClaimCount, 1);
   assert.equal(result.claimSupport.unsupportedClaimCount, 1);
-  assert.equal(
-    result.claimSupport.claims.find((claim) => claim.heading)?.text,
-    "Risk Review"
-  );
+  assert.equal(result.claimSupport.claims.some((claim) => claim.heading), false);
 });
 
 test("answer finalizer preserves analysis-backed no-difference conclusions", () => {
@@ -2437,6 +2991,159 @@ test("answer finalizer preserves analysis-backed no-difference conclusions", () 
   assert.equal(result.abstained, false);
   assert.equal(result.claimSupport.unsupportedClaimCount, 0);
   assert.match(result.text, /No evidence-backed material differences/i);
+});
+
+test("answer finalizer retains analysis-backed Differences during a rewrite", () => {
+  const result = finalizeAgentAnswer({
+    answerText: [
+      "Differences:",
+      "- No conflicting values or conditions were detected in the retrieved evidence. [Source 1] [Source 2]",
+      "Gaps or uncertainty:",
+      "- A satellite stipend may be available. [Source 1]",
+    ].join("\n"),
+    comparisonAnalysisSummary: {
+      comparedDocIds: ["doc-alpha", "doc-beta"],
+      explicitConflictPairs: [],
+      shouldShortCircuitNoMaterialDifference: true,
+    },
+    citations: [
+      {
+        rank: 1,
+        docId: "doc-alpha",
+        fileName: "handbook-alpha.pdf",
+        excerpt: "Remote work requires manager approval.",
+      },
+      {
+        rank: 2,
+        docId: "doc-beta",
+        fileName: "handbook-beta.pdf",
+        excerpt: "Remote work requires manager approval.",
+      },
+    ],
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.abstained, false);
+  assert.match(result.text, /^Differences\n/);
+  assert.match(result.text, /No conflicting values or conditions/i);
+  assert.doesNotMatch(result.text, /satellite stipend/i);
+});
+
+test("answer finalizer removes an empty Differences heading with rejected pairs", () => {
+  const result = finalizeAgentAnswer({
+    answerText: [
+      "Summary:",
+      "- Both documents require manager approval. [Source 1] [Source 2]",
+      "Differences:",
+      "- handbook-alpha requires manager approval. [Source 1]",
+      "- handbook-beta requires manager approval. [Source 2]",
+    ].join("\n"),
+    citations: [
+      {
+        rank: 1,
+        docId: "doc-alpha",
+        fileName: "handbook-alpha.pdf",
+        excerpt: "Remote work requires manager approval.",
+      },
+      {
+        rank: 2,
+        docId: "doc-beta",
+        fileName: "handbook-beta.pdf",
+        excerpt: "Remote work requires manager approval.",
+      },
+    ],
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.abstained, false);
+  assert.match(result.text, /^Summary\n/);
+  assert.match(result.text, /Both documents require manager approval/i);
+  assert.doesNotMatch(result.text, /Differences/i);
+  assert.doesNotMatch(result.text, /handbook-alpha requires/i);
+  assert.doesNotMatch(result.text, /handbook-beta requires/i);
+});
+
+test("answer finalizer preserves claim order across retained sections", () => {
+  const result = finalizeAgentAnswer({
+    answerText: [
+      "Summary:",
+      "- Both documents require manager approval. [Source 1] [Source 2]",
+      "Differences:",
+      "- handbook-alpha allows 2 remote days. [Source 1]",
+      "- handbook-beta allows 3 remote days. [Source 2]",
+      "Gaps or uncertainty:",
+      "- A satellite stipend may be available. [Source 1]",
+    ].join("\n"),
+    citations: [
+      {
+        rank: 1,
+        docId: "doc-alpha",
+        fileName: "handbook-alpha.pdf",
+        excerpt:
+          "Remote work requires manager approval and is allowed 2 days per week.",
+      },
+      {
+        rank: 2,
+        docId: "doc-beta",
+        fileName: "handbook-beta.pdf",
+        excerpt:
+          "Remote work requires manager approval and is allowed 3 days per week.",
+      },
+    ],
+  });
+
+  const summaryIndex = result.text.indexOf("Summary");
+  const agreementIndex = result.text.indexOf(
+    "Both documents require manager approval"
+  );
+  const differencesIndex = result.text.indexOf("Differences");
+  const alphaIndex = result.text.indexOf("handbook-alpha allows 2 remote days");
+  const betaIndex = result.text.indexOf("handbook-beta allows 3 remote days");
+
+  assert.equal(result.changed, true);
+  assert.equal(result.abstained, false);
+  assert.ok(summaryIndex >= 0);
+  assert.ok(summaryIndex < agreementIndex);
+  assert.ok(agreementIndex < differencesIndex);
+  assert.ok(differencesIndex < alphaIndex);
+  assert.ok(alphaIndex < betaIndex);
+  assert.doesNotMatch(result.text, /satellite stipend/i);
+});
+
+test("answer finalizer isolates repeated Differences sections by section id", () => {
+  const result = finalizeAgentAnswer({
+    answerText: [
+      "Differences:",
+      "- handbook-alpha allows 2 remote days. [Source 1]",
+      "- handbook-beta allows 3 remote days. [Source 2]",
+      "Differences:",
+      "- handbook-alpha requires manager approval. [Source 1]",
+      "- handbook-beta requires manager approval. [Source 2]",
+    ].join("\n"),
+    citations: [
+      {
+        rank: 1,
+        docId: "doc-alpha",
+        fileName: "handbook-alpha.pdf",
+        excerpt:
+          "Remote work allows 2 days per week and requires manager approval.",
+      },
+      {
+        rank: 2,
+        docId: "doc-beta",
+        fileName: "handbook-beta.pdf",
+        excerpt:
+          "Remote work allows 3 days per week and requires manager approval.",
+      },
+    ],
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.abstained, false);
+  assert.equal(result.text.match(/^Differences$/gm)?.length ?? 0, 1);
+  assert.match(result.text, /handbook-alpha allows 2 remote days/i);
+  assert.match(result.text, /handbook-beta allows 3 remote days/i);
+  assert.doesNotMatch(result.text, /requires manager approval/i);
 });
 
 test("answer finalizer never appends unrelated citations to a supported relationship", () => {
@@ -2527,6 +3234,22 @@ test("answer finalizer preserves contract summary section headings", () => {
   assert.doesNotMatch(result.text, /fifth business day/i);
   assert.equal(result.claimSupport.supportedClaimCount, 4);
   assert.equal(result.claimSupport.unsupportedClaimCount, 1);
+
+  const contractOrder = [
+    "Contract Summary",
+    "Parties",
+    "Acme Corp and Beta LLC",
+    "Key Terms",
+    "renews every 12 months",
+    "Obligations",
+    "monthly support reports",
+    "Deadlines",
+    "Unknowns",
+    "payment deadline is not specified",
+  ].map((value) => result.text.indexOf(value));
+
+  assert.ok(contractOrder.every((index) => index >= 0));
+  assert.deepEqual(contractOrder, [...contractOrder].sort((a, b) => a - b));
 });
 
 test("answer finalizer preserves document comparison section headings", () => {
@@ -2536,7 +3259,8 @@ test("answer finalizer preserves document comparison section headings", () => {
       "Common Ground",
       "- Both policies require manager approval for remote work. [Source 1] [Source 2]",
       "Differences",
-      "- Policy 2024 allows 2 remote days per week, while Policy 2025 allows 3 remote days per week. [Source 1] [Source 2]",
+      "- policy-2024 allows 2 remote days per week. [Source 1]",
+      "- policy-2025 allows 3 remote days per week. [Source 2]",
       "Conflicts",
       "- Unsupported: Policy 2025 provides a 500 dollar remote stipend. [Source 2]",
       "Missing Terms",
@@ -2566,8 +3290,26 @@ test("answer finalizer preserves document comparison section headings", () => {
   assert.match(result.text, /\nConflicts\n/);
   assert.match(result.text, /\nMissing Terms\n/);
   assert.doesNotMatch(result.text, /500 dollar/i);
-  assert.equal(result.claimSupport.supportedClaimCount, 3);
+  assert.equal(result.claimSupport.supportedClaimCount, 4);
   assert.equal(result.claimSupport.unsupportedClaimCount, 1);
+
+  const comparisonOrder = [
+    "Document Comparison",
+    "Common Ground",
+    "Both policies require manager approval",
+    "Differences",
+    "policy-2024 allows 2 remote days",
+    "policy-2025 allows 3 remote days",
+    "Conflicts",
+    "Missing Terms",
+    "No reimbursement term",
+  ].map((value) => result.text.indexOf(value));
+
+  assert.ok(comparisonOrder.every((index) => index >= 0));
+  assert.deepEqual(
+    comparisonOrder,
+    [...comparisonOrder].sort((a, b) => a - b)
+  );
 });
 
 test("answer finalizer abstains when only a preserved heading is supported", () => {
@@ -2647,4 +3389,1373 @@ test("feedback records and feedback eval metadata retain claim support checks", 
 
   const corpus = buildFeedbackCorpusFromRecords([feedback]);
   assert.deepEqual(corpus.cases[0].metadata.feedback.claimChecks, feedback.claimChecks);
+});
+
+test("numeric binding keeps parentheticals and canonical numeric spellings intact", () => {
+  const cases = [
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work, after onboarding, is allowed 2 days."],
+    ["Remote work is allowed up to 2 days. [Source 1]", "Remote work, after onboarding, is allowed up to 2 days."],
+    ["The budget is $1,000. [Source 1]", "The budget is $1,000."],
+    ["The budget is $1,000. [Source 1]", "The budget is $1000."],
+    ["The budget is $1000. [Source 1]", "The budget is $1,000."],
+    ["The threshold is 2.00 units. [Source 1]", "The threshold is 2 units."],
+    ["The threshold is 2 units. [Source 1]", "The threshold is 2.00 units."],
+    ["The threshold is 10.00%. [Source 1]", "The threshold is 10%."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed two days."],
+    ["Remote work is allowed two days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed up to 2 days. [Source 1]", "Remote work is allowed up to two days."],
+  ];
+
+  for (const [answer, excerpt] of cases) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, true, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("numeric binding rejects inherited and predicate-local subject confusion", () => {
+  const cases = [
+    [
+      "Remote work is allowed 2 days. [Source 1]",
+      "Remote work is allowed 3 days, while allowed for training 2 days.",
+    ],
+    [
+      "Remote work is allowed up to 2 days. [Source 1]",
+      "Remote work is allowed up to 3 days, while allowed up to 2 days for training.",
+    ],
+    [
+      "Remote work is allowed 2 days. [Source 1]",
+      "Remote work is allowed 3 days, while permitted 2 days to trainees.",
+    ],
+    [
+      "2 days are allowed for remote work. [Source 1]",
+      "Remote work is allowed 3 days, while 2 days are allowed for training.",
+    ],
+    [
+      "Remote work is limited to 2 days. [Source 1]",
+      "Remote work is discussed, and safety training lasts up to 2 days.",
+    ],
+    [
+      "Remote work is allowed 2 days. [Source 1]",
+      "Remote work is allowed 3 days with 2 days advance notice.",
+    ],
+    [
+      "Remote work is allowed only 2 days. [Source 1]",
+      "Only 2 days after onboarding remote work is allowed 3 days.",
+    ],
+  ];
+
+  for (const [answer, excerpt] of cases) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("numeric binding preserves coordinated subjects without borrowing partial support", () => {
+  const supported = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "Remote work is allowed up to 2 days. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt: "Remote work and training are allowed up to 2 days.",
+          },
+        ],
+      },
+    },
+  });
+  const unsupported = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "Remote work and training are allowed 2 days. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt:
+              "Remote work is allowed 3 days, while training is allowed 2 days.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(supported.passed, true);
+  assert.equal(unsupported.passed, false);
+});
+
+test("numeric constraint direction is symmetric and supports signed values", () => {
+  const rejectedCases = [
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed up to 2 days."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed at least 2 days."],
+    ["Remote work is allowed just 2 days. [Source 1]", "Remote work is allowed 2 days."],
+    ["The threshold is <= -2 units. [Source 1]", "The threshold is >= -2 units."],
+    ["Payment is due 2 days. [Source 1]", "Payment is due within 2 days."],
+  ];
+
+  for (const [answer, excerpt] of rejectedCases) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("Differences accepts one self-contained cited cross-document contrast", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- policy-2024 allows 2 remote days, while policy-2025 allows 3 remote days. [Source 1] [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "policy-2024.pdf",
+            excerpt: "The policy allows 2 remote days.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "policy-2025.pdf",
+            excerpt: "The policy allows 3 remote days.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+});
+
+test("numeric facts fail closed across independent predicates and ambiguous occurrences", () => {
+  const rejectedExcerpts = [
+    "Remote work is discussed and safety training lasts up to 2 days.",
+    "Remote work is allowed 3 days, training is allowed 2 days.",
+    "Remote work is allowed 3 days: training is allowed 2 days.",
+    "Remote work is allowed 3 days / training is allowed 2 days.",
+    "Remote work is allowed 3 days — training is allowed 2 days.",
+    "Remote work is allowed 3 days then training is allowed 2 days.",
+    "Remote work is allowed 3 days plus training is allowed 2 days.",
+    "Remote work is allowed 3 days as well as training is allowed 2 days.",
+    "Remote work is allowed 3 days followed by training is allowed 2 days.",
+    "Remote work is allowed 3 days subject to 2 days advance notice.",
+    "Remote work is allowed 3 days provided employees give 2 days advance notice.",
+    "Remote work is allowed 3 days requiring 2 days advance notice.",
+  ];
+
+  for (const excerpt of rejectedExcerpts) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: "Remote work is allowed 2 days. [Source 1]",
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, excerpt);
+  }
+});
+
+test("numeric facts support compound subjects across separate evidence clauses", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "Remote work and training are allowed 2 days. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt:
+              "Remote work is allowed 2 days, while training is allowed 2 days.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+});
+
+test("numeric fact matching ignores unrelated policy metadata numbers", () => {
+  for (const excerpt of [
+    "Under the 2024 policy, remote work is allowed 2 days.",
+    "Policy version 3 states remote work is allowed 2 days.",
+    "Section 7 allows remote work 2 days.",
+    "Remote work is allowed 2 days under rule 7.",
+    "Remote work is allowed 2 days (see page 7).",
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: "Remote work is allowed 2 days. [Source 1]",
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, true, excerpt);
+  }
+});
+
+test("numeric metadata cannot satisfy a business quantity with the same value", () => {
+  for (const excerpt of [
+    "Section 7 states remote work days are allowed.",
+    "Page 7 states remote work days are allowed.",
+    "Policy version 7 states remote work days are allowed.",
+    "Rule 7 states remote work days are allowed.",
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: "Remote work is allowed 7 days. [Source 1]",
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, excerpt);
+  }
+});
+
+test("numeric facts preserve inherited subjects across predicate adjuncts", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "Training is allowed 3 days during onboarding. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt:
+              "Training is limited to 2 days and allowed 3 days during onboarding.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+});
+
+test("numeric operators fail closed across common English and Chinese surfaces", () => {
+  const cases = [
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed at or below 2 days."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is capped at 2 days."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days max."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed more than 2 days."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed under 2 days."],
+    ["远程办公允许2天。[来源 1]", "远程办公最多允许2天。"],
+    ["远程办公允许2天。[来源 1]", "远程办公至少允许2天。"],
+  ];
+
+  for (const [answer, excerpt] of cases) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("numeric signs ranges and repeated values preserve occurrence identity", () => {
+  const accepted = [
+    ["Remote work is allowed 2-3 days. [Source 1]", "Remote work is allowed 2 to 3 days."],
+    ["The floor is -2, while the ceiling is +2. [Source 1]", "The floor is -2, while the ceiling is +2."],
+    ["The threshold is <= −2 units. [Source 1]", "The threshold is <= -2 units."],
+    ["The threshold is <= $-2 units. [Source 1]", "The threshold is <= -$2 units."],
+  ];
+  const rejected = [
+    ["The floor is +2, while the ceiling is -2. [Source 1]", "The floor is +2, while the ceiling is +2."],
+    ["The threshold is <= −2 units. [Source 1]", "The threshold is >= −2 units."],
+    ["The adjustment is -2 dollars. [Source 1]", "The adjustment is at least -2 dollars."],
+    [
+      "Remote work is allowed 2 days for 3 employees. [Source 1]",
+      "Remote work is allowed 3 days for 2 employees.",
+    ],
+    [
+      "Remote work is allowed up to 2 days for up to 3 employees. [Source 1]",
+      "Remote work is allowed up to 3 days for up to 2 employees.",
+    ],
+    [
+      "Remote work is allowed up to 2 days plus 2 days advance notice. [Source 1]",
+      "Remote work is allowed up to 2 days plus at most 2 days advance notice.",
+    ],
+    ["Employees may work remotely up to 2 days. [Source 1]", "Employees may work remotely within 2 days after approval."],
+  ];
+
+  for (const [answer, excerpt] of accepted) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: { ok: true, value: { text: answer, citations: [{ rank: 1, docId: "doc-1", excerpt }] } },
+    });
+    assert.equal(check.passed, true, `${answer} <- ${excerpt}`);
+  }
+
+  for (const [answer, excerpt] of rejected) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: { ok: true, value: { text: answer, citations: [{ rank: 1, docId: "doc-1", excerpt }] } },
+    });
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("Differences requires the same fact dimension rather than one generic token", () => {
+  for (const [left, right, leftEvidence, rightEvidence] of [
+    [
+      "handbook-alpha allows employees remote work 2 days",
+      "handbook-beta allows employees safety training 3 days",
+      "Employees may perform remote work 2 days.",
+      "Employees may attend safety training 3 days.",
+    ],
+    [
+      "handbook-alpha states an annual travel budget of $500",
+      "handbook-beta states an annual equipment budget of $700",
+      "The annual travel budget is $500.",
+      "The annual equipment budget is $700.",
+    ],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: ["Differences:", `- ${left}. [Source 1]`, `- ${right}. [Source 2]`].join("\n"),
+          citations: [
+            { rank: 1, docId: "doc-alpha", fileName: "handbook-alpha.pdf", excerpt: leftEvidence },
+            { rank: 2, docId: "doc-beta", fileName: "handbook-beta.pdf", excerpt: rightEvidence },
+          ],
+        },
+      },
+    });
+    assert.equal(check.passed, false, `${left} <> ${right}`);
+  }
+});
+
+test("Differences supports contrast wording and topic pairing independent of bullet order", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt: "Remote work is allowed 2 days and the equipment budget is $500.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt: "Remote work is allowed 3 days and the equipment budget is $700.",
+    },
+  ];
+
+  for (const text of [
+    [
+      "Differences:",
+      "- handbook-alpha allows 2 remote days, but handbook-beta allows 3 remote days. [Source 1] [Source 2]",
+    ].join("\n"),
+    [
+      "Differences:",
+      "- handbook-alpha allows 2 remote days. [Source 1]",
+      "- handbook-alpha sets an equipment budget of $500. [Source 1]",
+      "- handbook-beta allows 3 remote days. [Source 2]",
+      "- handbook-beta sets an equipment budget of $700. [Source 2]",
+    ].join("\n"),
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: { ok: true, value: { text, citations } },
+    });
+    assert.equal(check.passed, true, text);
+  }
+});
+
+test("numeric occurrences bind values to generic local fact roles", () => {
+  const rejected = [
+    [
+      "Remote work is allowed up to 2 days. [Source 1]",
+      "Remote work is allowed up to 3 days, while allowed up to 2 days for training.",
+    ],
+    [
+      "Remote work is allowed up to 2 days. [Source 1]",
+      "Remote work is allowed up to 3 days, while allowed up to 2 days for safety training!",
+    ],
+    [
+      "The policy provides 2 licenses to Alpha alongside 3 credits to Beta. [Source 1]",
+      "The policy provides 2 credits to Beta alongside 3 licenses to Alpha.",
+    ],
+    [
+      "The policy provides 2 days of remote work alongside 3 days of training. [Source 1]",
+      "The policy provides 2 days of training alongside 3 days of remote work.",
+    ],
+  ];
+
+  for (const [answer, excerpt] of rejected) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+
+  const reordered = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "The policy provides 2 licenses to Alpha alongside 3 credits to Beta. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt:
+              "The policy provides 3 credits to Beta alongside 2 licenses to Alpha.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(reordered.passed, true);
+});
+
+test("numeric syntax preserves approximate ranges suffix operators and number words", () => {
+  const accepted = [
+    ["Remote work is allowed about 2 days. [Source 1]", "Remote work is allowed approximately 2 days."],
+    ["Remote work is allowed between 2 and 3 days. [Source 1]", "Remote work is allowed 2 through 3 days."],
+    ["Remote work is allowed at least 2 days. [Source 1]", "Remote work is allowed 2 days or more."],
+    ["Remote work is allowed at most 2 days. [Source 1]", "Remote work is allowed 2 days or fewer."],
+    ["Remote work is allowed at least 2 days. [Source 1]", "Remote work is allowed 2 days at least."],
+    ["Remote work is allowed at most 2 days. [Source 1]", "Remote work is allowed 2 days at most."],
+    ["Remote work is allowed up to about 2 days. [Source 1]", "Remote work is allowed up to approximately 2 days."],
+    ["The limit is 15 licenses. [Source 1]", "The limit is fifteen licenses."],
+    ["The limit is 21 licenses. [Source 1]", "The limit is twenty-one licenses."],
+    ["The allocation is 100 units. [Source 1]", "The allocation is one hundred units."],
+    ["The allocation is 0.5 unit. [Source 1]", "The allocation is one-half unit."],
+    ["The floor is -2 units. [Source 1]", "The floor is minus two units."],
+    ["Values of $2-$3 are allowed. [Source 1]", "Values from $2 through $3 are allowed."],
+    ["远程办公允许12天。[来源 1]", "远程办公允许十二天。"],
+    ["远程办公允许至少2天。[来源 1]", "远程办公允许2天以上。"],
+    ["远程办公允许最多2天。[来源 1]", "远程办公允许2天以内。"],
+  ];
+  const rejected = [
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed around 2 days."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days or higher."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days or lower."],
+    ["The allocation is 1 unit. [Source 1]", "The allocation is one hundred units."],
+    ["The allocation is 1 unit. [Source 1]", "The allocation is one-half unit."],
+    ["The floor is 2 units. [Source 1]", "The floor is negative two units."],
+    ["The threshold is exactly 2 units. [Source 1]", "The threshold is approximately equal to 2 units."],
+    ["The threshold is 2 units. [Source 1]", "The threshold is ~2 units."],
+    ["The threshold is 2 units. [Source 1]", "The threshold is higher than 2 units."],
+    ["Values of 2-3 units are allowed. [Source 1]", "Values outside 2-3 units are allowed."],
+    ["远程办公允许2天。[来源 1]", "远程办公约2天。"],
+  ];
+
+  for (const [answer, excerpt] of accepted) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: { text: answer, citations: [{ rank: 1, docId: "doc-1", excerpt }] },
+      },
+    });
+    assert.equal(check.passed, true, `${answer} <- ${excerpt}`);
+  }
+
+  for (const [answer, excerpt] of rejected) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: { text: answer, citations: [{ rank: 1, docId: "doc-1", excerpt }] },
+      },
+    });
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("ISO dates remain date anchors rather than numeric ranges", () => {
+  for (const [answer, excerpt, expected] of [
+    [
+      "Contract signed on 2024-01-10. [Source 1]",
+      "Contract signed on 2024-01-10.",
+      true,
+    ],
+    [
+      "Contract signed on 2024-01-10. [Source 1]",
+      "Contract signed on 2024-10-01.",
+      false,
+    ],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, expected, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("numeric role matching preserves compound and respectively ordering semantics", () => {
+  const compound = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "Remote work, training, and travel are allowed up to 2 days. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt:
+              "Remote work is allowed up to 2 days. Training is allowed up to 2 days. Travel is allowed up to 2 days.",
+          },
+        ],
+      },
+    },
+  });
+  const reversedRespectively = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "Alpha and Beta receive 2 and 3 licenses, respectively. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt: "Beta and Alpha receive 2 and 3 licenses, respectively.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(compound.passed, true);
+  assert.equal(reversedRespectively.passed, false);
+});
+
+test("Differences rejects padded scopes and supports mixed standalone and atomic contrasts", () => {
+  const padded = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha allows permanent salaried domestic office personnel remote work 2 days. [Source 1]",
+          "- handbook-beta allows permanent salaried domestic office personnel safety training 3 days. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt:
+              "Permanent salaried domestic office personnel may perform remote work 2 days.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt:
+              "Permanent salaried domestic office personnel may attend safety training 3 days.",
+          },
+        ],
+      },
+    },
+  });
+  const mixed = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha allows 2 remote days, while handbook-beta allows 3 remote days. [Source 1] [Source 2]",
+          "- handbook-alpha sets an equipment budget of $500. [Source 1]",
+          "- handbook-beta sets an equipment budget of $700. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "Remote work is allowed 2 days and the equipment budget is $500.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "Remote work is allowed 3 days and the equipment budget is $700.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(padded.passed, false);
+  assert.equal(mixed.passed, true);
+});
+
+test("Differences requires compatible measurement dimensions", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha sets a remote work budget of $500. [Source 1]",
+          "- handbook-beta sets a remote work duration of 8 hours. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "The remote work budget is $500.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "The remote work duration is 8 hours.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+});
+
+test("numeric roles preserve actor and object direction", () => {
+  for (const [answer, excerpt] of [
+    [
+      "Alpha provides Beta 2 licenses. [Source 1]",
+      "Alpha provides Beta 2 licenses.",
+    ],
+    [
+      "Alpha receives 2 licenses from Beta. [Source 1]",
+      "Alpha receives 2 licenses from Beta.",
+    ],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, true, `${answer} <- ${excerpt}`);
+  }
+
+  for (const [answer, excerpt] of [
+    [
+      "Alpha provides Beta 2 licenses. [Source 1]",
+      "Beta provides Alpha 2 licenses.",
+    ],
+    [
+      "Alpha receives 2 licenses from Beta. [Source 1]",
+      "Beta receives 2 licenses from Alpha.",
+    ],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("numeric qualifiers fail closed for suffix and nested forms", () => {
+  for (const [answer, excerpt] of [
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days at least."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days at most."],
+    ["Remote work is allowed up to about 2 days. [Source 1]", "Remote work is allowed about 2 days."],
+    ["远程办公允许2天。[来源 1]", "远程办公允许2天以上。"],
+    ["远程办公允许2天。[来源 1]", "远程办公允许2天以内。"],
+    ["远程办公允许2天。[来源 1]", "远程办公允许2天左右。"],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("Differences does not treat one appended topic as the same fact", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha allows employee data access 2 days. [Source 1]",
+          "- handbook-beta allows employee data access training 3 days. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "Employee data access is allowed 2 days.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "Employee data access training is allowed 3 days.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+});
+
+test("nested markdown headings cannot escape a Differences section", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt: "Remote work is allowed 2 days.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt: "Safety training is allowed 3 days.",
+    },
+  ];
+  const answerText = [
+    "## Differences",
+    "### Key Findings",
+    "- handbook-alpha allows remote work 2 days. [Source 1]",
+    "- handbook-beta allows safety training 3 days. [Source 2]",
+  ].join("\n");
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: { ok: true, value: { text: answerText, citations } },
+  });
+  const finalized = finalizeAgentAnswer({ answerText, citations });
+
+  assert.equal(check.passed, false);
+  assert.equal(finalized.changed, true);
+  assert.doesNotMatch(finalized.text, /remote work 2 days/i);
+  assert.doesNotMatch(finalized.text, /safety training 3 days/i);
+});
+
+test("fact direction cannot be reversed outside a predicate whitelist", () => {
+  for (const [answer, excerpt] of [
+    ["Alpha supervises Beta. [Source 1]", "Beta supervises Alpha."],
+    ["Alpha requires Beta approval. [Source 1]", "Beta requires Alpha approval."],
+    ["Alpha reports to Beta. [Source 1]", "Beta reports to Alpha."],
+    ["Alpha acquired Beta. [Source 1]", "Beta acquired Alpha."],
+    ["Alpha allocates Beta 2 licenses. [Source 1]", "Beta allocates Alpha 2 licenses."],
+    ["Alpha lends Beta 2 laptops. [Source 1]", "Beta lends Alpha 2 laptops."],
+    [
+      "Alpha requires Beta approval within 2 days. [Source 1]",
+      "Beta requires Alpha approval within 2 days.",
+    ],
+    ["Alpha is above Beta. [Source 1]", "Beta is above Alpha."],
+    ["Alpha is greater than Beta. [Source 1]", "Beta is greater than Alpha."],
+    ["Alpha > Beta. [Source 1]", "Beta > Alpha."],
+    [
+      "Alpha requires Beta approval within 2 days and 3 signatures. [Source 1]",
+      "Beta requires Alpha approval within 2 days and 3 signatures.",
+    ],
+    ["Alpha supervises Beta. [Source 1]", "Supervises: Beta supervises Alpha."],
+    ["Alpha reports to Beta. [Source 1]", "Reports means that Beta reports to Alpha."],
+    ["Alpha allocates Beta 2 licenses. [Source 1]", "Allocates: Beta allocates Alpha 2 licenses."],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: { text: answer, citations: [{ rank: 1, docId: "doc-1", excerpt }] },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("unconsumed numeric qualifiers fail closed", () => {
+  for (const [answer, excerpt] of [
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days or greater."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days and over."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days or longer."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days approximately."],
+    ["Remote work is allowed more than about 2 days. [Source 1]", "Remote work is allowed about 2 days."],
+    ["Remote work is allowed within about 2 days. [Source 1]", "Remote work is allowed about 2 days."],
+    ["远程办公允许2天。[来源 1]", "远程办公允许2天内。"],
+    ["远程办公允许2天。[来源 1]", "远程办公允许2天起。"],
+    ["远程办公允许至少约2天。[来源 1]", "远程办公允许约2天。"],
+    ["Remote work is allowed up to **about 2** days. [Source 1]", "Remote work is allowed about 2 days."],
+    ["Remote work is allowed more than (about 2) days. [Source 1]", "Remote work is allowed about 2 days."],
+    ["Remote work is allowed 2 days. [Source 1]", "Remote work is allowed 2 days (**at least**)."],
+    ["远程办公允许至少（约2天）。[来源 1]", "远程办公允许约2天。"],
+    ["远程办公允许2天。[来源 1]", "远程办公允许2天（以上）。"],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: { text: answer, citations: [{ rank: 1, docId: "doc-1", excerpt }] },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("formatted and nested labels remain structural inside Differences", () => {
+  const variants = [
+    "**Differences**",
+    "__Differences__",
+    "### **Differences**",
+    "Differences —",
+  ];
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt: "Differences are documented. Remote work is allowed 2 days.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt: "Safety training is allowed 3 days.",
+    },
+  ];
+
+  for (const heading of variants) {
+    const answerText = [
+      `${heading} [Source 1]`,
+      "- handbook-alpha allows remote work 2 days. [Source 1]",
+      "- handbook-beta allows safety training 3 days. [Source 2]",
+    ].join("\n");
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: { ok: true, value: { text: answerText, citations } },
+    });
+
+    assert.equal(check.passed, false, heading);
+  }
+
+  for (const nestedLabel of ["- Key Findings:", "* Key Findings:"]) {
+    const answerText = [
+      "## Differences",
+      nestedLabel,
+      "- handbook-alpha allows remote work 2 days. [Source 1]",
+      "- handbook-beta allows safety training 3 days. [Source 2]",
+    ].join("\n");
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: { ok: true, value: { text: answerText, citations } },
+    });
+
+    assert.equal(check.passed, false, nestedLabel);
+  }
+});
+
+test("numeric facts bind currency and local measurement", () => {
+  const supported = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "The equipment budget is $500. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt: "The equipment budget is 500 dollars.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(supported.passed, true);
+
+  for (const [answer, excerpt] of [
+    ["The travel budget is €500. [Source 1]", "The travel budget is $500."],
+    ["The travel budget is £500. [Source 1]", "The travel budget is ¥500."],
+    ["The equipment budget is $500. [Source 1]", "The equipment budget covers 500 vendors."],
+    ["Alpha pays Beta $500. [Source 1]", "Alpha pays Beta invoices to 500 vendors."],
+    ["Remote work is allowed 1 day. [Source 1]", "A remote work day request is allowed 1 at a time."],
+    ["The equipment budget is $500. [Source 1]", "The equipment budget covers 500 vendors in USD markets."],
+    ["The equipment budget is $500. [Source 1]", "The equipment budget covers 500 USD vendors."],
+    ["The travel budget is € 500. [Source 1]", "The travel budget is $ 500."],
+    ["The travel budget is € **500**. [Source 1]", "The travel budget is £ **500**."],
+    ["Remote work is allowed 1 day. [Source 1]", "A remote work request is allowed for 1 employee per day."],
+    ["The rate is 5 percent. [Source 1]", "The rate covers 5 requests per percent category."],
+    ["Payment is due within 2 days. [Source 1]", "Payment is due within 2 business days."],
+    ["Payment is due within 2 days. [Source 1]", "Payment is due within 2 working days."],
+    ["远程办公允许7天。[来源 1]", "第7章说明远程办公天数允许。"],
+    ["远程办公允许7天。[来源 1]", "在第7天，远程办公申请被允许。"],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: { text: answer, citations: [{ rank: 1, docId: "doc-1", excerpt }] },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("Differences does not report equivalent converted quantities or reordered roles", () => {
+  for (const [alphaClaim, betaClaim, alphaEvidence, betaEvidence] of [
+    [
+      "handbook-alpha allows remote work 2 days.",
+      "handbook-beta allows remote work 48 hours.",
+      "Remote work is allowed 2 days.",
+      "Remote work is allowed 48 hours.",
+    ],
+    [
+      "handbook-alpha requires retention for 1 year.",
+      "handbook-beta requires retention for 12 months.",
+      "Retention is required for 1 year.",
+      "Retention is required for 12 months.",
+    ],
+    [
+      "handbook-alpha requires training for 1 week.",
+      "handbook-beta requires training for 7 days.",
+      "Training is required for 1 week.",
+      "Training is required for 7 days.",
+    ],
+    [
+      "handbook-alpha requires manager approval within 2 days for employee travel.",
+      "handbook-beta requires employee approval within 3 days for manager travel.",
+      "Manager approval is required within 2 days for employee travel.",
+      "Employee approval is required within 3 days for manager travel.",
+    ],
+  ]) {
+    const answerText = [
+      "Differences:",
+      `- ${alphaClaim} [Source 1]`,
+      `- ${betaClaim} [Source 2]`,
+    ].join("\n");
+    const citations = [
+      { rank: 1, docId: "doc-alpha", fileName: "handbook-alpha.pdf", excerpt: alphaEvidence },
+      { rank: 2, docId: "doc-beta", fileName: "handbook-beta.pdf", excerpt: betaEvidence },
+    ];
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: { ok: true, value: { text: answerText, citations } },
+    });
+
+    assert.equal(check.passed, false, `${alphaClaim} <> ${betaClaim}`);
+  }
+
+  for (const [alphaClaim, betaClaim, alphaEvidence, betaEvidence] of [
+    [
+      "handbook-alpha allows remote work 2 days.",
+      "handbook-beta allows remote work 2 hours.",
+      "Remote work is allowed 2 days.",
+      "Remote work is allowed 2 hours.",
+    ],
+    [
+      "handbook-alpha requires retention for 1 year.",
+      "handbook-beta requires retention for 1 month.",
+      "Retention is required for 1 year.",
+      "Retention is required for 1 month.",
+    ],
+  ]) {
+    const answerText = [
+      "Differences:",
+      `- ${alphaClaim} [Source 1]`,
+      `- ${betaClaim} [Source 2]`,
+    ].join("\n");
+    const citations = [
+      { rank: 1, docId: "doc-alpha", fileName: "handbook-alpha.pdf", excerpt: alphaEvidence },
+      { rank: 2, docId: "doc-beta", fileName: "handbook-beta.pdf", excerpt: betaEvidence },
+    ];
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-alpha", "doc-beta"],
+      ragResult: { ok: true, value: { text: answerText, citations } },
+    });
+
+    assert.equal(check.passed, true, `${alphaClaim} <> ${betaClaim}`);
+  }
+});
+
+test("repeated numeric anchors are checked once per semantic key", () => {
+  const repeatedClaim = Array.from({ length: 150 }, () => "1").join(" and ");
+  const repeatedSupport = `${Array.from({ length: 149 }, () => "1").join(" and ")} and 2`;
+  const startedAt = performance.now();
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: `The sequence is ${repeatedClaim}. [Source 1]`,
+        citations: [{ rank: 1, docId: "doc-1", excerpt: `The sequence is ${repeatedSupport}.` }],
+      },
+    },
+  });
+  const durationMs = performance.now() - startedAt;
+
+  assert.equal(check.passed, false);
+  assert.ok(durationMs < 1_000, `numeric check took ${durationMs.toFixed(1)}ms`);
+
+  const repeatedConstraints = Array.from(
+    { length: 250 },
+    () => "at least 1 item"
+  ).join(" and ");
+  const constraintStartedAt = performance.now();
+  const constraintCheck = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: `The sequence contains ${repeatedConstraints}. [Source 1]`,
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt: `The sequence contains ${repeatedConstraints}.`,
+          },
+        ],
+      },
+    },
+  });
+  const constraintDurationMs = performance.now() - constraintStartedAt;
+
+  assert.equal(constraintCheck.passed, false);
+  assert.ok(
+    constraintDurationMs < 1_000,
+    `constraint check took ${constraintDurationMs.toFixed(1)}ms`
+  );
+});
+
+test("unicode digits and curly contractions preserve semantic checks", () => {
+  for (const [answer, excerpt] of [
+    ["Remote work is allowed ２ days. [Source 1]", "Remote work is allowed 3 days."],
+    ["Remote work is allowed １２ days. [Source 1]", "Remote work is allowed 2 days."],
+    ["Remote work is allowed ٢ days. [Source 1]", "Remote work is allowed 3 days."],
+    ["预算为５００元。[来源 1]", "预算为600元。"],
+    ["The rate is ５０%. [Source 1]", "The rate is 60%."],
+    ["Remote work is allowed. [Source 1]", "Remote work isn’t allowed."],
+    ["Remote work is required. [Source 1]", "Remote work isn’t required."],
+    ["Travel is allowed. [Source 1]", "Travel can’t be allowed."],
+    ["Approval is required. [Source 1]", "Approval mustn’t be required."],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: { text: answer, citations: [{ rank: 1, docId: "doc-1", excerpt }] },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("modality support cannot cross independent evidence clauses", () => {
+  for (const [answer, excerpt] of [
+    [
+      "Remote work is not allowed. [Source 1]",
+      "Remote work is allowed and travel is not allowed.",
+    ],
+    [
+      "Remote work is required. [Source 1]",
+      "Remote work is optional and travel is required.",
+    ],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, false, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("copular relationship frames preserve actor and object direction", () => {
+  for (const [answer, excerpt, expected] of [
+    ["Alice is Bob's manager. [Source 1]", "Alice is Bob's manager.", true],
+    ["Alice is Bob's manager. [Source 1]", "Bob is Alice's manager.", false],
+    ["Alpha is the parent of Beta. [Source 1]", "Alpha is the parent of Beta.", true],
+    ["Alpha is the parent of Beta. [Source 1]", "Beta is the parent of Alpha.", false],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, expected, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("Differences supports grounded open-vocabulary value slots", () => {
+  const accepted = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha states the governing law is California. [Source 1]",
+          "- handbook-beta states the governing law is New York. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "The governing law is California.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "The governing law is New York.",
+          },
+        ],
+      },
+    },
+  });
+  const rejected = evaluateDocumentEvidence({
+    docIds: ["doc-alpha", "doc-beta"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha states the governing law is California. [Source 1]",
+          "- handbook-beta states the office location is New York. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-alpha",
+            fileName: "handbook-alpha.pdf",
+            excerpt: "The governing law is California.",
+          },
+          {
+            rank: 2,
+            docId: "doc-beta",
+            fileName: "handbook-beta.pdf",
+            excerpt: "The office location is New York.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(accepted.passed, true);
+  assert.equal(rejected.passed, false);
+});
+
+test("date anchors fail closed when evidence contains a transition", () => {
+  for (const [answer, excerpt, expected] of [
+    ["The deadline is 2025-01-02. [Source 1]", "The deadline is 2025-01-02.", true],
+    [
+      "The deadline is 2025-01-02. [Source 1]",
+      "The deadline was moved from 2025-01-02 to 2025-02-01.",
+      false,
+    ],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, expected, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("mixed-currency ranges fail closed", () => {
+  for (const [answer, excerpt, expected] of [
+    ["Values of $2-$3 are allowed. [Source 1]", "Values of $2-$3 are allowed.", true],
+    ["Values of $2-$3 are allowed. [Source 1]", "Values of $2-€3 are allowed.", false],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, expected, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("numeric parent scopes cannot lend semantics across independent clauses", () => {
+  for (const [answer, excerpt, expected] of [
+    [
+      "Remote work is allowed and the handbook contains 2 appendices. [Source 1]",
+      "Remote work is prohibited, the handbook contains 2 appendices, and travel is allowed.",
+      false,
+    ],
+    [
+      "Remote work is not active for 2 days. [Source 1]",
+      "Remote work is active for 2 days, and travel is not active.",
+      false,
+    ],
+    [
+      "Remote work is not active for 2 days. [Source 1]",
+      "Remote work is not active for 2 days.",
+      true,
+    ],
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: ["doc-1"],
+      ragResult: {
+        ok: true,
+        value: {
+          text: answer,
+          citations: [{ rank: 1, docId: "doc-1", excerpt }],
+        },
+      },
+    });
+
+    assert.equal(check.passed, expected, `${answer} <- ${excerpt}`);
+  }
+});
+
+test("quoted refutations are mentions rather than supporting assertions", () => {
+  const check = evaluateDocumentEvidence({
+    docIds: ["doc-1"],
+    ragResult: {
+      ok: true,
+      value: {
+        text: "Remote work is allowed. [Source 1]",
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-1",
+            excerpt:
+              "The statement \u201cRemote work is allowed\u201d is false, and travel is allowed.",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
 });

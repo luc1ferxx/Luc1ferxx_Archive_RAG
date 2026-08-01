@@ -1,10 +1,11 @@
 import { evaluateClaimSupport } from "./agent-self-check.js";
 import { filterCitationsToSourceRanks } from "./source-labels.js";
+import { isStructuralSectionHeading } from "./self-check/attribution.js";
+import { splitAnswerStructure } from "./self-check/claims.js";
+import { normalizeStructuralClaimLabel } from "./self-check/text.js";
 
 const SOURCE_LABEL_PATTERN = /\[(?:source|来源)\s*\d+\]/gi;
 const SENTENCE_END_PATTERN = /[.!?。！？]$/;
-const SECTION_HEADING_PATTERN =
-  /^(?:risk review|contract summary|document comparison|common ground|differences?|missing terms?|parties|key terms?|obligations?|deadlines?|unknowns?|risks?|gaps?|conflicts?(?: or exceptions?)?|exceptions?|evidence limits?|executive summary|key findings|summary|evidence by document|recommended next questions)$/i;
 
 const hasText = (value) => typeof value === "string" && value.trim().length > 0;
 
@@ -27,22 +28,10 @@ const buildSourceLabelSuffix = (citations = [], allCitations = citations) =>
 const stripSourceLabels = (value = "") =>
   String(value ?? "").replace(SOURCE_LABEL_PATTERN, "").trim();
 
-const normalizeHeadingText = (value = "") =>
-  stripSourceLabels(value)
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^[-*]\s+/, "")
-    .replace(/:$/g, "")
-    .trim();
+const normalizeHeadingText = (value = "") => normalizeStructuralClaimLabel(value);
 
 const isPreservedHeading = (value = "") =>
-  SECTION_HEADING_PATTERN.test(normalizeHeadingText(value));
-
-const getPreservedHeadings = (answerText = "") =>
-  String(answerText ?? "")
-    .split(/\n+/g)
-    .map(normalizeHeadingText)
-    .filter((line) => line && isPreservedHeading(line))
-    .slice(0, 8);
+  isStructuralSectionHeading(normalizeHeadingText(value));
 
 export const normalizeClaimSupportForHeadings = (claimSupport) => {
   const claims = (claimSupport.claims ?? []).map((claim) =>
@@ -90,25 +79,54 @@ const formatSupportedClaim = ({ claim, citations }) => {
   return sourceLabelSuffix ? `${sentence} ${sourceLabelSuffix}` : sentence;
 };
 
-const buildFinalizedText = ({ answerText, claimSupport, citations }) => {
+const buildFinalizedText = ({ claimSupport, citations, nodes = [] }) => {
   const supportedClaims = claimSupport.claims.filter((claim) => claim.supported);
   const supportedEvidenceClaims = supportedClaims.filter((claim) => !claim.heading);
-  const preservedHeadings = getPreservedHeadings(answerText);
+  const supportedDifferenceSectionIds = new Set(
+    supportedEvidenceClaims
+      .filter((claim) => claim.section === "differences")
+      .map((claim) => claim.sectionId)
+  );
 
   if (supportedEvidenceClaims.length === 0) {
     return "I do not have enough citation-backed evidence to answer reliably.";
   }
 
-  const finalizedClaims = supportedEvidenceClaims
-    .map((claim) =>
-      formatSupportedClaim({
-        claim,
-        citations,
-      })
-    )
-    .filter(Boolean);
+  if (nodes.length === 0) {
+    return supportedEvidenceClaims
+      .map((claim) => formatSupportedClaim({ claim, citations }))
+      .filter(Boolean)
+      .join("\n");
+  }
 
-  return [...preservedHeadings, ...finalizedClaims].join("\n");
+  const finalizedLines = [];
+
+  for (const node of nodes) {
+    if (node.type === "heading") {
+      if (
+        node.section !== "differences" ||
+        supportedDifferenceSectionIds.has(node.sectionId)
+      ) {
+        finalizedLines.push(node.text);
+      }
+
+      continue;
+    }
+
+    const claim = claimSupport.claims[node.claimIndex];
+
+    if (!claim?.supported || claim.heading) {
+      continue;
+    }
+
+    const formattedClaim = formatSupportedClaim({ claim, citations });
+
+    if (formattedClaim) {
+      finalizedLines.push(formattedClaim);
+    }
+  }
+
+  return finalizedLines.join("\n");
 };
 
 export const finalizeAgentAnswer = ({
@@ -123,8 +141,9 @@ export const finalizeAgentAnswer = ({
     citations: evidenceCitations,
     comparisonAnalysisSummary,
   });
+  const structure = splitAnswerStructure(text, evidenceCitations);
 
-  if (!hasText(text) || citations.length === 0 || !claimSupport.checked) {
+  if (!hasText(text) || citations.length === 0) {
     return {
       text,
       changed: false,
@@ -134,7 +153,34 @@ export const finalizeAgentAnswer = ({
     };
   }
 
+  if (!claimSupport.checked) {
+    const containsOnlyHeadings =
+      structure.nodes.length > 0 &&
+      structure.claims.length === 0 &&
+      structure.nodes.every((node) => node.type === "heading");
+
+    return containsOnlyHeadings
+      ? {
+          text: "I do not have enough citation-backed evidence to answer reliably.",
+          changed: true,
+          abstained: true,
+          removedClaims: [],
+          claimSupport,
+        }
+      : {
+          text,
+          changed: false,
+          abstained: false,
+          removedClaims: [],
+          claimSupport,
+        };
+  }
+
   const normalizedClaimSupport = normalizeClaimSupportForHeadings(claimSupport);
+  const structureNodes =
+    structure.claims.length === normalizedClaimSupport.claims.length
+      ? structure.nodes
+      : [];
   const unsupportedClaims = normalizedClaimSupport.claims.filter(
     (claim) => !claim.supported
   );
@@ -149,9 +195,9 @@ export const finalizeAgentAnswer = ({
     ) {
       return {
         text: buildFinalizedText({
-          answerText: text,
           claimSupport: normalizedClaimSupport,
           citations,
+          nodes: structureNodes,
         }),
         changed: true,
         abstained: true,
@@ -171,9 +217,9 @@ export const finalizeAgentAnswer = ({
 
   return {
     text: buildFinalizedText({
-      answerText: text,
       claimSupport: normalizedClaimSupport,
       citations,
+      nodes: structureNodes,
     }),
     changed: true,
     abstained: supportedEvidenceClaimCount === 0,

@@ -12,6 +12,7 @@ import {
   evaluateAgreementClaimSupport,
   evaluateClaimAgainstCitations,
   evaluateContrastClaimSupport,
+  evaluateDifferenceSectionSupport,
   evaluateExclusiveClaimSupport,
   evaluateNoDifferenceClaimSupport,
 } from "./support.js";
@@ -58,7 +59,15 @@ export const evaluateClaimSupport = ({
     };
   }
 
-  const checkedClaims = claims.map(({ text: claimText, sourceRanks }) => {
+  const supportedNoDifferenceClaimIndexes = new Set();
+  let checkedClaims = claims.map((claim, claimIndex) => {
+    const {
+      text: claimText,
+      section,
+      sectionId,
+      sectionLabel,
+      sourceRanks,
+    } = claim;
     const missingSourceRanks = sourceRanks.filter(
       (rank) => !citationByRank.has(rank)
     );
@@ -76,11 +85,18 @@ export const evaluateClaimSupport = ({
         getCitationIdentity(citation, index)
       )
     );
-    const misattributedCitationIdentities =
+    const explicitlyAttributedCitationIdentities =
       getExplicitlyAttributedCitationIdentities({
         claimText,
         citations,
-      }).filter((identity) => !scopedCitationIdentities.has(identity));
+      });
+    const explicitlyAttributedCitationIdentitySet = new Set(
+      explicitlyAttributedCitationIdentities
+    );
+    const misattributedCitationIdentities =
+      explicitlyAttributedCitationIdentities.filter(
+        (identity) => !scopedCitationIdentities.has(identity)
+      );
     const defaultSupport = evaluateClaimAgainstCitations({
       claimText,
       citations: scopedCitations,
@@ -108,6 +124,11 @@ export const evaluateClaimSupport = ({
       scopedCitations,
       sourceRanks,
     });
+
+    if (noDifferenceSupport?.supported) {
+      supportedNoDifferenceClaimIndexes.add(claimIndex);
+    }
+
     const relationSupport = combineRelationSupportChecks([
       noDifferenceSupport,
       contrastSupport,
@@ -126,9 +147,21 @@ export const evaluateClaimSupport = ({
         return false;
       }
 
+      const citation = citationByRank.get(rank);
+      const citationIndex = citations.indexOf(citation);
+
+      if (
+        explicitlyAttributedCitationIdentitySet.size > 0 &&
+        !explicitlyAttributedCitationIdentitySet.has(
+          getCitationIdentity(citation, citationIndex)
+        )
+      ) {
+        return false;
+      }
+
       return evaluateClaimAgainstCitations({
         claimText,
-        citations: [citationByRank.get(rank)],
+        citations: [citation],
         documentLabelCitations: citations,
       }).supported;
     });
@@ -157,6 +190,9 @@ export const evaluateClaimSupport = ({
 
     return {
       text: claimText,
+      section,
+      sectionId,
+      sectionLabel,
       supported,
       tokenOverlap,
       anchors: relationSupport?.anchors ?? defaultSupport.anchors,
@@ -171,6 +207,57 @@ export const evaluateClaimSupport = ({
       missingAnchors,
     };
   });
+  const differenceClaimIndexesBySection = new Map();
+
+  claims.forEach((claim, index) => {
+    if (
+      claim.section !== "differences" ||
+      supportedNoDifferenceClaimIndexes.has(index)
+    ) {
+      return;
+    }
+
+    const sectionKey = claim.sectionId ?? "legacy-differences";
+    const sectionIndexes =
+      differenceClaimIndexesBySection.get(sectionKey) ?? [];
+
+    sectionIndexes.push(index);
+    differenceClaimIndexesBySection.set(sectionKey, sectionIndexes);
+  });
+
+  const invalidDifferenceClaimIndexes = new Set();
+
+  for (const sectionIndexes of differenceClaimIndexesBySection.values()) {
+    const sectionSupported =
+      sectionIndexes.every((index) => checkedClaims[index]?.supported) &&
+      evaluateDifferenceSectionSupport({
+        claims: sectionIndexes.map((index) => claims[index]),
+        citations,
+      });
+
+    if (!sectionSupported) {
+      sectionIndexes.forEach((index) =>
+        invalidDifferenceClaimIndexes.add(index)
+      );
+    }
+  }
+
+  if (invalidDifferenceClaimIndexes.size > 0) {
+    checkedClaims = checkedClaims.map((claim, index) =>
+      invalidDifferenceClaimIndexes.has(index)
+        ? {
+            ...claim,
+            supported: false,
+            supportedSourceRanks: [],
+            supportedCitedDocIds: [],
+            missingAnchors: uniqueValues([
+              ...claim.missingAnchors,
+              "substantive_contrast",
+            ]),
+          }
+        : claim
+    );
+  }
   const unsupportedClaimCount = checkedClaims.filter((claim) => !claim.supported).length;
 
   return {
@@ -344,4 +431,3 @@ export const evaluateDocumentEvidence = ({ ragResult, docIds = [] } = {}) => {
     retryRecommended,
   };
 };
-

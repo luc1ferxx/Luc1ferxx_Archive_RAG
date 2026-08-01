@@ -237,12 +237,15 @@ export const getMetadataFactAnchors = ({ claimText = "", citations = [] } = {}) 
     )
   );
 
+export const isStructuralSectionHeading = (value = "") =>
+  STRUCTURAL_SECTION_HEADING_PATTERN.test(normalizeStructuralClaimLabel(value));
+
 export const isStructuralClaimLabel = ({ value = "", citations = [] } = {}) => {
   const label = normalizeStructuralClaimLabel(value);
   const normalizedLabel = normalizeSearchText(label);
 
   return (
-    STRUCTURAL_SECTION_HEADING_PATTERN.test(label) ||
+    isStructuralSectionHeading(label) ||
     getCitationDocumentLabels(citations).has(normalizedLabel)
   );
 };
@@ -276,7 +279,7 @@ export const getGroupDocumentAliases = (group = {}) =>
     )
   );
 
-export const buildCitationSupportSegments = (citations = []) =>
+export const buildCitationSupportSentences = (citations = []) =>
   uniqueValues(
     citations.flatMap((citation) =>
       CHECKABLE_CITATION_FIELDS.flatMap((field) =>
@@ -284,9 +287,24 @@ export const buildCitationSupportSegments = (citations = []) =>
           .split(/(?<=[.!?。！？])\s+|\n+/g)
           .map((sentence) => sentence.trim())
           .filter(Boolean)
-          .flatMap((sentence) => [sentence, ...splitModalityClauses(sentence)])
       )
     )
+  );
+
+export const buildCitationSupportSegments = (
+  citations = [],
+  { includeParentSentences = true } = {}
+) =>
+  uniqueValues(
+    buildCitationSupportSentences(citations).flatMap((sentence) => {
+      const clauses = splitModalityClauses(sentence);
+
+      if (clauses.length <= 1) {
+        return [sentence];
+      }
+
+      return includeParentSentences ? [sentence, ...clauses] : clauses;
+    })
   );
 
 export const getCitationSourceRank = ({
