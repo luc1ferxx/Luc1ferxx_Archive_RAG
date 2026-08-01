@@ -3,6 +3,10 @@ name: Robust Eval Suite
 on:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   robust-eval-suite:
     runs-on: ubuntu-latest
@@ -34,7 +38,7 @@ jobs:
         run: npm run eval:robust-suite
 
       - name: Check robust quality gate
-        run: npm run quality:gate -- --fail-on-warn --require-robust-suite
+        run: npm run robust:gate -- --fail-on-warn
 
       - name: Upload robust eval reports
         if: always()
@@ -42,6 +46,7 @@ jobs:
         with:
           name: robust-eval-reports
           path: |
+            server/evaluation/corpora/arxiv-computer-science-rerank-v1.json
             server/evaluation/results/latest.*
             server/evaluation/results/latest-rerank-hard-cs.*
             server/evaluation/results/latest-arxiv-rerank.*

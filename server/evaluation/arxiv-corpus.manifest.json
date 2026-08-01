@@ -4,7 +4,7 @@
   "description": "Fixed arXiv paper set for building a real-paper rerank evaluation corpus. Cases are annotated separately after PDF text extraction.",
   "workflow": [
     "Pin a stable set of arXiv papers in this manifest.",
-    "Run npm run corpus:arxiv to download PDFs and extract page text into evaluation/generated/arxiv-corpus.json.",
+    "Run npm run corpus:arxiv only to refresh the ignored candidate at evaluation/generated/arxiv-corpus.json; release evaluation reads the separately reviewed pinned corpus under evaluation/corpora/.",
     "Manually annotate cases with expectedEvidence, referenceAnswer, and shouldAbstain before running eval:rerank for report-quality metrics."
   ],
   "documents": [

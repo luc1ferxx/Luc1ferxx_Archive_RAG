@@ -410,6 +410,8 @@ test("rollout readiness report reads and writes latest result files", async () =
   });
 
   assert.equal(report.summary.status, "ready");
+  assert.equal(report.evidence.runId, report.summary.runId);
+  assert.equal(report.evidence.generatedAt, report.summary.createdAt);
   assert.deepEqual(
     report.evidence.sourceReports.map((sourceReport) => sourceReport.reportId),
     [

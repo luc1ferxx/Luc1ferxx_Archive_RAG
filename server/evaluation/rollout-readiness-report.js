@@ -425,6 +425,7 @@ export const buildRolloutReadinessReportFromResults = async ({
 
   return attachEvaluationEvidence(report, {
     command: "npm run rollout:readiness",
+    generatedAt: report.summary.createdAt,
     profile: process.env.EVAL_EVIDENCE_PROFILE ?? "release",
     provider: {
       id: "release-readiness",
@@ -432,6 +433,7 @@ export const buildRolloutReadinessReportFromResults = async ({
     },
     reportId: "rollout-readiness",
     reportType: "rollout_readiness",
+    runId: report.summary.runId,
     sourceReports,
   });
 };

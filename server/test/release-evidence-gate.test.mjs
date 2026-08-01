@@ -22,12 +22,24 @@ import {
   readReleaseEvidenceInputs,
   writeReleaseEvidenceReport,
 } from "../evaluation/release-evidence-gate.js";
+import { buildRobustSuiteExecutionPlan } from "../evaluation/robust-suite-execution.js";
+import {
+  buildPassingCheckSuiteReport,
+  buildPassingRobustRerankReport,
+  buildPassingRobustSyntheticReport,
+  buildPassingRolloutReadinessReport,
+  buildPassingRuntimeSmokeReport,
+} from "./fixtures/release-evidence-report-fixtures.mjs";
 
 const TARGET_COMMIT = "a".repeat(40);
 const NOW = "2026-07-15T08:00:00.000Z";
 const GENERATED_AT = "2026-07-15T07:30:00.000Z";
 const SUITE = {
-  configHash: "b".repeat(64),
+  configHash: buildRobustSuiteExecutionPlan({
+    options: {
+      syntheticProvider: "real",
+    },
+  }).configHash,
   id: "robust",
   runId: "robust-release-run",
 };
@@ -48,95 +60,52 @@ const MODEL_ROUTE_IDS = Object.freeze({
   "planner-real": "planner.execution.default",
   "runtime-smoke": "planner.execution.default",
 });
+const PASSING_ROBUST_SYNTHETIC_REPORT =
+  await buildPassingRobustSyntheticReport({
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+    createdAt: GENERATED_AT,
+    runId: "compare-hard-synthetic-run",
+  });
 
 const buildBaseReport = (reportId) => {
   if (reportId === "compare-hard-synthetic") {
-    return {
-      summary: {
-        config: { chunkSize: 900 },
-        corpus: {
-          path: "server/evaluation/synthetic-corpus-compare-hard.json",
-          cases: 1,
-        },
-        metrics: { overallPassRate: 1 },
-        status: "pass",
-      },
-      cases: [{ id: "compare-hard", passed: true }],
-    };
+    return structuredClone(PASSING_ROBUST_SYNTHETIC_REPORT);
   }
 
   if (["rerank-hard-cs", "arxiv-real-paper-rerank"].includes(reportId)) {
     const corpusPath =
       reportId === "rerank-hard-cs"
-        ? "server/evaluation/synthetic-corpus-rerank-hard-cs.json"
-        : "server/evaluation/generated/arxiv-corpus.json";
+        ? "evaluation/synthetic-corpus-rerank-hard-cs.json"
+        : "evaluation/corpora/arxiv-computer-science-rerank-v1.json";
 
-    return {
-      summary: {
-        caseCount: 1,
-        config: { rerankProvider: "heuristic", topK: 6 },
-        corpus: { path: corpusPath, cases: 1 },
-        metrics: {
-          baseline: { ndcgAtK: 0.5, recallAtK: 0.5 },
-          reranked: { ndcgAtK: 0.8, recallAtK: 0.8 },
-        },
-      },
-      cases: [{ id: reportId, passed: true }],
-    };
+    return buildPassingRobustRerankReport({
+      corpusPath,
+      createdAt: GENERATED_AT,
+      reportId,
+      runId: `${reportId}-run`,
+    });
   }
 
   if (reportId === "runtime-smoke") {
-    return {
-      completedAt: GENERATED_AT,
+    return buildPassingRuntimeSmokeReport({
+      createdAt: GENERATED_AT,
       runId: "runtime-smoke-run",
-      status: "pass",
-      version: "1.0.0",
-      checks: {
-        planners: {
-          executionPlanner: "llm",
-          executionPlannerStatus: "selected",
-          intentPlanner: "llm",
-          intentPlannerStatus: "selected",
-        },
-      },
-    };
-  }
-
-  if (reportId === "rollout-readiness") {
-    return {
-      summary: {
-        createdAt: GENERATED_AT,
-        runId: "rollout-readiness-run",
-        status: "ready",
-        version: "1.0.0",
-      },
-      checks: [{ id: "all_release_signals", status: "pass" }],
-      signals: {
-        runtime: {
-          required: {
-            effectiveExecutionPlanner: "llm",
-            effectiveIntentPlanner: "llm",
-            plannerRollout: "llm",
-          },
-        },
-      },
-    };
+    });
   }
 
   const provider = reportId.startsWith("planner-")
     ? reportId.slice("planner-".length)
     : undefined;
+  const manifestId = reportId === "recovery-observability"
+    ? "recovery"
+    : reportId;
 
-  return {
-    summary: {
-      createdAt: GENERATED_AT,
-      provider,
-      runId: `${reportId}-run`,
-      status: "pass",
-      version: "1.0.0",
-    },
-    cases: [{ id: `${reportId}-case`, passed: true }],
-  };
+  return buildPassingCheckSuiteReport({
+    createdAt: GENERATED_AT,
+    provider,
+    runId: `${reportId}-run`,
+    specId: manifestId,
+  });
 };
 
 const buildEvidence = ({
@@ -158,7 +127,7 @@ const buildEvidence = ({
     dirty: false,
   },
   command: `npm run ${reportId}`,
-  profile: suite ? "robust" : "release",
+  profile: "release",
   corpus: {
     contentHash: corpus?.contentHash ?? "unknown",
     id: corpus?.id ?? "unknown",
@@ -181,7 +150,9 @@ const buildEvidence = ({
 const createCompleteFixture = () => {
   const reports = {};
 
-  for (const spec of RELEASE_EVIDENCE_REPORT_SPECS) {
+  for (const spec of RELEASE_EVIDENCE_REPORT_SPECS.filter(
+    ({ id }) => id !== "rollout-readiness"
+  )) {
     const report = buildBaseReport(spec.id);
     reports[spec.id] = {
       ...report,
@@ -212,6 +183,24 @@ const createCompleteFixture = () => {
     }),
   };
 
+  const readinessSpec = RELEASE_EVIDENCE_REPORT_SPECS.find(
+    ({ id }) => id === "rollout-readiness"
+  );
+  const readiness = buildPassingRolloutReadinessReport({
+    createdAt: GENERATED_AT,
+    reports,
+    runId: "rollout-readiness-run",
+  });
+  reports["rollout-readiness"] = {
+    ...readiness,
+    evidence: buildEvidence({
+      providerMode: readinessSpec.providerMode,
+      report: readiness,
+      reportId: readinessSpec.id,
+      reportType: readinessSpec.reportType,
+    }),
+  };
+
   const readinessSources = [
     reports["planner-mock"],
     reports["planner-real"],
@@ -222,6 +211,25 @@ const createCompleteFixture = () => {
   reports["rollout-readiness"].evidence.sourceReports = readinessSources;
 
   return reports;
+};
+
+const setReportGeneratedAt = ({ generatedAt, reportId, reports }) => {
+  const report = reports[reportId];
+  report.evidence.generatedAt = generatedAt;
+
+  if (report.summary) {
+    report.summary.createdAt = generatedAt;
+  } else {
+    report.completedAt = generatedAt;
+  }
+
+  const readinessSource = reports[
+    "rollout-readiness"
+  ].evidence.sourceReports.find((source) => source.reportId === reportId);
+
+  if (readinessSource) {
+    readinessSource.generatedAt = generatedAt;
+  }
 };
 
 const runReleaseGateCli = (args) =>
@@ -258,7 +266,11 @@ test("release evidence gate passes a complete same-commit fixture", () => {
     targetCommit: TARGET_COMMIT,
   });
 
-  assert.equal(report.summary.status, "pass");
+  assert.equal(
+    report.summary.status,
+    "pass",
+    JSON.stringify(report.failedChecks, null, 2)
+  );
   assert.equal(report.summary.reasonCode, "ok");
   assert.equal(
     report.checks.every((check) => check.status === "pass"),
@@ -336,7 +348,11 @@ test("release evidence gate fails reports generated from a dirty worktree", () =
 
 test("release evidence gate fails stale reports", () => {
   const reports = createCompleteFixture();
-  reports["planner-real"].evidence.generatedAt = "2026-07-13T07:30:00.000Z";
+  setReportGeneratedAt({
+    generatedAt: "2026-07-13T07:30:00.000Z",
+    reportId: "planner-real",
+    reports,
+  });
   const report = buildReleaseEvidenceReport({
     maxAgeHours: 24,
     now: NOW,
@@ -351,7 +367,11 @@ test("release evidence gate fails stale reports", () => {
 
 test("release evidence gate rejects reports generated in the future", () => {
   const reports = createCompleteFixture();
-  reports["planner-real"].evidence.generatedAt = "2026-07-16T08:00:00.000Z";
+  setReportGeneratedAt({
+    generatedAt: "2026-07-16T08:00:00.000Z",
+    reportId: "planner-real",
+    reports,
+  });
   const report = buildReleaseEvidenceReport({
     maxAgeHours: 24,
     now: NOW,
@@ -474,6 +494,21 @@ test("release evidence gate requires the public model route identity", () => {
   assert.equal(check.reasonCode, "wrong_model_route");
 });
 
+test("release evidence gate rejects a report from a non-release profile", () => {
+  const reports = createCompleteFixture();
+  reports["planner-real"].evidence.profile = "default";
+  const report = buildReleaseEvidenceReport({
+    now: NOW,
+    reports,
+    targetCommit: TARGET_COMMIT,
+  });
+  const check = report.checks.find((entry) => entry.id === "planner-real");
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(check.status, "fail");
+  assert.equal(check.reasonCode, "wrong_profile");
+});
+
 test("release evidence gate validates rollout readiness source lineage", () => {
   const reports = createCompleteFixture();
   reports["rollout-readiness"].evidence.sourceReports[0].configHash =
@@ -541,6 +576,28 @@ test("release evidence gate rejects a malformed robust suite config hash", () =>
   assert.equal(check.reasonCode, "robust_lineage_split");
 });
 
+test("release evidence gate rejects a shared but non-canonical robust suite config", () => {
+  const reports = createCompleteFixture();
+
+  for (const id of [
+    "compare-hard-synthetic",
+    "rerank-hard-cs",
+    "arxiv-real-paper-rerank",
+  ]) {
+    reports[id].evidence.suite.configHash = "c".repeat(64);
+  }
+
+  const report = buildReleaseEvidenceReport({
+    now: NOW,
+    reports,
+    targetCommit: TARGET_COMMIT,
+  });
+  const check = report.checks.find((entry) => entry.id === "robust-lineage");
+
+  assert.equal(check.status, "fail");
+  assert.equal(check.reasonCode, "config_hash_mismatch");
+});
+
 test("release evidence gate rejects a mismatched public config hash", () => {
   const reports = createCompleteFixture();
   reports["rerank-hard-cs"].evidence.configHash = "d".repeat(64);
@@ -567,6 +624,231 @@ test("release evidence gate requires each source report to pass its own checks",
 
   assert.equal(check.status, "fail");
   assert.equal(check.reasonCode, "report_failed");
+});
+
+test("release evidence gate binds every robust report body to its evidence envelope", () => {
+  const robustReportIds = [
+    "compare-hard-synthetic",
+    "rerank-hard-cs",
+    "arxiv-real-paper-rerank",
+  ];
+
+  for (const reportId of robustReportIds) {
+    for (const [field, issueId] of [
+      ["runId", "envelope.runId"],
+      ["createdAt", "envelope.generatedAt"],
+    ]) {
+      const reports = createCompleteFixture();
+      reports[reportId].summary[field] = `stale-${field}`;
+      const report = buildReleaseEvidenceReport({
+        now: NOW,
+        reports,
+        targetCommit: TARGET_COMMIT,
+      });
+      const contractCheck = report.checks.find(
+        (entry) => entry.id === `${reportId}-contract`
+      );
+
+      assert.equal(report.summary.status, "fail", `${reportId}.${field}`);
+      assert.equal(contractCheck.status, "fail", `${reportId}.${field}`);
+      assert.equal(
+        contractCheck.reasonCode,
+        "report_integrity_failed",
+        `${reportId}.${field}`
+      );
+      assert.ok(
+        contractCheck.actual.some((issue) => issue.id === issueId),
+        `${reportId}.${field}`
+      );
+    }
+  }
+});
+
+test("release evidence gate pins robust envelope schema and generator versions", () => {
+  for (const reportId of [
+    "compare-hard-synthetic",
+    "rerank-hard-cs",
+    "arxiv-real-paper-rerank",
+  ]) {
+    for (const [field, issueId] of [
+      ["schemaVersion", "envelope.schemaVersion"],
+      ["generatorVersion", "envelope.generatorVersion"],
+    ]) {
+      const reports = createCompleteFixture();
+      reports[reportId].evidence[field] = "999.0.0";
+      const report = buildReleaseEvidenceReport({
+        now: NOW,
+        reports,
+        targetCommit: TARGET_COMMIT,
+      });
+      const contractCheck = report.checks.find(
+        (entry) => entry.id === `${reportId}-contract`
+      );
+
+      assert.equal(report.summary.status, "fail", `${reportId}.${field}`);
+      assert.equal(contractCheck.status, "fail", `${reportId}.${field}`);
+      assert.ok(
+        contractCheck.actual.some((issue) => issue.id === issueId),
+        `${reportId}.${field}`
+      );
+    }
+  }
+});
+
+test("release evidence gate rejects a one-case trajectory hidden by a passing summary", () => {
+  const reports = createCompleteFixture();
+  reports.trajectory.cases = [reports.trajectory.cases[0]];
+  reports.trajectory.summary.metrics = {
+    caseCount: 1,
+    checkCount: reports.trajectory.cases[0].checks.length,
+    failedCaseCount: 0,
+    failedCheckCount: 0,
+    passedCaseCount: 1,
+    passedCheckCount: reports.trajectory.cases[0].checks.length,
+    overallPassRate: 1,
+    checkPassRate: 1,
+  };
+  reports.trajectory.summary.status = "pass";
+  const report = buildReleaseEvidenceReport({
+    now: NOW,
+    reports,
+    targetCommit: TARGET_COMMIT,
+  });
+  const contractCheck = report.checks.find(
+    (entry) => entry.id === "trajectory-contract"
+  );
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(contractCheck.status, "fail");
+  assert.equal(contractCheck.reasonCode, "report_integrity_failed");
+  assert.ok(
+    contractCheck.actual.some((issue) => issue.id === "cases.contract")
+  );
+});
+
+test("release evidence gate rejects a forged passing runtime smoke envelope", () => {
+  const reports = createCompleteFixture();
+  reports["runtime-smoke"].checks.longMemory.healthStatus = "error";
+  reports["runtime-smoke"].status = "pass";
+  const report = buildReleaseEvidenceReport({
+    now: NOW,
+    reports,
+    targetCommit: TARGET_COMMIT,
+  });
+  const contractCheck = report.checks.find(
+    (entry) => entry.id === "runtime-smoke-contract"
+  );
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(contractCheck.status, "fail");
+  assert.equal(contractCheck.reasonCode, "report_integrity_failed");
+  assert.ok(
+    contractCheck.actual.some((issue) => issue.id === "checks.longMemory")
+  );
+});
+
+test("release evidence gate rejects runtime smoke content wrapped in a fresh evidence envelope", () => {
+  const reports = createCompleteFixture();
+  reports["runtime-smoke"].runId = "stale-runtime-smoke-run";
+  reports["runtime-smoke"].completedAt = "2026-07-13T07:30:00.000Z";
+  const report = buildReleaseEvidenceReport({
+    now: NOW,
+    reports,
+    targetCommit: TARGET_COMMIT,
+  });
+  const contractCheck = report.checks.find(
+    (entry) => entry.id === "runtime-smoke-contract"
+  );
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(contractCheck.status, "fail");
+  assert.equal(contractCheck.reasonCode, "report_integrity_failed");
+  assert.ok(
+    contractCheck.actual.some((issue) => issue.id === "envelope.runId")
+  );
+  assert.ok(
+    contractCheck.actual.some((issue) => issue.id === "envelope.generatedAt")
+  );
+});
+
+test("release evidence gate rejects forged ready status over failing readiness facts", () => {
+  const reports = createCompleteFixture();
+  reports["rollout-readiness"].checks[0].status = "fail";
+  reports["rollout-readiness"].summary.status = "ready";
+  const report = buildReleaseEvidenceReport({
+    now: NOW,
+    reports,
+    targetCommit: TARGET_COMMIT,
+  });
+  const contractCheck = report.checks.find(
+    (entry) => entry.id === "rollout-readiness-contract"
+  );
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(contractCheck.status, "fail");
+  assert.equal(contractCheck.reasonCode, "report_integrity_failed");
+  assert.ok(
+    contractCheck.actual.some(
+      (issue) => issue.id === "rollout_readiness_projection"
+    )
+  );
+});
+
+test("release evidence gate rejects rollout readiness content wrapped in a fresh evidence envelope", () => {
+  const reports = createCompleteFixture();
+  reports["rollout-readiness"].summary.runId = "stale-readiness-run";
+  reports["rollout-readiness"].summary.createdAt =
+    "2026-07-13T07:30:00.000Z";
+  const report = buildReleaseEvidenceReport({
+    now: NOW,
+    reports,
+    targetCommit: TARGET_COMMIT,
+  });
+  const contractCheck = report.checks.find(
+    (entry) => entry.id === "rollout-readiness-contract"
+  );
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(contractCheck.status, "fail");
+  assert.equal(contractCheck.reasonCode, "report_integrity_failed");
+  assert.ok(
+    contractCheck.actual.some((issue) => issue.id === "envelope.runId")
+  );
+  assert.ok(
+    contractCheck.actual.some((issue) => issue.id === "envelope.generatedAt")
+  );
+});
+
+test("release evidence gate pins runtime and readiness envelope schema versions", () => {
+  for (const [reportId, field, issueId] of [
+    ["runtime-smoke", "schemaVersion", "envelope.schemaVersion"],
+    ["runtime-smoke", "generatorVersion", "envelope.generatorVersion"],
+    ["rollout-readiness", "schemaVersion", "envelope.schemaVersion"],
+    ["rollout-readiness", "generatorVersion", "envelope.generatorVersion"],
+  ]) {
+    const reports = createCompleteFixture();
+    reports[reportId].evidence[field] = "999.0.0";
+    const report = buildReleaseEvidenceReport({
+      now: NOW,
+      reports,
+      targetCommit: TARGET_COMMIT,
+    });
+    const contractCheck = report.checks.find(
+      (entry) => entry.id === `${reportId}-contract`
+    );
+
+    assert.equal(report.summary.status, "fail", `${reportId}.${field}`);
+    assert.equal(contractCheck.status, "fail", `${reportId}.${field}`);
+    assert.equal(
+      contractCheck.reasonCode,
+      "report_integrity_failed",
+      `${reportId}.${field}`
+    );
+    assert.ok(
+      contractCheck.actual.some((issue) => issue.id === issueId),
+      `${reportId}.${field}`
+    );
+  }
 });
 
 test("release evidence gate reads latest inputs and writes stable JSON and Markdown", async () => {

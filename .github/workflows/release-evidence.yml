@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "0 11 * * 1"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release-evidence:
     runs-on: ubuntu-latest
@@ -61,7 +65,7 @@ jobs:
 
       - name: Check robust quality gate
         if: ${{ !cancelled() }}
-        run: npm run quality:gate -- --fail-on-warn --require-robust-suite
+        run: npm run robust:gate -- --fail-on-warn
 
       - name: Run planner eval (mock)
         if: ${{ !cancelled() }}
@@ -97,6 +101,7 @@ jobs:
         with:
           name: release-evidence-${{ env.EVAL_TARGET_COMMIT_SHA }}
           path: |
+            server/evaluation/corpora/arxiv-computer-science-rerank-v1.json
             server/evaluation/results/latest.json
             server/evaluation/results/latest.md
             server/evaluation/results/latest-rerank-hard-cs.json

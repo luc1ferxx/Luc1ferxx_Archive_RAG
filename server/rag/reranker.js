@@ -538,11 +538,17 @@ const rerankResultsWithCrossEncoder = async ({ queryText = "", results = [], top
   });
 };
 
-export const rerankResults = ({ queryText = "", results = [], topK } = {}) => {
+export const rerankResultsWithConfig = ({
+  queryText = "",
+  results = [],
+  topK,
+  rerankEnabled = true,
+  rerankWeight = 0,
+} = {}) => {
   const safeResults = Array.isArray(results) ? results : [];
   const safeTopK = normalizeTopK(topK, safeResults.length);
 
-  if (!isRerankEnabled()) {
+  if (!rerankEnabled) {
     return safeResults.slice(0, safeTopK);
   }
 
@@ -550,7 +556,7 @@ export const rerankResults = ({ queryText = "", results = [], topK } = {}) => {
     return [];
   }
 
-  const rerankWeight = getRerankWeight();
+  const safeRerankWeight = clamp01(toFiniteNumber(rerankWeight, 0));
   const signals = buildQuerySignals(queryText);
   const originalScores = safeResults.map((result) =>
     toFiniteNumber(result?.score, 0)
@@ -585,7 +591,8 @@ export const rerankResults = ({ queryText = "", results = [], topK } = {}) => {
           ? clamp01(entry.rawRerankScore / maximumRawRerankScore)
           : 0;
       const mixedScore =
-        entry.originalScore * (1 - rerankWeight) + rerankScore * rerankWeight;
+        entry.originalScore * (1 - safeRerankWeight) +
+        rerankScore * safeRerankWeight;
 
       return {
         ...entry.result,
@@ -605,6 +612,15 @@ export const rerankResults = ({ queryText = "", results = [], topK } = {}) => {
     .slice(0, safeTopK)
     .map(({ __rerankIndex, ...result }) => result);
 };
+
+export const rerankResults = ({ queryText = "", results = [], topK } = {}) =>
+  rerankResultsWithConfig({
+    queryText,
+    results,
+    topK,
+    rerankEnabled: isRerankEnabled(),
+    rerankWeight: getRerankWeight(),
+  });
 
 export const rerankResultsWithProvider = async ({
   queryText = "",

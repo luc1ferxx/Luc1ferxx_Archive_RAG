@@ -281,12 +281,18 @@ const chunkPageWithStructure = ({
   };
 };
 
-export const chunkDocument = ({ docId, fileName, publicFilePath, pages, source = null }) => {
+export const chunkDocumentWithConfig = ({
+  docId,
+  fileName,
+  publicFilePath,
+  pages,
+  source = null,
+  chunkSize,
+  chunkOverlap,
+  chunkStrategy,
+}) => {
   const resolvedPublicFilePath =
     publicFilePath || buildPublicFilePath(docId);
-  const chunkSize = getChunkSize();
-  const chunkOverlap = getChunkOverlap();
-  const chunkStrategy = getChunkStrategy();
   const chunks = [];
   let chunkIndex = 0;
 
@@ -320,3 +326,11 @@ export const chunkDocument = ({ docId, fileName, publicFilePath, pages, source =
 
   return chunks;
 };
+
+export const chunkDocument = (input) =>
+  chunkDocumentWithConfig({
+    ...input,
+    chunkSize: getChunkSize(),
+    chunkOverlap: getChunkOverlap(),
+    chunkStrategy: getChunkStrategy(),
+  });

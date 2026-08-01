@@ -1,12 +1,12 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { robustEvalSuite } from "./eval-suite.js";
 import { defaultHistoryLimit } from "./quality-shared.js";
 import { buildQualityReportFromResultPayload } from "./quality-run-summary.js";
 import { buildQualityHistoryResponse } from "./quality-combined-gate.js";
 import { markHistoricalQualityEvidence } from "./quality-evidence-scope.js";
 import { createSyntheticQualityEvaluationRunner } from "./quality-synthetic-runner.js";
+import { readLatestRobustPayloads } from "./robust-suite-result-reader.js";
 
 export { markHistoricalQualityEvidence } from "./quality-evidence-scope.js";
 
@@ -26,11 +26,6 @@ const latestPlannerProviderResultPaths = [
   path.join(resultsDirectory, "latest-planner-mock.json"),
   path.join(resultsDirectory, "latest-planner-real.json"),
 ];
-const latestRobustSuiteResultPaths = robustEvalSuite.reports.map((report) => ({
-  reportId: report.id,
-  filePath: path.join(resultsDirectory, `${report.latestName}.json`),
-}));
-
 const isQualityResultFile = (fileName) =>
   fileName.endsWith(".json") &&
   !fileName.startsWith("latest") &&
@@ -62,14 +57,6 @@ const readLatestPlannerPayloads = async () => {
   const legacyPayload = await readOptionalJsonFile(latestPlannerResultPath);
   return legacyPayload ? [legacyPayload] : [];
 };
-
-const readLatestRobustPayloads = async () =>
-  Promise.all(
-    latestRobustSuiteResultPaths.map(async ({ filePath, reportId }) => ({
-      reportId,
-      payload: await readOptionalJsonFile(filePath),
-    }))
-  );
 
 export const readLatestQualityReport = async () => {
   let payload = null;

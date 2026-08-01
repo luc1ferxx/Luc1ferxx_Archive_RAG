@@ -20,12 +20,22 @@ import {
   RELEASE_READINESS_SOURCE_IDS,
 } from "./eval-evidence-policy.js";
 import { buildRobustSuiteGate } from "./quality-robust-suite-gate.js";
+import { buildRobustSuiteExecutionPlan } from "./robust-suite-execution.js";
+import {
+  validateReleaseReportContract,
+} from "./release-report-contract-validation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const resultsDirectory = path.join(__dirname, "results");
 const LATEST_RELEASE_EVIDENCE_JSON = "latest-release-evidence.json";
 const LATEST_RELEASE_EVIDENCE_MD = "latest-release-evidence.md";
+const EXPECTED_RELEASE_ROBUST_SUITE_CONFIG_HASH =
+  buildRobustSuiteExecutionPlan({
+    options: {
+      syntheticProvider: "real",
+    },
+  }).configHash;
 
 const getRobustReportStatuses = (reports) => {
   const gate = buildRobustSuiteGate({
@@ -51,9 +61,13 @@ const getRobustReportStatuses = (reports) => {
   );
 };
 
-const reportPassed = ({ report, spec, robustStatuses }) => {
+const reportPassed = ({ contract, report, spec, robustStatuses }) => {
   if (spec.suiteId === "robust") {
     return robustStatuses.get(spec.id) === "pass";
+  }
+
+  if (contract.status !== "pass") {
+    return false;
   }
 
   if (spec.reportType === "runtime_smoke") {
@@ -73,7 +87,7 @@ const buildRobustLineageCheck = ({ reports, targetCommit }) => {
   ).map((spec) => reports[spec.id]?.evidence ?? null);
   const suites = suiteReports.map((evidence) => evidence?.suite ?? null);
   const firstSuite = suites[0] ?? null;
-  const matched =
+  const sameLineage =
     suiteReports.every(
       (evidence) => evidence?.git?.commitSha === targetCommit
     ) &&
@@ -86,19 +100,26 @@ const buildRobustLineageCheck = ({ reports, targetCommit }) => {
         suite?.runId === firstSuite.runId &&
         suite?.configHash === firstSuite.configHash
     );
+  const matched =
+    sameLineage &&
+    firstSuite.configHash === EXPECTED_RELEASE_ROBUST_SUITE_CONFIG_HASH;
+  const reasonCode = matched
+    ? RELEASE_EVIDENCE_REASON_CODES.ok
+    : sameLineage
+      ? RELEASE_EVIDENCE_REASON_CODES.configHashMismatch
+      : RELEASE_EVIDENCE_REASON_CODES.robustLineageSplit;
 
   return buildCheck({
     actual: suites,
     expected: {
       commitSha: targetCommit,
+      configHash: EXPECTED_RELEASE_ROBUST_SUITE_CONFIG_HASH,
       suiteId: "robust",
       sameRunId: true,
       sameConfigHash: true,
     },
     id: "robust-lineage",
-    reasonCode: matched
-      ? RELEASE_EVIDENCE_REASON_CODES.ok
-      : RELEASE_EVIDENCE_REASON_CODES.robustLineageSplit,
+    reasonCode,
     reportType: "suite",
   });
 };
@@ -137,15 +158,28 @@ export const buildReleaseEvidenceReport = ({
 } = {}) => {
   const nowMs = Date.parse(now);
   const robustStatuses = getRobustReportStatuses(reports);
+  const reportContracts = new Map(
+    [...RELEASE_EVIDENCE_REPORT_SPECS, ...RELEASE_EVIDENCE_SOURCE_SPECS].map(
+      (spec) => [
+        spec.id,
+        validateReleaseReportContract({
+          reportId: spec.id,
+          report: reports[spec.id] ?? null,
+          reports,
+        }),
+      ]
+    )
+  );
   const reportChecks = RELEASE_EVIDENCE_REPORT_SPECS.map((spec) => {
     const report = reports[spec.id] ?? null;
+    const contract = reportContracts.get(spec.id);
     const reasonCode = getEvaluationEvidenceFailureReason({
       expectedCorpusHash: expectedCorpusHashes[spec.id],
       maxAgeHours,
       nowMs,
       report,
       reportPassed: report
-        ? reportPassed({ report, spec, robustStatuses })
+        ? reportPassed({ contract, report, spec, robustStatuses })
         : false,
       spec,
       targetCommit,
@@ -159,6 +193,7 @@ export const buildReleaseEvidenceReport = ({
         corpusContentHash: expectedCorpusHashes[spec.id] ?? null,
         maxAgeHours,
         modelRouteId: spec.modelRouteId,
+        profile: spec.profile,
         providerId: spec.providerId,
         providerMode: spec.providerMode,
         reportId: spec.id,
@@ -172,12 +207,13 @@ export const buildReleaseEvidenceReport = ({
   });
   const sourceChecks = RELEASE_EVIDENCE_SOURCE_SPECS.map((spec) => {
     const report = reports[spec.id] ?? null;
+    const contract = reportContracts.get(spec.id);
     const reasonCode = getEvaluationEvidenceFailureReason({
       maxAgeHours,
       nowMs,
       report,
       reportPassed: report
-        ? reportPassed({ report, spec, robustStatuses })
+        ? reportPassed({ contract, report, spec, robustStatuses })
         : false,
       spec,
       targetCommit,
@@ -189,6 +225,7 @@ export const buildReleaseEvidenceReport = ({
         commitSha: targetCommit,
         maxAgeHours,
         modelRouteId: spec.modelRouteId,
+        profile: spec.profile,
         providerId: spec.providerId,
         providerMode: spec.providerMode,
         reportId: spec.id,
@@ -200,9 +237,30 @@ export const buildReleaseEvidenceReport = ({
       reportType: spec.reportType,
     });
   });
+  const contractChecks = [
+    ...RELEASE_EVIDENCE_REPORT_SPECS,
+    ...RELEASE_EVIDENCE_SOURCE_SPECS,
+  ]
+    .map((spec) => {
+      const contract = reportContracts.get(spec.id);
+      const report = reports[spec.id] ?? null;
+
+      return buildCheck({
+        actual: contract.issues,
+        expected: { rawReportContractPassed: true },
+        id: `${spec.id}-contract`,
+        reasonCode:
+          contract.status === "pass"
+            ? RELEASE_EVIDENCE_REASON_CODES.ok
+            : RELEASE_EVIDENCE_REASON_CODES.reportIntegrityFailed,
+        report,
+        reportType: spec.reportType,
+      });
+    });
   const checks = [
     ...reportChecks,
     ...sourceChecks,
+    ...contractChecks,
     buildRobustLineageCheck({ reports, targetCommit }),
     buildReadinessSourceCheck({ reports }),
   ];

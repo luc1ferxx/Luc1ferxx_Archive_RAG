@@ -31,7 +31,33 @@ const releaseEvidenceWorkflowPath = path.join(
   "workflows",
   "release-evidence.yml"
 );
+const evaluationDocsPath = path.join(repositoryRoot, "docs", "evaluation.md");
 const rootPackagePath = path.join(repositoryRoot, "package.json");
+const serverPackagePath = path.join(repositoryRoot, "server", "package.json");
+const pinnedArxivCorpusArtifactPath =
+  "server/evaluation/corpora/arxiv-computer-science-rerank-v1.json";
+
+test("quality, planner, robust, and release workflows cancel superseded runs on the same ref", async () => {
+  const workflows = await Promise.all(
+    [
+      workflowPath,
+      plannerRealGateWorkflowPath,
+      robustEvalSuiteWorkflowPath,
+      releaseEvidenceWorkflowPath,
+    ].map(async (workflowFile) => ({
+      workflowFile,
+      content: await readFile(workflowFile, "utf8"),
+    }))
+  );
+
+  for (const { workflowFile, content } of workflows) {
+    assert.match(
+      content,
+      /concurrency:\s*\n\s*group:\s*\$\{\{\s*github\.workflow\s*\}\}-\$\{\{\s*github\.ref\s*\}\}\s*\n\s*cancel-in-progress:\s*true/,
+      `${path.basename(workflowFile)} must cancel an older run for the same workflow and ref`
+    );
+  }
+});
 
 test("root current quality alias forwards command-line arguments", async () => {
   const packageJson = JSON.parse(await readFile(rootPackagePath, "utf8"));
@@ -57,6 +83,15 @@ test("root release evidence alias forwards command-line arguments", async () => 
   assert.equal(
     packageJson.scripts?.["release:gate"],
     "cd server && npm run release:gate --"
+  );
+});
+
+test("server exposes a dedicated robust-suite gate", async () => {
+  const packageJson = JSON.parse(await readFile(serverPackagePath, "utf8"));
+
+  assert.equal(
+    packageJson.scripts?.["robust:gate"],
+    "node evaluation/check-robust-suite.mjs"
   );
 });
 
@@ -142,15 +177,11 @@ test("quality gate workflow regenerates and validates current-commit evidence", 
     /run:\s*npm run eval:synthetic -- evaluation\/synthetic-corpus-near-duplicate\.json --latest-name latest-quality --openai-provider deterministic/
   );
   assert.match(workflow, /run:\s*npm run eval:trajectory/);
-  assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
+  assert.doesNotMatch(workflow, /OPENAI_API_KEY/);
   assert.match(workflow, /name:\s*Run planner eval \(mock\)/);
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider mock/);
-  assert.match(workflow, /name:\s*Run planner eval \(real\)/);
-  assert.match(
-    workflow,
-    /if:\s*\$\{\{\s*!cancelled\(\) && env\.OPENAI_API_KEY != ''\s*\}\}/
-  );
-  assert.match(workflow, /run:\s*npm run eval:planner -- --provider real/);
+  assert.doesNotMatch(workflow, /name:\s*Run planner eval \(real\)/);
+  assert.doesNotMatch(workflow, /run:\s*npm run eval:planner -- --provider real/);
   assert.match(workflow, /name:\s*Run recovery observability eval/);
   assert.match(workflow, /run:\s*npm run eval:recovery-observability/);
   assert.match(workflow, /name:\s*Run feedback regression eval/);
@@ -160,10 +191,7 @@ test("quality gate workflow regenerates and validates current-commit evidence", 
     workflow,
     /run:\s*npm run quality:current -- --target-commit "\$EVAL_TARGET_COMMIT_SHA"/
   );
-  assert.match(
-    workflow,
-    /run:\s*npm run quality:current -- --target-commit "\$EVAL_TARGET_COMMIT_SHA" --require-planner-real/
-  );
+  assert.doesNotMatch(workflow, /--require-planner-real/);
   assert.doesNotMatch(workflow, /run:\s*npm run quality:gate/);
   assert.ok(
     workflow.indexOf("run: npm run eval:synthetic") <
@@ -213,7 +241,11 @@ test("planner real provider workflow runs a required scheduled gate", async () =
 
   assert.match(workflow, /name:\s*Planner Real Provider Gate/);
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /schedule:\s*\n\s*-\s*cron:\s*"0 9 \* \* \*"/);
+  assert.match(
+    workflow,
+    /schedule:\s*\n\s*-\s*cron:\s*"0 9 \* \* 0,2-6"/
+  );
+  assert.doesNotMatch(workflow, /cron:\s*"0 9 \* \* 1"/);
   assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
   assert.match(workflow, /services:\s*\n\s*postgres:/);
   assert.match(workflow, /image:\s*postgres:16/);
@@ -271,12 +303,42 @@ test("robust eval suite is manual-only because the scheduled release gate owns t
   assert.match(workflow, /run:\s*npm run eval:robust-suite/);
   assert.match(
     workflow,
-    /run:\s*npm run quality:gate -- --fail-on-warn --require-robust-suite/
+    /run:\s*npm run robust:gate -- --fail-on-warn/
   );
+  assert.doesNotMatch(workflow, /run:\s*npm run quality:gate/);
   assert.match(workflow, /server\/evaluation\/results\/latest\.\*/);
   assert.match(workflow, /server\/evaluation\/results\/latest-rerank-hard-cs\.\*/);
   assert.match(workflow, /server\/evaluation\/results\/latest-arxiv-rerank\.\*/);
+  assert.ok(
+    workflow.includes(pinnedArxivCorpusArtifactPath),
+    "the robust artifact must include the exact pinned corpus used by the report"
+  );
   assert.match(workflow, /actions\/upload-artifact@v4/);
+});
+
+test("evaluation docs identify release evidence as the only weekly robust owner", async () => {
+  const documentation = await readFile(evaluationDocsPath, "utf8");
+
+  assert.match(
+    documentation,
+    /`Robust Eval Suite` workflow 仅通过 `workflow_dispatch` 手动触发/
+  );
+  assert.match(
+    documentation,
+    /`Release Evidence Gate` workflow 通过 `workflow_dispatch` 和每周一 `0 11 \* \* 1` schedule 触发/
+  );
+  assert.doesNotMatch(
+    documentation,
+    /`Robust Eval Suite` workflow 通过 `workflow_dispatch` 和每周一 schedule 触发/
+  );
+  assert.match(
+    documentation,
+    /`Planner Real Provider Gate` workflow 通过 `workflow_dispatch` 和每周二至周日 `0 9 \* \* 0,2-6` schedule 触发/
+  );
+  assert.match(
+    documentation,
+    /周一由 `Release Evidence Gate` 在 `0 11 \* \* 1` 统一覆盖 planner、runtime、recovery 和 readiness 信号/
+  );
 });
 
 test("release evidence workflow pins manual and scheduled runs to one target SHA", async () => {
@@ -335,15 +397,16 @@ test("release evidence workflow generates every required report in one Postgres-
     "run: npm run eval:robust-suite"
   );
   const robustGateCommand =
-    "run: npm run quality:gate -- --fail-on-warn --require-robust-suite";
+    "run: npm run robust:gate -- --fail-on-warn";
   const robustGateIndex = workflow.indexOf(robustGateCommand);
 
   assert.ok(robustSuiteIndex >= 0);
   assert.ok(
     robustGateIndex > robustSuiteIndex,
-    "the scheduled release job must preserve the historical robust regression gate"
+    "the scheduled release job must run the scoped robust gate after its suite"
   );
-  assert.doesNotMatch(workflow, /quality:gate[^\n]*--no-fail/);
+  assert.doesNotMatch(workflow, /run:\s*npm run quality:gate/);
+  assert.doesNotMatch(workflow, /robust:gate[^\n]*--no-fail/);
 
   const reportCommands = [
     "npm run eval:robust-suite",
@@ -388,7 +451,7 @@ test("release evidence workflow still emits gate evidence after an eval failure"
   );
   assert.match(
     workflow,
-    /name:\s*Check robust quality gate\s+if:\s*\$\{\{\s*!cancelled\(\)\s*\}\}\s+run:\s*npm run quality:gate -- --fail-on-warn --require-robust-suite/
+    /name:\s*Check robust quality gate\s+if:\s*\$\{\{\s*!cancelled\(\)\s*\}\}\s+run:\s*npm run robust:gate -- --fail-on-warn/
   );
   assert.match(
     workflow,
@@ -406,6 +469,10 @@ test("release evidence workflow uploads the complete JSON and Markdown evidence 
     /name:\s*release-evidence-\$\{\{\s*env\.EVAL_TARGET_COMMIT_SHA\s*\}\}/
   );
   assert.match(workflow, /if-no-files-found:\s*error/);
+  assert.ok(
+    workflow.includes(pinnedArxivCorpusArtifactPath),
+    "the release artifact must include the exact pinned corpus used by the robust report"
+  );
 
   const reportNames = [
     "latest",

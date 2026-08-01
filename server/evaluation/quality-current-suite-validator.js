@@ -11,6 +11,7 @@ import {
 } from "./eval-evidence.js";
 import { evaluateAnswerExpectation } from "./answer-match.js";
 import { evaluateExpectedCoverage } from "./eval-case-helpers.js";
+import { isExplicitAbstainAnswer } from "./explicit-abstain-answer.js";
 import { splitAnswerClaims } from "../rag/self-check/claims.js";
 import { evaluateClaimSupport } from "../rag/self-check/evaluate.js";
 
@@ -89,22 +90,6 @@ const deriveAnswerClaimContract = ({ answer, citations }) =>
     text: normalizeText(claim.text),
   }));
 
-const isExplicitAbstainAnswer = (answer) => {
-  const text = normalizeText(answer);
-
-  if (!text) {
-    return false;
-  }
-
-  return [
-    /^I (?:could not|couldn't) find enough grounded evidence in (?:the )?(?:uploaded|selected) documents(?: to answer reliably| to compare them)?[.!]?$/i,
-    /^I (?:could not|couldn't) find enough grounded evidence that specifically addresses [^.!?]+(?: in \d+ of the \d+ selected documents, so the comparison would be unreliable)?[.!]?$/i,
-    /^I do not have enough citation-backed evidence to answer reliably[.!]?$/i,
-    /^I have not found reliable evidence that directly answers [^.!?]+[.!]?$/i,
-    /^I only found strong evidence in \d+ of the \d+ selected documents, so the comparison would be unreliable[.!]?$/i,
-  ].some((pattern) => pattern.test(text));
-};
-
 const toUniqueNonEmptyStrings = (items) =>
   toArray(items)
     .map((item) => normalizeText(item))
@@ -125,7 +110,13 @@ const addMetricMismatch = ({
   }
 };
 
-const validateReportEnvelopeIntegrity = (report) => {
+export const validateReportEnvelopeIntegrity = (
+  report,
+  {
+    contentGeneratedAt = report?.summary?.createdAt,
+    contentRunId = report?.summary?.runId,
+  } = {}
+) => {
   if (!report) {
     return [];
   }
@@ -134,12 +125,12 @@ const validateReportEnvelopeIntegrity = (report) => {
   const pairs = [
     {
       actual: report?.evidence?.runId,
-      expected: report?.summary?.runId,
+      expected: contentRunId,
       id: "envelope.runId",
     },
     {
       actual: report?.evidence?.generatedAt,
-      expected: report?.summary?.createdAt,
+      expected: contentGeneratedAt,
       id: "envelope.generatedAt",
     },
     {

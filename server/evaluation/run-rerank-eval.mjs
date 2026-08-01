@@ -6,10 +6,18 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ingestDocumentPages } from "../chat.js";
 import {
+  getChunkOverlap,
+  getChunkSize,
+  getChunkStrategy,
   getComparisonTopKPerDoc,
+  getKeywordWeight,
   getRerankProvider,
   getRerankWeight,
+  getRetrievalScoringMode,
   getRetrievalTopK,
+  getVectorStoreProvider,
+  getVectorWeight,
+  isHybridRetrievalEnabled,
 } from "../rag/config.js";
 import { getResultKey } from "../rag/citations.js";
 import { resetDocumentRegistry } from "../rag/doc-registry.js";
@@ -28,18 +36,19 @@ import {
 } from "./eval-evidence.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
 import {
+  buildExpectedEvidenceUnits,
   findRobustReport as findRobustReportGeneric,
   hashToken,
   toDeterministicEmbedding,
 } from "./eval-case-helpers.js";
 import {
+  readOptionValue,
   resolveCorpusPath as resolveCorpusPathGeneric,
   toPositiveInteger,
   toRunId,
   validateLatestName,
   writeJson,
 } from "./eval-cli.js";
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -70,7 +79,19 @@ const configureDeterministicEmbeddingProvider = () => {
   });
 };
 
-const parseArgs = (argv) => {
+const RERANK_VALUE_OPTIONS = new Set([
+  "--candidate-multiplier",
+  "--cross-encoder-endpoint",
+  "--cross-encoder-model",
+  "--embedding-provider",
+  "--latest-name",
+  "--rerank-provider",
+  "--rerank-weight",
+  "--top-k",
+  "--top-k-per-doc",
+]);
+
+export const parseRerankEvalArgs = (argv) => {
   const args = {
     positional: [],
   };
@@ -79,21 +100,30 @@ const parseArgs = (argv) => {
     const rawArg = argv[index];
 
     if (!rawArg.startsWith("--")) {
+      if (args.positional.length > 0) {
+        throw new Error(`Unexpected positional argument: ${rawArg}`);
+      }
+
       args.positional.push(rawArg);
       continue;
     }
 
-    const [key, inlineValue] = rawArg.slice(2).split("=", 2);
-    const nextValue = argv[index + 1];
+    const equalsIndex = rawArg.indexOf("=");
+    const option = equalsIndex >= 0 ? rawArg.slice(0, equalsIndex) : rawArg;
 
-    if (inlineValue !== undefined) {
-      args[key] = inlineValue;
-    } else if (nextValue && !nextValue.startsWith("--")) {
-      args[key] = nextValue;
-      index += 1;
-    } else {
-      args[key] = true;
+    if (!RERANK_VALUE_OPTIONS.has(option)) {
+      throw new Error(`Unknown option: ${option}`);
     }
+
+    const { nextIndex, value } = readOptionValue({
+      arg: rawArg,
+      args: argv,
+      index,
+      option,
+    });
+
+    args[option.slice(2)] = value;
+    index = nextIndex;
   }
 
   return args;
@@ -132,43 +162,6 @@ const resolveCorpusPath = (requestedPath) =>
 
 const findRobustReport = ({ corpusPath, latestName }) =>
   findRobustReportGeneric({ corpusPath, latestName, reportType: "rerank" });
-
-const buildExpectedUnits = (expectedEvidence = []) => {
-  const units = [];
-
-  for (const expected of expectedEvidence ?? []) {
-    const docKey = String(expected?.docKey ?? "").trim();
-
-    if (!docKey) {
-      continue;
-    }
-
-    const pages = Array.isArray(expected.pages)
-      ? expected.pages
-          .map((page) => Number(page))
-          .filter((page) => Number.isFinite(page) && page > 0)
-      : [];
-
-    if (pages.length === 0) {
-      units.push({
-        key: `${docKey}:*`,
-        docKey,
-        pageNumber: null,
-      });
-      continue;
-    }
-
-    for (const pageNumber of pages) {
-      units.push({
-        key: `${docKey}:${pageNumber}`,
-        docKey,
-        pageNumber,
-      });
-    }
-  }
-
-  return units;
-};
 
 const getResultDocKey = (result, docKeyByDocId) =>
   docKeyByDocId.get(result?.document?.metadata?.docId) ?? null;
@@ -365,7 +358,13 @@ const calculateMetricLift = (baselineMetrics, rerankedMetrics) => {
   return lift;
 };
 
-const summarizeResult = ({ result, docKeyByDocId, expectedUnits, rank }) => {
+const summarizeResult = ({
+  result,
+  docKeyByDocId,
+  expectedUnits,
+  includeText = false,
+  rank,
+}) => {
   const relevance = getRelevance({
     result,
     expectedUnits,
@@ -386,6 +385,9 @@ const summarizeResult = ({ result, docKeyByDocId, expectedUnits, rank }) => {
     keywordScore: round(Number(result?.keywordScore), 6),
     relevanceGrade: relevance.relevanceGrade,
     relevant: relevance.exactRelevant,
+    ...(includeText
+      ? { text: String(result?.document?.pageContent ?? "") }
+      : {}),
   };
 };
 
@@ -422,7 +424,7 @@ const buildComparisonCaseResult = async ({
 
   for (const docKey of testCase.docKeys) {
     const docId = docIdByKey.get(docKey);
-    const expectedUnits = buildExpectedUnits(
+    const expectedUnits = buildExpectedEvidenceUnits(
       (testCase.expectedEvidence ?? []).filter((entry) => entry.docKey === docKey)
     );
 
@@ -470,6 +472,15 @@ const buildComparisonCaseResult = async ({
         docKeyByDocId,
         k: topKPerDoc,
       }),
+      candidateRanking: candidates.map((result, index) =>
+        summarizeResult({
+          result,
+          docKeyByDocId,
+          expectedUnits,
+          includeText: true,
+          rank: index + 1,
+        })
+      ),
       baselineRanking: baselineRanking.map((result, index) =>
         summarizeResult({
           result,
@@ -507,7 +518,7 @@ const buildComparisonCaseResult = async ({
       (sum, entry) => sum + entry.candidateCount,
       0
     ),
-    expectedUnits: buildExpectedUnits(testCase.expectedEvidence),
+    expectedUnits: buildExpectedEvidenceUnits(testCase.expectedEvidence),
     responseTimeMs: Math.round(performance.now() - startedAt),
     baselineMetrics,
     rerankedMetrics,
@@ -528,7 +539,7 @@ const buildGlobalCaseResult = async ({
 }) => {
   const queryVector = await embedQuery(testCase.question);
   const docIds = testCase.docKeys.map((docKey) => docIdByKey.get(docKey)).filter(Boolean);
-  const expectedUnits = buildExpectedUnits(testCase.expectedEvidence);
+  const expectedUnits = buildExpectedEvidenceUnits(testCase.expectedEvidence);
   const startedAt = performance.now();
   const candidates = await searchDocuments({
     queryVector,
@@ -575,6 +586,15 @@ const buildGlobalCaseResult = async ({
       docKeyByDocId,
       k: topK,
     }),
+    candidateRanking: candidates.map((result, index) =>
+      summarizeResult({
+        result,
+        docKeyByDocId,
+        expectedUnits,
+        includeText: true,
+        rank: index + 1,
+      })
+    ),
     baselineRanking: baselineRanking.map((result, index) =>
       summarizeResult({
         result,
@@ -773,7 +793,7 @@ export const runRerankEvaluation = async ({
         continue;
       }
 
-      const expectedUnits = buildExpectedUnits(testCase.expectedEvidence);
+      const expectedUnits = buildExpectedEvidenceUnits(testCase.expectedEvidence);
 
       if (expectedUnits.length === 0) {
         skippedCases.push({
@@ -817,6 +837,14 @@ export const runRerankEvaluation = async ({
       caseCount: caseResults.length,
       skippedCaseCount: skippedCases.length,
       config: {
+        chunkStrategy: getChunkStrategy(),
+        chunkSize: getChunkSize(),
+        chunkOverlap: getChunkOverlap(),
+        vectorStoreProvider: getVectorStoreProvider(),
+        hybridEnabled: isHybridRetrievalEnabled(),
+        retrievalScoringMode: getRetrievalScoringMode(),
+        vectorWeight: getVectorWeight(),
+        keywordWeight: getKeywordWeight(),
         topK,
         topKPerDoc,
         candidateMultiplier,
@@ -882,7 +910,7 @@ export const runRerankEvaluation = async ({
 };
 
 const main = async () => {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseRerankEvalArgs(process.argv.slice(2));
   const corpusPath = resolveCorpusPath(args.positional[0]);
   const topK = toPositiveInteger(args["top-k"], getRetrievalTopK(), "--top-k");
   const topKPerDoc = toPositiveInteger(

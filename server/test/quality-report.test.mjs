@@ -12,6 +12,16 @@ import {
   buildRecoveryObservabilityEvaluationReport,
   buildRecoveryObservabilityFixtureEvents,
 } from "../evaluation/recovery-observability-eval.js";
+import {
+  buildPassingRobustRerankReport,
+  buildPassingRobustSyntheticReport,
+} from "./fixtures/release-evidence-report-fixtures.mjs";
+
+const compareHardSyntheticTemplate = await buildPassingRobustSyntheticReport({
+  corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  createdAt: "2026-06-08T10:00:00.000Z",
+  runId: "compare-hard-template",
+});
 
 const buildPassingSyntheticPayload = ({
   config = null,
@@ -20,27 +30,35 @@ const buildPassingSyntheticPayload = ({
   metrics = {},
   models = null,
   runId,
-} = {}) => ({
-  summary: {
-    runId,
-    createdAt,
-    corpus: {
-      path: corpusPath,
-      cases: 1,
-    },
-    ...(config ? { config } : {}),
-    ...(models ? { models } : {}),
-    metrics: {
-      overallPassRate: 1,
-      qaPageHitRate: 1,
-      comparePageHitRate: 1,
-      averageCitationCount: 2,
+} = {}) => {
+  const isComparisonCorpus = corpusPath.endsWith(
+    "synthetic-corpus-compare-hard.json"
+  );
+  if (isComparisonCorpus) {
+    const payload = structuredClone(compareHardSyntheticTemplate);
+
+    payload.summary.runId = runId ?? payload.summary.runId;
+    payload.summary.createdAt = createdAt ?? payload.summary.createdAt;
+    payload.summary.corpus.path = corpusPath;
+    payload.summary.metrics = {
+      ...payload.summary.metrics,
       ...metrics,
-    },
-  },
-  cases: [
+    };
+
+    if (config) {
+      payload.summary.config = structuredClone(config);
+    }
+    if (models) {
+      payload.summary.models = structuredClone(models);
+    }
+
+    return payload;
+  }
+
+  const cases = [
     {
       id: "qa-1",
+      type: "qa",
       passed: true,
       shouldAbstain: false,
       abstained: false,
@@ -48,50 +66,102 @@ const buildPassingSyntheticPayload = ({
       pageCoverageHit: true,
       answerExpectationHit: true,
     },
-  ],
-});
+  ];
 
-const buildPassingRerankPayload = ({
-  corpusPath,
-  runId,
-} = {}) => ({
-  summary: {
-    runId,
+  return {
+    summary: {
+      runId,
+      createdAt,
+      corpus: {
+        path: corpusPath,
+        cases: cases.length,
+      },
+      ...(config ? { config } : {}),
+      ...(models ? { models } : {}),
+      metrics: {
+        overallPassRate: 1,
+        qaPageHitRate: 1,
+        comparePageHitRate: 1,
+        averageCitationCount: 2,
+        ...(isComparisonCorpus ? { comparisonExpectationHitRate: 1 } : {}),
+        ...metrics,
+      },
+    },
+    cases,
+  };
+};
+
+const buildPassingRerankPayload = ({ corpusPath, runId } = {}) =>
+  buildPassingRobustRerankReport({
+    corpusPath,
     createdAt: "2026-06-08T10:30:00.000Z",
-    corpus: {
-      path: corpusPath,
-      cases: 2,
-    },
-    caseCount: 2,
+    runId,
+  });
+
+const buildRequiredRobustHistory = (
+  syntheticPayload,
+  { arxivPayload = null, hardCsPayload = null } = {}
+) =>
+  buildQualityHistoryResponse({
+    latestPayload: syntheticPayload,
+    latestRobustPayloads: [
+      {
+        reportId: "compare-hard-synthetic",
+        payload: syntheticPayload,
+      },
+      {
+        reportId: "rerank-hard-cs",
+        payload:
+          hardCsPayload ??
+          buildPassingRerankPayload({
+            corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+            runId: "hard-cs-rerank",
+          }),
+      },
+      {
+        reportId: "arxiv-real-paper-rerank",
+        payload:
+          arxivPayload ??
+          buildPassingRerankPayload({
+            corpusPath:
+              "evaluation/corpora/arxiv-computer-science-rerank-v1.json",
+            runId: "arxiv-rerank",
+          }),
+      },
+    ],
+    requireRobustSuite: true,
+    runPayloads: [],
+  });
+
+const supportedDifferenceClaim = {
+  text: "The documents specify different remote-work limits.",
+  supported: true,
+  section: "differences",
+  sectionId: "difference-1",
+  supportedCitedDocIds: ["alpha", "beta"],
+};
+
+const buildComparisonSyntheticPayload = ({ runId } = {}) => {
+  const payload = buildPassingSyntheticPayload({
+    runId,
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
     metrics: {
-      baseline: {
-        ndcgAtK: 0.75,
-        recallAtK: 0.8,
-        mrr: 0.7,
-      },
-      reranked: {
-        ndcgAtK: 0.9,
-        recallAtK: 0.8,
-        mrr: 0.85,
-      },
-      lift: {
-        ndcgAtK: {
-          absolute: 0.15,
-          relative: 0.2,
-        },
-      },
-      noiseFilteringRate: 0.4,
+      comparisonExpectationHitRate: 1,
     },
-  },
-  cases: [
-    {
-      id: "rerank-1",
-    },
-    {
-      id: "rerank-2",
-    },
-  ],
-});
+  });
+
+  const comparisonCaseIndex = payload.cases.findIndex(
+    (caseResult) =>
+      caseResult.type === "compare" &&
+      caseResult.compareExpectation === "difference"
+  );
+  const comparisonCase = payload.cases[comparisonCaseIndex];
+  payload.cases.splice(comparisonCaseIndex, 1);
+  payload.cases.unshift(comparisonCase);
+
+  return payload;
+};
 
 const buildPassingPlannerPayload = ({
   provider = "mock",
@@ -1019,7 +1089,8 @@ test("quality history requires robust hard and real eval suite when requested", 
       {
         reportId: "arxiv-real-paper-rerank",
         payload: buildPassingRerankPayload({
-          corpusPath: "evaluation/generated/arxiv-corpus.json",
+          corpusPath:
+            "evaluation/corpora/arxiv-computer-science-rerank-v1.json",
           runId: "arxiv-rerank",
         }),
       },
@@ -1048,6 +1119,615 @@ test("quality history requires robust hard and real eval suite when requested", 
         check.metric === "robustSuiteRerankNdcgLift" &&
         check.reportId === "arxiv-real-paper-rerank" &&
         check.status === "pass"
+    )
+  );
+});
+
+test("robust suite rejects a synthetic report whose declared cases hide an empty raw case list", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-empty-raw-cases",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  latestPayload.summary.caseCount = 1;
+  latestPayload.cases = [];
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const caseContractCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteCaseContract"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.equal(history.qualityGate.status, "fail");
+  assert.equal(caseContractCheck?.status, "fail");
+  assert.equal(
+    caseContractCheck?.detail?.reasonCode,
+    "robust_case_contract_invalid"
+  );
+  assert.deepEqual(
+    caseContractCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    [
+      "raw_cases_empty",
+      "summary_case_count_mismatch",
+    ]
+  );
+});
+
+test("robust suite recomputes synthetic pass rate from raw case outcomes", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-forged-summary-pass-rate",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const failedRawCase = latestPayload.cases.find(
+    (caseResult) => caseResult.shouldAbstain === false
+  );
+  failedRawCase.rawAnswer = `${failedRawCase.rawAnswer}\nSummary:\n- The annual allowance is 999 days. [Source 1]`;
+  failedRawCase.rawClaimSupportHit = false;
+  failedRawCase.passed = false;
+  latestPayload.summary.metrics.overallPassRate = 1;
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const metricContractCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteMetricContract"
+  );
+  const passRateCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteOverallPassRate"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.equal(metricContractCheck?.status, "fail");
+  assert.ok(
+    metricContractCheck?.detail?.issues.some(
+      (issue) =>
+        issue.reasonCode === "synthetic_overall_pass_rate_mismatch"
+    )
+  );
+  assert.equal(passRateCheck?.status, "fail");
+  assert.equal(passRateCheck?.currentValue, 0.875);
+});
+
+test("robust suite rejects a rerank report whose declared cases hide an empty raw case list", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-valid-for-empty-rerank",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const hardCsPayload = buildPassingRerankPayload({
+    corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+    runId: "hard-cs-empty-raw-cases",
+  });
+  hardCsPayload.cases = [];
+
+  const history = buildRequiredRobustHistory(latestPayload, {
+    hardCsPayload,
+  });
+  const report = history.robustSuiteGate.reports.find(
+    (entry) => entry.reportId === "rerank-hard-cs"
+  );
+  const caseContractCheck = report?.checks.find(
+    (check) => check.metric === "robustSuiteCaseContract"
+  );
+
+  assert.equal(report?.status, "fail");
+  assert.deepEqual(
+    caseContractCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    [
+      "raw_cases_empty",
+      "summary_case_count_mismatch",
+    ]
+  );
+});
+
+test("robust suite rejects forged per-case rerank metrics without altering replayable rankings", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-valid-for-forged-rerank-metrics",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const hardCsPayload = buildPassingRerankPayload({
+    corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+    runId: "hard-cs-forged-summary-metrics",
+  });
+  hardCsPayload.cases[0].rerankedMetrics.ndcgAtK = 0;
+
+  const history = buildRequiredRobustHistory(latestPayload, {
+    hardCsPayload,
+  });
+  const report = history.robustSuiteGate.reports.find(
+    (entry) => entry.reportId === "rerank-hard-cs"
+  );
+  const metricContractCheck = report?.checks.find(
+    (check) => check.metric === "robustSuiteMetricContract"
+  );
+  const rawRankingContractCheck = report?.checks.find(
+    (check) => check.metric === "robustSuiteRawRankingContract"
+  );
+  const ndcgRegressionCheck = report?.checks.find(
+    (check) => check.metric === "robustSuiteRerankNdcgRegression"
+  );
+
+  assert.equal(report?.status, "fail");
+  assert.equal(rawRankingContractCheck?.status, "fail");
+  assert.ok(
+    rawRankingContractCheck?.detail?.issues.some(
+      (issue) => issue.reasonCode === "reported_ranking_metric_mismatch"
+    )
+  );
+  assert.equal(metricContractCheck?.status, "pass");
+  assert.equal(ndcgRegressionCheck?.status, "pass");
+  assert.ok(ndcgRegressionCheck.currentValue >= 0);
+});
+
+test("robust suite rejects an invalid declared case count even when raw cases are present", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-valid-for-invalid-rerank-count",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const hardCsPayload = buildPassingRerankPayload({
+    corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+    runId: "hard-cs-invalid-count",
+  });
+  hardCsPayload.summary.caseCount = "2";
+
+  const history = buildRequiredRobustHistory(latestPayload, {
+    hardCsPayload,
+  });
+  const caseContractCheck = history.robustSuiteGate.checks.find(
+    (check) =>
+      check.reportId === "rerank-hard-cs" &&
+      check.metric === "robustSuiteCaseContract"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    caseContractCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    ["summary_case_count_invalid"]
+  );
+});
+
+test("robust suite rejects a rerank report without its required summary case count", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-valid-for-missing-rerank-count",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const hardCsPayload = buildPassingRerankPayload({
+    corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+    runId: "hard-cs-missing-count",
+  });
+  delete hardCsPayload.summary.caseCount;
+
+  const history = buildRequiredRobustHistory(latestPayload, {
+    hardCsPayload,
+  });
+  const caseContractCheck = history.robustSuiteGate.checks.find(
+    (check) =>
+      check.reportId === "rerank-hard-cs" &&
+      check.metric === "robustSuiteCaseContract"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    caseContractCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    ["summary_case_count_missing"]
+  );
+});
+
+test("robust suite rejects duplicated raw case identities", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-valid-for-duplicate-rerank-case",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  const hardCsPayload = buildPassingRerankPayload({
+    corpusPath: "evaluation/synthetic-corpus-rerank-hard-cs.json",
+    runId: "hard-cs-duplicate-raw-case",
+  });
+  hardCsPayload.cases[1].id = hardCsPayload.cases[0].id;
+
+  const history = buildRequiredRobustHistory(latestPayload, {
+    hardCsPayload,
+  });
+  const caseContractCheck = history.robustSuiteGate.checks.find(
+    (check) =>
+      check.reportId === "rerank-hard-cs" &&
+      check.metric === "robustSuiteCaseContract"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.ok(
+    caseContractCheck?.detail?.issues.some(
+      (issue) => issue.reasonCode === "raw_case_id_duplicate"
+    )
+  );
+});
+
+test("robust suite rejects raw cases without a type", () => {
+  const latestPayload = buildPassingSyntheticPayload({
+    runId: "compare-hard-missing-case-type",
+    createdAt: "2026-06-08T10:00:00.000Z",
+    corpusPath: "evaluation/synthetic-corpus-compare-hard.json",
+  });
+  delete latestPayload.cases[0].type;
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const caseContractCheck = history.robustSuiteGate.checks.find(
+    (check) =>
+      check.reportId === "compare-hard-synthetic" &&
+      check.metric === "robustSuiteCaseContract"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.ok(
+    caseContractCheck?.detail?.issues.some(
+      (issue) => issue.reasonCode === "raw_case_type_missing"
+    )
+  );
+});
+
+test("robust suite fails closed when comparison semantic fields contradict a passing case", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-contradictory",
+  });
+  latestPayload.cases[0].comparisonVerdict.actual = "unresolved";
+  latestPayload.cases[0].comparisonVerdict.passed = false;
+  latestPayload.cases[0].comparisonVerdict.reasonCode =
+    "missing_supported_cross_document_difference";
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.equal(history.qualityGate.status, "fail");
+  assert.equal(semanticCheck?.status, "fail");
+  assert.equal(
+    semanticCheck?.detail?.reasonCode,
+    "comparison_semantics_inconsistent"
+  );
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    [
+      "comparison_verdict_actual_mismatch",
+      "comparison_verdict_passed_mismatch",
+      "comparison_verdict_reason_code_mismatch",
+    ]
+  );
+});
+
+test("robust suite binds a comparison verdict to the case expectation", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-wrong-verdict-expectation",
+  });
+  latestPayload.cases[0].comparisonVerdict.expected = "no_difference";
+  latestPayload.cases[0].comparisonVerdict.actual = "no_difference";
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.ok(
+    semanticCheck?.detail?.issues.some(
+      (issue) =>
+        issue.reasonCode === "comparison_verdict_expectation_mismatch"
+    )
+  );
+});
+
+test("robust suite independently recomputes a forged passing comparison verdict", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-forged-verdict",
+  });
+  latestPayload.cases[0].rawAnswer =
+    "The annual allowance is 999 days. [Source 1]";
+  latestPayload.cases[0].answer =
+    "The annual allowance is 999 days. [Source 1]";
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.equal(history.qualityGate.status, "fail");
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    [
+      "comparison_raw_claim_support_hit_mismatch",
+      "comparison_verdict_actual_mismatch",
+      "comparison_verdict_passed_mismatch",
+      "comparison_verdict_reason_code_mismatch",
+      "comparison_verdict_hit_mismatch",
+      "comparison_case_pass_mismatch",
+      "comparison_expectation_hit_rate_mismatch",
+    ]
+  );
+});
+
+test("robust suite checks the reported comparison verdict checked flag against recomputation", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-unchecked-verdict",
+  });
+  latestPayload.cases[0].comparisonVerdict.checked = false;
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    ["comparison_verdict_checked_mismatch"]
+  );
+});
+
+test("robust suite accepts comparison semantics that match independent recomputation", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-consistent-verdict",
+  });
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "pass");
+  assert.equal(semanticCheck?.status, "pass");
+  assert.equal(semanticCheck?.detail?.reasonCode, "ok");
+  assert.deepEqual(semanticCheck?.detail?.issues, []);
+});
+
+test("robust suite recomputes case pass instead of trusting a forged passing base check", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-forged-case-pass",
+  });
+  latestPayload.cases[0].rawAnswer = `${latestPayload.cases[0].rawAnswer}\nSummary:\n- The annual allowance is 999 days. [Source 1]`;
+  latestPayload.cases[0].rawClaimSupportHit = false;
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    ["comparison_case_pass_mismatch"]
+  );
+  assert.deepEqual(semanticCheck?.detail?.issues[0], {
+    reasonCode: "comparison_case_pass_mismatch",
+    caseId: "compare_remote_numeric_conflict_hard",
+    expected: false,
+    actual: true,
+  });
+});
+
+test("robust suite rejects a coherent verdict when raw claim support failed", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-raw-unsupported",
+  });
+  latestPayload.cases[0].rawClaimSupport = {
+    checked: true,
+    supportedClaimCount: 1,
+    unsupportedClaimCount: 1,
+    claims: [
+      supportedDifferenceClaim,
+      {
+        text: "An unsupported raw comparison claim.",
+        supported: false,
+      },
+    ],
+  };
+  latestPayload.cases[0].rawAnswer = `${latestPayload.cases[0].rawAnswer}\nSummary:\n- The annual allowance is 999 days. [Source 1]`;
+  latestPayload.cases[0].rawClaimSupportHit = false;
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    ["comparison_case_pass_mismatch"]
+  );
+});
+
+test("robust suite recomputes raw claim support instead of trusting a forged hit", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-forged-raw-support-hit",
+  });
+  latestPayload.cases[0].rawClaimSupport = {
+    checked: true,
+    supportedClaimCount: 1,
+    unsupportedClaimCount: 0,
+    claims: [
+      supportedDifferenceClaim,
+      {
+        text: "An unsupported raw comparison claim.",
+        supported: false,
+      },
+    ],
+  };
+  latestPayload.cases[0].rawAnswer = `${latestPayload.cases[0].rawAnswer}\nSummary:\n- The annual allowance is 999 days. [Source 1]`;
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    [
+      "comparison_raw_claim_support_hit_mismatch",
+      "comparison_case_pass_mismatch",
+    ]
+  );
+});
+
+test("robust suite requires document and page coverage for comparison abstention cases", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-abstain-zero-coverage",
+  });
+  const abstainCase = latestPayload.cases.find(
+    (caseResult) => caseResult.compareExpectation === "abstain"
+  );
+  Object.assign(abstainCase, {
+    docCoverageHit: false,
+    pageCoverageHit: false,
+    rawCitations: [],
+    rawRetrievedContexts: [],
+    citations: [],
+    retrievedContexts: [],
+    passed: true,
+  });
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    ["comparison_case_pass_mismatch"]
+  );
+});
+
+test("robust suite rejects non-boolean inputs used to derive comparison case pass", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-invalid-base-boolean",
+  });
+  latestPayload.cases[0].rawClaimSupportHit = "true";
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    [
+      "comparison_case_boolean_invalid",
+      "comparison_raw_claim_support_hit_mismatch",
+    ]
+  );
+  assert.deepEqual(semanticCheck?.detail?.issues[0], {
+    reasonCode: "comparison_case_boolean_invalid",
+    caseId: "compare_remote_numeric_conflict_hard",
+    field: "rawClaimSupportHit",
+    expected: "boolean",
+    actual: "true",
+  });
+});
+
+test("robust suite fails closed when required comparison booleans and aggregate are missing", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-missing-semantics",
+  });
+  delete latestPayload.cases[0].comparisonExpectationHit;
+  delete latestPayload.cases[0].comparisonVerdict.passed;
+  delete latestPayload.summary.metrics.comparisonExpectationHitRate;
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const semanticCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteComparisonSemantics"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.deepEqual(
+    semanticCheck?.detail?.issues.map((issue) => issue.reasonCode),
+    [
+      "comparison_verdict_passed_invalid",
+      "comparison_verdict_passed_mismatch",
+      "comparison_expectation_hit_invalid",
+      "comparison_expectation_hit_rate_invalid",
+    ]
+  );
+});
+
+test("compare-hard robust suite rejects raw compare cases with every expectation removed", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-expectations-removed",
+  });
+
+  for (const caseResult of latestPayload.cases) {
+    delete caseResult.compareExpectation;
+  }
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const corpusBindingCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteCorpusCaseBinding"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.equal(corpusBindingCheck?.status, "fail");
+  assert.ok(
+    corpusBindingCheck?.detail?.issues.some(
+      (issue) => issue.reasonCode === "report_case_expectation_mismatch"
+    )
+  );
+});
+
+test("compare-hard robust suite requires at least one typed comparison case", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-no-typed-comparison-case",
+  });
+  latestPayload.cases.forEach((caseResult) => {
+    if (caseResult.type === "compare") {
+      caseResult.type = "qa";
+    }
+  });
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const corpusBindingCheck = history.robustSuiteGate.checks.find(
+    (check) => check.metric === "robustSuiteCorpusCaseBinding"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.equal(corpusBindingCheck?.status, "fail");
+  assert.ok(
+    corpusBindingCheck?.detail?.issues.some(
+      (issue) => issue.reasonCode === "report_case_type_mismatch"
+    )
+  );
+});
+
+test("robust suite rejects a self-consistent easy case that replaces the checked-in corpus", () => {
+  const latestPayload = buildComparisonSyntheticPayload({
+    runId: "compare-hard-self-consistent-easy-replacement",
+  });
+  latestPayload.cases = [
+    {
+      ...latestPayload.cases[0],
+      id: "easy-self-consistent-replacement",
+    },
+  ];
+  latestPayload.summary.corpus.cases = latestPayload.cases.length;
+
+  const history = buildRequiredRobustHistory(latestPayload);
+  const corpusContractCheck = history.robustSuiteGate.checks.find(
+    (check) =>
+      check.reportId === "compare-hard-synthetic" &&
+      check.metric === "robustSuiteCorpusCaseBinding"
+  );
+
+  assert.equal(history.robustSuiteGate.status, "fail");
+  assert.equal(corpusContractCheck?.status, "fail");
+  assert.ok(
+    corpusContractCheck?.detail?.issues.some(
+      (issue) => issue.reasonCode === "corpus_case_missing"
+    )
+  );
+  assert.ok(
+    corpusContractCheck?.detail?.issues.some(
+      (issue) => issue.reasonCode === "report_case_extra"
     )
   );
 });
@@ -1128,7 +1808,8 @@ test("quality history preserves legacy pass and skip semantics without release e
     {
       reportId: "arxiv-real-paper-rerank",
       payload: buildPassingRerankPayload({
-        corpusPath: "evaluation/generated/arxiv-corpus.json",
+        corpusPath:
+          "evaluation/corpora/arxiv-computer-science-rerank-v1.json",
         runId: "arxiv-rerank-legacy",
       }),
     },
@@ -1603,7 +2284,8 @@ test("quality history excludes non-synthetic eval runs from regression baselines
       runId: "rerank-timestamped",
       createdAt: "2026-06-08T10:10:00.000Z",
       corpus: {
-        path: "evaluation/generated/arxiv-corpus.json",
+        path:
+          "evaluation/corpora/arxiv-computer-science-rerank-v1.json",
         cases: 48,
       },
       metrics: {

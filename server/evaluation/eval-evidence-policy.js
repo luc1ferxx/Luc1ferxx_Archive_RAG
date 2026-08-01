@@ -2,9 +2,11 @@ import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
 import { EVALUATION_EVIDENCE_REASON_CODES } from "./eval-evidence-validation.js";
 
 export const DEFAULT_RELEASE_EVIDENCE_MAX_AGE_HOURS = 24;
+export const RELEASE_EVIDENCE_PROFILE = "release";
 
 export const RELEASE_EVIDENCE_REASON_CODES = Object.freeze({
   ...EVALUATION_EVIDENCE_REASON_CODES,
+  reportIntegrityFailed: "report_integrity_failed",
   sourceReportLineageMismatch: "source_report_lineage_mismatch",
   robustLineageSplit: "robust_lineage_split",
 });
@@ -16,6 +18,7 @@ export const RELEASE_EVIDENCE_REPORT_SPECS = Object.freeze([
     reportType: "synthetic",
     providerId: "openai",
     providerMode: "real",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: MODEL_ROUTE_IDS.chatDefault,
     suiteId: "robust",
     corpus: {
@@ -30,6 +33,7 @@ export const RELEASE_EVIDENCE_REPORT_SPECS = Object.freeze([
     reportType: "rerank",
     providerId: "rerank",
     providerMode: "heuristic",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: null,
     suiteId: "robust",
     corpus: {
@@ -44,11 +48,13 @@ export const RELEASE_EVIDENCE_REPORT_SPECS = Object.freeze([
     reportType: "rerank",
     providerId: "rerank",
     providerMode: "heuristic",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: null,
     suiteId: "robust",
     corpus: {
       id: "arxiv-computer-science-rerank-seed",
-      relativePath: "server/evaluation/generated/arxiv-corpus.json",
+      relativePath:
+        "server/evaluation/corpora/arxiv-computer-science-rerank-v1.json",
       version: "1",
     },
   },
@@ -58,6 +64,7 @@ export const RELEASE_EVIDENCE_REPORT_SPECS = Object.freeze([
     reportType: "trajectory",
     providerId: "agent-eval",
     providerMode: "deterministic",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: null,
   },
   {
@@ -66,6 +73,7 @@ export const RELEASE_EVIDENCE_REPORT_SPECS = Object.freeze([
     reportType: "planner",
     providerId: "openai",
     providerMode: "real",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: MODEL_ROUTE_IDS.executionPlannerDefault,
   },
   {
@@ -74,6 +82,7 @@ export const RELEASE_EVIDENCE_REPORT_SPECS = Object.freeze([
     reportType: "recovery_observability",
     providerId: "agent-observability",
     providerMode: "deterministic",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: null,
   },
   {
@@ -82,6 +91,7 @@ export const RELEASE_EVIDENCE_REPORT_SPECS = Object.freeze([
     reportType: "runtime_smoke",
     providerId: "openai",
     providerMode: "real",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: MODEL_ROUTE_IDS.executionPlannerDefault,
   },
   {
@@ -90,6 +100,7 @@ export const RELEASE_EVIDENCE_REPORT_SPECS = Object.freeze([
     reportType: "rollout_readiness",
     providerId: "release-readiness",
     providerMode: "aggregate",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: null,
   },
 ]);
@@ -101,6 +112,7 @@ export const RELEASE_EVIDENCE_SOURCE_SPECS = Object.freeze([
     reportType: "planner",
     providerId: "mock",
     providerMode: "mock",
+    profile: RELEASE_EVIDENCE_PROFILE,
     modelRouteId: null,
   },
 ]);

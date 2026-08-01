@@ -30,6 +30,7 @@
     "rollout:readiness": "node evaluation/run-rollout-readiness-report.mjs",
     "quality:gate": "node evaluation/check-quality-gate.mjs",
     "quality:current": "node evaluation/check-current-quality.mjs",
+    "robust:gate": "node evaluation/check-robust-suite.mjs",
     "release:gate": "node evaluation/check-release-evidence.mjs",
     "coverage:gate": "node test/coverage-gate.mjs",
     "coverage:targets": "node test/coverage-gate.mjs --strict-targets",

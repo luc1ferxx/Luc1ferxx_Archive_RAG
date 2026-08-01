@@ -3,7 +3,11 @@ name: Planner Real Provider Gate
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "0 9 * * 0,2-6"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   planner-real-gate:

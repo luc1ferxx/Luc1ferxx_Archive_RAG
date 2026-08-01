@@ -3,12 +3,14 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import {
-  hashCanonicalJson,
-  resolveEvaluationGitState,
-} from "./eval-evidence.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolveEvaluationGitState } from "./eval-evidence.js";
 import { robustEvalSuite } from "./eval-suite.js";
+import {
+  buildRobustSuiteChildEnvironment,
+  buildRobustSuiteExecutionPlan,
+} from "./robust-suite-execution.js";
+import { verifyPinnedCorpus } from "./pinned-corpus-validation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,16 +21,12 @@ const usage = `Usage: npm run eval:robust-suite -- [options]
 Options:
   --suite <name>                  Evaluation suite to run. Defaults to robust.
   --synthetic-provider <mode>     Provider for synthetic answer eval: real or deterministic. Defaults to real.
-  --skip-arxiv-build              Reuse evaluation/generated/arxiv-corpus.json instead of rebuilding it.
-  --arxiv-skip-download           Pass --skip-download to the arXiv corpus builder.
   --help                          Show this message.
 `;
 
-const parseArgs = (argv) => {
+export const parseRobustSuiteArgs = (argv) => {
   const options = {
-    arxivSkipDownload: false,
     help: false,
-    skipArxivBuild: false,
     suite: "robust",
     syntheticProvider: "real",
   };
@@ -41,17 +39,11 @@ const parseArgs = (argv) => {
       continue;
     }
 
-    if (rawArg === "--skip-arxiv-build") {
-      options.skipArxivBuild = true;
-      continue;
-    }
-
-    if (rawArg === "--arxiv-skip-download") {
-      options.arxivSkipDownload = true;
-      continue;
-    }
-
-    const [key, inlineValue] = rawArg.slice(2).split("=", 2);
+    const option = rawArg.slice(2);
+    const equalsIndex = option.indexOf("=");
+    const key = equalsIndex === -1 ? option : option.slice(0, equalsIndex);
+    const inlineValue =
+      equalsIndex === -1 ? undefined : option.slice(equalsIndex + 1);
     const nextValue = argv[index + 1];
     const value = inlineValue ?? nextValue;
 
@@ -112,101 +104,61 @@ const runNodeStep = async ({ args, environment, label }) => {
   });
 };
 
-const buildReportSteps = ({ options, report }) => {
-  const steps = [];
-
-  if (report.build && !(report.id === "arxiv-real-paper-rerank" && options.skipArxivBuild)) {
-    const buildArgs = [report.build.scriptPath];
-
-    if (report.id === "arxiv-real-paper-rerank" && options.arxivSkipDownload) {
-      buildArgs.push("--skip-download");
+export const verifyPinnedCorpora = async (executionPlan) => {
+  for (const report of executionPlan.contract.reports) {
+    if (!report.corpusIntegrity) {
+      continue;
     }
 
-    steps.push({
-      label: report.build.label,
-      args: buildArgs,
+    const verification = await verifyPinnedCorpus({
+      expected: report.corpusIntegrity,
+      filePath: path.resolve(serverDirectory, report.corpusPath),
     });
-  }
 
-  if (report.reportType === "synthetic") {
-    steps.push({
-      label: report.label,
-      args: [
-        "evaluation/run-synthetic-eval.mjs",
-        report.corpusPath,
-        "--latest-name",
-        report.latestName,
-        "--openai-provider",
-        options.syntheticProvider,
-      ],
-    });
-    return steps;
+    console.log(
+      `Verified pinned corpus ${verification.id}@${verification.version} (${verification.contentHash}).`
+    );
   }
-
-  if (report.reportType === "rerank") {
-    steps.push({
-      label: report.label,
-      args: [
-        "evaluation/run-rerank-eval.mjs",
-        report.corpusPath,
-        "--latest-name",
-        report.latestName,
-        "--rerank-provider",
-        report.rerankProvider,
-      ],
-    });
-    return steps;
-  }
-
-  throw new Error(`Unsupported report type for ${report.id}: ${report.reportType}`);
 };
 
 const main = async () => {
-  const options = parseArgs(process.argv.slice(2));
+  const options = parseRobustSuiteArgs(process.argv.slice(2));
 
   if (options.help) {
     console.log(usage.trim());
     return;
   }
 
-  const steps = robustEvalSuite.reports.flatMap((report) =>
-    buildReportSteps({
-      options,
-      report,
-    })
-  );
+  const executionPlan = buildRobustSuiteExecutionPlan({
+    options,
+    suite: robustEvalSuite,
+  });
+  await verifyPinnedCorpora(executionPlan);
   const gitState = await resolveEvaluationGitState({
     targetCommit: process.env.EVAL_TARGET_COMMIT_SHA ?? "",
   });
   const suiteRunId = `robust-${new Date()
     .toISOString()
     .replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
-  const suiteConfigHash = hashCanonicalJson({
-    id: robustEvalSuite.id,
-    reports: robustEvalSuite.reports.map((report) => ({
-      corpusPath: report.corpusPath,
-      id: report.id,
-      latestName: report.latestName,
-      reportType: report.reportType,
-      rerankProvider: report.rerankProvider ?? null,
-    })),
-    syntheticProvider: options.syntheticProvider,
-  });
-  const environment = {
-    ...process.env,
+  const suiteConfigHash = executionPlan.configHash;
+  const evidenceEnvironment = {
     EVAL_EVIDENCE_SUITE_CONFIG_HASH: suiteConfigHash,
     EVAL_EVIDENCE_SUITE_ID: robustEvalSuite.id,
     EVAL_EVIDENCE_SUITE_RUN_ID: suiteRunId,
   };
 
   if (gitState.commitSha !== "unknown") {
-    environment.EVAL_TARGET_COMMIT_SHA = gitState.commitSha;
+    evidenceEnvironment.EVAL_TARGET_COMMIT_SHA = gitState.commitSha;
   }
 
-  for (const step of steps) {
+  for (const step of executionPlan.steps) {
     await runNodeStep({
       ...step,
-      environment,
+      environment: buildRobustSuiteChildEnvironment({
+        baseEnvironment: process.env,
+        evidenceEnvironment,
+        step,
+      }),
     });
   }
 
@@ -227,9 +179,11 @@ const main = async () => {
   );
 };
 
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
 }

@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   frontend-checks:
     runs-on: ubuntu-latest
@@ -62,7 +66,6 @@ jobs:
     env:
       EVAL_EVIDENCE_PROFILE: quality-current
       EVAL_TARGET_COMMIT_SHA: ${{ github.sha }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     defaults:
       run:
@@ -94,10 +97,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: npm run eval:planner -- --provider mock
 
-      - name: Run planner eval (real)
-        if: ${{ !cancelled() && env.OPENAI_API_KEY != '' }}
-        run: npm run eval:planner -- --provider real
-
       - name: Run recovery observability eval
         if: ${{ !cancelled() }}
         run: npm run eval:recovery-observability
@@ -107,12 +106,8 @@ jobs:
         run: npm run eval:feedback
 
       - name: Check current quality gate
-        if: ${{ !cancelled() && env.OPENAI_API_KEY == '' }}
+        if: ${{ !cancelled() }}
         run: npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA"
-
-      - name: Check current quality gate (planner real)
-        if: ${{ !cancelled() && env.OPENAI_API_KEY != '' }}
-        run: npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA" --require-planner-real
 
       - name: Upload current quality evidence
         if: always()
@@ -124,7 +119,6 @@ jobs:
             server/evaluation/results/latest-feedback.*
             server/evaluation/results/latest-trajectory.*
             server/evaluation/results/latest-planner-mock.*
-            server/evaluation/results/latest-planner-real.*
             server/evaluation/results/latest-recovery-observability.*
             server/evaluation/results/latest-current-quality-gate.*
           if-no-files-found: error

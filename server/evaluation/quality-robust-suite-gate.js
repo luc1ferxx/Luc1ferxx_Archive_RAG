@@ -3,8 +3,26 @@ import { buildFailedCases } from "./quality-run-summary.js";
 import {
   getCorpusName,
   getWorstStatus,
-  toNonNegativeInteger,
 } from "./quality-shared.js";
+import {
+  validateRobustReportCaseContract,
+} from "./robust-report-case-validation.js";
+import {
+  validateRobustReportCorpusBinding,
+} from "./robust-report-corpus-validation.js";
+import {
+  validateRerankMetricContract,
+  validateSyntheticMetricContract,
+} from "./robust-report-metric-validation.js";
+import {
+  validateRerankReportRankings,
+} from "./rerank-report-ranking-validation.js";
+import {
+  validateSyntheticComparisonSemantics,
+} from "./synthetic-comparison-report-validation.js";
+import {
+  validateSyntheticCaseOutcomes,
+} from "./synthetic-report-case-evaluator.js";
 
 const epsilon = 0.000001;
 
@@ -26,12 +44,6 @@ const normalizePayloadEntries = (latestRobustPayloads = []) => {
   }
 
   return new Map();
-};
-
-const toFiniteNumber = (value) => {
-  const parsedValue = Number(value);
-
-  return Number.isFinite(parsedValue) ? parsedValue : null;
 };
 
 const buildCheck = ({
@@ -90,19 +102,112 @@ const buildCorpusCheck = ({ payload, report }) => {
   });
 };
 
-const getCaseCount = (payload = {}) =>
-  toNonNegativeInteger(
-    payload.summary?.caseCount,
-    Array.isArray(payload.cases)
-      ? payload.cases.length
-      : toNonNegativeInteger(payload.summary?.corpus?.cases)
-  );
+const buildCaseContractCheck = ({ caseContract, report }) =>
+  buildCheck({
+    label: `${report.label} case contract`,
+    metric: "robustSuiteCaseContract",
+    report,
+    status: caseContract.status,
+    currentValue: {
+      rawCaseCount: caseContract.rawCaseCount,
+      summaryCaseCount: caseContract.summaryCaseCount,
+      corpusCaseCount: caseContract.corpusCaseCount,
+    },
+    threshold: {
+      rawCasesNonEmpty: true,
+      declaredCountsMatchRawCases: true,
+    },
+    detail: {
+      reasonCode: caseContract.reasonCode,
+      issues: caseContract.issues,
+    },
+  });
+
+const buildMetricContractCheck = ({ metricContract, report }) =>
+  buildCheck({
+    label: `${report.label} metric contract`,
+    metric: "robustSuiteMetricContract",
+    report,
+    status: metricContract.status,
+    currentValue: metricContract.metrics,
+    threshold: {
+      summaryMatchesRawCases: true,
+    },
+    detail: {
+      reasonCode: metricContract.reasonCode,
+      issues: metricContract.issues,
+    },
+  });
+
+const buildRankingContractCheck = ({ rankingContract, report }) =>
+  buildCheck({
+    label: `${report.label} raw ranking contract`,
+    metric: "robustSuiteRawRankingContract",
+    report,
+    status: rankingContract.status,
+    currentValue: rankingContract.metrics,
+    threshold: {
+      corpusBoundExpectedUnits: true,
+      corpusBoundCandidateText: true,
+      immutableResultIdentity: true,
+      metricsRecomputedFromRankings: true,
+    },
+    detail: {
+      reasonCode: rankingContract.reasonCode,
+      issues: rankingContract.issues,
+    },
+  });
+
+const buildCorpusCaseBindingCheck = ({ corpusBinding, report }) =>
+  buildCheck({
+    label: `${report.label} corpus case binding`,
+    metric: "robustSuiteCorpusCaseBinding",
+    report,
+    status: corpusBinding.status,
+    currentValue: {
+      corpusCaseCount: corpusBinding.corpusCaseCount,
+      expectedEvaluatedCaseCount: corpusBinding.expectedEvaluatedCaseCount,
+      expectedSkippedCaseCount: corpusBinding.expectedSkippedCaseCount,
+    },
+    threshold: {
+      exactCheckedInCorpusCaseSet: true,
+    },
+    detail: {
+      reasonCode: corpusBinding.reasonCode,
+      issues: corpusBinding.issues,
+    },
+  });
 
 const buildSyntheticReportResult = ({ payload, report }) => {
-  const caseCount = getCaseCount(payload);
-  const failedCases = buildFailedCases(payload.cases ?? []);
-  const overallPassRate = toFiniteNumber(payload.summary?.metrics?.overallPassRate);
+  const corpusBinding = validateRobustReportCorpusBinding({
+    payload,
+    report,
+  });
+  const caseContract = validateRobustReportCaseContract(payload, {
+    expectedCorpusCaseCount: corpusBinding.corpusCaseCount,
+  });
+  const caseOutcomeContract = validateSyntheticCaseOutcomes({
+    caseContracts: corpusBinding.caseContracts,
+    documentContracts: corpusBinding.documentContracts,
+    executionConfig: report.executionConfig,
+    payload,
+  });
+  const metricContract = validateSyntheticMetricContract(payload, {
+    caseOutcomeContract,
+  });
+  const caseCount = caseContract.rawCaseCount ?? 0;
+  const failedCases = buildFailedCases(
+    caseOutcomeContract.outcomes.map((outcome) => ({
+      id: outcome.id,
+      passed: outcome.passed,
+    }))
+  );
+  const overallPassRate = metricContract.metrics.overallPassRate;
   const minOverallPassRate = report.minOverallPassRate ?? 1;
+  const comparisonSemantics = validateSyntheticComparisonSemantics(payload, {
+    caseOutcomeContract,
+    requireComparisonCases: report.id === "compare-hard-synthetic",
+  });
   const checks = [
     buildCheck({
       label: `${report.label} report exists`,
@@ -113,6 +218,18 @@ const buildSyntheticReportResult = ({ payload, report }) => {
     }),
     buildCorpusCheck({
       payload,
+      report,
+    }),
+    buildCorpusCaseBindingCheck({
+      corpusBinding,
+      report,
+    }),
+    buildCaseContractCheck({
+      caseContract,
+      report,
+    }),
+    buildMetricContractCheck({
+      metricContract,
       report,
     }),
     buildCheck({
@@ -144,6 +261,30 @@ const buildSyntheticReportResult = ({ payload, report }) => {
     }),
   ];
 
+  if (comparisonSemantics.applicable) {
+    checks.push(
+      buildCheck({
+        label: `${report.label} comparison semantics`,
+        metric: "robustSuiteComparisonSemantics",
+        report,
+        status: comparisonSemantics.status,
+        currentValue: {
+          caseCount: comparisonSemantics.comparisonCaseCount,
+          hitCount: comparisonSemantics.comparisonHitCount,
+          hitRate: comparisonSemantics.actualHitRate,
+        },
+        threshold: {
+          hitRate: comparisonSemantics.expectedHitRate,
+          internallyConsistent: true,
+        },
+        detail: {
+          reasonCode: comparisonSemantics.reasonCode,
+          issues: comparisonSemantics.issues,
+        },
+      })
+    );
+  }
+
   return {
     reportId: report.id,
     label: report.label,
@@ -158,31 +299,32 @@ const buildSyntheticReportResult = ({ payload, report }) => {
   };
 };
 
-const getRerankMetric = ({ payload, group, metric }) =>
-  toFiniteNumber(payload.summary?.metrics?.[group]?.[metric]);
-
 const buildRerankReportResult = ({ payload, report }) => {
-  const caseCount = getCaseCount(payload);
-  const baselineNdcg = getRerankMetric({
+  const corpusBinding = validateRobustReportCorpusBinding({
     payload,
-    group: "baseline",
-    metric: "ndcgAtK",
+    report,
   });
-  const rerankedNdcg = getRerankMetric({
-    payload,
-    group: "reranked",
-    metric: "ndcgAtK",
+  const caseContract = validateRobustReportCaseContract(payload, {
+    expectedCorpusCaseCount: corpusBinding.corpusCaseCount,
+    requireSummaryCaseCount: true,
   });
-  const baselineRecall = getRerankMetric({
-    payload,
-    group: "baseline",
-    metric: "recallAtK",
+  const rankingContract = validateRerankReportRankings(payload, {
+    caseContracts: corpusBinding.caseContracts,
+    documentContracts: corpusBinding.documentContracts,
+    expectedConfig: {
+      ...report.rankingConfig,
+      rerankProvider: report.rerankProvider,
+      rerankWeight: report.rerankWeight,
+    },
   });
-  const rerankedRecall = getRerankMetric({
-    payload,
-    group: "reranked",
-    metric: "recallAtK",
+  const metricContract = validateRerankMetricContract(payload, {
+    rankingContract,
   });
+  const caseCount = caseContract.rawCaseCount ?? 0;
+  const baselineNdcg = metricContract.metrics.baseline?.ndcgAtK ?? null;
+  const rerankedNdcg = metricContract.metrics.reranked?.ndcgAtK ?? null;
+  const baselineRecall = metricContract.metrics.baseline?.recallAtK ?? null;
+  const rerankedRecall = metricContract.metrics.reranked?.recallAtK ?? null;
   const metricsAvailable =
     baselineNdcg !== null &&
     rerankedNdcg !== null &&
@@ -198,6 +340,22 @@ const buildRerankReportResult = ({ payload, report }) => {
     }),
     buildCorpusCheck({
       payload,
+      report,
+    }),
+    buildCorpusCaseBindingCheck({
+      corpusBinding,
+      report,
+    }),
+    buildCaseContractCheck({
+      caseContract,
+      report,
+    }),
+    buildRankingContractCheck({
+      rankingContract,
+      report,
+    }),
+    buildMetricContractCheck({
+      metricContract,
       report,
     }),
     buildCheck({
@@ -270,7 +428,7 @@ const buildRerankReportResult = ({ payload, report }) => {
     runId: payload.summary?.runId ?? null,
     status: getWorstStatus(checks.map((check) => check.status)),
     caseCount,
-    metrics: payload.summary?.metrics ?? null,
+    metrics: metricContract.metrics,
     checks,
   };
 };

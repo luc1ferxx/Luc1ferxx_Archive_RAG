@@ -31,7 +31,8 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run runtime:smoke` | 用真实后端 HTTP 路径、真实 LLM planner 和 PostgreSQL smoke `/health` + `/chat`，确认 long/experience memory default-on、planner 选中 `llm`、experience memory 只进入 planning hints 而不进入 evidence sources。 |
 | `cd server && npm run feedback:corpus` | 从负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用 seed + runtime feedback corpus 运行 deterministic 回归评测。 |
-| `cd server && npm run eval:robust-suite` | 固定周期运行 compare-hard synthetic、hard-CS rerank 和 arXiv real-paper rerank。 |
+| `cd server && npm run eval:robust-suite` | 手动运行 compare-hard synthetic、hard-CS rerank 和 arXiv real-paper rerank；固定周期由 Release Evidence Gate 调用同一 suite。 |
+| `cd server && npm run robust:gate -- --fail-on-warn` | 只校验三份 robust suite 最新报告；不会读取历史 synthetic、feedback、planner、trajectory 或 recovery 状态。 |
 | `cd server && npm run quality:gate` | 兼容旧 payload 的历史 metrics gate；PASS 不代表当前 commit 已验证。 |
 | `cd server && npm run quality:current` | 校验当前 commit 的轻量报告 lineage、freshness、clean worktree 和 metrics。 |
 | `cd server && npm run release:gate` | 严格检查当前 commit 的完整发布证据 lineage 和 freshness。 |
@@ -125,7 +126,7 @@ npm run quality:current -- --require-planner-real
 
 `latest-planner-mock.json` 不是第 9 份 required report，但它是 rollout readiness 实际读取的辅助 source；readiness 的 `sourceReports` 必须同时准确引用 mock/real planner、trajectory、recovery observability 和 runtime smoke。
 
-所有 required reports 还必须存在、包含完整 `evidence`、`git.commitSha` 等于 target、`git.dirty=false`，并在默认 `24` 小时 freshness policy 内。未来时间戳同样会失败。任一报告缺失、过期、commit 不匹配、由 dirty worktree 生成、corpus/provider ID 或 mode 错误、public model route 错误、source report lineage 不一致，或 robust 三份报告出现 split lineage，整体状态都是 `fail`。
+所有 required reports 还必须存在、包含完整 `evidence`、使用 `profile=release`、`git.commitSha` 等于 target、`git.dirty=false`，并在默认 `24` 小时 freshness policy 内。未来时间戳同样会失败。三份 robust report 必须满足 `evidence.runId == summary.runId`、`evidence.generatedAt == summary.createdAt`；Runtime smoke 必须满足 `evidence.runId == report.runId`、`evidence.generatedAt == report.completedAt`；rollout readiness 必须满足 `evidence.runId == summary.runId`、`evidence.generatedAt == summary.createdAt`。这些报告同时固定 evidence schema/generator 版本，旧内容不能只替换成 fresh envelope 后冒充当前证据。任一报告缺失、过期、commit 不匹配、由 dirty worktree 生成、profile、corpus/provider ID 或 mode 错误、public model route 错误、source report lineage 不一致，或 robust 三份报告出现 split lineage，整体状态都是 `fail`。
 
 ```bash
 cd server
@@ -145,11 +146,11 @@ CLI 选项：
 | `--json` | 在 stdout 输出机器可读 JSON。 |
 | `--no-fail` | 仅把失败时的进程退出码改为 0；报告内 `status` 和 reason codes 仍保持失败。 |
 
-默认每次检查都会写入 `evaluation/results/latest-release-evidence.json` 和 `.md`。逐项结果包含 `status`、`reasonCode`、`expected`、`actual`、`reportType`、`runId`、`generatedAt`、`commitSha` 以及 corpus/provider 摘要，便于 CI 用稳定 reason code 判断失败原因。当前稳定 reason codes 为：`ok`、`missing_report`、`missing_lineage`、`unknown_commit`、`commit_mismatch`、`dirty_worktree`、`stale_report`、`future_report`、`invalid_generated_at`、`report_failed`、`config_hash_mismatch`、`wrong_corpus`、`wrong_provider`、`wrong_model_route`、`source_report_lineage_mismatch` 和 `robust_lineage_split`。
+默认每次检查都会写入 `evaluation/results/latest-release-evidence.json` 和 `.md`。逐项结果包含 `status`、`reasonCode`、`expected`、`actual`、`reportType`、`runId`、`generatedAt`、`commitSha` 以及 corpus/provider 摘要，便于 CI 用稳定 reason code 判断失败原因。当前稳定 reason codes 为：`ok`、`missing_report`、`missing_lineage`、`unknown_commit`、`commit_mismatch`、`dirty_worktree`、`stale_report`、`future_report`、`invalid_generated_at`、`report_failed`、`report_integrity_failed`、`config_hash_mismatch`、`wrong_corpus`、`wrong_provider`、`wrong_profile`、`wrong_model_route`、`source_report_lineage_mismatch` 和 `robust_lineage_split`。
 
 ### 与 quality gate 的兼容边界
 
-默认 `quality:gate` 的成本和历史语义不变：它仍兼容旧 synthetic/feedback/trajectory/planner/recovery payload，且未传 `--require-robust-suite` 时 robust gate 继续显示 pass + skipped。`quality:gate -- --require-robust-suite` 继续执行既有三报告 metrics/corpus 合同，但不追加 current/release lineage 要求。PR workflow 用独立的 `quality:current` 拦截轻量 current evidence；`release:gate` 再验证完整发布批次。因此默认 PR 不需要真实 OpenAI，也不会下载 arXiv corpus。
+默认 `quality:gate` 的成本和历史语义不变：它仍兼容旧 synthetic/feedback/trajectory/planner/recovery payload，且未传 `--require-robust-suite` 时 robust gate 继续显示 pass + skipped。`quality:gate -- --require-robust-suite` 仅为旧调用方保留；自动 workflow 使用独立的 `robust:gate`，不会让历史报告状态影响 robust suite。PR workflow 用独立的 `quality:current` 拦截轻量 current evidence；`release:gate` 再验证完整发布批次。因此默认 PR 不需要真实 OpenAI，也不会下载 arXiv corpus。
 
 ## Synthetic regression
 
@@ -160,7 +161,7 @@ npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json
 npm run eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json
 ```
 
-默认报告写入 `server/evaluation/results/latest.json` 和 `.md`。
+默认报告写入 `server/evaluation/results/latest.json` 和 `.md`。Synthetic corpus 必须声明稳定的顶层 `id` 和 `version`，且每个 document `key` 唯一；runner 用三者生成确定性 document ID，门禁才能把 raw citation/context 精确绑定回受版本控制的 corpus，而不是信任报告自报的来源标识。
 
 ## Robust hard/real suite
 
@@ -169,7 +170,7 @@ npm run eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json
 ```bash
 cd server
 npm run eval:robust-suite
-npm run quality:gate -- --fail-on-warn --require-robust-suite
+npm run robust:gate -- --fail-on-warn
 ```
 
 默认 suite 包含三层：
@@ -178,17 +179,20 @@ npm run quality:gate -- --fail-on-warn --require-robust-suite
 | --- | --- | --- | --- |
 | compare-hard synthetic | `evaluation/synthetic-corpus-compare-hard.json` | `evaluation/results/latest.*` | 刷新主 synthetic regression，替代长期只看 near-duplicate。 |
 | hard-CS rerank | `evaluation/synthetic-corpus-rerank-hard-cs.json` | `evaluation/results/latest-rerank-hard-cs.*` | 检查 baseline 非饱和、NDCG/Recall 不回退，并要求 NDCG 有 lift。 |
-| arXiv real-paper rerank | `evaluation/generated/arxiv-corpus.json` | `evaluation/results/latest-arxiv-rerank.*` | 用固定真实论文 manifest 覆盖长文档、hard negative 和跨论文比较。 |
+| arXiv real-paper rerank | `evaluation/corpora/arxiv-computer-science-rerank-v1.json` | `evaluation/results/latest-arxiv-rerank.*` | 用受版本控制且绑定 SHA-256 的真实论文 corpus 覆盖长文档、hard negative 和跨论文比较。 |
 
-compare-hard synthetic 使用真实 provider，要求 `OPENAI_API_KEY`。两项 rerank eval 使用 deterministic embedding + heuristic rerank，可稳定复跑。arXiv corpus 默认会按固定 manifest 构建；本地已有缓存时可用：
+compare-hard synthetic 使用真实 provider，要求 `OPENAI_API_KEY`。两项 rerank eval 使用 deterministic embedding + heuristic rerank，可稳定复跑。周期 Release 只读取 checked-in arXiv corpus；runner 在执行前校验文件 SHA-256、manifest ID 和 version，并把这些值写入 suite lineage contract。这样 arXiv 的临时 429、5xx 或超时不会被误判为代码回归。
+
+联网刷新与发布验证分离。需要更新论文文本时，先显式生成 ignored 候选文件：
 
 ```bash
 cd server
-npm run eval:robust-suite -- --skip-arxiv-build
-npm run eval:robust-suite -- --arxiv-skip-download
+npm run corpus:arxiv
 ```
 
-`quality:gate -- --require-robust-suite` 会要求三份 report 都存在：synthetic report 不能有失败 case；rerank report 必须有 ranking case、语料匹配、NDCG/Recall 不回退，且 NDCG lift 不能退化成 0。未加该开关时 robust suite gate 会跳过，保持 PR gate 轻量。
+人工检查候选 corpus 后，再单独更新 `evaluation/corpora/arxiv-computer-science-rerank-v1.json` 及 `evaluation/eval-suite.js` 中固定的 SHA-256；两者不一致时 suite 会 fail closed，不会静默回退到网络或旧报告。
+
+`robust:gate` 只读取以上三份 report，并要求它们都存在：synthetic report 不能有失败 case；rerank report 必须有 ranking case、语料匹配、NDCG/Recall 不回退。workflow 使用 `--fail-on-warn`，因此 NDCG lift 退化成 0 或 baseline 饱和也会失败。它不会把旧 synthetic 历史、feedback、planner、trajectory 或 recovery 状态混入 robust 判定；这些信号分别由 current/release gate 校验。单独运行 `robust:gate` 的输出固定标记为 `latest_reports_unverified/currentCommitVerified=false`；只有随后执行的 `release:gate` 才验证 commit、freshness、profile 与 suite lineage。Suite lineage hash 绑定 provider、固定 corpus 的内容 hash/identity、threshold 以及实际 chunk/retrieval/rerank 配置；release gate 会从代码中的权威 suite 计划重算这个 hash，因此三份报告共享任意自造 hash 也不能通过。
 
 ## Trajectory eval
 
@@ -368,21 +372,28 @@ npm run eval:rerank -- evaluation/generated/arxiv-corpus.json --embedding-provid
 npm run eval:rerank -- evaluation/generated/arxiv-corpus.json --rerank-provider cross-encoder --cross-encoder-endpoint http://localhost:8081/rerank --latest-name arxiv-cross-encoder-rerank
 ```
 
-报告包含 baseline 粗排与 rerank 后的 `NDCG@k`、`Precision@k`、`Recall@k`、`MRR`、`Noise rate@k` 和排序提升率。
+报告包含 baseline 粗排与 rerank 后的 `NDCG@k`、`Precision@k`、`Recall@k`、`MRR`、`Noise rate@k` 和排序提升率。严格 gate 会按报告声明且由 suite 固定的 chunk 配置，从当前 corpus 重新切分每个候选，并要求候选文本、文件、页码和 chunk index 完全一致；页内任意短子串不能再冒充真实检索候选。
 
 固定周期 gate 使用 `latest-rerank-hard-cs.*` 和 `latest-arxiv-rerank.*`，不再依赖 near-duplicate rerank 的饱和报告判断 lift。
 
 ## arXiv real-paper corpus
 
-真实论文 rerank 评测采用固定 manifest，避免每次评测实时搜索导致语料漂移：
+真实论文 rerank 评测采用受版本控制的固定 corpus，避免每次评测实时下载导致语料漂移或瞬时网络失败：
+
+```bash
+cd server
+npm run eval:rerank -- evaluation/corpora/arxiv-computer-science-rerank-v1.json --latest-name arxiv-rerank
+```
+
+只有显式刷新候选 corpus 时才访问 arXiv：
 
 ```bash
 cd server
 npm run corpus:arxiv
-npm run eval:rerank -- evaluation/generated/arxiv-corpus.json --latest-name arxiv-rerank
+npm run eval:rerank -- evaluation/generated/arxiv-corpus.json --latest-name arxiv-refresh-review
 ```
 
-当前 manifest 固定 8 篇计算机方向论文：RAG、DPR、ColBERT、HNSW、Transformer、ReAct、Toolformer、Self-RAG。当前 seed 包含 16 个标注 case，覆盖精确问答、hard negative 和跨论文比较。
+当前 manifest 固定 8 篇计算机方向论文：RAG、DPR、ColBERT、HNSW、Transformer、ReAct、Toolformer、Self-RAG。当前 pinned corpus 包含 48 个标注 case，覆盖精确问答、hard negative 和跨论文比较。
 
 批量 sweep：
 
@@ -428,18 +439,17 @@ GitHub Actions 的 `Quality Gate` workflow 会在 PR 和 `main` push 时执行�
 2. 用 near-duplicate corpus 和 deterministic provider 生成独立 `latest-quality.*`
 3. `npm run eval:trajectory`
 4. `npm run eval:planner -- --provider mock`
-5. 如果配置了 `OPENAI_API_KEY`，再运行 `npm run eval:planner -- --provider real`
-6. `npm run eval:recovery-observability`
-7. `npm run eval:feedback`
-8. `npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA"`；存在真实 provider 时同时要求 planner-real
+5. `npm run eval:recovery-observability`
+6. `npm run eval:feedback`
+7. `npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA"`
 
-eval producer 和 current gate 都使用 `!cancelled()`，因此单个 producer 失败后仍会运行其余诊断；job 保持失败，最后通过 `always()` 上传原始 latest reports 与 `latest-current-quality-gate.*`。workflow 不再把兼容命令 `quality:gate` 的历史 PASS 当作 PR current 证据。
+PR/main Quality Gate 只消费 deterministic/mock provider，不读取 `OPENAI_API_KEY`，因此无效密钥、限流或外部模型抖动不会让普通代码提交失败。真实 provider 由独立的 `Planner Real Provider Gate` 和每周 `Release Evidence Gate` 强制验证。eval producer 和 current gate 都使用 `!cancelled()`，因此单个 producer 失败后仍会运行其余诊断；job 保持失败，最后通过 `always()` 上传原始 latest reports 与 `latest-current-quality-gate.*`。workflow 不再把兼容命令 `quality:gate` 的历史 PASS 当作 PR current 证据。
 
-`Planner Real Provider Gate` workflow 通过 `workflow_dispatch` 和每日 schedule 触发。它不使用 conditional real step：会在纯 LLM planner runtime env 下强制运行 mock planner eval、real planner eval、trajectory eval、recovery observability eval，并执行 `npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0`、`npm run rollout:readiness` 和 `npm run runtime:smoke`。该 workflow 会启动 PostgreSQL service，让 smoke 覆盖 Postgres default-on memory 和 runtime `/chat` observability。如果没有配置 `OPENAI_API_KEY` secret，real provider eval 或 runtime smoke 会失败，从而暴露配置缺口。
+`Planner Real Provider Gate` workflow 通过 `workflow_dispatch` 和每周二至周日 `0 9 * * 0,2-6` schedule 触发。它不使用 conditional real step：会在纯 LLM planner runtime env 下强制运行 mock planner eval、real planner eval、trajectory eval、recovery observability eval，并执行 `npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0`、`npm run rollout:readiness` 和 `npm run runtime:smoke`。该 workflow 会启动 PostgreSQL service，让 smoke 覆盖 Postgres default-on memory 和 runtime `/chat` observability。如果没有配置 `OPENAI_API_KEY` secret，real provider eval 或 runtime smoke 会失败，从而暴露配置缺口。周一由 `Release Evidence Gate` 在 `0 11 * * 1` 统一覆盖 planner、runtime、recovery 和 readiness 信号，避免两个 workflow 对同一信号产生重复失败通知。
 
-`Robust Eval Suite` workflow 通过 `workflow_dispatch` 和每周一 schedule 触发。它要求 `OPENAI_API_KEY`，运行 `npm run eval:robust-suite`，再用 `npm run quality:gate -- --fail-on-warn --require-robust-suite` 强制检查 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 三份 report，并上传 `latest.*`、`latest-rerank-hard-cs.*`、`latest-arxiv-rerank.*` artifacts。
+`Robust Eval Suite` workflow 仅通过 `workflow_dispatch` 手动触发。它要求 `OPENAI_API_KEY`，运行 `npm run eval:robust-suite`，再用 scoped `npm run robust:gate -- --fail-on-warn` 强制检查 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 三份 report，并上传 `latest.*`、`latest-rerank-hard-cs.*`、`latest-arxiv-rerank.*` artifacts。该 workflow 不读取历史 quality 状态。每周固定运行由 `Release Evidence Gate` 统一负责，避免同一 robust suite 产生重复周期任务和通知。
 
-`Release Evidence Gate` workflow 只通过 `workflow_dispatch` 和每周一 `0 11 * * 1` schedule 触发，明确不在 `pull_request` 上运行。它在单个 job、单次 target checkout 中设置 `EVAL_TARGET_COMMIT_SHA=${{ github.sha }}` 和 `EVAL_EVIDENCE_PROFILE=release`，依次生成 robust suite、mock/real planner、trajectory、recovery observability、runtime smoke 与 rollout readiness，再执行严格 `release:gate` 并上传 required latest JSON/Markdown 和 `latest-release-evidence.*`。这样昂贵的 real/robust 评测不会增加默认 PR gate 成本，发布 artifacts 又都绑定同一 SHA。
+`Release Evidence Gate` workflow 通过 `workflow_dispatch` 和每周一 `0 11 * * 1` schedule 触发，明确不在 `pull_request` 上运行。它在单个 job、单次 target checkout 中设置 `EVAL_TARGET_COMMIT_SHA=${{ github.sha }}` 和 `EVAL_EVIDENCE_PROFILE=release`，依次生成 robust suite、mock/real planner、trajectory、recovery observability、runtime smoke 与 rollout readiness，再执行严格 `release:gate` 并上传 required latest JSON/Markdown 和 `latest-release-evidence.*`。这样昂贵的 real/robust 评测不会增加默认 PR gate 成本，发布 artifacts 又都绑定同一 SHA。
 
 提交前建议至少运行：
 
