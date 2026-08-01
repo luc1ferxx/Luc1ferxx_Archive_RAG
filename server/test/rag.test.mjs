@@ -41,6 +41,9 @@ import {
   writeQaAnswer,
 } from "../rag/answer-writer.js";
 import { analyzeComparison } from "../rag/comparison-engine.js";
+import {
+  buildComparisonAnalysisFromContexts,
+} from "../rag/comparison-analysis-summary.js";
 import { alignComparisonEvidence } from "../rag/evidence-aligner.js";
 import { planQaEvidenceGap } from "../rag/gap-planner.js";
 import { getRerankCandidateMultiplier } from "../rag/config.js";
@@ -1531,9 +1534,20 @@ test("near-duplicate compare flow short-circuits to no material difference", asy
 
   const response = await chat(
     ["handbook-alpha", "handbook-beta"],
-    "Compare the remote work policy."
+    "Compare the remote work policy.",
+    { includeRetrievedContexts: true }
   );
   const citedDocIds = new Set(response.citations.map((citation) => citation.docId));
+  const equivalentPair =
+    response.comparisonAnalysisSummary?.likelyNoMaterialDifferencePairs?.[0];
+  const replayedSummary = buildComparisonAnalysisFromContexts({
+    query: response.resolvedQuery,
+    documents: [
+      { docId: "handbook-alpha", fileName: "handbook-alpha.pdf" },
+      { docId: "handbook-beta", fileName: "handbook-beta.pdf" },
+    ],
+    retrievedContexts: response.retrievedContexts,
+  }).summary;
 
   assert.match(response.text, /No evidence-backed material differences were found/i);
   assert.match(response.text, /2 days per week with manager approval/i);
@@ -1551,9 +1565,50 @@ test("near-duplicate compare flow short-circuits to no material difference", asy
     response.comparisonAnalysisSummary?.comparedDocIds,
     ["handbook-alpha", "handbook-beta"]
   );
+  assert.deepEqual(response.comparisonAnalysisSummary, replayedSummary);
+  assert.equal(equivalentPair?.exactEvidenceMatch, true);
+  assert.equal(equivalentPair?.semanticEvidenceMatch, true);
+  assert.equal(equivalentPair?.leftEntailedByRight, true);
+  assert.equal(equivalentPair?.rightEntailedByLeft, true);
+  assert.equal(equivalentPair?.equivalenceMethod, "exact");
   assert.equal(citedDocIds.size, 2);
   assert.ok(citedDocIds.has("handbook-alpha"));
   assert.ok(citedDocIds.has("handbook-beta"));
+});
+
+test("semantic no-difference answers retain facts shared through word-order rewrites", async () => {
+  await ingestFixture({
+    docId: "handbook-semantic-alpha",
+    fileName: "handbook-semantic-alpha.pdf",
+    pages: [
+      "Employees may work remotely 2 days per week with manager approval. Security checklists must be completed before each remote day.",
+    ],
+  });
+  await ingestFixture({
+    docId: "handbook-semantic-beta",
+    fileName: "handbook-semantic-beta.pdf",
+    pages: [
+      "With manager approval, employees may work remotely 2 days per week. Before each remote day, security checklists must be completed.",
+    ],
+  });
+
+  const response = await chat(
+    ["handbook-semantic-alpha", "handbook-semantic-beta"],
+    "Compare the remote work policy."
+  );
+
+  assert.equal(
+    response.comparisonAnalysisSummary?.shouldShortCircuitNoMaterialDifference,
+    true
+  );
+  assert.match(
+    response.text,
+    /Employees may work remotely 2 days per week with manager approval\. \[Source 1\] \[Source 2\]/i
+  );
+  assert.match(
+    response.text,
+    /Security checklists must be completed before each remote day\. \[Source 1\] \[Source 2\]/i
+  );
 });
 
 test("comparison prompt requires atomic claims and diagnostics-backed gaps", async () => {
@@ -1725,7 +1780,7 @@ test("all comparison prompts fail closed against unsupported semantic rewrites",
   }
 });
 
-test("near-duplicate guard disabled exposes model differences to self-check", async () => {
+test("near-duplicate guard disabled rejects model-invented differences", async () => {
   const originalNearDuplicateGuard = process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED;
 
   process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED = "false";
@@ -1762,11 +1817,11 @@ test("near-duplicate guard disabled exposes model differences to self-check", as
       response.text,
       /No evidence-backed material differences were found/i
     );
-    assert.match(response.text, /2 days per week/i);
-    assert.match(response.text, /3 days per week/i);
+    assert.match(response.text, /not have enough citation-backed evidence/i);
+    assert.doesNotMatch(response.text, /3 days per week/i);
+    assert.equal(response.abstained, true);
     assert.equal(response.answerFinalization, undefined);
     assert.equal(documentEvidence.passed, false);
-    assert.equal(documentEvidence.retryRecommended, true);
   } finally {
     if (originalNearDuplicateGuard === undefined) {
       delete process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED;
@@ -1776,7 +1831,7 @@ test("near-duplicate guard disabled exposes model differences to self-check", as
   }
 });
 
-test("compare flow exposes unsupported generated claims to Agent self-check", async () => {
+test("compare flow replaces unsupported generated claims with grounded differences", async () => {
   await ingestFixture({
     docId: "handbook-filter-alpha",
     fileName: "handbook-filter-alpha.pdf",
@@ -1820,15 +1875,124 @@ test("compare flow exposes unsupported generated claims to Agent self-check", as
   });
 
   assert.match(response.text, /2 days per week with manager approval/i);
-  assert.match(response.text, /satellite stipend/i);
+  assert.match(response.text, /3 days per week with manager approval/i);
+  assert.doesNotMatch(response.text, /satellite stipend/i);
+  assert.match(response.text, /^Differences:$/m);
   assert.equal(response.answerFinalization, undefined);
-  assert.equal(claimSupport.unsupportedClaimCount, 1);
-  assert.equal(documentEvidence.passed, false);
-  assert.equal(documentEvidence.retryRecommended, true);
-  assert.match(documentEvidence.reasons.join(" "), /claim lacks citation support/i);
+  assert.equal(claimSupport.unsupportedClaimCount, 0);
+  assert.equal(documentEvidence.passed, true);
 });
 
-test("compare citation coverage ignores source labels attached only to headings", async () => {
+test("comparison fallback preserves key-value subjects and proves its own support", async () => {
+  await ingestFixture({
+    docId: "handbook-colon-alpha",
+    fileName: "handbook-colon-alpha.pdf",
+    pages: ["Remote work days: 2."],
+  });
+  await ingestFixture({
+    docId: "handbook-colon-beta",
+    fileName: "handbook-colon-beta.pdf",
+    pages: ["Remote work days: 3."],
+  });
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) =>
+      String(prompt).includes("Write the answer using these sections:")
+        ? "Malformed comparison without grounded sections."
+        : provider.completeText(prompt),
+  });
+
+  const response = await chat(
+    ["handbook-colon-alpha", "handbook-colon-beta"],
+    "Compare the remote work days."
+  );
+  const claimSupport = evaluateClaimSupport({
+    answerText: response.text,
+    citations: response.citations,
+    comparisonAnalysisSummary: response.comparisonAnalysisSummary,
+  });
+  const documentEvidence = evaluateDocumentEvidence({
+    docIds: ["handbook-colon-alpha", "handbook-colon-beta"],
+    ragResult: {
+      ok: true,
+      value: response,
+    },
+  });
+
+  assert.match(response.text, /Remote work days: 2\./i);
+  assert.match(response.text, /Remote work days: 3\./i);
+  assert.equal(response.abstained, false);
+  assert.equal(claimSupport.unsupportedClaimCount, 0);
+  assert.equal(documentEvidence.passed, true);
+});
+
+test("comparison fallback keeps every document binding in a mixed duplicate conflict", async () => {
+  for (const [docId, fileName, remoteDays] of [
+    ["handbook-mixed-alpha", "handbook-mixed-alpha.pdf", 2],
+    ["handbook-mixed-beta", "handbook-mixed-beta.pdf", 2],
+    ["handbook-mixed-gamma", "handbook-mixed-gamma.pdf", 3],
+  ]) {
+    await ingestFixture({
+      docId,
+      fileName,
+      pages: [`Remote work days: ${remoteDays}.`],
+    });
+  }
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) =>
+      String(prompt).includes("Write the answer using these sections:")
+        ? "Malformed comparison without grounded sections."
+        : provider.completeText(prompt),
+  });
+
+  const response = await chat(
+    [
+      "handbook-mixed-alpha",
+      "handbook-mixed-beta",
+      "handbook-mixed-gamma",
+    ],
+    "Compare the remote work days."
+  );
+  const differenceSection = response.text
+    .split("Differences:")[1]
+    ?.split("Gaps or uncertainty:")[0] ?? "";
+  const claimSupport = evaluateClaimSupport({
+    answerText: response.text,
+    citations: response.citations,
+    comparisonAnalysisSummary: response.comparisonAnalysisSummary,
+  });
+  const documentEvidence = evaluateDocumentEvidence({
+    docIds: [
+      "handbook-mixed-alpha",
+      "handbook-mixed-beta",
+      "handbook-mixed-gamma",
+    ],
+    ragResult: {
+      ok: true,
+      value: response,
+    },
+  });
+
+  assert.match(response.text, /^Differences:$/m);
+  assert.match(
+    differenceSection,
+    /handbook-mixed-alpha states Remote work days: 2\./i
+  );
+  assert.match(
+    differenceSection,
+    /handbook-mixed-beta states Remote work days: 2\./i
+  );
+  assert.match(
+    differenceSection,
+    /handbook-mixed-gamma states Remote work days: 3\./i
+  );
+  assert.equal(response.abstained, false);
+  assert.equal(claimSupport.unsupportedClaimCount, 0);
+  assert.equal(documentEvidence.passed, true);
+});
+
+test("compare answer guard repairs source labels attached only to headings", async () => {
   await ingestFixture({
     docId: "handbook-heading-alpha",
     fileName: "handbook-heading-alpha.pdf",
@@ -1867,9 +2031,9 @@ test("compare citation coverage ignores source labels attached only to headings"
   });
 
   assert.equal(response.citations.length, 2);
-  assert.equal(documentEvidence.citedDocCount, 1);
-  assert.equal(documentEvidence.passed, false);
-  assert.match(documentEvidence.reasons.join(" "), /cover 1 of 2/i);
+  assert.equal(documentEvidence.citedDocCount, 2);
+  assert.equal(documentEvidence.passed, true);
+  assert.match(response.text, /^Differences:$/m);
 });
 
 test("comparison analysis does not short-circuit when no comparable evidence exists", () => {
@@ -1984,6 +2148,183 @@ test("comparison analysis marks identical evidence as strong near-duplicate with
   assert.equal(analysis.pairwiseAnalysis[0].explicitConflict, false);
   assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 1);
   assert.equal(analysis.shouldShortCircuitNoMaterialDifference, true);
+});
+
+test("comparison analysis short-circuits bidirectionally supported word-order rewrites", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work policy.",
+    entries: [
+      {
+        docId: "handbook-order-alpha",
+        fileName: "handbook-order-alpha.pdf",
+        pageContents: [
+          "Employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "handbook-order-beta",
+        fileName: "handbook-order-beta.pdf",
+        pageContents: [
+          "With manager approval, employees may work remotely 2 days per week.",
+        ],
+      },
+    ],
+  });
+  const pair = analysis.pairwiseAnalysis[0];
+
+  assert.equal(pair.exactEvidenceMatch, false);
+  assert.equal(pair.semanticEvidenceMatch, true);
+  assert.equal(pair.leftEntailedByRight, true);
+  assert.equal(pair.rightEntailedByLeft, true);
+  assert.equal(pair.equivalenceMethod, "bidirectional_claim_support");
+  assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 1);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, true);
+});
+
+test("comparison analysis keeps conjunction distinct from disjunction", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare remote work schedules.",
+    entries: [
+      {
+        docId: "schedule-disjunction",
+        fileName: "schedule-disjunction.pdf",
+        pageContents: [
+          "Employees may work remotely on Monday or Tuesday with manager approval.",
+        ],
+      },
+      {
+        docId: "schedule-conjunction",
+        fileName: "schedule-conjunction.pdf",
+        pageContents: [
+          "Employees may work remotely on Monday and Tuesday with manager approval.",
+        ],
+      },
+    ],
+  });
+  const pair = analysis.pairwiseAnalysis[0];
+
+  assert.equal(pair.leftEntailedByRight, false);
+  assert.equal(pair.rightEntailedByLeft, false);
+  assert.equal(pair.semanticEvidenceMatch, false);
+  assert.equal(pair.equivalenceMethod, "none");
+  assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 0);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
+});
+
+test("comparison analysis requires substantive non-predicate fragments on both sides", () => {
+  const sharedPolicy =
+    "Employees may work remotely 2 days per week with manager approval.";
+  const analysis = buildComparisonAnalysis({
+    query: "Compare remote work eligibility.",
+    entries: [
+      {
+        docId: "eligibility-general",
+        fileName: "eligibility-general.pdf",
+        pageContents: [sharedPolicy],
+      },
+      {
+        docId: "eligibility-restricted",
+        fileName: "eligibility-restricted.pdf",
+        pageContents: [`${sharedPolicy} Contractors excluded.`],
+      },
+    ],
+  });
+  const pair = analysis.pairwiseAnalysis[0];
+
+  assert.equal(pair.leftEntailedByRight, true);
+  assert.equal(pair.rightEntailedByLeft, false);
+  assert.equal(pair.semanticEvidenceMatch, false);
+  assert.equal(pair.equivalenceMethod, "none");
+  assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 0);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
+});
+
+test("comparison analysis keeps bare quantities distinct from upper bounds", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work policy.",
+    entries: [
+      {
+        docId: "handbook-bare-quantity",
+        fileName: "handbook-bare-quantity.pdf",
+        pageContents: [
+          "Employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "handbook-upper-bound",
+        fileName: "handbook-upper-bound.pdf",
+        pageContents: [
+          "Employees may work remotely up to 2 days per week with manager approval.",
+        ],
+      },
+    ],
+  });
+  const pair = analysis.pairwiseAnalysis[0];
+
+  assert.equal(pair.semanticEvidenceMatch, false);
+  assert.equal(pair.leftEntailedByRight, false);
+  assert.equal(pair.rightEntailedByLeft, false);
+  assert.equal(pair.equivalenceMethod, "none");
+  assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 0);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
+});
+
+test("comparison analysis keeps different approval authorities distinct", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work approval policy.",
+    entries: [
+      {
+        docId: "handbook-manager-approval",
+        fileName: "handbook-manager-approval.pdf",
+        pageContents: [
+          "Employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "handbook-director-approval",
+        fileName: "handbook-director-approval.pdf",
+        pageContents: [
+          "Employees may work remotely 2 days per week with director approval.",
+        ],
+      },
+    ],
+  });
+  const pair = analysis.pairwiseAnalysis[0];
+
+  assert.equal(pair.semanticEvidenceMatch, false);
+  assert.equal(pair.equivalenceMethod, "none");
+  assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 0);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
+});
+
+test("comparison analysis keeps restricted employee scope distinct", () => {
+  const analysis = buildComparisonAnalysis({
+    query: "Compare the remote work eligibility policy.",
+    entries: [
+      {
+        docId: "handbook-all-employees",
+        fileName: "handbook-all-employees.pdf",
+        pageContents: [
+          "Employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+      {
+        docId: "handbook-engineering-employees",
+        fileName: "handbook-engineering-employees.pdf",
+        pageContents: [
+          "Only full-time engineering employees may work remotely 2 days per week with manager approval.",
+        ],
+      },
+    ],
+  });
+  const pair = analysis.pairwiseAnalysis[0];
+
+  assert.equal(pair.leftEntailedByRight, true);
+  assert.equal(pair.rightEntailedByLeft, false);
+  assert.equal(pair.semanticEvidenceMatch, false);
+  assert.equal(pair.equivalenceMethod, "none");
+  assert.equal(analysis.likelyNoMaterialDifferencePairs.length, 0);
+  assert.equal(analysis.shouldShortCircuitNoMaterialDifference, false);
 });
 
 test("comparison analysis normalizes equivalent decimal numeric bindings", () => {

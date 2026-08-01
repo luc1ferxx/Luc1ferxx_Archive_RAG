@@ -71,6 +71,10 @@ import {
   areCopularRelationsSupported,
   hasReversedTermOrder,
 } from "./relation-order.js";
+import {
+  getDocumentRelationCardinality,
+  normalizeDocumentReportiveClaim,
+} from "./reportive-claims.js";
 
 const MAX_NUMERIC_OCCURRENCES_PER_CLAIM = 128;
 
@@ -452,7 +456,14 @@ export const evaluateClaimAgainstCitations = ({
   documentLabelCitations = citations,
   forceComparisonClaim = false,
 } = {}) => {
-  const anchors = extractClaimAnchors(claimText);
+  const documentAliases = documentLabelCitations.flatMap((citation) =>
+    getCitationDocumentAliases(citation)
+  );
+  const factualInputClaim = normalizeDocumentReportiveClaim({
+    claimText,
+    documentAliases,
+  });
+  const anchors = extractClaimAnchors(factualInputClaim);
   const numericAnchors = anchors.filter((anchor) =>
     ["number", "numeric_constraint"].includes(anchor.type)
   );
@@ -467,9 +478,9 @@ export const evaluateClaimAgainstCitations = ({
       missingAnchors: ["numeric_scope_limit"],
     };
   }
-  const modalityAnchors = getModalityLabels(claimText);
+  const modalityAnchors = getModalityLabels(factualInputClaim);
   const documentAttributionTerms = getDocumentAttributionTerms({
-    claimText,
+    claimText: factualInputClaim,
     citations: documentLabelCitations,
     forceComparisonClaim,
   });
@@ -480,11 +491,11 @@ export const evaluateClaimAgainstCitations = ({
     (anchor) =>
       getNumericAnchorBindingGroups({
         anchor,
-        claimText,
+        claimText: factualInputClaim,
         documentAttributionTerms,
       }).length > 1
   );
-  const factualClaimText = stripClaimLeadLabel(claimText);
+  const factualClaimText = stripClaimLeadLabel(factualInputClaim);
   const numericClaimClauses = splitModalityClauses(factualClaimText);
   const numericParentEligible =
     numericAnchors.length > 0 &&
@@ -511,18 +522,18 @@ export const evaluateClaimAgainstCitations = ({
     ...parentSupportSegments,
     ...compoundSupportSegments,
   ]);
-  const claimHasNegativePolarity = hasNegativePolarity(claimText);
+  const claimHasNegativePolarity = hasNegativePolarity(factualInputClaim);
   const metadataFactAnchors = getMetadataFactAnchors({
-    claimText,
+    claimText: factualInputClaim,
     citations: documentLabelCitations,
   });
   const bindingTerms = getClaimBindingTerms({
-    claimText,
+    claimText: factualInputClaim,
     documentAttributionTerms,
     forceComparisonClaim,
   });
   const additiveDetailTermGroups = getAdditiveDetailTermGroups({
-    claimText,
+    claimText: factualInputClaim,
     documentAttributionTerms,
   });
   const segmentChecks = evaluationSegments.map((segment) => {
@@ -530,7 +541,7 @@ export const evaluateClaimAgainstCitations = ({
     const orderedSupportTerms = extractFactTerms(segment);
     const supportTerms = new Set(orderedSupportTerms);
     const claimTerms = buildClaimTerms({
-      claimText,
+      claimText: factualInputClaim,
       documentLabelCitations,
       forceComparisonClaim,
       scopedCitations: citations,
@@ -552,7 +563,7 @@ export const evaluateClaimAgainstCitations = ({
 
           const supported = isClaimAnchorSupported({
             anchor,
-            claimText,
+            claimText: factualInputClaim,
             documentAttributionTerms,
             rawSupportText: segment,
           });
@@ -581,12 +592,12 @@ export const evaluateClaimAgainstCitations = ({
       terms.every((term) => supportTerms.has(term))
     );
     const copularRelationsSupported = areCopularRelationsSupported(
-      claimText,
+      factualInputClaim,
       segment
     );
     const relationOrderSupported =
       copularRelationsSupported &&
-      !hasReversedRelationTerms(claimText, segment);
+      !hasReversedRelationTerms(factualInputClaim, segment);
     const polaritySupported =
       hasNegativePolarity(segment) === claimHasNegativePolarity;
     const assertionSupported = !isRefutedQuotedClaim({
@@ -920,10 +931,16 @@ const buildContrastFactSignature = ({
   clause = "",
   citations = [],
 } = {}) => {
-  const factualClause = String(clause ?? "").replace(
+  const comparisonClause = String(clause ?? "").replace(
     /^.*?\bdiffer(?:s|ed|ent)?\b\s*:?\s*/i,
     ""
   );
+  const factualClause = normalizeDocumentReportiveClaim({
+    claimText: comparisonClause,
+    documentAliases: citations.flatMap((citation) =>
+      getCitationDocumentAliases(citation)
+    ),
+  });
   const attributionTerms = getDocumentAttributionTerms({
     claimText: factualClause,
     citations,
@@ -998,6 +1015,21 @@ const buildContrastFactSignature = ({
   const numericFacts = buildNumericOccurrenceFacts(factualClause, {
     ignoredTerms: attributionTerms,
   }).facts;
+  const predicateMatch = CLAIM_PREDICATE_PATTERN.exec(factualClause);
+  const predicatePrefix = predicateMatch
+    ? factualClause.slice(0, predicateMatch.index)
+    : "";
+  const scopeTerms = predicateMatch
+    ? extractFactTerms(predicatePrefix).filter(
+        (term) =>
+          supportTerms.has(term) &&
+          !attributionTerms.has(term) &&
+          !COMPARISON_SCAFFOLD_TERMS.has(term) &&
+          !DOCUMENT_IDENTITY_TERMS.has(term) &&
+          !DOCUMENT_ATTRIBUTION_VERBS.has(term) &&
+          !MODALITY_CLAIM_TERMS.has(term)
+      )
+    : [];
 
   return {
     anchors: uniqueValues(anchors),
@@ -1018,6 +1050,9 @@ const buildContrastFactSignature = ({
       numericFacts.map(canonicalizeNumericFactQuantity)
     ),
     relationShape,
+    hasExplicitScopeRestriction:
+      EXCLUSIVE_RELATION_PATTERN.test(predicatePrefix),
+    scopeTerms: uniqueValues(scopeTerms),
     values: uniqueValues(values),
   };
 };
@@ -1041,6 +1076,46 @@ const hasSubstantiveContrast = (factSignatures = []) => {
   }
 
   if (hasPredicateValueContrast(factSignatures)) {
+    return true;
+  }
+
+  const scopeSets = factSignatures.map(
+    (signature) => new Set(signature.scopeTerms ?? [])
+  );
+  const hasStrictScopeSubset = scopeSets.some((candidate, candidateIndex) =>
+    scopeSets.some(
+      (other, otherIndex) =>
+        candidateIndex !== otherIndex &&
+        candidate.size > 0 &&
+        candidate.size < other.size &&
+        [...candidate].every((term) => other.has(term))
+    )
+  );
+  const sharedNonScopeFacts = intersectTermSets(
+    factSignatures.map(
+      (signature, index) =>
+        new Set(
+          signature.values.filter((term) => !scopeSets[index].has(term))
+        )
+    )
+  );
+  const scopeQuantityValues = factSignatures.map((signature) =>
+    serializeValues(signature.anchors)
+  );
+  const scopeModalityValues = factSignatures.map((signature) =>
+    serializeValues(signature.modality)
+  );
+
+  if (
+    hasStrictScopeSubset &&
+    factSignatures.some(
+      (signature) => signature.hasExplicitScopeRestriction === true
+    ) &&
+    sharedNonScopeFacts.size >= 2 &&
+    scopeQuantityValues.every(Boolean) &&
+    new Set(scopeQuantityValues).size === 1 &&
+    new Set(scopeModalityValues).size === 1
+  ) {
     return true;
   }
 
@@ -1459,8 +1534,13 @@ export const evaluateAgreementClaimSupport = ({
   }
 
   const documentGroups = groupCitationsByDocument(scopedCitations);
+  const claimedCardinality = getDocumentRelationCardinality(claimText);
 
-  if (documentGroups.length < 2 || sourceRanks.length === 0) {
+  if (
+    documentGroups.length < 2 ||
+    sourceRanks.length === 0 ||
+    (claimedCardinality !== null && claimedCardinality !== documentGroups.length)
+  ) {
     return buildUnsupportedRelationCheck(claimText);
   }
 
@@ -1506,7 +1586,16 @@ export const evaluateExclusiveClaimSupport = ({
   const exclusiveClause = String(claimText ?? "")
     .split(/\s*,?\s*\b(?:while|whereas)\b\s*/i)[0]
     .trim();
-  const normalizedClauseTerms = normalizeSearchText(exclusiveClause).split(/\s+/g);
+  const documentAliases = allDocumentGroups.flatMap((group) =>
+    getGroupDocumentAliases(group)
+  );
+  const factualExclusiveClause = normalizeDocumentReportiveClaim({
+    claimText: exclusiveClause,
+    documentAliases,
+  });
+  const normalizedClauseTerms = normalizeSearchText(
+    factualExclusiveClause
+  ).split(/\s+/g);
   const exclusiveTokenIndexes = normalizedClauseTerms
     .map((term, index) =>
       ["only", "solely", "exclusively", "alone"].includes(term)
@@ -1518,6 +1607,18 @@ export const evaluateExclusiveClaimSupport = ({
     getGroupDocumentAliases(group).some((alias) => {
       const normalizedAlias = normalizeSearchText(alias);
       const aliasTerms = normalizedAlias.split(/\s+/g);
+      const aliasPattern = aliasTerms
+        .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("[^a-z0-9一-鿿]+");
+
+      if (
+        new RegExp(
+          `(?:^|\\s|[-*])${aliasPattern}\\s*[:：]`,
+          "i"
+        ).test(factualExclusiveClause)
+      ) {
+        return false;
+      }
       const aliasIndex = normalizedClauseTerms.findIndex((term, index) =>
         aliasTerms.every(
           (aliasTerm, offset) => normalizedClauseTerms[index + offset] === aliasTerm
@@ -1538,10 +1639,11 @@ export const evaluateExclusiveClaimSupport = ({
     })
   );
   const genericDocumentExclusive = GENERIC_EXCLUSIVE_DOCUMENT_PATTERN.test(
-    exclusiveClause
+    factualExclusiveClause
   );
   const sourceScopedExclusive =
-    sourceRanks.length > 0 && SOURCE_SCOPED_EXCLUSIVE_PATTERN.test(exclusiveClause);
+    sourceRanks.length > 0 &&
+    SOURCE_SCOPED_EXCLUSIVE_PATTERN.test(factualExclusiveClause);
 
   if (
     !exclusiveDirectlyTargetsAlias &&

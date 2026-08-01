@@ -304,7 +304,18 @@ export const FACT_TERM_ALIASES = new Map([
   ["completed", "complete"],
   ["completing", "complete"],
   ["completion", "complete"],
+  ["checklists", "checklist"],
+  ["every", "each"],
+  ["included", "include"],
+  ["includes", "include"],
+  ["including", "include"],
+  ["referenced", "reference"],
+  ["references", "reference"],
+  ["referencing", "reference"],
   ["remotely", "remote"],
+  ["stated", "state"],
+  ["states", "state"],
+  ["stating", "state"],
 ]);
 export const REPORTIVE_STATED_WRAPPER_PATTERN =
   /\b(is|was)\s+stated\s+to\s+be\b/gi;

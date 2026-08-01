@@ -1,4 +1,6 @@
 {
+  "id": "synthetic-corpus-hybrid",
+  "version": "1",
   "documents": [
     {
       "key": "catalog_alpha",

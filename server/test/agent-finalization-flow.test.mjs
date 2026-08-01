@@ -175,6 +175,156 @@ test("finalization flow finalizes cited document answers and records agent trace
   assert.equal(recordedAgentTraces[0].status, 200);
 });
 
+test("finalization flow exposes the same continuously rebased evidence projection as the final answer", async () => {
+  const trace = [
+    {
+      type: "self_check",
+      label: "Primary Self Check",
+      detail: {
+        finalAnswer: false,
+        claimSupport: {
+          checked: true,
+          claims: [
+            {
+              supported: true,
+              sourceRanks: [2],
+              verifiedSourceRanks: [2],
+              supportedSourceRanks: [2],
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "self_check",
+      label: "Final Self Check Fixture",
+      detail: {
+        finalAnswer: true,
+        claimSupport: {
+          checked: true,
+          claims: [
+            {
+              supported: true,
+              sourceRanks: [2],
+              verifiedSourceRanks: [2],
+              supportedSourceRanks: [2],
+            },
+          ],
+        },
+      },
+    },
+  ];
+  let persistedTraceSnapshot = null;
+  const response = await finalizeAgentRun({
+    addTraceStep: (step) => trace.push(step),
+    buildAgentObservability: ({ agentMode }) => ({ agentMode }),
+    customSkillResults: [],
+    customSkills: [],
+    documentRagSkill: {
+      id: "document_rag",
+      version: "1.0.0",
+      label: "Document RAG",
+    },
+    getAgentSkills: () => [],
+    getBudgetSnapshot: () => ({ used: { documentRagCalls: 1 } }),
+    plan: { mode: "document" },
+    question: "What approval is required?",
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "A satellite stipend is provided. [Source 1]",
+          "Remote work requires manager approval. [Source 2]",
+        ].join("\n"),
+        citations: [
+          {
+            rank: 1,
+            docId: "doc-removed",
+            fileName: "removed.pdf",
+            pageNumber: 1,
+          },
+          {
+            rank: 2,
+            docId: "doc-kept",
+            fileName: "kept.pdf",
+            pageNumber: 1,
+          },
+        ],
+        retrievedContexts: [
+          {
+            rank: 1,
+            docId: "doc-removed",
+            fileName: "removed.pdf",
+            pageNumber: 1,
+            text: "Parking is available.",
+          },
+          {
+            rank: 2,
+            docId: "doc-kept",
+            fileName: "kept.pdf",
+            pageNumber: 1,
+            text: "Remote work requires manager approval.",
+          },
+        ],
+        abstained: false,
+      },
+    },
+    recordAgentTrace: async () => {
+      persistedTraceSnapshot = structuredClone(trace);
+    },
+    recordWorkingMemoryClaimSupport: () => {},
+    researchBrief: null,
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    trace,
+    webResult: null,
+    workingMemory: {},
+  });
+
+  assert.equal(
+    response.body.agentAnswer,
+    "Remote work requires manager approval. [Source 1]"
+  );
+  assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+  assert.deepEqual(
+    response.body.ragSources.map(({ rank, docId }) => ({ rank, docId })),
+    [{ rank: 1, docId: "doc-kept" }]
+  );
+  assert.equal("retrievedContexts" in response.body, false);
+  assert.deepEqual(
+    response.body.agentTrace
+      .find((step) => step.label === "Primary Self Check")
+      ?.detail.claimSupport.claims[0].supportedSourceRanks,
+    [2]
+  );
+  assert.deepEqual(
+    response.body.agentTrace
+      .find((step) => step.label === "Final Self Check Fixture")
+      ?.detail.claimSupport.claims.find((claim) => claim.supported)
+      ?.supportedSourceRanks,
+    [1]
+  );
+  assert.deepEqual(
+    response.body.agentTrace.find((step) => step.type === "answer_finalizer")
+      ?.detail.claimSupport.claims.find((claim) => claim.supported)
+      ?.supportedSourceRanks,
+    [1]
+  );
+  assert.deepEqual(
+    persistedTraceSnapshot
+      ?.find((step) => step.type === "answer_finalizer")
+      ?.detail.claimSupport.claims.find((claim) => claim.supported)
+      ?.supportedSourceRanks,
+    [1]
+  );
+  assert.deepEqual(
+    persistedTraceSnapshot
+      ?.find((step) => step.label === "Primary Self Check")
+      ?.detail.claimSupport.claims[0].supportedSourceRanks,
+    [2]
+  );
+});
+
 test("finalization flow preserves comparison conclusions backed by the matching analysis", async () => {
   const trace = [];
   const response = await finalizeAgentRun({
@@ -415,6 +565,54 @@ test("finalization hydrates rebased custom source ranks without exposing full ev
   );
 });
 
+test("finalization fails closed when a custom answer has no checkable evidence", async () => {
+  const trace = [];
+  const response = await finalizeAgentRun({
+    addTraceStep: (step) => trace.push(step),
+    buildAgentObservability: ({ agentMode }) => ({ agentMode }),
+    customSkillResults: [
+      {
+        ok: true,
+        skillId: "risk_review",
+        skillVersion: "1.0.0",
+        label: "Risk Review",
+        text: "CFO approval is required for every refund.",
+        citations: [],
+      },
+    ],
+    customSkills: [{ id: "risk_review" }],
+    docIds: ["doc-1"],
+    getAgentSkills: () => [],
+    getBudgetSnapshot: () => ({ used: { customSkillCalls: 1 } }),
+    plan: { mode: "risk_review" },
+    question: "Review refund risks.",
+    recordAgentTrace: async () => {},
+    recordWorkingMemoryClaimSupport: () => {},
+    recordWorkingMemoryGaps: () => {},
+    researchBrief: null,
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    trace,
+    webResult: null,
+    workingMemory: {},
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    response.body.agentAnswer,
+    "I do not have enough citation-backed evidence to answer reliably."
+  );
+  assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+  assert.equal(response.body.ragAbstained, true);
+  assert.deepEqual(response.body.ragSources, []);
+  assert.equal(response.body.researchBrief, null);
+  assert.doesNotMatch(response.body.agentAnswer, /CFO approval/i);
+  assert.equal(
+    trace.find((step) => step.type === "answer_finalizer")?.status,
+    "completed"
+  );
+});
+
 test("finalization flow verifies and finalizes research brief answers", async () => {
   const trace = [];
   const claimSupportRecords = [];
@@ -449,17 +647,44 @@ test("finalization flow verifies and finalizes research brief answers", async ()
     researchBrief: {
       text: [
         "Executive Summary",
-        "Refunds require 30 days notice. [Source 1]",
+        "Refunds require 30 days notice. [Source 2]",
         "CFO approval is required for every refund. [Source 1]",
       ].join("\n"),
       citations: [
         {
+          rank: 1,
+          docId: "doc-unsupported",
+          excerpt: "Parking is available.",
+        },
+        {
+          rank: 2,
           docId: "doc-1",
           excerpt: "Refunds require 30 days notice.",
         },
       ],
       findings: [
         {
+          status: "completed",
+          text: "Refunds require 30 days notice. [Source 2]",
+          citations: [
+            {
+              rank: 2,
+              docId: "doc-1",
+              excerpt: "Refunds require 30 days notice.",
+            },
+          ],
+          abstained: false,
+        },
+        {
+          status: "completed",
+          text: "CFO approval is required for every refund. [Source 1]",
+          citations: [
+            {
+              rank: 1,
+              docId: "doc-unsupported",
+              excerpt: "Parking is available.",
+            },
+          ],
           abstained: false,
         },
       ],
@@ -474,6 +699,38 @@ test("finalization flow verifies and finalizes research brief answers", async ()
   assert.equal(response.status, 200);
   assert.equal(response.body.agentMode, "research_brief");
   assert.doesNotMatch(response.body.agentAnswer, /CFO approval/i);
+  assert.doesNotMatch(
+    JSON.stringify(response.body.researchBrief),
+    /CFO approval/i
+  );
+  assert.doesNotMatch(
+    JSON.stringify(response.body.researchBrief),
+    /Parking is available/i
+  );
+  assert.equal(response.body.researchBrief.text, response.body.agentAnswer);
+  assert.deepEqual(
+    response.body.ragSources.map(({ rank, docId }) => ({ rank, docId })),
+    [{ rank: 1, docId: "doc-1" }]
+  );
+  assert.deepEqual(
+    response.body.researchBrief.citations.map(({ rank, docId }) => ({
+      rank,
+      docId,
+    })),
+    [{ rank: 1, docId: "doc-1" }]
+  );
+  assert.deepEqual(
+    response.body.researchBrief.findings.map((finding) => ({
+      text: finding.text,
+      citations: finding.citations.map(({ rank, docId }) => ({ rank, docId })),
+    })),
+    [
+      {
+        text: "Refunds require 30 days notice. [Source 1]",
+        citations: [{ rank: 1, docId: "doc-1" }],
+      },
+    ]
+  );
   assert.deepEqual(
     trace.map((step) => step.type),
     ["synthesis", "self_check", "gap_analysis", "answer_finalizer"]

@@ -8,13 +8,16 @@ import {
   isNearDuplicateGuardEnabled,
 } from "./config.js";
 import {
+  attachRetrievedEvidence,
   buildCitation,
   buildContextSection,
   dedupeCitations,
   getResultKey,
 } from "./citations.js";
+import { evaluateClaimSupport } from "./agent-self-check.js";
 import { completeText } from "./openai.js";
 import { normalizeWhitespace } from "./text-utils.js";
+import { evaluateBidirectionalEvidenceEntailment } from "./comparison-equivalence.js";
 
 const EVIDENCE_CLAIM_SAFETY_RULES = `- Preserve the evidence wording and its modality, quantity scope, and named actors.
 - Preserve each numeric occurrence with its own fact subject, measurement, sign, range, and qualifier; never move a value or qualifier to another fact.
@@ -287,7 +290,7 @@ const normalizeComparableSentence = (sentence = "") =>
     .trim();
 
 const splitEvidenceSentences = (value = "") =>
-  normalizeWhitespace(value)
+  String(value ?? "")
     .split(SENTENCE_BOUNDARY)
     .map((sentence) => normalizeWhitespace(sentence))
     .filter(Boolean);
@@ -386,7 +389,7 @@ const buildComparisonExtraCandidates = (alignment) =>
 const buildDocEvidenceEntries = (bundle) => {
   const entriesByDocId = new Map();
 
-  for (const result of bundle.rankedResults) {
+  for (const result of bundle.rankedResults ?? []) {
     const docId = result.document.metadata?.docId ?? result.document.id;
 
     if (!entriesByDocId.has(docId)) {
@@ -433,30 +436,34 @@ const collectSharedFactLines = (docEntries, limit = 3) => {
     return [];
   }
 
-  const canonicalCounts = new Map();
+  const findEquivalentSentence = (reference, entry) =>
+    entry.sentences.find((candidate) => {
+      if (candidate.canonical === reference.canonical) {
+        return true;
+      }
 
-  for (const entry of docEntries) {
-    for (const sentence of entry.sentences) {
-      canonicalCounts.set(
-        sentence.canonical,
-        (canonicalCounts.get(sentence.canonical) ?? 0) + 1
+      const entailment = evaluateBidirectionalEvidenceEntailment({
+        leftText: reference.text,
+        rightText: candidate.text,
+      });
+
+      return (
+        entailment.leftEntailedByRight && entailment.rightEntailedByLeft
       );
-    }
-  }
+    });
 
   return docEntries[0].sentences
-    .filter((sentence) => canonicalCounts.get(sentence.canonical) === docEntries.length)
+    .map((sentence) => ({
+      sentence,
+      matches: docEntries.map((entry) =>
+        findEquivalentSentence(sentence, entry)
+      ),
+    }))
+    .filter(({ matches }) => matches.every(Boolean))
     .slice(0, limit)
-    .map((sentence) => {
+    .map(({ sentence, matches }) => {
       const sourceLabels = formatSourceLabels(
-        docEntries
-          .map(
-            (entry) =>
-              entry.sentences.find(
-                (candidate) => candidate.canonical === sentence.canonical
-              )?.rank
-          )
-          .filter(Boolean)
+        matches.map((match) => match.rank).filter(Boolean)
       );
 
       return `- ${sentence.text}${sourceLabels ? ` ${sourceLabels}` : ""}`;
@@ -472,6 +479,170 @@ const buildPerDocumentFactLines = (docEntries) =>
       return `- ${sentence.text}${sourceLabels ? ` ${sourceLabels}` : ""}`;
     }),
   ]);
+
+const haveEquivalentEvidenceMeaning = (left = {}, right = {}) => {
+  const entailment = evaluateBidirectionalEvidenceEntailment({
+    leftText: left.text,
+    rightText: right.text,
+  });
+
+  return entailment.leftEntailedByRight && entailment.rightEntailedByLeft;
+};
+
+const buildDocumentBoundFactLine = (entry, sentence) => {
+  const sourceLabels = formatSourceLabels([sentence.rank]);
+  const documentLabel = entry.fileName.replace(/\.[^.]+$/, "");
+
+  return `- ${documentLabel} states ${sentence.text}${
+    sourceLabels ? ` ${sourceLabels}` : ""
+  }`;
+};
+
+const findDifferentiatingSentence = (entry, otherEntry) =>
+  entry.sentences.find(
+    (sentence) =>
+      !otherEntry.sentences.some((candidate) =>
+        haveEquivalentEvidenceMeaning(sentence, candidate)
+      )
+  );
+
+const buildGroundedDifferenceLines = (docEntries, analysis) => {
+  const entryByDocId = new Map(
+    docEntries.map((entry) => [entry.docId, entry])
+  );
+  const conflictPairLines = (analysis?.explicitConflictPairs ?? []).flatMap(
+    (pair) => {
+      const leftEntry = entryByDocId.get(pair.leftDocId);
+      const rightEntry = entryByDocId.get(pair.rightDocId);
+
+      if (!leftEntry || !rightEntry) {
+        return [];
+      }
+
+      const leftSentence = findDifferentiatingSentence(leftEntry, rightEntry);
+      const rightSentence = findDifferentiatingSentence(rightEntry, leftEntry);
+
+      return leftSentence && rightSentence
+        ? [
+            buildDocumentBoundFactLine(leftEntry, leftSentence),
+            buildDocumentBoundFactLine(rightEntry, rightSentence),
+          ]
+        : [];
+    }
+  );
+
+  if (conflictPairLines.length >= 2) {
+    return conflictPairLines;
+  }
+
+  const lines = [];
+
+  for (const entry of docEntries) {
+    const otherEntries = docEntries.filter(
+      (candidate) => candidate.docId !== entry.docId
+    );
+    const differentiatingSentences = entry.sentences
+      .filter((sentence) =>
+        otherEntries.some(
+          (otherEntry) =>
+            !otherEntry.sentences.some((candidate) =>
+              haveEquivalentEvidenceMeaning(sentence, candidate)
+            )
+        )
+      )
+      .slice(0, 2);
+    for (const sentence of differentiatingSentences) {
+      lines.push(buildDocumentBoundFactLine(entry, sentence));
+    }
+  }
+
+  return lines;
+};
+
+const buildGroundedPerDocumentLines = (docEntries) =>
+  docEntries.flatMap((entry) => {
+    const otherEntries = docEntries.filter(
+      (candidate) => candidate.docId !== entry.docId
+    );
+    const sentence =
+      entry.sentences.find((candidate) =>
+        otherEntries.some(
+          (otherEntry) =>
+            !otherEntry.sentences.some((otherSentence) =>
+              haveEquivalentEvidenceMeaning(candidate, otherSentence)
+            )
+        )
+      ) ?? entry.sentences[0];
+
+    if (!sentence) {
+      return [];
+    }
+
+    return [buildDocumentBoundFactLine(entry, sentence)];
+  });
+
+const buildGroundedDifferenceAnswer = ({ analysis, bundle }) => {
+  const docEntries = buildDocEvidenceEntries(bundle);
+  const differenceLines = buildGroundedDifferenceLines(docEntries, analysis);
+  const perDocumentLines = buildGroundedPerDocumentLines(docEntries);
+
+  if (differenceLines.length < 2 || perDocumentLines.length < 2) {
+    return null;
+  }
+
+  return [
+    "Summary:",
+    "Per document:",
+    ...perDocumentLines,
+    "Differences:",
+    ...differenceLines,
+    "Gaps or uncertainty:",
+  ].join("\n");
+};
+
+const isSafeStructuredDifferenceAnswer = ({ analysis, bundle, text }) => {
+  if (!/^Differences:\s*$/im.test(String(text ?? ""))) {
+    return false;
+  }
+
+  const claimSupport = evaluateClaimSupport({
+    answerText: text,
+    citations: attachRetrievedEvidence({
+      citations: bundle.citations,
+      retrievedContexts: bundle.retrievedContexts,
+    }),
+    comparisonAnalysisSummary: analysis,
+  });
+
+  if (claimSupport.checked !== true || claimSupport.unsupportedClaimCount > 0) {
+    return false;
+  }
+
+  const citationByRank = new Map(
+    bundle.citations.map((citation, index) => [
+      Number(citation.rank) || index + 1,
+      citation,
+    ])
+  );
+  const selectedDocIds = new Set(
+    (bundle.citations ?? []).map((citation) => citation.docId).filter(Boolean)
+  );
+  const differenceDocIds = new Set(
+    claimSupport.claims
+      .filter(
+        (claim) =>
+          claim.supported === true && claim.section === "differences"
+      )
+      .flatMap((claim) => claim.supportedSourceRanks ?? [])
+      .map((rank) => citationByRank.get(Number(rank))?.docId)
+      .filter(Boolean)
+  );
+
+  return (
+    selectedDocIds.size >= 2 &&
+    [...selectedDocIds].every((docId) => differenceDocIds.has(docId))
+  );
+};
 
 const buildComparisonDiagnostics = ({ analysis, nearDuplicateGuardEnabled }) => {
   const diagnostics = [
@@ -745,11 +916,49 @@ export const writeComparisonAnswer = async ({
     },
   });
   const text = await completeText(selectedPrompt);
+  const generatedText =
+    text ||
+    "I couldn't produce a reliable comparison from the retrieved document evidence.";
+
+  if (
+    isSafeStructuredDifferenceAnswer({
+      analysis,
+      bundle,
+      text: generatedText,
+    })
+  ) {
+    return {
+      text: generatedText,
+      citations: bundle.citations,
+    };
+  }
+
+  const groundedDifferenceAnswer = buildGroundedDifferenceAnswer({
+    analysis,
+    bundle,
+  });
+
+  if (
+    !groundedDifferenceAnswer ||
+    !isSafeStructuredDifferenceAnswer({
+      analysis,
+      bundle,
+      text: groundedDifferenceAnswer,
+    })
+  ) {
+    const abstainReason =
+      "I do not have enough citation-backed evidence to identify a concrete difference reliably.";
+
+    return {
+      text: abstainReason,
+      citations: bundle.citations,
+      abstained: true,
+      abstainReason,
+    };
+  }
 
   return {
-    text:
-      text ||
-      "I couldn't produce a reliable comparison from the retrieved document evidence.",
+    text: groundedDifferenceAnswer,
     citations: bundle.citations,
   };
 };

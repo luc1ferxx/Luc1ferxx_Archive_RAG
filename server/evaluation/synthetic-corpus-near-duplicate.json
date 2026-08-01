@@ -1,4 +1,6 @@
 {
+  "id": "synthetic-corpus-near-duplicate",
+  "version": "1",
   "documents": [
     {
       "key": "handbook_alpha",

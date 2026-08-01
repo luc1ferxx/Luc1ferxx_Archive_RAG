@@ -66,12 +66,45 @@ const normalizePositiveRank = (value) => {
   return Number.isInteger(rank) && rank > 0 ? rank : null;
 };
 
-const hasSameEvidenceIdentity = (citation = {}, context = {}) => {
+const EXPLICIT_EVIDENCE_IDENTITY_FIELDS = Object.freeze([
+  "docId",
+  "docKey",
+  "chunkIndex",
+  "pageNumber",
+  "fileName",
+  "filePath",
+  "url",
+]);
+
+const hasExplicitIdentityValue = (value) =>
+  value !== null && value !== undefined && String(value).trim() !== "";
+
+const normalizeIdentityValue = (value) => String(value).trim();
+
+const hasExplicitIdentityConflict = (citation = {}, context = {}) =>
+  EXPLICIT_EVIDENCE_IDENTITY_FIELDS.some((field) => {
+    const citationValue = citation[field];
+    const contextValue = context[field];
+
+    return (
+      hasExplicitIdentityValue(citationValue) &&
+      hasExplicitIdentityValue(contextValue) &&
+      normalizeIdentityValue(citationValue) !==
+        normalizeIdentityValue(contextValue)
+    );
+  });
+
+export const hasCompatibleEvidenceIdentity = (citation = {}, context = {}) => {
   const citationRank = normalizePositiveRank(citation.rank);
   const contextRank = normalizePositiveRank(context.rank);
 
-  if (citationRank && contextRank) {
-    return citationRank === contextRank;
+  if (citationRank || contextRank) {
+    return Boolean(
+      citationRank &&
+        contextRank &&
+        citationRank === contextRank &&
+        !hasExplicitIdentityConflict(citation, context)
+    );
   }
 
   return Boolean(
@@ -80,7 +113,8 @@ const hasSameEvidenceIdentity = (citation = {}, context = {}) => {
       citation.docId === context.docId &&
       citation.chunkIndex !== null &&
       citation.chunkIndex !== undefined &&
-      citation.chunkIndex === context.chunkIndex
+      citation.chunkIndex === context.chunkIndex &&
+      !hasExplicitIdentityConflict(citation, context)
   );
 };
 
@@ -90,7 +124,7 @@ export const attachRetrievedEvidence = ({
 } = {}) =>
   citations.map((citation) => {
     const context = retrievedContexts.find((candidate) =>
-      hasSameEvidenceIdentity(citation, candidate)
+      hasCompatibleEvidenceIdentity(citation, candidate)
     );
     const evidenceText = String(context?.text ?? "").trim();
 

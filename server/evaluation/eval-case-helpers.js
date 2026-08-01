@@ -33,6 +33,7 @@ export const summarizeCitations = (citations, docKeyByDocId) =>
     docKey: docKeyByDocId.get(citation.docId) ?? null,
     fileName: citation.fileName,
     pageNumber: citation.pageNumber,
+    chunkIndex: citation.chunkIndex,
     score: citation.score,
     sectionHeading: citation.sectionHeading,
   }));
@@ -59,6 +60,43 @@ export const evaluateExpectedCoverage = ({ citations, expectedEvidence }) => {
           )
     ),
   };
+};
+
+export const buildExpectedEvidenceUnits = (expectedEvidence = []) => {
+  const units = [];
+
+  for (const expected of expectedEvidence ?? []) {
+    const docKey = String(expected?.docKey ?? "").trim();
+
+    if (!docKey) {
+      continue;
+    }
+
+    const pages = Array.isArray(expected.pages)
+      ? expected.pages
+          .map((page) => Number(page))
+          .filter((page) => Number.isFinite(page) && page > 0)
+      : [];
+
+    if (pages.length === 0) {
+      units.push({
+        key: `${docKey}:*`,
+        docKey,
+        pageNumber: null,
+      });
+      continue;
+    }
+
+    for (const pageNumber of pages) {
+      units.push({
+        key: `${docKey}:${pageNumber}`,
+        docKey,
+        pageNumber,
+      });
+    }
+  }
+
+  return units;
 };
 
 export const hashToken = (token) => {

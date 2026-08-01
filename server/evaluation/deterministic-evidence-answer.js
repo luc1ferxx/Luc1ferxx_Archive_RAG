@@ -1,3 +1,5 @@
+import { buildTermSet } from "../rag/text-utils.js";
+
 const ABSTAIN_ANSWER =
   "I could not find enough grounded evidence in the selected documents.";
 const SOURCE_HEADING_PATTERN = /(?:^|\n)Source\s+(\d+)\s*(?=\n)/g;
@@ -13,21 +15,25 @@ const COMPARISON_PROMPT_PATTERNS = [
   /You compare uploaded documents/i,
   /document-grounded comparison assistant/i,
 ];
+const USER_QUESTION_PATTERN =
+  /(?:^|\n)User Question:\n([\s\S]*?)(?=\n\n(?:Resolved Retrieval Question:|Long-term memory:|Retrieved Evidence:|Retrieved evidence:|Comparison diagnostics:|Evidence by document:|Source\s+\d+)|$)/i;
 
 const normalizeEvidence = (value = "") =>
   String(value).replace(/\s+/g, " ").trim();
 
-const extractFirstSentence = (value = "") => {
+const extractEvidenceSentences = (value = "") => {
   const evidence = normalizeEvidence(value);
 
   if (!evidence) {
-    return "";
+    return [];
   }
 
   return (
-    evidence.match(/.*?(?:[.!?\u3002\uff01\uff1f]|$)/)?.[0]?.trim() ??
-    evidence
-  );
+    evidence.match(/.*?(?:[.!?\u3002\uff01\uff1f]|$)(?:\s+|$)/g) ??
+    [evidence]
+  )
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
 };
 
 const trimEvidenceSuffix = (value = "") => {
@@ -63,12 +69,13 @@ export const extractDeterministicEvidenceSources = (prompt = "") => {
       const evidence = trimEvidenceSuffix(
         block.slice(evidenceStart + EVIDENCE_MARKER.length)
       );
-      const sentence = extractFirstSentence(evidence);
+      const sentences = extractEvidenceSentences(evidence);
 
-      return sentence
+      return sentences.length > 0
         ? {
             rank,
-            sentence,
+            sentence: sentences[0],
+            sentences,
           }
         : null;
     })
@@ -81,6 +88,50 @@ export const isDeterministicComparisonPrompt = (prompt = "") => {
   return COMPARISON_PROMPT_PATTERNS.some((pattern) => pattern.test(text));
 };
 
+const extractUserQuestion = (prompt = "") =>
+  String(prompt).match(USER_QUESTION_PATTERN)?.[1]?.trim() ?? "";
+
+const countQuestionTermMatches = (questionTerms, sentence) => {
+  const sentenceTerms = buildTermSet(sentence);
+
+  return [...questionTerms].reduce(
+    (matchCount, term) => matchCount + Number(sentenceTerms.has(term)),
+    0
+  );
+};
+
+const selectQaEvidenceSentences = ({ prompt, sources }) => {
+  const questionTerms = buildTermSet(extractUserQuestion(prompt));
+  const rankedSources = sources.map(({ rank, sentence, sentences }) => {
+    const candidates = (sentences ?? [sentence]).map((evidenceSentence) => ({
+      rank,
+      score: countQuestionTermMatches(questionTerms, evidenceSentence),
+      sentence: evidenceSentence,
+    }));
+
+    return {
+      candidates,
+      score: Math.max(0, ...candidates.map((candidate) => candidate.score)),
+    };
+  });
+
+  if (rankedSources.length === 0) {
+    return null;
+  }
+
+  const selectedSource = rankedSources.reduce(
+    (selected, source) => source.score > selected.score ? source : selected,
+    rankedSources[0]
+  );
+  const relevantCandidates = selectedSource.candidates.filter(
+    (candidate) => candidate.score > 0
+  );
+
+  return relevantCandidates.length > 0
+    ? relevantCandidates
+    : selectedSource.candidates.slice(0, 1);
+};
+
 export const buildDeterministicEvidenceAnswer = (prompt = "") => {
   const sources = extractDeterministicEvidenceSources(prompt);
 
@@ -88,11 +139,21 @@ export const buildDeterministicEvidenceAnswer = (prompt = "") => {
     return ABSTAIN_ANSWER;
   }
 
-  const selectedSources = isDeterministicComparisonPrompt(prompt)
-    ? sources
-    : sources.slice(0, 1);
+  if (!isDeterministicComparisonPrompt(prompt)) {
+    const selected = selectQaEvidenceSentences({ prompt, sources });
 
-  return selectedSources
-    .map(({ rank, sentence }) => `${sentence} [Source ${rank}]`)
+    return selected
+      ? selected
+          .map(({ rank, sentence }) => `${sentence} [Source ${rank}]`)
+          .join("\n")
+      : ABSTAIN_ANSWER;
+  }
+
+  return sources
+    .flatMap(({ rank, sentence, sentences }) =>
+      (sentences ?? [sentence]).map(
+        (evidenceSentence) => `${evidenceSentence} [Source ${rank}]`
+      )
+    )
     .join("\n");
 };

@@ -1,4 +1,6 @@
 {
+  "id": "synthetic-corpus-chunking",
+  "version": "1",
   "documents": [
     {
       "key": "ops_alpha",

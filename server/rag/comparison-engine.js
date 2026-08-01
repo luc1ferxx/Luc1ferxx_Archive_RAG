@@ -1,3 +1,7 @@
+import {
+  evaluateBidirectionalEvidenceEntailment,
+} from "./comparison-equivalence.js";
+
 const NEAR_DUPLICATE_TERM_JACCARD = 0.75;
 const NEAR_DUPLICATE_SENTENCE_OVERLAP = 0.6;
 const STRONG_NEAR_DUPLICATE_TERM_JACCARD = 0.85;
@@ -135,6 +139,18 @@ const analyzePair = (leftEntry, rightEntry) => {
     ) &&
     haveSameSetValues(leftEntry.numericTokenSet, rightEntry.numericTokenSet) &&
     haveSameNumericBindings(leftNumericBindings, rightNumericBindings);
+  const semanticEntailment = exactEvidenceMatch
+    ? {
+        leftEntailedByRight: true,
+        rightEntailedByLeft: true,
+      }
+    : evaluateBidirectionalEvidenceEntailment({
+        leftText: leftEntry.evidenceText,
+        rightText: rightEntry.evidenceText,
+      });
+  const semanticEvidenceMatch =
+    semanticEntailment.leftEntailedByRight &&
+    semanticEntailment.rightEntailedByLeft;
   const nearDuplicate =
     termJaccard >= NEAR_DUPLICATE_TERM_JACCARD &&
     sentenceOverlap >= NEAR_DUPLICATE_SENTENCE_OVERLAP;
@@ -158,6 +174,14 @@ const analyzePair = (leftEntry, rightEntry) => {
     nearDuplicate,
     strongNearDuplicate,
     exactEvidenceMatch,
+    semanticEvidenceMatch,
+    leftEntailedByRight: semanticEntailment.leftEntailedByRight,
+    rightEntailedByLeft: semanticEntailment.rightEntailedByLeft,
+    equivalenceMethod: exactEvidenceMatch
+      ? "exact"
+      : semanticEvidenceMatch
+        ? "bidirectional_claim_support"
+        : "none",
     explicitConflict,
     numericBindingConflict,
     semanticConflict,
@@ -184,14 +208,18 @@ export const analyzeComparison = ({ alignment }) => {
   const nearDuplicatePairs = pairwiseAnalysis.filter((pair) => pair.nearDuplicate);
   const explicitConflictPairs = nearDuplicatePairs.filter((pair) => pair.explicitConflict);
   const likelyNoMaterialDifferencePairs = pairwiseAnalysis.filter(
-    (pair) => pair.exactEvidenceMatch && !pair.explicitConflict
+    (pair) =>
+      (pair.exactEvidenceMatch || pair.semanticEvidenceMatch) &&
+      !pair.explicitConflict
   );
   const shouldShortCircuitNoMaterialDifference =
     alignment.missingDocuments.length === 0 &&
     comparableEntries.length === alignment.perDocument.length &&
     pairwiseAnalysis.length > 0 &&
     pairwiseAnalysis.every(
-      (pair) => pair.exactEvidenceMatch && !pair.explicitConflict
+      (pair) =>
+        (pair.exactEvidenceMatch || pair.semanticEvidenceMatch) &&
+        !pair.explicitConflict
     );
 
   return {

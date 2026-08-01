@@ -496,6 +496,166 @@ test("document evidence check supports grouped source labels from model output",
   assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [1, 2]);
 });
 
+test("document evidence check treats document reportive wrappers as attribution, not evidence facts", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval. Security checklists must be completed before each remote day.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval. Security checklists must be completed before every remote day.",
+    },
+  ];
+  const supportedAnswers = [
+    "Both documents state remote work is 2 days per week with manager approval. [Source 1] [Source 2]",
+    "Both documents include the condition \u201cwith manager approval\u201d for remote work. [Source 1] [Source 2]",
+    "Both reference manager approval for remote work. [Source 1] [Source 2]",
+    "Both require completing a security checklist before each/every remote day. [Source 1] [Source 2]",
+    "handbook-alpha states \u201c2 days per week\u201d for remote work. [Source 1]",
+  ];
+
+  for (const text of supportedAnswers) {
+    const scopedCitations = text.includes("handbook-alpha states")
+      ? citations.slice(0, 1)
+      : citations;
+    const check = evaluateDocumentEvidence({
+      docIds: scopedCitations.map((citation) => citation.docId),
+      ragResult: {
+        ok: true,
+        value: {
+          text,
+          citations: scopedCitations,
+        },
+      },
+    });
+
+    assert.equal(check.passed, true, text);
+    assert.equal(check.claimSupport.unsupportedClaimCount, 0, text);
+  }
+});
+
+test("document reportive wrappers still reject wrong facts and wrong document cardinality", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt: "Employees may work remotely 2 days per week with manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt: "Employees may work remotely 2 days per week with manager approval.",
+    },
+  ];
+
+  for (const text of [
+    "Both documents state remote work is 3 days per week with manager approval. [Source 1] [Source 2]",
+    "Both documents state remote work is 2 days per week with director approval. [Source 1] [Source 2]",
+    "All three documents state remote work is 2 days per week with manager approval. [Source 1] [Source 2]",
+    "All thirteen documents state remote work is 2 days per week with manager approval. [Source 1] [Source 2]",
+  ]) {
+    const check = evaluateDocumentEvidence({
+      docIds: citations.map((citation) => citation.docId),
+      ragResult: {
+        ok: true,
+        value: { text, citations },
+      },
+    });
+
+    assert.equal(check.passed, false, text);
+    assert.equal(check.claimSupport.unsupportedClaimCount, 1, text);
+  }
+});
+
+test("document reportive normalization preserves substantive include predicates", () => {
+  const citations = ["alpha", "beta"].map((name, index) => ({
+    rank: index + 1,
+    docId: `doc-${name}`,
+    fileName: `handbook-${name}.pdf`,
+    excerpt: "The plan excludes dental coverage.",
+  }));
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "Both documents include dental coverage. [Source 1] [Source 2]",
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 1);
+});
+
+test("document reportive normalization preserves nominal requirement modality", () => {
+  const evaluateRequirement = (excerpt) => {
+    const citations = ["alpha", "beta"].map((name, index) => ({
+      rank: index + 1,
+      docId: `doc-${name}`,
+      fileName: `handbook-${name}.pdf`,
+      excerpt,
+    }));
+
+    return evaluateDocumentEvidence({
+      docIds: citations.map((citation) => citation.docId),
+      ragResult: {
+        ok: true,
+        value: {
+          text:
+            "Both documents state the requirement for manager approval for remote work. [Source 1] [Source 2]",
+          citations,
+        },
+      },
+    });
+  };
+
+  assert.equal(
+    evaluateRequirement("Manager approval is required for remote work.").passed,
+    true
+  );
+  assert.equal(
+    evaluateRequirement("Manager approval is optional for remote work.").passed,
+    false
+  );
+});
+
+test("document evidence check validates all-document cardinality separately from business numbers", () => {
+  const citations = ["alpha", "beta", "gamma"].map((name, index) => ({
+    rank: index + 1,
+    docId: `doc-${name}`,
+    fileName: `handbook-${name}.pdf`,
+    excerpt: "Security checklists must be completed before each remote day.",
+  }));
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "All three documents state that security checklists must be completed before each remote day. [Source 1] [Source 2] [Source 3]",
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+  assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [1, 2, 3]);
+  assert.doesNotMatch(check.claimSupport.claims[0].anchors.join(" "), /3/);
+});
+
 test("document evidence check rejects unknown ranks inside grouped source labels", () => {
   const check = evaluateDocumentEvidence({
     docIds: ["doc-alpha"],
@@ -1367,6 +1527,276 @@ test("document evidence check preserves claim support but requires selected-docu
   assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [2]);
   assert.equal(check.citedDocCount, 1);
   assert.equal(check.passed, false);
+});
+
+test("a document label colon keeps only scoped to the evidence subject", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-delta",
+      fileName: "handbook-delta.pdf",
+      excerpt:
+        "Only full-time engineering employees may work remotely 2 days per week with manager approval.",
+    },
+  ];
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "handbook-delta: Only full-time engineering employees may work remotely 2 days per week with manager approval. [Source 2]",
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+  assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [2]);
+  assert.equal(check.passed, false, "selected-document coverage remains enforced");
+});
+
+test("difference sections recognize a supported eligibility-scope restriction", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-delta",
+      fileName: "handbook-delta.pdf",
+      excerpt:
+        "Only full-time engineering employees may work remotely 2 days per week with manager approval.",
+    },
+  ];
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha: Employees may work remotely 2 days per week with manager approval. [Source 1]",
+          "- handbook-delta: Only full-time engineering employees may work remotely 2 days per week with manager approval. [Source 2]",
+        ].join("\n"),
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+  assert.deepEqual(
+    check.claimSupport.claims.flatMap((claim) => claim.supportedSourceRanks),
+    [1, 2]
+  );
+});
+
+test("difference sections preserve eligibility scope through document reportive wrappers", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-delta",
+      fileName: "handbook-delta.pdf",
+      excerpt:
+        "Only full-time engineering employees may work remotely 2 days per week with manager approval.",
+    },
+  ];
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha states Employees may work remotely 2 days per week with manager approval. [Source 1]",
+          "- handbook-delta states Only full-time engineering employees may work remotely 2 days per week with manager approval. [Source 2]",
+        ].join("\n"),
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+  assert.deepEqual(
+    check.claimSupport.claims.flatMap((claim) => claim.supportedSourceRanks),
+    [1, 2]
+  );
+});
+
+test("difference sections do not pair unrelated subjects as an eligibility scope contrast", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-employees",
+      fileName: "handbook-employees.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-contractors",
+      fileName: "handbook-contractors.pdf",
+      excerpt:
+        "Only full-time engineering contractors may work remotely 2 days per week with manager approval.",
+    },
+  ];
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-employees states Employees may work remotely 2 days per week with manager approval. [Source 1]",
+          "- handbook-contractors states Only full-time engineering contractors may work remotely 2 days per week with manager approval. [Source 2]",
+        ].join("\n"),
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 2);
+  assert.ok(
+    check.claimSupport.claims.every((claim) =>
+      claim.missingAnchors.includes("substantive_contrast")
+    )
+  );
+});
+
+test("document reportive normalization still rejects a document-scoped only claim", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval.",
+    },
+  ];
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text:
+          "Only handbook-alpha states Employees may work remotely 2 days per week with manager approval. [Source 1] [Source 2]",
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 1);
+});
+
+test("difference sections do not invent a scope contrast for identical populations", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt:
+        "Only full-time engineering employees may work remotely 2 days per week with manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-delta",
+      fileName: "handbook-delta.pdf",
+      excerpt:
+        "Only full-time engineering employees may work remotely 2 days per week with manager approval.",
+    },
+  ];
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha: Only full-time engineering employees may work remotely 2 days per week with manager approval. [Source 1]",
+          "- handbook-delta: Only full-time engineering employees may work remotely 2 days per week with manager approval. [Source 2]",
+        ].join("\n"),
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 2);
+  assert.ok(
+    check.claimSupport.claims.every((claim) =>
+      claim.missingAnchors.includes("substantive_contrast")
+    )
+  );
+});
+
+test("difference sections do not treat a subject reordering as a scope restriction", () => {
+  const citations = [
+    {
+      rank: 1,
+      docId: "doc-alpha",
+      fileName: "handbook-alpha.pdf",
+      excerpt:
+        "Employees may work remotely 2 days per week with manager approval.",
+    },
+    {
+      rank: 2,
+      docId: "doc-beta",
+      fileName: "handbook-beta.pdf",
+      excerpt:
+        "Employees working remotely may do so 2 days per week with manager approval.",
+    },
+  ];
+  const check = evaluateDocumentEvidence({
+    docIds: citations.map((citation) => citation.docId),
+    ragResult: {
+      ok: true,
+      value: {
+        text: [
+          "Differences:",
+          "- handbook-alpha: Employees may work remotely 2 days per week with manager approval. [Source 1]",
+          "- handbook-beta: Employees working remotely may do so 2 days per week with manager approval. [Source 2]",
+        ].join("\n"),
+        citations,
+      },
+    },
+  });
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 2);
+  assert.ok(
+    check.claimSupport.claims.every((claim) =>
+      claim.missingAnchors.includes("substantive_contrast")
+    )
+  );
 });
 
 test("relationship claims reject citations that do not contribute evidence", () => {

@@ -9,7 +9,9 @@ import {
   isQueryDecompositionEnabled,
   isRerankEnabled,
 } from "./config.js";
-import { analyzeComparison } from "./comparison-engine.js";
+import {
+  buildComparisonAnalysisFromContexts,
+} from "./comparison-analysis-summary.js";
 import { assessComparisonConfidence, assessQaConfidence } from "./confidence.js";
 import {
   buildComparisonEvidenceSummary,
@@ -303,36 +305,6 @@ const buildAlignmentSummaryTrace = (alignment = {}) => ({
   })),
 });
 
-const buildComparisonPairTrace = (pair = {}) => ({
-  leftDocId: pair.leftDocId ?? null,
-  leftFileName: pair.leftFileName ?? null,
-  rightDocId: pair.rightDocId ?? null,
-  rightFileName: pair.rightFileName ?? null,
-  termJaccard: pair.termJaccard ?? null,
-  sentenceOverlap: pair.sentenceOverlap ?? null,
-  nearDuplicate: Boolean(pair.nearDuplicate),
-  strongNearDuplicate: Boolean(pair.strongNearDuplicate),
-  explicitConflict: Boolean(pair.explicitConflict),
-  numericTokensOnlyInLeft: pair.numericTokensOnlyInLeft ?? [],
-  numericTokensOnlyInRight: pair.numericTokensOnlyInRight ?? [],
-});
-
-const buildComparisonAnalysisSummaryTrace = (analysis = {}) => ({
-  comparedDocIds: (analysis.perDocumentSummary ?? [])
-    .map((entry) => entry.docId)
-    .filter(Boolean),
-  evidenceBalance: analysis.evidenceBalance ?? null,
-  nearDuplicatePairs: (analysis.nearDuplicatePairs ?? []).map(
-    buildComparisonPairTrace
-  ),
-  explicitConflictPairs: (analysis.explicitConflictPairs ?? []).map(
-    buildComparisonPairTrace
-  ),
-  shouldShortCircuitNoMaterialDifference: Boolean(
-    analysis.shouldShortCircuitNoMaterialDifference
-  ),
-});
-
 const buildRetrievalInputs = async ({
   agentRetrievalPlan,
   docIds,
@@ -411,19 +383,23 @@ const executeComparisonRag = async ({
     perDocumentResults,
     requirements: evidenceRequirements,
   });
-  const alignment = alignComparisonEvidence({
+  const retrievalAlignment = alignComparisonEvidence({
     query: resolvedQuery,
     documents: selectedDocuments,
     perDocumentResults: confidence.usableResultsByDoc,
   });
-  const analysis = analyzeComparison({
-    alignment,
-  });
   const bundle = prepareComparisonSourceBundle({
-    alignment,
+    alignment: retrievalAlignment,
   });
-  const comparisonAnalysisSummary =
-    buildComparisonAnalysisSummaryTrace(analysis);
+  const {
+    alignment,
+    analysis,
+    summary: comparisonAnalysisSummary,
+  } = buildComparisonAnalysisFromContexts({
+    query: resolvedQuery,
+    documents: selectedDocuments,
+    retrievedContexts: bundle.retrievedContexts,
+  });
   const traceFields = {
     ...buildCommonTraceFields({
       agentRetrievalPlan,

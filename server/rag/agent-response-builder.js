@@ -1,6 +1,49 @@
 import { SKILL_CHAIN_MODE } from "./agent-planner.js";
+import { projectGroundedRankedContent } from "./grounded-answer-projection.js";
 
-const buildPublicResearchBrief = (researchBrief) => {
+const SOURCE_LABEL_PATTERN = /\[(?:source|来源)\s*\d+\]/gi;
+
+const normalizeFindingText = (value) =>
+  String(value ?? "")
+    .replace(SOURCE_LABEL_PATTERN, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+const containsRemovedClaim = (finding, removedClaims = []) => {
+  const findingText = normalizeFindingText(finding?.text);
+
+  return (
+    findingText.length > 0 &&
+    removedClaims.some((claim) => {
+      const removedText = normalizeFindingText(claim);
+
+      return removedText.length > 0 && findingText.includes(removedText);
+    })
+  );
+};
+
+const projectResearchFinding = ({ finding, sourceRankMap }) => {
+  const projection = projectGroundedRankedContent({
+    text: finding?.text,
+    citations: finding?.citations,
+    sourceRankMap,
+  });
+
+  return {
+    ...finding,
+    ...(typeof finding?.text === "string" ? { text: projection.text } : {}),
+    ...(Array.isArray(finding?.citations)
+      ? { citations: projection.citations }
+      : {}),
+  };
+};
+
+const buildPublicResearchBrief = (
+  researchBrief,
+  finalizer,
+  sourceRankMap = new Map()
+) => {
   if (!researchBrief) {
     return researchBrief;
   }
@@ -8,7 +51,28 @@ const buildPublicResearchBrief = (researchBrief) => {
   const { evidenceCitations: _evidenceCitations, ...publicResearchBrief } =
     researchBrief;
 
-  return publicResearchBrief;
+  if (!finalizer) {
+    return publicResearchBrief;
+  }
+
+  const citations = projectGroundedRankedContent({
+    citations: publicResearchBrief.citations,
+    sourceRankMap,
+  }).citations;
+
+  return {
+    ...publicResearchBrief,
+    text: finalizer.text,
+    citations,
+    findings: Array.isArray(publicResearchBrief.findings)
+      ? publicResearchBrief.findings.filter(
+          (finding) =>
+            !containsRemovedClaim(finding, finalizer.removedClaims)
+        ).map((finding) =>
+          projectResearchFinding({ finding, sourceRankMap })
+        )
+      : publicResearchBrief.findings,
+  };
 };
 
 export const serializeAgentError = (error, fallbackMessage) => {
@@ -37,6 +101,7 @@ export const buildClarificationResponse = ({
   trace,
   agentSkills,
   agentObservability,
+  finalAnswerSourceRankMap,
   workingMemory,
   question,
   ragResult,
@@ -91,6 +156,7 @@ export const buildAgentResponse = ({
   baseAgentAnswer,
   directAnswerModes = new Set(),
   finalizer,
+  finalAnswerSourceRankMap = new Map(),
   plan,
   primaryCustomResult,
   question,
@@ -105,7 +171,11 @@ export const buildAgentResponse = ({
   workingMemory,
   webResult,
 } = {}) => {
-  const publicResearchBrief = buildPublicResearchBrief(researchBrief);
+  const publicResearchBrief = buildPublicResearchBrief(
+    researchBrief,
+    finalizer,
+    finalAnswerSourceRankMap
+  );
   const agentAnswer = finalizer?.text ?? baseAgentAnswer;
   const ragError = ragResult?.ok === false
     ? serializeAgentError(ragResult.error, "Unable to answer from the document.")

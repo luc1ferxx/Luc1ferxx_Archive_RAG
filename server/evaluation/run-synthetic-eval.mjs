@@ -5,7 +5,6 @@ import { access, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import chat, { ingestDocument } from "../chat.js";
-import { evaluateAnswerExpectation } from "./answer-match.js";
 import {
   attachEvaluationEvidence,
   getCorpusIdentity,
@@ -15,10 +14,7 @@ import {
 } from "./eval-evidence.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
 import {
-  evaluateExpectedCoverage,
   findRobustReport as findRobustReportGeneric,
-  getResponseAbstained,
-  summarizeCitations,
   toDeterministicEmbedding,
 } from "./eval-case-helpers.js";
 import {
@@ -27,11 +23,6 @@ import {
   validateLatestName,
   writeJson,
 } from "./eval-cli.js";
-import {
-  buildRagasSample,
-  buildReferenceContextsFromPages,
-  summarizeRetrievedContexts,
-} from "./ragas-sample.js";
 import {
   getChatModel,
   getChunkOverlap,
@@ -44,9 +35,6 @@ import {
   isNearDuplicateGuardEnabled,
   getRetrievalTopK,
 } from "../rag/config.js";
-import { evaluateClaimSupport } from "../rag/agent-self-check.js";
-import { attachRetrievedEvidence } from "../rag/citations.js";
-import { filterCitationsToSourceRanks } from "../rag/source-labels.js";
 import { resetDocumentRegistry } from "../rag/doc-registry.js";
 import { resetSessionMemory } from "../rag/memory.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
@@ -69,6 +57,8 @@ import {
   buildDeterministicEvidenceAnswer,
 } from "./deterministic-evidence-answer.js";
 import { validateSyntheticCorpus } from "./synthetic-corpus-validation.js";
+import { evaluateSyntheticCaseResponse } from "./synthetic-case-evaluator.js";
+import { buildSyntheticDocumentId } from "./synthetic-document-identity.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -287,91 +277,14 @@ const evaluateCase = async ({
     { includeRetrievedContexts: true }
   );
   const durationMs = Math.round(performance.now() - startedAt);
-  const retrievedContexts = summarizeRetrievedContexts(
-    response.retrievedContexts,
-    docKeyByDocId
-  );
-  const referenceContexts = buildReferenceContextsFromPages({
-    expectedEvidence: testCase.expectedEvidence,
+
+  return evaluateSyntheticCaseResponse({
+    testCase,
+    response,
+    responseTimeMs: durationMs,
+    docKeyByDocId,
     pagesByDocKey,
   });
-  const abstained = getResponseAbstained(response);
-  const answerExpectationHit = evaluateAnswerExpectation({
-    answer: response.text,
-    expectedAnswerIncludes: testCase.expectedAnswerIncludes,
-  });
-  const claimSupport = abstained
-    ? {
-        checked: false,
-        supportedClaimCount: 0,
-        unsupportedClaimCount: 0,
-        claims: [],
-      }
-    : evaluateClaimSupport({
-        answerText: response.text,
-        citations: attachRetrievedEvidence({
-          citations: response.citations ?? [],
-          retrievedContexts: response.retrievedContexts ?? [],
-        }),
-        comparisonAnalysisSummary: response.comparisonAnalysisSummary,
-      });
-  const claimSupportHit =
-    !claimSupport.checked || claimSupport.unsupportedClaimCount === 0;
-  const answerCitations = abstained
-    ? response.citations ?? []
-    : filterCitationsToSourceRanks({
-        sourceRanks: claimSupport.claims.flatMap(
-          (claim) => claim.supportedSourceRanks ?? []
-        ),
-        citations: response.citations ?? [],
-      });
-  const citations = summarizeCitations(answerCitations, docKeyByDocId);
-  const coverage = evaluateExpectedCoverage({
-    citations,
-    expectedEvidence: testCase.expectedEvidence,
-  });
-
-  const passed = testCase.shouldAbstain
-    ? abstained
-    : !abstained &&
-      coverage.docCoverageHit &&
-      coverage.pageCoverageHit &&
-      answerExpectationHit &&
-      claimSupportHit;
-
-  return {
-    id: testCase.id,
-    type: testCase.type,
-    question: testCase.question,
-    docKeys: testCase.docKeys,
-    shouldAbstain: testCase.shouldAbstain,
-    abstained,
-    abstainReason: response.abstainReason ?? (abstained ? response.text : null),
-    docCoverageHit: coverage.docCoverageHit,
-    pageCoverageHit: coverage.pageCoverageHit,
-    answerExpectationHit,
-    claimSupportHit,
-    passed,
-    responseTimeMs: durationMs,
-    citationCount: citations.length,
-    resolvedQuery: response.resolvedQuery ?? testCase.question,
-    reference: testCase.referenceAnswer ?? null,
-    metadata: testCase.metadata ?? null,
-    answer: response.text,
-    claimSupport,
-    citations,
-    retrievedContexts,
-    referenceContexts,
-    ragasSample: buildRagasSample({
-      testCase,
-      response: {
-        ...response,
-        citations: answerCitations,
-      },
-      docKeyByDocId,
-      referenceContexts,
-    }),
-  };
 };
 
 const ratio = (numerator, denominator) =>
@@ -417,6 +330,7 @@ const buildMarkdownReport = ({
     `| Abstain accuracy | ${summary.metrics.abstainAccuracy} |`,
     `| Answer content hit rate | ${summary.metrics.answerContentHitRate} |`,
     `| Claim support hit rate | ${summary.metrics.claimSupportHitRate} |`,
+    `| Comparison expectation hit rate | ${summary.metrics.comparisonExpectationHitRate} |`,
     `| Upload resume success rate | ${summary.metrics.uploadResumeSuccessRate} |`,
     `| Avg response time (ms) | ${summary.metrics.averageResponseTimeMs} |`,
     `| Avg citation count | ${summary.metrics.averageCitationCount} |`,
@@ -438,13 +352,13 @@ const buildMarkdownReport = ({
     "",
     "## Case Results",
     "",
-    "| Case | Type | Pass | Abstain | Doc Hit | Page Hit | Answer Hit | Claim Support | Time (ms) |"
+    "| Case | Type | Pass | Abstain | Doc Hit | Page Hit | Answer Hit | Claim Support | Compare Verdict | Time (ms) |"
   );
-  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | ---: |");
+  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: |");
 
   for (const caseResult of caseResults) {
     lines.push(
-      `| ${caseResult.id} | ${caseResult.type} | ${caseResult.passed ? "yes" : "no"} | ${caseResult.abstained ? "yes" : "no"} | ${caseResult.docCoverageHit ? "yes" : "no"} | ${caseResult.pageCoverageHit ? "yes" : "no"} | ${caseResult.answerExpectationHit ? "yes" : "no"} | ${caseResult.claimSupportHit ? "yes" : "no"} | ${caseResult.responseTimeMs} |`
+      `| ${caseResult.id} | ${caseResult.type} | ${caseResult.passed ? "yes" : "no"} | ${caseResult.abstained ? "yes" : "no"} | ${caseResult.docCoverageHit ? "yes" : "no"} | ${caseResult.pageCoverageHit ? "yes" : "no"} | ${caseResult.answerExpectationHit ? "yes" : "no"} | ${caseResult.claimSupportHit ? "yes" : "no"} | ${caseResult.comparisonVerdict.checked ? caseResult.comparisonVerdict.reasonCode : "n/a"} | ${caseResult.responseTimeMs} |`
     );
   }
 
@@ -458,10 +372,21 @@ const buildMarkdownReport = ({
       lines.push("");
       lines.push(`- Question: ${failedCase.question}`);
       lines.push(`- Answer: ${failedCase.answer}`);
+      if (failedCase.finalization.changed) {
+        lines.push(`- Raw answer: ${failedCase.rawAnswer}`);
+        lines.push(
+          `- Finalization removed: ${failedCase.finalization.removedClaims.join(" | ") || "none"}`
+        );
+      }
       lines.push(`- Answer hit: ${failedCase.answerExpectationHit ? "yes" : "no"}`);
       lines.push(
         `- Claim support: ${failedCase.claimSupportHit ? "yes" : "no"}`
       );
+      if (failedCase.comparisonVerdict.checked) {
+        lines.push(
+          `- Comparison expectation: ${failedCase.comparisonVerdict.expected} (${failedCase.comparisonVerdict.reasonCode})`
+        );
+      }
       if ((failedCase.claimSupport?.unsupportedClaimCount ?? 0) > 0) {
         lines.push(
           `- Unsupported claims: ${failedCase.claimSupport.claims
@@ -593,7 +518,11 @@ const main = async () => {
       sourcePath,
     });
 
-    const docId = randomUUID();
+    const docId = buildSyntheticDocumentId({
+      corpusId: corpusIdentity.id,
+      corpusVersion: corpusIdentity.version,
+      docKey: documentSpec.key,
+    });
     const documentRecord = await ingestDocument({
       docId,
       filePath: uploadResult.mergedFilePath,
@@ -633,6 +562,9 @@ const main = async () => {
     (caseResult) => caseResult.type === "compare" && !caseResult.shouldAbstain
   );
   const abstainCases = caseResults.filter((caseResult) => caseResult.shouldAbstain);
+  const comparisonExpectationCases = caseResults.filter(
+    (caseResult) => caseResult.comparisonVerdict.checked
+  );
   const successfulUploads = uploadResults.filter(
     (uploadResult) =>
       uploadResult.mergedMatchesOriginal && uploadResult.skippedChunksOnResume > 0
@@ -705,6 +637,12 @@ const main = async () => {
           (caseResult) => !caseResult.shouldAbstain && caseResult.claimSupportHit
         ).length,
         caseResults.filter((caseResult) => !caseResult.shouldAbstain).length
+      ),
+      comparisonExpectationHitRate: ratio(
+        comparisonExpectationCases.filter(
+          (caseResult) => caseResult.comparisonExpectationHit
+        ).length,
+        comparisonExpectationCases.length
       ),
       uploadResumeSuccessRate: ratio(
         successfulUploads.length,

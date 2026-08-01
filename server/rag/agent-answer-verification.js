@@ -1,5 +1,7 @@
 import {
+  buildGroundedAbstention,
   finalizeAgentAnswer,
+  GROUNDED_ABSTENTION_TEXT,
   normalizeClaimSupportForHeadings,
 } from "./agent-finalizer.js";
 import {
@@ -85,7 +87,7 @@ const getPrimaryVerificationSkill = ({
 const buildFinalizedResearchBriefText = ({ finalizer } = {}) => [
   "Executive Summary",
   finalizer.abstained
-    ? "I do not have enough citation-backed evidence to answer reliably."
+    ? GROUNDED_ABSTENTION_TEXT
     : "The research brief was finalized to citation-backed findings.",
   "",
   "Key Findings",
@@ -206,24 +208,28 @@ export const runFinalAnswerVerification = ({
   }
 
   if (!hasCheckableCitationText(evidenceCitations)) {
+    const finalizer = buildGroundedAbstention({
+      answerText,
+      claimSupport: check.claimSupport,
+    });
+
     addTraceStep?.({
       type: "answer_finalizer",
       label: "Answer Finalizer",
-      status: "skipped",
-      summary:
-        "Finalizer skipped because no checkable citation text was available.",
+      status: "completed",
+      summary: buildFinalizerSummary(finalizer),
       detail: {
-        changed: false,
-        abstained: false,
-        removedClaims: [],
-        claimSupport: check.claimSupport,
-        skippedReason: "missing_checkable_citation_text",
+        changed: finalizer.changed,
+        abstained: finalizer.abstained,
+        removedClaims: finalizer.removedClaims,
+        claimSupport: finalizer.claimSupport,
+        reason: "missing_checkable_citation_text",
       },
     });
 
     return {
       check,
-      finalizer: null,
+      finalizer,
     };
   }
 

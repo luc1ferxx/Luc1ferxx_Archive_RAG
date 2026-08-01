@@ -3,6 +3,7 @@ import {
   shouldRunFinalAnswerVerification,
 } from "./agent-answer-verification.js";
 import { finalizeAgentAnswer } from "./agent-finalizer.js";
+import { projectGroundedAnswer } from "./grounded-answer-projection.js";
 import {
   buildDirectAnswerModes,
   buildSynthesisAnswer,
@@ -34,6 +35,33 @@ const attachResultRetrievedEvidence = (result = {}) => ({
       result.retrievedContexts ?? result.value?.retrievedContexts ?? [],
   }),
 });
+
+const synchronizeTraceClaimSupport = ({ trace, claimSupport } = {}) => {
+  if (!Array.isArray(trace) || !claimSupport) {
+    return;
+  }
+
+  for (const [index, step] of trace.entries()) {
+    const isFinalAnswerSelfCheck =
+      step?.type === "self_check" && step.detail?.finalAnswer === true;
+    const isAnswerFinalizer = step?.type === "answer_finalizer";
+
+    if (
+      (!isFinalAnswerSelfCheck && !isAnswerFinalizer) ||
+      !step?.detail?.claimSupport
+    ) {
+      continue;
+    }
+
+    trace[index] = {
+      ...step,
+      detail: {
+        ...step.detail,
+        claimSupport,
+      },
+    };
+  }
+};
 
 export const selectRagSources = ({
   customSkillResults = [],
@@ -245,6 +273,37 @@ export const finalizeAgentRun = async ({
     });
   }
 
+  const finalAnswerProjection = finalizer
+    ? projectGroundedAnswer({
+        text: finalizer.text,
+        citations: ragSources,
+        retrievedContexts:
+          researchBrief?.retrievedContexts ??
+          (ragResult?.ok ? ragResult.value?.retrievedContexts : null) ??
+          primaryCustomResult?.retrievedContexts ??
+          primaryCustomResult?.value?.retrievedContexts ??
+          webResult?.retrievedContexts ??
+          webResult?.value?.retrievedContexts ??
+          [],
+        claimSupport: finalizer.claimSupport,
+      })
+    : null;
+  const publicFinalizer = finalizer
+    ? {
+        ...finalizer,
+        text: finalAnswerProjection.text,
+        claimSupport: finalAnswerProjection.claimSupport,
+      }
+    : null;
+  const publicRagSources = finalAnswerProjection?.citations ?? ragSources;
+
+  if (finalAnswerProjection) {
+    synchronizeTraceClaimSupport({
+      trace,
+      claimSupport: finalAnswerProjection.claimSupport,
+    });
+  }
+
   const agentObservability = buildAgentObservability({
     agentMode,
   });
@@ -253,18 +312,19 @@ export const finalizeAgentRun = async ({
     agentMode,
     baseAgentAnswer,
     directAnswerModes,
-    finalizer,
+    finalizer: publicFinalizer,
     plan,
     primaryCustomResult,
     question,
     ragResult,
-    ragSources,
+    ragSources: publicRagSources,
     researchBrief,
     shouldRunWeb,
     skippedWebBecauseBudget,
     trace,
     agentSkills,
     agentObservability,
+    finalAnswerSourceRankMap: finalAnswerProjection?.sourceRankMap,
     workingMemory,
     webResult,
   });
