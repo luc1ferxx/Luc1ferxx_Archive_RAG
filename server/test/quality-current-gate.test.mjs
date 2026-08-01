@@ -1164,6 +1164,98 @@ test("current quality gate requires raw claim checks for non-abstain answers", (
   );
 });
 
+test("current quality gate accepts additional grounded facts without pinning formatter output", () => {
+  const report = buildGate({
+    mutate: (reports) => {
+      const syntheticCase = reports["quality-synthetic"].cases.find(
+        (caseResult) => caseResult.id === "qa_remote_alpha"
+      );
+
+      syntheticCase.answer +=
+        "\nSecurity checklists must be completed before each remote day. [Source 1]";
+      const claims = splitAnswerClaims(
+        syntheticCase.answer,
+        syntheticCase.citations
+      ).map((claim) => ({
+        sourceRanks: claim.sourceRanks,
+        supported: true,
+        text: claim.text,
+      }));
+
+      syntheticCase.claimSupport = {
+        checked: true,
+        supportedClaimCount: claims.length,
+        unsupportedClaimCount: 0,
+        claims,
+      };
+      syntheticCase.ragasSample.response = syntheticCase.answer;
+    },
+  });
+
+  assert.equal(
+    report.summary.status,
+    "pass",
+    JSON.stringify(report.failedChecks, null, 2)
+  );
+  assert.equal(
+    report.checks.find((check) => check.id === "quality-synthetic")
+      ?.status,
+    "pass"
+  );
+});
+
+test("current quality gate accepts evidence-bound structured comparison rendering", () => {
+  const report = buildGate({
+    mutate: (reports) => {
+      const syntheticCase = reports["quality-synthetic"].cases.find(
+        (caseResult) => caseResult.id === "compare_remote_numeric_conflict"
+      );
+      const alphaFact =
+        "- handbook-alpha states Remote Work Policy Employees may work remotely 2 days per week with manager approval. [Source 1]";
+      const gammaFact =
+        "- handbook-gamma states Remote Work Policy Employees may work remotely 3 days per week with manager approval. [Source 2]";
+
+      syntheticCase.answer = [
+        "Summary:",
+        "Per document:",
+        alphaFact,
+        gammaFact,
+        "Differences:",
+        alphaFact,
+        gammaFact,
+        "Gaps or uncertainty:",
+      ].join("\n");
+      const claims = splitAnswerClaims(
+        syntheticCase.answer,
+        syntheticCase.citations
+      ).map((claim) => ({
+        sourceRanks: claim.sourceRanks,
+        supported: true,
+        text: claim.text,
+      }));
+
+      syntheticCase.claimSupport = {
+        checked: true,
+        supportedClaimCount: claims.length,
+        unsupportedClaimCount: 0,
+        claims,
+      };
+      syntheticCase.ragasSample.response = syntheticCase.answer;
+    },
+  });
+
+  assert.equal(
+    report.summary.status,
+    "pass",
+    JSON.stringify(report.failedChecks, null, 2)
+  );
+  assert.equal(
+    report.checks.find((check) => check.id === "quality-synthetic")
+      ?.status,
+    "pass"
+  );
+});
+
 test("current quality gate rejects answer claims omitted from raw claim checks", () => {
   const report = buildGate({
     mutate: (reports) => {

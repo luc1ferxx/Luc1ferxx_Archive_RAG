@@ -78,6 +78,13 @@ import {
 
 const MAX_NUMERIC_OCCURRENCES_PER_CLAIM = 128;
 
+const normalizeExactEvidenceMatchText = (value = "") =>
+  normalizeEvidenceText(value)
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.!?。！？]+$/u, "")
+    .toLocaleLowerCase();
+
 const normalizeRelationOperators = (value = "") =>
   String(value ?? "")
     .replace(/(?:>=|≥|≧)/g, " greater than or equal to ")
@@ -509,6 +516,16 @@ export const evaluateClaimAgainstCitations = ({
       numericParentEligible ||
       normalizeSearchText(sentence) === normalizedFactualClaim
   );
+  const exactEvidenceSupportSegments = citations.flatMap((citation) =>
+    CHECKABLE_CITATION_FIELDS.map((field) =>
+      normalizeEvidenceText(citation?.[field])
+    ).filter(
+      (segment) =>
+        segment &&
+        normalizeExactEvidenceMatchText(segment) ===
+          normalizeExactEvidenceMatchText(factualClaimText)
+    )
+  );
   const compoundSupportSegments =
     compoundNumericClaim && numericParentEligible
     ? citations.flatMap((citation) =>
@@ -520,8 +537,14 @@ export const evaluateClaimAgainstCitations = ({
   const evaluationSegments = uniqueValues([
     ...supportSegments,
     ...parentSupportSegments,
+    ...exactEvidenceSupportSegments,
     ...compoundSupportSegments,
   ]);
+  const exactEvidenceSupportKeys = new Set(
+    exactEvidenceSupportSegments.map((segment) =>
+      normalizeExactEvidenceMatchText(segment)
+    )
+  );
   const claimHasNegativePolarity = hasNegativePolarity(factualInputClaim);
   const metadataFactAnchors = getMetadataFactAnchors({
     claimText: factualInputClaim,
@@ -537,6 +560,9 @@ export const evaluateClaimAgainstCitations = ({
     documentAttributionTerms,
   });
   const segmentChecks = evaluationSegments.map((segment) => {
+    const exactEvidenceMatch = exactEvidenceSupportKeys.has(
+      normalizeExactEvidenceMatchText(segment)
+    );
     const numericAnchorSupportCache = new Map();
     const orderedSupportTerms = extractFactTerms(segment);
     const supportTerms = new Set(orderedSupportTerms);
@@ -608,30 +634,37 @@ export const evaluateClaimAgainstCitations = ({
 
     return {
       supported:
-        missingAnchors.length === 0 &&
-        missingModalityAnchors.length === 0 &&
-        missingMetadataFactAnchors.length === 0 &&
-        missingBindingTerms.length === 0 &&
-        missingClaimTerms.length === 0 &&
-        additiveDetailsSupported &&
-        relationOrderSupported &&
-        polaritySupported &&
-        assertionSupported &&
-        tokenOverlap >= SUPPORT_TOKEN_OVERLAP_THRESHOLD,
-      tokenOverlap,
-      missingAnchors: [
-        ...missingAnchors,
-        ...missingModalityAnchors,
-        ...missingMetadataFactAnchors,
-        ...missingBindingTerms.map((term) => `subject:${term}`),
-        ...missingClaimTerms.map((term) => `term:${term}`),
-        ...(additiveDetailsSupported ? [] : ["additive_detail"]),
-        ...(relationOrderSupported
-          ? []
-          : [copularRelationsSupported ? "relation_order" : "relation_frame"]),
-        ...(polaritySupported ? [] : ["polarity"]),
-        ...(assertionSupported ? [] : ["refuted_mention"]),
-      ],
+        exactEvidenceMatch ||
+        (missingAnchors.length === 0 &&
+          missingModalityAnchors.length === 0 &&
+          missingMetadataFactAnchors.length === 0 &&
+          missingBindingTerms.length === 0 &&
+          missingClaimTerms.length === 0 &&
+          additiveDetailsSupported &&
+          relationOrderSupported &&
+          polaritySupported &&
+          assertionSupported &&
+          tokenOverlap >= SUPPORT_TOKEN_OVERLAP_THRESHOLD),
+      tokenOverlap: exactEvidenceMatch ? 1 : tokenOverlap,
+      missingAnchors: exactEvidenceMatch
+        ? []
+        : [
+            ...missingAnchors,
+            ...missingModalityAnchors,
+            ...missingMetadataFactAnchors,
+            ...missingBindingTerms.map((term) => `subject:${term}`),
+            ...missingClaimTerms.map((term) => `term:${term}`),
+            ...(additiveDetailsSupported ? [] : ["additive_detail"]),
+            ...(relationOrderSupported
+              ? []
+              : [
+                  copularRelationsSupported
+                    ? "relation_order"
+                    : "relation_frame",
+                ]),
+            ...(polaritySupported ? [] : ["polarity"]),
+            ...(assertionSupported ? [] : ["refuted_mention"]),
+          ],
     };
   });
   const bestCheck = segmentChecks.sort(

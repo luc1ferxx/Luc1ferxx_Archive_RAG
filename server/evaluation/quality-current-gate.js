@@ -69,7 +69,7 @@ export const CURRENT_QUALITY_REPORT_SPECS = Object.freeze([
       id: "synthetic-corpus-near-duplicate",
       relativePath:
         "server/evaluation/synthetic-corpus-near-duplicate.json",
-      version: "unknown",
+      version: "1",
     },
   },
   {
@@ -85,7 +85,7 @@ export const CURRENT_QUALITY_REPORT_SPECS = Object.freeze([
     corpus: {
       id: "feedback-corpus",
       relativePath: "server/evaluation/generated/feedback-corpus.json",
-      version: "unknown",
+      version: "1",
     },
   },
   {

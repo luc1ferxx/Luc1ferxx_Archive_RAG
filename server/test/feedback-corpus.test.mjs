@@ -53,6 +53,8 @@ test("feedback corpus builder converts negative feedback into synthetic eval cas
     },
   ]);
 
+  assert.equal(corpus.id, "feedback-corpus");
+  assert.equal(corpus.version, "1");
   assert.equal(corpus.documents.length, 2);
   assert.equal(corpus.cases.length, 2);
 

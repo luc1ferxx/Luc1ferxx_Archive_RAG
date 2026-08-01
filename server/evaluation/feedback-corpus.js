@@ -7,6 +7,8 @@ const NEGATIVE_FEEDBACK_TYPES = new Set([
   "incomplete",
   "hallucination",
 ]);
+const FEEDBACK_CORPUS_ID = "feedback-corpus";
+const FEEDBACK_CORPUS_VERSION = "1";
 
 const toIdentifier = (value, fallbackValue = "item") => {
   const normalized = normalizeText(value)
@@ -455,6 +457,8 @@ export const buildFeedbackCorpusFromRecords = (records = []) => {
   });
 
   return {
+    id: FEEDBACK_CORPUS_ID,
+    version: FEEDBACK_CORPUS_VERSION,
     documents: [...documentsByKey.values()].sort((left, right) =>
       left.key.localeCompare(right.key)
     ),

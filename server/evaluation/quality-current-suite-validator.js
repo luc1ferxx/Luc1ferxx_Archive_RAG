@@ -904,11 +904,14 @@ const validateSyntheticIntegrity = ({
       const requiredAnswerClaimContract = normalizeClaimContract(
         manifest?.requiredAnswerClaims?.[caseResult?.id]
       );
+      const enforceRequiredAnswerClaims =
+        manifest?.enforceRequiredAnswerClaims === true;
       const reportedClaimContract = normalizeClaimContract(claims);
       const claimContractMatches =
         JSON.stringify(answerClaimContract) ===
         JSON.stringify(reportedClaimContract);
       const requiredAnswerClaimContractMatches =
+        !enforceRequiredAnswerClaims ||
         requiredAnswerClaimContract.length === 0 ||
         JSON.stringify(answerClaimContract) ===
           JSON.stringify(requiredAnswerClaimContract);
