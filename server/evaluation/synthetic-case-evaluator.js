@@ -54,8 +54,8 @@ export const evaluateSyntheticCaseResponse = ({
     docKeyByDocId
   );
   const evidenceCitations = attachRetrievedEvidence({
-    citations: responseCitations,
-    retrievedContexts: response?.retrievedContexts ?? [],
+    citations: rawCitations,
+    retrievedContexts: rawRetrievedContexts,
   });
   const rawClaimSupport = evaluateSupport({
     abstained: rawAbstained,
@@ -76,14 +76,14 @@ export const evaluateSyntheticCaseResponse = ({
       }
     : finalizeGroundedAnswer({
         answerText: rawAnswer,
-        citations: responseCitations,
+        citations: rawCitations,
         evidenceCitations,
         comparisonAnalysisSummary: response?.comparisonAnalysisSummary,
       });
   const projection = projectGroundedAnswer({
     text: finalized.text,
-    citations: responseCitations,
-    retrievedContexts: response?.retrievedContexts ?? [],
+    citations: rawCitations,
+    retrievedContexts: rawRetrievedContexts,
     claimSupport: finalized.claimSupport ?? rawClaimSupport,
   });
   const answer = projection.text;

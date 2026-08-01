@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import {
   CURRENT_QUALITY_SUITE_MANIFEST,
   CURRENT_QUALITY_SUITE_MANIFEST_VERSION,
@@ -14,6 +16,9 @@ import { evaluateExpectedCoverage } from "./eval-case-helpers.js";
 import { isExplicitAbstainAnswer } from "./explicit-abstain-answer.js";
 import { splitAnswerClaims } from "../rag/self-check/claims.js";
 import { evaluateClaimSupport } from "../rag/self-check/evaluate.js";
+import {
+  validateSyntheticCaseOutcomes,
+} from "./synthetic-report-case-evaluator.js";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -561,6 +566,44 @@ const validateSyntheticRawIdentities = ({
   };
 };
 
+const validateSyntheticReplayIntegrity = ({ corpusContract, report }) => {
+  const corpusIdentity = report?.evidence?.corpus ?? {};
+  const replayValidation = validateSyntheticCaseOutcomes({
+    caseContracts: toArray(corpusContract?.cases).map((caseDefinition) => ({
+      ...caseDefinition,
+      corpusId: corpusIdentity.id,
+      corpusVersion: corpusIdentity.version,
+    })),
+    documentContracts: toArray(corpusContract?.documents).map((document) => ({
+      fileName: document?.fileName,
+      key: document?.key,
+      pages: toArray(document?.pages),
+    })),
+    executionConfig: report?.summary?.config ?? null,
+    payload: report ?? {},
+  });
+  const replayErrors = replayValidation.issues.map((issue, index) => ({
+    ...issue,
+    id: `case.${issue.caseId ?? "unknown"}.raw_replay.${issue.field ?? index}`,
+  }));
+  const rawClaimSupportErrors = replayValidation.outcomes
+    .filter(
+      (outcome) =>
+        !isDeepStrictEqual(
+          outcome?.caseResult?.rawClaimSupport,
+          outcome?.rawClaimSupport
+        )
+    )
+    .map((outcome) => ({
+      actual: outcome?.caseResult?.rawClaimSupport ?? null,
+      expected: outcome?.rawClaimSupport ?? null,
+      id: `case.${outcome?.caseResult?.id ?? "unknown"}.raw_replay.rawClaimSupport`,
+      reasonCode: "synthetic_raw_claim_support_mismatch",
+    }));
+
+  return [...replayErrors, ...rawClaimSupportErrors];
+};
+
 const validateSyntheticIntegrity = ({
   cases,
   corpusContract,
@@ -572,7 +615,10 @@ const validateSyntheticIntegrity = ({
     manifest,
     report,
   });
-  const errors = [...rawIdentityValidation.errors];
+  const errors = [
+    ...rawIdentityValidation.errors,
+    ...validateSyntheticReplayIntegrity({ corpusContract, report }),
+  ];
   const expectedCasesById = new Map(
     toArray(corpusContract?.cases).map((caseDefinition) => [
       caseDefinition.id,
@@ -905,7 +951,7 @@ const validateSyntheticIntegrity = ({
         manifest?.requiredAnswerClaims?.[caseResult?.id]
       );
       const enforceRequiredAnswerClaims =
-        manifest?.enforceRequiredAnswerClaims === true;
+        manifest?.enforceRequiredAnswerClaims !== false;
       const reportedClaimContract = normalizeClaimContract(claims);
       const claimContractMatches =
         JSON.stringify(answerClaimContract) ===

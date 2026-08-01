@@ -1,4 +1,4 @@
-export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.6.0";
+export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.7.0";
 export const CURRENT_QUALITY_EVIDENCE_PROFILE = "quality-current";
 
 const deepFreeze = (value) => {
@@ -1260,7 +1260,6 @@ export const CURRENT_QUALITY_SUITE_MANIFEST = deepFreeze({
   feedback: Object.freeze({
     kind: "synthetic",
     caseSource: "corpus",
-    enforceRequiredAnswerClaims: true,
     requiredAnswerClaims: Object.freeze(feedbackAnswerClaims),
     requiredCaseSemantics: Object.freeze(feedbackCaseSemantics),
     requiredConfig: Object.freeze(deterministicSyntheticConfig),

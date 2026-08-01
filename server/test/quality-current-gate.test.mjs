@@ -22,6 +22,16 @@ import {
 import {
   buildRecoveryObservabilityCases,
 } from "../evaluation/recovery-observability-cases.js";
+import {
+  evaluateSyntheticCaseResponse,
+} from "../evaluation/synthetic-case-evaluator.js";
+import {
+  buildSyntheticDocumentId,
+} from "../evaluation/synthetic-document-identity.js";
+import { chunkDocumentWithConfig } from "../rag/chunker.js";
+import {
+  buildComparisonAnalysisFromContexts,
+} from "../rag/comparison-analysis-summary.js";
 import { splitAnswerClaims } from "../rag/self-check/claims.js";
 
 const TARGET_COMMIT = "a".repeat(40);
@@ -29,18 +39,6 @@ const NOW = "2026-07-30T08:00:00.000Z";
 const GENERATED_AT = "2026-07-30T07:30:00.000Z";
 const PINNED_BASELINE_RUN_ID =
   "quality-near-duplicate-deterministic-v1";
-const DETERMINISTIC_QUALITY_CONFIG = {
-  chunkStrategy: "structured",
-  chunkSize: 900,
-  chunkOverlap: 180,
-  retrievalTopK: 6,
-  compareTopKPerDoc: 3,
-  maxComparisonSources: 8,
-  minRelevanceScore: 0.32,
-  nearDuplicateGuardEnabled: true,
-  uploadChunkSizeBytes: 180,
-};
-
 const passingHistory = {
   regressionGate: {
     baselineRunId: PINNED_BASELINE_RUN_ID,
@@ -72,10 +70,47 @@ const formatAnswerClaims = (claims) =>
     })
     .join("\n");
 
+const reevaluateSyntheticCase = ({ answer, caseResult, manifest }) => {
+  const semantics = manifest.requiredCaseSemantics[caseResult.id];
+  const evidence = [
+    ...(caseResult.rawCitations ?? []),
+    ...(caseResult.rawRetrievedContexts ?? []),
+  ];
+  const docKeyByDocId = new Map(
+    evidence.map((item) => [item.docId, item.docKey])
+  );
+  const pagesByDocKey = new Map(
+    Object.entries(manifest.requiredDocuments).map(([docKey, document]) => [
+      docKey,
+      document.pages,
+    ])
+  );
+
+  return evaluateSyntheticCaseResponse({
+    testCase: {
+      id: caseResult.id,
+      ...semantics,
+    },
+    response: {
+      abstained: false,
+      citations: caseResult.rawCitations,
+      comparisonAnalysisSummary: caseResult.comparisonAnalysisSummary,
+      retrievedContexts: caseResult.rawRetrievedContexts,
+      text: answer,
+    },
+    responseTimeMs: caseResult.responseTimeMs,
+    docKeyByDocId,
+    pagesByDocKey,
+  });
+};
+
 const buildReport = (spec) => {
   const manifest = CURRENT_QUALITY_SUITE_MANIFEST[spec.id];
   const runId = `${spec.id}-run`;
   const hasGateChecks = manifest.kind === "checks";
+  const executionConfig = hasGateChecks
+    ? {}
+    : structuredClone(manifest.requiredConfig);
   const recovery =
     spec.id === "recovery"
       ? {
@@ -120,7 +155,11 @@ const buildReport = (spec) => {
     : Object.entries(manifest.requiredDocuments).map(
         ([docKey, document]) => ({
           chunkCount: document.chunkCount,
-          docId: `${docKey}-id`,
+          docId: buildSyntheticDocumentId({
+            corpusId: spec.corpus.id,
+            corpusVersion: spec.corpus.version,
+            docKey,
+          }),
           docKey,
           fileName: document.fileName,
           mergedFilePath: `server/evaluation/generated/${runId}/merged/${document.fileName}`,
@@ -130,6 +169,33 @@ const buildReport = (spec) => {
       );
   const documentsByKey = new Map(
     (documents ?? []).map((document) => [document.docKey, document])
+  );
+  const docKeyByDocId = new Map(
+    (documents ?? []).map((document) => [document.docId, document.docKey])
+  );
+  const pagesByDocKey = new Map(
+    Object.entries(manifest.requiredDocuments ?? {}).map(
+      ([docKey, document]) => [docKey, document.pages]
+    )
+  );
+  const chunksByDocKey = new Map(
+    (documents ?? []).map((document) => [
+      document.docKey,
+      chunkDocumentWithConfig({
+        docId: document.docId,
+        fileName: document.fileName,
+        publicFilePath: "",
+        pages: manifest.requiredDocuments[document.docKey].pages.map(
+          (text, pageIndex) => ({
+            pageNumber: pageIndex + 1,
+            text,
+          })
+        ),
+        chunkStrategy: executionConfig.chunkStrategy,
+        chunkSize: executionConfig.chunkSize,
+        chunkOverlap: executionConfig.chunkOverlap,
+      }),
+    ])
   );
   const cases =
     spec.id === "recovery"
@@ -154,27 +220,37 @@ const buildReport = (spec) => {
     const citations = semantics.expectedEvidence.map(
       (expectedEvidence, index) => {
         const document = documentsByKey.get(expectedEvidence.docKey);
+        const chunk = chunksByDocKey
+          .get(expectedEvidence.docKey)
+          .find(
+            (candidate) =>
+              candidate.metadata.pageNumber === expectedEvidence.pages[0]
+          );
 
         return {
           rank: index + 1,
           docId: document.docId,
           docKey: expectedEvidence.docKey,
           fileName: document.fileName,
-          pageNumber: expectedEvidence.pages[0],
+          pageNumber: chunk.metadata.pageNumber,
+          chunkIndex: chunk.metadata.chunkIndex,
           score: 0.8,
+          sectionHeading: chunk.metadata.sectionHeading ?? null,
         };
       }
     );
     const sourceRanks = citations.map((citation) => citation.rank);
     const retrievedContexts = citations.map((citation) => {
-      const document =
-        manifest.requiredDocuments[citation.docKey];
+      const chunk = chunksByDocKey
+        .get(citation.docKey)
+        .find(
+          (candidate) =>
+            candidate.metadata.chunkIndex === citation.chunkIndex
+        );
 
       return {
         ...citation,
-        chunkIndex: citation.pageNumber - 1,
-        sectionHeading: null,
-        text: document.pages[citation.pageNumber - 1],
+        text: chunk.pageContent,
       };
     });
     const sourceLabels = sourceRanks
@@ -212,58 +288,39 @@ const buildReport = (spec) => {
               return `${firstSentence} [Source ${citation.rank}]`;
             })
             .join("\n");
-    const answerClaims = semantics.shouldAbstain
-      ? []
-      : splitAnswerClaims(answerText, citations);
-    const claimSupport = semantics.shouldAbstain
-      ? {
-          checked: false,
-          supportedClaimCount: 0,
-          unsupportedClaimCount: 0,
-          claims: [],
-        }
-      : {
-          checked: true,
-          supportedClaimCount: answerClaims.length,
-          unsupportedClaimCount: 0,
-          claims: answerClaims.map((claim) => ({
-              sourceRanks: claim.sourceRanks,
-              supported: true,
-              text: claim.text,
-            })),
-        };
+    const comparisonAnalysisSummary =
+      semantics.type === "compare"
+        ? buildComparisonAnalysisFromContexts({
+            query: semantics.question,
+            documents: semantics.docKeys.map((docKey) => {
+              const document = documentsByKey.get(docKey);
 
-    return {
-      id,
-      passed: true,
-      question: semantics.question,
-      shouldAbstain: semantics.shouldAbstain,
-      abstained: semantics.shouldAbstain,
-      abstainReason: semantics.shouldAbstain ? answerText : null,
-      docCoverageHit: true,
-      pageCoverageHit: true,
-      answerExpectationHit: true,
-      claimSupportHit: true,
-      claimSupport,
-      citationCount: citations.length,
-      citations,
-      answer: answerText,
-      docKeys: semantics.docKeys,
-      ragasSample: {
-        caseId: id,
-        response: answerText,
-        retrieved_context_ids: retrievedContexts.map(
-          (context) => `${context.docKey}:${context.pageNumber}`
-        ),
-        retrieved_contexts: retrievedContexts.map(
-          (context) => context.text
-        ),
-        user_input: semantics.question,
+              return {
+                docId: document.docId,
+                fileName: document.fileName,
+              };
+            }),
+            retrievedContexts,
+          }).summary
+        : null;
+
+    return evaluateSyntheticCaseResponse({
+      testCase: {
+        id,
+        ...semantics,
       },
-      retrievedContexts,
+      response: {
+        abstained: semantics.shouldAbstain,
+        abstainReason: semantics.shouldAbstain ? answerText : null,
+        citations,
+        comparisonAnalysisSummary,
+        retrievedContexts,
+        text: answerText,
+      },
       responseTimeMs: 1,
-      type: semantics.type,
-    };
+      docKeyByDocId,
+      pagesByDocKey,
+    });
   });
   const checkCount = cases.reduce(
     (sum, caseResult) => sum + (caseResult.checks?.length ?? 0),
@@ -288,7 +345,7 @@ const buildReport = (spec) => {
           manifest.requiredDocuments[document.docKey];
         const totalBytes = documentContract.totalBytes;
         const totalChunks = Math.ceil(
-          totalBytes / DETERMINISTIC_QUALITY_CONFIG.uploadChunkSizeBytes
+          totalBytes / executionConfig.uploadChunkSizeBytes
         );
         const pausedUploadedChunks = Array.from(
           { length: Math.max(1, Math.floor(totalChunks / 2)) },
@@ -298,10 +355,10 @@ const buildReport = (spec) => {
           (sum, chunkIndex) =>
             sum +
             Math.min(
-              DETERMINISTIC_QUALITY_CONFIG.uploadChunkSizeBytes,
+              executionConfig.uploadChunkSizeBytes,
               totalBytes -
                 chunkIndex *
-                  DETERMINISTIC_QUALITY_CONFIG.uploadChunkSizeBytes
+                  executionConfig.uploadChunkSizeBytes
             ),
           0
         );
@@ -312,7 +369,7 @@ const buildReport = (spec) => {
           totalBytes,
           totalChunks,
           chunkSizeBytes:
-            DETERMINISTIC_QUALITY_CONFIG.uploadChunkSizeBytes,
+            executionConfig.uploadChunkSizeBytes,
           pausedUploadedChunks,
           skippedChunksOnResume: pausedUploadedChunks.length,
           skippedBytesOnResume,
@@ -337,9 +394,7 @@ const buildReport = (spec) => {
   const report = {
     summary: {
       config:
-        spec.reportType === "synthetic"
-          ? structuredClone(DETERMINISTIC_QUALITY_CONFIG)
-          : {},
+        spec.reportType === "synthetic" ? executionConfig : {},
       corpus: spec.corpus
         ? {
             documents: documents.length,
@@ -1052,6 +1107,69 @@ test("current quality gate derives claim support from raw claim verdicts", () =>
   );
 });
 
+test("current quality gate rejects raw-only synthetic evidence tampering", () => {
+  const mutations = [
+    (caseResult) => {
+      caseResult.rawAnswer = "Employees receive an unlimited stipend.";
+    },
+    (caseResult) => {
+      caseResult.rawCitations = [];
+    },
+    (caseResult) => {
+      caseResult.rawRetrievedContexts = [];
+    },
+    (caseResult) => {
+      caseResult.rawClaimSupport = {
+        checked: true,
+        supportedClaimCount: 1,
+        unsupportedClaimCount: 0,
+        claims: [
+          {
+            sourceRanks: [1],
+            supported: true,
+            text: "Employees receive an unlimited stipend",
+          },
+        ],
+      };
+    },
+  ];
+
+  for (const mutateRawEvidence of mutations) {
+    const report = buildGate({
+      mutate: (reports) => {
+        const caseResult = reports["quality-synthetic"].cases.find(
+          (candidate) => candidate.id === "qa_remote_alpha"
+        );
+        const finalProjection = structuredClone({
+          answer: caseResult.answer,
+          citations: caseResult.citations,
+          retrievedContexts: caseResult.retrievedContexts,
+          claimSupport: caseResult.claimSupport,
+        });
+
+        mutateRawEvidence(caseResult);
+
+        assert.deepEqual(
+          {
+            answer: caseResult.answer,
+            citations: caseResult.citations,
+            retrievedContexts: caseResult.retrievedContexts,
+            claimSupport: caseResult.claimSupport,
+          },
+          finalProjection
+        );
+      },
+    });
+
+    assert.equal(report.summary.status, "fail");
+    assert.equal(
+      report.checks.find((check) => check.id === "quality-synthetic")
+        ?.reasonCode,
+      "report_integrity_failed"
+    );
+  }
+});
+
 test("current quality gate rejects an affirmative answer mislabeled as abstention", () => {
   const report = buildGate({
     mutate: (reports) => {
@@ -1170,25 +1288,17 @@ test("current quality gate accepts additional grounded facts without pinning for
       const syntheticCase = reports["quality-synthetic"].cases.find(
         (caseResult) => caseResult.id === "qa_remote_alpha"
       );
+      const answer = `${syntheticCase.answer}\nSecurity checklists must be completed before each remote day. [Source 1]`;
 
-      syntheticCase.answer +=
-        "\nSecurity checklists must be completed before each remote day. [Source 1]";
-      const claims = splitAnswerClaims(
-        syntheticCase.answer,
-        syntheticCase.citations
-      ).map((claim) => ({
-        sourceRanks: claim.sourceRanks,
-        supported: true,
-        text: claim.text,
-      }));
-
-      syntheticCase.claimSupport = {
-        checked: true,
-        supportedClaimCount: claims.length,
-        unsupportedClaimCount: 0,
-        claims,
-      };
-      syntheticCase.ragasSample.response = syntheticCase.answer;
+      Object.assign(
+        syntheticCase,
+        reevaluateSyntheticCase({
+          answer,
+          caseResult: syntheticCase,
+          manifest:
+            CURRENT_QUALITY_SUITE_MANIFEST["quality-synthetic"],
+        })
+      );
     },
   });
 
@@ -1215,7 +1325,7 @@ test("current quality gate accepts evidence-bound structured comparison renderin
       const gammaFact =
         "- handbook-gamma states Remote Work Policy Employees may work remotely 3 days per week with manager approval. [Source 2]";
 
-      syntheticCase.answer = [
+      const answer = [
         "Summary:",
         "Per document:",
         alphaFact,
@@ -1225,22 +1335,16 @@ test("current quality gate accepts evidence-bound structured comparison renderin
         gammaFact,
         "Gaps or uncertainty:",
       ].join("\n");
-      const claims = splitAnswerClaims(
-        syntheticCase.answer,
-        syntheticCase.citations
-      ).map((claim) => ({
-        sourceRanks: claim.sourceRanks,
-        supported: true,
-        text: claim.text,
-      }));
 
-      syntheticCase.claimSupport = {
-        checked: true,
-        supportedClaimCount: claims.length,
-        unsupportedClaimCount: 0,
-        claims,
-      };
-      syntheticCase.ragasSample.response = syntheticCase.answer;
+      Object.assign(
+        syntheticCase,
+        reevaluateSyntheticCase({
+          answer,
+          caseResult: syntheticCase,
+          manifest:
+            CURRENT_QUALITY_SUITE_MANIFEST["quality-synthetic"],
+        })
+      );
     },
   });
 
@@ -1253,6 +1357,44 @@ test("current quality gate accepts evidence-bound structured comparison renderin
     report.checks.find((check) => check.id === "quality-synthetic")
       ?.status,
     "pass"
+  );
+});
+
+test("current quality gate defaults required answer claim enforcement to on", () => {
+  const manifest = CURRENT_QUALITY_SUITE_MANIFEST.feedback;
+
+  assert.equal(
+    Object.hasOwn(manifest, "enforceRequiredAnswerClaims"),
+    false
+  );
+
+  const report = buildGate({
+    mutate: (reports) => {
+      const caseResult = reports.feedback.cases[0];
+      const answer = `${caseResult.answer}\n${caseResult.answer}`;
+
+      Object.assign(
+        caseResult,
+        reevaluateSyntheticCase({
+          answer,
+          caseResult,
+          manifest,
+        })
+      );
+    },
+  });
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(
+    report.checks.find((check) => check.id === "feedback")?.reasonCode,
+    "report_integrity_failed"
+  );
+  assert.ok(
+    report.checks
+      .find((check) => check.id === "feedback")
+      ?.actual?.suite?.integrityErrors?.some((error) =>
+        error.id.endsWith(".answer_claim_contract")
+      )
   );
 });
 

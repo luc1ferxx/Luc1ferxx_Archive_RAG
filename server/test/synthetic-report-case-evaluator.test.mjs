@@ -157,6 +157,83 @@ test("synthetic case evidence remains valid after citation preview fields are re
   assert.equal(replayed.passed, true);
 });
 
+test("synthetic case evaluation rejects a preview that contradicts canonical evidence", () => {
+  const corpusId = "synthetic-corpus-preview-conflict";
+  const corpusVersion = "1";
+  const docKey = "handbook_gamma";
+  const docId = buildSyntheticDocumentId({
+    corpusId,
+    corpusVersion,
+    docKey,
+  });
+  const evidenceText = [
+    "Badge Renewal Window",
+    "Renew access badges every 14 months after the last successful audit.",
+  ].join("\n\n");
+  const answer =
+    "Renew access badges every 99 months after the last successful audit. [Source 1]";
+  const testCase = {
+    id: "qa_badge_gamma_preview_conflict",
+    type: "qa",
+    question: "What is the badge renewal window?",
+    docKeys: [docKey],
+    shouldAbstain: false,
+    compareExpectation: null,
+    expectedEvidence: [{ docKey, pages: [1] }],
+    expectedAnswerIncludes: ["99", "months"],
+  };
+  const responseCitation = {
+    rank: 1,
+    docId,
+    fileName: "handbook-gamma.pdf",
+    pageNumber: 1,
+    chunkIndex: 0,
+    score: 1,
+    sectionHeading: "Badge Renewal Window",
+    excerpt:
+      "Renew access badges every 99 months after the last successful audit.",
+  };
+  const responseContext = {
+    ...responseCitation,
+    excerpt: undefined,
+    text: evidenceText,
+  };
+  const evaluated = evaluateSyntheticCaseResponse({
+    testCase,
+    response: {
+      text: answer,
+      citations: [responseCitation],
+      retrievedContexts: [responseContext],
+      comparisonAnalysisSummary: null,
+    },
+    docKeyByDocId: new Map([[docId, docKey]]),
+    pagesByDocKey: new Map([[docKey, [evidenceText]]]),
+  });
+
+  assert.equal(evaluated.rawClaimSupportHit, false);
+  assert.equal(evaluated.passed, false);
+
+  const replayed = recomputeSyntheticCaseOutcome({
+    caseContract: {
+      ...testCase,
+      corpusId,
+      corpusVersion,
+    },
+    caseResult: evaluated,
+    documentContracts: [
+      {
+        key: docKey,
+        fileName: "handbook-gamma.pdf",
+        pages: [evidenceText],
+      },
+    ],
+  });
+
+  assert.equal(replayed.rawClaimSupportHit, false);
+  assert.equal(replayed.projectionMatches, true);
+  assert.equal(replayed.passed, false);
+});
+
 test("synthetic report outcomes reject raw unsupported claims despite forged derived fields", () => {
   const outcome = recomputeSyntheticCaseOutcome({
     caseContract: qaContract,
