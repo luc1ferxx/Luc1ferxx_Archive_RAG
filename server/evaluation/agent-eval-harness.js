@@ -3,6 +3,41 @@ export const createEvalTelemetry = () => ({
   listDocumentScopes: [],
 });
 
+/**
+ * Runs `callback` with process.env overrides in place and restores the
+ * previous values afterwards, whether or not the callback throws.
+ *
+ * Eval cases run sequentially, so a case may pin a runtime dial for its own
+ * duration (the skill graph rollout, memory flags) without leaking it into the
+ * next case or into the CI process that launched the runner. A value of
+ * `undefined` deletes the variable for the duration of the callback.
+ */
+export const withEnvironmentOverrides = async (overrides, callback) => {
+  const originalValues = new Map(
+    Object.keys(overrides).map((key) => [key, process.env[key]])
+  );
+
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  try {
+    return await callback();
+  } finally {
+    for (const [key, value] of originalValues.entries()) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+};
+
 export const createAccessScopeMatcher = (expectedScope = {}) => (scope) =>
   scope?.userId === expectedScope.userId &&
   scope?.workspaceId === expectedScope.workspaceId;

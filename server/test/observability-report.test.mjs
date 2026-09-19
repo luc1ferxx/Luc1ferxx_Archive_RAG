@@ -597,6 +597,92 @@ test("observability report aggregates recovery and replay metrics", () => {
   assert.match(formatted, /planner fallback count: 1/);
 });
 
+test("observability report aggregates skill graph signals into recovery metrics", () => {
+  const report = buildObservabilityReport({
+    events: [
+      // A guarded run that replanned once and reused the two settled nodes.
+      {
+        type: "skill_graph_planned",
+        payload: {
+          executed: true,
+          fallback: null,
+          mode: "guarded",
+          nodeRuns: [
+            { nodeId: "summarize_contract", status: "reused" },
+            { nodeId: "risk_review", status: "reused" },
+            { nodeId: "risk_review_retry", status: "completed" },
+          ],
+          replans: [
+            { decision: "applied" },
+            { decision: "abstain", reasonCode: "replan_limit_reached" },
+          ],
+          status: "completed",
+        },
+      },
+      // A shadow run: planned beside the chain, never executed.
+      {
+        type: "skill_graph_planned",
+        payload: {
+          executed: false,
+          fallback: null,
+          mode: "shadow",
+          nodeRuns: [],
+          replans: [],
+          status: "selected",
+        },
+      },
+      // A graph rejected whole before any node ran: the one safe fallback.
+      {
+        type: "skill_graph_planned",
+        payload: {
+          executed: false,
+          fallback: "v1",
+          mode: "guarded",
+          nodeRuns: [],
+          replans: [],
+          status: "rejected",
+        },
+      },
+    ],
+  });
+
+  assert.equal(report.recovery.eventCount, 3);
+  assert.equal(report.recovery.skillGraphPlannedCount, 3);
+  assert.equal(report.recovery.skillGraphExecutedCount, 1);
+  assert.equal(report.recovery.skillGraphFallbackCount, 1);
+  assert.equal(report.recovery.skillGraphUnsafeFallbackCount, 0);
+  assert.equal(report.recovery.skillGraphReusedNodeCount, 2);
+  assert.equal(report.recovery.skillGraphReplanAppliedCount, 1);
+
+  const formatted = formatObservabilityReport(report);
+
+  assert.match(formatted, /skill graph planned: 3/);
+  assert.match(formatted, /skill graph fallbacks after execution: 0/);
+  assert.match(formatted, /skill graph reused nodes: 2/);
+  assert.match(formatted, /skill graph replans applied: 1/);
+});
+
+test("observability report counts a fallback after node execution as unsafe", () => {
+  const report = buildObservabilityReport({
+    events: [
+      {
+        type: "skill_graph_planned",
+        payload: {
+          executed: true,
+          fallback: "v1",
+          mode: "guarded",
+          nodeRuns: [{ nodeId: "compare", status: "completed" }],
+          replans: [],
+          status: "partial",
+        },
+      },
+    ],
+  });
+
+  assert.equal(report.recovery.skillGraphFallbackCount, 1);
+  assert.equal(report.recovery.skillGraphUnsafeFallbackCount, 1);
+});
+
 test("observability report aggregates agent task recovery metrics", () => {
   const report = buildObservabilityReport({
     events: [

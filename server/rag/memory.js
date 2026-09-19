@@ -121,12 +121,12 @@ JSON:
 
 2.
 Recent conversation:
-User [docs: plan-a.pdf, plan-b.pdf]: 瀵规瘮杩欎袱浠芥枃妗ｇ殑杩滅▼鍔炲叕鏀跨瓥銆?
-Assistant [docs: plan-a.pdf, plan-b.pdf] [mode: compare]: 涓や唤鏂囨。閮借姹傜粡鐞嗗鎵癸紝浣嗘瘡鍛ㄨ繙绋嬪ぉ鏁颁笉鍚屻€?
+User [docs: plan-a.pdf, plan-b.pdf]: 对比这两份文档的远程办公政策。
+Assistant [docs: plan-a.pdf, plan-b.pdf] [mode: compare]: 两份文档都要求经理审批，但每周远程天数不同。
 Latest user question:
-閭ｇ浜屼釜鍛紵
+那第二个呢？
 JSON:
-{{"rewritten_query":"绗簩浠芥枃妗ｇ殑杩滅▼鍔炲叕鏀跨瓥鏄粈涔堬紵","preserved_ambiguity":false}}
+{{"rewritten_query":"第二份文档的远程办公政策是什么？","preserved_ambiguity":false}}
 
 3.
 Recent conversation:

@@ -1,7 +1,10 @@
 import { hashCanonicalJson } from "./eval-evidence.js";
 import { robustEvalSuite } from "./eval-suite.js";
 
-export const ROBUST_SUITE_EXECUTION_CONTRACT_VERSION = "2.0.0";
+// 2.1.0: the synthetic execution contract names the retrieval architecture
+// (vectorStoreProvider, hybridEnabled, hybridFusion) and pushes it into the
+// child environment, so a report's public config hash changes with it.
+export const ROBUST_SUITE_EXECUTION_CONTRACT_VERSION = "2.1.0";
 
 const SYNTHETIC_ENVIRONMENT_FIELDS = Object.freeze({
   chunkStrategy: "RAG_CHUNK_STRATEGY",
@@ -12,6 +15,9 @@ const SYNTHETIC_ENVIRONMENT_FIELDS = Object.freeze({
   maxComparisonSources: "RAG_MAX_COMPARISON_SOURCES",
   minRelevanceScore: "RAG_MIN_RELEVANCE_SCORE",
   nearDuplicateGuardEnabled: "RAG_NEAR_DUPLICATE_GUARD_ENABLED",
+  vectorStoreProvider: "VECTOR_STORE_PROVIDER",
+  hybridEnabled: "RAG_HYBRID_ENABLED",
+  hybridFusion: "RAG_HYBRID_FUSION",
 });
 
 const RERANK_ENVIRONMENT_FIELDS = Object.freeze({
@@ -130,6 +136,18 @@ const normalizeSyntheticConfig = (report) => {
     uploadChunkSizeBytes: requireFiniteNumber(
       config.uploadChunkSizeBytes,
       `${report.id}.executionConfig.uploadChunkSizeBytes`
+    ),
+    vectorStoreProvider: requireNonEmptyString(
+      config.vectorStoreProvider,
+      `${report.id}.executionConfig.vectorStoreProvider`
+    ),
+    hybridEnabled: requireBoolean(
+      config.hybridEnabled,
+      `${report.id}.executionConfig.hybridEnabled`
+    ),
+    hybridFusion: requireNonEmptyString(
+      config.hybridFusion,
+      `${report.id}.executionConfig.hybridFusion`
     ),
   };
 };

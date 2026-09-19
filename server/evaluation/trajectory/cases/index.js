@@ -19,6 +19,12 @@ import {
   createCustomSkillRetryCase,
   createWebApprovalDenyCase,
 } from "./run-control.js";
+import {
+  createSkillGraphBoundedReplanCase,
+  createSkillGraphGuardedExecutionCase,
+  createSkillGraphIllegalPlanCase,
+  createSkillGraphShadowComparisonCase,
+} from "./skill-graph.js";
 
 export const createDefaultTrajectoryCases = () => [
   createSkillChainCase(),
@@ -34,4 +40,8 @@ export const createDefaultTrajectoryCases = () => [
   createPlannerFallbackCase(),
   createPrivacySanitizationCase(),
   createGoalLifecycleCase(),
+  createSkillGraphGuardedExecutionCase(),
+  createSkillGraphShadowComparisonCase(),
+  createSkillGraphIllegalPlanCase(),
+  createSkillGraphBoundedReplanCase(),
 ];

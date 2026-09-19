@@ -6,7 +6,10 @@ import {
   appendCaseCheckTable,
   appendCategoryMetricsTable,
   buildMetricSummary,
+  withEnvironmentOverrides,
 } from "./agent-eval-harness.js";
+import { runAgentRag } from "../rag/agent.js";
+import { CUSTOM_SKILL_IDS } from "../rag/skills/registry.js";
 import {
   buildRecoveryObservabilityCases,
 } from "./recovery-observability-cases.js";
@@ -51,6 +54,7 @@ export const RECOVERY_OBSERVABILITY_CATEGORY_LABELS = {
   replay: "Replay",
   task_recovery: "Task recovery",
   planner: "Planner",
+  skill_graph: "Skill graph",
 };
 
 const toIsoDate = (date = new Date()) =>
@@ -441,11 +445,101 @@ const buildProductionTaskRecoveryEvents = async () => {
   return taskRecoveryEvents;
 };
 
+// A real guarded run through the agent, not a hand-built event: the first risk
+// review comes back empty, the runtime applies the one replan the injected
+// replanner proposes, and the two nodes that had already settled are reused.
+// The skill_graph_planned event that run records is what the recovery report
+// counts, so the counters describe what the stage actually did.
+const buildProductionSkillGraphEvents = async () => {
+  const agentRunService = createProductionFixtureRunService();
+  const citation = {
+    docId: "doc-1",
+    excerpt: "Late notice creates renewal risk.",
+    fileName: "policy.pdf",
+    pageNumber: 3,
+  };
+  let chatCalls = 0;
+  const ragService = {
+    chat: async (docIds, question) => {
+      chatCalls += 1;
+
+      if (chatCalls === 2) {
+        return { abstained: true, citations: [], resolvedQuery: question, text: "" };
+      }
+
+      return {
+        abstained: false,
+        citations: [citation],
+        resolvedQuery: question,
+        text: /risk/i.test(question)
+          ? "Risk Review\n- Risk: Late notice creates renewal risk. [Source 1]"
+          : "Contract Summary\n- Parties: Acme and Beta. [Source 1]",
+      };
+    },
+    listDocuments: () => [{ docId: "doc-1", fileName: "policy.pdf" }],
+  };
+  const response = await withEnvironmentOverrides(
+    {
+      AGENT_SKILL_GRAPH_ROLLOUT: "guarded",
+      RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
+      RAG_LONG_MEMORY_ENABLED: "false",
+    },
+    () =>
+      runAgentRag({
+        accessScope: productionFixtureAccessScope,
+        // Exactly one call beyond the two-node plan: enough to fund the retry
+        // node the replan adds, not enough to fund anything else.
+        agentBudget: { maxCustomSkillCalls: 3 },
+        agentRunService,
+        docIds: ["doc-1"],
+        question: "Review this contract for risks and key terms.",
+        ragService,
+        replanAdapter: {
+          createPatch: () => ({
+            addNodes: [
+              {
+                dependsOn: [CUSTOM_SKILL_IDS.summarizeContract],
+                failurePolicy: "continue",
+                inputBindings: {
+                  docIds: { field: "docIds", source: "request" },
+                  priorFindings: {
+                    nodeId: CUSTOM_SKILL_IDS.summarizeContract,
+                    output: "text",
+                    source: "node",
+                  },
+                  question: { field: "question", source: "request" },
+                },
+                nodeId: "risk_review_retry",
+                rationale: "Retry the risk review with the summary as context.",
+                skillId: CUSTOM_SKILL_IDS.riskReview,
+              },
+            ],
+            rationale: "The first risk review found nothing.",
+            removeNodeIds: [],
+          }),
+          id: "recovery_eval_replan",
+        },
+        sessionId: "recovery-eval-session",
+        userId: productionFixtureAccessScope.userId,
+        webChatService: async () => ({ text: "web should not run" }),
+      })
+  );
+  const run = await agentRunService.getRun({
+    accessScope: productionFixtureAccessScope,
+    runId: response?.body?.agentRunId,
+  });
+
+  return (run?.events ?? []).filter(
+    (event) => event.type === "skill_graph_planned"
+  );
+};
+
 export const buildRecoveryObservabilityProductionEvents = async () => [
   ...(await buildProductionStartupRecoveryEvents()),
   ...(await buildProductionManualActionEvents()),
   ...(await buildProductionLifecycleEvents()),
   ...(await buildProductionTaskRecoveryEvents()),
+  ...(await buildProductionSkillGraphEvents()),
   {
     traceType: "agent",
     agentMode: "document",
@@ -557,6 +651,24 @@ export const buildRecoveryObservabilityFixtureEvents = () => [
     taskId: "task-waiting",
   },
   {
+    type: "skill_graph_planned",
+    payload: {
+      executed: true,
+      fallback: null,
+      mode: "guarded",
+      nodeRuns: [
+        { nodeId: "summarize_contract", status: "reused" },
+        { nodeId: "risk_review", status: "reused" },
+        { nodeId: "risk_review_retry", status: "completed" },
+      ],
+      replans: [
+        { decision: "applied" },
+        { decision: "abstain", reasonCode: "replan_limit_reached" },
+      ],
+      status: "completed",
+    },
+  },
+  {
     traceType: "agent",
     agentMode: "document",
     agentObservability: {
@@ -643,6 +755,16 @@ export const formatRecoveryObservabilityReportMarkdown = (report = {}) => {
     }\``,
     `- Task recovery completed: \`${recovery.taskRecoveryCompletedCount ?? 0}\``,
     `- Planner fallback count: \`${recovery.plannerFallbackCount ?? 0}\``,
+    `- Skill graph planned: \`${recovery.skillGraphPlannedCount ?? 0}\``,
+    `- Skill graph executed: \`${recovery.skillGraphExecutedCount ?? 0}\``,
+    `- Skill graph fallbacks: \`${recovery.skillGraphFallbackCount ?? 0}\``,
+    `- Skill graph fallbacks after execution: \`${
+      recovery.skillGraphUnsafeFallbackCount ?? 0
+    }\``,
+    `- Skill graph reused nodes: \`${recovery.skillGraphReusedNodeCount ?? 0}\``,
+    `- Skill graph replans applied: \`${
+      recovery.skillGraphReplanAppliedCount ?? 0
+    }\``,
   ];
 
   appendCategoryMetricsTable({

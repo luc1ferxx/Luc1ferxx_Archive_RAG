@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
+import {
+  createAgentRunRecoveryService,
+  findAutoRecoverableStep,
+} from "../rag/agent-run-recovery.js";
+import {
+  STEP_REPLAY_SAFETY_REASON_CODES,
+} from "../rag/agent-run-step-replay-safety.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
   createDocumentRagStepExecutor,
@@ -13,6 +19,7 @@ import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import { SKILL_EFFECTS } from "../rag/skills/skill-contract.js";
 
 test("agent run recovery marks startup running runs for manual recovery", async () => {
   const accessScope = {
@@ -300,4 +307,69 @@ test("agent run recovery can be disabled on startup", async () => {
   assert.equal(result.recoveredCount, 0);
   assert.equal(run.status, AGENT_RUN_STATUSES.running);
   assert.equal(run.result.recovery, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Scenario F -- a graph node is a custom_skill step like any other
+// ---------------------------------------------------------------------------
+
+/**
+ * Auto recovery re-runs a step without asking anyone. That is the right default
+ * for a whitelisted read-only skill and the wrong one for a skill that writes,
+ * and now that a graph node is persisted under the same custom_skill step type
+ * as a RAG read, only the contract stored with the step tells them apart.
+ */
+const nodeStep = ({ effects, nodeId, skillId }) => ({
+  id: `custom_skill:${nodeId}`,
+  input: {
+    docIds: ["doc-1"],
+    effects,
+    nodeId,
+    question: "Which obligations changed?",
+    skillId,
+  },
+  status: AGENT_RUN_STEP_STATUSES.running,
+  type: "custom_skill",
+});
+
+test("auto recovery refuses a graph node that declared a side effect", () => {
+  const writeOnly = findAutoRecoverableStep({
+    run: {
+      steps: [
+        nodeStep({
+          effects: SKILL_EFFECTS.workspaceWrite,
+          nodeId: "publish",
+          skillId: "publish_report",
+        }),
+      ],
+    },
+  });
+
+  assert.equal(writeOnly.step, null);
+  assert.equal(writeOnly.reason, STEP_REPLAY_SAFETY_REASON_CODES.externalWrite);
+  assert.equal(writeOnly.safety.canAutoReplay, false);
+});
+
+test("auto recovery still replays the read-only nodes of an interrupted graph", () => {
+  const mixed = findAutoRecoverableStep({
+    run: {
+      steps: [
+        nodeStep({
+          effects: SKILL_EFFECTS.externalWrite,
+          nodeId: "publish",
+          skillId: "publish_report",
+        }),
+        nodeStep({
+          effects: SKILL_EFFECTS.readOnly,
+          nodeId: "risk_a",
+          skillId: "risk_review",
+        }),
+      ],
+    },
+  });
+
+  // Declaration order does not decide this: the writing node is passed over
+  // rather than being allowed to block recovery of the read-only one.
+  assert.equal(mixed.step.id, "custom_skill:risk_a");
+  assert.equal(mixed.reason, "safe_step_ready");
 });

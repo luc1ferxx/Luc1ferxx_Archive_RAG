@@ -6,7 +6,10 @@ import { robustEvalSuite } from "./eval-suite.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const deterministicEmbeddingDimensions = 64;
+// Exported so evaluation runners can tell the pgvector provider how wide the
+// deterministic vectors are; the column is typed to that width.
+export const DETERMINISTIC_EMBEDDING_DIMENSIONS = 64;
+const deterministicEmbeddingDimensions = DETERMINISTIC_EMBEDDING_DIMENSIONS;
 
 export const abstainPatterns = [
   "couldn't find enough grounded evidence",

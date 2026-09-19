@@ -1,4 +1,14 @@
-export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.7.0";
+export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.9.0";
+
+// The retrieval architecture every synthetic/feedback report must have run on.
+// It is checked against `summary.retrieval`, which the runner derives from the
+// per-case route evidence rather than from configuration, so a run that fell
+// back to another provider or skipped a route cannot pass by declaration.
+const deterministicSyntheticRetrieval = {
+  hybridEnabled: true,
+  hybridFusion: "rrf",
+  vectorStoreProvider: "pgvector",
+};
 export const CURRENT_QUALITY_EVIDENCE_PROFILE = "quality-current";
 
 const deepFreeze = (value) => {
@@ -496,6 +506,32 @@ const trajectoryChecks = {
     "goal_lifecycle_workflow_contract_recorded",
     "goal_lifecycle_no_pending_approval",
   ],
+  skill_graph_guarded_execution: [
+    "graph_executed_in_guarded_mode",
+    "graph_nodes_are_atomic_skills",
+    "dependent_node_bound_upstream_output",
+    "node_steps_persist_replay_contract",
+    "chat_contract_unchanged_under_graph",
+  ],
+  skill_graph_shadow_comparison: [
+    "shadow_answers_from_v1_chain",
+    "shadow_graph_planned_without_execution",
+    "shadow_comparison_recorded",
+    "shadow_budget_charged_once",
+  ],
+  skill_graph_illegal_plan_rejected: [
+    "illegal_graph_rejected_before_any_node_ran",
+    "rejection_reason_codes_recorded",
+    "planner_saw_only_redacted_context",
+    "fallback_graph_answered_within_scope",
+  ],
+  skill_graph_bounded_replan: [
+    "replan_triggered_by_insufficient_evidence",
+    "replan_reran_only_affected_node",
+    "replan_is_bounded",
+    "replanner_saw_status_only_context",
+    "retry_node_bound_upstream_output",
+  ],
 };
 
 const plannerChecks = {
@@ -558,6 +594,11 @@ const recoveryChecks = {
     "agent_task_resume_failures_zero",
   ],
   planner_fallback_signal: ["planner_fallbacks_zero"],
+  skill_graph_signal: [
+    "graph_reused_nodes_not_rerun",
+    "graph_replan_applied_recorded",
+    "graph_fallback_after_execution_zero",
+  ],
 };
 
 const skillIds = (...ids) => ids.map((skillId) => ({ skillId }));
@@ -1102,6 +1143,456 @@ const trajectoryResponseProjections = {
       },
     },
   }),
+  skill_graph_guarded_execution: trajectoryResponseProjection({
+    agentMode: "skill_chain",
+    agentSkills: completedSkillIds("summarize_contract", "risk_review"),
+    budget: {
+      used: {
+        customSkillCalls: 2,
+        documentRagCalls: 0,
+        webSearchCalls: 0,
+      },
+    },
+    executionLoop: {
+      followUpsRun: 0,
+      gapsIdentified: 0,
+      stoppedReason: "not_needed",
+    },
+    observed: {
+      eventCount: 1,
+      graph: {
+        executed: true,
+        fallback: null,
+        mode: "guarded",
+        nodeIds: [
+          "summarize_contract",
+          "risk_review",
+        ],
+        plannerFallback: false,
+        requestedPlannerId: "deterministic_dag",
+        selectedPlannerId: "deterministic_dag",
+        status: "completed",
+      },
+      graphFieldsInResponse: [],
+      nodeRuns: [
+        {
+          citationCount: 1,
+          dependsOn: [],
+          nodeId: "summarize_contract",
+          status: "completed",
+          stepId: "custom_skill:summarize_contract",
+        },
+        {
+          citationCount: 1,
+          dependsOn: [
+            "summarize_contract",
+          ],
+          nodeId: "risk_review",
+          status: "completed",
+          stepId: "custom_skill:risk_review",
+        },
+      ],
+      questions: [
+        {
+          chained: false,
+          typedUpstream: false,
+        },
+        {
+          chained: false,
+          typedUpstream: true,
+        },
+      ],
+      replayContracts: [
+        {
+          effects: "read_only",
+          hasPriorFindings: false,
+          idempotency: "read_only_rag",
+          stepId: "custom_skill:summarize_contract",
+        },
+        {
+          effects: "read_only",
+          hasPriorFindings: true,
+          idempotency: "read_only_rag",
+          stepId: "custom_skill:risk_review",
+        },
+      ],
+      traceStepIds: [
+        "custom_skill:summarize_contract",
+        "custom_skill:risk_review",
+      ],
+    },
+    selectedSkills: skillIds("summarize_contract", "risk_review"),
+    skillChain: skillIds("summarize_contract", "risk_review"),
+    telemetry: {
+      chatCallCount: 2,
+      listDocumentCallCount: 2,
+    },
+    traceTypes: [
+      "plan",
+      "query_planner",
+      "skill_chain",
+      "custom_skill",
+      "custom_skill",
+      "synthesis",
+      "self_check",
+      "answer_finalizer",
+    ],
+  }),
+  skill_graph_shadow_comparison: trajectoryResponseProjection({
+    agentMode: "skill_chain",
+    agentSkills: completedSkillIds("summarize_contract", "risk_review"),
+    budget: {
+      used: {
+        customSkillCalls: 2,
+        documentRagCalls: 0,
+        webSearchCalls: 0,
+      },
+    },
+    executionLoop: {
+      followUpsRun: 0,
+      gapsIdentified: 0,
+      stoppedReason: "not_needed",
+    },
+    observed: {
+      eventCount: 1,
+      graph: {
+        executed: false,
+        fallback: null,
+        mode: "shadow",
+        nodeIds: [
+          "summarize_contract",
+          "risk_review",
+        ],
+        plannerFallback: false,
+        requestedPlannerId: "deterministic_dag",
+        selectedPlannerId: "deterministic_dag",
+        status: "selected",
+      },
+      questions: [
+        {
+          chained: false,
+          typedUpstream: false,
+        },
+        {
+          chained: true,
+          typedUpstream: false,
+        },
+      ],
+      replayContracts: [
+        {
+          effects: "read_only",
+          hasPriorFindings: false,
+          idempotency: "read_only_rag",
+          stepId: "custom_skill:summarize_contract",
+        },
+        {
+          effects: "read_only",
+          hasPriorFindings: false,
+          idempotency: "read_only_rag",
+          stepId: "custom_skill:risk_review",
+        },
+      ],
+      shadow: {
+        diverged: false,
+        error: null,
+        nodeRunCount: 0,
+        replanCount: 0,
+        requestedPlannerId: "deterministic_dag",
+      },
+      traceStepIds: [
+        "custom_skill:summarize_contract",
+        "custom_skill:risk_review",
+      ],
+    },
+    selectedSkills: skillIds("summarize_contract", "risk_review"),
+    skillChain: skillIds("summarize_contract", "risk_review"),
+    telemetry: {
+      chatCallCount: 2,
+      listDocumentCallCount: 2,
+    },
+    traceTypes: [
+      "plan",
+      "query_planner",
+      "skill_chain",
+      "custom_skill",
+      "custom_skill",
+      "synthesis",
+      "self_check",
+      "answer_finalizer",
+    ],
+  }),
+  skill_graph_illegal_plan_rejected: trajectoryResponseProjection({
+    agentMode: "skill_chain",
+    agentSkills: completedSkillIds("summarize_contract", "risk_review"),
+    budget: {
+      used: {
+        customSkillCalls: 2,
+        documentRagCalls: 0,
+        webSearchCalls: 0,
+      },
+    },
+    executionLoop: {
+      followUpsRun: 0,
+      gapsIdentified: 0,
+      stoppedReason: "not_needed",
+    },
+    observed: {
+      chatDocIds: [
+        [
+          "contract-1",
+        ],
+        [
+          "contract-1",
+        ],
+      ],
+      eventCount: 1,
+      forgedNodeIdsRan: [],
+      graph: {
+        executed: true,
+        fallback: null,
+        mode: "guarded",
+        nodeIds: [
+          "summarize_contract",
+          "risk_review",
+        ],
+        plannerFallback: true,
+        requestedPlannerId: "llm_dag",
+        selectedPlannerId: "deterministic_dag",
+        status: "completed",
+      },
+      nodeRuns: [
+        {
+          citationCount: 1,
+          dependsOn: [],
+          nodeId: "summarize_contract",
+          status: "completed",
+          stepId: "custom_skill:summarize_contract",
+        },
+        {
+          citationCount: 1,
+          dependsOn: [
+            "summarize_contract",
+          ],
+          nodeId: "risk_review",
+          status: "completed",
+          stepId: "custom_skill:risk_review",
+        },
+      ],
+      plannerView: {
+        authorizedDocIds: [
+          "contract-1",
+        ],
+        callCount: 1,
+        capabilityIds: [
+          "summarize_contract",
+          "risk_review",
+        ],
+        keys: [
+          "authorizedDocIds",
+          "capabilities",
+          "documentCount",
+          "goal",
+          "intentPlan",
+          "limits",
+          "taskMemoryPlanningContext",
+        ],
+        leaks: false,
+      },
+      reasonCodes: [
+        "forged_approval",
+        "out_of_scope_document",
+        "unregistered_capability",
+      ],
+    },
+    selectedSkills: skillIds("summarize_contract", "risk_review"),
+    skillChain: skillIds("summarize_contract", "risk_review"),
+    telemetry: {
+      chatCallCount: 2,
+      listDocumentCallCount: 2,
+    },
+    traceTypes: [
+      "plan",
+      "query_planner",
+      "skill_chain",
+      "custom_skill",
+      "custom_skill",
+      "synthesis",
+      "self_check",
+      "answer_finalizer",
+    ],
+  }),
+  skill_graph_bounded_replan: trajectoryResponseProjection({
+    agentMode: "skill_chain",
+    agentSkills: completedSkillIds("summarize_contract", "risk_review"),
+    budget: {
+      used: {
+        customSkillCalls: 3,
+        documentRagCalls: 0,
+        webSearchCalls: 0,
+      },
+    },
+    executionLoop: {
+      followUpsRun: 0,
+      gapsIdentified: 0,
+      stoppedReason: "not_needed",
+    },
+    observed: {
+      budgetUsed: 3,
+      eventCount: 1,
+      graph: {
+        executed: true,
+        fallback: null,
+        mode: "guarded",
+        nodeIds: [
+          "summarize_contract",
+          "risk_review",
+          "risk_review_retry",
+        ],
+        plannerFallback: false,
+        requestedPlannerId: "deterministic_dag",
+        selectedPlannerId: "deterministic_dag",
+        status: "completed",
+      },
+      nodeRuns: [
+        {
+          citationCount: 1,
+          dependsOn: [],
+          nodeId: "summarize_contract",
+          status: "reused",
+          stepId: "custom_skill:summarize_contract",
+        },
+        {
+          citationCount: 0,
+          dependsOn: [
+            "summarize_contract",
+          ],
+          nodeId: "risk_review",
+          status: "reused",
+          stepId: "custom_skill:risk_review",
+        },
+        {
+          citationCount: 1,
+          dependsOn: [
+            "summarize_contract",
+          ],
+          nodeId: "risk_review_retry",
+          status: "completed",
+          stepId: "custom_skill:risk_review_retry",
+        },
+      ],
+      questions: [
+        {
+          chained: false,
+          typedUpstream: false,
+        },
+        {
+          chained: false,
+          typedUpstream: true,
+        },
+        {
+          chained: false,
+          typedUpstream: true,
+        },
+      ],
+      replannerView: {
+        authorizedDocIds: [
+          "contract-1",
+        ],
+        callCount: 1,
+        keys: [
+          "authorizedDocIds",
+          "capabilities",
+          "goal",
+          "graph",
+          "limits",
+          "nodeRuns",
+          "trigger",
+        ],
+        leaks: false,
+        nodeRunKeys: [
+          [
+            "abstained",
+            "citationCount",
+            "nodeId",
+            "reason",
+            "skillId",
+            "status",
+          ],
+          [
+            "abstained",
+            "citationCount",
+            "nodeId",
+            "reason",
+            "skillId",
+            "status",
+          ],
+        ],
+        trigger: "insufficient_evidence",
+      },
+      replans: [
+        {
+          decision: "applied",
+          nodeIds: [
+            "summarize_contract",
+            "risk_review",
+            "risk_review_retry",
+          ],
+          reasonCode: null,
+          replanCount: 1,
+          trigger: "insufficient_evidence",
+        },
+        {
+          decision: "abstain",
+          nodeIds: [],
+          reasonCode: "replan_limit_reached",
+          replanCount: 1,
+          trigger: "insufficient_evidence",
+        },
+      ],
+      replayContracts: [
+        {
+          effects: "read_only",
+          hasPriorFindings: false,
+          idempotency: "read_only_rag",
+          stepId: "custom_skill:summarize_contract",
+        },
+        {
+          effects: "read_only",
+          hasPriorFindings: true,
+          idempotency: "read_only_rag",
+          stepId: "custom_skill:risk_review",
+        },
+        {
+          effects: "read_only",
+          hasPriorFindings: true,
+          idempotency: "read_only_rag",
+          stepId: "custom_skill:risk_review_retry",
+        },
+      ],
+      traceStepIds: [
+        "custom_skill:summarize_contract",
+        "custom_skill:risk_review",
+        "custom_skill:risk_review_retry",
+      ],
+    },
+    selectedSkills: skillIds("summarize_contract", "risk_review"),
+    skillChain: skillIds("summarize_contract", "risk_review"),
+    telemetry: {
+      chatCallCount: 3,
+      listDocumentCallCount: 3,
+    },
+    traceTypes: [
+      "plan",
+      "query_planner",
+      "skill_chain",
+      "custom_skill",
+      "custom_skill",
+      "custom_skill",
+      "synthesis",
+      "self_check",
+      "answer_finalizer",
+    ],
+  }),
 };
 
 const plannerResponseProjection = ({
@@ -1245,6 +1736,7 @@ export const CURRENT_QUALITY_SUITE_MANIFEST = deepFreeze({
     requiredAnswerClaims: Object.freeze(syntheticAnswerClaims),
     requiredCaseSemantics: Object.freeze(syntheticCaseSemantics),
     requiredConfig: Object.freeze(deterministicSyntheticConfig),
+    requiredRetrieval: Object.freeze(deterministicSyntheticRetrieval),
     requiredCaseIds: Object.freeze([
       "qa_remote_alpha",
       "qa_badge_gamma",
@@ -1263,6 +1755,7 @@ export const CURRENT_QUALITY_SUITE_MANIFEST = deepFreeze({
     requiredAnswerClaims: Object.freeze(feedbackAnswerClaims),
     requiredCaseSemantics: Object.freeze(feedbackCaseSemantics),
     requiredConfig: Object.freeze(deterministicSyntheticConfig),
+    requiredRetrieval: Object.freeze(deterministicSyntheticRetrieval),
     requiredCaseIds: Object.freeze([
       "feedback_citation_error_seed_citation_remote_approval",
       "feedback_incomplete_seed_incomplete_renewal_window",

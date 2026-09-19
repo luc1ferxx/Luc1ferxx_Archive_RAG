@@ -10,8 +10,26 @@ concurrency:
 jobs:
   robust-eval-suite:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: agentai_robust
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentai_robust"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_robust
+      VECTOR_STORE_PROVIDER: pgvector
+      RAG_HYBRID_ENABLED: "true"
+      RAG_HYBRID_FUSION: rrf
 
     defaults:
       run:

@@ -20,7 +20,7 @@ SERPAPI_KEY=your_serpapi_key
 POSTGRES_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/agentai
 POSTGRES_SSL_ENABLED=false
 
-VECTOR_STORE_PROVIDER=local
+VECTOR_STORE_PROVIDER=pgvector
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_CHAT_MODEL=gpt-5
 
@@ -51,6 +51,7 @@ STARTUP_HEALTH_STRICT=false
 | `AGENT_PLANNER_ROLLOUT` | `llm` | AgentRAG planner 灰度模式；`configured` 使用下面两个显式 planner 变量，`shadow` 执行 deterministic 主路径并把 LLM intent/execution proposal 记录到 `agentObservability.*Planner.shadow`，`guarded_llm` 让 LLM 作为主 planner 但继续由 validator/fallback 兜底，`llm`/`deterministic` 会同时覆盖 intent 和 execution planner。 |
 | `AGENT_INTENT_PLANNER` | `llm` | AgentRAG intent 选择器；`deterministic` 使用规则候选首选项，`llm` 让 LLM 在白名单候选 intent 中选择并由 validator 兜底。 |
 | `AGENT_EXECUTION_PLANNER` | `llm` | AgentRAG execution step 规划器；`deterministic` 使用固定 step schema，`llm` 让 LLM 在白名单 step 中排序并由 validator 兜底。 |
+| `AGENT_SKILL_GRAPH_ROLLOUT` | `off` | Custom skill 阶段内部的 V1 chain / V2 typed DAG 灰度开关；`off` 完全走 V1 顺序链，`shadow` 由 V1 出答案、同时旁路规划并校验一张 graph 用于比对，`guarded` 真正执行 DAG 并只在 graph 整体被拒时回落 V1。详见 [agent-rag.md](agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。 |
 | `RAG_PROMPT_VERSION` | `v3` | Prompt 版本；`server/.env.example` 当前显式设置为 `v2`。 |
 | `STARTUP_HEALTH_STRICT` | `false` | 健康检查失败时是否阻止启动。 |
 
@@ -114,7 +115,13 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `VECTOR_STORE_PROVIDER` | `local` | `local` 或 `qdrant`。 |
+| `VECTOR_STORE_PROVIDER` | `pgvector` | 严格白名单：`pgvector`（默认，chunk 与向量存在 PostgreSQL）、`local`（本地 JSON 索引，显式 opt-in）、`qdrant`（显式 opt-in）。其他值在启动健康检查、ingest 和检索时都直接报错，不会静默回落到 `local`。 |
+| `DOCUMENT_CHUNKS_POSTGRES_TABLE` | `rag_document_chunks` | pgvector chunk/向量表；外键级联到 `DOCUMENTS_POSTGRES_TABLE`。 |
+| `RAG_EMBEDDING_DIMENSIONS` | 由模型推导 | pgvector 列宽。留空时按 `OPENAI_EMBEDDING_MODEL` 推导（`text-embedding-3-small`=1536、`-large`=3072、`ada-002`=1536，未知模型 1536）。列宽或模型与库中已有 chunk 不一致时 ingest/检索明确失败并要求 `npm run vector:reindex`。 |
+| `RAG_PGVECTOR_TEXT_SEARCH_CONFIG` | `simple` | 稀疏路（PostgreSQL FTS）使用的 text search configuration。chunk 文本先用应用内 tokenizer 切分（CJK 逐字、ASCII 小写去停用词）再建 tsvector，因此默认 `simple`。排序用 `ts_rank_cd`，不是 BM25。 |
+| `RAG_PGVECTOR_INDEX_TYPE` | `hnsw` | `hnsw` 或 `ivfflat`，都用 cosine 距离。 |
+| `RAG_PGVECTOR_HNSW_M` / `RAG_PGVECTOR_HNSW_EF_CONSTRUCTION` | `16` / `64` | HNSW 建索引参数。 |
+| `RAG_PGVECTOR_IVFFLAT_LISTS` | `100` | IVFFlat `lists`。 |
 | `QDRANT_URL` | `http://127.0.0.1:6333` | Qdrant 地址。 |
 | `QDRANT_API_KEY` | 空 | Qdrant API key。 |
 | `QDRANT_COLLECTION` | `rag_chunks` | Qdrant collection 名称。 |
@@ -141,8 +148,8 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `RAG_HYBRID_ENABLED` | `false` | 是否启用 dense + sparse fusion。 |
-| `RAG_HYBRID_FUSION` | `weighted` | `weighted` 或 `rrf`。 |
+| `RAG_HYBRID_ENABLED` | `true` | 文档 RAG 默认真正跑两路召回：dense（pgvector cosine / local / qdrant）与 sparse（PostgreSQL FTS / local BM25 / qdrant sparse）各自独立检索后融合。设为 `false` 只跑 dense 一路，这是 opt-out。 |
+| `RAG_HYBRID_FUSION` | `rrf` | `rrf`（默认，RRF 分数按 `(k+1)` 归一到 0–1 以匹配 `RAG_MIN_RELEVANCE_SCORE`）或 `weighted`。rerank 始终在 fusion 之后。 |
 | `RAG_HYBRID_DENSE_WEIGHT` | `0.65` | Weighted fusion 的 dense 权重。 |
 | `RAG_HYBRID_SPARSE_WEIGHT` | `0.35` | Weighted fusion 的 sparse 权重。 |
 | `RAG_RRF_K` | `60` | RRF 平滑常数。 |

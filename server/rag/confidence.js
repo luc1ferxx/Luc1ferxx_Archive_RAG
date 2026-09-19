@@ -1,4 +1,5 @@
 import { getMinQueryTermCoverage, getMinRelevanceScore } from "./config.js";
+import { getAdmissionScore } from "./citations.js";
 import {
   buildTermSet,
   extractAnchorGroups,
@@ -139,10 +140,18 @@ const pickMoreCompleteAnchorAnalysis = (left, right) => {
   return right.filteredResults.length > left.filteredResults.length ? right : left;
 };
 
+// The relevance floor is applied to the evidence-admission signal, never to the
+// fusion `score`. RRF fusion scales its rank-sum into [0, 1] to rank candidates;
+// a chunk that ranks first on both routes gets score 1.0 regardless of how weak
+// its raw similarity is, so gating admission on `score` would let fusion position
+// stand in for retrieval strength. getAdmissionScore reads the strongest bounded
+// raw signal (dense cosine or query-term coverage); a candidate carrying no raw
+// signal admits at 0 and is rejected -- fail closed.
 const filterQualifiedResults = (results, minimumScore, coverageOptions) =>
   results.filter(
     (result) =>
-      result.score >= minimumScore && hasEnoughQueryCoverage(result, coverageOptions)
+      getAdmissionScore(result) >= minimumScore &&
+      hasEnoughQueryCoverage(result, coverageOptions)
   );
 
 const selectUsableResults = ({

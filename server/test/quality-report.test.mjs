@@ -1949,7 +1949,7 @@ test("quality history folds passing recovery observability report into gate deci
   assert.equal(history.qualityGate.status, "pass");
   assert.match(
     history.qualityGate.summary,
-    /Recovery observability passed 6 cases; replay failures 0, manual action failures 0, task resume failures 0/
+    /Recovery observability passed 7 cases; replay failures 0, manual action failures 0, task resume failures 0/
   );
   assert.ok(
     history.qualityGate.checks.some(

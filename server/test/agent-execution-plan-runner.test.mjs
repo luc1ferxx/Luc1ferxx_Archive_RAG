@@ -12,6 +12,8 @@ import {
 import {
   runAgentExecutionPlan,
 } from "../rag/agent-execution-plan-runner.js";
+import { deterministicDagPlannerAdapter } from "../rag/agent-dag-planner-adapter.js";
+import { REPLAN_DECISIONS, REPLAN_REASON_CODES } from "../rag/agent-replanner.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
 import { AGENT_SKILL_IDS } from "../rag/skills/registry.js";
 
@@ -582,6 +584,98 @@ test("execution plan runner preserves the default skill execution order", async 
       "web_search",
     ]
   );
+});
+
+// The plan runner owns one custom_skills stage and must keep owning exactly
+// one. These two tests are about the wiring, not the DAG: the same request, the
+// same step type, the same flat results, whichever path the stage took. What
+// the graph does inside is covered in agent-custom-skill-stage.test.mjs.
+test("the custom skills stage stays on the V1 chain unless a mode is threaded", async () => {
+  const callOrder = [];
+  const selectedSkills = createDefaultSelectedSkills(callOrder);
+  const harness = createRunnerHarness({
+    callOrder,
+    selectedSkills,
+  });
+  const graphRecords = [];
+
+  const result = await runAgentExecutionPlan({
+    ...harness.args,
+    recordExecutionGraph: (record) => graphRecords.push(record),
+  });
+
+  assert.deepEqual(graphRecords, []);
+  assert.equal(result.customSkillResults[0].skillId, "custom_review");
+});
+
+test("guarded mode reaches the graph through the plan runner without changing the stage contract", async () => {
+  const callOrder = [];
+  const selectedSkills = createDefaultSelectedSkills(callOrder);
+  const customSkills = selectedSkills.filter((skill) => skill.kind === "custom");
+  const harness = createRunnerHarness({
+    callOrder,
+    selectedSkills,
+  });
+  const graphRecords = [];
+  const plannerContexts = [];
+
+  const result = await runAgentExecutionPlan({
+    ...harness.args,
+    dagPlannerAdapter: {
+      createExecutionGraph: (context) => {
+        plannerContexts.push(context);
+
+        // Plan from the contracts rather than hand-written bindings, so this
+        // test cannot drift out of step with the skill schemas it depends on.
+        return deterministicDagPlannerAdapter.createExecutionGraph({
+          ...context,
+          selectedSkills: customSkills,
+        });
+      },
+      id: "test_dag",
+    },
+    recordExecutionGraph: (record) => graphRecords.push(record),
+    replanAdapter: {
+      createPatch: () => {
+        throw new Error("A satisfied run must not consult the replanner.");
+      },
+      id: "test_replan",
+    },
+    skillGraphMode: "guarded",
+  });
+
+  // Unchanged for everything downstream of the stage.
+  assert.equal(result.customSkillResults.length, 1);
+  assert.equal(result.customSkillResults[0].skillId, "custom_review");
+  assert.deepEqual(
+    harness.trace.filter((step) => step.type === "custom_skill").map((step) => step.id),
+    ["custom_skill:custom_review"]
+  );
+  assert.equal(
+    callOrder.filter((skillId) => skillId === "custom_review").length,
+    1
+  );
+
+  // Changed only in the additive record beside it.
+  assert.equal(graphRecords.length, 1);
+  assert.equal(graphRecords[0].executed, true);
+  assert.equal(graphRecords[0].fallback, null);
+  assert.deepEqual(graphRecords[0].graph.nodeIds, ["custom_review"]);
+  assert.equal(graphRecords[0].planner.selectedPlannerId, "test_dag");
+
+  // The replanner was threaded and declined, rather than never being reached.
+  assert.equal(graphRecords[0].replans.length, 1);
+  assert.equal(graphRecords[0].replans[0].decision, REPLAN_DECISIONS.abstain);
+  assert.equal(
+    graphRecords[0].replans[0].reasonCode,
+    REPLAN_REASON_CODES.notTriggered
+  );
+
+  // The planner saw the goal and the authorized documents, and nothing that
+  // would tell it whose request this is.
+  assert.deepEqual(plannerContexts[0].authorizedDocIds, ["doc-1"]);
+  assert.equal(plannerContexts[0].accessScope, undefined);
+  assert.ok(!JSON.stringify(plannerContexts[0]).includes("workspace-a"));
 });
 
 test("execution plan runner returns clarification before web fallback when document evidence is unresolved", async () => {

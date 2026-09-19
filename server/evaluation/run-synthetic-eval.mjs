@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { access, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
-import chat, { ingestDocument } from "../chat.js";
+import chat, { clearDocuments, ingestDocument } from "../chat.js";
 import {
   attachEvaluationEvidence,
   getCorpusIdentity,
@@ -14,6 +14,7 @@ import {
 } from "./eval-evidence.js";
 import { configureEvaluationStores } from "./eval-store-overrides.js";
 import {
+  DETERMINISTIC_EMBEDDING_DIMENSIONS,
   findRobustReport as findRobustReportGeneric,
   toDeterministicEmbedding,
 } from "./eval-case-helpers.js";
@@ -24,14 +25,17 @@ import {
   writeJson,
 } from "./eval-cli.js";
 import {
+  configureEmbeddingDimensions,
   getChatModel,
   getChunkOverlap,
   getChunkStrategy,
   getChunkSize,
   getComparisonTopKPerDoc,
+  getEmbeddingDimensions,
   getEmbeddingModel,
   getMaxComparisonSources,
   getMinRelevanceScore,
+  getRetrievalArchitectureConfig,
   isNearDuplicateGuardEnabled,
   getRetrievalTopK,
 } from "../rag/config.js";
@@ -58,6 +62,10 @@ import {
 } from "./deterministic-evidence-answer.js";
 import { validateSyntheticCorpus } from "./synthetic-corpus-validation.js";
 import { evaluateSyntheticCaseResponse } from "./synthetic-case-evaluator.js";
+import {
+  assertRetrievalEvidenceConsistent,
+  buildRetrievalEvidence,
+} from "./synthetic-retrieval-evidence.js";
 import { buildSyntheticDocumentId } from "./synthetic-document-identity.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -265,6 +273,7 @@ const runUploadResumeFlow = async ({ buffer, fileName, runDirectory, uploadIndex
 };
 
 const evaluateCase = async ({
+  accessScope = {},
   testCase,
   docIdByKey,
   docKeyByDocId,
@@ -274,7 +283,7 @@ const evaluateCase = async ({
   const response = await chat(
     testCase.docKeys.map((docKey) => docIdByKey.get(docKey)),
     testCase.question,
-    { includeRetrievedContexts: true }
+    { accessScope, includeRetrievedContexts: true }
   );
   const durationMs = Math.round(performance.now() - startedAt);
 
@@ -318,6 +327,10 @@ const buildMarkdownReport = ({
     `- Compare top-k per doc: \`${summary.config.compareTopKPerDoc}\``,
     `- Chunk size / overlap: \`${summary.config.chunkSize}/${summary.config.chunkOverlap}\``,
     `- Min relevance score: \`${summary.config.minRelevanceScore}\``,
+    `- Vector store provider: \`${summary.retrieval?.vectorStoreProvider ?? "unknown"}\``,
+    `- Hybrid retrieval: \`${summary.retrieval?.hybridEnabled ? `on (${summary.retrieval.hybridFusion})` : "off"}\``,
+    `- Dense route: \`${summary.retrieval?.routes?.dense?.executedCaseCount ?? 0}/${summary.retrieval?.caseCount ?? 0} cases, ${summary.retrieval?.routes?.dense?.candidateCount ?? 0} candidates\``,
+    `- Sparse route: \`${summary.retrieval?.routes?.sparse?.executedCaseCount ?? 0}/${summary.retrieval?.caseCount ?? 0} cases, ${summary.retrieval?.routes?.sparse?.candidateCount ?? 0} candidates\``,
     "",
     "## Metrics",
     "",
@@ -477,16 +490,32 @@ const main = async () => {
   });
   const ragDataDirectory = path.join(runDirectory, "rag-data");
   const uploadSessionDirectory = path.join(runDirectory, "upload-sessions");
+  const retrievalArchitecture = getRetrievalArchitectureConfig();
+
+  if (!retrievalArchitecture.vectorStoreProviderValid) {
+    throw new Error(
+      "VECTOR_STORE_PROVIDER is not an allowed provider; refusing to evaluate on a fallback."
+    );
+  }
+
+  // Under pgvector the chunk table's foreign key needs the PostgreSQL document
+  // row, so the real registry stays in place and this run's documents are
+  // isolated by a run-scoped workspace id that is cleared when the run ends.
+  const usePgvector = retrievalArchitecture.vectorStoreProvider === "pgvector";
+  const runWorkspaceId = usePgvector ? `synthetic-eval:${runId}` : "";
+  const runAccessScope = usePgvector ? { workspaceId: runWorkspaceId } : {};
 
   await mkdir(resultsDirectory, { recursive: true });
   await mkdir(sourceDirectory, { recursive: true });
   await mkdir(mergedDirectory, { recursive: true });
 
-  configureEvaluationStores();
+  configureEvaluationStores({ keepDocumentRegistryStore: usePgvector });
   if (openAIProviderMode === "deterministic") {
     configureDeterministicOpenAIProvider();
+    configureEmbeddingDimensions(DETERMINISTIC_EMBEDDING_DIMENSIONS);
   } else {
     resetOpenAIProvider();
+    configureEmbeddingDimensions(null);
   }
   configureRagDataDirectory(ragDataDirectory);
   resetDocumentRegistry();
@@ -500,6 +529,22 @@ const main = async () => {
   const pagesByDocKey = new Map();
   const documentRecords = [];
 
+  const cleanupRunDocuments = async () => {
+    if (!usePgvector) {
+      return;
+    }
+
+    try {
+      await clearDocuments({ accessScope: runAccessScope, deleteFiles: false });
+    } catch (error) {
+      console.error(
+        `Failed to remove synthetic evaluation documents for workspace ${runWorkspaceId}.`,
+        error
+      );
+    }
+  };
+
+  try {
   for (const [index, documentSpec] of corpus.documents.entries()) {
     pagesByDocKey.set(documentSpec.key, documentSpec.pages ?? []);
     const buffer = buildPdfBuffer(documentSpec.pages);
@@ -527,6 +572,7 @@ const main = async () => {
       docId,
       filePath: uploadResult.mergedFilePath,
       fileName: documentSpec.fileName,
+      workspaceId: runWorkspaceId,
     });
 
     docIdByKey.set(documentSpec.key, docId);
@@ -547,6 +593,7 @@ const main = async () => {
   for (const testCase of corpus.cases) {
     caseResults.push(
       await evaluateCase({
+        accessScope: runAccessScope,
         testCase,
         docIdByKey,
         docKeyByDocId,
@@ -554,6 +601,14 @@ const main = async () => {
       })
     );
   }
+
+  const retrievalEvidence = buildRetrievalEvidence({
+    caseResults,
+    embeddingDimensions: getEmbeddingDimensions(),
+    retrievalArchitecture,
+  });
+
+  assertRetrievalEvidenceConsistent(retrievalEvidence);
 
   const qaCases = caseResults.filter(
     (caseResult) => caseResult.type === "qa" && !caseResult.shouldAbstain
@@ -605,6 +660,10 @@ const main = async () => {
       nearDuplicateGuardEnabled: isNearDuplicateGuardEnabled(),
       uploadChunkSizeBytes,
     },
+    // Kept out of `config` on purpose: the regression profile key is built
+    // from `config`, and the pinned deterministic baseline predates pgvector.
+    // The gate checks this block against the manifest separately.
+    retrieval: retrievalEvidence,
     metrics: {
       overallPassRate: ratio(
         caseResults.filter((caseResult) => caseResult.passed).length,
@@ -716,11 +775,20 @@ const main = async () => {
         latestJsonPath,
         latestMarkdownPath,
         metrics: summary.metrics,
+        retrieval: {
+          vectorStoreProvider: summary.retrieval.vectorStoreProvider,
+          hybridEnabled: summary.retrieval.hybridEnabled,
+          hybridFusion: summary.retrieval.hybridFusion,
+          routes: summary.retrieval.routes,
+        },
       },
       null,
       2
     )
   );
+  } finally {
+    await cleanupRunDocuments();
+  }
 };
 
 try {

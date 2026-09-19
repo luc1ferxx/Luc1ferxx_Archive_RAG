@@ -16,6 +16,33 @@ export const buildCitation = (document, score, rank) => ({
   sectionHeading: document.metadata?.sectionHeading ?? null,
 });
 
+// The evidence-admission signal, kept deliberately separate from the fusion
+// `score`. RRF (or weighted) fusion only ranks candidates; its output must never
+// be read as a confidence or relevance probability. Admission is the strongest
+// bounded raw retrieval signal a candidate carries -- dense cosine similarity or
+// query-term coverage, both in [0, 1] -- so the gate that decides "is this real
+// evidence" is judged on retrieval strength, not on a rank-sum that was scaled to
+// clear a threshold. `sparseScore` (ts_rank_cd) is unbounded and ranking-only, so
+// it is deliberately excluded here.
+export const computeAdmissionScore = (result = {}) => {
+  const vectorScore = Number(result?.vectorScore);
+  const keywordScore = Number(result?.keywordScore);
+
+  return Math.max(
+    Number.isFinite(vectorScore) ? vectorScore : 0,
+    Number.isFinite(keywordScore) ? keywordScore : 0
+  );
+};
+
+// Prefer an admissionScore already stamped at fusion time; fall back to computing
+// it from the raw components. Always returns a finite number, so callers can hand
+// it straight to buildCitation without a guard.
+export const getAdmissionScore = (result = {}) => {
+  const stamped = Number(result?.admissionScore);
+
+  return Number.isFinite(stamped) ? stamped : computeAdmissionScore(result);
+};
+
 export const buildContextSection = (document, _score, rank) =>
   [
     `Source ${rank}`,

@@ -4,9 +4,12 @@ import {
   isRerankEnabled,
 } from "../config.js";
 import { rerankResultsWithProvider } from "../reranker.js";
-import { searchDocuments } from "../vector-store.js";
+import { searchDocumentsWithRoutes } from "../vector-store.js";
 
-export const retrieveGlobalContext = async ({
+// Rerank sits after fusion on purpose: it reorders the candidates the two
+// routes already produced and can never stand in for a route that did not run.
+
+export const retrieveGlobalContextWithRoutes = async ({
   queryVector,
   queryText,
   docIds,
@@ -18,16 +21,24 @@ export const retrieveGlobalContext = async ({
   const candidateK = isRerankEnabled()
     ? topK * getRerankCandidateMultiplier()
     : topK;
-  const results = await searchDocuments({
+  const search = await searchDocumentsWithRoutes({
     queryVector,
     queryText,
     docIds,
     topK: candidateK,
   });
-
-  return rerankResultsWithProvider({
+  const results = await rerankResultsWithProvider({
     queryText,
-    results,
+    results: search.results,
     topK,
   });
+
+  return {
+    fusion: search.fusion,
+    results,
+    routes: search.routes,
+  };
 };
+
+export const retrieveGlobalContext = async (args) =>
+  (await retrieveGlobalContextWithRoutes(args)).results;

@@ -1,4 +1,5 @@
 import { normalizeText } from "../lib/normalize-text.js";
+import { SKILL_EFFECTS } from "./skills/skill-contract.js";
 
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
@@ -288,6 +289,43 @@ const hasReplayApproval = ({ context, policy }) => {
   return false;
 };
 
+/**
+ * A step type is a coarse category. The same custom_skill step now covers a
+ * whitelisted RAG read and -- once the typed skill contract admits one -- a
+ * skill that writes, so the step type alone can no longer decide replay. Where
+ * the executing skill persisted its own contract with the step, that
+ * declaration narrows the step-type verdict.
+ *
+ * Narrowing only, in both directions it matters: a declaration can withhold
+ * auto-replay but never grant it, and a step recorded before the contract
+ * existed declares nothing and so keeps exactly the verdict it has today.
+ * Unrecognised effects are treated as writing, because a value we cannot read
+ * is not evidence that the skill is safe.
+ */
+const getDeclaredContractReasonCodes = (context) => {
+  const declared = context?.input ?? {};
+  const effects = normalizeText(declared.effects);
+  const refusesReplay = declared.replaySafe === false;
+
+  if (!effects && !refusesReplay) {
+    return [];
+  }
+
+  const reasonCodes = [];
+
+  if (effects === SKILL_EFFECTS.externalRead) {
+    reasonCodes.push(STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent);
+  } else if (effects && effects !== SKILL_EFFECTS.readOnly) {
+    reasonCodes.push(STEP_REPLAY_SAFETY_REASON_CODES.externalWrite);
+  }
+
+  if (refusesReplay && reasonCodes.length === 0) {
+    reasonCodes.push(STEP_REPLAY_SAFETY_REASON_CODES.unsafeByPolicy);
+  }
+
+  return reasonCodes;
+};
+
 const getPolicyReasonCodes = ({ configuredAutoReplaySafe, context, policy }) => {
   const reasonCodes = [];
   const missingInput = getMissingRequiredInput({
@@ -313,6 +351,8 @@ const getPolicyReasonCodes = ({ configuredAutoReplaySafe, context, policy }) => 
   ) {
     reasonCodes.push(STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent);
   }
+
+  reasonCodes.push(...getDeclaredContractReasonCodes(context));
 
   if (
     (!policy.autoReplaySafe || !configuredAutoReplaySafe) &&

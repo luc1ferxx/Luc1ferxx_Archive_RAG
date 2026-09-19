@@ -236,6 +236,48 @@ const buildPlannerFallbackCase = (recovery = {}) => ({
   },
 });
 
+const buildSkillGraphSignalCase = (recovery = {}) => ({
+  checks: [
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_reused_nodes_not_rerun",
+      label: "Settled graph nodes were reused instead of re-run",
+      passed: (recovery.skillGraphReusedNodeCount ?? 0) >= 1,
+      detail: `skillGraphReusedNodeCount=${recovery.skillGraphReusedNodeCount ?? 0}`,
+    }),
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_replan_applied_recorded",
+      label: "A bounded replan was recorded",
+      passed: (recovery.skillGraphReplanAppliedCount ?? 0) >= 1,
+      detail: `skillGraphReplanAppliedCount=${
+        recovery.skillGraphReplanAppliedCount ?? 0
+      }`,
+    }),
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_fallback_after_execution_zero",
+      label: "No graph fell back to the V1 chain after a node had executed",
+      passed: (recovery.skillGraphUnsafeFallbackCount ?? 0) === 0,
+      detail: `skillGraphUnsafeFallbackCount=${
+        recovery.skillGraphUnsafeFallbackCount ?? 0
+      }`,
+    }),
+  ],
+  description:
+    "A guarded skill graph should reuse settled nodes across a replan and never fall back to the V1 chain once a node has executed.",
+  id: "skill_graph_signal",
+  label: "Skill graph signal",
+  response: {
+    skillGraphExecutedCount: recovery.skillGraphExecutedCount ?? 0,
+    skillGraphFallbackCount: recovery.skillGraphFallbackCount ?? 0,
+    skillGraphPlannedCount: recovery.skillGraphPlannedCount ?? 0,
+    skillGraphReplanAppliedCount: recovery.skillGraphReplanAppliedCount ?? 0,
+    skillGraphReusedNodeCount: recovery.skillGraphReusedNodeCount ?? 0,
+    skillGraphUnsafeFallbackCount: recovery.skillGraphUnsafeFallbackCount ?? 0,
+  },
+});
+
 const finishRecoveryCase = (caseResult) => {
   const failedChecks = caseResult.checks.filter((check) => !check.passed);
 
@@ -254,4 +296,5 @@ export const buildRecoveryObservabilityCases = ({ recovery = {} } = {}) =>
     buildStepReplayCase(recovery),
     buildAgentTaskRecoveryCase(recovery),
     buildPlannerFallbackCase(recovery),
+    buildSkillGraphSignalCase(recovery),
   ].map(finishRecoveryCase);

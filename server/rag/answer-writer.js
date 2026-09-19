@@ -12,6 +12,7 @@ import {
   buildCitation,
   buildContextSection,
   dedupeCitations,
+  getAdmissionScore,
   getResultKey,
 } from "./citations.js";
 import { evaluateClaimSupport } from "./agent-self-check.js";
@@ -273,7 +274,9 @@ const MAX_COMPARE_SELECTED_RESULTS_PER_DOC = 2;
 
 const buildRetrievedContextEntry = (result, rank) => ({
   rank,
-  score: Number((result.score ?? 0).toFixed(4)),
+  // The evidence confidence surfaced to the validator and the trace is the
+  // admission signal, not the RRF fusion rank -- see getAdmissionScore.
+  score: Number(getAdmissionScore(result).toFixed(4)),
   docId: result.document.metadata?.docId ?? null,
   fileName: result.document.metadata?.fileName ?? "Unknown document",
   pageNumber: getPageNumber(result.document.metadata),
@@ -738,7 +741,7 @@ export const prepareQASourceBundle = ({ results }) => {
     rankedResults,
     citations: dedupeCitations(
       rankedResults.map((result) =>
-        buildCitation(result.document, result.score, result.rank)
+        buildCitation(result.document, getAdmissionScore(result), result.rank)
       )
     ),
     retrievedContexts: rankedResults.map((result) =>
@@ -806,7 +809,7 @@ export const prepareComparisonSourceBundle = ({ alignment }) => {
     rankedResults,
     citations: dedupeCitations(
       rankedResults.map((result) =>
-        buildCitation(result.document, result.score, result.rank)
+        buildCitation(result.document, getAdmissionScore(result), result.rank)
       )
     ),
     retrievedContexts: rankedResults.map((result) =>

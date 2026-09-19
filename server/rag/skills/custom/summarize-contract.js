@@ -1,4 +1,8 @@
 import { normalizeTrimmedText as normalizeText } from "../../../lib/normalize-text.js";
+import {
+  CUSTOM_RAG_SKILL_CONTRACT,
+  buildPriorFindingsSection,
+} from "./custom-skill-contract.js";
 
 export const SUMMARIZE_CONTRACT_SKILL_ID = "summarize_contract";
 
@@ -14,7 +18,7 @@ const getSelectedDocuments = ({ ragService, docIds = [], accessScope }) => {
   return documents.filter((document) => selectedDocIds.has(document.docId));
 };
 
-const buildSummaryQuestion = ({ question, documents = [] }) => {
+const buildSummaryQuestion = ({ question, documents = [], priorFindings }) => {
   const documentList = documents
     .map((document) => `- ${document.fileName ?? document.docId}`)
     .join("\n");
@@ -25,6 +29,7 @@ const buildSummaryQuestion = ({ question, documents = [] }) => {
     "Cover Parties, Key Terms, Obligations, Deadlines, Risks, and Unknowns when supported by citations.",
     "Every evidence-backed bullet must include source citations. If a section is not specified, say it is not specified.",
     documentList ? `Selected documents:\n${documentList}` : "",
+    buildPriorFindingsSection(priorFindings),
     `Original request: ${normalizeText(question)}`,
   ]
     .filter(Boolean)
@@ -38,6 +43,9 @@ export const createSummarizeContractSkill = () => ({
   kind: "custom",
   budgetKey: "customSkillCalls",
   requiresAccessScope: true,
+  ...CUSTOM_RAG_SKILL_CONTRACT,
+  plannerSummary:
+    "Summarizes parties, key terms, obligations, deadlines, and unknowns from the selected contract documents, with citations.",
   match: ({ plan }) => Boolean(plan.wantsContractSummary),
   plannerActions: ({ docIds }) => [
     {
@@ -48,7 +56,14 @@ export const createSummarizeContractSkill = () => ({
       }.`,
     },
   ],
-  execute: async ({ ragService, question, docIds, accessScope, retrievalPlan }) => {
+  execute: async ({
+    ragService,
+    question,
+    docIds,
+    accessScope,
+    retrievalPlan,
+    priorFindings,
+  }) => {
     const selectedDocuments = getSelectedDocuments({
       ragService,
       docIds,
@@ -57,6 +72,7 @@ export const createSummarizeContractSkill = () => ({
     const summaryQuestion = buildSummaryQuestion({
       question,
       documents: selectedDocuments,
+      priorFindings,
     });
     const value = await ragService.chat(docIds, summaryQuestion, {
       sessionId: null,
@@ -81,6 +97,7 @@ export const createSummarizeContractSkill = () => ({
         abstained: Boolean(value.abstained),
         summaryQuestion,
         retrievalPlan,
+        usedPriorFindings: Boolean(normalizeText(priorFindings)),
       },
     };
   },

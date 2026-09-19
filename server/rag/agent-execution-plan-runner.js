@@ -12,7 +12,7 @@ import {
   runResearchBriefSkill,
   runWorkspaceActionSkill,
 } from "./agent-built-in-skill-runners.js";
-import { runCustomSkills } from "./agent-custom-skill-runner.js";
+import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
 import { runWebSearchSkill } from "./agent-web-runner.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
 
@@ -28,6 +28,7 @@ export const runAgentExecutionPlan = async ({
   budgetState,
   buildSkillTraceDetail,
   capabilityRegistry,
+  dagPlannerAdapter = null,
   docIds,
   executeObservedSkill,
   executionLoop,
@@ -37,17 +38,21 @@ export const runAgentExecutionPlan = async ({
   question,
   ragService,
   recordExecutionGaps,
+  recordExecutionGraph,
   recordSkippedSkill,
   recordSkillResult,
   recordWorkingMemoryClaimSupport,
   recordWorkingMemoryGaps,
   registry,
+  replanAdapter = null,
   resolveWorkingMemoryGaps,
   retrievalPlan,
   returnClarification,
   selectedSkills = [],
   sessionId,
+  skillGraphMode,
   stepLifecycle,
+  taskMemory = null,
   userId,
   webChatService,
 } = {}) => {
@@ -171,7 +176,10 @@ export const runAgentExecutionPlan = async ({
     },
 
     [AGENT_EXECUTION_STEP_IDS.customSkills]: async () => {
-      state.customSkillResults = await runCustomSkills({
+      // Still one stage, still custom_skill steps, still a flat result array.
+      // Everything the rollout dial changes happens inside runCustomSkillStage,
+      // so this call site does not learn whether a chain or a graph ran.
+      state.customSkillResults = await runCustomSkillStage({
         accessScope,
         addBudgetLimitTrace,
         addTraceStep,
@@ -181,14 +189,20 @@ export const runAgentExecutionPlan = async ({
         docIds,
         executeObservedSkill,
         plan,
+        plannerAdapter: dagPlannerAdapter,
         question,
         ragService,
+        recordExecutionGraph,
         recordSkippedSkill,
         recordSkillResult,
+        registry,
+        replanAdapter,
         retrievalPlan,
         sessionId,
         stepLifecycle,
+        taskMemory,
         userId,
+        ...(skillGraphMode ? { mode: skillGraphMode } : {}),
       });
     },
 

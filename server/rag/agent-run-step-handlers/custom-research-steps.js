@@ -3,6 +3,7 @@ import {
   createCustomSkillRegistry,
   executeAgentSkill,
 } from "../skills/registry.js";
+import { isSideEffectingSkill } from "../skills/skill-contract.js";
 import { runRetriableStep } from "./retriable-step-runner.js";
 import {
   buildAgentTraceFromRunSteps,
@@ -41,9 +42,14 @@ const getCustomSkillInput = ({ run = {}, step = {} } = {}) => {
     normalizeText(stepInput.sessionId) || normalizeText(runInput.sessionId);
   const userId =
     normalizeText(stepInput.userId) || normalizeText(runInput.userId);
+  // Only ever set by the graph runner for a node bound to an upstream output.
+  // A V1 chain step folds earlier answers into its question instead, so this
+  // stays null there and the retry is unchanged.
+  const priorFindings = normalizeText(stepInput.priorFindings) || null;
 
   return {
     docIds: stepDocIds.length > 0 ? stepDocIds : runDocIds,
+    priorFindings,
     question,
     retrievalPlan,
     sessionId: sessionId || null,
@@ -281,6 +287,17 @@ export const createCustomSkillStepExecutor = ({
       fail("custom_skill retry only supports whitelisted custom skills.");
     }
 
+    // Resolved from the registry, not from the step: the persisted contract is
+    // what the skill declared when it ran, and a deploy can land between the
+    // interruption and the replay. Re-executing a skill that writes needs the
+    // approval machinery this path does not have, so it is refused here rather
+    // than repeated silently.
+    if (isSideEffectingSkill(skill)) {
+      fail(
+        `custom_skill retry refused: ${skill.id} declares a side effect and cannot be replayed without approval.`
+      );
+    }
+
     return runRetriableStep({
       accessScope,
       agentMode: input.skillId,
@@ -321,6 +338,7 @@ export const createCustomSkillStepExecutor = ({
         executeAgentSkill(skill, {
           accessScope,
           docIds: stepInput.docIds,
+          ...(stepInput.priorFindings ? { priorFindings: stepInput.priorFindings } : {}),
           question: stepInput.question,
           ragService,
           retrievalPlan: stepInput.retrievalPlan,

@@ -1,4 +1,8 @@
 import { normalizeTrimmedText as normalizeText } from "../../../lib/normalize-text.js";
+import {
+  CUSTOM_RAG_SKILL_CONTRACT,
+  buildPriorFindingsSection,
+} from "./custom-skill-contract.js";
 
 export const COMPARE_DOCUMENTS_SKILL_ID = "compare_documents";
 
@@ -14,7 +18,7 @@ const getSelectedDocuments = ({ ragService, docIds = [], accessScope }) => {
   return documents.filter((document) => selectedDocIds.has(document.docId));
 };
 
-const buildCompareQuestion = ({ question, documents = [] }) => {
+const buildCompareQuestion = ({ question, documents = [], priorFindings }) => {
   const documentList = documents
     .map((document) => `- ${document.fileName ?? document.docId}`)
     .join("\n");
@@ -25,6 +29,7 @@ const buildCompareQuestion = ({ question, documents = [] }) => {
     "Organize the answer as Document Comparison, Common Ground, Differences, Conflicts, Missing Terms, and Evidence Limits.",
     "Every evidence-backed bullet must include source citations from the relevant documents. If a category is not supported, say it is not specified.",
     documentList ? `Selected documents:\n${documentList}` : "",
+    buildPriorFindingsSection(priorFindings),
     `Original request: ${normalizeText(question)}`,
   ]
     .filter(Boolean)
@@ -38,6 +43,9 @@ export const createCompareDocumentsSkill = () => ({
   kind: "custom",
   budgetKey: "customSkillCalls",
   requiresAccessScope: true,
+  ...CUSTOM_RAG_SKILL_CONTRACT,
+  plannerSummary:
+    "Compares the selected documents and reports common ground, differences, conflicts, and missing terms with per-document citations.",
   match: ({ plan }) => Boolean(plan.wantsCompareDocuments),
   plannerActions: ({ docIds }) => [
     {
@@ -48,7 +56,14 @@ export const createCompareDocumentsSkill = () => ({
       }.`,
     },
   ],
-  execute: async ({ ragService, question, docIds, accessScope, retrievalPlan }) => {
+  execute: async ({
+    ragService,
+    question,
+    docIds,
+    accessScope,
+    retrievalPlan,
+    priorFindings,
+  }) => {
     const selectedDocuments = getSelectedDocuments({
       ragService,
       docIds,
@@ -57,6 +72,7 @@ export const createCompareDocumentsSkill = () => ({
     const compareQuestion = buildCompareQuestion({
       question,
       documents: selectedDocuments,
+      priorFindings,
     });
     const value = await ragService.chat(docIds, compareQuestion, {
       sessionId: null,
@@ -81,6 +97,7 @@ export const createCompareDocumentsSkill = () => ({
         abstained: Boolean(value.abstained),
         compareQuestion,
         retrievalPlan,
+        usedPriorFindings: Boolean(normalizeText(priorFindings)),
       },
     };
   },

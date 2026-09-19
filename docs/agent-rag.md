@@ -35,8 +35,8 @@ flowchart LR
 1. 结合会话记忆把追问改写成独立检索问题。
 2. 对复杂问题拆分 evidence requirements，例如时间、生效范围、适用地区。
 3. 生成 query embedding，并按选中文档检索。
-4. 可选启用 dense + sparse hybrid retrieval，融合方式支持 weighted score 或 RRF。
-5. 可选启用 rerank，位置在 retrieval/hybrid 之后、confidence gate 之前。
+4. 默认跑两路独立召回：dense 路（pgvector cosine；local / qdrant 为显式 opt-in）与 sparse 路（PostgreSQL FTS，`ts_rank_cd` 排序，不是 BM25），用 RRF 融合（weighted 可选，`RAG_HYBRID_ENABLED=false` 只跑 dense）。每个候选记录 route、原始 rank/score、fusion 分数和命中它的 retrieval query；多 query × 多路的结果按 `docId:chunkIndex` 稳定去重。`/chat` 响应附加 `retrieval` 块记录 provider 和两路是否真实产生候选。
+5. 可选启用 rerank，位置在 fusion 之后、confidence gate 之前；rerank 不能替代任何一路召回。
 6. 使用置信度门控过滤低相关或缺少 anchor coverage 的证据。
 7. 生成 grounded answer、citations、evidence summary 和 AgentRAG observability。
 
@@ -80,11 +80,90 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 
 新增 skill 需要稳定的 `id`、`version`、`label`、`budgetKey`、`requiresAccessScope`、确定性的 `match()`，以及接收 `accessScope` 的 `execute()`。Custom skills 只通过 `server/rag/skills/custom/index.js` 白名单加载，不允许模型调用任意未注册工具。
 
+## Custom skill 执行：V1 chain 与 V2 typed DAG
+
+Custom skill 阶段内部有两条执行路径，由 `AGENT_SKILL_GRAPH_ROLLOUT` 选择。两条路径共用同一个 stage、同一种 `custom_skill` step、同一个 run store 和同一份 replay safety matrix；execution plan 仍然只有一个 `custom_skills` 阶段，`/chat` 响应结构不变。切换入口集中在 `server/rag/agent-custom-skill-stage.js`，由 `server/rag/agent-execution-plan-runner.js` 调用。
+
+### V1：顺序 skill chain
+
+`server/rag/agent-custom-skill-runner.js` 按 planner 选定的白名单 chain 顺序执行，step id 是 `custom_skill:<skillId>`。它的数据接口是拼接文本：`buildChainedSkillQuestion()` 把前面 skill 的回答拼进下一个 skill 的 question。这条路径保持原样，没有被删除也没有被改写。
+
+### V2：typed DAG
+
+| 环节 | 模块 | 职责 |
+| --- | --- | --- |
+| Skill contract | `server/rag/skills/skill-contract.js` | 在既有 `id/version/budgetKey/requiresAccessScope/match/execute` 之外补充 `inputSchema`、`outputSchema`、`effects`、`idempotency`、`parallelSafe`、`replaySafe`；旧 skill 由 `inferSkillContractDefaults()` 推出安全默认值。 |
+| Graph contract | `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph`；node 至少包含 `nodeId`、`skillId`、`dependsOn`、`inputBindings`、`failurePolicy`、`rationale`。同一个 skill 可以出现在多个 `nodeId` 下，step id 变成 `custom_skill:<nodeId>`。 |
+| Validator / compiler | 同上的 `validateExecutionGraph()` / `compileExecutionGraph()` | 纯函数校验和拓扑分层，返回稳定 reason code。 |
+| Planner adapter | `server/rag/agent-dag-planner-adapter.js` | 直接产出原子 skill node 和依赖，不再输出 `skill_chain_compare_risk` 这类复合 id。 |
+| Scheduler | `server/rag/agent-execution-graph-runner.js` | 拓扑调度、并发上限、预算预留、side-effect 串行化。 |
+| Replanner | `server/rag/agent-replanner.js` | 有界局部重规划，只返回 graph patch。 |
+
+Node 输入只有两个来源：已校验的 request 字段，或它显式 `dependsOn` 的上游 node 的结构化输出（`inputBindings` 的 `source` 只接受 `request` 和 `node`）。这是和 V1 最实质的区别——拼接自由文本不再是主数据接口。
+
+### Validator
+
+`validateExecutionGraph()` 是纯函数，在任何 node 执行之前整体接受或整体拒绝一张图；`compileExecutionGraph()` 只在校验通过后产出拓扑层。非法图不会部分执行。初始 plan 和每一次 replan 走同一个 validator。当前 reason code：
+
+`empty_graph`、`invalid_graph_version`、`invalid_node_shape`、`duplicate_node_id`、`dangling_dependency`、`self_dependency`、`cycle_detected`、`illegal_output_reference`、`input_type_mismatch`、`missing_required_input`、`out_of_scope_document`、`unregistered_capability`、`forged_approval`、`forged_policy`、`unsafe_parallel_side_effect`、`max_nodes_exceeded`、`max_depth_exceeded`、`budget_exceeded`。
+
+`forged_approval` / `forged_policy` 覆盖 runtime 独占字段：planner 写入 `approval`、`approvalGateId`、`approvedGate`、`accessScope`、`budget`、`budgetKey`、`concurrency`、`docIds`、`maxReplans`、`requiresApproval` 等字段时整图被拒，而不是被静默清洗——静默清洗会让 planner 学到"多要一点没有代价"。
+
+默认上限在 `EXECUTION_GRAPH_LIMITS`：`maxNodes: 12`、`maxDepth: 5`、`maxConcurrency: 3`。
+
+### Scheduler
+
+调度顺序按 node 声明顺序做稳定拓扑排序，因此同一张图的调度是可复现的。只有依赖已满足、`parallelSafe`、彼此无冲突的只读 node 才会并发；并发上限由 runtime 收敛，调用方传入的 `maxConcurrency` 只能收紧不能放宽。预算在启动前原子预留，approval interrupt 会把预留退回，避免一次审批被计费两次。`failurePolicy` 为 `fail_fast` 的 node 失败后中止后续调度，`continue` 则只让下游 node 标记为 `dependency_failed` / `dependency_skipped`。
+
+### 有界 replan
+
+触发条件限定为 `insufficient_evidence`、`retryable_failure`、`output_schema_failure`、`missing_input`、`unmet_success_criterion`。Replanner 只返回 graph patch，不执行任何工具；patch 必须重新过同一个 validator，不能扩大 scope、白名单或预算。已完成的 node 默认不重跑（`completed` 和上一轮 `reused` 都算既成事实），指纹集合会拒绝重复等价的 plan，`DEFAULT_MAX_REPLANS` 为 `1`。无进展或预算耗尽时返回 `abstain`，交由上游走 clarification 或 evidence-limited answer，而不是继续重试。Replan 的拒绝原因同样有稳定 code：`replan_not_triggered`、`replan_limit_reached`、`replan_budget_exhausted`、`replan_no_progress`、`replan_duplicate_plan`、`replan_invalid_patch`、`replan_adapter_failed`、`replan_completed_node_retired`、`replan_side_effect_node_retired`。
+
+### 灰度流程
+
+| 模式 | 谁出答案 | Graph 行为 |
+| --- | --- | --- |
+| `off`（默认） | V1 chain | 不规划，不记录。 |
+| `shadow` | V1 chain | 在 V1 花预算之前抓取预算快照，规划并校验一张 graph 只做比对；shadow 路径出错会被记录成 error，不会影响真实请求。 |
+| `guarded` | V2 DAG | 真正执行；只有在 graph 整体被拒、尚无任何 node 执行时才回落 V1。 |
+
+`guarded` 之所以只在"整体被拒"时回落，是因为一旦有 node 花掉预算并写入 step，再用另一套 plan 重跑整条链会重复计费、并可能重复已发生的副作用。因此在灰度门禁证明可迁移之前，V1 planner、复合 intent 和 deterministic fallback 都不能删除。
+
+DAG planner 复用既有 execution planner 灰度位（`AGENT_EXECUTION_PLANNER` / `AGENT_PLANNER_ROLLOUT`），不新增第二个模型开关；见 `createDagPlannerAdapter()`。Replanner 只在解析后的 planner 确实是 LLM planner 时才接线——deterministic 或 shadow 状态下没有可回落的确定性 replanner，接上它等于让模型绕过灰度位影响真实执行。
+
+Graph 的规划和执行结果以 agent run event `skill_graph_planned` 记录（`executed`、`fallback`、`mode`、`graph.nodeIds`、`nodeRuns`、`replans`、`status`、`errorCodes`），属于版本化的附加字段。`/chat` 响应、`agentObservability`、前端 trace、feedback 和 recovery 合同保持向后兼容。Node run 记录只保留 `ok` / `abstained` 标记，不复制证据文本——citation 已经随 trace step 走，复制一份到没有校验的地方只会多一个可分叉的事实源。
+
+### Recovery 语义
+
+Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run-step-replay-safety.js` 的既有 policy。两处补充：
+
+- **持久化声明收窄（无 registry 的一侧）。** Step type 是粗粒度分类，同一个 `custom_skill` 既可能是只读 RAG 检索，也可能是 contract 允许的写操作。执行时 skill 的 replay contract（`effects`、`idempotency`、`replaySafe`）会随 step input 持久化，recovery 只拿得到持久化的 step，所以这是 skill 自身声明唯一能影响"是否可无人值守重放"的通道。该声明只能收窄不能放宽：可以撤回 auto-replay，不能授予；contract 出现之前写下的 step 没有声明，结论与今天完全一致；无法识别的 `effects` 按写操作处理——读不懂的值不是安全的证据。V1 chain 和 V2 graph 都持久化同一份声明。Graph node 绑定的上游输入 `priorFindings` 也随 step input 持久化，retry 用原来的那份数据重放；V1 chain step 把上游输出折进了 question，因此没有这个字段，retry 行为不变。
+- **实时 contract 复核（有 registry 的一侧）。** `server/rag/agent-run-step-handlers/custom-research-steps.js` 在 resume 时从 registry 重新解析 skill：持久化的 contract 是它当时的声明，中断和重放之间可能发生一次部署。声明了副作用的 skill 在这条没有审批机制的路径上被拒绝，而不是被静默重跑。
+
+两处是纵深防御的两层，分别覆盖"记录被伪造/过期"和"记录缺失"两种情况。Approval 仍然绑定原始 input hash。
+
+"不重跑已完成的 node"在两条路径上成立：step executor 的 `retry_failed_step` / `resume_from_step` / approval resume 只执行目标 step，不碰同一 run 里已完成的 `custom_skill` step；同一 run 内的 replan 通过 `completedNodeRuns` 把已完成和上一轮 `reused` 的 node 原样带入下一轮。第三条路径不成立：带 `agentRunId` + `capabilityApprovals` 重新调用 `/chat` 或 agent task 会重新规划并重新执行整个 plan，graph node 会再跑一次——这和 V1 chain 在同一路径上的行为完全一致，不是 V2 引入的回退，但也没有被 V2 修掉。
+
+### 当前限制
+
+- 默认 `off`。真实 `/chat` 走 typed DAG 需要运维显式设置 `AGENT_SKILL_GRAPH_ROLLOUT=shadow` 或 `guarded`；没有这一步时 V2 只存在于测试中。
+- 当前注册的四个 custom skill 全部继承 `custom-skill-contract.js` 的 `effects: readOnly`，没有任何 skill 声明写操作。上面的副作用防护守的是 contract 已经允许、但尚无实例的边界，不是在修一个线上缺陷。
+- `maxReplans` 初始为 `1`；指纹机制保证即使上调也不会形成等价循环，但更高的值尚未做灰度验证。
+- Graph 只覆盖 custom skill 阶段。built-in skill、document RAG 主循环、capability 调用仍走各自既有路径和安全边界。
+- 评测覆盖只到 trajectory 和 recovery-observability 两层。`eval:trajectory` 里四个 `skill_graph` case 各自钉住灰度位跑在 DAG 路径上（guarded 执行、shadow 只规划、非法图整体拒绝、有界 replan），id / check / 投影钉在 quality manifest `1.8.0`；`eval:recovery-observability` 另有一个 `skill_graph_signal` case，从一次真实 guarded 运行的 `skill_graph_planned` 事件里数 replan 内的 node 复用和执行后 fallback（recovery gate 对后者的阈值是 0）；但 `rollout:readiness` 不读这个开关，`eval:planner` 和 `quality:gate` 也仍跑默认 `off`。这些 case 都用注入的 planner / replanner 或 deterministic graph，不经过真实模型。见 [evaluation.md](evaluation.md#skill-graph-rollout-的评测边界)。
+- 跨 run 的 node 复用不存在。带 `agentRunId` 重新进入的 `/chat` / agent task 会重新执行整个 plan（见上文 Recovery 语义），要做到跨 run 复用需要 stage 在重入时读取上一轮的 `skill_graph_planned` 记录，目前没有做。
+
 ## 关键模块
 
 | 模块 | 职责 |
 | --- | --- |
 | `server/rag/agent-planner.js` | 请求分类、planner actions、skill/chain 选择、执行前 clarification 判断。 |
+| `server/rag/skills/skill-contract.js` | Skill contract：`inputSchema`/`outputSchema`/`effects`/`idempotency`/`parallelSafe`/`replaySafe` 的规范化与安全默认值，以及随 step 持久化的 replay contract 切片。 |
+| `server/rag/agent-custom-skill-stage.js` | 迁移切口：按 `AGENT_SKILL_GRAPH_ROLLOUT` 在 V1 chain、shadow 规划和 guarded DAG 之间选择，对外仍返回同一个扁平 skill result 数组。 |
+| `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph` contract 和纯函数 validator/compiler；整体接受或整体拒绝，返回稳定 reason code。 |
+| `server/rag/agent-execution-graph-runner.js` | Graph scheduler：拓扑调度、并发上限、预算预留/退回、side-effect 串行化、node run 记录。 |
+| `server/rag/agent-dag-planner-adapter.js` | V2 planner adapter；只暴露脱敏后的白名单 capability 描述、schema、授权文档范围和 planning context，产出原子 skill node 与依赖。 |
+| `server/rag/agent-replanner.js` | 有界局部重规划；只返回需重新校验的 graph patch，不执行工具，默认 `maxReplans: 1`。 |
 | `server/rag/arxiv-client.js` | arXiv Atom API 查询、feed 解析和 PDF 下载校验。 |
 | `server/rag/arxiv-enrichment.js` | 从已上传文档的本地 profile keyphrases 生成 arXiv topic、过滤私密实体和内部术语、对候选做 relevance check、返回签名候选 token，保存 recommendation snapshot，并提供 arXiv recommendation import runner。 |
 | `server/rag/arxiv-importer.js` | 按 topic 或已确认候选列表下载 arXiv PDF，导入前按 arXiv ID / PDF URL / title hash 去重，写入 `profile.source` provenance，通过现有文档 ingestion 写入索引，并通过可选 progress callback 汇报 per-paper 状态。 |

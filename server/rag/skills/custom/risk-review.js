@@ -1,4 +1,8 @@
 import { normalizeTrimmedText as normalizeText } from "../../../lib/normalize-text.js";
+import {
+  CUSTOM_RAG_SKILL_CONTRACT,
+  buildPriorFindingsSection,
+} from "./custom-skill-contract.js";
 
 export const RISK_REVIEW_SKILL_ID = "risk_review";
 
@@ -14,7 +18,7 @@ const getSelectedDocuments = ({ ragService, docIds = [], accessScope }) => {
   return documents.filter((document) => selectedDocIds.has(document.docId));
 };
 
-const buildRiskQuestion = ({ question, documents = [] }) => {
+const buildRiskQuestion = ({ question, documents = [], priorFindings }) => {
   const documentList = documents
     .map((document) => `- ${document.fileName ?? document.docId}`)
     .join("\n");
@@ -25,6 +29,7 @@ const buildRiskQuestion = ({ question, documents = [] }) => {
     "Do not guess. If a risk, gap, or exception is not supported by the selected documents, say it is not specified.",
     "Return concise bullets grouped as Risks, Gaps, Conflicts Or Exceptions, and Evidence Limits. Put source citations on every evidence-backed bullet.",
     documentList ? `Selected documents:\n${documentList}` : "",
+    buildPriorFindingsSection(priorFindings),
     `Original request: ${normalizeText(question)}`,
   ]
     .filter(Boolean)
@@ -38,6 +43,9 @@ export const createRiskReviewSkill = () => ({
   kind: "custom",
   budgetKey: "customSkillCalls",
   requiresAccessScope: true,
+  ...CUSTOM_RAG_SKILL_CONTRACT,
+  plannerSummary:
+    "Reviews the selected documents for risks, gaps, contradictions, and exceptions, with citations on every evidence-backed finding.",
   match: ({ plan }) => Boolean(plan.wantsRiskReview),
   plannerActions: ({ docIds }) => [
     {
@@ -48,7 +56,14 @@ export const createRiskReviewSkill = () => ({
       }.`,
     },
   ],
-  execute: async ({ ragService, question, docIds, accessScope, retrievalPlan }) => {
+  execute: async ({
+    ragService,
+    question,
+    docIds,
+    accessScope,
+    retrievalPlan,
+    priorFindings,
+  }) => {
     const selectedDocuments = getSelectedDocuments({
       ragService,
       docIds,
@@ -57,6 +72,7 @@ export const createRiskReviewSkill = () => ({
     const riskQuestion = buildRiskQuestion({
       question,
       documents: selectedDocuments,
+      priorFindings,
     });
     const value = await ragService.chat(docIds, riskQuestion, {
       sessionId: null,
@@ -81,6 +97,7 @@ export const createRiskReviewSkill = () => ({
         abstained: Boolean(value.abstained),
         riskQuestion,
         retrievalPlan,
+        usedPriorFindings: Boolean(normalizeText(priorFindings)),
       },
     };
   },

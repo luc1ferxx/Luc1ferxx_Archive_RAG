@@ -19,7 +19,7 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   });
 
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 13);
+  assert.equal(report.summary.metrics.caseCount, 17);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
   assert.equal(report.summary.metrics.categories.skill_selection.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.follow_up.failedCheckCount, 0);
@@ -33,6 +33,8 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   assert.equal(report.summary.metrics.categories.conflict.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.planner.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.privacy.failedCheckCount, 0);
+  assert.equal(report.summary.metrics.categories.skill_graph.failedCheckCount, 0);
+  assert.equal(report.summary.metrics.categories.skill_graph.checkCount, 18);
   assert.ok(
     report.cases.some(
       (caseResult) =>
@@ -88,6 +90,43 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
         caseResult.passed
     )
   );
+  // The graph cases pin the rollout dial per case; the report must show the
+  // graph actually ran under `guarded`, only planned under `shadow`, refused
+  // the forged plan whole, and stopped replanning at the bound.
+  const graphCase = (id) => report.cases.find((caseResult) => caseResult.id === id);
+
+  assert.equal(
+    graphCase("skill_graph_guarded_execution").response.observed.graph.executed,
+    true
+  );
+  assert.equal(
+    graphCase("skill_graph_guarded_execution").response.agentMode,
+    "skill_chain"
+  );
+  assert.equal(
+    graphCase("skill_graph_shadow_comparison").response.observed.graph.executed,
+    false
+  );
+  assert.deepEqual(
+    graphCase("skill_graph_illegal_plan_rejected").response.observed.forgedNodeIdsRan,
+    []
+  );
+  assert.deepEqual(
+    graphCase("skill_graph_illegal_plan_rejected").response.observed.reasonCodes,
+    ["forged_approval", "out_of_scope_document", "unregistered_capability"]
+  );
+  assert.deepEqual(
+    graphCase("skill_graph_bounded_replan").response.observed.replans.map(
+      (replan) => replan.reasonCode
+    ),
+    [null, "replan_limit_reached"]
+  );
+  assert.deepEqual(
+    graphCase("skill_graph_bounded_replan").response.observed.nodeRuns.map(
+      (nodeRun) => nodeRun.status
+    ),
+    ["reused", "reused", "completed"]
+  );
 
   const suiteValidation = validateCurrentQualitySuiteReport({
     report: {
@@ -111,6 +150,7 @@ test("trajectory eval isolates memory configuration from CI runtime", async () =
   const originalAgentExperienceMemory =
     process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
   const originalLongMemory = process.env.RAG_LONG_MEMORY_ENABLED;
+  const originalSkillGraphRollout = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
 
   process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED = "true";
   process.env.RAG_LONG_MEMORY_ENABLED = "true";
@@ -139,6 +179,10 @@ test("trajectory eval isolates memory configuration from CI runtime", async () =
     );
     assert.equal(process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED, "true");
     assert.equal(process.env.RAG_LONG_MEMORY_ENABLED, "true");
+    // The graph cases pin AGENT_SKILL_GRAPH_ROLLOUT for their own duration
+    // only; a leaked `guarded` here would silently move every later suite
+    // onto the V2 path.
+    assert.equal(process.env.AGENT_SKILL_GRAPH_ROLLOUT, originalSkillGraphRollout);
   } finally {
     if (originalAgentExperienceMemory === undefined) {
       delete process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
@@ -172,10 +216,15 @@ test("trajectory eval markdown summarizes categories and failed checks", async (
   assert.match(markdown, /Conflict/);
   assert.match(markdown, /Planner/);
   assert.match(markdown, /Privacy/);
+  assert.match(markdown, /Skill graph/);
   assert.match(markdown, /Contract review skill chain/);
   assert.match(markdown, /Capability approval resume/);
   assert.match(markdown, /Custom skill retry/);
   assert.match(markdown, /Privacy sanitization/);
   assert.match(markdown, /Agent goal lifecycle completion/);
+  assert.match(markdown, /Skill graph guarded execution/);
+  assert.match(markdown, /Skill graph shadow comparison/);
+  assert.match(markdown, /Skill graph illegal plan rejected/);
+  assert.match(markdown, /Skill graph bounded replan/);
   assert.match(markdown, /PASS/);
 });

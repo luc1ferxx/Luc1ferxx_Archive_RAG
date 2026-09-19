@@ -178,6 +178,10 @@ export const evaluateSyntheticCaseResponse = ({
     citations,
     retrievedContexts,
     referenceContexts,
+    // What the retrieval seam reported for this case: provider, both routes'
+    // candidate counts, fusion. The quality gate checks it per case so a
+    // route that silently did not run cannot hide behind a passing answer.
+    retrieval: response?.retrieval ?? null,
     ragasSample: buildRagasSample({
       testCase,
       response: {

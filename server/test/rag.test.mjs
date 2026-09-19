@@ -627,7 +627,21 @@ const buildComparisonAnalysis = ({ query, entries }) => {
   });
 };
 
+// These tests exercise the local JSON backend and the dense-only baseline on
+// purpose. pgvector + hybrid RRF is the runtime default, so both are pinned
+// here as an explicit opt-in; the hybrid and qdrant tests below override the
+// hybrid flag themselves for their own duration.
+const pinnedRetrievalEnvironment = {
+  RAG_HYBRID_ENABLED: "false",
+  VECTOR_STORE_PROVIDER: "local",
+};
+let originalRetrievalEnvironment = {};
+
 beforeEach(async () => {
+  originalRetrievalEnvironment = Object.fromEntries(
+    Object.keys(pinnedRetrievalEnvironment).map((key) => [key, process.env[key]])
+  );
+  Object.assign(process.env, pinnedRetrievalEnvironment);
   tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-rag-test-"));
   configureRagDataDirectory(path.join(tempRoot, "rag-data"));
   await resetDocumentRegistryStore();
@@ -647,6 +661,13 @@ afterEach(async () => {
   await clearDocuments({
     deleteFiles: false,
   });
+  for (const [key, value] of Object.entries(originalRetrievalEnvironment)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
   await resetSessionMemoryStore();
   await resetLongMemoryStore();
   resetVectorStore();

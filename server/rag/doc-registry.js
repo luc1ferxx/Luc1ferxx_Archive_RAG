@@ -226,6 +226,14 @@ export const resolveFileBuffer = async ({
   throw new Error("Document ingestion requires a PDF buffer or source file path.");
 };
 
+// Writes accept an optional transaction client so the pgvector ingest path can
+// commit the document row and its chunk rows together. Without one they use
+// the pool, exactly as before.
+const resolveQuery = (queryPostgres, client) =>
+  client && typeof client.query === "function"
+    ? (sql, values = []) => client.query(sql, values)
+    : queryPostgres;
+
 export const createDocumentRegistryStore = ({
   createDocumentLegacyImporter = createDefaultDocumentLegacyImporter,
   getDocumentsTable = getDocumentsPostgresTable,
@@ -282,7 +290,7 @@ export const createDocumentRegistryStore = ({
       .filter((document) => documentMatchesAccessScope(document, accessScope));
   },
 
-  async upsert(document) {
+  async upsert(document, { client = null } = {}) {
     const normalizedDocument = toStoredDocument(document);
 
     if (!normalizedDocument.docId || !normalizedDocument.fileName) {
@@ -296,7 +304,7 @@ export const createDocumentRegistryStore = ({
       sourceFilePath: document.sourceFilePath,
     });
     const fileSize = normalizedDocument.fileSize || fileBuffer.byteLength;
-    const result = await queryPostgres(
+    const result = await resolveQuery(queryPostgres, client)(
       `
         INSERT INTO ${tableName} (
           doc_id,
@@ -382,7 +390,7 @@ export const createDocumentRegistryStore = ({
     };
   },
 
-  async delete(docId, accessScope = {}) {
+  async delete(docId, accessScope = {}, { client = null } = {}) {
     const normalizedDocId = normalizeDocId(docId);
 
     if (!normalizedDocId) {
@@ -396,7 +404,7 @@ export const createDocumentRegistryStore = ({
       return null;
     }
 
-    const result = await queryPostgres(
+    const result = await resolveQuery(queryPostgres, client)(
       `
         DELETE FROM ${tableName}
         WHERE doc_id = $1
@@ -408,8 +416,9 @@ export const createDocumentRegistryStore = ({
     return result.rows[0] ? mapRowToStoredDocument(result.rows[0]) : null;
   },
 
-  async clear(accessScope = {}) {
+  async clear(accessScope = {}, { client = null } = {}) {
     const tableName = ensureTableName(getDocumentsTable);
+    const query = resolveQuery(queryPostgres, client);
 
     if (hasAccessScope(accessScope)) {
       const scopedDocuments = await this.list(accessScope);
@@ -419,7 +428,7 @@ export const createDocumentRegistryStore = ({
         return true;
       }
 
-      await queryPostgres(
+      await query(
         `
           DELETE FROM ${tableName}
           WHERE doc_id = ANY($1::text[])
@@ -429,7 +438,7 @@ export const createDocumentRegistryStore = ({
       return true;
     }
 
-    await queryPostgres(`DELETE FROM ${tableName}`);
+    await query(`DELETE FROM ${tableName}`);
     return true;
   },
 });
@@ -479,6 +488,23 @@ export const initializeDocumentRegistry = async () => {
   return listDocuments();
 };
 
+/**
+ * Read-only registry load: lists the stored documents and populates the
+ * in-memory map WITHOUT calling store.initialize(), which would run migrations
+ * (DDL). This is the load path for read-only callers such as the reindex
+ * dry-run, which must inspect the registry without altering the schema. It
+ * reads whatever the documents table currently holds; if that table does not
+ * exist yet, store.list() surfaces the underlying error to the caller rather
+ * than silently creating it.
+ */
+export const readDocumentRegistrySnapshot = async (accessScope = {}) => {
+  const store = getDocumentRegistryStore();
+  const documents = store.list ? await store.list() : [];
+
+  setDocumentRegistry(documents);
+  return listDocuments(accessScope);
+};
+
 export const configureDocumentRegistryStore = (store) => {
   configuredDocumentRegistryStore = store ?? null;
   documentRegistry = new Map();
@@ -486,14 +512,14 @@ export const configureDocumentRegistryStore = (store) => {
   legacyImportAttempted = false;
 };
 
-export const registerDocument = async (document) => {
+export const registerDocument = async (document, { client = null } = {}) => {
   if (!documentRegistryInitialized) {
     await initializeDocumentRegistry();
   }
 
   const store = getDocumentRegistryStore();
   const storedDocument = store.upsert
-    ? await store.upsert(document)
+    ? await store.upsert(document, { client })
     : toStoredDocument(document);
 
   documentRegistry.set(storedDocument.docId, toStoredDocument(storedDocument));
@@ -501,6 +527,33 @@ export const registerDocument = async (document) => {
 };
 
 export const hasDocument = (docId) => documentRegistry.has(normalizeDocId(docId));
+
+/**
+ * Re-reads one document from the store and replaces the in-process copy.
+ *
+ * registerDocument/deleteDocument update the in-memory map as soon as the
+ * store call returns, which is right on the pool but wrong inside a
+ * transaction that later rolls back. The ingest path calls this on rollback
+ * so the map reflects what the database actually committed.
+ */
+export const resyncDocument = async (docId) => {
+  const normalizedDocId = normalizeDocId(docId);
+
+  if (!normalizedDocId) {
+    return null;
+  }
+
+  const store = getDocumentRegistryStore();
+  const storedFile = store.getFile ? await store.getFile(normalizedDocId) : null;
+
+  if (storedFile?.document) {
+    documentRegistry.set(normalizedDocId, toStoredDocument(storedFile.document));
+  } else {
+    documentRegistry.delete(normalizedDocId);
+  }
+
+  return getDocument(normalizedDocId);
+};
 
 export const getStoredDocument = (docId, accessScope = {}) => {
   const document = documentRegistry.get(normalizeDocId(docId)) ?? null;
@@ -528,7 +581,11 @@ export const getDocumentFile = async (docId, accessScope = {}) => {
   return store.getFile ? store.getFile(docId, accessScope) : null;
 };
 
-export const deleteDocument = async (docId, accessScope = {}) => {
+export const deleteDocument = async (
+  docId,
+  accessScope = {},
+  { client = null } = {}
+) => {
   const storedDocument = getStoredDocument(docId, accessScope);
 
   if (!storedDocument) {
@@ -538,19 +595,19 @@ export const deleteDocument = async (docId, accessScope = {}) => {
   const store = getDocumentRegistryStore();
 
   if (store.delete) {
-    await store.delete(docId, accessScope);
+    await store.delete(docId, accessScope, { client });
   }
 
   documentRegistry.delete(normalizeDocId(docId));
   return toPublicDocument(storedDocument);
 };
 
-export const clearDocuments = async ({ accessScope = {} } = {}) => {
+export const clearDocuments = async ({ accessScope = {}, client = null } = {}) => {
   const documents = listDocuments(accessScope);
   const store = getDocumentRegistryStore();
 
   if (store.clear) {
-    await store.clear(accessScope);
+    await store.clear(accessScope, { client });
   }
 
   if (hasAccessScope(accessScope)) {

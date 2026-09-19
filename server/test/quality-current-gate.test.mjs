@@ -26,6 +26,10 @@ import {
   evaluateSyntheticCaseResponse,
 } from "../evaluation/synthetic-case-evaluator.js";
 import {
+  buildCaseRetrievalEvidence,
+  buildRetrievalEvidence,
+} from "../evaluation/synthetic-retrieval-evidence.js";
+import {
   buildSyntheticDocumentId,
 } from "../evaluation/synthetic-document-identity.js";
 import { chunkDocumentWithConfig } from "../rag/chunker.js";
@@ -96,6 +100,9 @@ const reevaluateSyntheticCase = ({ answer, caseResult, manifest }) => {
       citations: caseResult.rawCitations,
       comparisonAnalysisSummary: caseResult.comparisonAnalysisSummary,
       retrievedContexts: caseResult.rawRetrievedContexts,
+      // Re-evaluating an answer does not re-run retrieval; the route
+      // evidence the original run recorded stays with the case.
+      retrieval: caseResult.retrieval,
       text: answer,
     },
     responseTimeMs: caseResult.responseTimeMs,
@@ -142,6 +149,12 @@ const buildReport = (spec) => {
           taskRecoveryResumeFailureCount: 0,
           taskRecoveryCompletedCount: 1,
           plannerFallbackCount: 0,
+          skillGraphPlannedCount: 1,
+          skillGraphExecutedCount: 1,
+          skillGraphFallbackCount: 0,
+          skillGraphUnsafeFallbackCount: 0,
+          skillGraphReusedNodeCount: 2,
+          skillGraphReplanAppliedCount: 1,
         }
       : undefined;
   const caseIds =
@@ -315,6 +328,7 @@ const buildReport = (spec) => {
         citations,
         comparisonAnalysisSummary,
         retrievedContexts,
+        retrieval: buildCaseRetrievalEvidence(manifest.requiredRetrieval),
         text: answerText,
       },
       responseTimeMs: 1,
@@ -395,6 +409,15 @@ const buildReport = (spec) => {
     summary: {
       config:
         spec.reportType === "synthetic" ? executionConfig : {},
+      ...(spec.reportType === "synthetic"
+        ? {
+            retrieval: buildRetrievalEvidence({
+              caseResults: cases,
+              embeddingDimensions: 64,
+              retrievalArchitecture: manifest.requiredRetrieval,
+            }),
+          }
+        : {}),
       corpus: spec.corpus
         ? {
             documents: documents.length,

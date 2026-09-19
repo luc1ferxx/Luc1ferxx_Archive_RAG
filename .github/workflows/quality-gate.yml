@@ -36,6 +36,24 @@ jobs:
 
   server-tests:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: agentai_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentai_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Real pgvector PostgreSQL for the integration suite. The remaining suites
+      # pin VECTOR_STORE_PROVIDER themselves; nothing here downgrades the default.
+      PGVECTOR_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_test
 
     defaults:
       run:
@@ -63,9 +81,30 @@ jobs:
 
   quality-gate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: agentai_quality
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentai_quality"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       EVAL_EVIDENCE_PROFILE: quality-current
       EVAL_TARGET_COMMIT_SHA: ${{ github.sha }}
+      # The current profile runs the default retrieval stack for real:
+      # pgvector + dense/sparse routes + RRF. quality:current fails if the
+      # reports say otherwise, so these are stated rather than assumed.
+      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_quality
+      VECTOR_STORE_PROVIDER: pgvector
+      RAG_HYBRID_ENABLED: "true"
+      RAG_HYBRID_FUSION: rrf
 
     defaults:
       run:

@@ -41,7 +41,7 @@ test("robust suite execution plan hashes the canonical public execution contract
 
   assert.match(plan.configHash, /^[a-f0-9]{64}$/);
   assert.equal(plan.configHash, hashCanonicalJson(plan.contract));
-  assert.equal(plan.contract.schemaVersion, "2.0.0");
+  assert.equal(plan.contract.schemaVersion, "2.1.0");
   assert.deepEqual(plan.contract.options, DEFAULT_OPTIONS);
   assert.deepEqual(syntheticReport.config, {
     chunkStrategy: "structured",
@@ -53,6 +53,9 @@ test("robust suite execution plan hashes the canonical public execution contract
     minRelevanceScore: 0.32,
     nearDuplicateGuardEnabled: true,
     uploadChunkSizeBytes: 180,
+    vectorStoreProvider: "pgvector",
+    hybridEnabled: true,
+    hybridFusion: "rrf",
   });
   assert.deepEqual(hardCsReport.config, {
     chunkStrategy: "structured",
@@ -115,6 +118,12 @@ test("robust suite child environment overrides every configurable synthetic publ
       RAG_MIN_RELEVANCE_SCORE: "0.99",
       RAG_NEAR_DUPLICATE_GUARD_ENABLED: "false",
       RAG_RETRIEVAL_TOP_K: "99",
+      // A polluted retrieval stack must not survive into the child: the
+      // contract names pgvector + hybrid + RRF and the report is checked
+      // against exactly that.
+      RAG_HYBRID_ENABLED: "false",
+      RAG_HYBRID_FUSION: "weighted",
+      VECTOR_STORE_PROVIDER: "local",
     },
     evidenceEnvironment: {
       EVAL_EVIDENCE_SUITE_ID: "robust",
@@ -131,6 +140,9 @@ test("robust suite child environment overrides every configurable synthetic publ
   assert.equal(environment.RAG_MAX_COMPARISON_SOURCES, "8");
   assert.equal(environment.RAG_MIN_RELEVANCE_SCORE, "0.32");
   assert.equal(environment.RAG_NEAR_DUPLICATE_GUARD_ENABLED, "true");
+  assert.equal(environment.VECTOR_STORE_PROVIDER, "pgvector");
+  assert.equal(environment.RAG_HYBRID_ENABLED, "true");
+  assert.equal(environment.RAG_HYBRID_FUSION, "rrf");
   assert.equal(environment.EVAL_EVIDENCE_SUITE_ID, "robust");
 });
 

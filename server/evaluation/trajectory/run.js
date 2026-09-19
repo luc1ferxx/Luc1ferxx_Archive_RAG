@@ -1,34 +1,11 @@
-import { buildMetricSummary } from "../agent-eval-harness.js";
+import {
+  buildMetricSummary,
+  withEnvironmentOverrides,
+} from "../agent-eval-harness.js";
 import { createDefaultTrajectoryCases } from "./cases/index.js";
 import { CATEGORY_LABELS, runTrajectoryCaseSafely } from "./checks.js";
 
 const TRAJECTORY_REPORT_VERSION = "1.0.0";
-
-const withEnvironmentOverrides = async (overrides, callback) => {
-  const originalValues = new Map(
-    Object.keys(overrides).map((key) => [key, process.env[key]])
-  );
-
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = value;
-    }
-  }
-
-  try {
-    return await callback();
-  } finally {
-    for (const [key, value] of originalValues.entries()) {
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-  }
-};
 
 export const runTrajectoryEvaluation = async ({
   cases = createDefaultTrajectoryCases(),

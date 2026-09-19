@@ -34,6 +34,11 @@ export const robustEvalSuite = {
         minRelevanceScore: 0.32,
         nearDuplicateGuardEnabled: true,
         uploadChunkSizeBytes: 180,
+        // The default retrieval stack, stated explicitly so the child process
+        // env, the report's retrieval block and the robust gate all agree.
+        vectorStoreProvider: "pgvector",
+        hybridEnabled: true,
+        hybridFusion: "rrf",
       },
     },
     {

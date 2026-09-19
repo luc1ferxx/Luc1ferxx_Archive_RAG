@@ -146,8 +146,18 @@ const createDisabledLongMemoryStore = () => ({
   },
 });
 
-export const configureEvaluationStores = () => {
-  configureDocumentRegistryStore(createEvaluationDocumentRegistryStore());
+/**
+ * Session and long memory are always replaced with in-process stores. The
+ * document registry is replaced too unless the caller keeps the real one: the
+ * pgvector provider's chunk table has a foreign key onto the PostgreSQL
+ * document row, so an evaluation on pgvector must register documents for real.
+ */
+export const configureEvaluationStores = ({
+  keepDocumentRegistryStore = false,
+} = {}) => {
+  configureDocumentRegistryStore(
+    keepDocumentRegistryStore ? null : createEvaluationDocumentRegistryStore()
+  );
   configureSessionMemoryStore(createEvaluationSessionMemoryStore());
   configureLongMemoryStore(createDisabledLongMemoryStore());
 };

@@ -14,6 +14,10 @@ export const COVERAGE_GROUPS = [
       /^server\/rag\/query-router\.js$/,
       /^server\/rag\/research-brief\.js$/,
       /^server\/rag\/skills\/registry\.js$/,
+      // The typed-DAG skill contract decides what the planner may see and what
+      // recovery may replay, so it belongs under the agent-core thresholds
+      // rather than only the looser global gate.
+      /^server\/rag\/skills\/skill-contract\.js$/,
       /^server\/rag\/skills\/custom\//,
     ],
     minimum: {

@@ -62,6 +62,13 @@ const makeResult = ({
   id,
   text,
   score = 0.9,
+  // Dense cosine defaults to the overall score so the synthetic result carries a
+  // faithful admission signal: the evidence gate reads getAdmissionScore (raw
+  // dense/keyword), not the fusion `score`, so a fixture with only `score` and no
+  // raw signal would admit at 0 and be rejected. Callers that need a divergent
+  // dense score (e.g. the anchor-bypass precision test) overlay vectorScore, and
+  // callers modelling a sparse/rerank-only result with no dense score pass null.
+  vectorScore = score,
   keywordScore,
   fileName = "paper.pdf",
   sectionHeading = "Evaluation",
@@ -75,6 +82,7 @@ const makeResult = ({
     },
   },
   score,
+  ...(vectorScore === null ? {} : { vectorScore }),
   ...(keywordScore === undefined ? {} : { keywordScore }),
 });
 
@@ -331,6 +339,7 @@ test("a result carrying no dense score keeps the original coverage behaviour", a
         text: "The total liability shall not exceed the fees paid.",
         score: 0.5,
         keywordScore: 0.5,
+        vectorScore: null,
       });
 
       const assessment = assessComparisonConfidence({
@@ -478,6 +487,66 @@ test("comparison confidence explains zero and partial document coverage", async 
 
       assert.equal(genericPartialCoverage.confident, false);
       assert.match(genericPartialCoverage.reason, /1 of the 2 selected documents/);
+    }
+  );
+});
+
+test("evidence admission gates on the raw signal, not the fusion score", async () => {
+  // The separation guarantee at the core of the retrieval-correctness fix: RRF can
+  // rank a chunk first on both routes and hand it a fused `score` near 1.0, but a
+  // fusion rank is not retrieval strength. A satellite chunk with a weak dense
+  // cosine (0.14) and no lexical overlap must be refused admission even though its
+  // fused `score` tops the list -- and an otherwise identical chunk whose only
+  // difference is a strong dense signal must be admitted. Holding `score` fixed at
+  // 1.0 across both isolates what actually decides: getAdmissionScore, never `score`.
+  await withEnv(
+    {
+      RAG_MIN_RELEVANCE_SCORE: "0.32",
+      RAG_MIN_QUERY_TERM_COVERAGE: "0.51",
+    },
+    async () => {
+      const queryText = "How does the evaluation harness measure latency?";
+      const baseDocument = {
+        id: "fused-first",
+        pageContent:
+          "The evaluation harness records latency percentiles for each run.",
+        metadata: { fileName: "paper.pdf", sectionHeading: "Evaluation" },
+      };
+      // Fusion placed it first on both routes, so the scaled RRF `score` tops out
+      // near 1.0 and rrfScore carries the raw sum for provenance only.
+      const fusionRanking = {
+        score: 1,
+        rrfScore: 1 / (60 + 1),
+        denseRank: 1,
+        sparseRank: 1,
+      };
+
+      const inflatedByFusion = {
+        document: baseDocument,
+        ...fusionRanking,
+        // Raw dense signal is below the 0.32 relevance floor.
+        vectorScore: 0.14,
+      };
+      const groundedBySignal = {
+        document: { ...baseDocument, id: "grounded" },
+        ...fusionRanking,
+        // Same fusion rank and `score`; only the raw dense signal differs.
+        vectorScore: 0.9,
+      };
+
+      const refused = assessQaConfidence({
+        queryText,
+        results: [inflatedByFusion],
+      });
+      assert.equal(refused.confident, false);
+      assert.equal(refused.usableResults.length, 0);
+
+      const admitted = assessQaConfidence({
+        queryText,
+        results: [groundedBySignal],
+      });
+      assert.equal(admitted.confident, true);
+      assert.equal(admitted.usableResults.length, 1);
     }
   );
 });

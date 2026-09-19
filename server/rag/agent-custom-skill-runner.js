@@ -6,6 +6,7 @@ import {
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
 import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
+import { describeSkillReplayContract } from "./skills/skill-contract.js";
 
 const noop = () => {};
 
@@ -104,6 +105,10 @@ export const runCustomSkills = async ({
       skillId: customSkill.id,
       skillVersion: customSkill.version,
       userId: userId ?? null,
+      // Same reason the graph runner persists it: recovery reads the step, not
+      // the skill. The V1 chain must not leave a weaker record behind than the
+      // V2 graph does for the same skill.
+      ...describeSkillReplayContract(customSkill),
     };
     const executedCustomResult = await runLifecycleStep({
       buildError: buildSkillStepError,

@@ -359,8 +359,14 @@ export const getPublicEvaluationConfig = ({ report = {}, reportType } = {}) => {
     );
 
   if (reportType === "synthetic") {
-    return sanitizeEvidenceConfig(
-      pickPublicFields(report.summary?.config, [
+    const retrieval = pickPublicFields(report.summary?.retrieval, [
+      "vectorStoreProvider",
+      "hybridEnabled",
+      "hybridFusion",
+    ]);
+
+    return sanitizeEvidenceConfig({
+      ...pickPublicFields(report.summary?.config, [
         "chunkStrategy",
         "chunkSize",
         "chunkOverlap",
@@ -370,8 +376,12 @@ export const getPublicEvaluationConfig = ({ report = {}, reportType } = {}) => {
         "minRelevanceScore",
         "nearDuplicateGuardEnabled",
         "uploadChunkSizeBytes",
-      ])
-    );
+      ]),
+      // The retrieval architecture is part of the public config identity: a
+      // report produced on another provider hashes differently and cannot be
+      // presented as evidence for this one.
+      ...(Object.keys(retrieval).length > 0 ? { retrieval } : {}),
+    });
   }
 
   if (reportType === "rerank") {

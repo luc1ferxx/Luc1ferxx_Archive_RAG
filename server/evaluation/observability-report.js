@@ -216,6 +216,12 @@ const createRecoveryStats = () => ({
   taskRecoveryResumeFailureCount: 0,
   taskRecoveryCompletedCount: 0,
   taskRecoveryActionCounts: {},
+  skillGraphPlannedCount: 0,
+  skillGraphExecutedCount: 0,
+  skillGraphFallbackCount: 0,
+  skillGraphUnsafeFallbackCount: 0,
+  skillGraphReusedNodeCount: 0,
+  skillGraphReplanAppliedCount: 0,
 });
 
 const createLlmOpsBucketStats = () => ({
@@ -341,6 +347,9 @@ const isAgentRunStepReplayEvent = (event = {}) =>
 
 const isAgentTaskRecoveryEvent = (event = {}) =>
   event.traceType === "agent_task_recovery";
+
+const isSkillGraphPlannedEvent = (event = {}) =>
+  getEventType(event) === "skill_graph_planned";
 
 const STEP_LIFECYCLE_EVENT_TYPES = new Set([
   "step_started",
@@ -630,6 +639,40 @@ const addStepReplayEvent = (recovery, event = {}) => {
   }
 };
 
+// The custom skill stage records one skill_graph_planned event per run it
+// planned a graph for. Recovery cares about four things in it: whether a graph
+// executed at all, whether the stage fell back to the V1 chain, whether that
+// fallback ever happened after a node had already run (it must not -- that
+// would repeat charged work), and how much settled work a replan reused rather
+// than re-executed.
+const addSkillGraphEvent = (recovery, event = {}) => {
+  const payload = getEventPayload(event);
+  const nodeRuns = Array.isArray(payload.nodeRuns) ? payload.nodeRuns : [];
+  const replans = Array.isArray(payload.replans) ? payload.replans : [];
+
+  recovery.eventCount += 1;
+  recovery.skillGraphPlannedCount += 1;
+
+  if (payload.executed === true) {
+    recovery.skillGraphExecutedCount += 1;
+  }
+
+  if (payload.fallback) {
+    recovery.skillGraphFallbackCount += 1;
+
+    if (nodeRuns.length > 0) {
+      recovery.skillGraphUnsafeFallbackCount += 1;
+    }
+  }
+
+  recovery.skillGraphReusedNodeCount += nodeRuns.filter(
+    (nodeRun) => nodeRun?.status === "reused"
+  ).length;
+  recovery.skillGraphReplanAppliedCount += replans.filter(
+    (replan) => replan?.decision === "applied"
+  ).length;
+};
+
 const addTaskRecoveryEvent = (recovery, event = {}) => {
   const eventType = getEventType(event);
 
@@ -737,6 +780,10 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
 
     if (isAgentRunStepLifecycleEvent(event)) {
       addStepLifecycleEvent(recovery, event);
+    }
+
+    if (isSkillGraphPlannedEvent(event)) {
+      addSkillGraphEvent(recovery, event);
     }
 
     const retrievalPlan = getAgentRetrievalPlan(event);
@@ -1050,6 +1097,12 @@ export const formatObservabilityReport = (report) => {
     `  task recovery resume actions: ${report.recovery.taskRecoveryResumeActionCount}`,
     `  task recovery resume failures: ${report.recovery.taskRecoveryResumeFailureCount}`,
     `  task recovery completed: ${report.recovery.taskRecoveryCompletedCount}`,
+    `  skill graph planned: ${report.recovery.skillGraphPlannedCount}`,
+    `  skill graph executed: ${report.recovery.skillGraphExecutedCount}`,
+    `  skill graph fallbacks: ${report.recovery.skillGraphFallbackCount}`,
+    `  skill graph fallbacks after execution: ${report.recovery.skillGraphUnsafeFallbackCount}`,
+    `  skill graph reused nodes: ${report.recovery.skillGraphReusedNodeCount}`,
+    `  skill graph replans applied: ${report.recovery.skillGraphReplanAppliedCount}`,
     "  manual actions:"
   );
   lines.push(

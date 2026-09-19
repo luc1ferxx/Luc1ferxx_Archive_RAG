@@ -1,0 +1,26 @@
+# Local PostgreSQL 16 with the pgvector extension -- the default retrieval
+# backend (VECTOR_STORE_PROVIDER=pgvector). Start with `docker compose up -d`
+# from the repo root; server/.env.example already points POSTGRES_DATABASE_URL
+# at this instance. Data persists in the named volume across restarts.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: luc1ferxx-archive-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agentai
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agentai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

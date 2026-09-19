@@ -604,6 +604,187 @@ const validateSyntheticReplayIntegrity = ({ corpusContract, report }) => {
   return [...replayErrors, ...rawClaimSupportErrors];
 };
 
+const RETRIEVAL_ROUTE_NAMES = ["dense", "sparse"];
+
+/**
+ * The retrieval block is checked in two directions. Against the manifest: the
+ * report must declare the required provider, hybrid flag and fusion method.
+ * Against itself: the summary must be recomputable from the per-case route
+ * evidence, every case must have run both routes, and both routes must have
+ * produced candidates somewhere -- so "hybrid on" cannot be a config flag
+ * copied into a report while one route silently returned nothing.
+ */
+const validateSyntheticRetrievalContract = ({ cases, manifest, report }) => {
+  const required = manifest?.requiredRetrieval;
+
+  if (!required) {
+    return [];
+  }
+
+  const errors = [];
+  const retrieval = report?.summary?.retrieval;
+
+  if (!retrieval || typeof retrieval !== "object") {
+    errors.push({
+      actual: retrieval ?? null,
+      expected: required,
+      id: "summary.retrieval_missing",
+    });
+    return errors;
+  }
+
+  const declared = {
+    hybridEnabled: retrieval.hybridEnabled,
+    hybridFusion: retrieval.hybridFusion,
+    vectorStoreProvider: retrieval.vectorStoreProvider,
+  };
+
+  if (JSON.stringify(declared) !== JSON.stringify(required)) {
+    errors.push({
+      actual: declared,
+      expected: required,
+      id: "summary.retrieval_contract",
+    });
+  }
+
+  if (retrieval.fallbackCount !== 0) {
+    errors.push({
+      actual: retrieval.fallbackCount ?? null,
+      expected: 0,
+      id: "summary.retrieval_fallback",
+    });
+  }
+
+  const recomputedRoutes = Object.fromEntries(
+    RETRIEVAL_ROUTE_NAMES.map((route) => [
+      route,
+      { candidateCount: 0, casesWithCandidates: 0, executedCaseCount: 0 },
+    ])
+  );
+  const observedProviders = new Set();
+  let casesWithRetrieval = 0;
+  let fallbackCount = 0;
+
+  for (const caseResult of cases) {
+    const caseRetrieval = caseResult?.retrieval;
+    const caseId = caseResult?.id ?? "unknown";
+
+    if (!caseRetrieval || typeof caseRetrieval !== "object") {
+      errors.push({
+        actual: caseRetrieval ?? null,
+        expected: "per-case retrieval evidence",
+        id: `case.${caseId}.retrieval_missing`,
+      });
+      continue;
+    }
+
+    casesWithRetrieval += 1;
+    observedProviders.add(normalizeText(caseRetrieval.vectorStoreProvider));
+
+    if (caseRetrieval.fallback) {
+      fallbackCount += 1;
+    }
+
+    const caseProblems = [];
+
+    if (normalizeText(caseRetrieval.vectorStoreProvider) !== required.vectorStoreProvider) {
+      caseProblems.push("provider");
+    }
+
+    if (caseRetrieval.hybridEnabled !== required.hybridEnabled) {
+      caseProblems.push("hybridEnabled");
+    }
+
+    if (
+      required.hybridEnabled &&
+      normalizeText(caseRetrieval.hybridFusion) !== required.hybridFusion
+    ) {
+      caseProblems.push("hybridFusion");
+    }
+
+    for (const route of RETRIEVAL_ROUTE_NAMES) {
+      const routeSummary = caseRetrieval.routes?.[route];
+      const executed = routeSummary?.executed === true;
+      const candidateCount = Number(routeSummary?.candidateCount);
+
+      if (executed) {
+        recomputedRoutes[route].executedCaseCount += 1;
+      }
+
+      if (Number.isFinite(candidateCount)) {
+        recomputedRoutes[route].candidateCount += candidateCount;
+
+        if (candidateCount > 0) {
+          recomputedRoutes[route].casesWithCandidates += 1;
+        }
+      }
+
+      if (required.hybridEnabled && !executed) {
+        caseProblems.push(`${route}_route_not_executed`);
+      }
+    }
+
+    if (caseProblems.length > 0) {
+      errors.push({
+        actual: caseProblems,
+        expected: [],
+        id: `case.${caseId}.retrieval`,
+      });
+    }
+  }
+
+  const recomputed = {
+    caseCount: cases.length,
+    casesWithRetrieval,
+    fallbackCount,
+    observedProviders: [...observedProviders].sort(),
+    routes: recomputedRoutes,
+  };
+  const declaredSummary = {
+    caseCount: retrieval.caseCount,
+    casesWithRetrieval: retrieval.casesWithRetrieval,
+    fallbackCount: retrieval.fallbackCount,
+    observedProviders: toArray(retrieval.observedProviders),
+    routes: Object.fromEntries(
+      RETRIEVAL_ROUTE_NAMES.map((route) => [
+        route,
+        {
+          candidateCount: retrieval.routes?.[route]?.candidateCount,
+          casesWithCandidates: retrieval.routes?.[route]?.casesWithCandidates,
+          executedCaseCount: retrieval.routes?.[route]?.executedCaseCount,
+        },
+      ])
+    ),
+  };
+
+  if (JSON.stringify(declaredSummary) !== JSON.stringify(recomputed)) {
+    errors.push({
+      actual: declaredSummary,
+      expected: recomputed,
+      id: "summary.retrieval_recomputed",
+    });
+  }
+
+  if (required.hybridEnabled) {
+    const routeProblems = RETRIEVAL_ROUTE_NAMES.filter(
+      (route) =>
+        recomputedRoutes[route].executedCaseCount !== cases.length ||
+        recomputedRoutes[route].casesWithCandidates < 1
+    );
+
+    if (routeProblems.length > 0) {
+      errors.push({
+        actual: recomputedRoutes,
+        expected:
+          "every case ran both routes and each route produced candidates in at least one case",
+        id: "summary.retrieval_routes",
+      });
+    }
+  }
+
+  return errors;
+};
+
 const validateSyntheticIntegrity = ({
   cases,
   corpusContract,
@@ -618,6 +799,7 @@ const validateSyntheticIntegrity = ({
   const errors = [
     ...rawIdentityValidation.errors,
     ...validateSyntheticReplayIntegrity({ corpusContract, report }),
+    ...validateSyntheticRetrievalContract({ cases, manifest, report }),
   ];
   const expectedCasesById = new Map(
     toArray(corpusContract?.cases).map((caseDefinition) => [

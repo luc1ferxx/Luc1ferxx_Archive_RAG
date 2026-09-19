@@ -52,6 +52,34 @@ export const withPostgresClient = async (callback) => {
   }
 };
 
+/**
+ * Runs `callback` inside one BEGIN/COMMIT on a single pooled client and rolls
+ * back on any throw. The pgvector ingest path uses it so the document row and
+ * every chunk row land together or not at all; the rollback itself is
+ * best-effort because a client that already failed may not accept it.
+ */
+export const withPostgresTransaction = async (callback) =>
+  withPostgresClient(async (client) => {
+    await client.query("BEGIN");
+
+    let result;
+
+    try {
+      result = await callback(client);
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The original error is the one worth reporting.
+      }
+
+      throw error;
+    }
+
+    await client.query("COMMIT");
+    return result;
+  });
+
 export const checkPostgresHealth = async () => {
   if (!isPostgresConfigured()) {
     return {

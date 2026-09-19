@@ -4,9 +4,9 @@ import {
   isRerankEnabled,
 } from "../config.js";
 import { rerankResultsWithProvider } from "../reranker.js";
-import { searchDocumentsPerDocument } from "../vector-store.js";
+import { searchDocumentsPerDocumentWithRoutes } from "../vector-store.js";
 
-export const retrievePerDocumentContext = async ({
+export const retrievePerDocumentContextWithRoutes = async ({
   queryVector,
   queryText,
   docIds,
@@ -19,16 +19,15 @@ export const retrievePerDocumentContext = async ({
   const candidateKPerDoc = isRerankEnabled()
     ? topKPerDoc * getRerankCandidateMultiplier()
     : topKPerDoc;
-  const perDocumentCandidates = await searchDocumentsPerDocument({
+  const search = await searchDocumentsPerDocumentWithRoutes({
     queryVector,
     queryText,
     docIds,
     topKPerDoc: candidateKPerDoc,
   });
-
-  return new Map(
+  const resultsByDocument = new Map(
     await Promise.all(
-      [...perDocumentCandidates.entries()].map(async ([docId, results]) => [
+      [...search.resultsByDocument.entries()].map(async ([docId, results]) => [
         docId,
         await rerankResultsWithProvider({
           queryText,
@@ -38,4 +37,12 @@ export const retrievePerDocumentContext = async ({
       ])
     )
   );
+
+  return {
+    resultsByDocument,
+    routes: search.routes,
+  };
 };
+
+export const retrievePerDocumentContext = async (args) =>
+  (await retrievePerDocumentContextWithRoutes(args)).resultsByDocument;

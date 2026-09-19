@@ -4,7 +4,17 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createPostgresMigrator } from "../rag/db-migrations.js";
+import {
+  assertPgvectorAnnDimensionsSupported,
+  buildPgvectorIndexStatement,
+  createPostgresMigrator,
+  getPgvectorEmbeddingIndexName,
+  isPgvectorAnnDimensionSupported,
+  PGVECTOR_MIGRATION_ERROR_CODES,
+  PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS,
+  PgvectorAnnDimensionError,
+  renderMigrationSql,
+} from "../rag/db-migrations.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -413,4 +423,184 @@ test("PostgreSQL migrator resolves table names from runtime environment", async 
       );
     }
   );
+});
+
+// --- pgvector chunk table --------------------------------------------------
+
+test("chunk migration renders the pgvector table, embedding width, text search config and cosine index", async () => {
+  await withEnv(
+    {
+      DOCUMENT_CHUNKS_POSTGRES_TABLE: "env_chunks",
+      RAG_PGVECTOR_INDEX_TYPE: undefined,
+    },
+    async () => {
+      const renderedSql = [];
+      const migrator = createPostgresMigrator({
+        getEmbeddingDimensions: () => 64,
+        getTextSearchConfig: () => "simple",
+        isPostgresConfigured: () => true,
+        migrationsDirectory: "/fake/migrations",
+        queryPostgres: async () => ({ rows: [] }),
+        readFile: async () =>
+          "__DOCUMENT_CHUNKS_TABLE__ vector(__EMBEDDING_DIMENSIONS__) to_tsvector('__TEXT_SEARCH_CONFIG__'::regconfig, search_text) __VECTOR_INDEX_STATEMENT__",
+        readdir: async () => ["012_create_rag_document_chunks.sql"],
+        withPostgresClient: async (callback) =>
+          callback({
+            query: async (sql) => {
+              renderedSql.push(sql.trim());
+              return { rows: [] };
+            },
+          }),
+      });
+
+      await migrator.run();
+
+      const rendered = renderedSql[1];
+
+      assert.match(rendered, /^env_chunks vector\(64\) to_tsvector\('simple'::regconfig, search_text\)/);
+      assert.match(rendered, /CREATE INDEX IF NOT EXISTS env_chunks_embedding_idx/);
+      assert.match(rendered, /USING hnsw \(embedding vector_cosine_ops\)/);
+      assert.match(rendered, /m = 16, ef_construction = 64/);
+      assert.doesNotMatch(rendered, /__[A-Z_]+__/);
+    }
+  );
+});
+
+test("ivfflat is available as an explicit index choice", () => {
+  assert.match(
+    buildPgvectorIndexStatement({
+      documentChunksTable: "rag_document_chunks",
+      indexType: "ivfflat",
+      ivfflatLists: 50,
+    }),
+    /USING ivfflat \(embedding vector_cosine_ops\)\n  WITH \(lists = 50\)/
+  );
+  assert.equal(
+    getPgvectorEmbeddingIndexName("rag_document_chunks"),
+    "rag_document_chunks_embedding_idx"
+  );
+});
+
+test("pgvector ANN indexes fail closed above the 2000-dimension vector ceiling", () => {
+  // pgvector's `vector` type refuses hnsw/ivfflat indexes past 2000 dims. The
+  // guard must fire on the index-statement chokepoint for both access methods,
+  // before any DDL is emitted, so a mis-sized embedding never aborts a migration
+  // halfway or silently degrades retrieval to a sequential scan.
+  assert.equal(PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS, 2000);
+  assert.equal(isPgvectorAnnDimensionSupported(2000), true);
+  assert.equal(isPgvectorAnnDimensionSupported(2001), false);
+  assert.equal(isPgvectorAnnDimensionSupported(3072), false);
+
+  for (const indexType of ["hnsw", "ivfflat"]) {
+    assert.throws(
+      () =>
+        buildPgvectorIndexStatement({
+          documentChunksTable: "rag_document_chunks",
+          dimensions: 3072,
+          indexType,
+        }),
+      (error) => {
+        assert.ok(error instanceof PgvectorAnnDimensionError);
+        assert.equal(
+          error.code,
+          PGVECTOR_MIGRATION_ERROR_CODES.annDimensionUnsupported
+        );
+        assert.equal(error.dimensions, 3072);
+        assert.equal(error.indexType, indexType);
+        assert.equal(error.limit, 2000);
+        assert.match(error.message, /2000 dimensions/);
+        assert.match(error.message, /text-embedding-3-small is 1536/);
+        return true;
+      }
+    );
+  }
+
+  // The boundary value is admitted so a 2000-dim embedding still indexes.
+  assert.doesNotThrow(() =>
+    buildPgvectorIndexStatement({
+      documentChunksTable: "rag_document_chunks",
+      dimensions: 2000,
+      indexType: "hnsw",
+    })
+  );
+  assert.equal(
+    assertPgvectorAnnDimensionsSupported({ dimensions: 1536, indexType: "hnsw" }),
+    true
+  );
+});
+
+test("rendering a >2000-dim migration fails closed before any DDL text is produced", () => {
+  // renderMigrationSql sizes vector(__EMBEDDING_DIMENSIONS__) from the same
+  // width it feeds the index guard, so an over-wide embedding is rejected while
+  // the SQL is still a template — no CREATE INDEX ever reaches the database.
+  assert.throws(
+    () =>
+      renderMigrationSql("__VECTOR_INDEX_STATEMENT__", tableNames(), {
+        embeddingDimensions: 3072,
+        textSearchConfig: "simple",
+      }),
+    (error) => {
+      assert.ok(error instanceof PgvectorAnnDimensionError);
+      assert.equal(error.dimensions, 3072);
+      return true;
+    }
+  );
+
+  // A supported width still renders the cosine index unchanged.
+  assert.match(
+    renderMigrationSql("__VECTOR_INDEX_STATEMENT__", tableNames(), {
+      embeddingDimensions: 1536,
+      textSearchConfig: "simple",
+    }),
+    /rag_document_chunks_embedding_idx/
+  );
+});
+
+test("migration rendering rejects an unsafe text search config and a non-positive width", () => {
+  assert.throws(
+    () =>
+      renderMigrationSql("__TEXT_SEARCH_CONFIG__", tableNames(), {
+        embeddingDimensions: 64,
+        textSearchConfig: "simple'; DROP TABLE rag_documents; --",
+      }),
+    /text search configuration/
+  );
+  assert.throws(
+    () =>
+      renderMigrationSql("__EMBEDDING_DIMENSIONS__", tableNames(), {
+        embeddingDimensions: 0,
+        textSearchConfig: "simple",
+      }),
+    /positive integer/
+  );
+});
+
+test("the checked-in chunk migration is transactional-delete safe and fully rendered", async () => {
+  const migrationSql = await readFile(
+    path.join(__dirname, "..", "db", "migrations", "012_create_rag_document_chunks.sql"),
+    "utf8"
+  );
+
+  assert.match(migrationSql, /CREATE EXTENSION IF NOT EXISTS vector;/);
+  assert.match(
+    migrationSql,
+    /doc_id TEXT NOT NULL REFERENCES __DOCUMENTS_TABLE__ \(doc_id\) ON DELETE CASCADE/
+  );
+  assert.match(migrationSql, /UNIQUE \(doc_id, chunk_index\)/);
+  assert.match(migrationSql, /embedding vector\(__EMBEDDING_DIMENSIONS__\) NOT NULL/);
+  assert.match(migrationSql, /search_vector tsvector GENERATED ALWAYS AS/);
+  assert.match(migrationSql, /USING gin \(search_vector\)/);
+  assert.match(migrationSql, /\(owner_user_id, workspace_id\)/);
+  assert.match(migrationSql, /__VECTOR_INDEX_STATEMENT__/);
+
+  const rendered = renderMigrationSql(migrationSql, tableNames(), {
+    embeddingDimensions: 1536,
+    textSearchConfig: "simple",
+  });
+
+  assert.doesNotMatch(rendered, /__[A-Z_]+__/);
+  assert.match(rendered, /rag_document_chunks \(\n\s+chunk_id TEXT PRIMARY KEY/);
+  assert.match(rendered, /REFERENCES rag_documents \(doc_id\) ON DELETE CASCADE/);
+  assert.match(rendered, /vector\(1536\)/);
+  assert.match(rendered, /rag_document_chunks_embedding_idx/);
 });

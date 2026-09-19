@@ -18,9 +18,11 @@ export const createChatRouter = (services) => {
     arxivImportService,
     buildChatResponse,
     capabilityRegistry,
+    dagPlannerAdapter,
     executionPlannerAdapter,
     intentPlannerAdapter,
     ragService,
+    replanAdapter,
     skillRegistry,
     webChatService,
   } = services;
@@ -48,8 +50,10 @@ export const createChatRouter = (services) => {
         sessionId,
         userId,
         accessScope,
+        dagPlannerAdapter,
         executionPlannerAdapter,
         intentPlannerAdapter,
+        replanAdapter,
         skillRegistry,
       });
 

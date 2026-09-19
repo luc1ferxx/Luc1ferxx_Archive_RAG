@@ -14,7 +14,7 @@
   <img alt="Express API" src="https://img.shields.io/badge/Express-API-000000?logo=express&logoColor=ffffff" />
   <img alt="OpenAI" src="https://img.shields.io/badge/OpenAI-GPT--5-412991?logo=openai&logoColor=ffffff" />
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-docs%20%7C%20runs%20%7C%20tasks-4169E1?logo=postgresql&logoColor=ffffff" />
-  <img alt="Vector Store" src="https://img.shields.io/badge/Vector-local%20%7C%20Qdrant-FF4F00" />
+  <img alt="Vector Store" src="https://img.shields.io/badge/Vector-pgvector%20%7C%20local%20%7C%20Qdrant-FF4F00" />
 </p>
 
 [快速启动](#快速启动) · [架构](#系统架构) · [能力](#核心能力) · [命令](#常用命令) · [文档](#文档入口)
@@ -39,8 +39,8 @@ Luc1ferxx Archive RAG 是一个本地优先的多 PDF 档案分析系统。它�
 | 方向 | 当前能力 |
 | --- | --- |
 | 文档工作台 | React 三栏式工作台，包含上传、文档列表、PDF 预览、聊天、sources、trace、Agent Run Center、quality 面板，以及与源文档分离的 Drive 生成结果列表。 |
-| PDF ingestion | 支持直接上传和分片上传；文件名与 `%PDF` 魔数双重校验；解析页文本，生成 document profile，写入 PostgreSQL 文档表和向量索引。 |
-| 文档 RAG | Structured chunking、query decomposition、dense retrieval、可选 sparse hybrid、可选 rerank、confidence gate 和页级 citation。查询 embedding 走 LRU 缓存。 |
+| PDF ingestion | 支持直接上传和分片上传；文件名与 `%PDF` 魔数双重校验；解析页文本，生成 document profile，在同一个 PostgreSQL 事务里写入文档表和 pgvector chunk/向量表（embedding 在事务外计算）。 |
+| 文档 RAG | Structured chunking、query decomposition，默认两路独立召回——pgvector cosine dense 检索 + PostgreSQL FTS lexical 检索——用 RRF 融合（weighted 可选），可选 rerank 位于 fusion 之后，confidence gate 和页级 citation。每个候选带 route/rank/score/query provenance。查询 embedding 走 LRU 缓存。 |
 | 多文档对比 | Compare 请求走 per-document retrieval，每份文档独立召回和 rerank，再做 evidence alignment、近重复保护和结构化差异输出。 |
 | AgentRAG | LLM/deterministic planner 可配置，执行前校验 access scope；支持 clarification gate、approval gate、白名单 skill chain、self-check、gap analysis、follow-up retrieval、finalizer、research_task/dossier 流程、agent task 产物交付，以及显式注入的 connector/MCP adapter、sandbox/secret boundary、runtime model/provider registry 和 LLMOps policy/admin health surface。 |
 | Skills 和 capabilities | 内置 `document_rag`、`web_search`、`arxiv_import`、`inventory`、`document_discovery`、`research_brief`；custom skills 只从白名单加载。Capability registry 暴露 `report.export` 和 action capabilities 的统一 contract，不让模型调用任意工具。 |
@@ -80,7 +80,7 @@ flowchart TB
 
   subgraph Storage["Storage"]
     Postgres["PostgreSQL documents, memories, tasks, runs, artifacts"]
-    Vector["Local JSON vector store or Qdrant"]
+    Vector["pgvector chunks + FTS (default) | local JSON | Qdrant"]
     UploadSessions["upload sessions"]
     TraceFiles["optional JSONL traces"]
   end
@@ -141,6 +141,7 @@ flowchart LR
 关键规则：
 
 - Planner 只在已注册 intent、skill、capability 和 step schema 里选择。
+- Planner 不决定权限、`docIds`、审批、secret、预算、并发和重试上限；这些由 runtime 拥有。custom skill 的 typed DAG 也一样：模型只产出节点和依赖，validator 整体接受或整体拒绝，非法图不会部分执行。
 - 文档读取、skill 执行、task 和 agent run 都携带 `accessScope`。
 - Working memory 是 run-scoped，只记录本轮 queries、claims、gaps 和 loop counters。
 - Agent experience memory 是规划提示，不是事实来源；答案证据仍必须来自 citations。
@@ -191,13 +192,16 @@ POSTGRES_SSL_ENABLED=false
 WORKSPACE_ARTIFACT_STORE_PROVIDER=auto
 WORKSPACE_ARTIFACTS_POSTGRES_TABLE=rag_workspace_artifacts
 
-VECTOR_STORE_PROVIDER=local
+VECTOR_STORE_PROVIDER=pgvector
+RAG_HYBRID_ENABLED=true
+RAG_HYBRID_FUSION=rrf
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_CHAT_MODEL=gpt-5
 
 AGENT_PLANNER_ROLLOUT=llm
 AGENT_INTENT_PLANNER=llm
 AGENT_EXECUTION_PLANNER=llm
+AGENT_SKILL_GRAPH_ROLLOUT=off
 
 RAG_CHUNK_STRATEGY=structured
 RAG_CHUNK_SIZE=900
@@ -227,8 +231,11 @@ VITE_API_AUTH_TOKEN=
 
 - PostgreSQL 是当前文档持久化、PDF 文件流、task、agent run、workspace artifact、long memory 的主路径；本地可用 `createdb agentai` 创建默认库。
 - Workspace artifact 的 `auto` provider 在 PostgreSQL 可用时持久化到 `rag_workspace_artifacts`；回退的 memory adapter 仅适合本地开发，重启后会丢失生成结果。
-- `VECTOR_STORE_PROVIDER=local` 会把向量和 sparse index 写到 `server/data/rag/`；更大语料可以切到 Qdrant。
+- `VECTOR_STORE_PROVIDER=pgvector` 是默认值：chunk、向量和 FTS tsvector 都在 PostgreSQL 的 `rag_document_chunks` 表里，需要带 pgvector 扩展的实例——仓库根目录 `docker compose up -d` 会起一个 `pgvector/pgvector:pg16`。`local`（JSON 索引写到 `server/data/rag/`）和 `qdrant` 仍可显式选择；白名单之外的值直接报错，不会回落。
+- 从 `local` / Qdrant 切到 pgvector 后索引是空的，健康检查会报错；先跑 `cd server && npm run vector:reindex`（默认 dry-run，`-- --apply` 才写入；`--from documents` 会用库里的 PDF 重新切块和 embedding）。
+- `RAG_HYBRID_ENABLED=true` + `RAG_HYBRID_FUSION=rrf` 是默认值：dense 与 sparse 两路各自独立检索后融合。pgvector 的 sparse 路是 PostgreSQL FTS，用 `ts_rank_cd` 排序，不是 BM25。
 - 只做文档 RAG 时 `SERPAPI_KEY` 可以先留空；web search 能力需要它。
+- `AGENT_SKILL_GRAPH_ROLLOUT=off` 是默认值，custom skill 阶段走 V1 顺序链。设为 `shadow` 会在 V1 出答案的同时旁路规划并校验一张 typed DAG 用于比对，设为 `guarded` 才真正执行 DAG；两种 V2 模式都不改变 `/chat` 响应结构。见 [docs/agent-rag.md](docs/agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。
 - 前端 dev server 固定跑在 `3000` 端口，与 `ALLOWED_ORIGINS` 的 CORS 白名单一致；改端口时两边要同步。
 - 完整配置见 [docs/configuration.md](docs/configuration.md)。
 
@@ -277,6 +284,8 @@ curl http://localhost:5001/ready
 | `cd server && npm run runtime:smoke` | 用真实 planner 和 PostgreSQL smoke `/health`、`/chat` runtime。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |
 | `cd server && npm run eval:param-sweep` | 跑 topK、overlap、rerank、hybrid 参数扫描；`-- --profile full` 扩大矩阵。 |
+| `cd server && npm run vector:reindex` | 把 local JSON / Qdrant 里的 chunk 与向量回填到 pgvector，或用库里的 PDF 重新 embedding（`--from documents`）；默认 dry-run，`-- --apply` 才写入。 |
+| `cd server && npm run test:pgvector` | 单独跑真实数据库集成测试；需要 `PGVECTOR_TEST_DATABASE_URL`，否则报告为 skipped。 |
 | `cd server && npm run quality:gate` | 查看兼容旧 payload 的历史 metrics；即使输出 PASS，也不代表当前 commit 已验证。 |
 | `cd server && npm run quality:current` | 校验 PR 轻量评测是否全部来自当前 commit、24 小时内且由 clean worktree 生成；证据未验证时 metrics 只保留诊断值并标记为 unverified。 |
 | `cd server && npm run release:gate` | 严格检查当前 commit 的 8 份发布证据，包括 freshness、clean worktree、corpus/provider 和 source lineage。 |
@@ -317,7 +326,7 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | 文档 | 内容 |
 | --- | --- |
 | [docs/configuration.md](docs/configuration.md) | 环境变量、auth、PostgreSQL、vector store、retrieval、rerank、observability 配置。 |
-| [docs/agent-rag.md](docs/agent-rag.md) | AgentRAG 闭环、QA/compare 路径、skill registry、关键模块和 `/chat` observability。 |
+| [docs/agent-rag.md](docs/agent-rag.md) | AgentRAG 闭环、QA/compare 路径、skill registry、custom skill 的 V1 chain / V2 typed DAG 与灰度、关键模块和 `/chat` observability。 |
 | [docs/evaluation.md](docs/evaluation.md) | Synthetic、trajectory、feedback、planner、recovery、rerank、Ragas、coverage 和 CI gate。 |
 | [docs/development.md](docs/development.md) | 完整 API 表、目录结构、runtime paths 和开发约束。 |
 
@@ -385,13 +394,15 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | 6 | Agent task 目标产物 | 已把 `report.export`、`document.organize`、`summary.create`、`task.create` 接成 task-level goal deliverables；批准后前三类会真实写入 scoped workspace artifact 并只向 task 暴露 compact refs，写入失败时目标不会误报完成。 |
 | 7 | Research task / dossier | 已加 task-level research flow：本地 `research_brief` -> web supplement -> arXiv supplement -> compare/risk review -> citation self-check -> final dossier -> report deliverables。流程由 declarative `research_dossier` workflow spec 渲染，只生成下一步问题、公开 phase 状态和 workflow lifecycle snapshot，实际执行仍复用现有 planner、skills、approval gates 和 capability registry。 |
 | 8 | 目标完成自检 | 已加 task-level `goalCompletion` contract：统一检查 public plan steps、unresolved gaps / unsupported claims、goal deliverables、pending approval / user action、research phases 和 workflow lifecycle contract；默认 trajectory eval 覆盖从等待批准到产物创建后的完整目标生命周期。 |
+| 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加 typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、拓扑 scheduler 和一次有界 replan；灰度由 `AGENT_SKILL_GRAPH_ROLLOUT`（`off`/`shadow`/`guarded`，默认 `off`）控制，V1 顺序链、组合 intent 和 deterministic planner 全部保留为回退路径；`eval:trajectory` 里四个 `skill_graph` case 分别钉住 guarded / shadow / 非法图拒绝 / 有界 replan 跑在 DAG 路径上。 |
 
 ## 当前限制
 
 - 这是本地优先的工程型工作台，不是完整 SaaS 权限系统；多人部署应使用 `API_AUTH_TOKENS` 或 JWT auth，并补齐外围身份提供方、审计和网络隔离。
 - Connector / MCP adapter 默认不会加载任意外部工具；只有显式注册 connector spec、注入 executor，并提供 required secret refs / 可选 sandbox runner 后才会执行，且仍走 capability approval、replay safety、input filtering 和 refs-only secret boundary。
 - Model/provider registry 已接管 chat、embedding、LLM planner 和可选 cross-encoder model name 的选择；LLMOps metrics contract + policy engine + observability/admin reader 已覆盖 completion、embedding 和 cross-encoder rerank 的 route/status/latency/error、token usage/source、estimated cost/pricing source、latency SLO、annotation、alert 和 per-event budget verdict / block mode。账号级长期 quota、告警外发和自动熔断仍应接同一 policy contract 继续扩展。
-- PostgreSQL 是文档持久化主路径；`STARTUP_HEALTH_STRICT=false` 可以让服务在依赖异常时启动，但完整上传/检索工作流仍需要数据库和 OpenAI key。
-- Local vector store 适合本地开发和小规模工作区；大规模语料建议切到 Qdrant 并单独压测。
+- PostgreSQL（含 pgvector 扩展）是文档、chunk 和向量的持久化主路径；`STARTUP_HEALTH_STRICT=false` 可以让服务在依赖异常时启动，但完整上传/检索工作流仍需要数据库和 OpenAI key。
+- pgvector 的 lexical 路用 PostgreSQL FTS + `ts_rank_cd`，语义上不是 BM25；embedding 模型或维度变更需要显式 `vector:reindex`，不会自动迁移。Local JSON 索引和 Qdrant 只作为显式 opt-in 兼容后端保留，local 只适合单进程小规模工作区。
 - Web search 和 arXiv 导入依赖外部网络；web search 需要 SerpAPI key，arXiv 使用公开 Atom/PDF 地址。
 - Ragas eval 只是辅助信号；多文档 compare 和 citation 正确性主要依赖自定义 harness、trajectory 和 quality gate。
+- Custom skill 的 typed DAG 默认关闭（`AGENT_SKILL_GRAPH_ROLLOUT=off`），真实 `/chat` 走 V2 需要运维显式开灰度；DAG 也只覆盖 custom skill 阶段，built-in skill、document RAG 主循环和 capability 调用仍走各自既有路径。有界 replan 上限初始为 1。

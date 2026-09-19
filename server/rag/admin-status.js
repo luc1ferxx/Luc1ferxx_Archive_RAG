@@ -5,8 +5,10 @@ import { buildHealthReport } from "../health.js";
 import {
   getAgentRunRecoveryMode,
   getAgentRunStoreProvider,
+  getHybridFusionMethod,
   getTaskStoreProvider,
   getVectorStoreProvider,
+  isHybridRetrievalEnabled,
   isApiAuthEnabled,
   isStartupHealthStrict,
 } from "./config.js";
@@ -335,8 +337,23 @@ const buildDeploymentSnapshot = ({
   runtime: "node",
   startupHealthStrict: config.isStartupHealthStrict(),
   taskStoreProvider: config.getTaskStoreProvider(),
-  vectorStoreProvider: config.getVectorStoreProvider(),
+  vectorStoreProvider: describeVectorStoreProvider(config),
+  retrieval: {
+    hybridEnabled: config.isHybridRetrievalEnabled?.() ?? null,
+    hybridFusion: config.getHybridFusionMethod?.() ?? null,
+  },
 });
+
+// An invalid VECTOR_STORE_PROVIDER throws from the getter by design (fail
+// closed). Admin status still has to render, so report the raw value plus the
+// error instead of taking the whole status page down.
+const describeVectorStoreProvider = (config) => {
+  try {
+    return config.getVectorStoreProvider();
+  } catch (error) {
+    return `invalid:${normalizeText(error?.rawValue ?? "")}`;
+  }
+};
 
 const buildDeploymentWarnings = ({ deployment = {}, warnings }) => {
   if (!deployment.apiAuthEnabled) {
@@ -542,8 +559,10 @@ const buildOverallStatus = ({ health = {}, quality = {}, warnings = [] } = {}) =
 const defaultConfig = {
   getAgentRunRecoveryMode,
   getAgentRunStoreProvider,
+  getHybridFusionMethod,
   getTaskStoreProvider,
   getVectorStoreProvider,
+  isHybridRetrievalEnabled,
   isApiAuthEnabled,
   isStartupHealthStrict,
 };

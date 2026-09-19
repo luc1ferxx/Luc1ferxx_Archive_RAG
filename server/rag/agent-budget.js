@@ -87,6 +87,72 @@ export const consumeBudget = (budgetState, key) => {
   };
 };
 
+/**
+ * Reserves `count` units of a budget key in a single synchronous
+ * read-modify-write, so a concurrent scheduler can claim a whole wave of nodes
+ * before any of them starts awaiting.
+ *
+ * All-or-nothing: a reservation that does not fit consumes nothing, so a
+ * partial claim can never strand budget that no node will ever use.
+ */
+export const reserveBudget = (budgetState, key, count = 1) => {
+  const limitKey = limitKeyByBudgetKey[key];
+  const label = labelByBudgetKey[key] ?? key;
+
+  if (!limitKey) {
+    throw new Error(`Unknown agent budget key: ${key}`);
+  }
+
+  const limit = budgetState.limits[limitKey];
+  const used = budgetState.used[key] ?? 0;
+  const requested = Math.max(0, Math.trunc(count));
+
+  if (used + requested > limit) {
+    return {
+      key,
+      label,
+      limit,
+      ok: false,
+      reason: `${label} budget exhausted (${used}/${limit}, needed ${requested}).`,
+      remaining: Math.max(0, limit - used),
+      requested,
+      reserved: 0,
+      used,
+    };
+  }
+
+  budgetState.used[key] = used + requested;
+
+  return {
+    key,
+    label,
+    limit,
+    ok: true,
+    remaining: Math.max(0, limit - budgetState.used[key]),
+    requested,
+    reserved: requested,
+    used: budgetState.used[key],
+  };
+};
+
+/**
+ * Returns unused units from a prior reserveBudget call. Only ever called for
+ * work that was reserved and then not launched; it cannot push usage below
+ * zero, so a double release cannot mint budget.
+ */
+export const releaseBudget = (budgetState, key, count = 1) => {
+  const limitKey = limitKeyByBudgetKey[key];
+
+  if (!limitKey) {
+    throw new Error(`Unknown agent budget key: ${key}`);
+  }
+
+  const used = budgetState.used[key] ?? 0;
+  budgetState.used[key] = Math.max(0, used - Math.max(0, Math.trunc(count)));
+
+  return budgetState.used[key];
+};
+
 export const getBudgetSnapshot = (budgetState) => ({
   limits: {
     ...budgetState.limits,
@@ -96,6 +162,24 @@ export const getBudgetSnapshot = (budgetState) => ({
   },
   traceTruncated: budgetState.traceTruncated,
 });
+
+/**
+ * Remaining calls per budget key, in the flat shape the graph validator reads.
+ *
+ * This lives here because the budget key to limit key mapping does, and a
+ * caller that reconstructed it would silently stop matching the moment a new
+ * budget key is added -- reporting a generous `undefined` instead of a limit.
+ */
+export const getRemainingBudget = (budgetState) =>
+  Object.fromEntries(
+    Object.entries(limitKeyByBudgetKey).map(([budgetKey, limitKey]) => [
+      budgetKey,
+      Math.max(
+        0,
+        (budgetState?.limits?.[limitKey] ?? 0) - (budgetState?.used?.[budgetKey] ?? 0)
+      ),
+    ])
+  );
 
 export const appendTraceStep = ({ budgetState, step, trace }) => {
   const consumed = consumeBudget(budgetState, "traceSteps");

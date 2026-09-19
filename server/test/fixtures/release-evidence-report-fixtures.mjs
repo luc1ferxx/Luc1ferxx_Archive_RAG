@@ -21,6 +21,10 @@ import {
   evaluateSyntheticCaseResponse,
 } from "../../evaluation/synthetic-case-evaluator.js";
 import {
+  buildCaseRetrievalEvidence,
+  buildRetrievalEvidence,
+} from "../../evaluation/synthetic-retrieval-evidence.js";
+import {
   recomputeSyntheticCaseOutcome,
 } from "../../evaluation/synthetic-report-case-evaluator.js";
 import {
@@ -164,6 +168,11 @@ const buildSyntheticEvidenceResults = ({
 
   return chunks.map((chunk) => ({
     score: 0.99,
+    // Dense cosine mirrors the fusion score so the synthetic evidence carries a
+    // real admission signal: the evidence gate reads getAdmissionScore (raw
+    // dense/keyword), not the fusion `score`, so evidence lacking a raw signal
+    // would admit at 0 and be rejected before it could ground an answer.
+    vectorScore: 0.99,
     document: {
       ...chunk,
       metadata: {
@@ -267,7 +276,14 @@ const buildPassingSyntheticCase = async (
 
   const caseResult = evaluateSyntheticCaseResponse({
     testCase: corpusCase,
-    response,
+    response: {
+      ...response,
+      retrieval: buildCaseRetrievalEvidence({
+        hybridEnabled: executionConfig.hybridEnabled,
+        hybridFusion: executionConfig.hybridFusion,
+        vectorStoreProvider: executionConfig.vectorStoreProvider,
+      }),
+    },
     docKeyByDocId: new Map(
       [...docIdByKey].map(([docKey, docId]) => [docId, docKey])
     ),
@@ -376,6 +392,11 @@ export const buildPassingRobustSyntheticReport = async ({
         runId,
         createdAt,
         config: structuredClone(reportSpec.executionConfig),
+        retrieval: buildRetrievalEvidence({
+          caseResults: cases,
+          embeddingDimensions: 64,
+          retrievalArchitecture: reportSpec.executionConfig,
+        }),
         corpus: {
           path: corpusPath,
           cases: cases.length,
@@ -725,6 +746,12 @@ const PASSING_RECOVERY = Object.freeze({
   taskRecoveryResumeFailureCount: 0,
   taskRecoveryCompletedCount: 1,
   plannerFallbackCount: 0,
+  skillGraphPlannedCount: 1,
+  skillGraphExecutedCount: 1,
+  skillGraphFallbackCount: 0,
+  skillGraphUnsafeFallbackCount: 0,
+  skillGraphReusedNodeCount: 2,
+  skillGraphReplanAppliedCount: 1,
 });
 
 const buildRawMetrics = (cases) => {

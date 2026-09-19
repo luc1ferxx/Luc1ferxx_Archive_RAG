@@ -73,6 +73,11 @@ const buildMetricChecks = ({
   const minTaskRecoveryCompletedCount =
     thresholds.minTaskRecoveryCompletedCount ?? 1;
   const maxPlannerFallbackCount = thresholds.maxPlannerFallbackCount ?? 0;
+  // A guarded graph may fall back to the V1 chain only before any node has
+  // run; after that a fallback would repeat charged, possibly side-effecting
+  // work. Old reports without graph counters read as 0 and pass.
+  const maxSkillGraphUnsafeFallbackCount =
+    thresholds.maxSkillGraphUnsafeFallbackCount ?? 0;
 
   return [
     buildMaxCheck({
@@ -194,6 +199,12 @@ const buildMetricChecks = ({
       label: "Observed planner fallbacks",
       maximum: maxPlannerFallbackCount,
       metric: "recoveryPlannerFallbackCount",
+    }),
+    buildMaxCheck({
+      currentValue: recovery.skillGraphUnsafeFallbackCount ?? 0,
+      label: "Skill graph fallbacks after node execution",
+      maximum: maxSkillGraphUnsafeFallbackCount,
+      metric: "recoverySkillGraphUnsafeFallbackCount",
     }),
   ];
 };

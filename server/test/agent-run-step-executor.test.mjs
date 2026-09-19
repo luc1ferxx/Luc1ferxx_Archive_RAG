@@ -14,6 +14,7 @@ import {
   createResearchQuestionStepExecutor,
 } from "../rag/agent-run-step-handlers/index.js";
 import { buildAgentRunStepsFromTrace } from "../rag/agent-run-steps.js";
+import { SKILL_EFFECTS } from "../rag/skills/skill-contract.js";
 import {
   CAPABILITY_IDS,
   createDefaultCapabilityRegistry,
@@ -1196,6 +1197,88 @@ test("agent run step executor retries custom_skill through the wired custom hand
   assert.equal(retryStep.output.citationCount, 1);
 });
 
+/**
+ * The persisted contract is what the step said about itself when it ran, and a
+ * deploy can land between the interruption and the replay. The registry holds
+ * what the skill is now, so this is the authoritative check: re-executing a
+ * skill that writes needs the approval machinery a blind step replay does not
+ * have, whatever the stored record claims.
+ */
+test("agent run step executor refuses to replay a skill that now declares a side effect", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const writingSkill = {
+    id: "publish_report",
+    version: "2.0.0",
+    label: "Publish Report",
+    kind: "custom",
+    budgetKey: "customSkillCalls",
+    requiresAccessScope: true,
+    effects: SKILL_EFFECTS.workspaceWrite,
+    match: () => false,
+    execute: async (context) => {
+      calls.push(context);
+
+      return { abstained: false, citations: [], text: "published" };
+    },
+  };
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeCustomSkillStep: createCustomSkillStepExecutor({
+      ragService: {},
+      skillRegistry: {
+        get: (skillId) => (skillId === writingSkill.id ? writingSkill : null),
+      },
+    }),
+  });
+
+  await createCompletedRunWithSteps(agentRunService, {
+    goal: "Publish the review.",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-custom-write-retry",
+    steps: [
+      {
+        id: "custom-step",
+        type: "custom_skill",
+        kind: "tool_call",
+        label: "Publish Report",
+        status: "failed",
+        input: {
+          docIds: ["doc-1"],
+          // The record still carries the read-only contract this skill had when
+          // the step ran. It is stale, and it must not be what decides.
+          effects: SKILL_EFFECTS.readOnly,
+          question: "Publish the review.",
+          replaySafe: true,
+          skillId: "publish_report",
+          skillVersion: "1.0.0",
+        },
+      },
+    ],
+  });
+
+  await assert.rejects(
+    () =>
+      executor.retryStep({
+        accessScope,
+        runId: "run-custom-write-retry",
+        stepId: "custom-step",
+      }),
+    (error) => {
+      assert.match(error.message, /side effect/i);
+      assert.equal(error.status, 409);
+
+      return true;
+    }
+  );
+
+  assert.deepEqual(calls, []);
+});
+
 test("agent run step executor retries research_question through the wired research handler", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
@@ -1490,5 +1573,88 @@ test("agent run step executor returns stable 409 for unsupported step types", as
       assert.match(error.message, /Unsupported agent run step type: inventory/);
       return true;
     }
+  );
+});
+
+// A graph node bound to an upstream output persists that text with its step.
+// The retry has to replay it: re-running the node on the bare question would
+// be a different execution wearing the original step's id.
+test("agent run step executor retries a graph node with the upstream input it was originally given", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const customSkill = {
+    id: "risk_review",
+    version: "1.0.0",
+    label: "Risk Review",
+    kind: "custom",
+    budgetKey: "customSkillCalls",
+    requiresAccessScope: true,
+    match: () => false,
+    execute: async (context) => {
+      calls.push(context);
+
+      return {
+        text: "Risk reviewed against the upstream summary.",
+        citations: [{ docId: "doc-1", pageNumber: 4 }],
+        abstained: false,
+      };
+    },
+  };
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeCustomSkillStep: createCustomSkillStepExecutor({
+      ragService: {},
+      skillRegistry: {
+        get: (skillId) => (skillId === customSkill.id ? customSkill : null),
+      },
+    }),
+  });
+
+  await createCompletedRunWithSteps(agentRunService, {
+    goal: "Review this contract for risks and key terms.",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "run-graph-node-retry",
+    steps: [
+      {
+        id: "custom_skill:risk_review",
+        type: "custom_skill",
+        kind: "tool_call",
+        label: "Risk Review",
+        status: "failed",
+        input: {
+          docIds: ["doc-1"],
+          nodeId: "risk_review",
+          priorFindings: "Summary: the agreement renews every 12 months.",
+          question: "Review this contract for risks and key terms.",
+          skillId: "risk_review",
+          skillVersion: "1.0.0",
+        },
+      },
+    ],
+  });
+
+  const retried = await executor.retryStep({
+    accessScope,
+    runId: "run-graph-node-retry",
+    stepId: "custom_skill:risk_review",
+  });
+  const retryStep = retried.run.steps.find(
+    (step) => step.retryOfStepId === "custom_skill:risk_review"
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].priorFindings,
+    "Summary: the agreement renews every 12 months."
+  );
+  assert.equal(calls[0].question, "Review this contract for risks and key terms.");
+  assert.equal(retryStep.status, "completed");
+  assert.equal(
+    retryStep.input.priorFindings,
+    "Summary: the agreement renews every 12 months."
   );
 });

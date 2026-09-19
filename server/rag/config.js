@@ -74,14 +74,30 @@ export const getAgentIntentPlanner = () =>
     "llm",
   ]);
 
+// Rollout dial for the typed DAG inside the custom_skills stage. It starts at
+// `off` -- the V1 chain -- because the migration is only allowed to advance on
+// evidence: `shadow` plans a graph beside the real run so the two can be
+// compared, and `guarded` executes the graph with the V1 chain still there as
+// the fallback for a graph that was rejected before anything ran.
+export const getAgentSkillGraphRollout = () =>
+  toChoice(process.env.AGENT_SKILL_GRAPH_ROLLOUT, "off", [
+    "guarded",
+    "off",
+    "shadow",
+  ]);
+
 export const getChunkStrategy = () =>
   (process.env.RAG_CHUNK_STRATEGY || "structured").trim().toLowerCase();
 
+// Document RAG runs two independent retrieval routes by default -- pgvector
+// cosine search and PostgreSQL full-text search -- and fuses their ranks with
+// RRF. `weighted` remains available as an explicit choice; turning hybrid off
+// leaves the dense route alone, which is an opt-out, not the baseline.
 export const isHybridRetrievalEnabled = () =>
-  toBoolean(process.env.RAG_HYBRID_ENABLED, false);
+  toBoolean(process.env.RAG_HYBRID_ENABLED, true);
 
 export const getHybridFusionMethod = () =>
-  toChoice(process.env.RAG_HYBRID_FUSION, "weighted", ["weighted", "rrf"]);
+  toChoice(process.env.RAG_HYBRID_FUSION, "rrf", ["weighted", "rrf"]);
 
 export const getRrfK = () =>
   toNonNegativeNumber(process.env.RAG_RRF_K, 60);
@@ -89,8 +105,195 @@ export const getRrfK = () =>
 export const getRetrievalScoringMode = () =>
   (process.env.RAG_RETRIEVAL_SCORING_MODE || "combined").trim().toLowerCase();
 
-export const getVectorStoreProvider = () =>
-  (process.env.VECTOR_STORE_PROVIDER || "local").trim().toLowerCase();
+// Retrieval route selector. The default, `hybrid`, defers to the hybrid/dense
+// behaviour above so the documented production path is byte-for-byte unchanged.
+// `dense` and `sparse` force a single route and exist so the evaluation harness
+// can measure each arm in isolation (dense-only / sparse-only / hybrid). Unlike a
+// fusion or weight knob, mislabelling the route silently corrupts a comparison
+// table, so an unknown value fails closed instead of falling back to the default.
+export const RETRIEVAL_ROUTE_CHOICES = Object.freeze(["hybrid", "dense", "sparse"]);
+
+export const getRetrievalRoute = () => {
+  const rawValue = process.env.RAG_RETRIEVAL_ROUTE;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "hybrid";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!RETRIEVAL_ROUTE_CHOICES.includes(normalizedValue)) {
+    throw new Error(
+      `RAG_RETRIEVAL_ROUTE must be one of ${RETRIEVAL_ROUTE_CHOICES.join(", ")}. ` +
+        `Received "${rawValue}". Refusing to fall back to a different route.`
+    );
+  }
+
+  return normalizedValue;
+};
+
+export const VECTOR_STORE_PROVIDERS = Object.freeze({
+  local: "local",
+  pgvector: "pgvector",
+  qdrant: "qdrant",
+});
+
+export const DEFAULT_VECTOR_STORE_PROVIDER = VECTOR_STORE_PROVIDERS.pgvector;
+
+const VECTOR_STORE_PROVIDER_ALLOWLIST = Object.freeze(
+  Object.values(VECTOR_STORE_PROVIDERS)
+);
+
+/**
+ * The vector store provider is a strict allowlist and fails closed. An unknown
+ * value used to fall through to the local JSON index, which meant a typo in
+ * production quietly moved every chunk into a file on one machine. Now it is a
+ * configuration error that health, ingest and search all surface the same way.
+ */
+export const getVectorStoreProviderConfigStatus = () => {
+  const rawValue = process.env.VECTOR_STORE_PROVIDER;
+  const configured = hasEnvValue(rawValue);
+  const normalizedValue = configured ? rawValue.trim().toLowerCase() : "";
+  const valid = !configured || VECTOR_STORE_PROVIDER_ALLOWLIST.includes(normalizedValue);
+
+  return {
+    allowedProviders: [...VECTOR_STORE_PROVIDER_ALLOWLIST],
+    configured,
+    provider: valid
+      ? configured
+        ? normalizedValue
+        : DEFAULT_VECTOR_STORE_PROVIDER
+      : null,
+    rawValue: configured ? rawValue.trim() : "",
+    reason: !valid
+      ? "invalid_provider"
+      : configured
+        ? "env_configured"
+        : "default",
+    valid,
+  };
+};
+
+export class VectorStoreProviderConfigError extends Error {
+  constructor(status) {
+    super(
+      `VECTOR_STORE_PROVIDER must be one of ${status.allowedProviders.join(
+        ", "
+      )}. Received "${status.rawValue}". Refusing to fall back to another provider.`
+    );
+    this.name = "VectorStoreProviderConfigError";
+    this.code = "VECTOR_STORE_PROVIDER_INVALID";
+    this.status = 500;
+    this.rawValue = status.rawValue;
+    this.allowedProviders = status.allowedProviders;
+  }
+}
+
+export const getVectorStoreProvider = () => {
+  const status = getVectorStoreProviderConfigStatus();
+
+  if (!status.valid) {
+    throw new VectorStoreProviderConfigError(status);
+  }
+
+  return status.provider;
+};
+
+export const getDocumentChunksPostgresTable = () =>
+  (process.env.DOCUMENT_CHUNKS_POSTGRES_TABLE || "rag_document_chunks").trim();
+
+const KNOWN_EMBEDDING_DIMENSIONS = Object.freeze({
+  "text-embedding-3-large": 3072,
+  "text-embedding-3-small": 1536,
+  "text-embedding-ada-002": 1536,
+});
+
+export const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
+
+let embeddingDimensionsOverride = null;
+
+/**
+ * Lets an injected embedding provider declare its own dimensionality (the
+ * deterministic evaluation provider embeds into 64 dimensions). It is a
+ * process-level override so pgvector's fixed-width column and the migration
+ * that creates it see the same number the provider actually produces.
+ */
+export const configureEmbeddingDimensions = (dimensions) => {
+  const parsed = Number(dimensions);
+
+  embeddingDimensionsOverride =
+    Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+};
+
+export const getEmbeddingDimensionsConfigStatus = () => {
+  if (embeddingDimensionsOverride) {
+    return {
+      dimensions: embeddingDimensionsOverride,
+      source: "provider_override",
+    };
+  }
+
+  const rawValue = process.env.RAG_EMBEDDING_DIMENSIONS;
+
+  if (hasEnvValue(rawValue)) {
+    const parsed = Number(rawValue);
+
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return {
+        dimensions: parsed,
+        source: "env",
+      };
+    }
+  }
+
+  const modelDimensions = KNOWN_EMBEDDING_DIMENSIONS[getEmbeddingModel()];
+
+  return modelDimensions
+    ? {
+        dimensions: modelDimensions,
+        source: "model",
+      }
+    : {
+        dimensions: DEFAULT_EMBEDDING_DIMENSIONS,
+        source: "default",
+      };
+};
+
+export const getEmbeddingDimensions = () =>
+  getEmbeddingDimensionsConfigStatus().dimensions;
+
+// `simple` on purpose: chunk text is pre-tokenized by the same tokenizer the
+// local sparse store uses (per-character CJK, lowercase ASCII words, stop words
+// removed), so a language-specific stemmer would only diverge the two routes.
+export const getPgvectorTextSearchConfig = () =>
+  (process.env.RAG_PGVECTOR_TEXT_SEARCH_CONFIG || "simple").trim();
+
+export const getPgvectorIndexType = () =>
+  toChoice(process.env.RAG_PGVECTOR_INDEX_TYPE, "hnsw", ["hnsw", "ivfflat"]);
+
+export const getPgvectorIvfflatLists = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_PGVECTOR_IVFFLAT_LISTS, 100));
+
+export const getPgvectorHnswM = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_PGVECTOR_HNSW_M, 16));
+
+export const getPgvectorHnswEfConstruction = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_PGVECTOR_HNSW_EF_CONSTRUCTION, 64));
+
+/**
+ * The retrieval architecture as one public record, used by evaluation reports
+ * and health so that "what actually ran" is written down next to the metrics.
+ */
+export const getRetrievalArchitectureConfig = () => {
+  const providerStatus = getVectorStoreProviderConfigStatus();
+
+  return {
+    hybridEnabled: isHybridRetrievalEnabled(),
+    hybridFusion: getHybridFusionMethod(),
+    vectorStoreProvider: providerStatus.valid ? providerStatus.provider : null,
+    vectorStoreProviderValid: providerStatus.valid,
+  };
+};
 
 export const getQdrantUrl = () =>
   process.env.QDRANT_URL || "http://127.0.0.1:6333";

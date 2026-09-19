@@ -10,6 +10,7 @@ import {
   getAgentRunStoreConfigStatus,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
+  getAgentSkillGraphRollout,
   getAgentExperienceMemoryConfigStatus,
   getLlmOpsPolicy,
   getLongMemoryConfigStatus,
@@ -59,6 +60,27 @@ test("agent planner defaults target pure LLM runtime", async () => {
       assert.equal(getAgentExecutionPlanner(), "llm");
     }
   );
+});
+
+// The DAG rollout is the one planner dial that does not default to the new
+// behaviour. Every other planner already answers real traffic; this one changes
+// how skills are executed, so an operator has to ask for it.
+test("the skill graph rollout stays off until an operator opts in", async () => {
+  await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: undefined }, async () => {
+    assert.equal(getAgentSkillGraphRollout(), "off");
+  });
+
+  for (const mode of ["guarded", "off", "shadow"]) {
+    await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: mode }, async () => {
+      assert.equal(getAgentSkillGraphRollout(), mode);
+    });
+  }
+});
+
+test("an unrecognized skill graph rollout falls back to off rather than guessing", async () => {
+  await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: "full" }, async () => {
+    assert.equal(getAgentSkillGraphRollout(), "off");
+  });
 });
 
 test("memory defaults stay disabled when PostgreSQL is not configured", async () => {

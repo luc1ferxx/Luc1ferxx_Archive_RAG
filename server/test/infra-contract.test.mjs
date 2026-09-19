@@ -148,7 +148,12 @@ test("health report contracts expose missing dependencies and strict startup fai
       assert.equal(report.checks.apiAuth.status, "disabled");
       assert.equal(report.checks.openai.status, "error");
       assert.match(report.checks.openai.message, /OPENAI_API_KEY/);
-      assert.equal(report.checks.vectorStore.status, "disabled");
+      // `local` is an explicit opt-in and is checked like any other provider:
+      // it reports the backend it runs on instead of "disabled".
+      assert.equal(report.checks.vectorStore.status, "ok");
+      assert.equal(report.checks.vectorStore.provider, "local");
+      assert.equal(report.checks.vectorStore.backend, "filesystem");
+      assert.equal(report.checks.vectorStore.providerMatchesConfig, true);
       assert.equal(report.checks.documentStore.status, "error");
       assert.equal(report.checks.sessionMemory.status, "error");
       assert.equal(report.checks.longMemory.status, "disabled");

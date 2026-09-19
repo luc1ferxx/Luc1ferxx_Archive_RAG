@@ -58,6 +58,45 @@ const buildResultsByDocTrace = (resultsByDoc) => {
   );
 };
 
+const buildRouteTrace = (route = {}) => ({
+  rank: route.rank ?? null,
+  route: route.route ?? null,
+  score: toTraceNumber(route.score),
+});
+
+const buildProvenanceTrace = (provenance) => {
+  if (!provenance || typeof provenance !== "object") {
+    return null;
+  }
+
+  return {
+    fusion: provenance.fusion
+      ? {
+          method: provenance.fusion.method ?? null,
+          score: toTraceNumber(provenance.fusion.score),
+        }
+      : null,
+    routes: (Array.isArray(provenance.routes) ? provenance.routes : []).map(
+      buildRouteTrace
+    ),
+    queries: (Array.isArray(provenance.queries) ? provenance.queries : []).map(
+      (query) => ({
+        queryId: query.queryId ?? null,
+        primary: Boolean(query.primary),
+        fusion: query.fusion
+          ? {
+              method: query.fusion.method ?? null,
+              score: toTraceNumber(query.fusion.score),
+            }
+          : null,
+        routes: (Array.isArray(query.routes) ? query.routes : []).map(
+          buildRouteTrace
+        ),
+      })
+    ),
+  };
+};
+
 export const buildResultTrace = (result = {}) => {
   const document = getResultDocument(result);
   const metadata = document.metadata ?? {};
@@ -75,8 +114,17 @@ export const buildResultTrace = (result = {}) => {
     keywordScore: toTraceNumber(result.keywordScore),
     originalScore: toTraceNumber(result.originalScore),
     rerankScore: toTraceNumber(result.rerankScore),
+    // The evidence-admission signal and the raw RRF sum, kept separate from the
+    // fusion `score` so a trace reader can tell the admission gate's input from the
+    // ranking figure. admissionScore drives confidence; rrfScore is provenance only.
+    admissionScore: toTraceNumber(result.admissionScore),
+    rrfScore: toTraceNumber(result.rrfScore),
     excerptHash: buildExcerptHash(text),
     excerptPreview: buildExcerptPreview(text),
+    // Where the candidate came from: each route that returned it (with the raw
+    // rank and score on that route), the fusion that combined them, and every
+    // retrieval query that surfaced it. Additive; absent for non-seam results.
+    provenance: buildProvenanceTrace(result.provenance),
   };
 
   if (shouldIncludeRagObservabilityContext()) {

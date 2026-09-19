@@ -25,6 +25,7 @@ export const CATEGORY_LABELS = {
   planner: "Planner",
   privacy: "Privacy",
   retry: "Retry",
+  skill_graph: "Skill graph",
   skill_selection: "Skill selection",
 };
 

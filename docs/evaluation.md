@@ -21,11 +21,12 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | --- | --- |
 | `cd server && npm test` | 运行后端聚合测试。 |
 | `cd server && npm run coverage:gate` | 运行后端 coverage minimum gate。 |
+| `cd server && npm run test:pgvector` | 真实 pgvector PostgreSQL 集成测试；需要 `PGVECTOR_TEST_DATABASE_URL`，缺失时报告 skipped。 |
 | `cd server && npm run coverage:targets` | 把目标覆盖率作为硬门控运行。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
 | `cd server && npm run eval:trajectory` | 评测 AgentRAG 执行轨迹。 |
 | `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner、validator 和 fallback；`-- --provider real` 会生成真实 provider 报告。 |
-| `cd server && npm run eval:recovery-observability` | 生成 deterministic recovery/replay observability report，覆盖 manual recovery、auto replay、step retry/resume 和 planner fallback signal。 |
+| `cd server && npm run eval:recovery-observability` | 生成 deterministic recovery/replay observability report，覆盖 manual recovery、auto replay、step retry/resume、planner fallback signal 和 skill graph signal（一次真实 guarded 运行里的 replan node 复用与 fallback 计数）。 |
 | `cd server && npm run planner:gate -- --provider real` | 强制检查 real planner report、unexpected fallback rate 和 mock/real planner 分歧。 |
 | `cd server && npm run rollout:readiness` | 汇总 real planner gate、纯 LLM runtime target、trajectory gate、recovery gate、fallback rate 和 mock/real divergence，生成默认启用纯 LLM planner 前的 readiness signal。 |
 | `cd server && npm run runtime:smoke` | 用真实后端 HTTP 路径、真实 LLM planner 和 PostgreSQL smoke `/health` + `/chat`，确认 long/experience memory default-on、planner 选中 `llm`、experience memory 只进入 planning hints 而不进入 evidence sources。 |
@@ -53,9 +54,9 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `evaluation/results/latest-quality.*` | PR current gate 专用 deterministic near-duplicate synthetic 报告；不会覆盖 robust/release 使用的 `latest.*`。 |
 | `evaluation/results/latest-current-quality-gate.{json,md}` | 当前 commit 的轻量质量证据；逐项记录 SHA、freshness、dirty、corpus/provider/config 和 metrics 检查。 |
 | `evaluation/baselines/quality-near-duplicate-deterministic-v1.json` | PR deterministic profile 的固定 100% regression baseline；运行目录中的旧报告不能替换它。 |
-| `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `13/13` cases passed，`52/52` checks passed，包含 goal lifecycle completion。 |
+| `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `17/17` cases passed，`71/71` checks passed，包含 goal lifecycle completion 和四个钉住 `AGENT_SKILL_GRAPH_ROLLOUT` 的 skill graph case。 |
 | `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback 和 planner observability；mock/real provider 会各自写入 provider-specific latest report。 |
-| `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：deterministic fixture 覆盖 recoverable run、manual recovery action、safe step retry/resume、auto replay success rate 和 planner fallback signal。 |
+| `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：deterministic fixture 覆盖 recoverable run、manual recovery action、safe step retry/resume、auto replay success rate、planner fallback signal 和 skill graph signal；当前 `7/7` cases、`22/22` checks。 |
 | `evaluation/results/latest-rollout-readiness.{json,md}` | AgentRAG rollout readiness：只输出是否 ready 的信号，汇总 real planner provider gate、trajectory gate、recovery gate、unexpected fallback rate 和 mock/real planner divergence，不改变默认 planner 行为。 |
 | `evaluation/results/latest-rerank-hard-cs.*` | Hard-CS rerank eval：baseline 不再满分，heuristic rerank 需要保持 NDCG/Recall 不回退并保留 NDCG lift。 |
 | `evaluation/results/latest-arxiv-rerank.*` | arXiv real-paper rerank eval：使用固定 manifest 生成的真实论文 corpus，覆盖更长文档和 hard negative。 |
@@ -86,7 +87,7 @@ CI 可通过 `EVAL_TARGET_COMMIT_SHA` 把报告绑定到指定 SHA；它必须�
 `quality:current` 是 PR 的 fail-closed 轻量入口。它不调用评测 runner，只读取本次 workflow 已生成的报告，并同时检查：
 
 - gate 执行时 checkout 必须仍是 target SHA 且 clean；
-- `latest-quality.json`、feedback、trajectory、planner-mock 和 recovery 五份 required reports 必须存在；
+- `latest-quality.json`、feedback、trajectory、planner-mock 和 recovery 五份 required reports 必须存在；synthetic/feedback 报告的 `summary.retrieval` 必须声明 `pgvector` + hybrid + `rrf` 且能从 case 重算（见 “Retrieval 架构证据”）；
 - evidence profile 必须是 `quality-current`；trajectory/planner/recovery 必须精确匹配版本化 manifest 中的 case/check IDs，synthetic 与 feedback 必须匹配 corpus case，并保留固定的 8 个 near-duplicate cases 和 2 个 feedback seed cases；固定 case 的问题、答案片段、事实 claim/来源归属、证据页、文档页内容和拒答输出也必须匹配 manifest；
 - synthetic/feedback 会交叉校验 document/upload/citation 身份、固定 chunk/byte/path 关系和 evidence schema；每个 citation 必须对应本次 raw `retrievedContexts`，Ragas context identity 由 raw retrieval 重建。门禁再从版本化 corpus page 重建 citation evidence，并复用生产 claim checker 独立重算 answer claims 与 claim support；upload resume 和 summary metrics 也会从 raw payload 重算，summary 或自报 `supported=true` 不能覆盖 raw failure；
 - planner/trajectory 的关键模式、技能链、planner、budget、loop、telemetry 与 trace 字段必须匹配版本化 response projection；作用域、approval resume/deny、retry、memory、privacy 与 goal lifecycle 等高风险 case 还必须携带最小化、privacy-safe 的 `case.response.observed` 原始观测。`check.detail` 只用于诊断，不作为 verdict oracle；recovery cases/checks 则由独立共享 builder 从 `report.recovery` 重新计算；
@@ -205,6 +206,7 @@ Trajectory eval 检查 AgentRAG 行为，而不是只看答案文本：
 - Custom skill 是否传递 `accessScope`
 - Budget 是否阻止无限重试
 - Goal lifecycle 是否验证 plan steps、unresolved gaps、deliverables、pending approval 和 research phases
+- Skill graph：`guarded` 下 typed DAG 是否真的执行且 `/chat` 合同不变、`shadow` 下是否只规划不执行、非法图是否在任何 node 执行前整体被拒、有界 replan 是否只重跑受影响的 node 并在上限处停下
 
 ```bash
 cd server
@@ -253,6 +255,14 @@ npm run planner:gate -- --provider real --compare-provider mock
 
 `planner:gate` 默认 `--provider real`，并在 real provider 下默认比较 `mock`。默认阈值为 `--max-unexpected-fallback-rate=0` 和 `--max-divergence-count=0`。Planner eval 中故意验证 validator 的 fallback case 会计入总 fallback 数，但不会计入 unexpected fallback。
 
+## Retrieval 架构证据
+
+Synthetic / feedback 报告从 1.9.0 manifest 起带一个 `summary.retrieval` 块和逐 case 的 `retrieval` 字段，全部由 `/chat` 响应里的 `retrieval` 派生（provider、hybrid 是否开启、fusion 方法、dense/sparse 两路是否真实执行、各产生多少候选、是否发生 fallback），不是从配置抄来的。runner 在写报告前会核对：每个 case 都有 retrieval 证据、所有 case 跑在同一个 provider 上、没有 fallback、hybrid 开启时两路在每个 case 都执行；对不上就拒绝写报告。
+
+`quality:current` 再逐字段校验 `summary.retrieval` 与 manifest 的 `requiredRetrieval`（`pgvector` / `hybridEnabled: true` / `rrf`），从 case 重算路由计数并要求 dense、sparse 两路都至少在一个 case 产生候选；robust gate 对 compare-hard synthetic 报告做同样的检查（`robustSuiteRetrievalContract`）。配置不符、某一路没跑、或出现 fallback 都是 fail。
+
+`summary.config` 故意不包含这些字段：regression profile key 由 `config` 构成，钉住的 deterministic baseline（`quality-near-duplicate-deterministic-v1`）早于 pgvector 默认值，metrics 仍按同一语料比较。CI 的 `quality-gate` job 用真实 `pgvector/pgvector:pg16` service 跑 current profile；本地没有 PostgreSQL 时 `VECTOR_STORE_PROVIDER=local npm run eval:synthetic` 可以跑通，但 `quality:current` 会因 retrieval 合同不符而失败——这是预期行为，不要通过改 manifest 绕过。
+
 ## Rollout readiness
 
 ```bash
@@ -262,6 +272,36 @@ npm run rollout:readiness -- --json
 ```
 
 `rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，并检查当前 runtime 是否已经达到纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 都是 `llm`），生成 `latest-rollout-readiness.*`。缺少 real planner report、runtime smoke report、runtime target 未到纯 LLM、trajectory/recovery gate 失败、runtime smoke 失败、unexpected fallback rate 大于 0，或 mock/real planner divergence 大于 0 都会标成 `not_ready`，并让命令以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`。
+
+## Skill graph rollout 的评测边界
+
+`rollout:readiness` 只覆盖 planner 灰度（`AGENT_PLANNER_ROLLOUT` / intent / execution planner），不读取 `AGENT_SKILL_GRAPH_ROLLOUT`。`eval:planner`、`eval:recovery-observability` 和 `quality:gate` 也不碰这个开关，跑的都是默认的 `off` 路径。
+
+Trajectory eval 是唯一固定跑在 DAG 路径上的评测。四个 `skill_graph` 分类的 case 用 `withEnvironmentOverrides` 在各自运行期间钉住灰度位，跑完即还原，所以同一份报告里既有 `off` 路径的 13 个既有 case，也有下面四个：
+
+| Case | 钉住的模式 | 证明什么 |
+| --- | --- | --- |
+| `skill_graph_guarded_execution` | `guarded` | `skill_graph_planned` 事件 `executed: true`；node 是原子 skill id 而不是复合 chain id；risk node `dependsOn` summary 并以 typed `priorFindings` 读取上游输出（第二次检索的问题带 "Upstream findings" 而不是 V1 的 "Previous skill outputs"）；每个 node step 持久化了只读 replay contract；`/chat` 响应与 V1 逐字段一致且没有 `graph` / `nodeRuns` / `replans` 字段。 |
+| `skill_graph_shadow_comparison` | `shadow` | 答案由 V1 chain 产出（拼接问题、V1 step id、step input 无 `priorFindings`）；graph 只规划校验、`executed: false`、`nodeRuns` 为空；`diverged: false` 被记录；预算只扣一次。 |
+| `skill_graph_illegal_plan_rejected` | `guarded` + 注入的 LLM planner | planner 交出同时带伪造 `approval`、未注册 skill 和越权 `scope.docIds` 的图；整图被拒，三个 reason code 全部记录，伪造 node 没有任何一个执行；deterministic graph 在授权范围内作答；planner 拿到的上下文只有白名单视图，不含 `accessScope` / userId / workspaceId。 |
+| `skill_graph_bounded_replan` | `guarded` + 注入的 replanner，`maxCustomSkillCalls: 3` | 第一次 risk review 空手而归触发 `insufficient_evidence`；一次 patch 被应用，只有新增 node 执行，已完成的两个 node 状态为 `reused` 且不再计费；第二次尝试在 `replan_limit_reached` 处 abstain；replanner 拿到的上下文只有状态和白名单，没有证据文本和调用者身份。 |
+
+这四个 case 的 id、check id 和 response 投影都钉在 `quality-current-suite-manifest.js`（`1.8.0`）里，`quality:current` 会逐字段校验，多一个 case 或少一个 check 都会失败。
+
+仍然没有覆盖的部分：
+
+- `eval:recovery-observability` 只有一个 `skill_graph_signal` case：从一次真实 guarded 运行（risk review 首轮空手、一次 replan、两个 node `reused`）的 `skill_graph_planned` 事件里数 planned / executed / fallback / 执行后 fallback / reused node / applied replan。它证明 replan 内复用和"执行后绝不回落 V1"，不证明中断后 resume；graph node 的 retry / resume 走既有 `custom_skill` step 路径，由单测 `agent-run-step-executor.test.mjs` 和 `agent-run-step-replay-safety.test.mjs` 覆盖，不在评测报告里。
+- `rollout:readiness` 不读 `AGENT_SKILL_GRAPH_ROLLOUT`，readiness 报告不能作为把默认值提到 `guarded` 的依据。
+- 以上 case 全部用注入的 planner / replanner 或 deterministic graph，不经过真实模型；LLM planner 输出质量只有 `eval:planner` 的 mock provider 和单测覆盖。
+
+需要手动看 V2 对既有 13 个 case 的影响时，可以整份复跑：
+
+```bash
+cd server
+AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run eval:trajectory
+```
+
+2026-09-17 在本地实测 13/13 case PASS。这只是一次手动实验，不是门禁；`latest-trajectory.*` 是 gitignore 的本地产物，跑完后建议用默认配置再跑一次。
 
 ## Runtime smoke
 
@@ -352,11 +392,11 @@ npm run observability:report -- --json
 - LLMOps operation / model route 指标、token/cost/SLO 聚合，以及 annotation、alert、budget status counts
 - planner fallback reason top list
 - 各 `agentMode` 下的 planner `stepIds` 分布
-- recovery/replay 指标：recoverable run 数、manual recovery 数、auto replay 成功率、step retry/resume 次数、step replay failure 数，并在同一区块展示 planner fallback count
+- recovery/replay 指标：recoverable run 数、manual recovery 数、auto replay 成功率、step retry/resume 次数、step replay failure 数，并在同一区块展示 planner fallback count 和 skill graph 的 planned / executed / fallback / reused node / replan 计数
 - query planner intent、retrieval query 数量和 topK profile
 - RAG route mode、latency、citation 和 abstain 指标
 
-`eval:recovery-observability` 会用 deterministic fixture 生成 `latest-recovery-observability.*`，再由 `quality:gate` 的 recovery gate 检查：observability eval case/check 不能失败，auto replay failure、manual recovery action failure、step replay failure 和 observed planner fallback 都必须为 0，同时要求 report 至少覆盖 recoverable run、manual recovery action、auto replay attempt、step retry 和 step resume。
+`eval:recovery-observability` 会用 deterministic fixture 生成 `latest-recovery-observability.*`，再由 `quality:gate` 的 recovery gate 检查：observability eval case/check 不能失败，auto replay failure、manual recovery action failure、step replay failure、observed planner fallback 和 skill graph 执行后 fallback（`recoverySkillGraphUnsafeFallbackCount`，阈值 0；没有 graph 计数器的旧报告按 0 处理）都必须为 0，同时要求 report 至少覆盖 recoverable run、manual recovery action、auto replay attempt、step retry 和 step resume。observability report 的 `recovery` 区块新增 `skillGraphPlannedCount` / `skillGraphExecutedCount` / `skillGraphFallbackCount` / `skillGraphUnsafeFallbackCount` / `skillGraphReusedNodeCount` / `skillGraphReplanAppliedCount`，全部从 `skill_graph_planned` run event 派生，是附加字段。
 
 ## Feedback regression
 

@@ -52,6 +52,12 @@ import { createAgentTriggerDispatcher } from "./rag/agent-trigger-dispatcher.js"
 import { createDefaultAgentTriggerRegistry } from "./rag/agent-triggers/registry.js";
 import { runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
+import {
+  DAG_PLANNER_IDS,
+  dagPlannerAdapter,
+  deterministicDagPlannerAdapter,
+} from "./rag/agent-dag-planner-adapter.js";
+import { replanAdapter } from "./rag/agent-replan-adapter.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
 import {
   deterministicIntentPlannerAdapter,
@@ -131,14 +137,44 @@ export const createIntentPlannerAdapter = () =>
     llmPlanner: llmIntentPlannerAdapter,
   });
 
+// Planning a typed DAG is still execution planning, so it reads the dial the
+// operator already set for V1 rather than adding a second switch that could be
+// pointed somewhere else by accident. Under the `shadow` rollout the
+// deterministic graph stays primary and the model plans beside it, which is the
+// same bargain the V1 planner makes.
+export const createDagPlannerAdapter = () =>
+  createRolloutPlannerAdapter({
+    configuredPlanner: () =>
+      getAgentExecutionPlanner() === "llm"
+        ? dagPlannerAdapter
+        : deterministicDagPlannerAdapter,
+    deterministicPlanner: deterministicDagPlannerAdapter,
+    llmPlanner: dagPlannerAdapter,
+  });
+
+/**
+ * The replanner exists only where a model is already planning for real.
+ *
+ * There is no deterministic replanner to fall back to, so wherever the operator
+ * has pinned planning to the deterministic graph -- or kept the model in shadow
+ * -- a replan would be the one path that let a model shape an executed plan
+ * anyway. Reading the resolved planner's id keeps that decision in one place
+ * instead of restating the rollout branches here.
+ */
+export const createReplanAdapter = (
+  resolvedDagPlannerAdapter = createDagPlannerAdapter()
+) => (resolvedDagPlannerAdapter?.id === DAG_PLANNER_IDS.llm ? replanAdapter : null);
+
 export const buildChatResponse = async ({
   agentBudget,
   agentRunService,
   arxivImportService,
   capabilityRegistry,
+  dagPlannerAdapter: requestDagPlannerAdapter,
   executionPlannerAdapter,
   intentPlannerAdapter,
   ragService,
+  replanAdapter: requestReplanAdapter,
   webChatService,
   question,
   docIds,
@@ -181,6 +217,8 @@ export const buildChatResponse = async ({
     taskMemory,
     executionPlannerAdapter,
     intentPlannerAdapter,
+    dagPlannerAdapter: requestDagPlannerAdapter,
+    replanAdapter: requestReplanAdapter,
     skillRegistry,
   });
 };
@@ -267,6 +305,10 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     options.executionPlannerAdapter ?? createExecutionPlannerAdapter();
   const intentPlannerAdapter =
     options.intentPlannerAdapter ?? createIntentPlannerAdapter();
+  const resolvedDagPlannerAdapter =
+    options.dagPlannerAdapter ?? createDagPlannerAdapter();
+  const resolvedReplanAdapter =
+    options.replanAdapter ?? createReplanAdapter(resolvedDagPlannerAdapter);
   const agentTaskRunner =
     options.agentTaskRunner ??
     createAgentTaskRunner({
@@ -289,11 +331,13 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
           arxivImportService,
           capabilityApprovals,
           capabilityRegistry,
+          dagPlannerAdapter: resolvedDagPlannerAdapter,
           docIds,
           executionPlannerAdapter,
           intentPlannerAdapter,
           question,
           ragService,
+          replanAdapter: resolvedReplanAdapter,
           sessionId,
           skillRegistry,
           taskMemory,
@@ -434,6 +478,7 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     arxivService,
     buildChatResponse,
     capabilityRegistry,
+    dagPlannerAdapter: resolvedDagPlannerAdapter,
     executionPlannerAdapter,
     feedbackService,
     healthService,
@@ -443,6 +488,7 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     qualityService,
     ragService,
     recommendationTaskService,
+    replanAdapter: resolvedReplanAdapter,
     skillRegistry,
     taskService,
     uploadStore,

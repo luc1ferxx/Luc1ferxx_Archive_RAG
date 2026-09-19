@@ -91,6 +91,36 @@ Admin audit 默认 `ADMIN_AUDIT_STORE_PROVIDER=auto`：PostgreSQL 配好时写�
 └── README.md
 ```
 
+## 本地 PostgreSQL + pgvector
+
+默认检索后端需要带 `vector` 扩展的 PostgreSQL 16。仓库根目录提供了 Compose：
+
+```bash
+docker compose up -d          # pgvector/pgvector:pg16，healthcheck + 持久化 volume pgdata
+cd server && cp .env.example .env
+npm run start                 # 启动时跑 migration，/health 的 vectorStore 会报告扩展、表、索引、列宽
+```
+
+`server/.env.example` 的 `POSTGRES_DATABASE_URL` 已指向这个实例。迁移文件 `server/db/migrations/012_create_rag_document_chunks.sql` 可重复执行：`CREATE EXTENSION IF NOT EXISTS vector`、`rag_document_chunks`（外键级联到 `rag_documents`、`(doc_id, chunk_index)` 唯一、access scope 索引、HNSW/IVFFlat cosine 索引、GIN tsvector 索引）。列宽在首次迁移时按 `RAG_EMBEDDING_DIMENSIONS`（或模型推导值）渲染；之后模型/维度变化，空表会自动改列宽，非空表会明确报错并要求 reindex。
+
+从 local JSON 或 Qdrant 迁移：
+
+```bash
+cd server
+npm run vector:reindex                       # dry-run：逐文档列出 copy / reembed / skip 计划
+npm run vector:reindex -- --apply            # 复用已有向量（维度一致时）写入 pgvector，每份文档一个事务
+npm run vector:reindex -- --from qdrant --apply
+npm run vector:reindex -- --from documents --apply   # 换 embedding 模型后：用库里的 PDF 重新切块、重新 embedding
+```
+
+真实数据库集成测试只在 `PGVECTOR_TEST_DATABASE_URL` 存在时运行（会清空该库的文档，只指向一次性库）：
+
+```bash
+PGVECTOR_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/agentai npm run test:pgvector
+```
+
+没有该变量时 `npm test` 把它报告为 skipped，不会当作通过。
+
 ## Runtime paths
 
 这些路径是运行时或生成内容，一般不手动编辑，也不提交：
@@ -113,13 +143,14 @@ server/evaluation/results/<timestamped-files>
 - 新增 custom skill 必须走白名单注册，并确认 `accessScope` 传递到文档读取和 RAG chat。
 - `/chat` response shape 会被前端 trace UI、feedback metadata 和 evaluation 使用，改字段时需要同步测试。
 - Working memory 是 run-scoped，不应写入长期记忆，除非用户明确要求。
-- `VECTOR_STORE_PROVIDER=local` 适合小规模本地工作区；大规模语料建议切到 Qdrant。
+- `VECTOR_STORE_PROVIDER=pgvector` 是默认值，`local` / `qdrant` 只作显式 opt-in；provider 白名单之外的值必须 fail closed，不要加任何静默回落。pgvector 的 ingest/delete/clear 走 `rag/index.js` 里同一个 PostgreSQL 事务（embedding 在事务外算好），改动时保持这个边界。
+- 文档 RAG 默认两路召回 + RRF；rerank 放在 fusion 之后，不能用 rerank 或任何单路 combined scorer 冒充多路召回。sparse 路在 pgvector 上是 PostgreSQL FTS（`ts_rank_cd`），文档和代码里都不要写成 BM25。
 - 评测报告的 `evidence` 必须通过 `server/evaluation/eval-evidence.js` 统一生成；不要手写 commit、dirty、corpus hash、config hash 或 source lineage，也不要回填旧 `latest.*`。
 - 不要提交 `server/.env`、私有 PDF、`server/data/`、上传会话文件、生成语料或 timestamped eval 结果。
 
 ## Backend test entry
 
-`server/test/run.test.mjs` 聚合后端测试，包括 app、RAG、AgentRAG、feedback、quality report、observability report、CI workflow、param sweep、rerank 和 trajectory 相关测试。
+`server/test/run.test.mjs` 在运行时发现 `server/test/*.test.mjs` 并逐文件用 `node --test` 跑，包括 app、RAG、AgentRAG、feedback、quality report、observability report、CI workflow、param sweep、rerank、trajectory，以及 vector store provider / hybrid provenance / pgvector（无库单测 + 真实库集成）相关测试。`test/rag.test.mjs` 和 `test/app.test.mjs` 自己钉 `VECTOR_STORE_PROVIDER=local`，因为它们测的是本地索引路径；不要把这个钉子扩散到 runner 层。
 
 常用入口：
 

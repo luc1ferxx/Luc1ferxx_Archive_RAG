@@ -17,9 +17,11 @@ const accessScope = {
 const createConfig = (overrides = {}) => ({
   getAgentRunRecoveryMode: () => "manual",
   getAgentRunStoreProvider: () => "postgres",
+  getHybridFusionMethod: () => "rrf",
   getTaskStoreProvider: () => "postgres",
   getVectorStoreProvider: () => "local",
   isApiAuthEnabled: () => true,
+  isHybridRetrievalEnabled: () => true,
   isStartupHealthStrict: () => true,
   ...overrides,
 });
@@ -206,6 +208,10 @@ test("admin status aggregates compact deployment health quality and runtime coun
     startupHealthStrict: false,
     taskStoreProvider: "postgres",
     vectorStoreProvider: "local",
+    retrieval: {
+      hybridEnabled: true,
+      hybridFusion: "rrf",
+    },
   });
   assert.equal(status.health.status, "error");
   assert.equal(status.health.checks.openai.status, "error");

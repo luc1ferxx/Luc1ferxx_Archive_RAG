@@ -178,6 +178,108 @@ const buildCorpusCaseBindingCheck = ({ corpusBinding, report }) =>
     },
   });
 
+const RETRIEVAL_ROUTE_NAMES = ["dense", "sparse"];
+
+/**
+ * The synthetic report must have executed the retrieval stack its execution
+ * contract names, and must be able to prove it: both routes executed on every
+ * case, each route produced candidates somewhere, no case fell back, and the
+ * summary matches what the cases say. A mismatch is a failing check, not a
+ * warning -- a report on a downgraded stack is not evidence for this one.
+ */
+const buildRetrievalContractCheck = ({ payload, report }) => {
+  const expected = {
+    hybridEnabled: report.executionConfig?.hybridEnabled ?? null,
+    hybridFusion: report.executionConfig?.hybridFusion ?? null,
+    vectorStoreProvider: report.executionConfig?.vectorStoreProvider ?? null,
+  };
+  const retrieval = payload?.summary?.retrieval ?? null;
+  const cases = Array.isArray(payload?.cases) ? payload.cases : [];
+  const issues = [];
+
+  if (!retrieval) {
+    issues.push("summary.retrieval is missing");
+  } else {
+    const declared = {
+      hybridEnabled: retrieval.hybridEnabled ?? null,
+      hybridFusion: retrieval.hybridFusion ?? null,
+      vectorStoreProvider: retrieval.vectorStoreProvider ?? null,
+    };
+
+    if (JSON.stringify(declared) !== JSON.stringify(expected)) {
+      issues.push(
+        `summary.retrieval declares ${JSON.stringify(declared)} but the contract requires ${JSON.stringify(expected)}`
+      );
+    }
+
+    if (retrieval.fallbackCount !== 0) {
+      issues.push(`fallbackCount is ${retrieval.fallbackCount ?? "missing"}`);
+    }
+  }
+
+  const routeTotals = Object.fromEntries(
+    RETRIEVAL_ROUTE_NAMES.map((route) => [route, { executed: 0, withCandidates: 0 }])
+  );
+
+  cases.forEach((caseResult) => {
+    const caseRetrieval = caseResult?.retrieval;
+
+    if (!caseRetrieval) {
+      issues.push(`case ${caseResult?.id ?? "unknown"} has no retrieval evidence`);
+      return;
+    }
+
+    if ((caseRetrieval.vectorStoreProvider ?? null) !== expected.vectorStoreProvider) {
+      issues.push(
+        `case ${caseResult?.id ?? "unknown"} ran on ${caseRetrieval.vectorStoreProvider ?? "unknown"}`
+      );
+    }
+
+    if (caseRetrieval.fallback) {
+      issues.push(`case ${caseResult?.id ?? "unknown"} fell back`);
+    }
+
+    for (const route of RETRIEVAL_ROUTE_NAMES) {
+      const routeSummary = caseRetrieval.routes?.[route];
+
+      if (routeSummary?.executed === true) {
+        routeTotals[route].executed += 1;
+      } else if (expected.hybridEnabled) {
+        issues.push(`case ${caseResult?.id ?? "unknown"} did not execute the ${route} route`);
+      }
+
+      if ((Number(routeSummary?.candidateCount) || 0) > 0) {
+        routeTotals[route].withCandidates += 1;
+      }
+    }
+  });
+
+  if (expected.hybridEnabled && cases.length > 0) {
+    for (const route of RETRIEVAL_ROUTE_NAMES) {
+      if (routeTotals[route].withCandidates < 1) {
+        issues.push(`the ${route} route produced no candidates in any case`);
+      }
+    }
+  }
+
+  return buildCheck({
+    label: `${report.label} retrieval architecture`,
+    metric: "robustSuiteRetrievalContract",
+    report,
+    status: issues.length === 0 ? "pass" : "fail",
+    currentValue: retrieval
+      ? {
+          hybridEnabled: retrieval.hybridEnabled ?? null,
+          hybridFusion: retrieval.hybridFusion ?? null,
+          routes: routeTotals,
+          vectorStoreProvider: retrieval.vectorStoreProvider ?? null,
+        }
+      : null,
+    threshold: expected,
+    detail: issues.length > 0 ? { issues } : null,
+  });
+};
+
 const buildSyntheticReportResult = ({ payload, report }) => {
   const corpusBinding = validateRobustReportCorpusBinding({
     payload,
@@ -260,6 +362,10 @@ const buildSyntheticReportResult = ({ payload, report }) => {
       threshold: minOverallPassRate,
     }),
   ];
+
+  if (report.reportType === "synthetic") {
+    checks.push(buildRetrievalContractCheck({ payload, report }));
+  }
 
   if (comparisonSemantics.applicable) {
     checks.push(

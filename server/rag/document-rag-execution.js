@@ -1,10 +1,12 @@
 import {
+  getComparisonTopKPerDoc,
   getHybridFusionMethod,
   getRerankCandidateMultiplier,
   getRerankProvider,
   getRerankWeight,
   getRetrievalTopK,
   getRrfK,
+  getVectorStoreProvider,
   isHybridRetrievalEnabled,
   isQueryDecompositionEnabled,
   isRerankEnabled,
@@ -30,20 +32,85 @@ import {
   buildRetrievalQueries,
 } from "./query-decomposer.js";
 import { routeQuery } from "./query-router.js";
-import { retrieveGlobalContext } from "./retrievers/global-retriever.js";
-import { retrievePerDocumentContext } from "./retrievers/per-doc-retriever.js";
+import {
+  retrieveGlobalContext,
+  retrieveGlobalContextWithRoutes,
+} from "./retrievers/global-retriever.js";
+import { retrievePerDocumentContextWithRoutes } from "./retrievers/per-doc-retriever.js";
+import { describeVectorStoreRuntime, mergeRouteSummaries } from "./vector-store.js";
 import {
   prepareComparisonSourceBundle,
   prepareQASourceBundle,
   writeComparisonAnswer,
   writeQaAnswer,
 } from "./answer-writer.js";
-import { getResultKey } from "./citations.js";
+import { getAdmissionScore, getResultKey } from "./citations.js";
 
 const getResultMergeScore = (result = {}) =>
   (Number(result.keywordScore) || 0) * 2 + (Number(result.score) || 0);
 
-const mergeRetrievedResults = (...resultGroups) => {
+// One candidate can arrive from several retrieval queries, each with its own
+// route ranks. The merged result keeps the strongest scoring copy but the
+// union of every query that produced it, so the trace can show the whole path.
+const mergeProvenance = (kept = {}, incoming = {}) => {
+  const keptProvenance = kept.provenance ?? {};
+  const incomingProvenance = incoming.provenance ?? {};
+  const seen = new Set();
+  const queries = [];
+
+  for (const query of [
+    ...(Array.isArray(keptProvenance.queries) ? keptProvenance.queries : []),
+    ...(Array.isArray(incomingProvenance.queries) ? incomingProvenance.queries : []),
+  ]) {
+    const key = String(query?.queryId ?? "");
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    queries.push(query);
+  }
+
+  return {
+    ...keptProvenance,
+    queries,
+  };
+};
+
+const mergeResultPair = (existing, incoming) => {
+  const kept =
+    getResultMergeScore(incoming) > getResultMergeScore(existing)
+      ? incoming
+      : existing;
+
+  return {
+    ...kept,
+    provenance: mergeProvenance(kept, kept === existing ? incoming : existing),
+  };
+};
+
+export const tagResultsWithQuery = (results = [], retrievalQuery = {}) =>
+  (Array.isArray(results) ? results : []).map((result) => {
+    const provenance = result.provenance ?? { fusion: null, routes: [] };
+
+    return {
+      ...result,
+      provenance: {
+        ...provenance,
+        queries: [
+          {
+            fusion: provenance.fusion ?? null,
+            primary: Boolean(retrievalQuery.primary),
+            queryId: String(retrievalQuery.id ?? "query"),
+            routes: Array.isArray(provenance.routes) ? provenance.routes : [],
+          },
+        ],
+      },
+    };
+  });
+
+export const mergeRetrievedResults = (...resultGroups) => {
   const mergedResults = [];
   const resultIndexByKey = new Map();
 
@@ -53,12 +120,10 @@ const mergeRetrievedResults = (...resultGroups) => {
       const existingIndex = resultIndexByKey.get(resultKey);
 
       if (existingIndex !== undefined) {
-        if (
-          getResultMergeScore(result) >
-          getResultMergeScore(mergedResults[existingIndex])
-        ) {
-          mergedResults[existingIndex] = result;
-        }
+        mergedResults[existingIndex] = mergeResultPair(
+          mergedResults[existingIndex],
+          result
+        );
         continue;
       }
 
@@ -88,12 +153,10 @@ const mergePerDocumentResults = (docIds, ...perDocumentResultGroups) => {
         const existingIndex = resultIndexByKey.get(resultKey);
 
         if (existingIndex !== undefined) {
-          if (
-            getResultMergeScore(result) >
-            getResultMergeScore(mergedResults[existingIndex])
-          ) {
-            mergedResults[existingIndex] = result;
-          }
+          mergedResults[existingIndex] = mergeResultPair(
+            mergedResults[existingIndex],
+            result
+          );
           continue;
         }
 
@@ -104,6 +167,71 @@ const mergePerDocumentResults = (docIds, ...perDocumentResultGroups) => {
   }
 
   return mergedResultsByDoc;
+};
+
+const toComparableScore = (value) => {
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const toComparableRank = (value) => {
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+};
+
+// A single request fans out into several retrieval queries, and their results are
+// merged into one candidate pool that -- until here -- kept first-query-wins order
+// (mergeRetrievedResults preserves insertion order). Re-rank the whole pool by one
+// global order so the final Top-K and every citation rank reflect the merged
+// evidence, not the order the sub-queries happened to run in. `score` (the fusion
+// rank, or the rerank-blended score when rerank ran) stays the primary key -- RRF
+// and rerank are the legitimate candidate rankers -- with the raw admission and
+// route signals as deterministic tiebreakers and getResultKey as a unique total
+// order, so the sort is fully stable and identical across runs.
+const compareMergedResults = (left, right) =>
+  toComparableScore(right.score) - toComparableScore(left.score) ||
+  getAdmissionScore(right) - getAdmissionScore(left) ||
+  toComparableRank(left.denseRank) - toComparableRank(right.denseRank) ||
+  toComparableRank(left.sparseRank) - toComparableRank(right.sparseRank) ||
+  toComparableScore(right.vectorScore) - toComparableScore(left.vectorScore) ||
+  toComparableScore(right.sparseScore) - toComparableScore(left.sparseScore) ||
+  toComparableScore(right.keywordScore) - toComparableScore(left.keywordScore) ||
+  getResultKey(left).localeCompare(getResultKey(right));
+
+// Order the merged pool globally and cut to the unified final Top-K. A non-finite
+// or non-positive topK means "keep every candidate", only re-rank. Pure: it copies
+// before sorting so callers that also hold the raw merged array are unaffected.
+const rerankMergedResults = (results, finalTopK) => {
+  const ordered = [...(Array.isArray(results) ? results : [])].sort(
+    compareMergedResults
+  );
+
+  return Number.isFinite(finalTopK) && finalTopK > 0
+    ? ordered.slice(0, finalTopK)
+    : ordered;
+};
+
+/**
+ * What actually ran for this request: the provider, whether both routes
+ * executed, and how many candidates each produced across every retrieval
+ * query. Recorded in the trace and returned on the response so an evaluation
+ * report can be checked against it rather than against a config flag.
+ */
+const buildRetrievalSummary = ({ queryCount, routes }) => {
+  const runtime = describeVectorStoreRuntime();
+
+  return {
+    denseBackend: runtime.denseBackend,
+    fallback: null,
+    hybridEnabled: runtime.hybridEnabled,
+    hybridFusion: runtime.hybridFusion,
+    queryCount,
+    routes,
+    sparseBackend: runtime.sparseBackend,
+    vectorStoreProvider: runtime.vectorStoreProvider,
+  };
 };
 
 const buildRequirementTrace = (requirements = []) =>
@@ -161,23 +289,46 @@ const retrieveGlobalContextForQueries = async ({
   retrievalQueries,
   retrievalOptions = {},
 }) => {
-  const resultGroups = await Promise.all(
+  const searches = await Promise.all(
     retrievalQueries.map(async (retrievalQuery) => {
       const queryVector =
         retrievalQuery.primary && retrievalQuery.query === primaryQueryText
           ? primaryQueryVector
           : await embedQueryCached(retrievalQuery.query);
-
-      return retrieveGlobalContext({
+      const search = await retrieveGlobalContextWithRoutes({
         queryVector,
         queryText: retrievalQuery.query,
         docIds,
         topK: retrievalOptions.topK,
       });
+
+      return {
+        results: tagResultsWithQuery(search.results, retrievalQuery),
+        routes: search.routes,
+      };
     })
   );
 
-  return mergeRetrievedResults(...resultGroups);
+  return {
+    // The unified final Top-K budgets one retrieval depth (topK) per requirement,
+    // not per request: query decomposition fans a compound question into several
+    // sub-queries so that "when does it take effect AND which regions" retrieves
+    // evidence for both aspects, and each aspect needs room for its own topK. A
+    // per-request cap of topK would collapse the union back to a single aspect (at
+    // topK=1 it would strand every requirement but one). Each sub-query already
+    // returns at most topK, so topK*queryCount never truncates real per-requirement
+    // evidence -- it only bounds a runaway pool -- and the value here is the global
+    // re-rank that makes citation rank follow the merged order, not the sub-query
+    // order.
+    results: rerankMergedResults(
+      mergeRetrievedResults(...searches.map((search) => search.results)),
+      (retrievalOptions.topK ?? getRetrievalTopK()) * retrievalQueries.length
+    ),
+    retrieval: buildRetrievalSummary({
+      queryCount: retrievalQueries.length,
+      routes: mergeRouteSummaries(...searches.map((search) => search.routes)),
+    }),
+  };
 };
 
 const retrievePerDocumentContextForQueries = async ({
@@ -187,23 +338,56 @@ const retrievePerDocumentContextForQueries = async ({
   retrievalQueries,
   retrievalOptions = {},
 }) => {
-  const resultGroups = await Promise.all(
+  const searches = await Promise.all(
     retrievalQueries.map(async (retrievalQuery) => {
       const queryVector =
         retrievalQuery.primary && retrievalQuery.query === primaryQueryText
           ? primaryQueryVector
           : await embedQueryCached(retrievalQuery.query);
-
-      return retrievePerDocumentContext({
+      const search = await retrievePerDocumentContextWithRoutes({
         queryVector,
         queryText: retrievalQuery.query,
         docIds,
         topKPerDoc: retrievalOptions.topKPerDoc,
       });
+
+      return {
+        resultsByDocument: new Map(
+          [...search.resultsByDocument.entries()].map(([docId, results]) => [
+            docId,
+            tagResultsWithQuery(results, retrievalQuery),
+          ])
+        ),
+        routes: search.routes,
+      };
     })
   );
 
-  return mergePerDocumentResults(docIds, ...resultGroups);
+  // Per document, budget one retrieval depth (topKPerDoc) per requirement for the
+  // same reason as the global path: a decomposed comparison retrieves evidence for
+  // each aspect within each document, and a per-request cap would drop all but one
+  // aspect's evidence. Each sub-query returns at most topKPerDoc per document, so
+  // topKPerDoc*queryCount preserves the union while the global re-rank fixes order.
+  const finalTopKPerDoc =
+    (retrievalOptions.topKPerDoc ?? getComparisonTopKPerDoc()) *
+    retrievalQueries.length;
+  const mergedResultsByDocument = mergePerDocumentResults(
+    docIds,
+    ...searches.map((search) => search.resultsByDocument)
+  );
+
+  return {
+    resultsByDocument: new Map(
+      [...mergedResultsByDocument.entries()].map(([docId, results]) => [
+        docId,
+        rerankMergedResults(results, finalTopKPerDoc),
+      ])
+    ),
+    retrieval: buildRetrievalSummary({
+      queryCount: retrievalQueries.length,
+      routes: mergeRouteSummaries(...searches.map((search) => search.routes)),
+    }),
+  };
 };
 
 const buildQaGapPlan = async ({
@@ -241,7 +425,10 @@ const buildQaGapPlan = async ({
 
       return {
         ...supplementalQuery,
-        results: supplementalResults,
+        results: tagResultsWithQuery(supplementalResults, {
+          id: supplementalQuery.id ?? `supplemental-${supplementalQuery.label ?? ""}`,
+          primary: false,
+        }),
       };
     })
   );
@@ -276,6 +463,7 @@ const buildQaGapPlan = async ({
 };
 
 const buildRetrievalConfigTrace = () => ({
+  vectorStoreProvider: getVectorStoreProvider(),
   hybridEnabled: isHybridRetrievalEnabled(),
   hybridFusionMethod: getHybridFusionMethod(),
   rrfK: getRrfK(),
@@ -365,13 +553,14 @@ const executeComparisonRag = async ({
   route,
   selectedDocuments,
 }) => {
-  const perDocumentResults = await retrievePerDocumentContextForQueries({
-    primaryQueryVector: queryVector,
-    primaryQueryText: resolvedQuery,
-    retrievalQueries: plannedRetrievalQueries,
-    retrievalOptions,
-    docIds,
-  });
+  const { resultsByDocument: perDocumentResults, retrieval } =
+    await retrievePerDocumentContextForQueries({
+      primaryQueryVector: queryVector,
+      primaryQueryText: resolvedQuery,
+      retrievalQueries: plannedRetrievalQueries,
+      retrievalOptions,
+      docIds,
+    });
   const confidence = assessComparisonConfidence({
     docIds,
     perDocumentResults,
@@ -407,6 +596,7 @@ const executeComparisonRag = async ({
       plannedRetrievalQueries,
       route,
     }),
+    retrieval,
     perDocumentResults: buildPerDocumentResultsTrace(docIds, perDocumentResults),
     confidence: buildConfidenceTrace(confidence),
     evidenceSummary,
@@ -425,6 +615,7 @@ const executeComparisonRag = async ({
         retrievedContexts: bundle.retrievedContexts,
         evidenceSummary,
         comparisonAnalysisSummary,
+        retrieval,
         abstained: true,
         abstainReason: confidence.reason,
       },
@@ -446,6 +637,7 @@ const executeComparisonRag = async ({
       retrievedContexts: bundle.retrievedContexts,
       evidenceSummary,
       comparisonAnalysisSummary,
+      retrieval,
     },
   };
 };
@@ -462,13 +654,14 @@ const executeQaRag = async ({
   retrievalOptions,
   route,
 }) => {
-  const retrievalResults = await retrieveGlobalContextForQueries({
-    primaryQueryVector: queryVector,
-    primaryQueryText: resolvedQuery,
-    retrievalQueries: plannedRetrievalQueries,
-    retrievalOptions,
-    docIds,
-  });
+  const { results: retrievalResults, retrieval } =
+    await retrieveGlobalContextForQueries({
+      primaryQueryVector: queryVector,
+      primaryQueryText: resolvedQuery,
+      retrievalQueries: plannedRetrievalQueries,
+      retrievalOptions,
+      docIds,
+    });
   const confidence = assessQaConfidence({
     results: retrievalResults,
     queryText: resolvedQuery,
@@ -489,6 +682,7 @@ const executeQaRag = async ({
       plannedRetrievalQueries,
       route,
     }),
+    retrieval,
     retrievalResults: retrievalResults.map((result) => buildResultTrace(result)),
     confidence: buildConfidenceTrace(confidence),
     evidenceSummary,
@@ -511,6 +705,7 @@ const executeQaRag = async ({
         citations: bundle.citations,
         retrievedContexts: bundle.retrievedContexts,
         evidenceSummary,
+        retrieval,
         abstained: true,
         abstainReason: gapPlan.userMessage,
         gapPlan: {
@@ -533,6 +728,7 @@ const executeQaRag = async ({
       })),
       retrievedContexts: bundle.retrievedContexts,
       evidenceSummary,
+      retrieval,
     },
   };
 };

@@ -1,4 +1,8 @@
 import { normalizeTrimmedText as normalizeText } from "../../../lib/normalize-text.js";
+import {
+  CUSTOM_RAG_SKILL_CONTRACT,
+  buildPriorFindingsSection,
+} from "./custom-skill-contract.js";
 
 export const EXTRACT_TIMELINE_SKILL_ID = "extract_timeline";
 
@@ -14,7 +18,7 @@ const getSelectedDocuments = ({ ragService, docIds = [], accessScope }) => {
   return documents.filter((document) => selectedDocIds.has(document.docId));
 };
 
-const buildTimelineQuestion = ({ question, documents = [] }) => {
+const buildTimelineQuestion = ({ question, documents = [], priorFindings }) => {
   const documentList = documents
     .map((document) => `- ${document.fileName ?? document.docId}`)
     .join("\n");
@@ -25,6 +29,7 @@ const buildTimelineQuestion = ({ question, documents = [] }) => {
     "If the documents do not support a date or sequence, say it is not specified instead of guessing.",
     "Return bullet points ordered earliest to latest, and include source citations on each supported bullet.",
     documentList ? `Selected documents:\n${documentList}` : "",
+    buildPriorFindingsSection(priorFindings),
     `Original request: ${normalizeText(question)}`,
   ]
     .filter(Boolean)
@@ -38,6 +43,9 @@ export const createExtractTimelineSkill = () => ({
   kind: "custom",
   budgetKey: "customSkillCalls",
   requiresAccessScope: true,
+  ...CUSTOM_RAG_SKILL_CONTRACT,
+  plannerSummary:
+    "Builds a cited chronology of dates, deadlines, effective periods, and milestones from the selected documents.",
   match: ({ plan }) => Boolean(plan.wantsTimeline),
   plannerActions: ({ docIds }) => [
     {
@@ -48,7 +56,14 @@ export const createExtractTimelineSkill = () => ({
       }.`,
     },
   ],
-  execute: async ({ ragService, question, docIds, accessScope, retrievalPlan }) => {
+  execute: async ({
+    ragService,
+    question,
+    docIds,
+    accessScope,
+    retrievalPlan,
+    priorFindings,
+  }) => {
     const selectedDocuments = getSelectedDocuments({
       ragService,
       docIds,
@@ -57,6 +72,7 @@ export const createExtractTimelineSkill = () => ({
     const timelineQuestion = buildTimelineQuestion({
       question,
       documents: selectedDocuments,
+      priorFindings,
     });
     const value = await ragService.chat(docIds, timelineQuestion, {
       sessionId: null,
@@ -81,6 +97,7 @@ export const createExtractTimelineSkill = () => ({
         abstained: Boolean(value.abstained),
         timelineQuestion,
         retrievalPlan,
+        usedPriorFindings: Boolean(normalizeText(priorFindings)),
       },
     };
   },

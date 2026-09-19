@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: agentai_smoke
           POSTGRES_PASSWORD: postgres
@@ -35,6 +35,11 @@ jobs:
       LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_smoke
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       POSTGRES_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_smoke
+      # Release evidence executes the default retrieval stack: pgvector with
+      # dense + sparse routes fused by RRF. The robust gate checks the reports.
+      VECTOR_STORE_PROVIDER: pgvector
+      RAG_HYBRID_ENABLED: "true"
+      RAG_HYBRID_FUSION: rrf
 
     defaults:
       run:

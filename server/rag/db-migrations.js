@@ -3,10 +3,17 @@ import path from "path";
 import { fileURLToPath } from "url";
 import {
   getAdminAuditEventsPostgresTable,
+  getDocumentChunksPostgresTable,
   getDocumentsPostgresTable,
   getAgentRunEventsPostgresTable,
   getAgentRunsPostgresTable,
+  getEmbeddingDimensions,
   getLongMemoryPostgresTable,
+  getPgvectorHnswEfConstruction,
+  getPgvectorHnswM,
+  getPgvectorIndexType,
+  getPgvectorIvfflatLists,
+  getPgvectorTextSearchConfig,
   getSessionMemoryPostgresTable,
   getTaskEventsPostgresTable,
   getTasksPostgresTable,
@@ -77,6 +84,10 @@ const getTableNames = () => ({
     getWorkspaceArtifactsPostgresTable(),
     "WORKSPACE_ARTIFACTS_POSTGRES_TABLE"
   ),
+  documentChunksTable: ensureSimpleTableName(
+    getDocumentChunksPostgresTable(),
+    "DOCUMENT_CHUNKS_POSTGRES_TABLE"
+  ),
 });
 
 const validateTableNames = (tableNames = {}) => ({
@@ -116,14 +127,157 @@ const validateTableNames = (tableNames = {}) => ({
     tableNames.workspaceArtifactsTable,
     "WORKSPACE_ARTIFACTS_POSTGRES_TABLE"
   ),
+  // Optional for injected table maps so older callers keep working; the
+  // runtime map always carries it.
+  documentChunksTable: ensureSimpleTableName(
+    tableNames.documentChunksTable ?? getDocumentChunksPostgresTable(),
+    "DOCUMENT_CHUNKS_POSTGRES_TABLE"
+  ),
 });
 
-const renderMigrationSql = (sqlText, tableNames = getTableNames()) => {
+const TEXT_SEARCH_CONFIG_PATTERN = /^[a-z_][a-z0-9_]*$/;
+
+const ensureTextSearchConfig = (value) => {
+  const config = String(value ?? "").trim();
+
+  if (!TEXT_SEARCH_CONFIG_PATTERN.test(config)) {
+    throw new Error(
+      `RAG_PGVECTOR_TEXT_SEARCH_CONFIG must be a simple PostgreSQL text search configuration name. Received "${config}".`
+    );
+  }
+
+  return config;
+};
+
+const ensureEmbeddingDimensions = (value) => {
+  const dimensions = Number(value);
+
+  if (!Number.isInteger(dimensions) || dimensions <= 0) {
+    throw new Error(
+      `Embedding dimensions must be a positive integer to size the pgvector column. Received "${value}".`
+    );
+  }
+
+  return dimensions;
+};
+
+// pgvector caps ANN indexes on the built-in `vector` type at 2000 dimensions:
+// hnswbuild.c and ivfbuild.c both raise "column cannot have more than 2000
+// dimensions for <hnsw|ivfflat> index" (ERRCODE_PROGRAM_LIMIT_EXCEEDED) when the
+// column is wider. The `halfvec` type lifts that to 4000, but this store indexes
+// a `vector` column, so 2000 is the ceiling. Above it we fail closed with a
+// diagnostic *before* any DDL runs, rather than letting CREATE INDEX abort a
+// migration halfway with pgvector's raw error.
+export const PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS = 2000;
+
+export const PGVECTOR_MIGRATION_ERROR_CODES = Object.freeze({
+  annDimensionUnsupported: "PGVECTOR_ANN_DIMENSION_UNSUPPORTED",
+});
+
+export class PgvectorAnnDimensionError extends Error {
+  constructor({ dimensions, indexType, limit = PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS }) {
+    super(
+      `pgvector ${indexType} indexes support at most ${limit} dimensions on a vector column, ` +
+        `but the configured embedding is ${dimensions}-dimensional. Retrieval would run without an ` +
+        "ANN index (sequential scan) or the migration would abort. Set OPENAI_EMBEDDING_MODEL / " +
+        `RAG_EMBEDDING_DIMENSIONS to an embedding at or below ${limit} dimensions ` +
+        "(text-embedding-3-small is 1536), or lower the model's output dimensions. The pgvector " +
+        "index is not created rather than silently skipped."
+    );
+    this.name = "PgvectorAnnDimensionError";
+    this.code = PGVECTOR_MIGRATION_ERROR_CODES.annDimensionUnsupported;
+    this.status = 500;
+    this.dimensions = dimensions;
+    this.indexType = indexType;
+    this.limit = limit;
+  }
+}
+
+// Non-throwing predicate for health/status surfaces that must describe the
+// unsupported case without aborting.
+export const isPgvectorAnnDimensionSupported = (dimensions) => {
+  const parsed = Number(dimensions);
+
+  return (
+    Number.isInteger(parsed) &&
+    parsed > 0 &&
+    parsed <= PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS
+  );
+};
+
+export const assertPgvectorAnnDimensionsSupported = ({
+  dimensions = getEmbeddingDimensions(),
+  indexType = getPgvectorIndexType(),
+} = {}) => {
+  const parsed = Number(dimensions);
+
+  if (Number.isInteger(parsed) && parsed > PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS) {
+    throw new PgvectorAnnDimensionError({ dimensions: parsed, indexType });
+  }
+
+  return true;
+};
+
+export const getPgvectorEmbeddingIndexName = (documentChunksTable) =>
+  ensureSimpleTableName(
+    `${ensureSimpleTableName(documentChunksTable, "DOCUMENT_CHUNKS_POSTGRES_TABLE")}_embedding_idx`,
+    "derived pgvector embedding index"
+  );
+
+/**
+ * Cosine index over the embedding column. HNSW by default; IVFFlat is an
+ * explicit choice for archives large enough that build time matters more than
+ * recall at small sizes. Both use vector_cosine_ops because search orders by
+ * the `<=>` cosine distance operator and nothing else.
+ */
+export const buildPgvectorIndexStatement = ({
+  documentChunksTable,
+  dimensions = getEmbeddingDimensions(),
+  hnswEfConstruction = getPgvectorHnswEfConstruction(),
+  hnswM = getPgvectorHnswM(),
+  indexType = getPgvectorIndexType(),
+  ivfflatLists = getPgvectorIvfflatLists(),
+} = {}) => {
+  const tableName = ensureSimpleTableName(
+    documentChunksTable,
+    "DOCUMENT_CHUNKS_POSTGRES_TABLE"
+  );
+  const indexName = getPgvectorEmbeddingIndexName(tableName);
+
+  // Fail closed before emitting CREATE INDEX: a >2000-dim vector column cannot
+  // carry an hnsw/ivfflat index. This is the one chokepoint every index build
+  // (startup migration and the empty-table resize) passes through.
+  assertPgvectorAnnDimensionsSupported({ dimensions, indexType });
+
+  if (indexType === "ivfflat") {
+    return `CREATE INDEX IF NOT EXISTS ${indexName}\n  ON ${tableName} USING ivfflat (embedding vector_cosine_ops)\n  WITH (lists = ${Math.max(1, Math.floor(ivfflatLists))});`;
+  }
+
+  return `CREATE INDEX IF NOT EXISTS ${indexName}\n  ON ${tableName} USING hnsw (embedding vector_cosine_ops)\n  WITH (m = ${Math.max(2, Math.floor(hnswM))}, ef_construction = ${Math.max(4, Math.floor(hnswEfConstruction))});`;
+};
+
+export const renderMigrationSql = (
+  sqlText,
+  tableNames = getTableNames(),
+  {
+    embeddingDimensions = getEmbeddingDimensions(),
+    textSearchConfig = getPgvectorTextSearchConfig(),
+    vectorIndexStatement = null,
+  } = {}
+) => {
   const safeTableNames = validateTableNames(tableNames);
   const agentRunApprovalSnapshotsTable = ensureSimpleTableName(
     `${safeTableNames.agentRunsTable}_approval_snapshots`,
     "derived agent run approval snapshots table"
   );
+  const safeDimensions = ensureEmbeddingDimensions(embeddingDimensions);
+  const safeTextSearchConfig = ensureTextSearchConfig(textSearchConfig);
+  const indexStatement =
+    vectorIndexStatement ??
+    buildPgvectorIndexStatement({
+      documentChunksTable: safeTableNames.documentChunksTable,
+      dimensions: safeDimensions,
+    });
 
   return sqlText
     .replaceAll("__LONG_MEMORY_TABLE__", safeTableNames.longMemoryTable)
@@ -141,11 +295,17 @@ const renderMigrationSql = (sqlText, tableNames = getTableNames()) => {
     .replaceAll(
       "__WORKSPACE_ARTIFACTS_TABLE__",
       safeTableNames.workspaceArtifactsTable
-    );
+    )
+    .replaceAll("__DOCUMENT_CHUNKS_TABLE__", safeTableNames.documentChunksTable)
+    .replaceAll("__EMBEDDING_DIMENSIONS__", String(safeDimensions))
+    .replaceAll("__TEXT_SEARCH_CONFIG__", safeTextSearchConfig)
+    .replaceAll("__VECTOR_INDEX_STATEMENT__", indexStatement);
 };
 
 export const createPostgresMigrator = ({
+  getEmbeddingDimensions: resolveEmbeddingDimensions = getEmbeddingDimensions,
   getTableNames: resolveTableNames = getTableNames,
+  getTextSearchConfig: resolveTextSearchConfig = getPgvectorTextSearchConfig,
   isPostgresConfigured: isConfigured = isPostgresConfigured,
   migrationsDirectory = defaultMigrationsDirectory,
   queryPostgres: query = queryPostgres,
@@ -205,7 +365,11 @@ export const createPostgresMigrator = ({
       const filePath = path.join(migrationsDirectory, fileName);
       const migrationSql = renderMigrationSql(
         await readFile(filePath, "utf8"),
-        resolveTableNames()
+        resolveTableNames(),
+        {
+          embeddingDimensions: resolveEmbeddingDimensions(),
+          textSearchConfig: resolveTextSearchConfig(),
+        }
       );
 
       await withClient(async (client) => {

@@ -19,6 +19,7 @@ import {
   getStepReplaySafetyPolicy,
   listStepReplaySafetyPolicies,
 } from "../rag/agent-run-step-replay-safety.js";
+import { SKILL_EFFECTS } from "../rag/skills/skill-contract.js";
 
 test("step replay safety matrix fixes contracts for core replay paths", () => {
   const matrix = Object.fromEntries(
@@ -244,6 +245,106 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     ),
     false
   );
+});
+
+/**
+ * The custom_skill policy was written when one such step meant one whitelisted
+ * read-only skill, so declaring the whole step type auto-replay-safe was true by
+ * construction. The typed skill contract admits external_write and
+ * workspace_write skills into that same step type, and a graph node runs one of
+ * them under exactly the same step type as a RAG read. The step type is
+ * therefore no longer sufficient on its own: the contract persisted with the
+ * step has to be able to narrow it.
+ */
+test("a step whose persisted contract declares a side effect is never auto-replayed", () => {
+  const assess = (input) =>
+    buildStepReplaySafetyAssessment({
+      step: {
+        id: "custom_skill:node",
+        input: {
+          docIds: ["doc-1"],
+          question: "Which obligations changed?",
+          skillId: "some_skill",
+          ...input,
+        },
+        type: "custom_skill",
+      },
+    });
+
+  const readOnly = assess({
+    effects: SKILL_EFFECTS.readOnly,
+    replaySafe: true,
+  });
+
+  assert.equal(readOnly.canAutoReplay, true);
+  assert.deepEqual(readOnly.reasonCodes, []);
+
+  for (const effects of [
+    SKILL_EFFECTS.externalWrite,
+    SKILL_EFFECTS.workspaceWrite,
+  ]) {
+    const writing = assess({ effects });
+
+    assert.equal(writing.canAutoReplay, false, `${effects} is not auto-replayed`);
+    assert.deepEqual(writing.reasonCodes, [
+      STEP_REPLAY_SAFETY_REASON_CODES.externalWrite,
+    ]);
+  }
+
+  const externalRead = assess({ effects: SKILL_EFFECTS.externalRead });
+
+  assert.equal(externalRead.canAutoReplay, false);
+  assert.deepEqual(externalRead.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+  ]);
+
+  // A skill may be read-only and still refuse replay -- the declaration is the
+  // skill's own, and the recovery layer has no standing to overrule it.
+  const refusesReplay = assess({
+    effects: SKILL_EFFECTS.readOnly,
+    replaySafe: false,
+  });
+
+  assert.equal(refusesReplay.canAutoReplay, false);
+  assert.deepEqual(refusesReplay.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.unsafeByPolicy,
+  ]);
+});
+
+/**
+ * Narrowing only. Every step persisted before the typed contract existed -- and
+ * every step type that never carried one -- keeps the verdict it has today,
+ * because an absent declaration is not evidence of a side effect.
+ */
+test("a step that declares no skill contract keeps its step-type verdict", () => {
+  const legacyCustomSkill = buildStepReplaySafetyAssessment({
+    step: {
+      id: "custom_skill:risk_review",
+      input: {
+        docIds: ["doc-1"],
+        question: "Which obligations changed?",
+        skillId: "risk_review",
+      },
+      type: "custom_skill",
+    },
+  });
+
+  assert.equal(legacyCustomSkill.canAutoReplay, true);
+  assert.deepEqual(legacyCustomSkill.reasonCodes, []);
+
+  const documentRag = buildStepReplaySafetyAssessment({
+    step: {
+      id: "document_rag",
+      input: {
+        docIds: ["doc-1"],
+        question: "Which obligations changed?",
+      },
+      type: "document_rag",
+    },
+  });
+
+  assert.equal(documentRag.canAutoReplay, true);
+  assert.deepEqual(documentRag.reasonCodes, []);
 });
 
 test("action capability replay inherits the capability call safety matrix", () => {

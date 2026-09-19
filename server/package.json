@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "archive:ingest": "node archive-ingest.mjs",
+    "vector:reindex": "node vector-reindex.mjs",
+    "test:pgvector": "node --test test/vector-store-pgvector.integration.test.mjs",
     "eval:synthetic": "node evaluation/run-synthetic-eval.mjs",
     "eval:real": "node evaluation/run-real-eval.mjs",
     "eval:robust-suite": "node evaluation/run-eval-suite.mjs --suite robust",
@@ -14,6 +16,7 @@
     "eval:param-sweep": "node evaluation/run-param-sweep.mjs",
     "eval:rerank": "node evaluation/run-rerank-eval.mjs",
     "eval:rerank:sweep": "node evaluation/run-rerank-sweep.mjs",
+    "eval:retrieval-comparison": "node evaluation/run-retrieval-comparison.mjs",
     "corpus:arxiv": "node evaluation/build-arxiv-corpus.mjs",
     "rerank:cross-encoder:setup": "python3 -m venv --clear --system-site-packages evaluation/.venv-neural-reranker && PYTHONNOUSERSITE=1 evaluation/.venv-neural-reranker/bin/python -m pip install -r evaluation/neural-reranker-requirements.txt",
     "rerank:cross-encoder": "PYTHONNOUSERSITE=1 USE_TF=0 USE_FLAX=0 TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 HF_HOME=evaluation/generated/huggingface evaluation/.venv-neural-reranker/bin/python evaluation/neural-cross-encoder-endpoint.py",

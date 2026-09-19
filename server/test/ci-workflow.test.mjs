@@ -248,7 +248,9 @@ test("planner real provider workflow runs a required scheduled gate", async () =
   assert.doesNotMatch(workflow, /cron:\s*"0 9 \* \* 1"/);
   assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
   assert.match(workflow, /services:\s*\n\s*postgres:/);
-  assert.match(workflow, /image:\s*postgres:16/);
+  // pgvector is the default retrieval provider, so the service must ship the
+  // extension; a plain postgres image would make every eval fail closed.
+  assert.match(workflow, /image:\s*pgvector\/pgvector:pg16/);
   assert.match(workflow, /POSTGRES_DB:\s*agentai_smoke/);
   assert.match(workflow, /--health-cmd "pg_isready -U postgres -d agentai_smoke"/);
   assert.match(
@@ -362,8 +364,16 @@ test("release evidence workflow pins manual and scheduled runs to one target SHA
 test("release evidence workflow generates every required report in one Postgres-backed job", async () => {
   const workflow = await readFile(releaseEvidenceWorkflowPath, "utf8");
 
+  // The release profile must execute the default retrieval stack for real,
+  // not a downgraded one: pgvector, both routes, RRF fusion.
+  assert.match(workflow, /VECTOR_STORE_PROVIDER:\s*pgvector/);
+  assert.match(workflow, /RAG_HYBRID_ENABLED:\s*"true"/);
+  assert.match(workflow, /RAG_HYBRID_FUSION:\s*rrf/);
+
   assert.match(workflow, /services:\s*\n\s*postgres:/);
-  assert.match(workflow, /image:\s*postgres:16/);
+  // pgvector is the default retrieval provider, so the service must ship the
+  // extension; a plain postgres image would make every eval fail closed.
+  assert.match(workflow, /image:\s*pgvector\/pgvector:pg16/);
   assert.match(workflow, /POSTGRES_DB:\s*agentai_smoke/);
   assert.match(
     workflow,
@@ -497,4 +507,38 @@ test("release evidence workflow uploads the complete JSON and Markdown evidence 
       );
     }
   }
+});
+
+test("quality gate workflow backs the current profile and the integration suite with pgvector", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+  const serverTestsJob = workflow.match(
+    /\n  server-tests:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:\n|$)/
+  )?.[0];
+  const qualityGateJob = workflow.match(
+    /\n  quality-gate:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:\n|$)/
+  )?.[0];
+
+  assert.ok(serverTestsJob, "server-tests must be a top-level job");
+  assert.ok(qualityGateJob, "quality-gate must be a top-level job");
+
+  // Integration tests need a real pgvector database; the address is passed
+  // under a dedicated name so the default-provider tests still see no
+  // POSTGRES_DATABASE_URL and keep proving fail-closed behaviour.
+  assert.match(serverTestsJob, /image:\s*pgvector\/pgvector:pg16/);
+  assert.match(
+    serverTestsJob,
+    /PGVECTOR_TEST_DATABASE_URL:\s*postgresql:\/\/postgres:postgres@127\.0\.0\.1:5432\/agentai_test/
+  );
+  assert.doesNotMatch(serverTestsJob, /\n\s*POSTGRES_DATABASE_URL:/);
+
+  // The current quality profile is the PR-time proof that pgvector + hybrid +
+  // RRF actually ran; quality:current rejects reports that say otherwise.
+  assert.match(qualityGateJob, /image:\s*pgvector\/pgvector:pg16/);
+  assert.match(
+    qualityGateJob,
+    /POSTGRES_DATABASE_URL:\s*postgresql:\/\/postgres:postgres@127\.0\.0\.1:5432\/agentai_quality/
+  );
+  assert.match(qualityGateJob, /VECTOR_STORE_PROVIDER:\s*pgvector/);
+  assert.match(qualityGateJob, /RAG_HYBRID_ENABLED:\s*"true"/);
+  assert.match(qualityGateJob, /RAG_HYBRID_FUSION:\s*rrf/);
 });

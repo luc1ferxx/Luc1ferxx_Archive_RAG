@@ -52,6 +52,13 @@ import {
 import { MAX_CHUNK_UPLOAD_SIZE } from "../upload-policy.js";
 import * as uploadSessionStore from "../upload-session-store.js";
 
+// The upload and recovery flows below ingest through the retrieval seam with a
+// fake embedding provider. That is a local-index scenario, so the provider is
+// pinned explicitly for this file; the pgvector default is covered by
+// vector-store-pgvector.integration.test.mjs against a real database.
+process.env.VECTOR_STORE_PROVIDER = "local";
+process.env.RAG_HYBRID_ENABLED = "false";
+
 const okHealthService = {
   buildHealthReport: async () => ({
     status: "ok",
