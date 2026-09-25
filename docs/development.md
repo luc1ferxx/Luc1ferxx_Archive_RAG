@@ -39,6 +39,7 @@
 | `POST` | `/upload/complete` | 合并分片、解析 PDF、写入索引。 |
 | `POST` | `/upload` | 旧版直接上传接口，限制 50 MB。 |
 | `GET` / `POST` | `/chat` | 对选中文档提问，返回 RAG answer、sources、web answer 和 AgentRAG observability。 |
+| `POST` | `/chat/stream` | 与 `/chat` 同参数的 Server-Sent Events 版本：agent 每记录一步 trace 就推送一个 `trace_step` 事件（只含 id/type/label/status/summary，不含 detail），最终答案经 finalizer 校验后以 `result` 事件发送，内容与 `/chat` 的 status 和 body 完全一致，随后是 `done`；失败时发送 `error`。不流式输出 token，因为 finalizer 可能删除未被证据支持的内容。客户端断开后 run 仍会完成。前端入口是 `src/archiveApi.js` 的 `streamChat`。 |
 | `DELETE` | `/sessions/:sessionId` | 清理指定会话记忆。 |
 | `GET` | `/memory` | 查询长期记忆。 |
 | `POST` | `/memory` | 写入长期记忆。 |

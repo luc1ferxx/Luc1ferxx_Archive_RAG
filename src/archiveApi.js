@@ -1,4 +1,5 @@
 import { apiDelete, apiDownload, apiGet, apiPost } from "./apiClient";
+import { API_DOMAIN, buildApiRequestConfig } from "./config";
 
 export const fetchDocuments = async () => {
   return apiGet("/documents");
@@ -189,4 +190,85 @@ export const requestChat = async ({ docIds, question, sessionId, userId, signal 
   };
 
   return apiPost("/chat", payload, { signal, timeout: 0 });
+};
+
+// Parses a server-sent-events buffer into complete events plus the unparsed tail.
+export const parseServerSentEvents = (buffer) => {
+  const blocks = buffer.split(/\r?\n\r?\n/);
+  const rest = blocks.pop() ?? "";
+  const events = blocks.flatMap((block) => {
+    let event = "message";
+    const dataLines = [];
+
+    for (const line of block.split(/\r?\n/)) {
+      if (line.startsWith(":")) continue;
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+
+    if (dataLines.length === 0) return [];
+
+    try {
+      return [{ event, data: JSON.parse(dataLines.join("\n")) }];
+    } catch {
+      return [];
+    }
+  });
+
+  return { events, rest };
+};
+
+/**
+ * POST /chat/stream. Calls onEvent for every agent progress event (trace_step)
+ * as the run records it, and resolves with the same { status, body } that
+ * /chat returns once the verified answer is ready.
+ */
+export const streamChat = async ({ docIds, question, sessionId, userId, signal, onEvent }) => {
+  const response = await fetch(`${API_DOMAIN}/chat/stream`, {
+    body: JSON.stringify({ question, docIds: docIds.join(","), sessionId, userId }),
+    headers: buildApiRequestConfig({
+      headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
+    }).headers,
+    method: "POST",
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    // Validation and auth failures answer with plain JSON before any stream starts.
+    const error = new Error(`Chat stream failed with status ${response.status}.`);
+    error.status = response.status;
+    error.body = await response.json().catch(() => null);
+    throw error;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result = null;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parsed = parseServerSentEvents(buffer);
+    buffer = parsed.rest;
+
+    for (const { event, data } of parsed.events) {
+      if (event === "result") {
+        result = data;
+      } else if (event === "error") {
+        const error = new Error(data?.error?.message ?? "Chat stream failed.");
+        error.status = data?.status ?? 500;
+        throw error;
+      } else if (event !== "done") {
+        onEvent?.({ event, data });
+      }
+    }
+  }
+
+  if (!result) {
+    throw new Error("Chat stream ended without a result.");
+  }
+
+  return result;
 };

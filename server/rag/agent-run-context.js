@@ -8,6 +8,7 @@ import { buildAgentExperienceMemoryObservability } from "./agent-experience-memo
 import { buildClarificationResponse } from "./agent-response-builder.js";
 import { getSkillDescriptor } from "./agent-skill-observability.js";
 import { buildAgentTraceSummary, buildStep } from "./agent-trace.js";
+import { emitTraceStep } from "./agent-event-stream.js";
 import { createLongMemoryObservability } from "./long-memory.js";
 import { recordRagTrace } from "./observability.js";
 
@@ -70,26 +71,34 @@ export const createAgentRunContext = ({
 
   const getBudgetSnapshot = () => getAgentBudgetSnapshot(budgetState);
 
+  // A step reaches a streaming client only once it is really in the trace, so the
+  // stream never shows a step the trace budget dropped.
+  const recordStep = (builtStep) => {
+    const appended = appendTraceStep({ budgetState, trace, step: builtStep });
+
+    if (appended) {
+      emitTraceStep(builtStep);
+    }
+
+    return appended;
+  };
+
   const addTraceStep = (step) =>
-    appendTraceStep({
-      budgetState,
-      trace,
-      step: buildStep({
+    recordStep(
+      buildStep({
         index: trace.length + 1,
         ...step,
-      }),
-    });
+      })
+    );
 
   const addBudgetLimitTrace = ({ reason, tool }) =>
-    appendTraceStep({
-      budgetState,
-      trace,
-      step: buildBudgetLimitStep({
+    recordStep(
+      buildBudgetLimitStep({
         index: trace.length + 1,
         reason,
         tool,
-      }),
-    });
+      })
+    );
 
   const setSkillTracker = (tracker = {}) => {
     skillTracker = {

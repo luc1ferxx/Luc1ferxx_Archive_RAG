@@ -343,7 +343,7 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | 文档管理 | `/documents`, `/documents/:docId/file`, `/documents/clear` |
 | 生成结果 | `GET /artifacts`, `GET /artifacts/:artifactId`, download 和 archive actions |
 | 上传 | `/upload/init`, `/upload/status`, `/upload/chunk`, `/upload/complete`, `/upload` |
-| 问答 | `GET /chat`, `POST /chat` |
+| 问答 | `GET /chat`, `POST /chat`, `POST /chat/stream`（SSE 进度事件） |
 | Tasks | `/tasks`, `/agent-tasks`, `/agent-triggers`, `/tasks/:taskId`, `/tasks/:taskId/actions/:action` |
 | Agent runs | `/agent-runs`, `/agent-runs/recovery`, `/agent-runs/:runId`, approval/recovery/retry actions |
 | Capabilities | `GET /capabilities` |
