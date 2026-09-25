@@ -16,6 +16,7 @@ import {
   getResultKey,
 } from "./citations.js";
 import { evaluateClaimSupport } from "./agent-self-check.js";
+import { normalizeGroupedSourceLabels } from "./self-check/text.js";
 import { completeText } from "./openai.js";
 import { normalizeWhitespace } from "./text-utils.js";
 import { evaluateBidirectionalEvidenceEntailment } from "./comparison-equivalence.js";
@@ -866,7 +867,9 @@ export const writeQaAnswer = async ({
       context: bundle.context,
     },
   });
-  const text = await completeText(prompt);
+  // Models often group sources as [Source 1, Source 3]; every downstream reader
+  // (self-check, finalizer, citation projection) parses one rank per bracket.
+  const text = normalizeGroupedSourceLabels(await completeText(prompt));
 
   return {
     text: text || "I couldn't synthesize an answer from the retrieved document evidence.",
@@ -918,7 +921,7 @@ export const writeComparisonAnswer = async ({
       context: bundle.context,
     },
   });
-  const text = await completeText(selectedPrompt);
+  const text = normalizeGroupedSourceLabels(await completeText(selectedPrompt));
   const generatedText =
     text ||
     "I couldn't produce a reliable comparison from the retrieved document evidence.";

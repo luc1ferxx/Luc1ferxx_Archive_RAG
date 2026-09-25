@@ -338,8 +338,10 @@ export const extractSourceRanks = (value = "") =>
 
 export const normalizeGroupedSourceLabels = (value = "") =>
   String(value ?? "").replace(GROUPED_SOURCE_LABEL_PATTERN, (group) =>
-    [...group.matchAll(/(?:source|来源)\s*(\d+)/gi)]
-      .map((match) => `[Source ${match[1]}]`)
+    // The pattern admits only source words, separators, and ranks, so every
+    // number in the group is a rank, including the bare ones in [Sources 1, 3].
+    [...group.matchAll(/\d+/g)]
+      .map((match) => `[Source ${match[0]}]`)
       .join(" ")
   );
 

@@ -8,8 +8,12 @@ export const CHECKABLE_CITATION_FIELDS = [
 
 export const SOURCE_LABEL_PATTERN = /\[(?:source|来源)\s*\d+\]/gi;
 export const SOURCE_LABEL_CAPTURE_PATTERN = /\[(?:source|来源)\s*(\d+)\]/gi;
+// One bracket naming several sources, as models commonly write them:
+// [Source 1 Source 3], [Source 1, Source 3], [Sources 1, 3], [Source 1 and 3],
+// [来源 1、来源 3]. Consecutive numbers need a separator or a source word between
+// them, so [Source 12] is never read as sources 1 and 2.
 export const GROUPED_SOURCE_LABEL_PATTERN =
-  /\[(?:(?:source|来源)\s*\d+\s*){2,}\]/gi;
+  /\[(?:source|来源)s?\s*\d+(?:\s*(?:[,，、;；&]|and|和|及)\s*(?:(?:source|来源)s?\s*)?\d+|\s*(?:source|来源)s?\s*\d+)+\s*\]/gi;
 export const NUMBER_PATTERN =
   /(?<![\w.+-])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?(?![\w%]|\.\d)/g;
 export const NUMERIC_CONSTRAINT_PATTERNS = [

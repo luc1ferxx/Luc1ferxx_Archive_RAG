@@ -45,6 +45,13 @@ export const getCitationDocumentLabels = (citations = []) =>
     })
   );
 
+// File names that tell sibling documents apart by a short suffix -- vendor-a /
+// vendor-b, contract_ii, option-beta -- are document labels even without an
+// identity noun such as "policy". Topical names (remote-work.pdf) still are not,
+// so a claim's subject is never stripped just because a file shares its words.
+const VARIANT_LABEL_PATTERN =
+  /[-_\s]([a-z]|ii|iii|iv|vi|vii|viii|ix|xi|xii|alpha|beta|gamma|delta)$/i;
+
 export const getCitationDocumentAliasEntries = (citation = {}) => {
   const fileName = normalizeEvidenceText(citation?.fileName);
   const fileNameWithoutExtension = fileName.replace(/\.[^.]+$/, "");
@@ -57,8 +64,13 @@ export const getCitationDocumentAliasEntries = (citation = {}) => {
   const entries = rawLabels.map(({ value, isDocId }) => {
     const normalized = normalizeSearchText(value);
     const terms = extractMeaningfulTokens(normalized);
+    const variantSuffix =
+      (isDocId ? value : value.replace(/\.[^.]+$/, ""))
+        .match(VARIANT_LABEL_PATTERN)?.[1]
+        ?.toLowerCase() ?? null;
     const identityLike =
       isDocId ||
+      Boolean(variantSuffix) ||
       /\d/.test(value) ||
       CHINESE_DOCUMENT_IDENTITY_PATTERN.test(value) ||
       terms.some((term) => DOCUMENT_IDENTITY_TERMS.has(term));
@@ -67,6 +79,7 @@ export const getCitationDocumentAliasEntries = (citation = {}) => {
       normalized,
       removable:
         identityLike && (terms.length >= 2 || /[-_]/.test(value)),
+      variantSuffix,
     };
   });
 
@@ -80,7 +93,12 @@ export const getCitationDocumentAliasEntries = (citation = {}) => {
           !DOCUMENT_IDENTITY_TERMS.has(term)
       );
 
-    if (entry.removable && shortAlias?.length >= 3) {
+    // When a variant suffix is too short to be a meaningful token (vendor-a), the
+    // short alias falls back to the stem every sibling shares ("vendor") and would
+    // attribute a claim to all of them. A suffix that survives (alpha) is kept.
+    const sharedStemAlias = entry.variantSuffix && shortAlias !== entry.variantSuffix;
+
+    if (entry.removable && !sharedStemAlias && shortAlias?.length >= 3) {
       entries.push({
         normalized: shortAlias,
         removable: true,

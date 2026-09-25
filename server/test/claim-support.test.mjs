@@ -5,6 +5,7 @@ import { buildFeedbackRecord } from "../feedback.js";
 import { buildFeedbackCorpusFromRecords } from "../evaluation/feedback-corpus.js";
 import { finalizeAgentAnswer } from "../rag/agent-finalizer.js";
 import { evaluateDocumentEvidence } from "../rag/agent-self-check.js";
+import { getCitationDocumentAliases } from "../rag/self-check/attribution.js";
 
 test("document evidence check fails when an answer claim is unsupported by citations", () => {
   const check = evaluateDocumentEvidence({
@@ -5188,4 +5189,71 @@ test("quoted refutations are mentions rather than supporting assertions", () => 
   });
 
   assert.equal(check.passed, false);
+});
+
+const vendorLiabilityCitations = [
+  {
+    rank: 1,
+    docId: "doc-vendor-a",
+    fileName: "vendor-a.pdf",
+    excerpt:
+      "The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim.",
+  },
+  {
+    rank: 2,
+    docId: "doc-vendor-b",
+    fileName: "vendor-b.pdf",
+    excerpt:
+      "The total liability of Vendor B shall not exceed the fees paid in the six (6) months preceding the claim.",
+  },
+];
+
+const checkVendorDifferences = (lines, citations = vendorLiabilityCitations) =>
+  evaluateDocumentEvidence({
+    docIds: ["doc-vendor-a", "doc-vendor-b"],
+    ragResult: {
+      ok: true,
+      value: { text: ["Differences:", ...lines].join("\n"), citations },
+    },
+  });
+
+test("document evidence check pairs Differences bullets for variant file names like vendor-a", () => {
+  // The real DocCompare fixture shape. Before variant names counted as document
+  // labels, "vendor a" was read as the fact subject, the two bullets looked like
+  // facts about different subjects, and every grounded comparison abstained.
+  const check = checkVendorDifferences([
+    "- vendor-a states The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim. [Source 1]",
+    "- vendor-b states The total liability of Vendor B shall not exceed the fees paid in the six (6) months preceding the claim. [Source 2]",
+  ]);
+
+  assert.equal(check.passed, true);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 0);
+});
+
+test("document evidence check still rejects identical facts under variant file names", () => {
+  const sameRule = "Remote work requires manager approval.";
+  const check = checkVendorDifferences(
+    [
+      "- vendor-a requires manager approval. [Source 1]",
+      "- vendor-b requires manager approval. [Source 2]",
+    ],
+    vendorLiabilityCitations.map((citation) => ({ ...citation, excerpt: sameRule }))
+  );
+
+  assert.equal(check.passed, false);
+  assert.equal(check.claimSupport.unsupportedClaimCount, 2);
+});
+
+test("variant file names never share their stem as a document alias", () => {
+  const vendorA = getCitationDocumentAliases({ docId: "doc-vendor-a", fileName: "vendor-a.pdf" });
+  const vendorB = getCitationDocumentAliases({ docId: "doc-vendor-b", fileName: "vendor-b.pdf" });
+
+  // "vendor" would attribute a claim about either document to both of them.
+  assert.equal(vendorA.includes("vendor"), false);
+  assert.equal(vendorB.includes("vendor"), false);
+  assert.ok(vendorA.includes("vendor a"));
+  // A suffix that is itself meaningful stays a short alias.
+  assert.ok(
+    getCitationDocumentAliases({ docId: "doc-alpha", fileName: "handbook-alpha.pdf" }).includes("alpha")
+  );
 });

@@ -33,13 +33,21 @@
 // something the way a frontier model would is not a product defect. Advisory
 // failures are reported and do not fail the run.
 //
-// EXPECTED SELF-TEST RESULT: 16/18, with compare.answers and compare.value-binding
-// failing. That is correct, not a regression -- but read the reason carefully, because it
-// is easy to get wrong. The comparison answer has three stages (answer-writer.js ~923-957):
-// use the model's text if it passes isSafeStructuredDifferenceAnswer, else fall back to an
-// engine-constructed buildGroundedDifferenceAnswer, else abstain. Under the deterministic
-// stand-in BOTH the stitched text and the engine's grounded fallback fail that check, so it
-// abstains -- and this harness reports a failure rather than passing a fake.
+// EXPECTED SELF-TEST RESULT: 18/18. The comparison answer has three stages
+// (answer-writer.js writeComparisonAnswer): use the model's text if it passes
+// isSafeStructuredDifferenceAnswer, else fall back to an engine-constructed
+// buildGroundedDifferenceAnswer, else abstain. Both the self-test and a real qwen2.5:7b
+// run currently pass through the engine fallback; a paraphrasing model's own text
+// ("a 12-month period" for "twelve (12) months ... shall not exceed") is still rejected
+// by the lexical claim check, which is a known limit, not a harness defect.
+//
+// This used to score 16/18 with the comparison abstaining, and that was blamed on the
+// stand-in model. The real cause was the claim check itself: "vendor-a.pdf" was not
+// recognised as a document label (no identity noun, no digit), so "vendor a" was read as
+// the fact's subject and the two per-document difference bullets could never pair. Grouped
+// citations such as [Source 1, Source 3] were also not parsed. Both are pinned by
+// test/claim-support.test.mjs and test/grouped-source-labels.test.mjs. If compare.* fails
+// again, find which stage rejected the answer before blaming the model.
 //
 // Do NOT assume the comparison answer path is covered elsewhere. "the MCP ask tool carries
 // a real comparison summary onto the wire" in test/rag.test.mjs runs under that file's stub
