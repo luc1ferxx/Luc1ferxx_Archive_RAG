@@ -280,7 +280,7 @@ Route resolution 会消费 workspace policy，例如 blocked/allowed model ids�
 - `server/evaluation/observability-report.js` 会从同一个 RAG observability JSONL 中汇总 LLMOps events，按 operation 和 model route 输出 count、平均延迟、error rate、token totals、estimated cost、SLO breach rate、annotation counts、alert counts 和 budget status counts。
 - `/admin/status` 可通过注入 `llmOpsService.readLatestObservabilityReport()` 暴露 compact LLMOps health surface，汇总 event count、error、alert、budget exceeded、tokens 和 estimated cost，不返回原始 prompt、error body 或 secret-like 字段。
 
-当前 LLMOps 薄切片已覆盖 usage/cost/SLO、annotation、alert 和 per-event budget verdict / block mode。账号级长期 quota、告警外发和自动熔断仍应继续消费同一 policy event contract，而不是在各个模型调用点重复统计。
+当前 LLMOps 薄切片已覆盖 usage/cost/SLO、annotation、alert 和 per-event budget verdict / block mode。每个模型端点的并发上限和熔断器在 HTTP 客户端层（`server/rag/model-call-guard.js`），按连续不可用错误熔断，不读 LLMOps 事件；账号级长期 quota 和告警外发仍应继续消费同一 policy event contract，而不是在各个模型调用点重复统计。
 
 ## Research task / dossier
 

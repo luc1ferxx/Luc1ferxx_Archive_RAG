@@ -23,7 +23,7 @@
 | 结构化输出 | 规划器调用发送按请求从白名单生成的 strict JSON Schema；自由文本和数组都有上限；校验器仍是最终裁决 | `rag/structured-output.js` |
 | 持久化与恢复 | 运行、步骤、事件存在 PostgreSQL；guarded 图的 checkpoint 只能在节点边界续跑；认领、节点开始、完成都用运行版本号 CAS 防止旧 worker 重复执行；有副作用的步骤不会被自动重放 | `rag/agent-execution-graph-checkpoint.js`、`rag/agent-run-step-replay-safety.js`、`rag/agent-runs.js` |
 | 预算 | 每次运行两层：次数（文档 RAG 2 次、自定义 Skill 2 次、Web 搜索 1 次、trace 16 步），以及用量（默认 10 万 token、0.5 美元、5 分钟）。用量按每次成功的模型调用计量，用完后下一个工具被跳过、运行降级而不报错；已开始的步骤会跑完，所以是软截止 | `rag/agent-budget.js`、`rag/run-usage.js` |
-| LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型 | `rag/openai.js`、`rag/openai-client.js`、`rag/model-providers/` |
+| LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 流式进度 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要，经校验的最终答案整体发送；不流式输出 token | `routes/chat.js`、`rag/agent-event-stream.js` |
 
 默认配置：hybrid 检索（pgvector 余弦 + PostgreSQL 全文检索，RRF 融合），rerank 关闭，规划器用 LLM，自定义 Skill 阶段默认由 typed DAG 执行（`AGENT_SKILL_GRAPH_ROLLOUT=guarded`），V1 顺序链只在整图被拒时兜底。
@@ -87,6 +87,16 @@
 | 主模型宕机 | 0% | **100%** | 0% |
 
 代价：限流场景 p95 从约 2.5 秒升到约 4.7 秒。评测里备用模型和主模型共用一个限流器，是 failover 的最坏情况。
+
+并发上限与熔断（同一评测，三轮平均；改前 `d5623593`，改后加 `rag/model-call-guard.js`）：
+
+| 场景 | 改前 | 改后 |
+| --- | --- | --- |
+| 主模型宕机，有备用模型 | 每次调用 5.00 个请求，p50 2.6s | **1.33 个请求，p50 24ms** |
+| 主模型宕机，无备用模型 | 等 2.6s 后失败 | **立即失败（<1ms）** |
+| 自托管服务饱和（2 个工作线程，16 个并发调用方） | 1.42 个请求/调用，p95 5.2s，服务端峰值排队 16 | **1.00，p95 3.2s，峰值排队 8** |
+
+成功率在这三个场景都没变：重试本来就能兜住，改进的是延迟和对故障端点、过载服务的无效请求。其他场景在噪声内不变，40% 返回 503 的场景没有误熔断。饱和场景是为这次改动新加的，改前改后跑的是同一份脚本。
 
 ### 3.5 执行器转正：typed DAG 设为默认
 

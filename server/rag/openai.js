@@ -1,4 +1,5 @@
 import { createChatClient, createEmbeddingsClient } from "./openai-client.js";
+import { CIRCUIT_OPEN_CODE, resetModelCallGuards } from "./model-call-guard.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import { getLlmOpsPolicy, isStructuredOutputEnabled } from "./config.js";
 import {
@@ -39,7 +40,18 @@ const sleep = (durationMs) =>
     setTimeout(resolve, durationMs);
   });
 
+// An open circuit is not retried on the same model -- that is the point of it --
+// but it is exactly the case failover exists for.
+const isFailoverEligible = (error) =>
+  isRetriableError(error) || error?.code === CIRCUIT_OPEN_CODE;
+
 const isRetriableError = (error) => {
+  // Carries a 503 so callers see an unavailable model, but retrying it on the
+  // same model would only wait out a backoff to be rejected again.
+  if (error?.code === CIRCUIT_OPEN_CODE) {
+    return false;
+  }
+
   const status = Number(error?.status);
   const code = String(error?.code ?? error?.cause?.code ?? "").toUpperCase();
 
@@ -386,6 +398,7 @@ export const configureOpenAIProvider = (provider) => {
   customProvider = provider ?? null;
   embeddingsInstances = new Map();
   chatModelInstances = new Map();
+  resetModelCallGuards();
 };
 
 export const resetOpenAIProvider = () => {
@@ -588,9 +601,9 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
   try {
     return await completeOn(primary);
   } catch (primaryError) {
-    // Only a transient failure fails over. A 400/401, a policy block, or a
-    // budget block would fail the same way on any model.
-    if (!isRetriableError(primaryError) || primary.failovers.length === 0) {
+    // Only a transient failure or an open circuit fails over. A 400/401, a
+    // policy block, or a budget block would fail the same way on any model.
+    if (!isFailoverEligible(primaryError) || primary.failovers.length === 0) {
       throw primaryError;
     }
 
@@ -602,7 +615,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
       } catch (failoverError) {
         lastError = failoverError;
 
-        if (!isRetriableError(failoverError)) {
+        if (!isFailoverEligible(failoverError)) {
           break;
         }
       }

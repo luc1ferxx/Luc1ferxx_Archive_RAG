@@ -7,6 +7,11 @@
 // eval measures what a caller experiences: how many calls succeed within a
 // latency SLO, how many upstream requests each call cost, and p50/p95 latency.
 //
+// The saturated scenario models a self-hosted server (Ollama, vLLM) rather than
+// a hosted API: a fixed number of workers, a queue in front of them, and no way
+// to cancel a request the client has already given up on. It is the case a
+// client-side concurrency cap exists for.
+//
 // Fault decisions come from a seeded generator, so a scenario injects the same
 // fault mix on every run. Request interleaving under concurrency still varies,
 // so treat small differences between runs as noise.
@@ -66,6 +71,15 @@ export const RESILIENCE_SCENARIOS = Object.freeze([
     description: "Every request for the primary model fails with 503; the fallback model is healthy.",
     faults: { downModels: [PRIMARY_MODEL] },
   },
+  {
+    id: "saturated",
+    // Last on purpose: requests the clients abandoned keep the workers busy
+    // after the scenario ends, and nothing should run behind them.
+    description:
+      "A self-hosted server with 2 workers at 400 ms per request; excess requests queue, and a request the client gave up on is still processed. 16 concurrent callers.",
+    concurrency: 16,
+    faults: { capacity: 2, serviceMs: 400 },
+  },
 ]);
 
 // mulberry32, so a scenario injects the same fault sequence on every run.
@@ -92,8 +106,24 @@ export const startFaultInjectingServer = async () => {
   let faults = {};
   let random = createSeededRandom(1);
   let bucket = { tokens: 0, refilledAt: 0 };
-  const stats = { requests: 0, byModel: {} };
+  const stats = { requests: 0, byModel: {}, peakPending: 0 };
   const hangingResponses = new Set();
+  // Saturated-server model: requests wait for one of `capacity` workers. A
+  // worker finishes the request even if the client has gone, which is what
+  // makes client timeouts plus retries pile up instead of shedding load.
+  const workQueue = [];
+  let busyWorkers = 0;
+  const pumpWorkers = () => {
+    while (busyWorkers < (faults.capacity ?? 0) && workQueue.length > 0) {
+      const job = workQueue.shift();
+      busyWorkers += 1;
+      setTimeout(() => {
+        busyWorkers -= 1;
+        job();
+        pumpWorkers();
+      }, faults.serviceMs ?? 0);
+    }
+  };
 
   // Returns 0 when a token was taken, else the milliseconds until one refills.
   const takeRateLimitToken = (perSecond) => {
@@ -145,15 +175,21 @@ export const startFaultInjectingServer = async () => {
         return;
       }
       const content = faults.emptyRate && roll < faults.emptyRate ? "" : "pong";
-      setTimeout(
-        () =>
-          send(200, {
-            choices: [{ finish_reason: "stop", index: 0, message: { content, role: "assistant" } }],
-            model: payload.model,
-            usage: { completion_tokens: 1, prompt_tokens: 1, total_tokens: 2 },
-          }),
-        20
-      );
+      const answer = () => {
+        if (response.destroyed || response.writableEnded) return;
+        send(200, {
+          choices: [{ finish_reason: "stop", index: 0, message: { content, role: "assistant" } }],
+          model: payload.model,
+          usage: { completion_tokens: 1, prompt_tokens: 1, total_tokens: 2 },
+        });
+      };
+      if (faults.capacity) {
+        workQueue.push(answer);
+        stats.peakPending = Math.max(stats.peakPending, workQueue.length + busyWorkers);
+        pumpWorkers();
+        return;
+      }
+      setTimeout(answer, 20);
     });
   });
 
@@ -167,6 +203,7 @@ export const startFaultInjectingServer = async () => {
       bucket = { tokens: faults.rateLimitPerSecond ?? 0, refilledAt: Date.now() };
       stats.requests = 0;
       stats.byModel = {};
+      stats.peakPending = 0;
     },
     stats: () => ({ ...stats, byModel: { ...stats.byModel } }),
     close: async () => {
@@ -214,7 +251,8 @@ export const runResilienceScenario = async ({
     }
   };
 
-  await Promise.all(Array.from({ length: Math.min(concurrency, calls) }, worker));
+  const callers = scenario.concurrency ?? concurrency;
+  await Promise.all(Array.from({ length: Math.min(callers, calls) }, worker));
   const stats = server.stats();
   const succeeded = results.filter((result) => result.outcome === "ok");
   const outcomes = results.reduce((counts, result) => {
@@ -231,6 +269,8 @@ export const runResilienceScenario = async ({
     upstreamRequests: stats.requests,
     requestsPerCall: Number((stats.requests / calls).toFixed(2)),
     requestsByModel: stats.byModel,
+    concurrency: callers,
+    ...(scenario.faults?.capacity ? { peakServerPending: stats.peakPending } : {}),
     latencyMs: {
       p50: percentile(results.map((result) => result.latencyMs), 50),
       p95: percentile(results.map((result) => result.latencyMs), 95),
@@ -248,11 +288,11 @@ const renderMarkdown = (report) =>
     `- Per-request timeout offered: ${report.config.requestTimeoutMs} ms; fallback model offered: ${report.config.fallbackOffered ? `\`${FALLBACK_MODEL}\` (behind the same rate limiter: the worst case for failover)` : "none"}`,
     "- Success = non-empty completion within the SLO. Latency covers every call, capped at the SLO.",
     "",
-    "| Scenario | Success | Requests/call | p50 ms | p95 ms | Outcomes |",
-    "|---|---|---|---|---|---|",
+    "| Scenario | Callers | Success | Requests/call | p50 ms | p95 ms | Outcomes |",
+    "|---|---|---|---|---|---|---|",
     ...report.scenarios.map(
       (scenario) =>
-        `| ${scenario.id} | ${(scenario.successRate * 100).toFixed(1)}% | ${scenario.requestsPerCall} | ${scenario.latencyMs.p50} | ${scenario.latencyMs.p95} | ${Object.entries(scenario.outcomes).map(([key, count]) => `${key}: ${count}`).join(", ")} |`
+        `| ${scenario.id} | ${scenario.concurrency} | ${(scenario.successRate * 100).toFixed(1)}% | ${scenario.requestsPerCall} | ${scenario.latencyMs.p50} | ${scenario.latencyMs.p95} | ${Object.entries(scenario.outcomes).map(([key, count]) => `${key}: ${count}`).join(", ")} |`
     ),
     "",
     ...report.scenarios.map((scenario) => `- **${scenario.id}**: ${scenario.description}`),
@@ -294,11 +334,16 @@ const main = async () => {
   delete process.env.OPENAI_API_BASE;
 
   const { completeTextWithMetadata } = await import("../rag/openai.js");
+  // Circuit and concurrency state is per process. Reset it so every scenario
+  // starts from a healthy endpoint instead of inheriting a circuit the previous
+  // scenario opened. Absent in code that predates the guard.
+  const guardModule = await import("../rag/model-call-guard.js").catch(() => null);
   const scenarios = [];
 
   try {
     for (const [index, scenario] of RESILIENCE_SCENARIOS.entries()) {
       if (wanted && !wanted.has(scenario.id)) continue;
+      guardModule?.resetModelCallGuards?.();
       const result = await runResilienceScenario({
         calls,
         complete: (prompt) => completeTextWithMetadata(prompt),
@@ -310,7 +355,7 @@ const main = async () => {
       });
       scenarios.push(result);
       console.log(
-        `${result.id.padEnd(20)} success ${(result.successRate * 100).toFixed(1).padStart(5)}%  requests/call ${String(result.requestsPerCall).padStart(5)}  p50 ${result.latencyMs.p50}ms  p95 ${result.latencyMs.p95}ms`
+        `${result.id.padEnd(20)} success ${(result.successRate * 100).toFixed(1).padStart(5)}%  requests/call ${String(result.requestsPerCall).padStart(5)}  p50 ${result.latencyMs.p50}ms  p95 ${result.latencyMs.p95}ms${result.peakServerPending !== undefined ? `  peak server queue ${result.peakServerPending}` : ""}`
       );
     }
   } finally {

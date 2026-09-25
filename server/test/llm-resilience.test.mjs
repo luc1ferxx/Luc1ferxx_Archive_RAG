@@ -155,3 +155,50 @@ test("the resilience eval measures a scenario end to end", async (t) => {
   assert.ok(result.requestsPerCall >= 1);
   assert.ok(Number.isFinite(result.latencyMs.p95));
 });
+
+test("once a down primary opens its circuit, later calls go straight to the fallback", async (t) => {
+  const server = await withFaultServer(t);
+  server.setScenario(scenario("primary_model_down"), 1);
+
+  for (let index = 0; index < 3; index += 1) {
+    const completion = await completeTextWithMetadata("ping");
+    assert.equal(completion.modelRoute.status, "failover");
+  }
+
+  // The first call spends its four tries (4 failures); the fifth failure, on
+  // the second call's first try, opens the circuit. The second call's retry
+  // and the whole third call send the primary nothing.
+  assert.deepEqual(server.stats().byModel, { "resilience-fallback": 3, "resilience-primary": 5 });
+});
+
+test("without a fallback, an open circuit fails fast instead of retrying a dead model", async (t) => {
+  const server = await withFaultServer(t, { fallback: "" });
+  server.setScenario(scenario("primary_model_down"), 1);
+
+  await assert.rejects(completeTextWithMetadata("ping"), /overloaded/);
+  await assert.rejects(completeTextWithMetadata("ping"), /Circuit open/);
+  const requestsBefore = server.stats().requests;
+  const started = performance.now();
+
+  await assert.rejects(
+    completeTextWithMetadata("ping"),
+    (error) => error.code === "CIRCUIT_OPEN" && error.status === 503
+  );
+
+  assert.equal(server.stats().requests, requestsBefore, "nothing sent while open");
+  assert.ok(performance.now() - started < 100, "no backoff while open");
+});
+
+test("the concurrency cap bounds the queue a saturated server sees", async (t) => {
+  const server = await withFaultServer(t, { fallback: "" });
+  withEnv(t, { RAG_LLM_MAX_CONCURRENCY: "3" });
+  server.setScenario({ faults: { capacity: 1, serviceMs: 30 } }, 1);
+
+  const completions = await Promise.all(
+    Array.from({ length: 10 }, () => completeTextWithMetadata("ping"))
+  );
+
+  assert.ok(completions.every((completion) => completion.text === "pong"));
+  assert.equal(server.stats().requests, 10);
+  assert.equal(server.stats().peakPending, 3);
+});

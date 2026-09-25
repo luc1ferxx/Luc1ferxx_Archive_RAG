@@ -414,7 +414,7 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 
 - 这是本地优先的工程型工作台，不是完整 SaaS 权限系统；多人部署应使用 `API_AUTH_TOKENS` 或 JWT auth，并补齐外围身份提供方、审计和网络隔离。
 - Connector / MCP adapter 默认不会加载任意外部工具；只有显式注册 connector spec、注入 executor，并提供 required secret refs / 可选 sandbox runner 后才会执行，且仍走 capability approval、replay safety、input filtering 和 refs-only secret boundary。
-- Model/provider registry 已接管 chat、embedding、LLM planner 和可选 cross-encoder model name 的选择；LLMOps metrics contract + policy engine + observability/admin reader 已覆盖 completion、embedding 和 cross-encoder rerank 的 route/status/latency/error、token usage/source、estimated cost/pricing source、latency SLO、annotation、alert 和 per-event budget verdict / block mode。账号级长期 quota、告警外发和自动熔断仍应接同一 policy contract 继续扩展。
+- Model/provider registry 已接管 chat、embedding、LLM planner 和可选 cross-encoder model name 的选择；LLMOps metrics contract + policy engine + observability/admin reader 已覆盖 completion、embedding 和 cross-encoder rerank 的 route/status/latency/error、token usage/source、estimated cost/pricing source、latency SLO、annotation、alert 和 per-event budget verdict / block mode。模型调用在 HTTP 客户端层有每端点并发上限和熔断器（`server/rag/model-call-guard.js`，按进程计），每次 Agent 运行有 token/成本/时长上限；账号级长期 quota 和告警外发仍应接同一 policy contract 继续扩展。
 - PostgreSQL（含 pgvector 扩展）是文档、chunk 和向量的持久化主路径；`STARTUP_HEALTH_STRICT=false` 可以让服务在依赖异常时启动，但完整上传/检索工作流仍需要数据库和 OpenAI key。
 - pgvector 的 lexical 路用 PostgreSQL FTS + `ts_rank_cd`，语义上不是 BM25；embedding 模型或维度变更需要显式 `vector:reindex`，不会自动迁移。Local JSON 索引和 Qdrant 只作为显式 opt-in 兼容后端保留，local 只适合单进程小规模工作区。
 - Web search 和 arXiv 导入依赖外部网络；web search 需要 SerpAPI key，arXiv 使用公开 Atom/PDF 地址。

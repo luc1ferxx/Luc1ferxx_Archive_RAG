@@ -1,4 +1,5 @@
 import { getLlmRequestTimeoutMs } from "./config.js";
+import { guardModelCall } from "./model-call-guard.js";
 
 const EMBEDDING_BATCH_SIZE = 512;
 
@@ -88,14 +89,16 @@ export const createEmbeddingsClient = ({ apiKey, model }) => ({
 
     for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
       const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-      const result = await fetchJson(`${baseUrl}/embeddings`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({ input: batch, model }),
-      });
+      const result = await guardModelCall(`${baseUrl}|${model}`, () =>
+        fetchJson(`${baseUrl}/embeddings`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({ input: batch, model }),
+        })
+      );
       const sorted = result.data.sort((a, b) => a.index - b.index);
       for (const item of sorted) {
         allVectors.push(item.embedding);
@@ -107,14 +110,16 @@ export const createEmbeddingsClient = ({ apiKey, model }) => ({
 
   async embedQuery(text) {
     const baseUrl = resolveBaseUrl();
-    const result = await fetchJson(`${baseUrl}/embeddings`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({ input: text, model }),
-    });
+    const result = await guardModelCall(`${baseUrl}|${model}`, () =>
+      fetchJson(`${baseUrl}/embeddings`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ input: text, model }),
+      })
+    );
     return result.data[0].embedding;
   },
 });
@@ -140,18 +145,22 @@ export const createChatClient = ({ apiKey, model }) => ({
       messages = [{ role: "user", content: String(prompt ?? "") }];
     }
 
-    const result = await fetchJson(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        ...(responseFormat ? { response_format: responseFormat } : {}),
-      }),
-    });
+    // Every request, including each retry, passes the endpoint's circuit and
+    // concurrency cap; see model-call-guard.js.
+    const result = await guardModelCall(`${baseUrl}|${model}`, () =>
+      fetchJson(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          ...(responseFormat ? { response_format: responseFormat } : {}),
+        }),
+      })
+    );
 
     return {
       content: result.choices?.[0]?.message?.content ?? "",

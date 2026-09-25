@@ -51,6 +51,9 @@ STARTUP_HEALTH_STRICT=false
 | `RAG_STRUCTURED_OUTPUT_ENABLED` | `true` | intent / execution / DAG planner 调用是否发送按请求生成的 JSON Schema `response_format`（strict）。schema 由运行时白名单生成：可选 step、候选 intent、Skill 的 typed 输入输出和已授权文档都写成枚举，自由文本和数组都有长度上限。它只收窄模型能输出什么，validator 仍是最终裁决。仅当 OpenAI 兼容端点拒绝 `response_format` 时设为 `false`，此时回到纯 prompt JSON 和容错解析。 |
 | `OPENAI_CHAT_FALLBACK_MODEL` | 无 | 可选的备用 chat 模型。chat、intent planner、execution planner 路由上，主模型在重试用尽后仍返回可重试错误（429、5xx、超时）时切到它；400/401、策略或预算拦截不会切换。它经模型注册表登记，与主模型共用 workspace 策略标签，被策略禁用的主模型不会通过备用模型绕过。LLMOps 会分别记录主模型失败事件和备用模型成功事件，返回的 `modelRoute.modelId` 是实际作答的模型，`status` 为 `failover`。 |
 | `RAG_LLM_REQUEST_TIMEOUT_MS` | `120000` | 单次模型请求（含读取响应体）的超时。超时按可重试错误处理。重试采用带抖动的指数退避（窗口 500/1000/2000ms），服务端 `retry-after-ms` / `Retry-After` 作为下限并再分散最多一半，超过 10 秒的等待直接放弃重试；空 completion 重试一次，因长度截断而为空的不重试。 |
+| `RAG_LLM_MAX_CONCURRENCY` | `8` | 每个模型端点（base URL + 模型名）同时在途的请求上限，按进程计；`0` 不限。只在请求真正发出期间占用名额，重试的退避等待不占。它防的是自托管服务（Ollama、vLLM）排队过长：队列超过请求超时后，客户端超时重试、服务端还在处理已放弃的请求，负载越积越多。它不是按每分钟请求数或 token 数的限流。 |
+| `RAG_LLM_CIRCUIT_FAILURE_THRESHOLD` | `5` | 同一端点和模型连续多少次"不可用"错误（5xx、408、超时、连接失败）后熔断；`0` 关闭。429、其他 4xx 和空响应不计入：429 说明服务在线，交给退避处理。熔断期间请求不发出、也不重试，直接以 `CIRCUIT_OPEN`（503）失败，chat 路由有备用模型时立即切换。 |
+| `RAG_LLM_CIRCUIT_COOLDOWN_MS` | `30000` | 熔断持续时间。到期后放行一个探测请求：成功则恢复，失败则再熔断一个周期。熔断状态按进程保存，不跨进程共享。 |
 | `AGENT_RUN_MAX_TOKENS` | `100000` | 每次 Agent 运行的模型 token 上限（chat、embedding、rerank 合计，按 LLMOps metric 计）。用完后下一个工具被跳过并写 `budget_limit` trace，运行降级而不报错；`0` 关闭，空值保留默认。见 [agent-rag.md](agent-rag.md#运行预算次数之外的-token成本和时长)。 |
 | `AGENT_RUN_MAX_COST_USD` | `0.5` | 每次运行的估算成本上限，只约束有定价的模型；无定价调用记入 `unpricedModelCalls`。 |
 | `AGENT_RUN_MAX_DURATION_MS` | `300000` | 每次运行的总时长上限，在步骤边界检查：不再开始新工具，不中断进行中的调用。审批续跑从续跑时重新计时。 |

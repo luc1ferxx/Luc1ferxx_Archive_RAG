@@ -62,6 +62,19 @@ export const getLlmRequestTimeoutMs = () => {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 120000;
 };
 
+// Client-side protection per model endpoint (see model-call-guard.js).
+// Requests in flight per endpoint and model; 0 means no cap.
+export const getLlmMaxConcurrency = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_LLM_MAX_CONCURRENCY, 8));
+
+// Consecutive unavailable errors (5xx, timeouts, connection failures) that open
+// the circuit; 0 turns the breaker off.
+export const getLlmCircuitFailureThreshold = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_LLM_CIRCUIT_FAILURE_THRESHOLD, 5));
+
+export const getLlmCircuitCooldownMs = () =>
+  toPositiveNumber(process.env.RAG_LLM_CIRCUIT_COOLDOWN_MS, 30000);
+
 // Per-run ceilings on model usage (see run-usage.js). 0 turns one off; an empty
 // value keeps the default, so a blank line in .env cannot silently remove it.
 const readRunLimit = (name, fallbackValue) => {

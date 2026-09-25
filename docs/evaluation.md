@@ -523,7 +523,7 @@ npm run rerank:cross-encoder:local
 | `npm run eval:retrieval-comparison -- --embedding-provider openai` | 四组检索配置用真实 embedding 对比（任何 OpenAI 兼容端点，含 Ollama），每个 split 带配对 bootstrap 95% CI；报告写到 `latest-retrieval-comparison-openai.*`，不覆盖确定性报告。加 `--rerank-provider cross-encoder --cross-encoder-endpoint <url>` 测神经 reranker（服务见 `npm run rerank:cross-encoder:docker`）。 |
 | `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式：摘要为第 1 页、每个章节一页，证据段落映射到页码，不可回答题成为 `shouldAbstain`。输出默认在已忽略的 `evaluation/generated/`。 |
 | `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
-| `npm run eval:llm-resilience [-- --no-fallback]` | 故障注入：本地 OpenAI 兼容服务注入 429（精确 / 粗粒度 Retry-After）、503、挂起、空响应和主模型宕机，报告 SLO 内成功率、每次调用的上游请求数和 p50/p95。 |
+| `npm run eval:llm-resilience [-- --no-fallback]` | 故障注入：本地 OpenAI 兼容服务注入 429（精确 / 粗粒度 Retry-After）、503、挂起、空响应、主模型宕机，以及模拟自托管服务的饱和场景（2 个工作线程、请求排队、客户端放弃的请求仍被处理，16 个并发调用方），报告 SLO 内成功率、每次调用的上游请求数、p50/p95 和饱和场景的服务端峰值排队。每个场景开始前重置熔断和并发状态，避免上一个场景打开的熔断影响下一个。 |
 
 ### LLM 调用容错：改前 / 改后
 
@@ -540,6 +540,21 @@ npm run rerank:cross-encoder:local
 | 主模型宕机 | 0% | 100% | 0% |
 
 代价：遵守 Retry-After 让限流场景的 p95 从约 2.5 秒升到约 4.7 秒；成功率的提升来自不再在服务端要求等待时抢跑。持续过载下单靠重试无法兜住，需要客户端并发限制或自适应限流。
+
+### 并发上限与熔断：改前 / 改后
+
+同一评测，三轮平均。改前是 `d5623593`（上表"改后"的代码），改后加了 `server/rag/model-call-guard.js`（默认每个端点和模型最多 8 个在途请求，连续 5 次不可用错误熔断 30 秒）。饱和场景是这次新加的，改前改后跑的是同一份评测脚本。
+
+| 场景 | 指标 | 改前 | 改后 |
+| --- | --- | --- | --- |
+| 主模型宕机，有备用模型 | 成功率 / 请求/调用 / p50 / p95 | 100% / 5.00 / 2.6s / 3.1s | 100% / **1.33** / **24ms** / **0.47s** |
+| 主模型宕机，无备用模型 | 成功率 / 请求/调用 / p50 / p95 | 0% / 4.00 / 2.6s / 3.0s | 0% / **0.33** / **<1ms** / 0.48s |
+| 饱和（2 个工作线程，16 个并发调用方） | 成功率 / 请求/调用 / p50 / p95 / 服务端峰值排队 | 100% / 1.42 / 2.4s / 5.2s / 16 | 100% / **1.00** / 2.4s / **3.2s** / **8** |
+
+- 主模型宕机：熔断打开后调用不再先把重试计划在主模型上走一遍，而是直接切备用模型；没有备用模型时立即失败，而不是等 2.6 秒的退避后失败。成功率不变，因为这个场景里重试本来就能兜住，熔断省的是时间和对故障端点的请求。
+- 饱和：改前 42% 的请求是超时后的重试，服务端还在处理客户端已经放弃的请求；并发上限把服务端队列压到 8 以内，排队时间始终短于 3 秒请求超时，于是没有一次重试。p50 不变，因为总工作量由服务端的 2 个工作线程决定，上限只去掉了浪费的部分。
+- 其他场景（限流、503、挂起、空响应）在噪声范围内不变：429 不计入熔断，评测的 8 个并发没超过上限。40% 返回 503 的场景没有误熔断（无备用模型时仍是 100%），但连续失败阈值在更高错误率下可能误熔断，这是阈值的取舍。
+- 边界：状态按进程保存，多进程部署各自计数；上限按在途请求数而不是每分钟 token 数；排队等待没有单独的超时。
 
 ## Ragas supplement
 
