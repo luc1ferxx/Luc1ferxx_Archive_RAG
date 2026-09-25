@@ -6,6 +6,8 @@ import { buildFeedbackCorpusFromRecords } from "../evaluation/feedback-corpus.js
 import { finalizeAgentAnswer } from "../rag/agent-finalizer.js";
 import { evaluateDocumentEvidence } from "../rag/agent-self-check.js";
 import { getCitationDocumentAliases } from "../rag/self-check/attribution.js";
+import { evaluateClaimSupport } from "../rag/self-check/evaluate.js";
+import { collapseParenthesizedNumberRestatements } from "../rag/self-check/text.js";
 
 test("document evidence check fails when an answer claim is unsupported by citations", () => {
   const check = evaluateDocumentEvidence({
@@ -5256,4 +5258,102 @@ test("variant file names never share their stem as a document alias", () => {
   assert.ok(
     getCitationDocumentAliases({ docId: "doc-alpha", fileName: "handbook-alpha.pdf" }).includes("alpha")
   );
+});
+
+// Contracts write numbers twice: "twelve (12) months". Counted as two numbers,
+// no natural restatement ("twelve months", "12 months") could match, and correct
+// answers were rejected; on the verify:quality contracts the agent asked for
+// clarification instead of answering.
+const contractCitation = {
+  docId: "vendor-a",
+  excerpt:
+    "Section 7. Limitation of Liability. The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim. Section 8. Termination. Either party may terminate this agreement on thirty (30) days written notice.",
+  fileName: "vendor-a.pdf",
+  pageNumber: 2,
+};
+
+const isSupported = (claim, citations = [contractCitation]) =>
+  evaluateClaimSupport({ answerText: `${claim} [Source 1]`, citations }).claims[0].supported;
+
+test("a number stated in words and digits supports either restatement of it", () => {
+  for (const claim of [
+    "The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim.",
+    "The total liability of Vendor A shall not exceed the fees paid in the twelve months preceding the claim.",
+    "Vendor A total liability shall not exceed the fees paid in the 12 months preceding the claim.",
+    "Either party may terminate this agreement on 30 days written notice.",
+  ]) {
+    assert.equal(isSupported(claim), true, claim);
+  }
+});
+
+test("the collapse never makes a different number match", () => {
+  assert.equal(
+    isSupported("Vendor A total liability shall not exceed the fees paid in the 13 months preceding the claim."),
+    false
+  );
+  assert.equal(isSupported("Either party may terminate this agreement on 60 days written notice."), false);
+
+  // A source that contradicts itself keeps both numbers, so neither claim passes.
+  const contradictory = [{ ...contractCitation, excerpt: "Either party may terminate this agreement on thirty (60) days written notice." }];
+  assert.equal(isSupported("Either party may terminate this agreement on 30 days written notice.", contradictory), false);
+  assert.equal(isSupported("Either party may terminate this agreement on 60 days written notice.", contradictory), false);
+});
+
+test("only a number restated in the other form collapses", () => {
+  const cases = [
+    ["the twelve (12) months", "the 12 months"],
+    ["a 5 (five) day cure period", "a 5 day cure period"],
+    ["1,000 (one thousand) units", "1,000 units"],
+    ["twenty-four (24) hours", "24 hours"],
+    ["十二（12）个月".normalize("NFKC"), "12个月"],
+    ["twelve (13) months", "twelve (13) months"],
+    ["Section 7 (a)", "Section 7 (a)"],
+    ["version 1.2 (12)", "version 1.2 (12)"],
+  ];
+
+  for (const [input, expected] of cases) {
+    assert.equal(collapseParenthesizedNumberRestatements(input), expected, input);
+  }
+});
+
+
+// PDF text keeps its line wraps. Split at every line break, the notice sentence
+// below becomes two halves and a claim restating it matched neither; the check
+// then fell back to the 220-character preview, which had cut it off.
+test("a sentence wrapped across PDF lines supports a claim that restates it", () => {
+  const wrapped = [{
+    ...contractCitation,
+    evidenceText:
+      "Section 8. Termination.\n\nEither party may terminate this agreement on thirty (30) days\n\nwritten notice to the other party.",
+    excerpt: "Section 8. Termination. Either party may terminate this agreement on thirt",
+  }];
+
+  assert.equal(
+    isSupported("Either party may terminate this agreement on thirty (30) days written notice to the other party.", wrapped),
+    true
+  );
+  assert.equal(
+    isSupported("Either party may terminate this agreement on 30 days written notice to the other party.", wrapped),
+    true
+  );
+  assert.equal(
+    isSupported("Either party may terminate this agreement on 60 days written notice to the other party.", wrapped),
+    false
+  );
+  // Dropping the qualifier that scopes the number still fails, by design: the
+  // numeric check keeps a number bound to the words around it.
+  assert.equal(isSupported("Either party may terminate this agreement on 30 days written notice.", wrapped), false);
+});
+
+test("rejoining wrapped lines never merges list items or labelled values", () => {
+  const listed = [{
+    ...contractCitation,
+    evidenceText: "Fees:\n- Setup fee 500 dollars\n- Monthly fee 100 dollars",
+    excerpt: "Fees: - Setup fee 500 dollars - Monthly fee 100 dollars",
+  }];
+
+  assert.equal(isSupported("The monthly fee is 100 dollars.", listed), true);
+  // Joining the items would have put both values in one sentence; each item
+  // must still be checked on its own.
+  assert.equal(isSupported("The monthly fee is 500 dollars.", listed), false);
 });

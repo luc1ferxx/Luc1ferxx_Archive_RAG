@@ -281,8 +281,50 @@ export const extractOrderedFactTerms = (value = "") =>
 export const extractFactTerms = (value = "") =>
   uniqueValues(extractOrderedFactTerms(value));
 
+// Contracts state a number twice, in words and in digits: "twelve (12) months",
+// "thirty (30) days", "5 (five) days", "十二（12）个月". Read naively that is two
+// numbers, so no restatement of the fact -- "12 months", "twelve months" --
+// could ever match it. When both forms have the same value they are one
+// number; when they disagree ("twelve (13)") both are kept, and the claim
+// fails as it should.
+const DIGIT_NUMBER_SOURCE = "\\d+(?:,\\d{3})*(?:\\.\\d+)?";
+const ENGLISH_NUMBER_WORDS_SOURCE = `(?:${ENGLISH_NUMBER_TOKEN_SOURCE})(?:(?:[ -]+and)?[ -]+(?:${ENGLISH_NUMBER_TOKEN_SOURCE}))*`;
+const CHINESE_NUMBER_WORDS_SOURCE = "[零〇一二两三四五六七八九十百千万]{1,12}";
+const NUMBER_FORM_SOURCE = `(?:${DIGIT_NUMBER_SOURCE}|${ENGLISH_NUMBER_WORDS_SOURCE}|${CHINESE_NUMBER_WORDS_SOURCE})`;
+const PARENTHESIZED_NUMBER_RESTATEMENT_PATTERN = new RegExp(
+  `(?<![\\w.,])(${NUMBER_FORM_SOURCE})\\s*\\(\\s*(${NUMBER_FORM_SOURCE})\\s*\\)`,
+  "gi"
+);
+
+const parseNumberForm = (value = "") => {
+  if (/^\d/.test(value)) {
+    return Number(value.replaceAll(",", ""));
+  }
+
+  return /^[零〇一二两三四五六七八九十百千万]+$/.test(value)
+    ? parseChineseIntegerWords(value)
+    : parseEnglishIntegerWords(value);
+};
+
+export const collapseParenthesizedNumberRestatements = (value = "") =>
+  String(value ?? "").replace(
+    PARENTHESIZED_NUMBER_RESTATEMENT_PATTERN,
+    (match, outside, inside) => {
+      const outsideValue = parseNumberForm(outside);
+
+      if (!Number.isFinite(outsideValue) || outsideValue !== parseNumberForm(inside)) {
+        return match;
+      }
+
+      // Keep the digits as written ("1,000", not "1000") for the extractor.
+      return /^\d/.test(outside) ? outside : /^\d/.test(inside) ? inside : outside;
+    }
+  );
+
 export const normalizeNumericSyntax = (value = "") => {
-  const normalizedSigns = normalizeSemanticText(value)
+  const normalizedSigns = collapseParenthesizedNumberRestatements(
+    normalizeSemanticText(value)
+  )
     .replace(/(?:\*\*|__|~~|`)/g, "")
     .replace(/[()[\]{}]/g, " ")
     .replace(/[−﹣－]/g, "-")

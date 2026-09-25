@@ -870,7 +870,14 @@ export const writeQaAnswer = async ({
   });
   // Streams verified sentences to a waiting client when the agent opened a
   // draft channel for this answer; otherwise null and nothing changes.
-  const drafts = createAnswerDraftReleaser({ citations: bundle.citations });
+  // Checked against the full retrieved text, as the document loop's self-check
+  // is, not the 220-character citation preview.
+  const drafts = createAnswerDraftReleaser({
+    citations: attachRetrievedEvidence({
+      citations: bundle.citations,
+      retrievedContexts: bundle.retrievedContexts ?? [],
+    }),
+  });
   // Models often group sources as [Source 1, Source 3]; every downstream reader
   // (self-check, finalizer, citation projection) parses one rank per bracket.
   const text = normalizeGroupedSourceLabels(

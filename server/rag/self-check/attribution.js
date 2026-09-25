@@ -297,15 +297,55 @@ export const getGroupDocumentAliases = (group = {}) =>
     )
   );
 
+const splitSupportSentences = (text = "") =>
+  text
+    .split(/(?<=[.!?。！？])\s+|\n+/g)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+/**
+ * PDF text keeps the page layout, so a sentence wrapped across lines arrives
+ * as "... on thirty (30) days\n\nwritten notice to the other party." Split at
+ * every line break, neither half supports a claim that restates the sentence.
+ *
+ * A line break is a wrap only when the previous line has no sentence-final
+ * punctuation and the next one continues in lowercase. That leaves a heading
+ * ("Remote Work Policy" / "Employees may ...") apart, which comparison
+ * equivalence depends on to drop it as structure, and never merges list items
+ * or labelled values ("Fee: 100" / "Term: 12 months") into one sentence.
+ * Scripts without case, such as Chinese, are not rejoined.
+ */
+export const joinWrappedLines = (text = "") => {
+  const lines = String(text ?? "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return lines.reduce((joined, line, index) => {
+    if (index === 0) {
+      return line;
+    }
+
+    const previous = lines[index - 1];
+    const wrapped = !/[.!?。！？:：;；]$/.test(previous) && /^[a-z]/.test(line);
+
+    return `${joined}${wrapped ? " " : "\n"}${line}`;
+  }, "");
+};
+
+// Line-level sentences stay; the rejoined ones are added beside them, never in
+// their place, so a claim is checked against both readings of the layout.
 export const buildCitationSupportSentences = (citations = []) =>
   uniqueValues(
     citations.flatMap((citation) =>
-      CHECKABLE_CITATION_FIELDS.flatMap((field) =>
-        String(citation?.[field] ?? "")
-          .split(/(?<=[.!?。！？])\s+|\n+/g)
-          .map((sentence) => sentence.trim())
-          .filter(Boolean)
-      )
+      CHECKABLE_CITATION_FIELDS.flatMap((field) => {
+        const text = String(citation?.[field] ?? "");
+
+        return [
+          ...splitSupportSentences(text),
+          ...(text.includes("\n") ? splitSupportSentences(joinWrappedLines(text)) : []),
+        ];
+      })
     )
   );
 
