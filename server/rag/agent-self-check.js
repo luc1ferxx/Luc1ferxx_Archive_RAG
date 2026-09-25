@@ -4,6 +4,7 @@ export {
   evaluateClaimSupport,
   evaluateAnswerEvidence,
   evaluateDocumentEvidence,
+  evaluateDocumentEvidenceWithJudge,
   selectBetterRagResult,
 } from "./self-check/evaluate.js";
 export { buildEvidenceGaps, buildEvidenceRetryQuestion } from "./self-check/gaps.js";

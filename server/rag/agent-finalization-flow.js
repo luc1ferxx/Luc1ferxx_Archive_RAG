@@ -3,6 +3,9 @@ import {
   shouldRunFinalAnswerVerification,
 } from "./agent-answer-verification.js";
 import { finalizeAgentAnswer } from "./agent-finalizer.js";
+import { evaluateClaimSupport } from "./agent-self-check.js";
+import { getClaimJudgeMode } from "./config.js";
+import { judgeClaimSupport } from "./self-check/claim-judge.js";
 import {
   projectGroundedAnswer,
   projectGroundedRankedContent,
@@ -410,11 +413,27 @@ export const finalizeAgentRun = async ({
   let finalizer = finalVerification.finalizer ?? null;
 
   if (!finalizer && shouldFinalizeAnswer && !finalVerification.check) {
+    // With RAG_CLAIM_JUDGE=llm, claims the lexical check rejects get a second
+    // opinion before the finalizer removes them; verdicts the document loop
+    // already obtained for the same claim and evidence come from the cache.
+    const judgedClaimSupport = getClaimJudgeMode() === "llm"
+      ? await judgeClaimSupport({
+          citations: graphVerificationSources,
+          claimSupport: evaluateClaimSupport({
+            answerText: baseAgentAnswer,
+            citations: graphVerificationSources,
+            comparisonAnalysisSummary,
+          }),
+          comparisonAnalysisSummary,
+        })
+      : null;
+
     finalizer = finalizeAgentAnswer({
       answerText: baseAgentAnswer,
       citations: ragSources,
       evidenceCitations: graphVerificationSources,
       comparisonAnalysisSummary,
+      claimSupport: judgedClaimSupport,
     });
 
     recordWorkingMemoryClaimSupport({

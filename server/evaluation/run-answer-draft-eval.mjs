@@ -81,22 +81,25 @@ const percentile = (values, p) => {
   return Math.round(sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))]);
 };
 
+// [document, question, value the answer must state, value it must not]
 const FIXTURE_QUESTIONS = [
-  ["vendorA", "What is the limitation of liability?"],
-  ["vendorA", "How much notice is required to terminate the agreement?"],
-  ["vendorA", "Which state's law governs the agreement?"],
-  ["vendorB", "What is the limitation of liability?"],
-  ["vendorB", "How much notice is required to terminate the agreement?"],
-  ["vendorB", "Which state's law governs the agreement?"],
-  ["twinLeft", "How many days per week may employees work remotely?"],
+  ["vendorA", "What is the limitation of liability?", /\b(?:twelve|12)\b/i, /\b(?:six|6)\b/i],
+  ["vendorA", "How much notice is required to terminate the agreement?", /\b(?:thirty|30)\b/i, /\b(?:ninety|90)\b/i],
+  ["vendorA", "Which state's law governs the agreement?", /Delaware/i, /New York/i],
+  ["vendorB", "What is the limitation of liability?", /\b(?:six|6)\b/i, /\b(?:twelve|12)\b/i],
+  ["vendorB", "How much notice is required to terminate the agreement?", /\b(?:ninety|90)\b/i, /\b(?:thirty|30)\b/i],
+  ["vendorB", "Which state's law governs the agreement?", /New York/i, /Delaware/i],
+  ["twinLeft", "How many days per week may employees work remotely?", /\b(?:two|2)\b/i, /\b(?:three|3)\b/i],
 ];
 
 const buildFixtureSet = () => {
   const used = [...new Set(FIXTURE_QUESTIONS.map(([key]) => key))];
 
   return {
-    cases: FIXTURE_QUESTIONS.map(([key, question], index) => ({
+    cases: FIXTURE_QUESTIONS.map(([key, question, expected, forbidden], index) => ({
       docId: DOCCOMPARE_FIXTURES[key].docId,
+      expected,
+      forbidden,
       id: `fixture_${key}_${index + 1}`,
       question,
     })),
@@ -145,6 +148,7 @@ const renderSetMarkdown = ({ name, runs, summary }) =>
     `| Retraction causes | ${Object.entries(summary.retractionCauses).map(([cause, n]) => `${cause}: ${n}`).join(", ") || "none"} |`,
     `| Draft resets (retried model calls) | ${summary.resets} |`,
     `| Final answers that were a clarification | ${summary.clarifications}/${summary.cases} |`,
+    `| Answers checked correct / wrong (fixtures only) | ${summary.correctAnswers} / ${summary.wrongAnswers} |`,
     "",
     "| Case | Mode | Drafts | Retained | First draft ms | Final ms | Retraction |",
     "|---|---|---|---|---|---|---|",
@@ -174,6 +178,8 @@ const summarizeRuns = (runs) => {
   return {
     cases: runs.length,
     clarifications: runs.filter((run) => run.agentMode === "clarification").length,
+    correctAnswers: runs.filter((run) => run.correct === true).length,
+    wrongAnswers: runs.filter((run) => run.correct === false).length,
     drafts,
     finalMs: { p50: percentile(runs.map((r) => r.finalMs), 50), p95: percentile(runs.map((r) => r.finalMs), 95) },
     firstDraftMs: {
@@ -308,6 +314,13 @@ const main = async () => {
           finalMs,
           firstDraftMs: firstDraft ? Math.round(firstDraft.atMs) : null,
           id: testCase.id,
+          // Only fixture cases know their answer. An answer that states the
+          // wrong vendor's value is wrong even if it also states the right one.
+          correct:
+            testCase.expected && body.agentMode !== "clarification"
+              ? testCase.expected.test(body.agentAnswer ?? "") &&
+                !testCase.forbidden.test(body.agentAnswer ?? "")
+              : null,
           resets,
           ...scoreDraftRun({
             agentMode: body.agentMode,
@@ -331,6 +344,7 @@ const main = async () => {
     const report = {
       config: {
         chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
+        claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
         embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
       },
       generatedAt: new Date().toISOString(),

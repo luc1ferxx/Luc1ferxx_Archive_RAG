@@ -28,6 +28,7 @@
     "eval:feedback": "node evaluation/build-feedback-corpus.mjs && node evaluation/run-synthetic-eval.mjs evaluation/generated/feedback-corpus.json --latest-name latest-feedback --openai-provider deterministic",
     "eval:feedback:real": "node evaluation/build-feedback-corpus.mjs && node evaluation/run-synthetic-eval.mjs evaluation/generated/feedback-corpus.json --latest-name latest-feedback --openai-provider real",
     "eval:recovery-observability": "node evaluation/run-recovery-observability-eval.mjs",
+    "eval:claim-judge": "node evaluation/run-claim-judge-eval.mjs",
     "eval:answer-drafts": "node evaluation/run-answer-draft-eval.mjs",
     "trace:demo": "node evaluation/run-trace-demo.mjs",
     "eval:llm-resilience": "node evaluation/run-llm-resilience-eval.mjs",

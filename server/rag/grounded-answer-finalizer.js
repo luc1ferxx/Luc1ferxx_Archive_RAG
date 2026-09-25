@@ -156,13 +156,18 @@ export const finalizeGroundedAnswer = ({
   citations = [],
   evidenceCitations = citations,
   comparisonAnalysisSummary = null,
+  // Precomputed support for the same text and evidence, e.g. after the claim
+  // judge (self-check/claim-judge.js); evaluated here otherwise.
+  claimSupport: precomputedClaimSupport = null,
 } = {}) => {
   const text = String(answerText ?? "").trim();
-  const claimSupport = evaluateClaimSupport({
-    answerText: text,
-    citations: evidenceCitations,
-    comparisonAnalysisSummary,
-  });
+  const claimSupport =
+    precomputedClaimSupport ??
+    evaluateClaimSupport({
+      answerText: text,
+      citations: evidenceCitations,
+      comparisonAnalysisSummary,
+    });
   const structure = splitAnswerStructure(text, evidenceCitations);
 
   if (!hasText(text) || citations.length === 0) {

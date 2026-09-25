@@ -96,6 +96,12 @@ export const getAgentRunMaxCostUsd = () =>
 export const getAgentRunMaxDurationMs = () =>
   Math.floor(readRunLimit("AGENT_RUN_MAX_DURATION_MS", 300000));
 
+// Second opinion on claims the lexical claim check rejects (see
+// self-check/claim-judge.js). `off` keeps the lexical verdict alone; `llm` asks
+// the chat model, behind deterministic citation and number guards.
+export const getClaimJudgeMode = () =>
+  toChoice(process.env.RAG_CLAIM_JUDGE, "off", ["llm", "off"]);
+
 // Planner calls send a JSON Schema response_format. Turn it off only for an
 // OpenAI-compatible endpoint that rejects the parameter; the planners then fall
 // back to prompt-only JSON and their tolerant parsers.

@@ -312,6 +312,21 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 前端 `src/components/AgentRunCenter.js` 只消费 `/tasks` 返回的公开 task contract。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。
 
+## Claim 校验：词法规则 + LLM 评审
+
+自检和 finalizer 的 claim 校验默认是词法规则（`self-check/`）：claim 里每个关键词、数字都要能在它引用的证据里找到。它几乎不会放过编造，但也拒绝正确的改写：模型写"liability is capped at twelve months of fees"，证据写"shall not exceed the fees paid in the twelve (12) months"，词法校验判无支持。用本地 7B 模型时，这让合同题 21 次里只有 3 次得到回答，其余都转成澄清。
+
+`RAG_CLAIM_JUDGE=llm` 时，词法校验拒绝的 claim 会交给 LLM 评审（`self-check/claim-judge.js`）复核，一个答案的所有待复核 claim 合成一次调用，按 strict JSON Schema 返回每条的 verdict。评审的权力是受限的：
+
+- 只能把"无支持"改成"有支持"，词法已接受的 claim 不再复核。
+- 引用本身有问题（引用了不存在的来源、来源编号有歧义、归属到别的文档）的 claim 不送评审。
+- claim 里的每个数字都必须在它引用的证据里出现（与词法校验同样的归一化），否则不送评审：数字错误是评审最容易放过的一类。
+- 对比答案不送评审，仍由差异/等价专用逻辑判断。
+- 调用失败、输出无法解析、缺某条 verdict，一律保留词法结论。
+- 结论按 claim 文本 + 证据全文缓存，自检和 finalizer 对同一条 claim 只调一次。
+
+生效位置是文档问答的自检（`evaluateDocumentEvidenceWithJudge`，决定答还是澄清）和文档模式的 finalizer；custom Skill、Web、research 的最终校验和流式草稿仍只用词法规则。trace 的 `claimSupport.judge` 记录复核了几条、升级了几条、被数字规则挡下几条，升级的 claim 保留 `lexicalMissingAnchors` 和评审理由。校准结果见 [evaluation.md](evaluation.md)。
+
 ## 流式进度与校验过的答案草稿
 
 `POST /chat/stream` 推送两类中间事件，最后的 `result` 与 `/chat` 完全一致：

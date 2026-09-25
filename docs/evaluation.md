@@ -523,6 +523,7 @@ npm run rerank:cross-encoder:local
 | `npm run eval:retrieval-comparison -- --embedding-provider openai` | 四组检索配置用真实 embedding 对比（任何 OpenAI 兼容端点，含 Ollama），每个 split 带配对 bootstrap 95% CI；报告写到 `latest-retrieval-comparison-openai.*`，不覆盖确定性报告。加 `--rerank-provider cross-encoder --cross-encoder-endpoint <url>` 测神经 reranker（服务见 `npm run rerank:cross-encoder:docker`）。 |
 | `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式：摘要为第 1 页、每个章节一页，证据段落映射到页码，不可回答题成为 `shouldAbstain`。输出默认在已忽略的 `evaluation/generated/`。 |
 | `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
+| `npm run eval:claim-judge [-- --rounds 3]` | claim 评审的校准门槛：用 verify:quality 合同构造的对照集（14 条正确改写、14 条各错一处：错数字、错主体、错动作方、加条件、去条件、否定、may/must、方向颠倒、外部知识），另有 8 条留出集。分别跑"只用词法"和"词法 + 评审"，报告改写接受率和错误接受率。标签由构造保证，不是人工标注。 |
 | `npm run eval:answer-drafts [-- --set fixtures\|arxiv\|all] [--cases 12]` | 用真实 embedding + chat 模型（任何 OpenAI 兼容端点）在临时 standalone 档案里跑单文档问答：`fixtures` 是 verify:quality 的合同和政策（事实逐字出现），`arxiv` 是 8 篇论文。通过 `runAgentRag` + 流式接收端测首个草稿时间、最终答案时间、草稿保留率、撤回原因和澄清率；报告写到已忽略的 `latest-answer-drafts.*`。 |
 | `npm run eval:llm-resilience [-- --no-fallback]` | 故障注入：本地 OpenAI 兼容服务注入 429（精确 / 粗粒度 Retry-After）、503、挂起、空响应、主模型宕机，以及模拟自托管服务的饱和场景（2 个工作线程、请求排队、客户端放弃的请求仍被处理，16 个并发调用方），报告 SLO 内成功率、每次调用的上游请求数、p50/p95 和饱和场景的服务端峰值排队。每个场景开始前重置熔断和并发状态，避免上一个场景打开的熔断影响下一个。 |
 
@@ -569,6 +570,33 @@ npm run rerank:cross-encoder:local
 | arxiv（12 题 × 3） | 3/36 | 3/36 | 0/36 | 0/36 |
 
 arxiv 的 3 次"回答"都是误路由到时间线 Skill，不是文档问答。`verify:quality` 仍是 18/18。提升很小：这两个 bug 是真的，但不是主要瓶颈；剩下的失败主要是改写用词（见上一节）、"According to policy-v1.pdf"这类文档归属短语没被识别（文件名里的"v1"被当成数字），以及管辖法律问题在检索阶段就判为证据不足。它们要靠替换词法校验器解决，而不是继续打补丁。
+
+### Claim 评审：校准与端到端
+
+`npm run eval:claim-judge`（评审模型 qwen2.5:7b，3 轮）：
+
+| 校验 | 正确改写被接受 | 错误 claim 被接受 |
+| --- | --- | --- |
+| 只用词法 | 3/42（7%） | 0/42 |
+| 词法 + 评审 | 39/42（93%） | 0/42 |
+| 留出集，词法 + 评审 | 10/12 | 0/12 |
+
+- 数字规则在评审前挡下了 6 次错数字。
+- 第一版评测只看拆分后的第一条 claim，把"…30 天书面通知，且通知须挂号寄出"算成了评审误判；实际校验器把它拆成两条，评审只接受了前半句，finalizer 会删掉后半句。修正为"整句拆出的每条都通过才算接受"后误判消失。
+- 真实的误判也有：前一轮里"…six months of fees unless the claim involves data loss"被接受过 1 次，评审的理由写着"引入了原文没有的条件"，结论却是 supported；反方向也出现过（理由说支持、结论说不支持）。7B 评审的结论字段有时和它自己的理由不一致，前后两次完整运行里约百分之一。
+- 标签由构造保证，不是人工标注的真实答案；上线默认值前应该用 `eval:judge -- --labels` 在真实答案上报告一致率和 kappa。
+
+端到端（`eval:answer-drafts`，同一份代码，评审关 / 开各 3 轮）：
+
+| 用例集 | 指标 | 评审关 | 评审开 |
+| --- | --- | --- | --- |
+| fixtures（7 题 × 3） | 得到回答 | 3/21 | **14/21** |
+| | 回答正确 / 错误（值对、且没混入另一家的值） | 3 / 0 | **14 / 0** |
+| | 延迟 p50 / p95 | 1150 / 1463 ms | 1985 / 2367 ms |
+| arxiv（12 题 × 3） | 得到回答（不含误路由） | 0/36 | 3/36 |
+| | 延迟 p50 / p95 | 3269 / 6264 ms | 4312 / 12110 ms |
+
+剩下 7 次澄清里 6 次是两道管辖法律题，检索阶段就判为证据不足，与校验器无关。代价是每个答案多一次模型调用：合同题 p50 多 0.8 秒；论文答案 claim 更多、还可能补检索后再评一次，p95 翻倍。
 
 ### 并发上限与熔断：改前 / 改后
 

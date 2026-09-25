@@ -8,7 +8,7 @@ import {
 import {
   buildEvidenceRetryQuestion,
   buildEvidenceGaps,
-  evaluateDocumentEvidence,
+  evaluateDocumentEvidenceWithJudge,
   selectBetterRagResult,
 } from "./agent-self-check.js";
 import {
@@ -233,7 +233,9 @@ export const runDocumentRagLoop = async ({
     });
   }
 
-  const primaryCheck = evaluateDocumentEvidence({
+  // The judge (RAG_CLAIM_JUDGE=llm) re-checks claims the lexical check
+  // rejected; off, this is the lexical check alone.
+  const primaryCheck = await evaluateDocumentEvidenceWithJudge({
     ragResult: primaryRagResult,
     docIds,
   });
@@ -413,7 +415,7 @@ export const runDocumentRagLoop = async ({
       });
 
       if (followUpRagResult.ok) {
-        const followUpCheck = evaluateDocumentEvidence({
+        const followUpCheck = await evaluateDocumentEvidenceWithJudge({
           ragResult: followUpRagResult,
           docIds,
         });

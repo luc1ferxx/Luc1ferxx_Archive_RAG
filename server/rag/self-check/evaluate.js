@@ -1,3 +1,5 @@
+import { getClaimJudgeMode } from "../config.js";
+import { judgeClaimSupport } from "./claim-judge.js";
 import { filterCitationsToSourceRanks } from "../source-labels.js";
 import { attachRetrievedEvidence } from "../citations.js";
 import {
@@ -284,6 +286,8 @@ export const evaluateAnswerEvidence = ({
   retryRecommended = false,
   unsupportedClaimReason = (claimCount) =>
     `${claimCount} answer claim${claimCount === 1 ? "" : "s"} lacks citation support.`,
+  // Precomputed support, e.g. after the claim judge; evaluated here otherwise.
+  claimSupport: precomputedClaimSupport = null,
 } = {}) => {
   const safeCitations = Array.isArray(citations) ? citations : [];
   const safeDocIds = Array.isArray(docIds) ? docIds : [];
@@ -291,11 +295,12 @@ export const evaluateAnswerEvidence = ({
     ? Math.min(Math.max(safeDocIds.length, 1), 2)
     : 0;
   const claimSupport = normalizeClaimSupport(
-    evaluateClaimSupport({
-      answerText,
-      citations: safeCitations,
-      comparisonAnalysisSummary,
-    })
+    precomputedClaimSupport ??
+      evaluateClaimSupport({
+        answerText,
+        citations: safeCitations,
+        comparisonAnalysisSummary,
+      })
   );
   const answerCitations = filterCitationsToSourceRanks({
     sourceRanks: claimSupport.claims.flatMap(
@@ -385,7 +390,7 @@ export const selectBetterRagResult = ({ primary, retry } = {}) => {
   return getEvidenceScore(retry) > getEvidenceScore(primary) ? retry : primary;
 };
 
-export const evaluateDocumentEvidence = ({ ragResult, docIds = [] } = {}) => {
+export const evaluateDocumentEvidence = ({ ragResult, docIds = [], claimSupport = null } = {}) => {
   if (!ragResult?.ok) {
     return {
       passed: false,
@@ -414,6 +419,7 @@ export const evaluateDocumentEvidence = ({ ragResult, docIds = [] } = {}) => {
     answerLabel: "Document answer",
     answerText: value.text,
     citations: verificationCitations,
+    claimSupport,
     comparisonAnalysisSummary: value.comparisonAnalysisSummary,
     docIds,
     emptyAnswerReason: "Document answer is empty.",
@@ -431,3 +437,32 @@ export const evaluateDocumentEvidence = ({ ragResult, docIds = [] } = {}) => {
     retryRecommended,
   };
 };
+
+/**
+ * evaluateDocumentEvidence with the claim judge: claims the lexical check
+ * rejects get a second opinion (self-check/claim-judge.js). With the judge off
+ * this is exactly evaluateDocumentEvidence.
+ */
+export const evaluateDocumentEvidenceWithJudge = async ({ ragResult, docIds = [] } = {}) => {
+  if (getClaimJudgeMode() !== "llm" || !ragResult?.ok) {
+    return evaluateDocumentEvidence({ docIds, ragResult });
+  }
+
+  const value = ragResult.value ?? {};
+  const citations = attachRetrievedEvidence({
+    citations: value.citations ?? [],
+    retrievedContexts: value.retrievedContexts ?? [],
+  });
+  const claimSupport = await judgeClaimSupport({
+    citations,
+    claimSupport: evaluateClaimSupport({
+      answerText: value.text,
+      citations,
+      comparisonAnalysisSummary: value.comparisonAnalysisSummary,
+    }),
+    comparisonAnalysisSummary: value.comparisonAnalysisSummary,
+  });
+
+  return evaluateDocumentEvidence({ claimSupport, docIds, ragResult });
+};
+
