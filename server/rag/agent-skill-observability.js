@@ -1,6 +1,13 @@
 import { performance } from "node:perf_hooks";
 import { getBudgetSnapshot } from "./agent-budget.js";
 import { executeAgentSkill } from "./skills/registry.js";
+import {
+  GEN_AI_ATTRIBUTES,
+  GEN_AI_OPERATIONS,
+  markSpanFailed,
+  setSpanAttributes,
+  withSpan,
+} from "./tracing.js";
 
 const serializeError = (error, fallbackMessage) => {
   if (error instanceof Error) {
@@ -255,10 +262,38 @@ export const createAgentSkillTracker = ({
 
     const budgetBefore = getBudgetSnapshot(budgetState);
     const startedAt = performance.now();
-    const result = await executeAgentSkill(skill, context, {
-      validateInput,
-      validateOutput,
-    });
+    // Every Skill -- document RAG, follow-up retrieval, custom Skills, web,
+    // built-ins -- runs here, so this one span puts each model call a Skill
+    // makes under the Skill that made it.
+    const result = await withSpan(
+      `${GEN_AI_OPERATIONS.executeTool} ${skill.id}`,
+      {
+        [GEN_AI_ATTRIBUTES.operationName]: GEN_AI_OPERATIONS.executeTool,
+        [GEN_AI_ATTRIBUTES.toolName]: skill.id,
+        "agent.skill.phase": phase,
+        "agent.skill.version": skill.version,
+      },
+      async (span) => {
+        const skillResult = await executeAgentSkill(skill, context, {
+          validateInput,
+          validateOutput,
+        });
+
+        setSpanAttributes(span, {
+          "agent.skill.abstained": Boolean(skillResult?.abstained),
+          "agent.skill.citation_count": Array.isArray(skillResult?.citations)
+            ? skillResult.citations.length
+            : undefined,
+          "agent.skill.ok": Boolean(skillResult?.ok),
+        });
+
+        if (!skillResult?.ok) {
+          markSpanFailed(span, skillResult?.error?.message ?? "skill failed");
+        }
+
+        return skillResult;
+      }
+    );
     const durationMs = performance.now() - startedAt;
     const budgetAfter = getBudgetSnapshot(budgetState);
 

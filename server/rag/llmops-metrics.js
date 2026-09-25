@@ -9,6 +9,13 @@ import {
 } from "./llmops-policy.js";
 import { recordRagTrace } from "./observability.js";
 import { chargeActiveRunUsage } from "./run-usage.js";
+import {
+  GEN_AI_ATTRIBUTES,
+  GEN_AI_OPERATIONS,
+  SPAN_KINDS,
+  setSpanAttributes,
+  withSpan,
+} from "./tracing.js";
 import { normalizeClampedText } from "../lib/normalize-text.js";
 
 export { LlmOpsBudgetExceededError } from "./llmops-policy.js";
@@ -230,6 +237,43 @@ export const recordLlmOpsMetric = async (
   return event;
 };
 
+const GEN_AI_OPERATION_BY_LLMOPS_OPERATION = {
+  [LLMOPS_OPERATIONS.completion]: GEN_AI_OPERATIONS.chat,
+  [LLMOPS_OPERATIONS.embedding]: GEN_AI_OPERATIONS.embeddings,
+};
+
+// One CLIENT span per model tried, named "{operation} {model}" as the GenAI
+// conventions ask. The caller may pass `metric.modelName` (the provider's model
+// name); it is used for the span only and never enters the LLMOps event.
+const buildModelSpan = (metric = {}) => {
+  const operation =
+    GEN_AI_OPERATION_BY_LLMOPS_OPERATION[metric.operation] ?? metric.operation ?? "model";
+  const model =
+    metric.modelName || metric.modelRoute?.modelId || metric.modelRoute?.providerId || "unknown";
+
+  return {
+    attributes: {
+      [GEN_AI_ATTRIBUTES.operationName]: operation,
+      [GEN_AI_ATTRIBUTES.providerName]: metric.modelRoute?.providerId,
+      [GEN_AI_ATTRIBUTES.requestModel]: model,
+      "llmops.stage": metric.stage,
+    },
+    name: `${operation} ${model}`,
+  };
+};
+
+const setModelUsageAttributes = (span, event) => {
+  setSpanAttributes(span, {
+    [GEN_AI_ATTRIBUTES.inputTokens]: event.inputTokens,
+    [GEN_AI_ATTRIBUTES.outputTokens]: event.outputTokens,
+    "llmops.estimated_cost_usd": event.estimatedCostUsd,
+    "llmops.model_id": event.modelRoute?.modelId,
+    "llmops.route_status": event.modelRoute?.status,
+    "llmops.status": event.status,
+    "llmops.token_source": event.tokenSource,
+  });
+};
+
 export const runWithLlmOpsMetric = async ({
   action,
   metric = {},
@@ -242,6 +286,34 @@ export const runWithLlmOpsMetric = async ({
     throw new TypeError("LLMOps metric action must be a function.");
   }
 
+  const span = buildModelSpan(metric);
+
+  return withSpan(
+    span.name,
+    span.attributes,
+    (activeSpan) =>
+      runMeteredAction({
+        action,
+        activeSpan,
+        metric,
+        now,
+        policy,
+        recorder,
+        successMetric,
+      }),
+    { kind: SPAN_KINDS.client }
+  );
+};
+
+const runMeteredAction = async ({
+  action,
+  activeSpan,
+  metric,
+  now,
+  policy,
+  recorder,
+  successMetric,
+}) => {
   const startedAt = performance.now();
   const preflightEvent = normalizeLlmOpsMetricEvent(metric);
   const preflightPolicySignals = evaluateLlmOpsPolicy({
@@ -256,7 +328,7 @@ export const runWithLlmOpsMetric = async ({
     });
 
     const result = await action();
-    await recordLlmOpsMetric(
+    const event = await recordLlmOpsMetric(
       {
         ...metric,
         ...successMetric(result),
@@ -269,10 +341,11 @@ export const runWithLlmOpsMetric = async ({
         recorder,
       }
     );
+    setModelUsageAttributes(activeSpan, event);
 
     return result;
   } catch (error) {
-    await recordLlmOpsMetric(
+    const event = await recordLlmOpsMetric(
       {
         ...metric,
         error,
@@ -285,6 +358,7 @@ export const runWithLlmOpsMetric = async ({
         recorder,
       }
     );
+    setModelUsageAttributes(activeSpan, event);
 
     throw error;
   }

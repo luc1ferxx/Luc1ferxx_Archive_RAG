@@ -24,6 +24,7 @@
 | 持久化与恢复 | 运行、步骤、事件存在 PostgreSQL；guarded 图的 checkpoint 只能在节点边界续跑；认领、节点开始、完成都用运行版本号 CAS 防止旧 worker 重复执行；有副作用的步骤不会被自动重放 | `rag/agent-execution-graph-checkpoint.js`、`rag/agent-run-step-replay-safety.js`、`rag/agent-runs.js` |
 | 预算 | 每次运行两层：次数（文档 RAG 2 次、自定义 Skill 2 次、Web 搜索 1 次、trace 16 步），以及用量（默认 10 万 token、0.5 美元、5 分钟）。用量按每次成功的模型调用计量，用完后下一个工具被跳过、运行降级而不报错；已开始的步骤会跑完，所以是软截止 | `rag/agent-budget.js`、`rag/run-usage.js` |
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
+| 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | 流式进度 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要，经校验的最终答案整体发送；不流式输出 token | `routes/chat.js`、`rag/agent-event-stream.js` |
 
 默认配置：hybrid 检索（pgvector 余弦 + PostgreSQL 全文检索，RRF 融合），rerank 关闭，规划器用 LLM，自定义 Skill 阶段默认由 typed DAG 执行（`AGENT_SKILL_GRAPH_ROLLOUT=guarded`），V1 顺序链只在整图被拒时兜底。
@@ -120,7 +121,24 @@
 - 行为变化的风险点：`guarded` 下执行规划器能看到已授权的原子 Skill，理论上可能给普通问答多加 `custom_skills` 阶段。文档问答用例里这个阶段是合法选项，5/5 都没有被加上。
 - 没变的：动态组合用例（只选了对比，要求 LLM 规划出"对比 → 风险审查"）仍是 2/5，失败是规划选择问题：两次只规划了对比，一次选了时间线抽取并按文档拆成两个节点。所以纯 LLM 规划的 `rollout:readiness` 在 7B 上仍达不到，这不影响执行器默认值。
 
-### 3.6 工程基线（`99af0019`）
+### 3.6 一条真实 trace
+
+`npm run trace:demo -- --real`（qwen2.5:7b，本地 Ollama），一次两个 Skill 的合同审查。规划器在这个演示里是确定性的，所以只有两次模型调用：
+
+```
+invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_calls=2
+  agent.plan intent  2ms
+  agent.plan execution  0ms
+  agent.plan skill_graph  1ms  graph.node_count=2
+  execute_tool summarize_contract  3913ms
+    chat qwen2.5:7b  3912ms  usage.input_tokens=171 usage.output_tokens=123 token_source=actual
+  execute_tool risk_review  1860ms
+    chat qwen2.5:7b  1859ms  usage.input_tokens=358 usage.output_tokens=88 token_source=actual
+```
+
+能看出的东西：延迟几乎全在模型调用上，编排本身是毫秒级；第一次调用可能包含模型加载时间；第二个 Skill 的输入 token 多了一倍，因为它带着上游输出（类型化的 `priorFindings`）。单次 trace 不是性能基准。
+
+### 3.7 工程基线（`99af0019`）
 
 - 后端测试 1687 个，0 失败，2 个跳过（需要 PostgreSQL 的 pgvector 集成测试）。
 - 前端测试 102 个全部通过，生产构建通过。

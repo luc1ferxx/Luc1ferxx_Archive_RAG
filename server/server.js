@@ -18,6 +18,14 @@ const standaloneProfile = isStandaloneProfileEnabled()
   ? applyStandaloneProfile()
   : null;
 
+// The SDK is loaded only when tracing is on; otherwise the tracing API the app
+// calls stays a no-op. Started before createApp so the first request is traced.
+if (String(process.env.OTEL_TRACING_ENABLED ?? "").trim().toLowerCase() === "true") {
+  const { shutdownTracingOnExit, startTracing } = await import("./otel.js");
+  shutdownTracingOnExit(startTracing());
+  console.log("[tracing] OpenTelemetry tracing enabled (OTLP/HTTP export).");
+}
+
 const PORT = Number.parseInt(process.env.PORT ?? "5001", 10);
 const app = await createApp();
 

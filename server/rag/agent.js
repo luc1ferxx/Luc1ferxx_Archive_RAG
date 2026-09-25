@@ -47,6 +47,14 @@ import {
   resolveRunUsageLimits,
   runWithRunUsage,
 } from "./run-usage.js";
+import {
+  GEN_AI_ATTRIBUTES,
+  GEN_AI_OPERATIONS,
+  markSpanFailed,
+  setActiveSpanAttributes,
+  setSpanAttributes,
+  withSpan,
+} from "./tracing.js";
 import { observeUnifiedAgentGraphShadow } from "./agent-unified-graph-shadow.js";
 
 const getSkillDescriptor = (skill = {}) => ({
@@ -594,6 +602,50 @@ const resumeAgentExecutionGraphRunInScope = async ({
   return attachAgentRunSnapshot(responseWithContinuation, completedRun);
 };
 
+// A planner span carries which planner answered and whether it fell back;
+// never the question or the plan text.
+const withPlannerSpan = (kind, plan) =>
+  withSpan(`agent.plan ${kind}`, { "agent.planner.kind": kind }, async (span) => {
+    const result = await plan();
+
+    setSpanAttributes(span, {
+      "agent.planner.fallback": Boolean(result?.planner?.fallback),
+      "agent.planner.id": result?.planner?.selectedPlannerId,
+    });
+
+    return result;
+  });
+
+const withAgentRunSpan = (attributes, run) =>
+  withSpan(
+    `${GEN_AI_OPERATIONS.invokeAgent} archive_rag`,
+    {
+      ...attributes,
+      [GEN_AI_ATTRIBUTES.agentName]: "archive_rag",
+      [GEN_AI_ATTRIBUTES.operationName]: GEN_AI_OPERATIONS.invokeAgent,
+    },
+    async (span) => {
+      const response = await run();
+      const body = response?.body ?? {};
+      const runUsage = body.agentObservability?.budget?.run;
+
+      setSpanAttributes(span, {
+        "agent.mode": body.agentMode,
+        "agent.response.status": response?.status,
+        "agent.run.id": body.agentRunId,
+        "agent.usage.exhausted": runUsage?.exhausted,
+        "agent.usage.model_calls": runUsage?.used?.modelCalls,
+        "agent.usage.tokens": runUsage?.used?.tokens,
+      });
+
+      if (Number(response?.status) >= 500) {
+        markSpanFailed(span, `agent run answered ${response.status}`);
+      }
+
+      return response;
+    }
+  );
+
 const runAgentRagInScope = async ({
   agentBudget,
   agentRunService,
@@ -625,14 +677,16 @@ const runAgentRagInScope = async ({
     question,
     userId,
   });
-  const intentPlanResult = await createAgentIntentPlanResult({
-    docIds,
-    experienceMemory: agentExperienceMemory,
-    fallbackPlannerAdapter: deterministicIntentPlannerAdapter,
-    plannerAdapter: intentPlannerAdapter ?? deterministicIntentPlannerAdapter,
-    question,
-    taskMemory: taskMemoryContext,
-  });
+  const intentPlanResult = await withPlannerSpan("intent", () =>
+    createAgentIntentPlanResult({
+      docIds,
+      experienceMemory: agentExperienceMemory,
+      fallbackPlannerAdapter: deterministicIntentPlannerAdapter,
+      plannerAdapter: intentPlannerAdapter ?? deterministicIntentPlannerAdapter,
+      question,
+      taskMemory: taskMemoryContext,
+    })
+  );
   const {
     addBudgetLimitTrace,
     addTraceStep,
@@ -709,6 +763,9 @@ const runAgentRagInScope = async ({
         ...runSnapshot,
       });
   const agentRunId = agentRun?.runId ?? requestedAgentRunId ?? null;
+  // Tagged as soon as the run exists, so a run that later throws can still be
+  // found from its trace.
+  setActiveSpanAttributes({ "agent.run.id": agentRunId });
   const stepLifecycle = createAgentRunStepLifecycle({
     accessScope,
     agentRunService,
@@ -795,22 +852,24 @@ const runAgentRagInScope = async ({
         taskMemory: taskMemoryContext,
       });
     }
-    const executionPlanResult = await createAgentExecutionPlanResult({
-      accessScope,
-      authorizedCustomSkills,
-      fallbackPlannerAdapter: deterministicPlannerAdapter,
-      plannerAdapter: executionPlannerAdapter ?? deterministicPlannerAdapter,
-      plannerContext: {
+    const executionPlanResult = await withPlannerSpan("execution", () =>
+      createAgentExecutionPlanResult({
+        accessScope,
         authorizedCustomSkills,
-        docIds,
-        plan,
-        question,
+        fallbackPlannerAdapter: deterministicPlannerAdapter,
+        plannerAdapter: executionPlannerAdapter ?? deterministicPlannerAdapter,
+        plannerContext: {
+          authorizedCustomSkills,
+          docIds,
+          plan,
+          question,
+          selectedSkills,
+          taskMemory: taskMemoryContext,
+        },
+        registry,
         selectedSkills,
-        taskMemory: taskMemoryContext,
-      },
-      registry,
-      selectedSkills,
-    });
+      })
+    );
     setExecutionPlanner(executionPlanResult.planner);
 
     await agentRunService?.appendRunEvent?.({
@@ -990,10 +1049,23 @@ const runAgentRagInScope = async ({
 // up as its budget's `run` ceiling. Each invocation gets its own meter: an
 // approval resume or graph recovery is a new invocation with a fresh clock,
 // which is what a deadline should mean when a human approval may take hours.
+//
+// Each invocation is also one `invoke_agent` span: planners, tools, and every
+// model call the run makes are its descendants in the trace.
 export const runAgentRag = (options = {}) =>
   runWithRunUsage(
     createRunUsage({ limits: resolveRunUsageLimits(options.agentBudget) }),
-    () => runAgentRagInScope(options)
+    () =>
+      withAgentRunSpan(
+        {
+          "agent.document_count": Array.isArray(options.docIds)
+            ? options.docIds.length
+            : undefined,
+          "agent.run.resumed": Boolean(options.agentRunId),
+          [GEN_AI_ATTRIBUTES.conversationId]: options.sessionId,
+        },
+        () => runAgentRagInScope(options)
+      )
   );
 
 export const resumeAgentExecutionGraphRun = (options = {}) =>
@@ -1001,5 +1073,12 @@ export const resumeAgentExecutionGraphRun = (options = {}) =>
     createRunUsage({
       limits: resolveRunUsageLimits(options.checkpoint?.owner?.budget?.limits),
     }),
-    () => resumeAgentExecutionGraphRunInScope(options)
+    () =>
+      withAgentRunSpan(
+        {
+          "agent.run.graph_resume": true,
+          "agent.run.id": options.runId,
+        },
+        () => resumeAgentExecutionGraphRunInScope(options)
+      )
   );

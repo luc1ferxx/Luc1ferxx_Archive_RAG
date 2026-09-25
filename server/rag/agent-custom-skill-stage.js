@@ -21,6 +21,7 @@ import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import { runShadowPlanner, sameStringList } from "./agent-planner-shadow.js";
 import { REPLAN_DECISIONS, createReplanResult } from "./agent-replanner.js";
 import { getAgentSkillGraphRollout } from "./config.js";
+import { setSpanAttributes, withSpan } from "./tracing.js";
 
 // The migration incision.
 //
@@ -144,15 +145,26 @@ export const runCustomSkillStage = async ({
   const effectiveLimits = { ...EXECUTION_GRAPH_LIMITS, ...limits };
   const scopedDocIds = authorizedDocIds ?? docIds;
   const planGraph = (budgetRemaining) =>
-    createAgentExecutionGraphResult({
-      authorizedDocIds: scopedDocIds,
-      budgetRemaining,
-      limits: effectiveLimits,
-      ...(plannerAdapter ? { plannerAdapter } : {}),
-      plannerContext: { docIds, plan, question, taskMemory },
-      registry,
-      selectedSkills: graphSkills,
-      fallbackSelectedSkills: customSkills,
+    withSpan("agent.plan skill_graph", { "agent.planner.kind": "skill_graph" }, async (span) => {
+      const planned = await createAgentExecutionGraphResult({
+        authorizedDocIds: scopedDocIds,
+        budgetRemaining,
+        limits: effectiveLimits,
+        ...(plannerAdapter ? { plannerAdapter } : {}),
+        plannerContext: { docIds, plan, question, taskMemory },
+        registry,
+        selectedSkills: graphSkills,
+        fallbackSelectedSkills: customSkills,
+      });
+
+      setSpanAttributes(span, {
+        "agent.graph.accepted": Boolean(planned?.graph),
+        "agent.graph.node_count": planned?.graph?.nodes?.length,
+        "agent.planner.fallback": Boolean(planned?.planner?.fallback),
+        "agent.planner.id": planned?.planner?.selectedPlannerId,
+      });
+
+      return planned;
     });
 
   if (mode === CUSTOM_SKILL_STAGE_MODES.shadow) {

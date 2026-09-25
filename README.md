@@ -47,7 +47,7 @@ Luc1ferxx Archive RAG 是一个本地优先的多 PDF 档案分析系统。它�
 | arXiv enrichment | 基于已上传文档 profile 生成清理后的 arXiv topic，返回可签名确认的候选论文；用户选择后通过异步 task runner 导入，并按 arXiv ID / PDF URL / title hash 去重。 |
 | 执行持久化 | PostgreSQL-backed task store、agent run store 和 workspace artifact store 保存 task/run snapshot、公开 goal plan、真实 goal deliverables、steps、events、approval gates 和 recovery 状态；本地开发可回落内存实现。 |
 | 记忆 | Session memory 用于追问改写；long memory 和 agent experience memory 在 PostgreSQL 配置后默认启用。Experience memory 只进入 planner hints，不作为 citation 或答案证据。 |
-| 可观测性 | `/chat` 返回 `agentTrace`、`agentObservability`、`agentWorkingMemory`；可选写 JSONL trace，前端可展示 planner、skills、queries、gaps 和 removed claims。 |
+| 可观测性 | `/chat` 返回 `agentTrace`、`agentObservability`、`agentWorkingMemory`；可选写 JSONL trace，前端可展示 planner、skills、queries、gaps 和 removed claims。可选 OpenTelemetry trace（GenAI 语义约定，OTLP 导出到 Phoenix / Langfuse），一次运行里每个规划器、Skill 和模型调用各是一个 span，带 token 和耗时；`npm run trace:demo` 可直接打印。 |
 | 质量体系 | 覆盖 synthetic、real、feedback、trajectory、planner、recovery observability、rerank、param sweep、coverage gate、Ragas 辅助评测和 GitHub Actions quality gate。 |
 | 访问隔离 | `API_AUTH_ENABLED` 配合 `API_AUTH_TOKEN`、`API_AUTH_TOKENS` 或 HS256 JWT 后，文档、artifacts、上传、chat、删除、文件、memory、feedback、quality 等接口按 `userId/workspaceId` scope 过滤；Admin status/actions/audit 额外按 roles/permissions 授权，audit 在 PostgreSQL 配好时写入 append-only event store。CORS 白名单、helmet 和分级限流默认开启。 |
 
@@ -283,6 +283,7 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:planner` | 评测 planner mock provider；`-- --provider real` 生成真实 provider 报告。 |
 | `cd server && npm run planner:gate -- --provider real` | 检查 real planner report、fallback rate 和 mock/real divergence。 |
 | `cd server && npm run eval:recovery-observability` | 检查 recovery/replay observability。 |
+| `cd server && npm run trace:demo` | 跑一次 Agent 请求并打印它的 OpenTelemetry span 树；`-- --real` 用配置的模型端点，`-- --otlp` 同时导出。 |
 | `cd server && npm run rollout:readiness` | 汇总 planner、trajectory、recovery、fallback 和 divergence rollout signal。 |
 | `cd server && npm run runtime:smoke` | 用真实 planner 和 PostgreSQL smoke `/health`、`/chat` runtime。 |
 | `cd server && npm run eval:rerank` | 运行离线 rerank ranking eval。 |

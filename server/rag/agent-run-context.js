@@ -5,6 +5,7 @@ import {
   getBudgetSnapshot as getAgentBudgetSnapshot,
 } from "./agent-budget.js";
 import { getActiveRunUsage } from "./run-usage.js";
+import { addActiveSpanEvent, getActiveTraceId } from "./tracing.js";
 import { buildAgentExperienceMemoryObservability } from "./agent-experience-memory.js";
 import { buildClarificationResponse } from "./agent-response-builder.js";
 import { getSkillDescriptor } from "./agent-skill-observability.js";
@@ -81,6 +82,12 @@ export const createAgentRunContext = ({
 
     if (appended) {
       emitTraceStep(builtStep);
+      // The same compact fields the stream gets; never step detail.
+      addActiveSpanEvent("agent.step", {
+        "agent.step.label": builtStep.label,
+        "agent.step.status": builtStep.status,
+        "agent.step.type": builtStep.type,
+      });
     }
 
     return appended;
@@ -161,6 +168,10 @@ export const createAgentRunContext = ({
     skills: skillTracker.getSkillObservations(),
     runs: skillTracker.getSkillRuns(),
     budget: getBudgetSnapshot(),
+    // Only when a tracing SDK is recording, so the default response is
+    // unchanged; lets a /chat response, feedback record, or agent trace point
+    // at its OpenTelemetry trace.
+    ...(getActiveTraceId() ? { traceId: getActiveTraceId() } : {}),
   });
 
   const recordAgentTrace = async ({

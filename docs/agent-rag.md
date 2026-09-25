@@ -312,6 +312,19 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 前端 `src/components/AgentRunCenter.js` 只消费 `/tasks` 返回的公开 task contract。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。
 
+## OpenTelemetry trace
+
+`server/rag/tracing.js` 只依赖 `@opentelemetry/api`；没有注册 SDK 时所有 span 都是空操作。`OTEL_TRACING_ENABLED=true` 时 `server.js` 通过 `server/otel.js` 注册 SDK 并按 OTLP/HTTP 导出（默认 protobuf）。
+
+| Span | 在哪里打 | 关键属性 |
+| --- | --- | --- |
+| `invoke_agent archive_rag` | `runAgentRag` / 图恢复入口（`agent.js`） | `gen_ai.conversation.id`、`agent.run.id`、`agent.mode`、`agent.usage.tokens` / `model_calls` / `exhausted` |
+| `agent.plan intent` / `execution` / `skill_graph` | 三个规划器调用处 | `agent.planner.id`、`agent.planner.fallback`、`agent.graph.accepted` / `node_count` |
+| `execute_tool <skillId>` | `executeObservedSkill`（所有 Skill 的唯一执行入口） | `gen_ai.tool.name`、`agent.skill.ok` / `abstained` / `citation_count`；`ok: false` 标记为 ERROR |
+| `chat <model>` / `embeddings <model>` | `runWithLlmOpsMetric`（所有计量的模型调用） | `gen_ai.request.model`、`gen_ai.usage.input_tokens` / `output_tokens`、`llmops.token_source`、`llmops.estimated_cost_usd`、`llmops.route_status`；重试是 `model.retry` 事件 |
+
+Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模型调用自动挂在发起它的 Skill 下面；备用模型是同一个 Skill 下的另一个 `chat` span。Agent 步骤作为 `agent.step` 事件挂在当前 span 上，只带类型、标签和状态，和 `/chat/stream` 推送的字段一致。属性只有标识、模型名、计数和状态，不记录问题、prompt、模型输出或文档内容（`test/tracing.test.mjs` 会检查）。开启时 `agentObservability.traceId` 返回 trace id，关闭时不出现这个字段。
+
 ## 运行预算：次数之外的 token、成本和时长
 
 `server/rag/agent-budget.js` 的次数预算（文档 RAG 2 次、custom skill 2 次、Web 1 次……）限制工具被调用几次，但限制不了一次运行花多少：同样一次文档 RAG，长上下文的 token 可能是短上下文的十倍。`server/rag/run-usage.js` 给每次运行加三个上限：

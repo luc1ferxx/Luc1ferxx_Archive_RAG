@@ -1,5 +1,6 @@
 import { createChatClient, createEmbeddingsClient } from "./openai-client.js";
 import { CIRCUIT_OPEN_CODE, resetModelCallGuards } from "./model-call-guard.js";
+import { addActiveSpanEvent } from "./tracing.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import { getLlmOpsPolicy, isStructuredOutputEnabled } from "./config.js";
 import {
@@ -118,7 +119,14 @@ const withRetry = async (operation, failureMessage) => {
         emptyCompletionRetries += 1;
       }
 
-      await sleep(computeRetryDelayMs({ attempt, retryAfterMs }));
+      const delayMs = computeRetryDelayMs({ attempt, retryAfterMs });
+      // Lands on the model call's span, so a slow call shows why it was slow.
+      addActiveSpanEvent("model.retry", {
+        "error.type": String(error?.status ?? error?.code ?? "error"),
+        "retry.attempt": attempt + 1,
+        "retry.delay_ms": Math.round(delayMs),
+      });
+      await sleep(delayMs);
     }
   }
 
@@ -177,7 +185,10 @@ const getTextListCharacters = (texts = []) =>
     0
   );
 
-const getEmbeddingMetricBase = ({ stage, modelRoute, inputCharacters, itemCount }) => ({
+// Keeps the usage estimate the callers spread in: destructuring only the named
+// fields used to drop it, so embedding calls reported no tokens or cost.
+const getEmbeddingMetricBase = ({ stage, modelRoute, inputCharacters, itemCount, ...usage }) => ({
+  ...usage,
   inputCharacters,
   itemCount,
   modelRoute,
@@ -238,6 +249,7 @@ const getEmbeddingsInstance = (options = {}) => {
     return {
       instance: cachedInstance,
       metricContext: buildRouteMetricContext(route),
+      modelName: route.modelName,
       modelRoute: route.publicRoute,
     };
   }
@@ -251,6 +263,7 @@ const getEmbeddingsInstance = (options = {}) => {
   return {
     instance: embeddingsInstance,
     metricContext: buildRouteMetricContext(route),
+    modelName: route.modelName,
     modelRoute: route.publicRoute,
   };
 };
@@ -307,6 +320,7 @@ const getChatModelInstance = (options = {}) => {
       return {
         instance: getChatClient(getRouteCacheKey(failoverRoute), model.modelName),
         metricContext: buildRouteMetricContext(failoverRoute),
+        modelName: model.modelName,
         modelRoute: failoverRoute.publicRoute,
       };
     });
@@ -315,6 +329,7 @@ const getChatModelInstance = (options = {}) => {
     failovers,
     instance: getChatClient(getRouteCacheKey(route), route.modelName),
     metricContext: buildRouteMetricContext(route),
+    modelName: route.modelName,
     modelRoute: route.publicRoute,
   };
 };
@@ -429,7 +444,7 @@ export const embedTexts = async (texts) => {
     });
   }
 
-  const { instance, metricContext, modelRoute } = getEmbeddingsInstance();
+  const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance();
   const inputCharacters = getTextListCharacters(safeTexts);
 
   return runWithLlmOpsMetric({
@@ -445,6 +460,7 @@ export const embedTexts = async (texts) => {
       }),
       inputCharacters,
       itemCount: safeTexts.length,
+      modelName,
       modelRoute,
       stage: "embed_documents",
     }),
@@ -474,7 +490,7 @@ export const embedQuery = async (query) => {
     });
   }
 
-  const { instance, metricContext, modelRoute } = getEmbeddingsInstance();
+  const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance();
   const inputCharacters = getTextCharacters(query);
 
   return runWithLlmOpsMetric({
@@ -490,6 +506,7 @@ export const embedQuery = async (query) => {
       }),
       inputCharacters,
       itemCount: 1,
+      modelName,
       modelRoute,
       stage: "embed_query",
     }),
@@ -560,7 +577,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
 
     return result;
   };
-  const completeOn = ({ instance, metricContext, modelRoute }) =>
+  const completeOn = ({ instance, metricContext, modelName, modelRoute }) =>
     runWithLlmOpsMetric({
       action: () =>
         withRetry(() => invokeOnce(instance), "Chat completion failed.").catch(
@@ -579,6 +596,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         }),
         inputCharacters: inputText.length,
         itemCount: 1,
+        modelName,
         modelRoute,
         operation: LLMOPS_OPERATIONS.completion,
         stage: "complete_text",

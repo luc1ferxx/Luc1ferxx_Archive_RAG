@@ -241,3 +241,38 @@ RAG_OBSERVABILITY_INCLUDE_CONTEXT=true
 cd server
 npm run observability:report
 ```
+
+### OpenTelemetry trace
+
+JSONL trace 适合离线汇总；要在界面里看"一次请求里每一步花了多久"，打开 OpenTelemetry：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `OTEL_TRACING_ENABLED` | `false` | 为 `true` 时 `server.js` 启动 OpenTelemetry SDK（`server/otel.js`）并按 OTLP/HTTP 导出。关闭时代码里的 span 调用是空操作，`/chat` 响应不变。 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4318` | 标准 OTLP 变量，由导出器自己读取。前者是基地址（自动追加 `/v1/traces`），后者是完整地址。 |
+| `OTEL_EXPORTER_OTLP_HEADERS` | 无 | 标准 OTLP 变量，例如认证头。 |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` / `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `http/protobuf` | `http/protobuf` 或 `http/json`。Phoenix 的 `/v1/traces` 只接受 protobuf，对 JSON 返回 415；gRPC 未接入，会回落到 `http/protobuf` 并打印警告。 |
+| `OTEL_SERVICE_NAME` | `luc1ferxx-archive-rag` | trace 后端里显示的服务名。 |
+
+一次 `/chat` 是一条 trace：根 span `invoke_agent archive_rag`，下面是 `agent.plan intent` / `agent.plan execution` / `agent.plan skill_graph` 三个规划 span、每个 Skill 一个 `execute_tool <skillId>` span，Skill 发出的每次模型调用是它下面的 `chat <model>` 或 `embeddings <model>` span（CLIENT，带 `gen_ai.usage.input_tokens` / `output_tokens`、LLMOps 估算成本和重试事件）。Agent 步骤是 `agent.step` 事件，只有类型、标签和状态。属性遵循 OpenTelemetry GenAI 语义约定，**不记录问题、prompt、模型输出或文档内容**。开启后 `agentObservability.traceId` 给出这次请求的 trace id，根 span 上有 `agent.run.id`，可以从运行记录找到 trace，也可以反过来。
+
+接 Phoenix（本地，镜像需自行拉取）：
+
+```bash
+docker run -p 6006:6006 arizephoenix/phoenix
+```
+
+```env
+OTEL_TRACING_ENABLED=true
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:6006/v1/traces
+```
+
+接 Langfuse（云或自托管；接受 protobuf 和 JSON，不支持 gRPC；认证是 `public key:secret key` 的 base64）：
+
+```env
+OTEL_TRACING_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64(pk-lf-...:sk-lf-...)>
+```
+
+不接后端也能看：`cd server && npm run trace:demo` 在内存里跑一次合同审查请求并把 span 树打印出来；加 `-- --real` 用配置好的模型端点（例如本地 Ollama），加 `-- --otlp` 同时导出到上面配置的后端。
