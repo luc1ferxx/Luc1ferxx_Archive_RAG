@@ -50,6 +50,18 @@ export const getEmbeddingModel = () =>
 
 export const getChatModel = () => process.env.OPENAI_CHAT_MODEL || "gpt-5";
 
+// A second chat model the chat and planner routes fail over to when the primary
+// keeps failing with a retriable error. Unset means no failover.
+export const getChatFallbackModel = () =>
+  String(process.env.OPENAI_CHAT_FALLBACK_MODEL ?? "").trim();
+
+// Per-request timeout for model calls. A timed-out request is retried like a 5xx.
+export const getLlmRequestTimeoutMs = () => {
+  const parsed = Number(process.env.RAG_LLM_REQUEST_TIMEOUT_MS);
+
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 120000;
+};
+
 // Planner calls send a JSON Schema response_format. Turn it off only for an
 // OpenAI-compatible endpoint that rejects the parameter; the planners then fall
 // back to prompt-only JSON and their tolerant parsers.

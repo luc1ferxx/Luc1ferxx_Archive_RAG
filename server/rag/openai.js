@@ -1,4 +1,5 @@
 import { createChatClient, createEmbeddingsClient } from "./openai-client.js";
+import { normalizeText } from "../lib/normalize-text.js";
 import { getLlmOpsPolicy, isStructuredOutputEnabled } from "./config.js";
 import {
   MODEL_CAPABILITIES,
@@ -18,7 +19,18 @@ let embeddingsInstances = new Map();
 let chatModelInstances = new Map();
 let customProvider = null;
 
-const RETRY_DELAYS_MS = [250, 750, 1500];
+const MAX_RETRIES = 3;
+// Windows of 500, 1000, 2000 ms: three retries wait 2.6 s on average, the same
+// span as the fixed 250/750/1500 ms schedule this replaced, now jittered.
+const BACKOFF_BASE_MS = 500;
+const BACKOFF_CAP_MS = 4000;
+// A server that asks for a longer pause is not coming back in time for an
+// interactive request; stop and let failover or the caller decide.
+const MAX_RETRY_AFTER_MS = 10000;
+// One retry for an empty completion: the next sample usually has content, and a
+// second empty one is more likely a real limit than noise.
+const MAX_EMPTY_COMPLETION_RETRIES = 1;
+const EMPTY_COMPLETION_CODE = "EMPTY_COMPLETION";
 
 const getRuntimeLlmOpsPolicy = () => getLlmOpsPolicy();
 
@@ -44,23 +56,57 @@ const isRetriableError = (error) => {
     "EPIPE",
     "UND_ERR_CONNECT_TIMEOUT",
     "UND_ERR_HEADERS_TIMEOUT",
+    EMPTY_COMPLETION_CODE,
   ].includes(code);
+};
+
+// Exponential backoff with equal jitter: half of each window is a guaranteed
+// wait, half is random, so callers that failed together do not retry together.
+// A server-supplied Retry-After is a floor, never shortened by the jitter, and is
+// itself spread over half its length again: every client rate-limited in the
+// same second gets the same Retry-After, and retrying on it exactly would bring
+// them back together into the same limit.
+export const computeRetryDelayMs = ({
+  attempt,
+  random = Math.random,
+  retryAfterMs = null,
+} = {}) => {
+  const window = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** attempt);
+  const jittered = window / 2 + random() * (window / 2);
+
+  return Number.isFinite(retryAfterMs)
+    ? Math.max(jittered, retryAfterMs * (1 + random() / 2))
+    : jittered;
 };
 
 const withRetry = async (operation, failureMessage) => {
   let lastError = null;
+  let emptyCompletionRetries = 0;
 
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
     try {
       return await operation();
     } catch (error) {
       lastError = error;
+      const retryAfterMs = Number.isFinite(error?.retryAfterMs)
+        ? error.retryAfterMs
+        : null;
+      const emptyCompletion = error?.code === EMPTY_COMPLETION_CODE;
 
-      if (!isRetriableError(error) || attempt === RETRY_DELAYS_MS.length) {
+      if (
+        !isRetriableError(error) ||
+        attempt === MAX_RETRIES ||
+        (retryAfterMs !== null && retryAfterMs > MAX_RETRY_AFTER_MS) ||
+        (emptyCompletion && emptyCompletionRetries >= MAX_EMPTY_COMPLETION_RETRIES)
+      ) {
         break;
       }
 
-      await sleep(RETRY_DELAYS_MS[attempt]);
+      if (emptyCompletion) {
+        emptyCompletionRetries += 1;
+      }
+
+      await sleep(computeRetryDelayMs({ attempt, retryAfterMs }));
     }
   }
 
@@ -206,6 +252,7 @@ export const getEmbeddings = (options = {}) => {
 const getChatModelInstance = (options = {}) => {
   if (customProvider?.getChatModel) {
     return {
+      failovers: [],
       instance: customProvider.getChatModel(),
       metricContext: buildCustomRouteMetricContext(),
       modelRoute: buildCustomProviderRoute(
@@ -222,26 +269,39 @@ const getChatModelInstance = (options = {}) => {
 
   assertSelectedModelRoute(route);
 
-  const cacheKey = getRouteCacheKey(route);
-  const cachedInstance = chatModelInstances.get(cacheKey);
+  const getChatClient = (cacheKey, modelName) => {
+    if (!chatModelInstances.has(cacheKey)) {
+      chatModelInstances.set(
+        cacheKey,
+        createChatClient({ model: modelName, apiKey: getOpenAIApiKey() })
+      );
+    }
 
-  if (cachedInstance) {
-    return {
-      instance: cachedInstance,
-      metricContext: buildRouteMetricContext(route),
-      modelRoute: route.publicRoute,
-    };
-  }
+    return chatModelInstances.get(cacheKey);
+  };
 
-  const chatModelInstance = createChatClient({
-    model: route.modelName,
-    apiKey: getOpenAIApiKey(),
-  });
+  // Each failover target is served and metered as its own model: the route it
+  // reports names the model that actually answered.
+  const failovers = (route.resolvedRoute.failoverModels ?? [])
+    .filter((model) => normalizeText(model?.modelName))
+    .map((model) => {
+      const failoverRoute = {
+        ...route,
+        modelName: model.modelName,
+        publicRoute: { ...route.publicRoute, modelId: model.id, status: "failover" },
+        resolvedRoute: { ...route.resolvedRoute, selectedModel: model },
+      };
 
-  chatModelInstances.set(cacheKey, chatModelInstance);
+      return {
+        instance: getChatClient(getRouteCacheKey(failoverRoute), model.modelName),
+        metricContext: buildRouteMetricContext(failoverRoute),
+        modelRoute: failoverRoute.publicRoute,
+      };
+    });
 
   return {
-    instance: chatModelInstance,
+    failovers,
+    instance: getChatClient(getRouteCacheKey(route), route.modelName),
     metricContext: buildRouteMetricContext(route),
     modelRoute: route.publicRoute,
   };
@@ -471,38 +531,83 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
     };
   }
 
-  const { instance, metricContext, modelRoute } = getChatModelInstance(options);
-  const response = await runWithLlmOpsMetric({
-    action: () =>
-      withRetry(
-        async () => instance.invoke(prompt, { responseFormat }),
-        "Chat completion failed."
-      ),
-    metric: {
-      ...buildUsageMetricFields({
-        inputCharacters: inputText.length,
-        metricContext,
-      }),
-      inputCharacters: inputText.length,
-      itemCount: 1,
-      modelRoute,
-      operation: LLMOPS_OPERATIONS.completion,
-      stage: "complete_text",
-    },
-    successMetric: (result) => ({
-      ...buildUsageMetricFields({
-        inputCharacters: inputText.length,
-        outputCharacters: getTextCharacters(normalizeContent(result?.content)),
-        metricContext,
-        response: result,
-      }),
-      outputCharacters: getTextCharacters(normalizeContent(result?.content)),
-    }),
-    policy: getRuntimeLlmOpsPolicy(),
-  });
+  const primary = getChatModelInstance(options);
+  // An empty completion is retried once, then returned as it always was: callers
+  // already treat empty text as "no answer". A length-truncated one is not
+  // retried, because the same budget would truncate it again.
+  const invokeOnce = async (instance) => {
+    const result = await instance.invoke(prompt, { responseFormat });
 
-  return {
-    modelRoute,
-    text: normalizeContent(response.content),
+    if (!normalizeContent(result?.content) && result?.finishReason !== "length") {
+      const error = new Error("Chat completion returned empty content.");
+      error.code = EMPTY_COMPLETION_CODE;
+      error.response = result;
+      throw error;
+    }
+
+    return result;
   };
+  const completeOn = ({ instance, metricContext, modelRoute }) =>
+    runWithLlmOpsMetric({
+      action: () =>
+        withRetry(() => invokeOnce(instance), "Chat completion failed.").catch(
+          (error) => {
+            if (error?.code === EMPTY_COMPLETION_CODE) {
+              return error.response;
+            }
+
+            throw error;
+          }
+        ),
+      metric: {
+        ...buildUsageMetricFields({
+          inputCharacters: inputText.length,
+          metricContext,
+        }),
+        inputCharacters: inputText.length,
+        itemCount: 1,
+        modelRoute,
+        operation: LLMOPS_OPERATIONS.completion,
+        stage: "complete_text",
+      },
+      successMetric: (result) => ({
+        ...buildUsageMetricFields({
+          inputCharacters: inputText.length,
+          outputCharacters: getTextCharacters(normalizeContent(result?.content)),
+          metricContext,
+          response: result,
+        }),
+        outputCharacters: getTextCharacters(normalizeContent(result?.content)),
+      }),
+      policy: getRuntimeLlmOpsPolicy(),
+    }).then((response) => ({
+      modelRoute,
+      text: normalizeContent(response.content),
+    }));
+
+  try {
+    return await completeOn(primary);
+  } catch (primaryError) {
+    // Only a transient failure fails over. A 400/401, a policy block, or a
+    // budget block would fail the same way on any model.
+    if (!isRetriableError(primaryError) || primary.failovers.length === 0) {
+      throw primaryError;
+    }
+
+    let lastError = primaryError;
+
+    for (const failover of primary.failovers) {
+      try {
+        return await completeOn(failover);
+      } catch (failoverError) {
+        lastError = failoverError;
+
+        if (!isRetriableError(failoverError)) {
+          break;
+        }
+      }
+    }
+
+    throw lastError;
+  }
 };

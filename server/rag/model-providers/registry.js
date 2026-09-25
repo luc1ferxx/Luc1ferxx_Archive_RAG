@@ -82,6 +82,7 @@ const compactProvider = (provider = {}) => ({
 
 const buildResolvedRoute = ({
   candidateModels = [],
+  failoverModels = [],
   providerMap = new Map(),
   rejectedModelIds = [],
   route = {},
@@ -91,6 +92,9 @@ const buildResolvedRoute = ({
   candidateModelIds: candidateModels.map((model) => model.id),
   capability: route.capability,
   fallbackModelIds: toArray(route.fallbackModelIds),
+  // Policy-allowed candidates after the selected model, in route order: what a
+  // caller may fail over to at runtime. Internal; the public route keeps ids only.
+  failoverModels: failoverModels.map((model) => cloneJson(model)),
   primaryModelId: route.primaryModelId,
   rejectedModelIds,
   route: cloneJson(route, null),
@@ -257,8 +261,20 @@ export const createModelProviderRegistry = ({
           return allowed;
         }) ?? null;
 
+      const failoverModels = selectedModel
+        ? candidateModels
+            .slice(candidateModels.indexOf(selectedModel) + 1)
+            .filter((model) =>
+              isModelAllowedByWorkspacePolicy({
+                model,
+                policy: workspacePolicy,
+              })
+            )
+        : [];
+
       return buildResolvedRoute({
         candidateModels,
+        failoverModels,
         providerMap,
         rejectedModelIds,
         route,

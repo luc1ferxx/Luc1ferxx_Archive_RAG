@@ -1,4 +1,5 @@
-const DEFAULT_TIMEOUT_MS = 120000;
+import { getLlmRequestTimeoutMs } from "./config.js";
+
 const EMBEDDING_BATCH_SIZE = 512;
 
 const resolveBaseUrl = () => {
@@ -16,18 +17,64 @@ const parseErrorBody = (body) => {
   }
 };
 
-const fetchJson = async (url, options) => {
-  const response = await fetch(url, {
-    ...options,
-    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-  });
+// How long the server asked us to wait, from retry-after-ms (milliseconds) or
+// retry-after (seconds or an HTTP date). Null when it did not say.
+export const parseRetryAfterMs = (headers, now = Date.now()) => {
+  // Presence first: Number(null) is 0, which would read a missing header as
+  // "retry immediately".
+  const rawMilliseconds = String(headers?.get?.("retry-after-ms") ?? "").trim();
+  const milliseconds = rawMilliseconds ? Number(rawMilliseconds) : NaN;
 
-  const text = await response.text();
+  if (Number.isFinite(milliseconds) && milliseconds >= 0) {
+    return milliseconds;
+  }
+
+  const retryAfter = String(headers?.get?.("retry-after") ?? "").trim();
+
+  if (!retryAfter) {
+    return null;
+  }
+
+  const seconds = Number(retryAfter);
+
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+
+  const date = Date.parse(retryAfter);
+
+  return Number.isFinite(date) ? Math.max(0, date - now) : null;
+};
+
+const fetchJson = async (url, options) => {
+  const timeoutMs = getLlmRequestTimeoutMs();
+  let response;
+  let text;
+
+  try {
+    response = await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    // The same signal also bounds reading the body.
+    text = await response.text();
+  } catch (cause) {
+    if (cause?.name === "TimeoutError") {
+      // Tagged like a socket timeout so the retry policy treats it as transient.
+      const error = new Error(`Request timed out after ${timeoutMs} ms.`);
+      error.code = "ETIMEDOUT";
+      error.cause = cause;
+      throw error;
+    }
+
+    throw cause;
+  }
 
   if (!response.ok) {
     const errorMessage = parseErrorBody(text);
     const error = new Error(errorMessage);
     error.status = response.status;
+    error.retryAfterMs = parseRetryAfterMs(response.headers);
     throw error;
   }
 
@@ -108,6 +155,7 @@ export const createChatClient = ({ apiKey, model }) => ({
 
     return {
       content: result.choices?.[0]?.message?.content ?? "",
+      finishReason: result.choices?.[0]?.finish_reason ?? null,
       usage: result.usage ?? null,
     };
   },
