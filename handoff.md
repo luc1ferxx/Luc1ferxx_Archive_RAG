@@ -1,6 +1,8 @@
 # DocCompare — Handoff
 
 Last updated: 2026-08-24. Branch `feat/doccompare-standalone` (12 commits on top of `main`).
+Status update 2026-09-25 on `main`: answer quality has now been measured with a real model;
+see the update at the top of "The one thing blocking everything".
 
 ---
 
@@ -81,7 +83,19 @@ executed tests** — no live database was involved, and no audit artifact surviv
 
 ## The one thing blocking everything
 
-**Answer quality has never been measured with a real model.** Every test to date runs a
+> **Update 2026-09-25 (on `main`):** measured with local Ollama (`nomic-embed-text` +
+> `qwen2.5:7b`). `verify:quality` first scored 16/18 with both comparison checks
+> abstaining, and the cause was the claim check, not the model: grouped citations such as
+> `[Source 1, Source 3]` were not parsed, and `vendor-a.pdf` was not recognised as a
+> document label, so the two per-document difference bullets could never pair. After
+> `f7f6690c` it scores 18/18, and so does the self-test. The passing comparison comes from
+> the engine's grounded fallback; a model-written paraphrase is still rejected by the
+> lexical claim check. Real-embedding retrieval numbers are in
+> `server/docs/interview/CURRENT-TRUTH.md`. The Phase 2/3 decision is no longer blocked on
+> measurement, but a 7B model remains a capability ceiling. The text below is the original
+> 2026-08-24 analysis, kept for its reasoning.
+
+**Answer quality had never been measured with a real model (as of 2026-08-24).** Every test to date runs a
 deterministic hashed bag-of-words stub embedder. That proves the plumbing is connected and
 proves nothing about whether retrieval finds the right text or the comparison binds each
 value to the right document.
@@ -144,7 +158,12 @@ The strictest check is `compare.value-binding`: 12 months must bind to Vendor A 
 months to Vendor B, with no statement about one carrying the other's value. A confident
 but cross-attributed answer is worse than no answer and reads exactly like a correct one.
 
-### Self-test scores 16/18 by design — that is not a regression
+### Self-test scored 16/18 — now 18/18, and it was never "by design"
+
+> **Correction 2026-09-25:** the two failures below were attributed to the stand-in model.
+> They were caused by the two claim-check bugs described in the update above, and the
+> self-test has passed 18/18 since `f7f6690c`. The open question at the end of this section
+> is answered: it was not the 3-page fixtures, it was the `vendor-a` / `vendor-b` file names.
 
 ```bash
 cd server && node evaluation/run-doccompare-verification.mjs --self-test
@@ -181,10 +200,9 @@ product finding, not a harness artifact.
 
 ## Next action
 
-1. Install Ollama and pull the two models above (or supply a real API key — then Ollama is
-   unnecessary and the 7B capability ceiling goes away).
-2. Run `npm run verify:quality` and read
-   `server/evaluation/results/latest-doccompare-verification.md`.
+1. ~~Install Ollama and pull the two models above~~ Done 2026-09-25 (or supply a real API key —
+   then the 7B capability ceiling goes away).
+2. ~~Run `npm run verify:quality`~~ Done: 18/18 after `f7f6690c`.
 3. **Only then** decide whether Phase 2/3 is worth the investment.
 
 ---
@@ -193,10 +211,11 @@ product finding, not a harness artifact.
 
 Stated plainly so nobody mistakes them for done:
 
-- **Answer quality with a real model** — the whole point of the item above.
-- **Whether the comparison path abstains with a competent model** — see the self-test
-  section. The engine's structured summary is covered; a model-written comparison passing
-  `isSafeStructuredDifferenceAnswer` is not.
+- ~~**Answer quality with a real model**~~ Measured locally with a 7B model (18/18); not yet
+  with a frontier model.
+- **A model-written comparison passing `isSafeStructuredDifferenceAnswer`** — still not
+  seen: the comparison now answers through the engine's grounded fallback, and a
+  paraphrasing model's own text is rejected by the lexical claim check.
 - **Cross-compiled binaries were built but never executed.** linux-x64, linux-arm64,
   windows-x64 and darwin-x64 were produced; only the native macOS build was ever run.
 - **The PostgreSQL path was never run against a live database** in this work. The

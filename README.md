@@ -297,6 +297,17 @@ curl http://localhost:5001/ready
 
 CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 current eval+gate 拆成三个并行 job；所有 producer 失败后仍会继续生成可用诊断，最后上传 current gate JSON/Markdown 与原始报告。planner real gate 和 release evidence 保留独立的定时 workflow；standalone Robust Eval Suite 仅供手动运行，每周 Release Evidence Gate 会先运行同一 robust suite 和 scoped `robust:gate`，再执行严格发布门禁。robust workflow 不再调用历史 `quality:gate`，因此旧 synthetic、feedback、planner、trajectory 或 recovery 状态不会制造无关失败通知。周期 suite 直接读取受版本控制的 arXiv corpus，并在运行前校验固定 SHA-256/manifest identity；联网刷新只通过显式 `corpus:arxiv` 命令生成候选文件，不再把 arXiv 瞬时网络故障当作代码失败。
 
+## 真实模型评测结果
+
+下表用本地 Ollama 上的真实模型（`nomic-embed-text` + `qwen2.5:7b`）测得，不是 GPT 级模型或生产流量；评测集较小，未标"显著"的差异不能说成更好。命令、版本和完整表格见 [server/docs/interview/CURRENT-TRUTH.md](server/docs/interview/CURRENT-TRUTH.md) 和 [docs/evaluation.md](docs/evaluation.md)。
+
+| 方面 | 结果 |
+| --- | --- |
+| 检索（48 条用例，Recall@5） | hybrid RRF 0.712，dense 0.654，BM25 0.658，hybrid + 启发式 rerank 0.663；全量差异的 95% 置信区间跨 0，tuning 子集上 hybrid 比 BM25 显著更好。伪 embedding 下 hybrid 反而最差（0.543），所以效果结论只来自真实模型。 |
+| 端到端质量（`verify:quality`） | 16/18 → 18/18：修复了两个让对比答案全部被拒的校验器 bug（逗号分隔的多来源引用、`vendor-a` 类文件名不被当作文档名）。 |
+| 规划器（5 轮、25 次 LLM 规划） | 按请求生成的 strict JSON Schema 约束解码：降级率 56% → 8%，用例通过率 47% → 80%，每轮耗时 14.1s → 14.2s。 |
+| LLM 调用容错（故障注入） | 限流成功率 79% → 100%，请求挂起 87.5% → 100%（p95 15s → 3.4s），空响应 62.5% → 91.7%，主模型宕机 0% → 100%；代价是限流时 p95 约 2.5s → 4.7s。 |
+
 ## 评测优化结果
 
 优化前，主 synthetic `latest.*` 和 legacy rerank 报告长期依赖 near-duplicate 小语料。旧 `latest-rerank.md` 只有 `6` 个 ranking cases，NDCG、Recall、MRR 都是 `1.0000 -> 1.0000`，lift 为 `0.0000`，无法证明 rerank 对困难检索有真实收益。
@@ -322,7 +333,7 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | 架构 | `app.js` 组合根（171 行）+ `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 8 个模块；`normalizeText` 收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块，后端直接依赖 18 → 13。 |
 | 工程化 | 前端 CRA → Vite 7 + Vitest 3（测试 97s → ~7s，构建 ~8s）；后端测试并行化（24s → ~4s，含 Windows 全平台通过）；CI 后端测试与 eval gate 拆并行 job；评测脚本共享 helper 收敛到 `eval-cli.js` / `eval-case-helpers.js`。 |
 
-前后端测试基线：后端 `733` 个用例、前端 `44` 个用例全绿。
+前后端测试基线（`99af0019`）：后端 1687 个用例（2 个需要 PostgreSQL 的集成测试在无数据库时跳过）、前端 102 个用例全绿，覆盖率门禁通过。
 
 ## 文档入口
 
