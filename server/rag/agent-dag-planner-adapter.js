@@ -14,7 +14,23 @@ import {
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
 import { completeTextWithMetadata } from "./openai.js";
 import { MODEL_CAPABILITIES, MODEL_ROUTE_IDS } from "./model-providers/index.js";
-import { describeSkillsForPlanner, getSkillContract } from "./skills/skill-contract.js";
+import {
+  EXECUTION_REQUEST_FIELD_TYPES,
+  describeSkillsForPlanner,
+  getSkillContract,
+  isAssignableValueType,
+} from "./skills/skill-contract.js";
+import {
+  boundedArray,
+  boundedString,
+  buildJsonSchemaResponseFormat,
+  identifierString,
+  nullable,
+  oneOfSchemas,
+  parseFirstJsonValue,
+  strictObject,
+  stringEnum,
+} from "./structured-output.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 // V2 planner adapter: the model proposes an ExecutionGraph, and nothing else.
@@ -113,6 +129,7 @@ export const buildDagPlannerPrompt = (context = {}) =>
     "Every nodeId must be unique. The same skillId may appear under several nodeIds when it should run on different document scopes.",
     "dependsOn lists nodeIds that must finish first. Plan independent work as independent nodes so the runtime can run them concurrently; add a dependency only when a node genuinely needs an earlier node's output.",
     'inputBindings values are either {"source":"request","field":"<request field>"} or {"source":"node","nodeId":"<an id in dependsOn>","output":"<output field>"}. Never inline free text, document content, or an earlier answer into an input.',
+    `The only request fields are: ${Object.keys(EXECUTION_REQUEST_FIELD_TYPES).join(", ")}. Input keys such as goal or authorizedDocIds describe the request; they are not request fields.`,
     `failurePolicy must be one of: ${Object.values(EXECUTION_GRAPH_FAILURE_POLICIES).join(", ")}.`,
     "Optionally narrow a node to fewer documents with scope.docIds, using only ids from authorizedDocIds. You may narrow the scope; you may never widen it.",
     "Do not emit approval, budget, accessScope, retry, concurrency, or policy fields. The runtime owns those and will reject a graph that claims them.",
@@ -140,6 +157,12 @@ export const parsePlannerJson = (rawText) => {
   try {
     return JSON.parse(candidate);
   } catch {
+    const firstValue = parseFirstJsonValue(candidate);
+
+    if (firstValue !== undefined) {
+      return firstValue;
+    }
+
     const objectStart = candidate.indexOf("{");
     const objectEnd = candidate.lastIndexOf("}");
     const arrayStart = candidate.indexOf("[");
@@ -300,18 +323,147 @@ const attachModelRoute = (payload, modelRoute = null) => {
   return payload;
 };
 
+const buildBindingSchema = ({ inputSpec, outputTypes }) => {
+  const requestFields = Object.entries(EXECUTION_REQUEST_FIELD_TYPES)
+    .filter(([, type]) => isAssignableValueType(type, inputSpec.type))
+    .map(([field]) => field);
+  const outputs = [...outputTypes]
+    .filter(([, type]) => isAssignableValueType(type, inputSpec.type))
+    .map(([output]) => output);
+  const alternatives = [
+    ...(requestFields.length > 0
+      ? [
+          strictObject({
+            source: stringEnum([EXECUTION_GRAPH_BINDING_SOURCES.request]),
+            field: stringEnum(requestFields),
+          }),
+        ]
+      : []),
+    ...(outputs.length > 0
+      ? [
+          strictObject({
+            source: stringEnum([EXECUTION_GRAPH_BINDING_SOURCES.node]),
+            nodeId: identifierString(MAX_ID_LENGTH),
+            output: stringEnum(outputs),
+          }),
+        ]
+      : []),
+    ...(inputSpec.required ? [] : [{ type: "null" }]),
+  ];
+
+  return alternatives.length > 0 ? oneOfSchemas(alternatives) : null;
+};
+
+/**
+ * One node variant per capability the planner was shown, built from that
+ * capability's typed contract: its own input names, bound only to a request field
+ * or an upstream output whose type the input accepts, and scope narrowed only to
+ * authorized document ids. Node ids and dependsOn stay free-form because they
+ * name nodes of the same proposal; the validator checks those references.
+ */
+export const buildDagPlannerResponseFormat = ({
+  authorizedDocIds = [],
+  capabilities = [],
+  limits = EXECUTION_GRAPH_LIMITS,
+} = {}) => {
+  if (capabilities.length === 0) {
+    return null;
+  }
+
+  const outputTypes = new Map();
+
+  for (const capability of capabilities) {
+    for (const [output, spec] of Object.entries(capability.outputSchema ?? {})) {
+      if (!outputTypes.has(output)) {
+        outputTypes.set(output, spec?.type);
+      }
+    }
+  }
+
+  const nodeVariants = capabilities.map((capability) =>
+    strictObject({
+      nodeId: identifierString(MAX_ID_LENGTH),
+      skillId: stringEnum([capability.id]),
+      dependsOn: boundedArray(identifierString(MAX_ID_LENGTH), limits.maxNodes),
+      inputBindings: strictObject(
+        Object.fromEntries(
+          Object.entries(capability.inputSchema ?? {})
+            .map(([input, inputSpec]) => [
+              input,
+              buildBindingSchema({ inputSpec: inputSpec ?? {}, outputTypes }),
+            ])
+            .filter(([, schema]) => schema)
+        )
+      ),
+      failurePolicy: stringEnum(Object.values(EXECUTION_GRAPH_FAILURE_POLICIES)),
+      rationale: nullable(boundedString(MAX_RATIONALE_LENGTH)),
+      scope:
+        authorizedDocIds.length > 0
+          ? nullable(
+              strictObject({
+                docIds: boundedArray(stringEnum(authorizedDocIds), authorizedDocIds.length),
+              })
+            )
+          : { type: "null" },
+    })
+  );
+
+  return buildJsonSchemaResponseFormat({
+    name: "agent_execution_graph",
+    schema: strictObject({
+      nodes: boundedArray(oneOfSchemas(nodeVariants), limits.maxNodes),
+    }),
+  });
+};
+
+// A strict schema cannot leave a property out, so an unbound optional input or an
+// unscoped node arrives as null. Null means "not given" here: removing it undoes
+// the schema's encoding of absence rather than sanitizing the proposal, and every
+// field the model did set still reaches the validator untouched.
+const dropSchemaAbsentValues = (payload) => {
+  if (!isRecord(payload) || !Array.isArray(payload.nodes)) {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    nodes: payload.nodes.map((node) => {
+      if (!isRecord(node)) {
+        return node;
+      }
+
+      const { inputBindings, scope, ...rest } = node;
+
+      return {
+        ...rest,
+        ...(scope === null || scope === undefined ? {} : { scope }),
+        ...(isRecord(inputBindings)
+          ? {
+              inputBindings: Object.fromEntries(
+                Object.entries(inputBindings).filter(([, binding]) => binding !== null)
+              ),
+            }
+          : inputBindings === undefined
+            ? {}
+            : { inputBindings }),
+      };
+    }),
+  };
+};
+
 export const dagPlannerAdapter = {
   createExecutionGraph: async (plannerContext = {}) => {
     const completion = await completeTextWithMetadata(
       buildDagPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,
+        responseFormat: buildDagPlannerResponseFormat(plannerContext),
         routeId: MODEL_ROUTE_IDS.executionPlannerDefault,
       }
     );
 
     return attachModelRoute(
-      parsePlannerJson(completion.text),
+      dropSchemaAbsentValues(parsePlannerJson(completion.text)),
       completion.modelRoute
     );
   },
@@ -359,6 +511,38 @@ class ExecutionGraphValidationError extends Error {
  * and so does every replan patch, so there is one place where a graph becomes
  * executable and one set of reason codes explaining why one did not.
  */
+// Shown the full node limit, a planner proposes graphs the remaining Skill-call
+// budget then rejects whole (a local 7B model asked for 3-4 nodes with 2 calls
+// left). The planner is shown the node count the budget can pay for, and its
+// response schema follows; validation still checks the real budget and limits.
+const capNodesToBudget = ({ budgetRemaining, limits, selectedSkills }) => {
+  if (!isRecord(budgetRemaining) || selectedSkills.length === 0) {
+    return limits;
+  }
+
+  const budgetKeys = new Set();
+
+  for (const skill of selectedSkills) {
+    const { budgetKey } = getSkillContract(skill);
+
+    // A skill outside any finite budget leaves the node count unbounded by it.
+    if (!budgetKey || !Number.isFinite(budgetRemaining[budgetKey])) {
+      return limits;
+    }
+
+    budgetKeys.add(budgetKey);
+  }
+
+  const affordableNodes = [...budgetKeys].reduce(
+    (sum, budgetKey) => sum + budgetRemaining[budgetKey],
+    0
+  );
+
+  return affordableNodes >= 1 && affordableNodes < limits.maxNodes
+    ? { ...limits, maxNodes: affordableNodes }
+    : limits;
+};
+
 export const createAgentExecutionGraphResult = async ({
   authorizedDocIds = [],
   budgetRemaining = null,
@@ -378,7 +562,7 @@ export const createAgentExecutionGraphResult = async ({
   const redactedContext = buildDagPlanningContext({
     authorizedDocIds,
     docIds: plannerContext.docIds ?? null,
-    limits,
+    limits: capNodesToBudget({ budgetRemaining, limits, selectedSkills }),
     plan: plannerContext.plan ?? {},
     question: plannerContext.question,
     selectedSkills,

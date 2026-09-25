@@ -1,5 +1,5 @@
 import { createChatClient, createEmbeddingsClient } from "./openai-client.js";
-import { getLlmOpsPolicy } from "./config.js";
+import { getLlmOpsPolicy, isStructuredOutputEnabled } from "./config.js";
 import {
   MODEL_CAPABILITIES,
   MODEL_ROUTE_IDS,
@@ -433,12 +433,15 @@ export const completeText = async (prompt) => {
 export const completeTextWithMetadata = async (prompt, options = {}) => {
   const inputText = renderPromptInput(prompt);
   const capability = options.capability ?? MODEL_CAPABILITIES.chat;
+  const responseFormat = isStructuredOutputEnabled()
+    ? options.responseFormat ?? null
+    : null;
 
   if (customProvider?.completeText) {
     const modelRoute = buildCustomProviderRoute(capability);
     const metricContext = buildCustomRouteMetricContext();
     const text = await runWithLlmOpsMetric({
-      action: () => customProvider.completeText(inputText),
+      action: () => customProvider.completeText(inputText, { responseFormat }),
       metric: {
         ...buildUsageMetricFields({
           inputCharacters: inputText.length,
@@ -472,7 +475,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
   const response = await runWithLlmOpsMetric({
     action: () =>
       withRetry(
-        async () => instance.invoke(prompt),
+        async () => instance.invoke(prompt, { responseFormat }),
         "Chat completion failed."
       ),
     metric: {

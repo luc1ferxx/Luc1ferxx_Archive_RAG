@@ -6,6 +6,16 @@ import {
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
 import { completeTextWithMetadata } from "./openai.js";
 import {
+  boundedArray,
+  boundedString,
+  buildJsonSchemaResponseFormat,
+  nullable,
+  oneOfSchemas,
+  parseFirstJsonValue,
+  strictObject,
+  stringEnum,
+} from "./structured-output.js";
+import {
   MODEL_CAPABILITIES,
   MODEL_ROUTE_IDS,
 } from "./model-providers/index.js";
@@ -83,6 +93,12 @@ const parsePlannerJson = (rawText) => {
   try {
     return JSON.parse(candidate);
   } catch {
+    const firstValue = parseFirstJsonValue(candidate);
+
+    if (firstValue !== undefined) {
+      return firstValue;
+    }
+
     const objectStart = candidate.indexOf("{");
     const objectEnd = candidate.lastIndexOf("}");
     const arrayStart = candidate.indexOf("[");
@@ -187,6 +203,41 @@ const normalizePlannerPayload = (payload, plannerContext = {}) => {
   return normalizedSteps;
 };
 
+// One variant per step this request may use, with the only condition and skillId
+// the execution-plan validator accepts for it. The model still decides which
+// steps to run and in what order; it can no longer name an unselected step or
+// pair a step with the wrong condition.
+export const buildPlannerResponseFormat = ({
+  authorizedCustomSkills = [],
+  selectedSkills = [],
+} = {}) => {
+  const stepIds = [
+    ...getSelectedExecutionStepIds(selectedSkills, authorizedCustomSkills),
+  ];
+
+  if (stepIds.length === 0) {
+    return null;
+  }
+
+  const stepVariants = stepIds.map((stepId) => {
+    const schema = AGENT_EXECUTION_STEP_SCHEMA[stepId];
+
+    return strictObject({
+      id: stringEnum([stepId]),
+      skillId: schema.skillId ? stringEnum([schema.skillId]) : { type: "null" },
+      condition: stringEnum([schema.condition]),
+      reason: nullable(boundedString(MAX_REASON_LENGTH)),
+    });
+  });
+
+  return buildJsonSchemaResponseFormat({
+    name: "agent_execution_plan",
+    schema: strictObject({
+      steps: boundedArray(oneOfSchemas(stepVariants), stepIds.length),
+    }),
+  });
+};
+
 const attachModelRoute = (executionPlan = [], modelRoute = null) => {
   Object.defineProperty(executionPlan, "modelRoute", {
     configurable: true,
@@ -245,6 +296,7 @@ export const llmPlannerAdapter = {
       buildPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,
+        responseFormat: buildPlannerResponseFormat(plannerContext),
         routeId: MODEL_ROUTE_IDS.executionPlannerDefault,
       }
     );

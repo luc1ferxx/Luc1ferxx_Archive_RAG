@@ -73,7 +73,7 @@ export const createEmbeddingsClient = ({ apiKey, model }) => ({
 });
 
 export const createChatClient = ({ apiKey, model }) => ({
-  async invoke(prompt) {
+  async invoke(prompt, { responseFormat } = {}) {
     const baseUrl = resolveBaseUrl();
     let messages;
 
@@ -99,7 +99,11 @@ export const createChatClient = ({ apiKey, model }) => ({
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model, messages }),
+      body: JSON.stringify({
+        model,
+        messages,
+        ...(responseFormat ? { response_format: responseFormat } : {}),
+      }),
     });
 
     return {

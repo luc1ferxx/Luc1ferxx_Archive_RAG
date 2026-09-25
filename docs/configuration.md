@@ -48,6 +48,7 @@ STARTUP_HEALTH_STRICT=false
 | `SERPAPI_KEY` | 无 | Web answer 搜索所需；只跑文档 RAG 可先不配。 |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 文档 chunk 与 query 的 embedding 模型。 |
 | `OPENAI_CHAT_MODEL` | `gpt-5` | 文档答案、对比答案、网页摘要使用的模型。 |
+| `RAG_STRUCTURED_OUTPUT_ENABLED` | `true` | intent / execution / DAG planner 调用是否发送按请求生成的 JSON Schema `response_format`（strict）。schema 由运行时白名单生成：可选 step、候选 intent、Skill 的 typed 输入输出和已授权文档都写成枚举，自由文本和数组都有长度上限。它只收窄模型能输出什么，validator 仍是最终裁决。仅当 OpenAI 兼容端点拒绝 `response_format` 时设为 `false`，此时回到纯 prompt JSON 和容错解析。 |
 | `AGENT_PLANNER_ROLLOUT` | `llm` | AgentRAG planner 灰度模式；`configured` 使用下面两个显式 planner 变量，`shadow` 执行 deterministic 主路径并把 LLM intent/execution proposal 记录到 `agentObservability.*Planner.shadow`，`guarded_llm` 让 LLM 作为主 planner 但继续由 validator/fallback 兜底，`llm`/`deterministic` 会同时覆盖 intent 和 execution planner。 |
 | `AGENT_INTENT_PLANNER` | `llm` | AgentRAG intent 选择器；`deterministic` 使用规则候选首选项，`llm` 让 LLM 在白名单候选 intent 中选择并由 validator 兜底。 |
 | `AGENT_EXECUTION_PLANNER` | `llm` | AgentRAG execution step 规划器；`deterministic` 使用固定 step schema，`llm` 让 LLM 在白名单 step 中排序并由 validator 兜底。 |

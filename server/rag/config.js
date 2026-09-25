@@ -50,6 +50,12 @@ export const getEmbeddingModel = () =>
 
 export const getChatModel = () => process.env.OPENAI_CHAT_MODEL || "gpt-5";
 
+// Planner calls send a JSON Schema response_format. Turn it off only for an
+// OpenAI-compatible endpoint that rejects the parameter; the planners then fall
+// back to prompt-only JSON and their tolerant parsers.
+export const isStructuredOutputEnabled = () =>
+  toBoolean(process.env.RAG_STRUCTURED_OUTPUT_ENABLED, true);
+
 export const getPromptVersion = () =>
   toChoice(process.env.RAG_PROMPT_VERSION, "v3", ["v1", "v2", "v3"]);
 

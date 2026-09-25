@@ -9,6 +9,35 @@ import {
   MODEL_CAPABILITIES,
   MODEL_ROUTE_IDS,
 } from "./model-providers/index.js";
+import {
+  boundedString,
+  buildJsonSchemaResponseFormat,
+  parseFirstJsonValue,
+  strictObject,
+  stringEnum,
+} from "./structured-output.js";
+
+const MAX_REASON_LENGTH = 220;
+
+// The candidate list is the whitelist: the model picks one of these ids or
+// cannot answer at all.
+export const buildIntentPlannerResponseFormat = ({ candidates = [] } = {}) => {
+  const candidateIds = candidates
+    .map((candidate) => normalizeIntentText(candidate?.id))
+    .filter(Boolean);
+
+  if (candidateIds.length === 0) {
+    return null;
+  }
+
+  return buildJsonSchemaResponseFormat({
+    name: "agent_intent_selection",
+    schema: strictObject({
+      selectedIntentId: stringEnum(candidateIds),
+      reason: boundedString(MAX_REASON_LENGTH),
+    }),
+  });
+};
 
 const extractJsonCandidate = (rawText) => {
   const text = String(rawText ?? "").trim();
@@ -32,6 +61,12 @@ export const parseIntentPlannerJson = (rawText) => {
   try {
     return JSON.parse(candidate);
   } catch {
+    const firstValue = parseFirstJsonValue(candidate);
+
+    if (firstValue !== undefined) {
+      return firstValue;
+    }
+
     const objectStart = candidate.indexOf("{");
     const objectEnd = candidate.lastIndexOf("}");
 
@@ -89,6 +124,7 @@ export const llmIntentPlannerAdapter = {
       buildIntentPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.intentPlanner,
+        responseFormat: buildIntentPlannerResponseFormat(plannerContext),
         routeId: MODEL_ROUTE_IDS.intentPlannerDefault,
       }
     );
