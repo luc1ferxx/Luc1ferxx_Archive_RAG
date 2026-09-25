@@ -149,7 +149,26 @@ const buildReadinessSourceCheck = ({ reports }) => {
   });
 };
 
+const buildGateWorktreeCheck = ({ currentGitState, targetCommit }) => {
+  const reasonCode = !currentGitState?.commitSha || currentGitState.commitSha === "unknown"
+    ? RELEASE_EVIDENCE_REASON_CODES.unknownCommit
+    : currentGitState.commitSha !== targetCommit
+      ? RELEASE_EVIDENCE_REASON_CODES.commitMismatch
+      : currentGitState.dirty !== false
+        ? RELEASE_EVIDENCE_REASON_CODES.dirtyWorktree
+        : RELEASE_EVIDENCE_REASON_CODES.ok;
+
+  return buildCheck({
+    actual: currentGitState ?? null,
+    expected: { commitSha: targetCommit, dirty: false },
+    id: "gate-worktree",
+    reasonCode,
+    reportType: "repository",
+  });
+};
+
 export const buildReleaseEvidenceReport = ({
+  currentGitState = null,
   expectedCorpusHashes = {},
   maxAgeHours = DEFAULT_RELEASE_EVIDENCE_MAX_AGE_HOURS,
   now = new Date().toISOString(),
@@ -258,6 +277,7 @@ export const buildReleaseEvidenceReport = ({
       });
     });
   const checks = [
+    buildGateWorktreeCheck({ currentGitState, targetCommit }),
     ...reportChecks,
     ...sourceChecks,
     ...contractChecks,

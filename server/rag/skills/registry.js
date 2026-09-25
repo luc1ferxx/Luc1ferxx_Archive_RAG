@@ -4,6 +4,10 @@ import {
 } from "./built-ins.js";
 import { isAgentRunInterrupt } from "../agent-interrupts.js";
 import {
+  createSkillInputContractError,
+  createSkillOutputContractError,
+} from "./skill-contract.js";
+import {
   CUSTOM_SKILL_IDS,
   createCustomSkills,
 } from "./custom/index.js";
@@ -107,9 +111,32 @@ export const buildFailedSkillResult = (skill, error) => ({
   traceDetail: null,
 });
 
-export const executeAgentSkill = async (skill, context) => {
+export const executeAgentSkill = async (
+  skill,
+  context,
+  { validateInput, validateOutput } = {}
+) => {
   try {
-    return normalizeSkillResult(skill, await skill.execute(context));
+    const inputValidation = validateInput?.();
+
+    if (inputValidation && !inputValidation.ok) {
+      throw createSkillInputContractError(inputValidation.errors);
+    }
+
+    const rawOutput = await skill.execute(context);
+    const validation = validateOutput?.(rawOutput);
+
+    if (validation && !validation.ok) {
+      throw createSkillOutputContractError(validation.errors);
+    }
+
+    const result = normalizeSkillResult(skill, rawOutput);
+
+    if (validation) {
+      result.graphOutput = validation.output;
+    }
+
+    return result;
   } catch (error) {
     if (isAgentRunInterrupt(error)) {
       throw error;

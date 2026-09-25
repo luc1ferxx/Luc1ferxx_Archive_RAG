@@ -23,6 +23,15 @@ export {
   createDefaultCapabilityRegistry,
 } from "./built-ins.js";
 export {
+  createCapabilityGraphAdapter,
+  listCapabilityGraphAdapters,
+} from "./graph-contract.js";
+export {
+  GRAPH_CAPABILITY_APPROVAL_TYPE,
+  preflightCapabilityGraphApproval,
+  verifyCapabilityGraphApproval,
+} from "./graph-approval-preflight.js";
+export {
   ACTION_TASK_TYPE,
   createActionTaskService,
   createDocumentOrganizeCapability,

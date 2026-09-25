@@ -325,3 +325,84 @@ test("the background agent task path runs on the same governed planner and repla
     assert.equal(questions.length, 2);
   });
 });
+
+test("background agent task forwards the injected all-stage shadow planner without executing its graph", async () => {
+  await withEnv({
+    AGENT_PLANNER_ROLLOUT: "deterministic",
+    AGENT_SKILL_GRAPH_ROLLOUT: "off",
+    AGENT_UNIFIED_GRAPH_ROLLOUT: "shadow",
+  }, async () => {
+    const plannerContexts = [];
+    const unifiedGraphPlannerAdapter = {
+      id: "injected-unified-shadow",
+      createExecutionGraph: async (context) => {
+        plannerContexts.push(context);
+        return {
+          nodes: [{
+            dependsOn: [],
+            failurePolicy: "fail_fast",
+            inputBindings: {
+              docIds: requestBinding("docIds"),
+              question: requestBinding("question"),
+            },
+            nodeId: "primary",
+            skillId: "document_rag",
+          }],
+        };
+      },
+    };
+    const services = createAppServices({
+      agentRunStore: createInMemoryAgentRunStore(),
+      ragService: {
+        getDocument: (docId, scope) =>
+          docId === "contract-1" && scope?.workspaceId === TASK_ACCESS_SCOPE.workspaceId
+            ? { docId, fileName: "contract.pdf" }
+            : null,
+        listDocuments: () => [{ docId: "contract-1", fileName: "contract.pdf" }],
+        chat: async () => ({
+          abstained: false,
+          citations: [{
+            docId: "contract-1",
+            excerpt: "The contract requires thirty days notice.",
+            fileName: "contract.pdf",
+            pageNumber: 1,
+            rank: 1,
+          }],
+          text: "The contract requires thirty days notice. [Source 1]",
+        }),
+      },
+      taskStore: createInMemoryTaskStore(),
+      unifiedGraphPlannerAdapter,
+      workspaceArtifactStore: createInMemoryWorkspaceArtifactStore(),
+    }, { uploadsDirectory: os.tmpdir() });
+
+    assert.equal(services.unifiedGraphPlannerAdapter, unifiedGraphPlannerAdapter);
+    const outcome = await services.agentTaskRunner.run({
+      accessScope: TASK_ACCESS_SCOPE,
+      patchTask: async () => {},
+      task: {
+        id: "agent_goal:unified-shadow",
+        input: {
+          docIds: ["contract-1"],
+          maxIterations: 1,
+          question: "What notice does the contract require?",
+          sessionId: "unified-shadow-session",
+          userId: TASK_ACCESS_SCOPE.userId,
+        },
+      },
+    });
+    const run = await services.agentRunService.getRun({
+      accessScope: TASK_ACCESS_SCOPE,
+      runId: outcome.payload.agentRunId,
+    });
+    const shadowEvents = run.events.filter((event) => event.type === "unified_graph_planned");
+
+    assert.equal(outcome.status, "completed");
+    assert.equal(plannerContexts.length, 1);
+    assert.equal(plannerContexts[0].graphVersion, "v3");
+    assert.equal(shadowEvents.length, 1);
+    assert.equal(shadowEvents[0].payload.status, "selected");
+    assert.equal(shadowEvents[0].payload.executed, false);
+    assert.equal(run.steps.some((step) => step.type === "graph_node"), false);
+  });
+});

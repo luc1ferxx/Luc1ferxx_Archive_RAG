@@ -11,6 +11,7 @@ import { createAgentRunRecoveryActionService } from "../rag/agent-run-recovery-a
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
+  createCustomSkillStepExecutor,
   createDocumentRagStepExecutor,
 } from "../rag/agent-run-step-handlers/index.js";
 import {
@@ -21,6 +22,8 @@ import {
   createAgentRunService,
 } from "../rag/agent-runs.js";
 import { createPostgresAgentRunStore } from "../rag/postgres-agent-run-store.js";
+import { createSkillRegistry } from "../rag/skills/registry.js";
+import { SKILL_EFFECTS, SKILL_IDEMPOTENCY } from "../rag/skills/skill-contract.js";
 
 const parseJson = (value, fallback = null) =>
   value === null || value === undefined ? fallback : JSON.parse(value);
@@ -599,6 +602,39 @@ const createPostgresDocumentStepExecutor = ({
     }),
   });
 
+const PURE_READ_SKILL_ID = "pure_read_fixture";
+
+const createPostgresPureReadStepExecutor = ({
+  agentRunService,
+  calls = [],
+  text = "Recovered pure read from Postgres.",
+} = {}) => {
+  const skillRegistry = createSkillRegistry([{
+    budgetKey: "customSkillCalls",
+    effects: SKILL_EFFECTS.readOnly,
+    execute: async ({ accessScope: scope, docIds, question }) => {
+      calls.push({ accessScope: scope, docIds, question });
+      return { abstained: false, citations: [], text };
+    },
+    id: PURE_READ_SKILL_ID,
+    idempotency: SKILL_IDEMPOTENCY.deterministic,
+    kind: "custom",
+    label: "Pure read fixture",
+    match: () => false,
+    replaySafe: true,
+    requiresAccessScope: true,
+    version: "1.0.0",
+  }]);
+
+  return createAgentRunStepExecutor({
+    agentRunService,
+    executeCustomSkillStep: createCustomSkillStepExecutor({
+      ragService: {},
+      skillRegistry,
+    }),
+  });
+};
+
 const createManualRecoveryRun = async ({
   agentRunService,
   runId = "run-manual-recovery",
@@ -938,13 +974,39 @@ test("postgres agent run recovery preserves completed steps after partial restar
   );
 });
 
-test("postgres agent run recovery auto resumes a safe pending step after restart", async () => {
+test("postgres manual recovery does not change the run when its event cannot commit", async () => {
+  const harness = createFakePostgresAgentRunHarness();
+  const service = harness.createService();
+  await service.createRun({
+    accessScope,
+    goal: "Recover atomically",
+    runId: "run-manual-atomic-failure",
+  });
+  const recoveryService = createAgentRunRecoveryService({
+    agentRunService: harness.createService(),
+  });
+  harness.failNextAtomicEvent();
+
+  await assert.rejects(
+    recoveryService.recoverOnStartup({ mode: "manual" }),
+    /Simulated atomic event insert failure/
+  );
+  const run = await service.getRun({
+    accessScope,
+    runId: "run-manual-atomic-failure",
+  });
+  assert.equal(run.status, AGENT_RUN_STATUSES.running);
+  assert.equal(run.result.recovery, undefined);
+  assert.equal(run.events.some((event) => event.type === "manual_recovery_required"), false);
+});
+
+test("postgres agent run recovery auto resumes a pure read-only custom step after restart", async () => {
   const harness = createFakePostgresAgentRunHarness();
   const firstService = harness.createService();
 
   await firstService.createRun({
     accessScope,
-    goal: "Recover pending document run",
+    goal: "Recover pending pure read run",
     input: {
       docIds: ["doc-1"],
     },
@@ -956,13 +1018,18 @@ test("postgres agent run recovery auto resumes a safe pending step after restart
     patch: {
       steps: [
         {
-          id: "document-step",
+          id: "pure-read-step",
           input: {
             docIds: ["doc-1"],
             question: "What changed?",
+            skillId: PURE_READ_SKILL_ID,
+            skillVersion: "1.0.0",
+            effects: SKILL_EFFECTS.readOnly,
+            idempotency: SKILL_IDEMPOTENCY.deterministic,
+            replaySafe: true,
           },
           status: AGENT_RUN_STEP_STATUSES.pending,
-          type: "document_rag",
+          type: "custom_skill",
         },
       ],
     },
@@ -971,8 +1038,10 @@ test("postgres agent run recovery auto resumes a safe pending step after restart
   const restartedService = harness.createService({
     now: () => "2026-06-14T00:05:00.000Z",
   });
-  const agentRunStepExecutor = createPostgresDocumentStepExecutor({
+  const pureReadCalls = [];
+  const agentRunStepExecutor = createPostgresPureReadStepExecutor({
     agentRunService: restartedService,
+    calls: pureReadCalls,
   });
   const recoveryService = createAgentRunRecoveryService({
     agentRunService: restartedService,
@@ -992,7 +1061,12 @@ test("postgres agent run recovery auto resumes a safe pending step after restart
   assert.equal(recovery.manualRecoveredCount, 0);
   assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.completed);
   assert.equal(recoveredRun.result.recovery.mode, "auto");
-  assert.equal(recoveredRun.result.answer, "Recovered from Postgres.");
+  assert.equal(recoveredRun.result.answer, "Recovered pure read from Postgres.");
+  assert.deepEqual(pureReadCalls, [{
+    accessScope,
+    docIds: ["doc-1"],
+    question: "What changed?",
+  }]);
   assert.equal(
     recoveredRun.steps[0].status,
     AGENT_RUN_STEP_STATUSES.completed
@@ -1010,7 +1084,7 @@ test("postgres agent run recovery auto resumes a safe pending step after restart
   );
 });
 
-test("postgres agent run recovery auto resumes a safe running primary document step after restart", async () => {
+test("postgres agent run recovery never replays a running memory-writing document step", async () => {
   const harness = createFakePostgresAgentRunHarness();
   const firstService = harness.createService();
 
@@ -1066,43 +1140,38 @@ test("postgres agent run recovery auto resumes a safe running primary document s
     runId: "run-running-auto-recovery",
   });
 
-  assert.equal(recovery.autoRecoveredCount, 1);
-  assert.equal(recovery.manualRecoveredCount, 0);
-  assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.completed);
+  assert.equal(recovery.autoRecoveredCount, 0);
+  assert.equal(recovery.manualRecoveredCount, 1);
+  assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.waitingForUser);
   assert.deepEqual(
     {
       mode: recoveredRun.result.recovery.mode,
-      stepId: recoveredRun.result.recovery.stepId,
-      stepType: recoveredRun.result.recovery.stepType,
+      reason: recoveredRun.result.recovery.reason,
+      requestedMode: recoveredRun.result.recovery.requestedMode,
     },
     {
-      mode: "auto",
-      stepId: "document-step",
-      stepType: "document_rag",
+      mode: "manual",
+      reason: STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+      requestedMode: "auto",
     }
   );
-  assert.equal(ragCalls.length, 1);
-  assert.deepEqual(ragCalls[0].docIds, ["doc-1"]);
-  assert.equal(
-    ragCalls[0].question,
-    "What changed while the server restarted?"
-  );
-  assert.deepEqual(ragCalls[0].options.retrievalPlan, {
-    queries: ["policy change"],
-  });
-  assert.equal(recoveredRun.result.answer, "Recovered running primary step.");
+  assert.equal(ragCalls.length, 0);
   assert.equal(
     recoveredRun.steps[0].status,
-    AGENT_RUN_STEP_STATUSES.completed
+    AGENT_RUN_STEP_STATUSES.running
   );
   assert.ok(
     recoveredRun.events.some(
-      (event) => event.type === "auto_recovery_completed"
+      (event) => event.type === "manual_recovery_required"
     )
+  );
+  assert.equal(
+    recoveredRun.events.some((event) => event.type === "auto_recovery_started"),
+    false
   );
 });
 
-test("postgres agent run recovery resumes the next safe step after restart without replaying completed work", async () => {
+test("postgres agent run recovery resumes a pure read step without replaying completed work", async () => {
   for (const nextStepStatus of [
     AGENT_RUN_STEP_STATUSES.pending,
     AGENT_RUN_STEP_STATUSES.running,
@@ -1113,9 +1182,9 @@ test("postgres agent run recovery resumes the next safe step after restart witho
 
     await firstService.createRun({
       accessScope,
-      goal: "Recover the next document step",
+      goal: "Recover the next pure read step",
       input: {
-        docIds: ["doc-1"],
+        docIds: ["doc-1", "doc-2"],
       },
       runId,
     });
@@ -1142,9 +1211,14 @@ test("postgres agent run recovery resumes the next safe step after restart witho
             input: {
               docIds: ["doc-2"],
               question: `What changed next from ${nextStepStatus}?`,
+              skillId: PURE_READ_SKILL_ID,
+              skillVersion: "1.0.0",
+              effects: SKILL_EFFECTS.readOnly,
+              idempotency: SKILL_IDEMPOTENCY.deterministic,
+              replaySafe: true,
             },
             status: nextStepStatus,
-            type: "document_rag",
+            type: "custom_skill",
           },
         ],
       },
@@ -1153,12 +1227,12 @@ test("postgres agent run recovery resumes the next safe step after restart witho
     const restartedService = harness.createService({
       now: () => "2026-06-14T00:05:00.000Z",
     });
-    const ragCalls = [];
+    const pureReadCalls = [];
     const recoveryService = createAgentRunRecoveryService({
       agentRunService: restartedService,
-      agentRunStepExecutor: createPostgresDocumentStepExecutor({
+      agentRunStepExecutor: createPostgresPureReadStepExecutor({
         agentRunService: restartedService,
-        calls: ragCalls,
+        calls: pureReadCalls,
         text: `Recovered ${nextStepStatus} second step.`,
       }),
       now: () => "2026-06-14T00:06:00.000Z",
@@ -1180,10 +1254,10 @@ test("postgres agent run recovery resumes the next safe step after restart witho
     assert.equal(recovery.autoRecoveredCount, 1);
     assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.completed);
     assert.equal(recoveredRun.result.recovery.stepId, "step-next");
-    assert.equal(ragCalls.length, 1);
-    assert.deepEqual(ragCalls[0].docIds, ["doc-2"]);
+    assert.equal(pureReadCalls.length, 1);
+    assert.deepEqual(pureReadCalls[0].docIds, ["doc-2"]);
     assert.equal(
-      ragCalls[0].question,
+      pureReadCalls[0].question,
       `What changed next from ${nextStepStatus}?`
     );
     assert.equal(completedStep.status, AGENT_RUN_STEP_STATUSES.completed);
@@ -1302,7 +1376,7 @@ test("postgres agent run recovery does not auto replay a running unsafe external
   );
 });
 
-test("postgres recovery actions resume a partial run after restart without replaying completed steps", async () => {
+test("postgres recovery actions resume a pending pure read without replaying completed steps", async () => {
   const harness = createFakePostgresAgentRunHarness();
   const firstService = harness.createService();
 
@@ -1337,9 +1411,14 @@ test("postgres recovery actions resume a partial run after restart without repla
           input: {
             docIds: ["doc-1"],
             question: "What changed next?",
+            skillId: PURE_READ_SKILL_ID,
+            skillVersion: "1.0.0",
+            effects: SKILL_EFFECTS.readOnly,
+            idempotency: SKILL_IDEMPOTENCY.deterministic,
+            replaySafe: true,
           },
           status: AGENT_RUN_STEP_STATUSES.pending,
-          type: "document_rag",
+          type: "custom_skill",
         },
       ],
     },
@@ -1353,10 +1432,12 @@ test("postgres recovery actions resume a partial run after restart without repla
     now: () => "2026-06-14T00:06:00.000Z",
   });
   const manualRecovery = await recoveryService.recoverOnStartup();
+  const pureReadCalls = [];
   const actionService = createAgentRunRecoveryActionService({
     agentRunService: restartedService,
-    agentRunStepExecutor: createPostgresDocumentStepExecutor({
+    agentRunStepExecutor: createPostgresPureReadStepExecutor({
       agentRunService: restartedService,
+      calls: pureReadCalls,
       text: "Resumed after partial restart.",
     }),
   });
@@ -1378,6 +1459,7 @@ test("postgres recovery actions resume a partial run after restart without repla
   assert.equal(resumedStep.status, AGENT_RUN_STEP_STATUSES.completed);
   assert.equal(resumedStep.output.text, "Resumed after partial restart.");
   assert.equal(result.run.result.answer, "Resumed after partial restart.");
+  assert.deepEqual(pureReadCalls.map((call) => call.question), ["What changed next?"]);
 });
 
 test("postgres recovery actions retry a failed step after restart through the step executor", async () => {

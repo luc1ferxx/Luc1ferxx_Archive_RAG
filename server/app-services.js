@@ -50,7 +50,7 @@ import { createDefaultAdminAuditService } from "./rag/admin-audit-store.js";
 import { createAdminStatusService } from "./rag/admin-status.js";
 import { createAgentTriggerDispatcher } from "./rag/agent-trigger-dispatcher.js";
 import { createDefaultAgentTriggerRegistry } from "./rag/agent-triggers/registry.js";
-import { runAgentRag } from "./rag/agent.js";
+import { resumeAgentExecutionGraphRun, runAgentRag } from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import {
   DAG_PLANNER_IDS,
@@ -185,6 +185,7 @@ export const buildChatResponse = async ({
   capabilityApprovals,
   taskMemory,
   skillRegistry,
+  unifiedGraphPlannerAdapter,
 }) => {
   const missingDocIds = docIds.filter(
     (docId) => !ragService.getDocument(docId, accessScope)
@@ -220,6 +221,7 @@ export const buildChatResponse = async ({
     dagPlannerAdapter: requestDagPlannerAdapter,
     replanAdapter: requestReplanAdapter,
     skillRegistry,
+    unifiedGraphPlannerAdapter,
   });
 };
 
@@ -309,6 +311,10 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     options.dagPlannerAdapter ?? createDagPlannerAdapter();
   const resolvedReplanAdapter =
     options.replanAdapter ?? createReplanAdapter(resolvedDagPlannerAdapter);
+  // No implicit model route for the all-stage graph while its production
+  // execution/recovery path is incomplete. Tests and later rollout wiring may
+  // supply an explicit proposal adapter for shadow observation.
+  const unifiedGraphPlannerAdapter = options.unifiedGraphPlannerAdapter ?? null;
   const agentTaskRunner =
     options.agentTaskRunner ??
     createAgentTaskRunner({
@@ -341,6 +347,7 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
           sessionId,
           skillRegistry,
           taskMemory,
+          unifiedGraphPlannerAdapter,
           userId,
           webChatService,
         }),
@@ -402,6 +409,17 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     createAgentRunRecoveryService({
       agentRunService,
       agentRunStepExecutor,
+      resumeExecutionGraph: ({ accessScope, checkpoint, run, runId }) =>
+        resumeAgentExecutionGraphRun({
+          accessScope,
+          agentRunService,
+          checkpoint,
+          ragService,
+          replanAdapter: resolvedReplanAdapter,
+          run,
+          runId,
+          skillRegistry,
+        }),
     });
   const agentRunRecoveryActionService =
     options.agentRunRecoveryActionService ??
@@ -491,6 +509,7 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     replanAdapter: resolvedReplanAdapter,
     skillRegistry,
     taskService,
+    unifiedGraphPlannerAdapter,
     uploadStore,
     uploadsDirectory,
     webChatService,

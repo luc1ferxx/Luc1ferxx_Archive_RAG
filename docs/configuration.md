@@ -51,7 +51,8 @@ STARTUP_HEALTH_STRICT=false
 | `AGENT_PLANNER_ROLLOUT` | `llm` | AgentRAG planner 灰度模式；`configured` 使用下面两个显式 planner 变量，`shadow` 执行 deterministic 主路径并把 LLM intent/execution proposal 记录到 `agentObservability.*Planner.shadow`，`guarded_llm` 让 LLM 作为主 planner 但继续由 validator/fallback 兜底，`llm`/`deterministic` 会同时覆盖 intent 和 execution planner。 |
 | `AGENT_INTENT_PLANNER` | `llm` | AgentRAG intent 选择器；`deterministic` 使用规则候选首选项，`llm` 让 LLM 在白名单候选 intent 中选择并由 validator 兜底。 |
 | `AGENT_EXECUTION_PLANNER` | `llm` | AgentRAG execution step 规划器；`deterministic` 使用固定 step schema，`llm` 让 LLM 在白名单 step 中排序并由 validator 兜底。 |
-| `AGENT_SKILL_GRAPH_ROLLOUT` | `off` | Custom skill 阶段内部的 V1 chain / V2 typed DAG 灰度开关；`off` 完全走 V1 顺序链，`shadow` 由 V1 出答案、同时旁路规划并校验一张 graph 用于比对，`guarded` 真正执行 DAG 并只在 graph 整体被拒时回落 V1。详见 [agent-rag.md](agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。 |
+| `AGENT_SKILL_GRAPH_ROLLOUT` | `off` | 仅控制 custom Skill 阶段的 V1 chain / V2 typed DAG；`off` 完全走 V1，`shadow` 仍由 V1 出答案、旁路规划/校验 DAG，`guarded` 才执行 DAG。V2 候选来自经 `accessScope` / `docIds` 核验、且有显式 typed contract 的已注册原子 Skill catalog，不由 V1 intent/组合 chain 独占；graph 只在执行任何 node 之前整体被拒时才能回落 V1。不会将 built-in/document/Web/capability 阶段纳入同一张 DAG。详见 [agent-rag.md](agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。 |
+| `AGENT_UNIFIED_GRAPH_ROLLOUT` | `off` | 异构 v3 全阶段图目前仅支持 `off` / `shadow`。`shadow` 在注入统一图 planner adapter 时旁路生成并校验候选图，只记录精简的 `unified_graph_planned` run event，真实答案仍走现有外层流程；没有 adapter 会记录 rejected。`guarded` 尚不可选，误设会回到 `off`，不能据此声称生产已执行统一 DAG。 |
 | `RAG_PROMPT_VERSION` | `v3` | Prompt 版本；`server/.env.example` 当前显式设置为 `v2`。 |
 | `STARTUP_HEALTH_STRICT` | `false` | 健康检查失败时是否阻止启动。 |
 
@@ -65,6 +66,8 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `EVAL_EVIDENCE_PROFILE` | 各 runner 的默认 profile | 写入公开 `evidence.profile`；完整发布 workflow 固定为 `release`。 |
 
 `eval:robust-suite` 会在同一次运行内自行传递 suite ID、run ID 和 config hash，不需要手工设置 suite 环境变量。严格发布 freshness 默认是 `24` 小时，可用 `npm run release:gate -- --max-age-hours <hours>` 临时覆盖；target commit 也可通过 `--target-commit <sha>` 显式指定。完整 CLI 和 lineage 合同见 [evaluation.md](evaluation.md#release-evidence-gate)。
+
+把 Skill graph 设为 `guarded` 只改变运行路径，不等于通过上线门禁。`rollout:readiness` 会同时要求运行环境为 `guarded`、真实模型的 `planner_dynamic_skill_graph` case 通过，以及两次真实 HTTP `/chat` 的 guarded DAG smoke 通过；`release:gate` 还校验同一目标提交的报告 lineage。默认值不会由评测命令自动改成 `guarded`。
 
 ## Model/provider registry
 
@@ -98,7 +101,7 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `TASKS_POSTGRES_TABLE` | `rag_tasks` | task/job 当前快照表。 |
 | `TASK_EVENTS_POSTGRES_TABLE` | `rag_task_events` | task/job 审计事件表。 |
 | `AGENT_RUN_STORE_PROVIDER` | `auto` | Agent run 存储；`auto` 在 PostgreSQL 配好时使用 `postgres`，否则使用 `memory`。 |
-| `AGENT_RUN_RECOVERY_MODE` | PostgreSQL-backed run store 时为 `auto`，否则 `manual` | Agent run 启动恢复模式；不显式设置时，PostgreSQL-backed agent run store 会默认自动恢复安全的 RAG-only pending/running/paused step，非持久化 run store 仍默认 `manual`；显式 `manual` 只标记 recoverable run 等待人工处理，`auto` 遇到审批或不安全 step 会回落人工，`off` 跳过启动恢复。 |
+| `AGENT_RUN_RECOVERY_MODE` | PostgreSQL-backed run store 时为 `auto`，否则 `manual` | Agent run 启动恢复模式；PostgreSQL-backed run store 默认尝试恢复 replay matrix 允许的安全 step，非持久化 run store 默认 `manual`。`document_rag`、`follow_up_retrieval`、`research_question` 调用真实 `ragService.chat` 时可能写入会话和长期记忆，包括旧记录未持久化 replay metadata 的情况，都不自动重放；显式 `manual` 只标记 recoverable run 等待人工处理，`auto` 遇到审批或不安全 step 会回落人工，`off` 跳过启动恢复。失败步骤仍可显式 `retry_failed_step`，但可能重复这些写入，不保证 exactly-once。 |
 | `AGENT_RUNS_POSTGRES_TABLE` | `rag_agent_runs` | Agent run 当前快照表。 |
 | `AGENT_RUN_EVENTS_POSTGRES_TABLE` | `rag_agent_run_events` | Agent run 审计事件表。 |
 | `WORKSPACE_ARTIFACT_STORE_PROVIDER` | `auto` | Workspace artifact 存储；`auto` 在 PostgreSQL 配好时使用 `postgres`，否则回退到 `memory`。 |

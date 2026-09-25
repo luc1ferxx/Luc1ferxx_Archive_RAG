@@ -36,6 +36,7 @@ import {
 import {
   STEP_REPLAY_SAFETY_REASON_CODES,
 } from "../rag/agent-run-step-replay-safety.js";
+import { createSkillRegistry } from "../rag/skills/registry.js";
 import {
   createInMemoryTaskStore,
 } from "../rag/tasks.js";
@@ -1775,6 +1776,96 @@ test("chat endpoint exposes explicit rag abstain fields", async () => {
   }
 });
 
+test("chat endpoint can observe an injected all-stage DAG without executing it", async () => {
+  const previousRollout = process.env.AGENT_UNIFIED_GRAPH_ROLLOUT;
+  process.env.AGENT_UNIFIED_GRAPH_ROLLOUT = "shadow";
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  let planned = 0;
+  let retrieved = 0;
+  let server;
+
+  try {
+    const app = await createApp({
+      agentRunService,
+      ragService: {
+        chat: async () => {
+          retrieved += 1;
+          return {
+            abstained: false,
+            citations: [{
+              docId: "doc-shadow",
+              excerpt: "The agreement requires thirty days notice.",
+              fileName: "agreement.pdf",
+              pageNumber: 1,
+              rank: 1,
+            }],
+            text: "The agreement requires thirty days notice. [Source 1]",
+          };
+        },
+        getDocument: (docId) =>
+          docId === "doc-shadow" ? { docId, fileName: "agreement.pdf" } : null,
+        initializeDocumentRegistry: async () => [],
+        initializeSessionMemory: async () => true,
+        listDocuments: () => [{ docId: "doc-shadow", fileName: "agreement.pdf" }],
+      },
+      healthService: okHealthService,
+      unifiedGraphPlannerAdapter: {
+        id: "http-shadow",
+        createExecutionGraph: async () => {
+          planned += 1;
+          return {
+            nodes: [{
+              dependsOn: [],
+              failurePolicy: "fail_fast",
+              inputBindings: {
+                docIds: { field: "docIds", source: "request" },
+                question: { field: "question", source: "request" },
+              },
+              nodeId: "document",
+              skillId: "document_rag",
+            }],
+          };
+        },
+      },
+    });
+    server = await startServer(app);
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...recoveryScopeHeaders,
+      },
+      body: JSON.stringify({
+        docId: "doc-shadow",
+        question: "What notice does the agreement require?",
+      }),
+    });
+    const body = await response.json();
+    const run = await agentRunService.getRun({
+      accessScope: recoveryAccessScope,
+      runId: body.agentRunId,
+    });
+    const events = run.events.filter((event) => event.type === "unified_graph_planned");
+
+    assert.equal(response.status, 200);
+    assert.equal(planned, 1);
+    assert.ok(retrieved >= 1);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].payload.status, "selected");
+    assert.equal(events[0].payload.executed, false);
+    assert.equal(run.steps.some((step) => step.type === "graph_node"), false);
+  } finally {
+    await server?.close();
+    if (previousRollout === undefined) {
+      delete process.env.AGENT_UNIFIED_GRAPH_ROLLOUT;
+    } else {
+      process.env.AGENT_UNIFIED_GRAPH_ROLLOUT = previousRollout;
+    }
+  }
+});
+
 test("chat endpoint returns unified agent answer and trace while preserving legacy fields", async () => {
   const documents = new Map([
     [
@@ -2058,16 +2149,29 @@ test("agent run recovery endpoints list and cancel manual recovery runs", async 
     assert.equal(recoveryBody.runs[0].runId, "run-recovery");
     assert.deepEqual(
       recoveryBody.runs[0].recovery.actions.map((action) => action.type),
-      ["resume_from_step", "cancel"]
+      ["cancel"]
     );
     assert.equal(
       recoveryBody.runs[0].recovery.replaySafety.steps[0].canAutoReplay,
-      true
+      false
     );
     assert.deepEqual(
-      recoveryBody.runs[0].recovery.actions[0].safety.reasonCodes,
-      []
+      recoveryBody.runs[0].recovery.replaySafety.steps[0].reasonCodes,
+      [STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent]
     );
+
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/run-recovery/recovery/actions/resume_from_step`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ stepId: "step-document" }),
+      }
+    );
+
+    assert.equal(response.status, 409);
 
     response = await fetch(
       `${server.baseUrl}/agent-runs/run-recovery/recovery/actions/cancel`,
@@ -2098,9 +2202,40 @@ test("agent run recovery endpoints list and cancel manual recovery runs", async 
   }
 });
 
-test("agent run recovery API resumes a paused document step after restart", async () => {
+test("agent run recovery API resumes a paused read-only custom step after restart", async () => {
   const agentRunStore = createInMemoryAgentRunStore();
   const calls = [];
+  const skillRegistry = createSkillRegistry([
+    {
+      budgetKey: null,
+      effects: "read_only",
+      execute: async (context) => {
+        calls.push(context);
+
+        return {
+          citations: [
+            {
+              chunkIndex: 1,
+              docId: "doc-1",
+              excerpt: "Restarted recovery keeps the persisted input.",
+              fileName: "restart.pdf",
+              pageNumber: 2,
+              rank: 1,
+            },
+          ],
+          text: "Recovered after restart. [Source 1]",
+        };
+      },
+      id: "read_only_recovery_probe",
+      idempotency: "deterministic",
+      kind: "custom",
+      label: "Read-only recovery probe",
+      match: () => false,
+      replaySafe: true,
+      requiresAccessScope: true,
+      version: "1.0.0",
+    },
+  ]);
 
   await seedRecoverableAgentRun({
     agentRunStore,
@@ -2115,7 +2250,7 @@ test("agent run recovery API resumes a paused document step after restart", asyn
       status: AGENT_RUN_STATUSES.waitingForUser,
       steps: [
         {
-          id: "step-document-paused",
+          id: "step-custom-paused",
           input: {
             docIds: ["doc-1"],
             question: "What changed after restart?",
@@ -2123,12 +2258,14 @@ test("agent run recovery API resumes a paused document step after restart", asyn
               retrievalQueries: ["restart change"],
             },
             sessionId: "session-restart",
+            skillId: "read_only_recovery_probe",
+            skillVersion: "1.0.0",
             userId: "alice",
           },
           kind: AGENT_RUN_STEP_KINDS.toolCall,
-          label: "Document RAG",
+          label: "Read-only recovery probe",
           status: AGENT_RUN_STEP_STATUSES.paused,
-          type: "document_rag",
+          type: "custom_skill",
         },
       ],
     },
@@ -2140,29 +2277,11 @@ test("agent run recovery API resumes a paused document step after restart", asyn
     agentRunStore,
     healthService: okHealthService,
     ragService: createRecoveryRagService({
-      chat: async (docIds, question, options) => {
-        calls.push({
-          docIds,
-          options,
-          question,
-        });
-
-        return {
-          citations: [
-            {
-              chunkIndex: 1,
-              docId: "doc-1",
-              excerpt: "Restarted recovery keeps the persisted input.",
-              fileName: "restart.pdf",
-              pageNumber: 2,
-              rank: 1,
-            },
-          ],
-          resolvedQuery: question,
-          text: "Recovered after restart. [Source 1]",
-        };
+      chat: async () => {
+        throw new Error("Read-only recovery probe must not call memory-writing RAG chat.");
       },
     }),
+    skillRegistry,
   });
   const server = await startServer(app);
 
@@ -2202,7 +2321,7 @@ test("agent run recovery API resumes a paused document step after restart", asyn
           ...recoveryScopeHeaders,
         },
         body: JSON.stringify({
-          stepId: "step-document-paused",
+          stepId: "step-custom-paused",
         }),
       }
     );
@@ -2213,20 +2332,20 @@ test("agent run recovery API resumes a paused document step after restart", asyn
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].docIds, ["doc-1"]);
     assert.equal(calls[0].question, "What changed after restart?");
-    assert.equal(calls[0].options.accessScope.userId, recoveryAccessScope.userId);
+    assert.equal(calls[0].accessScope.userId, recoveryAccessScope.userId);
     assert.equal(
-      calls[0].options.accessScope.workspaceId,
+      calls[0].accessScope.workspaceId,
       recoveryAccessScope.workspaceId
     );
-    assert.deepEqual(calls[0].options.retrievalPlan, {
+    assert.deepEqual(calls[0].retrievalPlan, {
       retrievalQueries: ["restart change"],
     });
-    assert.equal(body.response.agentMode, "document");
+    assert.equal(body.response.agentMode, "read_only_recovery_probe");
     assert.equal(body.response.agentRunStatus, "completed");
     assert.equal(body.response.agentAnswer, "Recovered after restart. [Source 1]");
     assert.equal(body.run.status, AGENT_RUN_STATUSES.completed);
     assert.equal(
-      body.run.steps.find((step) => step.id === "step-document-paused").status,
+      body.run.steps.find((step) => step.id === "step-custom-paused").status,
       AGENT_RUN_STEP_STATUSES.completed
     );
 

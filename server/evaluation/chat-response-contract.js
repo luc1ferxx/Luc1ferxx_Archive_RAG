@@ -131,6 +131,9 @@ export const buildPlannerResponseSummary = ({ response, telemetry = {} } = {}) =
     planner: getExecutionPlanner(response),
     selectedSkills: getSelectedSkills(response),
     skillChain: getSkillChain(response),
+    ...(isPlainObject(telemetry.skillGraph)
+      ? { skillGraph: telemetry.skillGraph }
+      : {}),
     status: response?.status ?? null,
     telemetry: {
       chatCallCount: normalizeArray(telemetry.chatCalls).length,

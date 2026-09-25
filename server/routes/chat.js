@@ -24,6 +24,7 @@ export const createChatRouter = (services) => {
     ragService,
     replanAdapter,
     skillRegistry,
+    unifiedGraphPlannerAdapter,
     webChatService,
   } = services;
 
@@ -55,6 +56,7 @@ export const createChatRouter = (services) => {
         intentPlannerAdapter,
         replanAdapter,
         skillRegistry,
+        unifiedGraphPlannerAdapter,
       });
 
       return res.status(response.status).json(response.body);

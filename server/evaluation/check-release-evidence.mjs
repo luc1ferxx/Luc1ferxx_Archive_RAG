@@ -111,6 +111,7 @@ const main = async () => {
   const reports = await readReleaseEvidenceInputs({ inputDirectory });
   const expectedCorpusHashes = await readReleaseCorpusHashes();
   const report = buildReleaseEvidenceReport({
+    currentGitState: gitState,
     expectedCorpusHashes,
     maxAgeHours: options.maxAgeHours,
     reports,

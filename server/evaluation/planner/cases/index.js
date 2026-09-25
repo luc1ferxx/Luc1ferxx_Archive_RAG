@@ -1,4 +1,9 @@
 import { runAgentRag } from "../../../rag/agent.js";
+import { dagPlannerAdapter } from "../../../rag/agent-dag-planner-adapter.js";
+import {
+  createAgentRunService,
+  createInMemoryAgentRunStore,
+} from "../../../rag/agent-runs.js";
 import {
   getChatResponseBody,
   getExecutionPlanner,
@@ -11,6 +16,7 @@ import {
   buildScopedRagService,
   buildSource,
   createEvalTelemetry,
+  withEnvironmentOverrides,
 } from "../../agent-eval-harness.js";
 import {
   AGENT_EXECUTION_STEP_IDS,
@@ -70,6 +76,49 @@ const stepForId = ({ reason, stepId }) => {
 
 export const buildMockPlannerResponse = (prompt) => {
   const payload = extractPromptPayload(prompt);
+  if (prompt.startsWith("You are planning a guarded AgentRAG execution graph.")) {
+    const skillIds = new Set(normalizeArray(payload.capabilities).map((skill) => skill.id));
+    const wantsComparison = /compare|differences?/i.test(payload.goal ?? "");
+    const firstSkillId = wantsComparison
+      ? CUSTOM_SKILL_IDS.compareDocuments
+      : CUSTOM_SKILL_IDS.summarizeContract;
+    const secondSkillId = CUSTOM_SKILL_IDS.riskReview;
+    if (!skillIds.has(firstSkillId) || !skillIds.has(secondSkillId)) {
+      throw new Error("Mock DAG planner requires the authorized goal skills.");
+    }
+
+    return JSON.stringify({
+      nodes: [
+        {
+          nodeId: firstSkillId,
+          skillId: firstSkillId,
+          dependsOn: [],
+          inputBindings: {
+            docIds: { source: "request", field: "docIds" },
+            question: { source: "request", field: "question" },
+          },
+          failurePolicy: "fail_fast",
+          rationale: "Establish the document facts first.",
+        },
+        {
+          nodeId: secondSkillId,
+          skillId: secondSkillId,
+          dependsOn: [firstSkillId],
+          inputBindings: {
+            docIds: { source: "request", field: "docIds" },
+            question: { source: "request", field: "question" },
+            priorFindings: {
+              source: "node",
+              nodeId: firstSkillId,
+              output: "text",
+            },
+          },
+          failurePolicy: "fail_fast",
+          rationale: "Review risks arising from the documented differences.",
+        },
+      ],
+    });
+  }
   const selectedSkills = normalizeArray(payload.selectedSkills);
   const selectedSkillIds = new Set(selectedSkills.map((skill) => skill.id));
   const hasCustomSkill = selectedSkills.some((skill) => skill.kind === "custom");
@@ -477,6 +526,175 @@ const createCustomChainCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => (
   },
 });
 
+const createDynamicSkillGraphCase = ({ plannerAdapter = llmPlannerAdapter } = {}) => ({
+  id: "planner_dynamic_skill_graph",
+  label: "Real DAG planner composes atomic skills",
+  description:
+    "With only the compare intent selected, the DAG planner must compose comparison and risk review from the authorized atomic Skill catalog.",
+  run: async () => {
+    const telemetry = createEvalTelemetry();
+    const agentRunService = createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
+    });
+    const docIds = ["agreement-a", "agreement-b"];
+    const sources = [
+      buildSource({
+        docId: docIds[0],
+        excerpt: "Agreement A requires 30 days notice before renewal.",
+        fileName: "agreement-a.pdf",
+        pageNumber: 2,
+      }),
+      buildSource({
+        docId: docIds[1],
+        excerpt: "Agreement B requires 60 days notice before renewal.",
+        fileName: "agreement-b.pdf",
+        pageNumber: 3,
+      }),
+    ];
+    const ragService = buildScopedRagService({
+      sameScope,
+      documents: docIds.map((docId, index) => ({
+        docId,
+        fileName: `agreement-${index === 0 ? "a" : "b"}.pdf`,
+      })),
+      telemetry,
+      chat: async ({ callIndex, question }) => ({
+        abstained: false,
+        citations: sources,
+        memoryApplied: false,
+        resolvedQuery: question,
+        text: callIndex === 1
+          ? "Comparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2]."
+          : "Risk review: A 45-day notice meets Agreement A's 30-day requirement [Source 1] but misses Agreement B's 60-day requirement [Source 2].",
+      }),
+    });
+    const compareOnlyIntentAdapter = {
+      id: "deterministic",
+      selectIntentPlan: async ({ candidates = [] } = {}) => ({
+        selectedIntentId: candidates.find(
+          (candidate) => candidate.id === CUSTOM_SKILL_IDS.compareDocuments
+        )?.id ?? "",
+        reason: "Pin the narrower compare intent to test atomic DAG composition.",
+      }),
+    };
+    const response = await withEnvironmentOverrides(
+      { AGENT_SKILL_GRAPH_ROLLOUT: "guarded" },
+      () => runAgentRag({
+        accessScope: DEFAULT_ACCESS_SCOPE,
+        agentRunService,
+        dagPlannerAdapter,
+        docIds,
+        executionPlannerAdapter: plannerAdapter,
+        intentPlannerAdapter: compareOnlyIntentAdapter,
+        question:
+          "Compare the two selected agreements and identify risks caused by their differences.",
+        ragService,
+        sessionId: "planner-dynamic-graph-eval",
+        userId: DEFAULT_ACCESS_SCOPE.userId,
+        webChatService: async () => {
+          throw new Error("Web search must not run for selected-document comparison.");
+        },
+      })
+    );
+    const body = getChatResponseBody(response);
+    const run = await agentRunService.getRun({
+      accessScope: DEFAULT_ACCESS_SCOPE,
+      runId: body.agentRunId,
+    });
+    const graphEvent = (run?.events ?? []).filter(
+      (event) => event.type === "skill_graph_planned"
+    ).at(-1)?.payload ?? null;
+    const nodeRuns = graphEvent?.nodeRuns ?? [];
+    const compareNodeId = nodeRuns.find(
+      (nodeRun) => nodeRun.skillId === CUSTOM_SKILL_IDS.compareDocuments
+    )?.nodeId;
+    const graph = {
+      errorCodes: graphEvent?.errorCodes ?? [],
+      executed: graphEvent?.executed ?? false,
+      fallback: graphEvent?.fallback ?? null,
+      mode: graphEvent?.mode ?? null,
+      nodeStatuses: nodeRuns.map((nodeRun) => nodeRun.status),
+      nodeSkills: nodeRuns.map((nodeRun) => nodeRun.skillId),
+      plannerFallback: graphEvent?.planner?.fallback ?? null,
+      plannerFallbackReason: graphEvent?.planner?.fallbackReason ?? null,
+      selectedPlannerId: graphEvent?.planner?.selectedPlannerId ?? null,
+      status: graphEvent?.status ?? null,
+      riskDependsOnCompare: nodeRuns.find(
+        (nodeRun) => nodeRun.skillId === CUSTOM_SKILL_IDS.riskReview
+      )?.dependsOn?.includes(compareNodeId) ?? false,
+    };
+    telemetry.skillGraph = graph;
+
+    return finishCase({
+      checks: [
+        buildCheck({
+          category: "planner",
+          detail: body.agentObservability?.intentPlanner,
+          id: "compare_only_intent_selected",
+          label: "The upstream intent selected only comparison",
+          passed:
+            body.agentObservability?.intentPlanner?.selectedIntentId ===
+            CUSTOM_SKILL_IDS.compareDocuments,
+        }),
+        buildCheck({
+          category: "planner",
+          detail: graph,
+          id: "real_dag_planner_selected",
+          label: "The guarded DAG used the LLM planner without fallback",
+          passed:
+            graph.mode === "guarded" &&
+            graph.executed === true &&
+            graph.fallback === null &&
+            graph.status === "completed" &&
+            graph.plannerFallback === false &&
+            graph.selectedPlannerId === "llm_dag",
+        }),
+        buildCheck({
+          category: "execution",
+          detail: graph,
+          id: "dag_composed_compare_then_risk",
+          label: "The DAG composed comparison then risk review",
+          passed:
+            graph.nodeSkills.join(">") ===
+              `${CUSTOM_SKILL_IDS.compareDocuments}>${CUSTOM_SKILL_IDS.riskReview}` &&
+            graph.nodeStatuses.join(">") === "completed>completed" &&
+            graph.riskDependsOnCompare,
+        }),
+        buildCheck({
+          category: "observability",
+          detail: getSelectedSkillIds(response),
+          id: "dag_selected_skills_observed",
+          label: "Both executed skills are visible in Agent observability",
+          passed:
+            getSelectedSkillIds(response).includes(CUSTOM_SKILL_IDS.compareDocuments) &&
+            getSelectedSkillIds(response).includes(CUSTOM_SKILL_IDS.riskReview) &&
+            getTraceTypes(response).filter((type) => type === "custom_skill")
+              .length === 2,
+        }),
+        buildCheck({
+          category: "execution",
+          detail: telemetry.chatCalls.map((call) => call.docIds),
+          id: "dag_kept_document_scope",
+          label: "Both skills read exactly the two selected documents",
+          passed:
+            telemetry.chatCalls.length === 2 &&
+            telemetry.chatCalls.every((call) =>
+              call.docIds.length === docIds.length &&
+              new Set(call.docIds).size === docIds.length &&
+              docIds.every((docId) => call.docIds.includes(docId))
+            ),
+        }),
+      ],
+      description:
+        "With only the compare intent selected, the DAG planner must compose comparison and risk review from the authorized atomic Skill catalog.",
+      id: "planner_dynamic_skill_graph",
+      label: "Real DAG planner composes atomic skills",
+      response,
+      telemetry,
+    });
+  },
+});
+
 const createInvalidFallbackCase = () => ({
   id: "planner_invalid_fallback",
   label: "Invalid planner fallback",
@@ -576,6 +794,9 @@ export const createDefaultPlannerCases = ({
     plannerAdapter,
   }),
   createCustomChainCase({
+    plannerAdapter,
+  }),
+  createDynamicSkillGraphCase({
     plannerAdapter,
   }),
   createInvalidFallbackCase(),

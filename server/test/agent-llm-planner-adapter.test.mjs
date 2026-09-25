@@ -175,3 +175,25 @@ test("llm planner adapter collapses per-custom-skill steps into one custom step"
     resetOpenAIProvider();
   }
 });
+
+test("llm outer planner can retain the custom stage from an authorized catalog without preselecting its Skills", async () => {
+  configureOpenAIProvider({
+    completeText: async () => JSON.stringify({
+      steps: [{ id: AGENT_EXECUTION_STEP_IDS.customSkills }],
+    }),
+  });
+
+  try {
+    const executionPlan = await llmPlannerAdapter.createExecutionPlan({
+      authorizedCustomSkills: [{ id: CUSTOM_SKILL_IDS.compareDocuments }],
+      docIds: ["doc-1", "doc-2"],
+      plan: { mode: "document" },
+      question: "Analyze the selected documents.",
+      selectedSkills: [],
+    });
+
+    assert.deepEqual(executionPlan, [{ id: AGENT_EXECUTION_STEP_IDS.customSkills }]);
+  } finally {
+    resetOpenAIProvider();
+  }
+});

@@ -9,11 +9,13 @@ import {
   withEnvironmentOverrides,
 } from "./agent-eval-harness.js";
 import { runAgentRag } from "../rag/agent.js";
-import { CUSTOM_SKILL_IDS } from "../rag/skills/registry.js";
+import { CUSTOM_SKILL_IDS, createSkillRegistry } from "../rag/skills/registry.js";
+import { SKILL_EFFECTS, SKILL_IDEMPOTENCY } from "../rag/skills/skill-contract.js";
 import {
   buildRecoveryObservabilityCases,
 } from "./recovery-observability-cases.js";
 import { buildObservabilityReport } from "./observability-report.js";
+import { buildProductionGraphStartupResumeEvents } from "./recovery-graph-startup-resume-eval.js";
 import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
@@ -21,6 +23,7 @@ import {
 } from "../rag/agent-run-recovery-actions.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import {
+  createCustomSkillStepExecutor,
   createDocumentRagStepExecutor,
 } from "../rag/agent-run-step-handlers/index.js";
 import { createJobOrchestrator, TASK_ACTIONS } from "../rag/job-orchestrator.js";
@@ -77,6 +80,29 @@ const createProductionFixtureRunService = () =>
     }),
   });
 
+// Auto recovery must be exercised with an actually read-only operation. The
+// document RAG chat path writes session/long memory and is intentionally not
+// an auto-replay fixture anymore.
+const RECOVERY_READ_ONLY_SKILL_ID = "recovery_read_only_probe";
+const recoveryReadOnlySkill = {
+  id: RECOVERY_READ_ONLY_SKILL_ID,
+  version: "1.0.0",
+  label: "Recovery read-only probe",
+  kind: "custom",
+  budgetKey: "customSkillCalls",
+  requiresAccessScope: true,
+  effects: SKILL_EFFECTS.readOnly,
+  idempotency: SKILL_IDEMPOTENCY.readOnlyRag,
+  replaySafe: true,
+  retryable: true,
+  match: () => false,
+  execute: async () => ({
+    abstained: false,
+    citations: [{ docId: "doc-1", title: "Policy" }],
+    text: "Recovered read-only answer.",
+  }),
+};
+
 const createProductionFixtureDocumentExecutor = ({
   agentRunService,
   replayEvents,
@@ -84,6 +110,10 @@ const createProductionFixtureDocumentExecutor = ({
 } = {}) =>
   createAgentRunStepExecutor({
     agentRunService,
+    executeCustomSkillStep: createCustomSkillStepExecutor({
+      ragService: {},
+      skillRegistry: createSkillRegistry([recoveryReadOnlySkill]),
+    }),
     executeDocumentRagStep: createDocumentRagStepExecutor({
       ragService: {
         chat: async () => ({
@@ -133,6 +163,7 @@ const createManualRecoveryRun = async ({
           input: {
             docIds: ["doc-1"],
             question: "What changed?",
+            ...(type === "custom_skill" ? { skillId: RECOVERY_READ_ONLY_SKILL_ID } : {}),
           },
           status,
           type,
@@ -234,10 +265,10 @@ const buildProductionStartupRecoveryEvents = async () => {
     replayEvents,
   });
 
-  for (const runId of ["auto-document-1", "auto-document-2"]) {
+  for (const runId of ["auto-custom-1", "auto-custom-2"]) {
     await agentRunService.createRun({
       accessScope: productionFixtureAccessScope,
-      goal: "Recover a safe document step.",
+      goal: "Recover a read-only custom step.",
       input: {
         docIds: ["doc-1"],
       },
@@ -253,9 +284,10 @@ const buildProductionStartupRecoveryEvents = async () => {
             input: {
               docIds: ["doc-1"],
               question: "What changed?",
+              skillId: RECOVERY_READ_ONLY_SKILL_ID,
             },
             status: AGENT_RUN_STEP_STATUSES.running,
-            type: "document_rag",
+            type: "custom_skill",
           },
         ],
       },
@@ -317,6 +349,7 @@ const buildProductionManualActionEvents = async () => {
     agentRunService,
     runId: "manual-resume",
     stepId: "manual-resume-step",
+    type: "custom_skill",
   });
   await createManualRecoveryRun({
     agentRunService,
@@ -476,6 +509,12 @@ const buildProductionSkillGraphEvents = async () => {
           : "Contract Summary\n- Parties: Acme and Beta. [Source 1]",
       };
     },
+    getDocument: (docId, accessScope) =>
+      docId === "doc-1" &&
+      accessScope?.userId === productionFixtureAccessScope.userId &&
+      accessScope?.workspaceId === productionFixtureAccessScope.workspaceId
+        ? { docId: "doc-1", fileName: "policy.pdf" }
+        : null,
     listDocuments: () => [{ docId: "doc-1", fileName: "policy.pdf" }],
   };
   const response = await withEnvironmentOverrides(
@@ -540,6 +579,7 @@ export const buildRecoveryObservabilityProductionEvents = async () => [
   ...(await buildProductionLifecycleEvents()),
   ...(await buildProductionTaskRecoveryEvents()),
   ...(await buildProductionSkillGraphEvents()),
+  ...(await buildProductionGraphStartupResumeEvents()),
   {
     traceType: "agent",
     agentMode: "document",
@@ -669,6 +709,25 @@ export const buildRecoveryObservabilityFixtureEvents = () => [
     },
   },
   {
+    type: "skill_graph_resume_claimed",
+    payload: { type: "execution_graph" },
+  },
+  {
+    type: "auto_recovery_completed",
+    payload: { status: "completed", type: "execution_graph" },
+  },
+  // The fixture keeps the report contract testable without running a restart.
+  // The production builder emits its counterpart only after real assertions.
+  {
+    traceType: "agent_graph_resume_eval",
+    eventType: "graph_startup_resume_observed",
+    sameRunCompleted: true,
+    completedNodeNotRerun: true,
+    pendingNodeExecutedOnce: true,
+    secondClaimCount: 0,
+    partialFallbackCount: 0,
+  },
+  {
     traceType: "agent",
     agentMode: "document",
     agentObservability: {
@@ -706,7 +765,7 @@ export const buildRecoveryObservabilityEvaluationReport = ({
       runId: runId ?? toRunId(createdAt),
       createdAt,
       status,
-      version: "1.0.0",
+      version: "1.1.0",
       metrics,
     },
     recovery: observability.recovery,
@@ -764,6 +823,13 @@ export const formatRecoveryObservabilityReportMarkdown = (report = {}) => {
     `- Skill graph reused nodes: \`${recovery.skillGraphReusedNodeCount ?? 0}\``,
     `- Skill graph replans applied: \`${
       recovery.skillGraphReplanAppliedCount ?? 0
+    }\``,
+    `- Skill graph resume claims: \`${recovery.skillGraphResumeClaimCount ?? 0}\``,
+    `- Skill graph auto recoveries completed: \`${
+      recovery.skillGraphAutoRecoveryCompletedCount ?? 0
+    }\``,
+    `- Skill graph startup resume probes: \`${
+      recovery.skillGraphStartupResumeObservedCount ?? 0
     }\``,
   ];
 

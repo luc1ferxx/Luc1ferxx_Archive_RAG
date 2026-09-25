@@ -17,7 +17,7 @@ import {
   RELEASE_EVIDENCE_SOURCE_SPECS,
 } from "../evaluation/eval-evidence-policy.js";
 import {
-  buildReleaseEvidenceReport,
+  buildReleaseEvidenceReport as buildReleaseEvidenceReportImpl,
   formatReleaseEvidenceReportMarkdown,
   readReleaseEvidenceInputs,
   writeReleaseEvidenceReport,
@@ -32,6 +32,15 @@ import {
 } from "./fixtures/release-evidence-report-fixtures.mjs";
 
 const TARGET_COMMIT = "a".repeat(40);
+const CLEAN_GATE_GIT_STATE = Object.freeze({
+  commitSha: TARGET_COMMIT,
+  dirty: false,
+});
+const buildReleaseEvidenceReport = (options = {}) =>
+  buildReleaseEvidenceReportImpl({
+    currentGitState: CLEAN_GATE_GIT_STATE,
+    ...options,
+  });
 const NOW = "2026-07-15T08:00:00.000Z";
 const GENERATED_AT = "2026-07-15T07:30:00.000Z";
 const SUITE = {
@@ -280,6 +289,70 @@ test("release evidence gate passes a complete same-commit fixture", () => {
     report.checks.find((check) => check.id === "planner-real")?.actual.provider
       .mode,
     "real"
+  );
+  assert.equal(
+    report.checks.find((check) => check.id === "gate-worktree")?.reasonCode,
+    "ok"
+  );
+});
+
+test("release evidence gate rejects a dirty worktree at gate time after clean reports", () => {
+  const report = buildReleaseEvidenceReport({
+    currentGitState: {
+      commitSha: TARGET_COMMIT,
+      dirty: true,
+    },
+    maxAgeHours: 24,
+    now: NOW,
+    reports: createCompleteFixture(),
+    targetCommit: TARGET_COMMIT,
+  });
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(report.summary.reasonCode, "dirty_worktree");
+  assert.equal(
+    report.checks.find((check) => check.id === "gate-worktree")?.reasonCode,
+    "dirty_worktree"
+  );
+  assert.equal(
+    report.checks.find((check) => check.id === "planner-real")?.status,
+    "pass",
+    "the failure must come from the gate's current worktree, not report-time metadata"
+  );
+});
+
+test("release evidence gate fails closed when current git state is missing", () => {
+  const report = buildReleaseEvidenceReport({
+    currentGitState: null,
+    maxAgeHours: 24,
+    now: NOW,
+    reports: createCompleteFixture(),
+    targetCommit: TARGET_COMMIT,
+  });
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(
+    report.checks.find((check) => check.id === "gate-worktree")?.reasonCode,
+    "unknown_commit"
+  );
+});
+
+test("release evidence gate rejects a gate-time checkout on another commit", () => {
+  const report = buildReleaseEvidenceReport({
+    currentGitState: {
+      commitSha: "b".repeat(40),
+      dirty: false,
+    },
+    maxAgeHours: 24,
+    now: NOW,
+    reports: createCompleteFixture(),
+    targetCommit: TARGET_COMMIT,
+  });
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(
+    report.checks.find((check) => check.id === "gate-worktree")?.reasonCode,
+    "commit_mismatch"
   );
 });
 
@@ -744,6 +817,26 @@ test("release evidence gate rejects a forged passing runtime smoke envelope", ()
   assert.equal(contractCheck.reasonCode, "report_integrity_failed");
   assert.ok(
     contractCheck.actual.some((issue) => issue.id === "checks.longMemory")
+  );
+});
+
+test("release evidence gate rejects a runtime smoke that did not execute the guarded DAG", () => {
+  const reports = createCompleteFixture();
+  reports["runtime-smoke"].checks.skillGraph.bothRunsExecuted = false;
+  reports["runtime-smoke"].status = "pass";
+  const report = buildReleaseEvidenceReport({
+    now: NOW,
+    reports,
+    targetCommit: TARGET_COMMIT,
+  });
+  const contractCheck = report.checks.find(
+    (entry) => entry.id === "runtime-smoke-contract"
+  );
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(contractCheck.reasonCode, "report_integrity_failed");
+  assert.ok(
+    contractCheck.actual.some((issue) => issue.id === "checks.skillGraph")
   );
 });
 

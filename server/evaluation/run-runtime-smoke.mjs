@@ -9,12 +9,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createApp } from "../app.js";
-import { createInMemoryAgentRunStore } from "../rag/agent-runs.js";
+import {
+  createAgentRunService,
+  createInMemoryAgentRunStore,
+} from "../rag/agent-runs.js";
 import { resetAgentExperienceMemoryStore } from "../rag/agent-experience-memory.js";
 import { clearLongMemories, resetLongMemoryStore } from "../rag/long-memory.js";
 import { createInMemoryTaskStore } from "../rag/tasks.js";
 import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
 import { attachEvaluationEvidence } from "./eval-evidence.js";
+import { loadGuardedGraphSignal } from "./runtime-smoke-graph-signal.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -261,7 +265,7 @@ const assertExperiencePlanningHint = (chat) => {
   );
 };
 
-const runChatSmoke = async ({ baseUrl, sessionId, userId }) => {
+const runChatSmoke = async ({ agentRunService, baseUrl, sessionId, userId }) => {
   const payload = {
     docIds: [SMOKE_DOC_ID],
     question: SMOKE_QUESTION,
@@ -277,6 +281,11 @@ const runChatSmoke = async ({ baseUrl, sessionId, userId }) => {
   assertPureLlmPlanner(first.json, "first chat");
   assertDocumentOnlySources(first.json, "first chat");
   assertExperienceWrite(first.json);
+  const firstGraph = await loadGuardedGraphSignal({
+    agentRunService,
+    chat: first.json,
+    userId,
+  });
 
   const second = await requestJson(baseUrl, "/chat", {
     body: {
@@ -290,14 +299,30 @@ const runChatSmoke = async ({ baseUrl, sessionId, userId }) => {
   assertPureLlmPlanner(second.json, "second chat");
   assertDocumentOnlySources(second.json, "second chat");
   assertExperiencePlanningHint(second.json);
+  const secondGraph = await loadGuardedGraphSignal({
+    agentRunService,
+    chat: second.json,
+    userId,
+  });
 
   return {
     first: first.json,
+    firstGraph,
     second: second.json,
+    secondGraph,
   };
 };
 
-const buildReport = ({ calls, health, first, second, startedAt, userId }) => {
+const buildReport = ({
+  calls,
+  first,
+  firstGraph,
+  health,
+  second,
+  secondGraph,
+  startedAt,
+  userId,
+}) => {
   const completedAt = new Date().toISOString();
 
   return {
@@ -305,7 +330,7 @@ const buildReport = ({ calls, health, first, second, startedAt, userId }) => {
     runId: `runtime-smoke-${startedAt.replace(/[:.]/g, "-")}`,
     startedAt,
     status: "pass",
-    version: "1.0.0",
+    version: "1.1.0",
     checks: {
       agentExperienceMemory: {
         healthReason: health.checks?.agentExperienceMemory?.reason ?? null,
@@ -328,6 +353,16 @@ const buildReport = ({ calls, health, first, second, startedAt, userId }) => {
           second.agentObservability?.intentPlanner?.selectedPlannerId ?? null,
         intentPlannerStatus:
           second.agentObservability?.intentPlanner?.status ?? null,
+      },
+      skillGraph: {
+        bothRunsExecuted: firstGraph.executed && secondGraph.executed,
+        bothRunsPlannedByLlm:
+          firstGraph.selectedPlannerId === "llm_dag" &&
+          secondGraph.selectedPlannerId === "llm_dag",
+        fallbackCount: Number(firstGraph.fallback !== null) +
+          Number(secondGraph.fallback !== null),
+        mode: secondGraph.mode,
+        skillIds: secondGraph.skillIds,
       },
       sources: {
         firstRunSourceCount: first.ragSources?.length ?? 0,
@@ -361,6 +396,7 @@ const writeReport = async (report) => {
       `- Completed at: ${report.completedAt}`,
       `- Intent planner: ${report.checks.planners.intentPlanner} (${report.checks.planners.intentPlannerStatus})`,
       `- Execution planner: ${report.checks.planners.executionPlanner} (${report.checks.planners.executionPlannerStatus})`,
+      `- Skill graph: ${report.checks.skillGraph.mode}, LLM planned both runs: ${report.checks.skillGraph.bothRunsPlannedByLlm}`,
       `- Long memory: ${report.checks.longMemory.healthStatus} (${report.checks.longMemory.healthReason})`,
       `- Experience memory write: ${report.checks.agentExperienceMemory.writeStatus}`,
       `- Experience planning hints on second run: ${report.checks.agentExperienceMemory.secondRunHintCount}`,
@@ -378,11 +414,14 @@ const main = async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "archive-rag-smoke-"));
   const calls = [];
   const userId = `runtime-smoke-${randomUUID()}`;
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
   let server = null;
 
   try {
     const app = await createApp({
-      agentRunStore: createInMemoryAgentRunStore(),
+      agentRunService,
       ragService: createRuntimeSmokeRagService({ calls }),
       taskStore: createInMemoryTaskStore(),
       uploadsDirectory: path.join(tempRoot, "uploads"),
@@ -396,7 +435,8 @@ const main = async () => {
     assert.equal(healthResponse.status, 200, "/health should return 200.");
     assertHealth(healthResponse.json);
 
-    const { first, second } = await runChatSmoke({
+    const { first, firstGraph, second, secondGraph } = await runChatSmoke({
+      agentRunService,
       baseUrl: server.baseUrl,
       sessionId: `runtime-smoke-${randomUUID()}`,
       userId,
@@ -404,8 +444,10 @@ const main = async () => {
     const baseReport = buildReport({
       calls,
       first,
+      firstGraph,
       health: healthResponse.json,
       second,
+      secondGraph,
       startedAt,
       userId,
     });

@@ -175,6 +175,152 @@ test("finalization flow finalizes cited document answers and records agent trace
   assert.equal(recordedAgentTraces[0].status, 200);
 });
 
+test("guarded graph and document RAG evidence get distinct global source ranks", async () => {
+  const trace = [];
+  const response = await finalizeAgentRun({
+    addTraceStep: (step) => trace.push(step),
+    buildAgentObservability: ({ agentMode }) => ({ agentMode }),
+    customSkillGraphExecuted: true,
+    customSkillResults: [{
+      ok: true,
+      skillId: "risk_review",
+      text: "Contract B omits the notice clause. [Source 1]",
+      citations: [{
+        docId: "doc-b",
+        fileName: "b.pdf",
+        pageNumber: 1,
+        rank: 1,
+      }],
+      retrievedContexts: [{
+        docId: "doc-b",
+        fileName: "b.pdf",
+        pageNumber: 1,
+        rank: 1,
+        text: "Contract B omits the notice clause.",
+      }],
+    }],
+    customSkills: [],
+    docIds: ["doc-a", "doc-b"],
+    getAgentSkills: () => [],
+    getBudgetSnapshot: () => ({ used: {} }),
+    plan: { mode: "document" },
+    question: "What changed and what is risky?",
+    ragResult: {
+      ok: true,
+      value: {
+        abstained: false,
+        citations: [{
+          docId: "doc-a",
+          fileName: "a.pdf",
+          pageNumber: 1,
+          rank: 1,
+        }],
+        retrievedContexts: [{
+          docId: "doc-a",
+          fileName: "a.pdf",
+          pageNumber: 1,
+          rank: 1,
+          text: "Contract A requires 30 days notice.",
+        }],
+        text: "Contract A requires 30 days notice. [Source 1]",
+      },
+    },
+    recordAgentTrace: async () => {},
+    recordWorkingMemoryClaimSupport: () => {},
+    recordWorkingMemoryGaps: () => {},
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    trace,
+    webResult: null,
+    workingMemory: {},
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.body.agentAnswer, /notice clause\. \[Source 1\]/);
+  assert.match(response.body.agentAnswer, /30 days notice\. \[Source 2\]/);
+  assert.deepEqual(response.body.ragSources.map((citation) => citation.rank), [1, 2]);
+  assert.equal(response.body.ragSources.some((citation) => "evidenceText" in citation), false);
+});
+
+test("guarded graph keeps research brief findings and verifies their rebased evidence", async () => {
+  const trace = [];
+  const gaps = [];
+  const contractA = {
+    docId: "agreement-a",
+    excerpt: "Agreement A requires 30 days notice.",
+    rank: 1,
+  };
+  const contractB = {
+    docId: "agreement-b",
+    excerpt: "Agreement B has a notice clause.",
+    rank: 1,
+  };
+  const response = await finalizeAgentRun({
+    addTraceStep: (step) => trace.push(step),
+    buildAgentObservability: ({ agentMode }) => ({ agentMode }),
+    customSkillGraphExecuted: true,
+    customSkillResults: [{
+      ok: true,
+      skillId: "risk_review",
+      skillVersion: "1.0.0",
+      text: "Agreement A requires 30 days notice. [Source 1]",
+      citations: [contractA],
+    }],
+    customSkills: [],
+    docIds: ["agreement-a", "agreement-b"],
+    getAgentSkills: () => [],
+    getBudgetSnapshot: () => ({ used: {} }),
+    plan: { mode: "research_brief" },
+    question: "Review both agreements.",
+    recordAgentTrace: async () => {},
+    recordWorkingMemoryClaimSupport: () => {},
+    recordWorkingMemoryGaps: (record) => gaps.push(record),
+    researchBrief: {
+      text: "Agreement B requires 60 days notice. [Source 1]",
+      citations: [contractB],
+      evidenceCitations: [{
+        ...contractB,
+        evidenceText: "Agreement B requires 60 days notice.",
+      }],
+      findings: [{
+        status: "completed",
+        text: "Agreement B requires 60 days notice. [Source 1]",
+        citations: [contractB],
+        abstained: false,
+      }],
+    },
+    shouldRunWeb: false,
+    skippedWebBecauseBudget: false,
+    trace,
+    webResult: null,
+    workingMemory: {},
+  });
+
+  assert.match(response.body.agentAnswer, /Agreement A requires 30 days notice\. \[Source 1\]/);
+  assert.match(response.body.agentAnswer, /Agreement B requires 60 days notice\. \[Source 2\]/);
+  assert.deepEqual(
+    response.body.ragSources.map(({ rank, docId }) => ({ rank, docId })),
+    [
+      { rank: 1, docId: "agreement-a" },
+      { rank: 2, docId: "agreement-b" },
+    ]
+  );
+  assert.deepEqual(
+    response.body.researchBrief.findings[0].citations.map(({ rank }) => rank),
+    [2]
+  );
+  assert.equal(
+    response.body.ragSources.some((citation) => "evidenceText" in citation),
+    false
+  );
+  const finalSelfCheck = trace.find(
+    (step) => step.type === "self_check" && step.detail?.finalAnswer
+  );
+  assert.equal(finalSelfCheck?.status, "completed");
+  assert.equal(finalSelfCheck?.detail?.claimSupport?.unsupportedClaimCount, 0);
+  assert.deepEqual(gaps, []);
+});
+
 test("finalization flow exposes the same continuously rebased evidence projection as the final answer", async () => {
   const trace = [
     {

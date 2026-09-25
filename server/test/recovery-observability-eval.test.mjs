@@ -26,9 +26,9 @@ test("recovery observability eval builds a deterministic passing report", () => 
 
   assert.equal(report.summary.runId, "recovery-deterministic");
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 7);
+  assert.equal(report.summary.metrics.caseCount, 8);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
-  assert.equal(report.summary.metrics.checkCount, 22);
+  assert.equal(report.summary.metrics.checkCount, 29);
   assert.equal(report.recovery.recoverableRunCount, 3);
   assert.equal(report.recovery.manualRecoveryCount, 1);
   assert.equal(report.recovery.manualRecoveryActionCount, 3);
@@ -52,6 +52,9 @@ test("recovery observability eval builds a deterministic passing report", () => 
   assert.equal(report.recovery.skillGraphUnsafeFallbackCount, 0);
   assert.equal(report.recovery.skillGraphReusedNodeCount, 2);
   assert.equal(report.recovery.skillGraphReplanAppliedCount, 1);
+  assert.equal(report.recovery.skillGraphResumeClaimCount, 1);
+  assert.equal(report.recovery.skillGraphAutoRecoveryCompletedCount, 1);
+  assert.equal(report.recovery.skillGraphStartupResumeObservedCount, 1);
 
   for (const caseId of [
     "startup_recovery_summary",
@@ -61,6 +64,7 @@ test("recovery observability eval builds a deterministic passing report", () => 
     "agent_task_recovery",
     "planner_fallback_signal",
     "skill_graph_signal",
+    "skill_graph_startup_resume",
   ]) {
     assert.ok(findCase(report, caseId), `${caseId} case should be present`);
   }
@@ -82,6 +86,7 @@ test("recovery observability eval builds a deterministic passing report", () => 
   assert.match(markdown, /PASS Primary persisted step lifecycle/);
   assert.match(markdown, /Skill graph reused nodes: `2`/);
   assert.match(markdown, /PASS Skill graph signal/);
+  assert.match(markdown, /PASS Skill graph startup resume/);
 });
 
 test("recovery observability eval production events pass the report contract", async () => {
@@ -94,11 +99,12 @@ test("recovery observability eval production events pass the report contract", a
   });
 
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 7);
-  assert.equal(report.recovery.recoverableRunCount, 3);
+  assert.equal(report.summary.metrics.caseCount, 8);
+  assert.equal(report.summary.metrics.checkCount, 29);
+  assert.equal(report.recovery.recoverableRunCount, 4);
   assert.equal(report.recovery.manualRecoveryCount, 1);
   assert.equal(report.recovery.manualRecoveryActionCount, 3);
-  assert.equal(report.recovery.autoReplayAttemptCount, 2);
+  assert.equal(report.recovery.autoReplayAttemptCount, 3);
   assert.equal(report.recovery.autoReplaySuccessRate, 1);
   assert.equal(report.recovery.primaryStepStartedCount, 2);
   assert.equal(report.recovery.primaryStepCompletedCount, 1);
@@ -109,17 +115,73 @@ test("recovery observability eval production events pass the report contract", a
   assert.equal(report.recovery.taskRecoveryResumeActionCount, 1);
   assert.equal(report.recovery.taskRecoveryResumeFailureCount, 0);
   assert.equal(report.recovery.taskRecoveryCompletedCount, 1);
-  // These come from a real guarded run, not a hand-built event: one graph
-  // planned and executed, two settled nodes reused across the replan, no
-  // fallback of any kind.
-  assert.equal(report.recovery.skillGraphPlannedCount, 1);
-  assert.equal(report.recovery.skillGraphExecutedCount, 1);
+  // These come from two real guarded runs: one bounded replan and one
+  // process-restart resume of a persisted partial graph.
+  assert.equal(report.recovery.skillGraphPlannedCount, 2);
+  assert.equal(report.recovery.skillGraphExecutedCount, 2);
   assert.equal(report.recovery.skillGraphFallbackCount, 0);
   assert.equal(report.recovery.skillGraphUnsafeFallbackCount, 0);
-  assert.equal(report.recovery.skillGraphReusedNodeCount, 2);
+  assert.equal(report.recovery.skillGraphReusedNodeCount, 3);
   assert.equal(report.recovery.skillGraphReplanAppliedCount, 1);
+  assert.equal(report.recovery.skillGraphResumeClaimCount, 1);
+  assert.equal(report.recovery.skillGraphAutoRecoveryCompletedCount, 1);
+  assert.equal(report.recovery.skillGraphAutoRecoveryFailureCount, 0);
+  assert.equal(report.recovery.skillGraphStartupResumeObservedCount, 1);
+  assert.equal(report.recovery.skillGraphSameRunCompletedCount, 1);
+  assert.equal(report.recovery.skillGraphCompletedNodeNotRerunCount, 1);
+  assert.equal(report.recovery.skillGraphPendingNodeExecutedOnceCount, 1);
+  assert.equal(report.recovery.skillGraphSecondClaimCount, 0);
+  assert.equal(report.recovery.skillGraphPartialResumeFallbackCount, 0);
+  assert.equal(
+    events.filter((event) => event.type === "skill_graph_resume_claimed").length,
+    1
+  );
+  assert.equal(
+    events.filter((event) => event.type === "auto_recovery_completed").length,
+    1
+  );
   // The guarded run pins the dial for its own duration only.
   assert.equal(process.env.AGENT_SKILL_GRAPH_ROLLOUT, originalSkillGraphRollout);
+});
+
+test("recovery observability eval fails when graph resume proof or claim is missing", () => {
+  const events = buildRecoveryObservabilityFixtureEvents().filter(
+    (event) =>
+      event.eventType !== "graph_startup_resume_observed" &&
+      event.type !== "skill_graph_resume_claimed"
+  );
+  const report = buildRecoveryObservabilityEvaluationReport({ events });
+  const resumeCase = findCase(report, "skill_graph_startup_resume");
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(resumeCase.passed, false);
+  assert.equal(
+    findCheck(resumeCase, "graph_startup_resume_production_observed")?.passed,
+    false
+  );
+  assert.equal(
+    findCheck(resumeCase, "graph_startup_resume_claim_once")?.passed,
+    false
+  );
+});
+
+test("recovery observability eval fails on a second graph resume claim", () => {
+  const report = buildRecoveryObservabilityEvaluationReport({
+    events: [
+      ...buildRecoveryObservabilityFixtureEvents(),
+      { type: "skill_graph_resume_claimed", payload: { type: "execution_graph" } },
+    ],
+  });
+
+  assert.equal(report.summary.status, "fail");
+  assert.equal(report.recovery.skillGraphResumeClaimCount, 2);
+  assert.equal(
+    findCheck(
+      findCase(report, "skill_graph_startup_resume"),
+      "graph_startup_resume_claim_once"
+    )?.passed,
+    false
+  );
 });
 
 test("recovery observability eval fails when a graph falls back after a node has executed", () => {

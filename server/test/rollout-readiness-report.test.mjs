@@ -5,8 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildPlannerRuntimeGate,
+  buildRealDagPlannerGate,
   buildRolloutReadinessReport,
   buildRolloutReadinessReportFromResults,
+  buildSkillGraphRuntimeGate,
   formatRolloutReadinessReportMarkdown,
   getRolloutReadinessExitCode,
   writeRolloutReadinessReport,
@@ -59,6 +61,37 @@ const buildPlannerPayload = ({ cases = null, provider = "real" } = {}) => {
             selectedPlannerId: "deterministic",
             status: "fallback",
             stepIds: ["inventory"],
+          },
+        },
+      },
+      {
+        id: "planner_dynamic_skill_graph",
+        label: "Real DAG planner composes atomic skills",
+        passed: true,
+        checks: [
+          "compare_only_intent_selected",
+          "real_dag_planner_selected",
+          "dag_composed_compare_then_risk",
+          "dag_selected_skills_observed",
+          "dag_kept_document_scope",
+        ].map((id) => ({ id, passed: true })),
+        response: {
+          planner: {
+            fallback: false,
+            selectedPlannerId: "llm",
+            status: "selected",
+            stepIds: ["custom_skills"],
+          },
+          skillGraph: {
+            executed: true,
+            fallback: null,
+            mode: "guarded",
+            nodeStatuses: ["completed", "completed"],
+            nodeSkills: ["compare_documents", "risk_review"],
+            plannerFallback: false,
+            riskDependsOnCompare: true,
+            selectedPlannerId: "llm_dag",
+            status: "completed",
           },
         },
       },
@@ -139,6 +172,13 @@ const buildRuntimeSmokePayload = ({ status = "pass" } = {}) => ({
       intentPlanner: status === "pass" ? "llm" : "deterministic",
       intentPlannerStatus: status === "pass" ? "selected" : "fallback",
     },
+    skillGraph: {
+      bothRunsExecuted: status === "pass",
+      bothRunsPlannedByLlm: status === "pass",
+      fallbackCount: status === "pass" ? 0 : 1,
+      mode: status === "pass" ? "guarded" : "off",
+      skillIds: ["risk_review", "summarize_contract"],
+    },
     sources: {
       firstRunSourceCount: 2,
       secondRunSourceCount: 2,
@@ -198,19 +238,20 @@ test("rollout readiness report marks all required signals ready", () => {
     plannerRuntime: pureLlmPlannerRuntime,
     runtimeSmokePayload: buildRuntimeSmokePayload(),
     runId: "readiness-ready",
+    skillGraphRollout: "guarded",
     trajectoryPayload: buildTrajectoryPayload(),
   });
 
   assert.equal(report.summary.status, "ready");
   assert.equal(report.summary.failedCheckCount, 0);
-  assert.equal(report.signals.planner.fallbackRate, 0.5);
+  assert.equal(report.signals.planner.fallbackRate, 1 / 3);
   assert.equal(report.signals.planner.unexpectedFallbackRate, 0);
   assert.equal(report.signals.planner.divergenceCount, 0);
   assert.equal(report.signals.trajectory.status, "pass");
   assert.equal(report.signals.recovery.status, "pass");
   assert.deepEqual(
     report.checks.map((check) => check.status),
-    ["pass", "pass", "pass", "pass", "pass", "pass", "pass"]
+    ["pass", "pass", "pass", "pass", "pass", "pass", "pass", "pass", "pass"]
   );
   assert.equal(report.signals.runtimeSmoke.status, "pass");
   assert.equal(getRolloutReadinessExitCode(report), 0);
@@ -291,6 +332,7 @@ test("rollout readiness report blocks on planner, trajectory, and recovery signa
     runtimeSmokePayload: buildRuntimeSmokePayload({
       status: "fail",
     }),
+    skillGraphRollout: "guarded",
     trajectoryPayload: buildTrajectoryPayload({
       failed: true,
     }),
@@ -312,6 +354,7 @@ test("rollout readiness report blocks on planner, trajectory, and recovery signa
     [
       "real_planner_gate_passed",
       "planner_runtime_pure_llm",
+      "real_dag_planner_case_passed",
       "runtime_smoke_passed",
       "trajectory_gate_passed",
       "recovery_gate_passed",
@@ -403,6 +446,7 @@ test("rollout readiness report reads and writes latest result files", async () =
     inputDirectory: outputDirectory,
     plannerRuntime: pureLlmPlannerRuntime,
     runId: "readiness-from-files",
+    skillGraphRollout: "guarded",
   });
   const paths = await writeRolloutReadinessReport({
     outputDirectory,
@@ -454,4 +498,23 @@ test("planner runtime gate requires pure LLM rollout target", () => {
 
   assert.equal(gate.status, "fail");
   assert.ok(gate.failedReasons.includes("plannerRollout_mismatch"));
+});
+
+test("readiness rejects an off graph runtime and a claimed DAG result without observed execution", () => {
+  assert.equal(buildSkillGraphRuntimeGate({ mode: "off" }).status, "fail");
+
+  const forged = buildPlannerPayload({ provider: "real" });
+  const dagCase = forged.cases.find(
+    (caseResult) => caseResult.id === "planner_dynamic_skill_graph"
+  );
+  dagCase.response.skillGraph.executed = false;
+
+  assert.equal(buildRealDagPlannerGate({ payload: forged }).status, "fail");
+  dagCase.response.skillGraph.executed = true;
+  dagCase.response.skillGraph.nodeStatuses = ["completed", "failed"];
+  assert.equal(buildRealDagPlannerGate({ payload: forged }).status, "fail");
+  assert.equal(
+    buildRealDagPlannerGate({ payload: buildPlannerPayload({ provider: "mock" }) }).status,
+    "fail"
+  );
 });

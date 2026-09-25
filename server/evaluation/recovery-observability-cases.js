@@ -278,6 +278,99 @@ const buildSkillGraphSignalCase = (recovery = {}) => ({
   },
 });
 
+const buildSkillGraphStartupResumeCase = (recovery = {}) => ({
+  checks: [
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_startup_resume_production_observed",
+      label: "A restarted graph run was observed through the production path",
+      passed: recovery.skillGraphStartupResumeObservedCount === 1,
+      detail: `skillGraphStartupResumeObservedCount=${
+        recovery.skillGraphStartupResumeObservedCount ?? 0
+      }`,
+    }),
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_startup_resume_claim_once",
+      label: "The stored graph resume was claimed exactly once",
+      passed: recovery.skillGraphResumeClaimCount === 1,
+      detail: `skillGraphResumeClaimCount=${recovery.skillGraphResumeClaimCount ?? 0}`,
+    }),
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_startup_auto_recovery_completed",
+      label: "Graph-only startup auto recovery completed without failure",
+      passed:
+        recovery.skillGraphAutoRecoveryCompletedCount === 1 &&
+        recovery.skillGraphAutoRecoveryFailureCount === 0,
+      detail: `completed=${
+        recovery.skillGraphAutoRecoveryCompletedCount ?? 0
+      }, failed=${recovery.skillGraphAutoRecoveryFailureCount ?? 0}`,
+    }),
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_startup_same_run_completed",
+      label: "The interrupted run itself completed",
+      passed: recovery.skillGraphSameRunCompletedCount === 1,
+      detail: `skillGraphSameRunCompletedCount=${
+        recovery.skillGraphSameRunCompletedCount ?? 0
+      }`,
+    }),
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_startup_completed_node_not_rerun",
+      label: "The completed node was not re-executed",
+      passed: recovery.skillGraphCompletedNodeNotRerunCount === 1,
+      detail: `skillGraphCompletedNodeNotRerunCount=${
+        recovery.skillGraphCompletedNodeNotRerunCount ?? 0
+      }`,
+    }),
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_startup_pending_node_once",
+      label: "The pending dependent node executed exactly once",
+      passed: recovery.skillGraphPendingNodeExecutedOnceCount === 1,
+      detail: `skillGraphPendingNodeExecutedOnceCount=${
+        recovery.skillGraphPendingNodeExecutedOnceCount ?? 0
+      }`,
+    }),
+    buildCheck({
+      category: "skill_graph",
+      id: "graph_startup_no_second_claim_or_partial_fallback",
+      label: "A second startup made no claim and no partial fallback occurred",
+      passed:
+        recovery.skillGraphSecondClaimCount === 0 &&
+        recovery.skillGraphPartialResumeFallbackCount === 0 &&
+        recovery.skillGraphUnsafeFallbackCount === 0,
+      detail: `secondClaims=${recovery.skillGraphSecondClaimCount ?? 0}, partialFallbacks=${
+        recovery.skillGraphPartialResumeFallbackCount ?? 0
+      }, unsafeFallbacks=${recovery.skillGraphUnsafeFallbackCount ?? 0}`,
+    }),
+  ],
+  description:
+    "A durable partial guarded graph must resume after a simulated process restart without replaying settled work or entering the V1 fallback path.",
+  id: "skill_graph_startup_resume",
+  label: "Skill graph startup resume",
+  response: {
+    skillGraphAutoRecoveryCompletedCount:
+      recovery.skillGraphAutoRecoveryCompletedCount ?? 0,
+    skillGraphAutoRecoveryFailureCount:
+      recovery.skillGraphAutoRecoveryFailureCount ?? 0,
+    skillGraphCompletedNodeNotRerunCount:
+      recovery.skillGraphCompletedNodeNotRerunCount ?? 0,
+    skillGraphPartialResumeFallbackCount:
+      recovery.skillGraphPartialResumeFallbackCount ?? 0,
+    skillGraphPendingNodeExecutedOnceCount:
+      recovery.skillGraphPendingNodeExecutedOnceCount ?? 0,
+    skillGraphResumeClaimCount: recovery.skillGraphResumeClaimCount ?? 0,
+    skillGraphSameRunCompletedCount:
+      recovery.skillGraphSameRunCompletedCount ?? 0,
+    skillGraphSecondClaimCount: recovery.skillGraphSecondClaimCount ?? 0,
+    skillGraphStartupResumeObservedCount:
+      recovery.skillGraphStartupResumeObservedCount ?? 0,
+  },
+});
+
 const finishRecoveryCase = (caseResult) => {
   const failedChecks = caseResult.checks.filter((check) => !check.passed);
 
@@ -297,4 +390,5 @@ export const buildRecoveryObservabilityCases = ({ recovery = {} } = {}) =>
     buildAgentTaskRecoveryCase(recovery),
     buildPlannerFallbackCase(recovery),
     buildSkillGraphSignalCase(recovery),
+    buildSkillGraphStartupResumeCase(recovery),
   ].map(finishRecoveryCase);

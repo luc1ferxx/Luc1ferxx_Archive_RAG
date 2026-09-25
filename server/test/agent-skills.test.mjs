@@ -27,6 +27,13 @@ import {
   createDefaultSkillRegistry,
   validateSkillContract,
 } from "../rag/skills/registry.js";
+import {
+  SKILL_EFFECTS,
+  SKILL_IDEMPOTENCY,
+  describeSkillReplayContract,
+  getSkillContract,
+  isSideEffectingSkill,
+} from "../rag/skills/skill-contract.js";
 import { buildFeedbackRecord } from "../feedback.js";
 import { buildFeedbackCorpusFromRecords } from "../evaluation/feedback-corpus.js";
 import {
@@ -56,6 +63,52 @@ test("built-in skill registry selects document and web skills with stable metada
     selectedSkills.map((skill) => skill.version),
     ["1.0.0", "1.0.0"]
   );
+});
+
+test("document RAG declares its session-memory writes unsafe to replay", () => {
+  const skill = createBuiltInSkillRegistry().get(AGENT_SKILL_IDS.documentRag);
+  const contract = getSkillContract(skill);
+
+  assert.equal(skill.effects, SKILL_EFFECTS.workspaceWrite);
+  assert.equal(contract.idempotency, SKILL_IDEMPOTENCY.adapterDefined);
+  assert.equal(contract.parallelSafe, false);
+  assert.equal(contract.replaySafe, false);
+  assert.equal(contract.retryable, false);
+  assert.equal(isSideEffectingSkill(skill), true);
+  assert.deepEqual(describeSkillReplayContract(skill), {
+    effects: SKILL_EFFECTS.workspaceWrite,
+    idempotency: SKILL_IDEMPOTENCY.adapterDefined,
+    replaySafe: false,
+  });
+});
+
+test("research brief declares its question-level session-memory writes unsafe to replay", () => {
+  const skill = createBuiltInSkillRegistry().get(AGENT_SKILL_IDS.researchBrief);
+  const contract = getSkillContract(skill);
+
+  assert.equal(contract.effects, SKILL_EFFECTS.workspaceWrite);
+  assert.equal(contract.idempotency, SKILL_IDEMPOTENCY.adapterDefined);
+  assert.equal(contract.parallelSafe, false);
+  assert.equal(contract.replaySafe, false);
+  assert.equal(contract.retryable, false);
+  assert.equal(isSideEffectingSkill(skill), true);
+});
+
+test("external and workspace built-ins declare effects before unified graph admission", () => {
+  const registry = createBuiltInSkillRegistry();
+  const expected = [
+    [AGENT_SKILL_IDS.arxivImport, SKILL_EFFECTS.workspaceWrite],
+    [AGENT_SKILL_IDS.workspaceAction, SKILL_EFFECTS.workspaceWrite],
+    [AGENT_SKILL_IDS.webSearch, SKILL_EFFECTS.externalRead],
+  ];
+
+  for (const [skillId, effects] of expected) {
+    const contract = getSkillContract(registry.get(skillId));
+
+    assert.equal(contract.effects, effects, skillId);
+    assert.equal(contract.parallelSafe, false, skillId);
+    assert.equal(contract.replaySafe, false, skillId);
+  }
 });
 
 test("document-backed custom skills retain retrieved contexts for internal verification", async () => {

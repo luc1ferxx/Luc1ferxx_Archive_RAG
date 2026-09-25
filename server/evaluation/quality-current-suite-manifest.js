@@ -1,4 +1,4 @@
-export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.9.0";
+export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.12.0";
 
 // The retrieval architecture every synthetic/feedback report must have run on.
 // It is checked against `summary.retrieval`, which the runner derives from the
@@ -557,6 +557,13 @@ const plannerChecks = {
     "custom_chain_order",
     "custom_skill_trace",
   ],
+  planner_dynamic_skill_graph: [
+    "compare_only_intent_selected",
+    "real_dag_planner_selected",
+    "dag_composed_compare_then_risk",
+    "dag_selected_skills_observed",
+    "dag_kept_document_scope",
+  ],
   planner_invalid_fallback: [
     "fallback_to_deterministic",
     "fallback_reason_records_validator_error",
@@ -598,6 +605,15 @@ const recoveryChecks = {
     "graph_reused_nodes_not_rerun",
     "graph_replan_applied_recorded",
     "graph_fallback_after_execution_zero",
+  ],
+  skill_graph_startup_resume: [
+    "graph_startup_resume_production_observed",
+    "graph_startup_resume_claim_once",
+    "graph_startup_auto_recovery_completed",
+    "graph_startup_same_run_completed",
+    "graph_startup_completed_node_not_rerun",
+    "graph_startup_pending_node_once",
+    "graph_startup_no_second_claim_or_partial_fallback",
   ],
 };
 
@@ -1015,7 +1031,6 @@ const trajectoryResponseProjections = {
           "research_brief",
           "inventory",
           "document_discovery",
-          "custom_skills",
           "document_rag",
           "web_search",
         ],
@@ -1384,8 +1399,10 @@ const trajectoryResponseProjections = {
         ],
         callCount: 1,
         capabilityIds: [
-          "summarize_contract",
+          "extract_timeline",
           "risk_review",
+          "summarize_contract",
+          "compare_documents",
         ],
         keys: [
           "authorizedDocIds",
@@ -1603,6 +1620,7 @@ const plannerResponseProjection = ({
   plannerStatus = fallback ? "fallback" : "selected",
   selectedPlannerId = fallback ? "deterministic" : "llm",
   selectedSkills = [],
+  skillGraph = undefined,
   skillChain = [],
   stepIds,
   telemetry,
@@ -1627,6 +1645,7 @@ const plannerResponseProjection = ({
     stepIds,
   },
   selectedSkills: skillIds(...selectedSkills),
+  ...(skillGraph === undefined ? {} : { skillGraph }),
   skillChain: skillIds(...skillChain),
   status: 200,
   telemetry,
@@ -1696,6 +1715,39 @@ const plannerResponseProjections = {
       "answer_finalizer",
     ],
   }),
+  planner_dynamic_skill_graph: plannerResponseProjection({
+    agentMode: "compare_documents",
+    intentId: "compare_documents",
+    selectedSkills: ["compare_documents", "risk_review"],
+    skillGraph: {
+      errorCodes: [],
+      executed: true,
+      fallback: null,
+      mode: "guarded",
+      nodeStatuses: ["completed", "completed"],
+      nodeSkills: ["compare_documents", "risk_review"],
+      plannerFallback: false,
+      plannerFallbackReason: null,
+      selectedPlannerId: "llm_dag",
+      status: "completed",
+      riskDependsOnCompare: true,
+    },
+    stepIds: ["custom_skills"],
+    telemetry: {
+      chatCallCount: 2,
+      listDocumentCallCount: 2,
+    },
+    traceTypes: [
+      "plan",
+      "query_planner",
+      "custom_skill",
+      "custom_skill",
+      "synthesis",
+      "self_check",
+      "gap_analysis",
+      "answer_finalizer",
+    ],
+  }),
   planner_invalid_fallback: plannerResponseProjection({
     agentMode: "inventory",
     fallback: true,
@@ -1710,7 +1762,6 @@ const plannerResponseProjections = {
       "research_brief",
       "inventory",
       "document_discovery",
-      "custom_skills",
       "document_rag",
       "web_search",
     ],

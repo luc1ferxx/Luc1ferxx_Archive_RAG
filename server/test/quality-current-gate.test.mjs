@@ -155,6 +155,15 @@ const buildReport = (spec) => {
           skillGraphUnsafeFallbackCount: 0,
           skillGraphReusedNodeCount: 2,
           skillGraphReplanAppliedCount: 1,
+          skillGraphResumeClaimCount: 1,
+          skillGraphAutoRecoveryCompletedCount: 1,
+          skillGraphAutoRecoveryFailureCount: 0,
+          skillGraphStartupResumeObservedCount: 1,
+          skillGraphSameRunCompletedCount: 1,
+          skillGraphCompletedNodeNotRerunCount: 1,
+          skillGraphPendingNodeExecutedOnceCount: 1,
+          skillGraphSecondClaimCount: 0,
+          skillGraphPartialResumeFallbackCount: 0,
         }
       : undefined;
   const caseIds =

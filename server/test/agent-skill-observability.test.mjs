@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createAgentBudget } from "../rag/agent-budget.js";
+import { createAgentBudget, getBudgetSnapshot } from "../rag/agent-budget.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
 
 test("agent skill tracker records selected skill runs and working-memory queries", async () => {
@@ -63,4 +63,33 @@ test("agent skill tracker records selected skill runs and working-memory queries
   assert.equal(observation.attempts, 1);
   assert.equal(observation.citationCount, 1);
   assert.equal(tracker.getSkillRuns()[0].phase, "primary");
+});
+
+test("agent skill tracker distinguishes a preflight contract failure from a skipped node", () => {
+  const skill = {
+    id: "compare_documents",
+    version: "1.0.0",
+    label: "Document Comparison",
+    budgetKey: "customSkillCalls",
+  };
+  const budgetState = createAgentBudget({ maxCustomSkillCalls: 1 });
+  const tracker = createAgentSkillTracker({
+    budgetState,
+    selectedSkills: [skill],
+  });
+  const result = {
+    ok: false,
+    skillId: skill.id,
+    skillVersion: skill.version,
+    label: skill.label,
+    error: new Error("Skill input contract failed."),
+  };
+
+  tracker.recordSkippedSkill({ skill, result, phase: "primary", status: "failed" });
+
+  const observation = tracker.getSkillObservations()[0];
+  assert.equal(observation.status, "failed");
+  assert.equal(observation.errorCount, 1);
+  assert.equal(observation.skippedCount, 0);
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 0);
 });

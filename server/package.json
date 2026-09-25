@@ -7,7 +7,7 @@
     "start": "node server.js",
     "archive:ingest": "node archive-ingest.mjs",
     "vector:reindex": "node vector-reindex.mjs",
-    "test:pgvector": "node --test test/vector-store-pgvector.integration.test.mjs",
+    "test:pgvector": "node --test test/vector-store-pgvector.integration.test.mjs test/agent-execution-graph-postgres.integration.test.mjs",
     "eval:synthetic": "node evaluation/run-synthetic-eval.mjs",
     "eval:real": "node evaluation/run-real-eval.mjs",
     "eval:robust-suite": "node evaluation/run-eval-suite.mjs --suite robust",

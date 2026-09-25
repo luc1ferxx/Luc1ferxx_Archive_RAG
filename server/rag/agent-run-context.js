@@ -13,6 +13,7 @@ import { recordRagTrace } from "./observability.js";
 
 const defaultSkillTracker = {
   getAgentSkills: () => [],
+  getSelectedSkills: () => [],
   getSkillObservations: () => [],
   getSkillRuns: () => [],
 };
@@ -140,7 +141,11 @@ export const createAgentRunContext = ({
     skillChain: chainSkills.map((skill) => getSkillDescriptor(skill)),
     executionLoop,
     workingMemory,
-    selectedSkills: selectedSkills.map((skill) => getSkillDescriptor(skill)),
+    selectedSkills: (
+      skillTracker.getSelectedSkills().length > 0
+        ? skillTracker.getSelectedSkills()
+        : selectedSkills
+    ).map((skill) => getSkillDescriptor(skill)),
     skills: skillTracker.getSkillObservations(),
     runs: skillTracker.getSkillRuns(),
     budget: getBudgetSnapshot(),

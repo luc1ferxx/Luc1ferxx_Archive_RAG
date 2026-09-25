@@ -40,8 +40,37 @@ export {
   normalizeAgentRunStatus,
 } from "./agent-run-state-machine.js";
 import { normalizeText } from "../lib/normalize-text.js";
+import {
+  EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY,
+  buildExecutionGraphNodeStepId,
+  reconcileExecutionGraphCheckpoint,
+  sealExecutionGraphCheckpoint,
+  updateExecutionGraphCheckpoint,
+} from "./agent-execution-graph-checkpoint.js";
+import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
+import { GRAPH_CAPABILITY_APPROVAL_TYPE } from "./capabilities/graph-approval-preflight.js";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
+
+const findCheckpointGraphNode = (checkpoint, stepId) => {
+  if (!checkpoint || !stepId) {
+    return null;
+  }
+
+  return toArray(checkpoint.graph?.nodes).find((node) => {
+    try {
+      return buildExecutionGraphNodeStepId({
+        checkpointVersion: checkpoint.version,
+        nodeId: node.nodeId,
+      }) === stepId;
+    } catch {
+      return false;
+    }
+  }) ?? null;
+};
+
+const getCheckpointGraphStepType = (checkpoint) =>
+  checkpoint?.version === "v2" ? "graph_node" : "custom_skill";
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -237,7 +266,7 @@ export const normalizeAgentRun = (run = {}) => {
   };
 };
 
-const stripInternalRunFields = (run = {}) => {
+const stripInternalRunFields = (run = {}, { includeGraphCheckpoint = false } = {}) => {
   const {
     accessScope,
     revision,
@@ -245,7 +274,13 @@ const stripInternalRunFields = (run = {}) => {
     ...publicRun
   } = run;
 
-  return structuredClone(publicRun);
+  const result = structuredClone(publicRun);
+
+  if (!includeGraphCheckpoint && result.result) {
+    delete result.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+  }
+
+  return result;
 };
 
 const createApprovalBindingError = (message, code) => {
@@ -274,6 +309,85 @@ const assertApprovalObjectBinding = ({ gate = {}, payload = {} } = {}) => {
   }
 
   return expectedHash;
+};
+
+const graphApprovalConflict = (message, code = "AGENT_GRAPH_APPROVAL_CONFLICT") => {
+  const error = new Error(message);
+  error.code = code;
+  error.status = 409;
+  return error;
+};
+
+const graphApprovalBoundary = (gate) => ({
+  approvalObjectHash: gate.approvalObjectHash,
+  capabilityId: gate.capabilityId,
+  capabilityVersion: gate.capabilityVersion,
+  gateId: gate.id,
+  graphDigest: gate.graphDigest,
+  graphRevision: gate.graphRevision,
+  nodeId: gate.nodeId,
+});
+
+const assertGraphApprovalBinding = ({
+  accessScope,
+  checkpoint,
+  gate,
+  runId,
+  snapshot,
+  sourceCheckpointDigest,
+} = {}) => {
+  if (
+    checkpoint?.version !== "v2" ||
+    checkpoint.graph?.version !== "v3" ||
+    sealExecutionGraphCheckpoint(checkpoint).digest !== checkpoint.digest ||
+    gate?.type !== GRAPH_CAPABILITY_APPROVAL_TYPE ||
+    gate.graphBindingVersion !== 1 ||
+    gate.graphVersion !== "v3" ||
+    gate.runId !== runId ||
+    gate.graphDigest !== sourceCheckpointDigest ||
+    gate.graphRevision !== checkpoint.graph?.revision ||
+    gate.status === "denied" ||
+    !toArray(checkpoint.graph?.nodes).some(
+      (node) =>
+        node.nodeId === gate.nodeId &&
+        node.skillId === `capability:${gate.capabilityId}`
+    ) ||
+    snapshot?.gateId !== gate.id ||
+    snapshot?.approvalObjectHash !== gate.approvalObjectHash ||
+    snapshot?.capabilityId !== gate.capabilityId ||
+    snapshot?.capabilityVersion !== gate.capabilityVersion ||
+    snapshot?.snapshotVersion !== gate.snapshotVersion
+  ) {
+    throw graphApprovalConflict("Graph approval does not match the current graph node.");
+  }
+
+  const executionInput = verifyApprovalExecutionSnapshot({
+    accessScope,
+    approvalObjectHash: gate.approvalObjectHash,
+    capabilityId: gate.capabilityId,
+    capabilityVersion: gate.capabilityVersion,
+    inputPreview: gate.inputPreview,
+    privateSnapshot: snapshot,
+  });
+  const expectedBinding = {
+    graphBindingVersion: 1,
+    graphDigest: sourceCheckpointDigest,
+    graphRevision: checkpoint.graph.revision,
+    graphVersion: "v3",
+    nodeId: gate.nodeId,
+    runId,
+  };
+
+  if (
+    !isDeepStrictEqual(executionInput?.binding, expectedBinding) ||
+    !normalizeText(executionInput?.capabilityApproval?.gateId) ||
+    !normalizeText(executionInput?.capabilityApproval?.approvalObjectHash) ||
+    !normalizeRecord(executionInput?.input, null)
+  ) {
+    throw graphApprovalConflict("Graph approval snapshot has an invalid node binding.");
+  }
+
+  return executionInput;
 };
 
 const assertApprovalSnapshotMetadata = ({ gate = {}, snapshot = {} } = {}) => {
@@ -1008,6 +1122,9 @@ const getActiveAgentRunStep = (steps = []) =>
     ACTIVE_AGENT_RUN_STEP_STATUSES.has(step.status)
   ) ?? null;
 
+const isRunMarkedForManualRecovery = (run) =>
+  run?.result?.recovery?.mode === "manual";
+
 const createActiveRunStepCompletionConflictError = ({ status, step } = {}) => {
   const error = new Error(
     `Agent run cannot become ${status} with concurrent active step ${step.id} (${step.status}).`
@@ -1015,6 +1132,30 @@ const createActiveRunStepCompletionConflictError = ({ status, step } = {}) => {
   error.code = "AGENT_RUN_ACTIVE_STEP_CONFLICT";
   error.status = 409;
   return error;
+};
+
+const assertExecutionGraphRunOwner = ({ expectedResumeClaimId = null, run } = {}) => {
+  const checkpoint = run?.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+
+  if (!checkpoint) {
+    return false;
+  }
+
+  if (
+    isRunMarkedForManualRecovery(run) ||
+    sealExecutionGraphCheckpoint(checkpoint).digest !== checkpoint.digest ||
+    normalizeText(checkpoint.resumeClaim?.claimId) !==
+      normalizeText(expectedResumeClaimId)
+  ) {
+    const error = new Error(
+      "Agent run completion conflicts with the persisted graph owner."
+    );
+    error.code = "AGENT_GRAPH_EXECUTION_FENCED";
+    error.status = 409;
+    throw error;
+  }
+
+  return true;
 };
 
 const DEFAULT_AGENT_RUN_MUTATION_RETRIES = 32;
@@ -1025,6 +1166,7 @@ export const createAgentRunService = ({
   const mutateStoredRun = async ({
     accessScope = {},
     allowRetryTransition = false,
+    includeGraphCheckpoint = false,
     maxRetries = 0,
     mutate,
     runId,
@@ -1043,7 +1185,9 @@ export const createAgentRunService = ({
         };
       }
 
-      const mutation = await mutate(stripInternalRunFields(existingRun));
+      const mutation = await mutate(
+        stripInternalRunFields(existingRun, { includeGraphCheckpoint })
+      );
 
       if (!mutation) {
         return {
@@ -1055,6 +1199,18 @@ export const createAgentRunService = ({
 
       const patch = mutation.patch ?? mutation;
       const approvalSnapshots = toArray(mutation.approvalSnapshots);
+
+      if (
+        !includeGraphCheckpoint &&
+        Object.hasOwn(normalizeRecord(patch.result), EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY)
+      ) {
+        const error = new Error(
+          "Execution graph checkpoint requires the scoped checkpoint API."
+        );
+        error.code = "AGENT_GRAPH_CHECKPOINT_PRIVATE_FIELD";
+        error.status = 409;
+        throw error;
+      }
 
       if (patch.status !== undefined) {
         assertAgentRunStatusTransition({
@@ -1197,18 +1353,602 @@ export const createAgentRunService = ({
 
   async updateRun({
     accessScope = {},
+    graphReentryGuard = null,
     runId,
     patch = {},
   } = {}) {
     const mutation = await mutateStoredRun({
       accessScope,
+      includeGraphCheckpoint: Boolean(graphReentryGuard),
+      maxRetries: graphReentryGuard ? DEFAULT_AGENT_RUN_MUTATION_RETRIES : 0,
       runId,
-      mutate: () => ({
-        patch,
-      }),
+      mutate: (existingRun) => {
+        const checkpoint = existingRun.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+
+        if (graphReentryGuard && checkpoint) {
+          // A persisted graph belongs to the worker already executing it or
+          // to the dedicated graph recovery path. A second ordinary request
+          // cannot prove the first worker stopped, even when its request and
+          // Skill catalog happen to match. Fence it in the same CAS that would
+          // otherwise overwrite input/plan and later write run_resumed.
+          const error = new Error(
+            "Agent run re-entry requires the dedicated graph recovery path."
+          );
+          error.code = "AGENT_GRAPH_EXECUTION_FENCED";
+          error.status = 409;
+          throw error;
+        }
+
+        return { patch };
+      },
     });
 
     return mutation.run;
+  },
+
+  async markManualRecovery({ accessScope = {}, recovery = {}, runId } = {}) {
+    if (typeof agentRunStore.updateWithEvent !== "function") {
+      throw new Error(
+        "Agent run store cannot atomically persist manual recovery and its event."
+      );
+    }
+
+    const mutation = await mutateStoredRun({
+      accessScope,
+      includeGraphCheckpoint: true,
+      maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runId,
+      mutate: (run) => {
+        const checkpoint = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+
+        // The decision to stop a graph and the manual-recovery event must win
+        // the same revision CAS as a graph resume claim or node transition.
+        // Never change a run already owned by a resume worker.
+        if (
+          TERMINAL_AGENT_RUN_STATUSES.has(run.status) ||
+          isRunMarkedForManualRecovery(run) ||
+          toArray(run.events).some((event) => event.type === "manual_recovery_required") ||
+          checkpoint?.resumeClaim
+        ) {
+          return null;
+        }
+
+        const status = run.status === AGENT_RUN_STATUSES.running
+          ? AGENT_RUN_STATUSES.waitingForUser
+          : run.status;
+        const nextRecovery = {
+          ...recovery,
+          mode: "manual",
+          originalStatus: run.status,
+        };
+
+        return {
+          event: {
+            type: "manual_recovery_required",
+            payload: {
+              mode: "manual",
+              originalStatus: run.status,
+              reason: nextRecovery.reason,
+              requestedMode: nextRecovery.requestedMode,
+              status,
+              stepId: nextRecovery.stepId ?? null,
+              stepType: nextRecovery.stepType ?? null,
+            },
+          },
+          patch: {
+            result: { recovery: nextRecovery },
+            status,
+          },
+          value: true,
+        };
+      },
+    });
+
+    return {
+      marked: mutation.applied,
+      run: mutation.run,
+    };
+  },
+
+  async getExecutionGraphCheckpoint({ accessScope = {}, runId } = {}) {
+    const run = await agentRunStore.get?.({ accessScope, runId });
+
+    if (!run) {
+      return null;
+    }
+
+    const checkpoint = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+
+    return checkpoint
+      ? {
+          checkpoint: structuredClone(checkpoint),
+          steps: structuredClone(run.steps ?? []),
+        }
+      : null;
+  },
+
+  async claimExecutionGraphResume({
+    accessScope = {},
+    checkpointDigest,
+    runId,
+  } = {}) {
+    const claimId = randomUUID();
+    const mutation = await mutateStoredRun({
+      accessScope,
+      includeGraphCheckpoint: true,
+      maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runId,
+      mutate: (run) => {
+        const previous = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+
+        if (
+          !previous ||
+          isRunMarkedForManualRecovery(run) ||
+          previous.phase !== "running" ||
+          previous.digest !== checkpointDigest ||
+          sealExecutionGraphCheckpoint(previous).digest !== previous.digest ||
+          previous.resumeClaim ||
+          toArray(run.steps).some(
+            (step) =>
+              step.type === getCheckpointGraphStepType(previous) &&
+              Boolean(findCheckpointGraphNode(previous, normalizeText(step.id))) &&
+              ACTIVE_AGENT_RUN_STEP_STATUSES.has(step.status)
+          ) ||
+          toArray(run.approvalGates).some((gate) => gate.status === "pending") ||
+          ![AGENT_RUN_STATUSES.running, AGENT_RUN_STATUSES.waitingForUser].includes(
+            run.status
+          )
+        ) {
+          return null;
+        }
+
+        const checkpoint = updateExecutionGraphCheckpoint(previous, {
+          resumeClaim: {
+            claimId,
+            claimedAt: new Date().toISOString(),
+          },
+        });
+
+        return {
+          event: {
+            type: "skill_graph_resume_claimed",
+            payload: {
+              sequence: checkpoint.sequence,
+              version: checkpoint.version,
+            },
+          },
+          patch: {
+            result: { [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: checkpoint },
+          },
+          value: checkpoint,
+        };
+      },
+    });
+
+    return mutation.applied
+      ? { checkpoint: structuredClone(mutation.value), claimed: true }
+      : { checkpoint: null, claimed: false };
+  },
+
+  async saveExecutionGraphCheckpoint({
+    accessScope = {},
+    checkpoint,
+    runId,
+  } = {}) {
+    if (
+      !checkpoint ||
+      sealExecutionGraphCheckpoint(checkpoint).digest !== checkpoint.digest
+    ) {
+      throw new Error("Execution graph checkpoint has an invalid digest.");
+    }
+
+    const requestedScope = normalizeTaskAccessScope(accessScope);
+    if (
+      !isDeepStrictEqual(
+        normalizeTaskAccessScope(checkpoint.owner?.accessScope),
+        requestedScope
+      )
+    ) {
+      const error = new Error("Execution graph checkpoint scope does not match the run.");
+      error.code = "AGENT_GRAPH_CHECKPOINT_OWNER_MISMATCH";
+      error.status = 409;
+      throw error;
+    }
+
+    const mutation = await mutateStoredRun({
+      accessScope,
+      includeGraphCheckpoint: true,
+      maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runId,
+      mutate: (run) => {
+        const previous = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+
+        if (isRunMarkedForManualRecovery(run)) {
+          const error = new Error(
+            "Execution graph cannot change after manual recovery was required."
+          );
+          error.code = "AGENT_GRAPH_EXECUTION_FENCED";
+          error.status = 409;
+          throw error;
+        }
+
+        if (
+          normalizeText(run.goal) !== checkpoint.owner.question ||
+          (Array.isArray(run.input?.docIds) &&
+            !isDeepStrictEqual(run.input.docIds, checkpoint.owner.docIds)) ||
+          (run.input?.sessionId &&
+            normalizeText(run.input.sessionId) !== checkpoint.owner.sessionId) ||
+          (run.input?.userId &&
+            normalizeText(run.input.userId) !== checkpoint.owner.userId) ||
+          (run.plan?.mode &&
+            normalizeText(run.plan.mode) !==
+              normalizeText(checkpoint.owner.intentPlan?.mode))
+        ) {
+          const error = new Error("Execution graph checkpoint input does not match the run.");
+          error.code = "AGENT_GRAPH_CHECKPOINT_OWNER_MISMATCH";
+          error.status = 409;
+          throw error;
+        }
+
+        // Initial graph ownership and a previously started outer/standalone
+        // step are mutually exclusive. This check shares the run-revision CAS
+        // with checkpoint insertion, so a generic replay cannot slip between
+        // a preflight read and the graph's first durable receipt.
+        if (
+          !previous &&
+          (getActiveAgentRunStep(run.steps) ||
+            toArray(run.approvalGates).some((gate) => gate.status === "pending"))
+        ) {
+          const error = new Error(
+            "Execution graph cannot start while another step or approval is active."
+          );
+          error.code = "AGENT_GRAPH_EXECUTION_FENCED";
+          error.status = 409;
+          throw error;
+        }
+
+        if (previous?.digest === checkpoint.digest) {
+          return null;
+        }
+
+        if (
+          previous &&
+          (!isDeepStrictEqual(previous.owner, checkpoint.owner) ||
+            Number(checkpoint.sequence) !== Number(previous.sequence) + 1)
+        ) {
+          const error = new Error(
+            "Execution graph checkpoint conflicts with the stored run."
+          );
+          error.code = "AGENT_GRAPH_CHECKPOINT_CONFLICT";
+          error.status = 409;
+          throw error;
+        }
+
+        if (
+          previous?.phase === "awaiting_approval" ||
+          (previous?.resumeClaim &&
+            !isDeepStrictEqual(previous.resumeClaim, checkpoint.resumeClaim)) ||
+          (previous && run.status !== AGENT_RUN_STATUSES.running)
+        ) {
+          throw graphApprovalConflict(
+            "Execution graph checkpoint is owned by an approval or resume claim.",
+            "AGENT_GRAPH_EXECUTION_FENCED"
+          );
+        }
+
+        return {
+          event: {
+            type: "skill_graph_checkpointed",
+            payload: {
+              graphRevision: checkpoint.graph?.revision ?? 0,
+              phase: checkpoint.phase,
+              sequence: checkpoint.sequence,
+              version: checkpoint.version,
+            },
+          },
+          patch: {
+            result: {
+              [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: checkpoint,
+            },
+          },
+        };
+      },
+    });
+
+    if (!mutation.run) {
+      const error = new Error("Agent run not found.");
+      error.status = 404;
+      throw error;
+    }
+
+    return structuredClone(checkpoint);
+  },
+
+  async pauseExecutionGraphForApproval({
+    accessScope = {},
+    approvalGate,
+    approvalSnapshot,
+    checkpoint,
+    graphResumeClaimId = null,
+    runId,
+  } = {}) {
+    if (
+      typeof agentRunStore.updateWithEvent !== "function" ||
+      typeof agentRunStore.getApprovalSnapshot !== "function"
+    ) {
+      throw new Error(
+        "Agent run store cannot atomically persist graph approval and its private snapshot."
+      );
+    }
+
+    const mutation = await mutateStoredRun({
+      accessScope,
+      includeGraphCheckpoint: true,
+      maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runId,
+      mutate: (run) => {
+        const previous = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+        const gate = structuredClone(approvalGate ?? {});
+        const snapshot = structuredClone(approvalSnapshot ?? {});
+        const expectedClaimId = normalizeText(graphResumeClaimId);
+
+        if (
+          run.status !== AGENT_RUN_STATUSES.running ||
+          isRunMarkedForManualRecovery(run) ||
+          !previous ||
+          previous.phase !== "running" ||
+          previous.digest !== checkpoint?.digest ||
+          !isDeepStrictEqual(previous, checkpoint) ||
+          normalizeText(previous.resumeClaim?.claimId) !== expectedClaimId ||
+          !isDeepStrictEqual(
+            normalizeTaskAccessScope(previous.owner?.accessScope),
+            normalizeTaskAccessScope(accessScope)
+          ) ||
+          getActiveAgentRunStep(run.steps) ||
+          toArray(run.approvalGates).some(
+            (candidate) => candidate.status === "pending" || candidate.id === gate.id
+          ) ||
+          toArray(previous.nodeRuns).some((nodeRun) => nodeRun.nodeId === gate.nodeId) ||
+          toArray(run.steps).some(
+            (step) =>
+              step.id === buildExecutionGraphNodeStepId({
+                checkpointVersion: "v2",
+                nodeId: gate.nodeId,
+              })
+          )
+        ) {
+          throw graphApprovalConflict(
+            "Graph approval requires the current unclaimed node boundary."
+          );
+        }
+
+        const reconciled = reconcileExecutionGraphCheckpoint({
+          checkpoint: previous,
+          steps: run.steps,
+        });
+
+        if (!reconciled.ok) {
+          throw graphApprovalConflict(
+            `Graph approval boundary is not safely reconciled: ${reconciled.reason}.`
+          );
+        }
+
+        assertGraphApprovalBinding({
+          accessScope,
+          checkpoint: previous,
+          gate,
+          runId,
+          snapshot,
+          sourceCheckpointDigest: previous.digest,
+        });
+
+        const approvalBoundary = graphApprovalBoundary(gate);
+        const pausedCheckpoint = updateExecutionGraphCheckpoint(previous, {
+          approvalBoundary,
+          phase: "awaiting_approval",
+          resumeClaim: null,
+        });
+
+        return {
+          approvalSnapshots: [snapshot],
+          event: {
+            type: "graph_approval_gate_created",
+            payload: {
+              approvalObjectHash: gate.approvalObjectHash,
+              capabilityId: gate.capabilityId,
+              gateId: gate.id,
+              graphRevision: gate.graphRevision,
+              nodeId: gate.nodeId,
+              status: AGENT_RUN_STATUSES.waitingForUser,
+            },
+          },
+          patch: {
+            approvalGates: [...toArray(run.approvalGates), gate],
+            result: { [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: pausedCheckpoint },
+            status: AGENT_RUN_STATUSES.waitingForUser,
+          },
+          value: pausedCheckpoint,
+        };
+      },
+    });
+
+    if (!mutation.run) {
+      const error = new Error("Agent run not found.");
+      error.status = 404;
+      throw error;
+    }
+
+    return {
+      checkpoint: structuredClone(mutation.value),
+      paused: true,
+      run: mutation.run,
+    };
+  },
+
+  async applyExecutionGraphApprovalAction({
+    accessScope = {},
+    action,
+    gateId = "",
+    payload = {},
+    runId,
+  } = {}) {
+    const normalizedAction = normalizeAction(action);
+    const argumentGateId = normalizeText(gateId);
+    const payloadGateId = normalizeText(payload.gateId);
+    const normalizedGateId = argumentGateId || payloadGateId;
+
+    if (!Object.values(AGENT_RUN_ACTIONS).includes(normalizedAction)) {
+      const error = new Error(`Unsupported agent run action: ${action}`);
+      error.status = 400;
+      throw error;
+    }
+
+    if (!normalizedGateId || (argumentGateId && payloadGateId && argumentGateId !== payloadGateId)) {
+      const error = new Error("Graph approval requires one consistent gateId.");
+      error.status = 400;
+      throw error;
+    }
+
+    if (
+      typeof agentRunStore.updateWithEvent !== "function" ||
+      typeof agentRunStore.getApprovalSnapshot !== "function"
+    ) {
+      throw new Error("Agent run store cannot atomically decide graph approval.");
+    }
+
+    const claimId = randomUUID();
+    const mutation = await mutateStoredRun({
+      accessScope,
+      includeGraphCheckpoint: true,
+      maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runId,
+      mutate: async (run) => {
+        const previous = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+        const gate = toArray(run.approvalGates).find(
+          (candidate) => candidate?.status === "pending" && candidate.id === normalizedGateId
+        );
+        const boundary = previous?.approvalBoundary;
+
+        if (
+          run.status !== AGENT_RUN_STATUSES.waitingForUser ||
+          isRunMarkedForManualRecovery(run) ||
+          previous?.phase !== "awaiting_approval" ||
+          previous.resumeClaim ||
+          !gate ||
+          !isDeepStrictEqual(boundary, graphApprovalBoundary(gate)) ||
+          toArray(run.approvalGates).filter((candidate) => candidate.status === "pending").length !== 1 ||
+          getActiveAgentRunStep(run.steps)
+        ) {
+          throw graphApprovalConflict("No matching pending graph approval can be decided.");
+        }
+
+        assertApprovalObjectBinding({ gate, payload });
+        const snapshot = await agentRunStore.getApprovalSnapshot({
+          accessScope,
+          gateId: normalizedGateId,
+          runId,
+        });
+        assertGraphApprovalBinding({
+          accessScope,
+          checkpoint: previous,
+          gate,
+          runId,
+          snapshot,
+          sourceCheckpointDigest: boundary.graphDigest,
+        });
+
+        const updateResult = updateApprovalGatesForAction({
+          action: normalizedAction,
+          gateId: normalizedGateId,
+          gates: run.approvalGates,
+          now: () => new Date().toISOString(),
+          payload,
+        });
+        const approved = normalizedAction === AGENT_RUN_ACTIONS.approve;
+        const decidedCheckpoint = updateExecutionGraphCheckpoint(previous, {
+          phase: approved ? "running" : "partial",
+          resumeClaim: approved
+            ? { claimId, claimedAt: new Date().toISOString() }
+            : null,
+        });
+
+        return {
+          event: {
+            type: approved ? "graph_approval_approved" : "graph_approval_denied",
+            payload: {
+              approvalObjectHash: gate.approvalObjectHash,
+              capabilityId: gate.capabilityId,
+              gateId: gate.id,
+              graphRevision: gate.graphRevision,
+              nodeId: gate.nodeId,
+              reason: normalizeText(payload.reason),
+            },
+          },
+          patch: {
+            approvalGates: updateResult.gates,
+            result: {
+              [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: decidedCheckpoint,
+              ...(approved
+                ? {}
+                : { approvalDenied: true, deniedGateId: gate.id, status: 200 }),
+            },
+            status: approved ? AGENT_RUN_STATUSES.running : AGENT_RUN_STATUSES.completed,
+          },
+          value: {
+            checkpoint: decidedCheckpoint,
+            claimId: approved ? claimId : null,
+            gate: updateResult.gate,
+          },
+        };
+      },
+    });
+
+    if (!mutation.run) {
+      const error = new Error("Agent run not found.");
+      error.status = 404;
+      throw error;
+    }
+
+    return { applied: true, ...mutation.value, run: mutation.run };
+  },
+
+  async getExecutionGraphApproval({ accessScope = {}, runId } = {}) {
+    const run = await agentRunStore.get?.({ accessScope, runId });
+    const checkpoint = run?.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+    const boundary = checkpoint?.approvalBoundary;
+    const gate = toArray(run?.approvalGates).find(
+      (candidate) => candidate?.id === boundary?.gateId && candidate.status === "approved"
+    );
+
+    if (
+      run?.status !== AGENT_RUN_STATUSES.running ||
+      checkpoint?.phase !== "running" ||
+      !checkpoint.resumeClaim?.claimId ||
+      !gate ||
+      !isDeepStrictEqual(boundary, graphApprovalBoundary(gate))
+    ) {
+      return null;
+    }
+
+    const approvalSnapshot = await agentRunStore.getApprovalSnapshot?.({
+      accessScope,
+      gateId: gate.id,
+      runId,
+    });
+    assertGraphApprovalBinding({
+      accessScope,
+      checkpoint,
+      gate,
+      runId,
+      snapshot: approvalSnapshot,
+      sourceCheckpointDigest: boundary.graphDigest,
+    });
+
+    return {
+      approvalSnapshot: structuredClone(approvalSnapshot),
+      checkpoint: structuredClone(checkpoint),
+      gate: structuredClone(gate),
+    };
   },
 
   async completeRun({
@@ -1216,6 +1956,7 @@ export const createAgentRunService = ({
     approvalSnapshots = [],
     approvalGates = [],
     decisions = [],
+    graphResumeClaimId = null,
     observations = [],
     result = {},
     runId,
@@ -1237,10 +1978,23 @@ export const createAgentRunService = ({
             : "run_completed";
     const mutation = await mutateStoredRun({
       accessScope,
+      includeGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
       runId,
       mutate: (existingRun) => {
+        const hasGraph = assertExecutionGraphRunOwner({
+          expectedResumeClaimId: graphResumeClaimId,
+          run: existingRun,
+        });
+
         if (TERMINAL_AGENT_RUN_STATUSES.has(existingRun.status)) {
+          if (hasGraph) {
+            const error = new Error("Execution graph run was already finalized.");
+            error.code = "AGENT_GRAPH_EXECUTION_FENCED";
+            error.status = 409;
+            throw error;
+          }
+
           assertAgentRunStatusTransition({
             from: existingRun.status,
             to: status,
@@ -1363,23 +2117,46 @@ export const createAgentRunService = ({
     );
   },
 
-  async failRun({ accessScope = {}, error, runId } = {}) {
+  async failRun({ accessScope = {}, error, graphResumeClaimId = null, runId } = {}) {
     const runError = buildRunError(error);
     const mutation = await mutateStoredRun({
       accessScope,
+      includeGraphCheckpoint: true,
+      maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
       runId,
-      mutate: () => ({
-        event: {
-          type: "run_failed",
-          payload: {
-            error: runError,
+      mutate: (existingRun) => {
+        const hasGraph = assertExecutionGraphRunOwner({
+          expectedResumeClaimId: graphResumeClaimId,
+          run: existingRun,
+        });
+
+        // A graph node may already have entered an external Skill call. A
+        // second request must not turn the shared run terminal while its
+        // lifecycle step is still active, leaving the side effect unrecorded.
+        const activeStep = hasGraph
+          ? getActiveAgentRunStep(existingRun.steps)
+          : null;
+
+        if (activeStep) {
+          throw createActiveRunStepCompletionConflictError({
+            status: AGENT_RUN_STATUSES.failed,
+            step: activeStep,
+          });
+        }
+
+        return {
+          event: {
+            type: "run_failed",
+            payload: {
+              error: runError,
+            },
           },
-        },
-        patch: {
-          error: runError,
-          status: AGENT_RUN_STATUSES.failed,
-        },
-      }),
+          patch: {
+            error: runError,
+            status: AGENT_RUN_STATUSES.failed,
+          },
+        };
+      },
     });
     const run = mutation.run;
 
@@ -1427,8 +2204,14 @@ export const createAgentRunService = ({
 
     const mutation = await mutateStoredRun({
       accessScope,
+      includeGraphCheckpoint: true,
       runId,
       mutate: async (existingRun) => {
+        assertStandaloneGraphReplayAllowed({
+          gateId: normalizedGateId,
+          run: existingRun,
+        });
+
         if (existingRun.status !== AGENT_RUN_STATUSES.waitingForUser) {
           const error = new Error("Agent run is not waiting for user input.");
           error.status = 409;
@@ -1605,9 +2388,11 @@ export const createAgentRunService = ({
   } = {}) {
     const mutation = await mutateStoredRun({
       accessScope,
+      includeGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
       runId,
       mutate: (existingRun) => {
+        assertStandaloneGraphReplayAllowed({ run: existingRun, stepId });
         assertAgentRunAcceptsStepMutation(existingRun.status);
 
         const updateResult = updateAgentRunStep({
@@ -1652,6 +2437,7 @@ export const createAgentRunService = ({
     detail,
     error,
     eventType = "",
+    graphResumeClaimId = undefined,
     input,
     label,
     output,
@@ -1676,15 +2462,99 @@ export const createAgentRunService = ({
     });
     const mutation = await mutateStoredRun({
       accessScope,
+      includeGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
       runId,
       mutate: (existingRun) => {
-        assertAgentRunAcceptsStepMutation(existingRun.status);
-
+        const checkpoint = existingRun.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
         const existingSteps = normalizeAgentRunSteps(existingRun.steps);
         const existingStep = existingSteps.find(
           (step) => step.id === normalizedStepId
         );
+
+        if (graphResumeClaimId === undefined && checkpoint) {
+          const isCheckpointGraphNode = Boolean(
+            findCheckpointGraphNode(checkpoint, normalizedStepId)
+          );
+
+          if (
+            sealExecutionGraphCheckpoint(checkpoint).digest !== checkpoint.digest ||
+            !["completed", "partial"].includes(checkpoint.phase) ||
+            checkpoint.resumeClaim ||
+            isCheckpointGraphNode
+          ) {
+            const error = new Error(
+              "Standalone step transition conflicts with an active execution graph."
+            );
+            error.code = "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY";
+            error.status = 409;
+            throw error;
+          }
+
+          if (existingStep) {
+            assertStandaloneGraphReplayAllowed({
+              run: existingRun,
+              stepId: normalizedStepId,
+            });
+          }
+        }
+
+        if (
+          graphResumeClaimId === undefined &&
+          !checkpoint &&
+          (type === "graph_node" || normalizedStepId.startsWith("agent_graph_node:"))
+        ) {
+          const error = new Error(
+            "A heterogeneous graph node requires a persisted execution graph checkpoint."
+          );
+          error.code = "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY";
+          error.status = 409;
+          throw error;
+        }
+
+        if (graphResumeClaimId !== undefined) {
+          const expectedClaimId = normalizeText(graphResumeClaimId);
+          const actualClaimId = normalizeText(checkpoint?.resumeClaim?.claimId);
+          const graphNode = findCheckpointGraphNode(checkpoint, normalizedStepId);
+          const graphStepType = getCheckpointGraphStepType(checkpoint);
+          const requestedStatus = getRequestedRunStepStatus(status);
+          const startingNode = requestedStatus === AGENT_RUN_STEP_STATUSES.running &&
+            type === graphStepType &&
+            !existingStep &&
+            normalizeText(input?.skillId) === normalizeText(graphNode?.skillId) &&
+            normalizeText(input?.nodeId) === normalizeText(graphNode?.nodeId);
+          const settlingNode = [
+            AGENT_RUN_STEP_STATUSES.completed,
+            AGENT_RUN_STEP_STATUSES.failed,
+            AGENT_RUN_STEP_STATUSES.paused,
+          ].includes(requestedStatus) &&
+            existingStep?.type === graphStepType &&
+            existingStep.status === AGENT_RUN_STEP_STATUSES.running &&
+            normalizeText(existingStep.input?.skillId) === normalizeText(graphNode?.skillId) &&
+            normalizeText(existingStep.input?.nodeId) === normalizeText(graphNode?.nodeId);
+
+          // Both node start and settlement are fenced by the same persisted
+          // graph claim. A stale worker cannot finish a node after ownership
+          // changes, and an unrelated standalone step cannot join the graph.
+          if (
+            existingRun.status !== AGENT_RUN_STATUSES.running ||
+            !checkpoint ||
+            checkpoint.phase !== "running" ||
+            sealExecutionGraphCheckpoint(checkpoint).digest !== checkpoint.digest ||
+            expectedClaimId !== actualClaimId ||
+            !graphNode ||
+            (!startingNode && !settlingNode)
+          ) {
+            const fenceError = new Error(
+              "Execution graph node transition conflicts with the persisted graph owner."
+            );
+            fenceError.code = "AGENT_GRAPH_EXECUTION_FENCED";
+            fenceError.status = 409;
+            throw fenceError;
+          }
+        }
+
+        assertAgentRunAcceptsStepMutation(existingRun.status);
         let requestedStatus = getRequestedRunStepStatus(status);
         let nextSteps = existingSteps;
         let recordedStep = null;
@@ -1764,8 +2634,10 @@ export const createAgentRunService = ({
     const mutation = await mutateStoredRun({
       allowRetryTransition: true,
       accessScope,
+      includeGraphCheckpoint: true,
       runId,
       mutate: (existingRun) => {
+        assertStandaloneGraphReplayAllowed({ run: existingRun, stepId });
         if (!isRetryableAgentRunStatus(existingRun.status)) {
           const error = new Error(
             "Agent run steps can only be retried from completed or failed runs."

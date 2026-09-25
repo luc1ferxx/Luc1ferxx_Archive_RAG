@@ -86,6 +86,15 @@ export const getAgentSkillGraphRollout = () =>
     "shadow",
   ]);
 
+// The heterogeneous all-stage graph is observational only until its document
+// loop, approval continuation, and whole-run recovery have release evidence.
+// A mistyped or premature `guarded` setting fails closed to `off`.
+export const getAgentUnifiedGraphRollout = () =>
+  toChoice(process.env.AGENT_UNIFIED_GRAPH_ROLLOUT, "off", [
+    "off",
+    "shadow",
+  ]);
+
 export const getChunkStrategy = () =>
   (process.env.RAG_CHUNK_STRATEGY || "structured").trim().toLowerCase();
 

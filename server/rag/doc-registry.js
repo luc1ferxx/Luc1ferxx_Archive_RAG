@@ -162,7 +162,12 @@ const toStoredDocument = (document = {}) => {
       document.workspaceId ?? document.workspace_id ?? ""
     ).trim(),
     profile,
-    uploadedAt: document.uploadedAt ?? new Date().toISOString(),
+    // pg returns timestamptz as a Date, while file/in-memory stores already
+    // use strings. Keep the registry's public and sortable timestamp shape
+    // identical across providers.
+    uploadedAt: document.uploadedAt instanceof Date
+      ? document.uploadedAt.toISOString()
+      : document.uploadedAt ?? new Date().toISOString(),
     // Defaults to postgresql because that is where documents live unless a store
     // says otherwise. Preserving what the store reports matters: every document
     // entering the registry is renormalized through here, so hardcoding this made

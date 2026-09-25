@@ -1,7 +1,18 @@
 import { getRemainingBudget } from "./agent-budget.js";
 import { runCustomSkills } from "./agent-custom-skill-runner.js";
+import {
+  buildExecutionGraphCheckpointOwner,
+  createExecutionGraphCheckpoint,
+  reconcileExecutionGraphCheckpoint,
+  snapshotExecutionGraphNodeRun,
+  updateExecutionGraphCheckpoint,
+  verifyExecutionGraphCheckpoint,
+} from "./agent-execution-graph-checkpoint.js";
 import { createAgentExecutionGraphResult } from "./agent-dag-planner-adapter.js";
-import { EXECUTION_GRAPH_LIMITS } from "./agent-execution-graph.js";
+import {
+  EXECUTION_GRAPH_LIMITS,
+  validateExecutionGraph,
+} from "./agent-execution-graph.js";
 import {
   EXECUTION_GRAPH_RUN_STATUSES,
   runExecutionGraph,
@@ -72,12 +83,15 @@ export const runCustomSkillStage = async ({
   addBudgetLimitTrace = noop,
   addTraceStep = noop,
   authorizedDocIds = null,
+  authorizedCustomSkills = null,
   budgetState,
   buildSkillTraceDetail,
   customSkills = [],
   docIds = [],
   executeObservedSkill,
+  expectedGraphResumeClaimId = null,
   limits = EXECUTION_GRAPH_LIMITS,
+  loadExecutionGraphCheckpoint = null,
   maxConcurrency,
   mode = getAgentSkillGraphRollout(),
   plan,
@@ -90,11 +104,15 @@ export const runCustomSkillStage = async ({
   registry,
   replanAdapter = null,
   retrievalPlan,
+  saveExecutionGraphCheckpoint = null,
   sessionId,
   stepLifecycle,
   taskMemory = null,
   userId,
 } = {}) => {
+  const graphSkills = Array.isArray(authorizedCustomSkills)
+    ? authorizedCustomSkills
+    : customSkills;
   const runV1 = () =>
     runCustomSkills({
       accessScope,
@@ -116,7 +134,10 @@ export const runCustomSkillStage = async ({
       userId,
     });
 
-  if (mode === CUSTOM_SKILL_STAGE_MODES.off || customSkills.length === 0) {
+  if (
+    mode === CUSTOM_SKILL_STAGE_MODES.off ||
+    (customSkills.length === 0 && graphSkills.length === 0)
+  ) {
     return runV1();
   }
 
@@ -130,7 +151,8 @@ export const runCustomSkillStage = async ({
       ...(plannerAdapter ? { plannerAdapter } : {}),
       plannerContext: { docIds, plan, question, taskMemory },
       registry,
-      selectedSkills: customSkills,
+      selectedSkills: graphSkills,
+      fallbackSelectedSkills: customSkills,
     });
 
   if (mode === CUSTOM_SKILL_STAGE_MODES.shadow) {
@@ -154,30 +176,182 @@ export const runCustomSkillStage = async ({
         graph: describeGraph(shadowResult?.graph),
         planner: shadowResult?.planner ?? null,
       }),
-      execute: () => planGraph(budgetRemaining),
+      execute: () => {
+        if (typeof registry?.get !== "function") {
+          throw new Error("Skill registry unavailable for shadow graph validation.");
+        }
+
+        return planGraph(budgetRemaining);
+      },
       primary: results.map((result) => result.skillId),
       shadowPlannerAdapter: plannerAdapter ?? { id: "deterministic_dag" },
     });
 
-    recordExecutionGraph({
-      ...shadow,
-      executed: false,
-      fallback: null,
-      mode,
-      nodeRuns: [],
-      replans: [],
-    });
+    try {
+      await recordExecutionGraph({
+        ...shadow,
+        executed: false,
+        fallback: null,
+        mode,
+        nodeRuns: [],
+        replans: [],
+      });
+    } catch {
+      // Shadow is observational: a failed event write must not turn an
+      // already-completed V1 answer into an error. Keep the loss visible in
+      // the request trace without exposing storage details or source text.
+      addTraceStep({
+        type: "skill_graph_shadow_observation",
+        label: "Shadow graph observation",
+        status: "failed",
+        summary: "Shadow graph event could not be persisted.",
+      });
+    }
 
     return results;
   }
 
-  const planned = await planGraph(getRemainingBudget(budgetState));
+  const loadedCheckpoint = await loadExecutionGraphCheckpoint?.();
+  const persistedCheckpoint = loadedCheckpoint?.checkpoint ?? null;
+  let completedNodeRuns = [];
+  let checkpoint = null;
+
+  if (
+    (persistedCheckpoint?.resumeClaim?.claimId ?? null) !==
+    expectedGraphResumeClaimId
+  ) {
+    const error = new Error(
+      "Execution graph checkpoint is owned by another executor."
+    );
+    error.code = "AGENT_GRAPH_EXECUTION_FENCED";
+    error.status = 409;
+    throw error;
+  }
+
+  if (persistedCheckpoint) {
+    const verified = verifyExecutionGraphCheckpoint({
+      accessScope,
+      budgetState,
+      checkpoint: persistedCheckpoint,
+      docIds,
+      plan,
+      question,
+      retrievalPlan,
+      selectedSkills: graphSkills,
+      sessionId,
+      taskMemory,
+      userId,
+    });
+    const graphValidation = verified.ok
+      ? validateExecutionGraph({
+          authorizedDocIds: scopedDocIds,
+          authorizedSkillIds: graphSkills.map((skill) => skill.id),
+          graph: persistedCheckpoint.graph,
+          limits: effectiveLimits,
+          registry,
+        })
+      : null;
+    const reconciled = verified.ok && graphValidation?.ok
+      ? reconcileExecutionGraphCheckpoint({
+          checkpoint: persistedCheckpoint,
+          steps: loadedCheckpoint.steps,
+        })
+      : verified.ok
+        ? { ok: false, reason: "checkpoint_graph_invalid" }
+        : verified;
+
+    if (!reconciled.ok) {
+      const error = new Error(
+        `Execution graph checkpoint cannot be resumed: ${reconciled.reason}.`
+      );
+      error.code = "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY";
+      error.status = 409;
+      throw error;
+    }
+
+    checkpoint = persistedCheckpoint;
+    completedNodeRuns = reconciled.completedNodeRuns;
+
+    // The budget object is recreated on process restart. Charge every
+    // persisted attempt, including a read that was in flight when the process
+    // stopped, before allowing a pending node to reserve anything new.
+    const attemptedByBudgetKey = new Map();
+
+    for (const [budgetKey, initial] of Object.entries(
+      checkpoint.owner.budget.usedAtEntry
+    )) {
+      budgetState.used[budgetKey] = Math.max(
+        Number(budgetState.used[budgetKey] ?? 0),
+        initial
+      );
+    }
+
+    for (const step of loadedCheckpoint.steps ?? []) {
+      if (!String(step?.id ?? "").startsWith("custom_skill:")) {
+        continue;
+      }
+
+      const budgetKey = registry?.get?.(step.input?.skillId)?.budgetKey;
+
+      if (budgetKey) {
+        // A step record can represent a retried node. Conservatively charge
+        // every persisted attempt before reserving budget for new nodes.
+        const attemptCount = Number.isSafeInteger(step.attempt) && step.attempt > 0
+          ? step.attempt
+          : 1;
+        attemptedByBudgetKey.set(
+          budgetKey,
+          (attemptedByBudgetKey.get(budgetKey) ?? 0) + attemptCount
+        );
+      }
+    }
+
+    for (const [budgetKey, attempted] of attemptedByBudgetKey) {
+      const initial = Number(checkpoint.owner.budget.usedAtEntry[budgetKey] ?? 0);
+      budgetState.used[budgetKey] = Math.max(
+        Number(budgetState.used[budgetKey] ?? 0),
+        initial + attempted
+      );
+    }
+
+    if (["completed", "partial"].includes(checkpoint.phase)) {
+      await recordExecutionGraph({
+        errorCodes: [],
+        executed: true,
+        fallback: null,
+        graph: describeGraph(checkpoint.graph),
+        mode,
+        nodeRuns: (checkpoint.nodeRuns ?? [])
+          .filter((saved) => checkpoint.graph.nodes.some((node) => node.nodeId === saved.nodeId))
+          .map((saved) =>
+            serializeNodeRun({
+              ...saved,
+              dependsOn: checkpoint.graph.nodes.find(
+                (node) => node.nodeId === saved.nodeId
+              )?.dependsOn ?? [],
+            })
+          ),
+        planner: checkpoint.planner ?? null,
+        replans: checkpoint.replans ?? [],
+        status: checkpoint.phase,
+      });
+
+      return checkpoint.graph.nodes
+        .map((node) => completedNodeRuns.find((run) => run.nodeId === node.nodeId))
+        .filter(Boolean)
+        .map((run) => run.result);
+    }
+  }
+
+  const planned = checkpoint
+    ? { graph: checkpoint.graph, planner: checkpoint.planner ?? null }
+    : await planGraph(getRemainingBudget(budgetState));
 
   if (!planned.graph) {
     // Rejected as a whole, which means nothing has run and nothing has been
     // charged. This is the only moment where handing the request back to the
     // V1 chain is safe, and it is why V1 has to stay until the gates close.
-    recordExecutionGraph({
+    await recordExecutionGraph({
       errorCodes: (planned.errors ?? []).map((error) => error.code),
       executed: false,
       fallback: "v1",
@@ -192,21 +366,71 @@ export const runCustomSkillStage = async ({
     return runV1();
   }
 
-  const runGraph = (graph, completedNodeRuns = []) =>
+  if (!checkpoint && saveExecutionGraphCheckpoint) {
+    checkpoint = createExecutionGraphCheckpoint({
+      graph: planned.graph,
+      owner: buildExecutionGraphCheckpointOwner({
+        accessScope,
+        budgetState,
+        docIds,
+        plan,
+        question,
+        retrievalPlan,
+        selectedSkills: graphSkills,
+        sessionId,
+        taskMemory,
+        userId,
+      }),
+    });
+    checkpoint = updateExecutionGraphCheckpoint(checkpoint, {
+      planner: planned.planner,
+      replans: [],
+    });
+    await saveExecutionGraphCheckpoint(checkpoint);
+  }
+
+  let checkpointQueue = Promise.resolve();
+  const persistCheckpoint = (update) => {
+    if (!checkpoint || !saveExecutionGraphCheckpoint) {
+      return Promise.resolve();
+    }
+
+    checkpointQueue = checkpointQueue.then(async () => {
+      const next = updateExecutionGraphCheckpoint(checkpoint, update(checkpoint));
+      await saveExecutionGraphCheckpoint(next);
+      checkpoint = next;
+    });
+
+    return checkpointQueue;
+  };
+
+  const runGraph = (graph, settledRuns = []) =>
     runExecutionGraph({
       accessScope,
       addBudgetLimitTrace,
       addTraceStep,
       authorizedDocIds: scopedDocIds,
-      authorizedSkillIds: customSkills.map((skill) => skill.id),
+      authorizedSkillIds: graphSkills.map((skill) => skill.id),
       budgetState,
       buildSkillTraceDetail,
-      completedNodeRuns,
+      completedNodeRuns: settledRuns,
       docIds,
       executeObservedSkill,
       graph,
+      graphResumeClaimId: checkpoint ? expectedGraphResumeClaimId : undefined,
       limits: effectiveLimits,
       maxConcurrency,
+      onNodeSettled: checkpoint
+        ? ({ nodeRun }) =>
+            persistCheckpoint((current) => ({
+              nodeRuns: [
+                ...(current.nodeRuns ?? []).filter(
+                  (run) => run.nodeId !== nodeRun.nodeId
+                ),
+                snapshotExecutionGraphNodeRun(nodeRun),
+              ],
+            }))
+        : undefined,
       question,
       ragService,
       recordSkillResult,
@@ -218,13 +442,13 @@ export const runCustomSkillStage = async ({
       userId,
     });
 
-  const replans = [];
-  let fingerprints = [];
+  const replans = [...(checkpoint?.replans ?? [])];
+  let fingerprints = [...(checkpoint?.fingerprints ?? [])];
   let graph = planned.graph;
   let run;
 
   try {
-    run = await runGraph(graph);
+    run = await runGraph(graph, completedNodeRuns);
 
     while (replanAdapter) {
       const replan = await createReplanResult({
@@ -238,7 +462,7 @@ export const runCustomSkillStage = async ({
         registry,
         replanAdapter,
         replanCount: replans.length,
-        selectedSkills: customSkills,
+        selectedSkills: graphSkills,
       });
 
       replans.push(serializeReplan(replan));
@@ -252,6 +476,12 @@ export const runCustomSkillStage = async ({
       }
 
       graph = replan.graph;
+      await persistCheckpoint(() => ({
+        fingerprints,
+        graph,
+        replanCount: replans.length,
+        replans,
+      }));
       run = await runGraph(graph, replan.completedNodeRuns);
     }
   } catch (error) {
@@ -260,7 +490,7 @@ export const runCustomSkillStage = async ({
       // recorded before the interrupt continues upward. The stage does not
       // retry and does not fall back: the approval the user is about to see is
       // bound to the input this node was given.
-      recordExecutionGraph({
+      await recordExecutionGraph({
         errorCodes: [],
         executed: true,
         fallback: null,
@@ -276,7 +506,21 @@ export const runCustomSkillStage = async ({
     throw error;
   }
 
-  recordExecutionGraph({
+  await persistCheckpoint((current) => ({
+    fingerprints,
+    graph,
+    nodeRuns: [
+      ...(current.nodeRuns ?? []).filter(
+        (saved) => !run.nodeRuns.some((current) => current.nodeId === saved.nodeId)
+      ),
+      ...run.nodeRuns.map(snapshotExecutionGraphNodeRun),
+    ],
+    phase: run.ok ? "completed" : "partial",
+    replanCount: replans.length,
+    replans,
+  }));
+
+  await recordExecutionGraph({
     errorCodes: (run.errors ?? []).map((error) => error.code),
     executed: true,
     fallback: null,

@@ -33,6 +33,7 @@ import {
   buildScopedRagService,
   buildSource,
   createEvalTelemetry,
+  withEnvironmentOverrides,
 } from "../../agent-eval-harness.js";
 import {
   AGENT_SKILL_IDS,
@@ -278,7 +279,7 @@ export const createCustomSkillRetryCase = () => ({
   id: "custom_skill_retry",
   label: "Custom skill retry",
   description:
-    "A failed custom skill step should persist input/output/error and retry from the failed step.",
+    "With graph rollout off, a failed V1 custom skill step should persist input/output/error and retry from the failed step.",
   run: async () => {
     const telemetry = createEvalTelemetry();
     const citation = buildSource({
@@ -321,7 +322,7 @@ export const createCustomSkillRetryCase = () => ({
         ragService,
       }),
     });
-    const initialResponse = await runAgentRag({
+    const initialResponse = await withEnvironmentOverrides({ AGENT_SKILL_GRAPH_ROLLOUT: "off" }, () => runAgentRag({
       accessScope: DEFAULT_ACCESS_SCOPE,
       agentRunService,
       docIds: ["risk-1"],
@@ -332,7 +333,7 @@ export const createCustomSkillRetryCase = () => ({
       webChatService: async () => ({
         text: "web should not run",
       }),
-    });
+    }));
     const initialBody = getChatResponseBody(initialResponse);
     const initialRun = await agentRunService.getRun({
       accessScope: DEFAULT_ACCESS_SCOPE,
@@ -370,7 +371,7 @@ export const createCustomSkillRetryCase = () => ({
       id: "custom_skill_retry",
       label: "Custom skill retry",
       description:
-        "A failed custom skill step should persist input/output/error and retry from the failed step.",
+        "With graph rollout off, a failed V1 custom skill step should persist input/output/error and retry from the failed step.",
       observed: {
         chatCallCount: telemetry.chatCalls.length,
         failedStep: {

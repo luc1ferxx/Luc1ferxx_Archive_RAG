@@ -58,6 +58,7 @@ export const REPLAN_REASON_CODES = Object.freeze({
   limitReached: "replan_limit_reached",
   noProgress: "replan_no_progress",
   notTriggered: "replan_not_triggered",
+  sideEffectNodeFailed: "replan_side_effect_node_failed",
   sideEffectNodeRetired: "replan_side_effect_node_retired",
 });
 
@@ -443,6 +444,21 @@ export const createReplanResult = async ({
 
   if (replanCount >= effectiveMaxReplans) {
     return refuse(REPLAN_REASON_CODES.limitReached);
+  }
+
+  const failedSideEffect = toArray(nodeRuns).find((run) =>
+    run?.status === EXECUTION_GRAPH_NODE_STATUSES.failed &&
+    getContract(registry, run?.skillId)?.effects !== SKILL_EFFECTS.readOnly
+  );
+
+  if (failedSideEffect) {
+    // Failure (including an invalid output) does not prove a write did not
+    // land. Re-entering the revised whole graph would execute this failed
+    // node again, so do not even ask the replanner for a patch.
+    return refuse(
+      REPLAN_REASON_CODES.sideEffectNodeFailed,
+      `Node ${normalizeText(failedSideEffect.nodeId)} may have applied a side effect; automatic replanning is unsafe.`
+    );
   }
 
   if (!hasSpendableBudget(budgetRemaining)) {

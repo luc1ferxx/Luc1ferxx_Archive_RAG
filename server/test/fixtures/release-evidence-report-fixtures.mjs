@@ -752,6 +752,15 @@ const PASSING_RECOVERY = Object.freeze({
   skillGraphUnsafeFallbackCount: 0,
   skillGraphReusedNodeCount: 2,
   skillGraphReplanAppliedCount: 1,
+  skillGraphResumeClaimCount: 1,
+  skillGraphAutoRecoveryCompletedCount: 1,
+  skillGraphAutoRecoveryFailureCount: 0,
+  skillGraphStartupResumeObservedCount: 1,
+  skillGraphSameRunCompletedCount: 1,
+  skillGraphCompletedNodeNotRerunCount: 1,
+  skillGraphPendingNodeExecutedOnceCount: 1,
+  skillGraphSecondClaimCount: 0,
+  skillGraphPartialResumeFallbackCount: 0,
 });
 
 const buildRawMetrics = (cases) => {
@@ -805,7 +814,7 @@ export const buildPassingCheckSuiteReport = ({
       provider,
       runId,
       status: "pass",
-      version: "1.0.0",
+      version: specId === "recovery" ? "1.1.0" : "1.0.0",
       metrics: buildRawMetrics(cases),
     },
     cases,
@@ -817,7 +826,7 @@ export const buildPassingRuntimeSmokeReport = ({ createdAt, runId } = {}) => ({
   completedAt: createdAt,
   runId,
   status: "pass",
-  version: "1.0.0",
+  version: "1.1.0",
   checks: {
     longMemory: {
       healthReason: "postgres_configured_default",
@@ -834,6 +843,13 @@ export const buildPassingRuntimeSmokeReport = ({ createdAt, runId } = {}) => ({
       executionPlannerStatus: "selected",
       intentPlanner: "llm",
       intentPlannerStatus: "selected",
+    },
+    skillGraph: {
+      bothRunsExecuted: true,
+      bothRunsPlannedByLlm: true,
+      fallbackCount: 0,
+      mode: "guarded",
+      skillIds: ["risk_review", "summarize_contract"],
     },
     sources: {
       sourceDocIds: ["runtime-smoke-contract"],
@@ -860,6 +876,7 @@ export const buildPassingRolloutReadinessReport = ({
     trajectoryPayload: reports.trajectory,
     recoveryPayload: reports["recovery-observability"],
     runtimeSmokePayload: reports["runtime-smoke"],
+    skillGraphRollout: "guarded",
     plannerRuntime: {
       executionPlanner: "llm",
       intentPlanner: "llm",

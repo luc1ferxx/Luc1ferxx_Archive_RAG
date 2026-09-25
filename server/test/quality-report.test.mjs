@@ -409,6 +409,36 @@ test("recovery gate does not let zero summary counters hide raw failed checks", 
   assert.equal(gate.failedCases[0].failedChecks[0].id, "raw-failed-check");
 });
 
+test("recovery gate requires production graph startup resume evidence independently of case status", () => {
+  const passing = buildRecoveryObservabilityEvaluationReport();
+  const passingGate = buildRecoveryGate({ latestRecoveryPayload: passing });
+
+  assert.equal(passingGate.status, "pass");
+
+  const missing = structuredClone(passing);
+  delete missing.recovery.skillGraphStartupResumeObservedCount;
+  delete missing.recovery.skillGraphResumeClaimCount;
+  delete missing.recovery.skillGraphAutoRecoveryCompletedCount;
+  const missingGate = buildRecoveryGate({ latestRecoveryPayload: missing });
+
+  assert.equal(missingGate.status, "fail");
+  assert.ok(
+    missingGate.failedChecks.some(
+      (check) => check.metric === "recoverySkillGraphStartupResumeObservedCount"
+    )
+  );
+  assert.ok(
+    missingGate.failedChecks.some(
+      (check) => check.metric === "recoverySkillGraphResumeClaimCount"
+    )
+  );
+  assert.ok(
+    missingGate.failedChecks.some(
+      (check) => check.metric === "recoverySkillGraphAutoRecoveryCompletedCount"
+    )
+  );
+});
+
 test("quality history folds feedback eval failures into gate decision by skill", () => {
   const latestPayload = buildPassingSyntheticPayload({
     runId: "synthetic-latest",
@@ -1949,7 +1979,7 @@ test("quality history folds passing recovery observability report into gate deci
   assert.equal(history.qualityGate.status, "pass");
   assert.match(
     history.qualityGate.summary,
-    /Recovery observability passed 7 cases; replay failures 0, manual action failures 0, task resume failures 0/
+    /Recovery observability passed 8 cases; replay failures 0, manual action failures 0, task resume failures 0/
   );
   assert.ok(
     history.qualityGate.checks.some(
@@ -2016,6 +2046,15 @@ test("quality history does not require primary step failures in healthy recovery
       taskRecoveryResumeFailureCount: 0,
       taskRecoveryCompletedCount: 1,
       plannerFallbackCount: 0,
+      skillGraphStartupResumeObservedCount: 1,
+      skillGraphResumeClaimCount: 1,
+      skillGraphAutoRecoveryCompletedCount: 1,
+      skillGraphAutoRecoveryFailureCount: 0,
+      skillGraphSameRunCompletedCount: 1,
+      skillGraphCompletedNodeNotRerunCount: 1,
+      skillGraphPendingNodeExecutedOnceCount: 1,
+      skillGraphSecondClaimCount: 0,
+      skillGraphPartialResumeFallbackCount: 0,
     },
     cases: [
       {

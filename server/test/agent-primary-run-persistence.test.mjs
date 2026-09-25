@@ -5,7 +5,10 @@ import { runAgentRag } from "../rag/agent.js";
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { runDocumentRagLoop } from "../rag/agent-document-loop.js";
 import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
-import { buildStepReplaySafetyAssessment } from "../rag/agent-run-step-replay-safety.js";
+import {
+  buildStepReplaySafetyAssessment,
+  STEP_REPLAY_SAFETY_REASON_CODES,
+} from "../rag/agent-run-step-replay-safety.js";
 import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
@@ -13,6 +16,7 @@ import {
 } from "../rag/agent-runs.js";
 import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
 import { CAPABILITY_IDS } from "../rag/capabilities/index.js";
+import { SKILL_EFFECTS, SKILL_IDEMPOTENCY } from "../rag/skills/skill-contract.js";
 
 const accessScope = {
   userId: "alice",
@@ -78,11 +82,23 @@ const getStep = (run, stepId) => run.steps.find((step) => step.id === stepId);
 const countSteps = (run, stepId) =>
   run.steps.filter((step) => step.id === stepId).length;
 
+const assertMemoryWritingRagStep = (step) => {
+  assert.equal(step.input.effects, SKILL_EFFECTS.workspaceWrite);
+  assert.equal(step.input.idempotency, SKILL_IDEMPOTENCY.adapterDefined);
+  assert.equal(step.input.replaySafe, false);
+  const safety = buildStepReplaySafetyAssessment({ step });
+  assert.equal(safety.canAutoReplay, false);
+  assert.deepEqual(safety.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+    STEP_REPLAY_SAFETY_REASON_CODES.externalWrite,
+  ]);
+};
+
 const assertEventOrder = ({ after, before, events }) => {
   assert.ok(events.indexOf(before) < events.indexOf(after));
 };
 
-test("primary document RAG persists a completed run step with replayable input and output", async () => {
+test("primary document RAG persists a completed run step with non-replay-safe input and output", async () => {
   const agentRunService = createRunService();
   const answerText = "Remote work requires manager approval. [Source 1]";
   const response = await runPrimaryDocumentRag({
@@ -117,6 +133,8 @@ test("primary document RAG persists a completed run step with replayable input a
   assert.equal(documentStep.status, AGENT_RUN_STEP_STATUSES.completed);
   assert.deepEqual(documentStep.input.docIds, ["doc-1"]);
   assert.equal(documentStep.input.question, question);
+  assert.equal(documentStep.input.skillId, "document_rag");
+  assertMemoryWritingRagStep(documentStep);
   assert.equal(documentStep.output.citationCount, 1);
   assert.match(documentStep.output.text, /Remote work requires manager approval/);
   assert.notEqual(eventTypes.indexOf("step_started"), -1);
@@ -126,7 +144,7 @@ test("primary document RAG persists a completed run step with replayable input a
   );
 });
 
-test("follow-up retrieval persists a deterministic completed run step", async () => {
+test("follow-up retrieval persists a non-replay-safe completed run step", async () => {
   const agentRunService = createRunService();
   const response = await runPrimaryDocumentRag({
     agentRunService,
@@ -176,6 +194,8 @@ test("follow-up retrieval persists a deterministic completed run step", async ()
   assert.equal(followUpStep.status, AGENT_RUN_STEP_STATUSES.completed);
   assert.deepEqual(followUpStep.input.docIds, ["doc-1"]);
   assert.match(followUpStep.input.question, /claim lacks citation support/i);
+  assert.equal(followUpStep.input.skillId, "document_rag");
+  assertMemoryWritingRagStep(followUpStep);
   assert.equal(followUpStep.output.citationCount, 1);
   assert.match(followUpStep.output.text, /before the first remote day/i);
 });
@@ -202,6 +222,7 @@ test("primary document RAG persists failed Result steps with serialized error", 
   assert.equal(documentStep.status, AGENT_RUN_STEP_STATUSES.failed);
   assert.deepEqual(documentStep.input.docIds, ["doc-1"]);
   assert.equal(documentStep.input.question, question);
+  assertMemoryWritingRagStep(documentStep);
   assert.equal(documentStep.error.message, "Vector store unavailable.");
   assert.equal(documentStep.error.name, "Error");
   assertEventOrder({
@@ -413,12 +434,14 @@ test("research brief persists lifecycle-backed research question steps", async (
   assert.equal(completedStep.input.sessionId, "session-1");
   assert.equal(completedStep.input.skillId, "research_brief");
   assert.equal(completedStep.input.userId, "alice");
+  assertMemoryWritingRagStep(completedStep);
   assert.equal(completedStep.output.citationCount, 1);
   assert.equal(completedStep.output.researchQuestionId, "rq-1");
   assert.equal(completedStep.output.resolvedQuery, "remote work facts");
   assert.equal(failedStep.type, "research_question");
   assert.equal(failedStep.status, AGENT_RUN_STEP_STATUSES.failed);
   assert.equal(failedStep.input.researchQuestionId, "rq-2");
+  assertMemoryWritingRagStep(failedStep);
   assert.equal(failedStep.error.message, "Research lookup unavailable.");
   assert.equal(countSteps(run, "research_question:rq-1"), 1);
   assert.equal(countSteps(run, "research_question:rq-2"), 1);

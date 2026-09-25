@@ -128,7 +128,6 @@ test("execution planner shadow records alternate steps without changing executio
       AGENT_EXECUTION_STEP_IDS.researchBrief,
       AGENT_EXECUTION_STEP_IDS.inventory,
       AGENT_EXECUTION_STEP_IDS.documentDiscovery,
-      AGENT_EXECUTION_STEP_IDS.customSkills,
       AGENT_EXECUTION_STEP_IDS.documentRag,
       AGENT_EXECUTION_STEP_IDS.webSearch,
     ]

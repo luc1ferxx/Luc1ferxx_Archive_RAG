@@ -129,7 +129,7 @@ test("document registry normalizes public documents and enforces access scope", 
       pageCount: "1",
       ownerUserId: "bob",
       workspaceId: "workspace-b",
-      uploadedAt: "2024-02-01T00:00:00.000Z",
+      uploadedAt: new Date("2024-02-01T00:00:00.000Z"),
       profile: {
         summary: "Beta summary",
         tags: ["beta", "beta", ""],
@@ -183,6 +183,7 @@ test("document registry normalizes public documents and enforces access scope", 
     assert.deepEqual(initializedDocuments[0].tags, ["alpha", "risk"]);
     assert.deepEqual(initializedDocuments[0].entities, ["Alice", "Policy"]);
     assert.equal(initializedDocuments[0].storageBackend, "postgresql");
+    assert.equal(initializedDocuments[1].uploadedAt, "2024-02-01T00:00:00.000Z");
     assert.equal("ownerUserId" in initializedDocuments[0], false);
     assert.deepEqual(initializedDocuments[0].source, {
       sourceType: "arxiv",

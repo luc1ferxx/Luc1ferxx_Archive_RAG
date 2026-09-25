@@ -2,7 +2,9 @@ import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js"
 import {
   EXECUTION_REQUEST_FIELD_TYPES,
   SKILL_EFFECTS,
+  SKILL_VALUE_TYPES,
   getSkillContract,
+  hasExplicitExecutionGraphContract,
   isAssignableValueType,
 } from "./skills/skill-contract.js";
 
@@ -13,7 +15,17 @@ import {
 // mutates the graph it is handed. Everything it can refuse, it refuses here --
 // so an illegal graph is rejected as a whole and no node ever partially runs.
 
-export const EXECUTION_GRAPH_VERSION = "v1";
+export const EXECUTION_GRAPH_VERSIONS = Object.freeze({
+  v1: "v1",
+  v2: "v2",
+  // v3 reserves a separate contract for heterogeneous document, Web,
+  // built-in, custom Skill, and approval-gated Capability nodes. v1/v2 stay
+  // custom-Skill graphs and keep their existing checkpoint identity.
+  v3: "v3",
+});
+
+// Existing callers and deterministic fallback continue to create v1 graphs.
+export const EXECUTION_GRAPH_VERSION = EXECUTION_GRAPH_VERSIONS.v1;
 
 export const EXECUTION_GRAPH_FAILURE_POLICIES = Object.freeze({
   abstain: "abstain",
@@ -37,10 +49,13 @@ export const EXECUTION_GRAPH_REASON_CODES = Object.freeze({
   forgedPolicy: "forged_policy",
   illegalOutputReference: "illegal_output_reference",
   inputTypeMismatch: "input_type_mismatch",
+  invalidCondition: "invalid_condition",
   invalidGraphVersion: "invalid_graph_version",
+  implicitRuntimeContract: "implicit_runtime_contract",
   invalidNodeShape: "invalid_node_shape",
   maxDepthExceeded: "max_depth_exceeded",
   maxNodesExceeded: "max_nodes_exceeded",
+  missingAuthorizationCatalog: "missing_authorization_catalog",
   missingRequiredInput: "missing_required_input",
   outOfScopeDocument: "out_of_scope_document",
   selfDependency: "self_dependency",
@@ -74,6 +89,18 @@ const FORGED_POLICY_FIELDS = Object.freeze([
 ]);
 
 const VALID_FAILURE_POLICIES = new Set(Object.values(EXECUTION_GRAPH_FAILURE_POLICIES));
+const V2_NODE_FIELDS = new Set([
+  "dependsOn",
+  "failurePolicy",
+  "inputBindings",
+  "nodeId",
+  "parallelSafe",
+  "rationale",
+  "scope",
+  "skillId",
+  "when",
+]);
+const V3_GRAPH_FIELDS = new Set(["nodes", "revision", "version"]);
 
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -228,8 +255,20 @@ const collectScopeErrors = ({ authorizedDocIds, node }) => {
     );
   }
 
+  if (!Array.isArray(node.scope.docIds)) {
+    errors.push(
+      buildError({
+        code: EXECUTION_GRAPH_REASON_CODES.forgedPolicy,
+        message: `Node ${nodeId} scope.docIds must be an array of authorized document ids.`,
+        nodeId,
+      })
+    );
+
+    return errors;
+  }
+
   const authorized = new Set(toArray(authorizedDocIds).map(normalizeText));
-  const outOfScope = toArray(node.scope.docIds)
+  const outOfScope = node.scope.docIds
     .map(normalizeText)
     .filter((docId) => !authorized.has(docId));
 
@@ -276,6 +315,86 @@ const collectDependencyErrors = ({ knownNodeIds, node }) => {
   }
 
   return errors;
+};
+
+const collectConditionErrors = ({ graphVersion, node, skillContractsByNodeId }) => {
+  const nodeId = normalizeNodeId(node);
+  const invalid = (message) => [
+    buildError({
+      code: EXECUTION_GRAPH_REASON_CODES.invalidCondition,
+      message,
+      nodeId,
+    }),
+  ];
+
+  if (
+    graphVersion === EXECUTION_GRAPH_VERSIONS.v2 ||
+    graphVersion === EXECUTION_GRAPH_VERSIONS.v3
+  ) {
+    const extraFields = Object.keys(node).filter((field) => !V2_NODE_FIELDS.has(field));
+
+    if (extraFields.length > 0) {
+      return invalid(
+        `Node ${nodeId} contains unsupported v2 fields: ${extraFields.join(", ")}.`
+      );
+    }
+  }
+
+  if (node.when === undefined) {
+    return [];
+  }
+
+  if (
+    graphVersion !== EXECUTION_GRAPH_VERSIONS.v2 &&
+    graphVersion !== EXECUTION_GRAPH_VERSIONS.v3
+  ) {
+    return invalid(`Node ${nodeId} may declare when only in a v2 or v3 execution graph.`);
+  }
+
+  const when = node.when;
+  const fields = isRecord(when) ? Object.keys(when).sort() : [];
+
+  if (
+    !isRecord(when) ||
+    fields.length !== 3 ||
+    fields.some((field, index) => field !== ["equals", "nodeId", "output"][index]) ||
+    typeof when.nodeId !== "string" ||
+    typeof when.output !== "string" ||
+    typeof when.equals !== "boolean"
+  ) {
+    return invalid(
+      `Node ${nodeId} when must contain only nodeId, output, and boolean equals.`
+    );
+  }
+
+  const sourceNodeId = normalizeText(when.nodeId);
+  const outputName = normalizeText(when.output);
+  const dependencies = new Set(toArray(node.dependsOn).map(normalizeText));
+
+  if (
+    !sourceNodeId ||
+    !outputName ||
+    when.nodeId !== sourceNodeId ||
+    when.output !== outputName ||
+    !dependencies.has(sourceNodeId)
+  ) {
+    return invalid(
+      `Node ${nodeId} when must reference an output of a declared dependency.`
+    );
+  }
+
+  const sourceOutput = skillContractsByNodeId.get(sourceNodeId)?.outputSchema?.[outputName];
+
+  if (
+    sourceOutput?.type !== SKILL_VALUE_TYPES.boolean ||
+    sourceOutput.required !== true
+  ) {
+    return invalid(
+      `Node ${nodeId} when must reference a required boolean output of ${sourceNodeId}.`
+    );
+  }
+
+  return [];
 };
 
 const collectBindingErrors = ({ contract, node, skillContractsByNodeId }) => {
@@ -533,13 +652,37 @@ export const validateExecutionGraph = ({
     };
   }
 
-  if (normalizeText(graph.version) !== EXECUTION_GRAPH_VERSION) {
+  const graphVersion = normalizeText(graph.version);
+
+  if (!Object.values(EXECUTION_GRAPH_VERSIONS).includes(graphVersion)) {
     errors.push(
       buildError({
         code: EXECUTION_GRAPH_REASON_CODES.invalidGraphVersion,
-        message: `Execution graph version must be ${EXECUTION_GRAPH_VERSION}, received ${normalizeText(graph.version) || "(empty)"}.`,
+        message: `Execution graph version must be v1, v2, or v3, received ${graphVersion || "(empty)"}.`,
       })
     );
+  }
+
+  if (graphVersion === EXECUTION_GRAPH_VERSIONS.v3) {
+    const extraFields = Object.keys(graph).filter((field) => !V3_GRAPH_FIELDS.has(field));
+
+    if (extraFields.length > 0) {
+      errors.push(
+        buildError({
+          code: EXECUTION_GRAPH_REASON_CODES.forgedPolicy,
+          message: `v3 execution graph contains runtime-owned or unsupported fields: ${extraFields.join(", ")}.`,
+        })
+      );
+    }
+
+    if (!Array.isArray(authorizedSkillIds)) {
+      errors.push(
+        buildError({
+          code: EXECUTION_GRAPH_REASON_CODES.missingAuthorizationCatalog,
+          message: "v3 execution graph requires a runtime-owned authorized node catalog.",
+        })
+      );
+    }
   }
 
   const nodes = toArray(graph.nodes);
@@ -606,6 +749,20 @@ export const validateExecutionGraph = ({
       );
     }
 
+    if (
+      graphVersion === EXECUTION_GRAPH_VERSIONS.v3 &&
+      skill &&
+      !hasExplicitExecutionGraphContract(skill)
+    ) {
+      errors.push(
+        buildError({
+          code: EXECUTION_GRAPH_REASON_CODES.implicitRuntimeContract,
+          message: `Node ${nodeId} references ${skillId} without an explicit typed effects and replay contract.`,
+          nodeId,
+        })
+      );
+    }
+
     if (seenNodeIds.has(nodeId)) {
       errors.push(
         buildError({
@@ -620,11 +777,27 @@ export const validateExecutionGraph = ({
     errors.push(...collectForgedFieldErrors(node));
     errors.push(...collectScopeErrors({ authorizedDocIds, node }));
     errors.push(...collectDependencyErrors({ knownNodeIds, node }));
+    errors.push(...collectConditionErrors({ graphVersion, node, skillContractsByNodeId }));
 
     const contract = skillContractsByNodeId.get(nodeId);
 
     if (!contract) {
       continue;
+    }
+
+    if (
+      contract.inputSchema.docIds?.scoped === true &&
+      contract.inputSchema.docIds?.required === true &&
+      Array.isArray(node.scope?.docIds) &&
+      node.scope.docIds.length === 0
+    ) {
+      errors.push(
+        buildError({
+          code: EXECUTION_GRAPH_REASON_CODES.outOfScopeDocument,
+          message: `Node ${nodeId} cannot use an empty scoped document selection.`,
+          nodeId,
+        })
+      );
     }
 
     if (node.parallelSafe === true && contract.effects !== SKILL_EFFECTS.readOnly) {

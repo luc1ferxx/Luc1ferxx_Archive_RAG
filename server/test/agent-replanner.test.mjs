@@ -608,13 +608,14 @@ test("createReplanResult refuses to retire a node that already completed", async
   assert.equal(result.reasonCode, REPLAN_REASON_CODES.completedNodeRetired);
 });
 
-test("createReplanResult refuses to retire a node with a side effect", async () => {
+test("createReplanResult refuses to replan after a failed side-effect node", async () => {
   const graph = createExecutionGraph({
     nodes: [
       graphNode({ nodeId: "compare", skillId: "compare_documents" }),
       graphNode({ nodeId: "publish", skillId: "publish_report" }),
     ],
   });
+  let adapterCalls = 0;
   const result = await createReplanResult(
     baseOptions({
       graph,
@@ -627,13 +628,17 @@ test("createReplanResult refuses to retire a node with a side effect", async () 
           status: "failed",
         }),
       ],
-      replanAdapter: stubAdapter(() => timelinePatch({ removeNodeIds: ["publish"] })),
+      replanAdapter: stubAdapter(() => {
+        adapterCalls += 1;
+        return timelinePatch({ removeNodeIds: ["publish"] });
+      }),
       selectedSkills: [compareSkill(), publishSkill(), timelineSkill()],
     })
   );
 
   assert.equal(result.decision, REPLAN_DECISIONS.abstain);
-  assert.equal(result.reasonCode, REPLAN_REASON_CODES.sideEffectNodeRetired);
+  assert.equal(result.reasonCode, REPLAN_REASON_CODES.sideEffectNodeFailed);
+  assert.equal(adapterCalls, 0);
 });
 
 test("createReplanResult abstains when the budget cannot fund the patch", async () => {

@@ -6,6 +6,12 @@ import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import { createAgentBudget } from "../rag/agent-budget.js";
+import {
+  buildExecutionGraphCheckpointOwner,
+  createExecutionGraphCheckpoint,
+  updateExecutionGraphCheckpoint,
+} from "../rag/agent-execution-graph-checkpoint.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
   createCustomSkillStepExecutor,
@@ -147,6 +153,91 @@ const createCompletedRunWithSteps = async (agentRunService, {
     status: AGENT_RUN_STATUSES.completed,
     steps,
   });
+};
+
+const persistGuardedGraphCheckpoint = async (agentRunService, {
+  docIds = ["doc-1"],
+  goal = "Review the selected contract.",
+  phase = "running",
+  runId,
+} = {}) => {
+  const owner = buildExecutionGraphCheckpointOwner({
+    accessScope,
+    budgetState: createAgentBudget(),
+    docIds,
+    question: goal,
+    selectedSkills: [],
+  });
+  const graph = {
+    version: "v1",
+    revision: 0,
+    nodes: [{ nodeId: "risk", skillId: "risk_review" }],
+  };
+  const checkpoint = updateExecutionGraphCheckpoint(
+    createExecutionGraphCheckpoint({ graph, owner }),
+    { phase }
+  );
+
+  await agentRunService.saveExecutionGraphCheckpoint({
+    accessScope,
+    checkpoint,
+    runId,
+  });
+  return checkpoint;
+};
+
+const appendGuardedGraphCompletedEvent = (agentRunService, {
+  runId,
+  status = "completed",
+} = {}) => agentRunService.appendRunEvent({
+  accessScope,
+  runId,
+  type: "skill_graph_planned",
+  payload: {
+    executed: true,
+    fallback: null,
+    graph: { nodeIds: ["risk"], version: "v1" },
+    mode: "guarded",
+    status,
+  },
+});
+
+const createGuardedApprovalRun = async (agentRunService, {
+  phase = "running",
+  runId = "run-approval",
+} = {}) => {
+  const goal = "Search the web for the launch date.";
+  const approval = buildApprovalFixture({
+    capabilityId: "web.search",
+    capabilityLabel: "Web Search",
+    executionInput: { question: goal },
+    inputPreview: { question: goal },
+  });
+
+  await agentRunService.createRun({
+    accessScope,
+    goal,
+    runId,
+    status: AGENT_RUN_STATUSES.running,
+  });
+  await persistGuardedGraphCheckpoint(agentRunService, { goal, phase, runId });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+    steps: [{
+      id: "2-capability_approval_gate",
+      type: "capability_approval_gate",
+      kind: "approval_gate",
+      label: "Capability Approval",
+      status: "paused",
+      approvalGateId: approval.gate.id,
+      capabilityId: "web.search",
+    }],
+  });
+  return approval;
 };
 
 test("agent run step handler registry resolves known step handlers", () => {
@@ -1163,7 +1254,7 @@ test("agent run step executor retries custom_skill through the wired custom hand
     runId: "run-custom-retry",
     steps: [
       {
-        id: "custom-step",
+        id: "custom_skill:risk_review",
         type: "custom_skill",
         kind: "tool_call",
         label: "Risk Review",
@@ -1181,10 +1272,10 @@ test("agent run step executor retries custom_skill through the wired custom hand
   const retried = await executor.retryStep({
     accessScope,
     runId: "run-custom-retry",
-    stepId: "custom-step",
+    stepId: "custom_skill:risk_review",
   });
   const retryStep = retried.run.steps.find(
-    (step) => step.retryOfStepId === "custom-step"
+    (step) => step.retryOfStepId === "custom_skill:risk_review"
   );
 
   assert.equal(calls.length, 1);
@@ -1195,6 +1286,74 @@ test("agent run step executor retries custom_skill through the wired custom hand
   assert.match(retried.response.agentAnswer, /Retried custom answer/);
   assert.equal(retryStep.status, "completed");
   assert.equal(retryStep.output.citationCount, 1);
+});
+
+test("legacy V1 custom_skill prefix still resumes without a graph checkpoint", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const skill = {
+    id: "risk_review",
+    version: "1.0.0",
+    label: "Risk Review",
+    kind: "custom",
+    budgetKey: "customSkillCalls",
+    requiresAccessScope: true,
+    match: () => false,
+    execute: async (context) => {
+      calls.push(context);
+      return {
+        text: "Legacy V1 replay result.",
+        citations: [{ docId: "doc-1", pageNumber: 1 }],
+        abstained: false,
+      };
+    },
+  };
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeCustomSkillStep: createCustomSkillStepExecutor({
+      ragService: {},
+      skillRegistry: { get: (skillId) => skillId === skill.id ? skill : null },
+    }),
+  });
+  const runId = "legacy-v1-custom-resume";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Review risk.",
+    input: { docIds: ["doc-1"] },
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+    steps: [{
+      id: "custom_skill:risk_review",
+      type: "custom_skill",
+      kind: "tool_call",
+      label: "Risk Review",
+      status: "paused",
+      input: {
+        docIds: ["doc-1"],
+        question: "Review risk.",
+        skillId: "risk_review",
+        skillVersion: "1.0.0",
+      },
+    }],
+  });
+
+  const resumed = await executor.resumeStep({
+    accessScope,
+    runId,
+    stepId: "custom_skill:risk_review",
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(resumed.run.status, AGENT_RUN_STATUSES.completed);
+  assert.equal(resumed.response.agentAnswer, "Legacy V1 replay result.");
 });
 
 /**
@@ -1576,10 +1735,215 @@ test("agent run step executor returns stable 409 for unsupported step types", as
   );
 });
 
-// A graph node bound to an upstream output persists that text with its step.
-// The retry has to replay it: re-running the node on the bare question would
-// be a different execution wearing the original step's id.
-test("agent run step executor retries a graph node with the upstream input it was originally given", async () => {
+test("active guarded graph rejects standalone non-graph resume before mutation", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeDocumentRagStep: async () => { calls.push("executed"); },
+  });
+  const runId = "guarded-non-graph-resume";
+  const goal = "Review the selected contract.";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal,
+    input: { docIds: ["doc-1"] },
+    runId,
+    status: AGENT_RUN_STATUSES.running,
+  });
+  await agentRunService.updateRun({
+    accessScope,
+    runId,
+    patch: { steps: [{
+      id: "document-step",
+      type: "document_rag",
+      kind: "tool_call",
+      label: "Document RAG",
+      status: "failed",
+      input: { docIds: ["doc-1"], question: goal },
+    }] },
+  });
+  await persistGuardedGraphCheckpoint(agentRunService, { goal, runId });
+  const before = await agentRunService.getRun({ accessScope, runId });
+
+  await assert.rejects(
+    () => executor.resumeStep({ accessScope, runId, stepId: "document-step" }),
+    (error) => {
+      assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), before);
+});
+
+test("active guarded graph rejects standalone non-graph retry before queuing", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const executor = createAgentRunStepExecutor({ agentRunService });
+  const runId = "guarded-non-graph-retry";
+  const goal = "Review the selected contract.";
+
+  await agentRunService.createRun({
+    accessScope,
+    goal,
+    input: { docIds: ["doc-1"] },
+    runId,
+    status: AGENT_RUN_STATUSES.running,
+  });
+  await agentRunService.updateRun({
+    accessScope,
+    runId,
+    patch: { steps: [{
+      id: "document-step",
+      type: "document_rag",
+      kind: "tool_call",
+      label: "Document RAG",
+      status: "failed",
+      input: { docIds: ["doc-1"], question: goal },
+    }] },
+  });
+  await persistGuardedGraphCheckpoint(agentRunService, { goal, runId });
+  const before = await agentRunService.getRun({ accessScope, runId });
+
+  await assert.rejects(
+    () => executor.retryStep({ accessScope, runId, stepId: "document-step" }),
+    (error) => {
+      assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+  assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), before);
+});
+
+test("active guarded graph rejects approval and denial before changing the gate", async () => {
+  for (const action of ["approve", "deny"]) {
+    const agentRunService = createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
+    });
+    const calls = [];
+    const executor = createAgentRunStepExecutor({
+      agentRunService,
+      capabilityRegistry: { execute: async () => { calls.push("executed"); } },
+    });
+    const approval = await createGuardedApprovalRun(agentRunService);
+    const before = await agentRunService.getRun({
+      accessScope,
+      runId: "run-approval",
+    });
+
+    await assert.rejects(
+      () => executor.applyApprovalAction({
+        accessScope,
+        action,
+        gateId: approval.gate.id,
+        payload: { approvalObjectHash: approval.gate.approvalObjectHash },
+        runId: "run-approval",
+      }),
+      (error) => {
+        assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
+        assert.equal(error.status, 409);
+        return true;
+      }
+    );
+    assert.equal(calls.length, 0);
+    assert.deepEqual(await agentRunService.getRun({ accessScope, runId: "run-approval" }), before);
+  }
+});
+
+test("terminal guarded graph still rejects pre-graph approval gate", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const executor = createAgentRunStepExecutor({ agentRunService });
+  const approval = await createGuardedApprovalRun(agentRunService, { phase: "completed" });
+  await appendGuardedGraphCompletedEvent(agentRunService, { runId: "run-approval" });
+  const before = await agentRunService.getRun({ accessScope, runId: "run-approval" });
+
+  await assert.rejects(
+    () => executor.applyApprovalAction({
+      accessScope,
+      action: "deny",
+      gateId: approval.gate.id,
+      payload: { approvalObjectHash: approval.gate.approvalObjectHash },
+      runId: "run-approval",
+    }),
+    (error) => {
+      assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
+      assert.equal(error.status, 409);
+      return true;
+    }
+  );
+  assert.deepEqual(await agentRunService.getRun({ accessScope, runId: "run-approval" }), before);
+});
+
+test("terminal guarded graph allows approval gate provably created after graph completion", async () => {
+  for (const action of ["approve", "deny"]) {
+    const agentRunService = createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
+    });
+    const calls = [];
+    const executor = createAgentRunStepExecutor({
+      agentRunService,
+      capabilityRegistry: {
+        execute: async (capabilityId, payload) => {
+          calls.push({ capabilityId, payload });
+          return { citations: [], text: "Approved post-graph search." };
+        },
+      },
+    });
+    const runId = `post-graph-${action}`;
+    const goal = "Search the web for the launch date.";
+    const approval = buildApprovalFixture({
+      capabilityId: "web.search",
+      capabilityLabel: "Web Search",
+      executionInput: { question: goal },
+      inputPreview: { question: goal },
+    });
+
+    await agentRunService.createRun({ accessScope, goal, runId, status: AGENT_RUN_STATUSES.running });
+    await persistGuardedGraphCheckpoint(agentRunService, { goal, phase: "completed", runId });
+    await appendGuardedGraphCompletedEvent(agentRunService, { runId });
+    await agentRunService.completeRun({
+      accessScope,
+      approvalGates: [approval.gate],
+      approvalSnapshots: [approval.snapshot],
+      runId,
+      status: AGENT_RUN_STATUSES.waitingForUser,
+      steps: [{
+        id: "2-capability_approval_gate",
+        type: "capability_approval_gate",
+        kind: "approval_gate",
+        label: "Capability Approval",
+        status: "paused",
+        approvalGateId: approval.gate.id,
+        capabilityId: "web.search",
+      }],
+    });
+
+    const result = await executor.applyApprovalAction({
+      accessScope,
+      action,
+      gateId: approval.gate.id,
+      payload: { approvalObjectHash: approval.gate.approvalObjectHash },
+      runId,
+    });
+    assert.equal(result.run.status, AGENT_RUN_STATUSES.completed);
+    assert.equal(result.run.approvalGates[0].status, action === "approve" ? "approved" : "denied");
+    assert.equal(calls.length, action === "approve" ? 1 : 0);
+  }
+});
+
+// A graph-shaped step must fail closed even if its checkpoint is unavailable:
+// replaying only its stored upstream text would bypass graph ownership and
+// allow an isolated node to complete the entire run.
+test("agent run step executor rejects standalone retry of a graph-shaped node without a checkpoint", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
@@ -1637,24 +2001,126 @@ test("agent run step executor retries a graph node with the upstream input it wa
     ],
   });
 
-  const retried = await executor.retryStep({
+  const before = await agentRunService.getRun({
     accessScope,
     runId: "run-graph-node-retry",
-    stepId: "custom_skill:risk_review",
   });
-  const retryStep = retried.run.steps.find(
-    (step) => step.retryOfStepId === "custom_skill:risk_review"
-  );
 
-  assert.equal(calls.length, 1);
-  assert.equal(
-    calls[0].priorFindings,
-    "Summary: the agreement renews every 12 months."
+  await assert.rejects(
+    () => executor.retryStep({
+      accessScope,
+      runId: "run-graph-node-retry",
+      stepId: "custom_skill:risk_review",
+    }),
+    (error) => {
+      assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
+      assert.equal(error.status, 409);
+      return true;
+    }
   );
-  assert.equal(calls[0].question, "Review this contract for risks and key terms.");
-  assert.equal(retryStep.status, "completed");
-  assert.equal(
-    retryStep.input.priorFindings,
-    "Summary: the agreement renews every 12 months."
-  );
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await agentRunService.getRun({ accessScope, runId: "run-graph-node-retry" }), before);
+});
+
+test("guarded graph nodes reject generic retry and resume before any step mutation", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const calls = [];
+  const executor = createAgentRunStepExecutor({
+    agentRunService,
+    executeCustomSkillStep: async () => { calls.push("executed"); },
+  });
+  const goal = "Review the selected contract.";
+  const docIds = ["doc-1"];
+  const graphStep = {
+    id: "custom_skill:risk",
+    type: "custom_skill",
+    kind: "tool_call",
+    label: "Risk Review",
+    status: "failed",
+    input: {
+      docIds,
+      nodeId: "risk",
+      question: goal,
+      skillId: "risk_review",
+      skillVersion: "1.0.0",
+    },
+  };
+  const graph = {
+    version: "v1",
+    revision: 0,
+    nodes: [{ nodeId: "risk", skillId: "risk_review" }],
+  };
+  const checkpointOwner = buildExecutionGraphCheckpointOwner({
+    accessScope,
+    budgetState: createAgentBudget(),
+    docIds,
+    question: goal,
+    selectedSkills: [],
+  });
+
+  for (const [runId, runStatus, stepStatus, includeNodeMarker] of [
+    ["guarded-graph-retry", AGENT_RUN_STATUSES.completed, "failed", true],
+    ["guarded-graph-resume", AGENT_RUN_STATUSES.waitingForUser, "paused", true],
+    ["guarded-graph-older-step", AGENT_RUN_STATUSES.completed, "failed", false],
+  ]) {
+    await agentRunService.createRun({
+      accessScope,
+      goal,
+      input: { docIds },
+      runId,
+    });
+    const checkpoint = updateExecutionGraphCheckpoint(
+      createExecutionGraphCheckpoint({ graph, owner: checkpointOwner }),
+      { phase: runStatus === AGENT_RUN_STATUSES.completed ? "partial" : "running" }
+    );
+    await agentRunService.saveExecutionGraphCheckpoint({
+      accessScope,
+      checkpoint,
+      runId,
+    });
+    await agentRunService.completeRun({
+      accessScope,
+      runId,
+      status: runStatus,
+      steps: [{
+        ...graphStep,
+        status: stepStatus,
+        input: includeNodeMarker
+          ? graphStep.input
+          : { ...graphStep.input, nodeId: undefined },
+      }],
+    });
+    const beforeRun = await agentRunService.getRun({ accessScope, runId });
+    const beforeCheckpoint = await agentRunService.getExecutionGraphCheckpoint({ accessScope, runId });
+    const action = runStatus === AGENT_RUN_STATUSES.completed ? "retryStep" : "resumeStep";
+
+    await assert.rejects(
+      () => executor[action]({ accessScope, runId, stepId: graphStep.id }),
+      (error) => {
+        assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
+        assert.equal(error.status, 409);
+        return true;
+      }
+    );
+    assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), beforeRun);
+    assert.deepEqual(
+      await agentRunService.getExecutionGraphCheckpoint({ accessScope, runId }),
+      beforeCheckpoint
+    );
+
+    if (runId === "guarded-graph-retry") {
+      await assert.rejects(
+        () => agentRunService.retryStep({ accessScope, runId, stepId: graphStep.id }),
+        (error) => {
+          assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
+          return true;
+        }
+      );
+      assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), beforeRun);
+    }
+  }
+
+  assert.deepEqual(calls, []);
 });

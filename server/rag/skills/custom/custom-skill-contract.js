@@ -33,9 +33,9 @@ export const CUSTOM_RAG_SKILL_INPUT_SCHEMA = Object.freeze({
 });
 
 export const CUSTOM_RAG_SKILL_OUTPUT_SCHEMA = Object.freeze({
-  abstained: Object.freeze({ type: SKILL_VALUE_TYPES.boolean }),
-  citations: Object.freeze({ type: SKILL_VALUE_TYPES.citationArray }),
-  text: Object.freeze({ type: SKILL_VALUE_TYPES.string }),
+  abstained: Object.freeze({ required: true, type: SKILL_VALUE_TYPES.boolean }),
+  citations: Object.freeze({ required: true, type: SKILL_VALUE_TYPES.citationArray }),
+  text: Object.freeze({ required: true, type: SKILL_VALUE_TYPES.string }),
 });
 
 export const CUSTOM_RAG_SKILL_CONTRACT = Object.freeze({

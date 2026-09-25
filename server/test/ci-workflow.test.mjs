@@ -363,6 +363,7 @@ test("release evidence workflow pins manual and scheduled runs to one target SHA
 
 test("release evidence workflow generates every required report in one Postgres-backed job", async () => {
   const workflow = await readFile(releaseEvidenceWorkflowPath, "utf8");
+  const serverPackage = JSON.parse(await readFile(serverPackagePath, "utf8"));
 
   // The release profile must execute the default retrieval stack for real,
   // not a downgraded one: pgvector, both routes, RRF fusion.
@@ -385,6 +386,10 @@ test("release evidence workflow generates every required report in one Postgres-
   );
   assert.match(
     workflow,
+    /PGVECTOR_TEST_DATABASE_URL:\s*postgresql:\/\/postgres:postgres@127\.0\.0\.1:5432\/agentai_smoke/
+  );
+  assert.match(
+    workflow,
     /LONG_MEMORY_DATABASE_URL:\s*postgresql:\/\/postgres:postgres@127\.0\.0\.1:5432\/agentai_smoke/
   );
   assert.match(
@@ -402,7 +407,14 @@ test("release evidence workflow generates every required report in one Postgres-
   assert.match(workflow, /run:\s*npm ci/);
   assert.match(workflow, /name:\s*Require OpenAI key/);
   assert.match(workflow, /run:\s*test -n "\$OPENAI_API_KEY"/);
+  assert.equal(
+    serverPackage.scripts?.["test:pgvector"],
+    "node --test test/vector-store-pgvector.integration.test.mjs test/agent-execution-graph-postgres.integration.test.mjs"
+  );
+  assert.match(workflow, /name:\s*Run PostgreSQL integration tests/);
+  assert.match(workflow, /run:\s*npm run test:pgvector/);
 
+  const postgresTestIndex = workflow.indexOf("run: npm run test:pgvector");
   const robustSuiteIndex = workflow.indexOf(
     "run: npm run eval:robust-suite"
   );
@@ -410,7 +422,11 @@ test("release evidence workflow generates every required report in one Postgres-
     "run: npm run robust:gate -- --fail-on-warn";
   const robustGateIndex = workflow.indexOf(robustGateCommand);
 
-  assert.ok(robustSuiteIndex >= 0);
+  assert.ok(postgresTestIndex >= 0);
+  assert.ok(
+    robustSuiteIndex > postgresTestIndex,
+    "the release job must run PostgreSQL recovery integration before robust evaluation"
+  );
   assert.ok(
     robustGateIndex > robustSuiteIndex,
     "the scheduled release job must run the scoped robust gate after its suite"
@@ -456,8 +472,12 @@ test("release evidence workflow still emits gate evidence after an eval failure"
 
   assert.equal(
     workflow.split(continueAfterFailure).length - 1,
-    9,
-    "all report generators and both gates must run after prior failures"
+    10,
+    "PostgreSQL integration, all report generators and both gates must run after prior failures"
+  );
+  assert.match(
+    workflow,
+    /name:\s*Run PostgreSQL integration tests\s+if:\s*\$\{\{\s*!cancelled\(\)\s*\}\}\s+run:\s*npm run test:pgvector/
   );
   assert.match(
     workflow,

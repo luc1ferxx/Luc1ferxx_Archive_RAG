@@ -11,6 +11,7 @@ import {
   getAgentIntentPlanner,
   getAgentPlannerRollout,
   getAgentSkillGraphRollout,
+  getAgentUnifiedGraphRollout,
   getAgentExperienceMemoryConfigStatus,
   getLlmOpsPolicy,
   getLongMemoryConfigStatus,
@@ -81,6 +82,20 @@ test("an unrecognized skill graph rollout falls back to off rather than guessing
   await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: "full" }, async () => {
     assert.equal(getAgentSkillGraphRollout(), "off");
   });
+});
+
+test("the all-stage graph rollout is shadow-only until its production path is safe", async () => {
+  for (const [value, expected] of [
+    [undefined, "off"],
+    ["off", "off"],
+    ["shadow", "shadow"],
+    ["guarded", "off"],
+    ["unknown", "off"],
+  ]) {
+    await withEnv({ AGENT_UNIFIED_GRAPH_ROLLOUT: value }, async () => {
+      assert.equal(getAgentUnifiedGraphRollout(), expected);
+    });
+  }
 });
 
 test("memory defaults stay disabled when PostgreSQL is not configured", async () => {

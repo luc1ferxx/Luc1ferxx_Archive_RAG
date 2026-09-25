@@ -36,6 +36,7 @@ export const shouldFinalizeAgentAnswer = ({
 
 export const buildSynthesisAnswer = ({
   plan,
+  customSkillGraphExecuted = false,
   actionAnswer,
   arxivImportAnswer,
   ragResult,
@@ -45,6 +46,27 @@ export const buildSynthesisAnswer = ({
   discoveryAnswer,
   researchBrief,
 }) => {
+  // The DAG may select additional authorized atomic Skills beyond the single
+  // V1 intent. Compose what actually ran, not just the intent's one Skill id.
+  if (customSkillGraphExecuted) {
+    const completedResults = customSkillResults
+      .filter((result) => result.ok && normalizeText(result.text))
+      .map((result) => normalizeText(result.text));
+
+    if (completedResults.length > 0) {
+      const researchFindings = (researchBrief?.findings ?? [])
+        .filter((finding) => finding.status === "completed" && normalizeText(finding.text))
+        .map((finding) => normalizeText(finding.text));
+
+      return [
+        ...completedResults,
+        ...researchFindings,
+        ...(ragResult?.ok ? [normalizeText(ragResult.value.text)] : []),
+        ...(webResult?.ok ? [normalizeText(webResult.value.text)] : []),
+      ].filter(Boolean).join("\n\n");
+    }
+  }
+
   if (plan.mode === "arxiv_import") {
     return arxivImportAnswer ?? "The arXiv import could not be completed.";
   }

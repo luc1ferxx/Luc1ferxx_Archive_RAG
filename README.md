@@ -141,7 +141,8 @@ flowchart LR
 关键规则：
 
 - Planner 只在已注册 intent、skill、capability 和 step schema 里选择。
-- Planner 不决定权限、`docIds`、审批、secret、预算、并发和重试上限；这些由 runtime 拥有。custom skill 的 typed DAG 也一样：模型只产出节点和依赖，validator 整体接受或整体拒绝，非法图不会部分执行。
+- 在 custom skill 的 V2 DAG 模式下，模型看到的是 runtime 从已注册、显式 typed contract、已核验 `accessScope` / `docIds` 构造的原子 Skill catalog，不受 V1 复合 intent/chain 限死。例如上游只选了 `compare_documents` intent，DAG planner 仍可在授权候选中规划 `compare_documents -> risk_review`；没有选中文档或文档无法按 scope 核验时不会扩大候选范围。V1 与默认 `off` 行为不变。
+- Planner 不决定权限、`docIds`、审批、secret、预算、并发和重试上限；这些由 runtime 拥有。custom skill 的 typed DAG 也一样：模型只产出节点和依赖，validator 整体接受或整体拒绝，非法图不会部分执行；runner 在执行前、把真实或恢复的输出交给下游前再次校验 typed contract。当前 typed 输出仍是 `text` / `citations` / `abstained` 的答案封套，不是已做语义验证的差异或风险对象。
 - 文档读取、skill 执行、task 和 agent run 都携带 `accessScope`。
 - Working memory 是 run-scoped，只记录本轮 queries、claims、gaps 和 loop counters。
 - Agent experience memory 是规划提示，不是事实来源；答案证据仍必须来自 citations。
@@ -157,7 +158,7 @@ flowchart LR
 | 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
 | arXiv 推荐导入 | 前端 arXiv panel 调 suggestion / task action | `arxiv-enrichment.js` 生成清理后的 topic 和签名候选，task service 记录等待确认 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
 | Agent goal task | `/agent-tasks` 创建 durable goal，前端 Agent Run Center 消费 `/tasks` 返回的公开 plan | `agent-tasks.js` 驱动多轮 task loop，`agent-goal-plan.js` 生成公开计划合同 | `job-orchestrator.js` 调 runner，`runAgentRag()` 执行每轮 `/chat` 路径，task action 可继续或批准 |
-| Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*` | `agent-run-recovery.js` 和 replay safety matrix 判断能否自动恢复 | `agent-run-step-executor.js` 只恢复安全 step、审批后的 capability step 或显式 retry step |
+| Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*`，启动时也扫描 recoverable run | `agent-run-recovery.js` 和 replay safety matrix 判断能否自动恢复；guarded graph 还需私有 checkpoint 与 step 对账、无待审批且外层 plan 只有 `custom_skills` | `agent-run-step-executor.js` 恢复安全 step / 审批后的 capability step；符合上述窄条件的 graph-only run 用专用续跑路径复用已完成 node，未知 in-flight 或不一致时转人工 |
 | 质量门控 | CLI、前端 Quality 面板或 CI 调 eval/gate | `server/evaluation/quality-*.js` 组合各类报告 | synthetic、trajectory、planner、recovery、feedback、rerank、coverage 等 runner 执行 |
 
 ## 快速启动
@@ -202,6 +203,7 @@ AGENT_PLANNER_ROLLOUT=llm
 AGENT_INTENT_PLANNER=llm
 AGENT_EXECUTION_PLANNER=llm
 AGENT_SKILL_GRAPH_ROLLOUT=off
+AGENT_UNIFIED_GRAPH_ROLLOUT=off
 
 RAG_CHUNK_STRATEGY=structured
 RAG_CHUNK_SIZE=900
@@ -235,7 +237,8 @@ VITE_API_AUTH_TOKEN=
 - 从 `local` / Qdrant 切到 pgvector 后索引是空的，健康检查会报错；先跑 `cd server && npm run vector:reindex`（默认 dry-run，`-- --apply` 才写入；`--from documents` 会用库里的 PDF 重新切块和 embedding）。
 - `RAG_HYBRID_ENABLED=true` + `RAG_HYBRID_FUSION=rrf` 是默认值：dense 与 sparse 两路各自独立检索后融合。pgvector 的 sparse 路是 PostgreSQL FTS，用 `ts_rank_cd` 排序，不是 BM25。
 - 只做文档 RAG 时 `SERPAPI_KEY` 可以先留空；web search 能力需要它。
-- `AGENT_SKILL_GRAPH_ROLLOUT=off` 是默认值，custom skill 阶段走 V1 顺序链。设为 `shadow` 会在 V1 出答案的同时旁路规划并校验一张 typed DAG 用于比对，设为 `guarded` 才真正执行 DAG；两种 V2 模式都不改变 `/chat` 响应结构。见 [docs/agent-rag.md](docs/agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。
+- `AGENT_SKILL_GRAPH_ROLLOUT=off` 是默认值，custom skill 阶段走 V1 顺序链。设为 `shadow` 会在 V1 出答案的同时旁路规划并校验一张 typed DAG 用于比对，设为 `guarded` 才真正执行 DAG；两种 V2 模式都不改变 `/chat` 响应结构。真实模型的 guarded 发布判断还需要 `eval:planner -- --provider real`、`runtime:smoke`、`rollout:readiness` 和 `release:gate` 的相应门禁通过，设置变量本身不是发布证据。见 [docs/agent-rag.md](docs/agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。
+- `AGENT_UNIFIED_GRAPH_ROLLOUT=off` 单独控制全阶段 v3 图迁移，目前只开放 `shadow`：必须注入统一图 planner adapter 才会旁路产出有效候选；真实 `/chat` 和后台 task 仍按现有外层流程执行，run event 仅记录精简规划结果。`guarded` 尚未开放，设置它会回到 `off`。见 [迁移决策与验收清单](docs/unified-agent-dag-migration.md)。
 - 前端 dev server 固定跑在 `3000` 端口，与 `ALLOWED_ORIGINS` 的 CORS 白名单一致；改端口时两边要同步。
 - 完整配置见 [docs/configuration.md](docs/configuration.md)。
 
@@ -388,13 +391,13 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | --- | --- | --- |
 | 1 | Planner eval gate | 已接入 `eval:planner`、`planner:gate`、`rollout:readiness` 和 `quality:gate`。 |
 | 2 | 持久化主执行路径 | Task store、agent run store、step snapshots/events 已通过 PostgreSQL-backed adapter 持久化。 |
-| 3 | Agent run recovery | 已有 startup recovery、manual/auto recovery、approval resume、step retry 和 replay safety matrix。 |
+| 3 | Agent run recovery | 已有 startup recovery、manual/auto recovery、approval resume、step retry 和 replay safety matrix；guarded graph 增加同 run 私有 checkpoint 与受限的 graph-only startup auto resume，不会重跑已完成 node，也不宣称外层混合阶段可自动续跑。 |
 | 4 | PostgreSQL restart 覆盖 | 已补 HTTP/API 级 paused document resume、failed step retry 和 blocked approval safety 覆盖，继续复用 replay safety matrix 和 step executor。 |
 | 5 | 真实/困难语料评测 | 已用 `eval:robust-suite` 把 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 纳入固定周期 gate，替代只看 near-duplicate 饱和分数。 |
 | 6 | Agent task 目标产物 | 已把 `report.export`、`document.organize`、`summary.create`、`task.create` 接成 task-level goal deliverables；批准后前三类会真实写入 scoped workspace artifact 并只向 task 暴露 compact refs，写入失败时目标不会误报完成。 |
 | 7 | Research task / dossier | 已加 task-level research flow：本地 `research_brief` -> web supplement -> arXiv supplement -> compare/risk review -> citation self-check -> final dossier -> report deliverables。流程由 declarative `research_dossier` workflow spec 渲染，只生成下一步问题、公开 phase 状态和 workflow lifecycle snapshot，实际执行仍复用现有 planner、skills、approval gates 和 capability registry。 |
 | 8 | 目标完成自检 | 已加 task-level `goalCompletion` contract：统一检查 public plan steps、unresolved gaps / unsupported claims、goal deliverables、pending approval / user action、research phases 和 workflow lifecycle contract；默认 trajectory eval 覆盖从等待批准到产物创建后的完整目标生命周期。 |
-| 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加 typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、拓扑 scheduler 和一次有界 replan；灰度由 `AGENT_SKILL_GRAPH_ROLLOUT`（`off`/`shadow`/`guarded`，默认 `off`）控制，V1 顺序链、组合 intent 和 deterministic planner 全部保留为回退路径；`eval:trajectory` 里四个 `skill_graph` case 分别钉住 guarded / shadow / 非法图拒绝 / 有界 replan 跑在 DAG 路径上。 |
+| 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加授权原子 Skill catalog、typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、运行时输入/输出 gate、拓扑 scheduler、持久化 graph checkpoint 和一次有界 replan；灰度由 `AGENT_SKILL_GRAPH_ROLLOUT`（`off`/`shadow`/`guarded`，默认 `off`）控制，V1 顺序链、组合 intent 和 deterministic planner 全部保留。四个 trajectory case 钉住 DAG 行为，planner eval 另有 compare-only intent 下动态组合 compare+risk 的 guarded case；real provider、runtime smoke 和 rollout/release gate 为真实模型灰度提供额外门禁。 |
 
 ## 当前限制
 
@@ -405,4 +408,4 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 - pgvector 的 lexical 路用 PostgreSQL FTS + `ts_rank_cd`，语义上不是 BM25；embedding 模型或维度变更需要显式 `vector:reindex`，不会自动迁移。Local JSON 索引和 Qdrant 只作为显式 opt-in 兼容后端保留，local 只适合单进程小规模工作区。
 - Web search 和 arXiv 导入依赖外部网络；web search 需要 SerpAPI key，arXiv 使用公开 Atom/PDF 地址。
 - Ragas eval 只是辅助信号；多文档 compare 和 citation 正确性主要依赖自定义 harness、trajectory 和 quality gate。
-- Custom skill 的 typed DAG 默认关闭（`AGENT_SKILL_GRAPH_ROLLOUT=off`），真实 `/chat` 走 V2 需要运维显式开灰度；DAG 也只覆盖 custom skill 阶段，built-in skill、document RAG 主循环和 capability 调用仍走各自既有路径。有界 replan 上限初始为 1。
+- Custom skill 的 typed DAG 默认关闭（`AGENT_SKILL_GRAPH_ROLLOUT=off`），真实 `/chat` 走 V2 需要运维显式开灰度；DAG 也只覆盖 custom skill 阶段，built-in skill、document RAG 主循环、Web 和 capability 调用仍走各自既有路径，不能称为全工具统一 DAG。Typed output gate 校验字段形状，不证明差异/风险内容的语义正确；有界 replan 上限初始为 1。

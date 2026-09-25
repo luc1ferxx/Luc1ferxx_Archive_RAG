@@ -13,6 +13,11 @@ import {
 } from "./shared.js";
 import { ARTIFACT_TYPES } from "../workspace-artifacts/index.js";
 import { persistCapabilityArtifact } from "./artifacts.js";
+import {
+  SKILL_EFFECTS,
+  SKILL_IDEMPOTENCY,
+  SKILL_VALUE_TYPES,
+} from "../skills/skill-contract.js";
 
 export const ACTION_TASK_TYPE = "agent_action";
 
@@ -168,6 +173,31 @@ export const createTaskCreateCapability = ({ actionTaskService } = {}) => ({
       "tags",
     ],
     storesResult: true,
+  },
+  executionGraph: {
+    budgetKey: null,
+    effects: SKILL_EFFECTS.workspaceWrite,
+    idempotency: SKILL_IDEMPOTENCY.adapterDefined,
+    inputSchema: {
+      title: { required: true, type: SKILL_VALUE_TYPES.string },
+      description: { required: false, type: SKILL_VALUE_TYPES.string },
+    },
+    outputSchema: {
+      text: { required: true, type: SKILL_VALUE_TYPES.string },
+      citations: { required: true, type: SKILL_VALUE_TYPES.citationArray },
+      abstained: { required: true, type: SKILL_VALUE_TYPES.boolean },
+      task: { required: true, type: SKILL_VALUE_TYPES.object },
+    },
+    parallelSafe: false,
+    replaySafe: false,
+    retryable: false,
+    plannerSummary: "Create one workspace task after a runtime-owned user confirmation.",
+    projectOutput: (value) => ({
+      text: value?.text,
+      citations: [],
+      abstained: false,
+      task: value?.task,
+    }),
   },
   execute: async ({ accessScope, input, services }) => {
     const task = await persistActionTask({

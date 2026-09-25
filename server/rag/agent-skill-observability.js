@@ -64,6 +64,22 @@ export const createAgentSkillTracker = ({
   const skillObservations = new Map();
   const skillRuns = [];
   const selectedSkillKeys = new Set(selectedSkills.map((skill) => skill.id));
+  const selectedSkillById = new Map(selectedSkills.map((skill) => [skill.id, skill]));
+
+  const markSkillSelected = (skill) => {
+    if (!skill?.id) {
+      return;
+    }
+
+    selectedSkillKeys.add(skill.id);
+    selectedSkillById.set(skill.id, skill);
+
+    const observation = skillObservations.get(skill.id);
+
+    if (observation) {
+      observation.selected = true;
+    }
+  };
 
   const recordSkillResult = (result) => {
     if (!result?.skillId) {
@@ -229,7 +245,7 @@ export const createAgentSkillTracker = ({
   const executeObservedSkill = async (
     skill,
     context,
-    { phase = "primary", budget = null } = {}
+    { phase = "primary", budget = null, validateInput, validateOutput } = {}
   ) => {
     recordWorkingMemoryQueries({
       skill,
@@ -239,7 +255,10 @@ export const createAgentSkillTracker = ({
 
     const budgetBefore = getBudgetSnapshot(budgetState);
     const startedAt = performance.now();
-    const result = await executeAgentSkill(skill, context);
+    const result = await executeAgentSkill(skill, context, {
+      validateInput,
+      validateOutput,
+    });
     const durationMs = performance.now() - startedAt;
     const budgetAfter = getBudgetSnapshot(budgetState);
 
@@ -257,12 +276,12 @@ export const createAgentSkillTracker = ({
     return result;
   };
 
-  const recordSkippedSkill = ({ skill, result, phase, budget }) => {
+  const recordSkippedSkill = ({ skill, result, phase, budget, status = "skipped" }) => {
     recordSkillObservation({
       skill,
       result,
       phase,
-      status: "skipped",
+      status,
       budget,
       budgetAfter: getBudgetSnapshot(budgetState),
     });
@@ -278,6 +297,8 @@ export const createAgentSkillTracker = ({
         left.skillId.localeCompare(right.skillId)
       ),
     getSkillRuns: () => skillRuns,
+    getSelectedSkills: () => [...selectedSkillById.values()],
+    markSkillSelected,
     recordSkillObservation,
     recordSkillResult,
     recordSkippedSkill,

@@ -60,6 +60,12 @@ const EXPECTED_NODE_IDS = [
   CUSTOM_SKILL_IDS.summarizeContract,
   CUSTOM_SKILL_IDS.riskReview,
 ];
+const EXPECTED_AUTHORIZED_SKILL_IDS = [
+  CUSTOM_SKILL_IDS.compareDocuments,
+  CUSTOM_SKILL_IDS.extractTimeline,
+  CUSTOM_SKILL_IDS.riskReview,
+  CUSTOM_SKILL_IDS.summarizeContract,
+].sort();
 const V1_TRACE_TYPES = [
   "plan",
   "query_planner",
@@ -637,7 +643,10 @@ export const createSkillGraphIllegalPlanCase = () => ({
             plannerView.callCount === 1 &&
             sameList(plannerView.keys, PLANNER_CONTEXT_KEYS) &&
             sameList(plannerView.authorizedDocIds, [DOC_ID]) &&
-            sameList(plannerView.capabilityIds, EXPECTED_NODE_IDS) &&
+            sameList(
+              [...plannerView.capabilityIds].sort(),
+              EXPECTED_AUTHORIZED_SKILL_IDS
+            ) &&
             plannerView.leaks === false,
           detail: plannerView,
         }),

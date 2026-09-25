@@ -115,7 +115,7 @@ if (!databaseUrl) {
       docId,
       fileName,
       filePath: sourceFilePath,
-      pages,
+      pages: pages.map((text, index) => ({ pageNumber: index + 1, text })),
       workspaceId,
     });
 

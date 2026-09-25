@@ -21,6 +21,15 @@ const buildMaxCheck = ({ currentValue, label, metric, maximum }) => ({
   delta: currentValue - maximum,
 });
 
+const buildExactCheck = ({ currentValue, expected, label, metric }) => ({
+  metric,
+  label,
+  status: currentValue === expected ? "pass" : "fail",
+  currentValue,
+  baselineValue: expected,
+  delta: currentValue - expected,
+});
+
 const getMetrics = ({ payload = {} }) => {
   const summaryMetrics = payload.summary?.metrics ?? {};
   const summaryFailed = payload.summary?.status === "fail";
@@ -75,7 +84,7 @@ const buildMetricChecks = ({
   const maxPlannerFallbackCount = thresholds.maxPlannerFallbackCount ?? 0;
   // A guarded graph may fall back to the V1 chain only before any node has
   // run; after that a fallback would repeat charged, possibly side-effecting
-  // work. Old reports without graph counters read as 0 and pass.
+  // work. Graph startup recovery is now a required release signal.
   const maxSkillGraphUnsafeFallbackCount =
     thresholds.maxSkillGraphUnsafeFallbackCount ?? 0;
 
@@ -205,6 +214,60 @@ const buildMetricChecks = ({
       label: "Skill graph fallbacks after node execution",
       maximum: maxSkillGraphUnsafeFallbackCount,
       metric: "recoverySkillGraphUnsafeFallbackCount",
+    }),
+    buildMinCheck({
+      currentValue: recovery.skillGraphStartupResumeObservedCount ?? 0,
+      label: "Production graph startup resume probes observed",
+      minimum: 1,
+      metric: "recoverySkillGraphStartupResumeObservedCount",
+    }),
+    buildExactCheck({
+      currentValue: recovery.skillGraphResumeClaimCount ?? 0,
+      expected: 1,
+      label: "Graph startup resume claims",
+      metric: "recoverySkillGraphResumeClaimCount",
+    }),
+    buildExactCheck({
+      currentValue: recovery.skillGraphAutoRecoveryCompletedCount ?? 0,
+      expected: 1,
+      label: "Graph startup auto recoveries completed",
+      metric: "recoverySkillGraphAutoRecoveryCompletedCount",
+    }),
+    buildMaxCheck({
+      currentValue: recovery.skillGraphAutoRecoveryFailureCount ?? 0,
+      label: "Graph startup auto recovery failures",
+      maximum: 0,
+      metric: "recoverySkillGraphAutoRecoveryFailureCount",
+    }),
+    buildExactCheck({
+      currentValue: recovery.skillGraphSameRunCompletedCount ?? 0,
+      expected: 1,
+      label: "Interrupted graph runs completed in place",
+      metric: "recoverySkillGraphSameRunCompletedCount",
+    }),
+    buildExactCheck({
+      currentValue: recovery.skillGraphCompletedNodeNotRerunCount ?? 0,
+      expected: 1,
+      label: "Completed graph nodes not re-executed",
+      metric: "recoverySkillGraphCompletedNodeNotRerunCount",
+    }),
+    buildExactCheck({
+      currentValue: recovery.skillGraphPendingNodeExecutedOnceCount ?? 0,
+      expected: 1,
+      label: "Pending graph nodes executed once",
+      metric: "recoverySkillGraphPendingNodeExecutedOnceCount",
+    }),
+    buildMaxCheck({
+      currentValue: recovery.skillGraphSecondClaimCount ?? 0,
+      label: "Second graph startup resume claims",
+      maximum: 0,
+      metric: "recoverySkillGraphSecondClaimCount",
+    }),
+    buildMaxCheck({
+      currentValue: recovery.skillGraphPartialResumeFallbackCount ?? 0,
+      label: "Partial graph startup resume fallbacks",
+      maximum: 0,
+      metric: "recoverySkillGraphPartialResumeFallbackCount",
     }),
   ];
 };

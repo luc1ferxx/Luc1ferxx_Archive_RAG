@@ -9,6 +9,10 @@ import {
 } from "./agent-run-step-replay-safety.js";
 import { recordRagTrace } from "./observability.js";
 import { normalizeText } from "../lib/normalize-text.js";
+import {
+  reconcileExecutionGraphCheckpoint,
+  sealExecutionGraphCheckpoint,
+} from "./agent-execution-graph-checkpoint.js";
 
 const normalizeMode = (value) => {
   const mode = normalizeText(value).toLowerCase();
@@ -47,6 +51,32 @@ const hasPendingApprovalGate = (run = {}) =>
       step.kind === AGENT_RUN_STEP_KINDS.approvalGate &&
       AUTO_RECOVERY_STEP_STATUSES.has(step.status)
   );
+
+const hasExecutedGuardedGraph = (run = {}) =>
+  toArray(run.events).some(
+    (event) =>
+      event.type === "skill_graph_planned" &&
+      event.payload?.mode === "guarded" &&
+      event.payload?.executed === true
+  );
+
+const hasGraphOnlyStoredExecutionPlan = (run = {}) => {
+  const planningEvents = toArray(run.events).filter(
+    (event) => event.type === "execution_planned"
+  );
+  const stepIds = planningEvents.at(-1)?.payload?.planner?.stepIds;
+
+  return Array.isArray(stepIds) &&
+    stepIds.length === 1 &&
+    stepIds[0] === "custom_skills";
+};
+
+// The current startup continuation reconstructs only the legacy custom-Skill
+// stage. A heterogeneous v3 graph has a distinct checkpoint and must remain
+// manual until its complete outer-stage continuation is wired end to end.
+const hasLegacyResumableGraphContract = (checkpoint) =>
+  checkpoint?.version === "v1" &&
+  ["v1", "v2"].includes(checkpoint.graph?.version);
 
 export const findAutoRecoverableStep = ({
   run = {},
@@ -129,6 +159,9 @@ const buildRecoveryPatch = ({
 export const createAgentRunRecoveryService = ({
   agentRunService,
   agentRunStepExecutor,
+  // This callback must continue the persisted custom_skills graph directly.
+  // Calling runAgentRag here would regenerate the outer plan and repeat work.
+  resumeExecutionGraph = null,
   now = () => new Date().toISOString(),
   recordRecoveryTrace = recordRagTrace,
   safeAutoRecoveryStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
@@ -192,33 +225,29 @@ export const createAgentRunRecoveryService = ({
         run,
         step,
       });
-      const updatedRun = await agentRunService.updateRun({
+      if (typeof agentRunService.markManualRecovery !== "function") {
+        throw new Error("Atomic manual recovery is unavailable for agent runs.");
+      }
+
+      const mutation = await agentRunService.markManualRecovery({
         accessScope,
+        recovery: recoveryPatch.result.recovery,
         runId: run.runId,
-        patch: recoveryPatch,
       });
 
-      await agentRunService.appendRunEvent?.({
-        accessScope,
-        runId: run.runId,
-        type: MANUAL_RECOVERY_EVENT,
-        payload: {
-          mode: "manual",
-          originalStatus: run.status,
-          reason: fallbackReason,
-          requestedMode,
-          status: updatedRun?.status ?? recoveryPatch.status,
-          stepId: step?.id ?? null,
-          stepType: step?.type ?? null,
-        },
-      });
+      if (!mutation.marked) {
+        // A concurrent graph owner, terminal transition, or another recovery
+        // worker won the same run-revision CAS. Never overwrite that winner.
+        skippedCount += 1;
+        return;
+      }
 
       manualRecoveredCount += 1;
       recovered.push(
         (await agentRunService.getRun?.({
           accessScope,
           runId: run.runId,
-        })) ?? updatedRun
+        })) ?? mutation.run
       );
     };
 
@@ -290,6 +319,91 @@ export const createAgentRunRecoveryService = ({
       }
     };
 
+    const runAutoGraphRecovery = async ({
+      accessScope = {},
+      checkpoint,
+      run,
+    } = {}) => {
+      await agentRunService.updateRun({
+        accessScope,
+        runId: run.runId,
+        patch: buildRecoveryPatch({
+          mode: "auto",
+          now,
+          reason,
+          requestedMode: "auto",
+          run,
+        }),
+      });
+      await agentRunService.appendRunEvent?.({
+        accessScope,
+        runId: run.runId,
+        type: AUTO_RECOVERY_STARTED_EVENT,
+        payload: { originalStatus: run.status, reason, type: "execution_graph" },
+      });
+
+      try {
+        await resumeExecutionGraph({
+          accessScope,
+          checkpoint,
+          run,
+          runId: run.runId,
+        });
+        const resumed = await agentRunService.getRun?.({
+          accessScope,
+          runId: run.runId,
+        });
+
+        if (
+          ![AGENT_RUN_STATUSES.completed, AGENT_RUN_STATUSES.failed].includes(
+            resumed?.status
+          )
+        ) {
+          throw new Error("Graph resume did not settle the agent run.");
+        }
+
+        await agentRunService.appendRunEvent?.({
+          accessScope,
+          runId: run.runId,
+          type: AUTO_RECOVERY_COMPLETED_EVENT,
+          payload: { status: resumed.status, type: "execution_graph" },
+        });
+        autoRecoveredCount += 1;
+        recovered.push(
+          await agentRunService.getRun?.({ accessScope, runId: run.runId })
+        );
+      } catch (error) {
+        await agentRunService.appendRunEvent?.({
+          accessScope,
+          runId: run.runId,
+          type: AUTO_RECOVERY_FAILED_EVENT,
+          payload: {
+            error: serializeError(error, "Graph auto recovery failed."),
+            status: error?.status ?? 500,
+            type: "execution_graph",
+          },
+        });
+        failedCount += 1;
+        const current =
+          (await agentRunService.getRun?.({ accessScope, runId: run.runId })) ?? run;
+
+        if (
+          [AGENT_RUN_STATUSES.running, AGENT_RUN_STATUSES.waitingForUser].includes(
+            current.status
+          )
+        ) {
+          await markManualRecovery({
+            accessScope,
+            fallbackReason: "graph_resume_failed",
+            requestedMode: "auto",
+            run: current,
+          });
+        } else {
+          recovered.push(current);
+        }
+      }
+    };
+
     for (const listedRun of recoverableRuns.runs ?? []) {
       const accessScope = listedRun.accessScope ?? {};
       const run =
@@ -304,6 +418,76 @@ export const createAgentRunRecoveryService = ({
       }
 
       if (recoveryMode === "auto") {
+        const loadedGraph = await agentRunService.getExecutionGraphCheckpoint?.({
+          accessScope,
+          runId: run.runId,
+        });
+
+        if (loadedGraph || hasExecutedGuardedGraph(run)) {
+          if (loadedGraph?.checkpoint?.resumeClaim) {
+            // A claimed graph may still be running in another worker. The
+            // claim prevents a second replay, but it does not prove that the
+            // owner crashed; changing the run to manual recovery here would
+            // race the owner and could interrupt its completion.
+            skippedCount += 1;
+            continue;
+          }
+
+          const reconciliation = loadedGraph
+            ? sealExecutionGraphCheckpoint(loadedGraph.checkpoint).digest !==
+                loadedGraph.checkpoint.digest
+              ? { ok: false, reason: "checkpoint_digest_mismatch" }
+              : loadedGraph.checkpoint.phase !== "running"
+                ? { ok: false, reason: "graph_finalization_requires_recovery" }
+                : reconcileExecutionGraphCheckpoint(loadedGraph)
+            : { ok: false, reason: "graph_checkpoint_missing" };
+
+          if (
+            reconciliation.ok &&
+            hasLegacyResumableGraphContract(loadedGraph?.checkpoint) &&
+            !hasPendingApprovalGate(run) &&
+            hasGraphOnlyStoredExecutionPlan(run) &&
+            typeof resumeExecutionGraph === "function" &&
+            typeof agentRunService.claimExecutionGraphResume === "function"
+          ) {
+            const claim = await agentRunService.claimExecutionGraphResume({
+              accessScope,
+              checkpointDigest: loadedGraph.checkpoint.digest,
+              runId: run.runId,
+            });
+
+            if (!claim.claimed) {
+              // Another recovery worker won the persisted CAS. Do not alter
+              // its run status or race it with a second execution.
+              skippedCount += 1;
+              continue;
+            }
+
+            await runAutoGraphRecovery({
+              accessScope,
+              checkpoint: claim.checkpoint,
+              run,
+            });
+            continue;
+          }
+
+          await markManualRecovery({
+            accessScope,
+            fallbackReason: !reconciliation.ok
+              ? reconciliation.reason
+              : !hasLegacyResumableGraphContract(loadedGraph?.checkpoint)
+                ? "graph_checkpoint_version_not_resumable"
+              : hasPendingApprovalGate(run)
+                ? "pending_approval_gate"
+                : !hasGraphOnlyStoredExecutionPlan(run)
+                  ? "graph_outer_plan_not_resumable"
+                  : "graph_resume_executor_unavailable",
+            requestedMode: "auto",
+            run,
+          });
+          continue;
+        }
+
         const autoCandidate = findAutoRecoverableStep({
           run,
           safeStepTypes: safeAutoRecoveryStepTypes,

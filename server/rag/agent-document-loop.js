@@ -15,6 +15,11 @@ import {
   buildSelfCheckSummary,
 } from "./agent-trace.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
+import {
+  SKILL_EFFECTS,
+  SKILL_IDEMPOTENCY,
+  describeSkillReplayContract,
+} from "./skills/skill-contract.js";
 
 const noop = () => {};
 
@@ -49,6 +54,33 @@ const buildLifecycleStepError = (result = {}, fallbackMessage) => {
 };
 
 const DOCUMENT_RAG_PRIMARY_STEP_ID = "document_rag:primary";
+
+// Both phases call ragService.chat with the live session/user identity. The
+// call can persist a session turn and long-term memory before the step settles,
+// so a stored input must not misrepresent it as a replay-safe RAG read. Use a
+// conservative declaration even if an injected legacy Skill omits metadata.
+const buildDocumentRagStepInput = ({
+  docIds,
+  documentRagSkill,
+  question,
+  retrievalPlan,
+  sessionId,
+  userId,
+}) => ({
+  docIds,
+  question,
+  retrievalPlan,
+  sessionId,
+  skillId: documentRagSkill.id,
+  skillVersion: documentRagSkill.version,
+  userId,
+  ...describeSkillReplayContract({
+    ...documentRagSkill,
+    effects: SKILL_EFFECTS.workspaceWrite,
+    idempotency: SKILL_IDEMPOTENCY.adapterDefined,
+    replaySafe: false,
+  }),
+});
 
 export const runDocumentRagLoop = async ({
   accessScope,
@@ -87,13 +119,14 @@ export const runDocumentRagLoop = async ({
 
   let documentEvidenceClarification = null;
   let ragResult = null;
-  const primaryInput = {
+  const primaryInput = buildDocumentRagStepInput({
     docIds,
+    documentRagSkill,
     question,
     retrievalPlan,
     sessionId,
     userId,
-  };
+  });
   const primaryBudget = consumeBudget(budgetState, documentRagSkill.budgetKey);
   let primaryRagResult = null;
 
@@ -282,13 +315,14 @@ export const runDocumentRagLoop = async ({
         reason: followUpBudget.reason,
       });
     } else {
-      const followUpInput = {
+      const followUpInput = buildDocumentRagStepInput({
         docIds,
+        documentRagSkill,
         question: followUpQuestion,
         retrievalPlan: followUpRetrievalPlan,
         sessionId,
         userId,
-      };
+      });
       const followUpStepId = `follow_up_retrieval:${
         executionLoop.followUpsRun + 1
       }`;

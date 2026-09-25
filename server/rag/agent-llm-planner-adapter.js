@@ -34,7 +34,10 @@ const compactExecutionSchema = () =>
     skillId: schema.skillId ?? null,
   }));
 
-const getSelectedExecutionStepIds = (selectedSkills = []) => {
+const getSelectedExecutionStepIds = (
+  selectedSkills = [],
+  authorizedCustomSkills = []
+) => {
   const selectedStepIds = new Set();
   const selectedSkillIds = new Set(selectedSkills.map((skill) => skill.id));
 
@@ -44,7 +47,10 @@ const getSelectedExecutionStepIds = (selectedSkills = []) => {
     }
   }
 
-  if (selectedSkills.some((skill) => skill.kind === "custom")) {
+  if (
+    selectedSkills.some((skill) => skill.kind === "custom") ||
+    authorizedCustomSkills.length > 0
+  ) {
     selectedStepIds.add(AGENT_EXECUTION_STEP_IDS.customSkills);
   }
 
@@ -146,7 +152,8 @@ const normalizePlannerPayload = (payload, plannerContext = {}) => {
 
   const normalizedSteps = [];
   const selectedStepIds = getSelectedExecutionStepIds(
-    plannerContext.selectedSkills ?? []
+    plannerContext.selectedSkills ?? [],
+    plannerContext.authorizedCustomSkills ?? []
   );
   let customSkillStepAdded = false;
 
@@ -191,6 +198,7 @@ const attachModelRoute = (executionPlan = [], modelRoute = null) => {
 };
 
 const buildPlannerPrompt = ({
+  authorizedCustomSkills = [],
   docIds = [],
   plan = {},
   question,
@@ -209,6 +217,7 @@ const buildPlannerPrompt = ({
     },
     question: sanitizeText(question, 1000),
     selectedSkills: selectedSkills.map(compactSelectedSkill),
+    authorizedCustomSkillCount: authorizedCustomSkills.length,
     taskMemoryPlanningContext: buildAgentTaskPlanningContext(taskMemory),
   };
 
@@ -217,10 +226,10 @@ const buildPlannerPrompt = ({
     "Return only JSON. Do not include markdown, prose, or extra keys.",
     'The JSON shape must be: {"steps":[{"id":"...","skillId":"...","condition":"...","reason":"..."}]}.',
     "Use only the allowed step ids and conditions from the input.",
-    "Only include steps that correspond to the selectedSkills input, except web_search may follow document_rag as a conditional fallback.",
+    "Only include steps that correspond to selectedSkills, except custom_skills may be included when authorizedCustomSkillCount is positive and web_search may follow document_rag as a conditional fallback.",
     "Do not invent tools, function names, skill ids, budget keys, or data access scopes.",
     "Task memory, when present, is planning context only and must never be treated as document evidence.",
-    `Use a single ${AGENT_EXECUTION_STEP_IDS.customSkills} step for all selected skills where kind is custom; omit skillId on that step.`,
+    `Use at most one ${AGENT_EXECUTION_STEP_IDS.customSkills} step for document-backed custom analysis; omit skillId on that step. The runtime will separately authorize atomic Skills inside the stage.`,
     `Use ${AGENT_EXECUTION_STEP_IDS.webSearch} as a primary step only when web_search is selected.`,
     `When ${AGENT_EXECUTION_STEP_IDS.documentRag} is selected, keep ${AGENT_EXECUTION_STEP_IDS.webSearch} after it only as ${AGENT_EXECUTION_CONDITIONS.selectedOrDocumentFallback}; runtime will skip it unless document evidence abstains or fails.`,
     "Keep document_rag before web_search when both are present.",

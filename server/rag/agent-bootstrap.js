@@ -67,6 +67,7 @@ export const createAgentSession = ({
 
   runContext.setSkillTracker({
     getAgentSkills: skillTracker.getAgentSkills,
+    getSelectedSkills: skillTracker.getSelectedSkills,
     getSkillObservations: skillTracker.getSkillObservations,
     getSkillRuns: skillTracker.getSkillRuns,
   });

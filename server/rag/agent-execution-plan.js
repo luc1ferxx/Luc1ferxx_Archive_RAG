@@ -178,6 +178,7 @@ const validateFixedSkillStep = ({
 
 const validateCustomSkillStep = ({
   accessScope,
+  authorizedCustomSkills = [],
   errors,
   registry,
   selectedSkills,
@@ -194,7 +195,10 @@ const validateCustomSkillStep = ({
     stepId,
   });
 
-  const customSkills = selectedSkills.filter((skill) => skill.kind === "custom");
+  const customSkills = [
+    ...selectedSkills.filter((skill) => skill.kind === "custom"),
+    ...authorizedCustomSkills,
+  ];
 
   for (const customSkill of customSkills) {
     const registeredSkill = getRegistrySkill(registry, customSkill.id);
@@ -245,6 +249,7 @@ const validateWebFallbackOrdering = ({
 
 const normalizeExecutionStep = ({
   accessScope,
+  authorizedCustomSkills,
   errors,
   index,
   registry,
@@ -295,6 +300,7 @@ const normalizeExecutionStep = ({
   if (schema.skillGroup === "custom") {
     validateCustomSkillStep({
       accessScope,
+      authorizedCustomSkills,
       errors,
       registry,
       selectedSkills,
@@ -323,6 +329,7 @@ const normalizeExecutionStep = ({
 
 export const validateAgentExecutionPlan = ({
   accessScope = {},
+  authorizedCustomSkills = [],
   executionPlan,
   registry,
   selectedSkills = [],
@@ -338,6 +345,7 @@ export const validateAgentExecutionPlan = ({
     .map((step, index) =>
       normalizeExecutionStep({
         accessScope,
+        authorizedCustomSkills,
         errors,
         index,
         registry,
@@ -361,7 +369,7 @@ export const validateAgentExecutionPlan = ({
   return normalizedPlan;
 };
 
-export const createDeterministicAgentExecutionPlan = () => [
+export const createDeterministicAgentExecutionPlan = ({ selectedSkills } = {}) => [
   {
     id: AGENT_EXECUTION_STEP_IDS.arxivImport,
     condition: AGENT_EXECUTION_CONDITIONS.selectedSkill,
@@ -401,7 +409,12 @@ export const createDeterministicAgentExecutionPlan = () => [
     condition: AGENT_EXECUTION_CONDITIONS.selectedOrDocumentFallback,
     skillId: AGENT_SKILL_IDS.webSearch,
   },
-];
+].filter(
+  (step) =>
+    step.id !== AGENT_EXECUTION_STEP_IDS.customSkills ||
+    !Array.isArray(selectedSkills) ||
+    selectedSkills.some((skill) => skill?.kind === "custom")
+);
 
 export const deterministicPlannerAdapter = {
   id: "deterministic",
@@ -410,6 +423,7 @@ export const deterministicPlannerAdapter = {
 
 export const createAgentExecutionPlanResult = async ({
   accessScope = {},
+  authorizedCustomSkills = [],
   fallbackPlannerAdapter = deterministicPlannerAdapter,
   plannerAdapter = fallbackPlannerAdapter,
   plannerContext = {},
@@ -430,6 +444,7 @@ export const createAgentExecutionPlanResult = async ({
   const createFallbackPlan = async () =>
     createValidatedPlanWithMetadata({
       accessScope,
+      authorizedCustomSkills,
       plannerAdapter: fallbackPlannerAdapter,
       plannerContext,
       registry,
@@ -437,6 +452,7 @@ export const createAgentExecutionPlanResult = async ({
     });
   const createValidatedPlanWithMetadata = async ({
     accessScope,
+    authorizedCustomSkills,
     plannerAdapter,
     plannerContext,
     registry,
@@ -449,6 +465,7 @@ export const createAgentExecutionPlanResult = async ({
     return {
       executionPlan: validateAgentExecutionPlan({
         accessScope,
+        authorizedCustomSkills,
         executionPlan: rawExecutionPlan,
         registry,
         selectedSkills,
@@ -470,6 +487,7 @@ export const createAgentExecutionPlanResult = async ({
       execute: async (adapter) => {
         const result = await createValidatedPlanWithMetadata({
           accessScope,
+          authorizedCustomSkills,
           plannerAdapter: adapter,
           plannerContext,
           registry,
@@ -516,6 +534,7 @@ export const createAgentExecutionPlanResult = async ({
   try {
     const selectedPlan = await createValidatedPlanWithMetadata({
       accessScope,
+      authorizedCustomSkills,
       plannerAdapter,
       plannerContext,
       registry,

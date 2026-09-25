@@ -40,9 +40,15 @@ test("step replay safety matrix fixes contracts for core replay paths", () => {
   }
 
   assert.deepEqual(matrix.document_rag.requiredInput, ["docIds", "question"]);
-  assert.equal(matrix.document_rag.autoReplaySafe, true);
+  assert.equal(matrix.document_rag.autoReplaySafe, false);
   assert.equal(matrix.document_rag.replayRequiresApproval, false);
-  assert.equal(matrix.document_rag.idempotency, STEP_REPLAY_IDEMPOTENCY.readOnlyRag);
+  assert.equal(matrix.document_rag.idempotency, STEP_REPLAY_IDEMPOTENCY.memoryWritingRag);
+  assert.deepEqual(matrix.document_rag.replayActions, ["retry_failed_step"]);
+  for (const stepType of ["follow_up_retrieval", "research_question"]) {
+    assert.equal(matrix[stepType].autoReplaySafe, false);
+    assert.equal(matrix[stepType].idempotency, STEP_REPLAY_IDEMPOTENCY.memoryWritingRag);
+    assert.deepEqual(matrix[stepType].replayActions, ["retry_failed_step"]);
+  }
 
   assert.deepEqual(matrix.custom_skill.requiredInput, [
     "docIds",
@@ -81,15 +87,9 @@ test("step replay safety matrix fixes contracts for core replay paths", () => {
 test("auto recovery safe step types are derived from replay safety matrix", () => {
   assert.deepEqual([...DEFAULT_AUTO_RECOVERY_STEP_TYPES].sort(), [
     "custom_skill",
-    "document_rag",
-    "follow_up_retrieval",
-    "research_question",
   ]);
   assert.deepEqual(getAutoReplaySafeStepTypes().sort(), [
     "custom_skill",
-    "document_rag",
-    "follow_up_retrieval",
-    "research_question",
   ]);
 });
 
@@ -103,12 +103,13 @@ test("step handler registry exposes replay safety contracts", () => {
     documentHandler.replaySafety,
     getStepReplaySafetyPolicy("document_rag")
   );
+  assert.equal(documentHandler.replaySafety.autoReplaySafe, false);
   assert.equal(webHandler.replaySafety.autoReplaySafe, false);
   assert.equal(webHandler.replaySafety.requiredInput[0], "question");
 });
 
 test("step replay safety assessment derives replay reasons from the matrix", () => {
-  const safeDocument = buildStepReplaySafetyAssessment({
+  const memoryWritingDocument = buildStepReplaySafetyAssessment({
     step: {
       id: "step-document",
       input: {
@@ -119,9 +120,11 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     },
   });
 
-  assert.equal(safeDocument.canAutoReplay, true);
-  assert.deepEqual(safeDocument.reasonCodes, []);
-  assert.equal(safeDocument.idempotency, STEP_REPLAY_IDEMPOTENCY.readOnlyRag);
+  assert.equal(memoryWritingDocument.canAutoReplay, false);
+  assert.deepEqual(memoryWritingDocument.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+  ]);
+  assert.equal(memoryWritingDocument.idempotency, STEP_REPLAY_IDEMPOTENCY.memoryWritingRag);
 
   const missingDocumentInput = buildStepReplaySafetyAssessment({
     step: {
@@ -137,6 +140,7 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
   assert.deepEqual(missingDocumentInput.missingInput, ["question"]);
   assert.deepEqual(missingDocumentInput.reasonCodes, [
     STEP_REPLAY_SAFETY_REASON_CODES.missingInput,
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
   ]);
 
   const webSearch = buildStepReplaySafetyAssessment({
@@ -313,8 +317,9 @@ test("a step whose persisted contract declares a side effect is never auto-repla
 
 /**
  * Narrowing only. Every step persisted before the typed contract existed -- and
- * every step type that never carried one -- keeps the verdict it has today,
- * because an absent declaration is not evidence of a side effect.
+ * every step type that never carried one -- keeps the verdict from its current
+ * type policy. A legacy Document RAG step without metadata is not promoted to
+ * a read-only step: its type policy now fails closed for memory writes.
  */
 test("a step that declares no skill contract keeps its step-type verdict", () => {
   const legacyCustomSkill = buildStepReplaySafetyAssessment({
@@ -343,8 +348,61 @@ test("a step that declares no skill contract keeps its step-type verdict", () =>
     },
   });
 
-  assert.equal(documentRag.canAutoReplay, true);
-  assert.deepEqual(documentRag.reasonCodes, []);
+  assert.equal(documentRag.canAutoReplay, false);
+  assert.deepEqual(documentRag.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+  ]);
+});
+
+test("memory-writing RAG step types cannot be made auto-replayable by a stored read-only claim", () => {
+  for (const type of ["document_rag", "follow_up_retrieval", "research_question"]) {
+    const legacy = buildStepReplaySafetyAssessment({
+      step: {
+        id: `${type}:legacy`,
+        input: { docIds: ["doc-1"], question: "What changed?" },
+        type,
+      },
+    });
+    const falselySafe = buildStepReplaySafetyAssessment({
+      autoReplayStepTypes: [type],
+      step: {
+        id: `${type}:forged-safe`,
+        input: {
+          docIds: ["doc-1"],
+          effects: SKILL_EFFECTS.readOnly,
+          question: "What changed?",
+          replaySafe: true,
+        },
+        type,
+      },
+    });
+    const declaredWrite = buildStepReplaySafetyAssessment({
+      step: {
+        id: `${type}:declared-write`,
+        input: {
+          docIds: ["doc-1"],
+          effects: SKILL_EFFECTS.workspaceWrite,
+          question: "What changed?",
+          replaySafe: false,
+        },
+        type,
+      },
+    });
+
+    assert.equal(legacy.canAutoReplay, false, type);
+    assert.deepEqual(legacy.reasonCodes, [
+      STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+    ]);
+    assert.equal(falselySafe.canAutoReplay, false, type);
+    assert.deepEqual(falselySafe.reasonCodes, [
+      STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+    ]);
+    assert.equal(declaredWrite.canAutoReplay, false, type);
+    assert.deepEqual(declaredWrite.reasonCodes, [
+      STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
+      STEP_REPLAY_SAFETY_REASON_CODES.externalWrite,
+    ]);
+  }
 });
 
 test("action capability replay inherits the capability call safety matrix", () => {

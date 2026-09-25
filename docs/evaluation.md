@@ -25,11 +25,11 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run coverage:targets` | 把目标覆盖率作为硬门控运行。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
 | `cd server && npm run eval:trajectory` | 评测 AgentRAG 执行轨迹。 |
-| `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner、validator 和 fallback；`-- --provider real` 会生成真实 provider 报告。 |
-| `cd server && npm run eval:recovery-observability` | 生成 deterministic recovery/replay observability report，覆盖 manual recovery、auto replay、step retry/resume、planner fallback signal 和 skill graph signal（一次真实 guarded 运行里的 replan node 复用与 fallback 计数）。 |
+| `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner、validator、fallback 和 guarded 原子 Skill DAG 组合；`-- --provider real` 会让 DAG case 调用真实 LLM planner 并生成 real-provider 报告。 |
+| `cd server && npm run eval:recovery-observability` | 生成 recovery/replay observability report，覆盖 manual recovery、auto replay、step retry/resume、planner fallback、guarded replan signal，以及 checkpoint + 重建服务实例的 graph-only startup resume；真实 PostgreSQL 跨进程验证另见 `bash scripts/run-pgvector-integration.sh`。 |
 | `cd server && npm run planner:gate -- --provider real` | 强制检查 real planner report、unexpected fallback rate 和 mock/real planner 分歧。 |
-| `cd server && npm run rollout:readiness` | 汇总 real planner gate、纯 LLM runtime target、trajectory gate、recovery gate、fallback rate 和 mock/real divergence，生成默认启用纯 LLM planner 前的 readiness signal。 |
-| `cd server && npm run runtime:smoke` | 用真实后端 HTTP 路径、真实 LLM planner 和 PostgreSQL smoke `/health` + `/chat`，确认 long/experience memory default-on、planner 选中 `llm`、experience memory 只进入 planning hints 而不进入 evidence sources。 |
+| `cd server && npm run rollout:readiness` | 汇总 real planner gate、纯 LLM runtime target、`AGENT_SKILL_GRAPH_ROLLOUT=guarded`、real-provider 动态 DAG case、guarded runtime smoke、trajectory/recovery gate、fallback rate 和 mock/real divergence；只报告 readiness，不切换默认开关。 |
+| `cd server && npm run runtime:smoke` | 用真实后端 HTTP、真实 LLM planner 和 PostgreSQL smoke `/health` + 两次 `/chat`；同时要求两次都由真实 LLM 规划并执行 guarded custom-Skill DAG、无 fallback，并检查 experience memory 只作为 planning hint。 |
 | `cd server && npm run verify:quality` | 用真实 embedding + chat 模型验证零基础设施档案下的检索、页码引文、对比取值归属、弃答和跨进程持久化。见 “DocCompare quality verification”。 |
 | `cd server && npm run feedback:corpus` | 从负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用 seed + runtime feedback corpus 运行 deterministic 回归评测。 |
@@ -55,9 +55,9 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `evaluation/results/latest-current-quality-gate.{json,md}` | 当前 commit 的轻量质量证据；逐项记录 SHA、freshness、dirty、corpus/provider/config 和 metrics 检查。 |
 | `evaluation/baselines/quality-near-duplicate-deterministic-v1.json` | PR deterministic profile 的固定 100% regression baseline；运行目录中的旧报告不能替换它。 |
 | `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `17/17` cases passed，`71/71` checks passed，包含 goal lifecycle completion 和四个钉住 `AGENT_SKILL_GRAPH_ROLLOUT` 的 skill graph case。 |
-| `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback 和 planner observability；mock/real provider 会各自写入 provider-specific latest report。 |
-| `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：deterministic fixture 覆盖 recoverable run、manual recovery action、safe step retry/resume、auto replay success rate、planner fallback signal 和 skill graph signal；当前 `7/7` cases、`22/22` checks。 |
-| `evaluation/results/latest-rollout-readiness.{json,md}` | AgentRAG rollout readiness：只输出是否 ready 的信号，汇总 real planner provider gate、trajectory gate、recovery gate、unexpected fallback rate 和 mock/real planner divergence，不改变默认 planner 行为。 |
+| `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback、planner observability，以及 compare-only Intent 下由授权原子 catalog 规划 `compare_documents -> risk_review` 的 guarded case；real provider 调用真实 LLM DAG planner，分别写 provider-specific latest report。 |
+| `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：既有恢复统计与 guarded replan signal，加上从持久化 checkpoint 经新服务实例启动恢复的 `skill_graph_startup_resume` 生产路径检查；当前 `8/8` cases、`29/29` checks。 |
+| `evaluation/results/latest-rollout-readiness.{json,md}` | AgentRAG rollout readiness：只输出是否 ready 的信号，要求纯 LLM planner、guarded Skill graph、real-provider DAG case、guarded runtime smoke、trajectory/recovery gate，以及零 unexpected fallback / mock-real divergence；不改变默认 `off` 灰度值。 |
 | `evaluation/results/latest-rerank-hard-cs.*` | Hard-CS rerank eval：baseline 不再满分，heuristic rerank 需要保持 NDCG/Recall 不回退并保留 NDCG lift。 |
 | `evaluation/results/latest-arxiv-rerank.*` | arXiv real-paper rerank eval：使用固定 manifest 生成的真实论文 corpus，覆盖更长文档和 hard negative。 |
 | `evaluation/results/latest-release-evidence.{json,md}` | 严格发布证据报告：逐项记录 8 份 required reports 的状态、稳定 reason code、期望值、实际值和 lineage 摘要。 |
@@ -121,14 +121,14 @@ npm run quality:current -- --require-planner-real
 | Hard-CS rerank | `evaluation/results/latest-rerank-hard-cs.json` | 原报告通过，使用规定 Hard-CS corpus/version，且 robust lineage 未分裂。 |
 | arXiv real-paper rerank | `evaluation/results/latest-arxiv-rerank.json` | 原报告通过，使用规定 manifest corpus/version，且 robust lineage 未分裂。 |
 | trajectory | `evaluation/results/latest-trajectory.json` | trajectory 原始 cases/checks 通过并属于 target commit。 |
-| planner-real | `evaluation/results/latest-planner-real.json` | planner 原始状态通过，且 provider mode 必须为 `real`。 |
+| planner-real | `evaluation/results/latest-planner-real.json` | planner 原始状态通过、provider mode 为 `real`，包含真实 LLM 规划并执行的 `planner_dynamic_skill_graph` compare+risk case。 |
 | recovery observability | `evaluation/results/latest-recovery-observability.json` | recovery 原始状态通过并属于 target commit。 |
-| runtime smoke | `evaluation/results/latest-runtime-smoke.json` | runtime smoke 原始状态通过，provider/config lineage 与发布批次一致。 |
-| rollout readiness | `evaluation/results/latest-rollout-readiness.json` | readiness 为 ready，且 `sourceReports` 与它实际读取的 planner/trajectory/recovery/runtime 输入一致。 |
+| runtime smoke | `evaluation/results/latest-runtime-smoke.json` | 两次 HTTP `/chat` 都由真实 LLM 规划并执行 guarded Skill DAG、零 graph fallback，且 provider/config lineage 与发布批次一致。 |
+| rollout readiness | `evaluation/results/latest-rollout-readiness.json` | readiness 为 ready，guarded runtime/real DAG planner case 等检查通过，且 `sourceReports` 与实际读取的 planner/trajectory/recovery/runtime 输入一致。 |
 
 `latest-planner-mock.json` 不是第 9 份 required report，但它是 rollout readiness 实际读取的辅助 source；readiness 的 `sourceReports` 必须同时准确引用 mock/real planner、trajectory、recovery observability 和 runtime smoke。
 
-所有 required reports 还必须存在、包含完整 `evidence`、使用 `profile=release`、`git.commitSha` 等于 target、`git.dirty=false`，并在默认 `24` 小时 freshness policy 内。未来时间戳同样会失败。三份 robust report 必须满足 `evidence.runId == summary.runId`、`evidence.generatedAt == summary.createdAt`；Runtime smoke 必须满足 `evidence.runId == report.runId`、`evidence.generatedAt == report.completedAt`；rollout readiness 必须满足 `evidence.runId == summary.runId`、`evidence.generatedAt == summary.createdAt`。这些报告同时固定 evidence schema/generator 版本，旧内容不能只替换成 fresh envelope 后冒充当前证据。任一报告缺失、过期、commit 不匹配、由 dirty worktree 生成、profile、corpus/provider ID 或 mode 错误、public model route 错误、source report lineage 不一致，或 robust 三份报告出现 split lineage，整体状态都是 `fail`。
+调用 `release:gate` 时，当前 checkout 本身也必须与 target commit 相同且 worktree 干净；Git 状态不可读取同样会失败，不能拿先前 clean 时生成的报告给当前 dirty 工作树背书。所有 required reports 还必须存在、包含完整 `evidence`、使用 `profile=release`、`git.commitSha` 等于 target、`git.dirty=false`，并在默认 `24` 小时 freshness policy 内。未来时间戳同样会失败。三份 robust report 必须满足 `evidence.runId == summary.runId`、`evidence.generatedAt == summary.createdAt`；Runtime smoke 必须满足 `evidence.runId == report.runId`、`evidence.generatedAt == report.completedAt`；rollout readiness 必须满足 `evidence.runId == summary.runId`、`evidence.generatedAt == summary.createdAt`。发布合同还会重算 readiness 的 `guarded` graph 信号，并逐字段验证 runtime smoke 的 Skill graph 检查；不能用一个自报 PASS 的旧报告绕过。任一报告缺失、过期、commit 不匹配、由 dirty worktree 生成、profile、corpus/provider ID 或 mode 错误、public model route 错误、source report lineage 不一致，或 robust 三份报告出现 split lineage，整体状态都是 `fail`。
 
 ```bash
 cd server
@@ -229,6 +229,7 @@ npm run eval:planner
 - validator 拒绝未注册 step
 - 非法 LLM-style plan fallback 到 deterministic planner
 - `agentObservability.executionPlanner` 记录 selected/fallback 状态
+- `planner_dynamic_skill_graph` 将上游 Intent 固定为仅 `compare_documents`，在 `guarded` 下要求 DAG planner 从按 `accessScope` / `docIds` 核验的原子 catalog 独立选出 `compare_documents -> risk_review`，同时检查节点依赖、真实执行、最终 selectedSkills / trace 和文档 scope。mock provider 用固定模型响应验证接线；real provider 才检验真实 LLM 的这次规划。
 
 需要真实模型灰度时显式开启：
 
@@ -253,7 +254,7 @@ npm run eval:planner -- --provider real
 npm run planner:gate -- --provider real --compare-provider mock
 ```
 
-`planner:gate` 默认 `--provider real`，并在 real provider 下默认比较 `mock`。默认阈值为 `--max-unexpected-fallback-rate=0` 和 `--max-divergence-count=0`。Planner eval 中故意验证 validator 的 fallback case 会计入总 fallback 数，但不会计入 unexpected fallback。
+`planner:gate` 默认 `--provider real`，并在 real provider 下默认比较 `mock`。默认阈值为 `--max-unexpected-fallback-rate=0` 和 `--max-divergence-count=0`。Planner eval 中故意验证 validator 的 fallback case 会计入总 fallback 数，但不会计入 unexpected fallback。`rollout:readiness` 还单独要求 real-provider 报告的动态 DAG case、五个对应 check、`llm_dag` planner 且无 fallback；只看 mock PASS 不能证明模型会动态组合 Skill。
 
 ## Retrieval 架构证据
 
@@ -267,17 +268,17 @@ Synthetic / feedback 报告从 1.9.0 manifest 起带一个 `summary.retrieval` �
 
 ```bash
 cd server
-npm run rollout:readiness
-npm run rollout:readiness -- --json
+AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run rollout:readiness
+AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run rollout:readiness -- --json
 ```
 
-`rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，并检查当前 runtime 是否已经达到纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 都是 `llm`），生成 `latest-rollout-readiness.*`。缺少 real planner report、runtime smoke report、runtime target 未到纯 LLM、trajectory/recovery gate 失败、runtime smoke 失败、unexpected fallback rate 大于 0，或 mock/real planner divergence 大于 0 都会标成 `not_ready`，并让命令以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`。
+`rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，检查当前 runtime 是纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 均为 `llm`）且 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，生成 `latest-rollout-readiness.*`。real-provider `planner_dynamic_skill_graph` 必须由 `llm_dag` 真正规划并执行 compare+risk、无 fallback；runtime smoke 的两次 HTTP `/chat` 也必须由 LLM 规划并执行 guarded DAG、无 fallback。缺少报告、trajectory/recovery gate 失败、unexpected fallback、mock/real 分歧或上述条件任一不满足，都会标成 `not_ready` 并以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`；该参数不是 PASS。
 
 ## Skill graph rollout 的评测边界
 
-`rollout:readiness` 只覆盖 planner 灰度（`AGENT_PLANNER_ROLLOUT` / intent / execution planner），不读取 `AGENT_SKILL_GRAPH_ROLLOUT`。`eval:planner`、`eval:recovery-observability` 和 `quality:gate` 也不碰这个开关，跑的都是默认的 `off` 路径。
+`AGENT_SKILL_GRAPH_ROLLOUT` 的默认值仍是 `off`；评测只在自己的受控 case / CI 环境中显式钉住 `shadow` 或 `guarded`。固定评测覆盖三层：trajectory 的执行语义、planner eval 的独立原子 Skill 选择、runtime smoke 的真实 HTTP + LLM 路径。它们仍只证明 custom Skill 阶段内的 typed DAG；外层 document/Web/built-in/capability 不是同一张图，schema gate 也不等于差异/风险内容的语义真值校验。
 
-Trajectory eval 是唯一固定跑在 DAG 路径上的评测。四个 `skill_graph` 分类的 case 用 `withEnvironmentOverrides` 在各自运行期间钉住灰度位，跑完即还原，所以同一份报告里既有 `off` 路径的 13 个既有 case，也有下面四个：
+Trajectory eval 的四个 `skill_graph` case 用 `withEnvironmentOverrides` 在各自运行期间钉住灰度位，跑完即还原；同一份报告还保留默认 `off` 路径的既有 case：
 
 | Case | 钉住的模式 | 证明什么 |
 | --- | --- | --- |
@@ -286,13 +287,14 @@ Trajectory eval 是唯一固定跑在 DAG 路径上的评测。四个 `skill_gra
 | `skill_graph_illegal_plan_rejected` | `guarded` + 注入的 LLM planner | planner 交出同时带伪造 `approval`、未注册 skill 和越权 `scope.docIds` 的图；整图被拒，三个 reason code 全部记录，伪造 node 没有任何一个执行；deterministic graph 在授权范围内作答；planner 拿到的上下文只有白名单视图，不含 `accessScope` / userId / workspaceId。 |
 | `skill_graph_bounded_replan` | `guarded` + 注入的 replanner，`maxCustomSkillCalls: 3` | 第一次 risk review 空手而归触发 `insufficient_evidence`；一次 patch 被应用，只有新增 node 执行，已完成的两个 node 状态为 `reused` 且不再计费；第二次尝试在 `replan_limit_reached` 处 abstain；replanner 拿到的上下文只有状态和白名单，没有证据文本和调用者身份。 |
 
-这四个 case 的 id、check id 和 response 投影都钉在 `quality-current-suite-manifest.js`（`1.8.0`）里，`quality:current` 会逐字段校验，多一个 case 或少一个 check 都会失败。
+四个 trajectory case 的 id、check id、response 投影，以及 `planner_dynamic_skill_graph` 的同类合同，都钉在 `quality-current-suite-manifest.js`，`quality:current` 会逐字段校验，多一个 case 或少一个 check 都会失败。`planner_dynamic_skill_graph` 在 mock/real provider 下都跑 guarded：Intent 固定为 compare-only，但 graph 必须组合 compare+risk；real provider 才调用真实 LLM DAG planner。这验证了 Skill 选择不再依赖硬编码复合 Intent，同时检查授权文档范围和最终 observability。
 
-仍然没有覆盖的部分：
+Recovery 与仍需区分的证据：
 
-- `eval:recovery-observability` 只有一个 `skill_graph_signal` case：从一次真实 guarded 运行（risk review 首轮空手、一次 replan、两个 node `reused`）的 `skill_graph_planned` 事件里数 planned / executed / fallback / 执行后 fallback / reused node / applied replan。它证明 replan 内复用和"执行后绝不回落 V1"，不证明中断后 resume；graph node 的 retry / resume 走既有 `custom_skill` step 路径，由单测 `agent-run-step-executor.test.mjs` 和 `agent-run-step-replay-safety.test.mjs` 覆盖，不在评测报告里。
-- `rollout:readiness` 不读 `AGENT_SKILL_GRAPH_ROLLOUT`，readiness 报告不能作为把默认值提到 `guarded` 的依据。
-- 以上 case 全部用注入的 planner / replanner 或 deterministic graph，不经过真实模型；LLM planner 输出质量只有 `eval:planner` 的 mock provider 和单测覆盖。
+- `eval:recovery-observability` 的 `skill_graph_signal` 从一次 guarded `runAgentRag` 的 `skill_graph_planned` 事件统计 replan 内复用与执行后 fallback。新增的 `skill_graph_startup_resume` 不复用这组计数冒充重启证据：它向内存 store 写入部分 graph checkpoint，重建 run/recovery 服务实例，调用生产启动恢复 API 并检查同一 run 完成、已完成写节点只执行一次、待执行节点只执行一次、CAS 只领取一次、第二次扫描不再领取且没有部分执行后回落 V1。这验证续跑协议和调用链，不证明操作系统进程重启或 PostgreSQL 跨进程持久化。该评测仍只覆盖外层 plan 恰为 `custom_skills`、无待审批且 checkpoint/step 对账成功的 guarded run；unknown in-flight 或混合外层 plan 转 manual，已被领取的 run 由其他 worker 跳过，不会自动二次执行。
+- `agent-execution-graph-postgres.integration.test.mjs` 是独立的数据库集成测试：父进程将部分 graph 和已完成写节点落到 PostgreSQL，子 Node 进程重新加载服务并运行启动恢复，然后用数据库 effect 计数证明写节点未重放、后续节点只执行一次。`bash scripts/run-pgvector-integration.sh` 会在临时数据库上运行它；`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 会运行整套后端测试且不跳过数据库用例。此测试不代替真实 LLM 与 clean-SHA 的 release 门禁。
+- `rollout:readiness` 现在要求运行环境已显式设为 `guarded`、real-provider 动态 DAG case 通过、guarded runtime smoke 的两次 HTTP 运行都由 LLM 规划并执行且无 fallback，此外还要求 trajectory/recovery 和原有 planner gate。`release:gate` 再对完整报告集校验新鲜度、clean worktree、同一目标提交及报告合同。默认 `off` 不会被这些命令自动切换。
+- Mock planner、注入的 trajectory planner 和 deterministic recovery fixture 是稳定接线回归；只有 `eval:planner -- --provider real` 的动态 case 与 `runtime:smoke` 检查真实 LLM 的 DAG 规划。它们不衡量真实文档上的语义差异/风险质量。
 
 需要手动看 V2 对既有 13 个 case 的影响时，可以整份复跑：
 
@@ -301,26 +303,27 @@ cd server
 AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run eval:trajectory
 ```
 
-2026-09-17 在本地实测 13/13 case PASS。这只是一次手动实验，不是门禁；`latest-trajectory.*` 是 gitignore 的本地产物，跑完后建议用默认配置再跑一次。
+整份 `AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run eval:trajectory` 只是额外的本地实验，不代替上述 real-provider 和 release 门禁；`latest-trajectory.*` 是 gitignore 的本地产物，跑完后若要恢复默认报告，应在默认配置下重跑。
 
 ## Runtime smoke
 
 ```bash
 cd server
-npm run runtime:smoke
+AGENT_PLANNER_ROLLOUT=llm AGENT_INTENT_PLANNER=llm AGENT_EXECUTION_PLANNER=llm AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run runtime:smoke
 ```
 
-`runtime:smoke` 需要 `OPENAI_API_KEY` 和 `POSTGRES_DATABASE_URL` 或 `LONG_MEMORY_DATABASE_URL`。它会启动真实 Express app，走 `/health` 和两次 `/chat` HTTP 请求，不注入 deterministic planner。文档 RAG 使用 smoke stub，避免依赖上传文件和 embedding；intent/execution planner 仍走真实 LLM provider。
+`runtime:smoke` 需要 `OPENAI_API_KEY` 和 `POSTGRES_DATABASE_URL` 或 `LONG_MEMORY_DATABASE_URL`。它会启动真实 Express app，走 `/health` 和两次 `/chat` HTTP 请求，不注入 deterministic planner。文档 RAG 使用 smoke stub，避免依赖上传文件和 embedding；intent/execution 与 DAG planner 仍走真实 LLM provider。默认 `off` 不能通过该 smoke，必须显式启用 `guarded`；这不会修改持久默认值。
 
 Smoke 断言：
 
 - `/health` 的 `longMemory` 和 `agentExperienceMemory` 都是 `ok`，且 reason 为 `postgres_configured_default`
 - 两次 `/chat` 的 `agentObservability.intentPlanner` 和 `agentObservability.executionPlanner` 都选中 `llm`，且没有 fallback
+- 两次运行都写入 `mode: "guarded"`、`executed: true`、`fallback: null`、`selectedPlannerId: "llm_dag"` 的 `skill_graph_planned` 事件，并执行 `summarize_contract` 与 `risk_review`
 - 第一次 successful `skill_chain` 写入 `successful_plan` experience memory
 - 第二次请求加载该 memory 为 planning hint
 - `ragSources` 只包含 smoke document source，不包含 `agent_experience` 或 `successful_plan`
 
-报告写入 `evaluation/results/latest-runtime-smoke.json` 和 `.md`。`Planner Real Provider Gate` scheduled workflow 会启动 PostgreSQL service，在纯 LLM planner env 下先运行这个 smoke，再运行 `rollout:readiness` 把 smoke、real/mock planner gate、trajectory 和 recovery 汇总成最终发布门。
+报告写入 `evaluation/results/latest-runtime-smoke.json` 和 `.md`。`Planner Real Provider Gate` scheduled workflow 会启动 PostgreSQL service，在纯 LLM + guarded Skill graph 环境下先运行这个 smoke，再运行 `rollout:readiness` 把 smoke、real/mock planner gate、trajectory 和 recovery 汇总成灰度准备信号；完整发布还需 `release:gate` 的同提交证据校验。
 
 ## DocCompare quality verification
 
@@ -396,7 +399,7 @@ npm run observability:report -- --json
 - query planner intent、retrieval query 数量和 topK profile
 - RAG route mode、latency、citation 和 abstain 指标
 
-`eval:recovery-observability` 会用 deterministic fixture 生成 `latest-recovery-observability.*`，再由 `quality:gate` 的 recovery gate 检查：observability eval case/check 不能失败，auto replay failure、manual recovery action failure、step replay failure、observed planner fallback 和 skill graph 执行后 fallback（`recoverySkillGraphUnsafeFallbackCount`，阈值 0；没有 graph 计数器的旧报告按 0 处理）都必须为 0，同时要求 report 至少覆盖 recoverable run、manual recovery action、auto replay attempt、step retry 和 step resume。observability report 的 `recovery` 区块新增 `skillGraphPlannedCount` / `skillGraphExecutedCount` / `skillGraphFallbackCount` / `skillGraphUnsafeFallbackCount` / `skillGraphReusedNodeCount` / `skillGraphReplanAppliedCount`，全部从 `skill_graph_planned` run event 派生，是附加字段。
+`eval:recovery-observability` 会用 deterministic fixture 与实际 guarded graph 服务重建探针生成 `latest-recovery-observability.*`，再由 `quality:gate` 的 recovery gate 检查：observability eval case/check 不能失败，auto replay failure、manual recovery action failure、step replay failure、observed planner fallback 和 skill graph 执行后 fallback（`recoverySkillGraphUnsafeFallbackCount`，阈值 0）都必须为 0，同时要求 report 覆盖 recoverable run、manual recovery action、auto replay attempt、step retry、step resume 和 graph startup resume。`recovery` 区块的 planned / executed / fallback / reused / replan 计数来自 `skill_graph_planned` run event；resume claim / completion 来自 run 事件，是否重复执行来自服务重建探针在生成报告前的直接断言。PostgreSQL 跨进程恢复仍需独立环境验证。
 
 ## Feedback regression
 
@@ -536,11 +539,11 @@ GitHub Actions 的 `Quality Gate` workflow 会在 PR 和 `main` push 时执行�
 
 PR/main Quality Gate 只消费 deterministic/mock provider，不读取 `OPENAI_API_KEY`，因此无效密钥、限流或外部模型抖动不会让普通代码提交失败。真实 provider 由独立的 `Planner Real Provider Gate` 和每周 `Release Evidence Gate` 强制验证。eval producer 和 current gate 都使用 `!cancelled()`，因此单个 producer 失败后仍会运行其余诊断；job 保持失败，最后通过 `always()` 上传原始 latest reports 与 `latest-current-quality-gate.*`。workflow 不再把兼容命令 `quality:gate` 的历史 PASS 当作 PR current 证据。
 
-`Planner Real Provider Gate` workflow 通过 `workflow_dispatch` 和每周二至周日 `0 9 * * 0,2-6` schedule 触发。它不使用 conditional real step：会在纯 LLM planner runtime env 下强制运行 mock planner eval、real planner eval、trajectory eval、recovery observability eval，并执行 `npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0`、`npm run rollout:readiness` 和 `npm run runtime:smoke`。该 workflow 会启动 PostgreSQL service，让 smoke 覆盖 Postgres default-on memory 和 runtime `/chat` observability。如果没有配置 `OPENAI_API_KEY` secret，real provider eval 或 runtime smoke 会失败，从而暴露配置缺口。周一由 `Release Evidence Gate` 在 `0 11 * * 1` 统一覆盖 planner、runtime、recovery 和 readiness 信号，避免两个 workflow 对同一信号产生重复失败通知。
+`Planner Real Provider Gate` workflow 通过 `workflow_dispatch` 和每周二至周日 `0 9 * * 0,2-6` schedule 触发。它在纯 LLM planner + `AGENT_SKILL_GRAPH_ROLLOUT=guarded` 环境下强制运行 mock/real planner eval（含动态 DAG case）、trajectory eval、recovery observability eval，并执行 `npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0`、`npm run runtime:smoke` 和 `npm run rollout:readiness`。该 workflow 会启动 PostgreSQL service，让 smoke 覆盖 Postgres default-on memory 和两次真实 LLM 规划的 guarded `/chat` DAG；缺少 `OPENAI_API_KEY` 会让 real eval 或 smoke 失败。周一由 `Release Evidence Gate` 在 `0 11 * * 1` 统一覆盖 planner、runtime、recovery 和 readiness 信号，避免重复周期通知。
 
 `Robust Eval Suite` workflow 仅通过 `workflow_dispatch` 手动触发。它要求 `OPENAI_API_KEY`，运行 `npm run eval:robust-suite`，再用 scoped `npm run robust:gate -- --fail-on-warn` 强制检查 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 三份 report，并上传 `latest.*`、`latest-rerank-hard-cs.*`、`latest-arxiv-rerank.*` artifacts。该 workflow 不读取历史 quality 状态。每周固定运行由 `Release Evidence Gate` 统一负责，避免同一 robust suite 产生重复周期任务和通知。
 
-`Release Evidence Gate` workflow 通过 `workflow_dispatch` 和每周一 `0 11 * * 1` schedule 触发，明确不在 `pull_request` 上运行。它在单个 job、单次 target checkout 中设置 `EVAL_TARGET_COMMIT_SHA=${{ github.sha }}` 和 `EVAL_EVIDENCE_PROFILE=release`，依次生成 robust suite、mock/real planner、trajectory、recovery observability、runtime smoke 与 rollout readiness，再执行严格 `release:gate` 并上传 required latest JSON/Markdown 和 `latest-release-evidence.*`。这样昂贵的 real/robust 评测不会增加默认 PR gate 成本，发布 artifacts 又都绑定同一 SHA。
+`Release Evidence Gate` workflow 通过 `workflow_dispatch` 和每周一 `0 11 * * 1` schedule 触发，明确不在 `pull_request` 上运行。它在单个 job、单次 target checkout 中设置 `EVAL_TARGET_COMMIT_SHA=${{ github.sha }}`、`EVAL_EVIDENCE_PROFILE=release` 和 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，先用同一 pgvector PostgreSQL 服务运行 `test:pgvector`（包括跨 Node 进程的 graph checkpoint 恢复测试），再依次生成 robust suite、mock/real planner、trajectory、recovery observability、runtime smoke 与 rollout readiness，执行严格 `release:gate` 并上传 required latest JSON/Markdown 和 `latest-release-evidence.*`。集成测试失败会使发布 job 失败，但 `release:gate` 的 JSON 报告只验证评测报告本身，不会将这项测试的运行结果伪装成其中一份报告。这样昂贵的 real/robust 评测不会增加默认 PR gate 成本，发布 artifacts 又都绑定同一 SHA。
 
 提交前建议至少运行：
 

@@ -271,6 +271,25 @@ test("deterministic planner adapter emits the guarded default execution order", 
   );
 });
 
+test("deterministic planner omits custom analysis for ordinary document questions", () => {
+  const documentSkill = createSkill({
+    id: AGENT_SKILL_IDS.documentRag,
+    label: "Document RAG",
+  });
+  const executionPlan = deterministicPlannerAdapter.createExecutionPlan({
+    selectedSkills: [documentSkill],
+  });
+
+  assert.equal(
+    executionPlan.some((step) => step.id === AGENT_EXECUTION_STEP_IDS.customSkills),
+    false
+  );
+  assert.equal(
+    executionPlan.some((step) => step.id === AGENT_EXECUTION_STEP_IDS.documentRag),
+    true
+  );
+});
+
 test("validated execution planner accepts a safe adapter proposal", async () => {
   const documentSkill = createSkill({
     budgetKey: "documentRagCalls",
@@ -544,6 +563,24 @@ test("execution plan validator enforces budgets and web fallback ordering", () =
       selectedSkills: [webSkill],
     })
   );
+});
+
+test("outer plan accepts an authorized custom stage without preselecting every atomic Skill", () => {
+  const customSkill = createSkill({
+    budgetKey: "customSkillCalls",
+    id: "dynamic_custom",
+    kind: "custom",
+    label: "Dynamic Custom",
+  });
+  const validated = validateAgentExecutionPlan({
+    accessScope: { userId: "alice", workspaceId: "workspace-a" },
+    authorizedCustomSkills: [customSkill],
+    executionPlan: [{ id: AGENT_EXECUTION_STEP_IDS.customSkills }],
+    registry: { get: (skillId) => skillId === customSkill.id ? customSkill : null },
+    selectedSkills: [],
+  });
+
+  assert.deepEqual(validated.map((step) => step.id), [AGENT_EXECUTION_STEP_IDS.customSkills]);
 });
 
 test("execution plan runner preserves the default skill execution order", async () => {

@@ -14,6 +14,7 @@ export const STEP_REPLAY_IDEMPOTENCY = Object.freeze({
   capabilityDefined: "capability_defined",
   dedupedWorkspaceWrite: "deduped_workspace_write",
   externalReadNondeterministic: "external_read_nondeterministic",
+  memoryWritingRag: "memory_writing_rag",
   readOnlyDeterministic: "read_only_deterministic",
   readOnlyRag: "read_only_rag",
 });
@@ -108,43 +109,43 @@ const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
       "Whitelisted custom skills replay through the registered custom skill runner with persisted scope and retrieval input.",
   }),
   document_rag: freezePolicy({
-    autoReplaySafe: true,
-    idempotency: STEP_REPLAY_IDEMPOTENCY.readOnlyRag,
+    autoReplaySafe: false,
+    idempotency: STEP_REPLAY_IDEMPOTENCY.memoryWritingRag,
     optionalInput: ["retrievalPlan", "sessionId", "userId"],
-    replayActions: ["resume_from_step", "retry_failed_step"],
+    replayActions: ["retry_failed_step"],
     replayRequiresApproval: false,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.none,
     requiredInput: ["docIds", "question"],
     retryable: true,
     stepType: "document_rag",
     summary:
-      "Document RAG replay is read-only and uses persisted docIds, question, and retrieval plan when present.",
+      "Document RAG can write session and long-term memory. Interrupted work cannot be auto-replayed; an explicit failed-step retry may repeat those writes.",
   }),
   follow_up_retrieval: freezePolicy({
-    autoReplaySafe: true,
-    idempotency: STEP_REPLAY_IDEMPOTENCY.readOnlyRag,
+    autoReplaySafe: false,
+    idempotency: STEP_REPLAY_IDEMPOTENCY.memoryWritingRag,
     optionalInput: ["retrievalPlan", "sessionId", "userId"],
-    replayActions: ["resume_from_step", "retry_failed_step"],
+    replayActions: ["retry_failed_step"],
     replayRequiresApproval: false,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.none,
     requiredInput: ["docIds", "question"],
     retryable: true,
     stepType: "follow_up_retrieval",
     summary:
-      "Follow-up retrieval reuses the document RAG replay contract for persisted gap-filling queries.",
+      "Follow-up document retrieval shares Document RAG's memory-writing boundary and requires an explicit failed-step retry.",
   }),
   research_question: freezePolicy({
-    autoReplaySafe: true,
-    idempotency: STEP_REPLAY_IDEMPOTENCY.readOnlyRag,
+    autoReplaySafe: false,
+    idempotency: STEP_REPLAY_IDEMPOTENCY.memoryWritingRag,
     optionalInput: ["researchQuestionId", "retrievalPlan", "sessionId", "userId"],
-    replayActions: ["resume_from_step", "retry_failed_step"],
+    replayActions: ["retry_failed_step"],
     replayRequiresApproval: false,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.none,
     requiredInput: ["docIds", "question"],
     retryable: true,
     stepType: "research_question",
     summary:
-      "Research question replay is read-only and uses persisted question, document scope, and optional retrieval plan.",
+      "Research questions use the memory-writing RAG chat path. Interrupted work cannot be auto-replayed; an explicit failed-step retry may repeat those writes.",
   }),
   web_search: freezePolicy({
     autoReplaySafe: false,
@@ -347,7 +348,8 @@ const getPolicyReasonCodes = ({ configuredAutoReplaySafe, context, policy }) => 
 
   if (
     policy.idempotency === STEP_REPLAY_IDEMPOTENCY.externalReadNondeterministic ||
-    policy.idempotency === STEP_REPLAY_IDEMPOTENCY.capabilityDefined
+    policy.idempotency === STEP_REPLAY_IDEMPOTENCY.capabilityDefined ||
+    policy.idempotency === STEP_REPLAY_IDEMPOTENCY.memoryWritingRag
   ) {
     reasonCodes.push(STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent);
   }

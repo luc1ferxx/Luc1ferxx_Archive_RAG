@@ -409,6 +409,24 @@ test("a broken shadow path cannot break the real run", async () => {
   assert.ok(record.error);
 });
 
+test("a failed shadow event write does not discard the completed V1 answer", async () => {
+  const compare = createRecordingSkill({ id: "compare_documents" });
+  const harness = createHarness({ skills: [compare] });
+
+  const results = await runCustomSkillStage({
+    ...harness.options,
+    mode: CUSTOM_SKILL_STAGE_MODES.shadow,
+    recordExecutionGraph: async () => {
+      throw new Error("event store unavailable");
+    },
+  });
+
+  assert.equal(compare.calls.length, 1);
+  assert.equal(results[0].ok, true);
+  assert.equal(harness.trace.at(-1).type, "skill_graph_shadow_observation");
+  assert.equal(harness.trace.at(-1).status, "failed");
+});
+
 // ---------------------------------------------------------------------------
 // guarded: the DAG executes
 // ---------------------------------------------------------------------------
@@ -641,6 +659,42 @@ test("guarded mode charges each node once", async () => {
   assert.equal(getRemainingBudget(harness.budgetState).customSkillCalls, 2);
 });
 
+test("guarded mode waits for the graph event to persist before returning results", async () => {
+  const compare = createRecordingSkill({ id: "compare_documents", label: "Compare" });
+  const harness = createHarness({ skills: [compare] });
+  const recordStarted = createDeferred();
+  const recordPersisted = createDeferred();
+  const order = [];
+
+  const stage = runCustomSkillStage({
+    ...harness.options,
+    mode: CUSTOM_SKILL_STAGE_MODES.guarded,
+    plannerAdapter: stubPlanner([
+      readOnlyNode({ nodeId: "compare", skillId: "compare_documents" }),
+    ]),
+    recordExecutionGraph: async (event) => {
+      order.push("record_started");
+      recordStarted.resolve(event);
+      await recordPersisted.promise;
+      order.push("record_persisted");
+    },
+  }).then((results) => {
+    order.push("stage_returned");
+    return results;
+  });
+
+  const event = await recordStarted.promise;
+  assert.equal(event.status, "completed");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(order, ["record_started"]);
+
+  recordPersisted.resolve();
+  const results = await stage;
+  assert.equal(results.length, 1);
+  assert.deepEqual(order, ["record_started", "record_persisted", "stage_returned"]);
+});
+
 test("guarded mode lets an approval interrupt out instead of restarting under V1", async () => {
   const compare = createRecordingSkill({ id: "compare_documents", label: "Compare" });
   const risk = createRecordingSkill({
@@ -765,6 +819,54 @@ test("guarded mode applies at most one replan and reuses the nodes that already 
     "custom_skill:risk",
     "custom_skill:timeline",
   ]);
+});
+
+test("a failed write Skill is not executed again by bounded replanning", async () => {
+  let writeCalls = 0;
+  let patchCalls = 0;
+  const publish = {
+    skill: {
+      ...createTestSkill({
+        effects: "external_write",
+        execute: async () => {
+          writeCalls += 1;
+          throw new Error("write may have landed before acknowledgement failed");
+        },
+        id: "publish_report",
+      }),
+      idempotency: "nondeterministic",
+      replaySafe: false,
+      retryable: false,
+    },
+  };
+  const timeline = createRecordingSkill({ id: "extract_timeline" });
+  const harness = createHarness({ skills: [publish, timeline] });
+
+  await runCustomSkillStage({
+    ...harness.options,
+    mode: CUSTOM_SKILL_STAGE_MODES.guarded,
+    plannerAdapter: stubPlanner([
+      readOnlyNode({ nodeId: "publish", skillId: "publish_report" }),
+    ]),
+    replanAdapter: {
+      createPatch: () => {
+        patchCalls += 1;
+        return {
+          addNodes: [readOnlyNode({ nodeId: "timeline", skillId: "extract_timeline" })],
+        };
+      },
+      id: "test_replanner",
+    },
+  });
+
+  assert.equal(writeCalls, 1);
+  assert.equal(patchCalls, 0);
+  assert.equal(timeline.calls.length, 0);
+  assert.equal(harness.graphRecords[0].replans[0].decision, REPLAN_DECISIONS.abstain);
+  assert.equal(
+    harness.graphRecords[0].replans[0].reasonCode,
+    REPLAN_REASON_CODES.sideEffectNodeFailed
+  );
 });
 
 test("a replan that widens document scope is rejected and the run keeps its first answer", async () => {

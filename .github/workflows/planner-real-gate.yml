@@ -30,6 +30,7 @@ jobs:
       AGENT_EXECUTION_PLANNER: llm
       AGENT_INTENT_PLANNER: llm
       AGENT_PLANNER_ROLLOUT: llm
+      AGENT_SKILL_GRAPH_ROLLOUT: guarded
       LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_smoke
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       POSTGRES_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentai_smoke

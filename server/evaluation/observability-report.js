@@ -222,6 +222,15 @@ const createRecoveryStats = () => ({
   skillGraphUnsafeFallbackCount: 0,
   skillGraphReusedNodeCount: 0,
   skillGraphReplanAppliedCount: 0,
+  skillGraphResumeClaimCount: 0,
+  skillGraphAutoRecoveryCompletedCount: 0,
+  skillGraphAutoRecoveryFailureCount: 0,
+  skillGraphStartupResumeObservedCount: 0,
+  skillGraphSameRunCompletedCount: 0,
+  skillGraphCompletedNodeNotRerunCount: 0,
+  skillGraphPendingNodeExecutedOnceCount: 0,
+  skillGraphSecondClaimCount: 0,
+  skillGraphPartialResumeFallbackCount: 0,
 });
 
 const createLlmOpsBucketStats = () => ({
@@ -673,6 +682,41 @@ const addSkillGraphEvent = (recovery, event = {}) => {
   ).length;
 };
 
+const addGraphStartupResumeEvent = (recovery, event = {}) => {
+  const eventType = getEventType(event);
+  const payload = getEventPayload(event);
+
+  recovery.eventCount += 1;
+
+  if (eventType === "skill_graph_resume_claimed") {
+    recovery.skillGraphResumeClaimCount += 1;
+    return;
+  }
+
+  if (eventType === "auto_recovery_completed" && payload.type === "execution_graph") {
+    recovery.skillGraphAutoRecoveryCompletedCount += 1;
+    return;
+  }
+
+  if (eventType === "auto_recovery_failed" && payload.type === "execution_graph") {
+    recovery.skillGraphAutoRecoveryFailureCount += 1;
+    return;
+  }
+
+  if (eventType === "graph_startup_resume_observed") {
+    recovery.skillGraphStartupResumeObservedCount += 1;
+    recovery.skillGraphSameRunCompletedCount += event.sameRunCompleted === true ? 1 : 0;
+    recovery.skillGraphCompletedNodeNotRerunCount +=
+      event.completedNodeNotRerun === true ? 1 : 0;
+    recovery.skillGraphPendingNodeExecutedOnceCount +=
+      event.pendingNodeExecutedOnce === true ? 1 : 0;
+    recovery.skillGraphSecondClaimCount += toNonNegativeInteger(event.secondClaimCount);
+    recovery.skillGraphPartialResumeFallbackCount += toNonNegativeInteger(
+      event.partialFallbackCount
+    );
+  }
+};
+
 const addTaskRecoveryEvent = (recovery, event = {}) => {
   const eventType = getEventType(event);
 
@@ -784,6 +828,17 @@ export const buildObservabilityReport = ({ events = [] } = {}) => {
 
     if (isSkillGraphPlannedEvent(event)) {
       addSkillGraphEvent(recovery, event);
+    }
+
+    if (
+      getEventType(event) === "skill_graph_resume_claimed" ||
+      (["auto_recovery_completed", "auto_recovery_failed"].includes(
+        getEventType(event)
+      ) && getEventPayload(event).type === "execution_graph") ||
+      (getTraceType(event) === "agent_graph_resume_eval" &&
+        getEventType(event) === "graph_startup_resume_observed")
+    ) {
+      addGraphStartupResumeEvent(recovery, event);
     }
 
     const retrievalPlan = getAgentRetrievalPlan(event);

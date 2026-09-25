@@ -397,6 +397,40 @@ test("createAgentExecutionGraphResult falls back when the planner throws", async
   );
 });
 
+test("deterministic DAG fallback runs only intent-selected Skills, not the authorized catalog", async () => {
+  const plannerAdapter = stubAdapter("llm_dag", (context) => {
+    assert.deepEqual(
+      context.capabilities.map((capability) => capability.id),
+      ["compare_documents", "risk_review"]
+    );
+    throw new Error("planner unavailable");
+  });
+  const result = await createAgentExecutionGraphResult(
+    baseOptions({
+      fallbackSelectedSkills: [compareSkill()],
+      plannerAdapter,
+      selectedSkills: [compareSkill(), riskSkill()],
+    })
+  );
+
+  assert.equal(result.planner.fallback, true);
+  assert.deepEqual(result.graph.nodes.map((node) => node.skillId), ["compare_documents"]);
+});
+
+test("an empty intent fallback rejects the graph without running the authorized catalog", async () => {
+  const result = await createAgentExecutionGraphResult(
+    baseOptions({
+      fallbackSelectedSkills: [],
+      plannerAdapter: deterministicDagPlannerAdapter,
+      selectedSkills: [compareSkill(), riskSkill()],
+    })
+  );
+
+  assert.equal(result.graph, null);
+  assert.equal(result.planner.status, "rejected");
+  assert.match(result.planner.fallbackReason, /non-empty nodes array/);
+});
+
 test("createAgentExecutionGraphResult falls back on an unregistered capability", async () => {
   const plannerAdapter = stubAdapter("llm_dag", () => ({
     nodes: [ragNode({ nodeId: "exfiltrate", skillId: "shell_exec" })],

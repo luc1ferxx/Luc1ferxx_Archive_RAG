@@ -68,6 +68,10 @@ export const buildScopedRagService = ({
   sameScope = () => true,
   telemetry = createEvalTelemetry(),
 }) => ({
+  getDocument: (docId, accessScope) =>
+    sameScope(accessScope)
+      ? documents.find((document) => document.docId === docId) ?? null
+      : null,
   chat: async (docIds, question, options = {}) => {
     telemetry.chatCalls.push({
       accessScope: options.accessScope ?? null,

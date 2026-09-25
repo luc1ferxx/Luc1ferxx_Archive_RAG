@@ -93,11 +93,185 @@ const riskNode = (overrides = {}) => ({
 
 const codesOf = (result) => result.errors.map((error) => error.code);
 
+const conditionalContext = (outputSchema = {
+  proceed: { type: "boolean", required: true },
+}) => {
+  const context = baseContext();
+
+  return {
+    ...context,
+    authorizedSkillIds: [...context.authorizedSkillIds, "gate"],
+    registry: createTestRegistry([
+      createTestSkill({ id: "gate", outputSchema }),
+    ]),
+  };
+};
+
+const conditionalGraph = (when, version = "v2") => createExecutionGraph({
+  version,
+  nodes: [
+    compareNode({ nodeId: "gate", skillId: "gate" }),
+    riskNode({ dependsOn: ["gate"], when }),
+  ],
+});
+
 test("createExecutionGraph stamps the current graph version", () => {
   const graph = createExecutionGraph({ nodes: [compareNode()] });
 
   assert.equal(graph.version, EXECUTION_GRAPH_VERSION);
   assert.equal(graph.nodes.length, 1);
+});
+
+test("v2 graph accepts a condition on a required boolean dependency output", () => {
+  const graph = conditionalGraph({ nodeId: "gate", output: "proceed", equals: true });
+  const result = validateExecutionGraph({ graph, ...conditionalContext() });
+
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(compileExecutionGraph({ graph, ...conditionalContext() }).ok, true);
+});
+
+const explicitWebContext = () => ({
+  authorizedDocIds: [],
+  authorizedSkillIds: ["web_search"],
+  registry: createSkillRegistry([
+    {
+      ...createTestSkill({
+        budgetKey: "webSearchCalls",
+        effects: "external_read",
+        id: "web_search",
+        inputSchema: { question: { type: "string", required: true } },
+        outputSchema: {
+          abstained: { type: "boolean", required: true },
+          citations: { type: "citation[]", required: true },
+          text: { type: "string", required: true },
+        },
+        parallelSafe: false,
+      }),
+      idempotency: "nondeterministic",
+      replaySafe: false,
+      retryable: false,
+    },
+  ]),
+});
+
+const webNode = () => ({
+  dependsOn: [],
+  failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.failFast,
+  inputBindings: { question: requestField("question") },
+  nodeId: "web",
+  skillId: "web_search",
+});
+
+test("v3 admits an explicitly contracted authorized non-document node", () => {
+  const context = explicitWebContext();
+  const graph = createExecutionGraph({ nodes: [webNode()], version: "v3" });
+
+  assert.equal(validateExecutionGraph({ ...context, graph }).ok, true);
+  assert.equal(compileExecutionGraph({ ...context, graph }).ok, true);
+});
+
+test("v3 refuses a missing runtime authorization catalog and inferred replay policy", () => {
+  const context = explicitWebContext();
+  const graph = createExecutionGraph({ nodes: [webNode()], version: "v3" });
+  const noCatalog = validateExecutionGraph({
+    ...context,
+    authorizedSkillIds: null,
+    graph,
+  });
+  const inferred = validateExecutionGraph({
+    ...context,
+    graph,
+    registry: createSkillRegistry([createTestSkill({ id: "web_search" })]),
+  });
+
+  assert.ok(codesOf(noCatalog).includes(EXECUTION_GRAPH_REASON_CODES.missingAuthorizationCatalog));
+  assert.ok(codesOf(inferred).includes(EXECUTION_GRAPH_REASON_CODES.implicitRuntimeContract));
+});
+
+test("v3 rejects planner-authored top-level policy even with a valid catalog", () => {
+  const graph = {
+    ...createExecutionGraph({ nodes: [webNode()], version: "v3" }),
+    approval: true,
+  };
+  const result = validateExecutionGraph({ ...explicitWebContext(), graph });
+
+  assert.ok(codesOf(result).includes(EXECUTION_GRAPH_REASON_CODES.forgedPolicy));
+});
+
+test("v1 graph rejects conditions while remaining the default version", () => {
+  const graph = conditionalGraph({ nodeId: "gate", output: "proceed", equals: true }, "v1");
+  const result = validateExecutionGraph({ graph, ...conditionalContext() });
+
+  assert.equal(createExecutionGraph({ nodes: [compareNode()] }).version, "v1");
+  assert.equal(result.ok, false);
+  assert.ok(codesOf(result).includes(EXECUTION_GRAPH_REASON_CODES.invalidCondition));
+});
+
+test("v2 condition rejects undeclared dependencies, non-required outputs, and expressions", () => {
+  const cases = [
+    {
+      graph: conditionalGraph({ nodeId: "other", output: "proceed", equals: true }),
+      context: conditionalContext(),
+    },
+    {
+      graph: createExecutionGraph({
+        version: "v2",
+        nodes: [
+          compareNode({ nodeId: "gate", skillId: "gate" }),
+          compareNode({ nodeId: "middle", dependsOn: ["gate"] }),
+          riskNode({
+            dependsOn: ["middle"],
+            when: { nodeId: "gate", output: "proceed", equals: true },
+          }),
+        ],
+      }),
+      context: conditionalContext(),
+    },
+    {
+      graph: conditionalGraph({ nodeId: "gate", output: "proceed", equals: true }),
+      context: conditionalContext({ proceed: { type: "boolean", required: false } }),
+    },
+    {
+      graph: conditionalGraph({ nodeId: "gate", output: "proceed", equals: true }),
+      context: conditionalContext({ proceed: { type: "string", required: true } }),
+    },
+    {
+      graph: conditionalGraph({ nodeId: "gate", output: "proceed", equals: true, expression: "true" }),
+      context: conditionalContext(),
+    },
+    {
+      graph: conditionalGraph({ nodeId: "gate", output: "proceed", equals: "true" }),
+      context: conditionalContext(),
+    },
+    {
+      graph: conditionalGraph({ nodeId: " gate ", output: "proceed", equals: true }),
+      context: conditionalContext(),
+    },
+    {
+      graph: createExecutionGraph({
+        version: "v2",
+        nodes: [
+          compareNode({ nodeId: "gate", skillId: "gate" }),
+          riskNode({
+            dependsOn: ["gate"],
+            expression: "always_true",
+            when: { nodeId: "gate", output: "proceed", equals: true },
+          }),
+        ],
+      }),
+      context: conditionalContext(),
+    },
+  ];
+
+  for (const { graph, context } of cases) {
+    const result = validateExecutionGraph({ graph, ...context });
+
+    assert.equal(result.ok, false, JSON.stringify(graph));
+    assert.ok(
+      codesOf(result).includes(EXECUTION_GRAPH_REASON_CODES.invalidCondition),
+      JSON.stringify(result.errors)
+    );
+  }
 });
 
 test("validateExecutionGraph accepts a parallel compare + risk fan-out", () => {
@@ -306,6 +480,26 @@ test("validateExecutionGraph rejects an unknown request field binding", () => {
   );
 });
 
+test("validateExecutionGraph never exposes runtime identity as a request binding", () => {
+  for (const field of ["userId", "sessionId"]) {
+    const graph = createExecutionGraph({
+      nodes: [compareNode({
+        inputBindings: {
+          docIds: requestField("docIds"),
+          question: requestField(field),
+        },
+      })],
+    });
+    const result = validateExecutionGraph({ graph, ...baseContext() });
+
+    assert.equal(result.ok, false, field);
+    assert.ok(
+      codesOf(result).includes(EXECUTION_GRAPH_REASON_CODES.illegalOutputReference),
+      field
+    );
+  }
+});
+
 test("validateExecutionGraph rejects literal input bindings outright", () => {
   const graph = createExecutionGraph({
     nodes: [
@@ -337,6 +531,21 @@ test("validateExecutionGraph rejects a node scope outside the authorized documen
   );
 });
 
+test("validateExecutionGraph rejects a non-array scoped document selection", () => {
+  for (const docIds of ["doc-1", null, { 0: "doc-1" }]) {
+    const graph = createExecutionGraph({
+      nodes: [compareNode({ scope: { docIds } })],
+    });
+    const result = validateExecutionGraph({ graph, ...baseContext() });
+
+    assert.equal(result.ok, false, JSON.stringify(docIds));
+    assert.ok(
+      codesOf(result).includes(EXECUTION_GRAPH_REASON_CODES.forgedPolicy),
+      JSON.stringify(docIds)
+    );
+  }
+});
+
 test("validateExecutionGraph accepts a node scope that narrows the authorized scope", () => {
   const graph = createExecutionGraph({
     nodes: [compareNode({ scope: { docIds: ["doc-1"] } })],
@@ -344,6 +553,16 @@ test("validateExecutionGraph accepts a node scope that narrows the authorized sc
   const result = validateExecutionGraph({ graph, ...baseContext() });
 
   assert.equal(result.ok, true, JSON.stringify(result.errors));
+});
+
+test("validateExecutionGraph rejects an empty required document scope before any node runs", () => {
+  const graph = createExecutionGraph({
+    nodes: [compareNode({ scope: { docIds: [] } })],
+  });
+  const result = validateExecutionGraph({ graph, ...baseContext() });
+
+  assert.equal(result.ok, false);
+  assert.ok(codesOf(result).includes(EXECUTION_GRAPH_REASON_CODES.outOfScopeDocument));
 });
 
 test("validateExecutionGraph rejects a forged approval on a node", () => {

@@ -154,6 +154,7 @@ export const buildClarificationResponse = ({
 export const buildAgentResponse = ({
   agentMode,
   baseAgentAnswer,
+  customSkillGraphExecuted = false,
   directAnswerModes = new Set(),
   finalizer,
   finalAnswerSourceRankMap = new Map(),
@@ -183,7 +184,9 @@ export const buildAgentResponse = ({
   const webError = webResult?.ok === false
     ? serializeAgentError(webResult.error, "Unable to answer from web search.")
     : null;
-  const rawRagAnswer = researchBrief
+  const rawRagAnswer = customSkillGraphExecuted && primaryCustomResult
+    ? baseAgentAnswer
+    : researchBrief
     ? researchBrief.text
     : ragResult?.ok
     ? ragResult.value.text
@@ -198,6 +201,7 @@ export const buildAgentResponse = ({
     finalizer &&
     (agentMode === "document" ||
       agentMode === SKILL_CHAIN_MODE ||
+      customSkillGraphExecuted ||
       (primaryCustomResult && agentMode === primaryCustomResult.skillId))
       ? agentAnswer
       : rawRagAnswer;
@@ -217,7 +221,8 @@ export const buildAgentResponse = ({
       : 200;
   const finalizerAppliesToRagAnswer =
     finalizer &&
-    (agentMode === "document" ||
+    (customSkillGraphExecuted ||
+      agentMode === "document" ||
       agentMode === "document_web" ||
       agentMode === "research_brief" ||
       agentMode === "web" ||

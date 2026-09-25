@@ -21,7 +21,9 @@ flowchart LR
   CL --> O
 ```
 
-核心目标是让回答过程可解释、可回归：
+核心目标是让回答过程可解释、可回归。外层 execution plan 仍编排 document/Web/built-in/capability 等阶段；下面的 typed DAG 目前只在 custom Skill 阶段内部生效，不是全工具统一 DAG：
+
+将所有阶段迁入同一受治理 DAG 的目标、不变量和验收门禁见 [统一 AgentRAG DAG 迁移决策](unified-agent-dag-migration.md)；v3 合同和 `shadow` 观测虽已部分接线，生产执行仍未完成。
 
 - Planner 先判断任务类型、文档数量、access scope 和是否需要 skill chain。
 - Retrieval 保留文档边界，尤其是 compare 请求。
@@ -60,6 +62,7 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 - `arxiv_import`
 - `workspace_action`
 - `document_rag`
+- `document_evidence_check`（仅供 v3 图使用，不参与 V1 intent 匹配）
 - `web_search`
 - `inventory`
 - `document_discovery`
@@ -80,6 +83,8 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 
 新增 skill 需要稳定的 `id`、`version`、`label`、`budgetKey`、`requiresAccessScope`、确定性的 `match()`，以及接收 `accessScope` 的 `execute()`。Custom skills 只通过 `server/rag/skills/custom/index.js` 白名单加载，不允许模型调用任意未注册工具。
 
+V1 使用 intent / `match()` 选择上述固定 chain。V2 的模型候选则由 `server/rag/skills/authorized-catalog.js` 从同一个已注册 custom Skill 集合独立构造：每个候选须显式声明 `inputSchema`、`outputSchema`、`effects` 和 scoped `docIds` 输入；runtime 先用 `ragService.getDocument(docId, accessScope)` 核验请求中的每份文档。缺少文档、scope 或无法核验时返回空 catalog，不会借普通 QA 请求授权整套 Skill。V1 推导出的安全默认 contract 不会自动变成模型可调用的 V2 候选。因此上游 Intent 即使只选了 `compare_documents`，guarded DAG planner 也能在获授权的原子候选中提出 `compare_documents -> risk_review`；V1 原有选择和确定性回退仍只使用 V1 已选 Skill。
+
 ## Custom skill 执行：V1 chain 与 V2 typed DAG
 
 Custom skill 阶段内部有两条执行路径，由 `AGENT_SKILL_GRAPH_ROLLOUT` 选择。两条路径共用同一个 stage、同一种 `custom_skill` step、同一个 run store 和同一份 replay safety matrix；execution plan 仍然只有一个 `custom_skills` 阶段，`/chat` 响应结构不变。切换入口集中在 `server/rag/agent-custom-skill-stage.js`，由 `server/rag/agent-execution-plan-runner.js` 调用。
@@ -92,14 +97,15 @@ Custom skill 阶段内部有两条执行路径，由 `AGENT_SKILL_GRAPH_ROLLOUT`
 
 | 环节 | 模块 | 职责 |
 | --- | --- | --- |
-| Skill contract | `server/rag/skills/skill-contract.js` | 在既有 `id/version/budgetKey/requiresAccessScope/match/execute` 之外补充 `inputSchema`、`outputSchema`、`effects`、`idempotency`、`parallelSafe`、`replaySafe`；旧 skill 由 `inferSkillContractDefaults()` 推出安全默认值。 |
+| Skill contract | `server/rag/skills/skill-contract.js` | 在既有 `id/version/budgetKey/requiresAccessScope/match/execute` 之外补充 `inputSchema`、`outputSchema`、`effects`、`idempotency`、`parallelSafe`、`replaySafe`；旧 skill 可由 `inferSkillContractDefaults()` 推出 V1 兼容默认值，但只有显式 typed contract 才可进入 V2 授权 catalog。 |
+| 授权 catalog | `server/rag/skills/authorized-catalog.js` | 独立于复合 intent，按注册表、显式 contract、`accessScope` 和选中文档核验，给 DAG planner 提供原子 custom Skill 候选。 |
 | Graph contract | `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph`；node 至少包含 `nodeId`、`skillId`、`dependsOn`、`inputBindings`、`failurePolicy`、`rationale`。同一个 skill 可以出现在多个 `nodeId` 下，step id 变成 `custom_skill:<nodeId>`。 |
 | Validator / compiler | 同上的 `validateExecutionGraph()` / `compileExecutionGraph()` | 纯函数校验和拓扑分层，返回稳定 reason code。 |
 | Planner adapter | `server/rag/agent-dag-planner-adapter.js` | 直接产出原子 skill node 和依赖，不再输出 `skill_chain_compare_risk` 这类复合 id。 |
-| Scheduler | `server/rag/agent-execution-graph-runner.js` | 拓扑调度、并发上限、预算预留、side-effect 串行化。 |
+| Scheduler | `server/rag/agent-execution-graph-runner.js` | 拓扑调度、并发上限、预算预留、side-effect 串行化，以及解析后的输入和真实/恢复输出的运行时 schema gate。 |
 | Replanner | `server/rag/agent-replanner.js` | 有界局部重规划，只返回 graph patch。 |
 
-Node 输入只有两个来源：已校验的 request 字段，或它显式 `dependsOn` 的上游 node 的结构化输出（`inputBindings` 的 `source` 只接受 `request` 和 `node`）。这是和 V1 最实质的区别——拼接自由文本不再是主数据接口。
+Node 输入只有两个来源：已校验的 request 字段，或它显式 `dependsOn` 的上游 node 的 typed 输出字段（`inputBindings` 的 `source` 只接受 `request` 和 `node`）。这是和 V1 最实质的区别——拼接自由文本不再是主数据接口。当前输出 schema 是 `text`、`citations`、`abstained` 的答案封套，`priorFindings` 仍是上游 `text` 字段；它没有把对比差异或风险变成经过语义验证的独立对象。
 
 ### Validator
 
@@ -111,13 +117,15 @@ Node 输入只有两个来源：已校验的 request 字段，或它显式 `depe
 
 默认上限在 `EXECUTION_GRAPH_LIMITS`：`maxNodes: 12`、`maxDepth: 5`、`maxConcurrency: 3`。
 
+静态图验证后仍有运行时边界：runner 在预算预留和 Skill 执行前检查解析后的输入值，在结果可供下游 `inputBindings` 使用前检查 Skill 的真实输出；恢复复用的 node 输出也要按当前 live contract 复核。schema 不符的结果不会被当作成功的上游事实。这里验证的是形状/类型，不替代 citation 和 claim support 的语义检查。
+
 ### Scheduler
 
 调度顺序按 node 声明顺序做稳定拓扑排序，因此同一张图的调度是可复现的。只有依赖已满足、`parallelSafe`、彼此无冲突的只读 node 才会并发；并发上限由 runtime 收敛，调用方传入的 `maxConcurrency` 只能收紧不能放宽。预算在启动前原子预留，approval interrupt 会把预留退回，避免一次审批被计费两次。`failurePolicy` 为 `fail_fast` 的 node 失败后中止后续调度，`continue` 则只让下游 node 标记为 `dependency_failed` / `dependency_skipped`。
 
 ### 有界 replan
 
-触发条件限定为 `insufficient_evidence`、`retryable_failure`、`output_schema_failure`、`missing_input`、`unmet_success_criterion`。Replanner 只返回 graph patch，不执行任何工具；patch 必须重新过同一个 validator，不能扩大 scope、白名单或预算。已完成的 node 默认不重跑（`completed` 和上一轮 `reused` 都算既成事实），指纹集合会拒绝重复等价的 plan，`DEFAULT_MAX_REPLANS` 为 `1`。无进展或预算耗尽时返回 `abstain`，交由上游走 clarification 或 evidence-limited answer，而不是继续重试。Replan 的拒绝原因同样有稳定 code：`replan_not_triggered`、`replan_limit_reached`、`replan_budget_exhausted`、`replan_no_progress`、`replan_duplicate_plan`、`replan_invalid_patch`、`replan_adapter_failed`、`replan_completed_node_retired`、`replan_side_effect_node_retired`。
+触发条件限定为 `insufficient_evidence`、`retryable_failure`、`output_schema_failure`、`missing_input`、`unmet_success_criterion`。Replanner 只返回 graph patch，不执行任何工具；patch 必须重新过同一个 validator，不能扩大 scope、白名单或预算。已完成的 node 默认不重跑（`completed` 和上一轮 `reused` 都算既成事实）；如果有写副作用的 node 已尝试但失败，不能证明写入未落地，因此本轮不自动 replan，避免整图第二次运行时重做该 node。指纹集合会拒绝重复等价的 plan，`DEFAULT_MAX_REPLANS` 为 `1`。无进展或预算耗尽时返回 `abstain`，交由上游走 clarification 或 evidence-limited answer，而不是继续重试。Replan 的拒绝原因同样有稳定 code：`replan_not_triggered`、`replan_limit_reached`、`replan_budget_exhausted`、`replan_no_progress`、`replan_duplicate_plan`、`replan_invalid_patch`、`replan_adapter_failed`、`replan_completed_node_retired`、`replan_side_effect_node_failed`、`replan_side_effect_node_retired`。
 
 ### 灰度流程
 
@@ -131,7 +139,7 @@ Node 输入只有两个来源：已校验的 request 字段，或它显式 `depe
 
 DAG planner 复用既有 execution planner 灰度位（`AGENT_EXECUTION_PLANNER` / `AGENT_PLANNER_ROLLOUT`），不新增第二个模型开关；见 `createDagPlannerAdapter()`。Replanner 只在解析后的 planner 确实是 LLM planner 时才接线——deterministic 或 shadow 状态下没有可回落的确定性 replanner，接上它等于让模型绕过灰度位影响真实执行。
 
-Graph 的规划和执行结果以 agent run event `skill_graph_planned` 记录（`executed`、`fallback`、`mode`、`graph.nodeIds`、`nodeRuns`、`replans`、`status`、`errorCodes`），属于版本化的附加字段。`/chat` 响应、`agentObservability`、前端 trace、feedback 和 recovery 合同保持向后兼容。Node run 记录只保留 `ok` / `abstained` 标记，不复制证据文本——citation 已经随 trace step 走，复制一份到没有校验的地方只会多一个可分叉的事实源。
+Graph 的规划和执行结果以 agent run event `skill_graph_planned` 记录（`executed`、`fallback`、`mode`、`graph.nodeIds`、`nodeRuns`、`replans`、`status`、`errorCodes`），属于版本化的附加字段，不作为新的 `/chat` 顶层 graph 字段。`agentObservability.selectedSkills`、skill chain、trace 和最终合成会纳入真正执行的 graph Skill，而不会把 catalog 中仅有资格、未执行的 Skill 当作已选；feedback、前端和 recovery 合同保持向后兼容。Node run 事件只保留 `ok` / `abstained` 标记，不复制证据文本——citation 继续随 trace step 走。
 
 ### Recovery 语义
 
@@ -140,9 +148,13 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 - **持久化声明收窄（无 registry 的一侧）。** Step type 是粗粒度分类，同一个 `custom_skill` 既可能是只读 RAG 检索，也可能是 contract 允许的写操作。执行时 skill 的 replay contract（`effects`、`idempotency`、`replaySafe`）会随 step input 持久化，recovery 只拿得到持久化的 step，所以这是 skill 自身声明唯一能影响"是否可无人值守重放"的通道。该声明只能收窄不能放宽：可以撤回 auto-replay，不能授予；contract 出现之前写下的 step 没有声明，结论与今天完全一致；无法识别的 `effects` 按写操作处理——读不懂的值不是安全的证据。V1 chain 和 V2 graph 都持久化同一份声明。Graph node 绑定的上游输入 `priorFindings` 也随 step input 持久化，retry 用原来的那份数据重放；V1 chain step 把上游输出折进了 question，因此没有这个字段，retry 行为不变。
 - **实时 contract 复核（有 registry 的一侧）。** `server/rag/agent-run-step-handlers/custom-research-steps.js` 在 resume 时从 registry 重新解析 skill：持久化的 contract 是它当时的声明，中断和重放之间可能发生一次部署。声明了副作用的 skill 在这条没有审批机制的路径上被拒绝，而不是被静默重跑。
 
+外层的 `document_rag`、`follow_up_retrieval` 和 built-in `research_question` 不属于上面的 custom-only DAG。它们调用带真实 `sessionId` / `userId` 的 `ragService.chat`，可能先写入会话记录和长期记忆、后丢失 step 结算结果；因此 replay matrix 对这三类 step 禁止启动自动重放，旧的无 replay metadata 记录也按 step type fail-closed。新的 V1 step input 显式持久化 `effects: workspace_write`、`idempotency: adapter_defined`、`replaySafe: false`。显式 `retry_failed_step` 继续可用，但操作员需要接受可能重复写入的风险；现有路径没有跨 RAG 写入与 step 结算的 exactly-once 保证。
+
 两处是纵深防御的两层，分别覆盖"记录被伪造/过期"和"记录缺失"两种情况。Approval 仍然绑定原始 input hash。
 
-"不重跑已完成的 node"在两条路径上成立：step executor 的 `retry_failed_step` / `resume_from_step` / approval resume 只执行目标 step，不碰同一 run 里已完成的 `custom_skill` step；同一 run 内的 replan 通过 `completedNodeRuns` 把已完成和上一轮 `reused` 的 node 原样带入下一轮。第三条路径不成立：带 `agentRunId` + `capabilityApprovals` 重新调用 `/chat` 或 agent task 会重新规划并重新执行整个 plan，graph node 会再跑一次——这和 V1 chain 在同一路径上的行为完全一致，不是 V2 引入的回退，但也没有被 V2 修掉。
+"不重跑已完成的 node"先由 step executor 限定 `retry_failed_step` / `resume_from_step` / approval resume 的目标；对于 guarded graph node，通用单步 retry/resume 会在任何状态修改前拒绝，必须走整图恢复，以免跳过依赖、输出契约和预算。该拒绝也在 run store 的单次 CAS 内重新判断，覆盖预检与状态修改之间的竞态；只有持久事件能证明是在终态 graph event 之后创建的外层 step/gate 才可单步续跑。图节点的启动和结算都必须携带同一恢复 claim。Graph replan 则用 `completedNodeRuns` 复用已完成或已 `reused` 的 node。Guarded stage 进一步把 graph、owner、已结算 node 和预算起点写入同一个 agent run 的私有 checkpoint；专用续跑路径会校验摘要、scope、文档、graph、live Skill contract 与已持久化 step，重算已发生的预算后才复用已完成节点。普通 `runAgentRag` 重入即使请求和 owner 相同，也会在更新 input/plan 的同一次 CAS 中拒绝已有 graph checkpoint，避免与尚未停下的原 worker 并行执行或改写快照、事件。状态不一致、缺少已完成 step 的 checkpoint、或 node 仍处于未知 in-flight 状态时会拒绝静默续跑，转由 recovery policy 处理。公开 `/agent-runs` 投影不暴露私有 checkpoint。
+
+启动自动恢复另有更窄的 graph-only 路径：只有 `guarded` checkpoint 与已存 step 能对账、没有待审批 gate，且持久化的外层 execution plan 恰好只有 `custom_skills` 阶段时，recovery 才通过持久化的单次 CAS claim 调用 `resumeAgentExecutionGraphRun()`。它直接使用已存 plan/graph 续跑，不重新调用 Intent 或外层 planner；已完成 node 复用，未知 in-flight 节点、owner/step 不匹配、含 document/Web 等外层阶段的 run 均转人工恢复。自动续跑只在节点间的安全边界发生；即使 in-flight 节点声明 `readOnly`，存储层也无法证明旧 worker 已停止，因此仍转人工。`phase` 已是 `completed` 或 `partial`、但 run 尚未终结时也不自动 claim：旧 worker 可能正在写入经验或提交最终响应，这个终结窗口转人工；`agent-run-recovery.test.mjs` 覆盖两个 phase。claim 和下一节点的启动在同一 run-revision CAS 上互斥：旧 worker 先启动则 claim 失败，claim 先完成则旧 worker 在调用 Skill 前被挡住。其他 worker 遇到已领取的 graph 会跳过而不改写状态；如果 owner 在领取后崩溃，claim 不会自动重放，需要运维定位并人工处理。这不意味着整个 AgentRAG execution plan 都支持自动续跑。`eval:recovery-observability` 的 `skill_graph_startup_resume` 使用同一内存 store 重建服务实例，覆盖生产续跑 API 和 checkpoint 协议；独立的 `agent-execution-graph-postgres.integration.test.mjs` 则在真实 PostgreSQL 上由另一个 Node 进程续跑，验证已完成写节点不重放。真实发布仍需通过同提交的 release 证据门禁。
 
 ### 当前限制
 
@@ -150,8 +162,8 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 - 当前注册的四个 custom skill 全部继承 `custom-skill-contract.js` 的 `effects: readOnly`，没有任何 skill 声明写操作。上面的副作用防护守的是 contract 已经允许、但尚无实例的边界，不是在修一个线上缺陷。
 - `maxReplans` 初始为 `1`；指纹机制保证即使上调也不会形成等价循环，但更高的值尚未做灰度验证。
 - Graph 只覆盖 custom skill 阶段。built-in skill、document RAG 主循环、capability 调用仍走各自既有路径和安全边界。
-- 评测覆盖只到 trajectory 和 recovery-observability 两层。`eval:trajectory` 里四个 `skill_graph` case 各自钉住灰度位跑在 DAG 路径上（guarded 执行、shadow 只规划、非法图整体拒绝、有界 replan），id / check / 投影钉在 quality manifest `1.8.0`；`eval:recovery-observability` 另有一个 `skill_graph_signal` case，从一次真实 guarded 运行的 `skill_graph_planned` 事件里数 replan 内的 node 复用和执行后 fallback（recovery gate 对后者的阈值是 0）；但 `rollout:readiness` 不读这个开关，`eval:planner` 和 `quality:gate` 也仍跑默认 `off`。这些 case 都用注入的 planner / replanner 或 deterministic graph，不经过真实模型。见 [evaluation.md](evaluation.md#skill-graph-rollout-的评测边界)。
-- 跨 run 的 node 复用不存在。带 `agentRunId` 重新进入的 `/chat` / agent task 会重新执行整个 plan（见上文 Recovery 语义），要做到跨 run 复用需要 stage 在重入时读取上一轮的 `skill_graph_planned` 记录，目前没有做。
+- 评测有四个固定 trajectory `skill_graph` case、一个 `planner_dynamic_skill_graph` case（mock/real provider）、recovery-observability 的 replan 与 startup resume case，以及带真实 LLM planner 的 guarded HTTP runtime smoke。`rollout:readiness` 要求 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`、real-provider DAG case 和 smoke 通过；`release:gate` 另要求新鲜、同提交、干净工作树的完整证据。见 [evaluation.md](evaluation.md#skill-graph-rollout-的评测边界)。这些门禁证明规划/执行路径与合同，不直接证明模型生成的风险内容语义正确。
+- 同一 run 的 guarded checkpoint 可在严格校验后复用已完成 node；启动自动恢复只覆盖 graph-only 外层 plan，不是跨不同 `agentRunId` 的通用缓存，更不会跳过外层 document/Web/built-in/capability 阶段。默认仍是 `off`，切换到 `guarded` 要由部署显式设置并满足灰度门禁。
 
 ## 关键模块
 
@@ -160,8 +172,10 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 | `server/rag/agent-planner.js` | 请求分类、planner actions、skill/chain 选择、执行前 clarification 判断。 |
 | `server/rag/skills/skill-contract.js` | Skill contract：`inputSchema`/`outputSchema`/`effects`/`idempotency`/`parallelSafe`/`replaySafe` 的规范化与安全默认值，以及随 step 持久化的 replay contract 切片。 |
 | `server/rag/agent-custom-skill-stage.js` | 迁移切口：按 `AGENT_SKILL_GRAPH_ROLLOUT` 在 V1 chain、shadow 规划和 guarded DAG 之间选择，对外仍返回同一个扁平 skill result 数组。 |
+| `server/rag/skills/authorized-catalog.js` | 根据已注册 custom Skill 的显式 typed contract、`accessScope` 和选中文档核验构造模型可见的原子候选；与 V1 intent/chain 选择分离。 |
 | `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph` contract 和纯函数 validator/compiler；整体接受或整体拒绝，返回稳定 reason code。 |
-| `server/rag/agent-execution-graph-runner.js` | Graph scheduler：拓扑调度、并发上限、预算预留/退回、side-effect 串行化、node run 记录。 |
+| `server/rag/agent-execution-graph-runner.js` | Graph scheduler：拓扑调度、并发上限、预算预留/退回、side-effect 串行化、运行时 input/output schema gate 和 node run 记录。 |
+| `server/rag/agent-execution-graph-checkpoint.js` | 私有 graph checkpoint 的摘要/owner 验证、node/step 对账和完成节点复用判定；保存在既有 agent run store，而非第二套运行时。 |
 | `server/rag/agent-dag-planner-adapter.js` | V2 planner adapter；只暴露脱敏后的白名单 capability 描述、schema、授权文档范围和 planning context，产出原子 skill node 与依赖。 |
 | `server/rag/agent-replanner.js` | 有界局部重规划；只返回需重新校验的 graph patch，不执行工具，默认 `maxReplans: 1`。 |
 | `server/rag/arxiv-client.js` | arXiv Atom API 查询、feed 解析和 PDF 下载校验。 |
@@ -175,7 +189,8 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 | `server/rag/postgres-task-store.js` | PostgreSQL task store adapter，保存 task 当前快照和审计事件；内部 `payload` 只给 runner 使用，不从 API 暴露。 |
 | `server/rag/agent-runs.js` | 定义 agent run contract 和 service，记录 goal、plan、steps、observations、decisions、approval gates、result/error 和审计 events。 |
 | `server/rag/agent-run-step-executor.js` | 执行和恢复已持久化 run step；只负责 action/retry 编排和 step handler 派发，让 HTTP route 不绑定具体工具执行细节。 |
-| `server/rag/agent-run-recovery.js` | 启动时扫描 recoverable run；PostgreSQL-backed agent run store 默认进入 auto recovery，只通过 step executor 恢复安全 RAG-only step；非持久化 run store 默认 manual，审批和未知 step 回落人工。 |
+| `server/rag/agent-run-graph-replay-guard.js` | 纯函数：在同一 run 快照中判断通用单步 retry/resume/审批是否会绕开 guarded graph；step executor 预检与 run store CAS 共同使用。 |
+| `server/rag/agent-run-recovery.js` | 启动时扫描 recoverable run；普通安全 step 仍由 step executor 和 replay matrix 处理，只有经过 checkpoint/step 对账且外层 plan 仅含 `custom_skills` 的 guarded run 才能单次领取并走专用 graph-only 续跑；待审批、未知 in-flight 和混合外层 plan 转人工。非持久化 run store 默认 manual。 |
 | `server/rag/agent-run-step-replay-safety.js` | 固定 step replay safety matrix：每类 step 的必需 input、retry/resume action、审批要求、auto replay 安全性和幂等性说明；recovery policy 和 handler registry 复用同一份 contract。 |
 | `server/rag/agent-run-step-handlers.js` | 定义可插拔 step handler registry；当前 capability/web/arXiv 通过 capability adapter 执行，`document_rag` handler 预留可注入 resumer，未接线时返回稳定 409。 |
 | `server/rag/agent-run-store.js` | 根据 `AGENT_RUN_STORE_PROVIDER` 选择 agent run store adapter；默认 `auto` 跟随 PostgreSQL 可用性，否则使用内存 store。 |

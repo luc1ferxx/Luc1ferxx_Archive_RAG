@@ -193,14 +193,35 @@ const normalizeGraphNode = (node) => {
 export const normalizeExecutionGraphNodes = (rawNodes) =>
   toArray(rawNodes).map(normalizeGraphNode);
 
-export const normalizeExecutionGraphPayload = (payload) => {
+export const normalizeExecutionGraphPayload = (
+  payload,
+  { version = undefined } = {}
+) => {
   const rawNodes = Array.isArray(payload) ? payload : payload?.nodes;
 
   if (!Array.isArray(rawNodes) || rawNodes.length === 0) {
     throw new Error("DAG planner response must contain a non-empty nodes array.");
   }
 
-  return createExecutionGraph({ nodes: normalizeExecutionGraphNodes(rawNodes) });
+  const nodes = normalizeExecutionGraphNodes(rawNodes);
+
+  if (version === undefined) {
+    return createExecutionGraph({ nodes });
+  }
+
+  // v3 is a distinct all-stage contract. Preserve every planner-supplied
+  // root field for its validator to reject; dropping a forged approval or
+  // policy field here would launder an unauthorized proposal.
+  return {
+    ...(isRecord(payload) ? payload : {}),
+    nodes,
+    revision: isRecord(payload) && payload.revision !== undefined
+      ? payload.revision
+      : 0,
+    version: isRecord(payload) && payload.version !== undefined
+      ? payload.version
+      : version,
+  };
 };
 
 const buildNodeId = (skillId, index, usedNodeIds) => {
@@ -342,6 +363,7 @@ export const createAgentExecutionGraphResult = async ({
   authorizedDocIds = [],
   budgetRemaining = null,
   fallbackPlannerAdapter = deterministicDagPlannerAdapter,
+  fallbackSelectedSkills = null,
   limits = EXECUTION_GRAPH_LIMITS,
   plannerAdapter = fallbackPlannerAdapter,
   plannerContext = {},
@@ -365,7 +387,10 @@ export const createAgentExecutionGraphResult = async ({
   // The deterministic planner builds from the selected skill contracts, which
   // the redacted context deliberately flattens into descriptors. It gets the
   // redacted view plus the contracts it needs, and still no accessScope.
-  const fallbackContext = { ...redactedContext, selectedSkills };
+  const fallbackContext = {
+    ...redactedContext,
+    selectedSkills: fallbackSelectedSkills ?? selectedSkills,
+  };
 
   const withRolloutMetadata = (planner) =>
     rolloutMode ? { ...planner, rolloutMode } : planner;
@@ -440,14 +465,39 @@ export const createAgentExecutionGraphResult = async ({
     });
 
   if (!plannerAdapter || plannerAdapter === fallbackPlannerAdapter) {
-    const graphResult = await createFallbackGraph();
+    try {
+      const graphResult = await createFallbackGraph();
 
-    return buildAcceptedResult({
-      fallback: false,
-      fallbackReason: null,
-      graphResult,
-      selectedId: fallbackPlannerId,
-    });
+      return buildAcceptedResult({
+        fallback: false,
+        fallbackReason: null,
+        graphResult,
+        selectedId: fallbackPlannerId,
+      });
+    } catch (error) {
+      // An outer planner can request custom analysis even though the
+      // intent-selected V1 fallback has no custom Skills. Reject the empty
+      // graph as a whole; the stage may safely return its empty V1 result
+      // because no node has run. Never execute the entire authorized catalog
+      // as a substitute fallback.
+      return {
+        errors: error.validationErrors ?? [],
+        graph: null,
+        planner: withRolloutMetadata({
+          ...buildPlannerSelection({
+            fallback: true,
+            fallbackReason: error,
+            fallbackReasonCodes: (error.validationErrors ?? []).map(
+              (item) => item.code
+            ),
+            graph: null,
+            requestedPlannerId,
+            selectedPlannerId: fallbackPlannerId,
+          }),
+          status: "rejected",
+        }),
+      };
+    }
   }
 
   let primaryError = null;

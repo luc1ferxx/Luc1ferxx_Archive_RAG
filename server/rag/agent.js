@@ -1,4 +1,5 @@
 import { createAgentSession } from "./agent-bootstrap.js";
+import { isDeepStrictEqual } from "node:util";
 import {
   createAgentExecutionPlanResult,
   deterministicPlannerAdapter,
@@ -35,6 +36,13 @@ import {
   buildAgentRunStepsFromTrace,
 } from "./agent-run-steps.js";
 import { normalizeText } from "../lib/normalize-text.js";
+import {
+  getAgentSkillGraphRollout,
+  getAgentUnifiedGraphRollout,
+} from "./config.js";
+import { listAuthorizedAtomicCustomSkills } from "./skills/authorized-catalog.js";
+import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
+import { observeUnifiedAgentGraphShadow } from "./agent-unified-graph-shadow.js";
 
 const getSkillDescriptor = (skill = {}) => ({
   skillId: skill.id,
@@ -209,6 +217,7 @@ const completeRecordedRun = async ({
   accessScope,
   agentRunService,
   approvalSnapshots = [],
+  graphResumeClaimId = null,
   response,
   runId,
 } = {}) => {
@@ -223,6 +232,7 @@ const completeRecordedRun = async ({
 
   return agentRunService.completeRun({
     accessScope,
+    graphResumeClaimId,
     runId,
     ...buildRunCompletionPayload(response, existingRun ?? {}, {
       approvalSnapshots,
@@ -329,6 +339,7 @@ const completeRecordedRunAndExperience = async ({
     accessScope,
     agentRunService,
     approvalSnapshots,
+    graphResumeClaimId: null,
     response: responseWithExperienceMemory,
     runId,
   });
@@ -351,6 +362,233 @@ const withCapabilityApprovals = (capabilityRegistry, approvals = {}) => {
   };
 };
 
+const createGraphResumeError = (reason) => {
+  const error = new Error(`Execution graph cannot be resumed: ${reason}.`);
+  error.code = "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY";
+  error.status = 409;
+  return error;
+};
+
+/**
+ * Continue only the persisted custom_skills stage. In particular this does
+ * not call the Intent Planner, query planner, preparation flow, or outer
+ * Execution Planner. A startup worker must first own the persisted CAS claim
+ * and must never use the general runAgentRag re-entry path for this job.
+ */
+export const resumeAgentExecutionGraphRun = async ({
+  accessScope,
+  agentRunService,
+  checkpoint,
+  ragService,
+  replanAdapter = null,
+  run,
+  runId,
+  skillRegistry,
+} = {}) => {
+  const owner = checkpoint?.owner;
+  const docIds = run?.input?.docIds;
+  const question = normalizeText(run?.goal);
+  const plan = owner?.intentPlan;
+  const latestOuterPlan = (run?.events ?? [])
+    .filter((event) => event.type === "execution_planned")
+    .at(-1)?.payload?.planner;
+
+  if (
+    checkpoint?.version !== "v1" ||
+    !["v1", "v2"].includes(checkpoint?.graph?.version) ||
+    !owner ||
+    !plan ||
+    !Array.isArray(docIds) ||
+    !run?.plan ||
+    !Array.isArray(run.plan.selectedSkills) ||
+    !isDeepStrictEqual(latestOuterPlan?.stepIds, ["custom_skills"]) ||
+    question !== owner.question ||
+    !isDeepStrictEqual(docIds, owner.docIds) ||
+    normalizeText(run.plan.mode) !== normalizeText(plan.mode) ||
+    normalizeText(run.plan.summary) !== normalizeText(plan.summary) ||
+    !checkpoint.resumeClaim?.claimId
+  ) {
+    throw createGraphResumeError("stored request or outer plan changed");
+  }
+
+  const loaded = await agentRunService?.getExecutionGraphCheckpoint?.({
+    accessScope,
+    runId,
+  });
+
+  if (loaded?.checkpoint?.digest !== checkpoint.digest) {
+    throw createGraphResumeError("checkpoint claim changed");
+  }
+
+  const session = createAgentSession({
+    agentBudget: owner.budget?.limits,
+    docIds,
+    plan,
+    question,
+    skillRegistry,
+    taskMemory: owner.taskMemory,
+  });
+  const selectedIdentity = session.selectedSkills.map((skill) => ({
+    skillId: skill.id,
+    skillVersion: skill.version,
+  }));
+  const storedIdentity = run.plan.selectedSkills.map((skill) => ({
+    skillId: skill.skillId,
+    skillVersion: skill.skillVersion,
+  }));
+
+  if (!isDeepStrictEqual(selectedIdentity, storedIdentity)) {
+    throw createGraphResumeError("intent-selected Skill catalog changed");
+  }
+
+  const authorizedCustomSkills = listAuthorizedAtomicCustomSkills({
+    accessScope,
+    docIds,
+    ragService,
+    registry: session.registry,
+  });
+
+  if (authorizedCustomSkills.length === 0) {
+    throw createGraphResumeError("document scope or atomic Skill catalog unavailable");
+  }
+
+  session.setExecutionPlanner(latestOuterPlan);
+  session.setAgentRetrievalPlan(owner.retrievalPlan);
+  const {
+    addBudgetLimitTrace,
+    addTraceStep,
+    budgetState,
+    buildAgentObservability,
+    buildSkillTraceDetail,
+    executeObservedSkill,
+    getAgentSkills,
+    getBudgetSnapshot,
+    markSkillSelected,
+    recordAgentTrace,
+    recordSkillResult,
+    recordSkippedSkill,
+    recordWorkingMemoryClaimSupport,
+    recordWorkingMemoryGaps,
+    trace,
+    workingMemory,
+  } = session;
+
+  // A completed node is reused by the scheduler and is not traced again.
+  // Include its persisted step once in the response trace while the run store
+  // remains the lifecycle source of truth.
+  trace.push(
+    ...(run.steps ?? [])
+      .filter(
+        (step) =>
+          step.type === "custom_skill" &&
+          step.status === "completed" &&
+          String(step.id).startsWith("custom_skill:")
+      )
+      .map(({ id, type, label, status, summary, detail, input, output }) => ({
+        id,
+        type,
+        label,
+        status,
+        summary,
+        detail,
+        input,
+        output,
+      }))
+  );
+
+  let graphEvent = null;
+  const results = await runCustomSkillStage({
+    accessScope,
+    addBudgetLimitTrace,
+    addTraceStep,
+    authorizedCustomSkills,
+    authorizedDocIds: docIds,
+    budgetState,
+    buildSkillTraceDetail,
+    customSkills: session.selectedSkills.filter((skill) => skill.kind === "custom"),
+    docIds,
+    executeObservedSkill,
+    expectedGraphResumeClaimId: checkpoint.resumeClaim.claimId,
+    loadExecutionGraphCheckpoint: () =>
+      agentRunService.getExecutionGraphCheckpoint({ accessScope, runId }),
+    mode: "guarded",
+    plan,
+    question,
+    ragService,
+    recordExecutionGraph: (event) => { graphEvent = event; },
+    recordSkillResult,
+    recordSkippedSkill,
+    registry: session.registry,
+    replanAdapter,
+    retrievalPlan: owner.retrievalPlan,
+    saveExecutionGraphCheckpoint: (nextCheckpoint) =>
+      agentRunService.saveExecutionGraphCheckpoint({
+        accessScope,
+        checkpoint: nextCheckpoint,
+        runId,
+      }),
+    sessionId: owner.sessionId,
+    stepLifecycle: createAgentRunStepLifecycle({
+      accessScope,
+      agentRunService,
+      runId,
+    }),
+    taskMemory: owner.taskMemory,
+    userId: owner.userId,
+  });
+
+  if (!graphEvent?.executed || graphEvent.mode !== "guarded") {
+    throw createGraphResumeError("graph continuation did not execute");
+  }
+
+  for (const result of results) {
+    markSkillSelected(session.registry.get(result.skillId));
+    recordSkillResult(result);
+  }
+
+  await agentRunService.appendRunEvent?.({
+    accessScope,
+    runId,
+    type: "skill_graph_planned",
+    payload: graphEvent,
+  });
+
+  const response = attachAgentRunId(
+    await finalizeAgentRun({
+      addTraceStep,
+      buildAgentObservability,
+      customSkillResults: results,
+      customSkillGraphExecuted: true,
+      customSkills: session.selectedSkills.filter((skill) => skill.kind === "custom"),
+      docIds,
+      getAgentSkills,
+      getBudgetSnapshot,
+      plan,
+      question,
+      recordAgentTrace,
+      recordWorkingMemoryClaimSupport,
+      recordWorkingMemoryGaps,
+      trace,
+      workingMemory,
+    }),
+    runId
+  );
+  const responseWithContinuation = attachAgentTaskContinuation({
+    question,
+    response,
+    taskMemory: owner.taskMemory,
+  });
+  const completedRun = await completeRecordedRun({
+    accessScope,
+    agentRunService,
+    graphResumeClaimId: checkpoint.resumeClaim.claimId,
+    response: responseWithContinuation,
+    runId,
+  });
+
+  return attachAgentRunSnapshot(responseWithContinuation, completedRun);
+};
+
 export const runAgentRag = async ({
   agentBudget,
   agentRunService,
@@ -371,6 +609,7 @@ export const runAgentRag = async ({
   intentPlannerAdapter,
   replanAdapter = null,
   skillRegistry,
+  unifiedGraphPlannerAdapter = null,
 }) => {
   const taskMemoryContext = taskMemory
     ? buildAgentTaskPlanningContext(taskMemory)
@@ -401,6 +640,7 @@ export const runAgentRag = async ({
     getAgentSkills,
     getBudgetSnapshot,
     getSelectedSkill,
+    markSkillSelected,
     plan,
     recordAgentTrace,
     recordExecutionGaps,
@@ -426,6 +666,15 @@ export const runAgentRag = async ({
     skillRegistry,
     taskMemory: taskMemoryContext,
   });
+  const skillGraphMode = getAgentSkillGraphRollout();
+  const authorizedCustomSkills = skillGraphMode !== "off"
+    ? listAuthorizedAtomicCustomSkills({
+        accessScope,
+        docIds,
+        ragService,
+        registry,
+      })
+    : [];
   const runSnapshot = {
     input: {
       docIds,
@@ -441,6 +690,7 @@ export const runAgentRag = async ({
   const agentRun = requestedAgentRunId
     ? await agentRunService?.updateRun?.({
         accessScope,
+        graphReentryGuard: true,
         runId: requestedAgentRunId,
         patch: {
           ...runSnapshot,
@@ -519,11 +769,34 @@ export const runAgentRag = async ({
     }
 
     const agentRetrievalPlan = preparationResult.agentRetrievalPlan;
+    if (getAgentUnifiedGraphRollout() === "shadow") {
+      await observeUnifiedAgentGraphShadow({
+        accessScope,
+        addTraceStep,
+        budgetState,
+        capabilityRegistry: effectiveCapabilityRegistry,
+        docIds,
+        plan,
+        plannerAdapter: unifiedGraphPlannerAdapter,
+        question,
+        ragService,
+        record: (payload) => agentRunService?.appendRunEvent?.({
+          accessScope,
+          runId: agentRunId,
+          type: "unified_graph_planned",
+          payload,
+        }),
+        registry,
+        taskMemory: taskMemoryContext,
+      });
+    }
     const executionPlanResult = await createAgentExecutionPlanResult({
       accessScope,
+      authorizedCustomSkills,
       fallbackPlannerAdapter: deterministicPlannerAdapter,
       plannerAdapter: executionPlannerAdapter ?? deterministicPlannerAdapter,
       plannerContext: {
+        authorizedCustomSkills,
         docIds,
         plan,
         question,
@@ -549,6 +822,7 @@ export const runAgentRag = async ({
       addBudgetLimitTrace,
       addTraceStep,
       agentRunId,
+      authorizedCustomSkills,
       budgetState,
       arxivImportService,
       buildSkillTraceDetail,
@@ -559,17 +833,29 @@ export const runAgentRag = async ({
       executionLoop,
       executionPlan: executionPlanResult.executionPlan,
       getSelectedSkill,
+      loadExecutionGraphCheckpoint: agentRunId && agentRunService?.getExecutionGraphCheckpoint
+        ? () => agentRunService.getExecutionGraphCheckpoint({ accessScope, runId: agentRunId })
+        : null,
       plan,
       question,
       ragService,
       recordExecutionGaps,
-      recordExecutionGraph: (executionGraph) =>
-        agentRunService?.appendRunEvent?.({
+      recordExecutionGraph: (executionGraph) => {
+        if (executionGraph?.mode === "guarded" && executionGraph?.executed) {
+          for (const nodeRun of executionGraph.nodeRuns ?? []) {
+            if (["completed", "failed", "reused"].includes(nodeRun.status)) {
+              markSkillSelected(registry.get(nodeRun.skillId));
+            }
+          }
+        }
+
+        return agentRunService?.appendRunEvent?.({
           accessScope,
           runId: agentRunId,
           type: "skill_graph_planned",
           payload: executionGraph,
-        }),
+        });
+      },
       recordSkippedSkill,
       recordSkillResult,
       recordWorkingMemoryClaimSupport,
@@ -579,8 +865,16 @@ export const runAgentRag = async ({
       resolveWorkingMemoryGaps,
       retrievalPlan: agentRetrievalPlan,
       returnClarification,
+      saveExecutionGraphCheckpoint: agentRunId && agentRunService?.saveExecutionGraphCheckpoint
+        ? (checkpoint) => agentRunService.saveExecutionGraphCheckpoint({
+            accessScope,
+            checkpoint,
+            runId: agentRunId,
+          })
+        : null,
       selectedSkills,
       sessionId,
+      skillGraphMode,
       stepLifecycle,
       taskMemory: taskMemoryContext,
       userId,
@@ -608,6 +902,7 @@ export const runAgentRag = async ({
         arxivImportAnswer: executionResult.arxivImportAnswer,
         buildAgentObservability,
         customSkillResults: executionResult.customSkillResults,
+        customSkillGraphExecuted: executionResult.customSkillGraphExecuted,
         customSkills: executionResult.customSkills,
         discoveryAnswer: executionResult.discoveryAnswer,
         docIds,
@@ -641,6 +936,13 @@ export const runAgentRag = async ({
       userId,
     });
   } catch (error) {
+    if (error?.code === "AGENT_GRAPH_EXECUTION_FENCED") {
+      // A startup worker now owns this same run. The old request must stop,
+      // but marking the shared run failed here would race and cancel the
+      // worker that won the persisted graph claim.
+      throw error;
+    }
+
     if (isAgentRunInterrupt(error)) {
       const clarification = buildCapabilityApprovalClarification(error);
       const privateInterruptDetail =
@@ -670,6 +972,7 @@ export const runAgentRag = async ({
     await agentRunService?.failRun?.({
       accessScope,
       error,
+      graphResumeClaimId: null,
       runId: agentRunId,
     });
     throw error;

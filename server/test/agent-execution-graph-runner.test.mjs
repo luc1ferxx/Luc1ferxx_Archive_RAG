@@ -7,11 +7,19 @@ import {
   createExecutionGraph,
 } from "../rag/agent-execution-graph.js";
 import { runExecutionGraph } from "../rag/agent-execution-graph-runner.js";
+import { AGENT_INTERRUPT_TYPES, AgentRunInterruptError } from "../rag/agent-interrupts.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
+import { createBuiltInSkills } from "../rag/skills/built-ins.js";
 import {
+  CUSTOM_RAG_SKILL_INPUT_SCHEMA,
   CUSTOM_RAG_SKILL_CONTRACT,
+  CUSTOM_RAG_SKILL_OUTPUT_SCHEMA,
 } from "../rag/skills/custom/custom-skill-contract.js";
-import { SKILL_EFFECTS, SKILL_IDEMPOTENCY } from "../rag/skills/skill-contract.js";
+import {
+  SKILL_EFFECTS,
+  SKILL_IDEMPOTENCY,
+  SKILL_VALUE_TYPES,
+} from "../rag/skills/skill-contract.js";
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -60,18 +68,26 @@ const createBarrier = (size) => {
 const createTracker = (budgetState) =>
   createAgentSkillTracker({ budgetState, selectedSkills: [] });
 
+// Most scheduler fixtures predate the now-required abstained field. Keep
+// their success shape explicit while allowing raw malformed outputs in the
+// output-contract regressions below.
 const createSkill = ({
   budgetKey = "customSkillCalls",
   effects,
   execute,
   id,
+  inputSchema,
   label = id,
+  outputSchema,
   parallelSafe,
+  rawExecute = false,
   version = "1.0.0",
 }) => ({
   ...CUSTOM_RAG_SKILL_CONTRACT,
   budgetKey,
-  execute,
+  execute: rawExecute
+    ? execute
+    : async (context) => ({ abstained: false, ...(await execute(context)) }),
   id,
   kind: "custom",
   label,
@@ -79,6 +95,8 @@ const createSkill = ({
   requiresAccessScope: true,
   version,
   ...(effects === undefined ? {} : { effects }),
+  ...(inputSchema === undefined ? {} : { inputSchema }),
+  ...(outputSchema === undefined ? {} : { outputSchema }),
   ...(parallelSafe === undefined ? {} : { parallelSafe }),
 });
 
@@ -105,6 +123,7 @@ const node = ({
   rationale = `Run ${nodeId}.`,
   skillId,
   scope,
+  when,
 }) => ({
   dependsOn,
   failurePolicy,
@@ -116,17 +135,23 @@ const node = ({
   rationale,
   skillId,
   ...(scope === undefined ? {} : { scope }),
+  ...(when === undefined ? {} : { when }),
 });
 
 const runGraph = async ({
+  authorizedDocIds = null,
   authorizedSkillIds,
   budgetState = createAgentBudget(),
+  capabilityRegistry,
   completedNodeRuns,
   docIds = ["doc-1", "doc-2"],
   graph,
   maxConcurrency,
+  onNodeSettled,
   question = "Compare the two contracts and review the risks.",
+  ragService = {},
   registry,
+  retrievalPlan = { retrievalQueries: [{ id: "primary", query: "contract risks" }] },
   tracker = createTracker(budgetState),
 }) => {
   const budgetTrace = [];
@@ -137,21 +162,23 @@ const runGraph = async ({
     accessScope: { userId: "alice", workspaceId: "acme" },
     addBudgetLimitTrace: (step) => budgetTrace.push(step),
     addTraceStep: (step) => trace.push(step),
-    authorizedDocIds: docIds,
+    authorizedDocIds: authorizedDocIds ?? docIds,
     authorizedSkillIds: authorizedSkillIds ?? registry.list().map((skill) => skill.id),
     budgetState,
+    capabilityRegistry,
     buildSkillTraceDetail: tracker.buildSkillTraceDetail,
     completedNodeRuns,
     docIds,
     executeObservedSkill: tracker.executeObservedSkill,
     graph,
     maxConcurrency,
+    onNodeSettled,
     question,
-    ragService: {},
+    ragService,
     recordSkillResult: tracker.recordSkillResult,
     recordSkippedSkill: tracker.recordSkippedSkill,
     registry,
-    retrievalPlan: { retrievalQueries: [{ id: "primary", query: "contract risks" }] },
+    retrievalPlan,
     sessionId: "session-1",
     stepLifecycle: {
       completeStep: async (patch) => lifecycle.push({ verb: "complete", ...patch }),
@@ -163,6 +190,357 @@ const runGraph = async ({
 
   return { budgetState, budgetTrace, lifecycle, outcome, trace, tracker };
 };
+
+test("v3 runs a contracted non-custom node with a distinct graph lifecycle identity", async () => {
+  const calls = [];
+  const registry = createRegistry([{
+    ...createSkill({
+      budgetKey: "webSearchCalls",
+      effects: SKILL_EFFECTS.externalRead,
+      execute: async ({ capabilityRegistry, question }) => {
+        calls.push({ capabilityRegistry, question });
+        return { citations: [], text: "External evidence" };
+      },
+      id: "web_search",
+      inputSchema: { question: { required: true, type: SKILL_VALUE_TYPES.string } },
+      parallelSafe: false,
+    }),
+    idempotency: SKILL_IDEMPOTENCY.nondeterministic,
+    kind: "built_in",
+    replaySafe: false,
+    retryable: false,
+  }]);
+  const capabilityRegistry = { marker: "trusted-runtime-only" };
+  const graph = createExecutionGraph({
+    nodes: [node({
+      inputBindings: { question: requestField("question") },
+      nodeId: "web:search",
+      skillId: "web_search",
+    })],
+    version: "v3",
+  });
+
+  const { lifecycle, outcome, trace } = await runGraph({
+    capabilityRegistry,
+    docIds: [],
+    graph,
+    registry,
+  });
+
+  const expectedStepId = `agent_graph_node:${Buffer.from("web:search").toString("base64url")}`;
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.nodeRuns[0].stepId, expectedStepId);
+  assert.deepEqual(calls, [{ capabilityRegistry, question: "Compare the two contracts and review the risks." }]);
+  assert.deepEqual(lifecycle.map(({ type, id, verb }) => ({ type, id, verb })), [
+    { id: expectedStepId, type: "graph_node", verb: "start" },
+    { id: expectedStepId, type: undefined, verb: "complete" },
+  ]);
+  assert.equal(trace[0].type, "graph_node");
+});
+
+test("graph preflight interrupts before lifecycle start, budget charge, or adapter execution", async () => {
+  let executed = 0;
+  let started = 0;
+  let preflighted = 0;
+  const skill = createSkill({
+    execute: async () => {
+      executed += 1;
+      return { citations: [], text: "Unexpected execution" };
+    },
+    id: "approval_example",
+    parallelSafe: false,
+  });
+  const registry = createRegistry([skill]);
+  const budgetState = createAgentBudget();
+  const graph = createExecutionGraph({
+    nodes: [node({ nodeId: "write", skillId: skill.id })],
+    version: "v3",
+  });
+
+  await assert.rejects(
+    runExecutionGraph({
+      accessScope: { userId: "alice", workspaceId: "acme" },
+      authorizedDocIds: ["doc-1"],
+      authorizedSkillIds: [skill.id],
+      budgetState,
+      docIds: ["doc-1"],
+      executeObservedSkill: async () => {
+        executed += 1;
+        throw new Error("Unexpected adapter call");
+      },
+      graph,
+      preflightNode: ({ boundInputs, node: graphNode }) => {
+        preflighted += 1;
+        assert.equal(graphNode.nodeId, "write");
+        assert.deepEqual(boundInputs.docIds, ["doc-1"]);
+        assert.equal(budgetState.used.customSkillCalls, 0);
+        throw new AgentRunInterruptError({
+          type: AGENT_INTERRUPT_TYPES.capabilityApprovalRequired,
+        });
+      },
+      question: "Review a document",
+      registry,
+      stepLifecycle: {
+        startStep: async () => { started += 1; },
+        completeStep: async () => { throw new Error("Unexpected completion"); },
+        failStep: async () => { throw new Error("Unexpected failure step"); },
+      },
+    }),
+    (error) => error.agentRunInterrupt === true &&
+      error.executionGraphNodeRuns[0].status === "pending"
+  );
+  assert.equal(preflighted, 1);
+  assert.equal(started, 0);
+  assert.equal(executed, 0);
+  assert.equal(budgetState.used.customSkillCalls, 0);
+});
+
+const createDocumentFollowUpGraph = () => createExecutionGraph({
+  nodes: [
+    node({ nodeId: "primary", skillId: "document_rag" }),
+    node({
+      dependsOn: ["primary"],
+      inputBindings: {
+        docIds: requestField("docIds"),
+        evidence: nodeOutput("primary", "evidence"),
+        question: requestField("question"),
+      },
+      nodeId: "check",
+      skillId: "document_evidence_check",
+    }),
+    node({
+      dependsOn: ["check"],
+      inputBindings: {
+        docIds: requestField("docIds"),
+        question: nodeOutput("check", "followUpQuestion"),
+        retrievalPlan: nodeOutput("check", "followUpRetrievalPlan"),
+      },
+      nodeId: "follow-up",
+      skillId: "document_rag",
+      when: { equals: true, nodeId: "check", output: "retryRecommended" },
+    }),
+  ],
+  version: "v3",
+});
+
+test("v3 document evidence node schedules exactly one typed follow-up when support is missing", async () => {
+  const registry = createRegistry(createBuiltInSkills());
+  const docIds = ["doc-1", "doc-2"];
+  const calls = [];
+  const graph = createDocumentFollowUpGraph();
+  const primaryRetrievalPlan = {
+    phase: "primary",
+    retrievalQueries: [{ id: "primary", query: "contract risks" }],
+  };
+  const { outcome, budgetState } = await runGraph({
+    docIds,
+    graph,
+    ragService: {
+      chat: async (selectedDocIds, question, options) => {
+        calls.push({ selectedDocIds, question, options });
+        return calls.length === 1
+          ? { abstained: false, citations: [], text: "The agreements differ." }
+          : {
+              abstained: false,
+              citations: [{
+                docId: "doc-1",
+                excerpt: "The agreements differ in notice periods.",
+                fileName: "a.pdf",
+                pageNumber: 1,
+                rank: 1,
+              }],
+              text: "The agreements differ in notice periods. [Source 1]",
+            };
+      },
+    },
+    registry,
+    retrievalPlan: primaryRetrievalPlan,
+  });
+
+  assert.equal(outcome.status, "completed");
+  assert.deepEqual(outcome.nodeRuns.map((run) => run.status), [
+    "completed", "completed", "completed",
+  ]);
+  assert.equal(outcome.nodeRuns[1].result.graphOutput.retryRecommended, true);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.selectedDocIds), [docIds, docIds]);
+  assert.match(calls[1].question, /Evidence issue:/);
+  assert.equal(calls[0].options.retrievalPlan, primaryRetrievalPlan);
+  assert.deepEqual(
+    calls[1].options.retrievalPlan,
+    outcome.nodeRuns[1].result.graphOutput.followUpRetrievalPlan
+  );
+  assert.equal(calls[1].options.retrievalPlan.phase, "follow_up");
+  assert.notDeepEqual(calls[1].options.retrievalPlan, primaryRetrievalPlan);
+  assert.deepEqual(
+    calls[1].options.retrievalPlan.retrievalQueries.map(({ id }) => id),
+    ["primary", "follow-up-evidence", "follow-up-source-check"]
+  );
+  assert.equal(budgetState.used.documentRagCalls, 2);
+});
+
+test("v3 explicit document abstention does not schedule a follow-up RAG call", async () => {
+  const calls = [];
+  const { outcome, budgetState } = await runGraph({
+    graph: createDocumentFollowUpGraph(),
+    ragService: {
+      chat: async (...args) => {
+        calls.push(args);
+        return { abstained: true, citations: [], text: "Insufficient evidence." };
+      },
+    },
+    registry: createRegistry(createBuiltInSkills()),
+  });
+
+  assert.equal(outcome.status, "completed");
+  assert.deepEqual(outcome.nodeRuns.map((run) => run.status), [
+    "completed", "completed", "skipped",
+  ]);
+  assert.equal(outcome.nodeRuns[1].result.graphOutput.retryRecommended, false);
+  assert.equal(
+    Object.hasOwn(outcome.nodeRuns[1].result.graphOutput, "followUpRetrievalPlan"),
+    false
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(budgetState.used.documentRagCalls, 1);
+});
+
+test("v3 validates a document result before taking a conditional Web edge", async () => {
+  const order = [];
+  const builtIns = createBuiltInSkills();
+  const registry = createRegistry(builtIns.filter(
+    (skill) => ["document_rag", "web_search"].includes(skill.id)
+  ));
+  const ragService = {
+    chat: async (selectedDocIds, requestQuestion, options) => {
+      order.push("document_rag");
+      assert.deepEqual(selectedDocIds, ["doc-1", "doc-2"]);
+      assert.equal(options.accessScope.userId, "alice");
+      assert.equal(requestQuestion, "Compare the two contracts and review the risks.");
+      return { abstained: true, citations: [], text: "Insufficient document evidence." };
+    },
+  };
+  const capabilityRegistry = {
+    execute: async (capabilityId, args) => {
+      order.push("web_search");
+      assert.equal(capabilityId, "web.search");
+      assert.equal(args.accessScope.workspaceId, "acme");
+      return { citations: [{ url: "https://example.test/source" }], text: "External context." };
+    },
+  };
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "document", skillId: "document_rag" }),
+      node({
+        dependsOn: ["document"],
+        inputBindings: { question: requestField("question") },
+        nodeId: "web",
+        skillId: "web_search",
+        when: { equals: true, nodeId: "document", output: "abstained" },
+      }),
+    ],
+    version: "v3",
+  });
+
+  const { budgetState, outcome, trace } = await runGraph({
+    capabilityRegistry,
+    graph,
+    ragService,
+    registry,
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(order, ["document_rag", "web_search"]);
+  assert.deepEqual(outcome.nodeRuns.map((run) => run.status), ["completed", "completed"]);
+  assert.deepEqual(trace.map((step) => step.type), ["graph_node", "graph_node"]);
+  assert.equal(getBudgetSnapshot(budgetState).used.documentRagCalls, 1);
+  assert.equal(getBudgetSnapshot(budgetState).used.webSearchCalls, 1);
+});
+
+test("a typed upstream docIds output cannot widen the request scope", async () => {
+  const executed = [];
+  const source = createSkill({
+    execute: async () => ({
+      citations: [],
+      docIds: ["foreign-doc"],
+      text: "Select foreign document",
+    }),
+    id: "select_documents",
+    outputSchema: {
+      ...CUSTOM_RAG_SKILL_OUTPUT_SCHEMA,
+      docIds: { required: true, type: SKILL_VALUE_TYPES.stringArray },
+    },
+  });
+  const target = createSkill({
+    execute: async () => { executed.push("target"); return { citations: [], text: "read" }; },
+    id: "read_documents",
+  });
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "source", skillId: source.id }),
+      node({
+        dependsOn: ["source"],
+        inputBindings: {
+          docIds: nodeOutput("source", "docIds"),
+          question: requestField("question"),
+        },
+        nodeId: "target",
+        skillId: target.id,
+      }),
+    ],
+  });
+
+  const { budgetState, outcome } = await runGraph({
+    graph,
+    registry: createRegistry([source, target]),
+  });
+
+  assert.deepEqual(executed, []);
+  assert.equal(outcome.nodeRuns[0].status, "completed");
+  assert.equal(outcome.nodeRuns[1].status, "failed");
+  assert.match(outcome.nodeRuns[1].result.error.message, /authorized request/);
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 1);
+});
+
+test("a dynamic empty scoped document list fails before adapter execution or budget", async () => {
+  const executed = [];
+  const source = createSkill({
+    execute: async () => ({ citations: [], docIds: [], text: "No matches" }),
+    id: "select_documents",
+    outputSchema: {
+      ...CUSTOM_RAG_SKILL_OUTPUT_SCHEMA,
+      docIds: { required: true, type: SKILL_VALUE_TYPES.stringArray },
+    },
+  });
+  const target = createSkill({
+    execute: async () => { executed.push("target"); return { citations: [], text: "read" }; },
+    id: "read_documents",
+  });
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "source", skillId: source.id }),
+      node({
+        dependsOn: ["source"],
+        inputBindings: {
+          docIds: nodeOutput("source", "docIds"),
+          question: requestField("question"),
+        },
+        nodeId: "target",
+        skillId: target.id,
+      }),
+    ],
+  });
+
+  const { budgetState, outcome } = await runGraph({
+    graph,
+    registry: createRegistry([source, target]),
+  });
+
+  assert.deepEqual(executed, []);
+  assert.equal(outcome.nodeRuns[1].status, "failed");
+  assert.match(outcome.nodeRuns[1].result.error.message, /at least one document/);
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 1);
+});
 
 // ---------------------------------------------------------------------------
 // Scenario D -- an illegal graph is refused as a whole
@@ -370,6 +748,39 @@ test("runExecutionGraph narrows docIds to the node scope without widening the re
   assert.deepEqual(seenDocIds, [["doc-2"], ["doc-1", "doc-2"]]);
 });
 
+test("runExecutionGraph rejects out-of-scope request docIds even without node scope", async () => {
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async ({ docIds }) => {
+        executed.push([...docIds]);
+        return { citations: [], text: "must not run" };
+      },
+      id: "compare_documents",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
+  });
+
+  const { budgetState, lifecycle, outcome, trace } = await runGraph({
+    authorizedDocIds: ["doc-1"],
+    docIds: ["doc-1", "doc-2"],
+    graph,
+    registry,
+  });
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.errors[0].code, EXECUTION_GRAPH_REASON_CODES.outOfScopeDocument);
+  assert.deepEqual(outcome.nodeRuns, []);
+  assert.deepEqual(outcome.results, []);
+  assert.deepEqual(executed, []);
+  assert.deepEqual(lifecycle, []);
+  assert.deepEqual(trace, []);
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 0);
+});
+
 // ---------------------------------------------------------------------------
 // Scenario B -- dependency ordering
 // ---------------------------------------------------------------------------
@@ -430,6 +841,151 @@ test("runExecutionGraph does not start a dependent node before its dependency re
   const { outcome } = await pending;
 
   assert.deepEqual(started, ["compare", "risk_delta"]);
+  assert.equal(outcome.status, "completed");
+});
+
+test("v2 false condition skips without execution or budget and propagates dependencySkipped", async () => {
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("gate");
+        return { citations: [], proceed: false, text: "No follow-up needed." };
+      },
+      id: "gate",
+      outputSchema: { proceed: { type: SKILL_VALUE_TYPES.boolean, required: true } },
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("conditional");
+        return { citations: [], text: "conditional" };
+      },
+      id: "conditional",
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("downstream");
+        return { citations: [], text: "downstream" };
+      },
+      id: "downstream",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    version: "v2",
+    nodes: [
+      node({ nodeId: "gate", skillId: "gate" }),
+      node({
+        dependsOn: ["gate"],
+        nodeId: "conditional",
+        skillId: "conditional",
+        when: { nodeId: "gate", output: "proceed", equals: true },
+      }),
+      node({ dependsOn: ["conditional"], nodeId: "downstream", skillId: "downstream" }),
+    ],
+  });
+
+  const { budgetState, lifecycle, outcome } = await runGraph({ graph, registry });
+
+  assert.deepEqual(executed, ["gate"]);
+  assert.deepEqual(outcome.nodeRuns.map(({ status, reason }) => ({ status, reason })), [
+    { status: "completed", reason: null },
+    { status: "skipped", reason: "condition_not_met" },
+    { status: "skipped", reason: "dependency_skipped" },
+  ]);
+  assert.equal(outcome.status, "completed");
+  assert.equal(outcome.ok, true);
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 1);
+  assert.deepEqual(lifecycle.filter(({ verb }) => verb === "start").map(({ id }) => id), [
+    "custom_skill:gate",
+  ]);
+});
+
+test("v2 true condition waits for the validated source checkpoint", async () => {
+  const executed = [];
+  const checkpointEntered = createDeferred();
+  const releaseCheckpoint = createDeferred();
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("gate");
+        return { citations: [], proceed: true, text: "Proceed." };
+      },
+      id: "gate",
+      outputSchema: { proceed: { type: SKILL_VALUE_TYPES.boolean, required: true } },
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("conditional");
+        return { citations: [], text: "Done." };
+      },
+      id: "conditional",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    version: "v2",
+    nodes: [
+      node({ nodeId: "gate", skillId: "gate" }),
+      node({
+        dependsOn: ["gate"],
+        nodeId: "conditional",
+        skillId: "conditional",
+        when: { nodeId: "gate", output: "proceed", equals: true },
+      }),
+    ],
+  });
+  const pending = runGraph({
+    graph,
+    registry,
+    onNodeSettled: async ({ nodeRun }) => {
+      if (nodeRun.nodeId === "gate") {
+        checkpointEntered.resolve();
+        await releaseCheckpoint.promise;
+      }
+    },
+  });
+
+  await checkpointEntered.promise;
+  assert.deepEqual(executed, ["gate"]);
+  releaseCheckpoint.resolve();
+
+  const { budgetState, outcome } = await pending;
+  assert.deepEqual(executed, ["gate", "conditional"]);
+  assert.equal(outcome.status, "completed");
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 2);
+});
+
+test("v2 condition can take the false-valued branch", async () => {
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => ({ citations: [], proceed: false, text: "No extra evidence." }),
+      id: "gate",
+      outputSchema: { proceed: { type: SKILL_VALUE_TYPES.boolean, required: true } },
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("no_follow_up");
+        return { citations: [], text: "Answer directly." };
+      },
+      id: "no_follow_up",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    version: "v2",
+    nodes: [
+      node({ nodeId: "gate", skillId: "gate" }),
+      node({
+        dependsOn: ["gate"],
+        nodeId: "no_follow_up",
+        skillId: "no_follow_up",
+        when: { nodeId: "gate", output: "proceed", equals: false },
+      }),
+    ],
+  });
+
+  const { outcome } = await runGraph({ graph, registry });
+
+  assert.deepEqual(executed, ["no_follow_up"]);
   assert.equal(outcome.status, "completed");
 });
 
@@ -656,6 +1212,7 @@ test("runExecutionGraph reserves budget before launch and skips nodes it cannot 
 
   assert.equal(executed.length, 2);
   assert.equal(outcome.status, "partial");
+  assert.equal(outcome.ok, false);
   assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 2);
 
   const skipped = outcome.nodeRuns.filter((run) => run.status === "skipped");
@@ -766,6 +1323,7 @@ test("runExecutionGraph skips dependents of a failed node and reports the reason
   const byNodeId = new Map(outcome.nodeRuns.map((run) => [run.nodeId, run]));
 
   assert.equal(outcome.status, "partial");
+  assert.equal(outcome.ok, false);
   assert.equal(byNodeId.get("compare").status, "failed");
   assert.equal(byNodeId.get("risk_delta").status, "skipped");
   assert.equal(byNodeId.get("risk_delta").reason, "dependency_failed");
@@ -978,7 +1536,7 @@ test("runExecutionGraph reuses a node run a previous replan had already reused",
   assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 0);
 });
 
-test("runExecutionGraph ignores a completed node run whose skill no longer matches the node", async () => {
+test("runExecutionGraph refuses a completed node run whose skill no longer matches the node", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -994,7 +1552,7 @@ test("runExecutionGraph ignores a completed node run whose skill no longer match
     nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
   });
 
-  const { outcome } = await runGraph({
+  await assert.rejects(runGraph({
     completedNodeRuns: [
       {
         nodeId: "compare",
@@ -1005,10 +1563,9 @@ test("runExecutionGraph ignores a completed node run whose skill no longer match
     ],
     graph,
     registry,
-  });
+  }), { code: "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY" });
 
-  assert.deepEqual(executed, ["compare"]);
-  assert.equal(outcome.nodeRuns[0].status, "completed");
+  assert.deepEqual(executed, []);
 });
 
 // ---------------------------------------------------------------------------
@@ -1242,4 +1799,722 @@ test("runExecutionGraph persists the upstream-bound input with the step so a rep
     Object.hasOwn(startedInput.get("custom_skill:compare"), "priorFindings"),
     false
   );
+});
+
+test("runExecutionGraph fails malformed success before a dependent can consume it", async () => {
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+
+        // Registry normalization would turn missing text into an empty string.
+        return { abstained: false, citations: [] };
+      },
+      id: "compare_documents",
+      rawExecute: true,
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("risk");
+
+        return { citations: [], text: "should not run" };
+      },
+      id: "risk_review",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({
+        failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.continue,
+        nodeId: "compare",
+        skillId: "compare_documents",
+      }),
+      node({
+        dependsOn: ["compare"],
+        inputBindings: {
+          docIds: requestField("docIds"),
+          priorFindings: nodeOutput("compare", "text"),
+          question: requestField("question"),
+        },
+        nodeId: "risk",
+        skillId: "risk_review",
+      }),
+    ],
+  });
+
+  const { lifecycle, outcome, trace, tracker } = await runGraph({ graph, registry });
+
+  assert.deepEqual(executed, ["compare"]);
+  assert.equal(outcome.status, "partial");
+  assert.equal(outcome.nodeRuns[0].status, "failed");
+  assert.equal(outcome.nodeRuns[0].result.error.name, "SkillOutputContractError");
+  assert.equal(outcome.nodeRuns[1].status, "skipped");
+  assert.equal(outcome.nodeRuns[1].reason, "dependency_failed");
+  assert.deepEqual(lifecycle.map((entry) => entry.verb), ["start", "fail"]);
+  assert.equal(trace[0].status, "failed");
+  assert.equal(tracker.getSkillObservations()[0].status, "failed");
+});
+
+test("runExecutionGraph rejects a wrong output type without forwarding citations", async () => {
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => ({ abstained: false, citations: "doc-1", text: "bad" }),
+      id: "compare_documents",
+      rawExecute: true,
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
+  });
+
+  const { outcome } = await runGraph({ graph, registry });
+
+  assert.equal(outcome.nodeRuns[0].status, "failed");
+  assert.match(outcome.nodeRuns[0].result.error.message, /citations must be citation\[\]/);
+  assert.deepEqual(outcome.nodeRuns[0].result.citations, []);
+});
+
+test("runExecutionGraph applies fail_fast when a skill returns malformed output", async () => {
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+
+        return { abstained: false, citations: [], text: undefined };
+      },
+      id: "compare_documents",
+      rawExecute: true,
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("risk");
+
+        return { citations: [], text: "should not run" };
+      },
+      id: "risk_review",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "compare", skillId: "compare_documents" }),
+      node({ nodeId: "risk", skillId: "risk_review" }),
+    ],
+  });
+
+  const { outcome } = await runGraph({ graph, maxConcurrency: 1, registry });
+
+  assert.deepEqual(executed, ["compare"]);
+  assert.equal(outcome.nodeRuns[0].status, "failed");
+  assert.equal(outcome.nodeRuns[1].status, "skipped");
+  assert.equal(outcome.nodeRuns[1].reason, "aborted_after_failure");
+});
+
+test("runExecutionGraph rejects a concrete request input with the wrong type before calling the skill", async () => {
+  let executions = 0;
+  const budgetState = createAgentBudget({ maxCustomSkillCalls: 1 });
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executions += 1;
+
+        return { citations: [], text: "should not run" };
+      },
+      id: "compare_documents",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
+  });
+
+  const { lifecycle, outcome, tracker } = await runGraph({
+    budgetState,
+    graph,
+    question: 42,
+    registry,
+  });
+
+  assert.equal(executions, 0);
+  assert.equal(outcome.nodeRuns[0].status, "failed");
+  assert.equal(outcome.nodeRuns[0].result.error.name, "SkillInputContractError");
+  assert.deepEqual(lifecycle.map((entry) => entry.verb), ["start", "fail"]);
+  assert.equal(tracker.getSkillObservations()[0].status, "failed");
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 0);
+});
+
+test("runExecutionGraph blocks invalid resolved input even when an observer ignores validation hooks", async () => {
+  let observerCalls = 0;
+  let executions = 0;
+  const budgetState = createAgentBudget({ maxCustomSkillCalls: 1 });
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executions += 1;
+        return { citations: [], text: "must not run" };
+      },
+      id: "compare_documents",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
+  });
+
+  const outcome = await runExecutionGraph({
+    accessScope: { userId: "alice", workspaceId: "acme" },
+    authorizedDocIds: ["doc-1"],
+    budgetState,
+    docIds: ["doc-1"],
+    executeObservedSkill: async (skill, context) => {
+      observerCalls += 1;
+      return { ok: true, ...(await skill.execute(context)) };
+    },
+    graph,
+    question: 42,
+    registry,
+    stepLifecycle: {
+      runStep: async ({ execute }) => execute(),
+    },
+  });
+
+  assert.equal(observerCalls, 0);
+  assert.equal(executions, 0);
+  assert.equal(outcome.nodeRuns[0].result.error.name, "SkillInputContractError");
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 0);
+});
+
+test("runExecutionGraph still supplies runtime identity to the Skill context", async () => {
+  let observedIdentity = null;
+  const registry = createRegistry([
+    createSkill({
+      execute: async ({ sessionId, userId }) => {
+        observedIdentity = { sessionId, userId };
+        return { citations: [], text: "done" };
+      },
+      id: "compare_documents",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
+  });
+
+  const { outcome } = await runGraph({ graph, registry });
+
+  assert.equal(outcome.status, "completed");
+  assert.deepEqual(observedIdentity, { sessionId: "session-1", userId: "alice" });
+});
+
+test("runExecutionGraph treats a null optional retrieval plan as absent", async () => {
+  const observed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async ({ retrievalPlan }) => {
+        observed.push(retrievalPlan);
+
+        return { citations: [], text: "without a retrieval plan" };
+      },
+      id: "compare_documents",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({
+        inputBindings: {
+          docIds: requestField("docIds"),
+          question: requestField("question"),
+          retrievalPlan: requestField("retrievalPlan"),
+        },
+        nodeId: "compare",
+        skillId: "compare_documents",
+      }),
+    ],
+  });
+
+  const { outcome } = await runGraph({ graph, registry, retrievalPlan: null });
+
+  assert.equal(outcome.status, "completed");
+  assert.deepEqual(observed, [null]);
+});
+
+test("runExecutionGraph fails a required input absent from an optional upstream output", async () => {
+  const executed = [];
+  const budgetState = createAgentBudget({ maxCustomSkillCalls: 2 });
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+
+        return { citations: [], text: "comparison" };
+      },
+      id: "compare_documents",
+      outputSchema: {
+        ...CUSTOM_RAG_SKILL_OUTPUT_SCHEMA,
+        delta: { required: false, type: SKILL_VALUE_TYPES.string },
+      },
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("risk");
+
+        return { citations: [], text: "should not run" };
+      },
+      id: "risk_review",
+      inputSchema: {
+        ...CUSTOM_RAG_SKILL_INPUT_SCHEMA,
+        delta: { required: true, type: SKILL_VALUE_TYPES.string },
+      },
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "compare", skillId: "compare_documents" }),
+      node({
+        dependsOn: ["compare"],
+        inputBindings: {
+          delta: nodeOutput("compare", "delta"),
+          docIds: requestField("docIds"),
+          question: requestField("question"),
+        },
+        nodeId: "risk",
+        skillId: "risk_review",
+      }),
+    ],
+  });
+
+  const { outcome } = await runGraph({ budgetState, graph, registry });
+
+  assert.deepEqual(executed, ["compare"]);
+  assert.equal(outcome.nodeRuns[0].status, "completed");
+  assert.equal(outcome.nodeRuns[1].status, "failed");
+  assert.equal(outcome.nodeRuns[1].result.error.name, "SkillInputContractError");
+  assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 1);
+});
+
+test("runExecutionGraph refuses a malformed completed output without repeating effects", async () => {
+  let executions = 0;
+  const registry = createRegistry([
+    createSkill({
+      effects: SKILL_EFFECTS.externalWrite,
+      execute: async () => {
+        executions += 1;
+
+        return { citations: [], text: "fresh" };
+      },
+      id: "compare_documents",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
+  });
+
+  await assert.rejects(runGraph({
+    completedNodeRuns: [
+      {
+        nodeId: "compare",
+        result: {
+          abstained: false,
+          ok: true,
+          skillId: "compare_documents",
+          skillVersion: "1.0.0",
+          text: "checkpoint missing citations",
+        },
+        status: "completed",
+      },
+    ],
+    graph,
+    registry,
+  }), { code: "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY" });
+
+  assert.equal(executions, 0);
+});
+
+test("runExecutionGraph refuses a completed output whose typed envelope disagrees with the saved result", async () => {
+  let executions = 0;
+  const registry = createRegistry([
+    createSkill({
+      effects: SKILL_EFFECTS.workspaceWrite,
+      execute: async () => {
+        executions += 1;
+        return { citations: [], text: "fresh" };
+      },
+      id: "compare_documents",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
+  });
+
+  await assert.rejects(runGraph({
+    completedNodeRuns: [{
+      nodeId: "compare",
+      result: {
+        abstained: false,
+        citations: [],
+        graphOutput: { abstained: false, citations: [], text: "different evidence" },
+        ok: true,
+        skillId: "compare_documents",
+        skillVersion: "1.0.0",
+        text: "saved answer",
+      },
+      skillId: "compare_documents",
+      status: "completed",
+    }],
+    graph,
+    registry,
+  }), { code: "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY" });
+  assert.equal(executions, 0);
+});
+
+test("runExecutionGraph forwards only validated declared structured outputs", async () => {
+  const observed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => ({
+        abstained: false,
+        citations: [],
+        text: "comparison",
+        value: { differences: { clause: "renewal" }, undeclared: "discard me" },
+      }),
+      id: "compare_documents",
+      outputSchema: {
+        ...CUSTOM_RAG_SKILL_OUTPUT_SCHEMA,
+        differences: { required: true, type: SKILL_VALUE_TYPES.object },
+      },
+      rawExecute: true,
+    }),
+    createSkill({
+      execute: async ({ differences }) => {
+        observed.push(differences);
+
+        return { citations: [], text: "reviewed" };
+      },
+      id: "risk_review",
+      inputSchema: {
+        ...CUSTOM_RAG_SKILL_INPUT_SCHEMA,
+        differences: { required: true, type: SKILL_VALUE_TYPES.object },
+      },
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "compare", skillId: "compare_documents" }),
+      node({
+        dependsOn: ["compare"],
+        inputBindings: {
+          differences: nodeOutput("compare", "differences"),
+          docIds: requestField("docIds"),
+          question: requestField("question"),
+        },
+        nodeId: "risk",
+        skillId: "risk_review",
+      }),
+    ],
+  });
+
+  const { lifecycle, outcome } = await runGraph({ graph, registry });
+
+  assert.equal(outcome.status, "completed");
+  assert.deepEqual(observed, [{ clause: "renewal" }]);
+  assert.deepEqual(outcome.nodeRuns[0].result.graphOutput, {
+    abstained: false,
+    citations: [],
+    differences: { clause: "renewal" },
+    text: "comparison",
+  });
+  assert.deepEqual(
+    lifecycle.find((entry) => entry.id === "custom_skill:risk" && entry.verb === "start")
+      .input.boundInputs.differences,
+    { clause: "renewal" }
+  );
+  assert.equal(Object.hasOwn(outcome.nodeRuns[0].result.graphOutput, "undeclared"), false);
+});
+
+test("runExecutionGraph awaits checkpoint before launching a dependent node", async () => {
+  const checkpointEntered = createDeferred();
+  const releaseCheckpoint = createDeferred();
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+
+        return { citations: [], text: "comparison" };
+      },
+      id: "compare_documents",
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("risk");
+
+        return { citations: [], text: "review" };
+      },
+      id: "risk_review",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "compare", skillId: "compare_documents" }),
+      node({ dependsOn: ["compare"], nodeId: "risk", skillId: "risk_review" }),
+    ],
+  });
+  const pending = runGraph({
+    graph,
+    onNodeSettled: async ({ nodeRun }) => {
+      if (nodeRun.nodeId === "compare") {
+        checkpointEntered.resolve();
+        await releaseCheckpoint.promise;
+      }
+    },
+    registry,
+  });
+
+  await checkpointEntered.promise;
+  assert.deepEqual(executed, ["compare"]);
+  releaseCheckpoint.resolve();
+  const { outcome } = await pending;
+  assert.equal(outcome.status, "completed");
+  assert.deepEqual(executed, ["compare", "risk"]);
+});
+
+test("a parallel sibling cannot wake dependents while their checkpoint is pending", async () => {
+  const checkpointEntered = createDeferred();
+  const releaseCheckpoint = createDeferred();
+  const siblingSettled = createDeferred();
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+
+        return { citations: [], text: "comparison" };
+      },
+      id: "compare_documents",
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("summary");
+
+        return { citations: [], text: "summary" };
+      },
+      id: "summarize_contract",
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("risk");
+
+        return { citations: [], text: "review" };
+      },
+      id: "risk_review",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "compare", skillId: "compare_documents" }),
+      node({ nodeId: "summary", skillId: "summarize_contract" }),
+      node({ dependsOn: ["compare"], nodeId: "risk", skillId: "risk_review" }),
+    ],
+  });
+  const pending = runGraph({
+    budgetState: createAgentBudget({ maxCustomSkillCalls: 3 }),
+    graph,
+    maxConcurrency: 2,
+    onNodeSettled: async ({ nodeRun }) => {
+      if (nodeRun.nodeId === "compare") {
+        checkpointEntered.resolve();
+        await releaseCheckpoint.promise;
+      } else if (nodeRun.nodeId === "summary") {
+        siblingSettled.resolve();
+      }
+    },
+    registry,
+  });
+
+  await Promise.all([checkpointEntered.promise, siblingSettled.promise]);
+  // Let the scheduling loop react to the sibling's completion. This checks a
+  // state transition, not an elapsed-time or throughput threshold.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(executed, ["compare", "summary"]);
+  releaseCheckpoint.resolve();
+  const { outcome } = await pending;
+  assert.equal(outcome.status, "completed");
+  assert.deepEqual(executed, ["compare", "summary", "risk"]);
+});
+
+test("runExecutionGraph stops before dependents when checkpoint persistence fails", async () => {
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+
+        return { citations: [], text: "comparison" };
+      },
+      id: "compare_documents",
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("risk");
+
+        return { citations: [], text: "review" };
+      },
+      id: "risk_review",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "compare", skillId: "compare_documents" }),
+      node({ dependsOn: ["compare"], nodeId: "risk", skillId: "risk_review" }),
+    ],
+  });
+
+  await assert.rejects(
+    runGraph({
+      graph,
+      onNodeSettled: async () => {
+        throw new Error("checkpoint unavailable");
+      },
+      registry,
+    }),
+    /checkpoint unavailable/
+  );
+  assert.deepEqual(executed, ["compare"]);
+});
+
+test("a sibling checkpoint success cannot hide a same-turn checkpoint failure", async () => {
+  const bothSettling = createDeferred();
+  const releaseSuccessfulCheckpoint = createDeferred();
+  const failOtherCheckpoint = createDeferred();
+  const executed = [];
+  let settlingCount = 0;
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+        return { citations: [], text: "comparison" };
+      },
+      id: "compare_documents",
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("summary");
+        return { citations: [], text: "summary" };
+      },
+      id: "summarize_contract",
+    }),
+    createSkill({
+      effects: SKILL_EFFECTS.workspaceWrite,
+      execute: async () => {
+        executed.push("write");
+        return { citations: [], text: "written" };
+      },
+      id: "publish_report",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "compare", skillId: "compare_documents" }),
+      node({ nodeId: "summary", skillId: "summarize_contract" }),
+      node({ nodeId: "write", skillId: "publish_report" }),
+    ],
+  });
+  const pending = runGraph({
+    budgetState: createAgentBudget({ maxCustomSkillCalls: 3 }),
+    graph,
+    maxConcurrency: 2,
+    onNodeSettled: async ({ nodeRun }) => {
+      settlingCount += 1;
+
+      if (settlingCount === 2) {
+        bothSettling.resolve();
+      }
+
+      if (nodeRun.nodeId === "compare") {
+        await failOtherCheckpoint.promise;
+      } else if (nodeRun.nodeId === "summary") {
+        await releaseSuccessfulCheckpoint.promise;
+      }
+    },
+    registry,
+  });
+
+  await bothSettling.promise;
+  assert.deepEqual(executed, ["compare", "summary"]);
+  // These resolutions occur in one turn. Promise.race may observe the success
+  // first, but the failure must still remain visible before scheduling write.
+  releaseSuccessfulCheckpoint.resolve();
+  failOtherCheckpoint.reject(new Error("compare checkpoint failed"));
+
+  await assert.rejects(pending, /compare checkpoint failed/);
+  assert.deepEqual(executed, ["compare", "summary"]);
+});
+
+test("checkpoint failure drains already-running siblings before rejecting", async () => {
+  const bothSettling = createDeferred();
+  const failCheckpoint = createDeferred();
+  const releaseSibling = createDeferred();
+  const executed = [];
+  let settlingCount = 0;
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+        return { citations: [], text: "comparison" };
+      },
+      id: "compare_documents",
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("summary");
+        return { citations: [], text: "summary" };
+      },
+      id: "summarize_contract",
+    }),
+    createSkill({
+      effects: SKILL_EFFECTS.workspaceWrite,
+      execute: async () => {
+        executed.push("write");
+        return { citations: [], text: "written" };
+      },
+      id: "publish_report",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ nodeId: "compare", skillId: "compare_documents" }),
+      node({ nodeId: "summary", skillId: "summarize_contract" }),
+      node({ nodeId: "write", skillId: "publish_report" }),
+    ],
+  });
+  const pending = runGraph({
+    budgetState: createAgentBudget({ maxCustomSkillCalls: 3 }),
+    graph,
+    maxConcurrency: 2,
+    onNodeSettled: async ({ nodeRun }) => {
+      settlingCount += 1;
+
+      if (settlingCount === 2) {
+        bothSettling.resolve();
+      }
+
+      if (nodeRun.nodeId === "compare") {
+        await failCheckpoint.promise;
+      } else if (nodeRun.nodeId === "summary") {
+        await releaseSibling.promise;
+      }
+    },
+    registry,
+  });
+
+  await bothSettling.promise;
+  let finished = false;
+  pending.finally(() => { finished = true; }).catch(() => {});
+  failCheckpoint.reject(new Error("compare checkpoint failed"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(finished, false, "the in-flight sibling must settle before rejection");
+  assert.deepEqual(executed, ["compare", "summary"]);
+
+  releaseSibling.resolve();
+  await assert.rejects(pending, /compare checkpoint failed/);
+  assert.equal(finished, true);
+  assert.deepEqual(executed, ["compare", "summary"]);
 });

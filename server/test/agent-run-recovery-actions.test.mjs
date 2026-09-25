@@ -21,7 +21,7 @@ const accessScope = {
 const createManualRecoveryRun = async (agentRunService) => {
   await agentRunService.createRun({
     accessScope,
-    goal: "Resume document answer",
+    goal: "Resume read-only custom answer",
     runId: "run-manual",
   });
   await agentRunService.updateRun({
@@ -37,14 +37,15 @@ const createManualRecoveryRun = async (agentRunService) => {
       status: AGENT_RUN_STATUSES.waitingForUser,
       steps: [
         {
-          id: "step-document",
+          id: "step-custom",
           input: {
             docIds: ["doc-1"],
             question: "What changed?",
+            skillId: "read_only_probe",
           },
-          type: "document_rag",
+          type: "custom_skill",
           kind: "tool_call",
-          label: "Document RAG",
+          label: "Read-only custom skill",
           status: "paused",
         },
       ],
@@ -261,6 +262,7 @@ test("agent run recovery actions expose blocked replay safety reasons", async ()
   );
   assert.deepEqual(missingInputRun.recovery.replaySafety.reasonCodes, [
     STEP_REPLAY_SAFETY_REASON_CODES.missingInput,
+    STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
   ]);
   assert.deepEqual(missingInputRun.recovery.replaySafety.steps[0].missingInput, [
     "question",
@@ -304,7 +306,7 @@ test("agent run recovery actions execute through the step executor", async () =>
   assert.deepEqual(calls, [
     {
       runId: "run-manual",
-      stepId: "step-document",
+      stepId: "step-custom",
       type: "resume",
     },
   ]);

@@ -29,7 +29,7 @@ const validateRuntimeSmokeReport = (report = {}) => {
   });
   addMismatch({
     actual: report.version,
-    expected: "1.0.0",
+    expected: "1.1.0",
     id: "version",
     issues,
   });
@@ -65,6 +65,18 @@ const validateRuntimeSmokeReport = (report = {}) => {
       intentPlannerStatus: "selected",
     },
     id: "checks.planners",
+    issues,
+  });
+  addMismatch({
+    actual: checks.skillGraph,
+    expected: {
+      bothRunsExecuted: true,
+      bothRunsPlannedByLlm: true,
+      fallbackCount: 0,
+      mode: "guarded",
+      skillIds: ["risk_review", "summarize_contract"],
+    },
+    id: "checks.skillGraph",
     issues,
   });
   addMismatch({
@@ -119,6 +131,7 @@ const validateRolloutReadinessReport = ({ report = {}, reports = {} } = {}) => {
     recoveryPayload: reports["recovery-observability"] ?? null,
     runtimeSmokePayload: reports["runtime-smoke"] ?? null,
     plannerRuntime: RELEASE_PLANNER_RUNTIME,
+    skillGraphRollout: "guarded",
   });
   const actualProjection = {
     summary: report.summary ?? null,

@@ -1,5 +1,7 @@
 import { AGENT_RUN_STEP_KINDS } from "./agent-run-steps.js";
 import { AGENT_RUN_STATUSES } from "./agent-runs.js";
+import { EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY } from "./agent-execution-graph-checkpoint.js";
+import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
 import {
   buildCapabilityResumeResponse,
   createDefaultAgentRunStepHandlerRegistry,
@@ -49,6 +51,33 @@ const fail = (message, status = 409) => {
   const error = new Error(message);
   error.status = status;
   throw error;
+};
+
+// Public run projections omit the checkpoint. Combine that projection with the
+// private checkpoint for the same pure guard used inside run-store CAS updates.
+const assertStandaloneReplayAllowed = async ({
+  accessScope,
+  agentRunService,
+  gateId = "",
+  run,
+  runId,
+  step,
+} = {}) => {
+  const loaded = await agentRunService.getExecutionGraphCheckpoint?.({ accessScope, runId });
+  const checkpoint = loaded?.checkpoint;
+  assertStandaloneGraphReplayAllowed({
+    gateId,
+    run: checkpoint
+      ? {
+          ...run,
+          result: {
+            ...run?.result,
+            [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: checkpoint,
+          },
+        }
+      : run,
+    stepId: step?.id,
+  });
 };
 
 export const createAgentRunStepExecutor = ({
@@ -148,6 +177,14 @@ export const createAgentRunStepExecutor = ({
         fail("Agent run step not found.", 404);
       }
 
+      await assertStandaloneReplayAllowed({
+        accessScope,
+        agentRunService,
+        run: existingRun,
+        runId,
+        step,
+      });
+
       const runningRun =
         existingRun.status === AGENT_RUN_STATUSES.running
           ? existingRun
@@ -197,7 +234,17 @@ export const createAgentRunStepExecutor = ({
       runId,
     } = {}) {
       const normalizedAction = normalizeAction(action);
-      const normalizedGateId = normalizeText(gateId);
+      const normalizedGateId = normalizeText(gateId) || normalizeText(payload?.gateId);
+      const existingRun = await agentRunService.getRun({ accessScope, runId });
+
+      await assertStandaloneReplayAllowed({
+        accessScope,
+        agentRunService,
+        gateId: normalizedGateId,
+        run: existingRun,
+        runId,
+      });
+
       const run = await agentRunService.applyApprovalAction({
         accessScope,
         action: normalizedAction,
@@ -242,6 +289,14 @@ export const createAgentRunStepExecutor = ({
       if (!originalStep) {
         fail("Agent run step not found.", 404);
       }
+
+      await assertStandaloneReplayAllowed({
+        accessScope,
+        agentRunService,
+        run: existingRun,
+        runId,
+        step: originalStep,
+      });
 
       const handler = resolveStepHandler({
         run: existingRun,

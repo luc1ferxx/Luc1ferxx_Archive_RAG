@@ -11,6 +11,7 @@ import {
   getAgentExecutionPlanner,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
+  getAgentSkillGraphRollout,
 } from "../rag/config.js";
 import {
   attachEvaluationEvidence,
@@ -31,6 +32,62 @@ const toRunId = (createdAt) =>
   `rollout-readiness-${createdAt.replace(/[:.]/g, "-")}`;
 
 const isPassingGate = (gate = {}) => gate.status === "pass" && !gate.skipped;
+
+const DYNAMIC_DAG_CASE_ID = "planner_dynamic_skill_graph";
+const REQUIRED_DAG_CHECK_IDS = Object.freeze([
+  "compare_only_intent_selected",
+  "real_dag_planner_selected",
+  "dag_composed_compare_then_risk",
+  "dag_selected_skills_observed",
+  "dag_kept_document_scope",
+]);
+
+export const buildSkillGraphRuntimeGate = ({ mode = getAgentSkillGraphRollout() } = {}) => {
+  const currentMode = String(mode ?? "").trim().toLowerCase();
+  const status = currentMode === "guarded" ? "pass" : "fail";
+
+  return {
+    status,
+    currentMode,
+    requiredMode: "guarded",
+    skipped: false,
+    summary: status === "pass"
+      ? "The custom Skill DAG is active in guarded mode."
+      : `The custom Skill DAG is not active in guarded mode: ${currentMode || "missing"}.`,
+  };
+};
+
+export const buildRealDagPlannerGate = ({ payload = null } = {}) => {
+  const caseResult = (payload?.cases ?? []).find(
+    (entry) => entry.id === DYNAMIC_DAG_CASE_ID
+  );
+  const checks = new Map((caseResult?.checks ?? []).map((check) => [check.id, check]));
+  const graph = caseResult?.response?.skillGraph ?? {};
+  const observed =
+    payload?.summary?.provider === "real" &&
+    caseResult?.passed === true &&
+    REQUIRED_DAG_CHECK_IDS.every((id) => checks.get(id)?.passed === true) &&
+    graph.mode === "guarded" &&
+    graph.executed === true &&
+    graph.fallback === null &&
+    graph.status === "completed" &&
+    graph.nodeStatuses?.join(">") === "completed>completed" &&
+    graph.plannerFallback === false &&
+    graph.selectedPlannerId === "llm_dag" &&
+    graph.nodeSkills?.join(">") === "compare_documents>risk_review" &&
+    graph.riskDependsOnCompare === true;
+
+  return {
+    status: observed ? "pass" : "fail",
+    caseId: DYNAMIC_DAG_CASE_ID,
+    currentRunId: payload?.summary?.runId ?? null,
+    failedReasons: observed ? [] : [caseResult ? "real_dag_case_failed" : "real_dag_case_missing"],
+    skipped: false,
+    summary: observed
+      ? "A real LLM planned and executed the guarded comparison-to-risk DAG."
+      : "The real LLM guarded DAG case is missing or failed.",
+  };
+};
 
 const buildGateCheck = ({ gate = {}, id, label } = {}) => ({
   id,
@@ -75,6 +132,24 @@ const buildRuntimeSmokeGate = ({ payload = null } = {}) => {
   }
   if ((checks.sources?.sourceDocIds ?? []).length < 1) {
     failedReasons.push("document_sources_missing");
+  }
+  if (checks.skillGraph?.mode !== "guarded") {
+    failedReasons.push("skill_graph_mode_mismatch");
+  }
+  if (checks.skillGraph?.bothRunsExecuted !== true) {
+    failedReasons.push("skill_graph_execution_missing");
+  }
+  if (checks.skillGraph?.bothRunsPlannedByLlm !== true) {
+    failedReasons.push("skill_graph_llm_planner_missing");
+  }
+  if (checks.skillGraph?.fallbackCount !== 0) {
+    failedReasons.push("skill_graph_fallback_detected");
+  }
+  if (
+    checks.skillGraph?.skillIds?.join(">") !==
+    "risk_review>summarize_contract"
+  ) {
+    failedReasons.push("skill_graph_skills_mismatch");
   }
 
   const status = failedReasons.length > 0 ? "fail" : "pass";
@@ -189,8 +264,10 @@ export const buildPlannerRuntimeGate = ({
 const buildReadinessChecks = ({
   plannerProviderGate = {},
   plannerRuntimeGate = {},
+  realDagPlannerGate = {},
   recoveryGate = {},
   runtimeSmokeGate = {},
+  skillGraphRuntimeGate = {},
   trajectoryGate = {},
 } = {}) => [
   buildGateCheck({
@@ -202,6 +279,16 @@ const buildReadinessChecks = ({
     gate: plannerRuntimeGate,
     id: "planner_runtime_pure_llm",
     label: "Planner runtime target is pure LLM",
+  }),
+  buildGateCheck({
+    gate: skillGraphRuntimeGate,
+    id: "skill_graph_runtime_guarded",
+    label: "The custom Skill DAG is active in guarded mode",
+  }),
+  buildGateCheck({
+    gate: realDagPlannerGate,
+    id: "real_dag_planner_case_passed",
+    label: "Real LLM DAG planner case passed",
   }),
   buildGateCheck({
     gate: runtimeSmokeGate,
@@ -243,6 +330,7 @@ export const buildRolloutReadinessReport = ({
   recoveryPayload = null,
   runId = null,
   runtimeSmokePayload = null,
+  skillGraphRollout = getAgentSkillGraphRollout(),
   trajectoryPayload = null,
 } = {}) => {
   const plannerProviderGate = buildRequiredPlannerProviderGate({
@@ -264,14 +352,22 @@ export const buildRolloutReadinessReport = ({
     current: plannerRuntime,
     required: requiredPlannerRuntime,
   });
+  const skillGraphRuntimeGate = buildSkillGraphRuntimeGate({
+    mode: skillGraphRollout,
+  });
+  const realDagPlannerGate = buildRealDagPlannerGate({
+    payload: realPlannerPayload,
+  });
   const runtimeSmokeGate = buildRuntimeSmokeGate({
     payload: runtimeSmokePayload,
   });
   const checks = buildReadinessChecks({
     plannerProviderGate,
     plannerRuntimeGate,
+    realDagPlannerGate,
     recoveryGate,
     runtimeSmokeGate,
+    skillGraphRuntimeGate,
     trajectoryGate,
   });
   const failedChecks = checks.filter((check) => check.status === "fail");
@@ -333,6 +429,13 @@ export const buildRolloutReadinessReport = ({
         required: plannerRuntimeGate.required,
         summary: plannerRuntimeGate.summary,
       },
+      skillGraph: {
+        runtimeMode: skillGraphRuntimeGate.currentMode,
+        runtimeStatus: skillGraphRuntimeGate.status,
+        realPlannerCaseStatus: realDagPlannerGate.status,
+        realPlannerCaseRunId: realDagPlannerGate.currentRunId,
+        failedReasons: realDagPlannerGate.failedReasons,
+      },
       runtimeSmoke: {
         status: runtimeSmokeGate.status,
         completedAt: runtimeSmokeGate.completedAt ?? null,
@@ -345,6 +448,8 @@ export const buildRolloutReadinessReport = ({
     gates: {
       plannerProviderGate,
       plannerRuntimeGate,
+      skillGraphRuntimeGate,
+      realDagPlannerGate,
       trajectoryGate,
       recoveryGate,
       runtimeSmokeGate,
@@ -453,6 +558,7 @@ export const formatRolloutReadinessReportMarkdown = (report = {}) => {
   const recovery = report.signals?.recovery ?? {};
   const runtime = report.signals?.runtime ?? {};
   const runtimeSmoke = report.signals?.runtimeSmoke ?? {};
+  const skillGraph = report.signals?.skillGraph ?? {};
   const lines = [
     "# AgentRAG Rollout Readiness",
     "",
@@ -473,6 +579,8 @@ export const formatRolloutReadinessReportMarkdown = (report = {}) => {
     `- Mock/real divergence: \`${planner.divergenceCount ?? "N/A"}\``,
     `- Planner runtime target: \`${runtime.status ?? "unknown"}\``,
     `- Planner rollout: \`${runtime.current?.plannerRollout ?? "unknown"}\``,
+    `- Guarded Skill graph runtime: \`${skillGraph.runtimeStatus ?? "unknown"}\` (${skillGraph.runtimeMode ?? "unknown"})`,
+    `- Real DAG planner case: \`${skillGraph.realPlannerCaseStatus ?? "unknown"}\``,
     `- Runtime smoke: \`${runtimeSmoke.status ?? "unknown"}\``,
     `- Trajectory gate: \`${trajectory.status ?? "unknown"}\``,
     `- Recovery gate: \`${recovery.status ?? "unknown"}\``,
