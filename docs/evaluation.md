@@ -523,6 +523,7 @@ npm run rerank:cross-encoder:local
 | `npm run eval:retrieval-comparison -- --embedding-provider openai` | 四组检索配置用真实 embedding 对比（任何 OpenAI 兼容端点，含 Ollama），每个 split 带配对 bootstrap 95% CI；报告写到 `latest-retrieval-comparison-openai.*`，不覆盖确定性报告。加 `--rerank-provider cross-encoder --cross-encoder-endpoint <url>` 测神经 reranker（服务见 `npm run rerank:cross-encoder:docker`）。 |
 | `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式：摘要为第 1 页、每个章节一页，证据段落映射到页码，不可回答题成为 `shouldAbstain`。输出默认在已忽略的 `evaluation/generated/`。 |
 | `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
+| `npm run eval:answer-drafts [-- --set fixtures\|arxiv\|all] [--cases 12]` | 用真实 embedding + chat 模型（任何 OpenAI 兼容端点）在临时 standalone 档案里跑单文档问答：`fixtures` 是 verify:quality 的合同和政策（事实逐字出现），`arxiv` 是 8 篇论文。通过 `runAgentRag` + 流式接收端测首个草稿时间、最终答案时间、草稿保留率、撤回原因和澄清率；报告写到已忽略的 `latest-answer-drafts.*`。 |
 | `npm run eval:llm-resilience [-- --no-fallback]` | 故障注入：本地 OpenAI 兼容服务注入 429（精确 / 粗粒度 Retry-After）、503、挂起、空响应、主模型宕机，以及模拟自托管服务的饱和场景（2 个工作线程、请求排队、客户端放弃的请求仍被处理，16 个并发调用方），报告 SLO 内成功率、每次调用的上游请求数、p50/p95 和饱和场景的服务端峰值排队。每个场景开始前重置熔断和并发状态，避免上一个场景打开的熔断影响下一个。 |
 
 ### LLM 调用容错：改前 / 改后
@@ -540,6 +541,20 @@ npm run rerank:cross-encoder:local
 | 主模型宕机 | 0% | 100% | 0% |
 
 代价：遵守 Retry-After 让限流场景的 p95 从约 2.5 秒升到约 4.7 秒；成功率的提升来自不再在服务端要求等待时抢跑。持续过载下单靠重试无法兜住，需要客户端并发限制或自适应限流。
+
+### 校验过的答案草稿：真实模型
+
+`npm run eval:answer-drafts`（qwen2.5:7b + nomic-embed-text，本地 Ollama，确定性规划器）：
+
+| 用例集 | 有草稿的运行 | 首个草稿 / 最终答案（p50） | 草稿保留 | 最终是澄清 |
+| --- | --- | --- | --- | --- |
+| fixtures（合同、政策，7 题） | 1/7 | 476ms / 1067ms（有草稿那次只早 7ms） | 1/1 | 6/7 |
+| arxiv（8 篇论文，12 题） | 0/12 | - / 2826ms | - | 11/12 |
+
+- 机制按设计工作：唯一的草稿保留在最终答案里，没有撤回；但在这个模型和校验器下几乎没有收益。
+- 瓶颈是校验器，不是流式：绝大多数答案过不了词法 claim 校验，所以既没有草稿，agent 最后也改为澄清。对照 `verify:quality` 的 18/18，那个测的是不经过 agent 自检的纯 RAG 路径。
+- 其中至少一部分是校验器 bug 而不是严格：证据写"twelve (12) months"时，答案写"twelve months"或"12 months"都被判缺少数字锚点"12"，只有逐字照抄"twelve (12)"才通过。
+- 答案短、收尾只需毫秒，所以即使有草稿，也只比最终答案早一句话的生成时间；草稿的价值要等长答案和能放行正确改写的校验器。
 
 ### 并发上限与熔断：改前 / 改后
 

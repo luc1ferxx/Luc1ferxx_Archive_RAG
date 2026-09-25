@@ -735,3 +735,31 @@
   }
 }
 
+/* Streaming progress above the composer: the current agent step and the answer
+   sentences already verified against the sources, until the final answer
+   replaces them. */
+.archive-live-answer {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--archive-border-mid);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.archive-live-answer-step {
+  color: var(--archive-text-muted);
+}
+
+.archive-live-answer-note {
+  margin: 6px 0 4px;
+  color: var(--archive-text-muted);
+  font-size: 12px;
+}
+
+.archive-live-answer-drafts {
+  margin: 0;
+  padding-left: 18px;
+  opacity: 0.85;
+}
+

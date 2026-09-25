@@ -25,7 +25,7 @@
 | 预算 | 每次运行两层：次数（文档 RAG 2 次、自定义 Skill 2 次、Web 搜索 1 次、trace 16 步），以及用量（默认 10 万 token、0.5 美元、5 分钟）。用量按每次成功的模型调用计量，用完后下一个工具被跳过、运行降级而不报错；已开始的步骤会跑完，所以是软截止 | `rag/agent-budget.js`、`rag/run-usage.js` |
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
-| 流式进度 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要，经校验的最终答案整体发送；不流式输出 token | `routes/chat.js`、`rag/agent-event-stream.js` |
+| 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
 
 默认配置：hybrid 检索（pgvector 余弦 + PostgreSQL 全文检索，RRF 融合），rerank 关闭，规划器用 LLM，自定义 Skill 阶段默认由 typed DAG 执行（`AGENT_SKILL_GRAPH_ROLLOUT=guarded`），V1 顺序链只在整图被拒时兜底。
 
@@ -138,7 +138,11 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 能看出的东西：延迟几乎全在模型调用上，编排本身是毫秒级；第一次调用可能包含模型加载时间；第二个 Skill 的输入 token 多了一倍，因为它带着上游输出（类型化的 `priorFindings`）。单次 trace 不是性能基准。
 
-### 3.7 工程基线（`99af0019`）
+### 3.7 校验过的答案草稿
+
+`npm run eval:answer-drafts`（qwen2.5:7b，确定性规划器）：合同和政策 7 题里 1 题产生草稿，草稿保留在最终答案里，比最终答案只早 7 毫秒（答案只有一句）；论文 12 题 0 题产生草稿。6/7 和 11/12 的最终答案是澄清。结论：流式本身工作正常，瓶颈是词法校验器，详见 `docs/evaluation.md`。
+
+### 3.8 工程基线（`99af0019`）
 
 - 后端测试 1687 个，0 失败，2 个跳过（需要 PostgreSQL 的 pgvector 集成测试）。
 - 前端测试 102 个全部通过，生产构建通过。
@@ -152,7 +156,8 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **文档解析**：只读 PDF 文本层，没有 OCR、表格和版面解析；换行会把句子切断，导致模板答案出现半句话。
 - **安全**：prompt 注入只有设计层防御（规划器看不到身份、范围由运行时决定、外部查询过滤），还没有对抗性测试集和攻击成功率数据。
 - **架构**：V2 typed DAG 已是自定义 Skill 阶段的默认执行器，V1 顺序链只作为整图被拒时的兜底和运维回退；v3 统一图已冻结在 shadow（冻结原因见 `docs/unified-agent-dag-migration.md`）。DAG 只覆盖自定义 Skill 阶段，外层文档、Web、内置 Skill 仍是固定顺序。
-- **流式输出**：后端 SSE 接口和前端 `streamChat` 已有，但聊天界面还没接上，也没有测试。
+- **Agent 路径的答题率**：用 qwen2.5:7b 走 agent（`/chat` 的真实路径），合同和政策 7 题里 6 题、论文 12 题里 11 题最终改为澄清，因为词法校验器拒绝了大部分答案；`verify:quality` 的 18/18 测的是不经过 agent 自检的纯 RAG 路径。已定位到一个校验器 bug：证据写"twelve (12) months"时，"twelve months"和"12 months"都判为缺少数字。
+- **流式草稿**：机制已上线并有测试，但在上面的校验器下几乎不产生草稿（19 题里 1 题），所以还没有延迟收益。
 
 ## 5. 复现
 

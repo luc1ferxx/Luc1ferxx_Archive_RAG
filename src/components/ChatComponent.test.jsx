@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { message } from "antd";
 import { vi } from "vitest";
 
-let mockRequestChat;
+let mockStreamChatAnswer;
 
 vi.mock("react-speech-recognition", () => ({
   __esModule: true,
@@ -33,7 +33,7 @@ vi.mock("speak-tts", () => {
 });
 
 vi.mock("../archiveApi", () => ({
-  requestChat: (...args) => mockRequestChat(...args),
+  streamChatAnswer: (...args) => mockStreamChatAnswer(...args),
 }));
 
 vi.mock("../demoWorkbench", () => ({
@@ -50,6 +50,7 @@ vi.mock("../demoWorkbench", () => ({
 }));
 
 const { default: ChatComponent } = await import("./ChatComponent");
+const { createTranslator } = await import("../archiveI18n");
 
 describe("ChatComponent", () => {
   let handleResp;
@@ -58,7 +59,7 @@ describe("ChatComponent", () => {
   beforeEach(() => {
     handleResp = vi.fn();
     setIsLoading = vi.fn();
-    mockRequestChat = vi.fn().mockResolvedValue({
+    mockStreamChatAnswer = vi.fn().mockResolvedValue({
       agentAnswer: "Answer",
       ragAnswer: "Document answer",
       ragSources: [],
@@ -79,6 +80,77 @@ describe("ChatComponent", () => {
       />
     );
 
+  test("shows progress and verified drafts while running, then hands over the final answer", async () => {
+    let emit;
+    let resolveRequest;
+
+    mockStreamChatAnswer = vi.fn(({ onEvent }) => {
+      emit = onEvent;
+      return new Promise((resolve) => {
+        resolveRequest = resolve;
+      });
+    });
+
+    renderChat({ t: createTranslator("en") });
+
+    const input = screen.getByRole("searchbox");
+    await userEvent.type(input, "What is the renewal term?");
+    await userEvent.keyboard("{Enter}");
+
+    await act(async () => {
+      emit({ event: "trace_step", data: { step: { label: "Document RAG", type: "document_rag" } } });
+      emit({ event: "answer_draft", data: { draft: { index: 0, text: "Renews every 12 months. [Source 1]" } } });
+    });
+
+    expect(screen.getByText("Working: Document RAG")).toBeInTheDocument();
+    expect(screen.getByText("Renews every 12 months. [Source 1]")).toBeInTheDocument();
+    // Drafts are labelled as provisional.
+    expect(screen.getByText(/final answer may still change/)).toBeInTheDocument();
+
+    // A retried model call starts the answer over.
+    await act(async () => {
+      emit({ event: "answer_draft_reset", data: {} });
+    });
+    expect(screen.queryByText("Renews every 12 months. [Source 1]")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveRequest({ agentAnswer: "Final answer", ragAnswer: "Final", ragSources: [] });
+    });
+
+    await waitFor(() =>
+      expect(handleResp).toHaveBeenCalledWith(
+        "What is the renewal term?",
+        expect.objectContaining({ agentAnswer: "Final answer" })
+      )
+    );
+    // The final answer replaces the live panel.
+    expect(screen.queryByTestId("live-answer")).not.toBeInTheDocument();
+  });
+
+  test("ignores stream events from a request that has been superseded", async () => {
+    const emitters = [];
+
+    mockStreamChatAnswer = vi.fn(({ onEvent }) => {
+      emitters.push(onEvent);
+      return new Promise(() => {});
+    });
+
+    renderChat();
+
+    const input = screen.getByRole("searchbox");
+    await userEvent.type(input, "First");
+    await userEvent.keyboard("{Enter}");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Second");
+    await userEvent.keyboard("{Enter}");
+
+    await act(async () => {
+      emitters[0]({ event: "answer_draft", data: { draft: { index: 0, text: "Stale draft" } } });
+    });
+
+    expect(screen.queryByText("Stale draft")).not.toBeInTheDocument();
+  });
+
   test("only applies the last response when requests resolve out of order", async () => {
     let resolveFirst;
     let resolveSecond;
@@ -92,7 +164,7 @@ describe("ChatComponent", () => {
 
     let callCount = 0;
 
-    mockRequestChat = vi.fn(() => {
+    mockStreamChatAnswer = vi.fn(() => {
       callCount += 1;
 
       if (callCount === 1) {
@@ -114,7 +186,7 @@ describe("ChatComponent", () => {
     await userEvent.type(input, "Second question");
     await userEvent.keyboard("{Enter}");
 
-    expect(mockRequestChat).toHaveBeenCalledTimes(2);
+    expect(mockStreamChatAnswer).toHaveBeenCalledTimes(2);
 
     await act(async () => {
       resolveSecond({
@@ -149,7 +221,7 @@ describe("ChatComponent", () => {
   test("does not show error for deliberately aborted requests", async () => {
     let rejectRequest;
 
-    mockRequestChat = vi.fn(
+    mockStreamChatAnswer = vi.fn(
       () =>
         new Promise((_resolve, reject) => {
           rejectRequest = reject;
@@ -164,7 +236,7 @@ describe("ChatComponent", () => {
     await userEvent.type(input, "Question before unmount");
     await userEvent.keyboard("{Enter}");
 
-    expect(mockRequestChat).toHaveBeenCalledTimes(1);
+    expect(mockStreamChatAnswer).toHaveBeenCalledTimes(1);
 
     unmount();
 
@@ -182,7 +254,7 @@ describe("ChatComponent", () => {
 
     let callCount = 0;
 
-    mockRequestChat = vi.fn(() => {
+    mockStreamChatAnswer = vi.fn(() => {
       callCount += 1;
 
       if (callCount === 1) {

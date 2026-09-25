@@ -1,3 +1,4 @@
+import { runWithAnswerDraftChannel } from "./answer-drafts.js";
 import { consumeBudget } from "./agent-budget.js";
 import { buildAgentRetrievalPlan } from "./agent-query-planner.js";
 import {
@@ -139,17 +140,23 @@ export const runDocumentRagLoop = async ({
     });
 
     try {
-      primaryRagResult = await executeObservedSkill(
-        documentRagSkill,
-        {
-          ...primaryInput,
-          accessScope,
-          ragService,
-        },
-        {
-          phase: "primary",
-          budget: primaryBudget,
-        }
+      // The primary answer is the one a streaming client waits for, so its
+      // verified sentences may be sent as drafts (answer-drafts.js). Follow-up
+      // retrieval is not streamed: if it replaces the answer, the result event
+      // replaces the drafts.
+      primaryRagResult = await runWithAnswerDraftChannel(() =>
+        executeObservedSkill(
+          documentRagSkill,
+          {
+            ...primaryInput,
+            accessScope,
+            ragService,
+          },
+          {
+            phase: "primary",
+            budget: primaryBudget,
+          }
+        )
       );
     } catch (error) {
       await stepLifecycle?.failStep?.({

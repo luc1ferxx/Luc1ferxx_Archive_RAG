@@ -79,7 +79,9 @@ export const normalizeClaimSupportForHeadings =
 const ensureTerminalPunctuation = (value = "") =>
   SENTENCE_END_PATTERN.test(value) ? value : `${value}.`;
 
-const formatSupportedClaim = ({ claim, citations }) => {
+// Exported for answer drafts, so a streamed sentence reads exactly as the
+// finalizer would write it.
+export const formatSupportedClaim = ({ claim, citations }) => {
   const stripped = stripSourceLabels(claim.text)
     .replace(/^[-*]\s+/, "")
     .trim();

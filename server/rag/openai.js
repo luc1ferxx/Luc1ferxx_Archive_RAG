@@ -514,8 +514,8 @@ export const embedQuery = async (query) => {
   });
 };
 
-export const completeText = async (prompt) => {
-  const completion = await completeTextWithMetadata(prompt);
+export const completeText = async (prompt, options = {}) => {
+  const completion = await completeTextWithMetadata(prompt, options);
 
   return completion.text;
 };
@@ -531,7 +531,13 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
     const modelRoute = buildCustomProviderRoute(capability);
     const metricContext = buildCustomRouteMetricContext();
     const text = await runWithLlmOpsMetric({
-      action: () => customProvider.completeText(inputText, { responseFormat }),
+      action: () => {
+        options.onAttemptStart?.();
+        return customProvider.completeText(inputText, {
+          onTextDelta: options.onTextDelta,
+          responseFormat,
+        });
+      },
       metric: {
         ...buildUsageMetricFields({
           inputCharacters: inputText.length,
@@ -565,8 +571,19 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
   // An empty completion is retried once, then returned as it always was: callers
   // already treat empty text as "no answer". A length-truncated one is not
   // retried, because the same budget would truncate it again.
+  // `onTextDelta` streams the completion as it is generated. Every attempt --
+  // a retry or a failover model -- starts with `onAttemptStart`, so a consumer
+  // can drop what a failed attempt already streamed. The returned text is
+  // always the whole completion, streamed or not.
   const invokeOnce = async (instance) => {
-    const result = await instance.invoke(prompt, { responseFormat });
+    options.onAttemptStart?.();
+    const result =
+      typeof options.onTextDelta === "function" && typeof instance.invokeStream === "function"
+        ? await instance.invokeStream(prompt, {
+            onDelta: options.onTextDelta,
+            responseFormat,
+          })
+        : await instance.invoke(prompt, { responseFormat });
 
     if (!normalizeContent(result?.content) && result?.finishReason !== "length") {
       const error = new Error("Chat completion returned empty content.");

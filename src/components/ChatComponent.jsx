@@ -11,7 +11,7 @@ import {
 import SpeechRecognition, {
   useSpeechRecognition,
 } from "react-speech-recognition";
-import { requestChat } from "../archiveApi";
+import { streamChatAnswer } from "../archiveApi";
 import { DEMO_CONVERSATION } from "../demoWorkbench";
 
 const { Search } = Input;
@@ -50,6 +50,10 @@ const ChatComponent = (props) => {
   const [isScopeOpen, setIsScopeOpen] = useState(false);
   const [isToolsOpen, setIsToolsOpen] = useState(false);
   const [retrievalMode, setRetrievalMode] = useState("auto");
+  // What the running request has streamed so far: the latest agent step and the
+  // answer sentences that already passed verification. Cleared when the final
+  // answer arrives, which replaces the drafts.
+  const [liveProgress, setLiveProgress] = useState(null);
   const abortControllerRef = useRef(null);
   const requestSeqRef = useRef(0);
   const speechRef = useRef(null);
@@ -186,14 +190,36 @@ const ChatComponent = (props) => {
       const seq = ++requestSeqRef.current;
 
       setIsLoading(true);
+      setLiveProgress(null);
+
+      const onStreamEvent = ({ event, data }) => {
+        if (seq !== requestSeqRef.current) {
+          return;
+        }
+
+        if (event === "trace_step") {
+          setLiveProgress((current) => ({
+            drafts: current?.drafts ?? [],
+            step: data?.step?.label ?? data?.step?.type ?? null,
+          }));
+        } else if (event === "answer_draft" && data?.draft?.text) {
+          setLiveProgress((current) => ({
+            drafts: [...(current?.drafts ?? []), data.draft.text],
+            step: current?.step ?? null,
+          }));
+        } else if (event === "answer_draft_reset") {
+          setLiveProgress((current) => ({ drafts: [], step: current?.step ?? null }));
+        }
+      };
 
       try {
-        const data = await requestChat({
+        const data = await streamChatAnswer({
           docIds,
           question: trimmedQuestion,
           sessionId,
           userId,
           signal: controller.signal,
+          onEvent: onStreamEvent,
         });
 
         if (controller.signal.aborted || seq !== requestSeqRef.current) {
@@ -236,6 +262,7 @@ const ChatComponent = (props) => {
       } finally {
         if (seq === requestSeqRef.current) {
           setIsLoading(false);
+          setLiveProgress(null);
         }
       }
     },
@@ -407,6 +434,25 @@ const ChatComponent = (props) => {
 
   return (
     <div className="archive-composer-border">
+      {liveProgress ? (
+        <div className="archive-live-answer" aria-live="polite" data-testid="live-answer">
+          {liveProgress.step ? (
+            <div className="archive-live-answer-step">
+              {t("chat.liveStep", { step: liveProgress.step })}
+            </div>
+          ) : null}
+          {liveProgress.drafts.length > 0 ? (
+            <>
+              <p className="archive-live-answer-note">{t("chat.liveDraftNote")}</p>
+              <ul className="archive-live-answer-drafts">
+                {liveProgress.drafts.map((draft, index) => (
+                  <li key={`${index}-${draft}`}>{draft}</li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </div>
+      ) : null}
       <div
         className={`archive-composer-bar ${isDemoWorkbench ? "is-demo" : ""} ${
           isLoading ? "is-running" : ""

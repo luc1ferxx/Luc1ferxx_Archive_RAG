@@ -312,6 +312,17 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 前端 `src/components/AgentRunCenter.js` 只消费 `/tasks` 返回的公开 task contract。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。
 
+## 流式进度与校验过的答案草稿
+
+`POST /chat/stream` 推送两类中间事件，最后的 `result` 与 `/chat` 完全一致：
+
+- `trace_step`：每记录一步 trace 推一个精简摘要（`agent-event-stream.js`）。
+- `answer_draft` / `answer_draft_reset`：主文档答案的"已校验草稿"（`answer-drafts.js`）。模型按 token 流式生成，但 token 不出服务器；每写完一句，就用 finalizer 同一套 claim 校验（`evaluateClaimSupport` + 标题归一化）检查已生成的**前缀**，通过的句子按 finalizer 的格式推送，不通过的扣下。一句话只有在它后面的 `[Source N]` 标签和下一个字符都到了才算写完，否则会在引用到达前被判为无支持。重试或切换备用模型时推 `answer_draft_reset`。
+
+草稿只在 agent 用 `runWithAnswerDraftChannel` 包住的主文档检索里、且有流式客户端时产生；`/chat`、后台任务、评测、Skill 内部的模型调用和补检索都不产生草稿。草稿不是最终答案：自检失败后文档循环会补检索、可能换成补检索的答案或改为澄清，finalizer 也可能重写整段，所以界面把草稿标成"已通过证据校验，最终答案可能调整"，收到 `result` 后整体替换。保证是"不展示未经校验的内容"，不是"不撤回"。
+
+`npm run eval:answer-drafts` 用真实模型量首个草稿时间、最终答案时间、草稿保留率和撤回原因，见 [evaluation.md](evaluation.md)。
+
 ## OpenTelemetry trace
 
 `server/rag/tracing.js` 只依赖 `@opentelemetry/api`；没有注册 SDK 时所有 span 都是空操作。`OTEL_TRACING_ENABLED=true` 时 `server.js` 通过 `server/otel.js` 注册 SDK 并按 OTLP/HTTP 导出（默认 protobuf）。

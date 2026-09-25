@@ -238,6 +238,8 @@ export const streamChat = async ({ docIds, question, sessionId, userId, signal, 
     const error = new Error(`Chat stream failed with status ${response.status}.`);
     error.status = response.status;
     error.body = await response.json().catch(() => null);
+    // Same shape as an axios error, so callers of requestChat need no change.
+    error.response = { data: error.body, status: response.status };
     throw error;
   }
 
@@ -259,6 +261,7 @@ export const streamChat = async ({ docIds, question, sessionId, userId, signal, 
       } else if (event === "error") {
         const error = new Error(data?.error?.message ?? "Chat stream failed.");
         error.status = data?.status ?? 500;
+        error.response = { data: { error: data?.error }, status: error.status };
         throw error;
       } else if (event !== "done") {
         onEvent?.({ event, data });
@@ -271,4 +274,22 @@ export const streamChat = async ({ docIds, question, sessionId, userId, signal, 
   }
 
   return result;
+};
+
+/**
+ * The chat UI's request: streams progress and verified answer drafts to
+ * onEvent, and resolves with the /chat body or rejects the way requestChat
+ * does. Drafts are provisional; only the resolved body is the answer.
+ */
+export const streamChatAnswer = async (options) => {
+  const { status, body } = await streamChat(options);
+
+  if (status >= 400) {
+    const error = new Error(body?.error?.message ?? `Chat failed with status ${status}.`);
+    error.status = status;
+    error.response = { data: body, status };
+    throw error;
+  }
+
+  return body;
 };
