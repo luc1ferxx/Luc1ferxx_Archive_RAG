@@ -525,6 +525,22 @@ npm run rerank:cross-encoder:local
 | `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
 | `npm run eval:llm-resilience [-- --no-fallback]` | 故障注入：本地 OpenAI 兼容服务注入 429（精确 / 粗粒度 Retry-After）、503、挂起、空响应和主模型宕机，报告 SLO 内成功率、每次调用的上游请求数和 p50/p95。 |
 
+### LLM 调用容错：改前 / 改后
+
+`npm run eval:llm-resilience`，每个场景 24 次调用、并发 8、SLO 15 秒，三轮平均。改前是 `75628674`（固定 250/750/1500ms 重试、不读 Retry-After、超时 120 秒且不重试、无备用模型），改后是 `a2764083` 起的代码；"改后无备用"用 `--no-fallback`。评测里的备用模型和主模型共用同一个限流器，这是 failover 的最坏情况。
+
+| 场景 | 改前 | 改后 | 改后无备用 |
+| --- | --- | --- | --- |
+| healthy | 100% | 100% | 100% |
+| 429，精确 `retry-after-ms` | 79.2%（2.63 请求/调用，p95 2.5s） | 100%（3.21，p95 4.7s） | 83.3%（2.67） |
+| 429，粗粒度 `Retry-After: 1` | 79.2%（2.63） | 100%（2.22，p95 4.9s） | 94.4%（2.08） |
+| 40% 返回 503 | 100%（p95 1.0s） | 100%（p95 1.2s） | 100% |
+| 20% 请求挂起 | 87.5%（p95 15s） | 100%（p95 3.4s） | 100% |
+| 30% 空 completion | 62.5% | 91.7% | 91.7% |
+| 主模型宕机 | 0% | 100% | 0% |
+
+代价：遵守 Retry-After 让限流场景的 p95 从约 2.5 秒升到约 4.7 秒；成功率的提升来自不再在服务端要求等待时抢跑。持续过载下单靠重试无法兜住，需要客户端并发限制或自适应限流。
+
 ## Ragas supplement
 
 `ragas` 不替代自定义 compare harness，但适合补充观察语义相关性和 grounding：
