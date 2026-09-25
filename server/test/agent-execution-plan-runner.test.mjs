@@ -627,7 +627,7 @@ test("execution plan runner preserves the default skill execution order", async 
 // one. These two tests are about the wiring, not the DAG: the same request, the
 // same step type, the same flat results, whichever path the stage took. What
 // the graph does inside is covered in agent-custom-skill-stage.test.mjs.
-test("the custom skills stage stays on the V1 chain unless a mode is threaded", async () => {
+test("the custom skills stage stays on the V1 chain when off is threaded", async () => {
   const callOrder = [];
   const selectedSkills = createDefaultSelectedSkills(callOrder);
   const harness = createRunnerHarness({
@@ -639,6 +639,7 @@ test("the custom skills stage stays on the V1 chain unless a mode is threaded", 
   const result = await runAgentExecutionPlan({
     ...harness.args,
     recordExecutionGraph: (record) => graphRecords.push(record),
+    skillGraphMode: "off",
   });
 
   assert.deepEqual(graphRecords, []);

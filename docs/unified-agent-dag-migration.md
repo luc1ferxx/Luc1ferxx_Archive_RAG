@@ -1,10 +1,16 @@
 # Unified AgentRAG DAG：迁移决策与验收清单
 
-状态：**迁移中：统一图底座和 shadow 观测已部分接线，生产执行路径尚未接线**。用户已确认目标是把文档 RAG、Web、内置 Skill 和带审批的 Capability 与自定义 Skill 放进**同一张执行图**；按当前要求，真实模型调用及其证据暂缓。本文件同时记录已落地的底座与待验收的迁移规格，不能据此宣称全 Agent 动态 DAG 已上线。
+状态：**已冻结（2026-09-25）：统一图底座和 shadow 观测保留，生产执行路径不再推进**。冻结原因和解冻条件见下文“冻结决定”。原状态为“迁移中”，以下迁移规格原样保留作为设计记录。用户已确认目标是把文档 RAG、Web、内置 Skill 和带审批的 Capability 与自定义 Skill 放进**同一张执行图**；按当前要求，真实模型调用及其证据暂缓。本文件同时记录已落地的底座与待验收的迁移规格，不能据此宣称全 Agent 动态 DAG 已上线。
+
+## 冻结决定
+
+- **做了什么**：custom Skill 阶段的 typed DAG（V2）改为默认执行器；本文件描述的全阶段 v3 统一图停在 shadow，不再往 `guarded` 推进。`AGENT_UNIFIED_GRAPH_ROLLOUT` 仍只接受 `off` / `shadow`，已有模块和测试保留，不删除。
+- **为什么**：v3 要接入生产还缺文档循环的缺口处理与工作记忆、审批后续跑、整次运行的 finalization 收据和跨进程恢复四块，每块都要新的恢复证据；而它带来的能力（让模型在一张图里编排文档、Web、内置 Skill 和 Capability）在当前外层固定顺序下收益有限。同时维护三代编排的成本已经高于这部分收益，所以先把 V2 转正、把"一个运行时、一个 run store、一张重放安全矩阵"做实。
+- **解冻条件**：出现外层固定顺序表达不了、且有评测用例证明的编排需求（例如"文档证据不足时按条件进入 Web，再把结果交给 Skill"成为真实用例），并且上面四块各有对应的跨进程恢复测试。
 
 ## 当前边界与决策
 
-当前 `/chat` 仍由 `agent-execution-plan-runner.js` 依固定外层步骤顺序运行文档、Web、内置 Skill 和 Capability；`agent-custom-skill-stage.js` 的 typed DAG 只替代其中的 `custom_skills` 阶段。生产可达的图 checkpoint/启动恢复仍限于自定义 Skill，旧节点收据使用 `custom_skill:<nodeId>`。现有 `off` / `shadow` / `guarded` 开关默认 `off`，V1 chain 和确定性 planner 仍是兼容路径，不能把当前生产路径称为全 Agent 动态 DAG。
+当前 `/chat` 仍由 `agent-execution-plan-runner.js` 依固定外层步骤顺序运行文档、Web、内置 Skill 和 Capability；`agent-custom-skill-stage.js` 的 typed DAG 只替代其中的 `custom_skills` 阶段。生产可达的图 checkpoint/启动恢复仍限于自定义 Skill，旧节点收据使用 `custom_skill:<nodeId>`。`AGENT_SKILL_GRAPH_ROLLOUT` 现在默认 `guarded`（typed DAG 执行 custom Skill），V1 chain 只是整图被拒时的兜底和 `off` 回退，确定性 planner 仍是 LLM 规划失败时的兜底，不能把当前生产路径称为全 Agent 动态 DAG。
 
 统一图的**基础模块已经存在，但并未组合成生产执行路径**：`agent-execution-graph.js` 增加异构节点的 `v3` 图契约及整图校验；现有 scheduler 可运行 `v3` 节点，使用 `graph_node` 收据与独立的 `agent_graph_node:<编码后的 nodeId>` 身份。`agent-execution-graph-checkpoint.js` 增加与 `v3` 配套的 `v2` checkpoint，对完整 typed output 摘要、收据身份和未知进行中状态做保守对账；这不是统一图启动续跑已接线的证明。`skills/unified-graph-catalog.js`、`agent-unified-dag-planner.js`、`agent-unified-graph-results.js` 和 `agent-unified-graph-projection.js` 分别提供受限候选目录、注入式提案/校验边界、按节点保留的结果收集，以及**仅覆盖部分现有结果形状**的旧状态投影；目录本身标记 `executionWired: false`。显式 Capability 图适配器仅在可信调用方给出 allowlist 时进入候选目录，不代表审批后的统一图续跑已经可用。`AGENT_UNIFIED_GRAPH_ROLLOUT=shadow` 且注入提案 adapter 时，真实 AgentRAG/后台 task 会旁路验证 v3 图并记录精简 `unified_graph_planned` event；答案仍走旧路径，不执行统一图。`guarded` 当前不开放，未注入 adapter 时 shadow 记录拒绝。
 

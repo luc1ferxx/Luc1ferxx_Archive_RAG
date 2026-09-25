@@ -222,17 +222,56 @@ test("off mode never plans a graph and never records one", async () => {
   assert.deepEqual(harness.graphRecords, []);
 });
 
-test("the stage stays on the V1 chain when no mode is configured", async () => {
+test("the stage runs the graph when no mode is configured", async () => {
   const compare = createRecordingSkill({ id: "compare_documents", label: "Compare" });
   const harness = createHarness({ skills: [compare] });
   const previousMode = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
   delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
 
   try {
-    const results = await runCustomSkillStage({ ...harness.options });
+    const results = await runCustomSkillStage({
+      ...harness.options,
+      plannerAdapter: stubPlanner([
+        readOnlyNode({ nodeId: "compare", skillId: "compare_documents" }),
+      ]),
+    });
+
+    assert.equal(results.length, 1);
+    assert.equal(harness.graphRecords.length, 1);
+    assert.equal(harness.graphRecords[0].mode, CUSTOM_SKILL_STAGE_MODES.guarded);
+    assert.equal(harness.graphRecords[0].executed, true);
+    assert.deepEqual(stepIds(harness.trace), ["custom_skill:compare"]);
+  } finally {
+    if (previousMode === undefined) {
+      delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
+    } else {
+      process.env.AGENT_SKILL_GRAPH_ROLLOUT = previousMode;
+    }
+  }
+});
+
+// `off` is the operator's way back to the chain. It must not plan or record a
+// graph at all, so a planner that would run is a failure.
+test("the stage stays on the V1 chain when the operator opts out", async () => {
+  const compare = createRecordingSkill({ id: "compare_documents", label: "Compare" });
+  const harness = createHarness({ skills: [compare] });
+  const previousMode = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
+  process.env.AGENT_SKILL_GRAPH_ROLLOUT = CUSTOM_SKILL_STAGE_MODES.off;
+
+  try {
+    const results = await runCustomSkillStage({
+      ...harness.options,
+      plannerAdapter: {
+        createExecutionGraph: () => {
+          throw new Error("The chain must not consult the graph planner.");
+        },
+        id: "should_not_run",
+      },
+    });
 
     assert.equal(results.length, 1);
     assert.deepEqual(harness.graphRecords, []);
+    assert.deepEqual(stepIds(harness.trace), ["custom_skill:compare_documents"]);
   } finally {
     if (previousMode === undefined) {
       delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;

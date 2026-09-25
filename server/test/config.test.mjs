@@ -63,13 +63,15 @@ test("agent planner defaults target pure LLM runtime", async () => {
   );
 });
 
-// The DAG rollout is the one planner dial that does not default to the new
-// behaviour. Every other planner already answers real traffic; this one changes
-// how skills are executed, so an operator has to ask for it.
-test("the skill graph rollout stays off until an operator opts in", async () => {
-  await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: undefined }, async () => {
-    assert.equal(getAgentSkillGraphRollout(), "off");
-  });
+// The typed DAG is the default executor for custom Skills; the V1 chain is an
+// explicit opt-out. Who plans the graph is a separate dial and is not decided
+// here.
+test("the skill graph runs guarded unless an operator opts out", async () => {
+  for (const unset of [undefined, "", "   "]) {
+    await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: unset }, async () => {
+      assert.equal(getAgentSkillGraphRollout(), "guarded");
+    });
+  }
 
   for (const mode of ["guarded", "off", "shadow"]) {
     await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: mode }, async () => {
@@ -78,10 +80,14 @@ test("the skill graph rollout stays off until an operator opts in", async () => 
   }
 });
 
+// Someone who set the dial and mistyped it was most likely trying to leave the
+// graph, so a typo lands on the narrower chain instead of the default.
 test("an unrecognized skill graph rollout falls back to off rather than guessing", async () => {
-  await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: "full" }, async () => {
-    assert.equal(getAgentSkillGraphRollout(), "off");
-  });
+  for (const typo of ["full", "of", "guard"]) {
+    await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: typo }, async () => {
+      assert.equal(getAgentSkillGraphRollout(), "off");
+    });
+  }
 });
 
 test("the all-stage graph rollout is shadow-only until its production path is safe", async () => {

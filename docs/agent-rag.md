@@ -127,15 +127,19 @@ Node 输入只有两个来源：已校验的 request 字段，或它显式 `depe
 
 触发条件限定为 `insufficient_evidence`、`retryable_failure`、`output_schema_failure`、`missing_input`、`unmet_success_criterion`。Replanner 只返回 graph patch，不执行任何工具；patch 必须重新过同一个 validator，不能扩大 scope、白名单或预算。已完成的 node 默认不重跑（`completed` 和上一轮 `reused` 都算既成事实）；如果有写副作用的 node 已尝试但失败，不能证明写入未落地，因此本轮不自动 replan，避免整图第二次运行时重做该 node。指纹集合会拒绝重复等价的 plan，`DEFAULT_MAX_REPLANS` 为 `1`。无进展或预算耗尽时返回 `abstain`，交由上游走 clarification 或 evidence-limited answer，而不是继续重试。Replan 的拒绝原因同样有稳定 code：`replan_not_triggered`、`replan_limit_reached`、`replan_budget_exhausted`、`replan_no_progress`、`replan_duplicate_plan`、`replan_invalid_patch`、`replan_adapter_failed`、`replan_completed_node_retired`、`replan_side_effect_node_failed`、`replan_side_effect_node_retired`。
 
-### 灰度流程
+### 执行器开关
 
 | 模式 | 谁出答案 | Graph 行为 |
 | --- | --- | --- |
-| `off`（默认） | V1 chain | 不规划，不记录。 |
+| `guarded`（默认） | V2 DAG | 真正执行；只有在 graph 整体被拒、尚无任何 node 执行时才回落 V1。 |
+| `off` | V1 chain | 不规划，不记录。运维回退用；无法识别的取值也落到这里。 |
 | `shadow` | V1 chain | 在 V1 花预算之前抓取预算快照，规划并校验一张 graph 只做比对；shadow 路径出错会被记录成 error，不会影响真实请求。 |
-| `guarded` | V2 DAG | 真正执行；只有在 graph 整体被拒、尚无任何 node 执行时才回落 V1。 |
 
-`guarded` 之所以只在"整体被拒"时回落，是因为一旦有 node 花掉预算并写入 step，再用另一套 plan 重跑整条链会重复计费、并可能重复已发生的副作用。因此在灰度门禁证明可迁移之前，V1 planner、复合 intent 和 deterministic fallback 都不能删除。
+`guarded` 之所以只在"整体被拒"时回落，是因为一旦有 node 花掉预算并写入 step，再用另一套 plan 重跑整条链会重复计费、并可能重复已发生的副作用。因此 V1 chain、复合 intent 和 deterministic fallback 仍保留：V1 chain 是整图被拒时唯一安全的兜底，也是 `off` 回退的落点。
+
+**执行器与规划器是两个开关。** `AGENT_SKILL_GRAPH_ROLLOUT` 只决定 custom skill 阶段用哪个执行器；DAG 由谁规划跟随 `AGENT_EXECUTION_PLANNER`，LLM 规划失败（格式错误、越界、校验不过）时先退回 deterministic graph，确定性图也被整体拒绝时才回落 V1 chain。执行器默认值改为 `guarded` 的依据是执行语义的证据（全量测试、trajectory、recovery、PostgreSQL 跨进程恢复），而不是 LLM 规划质量；`rollout:readiness` 的零降级、零分歧要求衡量的是"纯 LLM 规划能否完全不需要兜底"，本地 7B 模型目前达不到，这不影响执行器的默认值。
+
+**行为变化：** 默认 `guarded` 下，执行规划器能看到已授权的原子 Skill 候选，因此 LLM 执行规划器可以在 Intent 没有选中 custom skill 时也加入 `custom_skills` 阶段（这正是 `planner_dynamic_skill_graph` 验证的动态选择）；确定性规划器不会这样做。这一步仍受 custom skill 预算（每次运行 2 次）和授权 catalog 约束。
 
 DAG planner 复用既有 execution planner 灰度位（`AGENT_EXECUTION_PLANNER` / `AGENT_PLANNER_ROLLOUT`），不新增第二个模型开关；见 `createDagPlannerAdapter()`。Replanner 只在解析后的 planner 确实是 LLM planner 时才接线——deterministic 或 shadow 状态下没有可回落的确定性 replanner，接上它等于让模型绕过灰度位影响真实执行。
 
@@ -158,12 +162,12 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 
 ### 当前限制
 
-- 默认 `off`。真实 `/chat` 走 typed DAG 需要运维显式设置 `AGENT_SKILL_GRAPH_ROLLOUT=shadow` 或 `guarded`；没有这一步时 V2 只存在于测试中。
+- 默认 `guarded`：真实 `/chat` 的 custom skill 阶段走 typed DAG。设为 `off` 可回到 V1 chain；本地 `server/.env` 里若仍写着 `off`，会覆盖这个默认值。
 - 当前注册的四个 custom skill 全部继承 `custom-skill-contract.js` 的 `effects: readOnly`，没有任何 skill 声明写操作。上面的副作用防护守的是 contract 已经允许、但尚无实例的边界，不是在修一个线上缺陷。
 - `maxReplans` 初始为 `1`；指纹机制保证即使上调也不会形成等价循环，但更高的值尚未做灰度验证。
 - Graph 只覆盖 custom skill 阶段。built-in skill、document RAG 主循环、capability 调用仍走各自既有路径和安全边界。
 - 评测有四个固定 trajectory `skill_graph` case、一个 `planner_dynamic_skill_graph` case（mock/real provider）、recovery-observability 的 replan 与 startup resume case，以及带真实 LLM planner 的 guarded HTTP runtime smoke。`rollout:readiness` 要求 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`、real-provider DAG case 和 smoke 通过；`release:gate` 另要求新鲜、同提交、干净工作树的完整证据。见 [evaluation.md](evaluation.md#skill-graph-rollout-的评测边界)。这些门禁证明规划/执行路径与合同，不直接证明模型生成的风险内容语义正确。
-- 同一 run 的 guarded checkpoint 可在严格校验后复用已完成 node；启动自动恢复只覆盖 graph-only 外层 plan，不是跨不同 `agentRunId` 的通用缓存，更不会跳过外层 document/Web/built-in/capability 阶段。默认仍是 `off`，切换到 `guarded` 要由部署显式设置并满足灰度门禁。
+- 同一 run 的 guarded checkpoint 可在严格校验后复用已完成 node；启动自动恢复只覆盖 graph-only 外层 plan，不是跨不同 `agentRunId` 的通用缓存，更不会跳过外层 document/Web/built-in/capability 阶段。默认 `guarded` 不代表整条 AgentRAG 执行计划都可自动续跑。
 
 ## 关键模块
 

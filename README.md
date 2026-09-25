@@ -202,7 +202,7 @@ OPENAI_CHAT_MODEL=gpt-5
 AGENT_PLANNER_ROLLOUT=llm
 AGENT_INTENT_PLANNER=llm
 AGENT_EXECUTION_PLANNER=llm
-AGENT_SKILL_GRAPH_ROLLOUT=off
+AGENT_SKILL_GRAPH_ROLLOUT=guarded
 AGENT_UNIFIED_GRAPH_ROLLOUT=off
 
 RAG_CHUNK_STRATEGY=structured
@@ -237,7 +237,7 @@ VITE_API_AUTH_TOKEN=
 - 从 `local` / Qdrant 切到 pgvector 后索引是空的，健康检查会报错；先跑 `cd server && npm run vector:reindex`（默认 dry-run，`-- --apply` 才写入；`--from documents` 会用库里的 PDF 重新切块和 embedding）。
 - `RAG_HYBRID_ENABLED=true` + `RAG_HYBRID_FUSION=rrf` 是默认值：dense 与 sparse 两路各自独立检索后融合。pgvector 的 sparse 路是 PostgreSQL FTS，用 `ts_rank_cd` 排序，不是 BM25。
 - 只做文档 RAG 时 `SERPAPI_KEY` 可以先留空；web search 能力需要它。
-- `AGENT_SKILL_GRAPH_ROLLOUT=off` 是默认值，custom skill 阶段走 V1 顺序链。设为 `shadow` 会在 V1 出答案的同时旁路规划并校验一张 typed DAG 用于比对，设为 `guarded` 才真正执行 DAG；两种 V2 模式都不改变 `/chat` 响应结构。真实模型的 guarded 发布判断还需要 `eval:planner -- --provider real`、`runtime:smoke`、`rollout:readiness` 和 `release:gate` 的相应门禁通过，设置变量本身不是发布证据。见 [docs/agent-rag.md](docs/agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。
+- `AGENT_SKILL_GRAPH_ROLLOUT=guarded` 是默认值：custom skill 阶段由 typed DAG 运行时执行，V1 顺序链只在整张图被拒、尚无节点执行时兜底。`off` 是回到 V1 链的显式开关，`shadow` 让 V1 出答案、旁路规划一张图做比对；无法识别的取值按 `off` 处理。三种模式都不改变 `/chat` 响应结构。谁来规划这张图是另一个开关：DAG 规划器跟随 `AGENT_EXECUTION_PLANNER`，LLM 规划失败时先退回确定性图，确定性图也被拒才回落 V1 链。`rollout:readiness` 衡量的是纯 LLM 规划能否零降级，不再是执行器默认值的门禁。见 [docs/agent-rag.md](docs/agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。
 - `AGENT_UNIFIED_GRAPH_ROLLOUT=off` 单独控制全阶段 v3 图迁移，目前只开放 `shadow`：必须注入统一图 planner adapter 才会旁路产出有效候选；真实 `/chat` 和后台 task 仍按现有外层流程执行，run event 仅记录精简规划结果。`guarded` 尚未开放，设置它会回到 `off`。见 [迁移决策与验收清单](docs/unified-agent-dag-migration.md)。
 - 前端 dev server 固定跑在 `3000` 端口，与 `ALLOWED_ORIGINS` 的 CORS 白名单一致；改端口时两边要同步。
 - 完整配置见 [docs/configuration.md](docs/configuration.md)。
@@ -408,7 +408,7 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | 6 | Agent task 目标产物 | 已把 `report.export`、`document.organize`、`summary.create`、`task.create` 接成 task-level goal deliverables；批准后前三类会真实写入 scoped workspace artifact 并只向 task 暴露 compact refs，写入失败时目标不会误报完成。 |
 | 7 | Research task / dossier | 已加 task-level research flow：本地 `research_brief` -> web supplement -> arXiv supplement -> compare/risk review -> citation self-check -> final dossier -> report deliverables。流程由 declarative `research_dossier` workflow spec 渲染，只生成下一步问题、公开 phase 状态和 workflow lifecycle snapshot，实际执行仍复用现有 planner、skills、approval gates 和 capability registry。 |
 | 8 | 目标完成自检 | 已加 task-level `goalCompletion` contract：统一检查 public plan steps、unresolved gaps / unsupported claims、goal deliverables、pending approval / user action、research phases 和 workflow lifecycle contract；默认 trajectory eval 覆盖从等待批准到产物创建后的完整目标生命周期。 |
-| 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加授权原子 Skill catalog、typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、运行时输入/输出 gate、拓扑 scheduler、持久化 graph checkpoint 和一次有界 replan；灰度由 `AGENT_SKILL_GRAPH_ROLLOUT`（`off`/`shadow`/`guarded`，默认 `off`）控制，V1 顺序链、组合 intent 和 deterministic planner 全部保留。四个 trajectory case 钉住 DAG 行为，planner eval 另有 compare-only intent 下动态组合 compare+risk 的 guarded case；real provider、runtime smoke 和 rollout/release gate 为真实模型灰度提供额外门禁。 |
+| 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加授权原子 Skill catalog、typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、运行时输入/输出 gate、拓扑 scheduler、持久化 graph checkpoint 和一次有界 replan；执行器由 `AGENT_SKILL_GRAPH_ROLLOUT`（`guarded`/`shadow`/`off`，默认 `guarded`）选择，V1 顺序链只作为整图被拒时的兜底和运维的显式回退，组合 intent 和 deterministic planner 保留。四个 trajectory case 钉住 DAG 行为，planner eval 另有 compare-only intent 下动态组合 compare+risk 的 guarded case；real provider、runtime smoke 和 rollout/release gate 为真实模型灰度提供额外门禁。 |
 
 ## 当前限制
 
@@ -419,4 +419,4 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 - pgvector 的 lexical 路用 PostgreSQL FTS + `ts_rank_cd`，语义上不是 BM25；embedding 模型或维度变更需要显式 `vector:reindex`，不会自动迁移。Local JSON 索引和 Qdrant 只作为显式 opt-in 兼容后端保留，local 只适合单进程小规模工作区。
 - Web search 和 arXiv 导入依赖外部网络；web search 需要 SerpAPI key，arXiv 使用公开 Atom/PDF 地址。
 - Ragas eval 只是辅助信号；多文档 compare 和 citation 正确性主要依赖自定义 harness、trajectory 和 quality gate。
-- Custom skill 的 typed DAG 默认关闭（`AGENT_SKILL_GRAPH_ROLLOUT=off`），真实 `/chat` 走 V2 需要运维显式开灰度；DAG 也只覆盖 custom skill 阶段，built-in skill、document RAG 主循环、Web 和 capability 调用仍走各自既有路径，不能称为全工具统一 DAG。Typed output gate 校验字段形状，不证明差异/风险内容的语义正确；有界 replan 上限初始为 1。
+- Custom skill 阶段默认由 typed DAG 执行（`AGENT_SKILL_GRAPH_ROLLOUT=guarded`），但 LLM 规划 DAG 在本地 7B 模型上仍有降级，由确定性图兜底；DAG 也只覆盖 custom skill 阶段，built-in skill、document RAG 主循环、Web 和 capability 调用仍走各自既有路径，不能称为全工具统一 DAG。Typed output gate 校验字段形状，不证明差异/风险内容的语义正确；有界 replan 上限初始为 1。

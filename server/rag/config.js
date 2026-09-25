@@ -92,17 +92,25 @@ export const getAgentIntentPlanner = () =>
     "llm",
   ]);
 
-// Rollout dial for the typed DAG inside the custom_skills stage. It starts at
-// `off` -- the V1 chain -- because the migration is only allowed to advance on
-// evidence: `shadow` plans a graph beside the real run so the two can be
-// compared, and `guarded` executes the graph with the V1 chain still there as
-// the fallback for a graph that was rejected before anything ran.
-export const getAgentSkillGraphRollout = () =>
-  toChoice(process.env.AGENT_SKILL_GRAPH_ROLLOUT, "off", [
-    "guarded",
-    "off",
-    "shadow",
-  ]);
+// Which executor runs the custom_skills stage. The typed DAG (`guarded`) is the
+// default; the V1 chain stays as the fallback for a graph rejected before any
+// node ran, and as an explicit operator opt-out (`off`). Who plans the graph is
+// a separate dial: the DAG planner follows AGENT_EXECUTION_PLANNER, and a failed
+// LLM plan falls back to the deterministic graph rather than straight to the
+// chain.
+//
+// An unrecognized value resolves to `off`, not to the default: an operator who
+// touched this dial and mistyped it was most likely trying to leave the graph,
+// and the chain is the narrower path.
+export const getAgentSkillGraphRollout = () => {
+  const rawValue = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "guarded";
+  }
+
+  return toChoice(rawValue, "off", ["guarded", "off", "shadow"]);
+};
 
 // The heterogeneous all-stage graph is observational only until its document
 // loop, approval continuation, and whole-run recovery have release evidence.
