@@ -312,13 +312,32 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 前端 `src/components/AgentRunCenter.js` 只消费 `/tasks` 返回的公开 task contract。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。
 
+## 运行预算：次数之外的 token、成本和时长
+
+`server/rag/agent-budget.js` 的次数预算（文档 RAG 2 次、custom skill 2 次、Web 1 次……）限制工具被调用几次，但限制不了一次运行花多少：同样一次文档 RAG，长上下文的 token 可能是短上下文的十倍。`server/rag/run-usage.js` 给每次运行加三个上限：
+
+| 上限 | 默认 | 环境变量 | `agentBudget` 覆盖 |
+| --- | --- | --- | --- |
+| token | 100000 | `AGENT_RUN_MAX_TOKENS` | `maxRunTokens` |
+| 估算成本（USD） | 0.5 | `AGENT_RUN_MAX_COST_USD` | `maxRunCostUsd` |
+| 总时长（ms） | 300000 | `AGENT_RUN_MAX_DURATION_MS` | `maxRunDurationMs` |
+
+`0` 关闭对应上限；空值保留默认值，避免 `.env` 里一行空值悄悄去掉上限。
+
+- **怎么计量**：每次成功的模型调用（chat、embedding、cross-encoder rerank）都会写一条 LLMOps metric，`recordLlmOpsMetric` 在写入前把它的 `totalTokens` 和 `estimatedCostUsd` 记到当前运行上。当前运行通过 `AsyncLocalStorage` 找到，所以 `ragService` 深处的调用也算在发起它的那次运行上；并发运行各记各的。失败、限流和被 LLMOps 策略拦截的调用不计（供应商不对它们计费）。没有定价的模型只计 token，并记入 `unpricedModelCalls`，所以成本上限只约束有定价的模型。
+- **在哪里生效**：在步骤边界，通过每个工具本来就要过的 `consumeBudget` / `reserveBudget`。任何一个上限用完后，下一个文档 RAG、补检索、custom skill、Web、arXiv 或 research question 都被跳过，写一条 `budget_limit` trace（原因如 `run token budget exhausted (…)`），运行走已有的澄清或证据不足降级路径，而不是报错；`getRemainingBudget` 返回 0，DAG 规划器因此不会再规划新节点。trace step 本身不受限，用完预算的运行仍能记录它为什么停下。
+- **边界**：已经开始的步骤会跑完，所以一次运行最多超出一个步骤的用量；这是"不再开始新工作"的软截止，不会中断进行中的模型调用。每次调用 `runAgentRag` 或图恢复都是一个新计量器：审批续跑可能隔了几个小时，时长从续跑时重新算才符合截止时间的含义，但这也意味着 token 和成本按调用计，不跨审批累加。意图、执行、DAG 规划器调用发生在第一个工具之前，计入用量但不受上限阻止。
+- **观测**：`agentObservability.budget.run` 返回 `limits`、`used`（`tokens`、`costUsd`、`modelCalls`、`unpricedModelCalls`、`durationMs`）和 `exhausted`（`null` / `tokens` / `cost` / `duration`）。它是新增字段，`budget.limits` / `budget.used` 的形状和图 checkpoint 摘要都不变。
+
+默认值是防失控的上限，不是按真实流量校准的：按次数预算的上限估算，一次运行最多约十次模型调用（三个规划器、两次文档 RAG、两次 custom skill、一次 Web 等），每次几千 token，合计在几万 token 量级，默认 100000 留了约两倍余量；时长按本地 7B 模型单次调用 10–20 秒估算。
+
 ## `/chat` observability
 
 `/chat` 响应会返回：
 
 - `agentSkills`：本轮候选和实际选中的 skills。
 - `agentTrace`：plan、query planner、skill chain、document RAG、self-check、gap analysis、follow-up、finalizer 等步骤。
-- `agentObservability`：execution planner selected/fallback 状态、per-skill attempts、duration、citations、abstain、retry/follow-up、budget、error 和 working memory。
+- `agentObservability`：execution planner selected/fallback 状态、per-skill attempts、duration、citations、abstain、retry/follow-up、budget（含 `budget.run` 的 token、成本、时长用量）、error 和 working memory。
 - `agentWorkingMemory`：本次 run 内的检索 query、supported/unsupported claims、resolved/unresolved gaps。
 
 前端 trace UI 位于 `src/components/RenderQA.js`，会展示选中的 skills、skill chains、retrieval queries、evidence gaps、unsupported claims 和 finalizer 删除内容。

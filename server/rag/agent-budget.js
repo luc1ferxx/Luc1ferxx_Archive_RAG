@@ -1,3 +1,10 @@
+import {
+  checkRunUsage,
+  createRunUsage,
+  getRunUsageSnapshot,
+  resolveRunUsageLimits,
+} from "./run-usage.js";
+
 export const DEFAULT_AGENT_BUDGET = {
   maxTraceSteps: 16,
   maxArxivPaperFetches: 1,
@@ -31,7 +38,12 @@ const normalizeLimit = (value, fallback) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 };
 
-export const createAgentBudget = (overrides = {}) => {
+/**
+ * Call-count limits plus the run's usage meter. `runUsage` is the meter the
+ * caller made active for this run (see run-usage.js); without one the budget
+ * gets its own, which enforces time but is charged by nothing.
+ */
+export const createAgentBudget = (overrides = {}, { runUsage = null } = {}) => {
   const limits = Object.fromEntries(
     Object.entries(DEFAULT_AGENT_BUDGET).map(([key, fallback]) => [
       key,
@@ -50,8 +62,14 @@ export const createAgentBudget = (overrides = {}) => {
       webSearchCalls: 0,
     },
     traceTruncated: false,
+    run: runUsage ?? createRunUsage({ limits: resolveRunUsageLimits(overrides) }),
   };
 };
+
+// Trace steps are bookkeeping, not work: a run that is out of tokens must still
+// be able to record why it stopped.
+const checkRunLimits = (budgetState, key) =>
+  key === "traceSteps" ? { ok: true } : checkRunUsage(budgetState?.run);
 
 export const consumeBudget = (budgetState, key) => {
   const limitKey = limitKeyByBudgetKey[key];
@@ -63,6 +81,19 @@ export const consumeBudget = (budgetState, key) => {
 
   const limit = budgetState.limits[limitKey];
   const used = budgetState.used[key] ?? 0;
+  const runLimit = checkRunLimits(budgetState, key);
+
+  if (!runLimit.ok) {
+    return {
+      ok: false,
+      key,
+      label,
+      limit,
+      used,
+      reason: runLimit.reason,
+      runLimit: runLimit.dimension,
+    };
+  }
 
   if (used >= limit) {
     return {
@@ -106,6 +137,24 @@ export const reserveBudget = (budgetState, key, count = 1) => {
   const limit = budgetState.limits[limitKey];
   const used = budgetState.used[key] ?? 0;
   const requested = Math.max(0, Math.trunc(count));
+  const runLimit = requested > 0
+    ? checkRunLimits(budgetState, key)
+    : { ok: true };
+
+  if (!runLimit.ok) {
+    return {
+      key,
+      label,
+      limit,
+      ok: false,
+      reason: runLimit.reason,
+      remaining: 0,
+      requested,
+      reserved: 0,
+      runLimit: runLimit.dimension,
+      used,
+    };
+  }
 
   if (used + requested > limit) {
     return {
@@ -161,6 +210,7 @@ export const getBudgetSnapshot = (budgetState) => ({
     ...budgetState.used,
   },
   traceTruncated: budgetState.traceTruncated,
+  ...(budgetState.run ? { run: getRunUsageSnapshot(budgetState.run) } : {}),
 });
 
 /**
@@ -174,10 +224,14 @@ export const getRemainingBudget = (budgetState) =>
   Object.fromEntries(
     Object.entries(limitKeyByBudgetKey).map(([budgetKey, limitKey]) => [
       budgetKey,
-      Math.max(
-        0,
-        (budgetState?.limits?.[limitKey] ?? 0) - (budgetState?.used?.[budgetKey] ?? 0)
-      ),
+      // A run out of tokens, cost, or time has no calls left to plan with,
+      // whatever the counts say.
+      checkRunLimits(budgetState, budgetKey).ok
+        ? Math.max(
+            0,
+            (budgetState?.limits?.[limitKey] ?? 0) - (budgetState?.used?.[budgetKey] ?? 0)
+          )
+        : 0,
     ])
   );
 

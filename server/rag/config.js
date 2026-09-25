@@ -62,6 +62,27 @@ export const getLlmRequestTimeoutMs = () => {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 120000;
 };
 
+// Per-run ceilings on model usage (see run-usage.js). 0 turns one off; an empty
+// value keeps the default, so a blank line in .env cannot silently remove it.
+const readRunLimit = (name, fallbackValue) => {
+  const rawValue = process.env[name];
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return fallbackValue;
+  }
+
+  return toNonNegativeNumber(rawValue, fallbackValue);
+};
+
+export const getAgentRunMaxTokens = () =>
+  Math.floor(readRunLimit("AGENT_RUN_MAX_TOKENS", 100000));
+
+export const getAgentRunMaxCostUsd = () =>
+  readRunLimit("AGENT_RUN_MAX_COST_USD", 0.5);
+
+export const getAgentRunMaxDurationMs = () =>
+  Math.floor(readRunLimit("AGENT_RUN_MAX_DURATION_MS", 300000));
+
 // Planner calls send a JSON Schema response_format. Turn it off only for an
 // OpenAI-compatible endpoint that rejects the parameter; the planners then fall
 // back to prompt-only JSON and their tolerant parsers.

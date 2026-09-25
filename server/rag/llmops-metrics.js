@@ -8,6 +8,7 @@ import {
   normalizeLlmOpsBudget,
 } from "./llmops-policy.js";
 import { recordRagTrace } from "./observability.js";
+import { chargeActiveRunUsage } from "./run-usage.js";
 import { normalizeClampedText } from "../lib/normalize-text.js";
 
 export { LlmOpsBudgetExceededError } from "./llmops-policy.js";
@@ -215,6 +216,10 @@ export const recordLlmOpsMetric = async (
       policySignals.annotations
     ),
   });
+
+  // Charge the run before the recorder: usage must count even when the trace
+  // write fails.
+  chargeActiveRunUsage(event);
 
   try {
     await recorder(event);

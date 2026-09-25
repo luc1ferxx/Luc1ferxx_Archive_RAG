@@ -653,6 +653,26 @@ test("createReplanResult abstains when the budget cannot fund the patch", async 
   assert.equal(result.reasonCode, REPLAN_REASON_CODES.budgetExhausted);
 });
 
+// A run out of tokens, cost, or time reports every call budget as 0 but keeps
+// trace steps so it can explain itself. Those cannot pay for a node, so the
+// replanner must not spend a model call on a patch.
+test("createReplanResult does not ask the model when only trace steps remain", async () => {
+  let adapterCalls = 0;
+  const result = await createReplanResult(
+    baseOptions({
+      budgetRemaining: { customSkillCalls: 0, traceSteps: 9, webSearchCalls: 0 },
+      replanAdapter: stubAdapter(() => {
+        adapterCalls += 1;
+        return timelinePatch();
+      }),
+    })
+  );
+
+  assert.equal(result.decision, REPLAN_DECISIONS.abstain);
+  assert.equal(result.reasonCode, REPLAN_REASON_CODES.budgetExhausted);
+  assert.equal(adapterCalls, 0);
+});
+
 // A node that abstained still ran, still spent budget, and would abstain again
 // on the same inputs. It is carried forward as completed work like any other,
 // which is why a useful patch adds a new node instead of replaying an old one.

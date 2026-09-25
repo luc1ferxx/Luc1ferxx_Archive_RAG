@@ -42,6 +42,11 @@ import {
 } from "./config.js";
 import { listAuthorizedAtomicCustomSkills } from "./skills/authorized-catalog.js";
 import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
+import {
+  createRunUsage,
+  resolveRunUsageLimits,
+  runWithRunUsage,
+} from "./run-usage.js";
 import { observeUnifiedAgentGraphShadow } from "./agent-unified-graph-shadow.js";
 
 const getSkillDescriptor = (skill = {}) => ({
@@ -375,7 +380,7 @@ const createGraphResumeError = (reason) => {
  * Execution Planner. A startup worker must first own the persisted CAS claim
  * and must never use the general runAgentRag re-entry path for this job.
  */
-export const resumeAgentExecutionGraphRun = async ({
+const resumeAgentExecutionGraphRunInScope = async ({
   accessScope,
   agentRunService,
   checkpoint,
@@ -589,7 +594,7 @@ export const resumeAgentExecutionGraphRun = async ({
   return attachAgentRunSnapshot(responseWithContinuation, completedRun);
 };
 
-export const runAgentRag = async ({
+const runAgentRagInScope = async ({
   agentBudget,
   agentRunService,
   arxivImportService,
@@ -978,3 +983,23 @@ export const runAgentRag = async ({
     throw error;
   }
 };
+
+// Every model call a run causes -- planners, document RAG, Skills, web -- is
+// charged to that run's usage meter through AsyncLocalStorage, so the meter has
+// to be active before the first of them. The run context picks the same meter
+// up as its budget's `run` ceiling. Each invocation gets its own meter: an
+// approval resume or graph recovery is a new invocation with a fresh clock,
+// which is what a deadline should mean when a human approval may take hours.
+export const runAgentRag = (options = {}) =>
+  runWithRunUsage(
+    createRunUsage({ limits: resolveRunUsageLimits(options.agentBudget) }),
+    () => runAgentRagInScope(options)
+  );
+
+export const resumeAgentExecutionGraphRun = (options = {}) =>
+  runWithRunUsage(
+    createRunUsage({
+      limits: resolveRunUsageLimits(options.checkpoint?.owner?.budget?.limits),
+    }),
+    () => resumeAgentExecutionGraphRunInScope(options)
+  );

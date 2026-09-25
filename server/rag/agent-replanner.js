@@ -346,9 +346,15 @@ const abstain = ({ fingerprints, reason = null, reasonCode, replanCount, trigger
   trigger,
 });
 
+// Trace steps cannot pay for a node. Counting them would let a run that is out
+// of every call budget -- or out of tokens, cost, or time, which zeroes the
+// others but deliberately not traceSteps -- still spend a model call on a patch
+// that no node could execute.
 const hasSpendableBudget = (budgetRemaining) =>
   !isRecord(budgetRemaining) ||
-  Object.values(budgetRemaining).some((value) => Number(value) > 0);
+  Object.entries(budgetRemaining).some(
+    ([budgetKey, value]) => budgetKey !== "traceSteps" && Number(value) > 0
+  );
 
 /**
  * Budget demanded by the nodes that have not already been paid for.

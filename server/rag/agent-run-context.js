@@ -4,6 +4,7 @@ import {
   createAgentBudget,
   getBudgetSnapshot as getAgentBudgetSnapshot,
 } from "./agent-budget.js";
+import { getActiveRunUsage } from "./run-usage.js";
 import { buildAgentExperienceMemoryObservability } from "./agent-experience-memory.js";
 import { buildClarificationResponse } from "./agent-response-builder.js";
 import { getSkillDescriptor } from "./agent-skill-observability.js";
@@ -57,7 +58,9 @@ export const createAgentRunContext = ({
   workingMemory,
 } = {}) => {
   const trace = [];
-  const budgetState = createAgentBudget(agentBudget);
+  const budgetState = createAgentBudget(agentBudget, {
+    runUsage: getActiveRunUsage(),
+  });
   let agentRetrievalPlan = null;
   let executionPlanner = createDefaultExecutionPlanner();
   let intentPlanner = {
