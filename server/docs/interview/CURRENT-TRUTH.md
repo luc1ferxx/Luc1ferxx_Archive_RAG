@@ -1,301 +1,121 @@
-# Luc1ferxx_Archive_RAG — Current Truth
+# 现状与数据
 
-> **Status banner (read first).**
-> This document records *what the system actually is* — default configuration and
-> implemented mechanism — with every claim pinned to `file:line` under `server/`.
-> **Mechanism and defaults below are VERIFIED against the code and unit/regression
-> tests** (req-1 correctness: **41/41** this session). The **effect metrics** in §6
-> (Recall@K, NDCG, MRR, citation-support, refusal accuracy, latency, token/cost) are
-> **same-SHA evidence**: produced by the deterministic `npm run eval:retrieval-comparison`
-> runner and stamped at the commit that also contains this document, with a **clean
-> worktree**. The ranking columns are **git-state-independent** (deterministic
-> provider), so a re-run reproduces them identically; the source report
-> `evaluation/results/latest-retrieval-comparison.md` carries the live stamp. Never
-> fill §6 from a historical/expired report.
+> 面试里说出口的每个数字都应该能在这里找到出处：是什么命令、在哪个版本、用什么模型跑出来的。数字更新时先更新这里，再改讲述稿和 FAQ。
 >
-> - **Commit / worktree stamp:** read it from the report stamp in
->   `evaluation/results/latest-retrieval-comparison.md` (commit SHA + `dirty: false`)
->   or `git rev-parse HEAD`. This document deliberately does **not** hard-code its own
->   commit hash — a file cannot contain its own commit's SHA — so the report is the
->   single source of the stamp. Regenerate it at HEAD with `npm run eval:retrieval-comparison`.
-> - **Provider for the eval:** deterministic evaluation provider (no `OPENAI_API_KEY`
->   in `.env`), clearly labeled — **no calibrated-probability claims anywhere**;
->   RRF / in-set-normalized scores are ranking figures, not probabilities.
-> - **Still gated (NOT claimed green here):** the DB-backed `quality:current` /
->   `release:gate` batteries and the real-DB integration suite need a live pgvector
->   (and, for `planner-real`, a real model key). Their status lives in
->   `EVIDENCE-STATUS.md`. §6 is the deterministic **effect** comparison, which runs on
->   the `local` backend and needs neither a database nor a key.
+> 模型说明：下面的"真实模型"指本地 Ollama 上的 `nomic-embed-text`（embedding）和 `qwen2.5:7b`（chat），不是 GPT 级模型，也不是生产流量。评测集较小，凡是没有标注"显著"的差异都不能说成"更好"。
 
----
+## 1. 系统能做什么
 
-## 1. Default configuration (the "what runs by default" table)
+- 上传 PDF，在选定文档、全部文档或整个工作区范围内提问，回答带页码、摘录和来源文件。
+- 多文档对比：每份文档独立召回，逐文档绑定数值，识别"没有实质差异"的情况。
+- 证据不足时补检索、请求澄清或明确拒答。
+- 后台 Agent 任务、审批门、运行记录、崩溃后恢复。
+- 以 MCP server 形式暴露给其它 Agent（`archive-mcp-server.js`），也可以无数据库单机运行。
 
-All defaults are read live from `server/rag/config.js` unless noted. Environment
-variables override; the value shown is the fallback when the var is unset.
+## 2. Agent 架构要点（都能在代码里指出来）
 
-| Concern | Default | Source |
-|---|---|---|
-| Vector store provider | `pgvector` (strict allowlist `local`/`pgvector`/`qdrant`, **fails closed** on an unknown value) | `rag/config.js:114`, `:126-173` |
-| Embedding model | `text-embedding-3-small` → **1536 dim** (large=3072, ada-002=1536) | `rag/config.js:48-49`, `:178-184` |
-| Embedding dim (eval) | **64 dim** deterministic provider override | `rag/config.js:188-199` |
-| Chat model | `gpt-5` | `rag/config.js:51` |
-| Chunk strategy | `structured` | `rag/config.js:89-90` |
-| Chunk size / overlap | **900 / 180** chars | `rag/config.js:298-302` |
-| Retrieval Top-K (final) | **6** | `rag/config.js:304-305` |
-| Sparse Top-K (candidate) | **8** | `rag/config.js:307-308` |
-| Compare Top-K per doc | **3** | `rag/config.js:310-311` |
-| Max comparison sources | **8** | `rag/config.js:341-342` |
-| Hybrid retrieval | **enabled** (dense pgvector cosine + PostgreSQL FTS) | `rag/config.js:96-97` |
-| Fusion method | **`rrf`** (`weighted` available) | `rag/config.js:99-100` |
-| RRF constant *k* | **60** | `rag/config.js:102-103` |
-| Weighted dense / sparse weights | **0.65 / 0.35** (also weight the RRF per-route contribution) | `rag/config.js:350-354` |
-| Rerank | **disabled by default** | `rag/config.js:313-314` |
-| Rerank provider | `heuristic` (`custom`, `cross-encoder` available) | `rag/config.js:316-321` |
-| Rerank candidate multiplier / weight | **3 / 0.6** | `rag/config.js:323-330` |
-| Prompt version (query rewrite) | **`v3`** (`v1`/`v2` available) | `rag/config.js:53-54`, `rag/memory.js:156-168` |
-| Query decomposition (multi-query) | **enabled**, ≤ **4** requirements | `rag/config.js:362-366` |
-| Near-duplicate guard | **enabled** | `rag/config.js:368-369` |
-| Supplemental retrieval (补检索) | **1 round, ≤ 3** deduplicated queries (one per missing aspect) | `rag/gap-planner.js:660-684`, `rag/document-rag-execution.js:411-463` |
-| Typed DAG (skill-graph) rollout | **`off`** (`shadow`/`guarded` available; advances only on evidence) | `rag/config.js:77-87` |
-| Agent planner rollout | `llm` (execution & intent planners `llm`) | `rag/config.js:56-75` |
-| pgvector ANN index | `hnsw` (m=16, ef_construction=64); `ivfflat` (lists=100) available | `rag/config.js:244-254` |
-| pgvector FTS config | `simple` (matches the local sparse tokenizer) | `rag/config.js:238-242` |
-| Min relevance / vector / keyword weights | 0.32 / 0.82 / 0.18 | `rag/config.js:344-357` |
-| Min query-term coverage | 0.51 | `rag/config.js:359-360` |
+| 设计 | 事实 | 位置 |
+| --- | --- | --- |
+| 模型只提议、运行时决定 | 意图规划器在白名单候选里选意图；执行规划器在白名单步骤里排序；权限、`docIds`、预算、审批、并发、重试上限都由运行时决定 | `rag/agent-intent-llm-adapter.js`、`rag/agent-llm-planner-adapter.js`、`rag/agent-execution-plan.js` |
+| Typed DAG | 自定义 Skill 阶段由模型输出节点、依赖和输入绑定；校验器整图接受或整图拒绝；节点输入只能绑定请求字段或上游输出；上限 12 个节点、深度 5、并发 3 | `rag/agent-execution-graph.js`、`rag/agent-execution-graph-runner.js`、`rag/agent-dag-planner-adapter.js` |
+| 有界重规划 | 最多 1 次，只能打补丁，同样经过校验器 | `rag/agent-replanner.js` |
+| 自检与补检索 | 逐条 claim 核对引用支持；有缺口时补检索一轮，最多 3 条查询；finalizer 删除无证据内容 | `rag/agent-document-loop.js`、`rag/self-check/`、`rag/agent-finalizer.js` |
+| 结构化输出 | 规划器调用发送按请求从白名单生成的 strict JSON Schema；自由文本和数组都有上限；校验器仍是最终裁决 | `rag/structured-output.js` |
+| 持久化与恢复 | 运行、步骤、事件存在 PostgreSQL；guarded 图的 checkpoint 只能在节点边界续跑；认领、节点开始、完成都用运行版本号 CAS 防止旧 worker 重复执行；有副作用的步骤不会被自动重放 | `rag/agent-execution-graph-checkpoint.js`、`rag/agent-run-step-replay-safety.js`、`rag/agent-runs.js` |
+| 预算 | 每次运行：文档 RAG 2 次、自定义 Skill 2 次、Web 搜索 1 次、trace 16 步 | `rag/agent-budget.js` |
+| LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型 | `rag/openai.js`、`rag/openai-client.js`、`rag/model-providers/` |
+| 流式进度 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要，经校验的最终答案整体发送；不流式输出 token | `routes/chat.js`、`rag/agent-event-stream.js` |
 
----
+默认配置：hybrid 检索（pgvector 余弦 + PostgreSQL 全文检索，RRF 融合），rerank 关闭，规划器用 LLM，typed DAG 灰度开关默认 `off`。
 
-## 2. Retrieval signal separation — the correctness spine
+## 3. 实测数字
 
-**The single most important design fact:** four distinct signals are kept
-separate; the fusion rank is **never** used as a confidence or probability.
+### 3.1 检索：伪 embedding 与真实 embedding
 
-| Signal | Meaning | Range | Used for | Source |
-|---|---|---|---|---|
-| `vectorScore` | dense cosine similarity | [0, 1] | admission + weighted fusion | `rag/vector-store.js:356` |
-| `sparseScore` | PostgreSQL `ts_rank_cd` | **unbounded** | ranking only | `rag/vector-store.js:368` |
-| `keywordScore` | query-term coverage | [0, 1] | admission + provenance | `rag/vector-store.js:369-372` |
-| `rrfScore` | **raw** RRF sum `Σ weight/(k+rank+1)` | small (~≤0.016 at k=60) | **provenance only** | `rag/vector-store.js:324-325`, `:359-377` |
-| `score` | scaled RRF **rank** = `rrfScore × (k+1)` | [0, 1] | ordering / rerank blend | `rag/vector-store.js:380-394` |
-| `admissionScore` | `max(vectorScore, keywordScore)` | [0, 1] | **evidence gate + citation score** | `rag/citations.js:27-35` |
+`npm run eval:retrieval-comparison`，8 篇 arXiv 论文、48 条用例，Top-5，报告版本 `f7f6690c`，工作区干净。
 
-Two code comments state the contract verbatim:
+| 配置 | 伪 embedding（哈希词频）Recall@5 | 真实 embedding（nomic）Recall@5 |
+| --- | --- | --- |
+| dense | 0.625 | 0.654 |
+| BM25 | 0.658 | 0.658 |
+| hybrid RRF | 0.543 | **0.712** |
+| hybrid + 启发式 rerank | 0.585 | 0.663 |
 
-- `rag/vector-store.js:384-387`: *"This scaled `score` is a fusion RANK, not a
-  confidence: evidence admission is gated on admissionScore (raw dense/keyword
-  signal), never on this value. The raw sum is kept as rrfScore for provenance."*
-- `rag/citations.js:19-26`: *"RRF (or weighted) fusion only ranks candidates; its
-  output must never be read as a confidence or relevance probability. Admission is
-  the strongest bounded raw retrieval signal… judged on retrieval strength, not on
-  a rank-sum that was scaled to clear a threshold. `sparseScore` (ts_rank_cd) is
-  unbounded and ranking-only, so it is deliberately excluded here."*
+配对 bootstrap 95% 置信区间（真实 embedding）：
 
-Citations carry the **admission** score, not the fusion rank
-(`rag/answer-writer.js:278-279`, `:744`, `:812`), and `rank` is the final fused
-order.
+- 全量：hybrid 比 dense +0.057 [−0.031, +0.156]，比 BM25 +0.054 [−0.038, +0.149]，都**不显著**。
+- tuning 子集：hybrid 比 BM25 Recall +0.097 [+0.021, +0.188]，**显著**。
+- held-out 子集（预先指定的主指标）：没有任何一组差异显著。
+- 启发式 rerank 比 hybrid：全量 −0.049 [−0.115, +0.014]，不显著，但三个子集里都没有带来提升。
 
-**Verified by:** `test/hybrid-retrieval-provenance.test.mjs` (fusion + dedup +
-provenance contract), `test/rag-boundary-coverage.test.mjs` (citation dedup,
-stable keys, rank), `test/source-labels.test.mjs` (citation rank rebasing).
+能说的结论：hybrid 在真实 embedding 下数值最好、从不显著更差；48 条用例不足以证明它更好。伪 embedding 下的排序是错的，不能用来做架构决策。
 
----
+### 3.2 端到端质量
 
-## 3. Cross-query aggregation (req 1)
+`npm run verify:quality`（18 项检查：单文档问答的页码和数值、双文档对比的数值归属、完全相同文档的对照组、语料外问题拒答、跨进程读取）。
 
-Multi-query decomposition → each sub-query retrieves independently → results are
-merged with **stable de-duplication and a single global re-rank** into one unified
-final Top-K, so **citation `rank` is consistent with the final order**.
+| 版本 | 结果 |
+| --- | --- |
+| 修复前 | 16/18，对比路径全部拒答 |
+| `f7f6690c` 修复后 | **18/18**（真实模型），离线自测也是 18/18 |
 
-- Merge/dedup: `mergeRetrievedResults` — `rag/vector-store.js` (contract tested in
-  `test/hybrid-retrieval-provenance.test.mjs:233`).
-- Global re-rank + unified Top-K: applied after merge, before citation numbering.
-- Multi-query provenance recorded (`routes.dense.queryCount`) and asserted in the
-  integration suite (`test/vector-store-pgvector.integration.test.mjs`, multi-query
-  provenance + citation-ordering cases).
+原因和修复过程见 [NARRATIVE-CASES.md](NARRATIVE-CASES.md) 故事 1。注意：现在通过的对比答案来自引擎按证据拼出的模板，模型自己写的改写版本仍会被词法校验器拒绝。
 
----
+### 3.3 规划器：结构化输出
 
-## 4. End-to-end route map
+`npm run eval:planner -- --provider real`（qwen2.5:7b），每组 5 轮，共 30 个用例、25 次 LLM 规划调用。
 
-- **Normal QA →** *global* retrieval across the active document set
-  (`retrieveGlobalContext`, `rag/document-rag-execution.js:420`).
-- **Document comparison →** *per-document* retrieval, Top-K **3** per doc
-  (`rag/config.js:310-311`); **partial comparison** and **`missingDocuments`**
-  semantics preserved.
-- **Refusal / insufficient evidence →** gated on `admissionScore` + confidence;
-  triggers the `insufficient_evidence` replan path
-  (`rag/agent-replanner.js:40`, `:202`); refusal is not driven by the RRF rank.
-- **Supplemental retrieval (补检索) →** one round of ≤ 3 deduplicated gap-queries
-  (`rag/gap-planner.js:663-664`), merged and re-planned once
-  (`rag/document-rag-execution.js:435-462`) — **not** an unbounded loop.
+| 组别 | 用例通过 | LLM 规划降级 | 每轮耗时 |
+| --- | --- | --- | --- |
+| 改前 | 14/30（47%） | 14/25（56%） | 14.1s |
+| 只修 prompt | 14/30（47%） | 15/25（60%） | 13.0s |
+| 加 schema，不限长度 | 24/30（80%） | 4/25（16%） | 16.4s |
+| `75628674` 最终版 | **24/30（80%）** | **2/25（8%）** | 14.2s |
 
-The default query-rewrite prompt (`v3`, `rag/memory.js:83-142`) is **clean of the
-prior mojibake** and carries a Chinese follow-up example (`那第二个呢？` →
-`第二份文档的远程办公政策是什么？`, `rag/memory.js:124-129`). The dedicated
-regression test `test/memory-rewrite-v3.test.mjs` (3 cases) pins both halves: the
-rendered v3 prompt **contains the exact expected Chinese and none of the old GBK
-mojibake tokens** (`瀵规瘮`, `绗簩浠芥枃妗`, …), and a Chinese pronoun follow-up
-actually **drives the rewrite path** (while a self-contained Chinese question is left
-untouched). Additional CJK contrast handling is exercised in
-`test/claim-support.test.mjs`.
+改前的降级全是格式或越界错误：step 条件写错、输出了未选中的 step、DAG 输入绑定到不存在的请求字段。剩下的失败是规划选择问题（该先对比再做风险评估时只规划了对比），约束解码解决不了。
 
----
+### 3.4 LLM 调用容错
 
-## 5. Verified vs. Unverified boundary (be honest in the room)
+`npm run eval:llm-resilience`，每个场景 24 次调用、并发 8、SLO 15 秒，三轮平均。改前 `75628674`，改后 `a2764083` 起。
 
-**VERIFIED now (unit/regression, no database required):**
+| 场景 | 改前 | 改后 | 改后、无备用模型 |
+| --- | --- | --- | --- |
+| 429，精确 `retry-after-ms` | 79.2% | **100%** | 83.3% |
+| 429，粗粒度 `Retry-After: 1` | 79.2% | **100%** | 94.4%（请求数从 2.63 降到 2.08） |
+| 20% 请求挂起 | 87.5%，p95 15s | **100%，p95 3.4s** | 100% |
+| 30% 空响应 | 62.5% | **91.7%** | 91.7% |
+| 主模型宕机 | 0% | **100%** | 0% |
 
-- **Req 1 — retrieval correctness:** signal separation, cross-query merge /
-  global re-rank, citation-rank consistency, Chinese follow-up handling.
-  **41/41 regression tests pass** (this session): `retrieval-route-selection.test.mjs`
-  (route isolation + fail-closed), `hybrid-retrieval-provenance.test.mjs`,
-  `synthetic-retrieval-evidence.test.mjs` (architecture-consistency guard),
-  `rerank-report-ranking-validation.test.mjs` + `rerank-eval*.test.mjs`
-  (rerank-score vs. fusion-rank separation, forged-report rejection),
-  `rag-boundary-coverage.test.mjs`, `source-labels.test.mjs`,
-  `memory-rewrite-v3.test.mjs` (Chinese rewrite + mojibake guard),
-  `claim-support.test.mjs`.
-- **Req 2 — pgvector lifecycle:** dry-run is strictly read-only (no migration /
-  DDL / DML), model-provenance re-embed vs. attested copy, ANN > 2000 fails
-  closed; health detects invalid provider, pgvector-without-DB, ANN
-  actual-vs-configured method, and partial migration.
-  Tests: `vector-reindex.test.mjs` (9), `vector-store-health.test.mjs`.
-- **Req 4 (effect comparison) — same-SHA, no DB:** `npm run eval:retrieval-comparison`
-  compares dense-only / sparse-only / hybrid-RRF / hybrid+rerank on one corpus,
-  tuning vs held-out **split by source document**, reporting Recall@K / NDCG / MRR /
-  citation-support / refusal-accuracy / latency / token-cost (§6). Deterministic
-  **labeled** provider; ranking columns git-state-independent; stamped clean at this
-  commit. A **wiring / relative** check under a non-semantic embedding, not a
-  production-quality claim.
+代价：限流场景 p95 从约 2.5 秒升到约 4.7 秒。评测里备用模型和主模型共用一个限流器，是 failover 的最坏情况。
 
-**NOT YET PRODUCED in this run (execution-environment-gated — see `EVIDENCE-STATUS.md`):**
+### 3.5 工程基线（`99af0019`）
 
-- **Req 3 — real-DB E2E:** `test/vector-store-pgvector.integration.test.mjs`
-  self-skips whenever `PGVECTOR_TEST_DATABASE_URL` is unset. The runner is built and
-  docker-free: `scripts/run-pgvector-integration.sh` provisions a **throwaway**
-  Postgres.app 18 + pgvector cluster (both verified installed; exact versions printed
-  at runtime) on an **OS-picked free 127.0.0.1 port**
-  (never 5432; dev DB `agentai` untouched) and runs the suite **unskipped** (with
-  `FULL_SUITE=1` it also runs the full backend suite so the 47 sandbox-only route
-  tests pass in the same shell). It can't run through the Bash tool because the
-  sandbox blocks *all* sockets (outbound `connect`, unix-domain `listen()`, and TCP
-  `listen()` — all re-tested EPERM this run); it needs one shell outside the sandbox.
-- **DB-backed quality & release gates:** the deterministic **effect comparison**
-  (§6) is done same-SHA, but two batteries remain gated. `npm run quality:current`
-  regenerates `latest-quality`/`latest-feedback` under `VECTOR_STORE_PROVIDER=pgvector`,
-  so its manifest's `vectorStoreProvider === "pgvector"` check (derived from real
-  per-case route evidence — a run that fell back cannot pass by declaration) needs a
-  **live pgvector**. `npm run release:gate` requires `latest-planner-real.json`, which
-  needs a **real model key**. Both are honest execution-/credential-gated boundaries,
-  run in the same out-of-sandbox terminal as req 3 (`EVIDENCE-STATUS.md` Touchpoint A);
-  neither is claimed green here. `git` itself works (CLT `git` 2.54.0; the resolver at
-  `evaluation/eval-evidence.js:184` shells `git` correctly — only the bare
-  `/usr/bin/git` shim trips the Xcode license, a PATH detail, **no `xcodebuild
-  -license` needed**).
+- 后端测试 1687 个，0 失败，2 个跳过（需要 PostgreSQL 的 pgvector 集成测试）。
+- 前端测试 102 个全部通过，生产构建通过。
+- 覆盖率门禁通过：后端全局行覆盖 91.3%，RAG/AgentRAG 核心 93.5%。
 
-**Standing boundaries (do not overstate):**
+## 4. 边界（主动说，不要等被问）
 
-- PDF ingestion is **text-layer only** — no OCR / layout parser. Scanned or
-  complex-layout PDFs are detected and reported, not silently mis-parsed.
-- The sparse ranker is **backend-dependent, and labeled as such in code**
-  (`rag/vector-store.js:84,112,131`): the **default `pgvector`** backend ranks with
-  PostgreSQL **`ts_rank_cd` cover-density FTS — which is NOT BM25**
-  (`rag/vector-store-pgvector.js:788-794`, `sparseBackend: "postgres_fts_ts_rank_cd"`),
-  while the **`local`** (`local_json_bm25`) and **`qdrant`** (`qdrant_sparse_bm25`)
-  backends use a real **BM25** scorer (`rag/sparse-store.js:7-8,159-179`, k1=1.2/b=0.75,
-  IDF + saturation + length norm). The deterministic eval runs use the `local`
-  backend, so the §6 sparse arm **is** genuine BM25 — but the shipped default route
-  is FTS. Never describe `ts_rank_cd` as BM25.
-- The pending eval uses the **deterministic provider** (no OpenAI key present),
-  clearly labeled; no real-model or calibrated-probability claims.
+- **模型**：只用本地 7B 模型验证过，没有 GPT 级模型或生产流量的数据；没有真实的单次查询成本数据。
+- **评测规模**：检索 48 条、端到端 18 项检查，多数差异不显著。QASPER 导入脚本和 LLM 评审只有框架，还没跑过真实数据，评审也还没做人工校准。
+- **校验器**：自检是词法规则，识别不了语义等价的改写，所以对比答案目前走模板兜底。
+- **文档解析**：只读 PDF 文本层，没有 OCR、表格和版面解析；换行会把句子切断，导致模板答案出现半句话。
+- **安全**：prompt 注入只有设计层防御（规划器看不到身份、范围由运行时决定、外部查询过滤），还没有对抗性测试集和攻击成功率数据。
+- **架构**：V1 顺序链、V2 typed DAG、v3 统一图三代并存；v3 只在 shadow 模式下规划，执行阶段有测试但没接进生产路径。
+- **流式输出**：后端 SSE 接口和前端 `streamChat` 已有，但聊天界面还没接上，也没有测试。
 
----
+## 5. 复现
 
-## 6. Effect metrics — same-SHA evidence (deterministic provider)
+先 `ollama serve`，并 `ollama pull nomic-embed-text`、`ollama pull qwen2.5:7b`。
 
-> **These are same-SHA evidence, not a preview.** Produced by
-> `npm run eval:retrieval-comparison` (deterministic **labeled** provider) and stamped
-> at the commit that contains this document with a **clean worktree** — read the live
-> commit SHA + `dirty: false` from `evaluation/results/latest-retrieval-comparison.md`.
-> The embedding is a **non-semantic hashed term-frequency vector**, so these figures
-> validate that the four arms are wired and scored correctly *relative to each
-> other* — they are **NOT** production semantic quality and must not be quoted as
-> "hybrid beats sparse in deployment." The ranking columns
-> (Recall@K/NDCG@K/MRR/citation-support/tokens/cost) are **git-state-independent** and
-> reproduce **identically** on any clean re-run; only wall-clock latency varies.
-> Corpus hash `dde2bc4f…3bf38c04`. Read that report's "Interpreting these numbers"
-> section first.
+```bash
+cd server
+export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+export OPENAI_EMBEDDING_MODEL=nomic-embed-text OPENAI_CHAT_MODEL=qwen2.5:7b RAG_EMBEDDING_DIMENSIONS=768
+npm run eval:retrieval-comparison -- --embedding-provider openai --latest-name latest-retrieval-comparison-ollama
+npm run verify:quality
+npm run eval:planner -- --provider real
+npm run eval:llm-resilience   # 不需要模型，用本地假服务注入故障
+```
 
-Tuning and held-out are split **by source document** (no document — or near-duplicate
-pair — appears on both sides; every multi-doc `compare` case stays wholly on one
-side). The four arms are **fixed configurations**, so the split isolates
-generalization rather than fitting to one set. Note the **arm ordering differs
-between the two disjoint sets** under this non-semantic embedding — sparse leads
-held-out, hybrid+rerank leads tuning — which is exactly why held-out is the primary
-figure and why a production ordering needs a real-embedding run.
-
-**Held-out split — primary generalization figure (4 docs, 24 cases, Top-K=5)**
-docs: `dense_passage_retrieval`, `colbert_late_interaction`, `react_reasoning_acting`, `toolformer_self_supervised_tools`
-
-| Configuration | Recall@K | NDCG@K | MRR | Citation support | Refusal acc.¹ | Latency p50/p95 ms² | Est. embed tokens / USD³ |
-|---|---|---|---|---|---|---|---|
-| dense-only | 0.6215 | 0.5192 | 0.5937 | 0.8333 | 1.0000 | ~2.0 / 3.9 | 74576 / $0.001492 |
-| sparse-only (BM25) | 0.7083 | 0.6298 | 0.7361 | 0.9583 | 1.0000 | ~0.0 / 1.0 | 0 / $0 |
-| hybrid RRF | 0.4306 | 0.3371 | 0.3764 | 0.6250 | 1.0000 | ~2.0 / 3.0 | 74576 / $0.001492 |
-| hybrid + rerank | 0.4792 | 0.3802 | 0.4424 | 0.7083 | 1.0000 | ~2.0 / 3.0 | 74576 / $0.001492 |
-
-**Tuning split — held out from the primary figure (4 docs, 24 cases, Top-K=5)**
-docs: `rag_knowledge_intensive_nlp`, `self_rag_self_reflection`, `hnsw_approximate_nearest_neighbor`, `attention_is_all_you_need`
-
-| Configuration | Recall@K | NDCG@K | MRR | Citation support | Refusal acc.¹ | Latency p50/p95 ms² | Est. embed tokens / USD³ |
-|---|---|---|---|---|---|---|---|
-| dense-only | 0.6285 | 0.4569 | 0.4180 | 0.7500 | 1.0000 | ~2.0 / 5.5 | 70439 / $0.001409 |
-| sparse-only (BM25) | 0.6493 | 0.5302 | 0.5201 | 0.7500 | 1.0000 | ~1.0 / 1.0 | 0 / $0 |
-| hybrid RRF | 0.6563 | 0.5297 | 0.5174 | 0.7500 | 1.0000 | ~2.0 / 3.0 | 70439 / $0.001409 |
-| hybrid + rerank | 0.6910 | 0.5597 | 0.5500 | 0.8333 | 1.0000 | ~2.0 / 3.0 | 70439 / $0.001409 |
-
-**Full corpus (8 docs, 48 cases, Top-K=5):**
-
-| Configuration | Recall@K | NDCG@K | MRR | Citation support | Refusal acc.¹ | Latency p50/p95 ms² | Est. embed tokens / USD³ |
-|---|---|---|---|---|---|---|---|
-| dense-only | 0.6250 | 0.4880 | 0.5059 | 0.7917 | 1.0000 | ~2.0 / 3.0 | 145015 / $0.0029 |
-| sparse-only (BM25) | 0.6580 | 0.5686 | 0.6222 | 0.8542 | 1.0000 | ~0.0 / 1.0 | 0 / $0 |
-| hybrid RRF | 0.5434 | 0.4334 | 0.4486 | 0.6875 | 1.0000 | ~2.0 / 3.6 | 145015 / $0.0029 |
-| hybrid + rerank | 0.5851 | 0.4714 | 0.4996 | 0.7708 | 1.0000 | ~2.0 / 3.6 | 145015 / $0.0029 |
-
-¹ Refusal accuracy is measured on a **separate** abstain-bearing corpus
-(`synthetic-corpus-near-duplicate.json`, 2 abstain cases) per arm, not on the arXiv
-ranking corpus (which has 0 abstain cases) — hence the same 1.0000 across every split.
-² In-process wall time under deterministic embeddings with the heuristic rerank
-stage present in every arm — a **relative** cost signal, **not** a production SLA, and
-the one **non-deterministic** column: wall-clock varies run-to-run, so values are
-shown with `~` and the live report carries each run's exact p50/p95.
-³ List-price **estimate** (~4 chars/token, $0.02/1M for `text-embedding-3-small`)
-for the equivalent real-model deployment; the deterministic run bills $0. Sparse-only
-embeds no query vectors, hence 0 tokens.
-
-**Reading these (all expected under a non-semantic embedding, not defects):**
-sparse (BM25) out-ranks the crude dense TF-cosine arm on held-out/full; hybrid RRF can
-fall *below* the stronger single arm (equal-per-rank fusion dilutes a strong BM25 list
-with the noisy hashed-TF list); rerank partially repairs the fusion damage
-(hybrid+rerank ≥ hybrid RRF on **every** split). On the **tuning** split the dense arm
-is comparatively stronger, so hybrid+rerank actually **leads** (0.6910 Recall@5) —
-underscoring that arm ordering is split-sensitive here. Showing the dense/hybrid
-ordering a production deployment would exhibit requires a **real-embedding** run, which
-is credential-gated and not part of this deterministic evidence.
-
-Required narrative cases — all five are in `docs/interview/NARRATIVE-CASES.md`, each
-pulled from a real run and pointing to its **report file** (not a hard-coded run ID):
-≥1 successful answer (`qa_remote_alpha`), ≥1 multi-document comparison
-(`compare_remote_numeric_conflict`), ≥1 supplemental retrieval
-(`document_follow_up_retrieval`), ≥1 correct refusal (`qa_satellite_stipend_abstain`),
-≥1 failure case (hybrid-RRF dilution under the deterministic embedding).
-
-Release-evidence gate (`npm run release:gate`, profile `release`, max age 24h)
-expects 8 reports: `compare-hard-synthetic`, `rerank-hard-cs`,
-`arxiv-real-paper-rerank`, `trajectory`, `planner-real`,
-`recovery-observability`, `runtime-smoke`, `rollout-readiness`
-(`evaluation/eval-evidence-policy.js`). `planner-real` requires a real model key, so a
-green `release:gate` is a **credential-gated boundary** tracked in `EVIDENCE-STATUS.md`
-— it is not claimed here.
+报告写在 `server/evaluation/results/`（已被 git 忽略）；想引用的数字要在干净工作区上重跑，报告头部会带提交号和 `dirty: false`。

@@ -1,75 +1,31 @@
-# 180-Second Project Narrative (speak this)
+# 3 分钟项目讲述
 
-*Target: ~180 seconds. Every claim maps to `CURRENT-TRUTH.md`. The one
-metric-dependent sentence is marked; the numbers behind it are the deterministic
-**same-SHA** §6 table — speak them only as a "wiring / relative-behaviour check, not
-production quality," since the embedding is non-semantic.*
+> 这是草稿：请改成你自己的话，并确认每一句你都能展开讲五分钟。所有数字的出处、命令和版本见 [CURRENT-TRUTH.md](CURRENT-TRUTH.md)。数字来自本地 7B 模型，讲的时候说清楚这一点，不要说成生产环境或 GPT 级模型的结果。
 
----
+**（0:00–0:25）它是什么**
 
-**(0:00–0:25) What it is.**
-Luc1ferxx_Archive_RAG is a document-grounded RAG / Agent-RAG service:
-upload PDFs, they're chunked and embedded into pgvector, and you ask questions
-that are answered *only* from your documents, with citations. It supports
-single-document QA, multi-document comparison, evidence-gated refusal, and one
-round of automatic supplemental retrieval when the first pass leaves a gap. The
-default stack is PostgreSQL + pgvector, `text-embedding-3-small` at 1536
-dimensions, structured 900/180 chunking, and hybrid retrieval.
+这是一个面向合同、政策、论文这类文档的 Agent 系统。用户上传 PDF 后可以提问、做多文档对比，每个关键结论都要能回到页级引用；证据不够时，系统会补检索、请求澄清或者明确拒答，而不是编一个看起来合理的答案。
 
-**(0:25–1:05) The core design decision — signal separation.**
-The thing I'm most careful about is *not lying with scores*. Retrieval produces
-four different numbers and I keep them strictly separate. Dense cosine similarity
-and keyword coverage are bounded [0,1] raw signals. PostgreSQL full-text
-`ts_rank_cd` is unbounded, so it's ranking-only. RRF fusion combines the two
-routes' *ranks* into a single ordering — and its output is a **rank, never a
-probability**. So when the system decides "is this real evidence?", it gates on an
-admission score — the max of the bounded raw signals — not on the fused rank that
-was scaled to look like a [0,1] number. Citations show the admission score; the
-fusion value is kept only as provenance. That one discipline is what stops a
-confident-looking wrong answer.
+**（0:25–1:15）Agent 怎么设计**
 
-**(1:05–1:35) Multi-query and comparison.**
-A follow-up like "and the second one?" is rewritten into a standalone retrieval
-query — the default v3 prompt handles Chinese and English follow-ups. Complex
-questions decompose into up to four sub-queries; every sub-query retrieves
-independently, then results are merged with stable de-duplication and a single
-global re-rank into one unified Top-K, so citation numbering matches the real
-final order. Normal QA retrieves globally; document comparison retrieves
-per-document so "partial comparison" and "missing document" stay meaningful
-instead of collapsing into one pool.
+核心原则是"模型只提议，运行时做决定"。一次请求先由意图规划器在白名单候选里选意图，再由执行规划器在白名单步骤里排顺序；自定义 Skill 阶段用 typed DAG：模型只输出节点、依赖和输入绑定，校验器对整张图要么接受要么拒绝，不会执行半张非法的图。权限、文档范围、预算、审批、重试上限都由运行时决定，不交给模型。
 
-**(1:35–2:10) Lifecycle and operability.**
-pgvector is treated as a real database, not a cache. Re-index re-embeds by default
-and only copies stored vectors when the operator attests the source model —
-otherwise a same-width vector from a different model would be silently
-mislabelled. Dry-run is strictly read-only: no migration, no DDL, no writes.
-Embeddings above pgvector's 2000-dim ANN ceiling fail closed with an explicit
-explanation rather than pretending an index exists. Health surfaces partial
-migrations, wrong model/dimension, and whether the ANN index is *actually* the
-configured method.
+回答生成后有一个有界的自检循环：逐条核对 claim 有没有引用支持，有缺口就补检索一轮（最多 3 条查询），最后由 finalizer 删掉没有证据支持的内容。运行状态持久化在 PostgreSQL，崩溃后可以从 checkpoint 在节点边界续跑，并用版本号 CAS 防止两个 worker 重复执行有副作用的步骤。
 
-**(2:10–2:45) Evidence and honesty.**
-Correctness and lifecycle are covered by unit and regression tests today —
-retrieval correctness is 41 regression tests, all green. The real-database
-end-to-end path targets actual PostgreSQL + pgvector — not mocks — via a
-one-command throwaway cluster (no Docker); running it *unskipped* is the one step
-that still needs a shell outside the sandbox. The effect evaluation compares
-dense-only, sparse-only, hybrid RRF, and hybrid + rerank on the same corpus, split
-tuning vs. held-out by source document — and that comparison is finalized same-SHA
-in §6.
-**[METRIC LINE — the deterministic §6 table (same-SHA, this commit) reports the full
-suite (Recall@K, NDCG, MRR, citation-support, refusal-accuracy, p50/p95, tokens/cost)
-for all four arms; speak it only as a wiring / relative-behaviour check — e.g.
-"hybrid+rerank beats hybrid-RRF on every split, and the arms are genuinely
-distinct" — never as production semantic quality, which needs the credential-gated
-real-embedding run.]**
-Those §6 figures are same-SHA but on a *non-semantic* embedding, so I quote no
-*production* numbers — and I never call a fusion rank or an engineering threshold a
-calibrated probability.
+**（1:15–2:20）用真实模型测出来的三件事**
 
-**(2:45–3:00) Boundaries.**
-It's text-layer PDF only — no OCR yet, and scanned documents are detected and
-reported, not faked. On the default pgvector backend the sparse route is
-PostgreSQL FTS, which I don't call BM25 (the `local`/`qdrant` backends do use real
-BM25). It's a single-agent RAG framework focused on being correct, reproducible,
-and measurable — not an enterprise knowledge platform.
+早期所有评测都用确定性的伪 embedding，数字好看但说明不了效果。换成本地真实模型（nomic-embed-text + qwen2.5:7b）之后，我发现了三件事。
+
+第一，检索。伪 embedding 下 hybrid 比 BM25 差很多，一度让人怀疑融合有问题；真实 embedding 下 hybrid 反而是四组里数值最好的，Recall@5 是 0.71，dense 0.65、BM25 0.66。但 48 条用例的置信区间还跨 0，所以我只说"数值上最好"。启发式 reranker 在真实 embedding 下没有带来提升，全量上还降了约 5 个点，这也是它默认关闭的依据。
+
+第二，多文档对比功能 100% 拒答。表面看像 7B 模型能力不够，排查后发现是我自己的校验器拒掉了正确答案：逗号分隔的多来源引用解析不了，vendor-a 这种文件名认不成文档名。修完之后端到端检查从 16/18 到 18/18。
+
+第三，规划器。7B 模型下 56% 的规划调用因为格式错误或越界被降级到确定性规划器。我用按请求从白名单生成的 JSON Schema 做约束解码，降级率降到 8%，用例通过率从 47% 到 80%，延迟基本不变。
+
+**（2:20–2:45）可靠性**
+
+我写了一个故障注入评测，模拟 429、503、请求挂起、空响应和主模型宕机。加上带抖动的退避、遵守 Retry-After、可重试的超时和备用模型切换之后，限流下的成功率从 79% 到 100%，主模型宕机从 0 到 100%；代价是限流时 p95 从 2.5 秒涨到 4.7 秒，因为系统真的在按服务端要求等待。
+
+**（2:45–3:00）边界**
+
+目前只处理 PDF 文本层，没有 OCR 和表格；校验器是词法的，认不出语义等价的改写，下一步用校准过的 LLM 评审或 NLI 替换；评测集还小，正在接 QASPER 扩到几百题。

@@ -1,137 +1,49 @@
-# Narrative Cases — the five required examples (speak one of each)
+# 故障与决策故事
 
-Req 4 asks for **at least one** of each: a successful answer, a multi-document
-comparison, a supplemental-retrieval round, a correct refusal, and a failure /
-limitation case. Each case below names its **case ID + source corpus/suite + the
-deterministic command that reproduces it**, so the behaviour is inspectable, not
-asserted. References are to *files and commands* — not timestamped run IDs, which
-expire — so they stay valid across runs.
+> 面试官最常追问的是"遇到过什么难题、怎么定位的"。下面每个故事都按"背景 → 发现 → 定位 → 修复 → 结果 → 学到了什么"组织，数字出处见 [CURRENT-TRUTH.md](CURRENT-TRUTH.md)。挑两三个讲熟，不要全讲。
 
-> **Deterministic, reproducible behaviour.** Every case is produced by the
-> *deterministic* provider, so it is git-state-independent and reproduces
-> **identically** on any clean checkout — re-run the command shown to inspect it.
-> The **quantitative** claims (Case 4's abstain-accuracy, Case 5's Recall@5) come
-> from the §6 effect table, finalized **same-SHA** in
-> `server/evaluation/results/latest-retrieval-comparison.md`. Because the embedding
-> is **non-semantic**, treat all numbers as a wiring / relative-behaviour signal,
-> never as production semantic quality. Report links resolve to
-> `server/evaluation/results/`.
+## 故事 1：对比功能 100% 拒答，问题不在模型
 
-How to reproduce each case (deterministic provider; none overwrites the canonical
-`latest.json` / quality gate):
-- Cases 1, 2, 4 → `node evaluation/run-synthetic-eval.mjs
-  evaluation/synthetic-corpus-near-duplicate.json --latest-name latest-narrative
-  --openai-provider deterministic` (writes `latest-narrative.{json,md}`, not
-  `latest.json`).
-- Case 3 → `npm run eval:trajectory`.
-- Case 5 → `npm run eval:retrieval-comparison` (this is the §6 report; same-SHA at
-  the committing checkout).
+- **背景**：第一次用真实模型（qwen2.5:7b）跑端到端检查，18 项过了 16 项，两项失败都在多文档对比：系统对"比较两份合同的责任上限"一律回答"证据不足"。
+- **第一反应**：7B 模型能力不够。之前的离线自测也是 16/18，文档里当时的解释就是"替身模型的问题"。
+- **定位**：在答案生成的三个阶段（模型文本 → 引擎模板兜底 → 拒答）加临时日志，发现**模型的答案其实是对的**（A 12 个月、B 6 个月、带引用），是我自己的 claim 校验器把 11 条 claim 全判成无支持。然后用控制变量实验一次只改一个因素：
+  1. 模型写的引用是 `[Source 1, Source 3]`，解析器只认空格分隔，引用丢失，引用标签还被切成一条独立的"claim"。
+  2. 同样的内容，文件名叫 `handbook-alpha.pdf` 能通过，叫 `vendor-a.pdf` 就失败。原因是只有含数字或特定名词（policy、contract 等）的文件名才被当成文档名，"vendor a" 被当成事实主语，两份文档的差异配不上对。
+- **修复**：引用在模型输出进入系统时就统一归一化；变体后缀（`-a`、`_ii`、`-beta`）的文件名也视为文档名，同时保留"不剥离主题型文件名"的保护，并禁止把公共前缀 "vendor" 当成两份文档共用的别名。补了 7 个回归测试，其中一个专门确认修复没有放松"相同文档不能编造差异"。
+- **结果**：16/18 → 18/18，离线自测也变成 18/18。
+- **学到**："模型不行"是最容易、也最危险的归因。先看每一阶段实际拒绝的是什么，再下结论。
 
----
+## 故事 2：约束解码修好了格式，却让延迟涨了 10 倍
 
-## Case 1 — Successful single-document QA (grounded + cited)
+- **背景**：规划器在 7B 模型下 56% 的调用因为 JSON 格式或越界被降级。
+- **修复一**：按请求从运行时白名单生成 strict JSON Schema（选中的 step、合法条件、Skill 的类型化输入输出、已授权文档都写成枚举）。降级率降到 16%。
+- **新问题**：5 轮评测从 1 分钟变成超过 10 分钟。Ollama 日志里一次生成到了 3810 个 token 还在继续：模型在约束解码下进入不限长度的 `rationale` 字段后停不下来。
+- **修复二**：所有自由文本和数组都加上限，长度用 `pattern` 而不是 `maxLength`（查了 OpenAI 文档，strict 模式没把 `maxLength` 列为支持）。同一个调用从 754 token / 15 秒降到 374 token / 7 秒。
+- **又一个问题**：Ollama 的约束并不是硬保证，JSON 闭合后模型还会接着写中文，旧解析器（"第一个 `{` 到最后一个 `}`"）因此失败。改成提取第一个括号平衡的 JSON 值。另外 DAG 规划器会规划出超过剩余预算的节点，于是把"预算能支付的节点数"作为上限告诉规划器，schema 跟着收紧。
+- **结果**：降级 56% → 8%，用例通过 47% → 80%，延迟回到 14 秒左右，和改前持平。
+- **学到**：约束解码只约束"形状"，不约束"长度"和"是否停下"；每个改动都要同时量效果和延迟。另外，只修 prompt 的对照组几乎没有提升，这说明收益确实来自 schema。
 
-- **Reproduce:** `node evaluation/run-synthetic-eval.mjs
-  evaluation/synthetic-corpus-near-duplicate.json --latest-name latest-narrative
-  --openai-provider deterministic` (deterministic provider, `local` store, hybrid
-  RRF, top-k 6) → see `latest-narrative.md`.
-- **Case IDs:** `qa_remote_alpha`, `qa_badge_gamma` (type `qa`).
-- **Result:** pass; abstain **no**; doc-hit, page-hit, answer-hit, claim-support all
-  **yes**; ~1–3 ms/case.
+## 故事 3：测试推翻了我自己的解释
 
-**What it shows.** A single-document question retrieves the right chunk, answers
-*only* from it, and the citation points at the correct document **and page**, with
-the answer's claim actually supported by the cited span (claim-support = yes). This
-is the happy path: retrieval → admission → grounded answer → verifiable citation.
+- **背景**：做 LLM 调用容错时，我让代码遵守服务端的 `Retry-After`。故障注入评测里，没有备用模型时限流场景的成功率反而从 79% 降到 62–67%。
+- **当时的解释**：遵守粗粒度的 `Retry-After: 1` 让重试更保守，抢不到令牌。我甚至准备在提交说明里这样写。
+- **真正原因**：单元测试失败，暴露出 `Number(null)` 等于 0：没有 `retry-after-ms` 头时，解析器把它当成"立刻重试"，粗粒度的 1 秒根本没被遵守；变差是因为新的抖动退避总等待时间比旧版短。
+- **修复**：先判断头是否存在再解析；退避基数调到 500ms，让平均总等待和旧版持平，这样这次改动只增加抖动和 Retry-After，不偷偷缩短等待。
+- **结果**：无备用模型时粗粒度限流的成功率 94.4%，而且每次调用的请求数从 2.63 降到 2.08；带备用模型 100%。
+- **学到**：解释先要被证伪一次再写进结论。评测数字异常时，先怀疑自己的代码。
 
----
+## 故事 4：伪 embedding 给出了错误的架构结论
 
-## Case 2 — Multi-document comparison that surfaces a conflict
+- **背景**：所有检索评测原本都用哈希词频的伪 embedding，结果显示 hybrid 检索（0.54）比单独 BM25（0.66）还差。
+- **风险**：如果据此把默认改成 BM25，会是一个错误决定。
+- **做法**：让对比脚本支持真实 embedding，并给每组差异加配对 bootstrap 置信区间。
+- **结果**：真实 embedding 下 hybrid 反而是数值最好的（0.71），启发式 reranker 反而略降。同时置信区间显示，48 条用例下大多数差异不显著，于是我把"hybrid 更好"改成"数值最好、从不显著更差"，并开始接 QASPER 扩大评测集。
+- **学到**：离线替身只能证明管道接通了，不能用来做效果结论；没有置信区间的排名不要讲。
 
-- **Reproduce:** the synthetic command above (case
-  `compare_remote_numeric_conflict`, type `compare`) — pass; doc-hit / page-hit /
-  answer-hit / claim-support all yes. Corroborated by `npm run eval:trajectory` case
-  `multi_doc_conflict` (in `latest-trajectory.md`): checks
-  *"Answer surfaces a conflict"* and *"Conflict cites both selected documents."*
+## 故事 5：三个"不报错但悄悄算错"的 bug
 
-**What it shows.** Comparison retrieves **per-document** (not one merged pool), so
-when two handbooks give different remote-work numbers the answer reports the
-**conflict** and cites evidence from **each** document rather than silently picking
-one. This is why `partial comparison` and `missing document` stay meaningful — the
-per-document route keeps the documents distinguishable.
+来自做单机版时的排查，适合回答"最隐蔽的 bug"：
 
----
-
-## Case 3 — Supplemental retrieval (one bounded gap-repair round)
-
-- **Reproduce:** `npm run eval:trajectory`, case
-  `document_follow_up_retrieval` (mode `document`, in `latest-trajectory.md`) — pass.
-- **Trace:** `plan → query_planner → document_rag → self_check → gap_analysis →
-  follow_up_retrieval → self_check → synthesis → answer_finalizer`.
-- **Checks that passed:** *self-check failed before follow-up and passed after*;
-  *gap analysis recorded the unsupported claim*; *focused follow-up retrieval ran*;
-  *working memory resolved the evidence gap*; *stayed within retry budget*.
-
-**What it shows.** When the first pass leaves an unsupported claim, self-check
-fails, the gap planner emits a **focused** follow-up query, one more retrieval
-round fills the gap, and self-check then passes — a single, **bounded** repair, not
-a loop.
-
-**The bound (say this alongside):** trajectory case
-`budget_exhaustion_clarification` proves the other side — when the follow-up budget
-is exhausted the trace records `budget_limit → clarification_gate` and **no further
-retrieval runs**; the agent asks for clarification instead of looping. Supplemental
-retrieval is capped (≤ 3 deduped queries, re-planned once; `rag/gap-planner.js`,
-`rag/document-rag-execution.js:411-463`).
-
----
-
-## Case 4 — Correct refusal (evidence-gated abstain)
-
-- **Reproduce:** the synthetic command above.
-- **Case IDs:** `qa_satellite_stipend_abstain` (type `qa`) and
-  `compare_remote_single_doc_abstain` (type `compare`) — both pass with
-  **abstain = yes**. Aggregate abstain-accuracy = **1.0** across all four arms —
-  same-SHA in `latest-retrieval-comparison.md` (refusal section, separate
-  abstain-bearing corpus).
-
-**What it shows.** Asked something the corpus does not support, the system
-**declines** instead of fabricating. Refusal is decided on the **admission score**
-(`max(vectorScore, keywordScore)`, `rag/citations.js:27-35`) — the strongest
-*bounded* raw signal — never on the scaled RRF rank. The compare variant abstains
-when only one document carries evidence, preserving `insufficient-evidence`
-semantics inside comparison rather than answering half a question as if it were
-whole.
-
----
-
-## Case 5 — Failure / limitation (honest, measured, explained)
-
-- **Source:** the §6 effect table, **same-SHA** in `latest-retrieval-comparison.md`
-  (deterministic provider; read its commit stamp + `dirty: false`).
-- **Observation (held-out split):** **hybrid RRF fell *below* the stronger single
-  arm** — Recall@5 hybrid RRF ≈ **0.43** vs sparse-only ≈ **0.71**; hybrid+rerank
-  ≈ 0.48 (partial repair).
-
-**What it shows — and why it is not hidden.** Under the non-semantic
-deterministic (hashed term-frequency) embedding, the dense arm is weak, and RRF's
-**equal-per-rank fusion** lets collision noise displace good BM25 hits from the
-final Top-K. That is textbook **rank-fusion dilution when one input is weak** — not
-a fusion bug (the four arms are verified genuinely distinct by
-`retrieval-route-selection.test.mjs`), and the reranker partially repairs it, which
-is why rerank stays in the default path.
-
-**The boundary I state out loud.** This ordering is a **deterministic-embedding
-artifact**, *not* evidence that sparse beats hybrid in production. Claiming
-"hybrid > sparse in deployment" requires a **real-embedding run** (credential-gated;
-not generated here). I never quote a deterministic arm ordering as a production
-result, and I never call an RRF rank or an in-set-normalized score a calibrated
-probability.
-
----
-
-*All five cases trace to files under `server/evaluation/results/` and to the
-deterministic commands above. The narrative metric line and `CURRENT-TRUTH.md §6`
-cite the same §6 report; the quantitative claims are same-SHA in
-`latest-retrieval-comparison.md`, and nothing here reuses an expired or hand-edited
-report.*
+1. **BM25 统计被污染**：稠密索引写入失败后，稀疏索引里的条目没有回滚。这些条目参与全局 IDF 统计，悄悄影响了所有其它文档的打分。修复：失败时无条件回滚稀疏索引。
+2. **跨维度打分**：换了 embedding 模型后，旧向量和新查询维度不同，却算出了 0.7071 的相似度，远高于 0.32 的相关性阈值，垃圾块被当成证据。修复：维度不一致直接拒绝，并对每种形状只告警一次。
+3. **词法覆盖率否决所有对比问题**："比较责任上限"这类自然问法的覆盖率只有 0.50，阈值是 0.51，模型还没被调用就被拒了。修复：只对对比路径放宽，因为单文档问答里低覆盖率确实意味着答案不完整，全局放宽会让一个正确的拒答消失。
