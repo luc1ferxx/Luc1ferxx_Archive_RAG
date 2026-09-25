@@ -514,6 +514,17 @@ cd server
 npm run rerank:cross-encoder:local
 ```
 
+## 真实模型评测与外部基准（框架）
+
+这一组入口用来把评测从确定性替身换成真实模型和外部标注。除 `eval:retrieval-comparison` 和 `verify:quality` 已用本地 Ollama 实跑过外，其余目前是框架：脚本可运行，但还没有提交的基线结果或测试。
+
+| 命令 | 用途 |
+| --- | --- |
+| `npm run eval:retrieval-comparison -- --embedding-provider openai` | 四组检索配置用真实 embedding 对比（任何 OpenAI 兼容端点，含 Ollama），每个 split 带配对 bootstrap 95% CI；报告写到 `latest-retrieval-comparison-openai.*`，不覆盖确定性报告。加 `--rerank-provider cross-encoder --cross-encoder-endpoint <url>` 测神经 reranker（服务见 `npm run rerank:cross-encoder:docker`）。 |
+| `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式：摘要为第 1 页、每个章节一页，证据段落映射到页码，不可回答题成为 `shouldAbstain`。输出默认在已忽略的 `evaluation/generated/`。 |
+| `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
+| `npm run eval:llm-resilience [-- --no-fallback]` | 故障注入：本地 OpenAI 兼容服务注入 429（精确 / 粗粒度 Retry-After）、503、挂起、空响应和主模型宕机，报告 SLO 内成功率、每次调用的上游请求数和 p50/p95。 |
+
 ## Ragas supplement
 
 `ragas` 不替代自定义 compare harness，但适合补充观察语义相关性和 grounding：
