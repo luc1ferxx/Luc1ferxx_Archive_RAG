@@ -46,6 +46,8 @@ import {
 } from "./rag/postgres.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
 import { checkSharedStateHealth } from "./rag/shared-state.js";
+import { probeDoclingServe } from "./rag/docling-parser.js";
+import { getDoclingFallback, getPdfParser } from "./rag/config.js";
 import { getOpenAIApiKey } from "./rag/openai.js";
 import { getRagDataDirectory } from "./rag/storage.js";
 
@@ -784,6 +786,36 @@ const checkRowLevelSecurityHealth = async () => {
   }
 };
 
+// PDF_PARSER=docling depends on a docling-serve instance. Uploads still parse
+// with pdf.js when it is down (DOCLING_FALLBACK=pdfjs), so like shared state
+// this reports the configured dependency as broken rather than the app.
+const checkPdfParserHealth = async () => {
+  let parser;
+
+  try {
+    parser = getPdfParser();
+  } catch (error) {
+    return buildEntry("error", { message: error.message });
+  }
+
+  if (parser !== "docling") {
+    return buildEntry("ok", { parser, message: "PDFs are parsed in-process with pdf.js." });
+  }
+
+  const probe = await probeDoclingServe();
+
+  return probe.reachable
+    ? buildEntry("ok", { parser, url: probe.url, message: "docling-serve is reachable." })
+    : buildEntry("error", {
+        parser,
+        url: probe.url,
+        fallback: getDoclingFallback(),
+        message: `docling-serve at ${probe.url} is unreachable${probe.error ? ` (${probe.error})` : ""}; uploads ${
+          getDoclingFallback() === "none" ? "will fail" : "fall back to pdf.js"
+        }.`,
+      });
+};
+
 export const buildHealthReport = async () => {
   const [
     apiAuth,
@@ -799,6 +831,7 @@ export const buildHealthReport = async () => {
     workspaceArtifactStore,
     rowLevelSecurity,
     sharedState,
+    pdfParser,
   ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
@@ -813,6 +846,7 @@ export const buildHealthReport = async () => {
     checkWorkspaceArtifactStoreHealth(),
     checkRowLevelSecurityHealth(),
     checkSharedStateHealth(),
+    checkPdfParserHealth(),
   ]);
   const checks = {
     apiAuth,
@@ -828,6 +862,7 @@ export const buildHealthReport = async () => {
     workspaceArtifactStore,
     rowLevelSecurity,
     sharedState,
+    pdfParser,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 

@@ -61,6 +61,12 @@ STARTUP_HEALTH_STRICT=false
 | `RAG_QA_PARTIAL_COVERAGE_FLOOR` | `0.3` | 只在 `RAG_QA_ANSWER_VERDICT` 打开、且问题没被拆成多个子问题时生效。查询词覆盖在这个值到 `RAG_MIN_QA_QUERY_TERM_COVERAGE` 之间的段落也放行，前提是没有"近邻替换"：问题里的词在段落里被同一中心词前的另一个词替换了，比如问 parental leave，段落里是 annual leave。设为不低于问答覆盖下限的值即关闭补救区。 |
 | `RAG_QA_VERDICT_RETRY_TOP_K` | `18` | 只在 `RAG_QA_ANSWER_VERDICT` 打开时生效。模型回复 `NOT_IN_EVIDENCE:` 后，按这个深度再检索一次，从模型没看过、且通过同一门控的段落里取最多一份正常上下文的量（`RAG_RETRIEVAL_TOP_K` 条），让模型再答一次；没有新段落通过门控，就维持拒答。只重试一次。`0`（或不大于 `RAG_RETRIEVAL_TOP_K`）关闭。 |
 | `RAG_EMBEDDING_QUERY_PREFIX` / `RAG_EMBEDDING_DOCUMENT_PREFIX` | 按模型 | embedding 模型要求的任务前缀，只加在真实的 embedding 请求上。nomic-embed-text 默认用 `search_query: ` / `search_document: `（官方要求）。在 QASPER dev 上，证据段落进入问答候选的比例从 0.648 升到 0.692（配对 +0.044 [+0.021, +0.067]）；其他模型默认不加。设为空字符串即关闭。文档前缀属于"索引标识"，改了之后已有索引不能再检索：pgvector 会直接报错，local 和 Qdrant 对这些分块不给向量分。需要运行 `npm run vector:reindex -- --from documents --apply` 重建。**用 nomic-embed-text 的已有索引，升级后需要重建一次。** |
+| `PDF_PARSER` | `pdfjs` | PDF 文本提取方式。`pdfjs` 在进程内解析；`docling` 把文件交给 docling-serve 做版面解析，多栏按阅读顺序输出，表格还原成"列名: 值"的行。其他值在入库时直接报错。上传、`archive-ingest` 和 `vector:reindex` 都走这里。 |
+| `DOCLING_SERVE_URL` | `http://127.0.0.1:5010` | docling-serve 地址。它在容器里监听 5001，和后端默认端口相同，所以本地映射到 5010；compose 里指向 `http://docling:5001`。 |
+| `DOCLING_TIMEOUT_MS` | `300000` | 单个 PDF 的解析超时。CPU 上一篇 10 页的论文约 12 秒。 |
+| `DOCLING_OCR` | `false` | 是否做 OCR。文字型 PDF 不需要，扫描件才打开，会慢很多。 |
+| `DOCLING_FALLBACK` | `pdfjs` | docling-serve 失败时的处理方式：`pdfjs` 改用 pdf.js 解析，并打印原因；`none` 让上传直接失败。 |
+| `FRONTEND_BUILD_DIRECTORY` | 空 | 设置后 API 服务同时托管前端构建产物，单容器部署会用到。静态文件挂在限流和 API 鉴权之前；前端没有客户端路由，所以不做 `index.html` 回退，不会挡住 API 路径。 |
 | `RAG_SHARED_STATE` | `memory` | 熔断器、模型并发上限和 claim 评审缓存的状态存在哪里。`memory` 按进程保存，适合单实例；`redis` 让所有指向同一 `REDIS_URL` 的实例共享：一个实例打开的熔断对所有实例生效，并发上限按整个部署计算，评审结论跨实例复用。Redis 不可达时每个实例退回进程内状态，不会让模型调用失败，健康检查的 `checks.sharedState` 会报 `error`。 |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | `RAG_SHARED_STATE=redis` 时使用的 Redis。本地可用 `docker compose --profile shared-state up -d` 启动。 |
 | `RAG_SHARED_STATE_PREFIX` | `archive_rag:` | 共享状态的 key 前缀，让多个部署或测试共用一个 Redis 时互不干扰。 |

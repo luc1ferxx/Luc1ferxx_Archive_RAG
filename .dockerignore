@@ -1,0 +1,16 @@
+# Keep secrets, local data and build output out of the image context.
+.git
+**/node_modules
+build
+coverage
+**/.env
+**/.env.*
+!**/.env.example
+server/data
+server/uploads
+server/upload-sessions
+server/tmp-rag-data
+server/feedback
+server/evaluation/generated
+server/evaluation/results
+.playwright-mcp

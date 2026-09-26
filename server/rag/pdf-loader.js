@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 // Must stay above the pdfjs import: it installs globals that pdfjs reads while
 // evaluating its own module body, and sibling static imports run in source order.
 // Moving or sorting this line breaks single-file executable builds. See the file
@@ -9,6 +10,8 @@ import {
   version as pdfJsVersion,
   VerbosityLevel,
 } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { getDoclingFallback, getPdfParser } from "./config.js";
+import { loadPdfPagesWithDocling } from "./docling-parser.js";
 
 const normalizePageText = (text = "") =>
   String(text)
@@ -119,5 +122,21 @@ export const loadPdfDocument = async (
   };
 };
 
-export const loadPdfPages = async (filePath) =>
-  (await loadPdfDocument(filePath)).pages;
+// Every ingest path reads pages through here, so PDF_PARSER applies to
+// uploads, archive ingest and vector:reindex alike.
+export const loadPdfPages = async (filePath) => {
+  if (getPdfParser() !== "docling") {
+    return (await loadPdfDocument(filePath)).pages;
+  }
+
+  try {
+    return await loadPdfPagesWithDocling(filePath);
+  } catch (error) {
+    if (getDoclingFallback() === "none") {
+      throw error;
+    }
+
+    console.warn(`${error.message} Parsing ${path.basename(filePath)} with pdf.js instead (DOCLING_FALLBACK=pdfjs).`);
+    return (await loadPdfDocument(filePath)).pages;
+  }
+};

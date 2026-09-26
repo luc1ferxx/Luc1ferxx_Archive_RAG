@@ -22,6 +22,7 @@
     "eval:qasper-answers": "node evaluation/run-qasper-answer-eval.mjs",
     "eval:abstention-gate": "node evaluation/run-abstention-gate-analysis.mjs",
     "eval:qasper-retrieval": "node evaluation/run-qasper-retrieval-eval.mjs",
+    "eval:layout-parsing": "node evaluation/run-layout-parsing-eval.mjs",
     "eval:judge": "node evaluation/run-llm-judge.mjs",
     "rerank:cross-encoder:setup": "python3 -m venv --clear --system-site-packages evaluation/.venv-neural-reranker && PYTHONNOUSERSITE=1 evaluation/.venv-neural-reranker/bin/python -m pip install -r evaluation/neural-reranker-requirements.txt",
     "rerank:cross-encoder": "PYTHONNOUSERSITE=1 USE_TF=0 USE_FLAX=0 TRANSFORMERS_NO_TF=1 TRANSFORMERS_NO_FLAX=1 HF_HOME=evaluation/generated/huggingface evaluation/.venv-neural-reranker/bin/python evaluation/neural-cross-encoder-endpoint.py",

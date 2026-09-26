@@ -6234,3 +6234,44 @@ test("createApp recovers finalization claims and cleans expired upload sessions 
   assert.equal(cleanupCalled, true, "cleanupExpiredUploadSessions must be called during startup");
   assert.ok(app);
 });
+
+test("FRONTEND_BUILD_DIRECTORY serves the built UI ahead of API auth, and the API still needs a token", async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-frontend-build-"));
+  const saved = Object.fromEntries(
+    ["API_AUTH_ENABLED", "API_AUTH_TOKEN", "FRONTEND_BUILD_DIRECTORY"].map((key) => [key, process.env[key]])
+  );
+
+  await writeFile(path.join(tempRoot, "index.html"), "<!doctype html><title>Archive RAG</title>");
+  Object.assign(process.env, { API_AUTH_ENABLED: "true", API_AUTH_TOKEN: "ui-test-token", FRONTEND_BUILD_DIRECTORY: tempRoot });
+
+  const app = await createApp({
+    chatMcp: async () => ({ text: "web" }),
+    healthService: okHealthService,
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+    },
+    uploadSessionDirectory: path.join(tempRoot, "upload-sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+  });
+  const server = await startServer(app);
+
+  t.after(async () => {
+    await server.close();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await rm(tempRoot, { force: true, recursive: true });
+  });
+
+  const page = await fetch(`${server.baseUrl}/`);
+
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /<title>Archive RAG<\/title>/);
+  assert.equal((await fetch(`${server.baseUrl}/documents`)).status, 401);
+});

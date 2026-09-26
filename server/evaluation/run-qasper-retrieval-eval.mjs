@@ -16,6 +16,7 @@
 //   node evaluation/run-qasper-retrieval-eval.mjs
 //     [--corpus evaluation/generated/qasper-train.json] [--cases 400] [--seed 1]
 //     [--latest-name latest-qasper-retrieval] [--compare <report.json>]
+//     [--min-hit-at-all <rate>]   exit 1 below this rate (the CI floor)
 
 import "dotenv/config";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -151,6 +152,9 @@ const main = async () => {
   const seed = Math.max(1, Number(option("--seed", "1")) || 1);
   const latestName = option("--latest-name", "latest-qasper-retrieval");
   const comparePath = option("--compare", null);
+  // A regression floor for CI: exit 1 when evidence among the candidates
+  // falls below it.
+  const minHitAtAll = option("--min-hit-at-all", null);
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
 
   if (corpus.metadata?.granularity !== "paragraph") {
@@ -283,6 +287,11 @@ const main = async () => {
     await writeFile(path.join(resultsDirectory, `${latestName}.json`), `${JSON.stringify(report, null, 2)}\n`);
     await writeFile(path.join(resultsDirectory, `${latestName}.md`), formatMarkdown(report));
     process.stdout.write(formatMarkdown(report));
+
+    if (minHitAtAll !== null && report.summary.hitAtAll < Number(minHitAtAll)) {
+      console.error(`Evidence among the candidates ${report.summary.hitAtAll} is below the floor ${minHitAtAll}.`);
+      process.exitCode = 1;
+    }
   } finally {
     await rm(tempRoot, { force: true, recursive: true });
   }

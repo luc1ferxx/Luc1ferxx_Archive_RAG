@@ -70,6 +70,7 @@ flowchart LR
 npm install && (cd server && npm install)
 cp .env.example .env && cp server/.env.example server/.env
 docker compose up -d   # PostgreSQL 16 + pgvector，端口 5432
+# 或者一键部署整个应用（API + 前端 + PostgreSQL）：docker compose --profile app up -d --build，见 docs/deployment.md
 npm run dev            # 前端 http://localhost:3000，后端 http://localhost:5001
 ```
 

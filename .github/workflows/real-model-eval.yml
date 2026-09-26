@@ -1,0 +1,110 @@
+name: Real Model Eval
+
+# Real-model evaluation on a CPU runner, with no API key: Ollama serves
+# nomic-embed-text and a local chat model, the same stack the numbers in
+# server/docs/interview/CURRENT-TRUTH.md were measured on.
+#   - verify:quality: the 18 end-to-end checks against a real model (blocking);
+#   - QASPER dev evidence recall on a fixed 200-question sample (blocking below
+#     the floor; 0.655 when the floor was set);
+#   - QASPER dev answers on a small sample (report only: a 7B model on a CPU
+#     runner answers about one question a minute).
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_model:
+        description: Ollama chat model
+        default: qwen2.5:7b
+      qasper_answer_cases:
+        description: QASPER dev questions to answer (0 skips the answer eval)
+        default: "40"
+  schedule:
+    - cron: "0 7 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-model-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      OLLAMA_MODELS: /home/runner/.ollama/models
+      OPENAI_BASE_URL: http://127.0.0.1:11434/v1
+      OPENAI_API_KEY: ollama
+      OPENAI_CHAT_MODEL: ${{ inputs.chat_model || 'qwen2.5:7b' }}
+      OPENAI_EMBEDDING_MODEL: nomic-embed-text
+      RAG_EMBEDDING_DIMENSIONS: "768"
+      # CPU inference: one answer can take minutes.
+      RAG_LLM_REQUEST_TIMEOUT_MS: "600000"
+      VECTOR_STORE_PROVIDER: local
+      POSTGRES_DATABASE_URL: ""
+      LONG_MEMORY_DATABASE_URL: ""
+      RAG_LONG_MEMORY_ENABLED: "false"
+      SESSION_MEMORY_STORE_PROVIDER: memory
+      QASPER_ANSWER_CASES: ${{ inputs.qasper_answer_cases || '40' }}
+
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies
+        run: npm ci
+
+      - name: Cache Ollama models
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ollama/models
+          key: ollama-models-${{ env.OPENAI_CHAT_MODEL }}-nomic-embed-text
+
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          # The installer starts a system service with its own model store;
+          # serve as the runner user instead so the model cache above applies.
+          sudo systemctl stop ollama || true
+          mkdir -p "$OLLAMA_MODELS"
+          nohup ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
+          for attempt in $(seq 1 60); do curl -sf http://127.0.0.1:11434/api/tags > /dev/null && break; sleep 1; done
+          ollama pull nomic-embed-text
+          ollama pull "$OPENAI_CHAT_MODEL"
+
+      - name: Real-model quality verification
+        run: npm run verify:quality
+
+      - name: Fetch and convert QASPER dev
+        run: |
+          mkdir -p evaluation/generated/qasper
+          curl -fsSL -o "$RUNNER_TEMP/qasper.tgz" https://qasper-dataset.s3.us-west-2.amazonaws.com/qasper-train-dev-v0.3.tgz
+          tar -xzf "$RUNNER_TEMP/qasper.tgz" -C evaluation/generated/qasper
+          npm run corpus:qasper -- --input evaluation/generated/qasper/qasper-dev-v0.3.json --papers all --output evaluation/generated/qasper-dev.json
+
+      - name: QASPER evidence recall
+        run: npm run eval:qasper-retrieval -- --corpus evaluation/generated/qasper-dev.json --cases 200 --min-hit-at-all 0.6
+
+      - name: QASPER answers
+        if: env.QASPER_ANSWER_CASES != '0'
+        run: npm run eval:qasper-answers -- --corpus evaluation/generated/qasper-dev.json --cases "$QASPER_ANSWER_CASES"
+
+      - name: Upload real-model reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-eval
+          if-no-files-found: warn
+          path: |
+            server/evaluation/results/latest-doccompare-verification.*
+            server/evaluation/results/latest-qasper-retrieval*
+            server/evaluation/results/latest-qasper-answers*

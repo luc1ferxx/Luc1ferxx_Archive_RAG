@@ -181,3 +181,38 @@ test("loadPdfPages rejects malformed PDF bytes", async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("PDF_PARSER=docling falls back to pdf.js when docling-serve is down, unless told not to", async (t) => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-loader-docling-"));
+  const pdfPath = path.join(tempDir, "test.pdf");
+  const saved = Object.fromEntries(
+    ["PDF_PARSER", "DOCLING_SERVE_URL", "DOCLING_FALLBACK"].map((key) => [key, process.env[key]])
+  );
+  const originalWarn = console.warn;
+  const warnings = [];
+
+  t.after(async () => {
+    console.warn = originalWarn;
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  });
+  console.warn = (message) => warnings.push(String(message));
+  await writeFile(pdfPath, buildValidPdfBuffer(["Remote work needs approval."]));
+  // Nothing listens on port 1.
+  Object.assign(process.env, { DOCLING_SERVE_URL: "http://127.0.0.1:1", PDF_PARSER: "docling" });
+
+  assert.deepEqual(await loadPdfPages(pdfPath), [{ pageNumber: 1, text: "Remote work needs approval." }]);
+  assert.match(warnings.join("\n"), /unreachable.*Parsing test\.pdf with pdf\.js instead/);
+
+  process.env.DOCLING_FALLBACK = "none";
+  await assert.rejects(loadPdfPages(pdfPath), { name: "DoclingParseError" });
+
+  process.env.PDF_PARSER = "pdfminer";
+  await assert.rejects(loadPdfPages(pdfPath), /PDF_PARSER must be one of pdfjs, docling/);
+});

@@ -1,5 +1,10 @@
-export const API_DOMAIN =
-  import.meta.env.VITE_DOMAIN || "http://localhost:5001";
+// "same-origin" is for the single-container deployment, where the API server
+// also serves this build (FRONTEND_BUILD_DIRECTORY): requests go to relative
+// paths on whatever host served the page.
+export const resolveApiDomain = (configuredDomain) =>
+  configuredDomain === "same-origin" ? "" : configuredDomain || "http://localhost:5001";
+
+export const API_DOMAIN = resolveApiDomain(import.meta.env.VITE_DOMAIN);
 
 export const API_AUTH_TOKEN = import.meta.env.VITE_API_AUTH_TOKEN || "";
 

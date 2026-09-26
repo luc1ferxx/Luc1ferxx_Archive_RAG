@@ -562,3 +562,28 @@ test("quality gate workflow backs the current profile and the integration suite 
   assert.match(qualityGateJob, /RAG_HYBRID_ENABLED:\s*"true"/);
   assert.match(qualityGateJob, /RAG_HYBRID_FUSION:\s*rrf/);
 });
+
+test("real model eval workflow runs a real local model with no API key and gates on its reports", async () => {
+  const content = await readFile(
+    path.join(repositoryRoot, ".github", "workflows", "real-model-eval.yml"),
+    "utf8"
+  );
+  const serverPackage = JSON.parse(await readFile(serverPackagePath, "utf8"));
+
+  assert.match(content, /workflow_dispatch:/);
+  assert.match(content, /schedule:\s*\n\s*- cron:/);
+  assert.match(
+    content,
+    /concurrency:\s*\n\s*group:\s*\$\{\{\s*github\.workflow\s*\}\}-\$\{\{\s*github\.ref\s*\}\}\s*\n\s*cancel-in-progress:\s*true/
+  );
+  assert.doesNotMatch(content, /secrets\./, "no paid API key: Ollama serves the models");
+  assert.match(content, /OPENAI_BASE_URL: http:\/\/127\.0\.0\.1:11434\/v1/);
+  assert.match(content, /ollama pull nomic-embed-text/);
+  // The blocking steps, each backed by a real package script.
+  for (const script of ["verify:quality", "corpus:qasper", "eval:qasper-retrieval", "eval:qasper-answers"]) {
+    assert.ok(serverPackage.scripts[script], `server package defines ${script}`);
+    assert.match(content, new RegExp(`npm run ${script}`));
+  }
+  assert.match(content, /eval:qasper-retrieval -- .*--min-hit-at-all 0\.6/);
+  assert.match(content, /if: always\(\)\s*\n\s*uses: actions\/upload-artifact@v4/);
+});

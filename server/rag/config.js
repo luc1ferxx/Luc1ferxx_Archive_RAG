@@ -48,6 +48,39 @@ const toChoice = (rawValue, fallbackValue, allowedValues) => {
 export const getEmbeddingModel = () =>
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 
+// PDF text extraction. `pdfjs` (default) reads the content stream in-process;
+// `docling` sends the file to a docling-serve instance for layout-aware
+// parsing (reading order across columns, tables as cell grids; see
+// docling-parser.js). Any other value fails at ingest rather than silently
+// parsing with something else.
+export const PDF_PARSERS = Object.freeze(["pdfjs", "docling"]);
+
+export const getPdfParser = () => {
+  const value = String(process.env.PDF_PARSER ?? "pdfjs").trim().toLowerCase() || "pdfjs";
+
+  if (!PDF_PARSERS.includes(value)) {
+    throw new Error(`PDF_PARSER must be one of ${PDF_PARSERS.join(", ")}; got "${process.env.PDF_PARSER}".`);
+  }
+
+  return value;
+};
+
+// docling-serve listens on 5001 inside its container, the backend's own
+// default port, so the documented local mapping is 5010.
+export const getDoclingServeUrl = () =>
+  String(process.env.DOCLING_SERVE_URL || "http://127.0.0.1:5010").replace(/\/+$/, "");
+
+export const getDoclingTimeoutMs = () =>
+  Math.floor(toPositiveNumber(process.env.DOCLING_TIMEOUT_MS, 300000));
+
+// Born-digital PDFs carry their text; OCR is for scans and costs minutes.
+export const isDoclingOcrEnabled = () => toBoolean(process.env.DOCLING_OCR, false);
+
+// When docling-serve fails: `pdfjs` (default) parses the file in-process and
+// logs why; `none` fails the upload.
+export const getDoclingFallback = () =>
+  String(process.env.DOCLING_FALLBACK ?? "pdfjs").trim().toLowerCase() === "none" ? "none" : "pdfjs";
+
 // Task prefixes some embedding models are trained with and documented as
 // required. They are part of the model's input contract, so they apply to the
 // real embedding client only, never to a configured stand-in provider. On

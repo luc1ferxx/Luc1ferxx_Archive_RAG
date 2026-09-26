@@ -2,6 +2,11 @@
 # backend (VECTOR_STORE_PROVIDER=pgvector). Start with `docker compose up -d`
 # from the repo root; server/.env.example already points POSTGRES_DATABASE_URL
 # at this instance. Data persists in the named volume across restarts.
+#
+# One-click deployment of the whole app (docs/deployment.md):
+#   docker compose --profile app up -d --build
+# serves the UI and API on http://localhost:5001 next to this PostgreSQL. Add
+# `--profile layout` (and PDF_PARSER=docling) for Docling layout parsing.
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -39,5 +44,47 @@ services:
       timeout: 5s
       retries: 5
 
+  # The API server with the built frontend (Dockerfile). Model endpoints and
+  # keys come from server/.env when it exists; the database settings below
+  # point it at the postgres service. For Ollama on the host, set
+  # OPENAI_BASE_URL=http://host.docker.internal:11434/v1.
+  app:
+    build: .
+    image: luc1ferxx-archive-rag:local
+    container_name: luc1ferxx-archive-app
+    restart: unless-stopped
+    profiles: ["app"]
+    env_file:
+      - path: server/.env
+        required: false
+    environment:
+      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      VECTOR_STORE_PROVIDER: pgvector
+      PDF_PARSER: ${PDF_PARSER:-pdfjs}
+      DOCLING_SERVE_URL: ${DOCLING_SERVE_URL:-http://docling:5001}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "5001:5001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - appdata:/data
+
+  # Optional layout-aware PDF parsing (PDF_PARSER=docling): tables as cell
+  # grids and multi-column reading order. About 2 GB compressed, CPU only.
+  # Run `PDF_PARSER=docling docker compose --profile app --profile layout up -d`.
+  docling:
+    image: ghcr.io/docling-project/docling-serve-cpu:latest
+    container_name: luc1ferxx-archive-docling
+    restart: unless-stopped
+    profiles: ["layout"]
+    ports:
+      - "5010:5001"
+
 volumes:
   pgdata:
+  appdata:

@@ -117,6 +117,14 @@ export const createApp = async (options = {}) => {
       exposedHeaders: ["Content-Disposition"],
     })
   );
+  // The single-container deployment (Dockerfile) serves the built frontend
+  // from the API origin. Static files carry no archive data, so they are
+  // mounted ahead of rate limiting and API auth; the SPA has no client-side
+  // routes, so no index.html fallback shadows an API path.
+  if (process.env.FRONTEND_BUILD_DIRECTORY) {
+    app.use(express.static(path.resolve(process.env.FRONTEND_BUILD_DIRECTORY), { index: "index.html" }));
+  }
+
   app.use(express.json({ limit: "2mb" }));
 
   await mkdir(uploadsDirectory, { recursive: true });
