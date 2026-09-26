@@ -1,6 +1,7 @@
 import { createChatClient, createEmbeddingsClient } from "./openai-client.js";
 import { CIRCUIT_OPEN_CODE, resetModelCallGuards } from "./model-call-guard.js";
 import { addActiveSpanEvent } from "./tracing.js";
+import { normalizePromptDescriptor } from "./prompt-registry.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import { getLlmOpsPolicy, isStructuredOutputEnabled } from "./config.js";
 import {
@@ -523,6 +524,9 @@ export const completeText = async (prompt, options = {}) => {
 export const completeTextWithMetadata = async (prompt, options = {}) => {
   const inputText = renderPromptInput(prompt);
   const capability = options.capability ?? MODEL_CAPABILITIES.chat;
+  // Which template produced this call (rag/prompt-registry.js). It is metadata
+  // only: it goes on the metric and the span, never into the request.
+  const promptTemplate = normalizePromptDescriptor(options.promptTemplate);
   const responseFormat = isStructuredOutputEnabled()
     ? options.responseFormat ?? null
     : null;
@@ -547,6 +551,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         itemCount: 1,
         modelRoute,
         operation: LLMOPS_OPERATIONS.completion,
+        promptTemplate,
         stage: "complete_text",
       },
       successMetric: (result) => ({
@@ -616,6 +621,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         modelName,
         modelRoute,
         operation: LLMOPS_OPERATIONS.completion,
+        promptTemplate,
         stage: "complete_text",
       },
       successMetric: (result) => ({

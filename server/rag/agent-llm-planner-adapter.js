@@ -1,3 +1,4 @@
+import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import {
   AGENT_EXECUTION_CONDITIONS,
   AGENT_EXECUTION_STEP_IDS,
@@ -238,11 +239,21 @@ export const buildPlannerResponseFormat = ({
   });
 };
 
-const attachModelRoute = (executionPlan = [], modelRoute = null) => {
+// Non-enumerable so the plan array still compares and serializes as a plain
+// list of steps.
+const attachPlanMetadata = (
+  executionPlan = [],
+  { modelRoute = null, promptTemplate = null } = {}
+) => {
   Object.defineProperty(executionPlan, "modelRoute", {
     configurable: true,
     enumerable: false,
     value: modelRoute,
+  });
+  Object.defineProperty(executionPlan, "promptTemplate", {
+    configurable: true,
+    enumerable: false,
+    value: promptTemplate,
   });
 
   return executionPlan;
@@ -289,21 +300,32 @@ const buildPlannerPrompt = ({
   ].join("\n");
 };
 
+let executionPlannerPromptDescriptor = null;
+
+export const getExecutionPlannerPromptDescriptor = () =>
+  (executionPlannerPromptDescriptor ??= definePrompt({
+    id: PROMPT_IDS.executionPlanner,
+    source: buildPlannerPrompt({}),
+    version: "v1",
+  }));
+
 export const llmPlannerAdapter = {
   id: "llm",
   createExecutionPlan: async (plannerContext = {}) => {
+    const promptTemplate = getExecutionPlannerPromptDescriptor();
     const completion = await completeTextWithMetadata(
       buildPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,
+        promptTemplate,
         responseFormat: buildPlannerResponseFormat(plannerContext),
         routeId: MODEL_ROUTE_IDS.executionPlannerDefault,
       }
     );
 
-    return attachModelRoute(
+    return attachPlanMetadata(
       normalizePlannerPayload(parsePlannerJson(completion.text), plannerContext),
-      completion.modelRoute
+      { modelRoute: completion.modelRoute, promptTemplate }
     );
   },
 };

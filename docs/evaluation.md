@@ -78,6 +78,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 - 基于公开配置 canonical JSON 计算的 `configHash`
 - `provider.id`、`provider.mode` 和公开 `modelRouteId`
 - aggregate report 实际消费的 `sourceReports`；每项保留 report type/id、run ID、commit、生成时间、config hash、corpus ID 和 provider mode
+- `promptTemplates`：生成报告时生效的 prompt 模板（`id`、`version`、`fingerprint`）和一个与顺序无关的 `setHash`。它不进入 `configHash`，所以不影响已钉住的 regression baseline；`release:gate` 的 `prompt-lineage` 检查要求所有发布报告的 `setHash` 相同
 
 路径会正规化为 repo-relative；仓库外路径写为 `unknown`。公开配置会移除 API key、token、secret、authorization、prompt、原始文档内容、完整环境变量和内部 model name。无 Git 环境时 commit/dirty 记为 `unknown`：普通开发流程可以继续读取，严格发布门会失败。`eval:robust-suite` 还会把同一个 target commit、suite run ID 和 suite config hash 传给 compare-hard、Hard-CS 与 arXiv 三个 runner，防止把不同批次结果拼成一次 robust 证据。
 
@@ -627,6 +628,25 @@ arxiv 的 3 次"回答"都是误路由到时间线 Skill，不是文档问答。
 - 饱和：改前 42% 的请求是超时后的重试，服务端还在处理客户端已经放弃的请求；并发上限把服务端队列压到 8 以内，排队时间始终短于 3 秒请求超时，于是没有一次重试。p50 不变，因为总工作量由服务端的 2 个工作线程决定，上限只去掉了浪费的部分。
 - 其他场景（限流、503、挂起、空响应）在噪声范围内不变：429 不计入熔断，评测的 8 个并发没超过上限。40% 返回 503 的场景没有误熔断（无备用模型时仍是 100%），但连续失败阈值在更高错误率下可能误熔断，这是阈值的取舍。
 - 边界：状态按进程保存，多进程部署各自计数；上限按在途请求数而不是每分钟 token 数；排队等待没有单独的超时。
+
+## Prompt 模板归因
+
+改动之前，LLMOps 事件只能按 operation 和 model route 分组：`chat.default` 这个桶里混着 QA 回答、claim 评审和问题改写，`planner.execution.default` 里混着执行规划器和 DAG 规划器，同一个桶里的调用分不出是哪个 prompt 发的，更分不出是哪个版本。现在每个 completion 事件都带 `promptTemplate`，观测报告按模板分组。
+
+2026-09-25，本地 Ollama `qwen2.5:7b`：`eval:planner -- --provider real` 一轮，加 `eval:answer-drafts --set all --cases 6`（打开 claim 评审），用 `RAG_OBSERVABILITY_EVENTS_PATH` 单独收集事件：
+
+| 模板 | 调用 | 平均 token | 平均延迟 |
+| --- | --- | --- | --- |
+| `qa_answer@v2` | 13 | 740 | 1.8s |
+| `claim_judge@v1` | 10 | 463 | 1.9s |
+| `memory_query_rewrite@v2` | 6 | 463 | 0.9s |
+| `execution_planner@v1` | 5 | 656 | 1.6s |
+| `dag_planner@v1` | 1 | 1520 | 5.5s |
+
+- 35 个 completion 事件全部能归到具体模板；改前是 0 个，它们只能落进两个 route 桶，分别混着 3 个和 2 个 prompt。
+- 这次运行里 QA 回答占 completion token 的 44%，claim 评审占 21%。
+- 同一份规划器报告的 `evidence.promptTemplates` 记下了 9 个生效模板；`server/.env` 设置了 `RAG_PROMPT_VERSION=v2`，所以改写模板是 `v2`，报告如实记录了这一点。
+- 样本很小，延迟和 token 数只说明报告能做什么，不是性能基准。
 
 ## 租户隔离（数据库行级安全）
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { getClaimJudgeMode } from "../config.js";
 import { completeTextWithMetadata } from "../openai.js";
+import { definePrompt, PROMPT_IDS } from "../prompt-registry.js";
 import {
   boundedArray,
   boundedString,
@@ -107,6 +108,15 @@ export const buildClaimJudgePrompt = ({ items, sources }) =>
         `Claim ${index} (cites ${sourceRanks.map((rank) => `Source ${rank}`).join(", ")}): ${claimText}`
     ),
   ].join("\n");
+
+let claimJudgePromptDescriptor = null;
+
+export const getClaimJudgePromptDescriptor = () =>
+  (claimJudgePromptDescriptor ??= definePrompt({
+    id: PROMPT_IDS.claimJudge,
+    source: buildClaimJudgePrompt({ items: [], sources: [] }),
+    version: "v1",
+  }));
 
 export const buildClaimJudgeResponseFormat = (claimIndexes) =>
   buildJsonSchemaResponseFormat({
@@ -244,6 +254,7 @@ export const judgeClaimSupport = async ({
 
     try {
       const completion = await complete(buildClaimJudgePrompt({ items: uncached, sources }), {
+        promptTemplate: getClaimJudgePromptDescriptor(),
         responseFormat: buildClaimJudgeResponseFormat(claimIndexes),
       });
       const parsed = parseVerdicts(completion?.text, claimIndexes);

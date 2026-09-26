@@ -1,3 +1,5 @@
+import { normalizePromptDescriptor } from "./prompt-registry.js";
+
 export const normalizeIntentText = (value) =>
   String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -68,8 +70,11 @@ export const normalizeIntentSelection = (selection) => {
     };
   }
 
+  const promptTemplate = normalizePromptDescriptor(selection.promptTemplate);
+
   return {
     modelRoute: normalizeModelRoute(selection.modelRoute),
+    ...(promptTemplate ? { promptTemplate } : {}),
     selectedIntentId: normalizeIntentText(
       selection.selectedIntentId ?? selection.intentId ?? selection.id
     ),
@@ -93,6 +98,9 @@ export const resolveSelectedCandidate = ({ candidates = [], selection } = {}) =>
 
   return {
     modelRoute: normalizedSelection.modelRoute,
+    ...(normalizedSelection.promptTemplate
+      ? { promptTemplate: normalizedSelection.promptTemplate }
+      : {}),
     selectedCandidate,
     selectionReason: normalizedSelection.reason,
   };
@@ -107,9 +115,11 @@ export const buildPlannerSelection = ({
   selectedCandidate,
   selectedPlannerId,
   modelRoute = null,
+  promptTemplate = null,
   selectionReason = null,
 }) => {
   const normalizedModelRoute = normalizeModelRoute(modelRoute);
+  const normalizedPromptTemplate = normalizePromptDescriptor(promptTemplate);
   const planner = {
     candidateIntentIds: candidates.map((candidate) => candidate.id),
     experienceMemory: {
@@ -126,10 +136,10 @@ export const buildPlannerSelection = ({
     status: fallback ? "fallback" : "selected",
   };
 
-  return normalizedModelRoute
-    ? {
-        ...planner,
-        modelRoute: normalizedModelRoute,
-      }
-    : planner;
+  return {
+    ...planner,
+    ...(normalizedModelRoute ? { modelRoute: normalizedModelRoute } : {}),
+    // The template the LLM planner was given; absent for rule-based selection.
+    ...(normalizedPromptTemplate ? { promptTemplate: normalizedPromptTemplate } : {}),
+  };
 };

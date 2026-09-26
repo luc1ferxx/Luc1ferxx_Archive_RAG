@@ -6,6 +6,7 @@ export const RELEASE_EVIDENCE_PROFILE = "release";
 
 export const RELEASE_EVIDENCE_REASON_CODES = Object.freeze({
   ...EVALUATION_EVIDENCE_REASON_CODES,
+  promptLineageSplit: "prompt_lineage_split",
   reportIntegrityFailed: "report_integrity_failed",
   sourceReportLineageMismatch: "source_report_lineage_mismatch",
   robustLineageSplit: "robust_lineage_split",

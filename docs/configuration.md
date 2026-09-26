@@ -63,7 +63,7 @@ STARTUP_HEALTH_STRICT=false
 | `AGENT_EXECUTION_PLANNER` | `llm` | AgentRAG execution step 规划器；`deterministic` 使用固定 step schema，`llm` 让 LLM 在白名单 step 中排序并由 validator 兜底。 |
 | `AGENT_SKILL_GRAPH_ROLLOUT` | `guarded` | 仅控制 custom Skill 阶段用哪个执行器：`guarded` 由 V2 typed DAG 执行，`off` 回到 V1 chain（无法识别的取值也按 `off` 处理），`shadow` 仍由 V1 出答案、旁路规划/校验 DAG。DAG 由谁规划跟随 `AGENT_EXECUTION_PLANNER`，LLM 规划失败退回确定性图。V2 候选来自经 `accessScope` / `docIds` 核验、且有显式 typed contract 的已注册原子 Skill catalog，不由 V1 intent/组合 chain 独占；graph 只在执行任何 node 之前整体被拒时才能回落 V1。不会将 built-in/document/Web/capability 阶段纳入同一张 DAG。详见 [agent-rag.md](agent-rag.md#custom-skill-执行v1-chain-与-v2-typed-dag)。 |
 | `AGENT_UNIFIED_GRAPH_ROLLOUT` | `off` | 异构 v3 全阶段图目前仅支持 `off` / `shadow`。`shadow` 在注入统一图 planner adapter 时旁路生成并校验候选图，只记录精简的 `unified_graph_planned` run event，真实答案仍走现有外层流程；没有 adapter 会记录 rejected。`guarded` 尚不可选，误设会回到 `off`，不能据此声称生产已执行统一 DAG。 |
-| `RAG_PROMPT_VERSION` | `v3` | Prompt 版本；`server/.env.example` 当前显式设置为 `v2`。 |
+| `RAG_PROMPT_VERSION` | `v3` | Prompt 版本；`server/.env.example` 当前显式设置为 `v2`。实际用到的模板以 `id@version#fingerprint` 记录在 LLMOps 事件、`agentObservability.promptTemplates` 和评测报告里（见 `docs/agent-rag.md` 的“Prompt 模板版本”）。 |
 | `STARTUP_HEALTH_STRICT` | `false` | 健康检查失败时是否阻止启动。 |
 
 arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要能访问 `https://export.arxiv.org/api/query` 和对应 PDF URL。
@@ -250,6 +250,7 @@ API_AUTH_TOKENS={"admin-token":{"userId":"admin","workspaceId":"workspace-a","ro
 | --- | --- | --- |
 | `RAG_OBSERVABILITY_ENABLED` | `false` | 是否写入 RAG / AgentRAG JSONL trace。 |
 | `RAG_OBSERVABILITY_INCLUDE_CONTEXT` | `false` | Trace 是否记录完整 chunk 文本。 |
+| `RAG_OBSERVABILITY_EVENTS_PATH` | 空 | 把 trace 写到指定的 JSONL 文件，而不是默认的 `server/data/rag-observability/events.jsonl`；评测用它把一次运行的事件单独保存。 |
 | `FEEDBACK_DIRECTORY` | `server/data/feedback` | 答案反馈 JSONL 存储目录。 |
 
 默认 trace 只保存 metadata、score、`excerptHash` 和短 preview。启用后，completion、embedding 和 cross-encoder rerank 还会写入 `llmops_metric` 事件，用于 `observability:report` 汇总 operation / model route 的 count、平均延迟和 error rate；这些事件不包含 prompt 原文或 secret。只有本地调试且能接受完整 chunk 文本落盘时，才建议设置：

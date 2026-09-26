@@ -488,6 +488,51 @@ test("observability report aggregates LLMOps metrics by operation and route", ()
   assert.match(formatted, /openai:chat\.default:openai\.chat: 2 event\(s\)/);
 });
 
+test("observability report splits completions by prompt template", () => {
+  const completion = (promptTemplate, totalTokens) => ({
+    eventType: "llmops_metric",
+    latencyMs: 100,
+    operation: "llm_completion",
+    promptTemplate,
+    stage: "complete_text",
+    status: "ok",
+    totalTokens,
+    traceType: "llmops",
+  });
+  const qa = { fingerprint: "671ca684b7b9", id: "qa_answer", version: "v2" };
+  const judge = { fingerprint: "827365b7cb66", id: "claim_judge", version: "v1" };
+  const report = buildObservabilityReport({
+    events: [
+      completion(qa, 100),
+      completion(qa, 300),
+      completion(judge, 50),
+      completion(null, 10),
+      {
+        eventType: "llmops_metric",
+        latencyMs: 5,
+        operation: "embedding",
+        stage: "embed_query",
+        status: "ok",
+        traceType: "llmops",
+      },
+    ],
+  });
+  const byTemplate = report.llmops.byPromptTemplate;
+
+  assert.deepEqual(Object.keys(byTemplate), [
+    "claim_judge@v1#827365b7cb66",
+    "qa_answer@v2#671ca684b7b9",
+    "unnamed",
+  ]);
+  assert.equal(byTemplate["qa_answer@v2#671ca684b7b9"].eventCount, 2);
+  assert.equal(byTemplate["qa_answer@v2#671ca684b7b9"].avgTotalTokens, 200);
+  assert.equal(byTemplate.unnamed.eventCount, 1, "embeddings are not counted as prompts");
+  assert.match(
+    formatObservabilityReport(report),
+    /prompt templates \(completions\):\n(?:.*\n)*?\s+qa_answer@v2#671ca684b7b9/
+  );
+});
+
 test("observability report aggregates recovery and replay metrics", () => {
   const report = buildObservabilityReport({
     events: [

@@ -117,6 +117,11 @@ const buildBaseReport = (reportId) => {
   });
 };
 
+const FIXTURE_PROMPT_TEMPLATES = Object.freeze({
+  setHash: "0123456789ab",
+  templates: [{ fingerprint: "0123456789ab", id: "qa_answer", version: "v2" }],
+});
+
 const buildEvidence = ({
   corpus,
   providerMode,
@@ -153,6 +158,7 @@ const buildEvidence = ({
   modelRouteId: MODEL_ROUTE_IDS[reportId] ?? null,
   sourceReports,
   suite: suite ? { ...suite } : null,
+  promptTemplates: { ...FIXTURE_PROMPT_TEMPLATES },
   generatorVersion: "1.0.0",
 });
 
@@ -387,6 +393,30 @@ test("release evidence policy matches checked-in robust corpus identities", asyn
       version: spec.corpus.version,
     });
   }
+});
+
+test("release evidence gate fails reports produced from different prompt templates", () => {
+  const reports = createCompleteFixture();
+
+  reports.trajectory.evidence.promptTemplates = {
+    setHash: "ba9876543210",
+    templates: [{ fingerprint: "ba9876543210", id: "qa_answer", version: "v1" }],
+  };
+
+  const mixed = buildReleaseEvidenceReport({ reports });
+  const promptCheck = mixed.checks.find((check) => check.id === "prompt-lineage");
+
+  assert.equal(mixed.summary.status, "fail");
+  assert.equal(promptCheck.status, "fail");
+  assert.equal(promptCheck.reasonCode, "prompt_lineage_split");
+
+  delete reports.trajectory.evidence.promptTemplates;
+  assert.equal(
+    buildReleaseEvidenceReport({ reports }).checks.find((check) => check.id === "prompt-lineage")
+      .reasonCode,
+    "prompt_lineage_split",
+    "a report that does not record its prompts cannot join a release"
+  );
 });
 
 test("release evidence gate fails a report from another commit", () => {

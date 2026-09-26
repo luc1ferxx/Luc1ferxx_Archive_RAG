@@ -124,6 +124,31 @@ const buildRobustLineageCheck = ({ reports, targetCommit }) => {
   });
 };
 
+// Every release report must come from the same prompt templates. A report
+// produced under another RAG_PROMPT_VERSION, or before a template edit, would
+// otherwise pass on its own and mix two prompt sets into one release.
+const buildPromptLineageCheck = ({ reports }) => {
+  const promptSets = [...RELEASE_EVIDENCE_REPORT_SPECS, ...RELEASE_EVIDENCE_SOURCE_SPECS].map(
+    (spec) => ({
+      reportId: spec.id,
+      setHash: reports[spec.id]?.evidence?.promptTemplates?.setHash ?? null,
+    })
+  );
+  const firstSetHash = promptSets[0]?.setHash ?? null;
+  const matched =
+    Boolean(firstSetHash) && promptSets.every(({ setHash }) => setHash === firstSetHash);
+
+  return buildCheck({
+    actual: promptSets,
+    expected: { samePromptSet: true },
+    id: "prompt-lineage",
+    reasonCode: matched
+      ? RELEASE_EVIDENCE_REASON_CODES.ok
+      : RELEASE_EVIDENCE_REASON_CODES.promptLineageSplit,
+    reportType: "suite",
+  });
+};
+
 const buildReadinessSourceCheck = ({ reports }) => {
   const readiness = reports["rollout-readiness"];
   const expectedSources = RELEASE_READINESS_SOURCE_IDS.map((id) =>
@@ -282,6 +307,7 @@ export const buildReleaseEvidenceReport = ({
     ...sourceChecks,
     ...contractChecks,
     buildRobustLineageCheck({ reports, targetCommit }),
+    buildPromptLineageCheck({ reports }),
     buildReadinessSourceCheck({ reports }),
   ];
   const failedChecks = checks.filter((check) => check.status === "fail");

@@ -1,3 +1,4 @@
+import { normalizePromptDescriptor } from "./prompt-registry.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
 import {
   getPlannerRolloutMode,
@@ -90,6 +91,7 @@ const buildPlannerSelection = ({
   fallback = false,
   fallbackReason = null,
   modelRoute = null,
+  promptTemplate = null,
   requestedPlannerId,
   selectedPlannerId,
 }) => {
@@ -101,13 +103,13 @@ const buildPlannerSelection = ({
     status: fallback ? "fallback" : "selected",
     stepIds: executionPlan.map((step) => step.id),
   };
+  const normalizedPromptTemplate = normalizePromptDescriptor(promptTemplate);
 
-  return modelRoute
-    ? {
-        ...planner,
-        modelRoute,
-      }
-    : planner;
+  return {
+    ...planner,
+    ...(modelRoute ? { modelRoute } : {}),
+    ...(normalizedPromptTemplate ? { promptTemplate: normalizedPromptTemplate } : {}),
+  };
 };
 
 const getSelectedSkill = (selectedSkills = [], skillId) =>
@@ -471,6 +473,7 @@ export const createAgentExecutionPlanResult = async ({
         selectedSkills,
       }),
       modelRoute: rawExecutionPlan?.modelRoute ?? null,
+      promptTemplate: rawExecutionPlan?.promptTemplate ?? null,
     };
   };
 
@@ -525,6 +528,7 @@ export const createAgentExecutionPlanResult = async ({
       planner: buildPlannerSelection({
         executionPlan,
         modelRoute: fallbackPlan.modelRoute,
+        promptTemplate: fallbackPlan.promptTemplate,
         requestedPlannerId: fallbackPlannerId,
         selectedPlannerId: fallbackPlannerId,
       }),
@@ -547,6 +551,7 @@ export const createAgentExecutionPlanResult = async ({
       planner: buildPlannerSelection({
         executionPlan,
         modelRoute: selectedPlan.modelRoute,
+        promptTemplate: selectedPlan.promptTemplate,
         requestedPlannerId,
         selectedPlannerId: requestedPlannerId,
       }),
@@ -562,6 +567,7 @@ export const createAgentExecutionPlanResult = async ({
         fallback: true,
         fallbackReason: error,
         modelRoute: fallbackPlan.modelRoute,
+        promptTemplate: fallbackPlan.promptTemplate,
         requestedPlannerId,
         selectedPlannerId: fallbackPlannerId,
       }),

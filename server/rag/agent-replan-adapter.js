@@ -1,6 +1,7 @@
 import { parsePlannerJson } from "./agent-dag-planner-adapter.js";
 import { buildReplannerPrompt } from "./agent-replanner.js";
 import { completeTextWithMetadata } from "./openai.js";
+import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import { MODEL_CAPABILITIES, MODEL_ROUTE_IDS } from "./model-providers/index.js";
 
 // The model half of a replan.
@@ -19,12 +20,22 @@ export const REPLAN_ADAPTER_IDS = Object.freeze({
   llm: "llm_replan",
 });
 
+let replannerPromptDescriptor = null;
+
+export const getReplannerPromptDescriptor = () =>
+  (replannerPromptDescriptor ??= definePrompt({
+    id: PROMPT_IDS.replanner,
+    source: buildReplannerPrompt({}),
+    version: "v1",
+  }));
+
 export const replanAdapter = {
   createPatch: async (replanContext = {}) => {
     const completion = await completeTextWithMetadata(
       buildReplannerPrompt(replanContext),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,
+        promptTemplate: getReplannerPromptDescriptor(),
         routeId: MODEL_ROUTE_IDS.executionPlannerDefault,
       }
     );

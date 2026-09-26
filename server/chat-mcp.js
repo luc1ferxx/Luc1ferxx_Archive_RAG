@@ -7,6 +7,7 @@ import {
   createPromptTemplate,
 } from "./lib/prompt-template.js";
 import { completeText } from "./rag/openai.js";
+import { definePrompt, PROMPT_IDS } from "./rag/prompt-registry.js";
 import { getPromptVersion } from "./rag/config.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -129,10 +130,33 @@ Helpful Answer:`,
   ],
 ]);
 
-const formatWebAnswerPrompt = async (values) =>
-  getPromptVersion() === "v1"
-    ? webAnswerPromptV1.format(values)
-    : webAnswerPromptV2.invoke(values);
+const WEB_ANSWER_PROMPTS = {
+  v1: {
+    descriptor: definePrompt({
+      id: PROMPT_IDS.webAnswer,
+      source: webAnswerPromptV1.source,
+      version: "v1",
+    }),
+    render: (values) => webAnswerPromptV1.format(values),
+  },
+  v2: {
+    descriptor: definePrompt({
+      id: PROMPT_IDS.webAnswer,
+      source: webAnswerPromptV2.source,
+      version: "v2",
+    }),
+    render: (values) => webAnswerPromptV2.invoke(values),
+  },
+};
+
+// v2 and v3 share the chat template, as the document answer prompts do.
+const selectWebAnswerPrompt = () =>
+  getPromptVersion() === "v1" ? WEB_ANSWER_PROMPTS.v1 : WEB_ANSWER_PROMPTS.v2;
+
+export const listWebAnswerPromptDescriptors = () =>
+  Object.values(WEB_ANSWER_PROMPTS).map(({ descriptor }) => descriptor);
+
+export const getActiveWebAnswerPromptDescriptor = () => selectWebAnswerPrompt().descriptor;
 
 const chatMCP = async (query) => {
   getOpenAIApiKey();
@@ -155,11 +179,12 @@ const chatMCP = async (query) => {
         ? toolResult.content[0].text
         : "No search results available";
 
-    const formattedPrompt = await formatWebAnswerPrompt({
+    const webAnswerPrompt = selectWebAnswerPrompt();
+    const formattedPrompt = webAnswerPrompt.render({
       question: query,
       searchResults,
     });
-    const text = await completeText(formattedPrompt);
+    const text = await completeText(formattedPrompt, { promptTemplate: webAnswerPrompt.descriptor });
 
     return { text };
   } catch (error) {

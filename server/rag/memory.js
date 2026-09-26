@@ -3,6 +3,7 @@ import {
   createPromptTemplate,
 } from "../lib/prompt-template.js";
 import { completeText } from "./openai.js";
+import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import {
   getPromptVersion,
   getSessionMemoryPostgresTable,
@@ -153,19 +154,40 @@ const ensureTableName = () => {
   return tableName;
 };
 
-const formatRewritePrompt = async (values) => {
-  const promptVersion = getPromptVersion();
-
-  if (promptVersion === "v1") {
-    return rewritePromptV1.format(values);
-  }
-
-  if (promptVersion === "v3") {
-    return rewritePromptV3.invoke(values);
-  }
-
-  return rewritePromptV2.invoke(values);
+const REWRITE_PROMPTS = {
+  v1: {
+    descriptor: definePrompt({
+      id: PROMPT_IDS.memoryQueryRewrite,
+      source: rewritePromptV1.source,
+      version: "v1",
+    }),
+    render: (values) => rewritePromptV1.format(values),
+  },
+  v2: {
+    descriptor: definePrompt({
+      id: PROMPT_IDS.memoryQueryRewrite,
+      source: rewritePromptV2.source,
+      version: "v2",
+    }),
+    render: (values) => rewritePromptV2.invoke(values),
+  },
+  v3: {
+    descriptor: definePrompt({
+      id: PROMPT_IDS.memoryQueryRewrite,
+      source: rewritePromptV3.source,
+      version: "v3",
+    }),
+    render: (values) => rewritePromptV3.invoke(values),
+  },
 };
+
+const selectRewritePrompt = () =>
+  REWRITE_PROMPTS[getPromptVersion()] ?? REWRITE_PROMPTS.v2;
+
+export const listRewritePromptDescriptors = () =>
+  Object.values(REWRITE_PROMPTS).map(({ descriptor }) => descriptor);
+
+export const getActiveRewritePromptDescriptor = () => selectRewritePrompt().descriptor;
 
 const trimMemoryText = (value = "", maxLength = MAX_MESSAGE_CHARS) => {
   const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -475,7 +497,8 @@ export const resolveQueryWithSessionMemory = async ({
   }
 
   try {
-    const prompt = await formatRewritePrompt({
+    const rewritePrompt = selectRewritePrompt();
+    const prompt = rewritePrompt.render({
       documents:
         documents.length > 0
           ? documents.map((document) => document.fileName).join(", ")
@@ -487,7 +510,7 @@ export const resolveQueryWithSessionMemory = async ({
       question: query,
     });
     const rewrittenQuery = sanitizeRewrittenQuery(
-      await completeText(prompt),
+      await completeText(prompt, { promptTemplate: rewritePrompt.descriptor }),
       query
     );
 

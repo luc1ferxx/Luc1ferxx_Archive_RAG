@@ -4,7 +4,7 @@ import {
   createAgentBudget,
   getBudgetSnapshot as getAgentBudgetSnapshot,
 } from "./agent-budget.js";
-import { getActiveRunUsage } from "./run-usage.js";
+import { getActiveRunUsage, getRunPromptUsage } from "./run-usage.js";
 import { addActiveSpanEvent, getActiveTraceId } from "./tracing.js";
 import { buildAgentExperienceMemoryObservability } from "./agent-experience-memory.js";
 import { buildClarificationResponse } from "./agent-response-builder.js";
@@ -168,6 +168,9 @@ export const createAgentRunContext = ({
     skills: skillTracker.getSkillObservations(),
     runs: skillTracker.getSkillRuns(),
     budget: getBudgetSnapshot(),
+    // The prompt templates this run's model calls used (id, version,
+    // fingerprint, calls, tokens); empty when the run made no model call.
+    promptTemplates: getRunPromptUsage(budgetState.run),
     // Only when a tracing SDK is recording, so the default response is
     // unchanged; lets a /chat response, feedback record, or agent trace point
     // at its OpenTelemetry trace.

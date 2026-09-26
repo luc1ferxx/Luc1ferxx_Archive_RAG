@@ -21,6 +21,18 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// The prompt templates this run used; null when the code under test predates
+// the prompt registry (these scripts also run against older checkouts).
+const describePromptTemplates = async () => {
+  try {
+    const { describeActivePromptTemplates } = await import("../rag/prompt-catalog.js");
+
+    return describeActivePromptTemplates();
+  } catch {
+    return null;
+  }
+};
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
 
@@ -196,7 +208,11 @@ const main = async () => {
   const summary = summarizeJudgeRuns(rows.filter((row) => !row.heldOut));
   const heldOutSummary = summarizeJudgeRuns(rows.filter((row) => row.heldOut));
   const report = {
-    config: { chatModel: process.env.OPENAI_CHAT_MODEL ?? null, rounds },
+    config: {
+      chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
+      promptTemplates: await describePromptTemplates(),
+      rounds,
+    },
     generatedAt: new Date().toISOString(),
     reportType: "claim-judge-contrast",
     heldOutSummary,

@@ -283,6 +283,15 @@ export const buildSourceReportReference = (report = {}) => {
   };
 };
 
+// The prompt templates in effect for this run (id, version, fingerprint) and
+// one hash over them. Loaded lazily so the gates that only read reports do not
+// import the model-facing modules.
+const describeEvaluationPromptTemplates = async () => {
+  const { describeActivePromptTemplates } = await import("../rag/prompt-catalog.js");
+
+  return describeActivePromptTemplates();
+};
+
 export const buildEvaluationEvidence = async ({
   command,
   corpus = {},
@@ -346,6 +355,7 @@ export const buildEvaluationEvidence = async ({
           runId: normalizeText(suite.runId),
         }
       : null,
+    promptTemplates: await describeEvaluationPromptTemplates(),
     generatorVersion: EVAL_EVIDENCE_GENERATOR_VERSION,
   };
 };

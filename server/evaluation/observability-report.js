@@ -271,6 +271,7 @@ const createLlmOpsBucketStats = () => ({
 const createLlmOpsStats = () => ({
   ...createLlmOpsBucketStats(),
   byOperation: {},
+  byPromptTemplate: {},
   byRoute: {},
 });
 
@@ -428,6 +429,16 @@ const getLlmOpsRouteKey = (event = {}) => {
   return `${providerId}:${routeId}:${modelId}`;
 };
 
+// "id@version#fingerprint", so two edits of a template under one version label
+// still land in separate buckets; calls that named no template are "unnamed".
+const getLlmOpsPromptTemplateKey = (event = {}) => {
+  const template = isPlainObject(event.promptTemplate) ? event.promptTemplate : null;
+
+  return template?.id && template?.version && template?.fingerprint
+    ? `${template.id}@${template.version}#${template.fingerprint}`
+    : "unnamed";
+};
+
 const getLlmOpsBucket = (buckets = {}, key) => {
   const normalizedKey = String(key ?? "unknown").trim() || "unknown";
 
@@ -501,6 +512,13 @@ const addLlmOpsEvent = (llmops, event = {}) => {
     event
   );
   addLlmOpsCounters(getLlmOpsBucket(llmops.byRoute, getLlmOpsRouteKey(event)), event);
+
+  if (event.operation === "llm_completion") {
+    addLlmOpsCounters(
+      getLlmOpsBucket(llmops.byPromptTemplate, getLlmOpsPromptTemplateKey(event)),
+      event
+    );
+  }
 };
 
 const finalizeLlmOpsBucketStats = (stats = createLlmOpsBucketStats()) => {
@@ -540,6 +558,7 @@ const finalizeLlmOpsBucketMap = (buckets = {}) =>
 const finalizeLlmOpsStats = (llmops) => ({
   ...finalizeLlmOpsBucketStats(llmops),
   byOperation: finalizeLlmOpsBucketMap(llmops.byOperation),
+  byPromptTemplate: finalizeLlmOpsBucketMap(llmops.byPromptTemplate),
   byRoute: finalizeLlmOpsBucketMap(llmops.byRoute),
 });
 
@@ -1125,6 +1144,16 @@ export const formatObservabilityReport = (report) => {
       indent: "    ",
     }).length
       ? formatLlmOpsBucketMap(report.llmops.byRoute, {
+          indent: "    ",
+        })
+      : ["    none: 0"]),
+    "  prompt templates (completions):"
+  );
+  lines.push(
+    ...(formatLlmOpsBucketMap(report.llmops.byPromptTemplate ?? {}, {
+      indent: "    ",
+    }).length
+      ? formatLlmOpsBucketMap(report.llmops.byPromptTemplate ?? {}, {
           indent: "    ",
         })
       : ["    none: 0"]),

@@ -36,6 +36,18 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DOCCOMPARE_FIXTURES } from "./build-doccompare-fixtures.mjs";
 
+// The prompt templates this run used; null when the code under test predates
+// the prompt registry (these scripts also run against older checkouts).
+const describePromptTemplates = async () => {
+  try {
+    const { describeActivePromptTemplates } = await import("../rag/prompt-catalog.js");
+
+    return describeActivePromptTemplates();
+  } catch {
+    return null;
+  }
+};
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
 const CORPUS_PATH = path.join(__dirname, "corpora", "arxiv-computer-science-rerank-v1.json");
@@ -346,6 +358,7 @@ const main = async () => {
         chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
         claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
         embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
+        promptTemplates: await describePromptTemplates(),
       },
       generatedAt: new Date().toISOString(),
       reportType: "answer-drafts",

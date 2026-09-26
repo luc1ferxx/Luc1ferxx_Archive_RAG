@@ -18,6 +18,7 @@ import {
 import { evaluateClaimSupport } from "./agent-self-check.js";
 import { normalizeGroupedSourceLabels } from "./self-check/text.js";
 import { completeText } from "./openai.js";
+import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import { createAnswerDraftReleaser } from "./answer-drafts.js";
 import { normalizeWhitespace } from "./text-utils.js";
 import { evaluateBidirectionalEvidenceEntailment } from "./comparison-equivalence.js";
@@ -258,8 +259,61 @@ const buildQuestionBlock = ({ query, resolvedQuery }) =>
 const buildPreferenceBlock = (preferenceBlock = "") =>
   preferenceBlock?.trim() ? preferenceBlock.trim() : "Long-term memory: none.";
 
-const formatSelectedPrompt = async ({ v1Template, v2Template, values }) =>
-  getPromptVersion() === "v1" ? v1Template.format(values) : v2Template.invoke(values);
+// RAG_PROMPT_VERSION=v1 selects the plain-text templates; v2 and v3 both use
+// the chat templates (v3 only changes the memory rewrite prompt). `versions`
+// holds the recorded version labels: editing a template means giving it a new
+// label here (for example "v2.1") and pinning it in the prompt registry test.
+const defineAnswerPrompts = ({
+  id,
+  v1Template,
+  v2Template,
+  versions = { v1: "v1", v2: "v2" },
+}) => ({
+  v1: {
+    descriptor: definePrompt({ id, source: v1Template.source, version: versions.v1 }),
+    render: (values) => v1Template.format(values),
+  },
+  v2: {
+    descriptor: definePrompt({ id, source: v2Template.source, version: versions.v2 }),
+    render: (values) => v2Template.invoke(values),
+  },
+});
+
+const QA_PROMPTS = defineAnswerPrompts({
+  id: PROMPT_IDS.qaAnswer,
+  v1Template: qaPromptV1,
+  v2Template: qaPromptV2,
+});
+const COMPARISON_PROMPTS = defineAnswerPrompts({
+  id: PROMPT_IDS.comparisonAnswer,
+  v1Template: comparisonPromptV1,
+  v2Template: comparisonPromptV2,
+});
+const GUARDED_COMPARISON_PROMPTS = defineAnswerPrompts({
+  id: PROMPT_IDS.guardedComparisonAnswer,
+  v1Template: guardedComparisonPromptV1,
+  v2Template: guardedComparisonPromptV2,
+});
+
+const selectPrompt = (variants) =>
+  getPromptVersion() === "v1" ? variants.v1 : variants.v2;
+
+const selectComparisonPrompt = () =>
+  selectPrompt(
+    isNearDuplicateGuardEnabled() ? GUARDED_COMPARISON_PROMPTS : COMPARISON_PROMPTS
+  );
+
+/** Every template this module can send, for the pinned fingerprint test. */
+export const listAnswerPromptDescriptors = () =>
+  [QA_PROMPTS, COMPARISON_PROMPTS, GUARDED_COMPARISON_PROMPTS].flatMap((variants) =>
+    Object.values(variants).map(({ descriptor }) => descriptor)
+  );
+
+/** The templates the current configuration would send. */
+export const getActiveAnswerPromptDescriptors = () => [
+  selectPrompt(QA_PROMPTS).descriptor,
+  selectComparisonPrompt().descriptor,
+];
 
 const formatPairLabels = (pairs) =>
   pairs.map((pair) => `${pair.leftFileName} vs ${pair.rightFileName}`).join(", ");
@@ -856,17 +910,14 @@ export const writeQaAnswer = async ({
   bundle,
   preferenceBlock = "",
 }) => {
-  const prompt = await formatSelectedPrompt({
-    v1Template: qaPromptV1,
-    v2Template: qaPromptV2,
-    values: {
-      questionBlock: buildQuestionBlock({
-        query,
-        resolvedQuery,
-      }),
-      preferenceBlock: buildPreferenceBlock(preferenceBlock),
-      context: bundle.context,
-    },
+  const qaPrompt = selectPrompt(QA_PROMPTS);
+  const prompt = qaPrompt.render({
+    questionBlock: buildQuestionBlock({
+      query,
+      resolvedQuery,
+    }),
+    preferenceBlock: buildPreferenceBlock(preferenceBlock),
+    context: bundle.context,
   });
   // Streams verified sentences to a waiting client when the agent opened a
   // draft channel for this answer; otherwise null and nothing changes.
@@ -881,7 +932,10 @@ export const writeQaAnswer = async ({
   // Models often group sources as [Source 1, Source 3]; every downstream reader
   // (self-check, finalizer, citation projection) parses one rank per bracket.
   const text = normalizeGroupedSourceLabels(
-    await completeText(prompt, drafts?.completionOptions)
+    await completeText(prompt, {
+      ...drafts?.completionOptions,
+      promptTemplate: qaPrompt.descriptor,
+    })
   );
   drafts?.finish(text);
 
@@ -918,24 +972,19 @@ export const writeComparisonAnswer = async ({
     nearDuplicateGuardEnabled,
   });
 
-  const selectedPrompt = await formatSelectedPrompt({
-    v1Template: nearDuplicateGuardEnabled
-      ? guardedComparisonPromptV1
-      : comparisonPromptV1,
-    v2Template: nearDuplicateGuardEnabled
-      ? guardedComparisonPromptV2
-      : comparisonPromptV2,
-    values: {
-      questionBlock: buildQuestionBlock({
-        query,
-        resolvedQuery,
-      }),
-      preferenceBlock: buildPreferenceBlock(preferenceBlock),
-      diagnostics,
-      context: bundle.context,
-    },
+  const comparisonPrompt = selectComparisonPrompt();
+  const selectedPrompt = comparisonPrompt.render({
+    questionBlock: buildQuestionBlock({
+      query,
+      resolvedQuery,
+    }),
+    preferenceBlock: buildPreferenceBlock(preferenceBlock),
+    diagnostics,
+    context: bundle.context,
   });
-  const text = normalizeGroupedSourceLabels(await completeText(selectedPrompt));
+  const text = normalizeGroupedSourceLabels(
+    await completeText(selectedPrompt, { promptTemplate: comparisonPrompt.descriptor })
+  );
   const generatedText =
     text ||
     "I couldn't produce a reliable comparison from the retrieved document evidence.";

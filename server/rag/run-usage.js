@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { normalizePromptDescriptor } from "./prompt-registry.js";
 import {
   getAgentRunMaxCostUsd,
   getAgentRunMaxDurationMs,
@@ -82,11 +83,38 @@ export const getActiveRunUsage = () => storage.getStore() ?? null;
  * charged: a rate-limited or failed request is not billed by the provider, and
  * a call the LLMOps policy blocked never reached it.
  */
+// Which prompt templates the run's model calls used. Kept beside the meter, not
+// inside it: the meter is budget state that is cloned and compared, and this is
+// observability only.
+const promptLedgers = new WeakMap();
+
+const recordPromptUse = (runUsage, event) => {
+  const prompt = normalizePromptDescriptor(event.promptTemplate);
+
+  if (!prompt) {
+    return;
+  }
+
+  const ledger = promptLedgers.get(runUsage) ?? new Map();
+  const key = `${prompt.id}@${prompt.version}#${prompt.fingerprint}`;
+  const entry = ledger.get(key) ?? { ...prompt, calls: 0, tokens: 0 };
+
+  entry.calls += 1;
+  entry.tokens += Number.isFinite(event.totalTokens) ? event.totalTokens : 0;
+  ledger.set(key, entry);
+  promptLedgers.set(runUsage, ledger);
+};
+
+/** The prompts this run sent, one entry per template, in first-use order. */
+export const getRunPromptUsage = (runUsage) =>
+  runUsage ? [...(promptLedgers.get(runUsage)?.values() ?? [])].map((entry) => ({ ...entry })) : [];
+
 export const chargeRunUsage = (runUsage, event = {}) => {
   if (!runUsage || event.status !== "ok") {
     return;
   }
 
+  recordPromptUse(runUsage, event);
   runUsage.used.modelCalls += 1;
   runUsage.used.tokens += Number.isFinite(event.totalTokens) ? event.totalTokens : 0;
 

@@ -11,8 +11,11 @@ const formatTemplate = (template, values) => {
   });
 };
 
+// `source` is the unrendered template text. The prompt registry fingerprints
+// it, so a report or trace can say exactly which template produced a call.
 export const createPromptTemplate = (template) => ({
   format: (values) => formatTemplate(template, values),
+  source: template,
 });
 
 export const createChatPromptTemplate = (messages) => ({
@@ -22,4 +25,5 @@ export const createChatPromptTemplate = (messages) => ({
       content: formatTemplate(template, values),
     })),
   }),
+  source: messages.map(([role, template]) => `${role}:\n${template}`).join("\n\n"),
 });

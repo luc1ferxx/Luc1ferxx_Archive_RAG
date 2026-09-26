@@ -1,3 +1,4 @@
+import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import { completeTextWithMetadata } from "./openai.js";
 import {
   compactPlanCandidate,
@@ -109,6 +110,17 @@ export const buildIntentPlannerPrompt = ({
   }),
 ].join("\n");
 
+// Fingerprinted from the builder's output for an empty input: the
+// instructions and the input field names, without any request data.
+let intentPlannerPromptDescriptor = null;
+
+export const getIntentPlannerPromptDescriptor = () =>
+  (intentPlannerPromptDescriptor ??= definePrompt({
+    id: PROMPT_IDS.intentPlanner,
+    source: buildIntentPlannerPrompt({}),
+    version: "v1",
+  }));
+
 export const deterministicIntentPlannerAdapter = {
   id: "deterministic",
   selectIntentPlan: async ({ candidates = [] } = {}) => ({
@@ -120,10 +132,12 @@ export const deterministicIntentPlannerAdapter = {
 export const llmIntentPlannerAdapter = {
   id: "llm",
   selectIntentPlan: async (plannerContext = {}) => {
+    const promptTemplate = getIntentPlannerPromptDescriptor();
     const completion = await completeTextWithMetadata(
       buildIntentPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.intentPlanner,
+        promptTemplate,
         responseFormat: buildIntentPlannerResponseFormat(plannerContext),
         routeId: MODEL_ROUTE_IDS.intentPlannerDefault,
       }
@@ -132,6 +146,7 @@ export const llmIntentPlannerAdapter = {
     return {
       ...normalizeIntentSelection(parseIntentPlannerJson(completion.text)),
       modelRoute: completion.modelRoute,
+      promptTemplate,
     };
   },
 };

@@ -295,17 +295,33 @@ Route resolution 会消费 workspace policy，例如 blocked/allowed model ids�
 
 - `openai.js` 在 chat completion、embedding documents 和 embedding query 后写入 `traceType: "llmops"` / `eventType: "llmops_metric"`。
 - `reranker.js` 在 cross-encoder rerank 成功或失败后写入同一 contract，同时保留原来的 rerank metrics collector。
-- 事件只记录 operation、stage、status、latencyMs、公开 `modelRoute`、inputCharacters、outputCharacters、itemCount、token usage、token source、estimated cost、pricing source、latency SLO status、annotation、alert 和 budget verdict；不记录 prompt 原文、chunk 原文、API key、secret ref value、transport 或 pricing rate。
+- 事件只记录 operation、stage、status、latencyMs、公开 `modelRoute`、`promptTemplate`、inputCharacters、outputCharacters、itemCount、token usage、token source、estimated cost、pricing source、latency SLO status、annotation、alert 和 budget verdict；不记录 prompt 原文、chunk 原文、API key、secret ref value、transport 或 pricing rate。
+- `promptTemplate` 是发出这次调用的模板身份 `{id, version, fingerprint}`，不是 prompt 文本（见下文“Prompt 模板版本”）；embedding、rerank 和只在评测里用的 prompt 为 `null`。
 - Token usage 优先读取 provider response 的真实 usage metadata；缺失时按字符数做稳定估算并标记 `tokenSource: "estimated"`。
 - Cost 只从 model contract 中声明的 USD per-million-token pricing 估算，缺失 pricing 时标记 `pricingSource: "unavailable"`；这层是 report-only，不影响请求路由。
 - Latency SLO 使用 model contract 的 `latency.timeoutMs` 计算 `pass` / `breach` / `unavailable`，同样只进入 report，不作为质量门失败条件。
 - `server/rag/llmops-policy.js` 会从同一 metric contract 生成受控 annotation、alert 和 budget verdict。默认是 record-only；传入 `enforcementMode: "block"` 时，会在执行前用已知 estimated usage/cost 做 per-event budget gate，并记录 `skipped` metric。
 - runtime 模型调用会读取 `RAG_LLMOPS_POLICY_ENABLED`、`RAG_LLMOPS_ENFORCEMENT_MODE`、`RAG_LLMOPS_MAX_COST_USD_PER_EVENT`、`RAG_LLMOPS_MAX_TOKENS_PER_EVENT` 和 `RAG_LLMOPS_ALERT_*`。默认不设置预算阈值，因此只记录 verdict，不会阻断请求。
-- `server/evaluation/observability-report.js` 会从同一个 RAG observability JSONL 中汇总 LLMOps events，按 operation 和 model route 输出 count、平均延迟、error rate、token totals、estimated cost、SLO breach rate、annotation counts、alert counts 和 budget status counts。
+- `server/evaluation/observability-report.js` 会从同一个 RAG observability JSONL 中汇总 LLMOps events，按 operation、model route 和 prompt 模板（`byPromptTemplate`，只统计 completion）输出 count、平均延迟、error rate、token totals、estimated cost、SLO breach rate、annotation counts、alert counts 和 budget status counts。
 - `/admin/status` 可通过注入 `llmOpsService.readLatestObservabilityReport()` 暴露 compact LLMOps health surface，汇总 event count、error、alert、budget exceeded、tokens 和 estimated cost，不返回原始 prompt、error body 或 secret-like 字段。
 
 当前 LLMOps 薄切片已覆盖 usage/cost/SLO、annotation、alert 和 per-event budget verdict / block mode。每个模型端点的并发上限和熔断器在 HTTP 客户端层（`server/rag/model-call-guard.js`），按连续不可用错误熔断，不读 LLMOps 事件；账号级长期 quota 和告警外发仍应继续消费同一 policy event contract，而不是在各个模型调用点重复统计。
 
+
+## Prompt 模板版本
+
+每个发给聊天模型的 prompt 都有一个身份：`id`（这个 prompt 做什么）、`version`（使用的模板版本）和 `fingerprint`（模板原文 SHA-256 的前 12 位）。
+
+- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 10 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
+- **fingerprint 怎么算**：模板类 prompt 对未渲染的模板原文算；函数拼出来的 prompt（意图/执行/DAG 规划器、重规划器、claim 评审）对函数在空输入下的输出算，即指令文本加输入字段名，不含请求数据。
+- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 16 个模板变体，当前配置下生效 9 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一）。
+- **记录位置**：
+  - 模型调用把描述符作为 `promptTemplate` 传给 `completeTextWithMetadata`，它进入 LLMOps 事件和模型 span（`llmops.prompt_template.id` / `.version` / `.fingerprint`），不进入请求。
+  - 每次运行在 `agentObservability.promptTemplates` 里列出用过的模板和调用次数、token 数。
+  - LLM 规划器的决策（意图、执行计划、DAG）带 `promptTemplate`。
+  - 每份评测报告的 `evidence.promptTemplates` 记录当时生效的模板和一个集合哈希 `setHash`。
+- **防止悄悄改模板**：`test/prompt-registry.test.mjs` 把每个 `id@version` 钉到它的 fingerprint。改了模板却不改版本号，测试会失败；正确做法是给模板一个新版本号，再把新的 `id@version` 钉进去。
+- **发布门**：`release:gate` 要求所有发布报告的 `setHash` 相同，缺失或不一致都报 `prompt_lineage_split`。
 ## Research task / dossier
 
 Durable agent task 支持一个 task-level `research_task` / dossier 流程。触发词包括 `research_task`、`dossier`、`research report`、`risk report`、`研究任务`、`研究型任务`、`调研报告`、`风险报告` 等。流程 spec 集中在 `server/rag/agent-workflows/built-ins/research-dossier.js`；`server/rag/agent-research-task.js` 只从 registry 选择 spec、渲染下一步 question 并推进公开 phase 状态。当前 phase 顺序是：

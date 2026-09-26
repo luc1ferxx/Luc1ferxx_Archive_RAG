@@ -13,6 +13,7 @@ import {
 } from "./agent-planner-shadow.js";
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
 import { completeTextWithMetadata } from "./openai.js";
+import { definePrompt, normalizePromptDescriptor, PROMPT_IDS } from "./prompt-registry.js";
 import { MODEL_CAPABILITIES, MODEL_ROUTE_IDS } from "./model-providers/index.js";
 import {
   EXECUTION_REQUEST_FIELD_TYPES,
@@ -309,7 +310,9 @@ export const deterministicDagPlannerAdapter = {
   id: DAG_PLANNER_IDS.deterministic,
 };
 
-const attachModelRoute = (payload, modelRoute = null) => {
+// Non-enumerable so the payload still validates and serializes as the plain
+// graph the model returned.
+const attachPlanMetadata = (payload, { modelRoute = null, promptTemplate = null } = {}) => {
   if (!isRecord(payload) && !Array.isArray(payload)) {
     return payload;
   }
@@ -318,6 +321,11 @@ const attachModelRoute = (payload, modelRoute = null) => {
     configurable: true,
     enumerable: false,
     value: modelRoute,
+  });
+  Object.defineProperty(payload, "promptTemplate", {
+    configurable: true,
+    enumerable: false,
+    value: promptTemplate,
   });
 
   return payload;
@@ -451,20 +459,33 @@ const dropSchemaAbsentValues = (payload) => {
   };
 };
 
+// The planning context is appended as JSON at the end, so an empty context
+// fingerprints the instructions alone.
+let dagPlannerPromptDescriptor = null;
+
+export const getDagPlannerPromptDescriptor = () =>
+  (dagPlannerPromptDescriptor ??= definePrompt({
+    id: PROMPT_IDS.dagPlanner,
+    source: buildDagPlannerPrompt({}),
+    version: "v1",
+  }));
+
 export const dagPlannerAdapter = {
   createExecutionGraph: async (plannerContext = {}) => {
+    const promptTemplate = getDagPlannerPromptDescriptor();
     const completion = await completeTextWithMetadata(
       buildDagPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,
+        promptTemplate,
         responseFormat: buildDagPlannerResponseFormat(plannerContext),
         routeId: MODEL_ROUTE_IDS.executionPlannerDefault,
       }
     );
 
-    return attachModelRoute(
+    return attachPlanMetadata(
       dropSchemaAbsentValues(parsePlannerJson(completion.text)),
-      completion.modelRoute
+      { modelRoute: completion.modelRoute, promptTemplate }
     );
   },
   id: DAG_PLANNER_IDS.llm,
@@ -476,6 +497,7 @@ const buildPlannerSelection = ({
   fallbackReasonCodes = [],
   graph,
   modelRoute = null,
+  promptTemplate = null,
   requestedPlannerId,
   selectedPlannerId,
 }) => {
@@ -488,8 +510,13 @@ const buildPlannerSelection = ({
     selectedPlannerId,
     status: fallback ? "fallback" : "selected",
   };
+  const normalizedPromptTemplate = normalizePromptDescriptor(promptTemplate);
 
-  return modelRoute ? { ...planner, modelRoute } : planner;
+  return {
+    ...planner,
+    ...(modelRoute ? { modelRoute } : {}),
+    ...(normalizedPromptTemplate ? { promptTemplate: normalizedPromptTemplate } : {}),
+  };
 };
 
 class ExecutionGraphValidationError extends Error {
@@ -595,7 +622,11 @@ export const createAgentExecutionGraphResult = async ({
       throw new ExecutionGraphValidationError(validation.errors);
     }
 
-    return { graph: validation.graph, modelRoute: payload?.modelRoute ?? null };
+    return {
+      graph: validation.graph,
+      modelRoute: payload?.modelRoute ?? null,
+      promptTemplate: payload?.promptTemplate ?? null,
+    };
   };
 
   const createFallbackGraph = () =>
@@ -643,6 +674,7 @@ export const createAgentExecutionGraphResult = async ({
         ),
         graph: graphResult.graph,
         modelRoute: graphResult.modelRoute,
+        promptTemplate: graphResult.promptTemplate,
         requestedPlannerId,
         selectedPlannerId: selectedId,
       }),

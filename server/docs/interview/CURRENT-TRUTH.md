@@ -26,6 +26,7 @@
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | Claim 校验 | 默认词法规则；可选 LLM 评审只复核被词法拒绝的 claim，只能升级不能降级，引用错误、证据中没有的数字、对比答案不送评审，失败时保留词法结论；结论缓存 | `rag/self-check/`、`rag/self-check/claim-judge.js` |
+| Prompt 版本 | 10 个 prompt、16 个模板变体，每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
 | 租户隔离 | 应用层每个 store 按 user/workspace 过滤；PostgreSQL 行级安全再兜一层：鉴权后的中间件把访问范围放进 `AsyncLocalStorage`，带范围的语句在短事务里 `SET LOCAL ROLE` 到租户角色并设置租户变量，9 张表的策略拒绝其他租户的行。后台任务和恢复以记录自己的范围执行；迁移、进程级缓存加载、跨租户恢复扫描显式以 owner 身份执行 | `db/migrations/013_enable_tenant_row_level_security.sql`、`rag/postgres.js`、`rag/postgres-tenant.js` |
 | 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
 
@@ -161,9 +162,13 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - 做的过程中发现并修掉的问题：进程级文档 registry 如果在租户请求里首次加载，会只装进这个租户的文档，现在改为以 owner 身份加载；multer 的内存存储会丢掉异步上下文，分片上传路由在 multer 之后重新绑定租户。
 - 正确性：`test/postgres-row-level-security.integration.test.mjs` 9 个用例；PostgreSQL 集成测试共 24/24。
 
-### 3.9 工程基线（2026-09-25，行级安全提交）
+### 3.9 Prompt 版本与归因
 
-- 后端测试 1751 个：1748 通过，0 失败，3 个跳过（3 个需要 PostgreSQL 的集成测试文件在无数据库时各报告 1 个跳过）。在一次性 PostgreSQL 18.6 集群上跑（`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh`）是 1772/1772。
+2026-09-25，本地 qwen2.5:7b，真实规划器评测一轮加答案草稿评测（打开 claim 评审）：35 个 completion 事件全部能归到具体模板，改前是 0 个（它们只能按 model route 分组，`chat.default` 一个桶里混着 QA 回答、claim 评审和问题改写 3 个 prompt）。按模板分组后能直接看出：QA 回答占 completion token 的 44%，claim 评审占 21%。样本小，只说明能归因，不是性能数据。详见 `docs/evaluation.md` 的“Prompt 模板归因”。
+
+### 3.10 工程基线（2026-09-25，prompt 版本提交）
+
+- 后端测试 1759 个：1756 通过，0 失败，3 个跳过（3 个需要 PostgreSQL 的集成测试文件在无数据库时各报告 1 个跳过）。在一次性 PostgreSQL 18.6 集群上跑（`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh`）是 1780/1780。
 - 前端测试 111 个全部通过，生产构建通过（这次没改前端）。
 - 覆盖率门禁通过：后端全局行覆盖 91.3%，RAG/AgentRAG 核心 93.5%。
 

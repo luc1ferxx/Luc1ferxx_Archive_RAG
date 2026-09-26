@@ -9,6 +9,7 @@ import {
 } from "./llmops-policy.js";
 import { recordRagTrace } from "./observability.js";
 import { chargeActiveRunUsage } from "./run-usage.js";
+import { normalizePromptDescriptor } from "./prompt-registry.js";
 import {
   GEN_AI_ATTRIBUTES,
   GEN_AI_OPERATIONS,
@@ -173,6 +174,9 @@ export const normalizeLlmOpsMetricEvent = (metric = {}) => {
       latencySloStatus: metric.latencySloStatus,
     }),
     modelRoute: normalizeLlmOpsModelRoute(metric.modelRoute),
+    // id/version/fingerprint of the template, or null for a call that did not
+    // name one (embeddings, rerank, eval-only prompts).
+    promptTemplate: normalizePromptDescriptor(metric.promptTemplate),
     inputCharacters: normalizeOptionalNonNegativeInteger(metric.inputCharacters),
     outputCharacters: normalizeOptionalNonNegativeInteger(metric.outputCharacters),
     itemCount: normalizeOptionalNonNegativeInteger(metric.itemCount),
@@ -251,11 +255,16 @@ const buildModelSpan = (metric = {}) => {
   const model =
     metric.modelName || metric.modelRoute?.modelId || metric.modelRoute?.providerId || "unknown";
 
+  const promptTemplate = normalizePromptDescriptor(metric.promptTemplate);
+
   return {
     attributes: {
       [GEN_AI_ATTRIBUTES.operationName]: operation,
       [GEN_AI_ATTRIBUTES.providerName]: metric.modelRoute?.providerId,
       [GEN_AI_ATTRIBUTES.requestModel]: model,
+      "llmops.prompt_template.fingerprint": promptTemplate?.fingerprint,
+      "llmops.prompt_template.id": promptTemplate?.id,
+      "llmops.prompt_template.version": promptTemplate?.version,
       "llmops.stage": metric.stage,
     },
     name: `${operation} ${model}`,
