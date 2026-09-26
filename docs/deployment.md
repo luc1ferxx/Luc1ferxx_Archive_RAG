@@ -52,6 +52,7 @@ RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3
 - 本机：先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 就用 GPU，模型约 2.3 GB。
 - 生产：Hugging Face TEI 的 `/rerank` 接口格式一样，可以直接换上去。
 - 在 Apple MPS 上，一次 18 个候选的重排约 0.4 秒。服务挂了查询不会失败，只是不重排。
+- 开启重排后，"要不要回答"会改由重排模型的相关概率决定（`RAG_QA_MIN_RERANK_PROBABILITY=0.02`）：拒答少得多，但更多不可回答的问题会被答出来。想保留原来更严的词面门控，设为 `off`。
 
 ### 多实例共享状态（可选）
 

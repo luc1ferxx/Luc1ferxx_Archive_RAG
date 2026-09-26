@@ -168,6 +168,10 @@ export const buildConfidenceTrace = (confidence = {}) => {
     ),
   };
 
+  if (confidence.gate) {
+    trace.gate = confidence.gate;
+  }
+
   if (typeof confidence.partialCoverageResultCount === "number") {
     trace.partialCoverageResultCount = confidence.partialCoverageResultCount;
   }

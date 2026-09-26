@@ -2,6 +2,8 @@ import {
   getMinQaQueryTermCoverage,
   getMinQueryTermCoverage,
   getMinRelevanceScore,
+  getCrossEncoderScoreScale,
+  getQaMinRerankProbability,
   getQaPartialCoverageFloor,
   isQaAnswerVerdictEnabled,
 } from "./config.js";
@@ -404,6 +406,34 @@ const buildComparisonAnchorReason = ({
   )} in ${coveredDocumentCount} of the ${docCount} selected documents, so the comparison would be unreliable.`;
 };
 
+/** A cross-encoder score as a relevance probability. */
+export const toRerankProbability = (score) =>
+  getCrossEncoderScoreScale() === "probabilities" ? Number(score) : 1 / (1 + Math.exp(-Number(score)));
+
+// The reranker read the question and the chunk together, so its probability
+// judges relevance where query-term coverage can only count shared words. A
+// chunk clears the gate when that probability does; anchors (identifiers,
+// quoted phrases) must still appear, as on the lexical path.
+const selectByRerankProbability = ({ minProbability, queryText, results }) => {
+  const anchorGroups = extractAnchorGroups(queryText);
+  const analysis = analyzeAnchorCoverage(
+    results.filter((result) => toRerankProbability(result.crossEncoderScore) >= minProbability),
+    anchorGroups
+  );
+
+  if (analysis.filteredResults.length > 0 && analysis.missingAnchorGroups.length === 0) {
+    return { ...analysis, anchorGroups, failureMode: null, usableResults: analysis.filteredResults };
+  }
+
+  return {
+    ...analysis,
+    anchorGroups,
+    failureMode:
+      anchorGroups.length > 0 && analysis.missingAnchorGroups.length > 0 ? "missing_anchor_coverage" : "low_relevance",
+    usableResults: [],
+  };
+};
+
 // The partial coverage band opens only with RAG_QA_ANSWER_VERDICT on, since it
 // admits chunks whose answer only the model can confirm.
 // evidenceRequirementCount is how many parts the query decomposer split the
@@ -413,13 +443,21 @@ const buildComparisonAnchorReason = ({
 // coverage is what drives the gap planner's per-part suggestions.
 export const assessQaConfidence = ({ results, queryText = "", evidenceRequirementCount = 1 }) => {
   const minCoverage = getMinQaQueryTermCoverage();
-  const selection = selectUsableResults({
-    minCoverage,
-    partialCoverageFloor:
-      evidenceRequirementCount <= 1 && isQaAnswerVerdictEnabled() ? getQaPartialCoverageFloor() : null,
-    results,
-    queryText,
-  });
+  const minRerankProbability = getQaMinRerankProbability();
+  const rerankGate =
+    minRerankProbability !== null &&
+    results.length > 0 &&
+    results.every((result) => typeof result?.crossEncoderScore === "number");
+  const selection = rerankGate
+    ? selectByRerankProbability({ minProbability: minRerankProbability, queryText, results })
+    : selectUsableResults({
+        minCoverage,
+        partialCoverageFloor:
+          evidenceRequirementCount <= 1 && isQaAnswerVerdictEnabled() ? getQaPartialCoverageFloor() : null,
+        results,
+        queryText,
+      });
+  const gate = rerankGate ? "rerank" : "lexical";
 
   if (selection.usableResults.length === 0) {
     return {
@@ -434,12 +472,14 @@ export const assessQaConfidence = ({ results, queryText = "", evidenceRequiremen
             )
           : "I couldn't find enough grounded evidence in the uploaded documents to answer reliably.",
       anchorGroups: selection.anchorGroups,
+      gate,
       missingAnchorGroups: selection.missingAnchorGroups,
     };
   }
 
   return {
     confident: true,
+    gate,
     usableResults: selection.usableResults,
     anchorGroups: selection.anchorGroups,
     missingAnchorGroups: [],

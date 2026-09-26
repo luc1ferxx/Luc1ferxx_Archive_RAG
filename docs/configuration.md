@@ -208,6 +208,8 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | `RAG_RERANK_CANDIDATE_MULTIPLIER` | `3` | Rerank 候选放大倍数。 |
 | `RAG_RERANK_WEIGHT` | `0.6` | Rerank 分数与粗排分数混合权重。 |
 | `RAG_CROSS_ENCODER_ENDPOINT` | 空 | Cross-encoder HTTP endpoint，请求 `{query, texts}`、返回 `{scores}`，和 Hugging Face TEI 的 `/rerank` 格式相同。本地用 `npm run rerank:cross-encoder` 启动，地址是 `http://127.0.0.1:8081/rerank`。 |
+| `RAG_QA_MIN_RERANK_PROBABILITY` | `0.02` | 开启交叉编码器重排后，单文档问答是否作答，由重排模型给出的相关概率决定，不再看问题词覆盖率。只对带重排分数的结果生效：没开重排或重排失败时，仍用词面门控。设为 `off` 可关闭。0.02 是在 QASPER train 上按事先定的代价规则选出的。dev 上可回答题被拒答从 37.8% 降到 13.9%，F1 不变；但不可回答题的识别率从 80% 降到 45%（见 evaluation.md 的"重排概率做拒答门控"）。 |
+| `RAG_CROSS_ENCODER_SCORES` | `logits` | 重排服务返回的分数格式：`logits`（本仓库的端点）或 `probabilities`（Hugging Face TEI 的默认）。拒答门控会把它换算成概率。 |
 | `RAG_CROSS_ENCODER_MODEL` | 空 | 传给 cross-encoder endpoint 的可选模型名。 |
 
 ## Auth 和 access scope

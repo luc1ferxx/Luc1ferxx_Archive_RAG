@@ -265,3 +265,31 @@ test("retrieval keeps its own order when the cross-encoder is down, and the prov
     }
   );
 });
+
+test("reranked results keep the service's raw score next to the per-query normalized one", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_ENABLED: "true",
+      RAG_RERANK_PROVIDER: "cross-encoder",
+      RAG_CROSS_ENCODER_ENDPOINT: "https://rerank.example.test/score",
+      RAG_RERANK_WEIGHT: "1",
+    },
+    async () => {
+      globalThis.fetch = async () => ({ json: async () => ({ scores: [-2.5, 3.25] }), ok: true, status: 200 });
+
+      const results = await rerankResultsWithProvider({
+        queryText: "keyword overlap",
+        results: makeRerankResults(),
+        topK: 2,
+      });
+
+      assert.deepEqual(
+        results.map((result) => [result.document.id, result.crossEncoderScore, result.rerankScore]),
+        [
+          ["keyword", 3.25, 1],
+          ["semantic", -2.5, 0],
+        ]
+      );
+    }
+  );
+});

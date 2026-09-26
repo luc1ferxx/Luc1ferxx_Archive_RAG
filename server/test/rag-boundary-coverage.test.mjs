@@ -12,6 +12,7 @@ import {
   assessQaConfidence,
   findQueryTermSubstitution,
   selectQaContext,
+  toRerankProbability,
 } from "../rag/confidence.js";
 import {
   configureCrossEncoderProvider,
@@ -394,6 +395,58 @@ test("once the gate answers, the context adds reworded candidates but not neighb
       );
     }
   );
+});
+
+test("with a reranker probability floor, QA answers on the cross-encoder's judgement, not shared words", async () => {
+  const scored = (id, text, keywordScore, crossEncoderScore) => ({
+    ...makeResult({ id, text, keywordScore }),
+    crossEncoderScore,
+  });
+  const reworded = scored("reworded", "We evaluate on SQuAD and TriviaQA.", 0, 2); // p = 0.88
+  const wordy = scored("wordy", "The datasets section lists what they use.", 1, -3); // p = 0.05
+  const queryText = "What datasets do they use?";
+
+  await withEnv({ RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_QA_MIN_RERANK_PROBABILITY: "0.5" }, async () => {
+    const assessment = assessQaConfidence({ queryText, results: [wordy, reworded] });
+
+    assert.equal(assessment.gate, "rerank");
+    assert.equal(assessment.confident, true);
+    assert.deepEqual(assessment.usableResults.map((result) => result.document.id), ["reworded"]);
+    assert.equal(assessQaConfidence({ queryText, results: [wordy] }).confident, false);
+
+    // An identifier the question names must still be in the chunk.
+    const anchored = assessQaConfidence({ queryText: "What does clause ABC-12 cap?", results: [reworded] });
+
+    assert.equal(anchored.confident, false);
+    assert.ok(anchored.missingAnchorGroups.length > 0);
+
+    // A result without a cross-encoder score (a failed rerank) keeps the lexical gate.
+    const unscored = makeResult({ id: "unscored", text: "The datasets they use are listed here.", keywordScore: 1 });
+    const lexical = assessQaConfidence({ queryText, results: [unscored] });
+
+    assert.equal(lexical.gate, "lexical");
+    assert.equal(lexical.confident, true);
+  });
+
+  await withEnv(
+    { RAG_CROSS_ENCODER_SCORES: "probabilities", RAG_QA_MIN_RERANK_PROBABILITY: "0.5" },
+    async () => {
+      assert.equal(toRerankProbability(0.7), 0.7);
+      assert.equal(assessQaConfidence({ queryText, results: [scored("p", "We evaluate on SQuAD.", 0, 0.7)] }).confident, true);
+    }
+  );
+
+  await withEnv({ RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_QA_MIN_RERANK_PROBABILITY: "off" }, async () => {
+    assert.equal(assessQaConfidence({ queryText, results: [wordy, reworded] }).gate, "lexical");
+  });
+
+  // Unset: the tuned default applies whenever results carry reranker scores.
+  await withEnv({ RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_QA_MIN_RERANK_PROBABILITY: undefined }, async () => {
+    const assessment = assessQaConfidence({ queryText, results: [wordy, reworded] });
+
+    assert.equal(assessment.gate, "rerank");
+    assert.deepEqual(assessment.usableResults.map((result) => result.document.id), ["wordy", "reworded"]);
+  });
 });
 
 test("findQueryTermSubstitution names the replaced pair and ignores rewording and misspelling", () => {

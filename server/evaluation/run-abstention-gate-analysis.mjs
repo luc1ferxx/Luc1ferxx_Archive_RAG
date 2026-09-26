@@ -49,6 +49,26 @@ export const DEFAULT_GATE = Object.freeze({
   partialCoverageFloor: 1,
 });
 export const PARTIAL_BAND_GATE = Object.freeze({ ...DEFAULT_GATE, partialCoverageFloor: 0.3 });
+// With --rerank-gate (candidates reranked by a cross-encoder): thresholds on
+// the reranker's relevance probability (RAG_QA_MIN_RERANK_PROBABILITY).
+export const RERANK_PROBABILITY_GRID = Object.freeze([0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
+// The selection rule the lexical floor was tuned with (docs/evaluation.md):
+// a wrong answer costs three refusals, p is the unanswerable share of QASPER
+// train, and within 0.01 of the lowest cost the most conservative setting wins.
+export const WRONG_ANSWER_COST = 3;
+export const UNANSWERABLE_PRIOR = 0.115;
+
+export const gateCost = ({ answerablePass, unanswerableCatch }) =>
+  round((1 - UNANSWERABLE_PRIOR) * (1 - answerablePass) + WRONG_ANSWER_COST * UNANSWERABLE_PRIOR * (1 - unanswerableCatch));
+
+/** Lowest cost within 0.01, then the highest threshold (the most refusals). */
+export const pickRerankThreshold = (rows) => {
+  const lowest = Math.min(...rows.map((row) => row.cost));
+
+  return [...rows]
+    .filter((row) => row.cost <= lowest + 0.01)
+    .sort((left, right) => right.minRerankProbability - left.minRerankProbability)[0];
+};
 
 const round = (value) => (value === null ? null : Number(value.toFixed(4)));
 const rate = (count, total) => (total > 0 ? round(count / total) : null);
@@ -93,6 +113,7 @@ const withGateEnv = (setting, callback) => {
   const previous = {
     coverage: process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE,
     partial: process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR,
+    rerank: process.env.RAG_QA_MIN_RERANK_PROBABILITY,
     verdict: process.env.RAG_QA_ANSWER_VERDICT,
     relevance: process.env.RAG_MIN_RELEVANCE_SCORE,
   };
@@ -100,6 +121,7 @@ const withGateEnv = (setting, callback) => {
   process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE = String(setting.minQueryTermCoverage);
   process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR = String(setting.partialCoverageFloor ?? 1);
   process.env.RAG_QA_ANSWER_VERDICT = String((setting.partialCoverageFloor ?? 1) < 1);
+  process.env.RAG_QA_MIN_RERANK_PROBABILITY = String(setting.minRerankProbability ?? "off");
   process.env.RAG_MIN_RELEVANCE_SCORE = String(setting.minRelevanceScore);
 
   try {
@@ -108,6 +130,7 @@ const withGateEnv = (setting, callback) => {
     for (const [key, name] of [
       ["coverage", "RAG_MIN_QA_QUERY_TERM_COVERAGE"],
       ["partial", "RAG_QA_PARTIAL_COVERAGE_FLOOR"],
+      ["rerank", "RAG_QA_MIN_RERANK_PROBABILITY"],
       ["verdict", "RAG_QA_ANSWER_VERDICT"],
       ["relevance", "RAG_MIN_RELEVANCE_SCORE"],
     ]) {
@@ -130,7 +153,7 @@ const formatMarkdown = (report) => {
     "",
     `Generated ${report.generatedAt}; corpus \`${report.config.corpus}\`; ${report.counts.answerable} answerable (sampled) + ${report.counts.unanswerable} unanswerable questions; embedding ${report.config.embeddingModel}.`,
     "",
-    `Signal AUC (answerable vs unanswerable, best candidate): admission ${report.auc.admission}, query-term coverage ${report.auc.coverage}, dense similarity ${report.auc.vector}.`,
+    `Signal AUC (answerable vs unanswerable, best candidate): admission ${report.auc.admission}, query-term coverage ${report.auc.coverage}, dense similarity ${report.auc.vector}${report.auc.rerank === null ? "" : `, reranker probability ${report.auc.rerank}`}.`,
     `Annotated evidence among the retrieved candidates (answerable, before the gate): ${report.evidenceRetrieved}.`,
     "",
     "| minRelevanceScore | minQueryTermCoverage | answerable pass | ... with evidence admitted | unanswerable caught | Youden J |",
@@ -141,6 +164,19 @@ const formatMarkdown = (report) => {
     "",
     "First row: the coverage floor alone at 0.51 (the default). Second: with RAG_QA_ANSWER_VERDICT on, which also admits single-part questions' chunks in the partial coverage band unless a query word was replaced by a rival; the answer model's verdict comes after this gate and is not simulated. Then the eight floor-only settings with the highest Youden J.",
     "",
+    ...(report.rerankGrid.length === 0
+      ? []
+      : [
+          `Reranker gate (RAG_QA_MIN_RERANK_PROBABILITY), cost = ${1 - UNANSWERABLE_PRIOR} x refused answerable + ${WRONG_ANSWER_COST} x ${UNANSWERABLE_PRIOR} x answered unanswerable; the lexical default costs ${report.default.cost}.`,
+          "",
+          "| min probability | answerable pass | ... with evidence admitted | unanswerable caught | Youden J | cost |",
+          "|---|---|---|---|---|---|",
+          ...report.rerankGrid.map(
+            (entry) =>
+              `| ${entry.minRerankProbability}${entry === report.rerankPick ? " (picked)" : ""} | ${entry.answerablePass} | ${entry.answerableEvidencePass} | ${entry.unanswerableCatch} | ${entry.youdenJ} | ${entry.cost} |`
+          ),
+          "",
+        ]),
   ].join("\n");
 };
 
@@ -179,6 +215,7 @@ const main = async () => {
   const { retrieveQaCandidates } = await import("../rag/document-rag-execution.js");
   const { assessQaConfidence } = await import("../rag/confidence.js");
   const { getAdmissionScore } = await import("../rag/citations.js");
+  const { toRerankProbability } = await import("../rag/confidence.js");
   const candidatesByCase = [];
 
   try {
@@ -241,6 +278,9 @@ const main = async () => {
   const signals = candidatesByCase.map(({ results, testCase }) => ({
     admission: best(results, getAdmissionScore),
     coverage: best(results, (result) => result.keywordScore),
+    rerank: best(results, (result) =>
+      typeof result.crossEncoderScore === "number" ? toRerankProbability(result.crossEncoderScore) : 0
+    ),
     shouldAbstain: Boolean(testCase.shouldAbstain),
     vector: best(results, (result) => result.vectorScore),
   }));
@@ -275,9 +315,23 @@ const main = async () => {
       ...evaluateSetting({ minQueryTermCoverage, minRelevanceScore }),
     }))
   );
+  const reranked = candidatesByCase.some(({ results }) =>
+    results.some((result) => typeof result.crossEncoderScore === "number")
+  );
+  const withCost = (entry) => ({ ...entry, cost: gateCost(entry) });
+  const rerankGrid = reranked
+    ? RERANK_PROBABILITY_GRID.map((minRerankProbability) =>
+        withCost({ minRerankProbability, ...evaluateSetting({ ...DEFAULT_GATE, minRerankProbability }) })
+      )
+    : [];
   const answerableCases = candidatesByCase.filter(({ testCase }) => !testCase.shouldAbstain);
   const report = {
-    auc: { admission: auc("admission"), coverage: auc("coverage"), vector: auc("vector") },
+    auc: {
+      admission: auc("admission"),
+      coverage: auc("coverage"),
+      rerank: reranked ? auc("rerank") : null,
+      vector: auc("vector"),
+    },
     config: {
       corpus: path.basename(corpusPath),
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
@@ -287,7 +341,9 @@ const main = async () => {
       answerable: answerableCases.length,
       unanswerable: candidatesByCase.length - answerableCases.length,
     },
-    default: { ...DEFAULT_GATE, ...evaluateSetting(DEFAULT_GATE) },
+    default: withCost({ ...DEFAULT_GATE, ...evaluateSetting(DEFAULT_GATE) }),
+    rerankGrid,
+    rerankPick: reranked ? pickRerankThreshold(rerankGrid) : null,
     partialBand: { ...PARTIAL_BAND_GATE, ...evaluateSetting(PARTIAL_BAND_GATE) },
     evidenceRetrieved: rate(
       answerableCases.filter(({ results, testCase }) =>

@@ -325,6 +325,10 @@ const rerankResultsWithScores = ({ results = [], scores = [], topK }) => {
         ...result,
         originalScore,
         rerankScore,
+        // The service's own score, before the per-query min-max above: the
+        // only one comparable across queries, which the QA gate needs
+        // (getQaMinRerankProbability in config.js).
+        crossEncoderScore: toFiniteNumber(scores[index], 0),
         score: mixedScore,
         __rerankIndex: index,
       };

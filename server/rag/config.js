@@ -586,6 +586,40 @@ export const isQaAnswerVerdictEnabled = () =>
 // refuse. A value at or above the QA coverage floor turns it off.
 export const DEFAULT_QA_PARTIAL_COVERAGE_FLOOR = 0.3;
 
+// With cross-encoder reranking on, single-document QA decides whether to
+// answer from the reranker's relevance probability instead of query-term
+// coverage (confidence.js). "0" or "off" keeps the lexical gate. Applies only
+// to results that carry a cross-encoder score, so without the reranker, or
+// when a rerank failed, the lexical gate decides as before.
+//
+// 0.02 is what the lexical floor's pre-declared rule (a wrong answer costs
+// three refusals, lowest cost within 0.01, most conservative) picked on
+// QASPER train (bge-reranker-v2-m3; reranker AUC 0.64 against coverage 0.59).
+// On dev it cut refused answerable questions 37.8% -> 13.9% at unchanged
+// answer F1 (+0.005 [-0.039, +0.048]), but caught 45% of unanswerable
+// questions instead of 80%. See docs/evaluation.md.
+export const DEFAULT_QA_MIN_RERANK_PROBABILITY = 0.02;
+
+export const getQaMinRerankProbability = () => {
+  const rawValue = process.env.RAG_QA_MIN_RERANK_PROBABILITY;
+
+  if (rawValue === undefined || String(rawValue).trim() === "") {
+    return DEFAULT_QA_MIN_RERANK_PROBABILITY;
+  }
+
+  const value = Number(rawValue);
+
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : null;
+};
+
+// What the rerank service returns: raw `logits` (this repo's endpoint, the
+// sentence-transformers model output) or `probabilities` (Hugging Face TEI's
+// default). The gate compares a probability.
+export const getCrossEncoderScoreScale = () =>
+  String(process.env.RAG_CROSS_ENCODER_SCORES ?? "").trim().toLowerCase() === "probabilities"
+    ? "probabilities"
+    : "logits";
+
 // With the verdict on, a NOT_IN_EVIDENCE reply triggers one more retrieval
 // this deep; the chunks the model has not seen yet that pass the gate get one
 // more answer attempt. The model mostly refuses when the retrieved context

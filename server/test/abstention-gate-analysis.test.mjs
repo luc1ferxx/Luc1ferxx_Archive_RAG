@@ -4,7 +4,9 @@ import {
   computeAuc,
   COVERAGE_GRID,
   DEFAULT_GATE,
+  gateCost,
   PARTIAL_BAND_GATE,
+  pickRerankThreshold,
   RELEVANCE_GRID,
   summarizeGateSetting,
 } from "../evaluation/run-abstention-gate-analysis.mjs";
@@ -47,4 +49,18 @@ test("the analysis grid contains the pre-tuning gate and the tuned QA floor", ()
   // The grid measures the floor alone; the second row is the verdict's band.
   assert.equal(DEFAULT_GATE.partialCoverageFloor, 1);
   assert.equal(PARTIAL_BAND_GATE.partialCoverageFloor, DEFAULT_QA_PARTIAL_COVERAGE_FLOOR);
+});
+
+test("the reranker threshold follows the lexical floor's cost rule, most conservative within 0.01", () => {
+  // p = 0.115, a wrong answer costs three refusals.
+  assert.equal(gateCost({ answerablePass: 1, unanswerableCatch: 1 }), 0);
+  assert.equal(gateCost({ answerablePass: 0.5, unanswerableCatch: 0.5 }), 0.615);
+  assert.deepEqual(
+    pickRerankThreshold([
+      { cost: 0.4, minRerankProbability: 0.1 },
+      { cost: 0.409, minRerankProbability: 0.3 },
+      { cost: 0.42, minRerankProbability: 0.5 },
+    ]),
+    { cost: 0.409, minRerankProbability: 0.3 }
+  );
 });
