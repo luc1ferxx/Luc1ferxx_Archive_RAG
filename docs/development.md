@@ -120,7 +120,7 @@ npm run vector:reindex -- --from documents --apply   # 换 embedding 模型后�
 PGVECTOR_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/agentai npm run test:pgvector
 ```
 
-没有该变量时 `npm test` 把它报告为 skipped，不会当作通过。
+没有该变量时 `npm test` 把它报告为 skipped，不会当作通过。行级安全的集成测试（`test/postgres-row-level-security.integration.test.mjs`）会自己建一个一次性数据库和两个临时角色，结束后删除，因此这个连接还需要 `CREATEROLE` 和 `CREATEDB` 权限。`scripts/run-pgvector-integration.sh` 创建的超级用户满足要求。
 
 ## Runtime paths
 
@@ -148,7 +148,7 @@ server/evaluation/results/<timestamped-files>
 | 架构 | `app.js` 组合根（171 行）+ `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 8 个模块；`normalizeText` 收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块，后端直接依赖 18 → 13。 |
 | 工程化 | 前端 CRA → Vite 7 + Vitest 3（测试 97s → ~7s，构建 ~8s）；后端测试并行化（24s → ~4s，含 Windows 全平台通过）；CI 后端测试与 eval gate 拆并行 job；评测脚本共享 helper 收敛到 `eval-cli.js` / `eval-case-helpers.js`。 |
 
-当前测试基线：后端 1742 个用例（1740 通过，2 个需要 PostgreSQL 的集成测试在无数据库时跳过；用 `bash scripts/run-pgvector-integration.sh` 在一次性集群上跑则全部通过）、前端 111 个用例全绿、生产构建通过，覆盖率门禁通过（后端全局行覆盖约 91%）。
+当前测试基线：后端 1751 个用例（1748 通过，3 个需要 PostgreSQL 的集成测试文件在无数据库时各报告 1 个跳过；用 `FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 在一次性集群上跑则 1772 个全部通过）、前端 111 个用例全绿、生产构建通过，覆盖率门禁通过（后端全局行覆盖约 91%）。
 
 ## Development rules
 

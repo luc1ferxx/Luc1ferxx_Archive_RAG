@@ -22,6 +22,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm test` | 运行后端聚合测试。 |
 | `cd server && npm run coverage:gate` | 运行后端 coverage minimum gate。 |
 | `cd server && npm run test:pgvector` | 真实 pgvector PostgreSQL 集成测试；需要 `PGVECTOR_TEST_DATABASE_URL`，缺失时报告 skipped。 |
+| `cd server && npm run eval:tenant-isolation` | 数据库行级安全的改前/改后对比：在一次性数据库上比较 `POSTGRES_ROW_LEVEL_SECURITY=off` 与 `enforce` 下的越权读写、延迟和查询计划；需要能建角色和建库的 `PGVECTOR_TEST_DATABASE_URL`。 |
 | `cd server && npm run coverage:targets` | 把目标覆盖率作为硬门控运行。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
 | `cd server && npm run eval:trajectory` | 评测 AgentRAG 执行轨迹。 |
@@ -626,6 +627,32 @@ arxiv 的 3 次"回答"都是误路由到时间线 Skill，不是文档问答。
 - 饱和：改前 42% 的请求是超时后的重试，服务端还在处理客户端已经放弃的请求；并发上限把服务端队列压到 8 以内，排队时间始终短于 3 秒请求超时，于是没有一次重试。p50 不变，因为总工作量由服务端的 2 个工作线程决定，上限只去掉了浪费的部分。
 - 其他场景（限流、503、挂起、空响应）在噪声范围内不变：429 不计入熔断，评测的 8 个并发没超过上限。40% 返回 503 的场景没有误熔断（无备用模型时仍是 100%），但连续失败阈值在更高错误率下可能误熔断，这是阈值的取舍。
 - 边界：状态按进程保存，多进程部署各自计数；上限按在途请求数而不是每分钟 token 数；排队等待没有单独的超时。
+
+## 租户隔离（数据库行级安全）
+
+`npm run eval:tenant-isolation` 自己建一个一次性数据库，库的 owner 是一个只有 `CREATEROLE` 的非超级用户登录角色（和托管数据库的应用账号一样）。脚本跑真实迁移，写入 20 个租户、每个租户 5 份文档、共 10000 个 64 维切块，然后以其中一个租户的身份，在两种模式下跑同一组探测。`off` 走的就是改动之前的连接路径（owner 连接直接 `pool.query`），所以它就是“改前”。
+
+写操作探测都在一个最后必定回滚的事务里执行，`off` 模式下的攻击不会改动后续探测读到的数据。
+
+2026-09-25，PostgreSQL 18.6 + pgvector 0.8.6（本机），每种操作每种模式计时 300 次，两种模式交替执行：
+
+| 探测 | RLS off（改前） | RLS enforce（改后） |
+| --- | --- | --- |
+| 不带租户过滤的查询，泄露其他租户数据的表 | 9/9 | **0/9** |
+| 读到的其他租户行数 | 9728 | **0** |
+| 被接受的越权操作（伪造插入、upsert 抢占他人文档、跨租户更新、跨租户删除、store 拿错 scope 读取） | 5/5 | **0/5** |
+
+| 操作 | off p50 / p95 | enforce p50 / p95 | p50 增加 |
+| --- | --- | --- | --- |
+| store 主键读取 | 0.10 / 0.13 ms | 0.25 / 0.30 ms | +0.15 ms |
+| 稠密检索 | 0.23 / 0.26 ms | 0.48 / 0.55 ms | +0.25 ms |
+| 全文检索 | 0.31 / 0.36 ms | 0.56 / 0.66 ms | +0.25 ms |
+
+- 延迟增加来自每条语句多出的 3 次往返（BEGIN、租户设置、COMMIT）。按一次 `/chat` 几十条语句算，是几毫秒量级，相对模型调用可以忽略；但对语句很多的批处理不是零成本。可行的优化是把 BEGIN 和租户设置合成一次往返，目前没做。
+- 查询计划：两种模式都走索引。`off` 用 `doc_id` 索引；`enforce` 下规划器把策略条件也用上，对 `(owner_user_id, workspace_id)` 索引和 `doc_id` 索引做 BitmapAnd。全文检索的 `@@` 不是 leakproof 函数，在策略下不能先于策略条件求值，但这里本来就先用 `doc_id` 缩小范围，所以没有退化成顺序扫描。数据规模更大、单个租户的文档更多时需要重新测。
+- “off 下 9/9 泄露”说的是：一条漏写过滤条件的查询会读到什么。现有代码的 store 都带过滤条件，所以这个数字不代表现在就有泄露，它量化的是这层防护能兜住的那类 bug。
+
+正确性由 `test/postgres-row-level-security.integration.test.mjs` 保证（`bash scripts/run-pgvector-integration.sh` 会运行它）：每张表的隔离、四类越权写、连接池复用后不残留租户设置、owner 与租户查询交替执行、进程级文档 registry 在租户请求里首次加载时仍然加载全部文档、检索时传入其他租户的 docId 也拿不到其切块，以及健康检查探测。
 
 ## Ragas supplement
 

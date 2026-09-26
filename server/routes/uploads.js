@@ -4,7 +4,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 
-import { getRequestAccessScope } from "../auth.js";
+import { bindDatabaseTenant, getRequestAccessScope } from "../auth.js";
 import {
   MAX_UPLOAD_MULTIPART_FIELD_BYTES,
   MAX_UPLOAD_MULTIPART_FIELDS,
@@ -141,7 +141,11 @@ export const createUploadsRouter = (services) => {
     }
   });
 
-  router.post("/upload/chunk", chunkUpload.single("chunk"), async (req, res) => {
+  // multer's memory storage resumes the chain from a stream callback that has
+  // lost the request's async context, and with it the database tenant. Both
+  // upload routes re-bind it after multer rather than depend on which storage
+  // engine happens to keep the context.
+  router.post("/upload/chunk", chunkUpload.single("chunk"), bindDatabaseTenant, async (req, res) => {
     if (!req.file) {
       return res.status(400).json({
         error: "No chunk uploaded.",
@@ -271,7 +275,7 @@ export const createUploadsRouter = (services) => {
     }
   });
 
-  router.post("/upload", upload.single("file"), async (req, res) => {
+  router.post("/upload", upload.single("file"), bindDatabaseTenant, async (req, res) => {
     if (!req.file) {
       return res.status(400).json({
         error: "A PDF file is required.",

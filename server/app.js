@@ -6,7 +6,7 @@ import { mkdir } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { requireApiAuth } from "./auth.js";
+import { bindDatabaseTenant, requireApiAuth } from "./auth.js";
 import { getAgentRunRecoveryMode, isApiAuthEnabled } from "./rag/config.js";
 import { configureUploadSessionDirectory } from "./upload-session-store.js";
 
@@ -165,6 +165,7 @@ export const createApp = async (options = {}) => {
   }
 
   app.use(requireApiAuth);
+  app.use(bindDatabaseTenant);
 
   app.use(createArtifactsRouter(services));
   app.use(createAdminRouter(services));

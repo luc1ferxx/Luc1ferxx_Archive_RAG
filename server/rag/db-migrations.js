@@ -14,6 +14,7 @@ import {
   getPgvectorIndexType,
   getPgvectorIvfflatLists,
   getPgvectorTextSearchConfig,
+  getPostgresTenantRole,
   getSessionMemoryPostgresTable,
   getTaskEventsPostgresTable,
   getTasksPostgresTable,
@@ -24,6 +25,7 @@ import {
   queryPostgres,
   withPostgresClient,
 } from "./postgres.js";
+import { runAsDatabaseSystem } from "./postgres-tenant.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -261,6 +263,7 @@ export const renderMigrationSql = (
   tableNames = getTableNames(),
   {
     embeddingDimensions = getEmbeddingDimensions(),
+    tenantRole = getPostgresTenantRole(),
     textSearchConfig = getPgvectorTextSearchConfig(),
     vectorIndexStatement = null,
   } = {}
@@ -272,6 +275,7 @@ export const renderMigrationSql = (
   );
   const safeDimensions = ensureEmbeddingDimensions(embeddingDimensions);
   const safeTextSearchConfig = ensureTextSearchConfig(textSearchConfig);
+  const safeTenantRole = ensureSimpleTableName(tenantRole, "POSTGRES_TENANT_ROLE");
   const indexStatement =
     vectorIndexStatement ??
     buildPgvectorIndexStatement({
@@ -299,12 +303,14 @@ export const renderMigrationSql = (
     .replaceAll("__DOCUMENT_CHUNKS_TABLE__", safeTableNames.documentChunksTable)
     .replaceAll("__EMBEDDING_DIMENSIONS__", String(safeDimensions))
     .replaceAll("__TEXT_SEARCH_CONFIG__", safeTextSearchConfig)
+    .replaceAll("__TENANT_ROLE__", safeTenantRole)
     .replaceAll("__VECTOR_INDEX_STATEMENT__", indexStatement);
 };
 
 export const createPostgresMigrator = ({
   getEmbeddingDimensions: resolveEmbeddingDimensions = getEmbeddingDimensions,
   getTableNames: resolveTableNames = getTableNames,
+  getTenantRole: resolveTenantRole = getPostgresTenantRole,
   getTextSearchConfig: resolveTextSearchConfig = getPgvectorTextSearchConfig,
   isPostgresConfigured: isConfigured = isPostgresConfigured,
   migrationsDirectory = defaultMigrationsDirectory,
@@ -368,6 +374,7 @@ export const createPostgresMigrator = ({
         resolveTableNames(),
         {
           embeddingDimensions: resolveEmbeddingDimensions(),
+          tenantRole: resolveTenantRole(),
           textSearchConfig: resolveTextSearchConfig(),
         }
       );
@@ -402,7 +409,9 @@ export const createPostgresMigrator = ({
     reset: () => {
       migrationsInitialized = false;
     },
-    run,
+    // Stores run migrations lazily, sometimes from inside a tenant request;
+    // DDL belongs to the owner role, never the tenant.
+    run: () => runAsDatabaseSystem(run),
   };
 };
 

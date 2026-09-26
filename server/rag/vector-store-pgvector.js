@@ -18,9 +18,11 @@ import {
 import { embedTexts } from "./openai.js";
 import {
   checkPostgresHealth,
+  getEnforcedDatabaseTenant,
   isPostgresConfigured,
   queryPostgres,
 } from "./postgres.js";
+import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { buildTermSet, extractMeaningfulTokens } from "./text-utils.js";
 
 // PostgreSQL + pgvector retrieval provider: the default backend.
@@ -359,6 +361,16 @@ export const ensurePgvectorSchema = async ({ client = null, force = false } = {}
     return true;
   }
 
+  // The check is about the whole table: under a tenant the row policies would
+  // hide other tenants' chunks from the emptiness and stored-model checks, and
+  // the tenant role may not resize the column. It therefore never borrows a
+  // tenant transaction's client and always runs as the owner.
+  const verificationClient = getEnforcedDatabaseTenant() ? null : client;
+
+  return runAsDatabaseSystem(() => verifyPgvectorSchema({ client: verificationClient }));
+};
+
+const verifyPgvectorSchema = async ({ client = null } = {}) => {
   const runtime = getRuntime();
 
   if (!runtime.isConfigured()) {
@@ -413,9 +425,13 @@ export const ensurePgvectorSchema = async ({ client = null, force = false } = {}
 };
 
 /**
- * Non-throwing description of the provider for health and admin status.
+ * Non-throwing description of the provider for health and admin status. It
+ * describes the whole table, never one tenant's share, so it runs as the owner.
  */
-export const describePgvectorStatus = async () => {
+export const describePgvectorStatus = async () =>
+  runAsDatabaseSystem(() => describePgvectorTableStatus());
+
+const describePgvectorTableStatus = async () => {
   const runtime = getRuntime();
   const queryPostgres = runtime.query;
   const tableName = getPgvectorTableName();

@@ -102,6 +102,8 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | --- | --- | --- |
 | `POSTGRES_DATABASE_URL` | 空 | 文档、会话记忆和长期记忆共用连接。 |
 | `POSTGRES_SSL_ENABLED` | `false` | PostgreSQL 是否启用 SSL。 |
+| `POSTGRES_ROW_LEVEL_SECURITY` | `enforce` | 行级安全。`enforce` 让带访问范围的请求和后台任务在租户角色下执行，数据库拒绝其他租户的行；`off` 保持 owner 连接（策略仍在，但 owner 绕过）。无法识别的值按 `enforce` 处理。 |
+| `POSTGRES_TENANT_ROLE` | `archive_rag_tenant` | 行级安全使用的租户角色名（小写标识符）。迁移会创建它，并把它授予应用登录角色。 |
 | `DOCUMENTS_POSTGRES_TABLE` | `rag_documents` | 文档表。 |
 | `SESSION_MEMORY_POSTGRES_TABLE` | `rag_session_memory` | 会话记忆表。 |
 | `LONG_MEMORY_POSTGRES_TABLE` | `long_memory_items` | 长期记忆表。 |
@@ -121,6 +123,26 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `ADMIN_AUDIT_RETENTION_DAYS` | `90` | PostgreSQL admin audit retention；设为 `0` 可关闭自动裁剪。 |
 
 Agent experience memory 只进入 planner hints，不进入 citations/evidence。写入策略集中在后端：成功 run 只有在完成、未等待审批/澄清、且有文档证据或 claim support 时才会写入规划经验；负反馈只把 `citation_error`、`hallucination`、`incomplete` 写成严格核验证据的提示；普通 helpful feedback 不写。每个 user/workspace 最多保留 40 条经验，旧记录会在新写入后裁剪。`/chat` 的 `agentObservability.experienceMemory.write` 和 `/feedback` 的 `agentExperienceMemory` 会报告 `status`、`writeAttempted`、`skippedReason`、`storedCount`、`prunedCount` 和已脱敏的 `storedRecords`。
+
+### 数据库行级安全
+
+各个 store 在应用层按 user/workspace 过滤。迁移 `013_enable_tenant_row_level_security.sql` 让 PostgreSQL 也执行同样的规则，这样即使某条查询漏写了过滤条件，也读不到、写不进其他租户的行。
+
+- **覆盖的表**（9 张）：文档、切块、任务、任务事件、Agent run、run 事件、审批快照、workspace artifacts、长期记忆。文档和切块沿用 `documentMatchesAccessScope` 的规则（owner 和 workspace 都为空的行对任何租户不可见）；其余表按 `(user, workspace)` 精确匹配；长期记忆只按用户匹配。
+- **不覆盖**：会话记忆（只有 session id，没有 owner 列）；admin audit（workspace 管理员需要跨用户读取，由 admin 权限检查控制）。
+- **生效方式**：鉴权之后的中间件把请求的访问范围放进 `AsyncLocalStorage`。`rag/postgres.js` 看到租户时，把这条语句放进一个短事务：`SET LOCAL ROLE` 切到租户角色，并设置 `archive_rag.user_id` / `archive_rag.workspace_id`，事务结束后自动恢复，不会残留在连接池里。
+- **后台任务**：任务执行和启动时的 Agent run 恢复，都以该记录自己的范围作为租户。
+- **以 owner 身份执行的工作**（`runAsDatabaseSystem`）：迁移、进程级缓存加载（文档 registry）、pgvector 表结构检查和状态统计、跨租户的恢复扫描。
+- **不带范围的请求**：鉴权关闭且没有 `x-user-id` / `x-workspace-id` 的请求没有租户，仍以 owner 身份执行，与之前一样。
+- **权限要求**：应用登录角色需要 `CREATEROLE`（或由 DBA 预先创建租户角色并授予它）。表的 owner 不受策略约束（`ENABLE`，而不是 `FORCE ROW LEVEL SECURITY`）。
+- **新表**：新增的应用表必须在迁移里 `GRANT` 给租户角色；需要隔离的表还要加 `tenant_isolation` 策略。否则租户请求访问它会报权限错误，即失败时拒绝访问。
+- **健康检查**：`checks.rowLevelSecurity` 以一个探测租户真实执行一次，确认能切到租户角色、9 张表都带策略；任一条件不满足即报 `error`。
+
+已知边界：
+
+- 租户靠异步上下文传递。如果某个中间件从流回调里继续请求链（例如 multer 的内存存储），上下文会丢失，查询回落到 owner 身份，也就是只剩应用层过滤；上传路由在 multer 之后重新绑定了租户。要做到上下文丢失时也拒绝访问，需要一个没有表权限的独立登录角色，owner 连接只留给显式的系统操作。
+- 这层防护针对“漏写过滤条件”这类应用 bug，不防 SQL 注入：注入的语句可以执行 `RESET ROLE`。
+- 开启后每条带范围的语句要 4 次往返（BEGIN、租户设置、语句本身、COMMIT），原来是 1 次。
 
 Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 registry、向量索引或 RAG evidence。PostgreSQL migration `009_create_workspace_artifacts.sql` 为 `userId/workspaceId/idempotencyKey` 建立唯一约束；memory provider 只适合本地开发，进程重启后数据会丢失。单个 artifact 限制为：正文 512 KiB、结构化 payload 256 KiB、100 条 citation manifest、500 个 docIds；列表接口默认返回 50 条，最大 100 条。
 
@@ -212,7 +234,7 @@ API_AUTH_JWT_ISSUER=https://issuer.example
 API_AUTH_JWT_AUDIENCE=archive-rag
 ```
 
-启用带 `userId/workspaceId` 的 principal 后，文档列表、chat、删除和 PDF 文件流都会按访问范围过滤。`workspaceId` / `workspace_id` 表示固定 workspace；`allowedWorkspaceIds` 或 JWT `workspaces` 表示允许的 workspace 列表，请求里的 `x-workspace-id` / `workspaceId` 必须落在该列表内。旧的无 scope 文档不会出现在 scoped 用户视图中，需要重新上传或迁移 owner/workspace 元数据。
+启用带 `userId/workspaceId` 的 principal 后，文档列表、chat、删除和 PDF 文件流都会按访问范围过滤。使用 PostgreSQL 时，数据库行级安全会再检查一遍（见下文“数据库行级安全”）。`workspaceId` / `workspace_id` 表示固定 workspace；`allowedWorkspaceIds` 或 JWT `workspaces` 表示允许的 workspace 列表，请求里的 `x-workspace-id` / `workspaceId` 必须落在该列表内。旧的无 scope 文档不会出现在 scoped 用户视图中，需要重新上传或迁移 owner/workspace 元数据。
 
 Admin 端点还会读取 token principal 或 JWT claims 上的 `roles` / `roleIds` 和 `permissions` / `permissionIds`。内置角色包括 `admin.viewer`、`admin.quality_operator`、`admin.recovery_operator`、`admin.operator`、`admin.owner`；也可以直接授予 `admin.status.read`、`admin.audit.read`、`admin.actions.recovery_scan`、`admin.actions.quality_refresh`、`admin.actions.recover_tasks` 等权限：
 

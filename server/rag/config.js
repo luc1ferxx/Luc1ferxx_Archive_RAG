@@ -588,6 +588,28 @@ export const isPostgresSslEnabled = () =>
     toBoolean(process.env.LONG_MEMORY_POSTGRES_SSL_ENABLED, false)
   );
 
+// Row-level security: "enforce" runs every query issued for a scoped request or
+// task under the tenant role, so PostgreSQL rejects rows outside the caller's
+// user/workspace even when a query forgets its WHERE clause. "off" keeps the
+// owner connection (policies stay installed but the owner bypasses them). An
+// unrecognized value fails closed to "enforce".
+export const getPostgresRowLevelSecurityMode = () =>
+  toChoice(process.env.POSTGRES_ROW_LEVEL_SECURITY, "enforce", ["enforce", "off"]);
+
+const POSTGRES_ROLE_NAME_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
+
+export const getPostgresTenantRole = () => {
+  const role = String(process.env.POSTGRES_TENANT_ROLE ?? "").trim() || "archive_rag_tenant";
+
+  if (!POSTGRES_ROLE_NAME_PATTERN.test(role)) {
+    throw new Error(
+      `POSTGRES_TENANT_ROLE must be a lowercase PostgreSQL identifier of at most 63 bytes. Received "${role}".`
+    );
+  }
+
+  return role;
+};
+
 export const getLongMemoryDatabaseUrl = () =>
   getPostgresDatabaseUrl();
 

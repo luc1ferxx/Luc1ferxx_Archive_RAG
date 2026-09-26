@@ -8,6 +8,7 @@ import {
   TASK_STATUSES,
 } from "./tasks.js";
 import { recordRagTrace } from "./observability.js";
+import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 export const TASK_ACTIONS = Object.freeze({
@@ -471,13 +472,17 @@ export const createJobOrchestrator = ({
     recovery = false,
     taskId,
   } = {}) => {
+    // A scheduled run acts for its task's own scope, whatever context
+    // scheduled it (a request, an admin recovery action, or startup).
     schedule(
       () => {
-        return runTask({
-          accessScope,
-          recovery,
-          taskId,
-        }).catch((error) => {
+        return runWithDatabaseTenant(accessScope, () =>
+          runTask({
+            accessScope,
+            recovery,
+            taskId,
+          })
+        ).catch((error) => {
           console.error(
             "Task runner failed before task state could be updated.",
             error
@@ -491,10 +496,14 @@ export const createJobOrchestrator = ({
   const recoverRunnableTasks = async ({
     statuses = [TASK_STATUSES.queued, TASK_STATUSES.running],
   } = {}) => {
+    // Recovery lists every tenant's runnable tasks, including when an admin
+    // triggers it from a request.
     const recoverableTasks = taskService.listRecoverableTasks
-      ? await taskService.listRecoverableTasks({
-          statuses,
-        })
+      ? await runAsDatabaseSystem(() =>
+          taskService.listRecoverableTasks({
+            statuses,
+          })
+        )
       : { tasks: [] };
     const tasks = Array.isArray(recoverableTasks.tasks)
       ? recoverableTasks.tasks

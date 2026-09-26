@@ -12,12 +12,15 @@ import {
   getApiAuthConfigStatus,
   getAgentExperienceMemoryConfigStatus,
   getChatModel,
+  getDocumentChunksPostgresTable,
   getDocumentsPostgresTable,
   getDocumentStoreProvider,
   getEmbeddingModel,
   getHybridFusionMethod,
   getLongMemoryConfigStatus,
   getLongMemoryPostgresTable,
+  getPostgresRowLevelSecurityMode,
+  getPostgresTenantRole,
   getQdrantCollection,
   getQdrantUrl,
   getSessionMemoryPostgresTable,
@@ -39,7 +42,9 @@ import {
   checkLongMemoryPostgresHealth,
   checkPostgresHealth,
   isPostgresConfigured,
+  queryPostgres,
 } from "./rag/postgres.js";
+import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
 import { getOpenAIApiKey } from "./rag/openai.js";
 import { getRagDataDirectory } from "./rag/storage.js";
 
@@ -687,6 +692,97 @@ const checkWorkspaceArtifactStoreHealth = async () => {
   }
 };
 
+// The tables migration 013 puts under the tenant_isolation policy.
+const getRowLevelSecurityTables = () => [
+  getDocumentsPostgresTable(),
+  getDocumentChunksPostgresTable(),
+  getTasksPostgresTable(),
+  getTaskEventsPostgresTable(),
+  getAgentRunsPostgresTable(),
+  getAgentRunEventsPostgresTable(),
+  `${getAgentRunsPostgresTable()}_approval_snapshots`,
+  getWorkspaceArtifactsPostgresTable(),
+  getLongMemoryPostgresTable(),
+];
+
+const ROW_LEVEL_SECURITY_PROBE_TENANT = Object.freeze({ userId: "__health_probe__" });
+
+// Probes as a tenant rather than reading configuration: the check passes only
+// when the login role can really switch into the tenant role and every covered
+// table really carries the policy, which is what a scoped request relies on.
+const checkRowLevelSecurityHealth = async () => {
+  const mode = getPostgresRowLevelSecurityMode();
+
+  if (!isPostgresConfigured()) {
+    return buildEntry("disabled", {
+      mode,
+      message: "PostgreSQL is not configured; no row-level security applies.",
+    });
+  }
+
+  if (mode === "off") {
+    return buildEntry("disabled", {
+      mode,
+      message:
+        "POSTGRES_ROW_LEVEL_SECURITY=off: scoped queries run as the owner role and bypass the tenant policies.",
+    });
+  }
+
+  const tables = getRowLevelSecurityTables();
+
+  try {
+    const role = getPostgresTenantRole();
+
+    await runPostgresMigrations();
+
+    const probe = await runWithDatabaseTenant(ROW_LEVEL_SECURITY_PROBE_TENANT, () =>
+      queryPostgres(
+        `
+          SELECT
+            current_user AS role,
+            ARRAY(
+              SELECT c.relname::text
+              FROM pg_class c
+              JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = 'tenant_isolation'
+              WHERE c.relrowsecurity
+                AND c.relnamespace = current_schema()::regnamespace
+                AND c.relname = ANY($1::text[])
+            ) AS protected_tables
+        `,
+        [tables]
+      )
+    );
+    const row = probe.rows[0] ?? {};
+    const protectedTables = new Set(row.protected_tables ?? []);
+    const unprotectedTables = tables.filter((table) => !protectedTables.has(table));
+
+    if (row.role !== role || unprotectedTables.length > 0) {
+      return buildEntry("error", {
+        mode,
+        role,
+        unprotectedTables,
+        message:
+          row.role !== role
+            ? `Scoped queries run as "${row.role}" instead of the tenant role "${role}".`
+            : `Tables without the tenant_isolation policy: ${unprotectedTables.join(", ")}.`,
+      });
+    }
+
+    return buildEntry("ok", {
+      mode,
+      role,
+      protectedTableCount: tables.length,
+      message: "Scoped queries run as the tenant role and every tenant table carries its policy.",
+    });
+  } catch (error) {
+    return buildEntry("error", {
+      mode,
+      message:
+        error instanceof Error ? error.message : "Row-level security probe failed.",
+    });
+  }
+};
+
 export const buildHealthReport = async () => {
   const [
     apiAuth,
@@ -700,6 +796,7 @@ export const buildHealthReport = async () => {
     agentRunStore,
     adminAuditStore,
     workspaceArtifactStore,
+    rowLevelSecurity,
   ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
@@ -712,6 +809,7 @@ export const buildHealthReport = async () => {
     checkAgentRunStoreHealth(),
     checkAdminAuditStoreHealth(),
     checkWorkspaceArtifactStoreHealth(),
+    checkRowLevelSecurityHealth(),
   ]);
   const checks = {
     apiAuth,
@@ -725,6 +823,7 @@ export const buildHealthReport = async () => {
     agentRunStore,
     adminAuditStore,
     workspaceArtifactStore,
+    rowLevelSecurity,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 

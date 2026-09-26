@@ -22,6 +22,7 @@ import { z } from "zod";
 
 import chat, { initializeDocumentRegistry, listDocuments } from "./chat.js";
 import { resetDocumentRegistry } from "./rag/doc-registry.js";
+import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
 import { resetVectorStore } from "./rag/vector-store.js";
 import {
   applyStandaloneProfile,
@@ -101,10 +102,15 @@ server.registerTool(
         return toMcpTextContent(buildEmptyArchiveResult());
       }
 
-      const response = await chat(resolvedDocIds, question, {
-        includeRetrievedContexts: includeEvidence,
-        accessScope: buildAccessScope(),
-      });
+      // The configured principal is also the database tenant, so retrieval is
+      // held to it by row-level security as well as by the registry filter.
+      const accessScope = buildAccessScope();
+      const response = await runWithDatabaseTenant(accessScope, () =>
+        chat(resolvedDocIds, question, {
+          includeRetrievedContexts: includeEvidence,
+          accessScope,
+        })
+      );
 
       return toMcpTextContent(formatAskResult(response));
     } catch (error) {

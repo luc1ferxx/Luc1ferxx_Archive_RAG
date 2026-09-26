@@ -26,6 +26,7 @@
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | Claim 校验 | 默认词法规则；可选 LLM 评审只复核被词法拒绝的 claim，只能升级不能降级，引用错误、证据中没有的数字、对比答案不送评审，失败时保留词法结论；结论缓存 | `rag/self-check/`、`rag/self-check/claim-judge.js` |
+| 租户隔离 | 应用层每个 store 按 user/workspace 过滤；PostgreSQL 行级安全再兜一层：鉴权后的中间件把访问范围放进 `AsyncLocalStorage`，带范围的语句在短事务里 `SET LOCAL ROLE` 到租户角色并设置租户变量，9 张表的策略拒绝其他租户的行。后台任务和恢复以记录自己的范围执行；迁移、进程级缓存加载、跨租户恢复扫描显式以 owner 身份执行 | `db/migrations/013_enable_tenant_row_level_security.sql`、`rag/postgres.js`、`rag/postgres-tenant.js` |
 | 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
 
 默认配置：hybrid 检索（pgvector 余弦 + PostgreSQL 全文检索，RRF 融合），rerank 关闭，规划器用 LLM，自定义 Skill 阶段默认由 typed DAG 执行（`AGENT_SKILL_GRAPH_ROLLOUT=guarded`），V1 顺序链只在整图被拒时兜底。
@@ -145,10 +146,25 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 校验器 bug 修复后（`npm run eval:answer-drafts`，各 3 轮）：合同和政策题 2/21 → 4/21 得到回答，有草稿的运行 2 → 4 次，草稿全部保留；论文题不变。`verify:quality` 仍 18/18。
 
-### 3.8 工程基线（`99af0019`）
+### 3.8 数据库行级安全
 
-- 后端测试 1687 个，0 失败，2 个跳过（需要 PostgreSQL 的 pgvector 集成测试）。
-- 前端测试 102 个全部通过，生产构建通过。
+`npm run eval:tenant-isolation`（2026-09-25，PostgreSQL 18.6 + pgvector 0.8.6，本机一次性数据库，owner 是只有 `CREATEROLE` 的非超级用户）：20 个租户、10000 个切块，以其中一个租户身份执行。`off` 就是改动之前的连接路径。
+
+| 探测 | 改前（off） | 改后（enforce） |
+| --- | --- | --- |
+| 漏写过滤条件的查询，泄露其他租户数据的表 | 9/9（9728 行） | **0/9（0 行）** |
+| 被接受的越权写或越权读（伪造插入、upsert 抢占、跨租户更新、跨租户删除、store 拿错 scope） | 5/5 | **0/5** |
+| 每条语句 p50 延迟 | 0.10–0.31 ms | 0.25–0.56 ms（+0.15–0.25 ms，多了 3 次往返） |
+
+- 查询计划两种模式都走索引，没有退化成顺序扫描。
+- “off 下 9/9”量化的是这层防护能兜住的 bug 类型；现有 store 都带过滤条件，不代表现在就有泄露。
+- 做的过程中发现并修掉的问题：进程级文档 registry 如果在租户请求里首次加载，会只装进这个租户的文档，现在改为以 owner 身份加载；multer 的内存存储会丢掉异步上下文，分片上传路由在 multer 之后重新绑定租户。
+- 正确性：`test/postgres-row-level-security.integration.test.mjs` 9 个用例；PostgreSQL 集成测试共 24/24。
+
+### 3.9 工程基线（2026-09-25，行级安全提交）
+
+- 后端测试 1751 个：1748 通过，0 失败，3 个跳过（3 个需要 PostgreSQL 的集成测试文件在无数据库时各报告 1 个跳过）。在一次性 PostgreSQL 18.6 集群上跑（`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh`）是 1772/1772。
+- 前端测试 111 个全部通过，生产构建通过（这次没改前端）。
 - 覆盖率门禁通过：后端全局行覆盖 91.3%，RAG/AgentRAG 核心 93.5%。
 
 ## 4. 边界（主动说，不要等被问）
@@ -157,6 +173,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **评测规模**：检索 48 条、端到端 18 项检查，多数差异不显著。QASPER 导入脚本和 LLM 评审只有框架，还没跑过真实数据，评审也还没做人工校准。
 - **校验器**：默认是词法规则，认不出语义等价的改写；可选的 LLM 评审（`RAG_CLAIM_JUDGE=llm`）只复核被词法拒绝的 claim，数字和引用仍由确定性规则把关。评审默认关闭：构造对照集上错误接受 0/54（留出集含），但前一轮观察到过 1 次真实误判，而且还没用人工标注的真实答案校准。对比答案仍走模板兜底。
 - **文档解析**：只读 PDF 文本层，没有 OCR、表格和版面解析；换行会把句子切断，导致模板答案出现半句话。
+- **租户隔离**：行级安全不覆盖会话记忆（只有 session id）和 admin audit（管理员需要跨用户读取）。租户靠异步上下文传递，上下文丢失时回落到 owner 身份，也就是只剩应用层过滤，而不是拒绝访问；要做到拒绝访问需要一个没有表权限的独立登录角色。这层防护针对漏写过滤条件的 bug，不防 SQL 注入（注入的语句可以 `RESET ROLE`）。
 - **安全**：prompt 注入只有设计层防御（规划器看不到身份、范围由运行时决定、外部查询过滤），还没有对抗性测试集和攻击成功率数据。
 - **架构**：V2 typed DAG 已是自定义 Skill 阶段的默认执行器，V1 顺序链只作为整图被拒时的兜底和运维回退；v3 统一图已冻结在 shadow（冻结原因见 `docs/unified-agent-dag-migration.md`）。DAG 只覆盖自定义 Skill 阶段，外层文档、Web、内置 Skill 仍是固定顺序。
 - **Agent 路径的答题率**：用 qwen2.5:7b 走 agent（`/chat` 的真实路径），合同和政策 7 题里 6 题、论文 12 题里 11 题最终改为澄清，因为词法校验器拒绝了大部分答案；`verify:quality` 的 18/18 测的是不经过 agent 自检的纯 RAG 路径。修了两个校验器 bug（"twelve (12)"被算成两个数；证据在 PDF 换行处被切断）后，合同和政策题从 2/21 升到 4/21（各 3 轮），论文题不变；剩下的主要是改写用词过不了词法校验。打开 LLM 评审后合同和政策题 3/21 → 14/21 得到回答且 14 个全对，p50 延迟多约 0.8 秒；两道管辖法律题仍在检索阶段判为证据不足。

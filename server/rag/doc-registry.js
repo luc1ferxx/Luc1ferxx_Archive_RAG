@@ -4,6 +4,7 @@ import { runPostgresMigrations } from "./db-migrations.js";
 import { createDocumentLegacyImporter as createDefaultDocumentLegacyImporter } from "./document-legacy-importer.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { queryPostgres as queryDefaultPostgres } from "./postgres.js";
+import { runAsDatabaseSystem } from "./postgres-tenant.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -477,18 +478,24 @@ export const normalizeDocIds = (docIds) => {
   return [];
 };
 
+// The registry map is process-wide and every request filters it by scope, so
+// it is always loaded as the owner role. Registering the first document can
+// trigger this load from inside a tenant request; under that tenant the row
+// policies would fill the shared map with one tenant's documents only.
 export const initializeDocumentRegistry = async () => {
   if (documentRegistryInitialized) {
     return listDocuments();
   }
 
   const store = getDocumentRegistryStore();
+  const documents = await runAsDatabaseSystem(async () => {
+    if (store.initialize) {
+      await store.initialize();
+    }
 
-  if (store.initialize) {
-    await store.initialize();
-  }
+    return store.list ? store.list() : [];
+  });
 
-  const documents = store.list ? await store.list() : [];
   setDocumentRegistry(documents);
   return listDocuments();
 };
@@ -504,7 +511,7 @@ export const initializeDocumentRegistry = async () => {
  */
 export const readDocumentRegistrySnapshot = async (accessScope = {}) => {
   const store = getDocumentRegistryStore();
-  const documents = store.list ? await store.list() : [];
+  const documents = await runAsDatabaseSystem(() => (store.list ? store.list() : []));
 
   setDocumentRegistry(documents);
   return listDocuments(accessScope);
@@ -548,8 +555,12 @@ export const resyncDocument = async (docId) => {
     return null;
   }
 
+  // Same reason as the initial load: the map entry is shared by all tenants,
+  // so whether the row exists is read as the owner.
   const store = getDocumentRegistryStore();
-  const storedFile = store.getFile ? await store.getFile(normalizedDocId) : null;
+  const storedFile = await runAsDatabaseSystem(() =>
+    store.getFile ? store.getFile(normalizedDocId) : null
+  );
 
   if (storedFile?.document) {
     documentRegistry.set(normalizedDocId, toStoredDocument(storedFile.document));

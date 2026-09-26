@@ -72,7 +72,7 @@ const loadModules = async () => {
     { CUSTOM_RAG_SKILL_CONTRACT },
     { createSkillRegistry },
     { SKILL_EFFECTS, SKILL_IDEMPOTENCY },
-    { getAgentRunEventsPostgresTable, getAgentRunsPostgresTable },
+    { getAgentRunEventsPostgresTable, getAgentRunsPostgresTable, getPostgresTenantRole },
   ] = await Promise.all([
     import("../rag/agent-budget.js"),
     import("../rag/agent-execution-graph-checkpoint.js"),
@@ -113,7 +113,24 @@ const loadModules = async () => {
     SKILL_IDEMPOTENCY,
     getAgentRunEventsPostgresTable,
     getAgentRunsPostgresTable,
+    getPostgresTenantRole,
   };
+};
+
+// Recovery replays a run acting for the run's own tenant, so a Skill's write
+// lands under the row-level-security tenant role. Like any application table,
+// the fixture's effect table needs a grant to that role (migration 013 grants
+// the real ones).
+const createEffectTable = async (modules, tableName) => {
+  await modules.queryPostgres(
+    `CREATE TABLE ${tableName} (id BIGSERIAL PRIMARY KEY, run_id TEXT NOT NULL, skill_id TEXT NOT NULL)`
+  );
+  await modules.queryPostgres(
+    `GRANT SELECT, INSERT ON ${tableName} TO ${modules.getPostgresTenantRole()}`
+  );
+  await modules.queryPostgres(
+    `GRANT USAGE ON SEQUENCE ${tableName}_id_seq TO ${modules.getPostgresTenantRole()}`
+  );
 };
 
 const createSkills = (modules, tableName, runId) => {
@@ -342,9 +359,7 @@ if (workerMode === "1") {
 
     try {
       await service.initialize();
-      await modules.queryPostgres(
-        `CREATE TABLE ${tableName} (id BIGSERIAL PRIMARY KEY, run_id TEXT NOT NULL, skill_id TEXT NOT NULL)`
-      );
+      await createEffectTable(modules, tableName);
       effectTableCreated = true;
       await service.createRun({
         accessScope,
@@ -501,9 +516,7 @@ if (workerMode === "1") {
 
     try {
       await service.initialize();
-      await modules.queryPostgres(
-        `CREATE TABLE ${tableName} (id BIGSERIAL PRIMARY KEY, run_id TEXT NOT NULL, skill_id TEXT NOT NULL)`
-      );
+      await createEffectTable(modules, tableName);
       effectTableCreated = true;
       await service.createRun({
         accessScope,

@@ -13,6 +13,7 @@ import {
   isApiAuthJwtEnabled,
   isApiAuthWorkspaceRequired,
 } from "./rag/config.js";
+import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
 
 const PUBLIC_PATH_PREFIXES = ["/health", "/ready"];
 
@@ -218,6 +219,16 @@ const resolveAuthenticatedPrincipal = ({ providedToken, staticPrincipals }) => {
 };
 
 export const getRequestAccessScope = (req) => req.accessScope ?? {};
+
+/**
+ * Runs the rest of the request under its access scope as the database tenant,
+ * so every PostgreSQL query a route issues is checked by row-level security
+ * whether or not the store filtered it. Mounted after requireApiAuth; a
+ * middleware that resumes the chain from a stream callback loses the async
+ * context (multer's memory storage does) and must be followed by this again.
+ */
+export const bindDatabaseTenant = (req, res, next) =>
+  runWithDatabaseTenant(getRequestAccessScope(req), next);
 
 export const requireApiAuth = (req, res, next) => {
   if (!isApiAuthEnabled()) {
