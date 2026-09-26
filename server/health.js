@@ -45,6 +45,7 @@ import {
   queryPostgres,
 } from "./rag/postgres.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
+import { checkSharedStateHealth } from "./rag/shared-state.js";
 import { getOpenAIApiKey } from "./rag/openai.js";
 import { getRagDataDirectory } from "./rag/storage.js";
 
@@ -797,6 +798,7 @@ export const buildHealthReport = async () => {
     adminAuditStore,
     workspaceArtifactStore,
     rowLevelSecurity,
+    sharedState,
   ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
@@ -810,6 +812,7 @@ export const buildHealthReport = async () => {
     checkAdminAuditStoreHealth(),
     checkWorkspaceArtifactStoreHealth(),
     checkRowLevelSecurityHealth(),
+    checkSharedStateHealth(),
   ]);
   const checks = {
     apiAuth,
@@ -824,6 +827,7 @@ export const buildHealthReport = async () => {
     adminAuditStore,
     workspaceArtifactStore,
     rowLevelSecurity,
+    sharedState,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 

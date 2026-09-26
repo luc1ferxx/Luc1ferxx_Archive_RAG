@@ -182,6 +182,9 @@ test("requests queued behind the ones that trip the circuit are not sent", async
     queuedSent = true;
   });
 
+  // The breaker check is awaited (it may be a Redis round trip), so the second
+  // call joins the queue a tick later.
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(getModelCallGuardSnapshot(key).limiter.waiting, 1);
   inFlight.reject(httpError(503));
 

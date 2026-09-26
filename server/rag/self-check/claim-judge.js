@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
-import { getClaimJudgeMode } from "../config.js";
+import { getChatModel, getClaimJudgeMode } from "../config.js";
 import { completeTextWithMetadata } from "../openai.js";
 import { definePrompt, PROMPT_IDS } from "../prompt-registry.js";
 import { screenUntrustedText } from "../prompt-injection-screen.js";
+import {
+  buildSharedStateKey,
+  getSharedRedisClient,
+  whenSharedStateReady,
+} from "../shared-state.js";
 import {
   boundedArray,
   boundedString,
@@ -38,6 +43,70 @@ const MAX_EVIDENCE_CHARS = 2000;
 const MAX_REASON_CHARS = 160;
 const CACHE_LIMIT = 500;
 const verdictCache = new Map();
+
+// With RAG_SHARED_STATE=redis, verdicts are also shared across instances for a
+// week. A verdict belongs to the judge template and the model that produced
+// it, so both are part of the shared key: a prompt or model change never
+// reuses an old verdict. Redis failures only cost the cache.
+const SHARED_VERDICT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const buildSharedVerdictKey = (cacheKey) =>
+  buildSharedStateKey(
+    "judge",
+    `${getClaimJudgePromptDescriptor().fingerprint}|${getChatModel()}|${cacheKey}`
+  );
+
+const isVerdict = (value) =>
+  Boolean(value) && typeof value === "object" && typeof value.supported === "boolean";
+
+const readSharedVerdicts = async (items) => {
+  const redis = getSharedRedisClient();
+
+  if (!redis || items.length === 0) {
+    return new Map();
+  }
+
+  try {
+    await whenSharedStateReady();
+    const values = await redis.mget(items.map((item) => buildSharedVerdictKey(item.cacheKey)));
+
+    return new Map(
+      items
+        .map((item, index) => [item.cacheKey, values[index] ? JSON.parse(values[index]) : null])
+        .filter(([, verdict]) => isVerdict(verdict))
+    );
+  } catch {
+    return new Map();
+  }
+};
+
+const writeSharedVerdicts = async (entries) => {
+  const redis = getSharedRedisClient();
+
+  if (!redis || entries.length === 0) {
+    return;
+  }
+
+  try {
+    const pipeline = redis.pipeline();
+
+    for (const [cacheKey, verdict] of entries) {
+      pipeline.set(buildSharedVerdictKey(cacheKey), JSON.stringify(verdict), "PX", SHARED_VERDICT_TTL_MS);
+    }
+
+    await pipeline.exec();
+  } catch {
+    // The verdict is already in the local cache.
+  }
+};
+
+const rememberVerdict = (cacheKey, verdict) => {
+  if (verdictCache.size >= CACHE_LIMIT) {
+    verdictCache.delete(verdictCache.keys().next().value);
+  }
+
+  verdictCache.set(cacheKey, verdict);
+};
 
 export const resetClaimJudgeCache = () => {
   verdictCache.clear();
@@ -237,10 +306,21 @@ export const judgeClaimSupport = async ({
   }
 
   const verdicts = new Map();
-  const uncached = items.filter((item) => {
+  const locallyUncached = items.filter((item) => {
     const cached = verdictCache.get(item.cacheKey);
     if (cached) {
       verdicts.set(item.index, cached);
+      summary.cachedClaimCount += 1;
+      return false;
+    }
+    return true;
+  });
+  const sharedVerdicts = await readSharedVerdicts(locallyUncached);
+  const uncached = locallyUncached.filter((item) => {
+    const shared = sharedVerdicts.get(item.cacheKey);
+    if (shared) {
+      verdicts.set(item.index, shared);
+      rememberVerdict(item.cacheKey, shared);
       summary.cachedClaimCount += 1;
       return false;
     }
@@ -264,17 +344,19 @@ export const judgeClaimSupport = async ({
       const parsed = parseVerdicts(completion?.text, claimIndexes);
       summary.modelId = completion?.modelRoute?.modelId ?? null;
 
+      const judged = [];
+
       for (const item of uncached) {
         const verdict = parsed.get(item.index);
 
         if (verdict) {
           verdicts.set(item.index, verdict);
-          if (verdictCache.size >= CACHE_LIMIT) {
-            verdictCache.delete(verdictCache.keys().next().value);
-          }
-          verdictCache.set(item.cacheKey, verdict);
+          rememberVerdict(item.cacheKey, verdict);
+          judged.push([item.cacheKey, verdict]);
         }
       }
+
+      await writeSharedVerdicts(judged);
     } catch (error) {
       // Fail closed: the lexical verdict stands.
       summary.status = "failed";

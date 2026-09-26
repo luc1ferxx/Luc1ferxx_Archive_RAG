@@ -23,7 +23,7 @@
 | 结构化输出 | 规划器调用发送按请求从白名单生成的 strict JSON Schema；自由文本和数组都有上限；校验器仍是最终裁决 | `rag/structured-output.js` |
 | 持久化与恢复 | 运行、步骤、事件存在 PostgreSQL；guarded 图的 checkpoint 只能在节点边界续跑；认领、节点开始、完成都用运行版本号 CAS 防止旧 worker 重复执行；有副作用的步骤不会被自动重放 | `rag/agent-execution-graph-checkpoint.js`、`rag/agent-run-step-replay-safety.js`、`rag/agent-runs.js` |
 | 预算 | 每次运行两层：次数（文档 RAG 2 次、自定义 Skill 2 次、Web 搜索 1 次、trace 16 步），以及用量（默认 10 万 token、0.5 美元、5 分钟）。用量按每次成功的模型调用计量，用完后下一个工具被跳过、运行降级而不报错；已开始的步骤会跑完，所以是软截止 | `rag/agent-budget.js`、`rag/run-usage.js` |
-| LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
+| LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计）；多实例部署时二者和评审缓存可放进 Redis 共享（Lua 脚本原子更新，名额和探测都是租约，Redis 挂了退回进程内） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | Claim 校验 | 默认词法规则；可选 LLM 评审只复核被词法拒绝的 claim，只能升级不能降级，引用错误、证据中没有的数字、对比答案不送评审，失败时保留词法结论；结论缓存 | `rag/self-check/`、`rag/self-check/claim-judge.js` |
 | Prompt 版本 | 10 个 prompt、16 个模板变体，每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
@@ -183,9 +183,14 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - claim 评审在注入证据下错误接受 0/18，改前也是 0/18，没测出漏洞。
 - Agent 路径用 7B 模型时大多以澄清结束，它的 0/39 很大程度上是答案被扣下了，不能单独拿来说防护有效。
 
-### 3.11 工程基线（2026-09-25，提示注入防护提交）
+### 3.11 多实例共享状态
 
-- 后端测试 1768 个：1765 通过，0 失败，3 个跳过（3 个需要 PostgreSQL 的集成测试文件在无数据库时各报告 1 个跳过）。在一次性 PostgreSQL 18.6 集群上跑（`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh`）是 1789/1789。
+`npm run eval:shared-state`（2026-09-25，4 个实例进程，本机 Redis）：主模型宕机时，打到坏模型的请求从 21 次降到 8 次，p95 从 1.3 秒降到 0.46 秒；自托管服务饱和时，SLO 内成功率从 29.2% 升到 100%，服务端峰值排队从 42 降到 8，每次调用的请求数从 1.71 降到 1.00。第一版有启动竞态：连接建立前的请求全部退回进程内，结果和不共享一样；这是评测抓出来的。
+
+### 3.12 工程基线（2026-09-25，Redis 共享状态提交）
+
+- 后端测试 1769 个：1765 通过，0 失败，4 个跳过（3 个需要 PostgreSQL、1 个需要 Redis 的集成测试文件在无对应服务时各报告 1 个跳过）。PostgreSQL 部分在一次性集群上是 1789/1789（上一次提交时测得）；Redis 集成测试 5/5。
+- 默认覆盖率门禁不含 Redis，`model-call-guard.js` 的共享分支只由 Redis 集成测试覆盖。
 - 前端测试 111 个全部通过，生产构建通过（这次没改前端）。
 - 覆盖率门禁通过：后端全局行覆盖 91.3%，RAG/AgentRAG 核心 93.5%。
 

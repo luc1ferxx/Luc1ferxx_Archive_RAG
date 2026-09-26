@@ -1,8 +1,16 @@
+import { randomUUID } from "node:crypto";
 import {
   getLlmCircuitCooldownMs,
   getLlmCircuitFailureThreshold,
   getLlmMaxConcurrency,
+  getLlmRequestTimeoutMs,
 } from "./config.js";
+import {
+  buildSharedStateKey,
+  getSharedRedisClient,
+  SHARED_STATE_TTL_MS,
+  whenSharedStateReady,
+} from "./shared-state.js";
 
 // Client-side protection for one model endpoint: a concurrency cap and a
 // circuit breaker, applied to every HTTP request the model client sends.
@@ -20,8 +28,11 @@ import {
 //   remembers: after enough consecutive failures it rejects immediately, so the
 //   call goes straight to the fallback model, or fails fast when there is none.
 //
-// State is per endpoint and model, in this process. It is not shared across
-// processes, and the cap counts requests in flight, not tokens per minute.
+// State is per endpoint and model. By default it lives in this process; with
+// RAG_SHARED_STATE=redis the breaker and the cap are shared by every instance
+// (createSharedCircuitBreaker / createSharedConcurrencyLimiter below), and each
+// falls back to this process's state whenever Redis does not answer. The cap
+// counts requests in flight, not tokens per minute.
 
 export const CIRCUIT_OPEN_CODE = "CIRCUIT_OPEN";
 
@@ -187,17 +198,241 @@ export const createCircuitBreaker = ({
   };
 };
 
+const createFallbackCounter = () => {
+  const counter = { fallbacks: 0, lastError: null };
+
+  return {
+    counter,
+    record: (error) => {
+      counter.fallbacks += 1;
+      counter.lastError = error instanceof Error ? error.message : String(error);
+    },
+  };
+};
+
+/**
+ * The same breaker, with its state in Redis so every instance sees one
+ * circuit. `local` is kept up to date with every outcome and answers whenever
+ * a Redis command fails, so an unreachable Redis degrades to per-process
+ * protection instead of failing model calls. The half-open probe is a lease of
+ * `probeLeaseMs`: an instance that dies while probing releases it by expiry.
+ */
+export const createSharedCircuitBreaker = ({
+  cooldownMs,
+  failureThreshold,
+  key,
+  local,
+  now = Date.now,
+  probeLeaseMs,
+  redis,
+}) => {
+  const redisKey = buildSharedStateKey("circuit", key);
+  const { counter, record } = createFallbackCounter();
+  const withFallback = async (sharedCall, localCall) => {
+    try {
+      await whenSharedStateReady();
+      return await sharedCall();
+    } catch (error) {
+      record(error);
+      return localCall();
+    }
+  };
+
+  return {
+    isRejecting: () =>
+      withFallback(
+        async () =>
+          (await redis.archiveCircuitPeek(redisKey, now(), cooldownMs, failureThreshold)) === 1,
+        () => local.isRejecting()
+      ),
+    admit: () =>
+      withFallback(
+        async () =>
+          (await redis.archiveCircuitAdmit(
+            redisKey,
+            now(),
+            cooldownMs,
+            failureThreshold,
+            probeLeaseMs,
+            SHARED_STATE_TTL_MS
+          )) === 1,
+        () => local.admit()
+      ),
+    recordFailure: async () => {
+      local.recordFailure();
+      await withFallback(
+        () => redis.archiveCircuitFailure(redisKey, now(), failureThreshold, SHARED_STATE_TTL_MS),
+        () => null
+      );
+    },
+    recordSuccess: async () => {
+      local.recordSuccess();
+      await withFallback(
+        () => redis.archiveCircuitSuccess(redisKey, SHARED_STATE_TTL_MS),
+        () => null
+      );
+    },
+    snapshot: () => ({ ...local.snapshot(), shared: { provider: "redis", ...counter } }),
+  };
+};
+
+/**
+ * A deployment-wide cap: each request holds a lease in a Redis sorted set.
+ * Waiters queue FIFO in this process and the head polls for a slot (10 ms,
+ * backing off to 100 ms); a release in this process wakes it at once, one in
+ * another instance is seen at the next poll, so fairness across instances is
+ * approximate. A lease outlives the longest request (the request timeout plus
+ * a margin), so slots held by a crashed instance return on expiry. If Redis
+ * fails, every waiter falls back to the local cap.
+ */
+export const createSharedConcurrencyLimiter = ({
+  key,
+  leaseMs,
+  limit,
+  local,
+  maxPollMs = 100,
+  now = Date.now,
+  pollMs = 10,
+  redis,
+}) => {
+  const redisKey = buildSharedStateKey("slots", key);
+  const { counter, record } = createFallbackCounter();
+  const waiting = [];
+  let pumping = false;
+  let wake = null;
+
+  const sleep = (ms) =>
+    new Promise((resolve) => {
+      const done = () => {
+        wake = null;
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+
+      wake = () => {
+        clearTimeout(timer);
+        done();
+      };
+    });
+
+  const makeRelease = (leaseId) => {
+    let released = false;
+
+    return () => {
+      if (released) {
+        return;
+      }
+
+      released = true;
+      redis
+        .zrem(redisKey, leaseId)
+        .catch(() => {})
+        .finally(() => {
+          wake?.();
+          pump();
+        });
+    };
+  };
+
+  const pump = async () => {
+    if (pumping) {
+      return;
+    }
+
+    pumping = true;
+    let delay = pollMs;
+
+    try {
+      while (waiting.length > 0) {
+        const leaseId = randomUUID();
+        let acquired;
+
+        try {
+          await whenSharedStateReady();
+          acquired =
+            (await redis.archiveSlotAcquire(
+              redisKey,
+              now(),
+              limit,
+              leaseMs,
+              leaseId,
+              SHARED_STATE_TTL_MS
+            )) === 1;
+        } catch (error) {
+          record(error);
+
+          for (const waiter of waiting.splice(0)) {
+            waiter.resolve(local.acquire());
+          }
+
+          break;
+        }
+
+        if (acquired) {
+          waiting.shift().resolve(makeRelease(leaseId));
+          delay = pollMs;
+          continue;
+        }
+
+        await sleep(delay);
+        delay = Math.min(maxPollMs, delay * 2);
+      }
+    } finally {
+      pumping = false;
+    }
+  };
+
+  return {
+    acquire: () => {
+      if (limit <= 0) {
+        return Promise.resolve(() => {});
+      }
+
+      return new Promise((resolve) => {
+        waiting.push({ resolve });
+        pump();
+      });
+    },
+    snapshot: () => ({
+      limit,
+      waiting: waiting.length,
+      shared: { provider: "redis", ...counter },
+    }),
+  };
+};
+
 const guards = new Map();
+
+// Slightly longer than any request may run, so a lease never expires under a
+// request that is still in flight.
+const SHARED_SLOT_LEASE_MARGIN_MS = 5000;
 
 const getGuard = (key) => {
   if (!guards.has(key)) {
-    guards.set(key, {
-      breaker: createCircuitBreaker({
-        cooldownMs: getLlmCircuitCooldownMs(),
-        failureThreshold: getLlmCircuitFailureThreshold(),
-      }),
-      limiter: createConcurrencyLimiter(getLlmMaxConcurrency()),
-    });
+    const cooldownMs = getLlmCircuitCooldownMs();
+    const failureThreshold = getLlmCircuitFailureThreshold();
+    const limit = getLlmMaxConcurrency();
+    const breaker = createCircuitBreaker({ cooldownMs, failureThreshold });
+    const limiter = createConcurrencyLimiter(limit);
+    const redis = getSharedRedisClient();
+    const leaseMs = getLlmRequestTimeoutMs() + SHARED_SLOT_LEASE_MARGIN_MS;
+
+    guards.set(
+      key,
+      redis
+        ? {
+            breaker: createSharedCircuitBreaker({
+              cooldownMs,
+              failureThreshold,
+              key,
+              local: breaker,
+              probeLeaseMs: leaseMs,
+              redis,
+            }),
+            limiter: createSharedConcurrencyLimiter({ key, leaseMs, limit, local: limiter, redis }),
+          }
+        : { breaker, limiter }
+    );
   }
 
   return guards.get(key);
@@ -211,7 +446,7 @@ const getGuard = (key) => {
 export const guardModelCall = async (key, send) => {
   const { breaker, limiter } = getGuard(key);
 
-  if (breaker.isRejecting()) {
+  if (await breaker.isRejecting()) {
     throw createCircuitOpenError(key);
   }
 
@@ -220,19 +455,19 @@ export const guardModelCall = async (key, send) => {
   try {
     // Re-check after the wait: the circuit may have opened while this request
     // was queued behind the ones that tripped it.
-    if (!breaker.admit()) {
+    if (!(await breaker.admit())) {
       throw createCircuitOpenError(key);
     }
 
     try {
       const result = await send();
-      breaker.recordSuccess();
+      await breaker.recordSuccess();
       return result;
     } catch (error) {
       if (isUnavailableError(error)) {
-        breaker.recordFailure();
+        await breaker.recordFailure();
       } else {
-        breaker.recordSuccess();
+        await breaker.recordSuccess();
       }
 
       throw error;

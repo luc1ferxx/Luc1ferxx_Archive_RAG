@@ -15,3 +15,5 @@ latest-tenant-isolation.json
 latest-tenant-isolation.md
 latest-prompt-injection*.json
 latest-prompt-injection*.md
+latest-shared-state.json
+latest-shared-state.md

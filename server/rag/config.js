@@ -75,6 +75,19 @@ export const getLlmCircuitFailureThreshold = () =>
 export const getLlmCircuitCooldownMs = () =>
   toPositiveNumber(process.env.RAG_LLM_CIRCUIT_COOLDOWN_MS, 30000);
 
+// Where the circuit breakers, the model concurrency cap and the claim-judge
+// cache keep their state. "memory" is per process, right for one instance;
+// "redis" shares it across every instance that points at the same REDIS_URL.
+export const getSharedStateProvider = () =>
+  toChoice(process.env.RAG_SHARED_STATE, "memory", ["memory", "redis"]);
+
+export const getRedisUrl = () =>
+  String(process.env.REDIS_URL ?? "").trim() || "redis://127.0.0.1:6379";
+
+// Namespaces the keys so several deployments (or test runs) can share one Redis.
+export const getSharedStatePrefix = () =>
+  String(process.env.RAG_SHARED_STATE_PREFIX ?? "").trim() || "archive_rag:";
+
 // Per-run ceilings on model usage (see run-usage.js). 0 turns one off; an empty
 // value keeps the default, so a blank line in .env cannot silently remove it.
 const readRunLimit = (name, fallbackValue) => {

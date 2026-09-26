@@ -22,5 +22,22 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # Optional shared state for multi-instance deployments (RAG_SHARED_STATE=redis):
+  # circuit breakers, the model concurrency cap and the claim-judge cache.
+  # Not started by default; run `docker compose --profile shared-state up -d`.
+  redis:
+    image: redis:7-alpine
+    container_name: luc1ferxx-archive-redis
+    restart: unless-stopped
+    profiles: ["shared-state"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   pgdata:

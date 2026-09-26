@@ -158,6 +158,7 @@ export const GLOBAL_COVERAGE_EXCLUDED_PATHS = Object.freeze([
   "server/evaluation/run-rerank-sweep.mjs",
   "server/evaluation/run-rollout-readiness-report.mjs",
   "server/evaluation/run-runtime-smoke.mjs",
+  "server/evaluation/run-shared-state-eval.mjs",
   "server/evaluation/run-synthetic-eval.mjs",
   "server/evaluation/run-tenant-isolation-eval.mjs",
   "server/evaluation/run-trace-demo.mjs",
