@@ -43,6 +43,9 @@ Luc1ferxx Archive RAG 是一个本地优先的多 PDF 档案分析系统。它�
 | 文档 RAG | Structured chunking、query decomposition，默认两路独立召回——pgvector cosine dense 检索 + PostgreSQL FTS lexical 检索——用 RRF 融合（weighted 可选），可选 rerank 位于 fusion 之后，confidence gate 和页级 citation。每个候选带 route/rank/score/query provenance。查询 embedding 走 LRU 缓存。 |
 | 多文档对比 | Compare 请求走 per-document retrieval，每份文档独立召回和 rerank，再做 evidence alignment、近重复保护和结构化差异输出。 |
 | AgentRAG | LLM/deterministic planner 可配置，执行前校验 access scope；支持 clarification gate、approval gate、白名单 skill chain、self-check、gap analysis、follow-up retrieval、finalizer、research_task/dossier 流程、agent task 产物交付，以及显式注入的 connector/MCP adapter、sandbox/secret boundary、runtime model/provider registry 和 LLMOps policy/admin health surface。 |
+| 模型网关 | OpenAI 兼容 client 自带带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限和熔断器（`model-call-guard.js`）；规划器调用发送按请求生成的 strict JSON Schema。每次 Agent 运行除次数预算外还有 token / 成本 / 时长上限，超限后降级而不是报错。 |
+| 答案校验 | 每条 claim 必须由它引用的证据支持，默认用词法规则（数字、主体、关系方向、否定、文档归属），finalizer 删除无支持的内容。可选 LLM 评审（`RAG_CLAIM_JUDGE=llm`）只复核被词法拒绝的 claim、只能放行不能否决；引用错误、证据里没有的数字、对比答案仍由规则直接判定。 |
+| 流式输出 | `/chat/stream` 以 SSE 推送每一步进度，以及已通过同一套 claim 校验的整句答案草稿；原始 token 不出服务器，最终答案与 `/chat` 一致并替换草稿。聊天界面已接上。 |
 | Skills 和 capabilities | 内置 `document_rag`、`web_search`、`arxiv_import`、`inventory`、`document_discovery`、`research_brief`；custom skills 只从白名单加载。Capability registry 暴露 `report.export` 和 action capabilities 的统一 contract，不让模型调用任意工具。 |
 | arXiv enrichment | 基于已上传文档 profile 生成清理后的 arXiv topic，返回可签名确认的候选论文；用户选择后通过异步 task runner 导入，并按 arXiv ID / PDF URL / title hash 去重。 |
 | 执行持久化 | PostgreSQL-backed task store、agent run store 和 workspace artifact store 保存 task/run snapshot、公开 goal plan、真实 goal deliverables、steps、events、approval gates 和 recovery 状态；本地开发可回落内存实现。 |
@@ -112,7 +115,7 @@ flowchart TB
 
 - `server/app.js` 是 171 行的组合根：解析配置，交给 `app-services.js` 装配全部服务，按序执行启动恢复（storage → registries → memories → tasks → runs → recovery → health），然后先挂载 `/health`、`/ready`，再套限流和鉴权，最后挂载 `server/routes/` 下的特性 Router（documents、uploads、chat、tasks、arxiv、memory、quality、artifacts、admin）。
 - 路由入参统一经 `routes/validation.js` 的 zod schema 校验；错误消息和状态码保持稳定 contract。
-- LLM 接入不依赖任何框架：`server/lib/prompt-template.js`（f-string 模板渲染）、`server/rag/openai-client.js`（OpenAI 兼容 fetch client，支持 `OPENAI_BASE_URL` 代理端点、错误 status 传播和真实 token usage 上报）、`server/rag/pdf-loader.js`（页级 PDF 提取，ingestion 和评测共用同一条管线）。后端直接依赖仅 13 个。
+- LLM 接入不依赖任何框架：`server/lib/prompt-template.js`（f-string 模板渲染）、`server/rag/openai-client.js`（OpenAI 兼容 fetch client，支持 `OPENAI_BASE_URL` 代理端点、流式输出、错误 status 传播和真实 token usage 上报）、`server/rag/pdf-loader.js`（页级 PDF 提取，ingestion 和评测共用同一条管线）。后端直接依赖 19 个，其中 6 个是 OpenTelemetry（只有 `@opentelemetry/api` 在请求路径上，SDK 只在开启 tracing 时加载）。
 - Claim self-check 拆分在 `server/rag/self-check/`（patterns、text、modality、attribution、claims、support、evaluate、gaps），`agent-self-check.js` 作为稳定的对外出口。
 - 文本归一化收敛在 `server/lib/normalize-text.js` 三个变体（collapse / trim / clamp），全仓复用。
 
@@ -126,7 +129,7 @@ flowchart LR
   C -->|no| S["Whitelisted skill or skill chain"]
   S --> R["Scoped retrieval"]
   R --> A["Grounded draft with citations"]
-  A --> V["Claim support self-check"]
+  A --> V["Claim check (lexical + optional LLM judge)"]
   V -->|supported| F["Finalizer"]
   V -->|gap found| GP["Gap analysis"]
   GP --> B{"Budget left?"}
@@ -141,20 +144,21 @@ flowchart LR
 关键规则：
 
 - Planner 只在已注册 intent、skill、capability 和 step schema 里选择。
-- 在 custom skill 的 V2 DAG 模式下，模型看到的是 runtime 从已注册、显式 typed contract、已核验 `accessScope` / `docIds` 构造的原子 Skill catalog，不受 V1 复合 intent/chain 限死。例如上游只选了 `compare_documents` intent，DAG planner 仍可在授权候选中规划 `compare_documents -> risk_review`；没有选中文档或文档无法按 scope 核验时不会扩大候选范围。V1 与默认 `off` 行为不变。
+- 在 custom skill 的 V2 DAG 模式下，模型看到的是 runtime 从已注册、显式 typed contract、已核验 `accessScope` / `docIds` 构造的原子 Skill catalog，不受 V1 复合 intent/chain 限死。例如上游只选了 `compare_documents` intent，DAG planner 仍可在授权候选中规划 `compare_documents -> risk_review`；没有选中文档或文档无法按 scope 核验时不会扩大候选范围。V1 顺序链只在整张图被拒、尚无节点执行时兜底，或由运维显式设为 `off`。
 - Planner 不决定权限、`docIds`、审批、secret、预算、并发和重试上限；这些由 runtime 拥有。custom skill 的 typed DAG 也一样：模型只产出节点和依赖，validator 整体接受或整体拒绝，非法图不会部分执行；runner 在执行前、把真实或恢复的输出交给下游前再次校验 typed contract。当前 typed 输出仍是 `text` / `citations` / `abstained` 的答案封套，不是已做语义验证的差异或风险对象。
 - 文档读取、skill 执行、task 和 agent run 都携带 `accessScope`。
 - Working memory 是 run-scoped，只记录本轮 queries、claims、gaps 和 loop counters。
 - Agent experience memory 是规划提示，不是事实来源；答案证据仍必须来自 citations。
 - Workspace artifact 是生成结果而非 RAG 来源；不会进入文档 registry、向量索引、citation、claim support 或 evidence。
 - 对外部工具调用先经过 query policy 和 approval policy，避免把敏感实体直接带出工作区。
+- Claim 校验的 LLM 评审只能把"无支持"改成"有支持"；引用错误、证据里没有的数字、对比答案不送评审，评审失败时保留词法结论。
 
 ## 关键调用链
 
 | 场景 | 谁调用 | 谁决定 | 谁执行 |
 | --- | --- | --- | --- |
 | 上传 PDF | `src/components/PdfUploader.jsx` 调 `/upload` 或分片上传接口 | `server/routes/uploads.js` 校验文件名、魔数、session 和 access scope | `server/rag/index.js` 用 `pdf-loader.js` 解析 PDF，`chunker.js` 切块，`doc-registry.js` 写 PostgreSQL，`vector-store*.js` 写索引 |
-| 普通问答 | `src/components/ChatComponent.jsx` 调 `/chat` | `server/routes/chat.js` 接请求，`server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
+| 普通问答 | `src/components/ChatComponent.jsx` 经 `streamChatAnswer` 调 `/chat/stream`（进度和校验过的草稿实时推送，最终结果与 `/chat` 相同） | `server/routes/chat.js` 接请求，`server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
 | 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
 | arXiv 推荐导入 | 前端 arXiv panel 调 suggestion / task action | `arxiv-enrichment.js` 生成清理后的 topic 和签名候选，task service 记录等待确认 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
 | Agent goal task | `/agent-tasks` 创建 durable goal，前端 Agent Run Center 消费 `/tasks` 返回的公开 plan | `agent-tasks.js` 驱动多轮 task loop，`agent-goal-plan.js` 生成公开计划合同 | `job-orchestrator.js` 调 runner，`runAgentRag()` 执行每轮 `/chat` 路径，task action 可继续或批准 |
@@ -210,6 +214,11 @@ RAG_CHUNK_SIZE=900
 RAG_CHUNK_OVERLAP=180
 RAG_RETRIEVAL_TOP_K=6
 RAG_COMPARE_TOP_K_PER_DOC=3
+
+# Optional: LLM second opinion on claims the lexical check rejects (off by default)
+RAG_CLAIM_JUDGE=off
+# Optional: OpenTelemetry traces to Phoenix / Langfuse (see docs/configuration.md)
+OTEL_TRACING_ENABLED=false
 
 RAG_LLMOPS_POLICY_ENABLED=true
 RAG_LLMOPS_ENFORCEMENT_MODE=record
@@ -283,6 +292,11 @@ curl http://localhost:5001/ready
 | `cd server && npm run eval:planner` | 评测 planner mock provider；`-- --provider real` 生成真实 provider 报告。 |
 | `cd server && npm run planner:gate -- --provider real` | 检查 real planner report、fallback rate 和 mock/real divergence。 |
 | `cd server && npm run eval:recovery-observability` | 检查 recovery/replay observability。 |
+| `cd server && npm run verify:quality` | 用真实 embedding + chat 模型（任何 OpenAI 兼容端点，含本地 Ollama）验证单文档问答、双文档对比、拒答和跨进程持久化，共 18 项检查。 |
+| `cd server && npm run eval:retrieval-comparison -- --embedding-provider openai` | dense / BM25 / hybrid / hybrid+rerank 四组检索配置用真实 embedding 对比，每个 split 带配对 bootstrap 95% 置信区间。 |
+| `cd server && npm run eval:llm-resilience [-- --no-fallback]` | 故障注入：本地假服务模拟 429、503、挂起、空响应、主模型宕机和自托管服务饱和，测成功率、请求数和 p50/p95；不需要模型。 |
+| `cd server && npm run eval:claim-judge` | Claim 评审校准：构造的对照集和留出集上，分别统计"只用词法"和"词法 + 评审"接受了多少正确改写、错收了多少错误 claim。 |
+| `cd server && npm run eval:answer-drafts` | 用真实模型在临时档案里跑文档问答，测回答率、答案是否正确、首个草稿时间和草稿保留率。 |
 | `cd server && npm run trace:demo` | 跑一次 Agent 请求并打印它的 OpenTelemetry span 树；`-- --real` 用配置的模型端点，`-- --otlp` 同时导出。 |
 | `cd server && npm run rollout:readiness` | 汇总 planner、trajectory、recovery、fallback 和 divergence rollout signal。 |
 | `cd server && npm run runtime:smoke` | 用真实 planner 和 PostgreSQL smoke `/health`、`/chat` runtime。 |
@@ -308,6 +322,10 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | 端到端质量（`verify:quality`） | 16/18 → 18/18：修复了两个让对比答案全部被拒的校验器 bug（逗号分隔的多来源引用、`vendor-a` 类文件名不被当作文档名）。 |
 | 规划器（5 轮、25 次 LLM 规划） | 按请求生成的 strict JSON Schema 约束解码：降级率 56% → 8%，用例通过率 47% → 80%，每轮耗时 14.1s → 14.2s。 |
 | LLM 调用容错（故障注入） | 限流成功率 79% → 100%，请求挂起 87.5% → 100%（p95 15s → 3.4s），空响应 62.5% → 91.7%，主模型宕机 0% → 100%；代价是限流时 p95 约 2.5s → 4.7s。 |
+| 并发上限与熔断（故障注入） | 主模型宕机时每次调用的请求数 5.00 → 1.33、p50 2.6s → 24ms；无备用模型时立即失败而不是等 2.6s；自托管服务饱和时请求数 1.42 → 1.00、p95 5.2s → 3.2s、服务端峰值排队 16 → 8。成功率不变，省的是延迟和无效请求。 |
+| Typed DAG 设为默认执行器 | 后端全量测试、轨迹 17/17、恢复 8/8、PostgreSQL 跨进程恢复 15/15 通过；真实模型规划器 27/30、降级 0/25（改前 24/30、2/25，差异在噪声内），普通问答没有被多加 Skill 阶段。 |
+| Agent 路径回答率与 claim 评审 | 走 `/chat` 真实路径时，词法校验拒绝了大部分正确改写，合同/政策题只答 3/21；打开 LLM 评审后 14/21 得到回答且 14 个全对，p50 延迟多约 0.8s。评审校准（构造对照集，3 轮）：正确改写接受 3/42 → 39/42，错误 claim 接受 0/42（留出集 0/12）。论文题提升有限（0/36 → 3/36）。 |
+| 流式草稿 | 机制按设计工作（草稿全部保留在最终答案里），但答案短、校验严，首个草稿只比最终答案早几毫秒到 1.5s，目前没有实质延迟收益。 |
 
 ## 评测优化结果
 
@@ -334,7 +352,7 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | 架构 | `app.js` 组合根（171 行）+ `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 8 个模块；`normalizeText` 收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块，后端直接依赖 18 → 13。 |
 | 工程化 | 前端 CRA → Vite 7 + Vitest 3（测试 97s → ~7s，构建 ~8s）；后端测试并行化（24s → ~4s，含 Windows 全平台通过）；CI 后端测试与 eval gate 拆并行 job；评测脚本共享 helper 收敛到 `eval-cli.js` / `eval-case-helpers.js`。 |
 
-前后端测试基线（`99af0019`）：后端 1687 个用例（2 个需要 PostgreSQL 的集成测试在无数据库时跳过）、前端 102 个用例全绿，覆盖率门禁通过。
+当前测试基线：后端 1742 个用例（1740 通过，2 个需要 PostgreSQL 的集成测试在无数据库时跳过；用 `bash scripts/run-pgvector-integration.sh` 在一次性集群上跑则全部通过）、前端 111 个用例全绿、生产构建通过，覆盖率门禁通过（后端全局行覆盖约 91%）。
 
 ## 文档入口
 
@@ -344,6 +362,8 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | [docs/agent-rag.md](docs/agent-rag.md) | AgentRAG 闭环、QA/compare 路径、skill registry、custom skill 的 V1 chain / V2 typed DAG 与灰度、关键模块和 `/chat` observability。 |
 | [docs/evaluation.md](docs/evaluation.md) | Synthetic、trajectory、feedback、planner、recovery、rerank、Ragas、coverage 和 CI gate。 |
 | [docs/development.md](docs/development.md) | 完整 API 表、目录结构、runtime paths 和开发约束。 |
+| [docs/unified-agent-dag-migration.md](docs/unified-agent-dag-migration.md) | 全阶段统一图（v3）的设计记录，以及冻结的原因和解冻条件。 |
+| [server/docs/interview/](server/docs/interview/) | 面试材料：每个数字的出处（`CURRENT-TRUTH.md`）、3 分钟讲述、故障与决策故事、高频追问。 |
 
 ## API 摘要
 
@@ -411,6 +431,17 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 | 8 | 目标完成自检 | 已加 task-level `goalCompletion` contract：统一检查 public plan steps、unresolved gaps / unsupported claims、goal deliverables、pending approval / user action、research phases 和 workflow lifecycle contract；默认 trajectory eval 覆盖从等待批准到产物创建后的完整目标生命周期。 |
 | 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加授权原子 Skill catalog、typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、运行时输入/输出 gate、拓扑 scheduler、持久化 graph checkpoint 和一次有界 replan；执行器由 `AGENT_SKILL_GRAPH_ROLLOUT`（`guarded`/`shadow`/`off`，默认 `guarded`）选择，V1 顺序链只作为整图被拒时的兜底和运维的显式回退，组合 intent 和 deterministic planner 保留。四个 trajectory case 钉住 DAG 行为，planner eval 另有 compare-only intent 下动态组合 compare+risk 的 guarded case；real provider、runtime smoke 和 rollout/release gate 为真实模型灰度提供额外门禁。 |
 
+后续按"像工业界那样"的差距清单推进，已完成：
+
+| 顺序 | 主题 | 当前落点 |
+| --- | --- | --- |
+| 10 | 收敛编排 | Typed DAG 设为 custom skill 阶段的默认执行器；执行器与规划器拆成两个开关；全阶段 v3 统一图冻结在 shadow。 |
+| 11 | 运行预算 | 每次运行加 token / 成本 / 时长上限，按 LLMOps 事件计量，经 AsyncLocalStorage 归属到运行，超限后在步骤边界降级。 |
+| 12 | 模型网关保护 | 每个模型端点的并发上限和熔断器；熔断时直接切备用模型或立即失败。 |
+| 13 | 可观测性 | OpenTelemetry GenAI trace，默认 protobuf 导出（Phoenix 只收 protobuf），不记录问题、prompt、输出和文档内容。 |
+| 14 | 流式草稿 | 只推送通过 claim 校验的整句；聊天界面接上 `/chat/stream`。 |
+| 15 | 校验器 | 修复"twelve (12)"被算成两个数、证据在 PDF 换行处被切断两个 bug；加入受限的 LLM 评审（默认关闭）。 |
+
 ## 当前限制
 
 - 这是本地优先的工程型工作台，不是完整 SaaS 权限系统；多人部署应使用 `API_AUTH_TOKENS` 或 JWT auth，并补齐外围身份提供方、审计和网络隔离。
@@ -420,4 +451,8 @@ CI 侧，`quality-gate.yml` 把前端测试/构建、后端测试/覆盖率和 c
 - pgvector 的 lexical 路用 PostgreSQL FTS + `ts_rank_cd`，语义上不是 BM25；embedding 模型或维度变更需要显式 `vector:reindex`，不会自动迁移。Local JSON 索引和 Qdrant 只作为显式 opt-in 兼容后端保留，local 只适合单进程小规模工作区。
 - Web search 和 arXiv 导入依赖外部网络；web search 需要 SerpAPI key，arXiv 使用公开 Atom/PDF 地址。
 - Ragas eval 只是辅助信号；多文档 compare 和 citation 正确性主要依赖自定义 harness、trajectory 和 quality gate。
+- 真实模型数字都来自本地 7B（`qwen2.5:7b` + `nomic-embed-text`），评测集小（检索 48 条、端到端 7 + 12 题），没有人工标注的黄金集，也没有生产流量；claim 评审只在构造的对照集上校准过，而且用同一个模型检查自己的答案，所以默认关闭。
+- 默认的词法校验对改写很严格：不开评审时 agent 路径大多转成澄清。流式草稿、custom skill / Web / research 的最终校验仍只用词法规则。
+- 熔断器、并发上限和评审缓存都在进程内存里，多实例部署时各自计数；租户隔离只在应用层过滤，数据库还没有行级安全。
+- 只读 PDF 文本层，没有 OCR、表格和版面解析；提示注入只有设计层防御，还没有对抗测试集。
 - Custom skill 阶段默认由 typed DAG 执行（`AGENT_SKILL_GRAPH_ROLLOUT=guarded`），但 LLM 规划 DAG 在本地 7B 模型上仍有降级，由确定性图兜底；DAG 也只覆盖 custom skill 阶段，built-in skill、document RAG 主循环、Web 和 capability 调用仍走各自既有路径，不能称为全工具统一 DAG。Typed output gate 校验字段形状，不证明差异/风险内容的语义正确；有界 replan 上限初始为 1。
