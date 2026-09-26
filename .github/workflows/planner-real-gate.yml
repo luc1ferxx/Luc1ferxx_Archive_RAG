@@ -53,6 +53,18 @@ jobs:
       - name: Install server dependencies
         run: npm ci
 
+      # Fail first, and say why, when the secret is missing or revoked: every
+      # real planner call would otherwise fall back to the deterministic
+      # planner and the gate would fail case by case with the reason buried
+      # in the planner report.
+      - name: Check the OpenAI API key
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models)
+          if [ "$status" != "200" ]; then
+            echo "::error title=OPENAI_API_KEY rejected::api.openai.com answered HTTP $status for the repository secret OPENAI_API_KEY, so every real planner call would fall back. Replace it (gh secret set OPENAI_API_KEY) and re-run this workflow."
+            exit 1
+          fi
+
       - name: Run planner eval (mock)
         run: npm run eval:planner -- --provider mock
 

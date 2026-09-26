@@ -267,6 +267,11 @@ test("planner real provider workflow runs a required scheduled gate", async () =
   assert.match(workflow, /working-directory:\s*server/);
   assert.match(workflow, /node-version:\s*"20"/);
   assert.match(workflow, /run:\s*npm ci/);
+  // A revoked key fails up front with an actionable error, before any eval.
+  assert.match(
+    workflow,
+    /name:\s*Check the OpenAI API key[\s\S]*api\.openai\.com\/v1\/models[\s\S]*exit 1[\s\S]*npm run eval:planner -- --provider mock/
+  );
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider mock/);
   assert.match(workflow, /run:\s*npm run eval:planner -- --provider real/);
   assert.match(workflow, /run:\s*npm run eval:trajectory/);

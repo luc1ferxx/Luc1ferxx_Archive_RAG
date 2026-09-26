@@ -260,10 +260,11 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 ### 3.13 工程基线（2026-09-26，版面解析与部署提交）
 
-- 后端测试 1801 个：1797 通过，0 失败，4 个跳过（3 个需要 PostgreSQL、1 个需要 Redis 的集成测试文件在无对应服务时各报告 1 个跳过）。pgvector 集成测试在一次性 PostgreSQL 18 集群上 25/25（本次测得，含新的索引标识用例）；Redis 集成测试 5/5。
+- 后端测试 1804 个：1800 通过，0 失败，4 个跳过（3 个需要 PostgreSQL、1 个需要 Redis 的集成测试文件在无对应服务时各报告 1 个跳过）。pgvector 集成测试在一次性 PostgreSQL 18 集群上 25/25（本次测得，含新的索引标识用例）；Redis 集成测试 5/5。
 - 默认覆盖率门禁不含 Redis，`model-call-guard.js` 的共享分支只由 Redis 集成测试覆盖。
 - 前端测试 113 个全部通过，生产构建通过（Docker 镜像构建时执行）。
-- 覆盖率门禁通过：后端全局行覆盖 91.3%，RAG/AgentRAG 核心 93.5%（拒答门控调参提交时测得，本次未重跑）。
+- 覆盖率门禁通过：后端全局行覆盖 90.6%，RAG/AgentRAG 核心 93.6%（本次测得）。
+- 定时的 Planner Real Provider Gate 从 2026-09-20 起每天失败，原因是仓库 secret `OPENAI_API_KEY` 失效，OpenAI 返回 "Incorrect API key provided"，真实规划器全部退回确定性规划。这不是代码问题，需要换一个有效的 key；workflow 现在会在第一步检查 key，并给出明确的报错。
 - 真实模型 `verify:quality`（qwen2.5:7b，默认配置）：18/18。
 
 ## 4. 边界（主动说，不要等被问）
