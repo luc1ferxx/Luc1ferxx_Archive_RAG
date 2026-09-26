@@ -28,14 +28,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
 
 export const RECALL_METRICS = Object.freeze(["hitAt1", "hitAt3", "hitAtAll", "admitted"]);
+// With --context-floors: whether the gate was confident, and whether evidence
+// reached the context selectQaContext builds at each extra-candidate floor.
+export const CONTEXT_FLOORS = Object.freeze([0, 0.01, 0.3]);
+const contextMetric = (floor) => `context@${floor}`;
 
 const round = (value) => (value === null ? null : Number(value.toFixed(4)));
 const mean = (values) =>
   values.length === 0 ? null : round(values.reduce((sum, value) => sum + value, 0) / values.length);
 
 /** rows: { hitAt1, hitAt3, hitAtAll, admitted } booleans per question. */
+const metricsOf = (rows) => [
+  ...RECALL_METRICS,
+  ...["gateConfident", ...CONTEXT_FLOORS.map(contextMetric)].filter((metric) =>
+    rows.some((row) => metric in row)
+  ),
+];
+
 export const summarizeRecallRows = (rows) =>
-  Object.fromEntries(RECALL_METRICS.map((metric) => [metric, mean(rows.map((row) => (row[metric] ? 1 : 0)))]));
+  Object.fromEntries(metricsOf(rows).map((metric) => [metric, mean(rows.map((row) => (row[metric] ? 1 : 0)))]));
 
 // mulberry32, as the other QASPER harnesses sample with.
 const createSeededRandom = (seed) => {
@@ -61,7 +72,7 @@ export const pairedRecallDeltas = (rows, otherRows, { iterations = 4000, seed = 
   return {
     cases: pairs.length,
     ...Object.fromEntries(
-      RECALL_METRICS.map((metric) => {
+      metricsOf(rows).map((metric) => {
         const diffs = pairs.map(([left, right]) => (left[metric] ? 1 : 0) - (right[metric] ? 1 : 0));
         const samples = [];
 
@@ -104,6 +115,10 @@ const formatMarkdown = (report) => {
     `| in the top 3 | ${summary.hitAt3} |`,
     `| among all candidates | ${summary.hitAtAll} |`,
     `| among the chunks the gate admits | ${summary.admitted} |`,
+    ...CONTEXT_FLOORS.filter((floor) => contextMetric(floor) in summary).map(
+      (floor) => `| in the widened context (extra candidates from coverage ${floor}) | ${summary[contextMetric(floor)]} |`
+    ),
+    ...("gateConfident" in summary ? [`| (questions the gate answers) | ${summary.gateConfident} |`] : []),
   ];
 
   if (comparison) {
@@ -113,9 +128,9 @@ const formatMarkdown = (report) => {
       "",
       "| Metric | Delta | 95% CI |",
       "|---|---|---|",
-      ...RECALL_METRICS.map(
-        (metric) => `| ${metric} | ${comparison[metric].delta} | [${comparison[metric].ci95?.join(", ")}] |`
-      )
+      ...Object.keys(comparison)
+        .filter((metric) => comparison[metric]?.ci95 !== undefined)
+        .map((metric) => `| ${metric} | ${comparison[metric].delta} | [${comparison[metric].ci95?.join(", ")}] |`)
     );
   }
 
@@ -158,7 +173,7 @@ const main = async () => {
   applyStandaloneProfile();
   const rag = await import("../chat.js");
   const { retrieveQaCandidates } = await import("../rag/document-rag-execution.js");
-  const { assessQaConfidence } = await import("../rag/confidence.js");
+  const { assessQaConfidence, selectQaContext } = await import("../rag/confidence.js");
   const config = await import("../rag/config.js");
   const rows = [];
 
@@ -214,7 +229,22 @@ const main = async () => {
         results,
       });
 
+      const contextHits = Object.fromEntries(
+        CONTEXT_FLOORS.map((floor) => [
+          contextMetric(floor),
+          selectQaContext({
+            confidence,
+            limit: config.getRetrievalTopK(),
+            minCoverage: floor,
+            queryText: testCase.question,
+            results,
+          }).some((result) => expected.has(pageOf(result))),
+        ])
+      );
+
       rows.push({
+        ...contextHits,
+        gateConfident: confidence.confident,
         admitted: confidence.usableResults.some((result) => expected.has(pageOf(result))),
         candidateCount: results.length,
         hitAt1: hitRank === 0,

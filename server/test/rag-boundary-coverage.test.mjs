@@ -11,6 +11,7 @@ import {
   assessComparisonConfidence,
   assessQaConfidence,
   findQueryTermSubstitution,
+  selectQaContext,
 } from "../rag/confidence.js";
 import {
   configureCrossEncoderProvider,
@@ -353,6 +354,46 @@ test("QA admits a reworded chunk in the partial coverage band but not a neighbou
       false
     );
   });
+});
+
+test("once the gate answers, the context adds reworded candidates but not neighbouring topics", async () => {
+  await withEnv(
+    { RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_MIN_RELEVANCE_SCORE: "0.32", RAG_QA_ANSWER_VERDICT: undefined },
+    async () => {
+      const admitted = makeResult({ id: "admitted", text: "The amber ceiling is 2400 dollars.", keywordScore: 1 });
+      const reworded = makeResult({ id: "reworded", text: "Approved amounts above that need a director.", keywordScore: 0 });
+      const neighbour = makeResult({ id: "neighbour", text: "The cobalt ceiling is 3600 dollars.", keywordScore: 0.5 });
+      const results = [admitted, neighbour, reworded];
+      const queryText = "What is the amber ceiling?";
+      const confidence = assessQaConfidence({ queryText, results });
+      const ids = (context) => context.map((result) => result.document.id);
+
+      assert.deepEqual(ids(confidence.usableResults), ["admitted"]);
+      assert.deepEqual(ids(selectQaContext({ confidence, limit: 6, minCoverage: 0, queryText, results })), [
+        "admitted",
+        "reworded",
+      ]);
+      // The limit fills up to the context size but never drops an admitted chunk.
+      assert.deepEqual(ids(selectQaContext({ confidence, limit: 1, minCoverage: 0, queryText, results })), ["admitted"]);
+      assert.deepEqual(
+        selectQaContext({ confidence: { ...confidence, confident: false }, limit: 6, minCoverage: 0, queryText, results }),
+        []
+      );
+
+      // A question naming an identifier only takes candidates naming it.
+      const anchored = "What does clause ABC-12 cap?";
+      const anchorResults = [
+        makeResult({ id: "anchor", text: "Clause ABC-12 caps liability at the fees paid.", keywordScore: 1 }),
+        makeResult({ id: "other-clause", text: "Clause XYZ-9 caps indemnity.", keywordScore: 0.3 }),
+      ];
+      const anchorConfidence = assessQaConfidence({ queryText: anchored, results: anchorResults });
+
+      assert.deepEqual(
+        ids(selectQaContext({ confidence: anchorConfidence, limit: 6, minCoverage: 0, queryText: anchored, results: anchorResults })),
+        ["anchor"]
+      );
+    }
+  );
 });
 
 test("findQueryTermSubstitution names the replaced pair and ignores rewording and misspelling", () => {

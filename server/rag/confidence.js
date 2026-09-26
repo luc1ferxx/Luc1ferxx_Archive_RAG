@@ -5,7 +5,7 @@ import {
   getQaPartialCoverageFloor,
   isQaAnswerVerdictEnabled,
 } from "./config.js";
-import { getAdmissionScore } from "./citations.js";
+import { getAdmissionScore, getResultKey } from "./citations.js";
 import {
   buildTermSet,
   extractAnchorGroups,
@@ -448,6 +448,39 @@ export const assessQaConfidence = ({ results, queryText = "", evidenceRequiremen
       (result) => typeof result?.keywordScore === "number" && result.keywordScore < minCoverage
     ).length,
   };
+};
+
+/**
+ * The chunks the QA answer model sees once the gate is confident: the ones the
+ * gate admitted, then further candidates in retrieval order, up to `limit`.
+ *
+ * The coverage floor judges each chunk alone, so a confident question still
+ * lost the evidence paragraphs worded differently from it: on QASPER dev 69%
+ * of evidence paragraphs were among the candidates and 24% reached the model.
+ * Whether to answer stays the gate's call; this only decides what the model
+ * reads. A further candidate must still clear the relevance fallback floor,
+ * reach `minCoverage`, name one of the question's anchors when it has any, and
+ * not replace a query word with a rival (findQueryTermSubstitution).
+ */
+export const selectQaContext = ({ confidence, limit, minCoverage, queryText = "", results }) => {
+  if (!confidence?.confident) {
+    return [];
+  }
+
+  const admitted = confidence.usableResults;
+  const admittedKeys = new Set(admitted.map((result) => getResultKey(result)));
+  const anchorGroups = confidence.anchorGroups ?? [];
+  const minimumScore = getMinRelevanceScore() * FALLBACK_THRESHOLD_RATIO;
+  const extras = results.filter(
+    (result) =>
+      !admittedKeys.has(getResultKey(result)) &&
+      getAdmissionScore(result) >= minimumScore &&
+      (typeof result?.keywordScore !== "number" || result.keywordScore >= minCoverage) &&
+      (anchorGroups.length === 0 || getMatchedAnchorIndexes(result, anchorGroups).length > 0) &&
+      !findQueryTermSubstitution(queryText, buildSubstitutionEvidenceText(result))
+  );
+
+  return [...admitted, ...extras].slice(0, Math.max(limit, admitted.length));
 };
 
 export const assessComparisonConfidence = ({

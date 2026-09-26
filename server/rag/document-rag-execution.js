@@ -15,7 +15,11 @@ import {
 import {
   buildComparisonAnalysisFromContexts,
 } from "./comparison-analysis-summary.js";
-import { assessComparisonConfidence, assessQaConfidence } from "./confidence.js";
+import {
+  assessComparisonConfidence,
+  assessQaConfidence,
+  selectQaContext,
+} from "./confidence.js";
 import {
   buildComparisonEvidenceSummary,
   buildQaEvidenceSummary,
@@ -702,8 +706,20 @@ const executeQaRag = async ({
     requirements: evidenceRequirements,
     results: retrievalResults,
   });
+  // The gate decides whether to answer; once it does, the model also sees the
+  // further candidates selectQaContext lets through, not only the chunks each
+  // clearing the coverage floor on its own.
+  const contextResults = confidence.confident
+    ? selectQaContext({
+        confidence,
+        limit: retrievalOptions.topK ?? getRetrievalTopK(),
+        minCoverage: QA_CONTEXT_MIN_COVERAGE,
+        queryText: resolvedQuery,
+        results: retrievalResults,
+      })
+    : confidence.usableResults;
   const bundle = prepareQASourceBundle({
-    results: confidence.usableResults,
+    results: contextResults,
   });
   const traceFields = {
     ...buildCommonTraceFields({
@@ -714,6 +730,7 @@ const executeQaRag = async ({
     }),
     retrieval,
     retrievalResults: retrievalResults.map((result) => buildResultTrace(result)),
+    contextExtraCount: contextResults.length - confidence.usableResults.length,
     confidence: buildConfidenceTrace(confidence),
     evidenceSummary,
     finalSourceBundle: buildBundleTrace(bundle),
@@ -763,7 +780,7 @@ const executeQaRag = async ({
           queryVector,
           resolvedQuery,
           retrievalOptions,
-          shownResults: confidence.usableResults,
+          shownResults: contextResults,
         })
       : null;
 
@@ -790,6 +807,12 @@ const executeQaRag = async ({
 // retrieve once more at RAG_QA_VERDICT_RETRY_TOP_K and give the model the
 // chunks it has not seen that pass the same gate, at most one normal context's
 // worth. One retry only; if nothing new passes, the refusal stands.
+// Further candidates need no query term of their own: a paragraph answering in
+// other words ("We evaluate on SQuAD" for "What datasets do they use?") often
+// shares none. On QASPER train this floor put the most evidence in the context
+// (0.335 against 0.318 at one shared term and 0.23 before widening).
+const QA_CONTEXT_MIN_COVERAGE = 0;
+
 const retryQaWithDeeperRetrieval = async ({
   docIds,
   evidenceRequirementCount,
@@ -834,7 +857,13 @@ const retryQaWithDeeperRetrieval = async ({
   }
 
   const bundle = prepareQASourceBundle({
-    results: confidence.usableResults.slice(0, contextSize),
+    results: selectQaContext({
+      confidence,
+      limit: contextSize,
+      minCoverage: QA_CONTEXT_MIN_COVERAGE,
+      queryText: resolvedQuery,
+      results: unseen,
+    }).slice(0, contextSize),
   });
   const answer = await writeQaAnswer({
     query,
