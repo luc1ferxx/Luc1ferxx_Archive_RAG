@@ -32,6 +32,18 @@ flowchart LR
 - Budget guard 阻止无限 follow-up。
 - Finalizer 删除或降级仍未被 citation 支持的 claim。
 
+### 关键规则
+
+- Planner 只在已注册 intent、skill、capability 和 step schema 里选择。
+- 在 custom skill 的 V2 DAG 模式下，模型看到的是 runtime 从已注册、显式 typed contract、已核验 `accessScope` / `docIds` 构造的原子 Skill catalog，不受 V1 复合 intent/chain 限死。例如上游只选了 `compare_documents` intent，DAG planner 仍可在授权候选中规划 `compare_documents -> risk_review`；没有选中文档或文档无法按 scope 核验时不会扩大候选范围。V1 顺序链只在整张图被拒、尚无节点执行时兜底，或由运维显式设为 `off`。
+- Planner 不决定权限、`docIds`、审批、secret、预算、并发和重试上限；这些由 runtime 拥有。custom skill 的 typed DAG 也一样：模型只产出节点和依赖，validator 整体接受或整体拒绝，非法图不会部分执行；runner 在执行前、把真实或恢复的输出交给下游前再次校验 typed contract。当前 typed 输出仍是 `text` / `citations` / `abstained` 的答案封套，不是已做语义验证的差异或风险对象。
+- 文档读取、skill 执行、task 和 agent run 都携带 `accessScope`。
+- Working memory 是 run-scoped，只记录本轮 queries、claims、gaps 和 loop counters。
+- Agent experience memory 是规划提示，不是事实来源；答案证据仍必须来自 citations。
+- Workspace artifact 是生成结果而非 RAG 来源；不会进入文档 registry、向量索引、citation、claim support 或 evidence。
+- 对外部工具调用先经过 query policy 和 approval policy，避免把敏感实体直接带出工作区。
+- Claim 校验的 LLM 评审只能把"无支持"改成"有支持"；引用错误、证据里没有的数字、对比答案不送评审，评审失败时保留词法结论。
+
 ## QA 路径
 
 1. 结合会话记忆把追问改写成独立检索问题。
@@ -168,6 +180,18 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 - Graph 只覆盖 custom skill 阶段。built-in skill、document RAG 主循环、capability 调用仍走各自既有路径和安全边界。
 - 评测有四个固定 trajectory `skill_graph` case、一个 `planner_dynamic_skill_graph` case（mock/real provider）、recovery-observability 的 replan 与 startup resume case，以及带真实 LLM planner 的 guarded HTTP runtime smoke。`rollout:readiness` 要求 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`、real-provider DAG case 和 smoke 通过；`release:gate` 另要求新鲜、同提交、干净工作树的完整证据。见 [evaluation.md](evaluation.md#skill-graph-rollout-的评测边界)。这些门禁证明规划/执行路径与合同，不直接证明模型生成的风险内容语义正确。
 - 同一 run 的 guarded checkpoint 可在严格校验后复用已完成 node；启动自动恢复只覆盖 graph-only 外层 plan，不是跨不同 `agentRunId` 的通用缓存，更不会跳过外层 document/Web/built-in/capability 阶段。默认 `guarded` 不代表整条 AgentRAG 执行计划都可自动续跑。
+
+## 关键调用链
+
+| 场景 | 谁调用 | 谁决定 | 谁执行 |
+| --- | --- | --- | --- |
+| 上传 PDF | `src/components/PdfUploader.jsx` 调 `/upload` 或分片上传接口 | `server/routes/uploads.js` 校验文件名、魔数、session 和 access scope | `server/rag/index.js` 用 `pdf-loader.js` 解析 PDF，`chunker.js` 切块，`doc-registry.js` 写 PostgreSQL，`vector-store*.js` 写索引 |
+| 普通问答 | `src/components/ChatComponent.jsx` 经 `streamChatAnswer` 调 `/chat/stream`（进度和校验过的草稿实时推送，最终结果与 `/chat` 相同） | `server/routes/chat.js` 接请求，`server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
+| 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
+| arXiv 推荐导入 | 前端 arXiv panel 调 suggestion / task action | `arxiv-enrichment.js` 生成清理后的 topic 和签名候选，task service 记录等待确认 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
+| Agent goal task | `/agent-tasks` 创建 durable goal，前端 Agent Run Center 消费 `/tasks` 返回的公开 plan | `agent-tasks.js` 驱动多轮 task loop，`agent-goal-plan.js` 生成公开计划合同 | `job-orchestrator.js` 调 runner，`runAgentRag()` 执行每轮 `/chat` 路径，task action 可继续或批准 |
+| Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*`，启动时也扫描 recoverable run | `agent-run-recovery.js` 和 replay safety matrix 判断能否自动恢复；guarded graph 还需私有 checkpoint 与 step 对账、无待审批且外层 plan 只有 `custom_skills` | `agent-run-step-executor.js` 恢复安全 step / 审批后的 capability step；符合上述窄条件的 graph-only run 用专用续跑路径复用已完成 node，未知 in-flight 或不一致时转人工 |
+| 质量门控 | CLI、前端 Quality 面板或 CI 调 eval/gate | `server/evaluation/quality-*.js` 组合各类报告 | synthetic、trajectory、planner、recovery、feedback、rerank、coverage 等 runner 执行 |
 
 ## 关键模块
 
@@ -420,3 +444,30 @@ Durable agent task loop 使用 `server/rag/agent-task-memory.js` 维护 task-sco
 - 下一步候选。
 
 Task memory 只会作为 intent/execution planner 的 planning context 传入，并带有 `evidencePolicy: "planning_context_only"`。它不能作为 citation、RAG source、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 的实际执行结果。
+
+## AgentRAG 优化路线
+
+当前主线遵循低耦合、避免重复代码、复用现有模块边界的原则：
+
+| 顺序 | 主题 | 当前落点 |
+| --- | --- | --- |
+| 1 | Planner eval gate | 已接入 `eval:planner`、`planner:gate`、`rollout:readiness` 和 `quality:gate`。 |
+| 2 | 持久化主执行路径 | Task store、agent run store、step snapshots/events 已通过 PostgreSQL-backed adapter 持久化。 |
+| 3 | Agent run recovery | 已有 startup recovery、manual/auto recovery、approval resume、step retry 和 replay safety matrix；guarded graph 增加同 run 私有 checkpoint 与受限的 graph-only startup auto resume，不会重跑已完成 node，也不宣称外层混合阶段可自动续跑。 |
+| 4 | PostgreSQL restart 覆盖 | 已补 HTTP/API 级 paused document resume、failed step retry 和 blocked approval safety 覆盖，继续复用 replay safety matrix 和 step executor。 |
+| 5 | 真实/困难语料评测 | 已用 `eval:robust-suite` 把 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 纳入固定周期 gate，替代只看 near-duplicate 饱和分数。 |
+| 6 | Agent task 目标产物 | 已把 `report.export`、`document.organize`、`summary.create`、`task.create` 接成 task-level goal deliverables；批准后前三类会真实写入 scoped workspace artifact 并只向 task 暴露 compact refs，写入失败时目标不会误报完成。 |
+| 7 | Research task / dossier | 已加 task-level research flow：本地 `research_brief` -> web supplement -> arXiv supplement -> compare/risk review -> citation self-check -> final dossier -> report deliverables。流程由 declarative `research_dossier` workflow spec 渲染，只生成下一步问题、公开 phase 状态和 workflow lifecycle snapshot，实际执行仍复用现有 planner、skills、approval gates 和 capability registry。 |
+| 8 | 目标完成自检 | 已加 task-level `goalCompletion` contract：统一检查 public plan steps、unresolved gaps / unsupported claims、goal deliverables、pending approval / user action、research phases 和 workflow lifecycle contract；默认 trajectory eval 覆盖从等待批准到产物创建后的完整目标生命周期。 |
+| 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加授权原子 Skill catalog、typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、运行时输入/输出 gate、拓扑 scheduler、持久化 graph checkpoint 和一次有界 replan；执行器由 `AGENT_SKILL_GRAPH_ROLLOUT`（`guarded`/`shadow`/`off`，默认 `guarded`）选择，V1 顺序链只作为整图被拒时的兜底和运维的显式回退，组合 intent 和 deterministic planner 保留。四个 trajectory case 钉住 DAG 行为，planner eval 另有 compare-only intent 下动态组合 compare+risk 的 guarded case；real provider、runtime smoke 和 rollout/release gate 为真实模型灰度提供额外门禁。 |
+
+后续按"像工业界那样"的差距清单推进，已完成：
+
+| 顺序 | 主题 | 当前落点 |
+| --- | --- | --- |
+| 10 | 收敛编排 | Typed DAG 设为 custom skill 阶段的默认执行器；执行器与规划器拆成两个开关；全阶段 v3 统一图冻结在 shadow。 |
+| 11 | 运行预算 | 每次运行加 token / 成本 / 时长上限，按 LLMOps 事件计量，经 AsyncLocalStorage 归属到运行，超限后在步骤边界降级。 |
+| 12 | 模型网关保护 | 每个模型端点的并发上限和熔断器；熔断时直接切备用模型或立即失败。 |
+| 13 | 可观测性 | OpenTelemetry GenAI trace，默认 protobuf 导出（Phoenix 只收 protobuf），不记录问题、prompt、输出和文档内容。 |
+| 14 | 流式草稿 | 只推送通过 claim 校验的整句；聊天界面接上 `/chat/stream`。 |
+| 15 | 校验器 | 修复"twelve (12)"被算成两个数、证据在 PDF 换行处被切断两个 bug；加入受限的 LLM 评审（默认关闭）。 |

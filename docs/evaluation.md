@@ -196,6 +196,20 @@ npm run corpus:arxiv
 
 `robust:gate` 只读取以上三份 report，并要求它们都存在：synthetic report 不能有失败 case；rerank report 必须有 ranking case、语料匹配、NDCG/Recall 不回退。workflow 使用 `--fail-on-warn`，因此 NDCG lift 退化成 0 或 baseline 饱和也会失败。它不会把旧 synthetic 历史、feedback、planner、trajectory 或 recovery 状态混入 robust 判定；这些信号分别由 current/release gate 校验。单独运行 `robust:gate` 的输出固定标记为 `latest_reports_unverified/currentCommitVerified=false`；只有随后执行的 `release:gate` 才验证 commit、freshness、profile 与 suite lineage。Suite lineage hash 绑定 provider、固定 corpus 的内容 hash/identity、threshold 以及实际 chunk/retrieval/rerank 配置；release gate 会从代码中的权威 suite 计划重算这个 hash，因此三份报告共享任意自造 hash 也不能通过。
 
+### 为什么换成 robust suite：改前 / 改后
+
+优化前，主 synthetic `latest.*` 和 legacy rerank 报告长期依赖 near-duplicate 小语料。旧 `latest-rerank.md` 只有 `6` 个 ranking cases，NDCG、Recall、MRR 都是 `1.0000 -> 1.0000`，lift 为 `0.0000`，无法证明 rerank 对困难检索有真实收益。
+
+这次优化把 robust 评测统一到 `eval:robust-suite`：用 compare-hard 刷新主 synthetic regression，把 hard-CS rerank 和 arXiv real-paper rerank 写成独立 latest reports，并交给 scoped `robust:gate -- --fail-on-warn` 强制检查。standalone workflow 负责手动诊断，固定周期由 Release Evidence Gate 运行同一命令并继续执行 strict release gate。suite 定义集中在 `server/evaluation/eval-suite.js`，runner 只消费配置；suite lineage 同时绑定 pinned arXiv corpus 的内容 hash/identity，release gate 还要求三份 robust 正文的 runId/createdAt 与 evidence envelope 一致并固定 schema/generator。质量门通过 `quality-robust-suite-gate.js` 统一检查 report 是否存在、语料是否匹配、case 数量是否非空、NDCG/Recall 是否不回退，以及 NDCG lift 是否退化成 `0`。
+
+前后对比如下：
+
+| 评测层 | 优化前 | 优化后 | 变化 |
+| --- | --- | --- | --- |
+| 主 synthetic regression | `latest.*` 长期追踪 near-duplicate，小语料容易满分饱和。 | `eval:robust-suite` 用 compare-hard corpus 刷新 `latest.*`。 | 主报告从容易饱和的近重复集，切到更难的 compare 回归集。 |
+| Legacy rerank signal | near-duplicate `latest-rerank.md`：NDCG `1.0000 -> 1.0000`，Recall `1.0000 -> 1.0000`，MRR `1.0000 -> 1.0000`，lift `0.0000`。 | hard-CS rerank probe：NDCG `0.9385 -> 1.0`，MRR `0.9167 -> 1.0`。 | baseline 不再满分，rerank 在困难 CS 语料上有可见 lift。 |
+| Real-paper rerank coverage | legacy 小语料不覆盖长论文、跨论文比较和 hard negative。 | arXiv real-paper rerank probe：NDCG `0.4698 -> 0.5394`，Recall `0.6215 -> 0.6771`，MRR `0.476 -> 0.5615`。 | 固定 gate 开始覆盖真实论文语料，能观察长文档排序收益。 |
+
 ## Trajectory eval
 
 Trajectory eval 检查 AgentRAG 行为，而不是只看答案文本：
