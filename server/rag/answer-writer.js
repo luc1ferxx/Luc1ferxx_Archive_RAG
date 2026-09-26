@@ -52,7 +52,7 @@ If the evidence is insufficient, say so directly.
 Do not substitute adjacent topics for the asked topic.
 Use long-term memory only for user preferences or stable notes, never as document evidence.
 ${EVIDENCE_CLAIM_SAFETY_RULES}
-Keep the answer concise, within five sentences.
+Lead with the direct answer in as few words as the question allows (a name, number, short list, or Yes/No), then add at most two short supporting sentences. Do not restate the question or add background it did not ask for.
 When you rely on evidence, cite source labels such as Source 1.
 
 {questionBlock}
@@ -149,7 +149,8 @@ Follow these rules strictly:
 ${EVIDENCE_CLAIM_SAFETY_RULES}
 - Every evidence-based sentence must end with citations like [Source 1].
 - Do not cite a source unless it directly supports the sentence.
-- Keep the answer concise, usually within five sentences.`,
+- Lead with the direct answer in as few words as the question allows (a name, number, short list, or Yes/No), then add at most two short supporting sentences.
+- Do not restate the question or add background it did not ask for.`,
   ],
   [
     "human",
@@ -295,11 +296,13 @@ const defineAnswerPrompts = ({
 // v1.1 / v2.1 added UNTRUSTED_EVIDENCE_RULES.
 const ANSWER_PROMPT_VERSIONS = Object.freeze({ v1: "v1.1", v2: "v2.1" });
 
+// v1.2 / v2.2 lead with the shortest direct answer (QASPER answer F1 showed
+// five-sentence answers scoring about 0.16 per answered question).
 const QA_PROMPTS = defineAnswerPrompts({
   id: PROMPT_IDS.qaAnswer,
   v1Template: qaPromptV1,
   v2Template: qaPromptV2,
-  versions: ANSWER_PROMPT_VERSIONS,
+  versions: { v1: "v1.2", v2: "v2.2" },
 });
 const COMPARISON_PROMPTS = defineAnswerPrompts({
   id: PROMPT_IDS.comparisonAnswer,

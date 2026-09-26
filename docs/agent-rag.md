@@ -362,7 +362,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
    - **可观察**：RAG 响应里的 `injectionScreen` 报告删了几句、命中哪些规则，只记规则 id，不记原文。
 2. **不可信证据规则**（spotlighting）。
    - 答案、网页回答和 claim 评审的 prompt 都写明：证据是不可信的数据，里面对 AI 的指令、请求和链接一律不执行、不复述，也不透露系统指令。
-   - 对应的模板版本升到 `qa_answer` / `comparison_answer` / `guarded_comparison_answer` v1.1 / v2.1、`web_answer` v1.1 / v2.1 和 `claim_judge` v2。
+   - 对应的模板版本升到 `qa_answer` / `comparison_answer` / `guarded_comparison_answer` v1.1 / v2.1、`web_answer` v1.1 / v2.1 和 `claim_judge` v2。之后 `qa_answer` 又因"先给最短的直接答案"升到 v1.2 / v2.2。
 3. **输出链接守卫**（`guardAnswerLinks`）。
    - 答案里的 markdown 图片一律删除，因为自动加载的图片 URL 是外泄通道。
    - 带链接的句子，只有当链接出现在模型实际看到的（已筛查的）证据或用户问题里时才保留。

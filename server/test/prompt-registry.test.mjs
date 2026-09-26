@@ -42,9 +42,9 @@ const PINNED_PROMPT_TEMPLATES = Object.freeze({
   "memory_query_rewrite@v1": "482c557f3448",
   "memory_query_rewrite@v2": "c695383ae9e3",
   "memory_query_rewrite@v3": "2dc8733dd00c",
-  // v1.1 / v2.1: untrusted-evidence rules (prompt-injection hardening).
-  "qa_answer@v1.1": "ac8a16cadc2d",
-  "qa_answer@v2.1": "35bc6fd42c57",
+  // v1.2 / v2.2: lead with the shortest direct answer.
+  "qa_answer@v1.2": "b96d76d43661",
+  "qa_answer@v2.2": "69647d5ad62c",
   "replanner@v1": "16e4034680c7",
   "web_answer@v1.1": "26e8ffa6c6c4",
   "web_answer@v2.1": "9fb8253dfa4f",
@@ -87,8 +87,8 @@ test("the active set follows RAG_PROMPT_VERSION and hashes independently of orde
     process.env.RAG_PROMPT_VERSION = "v3";
     const v3 = describeActivePromptTemplates();
 
-    assert.equal(v1.templates.find((template) => template.id === "qa_answer").version, "v1.1");
-    assert.equal(v3.templates.find((template) => template.id === "qa_answer").version, "v2.1");
+    assert.equal(v1.templates.find((template) => template.id === "qa_answer").version, "v1.2");
+    assert.equal(v3.templates.find((template) => template.id === "qa_answer").version, "v2.2");
     assert.equal(
       v3.templates.find((template) => template.id === "memory_query_rewrite").version,
       "v3"
