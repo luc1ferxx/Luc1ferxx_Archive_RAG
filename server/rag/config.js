@@ -477,8 +477,27 @@ export const getHybridSparseWeight = () =>
 export const getKeywordWeight = () =>
   toPositiveNumber(process.env.RAG_KEYWORD_WEIGHT, 0.18);
 
+// Query-term coverage floor for comparison answers (see rag/confidence.js,
+// which also lets dense similarity bypass it there).
 export const getMinQueryTermCoverage = () =>
   Math.min(1, toPositiveNumber(process.env.RAG_MIN_QUERY_TERM_COVERAGE, 0.51));
+
+// The same floor for single-document QA, split out so a deployment can set it
+// on its own. On QASPER (evaluation/run-abstention-gate-analysis.mjs) it
+// rejects answerable and unanswerable questions at nearly the same rate,
+// because a question worded differently from the paper fails a lexical test
+// whether or not the paper answers it, and lowering it to 0.2 would cut the
+// expected cost there by a third. The default stays 0.51 anyway: every value
+// at or below 0.5 also admits the adjacent-topic chunks the behaviour tests
+// guard against ("parental leave" answered from an annual-leave clause,
+// "amber ceiling" citing the cobalt one). See docs/evaluation.md.
+export const DEFAULT_MIN_QA_QUERY_TERM_COVERAGE = 0.51;
+
+export const getMinQaQueryTermCoverage = () =>
+  Math.min(
+    1,
+    toPositiveNumber(process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE, DEFAULT_MIN_QA_QUERY_TERM_COVERAGE)
+  );
 
 export const isQueryDecompositionEnabled = () =>
   toBoolean(process.env.RAG_QUERY_DECOMPOSITION_ENABLED, true);

@@ -642,6 +642,30 @@ const executeComparisonRag = async ({
   };
 };
 
+/**
+ * The single-document QA route up to its confidence gate: the candidates
+ * assessQaConfidence judges, built exactly as executeDocumentRag builds them
+ * when no agent retrieval plan is given. Exported so the abstention-gate
+ * analysis can replay the real gate over real candidates under different
+ * thresholds without calling a chat model.
+ */
+export const retrieveQaCandidates = async ({ docIds, resolvedQuery }) => {
+  const inputs = await buildRetrievalInputs({
+    agentRetrievalPlan: null,
+    docIds,
+    resolvedQuery,
+  });
+  const { results } = await retrieveGlobalContextForQueries({
+    primaryQueryVector: inputs.queryVector,
+    primaryQueryText: resolvedQuery,
+    retrievalQueries: inputs.plannedRetrievalQueries,
+    retrievalOptions: inputs.retrievalOptions,
+    docIds,
+  });
+
+  return { results, routeMode: inputs.route.mode };
+};
+
 const executeQaRag = async ({
   agentRetrievalPlan,
   docIds,

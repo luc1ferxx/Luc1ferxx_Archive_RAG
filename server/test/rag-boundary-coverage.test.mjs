@@ -265,8 +265,8 @@ test("single-document QA keeps the strict lexical coverage requirement", async (
   // made a correct abstention silently disappear.
   await withEnv(
     {
+      RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
       RAG_MIN_RELEVANCE_SCORE: "0.32",
-      RAG_MIN_QUERY_TERM_COVERAGE: "0.51",
     },
     async () => {
       const assessment = assessQaConfidence({
@@ -286,6 +286,33 @@ test("single-document QA keeps the strict lexical coverage requirement", async (
 
       assert.equal(assessment.confident, false);
       assert.equal(assessment.usableResults.length, 0);
+    }
+  );
+});
+
+test("QA and comparison read separate coverage floors", async () => {
+  const halfCoverage = {
+    ...makeResult({
+      id: "half-coverage",
+      text: "The total liability of Vendor A shall not exceed the fees paid.",
+      score: 0.5,
+      keywordScore: 0.5,
+    }),
+    vectorScore: 0.2,
+  };
+
+  // Lowering the QA floor admits the chunk to QA ...
+  await withEnv(
+    { RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.4", RAG_MIN_QUERY_TERM_COVERAGE: "0.51", RAG_MIN_RELEVANCE_SCORE: "0.32" },
+    async () => {
+      assert.equal(assessQaConfidence({ queryText: "liability cap", results: [halfCoverage] }).confident, true);
+    }
+  );
+  // ... and raising the comparison floor does not touch QA.
+  await withEnv(
+    { RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_MIN_QUERY_TERM_COVERAGE: "0.4", RAG_MIN_RELEVANCE_SCORE: "0.32" },
+    async () => {
+      assert.equal(assessQaConfidence({ queryText: "liability cap", results: [halfCoverage] }).confident, false);
     }
   );
 });

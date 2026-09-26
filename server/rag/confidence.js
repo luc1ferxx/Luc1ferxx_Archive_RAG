@@ -1,4 +1,8 @@
-import { getMinQueryTermCoverage, getMinRelevanceScore } from "./config.js";
+import {
+  getMinQaQueryTermCoverage,
+  getMinQueryTermCoverage,
+  getMinRelevanceScore,
+} from "./config.js";
 import { getAdmissionScore } from "./citations.js";
 import {
   buildTermSet,
@@ -39,12 +43,15 @@ const FALLBACK_THRESHOLD_RATIO = 0.8;
 // This does NOT weaken the anchor check: a query naming a specific identifier is
 // still rejected when the identifier is absent, by analyzeAnchorCoverage, which
 // runs after this filter and is tested independently.
-const hasEnoughQueryCoverage = (result, { allowSemanticBypass = false } = {}) => {
+const hasEnoughQueryCoverage = (
+  result,
+  { allowSemanticBypass = false, minCoverage = getMinQueryTermCoverage() } = {}
+) => {
   if (typeof result?.keywordScore !== "number") {
     return true;
   }
 
-  if (result.keywordScore >= getMinQueryTermCoverage()) {
+  if (result.keywordScore >= minCoverage) {
     return true;
   }
 
@@ -154,13 +161,17 @@ const filterQualifiedResults = (results, minimumScore, coverageOptions) =>
       hasEnoughQueryCoverage(result, coverageOptions)
   );
 
+// QA and comparison read separate coverage floors: comparison keeps
+// RAG_MIN_QUERY_TERM_COVERAGE (its abstention cases depend on it), QA reads
+// RAG_MIN_QA_QUERY_TERM_COVERAGE.
 const selectUsableResults = ({
   results,
   queryText = "",
   allowSemanticBypass = false,
+  minCoverage = getMinQueryTermCoverage(),
 }) => {
   const minimumScore = getMinRelevanceScore();
-  const coverageOptions = { allowSemanticBypass };
+  const coverageOptions = { allowSemanticBypass, minCoverage };
   const anchorGroups = extractAnchorGroups(queryText);
   const strongAnchorAnalysis = analyzeAnchorCoverage(
     filterQualifiedResults(results, minimumScore, coverageOptions),
@@ -245,6 +256,7 @@ const buildComparisonAnchorReason = ({
 
 export const assessQaConfidence = ({ results, queryText = "" }) => {
   const selection = selectUsableResults({
+    minCoverage: getMinQaQueryTermCoverage(),
     results,
     queryText,
   });
