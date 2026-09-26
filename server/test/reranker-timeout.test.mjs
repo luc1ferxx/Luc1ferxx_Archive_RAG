@@ -2,6 +2,7 @@ import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   configureRerankMetricsCollector,
+  rerankResultsOrKeepOrder,
   rerankResultsWithProvider,
   resetCrossEncoderProvider,
   resetCustomRerankProvider,
@@ -225,6 +226,42 @@ test("http cross-encoder uses default 30000ms timeout when env var is not set", 
           return true;
         }
       );
+    }
+  );
+});
+
+test("retrieval keeps its own order when the cross-encoder is down, and the provider call still throws", async () => {
+  await withEnv(
+    {
+      RAG_RERANK_ENABLED: "true",
+      RAG_RERANK_PROVIDER: "cross-encoder",
+      RAG_CROSS_ENCODER_ENDPOINT: "https://rerank.example.test/score",
+    },
+    async () => {
+      const warnings = [];
+      const originalWarn = console.warn;
+
+      console.warn = (message) => warnings.push(String(message));
+      globalThis.fetch = async () => {
+        throw new TypeError("fetch failed");
+      };
+
+      try {
+        const kept = await rerankResultsOrKeepOrder({
+          queryText: "semantic search",
+          results: makeRerankResults(),
+          topK: 1,
+        });
+
+        assert.deepEqual(kept.map((result) => result.document.id), ["semantic"]);
+        assert.match(warnings.join("\n"), /Rerank failed \(fetch failed\); keeping the retrieval order/);
+        await assert.rejects(
+          rerankResultsWithProvider({ queryText: "semantic search", results: makeRerankResults(), topK: 1 }),
+          /fetch failed/
+        );
+      } finally {
+        console.warn = originalWarn;
+      }
     }
   );
 });

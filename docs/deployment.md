@@ -38,6 +38,21 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 - 服务不可用时退回 pdf.js，并在 `/health` 的 `checks.pdfParser` 里报错；
 - 效果和代价见 [evaluation.md](evaluation.md) 的"版面解析"。
 
+### 交叉编码器重排（可选，推荐）
+
+在应用之外单独起一个重排服务，然后给应用设置这几个变量：
+
+```bash
+RAG_RERANK_ENABLED=true
+RAG_RERANK_PROVIDER=cross-encoder
+RAG_CROSS_ENCODER_ENDPOINT=http://<重排服务>/rerank
+RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3
+```
+
+- 本机：先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 就用 GPU，模型约 2.3 GB。
+- 生产：Hugging Face TEI 的 `/rerank` 接口格式一样，可以直接换上去。
+- 在 Apple MPS 上，一次 18 个候选的重排约 0.4 秒。服务挂了查询不会失败，只是不重排。
+
 ### 多实例共享状态（可选）
 
 ```bash

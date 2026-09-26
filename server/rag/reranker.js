@@ -622,6 +622,29 @@ export const rerankResults = ({ queryText = "", results = [], topK } = {}) =>
     rerankWeight: getRerankWeight(),
   });
 
+// Reranking refines an order retrieval already produced, so an unreachable or
+// failing rerank service degrades a query to that order instead of failing it.
+// The failure is still an error metric (scoreWithCrossEncoder) and a warning,
+// logged once per distinct message.
+const reportedRerankFallbacks = new Set();
+
+export const rerankResultsOrKeepOrder = async ({ queryText = "", results = [], topK } = {}) => {
+  try {
+    return await rerankResultsWithProvider({ queryText, results, topK });
+  } catch (error) {
+    const message = error?.message ?? String(error);
+
+    if (!reportedRerankFallbacks.has(message)) {
+      reportedRerankFallbacks.add(message);
+      console.warn(`Rerank failed (${message}); keeping the retrieval order for this query.`);
+    }
+
+    const safeResults = Array.isArray(results) ? results : [];
+
+    return safeResults.slice(0, normalizeTopK(topK, safeResults.length));
+  }
+};
+
 export const rerankResultsWithProvider = async ({
   queryText = "",
   results = [],

@@ -204,10 +204,10 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | `RAG_HYBRID_SPARSE_WEIGHT` | `0.35` | Weighted fusion 的 sparse 权重。 |
 | `RAG_RRF_K` | `60` | RRF 平滑常数。 |
 | `RAG_RERANK_ENABLED` | `false` | 是否启用 rerank。 |
-| `RAG_RERANK_PROVIDER` | `heuristic` | `heuristic`、`cross-encoder` 或代码内注入的 `custom`。 |
+| `RAG_RERANK_PROVIDER` | `heuristic` | `heuristic`、`cross-encoder` 或代码内注入的 `custom`。启发式重排在 QASPER 上没有收益。有重排服务时推荐 `cross-encoder` 加 BAAI/bge-reranker-v2-m3：dev 上证据进入模型上下文 +0.063，可回答题的拒答率下降 4.4 个百分点，不可回答题识别率不变（见 evaluation.md 的“交叉编码器重排”）。重排服务不可用时，该次查询退回融合排序并打印警告，不会失败。 |
 | `RAG_RERANK_CANDIDATE_MULTIPLIER` | `3` | Rerank 候选放大倍数。 |
 | `RAG_RERANK_WEIGHT` | `0.6` | Rerank 分数与粗排分数混合权重。 |
-| `RAG_CROSS_ENCODER_ENDPOINT` | 空 | Cross-encoder HTTP endpoint。 |
+| `RAG_CROSS_ENCODER_ENDPOINT` | 空 | Cross-encoder HTTP endpoint，请求 `{query, texts}`、返回 `{scores}`，和 Hugging Face TEI 的 `/rerank` 格式相同。本地用 `npm run rerank:cross-encoder` 启动，地址是 `http://127.0.0.1:8081/rerank`。 |
 | `RAG_CROSS_ENCODER_MODEL` | 空 | 传给 cross-encoder endpoint 的可选模型名。 |
 
 ## Auth 和 access scope

@@ -1,6 +1,10 @@
-fastapi==0.115.6
-huggingface-hub==0.23.5
-pydantic==2.10.4
-tokenizers==0.19.1
-transformers==4.40.2
-uvicorn==0.34.0
+# Measured with BAAI/bge-reranker-v2-m3 on Apple MPS (docs/evaluation.md,
+# "交叉编码器重排"). Python 3.10+; torch picks CUDA, MPS or CPU wheels itself.
+fastapi==0.141.1
+huggingface_hub==1.33.0
+pydantic==2.13.5
+safetensors==0.8.0
+tokenizers==0.23.2
+torch==2.14.0
+transformers==5.17.0
+uvicorn==0.54.0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import List, Optional
 
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
@@ -32,6 +33,7 @@ class NeuralCrossEncoder:
         self.max_length = int(os.environ.get("RAG_CROSS_ENCODER_MAX_LENGTH", "384"))
         self.batch_size = int(os.environ.get("RAG_CROSS_ENCODER_BATCH_SIZE", "8"))
         self.device = self._resolve_device()
+        self.lock = threading.Lock()
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
         self.model.to(self.device)
@@ -39,7 +41,7 @@ class NeuralCrossEncoder:
 
     @staticmethod
     def _resolve_device() -> torch.device:
-        requested = os.environ.get("RAG_CROSS_ENCODER_DEVICE", "cpu").strip().lower()
+        requested = os.environ.get("RAG_CROSS_ENCODER_DEVICE", "auto").strip().lower()
 
         if requested == "auto":
             if torch.cuda.is_available():
@@ -56,6 +58,15 @@ class NeuralCrossEncoder:
 
         if not texts:
             return []
+
+        # FastAPI runs sync endpoints on a thread pool and retrieval sends one
+        # rerank request per sub-query at once; MPS (and a single model on any
+        # device) is not safe to drive from several threads, and concurrent
+        # calls crashed the Metal command encoder. One inference at a time.
+        with self.lock:
+            return self._score(query, texts)
+
+    def _score(self, query: str, texts: List[str]) -> List[float]:
 
         scores: List[float] = []
 

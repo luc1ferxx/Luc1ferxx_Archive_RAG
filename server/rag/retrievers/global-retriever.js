@@ -3,7 +3,7 @@ import {
   getRetrievalTopK,
   isRerankEnabled,
 } from "../config.js";
-import { rerankResultsWithProvider } from "../reranker.js";
+import { rerankResultsOrKeepOrder } from "../reranker.js";
 import { searchDocumentsWithRoutes } from "../vector-store.js";
 
 // Rerank sits after fusion on purpose: it reorders the candidates the two
@@ -27,7 +27,7 @@ export const retrieveGlobalContextWithRoutes = async ({
     docIds,
     topK: candidateK,
   });
-  const results = await rerankResultsWithProvider({
+  const results = await rerankResultsOrKeepOrder({
     queryText,
     results: search.results,
     topK,

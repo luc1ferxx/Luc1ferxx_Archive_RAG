@@ -3,7 +3,7 @@ import {
   getRerankCandidateMultiplier,
   isRerankEnabled,
 } from "../config.js";
-import { rerankResultsWithProvider } from "../reranker.js";
+import { rerankResultsOrKeepOrder } from "../reranker.js";
 import { searchDocumentsPerDocumentWithRoutes } from "../vector-store.js";
 
 export const retrievePerDocumentContextWithRoutes = async ({
@@ -29,7 +29,7 @@ export const retrievePerDocumentContextWithRoutes = async ({
     await Promise.all(
       [...search.resultsByDocument.entries()].map(async ([docId, results]) => [
         docId,
-        await rerankResultsWithProvider({
+        await rerankResultsOrKeepOrder({
           queryText,
           results,
           topK: topKPerDoc,
