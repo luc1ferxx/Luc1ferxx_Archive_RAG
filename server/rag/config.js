@@ -99,6 +99,12 @@ export const getAgentRunMaxDurationMs = () =>
 // Second opinion on claims the lexical claim check rejects (see
 // self-check/claim-judge.js). `off` keeps the lexical verdict alone; `llm` asks
 // the chat model, behind deterministic citation and number guards.
+// The deterministic prompt-injection screen over retrieved text, file names
+// and web results (rag/prompt-injection-screen.js). "off" is a kill switch for
+// a false positive in production; an unrecognized value keeps it on.
+export const getPromptInjectionScreenMode = () =>
+  toChoice(process.env.RAG_INJECTION_SCREEN, "on", ["off", "on"]);
+
 export const getClaimJudgeMode = () =>
   toChoice(process.env.RAG_CLAIM_JUDGE, "off", ["llm", "off"]);
 

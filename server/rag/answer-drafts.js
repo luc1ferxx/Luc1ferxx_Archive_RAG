@@ -10,6 +10,7 @@ import {
 } from "./grounded-answer-finalizer.js";
 import { evaluateClaimSupport } from "./self-check/evaluate.js";
 import { normalizeGroupedSourceLabels } from "./self-check/text.js";
+import { guardAnswerLinks } from "./prompt-injection-screen.js";
 
 // Verified answer drafts for a streaming /chat request.
 //
@@ -78,7 +79,10 @@ export const findCompletePrefix = (text) => {
  * null outside a draft channel. `finish(text)` checks the last sentence, which
  * may end without punctuation, against the answer the model returned.
  */
-export const createAnswerDraftReleaser = ({ citations = [] } = {}) => {
+// `allowedText` is what the model was shown (screened evidence and the
+// question): a draft carrying a link from anywhere else is held back, as the
+// final answer's link guard would remove it.
+export const createAnswerDraftReleaser = ({ allowedText = null, citations = [] } = {}) => {
   const channel = channelStorage.getStore();
 
   if (!channel || citations.length === 0) {
@@ -103,9 +107,13 @@ export const createAnswerDraftReleaser = ({ citations = [] } = {}) => {
       }
 
       for (const claim of claimSupport.claims.slice(decidedClaimCount)) {
-        const text = claim.supported && !claim.heading
+        const formatted = claim.supported && !claim.heading
           ? formatSupportedClaim({ claim, citations })
           : "";
+        const text =
+          formatted && allowedText !== null && guardAnswerLinks(formatted, { allowedText }).removed.length > 0
+            ? ""
+            : formatted;
 
         if (text) {
           emitAgentEvent({

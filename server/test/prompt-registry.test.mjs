@@ -30,22 +30,24 @@ import { CUSTOM_SKILL_IDS } from "../rag/skills/registry.js";
 // `version` passed to definePrompt, or `versions` in answer-writer.js) and pin
 // the new id@version below.
 const PINNED_PROMPT_TEMPLATES = Object.freeze({
-  "claim_judge@v1": "827365b7cb66",
-  "comparison_answer@v1": "a77091d0dd9a",
-  "comparison_answer@v2": "30d5b1ca0b42",
+  // v2: sources are data, not instructions (prompt-injection hardening).
+  "claim_judge@v2": "1f7dda59a211",
+  "comparison_answer@v1.1": "5cfc615314eb",
+  "comparison_answer@v2.1": "2046647cec58",
   "dag_planner@v1": "9b264db384f8",
   "execution_planner@v1": "46e1a0502f34",
-  "guarded_comparison_answer@v1": "1ed9084bc3d8",
-  "guarded_comparison_answer@v2": "5061066b03a3",
+  "guarded_comparison_answer@v1.1": "5a59976484cd",
+  "guarded_comparison_answer@v2.1": "e5f60f0f5aba",
   "intent_planner@v1": "088ec96ebb85",
   "memory_query_rewrite@v1": "482c557f3448",
   "memory_query_rewrite@v2": "c695383ae9e3",
   "memory_query_rewrite@v3": "2dc8733dd00c",
-  "qa_answer@v1": "decdfe989d64",
-  "qa_answer@v2": "671ca684b7b9",
+  // v1.1 / v2.1: untrusted-evidence rules (prompt-injection hardening).
+  "qa_answer@v1.1": "ac8a16cadc2d",
+  "qa_answer@v2.1": "35bc6fd42c57",
   "replanner@v1": "16e4034680c7",
-  "web_answer@v1": "8994c8c4714e",
-  "web_answer@v2": "e013b5b34f00",
+  "web_answer@v1.1": "26e8ffa6c6c4",
+  "web_answer@v2.1": "9fb8253dfa4f",
 });
 
 test("every prompt template matches its pinned fingerprint", () => {
@@ -85,8 +87,8 @@ test("the active set follows RAG_PROMPT_VERSION and hashes independently of orde
     process.env.RAG_PROMPT_VERSION = "v3";
     const v3 = describeActivePromptTemplates();
 
-    assert.equal(v1.templates.find((template) => template.id === "qa_answer").version, "v1");
-    assert.equal(v3.templates.find((template) => template.id === "qa_answer").version, "v2");
+    assert.equal(v1.templates.find((template) => template.id === "qa_answer").version, "v1.1");
+    assert.equal(v3.templates.find((template) => template.id === "qa_answer").version, "v2.1");
     assert.equal(
       v3.templates.find((template) => template.id === "memory_query_rewrite").version,
       "v3"

@@ -152,6 +152,7 @@ export const GLOBAL_COVERAGE_EXCLUDED_PATHS = Object.freeze([
   "server/evaluation/run-llm-judge.mjs",
   "server/evaluation/run-param-sweep.mjs",
   "server/evaluation/run-planner-eval.mjs",
+  "server/evaluation/run-prompt-injection-eval.mjs",
   "server/evaluation/run-real-eval.mjs",
   "server/evaluation/run-recovery-observability-eval.mjs",
   "server/evaluation/run-rerank-sweep.mjs",

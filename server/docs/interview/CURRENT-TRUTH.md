@@ -27,6 +27,7 @@
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | Claim 校验 | 默认词法规则；可选 LLM 评审只复核被词法拒绝的 claim，只能升级不能降级，引用错误、证据中没有的数字、对比答案不送评审，失败时保留词法结论；结论缓存 | `rag/self-check/`、`rag/self-check/claim-judge.js` |
 | Prompt 版本 | 10 个 prompt、16 个模板变体，每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
+| 提示注入防护 | 文档、文件名、网页结果进 prompt 前做确定性筛查（对 AI 说话的句子替换成标记，中英文都覆盖）；答案、网页回答、claim 评审的 prompt 写明证据是不可信数据；输出链接守卫删掉图片和模型没见过的链接。规划器本来就看不到文档正文 | `rag/prompt-injection-screen.js`、`evaluation/prompt-injection-cases.js` |
 | 租户隔离 | 应用层每个 store 按 user/workspace 过滤；PostgreSQL 行级安全再兜一层：鉴权后的中间件把访问范围放进 `AsyncLocalStorage`，带范围的语句在短事务里 `SET LOCAL ROLE` 到租户角色并设置租户变量，9 张表的策略拒绝其他租户的行。后台任务和恢复以记录自己的范围执行；迁移、进程级缓存加载、跨租户恢复扫描显式以 owner 身份执行 | `db/migrations/013_enable_tenant_row_level_security.sql`、`rag/postgres.js`、`rag/postgres-tenant.js` |
 | 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
 
@@ -166,9 +167,25 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 2026-09-25，本地 qwen2.5:7b，真实规划器评测一轮加答案草稿评测（打开 claim 评审）：35 个 completion 事件全部能归到具体模板，改前是 0 个（它们只能按 model route 分组，`chat.default` 一个桶里混着 QA 回答、claim 评审和问题改写 3 个 prompt）。按模板分组后能直接看出：QA 回答占 completion token 的 44%，claim 评审占 21%。样本小，只说明能归因，不是性能数据。详见 `docs/evaluation.md` 的“Prompt 模板归因”。
 
-### 3.10 工程基线（2026-09-25，prompt 版本提交）
+### 3.10 提示注入红队
 
-- 后端测试 1759 个：1756 通过，0 失败，3 个跳过（3 个需要 PostgreSQL 的集成测试文件在无数据库时各报告 1 个跳过）。在一次性 PostgreSQL 18.6 集群上跑（`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh`）是 1780/1780。
+`npm run eval:prompt-injection`（2026-09-25，qwen2.5:7b，每组 3 轮）：13 个攻击用例，7 类（指令覆盖、控制符、篡改事实、外泄链接、钓鱼链接、系统提示词泄露、直接注入），另有 4 个对照组。
+
+| | 改前 | 只有 prompt 规则 + 链接守卫 | 三层全开 |
+| --- | --- | --- | --- |
+| 文档 RAG 答案（MCP 原样返回）：攻击进入答案 | 17/39 | 12/39 | **0/39** |
+| 受攻击时仍给出正确事实 | 22/30 | 23/30 | **30/30** |
+| 对照组正确 | 9/12 | 9/12 | 9/12 |
+| Agent 路径：攻击进入答案 | 4/39 | 6/39 | **0/39** |
+
+- 只加 prompt 规则，指令覆盖类仍 9/9；起决定作用的是确定性筛查。筛查在 16,001 句良性语料上误判 0 句。
+- 刻意绕开模式的英文改写，改前改后都是 3/3 成功，这是已知盲区。
+- claim 评审在注入证据下错误接受 0/18，改前也是 0/18，没测出漏洞。
+- Agent 路径用 7B 模型时大多以澄清结束，它的 0/39 很大程度上是答案被扣下了，不能单独拿来说防护有效。
+
+### 3.11 工程基线（2026-09-25，提示注入防护提交）
+
+- 后端测试 1768 个：1765 通过，0 失败，3 个跳过（3 个需要 PostgreSQL 的集成测试文件在无数据库时各报告 1 个跳过）。在一次性 PostgreSQL 18.6 集群上跑（`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh`）是 1789/1789。
 - 前端测试 111 个全部通过，生产构建通过（这次没改前端）。
 - 覆盖率门禁通过：后端全局行覆盖 91.3%，RAG/AgentRAG 核心 93.5%。
 
@@ -179,7 +196,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **校验器**：默认是词法规则，认不出语义等价的改写；可选的 LLM 评审（`RAG_CLAIM_JUDGE=llm`）只复核被词法拒绝的 claim，数字和引用仍由确定性规则把关。评审默认关闭：构造对照集上错误接受 0/54（留出集含），但前一轮观察到过 1 次真实误判，而且还没用人工标注的真实答案校准。对比答案仍走模板兜底。
 - **文档解析**：只读 PDF 文本层，没有 OCR、表格和版面解析；换行会把句子切断，导致模板答案出现半句话。
 - **租户隔离**：行级安全不覆盖会话记忆（只有 session id）和 admin audit（管理员需要跨用户读取）。租户靠异步上下文传递，上下文丢失时回落到 owner 身份，也就是只剩应用层过滤，而不是拒绝访问；要做到拒绝访问需要一个没有表权限的独立登录角色。这层防护针对漏写过滤条件的 bug，不防 SQL 注入（注入的语句可以 `RESET ROLE`）。
-- **安全**：prompt 注入只有设计层防御（规划器看不到身份、范围由运行时决定、外部查询过滤），还没有对抗性测试集和攻击成功率数据。
+- **安全**：提示注入有了自建红队集和攻击成功率数据（见 3.10），但用例是自己构造的、数量小、攻击方式公开；确定性筛查挡得住已知写法，挡不住刻意改写（`evasion_paraphrase` 仍 3/3 成功），只靠 prompt 规则挡不住 7B 模型。没有用第三方基准（如 BIPIA、AgentDojo）测过。
 - **架构**：V2 typed DAG 已是自定义 Skill 阶段的默认执行器，V1 顺序链只作为整图被拒时的兜底和运维回退；v3 统一图已冻结在 shadow（冻结原因见 `docs/unified-agent-dag-migration.md`）。DAG 只覆盖自定义 Skill 阶段，外层文档、Web、内置 Skill 仍是固定顺序。
 - **Agent 路径的答题率**：用 qwen2.5:7b 走 agent（`/chat` 的真实路径），合同和政策 7 题里 6 题、论文 12 题里 11 题最终改为澄清，因为词法校验器拒绝了大部分答案；`verify:quality` 的 18/18 测的是不经过 agent 自检的纯 RAG 路径。修了两个校验器 bug（"twelve (12)"被算成两个数；证据在 PDF 换行处被切断）后，合同和政策题从 2/21 升到 4/21（各 3 轮），论文题不变；剩下的主要是改写用词过不了词法校验。打开 LLM 评审后合同和政策题 3/21 → 14/21 得到回答且 14 个全对，p50 延迟多约 0.8 秒；两道管辖法律题仍在检索阶段判为证据不足。
 - **流式草稿**：机制已上线并有测试，但在上面的校验器下很少产生草稿（修 bug 后合同和政策题 21 次里 4 次，论文题 0 次），所以还没有实际的延迟收益。

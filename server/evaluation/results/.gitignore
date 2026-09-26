@@ -13,3 +13,5 @@ latest-claim-judge.json
 latest-claim-judge.md
 latest-tenant-isolation.json
 latest-tenant-isolation.md
+latest-prompt-injection*.json
+latest-prompt-injection*.md
