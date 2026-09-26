@@ -3809,6 +3809,67 @@ test("with the answer verdict on, a QA answer opening with the not-in-evidence m
   assert.deepEqual(response.citations, []);
 });
 
+test("a not-in-evidence reply retries once with chunks the model has not seen", async (t) => {
+  const answerPrompts = [];
+  const saved = Object.fromEntries(
+    ["RAG_QA_ANSWER_VERDICT", "RAG_RETRIEVAL_TOP_K", "RAG_QA_VERDICT_RETRY_TOP_K"].map((key) => [key, process.env[key]])
+  );
+
+  Object.assign(process.env, {
+    RAG_QA_ANSWER_VERDICT: "true",
+    RAG_QA_VERDICT_RETRY_TOP_K: "4",
+    RAG_RETRIEVAL_TOP_K: "1",
+  });
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      if (prompt.includes("preserved_ambiguity")) {
+        return JSON.stringify({ rewritten_query: "How many annual leave days carry over?", preserved_ambiguity: false });
+      }
+
+      if (prompt.includes("Standalone retrieval question:")) {
+        return "How many annual leave days carry over?";
+      }
+
+      answerPrompts.push(prompt);
+      return answerPrompts.length === 1
+        ? "NOT_IN_EVIDENCE: The shown clause does not say."
+        : "Up to 5 days carry over [Source 1].";
+    },
+  });
+
+  await ingestFixture({
+    docId: "leave-retry",
+    fileName: "leave-retry.pdf",
+    pages: [
+      "Annual leave policy: employees receive 10 paid annual leave days each year.",
+      "Annual leave carry over: up to 5 unused annual leave days carry over to the next year.",
+    ],
+  });
+
+  const response = await chat(["leave-retry"], "How many annual leave days carry over?");
+  const shownFirst = answerPrompts[0].includes("10 paid annual leave days") ? 1 : 2;
+
+  assert.equal(answerPrompts.length, 2);
+  assert.ok(
+    !answerPrompts[1].includes(shownFirst === 1 ? "10 paid annual leave days" : "5 unused annual leave days"),
+    "the retry shows only chunks the first answer did not see"
+  );
+  assert.equal(response.abstained, false);
+  assert.equal(response.text, "Up to 5 days carry over [Source 1].");
+  assert.equal(response.citations.length, 1);
+  assert.equal(response.citations[0].pageNumber, shownFirst === 1 ? 2 : 1);
+});
+
 test("qa abstain path runs supplemental retrieval to improve gap suggestions", async () => {
   const originalTopK = process.env.RAG_RETRIEVAL_TOP_K;
 

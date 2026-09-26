@@ -1,6 +1,7 @@
 import {
   getComparisonTopKPerDoc,
   getHybridFusionMethod,
+  getQaVerdictRetryTopK,
   getRerankCandidateMultiplier,
   getRerankProvider,
   getRerankWeight,
@@ -745,21 +746,106 @@ const executeQaRag = async ({
     };
   }
 
+  const answer = await writeQaAnswer({
+    query,
+    resolvedQuery,
+    bundle,
+    preferenceBlock,
+  });
+  const retry =
+    answer.abstainSource === "answer_model"
+      ? await retryQaWithDeeperRetrieval({
+          docIds,
+          evidenceRequirementCount: evidenceRequirements?.length ?? 1,
+          plannedRetrievalQueries,
+          preferenceBlock,
+          query,
+          queryVector,
+          resolvedQuery,
+          retrievalOptions,
+          shownResults: confidence.usableResults,
+        })
+      : null;
+
+  if (retry) {
+    traceFields.verdictRetry = retry.trace;
+  }
+
+  const final = retry?.answer ? retry : { answer, bundle };
+
   return {
     routeMode: route.mode,
     traceFields,
     response: {
-      ...(await writeQaAnswer({
-        query,
-        resolvedQuery,
-        bundle,
-        preferenceBlock,
-      })),
-      retrievedContexts: bundle.retrievedContexts,
+      ...final.answer,
+      retrievedContexts: final.bundle.retrievedContexts,
       evidenceSummary,
       retrieval,
     },
   };
+};
+
+// The answer model said the evidence does not answer (RAG_QA_ANSWER_VERDICT).
+// On QASPER most such refusals had the answer outside the retrieved chunks, so
+// retrieve once more at RAG_QA_VERDICT_RETRY_TOP_K and give the model the
+// chunks it has not seen that pass the same gate, at most one normal context's
+// worth. One retry only; if nothing new passes, the refusal stands.
+const retryQaWithDeeperRetrieval = async ({
+  docIds,
+  evidenceRequirementCount,
+  plannedRetrievalQueries,
+  preferenceBlock,
+  query,
+  queryVector,
+  resolvedQuery,
+  retrievalOptions,
+  shownResults,
+}) => {
+  const contextSize = retrievalOptions.topK ?? getRetrievalTopK();
+  const topK = getQaVerdictRetryTopK();
+
+  if (topK <= contextSize) {
+    return null;
+  }
+
+  const shownKeys = new Set(shownResults.map((result) => getResultKey(result)));
+  const { results } = await retrieveGlobalContextForQueries({
+    primaryQueryVector: queryVector,
+    primaryQueryText: resolvedQuery,
+    retrievalQueries: plannedRetrievalQueries,
+    retrievalOptions: { ...retrievalOptions, topK },
+    docIds,
+  });
+  const unseen = results.filter((result) => !shownKeys.has(getResultKey(result)));
+  const confidence = assessQaConfidence({
+    evidenceRequirementCount,
+    queryText: resolvedQuery,
+    results: unseen,
+  });
+  const trace = {
+    topK,
+    unseenCandidateCount: unseen.length,
+    admittedCount: Math.min(confidence.usableResults.length, contextSize),
+    answered: false,
+  };
+
+  if (!confidence.confident) {
+    return { answer: null, trace };
+  }
+
+  const bundle = prepareQASourceBundle({
+    results: confidence.usableResults.slice(0, contextSize),
+  });
+  const answer = await writeQaAnswer({
+    query,
+    resolvedQuery,
+    bundle,
+    preferenceBlock,
+  });
+
+  trace.answered = !answer.abstained;
+
+  return { answer, bundle, trace };
 };
 
 export const executeDocumentRag = async ({
