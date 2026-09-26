@@ -60,3 +60,4 @@ RAG_SHARED_STATE=redis docker compose --profile app --profile shared-state up -d
   2. QASPER dev 抽样 200 题，测证据能否进入问答候选；召回低于 0.6 就失败（设定下限时实测为 0.655）；
   3. QASPER dev 答题，默认 40 题，只出报告，不设门槛。CPU 上 7B 模型大约一分钟答一题。
 - 报告作为 `real-model-eval` artifact 上传；前面的步骤失败也会上传。
+- 首次运行（2026-09-26）约 63 分钟通过：`verify:quality` 18/18，召回 0.655，和本机结果一致。

@@ -256,7 +256,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - `/health` 各项都是 ok，包括行级安全；
   - 用 Docling 上传一篇论文并问表格里的数，答案正确（76.86）。
   - `--profile layout` 会加上 docling 服务，`--profile shared-state` 会加上 Redis。
-- **真实模型 CI**：`real-model-eval.yml`，每周跑一次，也可手动触发。在 GitHub 的机器上用 Ollama 跑 `verify:quality` 和 QASPER 检索抽样（召回低于 0.6 就失败），不需要 API key。**还没在 GitHub 上实际跑过一次**，首次运行结果以 Actions 页面为准。
+- **真实模型 CI**：`real-model-eval.yml`，每周跑一次，也可手动触发。在 GitHub 的机器上用 Ollama 跑 `verify:quality` 和 QASPER 检索抽样（召回低于 0.6 就失败），不需要 API key。首次运行（2026-09-26，run 36229084695，约 63 分钟）通过：`verify:quality` 18/18，QASPER 候选召回 0.655，和本机测得的完全一致；10 道题的答案 F1 为 0.164，只作报告。
 
 ### 3.13 工程基线（2026-09-26，版面解析与部署提交）
 
