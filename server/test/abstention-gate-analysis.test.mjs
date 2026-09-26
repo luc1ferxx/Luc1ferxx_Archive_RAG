@@ -4,11 +4,13 @@ import {
   computeAuc,
   COVERAGE_GRID,
   DEFAULT_GATE,
+  PARTIAL_BAND_GATE,
   RELEVANCE_GRID,
   summarizeGateSetting,
 } from "../evaluation/run-abstention-gate-analysis.mjs";
 import {
   DEFAULT_MIN_QA_QUERY_TERM_COVERAGE,
+  DEFAULT_QA_PARTIAL_COVERAGE_FLOOR,
   getMinQueryTermCoverage,
   getMinRelevanceScore,
 } from "../rag/config.js";
@@ -42,4 +44,7 @@ test("the analysis grid contains the pre-tuning gate and the tuned QA floor", ()
   assert.ok(RELEVANCE_GRID.includes(DEFAULT_GATE.minRelevanceScore));
   assert.ok(COVERAGE_GRID.includes(DEFAULT_GATE.minQueryTermCoverage));
   assert.ok(COVERAGE_GRID.includes(DEFAULT_MIN_QA_QUERY_TERM_COVERAGE));
+  // The grid measures the floor alone; the second row is the verdict's band.
+  assert.equal(DEFAULT_GATE.partialCoverageFloor, 1);
+  assert.equal(PARTIAL_BAND_GATE.partialCoverageFloor, DEFAULT_QA_PARTIAL_COVERAGE_FLOOR);
 });

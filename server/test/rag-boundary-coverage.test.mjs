@@ -10,6 +10,7 @@ import {
 import {
   assessComparisonConfidence,
   assessQaConfidence,
+  findQueryTermSubstitution,
 } from "../rag/confidence.js";
 import {
   configureCrossEncoderProvider,
@@ -258,15 +259,18 @@ test("a strong dense score satisfies query-term coverage for comparison", async 
   );
 });
 
-test("single-document QA keeps the strict lexical coverage requirement", async () => {
-  // The bypass is deliberately NOT extended to QA. There, low coverage carries real
-  // information: it marks a chunk answering only part of a multi-aspect question,
-  // which is what drives the gap-suggestion machinery. Granting the bypass here
-  // made a correct abstention silently disappear.
+test("single-document QA gets no semantic bypass of its coverage floor", async () => {
+  // The dense-score bypass is deliberately NOT extended to QA. There, low
+  // coverage carries real information: it marks a chunk answering only part of
+  // a multi-aspect question, which is what drives the gap-suggestion machinery.
+  // Granting the bypass here made a correct abstention silently disappear. The
+  // partial coverage band, QA's own narrower relief, is off here and tested
+  // below.
   await withEnv(
     {
       RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
       RAG_MIN_RELEVANCE_SCORE: "0.32",
+      RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
     },
     async () => {
       const assessment = assessQaConfidence({
@@ -290,6 +294,88 @@ test("single-document QA keeps the strict lexical coverage requirement", async (
   );
 });
 
+test("QA admits a reworded chunk in the partial coverage band but not a neighbouring topic", async () => {
+  const gate = {
+    RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
+    RAG_MIN_RELEVANCE_SCORE: "0.32",
+    RAG_QA_ANSWER_VERDICT: "true",
+    RAG_QA_PARTIAL_COVERAGE_FLOOR: "0.3",
+  };
+  const chunk = (id, text, keywordScore) => ({
+    ...makeResult({ id, text, score: 0.5, keywordScore }),
+    vectorScore: 0.465,
+  });
+
+  await withEnv(gate, async () => {
+    // Other words for the same thing: "caps" is "shall not exceed".
+    const reworded = assessQaConfidence({
+      queryText: "What are the liability caps?",
+      results: [chunk("reworded", "The total liability of Vendor A shall not exceed the fees paid.", 0.5)],
+    });
+
+    assert.equal(reworded.confident, true);
+    assert.equal(reworded.partialCoverageResultCount, 1);
+
+    // The same coverage, but the asked word was replaced on its head word.
+    for (const [queryText, text] of [
+      ["What is the amber ceiling?", "Archive serial cobalt ceiling: approved amount is 3600 dollars per cycle."],
+      ["What is the parental leave policy?", "Annual leave policy: employees receive 10 paid annual leave days each year."],
+    ]) {
+      const neighbour = assessQaConfidence({ queryText, results: [chunk("neighbour", text, 0.5)] });
+
+      assert.equal(neighbour.confident, false, queryText);
+    }
+
+    // Below the band, for a question the decomposer split into parts, and
+    // without the answer model's verdict to back it, the floor alone decides.
+    assert.equal(
+      assessQaConfidence({
+        queryText: "What are the liability caps?",
+        results: [chunk("thin", "Liability is described in the schedule.", 0.25)],
+      }).confident,
+      false
+    );
+    assert.equal(
+      assessQaConfidence({
+        evidenceRequirementCount: 2,
+        queryText: "When does the refund policy take effect and which regions does it apply to?",
+        results: [chunk("topic-only", "Refunds are issued back to the original payment method.", 0.34)],
+      }).confident,
+      false
+    );
+  });
+  await withEnv({ ...gate, RAG_QA_ANSWER_VERDICT: undefined }, async () => {
+    assert.equal(
+      assessQaConfidence({
+        queryText: "What are the liability caps?",
+        results: [chunk("reworded", "The total liability of Vendor A shall not exceed the fees paid.", 0.5)],
+      }).confident,
+      false
+    );
+  });
+});
+
+test("findQueryTermSubstitution names the replaced pair and ignores rewording and misspelling", () => {
+  assert.deepEqual(
+    findQueryTermSubstitution("What is the parental leave policy?", "Annual leave policy: 10 days."),
+    { asked: "parental leave", found: "annual leave" }
+  );
+  assert.equal(findQueryTermSubstitution("What are the liability caps?", "Liability shall not exceed the fees."), null);
+  // The asked word is present, so the other pair is not a replacement.
+  assert.equal(
+    findQueryTermSubstitution("What is the amber ceiling?", "The amber ceiling is 2400; the cobalt ceiling is 3600."),
+    null
+  );
+  assert.equal(
+    findQueryTermSubstitution("Which knowedge graph embeddings?", "Knowledge graph embeddings map entities."),
+    null
+  );
+  // Never across a sentence boundary.
+  assert.equal(findQueryTermSubstitution("What is the amber ceiling?", "Paint it cobalt. Ceiling rules follow."), null);
+  // Character pairs for CJK: 育儿假 against 年假.
+  assert.ok(findQueryTermSubstitution("育儿假政策是什么？", "年假政策：员工每年享有10天年假。"));
+});
+
 test("QA and comparison read separate coverage floors", async () => {
   const halfCoverage = {
     ...makeResult({
@@ -303,14 +389,24 @@ test("QA and comparison read separate coverage floors", async () => {
 
   // Lowering the QA floor admits the chunk to QA ...
   await withEnv(
-    { RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.4", RAG_MIN_QUERY_TERM_COVERAGE: "0.51", RAG_MIN_RELEVANCE_SCORE: "0.32" },
+    {
+      RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.4",
+      RAG_MIN_QUERY_TERM_COVERAGE: "0.51",
+      RAG_MIN_RELEVANCE_SCORE: "0.32",
+      RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
+    },
     async () => {
       assert.equal(assessQaConfidence({ queryText: "liability cap", results: [halfCoverage] }).confident, true);
     }
   );
   // ... and raising the comparison floor does not touch QA.
   await withEnv(
-    { RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_MIN_QUERY_TERM_COVERAGE: "0.4", RAG_MIN_RELEVANCE_SCORE: "0.32" },
+    {
+      RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
+      RAG_MIN_QUERY_TERM_COVERAGE: "0.4",
+      RAG_MIN_RELEVANCE_SCORE: "0.32",
+      RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
+    },
     async () => {
       assert.equal(assessQaConfidence({ queryText: "liability cap", results: [halfCoverage] }).confident, false);
     }

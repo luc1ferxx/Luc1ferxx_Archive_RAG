@@ -57,6 +57,8 @@ STARTUP_HEALTH_STRICT=false
 | `RAG_LLM_CIRCUIT_FAILURE_THRESHOLD` | `5` | 同一端点和模型连续多少次"不可用"错误（5xx、408、超时、连接失败）后熔断；`0` 关闭。429、其他 4xx 和空响应不计入：429 说明服务在线，交给退避处理。熔断期间请求不发出、也不重试，直接以 `CIRCUIT_OPEN`（503）失败，chat 路由有备用模型时立即切换。 |
 | `RAG_LLM_CIRCUIT_COOLDOWN_MS` | `30000` | 熔断持续时间。到期后放行一个探测请求：成功则恢复，失败则再熔断一个周期。熔断状态默认按进程保存；`RAG_SHARED_STATE=redis` 时由所有实例共享。 |
 | `RAG_MIN_QA_QUERY_TERM_COVERAGE` | `0.51` | 单文档问答的查询词覆盖下限，和对比用的 `RAG_MIN_QUERY_TERM_COVERAGE` 分开。调低会少拒答措辞不同的问题，但也会放进相邻话题的段落（问"育儿假"却拿年假条款回答）；在 QASPER dev 上调到 0.2，拒答从 41.7% 降到 7.2%，但官方 F1 从 0.206 降到 0.153。见 [evaluation.md](evaluation.md) 的“拒答门控调参”。 |
+| `RAG_QA_ANSWER_VERDICT` | `false` | 单文档问答的第二个拒答信号。打开后，QA prompt 换成 `qa_answer` v1.3 / v2.3：证据答不了时，模型以 `NOT_IN_EVIDENCE:` 开头回复，服务端把它当成拒答（`abstainSource: "answer_model"`，不带引用，也不作为流式草稿发出）。同时打开下面的部分覆盖补救区。默认关闭：用 qwen2.5:7b 在 QASPER dev 上测，可回答题拒答从 41.7% 升到 51.7%，作答题 F1 从 0.215 升到 0.281，总 F1 没有显著变化；`verify:quality` 里还有一次把正确答案标成"没有"。换更强的模型前，先用这两项重新测一遍。见 [evaluation.md](evaluation.md) 的“两段式拒答”。 |
+| `RAG_QA_PARTIAL_COVERAGE_FLOOR` | `0.3` | 只在 `RAG_QA_ANSWER_VERDICT` 打开、且问题没被拆成多个子问题时生效。查询词覆盖在这个值到 `RAG_MIN_QA_QUERY_TERM_COVERAGE` 之间的段落也放行，前提是没有"近邻替换"：问题里的词在段落里被同一中心词前的另一个词替换了，比如问 parental leave，段落里是 annual leave。设为不低于问答覆盖下限的值即关闭补救区。 |
 | `RAG_SHARED_STATE` | `memory` | 熔断器、模型并发上限和 claim 评审缓存的状态存在哪里。`memory` 按进程保存，适合单实例；`redis` 让所有指向同一 `REDIS_URL` 的实例共享：一个实例打开的熔断对所有实例生效，并发上限按整个部署计算，评审结论跨实例复用。Redis 不可达时每个实例退回进程内状态，不会让模型调用失败，健康检查的 `checks.sharedState` 会报 `error`。 |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | `RAG_SHARED_STATE=redis` 时使用的 Redis。本地可用 `docker compose --profile shared-state up -d` 启动。 |
 | `RAG_SHARED_STATE_PREFIX` | `archive_rag:` | 共享状态的 key 前缀，让多个部署或测试共用一个 Redis 时互不干扰。 |

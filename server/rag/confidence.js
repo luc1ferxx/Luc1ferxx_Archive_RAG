@@ -2,15 +2,129 @@ import {
   getMinQaQueryTermCoverage,
   getMinQueryTermCoverage,
   getMinRelevanceScore,
+  getQaPartialCoverageFloor,
+  isQaAnswerVerdictEnabled,
 } from "./config.js";
 import { getAdmissionScore } from "./citations.js";
 import {
   buildTermSet,
   extractAnchorGroups,
+  extractMeaningfulTokens,
   normalizeSearchText,
+  tokenize,
 } from "./text-utils.js";
 
 const FALLBACK_THRESHOLD_RATIO = 0.8;
+
+// Plural-insensitive matching, so "ceilings" still names the ceiling.
+const stemTerm = (term) =>
+  term.length > 3 && term.endsWith("s") && !term.endsWith("ss") ? term.slice(0, -1) : term;
+
+const isContentToken = (token) => extractMeaningfulTokens(token)[0] === token;
+
+// Words that modify a head word without naming a topic of their own: "how
+// many annual leave days" asks about annual leave, and "10 paid annual leave
+// days" has not replaced "many". Only a topic-naming word can be the asked
+// word a rival replaces.
+const NON_TOPICAL_MODIFIERS = new Set([
+  "all", "another", "any", "best", "better", "big", "bigger", "biggest", "both",
+  "certain", "common", "current", "each", "either", "every", "few", "fewer",
+  "first", "general", "given", "good", "high", "higher", "highest", "large",
+  "larger", "largest", "last", "least", "less", "long", "low", "lower", "lowest",
+  "main", "many", "me", "more", "most", "much", "my", "neither", "new", "next",
+  "old", "only", "other", "overall", "own", "particular", "previous", "prior",
+  "recent", "several", "short", "small", "smaller", "smallest", "so", "some",
+  "specific", "such", "too", "total", "typical", "us", "usual", "various", "very",
+  "worse", "worst", "been", "being", "get", "got", "give", "make", "made",
+  "take", "taken", "use", "used", "using",
+]);
+
+// Adjacent content-word pairs, never across a sentence or line break.
+const collectContentBigrams = (text) =>
+  String(text ?? "")
+    .split(/[.;:!?\n。；：！？]+/)
+    .flatMap((segment) => {
+      const tokens = tokenize(segment);
+
+      return tokens.slice(1).flatMap((token, index) =>
+        isContentToken(tokens[index]) && isContentToken(token) ? [[tokens[index], token]] : []
+      );
+    });
+
+const editDistanceAtMost = (left, right, limit) => {
+  if (Math.abs(left.length - right.length) > limit) {
+    return false;
+  }
+
+  let previous = Array.from({ length: right.length + 1 }, (_value, index) => index);
+
+  for (let row = 1; row <= left.length; row += 1) {
+    const current = [row];
+
+    for (let column = 1; column <= right.length; column += 1) {
+      current[column] = Math.min(
+        previous[column] + 1,
+        current[column - 1] + 1,
+        previous[column - 1] + (left[row - 1] === right[column - 1] ? 0 : 1)
+      );
+    }
+
+    if (Math.min(...current) > limit) {
+      return false;
+    }
+
+    previous = current;
+  }
+
+  return previous[right.length] <= limit;
+};
+
+// A misspelled query word ("knowedge graph" against "knowledge graph") is the
+// same word, not a rival.
+const isSpellingVariant = (asked, found) =>
+  /^[a-z]{5,}$/.test(asked) && /^[a-z]{5,}$/.test(found) && editDistanceAtMost(asked, found, 2);
+
+/**
+ * The difference between a chunk that answers a question in other words and
+ * one about a neighbouring thing: the question pairs a word with a head word
+ * ("parental leave", "amber ceiling"), and the chunk has the head word with a
+ * different word in that place ("annual leave", "cobalt ceiling") and never
+ * the asked one. Returns the first such pair, or null.
+ *
+ * Only single-document QA reads it, and only to refuse a chunk in the partial
+ * coverage band, which the coverage floor alone would refuse too; a false
+ * positive therefore costs nothing against the stricter gate. It is lexical:
+ * a hyponym ("neural network" against "recurrent network") also counts as a
+ * rival.
+ */
+export const findQueryTermSubstitution = (queryText, evidenceText) => {
+  const queryStems = new Set(extractMeaningfulTokens(queryText).map(stemTerm));
+  const evidenceStems = new Set(extractMeaningfulTokens(evidenceText).map(stemTerm));
+  const evidenceBigrams = collectContentBigrams(evidenceText);
+
+  for (const [asked, head] of collectContentBigrams(queryText)) {
+    if (
+      NON_TOPICAL_MODIFIERS.has(asked) ||
+      evidenceStems.has(stemTerm(asked)) ||
+      !evidenceStems.has(stemTerm(head))
+    ) {
+      continue;
+    }
+
+    const rival = evidenceBigrams.find(
+      ([found, evidenceHead]) =>
+        stemTerm(evidenceHead) === stemTerm(head) &&
+        !queryStems.has(stemTerm(found)) &&
+        !isSpellingVariant(asked, found)
+    );
+
+    if (rival) {
+      return { asked: `${asked} ${head}`, found: rival.join(" ") };
+    }
+  }
+
+  return null;
+};
 
 // Query-term coverage is a purely lexical measure, so on its own it vetoes results
 // that hybrid retrieval was built to find: the ones where the document says the
@@ -43,9 +157,22 @@ const FALLBACK_THRESHOLD_RATIO = 0.8;
 // This does NOT weaken the anchor check: a query naming a specific identifier is
 // still rejected when the identifier is absent, by analyzeAnchorCoverage, which
 // runs after this filter and is tested independently.
+//
+// Single-document QA has its own, narrower relief (partialCoverage), open only
+// with RAG_QA_ANSWER_VERDICT on: a chunk between the partial floor and the
+// coverage floor is admitted unless it swaps a query word for a rival on the
+// same head word (findQueryTermSubstitution). That separates the two reasons a
+// chunk misses query terms -- it says the same thing in other words, or it is
+// about a neighbouring thing -- which the coverage fraction alone cannot.
+// Whether the chunk actually answers is then the answer model's call
+// (QA_NOT_IN_EVIDENCE_MARKER in answer-verdict.js).
 const hasEnoughQueryCoverage = (
   result,
-  { allowSemanticBypass = false, minCoverage = getMinQueryTermCoverage() } = {}
+  {
+    allowSemanticBypass = false,
+    minCoverage = getMinQueryTermCoverage(),
+    partialCoverage = null,
+  } = {}
 ) => {
   if (typeof result?.keywordScore !== "number") {
     return true;
@@ -53,6 +180,13 @@ const hasEnoughQueryCoverage = (
 
   if (result.keywordScore >= minCoverage) {
     return true;
+  }
+
+  if (partialCoverage && result.keywordScore >= partialCoverage.floor) {
+    return !findQueryTermSubstitution(
+      partialCoverage.queryText,
+      buildSubstitutionEvidenceText(result)
+    );
   }
 
   return (
@@ -70,6 +204,14 @@ const buildSearchableResultText = (result) =>
   ]
     .filter(Boolean)
     .join("\n");
+
+// The file name is left out: "cobalt.pdf" names the file, not the topic of
+// a clause.
+function buildSubstitutionEvidenceText(result) {
+  return [result?.document?.metadata?.sectionHeading, result?.document?.pageContent]
+    .filter(Boolean)
+    .join("\n");
+}
 
 const getMatchedAnchorIndexes = (result, anchorGroups) => {
   if (anchorGroups.length === 0) {
@@ -169,9 +311,17 @@ const selectUsableResults = ({
   queryText = "",
   allowSemanticBypass = false,
   minCoverage = getMinQueryTermCoverage(),
+  partialCoverageFloor = null,
 }) => {
   const minimumScore = getMinRelevanceScore();
-  const coverageOptions = { allowSemanticBypass, minCoverage };
+  const coverageOptions = {
+    allowSemanticBypass,
+    minCoverage,
+    partialCoverage:
+      partialCoverageFloor !== null && partialCoverageFloor < minCoverage
+        ? { floor: partialCoverageFloor, queryText }
+        : null,
+  };
   const anchorGroups = extractAnchorGroups(queryText);
   const strongAnchorAnalysis = analyzeAnchorCoverage(
     filterQualifiedResults(results, minimumScore, coverageOptions),
@@ -254,9 +404,19 @@ const buildComparisonAnchorReason = ({
   )} in ${coveredDocumentCount} of the ${docCount} selected documents, so the comparison would be unreliable.`;
 };
 
-export const assessQaConfidence = ({ results, queryText = "" }) => {
+// The partial coverage band opens only with RAG_QA_ANSWER_VERDICT on, since it
+// admits chunks whose answer only the model can confirm.
+// evidenceRequirementCount is how many parts the query decomposer split the
+// question into. The partial coverage band is for a single-part question: in a
+// multi-part one ("when does it take effect and which regions does it apply
+// to"), a chunk matching only the topic word answers none of the parts, and low
+// coverage is what drives the gap planner's per-part suggestions.
+export const assessQaConfidence = ({ results, queryText = "", evidenceRequirementCount = 1 }) => {
+  const minCoverage = getMinQaQueryTermCoverage();
   const selection = selectUsableResults({
-    minCoverage: getMinQaQueryTermCoverage(),
+    minCoverage,
+    partialCoverageFloor:
+      evidenceRequirementCount <= 1 && isQaAnswerVerdictEnabled() ? getQaPartialCoverageFloor() : null,
     results,
     queryText,
   });
@@ -283,6 +443,10 @@ export const assessQaConfidence = ({ results, queryText = "" }) => {
     usableResults: selection.usableResults,
     anchorGroups: selection.anchorGroups,
     missingAnchorGroups: [],
+    // Admitted through the partial coverage band rather than the floor.
+    partialCoverageResultCount: selection.usableResults.filter(
+      (result) => typeof result?.keywordScore === "number" && result.keywordScore < minCoverage
+    ).length,
   };
 };
 

@@ -3763,6 +3763,52 @@ test("code-like anchors must appear in evidence before qa answers proceed", asyn
   assert.equal(response.citations.length, 0);
 });
 
+test("with the answer verdict on, a QA answer opening with the not-in-evidence marker abstains", async (t) => {
+  const replies = [];
+  const originalVerdict = process.env.RAG_QA_ANSWER_VERDICT;
+
+  process.env.RAG_QA_ANSWER_VERDICT = "true";
+  t.after(() => {
+    if (originalVerdict === undefined) {
+      delete process.env.RAG_QA_ANSWER_VERDICT;
+    } else {
+      process.env.RAG_QA_ANSWER_VERDICT = originalVerdict;
+    }
+  });
+
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      if (prompt.includes("preserved_ambiguity")) {
+        return JSON.stringify({ rewritten_query: "How many annual leave days carry over?", preserved_ambiguity: false });
+      }
+
+      if (prompt.includes("Standalone retrieval question:")) {
+        return "How many annual leave days carry over?";
+      }
+
+      replies.push(prompt);
+      return "**NOT_IN_EVIDENCE:** The policy does not say how many days carry over [Source 1].";
+    },
+  });
+
+  await ingestFixture({
+    docId: "leave-carryover",
+    fileName: "leave-carryover.pdf",
+    pages: ["Annual leave policy: employees receive 10 paid annual leave days each year."],
+  });
+
+  const response = await chat(["leave-carryover"], "How many annual leave days carry over?");
+
+  assert.equal(replies.length, 1, "the gate admitted the chunk; the answer model decided");
+  assert.match(replies[0], /NOT_IN_EVIDENCE:/);
+  assert.equal(response.abstained, true);
+  assert.equal(response.abstainSource, "answer_model");
+  assert.equal(response.text, "The policy does not say how many days carry over.");
+  assert.equal(response.abstainReason, response.text);
+  assert.deepEqual(response.citations, []);
+});
+
 test("qa abstain path runs supplemental retrieval to improve gap suggestions", async () => {
   const originalTopK = process.env.RAG_RETRIEVAL_TOP_K;
 

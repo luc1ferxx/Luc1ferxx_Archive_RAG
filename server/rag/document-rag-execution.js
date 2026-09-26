@@ -663,7 +663,11 @@ export const retrieveQaCandidates = async ({ docIds, resolvedQuery }) => {
     docIds,
   });
 
-  return { results, routeMode: inputs.route.mode };
+  return {
+    evidenceRequirementCount: inputs.evidenceRequirements?.length ?? 1,
+    results,
+    routeMode: inputs.route.mode,
+  };
 };
 
 const executeQaRag = async ({
@@ -687,6 +691,7 @@ const executeQaRag = async ({
       docIds,
     });
   const confidence = assessQaConfidence({
+    evidenceRequirementCount: evidenceRequirements?.length ?? 1,
     results: retrievalResults,
     queryText: resolvedQuery,
   });

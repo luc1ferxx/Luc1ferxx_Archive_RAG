@@ -407,6 +407,7 @@ const chat = async (docIds, query, options = {}) => {
           ...traceFields,
           abstained: result.abstained,
           abstainReason: result.abstainReason,
+          abstainSource: result.abstainSource ?? null,
           answerLength: result.text?.length ?? 0,
           error: null,
         })

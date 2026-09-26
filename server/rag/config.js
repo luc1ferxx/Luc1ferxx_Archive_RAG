@@ -499,6 +499,28 @@ export const getMinQaQueryTermCoverage = () =>
     toPositiveNumber(process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE, DEFAULT_MIN_QA_QUERY_TERM_COVERAGE)
   );
 
+// The QA answer model's own abstention (answer-verdict.js): the QA prompt asks
+// it to open with NOT_IN_EVIDENCE: when the evidence does not answer, and the
+// reply becomes an abstention. Off by default: with qwen2.5:7b it refused 44%
+// of the answerable QASPER questions that passed the gate and marked a correct
+// answer as missing in verify:quality. See docs/evaluation.md.
+export const isQaAnswerVerdictEnabled = () =>
+  toBoolean(process.env.RAG_QA_ANSWER_VERDICT, false);
+
+// With the verdict on, single-document QA also admits a chunk whose coverage
+// lies between this floor and the one above, unless a query term was replaced
+// in it by a rival on the same head word ("parental leave" -> "annual leave");
+// see findQueryTermSubstitution in confidence.js. The band admits chunks the
+// lexical gate cannot vouch for, so it opens only when the answer model can
+// refuse. A value at or above the QA coverage floor turns it off.
+export const DEFAULT_QA_PARTIAL_COVERAGE_FLOOR = 0.3;
+
+export const getQaPartialCoverageFloor = () =>
+  Math.min(
+    1,
+    toPositiveNumber(process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR, DEFAULT_QA_PARTIAL_COVERAGE_FLOOR)
+  );
+
 export const isQueryDecompositionEnabled = () =>
   toBoolean(process.env.RAG_QUERY_DECOMPOSITION_ENABLED, true);
 

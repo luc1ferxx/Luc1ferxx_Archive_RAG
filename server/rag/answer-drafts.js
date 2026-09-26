@@ -11,6 +11,7 @@ import {
 import { evaluateClaimSupport } from "./self-check/evaluate.js";
 import { normalizeGroupedSourceLabels } from "./self-check/text.js";
 import { guardAnswerLinks } from "./prompt-injection-screen.js";
+import { startsWithNotInEvidenceVerdict } from "./answer-verdict.js";
 
 // Verified answer drafts for a streaming /chat request.
 //
@@ -94,6 +95,12 @@ export const createAnswerDraftReleaser = ({ allowedText = null, citations = [] }
   let decidedClaimCount = 0;
 
   const release = (answerText) => {
+    // A reply opening with the not-in-evidence marker becomes an abstention;
+    // none of it is a draft.
+    if (startsWithNotInEvidenceVerdict(answerText)) {
+      return;
+    }
+
     try {
       const claimSupport = normalizeGroundedClaimSupportForHeadings(
         evaluateClaimSupport({

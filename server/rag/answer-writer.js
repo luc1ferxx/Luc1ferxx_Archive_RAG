@@ -6,6 +6,7 @@ import {
   getMaxComparisonSources,
   getPromptVersion,
   isNearDuplicateGuardEnabled,
+  isQaAnswerVerdictEnabled,
 } from "./config.js";
 import {
   attachRetrievedEvidence,
@@ -26,6 +27,7 @@ import {
   screenUntrustedText,
 } from "./prompt-injection-screen.js";
 import { createAnswerDraftReleaser } from "./answer-drafts.js";
+import { QA_NOT_IN_EVIDENCE_MARKER, readQaAnswerVerdict } from "./answer-verdict.js";
 import { normalizeWhitespace } from "./text-utils.js";
 import { evaluateBidirectionalEvidenceEntailment } from "./comparison-equivalence.js";
 
@@ -46,9 +48,13 @@ const COMPARISON_CLAIM_SAFETY_RULES = `${EVIDENCE_CLAIM_SAFETY_RULES}
 - Do not replace those explicit document-value bindings with an abstract relation-only claim such as "approval authority differs".
 - If there is no evidence-backed gap, leave the Gaps or uncertainty section body empty; never write "None identified", "No gaps", or similar filler.`;
 
-const qaPromptV1 = createPromptTemplate(
+// The QA prompts only: comparison keeps its own insufficiency rules. With
+// RAG_QA_ANSWER_VERDICT on, the model may abstain with the marker.
+const QA_NOT_IN_EVIDENCE_RULE = `If the evidence does not answer the question, reply with only ${QA_NOT_IN_EVIDENCE_MARKER} followed by one short sentence, in the language of the question, naming what the documents do not state. If it answers only part of the question, answer that part and say exactly what is missing. Never guess.`;
+
+const buildQaPromptV1 = (insufficientEvidenceRule) => createPromptTemplate(
   `You answer questions using only retrieved document evidence.
-If the evidence is insufficient, say so directly.
+${insufficientEvidenceRule}
 Do not substitute adjacent topics for the asked topic.
 Use long-term memory only for user preferences or stable notes, never as document evidence.
 ${EVIDENCE_CLAIM_SAFETY_RULES}
@@ -64,6 +70,9 @@ Retrieved Evidence:
 
 Grounded Answer:`
 );
+
+const qaPromptV1 = buildQaPromptV1("If the evidence is insufficient, say so directly.");
+const qaVerdictPromptV1 = buildQaPromptV1(QA_NOT_IN_EVIDENCE_RULE);
 
 const comparisonPromptV1 = createPromptTemplate(
   `You compare uploaded documents using only the provided evidence.
@@ -134,7 +143,7 @@ Differences:
 Gaps or uncertainty:`
 );
 
-const qaPromptV2 = createChatPromptTemplate([
+const buildQaPromptV2 = (insufficientEvidenceRule) => createChatPromptTemplate([
   [
     "system",
     `You are a document-grounded assistant for uploaded PDFs.
@@ -145,7 +154,7 @@ Follow these rules strictly:
 - Use the resolved retrieval question only to clarify references or scope.
 - Use long-term memory only for user preferences or stable notes, never as document evidence or a citation source.
 - Do not substitute related topics, adjacent policies, or likely assumptions for the asked topic.
-- If the evidence is insufficient, say exactly what is missing and do not guess.
+- ${insufficientEvidenceRule}
 ${EVIDENCE_CLAIM_SAFETY_RULES}
 - Every evidence-based sentence must end with citations like [Source 1].
 - Do not cite a source unless it directly supports the sentence.
@@ -164,6 +173,11 @@ Retrieved evidence:
 Grounded Answer:`,
   ],
 ]);
+
+const qaPromptV2 = buildQaPromptV2(
+  "If the evidence is insufficient, say exactly what is missing and do not guess."
+);
+const qaVerdictPromptV2 = buildQaPromptV2(QA_NOT_IN_EVIDENCE_RULE);
 
 const comparisonPromptV2 = createChatPromptTemplate([
   [
@@ -304,6 +318,16 @@ const QA_PROMPTS = defineAnswerPrompts({
   v2Template: qaPromptV2,
   versions: { v1: "v1.2", v2: "v2.2" },
 });
+// v1.3 / v2.3 (RAG_QA_ANSWER_VERDICT on) let the model abstain with
+// QA_NOT_IN_EVIDENCE_MARKER.
+const QA_VERDICT_PROMPTS = defineAnswerPrompts({
+  id: PROMPT_IDS.qaAnswer,
+  v1Template: qaVerdictPromptV1,
+  v2Template: qaVerdictPromptV2,
+  versions: { v1: "v1.3", v2: "v2.3" },
+});
+
+const selectQaPrompts = () => (isQaAnswerVerdictEnabled() ? QA_VERDICT_PROMPTS : QA_PROMPTS);
 const COMPARISON_PROMPTS = defineAnswerPrompts({
   id: PROMPT_IDS.comparisonAnswer,
   v1Template: comparisonPromptV1,
@@ -327,13 +351,13 @@ const selectComparisonPrompt = () =>
 
 /** Every template this module can send, for the pinned fingerprint test. */
 export const listAnswerPromptDescriptors = () =>
-  [QA_PROMPTS, COMPARISON_PROMPTS, GUARDED_COMPARISON_PROMPTS].flatMap((variants) =>
+  [QA_PROMPTS, QA_VERDICT_PROMPTS, COMPARISON_PROMPTS, GUARDED_COMPARISON_PROMPTS].flatMap((variants) =>
     Object.values(variants).map(({ descriptor }) => descriptor)
   );
 
 /** The templates the current configuration would send. */
 export const getActiveAnswerPromptDescriptors = () => [
-  selectPrompt(QA_PROMPTS).descriptor,
+  selectPrompt(selectQaPrompts()).descriptor,
   selectComparisonPrompt().descriptor,
 ];
 
@@ -979,7 +1003,7 @@ export const writeQaAnswer = async ({
   bundle,
   preferenceBlock = "",
 }) => {
-  const qaPrompt = selectPrompt(QA_PROMPTS);
+  const qaPrompt = selectPrompt(selectQaPrompts());
   const prompt = qaPrompt.render({
     questionBlock: buildQuestionBlock({
       query,
@@ -1011,13 +1035,29 @@ export const writeQaAnswer = async ({
     ),
     { allowedText }
   );
-  const text = guarded.text;
+  const verdict = isQaAnswerVerdictEnabled()
+    ? readQaAnswerVerdict(guarded.text)
+    : { abstained: false, text: guarded.text };
+  const injectionScreen = buildInjectionScreenResult(bundle, guarded.removed);
+
+  if (verdict.abstained) {
+    return {
+      text: verdict.reason,
+      citations: [],
+      abstained: true,
+      abstainReason: verdict.reason,
+      abstainSource: "answer_model",
+      injectionScreen,
+    };
+  }
+
+  const text = verdict.text;
   drafts?.finish(text);
 
   return {
     text: text || "I couldn't synthesize an answer from the retrieved document evidence.",
     citations: bundle.citations,
-    injectionScreen: buildInjectionScreenResult(bundle, guarded.removed),
+    injectionScreen,
   };
 };
 

@@ -45,6 +45,9 @@ const PINNED_PROMPT_TEMPLATES = Object.freeze({
   // v1.2 / v2.2: lead with the shortest direct answer.
   "qa_answer@v1.2": "b96d76d43661",
   "qa_answer@v2.2": "69647d5ad62c",
+  // v1.3 / v2.3: the not-in-evidence verdict (RAG_QA_ANSWER_VERDICT on).
+  "qa_answer@v1.3": "c57f90a838c7",
+  "qa_answer@v2.3": "f13805dcc49f",
   "replanner@v1": "16e4034680c7",
   "web_answer@v1.1": "26e8ffa6c6c4",
   "web_answer@v2.1": "9fb8253dfa4f",

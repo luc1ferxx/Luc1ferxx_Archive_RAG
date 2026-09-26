@@ -171,6 +171,9 @@ const main = async () => {
 
         answer = {
           abstained: Boolean(result?.abstained),
+          // "answer_model" when the model said the evidence does not answer;
+          // otherwise an abstention is the confidence gate's.
+          abstainSource: result?.abstained ? result.abstainSource ?? "gate" : null,
           pages: (result?.retrievedContexts ?? []).map((context) => Number(context.pageNumber)),
           text: result?.text,
         };
@@ -197,6 +200,7 @@ const main = async () => {
       const expectedPages = new Set(testCase.expectedEvidence?.[0]?.pages ?? []);
       const row = {
         abstained: answer.abstained,
+        abstainSource: answer.abstainSource ?? null,
         answerType: testCase.answerType,
         evidenceHit: testCase.shouldAbstain ? null : answer.pages.some((page) => expectedPages.has(page)),
         f1: Number(qasperAnswerF1(prediction, testCase.referenceAnswers ?? []).toFixed(4)),

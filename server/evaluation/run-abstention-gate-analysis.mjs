@@ -39,8 +39,16 @@ export const RELEVANCE_GRID = Object.freeze([0.2, 0.24, 0.28, 0.32, 0.36, 0.4, 0
 // 0.01 means "at least one query term"; the setting cannot be 0.
 export const COVERAGE_GRID = Object.freeze([0.01, 0.1, 0.2, 0.3, 0.4, 0.51, 0.6]);
 // The gate before tuning: the report's first row. The tuned QA floor is
-// DEFAULT_MIN_QA_QUERY_TERM_COVERAGE in rag/config.js.
-export const DEFAULT_GATE = Object.freeze({ minQueryTermCoverage: 0.51, minRelevanceScore: 0.32 });
+// DEFAULT_MIN_QA_QUERY_TERM_COVERAGE in rag/config.js. The grid measures the
+// coverage floor alone (partial coverage band off, partialCoverageFloor 1);
+// the second row adds the band RAG_QA_ANSWER_VERDICT opens, before the answer
+// model's own verdict, which this analysis does not call.
+export const DEFAULT_GATE = Object.freeze({
+  minQueryTermCoverage: 0.51,
+  minRelevanceScore: 0.32,
+  partialCoverageFloor: 1,
+});
+export const PARTIAL_BAND_GATE = Object.freeze({ ...DEFAULT_GATE, partialCoverageFloor: 0.3 });
 
 const round = (value) => (value === null ? null : Number(value.toFixed(4)));
 const rate = (count, total) => (total > 0 ? round(count / total) : null);
@@ -84,10 +92,14 @@ export const summarizeGateSetting = (decisions) => {
 const withGateEnv = (setting, callback) => {
   const previous = {
     coverage: process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE,
+    partial: process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR,
+    verdict: process.env.RAG_QA_ANSWER_VERDICT,
     relevance: process.env.RAG_MIN_RELEVANCE_SCORE,
   };
 
   process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE = String(setting.minQueryTermCoverage);
+  process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR = String(setting.partialCoverageFloor ?? 1);
+  process.env.RAG_QA_ANSWER_VERDICT = String((setting.partialCoverageFloor ?? 1) < 1);
   process.env.RAG_MIN_RELEVANCE_SCORE = String(setting.minRelevanceScore);
 
   try {
@@ -95,6 +107,8 @@ const withGateEnv = (setting, callback) => {
   } finally {
     for (const [key, name] of [
       ["coverage", "RAG_MIN_QA_QUERY_TERM_COVERAGE"],
+      ["partial", "RAG_QA_PARTIAL_COVERAGE_FLOOR"],
+      ["verdict", "RAG_QA_ANSWER_VERDICT"],
       ["relevance", "RAG_MIN_RELEVANCE_SCORE"],
     ]) {
       if (previous[key] === undefined) {
@@ -122,9 +136,10 @@ const formatMarkdown = (report) => {
     "| minRelevanceScore | minQueryTermCoverage | answerable pass | ... with evidence admitted | unanswerable caught | Youden J |",
     "|---|---|---|---|---|---|",
     row({ ...report.default, label: "default" }),
+    row({ ...report.partialBand, minQueryTermCoverage: `${report.partialBand.minQueryTermCoverage} (band ${report.partialBand.partialCoverageFloor})` }),
     ...top.map(row),
     "",
-    "First row: the gate before tuning (0.51). Then the eight settings with the highest Youden J.",
+    "First row: the coverage floor alone at 0.51 (the default). Second: with RAG_QA_ANSWER_VERDICT on, which also admits single-part questions' chunks in the partial coverage band unless a query word was replaced by a rival; the answer model's verdict comes after this gate and is not simulated. Then the eight floor-only settings with the highest Youden J.",
     "",
   ].join("\n");
 };
@@ -199,12 +214,12 @@ const main = async () => {
     }
 
     for (const [index, testCase] of cases.entries()) {
-      const { results } = await retrieveQaCandidates({
+      const { evidenceRequirementCount, results } = await retrieveQaCandidates({
         docIds: [testCase.docKeys[0]],
         resolvedQuery: testCase.question,
       });
 
-      candidatesByCase.push({ results, testCase });
+      candidatesByCase.push({ evidenceRequirementCount, results, testCase });
 
       if ((index + 1) % 100 === 0) {
         console.log(`retrieved ${index + 1}/${cases.length}`);
@@ -237,8 +252,12 @@ const main = async () => {
   const evaluateSetting = (setting) =>
     withGateEnv(setting, () =>
       summarizeGateSetting(
-        candidatesByCase.map(({ results, testCase }) => {
-          const confidence = assessQaConfidence({ queryText: testCase.question, results });
+        candidatesByCase.map(({ evidenceRequirementCount, results, testCase }) => {
+          const confidence = assessQaConfidence({
+            evidenceRequirementCount,
+            queryText: testCase.question,
+            results,
+          });
           const expected = expectedPagesOf(testCase);
 
           return {
@@ -269,6 +288,7 @@ const main = async () => {
       unanswerable: candidatesByCase.length - answerableCases.length,
     },
     default: { ...DEFAULT_GATE, ...evaluateSetting(DEFAULT_GATE) },
+    partialBand: { ...PARTIAL_BAND_GATE, ...evaluateSetting(PARTIAL_BAND_GATE) },
     evidenceRetrieved: rate(
       answerableCases.filter(({ results, testCase }) =>
         results.some((result) => expectedPagesOf(testCase).has(pageOf(result)))
