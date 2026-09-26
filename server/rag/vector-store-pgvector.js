@@ -2,6 +2,7 @@ import {
   getDocumentChunksPostgresTable,
   getDocumentsPostgresTable,
   getEmbeddingDimensions,
+  getEmbeddingIndexIdentity,
   getEmbeddingModel,
   getKeywordWeight,
   getPgvectorIndexType,
@@ -91,7 +92,7 @@ export class PgvectorEmbeddingModelError extends Error {
     super(
       `The pgvector index holds chunks embedded with ${storedModels
         .map((entry) => `${entry.model}/${entry.dimensions}`)
-        .join(", ")} but the configured embedding model is ${getEmbeddingModel()}/${getEmbeddingDimensions()}. ` +
+        .join(", ")} but the configured embedding model is ${getEmbeddingIndexIdentity()}/${getEmbeddingDimensions()}. ` +
         "Refusing to mix embedding spaces. Run `npm run vector:reindex -- --apply` to re-embed the archive under the current model."
     );
     this.name = "PgvectorEmbeddingModelError";
@@ -356,7 +357,15 @@ const resizeEmbeddingColumn = async ({ query, tableName, dimensions }) => {
  * space. Throws with a stable code when it does not: this is the fail-closed
  * boundary the goal asks for, and every read/write below goes through it.
  */
-export const ensurePgvectorSchema = async ({ client = null, force = false } = {}) => {
+// allowForeignEmbeddings is for `vector:reindex --apply` only: it rewrites every
+// document it touches under the current embedding identity, so chunks stored
+// under another model or task prefix are what it exists to replace. Every
+// other caller fails closed on them.
+export const ensurePgvectorSchema = async ({
+  client = null,
+  force = false,
+  allowForeignEmbeddings = false,
+} = {}) => {
   if (schemaVerified && !force) {
     return true;
   }
@@ -367,10 +376,12 @@ export const ensurePgvectorSchema = async ({ client = null, force = false } = {}
   // tenant transaction's client and always runs as the owner.
   const verificationClient = getEnforcedDatabaseTenant() ? null : client;
 
-  return runAsDatabaseSystem(() => verifyPgvectorSchema({ client: verificationClient }));
+  return runAsDatabaseSystem(() =>
+    verifyPgvectorSchema({ allowForeignEmbeddings, client: verificationClient })
+  );
 };
 
-const verifyPgvectorSchema = async ({ client = null } = {}) => {
+const verifyPgvectorSchema = async ({ allowForeignEmbeddings = false, client = null } = {}) => {
   const runtime = getRuntime();
 
   if (!runtime.isConfigured()) {
@@ -413,10 +424,10 @@ const verifyPgvectorSchema = async ({ client = null } = {}) => {
   const foreignModels = storedModels.filter(
     (entry) =>
       entry.chunkCount > 0 &&
-      (entry.model !== getEmbeddingModel() || entry.dimensions !== expectedDimensions)
+      (entry.model !== getEmbeddingIndexIdentity() || entry.dimensions !== expectedDimensions)
   );
 
-  if (foreignModels.length > 0) {
+  if (foreignModels.length > 0 && !allowForeignEmbeddings) {
     throw new PgvectorEmbeddingModelError({ storedModels: foreignModels });
   }
 
@@ -441,7 +452,9 @@ const describePgvectorTableStatus = async () => {
       columnDimensions: null,
       configuredDimensions: getEmbeddingDimensions(),
       matches: false,
-      model: getEmbeddingModel(),
+      // The embedding_model value chunks are stored under: the model name,
+      // plus the document prefix when one applies (getEmbeddingIndexIdentity).
+      model: getEmbeddingIndexIdentity(),
       storedModels: [],
     },
     extension: { installed: false, version: null },
@@ -597,7 +610,7 @@ export const writeDocumentsToPgvectorIndex = async ({
   const docIds = toDocIdArray(preparedDocuments.map((document) => document.metadata.docId));
   const ownerUserId = String(accessScope?.userId ?? accessScope?.ownerUserId ?? "").trim();
   const workspaceId = String(accessScope?.workspaceId ?? "").trim();
-  const embeddingModel = getEmbeddingModel();
+  const embeddingModel = getEmbeddingIndexIdentity();
   const embeddingDimensions = getEmbeddingDimensions();
 
   // Re-ingesting a docId replaces its chunks wholesale. Chunk ids embed the
@@ -754,7 +767,7 @@ export const searchPgvectorDocuments = async ({
     [
       toVectorLiteral(queryVector),
       normalizedDocIds,
-      getEmbeddingModel(),
+      getEmbeddingIndexIdentity(),
       getEmbeddingDimensions(),
       limit,
     ]

@@ -3,7 +3,12 @@ import { CIRCUIT_OPEN_CODE, resetModelCallGuards } from "./model-call-guard.js";
 import { addActiveSpanEvent } from "./tracing.js";
 import { normalizePromptDescriptor } from "./prompt-registry.js";
 import { normalizeText } from "../lib/normalize-text.js";
-import { getLlmOpsPolicy, isStructuredOutputEnabled } from "./config.js";
+import {
+  getEmbeddingDocumentPrefix,
+  getEmbeddingQueryPrefix,
+  getLlmOpsPolicy,
+  isStructuredOutputEnabled,
+} from "./config.js";
 import {
   MODEL_CAPABILITIES,
   MODEL_ROUTE_IDS,
@@ -421,6 +426,9 @@ export const resetOpenAIProvider = () => {
   configureOpenAIProvider(null);
 };
 
+const withEmbeddingPrefix = (texts, prefix) =>
+  prefix ? texts.map((text) => `${prefix}${text}`) : texts;
+
 export const embedTexts = async (texts) => {
   const safeTexts = Array.isArray(texts) ? texts : [];
 
@@ -451,7 +459,7 @@ export const embedTexts = async (texts) => {
   return runWithLlmOpsMetric({
     action: () =>
       withRetry(
-        async () => instance.embedDocuments(texts),
+        async () => instance.embedDocuments(withEmbeddingPrefix(texts, getEmbeddingDocumentPrefix())),
         "Embedding request failed."
       ),
     metric: getEmbeddingMetricBase({
@@ -497,7 +505,7 @@ export const embedQuery = async (query) => {
   return runWithLlmOpsMetric({
     action: () =>
       withRetry(
-        async () => instance.embedQuery(query),
+        async () => instance.embedQuery(`${getEmbeddingQueryPrefix()}${query}`),
         "Query embedding request failed."
       ),
     metric: getEmbeddingMetricBase({

@@ -452,9 +452,12 @@ export const main = async () => {
   // --- APPLY: from here on the schema may be created and rows written. ---
   // ensurePgvectorSchema() runs the migrations and fails closed when the
   // configured dimensions exceed the ANN ceiling, before any document is read.
+  // Chunks stored under another embedding model or task prefix do not stop
+  // it: replacing them document by document is what this command is for, and
+  // until every one is rewritten the server keeps refusing the table.
   // initializeDocumentRegistry() then refreshes the map authoritatively,
   // including any legacy rows the migration imported.
-  await ensurePgvectorSchema();
+  await ensurePgvectorSchema({ allowForeignEmbeddings: true });
   await initializeDocumentRegistry();
   registered = new Map(listDocuments().map((document) => [document.docId, document]));
 

@@ -1,4 +1,9 @@
-import { getKeywordWeight, getVectorWeight } from "./config.js";
+import {
+  getEmbeddingIndexIdentity,
+  getKeywordWeight,
+  getVectorWeight,
+  isEmbeddingIdentityCurrent,
+} from "./config.js";
 import { embedTexts } from "./openai.js";
 import { buildTermSet } from "./text-utils.js";
 import { getRagDataPath, readJsonFileSync, writeJsonFileSync, writeJsonFileAsync } from "./storage.js";
@@ -21,6 +26,9 @@ const normalizeEntry = (entry = {}) => ({
   pageContent: String(entry.pageContent ?? ""),
   metadata: normalizeMetadata(entry.metadata),
   vector: Array.isArray(entry.vector) ? entry.vector.map((value) => Number(value) || 0) : [],
+  // getEmbeddingIndexIdentity() at write time; null for entries written before
+  // it was recorded.
+  embeddingIdentity: typeof entry.embeddingIdentity === "string" ? entry.embeddingIdentity : null,
 });
 
 const loadVectorEntries = () => {
@@ -93,6 +101,7 @@ const reportedDimensionMismatches = new Set();
 
 export const resetDimensionMismatchReports = () => {
   reportedDimensionMismatches.clear();
+  reportedIdentityMismatches.clear();
 };
 
 const reportDimensionMismatch = ({ queryLength, entries }) => {
@@ -131,6 +140,31 @@ const reportDimensionMismatch = ({ queryLength, entries }) => {
   return message;
 };
 
+
+const reportedIdentityMismatches = new Set();
+
+const reportEmbeddingIdentityMismatch = (entries) => {
+  const stale = entries.filter((entry) => !isEmbeddingIdentityCurrent(entry.embeddingIdentity));
+
+  if (stale.length === 0) {
+    return;
+  }
+
+  const storedIdentities = [...new Set(stale.map((entry) => entry.embeddingIdentity ?? "unrecorded"))].sort();
+  const signature = `${getEmbeddingIndexIdentity()}:${storedIdentities.join(",")}`;
+
+  if (reportedIdentityMismatches.has(signature)) {
+    return;
+  }
+
+  reportedIdentityMismatches.add(signature);
+  console.warn(
+    `Dense retrieval skipped ${stale.length} of ${entries.length} stored chunks embedded as ` +
+      `${storedIdentities.join("/")}; the current embedding is ${getEmbeddingIndexIdentity()} ` +
+      "(model plus task prefix). Keyword matching still applies. Re-ingest those documents to " +
+      "restore dense ranking."
+  );
+};
 
 const buildKeywordScore = (queryTerms, entry) => {
   if (queryTerms.size === 0) {
@@ -203,6 +237,7 @@ export const addDocumentsToLocalIndex = async ({ documents }) => {
       pageContent: document.pageContent,
       metadata: document.metadata,
       vector: vectors[index],
+      embeddingIdentity: getEmbeddingIndexIdentity(),
     })
   );
 
@@ -256,11 +291,16 @@ export const searchLocalDocuments = async ({
 
   if (Array.isArray(queryVector) && queryVector.length > 0) {
     reportDimensionMismatch({ queryLength: queryVector.length, entries: candidates });
+    reportEmbeddingIdentityMismatch(candidates);
   }
 
   return candidates
     .map((entry) => {
-      const vectorScore = cosineSimilarity(queryVector, entry.vector);
+      // A vector from another model or task prefix lives in another space:
+      // its cosine with this query means nothing, so it gets no dense score.
+      const vectorScore = isEmbeddingIdentityCurrent(entry.embeddingIdentity)
+        ? cosineSimilarity(queryVector, entry.vector)
+        : 0;
       const keywordScore = buildKeywordScore(queryTerms, entry);
       return toSearchResult(entry, vectorScore, keywordScore, scoringMode);
     })

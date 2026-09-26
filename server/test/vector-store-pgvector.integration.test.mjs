@@ -190,6 +190,31 @@ if (!databaseUrl) {
     await pgvector.ensurePgvectorSchema({ force: true });
   });
 
+  test("a new embedding identity refuses the old chunks until the reindex path rewrites them", async (t) => {
+    t.after(async () => {
+      delete process.env.RAG_EMBEDDING_DOCUMENT_PREFIX;
+      await clearDocuments();
+      await pgvector.ensurePgvectorSchema({ force: true });
+    });
+    await ingest({ docId: "it-identity", fileName: "identity.pdf", pages: ["Alpha identity page."] });
+
+    // The same model with a document task prefix is another embedding space.
+    process.env.RAG_EMBEDDING_DOCUMENT_PREFIX = "search_document: ";
+    await assert.rejects(pgvector.ensurePgvectorSchema({ force: true }), { name: "PgvectorEmbeddingModelError" });
+
+    await pgvector.ensurePgvectorSchema({ allowForeignEmbeddings: true, force: true });
+    await ingest({ docId: "it-identity", fileName: "identity.pdf", pages: ["Alpha identity page."] });
+    await pgvector.ensurePgvectorSchema({ force: true });
+
+    const status = await pgvector.describePgvectorStatus();
+
+    assert.deepEqual(
+      status.embedding.storedModels.map((entry) => entry.model),
+      ["integration-test-embedding#search_document:"]
+    );
+    assert.equal(status.embedding.matches, true);
+  });
+
   test("ingest writes registry row and chunks together; search runs both routes; delete and clear cascade", async () => {
     await ingest({
       docId: "it-alpha",

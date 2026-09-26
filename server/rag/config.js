@@ -48,6 +48,43 @@ const toChoice = (rawValue, fallbackValue, allowedValues) => {
 export const getEmbeddingModel = () =>
   process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 
+// Task prefixes some embedding models are trained with and documented as
+// required. They are part of the model's input contract, so they apply to the
+// real embedding client only, never to a configured stand-in provider. On
+// QASPER, nomic-embed-text with its prefixes put the evidence paragraph among
+// the QA candidates for 6 more questions in 100 (docs/evaluation.md).
+// RAG_EMBEDDING_QUERY_PREFIX / RAG_EMBEDDING_DOCUMENT_PREFIX override the
+// table; an empty value turns a prefix off.
+const EMBEDDING_TASK_PREFIXES = Object.freeze([
+  { document: "search_document: ", pattern: /nomic-embed-text/i, query: "search_query: " },
+]);
+
+const findEmbeddingTaskPrefixes = () =>
+  EMBEDDING_TASK_PREFIXES.find((entry) => entry.pattern.test(getEmbeddingModel())) ?? null;
+
+export const getEmbeddingQueryPrefix = () =>
+  process.env.RAG_EMBEDDING_QUERY_PREFIX ?? findEmbeddingTaskPrefixes()?.query ?? "";
+
+export const getEmbeddingDocumentPrefix = () =>
+  process.env.RAG_EMBEDDING_DOCUMENT_PREFIX ?? findEmbeddingTaskPrefixes()?.document ?? "";
+
+// What a stored vector was embedded under: the model, plus the document
+// prefix when there is one ("nomic-embed-text#search_document:"). Stores
+// record it with each chunk and refuse to rank chunks from another identity,
+// the same way they treat another model.
+export const getEmbeddingIndexIdentity = () => {
+  const prefix = getEmbeddingDocumentPrefix().trim();
+
+  return prefix ? `${getEmbeddingModel()}#${prefix}` : getEmbeddingModel();
+};
+
+// A chunk stored before identities were recorded has none; it was embedded
+// without a prefix, so it is current only while no prefix applies.
+export const isEmbeddingIdentityCurrent = (storedIdentity) =>
+  typeof storedIdentity === "string" && storedIdentity
+    ? storedIdentity === getEmbeddingIndexIdentity()
+    : getEmbeddingIndexIdentity() === getEmbeddingModel();
+
 export const getChatModel = () => process.env.OPENAI_CHAT_MODEL || "gpt-5";
 
 // A second chat model the chat and planner routes fail over to when the primary

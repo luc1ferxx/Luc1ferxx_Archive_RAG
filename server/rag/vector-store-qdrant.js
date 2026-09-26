@@ -1,11 +1,13 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 import {
+  getEmbeddingIndexIdentity,
   getKeywordWeight,
   getQdrantApiKey,
   getQdrantCollection,
   getQdrantDistance,
   getQdrantUrl,
   getVectorWeight,
+  isEmbeddingIdentityCurrent,
 } from "./config.js";
 import { embedTexts } from "./openai.js";
 import {
@@ -121,6 +123,7 @@ const buildPointPayload = (document) => ({
   sectionHeading: document.metadata?.sectionHeading ?? null,
   source: document.metadata?.source ?? null,
   pageContent: document.pageContent,
+  embeddingIdentity: getEmbeddingIndexIdentity(),
 });
 
 const buildMetadataFromPayload = (payload = {}) => ({
@@ -136,7 +139,10 @@ const buildMetadataFromPayload = (payload = {}) => ({
 
 const toDenseSearchResult = (point, keywordScore, scoringMode) => {
   const payload = point.payload ?? {};
-  const vectorScore = Number(point.score ?? 0);
+  // A point embedded under another model or task prefix is in another space.
+  const vectorScore = isEmbeddingIdentityCurrent(payload.embeddingIdentity)
+    ? Number(point.score ?? 0)
+    : 0;
 
   return {
     document: {
