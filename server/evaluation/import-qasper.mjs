@@ -14,18 +14,27 @@
 //                               free_form_answer, evidence, highlighted_evidence } }] }] } }
 //
 // Mapping:
-//   - Each paper becomes a document; the abstract is page 1 and each non-empty
-//     section is one more "page", so expectedEvidence stays page-granular like
-//     the existing corpora.
-//   - An answerable question keeps the first annotator's answer. Its evidence
-//     paragraphs map to the pages that contain them; figure and table evidence
-//     ("FLOAT SELECTED") is not in the text and is dropped, and a question left
-//     with no locatable evidence is skipped, because retrieval cannot be graded.
-//   - An unanswerable question becomes shouldAbstain: true.
+//   - Each paper becomes a document and the abstract is page 1. With the
+//     default --granularity paragraph every paragraph is one more "page",
+//     prefixed with its section name as a PDF page would show the heading, so
+//     expectedEvidence names the annotated paragraphs themselves. With
+//     --granularity section a whole section is one page; any chunk of a long
+//     section then counts as a hit, which inflates recall.
+//   - An answerable question's evidence comes from the first annotator. Its
+//     evidence paragraphs map to the pages that contain them; figure and table
+//     evidence ("FLOAT SELECTED") is not in the text and is dropped, and a
+//     question left with no locatable evidence is skipped, because retrieval
+//     cannot be graded.
+//   - referenceAnswers keeps every annotator's answer ("Unanswerable" for an
+//     unanswerable one), because the official QASPER answer F1 takes the best
+//     match over annotators; referenceAnswer and answerType are the first
+//     annotator's.
+//   - An unanswerable question (first annotator) becomes shouldAbstain: true.
 //
 // Usage:
 //   node evaluation/import-qasper.mjs --input <qasper-dev-v0.3.json>
-//     [--papers 20] [--seed 1] [--output evaluation/generated/qasper-dev-sample.json]
+//     [--papers 20|all] [--seed 1] [--granularity paragraph|section]
+//     [--output evaluation/generated/qasper-dev-sample.json]
 
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -67,15 +76,32 @@ const samplePaperIds = (paperIds, count, seed) => {
   return shuffled.slice(0, count);
 };
 
-const buildPages = (paper) =>
+export const QASPER_GRANULARITIES = Object.freeze(["paragraph", "section"]);
+
+const buildPages = (paper, granularity) =>
   [
     normalize(paper.abstract),
-    ...(paper.full_text ?? []).map((section) =>
-      [normalize(section.section_name), ...(section.paragraphs ?? []).map(normalize)]
-        .filter(Boolean)
-        .join("\n\n")
-    ),
+    ...(paper.full_text ?? []).flatMap((section) => {
+      const heading = normalize(section.section_name);
+      const paragraphs = (section.paragraphs ?? []).map(normalize).filter(Boolean);
+
+      return granularity === "section"
+        ? [[heading, ...paragraphs].filter(Boolean).join("\n\n")]
+        : paragraphs.map((paragraph) => [heading, paragraph].filter(Boolean).join("\n\n"));
+    }),
   ].filter(Boolean);
+
+// The answer text and type the official QASPER evaluator derives: extractive
+// spans (joined with ", ") win over a free-form answer, then yes/no.
+export const describeQasperAnswer = (answer = {}) => {
+  if (answer.unanswerable) return { text: "Unanswerable", type: "none" };
+  if ((answer.extractive_spans ?? []).map(normalize).filter(Boolean).length > 0) {
+    return { text: answer.extractive_spans.map(normalize).filter(Boolean).join(", "), type: "extractive" };
+  }
+  if (normalize(answer.free_form_answer)) return { text: normalize(answer.free_form_answer), type: "abstractive" };
+  if (typeof answer.yes_no === "boolean") return { text: answer.yes_no ? "Yes" : "No", type: "boolean" };
+  return null;
+};
 
 const referenceAnswerOf = (answer) => {
   if (normalize(answer.free_form_answer)) return normalize(answer.free_form_answer);
@@ -86,9 +112,9 @@ const referenceAnswerOf = (answer) => {
   return null;
 };
 
-export const convertQasperPaper = ({ paper, paperId }) => {
+export const convertQasperPaper = ({ granularity = "paragraph", paper, paperId }) => {
   const docKey = `qasper_${slug(paperId)}`;
-  const pages = buildPages(paper);
+  const pages = buildPages(paper, granularity);
   const cases = [];
   let skipped = 0;
 
@@ -100,10 +126,15 @@ export const convertQasperPaper = ({ paper, paperId }) => {
       continue;
     }
 
+    const references = (qa.answers ?? [])
+      .map((entry) => describeQasperAnswer(entry?.answer))
+      .filter(Boolean);
     const base = {
+      answerType: describeQasperAnswer(answer)?.type ?? null,
       docKeys: [docKey],
       id: `qasper_${slug(qa.question_id || qa.question)}`,
       question: normalize(qa.question),
+      referenceAnswers: [...new Set(references.map((reference) => reference.text))],
       type: "qa",
     };
 
@@ -178,13 +209,21 @@ const main = async () => {
     );
   }
 
-  const paperCount = Number(args.papers) > 0 ? Number(args.papers) : 20;
+  const paperCount =
+    args.papers === "all" ? paperIds.length : Number(args.papers) > 0 ? Number(args.papers) : 20;
   const seed = Number(args.seed) > 0 ? Number(args.seed) : 1;
+  const granularity = args.granularity ?? "paragraph";
+
+  if (!QASPER_GRANULARITIES.includes(granularity)) {
+    throw new Error(`--granularity must be one of: ${QASPER_GRANULARITIES.join(", ")}.`);
+  }
+
   const converted = samplePaperIds(paperIds, paperCount, seed).map((paperId) =>
-    convertQasperPaper({ paper: release[paperId], paperId })
+    convertQasperPaper({ granularity, paper: release[paperId], paperId })
   );
   const corpus = {
     metadata: {
+      granularity,
       license: "CC BY 4.0",
       papers: converted.length,
       seed,

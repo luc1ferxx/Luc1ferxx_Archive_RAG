@@ -142,7 +142,6 @@ export const GLOBAL_COVERAGE_EXCLUDED_PATHS = Object.freeze([
   "server/evaluation/build-observability-report.mjs",
   "server/evaluation/check-current-quality.mjs",
   "server/evaluation/check-planner-provider-gate.mjs",
-  "server/evaluation/import-qasper.mjs",
   "server/evaluation/local-cross-encoder-endpoint.mjs",
   "server/evaluation/ragas-sample.js",
   "server/evaluation/run-answer-draft-eval.mjs",

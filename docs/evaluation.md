@@ -534,12 +534,13 @@ npm run rerank:cross-encoder:local
 
 ## 真实模型评测与外部基准（框架）
 
-这一组入口用来把评测从确定性替身换成真实模型和外部标注。除 `eval:retrieval-comparison` 和 `verify:quality` 已用本地 Ollama 实跑过外，其余目前是框架：脚本可运行，但还没有提交的基线结果或测试。
+这一组入口用来把评测从确定性替身换成真实模型和外部标注。`eval:retrieval-comparison`、`verify:quality`、`corpus:qasper` 和 `eval:qasper-answers` 已用本地 Ollama 在真实数据上跑过；`eval:judge` 仍是框架（脚本可运行，但没有校准过的结果）。
 
 | 命令 | 用途 |
 | --- | --- |
 | `npm run eval:retrieval-comparison -- --embedding-provider openai` | 四组检索配置用真实 embedding 对比（任何 OpenAI 兼容端点，含 Ollama），每个 split 带配对 bootstrap 95% CI；报告写到 `latest-retrieval-comparison-openai.*`，不覆盖确定性报告。加 `--rerank-provider cross-encoder --cross-encoder-endpoint <url>` 测神经 reranker（服务见 `npm run rerank:cross-encoder:docker`）。 |
-| `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式：摘要为第 1 页、每个章节一页，证据段落映射到页码，不可回答题成为 `shouldAbstain`。输出默认在已忽略的 `evaluation/generated/`。 |
+| `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20\|all] [--granularity paragraph\|section]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式。默认按段落切"页"：摘要是第 1 页，之后每个段落一页并带上所在章节的标题，证据精确到被标注的段落；`section` 按整节切，长节里任何一块都算命中，召回会偏高。保留所有标注者的答案（官方 F1 取最优），不可回答题成为 `shouldAbstain`，证据只在图表里的题跳过。输出默认在已忽略的 `evaluation/generated/`。 |
+| `npm run eval:qasper-answers [-- --cases 200] [--surface rag\|agent]` | 在 QASPER 语料上测答案：官方 QASPER 答案 F1（SQuAD 式归一化，取所有标注者中的最优，拒答记为 "Unanswerable"），外加可回答题的拒答率、不可回答题的拒答召回和精度、答案来源里是否含标注的证据段落。不用 LLM 评审。`rag` 走 MCP `archive_ask` 的文档 RAG 答案，`agent` 走 `runAgentRag`。 |
 | `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
 | `npm run eval:claim-judge [-- --rounds 3]` | claim 评审的校准门槛：用 verify:quality 合同构造的对照集（14 条正确改写、14 条各错一处：错数字、错主体、错动作方、加条件、去条件、否定、may/must、方向颠倒、外部知识），另有 8 条留出集。分别跑"只用词法"和"词法 + 评审"，报告改写接受率和错误接受率。标签由构造保证，不是人工标注。 |
 | `npm run eval:answer-drafts [-- --set fixtures\|arxiv\|all] [--cases 12]` | 用真实 embedding + chat 模型（任何 OpenAI 兼容端点）在临时 standalone 档案里跑单文档问答：`fixtures` 是 verify:quality 的合同和政策（事实逐字出现），`arxiv` 是 8 篇论文。通过 `runAgentRag` + 流式接收端测首个草稿时间、最终答案时间、草稿保留率、撤回原因和澄清率；报告写到已忽略的 `latest-answer-drafts.*`。 |
@@ -650,6 +651,43 @@ arxiv 的 3 次"回答"都是误路由到时间线 Skill，不是文档问答。
   - 名额租约 = 请求超时 + 5 秒，实例崩溃后名额在租约到期时收回。
   - 半开探测也是租约，探测中的实例崩溃不会让熔断永远卡住。
 - **正确性测试**：`test/shared-state.integration.test.mjs`，需要 `REDIS_TEST_URL`，没有时报告为跳过。覆盖熔断共享、单一探测与租约过期、全部署统一的并发上限、Redis 不可达时退回本地，以及评审缓存跨实例复用、换模型后失效。
+
+## QASPER：外部标注的检索和答案评测
+
+QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据段落；CC BY 4.0，下载到已忽略的 `evaluation/generated/qasper/`）。`corpus:qasper --papers all` 转换后，得到 916 个问题：821 个有可定位的证据段落，95 个不可回答；另有 89 个的证据只在图表里，文本中定位不到，已跳过。每个问题只在它自己的论文里检索，和用户选定文档提问一样。2026-09-25，本地 Ollama：embedding 用 `nomic-embed-text`，回答用 `qwen2.5:7b`。
+
+**检索**（`eval:retrieval-comparison -- --embedding-provider openai --corpus evaluation/generated/qasper-dev.json --splits full --no-refusal`）：821 个可回答问题，按段落算 Top-5。
+
+| 检索方式 | Recall@5 | NDCG@5 | MRR |
+| --- | --- | --- | --- |
+| 稠密 | 0.511 | 0.381 | 0.362 |
+| 全文（BM25） | 0.442 | 0.330 | 0.319 |
+| 混合（RRF） | **0.517** | **0.393** | **0.384** |
+| 混合 + 启发式重排 | 0.510 | 0.385 | 0.375 |
+
+配对 bootstrap 95% 置信区间：
+
+- 混合比全文 Recall +0.074 [+0.048, +0.102]，**显著**；
+- 混合比稠密 +0.006 [−0.019, +0.031]，**不显著**；
+- 启发式重排比混合 −0.007 [−0.022, +0.008]，**不显著**。
+
+这修正了 48 条 arXiv 用例上的印象：在那里混合比稠密高 0.057，但区间本来就跨 0；放到 821 题上，这个差距看不出来。要说混合检索更好，只能说"比单用 BM25 好"。
+
+**答案**（`eval:qasper-answers -- --cases 200`，按种子抽样，涉及 139 篇论文，其中 20 题不可回答；走 MCP `archive_ask` 的文档 RAG 答案）：
+
+| 指标 | 数值 |
+| --- | --- |
+| 官方答案 F1（全部 200 题） | 0.206 |
+| 按类型：抽取式 117 题 / 概括式 41 题 / 是非题 22 题 / 不可回答 20 题 | 0.124 / 0.116 / 0.227 / 0.850 |
+| 可回答题被拒答 | 41.7%（75/180） |
+| 不可回答题被识别出来（拒答召回） | 85%（17/20） |
+| 拒答里拒对的比例（拒答精度） | 18.5%（17/92） |
+| 给出答案时，来源里有标注的证据段落 | 41.9%（44/105） |
+| 只看给出答案的可回答题，F1 | 0.168 |
+
+- **问题一：拒答太多**。180 个可回答的问题拒了 75 个，92 次拒答里只有 17 次是对的。检索阶段 Recall@5 有 0.51，说明大多数拒答不是没找到，而是置信度门控对 QASPER 这种改写式提问太严。这是下一步最值得调的地方，而且可以用 QASPER train 集调、dev 集测，避免对测试集过拟合。
+- **问题二：答案太长**。给出的答案中位数 54 个词，标注答案通常只有几个词，token F1 会因此大幅扣分。和只抽取片段的系统比 F1 没有意义，这个数字只适合同一系统的前后版本之间比较。
+- **没测的**：Agent 路径（`--surface agent`）这次没跑。用 7B 模型时，Agent 路径大多以澄清结束，拒答只会更多。
 
 ## Prompt 注入红队
 
