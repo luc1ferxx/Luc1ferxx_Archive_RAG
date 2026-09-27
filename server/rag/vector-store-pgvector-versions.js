@@ -1,18 +1,23 @@
 import {
+  DEFAULT_EMBEDDING_DIMENSIONS,
   buildEmbeddingIndexIdentity,
   getDocumentChunksPostgresTable,
   getEmbeddingDimensions,
+  getEmbeddingDimensionsConfigStatus,
   getEmbeddingDocumentPrefix,
   getEmbeddingIndexIdentity,
   getEmbeddingModel,
   getEmbeddingQueryPrefix,
+  getEmbeddingTaskPrefixesForModel,
   getIndexVersionDualWriteGraceMs,
   getIndexVersionPointerTtlMs,
+  getKnownEmbeddingDimensionsForModel,
   getPgvectorHnswEfConstruction,
   getPgvectorHnswM,
   getPgvectorIndexType,
   getPgvectorIvfflatLists,
   getPgvectorTextSearchConfig,
+  getVectorStoreProviderConfigStatus,
 } from "./config.js";
 import { getIndexVersionRegistryTableNames } from "./db-migrations.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
@@ -47,8 +52,16 @@ import {
 //
 // * Lock order. Lifecycle operations lock the pointer row, then version rows,
 //   then the advisory lock, then touch the documents table (DDL). Writers take
-//   the advisory lock before their first documents-row lock. The builder locks
-//   its version row and then one documents row. No cycle is possible.
+//   the advisory lock before their first documents-row lock, and a documents
+//   row before any chunk row (ingest registers the row first; a replacement
+//   and a delete lock it first). The builder takes no advisory lock: it locks
+//   one documents row, then that document's chunk rows, and its version row
+//   last, right before the progress row. The fence and a claim lock a version
+//   row alone. A version row a lifecycle transaction locks is therefore never
+//   one a builder waits for: activation's are active or ready, and retire
+//   first stops a build it may abort, in a statement of its own
+//   (status failed), so a builder's lease check no longer matches the row and
+//   never waits for it. No cycle is possible.
 //
 // Searches read the pointer through a short TTL cache instead of LISTEN/NOTIFY:
 // a stale read is harmless because the version it names keeps receiving every
@@ -470,6 +483,120 @@ export const peekIndexVersionSnapshot = () => snapshotCache?.snapshot ?? null;
 export const isIndexVersionSnapshotFresh = () =>
   Boolean(snapshotCache && snapshotCache.expiresAt > getPgvectorRuntime().now());
 
+/**
+ * The embedding space a search query must be embedded in: the active
+ * version's. For the local and Qdrant providers, and for pgvector without a
+ * database (tests, a dry run), that is the configured space. The pointer is
+ * read through the TTL cache the search itself reads next, so this costs no
+ * extra round trip; if the read fails the last snapshot (or the configured
+ * space) is used and the search, which reads the pointer again, re-embeds on a
+ * mismatch. Never throws.
+ */
+export const resolveServingQueryEmbeddingSpace = async () => {
+  const known = peekServingQueryEmbeddingSpace();
+
+  if (known) {
+    return known;
+  }
+
+  try {
+    return resolveVersionSpace((await readIndexVersionSnapshot()).active);
+  } catch {
+    const cached = peekIndexVersionSnapshot();
+
+    return cached ? resolveVersionSpace(cached.active) : getConfiguredEmbeddingSpace();
+  }
+};
+
+/**
+ * The serving space when it is known without a database read (another
+ * provider, no database configured, or a pointer snapshot inside its TTL);
+ * null when the pointer must be read first.
+ */
+export const peekServingQueryEmbeddingSpace = () => {
+  const provider = getVectorStoreProviderConfigStatus();
+
+  if (!provider.valid || provider.provider !== "pgvector") {
+    return getConfiguredEmbeddingSpace();
+  }
+
+  try {
+    if (!getPgvectorRuntime().isConfigured()) {
+      return getConfiguredEmbeddingSpace();
+    }
+
+    return isIndexVersionSnapshotFresh() ? resolveVersionSpace(peekIndexVersionSnapshot().active) : null;
+  } catch {
+    return null;
+  }
+};
+
+const toEnvironmentValue = (value) => {
+  const text = String(value ?? "");
+
+  return /^[A-Za-z0-9_.:/@+-]*$/.test(text) ? text : JSON.stringify(text);
+};
+
+// The width the configuration would give once OPENAI_EMBEDDING_MODEL names
+// `model`: an explicit RAG_EMBEDDING_DIMENSIONS (or a provider's own override)
+// stays in force; a width derived from the configured model follows the new
+// model instead (its known width, else the default), exactly as
+// getEmbeddingDimensionsConfigStatus would derive it after the change.
+const predictDimensionsAfterModelChange = (model) => {
+  const status = getEmbeddingDimensionsConfigStatus();
+
+  return status.source === "env" || status.source === "provider_override"
+    ? status.dimensions
+    : getKnownEmbeddingDimensionsForModel(model) ?? DEFAULT_EMBEDDING_DIMENSIONS;
+};
+
+/**
+ * The settings that make this process's configuration name `space`, as
+ * NAME -> value, only those that differ: the model, the width, and a task
+ * prefix override when the model's documented prefix (the one the
+ * configuration would pick for it) is not the one the space was built with.
+ * The width and prefixes are compared with what the configuration would give
+ * after the model change, so applying the settings once is enough.
+ */
+export const describeConfigurationChangeFor = (space) => {
+  const configured = getConfiguredEmbeddingSpace();
+  const settings = {};
+  const modelChanges = space.model !== configured.model;
+  // What the configuration would use after the model change: an explicit
+  // override stays in force, otherwise the new model's documented prefix and
+  // known width.
+  const predicted = modelChanges
+    ? {
+        dimensions: predictDimensionsAfterModelChange(space.model),
+        document: process.env.RAG_EMBEDDING_DOCUMENT_PREFIX ?? getEmbeddingTaskPrefixesForModel(space.model).document,
+        query: process.env.RAG_EMBEDDING_QUERY_PREFIX ?? getEmbeddingTaskPrefixesForModel(space.model).query,
+      }
+    : { dimensions: configured.dimensions, document: configured.documentPrefix, query: configured.queryPrefix };
+
+  if (modelChanges) {
+    settings.OPENAI_EMBEDDING_MODEL = space.model;
+  }
+
+  if (space.dimensions !== predicted.dimensions) {
+    settings.RAG_EMBEDDING_DIMENSIONS = String(space.dimensions);
+  }
+
+  if (predicted.document !== space.documentPrefix) {
+    settings.RAG_EMBEDDING_DOCUMENT_PREFIX = space.documentPrefix;
+  }
+
+  if (predicted.query !== space.queryPrefix) {
+    settings.RAG_EMBEDDING_QUERY_PREFIX = space.queryPrefix;
+  }
+
+  return settings;
+};
+
+const formatSettings = (settings) =>
+  Object.entries(settings)
+    .map(([name, value]) => `${name}=${toEnvironmentValue(value)}`)
+    .join(" ");
+
 export const isIndexVersionWriteTarget = (version) =>
   version.status === INDEX_VERSION_STATUSES.active ||
   version.status === INDEX_VERSION_STATUSES.building ||
@@ -712,9 +839,17 @@ export const describeIndexVersions = async ({ includeDrift = true, includeRetire
     if (!active) {
       problems.push("The version pointer names no registered version.");
     } else if (!isSameQuerySpace(resolveVersionSpace(active), configured)) {
+      // Serving is correct either way: queries are embedded once, in the
+      // active version's space (resolveServingQueryEmbeddingSpace). The
+      // configuration still decides what a new build and a version-1-style
+      // configuration-following table use, so it should say the same.
+      const activeSpace = resolveVersionSpace(active);
+      const settings = describeConfigurationChangeFor(activeSpace);
+
       warnings.push({
         code: "configuration_differs_from_active",
-        message: `The active version ${active.versionId} is pinned to ${resolveVersionSpace(active).identity}/${resolveVersionSpace(active).dimensions} but this process is configured for ${configured.identity}/${configured.dimensions}; every query is embedded twice until OPENAI_EMBEDDING_MODEL / RAG_EMBEDDING_DIMENSIONS name the active model.`,
+        message: `The active version ${active.versionId} is pinned to ${activeSpace.identity}/${activeSpace.dimensions} but this process is configured for ${configured.identity}/${configured.dimensions}. Queries are embedded once, in the active version's model; set ${formatSettings(settings)} at the next deploy so the configuration names the model that serves (a build without --model uses the configuration).`,
+        settings,
         versionId: active.versionId,
       });
     }

@@ -115,8 +115,10 @@ const configureEnvironment = (databaseUrl, tenantRole, dataDirectory) => {
 };
 
 if (childMode === "crash-build") {
-  // A builder process that dies (exit 137, no cleanup, lease kept) after it
-  // committed two documents.
+  // A builder process that dies (exit 137, no cleanup, lease kept) once two
+  // documents have committed -- with several documents in flight
+  // (RAG_INDEX_VERSION_BUILD_CONCURRENCY's default), so more may have
+  // committed and the ones still open are rolled back by the disconnect.
   const [{ configureEmbeddingDimensions }, { configureOpenAIProvider }, lifecycle] = await Promise.all([
     import("../rag/config.js"),
     import("../rag/openai.js"),
@@ -514,6 +516,21 @@ if (childMode === "crash-build") {
       queriesIn(MODEL_B) > queriesInBBefore,
       "after the switch, queries are embedded in version 2's own model"
     );
+
+    // A new question after the switch is embedded in version 2's model only:
+    // once per retrieval query, never also in the configured model.
+    const [queriesInABefore, queriesInBBeforeNew] = [queriesIn(MODEL_A), queriesIn(MODEL_B)];
+    const fresh = await modules.tenant.runWithDatabaseTenant(ALICE, () =>
+      modules.rag.default(["d-alpha", "d-gamma"], "Which gamma renewal window follows the audit?", { accessScope: ALICE })
+    );
+    const retrievalQueries = new Set(
+      embedding.calls.queries.slice(-(queriesIn(MODEL_B) - queriesInBBeforeNew)).map((call) => call.query)
+    );
+
+    assert.ok(fresh, "the question was answered");
+    assert.equal(queriesIn(MODEL_A), queriesInABefore, "no query embedding in the configured model");
+    assert.ok(queriesIn(MODEL_B) > queriesInBBeforeNew);
+    assert.equal(queriesIn(MODEL_B) - queriesInBBeforeNew, retrievalQueries.size, "one embedding per retrieval query");
     assert.equal((await modules.pgvector.getActivePgvectorVersion()).versionId, 2);
 
     const pointer = await pointerRow();
@@ -603,13 +620,23 @@ if (childMode === "crash-build") {
     const progress = (
       await q(`SELECT doc_id, outcome FROM rag_index_versions_build_progress WHERE version_id = 3 ORDER BY doc_id`)
     ).rows;
+    const committed = progress.map((row) => row.doc_id);
 
     assert.equal(version.status, "building");
     assert.equal(version.builder_id, "crash-builder");
-    assert.deepEqual(progress, [
-      { doc_id: "b-eta", outcome: "indexed" },
-      { doc_id: "b-iota", outcome: "indexed" },
-    ]);
+    // At least the two it waited for. Four were in flight, and the worker that
+    // finished first took the fifth document; any of them whose COMMIT reached
+    // the server before the exit stays, each with its chunks.
+    assert.ok(committed.length >= 2, `committed before the crash: ${committed}`);
+    assert.ok(progress.every((row) => row.outcome === "indexed"));
+    assert.ok(
+      committed.every((docId) => ["b-eta", "b-iota", "b-theta", "d-alpha", "d-beta"].includes(docId)),
+      `only the first documents in doc_id order were taken: ${committed}`
+    );
+
+    const builtBeforeCrash = await chunkCounts("rag_document_chunks_v3");
+
+    assert.deepEqual(Object.keys(builtBeforeCrash).sort(), committed, "chunks only for committed documents");
 
     // Two builders never run at once: the dead one's lease is still live.
     await assert.rejects(modules.lifecycle.resumeIndexVersionBuild(), /being built by crash-builder/);
@@ -621,11 +648,12 @@ if (childMode === "crash-build") {
     );
 
     // A clear during the build is written to the building version too.
-    assert.ok((await chunkCounts("rag_document_chunks_v3"))["b-eta"] > 0);
+    assert.ok(committed.some((docId) => docId.startsWith("b-")), "one of bob's documents is in the building version");
     await modules.tenant.runWithDatabaseTenant(BOB, () => modules.rag.clearDocuments({ accessScope: BOB }));
+    // Bob's chunks are gone from it; alice's d-alpha stays if it committed.
     assert.deepEqual(
       (await q(`SELECT DISTINCT owner_user_id FROM rag_document_chunks_v3`)).rows.map((row) => row.owner_user_id),
-      []
+      committed.includes("d-alpha") ? ["alice"] : []
     );
 
     await sleep(leaseMs + 200);
@@ -638,7 +666,14 @@ if (childMode === "crash-build") {
 
     assert.equal(resumed.versionId, 3);
     assert.equal(resumed.version.status, "ready");
-    assert.deepEqual(resumedDocs, ["d-alpha:indexed", "d-epsilon:indexed", "d-gamma:indexed", "d-zeta:indexed"]);
+    // Exactly alice's documents the crashed builder had not committed (bob's
+    // were cleared), in whatever order the parallel builder finished them.
+    assert.deepEqual(
+      resumedDocs.sort(),
+      ["d-alpha", "d-epsilon", "d-gamma", "d-zeta"]
+        .filter((docId) => !committed.includes(docId))
+        .map((docId) => `${docId}:indexed`)
+    );
     assert.deepEqual(await chunkCounts("rag_document_chunks_v3"), await chunkCounts("rag_document_chunks"));
 
     const activation = await modules.lifecycle.activateIndexVersion({
@@ -692,10 +727,15 @@ if (childMode === "crash-build") {
     assert.equal(vectorStore.embedding.matches, true);
     assert.equal(vectorStore.indexVersions.active.versionId, 3);
     assert.equal(vectorStore.indexVersions.previousVersionId, 1);
-    assert.ok(
-      vectorStore.indexVersions.warnings.some((warning) => warning.code === "configuration_differs_from_active"),
-      "the configured model differs from the active version's"
+    const configurationWarning = vectorStore.indexVersions.warnings.find(
+      (warning) => warning.code === "configuration_differs_from_active"
     );
+
+    assert.ok(configurationWarning, "the configured model differs from the active version's");
+    assert.deepEqual(configurationWarning.settings, {
+      OPENAI_EMBEDDING_MODEL: MODEL_C,
+      RAG_EMBEDDING_DIMENSIONS: String(DIMENSIONS[MODEL_C]),
+    });
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     // Eleven tenant tables (ten plus the staged ingest's outputs, migration
     // 017) and the live version's own chunk table.
@@ -810,5 +850,238 @@ if (childMode === "crash-build") {
       /only a ready version can be activated/
     );
     await modules.lifecycle.retireIndexVersion({ versionId: build.versionId });
+  });
+
+  // Backends of this database waiting on a heavyweight lock (row, tuple, table).
+  const lockWaiters = async () =>
+    Number(
+      (
+        await q(
+          `SELECT COUNT(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`
+        )
+      ).rows[0].n
+    );
+  const waitUntil = async (predicate, label, timeoutMs = 10_000) => {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      if (await predicate()) {
+        return;
+      }
+
+      await sleep(20);
+    }
+
+    assert.fail(`timed out waiting for ${label}`);
+  };
+
+  test("an upload's fence gets through while several builder transactions are mid-write: the lease is checked after the chunk writes", async () => {
+    for (const [docId, topic] of [["f-1", "alpha"], ["f-2", "beta"], ["f-3", "gamma"], ["f-4", "delta"]]) {
+      await ingest(ALICE, docId, [`${topic} fence clause for ${docId}.`]);
+    }
+
+    const space = modules.lifecycle.resolveBuildEmbeddingSpace({ dimensions: DIMENSIONS[MODEL_B], model: MODEL_B });
+    const created = await modules.lifecycle.createIndexVersion({ builderId: "busy-builder", space });
+    // Holds every chunk write into the new table, as long HNSW inserts would:
+    // each builder transaction that reaches its chunks waits here.
+    const blocker = new pg.Client({ connectionString: process.env.POSTGRES_DATABASE_URL });
+    let building;
+    let fenced;
+    let fenceMs;
+
+    await blocker.connect();
+
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(`LOCK TABLE ${created.chunkTable} IN SHARE MODE`);
+      building = modules.lifecycle
+        .runIndexVersionBuild({ builderId: "busy-builder", concurrency: 4, versionId: created.versionId })
+        .then(
+          () => null,
+          (error) => error
+        );
+      // Four document transactions in flight, every one inside its chunk
+      // writes. Taking the version row first, each would hold it (or queue
+      // for it) until its whole document committed, and the fence's 2 s
+      // lock_timeout would give up behind them.
+      await waitUntil(async () => (await lockWaiters()) >= 4, "four builder transactions waiting on their chunk writes");
+
+      const startedAt = Date.now();
+
+      fenced = await modules.versions.fenceNonServingIndexVersions({
+        reason: "An upload could not embed its chunks in this version's space.",
+        space,
+      });
+      fenceMs = Date.now() - startedAt;
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {});
+      await blocker.end();
+    }
+
+    assert.deepEqual(fenced, [created.versionId]);
+    assert.ok(fenceMs < 1000, `the fence did not queue behind the builder (${fenceMs} ms)`);
+
+    // Each transaction in flight reaches its lease check after its chunks
+    // and rolls back: nothing lands in the failed version.
+    const error = await building;
+
+    assert.equal(error?.code, modules.versions.INDEX_VERSION_ERROR_CODES.leaseLost, error?.message);
+    assert.equal((await versionRow(created.versionId)).status, "failed");
+    assert.deepEqual(await chunkCounts(created.chunkTable), {});
+    assert.deepEqual(
+      (await q(`SELECT doc_id FROM rag_index_versions_build_progress WHERE version_id = $1`, [created.versionId])).rows,
+      []
+    );
+    await modules.lifecycle.retireIndexVersion({ versionId: created.versionId });
+  });
+
+  test("a delete of the document the builder is rewriting neither deadlocks nor leaves its chunks in either version", async () => {
+    const space = modules.lifecycle.resolveBuildEmbeddingSpace({ dimensions: DIMENSIONS[MODEL_B], model: MODEL_B });
+    const created = await modules.lifecycle.createIndexVersion({ builderId: "race-builder", space });
+    const raced = "zz-delete-race";
+
+    // Uploaded during the build: dual-written into the building table, with
+    // no progress row and past the builder's cursor, so the builder rewrites
+    // those very rows.
+    await ingest(ALICE, raced, ["Beta clause the builder rewrites while it is deleted."]);
+    assert.ok((await chunkCounts(created.chunkTable))[raced] > 0, "dual-written into the building version");
+
+    // A reader holding the document row FOR KEY SHARE (as a foreign-key check
+    // would) lets the builder's FOR SHARE through but makes the delete wait,
+    // which lines the two transactions up at their lock-order crossing.
+    const blocker = new pg.Client({ connectionString: process.env.POSTGRES_DATABASE_URL });
+    const written = new Set();
+    let deleting = null;
+    let releasing = null;
+
+    await blocker.connect();
+
+    try {
+      const result = await modules.lifecycle.runIndexVersionBuild({
+        builderId: "race-builder",
+        concurrency: 1,
+        hooks: {
+          afterDocument: ({ docId }) => {
+            written.add(docId);
+          },
+          beforeDocumentWrite: async ({ docId }) => {
+            if (docId !== raced || deleting) {
+              return;
+            }
+
+            await blocker.query("BEGIN");
+            await blocker.query("SELECT 1 FROM rag_documents WHERE doc_id = $1 FOR KEY SHARE", [docId]);
+            deleting = remove(ALICE, docId).then(
+              (value) => ({ value }),
+              (error) => ({ error })
+            );
+            await waitUntil(async () => (await lockWaiters()) >= 1, "the delete waiting on the document row");
+            // Let the delete go once the builder has committed the document
+            // (the delete locks the document row before any chunk row) or is
+            // itself stuck on a lock (chunk rows first: the two would deadlock).
+            releasing = waitUntil(
+              async () => written.has(docId) || (await lockWaiters()) >= 2,
+              "the builder committing or waiting"
+            ).finally(() => blocker.query("COMMIT"));
+          },
+        },
+        versionId: created.versionId,
+      });
+
+      await releasing;
+
+      const deleted = await deleting;
+
+      assert.equal(deleted?.error, undefined, `the delete failed: ${deleted?.error?.message}`);
+      assert.ok(deleted.value, "the delete found and removed the document");
+      assert.equal(result.version.status, "ready");
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {});
+      await blocker.end();
+    }
+
+    const activeTable = (await versionRow((await pointerRow()).active_version_id)).chunk_table;
+
+    assert.equal((await chunkCounts(activeTable))[raced], undefined, "gone from the active version");
+    assert.equal((await chunkCounts(created.chunkTable))[raced], undefined, "and from the one built meanwhile");
+    assert.equal((await q(`SELECT 1 FROM rag_documents WHERE doc_id = $1`, [raced])).rows.length, 0);
+    await modules.lifecycle.retireIndexVersion({ versionId: created.versionId });
+  });
+
+  test("retire --force of a build that is mid-write, while a delete waits for a document the builder holds, ends without a deadlock", async () => {
+    const racing = ["a-race-1", "a-race-2", "a-race-3", "a-race-4"];
+
+    // Sorted first, so they are the four documents the builder takes.
+    for (const [index, docId] of racing.entries()) {
+      await ingest(ALICE, docId, [`${TOPICS[index]} retire race clause for ${docId}.`]);
+    }
+
+    const space = modules.lifecycle.resolveBuildEmbeddingSpace({ dimensions: DIMENSIONS[MODEL_B], model: MODEL_B });
+    const created = await modules.lifecycle.createIndexVersion({ builderId: "aborted-builder", space });
+    const blocker = new pg.Client({ connectionString: process.env.POSTGRES_DATABASE_URL });
+    const inFlight = [];
+    let building;
+    let deleting;
+    let retiring;
+
+    await blocker.connect();
+
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(`LOCK TABLE ${created.chunkTable} IN SHARE MODE`);
+      building = modules.lifecycle
+        .runIndexVersionBuild({
+          builderId: "aborted-builder",
+          concurrency: 4,
+          hooks: { beforeDocumentWrite: ({ docId }) => inFlight.push(docId) },
+          versionId: created.versionId,
+        })
+        .then(
+          () => null,
+          (error) => error
+        );
+      // Each builder transaction holds its document row FOR SHARE and waits
+      // on its chunk writes.
+      await waitUntil(async () => (await lockWaiters()) >= 4, "four builder transactions mid-write");
+      assert.deepEqual([...inFlight].sort(), racing);
+
+      // A user deletes one of them: it holds the shared write lock and waits
+      // for the document row.
+      deleting = remove(ALICE, racing[0]).then(
+        (value) => ({ value }),
+        (error) => ({ error })
+      );
+      await waitUntil(async () => (await lockWaiters()) >= 5, "the delete waiting on the document row");
+
+      // The operator aborts the build: retire waits for the delete (the
+      // exclusive write lock) while it holds the version row.
+      retiring = modules.lifecycle
+        .retireIndexVersion({ dropAttempts: 5, dropLockTimeoutMs: 200, dropRetryDelayMs: 50, force: true, versionId: created.versionId })
+        .then(
+          (value) => ({ value }),
+          (error) => ({ error })
+        );
+      await waitUntil(async () => (await lockWaiters()) >= 6, "retire waiting for the writers");
+    } finally {
+      // The chunk writes go on: each builder transaction reaches its lease
+      // check. Were it to wait for the version row retire holds, while
+      // holding the document row the delete waits for, the three would
+      // deadlock; the build was stopped before retire took that row, so the
+      // check fails at once and the transaction rolls back.
+      await blocker.query("ROLLBACK").catch(() => {});
+      await blocker.end();
+    }
+
+    const [buildError, deleted, retired] = await Promise.all([building, deleting, retiring]);
+
+    assert.equal(buildError?.code, modules.versions.INDEX_VERSION_ERROR_CODES.leaseLost, buildError?.message);
+    assert.equal(deleted.error, undefined, `the delete failed: ${deleted.error?.message}`);
+    assert.ok(deleted.value);
+    assert.equal(retired.error, undefined, `retire failed: ${retired.error?.message}`);
+    assert.equal(retired.value.previousStatus, "building");
+    assert.equal((await versionRow(created.versionId)).status, "retired");
+    assert.equal((await q(`SELECT to_regclass($1) AS relation`, [created.chunkTable])).rows[0].relation, null);
+    assert.equal((await q(`SELECT 1 FROM rag_documents WHERE doc_id = $1`, [racing[0]])).rows.length, 0);
   });
 }

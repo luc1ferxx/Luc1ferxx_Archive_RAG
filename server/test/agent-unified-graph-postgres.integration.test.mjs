@@ -6,17 +6,20 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  APPROVAL_TASK_QUESTION,
   UNIFIED_ACCESS_SCOPE as accessScope,
   DOCUMENT_LOOP_QUESTION,
   UNIFIED_DOC_ID,
   UNIFIED_SESSION_ID,
   WEB_QUESTION,
   checkpointHasNodeRun,
+  createApprovalGatedTaskProposal,
   createConditionalWebProposal,
   createCrashingRunService,
   createDocumentLoopProposal,
   createDocumentLoopRagService,
   createProposalAdapter,
+  createTaskCapabilityRegistry,
   createWebChatService,
   describeAnswerState,
   scopeRecoveryToRuns,
@@ -26,7 +29,7 @@ import {
 // PostgreSQL agent-run store. Each test crashes a first process at a chosen
 // write (every later write of that process fails, as after an exit), then a
 // separate Node process runs production startup recovery against the same
-// rows. The three blocks the unfreeze requires:
+// rows. The recovery blocks the unfreeze requires:
 //   1. document-loop gap handling and working memory survive the restart and
 //      a completed follow-up is never charged or executed twice;
 //   2. whole-run finalization receipts: a crash after the answer is sealed
@@ -34,8 +37,12 @@ import {
 //   3. resume at node boundaries: completed nodes are reused only when their
 //      typed-output digests reconcile; unknown in-flight document calls and
 //      tampered receipts go to manual recovery.
-// Approval continuation stays frozen; an approval-gated node never enters a
-// guarded graph (the in-memory guarded suite covers that refusal).
+// and the fourth, approval continuation inside the graph: this process pauses
+// the graph at an approval-gated Capability, a separate process decides the
+// gate through the approval endpoint's handler and continues the same graph
+// (the Capability's write happens exactly once, in that process), a process
+// that dies right after the write and before its receipt leaves the run to an
+// operator on the next startup, and a rejection finalizes without the write.
 // Without PGVECTOR_TEST_DATABASE_URL the suite is reported as skipped.
 
 const databaseUrl = String(process.env.PGVECTOR_TEST_DATABASE_URL ?? "").trim();
@@ -43,6 +50,9 @@ const workerMode = process.env.AGENT_UNIFIED_GRAPH_POSTGRES_WORKER ?? "";
 const execFileAsync = promisify(execFile);
 const RUNTIME_ENV = Object.freeze({
   AGENT_PLANNER_ROLLOUT: "deterministic",
+  // The live operator allowlist every process (the approval and recovery
+  // workers included) reads; the pausing request injects the same list.
+  AGENT_UNIFIED_GRAPH_CAPABILITIES: "task.create",
   AGENT_UNIFIED_GRAPH_ROLLOUT: "guarded",
   RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
   RAG_LONG_MEMORY_ENABLED: "false",
@@ -62,13 +72,14 @@ const loadModules = async () => {
   process.env.POSTGRES_DATABASE_URL = databaseUrl;
   Object.assign(process.env, RUNTIME_ENV);
   const [
-    { resumeAgentExecutionGraphRun, runAgentRag },
+    { continueAgentExecutionGraphApproval, resumeAgentExecutionGraphRun, runAgentRag },
     { createAgentRunRecoveryService },
     { createAgentRunService, createInMemoryAgentRunStore },
     { queryPostgres, resetPostgresPool },
     { createPostgresAgentRunStore },
     { createDefaultSkillRegistry, createSkillRegistry },
     { getAgentRunEventsPostgresTable, getAgentRunsPostgresTable, getPostgresTenantRole },
+    { createAgentRunStepExecutor },
   ] = await Promise.all([
     import("../rag/agent.js"),
     import("../rag/agent-run-recovery.js"),
@@ -77,10 +88,13 @@ const loadModules = async () => {
     import("../rag/postgres-agent-run-store.js"),
     import("../rag/skills/registry.js"),
     import("../rag/config.js"),
+    import("../rag/agent-run-step-executor.js"),
   ]);
 
   return {
+    continueAgentExecutionGraphApproval,
     createAgentRunRecoveryService,
+    createAgentRunStepExecutor,
     createAgentRunService,
     createDefaultSkillRegistry,
     createInMemoryAgentRunStore,
@@ -300,6 +314,17 @@ const runRecoveryWorker = async () => {
 
   try {
     const service = newRunService(modules);
+
+    for (const spec of runs) {
+      if (spec.taskCapability) {
+        spec.capabilityRegistry = (await createTaskCapabilityRegistry({
+          onWrite: async () =>
+            effectRecorder(modules, table, spec.label, "worker")({ phase: "task" }),
+          ragService: createDocumentLoopRagService(),
+        })).registry;
+      }
+    }
+
     const recovery = modules.createAgentRunRecoveryService({
       agentRunService: scopeRecoveryToRuns(service, runs.map((run) => run.runId)),
       recordRecoveryTrace: async () => {},
@@ -309,6 +334,7 @@ const runRecoveryWorker = async () => {
         return modules.resumeAgentExecutionGraphRun({
           ...args,
           agentRunService: service,
+          ...(spec.capabilityRegistry ? { capabilityRegistry: spec.capabilityRegistry } : {}),
           ragService: createDocumentLoopRagService({
             followUp: spec.followUp,
             onChat: effectRecorder(modules, table, spec.label, "worker"),
@@ -334,6 +360,114 @@ const runRecoveryWorker = async () => {
   }
 };
 
+// Runs in its own Node process: the approval endpoint's handler
+// (agentRunStepExecutor.applyApprovalAction, wired as app-services wires it)
+// decides the gate and continues the same graph. With `crashAfterWrite` the
+// process exits right after the Capability's write is durable, before the
+// node's receipt: a real process death, not a simulated one.
+const runApprovalWorker = async () => {
+  if (!databaseUrl) {
+    throw new Error("Approval worker requires PGVECTOR_TEST_DATABASE_URL.");
+  }
+
+  const table = effectTable(process.env.AGENT_UNIFIED_GRAPH_POSTGRES_EFFECT_TABLE);
+  const spec = JSON.parse(process.env.AGENT_UNIFIED_GRAPH_POSTGRES_APPROVAL ?? "{}");
+  const modules = await loadModules();
+
+  try {
+    const service = newRunService(modules);
+    const ragService = createDocumentLoopRagService({
+      onChat: effectRecorder(modules, table, spec.label, "approver"),
+      primary: "supported",
+    });
+    const { registry } = await createTaskCapabilityRegistry({
+      onWrite: async () => {
+        await effectRecorder(modules, table, spec.label, "approver")({ phase: "task" });
+
+        if (spec.crashAfterWrite) {
+          process.exit(17);
+        }
+      },
+      ragService,
+    });
+    const result = await modules.createAgentRunStepExecutor({
+      agentRunService: service,
+      capabilityRegistry: registry,
+      continueExecutionGraphApproval: (args) =>
+        modules.continueAgentExecutionGraphApproval({
+          ...args,
+          agentRunService: service,
+          capabilityRegistry: registry,
+          ragService,
+        }),
+    }).applyApprovalAction({
+      accessScope,
+      action: spec.action,
+      gateId: spec.gateId,
+      payload: { approvalObjectHash: spec.approvalObjectHash },
+      runId: spec.runId,
+    });
+
+    process.stdout.write(`UNIFIED_GRAPH_APPROVAL ${JSON.stringify({
+      agentAnswer: result.response?.agentAnswer ?? null,
+      agentMode: result.response?.agentMode ?? null,
+      runStatus: result.run?.status ?? null,
+      status: result.status ?? null,
+    })}\n`);
+  } finally {
+    await modules.resetPostgresPool();
+  }
+};
+
+const runApprovalProcess = async (spec) => {
+  const child = await execFileAsync(process.execPath, [fileURLToPath(import.meta.url)], {
+    env: {
+      ...process.env,
+      AGENT_UNIFIED_GRAPH_POSTGRES_APPROVAL: JSON.stringify(spec),
+      AGENT_UNIFIED_GRAPH_POSTGRES_EFFECT_TABLE: spec.table,
+      AGENT_UNIFIED_GRAPH_POSTGRES_WORKER: "approve",
+    },
+    timeout: 90_000,
+  });
+  const line = child.stdout
+    .split("\n")
+    .find((entry) => entry.startsWith("UNIFIED_GRAPH_APPROVAL "));
+  assert.ok(line, child.stdout);
+  return JSON.parse(line.slice("UNIFIED_GRAPH_APPROVAL ".length));
+};
+
+// This process asks the approval-gated question and stops at the gate.
+const pauseAtApproval = async (modules, { label, table }) => {
+  const ragService = createDocumentLoopRagService({
+    onChat: effectRecorder(modules, table, label, "parent"),
+    primary: "supported",
+  });
+  const { registry } = await createTaskCapabilityRegistry({
+    onWrite: effectRecorder(modules, table, label, "parent"),
+    ragService,
+  });
+  const paused = await modules.runAgentRag({
+    accessScope,
+    agentRunService: newRunService(modules),
+    capabilityRegistry: registry,
+    docIds: [UNIFIED_DOC_ID],
+    question: APPROVAL_TASK_QUESTION,
+    ragService,
+    sessionId: UNIFIED_SESSION_ID,
+    unifiedGraphAllowedCapabilityIds: ["task.create"],
+    unifiedGraphPlannerAdapter: createProposalAdapter(createApprovalGatedTaskProposal),
+    userId: accessScope.userId,
+  });
+
+  assert.equal(paused.body.clarification?.reason, "capability_approval_required");
+  return {
+    gate: paused.body.approvalGates[0],
+    label,
+    runId: paused.body.agentRunId,
+    taskCapability: true,
+  };
+};
+
 const withFixture = async (callback) => {
   const modules = await loadModules();
   const table = effectTable(`ugraph_it_fx_${randomUUID().replaceAll("-", "").slice(0, 24)}`);
@@ -356,6 +490,8 @@ const track = (context, crashed) => {
 
 if (workerMode === "recover") {
   await runRecoveryWorker();
+} else if (workerMode === "approve") {
+  await runApprovalWorker();
 } else if (!databaseUrl) {
   test("PostgreSQL guarded unified graph cross-process recovery", {
     skip: "PGVECTOR_TEST_DATABASE_URL is not set; use server/scripts/run-pgvector-integration.sh",
@@ -758,6 +894,166 @@ if (workerMode === "recover") {
         manualRecoveredCount: 0,
         skippedCount: 1,
       });
+    });
+  });
+
+  test("a graph paused at its approval gate in one process is approved and continued in another", {
+    timeout: 180_000,
+  }, async () => {
+    await withFixture(async (context) => {
+      const { modules, table } = context;
+      const paused = track(context, await pauseAtApproval(modules, { label: "approved", table }));
+      const before = await loadRun(modules, paused.runId);
+
+      assert.equal(before.run.status, "waiting_for_user");
+      assert.equal(before.checkpoint.phase, "awaiting_approval");
+      assert.equal(before.checkpoint.approvalBoundary.gateId, paused.gate.id);
+      assert.deepEqual(await countEffects(modules, table, "approved"), { "primary@parent": 1 });
+
+      // A startup in another process leaves the parked graph alone.
+      assert.deepEqual(await runRecoveryProcess({ runs: [paused], table }), {
+        autoRecoveredCount: 0,
+        failedCount: 0,
+        manualRecoveredCount: 0,
+        skippedCount: 1,
+      });
+
+      const outcome = await runApprovalProcess({
+        action: "approve",
+        approvalObjectHash: paused.gate.approvalObjectHash,
+        gateId: paused.gate.id,
+        label: "approved",
+        runId: paused.runId,
+        table,
+      });
+      const after = await loadRun(modules, paused.runId);
+
+      assert.equal(outcome.status, 200);
+      assert.equal(outcome.runStatus, "completed");
+      assert.equal(outcome.agentMode, "workspace_action");
+      assert.match(outcome.agentAnswer, /^Task recorded as task /);
+      // The Capability wrote once, in the approving process; the document
+      // answer was never recomputed there.
+      assert.deepEqual(await countEffects(modules, table, "approved"), {
+        "primary@parent": 1,
+        "task@approver": 1,
+      });
+      assert.equal(after.run.status, "completed");
+      assert.equal(after.checkpoint.phase, "completed");
+      assert.equal(after.checkpoint.graph.nodes.length, 3);
+      assert.equal(after.run.result.answer, outcome.agentAnswer);
+      assert.equal(after.checkpoint.finalization.response.body.agentAnswer, outcome.agentAnswer);
+      assert.deepEqual(
+        after.run.events.filter((event) => event.type === "unified_graph_executed")
+          .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
+        [["document", "reused"], ["evidence_check", "reused"], ["task", "completed"]]
+      );
+      assert.equal(countEvents(after.run, "graph_approval_approved"), 1);
+      assert.equal(countEvents(after.run, "unified_graph_planned"), 1);
+
+      // Deciding again from yet another process is refused, and a later
+      // startup finds nothing to do.
+      await assert.rejects(runApprovalProcess({
+        action: "approve",
+        approvalObjectHash: paused.gate.approvalObjectHash,
+        gateId: paused.gate.id,
+        label: "approved",
+        runId: paused.runId,
+        table,
+      }));
+      assert.deepEqual(await runRecoveryProcess({ runs: [paused], table }), {
+        autoRecoveredCount: 0,
+        failedCount: 0,
+        manualRecoveredCount: 0,
+        skippedCount: 0,
+      });
+      assert.deepEqual(await countEffects(modules, table, "approved"), {
+        "primary@parent": 1,
+        "task@approver": 1,
+      });
+    });
+  });
+
+  test("a process that dies after the approved write and before its receipt leaves the run manual", {
+    timeout: 180_000,
+  }, async () => {
+    await withFixture(async (context) => {
+      const { modules, table } = context;
+      const paused = track(context, await pauseAtApproval(modules, { label: "crashed", table }));
+
+      await assert.rejects(
+        runApprovalProcess({
+          action: "approve",
+          approvalObjectHash: paused.gate.approvalObjectHash,
+          crashAfterWrite: true,
+          gateId: paused.gate.id,
+          label: "crashed",
+          runId: paused.runId,
+          table,
+        }),
+        (error) => error.code === 17
+      );
+      const crashed = await loadRun(modules, paused.runId);
+      assert.equal(crashed.run.status, "running");
+      assert.equal(
+        crashed.run.steps.find((step) => step.input?.nodeId === "task")?.status,
+        "running"
+      );
+      assert.deepEqual(await countEffects(modules, table, "crashed"), {
+        "primary@parent": 1,
+        "task@approver": 1,
+      });
+
+      const outcome = await runRecoveryProcess({ runs: [paused], table });
+      const after = await loadRun(modules, paused.runId);
+
+      assert.deepEqual(outcome, {
+        autoRecoveredCount: 0,
+        failedCount: 0,
+        manualRecoveredCount: 1,
+        skippedCount: 0,
+      });
+      assert.equal(after.run.result.recovery.mode, "manual");
+      assert.equal(after.run.result.recovery.reason, "unknown_in_flight_node");
+      assert.equal(countEvents(after.run, "skill_graph_resume_claimed"), 0);
+      // Never replayed: the write happened once, in the process that died.
+      assert.deepEqual(await countEffects(modules, table, "crashed"), {
+        "primary@parent": 1,
+        "task@approver": 1,
+      });
+    });
+  });
+
+  test("a rejection decided in another process finalizes the same graph without the write", {
+    timeout: 180_000,
+  }, async () => {
+    await withFixture(async (context) => {
+      const { modules, table } = context;
+      const paused = track(context, await pauseAtApproval(modules, { label: "denied", table }));
+      const outcome = await runApprovalProcess({
+        action: "deny",
+        approvalObjectHash: paused.gate.approvalObjectHash,
+        gateId: paused.gate.id,
+        label: "denied",
+        runId: paused.runId,
+        table,
+      });
+      const after = await loadRun(modules, paused.runId);
+
+      assert.equal(outcome.runStatus, "completed");
+      assert.equal(outcome.agentAnswer, "Create Task was not run: the approval was denied.");
+      assert.deepEqual(await countEffects(modules, table, "denied"), { "primary@parent": 1 });
+      assert.equal(after.run.approvalGates[0].status, "denied");
+      assert.deepEqual(
+        after.run.events.filter((event) => event.type === "unified_graph_executed")
+          .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.reason]),
+        [
+          ["document", "reused", null],
+          ["evidence_check", "reused", null],
+          ["task", "skipped", "approval_denied"],
+        ]
+      );
+      assert.ok(after.checkpoint.finalization);
     });
   });
 }

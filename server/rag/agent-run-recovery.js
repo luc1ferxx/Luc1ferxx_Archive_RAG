@@ -87,8 +87,14 @@ const isUnifiedGraphCheckpoint = (checkpoint) =>
   checkpoint?.version === "v2" && checkpoint.graph?.version === "v3";
 
 // A resumed v3 run may legitimately settle as a clarification: the whole
-// request was answered with a question for the user. That counts as settled
-// only when the completion event follows this recovery's claim.
+// request was answered with a question for the user, or the graph reached its
+// approval gate and now waits for the decision. That counts as settled only
+// when the completion or gate event follows this recovery's claim.
+const SETTLED_WAITING_EVENTS = new Set([
+  "graph_approval_gate_created",
+  "run_waiting_for_user",
+]);
+
 const hasSettledAfterResumeClaim = (run = {}) => {
   if ([AGENT_RUN_STATUSES.completed, AGENT_RUN_STATUSES.failed].includes(run?.status)) {
     return true;
@@ -101,7 +107,28 @@ const hasSettledAfterResumeClaim = (run = {}) => {
 
   return run?.status === AGENT_RUN_STATUSES.waitingForUser &&
     claimIndex >= 0 &&
-    events.slice(claimIndex + 1).some((event) => event.type === "run_waiting_for_user");
+    events.slice(claimIndex + 1).some((event) => SETTLED_WAITING_EVENTS.has(event.type));
+};
+
+// A v3 graph parked at its approval gate is waiting for a person, not
+// crashed: the paused checkpoint, its one pending gate, and no active graph
+// step. Startup leaves it for the approval decision.
+const isCleanGraphApprovalPause = ({ checkpoint, run } = {}) => {
+  const pendingGates = toArray(run?.approvalGates).filter(
+    (gate) => normalizeText(gate.status).toLowerCase() === "pending"
+  );
+
+  return isUnifiedGraphCheckpoint(checkpoint) &&
+    checkpoint.phase === "awaiting_approval" &&
+    !checkpoint.resumeClaim &&
+    run?.status === AGENT_RUN_STATUSES.waitingForUser &&
+    pendingGates.length === 1 &&
+    pendingGates[0].id === checkpoint.approvalBoundary?.gateId &&
+    !toArray(run?.steps).some(
+      (step) =>
+        step.type === "graph_node" &&
+        AUTO_RECOVERY_STEP_STATUSES.has(step.status)
+    );
 };
 
 export const findAutoRecoverableStep = ({
@@ -486,6 +513,29 @@ export const createAgentRunRecoveryService = ({
               // Already finalized as a clarification: the receipt was written
               // and the run completed. Nothing crashed, so nothing is resumed.
               skippedCount += 1;
+              return;
+            }
+
+            if (
+              unifiedGraphPath &&
+              isCleanGraphApprovalPause({ checkpoint: loadedGraph.checkpoint, run })
+            ) {
+              if (unifiedRolloutGuarded) {
+                // Parked at its approval gate: the decision continues it.
+                skippedCount += 1;
+                return;
+              }
+
+              // After a rollback no decision can continue this graph (the
+              // approval continuation refuses outside `guarded`), so it would
+              // wait forever unlisted. Hand it to an operator; the run is
+              // unclaimed and keeps waiting, and the cancel action applies.
+              await markManualRecovery({
+                accessScope,
+                fallbackReason: "unified_graph_rollout_not_guarded",
+                requestedMode: "auto",
+                run,
+              });
               return;
             }
             const reconciliation = loadedGraph

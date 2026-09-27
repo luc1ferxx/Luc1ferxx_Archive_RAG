@@ -391,7 +391,9 @@ test("continuing a settled guarded graph run starts a new run and leaves the set
     capabilityApprovals: {},
     mode: "guarded",
     proposal: createDocumentLoopProposal,
-    question: "Use the renewal clause of the vendor MSA: what notice period does it require?",
+    // A plain document question (no contract wording, which would select the
+    // summarize_contract intent and a graph without that Skill is refused).
+    question: "How many days of notice does the vendor need before renewal?",
     ragService: createDocumentLoopRagService({ followUp: "resolves" }),
   });
   const settled = await agentRunService.getRun({ accessScope, runId: first.run.runId });

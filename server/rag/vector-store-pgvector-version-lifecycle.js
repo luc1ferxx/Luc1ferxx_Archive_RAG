@@ -8,6 +8,7 @@ import {
   getDocumentsPostgresTable,
   getEmbeddingTaskPrefixesForModel,
   getIndexVersionBuildBatchSize,
+  getIndexVersionBuildConcurrency,
   getIndexVersionBuildLeaseMs,
   getIndexVersionDualWriteGraceMs,
   getIndexVersionPointerTtlMs,
@@ -16,6 +17,7 @@ import {
   getIndexVersionRetireRetryDelayMs,
   getKnownEmbeddingDimensionsForModel,
   getVectorStoreProviderConfigStatus,
+  isRagIngestEmbedBatchingEnabled,
 } from "./config.js";
 import {
   assertIndexVersionChunkTableName,
@@ -24,6 +26,7 @@ import {
   renderIndexVersionDropDdl,
 } from "./db-migrations.js";
 import { buildPublicFilePath } from "./document-utils.js";
+import { getDefaultEmbeddingBatcher } from "./ingest-embedding-batcher.js";
 import { loadPdfPages } from "./pdf-loader.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import {
@@ -64,15 +67,35 @@ import {
 // write/lifecycle lock protocol live in vector-store-pgvector-versions.js.
 //
 // A build re-embeds every registered document from the PDF bytes the registry
-// stores, a batch of documents at a time, into the version's own table. Each
-// document is written in its own transaction together with its progress row,
-// fenced on the builder's lease, and only if the document row it read is still
-// the current one (checked under FOR SHARE, so a concurrent re-ingest or delete
-// either waits for the builder or wins outright). A crashed builder leaves the
-// version `building`; once its lease has expired `resume` continues with the
-// documents that have no progress row. While the build runs, every ingest,
-// delete and clear writes the building version too, so the snapshot the
-// builder works from never misses a change.
+// stores into the version's own table, several documents in flight at once
+// (RAG_INDEX_VERSION_BUILD_CONCURRENCY) and their chunks embedded through the
+// cross-document batcher of the staged ingest. RAG_LLM_MAX_CONCURRENCY caps the
+// build's embedding requests; only when the cap is below the documents in
+// flight do the documents it holds back leave merged into one request (at the
+// defaults, 4 in flight under a cap of 8, every document leaves alone).
+// RAG_INGEST_EMBED_BATCHING=false, the staged ingest's kill switch, turns the
+// merging off for builds too: one request per document.
+//
+// Each document is written in its own transaction together with its progress
+// row, and only if the document row it read is still the current one (checked
+// under FOR SHARE: a concurrent re-ingest, replacement or delete -- each takes
+// the document row before any chunk row, rag/index.js -- either waits for the
+// builder or wins outright). The lease is renewed after the chunk writes, as
+// the statement before the progress row: an UPDATE of the version row WHERE
+// builder_id and status = 'building', so a transaction whose lease was lost or
+// whose version was fenced meanwhile still rolls back, while the version row
+// is held only from there to COMMIT. Chunk writes of different documents
+// therefore never queue on it, and neither does a fence or a claim waiting
+// for it. Order in a document transaction: document row, chunk rows, version
+// row, progress row -- the version row before the progress rows, as retire
+// takes them. Retire stops a build before it locks the version row (see
+// retireIndexVersion), so no builder is ever left waiting for a row retire
+// holds while it waits for the writers.
+//
+// A crashed builder leaves the version `building`; once its lease has expired
+// `resume` continues with the documents that have no progress row. While the
+// build runs, every ingest, delete and clear writes the building version too,
+// so the snapshot the builder works from never misses a change.
 
 const DDL_LOCK_TIMEOUT = "10s";
 const PROBE_TEXT_LIMIT = 1000;
@@ -427,7 +450,9 @@ export const claimIndexVersionBuild = async ({
   });
 
 // Every write of a builder renews its lease and fails when another builder
-// has taken the version or it is no longer building (retired, failed).
+// has taken the version or it is no longer building (retired, failed). The
+// UPDATE holds the version row until the transaction ends, so it runs as late
+// as it can: after a document's chunk writes, before its progress row.
 const renewLease = async (query, { builderId, leaseMs, versionId }) => {
   const { versionsTable } = getIndexVersionTableNames();
   const renewed = firstRow(
@@ -467,15 +492,18 @@ const recordProgress = (query, { chunkCount = 0, docId, error = null, outcome, u
   );
 };
 
-const inBuilderTransaction = (lease, callback) =>
+const inOwnerTransaction = (callback) =>
   runAsDatabaseSystem(() =>
-    getPgvectorRuntime().withTransaction(async (client) => {
-      const query = getPgvectorQuery(client);
-
-      await renewLease(query, lease);
-      return callback(query);
-    })
+    getPgvectorRuntime().withTransaction(async (client) => callback(getPgvectorQuery(client)))
   );
+
+// A progress row alone (skipped, failed): nothing runs before it, so the
+// lease is renewed first.
+const recordProgressUnderLease = (lease, progress) =>
+  inOwnerTransaction(async (query) => {
+    await renewLease(query, lease);
+    await recordProgress(query, progress);
+  });
 
 const listPendingDocuments = async ({ cursor, limit, versionId }) => {
   const { buildProgressTable } = getIndexVersionTableNames();
@@ -570,10 +598,11 @@ const buildDocumentChunks = async ({ loadPages, source }) => {
 };
 
 const writeVersionDocument = ({ contentToken, docId, lease, prepared, space, uploadedAt, version }) =>
-  inBuilderTransaction(lease, async (query) => {
+  inOwnerTransaction(async (query) => {
     // FOR SHARE: a concurrent re-ingest, replacement or delete of this
-    // document waits for this transaction, and its own dual write then lands
-    // after these rows.
+    // document waits for this transaction (each of them locks the document row
+    // before any chunk row), and its own dual write then lands after these
+    // rows.
     const current = firstRow(
       await query(
         `/* index_versions:lock_document */
@@ -586,6 +615,7 @@ const writeVersionDocument = ({ contentToken, docId, lease, prepared, space, upl
     );
 
     if (!current) {
+      await renewLease(query, lease);
       await recordProgress(query, { docId, outcome: "skipped_deleted", versionId: version.versionId });
       return "skipped_deleted";
     }
@@ -609,6 +639,10 @@ const writeVersionDocument = ({ contentToken, docId, lease, prepared, space, upl
       vectors: prepared.map((document) => document.vectors[space.key]),
     });
 
+    // The fence, after the chunk writes: a lost lease or a version fenced
+    // meanwhile rolls all of this back, and the version row is held only
+    // from here to COMMIT (see the header).
+    await renewLease(query, lease);
     await recordProgress(query, {
       chunkCount,
       docId,
@@ -619,40 +653,64 @@ const writeVersionDocument = ({ contentToken, docId, lease, prepared, space, upl
     return "indexed";
   });
 
-const buildOneDocument = async ({ docId, hooks, lease, loadPages, maxAttempts, space, version }) => {
+/**
+ * The build's default embedding path: this process's cross-document batcher
+ * (rag/ingest-embedding-batcher.js), or, with RAG_INGEST_EMBED_BATCHING=false
+ * (the staged ingest's kill switch), a pass-through that sends each
+ * document's texts as its own request, as the ingest pipeline's
+ * embedUnbatched does. Both reach the store's width-checked embedding.
+ */
+export const resolveBuildEmbeddingBatcher = () =>
+  isRagIngestEmbedBatchingEnabled()
+    ? getDefaultEmbeddingBatcher()
+    : { embed: (texts, space) => embedDocumentsInSpace(texts, space) };
+
+// The chunks' vectors in the version's space through `batcher`. Through the
+// cross-document batcher, with a free slot under RAG_LLM_MAX_CONCURRENCY a
+// document's texts leave at once, alone; only the documents that find every
+// slot busy go out together when one frees. Every vector is width-checked.
+const prepareVersionChunks = async ({ batcher, documents, space }) => {
+  const vectors = await batcher.embed(
+    documents.map((document) => document.pageContent),
+    space
+  );
+
+  return prepareDocumentsForPgvectorIndex({
+    documents,
+    spaces: [space],
+    vectorsBySpace: { [space.key]: vectors },
+  });
+};
+
+const buildOneDocument = async ({ batcher, docId, hooks, lease, loadPages, maxAttempts, space, version }) => {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const source = await readDocumentSource(docId);
 
     if (!source) {
-      await inBuilderTransaction(lease, (query) =>
-        recordProgress(query, { docId, outcome: "skipped_deleted", versionId: version.versionId })
-      );
+      await recordProgressUnderLease(lease, { docId, outcome: "skipped_deleted", versionId: version.versionId });
       return "skipped_deleted";
     }
 
-    let prepared;
+    let documents;
 
     try {
-      prepared = await prepareDocumentsForPgvectorIndex({
-        documents: await buildDocumentChunks({ loadPages, source }),
-        spaces: [space],
-      });
+      documents = await buildDocumentChunks({ loadPages, source });
     } catch (error) {
       if (!(error instanceof DocumentSourceError)) {
         throw error;
       }
 
-      await inBuilderTransaction(lease, (query) =>
-        recordProgress(query, {
-          docId,
-          error: error.message,
-          outcome: "failed",
-          uploadedAt: source.uploaded_at,
-          versionId: version.versionId,
-        })
-      );
+      await recordProgressUnderLease(lease, {
+        docId,
+        error: error.message,
+        outcome: "failed",
+        uploadedAt: source.uploaded_at,
+        versionId: version.versionId,
+      });
       return "failed";
     }
+
+    const prepared = await prepareVersionChunks({ batcher, documents, space });
 
     await hooks.beforeDocumentWrite({ attempt, docId, versionId: version.versionId });
 
@@ -671,14 +729,12 @@ const buildOneDocument = async ({ docId, hooks, lease, loadPages, maxAttempts, s
     }
   }
 
-  await inBuilderTransaction(lease, (query) =>
-    recordProgress(query, {
-      docId,
-      error: `The document changed during each of ${maxAttempts} attempts.`,
-      outcome: "failed",
-      versionId: version.versionId,
-    })
-  );
+  await recordProgressUnderLease(lease, {
+    docId,
+    error: `The document changed during each of ${maxAttempts} attempts.`,
+    outcome: "failed",
+    versionId: version.versionId,
+  });
   return "failed";
 };
 
@@ -782,17 +838,126 @@ const endBuildAfterError = async ({ builderId, error, failed, versionId }) => {
 const isFatalBuildError = (error) => error?.code === PGVECTOR_ERROR_CODES.dimensionMismatch;
 
 /**
- * Builds (or resumes) `versionId`: claims the lease, re-embeds every document
- * without a progress row in batches, and marks the version ready. A lost lease
- * stops the build without touching the version; an embedding width that never
- * matches marks it failed; any other error (the embedding API down, the
- * database gone) releases the lease and leaves it `building` for `resume`.
+ * Runs `processDocument` over the pending documents, `concurrency` at a time.
+ * Pages of pending doc ids are listed as the workers run out (`listPage`; its
+ * cursor only moves forward, so each document is taken once), and a page is
+ * finished (`finishPage`: counters, lease, the afterBatch seam) once every one
+ * of its documents has settled, pages in listing order. With concurrency 1
+ * this is exactly the serial loop: list a page, build its documents one by
+ * one, finish it, list the next.
  *
- * `hooks.beforeDocumentWrite` / `afterDocument` / `afterBatch` are test seams.
+ * The first error stops every worker from taking another document; the
+ * documents already in flight settle -- each commits or rolls back its own
+ * transaction -- before the error is thrown, so the caller never releases the
+ * lease under a write that is still running.
+ */
+export const runBuildDocuments = async ({ concurrency, finishPage, listPage, processDocument }) => {
+  const queue = [];
+  const pages = [];
+  let exhausted = false;
+  let listing = null;
+  let failure = null;
+  let finishing = Promise.resolve();
+
+  const listNextPage = () => {
+    listing ??= (async () => {
+      const docIds = await listPage();
+
+      if (docIds.length === 0) {
+        exhausted = true;
+        return;
+      }
+
+      const page = { remaining: docIds.length };
+
+      pages.push(page);
+      docIds.forEach((docId) => queue.push({ docId, page }));
+    })().finally(() => {
+      listing = null;
+    });
+
+    return listing;
+  };
+
+  const takeNext = async () => {
+    while (!failure) {
+      if (queue.length > 0) {
+        return queue.shift();
+      }
+
+      if (exhausted) {
+        return null;
+      }
+
+      await listNextPage();
+    }
+
+    return null;
+  };
+
+  // One chain, so pages finish one at a time and in order.
+  const finishSettledPages = () => {
+    finishing = finishing.then(async () => {
+      while (!failure && pages.length > 0 && pages[0].remaining === 0) {
+        pages.shift();
+        await finishPage();
+      }
+    });
+
+    return finishing;
+  };
+
+  const worker = async () => {
+    for (;;) {
+      const next = await takeNext();
+
+      if (!next) {
+        return;
+      }
+
+      await processDocument(next.docId);
+      next.page.remaining -= 1;
+      await finishSettledPages();
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.floor(Number(concurrency) || 1)) }, () =>
+      worker().catch((error) => {
+        failure ??= error;
+      })
+    )
+  );
+
+  if (failure) {
+    throw failure;
+  }
+};
+
+/**
+ * Builds (or resumes) `versionId`: claims the lease, re-embeds every document
+ * without a progress row, `concurrency` documents at a time
+ * (RAG_INDEX_VERSION_BUILD_CONCURRENCY) and their embeddings through the
+ * cross-document batcher, and marks the version ready. Each document is still
+ * written in its own transaction with its progress row, fenced on the lease
+ * (renewed after the chunk writes, just before the progress row, so the
+ * version row is held only from there to COMMIT and chunk writes of
+ * different documents overlap). A lost lease stops the build without touching
+ * the version; an embedding width that never matches marks it failed; any
+ * other error (the embedding API down, the database gone) releases the lease
+ * -- after the documents in flight have settled -- and leaves it `building`
+ * for `resume`.
+ *
+ * `hooks.beforeDocumentWrite` / `afterDocument` / `afterBatch` are test seams;
+ * `batcher` ({ embed(texts, space) }) defaults to resolveBuildEmbeddingBatcher:
+ * this process's embedding batcher, shared with its ingest workers, unless
+ * RAG_INGEST_EMBED_BATCHING=false.
  */
 export const runIndexVersionBuild = async ({
   batchSize = getIndexVersionBuildBatchSize(),
+  batcher = resolveBuildEmbeddingBatcher(),
   builderId = createDefaultBuilderId(),
+  concurrency = getIndexVersionBuildConcurrency(),
   hooks = {},
   leaseMs = getIndexVersionBuildLeaseMs(),
   loadPages = loadStoredDocumentPages,
@@ -806,6 +971,7 @@ export const runIndexVersionBuild = async ({
   const safeVersionId = requireVersionId(versionId);
   const safeLeaseMs = toPositiveInteger(leaseMs, getIndexVersionBuildLeaseMs());
   const safeBatchSize = toPositiveInteger(batchSize, getIndexVersionBuildBatchSize());
+  const safeConcurrency = toPositiveInteger(concurrency, getIndexVersionBuildConcurrency());
   const safeHooks = {
     afterBatch: hooks.afterBatch ?? noop,
     afterDocument: hooks.afterDocument ?? noop,
@@ -815,21 +981,25 @@ export const runIndexVersionBuild = async ({
   const space = resolveVersionSpace(version);
   const lease = { builderId, leaseMs: safeLeaseMs, versionId: safeVersionId };
   const summary = { builderId, failed: 0, indexed: 0, skippedDeleted: 0, versionId: safeVersionId };
+  let cursor = "";
 
   try {
-    let cursor = "";
+    await runBuildDocuments({
+      concurrency: safeConcurrency,
+      finishPage: async () => {
+        await refreshBuildCounters(lease);
+        logger?.(`version ${safeVersionId}: ${summary.indexed} indexed, ${summary.skippedDeleted} deleted meanwhile, ${summary.failed} failed`);
+        await safeHooks.afterBatch({ ...summary });
+      },
+      listPage: async () => {
+        const docIds = await listPendingDocuments({ cursor, limit: safeBatchSize, versionId: safeVersionId });
 
-    for (;;) {
-      const docIds = await listPendingDocuments({ cursor, limit: safeBatchSize, versionId: safeVersionId });
-
-      if (docIds.length === 0) {
-        break;
-      }
-
-      cursor = docIds.at(-1);
-
-      for (const docId of docIds) {
+        cursor = docIds.at(-1) ?? cursor;
+        return docIds;
+      },
+      processDocument: async (docId) => {
         const outcome = await buildOneDocument({
+          batcher,
           docId,
           hooks: safeHooks,
           lease,
@@ -848,12 +1018,8 @@ export const runIndexVersionBuild = async ({
         }
 
         await safeHooks.afterDocument({ docId, outcome, versionId: safeVersionId });
-      }
-
-      await refreshBuildCounters(lease);
-      logger?.(`version ${safeVersionId}: ${summary.indexed} indexed, ${summary.skippedDeleted} deleted meanwhile, ${summary.failed} failed`);
-      await safeHooks.afterBatch({ ...summary });
-    }
+      },
+    });
 
     return { ...summary, version: await completeIndexVersionBuild({ builderId, version }) };
   } catch (error) {
@@ -1554,7 +1720,10 @@ const retiredStorageRemains = async (query, row) => {
  * Refused for the active version, for a version deactivated less than two
  * pointer TTLs ago (an instance may still be searching it; the longest TTL any
  * instance may use), and -- unless `force` -- for a version inside its
- * rollback window or one a live builder holds. When the drop could not get
+ * rollback window or one a live builder holds. A build it may abort (--force,
+ * or a lease that expired or was released) is first stopped on its own --
+ * failed, so every builder transaction in flight fails its lease check --
+ * and reported as `previousStatus: "building"`. When the drop could not get
  * its lock within its attempts (`dropped: false`), the version is retired all
  * the same and running retire on it again finishes the drop.
  */
@@ -1570,6 +1739,35 @@ export const retireIndexVersion = async ({
   const safeVersionId = requireVersionId(versionId);
   const { buildProgressTable, pointerTable, versionsTable } = getIndexVersionTableNames();
   const baseTable = getPgvectorBaseTableName().toLowerCase();
+  // A build retire may abort (--force, or one whose lease has expired or was
+  // released) is stopped first, in a statement of its own that locks nothing
+  // but the version row: it becomes failed, so each builder transaction still
+  // in flight fails its lease check without waiting for that row. A builder
+  // takes the version row last, after a document row a concurrent write may
+  // be waiting for (see the header); left waiting on the row the transaction
+  // below holds while that one waits for the writers, the three would
+  // deadlock.
+  const stoppedBuild = Boolean(
+    firstRow(
+      await runAsDatabaseSystem(() =>
+        getPgvectorRuntime().query(
+          `/* index_versions:stop_build */
+            UPDATE ${versionsTable}
+               SET status = 'failed', builder_id = NULL, lease_expires_at = NULL,
+                   last_error = $3, updated_at = NOW()
+             WHERE version_id = $1 AND status = 'building'
+               AND ($2::boolean OR lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
+            RETURNING version_id`,
+          [safeVersionId, Boolean(force), "The build was stopped by retire."]
+        )
+      )
+    )
+  );
+
+  if (stoppedBuild) {
+    invalidateIndexVersionSnapshot();
+  }
+
   const retired = await runAsDatabaseSystem(() =>
     getPgvectorRuntime().withTransaction(async (client) => {
       const query = getPgvectorQuery(client);
@@ -1605,7 +1803,7 @@ export const retireIndexVersion = async ({
       };
       const summary = {
         chunkTable: String(row.chunk_table),
-        previousStatus: String(row.status),
+        previousStatus: stoppedBuild ? INDEX_VERSION_STATUSES.building : String(row.status),
         sparseRankFunction: String(row.sparse_rank_function),
         versionId: safeVersionId,
       };
@@ -1635,9 +1833,13 @@ export const retireIndexVersion = async ({
         );
       }
 
-      if (!force && row.status === INDEX_VERSION_STATUSES.building && row.lease_live === true) {
+      // Every build retire may abort was stopped above; one still building
+      // has a live lease and no --force (or its lease ran out only since).
+      if (row.status === INDEX_VERSION_STATUSES.building) {
         refuse(
-          `Index version ${safeVersionId} is being built by ${row.builder_id}; pass --force to abort the build.`
+          row.lease_live === true
+            ? `Index version ${safeVersionId} is being built by ${row.builder_id}; pass --force to abort the build.`
+            : `Index version ${safeVersionId} was still building when retire began; run retire again.`
         );
       }
 

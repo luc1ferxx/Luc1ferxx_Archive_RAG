@@ -496,6 +496,20 @@ export const createFakeVersionDatabase = ({
           switched_at: nowDate(),
         };
         return rows([{ generation: String(state.pointer.generation), switched_at: state.pointer.switched_at }]);
+      case "stop_build": {
+        const row = state.versions.get(values[0]);
+
+        if (
+          row &&
+          row.status === "building" &&
+          (values[1] || row.lease_expires_at === null || !isAfterNow(row.lease_expires_at))
+        ) {
+          Object.assign(row, { builder_id: null, last_error: values[2], lease_expires_at: null, status: "failed" });
+          return rows([{ version_id: row.version_id }]);
+        }
+
+        return rows([]);
+      }
       case "lock_retire": {
         const row = state.versions.get(values[0]);
 

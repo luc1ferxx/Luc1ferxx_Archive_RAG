@@ -328,8 +328,9 @@ const isWebEntry = (skill, capabilityRegistry) => {
  * ids, and still delegate execution/approval to the Capability registry.
  * Building a catalog routes nothing (`executionWired` stays false for this
  * module): only the guarded rollout in agent-unified-graph-run.js executes a
- * graph drawn from it, after admission refuses approval-gated nodes. Graph
- * approval continuation remains frozen.
+ * graph drawn from it, after admission. An approval-gated Capability node in
+ * such a graph pauses at a graph-bound gate and continues after the decision
+ * (agent-unified-graph-stage.js).
  */
 export const buildAuthorizedUnifiedGraphCatalog = ({
   accessScope,

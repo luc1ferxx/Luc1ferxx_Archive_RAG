@@ -4,7 +4,13 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { derivePgvectorHealthProblems } from "../health.js";
 import { configureEmbeddingDimensions } from "../rag/config.js";
+import {
+  describeEmbeddingCache,
+  embedQueryCached,
+  getQueryVectorEmbeddingSpace,
+} from "../rag/embedding-cache.js";
 import {
   assertIndexVersionChunkTableName,
   getIndexVersionRegistryTableNames,
@@ -41,6 +47,7 @@ import {
   IndexVersionError,
   buildEmbeddingSpace,
   buildLegacyIndexVersion,
+  describeConfigurationChangeFor,
   describeIndexVersions,
   getConfiguredEmbeddingSpace,
   getEffectiveDualWriteGraceMs,
@@ -55,7 +62,9 @@ import {
   lockIndexVersionWriteTargets,
   normalizeIndexParams,
   peekIndexVersionSnapshot,
+  peekServingQueryEmbeddingSpace,
   readIndexVersionSnapshot,
+  resolveServingQueryEmbeddingSpace,
   resolveVersionIndexParams,
   resolveVersionSpace,
   toIndexVersion,
@@ -82,11 +91,13 @@ const ENV_KEYS = [
   "OPENAI_BASE_URL",
   "OPENAI_EMBEDDING_MODEL",
   "POSTGRES_ROW_LEVEL_SECURITY",
+  "RAG_EMBEDDING_DIMENSIONS",
   "RAG_EMBEDDING_DOCUMENT_PREFIX",
   "RAG_EMBEDDING_QUERY_PREFIX",
   "RAG_INDEX_VERSION_DUAL_WRITE_GRACE_MS",
   "RAG_INDEX_VERSION_POINTER_TTL_MS",
   "RAG_PGVECTOR_ITERATIVE_SCAN",
+  "VECTOR_STORE_PROVIDER",
 ];
 let savedEnv;
 let originalFetch;
@@ -746,6 +757,193 @@ test("searches go to the active version: its table, its function and a query emb
   assert.equal(sparse[0].document.metadata.docId, "doc-2");
   assert.match(sparseCall.sql, new RegExp(`FROM ${table}_sparse_rank\\(`));
   assert.match(sparseCall.sql, new RegExp(`JOIN ${table} c ON`));
+});
+
+// ---------------------------------------------------------------------------
+// Query embedding follows the active version
+// ---------------------------------------------------------------------------
+
+test("a query is embedded once, in the active version's space; the configured model only when a version in it serves", async () => {
+  const calls = useProvider();
+  const database = useDatabase();
+  const queries = (model) => calls.filter((call) => call.kind === "query" && call.model === model).map((call) => call.text);
+
+  addPinnedVersion(database, { status: "ready" });
+  await writeDocumentsToPgvectorIndex({
+    preparedDocuments: await prepareDocumentsForPgvectorIndex({
+      documents: [...prepared("doc-1", ["alpha policy text"]), ...prepared("doc-2", ["beta budget text"])],
+      spaces: [getConfiguredEmbeddingSpace(), buildEmbeddingSpace({ dimensions: 3, model: PINNED_MODEL })],
+    }),
+  });
+  activate(database, 2);
+
+  // What document RAG does: embed through the cache, then search.
+  const vector = await embedQueryCached("beta budget");
+
+  assert.equal(vector.length, 3);
+  assert.equal(getQueryVectorEmbeddingSpace(vector).model, PINNED_MODEL);
+  assert.deepEqual(queries(PINNED_MODEL), ["beta budget"]);
+  assert.deepEqual(queries(MODEL), [], "no embedding in the configured model nobody searches");
+
+  const found = await searchPgvectorDocuments({ docIds: ["doc-1", "doc-2"], queryText: "beta budget", queryVector: vector, topK: 1 });
+  const dense = database.log.filter((entry) => /AS vector_score/.test(entry.sql)).at(-1);
+
+  assert.equal(found[0].document.metadata.docId, "doc-2");
+  assert.deepEqual(dense.values.slice(2, 4), [PINNED_MODEL, 3]);
+  assert.equal(calls.filter((call) => call.kind === "query").length, 1, "the search used the vector it was given");
+
+  // Repeated queries come from the one cache, under the active space's key.
+  await embedQueryCached("beta budget");
+  assert.equal(calls.filter((call) => call.kind === "query").length, 1);
+  assert.deepEqual(Object.keys(describeEmbeddingCache().bySpace), [`${PINNED_MODEL}|3`]);
+
+  // Rollback: the pointer names version 1 again and queries follow it.
+  activate(database, 1);
+  const rolledBack = await embedQueryCached("alpha policy");
+
+  assert.equal(getQueryVectorEmbeddingSpace(rolledBack).model, MODEL);
+  await searchPgvectorDocuments({ docIds: ["doc-1"], queryText: "alpha policy", queryVector: rolledBack, topK: 1 });
+  assert.deepEqual(queries(MODEL), ["alpha policy"]);
+  assert.deepEqual(queries(PINNED_MODEL), ["beta budget"]);
+
+  // The pointer moves between the embedding and the search: the search embeds
+  // the text once more, in the space it now reads.
+  const beforeSwitch = await embedQueryCached("gamma schedule");
+
+  activate(database, 2);
+  await searchPgvectorDocuments({ docIds: ["doc-1"], queryText: "gamma schedule", queryVector: beforeSwitch, topK: 1 });
+  assert.deepEqual(queries(MODEL), ["alpha policy", "gamma schedule"]);
+  assert.deepEqual(queries(PINNED_MODEL), ["beta budget", "gamma schedule"]);
+});
+
+test("the serving query space: configured without pgvector or a database, the snapshot's inside its TTL, the pointer's otherwise", async () => {
+  useProvider();
+  const configured = getConfiguredEmbeddingSpace();
+
+  // No database configured: no pointer read is attempted.
+  assert.deepEqual(peekServingQueryEmbeddingSpace(), configured);
+  assert.deepEqual(await resolveServingQueryEmbeddingSpace(), configured);
+
+  const database = useDatabase();
+
+  addPinnedVersion(database, { status: "ready" });
+  activate(database, 2);
+  assert.equal(peekServingQueryEmbeddingSpace(), null, "the pointer must be read first");
+  assert.equal((await resolveServingQueryEmbeddingSpace()).model, PINNED_MODEL);
+  assert.equal(peekServingQueryEmbeddingSpace().model, PINNED_MODEL, "then known inside the TTL");
+
+  // A failed pointer read falls back to the last snapshot, never throws.
+  invalidateIndexVersionSnapshot();
+  database.failNext("snapshot", new Error("pointer down"));
+  assert.equal((await resolveServingQueryEmbeddingSpace()).model, MODEL, "no snapshot left: the configured space");
+
+  process.env.VECTOR_STORE_PROVIDER = "local";
+  try {
+    assert.deepEqual(await resolveServingQueryEmbeddingSpace(), configured);
+  } finally {
+    delete process.env.VECTOR_STORE_PROVIDER;
+  }
+});
+
+test("ingest embeds once per live write-target space: the configured model not at all once no target lives in it", async () => {
+  const calls = useProvider();
+  const database = useDatabase();
+
+  addPinnedVersion(database, { status: "ready" });
+  activate(database, 2);
+  // Version 1 (pinned to the configured model at the switch) leaves its grace period.
+  database.state.versions.get(1).dual_write_until = new Date(database.clock.now - 1);
+  database.state.versions.get(1).embedding_space_source = "pinned";
+  database.state.versions.get(1).embedding_model = MODEL;
+  database.state.versions.get(1).embedding_identity = MODEL;
+  await readIndexVersionSnapshot({ force: true });
+
+  assert.deepEqual(getHintedWriteSpaces().map((space) => space.key), [`${PINNED_MODEL}|3`]);
+  await prepareDocumentsForPgvectorIndex({ documents: prepared("doc-9", ["delta clause"]) });
+  assert.deepEqual(
+    calls.filter((call) => call.kind === "documents").map((call) => call.model),
+    [PINNED_MODEL]
+  );
+});
+
+test("a configuration that disagrees with the active version is a health warning that names the settings to change", async () => {
+  useProvider();
+  const database = useDatabase();
+
+  addPinnedVersion(database, {
+    embedding_dimensions: 768,
+    embedding_document_prefix: "search_document: ",
+    embedding_identity: "nomic-embed-text#search_document:",
+    embedding_model: "nomic-embed-text",
+    embedding_query_prefix: "search_query: ",
+    status: "ready",
+  });
+  database.state.tables.get("rag_document_chunks_v2").dimensions = 768;
+  activate(database, 2);
+
+  // The model's documented prefixes come with it: only the model and width change.
+  const status = await describePgvectorStatus();
+  const warning = status.indexVersions.warnings.find((entry) => entry.code === "configuration_differs_from_active");
+
+  assert.deepEqual(warning.settings, { OPENAI_EMBEDDING_MODEL: "nomic-embed-text", RAG_EMBEDDING_DIMENSIONS: "768" });
+  assert.match(warning.message, /set OPENAI_EMBEDDING_MODEL=nomic-embed-text RAG_EMBEDDING_DIMENSIONS=768 at the next deploy/);
+  assert.match(warning.message, /Queries are embedded once, in the active version's model/);
+  assert.deepEqual(derivePgvectorHealthProblems(status), [], "a warning, not a health error");
+
+  // A prefix the model's documentation would not pick is named too, quoted.
+  process.env.RAG_EMBEDDING_QUERY_PREFIX = "query: ";
+  assert.deepEqual(
+    describeConfigurationChangeFor(
+      buildEmbeddingSpace({ dimensions: 4, documentPrefix: "", model: MODEL, queryPrefix: "search: " })
+    ),
+    { RAG_EMBEDDING_QUERY_PREFIX: "search: " }
+  );
+  assert.deepEqual(
+    describeConfigurationChangeFor(buildEmbeddingSpace({ dimensions: 4, model: "nomic-embed-text", queryPrefix: "" })),
+    { OPENAI_EMBEDDING_MODEL: "nomic-embed-text", RAG_EMBEDDING_DOCUMENT_PREFIX: "", RAG_EMBEDDING_QUERY_PREFIX: "" },
+    "a space built without the model's documented prefixes turns them off; an override stays in force, so it is named"
+  );
+  delete process.env.RAG_EMBEDDING_QUERY_PREFIX;
+
+  // A width derived from the configured model follows the new model: the
+  // settings name the active width whenever the new model would derive
+  // another one, so applying them once is enough.
+  configureEmbeddingDimensions(null);
+  process.env.OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+  assert.deepEqual(
+    describeConfigurationChangeFor(buildEmbeddingSpace({ dimensions: 1536, model: "text-embedding-3-large" })),
+    { OPENAI_EMBEDDING_MODEL: "text-embedding-3-large", RAG_EMBEDDING_DIMENSIONS: "1536" },
+    "3-large derives 3072 once it is configured, so the 1536 it was built at must be set"
+  );
+  assert.deepEqual(
+    describeConfigurationChangeFor(buildEmbeddingSpace({ dimensions: 3072, model: "text-embedding-3-large" })),
+    { OPENAI_EMBEDDING_MODEL: "text-embedding-3-large" },
+    "the model's own width needs no setting"
+  );
+  assert.deepEqual(
+    describeConfigurationChangeFor(buildEmbeddingSpace({ dimensions: 1536, model: "unlisted-embed" })),
+    { OPENAI_EMBEDDING_MODEL: "unlisted-embed" },
+    "a model of unknown width derives the default, 1536"
+  );
+  // An explicit RAG_EMBEDDING_DIMENSIONS stays in force after the change.
+  process.env.RAG_EMBEDDING_DIMENSIONS = "1536";
+  assert.deepEqual(
+    describeConfigurationChangeFor(buildEmbeddingSpace({ dimensions: 1536, model: "text-embedding-3-large" })),
+    { OPENAI_EMBEDDING_MODEL: "text-embedding-3-large" }
+  );
+  assert.deepEqual(
+    describeConfigurationChangeFor(buildEmbeddingSpace({ dimensions: 3072, model: "text-embedding-3-large" })),
+    { OPENAI_EMBEDDING_MODEL: "text-embedding-3-large", RAG_EMBEDDING_DIMENSIONS: "3072" }
+  );
+  delete process.env.RAG_EMBEDDING_DIMENSIONS;
+
+  // Configured for the active model: no warning.
+  process.env.OPENAI_EMBEDDING_MODEL = "nomic-embed-text";
+  configureEmbeddingDimensions(768);
+  assert.equal(
+    (await describeIndexVersions()).warnings.some((entry) => entry.code === "configuration_differs_from_active"),
+    false
+  );
 });
 
 test("a search that meets a retired table re-reads the pointer once; a caller's transaction is not retried", async () => {

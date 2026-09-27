@@ -7,7 +7,7 @@ import {
   evaluateCapabilityPolicy,
 } from "./capabilities/policy-enforcer.js";
 import { CAPABILITY_IDS } from "./capabilities/shared.js";
-import { AGENT_SKILL_IDS } from "./skills/registry.js";
+import { AGENT_SKILL_IDS, CUSTOM_SKILL_IDS } from "./skills/registry.js";
 import {
   SKILL_EFFECTS,
   SKILL_VALUE_TYPES,
@@ -18,15 +18,29 @@ import {
 // request away from the V1 path. Nothing here runs a node, writes a step, or
 // reserves budget, so a refusal can still hand the request to V1 unchanged.
 //
-// Approval continuation inside the graph is frozen. A node that could pause
-// for a user decision mid-graph would leave earlier nodes executed and the
-// request unable to fall back, so every such node refuses the whole graph:
-//   * a direct Capability adapter that declares an approval gate, always;
+// Approvals inside the graph. A direct Capability adapter that declares an
+// approval gate is admitted: the runtime stops it at a clean node boundary
+// (no step, no budget), lets the nodes that do not depend on it finish,
+// persists a graph-bound gate (approval object hash over the exact resolved
+// input, graph digest, node id) through the same approval snapshot table and
+// policy V1 uses, and continues the same graph after the user decides
+// (agent-unified-graph-stage.js). One such node per graph: the run store holds
+// one pending graph gate at a time. What is still refused:
 //   * a built-in wrapper (Web search, document discovery) whose Capability
 //     requires confirmation, unless the request already carries a standing,
-//     input-independent grant for it (the same grant V1 would apply).
+//     input-independent grant for it (the same grant V1 would apply). Its
+//     approval happens inside execute(), not at a graph node boundary, so a
+//     pause there would leave a running receipt behind;
+//   * more than one approval-gated Capability node.
 // The graph must also fit the legacy finalizer's state (projection shape), or
 // its answer could not be finalized after its nodes already ran.
+//
+// The graph must also contain what the intent asked for: the intent's own
+// custom Skill (or every Skill of its chain), its workspace-action Capability,
+// or its standalone inventory, discovery, or Web node. The finalizer answers
+// in the intent's mode, so a graph without that node would finalize into a
+// "could not complete" answer; an intent the v3 catalog has no node for
+// (research brief, arXiv import) is refused and V1 answers it.
 //
 // Three data boundaries hold for every admitted graph, whatever the planner
 // proposed:
@@ -45,12 +59,13 @@ import {
 //     abstention to a failed check).
 
 export const UNIFIED_GRAPH_ADMISSION_REASON_CODES = Object.freeze({
-  approvalGatedCapability: "approval_gated_capability",
   approvalWithoutStandingGrant: "approval_required_without_standing_grant",
   documentRequestWithoutDocumentNode: "document_request_without_document_node",
   externalInputNotRequestQuestion: "external_input_not_request_question",
   externalOutputHandOff: "external_output_hand_off",
   graphNotProjectable: "graph_not_projectable",
+  intentSkillMissing: "intent_skill_missing",
+  multipleApprovalGatedCapabilities: "multiple_approval_gated_capabilities",
   webNotGatedOnDocumentEvidence: "web_not_gated_on_document_evidence",
 });
 
@@ -121,9 +136,41 @@ const capabilityRequiresConfirmation = (capabilityRegistry, capabilityId) => {
     );
 };
 
+/** The node Skills the intent's own mode requires in the graph. */
+export const listIntentRequiredSkillIds = (plan = {}) => {
+  const mode = normalizeText(plan?.mode);
+
+  if (mode === "skill_chain") {
+    return (Array.isArray(plan.skillChain) ? plan.skillChain : []).map(normalizeText);
+  }
+
+  if (mode === "workspace_action") {
+    const capabilityId = normalizeText(plan.actionCapabilityId);
+    return [capabilityId ? `capability:${capabilityId}` : AGENT_SKILL_IDS.workspaceAction];
+  }
+
+  if (Object.values(CUSTOM_SKILL_IDS).includes(mode)) {
+    return [mode];
+  }
+
+  return {
+    arxiv_import: [AGENT_SKILL_IDS.arxivImport],
+    document_discovery: [AGENT_SKILL_IDS.documentDiscovery],
+    inventory: [AGENT_SKILL_IDS.inventory],
+    research_brief: [AGENT_SKILL_IDS.researchBrief],
+    web: [AGENT_SKILL_IDS.webSearch],
+  }[mode] ?? [];
+};
+
+/** True for a direct Capability adapter whose policy asks the user first. */
+export const isApprovalGatedCapabilityNode = (skill) =>
+  skill?.kind === "capability" && skill.requiresApproval !== false;
+
 /**
  * The approval refusal for one node, or null when it may start without a
- * user decision. Recovery also asks this right before a node would start.
+ * request-level grant. Recovery also asks this right before a node would
+ * start. A direct Capability never needs one: its approval is graph-bound and
+ * durable (the node pauses at its gate), so recovery can re-establish it.
  */
 export const assessUnifiedGraphNodeApproval = ({
   accessScope,
@@ -133,9 +180,7 @@ export const assessUnifiedGraphNodeApproval = ({
   skill,
 } = {}) => {
   if (skill?.kind === "capability") {
-    return skill.requiresApproval !== false
-      ? UNIFIED_GRAPH_ADMISSION_REASON_CODES.approvalGatedCapability
-      : null;
+    return null;
   }
 
   if (!Object.hasOwn(CAPABILITY_BACKED_BUILT_INS, skill?.id ?? "")) {
@@ -290,6 +335,27 @@ export const assessUnifiedGraphAdmission = ({
     reasonCodes.add(reasonCode);
     if (nodeId && !blockedNodeIds.includes(nodeId)) {
       blockedNodeIds.push(nodeId);
+    }
+  }
+
+  const plannedSkillIds = new Set(
+    (Array.isArray(graph?.nodes) ? graph.nodes : []).map((node) => node?.skillId)
+  );
+
+  if (listIntentRequiredSkillIds(plan).some((skillId) => !plannedSkillIds.has(skillId))) {
+    reasonCodes.add(UNIFIED_GRAPH_ADMISSION_REASON_CODES.intentSkillMissing);
+  }
+
+  const gatedCapabilityNodeIds = (Array.isArray(graph?.nodes) ? graph.nodes : [])
+    .filter((node) => isApprovalGatedCapabilityNode(registry?.get?.(node.skillId)))
+    .map((node) => node.nodeId);
+
+  if (gatedCapabilityNodeIds.length > 1) {
+    reasonCodes.add(UNIFIED_GRAPH_ADMISSION_REASON_CODES.multipleApprovalGatedCapabilities);
+    for (const nodeId of gatedCapabilityNodeIds.slice(1)) {
+      if (!blockedNodeIds.includes(nodeId)) {
+        blockedNodeIds.push(nodeId);
+      }
     }
   }
 

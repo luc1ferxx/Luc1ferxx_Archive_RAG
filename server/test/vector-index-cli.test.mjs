@@ -135,6 +135,8 @@ test("parseArgs reads commands, numbers and --key=value, and rejects what it doe
     "50",
     "--batch-size",
     "8",
+    "--concurrency",
+    "6",
     "--json",
   ]);
 
@@ -145,6 +147,7 @@ test("parseArgs reads commands, numbers and --key=value, and rejects what it doe
   assert.equal(build.indexType, "ivfflat");
   assert.equal(build.ivfflatLists, 50);
   assert.equal(build.batchSize, 8);
+  assert.equal(build.concurrency, 6);
   assert.equal(build.json, true);
 
   const activate = parseArgs(["activate", "3", "--probe-sample", "20", "--min-recall", "0.9", "--allow-chunk-count-drift"]);
@@ -182,7 +185,11 @@ test("--help prints the usage without touching the database; other providers are
 test("build, validate, activate, rollback, retire and status through the CLI", async () => {
   const database = useDatabase();
 
-  const built = await run(["build", "--model", NEW_MODEL, "--dimensions", "3", "--batch-size", "1", "--hnsw-m", "20"]);
+  // One document at a time, so the progress line of each one-document batch is
+  // its own (with several in flight a batch reports the running totals).
+  const built = await run([
+    "build", "--model", NEW_MODEL, "--dimensions", "3", "--batch-size", "1", "--concurrency", "1", "--hnsw-m", "20",
+  ]);
 
   assert.match(built.output, /version 2: 1 indexed/);
   assert.match(built.output, /Version 2 is ready: 2 document\(s\) indexed, 0 deleted during the build, 0 failed/);

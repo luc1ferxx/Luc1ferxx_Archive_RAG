@@ -56,15 +56,49 @@ const verifyRequestedDocuments = ({ accessScope, docIds, ragService }) => {
   }
 };
 
+const serializePlannerError = (error) =>
+  normalizeText(error instanceof Error ? error.message : error).slice(0, 300);
+
+// What one planner call cost, when the adapter measured it (the model adapter
+// does; an injected or deterministic proposal costs nothing).
+const describePlannerCall = (call) =>
+  isRecord(call)
+    ? {
+        latencyMs: Number.isFinite(call.latencyMs) ? call.latencyMs : null,
+        modelRoute: call.modelRoute ?? null,
+        promptTemplate: call.promptTemplate
+          ? {
+              fingerprint: call.promptTemplate.fingerprint,
+              id: call.promptTemplate.id,
+              version: call.promptTemplate.version,
+            }
+          : null,
+        responseFormatDigest:
+          typeof call.responseFormatDigest === "string" ? call.responseFormatDigest : null,
+        tokens: Number.isFinite(call.tokens) ? call.tokens : null,
+      }
+    : null;
+
 /**
  * Plan a single heterogeneous v3 graph from a runtime-authorized catalog.
  * This is a proposal boundary only: no node runs and no V1 fallback runs
  * here. The production caller may fall back to V1 only before execution.
  * The adapter is injected, so deterministic/mock tests never call a model.
+ *
+ * An adapter that names a `fallbackPlannerAdapter` (the model adapter names
+ * the deterministic graph) gets one replacement: a proposal that fails, does
+ * not parse, fails validation, or is refused by `assessGraph` (the caller's
+ * pure admission check) is discarded whole and the fallback is planned from
+ * the same redacted context. An adapter without one is judged as proposed
+ * (injected test proposals rely on that). `allowPlannerFallback: false`
+ * judges every adapter as proposed: shadow observation measures the observed
+ * planner itself, never the graph that would have replaced it.
  */
 export const createUnifiedAgentExecutionGraphResult = async ({
   accessScope,
+  allowPlannerFallback = true,
   allowedCapabilityIds = [],
+  assessGraph = null,
   budgetState,
   capabilityRegistry,
   docIds = [],
@@ -115,65 +149,143 @@ export const createUnifiedAgentExecutionGraphResult = async ({
     registry,
   });
   const budgetRemaining = getRemainingBudget(budgetState);
+  const baseContext = buildDagPlanningContext({
+    authorizedDocIds: docIds,
+    docIds,
+    limits,
+    plan,
+    question,
+    selectedSkills: catalog.skills,
+    taskMemory,
+  });
   const plannerContext = {
-    ...buildDagPlanningContext({
-      authorizedDocIds: docIds,
-      docIds,
-      limits,
-      plan,
-      question,
-      selectedSkills: catalog.skills,
-      taskMemory,
-    }),
+    ...baseContext,
     budgetRemaining,
     capabilities: catalog.descriptors,
     graphVersion: EXECUTION_GRAPH_VERSIONS.v3,
+    // The intent's routing flags a v3 planner needs; never document text.
+    intentPlan: {
+      ...baseContext.intentPlan,
+      actionCapabilityId: normalizeText(plan.actionCapabilityId) || null,
+      skillChain: Array.isArray(plan.skillChain) ? plan.skillChain.map(normalizeText) : [],
+      wantsDocumentRag: Boolean(plan.wantsDocumentRag),
+    },
   };
 
-  let graph;
+  const propose = async (adapter) => {
+    let payload;
 
-  try {
-    const proposal = await plannerAdapter.createExecutionGraph(plannerContext);
-    graph = normalizeExecutionGraphPayload(proposal, {
-      version: EXECUTION_GRAPH_VERSIONS.v3,
+    try {
+      payload = await adapter.createExecutionGraph(plannerContext);
+    } catch (error) {
+      return {
+        call: describePlannerCall(error?.plannerCall),
+        errors: [{
+          code: EXECUTION_GRAPH_REASON_CODES.invalidNodeShape,
+          message: `Unified graph planner failed: ${serializePlannerError(error)}.`,
+          nodeId: null,
+        }],
+        graph: null,
+      };
+    }
+
+    const call = describePlannerCall(payload?.plannerCall);
+    let graph;
+
+    try {
+      graph = normalizeExecutionGraphPayload(payload, {
+        version: EXECUTION_GRAPH_VERSIONS.v3,
+      });
+    } catch (error) {
+      return {
+        call,
+        errors: [{
+          code: EXECUTION_GRAPH_REASON_CODES.invalidNodeShape,
+          message: `Unified graph planner failed: ${serializePlannerError(error)}.`,
+          nodeId: null,
+        }],
+        graph: null,
+      };
+    }
+
+    if (graph.version !== EXECUTION_GRAPH_VERSIONS.v3) {
+      return {
+        call,
+        errors: [{
+          code: EXECUTION_GRAPH_REASON_CODES.invalidGraphVersion,
+          message: "A unified graph proposal must use contract v3.",
+          nodeId: null,
+        }],
+        graph: null,
+      };
+    }
+
+    const validation = validateExecutionGraph({
+      authorizedDocIds: docIds,
+      authorizedSkillIds: catalog.skills.map((skill) => skill.id),
+      budgetRemaining,
+      graph,
+      limits,
+      registry: catalog.graphRegistry,
     });
-  } catch (error) {
-    return reject({
-      code: EXECUTION_GRAPH_REASON_CODES.invalidNodeShape,
-      message: `Unified graph planner failed: ${normalizeText(error?.message ?? error).slice(0, 300)}.`,
-      plannerId,
-    });
+
+    if (!validation.ok) {
+      return { call, errors: validation.errors, graph: null, proposed: graph };
+    }
+
+    const admission = typeof assessGraph === "function"
+      ? assessGraph({ graph: validation.graph, graphRegistry: catalog.graphRegistry })
+      : null;
+
+    return {
+      admission,
+      call,
+      errors: [],
+      graph: validation.graph,
+    };
+  };
+
+  const fallbackAdapter = allowPlannerFallback
+    ? plannerAdapter.fallbackPlannerAdapter ?? null
+    : null;
+  const primary = await propose(plannerAdapter);
+  const primaryAccepted = Boolean(primary.graph) && primary.admission?.admitted !== false;
+  const primaryReasonCodes = primary.graph
+    ? primary.admission?.reasonCodes ?? []
+    : primary.errors.map((error) => error.code);
+  let selected = primary;
+  let selectedPlannerId = plannerId;
+  let fallback = false;
+
+  if (!primaryAccepted && fallbackAdapter && fallbackAdapter !== plannerAdapter) {
+    selected = await propose(fallbackAdapter);
+    selectedPlannerId = normalizeText(fallbackAdapter.id) || null;
+    fallback = true;
   }
 
-  if (graph.version !== EXECUTION_GRAPH_VERSIONS.v3) {
-    return reject({
-      code: EXECUTION_GRAPH_REASON_CODES.invalidGraphVersion,
-      message: "A unified graph proposal must use contract v3.",
-      plannerId,
-    });
-  }
-
-  const validation = validateExecutionGraph({
-    authorizedDocIds: docIds,
-    authorizedSkillIds: catalog.skills.map((skill) => skill.id),
-    budgetRemaining,
-    graph,
-    limits,
-    registry: catalog.graphRegistry,
-  });
+  const planner = {
+    fallback,
+    fallbackReason: fallback
+      ? primary.graph
+        ? `The proposal was not admissible: ${primaryReasonCodes.join(", ")}.`
+        : primary.errors.map((error) => error.message).join(" ").slice(0, 500) || null
+      : null,
+    fallbackReasonCodes: fallback ? primaryReasonCodes : [],
+    nodeIds: selected.graph ? selected.graph.nodes.map((node) => node.nodeId) : [],
+    plannerCall: primary.call ?? null,
+    reasonCodes: selected.errors.map((error) => error.code),
+    requestedPlannerId: plannerId,
+    selectedPlannerId: selected.graph ? selectedPlannerId : null,
+    status: selected.graph ? "selected" : "rejected",
+  };
 
   return {
     catalog: catalog.descriptors,
-    errors: validation.errors,
-    graph: validation.graph,
+    errors: selected.errors,
+    graph: selected.graph,
     // The request-scoped executable registry the graph was validated against.
     // Trusted runtime code may use it for admission; it is never planner input.
     graphRegistry: catalog.graphRegistry,
-    planner: {
-      nodeIds: validation.ok ? graph.nodes.map((node) => node.nodeId) : [],
-      reasonCodes: validation.errors.map((error) => error.code),
-      requestedPlannerId: plannerId,
-      status: validation.ok ? "selected" : "rejected",
-    },
+    planner,
   };
 };

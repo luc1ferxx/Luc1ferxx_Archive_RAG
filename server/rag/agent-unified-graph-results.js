@@ -48,6 +48,8 @@ const DIRECT_BUILT_INS = new Set([
 const RESERVED_BUILT_INS = new Set(Object.values(AGENT_SKILL_IDS));
 const SETTLED = new Set(["completed", "reused"]);
 const BENIGN_SKIPS = new Set(["condition_not_met", "dependency_skipped"]);
+// A rejected approval gate. Only a Capability node carries one.
+const APPROVAL_DENIED = "approval_denied";
 
 const classifySkill = (skill) => {
   if (skill.kind === "built_in") {
@@ -204,6 +206,14 @@ const verifySettledDependencies = ({ entry, byNodeId }) => {
       return;
     }
 
+    if (entry.reason === APPROVAL_DENIED) {
+      // The gate was reached, so everything the node waited for completed.
+      if (!dependencies.every((dependency) => SETTLED.has(dependency?.status))) {
+        fail(`node ${entry.nodeId} was denied before its dependencies completed`);
+      }
+      return;
+    }
+
     if (
       entry.reason !== "condition_not_met" ||
       !isRecord(entry.node.when) ||
@@ -344,7 +354,8 @@ export const collectUnifiedGraphResults = ({
 
     if (receipt.status === "skipped") {
       if (
-        !BENIGN_SKIPS.has(receipt.reason) ||
+        !(BENIGN_SKIPS.has(receipt.reason) ||
+          (receipt.reason === APPROVAL_DENIED && category === "capability")) ||
         receipt.result != null ||
         receipt.citationCount !== 0
       ) {
@@ -396,8 +407,10 @@ export const collectUnifiedGraphResults = ({
     .filter((entry) => SETTLED.has(entry.status))
     .map((entry) => entry.result);
 
+  const deniedActions = entries.filter((entry) => entry.reason === APPROVAL_DENIED);
+
   if (
-    successfulResults.length === 0 ||
+    (successfulResults.length === 0 && deniedActions.length === 0) ||
     !isDeepStrictEqual(run.results, successfulResults)
   ) {
     fail("flat run results disagree with successful node receipts");

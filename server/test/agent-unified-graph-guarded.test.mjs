@@ -209,7 +209,7 @@ test("a guarded document loop reproduces V1's answer, gaps, loop counters, and b
   assert.ok(unresolved.body.agentWorkingMemory.unresolvedGaps.length > 0);
 });
 
-test("an approval-gated Capability node refuses the whole graph before any node runs", async () => {
+test("a Capability node outside a workspace-action intent refuses the whole graph before any node runs", async () => {
   const agentRunService = newService(createInMemoryAgentRunStore());
   const ragService = createDocumentLoopRagService();
   const response = await ask({
@@ -243,13 +243,12 @@ test("an approval-gated Capability node refuses the whole graph before any node 
   const planned = run.events.filter((event) => event.type === "unified_graph_planned");
 
   assert.equal(response.status, 200);
-  // The Capability is approval-gated, and a Capability node is also outside
-  // the shape the legacy finalizer can represent; both refuse it.
-  assert.deepEqual(fallbackStep.detail.errorCodes, [
-    "approval_gated_capability",
-    "graph_not_projectable",
-  ]);
-  assert.deepEqual(fallbackStep.detail.blockedNodeIds, ["create_task"]);
+  // An approval-gated Capability is admissible (it pauses at its gate), but
+  // only as the workspace action the intent asked for: this is a plain
+  // document question, so the legacy finalizer has no place for the action's
+  // answer and the graph is refused whole.
+  assert.deepEqual(fallbackStep.detail.errorCodes, ["graph_not_projectable"]);
+  assert.deepEqual(fallbackStep.detail.blockedNodeIds, []);
   assert.equal(fallbackStep.detail.fallback, "v1");
   assert.equal(planned.length, 1);
   assert.equal(planned[0].payload.status, "rejected");
@@ -779,7 +778,7 @@ test("the graph's document loop derives checks it did not plan and honours a mis
   assert.equal(supported.body.agentObservability.executionLoop.followUpsRun, 0);
 });
 
-test("approval continuation stays on V1: an approved pause resumes V1 and a re-entry never plans a graph", async () => {
+test("a V1 approval pause stays on V1: an approved pause resumes V1 and a re-entry never plans a graph", async () => {
   const webCalls = [];
   const plannerContexts = [];
   const ragService = createDocumentLoopRagService({ primary: "abstain" });
@@ -854,7 +853,7 @@ test("approval continuation stays on V1: an approved pause resumes V1 and a re-e
     reenteredRun.events
       .filter((event) => event.type === "unified_graph_planned")
       .map((event) => event.payload.errorCodes),
-    [["approval_required_without_standing_grant"], ["approval_continuation_frozen"]]
+    [["approval_required_without_standing_grant"], ["reentry_stays_on_v1"]]
   );
   assert.equal(
     await agentRunService.getExecutionGraphCheckpoint({
@@ -907,7 +906,7 @@ test("the stage itself refuses an inadmissible or invalid graph before any durab
     });
 
   await assert.rejects(stage(createConditionalWebProposal()), (error) => {
-    assert.equal(error.code, "AGENT_UNIFIED_GRAPH_APPROVAL_UNSUPPORTED");
+    assert.equal(error.code, "AGENT_UNIFIED_GRAPH_INADMISSIBLE");
     assert.equal(error.preExecution, true);
     assert.deepEqual(error.reasonCodes, ["approval_required_without_standing_grant"]);
     return true;

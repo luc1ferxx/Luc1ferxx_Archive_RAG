@@ -41,6 +41,9 @@ import {
 const noop = () => {};
 
 export const EXECUTION_GRAPH_NODE_STATUSES = Object.freeze({
+  // A node whose preflight needs a user decision. It holds no lifecycle step
+  // and no budget; its dependants wait, independent nodes keep running.
+  awaitingApproval: "awaiting_approval",
   completed: "completed",
   failed: "failed",
   pending: "pending",
@@ -51,6 +54,8 @@ export const EXECUTION_GRAPH_NODE_STATUSES = Object.freeze({
 
 export const EXECUTION_GRAPH_SKIP_REASONS = Object.freeze({
   abortedAfterFailure: "aborted_after_failure",
+  // The user rejected the node's approval gate: it never ran and never will.
+  approvalDenied: "approval_denied",
   budgetExhausted: "budget_exhausted",
   conditionNotMet: "condition_not_met",
   dependencyFailed: "dependency_failed",
@@ -272,6 +277,7 @@ export const runExecutionGraph = async ({
     ...detail,
   }),
   completedNodeRuns = [],
+  deniedNodeIds = [],
   docIds = [],
   executeObservedSkill,
   graph,
@@ -279,6 +285,7 @@ export const runExecutionGraph = async ({
   limits = EXECUTION_GRAPH_LIMITS,
   maxConcurrency,
   onNodeSettled = noop,
+  pauseForApproval = null,
   preflightNode = null,
   question,
   ragService,
@@ -422,6 +429,19 @@ export const runExecutionGraph = async ({
     state.status = EXECUTION_GRAPH_NODE_STATUSES.skipped;
   };
 
+  // A rejected approval gate settles its node before scheduling starts: it
+  // spends nothing, starts no lifecycle step, and its dependants are skipped
+  // with it. Only a node that never ran can be denied.
+  for (const nodeId of Array.isArray(deniedNodeIds) ? deniedNodeIds : []) {
+    const state = statesByNodeId.get(nodeId);
+
+    if (!state || state.status !== EXECUTION_GRAPH_NODE_STATUSES.pending) {
+      throw invalidCompletedRun(nodeId);
+    }
+
+    settleSkip(state, EXECUTION_GRAPH_SKIP_REASONS.approvalDenied);
+  }
+
   const recordSkip = ({ budget = null, reason, state }) => {
     const result = buildFailedSkillResult(
       state.skill,
@@ -517,6 +537,10 @@ export const runExecutionGraph = async ({
       let result;
       let budget = null;
       let nodeRuntime = null;
+      // A preflight that refuses the resolved input (a Capability policy
+      // block, an out-of-scope value) fails this node like an invalid
+      // binding: a failed lifecycle step, no budget, no execution.
+      let preflightRejection = null;
 
       try {
         // An approval-required Capability must be checked at a clean node
@@ -542,12 +566,31 @@ export const runExecutionGraph = async ({
           ) {
             throw new Error("Only a trusted Capability preflight may provide node runtime grants.");
           }
+
+          // The node needs a user decision. It is parked at a clean boundary:
+          // no lifecycle step, no budget, no output. Its dependants wait with
+          // it while independent nodes keep running; the pause itself is
+          // persisted only once nothing else can run (see pauseForApproval).
+          if (nodeRuntime?.awaitingApproval === true) {
+            state.awaiting = {
+              boundInputs: inputValidation.output,
+              nodeDocIds,
+              persistedInput,
+            };
+            state.status = EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval;
+            return;
+          }
+
+          if (nodeRuntime?.rejectedInput instanceof Error) {
+            preflightRejection = nodeRuntime.rejectedInput;
+            nodeRuntime = null;
+          }
         }
 
         // A malformed binding must not execute the skill or consume call
         // budget. The node still enters the lifecycle and fails under its
         // declared failure policy.
-        budget = inputValidation.ok && contract.budgetKey
+        budget = inputValidation.ok && !preflightRejection && contract.budgetKey
           ? reserveBudget(budgetState, contract.budgetKey, 1)
           : null;
 
@@ -564,10 +607,10 @@ export const runExecutionGraph = async ({
             // Enforce the input gate in the scheduler itself. Observability
             // adapters may be injected or replaced; none may receive an
             // invalid bound input or invoke the real Skill with it.
-            if (!inputValidation.ok) {
+            if (!inputValidation.ok || preflightRejection) {
               const invalidResult = buildFailedSkillResult(
                 skill,
-                createSkillInputContractError(inputValidation.errors)
+                preflightRejection ?? createSkillInputContractError(inputValidation.errors)
               );
 
               // Preserve the per-Skill failure observation without treating a
@@ -880,6 +923,50 @@ export const runExecutionGraph = async ({
     throw interrupt;
   }
 
+  const awaiting = states.filter(
+    (state) => state.status === EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval
+  );
+
+  if (awaiting.length > 0) {
+    // A graph that already failed a node will not complete, so asking the
+    // user to approve more work in it would only defer the failure.
+    if (
+      aborted ||
+      states.some((state) => state.status === EXECUTION_GRAPH_NODE_STATUSES.failed)
+    ) {
+      for (const state of awaiting) {
+        recordSkip({ reason: EXECUTION_GRAPH_SKIP_REASONS.abortedAfterFailure, state });
+      }
+    } else {
+      if (typeof pauseForApproval !== "function" || awaiting.length !== 1) {
+        const error = new Error(
+          "An approval-gated graph node has no single durable approval pause."
+        );
+        error.code = "AGENT_UNIFIED_GRAPH_APPROVAL_UNAVAILABLE";
+        error.status = 409;
+        throw error;
+      }
+
+      const [state] = awaiting;
+
+      // Every in-flight node has settled and checkpointed. The hook persists
+      // the gate against that checkpoint and throws the run's interrupt.
+      await pauseForApproval({
+        boundInputs: state.awaiting.boundInputs,
+        graph,
+        node: state.node,
+        nodeDocIds: state.awaiting.nodeDocIds,
+        nodeRuns: states.map(buildNodeRun),
+        skill: state.skill,
+      });
+
+      const error = new Error("The approval pause did not interrupt the graph.");
+      error.code = "AGENT_UNIFIED_GRAPH_APPROVAL_UNAVAILABLE";
+      error.status = 409;
+      throw error;
+    }
+  }
+
   const nodeRuns = states.map(buildNodeRun);
   const results = states
     .filter((state) => state.result)
@@ -897,7 +984,12 @@ export const runExecutionGraph = async ({
       return false;
     }
 
-    if (state.reason === EXECUTION_GRAPH_SKIP_REASONS.conditionNotMet) {
+    // A false condition and a rejected approval are decisions, not failures:
+    // the graph completes without that node.
+    if (
+      state.reason === EXECUTION_GRAPH_SKIP_REASONS.conditionNotMet ||
+      state.reason === EXECUTION_GRAPH_SKIP_REASONS.approvalDenied
+    ) {
       return true;
     }
 

@@ -4,7 +4,8 @@
 //   status                 the registry: active version, build progress, drift
 //   build [space/index]    create a version (own table, width, indexes, policy,
 //                          sparse-rank function) and re-embed every document
-//                          from the PDF bytes the registry stores, in batches
+//                          from the PDF bytes the registry stores, several
+//                          documents at a time (--concurrency)
 //   resume                 continue a build whose builder died, once its lease
 //                          has expired
 //   validate <id>          the activation gate alone, read-only
@@ -58,7 +59,11 @@ Build options (default: the configured embedding model and index settings)
   --index-type hnsw|ivfflat     ANN index method.
   --hnsw-m <n>  --hnsw-ef-construction <n>  --ivfflat-lists <n>
   --text-search-config <name>   PostgreSQL text search configuration of the lexical route.
-  --batch-size <n>              Documents per batch (RAG_INDEX_VERSION_BUILD_BATCH_SIZE).
+  --batch-size <n>              Documents listed per batch (RAG_INDEX_VERSION_BUILD_BATCH_SIZE).
+  --concurrency <n>             Documents in flight at once (RAG_INDEX_VERSION_BUILD_CONCURRENCY, default 4);
+                                also for resume. Each is still written in its own transaction.
+                                Their embeddings share requests only when RAG_LLM_MAX_CONCURRENCY is
+                                below this; RAG_INGEST_EMBED_BATCHING=false sends one request per document.
   --lease-ms <n>                Builder lease (RAG_INDEX_VERSION_BUILD_LEASE_MS).
 
 Activation options (activate, validate, rollback)
@@ -95,6 +100,7 @@ const VALUE_OPTIONS = new Map([
   ["--ivfflat-lists", "ivfflatLists"],
   ["--text-search-config", "textSearchConfig"],
   ["--batch-size", "batchSize"],
+  ["--concurrency", "concurrency"],
   ["--lease-ms", "leaseMs"],
   ["--probe-sample", "probeSample"],
   ["--probe-queries", "probeQueries"],
@@ -116,6 +122,7 @@ const NUMERIC_OPTIONS = new Set([
   "hnswEfConstruction",
   "ivfflatLists",
   "batchSize",
+  "concurrency",
   "leaseMs",
   "probeSample",
   "probeTopK",
@@ -312,7 +319,12 @@ export const main = async ({ argv = process.argv.slice(2), stdout = process.stdo
 
   if (options.command === "build" || options.command === "resume") {
     const logger = options.json ? null : (line) => write(`${line}\n`);
-    const buildOptions = pickDefined({ batchSize: options.batchSize, leaseMs: options.leaseMs, logger });
+    const buildOptions = pickDefined({
+      batchSize: options.batchSize,
+      concurrency: options.concurrency,
+      leaseMs: options.leaseMs,
+      logger,
+    });
     const result =
       options.command === "build"
         ? await startIndexVersionBuild({

@@ -341,3 +341,109 @@ export const describeAnswerState = (response = {}) => {
     },
   };
 };
+
+// --- Approval-gated Capability inside the graph ------------------------------
+
+// Workspace-action intent (task.create) on a selected document: V1 runs the
+// action alone, with the raw question as its input.
+export const APPROVAL_TASK_QUESTION =
+  "Create a follow-up task for the vendor renewal notice period";
+export const APPROVAL_TASK_CAPABILITY_ID = "task.create";
+
+/**
+ * The document answer, its evidence check, and a task.create node that runs
+ * only when that answer passed the check, with the verified answer as the
+ * task description. The Capability is approval-gated: the graph parks it.
+ */
+export const createApprovalGatedTaskProposal = () => ({
+  nodes: [
+    {
+      dependsOn: [],
+      failurePolicy: "fail_fast",
+      inputBindings: { docIds: requestBinding("docIds"), question: requestBinding("question") },
+      nodeId: "document",
+      skillId: "document_rag",
+    },
+    {
+      dependsOn: ["document"],
+      failurePolicy: "fail_fast",
+      inputBindings: {
+        docIds: requestBinding("docIds"),
+        evidence: nodeBinding("document", "evidence"),
+        question: requestBinding("question"),
+      },
+      nodeId: "evidence_check",
+      skillId: "document_evidence_check",
+    },
+    {
+      dependsOn: ["document", "evidence_check"],
+      failurePolicy: "fail_fast",
+      inputBindings: {
+        description: nodeBinding("document", "text"),
+        title: requestBinding("question"),
+      },
+      nodeId: "task",
+      skillId: `capability:${APPROVAL_TASK_CAPABILITY_ID}`,
+      when: { equals: true, nodeId: "evidence_check", output: "passed" },
+    },
+  ],
+});
+
+/**
+ * The task node declared before an evidence check it does not depend on: the
+ * check must still run while the task waits for approval.
+ */
+export const createTaskBeforeIndependentCheckProposal = () => {
+  const [documentNode, checkNode, taskNode] = createApprovalGatedTaskProposal().nodes;
+  const { when, ...unconditionalTask } = taskNode;
+
+  return {
+    nodes: [
+      documentNode,
+      { ...unconditionalTask, dependsOn: ["document"] },
+      checkNode,
+    ],
+  };
+};
+
+/**
+ * A capability registry whose task.create writes go through `onWrite` (which
+ * may record the effect durably, or stop the process right after it) and are
+ * counted in `writes`. `version` overrides the Capability version, as after a
+ * deploy.
+ */
+export const createTaskCapabilityRegistry = async ({
+  onWrite = async () => {},
+  ragService,
+  version = null,
+  webChatService = createWebChatService(),
+} = {}) => {
+  const [
+    { createDefaultCapabilityRegistry, createCapabilityRegistry },
+    { createTaskCreateCapability },
+  ] = await Promise.all([
+    import("../../rag/capabilities/index.js"),
+    import("../../rag/capabilities/actions.js"),
+  ]);
+  const writes = [];
+  const actionTaskService = {
+    createActionTask: async (task) => {
+      writes.push(task);
+      await onWrite(task);
+      return { id: task.taskId || `task-${writes.length}`, label: task.label, status: task.status };
+    },
+  };
+  const defaults = createDefaultCapabilityRegistry({ actionTaskService, ragService, webChatService });
+  const capabilities = defaults.list().map((capability) => defaults.get(capability.id));
+  const registry = version
+    ? createCapabilityRegistry(
+        capabilities.map((capability) =>
+          capability.id === APPROVAL_TASK_CAPABILITY_ID
+            ? { ...createTaskCreateCapability({ actionTaskService }), version }
+            : capability
+        )
+      )
+    : defaults;
+
+  return { registry, writes };
+};

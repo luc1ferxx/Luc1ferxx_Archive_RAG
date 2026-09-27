@@ -148,7 +148,7 @@ server/evaluation/results/<timestamped-files>
 | 架构 | `app.js` 组合根（171 行）+ `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 8 个模块；`normalizeText` 收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块，后端直接依赖 18 → 13。 |
 | 工程化 | 前端 CRA → Vite 7 + Vitest 3（测试 97s → ~7s，构建 ~8s）；后端测试并行化（24s → ~4s，含 Windows 全平台通过）；CI 后端测试与 eval gate 拆并行 job；评测脚本共享 helper 收敛到 `eval-cli.js` / `eval-case-helpers.js`。 |
 
-当前测试基线：后端 2128 个用例（2120 通过；3 个需要 PostgreSQL 的集成测试文件和 1 个需要 Redis 的集成测试文件在无数据库时各报告 1 个跳过；用 `FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 在一次性集群上跑，PostgreSQL 部分全部通过；Redis 部分需另设 `REDIS_TEST_URL`，5 个用例）、前端 113 个用例全绿、生产构建通过，覆盖率门禁通过（后端全局行覆盖约 90%）。
+当前测试基线：后端 2158 个用例（2150 通过；3 个需要 PostgreSQL 的集成测试文件和 1 个需要 Redis 的集成测试文件在无数据库时各报告 1 个跳过；用 `FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 在一次性集群上跑，PostgreSQL 部分全部通过；Redis 部分需另设 `REDIS_TEST_URL`，5 个用例）、前端 113 个用例全绿、生产构建通过，覆盖率门禁通过（后端全局行覆盖约 90%）。
 
 ## Development rules
 

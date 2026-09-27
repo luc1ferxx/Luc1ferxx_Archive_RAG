@@ -19,7 +19,7 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   });
 
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 18);
+  assert.equal(report.summary.metrics.caseCount, 19);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
   assert.equal(report.summary.metrics.categories.skill_selection.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.follow_up.failedCheckCount, 0);
@@ -36,7 +36,7 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   assert.equal(report.summary.metrics.categories.skill_graph.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.skill_graph.checkCount, 18);
   assert.equal(report.summary.metrics.categories.unified_graph.failedCheckCount, 0);
-  assert.equal(report.summary.metrics.categories.unified_graph.checkCount, 7);
+  assert.equal(report.summary.metrics.categories.unified_graph.checkCount, 13);
   assert.ok(
     report.cases.some(
       (caseResult) =>

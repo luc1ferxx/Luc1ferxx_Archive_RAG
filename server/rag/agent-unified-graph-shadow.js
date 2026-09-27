@@ -1,4 +1,5 @@
 import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
+import { getShadowPlannerAdapter } from "./agent-planner-shadow.js";
 import { createUnifiedAgentExecutionGraphResult } from "./agent-unified-dag-planner.js";
 
 const noop = () => {};
@@ -8,6 +9,15 @@ const noop = () => {};
  * deliberately smaller than the proposal: request text, document ids, bound
  * values, and executable catalog entries never become an observability copy.
  * A shadow failure must not change the V1 answer path.
+ *
+ * The event describes the observed planner's own outcome. When the planning
+ * rollout carries a shadow planner (AGENT_PLANNER_ROLLOUT=shadow: the model
+ * beside the deterministic primary) that model is the one observed, and no
+ * planner fallback applies here: a model proposal that fails to parse,
+ * validate, or pass admission is recorded as `rejected` with its reason codes,
+ * never replaced by the deterministic graph and counted as a model success.
+ * The planning call is awaited on the request path (a model plan adds its
+ * latency to shadow requests).
  */
 export const observeUnifiedAgentGraphShadow = async ({
   accessScope,
@@ -25,16 +35,18 @@ export const observeUnifiedAgentGraphShadow = async ({
   taskMemory,
 } = {}) => {
   let event;
+  const observedAdapter = getShadowPlannerAdapter(plannerAdapter) ?? plannerAdapter;
 
   try {
     const result = await createUnifiedAgentExecutionGraphResult({
       accessScope,
+      allowPlannerFallback: false,
       allowedCapabilityIds,
       budgetState,
       capabilityRegistry,
       docIds,
       plan,
-      plannerAdapter,
+      plannerAdapter: observedAdapter,
       question,
       ragService,
       registry,
@@ -54,9 +66,12 @@ export const observeUnifiedAgentGraphShadow = async ({
         : null,
       mode: "shadow",
       planner: {
+        fallback: result.planner.fallback === true,
         nodeCount: result.planner.nodeIds.length,
+        plannerCall: result.planner.plannerCall ?? null,
         reasonCodes: result.planner.reasonCodes,
         requestedPlannerId: result.planner.requestedPlannerId,
+        selectedPlannerId: result.planner.selectedPlannerId ?? null,
         status: result.planner.status,
       },
       status: result.planner.status,
@@ -69,7 +84,8 @@ export const observeUnifiedAgentGraphShadow = async ({
       graph: null,
       mode: "shadow",
       planner: {
-        requestedPlannerId: normalizeText(plannerAdapter?.id) || null,
+        fallback: false,
+        requestedPlannerId: normalizeText(observedAdapter?.id) || null,
         status: "error",
       },
       status: "error",

@@ -54,7 +54,11 @@ import { createDefaultAdminAuditService } from "./rag/admin-audit-store.js";
 import { createAdminStatusService } from "./rag/admin-status.js";
 import { createAgentTriggerDispatcher } from "./rag/agent-trigger-dispatcher.js";
 import { createDefaultAgentTriggerRegistry } from "./rag/agent-triggers/registry.js";
-import { resumeAgentExecutionGraphRun, runAgentRag } from "./rag/agent.js";
+import {
+  continueAgentExecutionGraphApproval,
+  resumeAgentExecutionGraphRun,
+  runAgentRag,
+} from "./rag/agent.js";
 import { deterministicPlannerAdapter } from "./rag/agent-execution-plan.js";
 import {
   DAG_PLANNER_IDS,
@@ -63,6 +67,10 @@ import {
 } from "./rag/agent-dag-planner-adapter.js";
 import { replanAdapter } from "./rag/agent-replan-adapter.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
+import {
+  deterministicUnifiedGraphPlannerAdapter,
+  unifiedGraphLlmPlannerAdapter,
+} from "./rag/agent-unified-dag-planner-adapter.js";
 import {
   deterministicIntentPlannerAdapter,
   llmIntentPlannerAdapter,
@@ -159,6 +167,21 @@ export const createDagPlannerAdapter = () =>
         : deterministicDagPlannerAdapter,
     deterministicPlanner: deterministicDagPlannerAdapter,
     llmPlanner: dagPlannerAdapter,
+  });
+
+// The all-stage (v3) graph planner reads the same execution-planning dial as
+// the DAG planner. Whether a v3 graph is planned or executed at all is the
+// separate AGENT_UNIFIED_GRAPH_ROLLOUT dial (default off); the model adapter
+// replaces a proposal the validator or admission refuses with the
+// deterministic graph, never with partial execution.
+export const createUnifiedGraphPlannerAdapter = () =>
+  createRolloutPlannerAdapter({
+    configuredPlanner: () =>
+      getAgentExecutionPlanner() === "llm"
+        ? unifiedGraphLlmPlannerAdapter
+        : deterministicUnifiedGraphPlannerAdapter,
+    deterministicPlanner: deterministicUnifiedGraphPlannerAdapter,
+    llmPlanner: unifiedGraphLlmPlannerAdapter,
   });
 
 /**
@@ -338,10 +361,9 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     options.dagPlannerAdapter ?? createDagPlannerAdapter();
   const resolvedReplanAdapter =
     options.replanAdapter ?? createReplanAdapter(resolvedDagPlannerAdapter);
-  // No implicit model route for the all-stage graph while its production
-  // execution/recovery path is incomplete. Tests and later rollout wiring may
-  // supply an explicit proposal adapter for shadow observation.
-  const unifiedGraphPlannerAdapter = options.unifiedGraphPlannerAdapter ?? null;
+  // Used only when AGENT_UNIFIED_GRAPH_ROLLOUT is shadow or guarded.
+  const unifiedGraphPlannerAdapter =
+    options.unifiedGraphPlannerAdapter ?? createUnifiedGraphPlannerAdapter();
   const agentTaskRunner =
     options.agentTaskRunner ??
     createAgentTaskRunner({
@@ -420,6 +442,20 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     createAgentRunStepExecutor({
       agentRunService,
       capabilityRegistry,
+      continueExecutionGraphApproval: ({ accessScope, action, gateId, payload, runId }) =>
+        continueAgentExecutionGraphApproval({
+          accessScope,
+          action,
+          agentBudget,
+          agentRunService,
+          capabilityRegistry,
+          gateId,
+          payload,
+          ragService,
+          runId,
+          skillRegistry,
+          webChatService,
+        }),
       executeCustomSkillStep: createCustomSkillStepExecutor({
         ragService,
         skillRegistry,

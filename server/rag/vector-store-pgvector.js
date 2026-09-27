@@ -11,7 +11,8 @@ import {
   getPgvectorEmbeddingIndexName,
   isPgvectorAnnDimensionSupported,
 } from "./db-migrations.js";
-import { embedQuery, embedTexts } from "./openai.js";
+import { embedQueryCached, getQueryVectorEmbeddingSpace, resetEmbeddingCache } from "./embedding-cache.js";
+import { embedTexts } from "./openai.js";
 import { getEnforcedDatabaseTenant } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { buildTermSet, extractMeaningfulTokens } from "./text-utils.js";
@@ -298,52 +299,32 @@ export const embedDocumentsInSpace = async (
   });
 };
 
-// Queries embedded in a space other than the configured one (an active
-// version pinned to another model), keyed by space and text. Small and short
-// lived like the configured-model cache in embedding-cache.js.
-const QUERY_CACHE_MAX_ENTRIES = 256;
-const QUERY_CACHE_TTL_MS = 10 * 60 * 1000;
-let spaceQueryCache = new Map();
-
+/**
+ * The query's vector in `space`, through the process's query embedding cache
+ * (rag/embedding-cache.js: one LRU keyed by space and text, sized by
+ * RAG_EMBEDDING_CACHE_MAX), width-checked.
+ */
 export const embedQueryInSpace = async (queryText, space = getConfiguredEmbeddingSpace()) => {
-  const text = String(queryText ?? "");
-
-  if (isSameQuerySpace(space, getConfiguredEmbeddingSpace())) {
-    const vector = await embedQuery(text);
-
-    assertDimensions({ actual: Array.isArray(vector) ? vector.length : 0, context: "Embedding the query", space });
-    return vector;
-  }
-
-  const key = [space.key, space.model, space.queryPrefix, text].join("\u0000");
-  const now = Date.now();
-  const cached = spaceQueryCache.get(key);
-
-  if (cached && cached.expiresAt > now) {
-    return cached.vector;
-  }
-
-  const vector = await embedQuery(text, { embeddingSpace: toEmbeddingSpaceRequest(space) });
+  const vector = await embedQueryCached(String(queryText ?? ""), { space });
 
   assertDimensions({ actual: Array.isArray(vector) ? vector.length : 0, context: "Embedding the query", space });
-  spaceQueryCache.delete(key);
-  spaceQueryCache.set(key, { expiresAt: now + QUERY_CACHE_TTL_MS, vector });
-
-  while (spaceQueryCache.size > QUERY_CACHE_MAX_ENTRIES) {
-    spaceQueryCache.delete(spaceQueryCache.keys().next().value);
-  }
-
   return vector;
 };
 
 /**
- * The query vector for the active version. The caller embedded the query under
- * the configured model; that vector is used as is whenever the active version
- * lives in the configured space. A version pinned to another model gets the
- * query text embedded in its own space instead.
+ * The query vector for the active version. embedQueryCached embeds a query in
+ * the space the index serves and tags the vector with it, so the caller's
+ * vector is used as is when it was embedded in the active version's space.
+ * An untagged vector counts as the configured space's (what every caller sent
+ * before index versions). Only when the two differ -- the pointer moved between
+ * the embedding and the search, or a caller embedded in the configured model
+ * while a version pinned to another one serves -- is the text embedded again,
+ * in the active space.
  */
 const resolveQueryVector = async ({ queryText, queryVector, space }) => {
-  if (isSameQuerySpace(space, getConfiguredEmbeddingSpace())) {
+  const vectorSpace = getQueryVectorEmbeddingSpace(queryVector) ?? getConfiguredEmbeddingSpace();
+
+  if (isSameQuerySpace(space, vectorSpace)) {
     assertDimensions({ actual: queryVector.length, context: "Embedding the query", space });
     return queryVector;
   }
@@ -368,7 +349,9 @@ const resolveQueryVector = async ({ queryText, queryVector, space }) => {
 export const resetPgvectorVectorStore = () => {
   verified = null;
   verificationsInFlight.clear();
-  spaceQueryCache = new Map();
+  // Query vectors of the previous store's spaces (the cache is shared with
+  // the configured space: a cold start of the store is a cold cache).
+  resetEmbeddingCache();
   invalidateIndexVersionSnapshot();
 };
 

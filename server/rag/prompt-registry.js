@@ -27,6 +27,7 @@ export const PROMPT_IDS = Object.freeze({
   memoryQueryRewrite: "memory_query_rewrite",
   qaAnswer: "qa_answer",
   replanner: "replanner",
+  unifiedGraphPlanner: "unified_graph_planner",
   webAnswer: "web_answer",
 });
 

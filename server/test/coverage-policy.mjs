@@ -162,6 +162,7 @@ export const GLOBAL_COVERAGE_EXCLUDED_PATHS = Object.freeze([
   "server/evaluation/run-tenant-isolation-eval.mjs",
   "server/evaluation/run-trace-demo.mjs",
   "server/evaluation/run-trajectory-eval.mjs",
+  "server/evaluation/run-unified-graph-planner-eval.mjs",
   "server/mcp-server.js",
   "server/rag/connectors/built-ins/test-connector.js",
   "server/server.js",

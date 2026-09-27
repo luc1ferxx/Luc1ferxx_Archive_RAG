@@ -2069,7 +2069,6 @@ export const createAgentRunService = ({
       throw new Error("Agent run store cannot atomically decide graph approval.");
     }
 
-    const claimId = randomUUID();
     const mutation = await mutateStoredRun({
       accessScope,
       includeGraphCheckpoint: true,
@@ -2118,11 +2117,18 @@ export const createAgentRunService = ({
           payload,
         });
         const approved = normalizedAction === AGENT_RUN_ACTIONS.approve;
+        // Either decision reopens the same graph at its node boundary: an
+        // approval runs the gated node with the approved input, a denial
+        // settles it as skipped, and in both cases the remaining nodes and the
+        // whole-run finalization follow. The reopened graph is unclaimed, like
+        // the worker of a fresh request: every node transition and the run
+        // completion are fenced by the same run-revision CAS, a startup worker
+        // may take over only at a node boundary (and fences this one out), and
+        // a crash inside the approved node leaves a running step that startup
+        // reconciliation hands to an operator instead of replaying it.
         const decidedCheckpoint = updateExecutionGraphCheckpoint(previous, {
-          phase: approved ? "running" : "partial",
-          resumeClaim: approved
-            ? { claimId, claimedAt: new Date().toISOString() }
-            : null,
+          phase: "running",
+          resumeClaim: null,
         });
 
         return {
@@ -2141,15 +2147,12 @@ export const createAgentRunService = ({
             approvalGates: updateResult.gates,
             result: {
               [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: decidedCheckpoint,
-              ...(approved
-                ? {}
-                : { approvalDenied: true, deniedGateId: gate.id, status: 200 }),
             },
-            status: approved ? AGENT_RUN_STATUSES.running : AGENT_RUN_STATUSES.completed,
+            status: AGENT_RUN_STATUSES.running,
           },
           value: {
             checkpoint: decidedCheckpoint,
-            claimId: approved ? claimId : null,
+            decision: approved ? "approved" : "denied",
             gate: updateResult.gate,
           },
         };
@@ -2165,22 +2168,45 @@ export const createAgentRunService = ({
     return { applied: true, ...mutation.value, run: mutation.run };
   },
 
-  async getExecutionGraphApproval({ accessScope = {}, runId } = {}) {
+  /**
+   * The decided gate of a reopened graph, read by the worker that continues
+   * it: `approved` with the private execution snapshot the node must run
+   * with, or `denied`. `expectedResumeClaimId` is the continuing worker's
+   * claim (null for the worker the approval action itself reopened).
+   */
+  async getExecutionGraphApproval({
+    accessScope = {},
+    expectedResumeClaimId = null,
+    runId,
+  } = {}) {
     const run = await agentRunStore.get?.({ accessScope, runId });
     const checkpoint = run?.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
     const boundary = checkpoint?.approvalBoundary;
     const gate = toArray(run?.approvalGates).find(
-      (candidate) => candidate?.id === boundary?.gateId && candidate.status === "approved"
+      (candidate) =>
+        candidate?.id === boundary?.gateId &&
+        ["approved", "denied"].includes(candidate.status)
     );
 
     if (
       run?.status !== AGENT_RUN_STATUSES.running ||
+      isRunMarkedForManualRecovery(run) ||
       checkpoint?.phase !== "running" ||
-      !checkpoint.resumeClaim?.claimId ||
+      normalizeText(checkpoint.resumeClaim?.claimId) !==
+        normalizeText(expectedResumeClaimId) ||
       !gate ||
       !isDeepStrictEqual(boundary, graphApprovalBoundary(gate))
     ) {
       return null;
+    }
+
+    if (gate.status === "denied") {
+      return {
+        approvalSnapshot: null,
+        checkpoint: structuredClone(checkpoint),
+        decision: "denied",
+        gate: structuredClone(gate),
+      };
     }
 
     const approvalSnapshot = await agentRunStore.getApprovalSnapshot?.({
@@ -2200,6 +2226,7 @@ export const createAgentRunService = ({
     return {
       approvalSnapshot: structuredClone(approvalSnapshot),
       checkpoint: structuredClone(checkpoint),
+      decision: "approved",
       gate: structuredClone(gate),
     };
   },

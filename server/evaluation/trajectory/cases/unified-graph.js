@@ -22,6 +22,7 @@ import {
   finishTrajectoryCase as finishCase,
   sameTrajectoryScope as sameScope,
 } from "../checks.js";
+import { describeUnifiedPlannerDecisions } from "./unified-graph-planner.js";
 
 // The unfreeze condition for the heterogeneous v3 graph: an orchestration the
 // fixed V1 outer order cannot express, measured against V1 on the same
@@ -45,10 +46,14 @@ import {
 // into another node (a check here pins that refusal). Conditional Web itself
 // is admitted and feeds only the finalizer.
 //
-// Evidence kind: every graph comes from an injected, deterministic proposal
-// and every provider is a mock. This proves the runtime contract (admission,
-// conditional scheduling, typed hand-off, budget, receipts, one path per
-// request). It is not real-model planning evidence.
+// Evidence kind: by default every graph comes from an injected, deterministic
+// proposal and every provider is a mock. This proves the runtime contract
+// (admission, conditional scheduling, typed hand-off, budget, receipts, one
+// path per request). It is not real-model planning evidence. With a `planner`
+// option the two guarded runs are planned by that adapter instead and nodes
+// are found by their role (the model picks its own node ids); the refused
+// Web-to-Skill proposal stays injected, because it tests admission, not
+// planning.
 
 const CASE_ID = "unified_graph_evidence_gated_skill_hand_off";
 const CASE_LABEL = "Unified graph evidence-gated Skill hand-off";
@@ -160,6 +165,16 @@ const createProposalAdapter = ({ contexts, createProposal, id }) => ({
   id,
 });
 
+// A configured planner, observed: the contexts it was handed are recorded and
+// its own id and fallback travel with it.
+const observePlanner = ({ adapter, contexts }) => ({
+  ...adapter,
+  createExecutionGraph: (context) => {
+    contexts.push(context);
+    return adapter.createExecutionGraph(context);
+  },
+});
+
 // The Skill's answer is the same whether or not its prompt carries an
 // upstream section: nothing here rewards the hand-off with a better answer.
 const createVendorRagService = ({ documentSufficient, telemetry }) =>
@@ -203,6 +218,7 @@ const runVendorQuestion = async ({
   createProposal = createEvidenceGatedSkillProposal,
   documentSufficient,
   mode,
+  planner = null,
   plannerId = PROPOSAL_ID,
   skillGraphRollout = "guarded",
 }) => {
@@ -226,11 +242,13 @@ const runVendorQuestion = async ({
         question: QUESTION,
         ragService: createVendorRagService({ documentSufficient, telemetry }),
         sessionId: "trajectory-unified-session",
-        unifiedGraphPlannerAdapter: createProposalAdapter({
-          contexts: plannerContexts,
-          createProposal,
-          id: plannerId,
-        }),
+        unifiedGraphPlannerAdapter: planner
+          ? observePlanner({ adapter: planner.adapter, contexts: plannerContexts })
+          : createProposalAdapter({
+              contexts: plannerContexts,
+              createProposal,
+              id: plannerId,
+            }),
         userId: DEFAULT_ACCESS_SCOPE.userId,
         webChatService: async (webQuestion) => {
           webCalls.push(webQuestion);
@@ -311,12 +329,27 @@ const findGraphStep = (outcome, nodeId) =>
 const findNodeRun = (nodeRuns, nodeId) =>
   nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId) ?? null;
 
+// The node ids of each role in the graph a run executed (the injected
+// proposal's ids by default; whatever a real planner chose otherwise).
+const describeRoles = (outcome) => {
+  const planned = eventsOf(outcome.run, UNIFIED_GRAPH_RUN_EVENTS.planned).at(-1)?.payload?.graph;
+  const nodeIds = planned?.nodeIds ?? [];
+  const skillIds = planned?.skillIds ?? [];
+  const firstOf = (skillId) => nodeIds[skillIds.indexOf(skillId)] ?? null;
+
+  return {
+    check: firstOf("document_evidence_check"),
+    document: firstOf("document_rag"),
+    risk: firstOf("risk_review"),
+  };
+};
+
 const riskCalls = (outcome) =>
   outcome.telemetry.chatCalls.filter((call) => RISK_PROMPT_PATTERN.test(call.question));
 
-const describeCheckOutput = (outcome) =>
+const describeCheckOutput = (outcome, checkNodeId = "evidence_check") =>
   (outcome.checkpoint?.nodeRuns ?? []).find(
-    (nodeRun) => nodeRun.nodeId === "evidence_check"
+    (nodeRun) => nodeRun.nodeId === checkNodeId
   )?.result?.graphOutput ?? null;
 
 const describeCheckpoint = (outcome) => {
@@ -357,13 +390,32 @@ const describeV1Run = ({ documentSufficient, outcome, skillGraphRollout }) => {
   };
 };
 
-export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
+// Planner mode only: every graph the run executed was the configured planner's
+// own proposal (none was replaced by the deterministic graph or refused).
+const buildModelPlanCheck = (decisions) =>
+  buildCheck({
+    id: "model_plan_used",
+    label: "Every executed graph was the configured planner's own plan, without fallback",
+    category: "planner",
+    passed:
+      decisions.length > 0 &&
+      decisions.every((decision) => decision.admitted && !decision.fallback),
+    detail: decisions,
+  });
+
+export const createUnifiedGraphEvidenceGatedSkillCase = ({ planner = null } = {}) => ({
   id: CASE_ID,
   label: CASE_LABEL,
   description: CASE_DESCRIPTION,
   run: async () => {
-    const sufficient = await runVendorQuestion({ documentSufficient: true, mode: "guarded" });
-    const insufficient = await runVendorQuestion({ documentSufficient: false, mode: "guarded" });
+    const sufficient = await runVendorQuestion({ documentSufficient: true, mode: "guarded", planner });
+    const insufficient = await runVendorQuestion({
+      documentSufficient: false,
+      mode: "guarded",
+      planner,
+    });
+    const roles = describeRoles(sufficient);
+    const insufficientRoles = describeRoles(insufficient);
     const v1Runs = [];
 
     for (const skillGraphRollout of ["off", "guarded"]) {
@@ -387,16 +439,16 @@ export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
     const path = describeUnifiedPath(sufficient);
     const nodeRuns = describeNodeRuns(sufficient);
     const insufficientNodeRuns = describeNodeRuns(insufficient);
-    const documentStep = findGraphStep(sufficient, "document");
-    const checkStep = findGraphStep(sufficient, "evidence_check");
-    const riskStep = findGraphStep(sufficient, "risk");
+    const documentStep = findGraphStep(sufficient, roles.document);
+    const checkStep = findGraphStep(sufficient, roles.check);
+    const riskStep = findGraphStep(sufficient, roles.risk);
     const sufficientRiskCalls = riskCalls(sufficient);
     const handOff = {
       priorFindingsIsDocumentAnswer:
         typeof riskStep?.input?.priorFindings === "string" &&
         riskStep.input.priorFindings === documentStep?.output?.text &&
         riskStep.input.priorFindings === DOCUMENT_ANSWER,
-      riskDependsOn: [...(findNodeRun(nodeRuns, "risk")?.dependsOn ?? [])],
+      riskDependsOn: [...(findNodeRun(nodeRuns, roles.risk)?.dependsOn ?? [])],
       riskQuestionCarriesDocumentAnswer:
         sufficientRiskCalls.length === 1 &&
         UPSTREAM_PATTERN.test(sufficientRiskCalls[0].question) &&
@@ -408,7 +460,7 @@ export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
     const gating = {
       insufficient: {
         agentMode: insufficient.body.agentMode ?? null,
-        checkPassed: describeCheckOutput(insufficient)?.passed ?? null,
+        checkPassed: describeCheckOutput(insufficient, insufficientRoles.check)?.passed ?? null,
         clarificationNeeded: insufficient.body.clarification?.needed === true,
         customSkillCalls: getBudget(insufficient.response)?.used?.customSkillCalls ?? null,
         documentRagCalls: getBudget(insufficient.response)?.used?.documentRagCalls ?? null,
@@ -416,10 +468,10 @@ export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
         riskCallCount: riskCalls(insufficient).length,
       },
       sufficient: {
-        checkPassed: describeCheckOutput(sufficient)?.passed ?? null,
+        checkPassed: describeCheckOutput(sufficient, roles.check)?.passed ?? null,
         customSkillCalls: getBudget(sufficient.response)?.used?.customSkillCalls ?? null,
         documentRagCalls: getBudget(sufficient.response)?.used?.documentRagCalls ?? null,
-        riskStatus: findNodeRun(nodeRuns, "risk")?.status ?? null,
+        riskStatus: findNodeRun(nodeRuns, roles.risk)?.status ?? null,
       },
     };
     const externalHandOff = {
@@ -448,13 +500,20 @@ export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
         source.url ? "web" : source.docId ? "document" : "unknown"
       ),
     };
-    const planner = {
+    const plannerObserved = {
       callCount: sufficient.plannerContexts.length,
-      evidenceKind: "deterministic_injected_proposal",
+      evidenceKind: planner?.evidenceKind ?? "deterministic_injected_proposal",
       graphVersion: sufficient.plannerContexts[0]?.graphVersion ?? null,
       requestedPlannerId: path.plannedEvents[0]?.requestedPlannerId ?? null,
     };
-    const insufficientRisk = findNodeRun(insufficientNodeRuns, "risk");
+    const expectedPlannerId = planner?.adapter?.id ?? PROPOSAL_ID;
+    const insufficientRisk = findNodeRun(insufficientNodeRuns, insufficientRoles.risk);
+    const expectedShape = planner
+      ? Boolean(roles.document && roles.check && roles.risk)
+      : sameList(path.plannedEvents[0]?.nodeIds ?? [], EXPECTED_NODE_IDS);
+    const riskDependsOnDocumentAndCheck = planner
+      ? [roles.document, roles.check].every((nodeId) => handOff.riskDependsOn.includes(nodeId))
+      : sameList(handOff.riskDependsOn, ["document", "evidence_check"]);
 
     return finishCase({
       id: CASE_ID,
@@ -468,7 +527,16 @@ export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
         handOff,
         nodeRuns,
         path,
-        planner,
+        planner: plannerObserved,
+        ...(planner
+          ? {
+              plannerDecisions: [
+                ...describeUnifiedPlannerDecisions(sufficient.run),
+                ...describeUnifiedPlannerDecisions(insufficient.run),
+              ],
+              roles: { insufficient: insufficientRoles, sufficient: roles },
+            }
+          : {}),
         v1Runs,
       },
       response: sufficient.response,
@@ -483,7 +551,7 @@ export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
             path.plannedEvents[0].status === "selected" &&
             path.plannedEvents[0].fallback === null &&
             path.plannedEvents[0].mode === "guarded" &&
-            sameList(path.plannedEvents[0].nodeIds, EXPECTED_NODE_IDS) &&
+            expectedShape &&
             path.outerPlanEventCount === 0 &&
             path.executedEventCount === 1 &&
             path.executedStatus === "completed" &&
@@ -516,7 +584,7 @@ export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
             handOff.priorFindingsIsDocumentAnswer &&
             handOff.riskQuestionCarriesDocumentAnswer &&
             handOff.riskStartedAfterCheckCompleted &&
-            sameList(handOff.riskDependsOn, ["document", "evidence_check"]),
+            riskDependsOnDocumentAndCheck,
           detail: handOff,
         }),
         buildCheck({
@@ -575,14 +643,15 @@ export const createUnifiedGraphEvidenceGatedSkillCase = () => ({
             gating.sufficient.documentRagCalls === 1 &&
             gating.sufficient.customSkillCalls === 1 &&
             (getBudget(sufficient.response)?.used?.webSearchCalls ?? 0) === 0 &&
-            planner.callCount === 1 &&
-            planner.graphVersion === "v3" &&
-            planner.requestedPlannerId === PROPOSAL_ID,
+            plannerObserved.callCount === 1 &&
+            plannerObserved.graphVersion === "v3" &&
+            plannerObserved.requestedPlannerId === expectedPlannerId,
           detail: {
             budgetUsed: getBudget(sufficient.response)?.used ?? null,
-            planner,
+            planner: plannerObserved,
           },
         }),
+        ...(planner ? [buildModelPlanCheck([...describeUnifiedPlannerDecisions(sufficient.run), ...describeUnifiedPlannerDecisions(insufficient.run)])] : []),
       ],
     });
   },

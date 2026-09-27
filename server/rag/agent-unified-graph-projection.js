@@ -106,6 +106,10 @@ const emptyExecutionState = () => ({
   webResult: null,
 });
 
+// The skip reason of a node whose approval gate the user rejected (the
+// runner's EXECUTION_GRAPH_SKIP_REASONS.approvalDenied).
+export const APPROVAL_DENIED_SKIP_REASON = "approval_denied";
+
 const PROJECTABLE_BUILT_INS = new Set([
   AGENT_SKILL_IDS.documentRag,
   AGENT_SKILL_IDS.documentEvidenceCheck,
@@ -126,19 +130,34 @@ const isNodeBinding = (binding, nodeId, output) =>
   binding.nodeId === nodeId &&
   binding.output === output;
 
-const isProjectableSkill = (skill) =>
+// V1 represents a Capability's answer only as the workspace action the intent
+// asked for (`actionAnswer`, synthesized for plan.mode "workspace_action").
+// A Capability node is projectable exactly there, once per graph.
+const isIntentActionCapability = (skill, plan) =>
+  skill?.kind === "capability" &&
+  plan?.mode === "workspace_action" &&
+  typeof plan.actionCapabilityId === "string" &&
+  skill.id === `capability:${plan.actionCapabilityId}`;
+
+const isProjectableSkill = (skill, plan) =>
   Boolean(skill) &&
   hasExplicitExecutionGraphContract(skill) &&
   ((skill.kind === "custom" && !RESERVED_BUILT_IN_IDS.has(skill.id)) ||
-    (skill.kind === "built_in" && PROJECTABLE_BUILT_INS.has(skill.id)));
+    (skill.kind === "built_in" && PROJECTABLE_BUILT_INS.has(skill.id)) ||
+    isIntentActionCapability(skill, plan));
+
+/** The workspace-action answer of a Capability node the user rejected. */
+export const buildDeniedCapabilityAnswer = (skill) =>
+  `${skill?.label || "The workspace action"} was not run: the approval was denied.`;
 
 const shapeError = (reason) => ({ ok: false, reason });
 
 /**
  * Static projection contract for a validated v3 graph. The legacy execution
  * state has one ragResult (the better of a primary document answer and at most
- * one conditional follow-up), one webResult, a flat custom-Skill list, and a
- * direct answer only for a standalone inventory/discovery request. A graph
+ * one conditional follow-up), one webResult, a flat custom-Skill list, a
+ * direct answer only for a standalone inventory/discovery request, and one
+ * workspace action answer (the Capability the intent itself asked for). A graph
  * outside that shape is refused before execution instead of failing after
  * its nodes have already spent budget and written session state.
  */
@@ -156,15 +175,18 @@ export const describeUnifiedGraphProjectionShape = ({ graph, plan, registry } = 
   const documentNodeIds = [];
   const checkSources = new Map();
   let webNodeCount = 0;
+  let capabilityNodeCount = 0;
 
   for (const node of graph.nodes) {
     const skill = registry.get(node?.skillId);
 
-    if (!isProjectableSkill(skill)) {
+    if (!isProjectableSkill(skill, plan)) {
       return shapeError(`node_${node?.nodeId}_not_projectable`);
     }
 
-    if (skill.id === AGENT_SKILL_IDS.documentRag) {
+    if (skill.kind === "capability") {
+      capabilityNodeCount += 1;
+    } else if (skill.id === AGENT_SKILL_IDS.documentRag) {
       documentNodeIds.push(node.nodeId);
     } else if (skill.id === AGENT_SKILL_IDS.webSearch) {
       webNodeCount += 1;
@@ -190,6 +212,10 @@ export const describeUnifiedGraphProjectionShape = ({ graph, plan, registry } = 
 
   if (webNodeCount > 1) {
     return shapeError("repeated_web_output");
+  }
+
+  if (capabilityNodeCount > 1) {
+    return shapeError("repeated_action_output");
   }
 
   if (documentNodeIds.length > 2) {
@@ -280,6 +306,7 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
   const state = emptyExecutionState();
   const customIds = new Set();
   const completedResults = [];
+  let deniedActions = 0;
 
   // Graph declaration order is the scheduler's stable presentation order.
   for (const node of graph.nodes) {
@@ -293,17 +320,26 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
       !skill ||
       skill.id !== node.skillId ||
       nodeRun.skillVersion !== skill.version ||
-      !isProjectableSkill(skill)
+      !isProjectableSkill(skill, plan)
     ) {
       fail(`node ${node.nodeId} has no supported live typed Skill`);
     }
 
     if (nodeRun.status === "skipped") {
+      const denied = nodeRun.reason === APPROVAL_DENIED_SKIP_REASON && skill.kind === "capability";
+
       if (
         (nodeRun.result !== null && nodeRun.result !== undefined) ||
-        !["condition_not_met", "dependency_skipped"].includes(nodeRun.reason)
+        (!denied && !["condition_not_met", "dependency_skipped"].includes(nodeRun.reason))
       ) {
         fail(`node ${node.nodeId} has an ambiguous skip receipt`);
+      }
+
+      if (denied) {
+        // The user rejected the action: the answer says so, and nothing the
+        // Capability would have produced exists.
+        state.actionAnswer = buildDeniedCapabilityAnswer(skill);
+        deniedActions += 1;
       }
       continue;
     }
@@ -376,6 +412,14 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
       continue;
     }
 
+    if (skill.kind === "capability") {
+      if (state.actionAnswer !== null || !result.text) {
+        fail("workspace action output is repeated or empty");
+      }
+      state.actionAnswer = result.text;
+      continue;
+    }
+
     fail(`Skill ${skill.id} has no legacy execution-state projection`);
   }
 
@@ -397,8 +441,10 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
       : primary;
   }
 
+  // A graph whose only node was a rejected action completed with no result;
+  // any other empty graph did not.
   if (
-    completedResults.length === 0 ||
+    (completedResults.length === 0 && deniedActions === 0) ||
     run.results.length !== completedResults.length ||
     run.results.some((result, index) =>
       !isDeepStrictEqual(result, completedResults[index])

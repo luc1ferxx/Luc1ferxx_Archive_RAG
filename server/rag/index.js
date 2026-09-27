@@ -654,6 +654,11 @@ export const deleteDocument = async (
         deleted = await withPostgresTransaction(async (transactionClient) => {
           const client = await beginVectorIndexWrite({ client: transactionClient });
 
+          // The document row before its chunk rows, as ingest and replacement
+          // take them: an index-version builder holds this row FOR SHARE
+          // while it rewrites the document's chunks in the building version,
+          // so removing the chunks first could deadlock with it.
+          await lockDocumentForContentReplace(docId, { client });
           await removeDocumentsFromIndex({ client, docIds: [docId] });
           return deleteRegisteredDocument(docId, accessScope, { client });
         });

@@ -1,7 +1,13 @@
 import test, { afterEach, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
-import { embedQueryCached, resetEmbeddingCache } from "../rag/embedding-cache.js";
+import {
+  describeEmbeddingCache,
+  embedQueryCached,
+  getQueryVectorEmbeddingSpace,
+  resetEmbeddingCache,
+} from "../rag/embedding-cache.js";
+import { buildEmbeddingSpace } from "../rag/vector-store-pgvector-versions.js";
 
 const FAKE_VECTOR = [0.1, 0.2, 0.3];
 const FAKE_VECTOR_B = [0.4, 0.5, 0.6];
@@ -215,5 +221,41 @@ test("LRU hit refreshes entry position and prevents eviction", async () => {
     calls.length = 0;
     await embedQueryCached("query-b");
     assert.equal(calls.length, 1, "query-b should have been evicted as LRU");
+  });
+});
+
+test("one LRU for every embedding space: keyed by space and text, bounded by RAG_EMBEDDING_CACHE_MAX, vectors tagged with their space", async () => {
+  const calls = [];
+  configureOpenAIProvider({
+    embedQuery: async (query, options) => {
+      const model = options?.embeddingSpace?.model ?? "configured";
+      calls.push(`${model}:${query}`);
+      return Array.from({ length: options?.embeddingSpace?.dimensions ?? 3 }, () => query.length);
+    },
+    embedTexts: async (texts) => texts.map(() => FAKE_VECTOR),
+    completeText: async () => "answer",
+  });
+  const pinned = buildEmbeddingSpace({ dimensions: 2, model: "pinned-model", queryPrefix: "q: " });
+
+  await withEnv({ OPENAI_EMBEDDING_MODEL: "configured", RAG_EMBEDDING_CACHE_MAX: "2", RAG_EMBEDDING_DIMENSIONS: "3", VECTOR_STORE_PROVIDER: "local" }, async () => {
+    const configuredVector = await embedQueryCached("same text");
+    const pinnedVector = await embedQueryCached("same text", { space: pinned });
+
+    assert.deepEqual(calls, ["configured:same text", "pinned-model:same text"], "the same text in two spaces is two entries");
+    assert.equal(getQueryVectorEmbeddingSpace(configuredVector).model, "configured");
+    assert.equal(getQueryVectorEmbeddingSpace(pinnedVector).model, "pinned-model");
+    assert.equal(getQueryVectorEmbeddingSpace([1, 2, 3]), null, "a vector from elsewhere carries no space");
+    assert.deepEqual(describeEmbeddingCache(), {
+      bySpace: { "configured|3": 1, "pinned-model|2": 1 },
+      entries: 2,
+      maxEntries: 2,
+    });
+
+    // A third entry evicts the least recently used one, whatever its space.
+    await embedQueryCached("other text", { space: pinned });
+    await embedQueryCached("same text", { space: pinned });
+    assert.equal(calls.length, 3, "the pinned entry was still cached");
+    await embedQueryCached("same text");
+    assert.equal(calls.at(-1), "configured:same text", "the configured entry was evicted");
   });
 });

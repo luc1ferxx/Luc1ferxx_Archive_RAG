@@ -179,7 +179,7 @@
 //     (--latest-name defaults to latest-load-test-ingest)
 //   index-switch scenario only (pgvector):
 //     [--switch-concurrency 8] [--switch-dimensions 768] [--switch-phase-ms 15000]
-//     [--switch-build-batch-size N] [--index-pointer-ttl-ms N]
+//     [--switch-build-batch-size N] [--switch-build-concurrency N] [--index-pointer-ttl-ms N]
 //     (--latest-name defaults to latest-load-test-index-switch)
 //   any scenario: [--embedding-latency-per-input-ms 0]
 //
@@ -271,6 +271,7 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   sharedState: "memory",
   storage: null,
   switchBuildBatchSize: null,
+  switchBuildConcurrency: null,
   switchConcurrency: 8,
   switchDimensions: 768,
   switchPhaseMs: 15000,
@@ -321,6 +322,7 @@ const INGEST_ONLY_FLAGS = Object.freeze([
 const INDEX_SWITCH_ONLY_FLAGS = Object.freeze([
   "index-pointer-ttl-ms",
   "switch-build-batch-size",
+  "switch-build-concurrency",
   "switch-concurrency",
   "switch-dimensions",
   "switch-phase-ms",
@@ -501,6 +503,8 @@ export const parseLoadTestArgs = (argv = []) => {
       options.switchPhaseMs = toPositiveInteger(raw["switch-phase-ms"], "--switch-phase-ms", { allowZero: true });
     if (raw["switch-build-batch-size"] !== undefined)
       options.switchBuildBatchSize = toPositiveInteger(raw["switch-build-batch-size"], "--switch-build-batch-size");
+    if (raw["switch-build-concurrency"] !== undefined)
+      options.switchBuildConcurrency = toPositiveInteger(raw["switch-build-concurrency"], "--switch-build-concurrency");
     if (raw["index-pointer-ttl-ms"] !== undefined)
       options.indexPointerTtlMs = toPositiveInteger(raw["index-pointer-ttl-ms"], "--index-pointer-ttl-ms");
     if (!raw["latest-name"]) options.latestName = DEFAULT_INDEX_SWITCH_LATEST_NAME;
@@ -3894,6 +3898,8 @@ const runIndexSwitchScenario = async ({ apps, baseUrls, corpus, environmentFor, 
         "--dimensions",
         String(options.switchDimensions),
         ...(options.switchBuildBatchSize ? ["--batch-size", String(options.switchBuildBatchSize)] : []),
+        // Only when asked: a tree whose CLI predates --concurrency still builds.
+        ...(options.switchBuildConcurrency ? ["--concurrency", String(options.switchBuildConcurrency)] : []),
       ],
       environment: cliEnvironment,
     });
@@ -3906,16 +3912,41 @@ const runIndexSwitchScenario = async ({ apps, baseUrls, corpus, environmentFor, 
 
     mark("activating");
     console.log(`  activating version ${versionId}...`);
+    // With the query cache on, the steady phase after the switch is measured
+    // with the cache state "before" had: once every instance follows the
+    // pointer, every question is asked once on every instance (discarded,
+    // like the warm-up before the first level), so whatever the app caches
+    // for the new version's space is warm.
+    const warmNewSpace = options.embeddingCache !== false;
     record.activation = await runPointerSwitch({
       args: ["activate", String(versionId)],
       database,
       environment: cliEnvironment,
-      onVisible: () => mark("new version active"),
+      onVisible: () => mark(warmNewSpace ? "new version, cache warming" : "new version active"),
     });
     if (record.activation.exitCode !== 0 || !record.activation.visible) {
       throw new Error(`vector-index activate failed (exit ${record.activation.exitCode}): ${record.activation.stderrTail.join(" | ")}`);
     }
-    await sleep(Math.max(options.switchPhaseMs, pointerTtlMs + SWITCHOVER_MARGIN_MS));
+    if (warmNewSpace) {
+      await sleep(pointerTtlMs + SWITCHOVER_MARGIN_MS);
+      console.log("  warming every instance's query cache under the new version...");
+      const warmStartedAt = performance.now();
+      record.newSpaceWarmup = {
+        failures: await warmQueryCaches({
+          baseUrls,
+          concurrency: options.switchConcurrency,
+          headers,
+          options,
+          questions: corpus.questions,
+          sessionTag: `load-${runId}-switch-warm`,
+        }),
+      };
+      record.newSpaceWarmup.durationMs = round(performance.now() - warmStartedAt);
+      mark("new version active");
+      await sleep(options.switchPhaseMs);
+    } else {
+      await sleep(Math.max(options.switchPhaseMs, pointerTtlMs + SWITCHOVER_MARGIN_MS));
+    }
     searchesAfterActivation = await Promise.all(apps.map((app) => app.searchTables()));
 
     mark("rolling back");
@@ -3986,6 +4017,8 @@ const runIndexSwitchScenario = async ({ apps, baseUrls, corpus, environmentFor, 
   return {
     build: {
       chunkCount: built.chunkCount ?? null,
+      // Documents in flight in the builder: --switch-build-concurrency, or the CLI's default.
+      concurrency: options.switchBuildConcurrency ?? null,
       cliWallMs: round(record.build.endedAt - record.build.startedAt),
       docsPerSecond: Number.isFinite(buildMs) && buildMs > 0 && Number.isFinite(indexed) ? round(indexed / (buildMs / 1000), 2) : null,
       docsPerSecondIncludingCli:
@@ -4003,6 +4036,7 @@ const runIndexSwitchScenario = async ({ apps, baseUrls, corpus, environmentFor, 
     activation: {
       ...describeSwitch(record.activation, { fromTable, snapshots: searchesAfterActivation, toTable: record.newTable }),
       firstNewSpaceQueryEmbeddingMs: newSpaceQueryEmbedding(record.activation.visible.observedAt),
+      newSpaceWarmup: record.newSpaceWarmup ?? null,
     },
     rollback: describeSwitch(record.rollback, { fromTable: record.newTable, snapshots: searchesAtEnd, toTable: fromTable }),
     chatConcurrency: options.switchConcurrency,
@@ -4609,9 +4643,15 @@ const formatIndexSwitchScenario = (lines, scenario) => {
   };
 
   lines.push(
-    `Build of version ${build.versionId} (${build.model}, ${build.dimensions} dimensions) under /chat load: ${cell(build.indexed)} documents indexed, ${cell(build.failed)} failed, ${cell(build.chunkCount)} chunks; ${cell(build.registryBuildMs)} ms by the registry's build timestamps (${cell(build.docsPerSecond)} documents/s), ${cell(build.cliWallMs)} ms for the whole command including its start-up (${cell(build.docsPerSecondIncludingCli)} documents/s); ${cell(build.embeddingRequests)} embeddings requests (${cell(build.embeddingInputs)} inputs) from the builder.`,
+    `Build of version ${build.versionId} (${build.model}, ${build.dimensions} dimensions${
+      build.concurrency ? `, ${build.concurrency} document(s) in flight` : ""
+    }) under /chat load: ${cell(build.indexed)} documents indexed, ${cell(build.failed)} failed, ${cell(build.chunkCount)} chunks; ${cell(build.registryBuildMs)} ms by the registry's build timestamps (${cell(build.docsPerSecond)} documents/s), ${cell(build.cliWallMs)} ms for the whole command including its start-up (${cell(build.docsPerSecondIncludingCli)} documents/s); ${cell(build.embeddingRequests)} embeddings requests (${cell(build.embeddingInputs)} inputs) from the builder.`,
     "",
-    `${describePropagation("Activation", scenario.activation)} First query embedding in the new space per instance: ${scenario.activation.firstNewSpaceQueryEmbeddingMs.map((value, index) => `instance ${index} ${cell(value)} ms`).join(", ")} after the switch was seen.`,
+    `${describePropagation("Activation", scenario.activation)} First query embedding in the new space per instance: ${scenario.activation.firstNewSpaceQueryEmbeddingMs.map((value, index) => `instance ${index} ${cell(value)} ms`).join(", ")} after the switch was seen.${
+      scenario.activation.newSpaceWarmup
+        ? ` Cache warm-up under the new version (every question once per instance, discarded): ${cell(scenario.activation.newSpaceWarmup.durationMs)} ms, ${scenario.activation.newSpaceWarmup.failures} non-2xx.`
+        : ""
+    }`,
     "",
     describePropagation("Rollback", scenario.rollback),
     "",
@@ -4798,7 +4838,7 @@ export const formatLoadTestMarkdown = (report) => {
       `| /chat load | closed loop, concurrency ${cell(config.switchConcurrency)}, for the whole run; seed corpus ${config.documents} documents x ${config.pages} pages (uploaded as PDFs), ${config.questions} questions |`,
       `| Index versions | seed version at ${config.embeddingDimensions} dimensions; new version ${switchEmbeddingModel(config.switchDimensions)} at ${config.switchDimensions} dimensions${
         config.switchBuildBatchSize ? `, build batches of ${config.switchBuildBatchSize}` : ""
-      } |`,
+      }${config.switchBuildConcurrency ? `, ${config.switchBuildConcurrency} build document(s) in flight` : ""} |`,
       `| Steady phases | ${config.switchPhaseMs} ms before the build, after the activation and after the rollback |`,
       `| RAG_INDEX_VERSION_POINTER_TTL_MS | ${config.indexPointerTtlMs ?? "app default (2000)"} |`
     );
@@ -4975,7 +5015,8 @@ export const HOST_CPU_NOTE =
 export const INDEX_SWITCH_NOTES = Object.freeze([
   "Index switch scenario: the seed corpus is uploaded as PDFs so the registry holds bytes a build can parse again. A closed-loop /chat load runs for the whole run; each request belongs to the phase it was sent in. The lifecycle commands are separate processes (node vector-index.mjs build / activate / rollback --json) on the same database and fake model: build creates version 2 under load-test-embedding-<width> (the fake answers that model at that width) and re-embeds every document from its stored PDF; activate runs the activation gate (per-document chunk counts) and switches the pointer; rollback switches back to version 1 while version 2 is inside its dual-write grace period.",
   "Switch visibility: the harness reads the pointer row on its own connection every few ms while activate/rollback runs; the first read with a new generation is when the switch is taken as committed (the commit happened after the previous read). Propagation per instance: every app process records which chunk table each of its dense retrieval statements read (each version is its own table), so the first dense search on the new table after the switch is when that instance started serving the new version, measured inside the process; its last search on the old table is when it stopped. A request that read the pointer just before the switch may still search the old table afterwards; that version keeps receiving writes for its grace period, so such a search is still complete.",
-  "A version pinned to another embedding model than the configured one makes every query embed in that model too (vector-store-pgvector.js embedQueryInSpace, a per-process cache of 256 queries); the embeddings column shows those calls per phase.",
+  "Query embeddings after the switch: the instances keep their configured embedding model (the configuration is not changed), so the new version is pinned to another model than the one they are configured for; the embeddings columns show each phase's query embedding calls per model. With the query cache on, the harness sizes RAG_EMBEDDING_CACHE_MAX to hold every retrieval query of the question pool (config table; the app default is 256) and, once every instance follows the new pointer, asks every question once on every instance (phase 'new version, cache warming', discarded like the warm-up before the first level). 'new version active' then serves from a cache holding the whole pool, like 'before': it shows what a cache that size saves, not how many embeddings a query costs. With --no-embedding-cache there is no warm-up, and each phase's embeddings per /chat, per model, are what every query pays.",
+  "The fake embedding model answers each request after a flat latency (plus --embedding-latency-per-input-ms per input), in parallel and without a rate limit, and each process -- the build CLI included -- has its own RAG_LLM_MAX_CONCURRENCY guard unless --shared-state redis (keyed by model, so the build's model and /chat's configured model never share one). The build's requests therefore never compete with /chat for a provider limit here: /chat during the build measures database and host contention only, and the build's documents/s is a flat-latency, embedding-bound best case.",
 ]);
 
 export const buildCrashNotes = () => [
@@ -5357,6 +5398,7 @@ const main = async () => {
       ingestJobLeaseMs: ingest ? options.ingestJobLeaseMs : null,
       indexPointerTtlMs: indexSwitch ? options.indexPointerTtlMs : null,
       switchBuildBatchSize: indexSwitch ? options.switchBuildBatchSize : null,
+      switchBuildConcurrency: indexSwitch ? options.switchBuildConcurrency : null,
       switchConcurrency: indexSwitch ? options.switchConcurrency : null,
       switchDimensions: indexSwitch ? options.switchDimensions : null,
       switchPhaseMs: indexSwitch ? options.switchPhaseMs : null,

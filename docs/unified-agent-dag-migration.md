@@ -1,6 +1,6 @@
 # Unified AgentRAG DAG：迁移决策与验收清单
 
-状态：**部分解冻（2026-09-27）**。`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 可以执行不含审批节点的统一图；图内的审批续跑仍冻结。默认值仍为 `off`，无法识别的值也回落到 `off`。下文迁移规格保留作为设计记录。本文件不能用来宣称全 Agent 动态 DAG 已上线，也不能把注入提案或 mock 评测称为真实模型证据。
+状态：**审批续跑也已解冻（2026-09-27）**。`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 可以执行含审批节点的统一图：图在审批节点暂停，批准后从 checkpoint 续跑，Capability 只执行一次。默认值仍为 `off`。统一图规划器已接上真实模型，但本地 qwen2.5:7b 只有 3/15 的计划被接受，其余回落到确定性图（见下文"真实模型规划"）。本文件不能用来宣称真实模型能可靠地规划全阶段图。
 
 ## 冻结与部分解冻
 
@@ -138,3 +138,125 @@ Changed files (all agent track):
 3. **审批 Capability 与最终合成（待完成）**：已有显式适配器和可信 allowlist，但生产统一图的审批暂停、批准后续跑及输入 hash 绑定仍未实现；现有投影也尚不能表达任意内置/Capability 组合，最终合成仍依赖旧 `plan.mode`。须覆盖批准前零写入、批准后输入 hash 不变、拒绝/超时、写后崩溃、重复 worker，以及图结果到回答/trace 的等价投影。只有已证明幂等的 adapter 可自动补跑，其他情况人工处置。
 4. **恢复与发布**：用独立 Node 进程和 PostgreSQL run store 验证部分完成图的恢复、scope/版本变化、预算重建、收据篡改、未知 in-flight 和 finalization 中断。`off` 保持 V1；`shadow` 只记录候选图不执行；`guarded` 仅在**首节点执行前**允许回退 V1，部分执行后禁止回退。逐级灰度，不删除 V1，直至门禁和实际观测证明可替换。
 5. **评测门禁**：为统一图新增 pinned trajectory/planner/recovery/runtime/readiness 用例并更新 manifest 版本；断言真实 `/chat` 与后台 task 经过同一图路径、审批与权限/预算不回退、图节点/步骤/收据一致。运行后端含 pgvector 集成、前端与 build，以及 `quality:current` / `release:gate` 的同 SHA、干净工作树、fresh lineage 检查。真实 LLM DAG planner 的评测与上线判定仍是目标要求，但依用户当前指示暂缓；mock PASS 不可替代它，也不可据此宣称总迁移完成。
+
+## 审批续跑与真实模型规划（2026-09-27）
+
+状态：**解冻（2026-09-27 第二轮）**。`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 可以执行统一图，包括含一个审批门 Capability 的图：图在审批门暂停，批准或拒绝后在同一个图上续跑。四块恢复能力都已有跨进程 PostgreSQL 测试。统一图现在有默认模型 planner。但在本地 7B 模型上，模型自己的方案大多被拒，由确定性图兜底（数字见下文“真实模型规划”）。默认值仍为 `off`，无法识别的值也回落到 `off`。不能把本地 mock 或确定性结果说成 GPT 级模型的规划证据。
+
+【把“仍冻结：审批续跑”整段替换为】
+- **已满足：审批续跑（第四块）**
+  - 准入：直连的审批门 Capability 可以进图，每个图最多一个（`multiple_approval_gated_capabilities`）。它只能是意图本身要求的动作：`plan.mode` 为 `workspace_action`，且节点是 `capability:<actionCapabilityId>`；否则 finalizer 无法表达它的结果（`graph_not_projectable`）。
+  - 仍然拒绝：Web / 文档发现这类内置包装节点，如果没有常设授权，仍整图拒绝。它们的审批发生在 execute 内部，不在节点边界。
+  - 暂停：
+    - 调度器把需要审批的节点停在干净边界（`awaiting_approval`），此时没有 step、没有预算、没有输出。
+    - 不依赖它的节点继续跑完。
+    - 等没有其他节点可跑时，基于最新 checkpoint 生成图绑定审批门。审批对象 hash 覆盖精确的解析后输入，并绑定 run、graph digest、revision 和 nodeId。
+    - 审批门、私有执行快照（与 V1 同一张审批快照表、同一套 policy）和 `awaiting_approval` checkpoint 在同一个 CAS 中写入。
+    - 请求返回与 V1 相同的 `capability_approval_required` 澄清，run 进入 `waiting_for_user`，不完成 run，不写收据。
+  - 决策入口：`/agent-runs/:runId/actions/approve|deny`（agentRunStepExecutor 识别图门后交给 `continueAgentExecutionGraphApproval`），或后台任务带该门 gateId 与 approvalObjectHash 的批准重入。两者都在同一个图上续跑，不重新规划。
+  - 批准：
+    - 决策 CAS 把图重新打开为无 claim 的 `running`，用与新请求 worker 相同的 run-revision 栅栏。
+    - 已完成节点按摘要复用。
+    - Capability 执行前，用实时 Capability、实时 policy 和当前绑定输入重算审批门，必须与用户批准的门和私有快照一致，然后以批准的输入执行一次。
+    - 执行时带确定性幂等键 `run+node`：task.create 按该键 upsert。
+    - 之后依次运行下游节点、整次 finalization，写入收据并完成 run。
+  - 拒绝：该节点记为 `skipped / approval_denied`，下游 `dependency_skipped`，不写任何东西。回答为“<Capability> was not run: the approval was denied.”，同样写入收据并完成 run。
+  - 被拒绝的审批：
+    - 错误的审批对象（`approval_object_hash_mismatch`）。
+    - 已决定的门再次决定（409）。
+    - 审批门展示后 Capability 版本变了（`graph_approval_stale`，决策前拒绝，run 仍在等待）。
+    - 私有快照与所示输入不符（绑定校验在决策 CAS 内失败）。
+  - 未知状态不自动重放：
+    - 批准后、Capability 的 step 尚未开始时崩溃：启动恢复可以取 claim，读取同一批准，执行一次。
+    - Capability 已写入、收据之前崩溃（step 为 running）：启动恢复进入人工恢复（`unknown_in_flight_node`），绝不重放。
+    - 干净停在审批门的运行，启动恢复不改动它（跳过，不转人工）。
+    - 续跑失败时：部分失败的图使 run 失败；其他错误由 worker 转人工（`graph_approval_continuation_failed`）。
+    - 回滚到非 `guarded` 后，审批决策被拒绝（`unified_graph_rollout_not_guarded`），由运维处理。
+  - Capability policy 拒绝解析后输入（例如必填字段绑定到空的上游输出）时，该节点经生命周期记为失败，不会崩溃，也不会执行。
+  - 证据：
+    - `server/test/agent-unified-graph-postgres.integration.test.mjs` 新增三个真实跨进程用例：进程 A 暂停、进程 B 批准，Capability 恰好写一次；批准写入后真实退出（exit 17），下次启动转人工且不重放；拒绝。
+    - 内存套件为 `agent-unified-graph-approval.test.mjs`。
+    - trajectory 用例 `unified_graph_approval_gated_action`（manifest 1.14.0）同时测量同一请求在 V1 上的表现：V1 只运行动作，审批的任务描述是原始问题，没有文档答案。
+- **新增准入规则**：图必须包含意图本身的节点，即意图的自定义 Skill（或 chain 中每个 Skill）、workspace action 的 Capability，或独立的 inventory / discovery / Web 节点（`intent_skill_missing`）。否则 finalizer 只能给出“Skill 未完成”。research brief / arXiv import 在 v3 目录中没有节点，一律由 V1 回答。真实模型测试暴露了这个缺口。
+
+【“guarded 的边界”中把“没有默认模型 planner……”一条替换为】
+- 默认 planner 由 `app-services.js` 的 `createUnifiedGraphPlannerAdapter()` 提供，与 DAG planner 读同一个开关（`AGENT_PLANNER_ROLLOUT` / `AGENT_EXECUTION_PLANNER`）：llm 时为 `llm_unified_graph`，否则为 `deterministic_unified_graph`。
+  - 模型 adapter（`agent-unified-dag-planner-adapter.js`）使用 prompt `unified_graph_planner@v1`，已登记在 prompt-catalog 并固定指纹。
+  - response_format 是从运行时授权目录生成的严格 JSON Schema：
+    - nodeId 必须是 skillId 或 skillId_2..9；
+    - 绑定和 when 只能引用来源 Skill 声明的同类型输出；
+    - object 输入只接同名（或 followUp 变体）输出；
+    - 节点不绑定自己 Skill 的输出；
+    - 受限的 docIds 只接请求值；
+    - 字符串用 pattern 限长，数组有 maxItems。
+  - 解析回复中第一个完整 JSON 值。validator 与准入仍是最终权威。解析、校验或准入任一失败，就整图换成确定性图，绝不部分执行；确定性图也不可准入时，由 V1 回答。
+  - planner 只看到脱敏上下文：目标、意图标志、授权 docIds、目录描述、限制、剩余预算，从不看到文档文本。
+  - 每次决策记录在 `unified_graph_planned.payload.planner`：fallback、原因码与原因、`plannerCall.latencyMs / tokens / promptTemplate`。
+- 允许直接调用的 Capability 由可信配置 `AGENT_UNIFIED_GRAPH_CAPABILITIES` 决定（逗号分隔，默认空），不是 planner 输入。恢复时按已封存 owner 中的目录身份重建。
+
+【新增小节：真实模型规划（本地 qwen2.5:7b，2026-09-27）】
+- 这是本地 7B 模型（Ollama 上的 qwen2.5:7b），不是 GPT 级模型。只有 planner 调用模型，RAG / Skill / Web / task.create 均为 mock，因此失败的只是规划。
+- `npm run eval:unified-graph-planner -- --real --runs 3`，统一图的两个 trajectory 用例，共 15 次规划：
+  - 模型自己的方案被接纳 2/15（13.3%），换成确定性图 13/15，由 V1 回答 0。
+  - 原因：intent_skill_missing 6（风险审查意图的 6 次全部漏了 risk_review）、illegal_output_reference 5（绑定了没列进 dependsOn 的节点）、invalid_node_shape 1（约束解码失效，JSON 解析失败）、graph_not_projectable 1。
+  - 分用例：证据门控用例 0/6，审批用例 2/9。
+  - 运行时检查 39/39 全部通过（确定性兜底图承担了执行）；planner 模式检查 `model_plan_used` 0/6，所以用例层面 0/6 通过。
+  - 每次规划延迟：均值 8194 ms，p50 8205 ms，最大 11103 ms。每次规划 token：均值 2036，最大 2217。
+- `npm run eval:planner -- --real` 跑 3 次：用例 16/21，检查 72/81。
+  - 新用例 `planner_unified_graph` 三次都未通过 `unified_planner_selected`（1 次 illegal_output_reference，2 次 intent_skill_missing）。
+  - 既有的 `planner_dynamic_skill_graph`（V2 DAG planner，本轮未改动）三次中失败两次。
+- 结论：运行时契约已经具备，但本地 7B 模型的 v3 方案目前主要靠确定性兜底，不能作为模型规划能力的证据。
+
+=== docs/configuration.md ===
+- `AGENT_UNIFIED_GRAPH_ROLLOUT` 行：取值 `off`（默认）/ `shadow` / `guarded`。
+  - `guarded` 让通过准入的 v3 图回答整个请求，包括在审批门暂停、并由审批决策在同一图上续跑。
+  - 规划、准入或 stage 在首次写 checkpoint 前拒绝时，由 V1 回答。
+  - 审批决策和启动恢复只在 `guarded` 下续跑 v3 图；其他取值下，审批被拒绝（`unified_graph_rollout_not_guarded`），启动恢复转人工。
+  - planner 跟随 `AGENT_PLANNER_ROLLOUT` / `AGENT_EXECUTION_PLANNER`（`llm_unified_graph` 或 `deterministic_unified_graph`）。
+- 新增行 `AGENT_UNIFIED_GRAPH_CAPABILITIES`：v3 图可以直接调用的 Capability id，逗号分隔，默认空。这是可信运维白名单，不是 planner 输入。审批门 Capability 仍在审批门暂停。
+
+=== server/docs/interview/CURRENT-TRUTH.md ===
+- trajectory 19/19 用例、84/84 检查（unified_graph 类别 13 项），manifest 1.14.0。新增 `unified_graph_approval_gated_action`：审批续跑的运行时契约证据，确定性注入提案与 mock。planner mock 7/7、27/27。
+- v3 真实模型规划（本地 qwen2.5:7b，不是 GPT 级模型）：方案接纳率 2/15，兜底 13/15；每次规划约 8.2 s、约 2.0k token。
+- 审批续跑跨进程 PostgreSQL 测试 3 项全部通过；两个 agent 图 PostgreSQL 套件合计 14/14。
+
+### 第二轮审查修正（2026-09-27）
+
+**审批续跑读取实时 allowlist**：
+- 审批决定（`/agent-runs/:runId/actions/:action`，以及后台任务的重入）和启动恢复都按当前配置读取 `AGENT_UNIFIED_GRAPH_CAPABILITIES`，不使用规划时封存在 checkpoint owner 里的列表。封存列表只用于核对目录身份。
+- 批准时若该 Capability 已不在实时 allowlist：不做决定，门保持 pending，运行以 `unified_graph_capability_not_allowed` 转人工（不取 claim），请求返回 409 `graph_approval_capability_not_allowed`。拒绝（deny）不受影响，照常以不含该 Capability 的答案结束。
+- stage 续跑或恢复时，对每个待运行（未完成、也不会被跳过）的 Capability 节点再核对一次实时 allowlist，不在列表中则抛 `AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY`。因此，已批准但尚未启动的节点在启动恢复时同样尊重撤销：运行转人工（`graph_resume_failed`），不写入。
+
+**回滚不再让审批暂停搁浅**：
+- 启动恢复只在 `guarded` 下跳过干净的审批暂停。回滚到 `off` 或 `shadow` 后，这类运行以 `unified_graph_rollout_not_guarded` 转人工，状态保持 `waiting_for_user`，出现在 `/agent-runs/recovery` 并带 cancel 动作。
+- 在非 `guarded` 下做审批决定（批准或拒绝）时，先把运行标记为人工，再返回 409 `unified_graph_rollout_not_guarded`。
+- 审批 CAS 拒绝已标记人工的运行，所以之后恢复 `guarded` 或 allowlist 也不会绕过 operator 重新打开它。
+
+**后台任务在图审批门上**：
+- 任务 `continue` 重入一个停在图审批门的运行、且没有带上该门的决定时，不再报 `graph_approval_not_pending`。它原样返回存储的审批澄清（同一个 gateId 与 approvalObjectHash），不写任何东西，不重新规划。任务回到 `waiting_for_user`（`approve_capability`），并保留这个门。
+- 新增任务动作 `deny`，只适用于 `graph_capability_approval` 门。它和 approve 一样要求 gateId 与 approvalObjectHash 同待决门一致，映射为图的拒绝决定，任务以不含该 Capability 的答案结束。V1 门的拒绝仍在 agent run 上进行，任务动作对 V1 门返回 409。
+- 与门不符的决定（缺 gateId 或 hash 不符）仍返回 409 `graph_approval_not_pending`。
+
+**shadow 观测模型自身的结果**：
+- `AGENT_UNIFIED_GRAPH_ROLLOUT=shadow` 时，若规划 rollout 带有旁路 planner（`AGENT_PLANNER_ROLLOUT=shadow`），观测的是该模型 planner。
+- 观测不使用 fallback：模型计划解析、校验或准入失败时记为 `rejected` 并带原因码，不再被确定性图替换后记成成功。
+- 事件新增 `planner.fallback`、`selectedPlannerId`、`plannerCall`（延迟、tokens、prompt 模板、模型路由、response format 摘要）。
+- 已知限制：shadow 规划仍在请求路径上同步等待，模型规划约 8 s 会计入 shadow 请求延迟；`guarded` 路径在 `AGENT_PLANNER_ROLLOUT=shadow` 下仍不做旁路模型规划。
+
+**真实模型 v3 planner 评测（带 lineage）**：
+- 报告 1.1.0 版新增 `summary.lineage`，列出实际运行过的 prompt 模板、模型路由和 response format schema 摘要；另有 `evidence` 块，记录 commit、工作区是否 dirty 和全部 prompt 模板。
+- 最后一次运行时代码修改之后重跑一次：commit 85efbb6a 加未提交改动（dirty），`unified_graph_planner@v1#037c0f5c79da`，本地 Ollama `qwen2.5:7b`，3 轮 15 次规划。
+- 结果：模型自身计划被采纳 3/15；12 次回退到确定性图（原因：intent_skill_missing 6、graph_not_projectable 4、illegal_output_reference 4、approval_required_without_standing_grant 1）；0 次回 V1。检查 37/45，用例 0/6。延迟 mean/p50/max 为 8140/8226/10778 ms，tokens 平均 2044。
+- 两项运行时检查各有 1 次失败，都来自模型计划的形状：一次任务描述没有绑定到已验证答案；一次 `when` 条件把 task.create 跳过，导致没有门可以拒绝。
+- 这是 mock 文档服务加真实模型规划的证据，不是答案质量证据。之前引用的 2/15、39/45 没有 lineage，而且测量之后运行时代码仍有改动，不再引用。
+
+**前端**：图审批被拒绝时，返回的最终答案（已验证的文档答案加“未执行”说明）直接显示；V1 的拒绝仍显示通用文案。
+
+=== server/docs/interview/CURRENT-TRUTH.md（v3 planner 真实模型数字）===
+v3 统一图 planner 真实模型评测（`npm run eval:unified-graph-planner -- --real --runs 3`，qwen2.5:7b，本地 Ollama）：模型自身计划采纳 3/15，其余 12 次回退到确定性图，0 次回 V1；检查 37/45；单次规划延迟均值 8.1 s，tokens 均值 2044。报告带 lineage：commit 85efbb6a（dirty）、`unified_graph_planner@v1#037c0f5c79da`。这是规划证据，文档服务、Skill 与 Capability 都是 mock。
+
+=== AGENTS.md paragraph (append to the v3 unified-graph bullet) ===
+Guarded v3 approval is governed by the live configuration. The approval decision (`continueUnifiedAgentGraphAfterApproval`, reached from `/agent-runs/:runId/actions/:action` and from a task re-entry) and startup recovery read `AGENT_UNIFIED_GRAPH_CAPABILITIES` at call time. The allowlist sealed in the checkpoint owner only identifies the catalog. An approve of a Capability no longer on the live list, or any decision outside `guarded`, marks the run manual without a claim and returns 409. The reason codes are `unified_graph_capability_not_allowed` and `unified_graph_rollout_not_guarded`. The stage refuses any pending Capability node missing from the live list with `AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY`. Startup recovery skips a clean approval pause only under `guarded`; otherwise it marks the run manual with `unified_graph_rollout_not_guarded`, so the run is listed with a cancel action. A `runAgentRag` re-entry into a parked graph that carries no decision for its gate (a task `continue`) re-states the stored approval clarification and writes nothing (`restateUnifiedGraphApprovalPause`). A mismatched decision stays 409 `graph_approval_not_pending`. The task action `deny` applies to `graph_capability_approval` gates only and maps to the graph denial; V1 gates are denied on their run. Shadow observation plans with the rollout's shadow planner when there is one, and never with a fallback (`allowPlannerFallback: false`). `npm run eval:unified-graph-planner [-- --real --runs 3]` writes ignored `evaluation/results/latest-planner-unified-graph-<provider>.*` with `summary.lineage` (prompt template, model route, response-format digest) and an `evidence` block. Quote its numbers only together with that lineage; a local mock provider result is not real-model evidence. This is pinned by `agent-unified-graph-approval.test.mjs`, `agent-unified-graph-shadow.test.mjs` and `unified-graph-planner-eval.test.mjs`.
+
+=== npm script (server/package.json, scripts) ===
+"eval:unified-graph-planner": "node evaluation/run-unified-graph-planner-eval.mjs"

@@ -1,4 +1,4 @@
-export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.13.0";
+export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.14.0";
 
 // The retrieval architecture every synthetic/feedback report must have run on.
 // It is checked against `summary.retrieval`, which the runner derives from the
@@ -544,6 +544,17 @@ const trajectoryChecks = {
     "graph_answer_finalized_with_receipt",
     "graph_budget_charged_per_executed_node",
   ],
+  // Approval continuation inside the v3 graph (deterministic injected
+  // proposal and mock providers: runtime-contract evidence only), with V1
+  // measured on the same request.
+  unified_graph_approval_gated_action: [
+    "graph_paused_at_capability_gate",
+    "approval_continued_same_graph_once",
+    "stale_or_repeated_approval_refused",
+    "denied_approval_finalized_without_capability",
+    "v1_same_request_action_ungrounded",
+    "approval_graph_budget_and_planner",
+  ],
 };
 
 const plannerChecks = {
@@ -575,6 +586,15 @@ const plannerChecks = {
     "dag_composed_compare_then_risk",
     "dag_selected_skills_observed",
     "dag_kept_document_scope",
+  ],
+  // The v3 (unified) graph planner. With the real provider this is the
+  // model's own plan; a deterministic fallback fails these checks.
+  planner_unified_graph: [
+    "unified_planner_selected",
+    "unified_graph_answered_request",
+    "unified_graph_document_first",
+    "unified_graph_skill_gated_on_evidence",
+    "unified_planner_call_measured",
   ],
   planner_invalid_fallback: [
     "fallback_to_deterministic",
@@ -1826,6 +1846,116 @@ const trajectoryResponseProjections = {
       "answer_finalizer",
     ],
   }),
+  unified_graph_approval_gated_action: trajectoryResponseProjection({
+    agentMode: "workspace_action",
+    agentSkills: completedSkillIds(
+      "capability:task.create",
+      "document_rag",
+      "document_evidence_check"
+    ),
+    budget: {
+      used: {
+        customSkillCalls: 0,
+        documentRagCalls: 1,
+        webSearchCalls: 0,
+      },
+    },
+    executionLoop: {
+      followUpsRun: 0,
+      gapsIdentified: 0,
+      stoppedReason: "not_needed",
+    },
+    observed: {
+      approval: {
+        agentMode: "workspace_action",
+        answerNamesTask: true,
+        documentCallsTotal: 1,
+        error: null,
+        finalizationMatchesAnswer: true,
+        graphNodeCount: 3,
+        nodeRuns: [
+          { nodeId: "document", reason: null, skillId: "document_rag", status: "reused" },
+          {
+            nodeId: "evidence_check",
+            reason: null,
+            skillId: "document_evidence_check",
+            status: "reused",
+          },
+          { nodeId: "task", reason: null, skillId: "capability:task.create", status: "completed" },
+        ],
+        plannedEventCount: 1,
+        runStatus: "completed",
+        writeInputMatchesGate: true,
+        writes: 1,
+      },
+      denial: {
+        agentAnswer: "Create Task was not run: the approval was denied.",
+        error: null,
+        gateStatus: "denied",
+        nodeRuns: [
+          { nodeId: "document", reason: null, skillId: "document_rag", status: "reused" },
+          {
+            nodeId: "evidence_check",
+            reason: null,
+            skillId: "document_evidence_check",
+            status: "reused",
+          },
+          {
+            nodeId: "task",
+            reason: "approval_denied",
+            skillId: "capability:task.create",
+            status: "skipped",
+          },
+        ],
+        runStatus: "completed",
+        writes: 0,
+      },
+      pause: {
+        actionNodeId: "task",
+        agentMode: "clarification",
+        checkpointPhase: "awaiting_approval",
+        clarificationReason: "capability_approval_required",
+        completedBeforePause: ["document_rag", "document_evidence_check"],
+        documentCallsBeforePause: 1,
+        gateBoundToCheckpoint: true,
+        gateCapabilityId: "task.create",
+        gateInputCarriesVerifiedAnswer: true,
+        gateType: "graph_capability_approval",
+        lastEvent: "graph_approval_gate_created",
+        outerPlanEventCount: 0,
+        runStatus: "waiting_for_user",
+        writesBeforeDecision: 0,
+      },
+      refusals: {
+        repeatedApproval: { status: 409 },
+        staleCapability: { code: "graph_approval_stale", status: 409 },
+        staleRunStatus: "waiting_for_user",
+        staleWrites: 0,
+        unchangedAfterWrongObject: true,
+        wrongObject: { code: "approval_object_hash_mismatch", status: 409 },
+      },
+      v1: {
+        agentMode: "clarification",
+        documentCalls: 0,
+        gateInputIsRawQuestion: true,
+        outerPlanRan: true,
+        unifiedEventCount: 0,
+        writes: 0,
+      },
+    },
+    selectedSkills: skillIds(
+      "workspace_action",
+      "document_rag",
+      "document_evidence_check",
+      "capability:task.create"
+    ),
+    skillChain: [],
+    telemetry: {
+      chatCallCount: 1,
+      listDocumentCallCount: 3,
+    },
+    traceTypes: ["graph_node", "graph_node", "graph_node", "self_check", "synthesis"],
+  }),
 };
 
 const plannerResponseProjection = ({
@@ -1964,6 +2094,34 @@ const plannerResponseProjections = {
       "answer_finalizer",
     ],
   }),
+  planner_unified_graph: {
+    agentMode: "risk_review",
+    planner: {
+      fallback: false,
+      fallbackReason: null,
+      requestedPlannerId: "llm_unified_graph",
+      selectedPlannerId: "llm_unified_graph",
+      status: "selected",
+      stepIds: [],
+    },
+    skillGraph: {
+      errorCodes: [],
+      executed: true,
+      fallback: null,
+      mode: "guarded",
+      nodeSkills: ["document_rag", "document_evidence_check", "risk_review"],
+      nodeStatuses: ["completed", "completed", "completed"],
+      plannerFallback: false,
+      plannerFallbackReasonCodes: [],
+      selectedPlannerId: "llm_unified_graph",
+      status: "selected",
+    },
+    status: 200,
+    telemetry: {
+      chatCallCount: 2,
+      listDocumentCallCount: 3,
+    },
+  },
   planner_invalid_fallback: plannerResponseProjection({
     agentMode: "inventory",
     fallback: true,

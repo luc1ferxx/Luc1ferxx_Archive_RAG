@@ -23,6 +23,8 @@ import {
   AGENT_EXECUTION_STEP_SCHEMA,
 } from "../../../rag/agent-execution-plan.js";
 import { llmPlannerAdapter } from "../../../rag/agent-llm-planner-adapter.js";
+import { unifiedGraphLlmPlannerAdapter } from "../../../rag/agent-unified-dag-planner-adapter.js";
+import { UNIFIED_GRAPH_RUN_EVENTS } from "../../../rag/agent-unified-graph-run.js";
 import {
   AGENT_SKILL_IDS,
   CUSTOM_SKILL_IDS,
@@ -74,8 +76,74 @@ const stepForId = ({ reason, stepId }) => {
   };
 };
 
+const UNIFIED_PLANNER_PROMPT_PREFIX =
+  "You are planning one guarded AgentRAG execution graph (contract v3)";
+
+// The mock v3 plan: the document answer, its evidence check, and the intent's
+// Skill (or, for a workspace action, its Capability) only when that answer
+// passed, reading it as priorFindings (or as the action's description).
+const buildMockUnifiedGraphResponse = (payload) => {
+  const skillIds = new Set(normalizeArray(payload.capabilities).map((skill) => skill.id));
+  const actionId = `capability:${payload.intentPlan?.actionCapabilityId ?? ""}`;
+  const isAction = payload.intentPlan?.mode === "workspace_action";
+  const skillId = isAction ? actionId : payload.intentPlan?.mode;
+
+  if (!skillIds.has("document_rag") || !skillIds.has("document_evidence_check") || !skillIds.has(skillId)) {
+    throw new Error("Mock unified planner requires the document loop and the intent Skill.");
+  }
+
+  const request = (field) => ({ source: "request", field });
+  const upstream = (nodeId, output) => ({ source: "node", nodeId, output });
+  const gatedInputs = isAction
+    ? { title: request("question"), description: upstream("document", "text") }
+    : {
+        docIds: request("docIds"),
+        priorFindings: upstream("document", "text"),
+        question: request("question"),
+      };
+
+  return JSON.stringify({
+    nodes: [
+      {
+        nodeId: "document",
+        skillId: "document_rag",
+        dependsOn: [],
+        inputBindings: { docIds: request("docIds"), question: request("question"), retrievalPlan: null },
+        failurePolicy: "fail_fast",
+        when: null,
+        rationale: "Answer from the selected documents first.",
+      },
+      {
+        nodeId: "evidence_check",
+        skillId: "document_evidence_check",
+        dependsOn: ["document"],
+        inputBindings: {
+          docIds: request("docIds"),
+          evidence: upstream("document", "evidence"),
+          question: request("question"),
+        },
+        failurePolicy: "fail_fast",
+        when: null,
+        rationale: "Check the document answer against its evidence.",
+      },
+      {
+        nodeId: isAction ? "action" : skillId,
+        skillId,
+        dependsOn: ["document", "evidence_check"],
+        inputBindings: gatedInputs,
+        failurePolicy: "fail_fast",
+        when: { nodeId: "evidence_check", output: "passed", equals: true },
+        rationale: "Review only a verified document answer.",
+      },
+    ],
+  });
+};
+
 export const buildMockPlannerResponse = (prompt) => {
   const payload = extractPromptPayload(prompt);
+  if (prompt.startsWith(UNIFIED_PLANNER_PROMPT_PREFIX)) {
+    return buildMockUnifiedGraphResponse(payload);
+  }
   if (prompt.startsWith("You are planning a guarded AgentRAG execution graph.")) {
     const skillIds = new Set(normalizeArray(payload.capabilities).map((skill) => skill.id));
     const wantsComparison = /compare|differences?/i.test(payload.goal ?? "");
@@ -695,6 +763,181 @@ const createDynamicSkillGraphCase = ({ plannerAdapter = llmPlannerAdapter } = {}
   },
 });
 
+// The v3 (unified) graph planner: one graph for the whole request. A
+// risk-review request on a selected document should be planned as the
+// document answer, its evidence check, and the Skill gated on that check,
+// reading the verified answer; the runtime validator and admission judge the
+// plan, and a refused plan is replaced whole by the deterministic graph (which
+// fails the planner checks here: the model's own plan is what is measured).
+const UNIFIED_DOC_ID = "vendor-msa";
+const UNIFIED_QUESTION =
+  "Run a risk review of the vendor notice terms: what notice period does the vendor require?";
+const UNIFIED_EXCERPT = "The vendor requires 30 days written notice before renewal.";
+const UNIFIED_RISK_EXCERPT =
+  "The agreement renews automatically unless the customer gives notice before the renewal date.";
+
+const createUnifiedGraphCase = ({
+  unifiedPlannerAdapter = unifiedGraphLlmPlannerAdapter,
+} = {}) => ({
+  id: "planner_unified_graph",
+  label: "Unified graph planner composes an evidence-gated graph",
+  description:
+    "Under AGENT_UNIFIED_GRAPH_ROLLOUT=guarded the v3 planner should plan the whole request as the document answer, its evidence check, and the risk_review Skill gated on that check, and the runtime should admit and execute its plan without fallback.",
+  run: async () => {
+    const telemetry = createEvalTelemetry();
+    const agentRunService = createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
+    });
+    const ragService = buildScopedRagService({
+      sameScope,
+      documents: [{ docId: UNIFIED_DOC_ID, fileName: "vendor-msa.pdf" }],
+      telemetry,
+      chat: async ({ question }) =>
+        /Perform a concise citation-backed risk review/.test(question)
+          ? {
+              abstained: false,
+              citations: [
+                buildSource({
+                  docId: UNIFIED_DOC_ID,
+                  excerpt: UNIFIED_RISK_EXCERPT,
+                  fileName: "vendor-msa.pdf",
+                  pageNumber: 4,
+                }),
+              ],
+              text: ["Risk Review", `- Risk: ${UNIFIED_RISK_EXCERPT} [Source 1]`].join("\n"),
+            }
+          : {
+              abstained: false,
+              citations: [
+                buildSource({
+                  docId: UNIFIED_DOC_ID,
+                  excerpt: UNIFIED_EXCERPT,
+                  fileName: "vendor-msa.pdf",
+                  pageNumber: 2,
+                }),
+              ],
+              text: `${UNIFIED_EXCERPT} [Source 1]`,
+            },
+    });
+    const response = await withEnvironmentOverrides(
+      { AGENT_UNIFIED_GRAPH_ROLLOUT: "guarded" },
+      () => runAgentRag({
+        accessScope: DEFAULT_ACCESS_SCOPE,
+        agentRunService,
+        docIds: [UNIFIED_DOC_ID],
+        question: UNIFIED_QUESTION,
+        ragService,
+        sessionId: "planner-unified-graph-eval",
+        unifiedGraphPlannerAdapter: unifiedPlannerAdapter,
+        userId: DEFAULT_ACCESS_SCOPE.userId,
+        webChatService: async () => {
+          throw new Error("Web search must not run for a selected-document risk review.");
+        },
+      })
+    );
+    const body = getChatResponseBody(response);
+    const run = await agentRunService.getRun({
+      accessScope: DEFAULT_ACCESS_SCOPE,
+      runId: body.agentRunId,
+    });
+    const checkpoint = (await agentRunService.getExecutionGraphCheckpoint({
+      accessScope: DEFAULT_ACCESS_SCOPE,
+      runId: body.agentRunId,
+    }))?.checkpoint ?? null;
+    const plannedEvent = (run?.events ?? []).filter(
+      (event) => event.type === UNIFIED_GRAPH_RUN_EVENTS.planned
+    ).at(-1)?.payload ?? null;
+    const executedEvent = (run?.events ?? []).filter(
+      (event) => event.type === UNIFIED_GRAPH_RUN_EVENTS.executed
+    ).at(-1)?.payload ?? null;
+    const nodes = checkpoint?.graph?.nodes ?? [];
+    const documentNode = nodes.find((node) => node.skillId === AGENT_SKILL_IDS.documentRag) ?? null;
+    const checkNode =
+      nodes.find((node) => node.skillId === AGENT_SKILL_IDS.documentEvidenceCheck) ?? null;
+    const riskNode = nodes.find((node) => node.skillId === CUSTOM_SKILL_IDS.riskReview) ?? null;
+    const plannerCall = plannedEvent?.planner?.plannerCall ?? null;
+    const graph = {
+      errorCodes: plannedEvent?.errorCodes ?? [],
+      executed: executedEvent?.executed ?? false,
+      fallback: plannedEvent?.fallback ?? null,
+      mode: plannedEvent?.mode ?? null,
+      nodeSkills: nodes.map((node) => node.skillId),
+      nodeStatuses: (executedEvent?.nodeRuns ?? []).map((nodeRun) => nodeRun.status),
+      plannerFallback: plannedEvent?.planner?.fallback ?? null,
+      plannerFallbackReasonCodes: plannedEvent?.planner?.fallbackReasonCodes ?? [],
+      selectedPlannerId: plannedEvent?.planner?.selectedPlannerId ?? null,
+      status: plannedEvent?.status ?? null,
+    };
+    telemetry.skillGraph = graph;
+
+    return finishCase({
+      checks: [
+        buildCheck({
+          category: "planner",
+          detail: plannedEvent?.planner ?? null,
+          id: "unified_planner_selected",
+          label: "The v3 planner's own plan was admitted, without fallback",
+          passed:
+            graph.status === "selected" &&
+            graph.fallback === null &&
+            graph.plannerFallback === false &&
+            plannedEvent?.planner?.requestedPlannerId === "llm_unified_graph" &&
+            graph.selectedPlannerId === "llm_unified_graph",
+        }),
+        buildCheck({
+          category: "execution",
+          detail: { executedStatus: executedEvent?.status ?? null, runStatus: run?.status ?? null },
+          id: "unified_graph_answered_request",
+          label: "The admitted graph answered the whole request; the V1 outer plan never ran",
+          passed:
+            executedEvent?.status === "completed" &&
+            run?.status === "completed" &&
+            response.status === 200 &&
+            !(run?.events ?? []).some((event) => event.type === "execution_planned"),
+        }),
+        buildCheck({
+          category: "execution",
+          detail: documentNode,
+          id: "unified_graph_document_first",
+          label: "The document answer runs first, unconditionally, on the request",
+          passed:
+            Boolean(documentNode) &&
+            (documentNode.dependsOn ?? []).length === 0 &&
+            documentNode.when === undefined &&
+            documentNode.inputBindings?.question?.source === "request",
+        }),
+        buildCheck({
+          category: "planner",
+          detail: { checkNode, riskNode },
+          id: "unified_graph_skill_gated_on_evidence",
+          label: "risk_review runs only when the document answer passed its evidence check",
+          passed:
+            Boolean(checkNode && riskNode && documentNode) &&
+            checkNode.inputBindings?.evidence?.nodeId === documentNode.nodeId &&
+            riskNode.when?.nodeId === checkNode.nodeId &&
+            riskNode.when?.output === "passed" &&
+            riskNode.when?.equals === true,
+        }),
+        buildCheck({
+          category: "observability",
+          detail: plannerCall,
+          id: "unified_planner_call_measured",
+          label: "The planner call's latency and prompt template are recorded on the run",
+          passed:
+            Number.isFinite(plannerCall?.latencyMs) &&
+            plannerCall?.promptTemplate?.id === "unified_graph_planner",
+        }),
+      ],
+      description:
+        "Under AGENT_UNIFIED_GRAPH_ROLLOUT=guarded the v3 planner should plan the whole request as the document answer, its evidence check, and the risk_review Skill gated on that check, and the runtime should admit and execute its plan without fallback.",
+      id: "planner_unified_graph",
+      label: "Unified graph planner composes an evidence-gated graph",
+      response,
+      telemetry,
+    });
+  },
+});
+
 const createInvalidFallbackCase = () => ({
   id: "planner_invalid_fallback",
   label: "Invalid planner fallback",
@@ -799,5 +1042,6 @@ export const createDefaultPlannerCases = ({
   createDynamicSkillGraphCase({
     plannerAdapter,
   }),
+  createUnifiedGraphCase(),
   createInvalidFallbackCase(),
 ];

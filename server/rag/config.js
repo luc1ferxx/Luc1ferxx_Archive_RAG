@@ -245,20 +245,30 @@ export const getAgentSkillGraphRollout = () => {
 // `off` (default) keeps the V1 outer order. `shadow` plans and validates a v3
 // graph beside the V1 answer without executing it. `guarded` executes an
 // admitted v3 graph (document primary, evidence check, conditional follow-up,
-// Web, built-in and custom Skills) on the same run store, validator/scheduler,
-// budget reservation, replay matrix, and finalizer; a graph with an
-// approval-gated node, or one that breaks an admission data boundary
-// (agent-unified-graph-admission.js), is rejected whole before any node runs
-// and the request takes the V1 path instead. Approval continuation inside the
-// graph stays frozen. Startup recovery resumes or finalizes a v3 graph only
-// under `guarded`; with any other value such runs wait for an operator. Any
-// unrecognized value still fails closed to `off`.
+// Web, built-in and custom Skills, and one approval-gated Capability that
+// pauses the graph at its gate) on the same run store, validator/scheduler,
+// budget reservation, replay matrix, and finalizer; a graph that breaks an
+// admission rule (agent-unified-graph-admission.js) is rejected whole before
+// any node runs and the request takes the V1 path instead. An approval
+// decision continues the same graph, and startup recovery resumes or
+// finalizes a v3 graph, only under `guarded`; with any other value such runs
+// wait for an operator. Any unrecognized value still fails closed to `off`.
 export const getAgentUnifiedGraphRollout = () =>
   toChoice(process.env.AGENT_UNIFIED_GRAPH_ROLLOUT, "off", [
     "guarded",
     "off",
     "shadow",
   ]);
+
+// Capabilities a v3 graph may call directly (comma-separated ids, default
+// none). A trusted operator allowlist, never planner input: each id must also
+// be a registered Capability with an explicit graph contract, and an
+// approval-gated one still pauses at its gate.
+export const getAgentUnifiedGraphCapabilityIds = () =>
+  String(process.env.AGENT_UNIFIED_GRAPH_CAPABILITIES ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 // --- end AGENT track block -------------------------------------------------
 
 export const getChunkStrategy = () =>
@@ -1174,6 +1184,25 @@ export const getIndexVersionBuildLeaseMs = () =>
 // Documents a builder reads, embeds and writes per batch.
 export const getIndexVersionBuildBatchSize = () =>
   Math.floor(toPositiveNumber(process.env.RAG_INDEX_VERSION_BUILD_BATCH_SIZE, 16)) || 16;
+
+// Documents a builder has in flight at once (read, parsed, embedded through
+// the cross-document embedding batcher, written). Each is still written in its
+// own transaction with its progress row, fenced on the same lease.
+export const getIndexVersionBuildConcurrency = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INDEX_VERSION_BUILD_CONCURRENCY, 4)) || 4;
+
+// The per-process query embedding cache (rag/embedding-cache.js). Entries are
+// keyed by embedding space and text, so a process serving an index version
+// pinned to another model than its configuration caches that version's query
+// vectors in the same cache, under the same size bound.
+export const isQueryEmbeddingCacheEnabled = () =>
+  !["0", "false", "no", "off"].includes(String(process.env.RAG_EMBEDDING_CACHE_ENABLED ?? "").trim().toLowerCase());
+
+export const getQueryEmbeddingCacheMaxEntries = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_EMBEDDING_CACHE_MAX, 256)) || 256;
+
+export const getQueryEmbeddingCacheTtlMs = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_EMBEDDING_CACHE_TTL_MS, 10 * 60 * 1000)) || 10 * 60 * 1000;
 
 // Retire drops a version table whose foreign key points at the documents
 // table, which needs an AccessExclusiveLock on documents; while that request

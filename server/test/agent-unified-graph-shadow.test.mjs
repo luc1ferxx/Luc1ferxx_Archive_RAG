@@ -5,6 +5,7 @@ import { createAgentBudget } from "../rag/agent-budget.js";
 import { runAgentRag } from "../rag/agent.js";
 import { createAgentRunService, createInMemoryAgentRunStore } from "../rag/agent-runs.js";
 import { observeUnifiedAgentGraphShadow } from "../rag/agent-unified-graph-shadow.js";
+import { withShadowPlanner } from "../rag/agent-planner-shadow.js";
 import { createCapabilityRegistry } from "../rag/capabilities/registry.js";
 import { createWebSearchCapability } from "../rag/capabilities/web.js";
 import { createDefaultSkillRegistry } from "../rag/skills/registry.js";
@@ -171,4 +172,65 @@ test("real AgentRAG request records the v3 shadow proposal while V1 still answer
       process.env.AGENT_SKILL_GRAPH_ROLLOUT = originalSkillRollout;
     }
   }
+});
+
+test("shadow records the observed planner's own outcome, never a fallback graph", async () => {
+  const documentProposal = () => ({
+    nodes: [{
+      dependsOn: [],
+      failurePolicy: "fail_fast",
+      inputBindings: {
+        docIds: { field: "docIds", source: "request" },
+        question: { field: "question", source: "request" },
+      },
+      nodeId: "document",
+      skillId: "document_rag",
+    }],
+  });
+  const calls = { deterministic: 0, model: 0 };
+  const deterministic = {
+    id: "deterministic_unified_graph",
+    createExecutionGraph: async () => {
+      calls.deterministic += 1;
+      return documentProposal();
+    },
+  };
+  // The model adapter's shape: a failed plan would be replaced whole by the
+  // deterministic graph on the guarded path.
+  const model = {
+    id: "llm_unified_graph",
+    createExecutionGraph: async () => {
+      calls.model += 1;
+      throw new Error("I cannot plan this request.");
+    },
+    fallbackPlannerAdapter: deterministic,
+  };
+
+  const failed = await observeUnifiedAgentGraphShadow({ ...context, plannerAdapter: model });
+  assert.equal(failed.status, "rejected");
+  assert.deepEqual(failed.errorCodes, ["invalid_node_shape"]);
+  assert.equal(failed.graph, null);
+  assert.equal(failed.planner.requestedPlannerId, "llm_unified_graph");
+  assert.equal(failed.planner.selectedPlannerId, null);
+  assert.equal(failed.planner.fallback, false);
+  assert.deepEqual(calls, { deterministic: 0, model: 1 });
+
+  // AGENT_PLANNER_ROLLOUT=shadow keeps the deterministic graph primary and
+  // carries the model beside it: shadow observation plans with the model.
+  const rolled = await observeUnifiedAgentGraphShadow({
+    ...context,
+    plannerAdapter: withShadowPlanner(deterministic, {
+      ...model,
+      createExecutionGraph: async () => {
+        calls.model += 1;
+        return documentProposal();
+      },
+    }),
+  });
+  assert.equal(rolled.status, "selected");
+  assert.equal(rolled.planner.requestedPlannerId, "llm_unified_graph");
+  assert.equal(rolled.planner.selectedPlannerId, "llm_unified_graph");
+  assert.equal(rolled.planner.fallback, false);
+  assert.deepEqual(calls, { deterministic: 0, model: 2 });
+  assert.equal(context.budgetState.used.documentRagCalls, 0);
 });

@@ -3,9 +3,15 @@ import assert from "node:assert/strict";
 
 import { buildTextPdf } from "../evaluation/load-bench-pdf.mjs";
 import { configureEmbeddingDimensions } from "../rag/config.js";
+import {
+  createEmbeddingBatcher,
+  getDefaultEmbeddingBatcher,
+  resetDefaultEmbeddingBatcher,
+} from "../rag/ingest-embedding-batcher.js";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import {
   configurePgvectorRuntime,
+  embedDocumentsInSpace,
   getActivePgvectorVersion,
   resetPgvectorRuntime,
   resetPgvectorVectorStore,
@@ -17,10 +23,12 @@ import {
   createDefaultBuilderId,
   createIndexVersion,
   loadStoredDocumentPages,
+  resolveBuildEmbeddingBatcher,
   resolveBuildEmbeddingSpace,
   resumeIndexVersionBuild,
   retireIndexVersion,
   rollbackIndexVersion,
+  runBuildDocuments,
   runIndexVersionBuild,
   runIndexVersionRecallProbe,
   startIndexVersionBuild,
@@ -47,6 +55,8 @@ const ENV_KEYS = [
   "OPENAI_EMBEDDING_MODEL",
   "RAG_EMBEDDING_DOCUMENT_PREFIX",
   "RAG_EMBEDDING_QUERY_PREFIX",
+  "RAG_INGEST_EMBED_BATCHING",
+  "RAG_LLM_MAX_CONCURRENCY",
   "RAG_INDEX_VERSION_POINTER_TTL_MS",
   "VECTOR_STORE_PROVIDER",
 ];
@@ -440,6 +450,313 @@ test("the lease: a live one keeps a second builder out, an expired one is taken 
 
   database.state.versions.get(2).status = "ready";
   await assert.rejects(claimIndexVersionBuild({ builderId: "builder-2", versionId: 2 }), /is ready, not building/);
+});
+
+// A provider whose document embeddings wait until the test releases them,
+// so the tests see exactly which documents are in flight (no timing).
+const useGatedProvider = () => {
+  const gate = { calls: [], inFlight: 0, maxInFlight: 0, open: false, pending: [] };
+
+  configureOpenAIProvider({
+    embedQuery: async (text, options) => embedTopic(text, options?.embeddingSpace?.dimensions ?? 4),
+    embedTexts: async (texts, options) => {
+      const dimensions = options?.embeddingSpace?.dimensions ?? 4;
+
+      gate.calls.push({ model: options?.embeddingSpace?.model ?? MODEL, texts });
+      gate.inFlight += 1;
+      gate.maxInFlight = Math.max(gate.maxInFlight, gate.inFlight);
+
+      try {
+        if (!gate.open) {
+          await new Promise((resolve, reject) => gate.pending.push({ reject, resolve, texts }));
+        }
+
+        return texts.map((text) => embedTopic(text, dimensions));
+      } finally {
+        gate.inFlight -= 1;
+      }
+    },
+  });
+  gate.release = (entry) => {
+    gate.pending.splice(gate.pending.indexOf(entry), 1);
+    entry.resolve();
+  };
+  gate.openAll = () => {
+    gate.open = true;
+    gate.pending.splice(0).forEach((entry) => entry.resolve());
+  };
+  return gate;
+};
+
+// Lets every pending promise chain run (several macrotask turns).
+const settle = async (turns = 20) => {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+};
+
+const waitFor = async (predicate, label) => {
+  for (let turn = 0; turn < 500; turn += 1) {
+    if (predicate()) {
+      return;
+    }
+
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.fail(`timed out waiting for ${label}`);
+};
+
+// The builder's batcher as a test wires it: the store's width-checked embedding, a cap of its own.
+const createBuildBatcher = (maxConcurrency) =>
+  createEmbeddingBatcher({ embed: (texts, space) => embedDocumentsInSpace(texts, space), maxConcurrency });
+
+const seedTopicDocuments = (database, count) => {
+  for (let index = 0; index < count; index += 1) {
+    database.addDocument({ docId: `doc-${index}`, owner: "alice", pages: [`${TOPICS[index % TOPICS.length]} clause ${index}.`] });
+  }
+};
+
+test("a build keeps `concurrency` documents in flight, each written in its own transaction with its progress row", async () => {
+  useProvider();
+  const database = useDatabase();
+  const transactions = [];
+
+  // Record which statements each transaction ran.
+  configurePgvectorRuntime({
+    ...database.runtime,
+    withTransaction: (callback) =>
+      database.runtime.withTransaction((client) => {
+        const statements = [];
+
+        transactions.push(statements);
+        return callback({
+          query: (sql, values) => {
+            statements.push({ sql: String(sql).replace(/\s+/g, " "), values });
+            return client.query(sql, values);
+          },
+        });
+      }),
+  });
+  seedTopicDocuments(database, 5);
+  await createIndexVersion({ builderId: "builder-1", space: NEW_SPACE() });
+
+  const gate = useGatedProvider();
+  const run = runIndexVersionBuild({
+    batchSize: 2,
+    batcher: createBuildBatcher(8),
+    builderId: "builder-1",
+    concurrency: 3,
+    loadPages: loadFakePages,
+    versionId: 2,
+  });
+
+  await waitFor(() => gate.pending.length === 3, "three documents embedding");
+  await settle();
+  assert.equal(gate.pending.length, 3, "a fourth document waits for a place");
+  assert.equal(gate.maxInFlight, 3);
+  assert.equal(database.state.versions.get(2).builder_id, "builder-1");
+
+  // One finishes: exactly one more starts.
+  gate.release(gate.pending[0]);
+  await waitFor(() => gate.pending.length === 3 && gate.calls.length === 4, "the next document");
+  gate.openAll();
+
+  const result = await run;
+
+  assert.equal(result.indexed, 5);
+  assert.equal(result.version.status, "ready");
+  assert.equal(gate.maxInFlight, 3, "never more than the concurrency");
+  // With free slots under the cap every document's texts left alone.
+  assert.deepEqual(gate.calls.map((call) => call.texts.length), [1, 1, 1, 1, 1]);
+  assert.ok(gate.calls.every((call) => call.model === NEW_MODEL));
+
+  const documentWrites = transactions.filter((statements) =>
+    statements.some((statement) => statement.sql.includes("index_versions:progress"))
+  );
+
+  assert.equal(documentWrites.length, 5, "one transaction per document");
+
+  for (const statements of documentWrites) {
+    const [docId] = statements.find((statement) => statement.sql.includes("index_versions:lock_document")).values;
+
+    // The document row first, then its chunks; the lease (the version row)
+    // only after the chunk writes, right before the progress row, so it is
+    // held from there to COMMIT and never while chunks are written.
+    const tags = statements.map((statement) =>
+      /index_versions:(\w+)/.exec(statement.sql)?.[1] ?? (/^ ?(DELETE|INSERT)/.exec(statement.sql)?.[1] ?? "other")
+    );
+
+    assert.equal(tags[0], "lock_document", "the document row is locked first");
+    assert.deepEqual(tags.slice(-2), ["renew_lease", "progress"], "the lease is renewed last, fencing the write");
+    assert.ok(
+      tags.lastIndexOf("INSERT") < tags.indexOf("renew_lease"),
+      `the chunk writes come before the version row is taken: ${tags.join(", ")}`
+    );
+    assert.deepEqual(
+      statements.filter((statement) => statement.sql.includes("index_versions:progress")).map((statement) => statement.values[1]),
+      [docId]
+    );
+    assert.ok(
+      statements.some((statement) => /^ ?INSERT INTO rag_document_chunks_v2 /.test(statement.sql) && statement.values.includes(docId)),
+      `${docId}'s chunks are written in its own transaction`
+    );
+  }
+
+  assert.deepEqual(
+    [...database.state.progress.values()].map((entry) => [entry.doc_id, entry.outcome]).sort(),
+    [0, 1, 2, 3, 4].map((index) => [`doc-${index}`, "indexed"])
+  );
+});
+
+test("the build's documents share embedding requests only when RAG_LLM_MAX_CONCURRENCY holds them back", async () => {
+  useProvider();
+  const database = useDatabase();
+
+  seedTopicDocuments(database, 4);
+  await createIndexVersion({ builderId: "builder-1", space: NEW_SPACE() });
+
+  const gate = useGatedProvider();
+  const batcher = createBuildBatcher(1);
+  const run = runIndexVersionBuild({ batcher, builderId: "builder-1", concurrency: 4, loadPages: loadFakePages, versionId: 2 });
+
+  // The first document takes the only slot; the other three queue behind it.
+  await waitFor(() => gate.pending.length === 1 && batcher.stats().queuedTexts === 3, "three documents queued");
+  gate.openAll();
+
+  const result = await run;
+
+  assert.equal(result.indexed, 4);
+  assert.deepEqual(gate.calls.map((call) => call.texts.length), [1, 3], "the held-back documents left in one request");
+  assert.equal(batcher.stats().batchedRequests, 1);
+  assert.equal(database.state.tables.get("rag_document_chunks_v2").rows.size, 4);
+});
+
+test("RAG_INGEST_EMBED_BATCHING=false sends each of the build's documents as its own request, even under a cap of 1", async () => {
+  useProvider();
+  const database = useDatabase();
+
+  process.env.RAG_INGEST_EMBED_BATCHING = "false";
+  process.env.RAG_LLM_MAX_CONCURRENCY = "1";
+  resetDefaultEmbeddingBatcher();
+  seedTopicDocuments(database, 4);
+  await createIndexVersion({ builderId: "builder-1", space: NEW_SPACE() });
+
+  assert.notEqual(resolveBuildEmbeddingBatcher(), getDefaultEmbeddingBatcher(), "the switch bypasses the batcher");
+
+  const gate = useGatedProvider();
+  // No batcher passed: the build resolves its own from the configuration.
+  const run = runIndexVersionBuild({ builderId: "builder-1", concurrency: 4, loadPages: loadFakePages, versionId: 2 });
+
+  // A batcher under a cap of 1 would hold three documents back and merge
+  // them; straight through, all four are in flight at once, one each.
+  await waitFor(() => gate.pending.length === 4, "four documents embedding at once");
+  gate.openAll();
+
+  const result = await run;
+
+  assert.equal(result.indexed, 4);
+  assert.deepEqual(gate.calls.map((call) => call.texts.length), [1, 1, 1, 1]);
+  assert.equal(getDefaultEmbeddingBatcher().stats().requests, 0, "the shared batcher sent nothing");
+
+  // With the switch on (the default) the build uses the process's batcher.
+  delete process.env.RAG_INGEST_EMBED_BATCHING;
+  assert.equal(resolveBuildEmbeddingBatcher(), getDefaultEmbeddingBatcher());
+  resetDefaultEmbeddingBatcher();
+});
+
+test("a failed document stops the build from taking more; the ones in flight settle before the lease is released; resume finishes the rest", async () => {
+  useProvider();
+  const database = useDatabase();
+
+  seedTopicDocuments(database, 4);
+  await createIndexVersion({ builderId: "builder-1", space: NEW_SPACE() });
+
+  const gate = useGatedProvider();
+  const run = runIndexVersionBuild({
+    batcher: createBuildBatcher(8),
+    builderId: "builder-1",
+    concurrency: 2,
+    loadPages: loadFakePages,
+    versionId: 2,
+  });
+  const failed = run.then(
+    () => null,
+    (error) => error
+  );
+
+  await waitFor(() => gate.pending.length === 2, "two documents embedding");
+
+  const [first, second] = [...gate.pending].sort((left, right) => left.texts[0].localeCompare(right.texts[0]));
+
+  gate.pending.splice(gate.pending.indexOf(first), 1);
+  first.reject(Object.assign(new Error("embeddings unavailable"), { status: 503 }));
+  await settle();
+
+  assert.equal(gate.calls.length, 2, "no document starts after the failure");
+  assert.equal(database.state.versions.get(2).builder_id, "builder-1", "the lease is held while a document is in flight");
+
+  gate.release(second);
+
+  const error = await failed;
+
+  assert.match(error?.message ?? "", /embeddings unavailable/);
+  assert.equal(database.state.versions.get(2).status, "building");
+  assert.equal(database.state.versions.get(2).builder_id, null, "released once nothing was in flight");
+  assert.deepEqual(
+    [...database.state.progress.values()].map((entry) => [entry.doc_id, entry.outcome]),
+    [["doc-1", "indexed"]],
+    "the document in flight committed; the failed one left no progress row"
+  );
+
+  const calls = useProvider();
+  const resumed = await resumeIndexVersionBuild({ builderId: "builder-2", concurrency: 2, loadPages: loadFakePages });
+
+  assert.equal(resumed.indexed, 3);
+  assert.equal(resumed.version.status, "ready");
+  assert.deepEqual(
+    calls.flatMap((call) => call.texts).sort(),
+    ["alpha clause 0.", "delta clause 3.", "gamma clause 2."],
+    "only what has no progress row is embedded again"
+  );
+});
+
+test("the document runner lists pages as it needs them and finishes them in order, serially at concurrency 1", async () => {
+  const pages = [["a", "b"], ["c"], []];
+  const events = [];
+
+  await runBuildDocuments({
+    concurrency: 1,
+    finishPage: async () => events.push("page"),
+    listPage: async () => {
+      events.push("list");
+      return pages.shift();
+    },
+    processDocument: async (docId) => events.push(docId),
+  });
+  assert.deepEqual(events, ["list", "a", "b", "page", "list", "c", "page", "list"]);
+
+  // A later page that settles first waits for the earlier one.
+  const release = {};
+  const finished = [];
+  const run = runBuildDocuments({
+    concurrency: 2,
+    finishPage: async () => finished.push(finished.length),
+    listPage: (() => {
+      const listed = [["slow"], ["fast"], []];
+
+      return async () => listed.shift();
+    })(),
+    processDocument: (docId) =>
+      docId === "slow" ? new Promise((resolve) => (release.slow = resolve)) : Promise.resolve(),
+  });
+
+  await waitFor(() => typeof release.slow === "function", "the slow document");
+  await settle();
+  assert.deepEqual(finished, [], "the fast page waits for the slow one before it");
+  release.slow();
+  await run;
+  assert.deepEqual(finished, [0, 1]);
 });
 
 test("creation probes the new space: a model that is not served or answers at another width registers nothing", async () => {
@@ -881,9 +1198,25 @@ test("retire refuses what may still be served or rolled back to, then drops the 
   database.state.versions.get(3).builder_id = "someone";
   database.state.versions.get(3).lease_expires_at = new Date(database.clock.now + 10_000);
   await assert.rejects(retireIndexVersion({ versionId: 3 }), /being built by someone.*--force/);
+  assert.equal(database.state.versions.get(3).status, "building", "a refused retire leaves the build alone");
+
+  database.log.length = 0;
 
   const retired = await retireIndexVersion({ force: true, versionId: 3 });
+  const tags = database.log.map((entry) => entry.tag ?? entry.sql);
 
+  // The build is stopped in a statement of its own before the retire
+  // transaction locks the version row and waits for the writers: a builder
+  // transaction still in flight then fails its lease check at once instead of
+  // waiting for that row while it holds a document row.
+  assert.equal(tags[0], "stop_build");
+  assert.ok(tags.indexOf("stop_build") < tags.indexOf("BEGIN"), tags.join(", "));
+  assert.equal(retired.previousStatus, "building");
+  await assert.rejects(
+    claimIndexVersionBuild({ builderId: "someone", versionId: 3 }),
+    /is retired, not building/,
+    "the builder cannot take it back"
+  );
   assert.equal(retired.droppedTable, true);
   assert.equal(database.state.tables.has("rag_document_chunks_v3"), false);
   assert.equal([...database.state.progress.values()].filter((entry) => entry.version_id === 3).length, 0);

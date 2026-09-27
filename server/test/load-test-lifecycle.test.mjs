@@ -61,6 +61,8 @@ test("the index-switch scenario parses its own flags, runs on pgvector only and 
     "0",
     "--switch-build-batch-size",
     "8",
+    "--switch-build-concurrency",
+    "1",
     "--index-pointer-ttl-ms",
     "500",
   ]);
@@ -68,6 +70,8 @@ test("the index-switch scenario parses its own flags, runs on pgvector only and 
   assert.equal(custom.switchDimensions, 384);
   assert.equal(custom.switchPhaseMs, 0);
   assert.equal(custom.switchBuildBatchSize, 8);
+  assert.equal(custom.switchBuildConcurrency, 1);
+  assert.equal(options.switchBuildConcurrency, null, "the builder's own default unless asked");
   assert.equal(custom.indexPointerTtlMs, 500);
 
   assert.throws(() => parseLoadTestArgs(["--scenario", "index-switch"]), /database-url/);
@@ -80,6 +84,7 @@ test("the index-switch scenario parses its own flags, runs on pgvector only and 
     /must differ/
   );
   assert.throws(() => parseLoadTestArgs(["--switch-phase-ms", "10"]), /only apply to --scenario index-switch/);
+  assert.throws(() => parseLoadTestArgs(["--switch-build-concurrency", "4"]), /only apply to --scenario index-switch/);
   assert.throws(() => parseLoadTestArgs([...database, "--scenario", "index-switch", "--uploads", "4"]), /only apply to --scenario ingest/);
 });
 
@@ -492,6 +497,7 @@ test("the index switch and crash reports render with their notes", () => {
               exitCode: 0,
               firstNewSpaceQueryEmbeddingMs: [1850],
               fromVersionId: 1,
+              newSpaceWarmup: { durationMs: 1234, failures: 0 },
               generation: "2",
               pointerPollResolutionMs: 6,
               propagation,
@@ -499,7 +505,7 @@ test("the index switch and crash reports render with their notes", () => {
               validation: { ok: true, reasons: [], totals: { activeChunks: 80, documents: 20, targetChunks: 80 } },
               visibleAfterCommandStartMs: 350,
             },
-            build: { chunkCount: 80, cliWallMs: 900, dimensions: 768, docsPerSecond: 40, docsPerSecondIncludingCli: 22, embeddingInputs: 80, embeddingRequests: 20, failed: 0, indexed: 20, model: "load-test-embedding-768", registryBuildMs: 500, versionId: 2 },
+            build: { chunkCount: 80, cliWallMs: 900, concurrency: 4, dimensions: 768, docsPerSecond: 40, docsPerSecondIncludingCli: 22, embeddingInputs: 80, embeddingRequests: 20, failed: 0, indexed: 20, model: "load-test-embedding-768", registryBuildMs: 500, versionId: 2 },
             embeddingLatencyMs: 0,
             endpoint: "POST /chat during build, activate and rollback",
             errors: [],
@@ -526,7 +532,11 @@ test("the index switch and crash reports render with their notes", () => {
   });
 
   assert.match(markdown, /\| Scenario \| index-switch \|/);
-  assert.match(markdown, /Build of version 2 \(load-test-embedding-768, 768 dimensions\) under \/chat load: 20 documents indexed/);
+  assert.match(
+    markdown,
+    /Build of version 2 \(load-test-embedding-768, 768 dimensions, 4 document\(s\) in flight\) under \/chat load: 20 documents indexed/
+  );
+  assert.match(markdown, /Cache warm-up under the new version \(every question once per instance, discarded\): 1234 ms, 0 non-2xx\./);
   assert.match(markdown, /Every instance searched version 2 1900 ms after the switch was seen/);
   assert.match(markdown, /\| _activation switchover \(first 3000 ms\)_ \|/);
   assert.match(markdown, /2 ready \(rag_document_chunks_v2, load-test-embedding-768\/768, 80 chunks, still dual-written\)/);

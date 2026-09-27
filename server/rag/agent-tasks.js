@@ -34,7 +34,12 @@ export const AGENT_TASK_ACTIONS = Object.freeze({
   approve: "approve",
   approveDeliverables: "approve_deliverables",
   continue: "continue",
+  // Only for a unified graph gate: the run's graph is decided and finalized
+  // without the Capability (a V1 gate is denied on its agent run).
+  deny: "deny",
 });
+
+const GRAPH_APPROVAL_GATE_TYPE = "graph_capability_approval";
 
 const DEFAULT_MAX_ITERATIONS = 3;
 
@@ -288,7 +293,9 @@ const buildProgressPatch = ({
   };
 };
 
-const buildApprovalMap = ({ payload = {}, task = {} } = {}) => {
+// The pending gate a task decision names, bound to the exact approval object
+// the user was shown.
+const findPendingApprovalGate = ({ payload = {}, task = {} } = {}) => {
   const gateId = normalizeText(payload.gateId);
 
   if (!gateId) {
@@ -339,12 +346,45 @@ const buildApprovalMap = ({ payload = {}, task = {} } = {}) => {
     );
   }
 
+  return { approvalObjectHash, capabilityId, gate, gateId };
+};
+
+const buildApprovalMap = ({ payload = {}, task = {} } = {}) => {
+  const { approvalObjectHash, capabilityId, gateId } = findPendingApprovalGate({
+    payload,
+    task,
+  });
+
   return {
     [capabilityId]: {
       ...normalizeRecord(payload.approval),
       approved: true,
       approvalObjectHash,
       decision: "approved",
+      gateId,
+      source: "task_action",
+    },
+  };
+};
+
+const buildDenialMap = ({ payload = {}, task = {} } = {}) => {
+  const { approvalObjectHash, capabilityId, gate, gateId } = findPendingApprovalGate({
+    payload,
+    task,
+  });
+
+  if (normalizeText(gate.type) !== GRAPH_APPROVAL_GATE_TYPE) {
+    throw buildTaskError(
+      "Only a unified graph approval gate can be denied from a task; deny this approval on its agent run.",
+      409
+    );
+  }
+
+  return {
+    [capabilityId]: {
+      approvalObjectHash,
+      approved: false,
+      decision: "denied",
       gateId,
       source: "task_action",
     },
@@ -837,6 +877,35 @@ export const createAgentTaskRunner = ({
         result: planFields.result,
         status: TASK_STATUSES.queued,
         summary: "Agent task queued after approval.",
+      };
+    }
+
+    if (normalizedAction === AGENT_TASK_ACTIONS.deny) {
+      const resumedPayload = {
+        ...nextPayload,
+        capabilityApprovals: buildDenialMap({
+          payload,
+          task,
+        }),
+        nextQuestion:
+          normalizeText(taskPayload.lastQuestion) ||
+          normalizeText(taskPayload.nextQuestion) ||
+          normalizeText(taskPayload.pending?.question) ||
+          taskPayload.question,
+        resumeAgentRunId: true,
+      };
+      const planFields = buildAgentGoalPlanTaskFields({
+        payload: resumedPayload,
+        stoppedReason: "queued_after_denial",
+        taskStatus: TASK_STATUSES.queued,
+      });
+
+      return {
+        items: planFields.items,
+        payload: resumedPayload,
+        result: planFields.result,
+        status: TASK_STATUSES.queued,
+        summary: "Agent task queued after the approval was denied.",
       };
     }
 
