@@ -11,6 +11,7 @@ import {
   isHybridRetrievalEnabled,
 } from "./config.js";
 import { computeAdmissionScore, getResultKey } from "./citations.js";
+import { buildPublicFilePath } from "./document-utils.js";
 import {
   addDocumentsToLocalIndex,
   clearLocalVectorIndex,
@@ -18,10 +19,14 @@ import {
   resetLocalVectorStore,
   searchLocalDocuments,
 } from "./vector-store-local.js";
+import { embedTexts } from "./openai.js";
 import {
   addDocumentsToPgvectorIndex,
+  beginPgvectorIndexWrite,
   clearPgvectorIndex,
+  embedDocumentsInSpace,
   ensurePgvectorSchema,
+  fenceFailedWriteSpace,
   prepareDocumentsForPgvectorIndex,
   removeDocumentsFromPgvectorIndex,
   resetPgvectorVectorStore,
@@ -29,6 +34,10 @@ import {
   searchPgvectorSparseDocuments,
   writeDocumentsToPgvectorIndex,
 } from "./vector-store-pgvector.js";
+import {
+  getConfiguredEmbeddingSpace,
+  getHintedWriteSpaces,
+} from "./vector-store-pgvector-versions.js";
 import {
   addDocumentsToQdrantIndex,
   clearQdrantVectorIndex,
@@ -78,14 +87,42 @@ const normalizeWeights = () => {
 const normalizeByMaximum = (value, maximum) =>
   maximum > 0 ? value / maximum : 0;
 
+// The local and Qdrant providers embed in the configured model only. Vectors a
+// staged ingest computed earlier ride along in `prepared.vectors`; without them
+// the provider embeds at write time, as it always did.
+const prepareWithConfiguredVectors = async ({ documents, vectorsBySpace = null }) => {
+  const vectors = vectorsBySpace?.[getConfiguredEmbeddingSpace().key];
+
+  return Array.isArray(vectors) && vectors.length === documents.length
+    ? { documents, vectors }
+    : { documents };
+};
+
+// Embeds in the configured model without a width check: the local and Qdrant
+// indexes take whatever width the model returns (Qdrant sizes its collection
+// from the first vector), exactly as their write path does.
+const embedInConfiguredModel = async (texts) => {
+  const vectors = await embedTexts(texts);
+
+  if (!Array.isArray(vectors) || vectors.length !== texts.length) {
+    throw new Error(
+      `Embedding provider returned ${Array.isArray(vectors) ? vectors.length : 0} vector(s) for ${texts.length} chunk(s).`
+    );
+  }
+
+  return vectors;
+};
+
 const buildLocalImplementation = () => ({
   id: VECTOR_STORE_PROVIDERS.local,
   denseBackend: "local_json_cosine",
   sparseBackend: "local_json_bm25",
-  prepareDocuments: async ({ documents }) => ({ documents }),
+  embedInSpace: (texts) => embedInConfiguredModel(texts),
+  getWriteSpaces: () => [getConfiguredEmbeddingSpace()],
+  prepareDocuments: prepareWithConfiguredVectors,
   writeDocuments: async ({ prepared }) => {
     await Promise.all([
-      addDocumentsToLocalIndex({ documents: prepared.documents }),
+      addDocumentsToLocalIndex({ documents: prepared.documents, vectors: prepared.vectors ?? null }),
       addDocumentsToSparseIndex({ documents: prepared.documents }),
     ]);
   },
@@ -110,9 +147,11 @@ const buildQdrantImplementation = () => ({
   id: VECTOR_STORE_PROVIDERS.qdrant,
   denseBackend: "qdrant_dense",
   sparseBackend: "qdrant_sparse_bm25",
-  prepareDocuments: async ({ documents }) => ({ documents }),
+  embedInSpace: (texts) => embedInConfiguredModel(texts),
+  getWriteSpaces: () => [getConfiguredEmbeddingSpace()],
+  prepareDocuments: prepareWithConfiguredVectors,
   writeDocuments: async ({ prepared }) => {
-    await addDocumentsToQdrantIndex({ documents: prepared.documents });
+    await addDocumentsToQdrantIndex({ documents: prepared.documents, vectors: prepared.vectors ?? null });
   },
   removeDocuments: async ({ docIds }) => {
     await removeDocumentsFromQdrantIndex({ docIds });
@@ -130,8 +169,17 @@ const buildPgvectorImplementation = () => ({
   denseBackend: "pgvector_cosine",
   sparseBackend: "postgres_fts_ts_rank_cd",
   transactional: true,
-  prepareDocuments: async ({ documents }) => ({
-    preparedDocuments: await prepareDocumentsForPgvectorIndex({ documents }),
+  // Index versions: the version tables a transaction writes are fixed by its
+  // first statements (vector-store-pgvector-versions.js).
+  beginWrite: async ({ client }) => beginPgvectorIndexWrite({ client }),
+  // Every version a write will most likely reach (active first), each in its
+  // own embedding space, width-checked.
+  embedInSpace: (texts, space) => embedDocumentsInSpace(texts, space),
+  // A write target no search reads is best effort (fenceFailedWriteSpace).
+  fenceWriteSpace: fenceFailedWriteSpace,
+  getWriteSpaces: () => getHintedWriteSpaces(),
+  prepareDocuments: async ({ documents, vectorsBySpace = null }) => ({
+    preparedDocuments: await prepareDocumentsForPgvectorIndex({ documents, vectorsBySpace }),
   }),
   writeDocuments: async ({ prepared, accessScope, client }) => {
     await writeDocumentsToPgvectorIndex({
@@ -205,6 +253,19 @@ export const ensureVectorStoreReady = async () => {
   }
 
   return implementation.id;
+};
+
+/**
+ * The first call inside an ingest, delete or clear transaction on a
+ * transactional provider. pgvector takes the index-version write lock and
+ * decides which version tables the transaction writes; the returned client is
+ * the one the rest of the transaction must use. Other providers hand the
+ * client back unchanged.
+ */
+export const beginVectorIndexWrite = async ({ client }) => {
+  const implementation = getVectorStoreImplementation();
+
+  return implementation.beginWrite ? implementation.beginWrite({ client }) : client;
 };
 
 const withDenseProvenance = (results) =>
@@ -450,6 +511,38 @@ const buildRouteSummary = ({ candidateCount, executed, topK }) => ({
   topK,
 });
 
+const toChunkDocumentVersion = (result) => {
+  const version = Number(result?.document?.metadata?.documentVersion);
+
+  // Chunks from before migration 018 carry no version: they are version 1.
+  return Number.isInteger(version) && version > 0 ? version : 1;
+};
+
+/**
+ * Per document, the results of the newest content version any route returned.
+ * Chunk ids are `<docId>:<chunkIndex>` in every version, and the two routes
+ * are separate statements: a replacement that commits between them can hand
+ * fusion the old text from one route and the new from the other under one
+ * key. Dropping the older version's results keeps one answer on one version.
+ */
+export const keepNewestDocumentVersion = (...routes) => {
+  const newest = new Map();
+
+  for (const results of routes) {
+    for (const result of results) {
+      const docId = result?.document?.metadata?.docId;
+
+      newest.set(docId, Math.max(newest.get(docId) ?? 0, toChunkDocumentVersion(result)));
+    }
+  }
+
+  return routes.map((results) =>
+    results.filter(
+      (result) => toChunkDocumentVersion(result) === newest.get(result?.document?.metadata?.docId)
+    )
+  );
+};
+
 /**
  * Runs both routes independently and fuses them. Each route is a separate
  * query against the provider -- a dense cosine search and a lexical search --
@@ -465,7 +558,7 @@ const searchHybridDocumentsWithRoutes = async ({
   const sparseTopK = Math.max(topK, getSparseRetrievalTopK());
   const denseTopK = Math.max(topK, sparseTopK);
   const implementation = getVectorStoreImplementation();
-  const [denseResults, sparseResults] = await Promise.all([
+  const [rawDenseResults, rawSparseResults] = await Promise.all([
     implementation.searchDenseDocuments({
       queryVector,
       queryText,
@@ -479,6 +572,7 @@ const searchHybridDocumentsWithRoutes = async ({
       topK: sparseTopK,
     }),
   ]);
+  const [denseResults, sparseResults] = keepNewestDocumentVersion(rawDenseResults, rawSparseResults);
   const method = getHybridFusionMethod();
   const results =
     method === "rrf"
@@ -613,12 +707,124 @@ export const mergeRouteSummaries = (...summaries) => {
  * Embeds (provider permitting) without touching storage. Split from the write
  * so the ingest path can compute embeddings before it opens a transaction.
  */
-export const prepareDocumentsForIndex = async ({ documents }) => {
+export const prepareDocumentsForIndex = async ({ documents, vectorsBySpace = null }) => {
   const implementation = getVectorStoreImplementation();
 
   return {
     provider: implementation.id,
-    ...(await implementation.prepareDocuments({ documents })),
+    ...(await implementation.prepareDocuments({ documents, vectorsBySpace })),
+  };
+};
+
+/**
+ * The embedding spaces an ingest write will most likely need, the active one
+ * first: for pgvector the active index version and every version that must
+ * stay complete (a build, a rollback target), from the cached pointer; for the
+ * other providers the configured model. Call ensureVectorStoreReady first so
+ * the pointer has been read. A space the write's locked read adds later is
+ * embedded inside the write, so this is a hint, never a correctness input.
+ */
+export const getIndexWriteEmbeddingSpaces = () => {
+  const spaces = [];
+
+  for (const space of getVectorStoreImplementation().getWriteSpaces()) {
+    if (!spaces.some((candidate) => candidate.key === space.key)) {
+      spaces.push(space);
+    }
+  }
+
+  return spaces;
+};
+
+/**
+ * Embeds document texts in one of those spaces the way the active provider's
+ * write would (pgvector checks the space's width). The staged ingest's
+ * embedding batcher (rag/ingest-embedding-batcher.js) sends its merged batches
+ * through here, which reaches the model through rag/openai.js and therefore
+ * through the model-call guard.
+ */
+export const embedDocumentTextsForIndex = (texts, space) =>
+  getVectorStoreImplementation().embedInSpace(texts, space);
+
+/**
+ * The texts embedded in every space getIndexWriteEmbeddingSpaces names,
+ * through `embedInSpace` (the staged ingest passes its batcher). A space other
+ * than the active one that fails is dropped when the provider can fence the
+ * versions in it (pgvector: fenceFailedWriteSpace), so a version nobody
+ * searches never fails an upload; any other failure is thrown. Resolves to
+ * { spaces, vectorsBySpace } for the spaces that were embedded.
+ */
+export const embedTextsForIndexWrite = async ({ texts, embedInSpace = embedDocumentTextsForIndex }) => {
+  const implementation = getVectorStoreImplementation();
+  const spaces = [];
+  const vectorsBySpace = {};
+
+  for (const [spaceIndex, space] of getIndexWriteEmbeddingSpaces().entries()) {
+    try {
+      const vectors = await embedInSpace(texts, space);
+
+      if (!Array.isArray(vectors) || vectors.length !== texts.length) {
+        throw new Error(
+          `Embedding returned ${Array.isArray(vectors) ? vectors.length : 0} vector(s) for ${texts.length} chunk(s).`
+        );
+      }
+
+      vectorsBySpace[space.key] = vectors;
+      spaces.push(space);
+    } catch (error) {
+      // The first space is the active version's: its failure fails the write.
+      if (
+        spaceIndex === 0 ||
+        typeof implementation.fenceWriteSpace !== "function" ||
+        !(await implementation.fenceWriteSpace({ error, space }))
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  if (spaces.length === 0) {
+    throw new Error("No embedding space of the index could embed the document.");
+  }
+
+  return { spaces, vectorsBySpace };
+};
+
+/**
+ * A chunk's metadata stamped with the content version it was cut from. From
+ * version 2 on (a replaced document) the file link names that version too
+ * (`documents/<id>/file?version=N`), so a citation of replaced content never
+ * silently opens the newer PDF: GET /documents/:docId/file refuses a version
+ * that is no longer the document's. Version 1 keeps the plain link.
+ */
+export const stampChunkDocumentVersion = (metadata = {}, documentVersion = 1) => {
+  const version = Number(documentVersion);
+  const stamped = { ...(metadata ?? {}), documentVersion };
+
+  if (Number.isInteger(version) && version > 1 && stamped.docId) {
+    stamped.publicFilePath = `${buildPublicFilePath(stamped.docId)}?version=${version}`;
+  }
+
+  return stamped;
+};
+
+/**
+ * `prepared` with `documentVersion` (the document's content version) added to
+ * every chunk's metadata, so the chunks of a replaced document say which
+ * version they came from. The version is decided inside the write transaction.
+ */
+export const stampPreparedDocumentVersion = (prepared, documentVersion) => {
+  const stamp = (document) => ({
+    ...document,
+    metadata: stampChunkDocumentVersion(document.metadata, documentVersion),
+  });
+
+  return {
+    ...prepared,
+    ...(Array.isArray(prepared?.preparedDocuments)
+      ? { preparedDocuments: prepared.preparedDocuments.map(stamp) }
+      : {}),
+    ...(Array.isArray(prepared?.documents) ? { documents: prepared.documents.map(stamp) } : {}),
   };
 };
 

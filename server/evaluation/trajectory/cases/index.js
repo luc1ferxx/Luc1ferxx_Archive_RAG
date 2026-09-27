@@ -25,6 +25,7 @@ import {
   createSkillGraphIllegalPlanCase,
   createSkillGraphShadowComparisonCase,
 } from "./skill-graph.js";
+import { createUnifiedGraphEvidenceGatedSkillCase } from "./unified-graph.js";
 
 export const createDefaultTrajectoryCases = () => [
   createSkillChainCase(),
@@ -44,4 +45,5 @@ export const createDefaultTrajectoryCases = () => [
   createSkillGraphShadowComparisonCase(),
   createSkillGraphIllegalPlanCase(),
   createSkillGraphBoundedReplanCase(),
+  createUnifiedGraphEvidenceGatedSkillCase(),
 ];

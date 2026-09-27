@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import { EXECUTION_GRAPH_VERSIONS } from "./agent-execution-graph.js";
+import { selectBetterRagResult } from "./agent-self-check.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
 import { hasConsistentDocumentRagGraphResult } from "./skills/document-rag-graph-result.js";
 import {
@@ -9,9 +10,12 @@ import {
   validateSkillValues,
 } from "./skills/skill-contract.js";
 
-// A shape adapter, not an execution or authorization boundary. The v3 graph
-// still needs its own scoped catalog, durable lifecycle, approval continuation,
-// and document evidence loop before callers can hand this state to finalization.
+// A shape adapter, not an execution or authorization boundary. The guarded v3
+// path hands this state to the existing finalizeAgentRun; the scoped catalog,
+// durable lifecycle, and document-loop working memory live in their own
+// modules. describeUnifiedGraphProjectionShape is the static half of this
+// adapter: a graph it refuses is rejected before any node runs, so a planner
+// can never execute work the legacy finalizer cannot represent.
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
@@ -104,12 +108,124 @@ const emptyExecutionState = () => ({
 
 const PROJECTABLE_BUILT_INS = new Set([
   AGENT_SKILL_IDS.documentRag,
+  AGENT_SKILL_IDS.documentEvidenceCheck,
   AGENT_SKILL_IDS.webSearch,
   AGENT_SKILL_IDS.inventory,
   AGENT_SKILL_IDS.documentDiscovery,
 ]);
 
 const RESERVED_BUILT_IN_IDS = new Set(Object.values(AGENT_SKILL_IDS));
+const DIRECT_BUILT_IN_IDS = new Set([
+  AGENT_SKILL_IDS.inventory,
+  AGENT_SKILL_IDS.documentDiscovery,
+]);
+
+const isNodeBinding = (binding, nodeId, output) =>
+  isRecord(binding) &&
+  binding.source === "node" &&
+  binding.nodeId === nodeId &&
+  binding.output === output;
+
+const isProjectableSkill = (skill) =>
+  Boolean(skill) &&
+  hasExplicitExecutionGraphContract(skill) &&
+  ((skill.kind === "custom" && !RESERVED_BUILT_IN_IDS.has(skill.id)) ||
+    (skill.kind === "built_in" && PROJECTABLE_BUILT_INS.has(skill.id)));
+
+const shapeError = (reason) => ({ ok: false, reason });
+
+/**
+ * Static projection contract for a validated v3 graph. The legacy execution
+ * state has one ragResult (the better of a primary document answer and at most
+ * one conditional follow-up), one webResult, a flat custom-Skill list, and a
+ * direct answer only for a standalone inventory/discovery request. A graph
+ * outside that shape is refused before execution instead of failing after
+ * its nodes have already spent budget and written session state.
+ */
+export const describeUnifiedGraphProjectionShape = ({ graph, plan, registry } = {}) => {
+  if (
+    graph?.version !== EXECUTION_GRAPH_VERSIONS.v3 ||
+    !Array.isArray(graph.nodes) ||
+    graph.nodes.length === 0 ||
+    typeof registry?.get !== "function"
+  ) {
+    return shapeError("graph_or_registry_missing");
+  }
+
+  const nodes = new Map(graph.nodes.map((node) => [node.nodeId, node]));
+  const documentNodeIds = [];
+  const checkSources = new Map();
+  let webNodeCount = 0;
+
+  for (const node of graph.nodes) {
+    const skill = registry.get(node?.skillId);
+
+    if (!isProjectableSkill(skill)) {
+      return shapeError(`node_${node?.nodeId}_not_projectable`);
+    }
+
+    if (skill.id === AGENT_SKILL_IDS.documentRag) {
+      documentNodeIds.push(node.nodeId);
+    } else if (skill.id === AGENT_SKILL_IDS.webSearch) {
+      webNodeCount += 1;
+    } else if (skill.id === AGENT_SKILL_IDS.documentEvidenceCheck) {
+      const binding = node.inputBindings?.evidence;
+      const source = nodes.get(binding?.nodeId);
+
+      if (
+        !isNodeBinding(binding, binding?.nodeId, "evidence") ||
+        source?.skillId !== AGENT_SKILL_IDS.documentRag ||
+        !(node.dependsOn ?? []).includes(binding.nodeId)
+      ) {
+        return shapeError(`check_${node.nodeId}_without_document_evidence`);
+      }
+
+      checkSources.set(node.nodeId, binding.nodeId);
+    } else if (DIRECT_BUILT_IN_IDS.has(skill.id)) {
+      if (graph.nodes.length !== 1 || plan?.mode !== skill.id) {
+        return shapeError("direct_skill_not_standalone");
+      }
+    }
+  }
+
+  if (webNodeCount > 1) {
+    return shapeError("repeated_web_output");
+  }
+
+  if (documentNodeIds.length > 2) {
+    return shapeError("repeated_document_output");
+  }
+
+  const [primaryDocumentNodeId = null, followUpNodeId = null] = documentNodeIds;
+  let followUpCheckNodeId = null;
+
+  if (followUpNodeId) {
+    const followUp = nodes.get(followUpNodeId);
+    const checkNodeId = followUp.when?.nodeId;
+
+    // A second document call is admissible only as the conditional follow-up
+    // of the primary answer's own evidence check: it runs when that check asks
+    // for one and reads the check's focused question, never a free-form one.
+    if (
+      checkSources.get(checkNodeId) !== primaryDocumentNodeId ||
+      followUp.when?.output !== "retryRecommended" ||
+      followUp.when?.equals !== true ||
+      !isNodeBinding(followUp.inputBindings?.question, checkNodeId, "followUpQuestion")
+    ) {
+      return shapeError("repeated_document_output");
+    }
+
+    followUpCheckNodeId = checkNodeId;
+  }
+
+  return {
+    followUpCheckNodeId,
+    followUpNodeId,
+    ok: true,
+    primaryDocumentNodeId,
+    reason: null,
+  };
+};
 
 /**
  * Project completed, validated v3 node results into runAgentExecutionPlan's
@@ -159,6 +275,8 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
     receipts.set(nodeRun.nodeId, nodeRun);
   }
 
+  const shape = describeUnifiedGraphProjectionShape({ graph, plan, registry });
+  const documentResults = new Map();
   const state = emptyExecutionState();
   const customIds = new Set();
   const completedResults = [];
@@ -174,12 +292,8 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
     if (
       !skill ||
       skill.id !== node.skillId ||
-      !hasExplicitExecutionGraphContract(skill) ||
       nodeRun.skillVersion !== skill.version ||
-      !(
-        (skill.kind === "custom" && !RESERVED_BUILT_IN_IDS.has(skill.id)) ||
-        (skill.kind === "built_in" && PROJECTABLE_BUILT_INS.has(skill.id))
-      )
+      !isProjectableSkill(skill)
     ) {
       fail(`node ${node.nodeId} has no supported live typed Skill`);
     }
@@ -214,11 +328,25 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
       continue;
     }
 
+    if (skill.id === AGENT_SKILL_IDS.documentEvidenceCheck) {
+      // A control node: its typed check feeds the document loop's working
+      // memory and gap handling, never the answer sources.
+      if (!shape.ok) {
+        fail(`document evidence check cannot be projected (${shape.reason})`);
+      }
+      continue;
+    }
+
     if (skill.id === AGENT_SKILL_IDS.documentRag) {
-      if (state.ragResult || !isValidLegacyValue({ result, skillId: skill.id })) {
+      if (
+        documentResults.has(node.nodeId) ||
+        !isValidLegacyValue({ result, skillId: skill.id }) ||
+        (documentResults.size > 0 &&
+          (!shape.ok || shape.followUpNodeId !== node.nodeId))
+      ) {
         fail("document RAG output is repeated or cannot represent the legacy result");
       }
-      state.ragResult = result;
+      documentResults.set(node.nodeId, result);
       state.documentRagSkill = skill;
       continue;
     }
@@ -251,6 +379,24 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
     fail(`Skill ${skill.id} has no legacy execution-state projection`);
   }
 
+  if (documentResults.size > 0) {
+    const primary = shape.ok && shape.primaryDocumentNodeId
+      ? documentResults.get(shape.primaryDocumentNodeId) ?? null
+      : [...documentResults.values()][0];
+    const followUp = shape.ok && shape.followUpNodeId
+      ? documentResults.get(shape.followUpNodeId) ?? null
+      : null;
+
+    if (!primary) {
+      fail("a follow-up document result has no primary answer");
+    }
+
+    // The same choice runDocumentRagLoop makes between its two calls.
+    state.ragResult = followUp
+      ? selectBetterRagResult({ primary, retry: followUp })
+      : primary;
+  }
+
   if (
     completedResults.length === 0 ||
     run.results.length !== completedResults.length ||
@@ -277,6 +423,13 @@ export const projectUnifiedGraphRun = ({ graph, run, registry, plan } = {}) => {
     fail("legacy synthesis can only represent a matching standalone direct Skill");
   }
 
-  state.customSkillGraphExecuted = state.customSkillResults.length > 0;
+  // The graph-evidence policy (every node's citations, Web included, count
+  // as verification sources) applies only when a custom Skill actually
+  // answered. An abstaining Skill node contributes no answer, so it must not
+  // switch the finalizer away from the evidence policy the same request gets
+  // without it (where Web context never verifies a document-mode claim).
+  state.customSkillGraphExecuted = state.customSkillResults.some(
+    (result) => result.abstained !== true
+  );
   return state;
 };

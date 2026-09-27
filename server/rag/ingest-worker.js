@@ -6,12 +6,20 @@ import path from "node:path";
 import {
   getRagIngestJobLeaseMs,
   getRagIngestJobRetentionMs,
+  getRagIngestStageRetryPolicy,
   getRagIngestWorkerConcurrency,
   getRagIngestWorkerPollMs,
   isRagIngestAsync,
 } from "./config.js";
 import { isDocumentRegistryShared } from "./doc-registry.js";
 import { toIngestJobErrorMessage } from "./ingest-job-store.js";
+import {
+  INGEST_JOB_KINDS,
+  INGEST_STAGE_OUTPUTS,
+  INGEST_STAGES,
+  getNextIngestStage,
+  supportsStagedIngest,
+} from "./ingest-stages.js";
 import { runWithDatabaseTenant } from "./postgres-tenant.js";
 
 // The worker side of RAG_INGEST_MODE=async. Each loop claims one job at a time
@@ -25,6 +33,17 @@ import { runWithDatabaseTenant } from "./postgres-tenant.js";
 // wakes it early when a job is enqueued (store.subscribeToEnqueues: directly in
 // this process, through PostgreSQL NOTIFY from other processes). The poll is
 // the fallback that bounds a lost wake-up to one interval.
+//
+// With the real ragService (whose ingestDocument declares STAGED_INGEST) a job
+// runs as the staged pipeline of rag/ingest-pipeline.js: parse, chunk, embed
+// and index, each one's output stored (store.advanceStage) before the next
+// starts, all within one claim while nothing fails. A failure is recorded
+// against the stage it happened in, with that stage's own retry budget and
+// backoff (RAG_INGEST_<STAGE>_*), so the next attempt resumes there; a stage
+// out of attempts moves the job to dead_letter. The index stage records the
+// job's success inside its own write transaction (store.completeInTransaction)
+// where the provider has one. A ragService whose ingestDocument declares no
+// stages (a test stub, a custom service) runs each job as one step, as before.
 
 const DEFAULT_SHUTDOWN_GRACE_MS = 5000;
 const DEFAULT_HOUSEKEEPING_INTERVAL_MS = 10 * 60 * 1000;
@@ -44,16 +63,62 @@ export const getIngestRetryDelayMs = (attemptCount) =>
     RETRY_MAX_DELAY_MS
   );
 
+/**
+ * The backoff after the `attemptCount`th failed attempt of `stage`: the
+ * doubling delay, jittered down to half of it. Jobs that failed together (one
+ * embeddings batch) thus come due apart and do not re-form the same batch.
+ */
+export const getIngestStageRetryDelayMs = (attemptCount, stage, random = Math.random) => {
+  const { baseDelayMs, maxDelayMs } = getRagIngestStageRetryPolicy(stage);
+  const delayMs = Math.min(baseDelayMs * 2 ** Math.max(0, Number(attemptCount) - 1), maxDelayMs);
+  const draw = Math.min(1, Math.max(0, Number(random()) || 0));
+
+  return Math.round(delayMs * (0.5 + draw / 2));
+};
+
+/**
+ * What an operator reads about a dead-letter job: the stage, the attempt and
+ * the error's status, code and class -- never its message, which may name
+ * part of a key or a host (the public message says what the user may see).
+ */
+export const describeIngestStageFailure = ({ attempt, error, maxAttempts, stage }) => {
+  const details = [
+    Number.isInteger(Number(error?.status)) && error?.status !== undefined ? `status ${error.status}` : null,
+    error?.code ? `code ${error.code}` : null,
+    error?.name && error.name !== "Error" ? error.name : null,
+  ].filter(Boolean);
+
+  return `Stage ${stage} failed on attempt ${attempt} of ${maxAttempts}${
+    details.length > 0 ? ` (${details.join(", ")})` : ""
+  }: ${toIngestJobErrorMessage(error)}`;
+};
+
+const createLeaseLostError = (job) =>
+  Object.assign(new Error(`Ingest job ${job.jobId} attempt ${job.attemptCount} lost its lease.`), {
+    code: "INGEST_JOB_LEASE_LOST",
+    retryable: true,
+  });
+
 // 4xx statuses that still say "try again later": the same set rag/openai.js
 // retries (a timed-out request, a conflict, a rate limit), plus 425.
 const TRANSIENT_CLIENT_STATUSES = new Set([408, 409, 425, 429]);
 
-// Any other 4xx says the upload itself is the problem (no extractable text, an
-// unreadable PDF): another attempt would read the same bytes and fail the same
-// way, so the job fails at once instead of spending its retries. A rate limit
-// from the embedding provider that outlasted the model client's own retries is
-// exactly what the queue's backoff is for.
-export const isRetryableIngestError = (error) => {
+// The stages that read only the upload's own bytes.
+const UPLOAD_STAGES = new Set(["parse", "chunk"]);
+
+// At parse and chunk any other 4xx says the upload itself is the problem (no
+// extractable text, an unreadable PDF, pages too large to store): another
+// attempt would read the same bytes and fail the same way, so the job fails at
+// once instead of spending its retries. At embed and index a 4xx comes from a
+// provider or the configuration instead -- a rotated key (401), revoked model
+// access (403), a model the endpoint does not serve (404), a version's width --
+// or from a size the index versions being built decide: nothing is wrong with
+// the upload, so the job spends the stage's retries and then waits in
+// dead_letter with its bytes for an operator's requeue. An error that says
+// `retryable: false` itself (the document it replaces is gone, the job lost
+// its file) is final at any stage. A rate limit that outlasted the model
+// client's own retries is exactly what the queue's backoff is for.
+export const isRetryableIngestError = (error, stage = null) => {
   if (typeof error?.retryable === "boolean") {
     return error.retryable;
   }
@@ -64,12 +129,16 @@ export const isRetryableIngestError = (error) => {
     return true;
   }
 
+  if (stage && !UPLOAD_STAGES.has(stage)) {
+    return true;
+  }
+
   return !(Number.isInteger(status) && status >= 400 && status < 500);
 };
 
 // The backoff, but never shorter than a Retry-After the provider sent.
-const resolveRetryDelayMs = (retryDelayMs, job, error) => {
-  const delayMs = Number(retryDelayMs(job.attemptCount)) || 0;
+const resolveRetryDelayMs = (retryDelayMs, { attemptCount, stage }, error) => {
+  const delayMs = Number(retryDelayMs(attemptCount, stage)) || 0;
   const retryAfterMs = Number(error?.retryAfterMs);
 
   return Number.isFinite(retryAfterMs) && retryAfterMs > delayMs ? retryAfterMs : delayMs;
@@ -142,23 +211,41 @@ export const createIngestWorker = ({
   housekeepingIntervalMs = DEFAULT_HOUSEKEEPING_INTERVAL_MS,
   leaseMs = getRagIngestJobLeaseMs(),
   logger = console,
+  pipeline = null,
   pollIntervalMs = getRagIngestWorkerPollMs(),
   ragService,
   renewIntervalMs = null,
-  retryDelayMs = getIngestRetryDelayMs,
+  retryDelayMs = getIngestStageRetryDelayMs,
+  stageMaxAttempts = (stage) => getRagIngestStageRetryPolicy(stage).maxAttempts,
   settleRetryDelayMs = SETTLE_RETRY_DELAY_MS,
   shutdownGraceMs = DEFAULT_SHUTDOWN_GRACE_MS,
   store,
   tempDirectory = os.tmpdir(),
   workerId = createIngestWorkerId(),
+  // Test seams: afterStage({ job, stage }) runs once a stage's output is stored.
+  hooks = {},
 } = {}) => {
   if (!store || typeof store.claim !== "function") {
     throw new Error("createIngestWorker requires an ingest job store.");
   }
 
-  if (typeof ragService?.ingestDocument !== "function") {
+  if (!pipeline && typeof ragService?.ingestDocument !== "function") {
     throw new Error("createIngestWorker requires ragService.ingestDocument.");
   }
+
+  // The staged pipeline when one is given or the ragService's ingest declares
+  // it; loaded lazily so a stub-driven worker never loads the RAG modules.
+  let stagedPipeline = pipeline;
+  const resolvePipeline = async () => {
+    if (stagedPipeline || !supportsStagedIngest(ragService?.ingestDocument)) {
+      return stagedPipeline;
+    }
+
+    const { getDefaultIngestPipeline } = await import("./ingest-pipeline.js");
+
+    stagedPipeline = getDefaultIngestPipeline();
+    return stagedPipeline;
+  };
 
   const inFlight = new Map();
   const wakeSleepers = new Set();
@@ -248,9 +335,17 @@ export const createIngestWorker = ({
     return true;
   };
 
-  const ingestJob = async (job, fence, tempFilePath) => {
-    if (await findCommittedDocument(job)) {
-      return;
+  // The one-step ingest of a ragService that declares no stages. It gets the
+  // job's content hash, whether to deduplicate, and whether it replaces a
+  // document, so such a service can honour them too; it resolves to
+  // { outcome } for the success record.
+  const ingestJob = async (job, fence, tempFilePath, holdsLease) => {
+    const replacing = job.kind === INGEST_JOB_KINDS.replace;
+
+    // A replacement's document always exists, so only a new document's row
+    // says an earlier attempt committed.
+    if (!replacing && (await findCommittedDocument(job))) {
+      return { outcome: {} };
     }
 
     try {
@@ -263,15 +358,204 @@ export const createIngestWorker = ({
         throw error;
       }
 
-      await ragService.ingestDocument({
+      // The ingest commits before any fenced write; an attempt that lost its
+      // lease must not start it.
+      if (!(await holdsLease())) {
+        return { leaseLost: true };
+      }
+
+      const document = await ragService.ingestDocument({
+        contentSha256: job.contentSha256 ?? null,
+        deduplicate: job.deduplicate === true,
         docId: job.docId,
         filePath: tempFilePath,
         fileName: job.fileName,
         ownerUserId: job.ownerUserId,
+        replace: replacing,
+        requestedAt: job.createdAt ?? null,
         workspaceId: job.workspaceId,
       });
+
+      return {
+        outcome: {
+          docId: document?.docId ?? null,
+          documentVersion: document?.version ?? null,
+          duplicate: document?.duplicate === true,
+          superseded: document?.superseded === true,
+        },
+      };
     } finally {
       await rm(tempFilePath, { force: true }).catch(() => {});
+    }
+  };
+
+  const writeOutputFile = async (fence, output, filePath) =>
+    typeof store.copyOutputFile === "function"
+      ? store.copyOutputFile({ ...fence, filePath, output })
+      : false;
+
+  const readStageInputs = async (fence, names) => {
+    if (names.length === 0) {
+      return {};
+    }
+
+    const inputs = await store.readOutputs({ ...fence, outputs: names });
+
+    if (!inputs) {
+      return null;
+    }
+
+    const missing = names.filter((name) => !inputs[name]);
+
+    if (missing.length > 0) {
+      // Stored before the stage advanced, so this is not a transient state:
+      // requeueing cannot bring the output back.
+      throw Object.assign(new Error(`The ingest job lost its ${missing.join(", ")} output.`), {
+        retryable: false,
+      });
+    }
+
+    return inputs;
+  };
+
+  // Runs the job's stages from its current one. `state` tracks the stage in
+  // progress and its attempt number, for the failure record. Resolves to
+  // { outcome, recorded } (recorded: success is already in the store),
+  // or { leaseLost: true }.
+  const runStagedJob = async (job, fence, stages, tempFilePath, state, holdsLease) => {
+    const withAttemptDirectory = async (callback) => {
+      await mkdir(attemptDirectory, { recursive: true });
+
+      try {
+        return await callback();
+      } finally {
+        await rm(tempFilePath, { force: true }).catch(() => {});
+      }
+    };
+
+    // Bytes this tenant already stored need no stage at all.
+    if (state.stage === INGEST_STAGES[0] && typeof stages.findDuplicate === "function") {
+      const duplicate = await stages.findDuplicate({ job });
+
+      if (duplicate) {
+        return { outcome: { ...duplicate, duplicate: true }, recorded: false };
+      }
+    }
+
+    for (;;) {
+      const stage = state.stage;
+
+      if (stage === "index") {
+        const inputs = await readStageInputs(fence, [
+          INGEST_STAGE_OUTPUTS.chunks,
+          INGEST_STAGE_OUTPUTS.embeddings,
+        ]);
+
+        if (!inputs) {
+          return { leaseLost: true };
+        }
+
+        let recorded = false;
+        let fencedOut = false;
+        const outcome = await withAttemptDirectory(async () => {
+          if (!(await writeOutputFile(fence, INGEST_STAGE_OUTPUTS.documentFile, tempFilePath))) {
+            throw Object.assign(new Error("The ingest job no longer holds its file."), {
+              retryable: false,
+            });
+          }
+
+          // Without a transaction the commit writes chunks and registry before
+          // any fenced call: an attempt that lost its lease (or was handed
+          // back on stop) must not start it beside the attempt that owns the
+          // job now. On pgvector completeInTransaction fences the commit too.
+          if (!(await holdsLease())) {
+            fencedOut = true;
+            return null;
+          }
+
+          return stages.index({
+            documentFilePath: tempFilePath,
+            inputs,
+            job,
+            onCommit: async ({ client, docId, documentVersion, duplicate, superseded }) => {
+              if (!client || typeof store.completeInTransaction !== "function") {
+                return;
+              }
+
+              if (
+                !(await store.completeInTransaction({
+                  ...fence,
+                  client,
+                  docId,
+                  documentVersion,
+                  duplicate,
+                  superseded,
+                }))
+              ) {
+                throw createLeaseLostError(job);
+              }
+
+              recorded = true;
+            },
+          });
+        });
+
+        return fencedOut ? { leaseLost: true } : { outcome, recorded };
+      }
+
+      let result;
+
+      if (stage === INGEST_STAGES[0]) {
+        result = await withAttemptDirectory(async () => {
+          if (!(await writeAttemptFile(job, fence, tempFilePath))) {
+            throw Object.assign(new Error("The ingest job no longer holds its file."), {
+              retryable: false,
+            });
+          }
+
+          return stages.parse({ filePath: tempFilePath, job });
+        });
+      } else {
+        const inputs = await readStageInputs(fence, stage === "chunk" ? [INGEST_STAGE_OUTPUTS.pages] : [INGEST_STAGE_OUTPUTS.chunks]);
+
+        if (!inputs) {
+          return { leaseLost: true };
+        }
+
+        result = await stages[stage]({ inputs, job });
+      }
+
+      const nextStage = getNextIngestStage(stage);
+      const advanced = await settleWithRetries(
+        () =>
+          store.advanceStage({
+            ...fence,
+            fromStage: stage,
+            leaseMs,
+            maxAttempts: stageMaxAttempts(nextStage),
+            moveDocumentFile: stage === INGEST_STAGES[0],
+            output: {
+              name:
+                stage === INGEST_STAGES[0]
+                  ? INGEST_STAGE_OUTPUTS.pages
+                  : stage === "chunk"
+                    ? INGEST_STAGE_OUTPUTS.chunks
+                    : INGEST_STAGE_OUTPUTS.embeddings,
+              payload: result.output,
+            },
+            toStage: nextStage,
+          }),
+        { retryDelayMs: settleRetryDelayMs }
+      );
+
+      if (!advanced) {
+        return { leaseLost: true };
+      }
+
+      await hooks.afterStage?.({ job, stage });
+      state.stage = nextStage;
+      state.attempt = 1;
+      state.maxAttempts = stageMaxAttempts(nextStage);
     }
   };
 
@@ -286,6 +570,23 @@ export const createIngestWorker = ({
       `ingest-${job.jobId}-${job.attemptCount}-${randomUUID()}.pdf`
     );
     let leaseLost = false;
+    // A fenced renewal: false once another attempt owns the job.
+    const holdsLease = async () => {
+      if (leaseLost) {
+        return false;
+      }
+
+      if (typeof store.renew !== "function") {
+        return true;
+      }
+
+      try {
+        return (await store.renew({ ...fence, leaseMs })) === true;
+      } catch (error) {
+        logger.error?.(`[ingest-worker] failed to renew the lease of job ${job.jobId} before its commit.`, error);
+        return false;
+      }
+    };
     const renewTimer = setInterval(() => {
       // The attempt file's mtime tracks the lease, for sweepIngestTempFiles.
       const touchedAt = new Date();
@@ -306,16 +607,35 @@ export const createIngestWorker = ({
 
     renewTimer.unref?.();
 
+    // The stage in progress and its attempt number, for the failure record.
+    const state = {
+      attempt: Number(job.stageAttempts ?? job.attemptCount) || 1,
+      maxAttempts: Number(job.maxAttempts) || 1,
+      stage: job.stage ?? INGEST_STAGES[0],
+    };
     let ingestError = null;
+    let staged = null;
+    // Whether the job ran as the staged pipeline (state.stage is then the
+    // stage that failed); a one-step ingest judges errors as before.
+    let stagedRun = false;
 
     try {
       await Promise.allSettled(waitFor);
+
+      const stages = await resolvePipeline();
+
+      stagedRun = Boolean(stages);
+
       await runWithDatabaseTenant(
         {
           userId: job.ownerUserId,
           workspaceId: job.workspaceId,
         },
-        () => ingestJob(job, fence, tempFilePath)
+        async () => {
+          staged = stages
+            ? await runStagedJob(job, fence, stages, tempFilePath, state, holdsLease)
+            : await ingestJob(job, fence, tempFilePath, holdsLease);
+        }
       );
     } catch (error) {
       ingestError = error;
@@ -326,24 +646,63 @@ export const createIngestWorker = ({
     const settleOptions = { retryDelayMs: settleRetryDelayMs };
 
     if (!ingestError) {
-      return (await settleWithRetries(() => store.succeed(fence), settleOptions))
+      if (staged?.leaseLost) {
+        return "lease_lost";
+      }
+
+      if (staged?.recorded) {
+        await store.discardOutputs?.(job.jobId).catch?.((error) =>
+          logger.error?.(`[ingest-worker] failed to drop the stage outputs of job ${job.jobId}.`, error)
+        );
+        return "succeeded";
+      }
+
+      const outcome = staged?.outcome ?? {};
+
+      return (await settleWithRetries(
+        () =>
+          store.succeed(fence, {
+            docId: outcome.docId ?? null,
+            documentVersion: outcome.documentVersion ?? null,
+            duplicate: outcome.duplicate === true,
+            superseded: outcome.superseded === true,
+          }),
+        settleOptions
+      ))
         ? "succeeded"
         : "lease_lost";
+    }
+
+    if (ingestError?.code === "INGEST_JOB_LEASE_LOST") {
+      logger.warn?.(
+        `[ingest-worker] job ${job.jobId} attempt ${job.attemptCount} lost its lease before its index write committed; the write was rolled back.`
+      );
+      return "lease_lost";
     }
 
     const status = await settleWithRetries(
       () =>
         store.fail({
           ...fence,
+          deadLetterReason: describeIngestStageFailure({
+            attempt: state.attempt,
+            error: ingestError,
+            maxAttempts: state.maxAttempts,
+            stage: state.stage,
+          }),
           error: toIngestJobErrorMessage(ingestError),
-          retryDelayMs: resolveRetryDelayMs(retryDelayMs, job, ingestError),
-          retryable: isRetryableIngestError(ingestError),
+          retryDelayMs: resolveRetryDelayMs(
+            retryDelayMs,
+            { attemptCount: state.attempt, stage: state.stage },
+            ingestError
+          ),
+          retryable: isRetryableIngestError(ingestError, stagedRun ? state.stage : null),
         }),
       settleOptions
     );
 
     logger.error?.(
-      `[ingest-worker] job ${job.jobId} attempt ${job.attemptCount} failed (${status ?? "lease lost"}).`,
+      `[ingest-worker] job ${job.jobId} attempt ${job.attemptCount} failed at stage ${state.stage} (${status ?? "lease lost"}).`,
       ingestError
     );
     return status ?? "lease_lost";

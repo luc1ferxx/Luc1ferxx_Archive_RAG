@@ -14,11 +14,11 @@ import { CUSTOM_RAG_SKILL_CONTRACT } from "../rag/skills/custom/custom-skill-con
 import { createSkillRegistry } from "../rag/skills/registry.js";
 import { SKILL_EFFECTS } from "../rag/skills/skill-contract.js";
 
-// The v3 all-stage graph stage is not wired into /chat yet (executionWired:
-// false). These tests pin the boundaries it must keep before it is: it runs only
-// on a durable runtime, only a validated v3 proposal, never a claimed
-// continuation without its checkpoint, and it never lets a node run past an
-// unacknowledged checkpoint write.
+// The v3 all-stage graph stage runs /chat and background tasks only under
+// AGENT_UNIFIED_GRAPH_ROLLOUT=guarded (agent-unified-graph-run.js). These tests
+// pin the boundaries it keeps: it runs only on a durable runtime, only a
+// validated v3 proposal, never a claimed continuation without its checkpoint,
+// and it never lets a node run past an unacknowledged checkpoint write.
 
 const accessScope = { userId: "alice", workspaceId: "workspace-a" };
 const docIds = ["doc-a", "doc-b"];

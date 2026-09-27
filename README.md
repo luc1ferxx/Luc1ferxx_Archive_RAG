@@ -35,6 +35,8 @@
   - 交叉编码器重排可选（bge-reranker-v2-m3），重排服务不可用时退回融合排序。
   - "答不答"由门控决定：有重排分数时看重排概率，否则看问题词的覆盖率。门控决定作答后，还会补入其余候选段落作为上下文。
 - **异步入库、多实例。** `RAG_INGEST_MODE=async` 时上传立即返回 202，PDF 存进 PostgreSQL 任务表，由任意实例上的 worker 或独立 worker 进程领取（`FOR UPDATE SKIP LOCKED`，带租约和围栏，失败退避重试，重试不会重复入库），新任务通过 `LISTEN/NOTIFY` 立即唤醒 worker。多个 API 实例共享数据库和 Redis 状态，别的实例上传或删除的文档立即可见。
+- **索引版本。** 换 embedding 模型或重建索引时，新版本在后台建（可断点续建、双写），校验通过后原子切换，所有实例 2 秒内跟上，可回滚；压测下全程 0 错误。
+- **分阶段入库。** 解析、切块、向量化、写索引四段各自落库和重试，跨文档合批向量化，死信队列，同租户按内容去重，`PUT /documents/:docId` 原子替换文档。
 - **持久、可恢复。** 运行记录、步骤和检查点存在 PostgreSQL 里，用版本号做 CAS，挡住过期的 worker；有副作用的步骤不会被自动重放。
 - **多租户隔离。** 每条带租户范围的 SQL 都在事务里切换到租户角色，由 PostgreSQL 行级安全兜底：即使漏写了过滤条件，也读不到其他租户的数据。行级安全下全文检索用不上 GIN（`@@` 不是 leakproof），多文档检索改由一个只返回 id 和分数的 owner 函数排序，返回的行仍由策略过滤；10 万分块、1000 篇文档时 p50 从 142 ms 降到 19 ms。
 - **一切有上限。** 补检索最多一轮，重规划最多一次。每次运行都有调用次数、token、成本和时长上限，超限时降级，不报错。
@@ -182,6 +184,7 @@ RAG_EMBEDDING_DIMENSIONS=768
 | [docs/evaluation.md](docs/evaluation.md) | 评测命令、质量门禁、所有改前 / 改后数字 |
 | [docs/configuration.md](docs/configuration.md) | 环境变量 |
 | [docs/deployment.md](docs/deployment.md) | Docker 一键部署和各个 profile |
+| [docs/data-lifecycle.md](docs/data-lifecycle.md) | 索引版本（零停机重建、切换、回滚）和分阶段入库流水线 |
 | [docs/development.md](docs/development.md) | API、目录结构、工程化基线、开发约束 |
 | [docs/unified-agent-dag-migration.md](docs/unified-agent-dag-migration.md) | 全阶段统一图（已冻结）的设计记录 |
 | [server/docs/interview/](server/docs/interview/) | 面试材料：数字出处、3 分钟讲述、故障故事、高频追问 |
@@ -199,4 +202,4 @@ RAG_EMBEDDING_DIMENSIONS=768
   - 压测和多实例测试都在同一台机器上、用假模型；4 个实例时已经用满高性能核，扩展倍数受机器影响。
   - 规模测试用的是合成向量，没有测并发查询和写入时的检索。
   - 查询里有极常见的词时，全文检索几乎命中所有分块、每一行都要打分：全表检索的 p95 仍约 135 ms。
-- **架构**：Typed DAG 只覆盖自定义 Skill 阶段；外层的文档、Web 和内置 Skill 仍按固定顺序执行。
+- **架构**：默认执行路径里，typed DAG 只覆盖自定义 Skill 阶段。全阶段统一图可以用 `AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 打开（不含审批节点的图），但只用确定性提案和 mock 验证过；含审批的图仍回到固定顺序。

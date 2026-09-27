@@ -225,12 +225,17 @@ const toSearchResult = (entry, vectorScore, keywordScore, scoringMode) => ({
   keywordScore,
 });
 
-export const addDocumentsToLocalIndex = async ({ documents }) => {
+// `vectors` are embeddings the staged ingest pipeline already computed (one per
+// document, in order); without them the documents are embedded here as before.
+export const addDocumentsToLocalIndex = async ({ documents, vectors: preparedVectors = null }) => {
   if (!Array.isArray(documents) || documents.length === 0) {
     return;
   }
 
-  const vectors = await embedTexts(documents.map((document) => document.pageContent));
+  const vectors =
+    Array.isArray(preparedVectors) && preparedVectors.length === documents.length
+      ? preparedVectors
+      : await embedTexts(documents.map((document) => document.pageContent));
   const nextEntries = documents.map((document, index) =>
     normalizeEntry({
       id: document.id,

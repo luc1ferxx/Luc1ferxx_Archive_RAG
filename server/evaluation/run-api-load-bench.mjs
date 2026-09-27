@@ -158,7 +158,7 @@
 //     [--database-url <disposable pgvector PostgreSQL URL>]
 //     [--instances 1] [--balance least-outstanding|round-robin]
 //     [--shared-state memory|redis] [--redis-url <disposable Redis URL>]
-//     [--scenario chat|ingest]
+//     [--scenario chat|ingest|index-switch]
 //     [--concurrency 1,4,16,32] [--requests 128] [--min-requests-per-client 8]
 //     [--cheap-requests 1000] [--warmup 8] [--idle-ms 3000]
 //     [--model-latency-ms 0,800] [--embedding-latency-ms 0]
@@ -174,7 +174,24 @@
 //     [--uploads 16] [--upload-concurrency 4]
 //     [--ingest-pages 4] [--chat-concurrency 4] [--baseline-ms 10000]
 //     [--poll-interval-ms 1000] [--searchable-timeout-ms 120000] [--repeat 1]
+//     [--embed-batching on|off] [--embed-batch-linger-ms N] [--ingest-job-lease-ms N]
+//     [--crash-worker-mid-embed]   (async, 2+ dedicated workers, one level)
 //     (--latest-name defaults to latest-load-test-ingest)
+//   index-switch scenario only (pgvector):
+//     [--switch-concurrency 8] [--switch-dimensions 768] [--switch-phase-ms 15000]
+//     [--switch-build-batch-size N] [--index-pointer-ttl-ms N]
+//     (--latest-name defaults to latest-load-test-index-switch)
+//   any scenario: [--embedding-latency-per-input-ms 0]
+//
+// Index switch scenario (--scenario index-switch): the seed corpus is
+// uploaded as PDFs, a closed-loop /chat load runs for the whole run, and
+// vector-index.mjs builds a version under another embedding model and width,
+// activates it and rolls back, each as its own process. The report splits
+// latency and errors by phase and says when each instance started searching
+// each version (runIndexSwitchScenario). Per-process API keys let the fake
+// model count each process's calls; --crash-worker-mid-embed kills dedicated
+// worker 0 during its first embeddings request of the level and follows every
+// job it held through the queue table (createCrashInjection).
 //
 // A report is named by --latest-name and a rerun overwrites it: give each side
 // of a before/after comparison its own name, and keep both.
@@ -192,7 +209,7 @@ import os from "node:os";
 import path from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { buildIngestDocuments } from "./load-bench-pdf.mjs";
+import { buildIngestDocuments, buildTextPdf } from "./load-bench-pdf.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -217,10 +234,16 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   concurrency: Object.freeze([1, 4, 16, 32]),
   databaseUrl: "",
   documents: 20,
+  crashWorkerMidEmbed: false,
+  embedBatchLingerMs: null,
+  embedBatching: null,
   embeddingCache: true,
   embeddingDimensions: 1536,
   embeddingLatencyMs: 0,
+  embeddingLatencyPerInputMs: 0,
   idleMs: 3000,
+  indexPointerTtlMs: null,
+  ingestJobLeaseMs: null,
   ingestMode: "sync",
   ingestPages: 4,
   ingestWorkerConcurrency: null,
@@ -247,6 +270,10 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   searchableTimeoutMs: 120000,
   sharedState: "memory",
   storage: null,
+  switchBuildBatchSize: null,
+  switchConcurrency: 8,
+  switchDimensions: 768,
+  switchPhaseMs: 15000,
   tenant: false,
   uploadConcurrency: Object.freeze([4]),
   uploads: 16,
@@ -258,10 +285,12 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
 // free unless --embedding-latency-ms says so; the chat scenario keeps 0.
 export const DEFAULT_INGEST_EMBEDDING_LATENCY_MS = 200;
 export const DEFAULT_INGEST_LATEST_NAME = "latest-load-test-ingest";
+export const DEFAULT_INDEX_SWITCH_LATEST_NAME = "latest-load-test-index-switch";
 
 const STORAGE_MODES = new Set(["local", "pgvector"]);
 const PLANNER_MODES = new Set(["deterministic", "llm"]);
-const SCENARIOS = new Set(["chat", "ingest"]);
+const SCENARIOS = new Set(["chat", "ingest", "index-switch"]);
+const EMBED_BATCHING_MODES = new Set(["on", "off"]);
 const INGEST_MODES = new Set(["sync", "async"]);
 const SHARED_STATE_MODES = new Set(["memory", "redis"]);
 export const BALANCE_MODES = Object.freeze(["least-outstanding", "round-robin"]);
@@ -272,6 +301,10 @@ export const LOAD_TEST_TENANT = Object.freeze({ userId: "load-test-user", worksp
 const INGEST_ONLY_FLAGS = Object.freeze([
   "baseline-ms",
   "chat-concurrency",
+  "crash-worker-mid-embed",
+  "embed-batch-linger-ms",
+  "embed-batching",
+  "ingest-job-lease-ms",
   "ingest-max-pending-jobs",
   "ingest-mode",
   "ingest-pages",
@@ -283,6 +316,14 @@ const INGEST_ONLY_FLAGS = Object.freeze([
   "searchable-timeout-ms",
   "upload-concurrency",
   "uploads",
+]);
+
+const INDEX_SWITCH_ONLY_FLAGS = Object.freeze([
+  "index-pointer-ttl-ms",
+  "switch-build-batch-size",
+  "switch-concurrency",
+  "switch-dimensions",
+  "switch-phase-ms",
 ]);
 
 const round = (value, digits = 1) =>
@@ -317,7 +358,17 @@ const toPositiveInteger = (raw, name, { allowZero = false } = {}) => {
 /** Parses CLI flags into a complete options object (defaults filled in). */
 export const parseLoadTestArgs = (argv = []) => {
   const raw = {};
-  const flags = new Set(["auth", "no-analyze", "no-embedding-cache", "rate-limit", "tenant", "verbose", "serve", "serve-worker"]);
+  const flags = new Set([
+    "auth",
+    "crash-worker-mid-embed",
+    "no-analyze",
+    "no-embedding-cache",
+    "rate-limit",
+    "tenant",
+    "verbose",
+    "serve",
+    "serve-worker",
+  ]);
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -342,6 +393,7 @@ export const parseLoadTestArgs = (argv = []) => {
   const known = new Set([
     ...flags,
     ...INGEST_ONLY_FLAGS,
+    ...INDEX_SWITCH_ONLY_FLAGS,
     "balance",
     "cheap-path",
     "cheap-requests",
@@ -350,6 +402,7 @@ export const parseLoadTestArgs = (argv = []) => {
     "documents",
     "embedding-dimensions",
     "embedding-latency-ms",
+    "embedding-latency-per-input-ms",
     "idle-ms",
     "instances",
     "latest-name",
@@ -397,6 +450,12 @@ export const parseLoadTestArgs = (argv = []) => {
     options.embeddingLatencyMs = toPositiveInteger(raw["embedding-latency-ms"], "--embedding-latency-ms", {
       allowZero: true,
     });
+  if (raw["embedding-latency-per-input-ms"] !== undefined)
+    options.embeddingLatencyPerInputMs = toPositiveInteger(
+      raw["embedding-latency-per-input-ms"],
+      "--embedding-latency-per-input-ms",
+      { allowZero: true }
+    );
   if (raw["latest-name"]) options.latestName = String(raw["latest-name"]);
   if (raw["llm-max-concurrency"] !== undefined)
     options.llmMaxConcurrency = toPositiveInteger(raw["llm-max-concurrency"], "--llm-max-concurrency", {
@@ -425,8 +484,34 @@ export const parseLoadTestArgs = (argv = []) => {
   if (raw["idle-ms"] !== undefined) options.idleMs = toPositiveInteger(raw["idle-ms"], "--idle-ms", { allowZero: true });
 
   if (raw.scenario !== undefined) {
-    if (!SCENARIOS.has(raw.scenario)) throw new Error("--scenario must be chat or ingest.");
+    if (!SCENARIOS.has(raw.scenario)) throw new Error("--scenario must be chat, ingest or index-switch.");
     options.scenario = raw.scenario;
+  }
+  if (options.scenario !== "index-switch") {
+    const misplaced = INDEX_SWITCH_ONLY_FLAGS.filter((name) => raw[name] !== undefined);
+    if (misplaced.length > 0) {
+      throw new Error(`${misplaced.map((name) => `--${name}`).join(", ")} only apply to --scenario index-switch.`);
+    }
+  } else {
+    if (raw["switch-concurrency"] !== undefined)
+      options.switchConcurrency = toPositiveInteger(raw["switch-concurrency"], "--switch-concurrency");
+    if (raw["switch-dimensions"] !== undefined)
+      options.switchDimensions = toPositiveInteger(raw["switch-dimensions"], "--switch-dimensions");
+    if (raw["switch-phase-ms"] !== undefined)
+      options.switchPhaseMs = toPositiveInteger(raw["switch-phase-ms"], "--switch-phase-ms", { allowZero: true });
+    if (raw["switch-build-batch-size"] !== undefined)
+      options.switchBuildBatchSize = toPositiveInteger(raw["switch-build-batch-size"], "--switch-build-batch-size");
+    if (raw["index-pointer-ttl-ms"] !== undefined)
+      options.indexPointerTtlMs = toPositiveInteger(raw["index-pointer-ttl-ms"], "--index-pointer-ttl-ms");
+    if (!raw["latest-name"]) options.latestName = DEFAULT_INDEX_SWITCH_LATEST_NAME;
+    // The new version must live in another embedding space than the seed's.
+    if (options.switchDimensions === options.embeddingDimensions) {
+      throw new Error("--switch-dimensions must differ from --embedding-dimensions: the scenario switches to another width.");
+    }
+    if (raw.storage !== undefined && String(raw.storage).trim() !== "pgvector") {
+      throw new Error("--scenario index-switch runs on --storage pgvector only (index versions are a pgvector feature).");
+    }
+    raw.storage = "pgvector";
   }
   if (options.scenario !== "ingest") {
     const misplaced = INGEST_ONLY_FLAGS.filter((name) => raw[name] !== undefined);
@@ -470,6 +555,17 @@ export const parseLoadTestArgs = (argv = []) => {
     // Each upload concurrency level runs this many times in a row (with its
     // own baselines), so the report can put an interval on its numbers.
     if (raw.repeat !== undefined) options.repeat = toPositiveInteger(raw.repeat, "--repeat");
+    if (raw["embed-batching"] !== undefined) {
+      if (!EMBED_BATCHING_MODES.has(raw["embed-batching"])) throw new Error("--embed-batching must be on or off.");
+      options.embedBatching = raw["embed-batching"];
+    }
+    if (raw["embed-batch-linger-ms"] !== undefined)
+      options.embedBatchLingerMs = toPositiveInteger(raw["embed-batch-linger-ms"], "--embed-batch-linger-ms", {
+        allowZero: true,
+      });
+    if (raw["ingest-job-lease-ms"] !== undefined)
+      options.ingestJobLeaseMs = toPositiveInteger(raw["ingest-job-lease-ms"], "--ingest-job-lease-ms");
+    if (raw["crash-worker-mid-embed"]) options.crashWorkerMidEmbed = true;
     if (raw["embedding-latency-ms"] === undefined) options.embeddingLatencyMs = DEFAULT_INGEST_EMBEDDING_LATENCY_MS;
     if (!raw["latest-name"]) options.latestName = DEFAULT_INGEST_LATEST_NAME;
     if (options.ingestWorkers > 0 && options.ingestMode !== "async") {
@@ -485,6 +581,25 @@ export const parseLoadTestArgs = (argv = []) => {
     }
     if (options.ingestMaxPendingJobs !== null && options.ingestMode !== "async") {
       throw new Error("--ingest-max-pending-jobs needs --ingest-mode async (only queued uploads count against it).");
+    }
+    for (const [flag, value] of [
+      ["--embed-batching", options.embedBatching],
+      ["--embed-batch-linger-ms", options.embedBatchLingerMs],
+      ["--ingest-job-lease-ms", options.ingestJobLeaseMs],
+    ]) {
+      if (value !== null && options.ingestMode !== "async") {
+        throw new Error(`${flag} needs --ingest-mode async (the staged pipeline runs async jobs only).`);
+      }
+    }
+    if (options.crashWorkerMidEmbed) {
+      if (options.ingestMode !== "async" || options.ingestWorkers < 2) {
+        throw new Error(
+          "--crash-worker-mid-embed needs --ingest-mode async and --ingest-workers 2 or more: one dedicated worker is killed, another resumes its jobs."
+        );
+      }
+      if (options.uploadConcurrency.length !== 1 || options.repeat !== 1) {
+        throw new Error("--crash-worker-mid-embed runs one level once: give one --upload-concurrency and no --repeat.");
+      }
     }
   }
 
@@ -1354,10 +1469,22 @@ const FILLER = Object.freeze([
   "Archived records are stored in encrypted object storage with versioning enabled.",
 ]);
 
-const projectName = (index) =>
-  index < PROJECT_NAMES.length
-    ? PROJECT_NAMES[index]
-    : `${PROJECT_NAMES[index % PROJECT_NAMES.length]}${Math.floor(index / PROJECT_NAMES.length) + 1}`;
+// Beyond the 20 base names a name compounds base names by the index's base-20
+// digits, lowest first ("Asterbirch" for 20), never with a digit: a file name
+// with a digit (project-aster2-handbook.pdf) counts as a document identity
+// label to the claim attribution (rag/self-check/attribution.js), and every
+// answer about such a document ended in a clarification, so a corpus above
+// 20 documents measured clarifications instead of answers. The base names are
+// a prefix-free set, so every compound is unique.
+export const projectName = (index) => {
+  const base = PROJECT_NAMES.length;
+  if (index < base) return PROJECT_NAMES[index];
+  let name = PROJECT_NAMES[index % base];
+  for (let rest = Math.floor(index / base); rest > 0; rest = Math.floor(rest / base)) {
+    name += PROJECT_NAMES[rest % base].toLowerCase();
+  }
+  return name;
+};
 
 // One fact per page; the question is answerable from that page alone.
 const PAGE_FACTS = Object.freeze([
@@ -1410,6 +1537,20 @@ export const buildSyntheticCorpus = ({ documents = 20, pages = 4, docIdPrefix = 
 
   return { documents: docs, questions };
 };
+
+/**
+ * PDF bytes of one synthetic corpus document (load-bench-pdf.mjs), one line
+ * per sentence, so the registry holds real PDF bytes an index version build
+ * can parse again (--scenario index-switch seeds the corpus this way).
+ */
+export const buildSeedPdf = (doc) =>
+  buildTextPdf({
+    pages: doc.pages.map((page) => {
+      const sentences = (String(page.text).match(/[^.!?]+[.!?]+/g) ?? []).map((sentence) => sentence.trim()).filter(Boolean);
+      return sentences.length > 0 ? sentences : [String(page.text)];
+    }),
+    title: doc.fileName,
+  });
 
 // FNV-1a, so a token always lands in the same bucket.
 const hashToken = (token) => {
@@ -1530,25 +1671,81 @@ export const observedPeakInFlight = ({ latencyMs, peak }) =>
   Number.isFinite(latencyMs) && latencyMs > 0 ? peak : null;
 
 /**
+ * The embedding model an index version is built under in --scenario
+ * index-switch: `load-test-embedding-<width>`. The fake answers such a model
+ * with vectors of that width, any other model with the server's default.
+ */
+export const SWITCH_EMBEDDING_MODEL_PREFIX = "load-test-embedding-";
+export const switchEmbeddingModel = (dimensions) => `${SWITCH_EMBEDDING_MODEL_PREFIX}${dimensions}`;
+export const fakeEmbeddingWidth = (model, fallback) => {
+  const text = String(model ?? "");
+  const width = text.startsWith(SWITCH_EMBEDDING_MODEL_PREFIX) ? Number(text.slice(SWITCH_EMBEDDING_MODEL_PREFIX.length)) : Number.NaN;
+
+  return Number.isInteger(width) && width > 0 ? width : fallback;
+};
+
+/**
+ * Who sent a model request: every process of a run gets its own API key
+ * (buildAppEnvironment's callerTag, "load-test-api-0", "load-test-worker-1",
+ * "load-test-cli"), so the fake can split its counts by process. "unknown"
+ * without a bearer key.
+ */
+export const fakeModelCaller = (authorization) => {
+  const match = /^Bearer\s+(\S+)/i.exec(String(authorization ?? ""));
+  return match ? match[1] : "unknown";
+};
+
+/** The seed or upload documents an embeddings request's texts belong to (by their program/project name). */
+export const documentNamesInTexts = (texts = []) => [
+  ...new Set(
+    texts.flatMap((text) => [...String(text ?? "").matchAll(/\b(?:Program|Project) ([A-Z][A-Za-z]*-[a-z0-9]+-\d+|[A-Z][A-Za-z]+(?:-\d+)?)\b/g)].map((match) => match[1]))
+  ),
+];
+
+/**
  * Local OpenAI-compatible server: /v1/embeddings and /v1/chat/completions with
- * artificial latency, counting requests and the peak in flight per kind.
+ * artificial latency, counting requests and the peak in flight per kind, and
+ * per caller (the request's API key) and embedding model. An embeddings
+ * request's latency is `embeddingLatencyMs` plus `embeddingLatencyPerInputMs`
+ * per input. holdNextEmbedding({ caller }) makes the next embeddings request
+ * of that caller hang unanswered and resolves with what it carried: the crash
+ * injection kills the process that sent it while it waits (mid-embed).
  */
 export const startFakeModelServer = async ({
   chatLatencyMs = 0,
   dimensions = DEFAULT_LOAD_TEST_OPTIONS.embeddingDimensions,
   embeddingLatencyMs = 0,
+  embeddingLatencyPerInputMs = 0,
 } = {}) => {
-  const latency = { chat: chatLatencyMs, embeddings: embeddingLatencyMs };
+  const latency = { chat: chatLatencyMs, embeddings: embeddingLatencyMs, embeddingsPerInput: embeddingLatencyPerInputMs };
   // In flight is one count for the server's life: a request that arrived
   // before a reset still leaves it when it is answered. Each stats window
   // starts its peak at what is in flight when it opens.
   const inFlight = { chat: 0, embeddings: 0 };
   const freshStats = () => ({
+    byCaller: {},
     chat: { peakInFlight: inFlight.chat, requests: 0 },
     embeddings: { inputs: 0, peakInFlight: inFlight.embeddings, requests: 0 },
+    embeddingsByModel: {},
     other: { requests: 0 },
   });
   let stats = freshStats();
+  // First embeddings request per caller and model, epoch ms, for the server's life.
+  const firstEmbeddingAt = {};
+  const holds = [];
+  const countCall = (caller, kind, model, inputs) => {
+    const entry = (stats.byCaller[caller] ??= { chat: 0, embeddingInputs: 0, embeddings: 0 });
+    if (kind === "chat") {
+      entry.chat += 1;
+      return;
+    }
+    entry.embeddings += 1;
+    entry.embeddingInputs += inputs;
+    const byModel = (stats.embeddingsByModel[model] ??= { inputs: 0, requests: 0 });
+    byModel.requests += 1;
+    byModel.inputs += inputs;
+    firstEmbeddingAt[`${caller}|${model}`] ??= Date.now();
+  };
 
   const server = http.createServer((request, response) => {
     let body = "";
@@ -1592,15 +1789,35 @@ export const startFakeModelServer = async ({
         }
       };
       response.on("close", settle);
+      const caller = fakeModelCaller(request.headers.authorization);
+      const inputs = kind === "embeddings" ? (Array.isArray(payload.input) ? payload.input : [payload.input ?? ""]) : [];
+      countCall(caller, kind, String(payload.model ?? ""), inputs.length);
+
+      if (kind === "embeddings") {
+        const holdIndex = holds.findIndex((hold) => hold.caller === caller);
+        if (holdIndex >= 0) {
+          // Never answered: the caller is killed while it waits.
+          const [hold] = holds.splice(holdIndex, 1);
+          bucket.inputs += inputs.length;
+          hold.resolve({
+            at: Date.now(),
+            caller,
+            documents: documentNamesInTexts(inputs),
+            inputs: inputs.length,
+            model: String(payload.model ?? ""),
+          });
+          return;
+        }
+      }
 
       const reply = () => {
         settle();
         if (kind === "embeddings") {
-          const inputs = Array.isArray(payload.input) ? payload.input : [payload.input ?? ""];
+          const width = fakeEmbeddingWidth(payload.model, dimensions);
           bucket.inputs += inputs.length;
           send(200, {
             data: inputs.map((input, index) => ({
-              embedding: hashEmbedding(input, dimensions),
+              embedding: hashEmbedding(input, width),
               index,
               object: "embedding",
             })),
@@ -1626,7 +1843,7 @@ export const startFakeModelServer = async ({
         });
       };
 
-      const delay = latency[kind];
+      const delay = kind === "embeddings" ? latency.embeddings + latency.embeddingsPerInput * inputs.length : latency[kind];
       if (delay > 0) setTimeout(reply, delay);
       else reply();
     });
@@ -1642,20 +1859,28 @@ export const startFakeModelServer = async ({
         server.closeAllConnections?.();
         server.close(() => resolve());
       }),
+    firstEmbeddingAt: () => ({ ...firstEmbeddingAt }),
+    holdNextEmbedding: ({ caller }) =>
+      new Promise((resolve) => {
+        holds.push({ caller, resolve });
+      }),
     resetStats: () => {
       stats = freshStats();
     },
-    setLatency: ({ chatMs, embeddingMs } = {}) => {
+    setLatency: ({ chatMs, embeddingMs, embeddingPerInputMs } = {}) => {
       if (Number.isFinite(chatMs)) latency.chat = chatMs;
       if (Number.isFinite(embeddingMs)) latency.embeddings = embeddingMs;
+      if (Number.isFinite(embeddingPerInputMs)) latency.embeddingsPerInput = embeddingPerInputMs;
     },
     snapshot: () => ({
+      byCaller: Object.fromEntries(Object.entries(stats.byCaller).map(([caller, entry]) => [caller, { ...entry }])),
       chat: { peakInFlight: stats.chat.peakInFlight, requests: stats.chat.requests },
       embeddings: {
         inputs: stats.embeddings.inputs,
         peakInFlight: stats.embeddings.peakInFlight,
         requests: stats.embeddings.requests,
       },
+      embeddingsByModel: Object.fromEntries(Object.entries(stats.embeddingsByModel).map(([model, entry]) => [model, { ...entry }])),
       other: { requests: stats.other.requests },
     }),
   };
@@ -1737,6 +1962,7 @@ export const buildAppEnvironment = ({
   storage,
   tempRoot,
   authToken = "",
+  callerTag = "",
   role = "api",
   runId = "",
 }) => {
@@ -1755,7 +1981,9 @@ export const buildAppEnvironment = ({
 
   Object.assign(environment, {
     NODE_ENV: "production",
-    OPENAI_API_KEY: "load-test",
+    // One key per process (callerTag), so the fake model splits its counts by
+    // process: a worker's embeddings requests are its documents' only.
+    OPENAI_API_KEY: callerTag ? `load-test-${callerTag}` : "load-test",
     OPENAI_BASE_URL: modelBaseUrl,
     OPENAI_CHAT_MODEL: FAKE_CHAT_MODEL,
     OPENAI_EMBEDDING_MODEL: FAKE_EMBEDDING_MODEL,
@@ -1820,6 +2048,21 @@ export const buildAppEnvironment = ({
   }
   if (Number.isInteger(options.ingestMaxPendingJobs)) {
     environment.RAG_INGEST_MAX_PENDING_JOBS_PER_TENANT = String(options.ingestMaxPendingJobs);
+  }
+  // The staged pipeline's cross-document embedding batcher (app default on)
+  // and the job lease (app default 60 s), set only when the run names them.
+  if (options.embedBatching === "on" || options.embedBatching === "off") {
+    environment.RAG_INGEST_EMBED_BATCHING = options.embedBatching === "on" ? "true" : "false";
+  }
+  if (Number.isInteger(options.embedBatchLingerMs)) {
+    environment.RAG_INGEST_EMBED_BATCH_LINGER_MS = String(options.embedBatchLingerMs);
+  }
+  if (Number.isInteger(options.ingestJobLeaseMs)) {
+    environment.RAG_INGEST_JOB_LEASE_MS = String(options.ingestJobLeaseMs);
+  }
+  // How long each API process trusts the index version pointer (app default 2 s).
+  if (Number.isInteger(options.indexPointerTtlMs)) {
+    environment.RAG_INDEX_VERSION_POINTER_TTL_MS = String(options.indexPointerTtlMs);
   }
 
   if (storage === "pgvector") {
@@ -1903,8 +2146,21 @@ const startAppProcess = async ({ environment, role = "api", verbose }) => {
 
   return {
     logTail,
-    start: (documents, { primary = true } = {}) => request({ documents, primary, type: "start" }, "ready"),
+    get exited() {
+      return exited;
+    },
+    // The crash injection: SIGKILL, resolved once the process is gone.
+    kill: async () => {
+      if (exited) return;
+      const exitPromise = new Promise((resolve) => child.once("exit", resolve));
+      child.kill("SIGKILL");
+      await exitPromise;
+    },
+    pid: child.pid,
+    start: (documents, { primary = true, seedFormat = "text" } = {}) =>
+      request({ documents, primary, seedFormat, type: "start" }, "ready"),
     analyze: () => request({ type: "analyze" }, "analyzed", 120000),
+    searchTables: () => request({ type: "searchTables" }, "searchTables", 30000),
     stats: () => request({ type: "stats" }, "stats", 30000),
     stop: async () => {
       if (exited) return;
@@ -1970,10 +2226,66 @@ const describeIngestWorkerSettings = async (worker) => {
 };
 
 /**
+ * Which chunk table a retrieval statement reads, from its SQL text: the dense
+ * route orders by `embedding <=> $1::vector`, the sparse route ranks with
+ * ts_rank_cd or calls a version's `<table>_sparse_rank` function. Null for
+ * any other statement. Index versions are separate tables
+ * (rag_document_chunks, rag_document_chunks_v2, ...), so this says which
+ * version a search went to without asking the app.
+ */
+export const readSearchedChunkTable = (text) => {
+  const sql = String(text ?? "");
+  const route = sql.includes("<=> $1::vector") ? "dense" : /ts_rank_cd|_sparse_rank\(/.test(sql) ? "sparse" : null;
+  if (!route) return null;
+  const source = /\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(sql)?.[1];
+  if (!source) return null;
+
+  return { route, table: source.replace(/_sparse_rank$/, "") };
+};
+
+/** Bounded record of the transitions kept per process (index-switch scenario). */
+export const MAX_SEARCH_TRANSITIONS = 500;
+
+/**
+ * Per chunk table and route: searches, first and last (epoch ms), plus every
+ * change of the table the dense route read from one search to the next. The
+ * first transition to a new version's table after a switch is when this
+ * process started searching it.
+ */
+export const createSearchTableTracker = ({ now = () => Date.now() } = {}) => {
+  const tables = {};
+  const transitions = [];
+  let lastDenseTable = null;
+
+  return {
+    observe: (text) => {
+      const searched = readSearchedChunkTable(text);
+      if (!searched) return;
+      const at = now();
+      const key = `${searched.route}:${searched.table}`;
+      const entry = (tables[key] ??= { count: 0, firstAt: at, lastAt: at, route: searched.route, table: searched.table });
+      entry.count += 1;
+      entry.lastAt = at;
+      if (searched.route === "dense" && searched.table !== lastDenseTable) {
+        if (transitions.length < MAX_SEARCH_TRANSITIONS) transitions.push({ at, from: lastDenseTable, to: searched.table });
+        lastDenseTable = searched.table;
+      }
+    },
+    snapshot: () => ({
+      tables: Object.fromEntries(Object.entries(tables).map(([key, entry]) => [key, { ...entry }])),
+      transitions: transitions.map((entry) => ({ ...entry })),
+      transitionsTruncated: transitions.length >= MAX_SEARCH_TRANSITIONS,
+    }),
+  };
+};
+
+/**
  * Counts every statement this process sends to PostgreSQL: each pg
  * client.query call (pooled or dedicated; the BEGIN, SET and COMMIT around a
  * tenant-scoped statement count too). Installed on the pg module the app
  * imports, before the app is loaded; a process without PostgreSQL counts 0.
+ * `counter.searches` (a createSearchTableTracker) also sees each statement's
+ * text, to record which chunk table the retrieval statements read.
  */
 const installPostgresQueryCounter = async (counter) => {
   const { default: pg } = await import("pg");
@@ -1982,6 +2294,8 @@ const installPostgresQueryCounter = async (counter) => {
   if (original.__loadTestCounted) return;
   const counted = function countedQuery(...args) {
     counter.queries += 1;
+    const first = args[0];
+    counter.searches?.observe(typeof first === "string" ? first : first?.text);
     return original.apply(this, args);
   };
   counted.__loadTestCounted = true;
@@ -2002,7 +2316,7 @@ const readGuardTotals = async () => {
 // the window's length), and an exit on shutdown.
 const handleChildMessages = (onStart) => {
   const loopDelay = monitorEventLoopDelay({ resolution: EVENT_LOOP_SAMPLING_MS });
-  const postgres = { queries: 0 };
+  const postgres = { queries: 0, searches: createSearchTableTracker() };
   const counterReady = installPostgresQueryCounter(postgres);
   let cpuMark = process.cpuUsage();
   let queryMark = 0;
@@ -2048,6 +2362,8 @@ const handleChildMessages = (onStart) => {
         resetMarks(guardTotals);
         loopDelay.reset();
         process.send(reply);
+      } else if (message?.type === "searchTables") {
+        process.send({ ...postgres.searches.snapshot(), type: "searchTables" });
       } else if (message?.type === "analyze") {
         // Planner statistics for the whole (fresh) database, as the owner.
         const startedAt = performance.now();
@@ -2101,16 +2417,29 @@ const serve = async () => {
     const ingestStartedAt = performance.now();
     let chunkCount = 0;
     for (const doc of message.documents) {
-      const filePath = path.join(sourceDirectory, `${doc.docId}.txt`);
-      await writeFile(filePath, doc.pages.map((page) => page.text).join("\n\n"), "utf8");
-      const registered = await rag.ingestDocumentPages({
-        docId: doc.docId,
-        fileName: doc.fileName,
-        filePath,
+      const owner = {
         ownerUserId: process.env.LOAD_TEST_TENANT_USER_ID ?? "",
-        pages: doc.pages,
         workspaceId: process.env.LOAD_TEST_TENANT_WORKSPACE_ID ?? "",
-      });
+      };
+      let registered;
+      if (message.seedFormat === "pdf") {
+        // Real PDF bytes in the registry, through the upload route's own
+        // ingest (parse, chunk, embed, index): an index version build
+        // re-reads them, so the rebuilt chunks equal the stored ones.
+        const filePath = path.join(sourceDirectory, `${doc.docId}.pdf`);
+        await writeFile(filePath, buildSeedPdf(doc));
+        registered = await rag.ingestDocument({ docId: doc.docId, fileName: doc.fileName, filePath, ...owner });
+      } else {
+        const filePath = path.join(sourceDirectory, `${doc.docId}.txt`);
+        await writeFile(filePath, doc.pages.map((page) => page.text).join("\n\n"), "utf8");
+        registered = await rag.ingestDocumentPages({
+          docId: doc.docId,
+          fileName: doc.fileName,
+          filePath,
+          pages: doc.pages,
+          ...owner,
+        });
+      }
       chunkCount += Number(registered?.chunkCount ?? 0);
     }
     const ingestMs = performance.now() - ingestStartedAt;
@@ -2311,7 +2640,8 @@ export const createChatSender = ({
     }
   };
 
-const collectStats = (processes) => Promise.all(processes.map((child) => child.stats()));
+// A process the crash injection killed reports nothing (null).
+const collectStats = (processes) => Promise.all(processes.map((child) => (child.exited ? null : child.stats())));
 
 /**
  * Per-instance view of one level: port, requests (and uploads for the ingest
@@ -3085,7 +3415,7 @@ const runBaselineWindow = async ({ apps, ...window }) => {
   return { ...summary, server: { coresBusy: combined.coresBusy, cpuMsPerRequest: combined.cpuMsPerUnit } };
 };
 
-const runIngestScenario = async ({ apps, baseUrls, corpus, fakeModel, headers, hostSampler, idle, instances, options, profile, runId, workerLoops, workers }) => {
+const runIngestScenario = async ({ apps, baseUrls, corpus, fakeModel, headers, hostSampler, idle, instances, options, profile, runId, workerLoops, workerProcesses = [], workers }) => {
   const levels = [];
   // The workload (uploads and background chat) and the harness's own
   // measurement traffic (job polls and searchable checks) are balanced
@@ -3121,6 +3451,17 @@ const runIngestScenario = async ({ apps, baseUrls, corpus, fakeModel, headers, h
     let hostAtStart = null;
     let hostAtEnd = null;
     let model = null;
+    // --crash-worker-mid-embed: worker 0 is killed during its first
+    // embeddings request of the window (createCrashInjection).
+    const crash = options.crashWorkerMidEmbed
+      ? await createCrashInjection({
+          databaseUrl: options.databaseUrl,
+          fakeModel,
+          victim: workers[0],
+          victimCaller: "load-test-worker-0",
+          victimWorkerId: workerProcesses[0]?.workerId ?? null,
+        })
+      : null;
     const { chat, polling, results, wallMs } = await runIngestLevel({
       balancer,
       baseUrls,
@@ -3136,6 +3477,7 @@ const runIngestScenario = async ({ apps, baseUrls, corpus, fakeModel, headers, h
           fakeModel.resetStats();
           statsAtStart = collectStats(processes);
           hostAtStart = hostSampler?.mark() ?? null;
+          crash?.arm();
         },
       },
       measurementBalancer,
@@ -3146,6 +3488,7 @@ const runIngestScenario = async ({ apps, baseUrls, corpus, fakeModel, headers, h
     });
     await statsAtStart;
     const allStats = await statsAtEnd;
+    const crashReport = crash ? await crash.finish() : null;
     const apiStats = allStats.slice(0, apps.length);
     const workerStats = allStats.slice(apps.length);
     const apiIdle = idle ? idle.slice(0, apps.length) : null;
@@ -3222,9 +3565,17 @@ const runIngestScenario = async ({ apps, baseUrls, corpus, fakeModel, headers, h
         ? {
             ...serverFields(workerCombined),
             count: workers.length,
-            perProcess: workerStats.map(({ type: _type, ...stats }, index) => ({ index, ...stats })),
+            perProcess: workerStats.map((entry, index) => {
+              if (!entry) return { index, killed: true };
+              const { type: _type, ...stats } = entry;
+              return { index, ...stats };
+            }),
           }
         : null,
+      // The dedicated workers' own embeddings requests (their API keys): the
+      // documents' embeddings only, no chat or probe query embeddings.
+      documentEmbeddings: describeWorkerEmbeddings({ byCaller: model.byCaller, documents: ingest.searchable }),
+      ...(crashReport ? { crash: crashReport } : {}),
       ...(apps.length > 1
         ? {
             instances: describeInstances({
@@ -3253,7 +3604,15 @@ const runIngestScenario = async ({ apps, baseUrls, corpus, fakeModel, headers, h
 
     const level = levels.at(-1);
     console.log(
-      `  POST /upload (${options.ingestMode}) c=${String(uploadConcurrency).padStart(3)} r${repeatIndex + 1}  ${ingest.searchable}/${ingest.uploads} searchable${ingest.comparable ? "" : " (not comparable)"}  from offer: indexed p50 ${ingest.offeredToIndexedMs.p50} ms, searchable p50 ${ingest.offeredToSearchableMs.p50} ms  ${ingest.indexedDocsPerSecond} docs/s  uploads per instance ${level.uploadSplit.perInstance.join("/")}${level.uploadSplit.imbalanced ? " (imbalanced)" : ""}${options.ingestMode === "async" ? `  queue wait p50 ${ingest.queueWaitMs.p50} ms  processing p50 ${ingest.processingMs.p50} ms` : ""}  polling ${pollingSummary.requestsPerSecond} req/s  chat p95 ${chatDuring?.latencyMs.p95 ?? "-"} ms (idle ${baselineBefore?.latencyMs.p95 ?? "-"}/${baselineAfter?.latencyMs.p95 ?? "-"})`
+      `  POST /upload (${options.ingestMode}) c=${String(uploadConcurrency).padStart(3)} r${repeatIndex + 1}  ${ingest.searchable}/${ingest.uploads} searchable${ingest.comparable ? "" : " (not comparable)"}  from offer: indexed p50 ${ingest.offeredToIndexedMs.p50} ms, searchable p50 ${ingest.offeredToSearchableMs.p50} ms  ${ingest.indexedDocsPerSecond} docs/s  uploads per instance ${level.uploadSplit.perInstance.join("/")}${level.uploadSplit.imbalanced ? " (imbalanced)" : ""}${options.ingestMode === "async" ? `  queue wait p50 ${ingest.queueWaitMs.p50} ms  processing p50 ${ingest.processingMs.p50} ms` : ""}  polling ${pollingSummary.requestsPerSecond} req/s  chat p95 ${chatDuring?.latencyMs.p95 ?? "-"} ms (idle ${baselineBefore?.latencyMs.p95 ?? "-"}/${baselineAfter?.latencyMs.p95 ?? "-"})${
+        level.documentEmbeddings ? `  worker embeddings ${level.documentEmbeddings.requests} req (${level.documentEmbeddings.requestsPerDocument}/doc, ${level.documentEmbeddings.inputsPerRequest} inputs/req)` : ""
+      }${
+        crashReport?.killed
+          ? `  crash: ${crashReport.strandedAtKill} job(s) stranded, ${crashReport.resumed} resumed, ${crashReport.resumedAtStageOfCrash} at the stage of the crash, ${crashReport.resumedWithoutEarlierStage} without re-running an earlier stage`
+          : crash
+            ? "  crash: worker 0 sent no embeddings request, nothing was killed"
+            : ""
+      }`
     );
   }
 
@@ -3267,6 +3626,585 @@ const runIngestScenario = async ({ apps, baseUrls, corpus, fakeModel, headers, h
     levels,
     modelLatencyMs: profile,
     repeats: summarizeIngestRepeats(levels),
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Index switch scenario (--scenario index-switch)
+//
+// Two or more API instances serve a continuous closed-loop /chat load while
+// `npm run vector:index` builds a new pgvector index version under another
+// embedding model and width (load-test-embedding-<--switch-dimensions>),
+// activates it, and rolls back to the original. Each lifecycle command runs
+// as its own process (vector-index.mjs, what an operator runs), against the
+// same database and fake model. Every /chat request is kept with the time it
+// was sent, so the report splits latency and errors by phase: before, during
+// the build, while the activation gate runs, with the new version active,
+// during the rollback, and after it.
+//
+// When a switch is visible: the harness reads the pointer row on a connection
+// of its own every few milliseconds while the command runs; the first read
+// that shows a new generation is when the switch committed (within one poll).
+// When each instance followed: each app process records which chunk table its
+// dense retrieval statements read (every version is its own table), so the
+// first dense search on the new table after the switch is when that instance
+// started serving from it, measured in the process itself.
+
+export const VECTOR_INDEX_ENTRY = path.join(serverDirectory, "vector-index.mjs");
+// The app's defaults, unless the harness's own environment names others (the
+// app processes inherit these two names).
+const indexVersionsTable = () => (process.env.INDEX_VERSIONS_POSTGRES_TABLE || "rag_index_versions").trim();
+const ingestJobsTable = () => (process.env.INGEST_JOBS_POSTGRES_TABLE || "rag_ingest_jobs").trim();
+const POINTER_POLL_MS = 5;
+// A switch shows in the report's own window: the pointer TTL plus this margin.
+const SWITCHOVER_MARGIN_MS = 1000;
+
+/** Runs `node vector-index.mjs <args> --json` and resolves with its outcome (never rejects). */
+const runIndexCommand = ({ args, environment }) =>
+  new Promise((resolve) => {
+    const startedAt = performance.now();
+    execFile(
+      process.execPath,
+      [VECTOR_INDEX_ENTRY, ...args, "--json"],
+      { cwd: serverDirectory, env: environment, maxBuffer: 64 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        let result = null;
+        try {
+          result = JSON.parse(String(stdout));
+        } catch {
+          result = null;
+        }
+        resolve({
+          args,
+          endedAt: performance.now(),
+          exitCode: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
+          result,
+          startedAt,
+          stderrTail: String(stderr ?? "").split("\n").filter(Boolean).slice(-12),
+        });
+      }
+    );
+  });
+
+/** A connection of the harness's own (the database owner) for the registry and queue reads. */
+const openHarnessDatabase = async (databaseUrl) => {
+  const { default: pg } = await import("pg");
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+
+  return {
+    close: () => client.end().catch(() => {}),
+    query: (text, values) => client.query(text, values),
+    readPointer: async () => {
+      const result = await client.query(
+        `SELECT active_version_id, previous_version_id, generation::text AS generation,
+                (EXTRACT(EPOCH FROM switched_at) * 1000)::float8 AS switched_ms
+         FROM ${indexVersionsTable()}_pointer WHERE singleton`
+      );
+      const row = result.rows[0] ?? {};
+      return {
+        activeVersionId: Number(row.active_version_id),
+        generation: String(row.generation ?? ""),
+        previousVersionId: row.previous_version_id === null ? null : Number(row.previous_version_id),
+        switchedAt: Number(row.switched_ms) || null,
+      };
+    },
+    readVersions: async () => {
+      const result = await client.query(
+        `SELECT version_id, status, chunk_table, embedding_model, embedding_dimensions,
+                chunk_count::int AS chunk_count, document_count, build_documents_done, build_documents_failed,
+                (EXTRACT(EPOCH FROM build_started_at) * 1000)::float8 AS build_started_ms,
+                (EXTRACT(EPOCH FROM build_completed_at) * 1000)::float8 AS build_completed_ms,
+                dual_write_until IS NOT NULL AND dual_write_until > NOW() AS in_dual_write_window
+         FROM ${indexVersionsTable()} ORDER BY version_id`
+      );
+      return result.rows.map((row) => ({
+        buildCompletedAt: Number(row.build_completed_ms) || null,
+        buildDocumentsDone: row.build_documents_done,
+        buildDocumentsFailed: row.build_documents_failed,
+        buildStartedAt: Number(row.build_started_ms) || null,
+        chunkCount: row.chunk_count,
+        chunkTable: row.chunk_table,
+        documentCount: row.document_count,
+        embeddingDimensions: row.embedding_dimensions,
+        embeddingModel: row.embedding_model,
+        inDualWriteWindow: row.in_dual_write_window === true,
+        status: row.status,
+        versionId: row.version_id,
+      }));
+    },
+  };
+};
+
+/**
+ * Runs a pointer-switching command (activate, rollback) while reading the
+ * pointer every POINTER_POLL_MS: `visible` is the first read that shows a new
+ * generation (epoch ms), `lastUnchangedAt` the read before it, so the commit
+ * happened between the two. `onVisible` runs as soon as it is seen.
+ */
+const runPointerSwitch = async ({ args, database, environment, onVisible = null }) => {
+  const before = await database.readPointer();
+  let finished = null;
+  const command = runIndexCommand({ args, environment }).then((outcome) => {
+    finished = outcome;
+    return outcome;
+  });
+  let lastUnchangedAt = Date.now();
+  let visible = null;
+
+  for (;;) {
+    const commandDone = finished !== null;
+    const pointer = await database.readPointer();
+    const readAt = Date.now();
+    if (pointer.generation !== before.generation) {
+      visible = { ...pointer, observedAt: readAt, observedAtPerf: performance.now() };
+      onVisible?.(visible);
+      break;
+    }
+    lastUnchangedAt = readAt;
+    if (commandDone) break;
+    await sleep(POINTER_POLL_MS);
+  }
+
+  const outcome = await command;
+  return { ...outcome, before, lastUnchangedAt, visible };
+};
+
+/**
+ * When each instance followed a switch to `toTable`, from its search record
+ * (createSearchTableTracker snapshots): the first dense search on `toTable`
+ * after `afterEpochMs` (the last pointer read that did not show the switch),
+ * and the last dense search on `fromTable`. Times are ms after the switch was
+ * first seen (`visibleAt`), so a value can be a few ms below 0 when an
+ * instance followed within one pointer poll.
+ */
+export const computeSwitchPropagation = ({ afterEpochMs, fromTable, snapshots = [], toTable, visibleAt }) =>
+  snapshots.map((snapshot, instance) => {
+    const firstOnNew = (snapshot?.transitions ?? []).find((entry) => entry.to === toTable && entry.at > afterEpochMs);
+    const lastOnOld = snapshot?.tables?.[`dense:${fromTable}`]?.lastAt ?? null;
+    const flips = (snapshot?.transitions ?? []).filter((entry) => entry.at > afterEpochMs).length;
+
+    return {
+      firstSearchOnNewMs: firstOnNew ? round(firstOnNew.at - visibleAt) : null,
+      instance,
+      lastSearchOnOldMs: Number.isFinite(lastOnOld) && lastOnOld > afterEpochMs ? round(lastOnOld - visibleAt) : null,
+      tableChangesAfterSwitch: flips,
+    };
+  });
+
+/** The slowest instance's first search on the new table: when every instance had followed. */
+export const summarizePropagation = (perInstance = []) => {
+  const values = perInstance.map((entry) => entry.firstSearchOnNewMs);
+  return {
+    allInstancesMs: values.length > 0 && values.every(Number.isFinite) ? Math.max(...values) : null,
+    perInstance,
+  };
+};
+
+/**
+ * Splits the continuous load by phase: each request belongs to the phase it
+ * was sent in. `phases` are { name, startedAt, endedAt, model } in
+ * performance.now() time; `windows` are extra rows (the switchover windows).
+ */
+export const summarizeSwitchPhases = ({ instanceCount = 1, phases = [], results = [], windows = [] }) =>
+  [...phases, ...windows].map((phase) => {
+    const inPhase = results.filter(
+      (result) => result && Number.isFinite(result.sentAt) && result.sentAt >= phase.startedAt && result.sentAt < phase.endedAt
+    );
+    const wallMs = Math.max(0, phase.endedAt - phase.startedAt);
+
+    return {
+      kind: phase.kind ?? "phase",
+      name: phase.name,
+      durationMs: round(wallMs),
+      ...summarizeLevel({ results: inPhase, wallMs }),
+      perInstance: summarizeByInstance(inPhase, instanceCount),
+      ...(phase.model
+        ? {
+            model: {
+              chatRequests: phase.model.chat.requests,
+              embeddingRequests: phase.model.embeddings.requests,
+              embeddingRequestsPerChat: inPhase.length > 0 ? round(phase.model.embeddings.requests / inPhase.length, 3) : null,
+              embeddingsByCaller: phase.model.byCaller,
+              embeddingsByModel: phase.model.embeddingsByModel,
+            },
+          }
+        : {}),
+    };
+  });
+
+const firstFailures = (results = [], phases = [], limit = 10) =>
+  results
+    .filter((result) => result && !isSuccess(result))
+    .slice(0, limit)
+    .map((result) => ({
+      error: result.error ?? null,
+      instance: result.instance ?? null,
+      phase: phases.find((phase) => result.sentAt >= phase.startedAt && result.sentAt < phase.endedAt)?.name ?? null,
+      status: result.status,
+    }));
+
+const runIndexSwitchScenario = async ({ apps, baseUrls, corpus, environmentFor, fakeModel, headers, options, runId }) => {
+  const database = await openHarnessDatabase(options.databaseUrl);
+  const cliEnvironment = environmentFor("cli", "cli");
+  const newModel = switchEmbeddingModel(options.switchDimensions);
+  const balancer = createInstanceBalancer({ count: baseUrls.length, mode: options.balance });
+  const picker = createQuestionPicker({ instanceCount: baseUrls.length, questions: corpus.questions });
+  const agent = new http.Agent({ keepAlive: true, maxSockets: options.switchConcurrency + 8 });
+  const pointerTtlMs = options.indexPointerTtlMs ?? 2000;
+  const phases = [];
+  const mark = (name) => {
+    const at = performance.now();
+    const previous = phases.at(-1);
+    if (previous && previous.endedAt === undefined) {
+      previous.endedAt = at;
+      previous.model = fakeModel.snapshot();
+    }
+    fakeModel.resetStats();
+    if (name) phases.push({ name, startedAt: at });
+    return at;
+  };
+  const baseSend = createChatSender({ agent, balancer, baseUrls, headers, options, picker, sessionTag: `load-${runId}-switch` });
+  const send = async (args) => {
+    const sentAt = performance.now();
+    return { ...(await baseSend(args)), sentAt };
+  };
+  const initialPointer = await database.readPointer();
+  const [initialVersion] = await database.readVersions();
+  const fromTable = initialVersion?.chunkTable ?? "rag_document_chunks";
+  let stop = false;
+  let loadResult = null;
+  const record = { build: null, activation: null, rollback: null };
+  let versionsAfterBuild = [];
+  let searchesAfterActivation = [];
+  let searchesAtEnd = [];
+
+  mark("before");
+  const load = runClosedLoopUntil({ concurrency: options.switchConcurrency, send, shouldStop: () => stop });
+
+  try {
+    await sleep(options.switchPhaseMs);
+    mark("build");
+    console.log(`  building a version under ${newModel} (${options.switchDimensions} dimensions) while /chat runs...`);
+    record.build = await runIndexCommand({
+      args: [
+        "build",
+        "--model",
+        newModel,
+        "--dimensions",
+        String(options.switchDimensions),
+        ...(options.switchBuildBatchSize ? ["--batch-size", String(options.switchBuildBatchSize)] : []),
+      ],
+      environment: cliEnvironment,
+    });
+    if (record.build.exitCode !== 0 || !Number.isInteger(record.build.result?.versionId)) {
+      throw new Error(`vector-index build failed (exit ${record.build.exitCode}): ${record.build.stderrTail.join(" | ")}`);
+    }
+    const versionId = record.build.result.versionId;
+    versionsAfterBuild = await database.readVersions();
+    const newTable = versionsAfterBuild.find((version) => version.versionId === versionId)?.chunkTable;
+
+    mark("activating");
+    console.log(`  activating version ${versionId}...`);
+    record.activation = await runPointerSwitch({
+      args: ["activate", String(versionId)],
+      database,
+      environment: cliEnvironment,
+      onVisible: () => mark("new version active"),
+    });
+    if (record.activation.exitCode !== 0 || !record.activation.visible) {
+      throw new Error(`vector-index activate failed (exit ${record.activation.exitCode}): ${record.activation.stderrTail.join(" | ")}`);
+    }
+    await sleep(Math.max(options.switchPhaseMs, pointerTtlMs + SWITCHOVER_MARGIN_MS));
+    searchesAfterActivation = await Promise.all(apps.map((app) => app.searchTables()));
+
+    mark("rolling back");
+    console.log("  rolling back...");
+    record.rollback = await runPointerSwitch({
+      args: ["rollback"],
+      database,
+      environment: cliEnvironment,
+      onVisible: () => mark("rolled back"),
+    });
+    if (record.rollback.exitCode !== 0 || !record.rollback.visible) {
+      throw new Error(`vector-index rollback failed (exit ${record.rollback.exitCode}): ${record.rollback.stderrTail.join(" | ")}`);
+    }
+    await sleep(Math.max(options.switchPhaseMs, pointerTtlMs + SWITCHOVER_MARGIN_MS));
+    record.newTable = newTable;
+    record.versionId = versionId;
+  } finally {
+    stop = true;
+    loadResult = await load;
+    mark(null);
+    searchesAtEnd = await Promise.all(apps.map((app) => app.searchTables().catch(() => null)));
+    agent.destroy();
+  }
+
+  const versionsAtEnd = await database.readVersions();
+  const pointerAtEnd = await database.readPointer();
+  await database.close();
+
+  const results = loadResult?.results ?? [];
+  const windows = [record.activation, record.rollback].map((entry, index) => ({
+    endedAt: entry.visible.observedAtPerf + pointerTtlMs + SWITCHOVER_MARGIN_MS,
+    kind: "window",
+    name: `${index === 0 ? "activation" : "rollback"} switchover (first ${pointerTtlMs + SWITCHOVER_MARGIN_MS} ms)`,
+    startedAt: entry.visible.observedAtPerf,
+  }));
+  const built = versionsAfterBuild.find((version) => version.versionId === record.versionId) ?? {};
+  const buildMs = built.buildCompletedAt && built.buildStartedAt ? built.buildCompletedAt - built.buildStartedAt : null;
+  const indexed = record.build.result?.indexed ?? null;
+  const buildPhase = phases.find((phase) => phase.name === "build");
+  const firstEmbeddingAt = fakeModel.firstEmbeddingAt();
+  const newSpaceQueryEmbedding = (visibleAt) =>
+    apps.map((_, instance) => {
+      const at = firstEmbeddingAt[`load-test-api-${instance}|${newModel}`];
+      return Number.isFinite(at) ? round(at - visibleAt) : null;
+    });
+  const describeSwitch = (entry, { fromTable: from, toTable: to, snapshots }) => ({
+    commandWallMs: round(entry.endedAt - entry.startedAt),
+    exitCode: entry.exitCode,
+    fromVersionId: entry.before.activeVersionId,
+    generation: entry.visible.generation,
+    pointerPollResolutionMs: round(entry.visible.observedAt - entry.lastUnchangedAt),
+    propagation: summarizePropagation(
+      computeSwitchPropagation({ afterEpochMs: entry.lastUnchangedAt, fromTable: from, snapshots, toTable: to, visibleAt: entry.visible.observedAt })
+    ),
+    toVersionId: entry.visible.activeVersionId,
+    validation: entry.result?.validation
+      ? {
+          mismatchedDocuments: entry.result.validation.mismatchedDocuments ?? null,
+          ok: entry.result.validation.ok,
+          reasons: entry.result.validation.reasons ?? [],
+          totals: entry.result.validation.totals ?? null,
+        }
+      : null,
+    // Validation gate plus the switch, until the new pointer was seen.
+    visibleAfterCommandStartMs: round(entry.visible.observedAtPerf - entry.startedAt),
+  });
+
+  return {
+    build: {
+      chunkCount: built.chunkCount ?? null,
+      cliWallMs: round(record.build.endedAt - record.build.startedAt),
+      docsPerSecond: Number.isFinite(buildMs) && buildMs > 0 && Number.isFinite(indexed) ? round(indexed / (buildMs / 1000), 2) : null,
+      docsPerSecondIncludingCli:
+        Number.isFinite(indexed) ? round(indexed / ((record.build.endedAt - record.build.startedAt) / 1000), 2) : null,
+      embeddingRequests: buildPhase?.model?.byCaller?.["load-test-cli"]?.embeddings ?? null,
+      embeddingInputs: buildPhase?.model?.byCaller?.["load-test-cli"]?.embeddingInputs ?? null,
+      failed: record.build.result?.failed ?? null,
+      indexed,
+      model: newModel,
+      dimensions: options.switchDimensions,
+      registryBuildMs: Number.isFinite(buildMs) ? round(buildMs) : null,
+      skippedDeleted: record.build.result?.skippedDeleted ?? null,
+      versionId: record.versionId,
+    },
+    activation: {
+      ...describeSwitch(record.activation, { fromTable, snapshots: searchesAfterActivation, toTable: record.newTable }),
+      firstNewSpaceQueryEmbeddingMs: newSpaceQueryEmbedding(record.activation.visible.observedAt),
+    },
+    rollback: describeSwitch(record.rollback, { fromTable: record.newTable, snapshots: searchesAtEnd, toTable: fromTable }),
+    chatConcurrency: options.switchConcurrency,
+    embeddingDimensions: options.embeddingDimensions,
+    endpoint: "POST /chat during build, activate and rollback",
+    errors: firstFailures(results, phases),
+    initialPointer,
+    kind: "index-switch",
+    phases: summarizeSwitchPhases({ instanceCount: baseUrls.length, phases, results, windows }),
+    pointerAtEnd,
+    pointerTtlMs,
+    requests: results.length,
+    searchesAtEnd: searchesAtEnd.map((snapshot) => snapshot?.tables ?? null),
+    totalErrors: results.filter((result) => result && !isSuccess(result)).length,
+    versions: versionsAtEnd,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Crash injection (--scenario ingest --crash-worker-mid-embed)
+//
+// Dedicated worker 0's first embeddings request of the measured window is
+// held unanswered by the fake model and the process is killed (SIGKILL) while
+// it waits: mid-embed, with nothing flushed. Its jobs stay `running` under a
+// lease nobody renews; once it expires another worker claims them. A poller
+// on a connection of the harness's own records every change of every job of
+// the window (status, stage, attempt, claimant, whether the upload bytes are
+// still on the row, and when each stage output was written), so the report
+// can say, per job, which stage the next attempt started at and whether an
+// earlier stage ran again.
+
+const JOB_POLL_MS = 25;
+
+const readJobStates = (database, sinceEpochMs) =>
+  database.query(
+    `SELECT j.job_id, j.file_name, j.status, j.stage, j.attempt_count, j.stage_attempts, j.claimed_by,
+            (j.file_bytes IS NOT NULL) AS holds_upload,
+            (SELECT json_object_agg(o.output, (EXTRACT(EPOCH FROM o.created_at) * 1000)::float8)
+               FROM ${ingestJobsTable()}_outputs o WHERE o.job_id = j.job_id) AS outputs
+     FROM ${ingestJobsTable()} j
+     WHERE j.created_at >= to_timestamp($1::float8 / 1000.0)`,
+    [sinceEpochMs]
+  );
+
+const jobStateKey = (state) =>
+  JSON.stringify([state.status, state.stage, state.attemptCount, state.stageAttempts, state.claimedBy, state.holdsUpload, state.outputs]);
+
+/**
+ * Per job of a crash run: `history` is the job's observed states in order,
+ * `victimWorkerId` the killed worker's id, `killedAt` when the kill was
+ * issued. A job the victim held when it died is `resumed` once another
+ * worker's claim of a later attempt is seen; the report says the stage it
+ * died in, the stage the next attempt started at, whether any earlier stage
+ * was observed again (re-run), and whether the earlier stages' outputs kept
+ * their write time.
+ */
+export const analyzeCrashedJobs = ({ histories = {}, killedAt, victimWorkerId }) => {
+  const stageOrder = ["parse", "chunk", "embed", "index"];
+  const jobs = [];
+
+  for (const [jobId, history] of Object.entries(histories)) {
+    const victimStates = history.filter((state) => state.claimedBy === victimWorkerId && state.at <= killedAt);
+    if (victimStates.length === 0) continue;
+    const lastVictim = victimStates.at(-1);
+    const final = history.at(-1);
+
+    if (lastVictim.status !== "running") {
+      jobs.push({ fileName: lastVictim.fileName, finalStatus: final.status, jobId, outcome: "finished_before_kill" });
+      continue;
+    }
+
+    const resumedIndex = history.findIndex(
+      (state) => state.claimedBy && state.claimedBy !== victimWorkerId && state.attemptCount > lastVictim.attemptCount
+    );
+    const resumed = resumedIndex >= 0 ? history[resumedIndex] : null;
+    const after = resumed ? history.slice(resumedIndex) : [];
+    const stagesAfter = [...new Set(after.map((state) => state.stage))];
+    const earlierStages = stageOrder.slice(0, stageOrder.indexOf(lastVictim.stage));
+    const outputsBefore = lastVictim.outputs ?? {};
+    const rewritten = Object.keys(outputsBefore).filter((name) =>
+      after.some((state) => state.outputs?.[name] !== undefined && state.outputs[name] !== outputsBefore[name])
+    );
+
+    const finishedState = after.find((state) => state.status === "succeeded" || state.status === "failed" || state.status === "dead_letter");
+
+    jobs.push({
+      earlierStagesRerun: stagesAfter.filter((stage) => earlierStages.includes(stage)),
+      fileName: lastVictim.fileName,
+      finalStatus: final.status,
+      // First observed finish after the resume, from the kill (the poller's resolution).
+      finishedAfterKillMs: finishedState ? round(finishedState.at - killedAt) : null,
+      jobId,
+      leaseWaitMs: resumed ? round(resumed.at - killedAt) : null,
+      outcome: resumed ? "resumed" : "not_resumed",
+      outputsAtKill: Object.keys(outputsBefore).sort(),
+      outputsRewrittenAfterResume: rewritten,
+      resumedAttempt: resumed?.attemptCount ?? null,
+      resumedAtStage: resumed?.stage ?? null,
+      resumedBy: resumed?.claimedBy ?? null,
+      stageAtKill: lastVictim.stage,
+      uploadBytesOnRowAtResume: resumed ? resumed.holdsUpload : null,
+    });
+  }
+
+  const resumed = jobs.filter((job) => job.outcome === "resumed");
+  const finishedAfterKill = resumed.map((job) => job.finishedAfterKillMs).filter(Number.isFinite);
+
+  return {
+    jobs,
+    lastResumedFinishedAfterKillMs: finishedAfterKill.length > 0 ? Math.max(...finishedAfterKill) : null,
+    resumed: resumed.length,
+    resumedAtStageOfCrash: resumed.filter((job) => job.resumedAtStage === job.stageAtKill).length,
+    resumedWithoutEarlierStage: resumed.filter((job) => job.earlierStagesRerun.length === 0 && job.outputsRewrittenAfterResume.length === 0).length,
+    strandedAtKill: jobs.filter((job) => job.outcome !== "finished_before_kill").length,
+  };
+};
+
+const createCrashInjection = async ({ databaseUrl, fakeModel, victim, victimCaller, victimWorkerId }) => {
+  const database = await openHarnessDatabase(databaseUrl);
+  const histories = {};
+  let poller = null;
+  let polling = Promise.resolve();
+  let since = null;
+  let held = null;
+  let killedAt = null;
+  let killCompletedAt = null;
+  let killing = Promise.resolve();
+
+  const poll = async () => {
+    const result = await readJobStates(database, since);
+    const at = Date.now();
+    for (const row of result.rows) {
+      const state = {
+        at,
+        attemptCount: row.attempt_count,
+        claimedBy: row.claimed_by ?? null,
+        fileName: row.file_name,
+        holdsUpload: row.holds_upload === true,
+        outputs: row.outputs ?? {},
+        stage: row.stage,
+        stageAttempts: row.stage_attempts,
+        status: row.status,
+      };
+      const history = (histories[row.job_id] ??= []);
+      if (history.length === 0 || jobStateKey(history.at(-1)) !== jobStateKey(state)) history.push(state);
+    }
+  };
+
+  return {
+    arm: () => {
+      since = Date.now() - 1000;
+      poller = setInterval(() => {
+        polling = polling.then(poll).catch((error) => console.warn(`[crash] job poll failed: ${error?.message ?? error}`));
+      }, JOB_POLL_MS);
+      killing = fakeModel.holdNextEmbedding({ caller: victimCaller }).then(async (request) => {
+        held = request;
+        killedAt = Date.now();
+        // One last look at the jobs as the victim left them.
+        await polling.catch(() => {});
+        await victim.kill();
+        killCompletedAt = Date.now();
+        console.log(
+          `  crash: killed worker 0 (${victimWorkerId}) with an embeddings request of ${request.inputs} text(s) from ${request.documents.length} document(s) in flight`
+        );
+      });
+    },
+    finish: async () => {
+      clearInterval(poller);
+      await polling.catch(() => {});
+      await poll().catch(() => {});
+      await database.close();
+      if (!killedAt) return { killed: false };
+      await killing;
+
+      return {
+        heldRequest: held,
+        killed: true,
+        killedAt,
+        killTookMs: round(killCompletedAt - killedAt),
+        victimWorkerId,
+        ...analyzeCrashedJobs({ histories, killedAt, victimWorkerId }),
+      };
+    },
+    get killed() {
+      return killedAt !== null;
+    },
+  };
+};
+
+/** Document embeddings from the dedicated workers' own requests (their API keys), per searchable document. */
+export const describeWorkerEmbeddings = ({ byCaller = {}, documents = 0, prefix = "load-test-worker-" } = {}) => {
+  const entries = Object.entries(byCaller).filter(([caller]) => caller.startsWith(prefix));
+  if (entries.length === 0) return null;
+  const requests = entries.reduce((total, [, entry]) => total + (entry.embeddings ?? 0), 0);
+  const inputs = entries.reduce((total, [, entry]) => total + (entry.embeddingInputs ?? 0), 0);
+
+  return {
+    inputs,
+    inputsPerRequest: requests > 0 ? round(inputs / requests, 2) : null,
+    perWorker: Object.fromEntries(entries.map(([caller, entry]) => [caller, { inputs: entry.embeddingInputs, requests: entry.embeddings }])),
+    requests,
+    requestsPerDocument: documents > 0 ? round(requests / documents, 3) : null,
   };
 };
 
@@ -3611,6 +4549,114 @@ const formatIngestScenario = (lines, scenario, multiInstance) => {
       );
     }
   }
+
+  const embeddingLevels = scenario.levels.filter((level) => level.documentEmbeddings);
+  if (embeddingLevels.length > 0) {
+    lines.push(
+      "",
+      "Document embeddings (the dedicated workers' own requests, by their API keys: no chat or probe query embeddings):",
+      "",
+      "| Upload concurrency | Embedding requests | Inputs | Requests per document | Inputs per request | Per worker (requests/inputs) |",
+      "| ---: | ---: | ---: | ---: | ---: | --- |"
+    );
+    for (const level of embeddingLevels) {
+      const embeddings = level.documentEmbeddings;
+      lines.push(
+        `| ${levelKey(level)} | ${cell(embeddings.requests)} | ${cell(embeddings.inputs)} | ${cell(embeddings.requestsPerDocument)} | ${cell(embeddings.inputsPerRequest)} | ${Object.entries(embeddings.perWorker)
+          .map(([caller, entry]) => `${caller.replace(/^load-test-/, "")} ${entry.requests}/${entry.inputs}`)
+          .join(", ")} |`
+      );
+    }
+  }
+
+  for (const level of scenario.levels.filter((entry) => entry.crash)) {
+    formatCrashReport(lines, level, levelKey(level));
+  }
+};
+
+export const formatCrashReport = (lines, level, key) => {
+  const crash = level.crash;
+  lines.push("", `Crash injection (upload concurrency ${key}):`, "");
+  if (!crash.killed) {
+    lines.push("Worker 0 sent no embeddings request during the window, so nothing was killed.");
+    return;
+  }
+  lines.push(
+    `Worker 0 (${crash.victimWorkerId}) was killed with SIGKILL while its embeddings request of ${crash.heldRequest.inputs} text(s) from ${crash.heldRequest.documents.length} document(s) (${crash.heldRequest.documents.join(", ")}) was in flight (the fake never answered it); the kill took ${cell(crash.killTookMs)} ms. ${crash.strandedAtKill} job(s) were running under it; ${crash.resumed} were resumed by another worker, ${crash.resumedAtStageOfCrash} at the stage they died in, ${crash.resumedWithoutEarlierStage} without any earlier stage running again or rewriting its output; the last of them finished ${cell(crash.lastResumedFinishedAfterKillMs)} ms after the kill.`,
+    "",
+    "| Job file | Stage at kill | Outputs at kill | Resumed at stage | Attempt | Upload bytes still on the row | Earlier stage re-run | Outputs rewritten | Lease wait ms | Finished ms after the kill | Final status |",
+    "| --- | --- | --- | --- | ---: | --- | --- | --- | ---: | ---: | --- |"
+  );
+  for (const job of crash.jobs.filter((entry) => entry.outcome !== "finished_before_kill")) {
+    lines.push(
+      `| ${job.fileName} | ${job.stageAtKill} | ${job.outputsAtKill.join(", ") || "-"} | ${cell(job.resumedAtStage)} | ${cell(job.resumedAttempt)} | ${job.uploadBytesOnRowAtResume === null ? "-" : job.uploadBytesOnRowAtResume ? "yes" : "no"} | ${job.earlierStagesRerun?.join(", ") || "none"} | ${job.outputsRewrittenAfterResume?.join(", ") || "none"} | ${cell(job.leaseWaitMs)} | ${cell(job.finishedAfterKillMs)} | ${job.finalStatus} |`
+    );
+  }
+};
+
+const formatIndexSwitchScenario = (lines, scenario) => {
+  const build = scenario.build;
+  const describePropagation = (label, entry) => {
+    const perInstance = entry.propagation.perInstance
+      .map(
+        (instance) =>
+          `instance ${instance.instance}: first search on version ${entry.toVersionId} ${cell(instance.firstSearchOnNewMs)} ms, last on version ${entry.fromVersionId} ${cell(instance.lastSearchOnOldMs)} ms, ${instance.tableChangesAfterSwitch} table change(s)`
+      )
+      .join("; ");
+    return `${label}: version ${entry.fromVersionId} -> ${entry.toVersionId} (generation ${entry.generation}); the command took ${entry.commandWallMs} ms and the new pointer was visible ${entry.visibleAfterCommandStartMs} ms after it started (pointer read every ${POINTER_POLL_MS} ms; the commit was at most ${entry.pointerPollResolutionMs} ms before it was seen). Every instance searched version ${entry.toVersionId} ${cell(entry.propagation.allInstancesMs)} ms after the switch was seen (${perInstance}).${
+      entry.validation ? ` Validation gate: ${entry.validation.ok ? "passed" : "FAILED"}${entry.validation.totals ? ` (${entry.validation.totals.documents} documents, ${entry.validation.totals.activeChunks} chunks in the active version, ${entry.validation.totals.targetChunks} in the target)` : ""}.` : ""
+    }`;
+  };
+
+  lines.push(
+    `Build of version ${build.versionId} (${build.model}, ${build.dimensions} dimensions) under /chat load: ${cell(build.indexed)} documents indexed, ${cell(build.failed)} failed, ${cell(build.chunkCount)} chunks; ${cell(build.registryBuildMs)} ms by the registry's build timestamps (${cell(build.docsPerSecond)} documents/s), ${cell(build.cliWallMs)} ms for the whole command including its start-up (${cell(build.docsPerSecondIncludingCli)} documents/s); ${cell(build.embeddingRequests)} embeddings requests (${cell(build.embeddingInputs)} inputs) from the builder.`,
+    "",
+    `${describePropagation("Activation", scenario.activation)} First query embedding in the new space per instance: ${scenario.activation.firstNewSpaceQueryEmbeddingMs.map((value, index) => `instance ${index} ${cell(value)} ms`).join(", ")} after the switch was seen.`,
+    "",
+    describePropagation("Rollback", scenario.rollback),
+    "",
+    `Pointer TTL ${scenario.pointerTtlMs} ms. /chat requests: ${scenario.requests}, errors: ${scenario.totalErrors}.`,
+    "",
+    `| Phase | Duration ms | Requests | Errors | Req/s | ${LATENCY_HEADER} | Grounded answers | Embedding requests (per /chat) | Embeddings by model |`,
+    `| --- | ---: | ---: | ---: | ---: | ${LATENCY_RULE} | ---: | ---: | --- |`
+  );
+  for (const phase of scenario.phases) {
+    lines.push(
+      `| ${phase.kind === "window" ? `_${phase.name}_` : phase.name} | ${cell(phase.durationMs)} | ${phase.requests} | ${phase.errors} | ${cell(phase.throughputRps)} | ${latencyCells(phase.latencyMs)} | ${cell(phase.groundedAnswers)} | ${
+        phase.model ? `${phase.model.embeddingRequests} (${cell(phase.model.embeddingRequestsPerChat)})` : "-"
+      } | ${
+        phase.model
+          ? Object.entries(phase.model.embeddingsByModel)
+              .map(([model, entry]) => `${model} ${entry.requests}`)
+              .join(", ") || "-"
+          : "-"
+      } |`
+    );
+  }
+  lines.push(
+    "",
+    "Per instance and phase:",
+    "",
+    `| Phase | Instance | Requests | Errors | ${LATENCY_HEADER} |`,
+    `| --- | ---: | ---: | ---: | ${LATENCY_RULE} |`
+  );
+  for (const phase of scenario.phases.filter((entry) => entry.kind !== "window")) {
+    phase.perInstance.forEach((instance, index) => {
+      lines.push(`| ${phase.name} | ${index} | ${instance.requests} | ${instance.errors} | ${latencyCells(instance.latencyMs)} |`);
+    });
+  }
+  if (scenario.errors.length > 0) {
+    lines.push("", "First errors:");
+    for (const error of scenario.errors) {
+      lines.push(`- ${error.phase ?? "?"}, instance ${cell(error.instance)}: ${error.error ?? `HTTP ${error.status}`}`);
+    }
+  }
+  lines.push(
+    "",
+    `Versions at the end: ${scenario.versions
+      .map((version) => `${version.versionId} ${version.status} (${version.chunkTable}, ${version.embeddingModel || "configured model"}/${version.embeddingDimensions}, ${cell(version.chunkCount)} chunks${version.inDualWriteWindow ? ", still dual-written" : ""})`)
+      .join("; ")}. Active: ${scenario.pointerAtEnd.activeVersionId}.`
+  );
 };
 
 const formatRequestScenario = (lines, scenario, multiInstance, balance) => {
@@ -3743,17 +4789,30 @@ export const formatLoadTestMarkdown = (report) => {
     `| App instances | ${instanceCount}${multiInstance ? ` (client-side ${config.balance ?? "round-robin"} balancing, one database)` : ""} |`,
     `| Shared state (model call guard) | ${config.sharedState ?? "memory"}${config.sharedState === "redis" ? " (RAG_LLM_MAX_CONCURRENCY is one cap for all instances)" : multiInstance ? " (RAG_LLM_MAX_CONCURRENCY applies per instance)" : ""} |`,
     `| Model latency profiles (chat completion) | ${config.modelLatencyMs.map((ms) => `${ms} ms`).join(", ")} |`,
-    `| Embedding latency | ${config.embeddingLatencyMs} ms |`,
+    `| Embedding latency | ${config.embeddingLatencyMs} ms per request${config.embeddingLatencyPerInputMs ? ` + ${config.embeddingLatencyPerInputMs} ms per input` : ""} |`,
     `| RAG_LLM_MAX_CONCURRENCY | ${config.llmMaxConcurrency} |`,
   ];
 
-  if (scenarioKind === "ingest") {
+  if (scenarioKind === "index-switch") {
+    lines.push(
+      `| /chat load | closed loop, concurrency ${cell(config.switchConcurrency)}, for the whole run; seed corpus ${config.documents} documents x ${config.pages} pages (uploaded as PDFs), ${config.questions} questions |`,
+      `| Index versions | seed version at ${config.embeddingDimensions} dimensions; new version ${switchEmbeddingModel(config.switchDimensions)} at ${config.switchDimensions} dimensions${
+        config.switchBuildBatchSize ? `, build batches of ${config.switchBuildBatchSize}` : ""
+      } |`,
+      `| Steady phases | ${config.switchPhaseMs} ms before the build, after the activation and after the rollback |`,
+      `| RAG_INDEX_VERSION_POINTER_TTL_MS | ${config.indexPointerTtlMs ?? "app default (2000)"} |`
+    );
+  } else if (scenarioKind === "ingest") {
     const workerSettings = [
       Number.isInteger(config.ingestWorkerConcurrency) ? `RAG_INGEST_WORKER_CONCURRENCY=${config.ingestWorkerConcurrency}` : null,
       Number.isInteger(config.ingestWorkerPollMs) ? `RAG_INGEST_WORKER_POLL_MS=${config.ingestWorkerPollMs}` : null,
       Number.isInteger(config.ingestMaxPendingJobs)
         ? `RAG_INGEST_MAX_PENDING_JOBS_PER_TENANT=${config.ingestMaxPendingJobs}`
         : null,
+      config.embedBatching ? `RAG_INGEST_EMBED_BATCHING=${config.embedBatching === "on" ? "true" : "false"}` : null,
+      Number.isInteger(config.embedBatchLingerMs) ? `RAG_INGEST_EMBED_BATCH_LINGER_MS=${config.embedBatchLingerMs}` : null,
+      Number.isInteger(config.ingestJobLeaseMs) ? `RAG_INGEST_JOB_LEASE_MS=${config.ingestJobLeaseMs}` : null,
+      config.crashWorkerMidEmbed ? "crash injection: worker 0 killed mid-embed" : null,
     ].filter(Boolean);
     lines.push(
       `| Ingest mode | ${config.ingestMode}${
@@ -3831,7 +4890,9 @@ export const formatLoadTestMarkdown = (report) => {
 
     for (const scenario of run.scenarios) {
       const heading =
-        scenario.kind === "ingest"
+        scenario.kind === "index-switch"
+          ? `### ${scenario.endpoint}, chat model latency ${scenario.modelLatencyMs} ms, embedding latency ${scenario.embeddingLatencyMs} ms`
+          : scenario.kind === "ingest"
           ? `### ${scenario.endpoint} (${scenario.ingestMode} ingest), chat model latency ${scenario.modelLatencyMs} ms, embedding latency ${scenario.embeddingLatencyMs} ms`
           : scenario.kind === "chat"
             ? `### ${scenario.endpoint}, model latency ${scenario.modelLatencyMs} ms`
@@ -3839,6 +4900,7 @@ export const formatLoadTestMarkdown = (report) => {
       lines.push(heading, "");
 
       if (scenario.kind === "ingest") formatIngestScenario(lines, scenario, multiInstance);
+      else if (scenario.kind === "index-switch") formatIndexSwitchScenario(lines, scenario);
       else formatRequestScenario(lines, scenario, multiInstance, config.balance);
       lines.push("");
     }
@@ -3910,6 +4972,16 @@ export const buildAccessScopeNote = ({ tenant = false } = {}) =>
 export const HOST_CPU_NOTE =
   "Host CPU: at each window's marks the harness reads the host's CPU counters (all processes), its own CPU (load generator and fake model) and, when the postmaster's pid file is given (the wrapper passes it), the CPU of the PostgreSQL postmaster and its children from one ps listing. PostgreSQL CPU is the difference per process; a backend that exited inside the window takes its window CPU with it and is counted as exited, and ps reports CPU in 10 ms steps on macOS.";
 
+export const INDEX_SWITCH_NOTES = Object.freeze([
+  "Index switch scenario: the seed corpus is uploaded as PDFs so the registry holds bytes a build can parse again. A closed-loop /chat load runs for the whole run; each request belongs to the phase it was sent in. The lifecycle commands are separate processes (node vector-index.mjs build / activate / rollback --json) on the same database and fake model: build creates version 2 under load-test-embedding-<width> (the fake answers that model at that width) and re-embeds every document from its stored PDF; activate runs the activation gate (per-document chunk counts) and switches the pointer; rollback switches back to version 1 while version 2 is inside its dual-write grace period.",
+  "Switch visibility: the harness reads the pointer row on its own connection every few ms while activate/rollback runs; the first read with a new generation is when the switch is taken as committed (the commit happened after the previous read). Propagation per instance: every app process records which chunk table each of its dense retrieval statements read (each version is its own table), so the first dense search on the new table after the switch is when that instance started serving the new version, measured inside the process; its last search on the old table is when it stopped. A request that read the pointer just before the switch may still search the old table afterwards; that version keeps receiving writes for its grace period, so such a search is still complete.",
+  "A version pinned to another embedding model than the configured one makes every query embed in that model too (vector-store-pgvector.js embedQueryInSpace, a per-process cache of 256 queries); the embeddings column shows those calls per phase.",
+]);
+
+export const buildCrashNotes = () => [
+  "Crash injection: the fake model holds dedicated worker 0's first embeddings request of the window unanswered and the harness kills that process (SIGKILL) while it waits, so the kill lands mid-embed with nothing flushed. The jobs it held stay running until their lease (RAG_INGEST_JOB_LEASE_MS) expires; the surviving worker then claims each one (running a job whose previous attempt died alone). A poller on the harness's own connection records every change of every job of the window every 25 ms: status, stage, attempt, claimant, whether the upload bytes are still on the job row, and when each stage output was written. A job resumed at the stage it died in, with no earlier stage observed again and no earlier output rewritten, did not re-parse. Times and docs/s of this level include the lease wait and the loss of one of the two workers.",
+];
+
 /** Method notes for this run's settings: the common ones plus those that apply. */
 export const buildMethodNotes = (options = {}) => {
   const storage = Array.isArray(options.storage) ? options.storage : [];
@@ -3927,6 +4999,13 @@ export const buildMethodNotes = (options = {}) => {
     ...(scenario === "ingest"
       ? buildIngestNotes({ ingestMode: options.ingestMode, pollIntervalMs: options.pollIntervalMs })
       : []),
+    ...(scenario === "ingest" && options.embedBatching
+      ? [
+          `Embedding batching ${options.embedBatching}: RAG_INGEST_EMBED_BATCHING=${options.embedBatching === "on" ? "true" : "false"}. On, the embed stages of concurrent jobs in one worker process share embeddings requests (the cross-document batcher); off, each job sends its chunks as its own request, as a synchronous upload does. The fake's embeddings latency is ${options.embeddingLatencyMs} ms per request${options.embeddingLatencyPerInputMs ? ` plus ${options.embeddingLatencyPerInputMs} ms per input` : " whatever the request's size, which favours batching: a real provider takes longer for a larger batch"}.`,
+        ]
+      : []),
+    ...(scenario === "ingest" && options.crashWorkerMidEmbed ? buildCrashNotes() : []),
+    ...(scenario === "index-switch" ? INDEX_SWITCH_NOTES : []),
   ];
 };
 
@@ -3959,9 +5038,12 @@ const startInstances = async ({ apps, corpus, environmentFor, options, storage }
   // One at a time: the first migrates the database and ingests the seed
   // corpus; the rest start against that schema and load its registry.
   for (let index = 0; index < options.instances; index += 1) {
-    const app = await startAppProcess({ environment: environmentFor("api"), verbose: options.verbose });
+    const app = await startAppProcess({ environment: environmentFor("api", `api-${index}`), verbose: options.verbose });
     apps.push(app);
-    const ready = await app.start(index === 0 ? corpus.documents : [], { primary: index === 0 });
+    const ready = await app.start(index === 0 ? corpus.documents : [], {
+      primary: index === 0,
+      seedFormat: options.scenario === "index-switch" ? "pdf" : "text",
+    });
     instances.push({ ...ready, index });
     const worker = ready.ingestWorker ? ` (with ingest worker, ${formatWorkerSettings(ready.ingestWorker)})` : "";
     console.log(
@@ -3978,7 +5060,11 @@ const startIngestWorkers = async ({ environmentFor, options, storage, workers })
   const ready = [];
 
   for (let index = 0; index < options.ingestWorkers; index += 1) {
-    const worker = await startAppProcess({ environment: environmentFor("worker"), role: "worker", verbose: options.verbose });
+    const worker = await startAppProcess({
+      environment: environmentFor("worker", `worker-${index}`),
+      role: "worker",
+      verbose: options.verbose,
+    });
     workers.push(worker);
     ready.push(await worker.start([]));
   }
@@ -3990,7 +5076,7 @@ const startIngestWorkers = async ({ environmentFor, options, storage, workers })
     );
   }
 
-  return ready.map((entry) => ({ ingestWorker: entry.ingestWorker ?? null, pid: entry.pid }));
+  return ready.map((entry) => ({ ingestWorker: entry.ingestWorker ?? null, pid: entry.pid, workerId: entry.workerId ?? null }));
 };
 
 /** Claim loops across every process that runs an ingest worker. */
@@ -4034,7 +5120,9 @@ const main = async () => {
   const runs = [];
 
   console.log(
-    options.scenario === "ingest"
+    options.scenario === "index-switch"
+      ? `Load test (index switch): ${options.instances} instance(s), ${options.balance} balancing; /chat concurrency ${options.switchConcurrency}; seed ${options.documents} x ${options.pages} pages at ${options.embeddingDimensions} dimensions; new version ${switchEmbeddingModel(options.switchDimensions)}; phases of ${options.switchPhaseMs} ms`
+      : options.scenario === "ingest"
       ? `Load test (ingest, ${options.ingestMode}): storage ${options.storage.join(", ")}; ${options.instances} instance(s), ${options.ingestWorkers} worker process(es), ${options.balance} balancing; upload concurrency ${options.uploadConcurrency.join(", ")}; ${options.uploads} uploads per level; embedding latency ${options.embeddingLatencyMs} ms; shared state ${options.sharedState}`
       : `Load test: storage ${options.storage.join(", ")}; ${options.instances} instance(s), ${options.balance} balancing; concurrency ${options.concurrency.join(", ")}; model latency ${options.modelLatencyMs.join(", ")} ms; RAG_LLM_MAX_CONCURRENCY=${options.llmMaxConcurrency}; shared state ${options.sharedState}`
   );
@@ -4045,9 +5133,10 @@ const main = async () => {
       await writeFile(path.join(tempRoot, "empty.env"), "");
       // Every process of the run shares the temp root: data, uploads and
       // upload-session directories are the same, as on one host.
-      const environmentFor = (role) =>
+      const environmentFor = (role, callerTag = "") =>
         buildAppEnvironment({
           authToken,
+          callerTag,
           databaseUrl: options.databaseUrl,
           modelBaseUrl: fakeModel.baseUrl,
           options,
@@ -4062,7 +5151,7 @@ const main = async () => {
       const hostSampler = createHostSampler({ postmasterPid: storage === "pgvector" ? postmasterPid : null });
 
       try {
-        fakeModel.setLatency({ chatMs: 0, embeddingMs: 0 });
+        fakeModel.setLatency({ chatMs: 0, embeddingMs: 0, embeddingPerInputMs: 0 });
         console.log(`[${storage}] starting ${options.instances} app instance(s) and ingesting ${corpus.documents.length} documents...`);
         const instances = await startInstances({ apps, corpus, environmentFor, options, storage });
         const workerProcesses = await startIngestWorkers({ environmentFor, options, storage, workers });
@@ -4080,7 +5169,11 @@ const main = async () => {
           databaseAnalyzeMs = await analyzeDatabase({ options, primary: apps[0], storage });
           idle = await measureIdle({ idleMs: options.idleMs, processes: [...apps, ...workers] });
           for (const profile of options.modelLatencyMs) {
-            fakeModel.setLatency({ chatMs: profile, embeddingMs: options.embeddingLatencyMs });
+            fakeModel.setLatency({
+              chatMs: profile,
+              embeddingMs: options.embeddingLatencyMs,
+              embeddingPerInputMs: options.embeddingLatencyPerInputMs,
+            });
             scenarios.push(
               await runIngestScenario({
                 apps,
@@ -4095,10 +5188,44 @@ const main = async () => {
                 profile,
                 runId,
                 workerLoops,
+                workerProcesses,
                 workers,
               })
             );
           }
+        } else if (options.scenario === "index-switch") {
+          if (options.warmup > 0) {
+            const failures = await warmQueryCaches({
+              baseUrls,
+              concurrency: Math.min(8, options.switchConcurrency),
+              headers,
+              options,
+              questions: corpus.questions,
+              sessionTag: `load-${runId}-switch-warm`,
+            });
+            if (failures > 0) console.warn(`[${storage}] query cache warm-up: ${failures} request(s) failed`);
+          }
+          databaseAnalyzeMs = await analyzeDatabase({ options, primary: apps[0], storage });
+          const profile = options.modelLatencyMs[0] ?? 0;
+          fakeModel.setLatency({
+            chatMs: profile,
+            embeddingMs: options.embeddingLatencyMs,
+            embeddingPerInputMs: options.embeddingLatencyPerInputMs,
+          });
+          scenarios.push({
+            ...(await runIndexSwitchScenario({
+              apps,
+              baseUrls,
+              corpus,
+              environmentFor,
+              fakeModel,
+              headers,
+              options,
+              runId,
+            })),
+            embeddingLatencyMs: options.embeddingLatencyMs,
+            modelLatencyMs: profile,
+          });
         } else {
           if (options.warmup > 0) {
             // Every instance's query embedding cache, before any measured level.
@@ -4131,7 +5258,11 @@ const main = async () => {
           );
 
           for (const profile of options.modelLatencyMs) {
-            fakeModel.setLatency({ chatMs: profile, embeddingMs: options.embeddingLatencyMs });
+            fakeModel.setLatency({
+              chatMs: profile,
+              embeddingMs: options.embeddingLatencyMs,
+              embeddingPerInputMs: options.embeddingLatencyPerInputMs,
+            });
             scenarios.push(
               await runScenario({
                 apps,
@@ -4195,6 +5326,7 @@ const main = async () => {
 
   const cpus = os.cpus();
   const ingest = options.scenario === "ingest";
+  const indexSwitch = options.scenario === "index-switch";
   const report = {
     reportType: LOAD_TEST_REPORT_TYPE,
     reportVersion: LOAD_TEST_REPORT_VERSION,
@@ -4218,6 +5350,16 @@ const main = async () => {
       embeddingCacheTtlMs: options.embeddingCache ? LOAD_TEST_EMBEDDING_CACHE_TTL_MS : null,
       embeddingDimensions: options.embeddingDimensions,
       embeddingLatencyMs: options.embeddingLatencyMs,
+      embeddingLatencyPerInputMs: options.embeddingLatencyPerInputMs,
+      embedBatching: ingest ? options.embedBatching : null,
+      embedBatchLingerMs: ingest ? options.embedBatchLingerMs : null,
+      crashWorkerMidEmbed: ingest ? options.crashWorkerMidEmbed : false,
+      ingestJobLeaseMs: ingest ? options.ingestJobLeaseMs : null,
+      indexPointerTtlMs: indexSwitch ? options.indexPointerTtlMs : null,
+      switchBuildBatchSize: indexSwitch ? options.switchBuildBatchSize : null,
+      switchConcurrency: indexSwitch ? options.switchConcurrency : null,
+      switchDimensions: indexSwitch ? options.switchDimensions : null,
+      switchPhaseMs: indexSwitch ? options.switchPhaseMs : null,
       ...worktree,
       harnessSha256,
       idleMs: options.idleMs,

@@ -8,6 +8,8 @@ import {
   getAgentRunEventsPostgresTable,
   getAgentRunsPostgresTable,
   getEmbeddingDimensions,
+  getIndexVersionPointerTtlMs,
+  getIndexVersionsPostgresTable,
   getIngestJobsPostgresTable,
   getLongMemoryPostgresTable,
   getPgvectorHnswEfConstruction,
@@ -95,6 +97,10 @@ const getTableNames = () => ({
     getIngestJobsPostgresTable(),
     "INGEST_JOBS_POSTGRES_TABLE"
   ),
+  indexVersionsTable: ensureSimpleTableName(
+    getIndexVersionsPostgresTable(),
+    "INDEX_VERSIONS_POSTGRES_TABLE"
+  ),
 });
 
 const validateTableNames = (tableNames = {}) => ({
@@ -143,6 +149,10 @@ const validateTableNames = (tableNames = {}) => ({
   ingestJobsTable: ensureSimpleTableName(
     tableNames.ingestJobsTable ?? getIngestJobsPostgresTable(),
     "INGEST_JOBS_POSTGRES_TABLE"
+  ),
+  indexVersionsTable: ensureSimpleTableName(
+    tableNames.indexVersionsTable ?? getIndexVersionsPostgresTable(),
+    "INDEX_VERSIONS_POSTGRES_TABLE"
   ),
 });
 
@@ -267,11 +277,174 @@ export const buildPgvectorIndexStatement = ({
   return `CREATE INDEX IF NOT EXISTS ${indexName}\n  ON ${tableName} USING hnsw (embedding vector_cosine_ops)\n  WITH (m = ${Math.max(2, Math.floor(hnswM))}, ef_construction = ${Math.max(4, Math.floor(hnswEfConstruction))});`;
 };
 
+// ---------------------------------------------------------------------------
+// Index versions (migration 016, rag/vector-store-pgvector-versions.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * The registry, pointer and build-progress table names of migration 016. Every
+ * identifier the migration derives from them must fit PostgreSQL's 63 bytes,
+ * so the longest ones are checked here rather than left to truncate.
+ */
+export const getIndexVersionRegistryTableNames = (
+  versionsTable = getIndexVersionsPostgresTable()
+) => {
+  const base = ensureSimpleTableName(versionsTable, "INDEX_VERSIONS_POSTGRES_TABLE");
+  const pointerTable = `${base}_pointer`;
+  const buildProgressTable = `${base}_build_progress`;
+
+  for (const derived of [
+    `${pointerTable}_singleton`,
+    `${pointerTable}_ttl_positive`,
+    `${buildProgressTable}_outcome_check`,
+    `${base}_space_source_check`,
+    `${base}_chunk_table_unique`,
+    `${base}_dimensions_positive`,
+  ]) {
+    ensureSimpleTableName(derived, "derived index version registry identifier");
+  }
+
+  return { buildProgressTable, pointerTable, versionsTable: base };
+};
+
+// ---------------------------------------------------------------------------
+// Staged ingestion (migrations 017 and 018, rag/ingest-job-store.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * The stage-output table of migration 017, `<jobs table>_outputs`. It and the
+ * constraint the migration names after it must fit PostgreSQL's 63 bytes, and
+ * so must the constraints migration 017 adds to the jobs table.
+ */
+export const getIngestJobOutputsTableName = (ingestJobsTable = getIngestJobsPostgresTable()) => {
+  const base = ensureSimpleTableName(ingestJobsTable, "INGEST_JOBS_POSTGRES_TABLE");
+  const outputsTable = `${base}_outputs`;
+
+  for (const derived of [
+    `${outputsTable}_output_check`,
+    `${base}_stage_attempts_check`,
+    `${base}_dead_letter_idx`,
+  ]) {
+    ensureSimpleTableName(derived, "derived ingest job identifier");
+  }
+
+  return outputsTable;
+};
+
+// The suffixes migrations 012 and 014 append to a chunk table's name (indexes,
+// constraints, the sparse-rank function). A version table's name has to leave
+// room for all of them.
+const CHUNK_TABLE_DERIVED_SUFFIXES = Object.freeze([
+  "_dimensions_positive",
+  "_embedding_model_idx",
+  "_search_vector_idx",
+  "_doc_chunk_unique",
+  "_embedding_idx",
+  "_sparse_rank",
+  "_doc_id_idx",
+  "_scope_idx",
+]);
+
+export const assertIndexVersionChunkTableName = (chunkTable) => {
+  const tableName = ensureSimpleTableName(chunkTable, "index version chunk table");
+
+  for (const suffix of CHUNK_TABLE_DERIVED_SUFFIXES) {
+    ensureSimpleTableName(`${tableName}${suffix}`, "derived index version identifier");
+  }
+
+  return tableName;
+};
+
+// Mirrors the chunk-table policy of migration 013: a row with neither owner
+// nor workspace is never visible to a tenant, and each non-empty owner column
+// must equal the tenant's setting.
+const buildChunkTableTenantPolicySql = ({ chunkTable, tenantRole }) => `
+GRANT SELECT, INSERT, UPDATE, DELETE ON ${chunkTable} TO ${tenantRole};
+
+ALTER TABLE ${chunkTable} ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON ${chunkTable};
+CREATE POLICY tenant_isolation ON ${chunkTable}
+  TO ${tenantRole}
+  USING (
+    (owner_user_id <> '' OR workspace_id <> '')
+    AND (owner_user_id = '' OR owner_user_id = current_setting('archive_rag.user_id', true))
+    AND (workspace_id = '' OR workspace_id = current_setting('archive_rag.workspace_id', true))
+  )
+  WITH CHECK (
+    (owner_user_id <> '' OR workspace_id <> '')
+    AND (owner_user_id = '' OR owner_user_id = current_setting('archive_rag.user_id', true))
+    AND (workspace_id = '' OR workspace_id = current_setting('archive_rag.workspace_id', true))
+  );
+`;
+
+/**
+ * The owner-only DDL that creates one index version's physical table: the
+ * chunk table of migration 012 rendered at the version's width with its own
+ * ANN and GIN indexes and foreign key to the documents table, the tenant grant
+ * and row policy of migration 013, and the sparse-rank function of migration
+ * 014 rendered for this table -- the same templates, so a version table cannot
+ * drift from the schema the migrations maintain. CREATE TABLE is not IF NOT
+ * EXISTS: a version id is never reused, so an existing table is an error.
+ */
+export const renderIndexVersionChunkTableDdl = async ({
+  chunkTable,
+  dimensions,
+  indexParams = {},
+  migrationsDirectory = defaultMigrationsDirectory,
+  readFile = readTextFile,
+  tableNames = getTableNames(),
+  tenantRole = getPostgresTenantRole(),
+} = {}) => {
+  const safeChunkTable = assertIndexVersionChunkTableName(chunkTable);
+  const safeTenantRole = ensureSimpleTableName(tenantRole, "POSTGRES_TENANT_ROLE");
+  const safeDimensions = ensureEmbeddingDimensions(dimensions);
+  const names = { ...tableNames, documentChunksTable: safeChunkTable };
+  const options = {
+    embeddingDimensions: safeDimensions,
+    tenantRole: safeTenantRole,
+    textSearchConfig: indexParams.textSearchConfig ?? getPgvectorTextSearchConfig(),
+    vectorIndexStatement: buildPgvectorIndexStatement({
+      dimensions: safeDimensions,
+      documentChunksTable: safeChunkTable,
+      hnswEfConstruction: indexParams.hnswEfConstruction ?? getPgvectorHnswEfConstruction(),
+      hnswM: indexParams.hnswM ?? getPgvectorHnswM(),
+      indexType: indexParams.indexType ?? getPgvectorIndexType(),
+      ivfflatLists: indexParams.ivfflatLists ?? getPgvectorIvfflatLists(),
+    }),
+  };
+  const [chunkTemplate, sparseRankTemplate] = await Promise.all([
+    readFile(path.join(migrationsDirectory, "012_create_rag_document_chunks.sql"), "utf8"),
+    readFile(path.join(migrationsDirectory, "014_create_sparse_rank_function.sql"), "utf8"),
+  ]);
+  const tableSql = renderMigrationSql(chunkTemplate, names, options)
+    // The extension belongs to migration 012; a version never installs it.
+    .replace(/^CREATE EXTENSION IF NOT EXISTS vector;\s*$/m, "")
+    .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE");
+
+  return [
+    tableSql,
+    buildChunkTableTenantPolicySql({ chunkTable: safeChunkTable, tenantRole: safeTenantRole }),
+    renderMigrationSql(sparseRankTemplate, names, options),
+  ].join("\n");
+};
+
+/** Retiring a version drops its function and table (owner only). */
+export const renderIndexVersionDropDdl = ({ chunkTable, sparseRankFunction }) => {
+  const safeChunkTable = assertIndexVersionChunkTableName(chunkTable);
+  const safeFunction = ensureSimpleTableName(sparseRankFunction, "index version sparse-rank function");
+
+  return [
+    `DROP FUNCTION IF EXISTS ${safeFunction}(tsquery, text[], integer);`,
+    `DROP TABLE IF EXISTS ${safeChunkTable};`,
+  ].join("\n");
+};
+
 export const renderMigrationSql = (
   sqlText,
   tableNames = getTableNames(),
   {
     embeddingDimensions = getEmbeddingDimensions(),
+    indexVersionPointerTtlMs = getIndexVersionPointerTtlMs(),
     tenantRole = getPostgresTenantRole(),
     textSearchConfig = getPgvectorTextSearchConfig(),
     vectorIndexStatement = null,
@@ -285,6 +458,15 @@ export const renderMigrationSql = (
   const safeDimensions = ensureEmbeddingDimensions(embeddingDimensions);
   const safeTextSearchConfig = ensureTextSearchConfig(textSearchConfig);
   const safeTenantRole = ensureSimpleTableName(tenantRole, "POSTGRES_TENANT_ROLE");
+  const safePointerTtlMs = Math.floor(Number(indexVersionPointerTtlMs));
+
+  if (!Number.isInteger(safePointerTtlMs) || safePointerTtlMs <= 0) {
+    throw new Error(`The index version pointer TTL must be a positive integer. Received "${indexVersionPointerTtlMs}".`);
+  }
+
+  const indexVersionTables = getIndexVersionRegistryTableNames(
+    safeTableNames.indexVersionsTable
+  );
   const indexStatement =
     vectorIndexStatement ??
     buildPgvectorIndexStatement({
@@ -293,6 +475,12 @@ export const renderMigrationSql = (
     });
 
   return sqlText
+    .replaceAll("__INDEX_VERSIONS_TABLE__", indexVersionTables.versionsTable)
+    .replaceAll("__INDEX_VERSIONS_POINTER_TABLE__", indexVersionTables.pointerTable)
+    .replaceAll(
+      "__INDEX_VERSION_BUILD_PROGRESS_TABLE__",
+      indexVersionTables.buildProgressTable
+    )
     .replaceAll("__LONG_MEMORY_TABLE__", safeTableNames.longMemoryTable)
     .replaceAll("__DOCUMENTS_TABLE__", safeTableNames.documentsTable)
     .replaceAll("__SESSION_MEMORY_TABLE__", safeTableNames.sessionMemoryTable)
@@ -310,7 +498,9 @@ export const renderMigrationSql = (
       safeTableNames.workspaceArtifactsTable
     )
     .replaceAll("__DOCUMENT_CHUNKS_TABLE__", safeTableNames.documentChunksTable)
+    .replaceAll("__INGEST_JOB_OUTPUTS_TABLE__", getIngestJobOutputsTableName(safeTableNames.ingestJobsTable))
     .replaceAll("__INGEST_JOBS_TABLE__", safeTableNames.ingestJobsTable)
+    .replaceAll("__INDEX_VERSION_POINTER_TTL_MS__", String(safePointerTtlMs))
     .replaceAll("__EMBEDDING_DIMENSIONS__", String(safeDimensions))
     .replaceAll("__TEXT_SEARCH_CONFIG__", safeTextSearchConfig)
     .replaceAll("__TENANT_ROLE__", safeTenantRole)

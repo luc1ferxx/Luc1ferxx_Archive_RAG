@@ -1,13 +1,8 @@
 import {
-  getDocumentChunksPostgresTable,
   getDocumentsPostgresTable,
-  getEmbeddingDimensions,
-  getEmbeddingIndexIdentity,
   getEmbeddingModel,
   getKeywordWeight,
-  getPgvectorIndexType,
   getPgvectorIterativeScan,
-  getPgvectorTextSearchConfig,
   getVectorWeight,
 } from "./config.js";
 import {
@@ -15,38 +10,72 @@ import {
   buildPgvectorIndexStatement,
   getPgvectorEmbeddingIndexName,
   isPgvectorAnnDimensionSupported,
-  runPostgresMigrations,
 } from "./db-migrations.js";
-import { embedTexts } from "./openai.js";
-import {
-  checkPostgresHealth,
-  getEnforcedDatabaseTenant,
-  isPostgresConfigured,
-  queryPostgres,
-  withPostgresTransaction,
-} from "./postgres.js";
+import { embedQuery, embedTexts } from "./openai.js";
+import { getEnforcedDatabaseTenant } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { buildTermSet, extractMeaningfulTokens } from "./text-utils.js";
+import {
+  configurePgvectorRuntime,
+  getPgvectorQuery,
+  getPgvectorRuntime,
+  onPgvectorRuntimeReset,
+  resetPgvectorRuntime,
+} from "./vector-store-pgvector-runtime.js";
+import {
+  EMBEDDING_SPACE_SOURCES,
+  buildLegacyIndexVersion,
+  describeIndexVersions,
+  fenceNonServingIndexVersions,
+  getConfiguredEmbeddingSpace,
+  getHintedWriteSpaces,
+  getPgvectorBaseTableName,
+  getVersionVerificationKey,
+  invalidateIndexVersionSnapshot,
+  isIndexVersionWriteTarget,
+  isSameDocumentSpace,
+  isSameQuerySpace,
+  lockIndexVersionWriteTargets,
+  readIndexVersionSnapshot,
+  resolveVersionIndexParams,
+  resolveVersionSpace,
+} from "./vector-store-pgvector-versions.js";
 
 // PostgreSQL + pgvector retrieval provider: the default backend.
 //
-// Two routes, one table. The dense route orders chunks by cosine distance over
-// an HNSW/IVFFlat index; the sparse route is PostgreSQL full-text search over a
-// generated tsvector, ranked with ts_rank_cd -- which is a cover-density rank,
-// not BM25, and is reported as such. Both routes filter by the caller's docIds
-// so a query never reads outside the documents it was authorized for.
+// Two routes over one table. The dense route orders chunks by cosine distance
+// over an HNSW/IVFFlat index; the sparse route is PostgreSQL full-text search
+// over a generated tsvector, ranked with ts_rank_cd -- which is a cover-density
+// rank, not BM25, and is reported as such. Both routes filter by the caller's
+// docIds so a query never reads outside the documents it was authorized for.
+//
+// "The table" is the active index version's (vector-store-pgvector-versions.js):
+// version 1 is the migration-012 table, and a version built by
+// `npm run vector:index -- build` has its own table, width and embedding model.
+// Searches read the active version through a short-TTL pointer cache; every
+// write goes to all of the versions that must stay complete (dual write).
 //
 // Every write goes through the caller-supplied transaction client when there
 // is one. The ingest path opens that transaction around the document row and
 // the chunk rows together, which is the only way the registry and the index
 // can be guaranteed to agree after a crash.
 
+export { configurePgvectorRuntime, resetPgvectorRuntime };
+
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const INSERT_BATCH_SIZE = 100;
-let schemaVerified = false;
+const MISSING_RELATION_CODES = new Set(["42P01", "42883"]);
+// The active version this process verified (getVersionVerificationKey), so a
+// search only re-reads the cheap pointer, never the whole table, while the
+// active version stays the same.
+let verified = null;
 // The pgvector version schema verification read; it decides whether the dense
 // route can ask for an iterative HNSW scan (a 0.8 setting).
 let verifiedExtensionVersion = null;
+// The verification in flight, per verification key: after a switch every
+// concurrent request of this process waits for one verification (a full
+// GROUP BY over the new version's table) instead of running its own.
+const verificationsInFlight = new Map();
 const INSERT_COLUMNS = [
   "chunk_id",
   "doc_id",
@@ -69,6 +98,11 @@ export const PGVECTOR_ERROR_CODES = Object.freeze({
   unavailable: "PGVECTOR_UNAVAILABLE",
 });
 
+const CONFIGURATION_REMEDY =
+  "Run `npm run vector:reindex -- --apply` after setting OPENAI_EMBEDDING_MODEL / RAG_EMBEDDING_DIMENSIONS to rebuild the index, or build a new index version with `npm run vector:index -- build`.";
+const PINNED_REMEDY =
+  "The active index version is pinned to its own embedding model; build and activate a new version with `npm run vector:index -- build` instead of rewriting it in place.";
+
 export class PgvectorUnavailableError extends Error {
   constructor(message) {
     super(message);
@@ -79,10 +113,10 @@ export class PgvectorUnavailableError extends Error {
 }
 
 export class PgvectorEmbeddingDimensionError extends Error {
-  constructor({ actual, expected, context }) {
+  constructor({ actual, expected, context, model = null, remedy = CONFIGURATION_REMEDY }) {
     super(
-      `${context}: the current embedding model (${getEmbeddingModel()}) produces ${expected}-dimensional vectors but ${actual} was observed. ` +
-        "Chunks embedded under another model or dimension cannot be searched. Run `npm run vector:reindex -- --apply` after setting OPENAI_EMBEDDING_MODEL / RAG_EMBEDDING_DIMENSIONS to rebuild the index."
+      `${context}: the embedding model (${model ?? getEmbeddingModel()}) produces ${expected}-dimensional vectors but ${actual} was observed. ` +
+        `Chunks embedded under another model or dimension cannot be searched. ${remedy}`
     );
     this.name = "PgvectorEmbeddingDimensionError";
     this.code = PGVECTOR_ERROR_CODES.dimensionMismatch;
@@ -93,12 +127,12 @@ export class PgvectorEmbeddingDimensionError extends Error {
 }
 
 export class PgvectorEmbeddingModelError extends Error {
-  constructor({ storedModels }) {
+  constructor({ storedModels, expected = getConfiguredEmbeddingSpace(), remedy = CONFIGURATION_REMEDY }) {
     super(
       `The pgvector index holds chunks embedded with ${storedModels
         .map((entry) => `${entry.model}/${entry.dimensions}`)
-        .join(", ")} but the configured embedding model is ${getEmbeddingIndexIdentity()}/${getEmbeddingDimensions()}. ` +
-        "Refusing to mix embedding spaces. Run `npm run vector:reindex -- --apply` to re-embed the archive under the current model."
+        .join(", ")} but the configured embedding model is ${expected.identity}/${expected.dimensions}. ` +
+        `Refusing to mix embedding spaces. ${remedy}`
     );
     this.name = "PgvectorEmbeddingModelError";
     this.code = PGVECTOR_ERROR_CODES.modelMismatch;
@@ -107,65 +141,20 @@ export class PgvectorEmbeddingModelError extends Error {
   }
 }
 
-const ensureTableName = (tableName, envName) => {
+/** The migration-012 table (index version 1). Searches use the active version's. */
+export const getPgvectorTableName = () => getPgvectorBaseTableName();
+
+const getDocumentsTableName = () => {
+  const tableName = getDocumentsPostgresTable();
+
   if (!TABLE_NAME_PATTERN.test(tableName)) {
     throw new Error(
-      `${envName} must be a simple PostgreSQL identifier. Received "${tableName}".`
+      `DOCUMENTS_POSTGRES_TABLE must be a simple PostgreSQL identifier. Received "${tableName}".`
     );
   }
 
   return tableName;
 };
-
-export const getPgvectorTableName = () =>
-  ensureTableName(getDocumentChunksPostgresTable(), "DOCUMENT_CHUNKS_POSTGRES_TABLE");
-
-const getDocumentsTableName = () =>
-  ensureTableName(getDocumentsPostgresTable(), "DOCUMENTS_POSTGRES_TABLE");
-
-// Test injection point, in the same spirit as configureOpenAIProvider and
-// configureQdrantClientFactory: unit tests hand in a scripted query function
-// and a no-op migration runner so the SQL this module emits can be checked
-// without a database. Production never calls it.
-let runtimeOverrides = null;
-
-export const configurePgvectorRuntime = (overrides = null) => {
-  runtimeOverrides = overrides && typeof overrides === "object" ? overrides : null;
-  schemaVerified = false;
-};
-
-export const resetPgvectorRuntime = () => {
-  configurePgvectorRuntime(null);
-};
-
-// A scripted query override without its own transaction hook gets one that
-// hands the callback that same query function, so tests see every statement.
-const getTransactionRunner = () => {
-  if (typeof runtimeOverrides?.withTransaction === "function") {
-    return runtimeOverrides.withTransaction;
-  }
-
-  if (typeof runtimeOverrides?.query === "function") {
-    const query = runtimeOverrides.query;
-
-    return (callback) => callback({ query });
-  }
-
-  return withPostgresTransaction;
-};
-
-const getRuntime = () => ({
-  checkHealth: runtimeOverrides?.checkPostgresHealth ?? checkPostgresHealth,
-  isConfigured: runtimeOverrides?.isPostgresConfigured ?? isPostgresConfigured,
-  query: runtimeOverrides?.query ?? queryPostgres,
-  runMigrations: runtimeOverrides?.runMigrations ?? runPostgresMigrations,
-  withTransaction: getTransactionRunner(),
-});
-
-const getQuery = (client) =>
-  client && typeof client.query === "function"
-    ? (sql, values = []) => client.query(sql, values)
-    : getRuntime().query;
 
 const toVectorLiteral = (vector) => `[${vector.map((value) => Number(value) || 0).join(",")}]`;
 
@@ -236,11 +225,14 @@ const rowToDocument = (row) => ({
   }),
 });
 
-const assertDimensions = ({ actual, context }) => {
-  const expected = getEmbeddingDimensions();
-
-  if (actual !== expected) {
-    throw new PgvectorEmbeddingDimensionError({ actual, context, expected });
+const assertDimensions = ({ actual, context, space = getConfiguredEmbeddingSpace() }) => {
+  if (actual !== space.dimensions) {
+    throw new PgvectorEmbeddingDimensionError({
+      actual,
+      context,
+      expected: space.dimensions,
+      model: space.model,
+    });
   }
 };
 
@@ -261,14 +253,131 @@ const buildTsQuery = (queryText) => {
 };
 
 // ---------------------------------------------------------------------------
+// Embedding spaces
+// ---------------------------------------------------------------------------
+
+const toEmbeddingSpaceRequest = (space) => ({
+  dimensions: space.dimensions,
+  documentPrefix: space.documentPrefix,
+  identity: space.identity,
+  model: space.model,
+  queryPrefix: space.queryPrefix,
+});
+
+/**
+ * Embeds document texts in `space`: the configured model through the usual
+ * path, a version pinned to another model through the same route with that
+ * model and its prefixes. Every vector must have the space's width.
+ */
+export const embedDocumentsInSpace = async (
+  texts,
+  space = getConfiguredEmbeddingSpace(),
+  { describeItem = (index) => `Embedding chunk ${index}` } = {}
+) => {
+  const safeTexts = Array.isArray(texts) ? texts : [];
+
+  if (safeTexts.length === 0) {
+    return [];
+  }
+
+  const vectors = isSameDocumentSpace(space, getConfiguredEmbeddingSpace())
+    ? await embedTexts(safeTexts)
+    : await embedTexts(safeTexts, { embeddingSpace: toEmbeddingSpaceRequest(space) });
+
+  if (!Array.isArray(vectors) || vectors.length !== safeTexts.length) {
+    throw new Error(
+      `Embedding provider returned ${Array.isArray(vectors) ? vectors.length : 0} vector(s) for ${safeTexts.length} chunk(s).`
+    );
+  }
+
+  return vectors.map((vector, index) => {
+    const safeVector = Array.isArray(vector) ? vector : [];
+
+    assertDimensions({ actual: safeVector.length, context: describeItem(index), space });
+    return safeVector;
+  });
+};
+
+// Queries embedded in a space other than the configured one (an active
+// version pinned to another model), keyed by space and text. Small and short
+// lived like the configured-model cache in embedding-cache.js.
+const QUERY_CACHE_MAX_ENTRIES = 256;
+const QUERY_CACHE_TTL_MS = 10 * 60 * 1000;
+let spaceQueryCache = new Map();
+
+export const embedQueryInSpace = async (queryText, space = getConfiguredEmbeddingSpace()) => {
+  const text = String(queryText ?? "");
+
+  if (isSameQuerySpace(space, getConfiguredEmbeddingSpace())) {
+    const vector = await embedQuery(text);
+
+    assertDimensions({ actual: Array.isArray(vector) ? vector.length : 0, context: "Embedding the query", space });
+    return vector;
+  }
+
+  const key = [space.key, space.model, space.queryPrefix, text].join("\u0000");
+  const now = Date.now();
+  const cached = spaceQueryCache.get(key);
+
+  if (cached && cached.expiresAt > now) {
+    return cached.vector;
+  }
+
+  const vector = await embedQuery(text, { embeddingSpace: toEmbeddingSpaceRequest(space) });
+
+  assertDimensions({ actual: Array.isArray(vector) ? vector.length : 0, context: "Embedding the query", space });
+  spaceQueryCache.delete(key);
+  spaceQueryCache.set(key, { expiresAt: now + QUERY_CACHE_TTL_MS, vector });
+
+  while (spaceQueryCache.size > QUERY_CACHE_MAX_ENTRIES) {
+    spaceQueryCache.delete(spaceQueryCache.keys().next().value);
+  }
+
+  return vector;
+};
+
+/**
+ * The query vector for the active version. The caller embedded the query under
+ * the configured model; that vector is used as is whenever the active version
+ * lives in the configured space. A version pinned to another model gets the
+ * query text embedded in its own space instead.
+ */
+const resolveQueryVector = async ({ queryText, queryVector, space }) => {
+  if (isSameQuerySpace(space, getConfiguredEmbeddingSpace())) {
+    assertDimensions({ actual: queryVector.length, context: "Embedding the query", space });
+    return queryVector;
+  }
+
+  if (!String(queryText ?? "").trim()) {
+    throw new PgvectorEmbeddingDimensionError({
+      actual: queryVector.length,
+      context: "The active index version is pinned to another embedding model and the query came without its text",
+      expected: space.dimensions,
+      model: space.model,
+      remedy: PINNED_REMEDY,
+    });
+  }
+
+  return embedQueryInSpace(queryText, space);
+};
+
+// ---------------------------------------------------------------------------
 // Schema verification
 // ---------------------------------------------------------------------------
 
 export const resetPgvectorVectorStore = () => {
-  schemaVerified = false;
+  verified = null;
+  verificationsInFlight.clear();
+  spaceQueryCache = new Map();
+  invalidateIndexVersionSnapshot();
 };
 
-const readColumnDimensions = async ({ query, tableName }) => {
+onPgvectorRuntimeReset(() => {
+  verified = null;
+  verificationsInFlight.clear();
+});
+
+export const readPgvectorColumnDimensions = async ({ query, tableName }) => {
   const result = await query(
     `
       SELECT a.atttypmod AS typmod
@@ -288,7 +397,7 @@ const readColumnDimensions = async ({ query, tableName }) => {
   return Number.isInteger(typmod) && typmod > 0 ? typmod : null;
 };
 
-const readStoredEmbeddingModels = async ({ query, tableName }) => {
+export const readPgvectorStoredEmbeddingModels = async ({ query, tableName }) => {
   const result = await query(
     `
       SELECT embedding_model, embedding_dimensions, COUNT(*)::int AS chunk_count
@@ -382,7 +491,7 @@ const tableExists = async ({ query, tableName }) => {
  * refuse the cast anyway. Callers that hit the populated case get the
  * dimension error with reindex instructions instead.
  */
-const resizeEmbeddingColumn = async ({ query, tableName, dimensions }) => {
+const resizeEmbeddingColumn = async ({ query, tableName, dimensions, indexParams }) => {
   // Fail closed before touching the column: if the target width cannot carry an
   // ANN index, refuse the whole resize rather than dropping the index and
   // altering the column only to abort on CREATE INDEX and leave it index-less.
@@ -393,14 +502,27 @@ const resizeEmbeddingColumn = async ({ query, tableName, dimensions }) => {
   await query(`DROP INDEX IF EXISTS ${indexName}`);
   await query(`ALTER TABLE ${tableName} ALTER COLUMN embedding TYPE vector(${dimensions})`);
   await query(
-    buildPgvectorIndexStatement({ documentChunksTable: tableName, dimensions })
+    buildPgvectorIndexStatement({
+      documentChunksTable: tableName,
+      dimensions,
+      hnswEfConstruction: indexParams.hnswEfConstruction,
+      hnswM: indexParams.hnswM,
+      indexType: indexParams.indexType,
+      ivfflatLists: indexParams.ivfflatLists,
+    })
   );
 };
 
 /**
- * Applies migrations and verifies the table matches the configured embedding
- * space. Throws with a stable code when it does not: this is the fail-closed
- * boundary the goal asks for, and every read/write below goes through it.
+ * Applies migrations and verifies the active version's table matches its
+ * embedding space. Throws with a stable code when it does not: this is the
+ * fail-closed boundary the goal asks for, and every read/write below goes
+ * through it.
+ *
+ * Version 1 follows the configuration, exactly like the single table did: an
+ * empty table at another width is resized, chunks of another model or width
+ * fail closed. A version built by `vector:index` is pinned to its own model
+ * and width and is never resized.
  */
 // allowForeignEmbeddings is for `vector:reindex --apply` only: it rewrites every
 // document it touches under the current embedding identity, so chunks stored
@@ -411,8 +533,28 @@ export const ensurePgvectorSchema = async ({
   force = false,
   allowForeignEmbeddings = false,
 } = {}) => {
-  if (schemaVerified && !force) {
-    return true;
+  await ensureActivePgvectorVersion({ allowForeignEmbeddings, client, force });
+  return true;
+};
+
+const ensureActivePgvectorVersion = async ({
+  client = null,
+  force = false,
+  allowForeignEmbeddings = false,
+} = {}) => {
+  // Fast path: the pointer (cached for its TTL, then one cheap read) still
+  // names the version verified last, under the same embedding space.
+  let pendingKey = null;
+
+  if (!force && verified) {
+    const snapshot = await readIndexVersionSnapshot();
+    const key = getVersionVerificationKey(snapshot.active);
+
+    if (key === verified.key) {
+      return snapshot.active;
+    }
+
+    pendingKey = key;
   }
 
   // The check is about the whole table: under a tenant the row policies would
@@ -420,14 +562,35 @@ export const ensurePgvectorSchema = async ({
   // the tenant role may not resize the column. It therefore never borrows a
   // tenant transaction's client and always runs as the owner.
   const verificationClient = getEnforcedDatabaseTenant() ? null : client;
+  const verify = () =>
+    runAsDatabaseSystem(() => verifyPgvectorSchema({ allowForeignEmbeddings, client: verificationClient }));
 
-  return runAsDatabaseSystem(() =>
-    verifyPgvectorSchema({ allowForeignEmbeddings, client: verificationClient })
-  );
+  // Shared only on the pool (no caller transaction) and with the same
+  // strictness: a caller's transaction client, a forced check and the
+  // reindex's foreign-embedding allowance each verify on their own.
+  if (force || verificationClient || allowForeignEmbeddings) {
+    return verify();
+  }
+
+  const flightKey = pendingKey ?? "\u0000initial";
+  const inFlight = verificationsInFlight.get(flightKey);
+
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const verification = verify().finally(() => {
+    if (verificationsInFlight.get(flightKey) === verification) {
+      verificationsInFlight.delete(flightKey);
+    }
+  });
+
+  verificationsInFlight.set(flightKey, verification);
+  return verification;
 };
 
 const verifyPgvectorSchema = async ({ allowForeignEmbeddings = false, client = null } = {}) => {
-  const runtime = getRuntime();
+  const runtime = getPgvectorRuntime();
 
   if (!runtime.isConfigured()) {
     throw new PgvectorUnavailableError(
@@ -437,8 +600,11 @@ const verifyPgvectorSchema = async ({ allowForeignEmbeddings = false, client = n
 
   await runtime.runMigrations();
 
-  const query = getQuery(client);
-  const tableName = getPgvectorTableName();
+  const query = getPgvectorQuery(client);
+  const version = (await readIndexVersionSnapshot({ force: true })).active;
+  const space = resolveVersionSpace(version);
+  const pinned = version.spaceSource === EMBEDDING_SPACE_SOURCES.pinned;
+  const tableName = version.chunkTable;
   const extension = await readExtension({ query });
 
   verifiedExtensionVersion = extension.version;
@@ -449,63 +615,116 @@ const verifyPgvectorSchema = async ({ allowForeignEmbeddings = false, client = n
     );
   }
 
-  const expectedDimensions = getEmbeddingDimensions();
-  const columnDimensions = await readColumnDimensions({ query, tableName });
+  const expectedDimensions = space.dimensions;
+  const columnDimensions = await readPgvectorColumnDimensions({ query, tableName });
+
+  if (pinned && columnDimensions === null) {
+    throw new PgvectorUnavailableError(
+      `The active index version ${version.versionId} names table ${tableName}, which does not exist. Roll back with \`npm run vector:index -- rollback\` or activate another version.`
+    );
+  }
 
   if (columnDimensions !== expectedDimensions) {
-    const storedModels = await readStoredEmbeddingModels({ query, tableName });
+    const storedModels = await readPgvectorStoredEmbeddingModels({ query, tableName });
     const storedChunkCount = storedModels.reduce((sum, entry) => sum + entry.chunkCount, 0);
 
-    if (storedChunkCount > 0) {
+    if (pinned || storedChunkCount > 0) {
       throw new PgvectorEmbeddingDimensionError({
         actual: columnDimensions,
         context: `The ${tableName}.embedding column is vector(${columnDimensions}) and already holds ${storedChunkCount} chunk(s)`,
         expected: expectedDimensions,
+        model: space.model,
+        remedy: pinned ? PINNED_REMEDY : CONFIGURATION_REMEDY,
       });
     }
 
-    await resizeEmbeddingColumn({ query, tableName, dimensions: expectedDimensions });
+    await resizeEmbeddingColumn({
+      dimensions: expectedDimensions,
+      indexParams: resolveVersionIndexParams(version),
+      query,
+      tableName,
+    });
   }
 
-  const storedModels = await readStoredEmbeddingModels({ query, tableName });
+  const storedModels = await readPgvectorStoredEmbeddingModels({ query, tableName });
   const foreignModels = storedModels.filter(
     (entry) =>
       entry.chunkCount > 0 &&
-      (entry.model !== getEmbeddingIndexIdentity() || entry.dimensions !== expectedDimensions)
+      (entry.model !== space.identity || entry.dimensions !== expectedDimensions)
   );
 
   if (foreignModels.length > 0 && !allowForeignEmbeddings) {
-    throw new PgvectorEmbeddingModelError({ storedModels: foreignModels });
+    throw new PgvectorEmbeddingModelError({
+      expected: space,
+      remedy: pinned ? PINNED_REMEDY : CONFIGURATION_REMEDY,
+      storedModels: foreignModels,
+    });
   }
 
-  schemaVerified = true;
-  return true;
+  verified = { key: getVersionVerificationKey(version), version };
+  return version;
+};
+
+/**
+ * The active index version, verified. Tests, the CLI and health use it to
+ * name the table and function a search goes to.
+ */
+export const getActivePgvectorVersion = async ({ force = false } = {}) =>
+  ensureActivePgvectorVersion({ force });
+
+// A pointer read just before another instance retired a version can name a
+// table that no longer exists; the next pointer read cannot. One retry with a
+// fresh pointer, and only outside a caller's transaction (an error there has
+// already aborted it).
+const withActiveVersionRetry = async (client, operation) => {
+  try {
+    return await operation();
+  } catch (error) {
+    if (client || !MISSING_RELATION_CODES.has(error?.code)) {
+      throw error;
+    }
+
+    invalidateIndexVersionSnapshot();
+    verified = null;
+    return operation();
+  }
+};
+
+const readSnapshotForStatus = async () => {
+  try {
+    return await readIndexVersionSnapshot({ force: true });
+  } catch {
+    return { active: buildLegacyIndexVersion(), registry: "error", versions: [] };
+  }
 };
 
 /**
  * Non-throwing description of the provider for health and admin status. It
- * describes the whole table, never one tenant's share, so it runs as the owner.
+ * describes the active version's whole table, never one tenant's share, so it
+ * runs as the owner. Strictly read-only (the reindex dry run relies on it).
  */
 export const describePgvectorStatus = async () =>
   runAsDatabaseSystem(() => describePgvectorTableStatus());
 
 const describePgvectorTableStatus = async () => {
-  const runtime = getRuntime();
+  const runtime = getPgvectorRuntime();
   const queryPostgres = runtime.query;
-  const tableName = getPgvectorTableName();
+  let version = buildLegacyIndexVersion();
+  let space = resolveVersionSpace(version);
+  let tableName = version.chunkTable;
   const base = {
     configured: runtime.isConfigured(),
     embedding: {
       columnDimensions: null,
-      configuredDimensions: getEmbeddingDimensions(),
+      configuredDimensions: space.dimensions,
       matches: false,
       // The embedding_model value chunks are stored under: the model name,
       // plus the document prefix when one applies (getEmbeddingIndexIdentity).
-      model: getEmbeddingIndexIdentity(),
+      model: space.identity,
       storedModels: [],
     },
     extension: { installed: false, version: null },
-    indexType: getPgvectorIndexType(),
+    indexType: resolveVersionIndexParams(version).indexType,
     // ANN index intent vs. reality. `configured` is the method migrations would
     // build; `actual` is the access method actually on the embedding index (read
     // from pg_am, null when absent); `matches` is true only when both agree.
@@ -513,20 +732,18 @@ const describePgvectorTableStatus = async () => {
     // index at all (<= the pgvector vector-type ceiling) — when false, an absent
     // ANN index is expected fail-closed behaviour, not a partial migration.
     annIndex: {
-      configured: getPgvectorIndexType(),
+      configured: resolveVersionIndexParams(version).indexType,
       actual: null,
       present: false,
       matches: false,
-      supported: isPgvectorAnnDimensionSupported(getEmbeddingDimensions()),
+      supported: isPgvectorAnnDimensionSupported(space.dimensions),
     },
-    annDimensionsSupported: isPgvectorAnnDimensionSupported(
-      getEmbeddingDimensions()
-    ),
+    annDimensionsSupported: isPgvectorAnnDimensionSupported(space.dimensions),
     indexes: {},
     provider: "pgvector",
     reachable: false,
     table: { exists: false, name: tableName },
-    textSearchConfig: getPgvectorTextSearchConfig(),
+    textSearchConfig: resolveVersionIndexParams(version).textSearchConfig,
     chunkCount: 0,
     documentCount: 0,
     indexEmptyWithDocuments: false,
@@ -543,6 +760,43 @@ const describePgvectorTableStatus = async () => {
   }
 
   base.reachable = true;
+
+  // The active version decides which table the rest describes.
+  const snapshot = await readSnapshotForStatus();
+
+  version = snapshot.active;
+  space = resolveVersionSpace(version);
+  tableName = version.chunkTable;
+  const indexParams = resolveVersionIndexParams(version);
+
+  base.table = { exists: false, name: tableName };
+  base.embedding.configuredDimensions = space.dimensions;
+  base.embedding.model = space.identity;
+  base.indexType = indexParams.indexType;
+  base.textSearchConfig = indexParams.textSearchConfig;
+  base.annDimensionsSupported = isPgvectorAnnDimensionSupported(space.dimensions);
+  base.annIndex = { ...base.annIndex, configured: indexParams.indexType, supported: base.annDimensionsSupported };
+  base.activeVersion = {
+    chunkTable: tableName,
+    sparseRankFunction: version.sparseRankFunction,
+    spaceSource: version.spaceSource,
+    versionId: version.versionId,
+  };
+
+  try {
+    // No drift totals here: they scan every live version's table, and health
+    // runs every few seconds. The CLI status and the admin route include them.
+    base.indexVersions = await describeIndexVersions({ includeDrift: false });
+  } catch (error) {
+    base.indexVersions = {
+      message: error instanceof Error ? error.message : String(error),
+      problems: [],
+      registry: "error",
+      versions: [],
+      warnings: [],
+    };
+  }
+
   base.extension = await readExtension({ query: queryPostgres });
   base.iterativeScan = {
     configured: getPgvectorIterativeScan(),
@@ -564,7 +818,7 @@ const describePgvectorTableStatus = async () => {
   };
 
   const annMethod = await readAnnIndexMethod({ query: queryPostgres, tableName });
-  const configuredAnnMethod = getPgvectorIndexType();
+  const configuredAnnMethod = indexParams.indexType;
   base.annIndex = {
     configured: configuredAnnMethod,
     actual: annMethod,
@@ -572,8 +826,8 @@ const describePgvectorTableStatus = async () => {
     matches: annMethod !== null && annMethod === configuredAnnMethod,
     supported: base.annDimensionsSupported,
   };
-  base.embedding.columnDimensions = await readColumnDimensions({ query: queryPostgres, tableName });
-  base.embedding.storedModels = await readStoredEmbeddingModels({ query: queryPostgres, tableName });
+  base.embedding.columnDimensions = await readPgvectorColumnDimensions({ query: queryPostgres, tableName });
+  base.embedding.storedModels = await readPgvectorStoredEmbeddingModels({ query: queryPostgres, tableName });
   base.chunkCount = base.embedding.storedModels.reduce((sum, entry) => sum + entry.chunkCount, 0);
   base.embedding.matches =
     base.embedding.columnDimensions === base.embedding.configuredDimensions &&
@@ -598,41 +852,138 @@ const describePgvectorTableStatus = async () => {
 // ---------------------------------------------------------------------------
 
 /**
- * Embeds outside any transaction. The vectors are computed once here and then
- * written by writeDocumentsToPgvectorIndex inside whatever transaction the
- * caller opened, so a slow embedding call never holds a database lock.
+ * Embeds outside any transaction. The vectors are computed here, once for
+ * every embedding space the write will most likely go to (the active version's
+ * first, then a version being built or kept for rollback under another model),
+ * and then written by writeDocumentsToPgvectorIndex inside whatever
+ * transaction the caller opened, so a slow embedding call never holds a
+ * database lock.
  */
-export const prepareDocumentsForPgvectorIndex = async ({ documents }) => {
+// `vectorsBySpace` ({ [space.key]: vectors }) carries embeddings the staged
+// ingest pipeline computed earlier (rag/ingest-pipeline.js); a space it covers
+// is not embedded again.
+/**
+ * An upload could not embed its chunks in `space`. When no search reads that
+ * space (it belongs only to a version being built, a built one not yet
+ * activated, or a rollback target in its grace period), those versions are
+ * fenced -- marked failed, so they stop taking writes and can never be
+ * activated or rolled back to -- and the upload goes on without them: a
+ * version nobody serves must not make every upload fail. Resolves to true when
+ * the write may skip the space, false when the error must fail the write (the
+ * active version is in that space, or the fence did not take).
+ */
+export const fenceFailedWriteSpace = async ({ error, space }) => {
+  try {
+    const before = await readIndexVersionSnapshot({ force: true });
+
+    if (isSameDocumentSpace(resolveVersionSpace(before.active), space)) {
+      return false;
+    }
+
+    const fenced = await fenceNonServingIndexVersions({
+      reason: `An upload could not embed its chunks in ${space.identity}/${space.dimensions}: ${
+        error instanceof Error ? error.message : String(error)
+      }`.slice(0, 2000),
+      space,
+    });
+    const after = await readIndexVersionSnapshot({ force: true });
+    const stillWritten = after.versions.some(
+      (version) =>
+        isIndexVersionWriteTarget(version) && isSameDocumentSpace(resolveVersionSpace(version), space)
+    );
+
+    if (stillWritten) {
+      return false;
+    }
+
+    if (fenced.length > 0) {
+      console.warn(
+        `[pgvector] index version(s) ${fenced.join(", ")} marked failed: an upload could not embed in their space ${space.identity}/${space.dimensions}. The active version keeps serving; build a new version once the model answers again.`
+      );
+    }
+
+    return true;
+  } catch (fenceError) {
+    console.error(`[pgvector] could not fence the index versions in ${space.identity}.`, fenceError);
+    return false;
+  }
+};
+
+export const prepareDocumentsForPgvectorIndex = async ({
+  documents,
+  spaces = null,
+  vectorsBySpace = null,
+} = {}) => {
   const safeDocuments = Array.isArray(documents) ? documents : [];
 
   if (safeDocuments.length === 0) {
     return [];
   }
 
-  const vectors = await embedTexts(safeDocuments.map((document) => document.pageContent));
+  const targetSpaces = [];
+  // Explicit spaces (the version builder) must all succeed; hinted write
+  // targets beyond the active version are best effort (fenceFailedWriteSpace).
+  const hinted = !(Array.isArray(spaces) && spaces.length > 0);
 
-  if (vectors.length !== safeDocuments.length) {
-    throw new Error(
-      `Embedding provider returned ${vectors.length} vector(s) for ${safeDocuments.length} chunk(s).`
-    );
+  for (const space of hinted ? getHintedWriteSpaces() : spaces) {
+    if (!targetSpaces.some((candidate) => isSameDocumentSpace(candidate, space))) {
+      targetSpaces.push(space);
+    }
   }
 
-  return safeDocuments.map((document, index) => {
-    const vector = Array.isArray(vectors[index]) ? vectors[index] : [];
+  const texts = safeDocuments.map((document) => document.pageContent);
+  const vectorsForSpace = new Map();
+  const embeddedSpaces = [];
 
-    assertDimensions({
-      actual: vector.length,
-      context: `Embedding chunk ${document.id}`,
-    });
+  for (const [spaceIndex, space] of targetSpaces.entries()) {
+    const given = vectorsBySpace?.[space.key];
 
-    return {
-      id: String(document.id),
-      metadata: normalizeMetadata(document.metadata),
-      pageContent: String(document.pageContent ?? ""),
-      searchText: buildSearchText(document),
-      vector,
-    };
-  });
+    if (Array.isArray(given) && given.length === safeDocuments.length) {
+      given.forEach((vector, index) =>
+        assertDimensions({
+          actual: Array.isArray(vector) ? vector.length : 0,
+          context: `Embedding chunk ${safeDocuments[index].id}`,
+          space,
+        })
+      );
+      vectorsForSpace.set(space.key, given);
+      embeddedSpaces.push(space);
+      continue;
+    }
+
+    try {
+      vectorsForSpace.set(
+        space.key,
+        await embedDocumentsInSpace(texts, space, {
+          describeItem: (index) => `Embedding chunk ${safeDocuments[index].id}`,
+        })
+      );
+      embeddedSpaces.push(space);
+    } catch (error) {
+      // The first hinted space is the active version's: its failure fails the write.
+      if (!hinted || spaceIndex === 0 || !(await fenceFailedWriteSpace({ error, space }))) {
+        throw error;
+      }
+    }
+  }
+
+  if (embeddedSpaces.length === 0) {
+    throw new Error("No embedding space of the index could embed the document.");
+  }
+
+  const primary = embeddedSpaces[0];
+
+  return safeDocuments.map((document, index) => ({
+    id: String(document.id),
+    metadata: normalizeMetadata(document.metadata),
+    pageContent: String(document.pageContent ?? ""),
+    searchText: buildSearchText(document),
+    vector: vectorsForSpace.get(primary.key)[index],
+    vectorSpaceKey: primary.key,
+    vectors: Object.fromEntries(
+      embeddedSpaces.map((space) => [space.key, vectorsForSpace.get(space.key)[index]])
+    ),
+  }));
 };
 
 const chunkArray = (values, size) => {
@@ -645,33 +996,53 @@ const chunkArray = (values, size) => {
   return batches;
 };
 
-export const writeDocumentsToPgvectorIndex = async ({
-  accessScope = {},
-  client = null,
-  preparedDocuments = [],
-} = {}) => {
-  if (preparedDocuments.length === 0) {
-    return { insertedChunkCount: 0, replacedDocIds: [] };
+// A prepared document carries vectors per space; one prepared by hand (the
+// reindex copy path) carries `vector` in the configured space.
+const resolveVectorsForSpace = async (preparedDocuments, space) => {
+  const configuredKey = getConfiguredEmbeddingSpace().key;
+  const vectors = preparedDocuments.map(
+    (document) =>
+      document.vectors?.[space.key] ??
+      ((document.vectorSpaceKey ?? configuredKey) === space.key ? document.vector : null)
+  );
+
+  if (vectors.every((vector) => Array.isArray(vector))) {
+    vectors.forEach((vector, index) =>
+      assertDimensions({ actual: vector.length, context: `Writing chunk ${preparedDocuments[index].id}`, space })
+    );
+    return vectors;
   }
 
-  await ensurePgvectorSchema({ client });
+  // A version registered after this write prepared its embeddings: embed in
+  // its space now, inside the transaction. Rare, and correct either way.
+  return embedDocumentsInSpace(
+    preparedDocuments.map((document) => document.pageContent),
+    space,
+    { describeItem: (index) => `Embedding chunk ${preparedDocuments[index].id}` }
+  );
+};
 
-  const query = getQuery(client);
-  const tableName = getPgvectorTableName();
-  const docIds = toDocIdArray(preparedDocuments.map((document) => document.metadata.docId));
-  const ownerUserId = String(accessScope?.userId ?? accessScope?.ownerUserId ?? "").trim();
-  const workspaceId = String(accessScope?.workspaceId ?? "").trim();
-  const embeddingModel = getEmbeddingIndexIdentity();
-  const embeddingDimensions = getEmbeddingDimensions();
-
-  // Re-ingesting a docId replaces its chunks wholesale. Chunk ids embed the
-  // docId, but chunk counts can shrink between uploads, so a delete is the
-  // only way to drop rows the new chunking no longer produces.
+/**
+ * Replaces `docIds`' chunks in one version table. Re-ingesting a docId
+ * replaces its chunks wholesale: chunk ids embed the docId, but chunk counts
+ * can shrink between uploads, so a delete is the only way to drop rows the new
+ * chunking no longer produces. The index-version builder writes through here
+ * too.
+ */
+export const replacePgvectorChunks = async ({
+  docIds,
+  owner = {},
+  preparedDocuments,
+  query,
+  space,
+  tableName,
+  vectors,
+}) => {
   await query(`DELETE FROM ${tableName} WHERE doc_id = ANY($1::text[])`, [docIds]);
 
   let insertedChunkCount = 0;
 
-  for (const batch of chunkArray(preparedDocuments, INSERT_BATCH_SIZE)) {
+  for (const [batchIndex, batch] of chunkArray(preparedDocuments, INSERT_BATCH_SIZE).entries()) {
     const values = [];
     const rows = batch.map((document, rowIndex) => {
       const base = rowIndex * INSERT_COLUMNS.length;
@@ -685,11 +1056,11 @@ export const writeDocumentsToPgvectorIndex = async ({
         document.pageContent,
         document.searchText,
         JSON.stringify(document.metadata),
-        ownerUserId,
-        workspaceId,
-        embeddingModel,
-        embeddingDimensions,
-        toVectorLiteral(document.vector)
+        owner.userId ?? "",
+        owner.workspaceId ?? "",
+        space.identity,
+        space.dimensions,
+        toVectorLiteral(vectors[batchIndex * INSERT_BATCH_SIZE + rowIndex])
       );
 
       return `(${INSERT_COLUMNS.map((column, columnIndex) =>
@@ -725,7 +1096,89 @@ export const writeDocumentsToPgvectorIndex = async ({
     insertedChunkCount += result.rowCount ?? batch.length;
   }
 
-  return { insertedChunkCount, replacedDocIds: docIds };
+  return insertedChunkCount;
+};
+
+// The version tables this transaction writes, keyed by the handle
+// beginPgvectorIndexWrite returned (a fresh object per transaction: pooled
+// clients are reused, so the client itself cannot be the key).
+const writeTargetsByHandle = new WeakMap();
+
+/**
+ * First statements of an ingest, delete or clear transaction: the shared
+ * version-lifecycle lock and the version tables to write
+ * (vector-store-pgvector-versions.js explains why they must come before the
+ * transaction's first documents-row lock). Returns the handle the rest of the
+ * transaction passes as its client.
+ */
+export const beginPgvectorIndexWrite = async ({ client }) => {
+  if (!client || typeof client.query !== "function") {
+    throw new Error("beginPgvectorIndexWrite needs the transaction's client.");
+  }
+
+  const targets = await lockIndexVersionWriteTargets(client);
+  const handle = { query: (sql, values) => client.query(sql, values) };
+
+  writeTargetsByHandle.set(handle, targets);
+  return handle;
+};
+
+const withWriteTargets = async (client, callback) => {
+  if (client) {
+    const targets = writeTargetsByHandle.get(client) ?? (await lockIndexVersionWriteTargets(client));
+
+    return callback(getPgvectorQuery(client), targets);
+  }
+
+  return getPgvectorRuntime().withTransaction(async (transactionClient) =>
+    callback(getPgvectorQuery(transactionClient), await lockIndexVersionWriteTargets(transactionClient))
+  );
+};
+
+const toOwnerScope = (accessScope = {}) => ({
+  userId: String(accessScope?.userId ?? accessScope?.ownerUserId ?? "").trim(),
+  workspaceId: String(accessScope?.workspaceId ?? "").trim(),
+});
+
+/**
+ * Writes the chunks into every version that must stay complete: the active
+ * one and, while they exist, the version being built and the versions kept
+ * for activation or rollback. `insertedChunkCount` is the active version's.
+ */
+export const writeDocumentsToPgvectorIndex = async ({
+  accessScope = {},
+  client = null,
+  preparedDocuments = [],
+} = {}) => {
+  if (preparedDocuments.length === 0) {
+    return { insertedChunkCount: 0, replacedDocIds: [] };
+  }
+
+  await ensurePgvectorSchema({ client });
+
+  const docIds = toDocIdArray(preparedDocuments.map((document) => document.metadata.docId));
+  const owner = toOwnerScope(accessScope);
+
+  return withWriteTargets(client, async (query, targets) => {
+    let insertedChunkCount = null;
+
+    for (const target of targets) {
+      const space = resolveVersionSpace(target);
+      const count = await replacePgvectorChunks({
+        docIds,
+        owner,
+        preparedDocuments,
+        query,
+        space,
+        tableName: target.chunkTable,
+        vectors: await resolveVectorsForSpace(preparedDocuments, space),
+      });
+
+      insertedChunkCount ??= count;
+    }
+
+    return { insertedChunkCount: insertedChunkCount ?? 0, replacedDocIds: docIds };
+  });
 };
 
 export const addDocumentsToPgvectorIndex = async ({
@@ -738,6 +1191,7 @@ export const addDocumentsToPgvectorIndex = async ({
   return writeDocumentsToPgvectorIndex({ accessScope, client, preparedDocuments });
 };
 
+/** Deletes from every write-target version; returns the active version's count. */
 export const removeDocumentsFromPgvectorIndex = async ({ client = null, docIds } = {}) => {
   const normalizedDocIds = toDocIdArray(docIds);
 
@@ -747,29 +1201,58 @@ export const removeDocumentsFromPgvectorIndex = async ({ client = null, docIds }
 
   await ensurePgvectorSchema({ client });
 
-  const result = await getQuery(client)(
-    `DELETE FROM ${getPgvectorTableName()} WHERE doc_id = ANY($1::text[])`,
-    [normalizedDocIds]
-  );
+  return withWriteTargets(client, async (query, targets) => {
+    let removed = null;
 
-  return result.rowCount ?? 0;
+    for (const target of targets) {
+      const result = await query(
+        `DELETE FROM ${target.chunkTable} WHERE doc_id = ANY($1::text[])`,
+        [normalizedDocIds]
+      );
+
+      removed ??= result.rowCount ?? 0;
+    }
+
+    return removed ?? 0;
+  });
 };
 
 export const clearPgvectorIndex = async ({ client = null } = {}) => {
   await ensurePgvectorSchema({ client });
 
-  const result = await getQuery(client)(`DELETE FROM ${getPgvectorTableName()}`);
+  const removed = await withWriteTargets(client, async (query, targets) => {
+    let count = null;
+
+    for (const target of targets) {
+      const result = await query(`DELETE FROM ${target.chunkTable}`);
+
+      count ??= result.rowCount ?? 0;
+    }
+
+    return count ?? 0;
+  });
 
   // A cleared table is the one moment a dimension change is safe; let the next
   // ensure re-check the column instead of trusting the cached verdict.
-  schemaVerified = false;
+  verified = null;
 
-  return result.rowCount ?? 0;
+  return removed;
 };
 
-export const countPgvectorChunks = async ({ client = null, docIds = null } = {}) => {
-  const query = getQuery(client);
-  const tableName = getPgvectorTableName();
+/** Chunks in the active version (or in `versionId`'s table). */
+export const countPgvectorChunks = async ({ client = null, docIds = null, versionId = null } = {}) => {
+  const query = getPgvectorQuery(client);
+  const snapshot = await readIndexVersionSnapshot();
+  const version =
+    versionId === null
+      ? snapshot.active
+      : snapshot.versions.find((candidate) => candidate.versionId === Number(versionId));
+
+  if (!version) {
+    throw new Error(`Index version ${versionId} is not live.`);
+  }
+
+  const tableName = version.chunkTable;
   const normalizedDocIds = docIds === null ? null : toDocIdArray(docIds);
   const result =
     normalizedDocIds === null
@@ -786,10 +1269,10 @@ export const countPgvectorChunks = async ({ client = null, docIds = null } = {})
 // Reads
 // ---------------------------------------------------------------------------
 
-const buildDenseSearchSql = () => `
+const buildDenseSearchSql = (tableName) => `
   SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
          1 - (embedding <=> $1::vector) AS vector_score
-  FROM ${getPgvectorTableName()}
+  FROM ${tableName}
   WHERE doc_id = ANY($2::text[])
     AND embedding_model = $3
     AND embedding_dimensions = $4
@@ -806,11 +1289,11 @@ const buildDenseSearchSql = () => `
 // distance order; the materialized CTE fixes the order afterwards (pgvector's
 // documented pattern; `+ 0` stops PostgreSQL 17+ from reusing the CTE's sort
 // order and skipping the outer sort). Exact plans (doc_id btree) are unaffected.
-const buildIterativeDenseSearchSql = () => `
+const buildIterativeDenseSearchSql = (tableName) => `
   WITH nearest AS MATERIALIZED (
     SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
            embedding <=> $1::vector AS distance
-    FROM ${getPgvectorTableName()}
+    FROM ${tableName}
     WHERE doc_id = ANY($2::text[])
       AND embedding_model = $3
       AND embedding_dimensions = $4
@@ -824,24 +1307,24 @@ const buildIterativeDenseSearchSql = () => `
 `;
 
 // IVFFlat has its own setting and only a relaxed mode.
-const getIterativeScanSetting = (iterativeScan) =>
-  getPgvectorIndexType() === "ivfflat"
+const getIterativeScanSetting = (iterativeScan, indexType) =>
+  indexType === "ivfflat"
     ? { name: "ivfflat.iterative_scan", value: "relaxed_order" }
     : { name: "hnsw.iterative_scan", value: iterativeScan };
 
 // set_config(..., true) is SET LOCAL: it needs the statement's own transaction.
 // A caller's client is already in one; otherwise the setting and the search
 // share a short transaction (under a tenant, the same one that sets the role).
-const runIterativeDenseSearch = async ({ client, iterativeScan, values }) => {
-  const setting = getIterativeScanSetting(iterativeScan);
+const runIterativeDenseSearch = async ({ client, indexType, iterativeScan, tableName, values }) => {
+  const setting = getIterativeScanSetting(iterativeScan, indexType);
   const search = async (transactionClient) => {
-    const query = getQuery(transactionClient);
+    const query = getPgvectorQuery(transactionClient);
 
     await query("SELECT set_config($1, $2, true)", [setting.name, setting.value]);
-    return query(buildIterativeDenseSearchSql(), values);
+    return query(buildIterativeDenseSearchSql(tableName), values);
   };
 
-  return client ? search(client) : getRuntime().withTransaction(search);
+  return client ? search(client) : getPgvectorRuntime().withTransaction(search);
 };
 
 export const searchPgvectorDocuments = async ({
@@ -859,20 +1342,29 @@ export const searchPgvectorDocuments = async ({
     return [];
   }
 
-  await ensurePgvectorSchema({ client });
-  assertDimensions({ actual: queryVector.length, context: "Embedding the query" });
+  const result = await withActiveVersionRetry(client, async () => {
+    const version = await ensureActivePgvectorVersion({ client });
+    const space = resolveVersionSpace(version);
+    const vector = await resolveQueryVector({ queryText, queryVector, space });
+    const values = [
+      toVectorLiteral(vector),
+      normalizedDocIds,
+      space.identity,
+      space.dimensions,
+      limit,
+    ];
+    const iterativeScan = getActiveIterativeScan();
 
-  const values = [
-    toVectorLiteral(queryVector),
-    normalizedDocIds,
-    getEmbeddingIndexIdentity(),
-    getEmbeddingDimensions(),
-    limit,
-  ];
-  const iterativeScan = getActiveIterativeScan();
-  const result = iterativeScan
-    ? await runIterativeDenseSearch({ client, iterativeScan, values })
-    : await getQuery(client)(buildDenseSearchSql(), values);
+    return iterativeScan
+      ? runIterativeDenseSearch({
+          client,
+          indexType: resolveVersionIndexParams(version).indexType,
+          iterativeScan,
+          tableName: version.chunkTable,
+          values,
+        })
+      : getPgvectorQuery(client)(buildDenseSearchSql(version.chunkTable), values);
+  });
   const queryTerms = buildTermSet(queryText);
 
   return result.rows
@@ -899,10 +1391,28 @@ export const searchPgvectorDocuments = async ({
     );
 };
 
-const buildSparseSearchSql = () => `
+/**
+ * Nearest chunk ids in one version table over every document (no document
+ * filter), for the activation recall probe. Owner only.
+ */
+export const searchPgvectorNearestChunkIds = async ({ query, space, tableName, topK, vector }) => {
+  const result = await query(
+    `/* index_versions:probe_nearest */
+      SELECT chunk_id
+      FROM ${tableName}
+      WHERE embedding_model = $2 AND embedding_dimensions = $3
+      ORDER BY embedding <=> $1::vector ASC, chunk_id ASC
+      LIMIT $4`,
+    [toVectorLiteral(vector), space.identity, space.dimensions, Math.max(1, Math.floor(Number(topK) || 1))]
+  );
+
+  return (result?.rows ?? []).map((row) => String(row.chunk_id));
+};
+
+const buildSparseSearchSql = (tableName) => `
   SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
          ts_rank_cd(search_vector, to_tsquery($1::regconfig, $2), 32) AS sparse_score
-  FROM ${getPgvectorTableName()}
+  FROM ${tableName}
   WHERE doc_id = ANY($3::text[])
     AND search_vector @@ to_tsquery($1::regconfig, $2)
   ORDER BY sparse_score DESC, chunk_id ASC
@@ -910,7 +1420,19 @@ const buildSparseSearchSql = () => `
 `;
 
 // The owner-run ranking function from migration 014, named after the table.
+// This is version 1's; getActivePgvectorSparseRankFunctionName names the one a
+// tenant's search calls now.
 export const getPgvectorSparseRankFunctionName = () => `${getPgvectorTableName()}_sparse_rank`;
+
+export const getActivePgvectorSparseRankFunctionName = async () =>
+  (await readIndexVersionSnapshot()).active.sparseRankFunction;
+
+/** Chunk tables of every live version (active, building, ready), for health. */
+export const listLivePgvectorVersionTables = async () => {
+  const snapshot = await readIndexVersionSnapshot();
+
+  return [...new Set(snapshot.versions.map((version) => version.chunkTable))];
+};
 
 // Under row-level security the full-text match cannot use the GIN index: @@ is
 // not leakproof, so it may only run after the policy conditions, never as an
@@ -923,16 +1445,18 @@ export const getPgvectorSparseRankFunctionName = () => `${getPgvectorTableName()
 // of which rows are returned. A single document keeps the plain statement: the
 // doc_id index reaches its few rows directly, and the function's call and
 // planning cost more (0.76 ms against 1.37 ms p50 as a tenant). From ten
-// documents up the function is faster, and far faster for large sets.
-const buildTenantSparseSearchSql = () => `
+// documents up the function is faster, and far faster for large sets. Every
+// index version has its own function over its own table (migration 014's
+// template, rendered when the version is created).
+const buildTenantSparseSearchSql = (version) => `
   SELECT c.chunk_id, c.doc_id, c.chunk_index, c.page_number, c.section_heading, c.content, c.metadata,
          r.sparse_score
-  FROM ${getPgvectorSparseRankFunctionName()}(
+  FROM ${version.sparseRankFunction}(
          to_tsquery($1::regconfig, $2),
          ARRAY(SELECT d.doc_id FROM ${getDocumentsTableName()} d WHERE d.doc_id = ANY($3::text[])),
          $4::integer
        ) AS r
-  JOIN ${getPgvectorTableName()} c ON c.chunk_id = r.chunk_id
+  JOIN ${version.chunkTable} c ON c.chunk_id = r.chunk_id
   ORDER BY r.sparse_score DESC, c.chunk_id ASC
 `;
 
@@ -950,17 +1474,19 @@ export const searchPgvectorSparseDocuments = async ({
     return [];
   }
 
-  await ensurePgvectorSchema({ client });
-
   // ts_rank_cd with normalization 32 maps the cover-density rank into [0, 1)
   // (rank / (rank + 1)) so scores are comparable across queries. It is not
   // BM25 and is never labelled as such.
-  const result = await getQuery(client)(
-    getEnforcedDatabaseTenant() && normalizedDocIds.length > 1
-      ? buildTenantSparseSearchSql()
-      : buildSparseSearchSql(),
-    [getPgvectorTextSearchConfig(), tsQuery.tsQuery, normalizedDocIds, limit]
-  );
+  const result = await withActiveVersionRetry(client, async () => {
+    const version = await ensureActivePgvectorVersion({ client });
+
+    return getPgvectorQuery(client)(
+      getEnforcedDatabaseTenant() && normalizedDocIds.length > 1
+        ? buildTenantSparseSearchSql(version)
+        : buildSparseSearchSql(version.chunkTable),
+      [resolveVersionIndexParams(version).textSearchConfig, tsQuery.tsQuery, normalizedDocIds, limit]
+    );
+  });
   const queryTerms = new Set(tsQuery.tokens);
 
   return result.rows

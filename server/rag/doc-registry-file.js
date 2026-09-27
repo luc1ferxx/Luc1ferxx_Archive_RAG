@@ -19,12 +19,13 @@
 
 import { mkdir, readFile as readBinaryFile, rename, rm, unlink, writeFile } from "fs/promises";
 import path from "path";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 
 import {
   DOCUMENT_REGISTRY_BACKENDS,
   documentMatchesAccessScope,
   hasAccessScope,
+  normalizeContentSha256,
   resolveFileBuffer,
 } from "./doc-registry.js";
 import { buildPublicFilePath } from "./document-utils.js";
@@ -97,7 +98,17 @@ const toStoredRecord = (document = {}) => {
     profile: toStoredProfile(document),
     uploadedAt: document.uploadedAt ?? new Date().toISOString(),
     storageBackend: "filesystem",
+    // Content identity and version, as in the PostgreSQL store (migration 018).
+    contentSha256: normalizeContentSha256(document.contentSha256),
+    version: toContentVersion(document.version ?? document.contentVersion),
+    updatedAt: document.updatedAt ?? document.contentUpdatedAt ?? null,
   };
+};
+
+const toContentVersion = (value) => {
+  const parsedValue = Number.parseInt(value ?? 1, 10);
+
+  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : 1;
 };
 
 // temp + rename, mirroring writeJsonFileAsync in storage.js: a reader sees either
@@ -208,7 +219,10 @@ export const createFileDocumentRegistryStore = ({
       });
       const record = {
         ...storedRecord,
+        contentSha256:
+          storedRecord.contentSha256 ?? createHash("sha256").update(fileBuffer).digest("hex"),
         fileSize: storedRecord.fileSize || fileBuffer.byteLength,
+        updatedAt: storedRecord.updatedAt ?? storedRecord.uploadedAt,
       };
 
       return withWriteLock(async () => {

@@ -1,6 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { normalizeText } from "../../lib/normalize-text.js";
+// The Skill registry normalizes result text by trimming it only
+// (normalizeSkillResult); a multi-line RAG answer keeps its line breaks. The
+// consistency check must use the same normalizer, or every real multi-line
+// answer would be refused as inconsistent with its own raw value.
+import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.js";
 
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);

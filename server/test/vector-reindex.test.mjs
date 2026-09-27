@@ -8,15 +8,21 @@ import {
   main,
   parseArgs,
   prepareFromStoredVectors,
+  writeReindexedDocument,
 } from "../vector-reindex.mjs";
 import { configureEmbeddingDimensions } from "../rag/config.js";
 import {
   configureDocumentRegistryStore,
 } from "../rag/doc-registry.js";
+import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import {
   configurePgvectorRuntime,
+  prepareDocumentsForPgvectorIndex,
   resetPgvectorRuntime,
+  resetPgvectorVectorStore,
 } from "../rag/vector-store-pgvector.js";
+import { getConfiguredEmbeddingSpace } from "../rag/vector-store-pgvector-versions.js";
+import { createFakeVersionDatabase } from "./pgvector-version-fake-database.mjs";
 import {
   configureRagDataDirectory,
   getRagDataDirectory,
@@ -361,4 +367,93 @@ test("a dry run warns when the configured embedding exceeds the pgvector ANN cei
 
   assert.match(output, /exceed pgvector's ANN limit of 2000/);
   assert.match(output, /fail closed/);
+});
+
+// ---------------------------------------------------------------------------
+// --apply: one locked, version-checked write per document
+// ---------------------------------------------------------------------------
+
+test("an applied document is written only while it is still the content it was prepared from", async () => {
+  process.env.VECTOR_STORE_PROVIDER = "pgvector";
+  process.env.OPENAI_EMBEDDING_MODEL = "reindex-embed";
+  configureEmbeddingDimensions(DIMENSIONS);
+  configureOpenAIProvider({
+    embedQuery: async () => [1, 0, 0, 0],
+    embedTexts: async (texts) => texts.map(() => [1, 0, 0, 0]),
+  });
+
+  const database = createFakeVersionDatabase({ baseDimensions: DIMENSIONS });
+  const order = [];
+  const current = { contentSha256: "a".repeat(64), docId: "doc-a", ownerUserId: "alice", version: 1, workspaceId: "ws" };
+  let row = current;
+
+  database.addDocument({ docId: "doc-a", owner: "alice", pages: ["x"], workspace: "ws" });
+  database.hooks.set("write_lock", () => order.push("index write lock"));
+  configurePgvectorRuntime(database.runtime);
+  configureDocumentRegistryStore({
+    async initialize() {
+      return true;
+    },
+    async list() {
+      return [];
+    },
+    async lockForContentReplace(docId, { client }) {
+      assert.equal(typeof client.query, "function", "locked on the write's own transaction");
+      order.push(`lock ${docId}`);
+      return row;
+    },
+  });
+
+  try {
+    const prepared = await prepareDocumentsForPgvectorIndex({
+      documents: [
+        { id: "doc-a:0", metadata: { chunkIndex: 0, docId: "doc-a", documentVersion: 7 }, pageContent: "alpha one" },
+        { id: "doc-a:1", metadata: { chunkIndex: 1, docId: "doc-a" }, pageContent: "alpha two" },
+      ],
+      spaces: [getConfiguredEmbeddingSpace()],
+    });
+    const write = (expected) =>
+      writeReindexedDocument({
+        docId: "doc-a",
+        expected,
+        preparedDocuments: prepared,
+        withTransaction: database.runtime.withTransaction,
+      });
+
+    assert.deepEqual(await write({ contentSha256: current.contentSha256, version: 1 }), {
+      chunkCount: 2,
+      documentVersion: 1,
+      status: "written",
+    });
+    assert.deepEqual(order, ["index write lock", "lock doc-a"], "the lock order of every writer");
+
+    const rows = [...database.state.tables.get("rag_document_chunks").rows.values()];
+
+    assert.deepEqual(rows.map((entry) => [entry.metadata.documentVersion, entry.owner_user_id, entry.workspace_id]), [
+      [1, "alice", "ws"],
+      [1, "alice", "ws"],
+    ]);
+
+    // PUT /documents/doc-a committed version 2 while these chunks were embedded.
+    row = { ...current, contentSha256: "b".repeat(64), version: 2 };
+    database.state.tables.get("rag_document_chunks").rows.clear();
+    assert.deepEqual(await write({ contentSha256: current.contentSha256, version: 1 }), {
+      currentVersion: 2,
+      expectedVersion: 1,
+      status: "changed",
+    });
+    assert.equal(database.state.tables.get("rag_document_chunks").rows.size, 0, "the replacement's chunks stay");
+
+    // Same version, other bytes (a restore that reset the version) is a change too.
+    row = { ...current, contentSha256: "c".repeat(64) };
+    assert.equal((await write({ contentSha256: current.contentSha256, version: 1 })).status, "changed");
+
+    // Deleted meanwhile.
+    row = null;
+    assert.deepEqual(await write({ contentSha256: current.contentSha256, version: 1 }), { status: "gone" });
+  } finally {
+    resetOpenAIProvider();
+    resetPgvectorVectorStore();
+    delete process.env.OPENAI_EMBEDDING_MODEL;
+  }
 });

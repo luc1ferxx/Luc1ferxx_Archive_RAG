@@ -90,12 +90,14 @@ test("an unrecognized skill graph rollout falls back to off rather than guessing
   }
 });
 
-test("the all-stage graph rollout is shadow-only until its production path is safe", async () => {
+test("the all-stage graph rollout defaults to off and accepts only off, shadow, or guarded", async () => {
   for (const [value, expected] of [
     [undefined, "off"],
     ["off", "off"],
     ["shadow", "shadow"],
-    ["guarded", "off"],
+    ["guarded", "guarded"],
+    [" Guarded ", "guarded"],
+    ["guard", "off"],
     ["unknown", "off"],
   ]) {
     await withEnv({ AGENT_UNIFIED_GRAPH_ROLLOUT: value }, async () => {

@@ -27,6 +27,7 @@ export const CATEGORY_LABELS = {
   retry: "Retry",
   skill_graph: "Skill graph",
   skill_selection: "Skill selection",
+  unified_graph: "Unified graph",
 };
 
 export const sameTrajectoryScope = createAccessScopeMatcher(

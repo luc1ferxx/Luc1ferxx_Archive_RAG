@@ -30,7 +30,16 @@
 //
 // Every document is written in its own transaction, replacing whatever the
 // pgvector table held for that docId, so a crash midway leaves each document
-// either fully migrated or untouched.
+// either fully migrated or untouched. That transaction locks the document's
+// row first (as a replacement does) and writes only if the document is still
+// the content the chunks were prepared from: a PUT /documents/:docId that
+// committed while this command parsed and embedded the old bytes wins, and
+// the document is reported as skipped instead of rewritten with old text.
+//
+// This rewrites the ACTIVE index version in place (and, like every write, the
+// versions it dual-writes). Moving to another embedding model without
+// downtime is `npm run vector:index -- build` followed by `activate`: a new
+// version with its own table is built beside the one serving.
 
 import "dotenv/config";
 
@@ -42,6 +51,7 @@ import { pathToFileURL } from "url";
 import { chunkDocument } from "./rag/chunker.js";
 import {
   getEmbeddingDimensions,
+  getEmbeddingIndexIdentity,
   getEmbeddingModel,
   getVectorStoreProviderConfigStatus,
 } from "./rag/config.js";
@@ -50,13 +60,16 @@ import {
   getDocumentFile,
   initializeDocumentRegistry,
   listDocuments,
+  lockDocumentForContentReplace,
   readDocumentRegistrySnapshot,
 } from "./rag/doc-registry.js";
 import { buildPublicFilePath } from "./rag/document-utils.js";
 import { loadPdfPages } from "./rag/pdf-loader.js";
 import { withPostgresTransaction } from "./rag/postgres.js";
 import { getRagDataPath, readJsonFileSync } from "./rag/storage.js";
+import { stampChunkDocumentVersion } from "./rag/vector-store.js";
 import {
+  beginPgvectorIndexWrite,
   buildSearchText,
   countPgvectorChunks,
   describePgvectorStatus,
@@ -256,6 +269,73 @@ export const prepareFromStoredVectors = async (
   };
 };
 
+/** The content a set of chunks was prepared from: the registry's version and hash. */
+const toContentIdentity = (document) => ({
+  contentSha256: document?.contentSha256 ?? null,
+  version: Number(document?.version ?? 1) || 1,
+});
+
+// The content version the stored chunks of the copy path name; chunks from
+// before migration 018 name none and are version 1.
+const toSourceDocumentVersion = (entries = []) =>
+  Math.max(
+    1,
+    ...entries.map((entry) => {
+      const value = Number(entry?.metadata?.documentVersion);
+
+      return Number.isInteger(value) && value > 0 ? value : 1;
+    })
+  );
+
+/**
+ * Writes one document's prepared chunks in its own transaction, only while the
+ * document is still the content they were prepared from. The index write lock
+ * comes first (the lock order of every writer), then the document's row FOR
+ * UPDATE, so a replacement either committed before (and this sees its version
+ * and skips) or waits for this write and then replaces these chunks itself.
+ * The chunks are stamped with the locked row's version. Resolves to
+ * { status: "written" | "changed" | "gone", ... }.
+ */
+export const writeReindexedDocument = async ({
+  docId,
+  expected,
+  preparedDocuments,
+  withTransaction = withPostgresTransaction,
+}) =>
+  withTransaction(async (client) => {
+    const handle = await beginPgvectorIndexWrite({ client });
+    const current = await lockDocumentForContentReplace(docId, { client: handle });
+
+    if (!current) {
+      return { status: "gone" };
+    }
+
+    const currentVersion = Number(current.version ?? 1) || 1;
+
+    if (
+      currentVersion !== expected.version ||
+      (expected.contentSha256 && current.contentSha256 && current.contentSha256 !== expected.contentSha256)
+    ) {
+      return { currentVersion, expectedVersion: expected.version, status: "changed" };
+    }
+
+    const stamped = preparedDocuments.map((document) => ({
+      ...document,
+      metadata: stampChunkDocumentVersion(document.metadata, currentVersion),
+    }));
+
+    await writeDocumentsToPgvectorIndex({
+      accessScope: {
+        userId: current.ownerUserId ?? "",
+        workspaceId: current.workspaceId ?? "",
+      },
+      client: handle,
+      preparedDocuments: stamped,
+    });
+
+    return { chunkCount: stamped.length, documentVersion: currentVersion, status: "written" };
+  });
+
 const prepareFromDocumentBytes = async (document) => {
   const stored = await getDocumentFile(document.docId);
 
@@ -277,7 +357,10 @@ const prepareFromDocumentBytes = async (document) => {
       source: document.source ?? null,
     });
 
+    // The content these chunks are cut from: the row the bytes were read
+    // with. The write stamps the version it finds under its lock.
     return {
+      expected: toContentIdentity(stored.document ?? document),
       preparedDocuments: await prepareDocumentsForPgvectorIndex({
         documents: chunks.map(toChunkDocument),
       }),
@@ -407,8 +490,22 @@ export const main = async () => {
   }
 
   process.stdout.write(
-    `Target: pgvector table ${status.table?.name ?? "?"}, embedding model ${getEmbeddingModel()} (${configuredDimensions} dims)\n`
+    `Target: pgvector table ${status.table?.name ?? "?"}${
+      status.activeVersion ? ` (active index version ${status.activeVersion.versionId})` : ""
+    }, embedding model ${getEmbeddingModel()} (${configuredDimensions} dims)\n`
   );
+
+  // A version built by vector:index is pinned to its own model; rewriting it
+  // in place keeps that model whatever the configuration says.
+  if (
+    status.activeVersion?.spaceSource === "pinned" &&
+    status.embedding?.model &&
+    status.embedding.model !== getEmbeddingIndexIdentity()
+  ) {
+    process.stdout.write(
+      `Note: the active index version ${status.activeVersion.versionId} is pinned to ${status.embedding.model}/${status.embedding.configuredDimensions}; --apply rewrites it under that model. To move to ${getEmbeddingIndexIdentity()}, run npm run vector:index -- build and activate the new version.\n`
+    );
+  }
 
   if (registryUnavailable) {
     process.stdout.write(
@@ -462,6 +559,7 @@ export const main = async () => {
   registered = new Map(listDocuments().map((document) => [document.docId, document]));
 
   let written = 0;
+  let skipped = 0;
 
   for (const item of plan) {
     if (item.action === "skip_missing_registry_row") {
@@ -482,32 +580,57 @@ export const main = async () => {
       continue;
     }
 
-    const prepared = item.entries
-      ? await prepareFromStoredVectors(item.entries, {
-          trustSourceEmbeddings: options.trustSourceEmbeddings,
-        })
-      : await prepareFromDocumentBytes(document);
+    // Stored chunks (local, Qdrant) were cut from the content version they
+    // name; they may only replace the index's chunks while the registry
+    // still holds that version.
+    if (item.entries) {
+      const sourceVersion = toSourceDocumentVersion(item.entries);
+      const registeredVersion = Number(document.version ?? 1) || 1;
 
-    await withPostgresTransaction(async (client) => {
-      await writeDocumentsToPgvectorIndex({
-        accessScope: {
-          userId: document.ownerUserId ?? "",
-          workspaceId: document.workspaceId ?? "",
-        },
-        client,
-        preparedDocuments: prepared.preparedDocuments,
-      });
+      if (sourceVersion !== registeredVersion) {
+        skipped += 1;
+        process.stdout.write(
+          `skip   ${item.docId}: the ${item.source} chunks are content version ${sourceVersion}, the registry holds version ${registeredVersion}; use --from documents.\n`
+        );
+        continue;
+      }
+    }
+
+    const prepared = item.entries
+      ? {
+          ...(await prepareFromStoredVectors(item.entries, {
+            trustSourceEmbeddings: options.trustSourceEmbeddings,
+          })),
+          expected: toContentIdentity(document),
+        }
+      : await prepareFromDocumentBytes(document);
+    const outcome = await writeReindexedDocument({
+      docId: item.docId,
+      expected: prepared.expected,
+      preparedDocuments: prepared.preparedDocuments,
     });
 
-    written += prepared.preparedDocuments.length;
+    if (outcome.status !== "written") {
+      skipped += 1;
+      process.stdout.write(
+        outcome.status === "gone"
+          ? `skip   ${item.docId}: deleted while it was being prepared.\n`
+          : `skip   ${item.docId}: replaced while it was being prepared (version ${outcome.expectedVersion} -> ${outcome.currentVersion}); the replacement already wrote its chunks.\n`
+      );
+      continue;
+    }
+
+    written += outcome.chunkCount;
     process.stdout.write(
-      `wrote  ${item.docId}: ${prepared.preparedDocuments.length} chunk(s)${
+      `wrote  ${item.docId}: ${outcome.chunkCount} chunk(s) of content version ${outcome.documentVersion}${
         prepared.reembedded ? " (re-embedded)" : " (vectors copied)"
       }\n`
     );
   }
 
-  process.stdout.write(`\nDone. ${written} chunk(s) written to pgvector.\n`);
+  process.stdout.write(
+    `\nDone. ${written} chunk(s) written to pgvector${skipped > 0 ? `; ${skipped} document(s) skipped` : ""}.\n`
+  );
 };
 
 // Run only when invoked as a script (node vector-reindex.mjs ...). Importing the

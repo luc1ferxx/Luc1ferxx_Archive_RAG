@@ -1,4 +1,4 @@
-export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.12.0";
+export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.13.0";
 
 // The retrieval architecture every synthetic/feedback report must have run on.
 // It is checked against `summary.retrieval`, which the runner derives from the
@@ -531,6 +531,18 @@ const trajectoryChecks = {
     "replan_is_bounded",
     "replanner_saw_status_only_context",
     "retry_node_bound_upstream_output",
+  ],
+  // The v3 unfreeze case: deterministic injected proposal and mock providers,
+  // runtime-contract evidence only (never real-model planning evidence), with
+  // V1 (chain and V2 DAG) measured on the same request.
+  unified_graph_evidence_gated_skill_hand_off: [
+    "unified_graph_took_request",
+    "skill_gated_on_document_evidence",
+    "skill_received_verified_document_answer",
+    "v1_same_request_runs_skill_first_and_unconditionally",
+    "web_to_skill_hand_off_refused",
+    "graph_answer_finalized_with_receipt",
+    "graph_budget_charged_per_executed_node",
   ],
 };
 
@@ -1605,6 +1617,210 @@ const trajectoryResponseProjections = {
       "custom_skill",
       "custom_skill",
       "custom_skill",
+      "synthesis",
+      "self_check",
+      "answer_finalizer",
+    ],
+  }),
+  unified_graph_evidence_gated_skill_hand_off: trajectoryResponseProjection({
+    agentMode: "risk_review",
+    agentSkills: completedSkillIds(
+      "document_rag",
+      "document_evidence_check",
+      "risk_review"
+    ),
+    budget: {
+      used: {
+        customSkillCalls: 1,
+        documentRagCalls: 1,
+        webSearchCalls: 0,
+      },
+    },
+    executionLoop: {
+      followUpsRun: 0,
+      gapsIdentified: 0,
+      stoppedReason: "not_needed",
+    },
+    observed: {
+      answer: {
+        agentMode: "risk_review",
+        includesDocumentAnswer: true,
+        includesRiskFinding: true,
+        sourceKinds: ["document", "document"],
+      },
+      checkpoint: {
+        finalizationMatchesResponse: true,
+        graphVersion: "v3",
+        hasFinalizationReceipt: true,
+        phase: "completed",
+        version: "v2",
+      },
+      externalHandOff: {
+        graphNodeStepCount: 0,
+        plannedEvents: [
+          {
+            errorCodes: ["external_output_hand_off"],
+            fallback: "v1",
+            mode: "guarded",
+            nodeIds: ["document", "evidence_check", "web", "risk"],
+            requestedPlannerId: "trajectory_web_hand_off_proposal",
+            status: "rejected",
+          },
+        ],
+        unifiedCheckpointWritten: false,
+        v1OuterPlanRan: true,
+        webTextReachedAnySkill: false,
+      },
+      gating: {
+        insufficient: {
+          agentMode: "clarification",
+          checkPassed: false,
+          clarificationNeeded: true,
+          customSkillCalls: 0,
+          documentRagCalls: 1,
+          nodeRuns: [
+            {
+              dependsOn: [],
+              nodeId: "document",
+              reason: null,
+              skillId: "document_rag",
+              status: "completed",
+            },
+            {
+              dependsOn: ["document"],
+              nodeId: "evidence_check",
+              reason: null,
+              skillId: "document_evidence_check",
+              status: "completed",
+            },
+            {
+              dependsOn: ["document", "evidence_check"],
+              nodeId: "risk",
+              reason: "condition_not_met",
+              skillId: "risk_review",
+              status: "skipped",
+            },
+          ],
+          riskCallCount: 0,
+        },
+        sufficient: {
+          checkPassed: true,
+          customSkillCalls: 1,
+          documentRagCalls: 1,
+          riskStatus: "completed",
+        },
+      },
+      handOff: {
+        priorFindingsIsDocumentAnswer: true,
+        riskDependsOn: ["document", "evidence_check"],
+        riskQuestionCarriesDocumentAnswer: true,
+        riskStartedAfterCheckCompleted: true,
+      },
+      nodeRuns: [
+        {
+          dependsOn: [],
+          nodeId: "document",
+          reason: null,
+          skillId: "document_rag",
+          status: "completed",
+        },
+        {
+          dependsOn: ["document"],
+          nodeId: "evidence_check",
+          reason: null,
+          skillId: "document_evidence_check",
+          status: "completed",
+        },
+        {
+          dependsOn: ["document", "evidence_check"],
+          nodeId: "risk",
+          reason: null,
+          skillId: "risk_review",
+          status: "completed",
+        },
+      ],
+      path: {
+        executedEventCount: 1,
+        executedStatus: "completed",
+        outerPlanEventCount: 0,
+        plannedEvents: [
+          {
+            errorCodes: [],
+            fallback: null,
+            mode: "guarded",
+            nodeIds: ["document", "evidence_check", "risk"],
+            requestedPlannerId: "trajectory_evidence_gated_skill_proposal",
+            status: "selected",
+          },
+        ],
+        runStatus: "completed",
+      },
+      planner: {
+        callCount: 1,
+        evidenceKind: "deterministic_injected_proposal",
+        graphVersion: "v3",
+        requestedPlannerId: "trajectory_evidence_gated_skill_proposal",
+      },
+      v1Runs: [
+        {
+          customSkillCalls: 1,
+          customStageBeforeDocumentRag: true,
+          documentRagCalls: 0,
+          documentSufficient: true,
+          riskCallCount: 1,
+          riskCallsWithUpstreamSection: 0,
+          skillGraphRollout: "off",
+          unifiedEventCount: 0,
+        },
+        {
+          customSkillCalls: 1,
+          customStageBeforeDocumentRag: true,
+          documentRagCalls: 0,
+          documentSufficient: false,
+          riskCallCount: 1,
+          riskCallsWithUpstreamSection: 0,
+          skillGraphRollout: "off",
+          unifiedEventCount: 0,
+        },
+        {
+          customSkillCalls: 1,
+          customStageBeforeDocumentRag: true,
+          documentRagCalls: 0,
+          documentSufficient: true,
+          riskCallCount: 1,
+          riskCallsWithUpstreamSection: 0,
+          skillGraphRollout: "guarded",
+          unifiedEventCount: 0,
+        },
+        {
+          customSkillCalls: 1,
+          customStageBeforeDocumentRag: true,
+          documentRagCalls: 0,
+          documentSufficient: false,
+          riskCallCount: 1,
+          riskCallsWithUpstreamSection: 0,
+          skillGraphRollout: "guarded",
+          unifiedEventCount: 0,
+        },
+      ],
+    },
+    selectedSkills: skillIds(
+      "risk_review",
+      "document_rag",
+      "document_evidence_check"
+    ),
+    skillChain: [],
+    telemetry: {
+      chatCallCount: 2,
+      listDocumentCallCount: 3,
+    },
+    traceTypes: [
+      "plan",
+      "query_planner",
+      "graph_node",
+      "graph_node",
+      "graph_node",
+      "self_check",
       "synthesis",
       "self_check",
       "answer_finalizer",

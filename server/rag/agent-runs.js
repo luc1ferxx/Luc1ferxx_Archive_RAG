@@ -1125,6 +1125,31 @@ const getActiveAgentRunStep = (steps = []) =>
 const isRunMarkedForManualRecovery = (run) =>
   run?.result?.recovery?.mode === "manual";
 
+/**
+ * Error code of a re-entry into a run whose guarded v3 graph owned the whole
+ * request and has settled: finalized (a sealed receipt; the run asked for
+ * clarification or completed) or failed after a partial graph. Nothing can
+ * resume such a run, so its continuation is a new request with a new run
+ * (agent.js). Any other run with a graph checkpoint stays fenced.
+ */
+export const AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE = "AGENT_RUN_SETTLED_GRAPH_REENTRY";
+
+const isSettledUnifiedGraphRun = (run, checkpoint) =>
+  checkpoint?.version === "v2" &&
+  checkpoint.graph?.version === "v3" &&
+  run?.status !== AGENT_RUN_STATUSES.running &&
+  !isRunMarkedForManualRecovery(run) &&
+  // A clarification leaves its own gate step paused; only graph node steps
+  // could still be executing.
+  !toArray(run?.steps).some(
+    (step) =>
+      step.type === getCheckpointGraphStepType(checkpoint) &&
+      ACTIVE_AGENT_RUN_STEP_STATUSES.has(step.status)
+  ) &&
+  !toArray(run?.approvalGates).some((gate) => gate.status === "pending") &&
+  ((checkpoint.phase === "completed" && checkpoint.finalization !== undefined) ||
+    (checkpoint.phase === "partial" && run.status === AGENT_RUN_STATUSES.failed));
+
 const createActiveRunStepCompletionConflictError = ({ status, step } = {}) => {
   const error = new Error(
     `Agent run cannot become ${status} with concurrent active step ${step.id} (${step.status}).`
@@ -1553,6 +1578,17 @@ export const createAgentRunService = ({
       mutate: (existingRun) => {
         const checkpoint = existingRun.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
 
+        if (graphReentryGuard && checkpoint && isSettledUnifiedGraphRun(existingRun, checkpoint)) {
+          // Decided on the same snapshot the fence below would read; the
+          // settled run is not written.
+          const error = new Error(
+            "A settled unified graph run is continued as a new run."
+          );
+          error.code = AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE;
+          error.status = 409;
+          throw error;
+        }
+
         if (graphReentryGuard && checkpoint) {
           // A persisted graph belongs to the worker already executing it or
           // to the dedicated graph recovery path. A second ordinary request
@@ -1574,7 +1610,18 @@ export const createAgentRunService = ({
     return mutation.run;
   },
 
-  async markManualRecovery({ accessScope = {}, recovery = {}, runId } = {}) {
+  /**
+   * `expectedGraphResumeClaimId` lets the recovery worker that owns a graph
+   * resume claim hand that run to an operator after its own resume failed
+   * (its work has stopped: the scheduler awaits every in-flight node before
+   * it throws). Without it, a claimed run is never marked.
+   */
+  async markManualRecovery({
+    accessScope = {},
+    expectedGraphResumeClaimId = null,
+    recovery = {},
+    runId,
+  } = {}) {
     if (typeof agentRunStore.updateWithEvent !== "function") {
       throw new Error(
         "Agent run store cannot atomically persist manual recovery and its event."
@@ -1592,11 +1639,15 @@ export const createAgentRunService = ({
         // The decision to stop a graph and the manual-recovery event must win
         // the same revision CAS as a graph resume claim or node transition.
         // Never change a run already owned by a resume worker.
+        const expectedClaimId = normalizeText(expectedGraphResumeClaimId);
+
         if (
           TERMINAL_AGENT_RUN_STATUSES.has(run.status) ||
           isRunMarkedForManualRecovery(run) ||
           toArray(run.events).some((event) => event.type === "manual_recovery_required") ||
-          checkpoint?.resumeClaim
+          (expectedClaimId
+            ? normalizeText(checkpoint?.resumeClaim?.claimId) !== expectedClaimId
+            : Boolean(checkpoint?.resumeClaim))
         ) {
           return null;
         }
@@ -1674,7 +1725,15 @@ export const createAgentRunService = ({
         if (
           !previous ||
           isRunMarkedForManualRecovery(run) ||
-          previous.phase !== "running" ||
+          // A completed heterogeneous v3 graph may still need its whole-run
+          // finalization (receipt or recomputation) under a claim; every
+          // other terminal graph phase stays with an operator.
+          (previous.phase !== "running" &&
+            !(
+              previous.version === "v2" &&
+              previous.graph?.version === "v3" &&
+              previous.phase === "completed"
+            )) ||
           previous.digest !== checkpointDigest ||
           sealExecutionGraphCheckpoint(previous).digest !== previous.digest ||
           previous.resumeClaim ||

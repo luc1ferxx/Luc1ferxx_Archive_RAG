@@ -248,28 +248,32 @@ const getEmbeddingsInstance = (options = {}) => {
 
   assertSelectedModelRoute(route);
 
-  const cacheKey = getRouteCacheKey(route);
+  // An index version may pin another embedding model than the configured one
+  // (rag/vector-store-pgvector-versions.js). It goes through the same route --
+  // provider, endpoint, workspace policy -- with only the model name replaced.
+  const modelName = String(options.modelName ?? "").trim() || route.modelName;
+  const cacheKey = getRouteCacheKey({ ...route, modelName });
   const cachedInstance = embeddingsInstances.get(cacheKey);
 
   if (cachedInstance) {
     return {
       instance: cachedInstance,
       metricContext: buildRouteMetricContext(route),
-      modelName: route.modelName,
+      modelName,
       modelRoute: route.publicRoute,
     };
   }
 
   const embeddingsInstance = createEmbeddingsClient({
     apiKey: getOpenAIApiKey(),
-    model: route.modelName,
+    model: modelName,
   });
 
   embeddingsInstances.set(cacheKey, embeddingsInstance);
   return {
     instance: embeddingsInstance,
     metricContext: buildRouteMetricContext(route),
-    modelName: route.modelName,
+    modelName,
     modelRoute: route.publicRoute,
   };
 };
@@ -429,8 +433,22 @@ export const resetOpenAIProvider = () => {
 const withEmbeddingPrefix = (texts, prefix) =>
   prefix ? texts.map((text) => `${prefix}${text}`) : texts;
 
-export const embedTexts = async (texts) => {
+// `embeddingSpace` ({ model, documentPrefix, queryPrefix, dimensions }) is set
+// only by the pgvector index-version code, for a version pinned to another
+// model or task prefix than the configured one. Without it both functions
+// behave exactly as before. A configured stand-in provider receives the space
+// as a second argument and never gets a prefix, like the configured path.
+const normalizeEmbeddingSpace = (embeddingSpace) =>
+  embeddingSpace && typeof embeddingSpace === "object" ? embeddingSpace : null;
+
+const callCustomEmbedding = (method, input, embeddingSpace) =>
+  embeddingSpace
+    ? customProvider[method](input, { embeddingSpace })
+    : customProvider[method](input);
+
+export const embedTexts = async (texts, options = {}) => {
   const safeTexts = Array.isArray(texts) ? texts : [];
+  const embeddingSpace = normalizeEmbeddingSpace(options?.embeddingSpace);
 
   if (customProvider?.embedTexts) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
@@ -438,7 +456,7 @@ export const embedTexts = async (texts) => {
     const inputCharacters = getTextListCharacters(safeTexts);
 
     return runWithLlmOpsMetric({
-      action: () => customProvider.embedTexts(texts),
+      action: () => callCustomEmbedding("embedTexts", texts, embeddingSpace),
       metric: getEmbeddingMetricBase({
         ...buildUsageMetricFields({
           inputCharacters,
@@ -453,13 +471,18 @@ export const embedTexts = async (texts) => {
     });
   }
 
-  const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance();
+  const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance({
+    modelName: embeddingSpace?.model,
+  });
   const inputCharacters = getTextListCharacters(safeTexts);
+  const documentPrefix = embeddingSpace
+    ? String(embeddingSpace.documentPrefix ?? "")
+    : getEmbeddingDocumentPrefix();
 
   return runWithLlmOpsMetric({
     action: () =>
       withRetry(
-        async () => instance.embedDocuments(withEmbeddingPrefix(texts, getEmbeddingDocumentPrefix())),
+        async () => instance.embedDocuments(withEmbeddingPrefix(texts, documentPrefix)),
         "Embedding request failed."
       ),
     metric: getEmbeddingMetricBase({
@@ -477,14 +500,16 @@ export const embedTexts = async (texts) => {
   });
 };
 
-export const embedQuery = async (query) => {
+export const embedQuery = async (query, options = {}) => {
+  const embeddingSpace = normalizeEmbeddingSpace(options?.embeddingSpace);
+
   if (customProvider?.embedQuery) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
     const metricContext = buildCustomRouteMetricContext();
     const inputCharacters = getTextCharacters(query);
 
     return runWithLlmOpsMetric({
-      action: () => customProvider.embedQuery(query),
+      action: () => callCustomEmbedding("embedQuery", query, embeddingSpace),
       metric: getEmbeddingMetricBase({
         ...buildUsageMetricFields({
           inputCharacters,
@@ -499,13 +524,18 @@ export const embedQuery = async (query) => {
     });
   }
 
-  const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance();
+  const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance({
+    modelName: embeddingSpace?.model,
+  });
   const inputCharacters = getTextCharacters(query);
+  const queryPrefix = embeddingSpace
+    ? String(embeddingSpace.queryPrefix ?? "")
+    : getEmbeddingQueryPrefix();
 
   return runWithLlmOpsMetric({
     action: () =>
       withRetry(
-        async () => instance.embedQuery(`${getEmbeddingQueryPrefix()}${query}`),
+        async () => instance.embedQuery(`${queryPrefix}${query}`),
         "Query embedding request failed."
       ),
     metric: getEmbeddingMetricBase({

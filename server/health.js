@@ -14,7 +14,9 @@ import {
   getChatModel,
   getDocumentChunksPostgresTable,
   getDocumentsPostgresTable,
+  getIngestJobOutputsPostgresTable,
   getIngestJobsPostgresTable,
+  getRagIngestMode,
   getDocumentStoreProvider,
   getEmbeddingModel,
   getHybridFusionMethod,
@@ -38,7 +40,9 @@ import {
 import { describeVectorStoreRuntime } from "./rag/vector-store.js";
 import {
   describePgvectorStatus,
+  getActivePgvectorSparseRankFunctionName,
   getPgvectorSparseRankFunctionName,
+  listLivePgvectorVersionTables,
 } from "./rag/vector-store-pgvector.js";
 import { runPostgresMigrations } from "./rag/db-migrations.js";
 import { PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS } from "./rag/db-migrations.js";
@@ -49,6 +53,7 @@ import {
   queryPostgres,
 } from "./rag/postgres.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
+import { createPostgresIngestJobStore } from "./rag/ingest-job-store.js";
 import { checkSharedStateHealth } from "./rag/shared-state.js";
 import { probeDoclingServe } from "./rag/docling-parser.js";
 import { getDoclingFallback, getPdfParser } from "./rag/config.js";
@@ -259,7 +264,44 @@ export const derivePgvectorHealthProblems = (status) => {
     );
   }
 
+  // Index versions (migration 016): only what stops the active version from
+  // being served is a problem. A stalled build, a version out of its
+  // dual-write window or drift are warnings on the entry.
+  for (const problem of status.indexVersions?.problems ?? []) {
+    problems.push(`Index versions: ${problem}`);
+  }
+
   return problems;
+};
+
+// The index-version part of the pgvector health entry: which version serves,
+// what is building and how far it got, and any drift between the active
+// version and the versions it dual-writes.
+const summarizeIndexVersions = (indexVersions) => {
+  if (!indexVersions || indexVersions.registry !== "present") {
+    return indexVersions ? { registry: indexVersions.registry } : null;
+  }
+
+  return {
+    active: indexVersions.active,
+    building: indexVersions.building,
+    drift: indexVersions.drift,
+    generation: indexVersions.generation,
+    pointerTtlMs: indexVersions.pointerTtlMs,
+    previousVersionId: indexVersions.previousVersionId,
+    registry: indexVersions.registry,
+    switchedAt: indexVersions.switchedAt,
+    versions: indexVersions.versions.map((version) => ({
+      chunkCount: version.chunkCount,
+      chunkTable: version.chunkTable,
+      dualWriteUntil: version.dualWriteUntil,
+      embedding: version.embedding,
+      isActive: version.isActive,
+      status: version.status,
+      versionId: version.versionId,
+    })),
+    warnings: indexVersions.warnings,
+  };
 };
 
 const checkPgvectorHealth = async () => {
@@ -298,6 +340,8 @@ const checkPgvectorHealth = async () => {
     embedding: status.embedding,
     chunkCount: status.chunkCount,
     documentCount: status.documentCount,
+    activeVersion: status.activeVersion ?? null,
+    indexVersions: summarizeIndexVersions(status.indexVersions),
     retrieval: buildRetrievalSummary(),
     message:
       problems.length > 0
@@ -711,6 +755,8 @@ const getRowLevelSecurityTables = () => [
   getWorkspaceArtifactsPostgresTable(),
   getLongMemoryPostgresTable(),
   getIngestJobsPostgresTable(),
+  // Migration 017: the staged ingest's outputs hold tenant document text.
+  getIngestJobOutputsPostgresTable(),
 ];
 
 const ROW_LEVEL_SECURITY_PROBE_TENANT = Object.freeze({ userId: "__health_probe__" });
@@ -736,15 +782,24 @@ const checkRowLevelSecurityHealth = async () => {
     });
   }
 
-  const tables = getRowLevelSecurityTables();
+  let tables = getRowLevelSecurityTables();
   // Multi-document full-text search as a tenant goes through this owner-run
   // function (migration 014), so a missing function or grant breaks it.
-  const sparseRankFunction = getPgvectorSparseRankFunctionName();
+  let sparseRankFunction = getPgvectorSparseRankFunctionName();
 
   try {
     const role = getPostgresTenantRole();
 
     await runPostgresMigrations();
+
+    // Every live index version has its own chunk table under the same policy,
+    // and a tenant's search calls the active version's own function.
+    try {
+      tables = [...new Set([...tables, ...(await listLivePgvectorVersionTables())])];
+      sparseRankFunction = await getActivePgvectorSparseRankFunctionName();
+    } catch (error) {
+      console.error("Could not read the index version registry for the row-level security probe.", error);
+    }
 
     const probe = await runWithDatabaseTenant(ROW_LEVEL_SECURITY_PROBE_TENANT, () =>
       queryPostgres(
@@ -831,6 +886,46 @@ const checkPdfParserHealth = async () => {
       });
 };
 
+// The ingest queue (rag/ingest-job-store.js): jobs per status over every
+// tenant. Dead-letter jobs ran out of attempts at one stage and wait for an
+// operator (`npm run ingest:jobs -- dead-letter list`, POST
+// /admin/ingest-jobs/:jobId/requeue); they are a warning, not an error, since
+// every other upload keeps being served. Without PostgreSQL the queue lives in
+// the API process's memory and there is nothing shared to count.
+const checkIngestJobsHealth = async ({ createStore = createPostgresIngestJobStore } = {}) => {
+  const mode = getRagIngestMode();
+
+  if (!isPostgresConfigured()) {
+    return buildEntry("disabled", {
+      mode,
+      message: "Without PostgreSQL the ingest queue lives in the API process's memory.",
+    });
+  }
+
+  try {
+    await runPostgresMigrations();
+
+    const counts = await createStore({ logger: { error() {}, log() {}, warn() {} } }).countByStatus();
+    const deadLetterCount = Number(counts.dead_letter) || 0;
+
+    return buildEntry("ok", {
+      counts,
+      deadLetterCount,
+      mode,
+      message:
+        deadLetterCount > 0
+          ? `${deadLetterCount} ingest job(s) ran out of attempts and wait in dead_letter; list them with npm run ingest:jobs -- dead-letter list and requeue them once the cause is fixed.`
+          : "No ingest job is waiting in dead_letter.",
+      ...(deadLetterCount > 0 ? { warnings: ["dead_letter_jobs"] } : {}),
+    });
+  } catch (error) {
+    return buildEntry("error", {
+      mode,
+      message: error instanceof Error ? error.message : "Ingest queue health check failed.",
+    });
+  }
+};
+
 export const buildHealthReport = async () => {
   const [
     apiAuth,
@@ -847,6 +942,7 @@ export const buildHealthReport = async () => {
     rowLevelSecurity,
     sharedState,
     pdfParser,
+    ingestJobs,
   ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
@@ -862,6 +958,7 @@ export const buildHealthReport = async () => {
     checkRowLevelSecurityHealth(),
     checkSharedStateHealth(),
     checkPdfParserHealth(),
+    checkIngestJobsHealth(),
   ]);
   const checks = {
     apiAuth,
@@ -878,6 +975,7 @@ export const buildHealthReport = async () => {
     rowLevelSecurity,
     sharedState,
     pdfParser,
+    ingestJobs,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 

@@ -322,11 +322,14 @@ const isWebEntry = (skill, capabilityRegistry) => {
 };
 
 /**
- * Trusted staging catalog for a future all-stage DAG. The model receives only
+ * Trusted catalog for the all-stage DAG. The model receives only
  * `descriptors`; the runtime may use the narrowed `graphRegistry`. Capability
  * adapters are included only when a trusted caller explicitly allowlists their
  * ids, and still delegate execution/approval to the Capability registry.
- * This module does not route production traffic or recover graph approvals.
+ * Building a catalog routes nothing (`executionWired` stays false for this
+ * module): only the guarded rollout in agent-unified-graph-run.js executes a
+ * graph drawn from it, after admission refuses approval-gated nodes. Graph
+ * approval continuation remains frozen.
  */
 export const buildAuthorizedUnifiedGraphCatalog = ({
   accessScope,

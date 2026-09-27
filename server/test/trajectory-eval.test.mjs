@@ -19,7 +19,7 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   });
 
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 17);
+  assert.equal(report.summary.metrics.caseCount, 18);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
   assert.equal(report.summary.metrics.categories.skill_selection.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.follow_up.failedCheckCount, 0);
@@ -35,6 +35,8 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
   assert.equal(report.summary.metrics.categories.privacy.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.skill_graph.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.skill_graph.checkCount, 18);
+  assert.equal(report.summary.metrics.categories.unified_graph.failedCheckCount, 0);
+  assert.equal(report.summary.metrics.categories.unified_graph.checkCount, 7);
   assert.ok(
     report.cases.some(
       (caseResult) =>
@@ -128,6 +130,47 @@ test("trajectory eval passes default deterministic agent trajectories", async ()
     ["reused", "reused", "completed"]
   );
 
+  // The v3 unfreeze case: the Skill runs only after the document answer
+  // passes its evidence check and receives that verified answer; V1 on the
+  // same request (chain and V2 DAG, both evidence variants) runs the Skill
+  // first and unconditionally; a Web-to-Skill hand-off is refused.
+  const unifiedCase = graphCase("unified_graph_evidence_gated_skill_hand_off");
+  assert.equal(unifiedCase.passed, true);
+  assert.equal(unifiedCase.response.observed.path.plannedEvents[0].status, "selected");
+  assert.equal(unifiedCase.response.observed.handOff.priorFindingsIsDocumentAnswer, true);
+  assert.deepEqual(
+    unifiedCase.response.observed.gating.insufficient.nodeRuns.map(
+      (nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.reason]
+    ),
+    [
+      ["document", "completed", null],
+      ["evidence_check", "completed", null],
+      ["risk", "skipped", "condition_not_met"],
+    ]
+  );
+  assert.deepEqual(
+    unifiedCase.response.observed.v1Runs.map((v1) => [
+      v1.skillGraphRollout,
+      v1.documentSufficient,
+      v1.customSkillCalls,
+      v1.documentRagCalls,
+    ]),
+    [
+      ["off", true, 1, 0],
+      ["off", false, 1, 0],
+      ["guarded", true, 1, 0],
+      ["guarded", false, 1, 0],
+    ]
+  );
+  assert.deepEqual(
+    unifiedCase.response.observed.externalHandOff.plannedEvents[0].errorCodes,
+    ["external_output_hand_off"]
+  );
+  assert.equal(
+    unifiedCase.response.observed.planner.evidenceKind,
+    "deterministic_injected_proposal"
+  );
+
   const suiteValidation = validateCurrentQualitySuiteReport({
     report: {
       ...report,
@@ -151,6 +194,7 @@ test("trajectory eval isolates memory configuration from CI runtime", async () =
     process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
   const originalLongMemory = process.env.RAG_LONG_MEMORY_ENABLED;
   const originalSkillGraphRollout = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
+  const originalUnifiedGraphRollout = process.env.AGENT_UNIFIED_GRAPH_ROLLOUT;
 
   process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED = "true";
   process.env.RAG_LONG_MEMORY_ENABLED = "true";
@@ -183,6 +227,7 @@ test("trajectory eval isolates memory configuration from CI runtime", async () =
     // only; a leaked `guarded` here would silently move every later suite
     // onto the V2 path.
     assert.equal(process.env.AGENT_SKILL_GRAPH_ROLLOUT, originalSkillGraphRollout);
+    assert.equal(process.env.AGENT_UNIFIED_GRAPH_ROLLOUT, originalUnifiedGraphRollout);
   } finally {
     if (originalAgentExperienceMemory === undefined) {
       delete process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
@@ -226,5 +271,7 @@ test("trajectory eval markdown summarizes categories and failed checks", async (
   assert.match(markdown, /Skill graph shadow comparison/);
   assert.match(markdown, /Skill graph illegal plan rejected/);
   assert.match(markdown, /Skill graph bounded replan/);
+  assert.match(markdown, /Unified graph/);
+  assert.match(markdown, /Unified graph evidence-gated Skill hand-off/);
   assert.match(markdown, /PASS/);
 });

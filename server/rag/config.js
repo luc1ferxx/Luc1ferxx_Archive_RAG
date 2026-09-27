@@ -241,14 +241,25 @@ export const getAgentSkillGraphRollout = () => {
   return toChoice(rawValue, "off", ["guarded", "off", "shadow"]);
 };
 
-// The heterogeneous all-stage graph is observational only until its document
-// loop, approval continuation, and whole-run recovery have release evidence.
-// A mistyped or premature `guarded` setting fails closed to `off`.
+// --- AGENT track: heterogeneous v3 unified graph rollout ---------------------
+// `off` (default) keeps the V1 outer order. `shadow` plans and validates a v3
+// graph beside the V1 answer without executing it. `guarded` executes an
+// admitted v3 graph (document primary, evidence check, conditional follow-up,
+// Web, built-in and custom Skills) on the same run store, validator/scheduler,
+// budget reservation, replay matrix, and finalizer; a graph with an
+// approval-gated node, or one that breaks an admission data boundary
+// (agent-unified-graph-admission.js), is rejected whole before any node runs
+// and the request takes the V1 path instead. Approval continuation inside the
+// graph stays frozen. Startup recovery resumes or finalizes a v3 graph only
+// under `guarded`; with any other value such runs wait for an operator. Any
+// unrecognized value still fails closed to `off`.
 export const getAgentUnifiedGraphRollout = () =>
   toChoice(process.env.AGENT_UNIFIED_GRAPH_ROLLOUT, "off", [
+    "guarded",
     "off",
     "shadow",
   ]);
+// --- end AGENT track block -------------------------------------------------
 
 export const getChunkStrategy = () =>
   (process.env.RAG_CHUNK_STRATEGY || "structured").trim().toLowerCase();
@@ -1128,3 +1139,156 @@ export const getApiAuthConfigStatus = () => {
 
 export const isStartupHealthStrict = () =>
   toBoolean(process.env.STARTUP_HEALTH_STRICT, false);
+
+// ---------------------------------------------------------------------------
+// DATA track: pgvector index versions
+// (rag/vector-store-pgvector-versions.js, rag/vector-store-pgvector-version-builder.js,
+// vector-index.mjs). Nothing above this line belongs to this block.
+// ---------------------------------------------------------------------------
+
+// The versions registry (migration 016). Its pointer and build-progress tables
+// are derived from this name (`<name>_pointer`, `<name>_build_progress`).
+export const getIndexVersionsPostgresTable = () =>
+  (process.env.INDEX_VERSIONS_POSTGRES_TABLE || "rag_index_versions").trim();
+
+// How long an API process trusts the active-version pointer it read. A switch
+// is picked up by every instance within this time without a restart; the old
+// version keeps receiving every write for the dual-write grace period, so a
+// search on a pointer read just before the switch still sees a complete index.
+export const getIndexVersionPointerTtlMs = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INDEX_VERSION_POINTER_TTL_MS, 2000)) || 2000;
+
+// After an activation the previous version keeps receiving every ingest,
+// delete and clear for this long, so a rollback inside the window loses
+// nothing. The versions module never lets it drop below twice the pointer TTL.
+export const getIndexVersionDualWriteGraceMs = () =>
+  Math.floor(
+    toNonNegativeNumber(process.env.RAG_INDEX_VERSION_DUAL_WRITE_GRACE_MS, 24 * 60 * 60 * 1000)
+  );
+
+// A builder renews its lease with every document it writes; another builder
+// may take over a building version only once the lease has expired.
+export const getIndexVersionBuildLeaseMs = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INDEX_VERSION_BUILD_LEASE_MS, 60000)) || 60000;
+
+// Documents a builder reads, embeds and writes per batch.
+export const getIndexVersionBuildBatchSize = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INDEX_VERSION_BUILD_BATCH_SIZE, 16)) || 16;
+
+// Retire drops a version table whose foreign key points at the documents
+// table, which needs an AccessExclusiveLock on documents; while that request
+// waits, every new reader of documents waits behind it. Each drop attempt
+// therefore waits at most RAG_INDEX_VERSION_RETIRE_LOCK_TIMEOUT_MS for the
+// lock, and retire makes up to RAG_INDEX_VERSION_RETIRE_DROP_ATTEMPTS of them,
+// RAG_INDEX_VERSION_RETIRE_RETRY_DELAY_MS apart (jittered), before it reports
+// the drop as pending.
+export const getIndexVersionRetireLockTimeoutMs = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INDEX_VERSION_RETIRE_LOCK_TIMEOUT_MS, 200)) || 200;
+
+export const getIndexVersionRetireDropAttempts = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INDEX_VERSION_RETIRE_DROP_ATTEMPTS, 25)) || 25;
+
+export const getIndexVersionRetireRetryDelayMs = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_INDEX_VERSION_RETIRE_RETRY_DELAY_MS, 400));
+
+// The task prefixes and the known width of an arbitrary model, for a version
+// built under another model than the configured one. The environment overrides
+// (RAG_EMBEDDING_*_PREFIX, RAG_EMBEDDING_DIMENSIONS) describe the configured
+// model only, so they do not apply here.
+export const getEmbeddingTaskPrefixesForModel = (model) => {
+  const entry = EMBEDDING_TASK_PREFIXES.find((candidate) => candidate.pattern.test(String(model ?? "")));
+
+  return { document: entry?.document ?? "", query: entry?.query ?? "" };
+};
+
+export const getKnownEmbeddingDimensionsForModel = (model) =>
+  KNOWN_EMBEDDING_DIMENSIONS[String(model ?? "")] ?? null;
+
+// The same identity rule as getEmbeddingIndexIdentity, for any model/prefix.
+export const buildEmbeddingIndexIdentity = ({ model, documentPrefix = "" } = {}) => {
+  const prefix = String(documentPrefix ?? "").trim();
+  const modelName = String(model ?? "").trim();
+
+  return prefix ? `${modelName}#${prefix}` : modelName;
+};
+
+// ---------------------------------------------------------------------------
+// DATA track: staged ingestion pipeline
+// (rag/ingest-pipeline.js, rag/ingest-embedding-batcher.js,
+// rag/ingest-job-store.js, rag/ingest-worker.js, ingest-jobs.mjs).
+// ---------------------------------------------------------------------------
+
+// The stages an async ingest job runs, in order. Each stage persists its
+// output before the next one starts, so a retry resumes where it failed.
+export const RAG_INGEST_STAGES = Object.freeze(["parse", "chunk", "embed", "index"]);
+
+// Default retry backoff of every stage (the one-step job's backoff before the
+// pipeline was staged).
+const INGEST_STAGE_RETRY_BASE_MS = 5000;
+const INGEST_STAGE_RETRY_MAX_MS = 5 * 60 * 1000;
+
+const readIngestStageSetting = (stage, suffix) =>
+  process.env[`RAG_INGEST_${String(stage).toUpperCase()}_${suffix}`];
+
+/**
+ * Attempts and backoff of one stage. RAG_INGEST_<STAGE>_MAX_ATTEMPTS,
+ * RAG_INGEST_<STAGE>_RETRY_BASE_MS and RAG_INGEST_<STAGE>_RETRY_MAX_MS
+ * (STAGE = PARSE, CHUNK, EMBED or INDEX) override the defaults, which are the
+ * job's RAG_INGEST_JOB_MAX_ATTEMPTS and the 5 s doubling backoff up to 5 min
+ * every job had before. A stage that exhausts its attempts moves the job to
+ * dead_letter.
+ */
+export const getRagIngestStageRetryPolicy = (stage) => {
+  const maxAttempts =
+    Math.floor(
+      toPositiveNumber(readIngestStageSetting(stage, "MAX_ATTEMPTS"), getRagIngestJobMaxAttempts())
+    ) || getRagIngestJobMaxAttempts();
+  const baseDelayMs = Math.floor(
+    toNonNegativeNumber(readIngestStageSetting(stage, "RETRY_BASE_MS"), INGEST_STAGE_RETRY_BASE_MS)
+  );
+  const maxDelayMs = Math.max(
+    baseDelayMs,
+    Math.floor(
+      toNonNegativeNumber(readIngestStageSetting(stage, "RETRY_MAX_MS"), INGEST_STAGE_RETRY_MAX_MS)
+    )
+  );
+
+  return { baseDelayMs, maxAttempts, maxDelayMs };
+};
+
+// Largest serialized output (parsed pages, chunks, embeddings) one stage may
+// persist. A document whose output is larger fails with a 413 instead of
+// filling the jobs table; 0 disables the bound.
+export const getRagIngestStageOutputMaxBytes = () =>
+  Math.floor(
+    toNonNegativeNumber(process.env.RAG_INGEST_STAGE_OUTPUT_MAX_BYTES, 64 * 1024 * 1024)
+  );
+
+// Cross-document embedding batcher: embed-stage work of concurrent jobs in one
+// process goes out as one embeddings request of at most this many inputs and
+// (estimated) tokens, after waiting at most the linger window for more work.
+// 512 inputs is also the request size of rag/openai-client.js.
+export const getRagIngestEmbedBatchMaxItems = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INGEST_EMBED_BATCH_MAX_ITEMS, 512)) || 512;
+
+export const getRagIngestEmbedBatchMaxTokens = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INGEST_EMBED_BATCH_MAX_TOKENS, 240000)) || 240000;
+
+export const getRagIngestEmbedBatchLingerMs = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_INGEST_EMBED_BATCH_LINGER_MS, 25));
+
+// RAG_INGEST_EMBED_BATCHING=false bypasses that batcher: each job's embed
+// stage sends its own chunks as one request per embedding space, as a
+// synchronous upload does. On by default; the switch exists so the batcher's
+// effect can be measured against the unbatched path and turned off if a
+// provider misbehaves on large mixed batches.
+export const isRagIngestEmbedBatchingEnabled = () =>
+  toBoolean(process.env.RAG_INGEST_EMBED_BATCHING, true);
+
+// Identical bytes uploaded again by the same tenant (same owner and workspace)
+// return the existing document instead of ingesting a copy. On by default;
+// RAG_INGEST_DEDUP=false ingests every upload.
+export const isRagIngestDedupEnabled = () => toBoolean(process.env.RAG_INGEST_DEDUP, true);
+
+// Where each job's stage outputs live (migration 017): `<jobs table>_outputs`.
+export const getIngestJobOutputsPostgresTable = () => `${getIngestJobsPostgresTable()}_outputs`;

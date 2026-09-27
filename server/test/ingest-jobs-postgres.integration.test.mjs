@@ -392,7 +392,7 @@ if (!adminDatabaseUrl) {
     );
   });
 
-  test("an exhausted expired job succeeds when its document committed and fails otherwise", async () => {
+  test("an exhausted expired job succeeds when its document committed and is dead-lettered otherwise", async () => {
     await clearJobs();
 
     const store = modules.store.createPostgresIngestJobStore();
@@ -433,17 +433,26 @@ if (!adminDatabaseUrl) {
 
     const rows = await modules.tenant.runAsDatabaseSystem(() =>
       q(
-        `SELECT job_id, status, last_error, file_bytes FROM ${tables.jobs} ORDER BY created_at`
+        `SELECT job_id, status, last_error, file_bytes IS NULL AS bytes_dropped, dead_letter_stage
+           FROM ${tables.jobs} ORDER BY created_at`
       )
     );
 
+    // The lost job keeps its bytes in dead_letter, for a requeue.
     assert.deepEqual(rows.rows, [
-      { file_bytes: null, job_id: committedJob.jobId, last_error: null, status: "succeeded" },
       {
-        file_bytes: null,
+        bytes_dropped: true,
+        dead_letter_stage: null,
+        job_id: committedJob.jobId,
+        last_error: null,
+        status: "succeeded",
+      },
+      {
+        bytes_dropped: false,
+        dead_letter_stage: "parse",
         job_id: lostJob.jobId,
         last_error: modules.store.LEASE_EXHAUSTED_ERROR_MESSAGE,
-        status: "failed",
+        status: "dead_letter",
       },
     ]);
   });

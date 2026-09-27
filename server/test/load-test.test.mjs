@@ -1090,7 +1090,7 @@ test("argument parsing: instances, shared state and the ingest scenario", () => 
   assert.throws(() => parseLoadTestArgs(["--ingest-max-pending-jobs", "100"]), /only apply to --scenario ingest/);
   assert.throws(() => parseLoadTestArgs(["--scenario", "ingest", "--ingest-mode", "later"]), /sync or async/);
   assert.throws(() => parseLoadTestArgs(["--scenario", "ingest", "--upload-concurrency", "0"]), /at least 1/);
-  assert.throws(() => parseLoadTestArgs(["--scenario", "replay"]), /chat or ingest/);
+  assert.throws(() => parseLoadTestArgs(["--scenario", "replay"]), /chat, ingest or index-switch/);
   // The chat scenario keeps its defaults.
   assert.equal(parseLoadTestArgs([]).embeddingLatencyMs, 0);
   assert.equal(parseLoadTestArgs([]).latestName, "latest-load-test");
@@ -1652,6 +1652,19 @@ test("the worktree hash reads untracked files from the repository root, whatever
       cwd: root,
       stdio: ["ignore", "pipe", "ignore"],
     });
+
+  // The fixture repository must not inherit a caller's repository location: a
+  // git hook's or a coverage run's GIT_INDEX_FILE would otherwise receive this
+  // throwaway repository's `git add`, and readWorktreeState would read it.
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
+    if (Object.hasOwn(process.env, name)) {
+      const saved = process.env[name];
+      delete process.env[name];
+      t.after(() => {
+        process.env[name] = saved;
+      });
+    }
+  }
 
   git("init", "-q");
   await mkdir(path.join(root, "server", "rag"), { recursive: true });

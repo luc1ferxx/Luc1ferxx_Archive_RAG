@@ -1,12 +1,108 @@
 # Unified AgentRAG DAG：迁移决策与验收清单
 
-状态：**已冻结（2026-09-25）：统一图底座和 shadow 观测保留，生产执行路径不再推进**。冻结原因和解冻条件见下文“冻结决定”。原状态为“迁移中”，以下迁移规格原样保留作为设计记录。用户已确认目标是把文档 RAG、Web、内置 Skill 和带审批的 Capability 与自定义 Skill 放进**同一张执行图**；按当前要求，真实模型调用及其证据暂缓。本文件同时记录已落地的底座与待验收的迁移规格，不能据此宣称全 Agent 动态 DAG 已上线。
+状态：**部分解冻（2026-09-27）**。`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 可以执行不含审批节点的统一图；图内的审批续跑仍冻结。默认值仍为 `off`，无法识别的值也回落到 `off`。下文迁移规格保留作为设计记录。本文件不能用来宣称全 Agent 动态 DAG 已上线，也不能把注入提案或 mock 评测称为真实模型证据。
 
-## 冻结决定
+## 冻结与部分解冻
 
-- **做了什么**：custom Skill 阶段的 typed DAG（V2）改为默认执行器；本文件描述的全阶段 v3 统一图停在 shadow，不再往 `guarded` 推进。`AGENT_UNIFIED_GRAPH_ROLLOUT` 仍只接受 `off` / `shadow`，已有模块和测试保留，不删除。
-- **为什么**：v3 要接入生产还缺文档循环的缺口处理与工作记忆、审批后续跑、整次运行的 finalization 收据和跨进程恢复四块，每块都要新的恢复证据；而它带来的能力（让模型在一张图里编排文档、Web、内置 Skill 和 Capability）在当前外层固定顺序下收益有限。同时维护三代编排的成本已经高于这部分收益，所以先把 V2 转正、把"一个运行时、一个 run store、一张重放安全矩阵"做实。
-- **解冻条件**：出现外层固定顺序表达不了、且有评测用例证明的编排需求（例如"文档证据不足时按条件进入 Web，再把结果交给 Skill"成为真实用例），并且上面四块各有对应的跨进程恢复测试。
+- **原冻结决定（2026-09-25）**：custom Skill 阶段的 typed DAG（V2）改为默认执行器，全阶段 v3 统一图停在 shadow。解冻需要两个条件：一是出现外层固定顺序表达不了、且有评测用例证明的编排需求；二是四块恢复能力各自有跨进程测试，即文档循环的缺口与工作记忆、审批续跑、整次运行的 finalization 收据、跨进程恢复。
+- **已满足：编排需求与评测用例**。trajectory 用例 `unified_graph_evidence_gated_skill_hand_off`（已写入 `quality-current-suite-manifest.js`，版本 1.13.0）固定了这条路径：
+  - 文档证据不足时，图经由已校验的谓词边 `document_evidence_check.passed == false` 进入 Web。
+  - Web 的 `text` 通过 typed 绑定作为 `priorFindings` 交给 `risk_review`。
+  - 证据充分时，Web 节点为 `condition_not_met`，Skill 节点为 `dependency_skipped`，两者都不计费。
+  - 同一请求在 V1 上的表现：`custom_skills` 固定排在 `document_rag` 与 `web_search` 之前；它的条件只有 `selected_custom_skills`，没有证据谓词；Web 结果没有任何进入 Skill 输入的通道。
+  - 证据类型：确定性注入提案加 mock provider。这证明的是运行时契约（接纳、条件调度、typed 交接、预算、收据、一请求一路径），不是真实模型规划证据。
+- **已满足：三块跨进程恢复**。测试文件为 `server/test/agent-unified-graph-postgres.integration.test.mjs`，使用真实 PostgreSQL run store。第一个进程在指定写入处“退出”，之后另起一个 Node 进程执行生产启动恢复。
+  1. **文档循环的缺口与工作记忆**：进程在 follow-up 节点完成后退出。重启后 primary 与 follow-up 都被复用，不重复执行、不重复计费（`documentRagCalls` 为 2）。claims、evidence gaps、executionLoop 与未中断的运行完全一致，resolved 与 unresolved 两种结局都覆盖。这些状态来自已持久化的 typed 输出（`agent-unified-graph-document-loop.js`），不依赖进程内存。
+  2. **整次运行的 finalization 收据**：答案由同一个 `finalizeAgentRun` 生成，先写入私有 graph checkpoint 的 `finalization` 收据，再完成 run。
+     - 收据写入后崩溃：恢复只用收据完成 run，答案逐字相同。
+     - 收据写入前崩溃（图已 completed）：从同一批持久化节点输出重算，不执行任何节点，结果与未中断运行一致。
+     - 之后再次启动不会产生第二个答案：claim 已用尽，run 已终结。
+  3. **节点边界的跨进程续跑**：只复用 typed-output 摘要能对账的已完成节点，待执行节点在新进程运行。篡改收据摘要会进入人工恢复（`completed_step_without_checkpoint`）。进行中的文档调用（step 为 running）会进入人工恢复（`unknown_in_flight_node`），绝不重放。
+- **仍冻结：审批续跑**。原因如下：
+  - 图内暂停、批准后继续执行，需要把审批对象和输入 hash 绑定到图节点，还要对“批准后执行、结果未知”的状态做跨进程恢复。这一块没有新的恢复证据。
+  - 常设授权只存在于原请求里，恢复进程无法重建。
+  - 因此在 guarded 下，任何可能中途等待用户确认的节点都会在所有节点运行之前被整图拒绝，然后回退 V1。这包括声明审批门的 Capability 适配器，以及没有常设、与输入无关授权的 Web / 文档发现内置节点。拒绝原因写入 `unified_graph_planned` 事件（`fallback: "v1"`）和 `unified_graph_fallback` trace 步骤。
+  - 已有 run 的重入（V1 批准后续跑的入口）一律留在 V1，原因码为 `approval_continuation_frozen`。
+  - 恢复时，如果待执行节点需要审批，则不执行，交给人工处理。
+  - `agent-unified-graph-stage.js` 中的图绑定审批 preflight 代码保留，但在 guarded 路径上不可达。
+- **guarded 的边界**：
+  - 没有默认模型 planner，未注入 adapter 时会记录拒绝并回退 V1。
+  - 一次请求只走一条路径；图被接纳后出错不回退 V1，部分执行的 run 以失败结束。
+  - 图的形状必须能投影回 V1 的执行状态：最多一个 primary 文档节点，加上一个以 primary 检查 `retryRecommended == true` 为条件的 follow-up；最多一个 Web 节点；inventory 与文档发现只能单独出现；Capability 节点不可投影。
+  - 图内证据检查使用词法的 `evaluateDocumentEvidence`（claim judge 只在 finalizer 中生效），`/chat/stream` 在 guarded 图路径上不发送 `answer_draft`。
+  - 仍待补：quality:current / release:gate 的同 SHA 证据，以及真实模型 DAG planner 的评测。
+
+### 审查后的修正（2026-09-27）
+
+**guarded 准入的数据边界**（`server/rag/agent-unified-graph-admission.js`；任何节点执行前对整图判定，拒绝即记录 `unified_graph_planned`（`rejected`），由 V1 回答）：
+- 有外部副作用的节点（Web 搜索、外部 Capability）只读取用户自己的请求：字符串输入只能绑定 `request.question`，不能绑定上游输出（`external_input_not_request_question`），因此文档派生文本不会被发给第三方搜索服务。
+- 外部节点的输出不能绑定进任何其他节点的输入（`external_output_hand_off`）。Web 文本是基于外部网页的模型输出，只有 finalizer 把它当作不可信证据处理，所以它只能进入最终答案，不能进入 Skill 提示词。基于它的布尔 `when` 条件仍然允许。
+- 意图要求读取所选文档时（`plan.wantsDocumentRag` 且 docIds 非空），图中必须有一个无条件、无依赖的主 `document_rag` 节点（`document_request_without_document_node`）。意图没有要求 Web 时，Web 节点必须挂在主文档答案自身 `document_evidence_check` 的 `passed == false` 上（`web_not_gated_on_document_evidence`），相当于把 V1 的“文档弃答或失败才走 Web”扩展为“文档答案未通过证据检查才走 Web”。
+- 只有至少一个自定义 Skill 结果未弃答时，finalizer 才采用图证据策略。一个弃答的 Skill 节点不会让 Web 上下文变成可验证证据。
+
+**解冻用例已更换**：原例子“文档证据不足 → Web → 把 Web 结果交给 Skill”按设计不被准入（trajectory 检查 `web_to_skill_hand_off_refused` 固定了这一拒绝）。新用例为 `unified_graph_evidence_gated_skill_hand_off`：
+- 风险审查请求先由所选文档作答。只有该答案通过自身证据检查时才运行 `risk_review`，并把已验证的文档答案作为类型化 `priorFindings` 交给它。
+- 证据不足时，Skill 以 `condition_not_met` 跳过，不计费，文档循环向用户澄清。
+- 同一请求在 V1 上（chain 与 V2 DAG 两种执行器，两种证据变体）每次都先无条件运行 Skill，从不运行 `document_rag`，Skill 提示词不含上游段落。
+- mock 的 Skill 答案与上游段落无关，所以该用例只证明编排与运行时契约（跑什么、花多少、Skill 收到什么类型化输入），不宣称答案质量提升，也不是真实模型规划证据。
+- 当前 trajectory 结果：18/18 用例、78/78 检查通过（unified_graph 类别 7 项）。
+
+**选中后 stage 拒绝**：stage 用实时服务重建目录并再次校验。在首次写 checkpoint 之前的拒绝（例如所选文档在规划与执行之间被另一实例删除）会追加一条 `supersedes: "selected"` 的 `rejected` 事件（错误码以 `stage_refused_before_execution` 开头），然后由 V1 回答。`hasUnifiedGuardedGraphPath` 以最新一条 planned 事件为准。从 stage 首次写 checkpoint 起不再回退 V1。
+
+**finalization 收据**：
+- 新鲜路径先完成响应准备（run id、task continuation、经验记忆写入），再写收据，所以收据保存的就是完整响应，回放结果与未中断请求一致。
+- 无收据的重算路径会再次写经验记忆。写入按确定性 memoryKey upsert，不会重复。
+- 重算时还会从 selected 事件的 `requestContext`（脱敏的 intentPlanner 与经验记忆读取观测）恢复会话观测字段。
+
+**启动恢复**：
+- 只有 `AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 时才会自动续跑或完成 v3 图。回滚到 `off` 或 `shadow` 后，这类运行以 `unified_graph_rollout_not_guarded` 转人工，不取 claim。
+- 有收据时先回放收据，再比较实时 Skill 目录，所以部署提升 Skill 版本不会让已封存答案的运行卡住；需要重算时，目录变化仍会被拒绝。
+- 已复用输出判定为不会运行的节点不算待运行节点，例如证据检查已通过而跳过的 Web 回退及其后续节点，因此恢复进程没有常备 Web 授权也能完成。节点即将启动前还会再检查一次审批需求。
+- 持有 claim 的 worker 在自己的续跑失败后，会在同一 claim 下标记人工恢复（`markManualRecovery({ expectedGraphResumeClaimId })`，原因 `graph_resume_failed`），运行不会停在 `running`、被以后的扫描永久跳过。不带 claim id 时，run store 仍拒绝标记被 claim 的运行。
+
+**已结束的 v3 运行的续接**：以澄清结束（有收据）或部分失败（run 为 `failed`）的 v3 运行不会被重入。后台任务的 continue 或带 agentRunId 的请求会新建运行（事件 `run_continued`，payload 含 `previousRunId`），由任务记忆携带上下文，已结束的运行保持不变。其他带图 checkpoint 的运行仍由 CAS 拦截（`AGENT_GRAPH_EXECUTION_FENCED`）。
+
+=== docs/configuration.md，`AGENT_UNIFIED_GRAPH_ROLLOUT` 行 ===
+取值 `off`（默认）/ `shadow` / `guarded`。`guarded` 在注入统一图 planner adapter 时，让通过准入（审批与数据边界）的 v3 图回答整个请求；规划、准入或 stage 在首次写 checkpoint 前拒绝时，由 V1 回答。启动恢复只在 `guarded` 下续跑或完成 v3 图，其他取值下这类运行转人工（`unified_graph_rollout_not_guarded`）。
+
+=== server/docs/interview/CURRENT-TRUTH.md（数字不变，仅更新用例名）===
+trajectory 18/18 用例、78/78 检查；v3 解冻用例为 `unified_graph_evidence_gated_skill_hand_off`（确定性注入提案与 mock，属于运行时契约证据，不是真实模型证据）。Web→Skill 交接按设计被准入拒绝。
+
+=== AGENTS.md paragraph (replaces the v3 bullet) ===
+- The heterogeneous v3 DAG has a `guarded` rollout (`AGENT_UNIFIED_GRAPH_ROLLOUT`, default `off`) in `agent-unified-graph-run.js`: an admitted graph answers the whole request, and any refusal before the stage's first checkpoint write (at planning, at admission, or in the stage, where it records `supersedes: "selected"` and `stage_refused_before_execution`) is recorded as `unified_graph_planned` `rejected` and V1 answers. `agent-unified-graph-admission.js` refuses approval-gated nodes and enforces data boundaries; do not relax them to make a graph admissible:
+  - an external-effect node's string inputs bind only to `request.question`;
+  - no node input binds an external node's output (Web text reaches only the finalizer, never a Skill prompt);
+  - a document-scoped intent needs an unconditional, dependency-free primary `document_rag` node;
+  - when the intent did not ask for Web, a Web node must be gated on `passed == false` of the primary answer's own `document_evidence_check`.
+
+  The prepared response (run id, continuation, experience-memory write) is sealed as the finalization receipt before completion. Startup recovery:
+  - resumes or finalizes v3 only under `guarded`, and otherwise marks the run manual with `unified_graph_rollout_not_guarded`;
+  - replays a stored receipt before comparing the live Skill catalog;
+  - treats nodes that the reused outputs already skip as not pending;
+  - lets a claim holder whose resume failed mark the run manual under that claim (`markManualRecovery({ expectedGraphResumeClaimId })`, reason `graph_resume_failed`).
+
+  A settled v3 run (a finalized receipt, or partial and failed) is never re-entered: `runAgentRag` with its id creates a new run (`run_continued`). The unfreeze trajectory case is `unified_graph_evidence_gated_skill_hand_off`; the "Web → Skill" example is refused by design. Approval continuation inside the graph stays frozen. This is pinned by `agent-unified-graph-boundaries.test.mjs`, `agent-unified-graph-guarded.test.mjs` and `agent-unified-graph-postgres.integration.test.mjs`.
+
+=== npm script (server/package.json) ===
+Append `test/agent-unified-graph-postgres.integration.test.mjs` to `test:pgvector` so the focused disposable runner covers it. For example: "test:pgvector": "node --test test/vector-store-pgvector.integration.test.mjs test/agent-execution-graph-postgres.integration.test.mjs test/agent-unified-graph-postgres.integration.test.mjs test/postgres-row-level-security.integration.test.mjs test/ingest-jobs-postgres.integration.test.mjs". Merge this with any DATA-track change to the same script.
+
+Changed files (all agent track):
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/rag/agent-unified-graph-admission.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/rag/agent-unified-graph-stage.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/rag/agent-unified-graph-run.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/rag/agent-unified-graph-projection.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/rag/agent.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/rag/agent-runs.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/rag/agent-run-recovery.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/rag/config.js (AGENT block comment only)
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/evaluation/trajectory/cases/unified-graph.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/evaluation/trajectory/cases/index.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/evaluation/quality-current-suite-manifest.js
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/test/agent-unified-graph-boundaries.test.mjs (new)
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/test/agent-unified-graph-guarded.test.mjs
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/test/agent-unified-graph-postgres.integration.test.mjs
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/test/fixtures/unified-graph-run-fixtures.mjs
+- /Users/luc1ferx/Desktop/Projects/Luc1ferxx_Archive_RAG/server/test/trajectory-eval.test.mjs
 
 ## 当前边界与决策
 

@@ -166,6 +166,9 @@ export const createUnifiedAgentExecutionGraphResult = async ({
     catalog: catalog.descriptors,
     errors: validation.errors,
     graph: validation.graph,
+    // The request-scoped executable registry the graph was validated against.
+    // Trusted runtime code may use it for admission; it is never planner input.
+    graphRegistry: catalog.graphRegistry,
     planner: {
       nodeIds: validation.ok ? graph.nodes.map((node) => node.nodeId) : [],
       reasonCodes: validation.errors.map((error) => error.code),

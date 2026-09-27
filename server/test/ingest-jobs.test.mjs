@@ -43,6 +43,7 @@ import {
   createPostgresIngestJobStore,
   getIngestJobsNotifyChannel,
   INGEST_JOB_STATUSES,
+  LEASE_EXHAUSTED_DEAD_LETTER_REASON,
   LEASE_EXHAUSTED_ERROR_MESSAGE,
   PENDING_LIMIT_ERROR_MESSAGE,
   SERVER_ERROR_MESSAGE,
@@ -319,7 +320,7 @@ test("in-memory store hands an expired lease to the next claim and fences out th
   assert.equal((await store.get(job.jobId)).status, "succeeded");
 });
 
-test("in-memory store requeues failures with a delay and fails the job once attempts are exhausted", async () => {
+test("in-memory store requeues failures with a delay and dead-letters the job once its stage's attempts are exhausted", async () => {
   const clock = createClock();
   const store = createInMemoryIngestJobStore({ now: clock.now });
   const job = await enqueueFor(store, ALICE, { maxAttempts: 2 });
@@ -346,17 +347,24 @@ test("in-memory store requeues failures with a delay and fails the job once atte
 
   const final = await store.fail({
     attemptCount: 2,
+    deadLetterReason: "Stage parse failed on attempt 2 of 2 (status 503): still unavailable",
     error: "still unavailable",
     jobId: job.jobId,
     retryDelayMs: 5000,
     workerId: "w",
   });
 
-  assert.equal(final, "failed");
+  // A retryable failure out of attempts is dead-lettered, not failed: it
+  // keeps its bytes for a requeue, and reads as failed to the client.
+  assert.equal(final, "dead_letter");
   snapshot = await store.get(job.jobId);
-  assert.equal(snapshot.status, "failed");
+  assert.equal(snapshot.status, "dead_letter");
   assert.equal(snapshot.lastError, "still unavailable");
+  assert.equal(snapshot.deadLetterStage, "parse");
+  assert.match(snapshot.deadLetterReason, /attempt 2 of 2/);
   assert.ok(snapshot.finishedAt);
+  assert.equal(toPublicIngestJob(snapshot).status, "failed");
+  assert.equal(toPublicIngestJob(snapshot).deadLetter.stage, "parse");
 
   clock.advance(60000);
   assert.equal(await store.claim({ leaseMs: 1000, workerId: "w" }), null);
@@ -377,7 +385,7 @@ test("in-memory store requeues failures with a delay and fails the job once atte
   );
 });
 
-test("in-memory store fails a job whose last allowed attempt let its lease expire", async () => {
+test("in-memory store dead-letters a job whose last allowed attempt let its lease expire", async () => {
   const clock = createClock();
   const store = createInMemoryIngestJobStore({ now: clock.now });
   const job = await enqueueFor(store, ALICE, { maxAttempts: 1 });
@@ -389,8 +397,9 @@ test("in-memory store fails a job whose last allowed attempt let its lease expir
 
   const snapshot = await store.get(job.jobId);
 
-  assert.equal(snapshot.status, "failed");
+  assert.equal(snapshot.status, "dead_letter");
   assert.equal(snapshot.lastError, LEASE_EXHAUSTED_ERROR_MESSAGE);
+  assert.equal(snapshot.deadLetterStage, "parse");
   assert.equal(snapshot.attemptCount, 1);
 });
 
@@ -469,7 +478,29 @@ test("public job projection and error messages never carry more than a bounded f
         status: "running",
       })
     ),
-    ["jobId", "docId", "fileName", "status", "attemptCount", "error", "createdAt", "startedAt", "finishedAt"]
+    [
+      "jobId",
+      "docId",
+      "fileName",
+      "status",
+      "attemptCount",
+      "error",
+      "createdAt",
+      "startedAt",
+      "finishedAt",
+      // Additive fields of the staged pipeline.
+      "kind",
+      "stage",
+      "duplicate",
+      "superseded",
+      "documentVersion",
+      "deadLetter",
+    ]
+  );
+  // A job resolved to another document reports that document.
+  assert.equal(
+    toPublicIngestJob({ docId: "fresh", duplicate: true, resolvedDocId: "existing", status: "succeeded" }).docId,
+    "existing"
   );
 });
 
@@ -534,16 +565,18 @@ test("postgres store claims with one SKIP LOCKED update as the owner role, even 
 
   const [sweep, claim] = calls;
 
-  // An exhausted expired job is settled from whether its document committed.
-  assert.match(sweep.sql, /SET status = CASE WHEN committed\.doc_id IS NULL THEN 'failed' ELSE 'succeeded' END/);
-  assert.match(sweep.sql, /LEFT JOIN docs_t AS committed ON committed\.doc_id = expired\.doc_id/);
-  assert.match(sweep.sql, /expired\.lease_expires_at < NOW\(\)\s+AND expired\.attempt_count >= expired\.max_attempts/);
-  assert.deepEqual(sweep.values, [LEASE_EXHAUSTED_ERROR_MESSAGE]);
+  // An exhausted expired job is settled from whether its document committed
+  // (a new document only), and dead-lettered at its stage otherwise.
+  assert.match(sweep.sql, /SET status = CASE WHEN committed\.doc_id IS NULL THEN 'dead_letter' ELSE 'succeeded' END/);
+  assert.match(sweep.sql, /dead_letter_stage = CASE WHEN committed\.doc_id IS NULL THEN expired\.stage ELSE NULL END/);
+  assert.match(sweep.sql, /LEFT JOIN docs_t AS committed\s+ON committed\.doc_id = expired\.doc_id AND expired\.kind = 'create'/);
+  assert.match(sweep.sql, /expired\.lease_expires_at < NOW\(\)\s+AND expired\.stage_attempts >= expired\.max_attempts/);
+  assert.deepEqual(sweep.values, [LEASE_EXHAUSTED_ERROR_MESSAGE, LEASE_EXHAUSTED_DEAD_LETTER_REASON]);
   assert.match(claim.sql, /UPDATE jobs_t AS j/);
-  assert.match(claim.sql, /attempt_count = j\.attempt_count \+ 1/);
+  assert.match(claim.sql, /attempt_count = j\.attempt_count \+ 1,\s+stage_attempts = j\.stage_attempts \+ 1/);
   assert.match(claim.sql, /WITH candidate AS \(\s+SELECT c\.job_id, c\.status AS previous_status\s+FROM jobs_t AS c/);
   assert.match(claim.sql, /\(c\.status = 'queued' AND c\.available_at <= NOW\(\)\)/);
-  assert.match(claim.sql, /c\.status = 'running'\s+AND c\.lease_expires_at < NOW\(\)\s+AND c\.attempt_count < c\.max_attempts/);
+  assert.match(claim.sql, /c\.status = 'running'\s+AND c\.lease_expires_at < NOW\(\)\s+AND c\.stage_attempts < c\.max_attempts/);
   assert.match(claim.sql, /r\.owner_user_id = c\.owner_user_id\s+AND r\.workspace_id = c\.workspace_id\s+\) ASC, c\.created_at ASC/);
   assert.match(claim.sql, /LIMIT 1\s+FOR UPDATE OF c SKIP LOCKED/);
   assert.doesNotMatch(claim.sql, /file_bytes/, "the bytes are read by copyJobFile, not the claim");
@@ -616,7 +649,7 @@ test("postgres store fences renew, succeed, fail and release on job, worker and 
       return { rows: [] };
     }
 
-    return /RETURNING status/.test(sql) ? { rows: [{ status: "queued" }] } : { rows: [{ job_id: values[0] }] };
+    return /SELECT status FROM settled/.test(sql) ? { rows: [{ status: "queued" }] } : { rows: [{ job_id: values[0] }] };
   });
   const store = createPostgresIngestJobStore({
     getTable: () => "jobs_t",
@@ -648,9 +681,17 @@ test("postgres store fences renew, succeed, fail and release on job, worker and 
 
   assert.equal(calls[0].values[3], 30000);
   assert.match(calls[1].sql, /status = 'succeeded',\s+file_bytes = NULL/);
-  assert.match(calls[2].sql, /WHEN \$4::boolean AND attempt_count < max_attempts\s+THEN 'queued' ELSE 'failed'/);
-  assert.deepEqual(calls[2].values.slice(3), [true, 5000, "boom"]);
-  assert.match(calls[3].sql, /attempt_count = GREATEST\(attempt_count - 1, 0\),\s+claimed_by = NULL/);
+  assert.match(calls[1].sql, /DELETE FROM jobs_t_outputs AS o\s+USING succeeded/, "success drops the stage outputs");
+  assert.match(
+    calls[2].sql,
+    /WHEN NOT \$4::boolean THEN 'failed'\s+WHEN stage_attempts < max_attempts THEN 'queued'\s+ELSE 'dead_letter' END/
+  );
+  assert.match(calls[2].sql, /file_bytes = CASE WHEN \$4::boolean THEN file_bytes ELSE NULL END/);
+  assert.deepEqual(calls[2].values.slice(3), [true, 5000, "boom", "boom"]);
+  assert.match(
+    calls[3].sql,
+    /attempt_count = GREATEST\(attempt_count - 1, 0\),\s+stage_attempts = GREATEST\(stage_attempts - 1, 0\),\s+claimed_by = NULL/
+  );
 
   const staleFence = { ...fence, workerId: "stale" };
 
@@ -837,7 +878,7 @@ test("in-memory store settles an exhausted expired job from whether its document
 
   assert.equal(succeeded.status, "succeeded", "the attempt committed and died before recording it");
   assert.equal(succeeded.lastError, null);
-  assert.equal(failed.status, "failed");
+  assert.equal(failed.status, "dead_letter");
   assert.equal(failed.lastError, LEASE_EXHAUSTED_ERROR_MESSAGE);
 
   const pending = await enqueueFor(store, ALICE);
@@ -936,7 +977,7 @@ test("a retried attempt does not ingest again when an earlier attempt committed 
   assert.equal(settled.attemptCount, 2);
 });
 
-test("worker requeues retryable failures, fails at the attempt limit, and fails upload errors at once", async () => {
+test("worker requeues retryable failures, dead-letters at the attempt limit, and fails upload errors at once", async () => {
   const clock = createClock();
   const store = createInMemoryIngestJobStore({ now: clock.now });
   const ragService = createFakeRagService({
@@ -966,12 +1007,14 @@ test("worker requeues retryable failures, fails at the attempt limit, and fails 
   clock.advance(1000);
   assert.equal((await worker.runOnce()).outcome, "queued");
   clock.advance(2000);
-  assert.equal((await worker.runOnce()).outcome, "failed");
+  assert.equal((await worker.runOnce()).outcome, "dead_letter");
 
   const failed = await store.get(flaky.jobId, ALICE);
 
-  assert.equal(failed.status, "failed");
+  assert.equal(failed.status, "dead_letter");
   assert.equal(failed.attemptCount, 3);
+  assert.match(failed.deadLetterReason, /^Stage parse failed on attempt 3 of 3:/);
+  assert.equal(toPublicIngestJob(failed).status, "failed", "clients see a terminal failure");
   assert.equal(
     toPublicIngestJob(failed).error,
     SERVER_ERROR_MESSAGE,

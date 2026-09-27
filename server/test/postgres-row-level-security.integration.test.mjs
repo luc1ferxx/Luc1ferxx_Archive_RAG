@@ -541,7 +541,8 @@ if (!adminDatabaseUrl) {
 
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     assert.equal(report.checks.rowLevelSecurity.role, tenantRole);
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 10);
+    // Ten tenant tables plus the staged ingest's outputs (migration 017).
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 11);
     assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
   });
 

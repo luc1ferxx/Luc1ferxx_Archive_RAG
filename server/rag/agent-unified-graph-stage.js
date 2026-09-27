@@ -17,26 +17,49 @@ import {
 } from "./agent-execution-graph.js";
 import { runExecutionGraph } from "./agent-execution-graph-runner.js";
 import { AGENT_INTERRUPT_TYPES, AgentRunInterruptError } from "./agent-interrupts.js";
+import {
+  assessUnifiedGraphAdmission,
+  assessUnifiedGraphNodeApproval,
+} from "./agent-unified-graph-admission.js";
 import { assessUnifiedGraphRecoveryEligibility } from "./agent-unified-graph-recovery-eligibility.js";
 import { collectUnifiedGraphResults } from "./agent-unified-graph-results.js";
-import { deriveUnifiedGraphAnswer } from "./agent-unified-graph-answer.js";
 import {
   preflightCapabilityGraphApproval,
   verifyCapabilityGraphApproval,
 } from "./capabilities/graph-approval-preflight.js";
 import { CAPABILITY_POLICY_DECISIONS } from "./capabilities/policy-enforcer.js";
 import { buildAuthorizedUnifiedGraphCatalog } from "./skills/unified-graph-catalog.js";
-import { AGENT_SKILL_IDS } from "./skills/registry.js";
 
 const noop = () => {};
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-const fail = (reason, code = "AGENT_UNIFIED_GRAPH_STAGE_INVALID") => {
+const fail = (
+  reason,
+  code = "AGENT_UNIFIED_GRAPH_STAGE_INVALID",
+  { preExecution = false, reasonCodes = null } = {}
+) => {
   const error = new Error(`Unified graph cannot execute: ${reason}.`);
   error.code = code;
   error.status = 409;
+  // Only an error raised before the first checkpoint write may hand the
+  // request back to the V1 path: nothing durable exists and no node ran.
+  error.preExecution = preExecution;
+  if (Array.isArray(reasonCodes)) {
+    error.reasonCodes = reasonCodes;
+  }
   throw error;
+};
+
+const COMPLETED_RECEIPTS = new Set(["completed", "reused"]);
+
+const replayGuardError = () => {
+  const error = new Error(
+    "A completed unified graph checkpoint would execute a node during finalization replay."
+  );
+  error.code = "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY";
+  error.status = 409;
+  return error;
 };
 
 const assertDurableRuntime = ({
@@ -54,7 +77,11 @@ const assertDurableRuntime = ({
     ["startGraphStep", "completeGraphStep", "failGraphStep", "pauseGraphStep"]
       .some((name) => typeof stepLifecycle?.[name] !== "function")
   ) {
-    fail("a durable run, observed executor, checkpoint store, and fenced graph lifecycle are required");
+    fail(
+      "a durable run, observed executor, checkpoint store, and fenced graph lifecycle are required",
+      "AGENT_UNIFIED_GRAPH_STAGE_INVALID",
+      { preExecution: true }
+    );
   }
 };
 
@@ -67,6 +94,45 @@ const assertStoredCheckpoint = (saved, expected) => {
   ) {
     fail("the graph checkpoint was not durably acknowledged", "AGENT_UNIFIED_GRAPH_CHECKPOINT_UNCONFIRMED");
   }
+};
+
+/**
+ * Node ids a recovery boundary can never start, derived exactly as the
+ * scheduler will: a node whose `when` reads a reused output that does not
+ * equal the expected value is skipped (condition_not_met), and every node
+ * depending on a skipped node is skipped too (dependency_skipped). Only a
+ * reused typed output decides a condition; anything else stays pending.
+ */
+export const listUnifiedGraphNodesThatCannotRun = ({ completedNodeRuns = [], graph } = {}) => {
+  const outputs = new Map(
+    completedNodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.result?.graphOutput])
+  );
+  const skipped = new Set();
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (const node of graph?.nodes ?? []) {
+      if (outputs.has(node.nodeId) || skipped.has(node.nodeId)) {
+        continue;
+      }
+
+      const output = node.when ? outputs.get(node.when.nodeId) : undefined;
+      const conditionFalse =
+        Boolean(node.when) &&
+        isRecord(output) &&
+        Object.hasOwn(output, node.when.output) &&
+        output[node.when.output] !== node.when.equals;
+
+      if (conditionFalse || (node.dependsOn ?? []).some((id) => skipped.has(id))) {
+        skipped.add(node.nodeId);
+        changed = true;
+      }
+    }
+  }
+
+  return skipped;
 };
 
 const approvalBoundaryMatches = (boundary, gate) =>
@@ -86,18 +152,29 @@ const approvalBoundaryMatches = (boundary, gate) =>
  * nor a stored checkpoint is allowed to supply an executable registry.
  *
  * A recovered invocation must carry a run-store claim and the current stored
- * run. It never invokes the planner again. The approval continuation is
- * handled at the same clean node boundary as an initial approval request.
+ * run. It never invokes the planner again. Under the guarded rollout an
+ * approval-gated node never reaches this far (admission refuses the graph),
+ * so the graph-bound approval continuation below stays unused and frozen.
+ *
+ * `capabilityRegistry` executes built-in wrappers (it may carry the request's
+ * standing approvals, exactly as on the V1 path); `baseCapabilityRegistry`
+ * builds the catalog and backs direct Capability adapters, whose approvals are
+ * graph-bound. `allowFinalizationReplay` lets a claimed recovery rebuild the
+ * node receipts of a graph that already completed, without executing a node,
+ * so the run can be finalized from the same persisted outputs.
  */
 export const runUnifiedGraphStage = async ({
   accessScope,
   addBudgetLimitTrace = noop,
   addTraceStep = noop,
   agentRunId,
+  allowFinalizationReplay = false,
   allowedCapabilityIds = [],
   baseCapabilityRegistry,
   budgetState,
   buildSkillTraceDetail,
+  capabilityApprovals = {},
+  capabilityRegistry = baseCapabilityRegistry,
   docIds = [],
   executeObservedSkill,
   expectedGraphResumeClaimId = null,
@@ -131,7 +208,9 @@ export const runUnifiedGraphStage = async ({
     stepLifecycle,
   });
   if (!isRecord(budgetState?.limits) || !isRecord(budgetState?.used)) {
-    fail("a runtime-owned budget is required");
+    fail("a runtime-owned budget is required", "AGENT_UNIFIED_GRAPH_STAGE_INVALID", {
+      preExecution: true,
+    });
   }
 
   const effectiveLimits = { ...EXECUTION_GRAPH_LIMITS, ...limits };
@@ -154,12 +233,16 @@ export const runUnifiedGraphStage = async ({
   let graph;
   let completedNodeRuns = [];
   let approvedNode = null;
+  let finalizationReplay = false;
 
   if (stored) {
+    finalizationReplay = allowFinalizationReplay && stored.phase === "completed";
+
     if (
       stored.version !== EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v2 ||
       stored.graph?.version !== EXECUTION_GRAPH_VERSIONS.v3 ||
-      stored.phase !== "running" ||
+      (stored.phase !== "running" && !finalizationReplay) ||
+      stored.finalization !== undefined ||
       !expectedGraphResumeClaimId ||
       stored.resumeClaim?.claimId !== expectedGraphResumeClaimId ||
       !isRecord(resumeRun) ||
@@ -188,11 +271,22 @@ export const runUnifiedGraphStage = async ({
       fail("the proposed graph differs from the claimed checkpoint", "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY");
     }
 
-    // The pure recovery assessor expects an unclaimed checkpoint. Remove only
-    // that field from a freshly sealed in-memory copy after checking the real
-    // claim above; the original durable checkpoint is never rewritten here.
+    // The pure recovery assessor expects an unclaimed running checkpoint.
+    // Remove only the claim from a freshly sealed in-memory copy after the real
+    // claim was checked above; the durable checkpoint is never rewritten here.
+    // A completed graph is assessed at the equivalent running boundary: its
+    // skip receipts carry no step, output, or budget, and the scheduler below
+    // re-derives each skip from the reused outputs alone.
     const assessmentCheckpoint = sealExecutionGraphCheckpoint({
       ...stored,
+      ...(finalizationReplay
+        ? {
+            nodeRuns: stored.nodeRuns.filter((nodeRun) =>
+              COMPLETED_RECEIPTS.has(nodeRun.status)
+            ),
+            phase: "running",
+          }
+        : {}),
       resumeClaim: undefined,
     });
     let assessmentRun = resumeRun;
@@ -248,14 +342,47 @@ export const runUnifiedGraphStage = async ({
 
     checkpoint = stored;
     graph = stored.graph;
-    completedNodeRuns = stored.nodeRuns;
+    completedNodeRuns = stored.nodeRuns.filter((nodeRun) =>
+      COMPLETED_RECEIPTS.has(nodeRun.status)
+    );
+
+    // Recovery cannot re-establish an approval the original request carried,
+    // so a node still to run must be admissible without one; otherwise the
+    // run stays with an operator. Completed nodes are reused, never re-run,
+    // and a node the reused outputs already skip (a Web fallback whose
+    // evidence check passed, and its dependents) will not run either. A
+    // finalization replay runs no node at all: the replay guard refuses any.
+    const settled = new Set(completedNodeRuns.map((nodeRun) => nodeRun.nodeId));
+    const cannotRun = listUnifiedGraphNodesThatCannotRun({ completedNodeRuns, graph });
+    const pendingAdmission = assessUnifiedGraphAdmission({
+      accessScope,
+      capabilityApprovals,
+      capabilityRegistry: baseCapabilityRegistry,
+      docIds,
+      graph,
+      nodeIds: finalizationReplay
+        ? []
+        : graph.nodes
+            .map((node) => node.nodeId)
+            .filter((nodeId) => !settled.has(nodeId) && !cannotRun.has(nodeId)),
+      plan,
+      registry: graphRegistry,
+    });
+    if (!pendingAdmission.admitted) {
+      fail(
+        `a pending node is not admissible at recovery (${pendingAdmission.reasonCodes.join(", ")})`,
+        "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY"
+      );
+    }
   } else {
     if (expectedGraphResumeClaimId || resumeRun) {
       fail("a claimed continuation has no graph checkpoint", "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY");
     }
     graph = planned?.graph;
     if (graph?.version !== EXECUTION_GRAPH_VERSIONS.v3) {
-      fail("the validated planner did not return a v3 graph", "AGENT_UNIFIED_GRAPH_REJECTED");
+      fail("the validated planner did not return a v3 graph", "AGENT_UNIFIED_GRAPH_REJECTED", {
+        preExecution: true,
+      });
     }
     const validation = validateExecutionGraph({
       authorizedDocIds: docIds,
@@ -266,18 +393,34 @@ export const runUnifiedGraphStage = async ({
       registry: graphRegistry,
     });
     if (!validation.ok) {
-      fail(validation.errors.map((error) => error.code).join(", "), "AGENT_UNIFIED_GRAPH_REJECTED");
+      const reasonCodes = validation.errors.map((error) => error.code);
+      fail(reasonCodes.join(", "), "AGENT_UNIFIED_GRAPH_REJECTED", {
+        preExecution: true,
+        reasonCodes,
+      });
     }
     graph = validation.graph;
 
-    // Legacy built-in wrappers still interrupt inside their execute path.
-    // That would leave a running graph receipt. Only graph-aware Capability
-    // adapters have a pre-execution approval boundary at present.
-    if (graph.nodes.some((node) => [
-      AGENT_SKILL_IDS.webSearch,
-      AGENT_SKILL_IDS.documentDiscovery,
-    ].includes(node.skillId))) {
-      fail("this graph contains a built-in approval path without a graph-bound preflight", "AGENT_UNIFIED_GRAPH_APPROVAL_UNSUPPORTED");
+    // Legacy built-in wrappers interrupt inside their execute path, which
+    // would leave a running graph receipt behind a pause that cannot fall
+    // back. Such a node is admissible only with a standing, input-independent
+    // grant; approval-gated Capability adapters and graphs the legacy
+    // finalizer cannot represent are refused whole, before any durable write.
+    const admission = assessUnifiedGraphAdmission({
+      accessScope,
+      capabilityApprovals,
+      capabilityRegistry: baseCapabilityRegistry,
+      docIds,
+      graph,
+      plan,
+      registry: graphRegistry,
+    });
+    if (!admission.admitted) {
+      fail(
+        `the graph is not admissible (${admission.reasonCodes.join(", ")})`,
+        "AGENT_UNIFIED_GRAPH_APPROVAL_UNSUPPORTED",
+        { preExecution: true, reasonCodes: admission.reasonCodes }
+      );
     }
 
     checkpoint = createExecutionGraphCheckpoint({
@@ -305,6 +448,11 @@ export const runUnifiedGraphStage = async ({
   // input. The runner awaits this hook before making a dependent ready.
   let checkpointQueue = Promise.resolve();
   const persistCheckpoint = (patch) => {
+    if (finalizationReplay) {
+      // A completed checkpoint is final: a replay never advances it.
+      return checkpointQueue;
+    }
+
     checkpointQueue = checkpointQueue.then(async () => {
       const next = updateExecutionGraphCheckpoint(checkpoint, patch(checkpoint));
       const saved = await saveExecutionGraphCheckpoint(next);
@@ -315,6 +463,28 @@ export const runUnifiedGraphStage = async ({
   };
 
   const preflightNode = async ({ boundInputs, node, skill }) => {
+    // At a recovery boundary the request's standing approvals are gone. The
+    // admission above already refused a pending node that needs one; this
+    // re-check at the moment a node would start, before its step or budget
+    // exists, keeps that true even if the scheduler reaches a node the
+    // admission considered skipped.
+    if (
+      stored &&
+      approvedNode?.gate?.nodeId !== node.nodeId &&
+      assessUnifiedGraphNodeApproval({
+        accessScope,
+        capabilityApprovals,
+        capabilityRegistry: baseCapabilityRegistry,
+        docIds,
+        skill,
+      })
+    ) {
+      fail(
+        `node ${node.nodeId} needs an approval recovery cannot re-establish`,
+        "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY"
+      );
+    }
+
     if (skill.kind !== "capability") {
       return null;
     }
@@ -396,10 +566,12 @@ export const runUnifiedGraphStage = async ({
     authorizedSkillIds,
     budgetState,
     buildSkillTraceDetail,
-    capabilityRegistry: baseCapabilityRegistry,
+    capabilityRegistry,
     completedNodeRuns,
     docIds,
-    executeObservedSkill,
+    executeObservedSkill: finalizationReplay
+      ? async () => { throw replayGuardError(); }
+      : executeObservedSkill,
     graph,
     graphResumeClaimId: expectedGraphResumeClaimId,
     limits: effectiveLimits,
@@ -411,7 +583,9 @@ export const runUnifiedGraphStage = async ({
           snapshotExecutionGraphNodeRun(nodeRun),
         ],
       })),
-    preflightNode,
+    preflightNode: finalizationReplay
+      ? async () => { throw replayGuardError(); }
+      : preflightNode,
     question,
     ragService,
     recordSkillResult,
@@ -426,6 +600,12 @@ export const runUnifiedGraphStage = async ({
 
   if (run.status === "rejected") {
     fail("the graph was rejected at execution", "AGENT_UNIFIED_GRAPH_REJECTED");
+  }
+  if (
+    finalizationReplay &&
+    run.nodeRuns.some((nodeRun) => ["completed", "failed"].includes(nodeRun.status))
+  ) {
+    throw replayGuardError();
   }
   if (!run.ok || run.status !== "completed") {
     await persistCheckpoint((current) => ({
@@ -446,7 +626,6 @@ export const runUnifiedGraphStage = async ({
     registry: graphRegistry,
     run,
   });
-  const answer = deriveUnifiedGraphAnswer({ collected });
   await persistCheckpoint((current) => ({
     nodeRuns: [
       ...current.nodeRuns.filter((saved) =>
@@ -464,8 +643,16 @@ export const runUnifiedGraphStage = async ({
       ...nodeRun,
       ok: Boolean(result?.ok),
     })),
+    ...(finalizationReplay ? { replayed: true } : {}),
     status: run.status,
   });
 
-  return { answer, checkpoint, collected, run };
+  return {
+    catalog,
+    checkpoint,
+    collected,
+    finalizationReplay,
+    graphRegistry,
+    run,
+  };
 };

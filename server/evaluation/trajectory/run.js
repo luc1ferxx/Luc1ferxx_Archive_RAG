@@ -14,6 +14,10 @@ export const runTrajectoryEvaluation = async ({
 } = {}) => {
   return withEnvironmentOverrides(
     {
+      // The unified-graph case pins `guarded` for its own duration; every
+      // other case describes the default V1 path and must not inherit a
+      // rollout dial from the CI environment.
+      AGENT_UNIFIED_GRAPH_ROLLOUT: "off",
       RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
       RAG_LONG_MEMORY_ENABLED: "false",
     },

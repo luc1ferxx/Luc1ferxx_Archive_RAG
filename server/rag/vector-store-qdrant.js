@@ -518,12 +518,17 @@ const updateSparseVectorsForEntries = async (entries, state) => {
   }
 };
 
-export const addDocumentsToQdrantIndex = async ({ documents }) => {
+// `vectors` are embeddings the staged ingest pipeline already computed (one per
+// document, in order); without them the documents are embedded here as before.
+export const addDocumentsToQdrantIndex = async ({ documents, vectors = null }) => {
   if (!Array.isArray(documents) || documents.length === 0) {
     return;
   }
 
-  const denseVectors = await embedTexts(documents.map((document) => document.pageContent));
+  const denseVectors =
+    Array.isArray(vectors) && vectors.length === documents.length
+      ? vectors
+      : await embedTexts(documents.map((document) => document.pageContent));
 
   if (denseVectors.length === 0) {
     return;

@@ -19,7 +19,11 @@ import {
   deterministicIntentPlannerAdapter,
 } from "./agent-intent-planner.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
-import { AGENT_RUN_STATUSES, createAgentRunCursor } from "./agent-runs.js";
+import {
+  AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE,
+  AGENT_RUN_STATUSES,
+  createAgentRunCursor,
+} from "./agent-runs.js";
 import {
   getAgentRunInterruptPrivateDetail,
   isAgentRunInterrupt,
@@ -56,6 +60,10 @@ import {
   withSpan,
 } from "./tracing.js";
 import { observeUnifiedAgentGraphShadow } from "./agent-unified-graph-shadow.js";
+import {
+  resumeUnifiedAgentGraphRun,
+  runGuardedUnifiedAgentGraph,
+} from "./agent-unified-graph-run.js";
 
 const getSkillDescriptor = (skill = {}) => ({
   skillId: skill.id,
@@ -330,14 +338,16 @@ const attachAgentExperienceMemoryWrite = (response = {}, writeResult = {}) => {
   };
 };
 
-const completeRecordedRunAndExperience = async ({
+// Everything a completed response carries besides the answer itself: the task
+// continuation and the experience-memory write. The guarded v3 path seals the
+// prepared response in its finalization receipt, so a recovered run completes
+// with exactly what the uninterrupted request would have returned. The write
+// is an upsert under a deterministic memory key, so preparing the same answer
+// again after a crash does not duplicate the record.
+const prepareCompletedAgentResponse = async ({
   accessScope,
-  agentRunService,
-  approvalSnapshots = [],
   question,
   response,
-  runCursor = null,
-  runId,
   taskMemory,
   userId,
 } = {}) => {
@@ -352,10 +362,31 @@ const completeRecordedRunAndExperience = async ({
     response: responseWithTaskContinuation,
     userId,
   });
-  const responseWithExperienceMemory = attachAgentExperienceMemoryWrite(
+
+  return attachAgentExperienceMemoryWrite(
     responseWithTaskContinuation,
     writeResult
   );
+};
+
+const completeRecordedRunAndExperience = async ({
+  accessScope,
+  agentRunService,
+  approvalSnapshots = [],
+  question,
+  response,
+  runCursor = null,
+  runId,
+  taskMemory,
+  userId,
+} = {}) => {
+  const responseWithExperienceMemory = await prepareCompletedAgentResponse({
+    accessScope,
+    question,
+    response,
+    taskMemory,
+    userId,
+  });
 
   const completedRun = await completeRecordedRun({
     accessScope,
@@ -392,22 +423,80 @@ const createGraphResumeError = (reason) => {
   return error;
 };
 
+// Completes a claimed guarded v3 run with its prepared, sealed response: the
+// stored finalization receipt, or one recomputed from the reused nodes and
+// prepared (run id, continuation, experience memory) before its receipt was
+// written. Either way it is persisted under the recovery claim.
+const completeUnifiedGraphResume = async ({
+  accessScope,
+  agentRunService,
+  claimId,
+  response,
+  runCursor,
+  runId,
+}) => {
+  const completedRun = await completeRecordedRun({
+    accessScope,
+    agentRunService,
+    graphResumeClaimId: claimId,
+    response,
+    runCursor,
+    runId,
+  });
+
+  return attachAgentRunSnapshot(response, completedRun);
+};
+
 /**
- * Continue only the persisted custom_skills stage. In particular this does
- * not call the Intent Planner, query planner, preparation flow, or outer
- * Execution Planner. A startup worker must first own the persisted CAS claim
- * and must never use the general runAgentRag re-entry path for this job.
+ * Continue only the persisted graph. For a v1 checkpoint that is the
+ * custom_skills stage; for a v2 checkpoint (a guarded heterogeneous v3 graph)
+ * it is the whole request, handled by agent-unified-graph-run.js. In
+ * particular this does not call the Intent Planner, query planner,
+ * preparation flow, or outer Execution Planner. A startup worker must first
+ * own the persisted CAS claim and must never use the general runAgentRag
+ * re-entry path for this job.
  */
 const resumeAgentExecutionGraphRunInScope = async ({
   accessScope,
   agentRunService,
+  capabilityRegistry = null,
   checkpoint,
   ragService,
   replanAdapter = null,
   run,
   runId,
   skillRegistry,
+  webChatService = null,
 } = {}) => {
+  if (checkpoint?.version === "v2") {
+    return resumeUnifiedAgentGraphRun({
+      accessScope,
+      agentRunService,
+      capabilityRegistry,
+      checkpoint,
+      complete: (completion) =>
+        completeUnifiedGraphResume({
+          ...completion,
+          accessScope,
+          agentRunService,
+          runId,
+        }),
+      prepareResponse: (response, { question, taskMemory, userId }) =>
+        prepareCompletedAgentResponse({
+          accessScope,
+          question,
+          response: attachAgentRunId(response, runId),
+          taskMemory,
+          userId,
+        }),
+      ragService,
+      run,
+      runId,
+      skillRegistry,
+      webChatService,
+    });
+  }
+
   const owner = checkpoint?.owner;
   const docIds = run?.input?.docIds;
   const question = normalizeText(run?.goal);
@@ -682,6 +771,7 @@ const runAgentRagInScope = async ({
   intentPlannerAdapter,
   replanAdapter = null,
   skillRegistry,
+  unifiedGraphAllowedCapabilityIds = [],
   unifiedGraphPlannerAdapter = null,
 }) => {
   const taskMemoryContext = taskMemory
@@ -703,6 +793,16 @@ const runAgentRagInScope = async ({
       taskMemory: taskMemoryContext,
     })
   );
+  const agentSession = createAgentSession({
+    agentBudget,
+    docIds,
+    experienceMemory: agentExperienceMemory,
+    intentPlanner: intentPlanResult.planner,
+    plan: intentPlanResult.plan,
+    question,
+    skillRegistry,
+    taskMemory: taskMemoryContext,
+  });
   const {
     addBudgetLimitTrace,
     addTraceStep,
@@ -731,16 +831,7 @@ const runAgentRagInScope = async ({
     setAgentRetrievalPlan,
     trace,
     workingMemory,
-  } = createAgentSession({
-    agentBudget,
-    docIds,
-    experienceMemory: agentExperienceMemory,
-    intentPlanner: intentPlanResult.planner,
-    plan: intentPlanResult.plan,
-    question,
-    skillRegistry,
-    taskMemory: taskMemoryContext,
-  });
+  } = agentSession;
   const skillGraphMode = getAgentSkillGraphRollout();
   const authorizedCustomSkills = skillGraphMode !== "off"
     ? listAuthorizedAtomicCustomSkills({
@@ -766,8 +857,19 @@ const runAgentRagInScope = async ({
   // it with the revision CAS instead of first re-reading the row the previous
   // write returned; see createAgentRunCursor.
   const runCursor = createAgentRunCursor();
-  const agentRun = requestedAgentRunId
-    ? await agentRunService?.updateRun?.({
+  const createFreshRun = () =>
+    agentRunService?.createRun?.({
+      accessScope,
+      goal: question,
+      runCursor,
+      ...runSnapshot,
+    });
+  let agentRun;
+  let reenteredRun = Boolean(requestedAgentRunId);
+
+  if (requestedAgentRunId) {
+    try {
+      agentRun = await agentRunService?.updateRun?.({
         accessScope,
         graphReentryGuard: true,
         runCursor,
@@ -776,15 +878,34 @@ const runAgentRagInScope = async ({
           ...runSnapshot,
           status: AGENT_RUN_STATUSES.running,
         },
-      })
-    : await agentRunService?.createRun?.({
-        accessScope,
-        goal: question,
-        runCursor,
-        runId: requestedAgentRunId,
-        ...runSnapshot,
       });
-  const agentRunId = agentRun?.runId ?? requestedAgentRunId ?? null;
+    } catch (error) {
+      // A guarded v3 graph owned the whole earlier request and has settled
+      // (finalized as a clarification, or failed). Its run is never
+      // re-entered: a continuation such as the user's answer to that
+      // clarification is a new request, so it gets a new run; the task memory
+      // carries the context. The settled run is left untouched.
+      if (error?.code !== AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE) {
+        throw error;
+      }
+
+      agentRun = await createFreshRun();
+      reenteredRun = false;
+      await agentRunService?.appendRunEvent?.({
+        accessScope,
+        runId: agentRun?.runId,
+        type: "run_continued",
+        payload: {
+          previousRunId: requestedAgentRunId,
+          reason: "settled_unified_graph_run",
+        },
+      });
+    }
+  } else {
+    agentRun = await createFreshRun();
+  }
+
+  const agentRunId = agentRun?.runId ?? (reenteredRun ? requestedAgentRunId : null) ?? null;
   // Tagged as soon as the run exists, so a run that later throws can still be
   // found from its trace.
   setActiveSpanAttributes({ "agent.run.id": agentRunId });
@@ -806,7 +927,7 @@ const runAgentRagInScope = async ({
     capabilityApprovals
   );
 
-  if (requestedAgentRunId && agentRunId) {
+  if (reenteredRun && agentRunId) {
     await agentRunService?.appendRunEvent?.({
       accessScope,
       runId: agentRunId,
@@ -855,7 +976,65 @@ const runAgentRagInScope = async ({
     }
 
     const agentRetrievalPlan = preparationResult.agentRetrievalPlan;
-    if (getAgentUnifiedGraphRollout() === "shadow") {
+    const unifiedGraphRollout = getAgentUnifiedGraphRollout();
+
+    if (unifiedGraphRollout === "guarded") {
+      // One request, one path: an admitted v3 graph answers the whole request
+      // and the V1 outer plan below never runs. A graph refused before any
+      // node ran (no planner, invalid proposal, an approval-gated node, or a
+      // shape the finalizer cannot represent) is recorded and falls through
+      // to V1 unchanged.
+      const unified = await runGuardedUnifiedAgentGraph({
+        accessScope,
+        agentRunId,
+        agentRunService,
+        allowedCapabilityIds: unifiedGraphAllowedCapabilityIds,
+        baseCapabilityRegistry,
+        capabilityApprovals,
+        capabilityRegistry: effectiveCapabilityRegistry,
+        docIds,
+        experienceMemory: agentExperienceMemory,
+        intentPlanner: intentPlanResult.planner,
+        plan,
+        plannerAdapter: unifiedGraphPlannerAdapter,
+        prepareResponse: (response) =>
+          prepareCompletedAgentResponse({
+            accessScope,
+            question,
+            response: attachAgentRunId(response, agentRunId),
+            taskMemory: taskMemoryContext,
+            userId,
+          }),
+        question,
+        ragService,
+        reentry: reenteredRun,
+        registry,
+        retrievalPlan: agentRetrievalPlan,
+        runCursor,
+        session: agentSession,
+        sessionId,
+        stepLifecycle,
+        taskMemory: taskMemoryContext,
+        userId,
+      });
+
+      if (unified.response) {
+        // Already prepared and sealed in the finalization receipt.
+        const completedRun = await completeRecordedRun({
+          accessScope,
+          agentRunService,
+          approvalSnapshots: [],
+          graphResumeClaimId: null,
+          response: unified.response,
+          runCursor,
+          runId: agentRunId,
+        });
+
+        return attachAgentRunSnapshot(unified.response, completedRun);
+      }
+    }
+
+    if (unifiedGraphRollout === "shadow") {
       await observeUnifiedAgentGraphShadow({
         accessScope,
         addTraceStep,

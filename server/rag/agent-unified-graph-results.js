@@ -1,6 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { normalizeText } from "../lib/normalize-text.js";
+// Result text is trimmed, not whitespace-collapsed, by the Skill registry; the
+// raw-value and evidence comparisons below must use the same normalizer.
+import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 import {
   EXECUTION_GRAPH_CHECKPOINT_VERSIONS,
   buildExecutionGraphNodeStepId,

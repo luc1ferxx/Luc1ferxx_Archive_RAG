@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile as readBinaryFile } from "fs/promises";
 import { getDocumentsPostgresTable, isPostgresDatabaseConfigured } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
@@ -31,6 +32,26 @@ const toPositiveInteger = (value, fallbackValue = 0) => {
   const parsedValue = Number.parseInt(value ?? fallbackValue, 10);
   return Number.isInteger(parsedValue) && parsedValue >= 0 ? parsedValue : fallbackValue;
 };
+
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+// A document's content identity (migration 018): the SHA-256 of its stored
+// bytes, lowercase hex, or null when it is unknown (a row from before the
+// migration that `ingest:jobs -- backfill-hashes` has not reached yet).
+export const normalizeContentSha256 = (value) => {
+  const hash = String(value ?? "").trim().toLowerCase();
+
+  return SHA256_PATTERN.test(hash) ? hash : null;
+};
+
+const toContentVersion = (value) => {
+  const parsedValue = Number.parseInt(value ?? 1, 10);
+
+  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : 1;
+};
+
+const toTimestampText = (value, fallbackValue) =>
+  value instanceof Date ? value.toISOString() : value ?? fallbackValue;
 
 const ensureTableName = (getTableName = getDocumentsPostgresTable) => {
   const tableName = getTableName();
@@ -160,6 +181,10 @@ const toStoredDocument = (document = {}) => {
   const docId = normalizeDocId(document.docId);
   const publicFilePath = buildPublicFilePath(docId);
   const profile = normalizeProfile(document);
+  // pg returns timestamptz as a Date, while file/in-memory stores already
+  // use strings. Keep the registry's public and sortable timestamp shape
+  // identical across providers.
+  const uploadedAt = toTimestampText(document.uploadedAt, new Date().toISOString());
 
   return {
     docId,
@@ -177,12 +202,15 @@ const toStoredDocument = (document = {}) => {
       document.workspaceId ?? document.workspace_id ?? ""
     ).trim(),
     profile,
-    // pg returns timestamptz as a Date, while file/in-memory stores already
-    // use strings. Keep the registry's public and sortable timestamp shape
-    // identical across providers.
-    uploadedAt: document.uploadedAt instanceof Date
-      ? document.uploadedAt.toISOString()
-      : document.uploadedAt ?? new Date().toISOString(),
+    uploadedAt,
+    // Content identity and version (migration 018). A replacement keeps the
+    // docId and uploadedAt, bumps `version` and moves `updatedAt`.
+    contentSha256: normalizeContentSha256(document.contentSha256 ?? document.content_sha256),
+    version: toContentVersion(document.version ?? document.contentVersion ?? document.content_version),
+    updatedAt: toTimestampText(
+      document.updatedAt ?? document.contentUpdatedAt ?? document.content_updated_at,
+      uploadedAt
+    ),
     // Defaults to postgresql because that is where documents live unless a store
     // says otherwise. Preserving what the store reports matters: every document
     // entering the registry is renormalized through here, so hardcoding this made
@@ -203,6 +231,9 @@ const mapRowToStoredDocument = (row = {}) =>
     workspaceId: row.workspace_id,
     profile: row.profile,
     uploadedAt: row.uploaded_at,
+    contentSha256: row.content_sha256,
+    contentVersion: row.content_version,
+    contentUpdatedAt: row.content_updated_at ?? undefined,
   });
 
 const toPublicDocument = (document) =>
@@ -223,6 +254,9 @@ const toPublicDocument = (document) =>
         source: document.profile?.source ?? null,
         uploadedAt: document.uploadedAt,
         storageBackend: document.storageBackend,
+        version: document.version,
+        updatedAt: document.updatedAt,
+        contentSha256: document.contentSha256,
       }
     : null;
 
@@ -253,6 +287,34 @@ const resolveQuery = (queryPostgres, client) =>
   client && typeof client.query === "function"
     ? (sql, values = []) => client.query(sql, values)
     : queryPostgres;
+
+// The metadata columns every read returns. A database migration 018 has not
+// reached yet (a read-only `vector:reindex` dry run never migrates) has no
+// content columns; reads there fall back to the older list once.
+const DOCUMENT_METADATA_COLUMNS =
+  "doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at, content_sha256, content_version, content_updated_at";
+const LEGACY_DOCUMENT_METADATA_COLUMNS =
+  "doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at";
+const UNDEFINED_COLUMN = "42703";
+
+const queryDocumentColumns = async (query, buildSql, values) => {
+  try {
+    return await query(buildSql(DOCUMENT_METADATA_COLUMNS), values);
+  } catch (error) {
+    if (error?.code !== UNDEFINED_COLUMN) {
+      throw error;
+    }
+
+    return query(buildSql(LEGACY_DOCUMENT_METADATA_COLUMNS), values);
+  }
+};
+
+// Exact tenant equality, not the looser visibility rule: a duplicate is a
+// document this very owner and workspace stored.
+const toOwnerKey = ({ ownerUserId = "", workspaceId = "" } = {}) => ({
+  ownerUserId: String(ownerUserId ?? "").trim(),
+  workspaceId: String(workspaceId ?? "").trim(),
+});
 
 export const createDocumentRegistryStore = ({
   createDocumentLegacyImporter = createDefaultDocumentLegacyImporter,
@@ -304,9 +366,10 @@ export const createDocumentRegistryStore = ({
     const tableName = ensureTableName(getDocumentsTable);
     const scope = normalizeAccessScope(accessScope);
     const result = hasAccessScope(scope)
-      ? await queryPostgres(
-          `
-            SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+      ? await queryDocumentColumns(
+          queryPostgres,
+          (columns) => `
+            SELECT ${columns}
             FROM ${tableName}
             WHERE (owner_user_id <> '' OR workspace_id <> '')
               AND (owner_user_id = '' OR owner_user_id = $1)
@@ -315,9 +378,10 @@ export const createDocumentRegistryStore = ({
           `,
           [scope.userId, scope.workspaceId]
         )
-      : await queryPostgres(
-          `
-            SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+      : await queryDocumentColumns(
+          queryPostgres,
+          (columns) => `
+            SELECT ${columns}
             FROM ${tableName}
             ORDER BY uploaded_at ASC, doc_id ASC
           `
@@ -338,9 +402,10 @@ export const createDocumentRegistryStore = ({
     }
 
     const tableName = ensureTableName(getDocumentsTable);
-    const result = await queryPostgres(
-      `
-        SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+    const result = await queryDocumentColumns(
+      queryPostgres,
+      (columns) => `
+        SELECT ${columns}
         FROM ${tableName}
         WHERE doc_id = ANY($1::text[])
       `,
@@ -348,6 +413,79 @@ export const createDocumentRegistryStore = ({
     );
 
     return result.rows.map(mapRowToStoredDocument);
+  },
+
+  /**
+   * The oldest document of exactly this owner and workspace whose stored
+   * bytes hash to `contentSha256`, or null. Inside the ingest transaction it
+   * runs on `client`, after the caller took lockContentHash.
+   */
+  async findByContentHash(contentSha256, owner = {}, { client = null } = {}) {
+    const hash = normalizeContentSha256(contentSha256);
+
+    if (!hash) {
+      return null;
+    }
+
+    const { ownerUserId, workspaceId } = toOwnerKey(owner);
+    const result = await resolveQuery(queryPostgres, client)(
+      `
+        SELECT ${DOCUMENT_METADATA_COLUMNS}
+        FROM ${ensureTableName(getDocumentsTable)}
+        WHERE owner_user_id = $1
+          AND workspace_id = $2
+          AND content_sha256 = $3
+        ORDER BY uploaded_at ASC, doc_id ASC
+        LIMIT 1
+      `,
+      [ownerUserId, workspaceId, hash]
+    );
+
+    return result.rows[0] ? mapRowToStoredDocument(result.rows[0]) : null;
+  },
+
+  /**
+   * Serializes identical uploads of one tenant for the rest of the caller's
+   * transaction (a transaction-scoped advisory lock on the tenant and hash).
+   * Taken after the index-version write lock and before any documents-row
+   * lock, the order vector-store-pgvector-versions.js requires of writers.
+   */
+  async lockContentHash(contentSha256, owner = {}, { client }) {
+    const { ownerUserId, workspaceId } = toOwnerKey(owner);
+
+    await resolveQuery(queryPostgres, client)(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [
+        // JSON keeps the parts apart whatever an id contains (a NUL separator
+        // cannot travel in a text parameter).
+        JSON.stringify([
+          "archive_rag:document_content",
+          ensureTableName(getDocumentsTable),
+          ownerUserId,
+          workspaceId,
+          normalizeContentSha256(contentSha256) ?? "",
+        ]),
+      ]
+    );
+  },
+
+  /**
+   * Locks the row a replacement is about to change (FOR UPDATE: concurrent
+   * replacements and deletes, and the index-version builder's FOR SHARE read,
+   * wait for it) and returns it, or null when the document is gone.
+   */
+  async lockForContentReplace(docId, { client }) {
+    const result = await resolveQuery(queryPostgres, client)(
+      `
+        SELECT ${DOCUMENT_METADATA_COLUMNS}
+        FROM ${ensureTableName(getDocumentsTable)}
+        WHERE doc_id = $1
+        FOR UPDATE
+      `,
+      [normalizeDocId(docId)]
+    );
+
+    return result.rows[0] ? mapRowToStoredDocument(result.rows[0]) : null;
   },
 
   async upsert(document, { client = null } = {}) {
@@ -377,9 +515,12 @@ export const createDocumentRegistryStore = ({
           owner_user_id,
           workspace_id,
           profile,
-          uploaded_at
+          uploaded_at,
+          content_sha256,
+          content_version,
+          content_updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, COALESCE($14::timestamptz, NOW()))
         ON CONFLICT (doc_id)
         DO UPDATE SET
           file_name = EXCLUDED.file_name,
@@ -391,8 +532,11 @@ export const createDocumentRegistryStore = ({
           owner_user_id = EXCLUDED.owner_user_id,
           workspace_id = EXCLUDED.workspace_id,
           profile = EXCLUDED.profile,
-          uploaded_at = EXCLUDED.uploaded_at
-        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+          uploaded_at = EXCLUDED.uploaded_at,
+          content_sha256 = EXCLUDED.content_sha256,
+          content_version = EXCLUDED.content_version,
+          content_updated_at = EXCLUDED.content_updated_at
+        RETURNING ${DOCUMENT_METADATA_COLUMNS}
       `,
       [
         normalizedDocument.docId,
@@ -406,6 +550,12 @@ export const createDocumentRegistryStore = ({
         normalizedDocument.workspaceId,
         normalizedDocument.profile,
         normalizedDocument.uploadedAt,
+        normalizedDocument.contentSha256 ?? createHash("sha256").update(fileBuffer).digest("hex"),
+        normalizedDocument.version,
+        // The database's clock when the writer asks for it: async jobs order
+        // replacements by their enqueue time (created_at, this clock too), so a
+        // write without a request time is stamped by it, never by a host's.
+        document.contentUpdatedAtFromDatabase === true ? null : normalizedDocument.updatedAt,
       ]
     );
 
@@ -420,9 +570,10 @@ export const createDocumentRegistryStore = ({
     }
 
     const tableName = ensureTableName(getDocumentsTable);
-    const result = await queryPostgres(
-      `
-        SELECT doc_id, file_name, mime_type, file_size, file_bytes, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+    const result = await queryDocumentColumns(
+      queryPostgres,
+      (columns) => `
+        SELECT ${columns.replace("file_size,", "file_size, file_bytes,")}
         FROM ${tableName}
         WHERE doc_id = $1
         LIMIT 1
@@ -468,7 +619,7 @@ export const createDocumentRegistryStore = ({
       `
         DELETE FROM ${tableName}
         WHERE doc_id = $1
-        RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+        RETURNING ${DOCUMENT_METADATA_COLUMNS}
       `,
       [normalizedDocId]
     );
@@ -490,14 +641,14 @@ export const createDocumentRegistryStore = ({
             WHERE (owner_user_id <> '' OR workspace_id <> '')
               AND (owner_user_id = '' OR owner_user_id = $1)
               AND (workspace_id = '' OR workspace_id = $2)
-            RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+            RETURNING ${DOCUMENT_METADATA_COLUMNS}
           `,
           [scope.userId, scope.workspaceId]
         )
       : await query(
           `
             DELETE FROM ${tableName}
-            RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+            RETURNING ${DOCUMENT_METADATA_COLUMNS}
           `
         );
 
@@ -610,6 +761,94 @@ export const registerDocument = async (document, { client = null } = {}) => {
 };
 
 export const hasDocument = (docId) => documentRegistry.has(normalizeDocId(docId));
+
+const compareByUploadOrder = (left, right) =>
+  left.uploadedAt.localeCompare(right.uploadedAt) || left.docId.localeCompare(right.docId);
+
+/**
+ * The document exactly this owner and workspace stored with bytes that hash to
+ * `contentSha256`, or null (the stored form, not the public one). A PostgreSQL
+ * store answers, so another process's upload counts, on `client` when the
+ * caller is inside its ingest transaction. A store that cannot (the file-backed
+ * registry, an evaluation store) has one writer, this process, whose map then
+ * answers. The map is not changed here: a caller that returns the document
+ * loads it (loadDocumentsFromStore) once its transaction settled.
+ */
+export const findDocumentByContentHash = async (contentSha256, owner = {}, { client = null } = {}) => {
+  const hash = normalizeContentSha256(contentSha256);
+
+  if (!hash) {
+    return null;
+  }
+
+  const { ownerUserId, workspaceId } = toOwnerKey(owner);
+  const store = getDocumentRegistryStore();
+
+  // The database answers whenever it is the registry other processes write,
+  // and always inside a caller's transaction.
+  if (typeof store.findByContentHash === "function" && (client || isDocumentRegistryShared())) {
+    const found = await store.findByContentHash(hash, { ownerUserId, workspaceId }, { client });
+
+    return found ? toStoredDocument(found) : null;
+  }
+
+  // A configured single-writer store is loaded once; without one (no database
+  // and no file registry) there is nothing to have stored.
+  if (!documentRegistryInitialized && configuredDocumentRegistryStore) {
+    await initializeDocumentRegistry();
+  }
+
+  return (
+    [...documentRegistry.values()]
+      .filter(
+        (document) =>
+          document.contentSha256 === hash &&
+          document.ownerUserId === ownerUserId &&
+          document.workspaceId === workspaceId
+      )
+      .sort(compareByUploadOrder)[0] ?? null
+  );
+};
+
+/**
+ * Inside an ingest transaction on a PostgreSQL store: holds the tenant's lock
+ * on `contentSha256` until COMMIT, so an identical upload racing this one
+ * waits and then finds this document. Other stores have one writer and take
+ * no lock here (rag/index.js serializes identical uploads in process).
+ */
+export const lockDocumentContentHash = async (contentSha256, owner = {}, { client = null } = {}) => {
+  const store = getDocumentRegistryStore();
+
+  if (client && typeof store.lockContentHash === "function") {
+    await store.lockContentHash(contentSha256, toOwnerKey(owner), { client });
+    return true;
+  }
+
+  return false;
+};
+
+/**
+ * The row a replacement is about to change, locked until the caller's
+ * transaction ends (PostgreSQL store with `client`), or this process's entry.
+ * Null when the document is gone. The stored form, as findDocumentByContentHash.
+ */
+export const lockDocumentForContentReplace = async (docId, { client = null } = {}) => {
+  const store = getDocumentRegistryStore();
+
+  if (client && typeof store.lockForContentReplace === "function") {
+    const locked = await store.lockForContentReplace(docId, { client });
+
+    return locked ? toStoredDocument(locked) : null;
+  }
+
+  if (!documentRegistryInitialized) {
+    await initializeDocumentRegistry();
+  }
+
+  const current = documentRegistry.get(normalizeDocId(docId));
+
+  return current ? toStoredDocument(current) : null;
+};
 
 /**
  * Re-reads one document from the store and replaces the in-process copy.
@@ -967,6 +1206,73 @@ export const clearDocuments = async ({
   documentRegistryInitialized = true;
   return cleared;
 };
+
+/**
+ * Fills content_sha256 (migration 018) for rows stored before it, in batches
+ * the database hashes itself, so no PDF crosses the wire. Until a row has its
+ * hash, an identical upload is not recognised as a duplicate of it. `dryRun`
+ * only counts. Runs as the owner: every tenant's rows.
+ */
+export const backfillDocumentContentHashes = async ({
+  batchSize = 100,
+  dryRun = false,
+  getDocumentsTable = getDocumentsPostgresTable,
+  onBatch = null,
+  queryPostgres = queryDefaultPostgres,
+  runMigrations = runPostgresMigrations,
+} = {}) =>
+  runAsDatabaseSystem(async () => {
+    await runMigrations();
+
+    const tableName = ensureTableName(getDocumentsTable);
+    const missing = async () =>
+      Number(
+        (
+          await queryPostgres(
+            `SELECT COUNT(*)::int AS missing FROM ${tableName} WHERE content_sha256 IS NULL`
+          )
+        ).rows[0]?.missing
+      ) || 0;
+    const before = await missing();
+
+    if (dryRun || before === 0) {
+      return { dryRun, hashed: 0, missing: before, remaining: before };
+    }
+
+    const limit = Math.max(1, Math.floor(Number(batchSize) || 100));
+    let hashed = 0;
+
+    for (;;) {
+      const result = await queryPostgres(
+        `
+          WITH batch AS (
+            SELECT doc_id
+            FROM ${tableName}
+            WHERE content_sha256 IS NULL
+            ORDER BY doc_id
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+          )
+          UPDATE ${tableName} AS d
+          SET content_sha256 = encode(sha256(d.file_bytes), 'hex')
+          FROM batch
+          WHERE d.doc_id = batch.doc_id
+          RETURNING d.doc_id
+        `,
+        [limit]
+      );
+      const count = result.rows.length;
+
+      hashed += count;
+      await onBatch?.({ count, hashed });
+
+      if (count < limit) {
+        break;
+      }
+    }
+
+    return { dryRun, hashed, missing: before, remaining: await missing() };
+  });
 
 export const resetDocumentRegistry = async () => {
   documentRegistry = new Map();

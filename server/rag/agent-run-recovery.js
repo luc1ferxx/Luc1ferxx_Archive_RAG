@@ -14,6 +14,8 @@ import {
   reconcileExecutionGraphCheckpoint,
   sealExecutionGraphCheckpoint,
 } from "./agent-execution-graph-checkpoint.js";
+import { hasUnifiedGuardedGraphPath } from "./agent-unified-graph-run.js";
+import { getAgentUnifiedGraphRollout } from "./config.js";
 
 const normalizeMode = (value) => {
   const mode = normalizeText(value).toLowerCase();
@@ -72,12 +74,35 @@ const hasGraphOnlyStoredExecutionPlan = (run = {}) => {
     stepIds[0] === "custom_skills";
 };
 
-// The current startup continuation reconstructs only the legacy custom-Skill
-// stage. A heterogeneous v3 graph has a distinct checkpoint and must remain
-// manual until its complete outer-stage continuation is wired end to end.
+// The legacy startup continuation reconstructs only the custom-Skill stage.
 const hasLegacyResumableGraphContract = (checkpoint) =>
   checkpoint?.version === "v1" &&
   ["v1", "v2"].includes(checkpoint.graph?.version);
+
+// A heterogeneous v3 graph (v2 checkpoint) owns its whole request. It has a
+// dedicated continuation only when the run's durable events prove that the
+// guarded unified path took the request and the V1 outer plan never ran;
+// anything else (a shadow or foreign checkpoint) stays manual.
+const isUnifiedGraphCheckpoint = (checkpoint) =>
+  checkpoint?.version === "v2" && checkpoint.graph?.version === "v3";
+
+// A resumed v3 run may legitimately settle as a clarification: the whole
+// request was answered with a question for the user. That counts as settled
+// only when the completion event follows this recovery's claim.
+const hasSettledAfterResumeClaim = (run = {}) => {
+  if ([AGENT_RUN_STATUSES.completed, AGENT_RUN_STATUSES.failed].includes(run?.status)) {
+    return true;
+  }
+
+  const events = toArray(run?.events);
+  const claimIndex = events.findLastIndex(
+    (event) => event.type === "skill_graph_resume_claimed"
+  );
+
+  return run?.status === AGENT_RUN_STATUSES.waitingForUser &&
+    claimIndex >= 0 &&
+    events.slice(claimIndex + 1).some((event) => event.type === "run_waiting_for_user");
+};
 
 export const findAutoRecoverableStep = ({
   run = {},
@@ -160,7 +185,8 @@ const buildRecoveryPatch = ({
 export const createAgentRunRecoveryService = ({
   agentRunService,
   agentRunStepExecutor,
-  // This callback must continue the persisted custom_skills graph directly.
+  // This callback must continue the persisted graph directly: the custom_skills
+  // stage for a v1 checkpoint, the whole guarded v3 request for a v2 one.
   // Calling runAgentRag here would regenerate the outer plan and repeat work.
   resumeExecutionGraph = null,
   now = () => new Date().toISOString(),
@@ -216,6 +242,7 @@ export const createAgentRunRecoveryService = ({
 
     const markManualRecovery = async ({
       accessScope = {},
+      expectedGraphResumeClaimId = null,
       fallbackReason,
       requestedMode,
       run,
@@ -235,6 +262,7 @@ export const createAgentRunRecoveryService = ({
 
       const mutation = await agentRunService.markManualRecovery({
         accessScope,
+        ...(expectedGraphResumeClaimId ? { expectedGraphResumeClaimId } : {}),
         recovery: recoveryPatch.result.recovery,
         runId: run.runId,
       });
@@ -358,11 +386,7 @@ export const createAgentRunRecoveryService = ({
           runId: run.runId,
         });
 
-        if (
-          ![AGENT_RUN_STATUSES.completed, AGENT_RUN_STATUSES.failed].includes(
-            resumed?.status
-          )
-        ) {
+        if (!hasSettledAfterResumeClaim(resumed)) {
           throw new Error("Graph resume did not settle the agent run.");
         }
 
@@ -396,8 +420,13 @@ export const createAgentRunRecoveryService = ({
             current.status
           )
         ) {
+          // This worker owns the claim and its resume has stopped, so it may
+          // hand the run to an operator under that same claim. Without the
+          // claim id the run store refuses, and a run whose resume failed
+          // before any node started would stay `running` and unlisted.
           await markManualRecovery({
             accessScope,
+            expectedGraphResumeClaimId: checkpoint?.resumeClaim?.claimId ?? null,
             fallbackReason: "graph_resume_failed",
             requestedMode: "auto",
             run: current,
@@ -440,20 +469,46 @@ export const createAgentRunRecoveryService = ({
               return;
             }
 
+            const unifiedGraph = isUnifiedGraphCheckpoint(loadedGraph?.checkpoint);
+            const unifiedGraphPath = unifiedGraph && hasUnifiedGuardedGraphPath(run);
+            // An operator who rolls the unified graph back to `off` (or
+            // `shadow`) also stops startup recovery from executing or
+            // finalizing a v3 graph; such runs wait for an operator.
+            const unifiedRolloutGuarded = getAgentUnifiedGraphRollout() === "guarded";
+
+            if (
+              unifiedGraphPath &&
+              loadedGraph.checkpoint.phase === "completed" &&
+              loadedGraph.checkpoint.finalization &&
+              run.status === AGENT_RUN_STATUSES.waitingForUser &&
+              toArray(run.events).some((event) => event.type === "run_waiting_for_user")
+            ) {
+              // Already finalized as a clarification: the receipt was written
+              // and the run completed. Nothing crashed, so nothing is resumed.
+              skippedCount += 1;
+              return;
+            }
             const reconciliation = loadedGraph
               ? sealExecutionGraphCheckpoint(loadedGraph.checkpoint).digest !==
                   loadedGraph.checkpoint.digest
                 ? { ok: false, reason: "checkpoint_digest_mismatch" }
-                : loadedGraph.checkpoint.phase !== "running"
+                : loadedGraph.checkpoint.phase !== "running" &&
+                    // A completed v3 graph whose run was not yet completed is
+                    // finalized from its reused nodes or its finalization
+                    // receipt; a partial one never is.
+                    !(unifiedGraphPath && loadedGraph.checkpoint.phase === "completed")
                   ? { ok: false, reason: "graph_finalization_requires_recovery" }
                   : reconcileExecutionGraphCheckpoint(loadedGraph)
               : { ok: false, reason: "graph_checkpoint_missing" };
+            const resumableContract = unifiedGraph
+              ? unifiedGraphPath && unifiedRolloutGuarded
+              : hasLegacyResumableGraphContract(loadedGraph?.checkpoint) &&
+                hasGraphOnlyStoredExecutionPlan(run);
 
             if (
               reconciliation.ok &&
-              hasLegacyResumableGraphContract(loadedGraph?.checkpoint) &&
+              resumableContract &&
               !hasPendingApprovalGate(run) &&
-              hasGraphOnlyStoredExecutionPlan(run) &&
               typeof resumeExecutionGraph === "function" &&
               typeof agentRunService.claimExecutionGraphResume === "function"
             ) {
@@ -482,6 +537,14 @@ export const createAgentRunRecoveryService = ({
               accessScope,
               fallbackReason: !reconciliation.ok
                 ? reconciliation.reason
+                : unifiedGraph
+                  ? !unifiedGraphPath
+                    ? "graph_checkpoint_version_not_resumable"
+                    : !unifiedRolloutGuarded
+                      ? "unified_graph_rollout_not_guarded"
+                    : hasPendingApprovalGate(run)
+                      ? "pending_approval_gate"
+                      : "graph_resume_executor_unavailable"
                 : !hasLegacyResumableGraphContract(loadedGraph?.checkpoint)
                   ? "graph_checkpoint_version_not_resumable"
                 : hasPendingApprovalGate(run)

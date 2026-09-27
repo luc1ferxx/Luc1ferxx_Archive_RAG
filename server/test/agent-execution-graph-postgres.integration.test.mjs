@@ -280,8 +280,26 @@ const runRecoveryWorker = async () => {
   try {
     const service = newRunService(modules);
     const registry = modules.createSkillRegistry(createSkills(modules, tableName, runId));
+    // Startup recovery scans every tenant. Other integration suites share this
+    // disposable database and may run concurrently, so the worker only sees
+    // this suite's run; the recovery path itself is unchanged.
+    const scopedService = new Proxy(service, {
+      get(target, property) {
+        if (property === "listRecoverableRuns") {
+          return async (args) => {
+            const listed = await target.listRecoverableRuns(args);
+            return {
+              ...listed,
+              runs: (listed?.runs ?? []).filter((run) => run.runId === runId),
+            };
+          };
+        }
+        const value = target[property];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
     const recovery = modules.createAgentRunRecoveryService({
-      agentRunService: service,
+      agentRunService: scopedService,
       recordRecoveryTrace: async () => {},
       resumeExecutionGraph: (args) => modules.resumeAgentExecutionGraphRun({
         ...args,
