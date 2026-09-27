@@ -9,8 +9,14 @@ import pg from "pg";
 // Real-database checks for the async ingest queue (migration 015): concurrent
 // claims never hand one job to two workers, an expired lease moves to the next
 // claimer and fences the old one out, a tenant never sees another tenant's
-// job, and a retried attempt after a committed-but-unrecorded ingest neither
-// fails on duplicate keys nor duplicates chunks. It runs only when
+// job, a retried attempt after a committed-but-unrecorded ingest neither
+// fails on duplicate keys nor duplicates chunks, an enqueue NOTIFYs idle
+// workers in other processes (claimed well inside the poll interval, also
+// after the LISTEN session was killed), in either ingest mode a document
+// another instance registered is found on a lookup miss, and a delete or clear
+// another instance made is seen here (a stale hit is dropped, a delete of it
+// answers null, and a clear removes and reports rows this map never loaded,
+// under the tenant's row policy). It runs only when
 // PGVECTOR_TEST_DATABASE_URL points at a pgvector-enabled PostgreSQL whose
 // login may create roles and databases (`bash scripts/run-pgvector-integration.sh`
 // provisions one); otherwise it is reported as skipped, never as passed.
@@ -76,6 +82,34 @@ if (!adminDatabaseUrl) {
   const q = (sql, values) => modules.postgres.queryPostgres(sql, values);
 
   const clearJobs = () => modules.tenant.runAsDatabaseSystem(() => q(`DELETE FROM ${tables.jobs}`));
+
+  const waitUntil = async (predicate, { label = "condition", timeoutMs = 15000 } = {}) => {
+    const deadline = Date.now() + timeoutMs;
+
+    while (!(await predicate())) {
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out waiting for ${label}.`);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+
+  // Sessions of this database (other than the asking one) whose last
+  // statement was a LISTEN: the owner sees its own sessions' query text.
+  const listenSessions = async () =>
+    (
+      await modules.tenant.runAsDatabaseSystem(() =>
+        q(
+          `
+            SELECT pid FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND pid <> pg_backend_pid()
+              AND query LIKE 'LISTEN %'
+          `
+        )
+      )
+    ).rows.map((row) => row.pid);
 
   const enqueueFor = (store, scope, docId) =>
     modules.tenant.runWithDatabaseTenant(scope, () =>
@@ -575,5 +609,288 @@ if (!adminDatabaseUrl) {
     });
     assert.equal(modules.rag.getDocument(job.docId, ALICE).docId, job.docId);
     assert.equal(modules.rag.getDocument(job.docId, BOB), null);
+  });
+
+  test("an enqueue NOTIFYs in its own statement and never for a job the cap refused", async () => {
+    await clearJobs();
+
+    const channel = modules.store.getIngestJobsNotifyChannel(tables.jobs);
+    const listener = new pg.Client({ connectionString: process.env.POSTGRES_DATABASE_URL });
+    const notifications = [];
+
+    await listener.connect();
+
+    try {
+      listener.on("notification", (message) => notifications.push(message));
+      await listener.query(`LISTEN "${channel}"`);
+
+      const capped = modules.store.createPostgresIngestJobStore({
+        getPendingLimits: () => ({ maxPendingBytes: 0, maxPendingJobs: 1 }),
+        logger: silentLogger,
+      });
+
+      await enqueueFor(capped, ALICE, "doc-notify-1");
+      await assert.rejects(
+        () => enqueueFor(capped, ALICE, "doc-notify-refused"),
+        (error) => error.status === 429
+      );
+      // Enqueued under row-level security as bob: the tenant role may notify.
+      await enqueueFor(capped, BOB, "doc-notify-2");
+
+      // Notifications arrive in commit order, so once the last one is here a
+      // refused enqueue would already have shown up between the two.
+      await waitUntil(() => notifications.length >= 2, { label: "two notifications" });
+      assert.equal(notifications.length, 2);
+      assert.ok(notifications.every((message) => message.channel === channel));
+      assert.equal(new Set(notifications.map((message) => message.payload)).size, 1);
+      assert.doesNotMatch(notifications[0].payload, /doc-notify|alice|bob/);
+    } finally {
+      await listener.end();
+    }
+  });
+
+  test("an idle worker claims a job another process enqueued well inside its poll interval, also after its LISTEN session was killed", async () => {
+    await clearJobs();
+
+    const POLL_MS = 60000;
+    // Two store instances: the enqueuing one has no subscribers of its own, so
+    // the only way its job reaches the worker is the database notification,
+    // exactly as between two processes.
+    const workerStore = modules.store.createPostgresIngestJobStore({ logger: silentLogger });
+    const otherProcess = modules.store.createPostgresIngestJobStore({ logger: silentLogger });
+    const ingested = [];
+    const worker = modules.worker.createIngestWorker({
+      concurrency: 2,
+      leaseMs: 60000,
+      logger: silentLogger,
+      pollIntervalMs: POLL_MS,
+      ragService: {
+        getDocument: () => null,
+        ingestDocument: async ({ docId }) => {
+          ingested.push(docId);
+          return { docId };
+        },
+      },
+      store: workerStore,
+      tempDirectory: tempRoot,
+      workerId: "woken",
+    });
+    const claimDelayMs = async (jobId) => {
+      const result = await modules.tenant.runAsDatabaseSystem(() =>
+        q(
+          `
+            SELECT status, EXTRACT(EPOCH FROM (started_at - created_at)) * 1000 AS delay_ms
+            FROM ${tables.jobs} WHERE job_id = $1
+          `,
+          [jobId]
+        )
+      );
+
+      return result.rows[0];
+    };
+    const enqueueAndAwaitClaim = async (docId) => {
+      await waitUntil(() => worker.idleLoopCount === 2, { label: "both loops asleep" });
+
+      const startedAt = Date.now();
+      const job = await enqueueFor(otherProcess, ALICE, docId);
+
+      await waitUntil(async () => (await claimDelayMs(job.jobId)).status === "succeeded", {
+        label: `${docId} to be ingested`,
+      });
+
+      return { elapsedMs: Date.now() - startedAt, row: await claimDelayMs(job.jobId) };
+    };
+
+    try {
+      worker.start();
+      await waitUntil(() => workerStore.enqueueNotificationStatus().listening, {
+        label: "the worker's LISTEN session",
+      });
+
+      const [sessionPid] = await listenSessions();
+
+      assert.ok(sessionPid, "one dedicated LISTEN session is open");
+      assert.equal((await listenSessions()).length, 1);
+
+      const first = await enqueueAndAwaitClaim("doc-woken-1");
+
+      assert.ok(
+        Number(first.row.delay_ms) < 2000,
+        `claimed ${first.row.delay_ms} ms after the enqueue, poll interval ${POLL_MS} ms`
+      );
+      assert.ok(first.elapsedMs < 5000, `ingested ${first.elapsedMs} ms after the enqueue`);
+
+      // Kill the LISTEN backend: the worker reconnects on its own (with
+      // backoff) and is woken again by the next enqueue.
+      await modules.tenant.runAsDatabaseSystem(() =>
+        q("SELECT pg_terminate_backend($1)", [sessionPid])
+      );
+      await waitUntil(
+        async () => {
+          const pids = await listenSessions();
+
+          return (
+            workerStore.enqueueNotificationStatus().listening &&
+            pids.length === 1 &&
+            pids[0] !== sessionPid
+          );
+        },
+        { label: "a new LISTEN session" }
+      );
+
+      const second = await enqueueAndAwaitClaim("doc-woken-2");
+
+      assert.ok(
+        Number(second.row.delay_ms) < 2000,
+        `claimed ${second.row.delay_ms} ms after the enqueue once reconnected`
+      );
+      assert.deepEqual(ingested, ["doc-woken-1", "doc-woken-2"]);
+    } finally {
+      await worker.stop();
+    }
+
+    assert.equal(workerStore.enqueueNotificationStatus().listening, false);
+    await waitUntil(async () => (await listenSessions()).length === 0, {
+      label: "stop to close the LISTEN session",
+    });
+  });
+
+  test("with the PostgreSQL registry, sync mode finds another instance's upload on a lookup miss and in the tenant refresh", async () => {
+    const previousMode = process.env.RAG_INGEST_MODE;
+
+    delete process.env.RAG_INGEST_MODE;
+
+    try {
+      assert.equal(modules.config.isRagIngestAsync(), false);
+      assert.equal(modules.registry.isDocumentRegistryShared(), true);
+
+      // A fresh map, as in a second API instance started before the upload.
+      await modules.registry.resetDocumentRegistry();
+      await modules.registry.initializeDocumentRegistry();
+
+      // The other instance writes through its own store, never this map.
+      const otherInstance = modules.registry.createDocumentRegistryStore();
+      const asAlice = (callback) => modules.tenant.runWithDatabaseTenant(ALICE, callback);
+      const firstDocId = `doc-sync-elsewhere-${suffix}`;
+      const secondDocId = `doc-sync-later-${suffix}`;
+      const upload = (docId) =>
+        asAlice(() =>
+          otherInstance.upsert({
+            docId,
+            fileBuffer: PDF_BYTES,
+            fileName: `${docId}.pdf`,
+            ownerUserId: ALICE.userId,
+            workspaceId: ALICE.workspaceId,
+          })
+        );
+
+      await upload(firstDocId);
+      assert.equal(modules.rag.getDocument(firstDocId, ALICE), null);
+
+      // What /chat, DELETE /documents/:docId and GET /ingest-jobs do on a miss.
+      await asAlice(() => modules.worker.loadDocumentsIngestedElsewhere(modules.rag, [firstDocId]));
+      assert.equal(modules.rag.getDocument(firstDocId, ALICE).fileName, `${firstDocId}.pdf`);
+      assert.equal(modules.rag.getDocument(firstDocId, BOB), null);
+
+      // It deletes that one and uploads another; GET /documents follows.
+      await asAlice(() => otherInstance.delete(firstDocId, ALICE));
+      await upload(secondDocId);
+      await asAlice(() =>
+        modules.worker.refreshDocumentsIngestedElsewhere(modules.rag, ALICE)
+      );
+
+      const listed = modules.rag.listDocuments(ALICE).map((document) => document.docId);
+
+      assert.ok(listed.includes(secondDocId));
+      assert.ok(!listed.includes(firstDocId));
+    } finally {
+      if (previousMode === undefined) {
+        delete process.env.RAG_INGEST_MODE;
+      } else {
+        process.env.RAG_INGEST_MODE = previousMode;
+      }
+    }
+  });
+
+  test("with the PostgreSQL registry, a delete or clear another instance made is seen here, and a clear removes rows this map never loaded", async () => {
+    await modules.registry.resetDocumentRegistry();
+    await modules.registry.initializeDocumentRegistry();
+
+    const otherInstance = modules.registry.createDocumentRegistryStore();
+    const asTenant = (scope, callback) => modules.tenant.runWithDatabaseTenant(scope, callback);
+    const asAlice = (callback) => asTenant(ALICE, callback);
+    const upload = (docId, scope = ALICE) =>
+      asTenant(scope, () =>
+        otherInstance.upsert({
+          docId,
+          fileBuffer: PDF_BYTES,
+          fileName: `${docId}.pdf`,
+          ownerUserId: scope.userId,
+          workspaceId: scope.workspaceId,
+        })
+      );
+    const rowExists = async (docId) =>
+      (
+        await modules.tenant.runAsDatabaseSystem(() =>
+          q(`SELECT 1 FROM ${tables.documents} WHERE doc_id = $1`, [docId])
+        )
+      ).rowCount > 0;
+    const staleDocId = `doc-deleted-elsewhere-${suffix}`;
+    const deletedTwiceDocId = `doc-deleted-twice-${suffix}`;
+    const loadedDocId = `doc-clear-loaded-${suffix}`;
+    const unseenDocId = `doc-clear-unseen-${suffix}`;
+    const bobDocId = `doc-clear-bob-${suffix}`;
+
+    // A hit that another instance deleted: the read by id drops it.
+    await upload(staleDocId);
+    await asAlice(() => modules.worker.loadDocumentsIngestedElsewhere(modules.rag, [staleDocId]));
+    assert.ok(modules.rag.getDocument(staleDocId, ALICE));
+    await asAlice(() => otherInstance.delete(staleDocId, ALICE));
+    await asAlice(() => modules.worker.loadDocumentsIngestedElsewhere(modules.rag, [staleDocId]));
+    assert.equal(modules.rag.getDocument(staleDocId, ALICE), null);
+
+    // A delete of a document the map still holds but the table no longer
+    // has: the pgvector delete transaction deletes nothing and answers null.
+    await upload(deletedTwiceDocId);
+    await asAlice(() => modules.worker.loadDocumentsIngestedElsewhere(modules.rag, [deletedTwiceDocId]));
+    await asAlice(() => otherInstance.delete(deletedTwiceDocId, ALICE));
+    assert.equal(
+      await asAlice(() => modules.rag.deleteDocument(deletedTwiceDocId, { accessScope: ALICE })),
+      null
+    );
+    assert.equal(modules.rag.getDocument(deletedTwiceDocId, ALICE), null);
+
+    // A clear on this instance covers what the table holds for alice,
+    // including a document another instance uploaded after this map was read.
+    await upload(loadedDocId);
+    await asAlice(() => modules.worker.loadDocumentsIngestedElsewhere(modules.rag, [loadedDocId]));
+    await upload(unseenDocId);
+    await upload(bobDocId, BOB);
+    assert.equal(modules.rag.getDocument(unseenDocId, ALICE), null);
+
+    const cleared = await asAlice(() => modules.rag.clearDocuments({ accessScope: ALICE }));
+    const clearedIds = cleared.map((document) => document.docId);
+
+    assert.ok(clearedIds.includes(loadedDocId));
+    assert.ok(clearedIds.includes(unseenDocId), "the DELETE, not the map, decides what a clear covers");
+    assert.equal(await rowExists(loadedDocId), false);
+    assert.equal(await rowExists(unseenDocId), false);
+    assert.equal(await rowExists(bobDocId), true, "bob's row is outside alice's clear");
+    assert.equal(
+      (
+        await modules.tenant.runAsDatabaseSystem(() =>
+          q(
+            `SELECT count(*)::int AS count FROM ${tables.documents} WHERE owner_user_id = $1 AND workspace_id = $2`,
+            [ALICE.userId, ALICE.workspaceId]
+          )
+        )
+      ).rows[0].count,
+      0
+    );
+    assert.deepEqual(modules.rag.listDocuments(ALICE), []);
+
+    await asAlice(() => modules.worker.refreshDocumentsIngestedElsewhere(modules.rag, ALICE));
+    assert.deepEqual(modules.rag.listDocuments(ALICE), [], "nothing comes back after the COMMIT");
+    await asTenant(BOB, () => otherInstance.delete(bobDocId, BOB));
   });
 }

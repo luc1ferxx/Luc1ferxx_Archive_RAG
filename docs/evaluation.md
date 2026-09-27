@@ -26,6 +26,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run eval:prompt-injection` | 提示注入红队：带恶意指令的文档加直接注入的问题，分别统计文档 RAG 答案（MCP `archive_ask`）和 Agent 路径（`/chat`）的攻击成功率、受攻击时仍答对的比例、对照组正确率，以及 claim 评审在注入证据下的错误接受率。需要真实模型；`--only` 只跑指定用例。 |
 | `cd server && npm run eval:tenant-isolation` | 数据库行级安全的改前/改后对比：在一次性数据库上比较 `POSTGRES_ROW_LEVEL_SECURITY=off` 与 `enforce` 下的越权读写、延迟和查询计划；需要能建角色和建库的 `PGVECTOR_TEST_DATABASE_URL`。 |
 | `cd server && npm run eval:load-test:pgvector` | API 闭环压测：在一次性 PostgreSQL 上，对 `/chat` 和 `GET /documents` 测吞吐、p50/p95/p99 和错误率，模型用假服务并注入延迟，pgvector 和 local 两种存储都测；只测 local 用 `eval:load-test`。见"压测与规模"。 |
+| `cd server && npm run eval:load-test:cluster` / `eval:load-test:ingest` | 多实例压测 / 上传入库压测，见"多实例与异步入库"。 |
 | `cd server && npm run bench:pgvector-scale` | pgvector 规模基准：在一次性集群上从 1 万到 100 万个分块，测加载、建索引、磁盘占用、行级安全下的检索延迟和 recall@10。见"压测与规模"。 |
 | `cd server && npm run coverage:targets` | 把目标覆盖率作为硬门控运行。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
@@ -1106,7 +1107,7 @@ train 上（400 题）的损失拆解：
 
 - **模型 0 ms**：吞吐停在约 91 req/s（local 约 108）。每个请求约 12–13 ms 的应用 CPU，单个事件循环就是瓶颈。要更高吞吐得开多进程或多实例。
 - **模型 800 ms**：并发 16 以上时在途峰值正好是 8，也就是 `RAG_LLM_MAX_CONCURRENCY`，吞吐约 8 / 0.8 s = 10 req/s，其余请求在上限后面排队。模型并发上限决定容量。
-- **`GET /documents`**：两种模式都不查数据库，读的是进程内的文档注册表，所以约 13k req/s 衡量的是 HTTP、鉴权和范围过滤的开销，与存储无关。
+- **`GET /documents`**：上表是多实例改动之前测的，当时两种存储都只读进程内注册表。现在 pgvector 下注册表以 PostgreSQL 为准（其他实例和入库 worker 也会写），每个请求和每个 `POST /chat` 的开头先按租户重读一次 documents 表，同一租户的并发请求共用一次查询。2026-09-26 重测（单实例、无租户）：pgvector 并发 1 约 2,800 req/s（每请求 1 次查询），并发 32 约 12,500 req/s、p95 3.1 ms（每请求约 0.08 次查询）；local 并发 32 约 13,900 req/s。
 - **查询 embedding 缓存**：80 个问题循环使用，第一轮之后查询 embedding 全部命中缓存，所以表里的 `/chat` 吞吐不含查询 embedding 的成本。
 - **可比性**：压测器、假模型和应用在同一台机器上运行，只能和同一台机器上的结果比较。pgvector 两次完整运行相差约 1%，local 在 0 ms 档相差约 8%。
 
@@ -1155,6 +1156,33 @@ train 上（400 题）的损失拆解：
   - 少返回的问题消失了，代价是多一次数据库往返，每次查询多 0.04–0.17 ms。
   - 10 万分块那一组，过滤后剩下的候选本来就够 10 条，所以返回条数不受影响。剩下的 recall 损失来自 HNSW 本身的近似，和不过滤时的整表 recall（0.925 / 0.93）同级。0.898 → 0.912 在两次建图之间的波动范围内（0.06），不能算改进。
   - 同一组 10 万分块、1000 篇文档（5 万个分块）的 hybrid 检索 p50 约 140 ms，而 dense 只要 2 ms，时间几乎都花在全文检索这一路。原因和修复见下面"全文检索与行级安全"。
+
+### 多实例与异步入库（2026-09-26）
+
+新开关：`--instances N`（N 个应用进程连同一个数据库）、`--balance least-outstanding|round-robin`（默认 least-outstanding，和 nginx `least_conn`、Envoy `LEAST_REQUEST` 相同）、`--shared-state redis`（wrapper 另起一次性 Redis）、`--tenant`（每个请求带租户头，数据库语句走租户事务和行级安全；不加时是 owner 路径，行级安全不生效，报告会写明）、`--no-analyze`（同一代码前后对照）、`--scenario ingest`（生成 PDF 并发上传）、`--ingest-mode sync|async`、`--ingest-workers K`、`--repeat N`（给出均值和 95% t 区间）。报告记录工作区 diff 的哈希和压测工具自身的哈希，wrapper 传入 PostgreSQL 的 pid，每档记录主机、压测器和 PostgreSQL 的 CPU。每个实例轮流接到全部问题；探测请求和任务轮询与业务流量分开做负载均衡，轮询间隔 1 秒（和前端一致）。
+
+以下都是单台机器（Apple M5 Pro）、一次性 PostgreSQL 18.6 + pgvector 0.8.6、假模型，每组单次运行（入库那组重复 3 次）：
+
+| 场景 | 1 实例 | 2 实例 | 4 实例 |
+| --- | --- | --- | --- |
+| `/chat`，模型 0 ms，并发 32，owner 路径 | 88.4 req/s | 160.7 req/s | 240.1 req/s（2.72 倍） |
+| 同上，按租户走行级安全 | 78.6 req/s | — | 201.4 req/s（2.56 倍） |
+
+- owner 路径下每个 `/chat` 发 46 条数据库语句，PostgreSQL 每请求 3.4–4.5 ms CPU；走行级安全时是 166 条（每条语句一个租户短事务），PostgreSQL 6.0–7.8 ms，吞吐低 11–16%。
+- 4 实例时整机占用约 6.9 核，超过这台机器的 5 个高性能核，每请求的应用 CPU 时间从 12.9 ms 升到 17.6 ms，部分来自核的异构，不全是应用开销。
+- 同一代码、4 实例、并发 8：加载后跑 ANALYZE 与否，230.3 对 184.5 req/s，PostgreSQL 每请求 3.8 对 12.6 ms。统计信息过期时查询计划明显变差。
+- 模型并发上限（4 实例、并发 64、模型 800 ms、`RAG_LLM_MAX_CONCURRENCY=8`）：进程内状态时整个集群同时在途 32 个，39.9 req/s；Redis 共享时正好 8 个，9.94 req/s = 8 / 0.8 s，各实例延迟均值 6.42–6.46 s、p95 6.46–7.22 s。等待方每秒约执行 359 次获取脚本（每个槽位 36 次），这是按等待时长计的开销，不能按请求摊。
+- 入库（2 个 API 实例、64 篇一次性提交、并行度 8、后台 2 路 chat、embedding 200 ms，3 次重复）：
+
+  | 模式 | 从提交到入库完成 p50 | 吞吐 | 后台 chat p95 增量 |
+  | --- | --- | --- | --- |
+  | 同步 | 1,320 [1,277, 1,364] ms | 24.9 [24.1, 25.7] 篇/秒 | +19.3 [16.1, 22.4] ms |
+  | 异步，API 进程内 worker | 947 [934, 960] ms | 23.2 [21.9, 24.6] 篇/秒 | +16.9 [15.6, 18.3] ms |
+  | 异步，独立 worker | 930 [877, 982] ms | 35.1 [34.3, 35.9] 篇/秒 | +18.5 [9.4, 27.7] ms |
+
+  - 能说的：独立 worker 吞吐最高；两种异步都比同步更早完成一批文档的入库（p50）；上传请求本身从约 257 ms 变成几毫秒的 202。
+  - 不能说的：同步和进程内异步的吞吐区间重叠，三种模式对后台 chat 的干扰区间也重叠，都不排序。
+  - 异步的排队等待 p50 约 690 ms、处理约 235 ms；"可检索"定义为在另一个实例上对新文档提问并得到带引用的正确答案，异步 p50 约 1,039 ms。
 
 ### 全文检索与行级安全（迁移 014）
 

@@ -1,5 +1,5 @@
 import { readFile as readBinaryFile } from "fs/promises";
-import { getDocumentsPostgresTable } from "./config.js";
+import { getDocumentsPostgresTable, isPostgresDatabaseConfigured } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { createDocumentLegacyImporter as createDefaultDocumentLegacyImporter } from "./document-legacy-importer.js";
 import { buildPublicFilePath } from "./document-utils.js";
@@ -8,16 +8,24 @@ import { runAsDatabaseSystem } from "./postgres-tenant.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// What a registry store says it is (`store.backend`). Only a PostgreSQL store
+// is written by more than one process; see isDocumentRegistryShared.
+export const DOCUMENT_REGISTRY_BACKENDS = Object.freeze({
+  filesystem: "filesystem",
+  postgres: "postgres",
+});
+
 let configuredDocumentRegistryStore = null;
 let documentRegistry = new Map();
 let documentRegistryInitialized = false;
 let legacyImportAttempted = false;
-// Document writes of this process whose transaction has not settled, and the
-// refreshes running now (by access scope); see trackDocumentWrite and
-// refreshDocumentRegistry.
+// Document writes of this process whose transaction has not settled, the
+// store reads running now (each with the ids written while it ran), and per
+// access scope the refresh listing the store and the one queued behind it;
+// see trackDocumentWrite, loadDocumentsFromStore and refreshDocumentRegistry.
 const documentWritesInFlight = new Map();
 const activeRefreshes = new Set();
-const refreshesInFlight = new Map();
+const refreshQueues = new Map();
 
 const toPositiveInteger = (value, fallbackValue = 0) => {
   const parsedValue = Number.parseInt(value ?? fallbackValue, 10);
@@ -253,6 +261,8 @@ export const createDocumentRegistryStore = ({
   readFile = readBinaryFile,
   runMigrations = runPostgresMigrations,
 } = {}) => ({
+  backend: DOCUMENT_REGISTRY_BACKENDS.postgres,
+
   async initialize() {
     await runMigrations();
 
@@ -466,35 +476,52 @@ export const createDocumentRegistryStore = ({
     return result.rows[0] ? mapRowToStoredDocument(result.rows[0]) : null;
   },
 
+  // Deletes the scope's rows (every row when the scope is empty) in one
+  // statement on `client` and returns the documents it deleted, including
+  // rows another process registered that this process's map never loaded.
   async clear(accessScope = {}, { client = null } = {}) {
     const tableName = ensureTableName(getDocumentsTable);
     const query = resolveQuery(queryPostgres, client);
+    const scope = normalizeAccessScope(accessScope);
+    const result = hasAccessScope(scope)
+      ? await query(
+          `
+            DELETE FROM ${tableName}
+            WHERE (owner_user_id <> '' OR workspace_id <> '')
+              AND (owner_user_id = '' OR owner_user_id = $1)
+              AND (workspace_id = '' OR workspace_id = $2)
+            RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+          `,
+          [scope.userId, scope.workspaceId]
+        )
+      : await query(
+          `
+            DELETE FROM ${tableName}
+            RETURNING doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+          `
+        );
 
-    if (hasAccessScope(accessScope)) {
-      const scopedDocuments = await this.list(accessScope);
-      const scopedDocIds = scopedDocuments.map((document) => document.docId);
-
-      if (scopedDocIds.length === 0) {
-        return true;
-      }
-
-      await query(
-        `
-          DELETE FROM ${tableName}
-          WHERE doc_id = ANY($1::text[])
-        `,
-        [scopedDocIds]
-      );
-      return true;
-    }
-
-    await query(`DELETE FROM ${tableName}`);
-    return true;
+    return (result?.rows ?? []).map(mapRowToStoredDocument);
   },
 });
 
 const getDocumentRegistryStore = () =>
   configuredDocumentRegistryStore ?? createDocumentRegistryStore();
+
+/**
+ * Whether other processes write the store behind this process's registry map,
+ * so the map can miss documents they added and keep ones they deleted. True for
+ * the PostgreSQL registry, in either ingest mode: every API instance and every
+ * ingest worker process registers into the same table. False for the
+ * file-backed registry (standalone: one process ingests) and for a store that
+ * does not declare itself PostgreSQL, such as an in-memory test or evaluation
+ * store. The default store counts only when a database is configured, since
+ * without one it cannot answer at all.
+ */
+export const isDocumentRegistryShared = () =>
+  configuredDocumentRegistryStore
+    ? configuredDocumentRegistryStore.backend === DOCUMENT_REGISTRY_BACKENDS.postgres
+    : isPostgresDatabaseConfigured();
 
 const setDocumentRegistry = (documents = []) => {
   documentRegistry = new Map(
@@ -621,58 +648,90 @@ export const resyncDocument = async (docId) => {
 };
 
 /**
- * Marks `docId` as written by this process until `callback` settles. The
- * pgvector ingest and delete paths change the map inside their transaction,
- * before COMMIT, and a refresh listing the store on another connection cannot
- * see that write yet; the refresh leaves such a document as this process has
- * it, including one whose write settled while the listing was in flight.
+ * Marks `docIds` (one id or a list) as written by this process until
+ * `callback` settles. The pgvector ingest, delete and clear paths change the
+ * map inside their transaction, before COMMIT, and a store read on another
+ * connection cannot see that write yet; a refresh or a named load leaves such a
+ * document as this process has it, including one whose write settled while the
+ * read was in flight. `callback` receives `track(ids)`, which marks more ids
+ * the same way until the callback settles: a clear learns which rows it
+ * deleted only from its DELETE, inside the transaction.
  */
-export const trackDocumentWrite = async (docId, callback) => {
-  const normalizedDocId = normalizeDocId(docId);
-  const touch = () => {
+export const trackDocumentWrite = async (docIds, callback) => {
+  const tracked = [];
+  const touch = (ids) => {
     for (const touched of activeRefreshes) {
-      touched.add(normalizedDocId);
+      for (const docId of ids) {
+        touched.add(docId);
+      }
     }
   };
+  const track = (ids) => {
+    const added = normalizeDocIds(Array.isArray(ids) ? ids : [ids]);
 
-  documentWritesInFlight.set(
-    normalizedDocId,
-    (documentWritesInFlight.get(normalizedDocId) ?? 0) + 1
-  );
-  touch();
-
-  try {
-    return await callback();
-  } finally {
-    const remaining = (documentWritesInFlight.get(normalizedDocId) ?? 1) - 1;
-
-    if (remaining > 0) {
-      documentWritesInFlight.set(normalizedDocId, remaining);
-    } else {
-      documentWritesInFlight.delete(normalizedDocId);
+    for (const docId of added) {
+      documentWritesInFlight.set(docId, (documentWritesInFlight.get(docId) ?? 0) + 1);
+      tracked.push(docId);
     }
 
-    touch();
+    touch(added);
+  };
+
+  track(docIds);
+
+  try {
+    return await callback(track);
+  } finally {
+    for (const docId of tracked) {
+      const remaining = (documentWritesInFlight.get(docId) ?? 1) - 1;
+
+      if (remaining > 0) {
+        documentWritesInFlight.set(docId, remaining);
+      } else {
+        documentWritesInFlight.delete(docId);
+      }
+    }
+
+    touch(tracked);
   }
 };
 
 // The map is filled at startup and updated by this process's own writes, so a
-// document an ingest worker in another process committed is invisible here
-// until it is read back. Both loaders below read as the owner for the same
-// reason as the initial load, and neither lets a store row overwrite an entry
-// this process changed while the read was in flight.
+// document another process committed (an API instance's upload, an ingest
+// worker's job) is invisible here until it is read back, and one another
+// process deleted stays until then. Both readers below read as the owner for
+// the same reason as the initial load, and apply a store row only to an entry
+// this process neither is writing (trackDocumentWrite) nor changed while the
+// read was in flight: the read may predate that write, and before its COMMIT
+// another connection still sees the old row. Callers use them only when
+// isDocumentRegistryShared().
 
 /**
- * Reads the named documents this process does not hold and adds the ones the
- * store has. A lookup that misses is the cheap signal that another process may
- * have registered the document; a docId the store does not know stays missing.
+ * Runs `read` with a set that collects every id written while it runs (and
+ * starts with the ids being written now); see trackDocumentWrite.
+ */
+const readWhileTrackingWrites = async (read) => {
+  const touched = new Set(documentWritesInFlight.keys());
+
+  activeRefreshes.add(touched);
+
+  try {
+    return { result: await read(), touched };
+  } finally {
+    activeRefreshes.delete(touched);
+  }
+};
+
+/**
+ * Brings the named documents in line with the store: adds the ones another
+ * process registered, replaces a held entry with its stored row, and drops an
+ * entry whose row is gone (another process deleted it). A docId the store does
+ * not know stays missing. Returns the ids it added.
  */
 export const loadDocumentsFromStore = async (docIds) => {
-  const missingDocIds = normalizeDocIds(docIds).filter(
-    (docId) => !documentRegistry.has(docId)
-  );
+  const requestedDocIds = normalizeDocIds(docIds);
 
-  if (missingDocIds.length === 0) {
+  if (requestedDocIds.length === 0) {
     return [];
   }
 
@@ -680,28 +739,42 @@ export const loadDocumentsFromStore = async (docIds) => {
     await initializeDocumentRegistry();
   }
 
+  const before = new Map(requestedDocIds.map((docId) => [docId, documentRegistry.get(docId)]));
   const store = getDocumentRegistryStore();
-  const storedDocuments = await runAsDatabaseSystem(async () => {
-    if (store.listByIds) {
-      return store.listByIds(missingDocIds);
-    }
+  const { result: storedDocuments, touched } = await readWhileTrackingWrites(() =>
+    runAsDatabaseSystem(async () => {
+      if (store.listByIds) {
+        return store.listByIds(requestedDocIds);
+      }
 
-    const wanted = new Set(missingDocIds);
-    const documents = store.list ? await store.list() : [];
+      const wanted = new Set(requestedDocIds);
+      const documents = store.list ? await store.list() : [];
 
-    return documents.filter((document) => wanted.has(normalizeDocId(document.docId)));
-  });
+      return documents.filter((document) => wanted.has(normalizeDocId(document.docId)));
+    })
+  );
+  const stored = new Map(
+    storedDocuments
+      .map((document) => toStoredDocument(document))
+      .filter((document) => document.docId)
+      .map((document) => [document.docId, document])
+  );
   const loaded = [];
 
-  for (const document of storedDocuments) {
-    const storedDocument = toStoredDocument(document);
-
-    if (!storedDocument.docId || documentRegistry.has(storedDocument.docId)) {
+  for (const docId of requestedDocIds) {
+    if (touched.has(docId) || documentRegistry.get(docId) !== before.get(docId)) {
       continue;
     }
 
-    documentRegistry.set(storedDocument.docId, storedDocument);
-    loaded.push(storedDocument.docId);
+    if (stored.has(docId)) {
+      documentRegistry.set(docId, stored.get(docId));
+
+      if (!before.get(docId)) {
+        loaded.push(docId);
+      }
+    } else if (before.get(docId)) {
+      documentRegistry.delete(docId);
+    }
   }
 
   return loaded;
@@ -709,39 +782,50 @@ export const loadDocumentsFromStore = async (docIds) => {
 
 const refreshFromStore = async (accessScope) => {
   const before = new Map(documentRegistry);
-  const touched = new Set(documentWritesInFlight.keys());
-
-  activeRefreshes.add(touched);
-
-  try {
-    const store = getDocumentRegistryStore();
-    const storedDocuments = await runAsDatabaseSystem(async () =>
+  const store = getDocumentRegistryStore();
+  const { result: storedDocuments, touched } = await readWhileTrackingWrites(() =>
+    runAsDatabaseSystem(async () =>
       (store.list ? await store.list(accessScope) : []).filter((document) =>
         documentMatchesAccessScope(toStoredDocument(document), accessScope)
       )
-    );
-    const stored = new Map(
-      storedDocuments
-        .map((document) => toStoredDocument(document))
-        .filter((document) => document.docId)
-        .map((document) => [document.docId, document])
-    );
+    )
+  );
+  const stored = new Map(
+    storedDocuments
+      .map((document) => toStoredDocument(document))
+      .filter((document) => document.docId)
+      .map((document) => [document.docId, document])
+  );
 
-    for (const docId of new Set([...before.keys(), ...stored.keys()])) {
-      if (touched.has(docId) || documentRegistry.get(docId) !== before.get(docId)) {
-        continue;
-      }
-
-      if (stored.has(docId)) {
-        documentRegistry.set(docId, stored.get(docId));
-      } else if (documentMatchesAccessScope(before.get(docId), accessScope)) {
-        // Only an entry the listing covered can be missing from it.
-        documentRegistry.delete(docId);
-      }
+  for (const docId of new Set([...before.keys(), ...stored.keys()])) {
+    if (touched.has(docId) || documentRegistry.get(docId) !== before.get(docId)) {
+      continue;
     }
-  } finally {
-    activeRefreshes.delete(touched);
+
+    if (stored.has(docId)) {
+      documentRegistry.set(docId, stored.get(docId));
+    } else if (documentMatchesAccessScope(before.get(docId), accessScope)) {
+      // Only an entry the listing covered can be missing from it.
+      documentRegistry.delete(docId);
+    }
   }
+};
+
+const noop = () => {};
+
+const startRefresh = (key, scope, queue) => {
+  const refresh = refreshFromStore(scope).finally(() => {
+    if (queue.running === refresh) {
+      queue.running = null;
+    }
+
+    if (!queue.running && !queue.next && refreshQueues.get(key) === queue) {
+      refreshQueues.delete(key);
+    }
+  });
+
+  queue.running = refresh;
+  return refresh;
 };
 
 /**
@@ -751,8 +835,13 @@ const refreshFromStore = async (accessScope) => {
  * alone, so a request reads its own tenant's rows and not every tenant's. An
  * entry this process set or removed after the listing started is kept as this
  * process left it, because the listing may predate that write, and so is one
- * this process is writing in a transaction (trackDocumentWrite). Concurrent
- * callers with the same scope share one listing.
+ * this process is writing in a transaction (trackDocumentWrite).
+ *
+ * A caller waits for a listing that starts after it arrived: one already in
+ * flight may predate a write the caller knows of (another instance's 201 or
+ * delete). Callers with the same scope that arrive while a listing runs share
+ * the one queued behind it, so a scope has at most one listing running and one
+ * waiting.
  */
 export const refreshDocumentRegistry = async (accessScope = {}) => {
   if (!documentRegistryInitialized) {
@@ -762,13 +851,23 @@ export const refreshDocumentRegistry = async (accessScope = {}) => {
 
   const scope = normalizeAccessScope(accessScope);
   const key = `${scope.userId}\u0000${scope.workspaceId}`;
-  let refresh = refreshesInFlight.get(key);
+  let queue = refreshQueues.get(key);
 
-  if (!refresh) {
-    refresh = refreshFromStore(scope).finally(() => {
-      refreshesInFlight.delete(key);
+  if (!queue) {
+    queue = { next: null, running: null };
+    refreshQueues.set(key, queue);
+  }
+
+  let refresh = queue.next;
+
+  if (!refresh && queue.running) {
+    refresh = queue.running.then(noop, noop).then(() => {
+      queue.next = null;
+      return startRefresh(key, scope, queue);
     });
-    refreshesInFlight.set(key, refresh);
+    queue.next = refresh;
+  } else if (!refresh) {
+    refresh = startRefresh(key, scope, queue);
   }
 
   await refresh;
@@ -801,6 +900,11 @@ export const getDocumentFile = async (docId, accessScope = {}) => {
   return store.getFile ? store.getFile(docId, accessScope) : null;
 };
 
+/**
+ * Deletes a document this caller can see. Null when the map does not hold it
+ * for the scope, or when the store deleted nothing (another process deleted
+ * the row): the stale entry is dropped either way and the caller answers 404.
+ */
 export const deleteDocument = async (
   docId,
   accessScope = {},
@@ -813,33 +917,55 @@ export const deleteDocument = async (
   }
 
   const store = getDocumentRegistryStore();
-
-  if (store.delete) {
-    await store.delete(docId, accessScope, { client });
-  }
+  const deleted = store.delete ? await store.delete(docId, accessScope, { client }) : undefined;
 
   documentRegistry.delete(normalizeDocId(docId));
-  return toPublicDocument(storedDocument);
+  return deleted === null ? null : toPublicDocument(storedDocument);
 };
 
-export const clearDocuments = async ({ accessScope = {}, client = null } = {}) => {
-  const documents = listDocuments(accessScope);
+/**
+ * Clears the scope's documents (every document for an empty scope) from the
+ * store and the map, and returns the documents cleared. A store that reports
+ * what it deleted (the PostgreSQL store's DELETE ... RETURNING) decides: that
+ * includes rows other processes registered that the map never loaded, and
+ * leaves out ones another process had already deleted. Otherwise the map's own
+ * listing stands in. `onCleared(docIds)` is called with those ids before the
+ * map changes; rag/index.js passes trackDocumentWrite's `track`, so a refresh
+ * whose listing predates the COMMIT does not bring them back. An entry another
+ * write of this process has in flight (an ingest not committed yet, whose row
+ * the DELETE could not see) is kept unless the store deleted it.
+ */
+export const clearDocuments = async ({
+  accessScope = {},
+  client = null,
+  onCleared = null,
+} = {}) => {
+  const listed = listDocuments(accessScope);
+  const otherWritesInFlight = new Set(documentWritesInFlight.keys());
   const store = getDocumentRegistryStore();
+  const result = store.clear ? await store.clear(accessScope, { client }) : null;
+  const cleared = Array.isArray(result)
+    ? result
+        .map((document) => toStoredDocument(document))
+        .filter((document) => document.docId)
+        .map((document) => toPublicDocument(document))
+    : listed;
+  const clearedDocIds = new Set(cleared.map((document) => document.docId));
 
-  if (store.clear) {
-    await store.clear(accessScope, { client });
+  onCleared?.([...clearedDocIds]);
+
+  for (const document of listed) {
+    if (clearedDocIds.has(document.docId) || !otherWritesInFlight.has(document.docId)) {
+      documentRegistry.delete(document.docId);
+    }
   }
 
-  if (hasAccessScope(accessScope)) {
-    for (const document of documents) {
-      documentRegistry.delete(normalizeDocId(document.docId));
-    }
-  } else {
-    documentRegistry = new Map();
+  for (const docId of clearedDocIds) {
+    documentRegistry.delete(docId);
   }
 
   documentRegistryInitialized = true;
-  return documents;
+  return cleared;
 };
 
 export const resetDocumentRegistry = async () => {

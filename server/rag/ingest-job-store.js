@@ -11,7 +11,11 @@ import {
 } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { documentMatchesAccessScope, hasDocument } from "./doc-registry.js";
-import { queryPostgres as queryDefaultPostgres } from "./postgres.js";
+import {
+  createDedicatedPostgresClient,
+  queryPostgres as queryDefaultPostgres,
+} from "./postgres.js";
+import { createPostgresNotificationListener } from "./postgres-notification-listener.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 
 // Jobs for RAG_INGEST_MODE=async (migration 015). The upload route enqueues a
@@ -36,6 +40,14 @@ import { runAsDatabaseSystem } from "./postgres-tenant.js";
 // - pruneFinished() deletes succeeded and failed jobs older than a cutoff.
 // - get() answers only for a job the access scope owns, by the same rule as
 //   the documents the jobs become (documentMatchesAccessScope).
+// - subscribeToEnqueues(listener) calls `listener` whenever a job may have
+//   become claimable now (an enqueue or a release), so idle workers claim it
+//   at once instead of at their next poll, and returns an async unsubscribe.
+//   The in-memory store calls it directly. The PostgreSQL store calls it
+//   directly for this process's own enqueues and, for every other process's,
+//   through NOTIFY on a channel named after the jobs table, which one dedicated
+//   LISTEN session per store receives while anything is subscribed. A wake-up
+//   is only ever a hint: workers keep polling, and a claim decides.
 
 export const INGEST_JOB_STATUSES = Object.freeze({
   failed: "failed",
@@ -237,11 +249,53 @@ const ensureTableName = (name, variableName) => {
   return name;
 };
 
+/**
+ * The NOTIFY channel of a jobs table: its name, lowercased as PostgreSQL folds
+ * the unquoted identifier, plus `_enqueued`, cut to the 63 bytes PostgreSQL
+ * keeps. Two tables whose names only differ past that point share a channel,
+ * which costs a spurious wake-up, nothing more.
+ */
+export const getIngestJobsNotifyChannel = (tableName) =>
+  `${String(tableName).toLowerCase()}_enqueued`.slice(0, 63);
+
+// Calls every subscriber; one that throws must neither stop the others nor
+// fail the enqueue that announced the job.
+const createEnqueueSubscribers = (logger) => {
+  const listeners = new Set();
+
+  return {
+    add: (listener) => {
+      if (typeof listener !== "function") {
+        throw new Error("subscribeToEnqueues requires a listener function.");
+      }
+
+      listeners.add(listener);
+    },
+    delete: (listener) => listeners.delete(listener),
+    get size() {
+      return listeners.size;
+    },
+    wake: () => {
+      for (const listener of [...listeners]) {
+        try {
+          listener();
+        } catch (error) {
+          logger.error?.("[ingest-jobs] an enqueue subscriber failed.", error);
+        }
+      }
+    },
+  };
+};
+
 export const createPostgresIngestJobStore = ({
+  createListenClient = createDedicatedPostgresClient,
   fileReadChunkBytes = FILE_READ_CHUNK_BYTES,
   getDocumentsTable = getDocumentsPostgresTable,
   getPendingLimits = resolvePendingLimits,
   getTable = getIngestJobsPostgresTable,
+  listenRetryBaseMs,
+  listenRetryMaxMs,
+  logger = console,
   queryPostgres = queryDefaultPostgres,
   runMigrations = runPostgresMigrations,
 } = {}) => {
@@ -252,9 +306,80 @@ export const createPostgresIngestJobStore = ({
   // request-side enqueue and get deliberately do not: they run under the
   // request's tenant and row-level security checks them.
   const runAsSystem = (callback) => runAsDatabaseSystem(callback);
+  // This process's subscribers are woken directly after its own enqueues, so
+  // the NOTIFY those enqueues send carries this store's id and its LISTEN
+  // session skips them instead of waking the same loops twice.
+  const instanceId = randomUUID();
+  const subscribers = createEnqueueSubscribers(logger);
+  let notificationListener = null;
+
+  const startListening = () => {
+    const listener = createPostgresNotificationListener({
+      channel: getIngestJobsNotifyChannel(tableName()),
+      createClient: createListenClient,
+      logger,
+      // Jobs enqueued while no session listened were announced to nobody.
+      onListening: () => subscribers.wake(),
+      onNotification: (payload) => {
+        if (payload !== instanceId) {
+          subscribers.wake();
+        }
+      },
+      retryBaseMs: listenRetryBaseMs,
+      retryMaxMs: listenRetryMaxMs,
+    });
+
+    listener.start();
+    return listener;
+  };
 
   return {
     backend: "postgres",
+
+    /**
+     * Wake-up state for health output and tests: whether the LISTEN session is
+     * open right now and how many subscribers it serves.
+     */
+    enqueueNotificationStatus() {
+      return {
+        channel: notificationListener?.channel ?? null,
+        failures: notificationListener?.failures ?? 0,
+        listening: notificationListener?.listening ?? false,
+        subscribers: subscribers.size,
+      };
+    },
+
+    // The first subscriber opens the LISTEN session (in the background: this
+    // returns at once and never waits for the database), the last unsubscribe
+    // closes it.
+    subscribeToEnqueues(listener) {
+      subscribers.add(listener);
+
+      try {
+        notificationListener ??= startListening();
+      } catch (error) {
+        subscribers.delete(listener);
+        throw error;
+      }
+
+      let subscribed = true;
+
+      return async () => {
+        if (!subscribed) {
+          return;
+        }
+
+        subscribed = false;
+        subscribers.delete(listener);
+
+        if (subscribers.size === 0 && notificationListener) {
+          const stopping = notificationListener;
+
+          notificationListener = null;
+          await stopping.stop();
+        }
+      };
+    },
 
     async initialize() {
       await runMigrations();
@@ -265,27 +390,35 @@ export const createPostgresIngestJobStore = ({
     // running jobs. Two concurrent uploads can both pass the check, so a cap
     // may be exceeded by the number of uploads racing it; that bounds a
     // runaway client, which is what it is for.
+    //
+    // The NOTIFY is part of the same statement, so it is sent when the INSERT
+    // commits and not at all when the cap refuses the job or the insert rolls
+    // back. Its payload is this store's id and nothing about the job.
     async enqueue(input) {
       const job = normalizeEnqueueInput(input);
       const table = tableName();
       const { maxPendingBytes, maxPendingJobs } = getPendingLimits();
       const result = await queryPostgres(
         `
-          INSERT INTO ${table} (
-            job_id, doc_id, owner_user_id, workspace_id, file_name, file_bytes, status, max_attempts
+          WITH inserted AS (
+            INSERT INTO ${table} (
+              job_id, doc_id, owner_user_id, workspace_id, file_name, file_bytes, status, max_attempts
+            )
+            SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::bytea, 'queued', $7::integer
+            FROM (
+              SELECT COUNT(*) AS pending_jobs,
+                     COALESCE(SUM(octet_length(file_bytes)), 0) AS pending_bytes
+              FROM ${table}
+              WHERE owner_user_id = $3::text
+                AND workspace_id = $4::text
+                AND status IN ('queued', 'running')
+            ) AS pending
+            WHERE ($8::integer = 0 OR pending.pending_jobs < $8::integer)
+              AND ($9::bigint = 0 OR pending.pending_bytes + octet_length($6::bytea) <= $9::bigint)
+            RETURNING ${JOB_COLUMNS}
           )
-          SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::bytea, 'queued', $7::integer
-          FROM (
-            SELECT COUNT(*) AS pending_jobs,
-                   COALESCE(SUM(octet_length(file_bytes)), 0) AS pending_bytes
-            FROM ${table}
-            WHERE owner_user_id = $3::text
-              AND workspace_id = $4::text
-              AND status IN ('queued', 'running')
-          ) AS pending
-          WHERE ($8::integer = 0 OR pending.pending_jobs < $8::integer)
-            AND ($9::bigint = 0 OR pending.pending_bytes + octet_length($6::bytea) <= $9::bigint)
-          RETURNING ${JOB_COLUMNS}
+          SELECT inserted.*, pg_notify($10::text, $11::text) AS notified
+          FROM inserted
         `,
         [
           job.jobId,
@@ -297,6 +430,8 @@ export const createPostgresIngestJobStore = ({
           job.maxAttempts,
           maxPendingJobs,
           maxPendingBytes,
+          getIngestJobsNotifyChannel(table),
+          instanceId,
         ]
       );
 
@@ -304,6 +439,7 @@ export const createPostgresIngestJobStore = ({
         throw createPendingLimitError();
       }
 
+      subscribers.wake();
       return mapRowToJob(result.rows[0]);
     },
 
@@ -540,26 +676,37 @@ export const createPostgresIngestJobStore = ({
 
     // A stopping worker hands its job back without spending the attempt. The
     // cleared claimed_by keeps the fence unique: the next claim is a different
-    // worker, so the stopping worker's late writes cannot match it.
+    // worker, so the stopping worker's late writes cannot match it. The job is
+    // claimable at once, so it is announced like an enqueue.
     async release(fence) {
+      const table = tableName();
       const result = await runAsSystem(() =>
         queryPostgres(
           `
-            UPDATE ${tableName()}
-            SET status = 'queued',
-                available_at = NOW(),
-                attempt_count = GREATEST(attempt_count - 1, 0),
-                claimed_by = NULL,
-                lease_expires_at = NULL,
-                updated_at = NOW()
-            WHERE ${FENCE_SQL}
-            RETURNING job_id
+            WITH released AS (
+              UPDATE ${table}
+              SET status = 'queued',
+                  available_at = NOW(),
+                  attempt_count = GREATEST(attempt_count - 1, 0),
+                  claimed_by = NULL,
+                  lease_expires_at = NULL,
+                  updated_at = NOW()
+              WHERE ${FENCE_SQL}
+              RETURNING job_id
+            )
+            SELECT released.job_id, pg_notify($4::text, $5::text) AS notified
+            FROM released
           `,
-          fenceValues(fence)
+          [...fenceValues(fence), getIngestJobsNotifyChannel(table), instanceId]
         )
       );
 
-      return result.rows.length > 0;
+      if (result.rows.length === 0) {
+        return false;
+      }
+
+      subscribers.wake();
+      return true;
     },
   };
 };
@@ -580,9 +727,11 @@ export const createPostgresIngestJobStore = ({
 export const createInMemoryIngestJobStore = ({
   getPendingLimits = resolvePendingLimits,
   isDocumentCommitted = hasDocument,
+  logger = console,
   now = () => Date.now(),
 } = {}) => {
   const jobs = new Map();
+  const subscribers = createEnqueueSubscribers(logger);
 
   const isPending = (job) =>
     job.status === INGEST_JOB_STATUSES.queued || job.status === INGEST_JOB_STATUSES.running;
@@ -631,6 +780,25 @@ export const createInMemoryIngestJobStore = ({
   return {
     backend: "memory",
 
+    enqueueNotificationStatus() {
+      return { channel: null, failures: 0, listening: false, subscribers: subscribers.size };
+    },
+
+    // The queue lives in this process, so every enqueue is local: subscribers
+    // are called directly.
+    subscribeToEnqueues(listener) {
+      subscribers.add(listener);
+
+      let subscribed = true;
+
+      return async () => {
+        if (subscribed) {
+          subscribed = false;
+          subscribers.delete(listener);
+        }
+      };
+    },
+
     async initialize() {
       return true;
     },
@@ -671,6 +839,7 @@ export const createInMemoryIngestJobStore = ({
       };
 
       jobs.set(job.jobId, job);
+      subscribers.wake();
       return snapshot(job);
     },
 
@@ -828,6 +997,7 @@ export const createInMemoryIngestJobStore = ({
       job.claimedBy = null;
       job.leaseExpiresAt = null;
       job.updatedAt = now();
+      subscribers.wake();
       return true;
     },
 

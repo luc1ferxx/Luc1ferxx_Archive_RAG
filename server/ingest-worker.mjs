@@ -78,8 +78,13 @@ export const runIngestWorkerProcess = async ({
       }),
   });
 
+  // start() subscribes to enqueues: with PostgreSQL that opens this process's
+  // one LISTEN session in the background, so a job is claimed when it is
+  // queued rather than at the next poll; stop() closes it before the pool.
   worker.start();
-  logger.log(`[ingest-worker] ${worker.workerId} is draining the ingest queue.`);
+  logger.log(
+    `[ingest-worker] ${worker.workerId} is draining the ingest queue (woken on enqueue, polling every ${worker.pollIntervalMs} ms).`
+  );
 
   let stopping = null;
   const shutdown = (signal) => {

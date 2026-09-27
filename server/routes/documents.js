@@ -53,6 +53,8 @@ export const createDocumentsRouter = (services) => {
   router.get("/documents", async (req, res) => {
     const accessScope = getRequestAccessScope(req);
 
+    // With a PostgreSQL registry other API instances and ingest workers write
+    // it too (either ingest mode), so this tenant's rows are re-read first.
     await refreshDocumentsIngestedElsewhere(ragService, accessScope);
     return res.json(ragService.listDocuments(accessScope));
   });
@@ -63,6 +65,9 @@ export const createDocumentsRouter = (services) => {
     const { docId } = parsed;
 
     try {
+      // With a PostgreSQL registry: picks up a document another process
+      // registered and drops one it already deleted, so the latter is a 404
+      // (the delete itself also answers null when the store had no row left).
       await loadDocumentsIngestedElsewhere(ragService, [docId]);
       const document = await ragService.deleteDocument(docId, {
         accessScope: getRequestAccessScope(req),

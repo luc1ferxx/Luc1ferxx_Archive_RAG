@@ -92,6 +92,8 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 - 上传在校验后立即返回 202，解析、向量化和写索引由 worker 完成。默认每个 API 进程同时运行 worker（每进程 2 个任务）。
 - 把入库放到单独的进程：API 进程设 `RAG_INGEST_WORKER_ENABLED=false`，另外运行一个或多个 `cd server && npm run worker:ingest`，环境变量和 API 相同（数据库、模型、`PDF_PARSER`、上传目录），只跑 worker、不监听端口。多个 worker 通过 `SKIP LOCKED` 领取任务，同一个任务不会同时交给两个 worker。
 - 跨进程入库需要共享的向量库（pgvector 或 qdrant）。`VECTOR_STORE_PROVIDER=local` 的索引在每个进程自己的内存和文件里：独立 worker 拒绝启动，API 进程忽略 `RAG_INGEST_WORKER_ENABLED=false`、在本进程运行 worker 并打印错误。没有 PostgreSQL 时队列在 API 进程内存里，同样只由本进程处理。
+- 每个运行 worker 的进程额外保持一个不走连接池的 PostgreSQL 连接，用来 `LISTEN` 新任务的通知，算连接数时要算上。它必须直连数据库或经过会话池：PgBouncer 事务池下收不到 `NOTIFY`，worker 退回每 `RAG_INGEST_WORKER_POLL_MS` 轮询一次。
+- 多实例部署时，每个实例按请求租户从 PostgreSQL 重读文档注册表（`GET /documents`、每个 `/chat` 开头、arXiv 查重），删除前按 id 重读，所以别的实例上传或删除的文档在这里立即可见；代价是每个 `/chat` 多一次按租户列出文档的查询。这对 `sync` 和 `async` 都成立。
 - 停机：收到 SIGTERM 或 SIGINT 后停止领取新任务，给运行中的任务 5 秒；没完成的归还队列（不计入尝试次数），其他 worker 可以立即接手。进程被强制结束时，任务在租约过期后由其他 worker 重试。
 - 从 `async` 切回 `sync` 前先等队列清空：`sync` 下 API 进程不运行 worker，剩下的任务要靠 `npm run worker:ingest`。
 

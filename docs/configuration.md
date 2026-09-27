@@ -168,6 +168,7 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | `RAG_INGEST_MODE` | `sync` | `sync`：上传请求里完成解析、向量化和写索引，返回 201 和文档（原有行为）。`async`：只做原有校验（PDF 魔数、大小、分片会话），把文件字节存进入库任务，返回 202 `{jobId, docId, fileName, status: "queued"}`，由 worker 执行同一个 `ingestDocument`。无法识别的值按 `sync` 处理。 |
 | `RAG_INGEST_WORKER_ENABLED` | `true` | `async` 下 API 进程是否同时运行 worker。设为 `false` 时入库交给 `npm run worker:ingest` 进程。没有 PostgreSQL（队列在内存里）或向量库是 `local` 时忽略 `false`，并打印错误。 |
 | `RAG_INGEST_WORKER_CONCURRENCY` | `2` | 每个进程同时处理的任务数。 |
+| `RAG_INGEST_WORKER_POLL_MS` | `1000` | 空闲 worker 两次查看队列的最长间隔。任务入队或被归还时会立即唤醒：同一进程内直接唤醒，其他进程通过 PostgreSQL `LISTEN/NOTIFY`。这个间隔只是兜底，唤醒丢失时（LISTEN 连接断开、重试退避到期、租约过期）最多晚一个间隔领取。 |
 | `RAG_INGEST_JOB_LEASE_MS` | `60000` | 任务租约。运行期间约每三分之一租约续一次；进程停止续约、租约过期后，下一个 worker 接手，尝试次数加一。 |
 | `RAG_INGEST_JOB_MAX_ATTEMPTS` | `3` | 最多尝试次数。408/409/425/429、5xx 和网络错误按 5 s、10 s、20 s……（上限 5 分钟，且不短于 Retry-After）重新排队；其他 4xx（如 422"PDF 中没有可提取的文字"）直接失败。 |
 | `RAG_INGEST_MAX_PENDING_JOBS_PER_TENANT` / `RAG_INGEST_MAX_PENDING_BYTES_PER_TENANT` | `50` / 1 GiB | 每个租户排队中和运行中的任务上限，超出时上传返回 429；0 表示不限。检查和插入是同一条语句，并发上传可能略微超出。 |
@@ -179,6 +180,8 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 - worker 以数据库 owner 身份领取任务：一条 `UPDATE ... FOR UPDATE SKIP LOCKED`，先选当前运行任务最少的租户，再按创建时间；领取后以任务所属租户的身份入库。之后的续约、成功、失败和归还都以 `job_id + claimed_by + attempt_count` 为条件，失去租约的 worker 覆盖不了新一次尝试。
 - 重试前由数据库判定文档是否已提交（不信任本进程的注册表缓存）：上一次尝试已写入文档行和分块、但没来得及标记成功时，重试直接记为成功，不会重复入库。前一次尝试持有租约时进程死掉的任务会单独运行，避免一个让进程崩溃的 PDF 耗掉同批其他任务的尝试次数。
 - 任务结束后 `file_bytes` 置空；每次尝试的临时 PDF 写在上传目录的 `ingest-tmp/` 下，续租时刷新修改时间，超过两倍租期没刷新的由清理删除。
+- 入队唤醒：入队语句本身调用 `pg_notify('<任务表名>_enqueued', <实例 id>)`，事务提交时才发出；被上限拒绝（429）的上传不发。通知只含随机实例 id，不含任务信息。每个运行 worker 的进程持有一个专用 LISTEN 连接：不走连接池、以 owner 身份、开启 TCP keepalive，后台建立、不阻塞启动，断开后按 0.5 s 起、上限 30 s 退避重连，重连后主动查一次队列。经过 PgBouncer 事务池时收不到通知，只能靠轮询。
+- 跨实例文档可见性：文档注册表在 PostgreSQL 时（默认），不论 `sync` 还是 `async`，API 实例按 docId 查不到或要删除文档时先从数据库按 id 重读，`GET /documents` 和每个 `/chat` 开头先按请求租户重读文档表；同一租户的并发请求共用一次查询，但只共用在它们到达之后才开始的那次。别的实例上传或删除的文档因此在这里立即可见，清空文档以数据库实际删除的行为准。重读不会覆盖本进程事务中尚未提交的入库、删除或清空。文件注册表（standalone）和内存注册表不做这些读取。
 - 前端收到 202 后轮询任务状态，间隔从 1 秒增长到 5 秒，最多 10 分钟；网络错误、429、5xx 继续轮询（遵守 Retry-After），只有任务 `failed` 或 404 才判定失败。
 
 ## Vector store

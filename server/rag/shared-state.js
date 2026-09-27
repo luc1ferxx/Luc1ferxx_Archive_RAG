@@ -166,17 +166,47 @@ return 1
 `;
 
 // --- Concurrency cap ------------------------------------------------------
-// A sorted set of slot leases scored by expiry. Expired leases are dropped
-// before counting, so a crashed instance's slots come back after the lease.
+// KEYS[1]: a sorted set of slot leases scored by expiry. Expired leases are
+// dropped before counting, so a crashed instance's slots come back after the
+// lease.
+// KEYS[2]: the waiting tickets in arrival order; KEYS[3]: the same tickets
+// scored by expiry. A caller asking for a slot joins the queue (or refreshes
+// its ticket) and gets one only while its ticket is among the first `free`
+// tickets, so a slot freed by one instance goes to the longest-waiting ticket
+// of the deployment, not to whichever instance asks first. A ticket not
+// refreshed within its TTL (its instance died) is dropped.
+// Returns {1, 0} when a slot was taken, else {0, position in the queue}.
 
 const SLOT_ACQUIRE_SCRIPT = `
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
-if redis.call('ZCARD', KEYS[1]) < tonumber(ARGV[2]) then
-  redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[3]), ARGV[4])
-  redis.call('PEXPIRE', KEYS[1], ARGV[5])
-  return 1
+local now = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local ticket = ARGV[6]
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+local stale = redis.call('ZRANGEBYSCORE', KEYS[3], '-inf', now)
+for _, member in ipairs(stale) do
+  redis.call('ZREM', KEYS[2], member)
+  redis.call('ZREM', KEYS[3], member)
 end
-return 0
+if not redis.call('ZSCORE', KEYS[2], ticket) then
+  local last = redis.call('ZRANGE', KEYS[2], -1, -1, 'WITHSCORES')
+  local order = 1
+  if #last == 2 then order = tonumber(last[2]) + 1 end
+  redis.call('ZADD', KEYS[2], order, ticket)
+end
+redis.call('ZADD', KEYS[3], now + tonumber(ARGV[7]), ticket)
+local position = redis.call('ZRANK', KEYS[2], ticket)
+local taken = 0
+if position < limit - redis.call('ZCARD', KEYS[1]) then
+  redis.call('ZREM', KEYS[2], ticket)
+  redis.call('ZREM', KEYS[3], ticket)
+  redis.call('ZADD', KEYS[1], now + tonumber(ARGV[3]), ARGV[4])
+  redis.call('PEXPIRE', KEYS[1], ARGV[5])
+  taken = 1
+  position = 0
+end
+redis.call('PEXPIRE', KEYS[2], ARGV[5])
+redis.call('PEXPIRE', KEYS[3], ARGV[5])
+return {taken, position}
 `;
 
 const defineSharedStateCommands = (redis) => {
@@ -184,7 +214,7 @@ const defineSharedStateCommands = (redis) => {
   redis.defineCommand("archiveCircuitAdmit", { lua: CIRCUIT_ADMIT_SCRIPT, numberOfKeys: 1 });
   redis.defineCommand("archiveCircuitFailure", { lua: CIRCUIT_FAILURE_SCRIPT, numberOfKeys: 1 });
   redis.defineCommand("archiveCircuitSuccess", { lua: CIRCUIT_SUCCESS_SCRIPT, numberOfKeys: 1 });
-  redis.defineCommand("archiveSlotAcquire", { lua: SLOT_ACQUIRE_SCRIPT, numberOfKeys: 1 });
+  redis.defineCommand("archiveSlotAcquire", { lua: SLOT_ACQUIRE_SCRIPT, numberOfKeys: 3 });
 };
 
 export const checkSharedStateHealth = async () => {

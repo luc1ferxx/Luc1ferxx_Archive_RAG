@@ -840,6 +840,14 @@ export const isRagIngestWorkerEnabled = () =>
 export const getRagIngestWorkerConcurrency = () =>
   Math.floor(toPositiveNumber(process.env.RAG_INGEST_WORKER_CONCURRENCY, 2)) || 1;
 
+// How long an idle worker loop sleeps before it looks at the queue again. An
+// enqueue wakes idle loops at once (in this process directly, in other worker
+// processes through PostgreSQL NOTIFY), so this only bounds how late a job is
+// picked up when that wake-up is lost: a dropped LISTEN connection, a retry
+// whose backoff has run out, a lease that expired.
+export const getRagIngestWorkerPollMs = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INGEST_WORKER_POLL_MS, 1000)) || 1000;
+
 // Renewed while a job runs; a worker that stops renewing loses the job to the
 // next claim once the lease has expired.
 export const getRagIngestJobLeaseMs = () =>

@@ -8,6 +8,7 @@ import {
   getDocuments,
   getStoredDocument,
   initializeDocumentRegistry,
+  isDocumentRegistryShared,
   listDocuments,
   loadDocumentsFromStore,
   normalizeDocIds,
@@ -59,6 +60,7 @@ export {
   initializeDocumentRegistry,
   initializeLongMemory,
   initializeSessionMemory,
+  isDocumentRegistryShared,
   listDocuments,
   listLongMemories,
   loadDocumentsFromStore,
@@ -228,6 +230,9 @@ const buildErrorTrace = (error) => ({
 const hasScopedAccess = (accessScope = {}) =>
   Boolean(accessScope?.userId || accessScope?.workspaceId);
 
+// Null when this caller cannot see the document, or when the registry store
+// had no row left to delete (another process deleted it first): the route
+// answers 404 either way.
 export const deleteDocument = async (
   docId,
   { deleteFile = true, accessScope = {} } = {}
@@ -242,10 +247,12 @@ export const deleteDocument = async (
     await ensureVectorStoreReady();
 
     return trackDocumentWrite(docId, async () => {
+      let deleted;
+
       try {
-        await withPostgresTransaction(async (client) => {
+        deleted = await withPostgresTransaction(async (client) => {
           await removeDocumentsFromIndex({ client, docIds: [docId] });
-          await deleteRegisteredDocument(docId, accessScope, { client });
+          return deleteRegisteredDocument(docId, accessScope, { client });
         });
       } catch (error) {
         try {
@@ -260,54 +267,74 @@ export const deleteDocument = async (
         throw error;
       }
 
-      return storedDocument;
+      return deleted ? storedDocument : null;
     });
   }
 
   await removeDocumentsFromIndex({
     docIds: [docId],
   });
-  await deleteRegisteredDocument(docId, accessScope);
+  const deleted = await deleteRegisteredDocument(docId, accessScope);
 
-  return storedDocument;
+  return deleted ? storedDocument : null;
 };
 
+// The registry's DELETE decides which documents a clear covers (with a
+// PostgreSQL registry that includes documents other processes registered and
+// this map never loaded), and the index removal and the response use the same
+// ids. The map drops them before COMMIT on the pgvector path, so they are
+// tracked (trackDocumentWrite) from the moment the DELETE reports them: a
+// registry refresh whose listing predates the COMMIT must not bring them back.
 export const clearDocuments = async ({
   deleteFiles = true,
   accessScope = {},
 } = {}) => {
+  const scoped = hasScopedAccess(accessScope);
+
   if (isVectorStoreTransactional()) {
     await ensureVectorStoreReady();
 
-    const scoped = hasScopedAccess(accessScope);
-    const scopedDocIds = scoped
-      ? listDocuments(accessScope).map((document) => document.docId)
-      : [];
+    return trackDocumentWrite([], (track) =>
+      withPostgresTransaction(async (client) => {
+        const documents = await clearRegisteredDocuments({
+          accessScope,
+          client,
+          onCleared: track,
+        });
 
-    return withPostgresTransaction(async (client) => {
-      if (scoped) {
-        await removeDocumentsFromIndex({ client, docIds: scopedDocIds });
-      } else {
-        await clearVectorIndex({ client });
-      }
+        // The chunk rows cascade with their document rows; removing them
+        // explicitly keeps the provider contract, not the foreign key, in
+        // charge.
+        if (scoped) {
+          await removeDocumentsFromIndex({
+            client,
+            docIds: documents.map((document) => document.docId),
+          });
+        } else {
+          await clearVectorIndex({ client });
+        }
 
-      return clearRegisteredDocuments({ accessScope, client });
-    });
+        return documents;
+      })
+    );
   }
 
-  const documents = await clearRegisteredDocuments({
-    accessScope,
+  return trackDocumentWrite([], async (track) => {
+    const documents = await clearRegisteredDocuments({
+      accessScope,
+      onCleared: track,
+    });
+
+    if (scoped) {
+      await removeDocumentsFromIndex({
+        docIds: documents.map((document) => document.docId),
+      });
+    } else {
+      await clearVectorIndex();
+    }
+
+    return documents;
   });
-
-  if (hasScopedAccess(accessScope)) {
-    await removeDocumentsFromIndex({
-      docIds: documents.map((document) => document.docId),
-    });
-  } else {
-    await clearVectorIndex();
-  }
-
-  return documents;
 };
 
 const chat = async (docIds, query, options = {}) => {

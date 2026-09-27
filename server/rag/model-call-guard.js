@@ -278,12 +278,17 @@ export const createSharedCircuitBreaker = ({
 
 /**
  * A deployment-wide cap: each request holds a lease in a Redis sorted set.
- * Waiters queue FIFO in this process and the head polls for a slot (10 ms,
- * backing off to 100 ms); a release in this process wakes it at once, one in
- * another instance is seen at the next poll, so fairness across instances is
- * approximate. A lease outlives the longest request (the request timeout plus
- * a margin), so slots held by a crashed instance return on expiry. If Redis
- * fails, every waiter falls back to the local cap.
+ * Waiters queue FIFO in this process and the head holds a ticket in a queue
+ * shared by every instance; a freed slot goes to the oldest ticket, so an
+ * instance whose own releases wake its head at once cannot keep re-taking the
+ * slots it frees while other instances wait (each instance gets one slot per
+ * turn of the queue). The head polls: at `pollMs` while its ticket could be
+ * served by the next free slots, otherwise backing off to `maxPollMs`; a
+ * release in this process wakes it at once. A ticket expires unless refreshed
+ * within `ticketTtlMs`, and a lease outlives the longest request (the request
+ * timeout plus a margin), so a crashed instance neither holds its slots nor
+ * blocks the queue for long. If Redis fails, every waiter falls back to the
+ * local cap.
  */
 export const createSharedConcurrencyLimiter = ({
   key,
@@ -294,9 +299,16 @@ export const createSharedConcurrencyLimiter = ({
   now = Date.now,
   pollMs = 10,
   redis,
+  ticketTtlMs = 2000,
 }) => {
   const redisKey = buildSharedStateKey("slots", key);
+  const queueKey = `${redisKey}:queue`;
+  const queueDeadlinesKey = `${redisKey}:queue-deadlines`;
   const { counter, record } = createFallbackCounter();
+  // Acquire scripts this process ran (each poll of a waiting head is one) and
+  // how many of them took a slot: the polling's cost is per second of waiting,
+  // not per request, so it is reported as a count.
+  const calls = { acquireCalls: 0, acquired: 0 };
   const waiting = [];
   let pumping = false;
   let wake = null;
@@ -341,23 +353,31 @@ export const createSharedConcurrencyLimiter = ({
 
     pumping = true;
     let delay = pollMs;
+    // One ticket per head of the local queue; a new head queues behind the
+    // instances already waiting.
+    let ticket = randomUUID();
 
     try {
       while (waiting.length > 0) {
         const leaseId = randomUUID();
         let acquired;
+        let position;
 
         try {
           await whenSharedStateReady();
-          acquired =
-            (await redis.archiveSlotAcquire(
-              redisKey,
-              now(),
-              limit,
-              leaseMs,
-              leaseId,
-              SHARED_STATE_TTL_MS
-            )) === 1;
+          calls.acquireCalls += 1;
+          [acquired, position] = await redis.archiveSlotAcquire(
+            redisKey,
+            queueKey,
+            queueDeadlinesKey,
+            now(),
+            limit,
+            leaseMs,
+            leaseId,
+            SHARED_STATE_TTL_MS,
+            ticket,
+            ticketTtlMs
+          );
         } catch (error) {
           record(error);
 
@@ -368,14 +388,21 @@ export const createSharedConcurrencyLimiter = ({
           break;
         }
 
-        if (acquired) {
+        if (acquired === 1) {
+          calls.acquired += 1;
           waiting.shift().resolve(makeRelease(leaseId));
+          ticket = randomUUID();
           delay = pollMs;
           continue;
         }
 
-        await sleep(delay);
-        delay = Math.min(maxPollMs, delay * 2);
+        // Within the first `limit` tickets, the next releases serve this one:
+        // keep polling at the base interval so a slot another instance frees
+        // does not sit idle for a backed-off poll.
+        const nearFront = position < limit;
+
+        await sleep(nearFront ? pollMs : delay);
+        delay = nearFront ? pollMs : Math.min(maxPollMs, delay * 2);
       }
     } finally {
       pumping = false;
@@ -396,7 +423,7 @@ export const createSharedConcurrencyLimiter = ({
     snapshot: () => ({
       limit,
       waiting: waiting.length,
-      shared: { provider: "redis", ...counter },
+      shared: { provider: "redis", ...counter, ...calls },
     }),
   };
 };
@@ -483,6 +510,25 @@ export const getModelCallGuardSnapshot = (key) => {
   return guard
     ? { breaker: guard.breaker.snapshot(), limiter: guard.limiter.snapshot() }
     : null;
+};
+
+/**
+ * Shared-cap acquire scripts this process ran over every guard, and how many
+ * took a slot (both 0 without shared state). A running total: read it twice
+ * and subtract for a window.
+ */
+export const getModelCallGuardTotals = () => {
+  let sharedSlotAcquireCalls = 0;
+  let sharedSlotsAcquired = 0;
+
+  for (const guard of guards.values()) {
+    const shared = guard.limiter.snapshot().shared;
+
+    sharedSlotAcquireCalls += shared?.acquireCalls ?? 0;
+    sharedSlotsAcquired += shared?.acquired ?? 0;
+  }
+
+  return { sharedSlotAcquireCalls, sharedSlotsAcquired };
 };
 
 export const resetModelCallGuards = () => {

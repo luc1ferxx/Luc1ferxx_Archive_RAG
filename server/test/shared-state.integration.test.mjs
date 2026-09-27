@@ -118,6 +118,103 @@ if (!redisUrl) {
     assert.equal(bAcquired, true);
   });
 
+  const waitUntil = async (condition, label) => {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (await condition()) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    assert.fail(`timed out waiting until ${label}`);
+  };
+
+  test("a freed slot goes to the instance that waited longest, not back to the one that freed it", async () => {
+    const key = "http://model|fair";
+    const queueKey = `${shared.buildSharedStateKey("slots", key)}:queue`;
+    const createInstanceLimiter = () =>
+      guard.createSharedConcurrencyLimiter({
+        key,
+        leaseMs: 60000,
+        limit: 1,
+        local: guard.createConcurrencyLimiter(1),
+        maxPollMs: 20,
+        pollMs: 5,
+        redis,
+      });
+    const a = createInstanceLimiter();
+    const b = createInstanceLimiter();
+    const order = [];
+    // Each holder keeps its slot briefly, like a model request, then frees it.
+    const holdThenRelease = (name) => async (release) => {
+      order.push(name);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      release();
+    };
+    const releaseFirst = await a.acquire();
+    const calls = [1, 2, 3].map(() => a.acquire().then(holdThenRelease("a")));
+
+    await waitUntil(async () => (await redis.zcard(queueKey)) === 1, "a's head is queued");
+    calls.push(b.acquire().then(holdThenRelease("b")));
+    await waitUntil(async () => (await redis.zcard(queueKey)) === 2, "b's head is queued behind it");
+
+    // a's release wakes a at once; before the fix a re-took every slot it
+    // freed and b waited for all of a's callers.
+    releaseFirst();
+    await Promise.all(calls);
+    assert.deepEqual(order, ["a", "b", "a", "a"]);
+    assert.equal(await redis.zcard(queueKey), 0, "served tickets leave the queue");
+  });
+
+  test("a ticket its instance stopped refreshing expires instead of blocking the queue", async () => {
+    let clock = 5_000_000;
+    const now = () => clock;
+    const key = "http://model|stale-ticket";
+    const slotsKey = shared.buildSharedStateKey("slots", key);
+    const createInstanceLimiter = () =>
+      guard.createSharedConcurrencyLimiter({
+        key,
+        leaseMs: 60000,
+        limit: 1,
+        local: guard.createConcurrencyLimiter(1),
+        maxPollMs: 10,
+        now,
+        pollMs: 5,
+        redis,
+      });
+    const holder = createInstanceLimiter();
+    const releaseHolder = await holder.acquire();
+    // An instance queues behind the holder and dies without polling again.
+    const [taken] = await redis.archiveSlotAcquire(
+      slotsKey,
+      `${slotsKey}:queue`,
+      `${slotsKey}:queue-deadlines`,
+      clock,
+      1,
+      60000,
+      "lease-of-dead-instance",
+      60000,
+      "ticket-of-dead-instance",
+      500
+    );
+
+    assert.equal(taken, 0);
+    releaseHolder();
+
+    let acquired = false;
+    const waiter = createInstanceLimiter()
+      .acquire()
+      .then((release) => {
+        acquired = true;
+        return release;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(acquired, false, "the dead instance's ticket is still ahead");
+
+    clock += 600;
+    (await waiter)();
+    assert.equal(acquired, true);
+  });
+
   test("an unreachable Redis falls back to per-process state instead of failing calls", async () => {
     const dead = shared.createSharedRedisClient("redis://127.0.0.1:1");
     const local = guard.createCircuitBreaker({ cooldownMs: 1000, failureThreshold: 1 });

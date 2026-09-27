@@ -12,6 +12,7 @@ export {
   initializeDocumentRegistry,
   initializeLongMemory,
   initializeSessionMemory,
+  isDocumentRegistryShared,
   listDocuments,
   listLongMemories,
   loadDocumentsFromStore,

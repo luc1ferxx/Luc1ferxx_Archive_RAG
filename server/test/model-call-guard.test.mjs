@@ -5,7 +5,9 @@ import {
   CIRCUIT_STATES,
   createCircuitBreaker,
   createConcurrencyLimiter,
+  createSharedConcurrencyLimiter,
   getModelCallGuardSnapshot,
+  getModelCallGuardTotals,
   guardModelCall,
   isUnavailableError,
   resetModelCallGuards,
@@ -191,4 +193,39 @@ test("requests queued behind the ones that trip the circuit are not sent", async
   await assert.rejects(first, /HTTP 503/);
   await assert.rejects(queued, (error) => error.code === CIRCUIT_OPEN_CODE);
   assert.equal(queuedSent, false);
+});
+
+test("the shared cap counts its acquire scripts, one per poll of a waiting head, next to the slots they took", async () => {
+  // Two polls find no slot, the third takes one; the second waiter's first
+  // poll takes the slot the first one released.
+  const replies = [[0, 0], [0, 0], [1, 0], [1, 0]];
+  const redis = {
+    archiveSlotAcquire: async () => replies.shift() ?? [1, 0],
+    zrem: async () => 1,
+  };
+  const limiter = createSharedConcurrencyLimiter({
+    key: "counted",
+    leaseMs: 1000,
+    limit: 1,
+    local: createConcurrencyLimiter(1),
+    maxPollMs: 1,
+    pollMs: 1,
+    redis,
+  });
+
+  const release = await limiter.acquire();
+
+  assert.equal(limiter.snapshot().shared.acquireCalls, 3);
+  assert.equal(limiter.snapshot().shared.acquired, 1);
+
+  release();
+  const second = await limiter.acquire();
+
+  assert.equal(limiter.snapshot().shared.acquireCalls, 4);
+  assert.equal(limiter.snapshot().shared.acquired, 2);
+  second();
+
+  // Without shared state no guard runs an acquire script.
+  resetModelCallGuards();
+  assert.deepEqual(getModelCallGuardTotals(), { sharedSlotAcquireCalls: 0, sharedSlotsAcquired: 0 });
 });

@@ -17,11 +17,7 @@ const getConnectionString = () => getPostgresDatabaseUrl().trim();
 export const isPostgresConfigured = () =>
   Boolean(getConnectionString());
 
-export const getPostgresPool = () => {
-  if (postgresPool) {
-    return postgresPool;
-  }
-
+const getConnectionConfig = () => {
   const connectionString = getConnectionString();
 
   if (!connectionString) {
@@ -30,16 +26,46 @@ export const getPostgresPool = () => {
     );
   }
 
-  postgresPool = new Pool({
+  return {
     connectionString,
     ssl: isPostgresSslEnabled()
       ? {
           rejectUnauthorized: false,
         }
       : undefined,
-  });
+  };
+};
+
+export const getPostgresPool = () => {
+  if (postgresPool) {
+    return postgresPool;
+  }
+
+  postgresPool = new Pool(getConnectionConfig());
 
   return postgresPool;
+};
+
+/**
+ * A connection of its own, outside the pool, for a session that has to stay
+ * open between statements (LISTEN). It logs in as the configured owner user and
+ * never carries a tenant, so it may not be created under one: nothing it runs
+ * is scoped by row-level security. The caller connects it, owns it and ends it.
+ * TCP keepalive lets a connection whose peer vanished fail instead of idling
+ * silently forever.
+ */
+export const createDedicatedPostgresClient = () => {
+  if (getEnforcedDatabaseTenant()) {
+    throw new Error(
+      "createDedicatedPostgresClient cannot run under a database tenant; a dedicated session always acts as the owner."
+    );
+  }
+
+  return new pg.Client({
+    ...getConnectionConfig(),
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
+  });
 };
 
 // The tenant settings the row-level security policies read (migration 013).

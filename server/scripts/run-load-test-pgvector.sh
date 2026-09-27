@@ -185,7 +185,10 @@ if [[ "${WITH_REDIS}" -eq 1 ]]; then
 fi
 
 set +e
-( cd "${SERVER_DIR}" && node evaluation/run-api-load-bench.mjs --database-url "${DATABASE_URL}" ${LOAD_TEST_ARGS[@]+"${LOAD_TEST_ARGS[@]}"} )
+# The postmaster's pid file lets the load test sample the cluster's CPU per
+# level (its backends are the postmaster's children).
+( cd "${SERVER_DIR}" && node evaluation/run-api-load-bench.mjs --database-url "${DATABASE_URL}" \
+    --postgres-pid-file "${DATA_DIR}/postmaster.pid" ${LOAD_TEST_ARGS[@]+"${LOAD_TEST_ARGS[@]}"} )
 STATUS=$?
 set -e
 exit "${STATUS}"

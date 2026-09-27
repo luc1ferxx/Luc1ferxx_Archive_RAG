@@ -7,8 +7,10 @@ import {
   getRagIngestJobLeaseMs,
   getRagIngestJobRetentionMs,
   getRagIngestWorkerConcurrency,
+  getRagIngestWorkerPollMs,
   isRagIngestAsync,
 } from "./config.js";
+import { isDocumentRegistryShared } from "./doc-registry.js";
 import { toIngestJobErrorMessage } from "./ingest-job-store.js";
 import { runWithDatabaseTenant } from "./postgres-tenant.js";
 
@@ -18,8 +20,12 @@ import { runWithDatabaseTenant } from "./postgres-tenant.js";
 // ragService.ingestDocument call the synchronous upload route makes. The store
 // fences every write after the claim, so a worker that stalled past its lease
 // can finish its work but cannot record it over the attempt that replaced it.
+//
+// An idle loop sleeps RAG_INGEST_WORKER_POLL_MS between claims, and the store
+// wakes it early when a job is enqueued (store.subscribeToEnqueues: directly in
+// this process, through PostgreSQL NOTIFY from other processes). The poll is
+// the fallback that bounds a lost wake-up to one interval.
 
-const DEFAULT_POLL_INTERVAL_MS = 1000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 5000;
 const DEFAULT_HOUSEKEEPING_INTERVAL_MS = 10 * 60 * 1000;
 const RETRY_BASE_DELAY_MS = 5000;
@@ -136,7 +142,7 @@ export const createIngestWorker = ({
   housekeepingIntervalMs = DEFAULT_HOUSEKEEPING_INTERVAL_MS,
   leaseMs = getRagIngestJobLeaseMs(),
   logger = console,
-  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+  pollIntervalMs = getRagIngestWorkerPollMs(),
   ragService,
   renewIntervalMs = null,
   retryDelayMs = getIngestRetryDelayMs,
@@ -157,8 +163,12 @@ export const createIngestWorker = ({
   const inFlight = new Map();
   const wakeSleepers = new Set();
   const attemptDirectory = path.join(tempDirectory, INGEST_TEMP_SUBDIRECTORY);
+  const loopCount = Math.max(1, Math.floor(concurrency));
   let loops = [];
   let running = false;
+  // Wake-ups no sleeping loop took; see wake().
+  let pendingWakes = 0;
+  let unsubscribeFromEnqueues = null;
   // A job whose previous attempt died holding it (its lease expired) may be
   // what killed that process. It runs alone: the loops claim nothing else
   // until it settles, and it starts once the jobs already running settled,
@@ -177,6 +187,29 @@ export const createIngestWorker = ({
 
       wakeSleepers.add(wake);
     });
+
+  /**
+   * A job may have become claimable: wakes one sleeping loop to claim now. If
+   * no loop is asleep the wake-up is kept (up to one per loop), and the next
+   * loop that finds the queue empty looks once more instead of sleeping,
+   * because that job may have been enqueued after its claim read the queue.
+   * Only a hint either way: a claim decides, and a lost wake-up costs one
+   * poll interval.
+   */
+  const wake = () => {
+    if (!running) {
+      return;
+    }
+
+    const [sleeper] = wakeSleepers;
+
+    if (sleeper) {
+      sleeper();
+      return;
+    }
+
+    pendingWakes = Math.min(pendingWakes + 1, loopCount);
+  };
 
   // A retried attempt may follow one that committed the document and stopped
   // before recording success. The document row and its chunks commit together
@@ -400,6 +433,11 @@ export const createIngestWorker = ({
           await runHousekeeping();
         }
 
+        if (pendingWakes > 0) {
+          pendingWakes -= 1;
+          continue;
+        }
+
         await sleep(pollIntervalMs);
       }
     }
@@ -411,9 +449,21 @@ export const createIngestWorker = ({
     }
 
     running = true;
+    pendingWakes = 0;
     lastHousekeepingAt = Date.now();
     void runHousekeeping();
-    loops = Array.from({ length: Math.max(1, Math.floor(concurrency)) }, () => loop());
+
+    // Never fails the start: without wake-ups the loops still poll.
+    try {
+      unsubscribeFromEnqueues = store.subscribeToEnqueues?.(wake) ?? null;
+    } catch (error) {
+      logger.error?.(
+        `[ingest-worker] could not subscribe to enqueued jobs; polling every ${pollIntervalMs} ms instead.`,
+        error
+      );
+    }
+
+    loops = Array.from({ length: loopCount }, () => loop());
   };
 
   /**
@@ -428,8 +478,20 @@ export const createIngestWorker = ({
 
     running = false;
 
-    for (const wake of [...wakeSleepers]) {
-      wake();
+    // Closes the store's LISTEN session (when this was its last subscriber)
+    // while the running jobs get their grace period.
+    const unsubscribe = unsubscribeFromEnqueues;
+
+    unsubscribeFromEnqueues = null;
+
+    const unsubscribing = Promise.resolve()
+      .then(() => unsubscribe?.())
+      .catch((error) =>
+        logger.error?.("[ingest-worker] failed to stop listening for enqueued jobs.", error)
+      );
+
+    for (const wakeSleeper of [...wakeSleepers]) {
+      wakeSleeper();
     }
 
     let graceTimer = null;
@@ -454,6 +516,7 @@ export const createIngestWorker = ({
       );
     }
 
+    await unsubscribing;
     loops = [];
   };
 
@@ -464,10 +527,16 @@ export const createIngestWorker = ({
     get inFlightCount() {
       return inFlight.size;
     },
+    // Loops asleep until their next poll or a wake-up.
+    get idleLoopCount() {
+      return wakeSleepers.size;
+    },
+    pollIntervalMs,
     runHousekeeping,
     runOnce,
     start,
     stop,
+    wake,
     workerId,
   };
 };
@@ -521,14 +590,32 @@ export const resolveApiIngestWorkerPlan = ({
   return plan;
 };
 
-// Document visibility across processes. With RAG_INGEST_MODE=async the worker
-// that registers a document may run in another process, whose registry map
-// this process never sees; these read the store before a lookup answers from
-// a stale map. In sync mode every document this process serves was registered
-// by it or loaded at startup, as before, so they do nothing.
+// Document visibility across processes. Each process keeps the document
+// registry in a map filled at startup and updated by its own writes. When the
+// registry is PostgreSQL, other processes write it too, in either ingest mode:
+// another API instance's synchronous upload, a worker process's async job, a
+// delete or clear made elsewhere. These read the store before a lookup or a
+// listing answers from a stale map: /chat refreshes the tenant before its run
+// (app-services.js buildChatResponse), GET /documents and the arXiv duplicate
+// check refresh the tenant, and DELETE /documents/:docId and GET
+// /ingest-jobs/:jobId read the named document. A file-backed or in-memory
+// registry has one writer (this process), so they do nothing there.
+//
+// Whether the registry is shared comes from the ragService when it says so
+// (the app's ragService does; a test stub can), otherwise from the registry
+// this process configured.
+const sharesDocumentRegistry = (ragService) =>
+  typeof ragService?.isDocumentRegistryShared === "function"
+    ? ragService.isDocumentRegistryShared() === true
+    : isDocumentRegistryShared();
 
+// The named documents only: adds the ones another process registered and
+// drops the ones it deleted (doc-registry.js loadDocumentsFromStore).
 export const loadDocumentsIngestedElsewhere = async (ragService, docIds) => {
-  if (!isRagIngestAsync() || typeof ragService?.loadDocumentsFromStore !== "function") {
+  if (
+    typeof ragService?.loadDocumentsFromStore !== "function" ||
+    !sharesDocumentRegistry(ragService)
+  ) {
     return;
   }
 
@@ -542,7 +629,10 @@ export const loadDocumentsIngestedElsewhere = async (ragService, docIds) => {
 // Reads the requesting tenant's documents only (every document when auth is
 // off, which is one tenant).
 export const refreshDocumentsIngestedElsewhere = async (ragService, accessScope = {}) => {
-  if (!isRagIngestAsync() || typeof ragService?.refreshDocumentRegistry !== "function") {
+  if (
+    typeof ragService?.refreshDocumentRegistry !== "function" ||
+    !sharesDocumentRegistry(ragService)
+  ) {
     return;
   }
 

@@ -7,7 +7,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildIngestDocuments, buildTextPdf } from "../evaluation/load-bench-pdf.mjs";
+import { buildIngestDocuments, buildTextPdf, probePageIndex } from "../evaluation/load-bench-pdf.mjs";
 import { loadPdfDocument } from "../rag/pdf-loader.js";
 
 const parse = async (t, bytes) => {
@@ -79,4 +79,37 @@ test("ingest documents are deterministic, distinct per tag and parse page by pag
     parsed.pages.map((page) => page.text),
     documents[1].pageLines.map((lines) => lines.join("\n"))
   );
+});
+
+test("each document carries a probe: one page's question and the phrase its answer must contain", () => {
+  const documents = buildIngestDocuments({ documents: 5, pages: 4, tag: "p1" });
+
+  // Fact kinds rotate over the documents, so a level asks every kind.
+  assert.deepEqual(
+    documents.map((document) => document.probe.pageNumber),
+    [1, 2, 3, 4, 1]
+  );
+  for (const document of documents) {
+    const factLine = document.pageLines[document.probe.pageNumber - 1][1];
+    assert.ok(factLine.includes(document.probe.expected), `${factLine} states ${document.probe.expected}`);
+    assert.ok(document.probe.question.includes(document.name), "the question names the document's program");
+  }
+  assert.equal(documents[1].probe.question, "Which department runs Program Bluebell-p1-2?");
+  assert.match(documents[1].probe.expected, /^[a-z]+ department$/);
+  assert.equal(documents[2].probe.question, "Where is the field office for Program Cobalt-p1-3 located?");
+  assert.match(documents[3].probe.expected, /^month \d+$/);
+});
+
+test("with more than four pages a repeated kind of fact is about an annex, and the probe asks the unique one", () => {
+  const [document] = buildIngestDocuments({ documents: 1, pages: 6, tag: "p2" });
+
+  assert.equal(document.pageLines[0][1].startsWith("The approval threshold for Program Albatross-p2-1 is"), true);
+  assert.equal(document.pageLines[4][1].startsWith("The approval threshold for Program Albatross-p2-1 annex 2 is"), true);
+  // Kind 0 occurs on pages 1 and 5: the probe asks page 5's question, which
+  // page 1 does not answer.
+  assert.equal(probePageIndex(0, 6), 4);
+  assert.equal(document.probe.pageNumber, 5);
+  assert.equal(document.probe.question, "What is the approval threshold for Program Albatross-p2-1 annex 2?");
+  assert.deepEqual([0, 1, 2, 3].map((docIndex) => probePageIndex(docIndex, 3)), [0, 1, 2, 0]);
+  assert.deepEqual([0, 1, 2, 3].map((docIndex) => probePageIndex(docIndex, 1)), [0, 0, 0, 0]);
 });

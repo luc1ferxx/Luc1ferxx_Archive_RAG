@@ -104,36 +104,83 @@ const INGEST_FILLER = Object.freeze([
 ]);
 
 // One distinct, answerable fact per page, so no two uploaded documents share a
-// chunk and retrieval can tell them apart.
+// chunk and retrieval can tell them apart. Each fact comes with the question
+// that asks for it and the phrase an answer must contain (the load test's
+// searchable check requires it, next to a citation of the document). The four
+// kinds of fact repeat every four pages; a repeat is about an annex of the
+// program ("Program X annex 2"), so every page's question has one answer.
 const INGEST_FACTS = Object.freeze([
-  (name, seed) => `The approval threshold for Program ${name} is ${1000 + (seed % 97) * 25} dollars.`,
-  (name, seed) => `Program ${name} is run by the ${DEPARTMENTS[seed % DEPARTMENTS.length]} department.`,
-  (name, seed) => `The field office for Program ${name} is located in ${CITIES[seed % CITIES.length]}.`,
-  (name, seed) => `Program ${name} publishes its audit report in month ${1 + (seed % 12)} of every year.`,
+  (subject, seed) => {
+    const amount = `${1000 + (seed % 97) * 25} dollars`;
+    return {
+      expected: amount,
+      fact: `The approval threshold for ${subject} is ${amount}.`,
+      question: `What is the approval threshold for ${subject}?`,
+    };
+  },
+  (subject, seed) => {
+    const department = `${DEPARTMENTS[seed % DEPARTMENTS.length]} department`;
+    return {
+      expected: department,
+      fact: `${subject} is run by the ${department}.`,
+      question: `Which department runs ${subject}?`,
+    };
+  },
+  (subject, seed) => {
+    const city = CITIES[seed % CITIES.length];
+    return {
+      expected: `located in ${city}`,
+      fact: `The field office for ${subject} is located in ${city}.`,
+      question: `Where is the field office for ${subject} located?`,
+    };
+  },
+  (subject, seed) => {
+    const month = `month ${1 + (seed % 12)}`;
+    return {
+      expected: month,
+      fact: `${subject} publishes its audit report in ${month} of every year.`,
+      question: `In which month does ${subject} publish its audit report?`,
+    };
+  },
 ]);
+
+/**
+ * The page a document's searchable check asks about: fact kind docIndex mod
+ * 4 (so the documents of a level ask every kind), on its last occurrence in
+ * the document, whose question no other page also answers.
+ */
+export const probePageIndex = (docIndex, pages) => {
+  const kinds = Math.min(INGEST_FACTS.length, pages);
+  const kind = docIndex % kinds;
+
+  return kind + INGEST_FACTS.length * Math.floor((pages - 1 - kind) / INGEST_FACTS.length);
+};
 
 /**
  * Deterministic upload documents for one ingest level: `documents` PDFs of
  * `pages` pages, each page a heading, one fact naming the document's program
  * and a few filler sentences. `tag` makes names unique per level and run so a
- * later level never re-uploads an earlier document's text.
+ * later level never re-uploads an earlier document's text. `probe` is the
+ * question for one page's fact (probePageIndex) and the phrase its answer
+ * must contain.
  */
 export const buildIngestDocuments = ({ documents = 8, pages = 4, sentencesPerPage = 6, tag = "l1" } = {}) =>
   Array.from({ length: documents }, (_, docIndex) => {
     const name = `${PROGRAMS[docIndex % PROGRAMS.length]}-${tag}-${docIndex + 1}`;
-    const pageLines = Array.from({ length: pages }, (_, pageIndex) => {
-      const seed = docIndex * 7 + pageIndex * 3;
+    const facts = Array.from({ length: pages }, (_, pageIndex) => {
+      const cycle = Math.floor(pageIndex / INGEST_FACTS.length);
+      const subject = cycle === 0 ? `Program ${name}` : `Program ${name} annex ${cycle + 1}`;
+      return INGEST_FACTS[pageIndex % INGEST_FACTS.length](subject, docIndex * 7 + pageIndex * 3);
+    });
+    const pageLines = facts.map(({ fact }, pageIndex) => {
       const filler = Array.from(
         { length: Math.max(0, sentencesPerPage - 2) },
         (_, sentence) => INGEST_FILLER[(docIndex + pageIndex + sentence) % INGEST_FILLER.length]
       );
 
-      return [
-        `Program ${name} operating manual, part ${pageIndex + 1}.`,
-        INGEST_FACTS[pageIndex % INGEST_FACTS.length](name, seed),
-        ...filler,
-      ];
+      return [`Program ${name} operating manual, part ${pageIndex + 1}.`, fact, ...filler];
     });
+    const probePage = probePageIndex(docIndex, pages);
     const fileName = `program-${name.toLowerCase()}-manual.pdf`;
 
     return {
@@ -141,5 +188,10 @@ export const buildIngestDocuments = ({ documents = 8, pages = 4, sentencesPerPag
       name,
       pageLines,
       pdf: buildTextPdf({ pages: pageLines, title: `Program ${name} operating manual` }),
+      probe: {
+        expected: facts[probePage].expected,
+        pageNumber: probePage + 1,
+        question: facts[probePage].question,
+      },
     };
   });

@@ -63,7 +63,9 @@ const server = app.listen(PORT, () => {
 
 if (ingestWorker) {
   ingestWorker.start();
-  console.log(`[ingest-worker] ${ingestWorker.workerId} is draining the ingest queue.`);
+  console.log(
+    `[ingest-worker] ${ingestWorker.workerId} is draining the ingest queue (woken on enqueue, polling every ${ingestWorker.pollIntervalMs} ms).`
+  );
 
   // Without a worker the default signal handling (exit at once) is unchanged.
   // With one, running jobs get a short grace period and the rest go back to

@@ -50,7 +50,9 @@ const withIngestMode = async (mode, callback) => {
   }
 };
 
-const createStubRagService = () => {
+// `sharedRegistry` says whether the registry behind the stub is PostgreSQL,
+// which other processes write too (isDocumentRegistryShared).
+const createStubRagService = ({ sharedRegistry = true } = {}) => {
   const documents = new Map();
   const ingested = [];
   const visibilityCalls = [];
@@ -92,6 +94,7 @@ const createStubRagService = () => {
       },
       initializeDocumentRegistry: async () => [],
       initializeSessionMemory: async () => true,
+      isDocumentRegistryShared: () => sharedRegistry,
       listDocuments: (accessScope = {}) =>
         [...documents.values()].filter(
           (document) => !accessScope.userId || document.ownerUserId === accessScope.userId
@@ -154,7 +157,7 @@ const getJob = (baseUrl, jobId, headers = ALICE_HEADERS) =>
 
 test("sync mode keeps answering 201 with the ingested document and queues nothing", async () => {
   await withIngestMode(undefined, async () => {
-    const rag = createStubRagService();
+    const rag = createStubRagService({ sharedRegistry: false });
     const ingestJobStore = createInMemoryIngestJobStore();
     const server = await startApp({ ingestJobStore, ragService: rag.service });
 
@@ -170,9 +173,138 @@ test("sync mode keeps answering 201 with the ingested document and queues nothin
       assert.equal(await ingestJobStore.claim({ leaseMs: 1000, workerId: "w" }), null);
 
       assert.equal((await fetch(`${server.baseUrl}/documents`, { headers: ALICE_HEADERS })).status, 200);
-      assert.deepEqual(rag.visibilityCalls, [], "sync mode never re-reads the registry store");
+      assert.deepEqual(
+        rag.visibilityCalls,
+        [],
+        "a registry only this process writes (file-backed, in memory) is never re-read"
+      );
     } finally {
       await server.close();
+    }
+  });
+});
+
+test("sync mode on a PostgreSQL registry lists and serves documents another instance uploaded", async () => {
+  await withIngestMode(undefined, async () => {
+    // Two API instances in sync mode over one registry table: instance A's
+    // upload lands in `table`, which instance B's map has never seen.
+    const table = new Map();
+    const instanceA = createStubRagService();
+    const instanceB = createStubRagService();
+
+    instanceA.service.ingestDocument = async ({ docId, fileName, ownerUserId, workspaceId }) => {
+      const document = { docId, fileName, ownerUserId, workspaceId };
+
+      table.set(docId, document);
+      instanceA.documents.set(docId, document);
+      return document;
+    };
+    // B's reads of the shared table: a named read adds and drops the named
+    // documents, a refresh mirrors the table.
+    instanceB.service.loadDocumentsFromStore = async (docIds) => {
+      instanceB.visibilityCalls.push(["load", docIds]);
+
+      for (const docId of docIds) {
+        if (table.has(docId)) {
+          instanceB.documents.set(docId, table.get(docId));
+        } else {
+          instanceB.documents.delete(docId);
+        }
+      }
+
+      return [];
+    };
+    instanceB.service.refreshDocumentRegistry = async (accessScope = {}) => {
+      instanceB.visibilityCalls.push(["refresh", accessScope]);
+
+      for (const docId of [...instanceB.documents.keys()]) {
+        if (!table.has(docId)) {
+          instanceB.documents.delete(docId);
+        }
+      }
+
+      for (const [docId, document] of table) {
+        instanceB.documents.set(docId, document);
+      }
+
+      return [];
+    };
+
+    const serverA = await startApp({
+      ingestJobStore: createInMemoryIngestJobStore(),
+      ragService: instanceA.service,
+    });
+    const serverB = await startApp({
+      ingestJobStore: createInMemoryIngestJobStore(),
+      ragService: instanceB.service,
+    });
+
+    try {
+      const uploaded = await postDirectUpload(serverA.baseUrl);
+
+      assert.equal(uploaded.status, 201);
+      const { docId } = await uploaded.json();
+
+      // A chat about it on B starts from the tenant's rows as the store has
+      // them, so the document is found there, not a 404.
+      const chatOnB = () =>
+        buildChatResponse({
+          accessScope: { userId: "alice", workspaceId: "ws-a" },
+          docIds: [docId],
+          question: "q",
+          ragService: {
+            ...instanceB.service,
+            getDocument: (id) => (instanceB.documents.has(id) ? instanceB.documents.get(id) : null),
+          },
+        }).catch((error) => error);
+      const chat = await chatOnB();
+
+      assert.equal(chat?.status, 200, "the document uploaded on A is found on B, not a 404");
+      assert.deepEqual(instanceB.visibilityCalls, [
+        ["refresh", { userId: "alice", workspaceId: "ws-a" }],
+      ]);
+
+      // A deletes it. B's map still holds it (a hit, not a miss), yet a chat
+      // there answers 404 and so does a DELETE routed to B.
+      table.delete(docId);
+      instanceA.documents.delete(docId);
+      assert.ok(instanceB.documents.has(docId));
+
+      const chatAfterDelete = await chatOnB();
+
+      assert.equal(chatAfterDelete?.status, 404, "a document deleted on A is gone on B");
+      assert.match(chatAfterDelete.message, /Upload the PDF again/);
+
+      instanceB.documents.set(docId, { docId, fileName: "notes.pdf", ownerUserId: "alice", workspaceId: "ws-a" });
+
+      const deleteOnB = await fetch(`${serverB.baseUrl}/documents/${encodeURIComponent(docId)}`, {
+        headers: ALICE_HEADERS,
+        method: "DELETE",
+      });
+
+      assert.equal(deleteOnB.status, 404, "deleting what A already deleted is a 404 on B, not {deleted: true}");
+      assert.deepEqual(instanceB.visibilityCalls.at(-1), ["load", [docId]]);
+
+      table.set(docId, { docId, fileName: "notes.pdf", ownerUserId: "alice", workspaceId: "ws-a" });
+
+      instanceB.documents.clear();
+      instanceB.visibilityCalls.length = 0;
+
+      const listed = await fetch(`${serverB.baseUrl}/documents`, { headers: ALICE_HEADERS });
+
+      assert.deepEqual(
+        (await listed.json()).map((document) => document.docId),
+        [docId],
+        "B lists A's upload"
+      );
+      assert.deepEqual(
+        instanceB.visibilityCalls.map(([kind, scope]) => [kind, scope.userId, scope.workspaceId]),
+        [["refresh", "alice", "ws-a"]],
+        "the refresh reads the requesting tenant only"
+      );
+    } finally {
+      await serverA.close();
+      await serverB.close();
     }
   });
 });
@@ -381,30 +513,34 @@ test("async mode queues a completed chunked upload under its session id and clea
 });
 
 test("chat reads documents registered by another process before answering 404", async () => {
+  for (const mode of ["async", undefined]) {
+    await withIngestMode(mode, async () => {
+      const loaded = [];
+      const ragService = {
+        getDocument: () => null,
+        isDocumentRegistryShared: () => true,
+        loadDocumentsFromStore: async (docIds) => {
+          loaded.push(docIds);
+          return [];
+        },
+      };
+
+      await assert.rejects(
+        () =>
+          buildChatResponse({
+            accessScope: {},
+            docIds: ["doc-a", "doc-b"],
+            question: "q",
+            ragService,
+          }),
+        (error) => error.status === 404 && /doc-a, doc-b/.test(error.message)
+      );
+      assert.deepEqual(loaded, [["doc-a", "doc-b"]], `ingest mode ${mode ?? "sync"}`);
+    });
+  }
+
+  // A registry only this process writes has nothing to read back.
   await withIngestMode("async", async () => {
-    const loaded = [];
-    const ragService = {
-      getDocument: () => null,
-      loadDocumentsFromStore: async (docIds) => {
-        loaded.push(docIds);
-        return [];
-      },
-    };
-
-    await assert.rejects(
-      () =>
-        buildChatResponse({
-          accessScope: {},
-          docIds: ["doc-a", "doc-b"],
-          question: "q",
-          ragService,
-        }),
-      (error) => error.status === 404 && /doc-a, doc-b/.test(error.message)
-    );
-    assert.deepEqual(loaded, [["doc-a", "doc-b"]]);
-  });
-
-  await withIngestMode(undefined, async () => {
     const loaded = [];
 
     await assert.rejects(() =>
@@ -414,6 +550,7 @@ test("chat reads documents registered by another process before answering 404", 
         question: "q",
         ragService: {
           getDocument: () => null,
+          isDocumentRegistryShared: () => false,
           loadDocumentsFromStore: async (docIds) => loaded.push(docIds),
         },
       })
@@ -529,6 +666,7 @@ test("the dedicated worker process drains the queue and stops on SIGTERM", async
 
     assert.equal(initialized, true);
     assert.equal(started.worker.running, true);
+    assert.equal(store.enqueueNotificationStatus().subscribers, 1, "woken on enqueue");
 
     const deadline = Date.now() + 5000;
 
@@ -543,6 +681,11 @@ test("the dedicated worker process drains the queue and stops on SIGTERM", async
     await started.shutdown("SIGTERM");
     assert.deepEqual(exits, [0], "one shutdown however many times it is asked for");
     assert.equal(started.worker.running, false);
+    assert.equal(
+      store.enqueueNotificationStatus().subscribers,
+      0,
+      "shutdown stops listening (with PostgreSQL: closes the LISTEN session) before the pool"
+    );
   } finally {
     if (previous === undefined) {
       delete process.env.POSTGRES_DATABASE_URL;

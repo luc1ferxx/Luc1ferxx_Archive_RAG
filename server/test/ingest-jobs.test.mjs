@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -14,14 +15,19 @@ import {
   getRagIngestMaxPendingJobsPerTenant,
   getRagIngestMode,
   getRagIngestWorkerConcurrency,
+  getRagIngestWorkerPollMs,
   isRagIngestAsync,
   isRagIngestWorkerEnabled,
 } from "../rag/config.js";
 import { renderMigrationSql } from "../rag/db-migrations.js";
 import {
+  clearDocuments,
   configureDocumentRegistryStore,
+  createDocumentRegistryStore,
+  deleteDocument,
   getDocument,
   initializeDocumentRegistry,
+  isDocumentRegistryShared,
   listDocuments,
   loadDocumentsFromStore,
   refreshDocumentRegistry,
@@ -30,10 +36,12 @@ import {
   resyncDocument,
   trackDocumentWrite,
 } from "../rag/doc-registry.js";
+import { createFileDocumentRegistryStore } from "../rag/doc-registry-file.js";
 import {
   createDefaultIngestJobStore,
   createInMemoryIngestJobStore,
   createPostgresIngestJobStore,
+  getIngestJobsNotifyChannel,
   INGEST_JOB_STATUSES,
   LEASE_EXHAUSTED_ERROR_MESSAGE,
   PENDING_LIMIT_ERROR_MESSAGE,
@@ -146,12 +154,14 @@ test("ingest config defaults keep synchronous uploads and parse the worker setti
       RAG_INGEST_MODE: undefined,
       RAG_INGEST_WORKER_CONCURRENCY: undefined,
       RAG_INGEST_WORKER_ENABLED: undefined,
+      RAG_INGEST_WORKER_POLL_MS: undefined,
     },
     async () => {
       assert.equal(getRagIngestMode(), "sync");
       assert.equal(isRagIngestAsync(), false);
       assert.equal(isRagIngestWorkerEnabled(), true);
       assert.equal(getRagIngestWorkerConcurrency(), 2);
+      assert.equal(getRagIngestWorkerPollMs(), 1000);
       assert.equal(getRagIngestJobLeaseMs(), 60000);
       assert.equal(getRagIngestJobMaxAttempts(), 3);
       assert.equal(getIngestJobsPostgresTable(), "rag_ingest_jobs");
@@ -166,12 +176,14 @@ test("ingest config defaults keep synchronous uploads and parse the worker setti
       RAG_INGEST_MODE: " ASYNC ",
       RAG_INGEST_WORKER_CONCURRENCY: "4",
       RAG_INGEST_WORKER_ENABLED: "false",
+      RAG_INGEST_WORKER_POLL_MS: "5000",
     },
     async () => {
       assert.equal(getRagIngestMode(), "async");
       assert.equal(isRagIngestAsync(), true);
       assert.equal(isRagIngestWorkerEnabled(), false);
       assert.equal(getRagIngestWorkerConcurrency(), 4);
+      assert.equal(getRagIngestWorkerPollMs(), 5000);
       assert.equal(getRagIngestJobLeaseMs(), 15000);
       assert.equal(getRagIngestJobMaxAttempts(), 5);
       assert.equal(getIngestJobsPostgresTable(), "custom_jobs");
@@ -179,10 +191,15 @@ test("ingest config defaults keep synchronous uploads and parse the worker setti
   );
 
   await withEnv(
-    { RAG_INGEST_MODE: "later", RAG_INGEST_WORKER_CONCURRENCY: "0.5" },
+    {
+      RAG_INGEST_MODE: "later",
+      RAG_INGEST_WORKER_CONCURRENCY: "0.5",
+      RAG_INGEST_WORKER_POLL_MS: "0",
+    },
     async () => {
       assert.equal(getRagIngestMode(), "sync");
       assert.equal(getRagIngestWorkerConcurrency(), 1);
+      assert.equal(getRagIngestWorkerPollMs(), 1000, "a poll of 0 would spin; the default stays");
     }
   );
 });
@@ -687,7 +704,7 @@ test("postgres store enqueues and reads under the request tenant and filters by 
 
   assert.equal(job.status, "queued");
   assert.deepEqual(calls[0].tenant, ALICE, "enqueue runs as the tenant so RLS checks the insert");
-  assert.deepEqual(calls[0].values, [
+  assert.deepEqual(calls[0].values.slice(0, 10), [
     "job-1",
     "doc-1",
     "alice",
@@ -697,7 +714,16 @@ test("postgres store enqueues and reads under the request tenant and filters by 
     4,
     getRagIngestMaxPendingJobsPerTenant(),
     getRagIngestMaxPendingBytesPerTenant(),
+    "jobs_t_enqueued",
   ]);
+  assert.equal(typeof calls[0].values[10], "string", "the NOTIFY payload is the store's id");
+  assert.doesNotMatch(calls[0].values[10], /job-1|doc-1|alice/, "and nothing about the job");
+  // One statement: the NOTIFY commits with the INSERT, and a refused
+  // (capped) insert returns no row, so it announces nothing.
+  assert.match(
+    calls[0].sql,
+    /WITH inserted AS \(\s+INSERT INTO jobs_t[\s\S]+\)\s+SELECT inserted\.\*, pg_notify\(\$10::text, \$11::text\) AS notified\s+FROM inserted/
+  );
   assert.doesNotMatch(calls[0].sql, /RETURNING[\s\S]*file_bytes/);
   assert.match(calls[0].sql, /status IN \('queued', 'running'\)/);
   assert.match(calls[0].sql, /\$8::integer = 0 OR pending\.pending_jobs < \$8::integer/);
@@ -1618,7 +1644,7 @@ test("a refresh leaves a document this process is writing in a transaction as th
   assert.equal(getDocument("doc-ingesting", ALICE), null);
 });
 
-test("a refresh reads the requesting tenant's documents only, and concurrent callers share it", async (t) => {
+test("a refresh reads the requesting tenant's documents only, and callers that arrive while it runs share the next one", async (t) => {
   const { rows, store } = createSharedRegistryStore();
   const listings = [];
 
@@ -1652,7 +1678,11 @@ test("a refresh reads the requesting tenant's documents only, and concurrent cal
     refreshDocumentRegistry(ALICE),
   ]);
 
-  assert.deepEqual(listings, [ALICE], "one listing, for alice's scope");
+  assert.deepEqual(
+    listings,
+    [ALICE, ALICE],
+    "alice's scope only: the first caller's listing, and one shared by the two that arrived while it ran"
+  );
   assert.deepEqual(results[0].map((document) => document.docId).sort(), ["doc-a", "doc-a2"]);
   assert.ok(getDocument("doc-b", BOB), "bob's entries wait for bob's own refresh");
   assert.equal(getDocument("doc-b2", BOB), null);
@@ -1682,36 +1712,792 @@ test("the PostgreSQL registry lists a scope with the tenant rule in SQL", async 
   assert.doesNotMatch(calls[1].sql, /WHERE/);
 });
 
-test("the cross-process document helpers only read the store in async mode", async () => {
+test("the cross-process document helpers read the store whenever the registry is shared, in either ingest mode", async () => {
   const calls = [];
-  const ragService = {
+  const createRagService = (shared) => ({
+    isDocumentRegistryShared: () => shared,
     loadDocumentsFromStore: async (docIds) => {
       calls.push(["load", docIds]);
     },
-    refreshDocumentRegistry: async () => {
-      calls.push(["refresh"]);
+    refreshDocumentRegistry: async (accessScope) => {
+      calls.push(["refresh", accessScope]);
       throw new Error("database unavailable");
     },
-  };
+  });
   const originalConsoleError = console.error;
 
   console.error = () => {};
 
   try {
-    await withEnv({ RAG_INGEST_MODE: undefined }, async () => {
-      await loadDocumentsIngestedElsewhere(ragService, ["doc-1"]);
-      await refreshDocumentsIngestedElsewhere(ragService);
-    });
-    assert.deepEqual(calls, []);
-
-    await withEnv({ RAG_INGEST_MODE: "async" }, async () => {
-      await loadDocumentsIngestedElsewhere(ragService, ["doc-1"]);
-      await refreshDocumentsIngestedElsewhere(ragService);
-      await loadDocumentsIngestedElsewhere({}, ["doc-1"]);
-    });
+    for (const mode of [undefined, "async"]) {
+      await withEnv({ RAG_INGEST_MODE: mode }, async () => {
+        await loadDocumentsIngestedElsewhere(createRagService(true), ["doc-1"]);
+        await refreshDocumentsIngestedElsewhere(createRagService(true), ALICE);
+        // A file-backed or in-memory registry has one writer: this process.
+        await loadDocumentsIngestedElsewhere(createRagService(false), ["doc-2"]);
+        await refreshDocumentsIngestedElsewhere(createRagService(false), ALICE);
+        await loadDocumentsIngestedElsewhere({ isDocumentRegistryShared: () => true }, ["doc-3"]);
+      });
+    }
   } finally {
     console.error = originalConsoleError;
   }
 
-  assert.deepEqual(calls, [["load", ["doc-1"]], ["refresh"]], "a failed refresh is logged, not thrown");
+  assert.deepEqual(
+    calls,
+    [
+      ["load", ["doc-1"]],
+      ["refresh", ALICE],
+      ["load", ["doc-1"]],
+      ["refresh", ALICE],
+    ],
+    "sync and async alike; a failed refresh is logged, not thrown"
+  );
+});
+
+test("the registry counts as shared when it is PostgreSQL, whatever the ingest mode", async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ingest-registry-shared-"));
+
+  t.after(async () => {
+    await resetDocumentRegistryStore();
+    await rm(tempRoot, { force: true, recursive: true });
+  });
+
+  for (const mode of [undefined, "async"]) {
+    await withEnv(
+      {
+        LONG_MEMORY_DATABASE_URL: undefined,
+        POSTGRES_DATABASE_URL: "postgresql://unused@127.0.0.1:1/unused",
+        RAG_INGEST_MODE: mode,
+      },
+      async () => {
+        configureDocumentRegistryStore(
+          createDocumentRegistryStore({ queryPostgres: async () => ({ rows: [] }) })
+        );
+        assert.equal(isDocumentRegistryShared(), true, "an injected PostgreSQL store");
+
+        configureDocumentRegistryStore(
+          createFileDocumentRegistryStore({
+            getDocumentsDirectory: () => path.join(tempRoot, "documents"),
+            getRegistryFilePath: () => path.join(tempRoot, "documents.json"),
+          })
+        );
+        assert.equal(isDocumentRegistryShared(), false, "the standalone file registry");
+
+        configureDocumentRegistryStore(createSharedRegistryStore().store);
+        assert.equal(isDocumentRegistryShared(), false, "a store that does not say it is PostgreSQL");
+
+        configureDocumentRegistryStore(null);
+        assert.equal(isDocumentRegistryShared(), true, "the default store with a database");
+      }
+    );
+  }
+
+  await withEnv({ LONG_MEMORY_DATABASE_URL: undefined, POSTGRES_DATABASE_URL: undefined }, async () => {
+    configureDocumentRegistryStore(null);
+    assert.equal(
+      isDocumentRegistryShared(),
+      false,
+      "the default store without a database cannot answer, so nothing is re-read"
+    );
+  });
+});
+
+test("in sync mode a PostgreSQL registry picks up another instance's upload; a file registry is left alone", async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ingest-registry-sync-"));
+
+  t.after(async () => {
+    await resetDocumentRegistryStore();
+    await rm(tempRoot, { force: true, recursive: true });
+  });
+
+  // The module functions the app's ragService is built from; without its own
+  // isDocumentRegistryShared the helpers ask the configured registry.
+  const ragService = { loadDocumentsFromStore, refreshDocumentRegistry };
+  const { rows, store } = createSharedRegistryStore();
+
+  await withEnv({ RAG_INGEST_MODE: undefined }, async () => {
+    configureDocumentRegistryStore({ ...store, backend: "postgres" });
+    await initializeDocumentRegistry();
+
+    // Another API instance's synchronous upload commits a row.
+    rows.set("doc-other-instance", {
+      docId: "doc-other-instance",
+      fileName: "other.pdf",
+      ownerUserId: "alice",
+      uploadedAt: "2026-09-26T10:00:00.000Z",
+      workspaceId: "ws-a",
+    });
+    assert.equal(getDocument("doc-other-instance", ALICE), null);
+
+    await loadDocumentsIngestedElsewhere(ragService, ["doc-other-instance"]);
+    assert.equal(getDocument("doc-other-instance", ALICE).fileName, "other.pdf");
+
+    // It deletes that one and uploads another; this tenant's listing follows.
+    rows.delete("doc-other-instance");
+    rows.set("doc-listed", {
+      docId: "doc-listed",
+      fileName: "listed.pdf",
+      ownerUserId: "alice",
+      uploadedAt: "2026-09-26T11:00:00.000Z",
+      workspaceId: "ws-a",
+    });
+    await refreshDocumentsIngestedElsewhere(ragService, ALICE);
+    assert.deepEqual(listDocuments(ALICE).map((document) => document.docId), ["doc-listed"]);
+
+    // The standalone file registry: even a record written behind this
+    // process's back is not read, because nothing but this process writes it.
+    const fileStoreOptions = {
+      getDocumentsDirectory: () => path.join(tempRoot, "documents"),
+      getRegistryFilePath: () => path.join(tempRoot, "documents.json"),
+    };
+
+    configureDocumentRegistryStore(createFileDocumentRegistryStore(fileStoreOptions));
+    await initializeDocumentRegistry();
+    await createFileDocumentRegistryStore(fileStoreOptions).upsert({
+      docId: "doc-file-elsewhere",
+      fileBuffer: PDF_BYTES,
+      fileName: "elsewhere.pdf",
+      ownerUserId: "alice",
+      workspaceId: "ws-a",
+    });
+
+    await loadDocumentsIngestedElsewhere(ragService, ["doc-file-elsewhere"]);
+    await refreshDocumentsIngestedElsewhere(ragService, ALICE);
+    assert.equal(getDocument("doc-file-elsewhere", ALICE), null);
+    assert.deepEqual(listDocuments(ALICE), []);
+  });
+});
+
+test("a refresh does not bring back documents a clear removed before its COMMIT", async (t) => {
+  const { rows, store } = createSharedRegistryStore();
+
+  configureDocumentRegistryStore(store);
+  t.after(() => resetDocumentRegistryStore());
+
+  for (const docId of ["doc-a", "doc-b"]) {
+    rows.set(docId, { docId, fileName: `${docId}.pdf`, ownerUserId: "alice", workspaceId: "ws-a" });
+  }
+
+  await initializeDocumentRegistry();
+
+  // rag/index.js clears the map inside the transaction; the store (another
+  // connection) still lists both rows until COMMIT.
+  let commit;
+  const committed = new Promise((resolve) => {
+    commit = resolve;
+  });
+  const clearing = trackDocumentWrite(["doc-a", "doc-b"], async () => {
+    await clearDocuments({ accessScope: ALICE });
+    await committed;
+    rows.delete("doc-a");
+    rows.delete("doc-b");
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  await refreshDocumentRegistry(ALICE);
+  assert.deepEqual(listDocuments(ALICE), [], "the pre-COMMIT listing does not resurrect them");
+
+  commit();
+  await clearing;
+  await refreshDocumentRegistry(ALICE);
+  assert.deepEqual(listDocuments(ALICE), []);
+});
+
+const createGate = () => {
+  let release;
+  let started;
+  const released = new Promise((resolve) => {
+    release = resolve;
+  });
+  const startedPromise = new Promise((resolve) => {
+    started = resolve;
+  });
+
+  return { release, released, started, startedPromise };
+};
+
+const aliceRow = (docId) => ({
+  docId,
+  fileName: `${docId}.pdf`,
+  ownerUserId: "alice",
+  uploadedAt: "2026-09-26T09:00:00.000Z",
+  workspaceId: "ws-a",
+});
+
+test("a refresh requested while an older listing runs waits for one that starts after it", async (t) => {
+  const { rows, store } = createSharedRegistryStore();
+  const listings = [];
+  let gate = null;
+
+  configureDocumentRegistryStore({
+    ...store,
+    async list() {
+      const snapshot = [...rows.values()];
+
+      listings.push(snapshot.map((row) => row.docId));
+
+      if (gate) {
+        const held = gate;
+
+        gate = null;
+        held.started();
+        await held.released;
+      }
+
+      return snapshot;
+    },
+  });
+  t.after(() => resetDocumentRegistryStore());
+
+  rows.set("doc-a", aliceRow("doc-a"));
+  await initializeDocumentRegistry();
+  listings.length = 0;
+
+  // Someone's GET /documents is listing the store on this instance...
+  gate = createGate();
+  const held = gate;
+  const older = refreshDocumentRegistry();
+
+  await held.startedPromise;
+
+  // ...when another instance commits an upload and answers 201, and the
+  // uploader's own GET /documents reaches this instance (auth off: one scope).
+  rows.set("doc-new", aliceRow("doc-new"));
+  const mine = refreshDocumentRegistry();
+  const another = refreshDocumentRegistry();
+
+  held.release();
+
+  const [olderListing, myListing, anotherListing] = await Promise.all([older, mine, another]);
+
+  assert.deepEqual(olderListing.map((document) => document.docId), ["doc-a"]);
+  assert.ok(
+    myListing.some((document) => document.docId === "doc-new"),
+    "a caller never gets a listing that started before it arrived"
+  );
+  assert.deepEqual(anotherListing, myListing);
+  assert.deepEqual(listings, [["doc-a"], ["doc-a", "doc-new"]], "the two later callers share one listing");
+});
+
+test("a named read drops a document another process deleted, and never undoes this process's delete before its COMMIT", async (t) => {
+  const { rows, store } = createSharedRegistryStore();
+  // Rows a DELETE of this process removed but has not committed: other
+  // connections still read them.
+  const uncommittedDeletes = new Set();
+  let byIdGate = null;
+
+  configureDocumentRegistryStore({
+    ...store,
+    async delete(docId) {
+      const row = rows.get(docId) ?? null;
+
+      if (row) {
+        uncommittedDeletes.add(docId);
+      }
+
+      return row;
+    },
+    async listByIds(docIds) {
+      const snapshot = docIds.map((docId) => rows.get(docId)).filter(Boolean);
+
+      if (byIdGate) {
+        const held = byIdGate;
+
+        byIdGate = null;
+        held.started();
+        await held.released;
+      }
+
+      return snapshot;
+    },
+  });
+  t.after(() => resetDocumentRegistryStore());
+
+  for (const docId of ["doc-x", "doc-y", "doc-z", "doc-w"]) {
+    rows.set(docId, aliceRow(docId));
+  }
+
+  await initializeDocumentRegistry();
+
+  // Another instance deletes doc-y and changes nothing else: a hit, not a
+  // miss, and the read by id drops it (the /chat and DELETE 404 checks).
+  rows.delete("doc-y");
+  assert.ok(getDocument("doc-y", ALICE));
+  assert.deepEqual(await loadDocumentsFromStore(["doc-y", "doc-z", "doc-unknown"]), []);
+  assert.equal(getDocument("doc-y", ALICE), null);
+  assert.ok(getDocument("doc-z", ALICE), "a document the store still has stays");
+
+  // DELETE /documents/doc-x on this instance: the map drops it inside the
+  // transaction, before COMMIT. A lookup that misses meanwhile reads the row
+  // the uncommitted delete still leaves visible, and must not re-add it.
+  let commit;
+  const committed = new Promise((resolve) => {
+    commit = resolve;
+  });
+  const deleting = trackDocumentWrite("doc-x", async () => {
+    await deleteDocument("doc-x", ALICE);
+    await committed;
+    rows.delete("doc-x");
+    uncommittedDeletes.delete("doc-x");
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(getDocument("doc-x", ALICE), null);
+  assert.deepEqual(await loadDocumentsFromStore(["doc-x"]), []);
+  assert.equal(getDocument("doc-x", ALICE), null, "the uncommitted delete is not undone");
+
+  commit();
+  await deleting;
+  assert.deepEqual(await loadDocumentsFromStore(["doc-x"]), []);
+  assert.equal(getDocument("doc-x", ALICE), null);
+
+  // The read started before a delete that settles while it runs: its row
+  // predates the delete, so it is not applied either.
+  byIdGate = createGate();
+  const heldRead = byIdGate;
+  const reading = loadDocumentsFromStore(["doc-w"]);
+
+  await heldRead.startedPromise;
+  await trackDocumentWrite("doc-w", async () => {
+    await deleteDocument("doc-w", ALICE);
+    rows.delete("doc-w");
+  });
+  heldRead.release();
+  assert.deepEqual(await reading, []);
+  assert.equal(getDocument("doc-w", ALICE), null);
+});
+
+test("deleting a document another process already deleted answers null and drops the stale entry", async (t) => {
+  const { rows, store } = createSharedRegistryStore();
+
+  configureDocumentRegistryStore({
+    ...store,
+    async delete(docId) {
+      const row = rows.get(docId) ?? null;
+
+      rows.delete(docId);
+      return row;
+    },
+  });
+  t.after(() => resetDocumentRegistryStore());
+
+  rows.set("doc-gone", aliceRow("doc-gone"));
+  rows.set("doc-here", aliceRow("doc-here"));
+  await initializeDocumentRegistry();
+
+  rows.delete("doc-gone");
+  assert.equal(await deleteDocument("doc-gone", ALICE), null, "the route answers 404");
+  assert.equal(getDocument("doc-gone", ALICE), null);
+  assert.equal((await deleteDocument("doc-here", ALICE)).docId, "doc-here");
+});
+
+test("a clear deletes and reports what the store holds for the scope, and a listing that predates it brings none of it back", async (t) => {
+  const { rows, store } = createSharedRegistryStore();
+  let listGate = null;
+
+  configureDocumentRegistryStore({
+    ...store,
+    // DELETE ... RETURNING inside the caller's transaction: the rows stay
+    // visible to other connections until the caller commits.
+    async clear(accessScope = {}) {
+      return [...rows.values()].filter(
+        (row) => row.ownerUserId === accessScope.userId && row.workspaceId === accessScope.workspaceId
+      );
+    },
+    async list() {
+      const snapshot = [...rows.values()];
+
+      if (listGate) {
+        const held = listGate;
+
+        listGate = null;
+        held.started();
+        await held.released;
+      }
+
+      return snapshot;
+    },
+  });
+  t.after(() => resetDocumentRegistryStore());
+
+  rows.set("doc-1", aliceRow("doc-1"));
+  rows.set("doc-bob", { ...aliceRow("doc-bob"), ownerUserId: "bob", workspaceId: "ws-b" });
+  await initializeDocumentRegistry();
+
+  // Another instance uploads doc-2, which this map has not read.
+  rows.set("doc-2", aliceRow("doc-2"));
+
+  // A GET /documents starts a listing that sees doc-1 and doc-2...
+  listGate = createGate();
+  const heldList = listGate;
+  const refreshing = refreshDocumentRegistry(ALICE);
+
+  await heldList.startedPromise;
+
+  // ...and POST /documents/clear runs the way rag/index.js runs it.
+  let commit;
+  const committed = new Promise((resolve) => {
+    commit = resolve;
+  });
+  const clearing = trackDocumentWrite([], async (track) => {
+    const cleared = await clearDocuments({ accessScope: ALICE, onCleared: track });
+
+    await committed;
+
+    for (const document of cleared) {
+      rows.delete(document.docId);
+    }
+
+    return cleared;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  commit();
+
+  const cleared = await clearing;
+
+  assert.deepEqual(
+    cleared.map((document) => document.docId).sort(),
+    ["doc-1", "doc-2"],
+    "the response counts every document the DELETE removed"
+  );
+
+  heldList.release();
+  await refreshing;
+
+  assert.deepEqual(listDocuments(ALICE), [], "the older listing brings nothing back");
+  assert.ok(getDocument("doc-bob", BOB), "another tenant's entry is untouched");
+});
+
+// --- waking idle workers ----------------------------------------------------
+
+const waitFor = async (predicate, { timeoutMs = 5000, label = "condition" } = {}) => {
+  const deadline = Date.now() + timeoutMs;
+
+  while (!(await predicate())) {
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out waiting for ${label}.`);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+};
+
+// Stands in for pg.Client: connect/query/end plus the events the listener
+// uses. `connectFailures` connects fail first; `hangConnect` never connects
+// until end() aborts it, as pg does by destroying the socket.
+const createFakeListenClients = ({ connectFailures = 0, hangConnect = false } = {}) => {
+  const clients = [];
+  let failuresLeft = connectFailures;
+
+  const create = () => {
+    const client = new EventEmitter();
+
+    client.ended = false;
+    client.queries = [];
+    client.connect = async () => {
+      client.tenant = getActiveDatabaseTenant();
+
+      if (failuresLeft > 0) {
+        failuresLeft -= 1;
+        throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED" });
+      }
+
+      if (hangConnect) {
+        await new Promise((resolve, reject) => {
+          client.abortConnect = () => reject(new Error("Connection terminated"));
+        });
+      }
+    };
+    client.query = async (sql) => {
+      client.queries.push(sql);
+      return { rows: [] };
+    };
+    client.end = async () => {
+      if (client.ended) {
+        return;
+      }
+
+      client.ended = true;
+      client.abortConnect?.();
+      client.emit("end");
+    };
+    clients.push(client);
+    return client;
+  };
+
+  return { clients, create };
+};
+
+test("an idle worker claims a job enqueued in its own process at once, not at its next poll", async (t) => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "ingest-wake-"));
+
+  t.after(() => rm(tempDirectory, { force: true, recursive: true }));
+
+  const store = createInMemoryIngestJobStore();
+  const ragService = createFakeRagService();
+  const worker = createIngestWorker({
+    concurrency: 1,
+    leaseMs: 60000,
+    logger: silentLogger,
+    pollIntervalMs: 60 * 60 * 1000,
+    ragService,
+    store,
+    tempDirectory,
+    workerId: "woken",
+  });
+
+  worker.start();
+  await waitFor(() => worker.idleLoopCount === 1, { label: "the loop to fall asleep" });
+  assert.equal(store.enqueueNotificationStatus().subscribers, 1);
+
+  const job = await enqueueFor(store, ALICE, { docId: "doc-woken" });
+
+  // The poll is an hour away: only the wake-up can have claimed it.
+  await waitFor(async () => (await store.get(job.jobId)).status === "succeeded", {
+    label: "the woken loop to ingest the job",
+  });
+  assert.equal(ragService.calls.length, 1);
+
+  await worker.stop();
+  assert.equal(store.enqueueNotificationStatus().subscribers, 0, "stop unsubscribes");
+  worker.wake();
+  assert.equal(worker.running, false, "a wake-up after stop starts nothing");
+});
+
+test("a wake-up that arrives while the loop is claiming makes it look again instead of sleeping", async (t) => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "ingest-wake-race-"));
+
+  t.after(() => rm(tempDirectory, { force: true, recursive: true }));
+
+  const inner = createInMemoryIngestJobStore();
+  let firstClaim = true;
+  let claimReadQueue;
+  const claimRead = new Promise((resolve) => {
+    claimReadQueue = resolve;
+  });
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => {
+    releaseClaim = resolve;
+  });
+  // The first claim reads an empty queue and is held before it returns: the
+  // job is enqueued after that read, while no loop is asleep to wake.
+  const store = {
+    ...inner,
+    async claim(options) {
+      const claimed = await inner.claim(options);
+
+      if (firstClaim) {
+        firstClaim = false;
+        claimReadQueue();
+        await claimGate;
+      }
+
+      return claimed;
+    },
+  };
+  const worker = createIngestWorker({
+    concurrency: 1,
+    leaseMs: 60000,
+    logger: silentLogger,
+    pollIntervalMs: 60 * 60 * 1000,
+    ragService: createFakeRagService(),
+    store,
+    tempDirectory,
+    workerId: "racing",
+  });
+
+  worker.start();
+  t.after(() => worker.stop());
+  await claimRead;
+
+  const job = await enqueueFor(inner, ALICE, { docId: "doc-raced" });
+
+  assert.equal(worker.idleLoopCount, 0, "the wake-up found no loop asleep");
+  releaseClaim();
+
+  await waitFor(async () => (await inner.get(job.jobId)).status === "succeeded", {
+    label: "the loop to look again and claim the job",
+  });
+});
+
+test("a store whose wake-ups fail to start leaves the worker polling", async (t) => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "ingest-wake-broken-"));
+
+  t.after(() => rm(tempDirectory, { force: true, recursive: true }));
+
+  const inner = createInMemoryIngestJobStore();
+  const errors = [];
+  const worker = createIngestWorker({
+    concurrency: 1,
+    leaseMs: 60000,
+    logger: { ...silentLogger, error: (message) => errors.push(message) },
+    pollIntervalMs: 5,
+    ragService: createFakeRagService(),
+    store: {
+      ...inner,
+      subscribeToEnqueues() {
+        throw new Error("INGEST_JOBS_POSTGRES_TABLE must be a simple PostgreSQL identifier.");
+      },
+    },
+    tempDirectory,
+    workerId: "polling",
+  });
+
+  worker.start();
+  t.after(() => worker.stop());
+  assert.match(errors[0], /polling every 5 ms instead/);
+
+  const job = await enqueueFor(inner, ALICE, { docId: "doc-polled" });
+
+  await waitFor(async () => (await inner.get(job.jobId)).status === "succeeded", {
+    label: "the poll to claim the job",
+  });
+});
+
+test("the PostgreSQL store wakes subscribers on other processes' NOTIFY, skips its own, and reconnects", async () => {
+  const listen = createFakeListenClients({ connectFailures: 1 });
+  const { calls, query } = createRecordingQuery(({ sql, values }) => {
+    if (/INSERT INTO/.test(sql)) {
+      return {
+        rows: [
+          jobRow({
+            attempt_count: 0,
+            claimed_by: null,
+            doc_id: values[1],
+            job_id: values[0],
+            status: "queued",
+          }),
+        ],
+      };
+    }
+
+    return /WITH released AS/.test(sql) ? { rows: [{ job_id: values[0] }] } : { rows: [] };
+  });
+  const warnings = [];
+  const store = createPostgresIngestJobStore({
+    createListenClient: listen.create,
+    getTable: () => "Jobs_T",
+    listenRetryBaseMs: 1,
+    logger: { error() {}, warn: (message) => warnings.push(message) },
+    queryPostgres: query,
+  });
+  const wakes = [];
+
+  assert.equal(getIngestJobsNotifyChannel("Jobs_T"), "jobs_t_enqueued");
+  assert.equal(getIngestJobsNotifyChannel("x".repeat(80)).length, 63);
+
+  // Subscribing never waits for the database, even inside a tenant request.
+  const unsubscribe = runWithDatabaseTenant(ALICE, () =>
+    store.subscribeToEnqueues(() => wakes.push("wake"))
+  );
+
+  assert.equal(typeof unsubscribe, "function");
+  assert.equal(store.enqueueNotificationStatus().listening, false);
+
+  // The first connect fails; the retry listens on a dedicated owner session.
+  await waitFor(() => store.enqueueNotificationStatus().listening, { label: "LISTEN" });
+
+  const [refused, session] = listen.clients;
+
+  assert.equal(refused.ended, true);
+  assert.equal(session.tenant, null, "the LISTEN session is the owner's, not the tenant's");
+  assert.deepEqual(session.queries, ['LISTEN "jobs_t_enqueued"']);
+  assert.deepEqual(wakes, ["wake"], "one look once listening, for jobs announced before");
+
+  // Another process's enqueue.
+  session.emit("notification", { channel: "jobs_t_enqueued", payload: "another-store" });
+  assert.equal(wakes.length, 2);
+  session.emit("notification", { channel: "other_channel", payload: "another-store" });
+  assert.equal(wakes.length, 2, "other channels are ignored");
+
+  // This process's enqueue wakes its subscribers directly, after the INSERT;
+  // the NOTIFY it sent comes back with this store's id and is skipped.
+  await runWithDatabaseTenant(ALICE, () =>
+    store.enqueue({ docId: "doc-1", fileBytes: PDF_BYTES, ownerUserId: "alice", workspaceId: "ws-a" })
+  );
+  assert.equal(wakes.length, 3);
+
+  const ownPayload = calls.find((call) => /INSERT INTO/.test(call.sql)).values[10];
+
+  session.emit("notification", { channel: "jobs_t_enqueued", payload: ownPayload });
+  assert.equal(wakes.length, 3, "an own enqueue is not announced twice");
+
+  // A released job is claimable at once, so it is announced like an enqueue.
+  assert.equal(await store.release({ attemptCount: 1, jobId: "job-1", workerId: "w1" }), true);
+  assert.equal(wakes.length, 4);
+
+  const release = calls.find((call) => /WITH released AS/.test(call.sql));
+
+  assert.match(release.sql, /SELECT released\.job_id, pg_notify\(\$4::text, \$5::text\) AS notified/);
+  assert.deepEqual(release.values.slice(3), ["jobs_t_enqueued", ownPayload]);
+
+  // The session drops; the store reconnects and looks once more.
+  session.emit("error", new Error("terminating connection due to administrator command"));
+  await waitFor(
+    () => listen.clients.length === 3 && store.enqueueNotificationStatus().listening,
+    { label: "the reconnect" }
+  );
+  assert.equal(session.ended, true);
+  assert.equal(wakes.length, 5);
+  assert.match(warnings[0], /closed \(terminating connection due to administrator command\); reconnecting/);
+
+  // The last unsubscribe closes the session and nothing reconnects.
+  await unsubscribe();
+  await unsubscribe();
+  assert.equal(listen.clients[2].ended, true);
+  assert.deepEqual(store.enqueueNotificationStatus(), {
+    channel: null,
+    failures: 0,
+    listening: false,
+    subscribers: 0,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(listen.clients.length, 3);
+});
+
+test("a worker on the PostgreSQL store opens its LISTEN session on start, wakes on NOTIFY and closes it on stop", async (t) => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "ingest-wake-pg-"));
+
+  t.after(() => rm(tempDirectory, { force: true, recursive: true }));
+
+  const listen = createFakeListenClients();
+  let claims = 0;
+  const store = createPostgresIngestJobStore({
+    createListenClient: listen.create,
+    getTable: () => "jobs_t",
+    logger: silentLogger,
+    queryPostgres: async (sql) => {
+      if (/SET status = 'running'/.test(sql)) {
+        claims += 1;
+      }
+
+      return { rowCount: 0, rows: [] };
+    },
+  });
+  const worker = createIngestWorker({
+    concurrency: 1,
+    leaseMs: 60000,
+    logger: silentLogger,
+    pollIntervalMs: 60 * 60 * 1000,
+    ragService: createFakeRagService(),
+    store,
+    tempDirectory,
+    workerId: "listening",
+  });
+
+  worker.start();
+  await waitFor(
+    () =>
+      store.enqueueNotificationStatus().listening && worker.idleLoopCount === 1 && claims === 2,
+    { label: "the start-up claim and the look after LISTEN" }
+  );
+
+  listen.clients[0].emit("notification", { channel: "jobs_t_enqueued", payload: "another-store" });
+  await waitFor(() => claims === 3, { label: "the claim the NOTIFY woke" });
+
+  await worker.stop();
+  assert.equal(listen.clients[0].ended, true, "stop closes the LISTEN session");
+  assert.equal(store.enqueueNotificationStatus().subscribers, 0);
 });

@@ -22,6 +22,7 @@ import path from "path";
 import { randomBytes } from "crypto";
 
 import {
+  DOCUMENT_REGISTRY_BACKENDS,
   documentMatchesAccessScope,
   hasAccessScope,
   resolveFileBuffer,
@@ -171,6 +172,10 @@ export const createFileDocumentRegistryStore = ({
     records.find((record) => record.docId === docId) ?? null;
 
   return {
+    // One writer (see the header), so the registry map never needs re-reading
+    // from this store (isDocumentRegistryShared).
+    backend: DOCUMENT_REGISTRY_BACKENDS.filesystem,
+
     async initialize() {
       await mkdir(getDocumentsDirectory(), {
         recursive: true,

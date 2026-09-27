@@ -12,6 +12,7 @@ import chat, {
   initializeDocumentRegistry,
   initializeLongMemory,
   initializeSessionMemory,
+  isDocumentRegistryShared,
   listDocuments,
   listLongMemories,
   loadDocumentsFromStore,
@@ -82,7 +83,10 @@ import {
   getAgentPlannerRollout,
 } from "./rag/config.js";
 import { createDefaultIngestJobStore } from "./rag/ingest-job-store.js";
-import { loadDocumentsIngestedElsewhere } from "./rag/ingest-worker.js";
+import {
+  loadDocumentsIngestedElsewhere,
+  refreshDocumentsIngestedElsewhere,
+} from "./rag/ingest-worker.js";
 import {
   claimUploadSessionFinalization,
   cleanupExpiredUploadSessions,
@@ -194,10 +198,17 @@ export const buildChatResponse = async ({
 }) => {
   const findMissingDocIds = () =>
     docIds.filter((docId) => !ragService.getDocument(docId, accessScope));
+
+  // With a PostgreSQL registry other API instances and ingest workers add and
+  // delete documents behind this process's map. The run starts from the
+  // tenant's rows as the store has them, so the 404 check below and every
+  // listing inside the run (skills, capabilities, the workspace inventory) see
+  // another instance's upload and do not offer a document it deleted. A miss
+  // left after that (a document outside the tenant's listing) is read by id.
+  // Neither reads anything with a single-writer registry (ingest-worker.js).
+  await refreshDocumentsIngestedElsewhere(ragService, accessScope);
   let missingDocIds = findMissingDocIds();
 
-  // With async ingestion a worker in another process may have registered them;
-  // in sync mode this reads nothing.
   if (missingDocIds.length > 0) {
     await loadDocumentsIngestedElsewhere(ragService, missingDocIds);
     missingDocIds = findMissingDocIds();
@@ -251,6 +262,7 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     initializeDocumentRegistry,
     initializeLongMemory,
     initializeSessionMemory,
+    isDocumentRegistryShared,
     listDocuments,
     listLongMemories,
     loadDocumentsFromStore,

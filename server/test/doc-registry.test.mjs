@@ -403,6 +403,7 @@ test("PostgreSQL document registry store applies migrations, legacy import, and 
     profile: values[9],
     uploaded_at: values[10],
   });
+  let fakeQuery = null;
   const store = createDocumentRegistryStore({
     createDocumentLegacyImporter: () => ({
       importMissingDocuments: async ({ getExistingDocIds, upsertDocument }) => {
@@ -422,7 +423,7 @@ test("PostgreSQL document registry store applies migrations, legacy import, and 
       },
     }),
     getDocumentsTable: () => "rag_documents",
-    queryPostgres: async (sql, values = []) => {
+    queryPostgres: (fakeQuery = async (sql, values = []) => {
       queryCalls.push({
         sql: sql.trim(),
         values,
@@ -458,15 +459,6 @@ test("PostgreSQL document registry store applies migrations, legacy import, and 
         };
       }
 
-      if (/DELETE FROM rag_documents\s+WHERE doc_id = ANY/.test(sql)) {
-        for (const docId of values[0]) {
-          rows.delete(docId);
-        }
-        return {
-          rows: [],
-        };
-      }
-
       if (/DELETE FROM rag_documents\s+WHERE doc_id = \$1\s+RETURNING/.test(sql)) {
         const row = rows.get(values[0]);
         rows.delete(values[0]);
@@ -475,15 +467,34 @@ test("PostgreSQL document registry store applies migrations, legacy import, and 
         };
       }
 
-      if (/DELETE FROM rag_documents/.test(sql)) {
+      // A scoped clear: the tenant rule in SQL, one statement, rows returned.
+      if (/DELETE FROM rag_documents\s+WHERE \(owner_user_id <> '' OR workspace_id <> ''\)[\s\S]*RETURNING doc_id/.test(sql)) {
+        const [userId, workspaceId] = values;
+        const deleted = [...rows.values()].filter(
+          (row) =>
+            (row.owner_user_id || row.workspace_id) &&
+            (!row.owner_user_id || row.owner_user_id === userId) &&
+            (!row.workspace_id || row.workspace_id === workspaceId)
+        );
+
+        for (const row of deleted) {
+          rows.delete(row.doc_id);
+        }
+        return {
+          rows: deleted,
+        };
+      }
+
+      if (/^DELETE FROM rag_documents\s+RETURNING doc_id/.test(sql.trim())) {
+        const deleted = [...rows.values()];
         rows.clear();
         return {
-          rows: [],
+          rows: deleted,
         };
       }
 
       throw new Error(`Unexpected SQL: ${sql}`);
-    },
+    }),
     readFile: async (filePath) => Buffer.from(`read:${filePath}`),
     runMigrations: async () => {
       migrationCalls.push("run");
@@ -567,30 +578,49 @@ test("PostgreSQL document registry store applies migrations, legacy import, and 
   assert.equal(await store.delete(""), null);
   assert.equal(await store.delete("missing-doc"), null);
 
-  await store.clear({
-    userId: "nobody",
-    workspaceId: "workspace-z",
-  });
+  assert.deepEqual(
+    await store.clear({
+      userId: "nobody",
+      workspaceId: "workspace-z",
+    }),
+    []
+  );
 
-  await store.clear({
-    userId: "alice",
-    workspaceId: "workspace-a",
-  });
+  // A clear reports the rows its own DELETE removed, not a listing taken
+  // beforehand, and runs as one statement (on the caller's client).
+  const clearClientCalls = [];
+  const clearClient = {
+    query: async (sql, values) => {
+      clearClientCalls.push(sql);
+      return fakeQuery(sql, values);
+    },
+  };
+  const clearedAlice = await store.clear(
+    {
+      userId: "alice",
+      workspaceId: "workspace-a",
+    },
+    { client: clearClient }
+  );
 
+  assert.deepEqual(
+    clearedAlice.map((document) => document.docId).sort(),
+    ["alice-doc", "legacy-doc", "uint8-doc"]
+  );
+  assert.equal(clearClientCalls.length, 1);
   assert.equal(rows.has("alice-doc"), false);
   assert.equal(rows.has("legacy-doc"), false);
   assert.equal(rows.has("bob-doc"), true);
 
-  await store.clear();
-
+  assert.deepEqual(
+    (await store.clear()).map((document) => document.docId),
+    ["bob-doc"]
+  );
   assert.equal(rows.size, 0);
   assert.equal(
     queryCalls.some((call) => /DELETE FROM rag_documents\s+WHERE doc_id = ANY/.test(call.sql)),
-    true
-  );
-  assert.equal(
-    queryCalls.some((call) => call.sql === "DELETE FROM rag_documents"),
-    true
+    false,
+    "no listing-then-delete"
   );
 
   const invalidStore = createDocumentRegistryStore({

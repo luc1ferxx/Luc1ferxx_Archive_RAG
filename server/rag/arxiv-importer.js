@@ -10,6 +10,7 @@ import {
   buildArxivPaperIdentity,
   findExistingArxivDocument,
 } from "./arxiv-identity.js";
+import { refreshDocumentsIngestedElsewhere } from "./ingest-worker.js";
 import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_IMPORT_DELAY_MS = 1000;
@@ -259,6 +260,11 @@ export const importArxivPapers = async ({
   await mkdir(tempDirectory, {
     recursive: true,
   });
+  // The duplicate check below lists this tenant's documents. With a
+  // PostgreSQL registry other processes add and delete them too, so the
+  // listing is read from the store first: a paper deleted on another instance
+  // can be imported again, and one imported there is not imported twice.
+  await refreshDocumentsIngestedElsewhere(ragService, accessScope);
   assertExecutionActive({
     assertClaimActive,
     signal,

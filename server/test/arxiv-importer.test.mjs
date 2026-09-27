@@ -544,3 +544,45 @@ test("arxiv importer checks its claim before each paper lookup", async () => {
 
   assert.equal(documentLookupCount, 0);
 });
+
+test("with a shared registry the duplicate check reads the tenant's documents from the store first", async () => {
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "arxiv-importer-shared-"));
+  const paper = createPaper();
+  const scope = { userId: "alice", workspaceId: "workspace-a" };
+  // This process's map still holds the paper, which another instance deleted.
+  let held = [{ docId: "doc-deleted-elsewhere", fileName: buildArxivPdfFileName(paper) }];
+  const calls = [];
+
+  try {
+    const result = await importArxivPapers({
+      accessScope: scope,
+      arxivService: { downloadPdf: async () => Buffer.from("%PDF-1.7 fake") },
+      delayMs: 0,
+      papers: [paper],
+      ragService: {
+        ingestDocument: async ({ docId, fileName }) => {
+          calls.push("ingest");
+          return { docId, fileName };
+        },
+        isDocumentRegistryShared: () => true,
+        listDocuments: () => {
+          calls.push("list");
+          return held;
+        },
+        refreshDocumentRegistry: async (accessScope) => {
+          calls.push("refresh");
+          assert.deepEqual(accessScope, scope);
+          held = [];
+          return held;
+        },
+      },
+      tempDirectory,
+    });
+
+    assert.deepEqual(calls, ["refresh", "list", "ingest"], "refreshed before the duplicate check");
+    assert.equal(result.importedCount, 1, "a paper deleted on another instance can be imported again");
+    assert.equal(result.skippedCount, 0);
+  } finally {
+    await rm(tempDirectory, { force: true, recursive: true });
+  }
+});
