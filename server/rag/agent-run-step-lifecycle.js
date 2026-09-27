@@ -6,6 +6,7 @@ const hasLifecycleTarget = ({ agentRunService, runId } = {}) =>
 export const createAgentRunStepLifecycle = ({
   accessScope = {},
   agentRunService,
+  runCursor = null,
   runId,
 } = {}) => {
   const recordStep = (patch = {}) => {
@@ -16,6 +17,9 @@ export const createAgentRunStepLifecycle = ({
     return agentRunService.recordRunStep({
       accessScope,
       runId,
+      // The invocation's latest run snapshot: each step transition CASes on
+      // it instead of re-reading the row the previous transition wrote.
+      ...(runCursor ? { runCursor } : {}),
       ...patch,
     });
   };

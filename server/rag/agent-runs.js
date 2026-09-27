@@ -1160,17 +1160,245 @@ const assertExecutionGraphRunOwner = ({ expectedResumeClaimId = null, run } = {}
 
 const DEFAULT_AGENT_RUN_MUTATION_RETRIES = 32;
 
+const buildAgentRunCursorKey = ({ accessScope = {}, runId } = {}) =>
+  `${buildTaskScopeKey(normalizeTaskAccessScope(accessScope))}\u0000${normalizeText(runId)}`;
+
+/**
+ * The run snapshot one invocation (one /chat request or one graph resume)
+ * last wrote or read, carried through its call chain so its next mutation
+ * does not first re-read the row it has just written.
+ *
+ * It is an optimistic CAS base, never a cache. A mutation decided on it
+ * commits only when the stored revision still equals the snapshot's revision,
+ * which makes the snapshot exactly the stored row. Every other outcome (a
+ * revision conflict, a no-op, a rejected mutation) is decided again from a
+ * fresh read with the method's full retry budget, so it behaves exactly as if
+ * the cursor had not been passed. Its event list is the stored list as of the
+ * write or read that produced it (the PostgreSQL CAS locks the run row before
+ * its snapshot, so a concurrent append that committed first is included) and
+ * may lag appends made after it, which do not bump the revision; a mutation
+ * whose decision reads events asks for a fresh read instead (see
+ * requiresFreshRun). A cursor belongs to one invocation and one (scope, runId)
+ * and is never shared between requests.
+ */
+export const createAgentRunCursor = () => {
+  let key = "";
+  let snapshot = null;
+
+  return {
+    remember({ accessScope = {}, run } = {}) {
+      if (!run || !normalizeText(run.runId)) {
+        return;
+      }
+
+      const nextKey = buildAgentRunCursorKey({
+        accessScope,
+        runId: run.runId,
+      });
+
+      if (
+        key === nextKey &&
+        snapshot &&
+        normalizeAgentRunRevision(snapshot.revision) >
+          normalizeAgentRunRevision(run.revision)
+      ) {
+        // Concurrent graph nodes settle in any order; keep the newest.
+        return;
+      }
+
+      key = nextKey;
+      snapshot = structuredClone(run);
+    },
+
+    read({ accessScope = {}, runId } = {}) {
+      return snapshot &&
+        key === buildAgentRunCursorKey({ accessScope, runId })
+        ? structuredClone(snapshot)
+        : null;
+    },
+
+    // The public projection of the latest known snapshot, for a caller that
+    // only builds a payload from it (the CAS base is still checked on write).
+    peek({ accessScope = {}, runId } = {}) {
+      const run = this.read({ accessScope, runId });
+
+      return run ? stripInternalRunFields(run) : null;
+    },
+  };
+};
+
+const rememberRunInCursor = ({ accessScope, run, runCursor } = {}) => {
+  if (run && typeof runCursor?.remember === "function") {
+    runCursor.remember({ accessScope, run });
+  }
+};
+
+const readRunFromCursor = ({ accessScope, runCursor, runId } = {}) =>
+  typeof runCursor?.read === "function"
+    ? runCursor.read({ accessScope, runId })
+    : null;
+
 export const createAgentRunService = ({
   agentRunStore = createInMemoryAgentRunStore(),
 } = {}) => {
+  // Decide a mutation against one stored run snapshot. Returns null when the
+  // mutation declines (no-op); throws when the decision rejects it.
+  const decideRunMutation = async ({
+    allowRetryTransition,
+    existingRun,
+    includeGraphCheckpoint,
+    mutate,
+  }) => {
+    const mutation = await mutate(
+      stripInternalRunFields(existingRun, { includeGraphCheckpoint })
+    );
+
+    if (!mutation) {
+      return null;
+    }
+
+    const patch = mutation.patch ?? mutation;
+
+    if (
+      !includeGraphCheckpoint &&
+      Object.hasOwn(normalizeRecord(patch.result), EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY)
+    ) {
+      const error = new Error(
+        "Execution graph checkpoint requires the scoped checkpoint API."
+      );
+      error.code = "AGENT_GRAPH_CHECKPOINT_PRIVATE_FIELD";
+      error.status = 409;
+      throw error;
+    }
+
+    if (patch.status !== undefined) {
+      assertAgentRunStatusTransition({
+        allowRetryTransition,
+        from: existingRun.status,
+        to: patch.status,
+      });
+    }
+
+    if (
+      TERMINAL_AGENT_RUN_STATUSES.has(existingRun.status) &&
+      !allowRetryTransition
+    ) {
+      const error = new Error(
+        `Terminal agent run cannot be updated: ${existingRun.status}.`
+      );
+      error.status = 409;
+      throw error;
+    }
+
+    return mutation;
+  };
+
+  // One revision CAS of a decided mutation on existingRun. Throws the store's
+  // revision conflict when existingRun is no longer the stored revision.
+  const commitRunMutation = async ({ accessScope, existingRun, mutation, runId }) => {
+    const patch = mutation.patch ?? mutation;
+    const approvalSnapshots = toArray(mutation.approvalSnapshots);
+
+    if (approvalSnapshots.length > 0 && !agentRunStore.updateWithEvent) {
+      throw new Error(
+        "Agent run store cannot atomically persist approval execution snapshots."
+      );
+    }
+
+    const updateOptions = {
+      accessScope,
+      // The store merges the patch onto this exact snapshot instead of
+      // reading the row again; the revision CAS still guards the write.
+      baseRun: existingRun,
+      expectedRevision: normalizeAgentRunRevision(existingRun.revision),
+      runId,
+      patch,
+    };
+    const atomicEvent = Boolean(mutation.event && agentRunStore.updateWithEvent);
+    const updatedRun = atomicEvent
+      ? await agentRunStore.updateWithEvent({
+          ...updateOptions,
+          approvalSnapshots,
+          event: mutation.event,
+        })
+      : await agentRunStore.update?.(updateOptions);
+
+    if (updatedRun && mutation.event && !agentRunStore.updateWithEvent) {
+      await agentRunStore.appendEvent?.({
+        accessScope,
+        event: mutation.event,
+        runId,
+      });
+    }
+
+    return {
+      applied: Boolean(updatedRun),
+      // The run the write returned already holds the committed row and, for
+      // an atomic event, the event; a store that appends it separately is
+      // re-read by the caller, as before.
+      current: Boolean(updatedRun) && (atomicEvent || !mutation.event),
+      run: updatedRun ? stripInternalRunFields(updatedRun) : null,
+      storedRun: updatedRun ?? null,
+      value: mutation.value ?? null,
+    };
+  };
+
   const mutateStoredRun = async ({
     accessScope = {},
     allowRetryTransition = false,
     includeGraphCheckpoint = false,
     maxRetries = 0,
     mutate,
+    requiresFreshRun = null,
+    runCursor = null,
     runId,
   } = {}) => {
+    const knownRun = readRunFromCursor({ accessScope, runCursor, runId });
+
+    if (knownRun && !requiresFreshRun?.(knownRun)) {
+      // Optimistic attempt on the snapshot this invocation last wrote. Only a
+      // committed CAS proves it was the stored revision; a no-op, a rejected
+      // decision or a revision conflict falls through to the fresh-read loop
+      // below, which decides again exactly as without a cursor. Store errors
+      // other than a revision conflict propagate unchanged.
+      let mutation = null;
+
+      try {
+        mutation = await decideRunMutation({
+          allowRetryTransition,
+          existingRun: knownRun,
+          includeGraphCheckpoint,
+          mutate,
+        });
+      } catch {
+        mutation = null;
+      }
+
+      if (mutation) {
+        try {
+          const committed = await commitRunMutation({
+            accessScope,
+            existingRun: knownRun,
+            mutation,
+            runId,
+          });
+
+          if (committed.applied) {
+            rememberRunInCursor({
+              accessScope,
+              run: committed.storedRun,
+              runCursor,
+            });
+            return committed;
+          }
+        } catch (error) {
+          if (!isAgentRunRevisionConflictError(error)) {
+            throw error;
+          }
+        }
+      }
+    }
+
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const existingRun = await agentRunStore.get?.({
         accessScope,
@@ -1180,92 +1408,44 @@ export const createAgentRunService = ({
       if (!existingRun) {
         return {
           applied: false,
+          current: false,
           run: null,
           value: null,
         };
       }
 
-      const mutation = await mutate(
-        stripInternalRunFields(existingRun, { includeGraphCheckpoint })
-      );
+      rememberRunInCursor({ accessScope, run: existingRun, runCursor });
+
+      const mutation = await decideRunMutation({
+        allowRetryTransition,
+        existingRun,
+        includeGraphCheckpoint,
+        mutate,
+      });
 
       if (!mutation) {
         return {
           applied: false,
+          current: false,
           run: stripInternalRunFields(existingRun),
           value: null,
         };
       }
 
-      const patch = mutation.patch ?? mutation;
-      const approvalSnapshots = toArray(mutation.approvalSnapshots);
-
-      if (
-        !includeGraphCheckpoint &&
-        Object.hasOwn(normalizeRecord(patch.result), EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY)
-      ) {
-        const error = new Error(
-          "Execution graph checkpoint requires the scoped checkpoint API."
-        );
-        error.code = "AGENT_GRAPH_CHECKPOINT_PRIVATE_FIELD";
-        error.status = 409;
-        throw error;
-      }
-
-      if (patch.status !== undefined) {
-        assertAgentRunStatusTransition({
-          allowRetryTransition,
-          from: existingRun.status,
-          to: patch.status,
-        });
-      }
-
-      if (
-        TERMINAL_AGENT_RUN_STATUSES.has(existingRun.status) &&
-        !allowRetryTransition
-      ) {
-        const error = new Error(
-          `Terminal agent run cannot be updated: ${existingRun.status}.`
-        );
-        error.status = 409;
-        throw error;
-      }
-
       try {
-        if (approvalSnapshots.length > 0 && !agentRunStore.updateWithEvent) {
-          throw new Error(
-            "Agent run store cannot atomically persist approval execution snapshots."
-          );
-        }
-
-        const updateOptions = {
+        const committed = await commitRunMutation({
           accessScope,
-          expectedRevision: normalizeAgentRunRevision(existingRun.revision),
+          existingRun,
+          mutation,
           runId,
-          patch,
-        };
-        const updatedRun =
-          mutation.event && agentRunStore.updateWithEvent
-            ? await agentRunStore.updateWithEvent({
-                ...updateOptions,
-                approvalSnapshots,
-                event: mutation.event,
-              })
-            : await agentRunStore.update?.(updateOptions);
+        });
 
-        if (updatedRun && mutation.event && !agentRunStore.updateWithEvent) {
-          await agentRunStore.appendEvent?.({
-            accessScope,
-            event: mutation.event,
-            runId,
-          });
-        }
-
-        return {
-          applied: Boolean(updatedRun),
-          run: updatedRun ? stripInternalRunFields(updatedRun) : null,
-          value: mutation.value ?? null,
-        };
+        rememberRunInCursor({
+          accessScope,
+          run: committed.storedRun,
+          runCursor,
+        });
+        return committed;
       } catch (error) {
         if (
           !isAgentRunRevisionConflictError(error) ||
@@ -1291,6 +1471,7 @@ export const createAgentRunService = ({
     goal,
     input = {},
     plan = {},
+    runCursor = null,
     runId = randomUUID(),
     status = AGENT_RUN_STATUSES.running,
   } = {}) {
@@ -1319,20 +1500,25 @@ export const createAgentRunService = ({
           run: runSnapshot,
         });
 
+    let storedRun = run;
+
     if (!agentRunStore.createWithEvent) {
       await this.appendRunEvent({
         accessScope,
         runId: run.runId,
         ...creationEvent,
       });
-    }
-
-    return stripInternalRunFields(
-      await agentRunStore.get({
+      storedRun = await agentRunStore.get({
         accessScope,
         runId: run.runId,
-      })
-    );
+      });
+    }
+
+    // createWithEvent returns the inserted row with its creation event, which
+    // is the whole stored run: reading it back would return the same row.
+    rememberRunInCursor({ accessScope, run: storedRun, runCursor });
+
+    return stripInternalRunFields(storedRun);
   },
 
   async appendRunEvent({
@@ -1354,6 +1540,7 @@ export const createAgentRunService = ({
   async updateRun({
     accessScope = {},
     graphReentryGuard = null,
+    runCursor = null,
     runId,
     patch = {},
   } = {}) {
@@ -1361,6 +1548,7 @@ export const createAgentRunService = ({
       accessScope,
       includeGraphCheckpoint: Boolean(graphReentryGuard),
       maxRetries: graphReentryGuard ? DEFAULT_AGENT_RUN_MUTATION_RETRIES : 0,
+      runCursor,
       runId,
       mutate: (existingRun) => {
         const checkpoint = existingRun.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
@@ -1450,12 +1638,14 @@ export const createAgentRunService = ({
     };
   },
 
-  async getExecutionGraphCheckpoint({ accessScope = {}, runId } = {}) {
+  async getExecutionGraphCheckpoint({ accessScope = {}, runCursor = null, runId } = {}) {
     const run = await agentRunStore.get?.({ accessScope, runId });
 
     if (!run) {
       return null;
     }
+
+    rememberRunInCursor({ accessScope, run, runCursor });
 
     const checkpoint = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
 
@@ -1533,6 +1723,7 @@ export const createAgentRunService = ({
   async saveExecutionGraphCheckpoint({
     accessScope = {},
     checkpoint,
+    runCursor = null,
     runId,
   } = {}) {
     if (
@@ -1559,6 +1750,7 @@ export const createAgentRunService = ({
       accessScope,
       includeGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runCursor,
       runId,
       mutate: (run) => {
         const previous = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
@@ -1670,6 +1862,7 @@ export const createAgentRunService = ({
     approvalSnapshot,
     checkpoint,
     graphResumeClaimId = null,
+    runCursor = null,
     runId,
   } = {}) {
     if (
@@ -1685,6 +1878,7 @@ export const createAgentRunService = ({
       accessScope,
       includeGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runCursor,
       runId,
       mutate: (run) => {
         const previous = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
@@ -1959,6 +2153,7 @@ export const createAgentRunService = ({
     graphResumeClaimId = null,
     observations = [],
     result = {},
+    runCursor = null,
     runId,
     status = AGENT_RUN_STATUSES.completed,
     steps,
@@ -1980,6 +2175,7 @@ export const createAgentRunService = ({
       accessScope,
       includeGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runCursor,
       runId,
       mutate: (existingRun) => {
         const hasGraph = assertExecutionGraphRunOwner({
@@ -2057,6 +2253,11 @@ export const createAgentRunService = ({
     });
     const run = mutation.run;
 
+    // A committed write returned the stored run with its completion event.
+    if (mutation.current) {
+      return run;
+    }
+
     return (
       (await this.getRun({
         accessScope,
@@ -2117,12 +2318,19 @@ export const createAgentRunService = ({
     );
   },
 
-  async failRun({ accessScope = {}, error, graphResumeClaimId = null, runId } = {}) {
+  async failRun({
+    accessScope = {},
+    error,
+    graphResumeClaimId = null,
+    runCursor = null,
+    runId,
+  } = {}) {
     const runError = buildRunError(error);
     const mutation = await mutateStoredRun({
       accessScope,
       includeGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runCursor,
       runId,
       mutate: (existingRun) => {
         const hasGraph = assertExecutionGraphRunOwner({
@@ -2159,6 +2367,10 @@ export const createAgentRunService = ({
       },
     });
     const run = mutation.run;
+
+    if (mutation.current) {
+      return run;
+    }
 
     return (
       (await this.getRun({
@@ -2441,6 +2653,7 @@ export const createAgentRunService = ({
     input,
     label,
     output,
+    runCursor = null,
     runId,
     status,
     stepId,
@@ -2464,6 +2677,14 @@ export const createAgentRunService = ({
       accessScope,
       includeGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      // A standalone step next to a persisted graph is admitted by the
+      // graph's durable event order (assertStandaloneGraphReplayAllowed),
+      // which a cursor snapshot may not hold in full; decide it on a fresh
+      // read. Every other step decision depends on revisioned fields only.
+      requiresFreshRun: (run) =>
+        graphResumeClaimId === undefined &&
+        Boolean(run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]),
+      runCursor,
       runId,
       mutate: (existingRun) => {
         const checkpoint = existingRun.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
@@ -2620,6 +2841,10 @@ export const createAgentRunService = ({
 
     if (!mutation.applied) {
       return null;
+    }
+
+    if (mutation.current) {
+      return mutation.run;
     }
 
     return (

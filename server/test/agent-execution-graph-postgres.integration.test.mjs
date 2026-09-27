@@ -842,4 +842,227 @@ if (workerMode === "1") {
       }
     }
   });
+
+  test("PostgreSQL run writes return the stored projection, and a stale run cursor still loses the CAS", {
+    timeout: 120_000,
+  }, async () => {
+    const modules = await loadModules();
+    const { createAgentRunCursor } = await import("../rag/agent-runs.js");
+    const { runWithDatabaseTenant } = await import("../rag/postgres-tenant.js");
+    const runId = `graph-postgres-it-${randomUUID().replaceAll("-", "")}`;
+    const statements = [];
+    // The production store and query path, with every statement classified.
+    const service = modules.createAgentRunService({
+      agentRunStore: modules.createPostgresAgentRunStore({
+        query: (queryText, values, options) => {
+          statements.push(
+            /WITH (inserted|updated|touched)_run AS/.test(queryText)
+              ? "write"
+              : /^\s*SELECT[\s\S]*FROM \w+\s+WHERE user_id = \$1/.test(queryText)
+                ? "read"
+                : "other"
+          );
+          return modules.queryPostgres(queryText, values, options);
+        },
+      }),
+    });
+    const other = newRunService(modules);
+
+    try {
+      await service.initialize();
+      // Under the request's tenant, as /chat runs it with row-level security.
+      await runWithDatabaseTenant(accessScope, async () => {
+        const runCursor = createAgentRunCursor();
+        statements.length = 0;
+        const created = await service.createRun({
+          accessScope,
+          goal: question,
+          input: { docIds, sessionId, userId: accessScope.userId },
+          runCursor,
+          runId,
+        });
+        await service.appendRunEvent({ accessScope, runId, type: "run_prepared" });
+        const started = await service.recordRunStep({
+          accessScope,
+          eventType: "step_started",
+          input: { question },
+          label: "Document RAG",
+          runCursor,
+          runId,
+          status: "running",
+          stepId: "document_rag:primary",
+          type: "document_rag",
+        });
+        const completedStep = await service.recordRunStep({
+          accessScope,
+          output: { text: "answer" },
+          runCursor,
+          runId,
+          status: "completed",
+          stepId: "document_rag:primary",
+        });
+
+        assert.deepEqual(statements, ["write", "write", "write", "write"]);
+        assert.deepEqual(created.events.map(({ type }) => type), ["run_created"]);
+        assert.deepEqual(started.events.map(({ type }) => type), [
+          "run_created",
+          "run_prepared",
+          "step_started",
+        ]);
+        // The event list a write returns is exactly what a read returns:
+        // same ids (int8 as text), payloads, timestamps and order.
+        assert.deepEqual(completedStep, await service.getRun({ accessScope, runId }));
+        assert.equal(typeof completedStep.events[0].eventId, "string");
+
+        // A second writer moves the run on; this cursor is now one revision
+        // behind. Its write must lose the CAS, re-read, and keep both changes.
+        await other.recordRunStep({
+          accessScope,
+          eventType: "step_started",
+          label: "Other writer",
+          runId,
+          status: "running",
+          stepId: "other-writer",
+          type: "capability_call",
+        });
+        await other.recordRunStep({
+          accessScope,
+          runId,
+          status: "completed",
+          stepId: "other-writer",
+        });
+        const completed = await service.completeRun({
+          accessScope,
+          result: { answer: "done" },
+          runCursor,
+          runId,
+          steps: completedStep.steps,
+        });
+        const stored = await service.getRun({ accessScope, runId });
+
+        assert.deepEqual(completed, stored);
+        assert.equal(stored.status, "completed");
+        assert.deepEqual(
+          stored.steps.map(({ id, status }) => [id, status]),
+          [
+            ["document_rag:primary", "completed"],
+            ["other-writer", "completed"],
+          ]
+        );
+        assert.equal(
+          stored.events.filter(({ type }) => type === "run_completed").length,
+          1
+        );
+      });
+    } finally {
+      try {
+        await deleteIntegrationRun(modules, runId);
+      } finally {
+        await modules.resetPostgresPool();
+      }
+    }
+  });
+
+  // READ COMMITTED takes a statement's snapshot when it starts. An appendEvent
+  // locks the run row without bumping the revision, so a CAS that starts
+  // while it is open waits for the lock, passes its revision re-check, and
+  // would return an event list read before that append committed. The CAS
+  // locks the run row first, in the same round trip, so its list includes it.
+  test("a run write that waits for a concurrent append's row lock returns that append in its event list", {
+    timeout: 120_000,
+  }, async () => {
+    const modules = await loadModules();
+    const { createAgentRunCursor } = await import("../rag/agent-runs.js");
+    const { runWithDatabaseTenant } = await import("../rag/postgres-tenant.js");
+    const { default: pg } = await import("pg");
+    const runsTable = modules.getAgentRunsPostgresTable();
+    const eventsTable = modules.getAgentRunEventsPostgresTable();
+    const service = newRunService(modules);
+
+    try {
+      await service.initialize?.();
+
+      for (const path of ["tenant", "owner"]) {
+        const runId = `graph-postgres-it-${randomUUID().replaceAll("-", "")}`;
+        const inScope = (callback) =>
+          path === "tenant" ? runWithDatabaseTenant(accessScope, callback) : callback();
+        const runCursor = createAgentRunCursor();
+        // Worker B: appendEvent's statement in a transaction held open.
+        const appender = new pg.Client({ connectionString: databaseUrl });
+
+        await appender.connect();
+
+        try {
+          await inScope(() =>
+            service.createRun({ accessScope, goal: question, runCursor, runId })
+          );
+
+          const { rows: [{ pid: appenderPid }] } = await appender.query(
+            "SELECT pg_backend_pid() AS pid"
+          );
+
+          await appender.query("BEGIN");
+          await appender.query(
+            `WITH touched_run AS (
+               UPDATE ${runsTable}
+               SET updated_at = GREATEST(updated_at, clock_timestamp())
+               WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3
+               RETURNING run_id
+             )
+             INSERT INTO ${eventsTable} (user_id, workspace_id, run_id, event_type, event_payload)
+             SELECT $1, $2, $3, 'concurrent_append', '{}'::jsonb FROM touched_run`,
+            [accessScope.userId, accessScope.workspaceId, runId]
+          );
+
+          // Worker A: a cursor CAS on the same run, started while B is open.
+          const write = inScope(() =>
+            service.recordRunStep({
+              accessScope,
+              eventType: "step_started",
+              label: "Document RAG",
+              runCursor,
+              runId,
+              status: "running",
+              stepId: "document_rag:primary",
+              type: "document_rag",
+            })
+          );
+
+          let waiting = 0;
+
+          for (let attempt = 0; attempt < 2000 && waiting === 0; attempt += 1) {
+            const { rows: [row] } = await modules.queryPostgres(
+              `SELECT count(*)::int AS waiting FROM pg_stat_activity
+               WHERE $1::int = ANY(pg_blocking_pids(pid))`,
+              [appenderPid]
+            );
+
+            waiting = row.waiting;
+
+            if (waiting === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+          }
+
+          assert.equal(waiting, 1, `${path}: the run write waits for the open append`);
+          await appender.query("COMMIT");
+
+          const started = await write;
+          const stored = await inScope(() => service.getRun({ accessScope, runId }));
+
+          assert.deepEqual(
+            started.events.map(({ type }) => type),
+            ["run_created", "concurrent_append", "step_started"],
+            `${path}: the returned list holds the append that committed first`
+          );
+          assert.deepEqual(started, stored);
+        } finally {
+          await appender.end();
+          await deleteIntegrationRun(modules, runId);
+        }
+      }
+    } finally {
+      await modules.resetPostgresPool();
+    }
+  });
 }

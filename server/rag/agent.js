@@ -19,7 +19,7 @@ import {
   deterministicIntentPlannerAdapter,
 } from "./agent-intent-planner.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
-import { AGENT_RUN_STATUSES } from "./agent-runs.js";
+import { AGENT_RUN_STATUSES, createAgentRunCursor } from "./agent-runs.js";
 import {
   getAgentRunInterruptPrivateDetail,
   isAgentRunInterrupt,
@@ -232,20 +232,28 @@ const completeRecordedRun = async ({
   approvalSnapshots = [],
   graphResumeClaimId = null,
   response,
+  runCursor = null,
   runId,
 } = {}) => {
   if (!agentRunService || !runId) {
     return;
   }
 
-  const existingRun = await agentRunService.getRun?.({
-    accessScope,
-    runId,
-  });
+  // The completion payload only merges the trace onto the persisted steps and
+  // gates; completeRun merges it again onto the run its CAS commits against,
+  // so the invocation's latest snapshot is as good a starting point as a
+  // fresh read (a newer stored revision fails that CAS and is re-read there).
+  const existingRun =
+    runCursor?.peek?.({ accessScope, runId }) ??
+    (await agentRunService.getRun?.({
+      accessScope,
+      runId,
+    }));
 
   return agentRunService.completeRun({
     accessScope,
     graphResumeClaimId,
+    ...(runCursor ? { runCursor } : {}),
     runId,
     ...buildRunCompletionPayload(response, existingRun ?? {}, {
       approvalSnapshots,
@@ -328,6 +336,7 @@ const completeRecordedRunAndExperience = async ({
   approvalSnapshots = [],
   question,
   response,
+  runCursor = null,
   runId,
   taskMemory,
   userId,
@@ -354,6 +363,7 @@ const completeRecordedRunAndExperience = async ({
     approvalSnapshots,
     graphResumeClaimId: null,
     response: responseWithExperienceMemory,
+    runCursor,
     runId,
   });
 
@@ -424,8 +434,11 @@ const resumeAgentExecutionGraphRunInScope = async ({
     throw createGraphResumeError("stored request or outer plan changed");
   }
 
+  // This resume's latest run snapshot, seeded by the claim check below.
+  const runCursor = createAgentRunCursor();
   const loaded = await agentRunService?.getExecutionGraphCheckpoint?.({
     accessScope,
+    runCursor,
     runId,
   });
 
@@ -523,7 +536,7 @@ const resumeAgentExecutionGraphRunInScope = async ({
     executeObservedSkill,
     expectedGraphResumeClaimId: checkpoint.resumeClaim.claimId,
     loadExecutionGraphCheckpoint: () =>
-      agentRunService.getExecutionGraphCheckpoint({ accessScope, runId }),
+      agentRunService.getExecutionGraphCheckpoint({ accessScope, runCursor, runId }),
     mode: "guarded",
     plan,
     question,
@@ -538,12 +551,14 @@ const resumeAgentExecutionGraphRunInScope = async ({
       agentRunService.saveExecutionGraphCheckpoint({
         accessScope,
         checkpoint: nextCheckpoint,
+        runCursor,
         runId,
       }),
     sessionId: owner.sessionId,
     stepLifecycle: createAgentRunStepLifecycle({
       accessScope,
       agentRunService,
+      runCursor,
       runId,
     }),
     taskMemory: owner.taskMemory,
@@ -596,6 +611,7 @@ const resumeAgentExecutionGraphRunInScope = async ({
     agentRunService,
     graphResumeClaimId: checkpoint.resumeClaim.claimId,
     response: responseWithContinuation,
+    runCursor,
     runId,
   });
 
@@ -746,10 +762,15 @@ const runAgentRagInScope = async ({
       selectedSkills: selectedSkills.map(getSkillDescriptor),
     },
   };
+  // This request's latest run snapshot. Each run write below commits against
+  // it with the revision CAS instead of first re-reading the row the previous
+  // write returned; see createAgentRunCursor.
+  const runCursor = createAgentRunCursor();
   const agentRun = requestedAgentRunId
     ? await agentRunService?.updateRun?.({
         accessScope,
         graphReentryGuard: true,
+        runCursor,
         runId: requestedAgentRunId,
         patch: {
           ...runSnapshot,
@@ -759,6 +780,7 @@ const runAgentRagInScope = async ({
     : await agentRunService?.createRun?.({
         accessScope,
         goal: question,
+        runCursor,
         runId: requestedAgentRunId,
         ...runSnapshot,
       });
@@ -769,6 +791,7 @@ const runAgentRagInScope = async ({
   const stepLifecycle = createAgentRunStepLifecycle({
     accessScope,
     agentRunService,
+    runCursor,
     runId: agentRunId,
   });
   const baseCapabilityRegistry =
@@ -824,6 +847,7 @@ const runAgentRagInScope = async ({
         agentRunService,
         question,
         response,
+        runCursor,
         runId: agentRunId,
         taskMemory: taskMemoryContext,
         userId,
@@ -898,7 +922,11 @@ const runAgentRagInScope = async ({
       executionPlan: executionPlanResult.executionPlan,
       getSelectedSkill,
       loadExecutionGraphCheckpoint: agentRunId && agentRunService?.getExecutionGraphCheckpoint
-        ? () => agentRunService.getExecutionGraphCheckpoint({ accessScope, runId: agentRunId })
+        ? () => agentRunService.getExecutionGraphCheckpoint({
+            accessScope,
+            runCursor,
+            runId: agentRunId,
+          })
         : null,
       plan,
       question,
@@ -933,6 +961,7 @@ const runAgentRagInScope = async ({
         ? (checkpoint) => agentRunService.saveExecutionGraphCheckpoint({
             accessScope,
             checkpoint,
+            runCursor,
             runId: agentRunId,
           })
         : null,
@@ -953,6 +982,7 @@ const runAgentRagInScope = async ({
         agentRunService,
         question,
         response,
+        runCursor,
         runId: agentRunId,
         taskMemory: taskMemoryContext,
         userId,
@@ -995,6 +1025,7 @@ const runAgentRagInScope = async ({
       agentRunService,
       question,
       response,
+      runCursor,
       runId: agentRunId,
       taskMemory: taskMemoryContext,
       userId,
@@ -1027,6 +1058,7 @@ const runAgentRagInScope = async ({
           : [],
         question,
         response,
+        runCursor,
         runId: agentRunId,
         taskMemory: taskMemoryContext,
         userId,
@@ -1037,6 +1069,7 @@ const runAgentRagInScope = async ({
       accessScope,
       error,
       graphResumeClaimId: null,
+      runCursor,
       runId: agentRunId,
     });
     throw error;

@@ -308,6 +308,155 @@ if (!adminDatabaseUrl) {
     });
   });
 
+  // Ids with quotes, backslashes, semicolons, newlines and a would-be second
+  // statement: the tenant settings bind them as parameters, so PostgreSQL must
+  // hand back exactly these strings and run nothing else.
+  const HOSTILE = {
+    userId: `o'brien\\'); DROP TABLE ${"rag_tasks"}; --\nline two $1 "q" é`,
+    workspaceId: `ws\\\\'; SELECT set_config('role', 'postgres', false); --\r\n'`,
+  };
+  const IDENTITY_SQL = `SELECT current_user AS role,
+    current_setting('archive_rag.user_id') AS user_id,
+    current_setting('archive_rag.workspace_id') AS workspace_id`;
+
+  // Counts pg client.query calls, one per round trip: a pipelined tenant
+  // statement is one call carrying one Sync.
+  const countClientQueries = async (callback) => {
+    const original = pg.Client.prototype.query;
+    let calls = 0;
+
+    pg.Client.prototype.query = function countedQuery(...args) {
+      calls += 1;
+      return original.apply(this, args);
+    };
+
+    try {
+      const result = await callback();
+
+      return { calls, result };
+    } finally {
+      pg.Client.prototype.query = original;
+    }
+  };
+
+  const ownerSeesNoTenantState = async () => {
+    // A destroyed connection's backend exits asynchronously; wait for it.
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const open = await modules.postgres.queryPostgres(
+        `SELECT count(*)::int AS open FROM pg_stat_activity
+         WHERE datname = current_database() AND state LIKE 'idle in transaction%'`
+      );
+
+      if (open.rows[0].open === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const observations = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        modules.postgres.queryPostgres(
+          `SELECT current_user AS role, current_setting('archive_rag.user_id', true) AS tenant,
+                  (SELECT count(*)::int FROM pg_stat_activity
+                   WHERE datname = current_database() AND state LIKE 'idle in transaction%') AS open`
+        )
+      )
+    );
+
+    observations.forEach(({ rows: [row] }) => {
+      assert.equal(row.role, ownerRole);
+      assert.ok(!row.tenant, "no tenant setting survives on a pooled connection");
+      assert.equal(row.open, 0, "no session is left inside a transaction");
+    });
+  };
+
+  test("hostile ids round-trip exactly through the tenant settings and inject nothing", async () => {
+    const asHostile = (callback) => modules.tenant.runWithDatabaseTenant(HOSTILE, callback);
+    const single = await asHostile(() => modules.postgres.queryPostgres(IDENTITY_SQL));
+    const inTransaction = await asHostile(() =>
+      modules.postgres.withPostgresTransaction((client) => client.query(IDENTITY_SQL))
+    );
+
+    for (const { rows: [row] } of [single, inTransaction]) {
+      assert.equal(row.role, tenantRole);
+      assert.equal(row.user_id, HOSTILE.userId);
+      assert.equal(row.workspace_id, HOSTILE.workspaceId);
+    }
+
+    // The hostile tenant owns nothing, and nothing was dropped or changed.
+    assert.deepEqual(await asHostile(() => scopedRows(tables.tasks)), []);
+    assert.deepEqual(await scopedRows(tables.tasks), ["alice", "bob"]);
+    await ownerSeesNoTenantState();
+  });
+
+  test("an id PostgreSQL cannot store fails the statement closed instead of truncating it", async () => {
+    await assert.rejects(
+      modules.tenant.runWithDatabaseTenant({ userId: "alice\u0000bob", workspaceId: "ws-a" }, () =>
+        modules.postgres.queryPostgres(`SELECT task_id FROM ${tables.tasks}`)
+      ),
+      (error) => error.code === "22021"
+    );
+    await ownerSeesNoTenantState();
+  });
+
+  test("a tenant statement is one round trip and a tenant transaction adds only BEGIN+settings and COMMIT", async () => {
+    const single = await countClientQueries(() =>
+      asAlice(() => modules.postgres.queryPostgres(IDENTITY_SQL))
+    );
+
+    assert.equal(single.calls, 1);
+    assert.equal(single.result.rows[0].role, tenantRole);
+    assert.equal(single.result.rows[0].user_id, "alice");
+
+    const transaction = await countClientQueries(() =>
+      asAlice(() => modules.postgres.withPostgresTransaction((client) => client.query(IDENTITY_SQL)))
+    );
+
+    assert.equal(transaction.calls, 3, "BEGIN+settings, the statement, COMMIT");
+    assert.equal(transaction.result.rows[0].role, tenantRole);
+  });
+
+  test("a failing tenant statement or transaction rolls back and returns the connection as the owner", async () => {
+    const insertTask = (taskId) =>
+      `INSERT INTO ${tables.tasks} (user_id, workspace_id, task_id, type, status)
+       VALUES ('alice', 'ws-a', '${taskId}', 'research', 'queued')`;
+
+    // The insert runs, then the same statement fails: the implicit
+    // transaction the Sync ends must roll the insert back.
+    await assert.rejects(
+      asAlice(() =>
+        modules.postgres.queryPostgres(
+          `WITH inserted AS (${insertTask("alice-rolled-back")} RETURNING 1)
+           SELECT 1 / (count(*) - 1) FROM inserted`
+        )
+      ),
+      (error) => error.code === "22012"
+    );
+    await assert.rejects(
+      asAlice(() =>
+        modules.postgres.withPostgresTransaction(async (client) => {
+          await client.query(insertTask("alice-rolled-back-2"));
+          await client.query("SELECT 1 / 0");
+        })
+      ),
+      (error) => error.code === "22012"
+    );
+
+    const leftovers = await modules.postgres.queryPostgres(
+      `SELECT task_id FROM ${tables.tasks} WHERE task_id LIKE 'alice-rolled-back%'`
+    );
+
+    assert.deepEqual(leftovers.rows, []);
+    await ownerSeesNoTenantState();
+  });
+
+  test("a tenant statement that would leave a transaction open fails and its connection is discarded", async () => {
+    await assert.rejects(
+      asAlice(() => modules.postgres.queryPostgres("BEGIN")),
+      (error) => error.code === modules.postgres.TENANT_PIPELINE_STATUS_ERROR_CODE
+    );
+    await ownerSeesNoTenantState();
+    assert.deepEqual(await asAlice(() => scopedRows(tables.tasks)), ["alice"]);
+  });
+
   test("system work inside a tenant request sees every tenant", async () => {
     const owners = await asAlice(() =>
       modules.tenant.runAsDatabaseSystem(() => scopedRows(tables.tasks))

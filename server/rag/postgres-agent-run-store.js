@@ -168,6 +168,73 @@ const mapEventRowToAgentRunEvent = (row = {}) =>
     createdAt: toIsoText(row.created_at),
   });
 
+const agentRunEventColumns = "event_id, event_type, event_payload, created_at";
+const RUN_EVENT_ORDER = "ORDER BY created_at ASC, event_id ASC";
+
+/**
+ * A write that already touches a run returns the run's whole event list in
+ * the same statement: the rows visible to the statement's snapshot plus the
+ * one this statement records (a data-modifying CTE is invisible to the rest of
+ * its own statement, so the two sets never overlap). The list is ordered
+ * exactly as getEvents() orders it and comes back as parallel arrays, so
+ * node-pg parses every value with the same type parser a plain event row gets
+ * (int8 as text, jsonb as an object, timestamptz as a Date).
+ *
+ * The snapshot is taken when the statement starts. A revision CAS that then
+ * waits for the run row lock (an appendEvent holds it without bumping the
+ * revision) would still pass its re-check but miss the event that writer
+ * committed, so the CAS writes take that lock first (lockRunRowFirst): every
+ * event writer locks the run row, which makes the list complete as of the
+ * write's commit.
+ */
+const buildRunEventListCte = ({ eventsTable, recordedEventCte }) => `
+  run_events AS (
+    SELECT
+      array_agg(event_id ${RUN_EVENT_ORDER}) AS run_event_ids,
+      array_agg(event_type ${RUN_EVENT_ORDER}) AS run_event_types,
+      array_agg(event_payload ${RUN_EVENT_ORDER}) AS run_event_payloads,
+      array_agg(created_at ${RUN_EVENT_ORDER}) AS run_event_created_ats
+    FROM (
+      SELECT ${agentRunEventColumns}
+      FROM ${eventsTable}
+      WHERE user_id = $1
+        AND workspace_id = $2
+        AND run_id = $3
+      UNION ALL
+      SELECT ${agentRunEventColumns}
+      FROM ${recordedEventCte}
+    ) AS run_event_rows
+  )
+`;
+
+const isUsableBaseRun = ({
+  accessScope = {},
+  baseRun,
+  expectedRevision,
+  runId,
+} = {}) =>
+  Boolean(baseRun) &&
+  normalizeText(baseRun.runId) === normalizeText(runId) &&
+  buildTaskScopeKey(normalizeTaskAccessScope(baseRun.accessScope)) ===
+    buildTaskScopeKey(normalizeTaskAccessScope(accessScope)) &&
+  normalizeAgentRunRevision(baseRun.revision) ===
+    normalizeAgentRunRevision(expectedRevision);
+
+const hasReturnedRunEvents = (row) =>
+  Boolean(row) && Object.hasOwn(row, "run_event_ids");
+
+const mapReturnedRunEvents = (row = {}) =>
+  toArray(row.run_event_ids)
+    .map((eventId, index) =>
+      mapEventRowToAgentRunEvent({
+        event_id: eventId,
+        event_type: toArray(row.run_event_types)[index],
+        event_payload: toArray(row.run_event_payloads)[index],
+        created_at: toArray(row.run_event_created_ats)[index],
+      })
+    )
+    .filter(Boolean);
+
 const mapRowToApprovalSnapshot = (row = {}) => ({
   gateId: normalizeText(row.gate_id),
   capabilityId: normalizeText(row.capability_id),
@@ -289,6 +356,42 @@ export const createPostgresAgentRunStore = ({
 
     return result.rows.map(mapEventRowToAgentRunEvent).filter(Boolean);
   };
+
+  // The event list a write returned with its row. An injected query function
+  // that does not model the aggregate (a unit-test fake) gets the separate
+  // read the store always used to make.
+  const resolveWrittenRunEvents = async ({ accessScope, row, runId }) =>
+    hasReturnedRunEvents(row)
+      ? mapReturnedRunEvents(row)
+      : getEvents({
+          accessScope,
+          runId,
+        });
+
+  const runEventListCte = buildRunEventListCte({
+    eventsTable: runEventsTable,
+    recordedEventCte: "recorded_event",
+  });
+
+  // Run before a revision CAS in the same transaction and round trip
+  // (queryPostgres's prelude): it waits for any writer holding the run row,
+  // so the CAS statement's snapshot, taken after it, includes that writer's
+  // events. FOR NO KEY UPDATE is the lock the UPDATE takes anyway.
+  const lockRunRowFirst = ({ runId, scope }) => ({
+    prelude: [
+      {
+        text: `
+          SELECT 1
+          FROM ${runsTable}
+          WHERE user_id = $1
+            AND workspace_id = $2
+            AND run_id = $3
+          FOR NO KEY UPDATE
+        `,
+        values: [scope.userId, scope.workspaceId, normalizeText(runId)],
+      },
+    ],
+  });
 
   const getRun = async ({ accessScope = {}, runId } = {}) => {
     await initialize();
@@ -416,11 +519,13 @@ export const createPostgresAgentRunStore = ({
               )
               SELECT $1, $2, $3, $17, $18::jsonb
               FROM inserted_run
-              RETURNING 1
-            )
-            SELECT inserted_run.*
+              RETURNING ${agentRunEventColumns}
+            ),
+            ${runEventListCte}
+            SELECT inserted_run.*, run_events.*
             FROM inserted_run
             CROSS JOIN recorded_event
+            CROSS JOIN run_events
           `,
           [
             ...insertParameters,
@@ -436,8 +541,9 @@ export const createPostgresAgentRunStore = ({
       });
     }
 
-    const events = await getEvents({
+    const events = await resolveWrittenRunEvents({
       accessScope: scope,
+      row: result.rows[0],
       runId: normalizedRun.runId,
     });
 
@@ -447,15 +553,28 @@ export const createPostgresAgentRunStore = ({
   const commitRunUpdate = async ({
     accessScope = {},
     approvalSnapshots = [],
+    baseRun = null,
     event = null,
     expectedRevision,
     patch = {},
     runId,
   } = {}) => {
-    const existingRun = await getRun({
+    // The caller already holds the run at expectedRevision when it decided
+    // this patch. A row at the same revision is the same row (every write
+    // other than the updated_at touch bumps it, and updatedAt is replaced
+    // below), and the CAS rejects the write when the stored revision moved,
+    // so reading it again here would only repeat the caller's read.
+    const existingRun = isUsableBaseRun({
       accessScope,
+      baseRun,
+      expectedRevision,
       runId,
-    });
+    })
+      ? baseRun
+      : await getRun({
+          accessScope,
+          runId,
+        });
 
     if (!existingRun) {
       return null;
@@ -662,18 +781,21 @@ export const createPostgresAgentRunStore = ({
                 FROM updated_run
                 CROSS JOIN approval_snapshot_write_guard
                 WHERE approval_snapshot_write_guard.complete
-                RETURNING 1
-              )
-              SELECT updated_run.*
+                RETURNING ${agentRunEventColumns}
+              ),
+              ${runEventListCte}
+              SELECT updated_run.*, run_events.*
               FROM updated_run
               CROSS JOIN recorded_event
+              CROSS JOIN run_events
           `,
           [
             ...updateParameters,
             normalizedEvent.type,
             JSON.stringify(normalizedEvent.payload ?? {}),
             JSON.stringify(normalizedApprovalSnapshots),
-          ]
+          ],
+          lockRunRowFirst({ runId, scope })
         );
       } else if (normalizedEvent) {
         result = await query(
@@ -709,17 +831,20 @@ export const createPostgresAgentRunStore = ({
               )
               SELECT $1, $2, $3, $16, $17::jsonb
               FROM updated_run
-              RETURNING 1
-            )
-            SELECT updated_run.*
+              RETURNING ${agentRunEventColumns}
+            ),
+            ${runEventListCte}
+            SELECT updated_run.*, run_events.*
             FROM updated_run
             CROSS JOIN recorded_event
+            CROSS JOIN run_events
           `,
           [
             ...updateParameters,
             normalizedEvent.type,
             JSON.stringify(normalizedEvent.payload ?? {}),
-          ]
+          ],
+          lockRunRowFirst({ runId, scope })
         );
       } else {
         result = await query(
@@ -770,6 +895,10 @@ export const createPostgresAgentRunStore = ({
         runId,
       });
 
+      if (!currentRun) {
+        return null;
+      }
+
       if (
         normalizedApprovalSnapshots.length > 0 &&
         currentRun &&
@@ -793,8 +922,9 @@ export const createPostgresAgentRunStore = ({
 
     return mapRowToAgentRun(
       result.rows[0],
-      await getEvents({
+      await resolveWrittenRunEvents({
         accessScope: scope,
+        row: result.rows[0],
         runId,
       })
     );
@@ -968,12 +1098,14 @@ export const createPostgresAgentRunStore = ({
 
     async update({
       accessScope = {},
+      baseRun = null,
       expectedRevision,
       patch = {},
       runId,
     } = {}) {
       return commitRunUpdate({
         accessScope,
+        baseRun,
         expectedRevision,
         patch,
         runId,
@@ -983,6 +1115,7 @@ export const createPostgresAgentRunStore = ({
     async updateWithEvent({
       accessScope = {},
       approvalSnapshots = [],
+      baseRun = null,
       event = {},
       expectedRevision,
       patch = {},
@@ -991,6 +1124,7 @@ export const createPostgresAgentRunStore = ({
       return commitRunUpdate({
         accessScope,
         approvalSnapshots,
+        baseRun,
         event,
         expectedRevision,
         patch,
