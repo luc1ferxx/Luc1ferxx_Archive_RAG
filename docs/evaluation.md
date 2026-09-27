@@ -25,6 +25,8 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run eval:shared-state` | 多实例（4 个子进程）对同一个故障模型服务，比较熔断和并发上限状态放在进程内和放在 Redis 的区别；`redis` 模式需要一个运行中的 Redis（`--redis-url`）。 |
 | `cd server && npm run eval:prompt-injection` | 提示注入红队：带恶意指令的文档加直接注入的问题，分别统计文档 RAG 答案（MCP `archive_ask`）和 Agent 路径（`/chat`）的攻击成功率、受攻击时仍答对的比例、对照组正确率，以及 claim 评审在注入证据下的错误接受率。需要真实模型；`--only` 只跑指定用例。 |
 | `cd server && npm run eval:tenant-isolation` | 数据库行级安全的改前/改后对比：在一次性数据库上比较 `POSTGRES_ROW_LEVEL_SECURITY=off` 与 `enforce` 下的越权读写、延迟和查询计划；需要能建角色和建库的 `PGVECTOR_TEST_DATABASE_URL`。 |
+| `cd server && npm run eval:load-test:pgvector` | API 闭环压测：在一次性 PostgreSQL 上，对 `/chat` 和 `GET /documents` 测吞吐、p50/p95/p99 和错误率，模型用假服务并注入延迟，pgvector 和 local 两种存储都测；只测 local 用 `eval:load-test`。见"压测与规模"。 |
+| `cd server && npm run bench:pgvector-scale` | pgvector 规模基准：在一次性集群上从 1 万到 100 万个分块，测加载、建索引、磁盘占用、行级安全下的检索延迟和 recall@10。见"压测与规模"。 |
 | `cd server && npm run coverage:targets` | 把目标覆盖率作为硬门控运行。 |
 | `cd server && npm run eval:synthetic` | 运行默认 synthetic RAG eval。 |
 | `cd server && npm run eval:trajectory` | 评测 AgentRAG 执行轨迹。 |
@@ -1076,6 +1078,71 @@ train 上（400 题）的损失拆解：
 - “off 下 9/9 泄露”说的是：一条漏写过滤条件的查询会读到什么。现有代码的 store 都带过滤条件，所以这个数字不代表现在就有泄露，它量化的是这层防护能兜住的那类 bug。
 
 正确性由 `test/postgres-row-level-security.integration.test.mjs` 保证（`bash scripts/run-pgvector-integration.sh` 会运行它）：每张表的隔离、四类越权写、连接池复用后不残留租户设置、owner 与租户查询交替执行、进程级文档 registry 在租户请求里首次加载时仍然加载全部文档、检索时传入其他租户的 docId 也拿不到其切块，以及健康检查探测。
+
+## 压测与规模
+
+两个脚本都只在一次性数据库上运行：wrapper 用 Postgres.app 的二进制在 `$TMPDIR` 下 initdb 一个集群，端口由系统分配（碰到 5432 或 5434 直接退出）。无论跑完还是失败都会停库并删除数据目录。两个脚本都不读 `server/.env`。报告写入 `evaluation/results/latest-load-test.*` 和 `latest-pgvector-scale.*`，都已加入忽略。
+
+### API 压测（`npm run eval:load-test:pgvector`）
+
+`server/evaluation/run-api-load-bench.mjs` 用 `createApp()` 和真实 services 在子进程里启动应用，做闭环压测。
+
+- **压测对象**：
+  - `POST /chat`：单文档问答，走完整 agent 路径；
+  - `GET /documents`：轻量端点作对照。
+- **测的是系统，不是模型**：进程内的假 OpenAI 兼容服务提供哈希词频 embedding 和"首句 + [Source 1]"答案，chat 延迟按档位注入（0 ms 和 800 ms）。假服务自己统计模型调用数和在途峰值；0 ms 档的在途峰值没有意义，报告里显示为 `-`。
+- **存储模式**：pgvector（生产默认，导入后在 PostgreSQL 里数分块行数，确认数据确实在库里）和 local。
+- **默认设置**：确定性规划器（每个 `/chat` 调 1 次模型；生产默认的 LLM 规划器调 3 次），查询 embedding 缓存开启，鉴权和限流关闭。
+- **防误用**：`--database-url` 指向的库如果已经有 `schema_migrations` 表（说明应用用过这个库），脚本在导入应用之前就拒绝运行。
+- **文件名**：不能以 `-test.mjs` 结尾，否则 Node 会把它当成测试文件，覆盖率报告里就没有它。
+
+2026-09-26，Apple M5 Pro，一次性 PostgreSQL 18.6 + pgvector 0.8.6，20 篇文档、80 个分块，每档 128 个 `/chat` 请求，全程 0 个错误，每个回答都带引用：
+
+| 场景（pgvector） | 并发 1 | 并发 16 | 并发 32 |
+| --- | --- | --- | --- |
+| `/chat`，模型 0 ms | p50 17 ms，58.8 req/s | 约 91 req/s | p50 347 ms，91.3 req/s |
+| `/chat`，模型 800 ms | p50 836 ms，1.2 req/s | p50 1607 ms，9.87 req/s，在途峰值 8 | p50 3213 ms，9.86 req/s，在途峰值 8 |
+| `GET /documents` | p50 0.1 ms，6,500 req/s | 13,244 req/s | p95 2.7 ms，13,350 req/s |
+
+- **模型 0 ms**：吞吐停在约 91 req/s（local 约 108）。每个请求约 12–13 ms 的应用 CPU，单个事件循环就是瓶颈。要更高吞吐得开多进程或多实例。
+- **模型 800 ms**：并发 16 以上时在途峰值正好是 8，也就是 `RAG_LLM_MAX_CONCURRENCY`，吞吐约 8 / 0.8 s = 10 req/s，其余请求在上限后面排队。模型并发上限决定容量。
+- **`GET /documents`**：两种模式都不查数据库，读的是进程内的文档注册表，所以约 13k req/s 衡量的是 HTTP、鉴权和范围过滤的开销，与存储无关。
+- **查询 embedding 缓存**：80 个问题循环使用，第一轮之后查询 embedding 全部命中缓存，所以表里的 `/chat` 吞吐不含查询 embedding 的成本。
+- **可比性**：压测器、假模型和应用在同一台机器上运行，只能和同一台机器上的结果比较。pgvector 两次完整运行相差约 1%，local 在 0 ms 档相差约 8%。
+
+### pgvector 规模（`npm run bench:pgvector-scale`）
+
+`server/evaluation/run-pgvector-scale-bench.mjs` 用应用自己的迁移（012 分块表和索引，013 行级安全）和检索代码，测分块数量增长后的表现。
+
+- **数据**：合成数据，每个文档 50 个分块，768 维聚类单位向量（256 个簇）。`embedding_model` 取自 `getEmbeddingIndexIdentity()`，所以应用的检索路径直接接受这些行。
+- **规模**：1 万、10 万、50 万、100 万，逐档追加；加载时先删索引，加载完重建 GIN 和 HNSW。
+- **查询方式**：在 `POSTGRES_ROW_LEVEL_SECURITY=enforce` 下，通过 `runWithDatabaseTenant` 以租户身份执行，和应用一致。
+- **查询系列**：
+  - dense 单文档；
+  - dense、sparse FTS 和 hybrid RRF，各在 100 篇文档（5,000 个分块）上；
+  - 一条不过滤的整表 HNSW 查询。它以表所有者身份直接执行 SQL，不是应用路径，只用来观察索引本身。
+- **recall@10**：捕获应用实际发出的 SQL，在 `enable_indexscan = off` 下重跑得到精确结果，再求交集比例。带文档过滤的系列检查每一条计时查询，整表系列抽样 20 条。
+- **计时**：每条查询先对它的文档集各读一次，单独记为 priming read，计时系列都是热缓存。
+- **集群设置**：关闭了 fsync，只影响写入；查询相关参数保持 PostgreSQL 默认值（shared_buffers 128MB）。
+
+2026-09-26 的结果，4 档都跑完，共 459 秒：
+
+| 分块 | 总大小（HNSW） | HNSW 构建 | dense 单文档 p50/p95 | dense 100 篇 p50/p95 | hybrid 100 篇 p50/p95 | 首次读 100 篇 p50/p95 | 100 篇 recall@10（计划） | 整表 HNSW recall@10 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 万 | 108 MB（39 MB） | 1 s | 0.76 / 0.89 ms | 1.0 / 1.3 ms | 8.5 / 11.6 ms | 1.2 / 1.4 ms | 0.994（HNSW） | 1 |
+| 10 万 | 1.1 GB（391 MB） | 10 s | 0.73 / 0.80 ms | 18.9 / 19.5 ms | 19.9 / 20.9 ms | 24.2 / 25.8 ms | 1（精确，未用 HNSW） | 0.925 |
+| 50 万 | 5.2 GB（1.9 GB） | 75 s | 0.79 / 0.87 ms | 19.9 / 20.4 ms | 20.4 / 20.9 ms | 26.5 / 27.0 ms | 1（精确，未用 HNSW） | 0.67 |
+| 100 万 | 10.4 GB（3.8 GB） | 169 s | 0.81 / 0.91 ms | 19.9 / 20.5 ms | 20.4 / 21.2 ms | 71.7 / 110.7 ms | 1（精确，未用 HNSW） | 0.495 |
+
+- **单文档检索**：从 1 万到 100 万都不到 1 ms，走 `doc_id` 索引。
+- **100 篇文档的检索**：
+  - 10 万分块以上，优化器用 `doc_id` 的 btree 取出 5,000 行再排序，这是精确检索，没有用 HNSW，所以热缓存下稳定在约 20 ms，recall 为 1。
+  - 这个 recall 为 1 来自精确计划，不说明 HNSW 索引本身的质量。
+  - 100 万时，一个文档集的第一次读取 p95 为 111 ms，因为 10.4 GB 的表已经放不进缓存。
+- **HNSW 加过滤的问题**：只有在 1 万分块、文档集占全表一半时，优化器才对带过滤的查询用 HNSW。`ef_search=40`、`hnsw.iterative_scan=off` 时，先取 40 个近邻再按文档过滤，平均只返回 9.95 条，recall 为 0.994，最差一条只有 5/10。应用目前没有打开 pgvector 的 `iterative_scan`，这是下一步要改的。
+- **整表 HNSW 的 recall 随规模下降**：到 100 万时为 0.495。原因是合成数据在簇内是各向同性噪声，真正的前 10 名之间几乎并列，对图索引来说是最坏情况；而且并行构建的图每次不同，两次运行相差 0.06–0.07。这一列不是应用路径，也不能代表真实 embedding 下的 recall。
+- **写入**：索引在线时，写入一个 50 块的文档，p50 从 1 万时的 203 ms 升到 100 万时的 513 ms（不含 embedding）。集群关了 fsync，所以这是持久化服务器上的下限。
+- **没测的**：并发查询、写入同时进行时的检索延迟、真实 embedding。
 
 ## Ragas supplement
 

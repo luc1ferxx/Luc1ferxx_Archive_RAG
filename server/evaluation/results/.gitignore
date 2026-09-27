@@ -25,3 +25,7 @@ latest-qasper-retrieval*.json
 latest-qasper-retrieval*.md
 latest-layout-parsing*.json
 latest-layout-parsing*.md
+latest-load-test*.json
+latest-load-test*.md
+latest-pgvector-scale*.json
+latest-pgvector-scale*.md

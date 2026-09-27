@@ -1,0 +1,26 @@
+# Turns on the measured cross-encoder reranker for the one-click deployment
+# (docs/deployment.md, "交叉编码器重排"):
+#   docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profile rerank up -d --build
+#
+# These settings live in their own file on purpose: compose `environment`
+# overrides server/.env, so putting them in docker-compose.yml would override
+# a user's own rerank settings on every deployment. They apply only when this
+# file is named.
+#
+# The reranker service (docker-compose.yml, profile "rerank") runs
+# neural-cross-encoder-endpoint.py, which returns raw logits;
+# RAG_CROSS_ENCODER_SCORES=logits makes the QA gate
+# (RAG_QA_MIN_RERANK_PROBABILITY, default 0.02) read them as it was measured.
+# The model name must match the one the reranker loaded, so both read the same
+# variable with the same default.
+services:
+  app:
+    environment:
+      RAG_RERANK_ENABLED: "true"
+      RAG_RERANK_PROVIDER: cross-encoder
+      RAG_CROSS_ENCODER_ENDPOINT: http://reranker:8081/rerank
+      RAG_CROSS_ENCODER_MODEL: ${RAG_CROSS_ENCODER_MODEL:-BAAI/bge-reranker-v2-m3}
+      RAG_CROSS_ENCODER_SCORES: logits
+    depends_on:
+      reranker:
+        condition: service_healthy

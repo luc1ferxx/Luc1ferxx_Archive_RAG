@@ -40,19 +40,42 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 
 ### 交叉编码器重排（可选，推荐）
 
-在应用之外单独起一个重排服务，然后给应用设置这几个变量：
-
 ```bash
-RAG_RERANK_ENABLED=true
-RAG_RERANK_PROVIDER=cross-encoder
-RAG_CROSS_ENCODER_ENDPOINT=http://<重排服务>/rerank
-RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3
+docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profile rerank up -d --build
 ```
 
-- 本机：先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 就用 GPU，模型约 2.3 GB。
-- 生产：Hugging Face TEI 的 `/rerank` 接口格式一样，可以直接换上去。
-- 在 Apple MPS 上，一次 18 个候选的重排约 0.4 秒。服务挂了查询不会失败，只是不重排。
-- 开启重排后，"要不要回答"会改由重排模型的相关概率决定（`RAG_QA_MIN_RERANK_PROBABILITY=0.02`）：拒答少得多，但更多不可回答的问题会被答出来。想保留原来更严的词面门控，设为 `off`。
+- **会多起一个 `reranker` 服务，配置和评测时完全一致：**
+  - 服务脚本：`server/evaluation/neural-cross-encoder-endpoint.py`；
+  - 依赖：`server/evaluation/neural-reranker-requirements.txt` 里固定的版本；
+  - 模型：`BAAI/bge-reranker-v2-m3`，max_length 384，batch 8（都是脚本的默认值，评测时没有改）；
+  - 返回原始 logits。
+- **镜像**：由 `server/evaluation/cross-encoder-service/Dockerfile` 构建，基础镜像是 python:3.14-slim，torch 装 CPU 版。`Dockerfile.dockerignore` 只把脚本和依赖文件放进构建上下文，模型缓存和评测数据不会被发送。**这个镜像还没有实际构建过**：如果 PyTorch 的 CPU 源上没有对应的 torch wheel，第一次构建会在 pip 这一步失败。这时加 `--build-arg TORCH_INDEX_URL=https://pypi.org/simple` 再构建。
+- **`compose.rerank.yml` 做什么**：给 `app` 设置下面这几项，并等 `reranker` 的健康检查通过后再启动 `app`：
+
+  ```bash
+  RAG_RERANK_ENABLED=true
+  RAG_RERANK_PROVIDER=cross-encoder
+  RAG_CROSS_ENCODER_ENDPOINT=http://reranker:8081/rerank
+  RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3
+  RAG_CROSS_ENCODER_SCORES=logits
+  ```
+
+  这些设置单独放一个文件，是因为 compose 的 `environment` 会覆盖 `server/.env`。部署时不带这个文件，`server/.env` 里的重排设置就照常生效。
+- **两个参数都要带**：只加 `-f compose.rerank.yml`、不加 `--profile rerank`，compose 会报 `service "app" depends on undefined service "reranker"`。
+- **其余重排参数读 `server/.env`**，没写就用代码默认值。评测时的取值就是默认值：
+  - `RAG_RERANK_WEIGHT=0.6`
+  - `RAG_RERANK_CANDIDATE_MULTIPLIER=3`
+  - `RAG_QA_MIN_RERANK_PROBABILITY=0.02`
+- **模型缓存**：挂载 `server/evaluation/generated/huggingface`，和本机 `npm run rerank:cross-encoder` 共用一个目录，本机下载过的模型不会再下载。新机器第一次启动要下载约 2.3 GB，下载完才开始监听。健康检查留了 30 分钟的启动时间，这段时间里 `up` 会一直等。
+- **速度**：
+  - 容器里只能用 CPU。评测里"18 个候选约 0.4 秒"是在 Apple MPS 上测的。
+  - 同一台 Apple M5 Pro 不进容器、只用 CPU 时，18 个候选约 2.8 秒（英文）到 4.5 秒（900 字的中文分块）。
+  - 服务逐个处理请求。Docker Desktop 虚拟机分到的 CPU 一般更少，会更慢。
+  - 超时默认 `RAG_CROSS_ENCODER_TIMEOUT_MS=30000`，不够时在 `server/.env` 里调大。超时或服务不可用时查询不会失败，只是这次不重排。
+- **拒答门控**：开启重排后，"要不要回答"改由重排模型的相关概率决定（`RAG_QA_MIN_RERANK_PROBABILITY=0.02`）。拒答少得多，但也会有更多不可回答的问题被答出来。想保留原来更严的词面门控，设为 `off`。
+- **不用 Docker**：先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 时会用 GPU。
+- **只起重排服务、给本机评测用**：`cd server && npm run rerank:cross-encoder:docker`。用同一个镜像，监听 `127.0.0.1:8081`。
+- **换成 Hugging Face TEI**：`/rerank` 接口格式相同，但 TEI 默认返回概率，要同时设 `RAG_CROSS_ENCODER_SCORES=probabilities`，否则拒答门控会按错误的分数判断。
 
 ### 多实例共享状态（可选）
 

@@ -12,5 +12,8 @@ server/upload-sessions
 server/tmp-rag-data
 server/feedback
 server/evaluation/generated
+# Local Python venvs (npm run rerank:cross-encoder:setup, about 1 GB with
+# torch); COPY server/ would bake them into the app image.
+server/evaluation/.venv*
 server/evaluation/results
 .playwright-mcp

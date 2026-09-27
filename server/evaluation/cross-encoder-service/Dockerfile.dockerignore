@@ -1,0 +1,5 @@
+# Build context is server/evaluation, which also holds the model cache and
+# QASPER data under generated/ (several GB). Send only what the image copies.
+*
+!neural-cross-encoder-endpoint.py
+!neural-reranker-requirements.txt
