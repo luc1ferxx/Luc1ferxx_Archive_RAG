@@ -161,6 +161,26 @@ Agent experience memory 只进入 planner hints，不进入 citations/evidence�
 
 Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 registry、向量索引或 RAG evidence。PostgreSQL migration `009_create_workspace_artifacts.sql` 为 `userId/workspaceId/idempotencyKey` 建立唯一约束；memory provider 只适合本地开发，进程重启后数据会丢失。单个 artifact 限制为：正文 512 KiB、结构化 payload 256 KiB、100 条 citation manifest、500 个 docIds；列表接口默认返回 50 条，最大 100 条。
 
+## 上传入库
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `RAG_INGEST_MODE` | `sync` | `sync`：上传请求里完成解析、向量化和写索引，返回 201 和文档（原有行为）。`async`：只做原有校验（PDF 魔数、大小、分片会话），把文件字节存进入库任务，返回 202 `{jobId, docId, fileName, status: "queued"}`，由 worker 执行同一个 `ingestDocument`。无法识别的值按 `sync` 处理。 |
+| `RAG_INGEST_WORKER_ENABLED` | `true` | `async` 下 API 进程是否同时运行 worker。设为 `false` 时入库交给 `npm run worker:ingest` 进程。没有 PostgreSQL（队列在内存里）或向量库是 `local` 时忽略 `false`，并打印错误。 |
+| `RAG_INGEST_WORKER_CONCURRENCY` | `2` | 每个进程同时处理的任务数。 |
+| `RAG_INGEST_JOB_LEASE_MS` | `60000` | 任务租约。运行期间约每三分之一租约续一次；进程停止续约、租约过期后，下一个 worker 接手，尝试次数加一。 |
+| `RAG_INGEST_JOB_MAX_ATTEMPTS` | `3` | 最多尝试次数。408/409/425/429、5xx 和网络错误按 5 s、10 s、20 s……（上限 5 分钟，且不短于 Retry-After）重新排队；其他 4xx（如 422"PDF 中没有可提取的文字"）直接失败。 |
+| `RAG_INGEST_MAX_PENDING_JOBS_PER_TENANT` / `RAG_INGEST_MAX_PENDING_BYTES_PER_TENANT` | `50` / 1 GiB | 每个租户排队中和运行中的任务上限，超出时上传返回 429；0 表示不限。检查和插入是同一条语句，并发上传可能略微超出。 |
+| `RAG_INGEST_JOB_RETENTION_MS` | 7 天 | 已完成任务的保留时长，由 worker 空闲时清理；0 永久保留。 |
+| `INGEST_JOBS_POSTGRES_TABLE` | `rag_ingest_jobs` | 任务表名（迁移 015）。 |
+
+- 任务状态：`GET /ingest-jobs/:jobId` 返回 `{jobId, docId, fileName, status, attemptCount, error, createdAt, startedAt, finishedAt}`，成功时带上与 201 相同的 `document`。`status` 为 `queued`、`running`、`succeeded` 或 `failed`。`error` 只给入库对上传本身的错误（413/415/422），其他错误统一为 "Indexing failed on the server."，完整错误只写 worker 日志。按 access scope 过滤，查别的租户的任务返回 404。
+- 任务表启用行级安全，策略与 `rag_documents` 相同，计入 `/health` 的 `checks.rowLevelSecurity`。
+- worker 以数据库 owner 身份领取任务：一条 `UPDATE ... FOR UPDATE SKIP LOCKED`，先选当前运行任务最少的租户，再按创建时间；领取后以任务所属租户的身份入库。之后的续约、成功、失败和归还都以 `job_id + claimed_by + attempt_count` 为条件，失去租约的 worker 覆盖不了新一次尝试。
+- 重试前由数据库判定文档是否已提交（不信任本进程的注册表缓存）：上一次尝试已写入文档行和分块、但没来得及标记成功时，重试直接记为成功，不会重复入库。前一次尝试持有租约时进程死掉的任务会单独运行，避免一个让进程崩溃的 PDF 耗掉同批其他任务的尝试次数。
+- 任务结束后 `file_bytes` 置空；每次尝试的临时 PDF 写在上传目录的 `ingest-tmp/` 下，续租时刷新修改时间，超过两倍租期没刷新的由清理删除。
+- 前端收到 202 后轮询任务状态，间隔从 1 秒增长到 5 秒，最多 10 分钟；网络错误、429、5xx 继续轮询（遵守 Retry-After），只有任务 `failed` 或 404 才判定失败。
+
 ## Vector store
 
 | 变量 | 默认值 | 作用 |

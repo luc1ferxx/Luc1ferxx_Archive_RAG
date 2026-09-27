@@ -12,6 +12,12 @@ let configuredDocumentRegistryStore = null;
 let documentRegistry = new Map();
 let documentRegistryInitialized = false;
 let legacyImportAttempted = false;
+// Document writes of this process whose transaction has not settled, and the
+// refreshes running now (by access scope); see trackDocumentWrite and
+// refreshDocumentRegistry.
+const documentWritesInFlight = new Map();
+const activeRefreshes = new Set();
+const refreshesInFlight = new Map();
 
 const toPositiveInteger = (value, fallbackValue = 0) => {
   const parsedValue = Number.parseInt(value ?? fallbackValue, 10);
@@ -281,19 +287,57 @@ export const createDocumentRegistryStore = ({
     return true;
   },
 
+  // A scope is applied in SQL too (the documentMatchesAccessScope rule, which
+  // is also the row policy), so a scoped listing reads only that tenant's rows
+  // even when it runs as the owner.
   async list(accessScope = {}) {
+    const tableName = ensureTableName(getDocumentsTable);
+    const scope = normalizeAccessScope(accessScope);
+    const result = hasAccessScope(scope)
+      ? await queryPostgres(
+          `
+            SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+            FROM ${tableName}
+            WHERE (owner_user_id <> '' OR workspace_id <> '')
+              AND (owner_user_id = '' OR owner_user_id = $1)
+              AND (workspace_id = '' OR workspace_id = $2)
+            ORDER BY uploaded_at ASC, doc_id ASC
+          `,
+          [scope.userId, scope.workspaceId]
+        )
+      : await queryPostgres(
+          `
+            SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
+            FROM ${tableName}
+            ORDER BY uploaded_at ASC, doc_id ASC
+          `
+        );
+
+    return result.rows
+      .map(mapRowToStoredDocument)
+      .filter((document) => documentMatchesAccessScope(document, accessScope));
+  },
+
+  // Metadata of the named documents only (no file bytes), for a process that
+  // needs to pick up documents another process registered.
+  async listByIds(docIds = []) {
+    const normalizedDocIds = normalizeDocIds(docIds);
+
+    if (normalizedDocIds.length === 0) {
+      return [];
+    }
+
     const tableName = ensureTableName(getDocumentsTable);
     const result = await queryPostgres(
       `
         SELECT doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at
         FROM ${tableName}
-        ORDER BY uploaded_at ASC, doc_id ASC
-      `
+        WHERE doc_id = ANY($1::text[])
+      `,
+      [normalizedDocIds]
     );
 
-    return result.rows
-      .map(mapRowToStoredDocument)
-      .filter((document) => documentMatchesAccessScope(document, accessScope));
+    return result.rows.map(mapRowToStoredDocument);
   },
 
   async upsert(document, { client = null } = {}) {
@@ -556,19 +600,179 @@ export const resyncDocument = async (docId) => {
   }
 
   // Same reason as the initial load: the map entry is shared by all tenants,
-  // so whether the row exists is read as the owner.
+  // so whether the row exists is read as the owner. Only the metadata is read
+  // when the store can, not the file bytes.
   const store = getDocumentRegistryStore();
-  const storedFile = await runAsDatabaseSystem(() =>
-    store.getFile ? store.getFile(normalizedDocId) : null
-  );
+  const storedDocument = await runAsDatabaseSystem(async () => {
+    if (store.listByIds) {
+      return (await store.listByIds([normalizedDocId]))[0] ?? null;
+    }
 
-  if (storedFile?.document) {
-    documentRegistry.set(normalizedDocId, toStoredDocument(storedFile.document));
+    return store.getFile ? (await store.getFile(normalizedDocId))?.document ?? null : null;
+  });
+
+  if (storedDocument) {
+    documentRegistry.set(normalizedDocId, toStoredDocument(storedDocument));
   } else {
     documentRegistry.delete(normalizedDocId);
   }
 
   return getDocument(normalizedDocId);
+};
+
+/**
+ * Marks `docId` as written by this process until `callback` settles. The
+ * pgvector ingest and delete paths change the map inside their transaction,
+ * before COMMIT, and a refresh listing the store on another connection cannot
+ * see that write yet; the refresh leaves such a document as this process has
+ * it, including one whose write settled while the listing was in flight.
+ */
+export const trackDocumentWrite = async (docId, callback) => {
+  const normalizedDocId = normalizeDocId(docId);
+  const touch = () => {
+    for (const touched of activeRefreshes) {
+      touched.add(normalizedDocId);
+    }
+  };
+
+  documentWritesInFlight.set(
+    normalizedDocId,
+    (documentWritesInFlight.get(normalizedDocId) ?? 0) + 1
+  );
+  touch();
+
+  try {
+    return await callback();
+  } finally {
+    const remaining = (documentWritesInFlight.get(normalizedDocId) ?? 1) - 1;
+
+    if (remaining > 0) {
+      documentWritesInFlight.set(normalizedDocId, remaining);
+    } else {
+      documentWritesInFlight.delete(normalizedDocId);
+    }
+
+    touch();
+  }
+};
+
+// The map is filled at startup and updated by this process's own writes, so a
+// document an ingest worker in another process committed is invisible here
+// until it is read back. Both loaders below read as the owner for the same
+// reason as the initial load, and neither lets a store row overwrite an entry
+// this process changed while the read was in flight.
+
+/**
+ * Reads the named documents this process does not hold and adds the ones the
+ * store has. A lookup that misses is the cheap signal that another process may
+ * have registered the document; a docId the store does not know stays missing.
+ */
+export const loadDocumentsFromStore = async (docIds) => {
+  const missingDocIds = normalizeDocIds(docIds).filter(
+    (docId) => !documentRegistry.has(docId)
+  );
+
+  if (missingDocIds.length === 0) {
+    return [];
+  }
+
+  if (!documentRegistryInitialized) {
+    await initializeDocumentRegistry();
+  }
+
+  const store = getDocumentRegistryStore();
+  const storedDocuments = await runAsDatabaseSystem(async () => {
+    if (store.listByIds) {
+      return store.listByIds(missingDocIds);
+    }
+
+    const wanted = new Set(missingDocIds);
+    const documents = store.list ? await store.list() : [];
+
+    return documents.filter((document) => wanted.has(normalizeDocId(document.docId)));
+  });
+  const loaded = [];
+
+  for (const document of storedDocuments) {
+    const storedDocument = toStoredDocument(document);
+
+    if (!storedDocument.docId || documentRegistry.has(storedDocument.docId)) {
+      continue;
+    }
+
+    documentRegistry.set(storedDocument.docId, storedDocument);
+    loaded.push(storedDocument.docId);
+  }
+
+  return loaded;
+};
+
+const refreshFromStore = async (accessScope) => {
+  const before = new Map(documentRegistry);
+  const touched = new Set(documentWritesInFlight.keys());
+
+  activeRefreshes.add(touched);
+
+  try {
+    const store = getDocumentRegistryStore();
+    const storedDocuments = await runAsDatabaseSystem(async () =>
+      (store.list ? await store.list(accessScope) : []).filter((document) =>
+        documentMatchesAccessScope(toStoredDocument(document), accessScope)
+      )
+    );
+    const stored = new Map(
+      storedDocuments
+        .map((document) => toStoredDocument(document))
+        .filter((document) => document.docId)
+        .map((document) => [document.docId, document])
+    );
+
+    for (const docId of new Set([...before.keys(), ...stored.keys()])) {
+      if (touched.has(docId) || documentRegistry.get(docId) !== before.get(docId)) {
+        continue;
+      }
+
+      if (stored.has(docId)) {
+        documentRegistry.set(docId, stored.get(docId));
+      } else if (documentMatchesAccessScope(before.get(docId), accessScope)) {
+        // Only an entry the listing covered can be missing from it.
+        documentRegistry.delete(docId);
+      }
+    }
+  } finally {
+    activeRefreshes.delete(touched);
+  }
+};
+
+/**
+ * Re-lists the store for `accessScope` (everything when it is empty) and
+ * brings that part of the map in line with it: documents other processes added
+ * appear and ones they deleted go, while other tenants' entries are left
+ * alone, so a request reads its own tenant's rows and not every tenant's. An
+ * entry this process set or removed after the listing started is kept as this
+ * process left it, because the listing may predate that write, and so is one
+ * this process is writing in a transaction (trackDocumentWrite). Concurrent
+ * callers with the same scope share one listing.
+ */
+export const refreshDocumentRegistry = async (accessScope = {}) => {
+  if (!documentRegistryInitialized) {
+    await initializeDocumentRegistry();
+    return listDocuments(accessScope);
+  }
+
+  const scope = normalizeAccessScope(accessScope);
+  const key = `${scope.userId}\u0000${scope.workspaceId}`;
+  let refresh = refreshesInFlight.get(key);
+
+  if (!refresh) {
+    refresh = refreshFromStore(scope).finally(() => {
+      refreshesInFlight.delete(key);
+    });
+    refreshesInFlight.set(key, refresh);
+  }
+
+  await refresh;
+  return listDocuments(scope);
 };
 
 export const getStoredDocument = (docId, accessScope = {}) => {

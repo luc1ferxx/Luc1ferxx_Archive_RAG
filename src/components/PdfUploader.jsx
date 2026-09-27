@@ -5,8 +5,18 @@ import { message, Upload } from "antd";
 import { API_DOMAIN, buildApiRequestConfig } from "../config";
 import { createTranslator, getInitialLocale } from "../archiveI18n";
 
+const defaultT = createTranslator(getInitialLocale());
+
 const { Dragger } = Upload;
 const CHUNK_SIZE_BYTES = 2 * 1024 * 1024;
+// With RAG_INGEST_MODE=async the server answers 202 with an ingest job and a
+// worker indexes the PDF; the uploader polls the job until it settles. The
+// interval grows from 1 s to 5 s, so several files dropped at once stay well
+// under the API's per-IP rate limit while their jobs wait in the queue.
+export const INGEST_POLL_INTERVAL_MS = 1000;
+export const INGEST_POLL_MAX_INTERVAL_MS = 5000;
+export const INGEST_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const INGEST_POLL_BACKOFF = 1.5;
 
 export const MAX_UPLOAD_SIZE_MB = 100;
 const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
@@ -75,14 +85,125 @@ const completeUpload = async (fileId) => {
     fileId,
   };
   const requestConfig = buildApiRequestConfig();
+
+  return requestConfig
+    ? axios.post(`${API_DOMAIN}/upload/complete`, payload, requestConfig)
+    : axios.post(`${API_DOMAIN}/upload/complete`, payload);
+};
+
+const apiGet = async (url) => {
+  const requestConfig = buildApiRequestConfig();
   const response = requestConfig
-    ? await axios.post(`${API_DOMAIN}/upload/complete`, payload, requestConfig)
-    : await axios.post(`${API_DOMAIN}/upload/complete`, payload);
+    ? await axios.get(url, requestConfig)
+    : await axios.get(url);
 
   return response.data;
 };
 
-const uploadToBackend = async (file, onProgress) => {
+const getIngestJob = (jobId) =>
+  apiGet(`${API_DOMAIN}/ingest-jobs/${encodeURIComponent(jobId)}`);
+
+const findUploadedDocument = async (docId) => {
+  const documents = await apiGet(`${API_DOMAIN}/documents`);
+
+  return Array.isArray(documents)
+    ? documents.find((document) => document.docId === docId) ?? null
+    : null;
+};
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A failed poll says nothing about the job unless the server answered it with
+// a client error (404: no such job for this user). No response at all, a rate
+// limit, or a 5xx during a restart is retried until the deadline.
+const isTransientPollError = (error) => {
+  const status = error?.response?.status;
+
+  return !status || status === 408 || status === 429 || status >= 500;
+};
+
+const readRetryAfterMs = (error, now) => {
+  const rawValue = error?.response?.headers?.["retry-after"];
+
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === "") {
+    return 0;
+  }
+
+  const seconds = Number(rawValue);
+
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, seconds * 1000);
+  }
+
+  const retryAt = Date.parse(rawValue);
+
+  return Number.isNaN(retryAt) ? 0 : Math.max(0, retryAt - now());
+};
+
+/**
+ * Polls a queued ingest job until the worker settles it. Resolves to the
+ * document, as a 201 upload response carries it; rejects with the job's own
+ * error when it failed, with the server's error when the job is not found, or
+ * when it is still unfinished after the timeout.
+ */
+export const waitForIngestJob = async (
+  queuedJob,
+  {
+    intervalMs = INGEST_POLL_INTERVAL_MS,
+    maxIntervalMs = INGEST_POLL_MAX_INTERVAL_MS,
+    now = () => Date.now(),
+    sleep = wait,
+    t = defaultT,
+    timeoutMs = INGEST_POLL_TIMEOUT_MS,
+  } = {}
+) => {
+  const deadline = now() + timeoutMs;
+  let delayMs = intervalMs;
+
+  for (;;) {
+    await sleep(delayMs);
+
+    const nextDelayMs = Math.min(maxIntervalMs, delayMs * INGEST_POLL_BACKOFF);
+    let job;
+
+    try {
+      job = await getIngestJob(queuedJob.jobId);
+    } catch (error) {
+      if (!isTransientPollError(error)) {
+        throw error;
+      }
+
+      if (now() >= deadline) {
+        throw new Error(t("uploader.ingestTimeout"));
+      }
+
+      delayMs = Math.max(nextDelayMs, readRetryAfterMs(error, now));
+      continue;
+    }
+
+    if (job.status === "succeeded") {
+      return (
+        job.document ??
+        (await findUploadedDocument(job.docId)) ?? {
+          docId: job.docId,
+          fileName: job.fileName,
+        }
+      );
+    }
+
+    if (job.status === "failed") {
+      throw new Error(job.error || t("uploader.ingestFailed"));
+    }
+
+    if (now() >= deadline) {
+      throw new Error(t("uploader.ingestTimeout"));
+    }
+
+    delayMs = nextDelayMs;
+  }
+};
+
+export const uploadToBackend = async (file, onProgress, pollOptions = {}) => {
   const fileId = buildFileId(file);
   const session = await initializeUpload(file, fileId);
   const totalChunks = session.totalChunks ?? getTotalChunks(file);
@@ -111,10 +232,12 @@ const uploadToBackend = async (file, onProgress) => {
     });
   }
 
-  return completeUpload(fileId);
-};
+  const response = await completeUpload(fileId);
 
-const defaultT = createTranslator(getInitialLocale());
+  return response.status === 202
+    ? waitForIngestJob(response.data, pollOptions)
+    : response.data;
+};
 
 const PdfUploader = ({ onUploadSuccess, t = defaultT }) => {
   const attributes = {
@@ -137,7 +260,7 @@ const PdfUploader = ({ onUploadSuccess, t = defaultT }) => {
     },
     customRequest: async ({ file, onSuccess, onError, onProgress }) => {
       try {
-        const response = await uploadToBackend(file, onProgress);
+        const response = await uploadToBackend(file, onProgress, { t });
         onUploadSuccess?.(response);
         onSuccess(response);
       } catch (error) {

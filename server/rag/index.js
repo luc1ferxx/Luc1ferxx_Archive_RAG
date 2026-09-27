@@ -9,9 +9,12 @@ import {
   getStoredDocument,
   initializeDocumentRegistry,
   listDocuments,
+  loadDocumentsFromStore,
   normalizeDocIds,
+  refreshDocumentRegistry,
   registerDocument,
   resyncDocument,
+  trackDocumentWrite,
 } from "./doc-registry.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { buildDocumentProfile } from "./document-profiler.js";
@@ -58,7 +61,10 @@ export {
   initializeSessionMemory,
   listDocuments,
   listLongMemories,
+  loadDocumentsFromStore,
+  refreshDocumentRegistry,
   rememberLongMemory,
+  resyncDocument,
 };
 
 const getPageNumber = (metadata = {}, fallbackPageNumber = null) =>
@@ -124,26 +130,29 @@ export const ingestDocumentPages = async ({
     // One transaction for the document row and every chunk row. The registry
     // row goes first because the chunk table's foreign key points at it; if
     // either write fails the whole thing rolls back and the in-memory registry
-    // is resynced from what the database actually holds.
-    try {
-      await withPostgresTransaction(async (client) => {
-        await registerDocument(registration, { client });
-        await writeDocumentsToIndex({ accessScope, client, prepared });
-      });
-    } catch (error) {
+    // is resynced from what the database actually holds. The map changes
+    // before COMMIT, so the write is tracked until it settles.
+    return trackDocumentWrite(docId, async () => {
       try {
-        await resyncDocument(docId);
-      } catch (resyncError) {
-        console.error(
-          `Failed to resync document registry entry for docId ${docId} after rollback.`,
-          resyncError
-        );
+        await withPostgresTransaction(async (client) => {
+          await registerDocument(registration, { client });
+          await writeDocumentsToIndex({ accessScope, client, prepared });
+        });
+      } catch (error) {
+        try {
+          await resyncDocument(docId);
+        } catch (resyncError) {
+          console.error(
+            `Failed to resync document registry entry for docId ${docId} after rollback.`,
+            resyncError
+          );
+        }
+
+        throw error;
       }
 
-      throw error;
-    }
-
-    return getDocument(docId);
+      return getDocument(docId);
+    });
   }
 
   try {
@@ -232,25 +241,27 @@ export const deleteDocument = async (
   if (isVectorStoreTransactional()) {
     await ensureVectorStoreReady();
 
-    try {
-      await withPostgresTransaction(async (client) => {
-        await removeDocumentsFromIndex({ client, docIds: [docId] });
-        await deleteRegisteredDocument(docId, accessScope, { client });
-      });
-    } catch (error) {
+    return trackDocumentWrite(docId, async () => {
       try {
-        await resyncDocument(docId);
-      } catch (resyncError) {
-        console.error(
-          `Failed to resync document registry entry for docId ${docId} after rollback.`,
-          resyncError
-        );
+        await withPostgresTransaction(async (client) => {
+          await removeDocumentsFromIndex({ client, docIds: [docId] });
+          await deleteRegisteredDocument(docId, accessScope, { client });
+        });
+      } catch (error) {
+        try {
+          await resyncDocument(docId);
+        } catch (resyncError) {
+          console.error(
+            `Failed to resync document registry entry for docId ${docId} after rollback.`,
+            resyncError
+          );
+        }
+
+        throw error;
       }
 
-      throw error;
-    }
-
-    return storedDocument;
+      return storedDocument;
+    });
   }
 
   await removeDocumentsFromIndex({

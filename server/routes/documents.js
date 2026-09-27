@@ -2,6 +2,10 @@ import { Router } from "express";
 import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
+import {
+  loadDocumentsIngestedElsewhere,
+  refreshDocumentsIngestedElsewhere,
+} from "../rag/ingest-worker.js";
 
 import { sendBufferedFile, serializeError } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
@@ -46,8 +50,11 @@ export const createDocumentsRouter = (services) => {
     }
   });
 
-  router.get("/documents", (req, res) => {
-    return res.json(ragService.listDocuments(getRequestAccessScope(req)));
+  router.get("/documents", async (req, res) => {
+    const accessScope = getRequestAccessScope(req);
+
+    await refreshDocumentsIngestedElsewhere(ragService, accessScope);
+    return res.json(ragService.listDocuments(accessScope));
   });
 
   router.delete("/documents/:docId", async (req, res) => {
@@ -56,6 +63,7 @@ export const createDocumentsRouter = (services) => {
     const { docId } = parsed;
 
     try {
+      await loadDocumentsIngestedElsewhere(ragService, [docId]);
       const document = await ragService.deleteDocument(docId, {
         accessScope: getRequestAccessScope(req),
       });

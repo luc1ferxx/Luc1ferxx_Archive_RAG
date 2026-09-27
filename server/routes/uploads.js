@@ -1,10 +1,14 @@
 import { Router } from "express";
+import { readFile } from "fs/promises";
 import multer from "multer";
 import path from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 
 import { bindDatabaseTenant, getRequestAccessScope } from "../auth.js";
+import { isRagIngestAsync } from "../rag/config.js";
+import { toPublicIngestJob } from "../rag/ingest-job-store.js";
+import { loadDocumentsIngestedElsewhere } from "../rag/ingest-worker.js";
 import {
   MAX_UPLOAD_MULTIPART_FIELD_BYTES,
   MAX_UPLOAD_MULTIPART_FIELDS,
@@ -31,6 +35,10 @@ const fileIdBodySchema = z.object({
   fileId: requiredTrimmedString("fileId is required."),
 });
 
+const ingestJobIdSchema = z.object({
+  jobId: requiredTrimmedString("jobId is required."),
+});
+
 const uploadChunkBodySchema = z
   .object({
     fileId: requiredTrimmedString("fileId is required."),
@@ -42,13 +50,50 @@ const uploadChunkBodySchema = z
 
 export const createUploadsRouter = (services) => {
   const router = Router();
-  const { ragService, uploadStore, uploadsDirectory } = services;
+  const { ingestJobStore, ragService, uploadStore, uploadsDirectory } = services;
   const runBestEffort = async (label, operation) => {
     try {
       await operation();
     } catch (error) {
       console.error(`[upload-cleanup] ${label}`, error);
     }
+  };
+
+  // Both upload routes validate first and then hand the file here. Sync mode
+  // ingests inside the request and answers 201 with the document; async mode
+  // stores the validated bytes in an ingest job and answers 202, and a worker
+  // runs the same ingestDocument call (rag/ingest-worker.js).
+  const ingestUpload = async ({ accessScope, docId, fileName, filePath }) => {
+    if (!isRagIngestAsync()) {
+      return {
+        body: await ragService.ingestDocument({
+          docId,
+          filePath,
+          fileName,
+          ownerUserId: accessScope.userId,
+          workspaceId: accessScope.workspaceId,
+        }),
+        status: 201,
+      };
+    }
+
+    const job = await ingestJobStore.enqueue({
+      docId,
+      fileBytes: await readFile(filePath),
+      fileName,
+      ownerUserId: accessScope.userId,
+      workspaceId: accessScope.workspaceId,
+    });
+
+    return {
+      body: {
+        jobId: job.jobId,
+        docId: job.docId,
+        fileName: job.fileName,
+        status: job.status,
+      },
+      status: 202,
+    };
   };
 
   const storage = multer.diskStorage({
@@ -235,12 +280,13 @@ export const createUploadsRouter = (services) => {
         });
       }
 
-      const document = await ragService.ingestDocument({
+      // Once ingested (or queued) the session has served its purpose; a
+      // queued job owns the bytes from here on, so the claim is not released.
+      const ingestion = await ingestUpload({
+        accessScope,
         docId: session.sessionId,
-        filePath: mergedFilePath,
         fileName: session.fileName,
-        ownerUserId: accessScope.userId,
-        workspaceId: accessScope.workspaceId,
+        filePath: mergedFilePath,
       });
       ingestionSucceeded = true;
 
@@ -253,7 +299,7 @@ export const createUploadsRouter = (services) => {
         })
       );
 
-      return res.status(201).json(document);
+      return res.status(ingestion.status).json(ingestion.body);
     } catch (error) {
       await runBestEffort("failed to remove a merged upload", () =>
         uploadStore.removeMergedUpload(mergedFilePath)
@@ -307,22 +353,52 @@ export const createUploadsRouter = (services) => {
         });
       }
 
-      const accessScope = getRequestAccessScope(req);
-      const document = await ragService.ingestDocument({
+      const ingestion = await ingestUpload({
+        accessScope: getRequestAccessScope(req),
         docId: randomUUID(),
-        filePath: req.file.path,
         fileName: req.file.originalname,
-        ownerUserId: accessScope.userId,
-        workspaceId: accessScope.workspaceId,
+        filePath: req.file.path,
       });
 
       await cleanupUploadedFile(req.file.path);
-      return res.status(201).json(document);
+      return res.status(ingestion.status).json(ingestion.body);
     } catch (error) {
       await cleanupUploadedFile(req.file.path);
 
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to ingest uploaded PDF."),
+      });
+    }
+  });
+
+  // Scoped like the document routes: another tenant's job is a 404, not a 403.
+  router.get("/ingest-jobs/:jobId", async (req, res) => {
+    const parsed = parseOrRespond(ingestJobIdSchema, req.params, res);
+    if (!parsed) return;
+
+    try {
+      const accessScope = getRequestAccessScope(req);
+      const job = await ingestJobStore.get(parsed.jobId, accessScope);
+
+      if (!job) {
+        return res.status(404).json({
+          error: "Ingest job not found.",
+        });
+      }
+
+      const body = toPublicIngestJob(job);
+
+      // The worker that finished the job may run in another process, so the
+      // document is read into this one before the client is told it exists.
+      if (job.status === "succeeded") {
+        await loadDocumentsIngestedElsewhere(ragService, [job.docId]);
+        body.document = ragService.getDocument?.(job.docId, accessScope) ?? null;
+      }
+
+      return res.json(body);
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to read the ingest job."),
       });
     }
   });

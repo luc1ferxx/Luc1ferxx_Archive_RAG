@@ -14,7 +14,10 @@ import chat, {
   initializeSessionMemory,
   listDocuments,
   listLongMemories,
+  loadDocumentsFromStore,
+  refreshDocumentRegistry,
   rememberLongMemory,
+  resyncDocument,
 } from "./chat.js";
 import chatMCP from "./chat-mcp.js";
 import {
@@ -78,6 +81,8 @@ import {
   getAgentIntentPlanner,
   getAgentPlannerRollout,
 } from "./rag/config.js";
+import { createDefaultIngestJobStore } from "./rag/ingest-job-store.js";
+import { loadDocumentsIngestedElsewhere } from "./rag/ingest-worker.js";
 import {
   claimUploadSessionFinalization,
   cleanupExpiredUploadSessions,
@@ -187,9 +192,16 @@ export const buildChatResponse = async ({
   skillRegistry,
   unifiedGraphPlannerAdapter,
 }) => {
-  const missingDocIds = docIds.filter(
-    (docId) => !ragService.getDocument(docId, accessScope)
-  );
+  const findMissingDocIds = () =>
+    docIds.filter((docId) => !ragService.getDocument(docId, accessScope));
+  let missingDocIds = findMissingDocIds();
+
+  // With async ingestion a worker in another process may have registered them;
+  // in sync mode this reads nothing.
+  if (missingDocIds.length > 0) {
+    await loadDocumentsIngestedElsewhere(ragService, missingDocIds);
+    missingDocIds = findMissingDocIds();
+  }
 
   if (missingDocIds.length > 0) {
     const error = new Error(
@@ -241,7 +253,10 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     initializeSessionMemory,
     listDocuments,
     listLongMemories,
+    loadDocumentsFromStore,
+    refreshDocumentRegistry,
     rememberLongMemory,
+    resyncDocument,
     ...(options.ragService ?? {}),
   };
   const webChatService = options.chatMcp ?? chatMCP;
@@ -440,6 +455,9 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     removeMergedUpload,
     storeUploadChunk,
   };
+  // Shared by the upload routes and, in this process, the worker server.js
+  // starts; the in-memory store (no PostgreSQL) only works that way.
+  const ingestJobStore = options.ingestJobStore ?? createDefaultIngestJobStore();
   const healthService = options.healthService ?? {
     buildHealthReport,
     runStartupHealthChecks,
@@ -500,6 +518,7 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     executionPlannerAdapter,
     feedbackService,
     healthService,
+    ingestJobStore,
     intentPlannerAdapter,
     jobOrchestrator,
     jobRunners,

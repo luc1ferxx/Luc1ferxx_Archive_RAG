@@ -7,7 +7,11 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { bindDatabaseTenant, requireApiAuth } from "./auth.js";
-import { getAgentRunRecoveryMode, isApiAuthEnabled } from "./rag/config.js";
+import {
+  getAgentRunRecoveryMode,
+  isApiAuthEnabled,
+  isRagIngestAsync,
+} from "./rag/config.js";
 import { configureUploadSessionDirectory } from "./upload-session-store.js";
 
 import { createAppServices } from "./app-services.js";
@@ -73,6 +77,7 @@ export const createApp = async (options = {}) => {
     agentRunRecoveryService,
     agentRunService,
     healthService,
+    ingestJobStore,
     jobOrchestrator,
     ragService,
     taskService,
@@ -81,6 +86,10 @@ export const createApp = async (options = {}) => {
   } = services;
 
   const app = express();
+  // server.js starts the ingest worker on these same services, so a worker in
+  // the API process shares the routes' job store (the only way the in-memory
+  // store works).
+  app.locals.services = services;
   const allowedOrigins = parseAllowedOrigins();
   const rateLimitEnabled = isRateLimitEnabled();
 
@@ -138,6 +147,11 @@ export const createApp = async (options = {}) => {
   await agentRunService.initialize?.();
   await adminAuditService.initialize?.();
   await workspaceArtifactService.initialize?.();
+
+  if (isRagIngestAsync()) {
+    await ingestJobStore.initialize?.();
+  }
+
   await agentRunRecoveryService.recoverOnStartup?.({
     mode: getAgentRunRecoveryMode(),
   });

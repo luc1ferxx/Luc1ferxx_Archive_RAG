@@ -8,6 +8,7 @@ import {
   getAgentRunEventsPostgresTable,
   getAgentRunsPostgresTable,
   getEmbeddingDimensions,
+  getIngestJobsPostgresTable,
   getLongMemoryPostgresTable,
   getPgvectorHnswEfConstruction,
   getPgvectorHnswM,
@@ -90,6 +91,10 @@ const getTableNames = () => ({
     getDocumentChunksPostgresTable(),
     "DOCUMENT_CHUNKS_POSTGRES_TABLE"
   ),
+  ingestJobsTable: ensureSimpleTableName(
+    getIngestJobsPostgresTable(),
+    "INGEST_JOBS_POSTGRES_TABLE"
+  ),
 });
 
 const validateTableNames = (tableNames = {}) => ({
@@ -129,11 +134,15 @@ const validateTableNames = (tableNames = {}) => ({
     tableNames.workspaceArtifactsTable,
     "WORKSPACE_ARTIFACTS_POSTGRES_TABLE"
   ),
-  // Optional for injected table maps so older callers keep working; the
-  // runtime map always carries it.
+  // These two are optional for injected table maps so older callers keep
+  // working; the runtime map always carries them.
   documentChunksTable: ensureSimpleTableName(
     tableNames.documentChunksTable ?? getDocumentChunksPostgresTable(),
     "DOCUMENT_CHUNKS_POSTGRES_TABLE"
+  ),
+  ingestJobsTable: ensureSimpleTableName(
+    tableNames.ingestJobsTable ?? getIngestJobsPostgresTable(),
+    "INGEST_JOBS_POSTGRES_TABLE"
   ),
 });
 
@@ -301,6 +310,7 @@ export const renderMigrationSql = (
       safeTableNames.workspaceArtifactsTable
     )
     .replaceAll("__DOCUMENT_CHUNKS_TABLE__", safeTableNames.documentChunksTable)
+    .replaceAll("__INGEST_JOBS_TABLE__", safeTableNames.ingestJobsTable)
     .replaceAll("__EMBEDDING_DIMENSIONS__", String(safeDimensions))
     .replaceAll("__TEXT_SEARCH_CONFIG__", safeTextSearchConfig)
     .replaceAll("__TENANT_ROLE__", safeTenantRole)

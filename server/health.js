@@ -14,6 +14,7 @@ import {
   getChatModel,
   getDocumentChunksPostgresTable,
   getDocumentsPostgresTable,
+  getIngestJobsPostgresTable,
   getDocumentStoreProvider,
   getEmbeddingModel,
   getHybridFusionMethod,
@@ -709,6 +710,7 @@ const getRowLevelSecurityTables = () => [
   `${getAgentRunsPostgresTable()}_approval_snapshots`,
   getWorkspaceArtifactsPostgresTable(),
   getLongMemoryPostgresTable(),
+  getIngestJobsPostgresTable(),
 ];
 
 const ROW_LEVEL_SECURITY_PROBE_TENANT = Object.freeze({ userId: "__health_probe__" });

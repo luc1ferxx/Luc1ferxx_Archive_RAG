@@ -820,6 +820,55 @@ export const isLongMemoryPostgresSslEnabled = () =>
 export const getDocumentsPostgresTable = () =>
   (process.env.DOCUMENTS_POSTGRES_TABLE || "rag_documents").trim();
 
+// Upload ingestion. `sync` (default) parses, embeds and indexes inside the
+// upload request, which answers 201 with the document. `async` validates the
+// upload, stores its bytes in an ingest job and answers 202; a worker claims the
+// job and runs the same ingest (rag/ingest-worker.js). An unknown value keeps
+// the synchronous behaviour, which the frontend handles either way.
+export const RAG_INGEST_MODES = Object.freeze(["sync", "async"]);
+
+export const getRagIngestMode = () =>
+  toChoice(process.env.RAG_INGEST_MODE, "sync", RAG_INGEST_MODES);
+
+export const isRagIngestAsync = () => getRagIngestMode() === "async";
+
+// Every API process also runs a worker loop unless this is false, which is how
+// ingestion moves to dedicated `npm run worker:ingest` processes.
+export const isRagIngestWorkerEnabled = () =>
+  toBoolean(process.env.RAG_INGEST_WORKER_ENABLED, true);
+
+export const getRagIngestWorkerConcurrency = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INGEST_WORKER_CONCURRENCY, 2)) || 1;
+
+// Renewed while a job runs; a worker that stops renewing loses the job to the
+// next claim once the lease has expired.
+export const getRagIngestJobLeaseMs = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INGEST_JOB_LEASE_MS, 60000)) || 60000;
+
+export const getRagIngestJobMaxAttempts = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_INGEST_JOB_MAX_ATTEMPTS, 3)) || 3;
+
+// A 202 costs the client about a second, so without a cap one tenant could
+// queue unbounded bytes. Counted over the tenant's queued and running jobs;
+// an upload over either cap answers 429. 0 disables a cap.
+export const getRagIngestMaxPendingJobsPerTenant = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_INGEST_MAX_PENDING_JOBS_PER_TENANT, 50));
+
+export const getRagIngestMaxPendingBytesPerTenant = () =>
+  Math.floor(
+    toNonNegativeNumber(process.env.RAG_INGEST_MAX_PENDING_BYTES_PER_TENANT, 1024 * 1024 * 1024)
+  );
+
+// Succeeded and failed jobs (their bytes are already gone) are deleted by the
+// workers' housekeeping once they are this old. 0 keeps them forever.
+export const getRagIngestJobRetentionMs = () =>
+  Math.floor(
+    toNonNegativeNumber(process.env.RAG_INGEST_JOB_RETENTION_MS, 7 * 24 * 60 * 60 * 1000)
+  );
+
+export const getIngestJobsPostgresTable = () =>
+  (process.env.INGEST_JOBS_POSTGRES_TABLE || "rag_ingest_jobs").trim();
+
 // Deliberately no "auto" and defaulting to postgres, unlike the task/agent-run
 // providers. The document registry store is *injected*
 // (configureDocumentRegistryStore), not selected by config, so there is nothing

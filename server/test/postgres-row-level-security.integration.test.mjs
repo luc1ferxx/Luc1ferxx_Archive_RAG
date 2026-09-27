@@ -392,7 +392,7 @@ if (!adminDatabaseUrl) {
 
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     assert.equal(report.checks.rowLevelSecurity.role, tenantRole);
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 9);
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 10);
     assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
   });
 

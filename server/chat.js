@@ -14,6 +14,9 @@ export {
   initializeSessionMemory,
   listDocuments,
   listLongMemories,
+  loadDocumentsFromStore,
+  refreshDocumentRegistry,
   rememberLongMemory,
+  resyncDocument,
 } from "./rag/index.js";
 export { default } from "./rag/index.js";

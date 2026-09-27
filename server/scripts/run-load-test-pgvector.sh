@@ -14,14 +14,22 @@
 #
 # With the database URL set, the load test defaults to --storage pgvector,local, so
 # one invocation measures both the production storage path and the standalone
-# local store. Extra arguments are passed through to the load test.
+# local store (pgvector only with --instances > 1 or --ingest-workers). Extra
+# arguments are passed through to the load test.
+#
+# --with-redis (consumed here, not passed through) also starts a disposable
+# redis-server for --shared-state redis: an OS-assigned free port on 127.0.0.1
+# (never 6379), no persistence (--save "" --appendonly no), its dir under the same
+# temp work dir, stopped and removed by the same EXIT trap. The load test then gets
+# --shared-state redis --redis-url redis://127.0.0.1:<port>.
 #
 # Usage (from server/):
-#   bash scripts/run-load-test-pgvector.sh [load-test flags]
+#   bash scripts/run-load-test-pgvector.sh [--with-redis] [load-test flags]
 #
 # Optional overrides (env):
-#   PG_BIN_DIR    directory holding initdb/pg_ctl/createdb/psql (auto-detected otherwise)
-#   LOADTEST_DB   disposable database name (default: archive_loadtest)
+#   PG_BIN_DIR         directory holding initdb/pg_ctl/createdb/psql (auto-detected otherwise)
+#   LOADTEST_DB        disposable database name (default: archive_loadtest)
+#   REDIS_SERVER_BIN   redis-server executable for --with-redis (auto-detected otherwise)
 #
 set -euo pipefail
 
@@ -30,6 +38,29 @@ fail() { log "ERROR: $*"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+WITH_REDIS=0
+LOAD_TEST_ARGS=()
+for arg in "$@"; do
+  if [[ "${arg}" == "--with-redis" ]]; then
+    WITH_REDIS=1
+  else
+    LOAD_TEST_ARGS+=("${arg}")
+  fi
+done
+
+REDIS_SERVER=""
+if [[ "${WITH_REDIS}" -eq 1 ]]; then
+  REDIS_SERVER="${REDIS_SERVER_BIN:-}"
+  if [[ -z "${REDIS_SERVER}" ]]; then
+    REDIS_SERVER="$(command -v redis-server 2>/dev/null || true)"
+  fi
+  if [[ -z "${REDIS_SERVER}" && -x /opt/homebrew/bin/redis-server ]]; then
+    REDIS_SERVER=/opt/homebrew/bin/redis-server
+  fi
+  [[ -n "${REDIS_SERVER}" && -x "${REDIS_SERVER}" ]] \
+    || fail "--with-redis could not find redis-server; set REDIS_SERVER_BIN"
+fi
 
 PG_BIN_DIR_RESOLVED="${PG_BIN_DIR:-}"
 if [[ -z "${PG_BIN_DIR_RESOLVED}" ]]; then
@@ -66,8 +97,18 @@ PWFILE="${WORK_DIR}/pw.txt"
 mkdir -p "${SOCK_DIR}"
 
 STARTED_SERVER=0
+REDIS_PID=""
 cleanup() {
   local status=$?
+  if [[ -n "${REDIS_PID}" ]]; then
+    log "stopping ephemeral Redis"
+    kill "${REDIS_PID}" >/dev/null 2>&1 || true
+    for _ in $(seq 1 50); do
+      kill -0 "${REDIS_PID}" >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+    kill -9 "${REDIS_PID}" >/dev/null 2>&1 || true
+  fi
   if [[ "${STARTED_SERVER}" -eq 1 ]]; then
     log "stopping ephemeral PostgreSQL"
     "${PG_CTL}" -D "${DATA_DIR}" -m immediate stop >/dev/null 2>&1 || true
@@ -77,7 +118,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-PG_PORT="$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});')"
+free_port() {
+  node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});'
+}
+
+PG_PORT="$(free_port)"
 [[ -n "${PG_PORT}" && "${PG_PORT}" != "5432" && "${PG_PORT}" != "5434" ]] || fail "could not get a free TCP port"
 log "ephemeral cluster: port=${PG_PORT} db=${LOADTEST_DB} data=${DATA_DIR}"
 
@@ -110,8 +155,37 @@ unset PGPASSWORD
 
 DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${PG_PORT}/${LOADTEST_DB}"
 
+if [[ "${WITH_REDIS}" -eq 1 ]]; then
+  REDIS_PORT="$(free_port)"
+  [[ -n "${REDIS_PORT}" && "${REDIS_PORT}" != "6379" && "${REDIS_PORT}" != "${PG_PORT}" ]] \
+    || fail "could not get a free TCP port for Redis"
+  REDIS_DIR="${WORK_DIR}/redis"
+  mkdir -p "${REDIS_DIR}"
+  "${REDIS_SERVER}" --port "${REDIS_PORT}" --bind 127.0.0.1 --protected-mode yes \
+    --save "" --appendonly no --dir "${REDIS_DIR}" --daemonize no \
+    --logfile "${WORK_DIR}/redis.log" &
+  REDIS_PID=$!
+  REDIS_READY=0
+  for _ in $(seq 1 50); do
+    if node -e '
+      const socket = require("net").connect(Number(process.argv[1]), "127.0.0.1");
+      socket.on("connect", () => socket.write("PING\r\n"));
+      socket.on("data", (data) => process.exit(String(data).startsWith("+PONG") ? 0 : 1));
+      socket.on("error", () => process.exit(1));
+      setTimeout(() => process.exit(1), 500);
+    ' "${REDIS_PORT}" >/dev/null 2>&1; then
+      REDIS_READY=1
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "${REDIS_READY}" -eq 1 ]] || { cat "${WORK_DIR}/redis.log" >&2 2>/dev/null; fail "Redis did not become ready"; }
+  log "ephemeral Redis: port=${REDIS_PORT} dir=${REDIS_DIR} (no persistence)"
+  LOAD_TEST_ARGS+=(--shared-state redis --redis-url "redis://127.0.0.1:${REDIS_PORT}")
+fi
+
 set +e
-( cd "${SERVER_DIR}" && node evaluation/run-api-load-bench.mjs --database-url "${DATABASE_URL}" "$@" )
+( cd "${SERVER_DIR}" && node evaluation/run-api-load-bench.mjs --database-url "${DATABASE_URL}" ${LOAD_TEST_ARGS[@]+"${LOAD_TEST_ARGS[@]}"} )
 STATUS=$?
 set -e
 exit "${STATUS}"
