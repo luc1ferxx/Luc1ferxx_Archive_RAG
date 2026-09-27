@@ -117,7 +117,7 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | --- | --- | --- |
 | `POSTGRES_DATABASE_URL` | 空 | 文档、会话记忆和长期记忆共用连接。 |
 | `POSTGRES_SSL_ENABLED` | `false` | PostgreSQL 是否启用 SSL。 |
-| `POSTGRES_ROW_LEVEL_SECURITY` | `enforce` | 行级安全。`enforce` 让带访问范围的请求和后台任务在租户角色下执行，数据库拒绝其他租户的行；`off` 保持 owner 连接（策略仍在，但 owner 绕过）。无法识别的值按 `enforce` 处理。 |
+| `POSTGRES_ROW_LEVEL_SECURITY` | `enforce` | 行级安全。`enforce` 让带访问范围的请求和后台任务在租户角色下执行，数据库拒绝其他租户的行；`off` 保持 owner 连接（策略仍在，但 owner 绕过）。无法识别的值按 `enforce` 处理。`enforce` 下多文档的全文检索通过迁移 014 的 owner 函数排序候选（行级安全下 `@@` 用不上 GIN），函数只拿到租户在文档表里能看到的文档 id，返回的行仍由策略过滤；健康检查会确认租户角色能执行它。 |
 | `POSTGRES_TENANT_ROLE` | `archive_rag_tenant` | 行级安全使用的租户角色名（小写标识符）。迁移会创建它，并把它授予应用登录角色。 |
 | `DOCUMENTS_POSTGRES_TABLE` | `rag_documents` | 文档表。 |
 | `SESSION_MEMORY_POSTGRES_TABLE` | `rag_session_memory` | 会话记忆表。 |

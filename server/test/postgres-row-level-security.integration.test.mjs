@@ -353,6 +353,39 @@ if (!adminDatabaseUrl) {
     assert.deepEqual(sparse.map((result) => result.document.metadata.docId), ["doc-alice"]);
   });
 
+  test("the sparse rank function runs as its owner with a pinned search_path, only the tenant role may call it, and the join drops foreign ids", async () => {
+    const functionName = modules.pgvector.getPgvectorSparseRankFunctionName();
+    const definition = (
+      await modules.postgres.queryPostgres(
+        `SELECT p.prosecdef, p.proconfig, p.prorows,
+                has_function_privilege($2, p.oid, 'EXECUTE') AS tenant_may_execute,
+                has_function_privilege('public', p.oid, 'EXECUTE') AS public_may_execute
+         FROM pg_proc p
+         WHERE p.proname = $1`,
+        [functionName, tenantRole]
+      )
+    ).rows;
+
+    assert.equal(definition.length, 1);
+    assert.equal(definition[0].prosecdef, true);
+    assert.deepEqual(definition[0].proconfig, ["search_path=pg_catalog, pg_temp", "enable_indexscan=off"]);
+    assert.equal(Number(definition[0].prorows), 20);
+    assert.equal(definition[0].tenant_may_execute, true);
+    assert.equal(definition[0].public_may_execute, false);
+
+    // Called directly the function ranks by doc id alone and sees Bob's chunk;
+    // the search itself first narrows the doc ids to those Alice can see in the
+    // documents table, and joins back to the chunks as Alice (test above).
+    const raw = await asAlice(() =>
+      modules.postgres.queryPostgres(
+        `SELECT chunk_id FROM ${functionName}(to_tsquery('simple', 'alpha'), $1::text[], 5) ORDER BY chunk_id`,
+        [["doc-alice", "doc-bob"]]
+      )
+    );
+
+    assert.deepEqual(raw.rows.map((row) => row.chunk_id), ["doc-alice:0", "doc-bob:0"]);
+  });
+
   test("the health report proves the tenant role switch and every covered policy", async () => {
     const { buildHealthReport } = await import("../health.js");
     const report = await buildHealthReport();
@@ -360,6 +393,7 @@ if (!adminDatabaseUrl) {
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     assert.equal(report.checks.rowLevelSecurity.role, tenantRole);
     assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 9);
+    assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
   });
 
   test("POSTGRES_ROW_LEVEL_SECURITY=off keeps the owner connection", async () => {

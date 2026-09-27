@@ -521,6 +521,8 @@ const main = async () => {
       `| dense | ${plans.off.dense.join(" > ")} | ${plans.enforce.dense.join(" > ")} |`,
       `| sparse | ${plans.off.sparse.join(" > ")} | ${plans.enforce.sparse.join(" > ")} |`,
       "",
+      "The sparse row is the plain statement. Under enforce it cannot use the GIN index (@@ is not leakproof), which is why a tenant's multi-document full-text search goes through the owner-run rank function of migration 014 instead (docs/evaluation.md, \"压测与规模\"); the timed sparse series above measures that app path.",
+      "",
     ];
 
     await mkdir(resultsDirectory, { recursive: true });

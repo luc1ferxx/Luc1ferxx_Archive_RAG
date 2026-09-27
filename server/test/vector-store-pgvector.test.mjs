@@ -2,6 +2,7 @@ import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { configureEmbeddingDimensions } from "../rag/config.js";
+import { runWithDatabaseTenant } from "../rag/postgres-tenant.js";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import {
   PGVECTOR_ERROR_CODES,
@@ -15,6 +16,7 @@ import {
   resetPgvectorRuntime,
   resetPgvectorVectorStore,
   searchPgvectorDocuments,
+  getPgvectorSparseRankFunctionName,
   searchPgvectorSparseDocuments,
   supportsPgvectorIterativeScan,
   writeDocumentsToPgvectorIndex,
@@ -97,7 +99,7 @@ const createFakeDatabase = ({
       return { rows: denseRows };
     }
 
-    if (/AS sparse_score/.test(compact)) {
+    if (/AS sparse_score/.test(compact) || /_sparse_rank\(/.test(compact)) {
       return { rows: sparseRows };
     }
 
@@ -525,6 +527,61 @@ test("sparse search builds an OR tsquery from the app tokenizer and ranks with t
     []
   );
   assert.equal(database.calls.length, callCount, "stop words alone never reach the database");
+});
+
+test("a tenant's sparse search ranks through the owner function and joins the ids back under the row policies", async () => {
+  const saved = process.env.POSTGRES_ROW_LEVEL_SECURITY;
+  process.env.POSTGRES_ROW_LEVEL_SECURITY = "enforce";
+
+  try {
+    const database = useDatabase({
+      sparseRows: [chunkRow({ content: "Amber ceiling is 2400 dollars.", docId: "doc-1", score: 0.35 })],
+    });
+    const results = await runWithDatabaseTenant({ userId: "alice", workspaceId: "ws" }, () =>
+      searchPgvectorSparseDocuments({ queryText: "What is the Amber ceiling?", docIds: ["doc-1", "doc-2"], topK: 5 })
+    );
+    const searchCall = database.calls.find((call) => /_sparse_rank\(/.test(call.sql));
+
+    assert.equal(getPgvectorSparseRankFunctionName(), `${TABLE}_sparse_rank`);
+    assert.match(searchCall.sql, new RegExp(`FROM ${TABLE}_sparse_rank\\( to_tsquery\\(\\$1::regconfig, \\$2\\),`));
+    assert.match(
+      searchCall.sql,
+      /ARRAY\(SELECT d\.doc_id FROM \w+ d WHERE d\.doc_id = ANY\(\$3::text\[\]\)\), \$4::integer \) AS r/,
+      "only doc ids the tenant can see in the documents table reach the owner function"
+    );
+    assert.match(searchCall.sql, new RegExp(`JOIN ${TABLE} c ON c\\.chunk_id = r\\.chunk_id`));
+    assert.match(searchCall.sql, /ORDER BY r.sparse_score DESC, c.chunk_id ASC$/);
+    assert.ok(!/@@/.test(searchCall.sql), "the tenant statement leaves the match to the function");
+    assert.deepEqual(searchCall.values, ["simple", "'amber' | 'ceiling'", ["doc-1", "doc-2"], 5]);
+    assert.equal(results[0].sparseScore, 0.35);
+
+    const singleDocument = useDatabase({ sparseRows: [] });
+
+    await runWithDatabaseTenant({ userId: "alice", workspaceId: "ws" }, () =>
+      searchPgvectorSparseDocuments({ queryText: "amber", docIds: ["doc-1"], topK: 5 })
+    );
+    assert.ok(
+      !singleDocument.calls.some((call) => /_sparse_rank\(/.test(call.sql)),
+      "one document keeps the plain statement"
+    );
+
+    process.env.POSTGRES_ROW_LEVEL_SECURITY = "off";
+    const ownerDatabase = useDatabase({ sparseRows: [] });
+
+    await runWithDatabaseTenant({ userId: "alice", workspaceId: "ws" }, () =>
+      searchPgvectorSparseDocuments({ queryText: "amber", docIds: ["doc-1"], topK: 5 })
+    );
+    assert.ok(
+      ownerDatabase.calls.some((call) => /search_vector @@ to_tsquery/.test(call.sql)),
+      "without an enforced tenant the plain statement runs"
+    );
+  } finally {
+    if (saved === undefined) {
+      delete process.env.POSTGRES_ROW_LEVEL_SECURITY;
+    } else {
+      process.env.POSTGRES_ROW_LEVEL_SECURITY = saved;
+    }
+  }
 });
 
 test("status describes extension, table, indexes, width and flags an empty index with registered documents", async () => {

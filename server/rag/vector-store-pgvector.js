@@ -899,6 +899,43 @@ export const searchPgvectorDocuments = async ({
     );
 };
 
+const buildSparseSearchSql = () => `
+  SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
+         ts_rank_cd(search_vector, to_tsquery($1::regconfig, $2), 32) AS sparse_score
+  FROM ${getPgvectorTableName()}
+  WHERE doc_id = ANY($3::text[])
+    AND search_vector @@ to_tsquery($1::regconfig, $2)
+  ORDER BY sparse_score DESC, chunk_id ASC
+  LIMIT $4
+`;
+
+// The owner-run ranking function from migration 014, named after the table.
+export const getPgvectorSparseRankFunctionName = () => `${getPgvectorTableName()}_sparse_rank`;
+
+// Under row-level security the full-text match cannot use the GIN index: @@ is
+// not leakproof, so it may only run after the policy conditions, never as an
+// index condition, and a large document set was read and decompressed chunk by
+// chunk. The function ranks the candidates as the table owner with the indexes.
+// It only gets the doc ids the tenant can see in the documents table (a
+// primary-key match, leakproof, so still an index lookup under that policy),
+// so another tenant's chunks can never take a place under the limit; joining
+// its ids back to the chunks table as the tenant keeps the row policy in charge
+// of which rows are returned. A single document keeps the plain statement: the
+// doc_id index reaches its few rows directly, and the function's call and
+// planning cost more (0.76 ms against 1.37 ms p50 as a tenant). From ten
+// documents up the function is faster, and far faster for large sets.
+const buildTenantSparseSearchSql = () => `
+  SELECT c.chunk_id, c.doc_id, c.chunk_index, c.page_number, c.section_heading, c.content, c.metadata,
+         r.sparse_score
+  FROM ${getPgvectorSparseRankFunctionName()}(
+         to_tsquery($1::regconfig, $2),
+         ARRAY(SELECT d.doc_id FROM ${getDocumentsTableName()} d WHERE d.doc_id = ANY($3::text[])),
+         $4::integer
+       ) AS r
+  JOIN ${getPgvectorTableName()} c ON c.chunk_id = r.chunk_id
+  ORDER BY r.sparse_score DESC, c.chunk_id ASC
+`;
+
 export const searchPgvectorSparseDocuments = async ({
   queryText = "",
   docIds,
@@ -919,15 +956,9 @@ export const searchPgvectorSparseDocuments = async ({
   // (rank / (rank + 1)) so scores are comparable across queries. It is not
   // BM25 and is never labelled as such.
   const result = await getQuery(client)(
-    `
-      SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
-             ts_rank_cd(search_vector, to_tsquery($1::regconfig, $2), 32) AS sparse_score
-      FROM ${getPgvectorTableName()}
-      WHERE doc_id = ANY($3::text[])
-        AND search_vector @@ to_tsquery($1::regconfig, $2)
-      ORDER BY sparse_score DESC, chunk_id ASC
-      LIMIT $4
-    `,
+    getEnforcedDatabaseTenant() && normalizedDocIds.length > 1
+      ? buildTenantSparseSearchSql()
+      : buildSparseSearchSql(),
     [getPgvectorTextSearchConfig(), tsQuery.tsQuery, normalizedDocIds, limit]
   );
   const queryTerms = new Set(tsQuery.tokens);

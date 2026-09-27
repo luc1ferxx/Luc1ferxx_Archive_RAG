@@ -35,7 +35,10 @@ import {
   isStartupHealthStrict,
 } from "./rag/config.js";
 import { describeVectorStoreRuntime } from "./rag/vector-store.js";
-import { describePgvectorStatus } from "./rag/vector-store-pgvector.js";
+import {
+  describePgvectorStatus,
+  getPgvectorSparseRankFunctionName,
+} from "./rag/vector-store-pgvector.js";
 import { runPostgresMigrations } from "./rag/db-migrations.js";
 import { PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS } from "./rag/db-migrations.js";
 import {
@@ -732,6 +735,9 @@ const checkRowLevelSecurityHealth = async () => {
   }
 
   const tables = getRowLevelSecurityTables();
+  // Multi-document full-text search as a tenant goes through this owner-run
+  // function (migration 014), so a missing function or grant breaks it.
+  const sparseRankFunction = getPgvectorSparseRankFunctionName();
 
   try {
     const role = getPostgresTenantRole();
@@ -750,30 +756,37 @@ const checkRowLevelSecurityHealth = async () => {
               WHERE c.relrowsecurity
                 AND c.relnamespace = current_schema()::regnamespace
                 AND c.relname = ANY($1::text[])
-            ) AS protected_tables
+            ) AS protected_tables,
+            COALESCE(has_function_privilege(to_regprocedure($2)::oid, 'EXECUTE'), false)
+              AS sparse_rank_executable
         `,
-        [tables]
+        [tables, `${sparseRankFunction}(tsquery, text[], integer)`]
       )
     );
     const row = probe.rows[0] ?? {};
     const protectedTables = new Set(row.protected_tables ?? []);
     const unprotectedTables = tables.filter((table) => !protectedTables.has(table));
+    const sparseRankExecutable = row.sparse_rank_executable === true;
 
-    if (row.role !== role || unprotectedTables.length > 0) {
+    if (row.role !== role || unprotectedTables.length > 0 || !sparseRankExecutable) {
       return buildEntry("error", {
         mode,
         role,
+        sparseRankExecutable,
         unprotectedTables,
         message:
           row.role !== role
             ? `Scoped queries run as "${row.role}" instead of the tenant role "${role}".`
-            : `Tables without the tenant_isolation policy: ${unprotectedTables.join(", ")}.`,
+            : unprotectedTables.length > 0
+              ? `Tables without the tenant_isolation policy: ${unprotectedTables.join(", ")}.`
+              : `The tenant role cannot execute ${sparseRankFunction} (migration 014), so every multi-document full-text search a tenant makes would fail. Run the migrations.`,
       });
     }
 
     return buildEntry("ok", {
       mode,
       role,
+      sparseRankExecutable,
       protectedTableCount: tables.length,
       message: "Scoped queries run as the tenant role and every tenant table carries its policy.",
     });

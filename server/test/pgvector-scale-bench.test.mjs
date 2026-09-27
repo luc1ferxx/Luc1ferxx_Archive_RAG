@@ -22,6 +22,7 @@ import {
   generateDocumentChunks,
   hnswMaintenanceWorkMemMb,
   normalizeVector,
+  isSearchStatement,
   parseArgs,
   parseSize,
   parseSizes,
@@ -51,6 +52,15 @@ test("parseSize and parseSizes accept k/M suffixes, dedupe and sort", () => {
   assert.throws(() => parseSize("ten"), /Invalid size/);
   assert.throws(() => parseSize("0"), /Invalid size/);
   assert.deepEqual(parseSizes("500k,10k,100k,10k"), [10000, 100000, 500000]);
+});
+
+test("isSearchStatement recognizes the app's dense and sparse statements, including the tenant rank function", () => {
+  assert.equal(isSearchStatement("SELECT chunk_id FROM t ORDER BY x LIMIT $5"), true);
+  assert.equal(
+    isSearchStatement("SELECT c.chunk_id FROM rag_document_chunks_sparse_rank(to_tsquery($1::regconfig, $2), $3::text[], $4) AS r JOIN t c ON c.chunk_id = r.chunk_id"),
+    true
+  );
+  assert.equal(isSearchStatement("SELECT set_config($1, $2, true)"), false);
 });
 
 test("parseArgs requires an explicit database URL and validates numbers", () => {

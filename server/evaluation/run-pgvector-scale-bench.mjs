@@ -66,6 +66,9 @@
 //     [--ingest-probes 3] [--time-budget-minutes 18] [--seed 20260926]
 //     [--load-concurrency 8] [--batch-docs 20] [--parallel-maintenance-workers 8]
 //     [--maintenance-work-mem-cap-mb 8192] [--latest-name latest-pgvector-scale]
+//     [--iterative-scan relaxed_order|strict_order|off]
+//     [--keep-data]   leave the last size loaded; with the wrapper's KEEP_CLUSTER=1
+//                     the cluster stays up for EXPLAIN work afterwards
 
 import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -147,6 +150,12 @@ const NUMERIC_OPTIONS = Object.freeze({
   "--warmup": "warmup",
   "--words-per-chunk": "wordsPerChunk",
 });
+// A captured app search statement: it selects chunk ids and either carries its
+// own LIMIT or hands the limit to the owner-run full-text rank function that
+// tenant sparse searches go through (migration 014).
+export const isSearchStatement = (sql) =>
+  /chunk_id/.test(sql) && (/\bLIMIT\b/.test(sql) || /_sparse_rank\(/.test(sql));
+
 // The app's RAG_PGVECTOR_ITERATIVE_SCAN values; `off` measures the plain statement.
 const ITERATIVE_SCAN_CHOICES = Object.freeze(["relaxed_order", "strict_order", "off"]);
 // Options that may legitimately be zero.
@@ -161,6 +170,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
   docSetSize: 100,
   ingestProbes: 3,
   iterativeScan: "relaxed_order",
+  keepData: false,
   latestName: "latest-pgvector-scale",
   loadConcurrency: 8,
   maintenanceWorkMemCapMb: 8192,
@@ -184,6 +194,11 @@ export const parseArgs = (argv) => {
     const value = argv[index + 1];
 
     if (flag === "--") {
+      continue;
+    }
+
+    if (flag === "--keep-data") {
+      options.keepData = true;
       continue;
     }
 
@@ -1363,7 +1378,7 @@ const main = async () => {
             const statement =
               series === "dense_unfiltered_sql"
                 ? { sql: unfilteredSql, values: [`[${query.vector.join(",")}]`, topK] }
-                : captured.filter((entry) => /\bLIMIT\b/.test(entry.sql) && /chunk_id/.test(entry.sql)).at(-1);
+                : captured.filter((entry) => isSearchStatement(entry.sql)).at(-1);
 
             if (!statement) {
               throw new Error(`No search statement was captured for ${series}.`);
@@ -1639,7 +1654,9 @@ const main = async () => {
   } finally {
     pgvector.resetPgvectorRuntime();
 
-    if (loadStarted) {
+    // --keep-data leaves the last size loaded for inspection; only useful with
+    // the wrapper's KEEP_CLUSTER=1, since the cluster is deleted otherwise.
+    if (loadStarted && !options.keepData) {
       await admin.query(`TRUNCATE ${chunksTable}, ${documentsTable}`).catch((error) => {
         console.error(`Could not truncate the benchmark tables: ${error.message}`);
       });
