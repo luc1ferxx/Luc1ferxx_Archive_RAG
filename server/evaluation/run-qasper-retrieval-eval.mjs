@@ -108,7 +108,7 @@ const formatMarkdown = (report) => {
   const lines = [
     "# QASPER evidence recall (single-document QA route)",
     "",
-    `Generated ${report.generatedAt}; corpus \`${config.corpus}\`; ${report.rows.length} answerable questions, seed ${config.seed}; embedding ${config.embeddingModel} (query prefix ${JSON.stringify(config.queryPrefix)}, document prefix ${JSON.stringify(config.documentPrefix)}); retrieval top-K ${config.retrievalTopK}.`,
+    `Generated ${report.generatedAt}; corpus \`${config.corpus}\`; ${report.rows.length} answerable questions, seed ${config.seed}; embedding ${config.embeddingModel} (query prefix ${JSON.stringify(config.queryPrefix)}, document prefix ${JSON.stringify(config.documentPrefix)}); retrieval top-K ${config.retrievalTopK}; query adapter ${config.queryAdapter ?? "none"}.`,
     "",
     "| Evidence paragraph ... | Rate |",
     "|---|---|",
@@ -179,6 +179,19 @@ const main = async () => {
   const { retrieveQaCandidates } = await import("../rag/document-rag-execution.js");
   const { assessQaConfidence, selectQaContext } = await import("../rag/confidence.js");
   const config = await import("../rag/config.js");
+  const { assertSameQueryAdapterFingerprint, getQueryAdapterReportFingerprint } = await import(
+    "../rag/query-adapter.js"
+  );
+  // RAG_EMBEDDING_QUERY_ADAPTER reorders this route's dense candidates; a
+  // --compare against a run made with another adapter (or none) is refused
+  // before the ingest.
+  const queryAdapter = getQueryAdapterReportFingerprint();
+  const other = comparePath ? JSON.parse(await readFile(path.resolve(process.cwd(), comparePath), "utf8")) : null;
+
+  if (other) {
+    assertSameQueryAdapterFingerprint(queryAdapter, other.config?.queryAdapter, { label: path.basename(comparePath) });
+  }
+
   const rows = [];
 
   try {
@@ -263,7 +276,6 @@ const main = async () => {
       }
     }
 
-    const other = comparePath ? JSON.parse(await readFile(path.resolve(process.cwd(), comparePath), "utf8")) : null;
     const report = {
       comparison: other
         ? { against: path.basename(comparePath), ...pairedRecallDeltas(rows, other.rows ?? []) }
@@ -273,6 +285,7 @@ const main = async () => {
         corpus: path.basename(corpusPath),
         documentPrefix: config.getEmbeddingDocumentPrefix(),
         embeddingModel: config.getEmbeddingModel(),
+        queryAdapter,
         queryPrefix: config.getEmbeddingQueryPrefix(),
         retrievalTopK: config.getRetrievalTopK(),
         seed,

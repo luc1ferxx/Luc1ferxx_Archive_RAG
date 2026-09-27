@@ -414,7 +414,7 @@ test("release evidence workflow generates every required report in one Postgres-
   assert.match(workflow, /run:\s*test -n "\$OPENAI_API_KEY"/);
   assert.equal(
     serverPackage.scripts?.["test:pgvector"],
-    "node --test --test-concurrency=1 test/vector-store-pgvector.integration.test.mjs test/vector-store-pgvector-versions.integration.test.mjs test/agent-execution-graph-postgres.integration.test.mjs test/agent-unified-graph-postgres.integration.test.mjs test/postgres-row-level-security.integration.test.mjs test/ingest-jobs-postgres.integration.test.mjs test/ingest-pipeline-postgres.integration.test.mjs"
+    "node --test --test-concurrency=1 test/vector-store-pgvector.integration.test.mjs test/vector-store-pgvector-versions.integration.test.mjs test/agent-execution-graph-postgres.integration.test.mjs test/agent-unified-graph-postgres.integration.test.mjs test/postgres-row-level-security.integration.test.mjs test/ingest-jobs-postgres.integration.test.mjs test/ingest-pipeline-postgres.integration.test.mjs test/vector-store-pgvector-bm25.integration.test.mjs"
   );
   assert.match(workflow, /name:\s*Run PostgreSQL integration tests/);
   assert.match(workflow, /run:\s*npm run test:pgvector/);

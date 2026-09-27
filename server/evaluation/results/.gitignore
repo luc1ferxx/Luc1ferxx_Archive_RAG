@@ -29,3 +29,5 @@ latest-load-test*.json
 latest-load-test*.md
 latest-pgvector-scale*.json
 latest-pgvector-scale*.md
+latest-semantic-cache*.json
+latest-semantic-cache*.md

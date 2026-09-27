@@ -79,7 +79,7 @@ const formatMarkdown = (report) => {
   return [
     "# QASPER answers",
     "",
-    `Generated ${report.generatedAt}; surface \`${report.config.surface}\`; chat model ${report.config.chatModel}; ${summary.cases} questions (${summary.unanswerableCases} unanswerable), seed ${report.config.seed}.`,
+    `Generated ${report.generatedAt}; surface \`${report.config.surface}\`; chat model ${report.config.chatModel}; ${summary.cases} questions (${summary.unanswerableCases} unanswerable), seed ${report.config.seed}; query adapter ${report.config.queryAdapter ?? "none"}.`,
     "",
     `- Answer F1 (official QASPER, best over annotators): ${summary.answerF1}`,
     `- Evidence paragraph among the answer's sources (answerable; an abstention has none): ${summary.evidenceRecall}; among answers actually given: ${summary.evidenceRecallWhenAnswered}`,
@@ -219,6 +219,7 @@ const main = async () => {
     await rm(tempRoot, { force: true, recursive: true });
   }
 
+  const { getQueryAdapterReportFingerprint } = await import("../rag/query-adapter.js");
   const report = {
     config: {
       cases: caseCount,
@@ -226,6 +227,8 @@ const main = async () => {
       corpus: path.basename(corpusPath),
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
       promptTemplates: await describePromptTemplates(),
+      // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
+      queryAdapter: getQueryAdapterReportFingerprint(),
       seed,
       surface,
     },

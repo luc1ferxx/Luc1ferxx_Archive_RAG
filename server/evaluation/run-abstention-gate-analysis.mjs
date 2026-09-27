@@ -213,6 +213,7 @@ const main = async () => {
   applyStandaloneProfile();
   const rag = await import("../chat.js");
   const { retrieveQaCandidates } = await import("../rag/document-rag-execution.js");
+  const { getQueryAdapterReportFingerprint } = await import("../rag/query-adapter.js");
   const { assessQaConfidence } = await import("../rag/confidence.js");
   const { getAdmissionScore } = await import("../rag/citations.js");
   const { toRerankProbability } = await import("../rag/confidence.js");
@@ -335,6 +336,8 @@ const main = async () => {
     config: {
       corpus: path.basename(corpusPath),
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
+      // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
+      queryAdapter: getQueryAdapterReportFingerprint(),
       seed,
     },
     counts: {

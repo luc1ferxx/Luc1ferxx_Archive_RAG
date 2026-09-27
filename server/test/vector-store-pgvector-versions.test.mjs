@@ -749,14 +749,30 @@ test("searches go to the active version: its table, its function and a query emb
   );
 
   process.env.POSTGRES_ROW_LEVEL_SECURITY = "enforce";
-  const sparse = await runWithDatabaseTenant({ userId: "alice" }, () =>
+  process.env.RAG_SPARSE_PRUNE_DF_FRACTION = "off";
+
+  try {
+    const sparse = await runWithDatabaseTenant({ userId: "alice" }, () =>
+      searchPgvectorSparseDocuments({ docIds: ["doc-1", "doc-2"], queryText: "beta budget", topK: 3 })
+    );
+    const sparseCall = database.log.filter((entry) => /_sparse_rank\(/.test(entry.sql)).at(-1);
+
+    assert.equal(sparse[0].document.metadata.docId, "doc-2");
+    assert.match(sparseCall.sql, new RegExp(`FROM ${table}_sparse_rank\\(`));
+    assert.match(sparseCall.sql, new RegExp(`JOIN ${table} c ON`));
+  } finally {
+    delete process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
+  }
+
+  // With pruning on (the default), the active version's migration-030 search function.
+  const pruned = await runWithDatabaseTenant({ userId: "alice" }, () =>
     searchPgvectorSparseDocuments({ docIds: ["doc-1", "doc-2"], queryText: "beta budget", topK: 3 })
   );
-  const sparseCall = database.log.filter((entry) => /_sparse_rank\(/.test(entry.sql)).at(-1);
+  const searchCall = database.log.filter((entry) => /_sparse_search\(/.test(entry.sql)).at(-1);
 
-  assert.equal(sparse[0].document.metadata.docId, "doc-2");
-  assert.match(sparseCall.sql, new RegExp(`FROM ${table}_sparse_rank\\(`));
-  assert.match(sparseCall.sql, new RegExp(`JOIN ${table} c ON`));
+  assert.equal(pruned[0].document.metadata.docId, "doc-2");
+  assert.match(searchCall.sql, new RegExp(`FROM ${table}_sparse_search\\(`));
+  assert.match(searchCall.sql, new RegExp(`JOIN ${table} c ON`));
 });
 
 // ---------------------------------------------------------------------------

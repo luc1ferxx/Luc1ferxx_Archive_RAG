@@ -17,6 +17,17 @@ import { getEnforcedDatabaseTenant } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { buildTermSet, extractMeaningfulTokens } from "./text-utils.js";
 import {
+  PGVECTOR_SPARSE_SEARCH_SIGNATURE,
+  buildPgvectorSparseSearchSql,
+  buildPgvectorSparseSearchValues,
+  getPgvectorSparseBackend,
+  getPgvectorSparseSearchFunctionName,
+  getPgvectorSparseStatisticsTables,
+  resolvePgvectorSparseScoring,
+  toMissingSparseSearchFunctionError,
+  usesPgvectorSparseSearchFunction,
+} from "./vector-store-pgvector-sparse.js";
+import {
   configurePgvectorRuntime,
   getPgvectorQuery,
   getPgvectorRuntime,
@@ -46,9 +57,12 @@ import {
 //
 // Two routes over one table. The dense route orders chunks by cosine distance
 // over an HNSW/IVFFlat index; the sparse route is PostgreSQL full-text search
-// over a generated tsvector, ranked with ts_rank_cd -- which is a cover-density
-// rank, not BM25, and is reported as such. Both routes filter by the caller's
-// docIds so a query never reads outside the documents it was authorized for.
+// over a generated tsvector, ranked either with ts_rank_cd -- a cover-density
+// rank, not BM25, and reported as such -- or, with RAG_SPARSE_SCORING=bm25,
+// with Okapi BM25 over per-version, per-scope statistics; either may prune
+// common query terms from candidate generation (vector-store-pgvector-sparse.js,
+// migrations 029/030). Both routes filter by the caller's docIds so a query
+// never reads outside the documents it was authorized for.
 //
 // "The table" is the active index version's (vector-store-pgvector-versions.js):
 // version 1 is the migration-012 table, and a version built by
@@ -673,6 +687,48 @@ const withActiveVersionRetry = async (client, operation) => {
   }
 };
 
+// Which sparse scoring and pruning the route uses, whether the active
+// version's table carries the statistics and search function (migration
+// 030), and how many rows its statistics log holds unfolded and how many
+// chunks still lack sparse_length (sparse-length-backfill.mjs).
+const describeSparseScoring = async ({ query, tableName }) => {
+  let options;
+
+  try {
+    options = resolvePgvectorSparseScoring();
+  } catch (error) {
+    return { backend: null, configured: null, message: error.message, searchFunctionInstalled: null };
+  }
+
+  const described = {
+    backend: getPgvectorSparseBackend(options.scoring),
+    commonTermCap: options.commonTermCap,
+    configured: options.scoring,
+    pruneDfFraction: options.pruneDfFraction,
+    searchFunctionInstalled: null,
+  };
+
+  try {
+    const { termLog } = getPgvectorSparseStatisticsTables(tableName);
+    const result = await query(
+      `SELECT to_regprocedure($1) IS NOT NULL AS installed,
+              CASE WHEN to_regclass($2) IS NULL THEN NULL
+                   ELSE (SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass($2)) END AS term_log_rows`,
+      [`${getPgvectorSparseSearchFunctionName(tableName)}${PGVECTOR_SPARSE_SEARCH_SIGNATURE}`, termLog]
+    );
+    const row = result?.rows?.[0] ?? {};
+
+    described.searchFunctionInstalled = row.installed === true;
+    described.unfoldedTermLogRowsEstimate = row.term_log_rows === null || row.term_log_rows === undefined
+      ? null
+      : Math.max(0, Number(row.term_log_rows));
+  } catch {
+    // Status stays non-throwing; null means "not checked".
+  }
+
+  return described;
+};
+
 const readSnapshotForStatus = async () => {
   try {
     return await readIndexVersionSnapshot({ force: true });
@@ -790,6 +846,8 @@ const describePgvectorTableStatus = async () => {
   if (!base.table.exists) {
     return { ...base, message: `Table ${tableName} does not exist. Run migrations (they run at startup and on health checks).` };
   }
+
+  base.sparseScoring = await describeSparseScoring({ query: queryPostgres, tableName });
 
   const indexNames = await readIndexNames({ query: queryPostgres, tableName });
   base.indexes = {
@@ -1252,9 +1310,14 @@ export const countPgvectorChunks = async ({ client = null, docIds = null, versio
 // Reads
 // ---------------------------------------------------------------------------
 
-const buildDenseSearchSql = (tableName) => `
+// `scored` (a query-adapter search, rag/query-adapter.js): rows are still
+// ordered by $1, and score_vector_score is the cosine with $6, the model's own
+// query vector. Unscored statements are unchanged.
+const buildDenseSearchSql = (tableName, scored = false) => `
   SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
-         1 - (embedding <=> $1::vector) AS vector_score
+         1 - (embedding <=> $1::vector) AS vector_score${
+           scored ? ",\n         1 - (embedding <=> $6::vector) AS score_vector_score" : ""
+         }
   FROM ${tableName}
   WHERE doc_id = ANY($2::text[])
     AND embedding_model = $3
@@ -1272,10 +1335,10 @@ const buildDenseSearchSql = (tableName) => `
 // distance order; the materialized CTE fixes the order afterwards (pgvector's
 // documented pattern; `+ 0` stops PostgreSQL 17+ from reusing the CTE's sort
 // order and skipping the outer sort). Exact plans (doc_id btree) are unaffected.
-const buildIterativeDenseSearchSql = (tableName) => `
+const buildIterativeDenseSearchSql = (tableName, scored = false) => `
   WITH nearest AS MATERIALIZED (
     SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
-           embedding <=> $1::vector AS distance
+           embedding <=> $1::vector AS distance${scored ? ",\n           embedding <=> $6::vector AS score_distance" : ""}
     FROM ${tableName}
     WHERE doc_id = ANY($2::text[])
       AND embedding_model = $3
@@ -1284,7 +1347,7 @@ const buildIterativeDenseSearchSql = (tableName) => `
     LIMIT $5
   )
   SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
-         1 - distance AS vector_score
+         1 - distance AS vector_score${scored ? ",\n         1 - score_distance AS score_vector_score" : ""}
   FROM nearest
   ORDER BY distance + 0 ASC, chunk_id ASC
 `;
@@ -1298,20 +1361,27 @@ const getIterativeScanSetting = (iterativeScan, indexType) =>
 // set_config(..., true) is SET LOCAL: it needs the statement's own transaction.
 // A caller's client is already in one; otherwise the setting and the search
 // share a short transaction (under a tenant, the same one that sets the role).
-const runIterativeDenseSearch = async ({ client, indexType, iterativeScan, tableName, values }) => {
+const runIterativeDenseSearch = async ({ client, indexType, iterativeScan, scored = false, tableName, values }) => {
   const setting = getIterativeScanSetting(iterativeScan, indexType);
   const search = async (transactionClient) => {
     const query = getPgvectorQuery(transactionClient);
 
     await query("SELECT set_config($1, $2, true)", [setting.name, setting.value]);
-    return query(buildIterativeDenseSearchSql(tableName), values);
+    return query(buildIterativeDenseSearchSql(tableName, scored), values);
   };
 
   return client ? search(client) : getPgvectorRuntime().withTransaction(search);
 };
 
+// `scoreVector` (the query adapter, rag/query-adapter.js): the model's own
+// query vector. Rows are ranked by queryVector (the adapted one) while
+// vectorScore is the cosine with scoreVector and rankVectorScore the ranking
+// cosine. The active version's space is resolved against scoreVector; when it
+// has to be embedded again (the version moved to another space meanwhile),
+// that vector ranks and scores and the result is unadapted.
 export const searchPgvectorDocuments = async ({
   queryVector,
+  scoreVector = null,
   queryText = "",
   docIds,
   topK,
@@ -1325,16 +1395,20 @@ export const searchPgvectorDocuments = async ({
     return [];
   }
 
+  let scored = false;
   const result = await withActiveVersionRetry(client, async () => {
     const version = await ensureActivePgvectorVersion({ client });
     const space = resolveVersionSpace(version);
-    const vector = await resolveQueryVector({ queryText, queryVector, space });
+    const modelVector = Array.isArray(scoreVector) ? scoreVector : queryVector;
+    const vector = await resolveQueryVector({ queryText, queryVector: modelVector, space });
+    scored = modelVector === scoreVector && vector === scoreVector;
     const values = [
-      toVectorLiteral(vector),
+      toVectorLiteral(scored ? queryVector : vector),
       normalizedDocIds,
       space.identity,
       space.dimensions,
       limit,
+      ...(scored ? [toVectorLiteral(scoreVector)] : []),
     ];
     const iterativeScan = getActiveIterativeScan();
 
@@ -1343,27 +1417,30 @@ export const searchPgvectorDocuments = async ({
           client,
           indexType: resolveVersionIndexParams(version).indexType,
           iterativeScan,
+          scored,
           tableName: version.chunkTable,
           values,
         })
-      : getPgvectorQuery(client)(buildDenseSearchSql(version.chunkTable), values);
+      : getPgvectorQuery(client)(buildDenseSearchSql(version.chunkTable, scored), values);
   });
   const queryTerms = buildTermSet(queryText);
 
   return result.rows
     .map((row) => {
       const document = rowToDocument(row);
-      const vectorScore = Number(row.vector_score) || 0;
+      const rankScore = Number(row.vector_score) || 0;
+      const vectorScore = scored ? Number(row.score_vector_score) || 0 : rankScore;
       const keywordScore = buildKeywordScore(queryTerms, document);
 
       return {
         document,
         score:
           scoringMode === "dense"
-            ? vectorScore
-            : buildCombinedScore(vectorScore, keywordScore),
+            ? rankScore
+            : buildCombinedScore(rankScore, keywordScore),
         vectorScore,
         keywordScore,
+        ...(scored ? { rankVectorScore: rankScore } : {}),
       };
     })
     .sort(
@@ -1410,6 +1487,34 @@ export const getPgvectorSparseRankFunctionName = () => `${getPgvectorTableName()
 export const getActivePgvectorSparseRankFunctionName = async () =>
   (await readIndexVersionSnapshot()).active.sparseRankFunction;
 
+/**
+ * What checks.rowLevelSecurity probes for the sparse route (migration 030):
+ * the four statistics tables of every live version, which carry the tenant
+ * policy (and no tenant grant), and the active version's search function,
+ * which a tenant calls for every BM25 search and every pruned
+ * multi-document search (`searchFunctionUsed`).
+ */
+export const describePgvectorSparseRowLevelSecurityTargets = async () => {
+  const snapshot = await readIndexVersionSnapshot();
+  let searchFunctionUsed = true;
+
+  try {
+    const options = resolvePgvectorSparseScoring();
+
+    searchFunctionUsed = usesPgvectorSparseSearchFunction({ docCount: 2, options });
+  } catch {
+    // An invalid RAG_SPARSE_SCORING fails every search anyway; probe the grant.
+  }
+
+  return {
+    searchFunction: `${getPgvectorSparseSearchFunctionName(snapshot.active.chunkTable)}${PGVECTOR_SPARSE_SEARCH_SIGNATURE}`,
+    searchFunctionUsed,
+    statisticsTables: [...new Set(snapshot.versions.map((version) => version.chunkTable))].flatMap((chunkTable) =>
+      Object.values(getPgvectorSparseStatisticsTables(chunkTable))
+    ),
+  };
+};
+
 /** Chunk tables of every live version (active, building, ready), for health. */
 export const listLivePgvectorVersionTables = async () => {
   const snapshot = await readIndexVersionSnapshot();
@@ -1443,11 +1548,43 @@ const buildTenantSparseSearchSql = (version) => `
   ORDER BY r.sparse_score DESC, c.chunk_id ASC
 `;
 
+// Migration 030's owner-run search function (rag/vector-store-pgvector-sparse.js):
+// BM25, or ts_rank_cd with common-term pruning, over the statistics it keeps.
+// One statement for tenant and owner, one document or many: the function
+// filters the document ids by the tenant policy itself.
+const runSparseSearchFunction = async ({ client, docIds, limit, options, tsQuery }) => {
+  const version = await ensureActivePgvectorVersion({ client });
+
+  return getPgvectorQuery(client)(
+    buildPgvectorSparseSearchSql({ chunkTable: version.chunkTable }),
+    buildPgvectorSparseSearchValues({
+      docIds,
+      limit,
+      options,
+      textSearchConfig: resolveVersionIndexParams(version).textSearchConfig,
+      tokens: tsQuery.tokens,
+      tsQuery: tsQuery.tsQuery,
+    })
+  );
+};
+
+/**
+ * The lexical route. `scoring` / `pruneDfFraction` / `commonTermCap` override
+ * RAG_SPARSE_SCORING / RAG_SPARSE_PRUNE_DF_FRACTION /
+ * RAG_SPARSE_COMMON_TERM_CAP for one call (evaluation arms and the scale
+ * benchmark compare them on the same data); `pruneMinChunks` overrides
+ * PGVECTOR_SPARSE_PRUNE_MIN_CHUNKS. A result from the search function names
+ * its candidate path (`sparseCandidates`).
+ */
 export const searchPgvectorSparseDocuments = async ({
   queryText = "",
   docIds,
   topK,
   client = null,
+  scoring = null,
+  pruneDfFraction = undefined,
+  pruneMinChunks = undefined,
+  commonTermCap = undefined,
 } = {}) => {
   const normalizedDocIds = toDocIdArray(docIds);
   const limit = Math.max(1, Math.floor(Number(topK) || 1));
@@ -1457,10 +1594,26 @@ export const searchPgvectorSparseDocuments = async ({
     return [];
   }
 
+  const scoringOptions = resolvePgvectorSparseScoring({ commonTermCap, pruneDfFraction, pruneMinChunks, scoring });
+
   // ts_rank_cd with normalization 32 maps the cover-density rank into [0, 1)
   // (rank / (rank + 1)) so scores are comparable across queries. It is not
-  // BM25 and is never labelled as such.
+  // BM25 and is never labelled as such. BM25 scores are unbounded; both are
+  // ranking-only (admission never reads sparseScore).
+  // A missing search function is retried once like a missing table (the
+  // pointer may have named a version retired meanwhile); after that the error
+  // names its remedy.
   const result = await withActiveVersionRetry(client, async () => {
+    if (usesPgvectorSparseSearchFunction({ docCount: normalizedDocIds.length, options: scoringOptions })) {
+      return runSparseSearchFunction({
+        client,
+        docIds: normalizedDocIds,
+        limit,
+        options: scoringOptions,
+        tsQuery,
+      });
+    }
+
     const version = await ensureActivePgvectorVersion({ client });
 
     return getPgvectorQuery(client)(
@@ -1469,6 +1622,8 @@ export const searchPgvectorSparseDocuments = async ({
         : buildSparseSearchSql(version.chunkTable),
       [resolveVersionIndexParams(version).textSearchConfig, tsQuery.tsQuery, normalizedDocIds, limit]
     );
+  }).catch((error) => {
+    throw toMissingSparseSearchFunctionError(error, "the active index version's table");
   });
   const queryTerms = new Set(tsQuery.tokens);
 
@@ -1482,6 +1637,7 @@ export const searchPgvectorSparseDocuments = async ({
         score: sparseScore,
         sparseScore,
         keywordScore: buildKeywordScore(queryTerms, document),
+        ...(row.candidate_mode ? { sparseCandidates: row.candidate_mode } : {}),
       };
     })
     .sort(

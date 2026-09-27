@@ -99,7 +99,7 @@ const createFakeDatabase = ({
       return { rows: denseRows };
     }
 
-    if (/AS sparse_score/.test(compact) || /_sparse_rank\(/.test(compact)) {
+    if (/AS sparse_score/.test(compact) || /_sparse_rank\(/.test(compact) || /_sparse_search\(/.test(compact)) {
       return { rows: sparseRows };
     }
 
@@ -531,7 +531,10 @@ test("sparse search builds an OR tsquery from the app tokenizer and ranks with t
 
 test("a tenant's sparse search ranks through the owner function and joins the ids back under the row policies", async () => {
   const saved = process.env.POSTGRES_ROW_LEVEL_SECURITY;
+  const savedPruning = process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
   process.env.POSTGRES_ROW_LEVEL_SECURITY = "enforce";
+  // Migration 014's function: ts_rank_cd without common-term pruning.
+  process.env.RAG_SPARSE_PRUNE_DF_FRACTION = "off";
 
   try {
     const database = useDatabase({
@@ -554,6 +557,27 @@ test("a tenant's sparse search ranks through the owner function and joins the id
     assert.ok(!/@@/.test(searchCall.sql), "the tenant statement leaves the match to the function");
     assert.deepEqual(searchCall.values, ["simple", "'amber' | 'ceiling'", ["doc-1", "doc-2"], 5]);
     assert.equal(results[0].sparseScore, 0.35);
+
+    // With pruning on (the default) several documents go through migration
+    // 030's search function instead, which filters the doc ids by the tenant
+    // policy itself; the join back still runs under the row policies.
+    delete process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
+
+    const pruning = useDatabase({
+      sparseRows: [chunkRow({ content: "Amber ceiling is 2400 dollars.", docId: "doc-1", score: 0.35 })],
+    });
+
+    await runWithDatabaseTenant({ userId: "alice", workspaceId: "ws" }, () =>
+      searchPgvectorSparseDocuments({ queryText: "What is the Amber ceiling?", docIds: ["doc-1", "doc-2"], topK: 5 })
+    );
+
+    const prunedCall = pruning.calls.find((call) => /_sparse_search\(/.test(call.sql));
+
+    assert.ok(prunedCall, "the search function ran");
+    assert.ok(!pruning.calls.some((call) => /_sparse_rank\(/.test(call.sql)));
+    assert.match(prunedCall.sql, new RegExp(`JOIN ${TABLE} c ON c\\.chunk_id = r\\.chunk_id`));
+    assert.equal(prunedCall.values[5], "ts_rank_cd");
+    process.env.RAG_SPARSE_PRUNE_DF_FRACTION = "off";
 
     const singleDocument = useDatabase({ sparseRows: [] });
 
@@ -580,6 +604,12 @@ test("a tenant's sparse search ranks through the owner function and joins the id
       delete process.env.POSTGRES_ROW_LEVEL_SECURITY;
     } else {
       process.env.POSTGRES_ROW_LEVEL_SECURITY = saved;
+    }
+
+    if (savedPruning === undefined) {
+      delete process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
+    } else {
+      process.env.RAG_SPARSE_PRUNE_DF_FRACTION = savedPruning;
     }
   }
 });

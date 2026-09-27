@@ -20,6 +20,7 @@ import {
   searchLocalDocuments,
 } from "./vector-store-local.js";
 import { embedTexts } from "./openai.js";
+import { adaptQueryVectorForSearch, stampQueryAdapterProvenance } from "./query-adapter.js";
 import {
   addDocumentsToPgvectorIndex,
   beginPgvectorIndexWrite,
@@ -38,6 +39,7 @@ import {
   getConfiguredEmbeddingSpace,
   getHintedWriteSpaces,
 } from "./vector-store-pgvector-versions.js";
+import { getPgvectorSparseBackend } from "./vector-store-pgvector-sparse.js";
 import {
   addDocumentsToQdrantIndex,
   clearQdrantVectorIndex,
@@ -136,6 +138,9 @@ const buildLocalImplementation = () => ({
     await Promise.all([clearLocalVectorIndex(), clearSparseIndex()]);
   },
   searchDenseDocuments: searchLocalDocuments,
+  // Dense search takes `scoreVector`: ranks by queryVector, reports the
+  // cosine with scoreVector as vectorScore (rag/query-adapter.js).
+  denseScoreVector: true,
   searchSparseDocuments,
   reset: () => {
     resetLocalVectorStore();
@@ -167,7 +172,8 @@ const buildQdrantImplementation = () => ({
 const buildPgvectorImplementation = () => ({
   id: VECTOR_STORE_PROVIDERS.pgvector,
   denseBackend: "pgvector_cosine",
-  sparseBackend: "postgres_fts_ts_rank_cd",
+  // postgres_fts_ts_rank_cd or postgres_bm25, as RAG_SPARSE_SCORING says.
+  sparseBackend: getPgvectorSparseBackend(),
   transactional: true,
   // Index versions: the version tables a transaction writes are fixed by its
   // first statements (vector-store-pgvector-versions.js).
@@ -195,6 +201,7 @@ const buildPgvectorImplementation = () => ({
     await clearPgvectorIndex({ client });
   },
   searchDenseDocuments: searchPgvectorDocuments,
+  denseScoreVector: true,
   searchSparseDocuments: searchPgvectorSparseDocuments,
   reset: resetPgvectorVectorStore,
 });
@@ -237,6 +244,11 @@ export const describeVectorStoreRuntime = () => {
 
 export const isVectorStoreTransactional = () =>
   Boolean(getVectorStoreImplementation().transactional);
+
+// Whether the dense search can rank by one vector and report another's
+// cosine as vectorScore, which the query adapter needs (rag/query-adapter.js).
+export const supportsDenseScoreVector = () =>
+  Boolean(getVectorStoreImplementation().denseScoreVector);
 
 /**
  * Verifies the active provider can accept writes before any work is done on
@@ -554,13 +566,26 @@ const searchHybridDocumentsWithRoutes = async ({
   queryText = "",
   docIds,
   topK,
+  queryAdapterScope = null,
 }) => {
   const sparseTopK = Math.max(topK, getSparseRetrievalTopK());
   const denseTopK = Math.max(topK, sparseTopK);
   const implementation = getVectorStoreImplementation();
+  // The query adapter (rag/query-adapter.js) only reorders the dense route:
+  // it ranks by W q while vectorScore stays the model vector's cosine, the
+  // scale every admission floor was set on.
+  const adaptation = adaptQueryVectorForSearch({
+    docIds,
+    fusion: getHybridFusionMethod(),
+    hybrid: true,
+    queryVector,
+    scope: queryAdapterScope,
+    supportsScoreVector: Boolean(implementation.denseScoreVector),
+  });
   const [rawDenseResults, rawSparseResults] = await Promise.all([
     implementation.searchDenseDocuments({
-      queryVector,
+      queryVector: adaptation?.rankVector ?? queryVector,
+      ...(adaptation ? { scoreVector: queryVector } : {}),
       queryText,
       docIds,
       topK: denseTopK,
@@ -578,8 +603,15 @@ const searchHybridDocumentsWithRoutes = async ({
     method === "rrf"
       ? fuseSearchResultsByRrf({ denseResults, sparseResults, topK })
       : fuseSearchResultsByWeightedScore({ denseResults, sparseResults, topK });
+  // The store ranked by the adapted vector only when every dense result says
+  // so; pgvector falls back to its own unadapted vector when the active
+  // version moved to another space between the embedding and the search.
+  const adapterFingerprint =
+    adaptation && rawDenseResults.length > 0 && rawDenseResults.every((result) => Number.isFinite(result?.rankVectorScore))
+      ? adaptation.fingerprint
+      : null;
 
-  return {
+  return stampQueryAdapterProvenance({
     results,
     fusion: { enabled: true, method },
     routes: {
@@ -594,11 +626,21 @@ const searchHybridDocumentsWithRoutes = async ({
         topK: sparseTopK,
       }),
     },
-  };
+  }, adapterFingerprint);
 };
 
 const searchDenseOnlyDocumentsWithRoutes = async (args) => {
   const implementation = getVectorStoreImplementation();
+
+  // Never adapted: the dense-only route measured worse with the query
+  // adapter. This only warns (once) when it is configured for this caller.
+  adaptQueryVectorForSearch({
+    docIds: args.docIds,
+    hybrid: false,
+    queryVector: args.queryVector,
+    scope: args.queryAdapterScope ?? null,
+    supportsScoreVector: Boolean(implementation.denseScoreVector),
+  });
   const results = withDenseProvenance(
     await implementation.searchDenseDocuments({
       ...args,
@@ -660,6 +702,9 @@ const searchSparseOnlyDocumentsWithRoutes = async ({
   };
 };
 
+// `queryAdapterScope` (rag/query-adapter.js) is set by the single-document QA
+// route only; the hybrid route then ranks its dense candidates with the query
+// adapter when one is configured and applies, and stamps its fingerprint.
 export const searchDocumentsWithRoutes = async (args) => {
   const route = getRetrievalRoute();
 
@@ -697,6 +742,10 @@ export const mergeRouteSummaries = (...summaries) => {
       merged[route].queryCount += 1;
       merged[route].executed = merged[route].executed || Boolean(routeSummary.executed);
       merged[route].candidateCount += Number(routeSummary.candidateCount) || 0;
+
+      if (routeSummary.queryAdapter) {
+        merged[route].queryAdapter = routeSummary.queryAdapter;
+      }
     }
   }
 

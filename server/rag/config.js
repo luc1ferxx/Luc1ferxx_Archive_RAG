@@ -453,6 +453,95 @@ export const getEmbeddingDimensions = () =>
 export const getPgvectorTextSearchConfig = () =>
   (process.env.RAG_PGVECTOR_TEXT_SEARCH_CONFIG || "simple").trim();
 
+// --- Sparse route scoring (pgvector BM25, migration 029) ---------------------
+// `ts_rank_cd` is PostgreSQL's cover-density rank and is never called BM25;
+// `bm25` is Okapi BM25 over per-version, per-scope statistics
+// (rag/vector-store-pgvector-sparse.js). An unknown value fails closed rather
+// than silently scoring with the other one.
+export const SPARSE_SCORING_CHOICES = Object.freeze(["ts_rank_cd", "bm25"]);
+export const DEFAULT_SPARSE_SCORING = "ts_rank_cd";
+
+export const getSparseScoring = () => {
+  const rawValue = process.env.RAG_SPARSE_SCORING;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return DEFAULT_SPARSE_SCORING;
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!SPARSE_SCORING_CHOICES.includes(normalizedValue)) {
+    throw new Error(
+      `RAG_SPARSE_SCORING must be one of ${SPARSE_SCORING_CHOICES.join(", ")}. Received "${rawValue}".`
+    );
+  }
+
+  return normalizedValue;
+};
+
+// k1 >= 0 (0 ignores term frequency), b in [0, 1]; Robertson's defaults, the
+// same the local sparse store (rag/sparse-store.js) scores with.
+export const getBm25K1 = () => toNonNegativeNumber(process.env.RAG_BM25_K1, 1.2);
+
+export const getBm25B = () => {
+  const value = toNonNegativeNumber(process.env.RAG_BM25_B, 0.75);
+
+  return value <= 1 ? value : 0.75;
+};
+
+// Common-term pruning, for either scoring, on searches whose documents hold
+// more than 1000 chunks: candidates come from the query terms whose document
+// frequency is at most this share of the scope's chunks, and every query term
+// still scores them (migration 030). `off`, 0 or a value >= 1 scores every
+// chunk that matches any term (exhaustive).
+export const DEFAULT_SPARSE_PRUNE_DF_FRACTION = 0.1;
+
+export const getSparsePruneDfFraction = () => {
+  const rawValue = String(process.env.RAG_SPARSE_PRUNE_DF_FRACTION ?? "").trim().toLowerCase();
+
+  if (rawValue === "") {
+    return DEFAULT_SPARSE_PRUNE_DF_FRACTION;
+  }
+
+  if (rawValue === "off" || rawValue === "false") {
+    return null;
+  }
+
+  const value = Number(rawValue);
+
+  if (!Number.isFinite(value)) {
+    return DEFAULT_SPARSE_PRUNE_DF_FRACTION;
+  }
+
+  return value > 0 && value < 1 ? value : null;
+};
+
+// With pruning, a query whose every term is common (one word, or several)
+// scores at most this many candidates per pass: the chunks holding every
+// common term, then those holding any, each in physical order. `off` or 0
+// scores all of them (exhaustive for such a query).
+export const DEFAULT_SPARSE_COMMON_TERM_CAP = 2000;
+
+export const getSparseCommonTermCap = () => {
+  const rawValue = String(process.env.RAG_SPARSE_COMMON_TERM_CAP ?? "").trim().toLowerCase();
+
+  if (rawValue === "") {
+    return DEFAULT_SPARSE_COMMON_TERM_CAP;
+  }
+
+  if (rawValue === "off" || rawValue === "false") {
+    return null;
+  }
+
+  const value = Math.floor(Number(rawValue));
+
+  if (!Number.isFinite(value)) {
+    return DEFAULT_SPARSE_COMMON_TERM_CAP;
+  }
+
+  return value > 0 ? value : null;
+};
+
 export const getPgvectorIndexType = () =>
   toChoice(process.env.RAG_PGVECTOR_INDEX_TYPE, "hnsw", ["hnsw", "ivfflat"]);
 
@@ -616,6 +705,46 @@ export const getMinQaQueryTermCoverage = () =>
 // docs/evaluation.md.
 export const isQaAnswerVerdictEnabled = () =>
   toBoolean(process.env.RAG_QA_ANSWER_VERDICT, false);
+
+// ---------------------------------------------------------------------------
+// Semantic answer cache (rag/semantic-cache.js). Opt-in: RAG_SEMANTIC_CACHE=on
+// serves a stored document RAG answer to a later question of the same tenant,
+// doc set, document versions, index version, query adapter, prompts, chat
+// model and answer mode whose query embedding clears
+// RAG_SEMANTIC_CACHE_THRESHOLD and whose words match almost exactly
+// (rag/semantic-cache-guard.js). Any other value keeps it off.
+// ---------------------------------------------------------------------------
+export const DEFAULT_SEMANTIC_CACHE_THRESHOLD = 0.97;
+
+export const isSemanticCacheEnabled = () =>
+  ["1", "true", "on", "yes", "memory"].includes(
+    String(process.env.RAG_SEMANTIC_CACHE ?? "").trim().toLowerCase()
+  );
+
+// Cosine similarity of the query embeddings, in (0, 1]; anything else falls
+// back to the default rather than admitting every question.
+export const getSemanticCacheThreshold = () => {
+  const value = Number(process.env.RAG_SEMANTIC_CACHE_THRESHOLD);
+
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : DEFAULT_SEMANTIC_CACHE_THRESHOLD;
+};
+
+export const getSemanticCacheMaxEntries = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_SEMANTIC_CACHE_MAX_ENTRIES, 500)) || 500;
+
+// Bytes of stored responses (their JSON), least recently used out first; an
+// answer larger than the whole budget is not stored.
+export const DEFAULT_SEMANTIC_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+
+export const getSemanticCacheMaxBytes = () =>
+  Math.floor(toPositiveNumber(process.env.RAG_SEMANTIC_CACHE_MAX_BYTES, DEFAULT_SEMANTIC_CACHE_MAX_BYTES)) ||
+  DEFAULT_SEMANTIC_CACHE_MAX_BYTES;
+
+// 0 keeps an entry until the LRU bound or an invalidation removes it.
+export const getSemanticCacheTtlMs = () =>
+  String(process.env.RAG_SEMANTIC_CACHE_TTL_MS ?? "").trim() === ""
+    ? 60 * 60 * 1000
+    : Math.floor(toNonNegativeNumber(process.env.RAG_SEMANTIC_CACHE_TTL_MS, 60 * 60 * 1000));
 
 // With the verdict on, single-document QA also admits a chunk whose coverage
 // lies between this floor and the one above, unless a query term was replaced
@@ -1203,6 +1332,26 @@ export const getQueryEmbeddingCacheMaxEntries = () =>
 
 export const getQueryEmbeddingCacheTtlMs = () =>
   Math.floor(toPositiveNumber(process.env.RAG_EMBEDDING_CACHE_TTL_MS, 10 * 60 * 1000)) || 10 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// ADAPTER track: query-side linear embedding adapter (rag/query-adapter.js).
+// ---------------------------------------------------------------------------
+
+// Path of a trained adapter file (evaluation/train-query-adapter.py); a
+// relative path resolves against the working directory. Empty, "off", "none"
+// or "false" (the default) leaves query vectors exactly as the model returns
+// them. It is applied only where it was measured: single-document QA
+// retrieval on the hybrid route, for a query the embedding model embedded in
+// the space the file was trained in (rag/query-adapter.js). Anything else
+// searches unadapted; checks.queryAdapter reports an unreadable file as an
+// error and a space or route it would never apply to as a warning. The file
+// must be readable by the server process: evaluation/generated/ is neither
+// committed nor copied into the Docker image, so mount or copy it there.
+export const getEmbeddingQueryAdapterPath = () => {
+  const value = String(process.env.RAG_EMBEDDING_QUERY_ADAPTER ?? "").trim();
+
+  return ["", "0", "false", "no", "off", "none"].includes(value.toLowerCase()) ? "" : value;
+};
 
 // Retire drops a version table whose foreign key points at the documents
 // table, which needs an AccessExclusiveLock on documents; while that request

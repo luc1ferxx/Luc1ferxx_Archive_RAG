@@ -46,6 +46,7 @@ import {
   resolveQueryWithSessionMemory,
 } from "./memory.js";
 import { recordRagTrace } from "./observability.js";
+import { invalidateSemanticCacheDocuments } from "./semantic-cache.js";
 import { loadPdfPages } from "./pdf-loader.js";
 import { withPostgresTransaction } from "./postgres.js";
 import { STAGED_INGEST } from "./ingest-stages.js";
@@ -330,6 +331,10 @@ export const commitDocument = async ({
   };
 
   const finish = async (outcome) => {
+    // Answers built on the document's earlier content leave the semantic
+    // answer cache now; their keys name the old content version anyway.
+    invalidateSemanticCacheDocuments([docId]);
+
     if (outcome.docId !== docId || outcome.superseded) {
       // A document this write did not change: read it the way another
       // process's write would be read.
@@ -675,6 +680,7 @@ export const deleteDocument = async (
         throw error;
       }
 
+      invalidateSemanticCacheDocuments([docId]);
       return deleted ? storedDocument : null;
     });
   }
@@ -684,6 +690,7 @@ export const deleteDocument = async (
   });
   const deleted = await deleteRegisteredDocument(docId, accessScope);
 
+  invalidateSemanticCacheDocuments([docId]);
   return deleted ? storedDocument : null;
 };
 
@@ -723,6 +730,7 @@ export const clearDocuments = async ({
           await clearVectorIndex({ client });
         }
 
+        invalidateSemanticCacheDocuments(documents.map((document) => document.docId));
         return documents;
       })
     );
@@ -742,6 +750,7 @@ export const clearDocuments = async ({
       await clearVectorIndex();
     }
 
+    invalidateSemanticCacheDocuments(documents.map((document) => document.docId));
     return documents;
   });
 };
@@ -864,8 +873,10 @@ const chat = async (docIds, query, options = {}) => {
     };
 
     const execution = await executeDocumentRag({
+      accessScope,
       agentRetrievalPlan,
       docIds: normalizedDocIds,
+      includeRetrievedContexts,
       preferenceBlock: longMemoryContext.answerBlock,
       query,
       resolvedQuery,

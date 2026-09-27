@@ -15,7 +15,11 @@ import {
   docIdFor,
   formatBytes,
   formatMarkdown,
+  formatSparseScoring,
   formatVectorLiteral,
+  buildCommonTermQueryTexts,
+  buildSparseScoringArms,
+  countCandidatePaths,
   generateCentroids,
   generateChunkText,
   generateClusteredVector,
@@ -26,6 +30,7 @@ import {
   parseArgs,
   parseSize,
   parseSizes,
+  parseSparseDocSets,
   percentile,
   PROJECTION_SAFETY_FACTOR,
   planUsesIndex,
@@ -61,6 +66,160 @@ test("isSearchStatement recognizes the app's dense and sparse statements, includ
     true
   );
   assert.equal(isSearchStatement("SELECT set_config($1, $2, true)"), false);
+  // Migration 030's search function (BM25, pruned searches) takes the limit too.
+  assert.equal(
+    isSearchStatement("SELECT c.chunk_id FROM rag_document_chunks_sparse_search(to_tsquery($1::regconfig, $2), to_tsvector($1::regconfig, $3), $4::text[], $5::integer, $6::text, $7, $8, $9, $10, $11) AS r JOIN t c ON c.chunk_id = r.chunk_id"),
+    true
+  );
+});
+
+test("the sparse-scoring comparison takes its sets, fractions, cap, length mode and writer counts from the command line", () => {
+  assert.deepEqual(parseSparseDocSets("1000, all,1k"), [1000, "all"]);
+  assert.deepEqual(parseSparseDocSets(""), []);
+
+  const defaults = parseArgs(["--database-url", "postgres://x/y"]);
+
+  assert.deepEqual(defaults.sparseDocSets, [1000, "all"]);
+  assert.deepEqual(defaults.pruneDfFractions, [0.1]);
+  assert.equal(defaults.commonQueries, 30);
+  assert.equal(defaults.commonTermCap, undefined, "the configured cap");
+  assert.equal(defaults.sparseLength, "set");
+  assert.deepEqual(defaults.concurrentWriters, [1, 4]);
+  assert.equal(defaults.concurrentWriterDocs, 4);
+  assert.equal(defaults.deleteProbeDocs, 100);
+  assert.deepEqual(
+    parseArgs(["--database-url", "postgres://x/y", "--prune-df-fractions", "0.05,2,0.05"]).pruneDfFractions,
+    [0.05]
+  );
+  assert.throws(
+    () => parseArgs(["--database-url", "postgres://x/y", "--prune-df-fractions", "1.5"]),
+    /--prune-df-fractions/
+  );
+
+  const custom = parseArgs([
+    "--database-url", "postgres://x/y",
+    "--common-term-cap", "off",
+    "--sparse-length", "NULL",
+    "--concurrent-writers", "1,8,8",
+    "--concurrent-writer-docs", "0",
+    "--common-queries", "5",
+  ]);
+
+  assert.equal(custom.commonTermCap, null);
+  assert.equal(custom.sparseLength, "null");
+  assert.deepEqual(custom.concurrentWriters, [1, 8]);
+  assert.equal(custom.concurrentWriterDocs, 0);
+  assert.equal(custom.commonQueries, 5);
+  assert.equal(parseArgs(["--database-url", "postgres://x/y", "--common-term-cap", "500"]).commonTermCap, 500);
+  assert.throws(() => parseArgs(["--database-url", "postgres://x/y", "--sparse-length", "maybe"]), /--sparse-length/);
+  assert.throws(() => parseArgs(["--database-url", "postgres://x/y", "--common-term-cap", "-1"]), /--common-term-cap/);
+});
+
+test("the all-common query slices draw only common words, and every scoring gets exhaustive and pruned arms", () => {
+  const corpus = { vocabulary: Array.from({ length: 100 }, (_, index) => `w${index}`) };
+  const texts = buildCommonTermQueryTexts({ corpus, count: 5, seed: 7 });
+  const common = new Set(corpus.vocabulary.slice(0, 30));
+
+  assert.equal(texts.single.length, 5);
+  assert.ok(texts.single.every((word) => common.has(word)));
+  assert.ok(texts.allCommon.every((text) => text.split(" ").length === 3 && text.split(" ").every((word) => common.has(word))));
+  assert.deepEqual(buildCommonTermQueryTexts({ corpus, count: 5, seed: 7 }), texts, "seeded");
+
+  assert.deepEqual(
+    buildSparseScoringArms([0.1]).map((arm) => [arm.id, arm.scoring, arm.pruneDfFraction, arm.exhaustiveId]),
+    [
+      ["ts_rank_cd", "ts_rank_cd", null, null],
+      ["ts_rank_cd_pruned_0.1", "ts_rank_cd", 0.1, "ts_rank_cd"],
+      ["bm25", "bm25", null, null],
+      ["bm25_pruned_0.1", "bm25", 0.1, "bm25"],
+    ]
+  );
+  assert.deepEqual(countCandidatePaths(["pruned", "pruned", "common_bounded", "plain", "none"]), {
+    common_bounded: 1,
+    none: 1,
+    plain: 1,
+    pruned: 2,
+  });
+});
+
+test("formatSparseScoring reports every arm and slice, the candidate paths, the pruned-list differences and the writer throughput", () => {
+  const latency = (p50, p95) => ({ count: 2, maxMs: p95, meanMs: p50, p50Ms: p50, p95Ms: p95 });
+  const arms = buildSparseScoringArms([0.1]);
+  const armEntry = (p50, p95, paths, versus = null) => ({
+    latency: { all: latency(p50, p95), commonTerm: latency(p95, p95), otherQueries: latency(p50, p50) },
+    paths,
+    versusExhaustive: versus,
+  });
+  const versus = { meanRecallAtK: 0.99, minRecallAtK: 0.9, queries: 2, queriesWithDifferentOrder: 1, queriesWithDifferentSet: 1 };
+  const lines = formatSparseScoring({
+    concurrentWriters: [
+      {
+        documentsPerRun: 16,
+        throughputRatio: 0.95,
+        withTriggers: { documentsPerSecond: 9.5, runsSeconds: [1.7, 1.67] },
+        withoutTriggers: { documentsPerSecond: 10, runsSeconds: [1.6, 1.6] },
+        writers: 4,
+      },
+    ],
+    deleteProbe: {
+      chunks: 5000,
+      documents: 100,
+      sparseLength: "null",
+      withTriggers: { ms: 900, msPerThousandChunks: 180 },
+      withoutTriggers: { ms: 300, msPerThousandChunks: 60 },
+    },
+    ingestProbe: { documents: 4, meanMs: 50, p50Ms: 49 },
+    ingestProbeWithoutBm25Triggers: { documents: 4, meanMs: 40, p50Ms: 39 },
+    sparseScoring: {
+      arms,
+      commonTermCap: 2000,
+      scopeChunks: 100000,
+      sets: {
+        all: {
+          documents: 2000,
+          slices: {
+            mixed: {
+              arms: {
+                bm25: armEntry(9, 90, { exhaustive: 2 }),
+                "bm25_pruned_0.1": armEntry(8, 12, { pruned: 1, exhaustive: 1 }, versus),
+                ts_rank_cd: armEntry(30, 130, { plain: 2 }),
+                "ts_rank_cd_pruned_0.1": armEntry(20, 40, { pruned: 1, exhaustive: 1 }, versus),
+              },
+              commonTermQueries: 1,
+              queries: 2,
+            },
+            single: {
+              arms: {
+                bm25: armEntry(90, 90, { exhaustive: 2 }),
+                "bm25_pruned_0.1": armEntry(20, 25, { common_bounded: 2 }, versus),
+                ts_rank_cd: armEntry(60, 70, { plain: 2 }),
+                "ts_rank_cd_pruned_0.1": armEntry(15, 18, { common_bounded: 2 }, versus),
+              },
+              commonTermQueries: 2,
+              queries: 2,
+            },
+          },
+        },
+      },
+      sparseLength: "null",
+    },
+  }).join("\n");
+
+  assert.match(lines, /sparse_length NULL on every loaded row/);
+  assert.match(lines, /at most 2000 candidates per pass/);
+  assert.match(lines, /Document set: all 2,000 documents\./);
+  assert.match(
+    lines,
+    /\| mixed: three topic words and one general word \(2, 1 common-term\) \| ts_rank_cd \(cover density, not BM25\), exhaustive \| 30 \| 130 \| 30 \| 130 \/ 130 \| plain 2 \| reference \|/
+  );
+  assert.match(
+    lines,
+    /\| one common word \(2\) \| BM25, pruning terms in > 0.1 of chunks \| 20 \| 25 \| 20 \| all \| common_bounded 2 \| 1 \/ 1, 0.99 \(0.9\) \|/
+  );
+  assert.match(lines, /with migration 030's triggers p50 49 ms .* disabled p50 39 ms/);
+  assert.match(lines, /\| 4 \| 16 \| 9.5 \(1.7, 1.67\) \| 10 \(1.6, 1.6\) \| 0.95 \|/);
+  assert.match(lines, /Delete cost \(one DELETE of 100 documents' registry rows, 5,000 chunks by cascade, as the owner, sparse_length NULL\): with the statistics triggers 900 ms \(180 ms per 1,000 chunks\), with them disabled 300 ms/);
+  assert.deepEqual(formatSparseScoring({}), []);
 });
 
 test("parseArgs requires an explicit database URL and validates numbers", () => {

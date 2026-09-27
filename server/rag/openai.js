@@ -2,9 +2,11 @@ import { createChatClient, createEmbeddingsClient } from "./openai-client.js";
 import { CIRCUIT_OPEN_CODE, resetModelCallGuards } from "./model-call-guard.js";
 import { addActiveSpanEvent } from "./tracing.js";
 import { normalizePromptDescriptor } from "./prompt-registry.js";
+import { markModelQueryVector } from "./query-adapter.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import {
   getEmbeddingDocumentPrefix,
+  getEmbeddingModel,
   getEmbeddingQueryPrefix,
   getLlmOpsPolicy,
   isStructuredOutputEnabled,
@@ -500,15 +502,37 @@ export const embedTexts = async (texts, options = {}) => {
   });
 };
 
+// The query-side adapter (rag/query-adapter.js) never changes what this
+// returns. It adapts a query vector at the retrieval seam, and only a vector
+// marked here as the embedding model's own, in the space it was embedded in.
+// A configured stand-in provider's vectors (embedQuery or getEmbeddings) are
+// not the model's, so they are never marked unless the provider opts in with
+// `allowQueryAdapter: true` (unit tests do).
+const servesQueryEmbeddingsFromStandIn = () =>
+  Boolean(customProvider?.embedQuery || customProvider?.getEmbeddings) && customProvider?.allowQueryAdapter !== true;
+
+const describeQuerySpace = (embeddingSpace, modelName, vector) => ({
+  dimensions: Array.isArray(vector) || ArrayBuffer.isView(vector) ? vector.length : 0,
+  documentPrefix: embeddingSpace ? String(embeddingSpace.documentPrefix ?? "") : getEmbeddingDocumentPrefix(),
+  model: String(embeddingSpace?.model ?? modelName ?? getEmbeddingModel()),
+  queryPrefix: embeddingSpace ? String(embeddingSpace.queryPrefix ?? "") : getEmbeddingQueryPrefix(),
+});
+
 export const embedQuery = async (query, options = {}) => {
   const embeddingSpace = normalizeEmbeddingSpace(options?.embeddingSpace);
+  const { modelName, vector } = await embedQueryWithModel(query, embeddingSpace);
 
+  return servesQueryEmbeddingsFromStandIn()
+    ? vector
+    : markModelQueryVector(vector, describeQuerySpace(embeddingSpace, modelName, vector));
+};
+
+const embedQueryWithModel = async (query, embeddingSpace) => {
   if (customProvider?.embedQuery) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
     const metricContext = buildCustomRouteMetricContext();
     const inputCharacters = getTextCharacters(query);
-
-    return runWithLlmOpsMetric({
+    const vector = await runWithLlmOpsMetric({
       action: () => callCustomEmbedding("embedQuery", query, embeddingSpace),
       metric: getEmbeddingMetricBase({
         ...buildUsageMetricFields({
@@ -522,6 +546,8 @@ export const embedQuery = async (query, options = {}) => {
       }),
       policy: getRuntimeLlmOpsPolicy(),
     });
+
+    return { modelName: null, vector };
   }
 
   const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance({
@@ -531,8 +557,7 @@ export const embedQuery = async (query, options = {}) => {
   const queryPrefix = embeddingSpace
     ? String(embeddingSpace.queryPrefix ?? "")
     : getEmbeddingQueryPrefix();
-
-  return runWithLlmOpsMetric({
+  const vector = await runWithLlmOpsMetric({
     action: () =>
       withRetry(
         async () => instance.embedQuery(`${queryPrefix}${query}`),
@@ -551,6 +576,8 @@ export const embedQuery = async (query, options = {}) => {
     }),
     policy: getRuntimeLlmOpsPolicy(),
   });
+
+  return { modelName, vector };
 };
 
 export const completeText = async (prompt, options = {}) => {

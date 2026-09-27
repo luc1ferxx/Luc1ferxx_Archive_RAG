@@ -41,6 +41,10 @@ import {
   searchPgvectorNearestChunkIds,
 } from "./vector-store-pgvector.js";
 import { getPgvectorQuery, getPgvectorRuntime } from "./vector-store-pgvector-runtime.js";
+import {
+  renderPgvectorBm25DropDdl,
+  renderPgvectorBm25InstallStatement,
+} from "./vector-store-pgvector-sparse.js";
 import { stampChunkDocumentVersion } from "./vector-store.js";
 import {
   EMBEDDING_SPACE_SOURCES,
@@ -344,11 +348,16 @@ export const createIndexVersion = async ({
 
       await query("SELECT set_config('lock_timeout', $1, true)", [DDL_LOCK_TIMEOUT]);
       await query(
-        await renderIndexVersionChunkTableDdl({
-          chunkTable,
-          dimensions: space.dimensions,
-          indexParams: params,
-        })
+        [
+          await renderIndexVersionChunkTableDdl({
+            chunkTable,
+            dimensions: space.dimensions,
+            indexParams: params,
+          }),
+          // Migration 030's BM25 statistics, triggers and rank function, in the
+          // version's own text search configuration.
+          renderPgvectorBm25InstallStatement({ chunkTable, textSearchConfig: params.textSearchConfig }),
+        ].join("\n")
       );
 
       const inserted = firstRow(
@@ -1672,7 +1681,14 @@ export const dropRetiredIndexVersionStorage = async ({
           if (isBaseTable) {
             await query(`/* index_versions:empty_base_table */ TRUNCATE ${chunkTable}`);
           } else {
-            await query(renderIndexVersionDropDdl({ chunkTable, sparseRankFunction }));
+            // The table first: its triggers go with it, then their functions,
+            // the BM25 rank function and the statistics tables.
+            await query(
+              [
+                renderIndexVersionDropDdl({ chunkTable, sparseRankFunction }),
+                renderPgvectorBm25DropDdl({ chunkTable }),
+              ].join("\n")
+            );
           }
         })
       );

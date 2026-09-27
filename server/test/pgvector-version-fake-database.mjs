@@ -736,6 +736,20 @@ export const createFakeVersionDatabase = ({
       );
     }
 
+    // Migration 030's search function: $3 the query terms, $4 doc ids, $5 limit.
+    if (/_sparse_search\(/.test(compact)) {
+      const name = /JOIN (\w+) c ON/.exec(compact)[1];
+      const tokens = String(values[2]).split(" ");
+      const docIds = new Set(values[3]);
+
+      return rows(
+        [...table(name).rows.values()]
+          .filter((row) => docIds.has(row.doc_id) && tokens.some((token) => row.search_text.split(" ").includes(token)))
+          .map((row) => ({ ...row, candidate_mode: "exhaustive", sparse_score: 0.5 }))
+          .slice(0, values[4])
+      );
+    }
+
     if (/AS sparse_score/.test(compact) || /_sparse_rank\(/.test(compact)) {
       const name = /_sparse_rank\(/.test(compact)
         ? /JOIN (\w+) c ON/.exec(compact)[1]

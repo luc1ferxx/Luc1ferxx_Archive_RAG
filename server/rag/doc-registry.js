@@ -27,6 +27,37 @@ let legacyImportAttempted = false;
 const documentWritesInFlight = new Map();
 const activeRefreshes = new Set();
 const refreshQueues = new Map();
+// Called with the docIds a store read dropped from this process's map or found
+// with other content (another process deleted or replaced them), so a cache
+// built on their old content can drop it (rag/semantic-cache.js). This
+// process's own deletes and replacements are handled by their callers.
+const documentStoreChangeListeners = new Set();
+
+export const onDocumentStoreChange = (listener) => {
+  documentStoreChangeListeners.add(listener);
+  return () => documentStoreChangeListeners.delete(listener);
+};
+
+const notifyDocumentStoreChange = (docIds) => {
+  if (docIds.length === 0) {
+    return;
+  }
+
+  for (const listener of documentStoreChangeListeners) {
+    try {
+      listener(docIds);
+    } catch (error) {
+      console.error("Document registry change listener failed.", error);
+    }
+  }
+};
+
+const describeContentVersion = (document) =>
+  document ? `${document.version}:${document.contentSha256 ?? ""}:${document.updatedAt ?? ""}` : null;
+
+// Whether a store read changed what `docId` holds: gone, or other content.
+const isContentChange = (previous, next) =>
+  Boolean(previous) && (!next || describeContentVersion(previous) !== describeContentVersion(next));
 
 const toPositiveInteger = (value, fallbackValue = 0) => {
   const parsedValue = Number.parseInt(value ?? fallbackValue, 10);
@@ -877,10 +908,17 @@ export const resyncDocument = async (docId) => {
     return store.getFile ? (await store.getFile(normalizedDocId))?.document ?? null : null;
   });
 
-  if (storedDocument) {
-    documentRegistry.set(normalizedDocId, toStoredDocument(storedDocument));
+  const previous = documentRegistry.get(normalizedDocId);
+  const next = storedDocument ? toStoredDocument(storedDocument) : null;
+
+  if (next) {
+    documentRegistry.set(normalizedDocId, next);
   } else {
     documentRegistry.delete(normalizedDocId);
+  }
+
+  if (isContentChange(previous, next)) {
+    notifyDocumentStoreChange([normalizedDocId]);
   }
 
   return getDocument(normalizedDocId);
@@ -999,6 +1037,7 @@ export const loadDocumentsFromStore = async (docIds) => {
       .map((document) => [document.docId, document])
   );
   const loaded = [];
+  const changed = [];
 
   for (const docId of requestedDocIds) {
     if (touched.has(docId) || documentRegistry.get(docId) !== before.get(docId)) {
@@ -1014,8 +1053,13 @@ export const loadDocumentsFromStore = async (docIds) => {
     } else if (before.get(docId)) {
       documentRegistry.delete(docId);
     }
+
+    if (isContentChange(before.get(docId), stored.get(docId))) {
+      changed.push(docId);
+    }
   }
 
+  notifyDocumentStoreChange(changed);
   return loaded;
 };
 
@@ -1036,6 +1080,8 @@ const refreshFromStore = async (accessScope) => {
       .map((document) => [document.docId, document])
   );
 
+  const changed = [];
+
   for (const docId of new Set([...before.keys(), ...stored.keys()])) {
     if (touched.has(docId) || documentRegistry.get(docId) !== before.get(docId)) {
       continue;
@@ -1046,8 +1092,16 @@ const refreshFromStore = async (accessScope) => {
     } else if (documentMatchesAccessScope(before.get(docId), accessScope)) {
       // Only an entry the listing covered can be missing from it.
       documentRegistry.delete(docId);
+    } else {
+      continue;
+    }
+
+    if (isContentChange(before.get(docId), stored.get(docId))) {
+      changed.push(docId);
     }
   }
+
+  notifyDocumentStoreChange(changed);
 };
 
 const noop = () => {};

@@ -45,7 +45,24 @@
 //   plans      EXPLAIN ANALYZE of each app statement under the tenant role.
 //   ingest     one document written through writeDocumentsToPgvectorIndex in a
 //              tenant transaction while the HNSW and GIN indexes are live
-//              (embedding call excluded).
+//              (embedding call excluded), with and without migration 030's
+//              statistics triggers; then --concurrent-writers writers of the
+//              same scope at once (--concurrent-writer-docs documents each),
+//              with and without them: documents per second.
+//   sparse     scoring comparison on the same data and seeded queries, as the
+//              tenant: ts_rank_cd and BM25, each exhaustive and with
+//              common-term pruning at each --prune-df-fractions value, over
+//              the document sets of --sparse-doc-sets ("all" = the whole
+//              table), for three query slices: the mixed queries of the main
+//              series, one common word alone, and three common words
+//              (--common-queries each); p50/p95, the candidate path each
+//              pruned search took, and how many pruned top-K lists differ
+//              from the same scoring's exhaustive ones.
+//              --sparse-length null clears sparse_length after the load, as
+//              on an archive upgraded without sparse-length-backfill.mjs.
+//   delete     one statement deleting --delete-probe-docs freshly loaded
+//              documents (their chunks by cascade, as a clear does), with the
+//              statistics triggers on and off.
 //
 // Sizes run in ascending order and stop when the next one is projected (from
 // the previous step's measured throughput) to overrun --time-budget-minutes;
@@ -67,6 +84,9 @@
 //     [--load-concurrency 8] [--batch-docs 20] [--parallel-maintenance-workers 8]
 //     [--maintenance-work-mem-cap-mb 8192] [--latest-name latest-pgvector-scale]
 //     [--iterative-scan relaxed_order|strict_order|off]
+//     [--sparse-doc-sets 1000,all] [--prune-df-fractions 0.1] [--common-queries 30]
+//     [--common-term-cap 2000|off] [--sparse-length set|null]
+//     [--concurrent-writers 1,4] [--concurrent-writer-docs 4] [--delete-probe-docs 100]
 //     [--keep-data]   leave the last size loaded; with the wrapper's KEEP_CLUSTER=1
 //                     the cluster stays up for EXPLAIN work afterwards
 
@@ -75,6 +95,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { comparePrunedToExhaustive, summarizePruning } from "./run-sparse-scoring-eval.mjs";
+import { SPARSE_CANDIDATE_PATHS, readPgvectorSparseStatistics } from "../rag/vector-store-pgvector-sparse.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -135,6 +158,9 @@ const NUMERIC_OPTIONS = Object.freeze({
   "--batch-docs": "batchDocs",
   "--chunks-per-doc": "chunksPerDoc",
   "--clusters": "clusters",
+  "--common-queries": "commonQueries",
+  "--concurrent-writer-docs": "concurrentWriterDocs",
+  "--delete-probe-docs": "deleteProbeDocs",
   "--dimensions": "dimensions",
   "--doc-set-size": "docSetSize",
   "--ingest-probes": "ingestProbes",
@@ -151,15 +177,24 @@ const NUMERIC_OPTIONS = Object.freeze({
   "--words-per-chunk": "wordsPerChunk",
 });
 // A captured app search statement: it selects chunk ids and either carries its
-// own LIMIT or hands the limit to the owner-run full-text rank function that
-// tenant sparse searches go through (migration 014).
+// own LIMIT or hands the limit to an owner-run rank function: ts_rank_cd for
+// tenant sparse searches (migration 014) or the sparse search function
+// (migration 030: BM25, and pruned searches of either scoring).
 export const isSearchStatement = (sql) =>
-  /chunk_id/.test(sql) && (/\bLIMIT\b/.test(sql) || /_sparse_rank\(/.test(sql));
+  /chunk_id/.test(sql) && (/\bLIMIT\b/.test(sql) || /_sparse_rank\(/.test(sql) || /_sparse_search\(/.test(sql));
 
 // The app's RAG_PGVECTOR_ITERATIVE_SCAN values; `off` measures the plain statement.
 const ITERATIVE_SCAN_CHOICES = Object.freeze(["relaxed_order", "strict_order", "off"]);
 // Options that may legitimately be zero.
-const ZERO_ALLOWED = new Set(["ingestProbes", "warmup", "recallQueries", "noise"]);
+const ZERO_ALLOWED = new Set([
+  "ingestProbes",
+  "warmup",
+  "recallQueries",
+  "noise",
+  "commonQueries",
+  "concurrentWriterDocs",
+  "deleteProbeDocs",
+]);
 
 export const DEFAULT_OPTIONS = Object.freeze({
   batchDocs: 20,
@@ -176,15 +211,50 @@ export const DEFAULT_OPTIONS = Object.freeze({
   maintenanceWorkMemCapMb: 8192,
   noise: 1,
   parallelMaintenanceWorkers: 8,
+  // Queries per all-common slice (one common word; three common words).
+  commonQueries: 30,
+  // RAG_SPARSE_COMMON_TERM_CAP for the pruned arms; undefined = the configured one.
+  commonTermCap: undefined,
+  concurrentWriterDocs: 4,
+  concurrentWriters: [1, 4],
+  // Documents one delete statement removes (their chunks by cascade, as a
+  // clear does), with the statistics triggers on and off.
+  deleteProbeDocs: 100,
+  // One pruned arm per scoring and fraction (RAG_SPARSE_PRUNE_DF_FRACTION).
+  pruneDfFractions: [0.1],
   queries: 100,
   recallQueries: 20,
   seed: 20260926,
   sizes: [10000, 100000, 500000, 1000000],
+  // Document sets of the sparse-scoring comparison ("all" = every document).
+  sparseDocSets: [1000, "all"],
+  // "null": clear sparse_length after the load (an upgraded, unbackfilled archive).
+  sparseLength: "set",
   timeBudgetMinutes: 18,
   topK: 10,
   warmup: 10,
   wordsPerChunk: 120,
 });
+
+/** "1000,all" -> [1000, "all"]; an empty value turns the sparse-scoring comparison off. */
+export const parseSparseDocSets = (value) =>
+  [
+    ...new Set(
+      String(value ?? "")
+        .split(",")
+        .map((part) => part.trim().toLowerCase())
+        .filter(Boolean)
+        .map((part) => {
+          if (part === "all") {
+            return "all";
+          }
+
+          const size = parseSize(part);
+
+          return size;
+        })
+    ),
+  ];
 
 export const parseArgs = (argv) => {
   const options = { ...DEFAULT_OPTIONS, sizes: [...DEFAULT_OPTIONS.sizes] };
@@ -212,6 +282,30 @@ export const parseArgs = (argv) => {
       options.databaseUrl = String(value).trim();
     } else if (flag === "--sizes") {
       options.sizes = parseSizes(value);
+    } else if (flag === "--prune-df-fractions") {
+      options.pruneDfFractions = [
+        ...new Set(String(value).split(",").map((part) => Number(part.trim())).filter((fraction) => fraction > 0 && fraction < 1)),
+      ];
+    } else if (flag === "--sparse-doc-sets") {
+      options.sparseDocSets = parseSparseDocSets(value);
+    } else if (flag === "--concurrent-writers") {
+      options.concurrentWriters = [
+        ...new Set(String(value).split(",").map((part) => Math.floor(Number(part.trim()))).filter((count) => count > 0)),
+      ];
+    } else if (flag === "--common-term-cap") {
+      const cap = String(value).trim().toLowerCase();
+
+      options.commonTermCap = cap === "off" ? null : Math.floor(Number(cap));
+
+      if (options.commonTermCap !== null && !(options.commonTermCap > 0)) {
+        throw new Error("--common-term-cap must be a positive number or off.");
+      }
+    } else if (flag === "--sparse-length") {
+      options.sparseLength = String(value).trim().toLowerCase();
+
+      if (!["set", "null"].includes(options.sparseLength)) {
+        throw new Error("--sparse-length must be set or null.");
+      }
     } else if (flag === "--latest-name") {
       options.latestName = String(value).trim();
     } else if (flag === "--iterative-scan") {
@@ -250,6 +344,10 @@ export const parseArgs = (argv) => {
   }
 
   options.recallQueries = Math.min(options.recallQueries, options.queries);
+
+  if (options.pruneDfFractions.length === 0) {
+    throw new Error("--prune-df-fractions needs at least one fraction between 0 and 1 (exclusive).");
+  }
 
   return options;
 };
@@ -523,6 +621,54 @@ export const buildQuerySet = ({ corpus, count, docCount, docSetSize, seed }) => 
   });
 };
 
+// The most frequent general words: pickGeneralWord draws index
+// floor(5000 * r^2), so each of the first 30 is in roughly 10-70% of the
+// chunks -- above the default pruning fraction.
+export const COMMON_WORD_COUNT = 30;
+
+/**
+ * Query texts whose every word is common, for the pruning's all-common path:
+ * one common word alone, and three distinct common words, `count` of each.
+ */
+export const buildCommonTermQueryTexts = ({ corpus, count, seed, commonWords = COMMON_WORD_COUNT }) => {
+  const random = createSeededRandom(deriveSeed(seed, 6, count));
+  const pool = corpus.vocabulary.slice(0, Math.min(commonWords, corpus.vocabulary.length));
+  const pick = () => pool[Math.floor(random() * pool.length)];
+
+  return {
+    allCommon: Array.from({ length: count }, () => {
+      const words = new Set();
+
+      while (words.size < Math.min(3, pool.length)) {
+        words.add(pick());
+      }
+
+      return [...words].join(" ");
+    }),
+    single: Array.from({ length: count }, () => pick()),
+  };
+};
+
+/** Every scoring exhaustive, then pruned at each fraction; a pruned arm names its exhaustive one. */
+export const buildSparseScoringArms = (fractions) =>
+  ["ts_rank_cd", "bm25"].flatMap((scoring) => [
+    { exhaustiveId: null, id: scoring, pruneDfFraction: null, scoring },
+    ...fractions.map((fraction) => ({
+      exhaustiveId: scoring,
+      id: `${scoring}_pruned_${fraction}`,
+      pruneDfFraction: fraction,
+      scoring,
+    })),
+  ]);
+
+/** How many searches took each candidate path ("none": no row came back). */
+export const countCandidatePaths = (paths) =>
+  Object.fromEntries(
+    [...SPARSE_CANDIDATE_PATHS, "plain", "none"]
+      .map((path) => [path, paths.filter((entry) => entry === path).length])
+      .filter(([, count]) => count > 0)
+  );
+
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
@@ -741,6 +887,94 @@ const SERIES_LABELS = Object.freeze({
   sparse_docset: "sparse FTS, document set (searchPgvectorSparseDocuments)",
 });
 
+const SPARSE_SCORING_LABELS = Object.freeze({
+  bm25: "BM25",
+  ts_rank_cd: "ts_rank_cd (cover density, not BM25)",
+});
+
+const SPARSE_SLICE_LABELS = Object.freeze({
+  allCommon: "three common words (every term common)",
+  mixed: "mixed: three topic words and one general word",
+  single: "one common word",
+});
+
+const describeSparseArm = (arm) =>
+  `${SPARSE_SCORING_LABELS[arm.scoring] ?? arm.scoring}, ${
+    arm.pruneDfFraction === null ? "exhaustive" : `pruning terms in > ${arm.pruneDfFraction} of chunks`
+  }`;
+
+const formatPaths = (paths) =>
+  Object.entries(paths ?? {})
+    .map(([path, count]) => `${path} ${count}`)
+    .join(", ") || "n/a";
+
+/** The sparse-scoring comparison of one size step, as Markdown lines. */
+export const formatSparseScoring = (step) => {
+  const comparison = step.sparseScoring;
+  const lines = [];
+
+  if (comparison) {
+    lines.push(
+      `Sparse scoring (searchPgvectorSparseDocuments as the tenant, RLS on, the scope holding ${formatCount(comparison.scopeChunks)} chunks, sparse_length ${comparison.sparseLength === "null" ? "NULL on every loaded row (an upgraded archive before the backfill)" : "set"}; a pruned arm generates candidates from the query terms held by at most its fraction of them, a query of common terms only takes at most ${comparison.commonTermCap ?? "all"} candidates per pass; "vs exhaustive" compares a pruned arm's top-K with the same scoring's exhaustive one; in the mixed slice, common-term queries are those the first pruned BM25 arm did not score exhaustively):`,
+      ""
+    );
+
+    for (const [label, set] of Object.entries(comparison.sets)) {
+      lines.push(
+        `Document set: ${label === "all" ? `all ${formatCount(set.documents)}` : formatCount(set.documents)} documents.`,
+        "",
+        "| Queries | Scoring | p50 ms | p95 ms | mean ms | common-term queries p50 / p95 ms | candidate paths | vs exhaustive: lists differing / sets differing, recall@K mean (min) |",
+        "|---|---|---|---|---|---|---|---|"
+      );
+
+      for (const [sliceId, slice] of Object.entries(set.slices)) {
+        for (const arm of comparison.arms) {
+          const entry = slice.arms[arm.id];
+          const versus = entry.versusExhaustive;
+
+          lines.push(
+            `| ${SPARSE_SLICE_LABELS[sliceId] ?? sliceId} (${slice.queries}${sliceId === "mixed" ? `, ${slice.commonTermQueries} common-term` : ""}) | ${describeSparseArm(arm)} | ${entry.latency.all.p50Ms} | ${entry.latency.all.p95Ms} | ${entry.latency.all.meanMs} | ${sliceId === "mixed" ? `${entry.latency.commonTerm.p50Ms ?? "n/a"} / ${entry.latency.commonTerm.p95Ms ?? "n/a"}` : "all"} | ${formatPaths(entry.paths)} | ${versus ? `${versus.queriesWithDifferentOrder} / ${versus.queriesWithDifferentSet}, ${versus.meanRecallAtK} (${versus.minRecallAtK})` : "reference"} |`
+          );
+        }
+      }
+
+      lines.push("");
+    }
+  }
+
+  if (step.ingestProbe && step.ingestProbeWithoutBm25Triggers) {
+    lines.push(
+      `Write cost of the sparse statistics (after one untimed write, the two modes alternated ABBA, ${step.ingestProbe.documents} documents each): with migration 030's triggers p50 ${step.ingestProbe.p50Ms} ms (mean ${step.ingestProbe.meanMs}) per document, with them disabled p50 ${step.ingestProbeWithoutBm25Triggers.p50Ms} ms (mean ${step.ingestProbeWithoutBm25Triggers.meanMs}).`,
+      ""
+    );
+  }
+
+  if (step.deleteProbe) {
+    const probe = step.deleteProbe;
+
+    lines.push(
+      `Delete cost (one DELETE of ${probe.documents} documents' registry rows, ${formatCount(probe.chunks)} chunks by cascade, as the owner, sparse_length ${probe.sparseLength === "null" ? "NULL" : "set"}): with the statistics triggers ${probe.withTriggers.ms} ms (${probe.withTriggers.msPerThousandChunks} ms per 1,000 chunks), with them disabled ${probe.withoutTriggers.ms} ms (${probe.withoutTriggers.msPerThousandChunks} ms per 1,000 chunks).`,
+      ""
+    );
+  }
+
+  if (step.concurrentWriters?.length) {
+    lines.push(
+      "Concurrent writers of one scope (each writes its documents one tenant transaction at a time through writeDocumentsToPgvectorIndex, as ingest workers do and as the index-version builder's documents in flight do; two runs per mode, ABBA):",
+      "",
+      "| Writers | Documents per run | with triggers: documents/s (runs, s) | triggers disabled: documents/s (runs, s) | ratio |",
+      "|---|---|---|---|---|",
+      ...step.concurrentWriters.map(
+        (entry) =>
+          `| ${entry.writers} | ${entry.documentsPerRun} | ${entry.withTriggers.documentsPerSecond} (${entry.withTriggers.runsSeconds.join(", ")}) | ${entry.withoutTriggers.documentsPerSecond} (${entry.withoutTriggers.runsSeconds.join(", ")}) | ${entry.throughputRatio} |`
+      ),
+      ""
+    );
+  }
+
+  return lines;
+};
+
 export const formatMarkdown = (report) => {
   const { config } = report;
   const lines = [
@@ -821,7 +1055,8 @@ export const formatMarkdown = (report) => {
             config.serverSettings?.fsync === "off" ? "; fsync off on this cluster, so a lower bound for a durable server" : ""
           }).`
         : "Ingest probe not run.",
-      ""
+      "",
+      ...formatSparseScoring(step)
     );
   }
 
@@ -860,6 +1095,12 @@ export const formatMarkdown = (report) => {
 // Env the vector store reads, cleared so the app defaults apply and nothing
 // leaks in from the calling shell.
 const APP_ENV_TO_CLEAR = Object.freeze([
+  "RAG_BM25_B",
+  "RAG_BM25_K1",
+  "RAG_SPARSE_COMMON_TERM_CAP",
+  "RAG_SPARSE_PRUNE_DF_FRACTION",
+  "RAG_EMBEDDING_QUERY_ADAPTER",
+  "RAG_SPARSE_SCORING",
   "DOCUMENTS_POSTGRES_TABLE",
   "DOCUMENT_CHUNKS_POSTGRES_TABLE",
   "LONG_MEMORY_DATABASE_URL",
@@ -1024,7 +1265,13 @@ const main = async () => {
       },
       filteredRecallQueries: recallSampleSize({ options, series: "dense_docset", timedQueries: options.queries }),
       ginIndexDefinition: indexDefinitions[ginIndexName],
+      commonQueries: options.commonQueries,
+      concurrentWriterDocs: options.concurrentWriterDocs,
+      concurrentWriters: options.concurrentWriters,
+      deleteProbeDocs: options.deleteProbeDocs,
       ingestProbes: options.ingestProbes,
+      pruneDfFractions: options.pruneDfFractions,
+      sparseLength: options.sparseLength,
       migrationsApplied: migrationResult.appliedMigrations.length,
       noise: options.noise,
       pgvectorVersion: settings.pgvector_version,
@@ -1457,69 +1704,375 @@ const main = async () => {
 
     // One document written the way ingestDocumentPages writes it (document row
     // plus chunks in one tenant transaction) with every index live.
-    const ingestProbe = async ({ sizeLabel }) => {
-      if (options.ingestProbes === 0) {
-        return null;
+    const writeBenchDocument = async ({ docId, docIndex }) => {
+      const template = generateDocumentChunks({ chunksPerDoc: options.chunksPerDoc, corpus, docIndex });
+      const preparedDocuments = template.map((chunk) => {
+        const metadata = {
+          chunkIndex: chunk.chunkIndex,
+          docId,
+          fileName: `${docId}.pdf`,
+          filePath: `/documents/${docId}/file`,
+          pageNumber: chunk.pageNumber,
+          publicFilePath: `/documents/${docId}/file`,
+          sectionHeading: null,
+        };
+
+        return {
+          id: `${docId}:${chunk.chunkIndex}`,
+          metadata,
+          pageContent: chunk.content,
+          searchText: pgvector.buildSearchText({ metadata, pageContent: chunk.content }),
+          vector: quantizeVector(chunk.vector),
+        };
+      });
+
+      const { ms } = await timeIt(() =>
+        asTenant(() =>
+          postgres.withPostgresTransaction(async (client) => {
+            await client.query(
+              `INSERT INTO ${documentsTable}
+                 (doc_id, file_name, file_size, file_bytes, chunk_count, page_count, owner_user_id, workspace_id)
+               VALUES ($1, $2, 0, '\\x'::bytea, $3, $4, $5, $6)`,
+              [docId, `${docId}.pdf`, options.chunksPerDoc, Math.ceil(options.chunksPerDoc / 3), BENCH_SCOPE.userId, BENCH_SCOPE.workspaceId]
+            );
+            await pgvector.writeDocumentsToPgvectorIndex({ accessScope: BENCH_SCOPE, client, preparedDocuments });
+          })
+        )
+      );
+
+      return ms;
+    };
+
+    // Documents written with the statistics triggers disabled never entered
+    // the statistics: they are deleted with the triggers off too, the others
+    // with them on, so the statistics stay exact.
+    const deleteBenchDocuments = async ({ tracked, untracked }) => {
+      if (tracked.length > 0) {
+        await admin.query(`DELETE FROM ${documentsTable} WHERE doc_id = ANY($1::text[])`, [tracked]);
       }
 
-      const latencies = [];
-      const probeDocIds = [];
+      if (untracked.length > 0) {
+        await admin.query(`ALTER TABLE ${chunksTable} DISABLE TRIGGER USER`);
+
+        try {
+          await admin.query(`DELETE FROM ${documentsTable} WHERE doc_id = ANY($1::text[])`, [untracked]);
+        } finally {
+          await admin.query(`ALTER TABLE ${chunksTable} ENABLE TRIGGER USER`);
+        }
+      }
+    };
+
+    // With and without migration 030's statistics triggers (disabled as the
+    // owner for the "without" writes: the write cost before them). One
+    // untimed write first -- the first write after an index build pays for
+    // work the later ones do not -- then the two modes in ABBA order, so
+    // neither mode always runs first.
+    const summarizeProbe = (latencies, bm25Triggers) => ({
+      bm25Triggers,
+      chunksPerDocument: options.chunksPerDoc,
+      documents: latencies.length,
+      latenciesMs: latencies.map((value) => round(value, 1)),
+      maxMs: round(Math.max(...latencies), 1),
+      meanMs: round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length, 1),
+      p50Ms: round(percentile(latencies, 0.5), 1),
+    });
+
+    const ingestProbes = async ({ sizeLabel }) => {
+      if (options.ingestProbes === 0) {
+        return { withBm25: null, withoutBm25: null };
+      }
+
+      const latencies = { with: [], without: [] };
+      const documents = { tracked: [], untracked: [] };
 
       try {
-        for (let probe = 0; probe < options.ingestProbes; probe += 1) {
-          const docId = `bench-ingest-${sizeLabel}-${probe}`;
-          const template = generateDocumentChunks({
-            chunksPerDoc: options.chunksPerDoc,
-            corpus,
-            docIndex: 9_000_000 + probe,
-          });
-          const preparedDocuments = template.map((chunk) => {
-            const metadata = {
-              chunkIndex: chunk.chunkIndex,
-              docId,
-              fileName: `${docId}.pdf`,
-              filePath: `/documents/${docId}/file`,
-              pageNumber: chunk.pageNumber,
-              publicFilePath: `/documents/${docId}/file`,
-              sectionHeading: null,
-            };
+        documents.tracked.push(`bench-ingest-${sizeLabel}-0`);
+        await writeBenchDocument({ docId: `bench-ingest-${sizeLabel}-0`, docIndex: 9_000_000 });
 
-            return {
-              id: `${docId}:${chunk.chunkIndex}`,
-              metadata,
-              pageContent: chunk.content,
-              searchText: pgvector.buildSearchText({ metadata, pageContent: chunk.content }),
-              vector: quantizeVector(chunk.vector),
-            };
-          });
+        for (let index = 0; index < 2 * options.ingestProbes; index += 1) {
+          const withTriggers = [0, 3].includes(index % 4);
+          const docId = `bench-ingest-${sizeLabel}-${index + 1}`;
 
-          probeDocIds.push(docId);
+          documents[withTriggers ? "tracked" : "untracked"].push(docId);
 
-          const { ms } = await timeIt(() =>
-            asTenant(() =>
-              postgres.withPostgresTransaction(async (client) => {
-                await client.query(
-                  `INSERT INTO ${documentsTable}
-                     (doc_id, file_name, file_size, file_bytes, chunk_count, page_count, owner_user_id, workspace_id)
-                   VALUES ($1, $2, 0, '\\x'::bytea, $3, $4, $5, $6)`,
-                  [docId, `${docId}.pdf`, options.chunksPerDoc, Math.ceil(options.chunksPerDoc / 3), BENCH_SCOPE.userId, BENCH_SCOPE.workspaceId]
-                );
-                await pgvector.writeDocumentsToPgvectorIndex({ accessScope: BENCH_SCOPE, client, preparedDocuments });
-              })
-            )
-          );
+          if (!withTriggers) {
+            await admin.query(`ALTER TABLE ${chunksTable} DISABLE TRIGGER USER`);
+          }
 
-          latencies.push(ms);
+          try {
+            latencies[withTriggers ? "with" : "without"].push(
+              await writeBenchDocument({ docId, docIndex: 9_000_000 + index + 1 })
+            );
+          } finally {
+            if (!withTriggers) {
+              await admin.query(`ALTER TABLE ${chunksTable} ENABLE TRIGGER USER`);
+            }
+          }
         }
       } finally {
-        await admin.query(`DELETE FROM ${documentsTable} WHERE doc_id = ANY($1::text[])`, [probeDocIds]);
+        await deleteBenchDocuments(documents);
       }
 
       return {
-        chunksPerDocument: options.chunksPerDoc,
-        documents: latencies.length,
-        maxMs: round(Math.max(...latencies), 1),
-        p50Ms: round(percentile(latencies, 0.5), 1),
+        withBm25: summarizeProbe(latencies.with, true),
+        withoutBm25: summarizeProbe(latencies.without, false),
+      };
+    };
+
+    // --concurrent-writers writers of the bench scope at once, each writing
+    // --concurrent-writer-docs documents one transaction after another, with
+    // the statistics triggers on and off (ABBA): the throughput the
+    // statistics cost same-scope writers, ingest workers and a version
+    // build's documents in flight alike.
+    const concurrentWriterProbes = async ({ sizeLabel }) => {
+      if (options.concurrentWriterDocs === 0 || options.concurrentWriters.length === 0) {
+        return [];
+      }
+
+      const results = [];
+      const documents = { tracked: [], untracked: [] };
+      let serial = 0;
+
+      try {
+        for (const writers of options.concurrentWriters) {
+          const runs = { with: [], without: [] };
+
+          for (const withTriggers of [true, false, false, true]) {
+            if (!withTriggers) {
+              await admin.query(`ALTER TABLE ${chunksTable} DISABLE TRIGGER USER`);
+            }
+
+            try {
+              const { ms } = await timeIt(() =>
+                Promise.all(
+                  Array.from({ length: writers }, async () => {
+                    for (let document = 0; document < options.concurrentWriterDocs; document += 1) {
+                      serial += 1;
+
+                      const docId = `bench-concurrent-${sizeLabel}-${serial}`;
+
+                      documents[withTriggers ? "tracked" : "untracked"].push(docId);
+                      await writeBenchDocument({ docId, docIndex: 8_000_000 + serial });
+                    }
+                  })
+                )
+              );
+
+              runs[withTriggers ? "with" : "without"].push(ms);
+            } finally {
+              if (!withTriggers) {
+                await admin.query(`ALTER TABLE ${chunksTable} ENABLE TRIGGER USER`);
+              }
+            }
+          }
+
+          const documentsPerRun = writers * options.concurrentWriterDocs;
+          const summarize = (values) => ({
+            documentsPerSecond: round((documentsPerRun * values.length) / (values.reduce((sum, value) => sum + value, 0) / 1000), 2),
+            runsSeconds: values.map((value) => round(value / 1000, 2)),
+          });
+          const withTriggers = summarize(runs.with);
+          const withoutTriggers = summarize(runs.without);
+
+          results.push({
+            documentsPerRun,
+            throughputRatio: round(withTriggers.documentsPerSecond / withoutTriggers.documentsPerSecond, 3),
+            withTriggers,
+            withoutTriggers,
+            writers,
+          });
+          console.log(
+            `[${sizeLabel}] ${writers} concurrent writers: ${withTriggers.documentsPerSecond} documents/s with the statistics triggers, ${withoutTriggers.documentsPerSecond} without`
+          );
+        }
+      } finally {
+        await deleteBenchDocuments(documents);
+      }
+
+      return results;
+    };
+
+    // One DELETE of --delete-probe-docs documents loaded for it (their chunks
+    // go by cascade, as in a clear), with the statistics triggers on and off:
+    // the log design expands every deleted chunk's tsvector (and counts its
+    // positions where sparse_length is NULL) to log what the delete takes
+    // away. Documents loaded with the triggers off are deleted with them off.
+    const deleteProbe = async () => {
+      if (options.deleteProbeDocs === 0) {
+        return null;
+      }
+
+      const measured = {};
+      let chunks = 0;
+
+      for (const [mode, withTriggers, first] of [
+        ["withTriggers", true, 7_000_000],
+        ["withoutTriggers", false, 7_500_000],
+      ]) {
+        const docIds = Array.from({ length: options.deleteProbeDocs }, (_, offset) => docIdFor(first + offset));
+
+        if (!withTriggers) {
+          await admin.query(`ALTER TABLE ${chunksTable} DISABLE TRIGGER USER`);
+        }
+
+        try {
+          await insertDocuments(first, first + options.deleteProbeDocs);
+
+          for (let start = first; start < first + options.deleteProbeDocs; start += options.batchDocs) {
+            const batch = [];
+
+            for (let docIndex = start; docIndex < Math.min(first + options.deleteProbeDocs, start + options.batchDocs); docIndex += 1) {
+              batch.push(...generateDocumentChunks({ chunksPerDoc: options.chunksPerDoc, corpus, docIndex }));
+            }
+
+            await insertChunkBatch(batch);
+          }
+
+          if (options.sparseLength === "null") {
+            await admin.query(`ALTER TABLE ${chunksTable} DISABLE TRIGGER USER`);
+            await admin.query(`UPDATE ${chunksTable} SET sparse_length = NULL WHERE doc_id = ANY($1::text[])`, [docIds]);
+
+            if (withTriggers) {
+              await admin.query(`ALTER TABLE ${chunksTable} ENABLE TRIGGER USER`);
+            }
+          }
+
+          const { ms, value } = await timeIt(() =>
+            admin.query(`DELETE FROM ${documentsTable} WHERE doc_id = ANY($1::text[])`, [docIds])
+          );
+
+          chunks = value.rowCount * options.chunksPerDoc;
+          measured[mode] = {
+            ms: round(ms, 1),
+            msPerThousandChunks: round((ms * 1000) / Math.max(1, chunks), 1),
+          };
+        } finally {
+          if (!withTriggers || options.sparseLength === "null") {
+            await admin.query(`ALTER TABLE ${chunksTable} ENABLE TRIGGER USER`);
+          }
+        }
+      }
+
+      return { chunks, documents: options.deleteProbeDocs, sparseLength: options.sparseLength, ...measured };
+    };
+
+    // ts_rank_cd and Okapi BM25, each exhaustive and with common-term pruning,
+    // on the same data and the same seeded queries, as the tenant (RLS on).
+    // Three query slices over the same document sets: the mixed queries of
+    // the main series, one common word, three common words. Per query: one
+    // untimed read of its document set, then every arm back to back.
+    const SPARSE_SCORING_ARMS = buildSparseScoringArms(options.pruneDfFractions);
+
+    const measureSparseScoring = async ({ docCount }) => {
+      const scopeChunks =
+        (
+          await readPgvectorSparseStatistics({
+            chunkTable: chunksTable,
+            lexemes: [],
+            query: (sql, values) => admin.query(sql, values),
+            scope: BENCH_SCOPE,
+          })
+        ).scopes[0]?.chunkCount ?? 0;
+      const measured = {};
+      const firstPrunedBm25 = SPARSE_SCORING_ARMS.find((arm) => arm.scoring === "bm25" && arm.pruneDfFraction !== null);
+
+      for (const setSize of options.sparseDocSets) {
+        const size = setSize === "all" ? docCount : Math.min(setSize, docCount);
+        const mixed = buildQuerySet({
+          corpus,
+          count: options.warmup + options.queries,
+          docCount,
+          docSetSize: size,
+          seed: options.seed,
+        });
+        const timed = mixed.slice(options.warmup);
+        const commonTexts = buildCommonTermQueryTexts({ corpus, count: options.commonQueries, seed: options.seed });
+        const slices = {
+          mixed: timed,
+          single: commonTexts.single.map((text, index) => ({ ...timed[index % timed.length], text })),
+          allCommon: commonTexts.allCommon.map((text, index) => ({ ...timed[index % timed.length], text })),
+        };
+        const search = (query, arm) =>
+          asTenant(() =>
+            pgvector.searchPgvectorSparseDocuments({
+              commonTermCap: options.commonTermCap,
+              docIds: query.docSet,
+              pruneDfFraction: arm.pruneDfFraction,
+              queryText: query.text,
+              scoring: arm.scoring,
+              topK,
+            })
+          );
+
+        for (const query of mixed.slice(0, options.warmup)) {
+          for (const arm of SPARSE_SCORING_ARMS) {
+            await search(query, arm);
+          }
+        }
+
+        const sliceResults = {};
+
+        for (const [sliceId, queries] of Object.entries(slices)) {
+          if (queries.length === 0) {
+            continue;
+          }
+
+          const perArm = Object.fromEntries(SPARSE_SCORING_ARMS.map((arm) => [arm.id, { ids: [], latencies: [], paths: [] }]));
+
+          for (const query of queries) {
+            await search(query, SPARSE_SCORING_ARMS[0]);
+
+            for (const arm of SPARSE_SCORING_ARMS) {
+              const { ms, value } = await timeIt(() => search(query, arm));
+
+              perArm[arm.id].latencies.push(ms);
+              perArm[arm.id].ids.push(value.map((result) => String(result.document.id)));
+              perArm[arm.id].paths.push(value.length === 0 ? "none" : value[0].sparseCandidates ?? "plain");
+            }
+          }
+
+          const commonTerm = firstPrunedBm25
+            ? perArm[firstPrunedBm25.id].paths.map((path) => path !== "exhaustive" && path !== "none")
+            : queries.map(() => false);
+
+          sliceResults[sliceId] = {
+            arms: Object.fromEntries(
+              SPARSE_SCORING_ARMS.map((arm) => {
+                const entry = perArm[arm.id];
+
+                return [
+                  arm.id,
+                  {
+                    latency: {
+                      all: summarizeLatencies(entry.latencies),
+                      commonTerm: summarizeLatencies(entry.latencies.filter((_, index) => commonTerm[index])),
+                      otherQueries: summarizeLatencies(entry.latencies.filter((_, index) => !commonTerm[index])),
+                    },
+                    paths: countCandidatePaths(entry.paths),
+                    versusExhaustive: arm.exhaustiveId
+                      ? summarizePruning(
+                          entry.ids.map((ids, index) => comparePrunedToExhaustive(ids, perArm[arm.exhaustiveId].ids[index]))
+                        )
+                      : null,
+                  },
+                ];
+              })
+            ),
+            commonTermQueries: commonTerm.filter(Boolean).length,
+            queries: queries.length,
+          };
+        }
+
+        measured[setSize === "all" ? "all" : String(size)] = { documents: size, slices: sliceResults };
+        console.log(`[sparse] document set ${setSize}: measured`);
+      }
+
+      return {
+        arms: SPARSE_SCORING_ARMS,
+        commonTermCap: options.commonTermCap === undefined ? config.getSparseCommonTermCap() : options.commonTermCap,
+        scopeChunks,
+        sets: measured,
+        sparseLength: options.sparseLength,
       };
     };
 
@@ -1566,6 +2119,21 @@ const main = async () => {
       loadedChunks = chunkCount;
       cumulativeLoadMs += load.ms;
 
+      // An archive upgraded without sparse-length-backfill.mjs: the loaded
+      // rows keep no length (the statistics are unchanged, since the NULL
+      // stands for the same count, so the triggers stay out of it).
+      if (options.sparseLength === "null") {
+        await admin.query(`ALTER TABLE ${chunksTable} DISABLE TRIGGER USER`);
+
+        try {
+          await admin.query(`UPDATE ${chunksTable} SET sparse_length = NULL WHERE sparse_length IS NOT NULL`);
+        } finally {
+          await admin.query(`ALTER TABLE ${chunksTable} ENABLE TRIGGER USER`);
+        }
+
+        await admin.query(`VACUUM ${chunksTable}`);
+      }
+
       const analyze = await timeIt(() => admin.query(`ANALYZE ${documentsTable}, ${chunksTable}`));
       console.log(`[${chunkCount}] loaded in ${round(load.ms / 1000, 1)} s; building GIN`);
       const ginMaintenanceWorkMemMb = Math.min(options.maintenanceWorkMemCapMb, GIN_MAINTENANCE_WORK_MEM_MB);
@@ -1593,7 +2161,12 @@ const main = async () => {
       const verify = await timeIt(() => pgvector.ensurePgvectorSchema({ force: true }));
 
       const measured = await measure({ docCount });
-      const probe = await ingestProbe({ sizeLabel: String(chunkCount) });
+      const probes = await ingestProbes({ sizeLabel: String(chunkCount) });
+      const probe = probes.withBm25;
+      const probeWithoutBm25 = probes.withoutBm25;
+      const concurrentWriters = await concurrentWriterProbes({ sizeLabel: String(chunkCount) });
+      const sparseScoring = options.sparseDocSets.length > 0 ? await measureSparseScoring({ docCount }) : null;
+      const deleteCost = await deleteProbe();
       const measureMs = performance.now() - measureStartedAt;
 
       steps.push({
@@ -1613,7 +2186,11 @@ const main = async () => {
           minParallelTableScanSize: BUILD_MIN_PARALLEL_TABLE_SCAN_SIZE,
           notices: [...new Set([...gin.notices, ...hnsw.notices])],
         },
+        concurrentWriters,
+        deleteProbe: deleteCost,
         ingestProbe: probe,
+        ingestProbeWithoutBm25Triggers: probeWithoutBm25,
+        sparseScoring,
         latency: measured.latency,
         load: {
           analyzeMs: round(analyze.ms, 0),

@@ -283,8 +283,12 @@ export const clearLocalVectorIndex = async () => {
   });
 };
 
+// `scoreVector` (the query adapter, rag/query-adapter.js): rank by
+// queryVector but report the cosine with scoreVector as vectorScore, and the
+// ranking cosine as rankVectorScore. Without it nothing changes.
 export const searchLocalDocuments = async ({
   queryVector,
+  scoreVector = null,
   queryText = "",
   docIds,
   topK,
@@ -303,11 +307,20 @@ export const searchLocalDocuments = async ({
     .map((entry) => {
       // A vector from another model or task prefix lives in another space:
       // its cosine with this query means nothing, so it gets no dense score.
-      const vectorScore = isEmbeddingIdentityCurrent(entry.embeddingIdentity)
+      const current = isEmbeddingIdentityCurrent(entry.embeddingIdentity);
+      const vectorScore = current
         ? cosineSimilarity(queryVector, entry.vector)
         : 0;
       const keywordScore = buildKeywordScore(queryTerms, entry);
-      return toSearchResult(entry, vectorScore, keywordScore, scoringMode);
+      const result = toSearchResult(entry, vectorScore, keywordScore, scoringMode);
+
+      return scoreVector
+        ? {
+            ...result,
+            rankVectorScore: vectorScore,
+            vectorScore: current ? cosineSimilarity(scoreVector, entry.vector) : 0,
+          }
+        : result;
     })
     .sort(
       (left, right) =>

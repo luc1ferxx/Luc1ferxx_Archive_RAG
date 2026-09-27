@@ -24,6 +24,7 @@ import {
   getLongMemoryPostgresTable,
   getPostgresRowLevelSecurityMode,
   getPostgresTenantRole,
+  getRetrievalRoute,
   getQdrantCollection,
   getQdrantUrl,
   getSessionMemoryPostgresTable,
@@ -37,8 +38,10 @@ import {
   isHybridRetrievalEnabled,
   isStartupHealthStrict,
 } from "./rag/config.js";
-import { describeVectorStoreRuntime } from "./rag/vector-store.js";
+import { describeVectorStoreRuntime, supportsDenseScoreVector } from "./rag/vector-store.js";
+import { describeQueryAdapterHealth } from "./rag/query-adapter.js";
 import {
+  describePgvectorSparseRowLevelSecurityTargets,
   describePgvectorStatus,
   getActivePgvectorSparseRankFunctionName,
   getPgvectorSparseRankFunctionName,
@@ -786,6 +789,9 @@ const checkRowLevelSecurityHealth = async () => {
   // Multi-document full-text search as a tenant goes through this owner-run
   // function (migration 014), so a missing function or grant breaks it.
   let sparseRankFunction = getPgvectorSparseRankFunctionName();
+  // BM25 and pruned multi-document searches go through migration 030's
+  // search function instead; null when neither is configured.
+  let sparseSearchFunction = null;
 
   try {
     const role = getPostgresTenantRole();
@@ -797,6 +803,13 @@ const checkRowLevelSecurityHealth = async () => {
     try {
       tables = [...new Set([...tables, ...(await listLivePgvectorVersionTables())])];
       sparseRankFunction = await getActivePgvectorSparseRankFunctionName();
+
+      // Migration 030: every live version's statistics tables carry the
+      // policy, and the search function needs the tenant's EXECUTE grant.
+      const sparseTargets = await describePgvectorSparseRowLevelSecurityTargets();
+
+      tables = [...new Set([...tables, ...sparseTargets.statisticsTables])];
+      sparseSearchFunction = sparseTargets.searchFunctionUsed ? sparseTargets.searchFunction : null;
     } catch (error) {
       console.error("Could not read the index version registry for the row-level security probe.", error);
     }
@@ -815,28 +828,35 @@ const checkRowLevelSecurityHealth = async () => {
                 AND c.relname = ANY($1::text[])
             ) AS protected_tables,
             COALESCE(has_function_privilege(to_regprocedure($2)::oid, 'EXECUTE'), false)
-              AS sparse_rank_executable
+              AS sparse_rank_executable,
+            CASE WHEN $3::text IS NULL THEN true
+                 ELSE COALESCE(has_function_privilege(to_regprocedure($3::text)::oid, 'EXECUTE'), false)
+            END AS sparse_search_executable
         `,
-        [tables, `${sparseRankFunction}(tsquery, text[], integer)`]
+        [tables, `${sparseRankFunction}(tsquery, text[], integer)`, sparseSearchFunction]
       )
     );
     const row = probe.rows[0] ?? {};
     const protectedTables = new Set(row.protected_tables ?? []);
     const unprotectedTables = tables.filter((table) => !protectedTables.has(table));
     const sparseRankExecutable = row.sparse_rank_executable === true;
+    const sparseSearchExecutable = row.sparse_search_executable === true;
 
-    if (row.role !== role || unprotectedTables.length > 0 || !sparseRankExecutable) {
+    if (row.role !== role || unprotectedTables.length > 0 || !sparseRankExecutable || !sparseSearchExecutable) {
       return buildEntry("error", {
         mode,
         role,
         sparseRankExecutable,
+        sparseSearchExecutable,
         unprotectedTables,
         message:
           row.role !== role
             ? `Scoped queries run as "${row.role}" instead of the tenant role "${role}".`
             : unprotectedTables.length > 0
               ? `Tables without the tenant_isolation policy: ${unprotectedTables.join(", ")}.`
-              : `The tenant role cannot execute ${sparseRankFunction} (migration 014), so every multi-document full-text search a tenant makes would fail. Run the migrations.`,
+              : !sparseRankExecutable
+                ? `The tenant role cannot execute ${sparseRankFunction} (migration 014), so every multi-document full-text search a tenant makes would fail. Run the migrations.`
+                : `The tenant role cannot execute ${sparseSearchFunction} (migration 030), so every BM25 or pruned multi-document sparse search a tenant makes would fail. Run the migrations.`,
       });
     }
 
@@ -844,6 +864,7 @@ const checkRowLevelSecurityHealth = async () => {
       mode,
       role,
       sparseRankExecutable,
+      sparseSearchExecutable,
       protectedTableCount: tables.length,
       message: "Scoped queries run as the tenant role and every tenant table carries its policy.",
     });
@@ -884,6 +905,33 @@ const checkPdfParserHealth = async () => {
           getDoclingFallback() === "none" ? "will fail" : "fall back to pdf.js"
         }.`,
       });
+};
+
+// RAG_EMBEDDING_QUERY_ADAPTER (rag/query-adapter.js): a configured file that
+// cannot be read or parsed is an error, so STARTUP_HEALTH_STRICT refuses to
+// start rather than serve every query unadapted; a trained space other than
+// the configured one, a non-hybrid route or non-RRF fusion, or a store that
+// cannot keep the model's cosine are warnings (the adapter is then not
+// applied there).
+const checkQueryAdapterHealth = async () => {
+  try {
+    let supportsScoreVector = false;
+
+    try {
+      supportsScoreVector = supportsDenseScoreVector();
+    } catch {
+      // An unknown provider is the vector store check's error.
+    }
+
+    // Already a { status, ...details } entry.
+    return describeQueryAdapterHealth({
+      fusion: getHybridFusionMethod(),
+      hybrid: getRetrievalRoute() === "hybrid" && isHybridRetrievalEnabled(),
+      supportsScoreVector,
+    });
+  } catch (error) {
+    return buildEntry("error", { message: error instanceof Error ? error.message : "Query adapter check failed." });
+  }
 };
 
 // The ingest queue (rag/ingest-job-store.js): jobs per status over every
@@ -943,6 +991,7 @@ export const buildHealthReport = async () => {
     sharedState,
     pdfParser,
     ingestJobs,
+    queryAdapter,
   ] = await Promise.all([
     checkApiAuthHealth(),
     checkOpenAIHealth(),
@@ -959,6 +1008,7 @@ export const buildHealthReport = async () => {
     checkSharedStateHealth(),
     checkPdfParserHealth(),
     checkIngestJobsHealth(),
+    checkQueryAdapterHealth(),
   ]);
   const checks = {
     apiAuth,
@@ -976,6 +1026,7 @@ export const buildHealthReport = async () => {
     sharedState,
     pdfParser,
     ingestJobs,
+    queryAdapter,
   };
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 

@@ -541,9 +541,11 @@ if (!adminDatabaseUrl) {
 
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     assert.equal(report.checks.rowLevelSecurity.role, tenantRole);
-    // Ten tenant tables plus the staged ingest's outputs (migration 017).
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 11);
+    // Ten tenant tables plus the staged ingest's outputs (migration 017), and
+    // the four sparse statistics tables of the chunk table (migration 030).
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 15);
     assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
+    assert.equal(report.checks.rowLevelSecurity.sparseSearchExecutable, true);
   });
 
   test("POSTGRES_ROW_LEVEL_SECURITY=off keeps the owner connection", async () => {

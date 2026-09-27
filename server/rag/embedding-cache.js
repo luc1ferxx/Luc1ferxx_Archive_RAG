@@ -40,6 +40,9 @@ const toEmbeddingSpaceRequest = (space) => ({
   queryPrefix: space.queryPrefix,
 });
 
+// The cache holds the model's own vectors only: the query adapter
+// (rag/query-adapter.js) adapts a copy at the retrieval seam, so it is not
+// part of the key.
 const buildCacheKey = (space, query) =>
   [space.key, space.model, space.queryPrefix].join("\u0000") + `\n${query}`;
 

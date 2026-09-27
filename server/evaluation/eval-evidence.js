@@ -292,6 +292,16 @@ const describeEvaluationPromptTemplates = async () => {
   return describeActivePromptTemplates();
 };
 
+// Whether this run could serve answers from the semantic answer cache
+// (RAG_SEMANTIC_CACHE, e.g. set in server/.env), and at what threshold. Not
+// part of the public config (the pinned baseline's key): the gates reject a
+// report that ran with the cache on instead (eval-evidence-validation.js).
+export const describeEvaluationSemanticCache = async () => {
+  const { getSemanticCacheThreshold, isSemanticCacheEnabled } = await import("../rag/config.js");
+
+  return { enabled: isSemanticCacheEnabled(), threshold: getSemanticCacheThreshold() };
+};
+
 export const buildEvaluationEvidence = async ({
   command,
   corpus = {},
@@ -356,6 +366,7 @@ export const buildEvaluationEvidence = async ({
         }
       : null,
     promptTemplates: await describeEvaluationPromptTemplates(),
+    semanticCache: await describeEvaluationSemanticCache(),
     generatorVersion: EVAL_EVIDENCE_GENERATOR_VERSION,
   };
 };

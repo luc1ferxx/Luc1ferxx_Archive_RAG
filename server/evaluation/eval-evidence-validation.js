@@ -21,6 +21,7 @@ export const EVALUATION_EVIDENCE_REASON_CODES = Object.freeze({
   wrongProvider: "wrong_provider",
   wrongModelRoute: "wrong_model_route",
   wrongProfile: "wrong_profile",
+  semanticCacheEnabled: "semantic_cache_enabled",
 });
 
 export const toEvaluationEvidenceActualSummary = (report = {}) => ({
@@ -168,6 +169,12 @@ export const getEvaluationEvidenceFailureReason = ({
 
   if (evidence.modelRouteId !== spec.modelRouteId) {
     return EVALUATION_EVIDENCE_REASON_CODES.wrongModelRoute;
+  }
+
+  // A run that could serve cached answers is not evidence of what this commit
+  // retrieves and answers.
+  if (evidence.semanticCache?.enabled === true) {
+    return EVALUATION_EVIDENCE_REASON_CODES.semanticCacheEnabled;
   }
 
   return EVALUATION_EVIDENCE_REASON_CODES.ok;

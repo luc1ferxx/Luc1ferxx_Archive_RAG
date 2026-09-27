@@ -1,11 +1,13 @@
+import { getBm25B, getBm25K1 } from "./config.js";
 import {
   buildTermFrequencyMap,
   extractMeaningfulTokens,
 } from "./text-utils.js";
 import { getRagDataPath, readJsonFileSync, writeJsonFileSync, writeJsonFileAsync } from "./storage.js";
 
-const BM25_K1 = 1.2;
-const BM25_B = 0.75;
+// Okapi BM25 with Lucene's IDF. k1 / b come from RAG_BM25_K1 / RAG_BM25_B
+// (defaults 1.2 / 0.75), the same settings the pgvector BM25 route reads
+// (rag/vector-store-pgvector-sparse.js), which reproduces these scores in SQL.
 
 const sparseIndexPath = () => getRagDataPath("sparse-index.json");
 
@@ -162,6 +164,8 @@ const getBm25Score = (entry, queryTerms) => {
   }
 
   const averageLength = averageDocumentLength || 1;
+  const k1 = getBm25K1();
+  const b = getBm25B();
   let score = 0;
 
   for (const term of queryTerms) {
@@ -174,9 +178,9 @@ const getBm25Score = (entry, queryTerms) => {
     const idf = getInverseDocumentFrequency(term);
     const denominator =
       termFrequency +
-      BM25_K1 * (1 - BM25_B + BM25_B * (entry.documentLength / averageLength));
+      k1 * (1 - b + b * (entry.documentLength / averageLength));
 
-    score += idf * ((termFrequency * (BM25_K1 + 1)) / denominator);
+    score += idf * ((termFrequency * (k1 + 1)) / denominator);
   }
 
   return score;

@@ -9,6 +9,7 @@ import {
   resetDefaultEmbeddingBatcher,
 } from "../rag/ingest-embedding-batcher.js";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
+import { renderPgvectorBm25DropDdl } from "../rag/vector-store-pgvector-sparse.js";
 import {
   configurePgvectorRuntime,
   embedDocumentsInSpace,
@@ -1142,7 +1143,12 @@ test("retire marks the version retired without DDL first, then drops it a short 
   // Errors other than a lock timeout are not retried.
   await build();
   database.state.versions.get(3).status = "ready";
-  database.failNext("DROP FUNCTION IF EXISTS rag_document_chunks_v3_sparse_rank(tsquery, text[], integer); DROP TABLE IF EXISTS rag_document_chunks_v3;", new Error("disk full"));
+  // The drop statement: the table and its sparse-rank function, then migration
+  // 030's BM25 objects.
+  database.failNext(
+    `DROP FUNCTION IF EXISTS rag_document_chunks_v3_sparse_rank(tsquery, text[], integer); DROP TABLE IF EXISTS rag_document_chunks_v3; ${renderPgvectorBm25DropDdl({ chunkTable: "rag_document_chunks_v3" }).replace(/\s+/g, " ")}`,
+    new Error("disk full")
+  );
   await assert.rejects(retireIndexVersion({ dropRetryDelayMs: 1, versionId: 3 }), /disk full/);
   assert.equal(database.state.versions.get(3).status, "retired");
 });

@@ -2,7 +2,8 @@ import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -116,15 +117,23 @@ const configureEnvironment = (databaseUrl, tenantRole, dataDirectory) => {
 
 if (childMode === "crash-build") {
   // A builder process that dies (exit 137, no cleanup, lease kept) once two
-  // documents have committed -- with several documents in flight
-  // (RAG_INDEX_VERSION_BUILD_CONCURRENCY's default), so more may have
-  // committed and the ones still open are rolled back by the disconnect.
+  // documents have committed, one of them bob's (the scoped clear the parent
+  // runs next must find one in the building table) -- with several documents
+  // in flight (RAG_INDEX_VERSION_BUILD_CONCURRENCY's default), so more may
+  // have committed and the ones still open are rolled back by the disconnect.
+  // Which in-flight document commits first is a race (the workers' pooled
+  // connections, each compiling the statistics triggers on its first write,
+  // finish in no fixed order; the triggers themselves never make one writer
+  // wait for another), so the documents that reached their write are recorded
+  // for the parent.
   const [{ configureEmbeddingDimensions }, { configureOpenAIProvider }, lifecycle] = await Promise.all([
     import("../rag/config.js"),
     import("../rag/openai.js"),
     import("../rag/vector-store-pgvector-version-lifecycle.js"),
   ]);
   let written = 0;
+  let bobWritten = false;
+  const started = [];
 
   configureEmbeddingDimensions(DIMENSIONS[MODEL_A]);
   configureOpenAIProvider(createEmbeddingProvider().provider);
@@ -132,10 +141,15 @@ if (childMode === "crash-build") {
     batchSize: 1,
     builderId: "crash-builder",
     hooks: {
-      afterDocument: () => {
+      beforeDocumentWrite: ({ docId }) => {
+        started.push(docId);
+        writeFileSync("crash-build-started.json", JSON.stringify(started));
+      },
+      afterDocument: ({ docId, outcome }) => {
         written += 1;
+        bobWritten ||= docId.startsWith("b-") && outcome === "indexed";
 
-        if (written === 2) {
+        if (written >= 2 && bobWritten) {
           process.exit(137);
         }
       },
@@ -600,6 +614,11 @@ if (childMode === "crash-build") {
     await ingest(BOB, "b-iota", ["Iota audit samples ten percent."]);
     await ingest(BOB, "b-theta", ["Theta escalation goes to the board."]);
 
+    // Every document in the order the builder takes them (earlier tests
+    // deleted some of the d-* ones).
+    const pendingInOrder = (await q(`SELECT doc_id FROM rag_documents ORDER BY doc_id`)).rows.map(
+      (row) => row.doc_id
+    );
     const leaseMs = 4000;
     const crashed = await execFileAsync(process.execPath, [fileURLToPath(import.meta.url)], {
       cwd: tempRoot,
@@ -629,9 +648,15 @@ if (childMode === "crash-build") {
     // the server before the exit stays, each with its chunks.
     assert.ok(committed.length >= 2, `committed before the crash: ${committed}`);
     assert.ok(progress.every((row) => row.outcome === "indexed"));
+    const started = JSON.parse(await readFile(path.join(tempRoot, "crash-build-started.json"), "utf8"));
+    // Taken in doc_id order: whatever reached its write is among the first
+    // documents, allowing for the workers' four in flight.
+    const firstTaken = pendingInOrder.slice(0, started.length + 4);
+
     assert.ok(
-      committed.every((docId) => ["b-eta", "b-iota", "b-theta", "d-alpha", "d-beta"].includes(docId)),
-      `only the first documents in doc_id order were taken: ${committed}`
+      committed.every((docId) => started.includes(docId)) &&
+        started.every((docId) => firstTaken.includes(docId)),
+      `only the first documents in doc_id order (${firstTaken}) were taken: ${started}; committed ${committed}`
     );
 
     const builtBeforeCrash = await chunkCounts("rag_document_chunks_v3");
@@ -650,10 +675,10 @@ if (childMode === "crash-build") {
     // A clear during the build is written to the building version too.
     assert.ok(committed.some((docId) => docId.startsWith("b-")), "one of bob's documents is in the building version");
     await modules.tenant.runWithDatabaseTenant(BOB, () => modules.rag.clearDocuments({ accessScope: BOB }));
-    // Bob's chunks are gone from it; alice's d-alpha stays if it committed.
+    // Bob's chunks are gone from it; alice's stay if any of hers committed.
     assert.deepEqual(
       (await q(`SELECT DISTINCT owner_user_id FROM rag_document_chunks_v3`)).rows.map((row) => row.owner_user_id),
-      committed.includes("d-alpha") ? ["alice"] : []
+      committed.some((docId) => docId.startsWith("d-")) ? ["alice"] : []
     );
 
     await sleep(leaseMs + 200);
@@ -738,9 +763,12 @@ if (childMode === "crash-build") {
     });
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     // Eleven tenant tables (ten plus the staged ingest's outputs, migration
-    // 017) and the live version's own chunk table.
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 12);
+    // 017), the live version's own chunk table, and the four sparse
+    // statistics tables (migration 030) of each of the two live versions.
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 20);
     assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
+    // Pruning is on by default, so tenants call migration 030's search function.
+    assert.equal(report.checks.rowLevelSecurity.sparseSearchExecutable, true);
   });
 
   test("retire drops a version table a short lock attempt at a time, so a long reader of documents never stalls the others", async (t) => {

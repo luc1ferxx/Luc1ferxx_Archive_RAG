@@ -42,6 +42,7 @@ import {
   retrieveGlobalContextWithRoutes,
 } from "./retrievers/global-retriever.js";
 import { retrievePerDocumentContextWithRoutes } from "./retrievers/per-doc-retriever.js";
+import { QUERY_ADAPTER_SCOPE_QA } from "./query-adapter.js";
 import { describeVectorStoreRuntime, mergeRouteSummaries } from "./vector-store.js";
 import {
   prepareComparisonSourceBundle,
@@ -50,6 +51,7 @@ import {
   writeQaAnswer,
 } from "./answer-writer.js";
 import { getAdmissionScore, getResultKey } from "./citations.js";
+import { lookupSemanticCache, storeSemanticCacheAnswer } from "./semantic-cache.js";
 
 const getResultMergeScore = (result = {}) =>
   (Number(result.keywordScore) || 0) * 2 + (Number(result.score) || 0);
@@ -287,12 +289,16 @@ export const normalizeRetrievalPlan = (retrievalPlan = null) => {
   };
 };
 
+// `queryAdapterScope` (rag/query-adapter.js): the single-document QA route's
+// own retrieval passes QUERY_ADAPTER_SCOPE_QA; agent-planned retrieval does
+// not, so it stays unadapted until it is measured.
 const retrieveGlobalContextForQueries = async ({
   docIds,
   primaryQueryVector,
   primaryQueryText,
   retrievalQueries,
   retrievalOptions = {},
+  queryAdapterScope = null,
 }) => {
   const searches = await Promise.all(
     retrievalQueries.map(async (retrievalQuery) => {
@@ -305,6 +311,7 @@ const retrieveGlobalContextForQueries = async ({
         queryText: retrievalQuery.query,
         docIds,
         topK: retrievalOptions.topK,
+        queryAdapterScope,
       });
 
       return {
@@ -666,6 +673,7 @@ export const retrieveQaCandidates = async ({ docIds, resolvedQuery }) => {
     retrievalQueries: inputs.plannedRetrievalQueries,
     retrievalOptions: inputs.retrievalOptions,
     docIds,
+    queryAdapterScope: QUERY_ADAPTER_SCOPE_QA,
   });
 
   return {
@@ -687,6 +695,7 @@ const executeQaRag = async ({
   retrievalOptions,
   route,
 }) => {
+  const queryAdapterScope = agentRetrievalPlan ? null : QUERY_ADAPTER_SCOPE_QA;
   const { results: retrievalResults, retrieval } =
     await retrieveGlobalContextForQueries({
       primaryQueryVector: queryVector,
@@ -694,6 +703,7 @@ const executeQaRag = async ({
       retrievalQueries: plannedRetrievalQueries,
       retrievalOptions,
       docIds,
+      queryAdapterScope,
     });
   const confidence = assessQaConfidence({
     evidenceRequirementCount: evidenceRequirements?.length ?? 1,
@@ -777,6 +787,7 @@ const executeQaRag = async ({
           plannedRetrievalQueries,
           preferenceBlock,
           query,
+          queryAdapterScope,
           queryVector,
           resolvedQuery,
           retrievalOptions,
@@ -811,7 +822,7 @@ const executeQaRag = async ({
 // other words ("We evaluate on SQuAD" for "What datasets do they use?") often
 // shares none. On QASPER train this floor put the most evidence in the context
 // (0.335 against 0.318 at one shared term and 0.23 before widening).
-const QA_CONTEXT_MIN_COVERAGE = 0;
+export const QA_CONTEXT_MIN_COVERAGE = 0;
 
 const retryQaWithDeeperRetrieval = async ({
   docIds,
@@ -819,6 +830,7 @@ const retryQaWithDeeperRetrieval = async ({
   plannedRetrievalQueries,
   preferenceBlock,
   query,
+  queryAdapterScope = null,
   queryVector,
   resolvedQuery,
   retrievalOptions,
@@ -838,6 +850,7 @@ const retryQaWithDeeperRetrieval = async ({
     retrievalQueries: plannedRetrievalQueries,
     retrievalOptions: { ...retrievalOptions, topK },
     docIds,
+    queryAdapterScope,
   });
   const unseen = results.filter((result) => !shownKeys.has(getResultKey(result)));
   const confidence = assessQaConfidence({
@@ -877,9 +890,42 @@ const retryQaWithDeeperRetrieval = async ({
   return { answer, bundle, trace };
 };
 
+const runDocumentRag = ({
+  docIds,
+  preferenceBlock,
+  query,
+  resolvedQuery,
+  retrievalInputs,
+  selectedDocuments,
+}) =>
+  retrievalInputs.route.mode === "compare"
+    ? executeComparisonRag({
+        ...retrievalInputs,
+        docIds,
+        preferenceBlock,
+        query,
+        resolvedQuery,
+        selectedDocuments,
+      })
+    : executeQaRag({
+        ...retrievalInputs,
+        docIds,
+        preferenceBlock,
+        query,
+        resolvedQuery,
+      });
+
+// `accessScope` is the request's tenant; the semantic answer cache
+// (semantic-cache.js, RAG_SEMANTIC_CACHE=on) keys on it and is skipped for a
+// caller that does not pass one. `includeRetrievedContexts` says whether the
+// caller will read retrievedContexts: the cache keeps chunk text only for
+// such callers and serves them only entries that kept it. With the cache off
+// nothing here changes.
 export const executeDocumentRag = async ({
+  accessScope = null,
   agentRetrievalPlan = null,
   docIds,
+  includeRetrievedContexts = false,
   preferenceBlock = "",
   query,
   resolvedQuery,
@@ -890,23 +936,49 @@ export const executeDocumentRag = async ({
     docIds,
     resolvedQuery,
   });
+  const cacheLookup = await lookupSemanticCache({
+    accessScope,
+    agentRetrievalPlan,
+    docIds,
+    includeRetrievedContexts,
+    preferenceBlock,
+    query,
+    queryVector: retrievalInputs.queryVector,
+    requirementCount: retrievalInputs.evidenceRequirements?.length ?? 1,
+    resolvedQuery,
+    routeMode: retrievalInputs.route.mode,
+    selectedDocuments,
+  });
 
-  if (retrievalInputs.route.mode === "compare") {
-    return executeComparisonRag({
-      ...retrievalInputs,
-      docIds,
-      preferenceBlock,
-      query,
-      resolvedQuery,
-      selectedDocuments,
-    });
+  if (cacheLookup?.hit) {
+    return {
+      routeMode: retrievalInputs.route.mode,
+      traceFields: {
+        ...buildCommonTraceFields(retrievalInputs),
+        semanticCache: cacheLookup.trace,
+      },
+      response: cacheLookup.response,
+    };
   }
 
-  return executeQaRag({
-    ...retrievalInputs,
+  const execution = await runDocumentRag({
     docIds,
     preferenceBlock,
     query,
     resolvedQuery,
+    retrievalInputs,
+    selectedDocuments,
   });
+
+  if (cacheLookup) {
+    execution.traceFields = {
+      ...execution.traceFields,
+      semanticCache: {
+        ...cacheLookup.trace,
+        ...storeSemanticCacheAnswer(cacheLookup, execution.response),
+      },
+    };
+  }
+
+  return execution;
 };
