@@ -59,6 +59,9 @@ test("parseArgs requires an explicit database URL and validates numbers", () => 
   assert.throws(() => parseArgs(["--database-url", "postgres://x/y", "--bogus", "1"]), /Unknown argument/);
   assert.throws(() => parseArgs(["--database-url", "postgres://x/y", "--queries", "0"]), /positive/);
   assert.throws(() => parseArgs(["--database-url", "postgres://x/y", "--latest-name", "../x"]), /file stem/);
+  assert.throws(() => parseArgs(["--database-url", "postgres://x/y", "--iterative-scan", "on"]), /--iterative-scan/);
+  assert.equal(parseArgs(["--database-url", "postgres://x/y"]).iterativeScan, "relaxed_order");
+  assert.equal(parseArgs(["--database-url", "postgres://x/y", "--iterative-scan", "OFF"]).iterativeScan, "off");
 
   const options = parseArgs([
     "--",
@@ -349,31 +352,32 @@ test("formatBytes and formatMarkdown render a report", () => {
     recall: { dense_docset: { meanRecall: 0.9, minRecall: 0.5, queries: 5, queriesBelowOne: 2 } },
     schemaVerifyMs: 12,
   };
+  const reportConfig = {
+    chunksPerDoc: 50,
+    clusters: 256,
+    dimensions: 768,
+    docSetSize: 100,
+    embeddingIdentity: "synthetic-clustered-unit",
+    gitDirty: true,
+    gitSha: "abc123",
+    hnsw: { efSearch: "40", indexDefinition: "CREATE INDEX ... USING hnsw", iterativeScan: "off" },
+    noise: 1,
+    pgvectorVersion: "0.8.6",
+    postgresVersion: "18.0",
+    queries: 5,
+    recallQueries: 5,
+    rowLevelSecurity: "enforce",
+    runtime: { hybridEnabled: true, hybridFusion: "rrf" },
+    seed: 1,
+    serverSettings: { shared_buffers: "128MB" },
+    tenantRole: "archive_rag_tenant",
+    topK: 10,
+    vocabularySize: 5000,
+    warmup: 2,
+    wordsPerChunk: 120,
+  };
   const markdown = formatMarkdown({
-    config: {
-      chunksPerDoc: 50,
-      clusters: 256,
-      dimensions: 768,
-      docSetSize: 100,
-      embeddingIdentity: "synthetic-clustered-unit",
-      gitDirty: true,
-      gitSha: "abc123",
-      hnsw: { efSearch: "40", indexDefinition: "CREATE INDEX ... USING hnsw", iterativeScan: "off" },
-      noise: 1,
-      pgvectorVersion: "0.8.6",
-      postgresVersion: "18.0",
-      queries: 5,
-      recallQueries: 5,
-      rowLevelSecurity: "enforce",
-      runtime: { hybridEnabled: true, hybridFusion: "rrf" },
-      seed: 1,
-      serverSettings: { shared_buffers: "128MB" },
-      tenantRole: "archive_rag_tenant",
-      topK: 10,
-      vocabularySize: 5000,
-      warmup: 2,
-      wordsPerChunk: 120,
-    },
+    config: reportConfig,
     generatedAt: "2026-09-26T00:00:00.000Z",
     skipped: [{ reason: "projected 30 min exceeds the 10 min left of the time budget", targetChunks: 1000000 }],
     steps: [step],
@@ -383,6 +387,15 @@ test("formatBytes and formatMarkdown render a report", () => {
   assert.match(markdown, /commit `abc123` \(uncommitted changes\); PostgreSQL 18\.0, pgvector 0\.8\.6/);
   assert.match(markdown, /POSTGRES_ROW_LEVEL_SECURITY=enforce/);
   assert.match(markdown, /hnsw\.ef_search=40, hnsw\.iterative_scan=off/);
+  assert.match(
+    formatMarkdown({
+      config: { ...reportConfig, hnsw: { ...reportConfig.hnsw, appIterativeScan: "relaxed_order" } },
+      generatedAt: "2026-09-26T00:00:00.000Z",
+      skipped: [],
+      steps: [step],
+    }),
+    /the app's dense route sets hnsw\.iterative_scan=relaxed_order per query \(server default off\)/
+  );
   assert.match(markdown, /## 2,000 chunks \(40 documents\)/);
   assert.match(markdown, /\| 2,000 \| 40 \| 0\.5 s \| 0\.1 s \| 0\.9 s \| 9\.1 KB \| 2\.9 KB \| 2 \/ 3 \| 2 \/ 3 \| 2 \/ 3 \| 0\.9 \(HNSW\) \| n\/a \|/);
   assert.match(markdown, /recall on 5 of them\./, "an old report without filteredRecallQueries keeps its wording");

@@ -6,6 +6,7 @@ import {
   getEmbeddingModel,
   getKeywordWeight,
   getPgvectorIndexType,
+  getPgvectorIterativeScan,
   getPgvectorTextSearchConfig,
   getVectorWeight,
 } from "./config.js";
@@ -22,6 +23,7 @@ import {
   getEnforcedDatabaseTenant,
   isPostgresConfigured,
   queryPostgres,
+  withPostgresTransaction,
 } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { buildTermSet, extractMeaningfulTokens } from "./text-utils.js";
@@ -42,6 +44,9 @@ import { buildTermSet, extractMeaningfulTokens } from "./text-utils.js";
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const INSERT_BATCH_SIZE = 100;
 let schemaVerified = false;
+// The pgvector version schema verification read; it decides whether the dense
+// route can ask for an iterative HNSW scan (a 0.8 setting).
+let verifiedExtensionVersion = null;
 const INSERT_COLUMNS = [
   "chunk_id",
   "doc_id",
@@ -133,11 +138,28 @@ export const resetPgvectorRuntime = () => {
   configurePgvectorRuntime(null);
 };
 
+// A scripted query override without its own transaction hook gets one that
+// hands the callback that same query function, so tests see every statement.
+const getTransactionRunner = () => {
+  if (typeof runtimeOverrides?.withTransaction === "function") {
+    return runtimeOverrides.withTransaction;
+  }
+
+  if (typeof runtimeOverrides?.query === "function") {
+    const query = runtimeOverrides.query;
+
+    return (callback) => callback({ query });
+  }
+
+  return withPostgresTransaction;
+};
+
 const getRuntime = () => ({
   checkHealth: runtimeOverrides?.checkPostgresHealth ?? checkPostgresHealth,
   isConfigured: runtimeOverrides?.isPostgresConfigured ?? isPostgresConfigured,
   query: runtimeOverrides?.query ?? queryPostgres,
   runMigrations: runtimeOverrides?.runMigrations ?? runPostgresMigrations,
+  withTransaction: getTransactionRunner(),
 });
 
 const getQuery = (client) =>
@@ -317,6 +339,29 @@ const readAnnIndexMethod = async ({ query, tableName }) => {
   return method ? String(method).toLowerCase() : null;
 };
 
+// hnsw.iterative_scan exists from pgvector 0.8.0. Older servers reserve the
+// hnsw.* prefix, so setting it there is an error rather than a no-op.
+export const supportsPgvectorIterativeScan = (version) => {
+  const match = /^(\d+)\.(\d+)/.exec(String(version ?? ""));
+
+  if (!match) {
+    return false;
+  }
+
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+
+  return major > 0 || minor >= 8;
+};
+
+// The mode the dense route will set, or null when it keeps the plain
+// statement (switched off, or a server older than 0.8).
+const getActiveIterativeScan = () => {
+  const mode = getPgvectorIterativeScan();
+
+  return mode !== "off" && supportsPgvectorIterativeScan(verifiedExtensionVersion) ? mode : null;
+};
+
 const readExtension = async ({ query }) => {
   const result = await query(
     `SELECT extversion FROM pg_extension WHERE extname = 'vector' LIMIT 1`
@@ -395,6 +440,8 @@ const verifyPgvectorSchema = async ({ allowForeignEmbeddings = false, client = n
   const query = getQuery(client);
   const tableName = getPgvectorTableName();
   const extension = await readExtension({ query });
+
+  verifiedExtensionVersion = extension.version;
 
   if (!extension.installed) {
     throw new PgvectorUnavailableError(
@@ -497,6 +544,10 @@ const describePgvectorTableStatus = async () => {
 
   base.reachable = true;
   base.extension = await readExtension({ query: queryPostgres });
+  base.iterativeScan = {
+    configured: getPgvectorIterativeScan(),
+    supported: supportsPgvectorIterativeScan(base.extension.version),
+  };
   base.table.exists = await tableExists({ query: queryPostgres, tableName });
 
   if (!base.table.exists) {
@@ -735,6 +786,64 @@ export const countPgvectorChunks = async ({ client = null, docIds = null } = {})
 // Reads
 // ---------------------------------------------------------------------------
 
+const buildDenseSearchSql = () => `
+  SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
+         1 - (embedding <=> $1::vector) AS vector_score
+  FROM ${getPgvectorTableName()}
+  WHERE doc_id = ANY($2::text[])
+    AND embedding_model = $3
+    AND embedding_dimensions = $4
+  ORDER BY embedding <=> $1::vector ASC, chunk_id ASC
+  LIMIT $5
+`;
+
+// The document filter applies after HNSW returns its ef_search candidates (IVFFlat:
+// its probed lists), so
+// when the planner sends a filtered query through the index (a document set
+// that is a large share of the table) a plain scan can return fewer than
+// topK rows. An iterative scan keeps reading the index until LIMIT is met or
+// hnsw.max_scan_tuples is reached. relaxed_order may emit rows slightly out of
+// distance order; the materialized CTE fixes the order afterwards (pgvector's
+// documented pattern; `+ 0` stops PostgreSQL 17+ from reusing the CTE's sort
+// order and skipping the outer sort). Exact plans (doc_id btree) are unaffected.
+const buildIterativeDenseSearchSql = () => `
+  WITH nearest AS MATERIALIZED (
+    SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
+           embedding <=> $1::vector AS distance
+    FROM ${getPgvectorTableName()}
+    WHERE doc_id = ANY($2::text[])
+      AND embedding_model = $3
+      AND embedding_dimensions = $4
+    ORDER BY embedding <=> $1::vector ASC, chunk_id ASC
+    LIMIT $5
+  )
+  SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
+         1 - distance AS vector_score
+  FROM nearest
+  ORDER BY distance + 0 ASC, chunk_id ASC
+`;
+
+// IVFFlat has its own setting and only a relaxed mode.
+const getIterativeScanSetting = (iterativeScan) =>
+  getPgvectorIndexType() === "ivfflat"
+    ? { name: "ivfflat.iterative_scan", value: "relaxed_order" }
+    : { name: "hnsw.iterative_scan", value: iterativeScan };
+
+// set_config(..., true) is SET LOCAL: it needs the statement's own transaction.
+// A caller's client is already in one; otherwise the setting and the search
+// share a short transaction (under a tenant, the same one that sets the role).
+const runIterativeDenseSearch = async ({ client, iterativeScan, values }) => {
+  const setting = getIterativeScanSetting(iterativeScan);
+  const search = async (transactionClient) => {
+    const query = getQuery(transactionClient);
+
+    await query("SELECT set_config($1, $2, true)", [setting.name, setting.value]);
+    return query(buildIterativeDenseSearchSql(), values);
+  };
+
+  return client ? search(client) : getRuntime().withTransaction(search);
+};
+
 export const searchPgvectorDocuments = async ({
   queryVector,
   queryText = "",
@@ -753,25 +862,17 @@ export const searchPgvectorDocuments = async ({
   await ensurePgvectorSchema({ client });
   assertDimensions({ actual: queryVector.length, context: "Embedding the query" });
 
-  const result = await getQuery(client)(
-    `
-      SELECT chunk_id, doc_id, chunk_index, page_number, section_heading, content, metadata,
-             1 - (embedding <=> $1::vector) AS vector_score
-      FROM ${getPgvectorTableName()}
-      WHERE doc_id = ANY($2::text[])
-        AND embedding_model = $3
-        AND embedding_dimensions = $4
-      ORDER BY embedding <=> $1::vector ASC, chunk_id ASC
-      LIMIT $5
-    `,
-    [
-      toVectorLiteral(queryVector),
-      normalizedDocIds,
-      getEmbeddingIndexIdentity(),
-      getEmbeddingDimensions(),
-      limit,
-    ]
-  );
+  const values = [
+    toVectorLiteral(queryVector),
+    normalizedDocIds,
+    getEmbeddingIndexIdentity(),
+    getEmbeddingDimensions(),
+    limit,
+  ];
+  const iterativeScan = getActiveIterativeScan();
+  const result = iterativeScan
+    ? await runIterativeDenseSearch({ client, iterativeScan, values })
+    : await getQuery(client)(buildDenseSearchSql(), values);
   const queryTerms = buildTermSet(queryText);
 
   return result.rows

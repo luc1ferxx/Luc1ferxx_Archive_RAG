@@ -147,6 +147,8 @@ const NUMERIC_OPTIONS = Object.freeze({
   "--warmup": "warmup",
   "--words-per-chunk": "wordsPerChunk",
 });
+// The app's RAG_PGVECTOR_ITERATIVE_SCAN values; `off` measures the plain statement.
+const ITERATIVE_SCAN_CHOICES = Object.freeze(["relaxed_order", "strict_order", "off"]);
 // Options that may legitimately be zero.
 const ZERO_ALLOWED = new Set(["ingestProbes", "warmup", "recallQueries", "noise"]);
 
@@ -158,6 +160,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
   dimensions: 768,
   docSetSize: 100,
   ingestProbes: 3,
+  iterativeScan: "relaxed_order",
   latestName: "latest-pgvector-scale",
   loadConcurrency: 8,
   maintenanceWorkMemCapMb: 8192,
@@ -196,6 +199,12 @@ export const parseArgs = (argv) => {
       options.sizes = parseSizes(value);
     } else if (flag === "--latest-name") {
       options.latestName = String(value).trim();
+    } else if (flag === "--iterative-scan") {
+      options.iterativeScan = String(value).trim().toLowerCase();
+
+      if (!ITERATIVE_SCAN_CHOICES.includes(options.iterativeScan)) {
+        throw new Error(`--iterative-scan must be one of ${ITERATIVE_SCAN_CHOICES.join(", ")}.`);
+      }
     } else if (NUMERIC_OPTIONS[flag]) {
       const key = NUMERIC_OPTIONS[flag];
       const parsed = Number(value);
@@ -732,7 +741,11 @@ export const formatMarkdown = (report) => {
         : `recall on ${config.filteredRecallQueries} of them with a document filter and on ${config.recallQueries} for the whole table`
     }.`,
     "",
-    `HNSW: ${config.hnsw.indexDefinition}; hnsw.ef_search=${config.hnsw.efSearch}, hnsw.iterative_scan=${config.hnsw.iterativeScan ?? "n/a"}. Server settings: ${Object.entries(config.serverSettings)
+    `HNSW: ${config.hnsw.indexDefinition}; hnsw.ef_search=${config.hnsw.efSearch}, ${
+      config.hnsw.appIterativeScan
+        ? `the app's dense route sets hnsw.iterative_scan=${config.hnsw.appIterativeScan} per query (server default ${config.hnsw.iterativeScan ?? "n/a"})`
+        : `hnsw.iterative_scan=${config.hnsw.iterativeScan ?? "n/a"}`
+    }. Server settings: ${Object.entries(config.serverSettings)
       .map(([key, value]) => `${key}=${value}`)
       .join(", ")}.`,
     "",
@@ -847,6 +860,7 @@ const APP_ENV_TO_CLEAR = Object.freeze([
   "RAG_PGVECTOR_HNSW_EF_CONSTRUCTION",
   "RAG_PGVECTOR_HNSW_M",
   "RAG_PGVECTOR_INDEX_TYPE",
+  "RAG_PGVECTOR_ITERATIVE_SCAN",
   "RAG_PGVECTOR_TEXT_SEARCH_CONFIG",
   "RAG_RETRIEVAL_ROUTE",
   "RAG_RETRIEVAL_SCORING_MODE",
@@ -880,6 +894,7 @@ const main = async () => {
   process.env.VECTOR_STORE_PROVIDER = "pgvector";
   process.env.OPENAI_EMBEDDING_MODEL = BENCH_EMBEDDING_MODEL;
   process.env.RAG_EMBEDDING_DIMENSIONS = String(options.dimensions);
+  process.env.RAG_PGVECTOR_ITERATIVE_SCAN = options.iterativeScan;
 
   const { default: pg } = await import("pg");
   const [config, postgres, tenant, migrations, pgvector, vectorStore] = await Promise.all([
@@ -984,6 +999,13 @@ const main = async () => {
         efSearch: settings.ef_search,
         indexDefinition: indexDefinitions[hnswIndexName],
         iterativeScan: settings.iterative_scan,
+        // What the app's dense route actually sets per query: null when it
+        // keeps the plain statement (switched off or pgvector older than 0.8).
+        appIterativeScan:
+          config.getPgvectorIterativeScan() !== "off" &&
+          pgvector.supportsPgvectorIterativeScan(settings.pgvector_version)
+            ? config.getPgvectorIterativeScan()
+            : null,
       },
       filteredRecallQueries: recallSampleSize({ options, series: "dense_docset", timedQueries: options.queries }),
       ginIndexDefinition: indexDefinitions[ginIndexName],
@@ -1300,11 +1322,22 @@ const main = async () => {
       const recalls = Object.fromEntries(RECALL_SERIES.map((series) => [series, []]));
       const plans = {};
 
+      // The iterative-scan setting and the dense search run in one
+      // transaction; capture both so the EXPLAIN replays the setting too.
       pgvector.configurePgvectorRuntime({
         query: (sql, values = []) => {
           captured.push({ sql, values });
           return postgres.queryPostgres(sql, values);
         },
+        withTransaction: (callback) =>
+          postgres.withPostgresTransaction((client) =>
+            callback({
+              query: (sql, values = []) => {
+                captured.push({ sql, values });
+                return client.query(sql, values);
+              },
+            })
+          ),
       });
 
       try {
@@ -1326,6 +1359,7 @@ const main = async () => {
             captured.length = 0;
 
             const value = await searchFunctions[series](query);
+            const setting = captured.filter((entry) => /set_config/.test(entry.sql)).at(-1) ?? null;
             const statement =
               series === "dense_unfiltered_sql"
                 ? { sql: unfilteredSql, values: [`[${query.vector.join(",")}]`, topK] }
@@ -1340,7 +1374,13 @@ const main = async () => {
                 series === "dense_unfiltered_sql"
                   ? await admin.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.sql}`, statement.values)
                   : await asTenant(() =>
-                      postgres.queryPostgres(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.sql}`, statement.values)
+                      postgres.withPostgresTransaction(async (client) => {
+                        if (setting) {
+                          await client.query(setting.sql, setting.values);
+                        }
+
+                        return client.query(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.sql}`, statement.values);
+                      })
                     );
               const app = summarizePlan(explained.rows[0]["QUERY PLAN"]);
 

@@ -435,6 +435,24 @@ export const getPgvectorTextSearchConfig = () =>
 export const getPgvectorIndexType = () =>
   toChoice(process.env.RAG_PGVECTOR_INDEX_TYPE, "hnsw", ["hnsw", "ivfflat"]);
 
+// pgvector 0.8+ iterative HNSW scans. The dense route filters by document after
+// the index returns its ef_search candidates, so without them a filtered query
+// the planner sends through HNSW can come back with fewer than topK rows.
+// relaxed_order is the mode pgvector documents for best recall; the store
+// restores strict distance order itself. `off` keeps the pre-0.8 statement.
+export const PGVECTOR_ITERATIVE_SCAN_MODES = Object.freeze([
+  "relaxed_order",
+  "strict_order",
+  "off",
+]);
+
+export const getPgvectorIterativeScan = () =>
+  toChoice(
+    process.env.RAG_PGVECTOR_ITERATIVE_SCAN,
+    "relaxed_order",
+    PGVECTOR_ITERATIVE_SCAN_MODES
+  );
+
 export const getPgvectorIvfflatLists = () =>
   Math.floor(toPositiveNumber(process.env.RAG_PGVECTOR_IVFFLAT_LISTS, 100));
 

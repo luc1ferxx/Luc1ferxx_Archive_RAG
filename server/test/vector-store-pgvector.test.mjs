@@ -16,6 +16,7 @@ import {
   resetPgvectorVectorStore,
   searchPgvectorDocuments,
   searchPgvectorSparseDocuments,
+  supportsPgvectorIterativeScan,
   writeDocumentsToPgvectorIndex,
 } from "../rag/vector-store-pgvector.js";
 
@@ -42,6 +43,7 @@ const createFakeDatabase = ({
   denseRows = [],
   documentCount = 0,
   extensionInstalled = true,
+  extensionVersion = "0.7.4",
   indexNames = ALL_INDEXES,
   sparseRows = [],
   storedModels = [],
@@ -54,7 +56,7 @@ const createFakeDatabase = ({
     calls.push({ sql: compact, values });
 
     if (/FROM pg_extension/.test(compact)) {
-      return { rows: extensionInstalled ? [{ extversion: "0.7.4" }] : [] };
+      return { rows: extensionInstalled ? [{ extversion: extensionVersion }] : [] };
     }
 
     if (/FROM pg_attribute/.test(compact)) {
@@ -365,6 +367,137 @@ test("dense search orders by cosine distance, filters by document and rejects th
   );
 });
 
+const withIterativeScanEnv = async (value, callback) => {
+  const saved = {
+    indexType: process.env.RAG_PGVECTOR_INDEX_TYPE,
+    iterativeScan: process.env.RAG_PGVECTOR_ITERATIVE_SCAN,
+  };
+
+  for (const [key, entry] of Object.entries(value)) {
+    process.env[key] = entry;
+  }
+
+  try {
+    return await callback();
+  } finally {
+    for (const [key, name] of [
+      ["indexType", "RAG_PGVECTOR_INDEX_TYPE"],
+      ["iterativeScan", "RAG_PGVECTOR_ITERATIVE_SCAN"],
+    ]) {
+      if (saved[key] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = saved[key];
+      }
+    }
+  }
+};
+
+const DENSE_ARGS = {
+  queryVector: [1, 0, 0, 0],
+  queryText: "alpha",
+  docIds: ["doc-1", "doc-2"],
+  topK: 2,
+  scoringMode: "dense",
+};
+
+test("iterative HNSW scans need pgvector 0.8 or later", () => {
+  assert.equal(supportsPgvectorIterativeScan("0.8.0"), true);
+  assert.equal(supportsPgvectorIterativeScan("0.8.6"), true);
+  assert.equal(supportsPgvectorIterativeScan("0.10.1"), true);
+  assert.equal(supportsPgvectorIterativeScan("1.0.0"), true);
+  assert.equal(supportsPgvectorIterativeScan("0.7.4"), false);
+  assert.equal(supportsPgvectorIterativeScan(null), false);
+  assert.equal(supportsPgvectorIterativeScan("dev"), false);
+});
+
+test("dense search on pgvector 0.8 sets a relaxed iterative scan in the search's own transaction and restores distance order", async () => {
+  const database = useDatabase({
+    denseRows: [
+      chunkRow({ content: "Alpha", docId: "doc-1", score: 0.9 }),
+      chunkRow({ content: "Beta", docId: "doc-2", score: 0.4 }),
+    ],
+    extensionVersion: "0.8.6",
+  });
+  const transactions = [];
+  configurePgvectorRuntime({
+    ...database.runtime,
+    withTransaction: async (callback) => {
+      const statements = [];
+
+      transactions.push(statements);
+      return callback({
+        query: (sql, values) => {
+          statements.push(sql.replace(/\s+/g, " ").trim());
+          return database.query(sql, values);
+        },
+      });
+    },
+  });
+
+  const results = await searchPgvectorDocuments(DENSE_ARGS);
+  const settingCall = database.calls.find((call) => /set_config/.test(call.sql));
+  const searchCall = database.calls.find((call) => /AS vector_score/.test(call.sql));
+
+  assert.deepEqual(settingCall.values, ["hnsw.iterative_scan", "relaxed_order"]);
+  assert.equal(transactions.length, 1, "setting and search share one transaction");
+  assert.equal(transactions[0].length, 2);
+  assert.match(transactions[0][0], /set_config\(\$1, \$2, true\)/);
+  assert.match(transactions[0][1], /WITH nearest AS MATERIALIZED/);
+  assert.match(searchCall.sql, /ORDER BY embedding <=> \$1::vector ASC, chunk_id ASC LIMIT \$5/);
+  assert.match(searchCall.sql, /ORDER BY distance \+ 0 ASC, chunk_id ASC/);
+  assert.deepEqual(searchCall.values, ["[1,0,0,0]", ["doc-1", "doc-2"], MODEL, DIMENSIONS, 2]);
+  assert.deepEqual(
+    results.map((result) => result.document.metadata.docId),
+    ["doc-1", "doc-2"]
+  );
+});
+
+test("dense search keeps the plain statement when iterative scans are off, and reuses a caller's transaction client", async () => {
+  await withIterativeScanEnv({ RAG_PGVECTOR_ITERATIVE_SCAN: "off" }, async () => {
+    const database = useDatabase({ extensionVersion: "0.8.6" });
+
+    await searchPgvectorDocuments(DENSE_ARGS);
+    assert.ok(!database.calls.some((call) => /set_config/.test(call.sql)));
+    assert.ok(!database.calls.some((call) => /MATERIALIZED/.test(call.sql)));
+  });
+
+  await withIterativeScanEnv({ RAG_PGVECTOR_ITERATIVE_SCAN: "strict_order" }, async () => {
+    const database = useDatabase({ extensionVersion: "0.8.6" });
+    const clientCalls = [];
+    const client = {
+      query: (sql, values) => {
+        clientCalls.push(sql);
+        return database.query(sql, values);
+      },
+    };
+    configurePgvectorRuntime({
+      ...database.runtime,
+      withTransaction: () => {
+        throw new Error("a caller's client is already in a transaction");
+      },
+    });
+
+    await searchPgvectorDocuments({ ...DENSE_ARGS, client });
+    assert.deepEqual(
+      database.calls.find((call) => /set_config/.test(call.sql)).values,
+      ["hnsw.iterative_scan", "strict_order"]
+    );
+    assert.ok(clientCalls.some((sql) => /set_config/.test(sql)));
+    assert.ok(clientCalls.some((sql) => /MATERIALIZED/.test(sql)));
+  });
+
+  await withIterativeScanEnv({ RAG_PGVECTOR_INDEX_TYPE: "ivfflat" }, async () => {
+    const database = useDatabase({ annIndexMethod: "ivfflat", extensionVersion: "0.8.0" });
+
+    await searchPgvectorDocuments(DENSE_ARGS);
+    assert.deepEqual(
+      database.calls.find((call) => /set_config/.test(call.sql)).values,
+      ["ivfflat.iterative_scan", "relaxed_order"]
+    );
+  });
+});
+
 test("sparse search builds an OR tsquery from the app tokenizer and ranks with ts_rank_cd", async () => {
   const database = useDatabase({
     sparseRows: [chunkRow({ content: "Amber ceiling is 2400 dollars.", docId: "doc-1", score: 0.35 })],
@@ -402,6 +535,7 @@ test("status describes extension, table, indexes, width and flags an empty index
   assert.equal(status.configured, true);
   assert.equal(status.reachable, true);
   assert.deepEqual(status.extension, { installed: true, version: "0.7.4" });
+  assert.deepEqual(status.iterativeScan, { configured: "relaxed_order", supported: false });
   assert.deepEqual(status.table, { exists: true, name: TABLE });
   assert.deepEqual(status.indexes, {
     docId: true,
