@@ -459,7 +459,7 @@ export const getPgvectorTextSearchConfig = () =>
 // (rag/vector-store-pgvector-sparse.js). An unknown value fails closed rather
 // than silently scoring with the other one.
 export const SPARSE_SCORING_CHOICES = Object.freeze(["ts_rank_cd", "bm25"]);
-export const DEFAULT_SPARSE_SCORING = "ts_rank_cd";
+export const DEFAULT_SPARSE_SCORING = "bm25";
 
 export const getSparseScoring = () => {
   const rawValue = process.env.RAG_SPARSE_SCORING;

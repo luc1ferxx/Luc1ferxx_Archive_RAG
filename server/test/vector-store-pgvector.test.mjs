@@ -147,7 +147,13 @@ const chunkRow = ({ chunkIndex = 0, content, docId, score }) => ({
 
 let originalModel;
 
+let originalSparseScoring;
+
 beforeEach(() => {
+  // This file pins the ts_rank_cd statements; BM25 (the default) is covered
+  // by vector-store-pgvector-bm25.test.mjs.
+  originalSparseScoring = process.env.RAG_SPARSE_SCORING;
+  process.env.RAG_SPARSE_SCORING = "ts_rank_cd";
   originalModel = process.env.OPENAI_EMBEDDING_MODEL;
   process.env.OPENAI_EMBEDDING_MODEL = MODEL;
   configureEmbeddingDimensions(DIMENSIONS);
@@ -155,6 +161,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (originalSparseScoring === undefined) {
+    delete process.env.RAG_SPARSE_SCORING;
+  } else {
+    process.env.RAG_SPARSE_SCORING = originalSparseScoring;
+  }
   resetPgvectorRuntime();
   resetOpenAIProvider();
   configureEmbeddingDimensions(null);

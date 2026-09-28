@@ -87,7 +87,7 @@ afterEach(() => {
 });
 
 test("sparse scoring settings: a strict choice, BM25 parameters, the pruning fraction and the common-term cap", () => {
-  assert.equal(getSparseScoring(), "ts_rank_cd");
+  assert.equal(getSparseScoring(), "bm25");
   process.env.RAG_SPARSE_SCORING = " BM25 ";
   assert.equal(getSparseScoring(), "bm25");
   process.env.RAG_SPARSE_SCORING = "bm2";

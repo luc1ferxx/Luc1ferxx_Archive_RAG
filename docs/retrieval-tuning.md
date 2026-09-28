@@ -4,6 +4,8 @@
 
 ## BM25 与常见词剪枝
 
+> 2026-09-27 更新：`RAG_SPARSE_SCORING` 默认改为 `bm25`（用户决定）。QASPER dev 上与 `ts_rank_cd` 没有显著差异；升级前写入的库先跑 `npm run vector:sparse-length` 回填分块长度。设 `RAG_SPARSE_SCORING=ts_rank_cd` 可以回到原来的排序。
+
 1）更新现有行：
 - `RAG_PGVECTOR_TEXT_SEARCH_CONFIG`：说明结尾改为"默认用 `ts_rank_cd` 排序（不是 BM25）；`RAG_SPARSE_SCORING=bm25` 时改用 Okapi BM25。"
 

@@ -31,7 +31,7 @@ test("case evidence mirrors the seam's shape for hybrid and dense-only runs", ()
 
   assert.equal(hybrid.vectorStoreProvider, "pgvector");
   assert.equal(hybrid.denseBackend, "pgvector_cosine");
-  assert.equal(hybrid.sparseBackend, "postgres_fts_ts_rank_cd");
+  assert.equal(hybrid.sparseBackend, "postgres_bm25");
   assert.equal(hybrid.hybridFusion, "rrf");
   assert.equal(hybrid.fallback, null);
   assert.deepEqual(hybrid.routes.dense, { candidateCount: 4, executed: true, queryCount: 1 });

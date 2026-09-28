@@ -1,3 +1,6 @@
+import { getSparseScoring } from "../rag/config.js";
+import { PGVECTOR_SPARSE_BACKENDS } from "../rag/vector-store-pgvector-sparse.js";
+
 // The retrieval block of a synthetic report, derived from per-case evidence.
 //
 // Shared by the runner that writes reports, the fixtures that build passing
@@ -147,7 +150,7 @@ export const buildCaseRetrievalEvidence = ({
   },
   sparseBackend: hybridEnabled
     ? vectorStoreProvider === "pgvector"
-      ? "postgres_fts_ts_rank_cd"
+      ? PGVECTOR_SPARSE_BACKENDS[getSparseScoring()]
       : `${vectorStoreProvider}_sparse`
     : null,
   vectorStoreProvider,

@@ -166,7 +166,7 @@ test("local and qdrant stay available as explicit opt-ins with their own route b
       denseBackend: "pgvector_cosine",
       hybridEnabled: true,
       hybridFusion: "rrf",
-      sparseBackend: "postgres_fts_ts_rank_cd",
+      sparseBackend: "postgres_bm25",
       transactional: true,
       vectorStoreProvider: "pgvector",
     });

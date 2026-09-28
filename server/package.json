@@ -8,6 +8,7 @@
     "archive:ingest": "node archive-ingest.mjs",
     "vector:reindex": "node vector-reindex.mjs",
     "vector:index": "node vector-index.mjs",
+    "vector:sparse-length": "node sparse-length-backfill.mjs",
     "ingest:jobs": "node ingest-jobs.mjs",
     "test:pgvector": "node --test --test-concurrency=1 test/vector-store-pgvector.integration.test.mjs test/vector-store-pgvector-versions.integration.test.mjs test/agent-execution-graph-postgres.integration.test.mjs test/agent-unified-graph-postgres.integration.test.mjs test/postgres-row-level-security.integration.test.mjs test/ingest-jobs-postgres.integration.test.mjs test/ingest-pipeline-postgres.integration.test.mjs test/vector-store-pgvector-bm25.integration.test.mjs",
     "worker:ingest": "node ingest-worker.mjs",
