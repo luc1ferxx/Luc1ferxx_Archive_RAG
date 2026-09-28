@@ -195,7 +195,7 @@ RAG_EMBEDDING_DIMENSIONS=768
 
 ## 实测结果
 
-数字来自本地 7B 模型（`qwen2.5:7b` + `nomic-embed-text`）和单台机器，不是 GPT 级模型，也没有生产流量。差异附配对 bootstrap 95% 区间，区间不含 0 才称"显著"。命令、提交号和细节见 [CURRENT-TRUTH.md](server/docs/interview/CURRENT-TRUTH.md)。
+数字来自本地 7B 模型（`qwen2.5:7b` + `nomic-embed-text`）和单台机器，不是 GPT 级模型，也没有生产流量。差异附配对 bootstrap 95% 区间，区间不含 0 才称"显著"。命令和细节见 [docs/evaluation.md](docs/evaluation.md)。
 
 **检索与问答**（QASPER dev，外部标注，不用 LLM 评审）
 
@@ -244,7 +244,6 @@ RAG_EMBEDDING_DIMENSIONS=768
 | [docs/configuration.md](docs/configuration.md) | 环境变量 |
 | [docs/deployment.md](docs/deployment.md) | Docker 一键部署、各个 profile、异步入库和多实例 |
 | [docs/development.md](docs/development.md) | API、目录结构、工程化基线、开发约束 |
-| [server/docs/interview/](server/docs/interview/) | 面试材料：数字出处、3 分钟讲述、故障故事、高频追问 |
 
 ## 当前限制
 
