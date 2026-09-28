@@ -185,7 +185,7 @@ Backend `npm test` runs `test/run.test.mjs`, which discovers every `server/test/
   - Pages finish (counters, logger, `afterBatch`) in listing order. A test that asserts per-page progress passes `concurrency: 1`.
   - The versions integration crash test accepts any committed subset of the documents in flight; resume must finish exactly the rest.
 - The index-switch load scenario takes `--switch-build-concurrency`. With the query cache on, it warms every instance's cache under the new version (phase "new version, cache warming") before measuring "new version active".
-- The pgvector sparse route has two scorings. Set them with `RAG_SPARSE_SCORING=ts_rank_cd|bm25`; the default is `ts_rank_cd`, and an unknown value throws.
+- The pgvector sparse route has two scorings. Set them with `RAG_SPARSE_SCORING=ts_rank_cd|bm25`; the default is `bm25`, and an unknown value throws.
   - `ts_rank_cd` is PostgreSQL's cover-density rank. Never call it BM25. Its runtime `sparseBackend` is `postgres_fts_ts_rank_cd`.
   - `bm25` is Okapi BM25 (`rag/vector-store-pgvector-sparse.js`, migrations 029/030). Its `sparseBackend` is `postgres_bm25`.
   - Both use Lucene's IDF and `RAG_BM25_K1` / `RAG_BM25_B`, the same as the local store's BM25 in `rag/sparse-store.js`. That local store is the reference: over the same chunks and statistics the scores match within 1e-9.
@@ -204,10 +204,10 @@ Backend `npm test` runs `test/run.test.mjs`, which discovers every `server/test/
   - candidates come through GIN from terms whose document frequency is at most that share of the scope's chunks, and every term then scores them;
   - it runs exhaustively when pruning would keep no terms or all of them, when the documents hold at most `PGVECTOR_BM25_PRUNE_MIN_CHUNKS` (1000) chunks, or when fewer than K candidates come back.
 - `npm run eval:sparse-scoring` measures this route. `eval:qasper-retrieval` measures the local store instead. `bench:pgvector-scale -- --sparse-doc-sets ... --prune-df-fractions ...` measures latency.
-- BM25 stays opt-in:
-  - on QASPER dev, hybrid evidence recall minus ts_rank_cd was -0.0012 [-0.0122, +0.0097], which misses the pre-declared -0.01 non-inferiority bound;
+- BM25 is the default by the user's decision, not because it measured better:
+  - on QASPER dev, hybrid evidence recall minus ts_rank_cd was -0.0012 [-0.0122, +0.0097], not significant either way and short of the pre-declared -0.01 non-inferiority bound, so do not describe BM25 as the better scoring;
   - pruning does halve the 100k-chunk whole-table and 1000-document p95.
-- Keep the triggers on even while `ts_rank_cd` is the default, so switching needs no rebuild. They add about 6% per ingested document.
+- Keep the triggers on whichever scoring is selected, so switching needs no rebuild. They add about 6% per ingested document.
 - Semantic answer cache (`server/rag/semantic-cache.js`, `RAG_SEMANTIC_CACHE=on`, default `off`; config block in `rag/config.js`).
   - Seam: a per-process LRU (`RAG_SEMANTIC_CACHE_MAX_ENTRIES` 500, `RAG_SEMANTIC_CACHE_TTL_MS` 1 h) at the answer seam `executeDocumentRag`. The lookup runs after routing and the query embedding and before retrieval, so it adds no model call. A hit returns the stored document RAG response and skips retrieval and the answer model.
   - Key: the tenant (`accessScope` userId/workspaceId; a caller that passes none bypasses the cache); the exact docId set with each document's content version; the active index version (pgvector version id and pointer generation) plus the query embedding space; the answer prompt fingerprints; the chat and fallback models; route mode and requirement count; the agent retrieval-plan shape with the question removed (follow-up plans are never cached); the preference block; and a fingerprint of the RAG_*/OPENAI_* configuration.
