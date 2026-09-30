@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { derivePgvectorHealthProblems } from "../health.js";
-import { configureEmbeddingDimensions } from "../rag/config.js";
+import { DEFAULT_SPARSE_PRUNE_DF_FRACTION, configureEmbeddingDimensions } from "../rag/config.js";
 import {
   describeEmbeddingCache,
   embedQueryCached,
@@ -97,6 +97,8 @@ const ENV_KEYS = [
   "RAG_INDEX_VERSION_DUAL_WRITE_GRACE_MS",
   "RAG_INDEX_VERSION_POINTER_TTL_MS",
   "RAG_PGVECTOR_ITERATIVE_SCAN",
+  "RAG_SPARSE_PRUNE_DF_FRACTION",
+  "RAG_SPARSE_SCORING",
   "VECTOR_STORE_PROVIDER",
 ];
 let savedEnv;
@@ -749,30 +751,63 @@ test("searches go to the active version: its table, its function and a query emb
   );
 
   process.env.POSTGRES_ROW_LEVEL_SECURITY = "enforce";
+
+  const tenantSparse = () =>
+    runWithDatabaseTenant({ userId: "alice" }, () =>
+      searchPgvectorSparseDocuments({ docIds: ["doc-1", "doc-2"], queryText: "beta budget", topK: 3 })
+    );
+  const lastCall = (pattern) => database.log.filter((entry) => pattern.test(entry.sql)).at(-1);
+
+  // ts_rank_cd without pruning: the active version's migration-014 rank function.
+  process.env.RAG_SPARSE_SCORING = "ts_rank_cd";
   process.env.RAG_SPARSE_PRUNE_DF_FRACTION = "off";
 
   try {
-    const sparse = await runWithDatabaseTenant({ userId: "alice" }, () =>
-      searchPgvectorSparseDocuments({ docIds: ["doc-1", "doc-2"], queryText: "beta budget", topK: 3 })
-    );
-    const sparseCall = database.log.filter((entry) => /_sparse_rank\(/.test(entry.sql)).at(-1);
+    const sparse = await tenantSparse();
+    const sparseCall = lastCall(/_sparse_rank\(/);
 
     assert.equal(sparse[0].document.metadata.docId, "doc-2");
     assert.match(sparseCall.sql, new RegExp(`FROM ${table}_sparse_rank\\(`));
     assert.match(sparseCall.sql, new RegExp(`JOIN ${table} c ON`));
+    assert.equal(lastCall(/_sparse_search\(/), undefined, "no search function call yet");
+
+    // ts_rank_cd with pruning on: the active version's migration-030 search function.
+    delete process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
+
+    const pruned = await tenantSparse();
+    const prunedCall = lastCall(/_sparse_search\(/);
+
+    assert.equal(pruned[0].document.metadata.docId, "doc-2");
+    assert.match(prunedCall.sql, new RegExp(`FROM ${table}_sparse_search\\(`));
+    assert.match(prunedCall.sql, new RegExp(`JOIN ${table} c ON`));
+    assert.equal(prunedCall.values[5], "ts_rank_cd");
   } finally {
     delete process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
+    delete process.env.RAG_SPARSE_SCORING;
   }
 
-  // With pruning on (the default), the active version's migration-030 search function.
-  const pruned = await runWithDatabaseTenant({ userId: "alice" }, () =>
-    searchPgvectorSparseDocuments({ docIds: ["doc-1", "doc-2"], queryText: "beta budget", topK: 3 })
-  );
-  const searchCall = database.log.filter((entry) => /_sparse_search\(/.test(entry.sql)).at(-1);
+  // The default, BM25: the same function of the active version, pruning on or off.
+  for (const pruning of [undefined, "off"]) {
+    const rankCalls = database.log.filter((entry) => /_sparse_rank\(/.test(entry.sql)).length;
 
-  assert.equal(pruned[0].document.metadata.docId, "doc-2");
-  assert.match(searchCall.sql, new RegExp(`FROM ${table}_sparse_search\\(`));
-  assert.match(searchCall.sql, new RegExp(`JOIN ${table} c ON`));
+    if (pruning) {
+      process.env.RAG_SPARSE_PRUNE_DF_FRACTION = pruning;
+    }
+
+    try {
+      const found = await tenantSparse();
+      const searchCall = lastCall(/_sparse_search\(/);
+
+      assert.equal(found[0].document.metadata.docId, "doc-2");
+      assert.match(searchCall.sql, new RegExp(`FROM ${table}_sparse_search\\(`));
+      assert.match(searchCall.sql, new RegExp(`JOIN ${table} c ON`));
+      assert.equal(searchCall.values[5], "bm25");
+      assert.equal(searchCall.values[8], pruning ? null : DEFAULT_SPARSE_PRUNE_DF_FRACTION);
+      assert.equal(database.log.filter((entry) => /_sparse_rank\(/.test(entry.sql)).length, rankCalls);
+    } finally {
+      delete process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

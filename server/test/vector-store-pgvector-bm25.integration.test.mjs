@@ -267,7 +267,7 @@ if (!adminDatabaseUrl) {
 
     assert.deepEqual([...targets.statisticsTables].sort(), statisticsTables);
     assert.equal(targets.searchFunction, `${TABLE}_sparse_search${modules.sparse.PGVECTOR_SPARSE_SEARCH_SIGNATURE}`);
-    assert.equal(targets.searchFunctionUsed, true, "pruning is on by default");
+    assert.equal(targets.searchFunctionUsed, true, "BM25, the default scoring, always calls it");
 
     // checks.rowLevelSecurity fails when the tenant loses the grant (a
     // changed POSTGRES_TENANT_ROLE, a restore), and passes once it is back.
@@ -284,13 +284,27 @@ if (!adminDatabaseUrl) {
       assert.equal(denied.sparseSearchExecutable, false);
       assert.match(denied.message, /migration 030/);
 
+      // BM25 (the default) calls it with pruning off too, so health still requires it.
+      process.env.RAG_SPARSE_PRUNE_DF_FRACTION = "off";
+      assert.equal((await modules.pgvector.describePgvectorSparseRowLevelSecurityTargets()).searchFunctionUsed, true);
+      assert.equal((await buildHealthReport()).checks.rowLevelSecurity.sparseSearchExecutable, false);
+
+      // ts_rank_cd with pruning on calls it for several documents: still required.
+      delete process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
+      process.env.RAG_SPARSE_SCORING = "ts_rank_cd";
+      assert.equal((await buildHealthReport()).checks.rowLevelSecurity.status, "error");
+
       // Pruning off and ts_rank_cd: tenants never call it, so health does not require it.
       process.env.RAG_SPARSE_PRUNE_DF_FRACTION = "off";
+      assert.equal((await modules.pgvector.describePgvectorSparseRowLevelSecurityTargets()).searchFunctionUsed, false);
       assert.equal((await buildHealthReport()).checks.rowLevelSecurity.status, "ok");
     } finally {
       delete process.env.RAG_SPARSE_PRUNE_DF_FRACTION;
+      delete process.env.RAG_SPARSE_SCORING;
       await q(`GRANT EXECUTE ON FUNCTION ${signature} TO ${tenantRole}`);
     }
+
+    assert.equal((await buildHealthReport()).checks.rowLevelSecurity.sparseSearchExecutable, true);
   });
 
   test("statistics stay exact through ingest, replacement, delete, cascade, clear and truncate", async () => {

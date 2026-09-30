@@ -137,8 +137,15 @@ test("a call may override the configured scoring, and each scoring has its own b
     pruneMinChunks: PGVECTOR_SPARSE_PRUNE_MIN_CHUNKS,
   };
 
+  // BM25 is the configured default; a call (an evaluation arm, the benchmark)
+  // names the other scoring, and the configuration can select it too.
+  assert.deepEqual(resolvePgvectorSparseScoring(), { ...defaults, scoring: "bm25" });
+  assert.deepEqual(resolvePgvectorSparseScoring({ scoring: "ts_rank_cd" }), { ...defaults, scoring: "ts_rank_cd" });
+  assert.deepEqual(resolvePgvectorSparseScoring({ scoring: " BM25 " }), { ...defaults, scoring: "bm25" });
+  process.env.RAG_SPARSE_SCORING = "ts_rank_cd";
   assert.deepEqual(resolvePgvectorSparseScoring(), { ...defaults, scoring: "ts_rank_cd" });
   assert.deepEqual(resolvePgvectorSparseScoring({ scoring: "bm25" }), { ...defaults, scoring: "bm25" });
+  delete process.env.RAG_SPARSE_SCORING;
   assert.equal(resolvePgvectorSparseScoring({ pruneMinChunks: 0, scoring: "bm25" }).pruneMinChunks, 0);
   assert.equal(resolvePgvectorSparseScoring({ pruneDfFraction: null, scoring: "bm25" }).pruneDfFraction, null);
   assert.equal(resolvePgvectorSparseScoring({ pruneDfFraction: 1, scoring: "bm25" }).pruneDfFraction, null);
@@ -148,24 +155,33 @@ test("a call may override the configured scoring, and each scoring has its own b
 
   // BM25 always goes through the search function; ts_rank_cd only when it
   // prunes a multi-document search (one document keeps the plain statement).
-  const tsRankCd = resolvePgvectorSparseScoring();
+  const tsRankCd = resolvePgvectorSparseScoring({ scoring: "ts_rank_cd" });
 
-  assert.equal(usesPgvectorSparseSearchFunction({ docCount: 1, options: resolvePgvectorSparseScoring({ scoring: "bm25" }) }), true);
+  assert.equal(usesPgvectorSparseSearchFunction({ docCount: 1, options: resolvePgvectorSparseScoring() }), true);
+  assert.equal(
+    usesPgvectorSparseSearchFunction({ docCount: 2, options: resolvePgvectorSparseScoring({ pruneDfFraction: null }) }),
+    true,
+    "BM25 with pruning off still goes through the search function"
+  );
   assert.equal(usesPgvectorSparseSearchFunction({ docCount: 1, options: tsRankCd }), false);
   assert.equal(usesPgvectorSparseSearchFunction({ docCount: 2, options: tsRankCd }), true);
   assert.equal(
-    usesPgvectorSparseSearchFunction({ docCount: 2, options: resolvePgvectorSparseScoring({ pruneDfFraction: null }) }),
+    usesPgvectorSparseSearchFunction({
+      docCount: 2,
+      options: resolvePgvectorSparseScoring({ pruneDfFraction: null, scoring: "ts_rank_cd" }),
+    }),
     false
   );
 
   assert.equal(getPgvectorSparseBackend("ts_rank_cd"), "postgres_fts_ts_rank_cd");
   assert.equal(getPgvectorSparseBackend("bm25"), "postgres_bm25");
   process.env.VECTOR_STORE_PROVIDER = "pgvector";
-  assert.equal(describeVectorStoreRuntime().sparseBackend, "postgres_fts_ts_rank_cd");
-  process.env.RAG_SPARSE_SCORING = "bm25";
   assert.equal(getPgvectorSparseBackend(), "postgres_bm25");
   // The runtime report and every /chat retrieval block name the scoring that ran.
   assert.equal(describeVectorStoreRuntime().sparseBackend, "postgres_bm25");
+  process.env.RAG_SPARSE_SCORING = "ts_rank_cd";
+  assert.equal(getPgvectorSparseBackend(), "postgres_fts_ts_rank_cd");
+  assert.equal(describeVectorStoreRuntime().sparseBackend, "postgres_fts_ts_rank_cd");
 });
 
 test("a new index version's table gets the statistics objects through the migration-030 installer, and retire drops them", () => {
