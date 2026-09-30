@@ -11,6 +11,15 @@ const questionSchema = z.object({
   question: requiredTrimmedString("Question is required."),
 });
 
+/**
+ * The /chat and /chat/stream request check: the question from the query (GET)
+ * or the JSON body. Answers 400 and returns null when it fails. Exported so the
+ * public edge of a split deployment (rag/agent-service/edge-router.js) refuses
+ * the same requests before forwarding them to the agent tier.
+ */
+export const validateChatRequest = (req, res) =>
+  parseOrRespond(questionSchema, req.method === "GET" ? req.query : req.body, res);
+
 export const createChatRouter = (services) => {
   const router = Router();
   const {
@@ -33,7 +42,7 @@ export const createChatRouter = (services) => {
   // point, so the two responses can never disagree about what was answered.
   const parseChatRequest = (req, res) => {
     const payload = req.method === "GET" ? req.query : req.body;
-    const parsed = parseOrRespond(questionSchema, payload, res);
+    const parsed = validateChatRequest(req, res);
     if (!parsed) return null;
     const accessScope = getRequestAccessScope(req);
 
@@ -96,7 +105,12 @@ export const createChatRouter = (services) => {
     res.flushHeaders?.();
 
     let open = true;
-    req.on("close", () => {
+    // The response's close, not the request's: current Node emits close on the
+    // request as soon as its body has been read, so a listener there either
+    // never fires or fires before the run starts, depending on how many async
+    // hops the middleware took. The response closes when the client goes away
+    // (or once it has ended).
+    res.on("close", () => {
       open = false;
     });
     const send = (event, data) => {

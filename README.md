@@ -23,6 +23,7 @@
 - 证据不足时补检索、请求澄清或明确拒答，不编一个看起来合理的答案。
 - 后台 Agent 任务、审批门和运行记录都持久化，进程崩溃后可以恢复；高风险动作要人工审批。
 - 多租户、多实例部署；上传可以异步入库，换 embedding 模型时零停机重建索引。
+- 默认一个进程；需要时可以拆成 API、Agent 编排、检索、模型网关几层，各自加副本。
 - 可以作为 MCP server 供其他 Agent 调用，也能不连数据库单机运行。
 
 ## 架构
@@ -31,35 +32,44 @@
 flowchart LR
   UI["React 工作台"] -->|"/chat/stream (SSE)"| API
   MCP["MCP 客户端"] --> API
-  API["Express API<br/>鉴权 · 限流 · 租户绑定"]
 
-  subgraph Agent["Agent 运行时"]
+  subgraph Edge["API 层（api）"]
+    API["Express API<br/>鉴权 · 限流 · 租户绑定"]
+    Upload["上传 / 替换"] --> Pipe["入库：解析 → 切块 → 向量化（合批） → 写索引"]
+  end
+
+  subgraph Agent["Agent 编排（agent）"]
     Plan["意图 / 执行规划器"] --> Exec["执行<br/>固定顺序（默认）或统一图（guarded）"]
+    Exec --> Gate["语义缓存（可选） · 拒答门控 · 上下文选择"]
     Exec --> Check["Claim 校验 + 有界补检索"]
     Check --> Final["Finalizer"]
   end
 
-  subgraph Retrieval["检索"]
-    Cache["语义缓存（可选）"] --> Hybrid["pgvector HNSW + BM25<br/>常见词剪枝 · RRF"]
-    Hybrid --> Rerank["交叉编码器重排（可选）"] --> Gate["拒答门控"]
+  subgraph Retrieval["检索（retrieval）"]
+    Hybrid["查询 embedding · pgvector HNSW + BM25<br/>常见词剪枝 · RRF"] --> Rerank["交叉编码器重排（可选）"]
   end
 
-  subgraph Ingest["入库"]
-    Upload["上传 / 替换"] --> Pipe["解析 → 切块 → 向量化（合批） → 写索引"]
+  subgraph ModelGateway["模型网关（model-gateway）"]
+    GW["重试 · 备用模型 · 并发上限 · 熔断<br/>计量 · 配额 · 上游副本"]
   end
 
-  API --> Plan
-  Exec --> Cache
-  Exec --> Gateway["模型网关<br/>重试 · 备用模型 · 并发上限 · 熔断"]
   API --> Upload
+  API -->|"Agent 请求"| Plan
   Final -->|"进度 · 校验过的草稿 · 最终答案"| API
-  Gateway -.-> Redis[("Redis<br/>跨实例共享状态（可选）")]
+  Gate --> Hybrid
+  Agent --> GW
+  Retrieval --> GW
+  Pipe --> GW
+  GW --> Backends["推理服务：chat · embedding · 重排<br/>（可多副本）"]
+  GW -.-> Redis[("Redis<br/>跨实例共享状态（可选）")]
   Hybrid --> PG
   Pipe --> PG
   Agent --> PG[("PostgreSQL + 行级安全<br/>文档 · 带版本的索引 · 运行与检查点 · 任务队列 · 记忆")]
 ```
 
 一次请求怎么走：API 鉴权并绑定租户 → 规划器在白名单内选意图和步骤 → 执行文档检索、Skill、Web 和 Capability → 逐条校验结论是否有证据支持，必要时补检索一轮 → finalizer 删掉没有证据的内容，流式接口只推送校验过的整句。
+
+图里的四个框默认都在一个进程里（`ARCHIVE_RAG_ROLE` 不设，即 `all`），层之间是函数调用。设了角色和服务地址后，每个框是一个独立进程，可以单独加副本，层之间走带签名内部身份的 HTTP。入库仍在 API 层（或独立的入库 worker），不经过检索层。
 
 ### 分层要点
 
@@ -98,12 +108,20 @@ flowchart LR
   - 校验通过后原子切换，所有实例 2 秒内跟上；可以回滚。
   - 查询只在当前激活版本的向量空间里做一次 embedding。
 
+**拆分部署（可选）**
+- **一个镜像，五种角色。** `ARCHIVE_RAG_ROLE` 选 `all`（默认，单进程）、`api`、`agent`、`retrieval` 或 `model-gateway`。`AGENT_SERVICE_URL`、`RETRIEVAL_SERVICE_URL`、`MODEL_GATEWAY_URL` 各列一个或多个副本；每一层都忽略指向自己的地址，所以同一份配置可以发给所有进程。
+- **API 层**只做公网入口：鉴权、限流、上传、文档、入库任务、管理接口。Agent 请求按单体的同一套规则校验后转发给 agent 层；它不跑 Agent，也不做启动恢复。
+- **层间身份。** 租户只写在短期签名 token（HS256，默认 60 秒）里，接收方按它设置访问范围和数据库租户；请求体里的租户字段一律不认，公网请求带来的内部请求头在入口就被删掉。
+- **调用与故障。** 选进行中请求最少的副本；连不上或返回 502/503/504 的副本暂时跳过；已经发出的 `/chat` 不会重发到另一个副本。下游不可用时返回 503/504 和固定错误码，不带地址、问题或文档内容。开启 OpenTelemetry 时，跨层是同一条 trace。
+- **检索层**按调用方的租户在行级安全下检索，别的租户的文档和不存在的文档返回完全一样的结果。远程检索的结果与进程内逐字段相同（有测试比对），调用方不读分块表，也不做检索用的 embedding。
+- **模型网关**集中执行重试、备用模型、并发上限、熔断，另外做用量计量、按 workspace 的配额，并在多个 chat、embedding、重排上游之间分配请求。调用方代码不变：设了 `MODEL_GATEWAY_URL`，模型调用就自动经过网关。
+
 **基础设施**
 - **多租户隔离。**
   - 每条带租户范围的 SQL 都在事务里切换到租户角色，由行级安全兜底：即使漏写了过滤条件，也读不到其他租户的数据。
   - 租户设置和语句用扩展协议流水线一次往返发出。
   - 行级安全下全文检索用不上 GIN（`@@` 不是 leakproof），多文档检索改由一个只返回 id 和分数的 owner 函数排序。
-- **模型网关。** 退避重试、遵守 Retry-After、切换备用模型、每个模型有并发上限和熔断；配置 Redis 后多个实例共享这些状态。规划器输出用 strict JSON Schema 约束。
+- **模型调用。** 退避重试、遵守 Retry-After、切换备用模型、每个模型有并发上限和熔断；配置 Redis 后多个实例共享这些状态。拆分部署时这些都在模型网关里执行。规划器输出用 strict JSON Schema 约束。
 - **提示注入防御。** 检索到的文本、文件名和网页结果进入 prompt 前先经过确定性筛查；答案里模型没见过的链接会被删除。
 - **可观测、可评测。**
   - OpenTelemetry GenAI trace 记录每个规划器、Skill 和模型调用的耗时与 token；每个 prompt 都有版本和指纹。
@@ -122,7 +140,11 @@ flowchart LR
 | `server/rag/ingest-*.js` | 入库任务队列、分阶段流水线、跨文档合批、worker |
 | `server/rag/postgres*.js` | 连接池、租户流水线、行级安全下的租户上下文、run store、`LISTEN` 连接 |
 | `server/rag/self-check/` | Claim 校验（词法规则、数字归一化、LLM 评审） |
-| `server/rag/openai*.js`、`model-call-guard.js`、`shared-state.js` | 模型网关：重试、备用模型、并发上限、熔断、共享状态 |
+| `server/rag/openai*.js`、`model-call-guard.js`、`shared-state.js` | 模型调用：重试、备用模型、并发上限、熔断、共享状态 |
+| `server/rag/service-topology.js`、`service-identity.js`、`service-client.js` | 拆分部署：角色与服务地址、层间签名身份、带副本选择和故障转移的客户端 |
+| `server/rag/agent-service/`、`server/server.js` | 按角色启动和停机、公网入口的转发、agent 层应用 |
+| `server/rag/retrieval-service/`、`server/retrieval-service.mjs` | 检索层服务、远程检索客户端、无损编码 |
+| `server/rag/model-gateway/`、`server/model-gateway.mjs` | 模型网关服务、上游副本池、配额、用量账本、调用侧客户端 |
 | `server/db/migrations/` | 表结构、行级安全策略、BM25 统计、索引版本、入库任务 |
 | `server/evaluation/` | 评测、压测、规模测试和质量门禁 |
 | `src/` | React 工作台 |
@@ -136,7 +158,7 @@ cp server/.env.example server/.env   # 至少填 OPENAI_API_KEY，或按下面�
 docker compose --profile app up -d --build
 ```
 
-可选组件：`--profile layout` 加 Docling 版面解析，`--profile shared-state` 加 Redis 共享状态；交叉编码器重排要同时带 `-f compose.rerank.yml --profile rerank`。详见 [docs/deployment.md](docs/deployment.md)。
+可选组件：`--profile layout` 加 Docling 版面解析，`--profile shared-state` 加 Redis 共享状态；交叉编码器重排要同时带 `-f compose.rerank.yml --profile rerank`。详见 [docs/deployment.md](docs/deployment.md)。按层拆成独立进程见 [docs/deployment.md 的"拆分部署"](docs/deployment.md#拆分部署可选)。
 
 **本地开发：**
 
@@ -164,6 +186,8 @@ RAG_EMBEDDING_DIMENSIONS=768
 | 开关 | 作用 |
 | --- | --- |
 | `DOCCOMPARE_STANDALONE=1` | 没有 PostgreSQL 时改用文件存储 |
+| `ARCHIVE_RAG_ROLE=api\|agent\|retrieval\|model-gateway` | 拆分部署时这个进程跑哪一层；不设就是 `all`，单进程 |
+| `AGENT_SERVICE_URL` / `RETRIEVAL_SERVICE_URL` / `MODEL_GATEWAY_URL` + `INTERNAL_SERVICE_KEYS` | 把对应的工作交给独立的层（可列多个副本），层间用这组密钥签名 |
 | `RAG_INGEST_MODE=async` | 上传立即返回 202，由 worker 入库（`npm run worker:ingest` 可单独起 worker） |
 | `AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` | 用统一图执行整个请求 |
 | `RAG_RERANK_ENABLED=true RAG_RERANK_PROVIDER=cross-encoder` | 打开交叉编码器重排 |
@@ -220,6 +244,7 @@ RAG_EMBEDDING_DIMENSIONS=768
 | 入库 | 独立 worker 35 篇/秒，同步 25 篇/秒；上传请求从约 257 ms 变成几毫秒的 202 |
 | 索引版本 | 2 实例持续压测下换 embedding 维度并切换、回滚，0 错误；建版本 8.6 → 33 篇/秒（4 篇并行） |
 | pgvector 规模 | 100 万分块 10.4 GB；单文档检索 p95 < 1 ms；跨 100 篇文档混合检索 p95 约 21 ms（热缓存） |
+| 拆分部署 | 每多一跳 p50 +4.3 ms；瓶颈在 agent 层时 agent ×2 / ×4 吞吐 1.84 / 2.75 倍，其他层扩容 1.00 倍；同一台机器上相同进程数的单体仍快 1.56 倍 |
 
 **可靠性与安全**
 
@@ -242,7 +267,7 @@ RAG_EMBEDDING_DIMENSIONS=768
 | [docs/data-lifecycle.md](docs/data-lifecycle.md) | 索引版本（零停机重建、切换、回滚）和分阶段入库流水线 |
 | [docs/evaluation.md](docs/evaluation.md) | 评测命令、质量门禁、所有改前 / 改后数字 |
 | [docs/configuration.md](docs/configuration.md) | 环境变量 |
-| [docs/deployment.md](docs/deployment.md) | Docker 一键部署、各个 profile、异步入库和多实例 |
+| [docs/deployment.md](docs/deployment.md) | Docker 一键部署、各个 profile、异步入库和多实例、按层拆分部署 |
 | [docs/development.md](docs/development.md) | API、目录结构、工程化基线、开发约束 |
 
 ## 当前限制
@@ -254,3 +279,4 @@ RAG_EMBEDDING_DIMENSIONS=768
 - **检索**：BM25 没证明优于 `ts_rank_cd`；只由常见词组成的查询剪枝后，前 10 条会和不剪枝时明显不同；查询适配器只针对 QASPER 训练，换语料要重训。
 - **安全**：提示注入的确定性筛查挡不住刻意改写；行级安全防的是漏写过滤条件的 bug，不防 SQL 注入；只有静态 token，没有 SSO。
 - **规模与运维**：所有测量都在一台机器上、用假模型；没有 K8s、自动扩缩、告警和备份演练；重排服务只能跑 CPU。
+- **拆分部署**：只在一台机器上跑过，所有层共用一个 PostgreSQL；层间身份是共享密钥的 HMAC 签名，不是 mTLS，内部端口只能放在内网；`compose.services.yml` 还没有真正构建和启动过；没有服务发现或 K8s 清单，副本列表写在环境变量里；没有 Redis 时，模型网关的配额、并发上限和熔断按网关进程计算；入口超时后 agent 层上的运行不会被取消；在同一台机器上，同样进程数的单体比拆分快（见上面的数字），拆分的价值是只给瓶颈层加副本。

@@ -533,6 +533,25 @@ test("observability report splits completions by prompt template", () => {
   );
 });
 
+test("observability report counts a gateway call once: metered events, not the caller's mirror", () => {
+  const event = (annotationId, totalTokens) => ({
+    annotations: [{ category: "metering", id: annotationId, severity: "info", source: "model_gateway" }],
+    eventType: "llmops_metric",
+    latencyMs: 100,
+    operation: "llm_completion",
+    stage: "complete_text",
+    status: "ok",
+    totalTokens,
+    traceType: "llmops",
+  });
+  const report = buildObservabilityReport({
+    events: [event("model_gateway_metered", 120), event("model_gateway_mirror", 120)],
+  });
+
+  assert.equal(report.llmops.eventCount, 1);
+  assert.equal(report.llmops.totalTokens, 120);
+});
+
 test("observability report aggregates recovery and replay metrics", () => {
   const report = buildObservabilityReport({
     events: [

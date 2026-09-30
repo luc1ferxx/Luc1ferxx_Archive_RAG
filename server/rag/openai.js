@@ -1,5 +1,12 @@
-import { createChatClient, createEmbeddingsClient } from "./openai-client.js";
+import { createChatClient, createEmbeddingsClient, toChatMessages } from "./openai-client.js";
 import { CIRCUIT_OPEN_CODE, resetModelCallGuards } from "./model-call-guard.js";
+import { getModelGatewayCall, recordModelMetricEvent } from "./model-gateway/call-context.js";
+import {
+  requestModelGatewayCompletion,
+  requestModelGatewayEmbeddings,
+} from "./model-gateway/client.js";
+import { MODEL_GATEWAY_MIRROR_ANNOTATION } from "./model-gateway/protocol.js";
+import { isModelGatewayEnabled } from "./service-topology.js";
 import { addActiveSpanEvent } from "./tracing.js";
 import { normalizePromptDescriptor } from "./prompt-registry.js";
 import { markModelQueryVector } from "./query-adapter.js";
@@ -100,12 +107,21 @@ export const computeRetryDelayMs = ({
     : jittered;
 };
 
-const withRetry = async (operation, failureMessage) => {
+// A caller that has gone away (the model gateway's signal) stops the retries:
+// nobody is waiting for the answer.
+const throwIfAborted = (signal) => {
+  if (signal?.aborted) {
+    throw signal.reason;
+  }
+};
+
+const withRetry = async (operation, failureMessage, { signal } = {}) => {
   let lastError = null;
   let emptyCompletionRetries = 0;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
     try {
+      throwIfAborted(signal);
       return await operation();
     } catch (error) {
       lastError = error;
@@ -115,6 +131,7 @@ const withRetry = async (operation, failureMessage) => {
       const emptyCompletion = error?.code === EMPTY_COMPLETION_CODE;
 
       if (
+        signal?.aborted ||
         !isRetriableError(error) ||
         attempt === MAX_RETRIES ||
         (retryAfterMs !== null && retryAfterMs > MAX_RETRY_AFTER_MS) ||
@@ -138,11 +155,50 @@ const withRetry = async (operation, failureMessage) => {
     }
   }
 
-  if (lastError instanceof Error && failureMessage) {
+  if (lastError instanceof Error && failureMessage && lastError !== signal?.reason) {
     lastError.message = `${failureMessage} ${lastError.message}`.trim();
   }
 
   throw lastError;
+};
+
+// With MODEL_GATEWAY_URL set (and this process not the gateway itself), every
+// chat, embedding and rerank call goes to the model gateway, which runs the
+// retry, failover and guard below. A configured stand-in provider stays in
+// process, and so does a call the gateway is serving.
+const routesThroughModelGateway = () =>
+  !customProvider && !getModelGatewayCall() && isModelGatewayEnabled();
+
+// The route a gateway call reports before the gateway has said which model
+// answered; the event's route is replaced by the gateway's on success.
+const buildModelGatewayPendingRoute = (capability, routeId = null) => ({
+  candidateModelIds: [],
+  capability,
+  fallbackModelIds: [],
+  modelId: null,
+  providerId: "model_gateway",
+  rejectedModelIds: [],
+  routeId: routeId || null,
+  status: "model_gateway",
+});
+
+// The usage the gateway metered for the call, in place of this process's
+// estimate, so run-level ceilings charge what the gateway billed.
+const buildModelGatewayUsageMetric = (result, estimate) => {
+  const usage = result?.meteredUsage;
+
+  return usage && Number.isFinite(usage.totalTokens)
+    ? {
+        costCurrency: usage.costCurrency ?? null,
+        estimatedCostUsd: usage.estimatedCostUsd ?? null,
+        inputTokens: usage.inputTokens ?? null,
+        outputTokens: usage.outputTokens ?? null,
+        pricingSource: usage.pricingSource ?? "unavailable",
+        tokenSource: usage.tokenSource ?? "unavailable",
+        totalTokens: usage.totalTokens,
+        ...(Number.isFinite(result?.latencySloMs) ? { latencySloMs: result.latencySloMs } : {}),
+      }
+    : buildUsageMetricFields(estimate);
 };
 
 export const getOpenAIApiKey = () => {
@@ -470,22 +526,39 @@ export const embedTexts = async (texts, options = {}) => {
         stage: "embed_documents",
       }),
       policy: getRuntimeLlmOpsPolicy(),
+      recorder: recordModelMetricEvent,
     });
+  }
+
+  const documentPrefix = embeddingSpace
+    ? String(embeddingSpace.documentPrefix ?? "")
+    : getEmbeddingDocumentPrefix();
+
+  if (routesThroughModelGateway()) {
+    return embedThroughModelGateway({
+      input: withEmbeddingPrefix(safeTexts, documentPrefix),
+      inputCharacters: getTextListCharacters(safeTexts),
+      itemCount: safeTexts.length,
+      modelName: resolveEmbeddingModelName(embeddingSpace),
+      signal: options?.signal,
+      stage: "embed_documents",
+    }).then(({ vectors }) => vectors);
   }
 
   const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance({
     modelName: embeddingSpace?.model,
   });
   const inputCharacters = getTextListCharacters(safeTexts);
-  const documentPrefix = embeddingSpace
-    ? String(embeddingSpace.documentPrefix ?? "")
-    : getEmbeddingDocumentPrefix();
 
   return runWithLlmOpsMetric({
     action: () =>
       withRetry(
-        async () => instance.embedDocuments(withEmbeddingPrefix(texts, documentPrefix)),
-        "Embedding request failed."
+        async () =>
+          instance.embedDocuments(withEmbeddingPrefix(texts, documentPrefix), {
+            signal: options?.signal,
+          }),
+        "Embedding request failed.",
+        { signal: options?.signal }
       ),
     metric: getEmbeddingMetricBase({
       ...buildUsageMetricFields({
@@ -499,6 +572,45 @@ export const embedTexts = async (texts, options = {}) => {
       stage: "embed_documents",
     }),
     policy: getRuntimeLlmOpsPolicy(),
+    recorder: recordModelMetricEvent,
+  });
+};
+
+// The model the configured path would embed with: the space's pinned model, or
+// the embedding route's. Sent to the gateway explicitly, because the vectors
+// must be in this process's embedding space, not whatever the gateway has
+// configured.
+const resolveEmbeddingModelName = (embeddingSpace) =>
+  String(embeddingSpace?.model ?? "").trim() ||
+  resolveModelRouteForRuntime({
+    capability: MODEL_CAPABILITIES.embedding,
+    routeId: MODEL_ROUTE_IDS.embeddingDefault,
+  }).modelName;
+
+// Texts arrive with this process's task prefixes already applied; the gateway
+// embeds them as given. One mirror LLMOps event per call carries the usage the
+// gateway metered (protocol.js explains which side is authoritative).
+const embedThroughModelGateway = ({ input, inputCharacters, itemCount, modelName, signal, stage }) => {
+  const modelRoute = buildModelGatewayPendingRoute(MODEL_CAPABILITIES.embedding);
+  const estimate = { inputCharacters, metricContext: buildCustomRouteMetricContext() };
+
+  return runWithLlmOpsMetric({
+    action: () => requestModelGatewayEmbeddings({ input, model: modelName, signal }),
+    metric: getEmbeddingMetricBase({
+      ...buildUsageMetricFields(estimate),
+      annotations: [MODEL_GATEWAY_MIRROR_ANNOTATION],
+      inputCharacters,
+      itemCount,
+      modelName,
+      modelRoute,
+      stage,
+    }),
+    policy: getRuntimeLlmOpsPolicy(),
+    recorder: recordModelMetricEvent,
+    successMetric: (result) => ({
+      ...buildModelGatewayUsageMetric(result, estimate),
+      modelRoute: result.modelRoute ?? modelRoute,
+    }),
   });
 };
 
@@ -520,14 +632,14 @@ const describeQuerySpace = (embeddingSpace, modelName, vector) => ({
 
 export const embedQuery = async (query, options = {}) => {
   const embeddingSpace = normalizeEmbeddingSpace(options?.embeddingSpace);
-  const { modelName, vector } = await embedQueryWithModel(query, embeddingSpace);
+  const { modelName, vector } = await embedQueryWithModel(query, embeddingSpace, options?.signal);
 
   return servesQueryEmbeddingsFromStandIn()
     ? vector
     : markModelQueryVector(vector, describeQuerySpace(embeddingSpace, modelName, vector));
 };
 
-const embedQueryWithModel = async (query, embeddingSpace) => {
+const embedQueryWithModel = async (query, embeddingSpace, signal) => {
   if (customProvider?.embedQuery) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
     const metricContext = buildCustomRouteMetricContext();
@@ -545,23 +657,40 @@ const embedQueryWithModel = async (query, embeddingSpace) => {
         stage: "embed_query",
       }),
       policy: getRuntimeLlmOpsPolicy(),
+      recorder: recordModelMetricEvent,
     });
 
     return { modelName: null, vector };
+  }
+
+  const queryPrefix = embeddingSpace
+    ? String(embeddingSpace.queryPrefix ?? "")
+    : getEmbeddingQueryPrefix();
+
+  if (routesThroughModelGateway()) {
+    const gatewayModelName = resolveEmbeddingModelName(embeddingSpace);
+    const { vectors } = await embedThroughModelGateway({
+      input: `${queryPrefix}${query}`,
+      inputCharacters: getTextCharacters(query),
+      itemCount: 1,
+      modelName: gatewayModelName,
+      signal,
+      stage: "embed_query",
+    });
+
+    return { modelName: gatewayModelName, vector: vectors[0] };
   }
 
   const { instance, metricContext, modelName, modelRoute } = getEmbeddingsInstance({
     modelName: embeddingSpace?.model,
   });
   const inputCharacters = getTextCharacters(query);
-  const queryPrefix = embeddingSpace
-    ? String(embeddingSpace.queryPrefix ?? "")
-    : getEmbeddingQueryPrefix();
   const vector = await runWithLlmOpsMetric({
     action: () =>
       withRetry(
-        async () => instance.embedQuery(`${queryPrefix}${query}`),
-        "Query embedding request failed."
+        async () => instance.embedQuery(`${queryPrefix}${query}`, { signal }),
+        "Query embedding request failed.",
+        { signal }
       ),
     metric: getEmbeddingMetricBase({
       ...buildUsageMetricFields({
@@ -575,6 +704,7 @@ const embedQueryWithModel = async (query, embeddingSpace) => {
       stage: "embed_query",
     }),
     policy: getRuntimeLlmOpsPolicy(),
+    recorder: recordModelMetricEvent,
   });
 
   return { modelName, vector };
@@ -629,6 +759,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         outputCharacters: getTextCharacters(result),
       }),
       policy: getRuntimeLlmOpsPolicy(),
+      recorder: recordModelMetricEvent,
     });
 
     return {
@@ -637,6 +768,18 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
     };
   }
 
+  if (routesThroughModelGateway()) {
+    return completeThroughModelGateway({
+      capability,
+      inputText,
+      options,
+      prompt,
+      promptTemplate,
+      responseFormat,
+    });
+  }
+
+  const { signal } = options;
   const primary = getChatModelInstance(options);
   // An empty completion is retried once, then returned as it always was: callers
   // already treat empty text as "no answer". A length-truncated one is not
@@ -652,8 +795,9 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         ? await instance.invokeStream(prompt, {
             onDelta: options.onTextDelta,
             responseFormat,
+            signal,
           })
-        : await instance.invoke(prompt, { responseFormat });
+        : await instance.invoke(prompt, { responseFormat, signal });
 
     if (!normalizeContent(result?.content) && result?.finishReason !== "length") {
       const error = new Error("Chat completion returned empty content.");
@@ -667,7 +811,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
   const completeOn = ({ instance, metricContext, modelName, modelRoute }) =>
     runWithLlmOpsMetric({
       action: () =>
-        withRetry(() => invokeOnce(instance), "Chat completion failed.").catch(
+        withRetry(() => invokeOnce(instance), "Chat completion failed.", { signal }).catch(
           (error) => {
             if (error?.code === EMPTY_COMPLETION_CODE) {
               return error.response;
@@ -699,10 +843,20 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         outputCharacters: getTextCharacters(normalizeContent(result?.content)),
       }),
       policy: getRuntimeLlmOpsPolicy(),
-    }).then((response) => ({
-      modelRoute,
-      text: normalizeContent(response.content),
-    }));
+      recorder: recordModelMetricEvent,
+    }).then((response) => {
+      // The gateway answers with the provider's model name and finish reason,
+      // which the returned shape does not carry.
+      getModelGatewayCall()?.noteCompletion?.({
+        finishReason: response?.finishReason ?? null,
+        modelName,
+      });
+
+      return {
+        modelRoute,
+        text: normalizeContent(response.content),
+      };
+    });
 
   try {
     return await completeOn(primary);
@@ -716,6 +870,10 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
     let lastError = primaryError;
 
     for (const failover of primary.failovers) {
+      if (signal?.aborted) {
+        break;
+      }
+
       try {
         return await completeOn(failover);
       } catch (failoverError) {
@@ -729,4 +887,63 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
 
     throw lastError;
   }
+};
+
+// The prompt is converted to messages exactly as the direct client would send
+// it, so the backend sees the same request either way. `onAttemptStart` runs
+// once per model attempt the gateway makes (it streams a marker for each), so
+// answer drafts are still reset by a gateway-side retry or failover. One mirror
+// LLMOps event per call carries the gateway's metered usage and the route of
+// the model that answered.
+const completeThroughModelGateway = ({
+  capability,
+  inputText,
+  options,
+  prompt,
+  promptTemplate,
+  responseFormat,
+}) => {
+  const modelRoute = buildModelGatewayPendingRoute(capability, options.routeId);
+  const estimate = {
+    inputCharacters: inputText.length,
+    metricContext: buildCustomRouteMetricContext(),
+  };
+
+  return runWithLlmOpsMetric({
+    action: () =>
+      requestModelGatewayCompletion({
+        capability,
+        messages: toChatMessages(prompt),
+        onAttemptStart: options.onAttemptStart,
+        onTextDelta: options.onTextDelta,
+        promptTemplate,
+        responseFormat,
+        routeId: options.routeId ?? null,
+        signal: options.signal,
+        workspacePolicy: options.workspacePolicy,
+      }),
+    metric: {
+      ...buildUsageMetricFields(estimate),
+      annotations: [MODEL_GATEWAY_MIRROR_ANNOTATION],
+      inputCharacters: inputText.length,
+      itemCount: 1,
+      modelRoute,
+      operation: LLMOPS_OPERATIONS.completion,
+      promptTemplate,
+      stage: "complete_text",
+    },
+    policy: getRuntimeLlmOpsPolicy(),
+    recorder: recordModelMetricEvent,
+    successMetric: (result) => ({
+      ...buildModelGatewayUsageMetric(result, {
+        ...estimate,
+        outputCharacters: getTextCharacters(result?.text),
+      }),
+      modelRoute: result.modelRoute ?? modelRoute,
+      outputCharacters: getTextCharacters(result?.text),
+    }),
+  }).then((result) => ({
+    modelRoute: result.modelRoute ?? modelRoute,
+    text: normalizeContent(result.text),
+  }));
 };

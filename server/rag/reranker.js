@@ -16,6 +16,10 @@ import {
   LLMOPS_OPERATIONS,
   recordLlmOpsMetric,
 } from "./llmops-metrics.js";
+import { getModelGatewayCall, recordModelMetricEvent } from "./model-gateway/call-context.js";
+import { requestModelGatewayRerank } from "./model-gateway/client.js";
+import { MODEL_GATEWAY_MIRROR_ANNOTATION } from "./model-gateway/protocol.js";
+import { isModelGatewayEnabled } from "./service-topology.js";
 import {
   buildLlmOpsRouteContext,
   buildLlmOpsUsageMetric,
@@ -234,8 +238,10 @@ const buildConfiguredCrossEncoderModelRoute = (configuredModel) => ({
   status: "configured_model",
 });
 
-const resolveHttpCrossEncoderModelRoute = () => {
-  const configuredModel = getCrossEncoderModel().trim();
+// `requestedModel` is a model a caller named (the model gateway serving a
+// caller's rerank); otherwise the configured model or the rerank route decides.
+export const resolveCrossEncoderModelRoute = (requestedModel = "") => {
+  const configuredModel = String(requestedModel ?? "").trim() || getCrossEncoderModel().trim();
 
   if (configuredModel) {
     return {
@@ -261,23 +267,29 @@ const getCrossEncoderInputCharacters = (metricBase = {}) =>
   toFiniteNumber(metricBase.queryCharacters) +
   toFiniteNumber(metricBase.totalTextCharacters);
 
+// `usage` replaces the local estimate with the usage the model gateway metered;
+// `annotations` marks such an event as the caller's mirror of the gateway's.
 const recordCrossEncoderLlmOpsMetric = async ({
+  annotations = [],
   error = null,
   latencyMs,
   metricBase = {},
   metricContext = {},
   modelRoute,
   status,
+  usage = null,
 } = {}) => {
   const inputCharacters = getCrossEncoderInputCharacters(metricBase);
 
   return recordLlmOpsMetric({
+    annotations,
     error,
     latencySloMs: metricContext.latencySloMs,
     ...buildLlmOpsUsageMetric({
       inputCharacters,
       pricing: metricContext.pricing,
     }),
+    ...(usage && Number.isFinite(usage.totalTokens) ? usage : {}),
     inputCharacters,
     itemCount: toFiniteNumber(metricBase.candidateCount),
     latencyMs,
@@ -285,7 +297,7 @@ const recordCrossEncoderLlmOpsMetric = async ({
     operation: LLMOPS_OPERATIONS.rerank,
     stage: "cross_encoder_score",
     status,
-  });
+  }, { recorder: recordModelMetricEvent });
 };
 
 const normalizeScores = (scores) => {
@@ -410,15 +422,14 @@ const parseCrossEncoderScores = (payload, expectedCount) => {
   return scores;
 };
 
-const scoreWithHttpCrossEncoder = async ({ queryText, pairs, model = "" }) => {
-  const endpoint = getCrossEncoderEndpoint().trim();
-
-  if (!endpoint) {
-    throw new Error(
-      "RAG_CROSS_ENCODER_ENDPOINT is required when RAG_RERANK_PROVIDER=cross-encoder."
-    );
-  }
-
+/**
+ * One request to a cross-encoder service ({ query, texts } -> { scores }).
+ * Resolves the scores in the order of `texts`. An HTTP failure carries
+ * `status` and `upstreamStatus`; a timeout carries code ETIMEDOUT. `signal`
+ * (the model gateway's, when its caller leaves or its deadline passes) cancels
+ * the request and rejects with its reason, which is not a timeout.
+ */
+export const requestCrossEncoderScores = async ({ endpoint, model = "", queryText, signal, texts }) => {
   const timeoutMs = getCrossEncoderTimeoutMs();
   let response;
 
@@ -430,59 +441,169 @@ const scoreWithHttpCrossEncoder = async ({ queryText, pairs, model = "" }) => {
       },
       body: JSON.stringify({
         query: queryText,
-        texts: pairs.map((pair) => pair.text),
+        texts,
         ...(model ? { model } : {}),
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal
+        ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal])
+        : AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
+    if (signal?.aborted) {
+      throw signal.reason;
+    }
+
     if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-      throw new Error(
+      const timeoutError = new Error(
         `Cross-encoder request timed out after ${timeoutMs}ms.`
       );
+
+      timeoutError.code = "ETIMEDOUT";
+      throw timeoutError;
     }
 
     throw error;
   }
 
   if (!response.ok) {
-    throw new Error(
+    const httpError = new Error(
       `Cross-encoder request failed with HTTP ${response.status}.`
+    );
+
+    httpError.status = response.status;
+    httpError.upstreamStatus = response.status;
+    throw httpError;
+  }
+
+  return parseCrossEncoderScores(await response.json(), texts.length);
+};
+
+const scoreWithHttpCrossEncoder = async ({ queryText, pairs, model = "" }) => {
+  const endpoint = getCrossEncoderEndpoint().trim();
+
+  if (!endpoint) {
+    throw new Error(
+      "RAG_CROSS_ENCODER_ENDPOINT is required when RAG_RERANK_PROVIDER=cross-encoder."
     );
   }
 
-  return parseCrossEncoderScores(await response.json(), pairs.length);
+  return requestCrossEncoderScores({
+    endpoint,
+    model,
+    queryText,
+    texts: pairs.map((pair) => pair.text),
+  });
+};
+
+// With MODEL_GATEWAY_URL set, cross-encoder scores come from the gateway, which
+// owns the rerank backends; a configured stand-in stays in process, and so does
+// a call the gateway itself is serving.
+const routesRerankThroughModelGateway = () =>
+  !getModelGatewayCall() && isModelGatewayEnabled();
+
+/**
+ * The model gateway's rerank: scores `texts` for `queryText` on a backend
+ * chosen by `dispatch({ model, request })`, where `request(endpoint)` sends
+ * one request, and records one LLMOps rerank event for the call. Resolves
+ * { scores, modelRoute }.
+ */
+export const scoreTextsWithCrossEncoderBackend = async ({
+  dispatch,
+  model = "",
+  queryText = "",
+  signal,
+  texts = [],
+}) => {
+  const routeSelection = resolveCrossEncoderModelRoute(model);
+  const metricBase = {
+    candidateCount: texts.length,
+    queryCharacters: String(queryText ?? "").length,
+    totalTextCharacters: texts.reduce((sum, text) => sum + String(text ?? "").length, 0),
+  };
+  const startedAt = performance.now();
+  const record = (status, error = null) =>
+    recordCrossEncoderLlmOpsMetric({
+      error,
+      latencyMs: toMetricNumber(performance.now() - startedAt),
+      metricBase,
+      metricContext: routeSelection.llmOpsContext,
+      modelRoute: routeSelection.modelRoute,
+      status,
+    });
+
+  try {
+    const scores = await dispatch({
+      model: routeSelection.model,
+      request: (endpoint) =>
+        requestCrossEncoderScores({ endpoint, model: routeSelection.model, queryText, signal, texts }),
+    });
+
+    await record("ok");
+
+    return { modelRoute: routeSelection.modelRoute, scores };
+  } catch (error) {
+    await record("error", error);
+    throw error;
+  }
 };
 
 const scoreWithCrossEncoder = async ({ queryText, results }) => {
   const pairs = buildCrossEncoderPairs(results);
-  const transport = crossEncoderProvider?.score ? "custom-provider" : "http";
+  const viaGateway = !crossEncoderProvider?.score && routesRerankThroughModelGateway();
+  const transport = crossEncoderProvider?.score
+    ? "custom-provider"
+    : viaGateway
+      ? "model-gateway"
+      : "http";
   const routeSelection = crossEncoderProvider?.score
     ? {
         llmOpsContext: buildEmptyLlmOpsRouteContext(),
         model: "",
         modelRoute: buildCustomCrossEncoderModelRoute(),
       }
-    : resolveHttpCrossEncoderModelRoute();
+    : resolveCrossEncoderModelRoute();
   const metricBase = buildCrossEncoderMetricBase({
     queryText,
     pairs,
     transport,
   });
   const startedAt = performance.now();
+  // The gateway meters the call; this process keeps a mirror event with the
+  // gateway's usage and route.
+  const gatewayMetric = viaGateway
+    ? { annotations: [MODEL_GATEWAY_MIRROR_ANNOTATION], modelRoute: routeSelection.modelRoute, usage: null }
+    : { annotations: [], modelRoute: routeSelection.modelRoute, usage: null };
 
   try {
-    const scores = crossEncoderProvider?.score
-      ? await crossEncoderProvider.score({
-          queryText,
-          pairs,
-          results,
-        })
-      : await scoreWithHttpCrossEncoder({
-          queryText,
-          model: routeSelection.model,
-          pairs,
-        });
+    let scores;
+
+    if (crossEncoderProvider?.score) {
+      scores = await crossEncoderProvider.score({
+        queryText,
+        pairs,
+        results,
+      });
+    } else if (viaGateway) {
+      // The same budget a direct cross-encoder request gets, so a slow or
+      // hanging gateway degrades the query exactly as a slow service would.
+      const answer = await requestModelGatewayRerank({
+        model: routeSelection.model,
+        query: queryText,
+        texts: pairs.map((pair) => pair.text),
+        timeoutMs: getCrossEncoderTimeoutMs(),
+      });
+
+      scores = parseCrossEncoderScores(answer, pairs.length);
+      gatewayMetric.modelRoute = answer.modelRoute ?? gatewayMetric.modelRoute;
+      gatewayMetric.usage = answer.meteredUsage ?? null;
+    } else {
+      scores = await scoreWithHttpCrossEncoder({
+        queryText,
+        model: routeSelection.model,
+        pairs,
+      });
+    }
+
     const latencyMs = toMetricNumber(performance.now() - startedAt);
 
     emitRerankMetric({
@@ -491,11 +612,13 @@ const scoreWithCrossEncoder = async ({ queryText, results }) => {
       latencyMs,
     });
     await recordCrossEncoderLlmOpsMetric({
+      annotations: gatewayMetric.annotations,
       latencyMs,
       metricContext: routeSelection.llmOpsContext,
       metricBase,
-      modelRoute: routeSelection.modelRoute,
+      modelRoute: gatewayMetric.modelRoute,
       status: "ok",
+      usage: gatewayMetric.usage,
     });
 
     return scores;
@@ -510,11 +633,12 @@ const scoreWithCrossEncoder = async ({ queryText, results }) => {
       errorMessage: error?.message ?? String(error),
     });
     await recordCrossEncoderLlmOpsMetric({
+      annotations: gatewayMetric.annotations,
       error,
       latencyMs,
       metricContext: routeSelection.llmOpsContext,
       metricBase,
-      modelRoute: routeSelection.modelRoute,
+      modelRoute: gatewayMetric.modelRoute,
       status: "error",
     });
 

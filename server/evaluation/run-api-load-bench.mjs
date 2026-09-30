@@ -150,6 +150,31 @@
 // request (200 ms by default in this scenario). A discarded warm-up asks every
 // seed question once on every instance and uploads one document per instance.
 //
+// Split topology (--topology split, chat scenario, pgvector): instead of N
+// monolith processes, every tier of a split deployment is its own process,
+// started through the role start-up (rag/agent-service/role-server.js
+// startServiceRole with ARCHIVE_RAG_ROLE set), --api / --agent / --retrieval /
+// --gateway replicas of each (1 by default). The tiers are wired the way a
+// deployment wires them: replica lists in AGENT_SERVICE_URL (api),
+// RETRIEVAL_SERVICE_URL (agent) and MODEL_GATEWAY_URL (api, agent,
+// retrieval), and one internal signing key generated for the run
+// (INTERNAL_SERVICE_KEYS, never written to the report). The fake model sits
+// behind the gateway (its chat and embedding upstream); every other tier
+// reaches it only through the gateway, which the fake's per-caller counts
+// confirm. They start in dependency order: gateways, retrieval (replica 0
+// checks the database is fresh and its start-up migrates it), agents, then the
+// api replicas (replica 0 ingests the seed corpus through the edge, its
+// embeddings through the gateway). The balancer (--balance) sits in front of
+// the api replicas; each tier's service client picks among the next tier's
+// replicas. Every process reports its own CPU per level, so each level has a
+// per-tier block (CPU per request, cores busy of the tier and of its busiest
+// process, event-loop delay) and names the busiest tier; each process's whole-
+// run CPU is read before it stops. --topology monolith (the default) is the
+// run described above, unchanged.
+//
+// --repeat N (chat and ingest scenarios) runs each level N times in a row on
+// the same processes; the chat report adds the range (min - max) per level.
+//
 // Usage:
 //   node evaluation/run-api-load-bench.mjs
 //     [--storage local|pgvector|local,pgvector]  default: local, or
@@ -166,14 +191,16 @@
 //     [--documents 20] [--pages 4] [--cheap-path /documents]
 //     [--request-timeout-ms 120000] [--planner deterministic|llm]
 //     [--auth] [--rate-limit] [--no-embedding-cache] [--tenant] [--no-analyze]
-//     [--postgres-pid-file <postmaster.pid>]
+//     [--postgres-pid-file <postmaster.pid>] [--repeat 1]
 //     [--latest-name latest-load-test] [--verbose]
+//   split topology (chat scenario, pgvector; replaces --instances):
+//     [--topology monolith|split] [--api 1] [--agent 1] [--retrieval 1] [--gateway 1]
 //   ingest scenario only:
 //     [--ingest-mode sync|async] [--ingest-workers 0] [--ingest-worker-concurrency N]
 //     [--ingest-worker-poll-ms N] [--ingest-max-pending-jobs N]
 //     [--uploads 16] [--upload-concurrency 4]
 //     [--ingest-pages 4] [--chat-concurrency 4] [--baseline-ms 10000]
-//     [--poll-interval-ms 1000] [--searchable-timeout-ms 120000] [--repeat 1]
+//     [--poll-interval-ms 1000] [--searchable-timeout-ms 120000]
 //     [--embed-batching on|off] [--embed-batch-linger-ms N] [--ingest-job-lease-ms N]
 //     [--crash-worker-mid-embed]   (async, 2+ dedicated workers, one level)
 //     (--latest-name defaults to latest-load-test-ingest)
@@ -217,7 +244,7 @@ const serverDirectory = path.join(__dirname, "..");
 const resultsDirectory = path.join(__dirname, "results");
 
 export const LOAD_TEST_REPORT_TYPE = "load-test";
-export const LOAD_TEST_REPORT_VERSION = "1.2.0";
+export const LOAD_TEST_REPORT_VERSION = "1.3.0";
 export const PERCENTILE_METHOD = "nearest-rank";
 
 const FAKE_CHAT_MODEL = "load-test-chat";
@@ -276,6 +303,10 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   switchDimensions: 768,
   switchPhaseMs: 15000,
   tenant: false,
+  topology: "monolith",
+  // Processes per tier with --topology split (--api, --agent, --retrieval,
+  // --gateway); a monolith run has `instances` processes of role all.
+  tierReplicas: Object.freeze({ api: 1, agent: 1, retrieval: 1, "model-gateway": 1 }),
   uploadConcurrency: Object.freeze([4]),
   uploads: 16,
   verbose: false,
@@ -295,6 +326,21 @@ const EMBED_BATCHING_MODES = new Set(["on", "off"]);
 const INGEST_MODES = new Set(["sync", "async"]);
 const SHARED_STATE_MODES = new Set(["memory", "redis"]);
 export const BALANCE_MODES = Object.freeze(["least-outstanding", "round-robin"]);
+export const TOPOLOGIES = Object.freeze(["monolith", "split"]);
+// The tiers of a split run, in start order: each one is started once the
+// tiers it calls are listening (its replica list is complete).
+export const SPLIT_TIERS = Object.freeze(["model-gateway", "retrieval", "agent", "api"]);
+// The order the report lists them in: the order a /chat request crosses them.
+export const TIER_REPORT_ORDER = Object.freeze(["api", "agent", "retrieval", "model-gateway"]);
+// CLI flag per tier replica count (--gateway is the model-gateway tier).
+export const TIER_REPLICA_FLAGS = Object.freeze({
+  agent: "agent",
+  api: "api",
+  gateway: "model-gateway",
+  retrieval: "retrieval",
+});
+// The role name of a monolith process in per-tier reports.
+export const MONOLITH_TIER = "all";
 // The tenant every request acts for with --tenant (x-user-id / x-workspace-id
 // headers; the seed corpus is ingested as its documents).
 export const LOAD_TEST_TENANT = Object.freeze({ userId: "load-test-user", workspaceId: "load-test-workspace" });
@@ -313,7 +359,6 @@ const INGEST_ONLY_FLAGS = Object.freeze([
   "ingest-worker-poll-ms",
   "ingest-workers",
   "poll-interval-ms",
-  "repeat",
   "searchable-timeout-ms",
   "upload-concurrency",
   "uploads",
@@ -369,6 +414,7 @@ export const parseLoadTestArgs = (argv = []) => {
     "tenant",
     "verbose",
     "serve",
+    "serve-tier",
     "serve-worker",
   ]);
 
@@ -396,6 +442,7 @@ export const parseLoadTestArgs = (argv = []) => {
     ...flags,
     ...INGEST_ONLY_FLAGS,
     ...INDEX_SWITCH_ONLY_FLAGS,
+    ...Object.keys(TIER_REPLICA_FLAGS),
     "balance",
     "cheap-path",
     "cheap-requests",
@@ -415,11 +462,13 @@ export const parseLoadTestArgs = (argv = []) => {
     "planner",
     "postgres-pid-file",
     "redis-url",
+    "repeat",
     "request-timeout-ms",
     "requests",
     "scenario",
     "shared-state",
     "storage",
+    "topology",
     "warmup",
   ]);
 
@@ -489,6 +538,35 @@ export const parseLoadTestArgs = (argv = []) => {
     if (!SCENARIOS.has(raw.scenario)) throw new Error("--scenario must be chat, ingest or index-switch.");
     options.scenario = raw.scenario;
   }
+  // Each level runs this many times in a row on the same processes (ingest:
+  // with its own baselines), so the report can put an interval (ingest) or a
+  // range (chat) on its numbers.
+  if (raw.repeat !== undefined) {
+    if (options.scenario === "index-switch") throw new Error("--repeat applies to --scenario chat and ingest.");
+    options.repeat = toPositiveInteger(raw.repeat, "--repeat");
+  }
+  if (raw.topology !== undefined) {
+    if (!TOPOLOGIES.includes(raw.topology)) throw new Error(`--topology must be ${TOPOLOGIES.join(" or ")}.`);
+    options.topology = raw.topology;
+  }
+  const tierFlags = Object.keys(TIER_REPLICA_FLAGS).filter((name) => raw[name] !== undefined);
+  if (options.topology === "split") {
+    if (options.scenario !== "chat") {
+      throw new Error("--topology split runs the chat scenario only (the ingest and index-switch scenarios start monolith processes).");
+    }
+    if (raw.instances !== undefined) {
+      throw new Error("--topology split takes its api replica count from --api, not --instances.");
+    }
+    const tierReplicas = { ...DEFAULT_LOAD_TEST_OPTIONS.tierReplicas };
+    for (const name of tierFlags) {
+      tierReplicas[TIER_REPLICA_FLAGS[name]] = toPositiveInteger(raw[name], `--${name}`);
+    }
+    options.tierReplicas = tierReplicas;
+    // The balancer and the per-instance tables count the api replicas.
+    options.instances = tierReplicas.api;
+  } else if (tierFlags.length > 0) {
+    throw new Error(`${tierFlags.map((name) => `--${name}`).join(", ")} only apply to --topology split.`);
+  }
   if (options.scenario !== "index-switch") {
     const misplaced = INDEX_SWITCH_ONLY_FLAGS.filter((name) => raw[name] !== undefined);
     if (misplaced.length > 0) {
@@ -556,9 +634,6 @@ export const parseLoadTestArgs = (argv = []) => {
       options.pollIntervalMs = toPositiveInteger(raw["poll-interval-ms"], "--poll-interval-ms");
     if (raw["searchable-timeout-ms"] !== undefined)
       options.searchableTimeoutMs = toPositiveInteger(raw["searchable-timeout-ms"], "--searchable-timeout-ms");
-    // Each upload concurrency level runs this many times in a row (with its
-    // own baselines), so the report can put an interval on its numbers.
-    if (raw.repeat !== undefined) options.repeat = toPositiveInteger(raw.repeat, "--repeat");
     if (raw["embed-batching"] !== undefined) {
       if (!EMBED_BATCHING_MODES.has(raw["embed-batching"])) throw new Error("--embed-batching must be on or off.");
       options.embedBatching = raw["embed-batching"];
@@ -626,7 +701,8 @@ export const parseLoadTestArgs = (argv = []) => {
   // Several instances only make sense over one shared store: standalone
   // instances each keep their own registry and vector index on local disk, and
   // their in-memory ingest queues are invisible to each other.
-  const multiProcess = options.instances > 1 || options.ingestWorkers > 0;
+  const split = options.topology === "split";
+  const multiProcess = options.instances > 1 || options.ingestWorkers > 0 || split;
   const storage = raw.storage
     ? String(raw.storage)
         .split(",")
@@ -643,7 +719,12 @@ export const parseLoadTestArgs = (argv = []) => {
   }
   if (storage.includes("pgvector") && !options.databaseUrl) {
     throw new Error(
-      `${raw.storage ? "--storage pgvector" : multiProcess ? "--instances > 1 and --ingest-workers" : "--storage pgvector"} needs --database-url pointing at a disposable pgvector PostgreSQL (scripts/run-load-test-pgvector.sh creates one).`
+      `${raw.storage ? "--storage pgvector" : split ? "--topology split" : multiProcess ? "--instances > 1 and --ingest-workers" : "--storage pgvector"} needs --database-url pointing at a disposable pgvector PostgreSQL (scripts/run-load-test-pgvector.sh creates one).`
+    );
+  }
+  if (split && storage.includes("local")) {
+    throw new Error(
+      "--topology split needs --storage pgvector: its tiers share the document registry and the index through PostgreSQL, and the retrieval tier refuses a local index."
     );
   }
   if (multiProcess && storage.includes("local")) {
@@ -655,6 +736,7 @@ export const parseLoadTestArgs = (argv = []) => {
   options.storage = [...new Set(storage)];
   options.serve = Boolean(raw.serve);
   options.serveWorker = Boolean(raw["serve-worker"]);
+  options.serveTier = Boolean(raw["serve-tier"]);
 
   return options;
 };
@@ -1972,10 +2054,13 @@ export const buildAppEnvironment = ({
 }) => {
   const environment = { ...baseEnvironment };
 
-  // Anything that could point the app at another database, model or cache.
+  // Anything that could point the app at another database, model or cache,
+  // or turn it into one tier of a split deployment (a role, service URLs or
+  // internal keys from the shell): a monolith child is a monolith, and a tier
+  // child gets its wiring from buildTierEnvironment only.
   for (const name of Object.keys(environment)) {
     if (
-      /^(OPENAI_|POSTGRES_|LONG_MEMORY_|PGVECTOR_|QDRANT_|REDIS_|RAG_|AGENT_|API_AUTH|RATE_LIMIT|OTEL_|DOCCOMPARE_|VECTOR_STORE_|DOCUMENT_STORE_|SESSION_MEMORY_STORE_|TASK_STORE_|WORKSPACE_ARTIFACT_STORE_|ADMIN_AUDIT_STORE_|AGENT_RUN_STORE_|UPLOADS_DIRECTORY|FRONTEND_BUILD_DIRECTORY|ALLOWED_ORIGINS|SERPAPI_|PG|DOTENV_|PDF_PARSER|DOCLING_)/.test(
+      /^(OPENAI_|POSTGRES_|LONG_MEMORY_|PGVECTOR_|QDRANT_|REDIS_|RAG_|AGENT_|API_AUTH|RATE_LIMIT|OTEL_|DOCCOMPARE_|VECTOR_STORE_|DOCUMENT_STORE_|SESSION_MEMORY_STORE_|TASK_STORE_|WORKSPACE_ARTIFACT_STORE_|ADMIN_AUDIT_STORE_|AGENT_RUN_STORE_|UPLOADS_DIRECTORY|FRONTEND_BUILD_DIRECTORY|ALLOWED_ORIGINS|SERPAPI_|PG|DOTENV_|PDF_PARSER|DOCLING_|ARCHIVE_RAG_|INTERNAL_SERVICE_|RETRIEVAL_SERVICE_|MODEL_GATEWAY_|SERVICE_SHUTDOWN_|PORT$)/.test(
         name
       )
     ) {
@@ -2082,8 +2167,71 @@ export const buildAppEnvironment = ({
   return environment;
 };
 
+/** The fake model's caller tag of a tier process ("gateway-0", "agent-1"). */
+export const tierCallerTag = (tier, index) => `${tier === "model-gateway" ? "gateway" : tier}-${index}`;
+
+/** The key the fake model sees from a gateway process: its caller tag's API key. */
+export const GATEWAY_CALLER_PREFIX = "load-test-gateway-";
+
+// Drain window of a tier process when the harness stops it: nothing is in
+// flight by then, and the harness waits at most 5 s for a child to exit.
+export const TIER_SHUTDOWN_GRACE_MS = 1000;
+
+/**
+ * One internal signing key for the run, `<kid>:<secret>` as
+ * INTERNAL_SERVICE_KEYS takes it: every tier signs and verifies with it, and
+ * nothing outside the run's processes knows it. The key id names the run.
+ */
+export const createRunServiceKeys = ({ runId, secret = randomBytes(32).toString("hex") } = {}) =>
+  `load-test-${runId || "run"}:${secret}`;
+
+/**
+ * Environment for one process of the split topology: the monolith child's
+ * (buildAppEnvironment, which clears anything a shell could add), plus the
+ * role and its wiring, exactly what a deployment sets per tier:
+ *   api            AGENT_SERVICE_URL and MODEL_GATEWAY_URL (the seed ingest's
+ *                  embeddings)
+ *   agent          RETRIEVAL_SERVICE_URL and MODEL_GATEWAY_URL
+ *   retrieval      MODEL_GATEWAY_URL (query embeddings)
+ *   model-gateway  the fake model as its chat and embedding upstream, and no
+ *                  database (the gateway keeps none)
+ * `urls` holds each tier's replica base URLs. Every process keeps its own
+ * OPENAI_API_KEY caller tag, so a model call that bypassed the gateway would
+ * show up in the fake's per-caller counts under another tier's name.
+ */
+export const buildTierEnvironment = ({ index = 0, serviceKeys, tier, urls = {}, ...appEnvironment }) => {
+  if (!SPLIT_TIERS.includes(tier)) throw new RangeError(`Unknown tier "${tier}".`);
+  if (!serviceKeys) throw new TypeError("buildTierEnvironment needs the run's internal service keys.");
+
+  const environment = buildAppEnvironment({ ...appEnvironment, callerTag: tierCallerTag(tier, index), role: tier });
+  const list = (name) => (urls[name] ?? []).join(",");
+
+  Object.assign(environment, {
+    ARCHIVE_RAG_ROLE: tier,
+    INTERNAL_SERVICE_KEYS: serviceKeys,
+    SERVICE_SHUTDOWN_GRACE_MS: String(TIER_SHUTDOWN_GRACE_MS),
+  });
+
+  if (tier === "model-gateway") {
+    environment.MODEL_GATEWAY_CHAT_UPSTREAMS = appEnvironment.modelBaseUrl;
+    environment.MODEL_GATEWAY_EMBEDDING_UPSTREAMS = appEnvironment.modelBaseUrl;
+    for (const name of ["POSTGRES_DATABASE_URL", "LONG_MEMORY_DATABASE_URL"]) delete environment[name];
+    return environment;
+  }
+
+  environment.MODEL_GATEWAY_URL = list("model-gateway");
+  if (tier === "api") environment.AGENT_SERVICE_URL = list("agent");
+  if (tier === "agent") environment.RETRIEVAL_SERVICE_URL = list("retrieval");
+
+  return environment;
+};
+
+// The child entry per process kind: a monolith API instance, a dedicated
+// ingest worker, or one tier of the split topology.
+const CHILD_ENTRY_FLAGS = Object.freeze({ api: "--serve", tier: "--serve-tier", worker: "--serve-worker" });
+
 const startAppProcess = async ({ environment, role = "api", verbose }) => {
-  const child = fork(__filename, [role === "worker" ? "--serve-worker" : "--serve"], {
+  const child = fork(__filename, [CHILD_ENTRY_FLAGS[role] ?? "--serve"], {
     cwd: serverDirectory,
     env: environment,
     execArgv: [],
@@ -2161,11 +2309,12 @@ const startAppProcess = async ({ environment, role = "api", verbose }) => {
       await exitPromise;
     },
     pid: child.pid,
-    start: (documents, { primary = true, seedFormat = "text" } = {}) =>
-      request({ documents, primary, seedFormat, type: "start" }, "ready"),
+    start: (documents, { assertFresh = false, primary = true, seedFormat = "text" } = {}) =>
+      request({ assertFresh, documents, primary, seedFormat, type: "start" }, "ready"),
     analyze: () => request({ type: "analyze" }, "analyzed", 120000),
     searchTables: () => request({ type: "searchTables" }, "searchTables", 30000),
     stats: () => request({ type: "stats" }, "stats", 30000),
+    totals: () => request({ type: "totals" }, "totals", 30000),
     stop: async () => {
       if (exited) return;
       const exitPromise = new Promise((resolve) => child.once("exit", resolve));
@@ -2366,6 +2515,19 @@ const handleChildMessages = (onStart) => {
         resetMarks(guardTotals);
         loopDelay.reset();
         process.send(reply);
+      } else if (message?.type === "totals") {
+        // Whole-life CPU of this process (start-up, seed ingest and every
+        // level), read once before it stops.
+        const cpu = process.cpuUsage();
+        process.send({
+          cpuSystemMs: round(cpu.system / 1000),
+          cpuUserMs: round(cpu.user / 1000),
+          dbQueries: postgres.queries,
+          maxRssMb: round(process.resourceUsage().maxRSS / 1024),
+          pid: process.pid,
+          type: "totals",
+          uptimeMs: round(process.uptime() * 1000),
+        });
       } else if (message?.type === "searchTables") {
         process.send({ ...postgres.searches.snapshot(), type: "searchTables" });
       } else if (message?.type === "analyze") {
@@ -2389,6 +2551,60 @@ const handleChildMessages = (onStart) => {
   process.on("disconnect", () => process.exit(0));
 };
 
+// The seed corpus, ingested by the process that received it (the monolith's
+// primary instance, or the split topology's primary api replica) through the
+// rag service's own ingest, as the tenant the requests act for. With
+// `countRows` the chunk rows are then counted in PostgreSQL.
+const ingestSeedCorpus = async ({ countRows = false, documents = [], seedFormat = "text", tempRoot }) => {
+  const rag = await import("../chat.js");
+  const sourceDirectory = path.join(tempRoot, "sources");
+  await mkdir(sourceDirectory, { recursive: true });
+
+  const ingestStartedAt = performance.now();
+  let chunkCount = 0;
+  for (const doc of documents) {
+    const owner = {
+      ownerUserId: process.env.LOAD_TEST_TENANT_USER_ID ?? "",
+      workspaceId: process.env.LOAD_TEST_TENANT_WORKSPACE_ID ?? "",
+    };
+    let registered;
+    if (seedFormat === "pdf") {
+      // Real PDF bytes in the registry, through the upload route's own
+      // ingest (parse, chunk, embed, index): an index version build
+      // re-reads them, so the rebuilt chunks equal the stored ones.
+      const filePath = path.join(sourceDirectory, `${doc.docId}.pdf`);
+      await writeFile(filePath, buildSeedPdf(doc));
+      registered = await rag.ingestDocument({ docId: doc.docId, fileName: doc.fileName, filePath, ...owner });
+    } else {
+      const filePath = path.join(sourceDirectory, `${doc.docId}.txt`);
+      await writeFile(filePath, doc.pages.map((page) => page.text).join("\n\n"), "utf8");
+      registered = await rag.ingestDocumentPages({
+        docId: doc.docId,
+        fileName: doc.fileName,
+        filePath,
+        pages: doc.pages,
+        ...owner,
+      });
+    }
+    chunkCount += Number(registered?.chunkCount ?? 0);
+  }
+  const ingestMs = performance.now() - ingestStartedAt;
+  let databaseChunkRows = null;
+  if (countRows) {
+    // Proof the chunks are in PostgreSQL, not a config claim. Counted as
+    // the owner role, like the startup loads.
+    const { queryPostgres } = await import("../rag/postgres.js");
+    const { getDocumentChunksPostgresTable } = await import("../rag/config.js");
+    const { runAsDatabaseSystem } = await import("../rag/postgres-tenant.js");
+    const result = await runAsDatabaseSystem(() =>
+      queryPostgres(`SELECT count(*)::int AS rows FROM ${getDocumentChunksPostgresTable()}`)
+    );
+    databaseChunkRows = result.rows[0]?.rows ?? null;
+  }
+
+  return { chunkCount, databaseChunkRows, ingestMs };
+};
+
 // API instance: build the app like server.js, ingest the seed corpus (primary
 // instance only), start the in-process ingest worker when async ingestion
 // wants one, listen.
@@ -2410,56 +2626,17 @@ const serve = async () => {
     }
 
     const { createApp } = await import("../app.js");
-    const rag = await import("../chat.js");
     const app = await createApp({
       uploadSessionDirectory: path.join(tempRoot, "upload-sessions"),
       uploadsDirectory: path.join(tempRoot, "uploads"),
     });
-    const sourceDirectory = path.join(tempRoot, "sources");
-    await mkdir(sourceDirectory, { recursive: true });
-
-    const ingestStartedAt = performance.now();
-    let chunkCount = 0;
-    for (const doc of message.documents) {
-      const owner = {
-        ownerUserId: process.env.LOAD_TEST_TENANT_USER_ID ?? "",
-        workspaceId: process.env.LOAD_TEST_TENANT_WORKSPACE_ID ?? "",
-      };
-      let registered;
-      if (message.seedFormat === "pdf") {
-        // Real PDF bytes in the registry, through the upload route's own
-        // ingest (parse, chunk, embed, index): an index version build
-        // re-reads them, so the rebuilt chunks equal the stored ones.
-        const filePath = path.join(sourceDirectory, `${doc.docId}.pdf`);
-        await writeFile(filePath, buildSeedPdf(doc));
-        registered = await rag.ingestDocument({ docId: doc.docId, fileName: doc.fileName, filePath, ...owner });
-      } else {
-        const filePath = path.join(sourceDirectory, `${doc.docId}.txt`);
-        await writeFile(filePath, doc.pages.map((page) => page.text).join("\n\n"), "utf8");
-        registered = await rag.ingestDocumentPages({
-          docId: doc.docId,
-          fileName: doc.fileName,
-          filePath,
-          pages: doc.pages,
-          ...owner,
-        });
-      }
-      chunkCount += Number(registered?.chunkCount ?? 0);
-    }
-    const ingestMs = performance.now() - ingestStartedAt;
+    const { chunkCount, databaseChunkRows, ingestMs } = await ingestSeedCorpus({
+      countRows: storage === "pgvector" && message.primary,
+      documents: message.documents,
+      seedFormat: message.seedFormat,
+      tempRoot,
+    });
     const { describeVectorStoreRuntime } = await import("../rag/vector-store.js");
-    let databaseChunkRows = null;
-    if (storage === "pgvector" && message.primary) {
-      // Proof the chunks are in PostgreSQL, not a config claim. Counted as
-      // the owner role, like the startup loads.
-      const { queryPostgres } = await import("../rag/postgres.js");
-      const { getDocumentChunksPostgresTable } = await import("../rag/config.js");
-      const { runAsDatabaseSystem } = await import("../rag/postgres-tenant.js");
-      const result = await runAsDatabaseSystem(() =>
-        queryPostgres(`SELECT count(*)::int AS rows FROM ${getDocumentChunksPostgresTable()}`)
-      );
-      databaseChunkRows = result.rows[0]?.rows ?? null;
-    }
 
     const worker = await startInProcessIngestWorker(app);
 
@@ -2482,6 +2659,68 @@ const serve = async () => {
         server?.close();
         await worker?.stop?.();
       },
+    };
+  });
+};
+
+// One process of the split topology (--topology split): the role's own
+// start-up, what `ARCHIVE_RAG_ROLE=<role> node server.js` runs
+// (startServiceRole: topology validation, the role's app, listen), on an
+// ephemeral port, without signal handlers (the harness stops it over IPC).
+// The first process to touch the fresh database (retrieval replica 0, whose
+// start-up health check migrates it) refuses one in use first; the primary api
+// replica then ingests the seed corpus through the edge's ingest path, whose
+// embeddings go through the model gateway.
+const serveTier = async () => {
+  const tempRoot = process.env.LOAD_TEST_TEMP_ROOT;
+  const role = process.env.ARCHIVE_RAG_ROLE;
+
+  handleChildMessages(async (message) => {
+    if (message.assertFresh) {
+      const { queryPostgres } = await import("../rag/postgres.js");
+      await assertFreshLoadTestDatabase(queryPostgres);
+    }
+
+    const { startServiceRole } = await import("../rag/agent-service/role-server.js");
+    const started = await startServiceRole({
+      // The edge and the agent tier build the monolith's services, over the
+      // run's shared directories.
+      appOptions:
+        role === "api" || role === "agent"
+          ? {
+              uploadSessionDirectory: path.join(tempRoot, "upload-sessions"),
+              uploadsDirectory: path.join(tempRoot, "uploads"),
+            }
+          : {},
+      exit: () => {},
+      handleSignals: false,
+      host: "127.0.0.1",
+      port: 0,
+      role,
+    });
+    const seed = message.primary
+      ? await ingestSeedCorpus({
+          countRows: true,
+          documents: message.documents,
+          seedFormat: message.seedFormat,
+          tempRoot,
+        })
+      : { chunkCount: 0, databaseChunkRows: null, ingestMs: 0 };
+    const { describeVectorStoreRuntime } = await import("../rag/vector-store.js");
+
+    return {
+      reply: {
+        chunkCount: seed.chunkCount,
+        databaseChunkRows: seed.databaseChunkRows,
+        documentCount: message.documents.length,
+        ingestMs: round(seed.ingestMs),
+        ingestWorker: null,
+        pid: process.pid,
+        port: started.port,
+        role,
+        vectorStore: role === "model-gateway" ? null : describeVectorStoreRuntime(),
+      },
+      shutdown: () => started.shutdown("shutdown"),
     };
   });
 };
@@ -2788,17 +3027,262 @@ export const describeSharedLimiter = ({ acquireCalls, acquired, wallMs }) =>
       }
     : null;
 
-const runScenario = async ({ apps, baseUrls, fakeModel, headers, hostSampler, idle, instances, options, profile, runId, target }) => {
+// ---------------------------------------------------------------------------
+// Topology: per-tier accounting
+
+/**
+ * The run's topology as the config records it: the process count per tier and
+ * in total. A monolith run is `instances` processes of role all (plus its
+ * dedicated ingest workers); a split run is its tier replicas.
+ */
+export const describeTopologyConfig = (options = {}) => {
+  const tierReplicas =
+    options.topology === "split"
+      ? Object.fromEntries(TIER_REPORT_ORDER.map((tier) => [tier, options.tierReplicas?.[tier] ?? 1]))
+      : {
+          [MONOLITH_TIER]: options.instances ?? 1,
+          ...((options.ingestWorkers ?? 0) > 0 ? { "ingest-worker": options.ingestWorkers } : {}),
+        };
+
+  return {
+    topology: options.topology === "split" ? "split" : "monolith",
+    tierReplicas,
+    totalProcesses: Object.values(tierReplicas).reduce((total, count) => total + count, 0),
+  };
+};
+
+const coresBusyOf = (stats) =>
+  Number.isFinite(stats?.windowMs) && stats.windowMs > 0 ? processCpuMs(stats) / stats.windowMs : null;
+
+/**
+ * Per tier of one window: the stats of that tier's processes combined
+ * (combineServerStats, with their idle rates in the same order), the cores
+ * busy of the tier's busiest process and the tier's share of all the app
+ * processes' CPU in the window. `processTiers[i]` names the tier of
+ * `stats[i]`; tiers keep the order they first appear in. A process that
+ * reported nothing (null stats) counts in `processes`, not in `reporting`.
+ */
+export const summarizeTierStats = ({ idle = null, processTiers = [], stats = [], units = 0 } = {}) => {
+  const totalCpuMs = stats.reduce((total, entry) => total + processCpuMs(entry), 0);
+
+  return Object.fromEntries(
+    [...new Set(processTiers)].map((tier) => {
+      const indexes = processTiers.flatMap((name, index) => (name === tier ? [index] : []));
+      const tierStats = indexes.map((index) => stats[index] ?? null);
+      const combined = combineServerStats(tierStats, units, {
+        idle: Array.isArray(idle) ? indexes.map((index) => idle[index] ?? null) : null,
+      });
+      const cpuMs = (combined.cpuUserMs ?? 0) + (combined.cpuSystemMs ?? 0);
+      const processCores = tierStats.map(coresBusyOf).filter(Number.isFinite);
+
+      return [
+        tier,
+        {
+          processes: indexes.length,
+          reporting: tierStats.filter(Boolean).length,
+          cpuUserMs: combined.cpuUserMs,
+          cpuSystemMs: combined.cpuSystemMs,
+          cpuMs: round(cpuMs),
+          cpuMsPerRequest: combined.cpuMsPerUnit,
+          cpuMsPerRequestNetOfIdle: combined.cpuMsPerUnitNetOfIdle,
+          coresBusy: combined.coresBusy,
+          maxProcessCoresBusy: processCores.length > 0 ? round(Math.max(...processCores), 2) : null,
+          shareOfCpu: totalCpuMs > 0 ? round(cpuMs / totalCpuMs, 3) : null,
+          dbQueries: combined.dbQueries,
+          dbQueriesPerRequest: combined.dbQueriesPerUnit,
+          eventLoopDelayMaxMs: combined.eventLoopDelayMaxMs,
+          eventLoopDelayP99Ms: combined.eventLoopDelayP99Ms,
+          rssMb: combined.rssMb,
+        },
+      ];
+    })
+  );
+};
+
+/**
+ * The tier whose busiest process kept the most cores busy in the window (ties:
+ * the worse event-loop delay): the tier to scale first. A Node process runs
+ * its JavaScript on one thread, so a process close to one core busy, with its
+ * event-loop delay rising, is saturated. Null without CPU data.
+ */
+export const pickBusiestTier = (tiers = {}) => {
+  let busiest = null;
+
+  for (const [tier, entry] of Object.entries(tiers ?? {})) {
+    if (!Number.isFinite(entry?.maxProcessCoresBusy)) continue;
+    const loop = Number.isFinite(entry.eventLoopDelayP99Ms) ? entry.eventLoopDelayP99Ms : -1;
+    if (
+      !busiest ||
+      entry.maxProcessCoresBusy > busiest.maxProcessCoresBusy ||
+      (entry.maxProcessCoresBusy === busiest.maxProcessCoresBusy && loop > (busiest.eventLoopDelayP99Ms ?? -1))
+    ) {
+      busiest = {
+        eventLoopDelayP99Ms: entry.eventLoopDelayP99Ms ?? null,
+        maxProcessCoresBusy: entry.maxProcessCoresBusy,
+        tier,
+      };
+    }
+  }
+
+  return busiest;
+};
+
+/**
+ * Model calls the fake received from anything but a gateway process in a
+ * window (from its per-caller counts): 0 when every tier of a split run
+ * reached the model through the gateway.
+ */
+export const countDirectModelCalls = (byCaller = {}, gatewayPrefix = GATEWAY_CALLER_PREFIX) =>
+  Object.entries(byCaller ?? {}).reduce(
+    (total, [caller, entry]) =>
+      caller.startsWith(gatewayPrefix) ? total : total + (entry?.chat ?? 0) + (entry?.embeddings ?? 0),
+    0
+  );
+
+/** min / max / mean (and n) of the finite values; null without any. */
+export const rangeOf = (values = []) => {
+  const finite = values.filter(Number.isFinite);
+  if (finite.length === 0) return null;
+
+  return {
+    max: Math.max(...finite),
+    mean: round(finite.reduce((total, value) => total + value, 0) / finite.length, 2),
+    min: Math.min(...finite),
+    n: finite.length,
+  };
+};
+
+/**
+ * The range of each level's numbers over its repeats (levels carry
+ * `concurrency` and, with --repeat, `repeat`): throughput, the latency mean
+ * and percentiles, CPU per request of all app processes and of each tier, and
+ * how often each tier was the busiest. One row per concurrency, in order.
+ */
+export const summarizeLevelRepeats = (levels = []) => {
+  const byConcurrency = new Map();
+  for (const level of levels) {
+    if (!byConcurrency.has(level.concurrency)) byConcurrency.set(level.concurrency, []);
+    byConcurrency.get(level.concurrency).push(level);
+  }
+
+  return [...byConcurrency.entries()].map(([concurrency, runs]) => {
+    const tierNames = [...new Set(runs.flatMap((level) => Object.keys(level.tiers ?? {})))];
+    const busiestTiers = {};
+    for (const level of runs) {
+      const tier = level.busiestTier?.tier;
+      if (tier) busiestTiers[tier] = (busiestTiers[tier] ?? 0) + 1;
+    }
+
+    return {
+      concurrency,
+      runs: runs.length,
+      errors: runs.reduce((total, level) => total + (level.errors ?? 0), 0),
+      throughputRps: rangeOf(runs.map((level) => level.throughputRps)),
+      latencyMeanMs: rangeOf(runs.map((level) => level.latencyMs?.mean)),
+      latencyP50Ms: rangeOf(runs.map((level) => level.latencyMs?.p50)),
+      latencyP95Ms: rangeOf(runs.map((level) => level.latencyMs?.p95)),
+      latencyP99Ms: rangeOf(runs.map((level) => level.latencyMs?.p99)),
+      cpuMsPerRequest: rangeOf(runs.map((level) => level.server?.cpuMsPerRequest)),
+      tiers: Object.fromEntries(
+        tierNames.map((tier) => [
+          tier,
+          {
+            cpuMsPerRequest: rangeOf(runs.map((level) => level.tiers?.[tier]?.cpuMsPerRequest)),
+            maxProcessCoresBusy: rangeOf(runs.map((level) => level.tiers?.[tier]?.maxProcessCoresBusy)),
+          },
+        ])
+      ),
+      busiestTiers,
+    };
+  });
+};
+
+/**
+ * Whole-run CPU per process and per tier, from each process's totals reply
+ * (read once before it stops; start-up, seed ingest and every level
+ * included). `processes[i]` is { tier, index, port } of `totals[i]`; a
+ * process that was gone (null) is listed without numbers.
+ */
+export const summarizeProcessTotals = ({ processes = [], totals = [] } = {}) => {
+  const rows = processes.map((entry, position) => {
+    const reply = totals[position];
+    return {
+      tier: entry.tier,
+      index: entry.index,
+      port: entry.port ?? null,
+      pid: reply?.pid ?? entry.pid ?? null,
+      cpuUserMs: reply ? reply.cpuUserMs : null,
+      cpuSystemMs: reply ? reply.cpuSystemMs : null,
+      cpuMs: reply ? round((reply.cpuUserMs ?? 0) + (reply.cpuSystemMs ?? 0)) : null,
+      dbQueries: reply ? reply.dbQueries ?? null : null,
+      maxRssMb: reply ? reply.maxRssMb ?? null : null,
+      uptimeMs: reply ? reply.uptimeMs ?? null : null,
+    };
+  });
+  const totalCpuMs = rows.reduce((total, row) => total + (row.cpuMs ?? 0), 0);
+  const byTier = {};
+  for (const row of rows) {
+    const entry = (byTier[row.tier] ??= { processes: 0, reporting: 0, cpuUserMs: 0, cpuSystemMs: 0, cpuMs: 0 });
+    entry.processes += 1;
+    if (row.cpuMs === null) continue;
+    entry.reporting += 1;
+    entry.cpuUserMs = round(entry.cpuUserMs + row.cpuUserMs);
+    entry.cpuSystemMs = round(entry.cpuSystemMs + row.cpuSystemMs);
+    entry.cpuMs = round(entry.cpuMs + row.cpuMs);
+  }
+  for (const entry of Object.values(byTier)) {
+    entry.shareOfCpu = totalCpuMs > 0 ? round(entry.cpuMs / totalCpuMs, 3) : null;
+  }
+
+  return { byTier, processes: rows, totalCpuMs: round(totalCpuMs) };
+};
+
+/**
+ * Warm-up passes a split run may make: query embeddings run in the retrieval
+ * tier, one cache per replica, and the agent tier's client picks the replica,
+ * so one pass over the question pool need not reach every replica with every
+ * question. Passes repeat until one sends no embeddings request, at most this
+ * many.
+ */
+export const splitWarmUpPassLimit = (retrievalReplicas = 1) => 2 + 4 * Math.max(1, retrievalReplicas);
+
+/**
+ * One scenario's levels. `apps` are the processes the load generator sends to
+ * (monolith instances, or the split topology's api replicas); `processes` is
+ * every app process whose stats a level reads (the api replicas first, so the
+ * per-instance rows line up) and `processTiers` their tiers. Each level runs
+ * --repeat times in a row.
+ */
+const runScenario = async ({
+  apps,
+  baseUrls,
+  fakeModel,
+  headers,
+  hostSampler,
+  idle,
+  instances,
+  options,
+  processes = apps,
+  processTiers = apps.map(() => MONOLITH_TIER),
+  profile,
+  runId,
+  target,
+}) => {
   const levels = [];
   const balancer = createInstanceBalancer({ count: baseUrls.length, mode: options.balance });
+  const repeat = options.repeat ?? 1;
+  const split = options.topology === "split";
+  const runs = options.concurrency.flatMap((concurrency) =>
+    Array.from({ length: repeat }, (_, index) => ({ concurrency, run: index + 1 }))
+  );
 
-  for (const concurrency of options.concurrency) {
+  for (const { concurrency, run } of runs) {
     const requests = measuredRequestsForLevel({
       concurrency,
       minRequestsPerClient: options.minRequestsPerClient,
       requests: target.kind === "chat" ? options.requests : options.cheapRequests,
     });
-    const sessionTag = `load-${runId}-${target.kind}-${profile ?? "na"}-c${concurrency}`;
+    const sessionTag = `load-${runId}-${target.kind}-${profile ?? "na"}-c${concurrency}${repeat > 1 ? `-r${run}` : ""}`;
     const warmup = options.warmup > 0 ? Math.max(options.warmup, concurrency) : 0;
     let statsAtStart = null;
     let statsAtEnd = null;
@@ -2812,12 +3296,12 @@ const runScenario = async ({ apps, baseUrls, fakeModel, headers, hostSampler, id
     const hooks = {
       onMeasureEnd: () => {
         model = fakeModel.snapshot();
-        statsAtEnd = collectStats(apps);
+        statsAtEnd = collectStats(processes);
         hostAtEnd = hostSampler?.mark() ?? null;
       },
       onMeasureStart: () => {
         fakeModel.resetStats();
-        statsAtStart = collectStats(apps);
+        statsAtStart = collectStats(processes);
         hostAtStart = hostSampler?.mark() ?? null;
       },
     };
@@ -2842,9 +3326,12 @@ const runScenario = async ({ apps, baseUrls, fakeModel, headers, hostSampler, id
     const perRequest = (value) => (summary.requests > 0 ? round(value / summary.requests, 2) : null);
     const combined = combineServerStats(serverStats, summary.requests, { idle });
     const perInstance = summarizeByInstance(results, apps.length);
+    const tiers = summarizeTierStats({ idle, processTiers, stats: serverStats, units: summary.requests });
+    const busiestTier = pickBusiestTier(tiers);
 
     levels.push({
       concurrency,
+      ...(repeat > 1 ? { repeat: run } : {}),
       warmupRequests: warmup,
       cooldownRequests,
       windowCompletions,
@@ -2861,6 +3348,7 @@ const runScenario = async ({ apps, baseUrls, fakeModel, headers, hostSampler, id
           latencyMs: target.kind === "chat" ? options.embeddingLatencyMs : 0,
           peak: model.embeddings.peakInFlight,
         }),
+        ...(split ? { directCalls: countDirectModelCalls(model.byCaller) } : {}),
         ...model,
       },
       server: {
@@ -2881,6 +3369,8 @@ const runScenario = async ({ apps, baseUrls, fakeModel, headers, hostSampler, id
         }),
       },
       host,
+      tiers,
+      busiestTier,
       ...(apps.length > 1
         ? {
             instances: describeInstances({
@@ -2898,8 +3388,13 @@ const runScenario = async ({ apps, baseUrls, fakeModel, headers, hostSampler, id
       apps.length > 1
         ? `  per instance ${perInstance.map((entry) => `${entry.requests} (mean ${entry.latencyMs.mean} ms)`).join(" / ")}`
         : "";
+    const tierCpu = split
+      ? `  cores busy per tier ${Object.entries(tiers)
+          .map(([tier, entry]) => `${tier} ${cell(entry.coresBusy)} (max ${cell(entry.maxProcessCoresBusy)})`)
+          .join(" / ")}; busiest ${busiestTier?.tier ?? "-"}`
+      : "";
     console.log(
-      `  ${target.label.padEnd(26)} c=${String(concurrency).padStart(3)}  ${String(summary.throughputRps).padStart(8)} req/s  mean ${summary.latencyMs.mean} ms  p50 ${summary.latencyMs.p50} ms  p95 ${summary.latencyMs.p95} ms  p99 ${summary.latencyMs.p99} ms (n=${summary.latencyMs.count})  errors ${summary.errors}/${summary.requests}${target.kind === "chat" ? `  peak model in flight ${model.chat.peakInFlight}` : ""}${spread}`
+      `  ${target.label.padEnd(26)} c=${String(concurrency).padStart(3)}${repeat > 1 ? ` #${run}` : ""}  ${String(summary.throughputRps).padStart(8)} req/s  mean ${summary.latencyMs.mean} ms  p50 ${summary.latencyMs.p50} ms  p95 ${summary.latencyMs.p95} ms  p99 ${summary.latencyMs.p99} ms (n=${summary.latencyMs.count})  errors ${summary.errors}/${summary.requests}${target.kind === "chat" ? `  peak model in flight ${model.chat.peakInFlight}` : ""}${spread}${tierCpu}`
     );
   }
 
@@ -2907,6 +3402,7 @@ const runScenario = async ({ apps, baseUrls, fakeModel, headers, hostSampler, id
     endpoint: target.kind === "chat" ? "POST /chat" : `GET ${target.path}`,
     kind: target.kind,
     levels,
+    ...(repeat > 1 ? { repeats: summarizeLevelRepeats(levels) } : {}),
     modelLatencyMs: target.kind === "chat" ? profile : null,
     embeddingLatencyMs: target.kind === "chat" ? options.embeddingLatencyMs : null,
   };
@@ -4699,7 +5195,84 @@ const formatIndexSwitchScenario = (lines, scenario) => {
   );
 };
 
-const formatRequestScenario = (lines, scenario, multiInstance, balance) => {
+/** A level's row key: its concurrency, and its run with --repeat ("16 #2"). */
+export const levelLabel = (level) => (Number.isInteger(level?.repeat) ? `${level.concurrency} #${level.repeat}` : String(level?.concurrency));
+
+const formatRange = (range, digits = null) => {
+  if (!range) return "-";
+  const show = (value) => (digits === null ? String(value) : String(round(value, digits)));
+  return range.min === range.max ? show(range.min) : `${show(range.min)} - ${show(range.max)}`;
+};
+
+/**
+ * Split topology: per level, each tier's CPU per request, cores busy (the
+ * tier's and its busiest process's), share of the app processes' CPU, queries
+ * and event-loop delay, then the busiest tier per level and the model calls
+ * that did not come through a gateway.
+ */
+export const formatTierRows = (lines, levels = []) => {
+  const withTiers = levels.filter((level) => level.tiers && Object.keys(level.tiers).length > 0);
+  if (withTiers.length === 0) return;
+
+  lines.push(
+    "",
+    "Per tier (every process of the tier summed; busiest process = the replica with the most cores busy, the saturation signal: a Node process runs its JavaScript on one thread):",
+    "",
+    "| Concurrency | Tier | Processes | CPU ms/req | CPU ms/req net of idle | Cores busy | Busiest process cores | Share of app CPU | DB queries/req | Event-loop p99 ms | RSS MB |",
+    "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+  );
+  for (const level of withTiers) {
+    for (const [tier, entry] of Object.entries(level.tiers)) {
+      lines.push(
+        `| ${levelLabel(level)} | ${tier} | ${cell(entry.processes)}${entry.reporting !== entry.processes ? ` (${cell(entry.reporting)} reported)` : ""} | ${cell(entry.cpuMsPerRequest)} | ${cell(entry.cpuMsPerRequestNetOfIdle)} | ${cell(entry.coresBusy)} | ${cell(entry.maxProcessCoresBusy)} | ${cell(entry.shareOfCpu)} | ${cell(entry.dbQueriesPerRequest)} | ${cell(entry.eventLoopDelayP99Ms)} | ${cell(entry.rssMb)} |`
+      );
+    }
+  }
+  lines.push(
+    "",
+    `Busiest tier per level: ${withTiers
+      .map((level) => `c=${levelLabel(level)} ${level.busiestTier ? `${level.busiestTier.tier} (${cell(level.busiestTier.maxProcessCoresBusy)} cores)` : "-"}`)
+      .join("; ")}.`
+  );
+  const direct = withTiers.filter((level) => Number.isFinite(level.model?.directCalls));
+  if (direct.length > 0) {
+    const bypassed = direct.filter((level) => level.model.directCalls > 0);
+    lines.push(
+      bypassed.length === 0
+        ? "Model calls from any process but a gateway: 0 at every level (every tier reached the model through the gateway)."
+        : `Model calls from a process other than a gateway: ${bypassed.map((level) => `c=${levelLabel(level)} ${level.model.directCalls}`).join("; ")} (see model.byCaller in the JSON report).`
+    );
+  }
+};
+
+/** --repeat: the range (min - max) of each level's numbers over its runs. */
+export const formatRepeatRanges = (lines, repeats = []) => {
+  if (!Array.isArray(repeats) || repeats.length === 0) return;
+  const tierNames = [...new Set(repeats.flatMap((row) => Object.keys(row.tiers ?? {})))];
+  const showTiers = tierNames.length > 1;
+
+  lines.push(
+    "",
+    "Range over the repeats of each level (min - max; one value when they agree):",
+    "",
+    `| Concurrency | Runs | Errors | Req/s | Mean ms | p50 ms | p95 ms | p99 ms | CPU ms/req |${showTiers ? `${tierNames.map((tier) => ` ${tier} CPU ms/req |`).join("")} Busiest tier (runs) |` : ""}`,
+    `| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |${showTiers ? `${tierNames.map(() => " ---: |").join("")} --- |` : ""}`
+  );
+  for (const row of repeats) {
+    const tierCells = showTiers
+      ? `${tierNames.map((tier) => ` ${formatRange(row.tiers?.[tier]?.cpuMsPerRequest)} |`).join("")} ${
+          Object.entries(row.busiestTiers ?? {})
+            .map(([tier, count]) => `${tier} ${count}`)
+            .join(", ") || "-"
+        } |`
+      : "";
+    lines.push(
+      `| ${row.concurrency} | ${row.runs} | ${row.errors} | ${formatRange(row.throughputRps)} | ${formatRange(row.latencyMeanMs)} | ${formatRange(row.latencyP50Ms)} | ${formatRange(row.latencyP95Ms)} | ${formatRange(row.latencyP99Ms)} | ${formatRange(row.cpuMsPerRequest)} |${tierCells}`
+    );
+  }
+};
+
+const formatRequestScenario = (lines, scenario, multiInstance, balance, { split = false } = {}) => {
   const chat = scenario.kind === "chat";
   lines.push(
     `| Concurrency | Requests | Errors | Req/s | ${LATENCY_HEADER} |${chat ? " Chat calls/req | Embedding calls/req | Peak chat in flight |" : ""} CPU ms/req | CPU ms/req net of idle | Cores busy | DB queries/req | Event-loop p99 ms |${chat ? " Answers (mode, cited) |" : ""}`,
@@ -4714,13 +5287,16 @@ const formatRequestScenario = (lines, scenario, multiInstance, balance) => {
       ? ` ${cell(level.model?.chatCompletionsPerRequest)} | ${cell(level.model?.embeddingRequestsPerRequest)} | ${cell(level.model?.peakChatInFlight)} |`
       : "";
     lines.push(
-      `| ${level.concurrency} | ${level.requests} | ${level.errors} | ${cell(level.throughputRps)} | ${latencyCells(level.latencyMs)} |${chatCells} ${cell(level.server?.cpuMsPerRequest)} | ${cell(level.server?.cpuMsPerRequestNetOfIdle)} | ${cell(level.server?.coresBusy)} | ${cell(level.server?.dbQueriesPerRequest)} | ${cell(level.server?.eventLoopDelayP99Ms)} |${chat ? ` ${modes || "-"} |` : ""}`
+      `| ${levelLabel(level)} | ${level.requests} | ${level.errors} | ${cell(level.throughputRps)} | ${latencyCells(level.latencyMs)} |${chatCells} ${cell(level.server?.cpuMsPerRequest)} | ${cell(level.server?.cpuMsPerRequestNetOfIdle)} | ${cell(level.server?.coresBusy)} | ${cell(level.server?.dbQueriesPerRequest)} | ${cell(level.server?.eventLoopDelayP99Ms)} |${chat ? ` ${modes || "-"} |` : ""}`
     );
   }
 
+  formatRepeatRanges(lines, scenario.repeats);
+  if (split) formatTierRows(lines, scenario.levels);
+
   formatHostRows(
     lines,
-    scenario.levels.map((level) => ({ host: level.host, key: String(level.concurrency) })),
+    scenario.levels.map((level) => ({ host: level.host, key: levelLabel(level) })),
     { label: "Concurrency", unit: "req" }
   );
 
@@ -4736,7 +5312,7 @@ const formatRequestScenario = (lines, scenario, multiInstance, balance) => {
     for (const level of withLimiter) {
       const limiter = level.server.sharedLimiter;
       lines.push(
-        `| ${level.concurrency} | ${cell(limiter.acquireCalls)} | ${cell(limiter.acquireCallsPerSecond)} | ${cell(limiter.slotsAcquired)} | ${cell(limiter.acquireCallsPerSlot)} |`
+        `| ${levelLabel(level)} | ${cell(limiter.acquireCalls)} | ${cell(limiter.acquireCallsPerSecond)} | ${cell(limiter.slotsAcquired)} | ${cell(limiter.acquireCallsPerSlot)} |`
       );
     }
   }
@@ -4752,7 +5328,7 @@ const formatRequestScenario = (lines, scenario, multiInstance, balance) => {
     for (const level of scenario.levels) {
       for (const instance of level.instances ?? []) {
         lines.push(
-          `| ${level.concurrency} | ${instance.index} | ${cell(instance.requests)} | ${cell(instance.errors)} | ${latencyCells(instance.latencyMs)} | ${cell(instance.cpuMsPerRequest)} | ${cell(instance.cpuMsPerRequestNetOfIdle)} | ${cell(instance.coresBusy)} | ${cell(instance.dbQueries)} |`
+          `| ${levelLabel(level)} | ${instance.index} | ${cell(instance.requests)} | ${cell(instance.errors)} | ${latencyCells(instance.latencyMs)} | ${cell(instance.cpuMsPerRequest)} | ${cell(instance.cpuMsPerRequestNetOfIdle)} | ${cell(instance.coresBusy)} | ${cell(instance.dbQueries)} |`
         );
       }
     }
@@ -4762,17 +5338,20 @@ const formatRequestScenario = (lines, scenario, multiInstance, balance) => {
   if (errorLevels.length > 0) {
     lines.push("", "Errors:");
     for (const level of errorLevels) {
-      lines.push(`- c=${level.concurrency}: ${formatErrorCounts(level.errorCounts)}`);
+      lines.push(`- c=${levelLabel(level)}: ${formatErrorCounts(level.errorCounts)}`);
     }
   }
 };
 
 const formatIdle = (run) => {
   if (!Array.isArray(run.idle) || run.idle.length === 0) return null;
-  const labels = [
-    ...(run.instances ?? []).map((instance) => `API #${instance.index}`),
-    ...Array.from({ length: run.ingestWorkers ?? 0 }, (_, index) => `worker #${index}`),
-  ];
+  const labels =
+    run.topology?.topology === "split" && Array.isArray(run.topology.processes)
+      ? run.topology.processes.map((entry) => `${entry.tier} #${entry.index}`)
+      : [
+          ...(run.instances ?? []).map((instance) => `API #${instance.index}`),
+          ...Array.from({ length: run.ingestWorkers ?? 0 }, (_, index) => `worker #${index}`),
+        ];
 
   return `Idle for ${cell(run.idleMs)} ms before the first measured level (nothing sent): ${run.idle
     .map(
@@ -4793,12 +5372,45 @@ export const formatAccessScope = (accessScope) =>
     ? `tenant ${accessScope.userId} / ${accessScope.workspaceId} (x-user-id / x-workspace-id; PostgreSQL statements run in tenant transactions under row-level security)`
     : "none: unscoped owner path (PostgreSQL statements run as the owner on the pool, row-level security bypassed); --tenant measures the tenant path";
 
+/**
+ * How the report names the run's topology; a report written before
+ * --topology existed is a monolith.
+ */
+export const formatTopologyConfig = (config = {}) => {
+  const replicas = config.tierReplicas ?? {};
+  const total = config.totalProcesses ?? Object.values(replicas).reduce((sum, count) => sum + count, 0);
+
+  if (config.topology === "split") {
+    return `split, ${total} processes: ${TIER_REPORT_ORDER.map((tier) => `${tier} x${replicas[tier] ?? 1}`).join(", ")} (each tier its own process through the role start-up, ARCHIVE_RAG_ROLE per process; wired by replica lists and one internal key generated for the run; the fake model behind the gateway)`;
+  }
+
+  const instances = replicas[MONOLITH_TIER] ?? config.instances ?? 1;
+  const workers = replicas["ingest-worker"] ?? 0;
+  return `monolith: ${instances} process(es) of role all${workers > 0 ? ` and ${workers} dedicated ingest worker(s)` : ""}`;
+};
+
+/** A run's whole-life CPU per tier, one line; null without totals. */
+export const formatLifetimeCpu = (topology) => {
+  const byTier = topology?.lifetime?.byTier;
+  if (!byTier || Object.keys(byTier).length === 0) return null;
+
+  return `Whole-run CPU per tier (start-up, seed ingest, warm-up and every level; read from each process before it stopped): ${Object.entries(
+    byTier
+  )
+    .map(
+      ([tier, entry]) =>
+        `${tier} ${cell(entry.cpuMs)} ms over ${entry.processes} process(es)${entry.reporting !== entry.processes ? ` (${entry.reporting} reported)` : ""}${Number.isFinite(entry.shareOfCpu) ? `, ${round(entry.shareOfCpu * 100)}%` : ""}`
+    )
+    .join("; ")}.`;
+};
+
 /** Markdown report: config, then the tables of every storage mode and scenario. */
 export const formatLoadTestMarkdown = (report) => {
   const { config } = report;
   const scenarioKind = config.scenario ?? "chat";
   const instanceCount = config.instances ?? 1;
   const multiInstance = instanceCount > 1;
+  const split = config.topology === "split";
   const topology = formatCpuTopology(config.cpuTopology);
   const changedFiles = Array.isArray(config.gitChangedFiles) ? config.gitChangedFiles : [];
   const changedCount = config.gitChangedFileCount ?? changedFiles.length;
@@ -4826,8 +5438,13 @@ export const formatLoadTestMarkdown = (report) => {
     `| Host | ${cell(config.platform)}, ${cell(config.cpuCount)} CPUs (${cell(config.cpuModel)}${topology ? `; core tiers ${topology}` : ""}), ${cell(config.totalMemoryGb)} GB RAM |`,
     `| Storage modes | ${config.storage.join(", ")} |`,
     `| Scenario | ${scenarioKind} |`,
-    `| App instances | ${instanceCount}${multiInstance ? ` (client-side ${config.balance ?? "round-robin"} balancing, one database)` : ""} |`,
-    `| Shared state (model call guard) | ${config.sharedState ?? "memory"}${config.sharedState === "redis" ? " (RAG_LLM_MAX_CONCURRENCY is one cap for all instances)" : multiInstance ? " (RAG_LLM_MAX_CONCURRENCY applies per instance)" : ""} |`,
+    `| Topology | ${formatTopologyConfig(config)} |`,
+    split
+      ? `| App instances | ${instanceCount} api replica(s)${multiInstance ? ` (client-side ${config.balance ?? "round-robin"} balancing over the edge)` : ""}; agent, retrieval and gateway replicas are picked by each tier's service client; one database |`
+      : `| App instances | ${instanceCount}${multiInstance ? ` (client-side ${config.balance ?? "round-robin"} balancing, one database)` : ""} |`,
+    split
+      ? `| Shared state (model call guard) | ${config.sharedState ?? "memory"}${config.sharedState === "redis" ? " (RAG_LLM_MAX_CONCURRENCY is one cap for all gateway processes)" : " (RAG_LLM_MAX_CONCURRENCY applies per gateway process; callers of the gateway run no guard)"} |`
+      : `| Shared state (model call guard) | ${config.sharedState ?? "memory"}${config.sharedState === "redis" ? " (RAG_LLM_MAX_CONCURRENCY is one cap for all instances)" : multiInstance ? " (RAG_LLM_MAX_CONCURRENCY applies per instance)" : ""} |`,
     `| Model latency profiles (chat completion) | ${config.modelLatencyMs.map((ms) => `${ms} ms`).join(", ")} |`,
     `| Embedding latency | ${config.embeddingLatencyMs} ms per request${config.embeddingLatencyPerInputMs ? ` + ${config.embeddingLatencyPerInputMs} ms per input` : ""} |`,
     `| RAG_LLM_MAX_CONCURRENCY | ${config.llmMaxConcurrency} |`,
@@ -4869,7 +5486,8 @@ export const formatLoadTestMarkdown = (report) => {
     lines.push(
       `| Concurrency levels | ${config.concurrency.join(", ")} |`,
       `| Measured requests per level | /chat max(${config.requests}, ${cell(config.minRequestsPerClient ?? 0)} x concurrency), ${config.cheapPath} max(${config.cheapRequests}, ${cell(config.minRequestsPerClient ?? 0)} x concurrency); warm-up of max(${config.warmup}, concurrency) and cool-down in the same loop |`,
-      `| Corpus | ${config.documents} documents x ${config.pages} pages, ${config.questions} questions |`
+      `| Corpus | ${config.documents} documents x ${config.pages} pages, ${config.questions} questions |`,
+      ...((config.repeat ?? 1) > 1 ? [`| Runs per level | ${config.repeat}, in a row on the same processes |`] : [])
     );
   }
 
@@ -4885,7 +5503,7 @@ export const formatLoadTestMarkdown = (report) => {
       : []),
     `| Embedding dimensions / query embedding cache | ${config.embeddingDimensions} / ${
       config.embeddingCache
-        ? `on, warmed on every instance before the first measured level${
+        ? `on, warmed on every ${split ? "retrieval replica (the tier that embeds queries)" : "instance"} before the first measured level${
             Number.isFinite(config.embeddingCacheMaxEntries) ? ` (${config.embeddingCacheMaxEntries} entries, TTL ${cell(config.embeddingCacheTtlMs)} ms)` : ""
           }`
         : "off"
@@ -4907,7 +5525,19 @@ export const formatLoadTestMarkdown = (report) => {
           : ""
       }.`
     );
-    if (Array.isArray(run.instances) && (run.instances.length > 1 || run.ingestWorkers > 0)) {
+    if (run.topology?.topology === "split" && Array.isArray(run.topology.processes)) {
+      lines.push(
+        `Processes: ${TIER_REPORT_ORDER.map((tier) => {
+          const ports = run.topology.processes.filter((entry) => entry.tier === tier).map((entry) => entry.port);
+          return `${tier} on port${ports.length > 1 ? "s" : ""} ${ports.join(", ")}`;
+        }).join("; ")}.`
+      );
+      if (run.topology.warmUp) {
+        lines.push(
+          `Query cache warm-up: ${run.topology.warmUp.passes} pass(es) over the question pool (at most ${cell(run.topology.warmUp.maxPasses)}); the last sent ${cell(run.topology.warmUp.lastPassEmbeddingRequests)} embeddings request(s).`
+        );
+      }
+    } else if (Array.isArray(run.instances) && (run.instances.length > 1 || run.ingestWorkers > 0)) {
       lines.push(
         `Processes: ${run.instances.length} API instance(s) on ports ${run.instances.map((instance) => instance.port).join(", ")}${
           run.ingestWorkers > 0 ? `, ${run.ingestWorkers} dedicated ingest worker(s)` : ""
@@ -4926,6 +5556,8 @@ export const formatLoadTestMarkdown = (report) => {
     }
     const idle = formatIdle(run);
     if (idle) lines.push(idle);
+    const lifetime = formatLifetimeCpu(run.topology);
+    if (lifetime) lines.push(lifetime);
     lines.push("");
 
     for (const scenario of run.scenarios) {
@@ -4941,7 +5573,7 @@ export const formatLoadTestMarkdown = (report) => {
 
       if (scenario.kind === "ingest") formatIngestScenario(lines, scenario, multiInstance);
       else if (scenario.kind === "index-switch") formatIndexSwitchScenario(lines, scenario);
-      else formatRequestScenario(lines, scenario, multiInstance, config.balance);
+      else formatRequestScenario(lines, scenario, multiInstance, config.balance, { split });
       lines.push("");
     }
   }
@@ -5023,6 +5655,21 @@ export const buildCrashNotes = () => [
   "Crash injection: the fake model holds dedicated worker 0's first embeddings request of the window unanswered and the harness kills that process (SIGKILL) while it waits, so the kill lands mid-embed with nothing flushed. The jobs it held stay running until their lease (RAG_INGEST_JOB_LEASE_MS) expires; the surviving worker then claims each one (running a job whose previous attempt died alone). A poller on the harness's own connection records every change of every job of the window every 25 ms: status, stage, attempt, claimant, whether the upload bytes are still on the job row, and when each stage output was written. A job resumed at the stage it died in, with no earlier stage observed again and no earlier output rewritten, did not re-parse. Times and docs/s of this level include the lease wait and the loss of one of the two workers.",
 ];
 
+/** Split topology: how the tiers are wired, how each is measured, and what the model cap means there. */
+export const buildTopologyNotes = ({ balance = "least-outstanding", sharedState = "memory" } = {}) => [
+  "Split topology: every tier runs in its own process, started through the role start-up a deployment uses (rag/agent-service/role-server.js startServiceRole with ARCHIVE_RAG_ROLE set; topology validation included), on one host and one PostgreSQL database. The tiers are wired by replica lists (AGENT_SERVICE_URL on the api replicas, RETRIEVAL_SERVICE_URL on the agents, MODEL_GATEWAY_URL on api, agent and retrieval) and one internal HS256 key generated for the run (INTERNAL_SERVICE_KEYS; not written to the report). The fake model is the gateway's only chat and embedding upstream; every process keeps its own model API key, so a call that bypassed the gateway would appear in the fake's per-caller counts, and the report counts such calls per level (expected 0).",
+  `Balancing: the load generator balances over the api replicas (${balance}, client-side, no proxy); each tier's service client picks among the next tier's replicas itself (fewest requests in flight from that process, ties in rotation), so a request crosses api -> agent -> retrieval -> model gateway and agent -> model gateway, each hop an HTTP call with a signed identity.`,
+  "CPU per tier: each process reports its own CPU (process.cpuUsage), PostgreSQL round trips, memory and event-loop delay over the measured window, and the per-tier table sums the replicas of each tier; the level's CPU ms/req sums every tier, so it includes the serialization and HTTP hops between tiers that a monolith does not pay. The busiest process's cores busy is the saturation signal: a Node process runs its JavaScript on one thread, so a tier whose busiest process nears one core busy, with its event-loop delay rising, limits throughput; the busiest tier is named per level. Whole-run CPU per process (start-up and seed ingest included) is read before each process stops.",
+  sharedState === "redis"
+    ? "Model concurrency: RAG_LLM_MAX_CONCURRENCY is enforced by the model gateway (callers of the gateway run no guard); with shared state redis it is one cap for all gateway processes."
+    : "Model concurrency: RAG_LLM_MAX_CONCURRENCY is enforced by the model gateway, per gateway process and upstream (callers of the gateway run no guard); with shared state memory N gateway replicas allow N times the cap, so where the cap binds (model latency above 0 at high concurrency) more gateways raise throughput through the cap, not through CPU. --shared-state redis makes it one cap.",
+  "Query cache warm-up: query embeddings run in the retrieval tier, one cache per replica, and the agent tier picks the replica, so the warm-up repeats the question pool on every api replica until a pass sends no embeddings request (bounded; the run records the passes); Embedding calls/req shows any query still embedded during a level.",
+];
+
+/** --repeat for the request scenarios. */
+export const REPEAT_NOTE =
+  "Repeats: each level runs --repeat times in a row on the same processes and database, and the range table gives min - max per concurrency. Runs do not start from a fresh database (every /chat writes an agent run and session memory), so a trend across the runs of a level is drift, not noise; compare configurations by their ranges, and do not rank two whose ranges overlap.";
+
 /** Method notes for this run's settings: the common ones plus those that apply. */
 export const buildMethodNotes = (options = {}) => {
   const storage = Array.isArray(options.storage) ? options.storage : [];
@@ -5034,9 +5681,12 @@ export const buildMethodNotes = (options = {}) => {
     HOST_CPU_NOTE,
     ...(scenario === "chat" && storage.length > 0 ? [buildDocumentsEndpointNote(storage)] : []),
     ...(storage.includes("pgvector") ? [DATABASE_STATISTICS_NOTE] : []),
-    ...((options.instances ?? 1) > 1 || (options.ingestWorkers ?? 0) > 0
-      ? buildMultiInstanceNotes({ balance: options.balance, sharedState: options.sharedState })
-      : []),
+    ...(options.topology === "split"
+      ? buildTopologyNotes({ balance: options.balance, sharedState: options.sharedState })
+      : (options.instances ?? 1) > 1 || (options.ingestWorkers ?? 0) > 0
+        ? buildMultiInstanceNotes({ balance: options.balance, sharedState: options.sharedState })
+        : []),
+    ...(scenario === "chat" && (options.repeat ?? 1) > 1 ? [REPEAT_NOTE] : []),
     ...(scenario === "ingest"
       ? buildIngestNotes({ ingestMode: options.ingestMode, pollIntervalMs: options.pollIntervalMs })
       : []),
@@ -5097,6 +5747,81 @@ const startInstances = async ({ apps, corpus, environmentFor, options, storage }
   return instances;
 };
 
+/**
+ * Starts the split topology's processes one at a time, in SPLIT_TIERS order
+ * (each tier once every tier it calls is listening, so its replica lists are
+ * complete): the gateways, the retrieval replicas (replica 0 checks that the
+ * database is fresh and its start-up migrates it), the agents, then the api
+ * replicas (replica 0 ingests the seed corpus). Api replicas are pushed into
+ * `apps` and the others into `tierApps` as they start, so the caller can stop
+ * the ones already running when a later one fails. Returns the api instances
+ * (as startInstances does) and every process with its tier, api replicas first.
+ */
+const startSplitTopology = async ({ apps, corpus, environmentForTier, options, storage, tierApps }) => {
+  const urls = Object.fromEntries(SPLIT_TIERS.map((tier) => [tier, []]));
+  const started = Object.fromEntries(SPLIT_TIERS.map((tier) => [tier, []]));
+
+  for (const tier of SPLIT_TIERS) {
+    for (let index = 0; index < options.tierReplicas[tier]; index += 1) {
+      const child = await startAppProcess({
+        environment: environmentForTier(tier, index, urls),
+        role: "tier",
+        verbose: options.verbose,
+      });
+      (tier === "api" ? apps : tierApps).push(child);
+      const primary = tier === "api" && index === 0;
+      const ready = await child.start(primary ? corpus.documents : [], {
+        assertFresh: tier === "retrieval" && index === 0,
+        primary,
+        seedFormat: "text",
+      });
+      started[tier].push({ child, ready: { ...ready, index, tier } });
+      urls[tier].push(`http://127.0.0.1:${ready.port}`);
+      console.log(
+        primary
+          ? `[${storage}] ${tier} #${index}: on port ${ready.port}; ${ready.chunkCount} chunks ingested in ${ready.ingestMs} ms`
+          : `[${storage}] ${tier} #${index}: on port ${ready.port}`
+      );
+    }
+  }
+
+  // The load generator's view (api replicas first), then the tiers behind.
+  const all = TIER_REPORT_ORDER.flatMap((tier) => started[tier]);
+
+  return {
+    instances: started.api.map(({ ready }) => ready),
+    processes: all.map(({ child }) => child),
+    processList: all.map(({ child, ready }) => ({ index: ready.index, pid: child.pid, port: ready.port, tier: ready.tier })),
+  };
+};
+
+/**
+ * The split topology's query cache warm-up: warmQueryCaches passes (every
+ * question once on every api replica) until one sends no embeddings request
+ * to the fake model, at most `maxPasses`; with the cache off there is nothing
+ * to warm beyond one pass. Returns the passes made, the last pass's
+ * embeddings requests and the non-2xx count.
+ */
+const warmSplitQueryCaches = async ({ fakeModel, maxPasses, options, ...warm }) => {
+  let failures = 0;
+  let passes = 0;
+  let lastPassEmbeddingRequests = null;
+
+  while (passes < (options.embeddingCache ? maxPasses : 1)) {
+    fakeModel.resetStats();
+    failures += await warmQueryCaches({ ...warm, options });
+    passes += 1;
+    lastPassEmbeddingRequests = fakeModel.snapshot().embeddings.requests;
+    if (lastPassEmbeddingRequests === 0) break;
+  }
+
+  return { failures, lastPassEmbeddingRequests, maxPasses, passes };
+};
+
+// A process that exited reports nothing (null).
+const collectTotals = (processes) =>
+  Promise.all(processes.map((child) => (child.exited ? null : child.totals().catch(() => null))));
+
 const startIngestWorkers = async ({ environmentFor, options, storage, workers }) => {
   const ready = [];
 
@@ -5135,6 +5860,10 @@ const main = async () => {
     await serveWorker();
     return;
   }
+  if (options.serveTier) {
+    await serveTier();
+    return;
+  }
   if (options.ingestWorkers > 0 && !existsSync(INGEST_WORKER_ENTRY)) {
     throw new Error(
       `--ingest-workers needs the dedicated ingest worker entry ${path.relative(serverDirectory, INGEST_WORKER_ENTRY)} (asynchronous ingestion), which this checkout does not have.`
@@ -5157,12 +5886,19 @@ const main = async () => {
   });
   const authToken = options.auth ? randomBytes(24).toString("hex") : "";
   const headers = buildRequestHeaders({ authToken, options });
+  const split = options.topology === "split";
+  // The split topology's internal signing key: generated here, handed to its
+  // processes only, never logged or reported.
+  const serviceKeys = split ? createRunServiceKeys({ runId }) : "";
+  const topologyConfig = describeTopologyConfig(options);
   const fakeModel = await startFakeModelServer({ dimensions: options.embeddingDimensions });
   const runs = [];
 
   console.log(
     options.scenario === "index-switch"
       ? `Load test (index switch): ${options.instances} instance(s), ${options.balance} balancing; /chat concurrency ${options.switchConcurrency}; seed ${options.documents} x ${options.pages} pages at ${options.embeddingDimensions} dimensions; new version ${switchEmbeddingModel(options.switchDimensions)}; phases of ${options.switchPhaseMs} ms`
+      : split
+      ? `Load test (split topology): ${TIER_REPORT_ORDER.map((tier) => `${tier} x${options.tierReplicas[tier]}`).join(", ")} (${topologyConfig.totalProcesses} processes), ${options.balance} balancing over the api replicas; concurrency ${options.concurrency.join(", ")}; model latency ${options.modelLatencyMs.join(", ")} ms; RAG_LLM_MAX_CONCURRENCY=${options.llmMaxConcurrency} per gateway process; shared state ${options.sharedState}${options.repeat > 1 ? `; each level ${options.repeat} times` : ""}`
       : options.scenario === "ingest"
       ? `Load test (ingest, ${options.ingestMode}): storage ${options.storage.join(", ")}; ${options.instances} instance(s), ${options.ingestWorkers} worker process(es), ${options.balance} balancing; upload concurrency ${options.uploadConcurrency.join(", ")}; ${options.uploads} uploads per level; embedding latency ${options.embeddingLatencyMs} ms; shared state ${options.sharedState}`
       : `Load test: storage ${options.storage.join(", ")}; ${options.instances} instance(s), ${options.balance} balancing; concurrency ${options.concurrency.join(", ")}; model latency ${options.modelLatencyMs.join(", ")} ms; RAG_LLM_MAX_CONCURRENCY=${options.llmMaxConcurrency}; shared state ${options.sharedState}`
@@ -5186,15 +5922,47 @@ const main = async () => {
           storage,
           tempRoot,
         });
+      const environmentForTier = (tier, index, urls) =>
+        buildTierEnvironment({
+          authToken,
+          databaseUrl: options.databaseUrl,
+          index,
+          modelBaseUrl: fakeModel.baseUrl,
+          options,
+          runId,
+          serviceKeys,
+          storage,
+          tempRoot,
+          tier,
+          urls,
+        });
       const apps = [];
       const workers = [];
+      // The split topology's agent, retrieval and gateway processes.
+      const tierApps = [];
       // The cluster's CPU belongs to the pgvector run only.
       const hostSampler = createHostSampler({ postmasterPid: storage === "pgvector" ? postmasterPid : null });
 
       try {
         fakeModel.setLatency({ chatMs: 0, embeddingMs: 0, embeddingPerInputMs: 0 });
-        console.log(`[${storage}] starting ${options.instances} app instance(s) and ingesting ${corpus.documents.length} documents...`);
-        const instances = await startInstances({ apps, corpus, environmentFor, options, storage });
+        console.log(
+          split
+            ? `[${storage}] starting ${topologyConfig.totalProcesses} tier processes and ingesting ${corpus.documents.length} documents...`
+            : `[${storage}] starting ${options.instances} app instance(s) and ingesting ${corpus.documents.length} documents...`
+        );
+        const splitTopology = split
+          ? await startSplitTopology({ apps, corpus, environmentForTier, options, storage, tierApps })
+          : null;
+        const instances = splitTopology
+          ? splitTopology.instances
+          : await startInstances({ apps, corpus, environmentFor, options, storage });
+        // Every app process a level reads, with its tier (api replicas first).
+        const processes = splitTopology ? splitTopology.processes : apps;
+        const processList = splitTopology
+          ? splitTopology.processList
+          : instances.map((instance, index) => ({ index, pid: apps[index].pid, port: instance.port, tier: MONOLITH_TIER }));
+        const processTiers = processList.map((entry) => entry.tier);
+        let warmUp = null;
         const workerProcesses = await startIngestWorkers({ environmentFor, options, storage, workers });
         const workerLoops = countIngestWorkerLoops([...instances, ...workerProcesses]);
         const baseUrls = instances.map((instance) => `http://127.0.0.1:${instance.port}`);
@@ -5268,7 +6036,24 @@ const main = async () => {
             modelLatencyMs: profile,
           });
         } else {
-          if (options.warmup > 0) {
+          if (options.warmup > 0 && split) {
+            // Every retrieval replica's query embedding cache (the tier that
+            // embeds queries), before any measured level.
+            warmUp = await warmSplitQueryCaches({
+              baseUrls,
+              concurrency: Math.min(8, Math.max(...options.concurrency)),
+              fakeModel,
+              headers,
+              maxPasses: splitWarmUpPassLimit(options.tierReplicas.retrieval),
+              options,
+              questions: corpus.questions,
+              sessionTag: `load-${runId}-chat-warm`,
+            });
+            console.log(
+              `[${storage}] query cache warm-up: ${warmUp.passes} pass(es), the last sent ${warmUp.lastPassEmbeddingRequests} embeddings request(s)`
+            );
+            if (warmUp.failures > 0) console.warn(`[${storage}] query cache warm-up: ${warmUp.failures} request(s) failed`);
+          } else if (options.warmup > 0) {
             // Every instance's query embedding cache, before any measured level.
             const failures = await warmQueryCaches({
               baseUrls,
@@ -5281,7 +6066,7 @@ const main = async () => {
             if (failures > 0) console.warn(`[${storage}] query cache warm-up: ${failures} request(s) failed`);
           }
           databaseAnalyzeMs = await analyzeDatabase({ options, primary: apps[0], storage });
-          idle = await measureIdle({ idleMs: options.idleMs, processes: apps });
+          idle = await measureIdle({ idleMs: options.idleMs, processes });
           scenarios.push(
             await runScenario({
               apps,
@@ -5292,6 +6077,8 @@ const main = async () => {
               idle,
               instances,
               options,
+              processes,
+              processTiers,
               profile: null,
               runId,
               target: { kind: "cheap", label: `GET ${options.cheapPath}`, path: options.cheapPath },
@@ -5314,6 +6101,8 @@ const main = async () => {
                 idle,
                 instances,
                 options,
+                processes,
+                processTiers,
                 profile,
                 runId,
                 target: {
@@ -5325,6 +6114,15 @@ const main = async () => {
             );
           }
         }
+
+        // Whole-run CPU of every process, read before any of them stops.
+        const lifetime = summarizeProcessTotals({
+          processes: [
+            ...processList,
+            ...workerProcesses.map((worker, index) => ({ index, pid: worker.pid, port: null, tier: "ingest-worker" })),
+          ],
+          totals: await collectTotals([...processes, ...workers]),
+        });
 
         runs.push({
           databaseAnalyzeMs,
@@ -5347,17 +6145,23 @@ const main = async () => {
           scenarios,
           sharedState: options.sharedState,
           storage,
+          topology: {
+            ...topologyConfig,
+            processes: processList,
+            lifetime,
+            ...(warmUp ? { warmUp } : {}),
+          },
           workerProcesses,
         });
       } catch (error) {
-        for (const [index, child] of [...apps, ...workers].entries()) {
+        for (const [index, child] of [...apps, ...tierApps, ...workers].entries()) {
           if (!options.verbose && child.logTail.length > 0) {
             console.error(`[${storage}] last log lines of process ${index}:\n${child.logTail.join("\n")}`);
           }
         }
         throw error;
       } finally {
-        await Promise.all([...workers, ...apps].map((child) => child.stop()));
+        await Promise.all([...workers, ...apps, ...tierApps].map((child) => child.stop()));
         await rm(tempRoot, { force: true, recursive: true });
       }
     }
@@ -5423,13 +6227,14 @@ const main = async () => {
       postgresCpuSampled: Boolean(postmasterPid),
       questions: corpus.questions.length,
       rateLimit: options.rateLimit,
-      repeat: ingest ? options.repeat : null,
+      repeat: indexSwitch ? null : options.repeat,
       requestTimeoutMs: options.requestTimeoutMs,
       requests: options.requests,
       scenario: options.scenario,
       searchableTimeoutMs: ingest ? options.searchableTimeoutMs : null,
       sharedState: options.sharedState,
       storage: options.storage,
+      ...topologyConfig,
       totalMemoryGb: round(os.totalmem() / 1024 ** 3),
       uploadConcurrency: ingest ? options.uploadConcurrency : null,
       uploads: ingest ? options.uploads : null,

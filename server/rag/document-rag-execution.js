@@ -11,6 +11,7 @@ import {
   isHybridRetrievalEnabled,
   isQueryDecompositionEnabled,
   isRerankEnabled,
+  isSemanticCacheEnabled,
 } from "./config.js";
 import {
   buildComparisonAnalysisFromContexts,
@@ -37,12 +38,15 @@ import {
   buildRetrievalQueries,
 } from "./query-decomposer.js";
 import { routeQuery } from "./query-router.js";
-import {
-  retrieveGlobalContext,
-  retrieveGlobalContextWithRoutes,
-} from "./retrievers/global-retriever.js";
+import { retrieveGlobalContextWithRoutes } from "./retrievers/global-retriever.js";
 import { retrievePerDocumentContextWithRoutes } from "./retrievers/per-doc-retriever.js";
 import { QUERY_ADAPTER_SCOPE_QA } from "./query-adapter.js";
+import {
+  isRetrievalRemote,
+  retrieveGlobalContextRemotely,
+  retrievePerDocumentContextRemotely,
+  searchGlobalContextRemotely,
+} from "./retrieval-service/remote-retrieval.js";
 import { describeVectorStoreRuntime, mergeRouteSummaries } from "./vector-store.js";
 import {
   prepareComparisonSourceBundle,
@@ -289,10 +293,28 @@ export const normalizeRetrievalPlan = (retrievalPlan = null) => {
   };
 };
 
+// The retrieval seam. Every chunk the document RAG path reads -- the QA and
+// comparison retrievals, the QA verdict retry, the gap plan's supplemental
+// searches, and retrieveQaCandidates for the evaluation entry points -- comes
+// through retrieveGlobalContextForQueries,
+// retrievePerDocumentContextForQueries or searchGlobalContext below. In
+// process they run the *InProcess functions against this process's vector
+// store. When retrieval runs remotely (RETRIEVAL_SERVICE_URL,
+// service-topology.js) they send the query texts, docIds and options to the
+// retrieval tier (retrieval-service/), which runs the same *InProcess
+// functions under the caller's tenant and embeds every query itself; this
+// process then reads no chunk table and embeds nothing for retrieval.
+// `accessScope` is the tenant a remote retrieval acts for
+// (remote-retrieval.js resolveRetrievalAccessScope); in process it is unused,
+// since the database tenant bound to the request already scopes the search.
+
 // `queryAdapterScope` (rag/query-adapter.js): the single-document QA route's
 // own retrieval passes QUERY_ADAPTER_SCOPE_QA; agent-planned retrieval does
-// not, so it stays unadapted until it is measured.
-const retrieveGlobalContextForQueries = async ({
+// not, so it stays unadapted until it is measured. A retrieval query marked
+// primary whose text is `primaryQueryText` searches with `primaryQueryVector`;
+// every other query is embedded here (the retrieval tier passes neither, so
+// each query goes through the same embedding cache).
+export const retrieveGlobalContextForQueriesInProcess = async ({
   docIds,
   primaryQueryVector,
   primaryQueryText,
@@ -343,7 +365,7 @@ const retrieveGlobalContextForQueries = async ({
   };
 };
 
-const retrievePerDocumentContextForQueries = async ({
+export const retrievePerDocumentContextForQueriesInProcess = async ({
   docIds,
   primaryQueryVector,
   primaryQueryText,
@@ -402,7 +424,34 @@ const retrievePerDocumentContextForQueries = async ({
   };
 };
 
+// One query's retrieveGlobalContextWithRoutes, embedded here: the gap plan's
+// supplemental searches, which keep the retriever's own order and are tagged
+// by the caller.
+export const searchGlobalContextInProcess = async ({ docIds, queryText, topK = null }) =>
+  retrieveGlobalContextWithRoutes({
+    queryVector: await embedQueryCached(queryText),
+    queryText,
+    docIds,
+    topK,
+  });
+
+const retrieveGlobalContextForQueries = ({ accessScope = null, ...args }) =>
+  isRetrievalRemote()
+    ? retrieveGlobalContextRemotely({ accessScope, ...args })
+    : retrieveGlobalContextForQueriesInProcess(args);
+
+const retrievePerDocumentContextForQueries = ({ accessScope = null, ...args }) =>
+  isRetrievalRemote()
+    ? retrievePerDocumentContextRemotely({ accessScope, ...args })
+    : retrievePerDocumentContextForQueriesInProcess(args);
+
+const searchGlobalContext = ({ accessScope = null, ...args }) =>
+  isRetrievalRemote()
+    ? searchGlobalContextRemotely({ accessScope, ...args })
+    : searchGlobalContextInProcess(args);
+
 const buildQaGapPlan = async ({
+  accessScope = null,
   query,
   results,
   confidence,
@@ -428,9 +477,8 @@ const buildQaGapPlan = async ({
 
   const supplementalSearches = await Promise.all(
     supplementalQueries.map(async (supplementalQuery) => {
-      const supplementalVector = await embedQueryCached(supplementalQuery.query);
-      const supplementalResults = await retrieveGlobalContext({
-        queryVector: supplementalVector,
+      const { results: supplementalResults } = await searchGlobalContext({
+        accessScope,
         queryText: supplementalQuery.query,
         docIds,
       });
@@ -527,7 +575,14 @@ const buildRetrievalInputs = async ({
       ? agentRetrievalPlan.retrievalQueries
       : retrievalQueries;
   const retrievalOptions = agentRetrievalPlan?.retrievalOptions ?? {};
-  const queryVector = await embedQueryCached(resolvedQuery);
+  // With remote retrieval the retrieval tier embeds every query it searches;
+  // the vector is needed here only for the semantic answer cache's lookup,
+  // and is then embedded through this process's own embedding path (the
+  // model gateway when one is configured), in the space the index serves.
+  const queryVector =
+    isRetrievalRemote() && !isSemanticCacheEnabled()
+      ? null
+      : await embedQueryCached(resolvedQuery);
 
   return {
     agentRetrievalPlan,
@@ -553,6 +608,7 @@ const buildCommonTraceFields = ({
 });
 
 const executeComparisonRag = async ({
+  accessScope = null,
   agentRetrievalPlan,
   docIds,
   evidenceRequirements,
@@ -567,6 +623,7 @@ const executeComparisonRag = async ({
 }) => {
   const { resultsByDocument: perDocumentResults, retrieval } =
     await retrievePerDocumentContextForQueries({
+      accessScope,
       primaryQueryVector: queryVector,
       primaryQueryText: resolvedQuery,
       retrievalQueries: plannedRetrievalQueries,
@@ -661,13 +718,14 @@ const executeComparisonRag = async ({
  * analysis can replay the real gate over real candidates under different
  * thresholds without calling a chat model.
  */
-export const retrieveQaCandidates = async ({ docIds, resolvedQuery }) => {
+export const retrieveQaCandidates = async ({ accessScope = null, docIds, resolvedQuery }) => {
   const inputs = await buildRetrievalInputs({
     agentRetrievalPlan: null,
     docIds,
     resolvedQuery,
   });
   const { results } = await retrieveGlobalContextForQueries({
+    accessScope,
     primaryQueryVector: inputs.queryVector,
     primaryQueryText: resolvedQuery,
     retrievalQueries: inputs.plannedRetrievalQueries,
@@ -684,6 +742,7 @@ export const retrieveQaCandidates = async ({ docIds, resolvedQuery }) => {
 };
 
 const executeQaRag = async ({
+  accessScope = null,
   agentRetrievalPlan,
   docIds,
   evidenceRequirements,
@@ -698,6 +757,7 @@ const executeQaRag = async ({
   const queryAdapterScope = agentRetrievalPlan ? null : QUERY_ADAPTER_SCOPE_QA;
   const { results: retrievalResults, retrieval } =
     await retrieveGlobalContextForQueries({
+      accessScope,
       primaryQueryVector: queryVector,
       primaryQueryText: resolvedQuery,
       retrievalQueries: plannedRetrievalQueries,
@@ -748,6 +808,7 @@ const executeQaRag = async ({
 
   if (!confidence.confident) {
     const gapPlan = await buildQaGapPlan({
+      accessScope,
       query: resolvedQuery,
       results: retrievalResults,
       confidence,
@@ -782,6 +843,7 @@ const executeQaRag = async ({
   const retry =
     answer.abstainSource === "answer_model"
       ? await retryQaWithDeeperRetrieval({
+          accessScope,
           docIds,
           evidenceRequirementCount: evidenceRequirements?.length ?? 1,
           plannedRetrievalQueries,
@@ -825,6 +887,7 @@ const executeQaRag = async ({
 export const QA_CONTEXT_MIN_COVERAGE = 0;
 
 const retryQaWithDeeperRetrieval = async ({
+  accessScope = null,
   docIds,
   evidenceRequirementCount,
   plannedRetrievalQueries,
@@ -845,6 +908,7 @@ const retryQaWithDeeperRetrieval = async ({
 
   const shownKeys = new Set(shownResults.map((result) => getResultKey(result)));
   const { results } = await retrieveGlobalContextForQueries({
+    accessScope,
     primaryQueryVector: queryVector,
     primaryQueryText: resolvedQuery,
     retrievalQueries: plannedRetrievalQueries,
@@ -891,6 +955,7 @@ const retryQaWithDeeperRetrieval = async ({
 };
 
 const runDocumentRag = ({
+  accessScope,
   docIds,
   preferenceBlock,
   query,
@@ -901,6 +966,7 @@ const runDocumentRag = ({
   retrievalInputs.route.mode === "compare"
     ? executeComparisonRag({
         ...retrievalInputs,
+        accessScope,
         docIds,
         preferenceBlock,
         query,
@@ -909,6 +975,7 @@ const runDocumentRag = ({
       })
     : executeQaRag({
         ...retrievalInputs,
+        accessScope,
         docIds,
         preferenceBlock,
         query,
@@ -962,6 +1029,7 @@ export const executeDocumentRag = async ({
   }
 
   const execution = await runDocumentRag({
+    accessScope,
     docIds,
     preferenceBlock,
     query,

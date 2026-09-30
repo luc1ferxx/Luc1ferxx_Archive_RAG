@@ -10,6 +10,7 @@ import { completeText } from "./rag/openai.js";
 import { definePrompt, PROMPT_IDS } from "./rag/prompt-registry.js";
 import { guardAnswerLinks, screenUntrustedText } from "./rag/prompt-injection-screen.js";
 import { getPromptVersion } from "./rag/config.js";
+import { isModelGatewayEnabled } from "./rag/service-topology.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -25,10 +26,12 @@ const sleep = (durationMs) =>
     setTimeout(resolve, durationMs);
   });
 
+// Behind a model gateway the gateway holds the key; this process only needs it
+// when it calls the model itself.
 const getOpenAIApiKey = () => {
   const apiKey = process.env.OPENAI_API_KEY;
 
-  if (!apiKey) {
+  if (!apiKey && !isModelGatewayEnabled()) {
     const error = new Error("OPENAI_API_KEY is not configured.");
     error.status = 500;
     throw error;

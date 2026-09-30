@@ -285,6 +285,88 @@ API_AUTH_TOKENS={"admin-token":{"userId":"admin","workspaceId":"workspace-a","ro
 
 `GET /admin/audit` 默认只返回当前 token workspace 下的 compact authorization events；支持 `limit`、`offset`、`userId`、`workspaceId`、`actionId`、`permissionId`、`result=allowed|denied`、`from` 和 `to` 查询参数。事件只包含 compact principal、request 和 authorization decision，不保存 token、payload、prompt 或 raw trace。
 
+## 拆分部署
+
+默认不需要设置下面任何一项：不设 `ARCHIVE_RAG_ROLE`、也不设三个服务地址时，进程就是原来的单体。怎么跑拆分部署见 [deployment.md](deployment.md#拆分部署可选)。
+
+### 角色和服务地址
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `ARCHIVE_RAG_ROLE` | `all` | 这个进程跑哪一层：`all`（单体）、`api`（公网入口）、`agent`（Agent 编排）、`retrieval`（检索）、`model-gateway`（模型网关）。忽略大小写和首尾空格；其他值在启动时直接报错，不会退回单体。 |
+| `AGENT_SERVICE_URL` | 空 | agent 层的副本地址，逗号分隔。设置后，`/chat`、`/chat/stream`、任务、触发器、agent run 及其操作、`/capabilities` 和 `POST /admin/actions/:action` 转发到 agent 层。`api` 角色必须设置。 |
+| `RETRIEVAL_SERVICE_URL` | 空 | 检索层的副本地址，逗号分隔。设置后，文档问答和对比的检索（查询 embedding、稠密 + 稀疏、融合、重排）交给检索层，本进程不再读分块表。`agent` 角色不设时在本进程检索，启动时打印警告。 |
+| `MODEL_GATEWAY_URL` | 空 | 模型网关的副本地址，逗号分隔。设置后，chat、embedding 和交叉编码器重排都经网关调用；配置了自定义 provider 的调用仍在本进程执行。 |
+
+- 地址只能是 http 或 https，不能带用户名密码、查询串或 `#`；可以带路径前缀，末尾的 `/` 会去掉，重复的地址只保留一个。任一条无效时启动报错。
+- 每一层都不会调用自己：`agent` 角色忽略 `AGENT_SERVICE_URL`，`retrieval` 忽略 `RETRIEVAL_SERVICE_URL`，`model-gateway` 忽略 `MODEL_GATEWAY_URL`，并各打印一条警告。所以同一份环境变量可以发给所有角色。
+- `all` 角色设置了哪个地址，就把哪部分工作交出去。例如只设 `MODEL_GATEWAY_URL`，就是"单体 + 独立模型网关"。
+
+### 内部身份
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `INTERNAL_SERVICE_KEYS` | 空 | 层与层之间签名用的密钥，格式 `kid1:secret1,kid2:secret2`。kid 由字母、数字、`.`、`_`、`-` 组成，最长 64；密钥是第一个冒号之后的全部内容，至少 32 个字符，不能含逗号。第一个密钥签名，所有密钥都能验证。除 `all` 以外的角色、以及设置了任一服务地址的进程都必须配置，而且所有层要用同一份。 |
+| `INTERNAL_SERVICE_TOKEN_TTL_MS` | `60000` | 内部 token 的有效期，限制在 1 秒到 1 小时之间。 |
+| `INTERNAL_SERVICE_TOKEN_CLOCK_SKEW_MS` | `5000` | 校验 token 时容忍的时钟偏差，限制在 0 到 60 秒之间。 |
+
+- 内部 token 是 HS256 签名，放在 `x-archive-service-token` 头里，audience 是目标层，issuer 是调用方的角色，租户（userId、workspaceId）只从 token 里读，请求体里的租户字段一律不认。公网入口在读任何请求头之前，先删掉所有 `x-archive-service-` 开头的头。
+- 换密钥分三轮，每轮都逐个重启所有层：先把新密钥加到最后（只验证），再挪到最前面（开始签名），最后删掉旧密钥。步骤见 [deployment.md](deployment.md#换内部密钥)。
+- 这不是 mTLS：所有层共用同一组对称密钥，issuer 是调用方自己写的；token 在有效期内可以重放，也不绑定路径。内部端口只能放在内网。
+
+### 调用、超时和停机
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `INTERNAL_SERVICE_TIMEOUT_MS` | `60000` | 层间调用的默认总预算，包括换副本重试和读取响应体，作为 `x-archive-service-deadline-ms` 发给对方。转发 `/chat/stream` 时只限制等响应头的时间。 |
+| `INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS` | `5000` | 副本连接失败或返回 502/503/504 后，多长时间内优先选别的副本。只剩这一个副本时照样会用它。 |
+| `AGENT_SERVICE_TIMEOUT_MS` | `300000` | 公网入口等 agent 层回答一个转发请求的时间，也是一次 `/chat/stream` 的总时长上限；限制在 1 秒到 1 小时之间。入口超时返回 504，但 agent 层上的运行不会被取消。 |
+| `SERVICE_SHUTDOWN_GRACE_MS` | `25000` | 用 `node server.js` 启动的拆分角色收到 SIGTERM/SIGINT 后，给进行中的请求多长时间结束，之后关闭剩下的连接并退出；限制在 0 到 10 分钟之间。`node retrieval-service.mjs` 和 `node model-gateway.mjs` 这两个入口没有这个上限，会一直等请求结束。 |
+
+- 选副本：选进行中请求最少的，相同时轮流。每次调用每个副本最多试一次。连接没建立起来（ECONNREFUSED 等）时任何请求都换下一个副本；请求已经发出之后，只有幂等的请求才换副本。已经发出的 `/chat`（包括 GET）和任务操作不会再发给第二个副本，避免一次提问跑两遍。
+- trace：配置了 OpenTelemetry 时，调用带 `traceparent`，跨层是同一条 trace。用 `node server.js` 启动的各角色默认用同一个服务名，要在后端区分，给每个角色设不同的 `OTEL_SERVICE_NAME`。
+
+### 检索层
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `RETRIEVAL_SERVICE_TIMEOUT_MS` | `0` | 调用方一次远程检索的预算；`0` 表示用 `INTERNAL_SERVICE_TIMEOUT_MS`。 |
+| `RETRIEVAL_SERVICE_MAX_DOC_IDS` | `1000` | 检索层一次请求最多接受的文档数。超出返回 400。 |
+| `RETRIEVAL_SERVICE_MAX_QUERIES` | `32` | 一次请求最多的检索查询数。 |
+| `RETRIEVAL_SERVICE_MAX_QUERY_CHARS` | `32000` | 单条查询的最大字符数。单体对问题长度没有这个限制，超长问题在拆分模式下会返回 400。 |
+| `RETRIEVAL_SERVICE_MAX_TOP_K` | `500` | topK 上限。`RAG_RETRIEVAL_TOP_K`、`RAG_QA_VERDICT_RETRY_TOP_K` 不要配得比它大。 |
+
+- 检索层监听 `PORT`，默认 5002。它需要 PostgreSQL，并且拒绝 `VECTOR_STORE_PROVIDER=local` 和 standalone 模式，因为那样它搜的是自己进程里的旧副本。
+- 检索相关的 `RAG_*`、`OPENAI_EMBEDDING_*`、`RAG_EMBEDDING_QUERY_ADAPTER` 等由检索层读取，但 agent 层仍读 `RAG_RETRIEVAL_TOP_K` 等少数几项。两层要用同一份配置，目前没有自动检查。
+
+### 模型网关
+
+网关进程读取的变量：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `MODEL_GATEWAY_PORT` | `PORT`，再是 `5003` | 网关监听的端口。 |
+| `MODEL_GATEWAY_CHAT_UPSTREAMS` | `OPENAI_BASE_URL`，再是 `OPENAI_API_BASE`，再是 `https://api.openai.com/v1` | chat 上游副本，逗号分隔，写法和 `OPENAI_BASE_URL` 相同。 |
+| `MODEL_GATEWAY_EMBEDDING_UPSTREAMS` | 同上 | embedding 上游副本。 |
+| `MODEL_GATEWAY_RERANK_UPSTREAMS` | `RAG_CROSS_ENCODER_ENDPOINT` | 重排上游副本，写完整地址（如 `http://reranker:8081/rerank`）。为空时 `/rerank` 返回 503 `MODEL_GATEWAY_BACKEND_NOT_CONFIGURED`。 |
+| `MODEL_GATEWAY_QUOTA_REQUESTS_PER_MINUTE` | `0` | 每个 workspace 每分钟的请求数上限；`0` 关闭。 |
+| `MODEL_GATEWAY_QUOTA_TOKENS_PER_MINUTE` | `0` | 每个 workspace 每分钟的 token 上限；`0` 关闭。 |
+| `MODEL_GATEWAY_QUOTA_DAILY_TOKENS` | `0` | 每个 workspace 每个 UTC 日的 token 上限；`0` 关闭。 |
+
+- 其余沿用原有变量，由网关读取：`OPENAI_API_KEY`、`OPENAI_CHAT_MODEL`、`OPENAI_CHAT_FALLBACK_MODEL`、`RAG_LLM_REQUEST_TIMEOUT_MS`、`RAG_LLM_MAX_CONCURRENCY`、`RAG_LLM_CIRCUIT_*`、`RAG_SHARED_STATE` / `REDIS_URL`、`RAG_CROSS_ENCODER_MODEL`、`RAG_CROSS_ENCODER_TIMEOUT_MS`。并发上限和熔断按"上游副本 + 模型"计算，每个副本各有一份。
+- 配额：窗口是固定的（当前分钟、当前 UTC 日）；没有 workspace 时按用户计；系统调用不受限。token 在模型回答后才扣，所以进行中的调用可能让 workspace 超出一次。`RAG_SHARED_STATE=redis` 时所有网关副本共享计数，否则每个网关进程各算各的。超出时返回 429 `MODEL_GATEWAY_QUOTA_EXCEEDED`，带 `Retry-After`。
+- chat 走网关自己的模型注册表，请求里的 `model` 字段被忽略，所以调用方和网关的模型变量要一致；`RAG_STRUCTURED_OUTPUT_ENABLED` 两边都要开。embedding 用调用方指定的模型，任务前缀、固定的 embedding 空间和查询适配器都在调用方处理。
+
+调用方（api、agent、retrieval 或 `all`）读取的变量：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `MODEL_GATEWAY_TIMEOUT_MS` | `600000` | 一次经网关的模型调用的总预算，包括网关里的重试、退避和切换备用模型，作为截止时间发给网关；网关在截止时间到了或调用方断开时停止重试、取消上游请求。重排不用它，仍用 `RAG_CROSS_ENCODER_TIMEOUT_MS`。 |
+
+- 经网关时，调用方自己不重试、不切换模型、不做并发上限和熔断，只在网关副本连不上时换一个副本。网关连不上返回 503 `MODEL_GATEWAY_UNAVAILABLE`，预算用完返回 504 `MODEL_GATEWAY_TIMEOUT`，应答不是网关的格式返回 502 `MODEL_GATEWAY_PROTOCOL_ERROR`；重排失败时照旧退回融合排序。
+- 调用方不需要 `OPENAI_API_KEY`，`/health` 的 `openai` 项显示 `gateway: true`。Web 回答路径（`chat-mcp.js`）在网关模式下也不再要求本进程有这个 key。
+- LLMOps 计量：网关每次尝试记一条带 `model_gateway_metered` 标注和租户的事件，这是权威数据；调用方每次调用只记一条 `model_gateway_mirror` 镜像事件，用量取网关的计量值，运行级的 token 和成本上限因此照常生效。汇总时要跳过镜像事件，`observability:report` 已经这样做，所以网关和调用方的事件可以放在一起统计。
+
 ## Observability
 
 | 变量 | 默认值 | 作用 |

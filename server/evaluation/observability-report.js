@@ -375,8 +375,17 @@ const getTraceType = (event = {}) => String(event.traceType ?? "").trim();
 const getEventPayload = (event = {}) =>
   isPlainObject(event.payload) ? event.payload : {};
 
+// A caller behind the model gateway records one mirror event per gateway call
+// (for its own run ceilings and spans); the gateway's metered events are the
+// authoritative ones, so a report over both files counts each call once.
+const isModelGatewayMirrorEvent = (event = {}) =>
+  Array.isArray(event.annotations) &&
+  event.annotations.some((annotation) => annotation?.id === "model_gateway_mirror");
+
 const isLlmOpsMetricEvent = (event = {}) =>
-  getTraceType(event) === "llmops" && getEventType(event) === "llmops_metric";
+  getTraceType(event) === "llmops" &&
+  getEventType(event) === "llmops_metric" &&
+  !isModelGatewayMirrorEvent(event);
 
 const getLlmOpsStatus = (event = {}) =>
   String(event.status ?? "unknown").trim().toLowerCase() || "unknown";

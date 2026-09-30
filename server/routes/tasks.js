@@ -12,34 +12,37 @@ import {
 } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
 
-const taskIdSchema = z.object({
+// The request schemas are exported so the public edge of a split deployment
+// (rag/agent-service/edge-router.js) refuses the same requests before
+// forwarding them to the agent tier.
+export const taskIdSchema = z.object({
   taskId: requiredTrimmedString("taskId is required."),
 });
 
-const taskActionSchema = z.object({
+export const taskActionSchema = z.object({
   taskId: requiredTrimmedString("taskId is required."),
   action: requiredTrimmedString("action is required."),
 });
 
-const triggerIdSchema = z.object({
+export const triggerIdSchema = z.object({
   triggerId: requiredTrimmedString("triggerId is required."),
 });
 
-const runIdSchema = z.object({
+export const runIdSchema = z.object({
   runId: requiredTrimmedString("runId is required."),
 });
 
-const runActionSchema = z.object({
+export const runActionSchema = z.object({
   runId: requiredTrimmedString("runId is required."),
   action: requiredTrimmedString("action is required."),
 });
 
-const runStepRetrySchema = z.object({
+export const runStepRetrySchema = z.object({
   runId: requiredTrimmedString("runId is required."),
   stepId: requiredTrimmedString("stepId is required."),
 });
 
-const agentTaskBodySchema = z.object({
+export const agentTaskBodySchema = z.object({
   question: requiredTrimmedString("Question is required."),
 });
 

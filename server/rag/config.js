@@ -1470,3 +1470,114 @@ export const isRagIngestDedupEnabled = () => toBoolean(process.env.RAG_INGEST_DE
 
 // Where each job's stage outputs live (migration 017): `<jobs table>_outputs`.
 export const getIngestJobOutputsPostgresTable = () => `${getIngestJobsPostgresTable()}_outputs`;
+
+// --- Model gateway (ARCHIVE_RAG_ROLE=model-gateway; rag/model-gateway/) ------
+// Read by the gateway process, except MODEL_GATEWAY_TIMEOUT_MS, which is the
+// caller's budget for one model call through the gateway.
+
+// Port of `node model-gateway.mjs`: MODEL_GATEWAY_PORT, then PORT, then 5003.
+// 0 asks the OS for a free port, as PORT=0 does for the other roles
+// (role-server.js resolveRolePort); an empty or invalid value is skipped.
+const toListenPort = (rawValue) => {
+  const parsed = Number.parseInt(String(rawValue ?? "").trim(), 10);
+
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+};
+
+export const getModelGatewayPort = () =>
+  toListenPort(process.env.MODEL_GATEWAY_PORT) ?? toListenPort(process.env.PORT) ?? 5003;
+
+// Whole budget of one call through the gateway, its retries, backoff and
+// failover included; sent to the gateway as the call's deadline. The default
+// covers the four tries of the default 120 s request timeout plus backoff.
+export const getModelGatewayTimeoutMs = () =>
+  Math.floor(toPositiveNumber(process.env.MODEL_GATEWAY_TIMEOUT_MS, 600_000));
+
+const getDefaultOpenAIBaseUrl = () =>
+  String(process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE || "").trim() ||
+  "https://api.openai.com/v1";
+
+// Upstream replicas behind the gateway, comma-separated base URLs (chat and
+// embeddings, as OPENAI_BASE_URL) or full endpoints (rerank, as
+// RAG_CROSS_ENCODER_ENDPOINT). Unset, each falls back to the single endpoint
+// the monolith uses; an empty rerank list means the gateway serves no rerank.
+export const getModelGatewayChatUpstreams = () =>
+  String(process.env.MODEL_GATEWAY_CHAT_UPSTREAMS ?? "").trim() || getDefaultOpenAIBaseUrl();
+
+export const getModelGatewayEmbeddingUpstreams = () =>
+  String(process.env.MODEL_GATEWAY_EMBEDDING_UPSTREAMS ?? "").trim() || getDefaultOpenAIBaseUrl();
+
+export const getModelGatewayRerankUpstreams = () =>
+  String(process.env.MODEL_GATEWAY_RERANK_UPSTREAMS ?? "").trim() || getCrossEncoderEndpoint().trim();
+
+// Per-workspace quotas the gateway enforces; 0 (the default) turns one off.
+export const getModelGatewayQuotaLimits = () => ({
+  dailyTokens: Math.floor(toNonNegativeNumber(process.env.MODEL_GATEWAY_QUOTA_DAILY_TOKENS, 0)),
+  requestsPerMinute: Math.floor(
+    toNonNegativeNumber(process.env.MODEL_GATEWAY_QUOTA_REQUESTS_PER_MINUTE, 0)
+  ),
+  tokensPerMinute: Math.floor(
+    toNonNegativeNumber(process.env.MODEL_GATEWAY_QUOTA_TOKENS_PER_MINUTE, 0)
+  ),
+});
+// --- End model gateway -------------------------------------------------------
+
+// --- ROLES track: split-deployment edge and agent tier ----------------------
+// (rag/agent-service/, server.js; the topology itself is rag/service-topology.js).
+// Nothing outside this block belongs to it.
+
+const readRoleSettingMs = (rawValue, fallbackValue, { max, min }) => {
+  if (!String(rawValue ?? "").trim()) {
+    return fallbackValue;
+  }
+
+  const parsedValue = Number(rawValue);
+
+  return Number.isFinite(parsedValue)
+    ? Math.min(max, Math.max(min, Math.floor(parsedValue)))
+    : fallbackValue;
+};
+
+// How long the public edge waits for the agent tier to answer one forwarded
+// request (/chat, a task or run action, an admin action), and how long a
+// forwarded /chat/stream may run in total. Agent runs call models in loops, so
+// this is longer than the INTERNAL_SERVICE_TIMEOUT_MS default the service
+// client uses for everything else (which still bounds the wait for a stream's
+// headers). The run itself is not cancelled when the edge gives up.
+export const getAgentServiceTimeoutMs = () =>
+  readRoleSettingMs(process.env.AGENT_SERVICE_TIMEOUT_MS, 300_000, {
+    max: 60 * 60 * 1000,
+    min: 1000,
+  });
+
+// On SIGTERM/SIGINT a split-role process (ARCHIVE_RAG_ROLE other than all)
+// stops accepting connections and gives in-flight requests this long to
+// finish before it closes what is left and exits. The default stays under the
+// 30 s a container orchestrator usually waits before SIGKILL.
+export const getServiceShutdownGraceMs = () =>
+  readRoleSettingMs(process.env.SERVICE_SHUTDOWN_GRACE_MS, 25_000, {
+    max: 10 * 60 * 1000,
+    min: 0,
+  });
+// --- End ROLES track ---------------------------------------------------------
+
+// --- RETRIEVAL track: retrieval tier (retrieval-service.mjs) ----------------
+// Bounds the retrieval service enforces on one request (a request past one is
+// answered 400 with a stable code before any work), and the budget of one
+// remote retrieval call made by a process whose retrieval runs remotely.
+// RETRIEVAL_SERVICE_TIMEOUT_MS unset (0) means INTERNAL_SERVICE_TIMEOUT_MS.
+export const getRetrievalServiceMaxDocIds = () =>
+  Math.floor(toPositiveNumber(process.env.RETRIEVAL_SERVICE_MAX_DOC_IDS, 1000));
+
+export const getRetrievalServiceMaxQueries = () =>
+  Math.floor(toPositiveNumber(process.env.RETRIEVAL_SERVICE_MAX_QUERIES, 32));
+
+export const getRetrievalServiceMaxQueryChars = () =>
+  Math.floor(toPositiveNumber(process.env.RETRIEVAL_SERVICE_MAX_QUERY_CHARS, 32000));
+
+export const getRetrievalServiceMaxTopK = () =>
+  Math.floor(toPositiveNumber(process.env.RETRIEVAL_SERVICE_MAX_TOP_K, 500));
+
+export const getRetrievalServiceTimeoutMs = () =>
+  Math.floor(toNonNegativeNumber(process.env.RETRIEVAL_SERVICE_TIMEOUT_MS, 0));
+// --- End RETRIEVAL track -----------------------------------------------------

@@ -7,6 +7,12 @@
 // that gate without any error, so these files are pinned as text (no YAML
 // dependency, like ci-workflow.test.mjs) and the override's app environment is
 // fed through the real config readers.
+//
+// The split deployment (compose.services.yml) is pinned the same way: four
+// services of the one app image, one ARCHIVE_RAG_ROLE each, only the api
+// published, internal keys only from the shell, and every tier's environment
+// fed through the real topology validator and port resolution, so the URLs
+// the tiers call are where their neighbours listen.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
@@ -17,8 +23,11 @@ import {
   getCrossEncoderModel,
   getCrossEncoderScoreScale,
   getRerankProvider,
+  getServiceShutdownGraceMs,
   isRerankEnabled,
 } from "../rag/config.js";
+import { resolveRolePort } from "../rag/agent-service/role-server.js";
+import { describeServiceTopology, validateServiceTopology } from "../rag/service-topology.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +38,8 @@ const serviceDirectory = path.join(evaluationDirectory, "cross-encoder-service")
 
 const composePath = path.join(repositoryRoot, "docker-compose.yml");
 const rerankOverridePath = path.join(repositoryRoot, "compose.rerank.yml");
+const servicesOverridePath = path.join(repositoryRoot, "compose.services.yml");
+const appDockerfilePath = path.join(repositoryRoot, "Dockerfile");
 const rerankerDockerfilePath = path.join(serviceDirectory, "Dockerfile");
 const rerankerDockerignorePath = path.join(serviceDirectory, "Dockerfile.dockerignore");
 const standaloneComposePath = path.join(serviceDirectory, "compose.yaml");
@@ -321,4 +332,205 @@ test("the app image context leaves out secrets, the model cache and the reranker
   for (const pattern of ["**/.env", "server/evaluation/generated", "server/evaluation/.venv*"]) {
     assert.ok(patterns.includes(pattern), `.dockerignore must contain ${pattern}`);
   }
+});
+
+// Service name -> ARCHIVE_RAG_ROLE in compose.services.yml.
+const tierRoles = Object.freeze({
+  agent: "agent",
+  api: "api",
+  "model-gateway": "model-gateway",
+  retrieval: "retrieval",
+});
+const tierServiceNames = Object.keys(tierRoles);
+const shellServiceKeys = `deploy-contract:${"k".repeat(40)}`;
+const requiredShellKeys = /^\$\{INTERNAL_SERVICE_KEYS:\?[^}]+\}$/;
+
+// A tier's environment as the container gets it: `${NAME:-default}` resolved
+// to its default, and the keyring to what the shell must provide.
+const tierEnvironment = (composeText, serviceName) =>
+  Object.fromEntries(
+    Object.entries(serviceEnvironment(composeText, serviceName)).map(([key, value]) => [
+      key,
+      key === "INTERNAL_SERVICE_KEYS" && requiredShellKeys.test(value) ? shellServiceKeys : value,
+    ])
+  );
+
+// The port a tier listens on, as server.js resolves it for its role.
+const listeningPort = (t, environment) => {
+  withEnvironment(t, {
+    MODEL_GATEWAY_PORT: environment.MODEL_GATEWAY_PORT ?? "",
+    PORT: environment.PORT ?? "",
+  });
+
+  return resolveRolePort(environment.ARCHIVE_RAG_ROLE, environment);
+};
+
+const healthcheckTarget = (composeText, serviceName) => {
+  const match = serviceText(composeText, serviceName).match(
+    /fetch\('http:\/\/127\.0\.0\.1:(\d+)(\/[a-z]+)'\)/
+  );
+
+  return match ? { path: match[2], port: Number(match[1]) } : null;
+};
+
+const dependsOn = (composeText, serviceName) => {
+  const lines = nestedLines(serviceLines(composeText, serviceName) ?? [], "depends_on", 4) ?? [];
+  const dependencies = {};
+  let current = null;
+
+  for (const line of lines.filter(isContentLine)) {
+    if (indentationOf(line) === 6) {
+      current = line.trim().replace(/:$/, "");
+      dependencies[current] = null;
+    } else if (current) {
+      dependencies[current] = line.trim().match(/^condition:\s*(\S+)$/)?.[1] ?? dependencies[current];
+    }
+  }
+
+  return dependencies;
+};
+
+test("the split deployment runs four tiers of the app image, one role each", async () => {
+  const [compose, override, dockerfile] = await Promise.all([
+    readText(composePath),
+    readText(servicesOverridePath),
+    readText(appDockerfilePath),
+  ]);
+  const appImage = serviceText(compose, "app").match(/^\s{4}image:\s*(\S+)\s*$/m)?.[1];
+
+  assert.ok(appImage, "the base app service names its image");
+  assert.match(dockerfile, /^CMD \["node", "server\.js"\]$/m, "the image starts every role through server.js");
+
+  for (const serviceName of tierServiceNames) {
+    const text = serviceText(override, serviceName);
+
+    assert.ok(text, `compose.services.yml must define ${serviceName}`);
+    assert.equal(serviceEnvironment(override, serviceName).ARCHIVE_RAG_ROLE, tierRoles[serviceName]);
+    assert.match(text, /^\s{4}build:\s*\.\s*$/m, `${serviceName} builds the app Dockerfile`);
+    assert.equal(text.match(/^\s{4}image:\s*(\S+)\s*$/m)?.[1], appImage, `${serviceName} is the app image`);
+    // `docker compose up --scale` needs generated container names, and the
+    // image's own entry point is what picks the role.
+    assert.doesNotMatch(text, /^\s{4}(container_name|command|entrypoint):/m);
+    assert.match(text, /^\s{4}healthcheck:/m);
+  }
+});
+
+test("only the api publishes a port, and internal keys come from the shell alone", async (t) => {
+  const override = await readText(servicesOverridePath);
+
+  for (const serviceName of tierServiceNames.filter((name) => name !== "api")) {
+    assert.doesNotMatch(serviceText(override, serviceName), /^\s{4}ports:/m, `${serviceName} stays internal`);
+  }
+
+  const apiPorts = nestedLines(serviceLines(override, "api"), "ports", 4).filter(isContentLine);
+
+  assert.deepEqual(apiPorts.map((line) => line.trim()), ['- "${ARCHIVE_RAG_API_PORTS:-5001}:5001"']);
+  assert.equal(listeningPort(t, tierEnvironment(override, "api")), 5001);
+
+  for (const serviceName of tierServiceNames) {
+    const environment = serviceEnvironment(override, serviceName);
+
+    assert.match(environment.INTERNAL_SERVICE_KEYS ?? "", requiredShellKeys, `${serviceName} requires the shell's keys`);
+
+    // Model keys and public tokens come from server/.env, rerank settings too
+    // (as for the base app service): compose `environment` would override them.
+    for (const key of Object.keys(environment)) {
+      assert.doesNotMatch(key, /^(OPENAI_|API_AUTH_|RAG_(RERANK|CROSS_ENCODER|QA_MIN_RERANK)_)/, `${serviceName}: ${key}`);
+    }
+  }
+
+  // No default and no literal keyring anywhere in the file.
+  assert.doesNotMatch(override, /INTERNAL_SERVICE_KEYS:-/);
+  assert.equal(
+    override.match(/^\s+INTERNAL_SERVICE_KEYS:/gm)?.length,
+    tierServiceNames.length,
+    "one required keyring per tier and nothing else"
+  );
+});
+
+test("each tier's environment passes the topology validator and calls its neighbours where they listen", async (t) => {
+  const override = await readText(servicesOverridePath);
+  const expectedHealthPaths = { agent: "/livez", api: "/livez", "model-gateway": "/health", retrieval: "/health" };
+  const tiers = Object.fromEntries(
+    tierServiceNames.map((serviceName) => {
+      const environment = tierEnvironment(override, serviceName);
+
+      return [serviceName, { environment, port: listeningPort(t, environment) }];
+    })
+  );
+
+  for (const [serviceName, { environment, port }] of Object.entries(tiers)) {
+    const role = tierRoles[serviceName];
+    const topology = validateServiceTopology(environment);
+    const description = describeServiceTopology(environment);
+
+    assert.deepEqual(topology, { errors: [], warnings: [] }, `${serviceName}: ${JSON.stringify(topology)}`);
+    assert.equal(description.role, role);
+    assert.equal(description.status, "ok");
+    assert.deepEqual(
+      Object.entries(description.hosts).filter(([, hosted]) => hosted).map(([tier]) => tier),
+      [role === "model-gateway" ? "modelGateway" : role],
+      `${serviceName} hosts its own tier only`
+    );
+    assert.deepEqual(healthcheckTarget(override, serviceName), { path: expectedHealthPaths[serviceName], port });
+
+    for (const variable of ["AGENT_SERVICE_URL", "RETRIEVAL_SERVICE_URL", "MODEL_GATEWAY_URL"]) {
+      for (const url of String(environment[variable] ?? "").split(",").filter(Boolean)) {
+        const target = new URL(url);
+        const neighbour = tiers[target.hostname];
+
+        assert.ok(neighbour, `${serviceName}: ${variable} names a service of this file`);
+        assert.equal(
+          { AGENT_SERVICE_URL: "agent", MODEL_GATEWAY_URL: "model-gateway", RETRIEVAL_SERVICE_URL: "retrieval" }[variable],
+          tierRoles[target.hostname]
+        );
+        assert.equal(Number(target.port), neighbour.port, `${serviceName}: ${variable} is where ${target.hostname} listens`);
+      }
+    }
+  }
+
+  // Who calls whom: the edge the agent and the gateway, the agent retrieval
+  // and the gateway, retrieval the gateway.
+  assert.ok(tiers.api.environment.AGENT_SERVICE_URL && tiers.api.environment.MODEL_GATEWAY_URL);
+  assert.ok(tiers.agent.environment.RETRIEVAL_SERVICE_URL && tiers.agent.environment.MODEL_GATEWAY_URL);
+  assert.ok(tiers.retrieval.environment.MODEL_GATEWAY_URL);
+  assert.equal(tiers.retrieval.environment.VECTOR_STORE_PROVIDER, "pgvector");
+});
+
+test("tiers start in dependency order and drain before docker stops them", async (t) => {
+  const override = await readText(servicesOverridePath);
+
+  assert.deepEqual(dependsOn(override, "api"), {
+    agent: "service_healthy",
+    "model-gateway": "service_healthy",
+    postgres: "service_healthy",
+  });
+  assert.deepEqual(dependsOn(override, "agent"), {
+    "model-gateway": "service_healthy",
+    postgres: "service_healthy",
+    retrieval: "service_healthy",
+  });
+  assert.deepEqual(dependsOn(override, "retrieval"), {
+    "model-gateway": "service_healthy",
+    postgres: "service_healthy",
+  });
+  assert.deepEqual(dependsOn(override, "model-gateway"), {});
+
+  withEnvironment(t, { SERVICE_SHUTDOWN_GRACE_MS: "" });
+
+  for (const serviceName of tierServiceNames) {
+    const seconds = Number(serviceText(override, serviceName).match(/^\s{4}stop_grace_period:\s*(\d+)s\s*$/m)?.[1]);
+
+    assert.ok(seconds * 1000 > getServiceShutdownGraceMs(), `${serviceName} outlasts the drain window`);
+  }
+});
+
+test("each role has a start script through the image's entry point", async () => {
+  const packageJson = JSON.parse(await readText(serverPackagePath));
+
+  for (const role of Object.values(tierRoles)) {
+    assert.equal(packageJson.scripts?.[`start:${role}`], `ARCHIVE_RAG_ROLE=${role} node server.js`);
+  }
+
+  assert.equal(packageJson.scripts?.start, "node server.js", "the monolith start is unchanged");
 });

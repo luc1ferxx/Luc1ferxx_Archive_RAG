@@ -9,6 +9,38 @@ const resolveBaseUrl = () => {
   return "https://api.openai.com/v1";
 };
 
+// Replica pools for the chat and embedding backends (rag/model-gateway/
+// upstream-pool.js), configured only by the model gateway process. Without one
+// every request goes to OPENAI_BASE_URL under the guard key it always had.
+let upstreamPools = { chat: null, embedding: null };
+
+export const configureModelUpstreamPools = ({ chat = null, embedding = null } = {}) => {
+  upstreamPools = { chat, embedding };
+};
+
+export const resetModelUpstreamPools = () => configureModelUpstreamPools();
+
+// `send(baseUrl)` performs one request; the pool (or the single endpoint)
+// passes it through the model-call guard.
+const sendToUpstream = (kind, model, send) => {
+  const pool = upstreamPools[kind];
+
+  if (pool) {
+    return pool.run({ model, send });
+  }
+
+  const baseUrl = resolveBaseUrl();
+
+  return guardModelCall(`${baseUrl}|${model}`, () => send(baseUrl));
+};
+
+// The request timeout, plus the caller's signal when it has one (the gateway
+// passes one that fires when its caller goes away or its deadline passes).
+const buildRequestSignal = (timeoutMs, signal) =>
+  signal
+    ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal])
+    : AbortSignal.timeout(timeoutMs);
+
 const parseErrorBody = (body) => {
   try {
     const parsed = JSON.parse(body);
@@ -62,11 +94,15 @@ const toTimeoutError = (cause, timeoutMs) => {
 const toHttpError = (response, text) => {
   const error = new Error(parseErrorBody(text));
   error.status = response.status;
+  // Marks an answer from the model backend itself, as opposed to an error
+  // raised in this process with a status (the model gateway maps the two
+  // differently).
+  error.upstreamStatus = response.status;
   error.retryAfterMs = parseRetryAfterMs(response.headers);
   return error;
 };
 
-const fetchJson = async (url, options) => {
+const fetchJson = async (url, { signal, ...options }) => {
   const timeoutMs = getLlmRequestTimeoutMs();
   let response;
   let text;
@@ -74,7 +110,7 @@ const fetchJson = async (url, options) => {
   try {
     response = await fetch(url, {
       ...options,
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: buildRequestSignal(timeoutMs, signal),
     });
     // The same signal also bounds reading the body.
     text = await response.text();
@@ -95,7 +131,7 @@ const fetchJson = async (url, options) => {
  * arrives, and resolves with the same shape a non-streaming call returns. The
  * request timeout bounds the whole stream, not just the first byte.
  */
-const fetchChatStream = async (url, options, onDelta) => {
+const fetchChatStream = async (url, { signal, ...options }, onDelta) => {
   const timeoutMs = getLlmRequestTimeoutMs();
   let content = "";
   let finishReason = null;
@@ -130,7 +166,7 @@ const fetchChatStream = async (url, options, onDelta) => {
   try {
     const response = await fetch(url, {
       ...options,
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: buildRequestSignal(timeoutMs, signal),
     });
 
     if (!response.ok) {
@@ -162,49 +198,68 @@ const fetchChatStream = async (url, options, onDelta) => {
   return { content, finishReason, usage };
 };
 
-export const createEmbeddingsClient = ({ apiKey, model }) => ({
-  async embedDocuments(texts) {
-    const baseUrl = resolveBaseUrl();
-    const allVectors = [];
-
-    for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
-      const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-      const result = await guardModelCall(`${baseUrl}|${model}`, () =>
-        fetchJson(`${baseUrl}/embeddings`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({ input: batch, model }),
-        })
-      );
-      const sorted = result.data.sort((a, b) => a.index - b.index);
-      for (const item of sorted) {
-        allVectors.push(item.embedding);
-      }
-    }
-
-    return allVectors;
-  },
-
-  async embedQuery(text) {
-    const baseUrl = resolveBaseUrl();
-    const result = await guardModelCall(`${baseUrl}|${model}`, () =>
+export const createEmbeddingsClient = ({ apiKey, model }) => {
+  const requestEmbeddings = (input, signal) =>
+    sendToUpstream("embedding", model, (baseUrl) =>
       fetchJson(`${baseUrl}/embeddings`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ input: text, model }),
+        body: JSON.stringify({ input, model }),
+        signal,
       })
     );
-    return result.data[0].embedding;
-  },
-});
 
-const toChatMessages = (prompt) => {
+  return {
+    async embedDocuments(texts, { signal } = {}) {
+      const allVectors = [];
+
+      for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
+        const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
+        const result = await requestEmbeddings(batch, signal);
+        const sorted = result.data.sort((a, b) => a.index - b.index);
+        for (const item of sorted) {
+          allVectors.push(item.embedding);
+        }
+      }
+
+      return allVectors;
+    },
+
+    async embedQuery(text, { signal } = {}) {
+      const result = await requestEmbeddings(text, signal);
+      return result.data[0].embedding;
+    },
+  };
+};
+
+const RAW_MESSAGE_ROLES = new Set(["assistant", "developer", "system", "tool", "user"]);
+
+/**
+ * A prompt that is already a list of OpenAI chat messages, sent as given (roles
+ * other than the OpenAI ones become "user"). The model gateway uses it to pass
+ * a caller's messages through unchanged; every other caller keeps the prompt
+ * shapes below.
+ */
+export const createRawChatPrompt = (messages = []) => {
+  const rawMessages = (Array.isArray(messages) ? messages : []).map((message) => ({
+    role: RAW_MESSAGE_ROLES.has(message?.role) ? message.role : "user",
+    content:
+      typeof message?.content === "string" || Array.isArray(message?.content)
+        ? message.content
+        : String(message?.content ?? ""),
+  }));
+
+  return { rawMessages, toChatMessages: () => rawMessages };
+};
+
+export const toChatMessages = (prompt) => {
+  if (Array.isArray(prompt?.rawMessages)) {
+    return prompt.rawMessages;
+  }
+
   if (typeof prompt === "string") {
     return [{ role: "user", content: prompt }];
   }
@@ -227,13 +282,12 @@ const toChatMessages = (prompt) => {
 };
 
 export const createChatClient = ({ apiKey, model }) => ({
-  async invoke(prompt, { responseFormat } = {}) {
-    const baseUrl = resolveBaseUrl();
+  async invoke(prompt, { responseFormat, signal } = {}) {
     const messages = toChatMessages(prompt);
 
     // Every request, including each retry, passes the endpoint's circuit and
     // concurrency cap; see model-call-guard.js.
-    const result = await guardModelCall(`${baseUrl}|${model}`, () =>
+    const result = await sendToUpstream("chat", model, (baseUrl) =>
       fetchJson(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
@@ -245,6 +299,7 @@ export const createChatClient = ({ apiKey, model }) => ({
           messages,
           ...(responseFormat ? { response_format: responseFormat } : {}),
         }),
+        signal,
       })
     );
 
@@ -257,10 +312,8 @@ export const createChatClient = ({ apiKey, model }) => ({
 
   // Same request with `stream: true`. include_usage asks for a final usage
   // chunk; servers that ignore it leave usage null and LLMOps estimates it.
-  async invokeStream(prompt, { onDelta, responseFormat } = {}) {
-    const baseUrl = resolveBaseUrl();
-
-    return guardModelCall(`${baseUrl}|${model}`, () =>
+  async invokeStream(prompt, { onDelta, responseFormat, signal } = {}) {
+    return sendToUpstream("chat", model, (baseUrl) =>
       fetchChatStream(
         `${baseUrl}/chat/completions`,
         {
@@ -276,6 +329,7 @@ export const createChatClient = ({ apiKey, model }) => ({
             stream_options: { include_usage: true },
             ...(responseFormat ? { response_format: responseFormat } : {}),
           }),
+          signal,
         },
         onDelta
       )

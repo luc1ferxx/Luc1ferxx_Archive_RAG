@@ -1,0 +1,173 @@
+# The split deployment: the public API edge, agent orchestration, retrieval
+# and the model gateway as four services of the one app image (Dockerfile).
+# Each picks its tier with ARCHIVE_RAG_ROLE (server/rag/service-topology.js)
+# and starts through the image's own `node server.js`:
+#   export INTERNAL_SERVICE_KEYS="k1:$(openssl rand -hex 32)"
+#   docker compose -f docker-compose.yml -f compose.services.yml up -d --build
+#   docker compose -f docker-compose.yml -f compose.services.yml up -d --scale agent=3 --scale retrieval=2
+#
+# Only the api publishes a port: ARCHIVE_RAG_API_PORTS (default 5001; a range
+# such as 5001-5003 gives each of `--scale api=3` its own host port). The
+# other tiers are reached on the compose network only, with signed internal
+# tokens. INTERNAL_SERVICE_KEYS (kid:secret, a secret of 32 or more
+# characters, the same on every tier) must come from the shell: there is no
+# default, and compose refuses to start without it. Do not add
+# `--profile app`, which runs the monolith on the same host port.
+#
+# Every tier reads server/.env like the monolith, so the RAG_* settings the
+# agent and the retrieval tier both read stay the same; the environment below
+# overrides it. Only the model gateway calls models, so only it needs
+# OPENAI_API_KEY. A query adapter (RAG_EMBEDDING_QUERY_ADAPTER) must be mounted
+# into the retrieval tier, which embeds the queries.
+#
+# Scaling: `--scale` gives a service several containers behind one DNS name.
+# A caller's service client (server/rag/service-client.js) sees that name as
+# one replica, so the containers share the load by DNS at connect time; its
+# per-replica failover and least-outstanding choice apply to URLs listed
+# explicitly (comma-separated AGENT_SERVICE_URL, RETRIEVAL_SERVICE_URL,
+# MODEL_GATEWAY_URL). The inference backends scale behind the gateway:
+# MODEL_GATEWAY_CHAT_UPSTREAMS, MODEL_GATEWAY_EMBEDDING_UPSTREAMS and
+# MODEL_GATEWAY_RERANK_UPSTREAMS (in server/.env) each take several replicas.
+#
+# stop_grace_period covers the tiers' drain window (SERVICE_SHUTDOWN_GRACE_MS,
+# default 25 s), so docker does not kill a tier while it finishes requests.
+services:
+  api:
+    build: .
+    image: luc1ferxx-archive-rag:local
+    restart: unless-stopped
+    env_file:
+      - path: server/.env
+        required: false
+    environment:
+      ARCHIVE_RAG_ROLE: api
+      PORT: "5001"
+      AGENT_SERVICE_URL: http://agent:5001
+      MODEL_GATEWAY_URL: http://model-gateway:5003
+      INTERNAL_SERVICE_KEYS: "${INTERNAL_SERVICE_KEYS:?set INTERNAL_SERVICE_KEYS for the split deployment}"
+      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      VECTOR_STORE_PROVIDER: pgvector
+      PDF_PARSER: ${PDF_PARSER:-pdfjs}
+      DOCLING_SERVE_URL: ${DOCLING_SERVE_URL:-http://docling:5001}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      OTEL_SERVICE_NAME: luc1ferxx-archive-rag-api
+    ports:
+      - "${ARCHIVE_RAG_API_PORTS:-5001}:5001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5001/livez').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+      model-gateway:
+        condition: service_healthy
+    volumes:
+      - tierdata:/data
+
+  # Agent orchestration: /chat, tasks, agent runs, startup recovery and
+  # background agent work. It shares the api's data volume because arXiv
+  # import tasks write their downloads below the uploads directory.
+  agent:
+    build: .
+    image: luc1ferxx-archive-rag:local
+    restart: unless-stopped
+    env_file:
+      - path: server/.env
+        required: false
+    environment:
+      ARCHIVE_RAG_ROLE: agent
+      PORT: "5001"
+      RETRIEVAL_SERVICE_URL: http://retrieval:5002
+      MODEL_GATEWAY_URL: http://model-gateway:5003
+      INTERNAL_SERVICE_KEYS: "${INTERNAL_SERVICE_KEYS:?set INTERNAL_SERVICE_KEYS for the split deployment}"
+      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      VECTOR_STORE_PROVIDER: pgvector
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      OTEL_SERVICE_NAME: luc1ferxx-archive-rag-agent
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5001/livez').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      retrieval:
+        condition: service_healthy
+      model-gateway:
+        condition: service_healthy
+    volumes:
+      - tierdata:/data
+
+  # Query embedding, dense and sparse search, fusion and rerank under the
+  # caller's tenant (row-level security). It refuses to start without
+  # PostgreSQL or with VECTOR_STORE_PROVIDER=local.
+  retrieval:
+    build: .
+    image: luc1ferxx-archive-rag:local
+    restart: unless-stopped
+    env_file:
+      - path: server/.env
+        required: false
+    environment:
+      ARCHIVE_RAG_ROLE: retrieval
+      PORT: "5002"
+      MODEL_GATEWAY_URL: http://model-gateway:5003
+      INTERNAL_SERVICE_KEYS: "${INTERNAL_SERVICE_KEYS:?set INTERNAL_SERVICE_KEYS for the split deployment}"
+      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      VECTOR_STORE_PROVIDER: pgvector
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      OTEL_SERVICE_NAME: luc1ferxx-archive-rag-retrieval
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5002/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      model-gateway:
+        condition: service_healthy
+
+  # The OpenAI-compatible model gateway in front of the chat, embedding and
+  # rerank backends: model-call guard, retries, failover, metering and quotas.
+  # For Ollama on the host, set OPENAI_BASE_URL (or the MODEL_GATEWAY_*
+  # upstream lists) to http://host.docker.internal:11434/v1.
+  model-gateway:
+    build: .
+    image: luc1ferxx-archive-rag:local
+    restart: unless-stopped
+    env_file:
+      - path: server/.env
+        required: false
+    environment:
+      ARCHIVE_RAG_ROLE: model-gateway
+      MODEL_GATEWAY_PORT: "5003"
+      INTERNAL_SERVICE_KEYS: "${INTERNAL_SERVICE_KEYS:?set INTERNAL_SERVICE_KEYS for the split deployment}"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      OTEL_SERVICE_NAME: luc1ferxx-archive-rag-model-gateway
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5003/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s
+
+volumes:
+  tierdata:

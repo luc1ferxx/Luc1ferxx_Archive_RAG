@@ -62,6 +62,16 @@ import { probeDoclingServe } from "./rag/docling-parser.js";
 import { getDoclingFallback, getPdfParser } from "./rag/config.js";
 import { getOpenAIApiKey } from "./rag/openai.js";
 import { getRagDataDirectory } from "./rag/storage.js";
+import { AGENT_SERVICE_PING_PATH } from "./rag/agent-service/contract.js";
+import { createServiceClient } from "./rag/service-client.js";
+import {
+  describeServiceTopology,
+  getServiceUrls,
+  isModelGatewayEnabled,
+  isRemoteAgentEnabled,
+  isRemoteRetrievalEnabled,
+  SERVICE_TIERS,
+} from "./rag/service-topology.js";
 
 const buildEntry = (status, details = {}) => ({
   status,
@@ -102,7 +112,26 @@ const checkRagDataDirectoryHealth = async ({ message, provider }) => {
   }
 };
 
-const checkOpenAIHealth = async () => {
+const readSafely = (read, fallback) => {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+};
+
+const checkOpenAIHealth = async ({ env = process.env } = {}) => {
+  // Behind MODEL_GATEWAY_URL the provider key is the gateway's, not this
+  // process's; the gateway reports its own backends.
+  if (readSafely(() => isModelGatewayEnabled(env), false)) {
+    return buildEntry("ok", {
+      chatModel: getChatModel(),
+      embeddingModel: getEmbeddingModel(),
+      gateway: true,
+      message: "Model calls go through MODEL_GATEWAY_URL.",
+    });
+  }
+
   try {
     getOpenAIApiKey();
 
@@ -974,66 +1003,216 @@ const checkIngestJobsHealth = async ({ createStore = createPostgresIngestJobStor
   }
 };
 
-export const buildHealthReport = async () => {
-  const [
-    apiAuth,
-    openai,
-    vectorStore,
-    documentStore,
-    sessionMemory,
-    longMemory,
-    agentExperienceMemory,
-    taskStore,
-    agentRunStore,
-    adminAuditStore,
-    workspaceArtifactStore,
-    rowLevelSecurity,
-    sharedState,
-    pdfParser,
-    ingestJobs,
-    queryAdapter,
-  ] = await Promise.all([
-    checkApiAuthHealth(),
-    checkOpenAIHealth(),
-    checkVectorStoreHealth(),
-    checkDocumentStoreHealth(),
-    checkSessionMemoryHealth(),
-    checkLongMemoryHealth(),
-    checkAgentExperienceMemoryHealth(),
-    checkTaskStoreHealth(),
-    checkAgentRunStoreHealth(),
-    checkAdminAuditStoreHealth(),
-    checkWorkspaceArtifactStoreHealth(),
-    checkRowLevelSecurityHealth(),
-    checkSharedStateHealth(),
-    checkPdfParserHealth(),
-    checkIngestJobsHealth(),
-    checkQueryAdapterHealth(),
-  ]);
-  const checks = {
-    apiAuth,
-    openai,
-    vectorStore,
-    documentStore,
-    sessionMemory,
-    longMemory,
-    agentExperienceMemory,
-    taskStore,
-    agentRunStore,
-    adminAuditStore,
-    workspaceArtifactStore,
-    rowLevelSecurity,
-    sharedState,
-    pdfParser,
-    ingestJobs,
-    queryAdapter,
+// --- Split deployment (ARCHIVE_RAG_ROLE, rag/service-topology.js) ----------
+//
+// A process reports only the checks of the tiers it runs, so a tier never
+// fails its health on a dependency another tier owns: the agent tier does not
+// authenticate public callers or drain the ingest queue, the edge embeds no
+// queries, and neither needs the provider key behind MODEL_GATEWAY_URL. The
+// monolith (role all, no service URLs) runs every check, as before.
+const HEALTH_CHECKS_BY_TIER = Object.freeze({
+  // Public routes, uploads and their ingestion, documents, memory, feedback,
+  // artifacts, and admin status (which reads the task and run stores).
+  api: [
+    "apiAuth",
+    "openai",
+    "vectorStore",
+    "documentStore",
+    "sessionMemory",
+    "longMemory",
+    "agentExperienceMemory",
+    "taskStore",
+    "agentRunStore",
+    "adminAuditStore",
+    "workspaceArtifactStore",
+    "rowLevelSecurity",
+    "sharedState",
+    "pdfParser",
+    "ingestJobs",
+  ],
+  // Agent runs, tasks (arXiv imports ingest PDFs), memory, artifacts, and the
+  // admin actions forwarded from the edge.
+  agent: [
+    "openai",
+    "vectorStore",
+    "documentStore",
+    "sessionMemory",
+    "longMemory",
+    "agentExperienceMemory",
+    "taskStore",
+    "agentRunStore",
+    "adminAuditStore",
+    "workspaceArtifactStore",
+    "rowLevelSecurity",
+    "sharedState",
+    "pdfParser",
+  ],
+  // Query embedding and search, wherever they run.
+  retrieval: [
+    "openai",
+    "vectorStore",
+    "documentStore",
+    "rowLevelSecurity",
+    "sharedState",
+    "queryAdapter",
+  ],
+  "model-gateway": ["openai", "sharedState"],
+});
+
+const describeHealthTiers = (env) => {
+  const topology = describeServiceTopology(env);
+  const { role } = topology;
+
+  if (role === "invalid") {
+    // Report everything; the serviceTopology check carries the error.
+    return { split: true, tiers: Object.keys(HEALTH_CHECKS_BY_TIER), topology };
+  }
+
+  const remoteAgent = readSafely(() => isRemoteAgentEnabled(env), false);
+  const remoteRetrieval = readSafely(() => isRemoteRetrievalEnabled(env), false);
+  const runsAgent = role === "agent" || (role === "all" && !remoteAgent);
+  const tiers = new Set();
+
+  if (role === "all" || role === "api") {
+    tiers.add("api");
+  }
+
+  if (runsAgent) {
+    tiers.add("agent");
+  }
+
+  if (role === "retrieval" || (runsAgent && !remoteRetrieval)) {
+    tiers.add("retrieval");
+  }
+
+  if (role === "model-gateway") {
+    tiers.add("model-gateway");
+  }
+
+  const split =
+    role !== "all" ||
+    Object.values(topology.remotes).some((remote) => remote.enabled);
+
+  return { remoteAgent, split, tiers: [...tiers], topology };
+};
+
+const AGENT_PROBE_TIMEOUT_MS = 2000;
+
+// One agent replica, probed with a system token: a 200 proves it is reachable
+// and accepts this process's signing key.
+const probeAgentReplica = async ({ env, url }) => {
+  try {
+    const client = createServiceClient({
+      audience: SERVICE_TIERS.agent,
+      env,
+      timeoutMs: AGENT_PROBE_TIMEOUT_MS,
+      urls: [url],
+    });
+    const answer = await client.request({
+      path: AGENT_SERVICE_PING_PATH,
+      system: true,
+      timeoutMs: AGENT_PROBE_TIMEOUT_MS,
+    });
+
+    return answer.status === 200
+      ? { ok: true, url }
+      : { code: answer.json?.code ?? `HTTP_${answer.status}`, ok: false, url };
+  } catch (error) {
+    return {
+      causeCode: error?.causeCode ?? null,
+      code: error?.code ?? "PROBE_FAILED",
+      ok: false,
+      url,
+    };
+  }
+};
+
+// The edge forwards chat, tasks and agent runs to AGENT_SERVICE_URL. An agent
+// tier that does not answer is a warning, not an error: /ready stays 200, so
+// the edge stays in rotation and keeps serving documents and uploads while the
+// agent routes answer 503.
+const checkAgentServiceHealth = async ({ env = process.env } = {}) => {
+  let urls;
+
+  try {
+    urls = getServiceUrls(SERVICE_TIERS.agent, env);
+  } catch {
+    return buildEntry("warning", {
+      message: "AGENT_SERVICE_URL is invalid; see the serviceTopology check.",
+    });
+  }
+
+  const replicas = await Promise.all(urls.map((url) => probeAgentReplica({ env, url })));
+  const reachableReplicas = replicas.filter((replica) => replica.ok).length;
+
+  return buildEntry(reachableReplicas === replicas.length ? "ok" : "warning", {
+    message:
+      reachableReplicas === replicas.length
+        ? "Every agent replica answered."
+        : reachableReplicas > 0
+          ? `${replicas.length - reachableReplicas} of ${replicas.length} agent replicas did not answer; the others take the agent routes.`
+          : "No agent replica answered: chat, tasks and agent runs answer 503 until one does; documents and uploads keep working.",
+    reachableReplicas,
+    replicas,
+  });
+};
+
+const buildServiceTopologyEntry = (topology) =>
+  buildEntry(topology.status, {
+    errors: topology.errors,
+    message:
+      topology.status === "error"
+        ? "The split-deployment topology cannot work as configured."
+        : `This process runs role ${topology.role}.`,
+    role: topology.role,
+    warnings: topology.warnings,
+  });
+
+export const buildHealthReport = async ({ env = process.env } = {}) => {
+  const { remoteAgent, split, tiers, topology } = describeHealthTiers(env);
+  const runnable = {
+    apiAuth: () => checkApiAuthHealth(),
+    openai: () => checkOpenAIHealth({ env }),
+    vectorStore: () => checkVectorStoreHealth(),
+    documentStore: () => checkDocumentStoreHealth(),
+    sessionMemory: () => checkSessionMemoryHealth(),
+    longMemory: () => checkLongMemoryHealth(),
+    agentExperienceMemory: () => checkAgentExperienceMemoryHealth(),
+    taskStore: () => checkTaskStoreHealth(),
+    agentRunStore: () => checkAgentRunStoreHealth(),
+    adminAuditStore: () => checkAdminAuditStoreHealth(),
+    workspaceArtifactStore: () => checkWorkspaceArtifactStoreHealth(),
+    rowLevelSecurity: () => checkRowLevelSecurityHealth(),
+    sharedState: () => checkSharedStateHealth(),
+    pdfParser: () => checkPdfParserHealth(),
+    ingestJobs: () => checkIngestJobsHealth(),
+    queryAdapter: () => checkQueryAdapterHealth(),
   };
+  const selected = new Set(tiers.flatMap((tier) => HEALTH_CHECKS_BY_TIER[tier]));
+  const names = Object.keys(runnable).filter((name) => selected.has(name));
+  const [results, agentService] = await Promise.all([
+    Promise.all(names.map((name) => runnable[name]())),
+    remoteAgent ? checkAgentServiceHealth({ env }) : null,
+  ]);
+  const checks = Object.fromEntries(names.map((name, index) => [name, results[index]]));
+
+  if (split) {
+    checks.serviceTopology = buildServiceTopologyEntry(topology);
+  }
+
+  if (agentService) {
+    checks.agentService = agentService;
+  }
+
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));
 
   return {
     status: hasErrors ? "error" : "ok",
     checkedAt: new Date().toISOString(),
     checks,
+    // Secret-free: the role, the tiers this process hosts and calls, and key
+    // ids (never secrets).
+    service: topology,
   };
 };
 

@@ -103,6 +103,105 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 - 镜像以非 root 用户 `node` 运行，只有 `/data` 可写。
 - 镜像里的 npm 10 在安装服务端依赖时会要求 `@qdrant/js-client-rest` 的 peer 依赖 typescript。本机 npm 11 生成的锁文件里没有它，而运行时也用不到，所以 Dockerfile 用 `--legacy-peer-deps` 安装。
 
+## 拆分部署（可选）
+
+默认仍是一个进程：不设 `ARCHIVE_RAG_ROLE`、不设服务地址时，`node server.js` 和上面的一键部署都和原来完全一样。拆分是可选的，用来让某一层单独加副本。
+
+### 分几层
+
+同一个镜像、同一个入口 `node server.js`，用 `ARCHIVE_RAG_ROLE` 选角色：
+
+| 角色 | 默认端口 | 做什么 | 调用谁（设了对应地址时） |
+| --- | --- | --- | --- |
+| `api` | `PORT`，否则 5001 | 公网入口：鉴权、限流、CORS、前端静态文件、上传、文档、入库任务（包括进程内的入库 worker）、管理接口。`/chat`、`/chat/stream`、任务、agent run 及其操作、管理动作转发给 agent 层。不跑 Agent，也不做启动恢复。 | agent 层；入库的 embedding 走模型网关 |
+| `agent` | `PORT`，否则 5001 | Agent 编排：`runAgentRag`、后台任务、启动恢复、公网入口转来的管理动作。只接受内部签名身份。 | 检索层、模型网关 |
+| `retrieval` | `PORT`，否则 5002 | 按调用方的租户（行级安全）做查询 embedding、稠密 + 稀疏检索、融合、重排。只接受内部签名身份。 | 模型网关 |
+| `model-gateway` | `MODEL_GATEWAY_PORT`，否则 `PORT`，否则 5003 | OpenAI 兼容的模型服务：重试、退避、切换备用模型、并发上限、熔断、用量计量、按 workspace 的配额，并在多个上游副本之间分配请求。 | chat、embedding、重排的上游 |
+
+- `retrieval` 和 `model-gateway` 也有单独的入口：`node retrieval-service.mjs`、`node model-gateway.mjs`。两种启动方式做同样的启动检查；用 `node server.js` 启动时，停机有 `SERVICE_SHUTDOWN_GRACE_MS` 的上限，单独入口没有。
+- 每个角色都有 `GET /livez`（只说明进程在）、`GET /health` 和 `GET /ready`，都不需要身份。api 的 `/health` 多两项：`checks.serviceTopology`，以及逐个探测 agent 副本的 `checks.agentService`。agent 层不可达时这一项是 `warning`，不会让 `/ready` 变成 503，所以公网入口留在负载均衡里，文档和上传照常可用，Agent 相关接口返回 503。
+- 模型网关的 `GET /health` 列出每个上游副本的在途数、熔断状态和配额设置；`GET /usage` 按租户列出用量，只接受系统身份、带 `admin` claim 或带 `admin.status.read` 权限的内部 token，不对公网开放。
+
+### 前提
+
+- **一个 PostgreSQL**：所有层用同一个 `POSTGRES_DATABASE_URL`。文档、分块、运行记录、任务、审计和入库队列都在里面，公网入口上传的文档靠它对检索层可见。内存存储不能跨层使用，拓扑检查不会发现这种配置。
+- **共享的向量库**：`pgvector`（默认）或 `qdrant`。检索层拒绝 `VECTOR_STORE_PROVIDER=local` 和 standalone 模式。
+- **同一份密钥**：所有层设同一个 `INTERNAL_SERVICE_KEYS`。生成一个：
+
+  ```bash
+  node -e "console.log('k1:' + require('crypto').randomBytes(32).toString('base64url'))"
+  ```
+
+- **同一份其余配置**：模型、`RAG_*`、embedding 前缀、查询适配器文件等在各层保持一致，目前没有自动检查。模型的 key 只需要给网关；其他层在设了 `MODEL_GATEWAY_URL` 后不再直接调用模型（例外见下面的"限制"）。
+- 启动时先校验拓扑：角色未知、地址无效、`api` 没有 `AGENT_SERVICE_URL`、缺少可用密钥，都会拒绝启动，报错里没有密钥。
+
+### 在一台机器上跑起来
+
+```bash
+cd server
+export INTERNAL_SERVICE_KEYS="<上面打印的整行，形如 k1:...>"
+export AGENT_SERVICE_URL=http://127.0.0.1:5101
+export RETRIEVAL_SERVICE_URL=http://127.0.0.1:5002
+export MODEL_GATEWAY_URL=http://127.0.0.1:5003
+
+ARCHIVE_RAG_ROLE=model-gateway PORT=5003 node server.js &
+ARCHIVE_RAG_ROLE=retrieval     PORT=5002 node server.js &
+ARCHIVE_RAG_ROLE=agent         PORT=5101 node server.js &
+ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
+```
+
+- 四个进程用同一份环境变量。每一层都会忽略指向自己的地址，模型网关还会忽略 agent 和检索层的地址（启动时各打印一条警告），所以不用为每个角色单独准备一份。
+- `server/.env` 照常读取；上面的 `export` 优先。`PORT` 写明比依赖默认值稳妥：`server/.env` 里如果设了 `PORT`，所有角色都会用它。
+- 只拆一部分也可以：只设 `MODEL_GATEWAY_URL`、不设角色，就是"单体 + 独立模型网关"；`agent` 不设 `RETRIEVAL_SERVICE_URL` 时在本进程检索。
+- 开 OpenTelemetry 时给每个角色设不同的 `OTEL_SERVICE_NAME`，否则在 trace 后端里它们是同一个服务名。
+
+### 给某一层加副本
+
+- **agent 或检索层**：在另一个端口（或另一台机器）再起一个同角色的进程，然后把它加进调用方的地址列表，例如 `AGENT_SERVICE_URL=http://127.0.0.1:5101,http://127.0.0.1:5102`，再重启调用方。没有服务发现，副本列表只从环境变量读。
+- **模型网关**：同样起多个网关进程，列进 `MODEL_GATEWAY_URL`。多个网关副本要共享并发上限、熔断和配额计数，设 `RAG_SHARED_STATE=redis`；不设时每个网关进程各算各的。
+- **推理后端（embedding、重排）**：在网关上列多个上游，例如 `MODEL_GATEWAY_EMBEDDING_UPSTREAMS=http://gpu-a:11434/v1,http://gpu-b:11434/v1`、`MODEL_GATEWAY_RERANK_UPSTREAMS=http://r1:8081/rerank,http://r2:8081/rerank`。网关选进行中请求最少的健康副本，每个副本有自己的并发上限和熔断；连接被拒或熔断打开时立即换下一个副本。
+- **入库**：仍在 api 层（或 `npm run worker:ingest` 独立 worker）执行，扩法见上面的"异步入库"。worker 设了 `MODEL_GATEWAY_URL` 时 embedding 也走网关，同样需要 `INTERNAL_SERVICE_KEYS`。
+- 调用方怎么选副本：进行中请求最少的优先；连不上或返回 502/503/504 的副本在 `INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS` 内被跳过。已经发出的 `/chat` 和任务操作不会重发到另一个副本。
+
+### 用镜像部署
+
+- 同一个镜像，给每个容器设不同的 `ARCHIVE_RAG_ROLE`，`CMD` 不用改。镜像里预设了 `PORT=5001`，所以每个角色在自己的容器里都监听 5001，镜像的健康检查也探测这个端口；不要单独给网关设 `MODEL_GATEWAY_PORT`，否则健康检查会探错端口。
+- 只有 api 容器需要对外发布端口；其他层放在内部网络，服务地址写容器名，例如 `AGENT_SERVICE_URL=http://agent:5001`。
+- `compose.services.yml` 把四个角色作为四个服务跑，用同一个镜像，只有 api 发布端口：
+
+  ```bash
+  export INTERNAL_SERVICE_KEYS="k1:<32 个字符以上的密钥>"
+  docker compose -f docker-compose.yml -f compose.services.yml up -d --build --scale agent=2
+  ```
+
+  - `INTERNAL_SERVICE_KEYS` 必须从 shell 提供，文件里没有默认值，不设就拒绝启动。
+  - 它是追加在基础文件上的 override，不能和 `--profile app` 同时用（两者都占 5001）。多个 api 副本要把 `ARCHIVE_RAG_API_PORTS` 设成端口范围（例如 `5001-5003`），或者自己在前面放负载均衡。
+  - `--scale` 起的副本共用一个 DNS 名（例如 `http://agent:5001`），service client 把它当成一个副本，负载靠 Docker DNS 在建连时分散。要用按副本的最少在途选择和故障转移，得在地址里逐个列出副本。
+  - 这个文件还没有真正构建和启动过，只用 `docker compose config` 校验过解析，由 `test/deployment-contract.test.mjs` 固定。
+- 仓库里没有 Kubernetes 清单。
+
+### 换内部密钥
+
+第一个密钥签名，所有密钥都能验证。逐个重启期间，新旧配置的进程同时在跑，所以分三轮：
+
+1. 把新密钥加到最后：`INTERNAL_SERVICE_KEYS=k1:<旧>,k2:<新>`，逐个重启所有层。这时仍用 `k1` 签名，`k2` 只用于验证。
+2. 所有层都换完后，把新密钥挪到最前面：`k2:<新>,k1:<旧>`，再逐个重启。这时用 `k2` 签名，还没重启的进程也认得它。
+3. 最后删掉 `k1`，再逐个重启一次。
+
+如果第一步就把新密钥放在最前面，先重启的进程会用 `k2` 签名，还没重启的进程不认识它，这些调用会被拒绝（公网入口转发 Agent 请求时返回 502 `SERVICE_IDENTITY_REJECTED`）。
+
+### 限制
+
+- 只在一台机器上跑过，没有多机、Kubernetes 清单、服务发现或自动扩缩；副本列表写在环境变量里，增减副本要重启调用方。
+- 所有层共用一个 PostgreSQL，它既是共享瓶颈，也是单点。
+- 层间身份是共享密钥的 HMAC（HS256），不是 mTLS：每一层都握有同一组密钥，能以任何 issuer 签名；token 在有效期（默认 60 秒）内可重放，不绑定路径。内部端口必须只在内网可达，层间 TLS 要自己在前面加。
+- 没有 Redis 时，网关的配额、并发上限和熔断都按网关进程计算，多个网关副本时总量会超出设定值。
+- 公网入口超时（`AGENT_SERVICE_TIMEOUT_MS`）后，agent 层上的运行会继续跑完，不会被取消；agent 层也不按截止时间限制运行。检索层到截止时间只提前返回 504，检索本身不取消；检索层没有并发上限或准入控制。
+- agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康，跳过 5 秒。
+- 检索层或模型网关停掉时，`/chat` 不返回 503，而是和单体里模型或数据库故障时一样：`document_rag` 步骤记为失败，Agent 转去请求 Web 搜索审批，返回 200 的 clarification。只有 agent 层本身不可达时，入口才返回 503。
+- 各层的 `/health` 不需要认证，会列出内部副本地址和密钥 id（不含密钥本身）；api 的 `/health` 每次都会探测每个 agent 副本。
+- 拆分模式下检索请求有上限（`RETRIEVAL_SERVICE_MAX_*`），超长问题或配得过大的 topK 返回 400，单体没有这些限制。
+
 ## CI 里的真实模型评测
 
 `.github/workflows/real-model-eval.yml`：每周一定时跑，也可以手动触发，手动时可以指定对话模型，以及 QASPER 答题的题数。

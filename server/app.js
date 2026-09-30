@@ -13,6 +13,13 @@ import {
   isRagIngestAsync,
 } from "./rag/config.js";
 import { configureUploadSessionDirectory } from "./upload-session-store.js";
+import { createAgentEdgeRouter } from "./rag/agent-service/edge-router.js";
+import { stripInternalServiceHeadersMiddleware } from "./rag/service-identity.js";
+import {
+  hostsServiceTier,
+  isRemoteAgentEnabled,
+  SERVICE_TIERS,
+} from "./rag/service-topology.js";
 
 import { createAppServices } from "./app-services.js";
 import { createAdminRouter } from "./routes/admin.js";
@@ -37,6 +44,10 @@ const defaultUploadsDirectory = resolveDataDirectory({
   fallbackSegments: ["uploads"],
   sourceDirectory: __dirname,
 });
+
+// The agent tier (rag/agent-service/app.js) builds the same services over the
+// same directory.
+export const getDefaultUploadsDirectory = () => defaultUploadsDirectory;
 
 const parseAllowedOrigins = () =>
   String(process.env.ALLOWED_ORIGINS ?? "")
@@ -85,6 +96,14 @@ export const createApp = async (options = {}) => {
     workspaceArtifactService,
   } = services;
 
+  // ARCHIVE_RAG_ROLE=api (or all with AGENT_SERVICE_URL): this process is the
+  // public edge of a split deployment. Agent routes are forwarded to the agent
+  // tier (rag/agent-service/edge-router.js), and agent startup recovery and
+  // background tasks run there, not here. Without AGENT_SERVICE_URL the
+  // monolith keeps everything in process.
+  const forwardsAgentWork = isRemoteAgentEnabled();
+  const hostsAgentWork = hostsServiceTier(SERVICE_TIERS.agent);
+
   const app = express();
   // server.js starts the ingest worker on these same services, so a worker in
   // the API process shares the routes' job store (the only way the in-memory
@@ -110,6 +129,10 @@ export const createApp = async (options = {}) => {
       "[security] Rate limiting is disabled. Set RATE_LIMIT_ENABLED=true to protect /chat, uploads, and destructive endpoints."
     );
   }
+
+  // Before anything reads a header: a public client can never present an
+  // internal token, deadline, or request id (rag/service-identity.js).
+  app.use(stripInternalServiceHeadersMiddleware);
 
   // frameguard/CSP frame-ancestors and CORP stay off: the workbench iframes
   // PDF previews from a different origin (frontend :3000 -> API :5001).
@@ -152,10 +175,13 @@ export const createApp = async (options = {}) => {
     await ingestJobStore.initialize?.();
   }
 
-  await agentRunRecoveryService.recoverOnStartup?.({
-    mode: getAgentRunRecoveryMode(),
-  });
-  await jobOrchestrator.recoverRunnableTasks?.();
+  if (hostsAgentWork) {
+    await agentRunRecoveryService.recoverOnStartup?.({
+      mode: getAgentRunRecoveryMode(),
+    });
+    await jobOrchestrator.recoverRunnableTasks?.();
+  }
+
   await healthService.runStartupHealthChecks?.();
 
   app.use(createSystemRouter(services));
@@ -189,15 +215,28 @@ export const createApp = async (options = {}) => {
   app.use(requireApiAuth);
   app.use(bindDatabaseTenant);
 
+  const agentEdge = forwardsAgentWork ? createAgentEdgeRouter() : null;
+
   app.use(createArtifactsRouter(services));
-  app.use(createAdminRouter(services));
+  // Admin actions recover agent tasks and run model evaluations, so at the
+  // edge they are authorized and audited here and then run by the agent tier.
+  app.use(
+    createAdminRouter(
+      services,
+      agentEdge ? { actionHandler: agentEdge.forwardAdminAction } : {}
+    )
+  );
   app.use(createDocumentsRouter(services));
-  app.use(createTasksRouter(services));
+  // At the edge one router forwards both the task and the chat routes.
+  app.use(agentEdge ? agentEdge.router : createTasksRouter(services));
   app.use(createArxivRouter(services));
   app.use(createMemoryRouter(services));
   app.use(createQualityRouter(services));
   app.use(createUploadsRouter(services));
-  app.use(createChatRouter(services));
+
+  if (!agentEdge) {
+    app.use(createChatRouter(services));
+  }
 
   return app;
 };

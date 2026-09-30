@@ -1911,8 +1911,14 @@ test("--tenant scopes every request and the seed corpus; the report says which p
   assert.match(formatAccessScope({ tenant: true, ...LOAD_TEST_TENANT }), /row-level security/);
   assert.match(formatAccessScope({ tenant: false }), /unscoped owner path/);
   assert.match(formatAccessScope(undefined), /unscoped owner path/, "reports written before --tenant existed");
-  assert.throws(() => parseLoadTestArgs(["--repeat", "3"]), /only apply to --scenario ingest/);
+  // --repeat runs each level N times in the chat and ingest scenarios; the
+  // index switch is one continuous run.
+  assert.equal(parseLoadTestArgs(["--repeat", "3"]).repeat, 3);
   assert.equal(parseLoadTestArgs(["--scenario", "ingest", "--repeat", "3"]).repeat, 3);
+  assert.throws(
+    () => parseLoadTestArgs(["--database-url", "postgresql://u:p@127.0.0.1:6000/db", "--scenario", "index-switch", "--repeat", "3"]),
+    /--repeat applies to --scenario chat and ingest/
+  );
   assert.equal(parseLoadTestArgs(["--postgres-pid-file", "/d/postmaster.pid"]).postgresPidFile, "/d/postmaster.pid");
 });
 

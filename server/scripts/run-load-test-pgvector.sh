@@ -14,8 +14,11 @@
 #
 # With the database URL set, the load test defaults to --storage pgvector,local, so
 # one invocation measures both the production storage path and the standalone
-# local store (pgvector only with --instances > 1 or --ingest-workers). Extra
-# arguments are passed through to the load test.
+# local store (pgvector only with --instances > 1, --ingest-workers or
+# --topology split). Extra arguments are passed through to the load test; with
+# --topology split every tier process (api, agent, retrieval; the model gateway
+# keeps no database) opens its own pool against this cluster, which
+# max_connections below leaves room for.
 #
 # --with-redis (consumed here, not passed through) also starts a disposable
 # redis-server for --shared-state redis: an OS-assigned free port on 127.0.0.1
