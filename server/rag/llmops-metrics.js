@@ -8,6 +8,7 @@ import {
   normalizeLlmOpsBudget,
 } from "./llmops-policy.js";
 import { recordRagTrace } from "./observability.js";
+import { recordModelCallMetric } from "./metrics-model.js";
 import { chargeActiveRunUsage } from "./run-usage.js";
 import { normalizePromptDescriptor } from "./prompt-registry.js";
 import {
@@ -231,6 +232,7 @@ export const recordLlmOpsMetric = async (
   // Charge the run before the recorder: usage must count even when the trace
   // write fails.
   chargeActiveRunUsage(event);
+  recordModelCallMetric(event);
 
   try {
     await recorder(event);

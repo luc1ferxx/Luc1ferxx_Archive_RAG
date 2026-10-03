@@ -9,6 +9,7 @@ import {
 } from "./tasks.js";
 import { recordRagTrace } from "./observability.js";
 import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js";
+import { runOutsideRequestDeadline } from "./request-deadline.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 export const TASK_ACTIONS = Object.freeze({
@@ -473,15 +474,18 @@ export const createJobOrchestrator = ({
     taskId,
   } = {}) => {
     // A scheduled run acts for its task's own scope, whatever context
-    // scheduled it (a request, an admin recovery action, or startup).
+    // scheduled it (a request, an admin recovery action, or startup), and
+    // never with the deadline or cancellation of a request that scheduled it.
     schedule(
       () => {
-        return runWithDatabaseTenant(accessScope, () =>
-          runTask({
-            accessScope,
-            recovery,
-            taskId,
-          })
+        return runOutsideRequestDeadline(() =>
+          runWithDatabaseTenant(accessScope, () =>
+            runTask({
+              accessScope,
+              recovery,
+              taskId,
+            })
+          )
         ).catch((error) => {
           console.error(
             "Task runner failed before task state could be updated.",

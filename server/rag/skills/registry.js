@@ -4,6 +4,10 @@ import {
 } from "./built-ins.js";
 import { isAgentRunInterrupt } from "../agent-interrupts.js";
 import {
+  getRequestCancellation,
+  throwIfRequestCancelled,
+} from "../request-deadline.js";
+import {
   createSkillInputContractError,
   createSkillOutputContractError,
 } from "./skill-contract.js";
@@ -111,11 +115,18 @@ export const buildFailedSkillResult = (skill, error) => ({
   traceDetail: null,
 });
 
+// A Skill never starts for a request that is already cancelled, and a Skill
+// that fails because its request was cancelled (an aborted model or retrieval
+// call, or one cut by the deadline) does not become a failed Skill result the
+// run could route around: the cancellation propagates and ends the run
+// (request-deadline.js). Without a bound request neither check does anything.
 export const executeAgentSkill = async (
   skill,
   context,
   { validateInput, validateOutput } = {}
 ) => {
+  throwIfRequestCancelled();
+
   try {
     const inputValidation = validateInput?.();
 
@@ -140,6 +151,12 @@ export const executeAgentSkill = async (
   } catch (error) {
     if (isAgentRunInterrupt(error)) {
       throw error;
+    }
+
+    const cancellation = getRequestCancellation({ cause: error });
+
+    if (cancellation) {
+      throw cancellation;
     }
 
     return buildFailedSkillResult(skill, error);

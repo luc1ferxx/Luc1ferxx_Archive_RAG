@@ -1775,10 +1775,12 @@ test("the cross-process document helpers read the store whenever the registry is
     for (const mode of [undefined, "async"]) {
       await withEnv({ RAG_INGEST_MODE: mode }, async () => {
         await loadDocumentsIngestedElsewhere(createRagService(true), ["doc-1"]);
-        await refreshDocumentsIngestedElsewhere(createRagService(true), ALICE);
+        // A failed refresh is reported, so the caller can keep that request
+        // off the read replicas.
+        assert.equal(await refreshDocumentsIngestedElsewhere(createRagService(true), ALICE), false);
         // A file-backed or in-memory registry has one writer: this process.
         await loadDocumentsIngestedElsewhere(createRagService(false), ["doc-2"]);
-        await refreshDocumentsIngestedElsewhere(createRagService(false), ALICE);
+        assert.equal(await refreshDocumentsIngestedElsewhere(createRagService(false), ALICE), true);
         await loadDocumentsIngestedElsewhere({ isDocumentRegistryShared: () => true }, ["doc-3"]);
       });
     }

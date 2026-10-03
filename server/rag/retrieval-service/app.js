@@ -28,11 +28,17 @@ import {
   searchGlobalContextInProcess,
 } from "../document-rag-execution.js";
 import { isPostgresConfigured } from "../postgres.js";
+import { isReadReplicaRoutingEnabled } from "../postgres-replicas.js";
 import { runAsDatabaseSystem } from "../postgres-tenant.js";
 import { describeQueryAdapterHealth, QUERY_ADAPTER_SCOPE_QA } from "../query-adapter.js";
 import { createRunUsage, runWithRunUsage } from "../run-usage.js";
 import { bindServiceTraceContext } from "../service-client.js";
-import { requireServiceIdentity } from "../service-identity.js";
+import {
+  handleServiceRequestBodyError,
+  requireServiceIdentity,
+  SERVICE_CALL_POLICY,
+  verifyServiceRequestBody,
+} from "../service-identity.js";
 import { describeServiceTopology } from "../service-topology.js";
 import { setSpanAttributes, withSpan } from "../tracing.js";
 import { describeVectorStoreRuntime, supportsDenseScoreVector } from "../vector-store.js";
@@ -83,9 +89,11 @@ import { decodeWireValue, encodeWireValue } from "./wire.js";
 // shares.
 // GET /health and GET /ready report the vector store, the index versions and
 // the query adapter, with no identity required; GET /internal/retrieval/v1/ping
-// answers any signed identity for this audience, system tokens included.
+// answers any signed identity SERVICE_CALL_POLICY lets probe this tier, system
+// tokens included.
 
-export const DEFAULT_RETRIEVAL_SERVICE_ISSUERS = Object.freeze(["all", "agent"]);
+// The callers SERVICE_CALL_POLICY admits: the agent tier and a monolith.
+export const DEFAULT_RETRIEVAL_SERVICE_ISSUERS = SERVICE_CALL_POLICY.retrieval.callers;
 export const RETRIEVAL_SERVICE_BODY_LIMIT = "4mb";
 
 const MAX_DOC_ID_LENGTH = 512;
@@ -241,10 +249,13 @@ export const maskInvisibleDocIds = async (docIds, accessScope = {}) => {
   await initializeDocumentRegistry();
 
   const isVisible = (docId) => Boolean(getStoredDocument(docId, accessScope));
-  const unknown = docIds.filter((docId) => !isVisible(docId));
+  // With read replicas a search's freshness guard expects each document at
+  // the version this registry holds (rag/vector-store-pgvector.js), so every
+  // id is re-read from the primary, not only the unknown ones.
+  const reread = isReadReplicaRoutingEnabled() ? docIds : docIds.filter((docId) => !isVisible(docId));
 
-  if (unknown.length > 0 && isDocumentRegistryShared()) {
-    await loadDocumentsFromStore(unknown);
+  if (reread.length > 0 && isDocumentRegistryShared()) {
+    await loadDocumentsFromStore(reread);
   }
 
   const originalByMasked = new Map();
@@ -652,7 +663,7 @@ export const createRetrievalApp = ({
 
   app.get(
     RETRIEVAL_SERVICE_PATHS.ping,
-    requireServiceIdentity({ allowSystem: true, audience: RETRIEVAL_SERVICE_AUDIENCE, env, now }),
+    requireServiceIdentity({ allowSystem: true, audience: RETRIEVAL_SERVICE_AUDIENCE, env, now, purpose: "probe" }),
     (req, res) => {
       res.json({ service: RETRIEVAL_SERVICE_AUDIENCE, status: "ok" });
     }
@@ -664,7 +675,8 @@ export const createRetrievalApp = ({
   // Parsed before the tenant is bound: body-parser resumes the chain from a
   // stream callback, which would drop an AsyncLocalStorage context bound
   // earlier.
-  router.use(express.json({ limit: RETRIEVAL_SERVICE_BODY_LIMIT }));
+  router.use(express.json({ limit: RETRIEVAL_SERVICE_BODY_LIMIT, verify: verifyServiceRequestBody }));
+  router.use(handleServiceRequestBodyError);
   router.use(handleBodyParserError);
   router.use(bindDatabaseTenant);
   router.use(bindServiceTraceContext);

@@ -10,9 +10,11 @@
 //
 // The split deployment (compose.services.yml) is pinned the same way: four
 // services of the one app image, one ARCHIVE_RAG_ROLE each, only the api
-// published, internal keys only from the shell, and every tier's environment
-// fed through the real topology validator and port resolution, so the URLs
-// the tiers call are where their neighbours listen.
+// published, internal keys only from the shell (under ed25519 each calling
+// tier's own private key from its own variable, the public keys shared, as
+// service-keys.mjs exports them), and every tier's environment fed through
+// the real topology validator and port resolution, so the URLs the tiers call
+// are where their neighbours listen and a tier without keys does not start.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
@@ -27,7 +29,9 @@ import {
   isRerankEnabled,
 } from "../rag/config.js";
 import { resolveRolePort } from "../rag/agent-service/role-server.js";
+import { signServiceToken, verifyServiceToken } from "../rag/service-identity.js";
 import { describeServiceTopology, validateServiceTopology } from "../rag/service-topology.js";
+import { COMPOSE_SIGNING_KEY_VARIABLES, runServiceKeysCommand } from "../service-keys.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -342,18 +346,65 @@ const tierRoles = Object.freeze({
   retrieval: "retrieval",
 });
 const tierServiceNames = Object.keys(tierRoles);
-const shellServiceKeys = `deploy-contract:${"k".repeat(40)}`;
-const requiredShellKeys = /^\$\{INTERNAL_SERVICE_KEYS:\?[^}]+\}$/;
+// What the deploying shell exports for the default (hmac) scheme.
+const hmacShell = Object.freeze({ INTERNAL_SERVICE_KEYS: `deploy-contract:${"k".repeat(40)}` });
+const identityVariables = [
+  "INTERNAL_SERVICE_AUTH",
+  "INTERNAL_SERVICE_KEYS",
+  "INTERNAL_SERVICE_SIGNING_KEY",
+  "INTERNAL_SERVICE_TRUSTED_KEYS",
+];
 
-// A tier's environment as the container gets it: `${NAME:-default}` resolved
-// to its default, and the keyring to what the shell must provide.
-const tierEnvironment = (composeText, serviceName) =>
+// A service's environment block as written, `${...}` left in place.
+const rawServiceEnvironment = (composeText, serviceName) => {
+  const lines = serviceLines(composeText, serviceName);
+  const environmentLines = lines ? nestedLines(lines, "environment", 4) : null;
+
+  return Object.fromEntries(
+    (environmentLines ?? []).filter(isContentLine).map((line) => {
+      const separator = line.indexOf(":");
+
+      return [line.slice(0, separator).trim(), unquote(line.slice(separator + 1).trim())];
+    })
+  );
+};
+
+// Compose interpolation: `${NAME:-default}` takes the shell's value when it is
+// set and not empty, and the default otherwise.
+const interpolate = (value, shell) =>
+  value.replace(/\$\{([A-Z0-9_]+):-([^}]*)\}/g, (match, name, fallback) => shell[name] || fallback);
+
+// A tier's environment as the container gets it from `shell`.
+const tierEnvironment = (composeText, serviceName, shell = hmacShell) =>
   Object.fromEntries(
-    Object.entries(serviceEnvironment(composeText, serviceName)).map(([key, value]) => [
+    Object.entries(rawServiceEnvironment(composeText, serviceName)).map(([key, value]) => [
       key,
-      key === "INTERNAL_SERVICE_KEYS" && requiredShellKeys.test(value) ? shellServiceKeys : value,
+      interpolate(value, shell),
     ])
   );
+
+// The exports `node service-keys.mjs compose` prints, as a shell would hold them.
+const generateEd25519Shell = () => {
+  const lines = [];
+  const code = runServiceKeysCommand({
+    argv: ["compose"],
+    env: {},
+    stderr: { write: () => true },
+    stdout: { write: (text) => lines.push(...text.split("\n").filter(Boolean)) },
+  });
+
+  assert.equal(code, 0);
+
+  return Object.fromEntries(
+    lines.map((line) => {
+      const match = line.match(/^export ([A-Z0-9_]+)=(.*)$/);
+
+      assert.ok(match, "the compose command prints export lines only");
+
+      return [match[1], match[2]];
+    })
+  );
+};
 
 // The port a tier listens on, as server.js resolves it for its role.
 const listeningPort = (t, environment) => {
@@ -428,9 +479,26 @@ test("only the api publishes a port, and internal keys come from the shell alone
   assert.equal(listeningPort(t, tierEnvironment(override, "api")), 5001);
 
   for (const serviceName of tierServiceNames) {
-    const environment = serviceEnvironment(override, serviceName);
+    const environment = rawServiceEnvironment(override, serviceName);
+    const signingVariable = COMPOSE_SIGNING_KEY_VARIABLES[tierRoles[serviceName]];
 
-    assert.match(environment.INTERNAL_SERVICE_KEYS ?? "", requiredShellKeys, `${serviceName} requires the shell's keys`);
+    // Every identity setting is a shell variable with no key as its default:
+    // the scheme defaults to hmac, every key to nothing.
+    assert.equal(environment.INTERNAL_SERVICE_AUTH, "${INTERNAL_SERVICE_AUTH:-hmac}", serviceName);
+    assert.equal(environment.INTERNAL_SERVICE_KEYS, "${INTERNAL_SERVICE_KEYS:-}", `${serviceName} shares the hmac keyring`);
+    assert.equal(
+      environment.INTERNAL_SERVICE_TRUSTED_KEYS,
+      "${INTERNAL_SERVICE_TRUSTED_KEYS:-}",
+      `${serviceName} shares the trusted public keys`
+    );
+
+    // Each calling tier has its own private key in its own shell variable,
+    // the one service-keys.mjs exports for it; the gateway calls nobody.
+    if (signingVariable) {
+      assert.equal(environment.INTERNAL_SERVICE_SIGNING_KEY, `\${${signingVariable}:-}`, `${serviceName} signs with its own key`);
+    } else {
+      assert.equal(environment.INTERNAL_SERVICE_SIGNING_KEY, undefined, `${serviceName} holds no signing key`);
+    }
 
     // Model keys and public tokens come from server/.env, rerank settings too
     // (as for the base app service): compose `environment` would override them.
@@ -439,13 +507,91 @@ test("only the api publishes a port, and internal keys come from the shell alone
     }
   }
 
-  // No default and no literal keyring anywhere in the file.
-  assert.doesNotMatch(override, /INTERNAL_SERVICE_KEYS:-/);
-  assert.equal(
-    override.match(/^\s+INTERNAL_SERVICE_KEYS:/gm)?.length,
-    tierServiceNames.length,
-    "one required keyring per tier and nothing else"
+  assert.deepEqual(
+    Object.keys(COMPOSE_SIGNING_KEY_VARIABLES).sort(),
+    tierServiceNames.filter((name) => name !== "model-gateway").map((name) => tierRoles[name]).sort()
   );
+
+  // No literal key and no key default anywhere in the file: every identity
+  // line reads the shell, and only the scheme has a (non-secret) default.
+  const identityLines = override.split("\n").filter((line) => /^\s+INTERNAL_SERVICE_[A-Z_]+:/.test(line));
+
+  for (const line of identityLines) {
+    assert.match(line.trim(), /^INTERNAL_SERVICE_[A-Z_]+: \$\{INTERNAL_SERVICE_[A-Z_]+:-(hmac)?\}$/, line.trim());
+  }
+
+  assert.equal(identityLines.length, identityVariables.length * tierServiceNames.length - 1);
+});
+
+test("a tier without keys from the shell refuses to start, in either scheme", async () => {
+  const override = await readText(servicesOverridePath);
+
+  for (const shell of [{}, { INTERNAL_SERVICE_AUTH: "ed25519" }, { INTERNAL_SERVICE_AUTH: "mixed" }]) {
+    for (const serviceName of tierServiceNames) {
+      const { errors } = validateServiceTopology(tierEnvironment(override, serviceName, shell));
+
+      assert.ok(errors.length > 0, `${serviceName} under ${JSON.stringify(shell)} must refuse to start`);
+    }
+  }
+});
+
+test("under ed25519 each tier signs with its own key and verifies with the shared list", async () => {
+  const override = await readText(servicesOverridePath);
+  const shell = generateEd25519Shell();
+  const trusted = Object.fromEntries(
+    shell.INTERNAL_SERVICE_TRUSTED_KEYS.split(",").map((entry) => {
+      const [issuer, keyId] = entry.split(":");
+
+      return [issuer, keyId];
+    })
+  );
+  const environments = Object.fromEntries(
+    tierServiceNames.map((serviceName) => [serviceName, tierEnvironment(override, serviceName, shell)])
+  );
+
+  assert.equal(shell.INTERNAL_SERVICE_AUTH, "ed25519");
+
+  for (const [serviceName, environment] of Object.entries(environments)) {
+    const role = tierRoles[serviceName];
+    const description = describeServiceTopology(environment);
+    const ownKey = COMPOSE_SIGNING_KEY_VARIABLES[role] ? shell[COMPOSE_SIGNING_KEY_VARIABLES[role]] : null;
+
+    assert.deepEqual(validateServiceTopology(environment), { errors: [], warnings: [] }, serviceName);
+    assert.equal(description.internalIdentity.mode, "ed25519");
+    assert.equal(description.internalIdentity.issuer, role);
+    assert.equal(description.internalIdentity.signingKeyId, trusted[role] ?? null, `${serviceName} signs with its own key id`);
+    assert.equal(environment.INTERNAL_SERVICE_SIGNING_KEY ?? "", ownKey ?? "");
+
+    // No tier's environment holds another tier's private key.
+    for (const [variable, value] of Object.entries(shell)) {
+      if (variable.startsWith("INTERNAL_SERVICE_SIGNING_KEY_") && value !== ownKey) {
+        assert.ok(!Object.values(environment).includes(value), `${serviceName} must not hold ${variable}`);
+      }
+    }
+  }
+
+  // The edge's token reaches the agent; the retrieval tier's key cannot speak
+  // for the edge there.
+  const request = { body: '{"question":"q"}', method: "POST", target: "/chat" };
+  const scope = { authenticated: true, userId: "alice", workspaceId: "ws-1" };
+  const fromApi = signServiceToken({ accessScope: scope, audience: "agent", env: environments.api, issuer: "api", request });
+  const forged = signServiceToken({ accessScope: scope, audience: "agent", env: environments.retrieval, issuer: "api", request });
+
+  assert.equal(
+    verifyServiceToken(fromApi, { audience: "agent", env: environments.agent, request: { ...request, hasBody: true } }).issuer,
+    "api"
+  );
+  assert.throws(
+    () => verifyServiceToken(forged, { audience: "agent", env: environments.agent, request: { ...request, hasBody: true } }),
+    (error) => error.code === "SERVICE_TOKEN_KEY_ISSUER"
+  );
+
+  // mixed (the rolling upgrade) also starts on every tier once both sets are exported.
+  for (const serviceName of tierServiceNames) {
+    const environment = tierEnvironment(override, serviceName, { ...hmacShell, ...shell, INTERNAL_SERVICE_AUTH: "mixed" });
+
+    assert.deepEqual(validateServiceTopology(environment).errors, [], serviceName);
+  }
 });
 
 test("each tier's environment passes the topology validator and calls its neighbours where they listen", async (t) => {

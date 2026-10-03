@@ -9,10 +9,26 @@
 # Only the api publishes a port: ARCHIVE_RAG_API_PORTS (default 5001; a range
 # such as 5001-5003 gives each of `--scale api=3` its own host port). The
 # other tiers are reached on the compose network only, with signed internal
-# tokens. INTERNAL_SERVICE_KEYS (kid:secret, a secret of 32 or more
-# characters, the same on every tier) must come from the shell: there is no
-# default, and compose refuses to start without it. Do not add
-# `--profile app`, which runs the monolith on the same host port.
+# tokens. Do not add `--profile app`, which runs the monolith on the same host
+# port.
+#
+# Internal identity (server/rag/service-identity.js) comes from the shell
+# alone; nothing below holds or defaults to a key, and a tier whose keys are
+# missing refuses to start (topology validation). INTERNAL_SERVICE_AUTH picks
+# the scheme:
+#   hmac (default)  INTERNAL_SERVICE_KEYS (kid:secret, a secret of 32 or more
+#                   characters), the same on every tier, as above.
+#   ed25519         each calling tier signs with its own private key, from its
+#                   own shell variable (INTERNAL_SERVICE_SIGNING_KEY_API,
+#                   _AGENT, _RETRIEVAL; the model gateway calls nobody and has
+#                   none), and every tier verifies with the shared
+#                   INTERNAL_SERVICE_TRUSTED_KEYS, each public key bound to its
+#                   issuer. server/service-keys.mjs prints all of these as
+#                   exports (private keys: keep them out of tracked files):
+#                     eval "$(node server/service-keys.mjs compose)"
+#   mixed           signs ed25519 and also accepts hmac, for moving a running
+#                   deployment over (server/rag/service-identity-keys.js has the
+#                   order of the rolls); it needs both sets of variables.
 #
 # Every tier reads server/.env like the monolith, so the RAG_* settings the
 # agent and the retrieval tier both read stay the same; the environment below
@@ -44,7 +60,10 @@ services:
       PORT: "5001"
       AGENT_SERVICE_URL: http://agent:5001
       MODEL_GATEWAY_URL: http://model-gateway:5003
-      INTERNAL_SERVICE_KEYS: "${INTERNAL_SERVICE_KEYS:?set INTERNAL_SERVICE_KEYS for the split deployment}"
+      INTERNAL_SERVICE_AUTH: ${INTERNAL_SERVICE_AUTH:-hmac}
+      INTERNAL_SERVICE_KEYS: ${INTERNAL_SERVICE_KEYS:-}
+      INTERNAL_SERVICE_SIGNING_KEY: ${INTERNAL_SERVICE_SIGNING_KEY_API:-}
+      INTERNAL_SERVICE_TRUSTED_KEYS: ${INTERNAL_SERVICE_TRUSTED_KEYS:-}
       POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
       LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
       VECTOR_STORE_PROVIDER: pgvector
@@ -86,7 +105,10 @@ services:
       PORT: "5001"
       RETRIEVAL_SERVICE_URL: http://retrieval:5002
       MODEL_GATEWAY_URL: http://model-gateway:5003
-      INTERNAL_SERVICE_KEYS: "${INTERNAL_SERVICE_KEYS:?set INTERNAL_SERVICE_KEYS for the split deployment}"
+      INTERNAL_SERVICE_AUTH: ${INTERNAL_SERVICE_AUTH:-hmac}
+      INTERNAL_SERVICE_KEYS: ${INTERNAL_SERVICE_KEYS:-}
+      INTERNAL_SERVICE_SIGNING_KEY: ${INTERNAL_SERVICE_SIGNING_KEY_AGENT:-}
+      INTERNAL_SERVICE_TRUSTED_KEYS: ${INTERNAL_SERVICE_TRUSTED_KEYS:-}
       POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
       LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
       VECTOR_STORE_PROVIDER: pgvector
@@ -123,7 +145,10 @@ services:
       ARCHIVE_RAG_ROLE: retrieval
       PORT: "5002"
       MODEL_GATEWAY_URL: http://model-gateway:5003
-      INTERNAL_SERVICE_KEYS: "${INTERNAL_SERVICE_KEYS:?set INTERNAL_SERVICE_KEYS for the split deployment}"
+      INTERNAL_SERVICE_AUTH: ${INTERNAL_SERVICE_AUTH:-hmac}
+      INTERNAL_SERVICE_KEYS: ${INTERNAL_SERVICE_KEYS:-}
+      INTERNAL_SERVICE_SIGNING_KEY: ${INTERNAL_SERVICE_SIGNING_KEY_RETRIEVAL:-}
+      INTERNAL_SERVICE_TRUSTED_KEYS: ${INTERNAL_SERVICE_TRUSTED_KEYS:-}
       POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
       LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
       VECTOR_STORE_PROVIDER: pgvector
@@ -156,7 +181,9 @@ services:
     environment:
       ARCHIVE_RAG_ROLE: model-gateway
       MODEL_GATEWAY_PORT: "5003"
-      INTERNAL_SERVICE_KEYS: "${INTERNAL_SERVICE_KEYS:?set INTERNAL_SERVICE_KEYS for the split deployment}"
+      INTERNAL_SERVICE_AUTH: ${INTERNAL_SERVICE_AUTH:-hmac}
+      INTERNAL_SERVICE_KEYS: ${INTERNAL_SERVICE_KEYS:-}
+      INTERNAL_SERVICE_TRUSTED_KEYS: ${INTERNAL_SERVICE_TRUSTED_KEYS:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       OTEL_SERVICE_NAME: luc1ferxx-archive-rag-model-gateway
     extra_hosts:

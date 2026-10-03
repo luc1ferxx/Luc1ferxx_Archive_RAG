@@ -11,6 +11,7 @@ import {
   getSharedStateProvider,
 } from "../config.js";
 import { getModelCallGuardTotals } from "../model-call-guard.js";
+import { recordGatewayQuotaRejection } from "../metrics-model.js";
 import {
   MODEL_CAPABILITIES,
   MODEL_ROUTE_IDS,
@@ -28,7 +29,9 @@ import { bindServiceTraceContext } from "../service-client.js";
 import {
   getServiceDeadlineRemainingMs,
   getServiceKeyStatus,
+  handleServiceRequestBodyError,
   requireServiceIdentity,
+  verifyServiceRequestBody,
 } from "../service-identity.js";
 import { SERVICE_TIERS } from "../service-topology.js";
 import { runWithModelGatewayCall } from "./call-context.js";
@@ -268,10 +271,12 @@ export const createModelGatewayApp = ({
   });
   // The body is parsed after the identity check (nothing is read for a caller
   // that is not a tier) and before the tenant is bound: the parser resumes the
-  // chain from a stream callback, which would lose the tenant context.
+  // chain from a stream callback, which would lose the tenant context. The
+  // parser also checks the body against the token's binding.
   const internal = [
     requireIdentity,
-    express.json({ limit: MAX_BODY_BYTES }),
+    express.json({ limit: MAX_BODY_BYTES, verify: verifyServiceRequestBody }),
+    handleServiceRequestBodyError,
     bindDatabaseTenant,
     bindServiceTraceContext,
   ];
@@ -336,6 +341,7 @@ export const createModelGatewayApp = ({
       ledger.recordRequest(tenant, { rejectedBy: admission.ok ? null : admission.quota });
 
       if (!admission.ok) {
+        recordGatewayQuotaRejection(admission.quota);
         sendError(res, {
           code: MODEL_GATEWAY_ERROR_CODES.quotaExceeded,
           message: "The workspace has used its model quota for now.",

@@ -47,6 +47,11 @@ import {
 } from "./config.js";
 import { listAuthorizedAtomicCustomSkills } from "./skills/authorized-catalog.js";
 import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
+import { resolveAgentRunTermination } from "./dependency-outage.js";
+import {
+  REQUEST_CANCELLATION_REASONS,
+  throwIfRequestCancelled,
+} from "./request-deadline.js";
 import {
   createRunUsage,
   resolveRunUsageLimits,
@@ -60,6 +65,7 @@ import {
   setSpanAttributes,
   withSpan,
 } from "./tracing.js";
+import { observeAgentRun } from "./metrics-agent.js";
 import { observeUnifiedAgentGraphShadow } from "./agent-unified-graph-shadow.js";
 import {
   continueUnifiedAgentGraphAfterApproval,
@@ -823,7 +829,7 @@ const withAgentRunSpan = (attributes, run) =>
       [GEN_AI_ATTRIBUTES.operationName]: GEN_AI_OPERATIONS.invokeAgent,
     },
     async (span) => {
-      const response = await run();
+      const response = await observeAgentRun(run);
       const body = response?.body ?? {};
       const runUsage = body.agentObservability?.budget?.run;
 
@@ -1313,6 +1319,10 @@ const runAgentRagInScope = async ({
       });
     }
 
+    // The last safe point: every step has settled, and finalization may call
+    // the claim judge. A request cancelled by now ends here.
+    throwIfRequestCancelled();
+
     const response = attachAgentRunId(
       await finalizeAgentRun({
         actionAnswer: executionResult.actionAnswer,
@@ -1389,6 +1399,19 @@ const runAgentRagInScope = async ({
       });
     }
 
+    const termination = resolveAgentRunTermination(error);
+
+    if (termination) {
+      await endRunForTermination({
+        accessScope,
+        agentRunService,
+        runCursor,
+        runId: agentRunId,
+        termination,
+      });
+      throw termination;
+    }
+
     await agentRunService?.failRun?.({
       accessScope,
       error,
@@ -1397,6 +1420,56 @@ const runAgentRagInScope = async ({
       runId: agentRunId,
     });
     throw error;
+  }
+};
+
+// A run that stopped because its request was cancelled (request-deadline.js:
+// the deadline passed, or the client left with AGENT_CANCEL_ON_DISCONNECT on)
+// or because a dependency is down (dependency-outage.js) ends terminal
+// through the same revision-CAS lifecycle as any failure: failed for a
+// deadline or an outage, canceled for a client that left, with the reason,
+// stable code and retryable flag on run.error. Startup recovery lists only
+// running and waiting runs, so it never picks such a run up, and nothing that
+// completed is replayed. Every step it started has settled by now (the
+// cancellation surfaced through its lifecycle). The error then carries the
+// run id to the route's answer. A store that cannot record the end (the
+// database being the dependency that is down) is logged by code only: the
+// request still answers with the termination.
+const endRunForTermination = async ({
+  accessScope,
+  agentRunService,
+  runCursor,
+  runId,
+  termination,
+}) => {
+  if (runId) {
+    termination.agentRunId = runId;
+  }
+
+  try {
+    const endedRun = await agentRunService?.failRun?.({
+      accessScope,
+      error: termination,
+      graphResumeClaimId: null,
+      runCursor,
+      runId,
+      ...(termination.reason === REQUEST_CANCELLATION_REASONS.clientCancelled
+        ? { status: AGENT_RUN_STATUSES.canceled }
+        : {}),
+    });
+
+    // The run store refused retryable once a Capability write had completed
+    // (agent-runs.js): the answer must not invite a retry either.
+    if (endedRun?.error?.retryable === false && termination.retryable) {
+      termination.retryable = false;
+      termination.runFailure = { ...termination.runFailure, retryable: false };
+    }
+  } catch (writeError) {
+    console.error(
+      `[agent] Could not record the run's end (${termination.code}): ${
+        writeError?.code ?? writeError?.name ?? "Error"
+      }.`
+    );
   }
 };
 

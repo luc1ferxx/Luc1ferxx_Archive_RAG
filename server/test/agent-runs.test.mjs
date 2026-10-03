@@ -2281,3 +2281,44 @@ test("in-memory agent run store list() returns the complete set for limit \"all\
     .listRuns({ accessScope, limit: "all" });
   assert.equal(completeViaService.runs.length, 250);
 });
+
+test("a cancelled run stays retryable unless a Capability write already completed", async () => {
+  const { RequestCancelledError } = await import("../rag/request-deadline.js");
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = { userId: "alice", workspaceId: "workspace-a" };
+  const endAfter = async (runId, steps) => {
+    await agentRunService.createRun({ accessScope, goal: "Deadline", runId });
+
+    for (const step of steps) {
+      for (const status of [AGENT_RUN_STEP_STATUSES.running, AGENT_RUN_STEP_STATUSES.completed]) {
+        await agentRunService.recordRunStep({
+          accessScope,
+          label: step.type,
+          runId,
+          status,
+          stepId: step.id,
+          type: step.type,
+        });
+      }
+    }
+
+    return agentRunService.failRun({
+      accessScope,
+      error: new RequestCancelledError("deadline_exceeded"),
+      runId,
+    });
+  };
+
+  const readOnly = await endAfter("run-read-only", [{ id: "step-doc", type: "document_rag" }]);
+  const wrote = await endAfter("run-wrote", [
+    { id: "step-doc", type: "document_rag" },
+    { id: "step-action", type: "capability_call" },
+  ]);
+
+  assert.equal(readOnly.error.retryable, true);
+  assert.equal(readOnly.error.reason, "deadline_exceeded");
+  assert.equal(wrote.error.retryable, false, "a retry would repeat the Capability write");
+  assert.equal(wrote.error.reason, "deadline_exceeded");
+});

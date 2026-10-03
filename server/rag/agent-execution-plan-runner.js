@@ -14,10 +14,25 @@ import {
 } from "./agent-built-in-skill-runners.js";
 import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
 import { runWebSearchSkill } from "./agent-web-runner.js";
+import { toDependencyOutageError } from "./dependency-outage.js";
+import { throwIfRequestCancelled } from "./request-deadline.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
 
 const getCustomSkills = (selectedSkills = []) =>
   selectedSkills.filter((skill) => skill.kind === "custom");
+
+// A stage whose every Skill failed because a dependency is down produced
+// nothing to answer with: the run ends with that outage (dependency-outage.js)
+// instead of finalizing an empty answer.
+const findWholeStageOutage = (results = []) => {
+  if (results.length === 0 || results.some((result) => result?.ok !== false)) {
+    return null;
+  }
+
+  const outages = results.map((result) => toDependencyOutageError(result.error));
+
+  return outages.every(Boolean) ? outages[0] : null;
+};
 
 export const runAgentExecutionPlan = async ({
   accessScope,
@@ -216,6 +231,12 @@ export const runAgentExecutionPlan = async ({
         userId,
         ...(skillGraphMode ? { mode: skillGraphMode } : {}),
       });
+
+      const outage = findWholeStageOutage(state.customSkillResults);
+
+      if (outage) {
+        throw outage;
+      }
     },
 
     [AGENT_EXECUTION_STEP_IDS.documentRag]: async () => {
@@ -301,6 +322,9 @@ export const runAgentExecutionPlan = async ({
     }
 
     try {
+      // Each stage boundary is a safe point for a cancelled request
+      // (request-deadline.js); inside a stage, step starts are.
+      throwIfRequestCancelled();
       await runStep(step);
     } catch (error) {
       if (isAgentRunInterrupt(error)) {

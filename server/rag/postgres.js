@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
 import {
   getPostgresDatabaseUrl,
@@ -6,6 +7,14 @@ import {
   isLongMemoryEnabled,
   isPostgresSslEnabled,
 } from "./config.js";
+import { rethrowPostgresError } from "./metrics-postgres.js";
+import {
+  acquireReadReplica,
+  hasReadReplicaConfiguration,
+  isReadReplicaRoutingEnabled,
+  recordPrimaryRead,
+  resetReadReplicas,
+} from "./postgres-replicas.js";
 import { getActiveDatabaseTenant } from "./postgres-tenant.js";
 
 const { DatabaseError, Pool, Query } = pg;
@@ -46,6 +55,9 @@ export const getPostgresPool = () => {
 
   return postgresPool;
 };
+
+/** The pool if one exists, without creating it (rag/metrics-postgres.js). */
+export const peekPostgresPool = () => postgresPool;
 
 /**
  * A connection of its own, outside the pool, for a session that has to stay
@@ -306,10 +318,28 @@ const tenantSettingsStep = (tenant) => ({
 });
 
 const withPooledClient = async (callback) => {
-  const client = await getPostgresPool().connect();
+  const client = await getPostgresPool().connect().catch(rethrowPostgresError);
   // Set when the connection may still be inside a transaction or a pipeline
   // (a failed ROLLBACK, a pipeline that did not provably end idle): the pool
   // then destroys it instead of handing it to the next caller.
+  const lease = { discard: false };
+
+  try {
+    return await callback(client, lease);
+  } catch (error) {
+    rethrowPostgresError(error);
+  } finally {
+    client.release(
+      lease.discard ? new Error("PostgreSQL connection discarded after an unfinished transaction.") : undefined
+    );
+  }
+};
+
+// The same lease rules on a read replica's pool. A failure there is the
+// router's to judge (the read falls back to the primary), so it is not counted
+// as a statement error.
+const withReplicaClient = async (pool, callback) => {
+  const client = await pool.connect();
   const lease = { discard: false };
 
   try {
@@ -413,13 +443,33 @@ const runInTransaction = async (client, lease, tenant, callback) => {
  * belongs in withPostgresTransaction. A connection that failed without
  * provably ending idle (such a client-side failure, a block left open by the
  * statement, or one it inherited) is discarded, never pooled.
+ *
+ * `readOnly` (true, or { guard: { text, values } }) marks a statement a read
+ * replica may answer (POSTGRES_READ_REPLICA_URLS, rag/postgres-replicas.js).
+ * It is honoured only for an enforced tenant outside withPostgresTransaction;
+ * everything else, and every read the router cannot place or a replica fails,
+ * runs here on the primary exactly as without the mark. On a replica the
+ * tenant settings, the guard (a freshness check that fails while the replica
+ * is behind what the caller expects), the prelude and the statement share one
+ * round trip. Mark only statements that read, and give a guard to any read
+ * that must see a write the caller knows of: without one the read is only as
+ * fresh as POSTGRES_READ_REPLICA_MAX_LAG_MS.
  */
-export const queryPostgres = async (queryText, values = [], { prelude = [] } = {}) => {
+export const queryPostgres = async (queryText, values = [], { prelude = [], readOnly = null } = {}) => {
   const tenant = getEnforcedDatabaseTenant();
+
+  if (readOnly && isReadReplicaRoutingEnabled()) {
+    const replicated = await queryReadReplica({ guard: readOnly.guard ?? null, prelude, queryText, tenant, values });
+
+    if (replicated) {
+      return replicated.result;
+    }
+  }
+
   const steps = [...(tenant ? [tenantSettingsStep(tenant)] : []), ...prelude];
 
   if (steps.length === 0) {
-    return getPostgresPool().query(queryText, values);
+    return getPostgresPool().query(queryText, values).catch(rethrowPostgresError);
   }
 
   return withPooledClient(async (client, lease) => {
@@ -441,6 +491,95 @@ export const queryPostgres = async (queryText, values = [], { prelude = [] } = {
       values,
     });
   });
+};
+
+// Set while a withPostgresTransaction callback runs (with replicas
+// configured), so a read-only statement issued from inside it stays on the
+// primary like the rest of the transaction's work.
+const transactionScope = new AsyncLocalStorage();
+
+// Set for the rest of a request whose document registry refresh failed: the
+// replica freshness guard compares the replica with the versions this
+// process's registry holds, and a registry that missed a replacement or a
+// delete would let a lagging replica pass it. Such a request reads only from
+// the primary.
+const primaryReadScope = new AsyncLocalStorage();
+
+export const runWithPrimaryReads = (callback) => primaryReadScope.run(true, callback);
+
+/**
+ * Whether a statement marked readOnly here and now could go to a replica:
+ * replicas configured, an enforced tenant, no transaction. The pgvector dense
+ * search asks before choosing its one-round-trip form.
+ */
+export const canRouteReadToReplica = () =>
+  isReadReplicaRoutingEnabled() &&
+  Boolean(getEnforcedDatabaseTenant()) &&
+  !transactionScope.getStore() &&
+  !primaryReadScope.getStore();
+
+// The tenant pipeline on a replica: settings, guard (as the tenant), prelude
+// and statement, one Sync. A hot standby runs it unchanged; its row policies
+// are the primary's, replayed.
+const runOnReplica = (pool, { guard, prelude, queryText, tenant, values }) =>
+  withReplicaClient(pool, async (client, lease) => {
+    const reads = [...(guard ? [guard] : []), ...prelude];
+
+    if (!canPipeline(client) || typeof queryText !== "string") {
+      return runInTransaction(client, lease, tenant, async () => {
+        for (const step of reads) {
+          await client.query(step.text, step.values ?? []);
+        }
+
+        return client.query(queryText, values);
+      });
+    }
+
+    return runPipeline(client, {
+      expectedTransactionStatus: TRANSACTION_IDLE,
+      lease,
+      prelude: [tenantSettingsStep(tenant), ...reads],
+      text: queryText,
+      values,
+    });
+  });
+
+// { result } from a replica, or null when the primary must answer: the read
+// is not eligible (no tenant, inside a transaction), no replica is usable, or
+// the replica failed (behind the guard, unreachable, any error). Each case is
+// counted by reason; a replica error never reaches the caller.
+const queryReadReplica = async ({ guard, prelude, queryText, tenant, values }) => {
+  if (!tenant) {
+    recordPrimaryRead("owner");
+    return null;
+  }
+
+  if (transactionScope.getStore()) {
+    recordPrimaryRead("in_transaction");
+    return null;
+  }
+
+  if (primaryReadScope.getStore()) {
+    recordPrimaryRead("registry_unverified");
+    return null;
+  }
+
+  const lease = acquireReadReplica();
+
+  if (!lease.replica) {
+    recordPrimaryRead(lease.reason, { fallback: true });
+    return null;
+  }
+
+  try {
+    const result = await runOnReplica(lease.replica.pool, { guard, prelude, queryText, tenant, values });
+
+    lease.succeeded();
+    return { result };
+  } catch (error) {
+    recordPrimaryRead(lease.failed(error), { fallback: true });
+    return null;
+  }
 };
 
 /**
@@ -467,8 +606,9 @@ export const withPostgresClient = async (callback) => {
  */
 export const withPostgresTransaction = async (callback) => {
   const tenant = getEnforcedDatabaseTenant();
+  const run = () => withPooledClient((client, lease) => runInTransaction(client, lease, tenant, callback));
 
-  return withPooledClient((client, lease) => runInTransaction(client, lease, tenant, callback));
+  return hasReadReplicaConfiguration() ? transactionScope.run(true, run) : run();
 };
 
 export const checkPostgresHealth = async () => {
@@ -496,6 +636,8 @@ export const checkPostgresHealth = async () => {
 };
 
 export const resetPostgresPool = async () => {
+  await resetReadReplicas();
+
   if (!postgresPool) {
     return;
   }

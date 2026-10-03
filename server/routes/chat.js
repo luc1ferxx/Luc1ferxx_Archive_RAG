@@ -3,6 +3,8 @@ import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
 import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
+import { describeAgentRequestFailure } from "../rag/dependency-outage.js";
+import { runAgentRequestWithCancellation } from "../rag/request-deadline.js";
 
 import { parseDocIds, serializeError } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
@@ -19,6 +21,31 @@ const questionSchema = z.object({
  */
 export const validateChatRequest = (req, res) =>
   parseOrRespond(questionSchema, req.method === "GET" ? req.query : req.body, res);
+
+/**
+ * The answer for an agent request that failed: a cancellation (the deadline
+ * passed: 504 AGENT_DEADLINE_EXCEEDED; the client left: 499) or a dependency
+ * outage (503 AGENT_DEPENDENCY_UNAVAILABLE / 504 AGENT_DEPENDENCY_TIMEOUT
+ * with Retry-After) gets its stable code and retryable flag
+ * (rag/dependency-outage.js); any other error keeps { error: message } and
+ * its status. Shared by /chat, /chat/stream and the agent-run action route.
+ */
+export const describeAgentRouteError = (error, fallbackMessage) =>
+  describeAgentRequestFailure(error) ?? {
+    body: { error: serializeError(error, fallbackMessage) },
+    headers: {},
+    status: error?.status ?? 500,
+  };
+
+export const sendAgentRouteError = (res, error, fallbackMessage) => {
+  const { body, headers, status } = describeAgentRouteError(error, fallbackMessage);
+
+  if (res.headersSent || res.destroyed) {
+    return res.end?.();
+  }
+
+  return res.status(status).set(headers).json(body);
+};
 
 export const createChatRouter = (services) => {
   const router = Router();
@@ -72,25 +99,31 @@ export const createChatRouter = (services) => {
       unifiedGraphPlannerAdapter,
     });
 
+  // Each request runs under its deadline (the calling tier's, in a split
+  // deployment, or AGENT_REQUEST_TIMEOUT_MS) and, with
+  // AGENT_CANCEL_ON_DISCONNECT on, is cancelled when its client leaves
+  // (rag/request-deadline.js). Without either it runs exactly as before.
   const handleChatRequest = async (req, res) => {
     const request = parseChatRequest(req, res);
     if (!request) return;
 
     try {
-      const response = await answer(request);
+      const response = await runAgentRequestWithCancellation(req, res, () => answer(request));
 
       return res.status(response.status).json(response.body);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
-        error: serializeError(error, "Failed to answer the question."),
-      });
+      return sendAgentRouteError(res, error, "Failed to answer the question.");
     }
   };
 
   // Server-sent events: one trace_step event per agent step as it is recorded,
   // then a result event carrying exactly the /chat status and body, then done.
-  // A client that disconnects stops receiving events; the run itself finishes,
-  // because cancelling it midway could leave a durable agent run half-written.
+  // A run that ends in a cancellation or a dependency outage sends an error
+  // event with the stable code (and retryable, retryAfterSeconds for an
+  // outage) instead, then done. A client that disconnects stops receiving
+  // events; the run itself finishes unless AGENT_CANCEL_ON_DISCONNECT is on,
+  // in which case it stops at its next safe point and ends canceled -- never
+  // half-written, since every step it started settles first.
   const handleChatStreamRequest = async (req, res) => {
     const request = parseChatRequest(req, res);
     if (!request) return;
@@ -124,17 +157,18 @@ export const createChatRouter = (services) => {
     }, 15000);
 
     try {
-      const response = await runWithAgentEventSink(
-        (event) => send(event.type, event),
-        () => answer(request)
+      const response = await runAgentRequestWithCancellation(req, res, () =>
+        runWithAgentEventSink(
+          (event) => send(event.type, event),
+          () => answer(request)
+        )
       );
 
       send("result", { body: response.body, status: response.status });
     } catch (error) {
-      send("error", {
-        error: serializeError(error, "Failed to answer the question."),
-        status: error.status ?? 500,
-      });
+      const { body, status } = describeAgentRouteError(error, "Failed to answer the question.");
+
+      send("error", { ...body, status });
     } finally {
       clearInterval(heartbeat);
       send("done", {});

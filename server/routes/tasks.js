@@ -2,6 +2,9 @@ import { Router } from "express";
 import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
+import { runAgentRequestWithCancellation } from "../rag/request-deadline.js";
+
+import { sendAgentRouteError } from "./chat.js";
 
 import {
   buildTriggerDispatchRequest,
@@ -268,19 +271,21 @@ export const createTasksRouter = (services) => {
     const { runId, action } = parsed;
 
     try {
-      const result = await agentRunStepExecutor.applyApprovalAction({
-        accessScope: getRequestAccessScope(req),
-        action,
-        gateId: req.body.gateId,
-        payload: req.body,
-        runId,
-      });
+      // An approval may continue the run's graph: it runs under the request's
+      // deadline and disconnect cancellation, as /chat does (routes/chat.js).
+      const result = await runAgentRequestWithCancellation(req, res, () =>
+        agentRunStepExecutor.applyApprovalAction({
+          accessScope: getRequestAccessScope(req),
+          action,
+          gateId: req.body.gateId,
+          payload: req.body,
+          runId,
+        })
+      );
 
       return res.json(result);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
-        error: serializeError(error, "Failed to update agent run."),
-      });
+      return sendAgentRouteError(res, error, "Failed to update agent run.");
     }
   });
 

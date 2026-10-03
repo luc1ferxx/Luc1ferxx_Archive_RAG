@@ -1,6 +1,12 @@
 import { getModelGatewayTimeoutMs } from "../config.js";
 import { getActiveDatabaseTenant } from "../postgres-tenant.js";
 import {
+  getRequestBudgetMs,
+  isRequestCancelledError,
+  REQUEST_CANCELLATION_REASONS,
+  withRequestSignal,
+} from "../request-deadline.js";
+import {
   createServiceClient,
   ServiceTimeoutError,
   ServiceUnavailableError,
@@ -30,6 +36,13 @@ import {
 // MODEL_GATEWAY_TIMEOUT when the budget ran out, 502
 // MODEL_GATEWAY_PROTOCOL_ERROR for an answer that is not the gateway's), never
 // a URL or a body.
+//
+// A call made for a request with a deadline (request-deadline.js: an agent
+// request, or a retrieval-tier operation under its caller's deadline) spends
+// at most what is left of it, so the gateway receives the shrunken deadline in
+// its header and abandons the backend request when it passes; the request's
+// signal aborts the call when the request is cancelled. A call the deadline
+// cut fails as MODEL_GATEWAY_TIMEOUT, whichever timer fired first.
 
 let cachedClient = null;
 
@@ -107,6 +120,14 @@ const findCauseCode = (error) => {
 // raised before anything was sent (a bad scope, keys that are missing), are
 // passed on as they are.
 const toTransportError = (error, signal) => {
+  if (isRequestCancelledError(error) && error.reason === REQUEST_CANCELLATION_REASONS.deadlineExceeded) {
+    return createGatewayError({
+      code: MODEL_GATEWAY_ERROR_CODES.timeout,
+      message: "no answer before the request's deadline.",
+      status: 504,
+    });
+  }
+
   if (error?.modelGateway || (signal?.aborted && error === signal.reason)) {
     return error;
   }
@@ -148,8 +169,26 @@ const toTransportError = (error, signal) => {
   return error;
 };
 
-const post = async ({ body, idempotent, path, signal, timeoutMs }) => {
-  const { client } = getGatewayClient();
+// The call's budget: its own (or the client's default) capped by the bound
+// request's deadline. Without a deadline it is exactly what was asked for.
+const resolveCallBudget = (timeoutMs, clientTimeoutMs) =>
+  getRequestBudgetMs(Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : clientTimeoutMs);
+
+const createDeadlinePassedError = () =>
+  createGatewayError({
+    code: MODEL_GATEWAY_ERROR_CODES.timeout,
+    message: "no time left before the request's deadline.",
+    status: 504,
+  });
+
+const post = async ({ body, idempotent, path, signal: callerSignal, timeoutMs }) => {
+  const { client, timeoutMs: clientTimeoutMs } = getGatewayClient();
+  const budgetMs = resolveCallBudget(timeoutMs, clientTimeoutMs);
+  const signal = withRequestSignal(callerSignal);
+
+  if (budgetMs <= 0) {
+    throw createDeadlinePassedError();
+  }
 
   try {
     return await client.request({
@@ -159,7 +198,7 @@ const post = async ({ body, idempotent, path, signal, timeoutMs }) => {
       method: "POST",
       path,
       signal,
-      ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
+      timeoutMs: budgetMs,
     });
   } catch (error) {
     throw toTransportError(error, signal);
@@ -298,9 +337,15 @@ const readChatStream = async (response, { onAttemptStart, onTextDelta, signal })
   return { ...toResult(extension), finishReason, text };
 };
 
-const streamCompletion = async (body, { onAttemptStart, onTextDelta, signal }) => {
-  const { client, timeoutMs } = getGatewayClient();
+const streamCompletion = async (body, { onAttemptStart, onTextDelta, signal: callerSignal }) => {
+  const { client, timeoutMs: clientTimeoutMs } = getGatewayClient();
+  const timeoutMs = resolveCallBudget(null, clientTimeoutMs);
+  const signal = withRequestSignal(callerSignal);
   let response;
+
+  if (timeoutMs <= 0) {
+    throw createDeadlinePassedError();
+  }
 
   try {
     // The gateway sends its headers with the first token (or its error), so

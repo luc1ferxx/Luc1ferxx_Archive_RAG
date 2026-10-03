@@ -78,6 +78,13 @@ export const runIngestWorkerProcess = async ({
       }),
   });
 
+  // METRICS_ENABLED=true: /metrics on a listener of its own, with the queue's
+  // depth and this worker's stage metrics (rag/metrics-server.js). Started
+  // before the worker, so a metrics port that cannot be bound refuses the
+  // start before any job is claimed.
+  const { startMetricsFromEnv } = await import("./rag/metrics-server.js");
+  const metrics = await startMetricsFromEnv({ env: environment, ingestJobStore: store, logger });
+
   // start() subscribes to enqueues: with PostgreSQL that opens this process's
   // one LISTEN session in the background, so a job is claimed when it is
   // queued rather than at the next poll; stop() closes it before the pool.
@@ -91,6 +98,7 @@ export const runIngestWorkerProcess = async ({
     stopping ??= (async () => {
       logger.log(`[ingest-worker] ${signal}: stopping.`);
       await worker.stop();
+      await metrics?.close();
       await resetPostgresPool();
       exit(0);
     })();
@@ -101,7 +109,7 @@ export const runIngestWorkerProcess = async ({
   signals.once("SIGTERM", () => void shutdown("SIGTERM"));
   signals.once("SIGINT", () => void shutdown("SIGINT"));
 
-  return { shutdown, store, worker };
+  return { metrics, shutdown, store, worker };
 };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

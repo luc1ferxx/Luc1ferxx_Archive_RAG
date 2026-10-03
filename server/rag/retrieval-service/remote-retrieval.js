@@ -1,5 +1,10 @@
 import { getRetrievalServiceTimeoutMs } from "../config.js";
 import { getActiveDatabaseTenant } from "../postgres-tenant.js";
+import {
+  getRequestSignal,
+  isRequestCancelledError,
+  REQUEST_CANCELLATION_REASONS,
+} from "../request-deadline.js";
 import { getActiveRunUsage } from "../run-usage.js";
 import { getServiceClient, getServiceTimeoutMs, ServiceTimeoutError } from "../service-client.js";
 import { isRemoteRetrievalEnabled, SERVICE_TIERS } from "../service-topology.js";
@@ -31,6 +36,12 @@ import { decodeWireValue, encodeWireValue } from "./wire.js";
 // toCallerStatus gives it. None of their messages name a URL, a query or
 // document text. The model calls the tier made for an answer are charged to
 // this process's active agent run (run-usage.js), as they are in process.
+//
+// A call made for a request with a deadline (request-deadline.js) spends at
+// most what is left of it, sends that as the tier's deadline, and is aborted
+// when the request is cancelled: a call the deadline cut is SERVICE_TIMEOUT
+// whichever timer fired first, and a client that left aborts it with its own
+// reason.
 
 export const RETRIEVAL_SERVICE_AUDIENCE = SERVICE_TIERS.retrieval;
 
@@ -214,14 +225,35 @@ const callRetrievalService = async ({ accessScope, body, operation, path, spanAt
         });
       }
 
-      const response = await client.request({
-        accessScope: scope,
-        body: encodeWireValue(body),
-        idempotent: true,
-        method: "POST",
-        path,
-        timeoutMs,
-      });
+      let response;
+
+      try {
+        response = await client.request({
+          accessScope: scope,
+          body: encodeWireValue(body),
+          idempotent: true,
+          method: "POST",
+          path,
+          signal: getRequestSignal() ?? undefined,
+          timeoutMs,
+        });
+      } catch (error) {
+        // The bound request's deadline and the call's budget (capped by that
+        // deadline) end together; whichever timer fired, a call cut by the
+        // deadline fails like one that ran out of budget. A client that left
+        // is the caller's own abort and passes through.
+        if (
+          isRequestCancelledError(error) &&
+          error.reason === REQUEST_CANCELLATION_REASONS.deadlineExceeded
+        ) {
+          throw new ServiceTimeoutError("The retrieval service call ran out of time before its deadline.", {
+            attempts: 1,
+            service: RETRIEVAL_SERVICE_AUDIENCE,
+          });
+        }
+
+        throw error;
+      }
 
       setSpanAttributes(span, { "http.response.status_code": response.status });
 

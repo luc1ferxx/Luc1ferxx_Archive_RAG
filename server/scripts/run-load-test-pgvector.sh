@@ -26,8 +26,22 @@
 # temp work dir, stopped and removed by the same EXIT trap. The load test then gets
 # --shared-state redis --redis-url redis://127.0.0.1:<port>.
 #
+# --read-replica (consumed here, not passed through) also provisions one streaming
+# hot-standby replica of the cluster: the primary runs with wal_level=replica and
+# WAL senders, pg_basebackup -R copies it into a second data dir under the same
+# temp work dir, and the replica starts on its own OS-assigned free port; the same
+# EXIT trap stops it. Both nodes load pg_stat_statements so the report can count
+# statements per node. The load test then gets --read-replica-url, which sets
+# POSTGRES_READ_REPLICA_URLS for the app processes; it needs --tenant (owner
+# statements never go to a replica).
+#
+# --stat-statements (consumed here) loads pg_stat_statements on the primary
+# without a replica and passes --node-statements, so a run without a replica
+# counts the primary's statements per /chat level the same way a
+# --read-replica run does (the baseline of a before/after pair).
+#
 # Usage (from server/):
-#   bash scripts/run-load-test-pgvector.sh [--with-redis] [load-test flags]
+#   bash scripts/run-load-test-pgvector.sh [--with-redis] [--read-replica] [--stat-statements] [load-test flags]
 #
 # Optional overrides (env):
 #   PG_BIN_DIR         directory holding initdb/pg_ctl/createdb/psql (auto-detected otherwise)
@@ -43,10 +57,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 WITH_REDIS=0
+READ_REPLICA=0
+STAT_STATEMENTS=0
 LOAD_TEST_ARGS=()
 for arg in "$@"; do
   if [[ "${arg}" == "--with-redis" ]]; then
     WITH_REDIS=1
+  elif [[ "${arg}" == "--read-replica" ]]; then
+    READ_REPLICA=1
+  elif [[ "${arg}" == "--stat-statements" ]]; then
+    STAT_STATEMENTS=1
   else
     LOAD_TEST_ARGS+=("${arg}")
   fi
@@ -87,9 +107,13 @@ PG_CTL="${PG_BIN_DIR_RESOLVED}/pg_ctl"
 CREATEDB="${PG_BIN_DIR_RESOLVED}/createdb"
 PSQL="${PG_BIN_DIR_RESOLVED}/psql"
 PG_ISREADY="${PG_BIN_DIR_RESOLVED}/pg_isready"
+PG_BASEBACKUP="${PG_BIN_DIR_RESOLVED}/pg_basebackup"
 for tool in "${INITDB}" "${PG_CTL}" "${CREATEDB}" "${PSQL}" "${PG_ISREADY}"; do
   [[ -x "${tool}" ]] || fail "missing executable: ${tool}"
 done
+if [[ "${READ_REPLICA}" -eq 1 ]]; then
+  [[ -x "${PG_BASEBACKUP}" ]] || fail "--read-replica needs pg_basebackup: missing executable ${PG_BASEBACKUP}"
+fi
 
 LOADTEST_DB="${LOADTEST_DB:-archive_loadtest}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/load-test-pg.XXXXXX")"
@@ -97,9 +121,12 @@ DATA_DIR="${WORK_DIR}/data"
 SOCK_DIR="${WORK_DIR}/sock"
 LOG_FILE="${WORK_DIR}/postgres.log"
 PWFILE="${WORK_DIR}/pw.txt"
+REPLICA_DIR="${WORK_DIR}/replica"
+REPLICA_SOCK_DIR="${WORK_DIR}/replica-sock"
 mkdir -p "${SOCK_DIR}"
 
 STARTED_SERVER=0
+STARTED_REPLICA=0
 REDIS_PID=""
 cleanup() {
   local status=$?
@@ -111,6 +138,10 @@ cleanup() {
       sleep 0.1
     done
     kill -9 "${REDIS_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${STARTED_REPLICA}" -eq 1 ]]; then
+    log "stopping ephemeral PostgreSQL replica"
+    "${PG_CTL}" -D "${REPLICA_DIR}" -m immediate stop >/dev/null 2>&1 || true
   fi
   if [[ "${STARTED_SERVER}" -eq 1 ]]; then
     log "stopping ephemeral PostgreSQL"
@@ -134,12 +165,20 @@ printf 'postgres\n' > "${PWFILE}"
   >/dev/null 2>"${LOG_FILE}" || { cat "${LOG_FILE}" >&2; fail "initdb failed"; }
 
 # fsync stays on: the load test measures the production write path. max_connections
-# leaves room for the app pools plus the recovery/health probes.
+# leaves room for the app pools plus the recovery/health probes. With
+# --read-replica the primary also ships WAL to a replica and both nodes count
+# statements.
 # Marked started before pg_ctl returns: a start that times out (-t) leaves the
 # postmaster running, and the trap must stop it before deleting its data dir.
+REPLICATION_OPTIONS=""
+if [[ "${READ_REPLICA}" -eq 1 ]]; then
+  REPLICATION_OPTIONS="-c wal_level=replica -c max_wal_senders=4 -c shared_preload_libraries=pg_stat_statements"
+elif [[ "${STAT_STATEMENTS}" -eq 1 ]]; then
+  REPLICATION_OPTIONS="-c shared_preload_libraries=pg_stat_statements"
+fi
 STARTED_SERVER=1
 "${PG_CTL}" -D "${DATA_DIR}" -l "${LOG_FILE}" -w -t 60 \
-  -o "-p ${PG_PORT} -k ${SOCK_DIR} -c listen_addresses=127.0.0.1 -c max_connections=200" \
+  -o "-p ${PG_PORT} -k ${SOCK_DIR} -c listen_addresses=127.0.0.1 -c max_connections=200 ${REPLICATION_OPTIONS}" \
   start >/dev/null 2>&1 || { cat "${LOG_FILE}" >&2; fail "pg_ctl start failed"; }
 
 export PGPASSWORD=postgres
@@ -154,6 +193,36 @@ done
 "${PSQL}" -h 127.0.0.1 -p "${PG_PORT}" -U postgres -d "${LOADTEST_DB}" \
   -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null
 log "PostgreSQL $("${PSQL}" -h 127.0.0.1 -p "${PG_PORT}" -U postgres -d "${LOADTEST_DB}" -tAc 'SHOW server_version;'), pgvector $("${PSQL}" -h 127.0.0.1 -p "${PG_PORT}" -U postgres -d "${LOADTEST_DB}" -tAc "SELECT extversion FROM pg_extension WHERE extname='vector';")"
+
+if [[ "${STAT_STATEMENTS}" -eq 1 && "${READ_REPLICA}" -eq 0 ]]; then
+  "${PSQL}" -h 127.0.0.1 -p "${PG_PORT}" -U postgres -d "${LOADTEST_DB}" \
+    -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null
+  LOAD_TEST_ARGS+=(--node-statements)
+fi
+if [[ "${READ_REPLICA}" -eq 1 ]]; then
+  "${PSQL}" -h 127.0.0.1 -p "${PG_PORT}" -U postgres -d "${LOADTEST_DB}" \
+    -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null
+  REPLICA_PORT="$(free_port)"
+  [[ -n "${REPLICA_PORT}" && "${REPLICA_PORT}" != "5432" && "${REPLICA_PORT}" != "5434" && "${REPLICA_PORT}" != "${PG_PORT}" ]] \
+    || fail "could not get a free TCP port for the replica"
+  mkdir -p "${REPLICA_SOCK_DIR}"
+  "${PG_BASEBACKUP}" -h 127.0.0.1 -p "${PG_PORT}" -U postgres -D "${REPLICA_DIR}" -R -X stream -c fast \
+    >/dev/null 2>"${WORK_DIR}/basebackup.log" || { cat "${WORK_DIR}/basebackup.log" >&2; fail "pg_basebackup failed"; }
+  chmod 700 "${REPLICA_DIR}"
+  # A hot standby needs max_connections at least the primary's.
+  STARTED_REPLICA=1
+  "${PG_CTL}" -D "${REPLICA_DIR}" -l "${WORK_DIR}/replica.log" -w -t 60 \
+    -o "-p ${REPLICA_PORT} -k ${REPLICA_SOCK_DIR} -c listen_addresses=127.0.0.1 -c hot_standby=on -c max_connections=200 -c shared_preload_libraries=pg_stat_statements" \
+    start >/dev/null 2>&1 || { cat "${WORK_DIR}/replica.log" >&2; fail "replica start failed"; }
+  for _ in $(seq 1 30); do
+    "${PG_ISREADY}" -h 127.0.0.1 -p "${REPLICA_PORT}" -U postgres >/dev/null 2>&1 && break
+    sleep 1
+  done
+  [[ "$("${PSQL}" -h 127.0.0.1 -p "${REPLICA_PORT}" -U postgres -d "${LOADTEST_DB}" -tAc 'SELECT pg_is_in_recovery();' 2>/dev/null || true)" == "t" ]] \
+    || { cat "${WORK_DIR}/replica.log" >&2; fail "the replica is not a hot standby"; }
+  log "ephemeral streaming replica: port=${REPLICA_PORT} data=${REPLICA_DIR}"
+  LOAD_TEST_ARGS+=(--read-replica-url "postgresql://postgres:postgres@127.0.0.1:${REPLICA_PORT}/${LOADTEST_DB}")
+fi
 unset PGPASSWORD
 
 DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${PG_PORT}/${LOADTEST_DB}"

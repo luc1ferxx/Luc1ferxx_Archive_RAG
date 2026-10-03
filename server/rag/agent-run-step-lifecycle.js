@@ -1,8 +1,13 @@
 import { AGENT_RUN_STEP_STATUSES } from "./agent-run-steps.js";
+import { throwIfRequestCancelled } from "./request-deadline.js";
 
 const hasLifecycleTarget = ({ agentRunService, runId } = {}) =>
   Boolean(agentRunService?.recordRunStep && runId);
 
+// Starting a step is the run's safe point: a request whose deadline passed or
+// whose client left (request-deadline.js) starts no further step, so nothing
+// is half-recorded and no completed step repeats. Settling a step that already
+// started is never refused: its outcome is recorded whatever happened since.
 export const createAgentRunStepLifecycle = ({
   accessScope = {},
   agentRunService,
@@ -84,6 +89,8 @@ export const createAgentRunStepLifecycle = ({
     },
 
     startGraphStep({ expectedResumeClaimId = null, id, input, label, type } = {}) {
+      throwIfRequestCancelled();
+
       return recordStep({
         graphResumeClaimId: expectedResumeClaimId,
         input,
@@ -95,6 +102,8 @@ export const createAgentRunStepLifecycle = ({
     },
 
     startStep({ detail, id, input, label, type } = {}) {
+      throwIfRequestCancelled();
+
       return recordStep({
         detail,
         input,

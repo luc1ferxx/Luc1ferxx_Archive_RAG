@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isRequestCancelledError } from "./request-deadline.js";
 import {
   getLlmCircuitCooldownMs,
   getLlmCircuitFailureThreshold,
@@ -55,6 +56,16 @@ const UNAVAILABLE_ERROR_CODES = new Set([
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_HEADERS_TIMEOUT",
 ]);
+
+const isCallerCancellation = (error) => {
+  for (let current = error, depth = 0; current && depth < 5; current = current.cause, depth += 1) {
+    if (isRequestCancelledError(current)) {
+      return true;
+    }
+  }
+
+  return false;
+};
 
 export const isUnavailableError = (error) => {
   const status = Number(error?.status);
@@ -194,6 +205,13 @@ export const createCircuitBreaker = ({
       consecutiveFailures = 0;
       probeInFlight = false;
     },
+    // The caller cancelled the call: no verdict on the endpoint. A half-open
+    // probe gives its turn back so the next request probes instead.
+    abandon: () => {
+      if (state === CIRCUIT_STATES.halfOpen) {
+        probeInFlight = false;
+      }
+    },
     snapshot: () => ({ consecutiveFailures, state }),
   };
 };
@@ -271,6 +289,11 @@ export const createSharedCircuitBreaker = ({
         () => redis.archiveCircuitSuccess(redisKey, SHARED_STATE_TTL_MS),
         () => null
       );
+    },
+    // The shared probe is a lease, so an abandoned probe frees itself when the
+    // lease expires; only the local mirror is released at once.
+    abandon: async () => {
+      local.abandon();
     },
     snapshot: () => ({ ...local.snapshot(), shared: { provider: "redis", ...counter } }),
   };
@@ -491,7 +514,13 @@ export const guardModelCall = async (key, send) => {
       await breaker.recordSuccess();
       return result;
     } catch (error) {
-      if (isUnavailableError(error)) {
+      // A call its own caller cancelled (request deadline passed, client left)
+      // says nothing about the model. Counted as a failure, a few short
+      // deadlines opened the circuit for every tenant of the process; counted
+      // as a success, a cancelled half-open probe closed it unanswered.
+      if (isCallerCancellation(error)) {
+        await breaker.abandon();
+      } else if (isUnavailableError(error)) {
         await breaker.recordFailure();
       } else {
         await breaker.recordSuccess();
@@ -511,6 +540,10 @@ export const getModelCallGuardSnapshot = (key) => {
     ? { breaker: guard.breaker.snapshot(), limiter: guard.limiter.snapshot() }
     : null;
 };
+
+/** [key, snapshot] for every guard this process holds (rag/metrics-model.js). */
+export const listModelCallGuardSnapshots = () =>
+  [...guards.keys()].map((key) => [key, getModelCallGuardSnapshot(key)]);
 
 /**
  * Shared-cap acquire scripts this process ran over every guard, and how many

@@ -19,6 +19,11 @@ import { runUnifiedGraphStage } from "./agent-unified-graph-stage.js";
 import { buildAgentExperienceMemoryObservability } from "./agent-experience-memory.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import {
+  getRequestCancellation,
+  isRequestCancelledError,
+  REQUEST_CANCELLATION_REASONS,
+} from "./request-deadline.js";
+import {
   buildCapabilityApprovalClarification,
   createDefaultCapabilityRegistry,
 } from "./capabilities/index.js";
@@ -1170,6 +1175,29 @@ export const continueUnifiedAgentGraphAfterApproval = async ({
     if (error?.code === "AGENT_GRAPH_EXECUTION_FENCED") {
       // Another worker owns the graph now; never race it.
       throw error;
+    }
+
+    // The approval request was cancelled (request-deadline.js: its deadline
+    // passed or its client left): the graph stopped at a node boundary with
+    // every started node settled, so the run ends terminal with the reason
+    // rather than waiting for an operator. An approved node that had started
+    // ran to completion first (Capabilities that write are never aborted).
+    const cancellation = isRequestCancelledError(error)
+      ? error
+      : getRequestCancellation({ cause: error });
+
+    if (cancellation) {
+      cancellation.agentRunId = runId;
+      await agentRunService.failRun?.({
+        accessScope,
+        error: cancellation,
+        graphResumeClaimId: null,
+        runId,
+        ...(cancellation.reason === REQUEST_CANCELLATION_REASONS.clientCancelled
+          ? { status: "canceled" }
+          : {}),
+      });
+      throw cancellation;
     }
 
     if (error?.code === "AGENT_UNIFIED_GRAPH_PARTIAL") {

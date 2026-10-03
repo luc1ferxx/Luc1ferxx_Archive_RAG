@@ -19,6 +19,8 @@ import {
 import { getModelGatewayCall, recordModelMetricEvent } from "./model-gateway/call-context.js";
 import { requestModelGatewayRerank } from "./model-gateway/client.js";
 import { MODEL_GATEWAY_MIRROR_ANNOTATION } from "./model-gateway/protocol.js";
+import { observeRerank, recordRerankDegradation } from "./metrics-retrieval.js";
+import { withRequestSignal } from "./request-deadline.js";
 import { isModelGatewayEnabled } from "./service-topology.js";
 import {
   buildLlmOpsRouteContext,
@@ -429,8 +431,10 @@ const parseCrossEncoderScores = (payload, expectedCount) => {
  * (the model gateway's, when its caller leaves or its deadline passes) cancels
  * the request and rejects with its reason, which is not a timeout.
  */
-export const requestCrossEncoderScores = async ({ endpoint, model = "", queryText, signal, texts }) => {
+export const requestCrossEncoderScores = async ({ endpoint, model = "", queryText, signal: callerSignal, texts }) => {
   const timeoutMs = getCrossEncoderTimeoutMs();
+  // A cancelled agent request (request-deadline.js) aborts the call too.
+  const signal = withRequestSignal(callerSignal);
   let response;
 
   try {
@@ -758,8 +762,9 @@ const reportedRerankFallbacks = new Set();
 
 export const rerankResultsOrKeepOrder = async ({ queryText = "", results = [], topK } = {}) => {
   try {
-    return await rerankResultsWithProvider({ queryText, results, topK });
+    return await observeRerank(() => rerankResultsWithProvider({ queryText, results, topK }));
   } catch (error) {
+    recordRerankDegradation();
     const message = error?.message ?? String(error);
 
     if (!reportedRerankFallbacks.has(message)) {

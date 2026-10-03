@@ -15,6 +15,8 @@ import {
 } from "./agent-execution-graph.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import { toDependencyOutageError } from "./dependency-outage.js";
+import { throwIfRequestCancelled } from "./request-deadline.js";
 import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
 import { AGENT_SKILL_IDS, buildFailedSkillResult } from "./skills/registry.js";
 import { hasConsistentDocumentRagGraphResult } from "./skills/document-rag-graph-result.js";
@@ -543,6 +545,12 @@ export const runExecutionGraph = async ({
       let preflightRejection = null;
 
       try {
+        // A node boundary is a safe point: a cancelled request
+        // (request-deadline.js) launches nothing more -- no preflight, no
+        // approval gate, no budget, no lifecycle step. The node stays pending
+        // and the cancellation stops the graph like any fatal error.
+        throwIfRequestCancelled();
+
         // An approval-required Capability must be checked at a clean node
         // boundary: no lifecycle step or budget attempt may exist yet. The
         // injected preflight may persist a graph-bound gate and interrupt;
@@ -775,6 +783,24 @@ export const runExecutionGraph = async ({
         nodeRun: buildNodeRun({ ...state, status: settledStatus }),
       });
       state.status = settledStatus;
+
+      // The primary document answer (the unconditional, dependency-free
+      // document_rag node) failed because a dependency is down: the graph
+      // stops and the run answers with the outage (dependency-outage.js)
+      // rather than finalizing around the missing answer. The node itself
+      // settled and checkpointed as failed above.
+      if (
+        !result.ok &&
+        contract.id === AGENT_SKILL_IDS.documentRag &&
+        (node.dependsOn ?? []).length === 0 &&
+        !node.when
+      ) {
+        const outage = toDependencyOutageError(result.error);
+
+        if (outage) {
+          throw outage;
+        }
+      }
     })();
 
     const tracked = task.catch((error) => {

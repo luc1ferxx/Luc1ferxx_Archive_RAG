@@ -1,8 +1,13 @@
 import "dotenv/config";
 
 import { createApp } from "./app.js";
-import { getVectorStoreProviderConfigStatus, isRagIngestWorkerEnabled } from "./rag/config.js";
+import {
+  getVectorStoreProviderConfigStatus,
+  isRagIngestAsync,
+  isRagIngestWorkerEnabled,
+} from "./rag/config.js";
 import { createIngestWorker, resolveApiIngestWorkerPlan } from "./rag/ingest-worker.js";
+import { startMetricsFromEnv } from "./rag/metrics-server.js";
 import {
   DEFAULT_SERVICE_ROLE,
   getServiceRole,
@@ -88,11 +93,21 @@ const startMonolith = async () => {
     : null;
 
   const server = app.listen(PORT, () => {
+    // The port actually bound, so PORT=0 names the one the OS assigned.
+    const port = server.address()?.port ?? PORT;
+
     console.log(
       standaloneProfile
-        ? `server is running on port ${PORT} (standalone: filesystem document registry, no PostgreSQL)`
-        : `server is running on port ${PORT}`
+        ? `server is running on port ${port} (standalone: filesystem document registry, no PostgreSQL)`
+        : `server is running on port ${port}`
     );
+  });
+
+  // METRICS_ENABLED=true: /metrics on its own listener (METRICS_PORT), never
+  // on PORT. This process hosts the ingest queue, so it reports its depth.
+  await startMetricsFromEnv({
+    httpServer: server,
+    ingestJobStore: isRagIngestAsync() ? app.locals.services.ingestJobStore : null,
   });
 
   if (ingestWorker) {

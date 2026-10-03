@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { RequestCancelledError } from "../rag/request-deadline.js";
 import test from "node:test";
 import {
   CIRCUIT_OPEN_CODE,
@@ -166,6 +167,39 @@ test("guarded calls trip the circuit on 503s but not on 429s", async (t) => {
   assert.equal(getModelCallGuardSnapshot(key).limiter.inFlight, 0);
   // Another endpoint or model has its own circuit.
   assert.equal(await guardModelCall("http://model.test|other", async () => "ok"), "ok");
+});
+
+test("a call its caller cancelled neither trips nor closes the circuit", async (t) => {
+  withEnv(t, {
+    RAG_LLM_CIRCUIT_COOLDOWN_MS: "1",
+    RAG_LLM_CIRCUIT_FAILURE_THRESHOLD: "2",
+    RAG_LLM_MAX_CONCURRENCY: "4",
+  });
+  resetModelCallGuards();
+  const key = "http://model.test|cancelled";
+  const pastCooldown = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const deadline = () => Promise.reject(new RequestCancelledError("deadline_exceeded"));
+  const wrapped = () =>
+    Promise.reject(new Error("aborted", { cause: new RequestCancelledError("client_cancelled") }));
+
+  // Deadline cancellations carry status 504, but they are the caller's, not the model's.
+  for (let index = 0; index < 5; index += 1) {
+    await assert.rejects(guardModelCall(key, deadline), RequestCancelledError);
+    await assert.rejects(guardModelCall(key, wrapped), /aborted/);
+  }
+  assert.equal(getModelCallGuardSnapshot(key).breaker.state, CIRCUIT_STATES.closed);
+  assert.equal(getModelCallGuardSnapshot(key).breaker.consecutiveFailures, 0);
+
+  // Open it for real, then cancel the half-open probe: the circuit stays
+  // half-open and the next request gets to probe.
+  await assert.rejects(guardModelCall(key, () => Promise.reject(httpError(503))), /HTTP 503/);
+  await assert.rejects(guardModelCall(key, () => Promise.reject(httpError(503))), /HTTP 503/);
+  assert.equal(getModelCallGuardSnapshot(key).breaker.state, CIRCUIT_STATES.open);
+  await pastCooldown();
+  await assert.rejects(guardModelCall(key, deadline), RequestCancelledError);
+  assert.equal(getModelCallGuardSnapshot(key).breaker.state, CIRCUIT_STATES.halfOpen);
+  assert.equal(await guardModelCall(key, async () => "ok"), "ok");
+  assert.equal(getModelCallGuardSnapshot(key).breaker.state, CIRCUIT_STATES.closed);
 });
 
 test("requests queued behind the ones that trip the circuit are not sent", async (t) => {

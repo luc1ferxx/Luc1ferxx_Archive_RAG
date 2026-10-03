@@ -9,6 +9,7 @@ import {
   buildArxivImportSkillInput,
   buildWorkspaceActionSkillInput,
 } from "./skills/built-ins.js";
+import { toDependencyOutageError } from "./dependency-outage.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 import {
   buildCapabilityArtifactIdempotencyKey,
@@ -285,6 +286,16 @@ export const runResearchBriefSkill = async ({
     userId,
   });
   recordSkillResult(researchResult);
+
+  // Every research question failed on a dependency outage: the run ends with
+  // it (dependency-outage.js) instead of a brief that reads as missing
+  // evidence.
+  const outage = researchResult.ok ? null : toDependencyOutageError(researchResult.error);
+
+  if (outage) {
+    throw outage;
+  }
+
   const researchBrief = researchResult.ok ? researchResult.value : null;
 
   if (!researchResult.ok) {

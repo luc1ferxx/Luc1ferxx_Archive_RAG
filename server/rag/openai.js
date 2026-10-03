@@ -9,6 +9,7 @@ import { MODEL_GATEWAY_MIRROR_ANNOTATION } from "./model-gateway/protocol.js";
 import { isModelGatewayEnabled } from "./service-topology.js";
 import { addActiveSpanEvent } from "./tracing.js";
 import { normalizePromptDescriptor } from "./prompt-registry.js";
+import { withRequestSignal } from "./request-deadline.js";
 import { markModelQueryVector } from "./query-adapter.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import {
@@ -51,9 +52,23 @@ const EMPTY_COMPLETION_CODE = "EMPTY_COMPLETION";
 
 const getRuntimeLlmOpsPolicy = () => getLlmOpsPolicy();
 
-const sleep = (durationMs) =>
+// A backoff ends early when `signal` aborts: a cancelled request does not wait
+// out a retry it will never send (withRetry checks the signal next).
+const sleep = (durationMs, signal) =>
   new Promise((resolve) => {
-    setTimeout(resolve, durationMs);
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, durationMs);
+
+    signal?.addEventListener?.("abort", done, { once: true });
   });
 
 // An open circuit is not retried on the same model -- that is the point of it --
@@ -151,7 +166,7 @@ const withRetry = async (operation, failureMessage, { signal } = {}) => {
         "retry.attempt": attempt + 1,
         "retry.delay_ms": Math.round(delayMs),
       });
-      await sleep(delayMs);
+      await sleep(delayMs, signal);
     }
   }
 
@@ -507,6 +522,9 @@ const callCustomEmbedding = (method, input, embeddingSpace) =>
 export const embedTexts = async (texts, options = {}) => {
   const safeTexts = Array.isArray(texts) ? texts : [];
   const embeddingSpace = normalizeEmbeddingSpace(options?.embeddingSpace);
+  // The caller's signal plus the bound request's (request-deadline.js), so a
+  // cancelled agent request aborts its in-flight embedding call.
+  const signal = withRequestSignal(options?.signal);
 
   if (customProvider?.embedTexts) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
@@ -540,7 +558,7 @@ export const embedTexts = async (texts, options = {}) => {
       inputCharacters: getTextListCharacters(safeTexts),
       itemCount: safeTexts.length,
       modelName: resolveEmbeddingModelName(embeddingSpace),
-      signal: options?.signal,
+      signal,
       stage: "embed_documents",
     }).then(({ vectors }) => vectors);
   }
@@ -555,10 +573,10 @@ export const embedTexts = async (texts, options = {}) => {
       withRetry(
         async () =>
           instance.embedDocuments(withEmbeddingPrefix(texts, documentPrefix), {
-            signal: options?.signal,
+            signal,
           }),
         "Embedding request failed.",
-        { signal: options?.signal }
+        { signal }
       ),
     metric: getEmbeddingMetricBase({
       ...buildUsageMetricFields({
@@ -632,7 +650,11 @@ const describeQuerySpace = (embeddingSpace, modelName, vector) => ({
 
 export const embedQuery = async (query, options = {}) => {
   const embeddingSpace = normalizeEmbeddingSpace(options?.embeddingSpace);
-  const { modelName, vector } = await embedQueryWithModel(query, embeddingSpace, options?.signal);
+  const { modelName, vector } = await embedQueryWithModel(
+    query,
+    embeddingSpace,
+    withRequestSignal(options?.signal)
+  );
 
   return servesQueryEmbeddingsFromStandIn()
     ? vector
@@ -725,6 +747,9 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
   const responseFormat = isStructuredOutputEnabled()
     ? options.responseFormat ?? null
     : null;
+  // The caller's signal plus the bound request's (request-deadline.js): a
+  // cancelled agent request aborts the call and stops its retries and failover.
+  const signal = withRequestSignal(options.signal);
 
   if (customProvider?.completeText) {
     const modelRoute = buildCustomProviderRoute(capability);
@@ -735,6 +760,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         return customProvider.completeText(inputText, {
           onTextDelta: options.onTextDelta,
           responseFormat,
+          ...(signal ? { signal } : {}),
         });
       },
       metric: {
@@ -772,14 +798,13 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
     return completeThroughModelGateway({
       capability,
       inputText,
-      options,
+      options: { ...options, signal },
       prompt,
       promptTemplate,
       responseFormat,
     });
   }
 
-  const { signal } = options;
   const primary = getChatModelInstance(options);
   // An empty completion is retried once, then returned as it always was: callers
   // already treat empty text as "no answer". A length-truncated one is not

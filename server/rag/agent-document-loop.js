@@ -15,6 +15,7 @@ import {
   buildGapAnalysisSummary,
   buildSelfCheckSummary,
 } from "./agent-trace.js";
+import { toDependencyOutageError } from "./dependency-outage.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 import {
   SKILL_EFFECTS,
@@ -180,6 +181,16 @@ export const runDocumentRagLoop = async ({
         id: DOCUMENT_RAG_PRIMARY_STEP_ID,
         output: buildRagStepOutput(primaryRagResult),
       });
+
+      // No answer because a dependency is down (retrieval, the model, the
+      // database): the run ends with the outage (dependency-outage.js). Going
+      // on would hand the question to the Web stage, which asks the user to
+      // approve a Web search as if the documents lacked the evidence.
+      const outage = toDependencyOutageError(primaryRagResult.error);
+
+      if (outage) {
+        throw outage;
+      }
     }
   } else {
     primaryRagResult = buildFailedSkillResult(

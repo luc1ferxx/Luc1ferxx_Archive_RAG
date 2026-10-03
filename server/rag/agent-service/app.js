@@ -11,8 +11,13 @@ import { createAdminActionHandler } from "../../routes/admin.js";
 import { createChatRouter } from "../../routes/chat.js";
 import { createSystemRouter } from "../../routes/system.js";
 import { createTasksRouter } from "../../routes/tasks.js";
+import { bindServiceCallDeadline } from "../retrieval-service/call-deadline.js";
 import { bindServiceTraceContext } from "../service-client.js";
-import { requireServiceIdentity } from "../service-identity.js";
+import {
+  handleServiceRequestBodyError,
+  requireServiceIdentity,
+  verifyServiceRequestBody,
+} from "../service-identity.js";
 import { SERVICE_TIERS } from "../service-topology.js";
 
 import {
@@ -38,6 +43,13 @@ import {
 // runs and tasks, and every task the job orchestrator schedules. Retrieval and
 // model calls go to RETRIEVAL_SERVICE_URL and MODEL_GATEWAY_URL when set, and
 // run in process otherwise.
+//
+// Every request runs under the deadline the edge sent (bindServiceCallDeadline,
+// rag/request-deadline.js): a call this tier makes on its behalf spends at
+// most what is left, so nothing outlives the edge's AGENT_SERVICE_TIMEOUT_MS.
+// The agent routes (/chat, /chat/stream, agent-run actions) also stop the run
+// itself when that deadline passes (routes/chat.js). Tasks the job
+// orchestrator schedules never inherit it.
 
 /**
  * Runs the forwarded admin action only when the edge's signed claim grants
@@ -120,9 +132,12 @@ export const createAgentApp = async (options = {}) => {
   // parsed, which can come out longer (1e9 becomes 1000000000), so the limit
   // here only guards against a runaway caller that already holds a key.
   app.use(requireServiceIdentity(identityOptions));
-  app.use(express.json({ limit: "8mb" }));
+  // The parser also checks the body against the token's request binding.
+  app.use(express.json({ limit: "8mb", verify: verifyServiceRequestBody }));
+  app.use(handleServiceRequestBodyError);
   app.use(bindDatabaseTenant);
   app.use(bindServiceTraceContext);
+  app.use(bindServiceCallDeadline);
 
   app.post(
     "/admin/actions/:action",

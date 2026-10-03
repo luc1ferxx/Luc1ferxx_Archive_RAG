@@ -10,6 +10,7 @@ import { completeText } from "./rag/openai.js";
 import { definePrompt, PROMPT_IDS } from "./rag/prompt-registry.js";
 import { guardAnswerLinks, screenUntrustedText } from "./rag/prompt-injection-screen.js";
 import { getPromptVersion } from "./rag/config.js";
+import { getRequestCallOptions, getRequestSignal } from "./rag/request-deadline.js";
 import { isModelGatewayEnabled } from "./rag/service-topology.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,6 +21,9 @@ let transport = null;
 let isConnecting = false;
 let connectionPromise = null;
 const RETRY_DELAYS_MS = [250, 750];
+// The MCP SDK's own default per request; a bound agent request's deadline
+// (request-deadline.js) caps it, and its signal aborts the search.
+const SEARCH_TOOL_TIMEOUT_MS = 60_000;
 
 const sleep = (durationMs) =>
   new Promise((resolve) => {
@@ -87,7 +91,7 @@ const withRetry = async (operation) => {
     } catch (error) {
       lastError = error;
 
-      if (attempt === RETRY_DELAYS_MS.length) {
+      if (attempt === RETRY_DELAYS_MS.length || getRequestSignal()?.aborted) {
         break;
       }
 
@@ -172,13 +176,17 @@ const chatMCP = async (query) => {
     await ensureConnected();
 
     const toolResult = await withRetry(() =>
-      client.callTool({
-        name: "search_web",
-        arguments: {
-          query,
-          num: 5,
+      client.callTool(
+        {
+          name: "search_web",
+          arguments: {
+            query,
+            num: 5,
+          },
         },
-      })
+        undefined,
+        getRequestCallOptions(SEARCH_TOOL_TIMEOUT_MS)
+      )
     );
 
     const searchResults =

@@ -2,15 +2,18 @@
 // and the agent tier (ARCHIVE_RAG_ROLE=agent) of a split deployment agree on.
 // Constants only, so health.js can read them without loading either app.
 
+import { SERVICE_CALL_POLICY } from "../service-identity.js";
+
 // Answered by the agent tier to any valid internal token for its audience,
 // system tokens included. The edge's health check probes every agent replica
-// here, which proves reachability and that both sides share a signing key.
+// here, which proves reachability and that the agent accepts the edge's key.
 export const AGENT_SERVICE_PING_PATH = "/internal/ping";
 
 // The roles whose tokens the agent tier accepts: the public edge, and a
 // monolith that forwards agent work to AGENT_SERVICE_URL. A retrieval or
-// model-gateway process holds the same keys but never speaks for a user here.
-export const AGENT_SERVICE_CALLER_ROLES = Object.freeze(["api", "all"]);
+// model-gateway process never speaks for a user here. Declared once, in
+// service-identity.js SERVICE_CALL_POLICY.
+export const AGENT_SERVICE_CALLER_ROLES = SERVICE_CALL_POLICY.agent.callers;
 
 // Claim on a forwarded POST /admin/actions/:action naming the permission the
 // edge already granted (and audited) for that action. The agent tier runs the

@@ -852,6 +852,44 @@ export const createInMemoryAgentRunStore = ({
   };
 };
 
+// Why a run ended, for an error that says so (request-deadline.js
+// cancellations, dependency-outage.js outages): its stable code, reason and
+// retryable flag, plus the dependency kind and cause code of an outage. Other
+// errors keep the plain { message, name } shape.
+const RUN_FAILURE_FIELDS = ["causeCode", "code", "dependency", "reason"];
+
+const pickRunFailure = (runFailure) => {
+  if (!runFailure || typeof runFailure !== "object") {
+    return {};
+  }
+
+  const picked = {};
+
+  for (const field of RUN_FAILURE_FIELDS) {
+    const value = normalizeText(runFailure[field]);
+
+    if (value) {
+      picked[field] = value;
+    }
+  }
+
+  if (typeof runFailure.retryable === "boolean") {
+    picked.retryable = runFailure.retryable;
+  }
+
+  return picked;
+};
+
+// A completed Capability call wrote outside the run, and its idempotency is
+// the adapter's (agent-run-step-replay-safety.js). A run that ends after one
+// is not retryable: a client that retries it would repeat the write. (An arXiv
+// import is deduplicated by the importer, so it does not count.)
+const hasCommittedCapabilityWrite = (steps = []) =>
+  (Array.isArray(steps) ? steps : []).some(
+    (step) =>
+      step?.type === "capability_call" && step?.status === AGENT_RUN_STEP_STATUSES.completed
+  );
+
 const buildRunError = (error) => {
   if (!error) {
     return null;
@@ -860,6 +898,7 @@ const buildRunError = (error) => {
   return {
     message: error instanceof Error ? error.message : normalizeText(error),
     name: error instanceof Error ? error.name : "Error",
+    ...pickRunFailure(error?.runFailure),
   };
 };
 
@@ -2404,14 +2443,21 @@ export const createAgentRunService = ({
     );
   },
 
+  // `status` is failed (the default) or canceled: a run whose client went away
+  // ends canceled through this same fenced write (agent.js).
   async failRun({
     accessScope = {},
     error,
     graphResumeClaimId = null,
     runCursor = null,
     runId,
+    status = AGENT_RUN_STATUSES.failed,
   } = {}) {
-    const runError = buildRunError(error);
+    const builtRunError = buildRunError(error);
+    const terminalStatus =
+      status === AGENT_RUN_STATUSES.canceled
+        ? AGENT_RUN_STATUSES.canceled
+        : AGENT_RUN_STATUSES.failed;
     const mutation = await mutateStoredRun({
       accessScope,
       includeGraphCheckpoint: true,
@@ -2423,6 +2469,10 @@ export const createAgentRunService = ({
           expectedResumeClaimId: graphResumeClaimId,
           run: existingRun,
         });
+        const runError =
+          builtRunError?.retryable === true && hasCommittedCapabilityWrite(existingRun.steps)
+            ? { ...builtRunError, retryable: false }
+            : builtRunError;
 
         // A graph node may already have entered an external Skill call. A
         // second request must not turn the shared run terminal while its
@@ -2433,21 +2483,31 @@ export const createAgentRunService = ({
 
         if (activeStep) {
           throw createActiveRunStepCompletionConflictError({
-            status: AGENT_RUN_STATUSES.failed,
+            status: terminalStatus,
             step: activeStep,
           });
         }
 
         return {
-          event: {
-            type: "run_failed",
-            payload: {
-              error: runError,
-            },
-          },
+          event:
+            terminalStatus === AGENT_RUN_STATUSES.canceled
+              ? {
+                  type: "run_canceled",
+                  payload: {
+                    error: runError,
+                    reason: runError?.reason ?? "",
+                    status: terminalStatus,
+                  },
+                }
+              : {
+                  type: "run_failed",
+                  payload: {
+                    error: runError,
+                  },
+                },
           patch: {
             error: runError,
-            status: AGENT_RUN_STATUSES.failed,
+            status: terminalStatus,
           },
         };
       },

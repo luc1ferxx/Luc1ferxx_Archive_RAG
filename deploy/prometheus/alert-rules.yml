@@ -1,0 +1,189 @@
+# Alert rules for Archive RAG. Load next to recording-rules.yml (see
+# prometheus.example.yml). Every metric is exposed by server/rag/metrics-*.js
+# on each process's /metrics when METRICS_ENABLED=true; `job`, `role` and
+# `instance` are target labels from the scrape configuration.
+#
+# /chat objectives (30-day window), alerted with multiple windows and burn
+# rates (fast: 14.4x the budget rate over 1h and 5m; slow: 6x over 6h and
+# 30m), so a short spike pages only while it lasts and a slow leak still
+# opens a ticket:
+#   availability  99.5% of valid /chat requests answer without a 5xx
+#                 (error budget 0.5%)
+#   latency       95% of valid /chat requests answer within 20 s
+#                 (budget 5%)
+# At 14.4x a 30-day budget is gone in about 2 days; at 6x in 5 days.
+#
+# Severity: critical pages someone now; warning goes to the ticket queue.
+
+groups:
+  - name: archive-rag-chat-slo-alerts
+    rules:
+      - alert: ArchiveRagChatAvailabilityFastBurn
+        expr: |
+          (1 - archive_rag:chat_availability_sli:ratio_rate1h) > (14.4 * 0.005)
+          and
+          (1 - archive_rag:chat_availability_sli:ratio_rate5m) > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: critical
+          slo: chat-availability
+        annotations:
+          summary: "/chat is failing fast enough to spend its 99.5% availability budget in about 2 days"
+          description: "More than 7.2% of valid /chat requests answered 5xx over both the last hour and the last 5 minutes (role all or api)."
+          runbook: |
+            What it means: the public edge answers /chat with 5xx at 14.4x the rate the 99.5% objective allows. 429s and requests the client abandoned are not counted. Users are getting errors now.
+            First three checks:
+            1. Where and why: sum by (role, instance) (rate(archive_rag_http_requests_total{route="/chat",status_class="5xx"}[5m])) and sum by (reason) (rate(archive_rag_agent_runs_total{outcome="failed"}[5m])). A split deployment that answers 503/504 at the edge while the agent tier is down shows no failed runs: check sum by (tier, code) (rate(archive_rag_service_client_calls_total[5m])).
+            2. Dependencies: sum by (model, status) (rate(archive_rag_model_calls_total{metering!="mirror"}[5m])), archive_rag_model_circuits{state="open"}, sum by (sqlstate_class) (rate(archive_rag_postgres_statement_errors_total[5m])) and archive_rag_postgres_pool_clients{state="waiting"}.
+            3. Health of each process: curl -s http://<host>:<PORT>/health (every checks.* entry and its message) and /ready; in a split deployment also the agent, retrieval and model-gateway tiers.
+            Commands: grep the process logs for "[service]" and "Failed to"; cd server && npm run eval:llm-resilience reproduces model failure modes (429, 503, hangs, a down primary) against a local fake model.
+      - alert: ArchiveRagChatAvailabilitySlowBurn
+        expr: |
+          (1 - archive_rag:chat_availability_sli:ratio_rate6h) > (6 * 0.005)
+          and
+          (1 - archive_rag:chat_availability_sli:ratio_rate30m) > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: warning
+          slo: chat-availability
+        annotations:
+          summary: "/chat 5xx rate would spend the 99.5% availability budget in about 5 days"
+          description: "More than 3% of valid /chat requests answered 5xx over both the last 6 hours and the last 30 minutes (role all or api)."
+          runbook: |
+            What it means: a steady error rate, too low to page, that still exhausts the month's availability budget within a week if it continues.
+            First three checks:
+            1. Which reasons dominate: sum by (outcome, reason) (increase(archive_rag_agent_runs_total[6h])) and sum by (role, instance) (increase(archive_rag_http_requests_total{route="/chat",status_class="5xx"}[6h])); one instance alone points at that host.
+            2. Recurring dependency errors: sum by (model, operation, status) (increase(archive_rag_model_calls_total{metering!="mirror"}[6h])), sum by (route, outcome) (increase(archive_rag_retrieval_route_duration_seconds_count[6h])), sum by (tier, code) (increase(archive_rag_service_client_calls_total[6h])).
+            3. Recent changes: a deploy, a model or prompt change, an index version switch (cd server && npm run vector:index -- status).
+            Commands: curl -s http://<host>:<PORT>/health; cd server && npm run observability:report summarizes recorded RAG and agent traces when RAG_OBSERVABILITY_ENABLED=true.
+      - alert: ArchiveRagChatLatencyFastBurn
+        expr: |
+          (1 - archive_rag:chat_latency_sli:ratio_rate1h) > (14.4 * 0.05)
+          and
+          (1 - archive_rag:chat_latency_sli:ratio_rate5m) > (14.4 * 0.05)
+        for: 2m
+        labels:
+          severity: critical
+          slo: chat-latency
+        annotations:
+          summary: "/chat is slow enough to spend its 95%-within-20s latency budget in about 2 days"
+          description: "More than 72% of valid /chat requests took longer than 20 s over both the last hour and the last 5 minutes (role all or api)."
+          runbook: |
+            What it means: most /chat answers now take more than 20 s. Usually the model is slow or queued; sometimes retrieval or the database is.
+            First three checks:
+            1. Model time and queueing: histogram_quantile(0.95, sum by (le, model) (rate(archive_rag_model_call_duration_seconds_bucket{metering!="mirror"}[5m]))) and archive_rag_model_guard_waiting (requests queued behind RAG_LLM_MAX_CONCURRENCY).
+            2. Retrieval and database: histogram_quantile(0.95, sum by (le, route) (rate(archive_rag_retrieval_route_duration_seconds_bucket[5m]))), archive_rag_postgres_pool_clients{state="waiting"}, nodejs_eventloop_delay_p99_seconds.
+            3. Load: sum by (role, instance) (archive_rag_http_requests_in_flight) and rate(archive_rag_agent_steps_total[5m]) by type (a follow-up retrieval loop multiplies model calls).
+            Commands: cd server && npm run eval:load-test reproduces /chat latency under concurrency against a fake model; RAG_LLM_MAX_CONCURRENCY and RAG_LLM_REQUEST_TIMEOUT_MS bound model queueing.
+      - alert: ArchiveRagChatLatencySlowBurn
+        expr: |
+          (1 - archive_rag:chat_latency_sli:ratio_rate6h) > (6 * 0.05)
+          and
+          (1 - archive_rag:chat_latency_sli:ratio_rate30m) > (6 * 0.05)
+        for: 15m
+        labels:
+          severity: warning
+          slo: chat-latency
+        annotations:
+          summary: "/chat latency would spend the 95%-within-20s budget in about 5 days"
+          description: "More than 30% of valid /chat requests took longer than 20 s over both the last 6 hours and the last 30 minutes (role all or api)."
+          runbook: |
+            What it means: a sustained share of slow answers, not an outage. Typical causes are a slower model, larger documents (more chunks per question), or rerank and follow-up retrieval on more questions.
+            First three checks:
+            1. Which stage grew: histogram_quantile(0.95, sum by (le, operation) (rate(archive_rag_model_call_duration_seconds_bucket{metering!="mirror"}[6h]))) against the same query a week earlier (offset 7d).
+            2. Retrieval candidates and latency: histogram_quantile(0.95, sum by (le, route) (rate(archive_rag_retrieval_route_duration_seconds_bucket[6h]))) and the candidate histogram archive_rag_retrieval_route_candidates.
+            3. Agent loop size: sum by (type) (increase(archive_rag_agent_steps_total[6h])) per run (divide by increase(archive_rag_agent_runs_total[6h])).
+            Commands: cd server && npm run eval:load-test; cd server && npm run bench:pgvector-scale for the database search alone.
+  - name: archive-rag-operations
+    rules:
+      - alert: ArchiveRagIngestDeadLetters
+        expr: |
+          max(archive_rag_ingest_dead_letter_jobs{job="archive-rag"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} ingest job(s) wait in dead_letter"
+          description: "An ingest stage ran out of attempts; the documents are not indexed until an operator requeues them."
+          runbook: |
+            What it means: with RAG_INGEST_MODE=async a job whose stage (parse, chunk, embed, index) exhausted RAG_INGEST_<STAGE>_MAX_ATTEMPTS moved to dead_letter, keeping its bytes and stage outputs. The uploader sees the job as failed.
+            First three checks:
+            1. Which jobs and why: cd server && npm run ingest:jobs -- dead-letter list --all (stage, message-free reason, attempts).
+            2. Which stage keeps failing: sum by (stage, result) (increase(archive_rag_ingest_stage_failures_total[1h])). embed points at the embedding model (archive_rag_model_calls_total{operation="embedding",status="error"}), parse at the PDF or docling-serve (DOCLING_SERVE_URL), index at PostgreSQL (archive_rag_postgres_statement_errors_total).
+            3. Queue health: curl -s http://<api-host>:<PORT>/health and read checks.ingestJobs; archive_rag_ingest_jobs by status.
+            Commands: once the cause is fixed, cd server && npm run ingest:jobs -- dead-letter requeue <jobId> --all (it resumes at the stage it died in), or POST /admin/ingest-jobs/<jobId>/requeue for one tenant.
+      - alert: ArchiveRagModelCircuitOpen
+        # Not closed (open, or half_open while its one probe is in flight) and
+        # model calls failing on the same process. half_open counts because a
+        # hanging model keeps its probe in flight for RAG_LLM_REQUEST_TIMEOUT_MS
+        # (120 s by default) after every 30 s open phase, which would reset an
+        # alert on open alone. The failing-calls condition is there because a
+        # guard keeps its last state until its next call: a circuit nobody calls
+        # any more (a fallback model after the incident) reports open forever.
+        expr: |
+          max by (job, role, instance, model) (archive_rag_model_circuits{job="archive-rag",state=~"open|half_open"}) > 0
+          and on (job, role, instance)
+          sum by (job, role, instance) (rate(archive_rag_model_calls_total{job="archive-rag",status="error"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model {{ $labels.model }} has had an open circuit on {{ $labels.instance }} ({{ $labels.role }}) for 5 minutes"
+          description: "The circuit has not closed for 5 minutes while model calls on this process keep failing: calls to this model fail fast with CIRCUIT_OPEN (503) or fail over to OPENAI_CHAT_FALLBACK_MODEL."
+          runbook: |
+            What it means: RAG_LLM_CIRCUIT_FAILURE_THRESHOLD consecutive unavailable errors (5xx, 408, timeouts, refused connections; never 429) opened the model-call guard. After RAG_LLM_CIRCUIT_COOLDOWN_MS one probe is let through (half_open while it is in flight); the circuit stays open while probes keep failing. A guard that has had no call since it opened is still reported open, so the alert also requires failing model calls on the process: it resolves once nothing calls that model.
+            First three checks:
+            1. Is the model endpoint up: curl -s <OPENAI_BASE_URL>/models from the same host, or GET /health on the model gateway (guard state per upstream replica).
+            2. What the calls see: sum by (model, operation, status) (rate(archive_rag_model_calls_total[5m])) and the latency histogram archive_rag_model_call_duration_seconds; hanging requests end at RAG_LLM_REQUEST_TIMEOUT_MS.
+            3. Fallback and sharing: is OPENAI_CHAT_FALLBACK_MODEL set and answering (model="openai.chat.fallback"); with RAG_SHARED_STATE=redis every instance shares the circuit, otherwise each opens its own.
+            Commands: cd server && npm run eval:llm-resilience exercises the breaker against a local fake model.
+      - alert: ArchiveRagPostgresReplicaLagHigh
+        expr: |
+          max by (job, role, instance, replica) (archive_rag_postgres_replica_lag_seconds{job="archive-rag"})
+            > on (job, role, instance) group_left()
+          (archive_rag_postgres_replica_max_lag_seconds{job="archive-rag"} > 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Read replica {{ $labels.replica }} lags more than its configured maximum ({{ $labels.instance }})"
+          description: "Reads that would go to this replica fall back to the primary, adding load there."
+          runbook: |
+            What it means: the replica's replay lag exceeds the maximum the replica router accepts, so the router sends those reads to the primary (archive_rag_postgres_replica_fallbacks_total). Answers stay correct; the primary carries the read load.
+            First three checks:
+            1. On the primary: psql "$POSTGRES_DATABASE_URL" -c "SELECT application_name, state, write_lag, replay_lag FROM pg_stat_replication".
+            2. On the replica: SELECT now() - pg_last_xact_replay_timestamp(); a long-running query on the replica can hold replay back (max_standby_streaming_delay).
+            3. Primary load from the fallbacks: sum by (reason) (rate(archive_rag_postgres_replica_fallbacks_total[5m])) and archive_rag_postgres_pool_clients{state="waiting"}.
+            Commands: bulk writes (cd server && npm run vector:reindex -- --apply, npm run vector:index -- build) are the usual cause of a lag burst; let them finish or pause them.
+      - alert: ArchiveRagMetricsTargetDown
+        expr: |
+          up{job="archive-rag"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.instance }} ({{ $labels.role }})"
+          description: "No metrics, and so no SLO or operational alert, from this process for 2 minutes."
+          runbook: |
+            What it means: the scrape failed: the process is down, it runs without METRICS_ENABLED=true, its listener binds a loopback METRICS_HOST while Prometheus scrapes from another host or container, the port differs from METRICS_PORT, or METRICS_TOKEN does not match (401).
+            First three checks:
+            1. Is the process up: curl -s http://<host>:<PORT>/livez (the app port, not the metrics port).
+            2. Did the listener start: the start-up log has "[metrics] serving /metrics on http://HOST:PORT"; curl -s -H "Authorization: Bearer $METRICS_TOKEN" http://<host>:<METRICS_PORT>/metrics | head.
+            3. The target's last error on Prometheus's /targets page: 401 means the token, a refused connection means METRICS_HOST (use 0.0.0.0 in a container) or METRICS_PORT.
+            Commands: the scrape configuration is deploy/prometheus/prometheus.example.yml; every process needs its own METRICS_PORT when several share one host.
+      - alert: ArchiveRagGatewayQuotaRejectionsSpike
+        expr: |
+          sum by (job, quota) (rate(archive_rag_model_gateway_quota_rejections_total{job="archive-rag"}[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The model gateway is refusing more than 6 requests a minute on the {{ $labels.quota }} quota"
+          description: "A workspace has used up a model quota; its model calls get 429 MODEL_GATEWAY_QUOTA_EXCEEDED until the window resets."
+          runbook: |
+            What it means: per-workspace quotas (MODEL_GATEWAY_QUOTA_REQUESTS_PER_MINUTE, MODEL_GATEWAY_QUOTA_TOKENS_PER_MINUTE, MODEL_GATEWAY_QUOTA_DAILY_TOKENS) are refusing calls. Agent runs of that workspace degrade or fail; other workspaces are unaffected. System calls are never limited.
+            First three checks:
+            1. Which quota: sum by (quota) (rate(archive_rag_model_gateway_quota_rejections_total[10m])).
+            2. Which workspace: GET /usage on the model gateway (system identity, an admin claim, or admin.status.read) lists per-tenant totals and rejections since start.
+            3. Whether the quota is per process: without RAG_SHARED_STATE=redis each gateway replica counts its own window, so the effective limit is the configured one times the number of replicas.
+            Commands: raise the quota in the gateway's environment and restart it, or find the caller driving the volume (a background task loop: cd server && npm run eval:trajectory checks budget behaviour).

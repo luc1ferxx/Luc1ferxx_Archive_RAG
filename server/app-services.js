@@ -28,6 +28,7 @@ import {
 } from "./evaluation/quality-report.js";
 import { listFeedback, recordFeedback } from "./feedback.js";
 import { buildHealthReport, runStartupHealthChecks } from "./health.js";
+import { runWithPrimaryReads } from "./rag/postgres.js";
 import { createArxivEnrichmentService } from "./rag/arxiv-enrichment.js";
 import { createArxivService } from "./rag/arxiv-client.js";
 import { createArxivImportService } from "./rag/arxiv-importer.js";
@@ -229,7 +230,7 @@ export const buildChatResponse = async ({
   // another instance's upload and do not offer a document it deleted. A miss
   // left after that (a document outside the tenant's listing) is read by id.
   // Neither reads anything with a single-writer registry (ingest-worker.js).
-  await refreshDocumentsIngestedElsewhere(ragService, accessScope);
+  const registryCurrent = await refreshDocumentsIngestedElsewhere(ragService, accessScope);
   let missingDocIds = findMissingDocIds();
 
   if (missingDocIds.length > 0) {
@@ -247,28 +248,34 @@ export const buildChatResponse = async ({
     throw error;
   }
 
-  return runAgentRag({
-    agentBudget,
-    agentRunService,
-    arxivImportService,
-    capabilityRegistry,
-    ragService,
-    webChatService,
-    question,
-    docIds,
-    sessionId,
-    userId,
-    accessScope,
-    agentRunId,
-    capabilityApprovals,
-    taskMemory,
-    executionPlannerAdapter,
-    intentPlannerAdapter,
-    dagPlannerAdapter: requestDagPlannerAdapter,
-    replanAdapter: requestReplanAdapter,
-    skillRegistry,
-    unifiedGraphPlannerAdapter,
-  });
+  const run = () =>
+    runAgentRag({
+      agentBudget,
+      agentRunService,
+      arxivImportService,
+      capabilityRegistry,
+      ragService,
+      webChatService,
+      question,
+      docIds,
+      sessionId,
+      userId,
+      accessScope,
+      agentRunId,
+      capabilityApprovals,
+      taskMemory,
+      executionPlannerAdapter,
+      intentPlannerAdapter,
+      dagPlannerAdapter: requestDagPlannerAdapter,
+      replanAdapter: requestReplanAdapter,
+      skillRegistry,
+      unifiedGraphPlannerAdapter,
+    });
+
+  // A registry that missed another process's replacement or delete would let
+  // a lagging read replica pass the freshness guard, so this run reads from
+  // the primary only (rag/postgres.js runWithPrimaryReads).
+  return registryCurrent ? run() : runWithPrimaryReads(run);
 };
 
 export const createAppServices = (options = {}, { uploadsDirectory }) => {

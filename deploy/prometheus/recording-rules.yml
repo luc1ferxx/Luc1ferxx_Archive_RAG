@@ -1,0 +1,97 @@
+# Recording rules for the /chat service level indicators of Archive RAG.
+#
+# Source: archive_rag_http_requests_total and
+# archive_rag_http_request_duration_seconds, exposed on each process's
+# /metrics (server/rag/metrics-http.js) when METRICS_ENABLED=true. Only the
+# public edge counts: role "all" (the monolith) or "api" (a split deployment).
+# The agent tier answers the same /chat a second time behind the edge, so it is
+# left out. `role` comes from the scrape target's labels
+# (prometheus.example.yml), never from the series.
+#
+# 429 (rate limited: the client's budget, not ours) is never a valid event.
+#
+#   availability SLI  share of valid /chat requests answered without a 5xx;
+#                     `aborted` (the client left before the answer ended) is
+#                     not a valid event either
+#   latency SLI       share of valid /chat requests answered within 20 s (the
+#                     20 s bucket; server/rag/metrics-http.js
+#                     HTTP_DURATION_BUCKETS must keep that bound). A request
+#                     abandoned after 20 s (the client gave up, or a proxy's
+#                     read timeout closed it) counts as slow, so a /chat that
+#                     hangs until every caller leaves still burns this budget;
+#                     one abandoned within 20 s has no verdict and is left out
+#                     (`or vector(0)`: a window without such abandons
+#                     subtracts 0, not an empty vector)
+#
+# The bucket is matched as le=~"20(\\.0)?", not le="20": the exposition writes
+# "20", which Prometheus 2 stores as is, but Prometheus 3 normalizes a classic
+# histogram's le to its float form ("20.0") on ingestion, and le="20" would
+# then select nothing, leaving the latency SLI and its alerts empty.
+#
+# Each SLI is recorded over the four windows the multi-window, multi-burn-rate
+# alerts in alert-rules.yml read: 5m and 1h (fast burn), 30m and 6h (slow burn).
+# With no valid traffic in a window there is no ratio and no alert fires. The
+# numerator falls back to `vector(0)`: a good-event series exists only once
+# something succeeded, so after a deploy whose every /chat fails, sum() would
+# be an empty vector and the ratio absent instead of 0.
+
+groups:
+  - name: archive-rag-chat-slo
+    interval: 30s
+    rules:
+      - record: archive_rag:chat_availability_sli:ratio_rate5m
+        expr: |
+          (sum(rate(archive_rag_http_requests_total{job="archive-rag",role=~"all|api",route="/chat",status_class!~"5xx|429|aborted"}[5m])) or vector(0))
+          /
+          sum(rate(archive_rag_http_requests_total{job="archive-rag",role=~"all|api",route="/chat",status_class!~"429|aborted"}[5m]))
+      - record: archive_rag:chat_availability_sli:ratio_rate30m
+        expr: |
+          (sum(rate(archive_rag_http_requests_total{job="archive-rag",role=~"all|api",route="/chat",status_class!~"5xx|429|aborted"}[30m])) or vector(0))
+          /
+          sum(rate(archive_rag_http_requests_total{job="archive-rag",role=~"all|api",route="/chat",status_class!~"429|aborted"}[30m]))
+      - record: archive_rag:chat_availability_sli:ratio_rate1h
+        expr: |
+          (sum(rate(archive_rag_http_requests_total{job="archive-rag",role=~"all|api",route="/chat",status_class!~"5xx|429|aborted"}[1h])) or vector(0))
+          /
+          sum(rate(archive_rag_http_requests_total{job="archive-rag",role=~"all|api",route="/chat",status_class!~"429|aborted"}[1h]))
+      - record: archive_rag:chat_availability_sli:ratio_rate6h
+        expr: |
+          (sum(rate(archive_rag_http_requests_total{job="archive-rag",role=~"all|api",route="/chat",status_class!~"5xx|429|aborted"}[6h])) or vector(0))
+          /
+          sum(rate(archive_rag_http_requests_total{job="archive-rag",role=~"all|api",route="/chat",status_class!~"429|aborted"}[6h]))
+      - record: archive_rag:chat_latency_sli:ratio_rate5m
+        expr: |
+          (sum(rate(archive_rag_http_request_duration_seconds_bucket{job="archive-rag",role=~"all|api",route="/chat",status_class!~"429|aborted",le=~"20(\\.0)?"}[5m])) or vector(0))
+          /
+          (
+            sum(rate(archive_rag_http_request_duration_seconds_count{job="archive-rag",role=~"all|api",route="/chat",status_class!="429"}[5m]))
+            -
+            (sum(rate(archive_rag_http_request_duration_seconds_bucket{job="archive-rag",role=~"all|api",route="/chat",status_class="aborted",le=~"20(\\.0)?"}[5m])) or vector(0))
+          )
+      - record: archive_rag:chat_latency_sli:ratio_rate30m
+        expr: |
+          (sum(rate(archive_rag_http_request_duration_seconds_bucket{job="archive-rag",role=~"all|api",route="/chat",status_class!~"429|aborted",le=~"20(\\.0)?"}[30m])) or vector(0))
+          /
+          (
+            sum(rate(archive_rag_http_request_duration_seconds_count{job="archive-rag",role=~"all|api",route="/chat",status_class!="429"}[30m]))
+            -
+            (sum(rate(archive_rag_http_request_duration_seconds_bucket{job="archive-rag",role=~"all|api",route="/chat",status_class="aborted",le=~"20(\\.0)?"}[30m])) or vector(0))
+          )
+      - record: archive_rag:chat_latency_sli:ratio_rate1h
+        expr: |
+          (sum(rate(archive_rag_http_request_duration_seconds_bucket{job="archive-rag",role=~"all|api",route="/chat",status_class!~"429|aborted",le=~"20(\\.0)?"}[1h])) or vector(0))
+          /
+          (
+            sum(rate(archive_rag_http_request_duration_seconds_count{job="archive-rag",role=~"all|api",route="/chat",status_class!="429"}[1h]))
+            -
+            (sum(rate(archive_rag_http_request_duration_seconds_bucket{job="archive-rag",role=~"all|api",route="/chat",status_class="aborted",le=~"20(\\.0)?"}[1h])) or vector(0))
+          )
+      - record: archive_rag:chat_latency_sli:ratio_rate6h
+        expr: |
+          (sum(rate(archive_rag_http_request_duration_seconds_bucket{job="archive-rag",role=~"all|api",route="/chat",status_class!~"429|aborted",le=~"20(\\.0)?"}[6h])) or vector(0))
+          /
+          (
+            sum(rate(archive_rag_http_request_duration_seconds_count{job="archive-rag",role=~"all|api",route="/chat",status_class!="429"}[6h]))
+            -
+            (sum(rate(archive_rag_http_request_duration_seconds_bucket{job="archive-rag",role=~"all|api",route="/chat",status_class="aborted",le=~"20(\\.0)?"}[6h])) or vector(0))
+          )

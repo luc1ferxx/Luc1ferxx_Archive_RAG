@@ -157,9 +157,43 @@ Agent experience memory 只进入 planner hints，不进入 citations/evidence�
 
 - 租户靠异步上下文传递。如果某个中间件从流回调里继续请求链（例如 multer 的内存存储），上下文会丢失，查询回落到 owner 身份，也就是只剩应用层过滤；上传路由在 multer 之后重新绑定了租户。要做到上下文丢失时也拒绝访问，需要一个没有表权限的独立登录角色，owner 连接只留给显式的系统操作。
 - 这层防护针对“漏写过滤条件”这类应用 bug，不防 SQL 注入：注入的语句可以执行 `RESET ROLE`。
-- 开启后每条带范围的语句要 4 次往返（BEGIN、租户设置、语句本身、COMMIT），原来是 1 次。
+- 开启后，租户设置和语句用扩展协议流水线一次往返发出（`rag/postgres.js` 的 `PipelinedQuery`）；用 pg 的 native 绑定时退回 4 次往返（BEGIN、租户设置、语句本身、COMMIT）。
 
 Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 registry、向量索引或 RAG evidence。PostgreSQL migration `009_create_workspace_artifacts.sql` 为 `userId/workspaceId/idempotencyKey` 建立唯一约束；memory provider 只适合本地开发，进程重启后数据会丢失。单个 artifact 限制为：正文 512 KiB、结构化 payload 256 KiB、100 条 citation manifest、500 个 docIds；列表接口默认返回 50 条，最大 100 条。
+
+### 读副本
+
+默认关闭。不设 `POSTGRES_READ_REPLICA_URLS` 时什么都不变，所有语句都在主库执行。怎么起一个副本、怎么验证，见 [deployment.md](deployment.md#读副本可选)。
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `POSTGRES_READ_REPLICA_URLS` | 空 | 读副本地址，逗号分隔，`postgres://` 或 `postgresql://`。必须是同一个数据库的流复制热备（hot standby）。按位置编号为 `replica-0`、`replica-1`……；健康检查和指标里只显示 host:port，不显示地址本身（里面可能有密码）。任一条无效，或者只写了逗号、没有地址时，所有标记为只读的语句直接报错，`checks.readReplicas` 报 `error`，不会悄悄退回主库。 |
+| `POSTGRES_READ_REPLICA_MAX_LAG_MS` | `2000` | 副本延迟超过这个值就不用它（整数，≥ 0）。 |
+| `POSTGRES_READ_REPLICA_LAG_POLL_MS` | `500` | 测延迟的轮询间隔（≥ 10）。 |
+| `POSTGRES_READ_REPLICA_POOL_MAX` | `10` | 每个副本的读连接池大小；在途读满了就跳过这个副本。 |
+| `POSTGRES_READ_REPLICA_CONNECT_TIMEOUT_MS` | `2000` | 连副本的超时，也是延迟监控每次轮询的超时。 |
+| `POSTGRES_READ_REPLICA_CIRCUIT_FAILURE_THRESHOLD` | `3` | 连续几次"不可用"错误后打开这个副本的熔断。 |
+| `POSTGRES_READ_REPLICA_CIRCUIT_COOLDOWN_MS` | `5000` | 熔断打开多久后放一次探测请求。 |
+
+数值变量必须是整数且不小于下限，否则和无效地址一样报错。测试专用：`PGVECTOR_TEST_REPLICA_URL`（与 `PGVECTOR_TEST_DATABASE_URL` 一起，超级用户）打开 `test/postgres-replica.integration.test.mjs`，缺一个就跳过。
+
+- **哪些读会去副本**：只有同时满足三个条件的语句：调用方明确标记为只读；在生效的租户下执行（走租户流水线，所以副本上的行级安全就是主库重放过来的同一套策略）；不在 `withPostgresTransaction` 里。目前只有 pgvector 的稠密检索（含迭代扫描，这时 `set_config` 作为同一次往返的前置语句，不再开事务）和稀疏检索（BM25 / 剪枝函数、`ts_rank_cd` 租户函数、普通语句）会标记，而且只在没有传入调用方连接、并且本进程的文档注册表认识每一个被检索文档时才标记。
+- **一直留在主库的**：写入、迁移、`LISTEN`、advisory lock、索引版本指针、所有 owner/system 语句、文档注册表的加载和刷新、`GET /documents`、`GET /documents/:id/file`、run 和任务的读接口。没有访问范围的请求（鉴权关闭且不带 `x-user-id` / `x-workspace-id`）和 `POSTGRES_ROW_LEVEL_SECURITY=off` 时，语句都是 owner 身份，配了副本也不会分流，健康检查也不会提示这一点。
+- **一致性**：
+  - 新鲜度 guard：和检索在同一次往返里先在副本上执行。它要求副本上每个被检索文档的 `content_version` 不低于本进程注册表从主库读到的版本，索引指针的 generation 不低于这次检索所用版本的 generation。不满足时副本跳过这条语句，改由主库回答，计为 `version_behind`。这依赖 pgvector 的写入、替换和删除都把文档行和分块放在同一个事务里提交。
+  - 锚点：每次 `/chat` 和任务开始前，先从主库刷新这个租户的注册表；刷新失败时，这次请求的所有读都走主库（计为绕过原因 `registry_unverified`）。拆分部署下，开启副本时检索层会从主库重读请求里的每个 docId。
+  - 有界陈旧度：监控按 `POSTGRES_READ_REPLICA_LAG_POLL_MS` 采样主库的 flush LSN 和每个副本的重放 LSN，延迟取"副本已重放过的最新主库样本"的年龄。测不出延迟的副本不用。主库 LSN 倒退（主备切换）时重新采样。
+- **回退**：副本延迟超限、不可达、不在 recovery、熔断打开、在途读满，都跳过；副本上任何错误都回退主库并按原因计数，请求本身不会因为副本失败。多个副本时选在途读最少的，相同时轮流。
+- **健康检查**：只有设置了这个变量、并且本进程承载检索层（`retrieval` 角色，或没设 `RETRIEVAL_SERVICE_URL` 的 `all`）时，才出现 `checks.readReplicas`。副本延迟、宕机、熔断最多报 `warning`，`/ready` 仍是 200；只有配置无效才报 `error`。
+
+已知边界：
+
+- 副本上的语句只有连接超时，没有语句超时，也不受请求截止时间限制。已建立的连接被黑洞时，在途的读会一直等到 TCP keepalive 发现；监控会把副本标成不可达，新的读不再选它。
+- 副本上的 BM25 用的是副本当时的按租户统计；guard 只证明被检索的文档是新的，同一租户其他文档的写入可能还没重放，分数可能和主库略有差异（在延迟上限以内）。
+- `vector:reindex --apply` 原地重写分块但不升 `content_version`，重建期间落后的副本可能对重新向量化的文档返回空的稠密结果，直到追上（受延迟上限约束，不受 guard 约束）。
+- `/chat` 开始时的注册表刷新如果失败，只打日志，这次请求的 guard 可能用的是旧版本。
+- 不检查副本是否真的跟随这个主库（`system_identifier`）。误配成别的集群的备库时，带 guard 的读会因为找不到文档而回退，不会读错数据，但会被计为 `version_behind`。
+- 延迟计算假设 `synchronous_commit` 是 `on`。
 
 ## 上传入库
 
@@ -304,15 +338,29 @@ API_AUTH_TOKENS={"admin-token":{"userId":"admin","workspaceId":"workspace-a","ro
 
 ### 内部身份
 
+层与层之间的调用带一个短期签名 token（`x-archive-service-token` 头），audience 是目标层，issuer 是调用方的角色，租户（userId、workspaceId）只从 token 里读，请求体里的租户字段一律不认。公网入口在读任何请求头之前，先删掉所有 `x-archive-service-` 开头的头。签名方式由 `INTERNAL_SERVICE_AUTH` 决定：
+
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `INTERNAL_SERVICE_KEYS` | 空 | 层与层之间签名用的密钥，格式 `kid1:secret1,kid2:secret2`。kid 由字母、数字、`.`、`_`、`-` 组成，最长 64；密钥是第一个冒号之后的全部内容，至少 32 个字符，不能含逗号。第一个密钥签名，所有密钥都能验证。除 `all` 以外的角色、以及设置了任一服务地址的进程都必须配置，而且所有层要用同一份。 |
+| `INTERNAL_SERVICE_AUTH` | `hmac` | `hmac`：所有层共用 `INTERNAL_SERVICE_KEYS` 做 HS256 签名（原来的方式）。`ed25519`：每个进程只持有自己的 Ed25519 私钥，用登记在 issuer 名下的公钥验证，HS256 token 一律拒绝。`mixed`：用 Ed25519 签名，同时接受两种 token，只用于从 `hmac` 滚动切换到 `ed25519` 的过渡。其他值启动报错，所有签名和校验也都报错，不会退回别的方式。 |
+| `INTERNAL_SERVICE_KEYS` | 空 | `hmac` 和 `mixed` 用的 HMAC 密钥，格式 `kid1:secret1,kid2:secret2`。kid 由字母、数字、`.`、`_`、`-` 组成，最长 64；密钥是第一个冒号之后的全部内容，至少 32 个字符，不能含逗号。第一个密钥签名，所有密钥都能验证。`hmac` 下，除 `all` 以外的角色、以及设置了任一服务地址的进程都必须配置，而且所有层要用同一份；`mixed` 下被调用的层也必须配置，用来验证还没切换的调用方。 |
+| `INTERNAL_SERVICE_SIGNING_KEY` | 空 | `ed25519` / `mixed` 下本进程的 Ed25519 私钥：PKCS8 PEM（可以用字面的 `\n` 换行）或 base64 DER。凡是会调用别的层的进程（设了任一服务地址的进程，例如 api、agent，以及设了 `MODEL_GATEWAY_URL` 的 retrieval 和 `all`）都必须配置；模型网关不调用别人，不需要。只发给这一个进程。 |
+| `INTERNAL_SERVICE_SIGNING_KEY_ID` | 公钥指纹 | 私钥的 kid，默认 `ed25519-` 加公钥 SPKI 的 SHA-256 前 20 个十六进制字符。 |
+| `INTERNAL_SERVICE_TRUSTED_KEYS` | 空 | 受信公钥列表，格式 `issuer:kid:base64spki,...`；issuer 只能是 `agent`、`all`、`api`、`ingest-worker`、`model-gateway`、`retrieval`。一把公钥只对它登记的 issuer 有效：用 retrieval 的私钥冒充 api 签名会被拒（401 `SERVICE_TOKEN_KEY_ISSUER`）。`ed25519` / `mixed` 下被调用的层（agent、retrieval、model-gateway）必须配置。 |
+| `INTERNAL_SERVICE_REQUEST_BINDING` | 不设 | token 是否必须绑定到这次请求。不设时 Ed25519 token 必须绑定，HS256 token 带了绑定才校验；`required` / `optional` 对两种都生效。其他值让拆分角色拒绝启动，单体只给警告。 |
+| `INTERNAL_SERVICE_REPLAY_CACHE` | `ed25519`、`mixed` 下开，`hmac` 下关 | 防重放：每个 token 只接受一次，直到过期。取值 `on`/`true`/`1`/`yes` 或 `off`/`false`/`0`/`no`；其他值让拆分角色拒绝启动，单体只给警告。 |
+| `INTERNAL_SERVICE_REPLAY_CACHE_MAX_ENTRIES` | `100000` | 每个进程的防重放缓存上限。满了以后淘汰最老的条目，这些 token 的重放窗口随之重新打开。 |
+| `INTERNAL_SERVICE_ISSUER` | 角色名 | 只能设为 `ingest-worker`，而且只能用在 `ARCHIVE_RAG_ROLE` 为 `all` 的独立入库 worker 上（`npm run worker:ingest`）。这样 worker 按调用策略只能调用模型网关；不设时它以 `all` 签名。 |
 | `INTERNAL_SERVICE_TOKEN_TTL_MS` | `60000` | 内部 token 的有效期，限制在 1 秒到 1 小时之间。 |
 | `INTERNAL_SERVICE_TOKEN_CLOCK_SKEW_MS` | `5000` | 校验 token 时容忍的时钟偏差，限制在 0 到 60 秒之间。 |
 
-- 内部 token 是 HS256 签名，放在 `x-archive-service-token` 头里，audience 是目标层，issuer 是调用方的角色，租户（userId、workspaceId）只从 token 里读，请求体里的租户字段一律不认。公网入口在读任何请求头之前，先删掉所有 `x-archive-service-` 开头的头。
-- 换密钥分三轮，每轮都逐个重启所有层：先把新密钥加到最后（只验证），再挪到最前面（开始签名），最后删掉旧密钥。步骤见 [deployment.md](deployment.md#换内部密钥)。
-- 这不是 mTLS：所有层共用同一组对称密钥，issuer 是调用方自己写的；token 在有效期内可以重放，也不绑定路径。内部端口只能放在内网。
+- **调用策略**：谁能调用谁写在 `server/rag/service-identity.js` 的 `SERVICE_CALL_POLICY` 一张表里，在接收方执行，三种模式都生效：agent 只接受 `all`、`api`；retrieval 只接受 `agent`、`all`（健康探测另外接受 `api`）；model-gateway 接受 `agent`、`all`、`api`、`ingest-worker`、`retrieval`。默认 `hmac` 下这也是新行为：以前模型网关接受任何 issuer，检索层的探测接口也接受任何 issuer。代码里现有的调用方都在表内。
+- **请求绑定**：service client 每次尝试都重新签一个 token，写入方法（`htm`）、路径加查询串的 SHA-256（`htu`，查询串里可能有问题文本，所以只传摘要）和非空请求体的 SHA-256（`bdh`）。接收方核对方法和路径，请求体由 JSON 解析器的校验钩子核对；带 `bdh` 的 token 只接受 `application/json` 请求。拦截到的 token 换一个接口或换一个请求体都用不了。内部链路上如果有改写路径或请求体的反向代理，三种模式下都会被拒。
+- **防重放**：按进程记录已接受的 token id。设了 `RAG_SHARED_STATE=redis` 时用 `SET NX PX` 在同一层的副本之间共享；Redis 出错时退回本进程判断。失败转移和重试每次都用新 token，不受影响。
+- **算法固定**：每把 key 只用一种算法，HS256 和 EdDSA 互不验证；签名必须是规范的 64 字节。HMAC 仍用常量时间比较，过期和时钟偏差检查不变。
+- **启动校验**：以下配置启动时直接拒绝：会调用别的层却没有私钥；被调用的层对任何一个合法调用方都没有受信公钥；本进程的 kid 在受信列表里绑定到别的 issuer 或别的公钥；`mixed` 下被调用的层没有 `INTERNAL_SERVICE_KEYS`；HMAC 和 Ed25519 的 kid 重复。一把公钥绑定多个 issuer、`ed25519` 下还留着 `INTERNAL_SERVICE_KEYS` 只给警告。报错里只有变量名和 kid，没有密钥。校验只要求"至少信任一个合法调用方"，比如网关只信任 api 的公钥也能启动，agent 和检索层调用它时才会在运行时得到 401。`npm run worker:ingest` 和 `chat-mcp.js` 不做这项校验，配置错误要到第一次调用网关时才暴露。
+- **生成密钥**：`node server/service-keys.mjs generate <issuer> [--kid <id>]`、`compose`、`public <issuer>`，只往标准输出打印，不写文件。生成、分发和轮换步骤见 [deployment.md](deployment.md#内部身份与密钥)。
+- 这不是 mTLS，层间也没有加密。`hmac` 下每一层都持有同一组密钥，issuer 是调用方自己写的；`ed25519` 下每层只能以自己的身份签名。两种模式下内部端口都只能放在内网。
 
 ### 调用、超时和停机
 
@@ -320,10 +368,11 @@ API_AUTH_TOKENS={"admin-token":{"userId":"admin","workspaceId":"workspace-a","ro
 | --- | --- | --- |
 | `INTERNAL_SERVICE_TIMEOUT_MS` | `60000` | 层间调用的默认总预算，包括换副本重试和读取响应体，作为 `x-archive-service-deadline-ms` 发给对方。转发 `/chat/stream` 时只限制等响应头的时间。 |
 | `INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS` | `5000` | 副本连接失败或返回 502/503/504 后，多长时间内优先选别的副本。只剩这一个副本时照样会用它。 |
-| `AGENT_SERVICE_TIMEOUT_MS` | `300000` | 公网入口等 agent 层回答一个转发请求的时间，也是一次 `/chat/stream` 的总时长上限；限制在 1 秒到 1 小时之间。入口超时返回 504，但 agent 层上的运行不会被取消。 |
+| `AGENT_SERVICE_TIMEOUT_MS` | `300000` | 公网入口等 agent 层回答一个转发请求的时间，也是一次 `/chat/stream` 的总时长上限；限制在 1 秒到 1 小时之间。它作为截止时间发给 agent 层，agent 层按它限制自己发出的检索和模型调用，到点时在下一个安全点取消运行（`deadline_exceeded`，见下面的"截止时间、取消和依赖故障"）。入口超时返回 504。注意：转发的管理动作（例如 `quality-refresh`）、步骤重试和恢复动作也受这个上限约束，到点时进行中的模型调用会被中止，以前它们会继续跑完。 |
 | `SERVICE_SHUTDOWN_GRACE_MS` | `25000` | 用 `node server.js` 启动的拆分角色收到 SIGTERM/SIGINT 后，给进行中的请求多长时间结束，之后关闭剩下的连接并退出；限制在 0 到 10 分钟之间。`node retrieval-service.mjs` 和 `node model-gateway.mjs` 这两个入口没有这个上限，会一直等请求结束。 |
 
 - 选副本：选进行中请求最少的，相同时轮流。每次调用每个副本最多试一次。连接没建立起来（ECONNREFUSED 等）时任何请求都换下一个副本；请求已经发出之后，只有幂等的请求才换副本。已经发出的 `/chat`（包括 GET）和任务操作不会再发给第二个副本，避免一次提问跑两遍。
+- 截止时间：一个请求绑定了截止时间时（见下面的"截止时间、取消和依赖故障"），远程检索和经网关的模型调用的预算取"自己的超时"和"剩余时间"中较小的一个，发给下一层的截止时间头随之缩短。
 - trace：配置了 OpenTelemetry 时，调用带 `traceparent`，跨层是同一条 trace。用 `node server.js` 启动的各角色默认用同一个服务名，要在后端区分，给每个角色设不同的 `OTEL_SERVICE_NAME`。
 
 ### 检索层
@@ -366,6 +415,37 @@ API_AUTH_TOKENS={"admin-token":{"userId":"admin","workspaceId":"workspace-a","ro
 - 经网关时，调用方自己不重试、不切换模型、不做并发上限和熔断，只在网关副本连不上时换一个副本。网关连不上返回 503 `MODEL_GATEWAY_UNAVAILABLE`，预算用完返回 504 `MODEL_GATEWAY_TIMEOUT`，应答不是网关的格式返回 502 `MODEL_GATEWAY_PROTOCOL_ERROR`；重排失败时照旧退回融合排序。
 - 调用方不需要 `OPENAI_API_KEY`，`/health` 的 `openai` 项显示 `gateway: true`。Web 回答路径（`chat-mcp.js`）在网关模式下也不再要求本进程有这个 key。
 - LLMOps 计量：网关每次尝试记一条带 `model_gateway_metered` 标注和租户的事件，这是权威数据；调用方每次调用只记一条 `model_gateway_mirror` 镜像事件，用量取网关的计量值，运行级的 token 和成本上限因此照常生效。汇总时要跳过镜像事件，`observability:report` 已经这样做，所以网关和调用方的事件可以放在一起统计。
+
+## 截止时间、取消和依赖故障
+
+单体和拆分部署都适用。两个开关默认都关，单体里什么都不绑定，行为和以前一样；拆分部署的 agent 层总是带着公网入口的截止时间（`AGENT_SERVICE_TIMEOUT_MS`）。
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `AGENT_REQUEST_TIMEOUT_MS` | `0` | 本进程里一个 Agent 请求（`/chat`、`/chat/stream`、`POST /agent-runs/:runId/actions/:action`）从到达起的截止时间，单位毫秒；`0`、空或无效值表示不限。拆分部署的 agent 层同时收到上游的截止时间时，取较早的那个。可以设很大的值：超过 `setTimeout` 上限（约 24.8 天）时分段计时，不会立即触发。 |
+| `AGENT_CANCEL_ON_DISCONNECT` | `off` | 设为 `on`/`true`/`1`/`yes` 时，客户端断开（包括在路由绑定之前就断开）会取消这次运行，运行以 `canceled` 结束。关闭时客户端断开后运行照常跑完。 |
+
+- **取消什么**：绑定后，请求里的出站调用预算取 min(自身超时, 剩余时间)，并带上取消信号：远程检索、模型网关客户端、直连模型的 chat 和 embedding（重试的退避也可中断，中断后不再重试）、交叉编码器重排、Web 搜索。自定义 provider 的 `completeText` 能收到信号，`embedTexts` / `embedQuery` 收不到。
+- **在哪里停**：运行只在安全点停下：每个执行阶段开始前、每个步骤或图节点启动前、Skill 执行入口、finalize 之前。会写工作区的 Capability（`approvalPolicy.writesWorkspace`）一旦开始就脱离取消信号跑完，步骤记为完成，副作用保留、不会重放，运行在下一个安全点结束。数据库语句不读取消信号，所以每个步骤的结果都会被记录。后台任务不继承请求的截止时间或取消信号。
+- **结束状态**：超时的运行记为 `failed`，`run.error` 带 `code: AGENT_DEADLINE_EXCEEDED`、`reason: deadline_exceeded`、`retryable: true`；客户端离开的运行记为 `canceled`，`AGENT_CLIENT_CANCELLED`，`retryable: false`。启动恢复不会接手这两种运行。运行里已经有 Capability 调用完成时，超时或依赖故障都记为 `retryable: false`，应答也不带 `Retry-After`，因为重试会再写一次。
+- **熔断**：调用方自己取消的模型调用（超时或客户端离开）既不算失败也不算成功，不会把模型熔断。
+- **应答**：超时返回 504 `{code: "AGENT_DEADLINE_EXCEEDED", reason, retryable: true, agentRunId}`，不带 `Retry-After`；客户端已离开时记 499。`/chat/stream` 以 `error` 事件（同样的字段加 `status`）和 `done` 结束，没有 `result`。
+
+依赖故障（默认就生效，不需要开关）：
+
+- 主文档检索步骤因为依赖不可用而失败时，`/chat` 现在返回 503 `AGENT_DEPENDENCY_UNAVAILABLE`（依赖超时时 504 `AGENT_DEPENDENCY_TIMEOUT`），带 `Retry-After`（依赖给了就用它的，否则 5 秒）和 `{code, error, dependency, causeCode, retryAfterSeconds, retryable: true, agentRunId}`，运行记为 `failed` 且 `retryable: true`。以前这种情况会转去请求 Web 搜索审批，返回 200 的 clarification。
+- 算作依赖故障的只有：拆分部署里某一层不可达或超时、模型网关不可用或超时、模型上游不可用、熔断打开、检索层报告自己的依赖故障、直连模型返回 5xx 或 408 或连不上、PostgreSQL 连接类错误（SQLSTATE 08xxx、57P01–57P03、53300、连接断开）。判断只看错误码和状态码，不看错误信息；应答里也不带原始错误信息。4xx、429、协议错误不算，保持原来的应答。
+- 同样按故障处理的还有：统一图里主 `document_rag` 节点故障、自定义 Skill 阶段的每个结果都因故障失败、research brief 的每个问题都因故障失败。普通的证据不足仍返回 200 的 clarification。后台任务遇到依赖故障时任务直接失败，不再暂停等 Web 审批。
+- 拆分部署时，公网入口把 agent 层的 503/504 原样转发，并按应答体的 `retryAfterSeconds` 补上 `Retry-After`；入口自己因为 agent 层不可达返回的 503/504 带 `Retry-After: 5`。
+
+已知边界：
+
+- V1 路径上，会写工作区的 Capability 越过截止时间跑完后，运行以 `deadline_exceeded` 失败，标记为不可重试。统一图在最后一个节点之后没有安全点，同样情况下运行会完成，两条路径不一致。
+- 模型并发上限的排队（`RAG_LLM_MAX_CONCURRENCY`）不响应取消信号，排队中的调用要拿到槽位后才结束。
+- 检索层不会因为调用方断开而停止，只在自己的截止时间到时停。
+- 统一图里非主节点（补检索、Web、自定义 Skill）遇到依赖故障仍以 409 `AGENT_UNIFIED_GRAPH_PARTIAL` 结束；统一图审批续跑里遇到依赖故障仍进入人工恢复。统一图默认关闭。
+- 直连模型连接失败时 `dependency` 是 `dependency`，不是 `model`；状态码和 code 是对的。
+- agent 层因为依赖故障返回 503 时，入口仍会把这个 agent 副本当成不健康，跳过 `INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS`（只有一个副本时照样会用它）。
 
 ## Observability
 
@@ -423,3 +503,19 @@ OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64(pk-lf-...:sk-lf-...)>
 ```
 
 不接后端也能看：`cd server && npm run trace:demo` 在内存里跑一次合同审查请求并把 span 树打印出来；加 `-- --real` 用配置好的模型端点（例如本地 Ollama），加 `-- --otlp` 同时导出到上面配置的后端。
+
+### Prometheus 指标
+
+默认关闭。打开后每个进程（单体、四个拆分角色、`node retrieval-service.mjs`、`node model-gateway.mjs`、`npm run worker:ingest`）在单独的端口上提供 `GET /metrics`，应用端口不提供。怎么接 Prometheus 和告警规则见 [deployment.md](deployment.md#指标与告警可选) 和 [operations.md](operations.md)。
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `METRICS_ENABLED` | `false` | 只有 `true`（不分大小写）才打开记录和监听；`1`、`on` 不算。关闭时每个埋点只多一次布尔判断，不监听任何端口。 |
+| `METRICS_PORT` | `9464` | 指标监听端口；`0` 表示由系统分配，实际端口打印在启动日志里（`[metrics] serving /metrics on http://HOST:PORT`）。只在打开时检查：不是 0–65535 的整数，或端口被占用，都拒绝启动。同一台机器上的多个进程要各用一个端口或 `0`。 |
+| `METRICS_HOST` | `127.0.0.1` | 监听地址。Prometheus 在另一个容器或主机上时设 `0.0.0.0`，并同时设 `METRICS_TOKEN`；不设 token 时启动会打印警告。 |
+| `METRICS_TOKEN` | 空 | 设置后，抓取必须带 `Authorization: Bearer <token>`（常量时间比较），否则返回 401。 |
+
+- 只接受 `GET` 和 `HEAD /metrics`（查询串忽略），其他方法 405，其他路径 404。格式是 Prometheus 文本格式 0.0.4，没有用客户端库。
+- 指标族：HTTP 请求数、耗时、在途数（按方法、Express 路由模板、状态类别，429 和 `aborted` 单独一类）；Agent 运行（按结果和原因）、运行耗时、步骤；模型调用次数、耗时、token、估算成本（按 `metering`：`direct`、`gateway`、`mirror`；跨进程汇总时排除 `mirror`）；模型调用守卫的在途、排队和熔断状态；网关配额拒绝；检索各路由的耗时和候选数、重排降级、语义缓存；入库队列深度（最多 15 秒查一次）、各阶段耗时和失败；PostgreSQL 连接池和按 SQLSTATE 类别的语句错误；读副本的读取、回退和延迟；层间调用的次数、故障转移、副本数；进程 CPU、内存、堆和事件循环 p99。
+- 标签规则：序列里没有 `role`、`instance`、`job`，这些由抓取配置加；租户、用户、文档、问题、URL、主机之类的标签名在注册时就被拒绝。每个指标族最多 1000 组标签，超出的观测记到一个所有标签都是 `_overflow` 的序列里，并计入 `archive_rag_metrics_series_overflow_total`。
+- 读数类指标（连接池、队列、守卫状态、副本）在每次抓取前读取，有超时；失败时保留上一次的值，并计入 `archive_rag_metrics_collector_errors_total`。

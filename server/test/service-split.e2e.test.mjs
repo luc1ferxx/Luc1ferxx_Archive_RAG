@@ -30,9 +30,11 @@ import { buildFakeChatAnswer, hashEmbedding } from "../evaluation/run-api-load-b
 // cover every tier. The model gateway then gets SIGTERM while a model answer
 // is in flight, and must finish it before it exits (tracing on). Then the
 // gateway, the retrieval tier and the agent tier are down in turn while the
-// edge keeps serving GET /documents: /chat reports the first two as a failed
-// document RAG step (as the monolith reports its own model or database being
-// down), and the edge answers the third with a 503.
+// edge keeps serving GET /documents: /chat answers the first two as a
+// dependency outage (503 with a stable code and Retry-After, the run failed
+// and retryable, its document RAG step failed with the stable error), as the
+// monolith answers its own model or database being down, and the edge answers
+// the third with a 503.
 //
 // No model, database or network beyond 127.0.0.1. Nothing waits on a timer:
 // readiness is each process's listening line, and the span export (every 5 s
@@ -464,7 +466,12 @@ const request = async (baseUrl, route, { body, method = "GET", token } = {}) => 
   });
   const text = await response.text();
 
-  return { json: text ? JSON.parse(text) : null, status: response.status, text };
+  return {
+    json: text ? JSON.parse(text) : null,
+    retryAfter: response.headers.get("retry-after"),
+    status: response.status,
+    text,
+  };
 };
 
 const readStream = async (baseUrl, body, token) => {
@@ -671,12 +678,37 @@ test("api -> agent -> retrieval -> model-gateway answers as the monolith does, a
     "every tier exported spans under the one trace id"
   );
 
-  // Stop the model gateway. The agent treats a failed document RAG step the
-  // way the monolith treats one whose model or database is down: the step
-  // fails with a stable, secret-free error and the run asks how to go on
-  // (HTTP 200, a clarification). The edge keeps serving documents.
+  // Stop the model gateway. The agent treats a document RAG step that failed
+  // on a dependency the way the monolith treats one whose model or database
+  // is down: the step fails with a stable, secret-free error, the run fails
+  // retryable, and /chat answers 503 with a stable code and Retry-After --
+  // never a clarification offering a Web search instead. The edge keeps
+  // serving documents.
   const failedDocumentRag = (body) =>
-    body?.agentRunSteps?.find((step) => step.type === "document_rag" && step.status === "failed")?.error ?? null;
+    body?.steps?.find((step) => step.type === "document_rag" && step.status === "failed")?.error ?? null;
+  const readRun = async (runId) => {
+    const run = await request(api.url, `/agent-runs/${runId}`, { token: TOKENS.alice });
+
+    assert.equal(run.status, 200, run.text);
+    return run.json;
+  };
+  const assertOutage = async (answer, { causeCode, dependency, stepError }) => {
+    assert.equal(answer.status, 503, answer.text);
+    assert.equal(answer.retryAfter, "5");
+    assert.equal(answer.json.code, "AGENT_DEPENDENCY_UNAVAILABLE");
+    assert.equal(answer.json.causeCode, causeCode);
+    assert.equal(answer.json.dependency, dependency);
+    assert.equal(answer.json.retryable, true);
+    assert.equal(answer.json.clarification, undefined);
+
+    const run = await readRun(answer.json.agentRunId);
+
+    assert.equal(run.status, "failed");
+    assert.equal(run.error.code, "AGENT_DEPENDENCY_UNAVAILABLE");
+    assert.equal(run.error.reason, "dependency_unavailable");
+    assert.equal(run.error.retryable, true);
+    assert.deepEqual(failedDocumentRag(run), stepError);
+  };
   const assertNothingInternal = (answer) => {
     for (const secret of ["127.0.0.1", SECRET, "e2e-gateway-key", TOKENS.alice]) {
       assert.ok(!answer.text.includes(secret), answer.text);
@@ -709,11 +741,13 @@ test("api -> agent -> retrieval -> model-gateway answers as the monolith does, a
 
   const withoutGateway = await request(api.url, "/chat", { body: chatBody, method: "POST", token: TOKENS.alice });
 
-  assert.equal(withoutGateway.status, 200, withoutGateway.text);
-  assert.equal(withoutGateway.json.agentMode, "clarification");
-  assert.deepEqual(failedDocumentRag(withoutGateway.json), {
-    message: "Model gateway: the gateway is unavailable.",
-    name: "ModelGatewayError",
+  await assertOutage(withoutGateway, {
+    causeCode: "MODEL_GATEWAY_UNAVAILABLE",
+    dependency: "model",
+    stepError: {
+      message: "Model gateway: the gateway is unavailable.",
+      name: "ModelGatewayError",
+    },
   });
   assertNothingInternal(withoutGateway);
   await assertDocumentsStillServed();
@@ -724,10 +758,13 @@ test("api -> agent -> retrieval -> model-gateway answers as the monolith does, a
 
   const withoutRetrieval = await request(api.url, "/chat", { body: chatBody, method: "POST", token: TOKENS.alice });
 
-  assert.equal(withoutRetrieval.status, 200, withoutRetrieval.text);
-  assert.deepEqual(failedDocumentRag(withoutRetrieval.json), {
-    message: "The retrieval service is unreachable.",
-    name: "ServiceUnavailableError",
+  await assertOutage(withoutRetrieval, {
+    causeCode: "SERVICE_UNREACHABLE",
+    dependency: "retrieval",
+    stepError: {
+      message: "The retrieval service is unreachable.",
+      name: "ServiceUnavailableError",
+    },
   });
   assertNothingInternal(withoutRetrieval);
   await assertDocumentsStillServed();

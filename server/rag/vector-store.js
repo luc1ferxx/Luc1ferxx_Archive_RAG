@@ -20,6 +20,7 @@ import {
   searchLocalDocuments,
 } from "./vector-store-local.js";
 import { embedTexts } from "./openai.js";
+import { instrumentVectorStoreSearch, timeRetrievalRoute } from "./metrics-retrieval.js";
 import { adaptQueryVectorForSearch, stampQueryAdapterProvenance } from "./query-adapter.js";
 import {
   addDocumentsToPgvectorIndex,
@@ -214,15 +215,15 @@ const getVectorStoreImplementation = () => {
   const provider = getVectorStoreProvider();
 
   if (provider === VECTOR_STORE_PROVIDERS.qdrant) {
-    return buildQdrantImplementation();
+    return instrumentVectorStoreSearch(buildQdrantImplementation());
   }
 
   if (provider === VECTOR_STORE_PROVIDERS.pgvector) {
-    return buildPgvectorImplementation();
+    return instrumentVectorStoreSearch(buildPgvectorImplementation());
   }
 
   if (provider === VECTOR_STORE_PROVIDERS.local) {
-    return buildLocalImplementation();
+    return instrumentVectorStoreSearch(buildLocalImplementation());
   }
 
   throw new Error(`Unsupported vector store provider: ${provider}`);
@@ -719,7 +720,7 @@ export const searchDocumentsWithRoutes = async (args) => {
   // route === "hybrid": the documented default. Hybrid on fuses both routes;
   // hybrid off is the dense-only opt-out, exactly as before this selector existed.
   if (isHybridRetrievalEnabled()) {
-    return searchHybridDocumentsWithRoutes(args);
+    return timeRetrievalRoute("hybrid", () => searchHybridDocumentsWithRoutes(args));
   }
 
   return searchDenseOnlyDocumentsWithRoutes(args);

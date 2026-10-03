@@ -1,0 +1,55 @@
+# Example Prometheus configuration for Archive RAG. Copy it, replace the
+# targets, and load the rules next to it.
+#
+# Every process serves GET /metrics on its own listener when
+# METRICS_ENABLED=true: METRICS_PORT (default 9464), bound to METRICS_HOST
+# (default 127.0.0.1, so set 0.0.0.0 when Prometheus runs in another container
+# or host), never on the app port. With METRICS_TOKEN set, a scrape must send
+# it as a bearer token.
+#
+# The series carry no process identity. Each target gets it here: `role` is
+# the process's ARCHIVE_RAG_ROLE (all for the monolith; api, agent, retrieval
+# or model-gateway in a split deployment) and `instance` defaults to the
+# target address. The rules select the public edge with role=~"all|api", so
+# every target needs its role label.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - recording-rules.yml
+  - alert-rules.yml
+
+scrape_configs:
+  - job_name: archive-rag
+    metrics_path: /metrics
+    scheme: http
+    # Omit when METRICS_TOKEN is unset; the file holds the token alone.
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/archive-rag-metrics-token
+    static_configs:
+      # The monolith (`docker compose --profile app up`): one process.
+      - targets:
+          - "app:9464"
+        labels:
+          role: all
+      # A split deployment (compose.services.yml): one entry per role, one
+      # target per replica.
+      - targets:
+          - "api:9464"
+        labels:
+          role: api
+      - targets:
+          - "agent:9464"
+        labels:
+          role: agent
+      - targets:
+          - "retrieval:9464"
+        labels:
+          role: retrieval
+      - targets:
+          - "model-gateway:9464"
+        labels:
+          role: model-gateway

@@ -11,9 +11,11 @@ import {
   getPgvectorEmbeddingIndexName,
   isPgvectorAnnDimensionSupported,
 } from "./db-migrations.js";
+import { getStoredDocument } from "./doc-registry.js";
 import { embedQueryCached, getQueryVectorEmbeddingSpace, resetEmbeddingCache } from "./embedding-cache.js";
 import { embedTexts } from "./openai.js";
-import { getEnforcedDatabaseTenant } from "./postgres.js";
+import { canRouteReadToReplica, getEnforcedDatabaseTenant } from "./postgres.js";
+import { buildDocumentFreshnessGuard } from "./postgres-replicas.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { buildTermSet, extractMeaningfulTokens } from "./text-utils.js";
 import {
@@ -41,6 +43,7 @@ import {
   fenceNonServingIndexVersions,
   getConfiguredEmbeddingSpace,
   getHintedWriteSpaces,
+  getIndexVersionTableNames,
   getPgvectorBaseTableName,
   getVersionVerificationKey,
   invalidateIndexVersionSnapshot,
@@ -48,6 +51,7 @@ import {
   isSameDocumentSpace,
   isSameQuerySpace,
   lockIndexVersionWriteTargets,
+  peekIndexVersionSnapshot,
   readIndexVersionSnapshot,
   resolveVersionIndexParams,
   resolveVersionSpace,
@@ -1310,6 +1314,64 @@ export const countPgvectorChunks = async ({ client = null, docIds = null, versio
 // Reads
 // ---------------------------------------------------------------------------
 
+// Read replicas (POSTGRES_READ_REPLICA_URLS, rag/postgres-replicas.js): a
+// tenant's search outside a caller's transaction may run on a streaming
+// replica when this process's registry knows every document it searches. The
+// guard then makes the replica prove, in the search's own round trip, that it
+// holds each document at least at the content version the registry has (its
+// chunks commit with that row) and the index pointer at least at the
+// generation this search's table came from (an activated version's build is
+// complete); otherwise the primary answers. Every request path refreshes the
+// tenant's registry rows from the primary before it searches
+// (app-services.js buildChatResponse; the retrieval tier re-reads the ids it
+// is given), so a replica never answers with less than the primary held when
+// the request began. A document the registry does not know keeps the search
+// on the primary. Undefined means "primary, as before".
+//
+// The generation must be that of the snapshot `version` came from: the cache
+// can be dropped (another request's retry) or hold an older snapshot (a
+// forced read that lost the race to store) while this search goes on with its
+// version, and a missing or older generation would let a replica that has not
+// replayed the switch answer from a partly built table. Called right after the
+// version is resolved, before any await; any other snapshot keeps the search
+// on the primary.
+const buildReplicaReadOptions = (client, docIds, version) => {
+  if (client || !canRouteReadToReplica()) {
+    return undefined;
+  }
+
+  const snapshot = peekIndexVersionSnapshot();
+
+  if (!snapshot || snapshot.active !== version) {
+    return undefined;
+  }
+
+  const documents = [];
+
+  for (const docId of docIds) {
+    const stored = getStoredDocument(docId);
+
+    if (!stored) {
+      return undefined;
+    }
+
+    documents.push({ docId, version: stored.version });
+  }
+
+  const pointer = snapshot.registry === "present";
+
+  return {
+    readOnly: {
+      guard: buildDocumentFreshnessGuard({
+        documents,
+        documentsTable: getDocumentsTableName(),
+        minPointerGeneration: pointer ? snapshot.generation : null,
+        pointerTable: pointer ? getIndexVersionTableNames().pointerTable : null,
+      }),
+    },
+  };
+};
+
 // `scored` (a query-adapter search, rag/query-adapter.js): rows are still
 // ordered by $1, and score_vector_score is the cosine with $6, the model's own
 // query vector. Unscored statements are unchanged.
@@ -1361,8 +1423,27 @@ const getIterativeScanSetting = (iterativeScan, indexType) =>
 // set_config(..., true) is SET LOCAL: it needs the statement's own transaction.
 // A caller's client is already in one; otherwise the setting and the search
 // share a short transaction (under a tenant, the same one that sets the role).
-const runIterativeDenseSearch = async ({ client, indexType, iterativeScan, scored = false, tableName, values }) => {
+// A search a replica may answer (`replicaRead`) sends the setting as the
+// statement's prelude instead: the same implicit transaction and round trip,
+// on the replica or, when the router falls back, on the primary.
+const runIterativeDenseSearch = async ({
+  client,
+  indexType,
+  iterativeScan,
+  replicaRead,
+  scored = false,
+  tableName,
+  values,
+}) => {
   const setting = getIterativeScanSetting(iterativeScan, indexType);
+
+  if (replicaRead) {
+    return getPgvectorRuntime().query(buildIterativeDenseSearchSql(tableName, scored), values, {
+      ...replicaRead,
+      prelude: [{ text: "SELECT set_config($1, $2, true)", values: [setting.name, setting.value] }],
+    });
+  }
+
   const search = async (transactionClient) => {
     const query = getPgvectorQuery(transactionClient);
 
@@ -1398,6 +1479,7 @@ export const searchPgvectorDocuments = async ({
   let scored = false;
   const result = await withActiveVersionRetry(client, async () => {
     const version = await ensureActivePgvectorVersion({ client });
+    const replicaRead = buildReplicaReadOptions(client, normalizedDocIds, version);
     const space = resolveVersionSpace(version);
     const modelVector = Array.isArray(scoreVector) ? scoreVector : queryVector;
     const vector = await resolveQueryVector({ queryText, queryVector: modelVector, space });
@@ -1417,11 +1499,12 @@ export const searchPgvectorDocuments = async ({
           client,
           indexType: resolveVersionIndexParams(version).indexType,
           iterativeScan,
+          replicaRead,
           scored,
           tableName: version.chunkTable,
           values,
         })
-      : getPgvectorQuery(client)(buildDenseSearchSql(version.chunkTable, scored), values);
+      : getPgvectorQuery(client)(buildDenseSearchSql(version.chunkTable, scored), values, replicaRead);
   });
   const queryTerms = buildTermSet(queryText);
 
@@ -1564,7 +1647,8 @@ const runSparseSearchFunction = async ({ client, docIds, limit, options, tsQuery
       textSearchConfig: resolveVersionIndexParams(version).textSearchConfig,
       tokens: tsQuery.tokens,
       tsQuery: tsQuery.tsQuery,
-    })
+    }),
+    buildReplicaReadOptions(client, docIds, version)
   );
 };
 
@@ -1620,7 +1704,8 @@ export const searchPgvectorSparseDocuments = async ({
       getEnforcedDatabaseTenant() && normalizedDocIds.length > 1
         ? buildTenantSparseSearchSql(version)
         : buildSparseSearchSql(version.chunkTable),
-      [resolveVersionIndexParams(version).textSearchConfig, tsQuery.tsQuery, normalizedDocIds, limit]
+      [resolveVersionIndexParams(version).textSearchConfig, tsQuery.tsQuery, normalizedDocIds, limit],
+      buildReplicaReadOptions(client, normalizedDocIds, version)
     );
   }).catch((error) => {
     throw toMissingSparseSearchFunctionError(error, "the active index version's table");

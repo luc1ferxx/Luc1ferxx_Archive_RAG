@@ -6,6 +6,7 @@ import {
 } from "./agent-budget.js";
 import { getActiveRunUsage, getRunPromptUsage } from "./run-usage.js";
 import { addActiveSpanEvent, getActiveTraceId } from "./tracing.js";
+import { recordAgentStep } from "./metrics-agent.js";
 import { buildAgentExperienceMemoryObservability } from "./agent-experience-memory.js";
 import { buildClarificationResponse } from "./agent-response-builder.js";
 import { getSkillDescriptor } from "./agent-skill-observability.js";
@@ -82,6 +83,7 @@ export const createAgentRunContext = ({
 
     if (appended) {
       emitTraceStep(builtStep);
+      recordAgentStep(builtStep);
       // The same compact fields the stream gets; never step detail.
       addActiveSpanEvent("agent.step", {
         "agent.step.label": builtStep.label,

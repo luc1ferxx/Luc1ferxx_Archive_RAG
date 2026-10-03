@@ -1,4 +1,5 @@
 import { enforceCapabilityPolicy } from "./policy-enforcer.js";
+import { runOutsideRequestDeadline } from "../request-deadline.js";
 import { normalizeText } from "../../lib/normalize-text.js";
 
 const normalizeRecord = (value, fallback = {}) =>
@@ -101,12 +102,21 @@ export const executeCapability = async (
     input,
   });
 
-  return capability.execute({
-    accessScope,
-    input: policyResult.sanitizedInput,
-    policy: policyResult,
-    services,
-  });
+  const run = () =>
+    capability.execute({
+      accessScope,
+      input: policyResult.sanitizedInput,
+      policy: policyResult,
+      services,
+    });
+
+  // A Capability that writes is never interrupted mid-effect: once started it
+  // runs without the request's deadline or cancellation signal
+  // (request-deadline.js), and a cancelled run stops at its next safe point
+  // after it. Read-only Capabilities (Web search, discovery) keep the signal.
+  return capability.approvalPolicy?.writesWorkspace === true
+    ? runOutsideRequestDeadline(run)
+    : run();
 };
 
 export const createCapabilityRegistry = (capabilities = []) => {

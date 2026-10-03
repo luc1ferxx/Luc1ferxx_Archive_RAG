@@ -8,6 +8,7 @@ import {
   normalizeArxivMaxResults,
 } from "../arxiv-client.js";
 import { isAgentRunInterrupt } from "../agent-interrupts.js";
+import { toDependencyOutageError } from "../dependency-outage.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
 import { attachRetrievedEvidence } from "../citations.js";
 import { buildAgentRetrievalPlan } from "../agent-query-planner.js";
@@ -909,6 +910,9 @@ const createResearchBriefSkill = () => ({
     });
     const results = [];
     const evidenceResults = [];
+    // The outages behind failed questions (dependency-outage.js); a finding
+    // keeps only its message.
+    const outages = [];
 
     for (const entry of plan.questions) {
       const budget = consumeBudget(budgetState, "researchQuestions");
@@ -1005,6 +1009,12 @@ const createResearchBriefSkill = () => ({
           id: researchQuestionStepId,
         });
 
+        const outage = toDependencyOutageError(error);
+
+        if (outage) {
+          outages.push(outage);
+        }
+
         results.push({
           id: entry.id,
           question: entry.question,
@@ -1017,6 +1027,15 @@ const createResearchBriefSkill = () => ({
           error: error instanceof Error ? error.message : "Research lookup failed.",
         });
       }
+    }
+
+    // Every question that ran failed because a dependency is down: the brief
+    // could only say the evidence was missing. The stage fails with the outage
+    // instead, and the run ends with it (agent-built-in-skill-runners.js).
+    const ran = results.filter((result) => result.status !== "skipped");
+
+    if (ran.length > 0 && outages.length === ran.length) {
+      throw outages[0];
     }
 
     const brief = formatResearchBrief({

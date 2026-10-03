@@ -14,6 +14,11 @@ import {
 import { isDocumentRegistryShared } from "./doc-registry.js";
 import { toIngestJobErrorMessage } from "./ingest-job-store.js";
 import {
+  instrumentIngestStages,
+  recordIngestAttemptOutcome,
+  recordIngestStageFailure,
+} from "./metrics-ingest.js";
+import {
   INGEST_JOB_KINDS,
   INGEST_STAGE_OUTPUTS,
   INGEST_STAGES,
@@ -622,7 +627,7 @@ export const createIngestWorker = ({
     try {
       await Promise.allSettled(waitFor);
 
-      const stages = await resolvePipeline();
+      const stages = instrumentIngestStages(await resolvePipeline());
 
       stagedRun = Boolean(stages);
 
@@ -705,6 +710,7 @@ export const createIngestWorker = ({
       `[ingest-worker] job ${job.jobId} attempt ${job.attemptCount} failed at stage ${state.stage} (${status ?? "lease lost"}).`,
       ingestError
     );
+    recordIngestStageFailure(state.stage, status);
     return status ?? "lease_lost";
   };
 
@@ -747,7 +753,7 @@ export const createIngestWorker = ({
     inFlight.set(job.jobId, { job, promise });
 
     try {
-      return { jobId: job.jobId, outcome: await promise };
+      return { jobId: job.jobId, outcome: recordIngestAttemptOutcome(await promise) };
     } finally {
       inFlight.delete(job.jobId);
     }
@@ -986,18 +992,21 @@ export const loadDocumentsIngestedElsewhere = async (ragService, docIds) => {
 };
 
 // Reads the requesting tenant's documents only (every document when auth is
-// off, which is one tenant).
+// off, which is one tenant). Resolves true when the registry is current: the
+// refresh ran, or this registry has no other writers to catch up with.
 export const refreshDocumentsIngestedElsewhere = async (ragService, accessScope = {}) => {
   if (
     typeof ragService?.refreshDocumentRegistry !== "function" ||
     !sharesDocumentRegistry(ragService)
   ) {
-    return;
+    return true;
   }
 
   try {
     await ragService.refreshDocumentRegistry(accessScope);
+    return true;
   } catch (error) {
     console.error("[ingest] Failed to refresh the document registry.", error);
+    return false;
   }
 };

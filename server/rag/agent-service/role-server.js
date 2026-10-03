@@ -5,10 +5,12 @@ import {
   getServiceShutdownGraceMs,
   getVectorStoreProviderConfigStatus,
   isPostgresDatabaseConfigured,
+  isRagIngestAsync,
   isRagIngestWorkerEnabled,
   isStartupHealthStrict,
 } from "../config.js";
 import { createIngestWorker, resolveApiIngestWorkerPlan } from "../ingest-worker.js";
+import { startMetricsFromEnv } from "../metrics-server.js";
 import { resetPostgresPool } from "../postgres.js";
 import { resetSharedState } from "../shared-state.js";
 import { validateServiceTopology } from "../service-topology.js";
@@ -298,7 +300,9 @@ export const createGracefulShutdown = ({
 };
 
 /**
- * Starts one split-deployment role and returns { app, server, port, shutdown }.
+ * Starts one split-deployment role and returns { app, server, port, shutdown,
+ * metrics } (metrics: the /metrics listener's { host, port, close }, or null
+ * without METRICS_ENABLED).
  * Throws before listening when the topology has errors (the messages are the
  * validator's, secret-free). Without `port` it listens on resolveRolePort().
  * `shutdownFinalizers` run after the role's own finalizers, once the requests
@@ -332,12 +336,25 @@ export const startServiceRole = async ({
   const server = await listen(app, { host, port: port ?? resolveRolePort(role, env) });
   const address = server.address();
   const listeningPort = typeof address === "object" && address ? address.port : port;
+  // METRICS_ENABLED=true: /metrics on its own listener, in every role. Only
+  // the edge drains the ingest queue, so only it reports the queue's depth.
+  // A metrics port that cannot be bound refuses the start.
+  const metrics = await startMetricsFromEnv({
+    env,
+    httpServer: server,
+    ingestJobStore: role === "api" && isRagIngestAsync() ? app.locals.services?.ingestJobStore : null,
+    logger,
+  }).catch((error) => {
+    server.close();
+    throw error;
+  });
   // app.locals.stop runs once the requests have drained, before the pool
   // closes, so nothing in flight loses what it depends on.
   const appStop = typeof app.locals?.stop === "function" ? [() => app.locals.stop()] : [];
+  const metricsStop = metrics ? [() => metrics.close()] : [];
   const shutdown = createGracefulShutdown({
     exit,
-    finalizers: [...appStop, ...finalizers, ...shutdownFinalizers, resetPostgresPool],
+    finalizers: [...appStop, ...finalizers, ...shutdownFinalizers, ...metricsStop, resetPostgresPool],
     graceMs,
     logger,
     role,
@@ -352,5 +369,5 @@ export const startServiceRole = async ({
 
   logger.log(`[service] role ${role} is running on port ${listeningPort}.`);
 
-  return { app, port: listeningPort, server, shutdown };
+  return { app, metrics, port: listeningPort, server, shutdown };
 };

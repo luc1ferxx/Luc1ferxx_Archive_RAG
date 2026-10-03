@@ -22,6 +22,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm test` | 运行后端聚合测试。 |
 | `cd server && npm run coverage:gate` | 运行后端 coverage minimum gate。 |
 | `cd server && npm run test:pgvector` | 真实 pgvector PostgreSQL 集成测试；需要 `PGVECTOR_TEST_DATABASE_URL`，缺失时报告 skipped。 |
+| `cd server && bash scripts/run-pgvector-replica-integration.sh` | 读副本集成测试：在 `$TMPDIR` 下起一次性主库和 `pg_basebackup -R` 流复制备库（系统分配端口），跑 `test/postgres-replica.integration.test.mjs` 后删除；没有 `PGVECTOR_TEST_DATABASE_URL` 和 `PGVECTOR_TEST_REPLICA_URL` 时这个套件报告 skipped。 |
 | `cd server && npm run eval:shared-state` | 多实例（4 个子进程）对同一个故障模型服务，比较熔断和并发上限状态放在进程内和放在 Redis 的区别；`redis` 模式需要一个运行中的 Redis（`--redis-url`）。 |
 | `cd server && npm run eval:prompt-injection` | 提示注入红队：带恶意指令的文档加直接注入的问题，分别统计文档 RAG 答案（MCP `archive_ask`）和 Agent 路径（`/chat`）的攻击成功率、受攻击时仍答对的比例、对照组正确率，以及 claim 评审在注入证据下的错误接受率。需要真实模型；`--only` 只跑指定用例。 |
 | `cd server && npm run eval:tenant-isolation` | 数据库行级安全的改前/改后对比：在一次性数据库上比较 `POSTGRES_ROW_LEVEL_SECURITY=off` 与 `enforce` 下的越权读写、延迟和查询计划；需要能建角色和建库的 `PGVECTOR_TEST_DATABASE_URL`。 |
@@ -1277,7 +1278,7 @@ train 上（400 题）的损失拆解：
 - **隔离**：别的租户的文档和不存在的文档在检索层返回完全一样的结果。真实 PostgreSQL 上的行级安全由 `test/retrieval-service-pgvector.integration.test.mjs` 检查，没有 `PGVECTOR_TEST_DATABASE_URL` 时报告为跳过。
 - **故障**：副本停掉或返回 503 时换副本；下游不可用时返回 503/504 和固定错误码，不带地址、问题或文档内容；已经发出的 `/chat` 不会重发到第二个副本。
 
-- **端到端**：`test/service-split.e2e.test.mjs` 把 api、agent、模型网关作为子进程启动，上传和 `/chat`、`/chat/stream` 依次经过四层，回答与单体一致，一个 trace id 贯穿四层；停掉检索层或网关时 `/chat` 的行为与单体里下游故障时相同，停掉 agent 层时入口返回 503。
+- **端到端**：`test/service-split.e2e.test.mjs` 把 api、agent、模型网关作为子进程启动，上传和 `/chat`、`/chat/stream` 依次经过四层，回答与单体一致，一个 trace id 贯穿四层；停掉检索层或网关时 `/chat` 返回 503 `AGENT_DEPENDENCY_UNAVAILABLE`（`Retry-After: 5`，`causeCode` 和 `dependency` 指明是哪一层），运行记为可重试的失败，`document_rag` 步骤的错误与以前相同；停掉 agent 层时入口返回 503。以前停掉检索层或网关时这里断言的是 200 加 Web 审批 clarification。
 
 **压测**：`npm run eval:load-test:split -- [--api N --agent N --retrieval N --gateway N] --repeat 3`（一次性 PostgreSQL，假模型，行级安全）。报告按层给出每请求 CPU、最忙进程占用的核数、事件循环 p99 和最忙的层，`model.directCalls` 必须是 0。下面是 2026-09-30 的一组，每个配置 3 次，吞吐写范围，全部 0 错误；并发 32，除注明外模型延迟 0：
 
@@ -1295,6 +1296,48 @@ train 上（400 题）的损失拆解：
 - 一台机器上拆分不提高效率：层间 HTTP 和序列化多花约 21% 的 CPU，同样进程数的单体更快。拆分换来的是按层扩容、故障隔离和集中的模型调用管控。
 - 模型并发上限在单体里按实例计，在拆分里按网关进程计；加 `--with-redis` 时都是一个全局上限，800 ms 那一行的差别会消失。
 - 主机在测量期间有约 2 核的后台负载；最后重跑的 1/1/1/1 对照与第一次的吞吐比为 1.00–1.01，没有漂移。
+
+### 读副本、层间身份、截止时间和指标
+
+这一轮的四项改动都默认关闭（依赖故障答 503 除外，见下面），配置见 [configuration.md](configuration.md)，部署见 [deployment.md](deployment.md)。下面是测试固定的行为，不是性能数字。
+
+- **读副本**（`POSTGRES_READ_REPLICA_URLS`）：
+  - `test/postgres-replica.integration.test.mjs`（`bash scripts/run-pgvector-replica-integration.sh`，真实的流复制备库）：副本上的读以租户角色执行，行级安全只给每个租户看自己的行；暂停重放后，在一个实例上上传、替换、删除文档，两个实例的 `/chat` 都没有缺失、过时或包含已删除的内容，回退都被计数；没变的文档在暂停期间仍从副本读；恢复重放后读取回到副本。只覆盖两个单体实例，拆分拓扑在暂停重放下没有集成测试。
+  - `test/postgres-replica-routing.test.mjs`、`postgres-replica-vector-search.test.mjs`、`postgres-replica.test.mjs`：哪些语句能去副本、guard 的内容和快照竞态、检索层从主库重读 docId、延迟计算、熔断、健康检查。
+  - 压测：`bash scripts/run-load-test-pgvector.sh --read-replica --tenant [参数]`，报告给出测量窗口内的路由计数和主备两个节点按类别的语句数（`test/postgres-replica-load-bench.test.mjs` 固定这些字段）。主库和副本在同一台机器上。
+- **层间身份**（`INTERNAL_SERVICE_AUTH`）：`test/service-identity-split.test.mjs` 在 `ed25519` 下把 api → agent → 检索 → 网关作为四个进程跑 `/chat` 和 `/chat/stream`，逐跳检查算法、kid、issuer 和请求绑定；截获的 token 原样重放得到 `SERVICE_TOKEN_REPLAYED`，用检索层的 key 冒充 api 得到 `SERVICE_TOKEN_KEY_ISSUER`，agent 调 agent 得到 403。检索层在这个测试里用本地向量库，不是 PostgreSQL。
+- **截止时间与取消**（`AGENT_REQUEST_TIMEOUT_MS`、`AGENT_CANCEL_ON_DISCONNECT`）：`test/agent-cancellation.test.mjs`、`request-deadline.test.mjs`、`request-deadline-split.test.mjs` 固定：到点时中止进行中的模型调用、运行以 `failed`（`deadline_exceeded`）或 `canceled` 结束且不被恢复；写工作区的 Capability 不被打断；依赖故障返回 503/504 和 `Retry-After`，不再请求 Web 审批；绑定了截止时间但没到点时，`/chat` 的 run store 调用数不变（`agent-run-chat-statement-count` 的固定计数不变）。拆分部署下 retrieval 和网关在这些测试里是替身。
+- **指标**（`METRICS_ENABLED`）：`test/metrics-monolith.e2e.test.mjs` 启动真实的 `node server.js`（假模型），在一次 `/chat` 前后各抓一次 `/metrics`，检查各指标族有记录、暴露内容里没有租户、docId、问题或 token。`test/metrics-rules.test.mjs` 检查告警规则引用的指标和标签都存在，没有用 promtool 或真实的 Prometheus。
+
+**压测**（2026-10-02，一台机器：主库、副本、应用、压测器、假模型同机；每个配置 3 次，写区间；判定规则事先定好）
+
+读副本：`bash scripts/run-load-test-pgvector.sh [--stat-statements | --read-replica] --instances 2 --tenant --model-latency-ms 0,200 --concurrency 1,16,32 --repeat 3`
+
+| 模型延迟 | 并发 | 主库语句/chat（关 → 开） | 降幅 | 副本读占比 | 吞吐 req/s（关 / 开） |
+| --- | --- | --- | --- | --- | --- |
+| 0 ms | 1 | 39.86 → 25.98 | −34.8% | 1.00 | 66.6–68.3 / 65.2–66.7 |
+| 0 ms | 16 | 38.81 → 27.08 | −30.2% | 0.81 | 168.0–176.3 / 161.4–173.3 |
+| 0 ms | 32 | 38.06 → 28.53 | −25.0% | 0.60 | 172.3–174.8 / 173.2–179.7 |
+| 200 ms | 1 | 40.12 → 27.07 | −32.5% | 1.00 | 4.2–4.3 / 4.2–4.2 |
+| 200 ms | 16 | 39.54 → 28.59 | −27.7% | 0.70 | 50.9–51.7 / 50.9–51.7 |
+| 200 ms | 32 | 39.57 → 28.74 | −27.4% | 0.68 | 78.8–79.4 / 78.6–79.3 |
+
+- 规则："分流了读"要求主库语句至少少 30%，"更快"要求吞吐区间不重叠。合计 −28.8%，只有并发 1 和 0 ms/并发 16 过线；吞吐没有一个档位更快。
+- 回退原因全部是 `replica_saturated`（副本连接池默认每进程每副本 10 个，并发 32 时 32–40% 的只读语句回到主库）；因为副本落后（`version_behind`、`lag_*`）回退的次数是 0。测得的最大延迟 287–945 ms，下限来自每 500 ms 一次的采样。
+- 主库每次 `/chat` 的 PostgreSQL CPU 下降（0 ms、并发 1：3.67–3.91 → 2.19–2.27 ms），没有采副本的 CPU，同机不是净节省。
+
+指标开销：`--metrics --metrics-scrape-ms 5000`，单体 ×1，0 ms，`--requests 1500`
+
+| 并发 | 吞吐 关 / 开 / 关（复测） | 每请求 CPU ms 关 / 开 |
+| --- | --- | --- |
+| 16 | 89.92–90.74 / 88.51–89.86 / 89.72–90.35 | 12.38–12.61 / 12.42–12.83 |
+| 32 | 91.32–92.48 / 91.61–93.64 / 93.18–93.62 | 11.89–12.30 / 11.73–12.28 |
+
+- 并发 16 时"开"比第一次的"关"低约 1.5% 且区间不重叠，但复测的"关"与"开"重叠，不排除顺序或漂移的影响，不下结论。抓取 22 次，0 失败，平均 27 KB。
+
+截止时间：`--model-latency-ms 800 --agent-request-timeout-ms 300 --concurrency 4,16 --requests 64 --metrics`
+
+- 第一次测量发现缺陷：被截止时间取消的模型调用被熔断器记成失败，5 次后熔断打开，234 次运行里 226 次直接 503。修复后（取消既不算失败也不算成功）复测：234 次全部以 `deadline_exceeded` 结束，504，0 次 503；失败延迟 p50 309 ms（并发 4）/ 322 ms（并发 16）；模型调用被应用中止 64 / 94 次（并发 16 时其余请求还在等模型槽位就到点了），排空后在途 0。
 
 ## Ragas supplement
 

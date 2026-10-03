@@ -192,6 +192,7 @@
 //     [--request-timeout-ms 120000] [--planner deterministic|llm]
 //     [--auth] [--rate-limit] [--no-embedding-cache] [--tenant] [--no-analyze]
 //     [--postgres-pid-file <postmaster.pid>] [--repeat 1]
+//     [--read-replica-url <disposable streaming replica URL>]   (pgvector, --tenant)
 //     [--latest-name latest-load-test] [--verbose]
 //   split topology (chat scenario, pgvector; replaces --instances):
 //     [--topology monolith|split] [--api 1] [--agent 1] [--retrieval 1] [--gateway 1]
@@ -219,6 +220,16 @@
 // model count each process's calls; --crash-worker-mid-embed kills dedicated
 // worker 0 during its first embeddings request of the level and follows every
 // job it held through the queue table (createCrashInjection).
+//
+// Read replica (--read-replica-url; the wrapper's --read-replica provisions one
+// streaming replica of the disposable cluster): every app process of the
+// pgvector run gets POSTGRES_READ_REPLICA_URLS, so tenant searches may run on
+// the replica (rag/postgres-replicas.js). It needs --tenant, because owner
+// statements never go to a replica. The chat scenario's report then carries,
+// for the measured levels, pg_stat_statements counts on the primary and on the
+// replica separately (searches, freshness guards, tenant settings, other reads,
+// writes) and each process's routing counters, so primary offload can be read
+// off. pg_stat_statements must be loaded on both nodes (the wrapper does that).
 //
 // A report is named by --latest-name and a rerun overwrites it: give each side
 // of a before/after comparison its own name, and keep both.
@@ -251,6 +262,9 @@ const FAKE_CHAT_MODEL = "load-test-chat";
 const FAKE_EMBEDDING_MODEL = "text-embedding-3-small";
 
 export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
+  // AGENT_REQUEST_TIMEOUT_MS of every app process (null: unset, the app's
+  // default of no request deadline).
+  agentRequestTimeoutMs: null,
   analyze: true,
   auth: false,
   balance: "least-outstanding",
@@ -279,9 +293,20 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   ingestWorkers: 0,
   instances: 1,
   latestName: "latest-load-test",
+  // RAG_LLM_CIRCUIT_FAILURE_THRESHOLD of every app process (null: the app's
+  // default; 0 turns the model circuit breaker off).
+  llmCircuitFailureThreshold: null,
   llmMaxConcurrency: 8,
+  // METRICS_ENABLED in every monolith app process (/metrics on an OS-assigned
+  // port of its own, bearer token per run), scraped every metricsScrapeMs
+  // (0: never) while the run lasts.
+  metrics: false,
+  metricsScrapeMs: 5000,
   minRequestsPerClient: 8,
   modelLatencyMs: Object.freeze([0, 800]),
+  // pg_stat_statements per node over each measured /chat level (on with
+  // --read-replica-url; --node-statements asks for it on the primary alone).
+  nodeStatements: false,
   pages: 4,
   planner: "deterministic",
   postgresPidFile: "",
@@ -289,6 +314,7 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   // frontend then backs off, the harness keeps the interval fixed.
   pollIntervalMs: 1000,
   rateLimit: false,
+  readReplicaUrl: "",
   redisUrl: "",
   repeat: 1,
   requestTimeoutMs: 120000,
@@ -408,7 +434,9 @@ export const parseLoadTestArgs = (argv = []) => {
   const flags = new Set([
     "auth",
     "crash-worker-mid-embed",
+    "metrics",
     "no-analyze",
+    "node-statements",
     "no-embedding-cache",
     "rate-limit",
     "tenant",
@@ -443,6 +471,7 @@ export const parseLoadTestArgs = (argv = []) => {
     ...INGEST_ONLY_FLAGS,
     ...INDEX_SWITCH_ONLY_FLAGS,
     ...Object.keys(TIER_REPLICA_FLAGS),
+    "agent-request-timeout-ms",
     "balance",
     "cheap-path",
     "cheap-requests",
@@ -455,12 +484,15 @@ export const parseLoadTestArgs = (argv = []) => {
     "idle-ms",
     "instances",
     "latest-name",
+    "llm-circuit-failure-threshold",
     "llm-max-concurrency",
+    "metrics-scrape-ms",
     "min-requests-per-client",
     "model-latency-ms",
     "pages",
     "planner",
     "postgres-pid-file",
+    "read-replica-url",
     "redis-url",
     "repeat",
     "request-timeout-ms",
@@ -478,6 +510,20 @@ export const parseLoadTestArgs = (argv = []) => {
 
   if (raw.auth) options.auth = true;
   if (raw["no-analyze"]) options.analyze = false;
+  if (raw.metrics) options.metrics = true;
+  if (raw["metrics-scrape-ms"] !== undefined) {
+    if (!options.metrics) throw new Error("--metrics-scrape-ms needs --metrics.");
+    options.metricsScrapeMs = toPositiveInteger(raw["metrics-scrape-ms"], "--metrics-scrape-ms", { allowZero: true });
+  }
+  if (raw["agent-request-timeout-ms"] !== undefined)
+    options.agentRequestTimeoutMs = toPositiveInteger(raw["agent-request-timeout-ms"], "--agent-request-timeout-ms");
+  if (raw["node-statements"]) options.nodeStatements = true;
+  if (raw["llm-circuit-failure-threshold"] !== undefined)
+    options.llmCircuitFailureThreshold = toPositiveInteger(
+      raw["llm-circuit-failure-threshold"],
+      "--llm-circuit-failure-threshold",
+      { allowZero: true }
+    );
   if (raw.tenant) options.tenant = true;
   if (raw["postgres-pid-file"] !== undefined) options.postgresPidFile = String(raw["postgres-pid-file"]).trim();
   if (raw["no-embedding-cache"]) options.embeddingCache = false;
@@ -494,6 +540,7 @@ export const parseLoadTestArgs = (argv = []) => {
     if (options.concurrency.includes(0)) throw new Error("--concurrency levels must be at least 1.");
   }
   if (raw["database-url"] !== undefined) options.databaseUrl = String(raw["database-url"]).trim();
+  if (raw["read-replica-url"] !== undefined) options.readReplicaUrl = String(raw["read-replica-url"]).trim();
   if (raw.documents !== undefined) options.documents = toPositiveInteger(raw.documents, "--documents");
   if (raw["embedding-dimensions"] !== undefined)
     options.embeddingDimensions = toPositiveInteger(raw["embedding-dimensions"], "--embedding-dimensions");
@@ -731,6 +778,23 @@ export const parseLoadTestArgs = (argv = []) => {
     throw new Error(
       "--instances > 1 and --ingest-workers need --storage pgvector: standalone (local) processes share no document registry, vector index or ingest queue."
     );
+  }
+
+  if (options.readReplicaUrl && !storage.includes("pgvector")) {
+    throw new Error("--read-replica-url needs --storage pgvector: only the pgvector run reads PostgreSQL.");
+  }
+  if (options.readReplicaUrl && !options.tenant) {
+    throw new Error(
+      "--read-replica-url needs --tenant: only tenant reads may go to a replica; owner statements always stay on the primary."
+    );
+  }
+
+  if (options.readReplicaUrl) options.nodeStatements = true;
+  if (options.nodeStatements && !storage.includes("pgvector")) {
+    throw new Error("--node-statements needs --storage pgvector: it reads pg_stat_statements on the run's database.");
+  }
+  if (options.metrics && options.topology === "split") {
+    throw new Error("--metrics applies to monolith processes (the split tiers start their listener through startServiceRole, which the harness does not scrape).");
   }
 
   options.storage = [...new Set(storage)];
@@ -1810,8 +1874,8 @@ export const startFakeModelServer = async ({
   const inFlight = { chat: 0, embeddings: 0 };
   const freshStats = () => ({
     byCaller: {},
-    chat: { peakInFlight: inFlight.chat, requests: 0 },
-    embeddings: { inputs: 0, peakInFlight: inFlight.embeddings, requests: 0 },
+    chat: { aborted: 0, peakInFlight: inFlight.chat, requests: 0 },
+    embeddings: { aborted: 0, inputs: 0, peakInFlight: inFlight.embeddings, requests: 0 },
     embeddingsByModel: {},
     other: { requests: 0 },
   });
@@ -1868,13 +1932,19 @@ export const startFakeModelServer = async ({
       inFlight[kind] += 1;
       bucket.peakInFlight = Math.max(bucket.peakInFlight, inFlight[kind]);
       let settled = false;
+      // Closed by the caller before the reply was sent: a call the app gave
+      // up on (a deadline or cancellation), counted as aborted.
+      let replied = false;
       const settle = () => {
         if (!settled) {
           settled = true;
           inFlight[kind] -= 1;
         }
       };
-      response.on("close", settle);
+      response.on("close", () => {
+        if (!replied) bucket.aborted += 1;
+        settle();
+      });
       const caller = fakeModelCaller(request.headers.authorization);
       const inputs = kind === "embeddings" ? (Array.isArray(payload.input) ? payload.input : [payload.input ?? ""]) : [];
       countCall(caller, kind, String(payload.model ?? ""), inputs.length);
@@ -1897,6 +1967,7 @@ export const startFakeModelServer = async ({
       }
 
       const reply = () => {
+        replied = true;
         settle();
         if (kind === "embeddings") {
           const width = fakeEmbeddingWidth(payload.model, dimensions);
@@ -1946,6 +2017,8 @@ export const startFakeModelServer = async ({
         server.close(() => resolve());
       }),
     firstEmbeddingAt: () => ({ ...firstEmbeddingAt }),
+    // Requests whose caller is still connected, now.
+    inFlightNow: () => ({ ...inFlight }),
     holdNextEmbedding: ({ caller }) =>
       new Promise((resolve) => {
         holds.push({ caller, resolve });
@@ -1960,8 +2033,9 @@ export const startFakeModelServer = async ({
     },
     snapshot: () => ({
       byCaller: Object.fromEntries(Object.entries(stats.byCaller).map(([caller, entry]) => [caller, { ...entry }])),
-      chat: { peakInFlight: stats.chat.peakInFlight, requests: stats.chat.requests },
+      chat: { aborted: stats.chat.aborted, peakInFlight: stats.chat.peakInFlight, requests: stats.chat.requests },
       embeddings: {
+        aborted: stats.embeddings.aborted,
         inputs: stats.embeddings.inputs,
         peakInFlight: stats.embeddings.peakInFlight,
         requests: stats.embeddings.requests,
@@ -2049,6 +2123,7 @@ export const buildAppEnvironment = ({
   tempRoot,
   authToken = "",
   callerTag = "",
+  metricsToken = "",
   role = "api",
   runId = "",
 }) => {
@@ -2060,7 +2135,7 @@ export const buildAppEnvironment = ({
   // child gets its wiring from buildTierEnvironment only.
   for (const name of Object.keys(environment)) {
     if (
-      /^(OPENAI_|POSTGRES_|LONG_MEMORY_|PGVECTOR_|QDRANT_|REDIS_|RAG_|AGENT_|API_AUTH|RATE_LIMIT|OTEL_|DOCCOMPARE_|VECTOR_STORE_|DOCUMENT_STORE_|SESSION_MEMORY_STORE_|TASK_STORE_|WORKSPACE_ARTIFACT_STORE_|ADMIN_AUDIT_STORE_|AGENT_RUN_STORE_|UPLOADS_DIRECTORY|FRONTEND_BUILD_DIRECTORY|ALLOWED_ORIGINS|SERPAPI_|PG|DOTENV_|PDF_PARSER|DOCLING_|ARCHIVE_RAG_|INTERNAL_SERVICE_|RETRIEVAL_SERVICE_|MODEL_GATEWAY_|SERVICE_SHUTDOWN_|PORT$)/.test(
+      /^(OPENAI_|POSTGRES_|LONG_MEMORY_|PGVECTOR_|QDRANT_|REDIS_|RAG_|AGENT_|API_AUTH|RATE_LIMIT|OTEL_|DOCCOMPARE_|VECTOR_STORE_|DOCUMENT_STORE_|SESSION_MEMORY_STORE_|TASK_STORE_|WORKSPACE_ARTIFACT_STORE_|ADMIN_AUDIT_STORE_|AGENT_RUN_STORE_|UPLOADS_DIRECTORY|FRONTEND_BUILD_DIRECTORY|ALLOWED_ORIGINS|SERPAPI_|PG|DOTENV_|PDF_PARSER|DOCLING_|ARCHIVE_RAG_|INTERNAL_SERVICE_|RETRIEVAL_SERVICE_|MODEL_GATEWAY_|SERVICE_SHUTDOWN_|METRICS_|PORT$)/.test(
         name
       )
     ) {
@@ -2108,6 +2183,22 @@ export const buildAppEnvironment = ({
   });
 
   if (options.auth) environment.API_AUTH_TOKEN = authToken;
+  // --metrics: what a deployment sets to serve /metrics, on a port the OS
+  // picks (each process names it in its ready reply) and the run's token.
+  if (options.metrics) {
+    Object.assign(environment, {
+      METRICS_ENABLED: "true",
+      METRICS_HOST: "127.0.0.1",
+      METRICS_PORT: "0",
+      ...(metricsToken ? { METRICS_TOKEN: metricsToken } : {}),
+    });
+  }
+  if (Number.isInteger(options.agentRequestTimeoutMs)) {
+    environment.AGENT_REQUEST_TIMEOUT_MS = String(options.agentRequestTimeoutMs);
+  }
+  if (Number.isInteger(options.llmCircuitFailureThreshold)) {
+    environment.RAG_LLM_CIRCUIT_FAILURE_THRESHOLD = String(options.llmCircuitFailureThreshold);
+  }
   // The seed corpus belongs to the tenant the requests act for.
   if (options.tenant) {
     environment.LOAD_TEST_TENANT_USER_ID = LOAD_TEST_TENANT.userId;
@@ -2160,6 +2251,8 @@ export const buildAppEnvironment = ({
       POSTGRES_DATABASE_URL: databaseUrl,
       VECTOR_STORE_PROVIDER: "pgvector",
     });
+    // Tenant searches may then run on the streaming replica.
+    if (options.readReplicaUrl) environment.POSTGRES_READ_REPLICA_URLS = options.readReplicaUrl;
   } else {
     environment.DOCCOMPARE_STANDALONE = "1";
   }
@@ -2312,6 +2405,7 @@ const startAppProcess = async ({ environment, role = "api", verbose }) => {
     start: (documents, { assertFresh = false, primary = true, seedFormat = "text" } = {}) =>
       request({ assertFresh, documents, primary, seedFormat, type: "start" }, "ready"),
     analyze: () => request({ type: "analyze" }, "analyzed", 120000),
+    replicaRouting: () => request({ type: "replicaRouting" }, "replicaRouting", 30000),
     searchTables: () => request({ type: "searchTables" }, "searchTables", 30000),
     stats: () => request({ type: "stats" }, "stats", 30000),
     totals: () => request({ type: "totals" }, "totals", 30000),
@@ -2530,6 +2624,13 @@ const handleChildMessages = (onStart) => {
         });
       } else if (message?.type === "searchTables") {
         process.send({ ...postgres.searches.snapshot(), type: "searchTables" });
+      } else if (message?.type === "replicaRouting") {
+        // This process's read replica counters (rag/postgres-replicas.js).
+        const replicas = await import("../rag/postgres-replicas.js").catch(() => null);
+        process.send({
+          snapshot: typeof replicas?.getReplicaRoutingSnapshot === "function" ? replicas.getReplicaRoutingSnapshot() : null,
+          type: "replicaRouting",
+        });
       } else if (message?.type === "analyze") {
         // Planner statistics for the whole (fresh) database, as the owner.
         const startedAt = performance.now();
@@ -2642,6 +2743,14 @@ const serve = async () => {
 
     server = http.createServer(app);
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    // What server.js does once it listens: with METRICS_ENABLED unset this is
+    // null and changes nothing; with it, the app server's requests are
+    // recorded and /metrics listens on a port of its own.
+    const { startMetricsFromEnv } = await import("../rag/metrics-server.js");
+    const metrics = await startMetricsFromEnv({
+      httpServer: server,
+      ingestJobStore: process.env.RAG_INGEST_MODE === "async" ? (app.locals?.services?.ingestJobStore ?? null) : null,
+    });
 
     return {
       reply: {
@@ -2650,6 +2759,7 @@ const serve = async () => {
         documentCount: message.documents.length,
         ingestMs: round(ingestMs),
         ingestWorker: await describeIngestWorkerSettings(worker),
+        metricsPort: metrics?.port ?? null,
         pid: process.pid,
         port: server.address().port,
         vectorStore: describeVectorStoreRuntime(),
@@ -2657,6 +2767,7 @@ const serve = async () => {
       shutdown: async () => {
         server?.closeAllConnections?.();
         server?.close();
+        await metrics?.close();
         await worker?.stop?.();
       },
     };
@@ -2969,6 +3080,308 @@ const measureIdle = async ({ idleMs, processes }) => {
   const stats = await collectStats(processes);
 
   return stats.map((entry) => idleRatesFromStats(entry));
+};
+
+// ---------------------------------------------------------------------------
+// Read replica (--read-replica-url)
+
+// What a pgvector run's statements are, per node, for --read-replica-url: the
+// retrieval searches, the replica freshness guard and the tenant settings
+// (what a replica can take), other reads, transaction control, writes and
+// utility statements (the primary's alone), and the replica monitor's polls.
+export const NODE_STATEMENT_KINDS = Object.freeze([
+  "search",
+  "guard",
+  "tenantSettings",
+  "otherRead",
+  "transaction",
+  "writeOrUtility",
+  "monitor",
+]);
+
+/** The kind of one pg_stat_statements entry (its normalized query text). */
+export const classifyNodeStatement = (query) => {
+  const text = String(query ?? "");
+
+  // pg_stat_statements keeps no leading comment, so the guard is known by its
+  // shape (rag/postgres-replicas.js buildDocumentFreshnessGuard).
+  if (/AS expected\(doc_id, content_version\)/u.test(text)) return "guard";
+  if (/pg_last_wal_replay_lsn|pg_current_wal_flush_lsn/u.test(text)) return "monitor";
+  // rag/postgres.js's tenant settings: three set_config calls in one SELECT
+  // (pg_stat_statements shows their literals as $n).
+  if (/set_config\([^)]*\),\s*set_config\([^)]*\),\s*set_config\(/u.test(text)) return "tenantSettings";
+  if (/AS vector_score|AS sparse_score|_sparse_search\(|_sparse_rank\(/u.test(text)) return "search";
+  if (/^\s*(BEGIN|COMMIT|ROLLBACK|START|SAVEPOINT|RELEASE)\b/iu.test(text)) return "transaction";
+  if (
+    /\b(INSERT|UPDATE|DELETE|MERGE)\b/iu.test(text) ||
+    /^\s*(\/\*[\s\S]*?\*\/\s*)*(CREATE|ALTER|DROP|TRUNCATE|ANALYZE|VACUUM|LOCK|GRANT|REVOKE|SET|LISTEN|UNLISTEN|NOTIFY|DO|CALL)\b/iu.test(text)
+  ) {
+    return "writeOrUtility";
+  }
+  return "otherRead";
+};
+
+/** Calls per kind over pg_stat_statements rows ({ query, calls }), plus `total`. */
+export const summarizeNodeStatements = (rows = []) => {
+  const counts = Object.fromEntries(NODE_STATEMENT_KINDS.map((kind) => [kind, 0]));
+
+  for (const row of rows) {
+    // The harness's own reads of the view.
+    if (/pg_stat_statements/u.test(String(row?.query ?? ""))) continue;
+    counts[classifyNodeStatement(row?.query)] += Number(row?.calls) || 0;
+  }
+
+  return { ...counts, total: NODE_STATEMENT_KINDS.reduce((sum, kind) => sum + counts[kind], 0) };
+};
+
+/** `after` minus `before` per kind, never below 0 (an entry pg_stat_statements evicted). */
+export const diffNodeStatements = (before, after) =>
+  Object.fromEntries(
+    [...NODE_STATEMENT_KINDS, "total"].map((kind) => [kind, Math.max(0, (Number(after?.[kind]) || 0) - (Number(before?.[kind]) || 0))])
+  );
+
+/** `after` minus `before` for every count of two sumReplicaRouting results. */
+export const diffReplicaRouting = (before, after) => {
+  const diff = (left = {}, right = {}) =>
+    Object.fromEntries(Object.keys(right).map((key) => [key, (Number(right[key]) || 0) - (Number(left[key]) || 0)]));
+
+  return {
+    bypasses: diff(before?.bypasses, after?.bypasses),
+    fallbacks: diff(before?.fallbacks, after?.fallbacks),
+    processes: after?.processes ?? 0,
+    reads: diff(before?.reads, after?.reads),
+  };
+};
+
+/** Read replica counters summed over the app processes' getReplicaRoutingSnapshot(). */
+export const sumReplicaRouting = (snapshots = []) => {
+  const total = { bypasses: {}, fallbacks: {}, processes: 0, reads: { primary: 0, replica: 0 } };
+  const add = (into, from) => {
+    for (const [key, value] of Object.entries(from ?? {})) into[key] = (into[key] ?? 0) + (Number(value) || 0);
+  };
+
+  for (const snapshot of snapshots) {
+    if (!snapshot?.enabled) continue;
+    total.processes += 1;
+    add(total.reads, snapshot.reads);
+    add(total.fallbacks, snapshot.fallbacks);
+    add(total.bypasses, snapshot.bypasses);
+  }
+
+  return total;
+};
+
+const withNodeClient = async (url, callback) => {
+  const { default: pg } = await import("pg");
+  const client = new pg.Client({ connectionString: url });
+
+  await client.connect();
+
+  try {
+    return await callback(client);
+  } finally {
+    await client.end();
+  }
+};
+
+/** Refuses a --read-replica-url that is not a hot standby. */
+const assertReadReplica = async (url) => {
+  const inRecovery = await withNodeClient(url, async (client) => (await client.query("SELECT pg_is_in_recovery() AS standby")).rows[0]?.standby);
+
+  if (inRecovery !== true) {
+    throw new Error("--read-replica-url must point at a hot standby (pg_is_in_recovery() is false there).");
+  }
+};
+
+// The run database's pg_stat_statements on one node, or null without it.
+const readNodeStatements = async (url) => {
+  try {
+    return await withNodeClient(url, async (client) =>
+      summarizeNodeStatements(
+        (
+          await client.query(
+            `SELECT s.query, s.calls::bigint AS calls
+             FROM pg_stat_statements s
+             JOIN pg_database d ON d.oid = s.dbid
+             WHERE d.datname = current_database()`
+          )
+        ).rows
+      )
+    );
+  } catch (error) {
+    console.warn(`[pgvector] pg_stat_statements is not readable on ${new URL(url).host} (${error?.code ?? error?.message}); per-node statements are not counted.`);
+    return null;
+  }
+};
+
+const readRoutingSnapshots = (processes) =>
+  Promise.all(
+    processes.map((child) => (typeof child.replicaRouting === "function" ? child.replicaRouting().then((reply) => reply.snapshot) : null))
+  );
+
+// Per-node statements and every process's routing counters, at one mark.
+const readReplicaStatementMark = async ({ options, processes }) => ({
+  primary: await readNodeStatements(options.databaseUrl),
+  replica: await readNodeStatements(options.readReplicaUrl),
+  routing: sumReplicaRouting(await readRoutingSnapshots(processes)),
+});
+
+/**
+ * What the measured levels of a --read-replica-url run did: statements per
+ * node (pg_stat_statements) and the app processes' routing counters, both
+ * over the window since `before`, plus each process's replica state at the
+ * end. Host and port only, never a URL.
+ */
+const collectReadReplicaReport = async ({ before, options, processes }) => {
+  const after = await readReplicaStatementMark({ options, processes });
+  const snapshots = await readRoutingSnapshots(processes);
+
+  return {
+    endpoint: new URL(options.readReplicaUrl).host,
+    routing: {
+      // Each process's own counters at the end, since it started (warm-up
+      // included), and its replica's state then.
+      processesAtEnd: snapshots.map((snapshot) =>
+        snapshot?.enabled
+          ? {
+              bypasses: snapshot.bypasses,
+              fallbacks: snapshot.fallbacks,
+              reads: snapshot.reads,
+              replicas: (snapshot.replicas ?? []).map((replica) => ({
+                circuit: replica.circuit?.state ?? null,
+                id: replica.id,
+                lagMs: replica.lagMs,
+                state: replica.state,
+              })),
+            }
+          : null
+      ),
+      total: diffReplicaRouting(before.routing, after.routing),
+    },
+    statements:
+      before.primary && before.replica && after.primary && after.replica
+        ? {
+            primary: diffNodeStatements(before.primary, after.primary),
+            replica: diffNodeStatements(before.replica, after.replica),
+          }
+        : null,
+  };
+};
+
+// pg_stat_statements on the primary (and the replica, with one) and the
+// processes' routing counters, read at one of a level's window marks; the two
+// nodes are read at once so the marks line up.
+const readNodeMark = async ({ options, processes }) => {
+  const [primary, replica, routing] = await Promise.all([
+    readNodeStatements(options.databaseUrl),
+    options.readReplicaUrl ? readNodeStatements(options.readReplicaUrl) : null,
+    options.readReplicaUrl ? readRoutingSnapshots(processes).then(sumReplicaRouting) : null,
+  ]);
+
+  return { primary, replica, routing };
+};
+
+/**
+ * One measured level's statements per node and routing counters (end mark
+ * minus start mark), per request, and the share of marked reads the replica
+ * served. "Net of monitor" leaves out the replica lag monitor's polls, which
+ * run on a timer, not per request. Null when a node was not readable.
+ */
+export const describeNodeLevel = ({ end, requests, start }) => {
+  if (!start?.primary || !end?.primary) return null;
+
+  const per = (value) => (requests > 0 ? round(value / requests, 2) : null);
+  const primary = diffNodeStatements(start.primary, end.primary);
+  const replica = start.replica && end.replica ? diffNodeStatements(start.replica, end.replica) : null;
+  const routing = start.routing && end.routing ? diffReplicaRouting(start.routing, end.routing) : null;
+  const markedReads = routing ? (routing.reads.primary ?? 0) + (routing.reads.replica ?? 0) : 0;
+
+  return {
+    perRequest: {
+      primary: per(primary.total),
+      primaryNetOfMonitor: per(primary.total - primary.monitor),
+      replica: replica ? per(replica.total) : null,
+      replicaNetOfMonitor: replica ? per(replica.total - replica.monitor) : null,
+    },
+    primary,
+    replica,
+    replicaReadShare: markedReads > 0 ? round(routing.reads.replica / markedReads, 3) : null,
+    routing,
+  };
+};
+
+/**
+ * Samples every process's replica lag (getReplicaRoutingSnapshot, which the
+ * lag monitor refreshes every POSTGRES_READ_REPLICA_LAG_POLL_MS) while a level
+ * is measured, keeping the largest. A replica whose lag is unknown counts as
+ * an unknown sample.
+ */
+const createLagSampler = (processes, intervalMs = 500) => {
+  let timer = null;
+  let reading = false;
+  const seen = { maxLagMs: null, samples: 0, unknownSamples: 0, unusableSamples: 0 };
+  const sample = async () => {
+    if (reading) return;
+    reading = true;
+    try {
+      for (const snapshot of await readRoutingSnapshots(processes)) {
+        for (const replica of snapshot?.replicas ?? []) {
+          seen.samples += 1;
+          if (Number.isFinite(replica.lagMs)) seen.maxLagMs = Math.max(seen.maxLagMs ?? 0, replica.lagMs);
+          else seen.unknownSamples += 1;
+          if (replica.usable === false) seen.unusableSamples += 1;
+        }
+      }
+    } catch {
+      // A missed sample; the next one reads again.
+    } finally {
+      reading = false;
+    }
+  };
+
+  return {
+    describe: () => ({ intervalMs, ...seen }),
+    start: () => {
+      sample();
+      timer = setInterval(sample, intervalMs);
+    },
+    stop: () => {
+      clearInterval(timer);
+      timer = null;
+    },
+  };
+};
+
+export const formatReadReplica = (readReplica) => {
+  if (!readReplica) return [];
+
+  const { routing, statements } = readReplica;
+  const total = routing?.total ?? { fallbacks: {}, reads: {} };
+  const fallbacks = Object.entries(total.fallbacks ?? {})
+    .filter(([, count]) => count > 0)
+    .map(([reason, count]) => `${reason} ${count}`);
+  const lines = [
+    "",
+    `Read replica: one streaming replica at ${readReplica.endpoint} (POSTGRES_READ_REPLICA_URLS in every app process). Over the measured levels the app processes sent ${cell(total.reads?.replica)} read(s) to the replica and ${cell(total.reads?.primary)} marked read(s) to the primary${fallbacks.length > 0 ? ` (fallbacks: ${fallbacks.join(", ")})` : " (no fallbacks)"}.`,
+  ];
+
+  if (statements) {
+    lines.push(
+      "",
+      "| Node | Searches | Freshness guards | Tenant settings | Other reads | Transaction control | Writes / utility | Replica monitor | Total |",
+      "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+      ...["primary", "replica"].map(
+        (node) =>
+          `| ${node} | ${NODE_STATEMENT_KINDS.map((kind) => cell(statements[node]?.[kind])).join(" | ")} | ${cell(statements[node]?.total)} |`
+      ),
+      "",
+      "Statement calls per node from pg_stat_statements over the measured levels (cheap path and /chat), on each node separately."
+    );
+  } else {
+    lines.push("Per-node statement counts: not available (pg_stat_statements was not readable on both nodes).");
+  }
+
+  return lines;
 };
 
 /**
@@ -3289,6 +3702,11 @@ const runScenario = async ({
     let hostAtStart = null;
     let hostAtEnd = null;
     let model = null;
+    // --node-statements / --read-replica-url: per-node statements of /chat levels.
+    const nodeMarks = target.kind === "chat" && options.nodeStatements;
+    let nodeAtStart = null;
+    let nodeAtEnd = null;
+    const lagSampler = nodeMarks && options.readReplicaUrl ? createLagSampler(processes) : null;
 
     // Marks taken inside the loop, when the first measured request and the
     // first cool-down request are sent (runClosedLoop's window): exactly the
@@ -3298,11 +3716,15 @@ const runScenario = async ({
         model = fakeModel.snapshot();
         statsAtEnd = collectStats(processes);
         hostAtEnd = hostSampler?.mark() ?? null;
+        if (nodeMarks) nodeAtEnd = readNodeMark({ options, processes });
+        lagSampler?.stop();
       },
       onMeasureStart: () => {
         fakeModel.resetStats();
         statsAtStart = collectStats(processes);
         hostAtStart = hostSampler?.mark() ?? null;
+        if (nodeMarks) nodeAtStart = readNodeMark({ options, processes });
+        lagSampler?.start();
       },
     };
     const { cooldownRequests, results, wallMs, windowCompletions, windowCompletionsByInstance } = await runLevel({
@@ -3317,9 +3739,18 @@ const runScenario = async ({
       target,
       warmup,
     });
+    // Model calls the app still holds open once every /chat has returned
+    // (the fake counts a call until its caller closes it or it is answered).
+    const modelInFlightAfterDrain = target.kind === "chat" ? fakeModel.inFlightNow() : null;
     await statsAtStart;
     const serverStats = await statsAtEnd;
     const summary = summarizeLevel({ results, wallMs });
+    const nodeStatements = nodeMarks
+      ? {
+          ...describeNodeLevel({ end: await nodeAtEnd, requests: summary.requests, start: await nodeAtStart }),
+          ...(lagSampler ? { lag: lagSampler.describe() } : {}),
+        }
+      : null;
     const host = hostSampler ? hostSampler.diff(await hostAtStart, await hostAtEnd, { units: summary.requests }) : null;
     // Exactly `requests` requests return inside the window (runClosedLoop), so
     // counters read over it divide by that.
@@ -3336,8 +3767,13 @@ const runScenario = async ({
       cooldownRequests,
       windowCompletions,
       ...summary,
+      ...(Number.isInteger(options.agentRequestTimeoutMs) && target.kind === "chat"
+        ? { failedLatencyMs: summarizeLatencies(results.filter((result) => result && !isSuccess(result)).map((result) => result.latencyMs)) }
+        : {}),
+      ...(nodeStatements ? { nodeStatements } : {}),
       littleLawMeanMs: littleLawMeanMs(concurrency, summary.throughputRps),
       model: {
+        ...(modelInFlightAfterDrain ? { inFlightAfterDrain: modelInFlightAfterDrain } : {}),
         chatCompletionsPerRequest: perRequest(model.chat.requests),
         embeddingRequestsPerRequest: perRequest(model.embeddings.requests),
         peakChatInFlight: observedPeakInFlight({
@@ -3396,6 +3832,11 @@ const runScenario = async ({
     console.log(
       `  ${target.label.padEnd(26)} c=${String(concurrency).padStart(3)}${repeat > 1 ? ` #${run}` : ""}  ${String(summary.throughputRps).padStart(8)} req/s  mean ${summary.latencyMs.mean} ms  p50 ${summary.latencyMs.p50} ms  p95 ${summary.latencyMs.p95} ms  p99 ${summary.latencyMs.p99} ms (n=${summary.latencyMs.count})  errors ${summary.errors}/${summary.requests}${target.kind === "chat" ? `  peak model in flight ${model.chat.peakInFlight}` : ""}${spread}${tierCpu}`
     );
+    if (nodeStatements?.perRequest) {
+      console.log(
+        `    statements per request: primary ${nodeStatements.perRequest.primary} (net of monitor ${nodeStatements.perRequest.primaryNetOfMonitor}), replica ${cell(nodeStatements.perRequest.replica)}; replica read share ${cell(nodeStatements.replicaReadShare)}${nodeStatements.lag ? `; max lag ${cell(nodeStatements.lag.maxLagMs)} ms` : ""}`
+      );
+    }
   }
 
   return {
@@ -5499,6 +5940,7 @@ export const formatLoadTestMarkdown = (report) => {
       ? [
           `| ANALYZE after the warm-up | ${config.analyze === false ? "no (--no-analyze): the fresh database has no planner statistics" : "yes"} |`,
           `| PostgreSQL CPU sampled | ${config.postgresCpuSampled ? "yes (postmaster and its children, ps at the window marks)" : "no (no --postgres-pid-file)"} |`,
+          `| Read replica | ${config.readReplica ? "one streaming replica; tenant searches may run there (POSTGRES_READ_REPLICA_URLS)" : "none"} |`,
         ]
       : []),
     `| Embedding dimensions / query embedding cache | ${config.embeddingDimensions} / ${
@@ -5558,6 +6000,7 @@ export const formatLoadTestMarkdown = (report) => {
     if (idle) lines.push(idle);
     const lifetime = formatLifetimeCpu(run.topology);
     if (lifetime) lines.push(lifetime);
+    lines.push(...formatReadReplica(run.readReplica));
     lines.push("");
 
     for (const scenario of run.scenarios) {
@@ -5849,6 +6292,98 @@ const startIngestWorkers = async ({ environmentFor, options, storage, workers })
 export const countIngestWorkerLoops = (processes = []) =>
   processes.reduce((total, entry) => total + (Number.isInteger(entry?.ingestWorker?.concurrency) ? entry.ingestWorker.concurrency : 0), 0);
 
+// Families kept from each process's last scrape (--metrics): the ones a
+// before/after or a deadline run reads. Sample lines only.
+export const KEPT_METRIC_FAMILIES = Object.freeze([
+  "archive_rag_agent_runs_total",
+  "archive_rag_http_requests_total",
+  "archive_rag_model_calls_total",
+  "archive_rag_model_guard_in_flight",
+  "archive_rag_model_guard_waiting",
+  "archive_rag_postgres_reads_total",
+  "archive_rag_postgres_replica_fallbacks_total",
+]);
+
+export const keepMetricSamples = (text = "") =>
+  String(text)
+    .split("\n")
+    .filter((line) => line && !line.startsWith("#") && KEPT_METRIC_FAMILIES.some((family) => line.startsWith(family)));
+
+const scrapeMetrics = ({ port, token }) =>
+  new Promise((resolve) => {
+    const startedAt = performance.now();
+    const request = http.get(
+      { headers: token ? { authorization: `Bearer ${token}` } : {}, host: "127.0.0.1", path: "/metrics", port, timeout: 10000 },
+      (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => resolve({ body, ms: performance.now() - startedAt, status: response.statusCode }));
+        response.on("error", () => resolve({ body: "", ms: performance.now() - startedAt, status: 0 }));
+      }
+    );
+    request.on("timeout", () => request.destroy(new Error("timeout")));
+    request.on("error", () => resolve({ body: "", ms: performance.now() - startedAt, status: 0 }));
+  });
+
+/**
+ * --metrics: scrapes every instance's /metrics every `intervalMs` (0: never)
+ * from start() until finish(), as a Prometheus server would, and once more at
+ * finish() to keep KEPT_METRIC_FAMILIES of each process.
+ */
+const createMetricsScraper = ({ intervalMs, ports, token }) => {
+  const totals = { bytes: 0, failures: 0, ms: 0, scrapes: 0 };
+  let timer = null;
+  const scrapeAll = () =>
+    Promise.all(
+      ports.map(async (port) => {
+        const result = await scrapeMetrics({ port, token });
+        totals.scrapes += 1;
+        totals.ms += result.ms;
+        totals.bytes += result.body.length;
+        if (result.status !== 200) totals.failures += 1;
+        return result;
+      })
+    );
+
+  return {
+    finish: async () => {
+      clearInterval(timer);
+      timer = null;
+      const last = await scrapeAll();
+      return {
+        intervalMs,
+        meanBytes: totals.scrapes > 0 ? Math.round(totals.bytes / totals.scrapes) : null,
+        meanScrapeMs: totals.scrapes > 0 ? round(totals.ms / totals.scrapes) : null,
+        processes: last.map((result, index) => ({ index, samples: keepMetricSamples(result.body), status: result.status })),
+        scrapeFailures: totals.failures,
+        scrapes: totals.scrapes,
+      };
+    },
+    start: () => {
+      if (intervalMs > 0 && ports.length > 0) timer = setInterval(scrapeAll, intervalMs);
+    },
+    stop: () => {
+      clearInterval(timer);
+      timer = null;
+    },
+  };
+};
+
+// The run's agent runs by status and error code/reason, as the owner (the
+// --agent-request-timeout-ms evidence: how many runs ended on the deadline).
+const readAgentRunOutcomes = (databaseUrl) =>
+  withNodeClient(databaseUrl, async (client) =>
+    (
+      await client.query(
+        `SELECT status, error->>'code' AS code, error->>'reason' AS reason, count(*)::int AS runs
+         FROM rag_agent_runs GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`
+      )
+    ).rows
+  ).catch((error) => ({ error: error?.code ?? error?.message ?? "error" }));
+
 const main = async () => {
   const options = parseLoadTestArgs(process.argv.slice(2));
 
@@ -5875,6 +6410,7 @@ const main = async () => {
   const worktree = await readWorktreeState();
   const harnessSha256 = await readHarnessSha256();
   const postmasterPid = await readPostmasterPid(options.postgresPidFile);
+  if (options.readReplicaUrl) await assertReadReplica(options.readReplicaUrl);
   if (options.postgresPidFile && !postmasterPid) {
     console.warn(`--postgres-pid-file ${options.postgresPidFile} names no running postmaster; PostgreSQL CPU is not sampled.`);
   }
@@ -5885,6 +6421,8 @@ const main = async () => {
     pages: options.pages,
   });
   const authToken = options.auth ? randomBytes(24).toString("hex") : "";
+  // --metrics: the scrape token, handed to the app processes only.
+  const metricsToken = options.metrics ? randomBytes(16).toString("hex") : "";
   const headers = buildRequestHeaders({ authToken, options });
   const split = options.topology === "split";
   // The split topology's internal signing key: generated here, handed to its
@@ -5915,6 +6453,7 @@ const main = async () => {
           authToken,
           callerTag,
           databaseUrl: options.databaseUrl,
+          metricsToken,
           modelBaseUrl: fakeModel.baseUrl,
           options,
           role,
@@ -5940,6 +6479,7 @@ const main = async () => {
       const workers = [];
       // The split topology's agent, retrieval and gateway processes.
       const tierApps = [];
+      let metricsScraper = null;
       // The cluster's CPU belongs to the pgvector run only.
       const hostSampler = createHostSampler({ postmasterPid: storage === "pgvector" ? postmasterPid : null });
 
@@ -5970,6 +6510,17 @@ const main = async () => {
         const scenarios = [];
         let databaseAnalyzeMs = null;
         let idle = null;
+        // --read-replica-url: per-node statements and routing counters of the
+        // chat scenario's measured levels.
+        let readReplica = null;
+        metricsScraper = options.metrics
+          ? createMetricsScraper({
+              intervalMs: options.metricsScrapeMs,
+              ports: instances.map((instance) => instance.metricsPort).filter(Number.isInteger),
+              token: metricsToken,
+            })
+          : null;
+        metricsScraper?.start();
 
         if (options.scenario === "ingest") {
           if (options.warmup > 0) {
@@ -6067,6 +6618,8 @@ const main = async () => {
           }
           databaseAnalyzeMs = await analyzeDatabase({ options, primary: apps[0], storage });
           idle = await measureIdle({ idleMs: options.idleMs, processes });
+          const replicaMark =
+            options.readReplicaUrl && storage === "pgvector" ? await readReplicaStatementMark({ options, processes }) : null;
           scenarios.push(
             await runScenario({
               apps,
@@ -6113,7 +6666,15 @@ const main = async () => {
               })
             );
           }
+          if (replicaMark) readReplica = await collectReadReplicaReport({ before: replicaMark, options, processes });
         }
+
+        const metrics = metricsScraper ? await metricsScraper.finish() : null;
+        const agentRunOutcomes =
+          Number.isInteger(options.agentRequestTimeoutMs) && storage === "pgvector"
+            ? await readAgentRunOutcomes(options.databaseUrl)
+            : null;
+        if (agentRunOutcomes) console.log(`[${storage}] agent runs by outcome: ${JSON.stringify(agentRunOutcomes)}`);
 
         // Whole-run CPU of every process, read before any of them stops.
         const lifetime = summarizeProcessTotals({
@@ -6142,6 +6703,9 @@ const main = async () => {
           })),
           ingestWorkerLoops: workerLoops,
           ingestWorkers: workers.length,
+          ...(metrics ? { metrics } : {}),
+          ...(agentRunOutcomes ? { agentRunOutcomes } : {}),
+          readReplica,
           scenarios,
           sharedState: options.sharedState,
           storage,
@@ -6161,6 +6725,7 @@ const main = async () => {
         }
         throw error;
       } finally {
+        metricsScraper?.stop();
         await Promise.all([...workers, ...apps, ...tierApps].map((child) => child.stop()));
         await rm(tempRoot, { force: true, recursive: true });
       }
@@ -6217,6 +6782,12 @@ const main = async () => {
       ingestWorkers: options.ingestWorkers,
       instances: options.instances,
       llmMaxConcurrency: options.llmMaxConcurrency,
+      ...(options.metrics ? { metrics: true, metricsScrapeMs: options.metricsScrapeMs } : {}),
+      ...(Number.isInteger(options.agentRequestTimeoutMs) ? { agentRequestTimeoutMs: options.agentRequestTimeoutMs } : {}),
+      ...(Number.isInteger(options.llmCircuitFailureThreshold)
+        ? { llmCircuitFailureThreshold: options.llmCircuitFailureThreshold }
+        : {}),
+      ...(options.nodeStatements ? { nodeStatements: true } : {}),
       minRequestsPerClient: options.minRequestsPerClient,
       modelLatencyMs: options.modelLatencyMs,
       nodeVersion: process.version,
@@ -6227,6 +6798,7 @@ const main = async () => {
       postgresCpuSampled: Boolean(postmasterPid),
       questions: corpus.questions.length,
       rateLimit: options.rateLimit,
+      readReplica: Boolean(options.readReplicaUrl),
       repeat: indexSwitch ? null : options.repeat,
       requestTimeoutMs: options.requestTimeoutMs,
       requests: options.requests,

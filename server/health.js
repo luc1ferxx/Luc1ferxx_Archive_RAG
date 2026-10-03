@@ -57,6 +57,7 @@ import {
 } from "./rag/postgres.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
 import { createPostgresIngestJobStore } from "./rag/ingest-job-store.js";
+import { checkReadReplicaHealth } from "./rag/postgres-replicas.js";
 import { checkSharedStateHealth } from "./rag/shared-state.js";
 import { probeDoclingServe } from "./rag/docling-parser.js";
 import { getDoclingFallback, getPdfParser } from "./rag/config.js";
@@ -1190,9 +1191,13 @@ export const buildHealthReport = async ({ env = process.env } = {}) => {
   };
   const selected = new Set(tiers.flatMap((tier) => HEALTH_CHECKS_BY_TIER[tier]));
   const names = Object.keys(runnable).filter((name) => selected.has(name));
-  const [results, agentService] = await Promise.all([
+  const [results, agentService, readReplicas] = await Promise.all([
     Promise.all(names.map((name) => runnable[name]())),
     remoteAgent ? checkAgentServiceHealth({ env }) : null,
+    // Only where searches run, and only with POSTGRES_READ_REPLICA_URLS set:
+    // lag, a down replica or an open circuit is a warning (the primary takes
+    // the reads), never an error that takes the process out of rotation.
+    tiers.includes("retrieval") ? checkReadReplicaHealth() : null,
   ]);
   const checks = Object.fromEntries(names.map((name, index) => [name, results[index]]));
 
@@ -1202,6 +1207,10 @@ export const buildHealthReport = async ({ env = process.env } = {}) => {
 
   if (agentService) {
     checks.agentService = agentService;
+  }
+
+  if (readReplicas) {
+    checks.readReplicas = readReplicas;
   }
 
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));

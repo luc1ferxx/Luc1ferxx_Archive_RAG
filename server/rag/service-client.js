@@ -9,8 +9,9 @@ import {
   SERVICE_TOKEN_HEADER,
   signServiceToken,
 } from "./service-identity.js";
+import { instrumentServiceClient, recordServiceFailover } from "./metrics-service-client.js";
 import {
-  getServiceRole,
+  getServiceIssuer,
   getServiceUrls,
   normalizeServiceUrl,
   SERVICE_TIERS,
@@ -313,7 +314,8 @@ const trackStreamBody = (response, onDone) => {
  *   audience   the tier's name (SERVICE_TIERS value); the token audience.
  *   urls       replica base URLs (validated like the *_SERVICE_URL lists).
  *   timeoutMs  default budget per call (INTERNAL_SERVICE_TIMEOUT_MS).
- *   issuer     this process's role, the token issuer (ARCHIVE_RAG_ROLE).
+ *   issuer     the token issuer: this process's role (ARCHIVE_RAG_ROLE), or
+ *              ingest-worker (service-topology.js getServiceIssuer).
  *   cooldownMs how long a failed replica is passed over
  *              (INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS).
  *   unavailableStatuses  answers that mean "replica unavailable" (default
@@ -339,7 +341,7 @@ export const createServiceClient = ({
   }
 
   const serviceName = String(service ?? tokenAudience);
-  const tokenIssuer = String(issuer ?? getServiceRole(env)).trim();
+  const tokenIssuer = String(issuer ?? getServiceIssuer(env)).trim();
   const defaultTimeoutMs = toPositiveInteger(timeoutMs, getServiceTimeoutMs(env));
   const replicaCooldownMs = toPositiveInteger(cooldownMs, getServiceCooldownMs(env));
   const unavailable = new Set(unavailableStatuses);
@@ -400,8 +402,13 @@ export const createServiceClient = ({
       { attempts, service: serviceName }
     );
 
-  const buildHeaders = ({ accessScope, claims, deadlineMs, headers, requestId, system }) => {
+  // One attempt's headers and body. The token is signed afresh for every
+  // attempt and bound to its method, target and the exact body bytes sent
+  // (service-identity.js), so a failover never presents a token twice and a
+  // captured token is no use against another route or body.
+  const buildAttempt = ({ accessScope, body, claims, deadlineMs, headers, method, path, requestId, system }) => {
     const outbound = copyCallerHeaders(headers);
+    const outboundBody = buildBody(body, outbound);
     const carrier = {};
 
     propagation.inject(context.active(), carrier);
@@ -412,6 +419,7 @@ export const createServiceClient = ({
       claims,
       env,
       issuer: tokenIssuer,
+      request: { body: outboundBody, method, target: path },
       system,
     });
     outbound[SERVICE_REQUEST_ID_HEADER] = requestId;
@@ -420,7 +428,7 @@ export const createServiceClient = ({
       outbound[SERVICE_DEADLINE_HEADER] = String(Math.max(0, Math.floor(deadlineMs)));
     }
 
-    return outbound;
+    return { body: outboundBody, headers: outbound };
   };
 
   // Runs attempts until a replica gives a usable answer, then hands the
@@ -466,17 +474,24 @@ export const createServiceClient = ({
         throw timeoutError(tried.size, waitMs);
       }
 
+      // Counted only once the next attempt will be made.
+      if (tried.size > 0) {
+        recordServiceFailover(tokenAudience);
+      }
+
       // Built before the replica is marked busy: a signing or body error is
       // the caller's, never the replica's.
-      const headers = buildHeaders({
+      const { body: outboundBody, headers } = buildAttempt({
         accessScope,
+        body,
         claims,
         deadlineMs: streaming ? (deadlineMs === null ? null : deadlineMs - elapsed()) : budgetMs,
         headers: callerHeaders,
+        method,
+        path,
         requestId,
         system,
       });
-      const outboundBody = buildBody(body, headers);
       const attempt = createAttemptSignal(signal);
       const waitTimer = attempt.arm(budgetMs);
       let released = false;
@@ -696,7 +711,7 @@ export const createServiceClient = ({
     };
   };
 
-  return { audience: tokenAudience, request, snapshot, stream };
+  return instrumentServiceClient({ audience: tokenAudience, request, snapshot, stream });
 };
 
 /**
@@ -712,7 +727,7 @@ const registeredClients = new Map();
 
 /**
  * The process-wide client for a tier (SERVICE_TIERS value), built from its
- * *_SERVICE_URL list, ARCHIVE_RAG_ROLE as issuer, and the INTERNAL_SERVICE_*
+ * *_SERVICE_URL list, getServiceIssuer as issuer, and the INTERNAL_SERVICE_*
  * settings. Rebuilt when the URL list changes. A tier without URLs still gets
  * a client, whose calls fail with SERVICE_NOT_CONFIGURED.
  */

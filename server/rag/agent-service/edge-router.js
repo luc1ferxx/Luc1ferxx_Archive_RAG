@@ -14,6 +14,7 @@ import {
 import { parseOrRespond } from "../../routes/validation.js";
 import { getAdminActionPermissionForRequest } from "../admin-authorization.js";
 import { getAgentServiceTimeoutMs } from "../config.js";
+import { DEFAULT_OUTAGE_RETRY_AFTER_SECONDS } from "../dependency-outage.js";
 import { getServiceClient, ServiceUnavailableError } from "../service-client.js";
 import {
   SERVICE_IDENTITY_ERROR_CODES,
@@ -39,9 +40,16 @@ import { ADMIN_PERMISSION_CLAIM, AGENT_EDGE_ERROR_CODES } from "./contract.js";
 //   - answer: status and body unchanged, plus an allowlist of headers; CORS
 //     and security headers stay the edge's own.
 //   - failures: an agent tier that cannot be reached answers 503 (504 when
-//     the budget ran out) with a stable code from service-client.js, while
-//     the routes that stay at the edge keep working. Only idempotent requests
-//     are retried on another replica; a /chat is never run twice.
+//     the budget ran out) with a stable code from service-client.js and a
+//     Retry-After, while the routes that stay at the edge keep working. Only
+//     idempotent requests are retried on another replica; a /chat is never
+//     run twice. The agent tier's own 503/504 (a dependency outage, a run
+//     past its deadline) passes through with its body, and with Retry-After
+//     restored from the body's retryAfterSeconds.
+//   - deadline: every forwarded call carries the time left of
+//     AGENT_SERVICE_TIMEOUT_MS as its deadline header, and the agent tier
+//     cancels the run when it passes (rag/request-deadline.js), so the edge
+//     giving up and the run stopping happen together.
 //   - /chat/stream: events are relayed as they arrive (framed at event
 //     boundaries, so a broken upstream never delivers half an event). A client
 //     that disconnects aborts the upstream request; an upstream that stops
@@ -216,6 +224,12 @@ const createResponder = ({ logger }) => {
       // is the agent tier's own answer (a model circuit that is open, an admin
       // action that is unavailable), passed through unchanged.
       if (error.remoteStatus && isPlainObject(error.remoteBody)) {
+        const retryAfterSeconds = Number(error.remoteBody.retryAfterSeconds);
+
+        if (Number.isInteger(retryAfterSeconds) && retryAfterSeconds > 0) {
+          res.setHeader("Retry-After", String(retryAfterSeconds));
+        }
+
         return res.status(error.remoteStatus).json(error.remoteBody);
       }
 
@@ -224,6 +238,8 @@ const createResponder = ({ logger }) => {
           error.causeCode ? ` (${error.causeCode})` : ""
         }.`
       );
+
+      res.setHeader("Retry-After", String(DEFAULT_OUTAGE_RETRY_AFTER_SECONDS));
 
       return res.status(error.status).json(error.toResponseBody());
     }

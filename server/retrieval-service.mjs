@@ -126,11 +126,20 @@ export const runRetrievalServiceProcess = async ({
 
   logger.log(`[retrieval-service] listening on port ${server.address().port}`);
 
+  // METRICS_ENABLED=true: /metrics on a listener of its own, as in every role
+  // (rag/metrics-server.js). A metrics port that cannot be bound refuses the start.
+  const { startMetricsFromEnv } = await import("./rag/metrics-server.js");
+  const metrics = await startMetricsFromEnv({ env: environment, httpServer: server, logger }).catch((error) => {
+    server.close();
+    throw error;
+  });
+
   let stopping = null;
   const shutdown = (signal) => {
     stopping ??= (async () => {
       logger.log(`[retrieval-service] ${signal}: stopping.`);
       await new Promise((resolve) => server.close(() => resolve()));
+      await metrics?.close();
       await resetPostgresPool();
       exit(0);
     })();
@@ -141,7 +150,7 @@ export const runRetrievalServiceProcess = async ({
   signals.once("SIGTERM", () => void shutdown("SIGTERM"));
   signals.once("SIGINT", () => void shutdown("SIGINT"));
 
-  return { app, server, shutdown };
+  return { app, metrics, server, shutdown };
 };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
