@@ -1067,6 +1067,8 @@ node evaluation/run-qasper-answer-eval.mjs --corpus evaluation/generated/qasper-
 
 **结论：没有通过，不改任何默认值**。train 上选出了候选 B2（评审 + 拒答标记 + 7 个开关），但 dev 上它答了 2/9 道不可答题，基线是 0/9，超过了"基线 + 1"的上限，按规则停止，没有跑护栏。7 个开关、`RAG_CLAIM_JUDGE` 和 `RAG_QA_ANSWER_VERDICT` 都保持关闭。
 
+之后用户决定补跑护栏：三条都通过，就作为产品决定把 B2 改成默认值。**护栏没有全部通过**（`verify:quality` 14/18），所以默认值仍然不变。见本节末尾"阶段 3 护栏：用户决定补跑"。
+
 **规则**（第一次模型调用前写好，之后没改）：
 
 - 定义同第一轮：是否回答以 `classifyAgentAnswer` 为准；答题率 = 回答的可答题 ÷ 可答题；F1(abstain=0) 只在可答题上平均，未回答记 0；不可答题被回答记数量。题目级配对 bootstrap，10000 次，固定随机种子，95% 百分位区间。
@@ -1111,7 +1113,7 @@ node evaluation/run-qasper-answer-eval.mjs --corpus evaluation/generated/qasper-
 - (a) 通过。
 - (b) 通过：下界 0.081 > −0.01。
 - (c) 不通过：区间含 0，这一半满足；但 2 > 0 + 1，数量上限不满足。
-- **dev 不通过，停止**。没有跑阶段 3 护栏，没有改默认值。
+- **dev 不通过，停止**。按事先的规则没有跑阶段 3 护栏，没有改默认值。后来用户决定补跑，结果见本节末尾。
 
 **只用于理解、不影响判定**：
 
@@ -1144,6 +1146,101 @@ node evaluation/run-qasper-answer-eval.mjs --corpus evaluation/generated/qasper-
 - 规则 (c) 的"基线 + 1"上限在 9 道不可答题上很紧，但规则事后不改，失败照记录处理。
 - QASPER 的 F1 归一化不统一连字符和破折号，有一条完全正确的答案因此记 0 分。这是评测打分的问题，不是模型错误，本轮没有修。
 - 本轮没有比较延迟。
+
+**阶段 3 护栏：用户决定补跑（2026-10-03）**
+
+dev 不通过之后，用户决定仍然对候选 B2 跑护栏。条件是：三条护栏都通过，就作为产品决定把这套配置改成默认值，做法和把 BM25 设为默认值一样。
+
+**结论：护栏没有全部通过，没有改任何默认值**。G1、G2 通过，G3 `verify:quality` 14/18，失败。9 个开关（含 `RAG_CLAIM_JUDGE`、`RAG_QA_ANSWER_VERDICT`）仍然默认关闭，代码没有改。
+
+**规则**（第一次模型调用前写好）：
+
+- 环境：上面命令里的前缀，直连 Ollama（qwen2.5:7b + nomic-embed-text），不经过回放代理，一个接一个跑。候选开关就是 B2 / D2 那组，每个开关作为单独的词传入。
+- 运行有效性：报告的 `config` 要显示开关已生效，否则重跑。
+  - 候选组：`answerRateFlags` 全为 true，`claimJudge` 为 `llm`，`qa_answer` 为 v2.3。
+  - 全关组：全为 false / off，`qa_answer` 为 v2.2。
+  - `eval:claim-judge` 和 `eval:answer-drafts` 的报告都满足。`verify:quality` 的报告不记录开关；按运行记录，那次的拒答来自答案模型（`abstainSource: "answer_model"`），只有拒答标记开着才会出现。
+- G1 `eval:claim-judge -- --rounds 2`：比上面原定的 `--rounds 1` 多一轮。跑两次：
+  - 1a：完整候选环境。
+  - 1b：只设 `RAG_CLAIM_JUDGE_TEMPERATURE=0`，也就是评审自己的设置。
+  - 两次在构造集和留出集上的错误接受都为 0，才算通过。
+- G2 `eval:answer-drafts -- --set all`：
+  - 候选环境跑两轮，每轮 fixtures 错答为 0，才算通过。
+  - 是否回答以 `classifyAgentAnswer` 为准。"对"指含期望值，且不含另一方文档的值。
+  - 另跑一轮全关作对照，不参与判定。arxiv 没有标准答案，只记回答数和延迟。
+- G3 `verify:quality`：候选环境 18/18 才算通过。
+- 三条都通过才算通过。失败只做抽象诊断，不改代码。
+
+**结果**：
+
+| 护栏 | 结果 | 数字 |
+| --- | --- | --- |
+| G1 claim 评审 | 通过 | 1a：构造集改写接受 28/28（每轮 14/14；只用词法 8/28），错误接受 0/28；留出集改写接受 8/8，错误接受 0/8。1b：构造集改写接受 26/28（每轮 13/14；只用词法 2/28），错误接受 0/28；留出集 8/8、0/8。两次都是数字规则在评审前挡下 4 条，评审失败 0 次。 |
+| G2 答案草稿 | 通过 | 候选两轮 fixtures 错答都是 0，见下表。 |
+| G3 `verify:quality` | **失败** | 14/18，4 条阻断失败。 |
+
+G2 各组（最终答案延迟，直连 Ollama，单机）：
+
+| 组 | fixtures 回答 / 对 / 错 | fixtures 澄清 | fixtures p50 / p95 | arxiv 回答 | arxiv 澄清 / grounded abstention | arxiv p50 / p95 | 草稿保留（fixtures，arxiv） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 候选 r1 | 5/7 / 5 / 0 | 2 | 416 / 1393 ms | 8/12 | 4 / 0 | 3363 / 13457 ms | 5/5，2/2 |
+| 候选 r2 | 7/7 / 7 / 0 | 0 | 562 / 966 ms | 6/12 | 5 / 1 | 3174 / 9055 ms | 6/6，2/2 |
+| 全关 r1（对照） | 2/7 / 2 / 0 | 5 | 736 / 2316 ms | 2/12 | 10 / 0 | 2678 / 8391 ms | 2/2，1/1 |
+
+三组都没有撤回草稿。
+
+**G3 失败在哪里**：
+
+- 4 条阻断失败都在单文档问答路径：`single.answers`、`single.cites`、`single.correct-value`、`single.page-honest`。
+- 原因：答案模型的回复以 `NOT_IN_EVIDENCE:` 开头，RAG 路径把它变成拒答（`abstainSource: "answer_model"`）。于是没有引文、没有取值、没有页码。
+- 其余 14 条通过：
+  - `single.no-foreign-value`；
+  - 对比路径 5 条；
+  - 同文档控制组 3 条（含 1 条 advisory）；
+  - 语料外拒答 2 条；
+  - 第二进程持久化 2 条，第二进程也答对了单文档问题；
+  - meta 检查。
+
+**诊断**（只用于理解，不改变判定）：
+
+用一次性脚本（不在仓库里）把 `verify:quality` 的单文档问答调用每组重复 20 次，只记录抽象字段：
+
+| 组 | 答案模型拒答 |
+| --- | --- |
+| 完整候选 | 10/20 |
+| 只开 `RAG_QA_ANSWER_VERDICT` | 10/20 |
+| 候选去掉 `RAG_QA_ANSWER_VERDICT` | 0/20（四条单文档检查 20/20 都过） |
+| 全部关闭 | 0/20 |
+
+- 失败全部来自 `RAG_QA_ANSWER_VERDICT`。评审和另外 7 个开关与它无关。
+- 候选的 10 次拒答里，有 7 次的拒答文本本身写出了正确的值。也就是模型答对了，却标成证据不足。上面"两段式拒答"一节记录的那次 17/18，是同一个已知限制。
+- 扩大检索重试救不回来：这份 fixture 文档只有 3 个块，第一次回答时已全部在上下文里，重试没有新块可加。
+- 按这个比例粗算，候选配置单次 `verify:quality` 拿到 18/18 的概率约为四分之一：单文档提问和第二进程提问都不能被误拒。
+
+**待用户决定**（这里没有做）：
+
+- 去掉 `RAG_QA_ANSWER_VERDICT` 的配置，在诊断里单文档检查 20/20 都过。但它是另一套配置，没有在 QASPER dev 上测过。
+- 第一轮里最接近它的组是 C2（评审 + 7 个开关，没有拒答标记），在 train seed 2 上答了 4/9 道不可答题。第二轮加拒答标记，正是为了拦住这种情况。
+- 要把这套或别的配置设为默认值，需要它自己的 dev 确认，再跑这三条护栏。按上面的限制，dev 确认要另选一个和 seed 1 不重叠的样本。
+- 没有核实的观察：候选 r1 的 fixtures 里，两道责任上限题都以澄清结束。这可能是同一机制在 agent 路径上的表现，但没有核实，而且全关对照组这两题也是澄清。
+
+**命令**（在 `server/` 下，前缀同上，`<候选开关>` 即 B2 / D2 那组）：
+
+```bash
+<前缀> <候选开关> npm run eval:claim-judge -- --rounds 2                     # 1a；1b 只换成 RAG_CLAIM_JUDGE_TEMPERATURE=0
+<前缀> <候选开关> npm run eval:answer-drafts -- --set all --latest-name latest-answer-drafts-guard-cand-r1   # r2 同样
+<前缀> npm run eval:answer-drafts -- --set all --latest-name latest-answer-drafts-guard-off-r1             # 全关对照
+<前缀> <候选开关> npm run verify:quality
+```
+
+报告在已忽略的 `evaluation/results/` 下：`latest-answer-drafts-guard-{cand-r1,cand-r2,off-r1}.*`、`latest-doccompare-verification.*`、`latest-claim-judge.*`。`latest-claim-judge.*` 现在存的是 1b，1a 的报告只留在一次性目录里。
+
+**限制**：
+
+- 只有本地 7B 模型。
+- 每条护栏只跑一到两次。拒答标记的误拒是随机的（单文档 10/20），所以单独一次 18/18 或一次 14/18，都说明不了比例。
+- G2 的 arxiv 没有标准答案，只计回答数，不判对错。
+- 延迟只有一轮全关对照，没做配对比较。候选组 arxiv 最终答案 p95 是 13.5 s / 9.1 s，全关对照是 8.4 s。
 
 ## Prompt 注入红队
 
