@@ -1061,6 +1061,90 @@ node evaluation/run-qasper-answer-eval.mjs --corpus evaluation/generated/qasper-
 - 第一次 C1/C2 运行无效（zsh 不对未加引号的变量分词，开关没生效，报告里开关全是 false），表里是用数组传参重跑的结果。
 - 没有新的 `verify:quality`、`eval:answer-drafts` 或 `eval:claim-judge` 数据：这些护栏只对候选跑。
 
+#### 第二轮：评审 + 答案模型拒答标记（QASPER train → dev，2026-10-03）
+
+**假设**：第一轮里评审放行了证据其实回答不了的问题。`RAG_QA_ANSWER_VERDICT=true`（见 AGENTS.md "Single-document QA abstention"）让答案模型在证据回答不了时以 `NOT_IN_EVIDENCE:` 开头，这样的回复在评审之前就变成拒答。所以评审加拒答标记，也许能保留答题率的提升，又不回答不可答题。
+
+**结论：没有通过，不改任何默认值**。train 上选出了候选 B2（评审 + 拒答标记 + 7 个开关），但 dev 上它答了 2/9 道不可答题，基线是 0/9，超过了"基线 + 1"的上限，按规则停止，没有跑护栏。7 个开关、`RAG_CLAIM_JUDGE` 和 `RAG_QA_ANSWER_VERDICT` 都保持关闭。
+
+**规则**（第一次模型调用前写好，之后没改）：
+
+- 定义同第一轮：是否回答以 `classifyAgentAnswer` 为准；答题率 = 回答的可答题 ÷ 可答题；F1(abstain=0) 只在可答题上平均，未回答记 0；不可答题被回答记数量。题目级配对 bootstrap，10000 次，固定随机种子，95% 百分位区间。
+- 所有组经过同一个回放代理（本轮用全新的缓存），各组发出相同请求时共用同一次模型抽样。
+- 阶段 1（train，50 题，seed 3；seed 1、2 用于设计和第一轮，不再用于选择）：
+  - B0：全部关闭。
+  - B1：`RAG_CLAIM_JUDGE=llm`、`RAG_CLAIM_JUDGE_TEMPERATURE=0`、`RAG_QA_ANSWER_VERDICT=true`。
+  - B2：B1 + 7 个开关全开。
+  - 入选需同时满足：(a) 回答的可答题多于 B0，且答题率差值区间不含 0；(b) F1 差值区间上界 ≥ 0；(c) 不可答被回答数不超过 B0（B0 为 0 时必须为 0）。两组都过时取答题率高的（并列看 F1，再看开关少的）。
+  - 运行有效性：报告里的 `config.answerRateFlags`、`config.claimJudge`、`config.promptTemplates` 必须显示开关生效（拒答标记开启时 `qa_answer` 是 v1.3 / v2.3），否则重跑。
+- 阶段 2（dev，100 题，seed 1，B0 对候选），三条都要满足：(a) 答题率差值区间不含 0 且为正；(b) F1 差值下界 > −0.01，或区间含 0 且均值 ≥ 0；(c) 不可答被回答差值的区间含 0 或为负，**并且**数量不超过 B0 + 1。
+- 阶段 3 护栏只在 dev 通过时跑：`eval:claim-judge -- --rounds 1` 错误接受为 0；`eval:answer-drafts -- --set all` 两轮，每轮 fixtures 错答为 0；`verify:quality` 18/18。
+
+**阶段 1：train，seed 3**（n = 50：47 道可答，3 道不可答；和 seed 2 没有共同题目）。三组开关都按设定生效：B0 的 `qa_answer` 是 v2.2，B1、B2 是 v2.3。
+
+| 组 | 回答的可答题 | 答题率 | F1(abstain=0) | 官方 F1（全部） | 不可答被回答 | follow-up 运行 / 解决 | chat 调用/题 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B0 全部关闭 | 1/47 | 0.021 | 0.004 | 0.064 | 0/3 | 15 / 0 | 0.72 |
+| B1 评审 + 拒答标记 | 14/47 | 0.298 | 0.134 | 0.185 | 0/3 | 16 / 2 | 2.08 |
+| B2 B1 + 7 个开关 | 16/47 | 0.340 | 0.125 | 0.177 | 0/3 | 18 / 5 | 2.62 |
+
+和 B0 的配对差值：
+
+| 组 | 答题率 | F1(abstain=0) | 不可答被回答 | 可答题翻转 |
+| --- | --- | --- | --- | --- |
+| B1 | +0.277 [0.149, 0.404] | +0.129 [0.060, 0.210] | 0 [0, 0] | +13 / −0 |
+| B2 | +0.319 [0.191, 0.468] | +0.120 [0.054, 0.200] | 0 [0, 0] | +15 / −0 |
+
+**阶段 1 判定**：B1、B2 的三条都满足。B2 答题率更高，按规则成为候选。
+
+**阶段 2：dev，seed 1**（n = 100：91 道可答，9 道不可答）
+
+| 组 | 回答的可答题 | 答题率 | F1(abstain=0) | 官方 F1（全部） | 不可答被回答 | follow-up 运行 / 解决 | chat 调用/题 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B0 全部关闭（D0） | 0/91 | 0.000 | 0.000 | 0.147 | 0/9 | 46 / 0 | 1.11 |
+| 候选 B2（D2） | 33/91 | 0.363 | 0.123 | 0.202 | **2/9** | 34 / 11 | 2.41 |
+
+配对差值：答题率 +0.363 [0.264, 0.462]（可答题翻转 +33 / −0）；F1 +0.123 [0.081, 0.170]；不可答被回答 +0.222 [0.000, 0.556]。
+
+**阶段 2 判定**：
+
+- (a) 通过。
+- (b) 通过：下界 0.081 > −0.01。
+- (c) 不通过：区间含 0，这一半满足；但 2 > 0 + 1，数量上限不满足。
+- **dev 不通过，停止**。没有跑阶段 3 护栏，没有改默认值。
+
+**只用于理解、不影响判定**：
+
+- B2 对 B1（train，同一样本）：答题率 +0.043 [−0.106, 0.191]，F1 −0.009 [−0.053, 0.029]，都不显著。B2 只是按"答题率高者优先"选出的；B1 没有在 dev 上测。
+- 拒答标记确实在起作用：本轮代理缓存的 575 个 chat 响应里有 82 个以 `NOT_IN_EVIDENCE` 开头。但它没拦住 dev 上那 2 道不可答题。其中一道的标注者意见不一（一人标不可答，另一人给了答案）；另一道只有"不可答"标注，候选给出了有具体内容的回答。
+- train seed 3 只有 3 道不可答题，条件 (c) 在 train 上几乎没有检出能力；第一轮 seed 2 的 9 道不可答题里，只开评审答了 2 道、评审加 7 个开关答了 4 道。
+- 逐条看过新放行的答案（只做抽象判断，不记录原文）：
+  - train：B1 新答 13 题，约 8 题对、3 题部分对（漏项或扩写）、2 题错；B2 新答 15 题，约 6 题对、6–7 题部分对或含糊、2 题明显错。
+  - dev：33 道新答的可答题，答过的题平均 F1 0.339，其中 21 道的来源包含标注的证据段落；看过的约 17 条大多对或基本对，F1 低主要因为答案太长；至少 2 条明显错（一道是非题结论与标注相反，一道列举题只给了数量没给内容）。
+
+**命令**（在 `server/` 下，每组只换开关、语料、题数、seed 和 `--latest-name`）：
+
+```bash
+DOTENV_CONFIG_PATH=/dev/null OPENAI_BASE_URL=http://127.0.0.1:11434/v1 OPENAI_API_KEY=ollama \
+OPENAI_CHAT_MODEL=qwen2.5:7b OPENAI_EMBEDDING_MODEL=nomic-embed-text RAG_EMBEDDING_DIMENSIONS=768 \
+POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= REDIS_URL= <该组开关> \
+node evaluation/run-qasper-answer-eval.mjs --corpus evaluation/generated/qasper-<train|dev>.json \
+  --cases <50|100> --seed <3|1> --surface agent --latest-name latest-qasper-answers-agent-ar-<B0|B1|B2|D0|D2>
+```
+
+- B1：`RAG_CLAIM_JUDGE=llm RAG_CLAIM_JUDGE_TEMPERATURE=0 RAG_QA_ANSWER_VERDICT=true`
+- B2 / D2：B1 + `AGENT_FOLLOW_UP_ORIGINAL_QUESTION=true RAG_QA_GATE_INFLECTION=true RAG_CLAIM_INFLECTION=true RAG_CLAIM_SOURCE_INHERITANCE=true RAG_CLAIM_HEADING_CONTEXT=true AGENT_SINGLE_DOCUMENT_ROUTING=true`
+- 在 zsh 里每个开关要作为单独的词传入（不要放进一个未加引号的变量）。
+- 测量时 `OPENAI_BASE_URL` 指向本地回放代理（一次性脚本，不在仓库里），直连 Ollama 也能复现，只是各组不再共用抽样。报告写在已忽略的 `evaluation/results/latest-qasper-answers-agent-ar-{B0,B1,B2,D0,D2}.{json,md}`。
+
+**限制**：
+
+- **dev seed 1 的 100 题已经用过**。以后要确认新候选，需要另选一个不和它重叠的 dev 样本。
+- 只有本地 7B 模型；不可答题样本小（train 3 道、dev 9 道），区间很宽。
+- 规则 (c) 的"基线 + 1"上限在 9 道不可答题上很紧，但规则事后不改，失败照记录处理。
+- QASPER 的 F1 归一化不统一连字符和破折号，有一条完全正确的答案因此记 0 分。这是评测打分的问题，不是模型错误，本轮没有修。
+- 本轮没有比较延迟。
+
 ## Prompt 注入红队
 
 **用例**：`evaluation/prompt-injection-cases.js`。
