@@ -747,6 +747,12 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
   const responseFormat = isStructuredOutputEnabled()
     ? options.responseFormat ?? null
     : null;
+  // Sent only when the caller sets a finite one (the claim judge with
+  // RAG_CLAIM_JUDGE_TEMPERATURE); otherwise the request carries none.
+  const temperatureOption =
+    typeof options.temperature === "number" && Number.isFinite(options.temperature)
+      ? { temperature: options.temperature }
+      : {};
   // The caller's signal plus the bound request's (request-deadline.js): a
   // cancelled agent request aborts the call and stops its retries and failover.
   const signal = withRequestSignal(options.signal);
@@ -760,6 +766,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         return customProvider.completeText(inputText, {
           onTextDelta: options.onTextDelta,
           responseFormat,
+          ...temperatureOption,
           ...(signal ? { signal } : {}),
         });
       },
@@ -802,6 +809,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
       prompt,
       promptTemplate,
       responseFormat,
+      temperatureOption,
     });
   }
 
@@ -821,8 +829,9 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
             onDelta: options.onTextDelta,
             responseFormat,
             signal,
+            ...temperatureOption,
           })
-        : await instance.invoke(prompt, { responseFormat, signal });
+        : await instance.invoke(prompt, { responseFormat, signal, ...temperatureOption });
 
     if (!normalizeContent(result?.content) && result?.finishReason !== "length") {
       const error = new Error("Chat completion returned empty content.");
@@ -927,6 +936,7 @@ const completeThroughModelGateway = ({
   prompt,
   promptTemplate,
   responseFormat,
+  temperatureOption = {},
 }) => {
   const modelRoute = buildModelGatewayPendingRoute(capability, options.routeId);
   const estimate = {
@@ -946,6 +956,7 @@ const completeThroughModelGateway = ({
         routeId: options.routeId ?? null,
         signal: options.signal,
         workspacePolicy: options.workspacePolicy,
+        ...temperatureOption,
       }),
     metric: {
       ...buildUsageMetricFields(estimate),

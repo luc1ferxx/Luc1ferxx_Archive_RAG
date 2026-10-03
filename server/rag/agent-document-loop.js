@@ -6,8 +6,8 @@ import {
   serializeAgentError as serializeError,
 } from "./agent-response-builder.js";
 import {
-  buildEvidenceRetryQuestion,
   buildEvidenceGaps,
+  buildFollowUpQuestion,
   evaluateDocumentEvidenceWithJudge,
   selectBetterRagResult,
 } from "./agent-self-check.js";
@@ -291,8 +291,9 @@ export const runDocumentRagLoop = async ({
       },
     });
 
-    const followUpQuestion = buildEvidenceRetryQuestion({
+    const followUpQuestion = buildFollowUpQuestion({
       question,
+      resolvedQuestion: primaryRagResult?.ok ? primaryRagResult.value?.resolvedQuery : null,
       check: primaryCheck,
     });
     const followUpRetrievalPlan = buildAgentRetrievalPlan({

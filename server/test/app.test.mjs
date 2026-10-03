@@ -175,6 +175,22 @@ const seedRecoverableAgentRun = async ({
   return agentRunService;
 };
 
+// This test asserts the default follow-up question; the flag that changes it
+// (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) is pinned off so an ambient value does
+// not change what is asserted.
+const pinDefaultFollowUpQuestion = (t) => {
+  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+
+  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "false";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+    } else {
+      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
+    }
+  });
+};
+
 test("upload flow stores chunks, completes ingestion, and deletes documents", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-app-test-"));
   const uploadsDirectory = path.join(tempRoot, "uploads");
@@ -2553,7 +2569,8 @@ test("agent run recovery API exposes blocked approval safety after restart", asy
   }
 });
 
-test("chat endpoint agent runs follow-up document RAG when self-check finds missing citations", async () => {
+test("chat endpoint agent runs follow-up document RAG when self-check finds missing citations", async (t) => {
+  pinDefaultFollowUpQuestion(t);
   const documents = new Map([
     [
       "doc-1",

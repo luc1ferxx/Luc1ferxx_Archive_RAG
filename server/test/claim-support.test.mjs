@@ -9,6 +9,22 @@ import { getCitationDocumentAliases } from "../rag/self-check/attribution.js";
 import { evaluateClaimSupport } from "../rag/self-check/evaluate.js";
 import { collapseParenthesizedNumberRestatements } from "../rag/self-check/text.js";
 
+// This test asserts the default follow-up question; the flag that changes it
+// (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) is pinned off so an ambient value does
+// not change what is asserted.
+const pinDefaultFollowUpQuestion = (t) => {
+  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+
+  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "false";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+    } else {
+      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
+    }
+  });
+};
+
 test("document evidence check fails when an answer claim is unsupported by citations", () => {
   const check = evaluateDocumentEvidence({
     docIds: ["doc-1"],
@@ -3163,7 +3179,8 @@ test("analysis-backed no-difference claims provide minimal document coverage", (
   assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [1, 2]);
 });
 
-test("agent rag runs follow-up retrieval when claim support check finds unsupported answer claims", async () => {
+test("agent rag runs follow-up retrieval when claim support check finds unsupported answer claims", async (t) => {
+  pinDefaultFollowUpQuestion(t);
   const askedQuestions = [];
   const ragService = {
     chat: async (_docIds, query) => {

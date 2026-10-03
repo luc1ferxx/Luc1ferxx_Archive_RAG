@@ -35,6 +35,22 @@ const groundedEvidence = () => ({
   comparisonAnalysisSummary: null,
 });
 
+// This test asserts the default follow-up question; the flag that changes it
+// (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) is pinned off so an ambient value does
+// not change what is asserted.
+const pinDefaultFollowUpQuestion = (t) => {
+  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+
+  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "false";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+    } else {
+      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
+    }
+  });
+};
+
 test("document evidence check is explicitly contracted but never V1-selected", () => {
   assert.equal(hasExplicitExecutionGraphContract(documentRag), true);
   assert.equal(hasExplicitExecutionGraphContract(evidenceCheck), true);
@@ -128,7 +144,8 @@ test("document evidence check verifies grounded citations and emits typed condit
   assert.equal(result.value.text, groundedEvidence().text);
 });
 
-test("document evidence check recommends one scoped follow-up for missing support", async () => {
+test("document evidence check recommends one scoped follow-up for missing support", async (t) => {
+  pinDefaultFollowUpQuestion(t);
   const result = await evidenceCheck.execute({
     docIds: selectedDocIds,
     question,

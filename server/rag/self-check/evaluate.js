@@ -1,4 +1,9 @@
-import { getClaimJudgeMode } from "../config.js";
+import {
+  getClaimJudgeMode,
+  isClaimHeadingContextEnabled,
+  isClaimInflectionEnabled,
+  isClaimSourceInheritanceEnabled,
+} from "../config.js";
 import { judgeClaimSupport } from "./claim-judge.js";
 import { filterCitationsToSourceRanks } from "../source-labels.js";
 import { attachRetrievedEvidence } from "../citations.js";
@@ -30,7 +35,14 @@ export const evaluateClaimSupport = ({
   citations = [],
   comparisonAnalysisSummary = null,
 } = {}) => {
-  const claims = splitAnswerClaims(answerText, citations);
+  // RAG_CLAIM_SOURCE_INHERITANCE and RAG_CLAIM_INFLECTION apply to answers
+  // that are not comparisons; a comparison answer is checked as before.
+  const comparisonAnswer = Boolean(comparisonAnalysisSummary);
+  const inflection = !comparisonAnswer && isClaimInflectionEnabled();
+  const headingContext = !comparisonAnswer && isClaimHeadingContextEnabled();
+  const claims = splitAnswerClaims(answerText, citations, {
+    inheritSourceLabels: !comparisonAnswer && isClaimSourceInheritanceEnabled(),
+  });
   const citationRankEntries = citations.map((citation, index) => {
     const explicitRank = Number(citation?.rank);
     const rank =
@@ -69,6 +81,7 @@ export const evaluateClaimSupport = ({
       sectionId,
       sectionLabel,
       sourceRanks,
+      sourceRanksInherited,
     } = claim;
     const missingSourceRanks = sourceRanks.filter(
       (rank) => !citationByRank.has(rank)
@@ -103,6 +116,8 @@ export const evaluateClaimSupport = ({
       claimText,
       citations: scopedCitations,
       documentLabelCitations: citations,
+      headingContext,
+      inflection,
     });
     const contrastSupport = evaluateContrastClaimSupport({
       claimText,
@@ -165,6 +180,8 @@ export const evaluateClaimSupport = ({
         claimText,
         citations: [citation],
         documentLabelCitations: citations,
+        headingContext,
+        inflection,
       }).supported;
     });
     const verifiedSourceRanks = (relationSupport
@@ -199,6 +216,7 @@ export const evaluateClaimSupport = ({
       tokenOverlap,
       anchors: relationSupport?.anchors ?? defaultSupport.anchors,
       sourceRanks,
+      ...(sourceRanksInherited ? { sourceRanksInherited: true } : {}),
       citedDocIds: [...getCitationDocIds(scopedCitations)],
       verifiedSourceRanks,
       supportedSourceRanks,

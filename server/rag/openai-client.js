@@ -281,8 +281,13 @@ export const toChatMessages = (prompt) => {
   return [{ role: "user", content: String(prompt ?? "") }];
 };
 
+// A finite `temperature` is sent as given; without one the request carries
+// none and the server's default applies (RAG_CLAIM_JUDGE_TEMPERATURE).
+const toTemperatureField = (temperature) =>
+  typeof temperature === "number" && Number.isFinite(temperature) ? { temperature } : {};
+
 export const createChatClient = ({ apiKey, model }) => ({
-  async invoke(prompt, { responseFormat, signal } = {}) {
+  async invoke(prompt, { responseFormat, signal, temperature } = {}) {
     const messages = toChatMessages(prompt);
 
     // Every request, including each retry, passes the endpoint's circuit and
@@ -298,6 +303,7 @@ export const createChatClient = ({ apiKey, model }) => ({
           model,
           messages,
           ...(responseFormat ? { response_format: responseFormat } : {}),
+          ...toTemperatureField(temperature),
         }),
         signal,
       })
@@ -312,7 +318,7 @@ export const createChatClient = ({ apiKey, model }) => ({
 
   // Same request with `stream: true`. include_usage asks for a final usage
   // chunk; servers that ignore it leave usage null and LLMOps estimates it.
-  async invokeStream(prompt, { onDelta, responseFormat, signal } = {}) {
+  async invokeStream(prompt, { onDelta, responseFormat, signal, temperature } = {}) {
     return sendToUpstream("chat", model, (baseUrl) =>
       fetchChatStream(
         `${baseUrl}/chat/completions`,
@@ -328,6 +334,7 @@ export const createChatClient = ({ apiKey, model }) => ({
             stream: true,
             stream_options: { include_usage: true },
             ...(responseFormat ? { response_format: responseFormat } : {}),
+            ...toTemperatureField(temperature),
           }),
           signal,
         },

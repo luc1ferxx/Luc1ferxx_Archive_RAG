@@ -1,3 +1,5 @@
+import { isAgentFollowUpOriginalQuestionEnabled } from "../config.js";
+
 export function buildEvidenceGaps(check = {}) {
   const gaps = [];
   const answerLabel = check.answerLabel ?? "Document answer";
@@ -83,4 +85,22 @@ export const buildEvidenceRetryQuestion = ({ question, check } = {}) => {
       : "",
     "Return the best answer only if it is backed by page-level citations.",
   ].filter(Boolean).join("\n");
+};
+
+/**
+ * The question a follow-up document RAG call asks. By default it is the
+ * "Re-check the uploaded documents..." text above, which the answer model,
+ * the QA gate and the primary retrieval query all read. With
+ * AGENT_FOLLOW_UP_ORIGINAL_QUESTION on it is the question itself (the primary
+ * call's resolved question when there is one); the evidence issue then reaches
+ * only the follow-up retrieval queries (agent-query-planner.js).
+ */
+export const buildFollowUpQuestion = ({ question, resolvedQuestion = null, check } = {}) => {
+  if (!isAgentFollowUpOriginalQuestionEnabled()) {
+    return buildEvidenceRetryQuestion({ question, check });
+  }
+
+  const resolved = typeof resolvedQuestion === "string" ? resolvedQuestion.trim() : "";
+
+  return resolved || question;
 };

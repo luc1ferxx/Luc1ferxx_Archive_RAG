@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { getChatModel, getClaimJudgeMode } from "../config.js";
+import { getChatModel, getClaimJudgeMode, getClaimJudgeTemperature } from "../config.js";
 import { completeTextWithMetadata } from "../openai.js";
 import { definePrompt, PROMPT_IDS } from "../prompt-registry.js";
 import { screenUntrustedText } from "../prompt-injection-screen.js";
@@ -154,9 +154,17 @@ const isJudgeEligible = (claim) =>
   (claim.ambiguousSourceRanks ?? []).length === 0 &&
   (claim.misattributedCitationIdentities ?? []).length === 0;
 
-const buildCacheKey = ({ claimText, evidence }) =>
+// A verdict sampled at a set RAG_CLAIM_JUDGE_TEMPERATURE is cached apart from
+// one sampled at the server's default; with it unset the key is unchanged.
+const buildCacheKey = ({ claimText, evidence, temperature = getClaimJudgeTemperature() }) =>
   createHash("sha256")
-    .update(JSON.stringify([claimText, evidence.map(({ rank, text }) => [rank, text])]))
+    .update(
+      JSON.stringify([
+        claimText,
+        evidence.map(({ rank, text }) => [rank, text]),
+        ...(temperature === null ? [] : [{ temperature }]),
+      ])
+    )
     .digest("hex");
 
 export const buildClaimJudgePrompt = ({ items, sources }) =>
@@ -337,9 +345,11 @@ export const judgeClaimSupport = async ({
     const claimIndexes = uncached.map(({ index }) => index);
 
     try {
+      const temperature = getClaimJudgeTemperature();
       const completion = await complete(buildClaimJudgePrompt({ items: uncached, sources }), {
         promptTemplate: getClaimJudgePromptDescriptor(),
         responseFormat: buildClaimJudgeResponseFormat(claimIndexes),
+        ...(temperature === null ? {} : { temperature }),
       });
       const parsed = parseVerdicts(completion?.text, claimIndexes);
       summary.modelId = completion?.modelRoute?.modelId ?? null;

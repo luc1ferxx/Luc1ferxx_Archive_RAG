@@ -229,10 +229,12 @@ const buildChatBody = ({
   responseFormat,
   routeId,
   stream,
+  temperature,
   workspacePolicy,
 }) => ({
   messages,
   ...(responseFormat ? { response_format: responseFormat } : {}),
+  ...(typeof temperature === "number" && Number.isFinite(temperature) ? { temperature } : {}),
   ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
   [MODEL_GATEWAY_EXTENSION_FIELD]: {
     capability,
@@ -398,6 +400,7 @@ export const requestModelGatewayCompletion = async ({
   responseFormat,
   routeId,
   signal,
+  temperature,
   workspacePolicy,
 }) => {
   const stream = typeof onTextDelta === "function";
@@ -408,6 +411,7 @@ export const requestModelGatewayCompletion = async ({
     responseFormat,
     routeId,
     stream,
+    temperature,
     workspacePolicy,
   });
 

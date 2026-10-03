@@ -6,6 +6,7 @@ import {
   getQaMinRerankProbability,
   getQaPartialCoverageFloor,
   isQaAnswerVerdictEnabled,
+  isQaGateInflectionEnabled,
 } from "./config.js";
 import { getAdmissionScore, getResultKey } from "./citations.js";
 import {
@@ -15,6 +16,7 @@ import {
   normalizeSearchText,
   tokenize,
 } from "./text-utils.js";
+import { buildInflectionIndex } from "./inflection.js";
 
 const FALLBACK_THRESHOLD_RATIO = 0.8;
 
@@ -172,19 +174,22 @@ const hasEnoughQueryCoverage = (
   result,
   {
     allowSemanticBypass = false,
+    coverageOf = null,
     minCoverage = getMinQueryTermCoverage(),
     partialCoverage = null,
   } = {}
 ) => {
-  if (typeof result?.keywordScore !== "number") {
+  const coverage = coverageOf ? coverageOf(result) : result?.keywordScore;
+
+  if (typeof coverage !== "number") {
     return true;
   }
 
-  if (result.keywordScore >= minCoverage) {
+  if (coverage >= minCoverage) {
     return true;
   }
 
-  if (partialCoverage && result.keywordScore >= partialCoverage.floor) {
+  if (partialCoverage && coverage >= partialCoverage.floor) {
     return !findQueryTermSubstitution(
       partialCoverage.queryText,
       buildSubstitutionEvidenceText(result)
@@ -206,6 +211,80 @@ const buildSearchableResultText = (result) =>
   ]
     .filter(Boolean)
     .join("\n");
+
+/**
+ * The share of the query's meaningful terms a text contains: the vector
+ * stores' keywordScore (same terms, same searchable text), optionally counting
+ * an inflected form as a match (rag/inflection.js). Null for a query with no
+ * meaningful term, as the stores return.
+ */
+export const computeQueryTermCoverage = ({ queryText = "", resultText = "", inflection = false } = {}) => {
+  const queryTerms = buildTermSet(queryText);
+
+  if (queryTerms.size === 0) {
+    return null;
+  }
+
+  const entryTerms = buildTermSet(resultText);
+
+  if (entryTerms.size === 0) {
+    return 0;
+  }
+
+  const index = inflection ? buildInflectionIndex(entryTerms) : entryTerms;
+  let overlap = 0;
+
+  for (const term of queryTerms) {
+    if (index.has(term)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap / queryTerms.size;
+};
+
+// How the QA gate reads a candidate's query-term coverage. By default it is the
+// stored keywordScore, measured against whichever retrieval query's copy of
+// the candidate won the merge. `fromQueryText` (the agent's follow-up with
+// AGENT_FOLLOW_UP_ORIGINAL_QUESTION) replaces it with the coverage of the
+// gate's own question, since the follow-up's other retrieval queries carry the
+// unsupported claim text and would score a chunk against the model's words.
+// `inflection` (RAG_QA_GATE_INFLECTION) acts only on a chunk that has some
+// query word in another inflected form only (the inflection-aware coverage of
+// the gate's question exceeds its exact coverage); such a chunk is read at the
+// higher of its stored score and that inflection-aware coverage. Any other
+// chunk keeps its stored score, and no score is lowered. A candidate without a
+// numeric keywordScore keeps it.
+const buildQaCoverageReader = ({ fromQueryText = false, inflection = false, queryText = "" }) => {
+  if (!fromQueryText && !inflection) {
+    return null;
+  }
+
+  const memo = new WeakMap();
+
+  return (result) => {
+    if (typeof result?.keywordScore !== "number") {
+      return result?.keywordScore;
+    }
+
+    if (memo.has(result)) {
+      return memo.get(result);
+    }
+
+    const resultText = buildSearchableResultText(result);
+    const recomputed = computeQueryTermCoverage({ inflection, queryText, resultText });
+    let coverage = result.keywordScore;
+
+    if (recomputed !== null && fromQueryText) {
+      coverage = recomputed;
+    } else if (recomputed !== null && recomputed > computeQueryTermCoverage({ queryText, resultText })) {
+      coverage = Math.max(result.keywordScore, recomputed);
+    }
+
+    memo.set(result, coverage);
+    return coverage;
+  };
+};
 
 // The file name is left out: "cobalt.pdf" names the file, not the topic of
 // a clause.
@@ -312,12 +391,14 @@ const selectUsableResults = ({
   results,
   queryText = "",
   allowSemanticBypass = false,
+  coverageOf = null,
   minCoverage = getMinQueryTermCoverage(),
   partialCoverageFloor = null,
 }) => {
   const minimumScore = getMinRelevanceScore();
   const coverageOptions = {
     allowSemanticBypass,
+    coverageOf,
     minCoverage,
     partialCoverage:
       partialCoverageFloor !== null && partialCoverageFloor < minCoverage
@@ -441,16 +522,38 @@ const selectByRerankProbability = ({ minProbability, queryText, results }) => {
 // multi-part one ("when does it take effect and which regions does it apply
 // to"), a chunk matching only the topic word answers none of the parts, and low
 // coverage is what drives the gap planner's per-part suggestions.
-export const assessQaConfidence = ({ results, queryText = "", evidenceRequirementCount = 1 }) => {
+//
+// coverageFromQueryText: measure coverage against queryText itself (see
+// buildQaCoverageReader); only the agent's follow-up retrieval sets it.
+export const assessQaConfidence = ({
+  results,
+  queryText = "",
+  evidenceRequirementCount = 1,
+  coverageFromQueryText = false,
+}) => {
   const minCoverage = getMinQaQueryTermCoverage();
   const minRerankProbability = getQaMinRerankProbability();
   const rerankGate =
     minRerankProbability !== null &&
     results.length > 0 &&
     results.every((result) => typeof result?.crossEncoderScore === "number");
+  const gateInflection = isQaGateInflectionEnabled();
+  const coverageOf = rerankGate
+    ? null
+    : buildQaCoverageReader({
+        fromQueryText: coverageFromQueryText,
+        inflection: gateInflection,
+        queryText,
+      });
+  // Recorded only when coverage is not the stored keywordScore, so default
+  // traces keep their shape.
+  const coverageBasis = coverageOf
+    ? { coverageBasis: { fromQueryText: Boolean(coverageFromQueryText), inflection: gateInflection } }
+    : {};
   const selection = rerankGate
     ? selectByRerankProbability({ minProbability: minRerankProbability, queryText, results })
     : selectUsableResults({
+        coverageOf,
         minCoverage,
         partialCoverageFloor:
           evidenceRequirementCount <= 1 && isQaAnswerVerdictEnabled() ? getQaPartialCoverageFloor() : null,
@@ -474,19 +577,23 @@ export const assessQaConfidence = ({ results, queryText = "", evidenceRequiremen
       anchorGroups: selection.anchorGroups,
       gate,
       missingAnchorGroups: selection.missingAnchorGroups,
+      ...coverageBasis,
     };
   }
 
   return {
     confident: true,
     gate,
+    ...coverageBasis,
     usableResults: selection.usableResults,
     anchorGroups: selection.anchorGroups,
     missingAnchorGroups: [],
     // Admitted through the partial coverage band rather than the floor.
-    partialCoverageResultCount: selection.usableResults.filter(
-      (result) => typeof result?.keywordScore === "number" && result.keywordScore < minCoverage
-    ).length,
+    partialCoverageResultCount: selection.usableResults.filter((result) => {
+      const coverage = coverageOf ? coverageOf(result) : result?.keywordScore;
+
+      return typeof coverage === "number" && coverage < minCoverage;
+    }).length,
   };
 };
 

@@ -28,6 +28,10 @@
 //   OPENAI_CHAT_MODEL=qwen2.5:7b OPENAI_EMBEDDING_MODEL=nomic-embed-text \
 //   RAG_EMBEDDING_DIMENSIONS=768 node evaluation/run-answer-draft-eval.mjs
 //     [--set fixtures|arxiv|all] [--cases 12]   (--cases limits the arxiv set)
+//     [--latest-name latest-answer-drafts]    (report file name, to keep runs apart)
+//
+// "Answered" excludes clarifications and the grounded abstention sentence
+// (agent-answer-outcome.js); fixture answers are checked only when answered.
 
 import "dotenv/config";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -35,6 +39,23 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DOCCOMPARE_FIXTURES } from "./build-doccompare-fixtures.mjs";
+import {
+  classifyAgentAnswer,
+  describeAgentFollowUp,
+  summarizeAgentOutcomes,
+} from "./agent-answer-outcome.js";
+
+// The answer-rate flags this run used (rag/config.js); null on a checkout
+// that predates them.
+const describeAnswerRateFlags = async () => {
+  try {
+    const config = await import("../rag/config.js");
+
+    return config.describeAnswerRateFlags?.() ?? null;
+  } catch {
+    return null;
+  }
+};
 
 // The prompt templates this run used; null when the code under test predates
 // the prompt registry (these scripts also run against older checkouts).
@@ -160,13 +181,16 @@ const renderSetMarkdown = ({ name, runs, summary }) =>
     `| Retraction causes | ${Object.entries(summary.retractionCauses).map(([cause, n]) => `${cause}: ${n}`).join(", ") || "none"} |`,
     `| Draft resets (retried model calls) | ${summary.resets} |`,
     `| Final answers that were a clarification | ${summary.clarifications}/${summary.cases} |`,
+    `| Answered (not a clarification or grounded abstention) | ${summary.answered}/${summary.cases} |`,
+    `| Abstentions by source | ${Object.entries(summary.abstainSources).map(([source, n]) => `${source}: ${n}`).join(", ") || "none"} |`,
+    `| Follow-ups run / resolved | ${summary.followUpRuns} / ${summary.followUpResolved} |`,
     `| Answers checked correct / wrong (fixtures only) | ${summary.correctAnswers} / ${summary.wrongAnswers} |`,
     "",
-    "| Case | Mode | Drafts | Retained | First draft ms | Final ms | Retraction |",
-    "|---|---|---|---|---|---|---|",
+    "| Case | Mode | Answered | Drafts | Retained | First draft ms | Final ms | Retraction |",
+    "|---|---|---|---|---|---|---|---|",
     ...runs.map(
       (run) =>
-        `| ${run.id} | ${run.agentMode} | ${run.draftCount} | ${run.retainedCount} | ${run.firstDraftMs ?? "-"} | ${run.finalMs} | ${run.retractionCause ?? "-"} |`
+        `| ${run.id} | ${run.agentMode} | ${run.answered ? "yes" : run.abstainSource} | ${run.draftCount} | ${run.retainedCount} | ${run.firstDraftMs ?? "-"} | ${run.finalMs} | ${run.retractionCause ?? "-"} |`
     ),
     "",
   ].join("\n");
@@ -187,9 +211,15 @@ const summarizeRuns = (runs) => {
   const drafts = runs.reduce((sum, run) => sum + run.draftCount, 0);
   const retainedDrafts = runs.reduce((sum, run) => sum + run.retainedCount, 0);
 
+  const outcomes = summarizeAgentOutcomes(runs);
+
   return {
+    abstainSources: outcomes.abstainSources,
+    answered: outcomes.answered,
     cases: runs.length,
     clarifications: runs.filter((run) => run.agentMode === "clarification").length,
+    followUpResolved: outcomes.followUpResolved,
+    followUpRuns: outcomes.followUpRuns,
     correctAnswers: runs.filter((run) => run.correct === true).length,
     wrongAnswers: runs.filter((run) => run.correct === false).length,
     drafts,
@@ -218,6 +248,7 @@ const main = async () => {
     return index >= 0 ? args[index + 1] : fallback;
   };
   const arxivCaseCount = Number(option("--cases", "12"));
+  const latestName = option("--latest-name", "latest-answer-drafts");
   const setChoice = option("--set", "all");
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "answer-draft-eval-"));
 
@@ -321,15 +352,19 @@ const main = async () => {
 
         const trace = body.agentTrace ?? [];
         const firstDraft = events.find((event) => event.type === "answer_draft");
+        const outcome = classifyAgentAnswer(body);
         const run = {
+          ...outcome,
+          ...describeAgentFollowUp(body),
           agentMode: body.agentMode,
           finalMs,
           firstDraftMs: firstDraft ? Math.round(firstDraft.atMs) : null,
           id: testCase.id,
-          // Only fixture cases know their answer. An answer that states the
-          // wrong vendor's value is wrong even if it also states the right one.
+          // Only fixture cases know their answer, and only an answer is
+          // checked. An answer that states the wrong vendor's value is wrong
+          // even if it also states the right one.
           correct:
-            testCase.expected && body.agentMode !== "clarification"
+            testCase.expected && outcome.answered
               ? testCase.expected.test(body.agentAnswer ?? "") &&
                 !testCase.forbidden.test(body.agentAnswer ?? "")
               : null,
@@ -346,7 +381,7 @@ const main = async () => {
         };
         runs.push(run);
         console.log(
-          `${run.id.padEnd(48)} ${String(run.agentMode).padEnd(14)} drafts ${run.draftCount} kept ${run.retainedCount}  first ${run.firstDraftMs ?? "-"}ms  final ${finalMs}ms  ${run.retractionCause ?? ""}`
+          `${run.id.padEnd(48)} ${String(run.agentMode).padEnd(14)} ${run.answered ? "answered" : run.abstainSource} drafts ${run.draftCount} kept ${run.retainedCount}  first ${run.firstDraftMs ?? "-"}ms  final ${finalMs}ms  ${run.retractionCause ?? ""}`
         );
       }
 
@@ -356,6 +391,7 @@ const main = async () => {
     const report = {
       config: {
         chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
+        answerRateFlags: await describeAnswerRateFlags(),
         claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
         embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
         promptTemplates: await describePromptTemplates(),
@@ -366,8 +402,8 @@ const main = async () => {
     };
 
     await mkdir(resultsDirectory, { recursive: true });
-    await writeFile(path.join(resultsDirectory, "latest-answer-drafts.json"), `${JSON.stringify(report, null, 2)}\n`);
-    await writeFile(path.join(resultsDirectory, "latest-answer-drafts.md"), renderMarkdown(report));
+    await writeFile(path.join(resultsDirectory, `${latestName}.json`), `${JSON.stringify(report, null, 2)}\n`);
+    await writeFile(path.join(resultsDirectory, `${latestName}.md`), renderMarkdown(report));
     console.log(`\n${renderMarkdown(report)}`);
   } finally {
     await rm(tempRoot, { force: true, recursive: true });

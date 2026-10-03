@@ -191,6 +191,22 @@ const runGraph = async ({
   return { budgetState, budgetTrace, lifecycle, outcome, trace, tracker };
 };
 
+// This test asserts the default follow-up question; the flag that changes it
+// (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) is pinned off so an ambient value does
+// not change what is asserted.
+const pinDefaultFollowUpQuestion = (t) => {
+  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+
+  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "false";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+    } else {
+      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
+    }
+  });
+};
+
 test("v3 runs a contracted non-custom node with a distinct graph lifecycle identity", async () => {
   const calls = [];
   const registry = createRegistry([{
@@ -323,7 +339,8 @@ const createDocumentFollowUpGraph = () => createExecutionGraph({
   version: "v3",
 });
 
-test("v3 document evidence node schedules exactly one typed follow-up when support is missing", async () => {
+test("v3 document evidence node schedules exactly one typed follow-up when support is missing", async (t) => {
+  pinDefaultFollowUpQuestion(t);
   const registry = createRegistry(createBuiltInSkills());
   const docIds = ["doc-1", "doc-2"];
   const calls = [];

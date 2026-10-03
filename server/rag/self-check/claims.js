@@ -116,7 +116,42 @@ export const protectDottedAbbreviations = (value = "") =>
 export const restoreProtectedPeriods = (value = "") =>
   String(value ?? "").replaceAll(PROTECTED_PERIOD, ".");
 
-export const splitAnswerStructure = (answerText = "", citations = []) => {
+// RAG_CLAIM_SOURCE_INHERITANCE: within one line, a sentence without a source
+// label takes the labels of the next labelled sentence, else of the previous
+// one ("A. B [Source 1]." and "A [Source 1]. B."). Never across lines, so a
+// list item or a paragraph without labels stays unsourced. The inherited
+// labels are checked exactly like written ones.
+// A sentence with no meaningful word and no anchor ("Yes.", "No.") is dropped
+// from the claims when unlabelled; it never inherits a label, so it cannot
+// become a trivially supported claim.
+const isTermlessClaimText = (rawText = "") => {
+  const text = stripSourceLabels(rawText);
+
+  return extractMeaningfulTokens(text).length === 0 && getClaimAnchors(text).length === 0;
+};
+
+const inheritLineSourceRanks = (lineNodes = []) => {
+  for (const [index, node] of lineNodes.entries()) {
+    if (node.sourceRanks.length > 0 || isTermlessClaimText(node.rawText)) {
+      continue;
+    }
+
+    const donor =
+      lineNodes.slice(index + 1).find((candidate) => candidate.ownSourceRanks.length > 0) ??
+      lineNodes.slice(0, index).reverse().find((candidate) => candidate.ownSourceRanks.length > 0);
+
+    if (donor) {
+      node.sourceRanks = [...donor.ownSourceRanks];
+      node.sourceRanksInherited = true;
+    }
+  }
+};
+
+export const splitAnswerStructure = (
+  answerText = "",
+  citations = [],
+  { inheritSourceLabels = false } = {}
+) => {
   let currentSection = "";
   let currentSectionDepth = 0;
   let currentSectionId = null;
@@ -176,19 +211,34 @@ export const splitAnswerStructure = (answerText = "", citations = []) => {
       )
     );
 
+    const lineNodes = [];
+
     for (const rawClaim of protectedLine.split(CLAIM_SPLIT_PATTERN)) {
       const sourceRanks = extractSourceRanks(rawClaim);
 
       for (const coordinatedClaim of splitCoordinatedClaim(rawClaim)) {
-        rawNodes.push({
+        const rawNode = {
           type: "raw_claim",
           rawText: restoreProtectedPeriods(coordinatedClaim).trim(),
           section: currentSection,
           sectionId: currentSectionId,
           sectionLabel: currentSectionLabel,
           sourceRanks,
-        });
+        };
+
+        rawNodes.push(rawNode);
+        lineNodes.push(rawNode);
       }
+    }
+
+    if (inheritSourceLabels) {
+      // A donor must carry labels of its own, and must be a sentence that
+      // survives as a claim (not an empty fragment).
+      inheritLineSourceRanks(
+        lineNodes
+          .filter((node) => stripSourceLabels(node.rawText).trim() || node.sourceRanks.length > 0)
+          .map((node) => Object.assign(node, { ownSourceRanks: node.sourceRanks }))
+      );
     }
   }
 
@@ -213,6 +263,7 @@ export const splitAnswerStructure = (answerText = "", citations = []) => {
       sectionId: node.sectionId,
       sectionLabel: node.sectionLabel,
       sourceRanks: node.sourceRanks,
+      ...(node.sourceRanksInherited ? { sourceRanksInherited: true } : {}),
     };
     const meaningfulTermCount = extractMeaningfulTokens(claim.text).length;
 
@@ -239,8 +290,8 @@ export const splitAnswerStructure = (answerText = "", citations = []) => {
   return { claims, nodes };
 };
 
-export const splitAnswerClaims = (answerText = "", citations = []) =>
-  splitAnswerStructure(answerText, citations).claims;
+export const splitAnswerClaims = (answerText = "", citations = [], options = {}) =>
+  splitAnswerStructure(answerText, citations, options).claims;
 
 export const getClaimBindingTerms = ({
   claimText = "",

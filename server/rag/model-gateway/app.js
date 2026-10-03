@@ -389,6 +389,9 @@ export const createModelGatewayApp = ({
       capability,
       promptTemplate: extension.promptTemplate ?? undefined,
       responseFormat: isPlainObject(body.response_format) ? body.response_format : null,
+      ...(typeof body.temperature === "number" && Number.isFinite(body.temperature) && body.temperature >= 0 && body.temperature <= 2
+        ? { temperature: body.temperature }
+        : {}),
       ...(routeId ? { routeId } : {}),
       signal,
       ...(isPlainObject(extension.workspacePolicy) ? { workspacePolicy: extension.workspacePolicy } : {}),

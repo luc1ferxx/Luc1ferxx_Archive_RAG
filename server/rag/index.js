@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile as readBinaryFile } from "node:fs/promises";
 import { chunkDocument } from "./chunker.js";
+import { isAgentFollowUpOriginalQuestionEnabled } from "./config.js";
 import {
   clearDocuments as clearRegisteredDocuments,
   deleteDocument as deleteRegisteredDocument,
@@ -810,12 +811,19 @@ const chat = async (docIds, query, options = {}) => {
       console.error("Failed to load long-term memory context.", error);
     }
 
-    const memoryResolution = await resolveQueryWithSessionMemory({
-      sessionId,
-      query,
-      documents: selectedDocuments,
-      longTermMemory: longMemoryContext.rewriteBlock,
-    });
+    // The agent's follow-up (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) passes the
+    // question its primary call already resolved. The primary call has since
+    // recorded a session turn, so rewriting again would read that turn and
+    // could add to the question (a file name becomes an anchor).
+    const memoryResolution =
+      agentRetrievalPlan?.phase === "follow_up" && isAgentFollowUpOriginalQuestionEnabled()
+        ? { resolvedQuery: query, memoryApplied: false }
+        : await resolveQueryWithSessionMemory({
+            sessionId,
+            query,
+            documents: selectedDocuments,
+            longTermMemory: longMemoryContext.rewriteBlock,
+          });
     resolvedQuery = memoryResolution.resolvedQuery;
 
     const buildResponse = async (response) => {

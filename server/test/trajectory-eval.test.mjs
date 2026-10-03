@@ -12,7 +12,40 @@ import {
   validateCurrentQualitySuiteReport,
 } from "../evaluation/quality-current-suite-validator.js";
 
-test("trajectory eval passes default deterministic agent trajectories", async () => {
+// The answer-rate flags (rag/config.js describeAnswerRateFlags) change some
+// pinned response projections when on (RAG_CLAIM_SOURCE_INHERITANCE makes an
+// unlabelled correct sentence supported), so this default-trajectory contract
+// runs with every one of them off whatever the ambient environment says.
+const ANSWER_RATE_FLAG_KEYS = [
+  "AGENT_FOLLOW_UP_ORIGINAL_QUESTION",
+  "AGENT_SINGLE_DOCUMENT_ROUTING",
+  "RAG_CLAIM_HEADING_CONTEXT",
+  "RAG_CLAIM_INFLECTION",
+  "RAG_CLAIM_JUDGE_TEMPERATURE",
+  "RAG_CLAIM_SOURCE_INHERITANCE",
+  "RAG_QA_GATE_INFLECTION",
+];
+
+const pinAnswerRateFlagsOff = (t) => {
+  const previous = Object.fromEntries(ANSWER_RATE_FLAG_KEYS.map((key) => [key, process.env[key]]));
+
+  for (const key of ANSWER_RATE_FLAG_KEYS) {
+    delete process.env[key];
+  }
+
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+};
+
+test("trajectory eval passes default deterministic agent trajectories", async (t) => {
+  pinAnswerRateFlagsOff(t);
   const report = await runTrajectoryEvaluation({
     createdAt: "2026-06-09T00:00:00.000Z",
     runId: "trajectory-test",

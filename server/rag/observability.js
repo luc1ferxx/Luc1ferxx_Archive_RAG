@@ -172,6 +172,10 @@ export const buildConfidenceTrace = (confidence = {}) => {
     trace.gate = confidence.gate;
   }
 
+  if (confidence.coverageBasis) {
+    trace.coverageBasis = { ...confidence.coverageBasis };
+  }
+
   if (typeof confidence.partialCoverageResultCount === "number") {
     trace.partialCoverageResultCount = confidence.partialCoverageResultCount;
   }

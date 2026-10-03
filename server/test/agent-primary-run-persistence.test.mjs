@@ -98,6 +98,22 @@ const assertEventOrder = ({ after, before, events }) => {
   assert.ok(events.indexOf(before) < events.indexOf(after));
 };
 
+// This test asserts the default follow-up question; the flag that changes it
+// (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) is pinned off so an ambient value does
+// not change what is asserted.
+const pinDefaultFollowUpQuestion = (t) => {
+  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+
+  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "false";
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
+    } else {
+      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
+    }
+  });
+};
+
 test("primary document RAG persists a completed run step with non-replay-safe input and output", async () => {
   const agentRunService = createRunService();
   const answerText = "Remote work requires manager approval. [Source 1]";
@@ -144,7 +160,8 @@ test("primary document RAG persists a completed run step with non-replay-safe in
   );
 });
 
-test("follow-up retrieval persists a non-replay-safe completed run step", async () => {
+test("follow-up retrieval persists a non-replay-safe completed run step", async (t) => {
+  pinDefaultFollowUpQuestion(t);
   const agentRunService = createRunService();
   const response = await runPrimaryDocumentRag({
     agentRunService,

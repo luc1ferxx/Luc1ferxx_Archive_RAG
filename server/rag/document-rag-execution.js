@@ -8,6 +8,7 @@ import {
   getRetrievalTopK,
   getRrfK,
   getVectorStoreProvider,
+  isAgentFollowUpOriginalQuestionEnabled,
   isHybridRetrievalEnabled,
   isQueryDecompositionEnabled,
   isRerankEnabled,
@@ -755,6 +756,11 @@ const executeQaRag = async ({
   route,
 }) => {
   const queryAdapterScope = agentRetrievalPlan ? null : QUERY_ADAPTER_SCOPE_QA;
+  // The agent's follow-up (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) asks the original
+  // question but retrieves with gap-repair queries built from the unsupported
+  // claims; its gate judges every candidate against the question.
+  const coverageFromQueryText =
+    agentRetrievalPlan?.phase === "follow_up" && isAgentFollowUpOriginalQuestionEnabled();
   const { results: retrievalResults, retrieval } =
     await retrieveGlobalContextForQueries({
       accessScope,
@@ -766,6 +772,7 @@ const executeQaRag = async ({
       queryAdapterScope,
     });
   const confidence = assessQaConfidence({
+    coverageFromQueryText,
     evidenceRequirementCount: evidenceRequirements?.length ?? 1,
     results: retrievalResults,
     queryText: resolvedQuery,
@@ -844,6 +851,7 @@ const executeQaRag = async ({
     answer.abstainSource === "answer_model"
       ? await retryQaWithDeeperRetrieval({
           accessScope,
+          coverageFromQueryText,
           docIds,
           evidenceRequirementCount: evidenceRequirements?.length ?? 1,
           plannedRetrievalQueries,
@@ -888,6 +896,7 @@ export const QA_CONTEXT_MIN_COVERAGE = 0;
 
 const retryQaWithDeeperRetrieval = async ({
   accessScope = null,
+  coverageFromQueryText = false,
   docIds,
   evidenceRequirementCount,
   plannedRetrievalQueries,
@@ -918,6 +927,7 @@ const retryQaWithDeeperRetrieval = async ({
   });
   const unseen = results.filter((result) => !shownKeys.has(getResultKey(result)));
   const confidence = assessQaConfidence({
+    coverageFromQueryText,
     evidenceRequirementCount,
     queryText: resolvedQuery,
     results: unseen,

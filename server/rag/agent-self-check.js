@@ -7,4 +7,8 @@ export {
   evaluateDocumentEvidenceWithJudge,
   selectBetterRagResult,
 } from "./self-check/evaluate.js";
-export { buildEvidenceGaps, buildEvidenceRetryQuestion } from "./self-check/gaps.js";
+export {
+  buildEvidenceGaps,
+  buildEvidenceRetryQuestion,
+  buildFollowUpQuestion,
+} from "./self-check/gaps.js";

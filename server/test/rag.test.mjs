@@ -3959,3 +3959,57 @@ test("persisted registry, vector data, and session memory survive reloads", asyn
     "What is the remote work approval policy?"
   );
 });
+
+test("an agent follow-up keeps its resolved question out of the session rewrite only with AGENT_FOLLOW_UP_ORIGINAL_QUESTION", async () => {
+  await ingestFixture({
+    docId: "benefits-2025",
+    fileName: "benefits-2025.pdf",
+    pages: [
+      "Remote work policy: employees may work remotely 3 days per week with manager approval.",
+    ],
+  });
+  await recordSessionTurn({
+    sessionId: "follow-up-session",
+    query: "Tell me about remote work.",
+    resolvedQuery: "Tell me about remote work.",
+    answer: "Manager approval is required.",
+    documents: [getDocument("benefits-2025")],
+    routeMode: "qa",
+  });
+
+  const followUpPlan = {
+    source: "agent-query-planner",
+    phase: "follow_up",
+    intent: "fact",
+    retrievalQueries: [
+      { id: "primary", label: "Original request", query: "And approval?", primary: true },
+      {
+        id: "follow-up-evidence",
+        label: "Follow-up evidence repair",
+        query: "Find citation-backed evidence that fixes this issue: Unsupported claim: approval is optional",
+        primary: false,
+      },
+    ],
+    retrievalOptions: { profile: "narrow", topK: 4, topKPerDoc: 2 },
+  };
+  const ask = () =>
+    chat(["benefits-2025"], "And approval?", {
+      retrievalPlan: followUpPlan,
+      sessionId: "follow-up-session",
+    });
+
+  // Default: the follow-up's question goes through the session rewrite.
+  await withEnv({ AGENT_FOLLOW_UP_ORIGINAL_QUESTION: undefined }, async () => {
+    const response = await ask();
+
+    assert.equal(response.memoryApplied, true);
+    assert.equal(response.resolvedQuery, "What is the remote work approval policy?");
+  });
+
+  await withEnv({ AGENT_FOLLOW_UP_ORIGINAL_QUESTION: "true" }, async () => {
+    const response = await ask();
+
+    assert.equal(response.memoryApplied, false);
+    assert.equal(response.resolvedQuery, "And approval?");
+  });
+});

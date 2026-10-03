@@ -707,6 +707,81 @@ export const isQaAnswerVerdictEnabled = () =>
   toBoolean(process.env.RAG_QA_ANSWER_VERDICT, false);
 
 // ---------------------------------------------------------------------------
+// Answer-rate flags. Each is off by default and changes one thing, so an
+// evaluation can turn them on one at a time and together.
+//
+// AGENT_FOLLOW_UP_ORIGINAL_QUESTION: the agent's follow-up retrieval asks the
+// answer model the primary call's resolved question instead of the
+// "Re-check the uploaded documents..." meta text; the evidence gaps go only into
+// the follow-up retrieval queries; the follow-up call skips the session-memory
+// rewrite; and its QA gate measures query-term coverage against that question
+// rather than against whichever retrieval query a candidate came from.
+export const isAgentFollowUpOriginalQuestionEnabled = () =>
+  toBoolean(process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION, false);
+
+// RAG_QA_GATE_INFLECTION: the single-document QA gate also counts a query word
+// as covered when the chunk has an inflected form of it ("governs" against
+// "governed", "metrics" against "metric"; rag/inflection.js). Anchors and
+// numbers stay exact. Comparison and the rerank gate are unchanged.
+export const isQaGateInflectionEnabled = () =>
+  toBoolean(process.env.RAG_QA_GATE_INFLECTION, false);
+
+// RAG_CLAIM_INFLECTION: the lexical claim check accepts an inflected form of a
+// claim word in its evidence. Numbers, anchors, polarity, modality, relation
+// order and attribution checks are unchanged.
+export const isClaimInflectionEnabled = () =>
+  toBoolean(process.env.RAG_CLAIM_INFLECTION, false);
+
+// RAG_CLAIM_HEADING_CONTEXT: the lexical claim check also reads each evidence
+// sentence under a section heading of the cited chunk with the heading's title
+// in front ("Limitation of Liability: The total liability ..."), so a claim
+// that names the section it answers from can be supported. Heading numbers are
+// dropped; see buildHeadingScopedSupportSentences in self-check/attribution.js.
+export const isClaimHeadingContextEnabled = () =>
+  toBoolean(process.env.RAG_CLAIM_HEADING_CONTEXT, false);
+
+// RAG_CLAIM_SOURCE_INHERITANCE: an answer sentence with no [Source N] label
+// takes the labels of the nearest labelled sentence in the same line (the
+// next one, else the previous one) before it is checked. The check itself is
+// unchanged; a sentence in a line with no label still has no source.
+export const isClaimSourceInheritanceEnabled = () =>
+  toBoolean(process.env.RAG_CLAIM_SOURCE_INHERITANCE, false);
+
+// RAG_CLAIM_JUDGE_TEMPERATURE: sampling temperature sent with the claim judge's
+// request. Unset (default) sends none, so the server's default applies.
+export const getClaimJudgeTemperature = () => {
+  const rawValue = process.env.RAG_CLAIM_JUDGE_TEMPERATURE;
+
+  if (!hasEnvValue(rawValue)) {
+    return null;
+  }
+
+  const parsedValue = Number(rawValue);
+
+  return Number.isFinite(parsedValue) && parsedValue >= 0 && parsedValue <= 2
+    ? parsedValue
+    : null;
+};
+
+// AGENT_SINGLE_DOCUMENT_ROUTING: the deterministic intent rules stop sending
+// single-document questions to a Skill on incidental wording (comparison words
+// with one selected document and no other document named, "sequence" inside a
+// hyphenated name, "this study"); see agent-intent-rules.js.
+export const isAgentSingleDocumentRoutingEnabled = () =>
+  toBoolean(process.env.AGENT_SINGLE_DOCUMENT_ROUTING, false);
+
+/** The answer-rate flags as an evaluation report records them. */
+export const describeAnswerRateFlags = () => ({
+  agentFollowUpOriginalQuestion: isAgentFollowUpOriginalQuestionEnabled(),
+  agentSingleDocumentRouting: isAgentSingleDocumentRoutingEnabled(),
+  claimHeadingContext: isClaimHeadingContextEnabled(),
+  claimInflection: isClaimInflectionEnabled(),
+  claimJudgeTemperature: getClaimJudgeTemperature(),
+  claimSourceInheritance: isClaimSourceInheritanceEnabled(),
+  qaGateInflection: isQaGateInflectionEnabled(),
+});
+
+// ---------------------------------------------------------------------------
 // Semantic answer cache (rag/semantic-cache.js). Opt-in: RAG_SEMANTIC_CACHE=on
 // serves a stored document RAG answer to a later question of the same tenant,
 // doc set, document versions, index version, query adapter, prompts, chat

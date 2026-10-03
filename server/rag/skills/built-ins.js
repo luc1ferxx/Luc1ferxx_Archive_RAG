@@ -13,7 +13,7 @@ import { CAPABILITY_IDS } from "../capabilities/index.js";
 import { attachRetrievedEvidence } from "../citations.js";
 import { buildAgentRetrievalPlan } from "../agent-query-planner.js";
 import {
-  buildEvidenceRetryQuestion,
+  buildFollowUpQuestion,
   evaluateDocumentEvidence,
 } from "../agent-self-check.js";
 import { rebaseEvidenceResults } from "../source-labels.js";
@@ -513,7 +513,7 @@ const createDocumentEvidenceCheckSkill = () => ({
       docIds,
     });
     const followUpQuestion = check.retryRecommended
-      ? buildEvidenceRetryQuestion({ question, check })
+      ? buildFollowUpQuestion({ question, check })
       : "";
     const followUpRetrievalPlan = check.retryRecommended
       ? buildAgentRetrievalPlan({

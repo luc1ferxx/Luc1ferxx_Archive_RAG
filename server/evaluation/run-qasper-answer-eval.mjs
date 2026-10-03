@@ -35,6 +35,11 @@ import {
   summarizeQasperRuns,
   toQasperPrediction,
 } from "./qasper-answer-metrics.js";
+import {
+  classifyAgentAnswer,
+  describeAgentFollowUp,
+  summarizeAgentOutcomes,
+} from "./agent-answer-outcome.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -63,6 +68,18 @@ export const sampleQasperCases = (cases, count, seed) => {
   return shuffled.slice(0, count);
 };
 
+// The answer-rate flags this run used (rag/config.js); null on a checkout
+// that predates them.
+const describeAnswerRateFlags = async () => {
+  try {
+    const config = await import("../rag/config.js");
+
+    return config.describeAnswerRateFlags?.() ?? null;
+  } catch {
+    return null;
+  }
+};
+
 const describePromptTemplates = async () => {
   try {
     const { describeActivePromptTemplates } = await import("../rag/prompt-catalog.js");
@@ -86,6 +103,13 @@ const formatMarkdown = (report) => {
     `- Answer F1 on answerable questions it did answer: ${summary.f1WhenAnswered}`,
     `- Abstained on answerable questions: ${summary.answerableAbstainRate}`,
     `- Unanswerable questions caught (abstain recall): ${summary.abstainRecall}; abstentions that were right (precision): ${summary.abstainPrecision}`,
+    "",
+    ...(summary.agentOutcomes
+      ? [
+          `- Agent answered (not a clarification or grounded abstention): ${summary.agentOutcomes.answered}/${summary.agentOutcomes.cases}; abstentions by source: ${Object.entries(summary.agentOutcomes.abstainSources).map(([source, n]) => `${source} ${n}`).join(", ") || "none"}; follow-ups run / resolved: ${summary.agentOutcomes.followUpRuns} / ${summary.agentOutcomes.followUpResolved}`,
+        ]
+      : []),
+    `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}`,
     "",
     "| Answer type | Cases | F1 |",
     "|---|---|---|",
@@ -188,10 +212,20 @@ const main = async () => {
           webChatService: async () => ({ text: "" }),
         });
         const body = response.body ?? {};
+        // A clarification and the grounded abstention sentence are both
+        // abstentions (agent-answer-outcome.js).
+        const outcome = classifyAgentAnswer(body);
 
         answer = {
-          abstained: body.agentMode === "clarification" || Boolean(body.abstained),
-          pages: (body.citations ?? []).map((citation) => Number(citation.pageNumber)),
+          abstained: !outcome.answered,
+          abstainSource: outcome.abstainSource,
+          agent: { ...outcome, ...describeAgentFollowUp(body) },
+          // The agent body carries its cited sources as ragSources; it has no
+          // citations field, so reading that gave every agent row no pages.
+          // An abstention counts as returning no sources, as on the rag surface.
+          pages: outcome.answered
+            ? (body.ragSources ?? body.citations ?? []).map((citation) => Number(citation.pageNumber))
+            : [],
           text: body.agentAnswer,
         };
       }
@@ -201,6 +235,7 @@ const main = async () => {
       const row = {
         abstained: answer.abstained,
         abstainSource: answer.abstainSource ?? null,
+        ...(answer.agent ?? {}),
         answerType: testCase.answerType,
         evidenceHit: testCase.shouldAbstain ? null : answer.pages.some((page) => expectedPages.has(page)),
         f1: Number(qasperAnswerF1(prediction, testCase.referenceAnswers ?? []).toFixed(4)),
@@ -222,8 +257,10 @@ const main = async () => {
   const { getQueryAdapterReportFingerprint } = await import("../rag/query-adapter.js");
   const report = {
     config: {
+      answerRateFlags: await describeAnswerRateFlags(),
       cases: caseCount,
       chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
+      claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
       corpus: path.basename(corpusPath),
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
       promptTemplates: await describePromptTemplates(),
@@ -235,7 +272,10 @@ const main = async () => {
     generatedAt: new Date().toISOString(),
     reportType: "qasper-answers",
     rows,
-    summary: summarizeQasperRuns(rows),
+    summary: {
+      ...summarizeQasperRuns(rows),
+      ...(surface === "agent" ? { agentOutcomes: summarizeAgentOutcomes(rows) } : {}),
+    },
   };
 
   await mkdir(resultsDirectory, { recursive: true });
