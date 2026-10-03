@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import test from "node:test";
+import test, { after, before } from "node:test";
 
 import { createApp as createProductionApp } from "../app.js";
 import { continueAgentExecutionGraphApproval, runAgentRag } from "../rag/agent.js";
@@ -35,6 +35,16 @@ import {
   createProposalAdapter,
   createTaskCapabilityRegistry,
 } from "./fixtures/unified-graph-run-fixtures.mjs";
+
+// The deadline and collector timers are unref'd so they never hold a process
+// open. A test that awaits one needs something else keeping the event loop
+// alive: on Node 20 (CI) the loop drains first and every later test in the
+// file is cancelled.
+let keepEventLoopAlive = null;
+before(() => {
+  keepEventLoopAlive = setInterval(() => {}, 60_000);
+});
+after(() => clearInterval(keepEventLoopAlive));
 
 // Cancellation and outages through the agent run, in one process: runAgentRag
 // under a request deadline, and the monolith's /chat and /chat/stream with

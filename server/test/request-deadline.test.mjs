@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
-import test from "node:test";
+import test, { after, before } from "node:test";
 
 import {
   classifyDependencyOutage,
@@ -54,6 +54,16 @@ import {
   ServiceUnavailableError,
 } from "../rag/service-client.js";
 import { createTaskService, TASK_STATUSES } from "../rag/tasks.js";
+
+// The deadline and collector timers are unref'd so they never hold a process
+// open. A test that awaits one needs something else keeping the event loop
+// alive: on Node 20 (CI) the loop drains first and every later test in the
+// file is cancelled.
+let keepEventLoopAlive = null;
+before(() => {
+  keepEventLoopAlive = setInterval(() => {}, 60_000);
+});
+after(() => clearInterval(keepEventLoopAlive));
 
 // The request-scoped deadline and cancellation signal (rag/request-deadline.js)
 // and the outage classification (rag/dependency-outage.js), unit by unit:

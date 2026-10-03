@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -16,6 +16,16 @@ import {
   toIdentifierLabel,
 } from "../rag/metrics.js";
 import { checkHistogram, parseExposition, sampleValue } from "./metrics-exposition.mjs";
+
+// The deadline and collector timers are unref'd so they never hold a process
+// open. A test that awaits one needs something else keeping the event loop
+// alive: on Node 20 (CI) the loop drains first and every later test in the
+// file is cancelled.
+let keepEventLoopAlive = null;
+before(() => {
+  keepEventLoopAlive = setInterval(() => {}, 60_000);
+});
+after(() => clearInterval(keepEventLoopAlive));
 
 // The registry and the text exposition format (rag/metrics.js): what it
 // renders must parse back exactly, histograms must be internally consistent,
