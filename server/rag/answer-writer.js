@@ -5,6 +5,7 @@ import {
 import {
   getMaxComparisonSources,
   getPromptVersion,
+  getQaVerdictOverrideMode,
   isNearDuplicateGuardEnabled,
   isQaAnswerVerdictEnabled,
 } from "./config.js";
@@ -28,6 +29,10 @@ import {
 } from "./prompt-injection-screen.js";
 import { createAnswerDraftReleaser } from "./answer-drafts.js";
 import { QA_NOT_IN_EVIDENCE_MARKER, readQaAnswerVerdict } from "./answer-verdict.js";
+import {
+  describeVerdictOverride,
+  overrideNotInEvidenceVerdict,
+} from "./answer-verdict-override.js";
 import { normalizeWhitespace } from "./text-utils.js";
 import { evaluateBidirectionalEvidenceEntailment } from "./comparison-equivalence.js";
 
@@ -1002,6 +1007,9 @@ export const writeQaAnswer = async ({
   resolvedQuery,
   bundle,
   preferenceBlock = "",
+  // How many parts the query decomposer split the question into; read only
+  // by the verdict override, which never answers a multi-part question.
+  evidenceRequirementCount = 1,
 }) => {
   const qaPrompt = selectPrompt(selectQaPrompts());
   const prompt = qaPrompt.render({
@@ -1041,6 +1049,34 @@ export const writeQaAnswer = async ({
   const injectionScreen = buildInjectionScreenResult(bundle, guarded.removed);
 
   if (verdict.abstained) {
+    // RAG_QA_VERDICT_OVERRIDE=supported (answer-verdict-override.js): the
+    // reply is answered anyway when the claims after the marker prove it. It
+    // was never drafted (the releaser skips a reply opening with the marker)
+    // and drafts.finish is not called, so it is not drafted now either.
+    const override =
+      getQaVerdictOverrideMode() === "supported"
+        ? overrideNotInEvidenceVerdict({
+            citations: attachRetrievedEvidence({
+              citations: bundle.citations,
+              retrievedContexts: bundle.retrievedContexts ?? [],
+            }),
+            questionPartCount: evidenceRequirementCount,
+            questions: [resolvedQuery, query],
+            replyText: guarded.text,
+          })
+        : null;
+
+    if (override?.overridden) {
+      return {
+        text: override.text,
+        citations: bundle.citations,
+        injectionScreen,
+        abstainSource: null,
+        verdictOverridden: true,
+        verdictOverride: describeVerdictOverride(override),
+      };
+    }
+
     return {
       text: verdict.reason,
       citations: [],
@@ -1048,6 +1084,7 @@ export const writeQaAnswer = async ({
       abstainReason: verdict.reason,
       abstainSource: "answer_model",
       injectionScreen,
+      ...(override ? { verdictOverride: describeVerdictOverride(override) } : {}),
     };
   }
 

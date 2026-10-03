@@ -24,6 +24,14 @@ export const startsWithNotInEvidenceVerdict = (text) =>
   LEADING_MARKER_PATTERN.test(String(text ?? ""));
 
 /**
+ * The text after a leading marker, source labels kept (the verdict override
+ * in answer-verdict-override.js checks the claims it cites); the text itself
+ * when it does not open with the marker.
+ */
+export const stripLeadingNotInEvidenceMarker = (text) =>
+  String(text ?? "").replace(LEADING_MARKER_PATTERN, "").trim();
+
+/**
  * Reads a finished QA reply. A reply that opens with the marker is an
  * abstention whose reason is the sentence after it (source labels removed:
  * an abstention cites nothing). A marker later in the reply follows a partial

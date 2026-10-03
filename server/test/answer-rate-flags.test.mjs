@@ -43,6 +43,7 @@ const FLAG_KEYS = [
   "RAG_CLAIM_JUDGE_TEMPERATURE",
   "RAG_CLAIM_JUDGE",
   "RAG_QA_ANSWER_VERDICT",
+  "RAG_QA_VERDICT_OVERRIDE",
   "RAG_QA_PARTIAL_COVERAGE_FLOOR",
   "RAG_MIN_QA_QUERY_TERM_COVERAGE",
   "RAG_MIN_RELEVANCE_SCORE",
@@ -638,6 +639,7 @@ test("describeAnswerRateFlags reports every flag, all off by default", () => {
     claimJudgeTemperature: null,
     claimSourceInheritance: false,
     qaGateInflection: false,
+    qaVerdictOverride: "off",
   });
 
   withFlags(
@@ -649,6 +651,7 @@ test("describeAnswerRateFlags reports every flag, all off by default", () => {
       RAG_CLAIM_JUDGE_TEMPERATURE: "0",
       RAG_CLAIM_SOURCE_INHERITANCE: "true",
       RAG_QA_GATE_INFLECTION: "true",
+      RAG_QA_VERDICT_OVERRIDE: "supported",
     },
     () => {
       assert.deepEqual(describeAnswerRateFlags(), {
@@ -659,6 +662,7 @@ test("describeAnswerRateFlags reports every flag, all off by default", () => {
         claimJudgeTemperature: 0,
         claimSourceInheritance: true,
         qaGateInflection: true,
+        qaVerdictOverride: "supported",
       });
     }
   );

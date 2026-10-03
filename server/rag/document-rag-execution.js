@@ -846,6 +846,7 @@ const executeQaRag = async ({
     resolvedQuery,
     bundle,
     preferenceBlock,
+    evidenceRequirementCount: evidenceRequirements?.length ?? 1,
   });
   const retry =
     answer.abstainSource === "answer_model"
@@ -865,17 +866,25 @@ const executeQaRag = async ({
         })
       : null;
 
+  // RAG_QA_VERDICT_OVERRIDE: the decision (codes and counts only) goes to the
+  // trace, not into the response; an applied override also marks the answer
+  // verdictOverridden: true.
+  if (answer.verdictOverride) {
+    traceFields.verdictOverride = answer.verdictOverride;
+  }
+
   if (retry) {
     traceFields.verdictRetry = retry.trace;
   }
 
   const final = retry?.answer ? retry : { answer, bundle };
+  const { verdictOverride: _verdictOverride, ...finalAnswer } = final.answer;
 
   return {
     routeMode: route.mode,
     traceFields,
     response: {
-      ...final.answer,
+      ...finalAnswer,
       retrievedContexts: final.bundle.retrievedContexts,
       evidenceSummary,
       retrieval,
@@ -957,9 +966,14 @@ const retryQaWithDeeperRetrieval = async ({
     resolvedQuery,
     bundle,
     preferenceBlock,
+    evidenceRequirementCount,
   });
 
   trace.answered = !answer.abstained;
+
+  if (answer.verdictOverride) {
+    trace.verdictOverride = answer.verdictOverride;
+  }
 
   return { answer, bundle, trace };
 };

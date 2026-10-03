@@ -3870,6 +3870,297 @@ test("a not-in-evidence reply retries once with chunks the model has not seen", 
   assert.equal(response.citations[0].pageNumber, shownFirst === 1 ? 2 : 1);
 });
 
+// RAG_QA_VERDICT_OVERRIDE end to end (rag/answer-verdict-override.js). The
+// pages are verify:quality's synthetic vendor contracts
+// (evaluation/build-doccompare-fixtures.mjs); the replies are written for these
+// tests in the shapes the answer model was seen to use.
+const verifyVendorPages = (vendor, months, noticeDays, state) => [
+  [
+    `VENDOR ${vendor} MASTER SERVICES AGREEMENT`,
+    "Section 1. Scope of Services.",
+    `Vendor ${vendor} shall provide cloud hosting and support services.`,
+  ].join("\n"),
+  [
+    "Section 7. Limitation of Liability.",
+    `The total liability of Vendor ${vendor} shall not exceed the fees paid`,
+    `in the ${months} months preceding the claim.`,
+    "Section 8. Termination.",
+    `Either party may terminate this agreement on ${noticeDays} days`,
+    "written notice to the other party.",
+  ].join("\n"),
+  ["Section 12. Governing Law.", `This agreement is governed by the laws of ${state}.`].join("\n"),
+];
+
+const stubAnswerModel = ({ question, qaReply, comparisonReply = null, answerPrompts = [] }) =>
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      if (prompt.includes("preserved_ambiguity")) {
+        return JSON.stringify({ rewritten_query: question, preserved_ambiguity: false });
+      }
+
+      if (prompt.includes("Standalone retrieval question:")) {
+        return question;
+      }
+
+      answerPrompts.push(prompt);
+
+      if (comparisonReply && prompt.includes("Write the answer using these sections:")) {
+        return comparisonReply;
+      }
+
+      return qaReply;
+    },
+  });
+
+// verify:quality's single-document checks (evaluation/run-doccompare-verification.mjs).
+const verifySingleDocumentChecks = (response) => {
+  const text = String(response.text ?? "").replace(/\s+/g, " ").trim();
+
+  return {
+    answers: !response.abstained && text.length > 0,
+    cites: (response.citations ?? []).length > 0,
+    correctValue: /\b(?:twelve|12)\b/i.test(text),
+    noForeignValue: !/\b(?:six|6)\b/i.test(text),
+    pageHonest: (response.citations ?? []).some((citation) => Number(citation.pageNumber) === 2),
+  };
+};
+
+// Two shapes of the same refusal: the marker, a reason sentence, then the cited
+// value as its own sentence; and the shape qwen2.5:7b used in verify:quality,
+// one hedge sentence whose second half (after "beyond stating that") states
+// the cited value. Both are written for these tests, not transcripts.
+const LIABILITY_OVERRIDE_REPLY =
+  "NOT_IN_EVIDENCE: The documents do not specify any other limitation. The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim. [Source 1]";
+const LIABILITY_HEDGE_REPLY =
+  "NOT_IN_EVIDENCE: The documents do not specify the limitation of liability beyond stating that the total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim. [Source 1]";
+
+test("verdict override: the verify:quality refusal (marker, reason, cited value) is answered only with the flag on", async () => {
+  const question = "What is the limitation of liability?";
+
+  await ingestFixture({
+    docId: "verify-vendor-a",
+    fileName: "vendor-a.pdf",
+    pages: verifyVendorPages("A", "twelve (12)", "thirty (30)", "Delaware"),
+  });
+
+  const ask = (override) =>
+    withEnv(
+      { RAG_OBSERVABILITY_ENABLED: "true", RAG_QA_ANSWER_VERDICT: "true", RAG_QA_VERDICT_OVERRIDE: override },
+      () => chat(["verify-vendor-a"], question)
+    );
+
+  for (const [qaReply, residualClaimCount] of [
+    [LIABILITY_OVERRIDE_REPLY, 0],
+    [LIABILITY_HEDGE_REPLY, 1],
+  ]) {
+    stubAnswerModel({ question, qaReply });
+
+    // Today's failure, reproduced: the answer model's marker makes it a refusal
+    // although the reply states the right value, so single.answers,
+    // single.cites and single.page-honest fail.
+    const refused = await ask(undefined);
+
+    assert.equal(refused.abstained, true, qaReply);
+    assert.equal(refused.abstainSource, "answer_model");
+    assert.equal("verdictOverridden" in refused, false);
+    assert.deepEqual(verifySingleDocumentChecks(refused), {
+      answers: false,
+      cites: false,
+      correctValue: true,
+      noForeignValue: true,
+      pageHonest: false,
+    });
+
+    const answered = await ask("supported");
+
+    assert.equal(answered.abstained, false, qaReply);
+    assert.equal(answered.abstainSource, null);
+    assert.equal(answered.verdictOverridden, true);
+    assert.equal(
+      answered.text,
+      "The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim [Source 1]."
+    );
+    assert.deepEqual(verifySingleDocumentChecks(answered), {
+      answers: true,
+      cites: true,
+      correctValue: true,
+      noForeignValue: true,
+      pageHonest: true,
+    });
+
+    const [refusedTrace, answeredTrace] = (await readRagObservabilityEvents()).slice(-2);
+
+    assert.equal(refusedTrace.abstainSource, "answer_model");
+    assert.equal("verdictOverride" in refusedTrace, false);
+    assert.equal(answeredTrace.abstainSource, null);
+    assert.deepEqual(answeredTrace.verdictOverride, {
+      applied: true,
+      factualClaimCount: 1,
+      hedgeCount: 1,
+      reason: "supported_claims",
+      residualClaimCount,
+      supportedClaimCount: 1,
+    });
+  }
+});
+
+test("verdict override: a hedge whose residual does not prove the answer stays a refusal", async () => {
+  const question = "What is the limitation of liability?";
+
+  await ingestFixture({
+    docId: "verify-vendor-a",
+    fileName: "vendor-a.pdf",
+    pages: verifyVendorPages("A", "twelve (12)", "thirty (30)", "Delaware"),
+  });
+
+  for (const [qaReply, reason] of [
+    // No value: the residual only names the cap (a bare noun phrase, not a claim).
+    [
+      "NOT_IN_EVIDENCE: The documents do not provide a specific limitation of liability apart from the liability cap mentioned. [Source 1]",
+      "no_factual_claim",
+    ],
+    // A pronoun subject names none of the question's terms.
+    [
+      "NOT_IN_EVIDENCE: The documents do not specify the exact limitation of liability beyond stating that it shall not exceed the fees paid in the twelve (12) months preceding the claim. [Source 1]",
+      "no_query_term",
+    ],
+    // A wrong value.
+    [
+      "NOT_IN_EVIDENCE: The documents do not specify the limitation of liability beyond stating that the total liability of Vendor A shall not exceed the fees paid in the six (6) months preceding the claim. [Source 1]",
+      "unsupported_claim",
+    ],
+  ]) {
+    stubAnswerModel({ question, qaReply });
+
+    const response = await withEnv(
+      { RAG_OBSERVABILITY_ENABLED: "true", RAG_QA_ANSWER_VERDICT: "true", RAG_QA_VERDICT_OVERRIDE: "supported" },
+      () => chat(["verify-vendor-a"], question)
+    );
+
+    assert.equal(response.abstained, true, qaReply);
+    assert.equal(response.abstainSource, "answer_model", qaReply);
+    assert.deepEqual(response.citations, [], qaReply);
+    assert.equal("verdictOverride" in response, false, "the decision goes to the trace only");
+    assert.equal((await readRagObservabilityEvents()).at(-1).verdictOverride.reason, reason, qaReply);
+  }
+});
+
+test("verdict override: a supported claim about an adjacent topic stays a refusal", async () => {
+  for (const { docId, fileName, page, question, qaReply } of [
+    {
+      docId: "cobalt-manual",
+      fileName: "cobalt.pdf",
+      page: "Archive serial cobalt ceiling: approved amount is 3600 dollars per cycle.",
+      question: "What is the amber ceiling approved amount per cycle?",
+      qaReply:
+        "NOT_IN_EVIDENCE: The documents do not state the amber ceiling. The approved amount is 3600 dollars per cycle [Source 1].",
+    },
+    {
+      docId: "benefits-2024",
+      fileName: "benefits-2024.pdf",
+      page: "Annual leave policy: employees receive 10 paid annual leave days each year.",
+      question: "How many paid parental leave days do employees receive each year?",
+      qaReply:
+        "NOT_IN_EVIDENCE: The policy does not mention parental leave. Employees receive 10 paid annual leave days each year [Source 1].",
+    },
+  ]) {
+    const answerPrompts = [];
+
+    stubAnswerModel({ answerPrompts, question, qaReply });
+    await ingestFixture({ docId, fileName, pages: [page] });
+
+    const response = await withEnv(
+      { RAG_OBSERVABILITY_ENABLED: "true", RAG_QA_ANSWER_VERDICT: "true", RAG_QA_VERDICT_OVERRIDE: "supported" },
+      () => chat([docId], question)
+    );
+
+    assert.equal(answerPrompts.length, 1, `${question}: the gate admitted the chunk; the override decided`);
+    assert.equal(response.abstained, true, question);
+    assert.equal(response.abstainSource, "answer_model", question);
+    assert.deepEqual(response.citations, [], question);
+    assert.deepEqual((await readRagObservabilityEvents()).at(-1).verdictOverride, {
+      applied: false,
+      factualClaimCount: 1,
+      hedgeCount: 1,
+      reason: "query_term_substitution",
+      residualClaimCount: 0,
+      supportedClaimCount: 1,
+    });
+  }
+});
+
+test("verdict override: a question the decomposer split into parts stays a refusal", async () => {
+  // The reply answers one part and drops the other without saying so; the
+  // override must not turn that into an answer.
+  const question = "What is the limitation of liability and the cure period for a breach?";
+  const qaReply =
+    "NOT_IN_EVIDENCE: The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim [Source 1].";
+  const answerPrompts = [];
+
+  stubAnswerModel({ answerPrompts, question, qaReply });
+  await ingestFixture({
+    docId: "verify-vendor-a",
+    fileName: "vendor-a.pdf",
+    pages: verifyVendorPages("A", "twelve (12)", "thirty (30)", "Delaware"),
+  });
+
+  const response = await withEnv(
+    { RAG_OBSERVABILITY_ENABLED: "true", RAG_QA_ANSWER_VERDICT: "true", RAG_QA_VERDICT_OVERRIDE: "supported" },
+    () => chat(["verify-vendor-a"], question)
+  );
+  const trace = (await readRagObservabilityEvents()).at(-1);
+
+  assert.ok(answerPrompts.length >= 1, "the gate admitted a chunk; the override decided");
+  assert.ok(trace.queryRequirements.length > 1, "the decomposer split the question");
+  assert.equal(response.abstained, true);
+  assert.equal(response.abstainSource, "answer_model");
+  assert.equal(response.verdictOverridden, undefined);
+  assert.equal(trace.verdictOverride.reason, "multi_part_question");
+});
+
+test("verdict override: comparison answers are unchanged", async () => {
+  const question = "Compare the limitation of liability in these two contracts.";
+  const comparisonReply = [
+    "NOT_IN_EVIDENCE: The documents do not compare indirect damages.",
+    "Summary:",
+    "- vendor-a limits liability to the fees paid in the twelve (12) months preceding the claim. [Source 1]",
+    "- vendor-b limits liability to the fees paid in the six (6) months preceding the claim. [Source 2]",
+  ].join("\n");
+
+  stubAnswerModel({ comparisonReply, question, qaReply: LIABILITY_OVERRIDE_REPLY });
+  await ingestFixture({
+    docId: "verify-vendor-a",
+    fileName: "vendor-a.pdf",
+    pages: verifyVendorPages("A", "twelve (12)", "thirty (30)", "Delaware"),
+  });
+  await ingestFixture({
+    docId: "verify-vendor-b",
+    fileName: "vendor-b.pdf",
+    pages: verifyVendorPages("B", "six (6)", "ninety (90)", "New York"),
+  });
+
+  const ask = (override) =>
+    withEnv({ RAG_QA_ANSWER_VERDICT: "true", RAG_QA_VERDICT_OVERRIDE: override }, () =>
+      chat(["verify-vendor-a", "verify-vendor-b"], question)
+    );
+  const project = (response) =>
+    JSON.stringify({
+      abstainReason: response.abstainReason,
+      abstained: response.abstained,
+      abstainSource: response.abstainSource,
+      citations: response.citations,
+      text: response.text,
+      verdictOverridden: response.verdictOverridden,
+    });
+  const off = await ask(undefined);
+  const on = await ask("supported");
+
+  assert.equal(off.evidenceSummary.mode, "compare");
+  assert.equal(project(on), project(off));
+  assert.equal(on.verdictOverridden, undefined);
+});
+
 test("qa abstain path runs supplemental retrieval to improve gap suggestions", async () => {
   const originalTopK = process.env.RAG_RETRIEVAL_TOP_K;
 

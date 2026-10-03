@@ -318,6 +318,20 @@ const getMatchedAnchorIndexes = (result, anchorGroups) => {
   return matchedIndexes;
 };
 
+/**
+ * The QA gate's anchor check (identifiers and quoted phrases, matched as in
+ * analyzeAnchorCoverage) applied to one text: the anchor groups of the
+ * question the text does not name. Empty when the question has no anchors.
+ */
+export const findUncoveredQueryAnchors = ({ queryText = "", text = "" } = {}) => {
+  const anchorGroups = extractAnchorGroups(String(queryText ?? ""));
+  const matchedIndexes = new Set(
+    getMatchedAnchorIndexes({ document: { pageContent: String(text ?? "") } }, anchorGroups)
+  );
+
+  return anchorGroups.filter((_group, index) => !matchedIndexes.has(index));
+};
+
 const analyzeAnchorCoverage = (results, anchorGroups) => {
   if (anchorGroups.length === 0) {
     return {

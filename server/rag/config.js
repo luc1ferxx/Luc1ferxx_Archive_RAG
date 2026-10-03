@@ -706,6 +706,23 @@ export const getMinQaQueryTermCoverage = () =>
 export const isQaAnswerVerdictEnabled = () =>
   toBoolean(process.env.RAG_QA_ANSWER_VERDICT, false);
 
+// RAG_QA_VERDICT_OVERRIDE (off | supported; default off; only read while
+// RAG_QA_ANSWER_VERDICT is on). With "supported", a reply that opens with
+// NOT_IN_EVIDENCE: is still answered when the text after the marker, with its
+// evidence-absence hedges removed, holds at least one cited factual claim and
+// every factual claim passes the lexical claim check; the claims must name
+// every anchor and name of the question, one claim must carry the answer,
+// and neither they nor the evidence they cite may swap a query word for a
+// rival; a question the decomposer split into parts is never overridden
+// (answer-verdict-override.js). The LLM claim judge is never asked. Any other
+// value is off.
+export const QA_VERDICT_OVERRIDE_MODES = Object.freeze(["off", "supported"]);
+
+export const getQaVerdictOverrideMode = () =>
+  String(process.env.RAG_QA_VERDICT_OVERRIDE ?? "").trim().toLowerCase() === "supported"
+    ? "supported"
+    : "off";
+
 // ---------------------------------------------------------------------------
 // Answer-rate flags. Each is off by default and changes one thing, so an
 // evaluation can turn them on one at a time and together.
@@ -779,6 +796,7 @@ export const describeAnswerRateFlags = () => ({
   claimJudgeTemperature: getClaimJudgeTemperature(),
   claimSourceInheritance: isClaimSourceInheritanceEnabled(),
   qaGateInflection: isQaGateInflectionEnabled(),
+  qaVerdictOverride: getQaVerdictOverrideMode(),
 });
 
 // ---------------------------------------------------------------------------

@@ -25,12 +25,16 @@ import {
 
 const noop = () => {};
 
+// verdictOverridden appears only when RAG_QA_VERDICT_OVERRIDE answered a
+// NOT_IN_EVIDENCE reply (answer-verdict-override.js), so with the flag off the
+// step output keeps its shape.
 const buildRagStepOutput = (result = {}) =>
   result.ok
     ? {
         abstained: Boolean(result.value?.abstained),
         citationCount: result.value?.citations?.length ?? 0,
         text: result.text ?? result.value?.text ?? "",
+        ...(result.value?.verdictOverridden === true ? { verdictOverridden: true } : {}),
       }
     : null;
 

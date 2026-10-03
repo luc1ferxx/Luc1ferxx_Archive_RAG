@@ -38,6 +38,7 @@ import {
 import {
   classifyAgentAnswer,
   describeAgentFollowUp,
+  isAgentVerdictOverridden,
   summarizeAgentOutcomes,
 } from "./agent-answer-outcome.js";
 
@@ -90,6 +91,17 @@ const describePromptTemplates = async () => {
   }
 };
 
+// RAG_QA_VERDICT_OVERRIDE: answers given although the answer model opened with
+// NOT_IN_EVIDENCE:, split by whether the question was answerable.
+const summarizeVerdictOverrides = (rows) => {
+  const answered = rows.filter((row) => row.verdictOverridden && !row.abstained);
+
+  return {
+    answeredAnswerable: answered.filter((row) => !row.shouldAbstain).length,
+    answeredUnanswerable: answered.filter((row) => row.shouldAbstain).length,
+  };
+};
+
 const formatMarkdown = (report) => {
   const summary = report.summary;
 
@@ -109,6 +121,7 @@ const formatMarkdown = (report) => {
           `- Agent answered (not a clarification or grounded abstention): ${summary.agentOutcomes.answered}/${summary.agentOutcomes.cases}; abstentions by source: ${Object.entries(summary.agentOutcomes.abstainSources).map(([source, n]) => `${source} ${n}`).join(", ") || "none"}; follow-ups run / resolved: ${summary.agentOutcomes.followUpRuns} / ${summary.agentOutcomes.followUpResolved}`,
         ]
       : []),
+    `- Answers through the verdict override (RAG_QA_VERDICT_OVERRIDE): answerable ${summary.verdictOverrides?.answeredAnswerable ?? 0}, unanswerable ${summary.verdictOverrides?.answeredUnanswerable ?? 0}`,
     `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}`,
     "",
     "| Answer type | Cases | F1 |",
@@ -200,6 +213,7 @@ const main = async () => {
           abstainSource: result?.abstained ? result.abstainSource ?? "gate" : null,
           pages: (result?.retrievedContexts ?? []).map((context) => Number(context.pageNumber)),
           text: result?.text,
+          verdictOverridden: result?.verdictOverridden === true,
         };
       } else {
         const response = await runAgentRag({
@@ -227,6 +241,7 @@ const main = async () => {
             ? (body.ragSources ?? body.citations ?? []).map((citation) => Number(citation.pageNumber))
             : [],
           text: body.agentAnswer,
+          verdictOverridden: isAgentVerdictOverridden(body),
         };
       }
 
@@ -243,6 +258,7 @@ const main = async () => {
         prediction: prediction.slice(0, 400),
         references: testCase.referenceAnswers,
         shouldAbstain: Boolean(testCase.shouldAbstain),
+        verdictOverridden: answer.verdictOverridden === true,
       };
 
       rows.push(row);
@@ -275,6 +291,7 @@ const main = async () => {
     summary: {
       ...summarizeQasperRuns(rows),
       ...(surface === "agent" ? { agentOutcomes: summarizeAgentOutcomes(rows) } : {}),
+      verdictOverrides: summarizeVerdictOverrides(rows),
     },
   };
 

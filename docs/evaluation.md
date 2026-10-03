@@ -1242,6 +1242,202 @@ G2 各组（最终答案延迟，直连 Ollama，单机）：
 - G2 的 arxiv 没有标准答案，只计回答数，不判对错。
 - 延迟只有一轮全关对照，没做配对比较。候选组 arxiv 最终答案 p95 是 13.5 s / 9.1 s，全关对照是 8.4 s。
 
+#### 拒答标记覆盖（`RAG_QA_VERDICT_OVERRIDE`，默认关闭，2026-10-03）
+
+G3 之后用户的决定：修掉误拒，换新样本重测，跑全部护栏，全部通过才作为产品决定改默认值。这一节只记录修复本身和它的确定性测试，外加两轮 `verify:quality` 单文档问题的真实模型诊断。新样本重测见下一节"第三轮：拒答标记的确定性复核"：阶段 1 没有通过，护栏没跑，默认值没有改。
+
+**做法**（`server/rag/answer-verdict-override.js`，只在 `RAG_QA_ANSWER_VERDICT` 打开时生效）：
+
+- 回复以 `NOT_IN_EVIDENCE:` 开头时，读标记后面的文字。谈论证据本身的句子（"文档没有说明……"、"……未明确"、"问题问的是……"）先去掉，不算 claim。
+- 例外：这种句子在 beyond / other than / except (for) / apart from / aside from / besides / ", only" 之后的后半句，作为单独的 claim 留下，照常校验。这是 qwen2.5:7b 在 `verify:quality` 里的写法："do not specify X beyond stating that <事实> [Source 1]"。
+- 作答条件，全部满足：
+  - 至少一条 claim 自带 `[Source N]`；
+  - 每条 claim 都通过 finalizer 用的词法 `evaluateClaimSupport`，不调用 claim 评审；
+  - claim 覆盖问题的全部 anchor（门控的 anchor 检查），且至少含一个查询词；
+  - claim 和它们引用的证据里都没有"近邻替换"（`findQueryTermSubstitution`）；
+  - 理由句里如果点名了问题中的词，说它们缺失（"文档没有描述退款政策"，问的是"保修的退款政策是什么"），claim 至少要提到其中一个。谈论证据本身的词（documents、paper、specified 等）和紧跟在 other / additional / another / separate / extra 后面的词（"any other limitation"）不算点名。这一条宁可拒答：理由句用 claim 没有重复的词点名了所问的东西（"no limitation is mentioned"，后面写"total liability shall not exceed ..."），也会拒答。
+- 作答时：答案是去掉这些句子后的文本，带原有引用，`abstainSource: null`，`verdictOverridden: true`。RAG trace 记 `verdictOverride`（只有原因代码和计数）。Agent 的 `document_rag` 步骤输出多一个 `verdictOverridden: true`。
+- 不变的部分：以标记开头的回复仍然不作为草稿流式发出；对比路径不读拒答标记；开关关时，输出和改前逐字节相同。
+
+**确定性测试**（`test/answer-verdict-override.test.mjs`、`test/rag.test.mjs`、`test/answer-drafts.test.mjs`）：
+
+- 复现 G3：用 `verify:quality` 的合成合同，存根模型回两种形状。一种是"标记 + 理由 + 单独一句带引用的值"，一种是"一句 hedge，值在 beyond 之后"。开关关时 `single.answers`、`single.cites`、`single.page-honest` 失败，和 G3 一样。开关开时 5 条单文档检查都通过。
+- 保持拒答的情形：
+  - 任一 claim 不被支持；
+  - 没有自带引用的 claim；
+  - 只有 hedge；
+  - 数字错（包括 hedge 后半句里的数字）；
+  - 主语是代词、和问题没有共同查询词；
+  - 近邻话题：amber / cobalt ceiling、parental / annual leave，claim 里或所引证据里出现都算；
+  - 问题的 anchor 没被 claim 提到；
+  - 理由句点名的缺失内容，claim 一个词都没有提到（退款政策 / 保修期）。
+- 对比路径不变；开关关时逐字节相同；覆盖时不调用 claim 评审；Agent 路径作答、不发草稿、步骤输出带 `verdictOverridden`。
+- 相关套件在 Node 24 和 Node 20 上、开关开和关都通过。完整后端 `npm test`（开关关）在两个版本上都是 2551 通过、0 失败、14 跳过（跳过的是需要数据库或 Redis 的集成套件）。`eval:trajectory` 默认配置 19/19、84/84，去掉 run id 和耗时后与改前逐项一致。
+
+**真实模型诊断**（一次性脚本，不在仓库里，只记抽象字段）：`verify:quality` 的单文档问题问 20 次，候选配置（B2）加 `RAG_QA_VERDICT_OVERRIDE=supported`，直连 Ollama。跑了两轮：第 1 轮时还没有"理由句点名"那一条；之后用一个合成的反例（上面的退款政策）加了这一条，再跑第 2 轮。
+
+| 项 | 第 1 轮 | 第 2 轮 |
+| --- | --- | --- |
+| 回复以标记开头 | 13/20 | 11/20 |
+| 覆盖后作答（5 条单文档检查都通过） | 4 | 3 |
+| 仍然拒答：hedge 后面没有事实（`no_factual_claim`），拒答文本里也没有正确值 | 5 | 5 |
+| 仍然拒答：后半句没通过词法校验（`unsupported_claim`） | 4（2 次含正确值） | 2（都含正确值） |
+| 仍然拒答：后半句和问题没有共同查询词（`no_query_term`），含正确值 | 0 | 1 |
+| 仍然拒答：理由句点名的词 claim 没提到（`hedged_term_unanswered`） | 不适用 | 0 |
+| 5 条单文档检查全部通过 | 11/20 | 12/20 |
+
+- 覆盖作答的 7 次全部来自 hedge 后半句。"标记 + 理由 + 单独一句值"这种形状，24 次标记回复里一次也没出现。
+- 24 次标记回复里，10 次文本里根本没有值，这部分本来就该拒答；另有 5 次写了值却没通过词法校验（大概率是改写过的说法），这次没救回来。
+- 改前诊断是另一批调用（拒答 10/20），不配对，不能直接相减。
+- `verify:quality` 要求单文档提问和第二进程提问都不被误拒。按两轮合计 23/40 粗算，单次 18/18 的概率约 0.33。所以只靠这个修复，G3 多半仍然过不了。
+- hedge 后半句这条规则，是看过 `verify:quality` 的拒答形状之后写的，所以 `verify:quality` 不能作为它的独立证据。判断它是否多答了不可答题，要看新样本上的 QASPER 结果。两轮诊断之后都没有按诊断结果改规则；第 2 轮前加的那一条来自合成反例，诊断里它没有拦下任何一次。
+
+**记录**：QASPER 答案报告的每行多一个 `verdictOverridden`，summary 多一个 `verdictOverrides`（覆盖后作答的可答题数和不可答题数）。`verify:quality` 报告多一个 `config`（答题率开关、评审、拒答标记），覆盖作答时，检查详情里写 `verdictOverridden=true`。
+
+**独立审查后的修复**（合成反例，不是测量数据）：审查时用构造的回复攻击覆盖规则：标记后面跟一句真实、带引用、但不回答问题的句子。下面每一种在修复前都会被当成答案。每条都先写了测试，确认修复前失败（`test/answer-verdict-override.test.mjs`；多子问题另有一条端到端测试在 `test/rag.test.mjs`）。
+
+- 多子问题：问题被查询拆分器拆成多个子问题（`evidenceRequirementCount` > 1），回复只答其中一部分。覆盖会把"另一部分缺失"那句一起删掉，答案看上去像是完整的。现在这类问题从不覆盖（`multi_part_question`）；`executeQaRag` 和 verdict retry 把子问题数传给 `writeQaAnswer`。
+- 别的实体：问 Vendor B，claim 原样引用 Vendor A 的条款（单个字母不算词，词法校验照样通过）；问 BERT 答 RoBERTa；问 SQuAD 答 TriviaQA；问 2023 答一个没写年份的数；问 Globex 答 Acme。现在问题里的名称必须同时出现在 claim 里和所引证据（正文、小节标题或文件名）里（`missing_query_name`，`extractQuestionNames`）。名称包括：数字；首字母之后还有大写的词；句首以外大写开头的词；单个字母连同它前面的词（"Vendor B"、"vendor b"）。整句是标题大小写或全大写时，大小写不算数。
+- 复述问题：标记后只有 "Limitation of Liability [Source 1]"，或者一条复述加一条不相干的事实；还有名称分散在两条 claim 里（"Vendor A cap is …"、"Vendor B signed …"）。现在必须有一条 claim 单独承担答案（`no_answering_claim`）：提到问题的全部名称和名称以外的至少一个查询词，并且说出问题里没有的内容。是非题的答案就是复述命题本身，所以改为要求这条 claim 提到全部查询词。
+- 指向位置的句子："is defined in Schedule 2"、"is listed in Table 2"、"is addressed in the master agreement"、"is dealt with separately"。这些说的是答案在哪里，不是答案是什么，现在算 hedge。
+- hedge 后半句是名词短语："do not list covered damages other than indirect damages [Source 1]"。后半句 "Indirect damages" 词法上被支持，但回复的意思是"间接损失在保"，和证据正好相反。现在后半句必须由 that 引出或含谓语，否则和 hedge 一起丢掉。因此原先两条抽取测试（"except for the 12-month fee cap"、", only the cobalt ceiling"）改为不抽取；"apart from the liability cap mentioned" 的拒答原因从 `unsupported_claim` 变成 `no_factual_claim`，结果仍是拒答。
+- 被注入过滤掉的句子：证据里有一句写给 AI 的指令，提示注入过滤器把它去掉了，模型看不到；如果回复照抄这句里的数值，词法校验原先会通过。现在 claim 按模型实际看到的证据校验。
+
+审查里试过、本来就挡住的：错数字、错单位、错币种、千位数、否定翻转（词法校验的数字和极性检查）；标记出现两次。
+
+没有修的已知局限：
+- 同一主题另一方面的、有引用支持的事实（"limitation of liability applies to Vendor A"，问的是限额是多少），在问题没有 anchor、名称、近邻词对，理由句也没点名缺失内容时，仍会当成答案。
+- 小写写出的实体名（"acme"）不算名称。
+- 单个问题只答了一部分也会通过，比如条款的例外没写。
+- 证据本身对这个词的实质说明（"is governed by the master agreement"、"will be agreed later"）会当成答案。它们是真实陈述，但不是数值。
+
+这些规则来自合成反例，审查时没有看真实模型输出，也没有重跑诊断，所以上一节的 7/24 和 23/40 是改动前的数字。按规则推断：`rag.test.mjs` 里 `verify:quality` 合成合同的两种回复形状（"标记 + 理由 + 单独一句值"、"beyond stating that <值>"）仍然覆盖作答。名称、单条答案、多子问题和注入过滤这四条只会让覆盖更少。名称规则还会多拒一些，比如问题用大写写出定义术语（"the Effective Date"），答案那条 claim 就必须重复它。指向位置的句子和名词短语后半句，现在当 hedge 去掉，不进入答案。所以一条原先因为它们没通过校验而拒答的回复，现在可能靠剩下的 claim 作答；剩下的 claim 照常全部校验。
+
+**命令**（在 `server/` 下）：
+
+```bash
+DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= REDIS_URL= node --test test/answer-verdict-override.test.mjs
+<前缀> <候选开关> RAG_QA_VERDICT_OVERRIDE=supported npm run verify:quality
+```
+
+#### 第三轮：拒答标记的确定性复核（QASPER train，2026-10-03）
+
+**问题**：上一节的 `RAG_QA_VERDICT_OVERRIDE=supported` 能不能修掉拒答标记的误拒，同时不回答不可答题？按用户的决定，候选 E 是第二轮的 B2 / D2 加上这个开关。train、dev、护栏三个阶段全部通过，才作为产品决定把 E 改成默认值。
+
+**结论：阶段 1 没有通过，按规则停止，没有改任何默认值**。
+
+- train seed 4 上，E 答了 1/7 道不可答题，基线是 0/7，违反规则 (c)。
+- dev 和护栏都没跑。
+- 以下开关仍然默认关闭：7 个答题率开关、`RAG_CLAIM_JUDGE`、`RAG_QA_ANSWER_VERDICT`、`RAG_QA_VERDICT_OVERRIDE`。
+- 另外，覆盖在这个样本里一次都没有作答。
+
+**规则**（第一次模型调用前写好，之后没改）：
+
+- 被测代码：工作区里经过审查的覆盖版本，未提交。测量开始和结束时都核对了代码指纹，没有变化。
+- 两组：
+  - B0：全部关闭。
+  - E：`RAG_CLAIM_JUDGE=llm`、`RAG_CLAIM_JUDGE_TEMPERATURE=0`、`RAG_QA_ANSWER_VERDICT=true`、`RAG_QA_VERDICT_OVERRIDE=supported`，再加另外 6 个答题率开关。
+- 运行有效性：报告的 `config` 必须显示该组的设置，否则重跑。
+  - E：`answerRateFlags` 全为 true，`claimJudgeTemperature` 为 0，`qaVerdictOverride` 为 `supported`，`claimJudge` 为 `llm`，`qa_answer` 为 v2.3。
+  - B0：开关全为 false，`claimJudgeTemperature` 未设置，`qaVerdictOverride` 为 `off`，`claimJudge` 为 `off`，`qa_answer` 为 v2.2。
+- 定义同前两轮：是否回答以 `classifyAgentAnswer` 为准，答题率、F1(abstain=0)、不可答被回答的算法不变。区间用题目级配对 bootstrap：10000 次，随机种子 12345，95% 百分位区间。
+- QASPER 各组经过第二轮的回放代理，使用全新缓存。护栏直连 Ollama。
+- 阶段 1：train，50 题，seed 4，其中 43 道可答、7 道不可答。
+  - 和以前样本的重叠按题目 id 计算，在模型调用前算好：
+    - seed 1 诊断样本 2 题，其中它的前 50 题 0 题；
+    - seed 2 3 题；
+    - seed 3 0 题；
+    - 合计 5/50 以前见过。
+  - 判定用全部 50 题；去掉这 5 题的数字只供参考。
+  - 条件同第二轮阶段 1：
+    - (a) E 回答的可答题多于 B0，且答题率差值区间不含 0；
+    - (b) F1 差值区间上界 ≥ 0；
+    - (c) 不可答被回答数不超过 B0；B0 为 0 时必须为 0。
+  - 不通过就停止。
+- 阶段 2：dev，100 题，不能和第二轮的 dev seed 1 重叠。
+  - seed 2..20000 里没有一个种子抽出的 100 题和 seed 1 完全不重叠：每个种子期望重叠约 10.9 题。
+  - 所以从 dev 的 916 题里去掉 seed 1 的 100 题，剩 816 题，文档和元数据不变；再用 `--cases 100 --seed 1` 抽样。
+  - 条件同第二轮阶段 2。
+- 阶段 3 护栏：
+  - G1：`eval:claim-judge -- --rounds 1`，构造集和留出集的错误接受都为 0。
+  - G2：`eval:answer-drafts -- --set all` 跑两轮，每轮 fixtures 错答为 0。
+  - G3：`verify:quality` 连续跑 3 次，每次都要 18/18；即使中途失败也跑满三次，判定要 3/3。
+
+**阶段 1 结果**（qwen2.5:7b + nomic-embed-text，评测脚本的 standalone 配置）。两组报告的 `config` 都和设定一致。
+
+| 组 | 回答的可答题 | 答题率 | F1(abstain=0) | 官方 F1（全部） | 不可答被回答 | follow-up 运行 / 解决 | chat 调用/题 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B0 全部关闭（R3T0） | 1/43 | 0.023 | 0.006 | 0.145 | 0/7 | 16 / 0 | 0.70 |
+| E 候选（R3TE） | 13/43 | 0.302 | 0.100 | 0.206 | **1/7** | 17 / 6 | 2.38 |
+
+配对差值：
+
+- 答题率 +0.279 [0.140, 0.419]，可答题翻转 +13 / −1；
+- F1 +0.095 [0.037, 0.159]；
+- 不可答被回答 +0.143 [0.000, 0.429]。
+
+**判定**：
+
+- (a) 通过：13 对 1，区间不含 0。
+- (b) 通过：上界 0.159 ≥ 0。
+- (c) **不通过**：B0 是 0/7，E 必须也是 0，实际是 1/7。
+- **停止**。阶段 2（dev）和阶段 3（护栏）都没跑。
+
+去掉 5 道见过的题（只供参考，不影响判定）：
+
+- 答题率 +0.263 [0.105, 0.421]；
+- F1 +0.088 [0.028, 0.162]；
+- 不可答被回答仍是 1/7。
+- 判定不变。
+
+**只用于理解、不影响判定**：
+
+- 覆盖一次都没有作答。
+  - E 组 82 次普通 chat 回复里，34 次以 `NOT_IN_EVIDENCE` 开头，另有 2 次在后文出现这个标记。
+  - 为了看原因，开着 observability 用缓存把 E 组回放了一遍。312/312 个请求都命中缓存，结果和正式运行完全相同。
+  - 回放中，24 道题出现过标记回复（21 道可答、3 道不可答）。覆盖一共判断了 42 次，作答 0 次。
+  - 不作答的原因代码：
+    - 可答题：`no_factual_claim` 20、`no_cited_claim` 10、`multi_part_question` 6、`unsupported_claim` 1；
+    - 不可答题：`no_factual_claim` 3、`unsupported_claim` 2。
+  - 也就是说，7B 模型在 QASPER 上的标记回复大多没有带引用的事实句。
+  - 覆盖只救得回 `verify:quality` 那种形状：hedge 的后半句写出了值。在这个样本里，E 的表现等同于第二轮的 B2。
+- 被回答的那道不可答题和覆盖无关：
+  - 它没有出现过标记回复，所以不是覆盖放行的；
+  - 答案模型直接作答，自检通过，没有跑 follow-up；
+  - 第二轮 dev 上的 2/9 也是这个机制。
+  - 所以只改覆盖解决不了它，要动的是评审和答案路径。
+- 新答出的 14 题，只做抽象判断，没有记录原文：
+  - 13 道可答题：约 7 道对或基本对；约 3 道部分对（列举漏项、数字归属错）；约 3 道错。
+  - 1 道不可答题：给出了有具体内容的肯定回答。
+- 阶段 2 的 dev 样本已经准备好，但没有用过，仍然可以作为下一个候选的干净确认集。
+  - 构成：88 道可答、12 道不可答，来自 82 篇论文。
+  - 和 seed 1 没有共同题目；但其中 25 篇论文也出现在 seed 1 样本里，问的是别的题。
+  - 这个语料文件只在一次性目录里，评测脚本也没有排除题目的选项。要复现，需要按上面的做法重新生成。
+- 本轮没有改代码。完整后端 `npm test`（开关关）在 Node 24 和 Node 20 上都是 2561 通过、0 失败、14 跳过。`eval:trajectory` 是 19/19、84/84，去掉 run id 和耗时后，和改动前一致。
+
+**命令**（在 `server/` 下，前缀同第一轮）：
+
+```bash
+<前缀> <该组开关> node evaluation/run-qasper-answer-eval.mjs --corpus evaluation/generated/qasper-train.json \
+  --cases 50 --seed 4 --surface agent --latest-name latest-qasper-answers-agent-ar-<R3T0|R3TE>
+```
+
+- E 的开关：B2 / D2 那组，再加 `RAG_QA_VERDICT_OVERRIDE=supported`。B0 不设开关。每个开关作为单独的词传入。
+- 诊断回放另加 `RAG_OBSERVABILITY_ENABLED=true RAG_OBSERVABILITY_EVENTS_PATH=<一次性目录>/obs.jsonl`。覆盖的原因代码从事件的 `verdictOverride` 和 `verdictRetry.verdictOverride` 里统计。
+- 测量时，`OPENAI_BASE_URL` 指向本地回放代理（一次性脚本，不在仓库里）。直连 Ollama 也能复现，只是两组不再共用同一次抽样。
+- 报告在已忽略的 `evaluation/results/latest-qasper-answers-agent-ar-{R3T0,R3TE}.{json,md}` 里，诊断回放的报告是 `R3TEobs`。
+
+**限制**：
+
+- 只有本地 qwen2.5:7b。
+- train 只有 7 道不可答题。B0 为 0 时，规则 (c) 要求 E 也为 0，非常严。但这是事先定好、和第二轮相同的规则，没有改。
+- 覆盖在 QASPER 上没有生效过。支持它的证据只有两类：
+  - `verify:quality` 合成合同上的确定性测试；
+  - 上一节两轮单问题诊断。
+  - 而 hedge 后半句那条规则，是看过 `verify:quality` 的拒答之后写的。
+- 阶段 3 没跑。上一节按改动前的诊断粗算：单次 `verify:quality` 18/18 约 0.33，连续 3 次约 0.04。这是审查修复前的估计，没有重测。
+- 本轮没有比较延迟。B0 的 p50 估计值是 0.0 s，这是计时窗口造成的假象，不是延迟数据。
+
 ## Prompt 注入红队
 
 **用例**：`evaluation/prompt-injection-cases.js`。
