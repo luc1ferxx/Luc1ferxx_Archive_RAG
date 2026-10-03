@@ -13,6 +13,7 @@ import {
   isRagIngestAsync,
 } from "./rag/config.js";
 import { configureUploadSessionDirectory } from "./upload-session-store.js";
+import { assertRbacConfiguration, createRbacMiddleware } from "./rag/rbac.js";
 import { createAgentEdgeRouter } from "./rag/agent-service/edge-router.js";
 import { stripInternalServiceHeadersMiddleware } from "./rag/service-identity.js";
 import {
@@ -25,6 +26,8 @@ import { createAppServices } from "./app-services.js";
 import { createAdminRouter } from "./routes/admin.js";
 import { createArxivRouter } from "./routes/arxiv.js";
 import { createArtifactsRouter } from "./routes/artifacts.js";
+import { createAuthConfigRouter } from "./routes/auth-config.js";
+import { createAuthMeRouter } from "./routes/auth-me.js";
 import { createChatRouter } from "./routes/chat.js";
 import { createDocumentsRouter } from "./routes/documents.js";
 import { createMemoryRouter } from "./routes/memory.js";
@@ -80,6 +83,10 @@ export const createApp = async (options = {}) => {
   if (options.uploadSessionDirectory) {
     configureUploadSessionDirectory(options.uploadSessionDirectory);
   }
+
+  // RBAC_MODE / RBAC_POLICY_JSON / RBAC_POLICY_FILE / RBAC_DEFAULT_ROLE are
+  // validated before anything starts: a bad policy refuses the start.
+  assertRbacConfiguration();
 
   const services = createAppServices(options, { uploadsDirectory });
 
@@ -185,6 +192,8 @@ export const createApp = async (options = {}) => {
   await healthService.runStartupHealthChecks?.();
 
   app.use(createSystemRouter(services));
+  // Public login configuration for the SPA (OIDC issuer/client id, no secrets).
+  app.use(createAuthConfigRouter());
 
   if (rateLimitEnabled) {
     app.use(
@@ -214,6 +223,11 @@ export const createApp = async (options = {}) => {
 
   app.use(requireApiAuth);
   app.use(bindDatabaseTenant);
+  // RBAC_MODE=enforce: every route below needs its RBAC_ROUTE_TABLE
+  // permission (rag/rbac.js); off (default) is a no-op. At the edge of a split
+  // deployment this runs before agent routes are forwarded.
+  app.use(createRbacMiddleware({ auditService: adminAuditService }));
+  app.use(createAuthMeRouter());
 
   const agentEdge = forwardsAgentWork ? createAgentEdgeRouter() : null;
 

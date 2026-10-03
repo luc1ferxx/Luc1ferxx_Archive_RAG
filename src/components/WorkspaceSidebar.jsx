@@ -255,6 +255,10 @@ const WorkspaceSidebar = ({
   activeNavItem,
   activeDocuments,
   arxivSuggestion,
+  authStatus = "disabled",
+  canAdmin = true,
+  canDelete = true,
+  canUpload = true,
   conversationCount,
   documentListRef,
   isActionPending,
@@ -346,7 +350,13 @@ const WorkspaceSidebar = ({
         <SidebarMetric label={t("home.stat.pages")} value={totalPages} />
         <SidebarMetric label={t("sidebar.turns")} value={conversationCount} />
       </div>
-      <PdfUploader onUploadSuccess={onUploadSuccess} t={t} />
+      {canUpload ? (
+        <PdfUploader onUploadSuccess={onUploadSuccess} t={t} />
+      ) : (
+        <p className="archive-permission-note" role="note">
+          {t(authStatus === "signed_in" ? "auth.uploadNotAllowed" : "auth.signInRequired")}
+        </p>
+      )}
       <ArxivSuggestionPanel
         isImporting={isArxivImporting}
         isLoading={isArxivSuggestionLoading}
@@ -457,6 +467,8 @@ const WorkspaceSidebar = ({
                       aria-label={t("sidebar.removeDocument", {
                         fileName: document.fileName,
                       })}
+                      disabled={!canDelete}
+                      title={canDelete ? undefined : t("auth.deleteNotAllowed")}
                       onClick={() => void onRemoveDocument(document.docId)}
                     >
                       ×
@@ -495,6 +507,7 @@ const WorkspaceSidebar = ({
         onLoadHistory={onLoadQualityHistory}
         onLoadLatest={onLoadQualityLatest}
         onRunSynthetic={onRunSyntheticQuality}
+        canRunSynthetic={canAdmin}
         qualityHistory={qualityHistory}
         qualityReport={qualityReport}
         locale={locale}
@@ -522,7 +535,8 @@ const WorkspaceSidebar = ({
       <Button
         className="archive-secondary-button archive-sidebar-clear"
         onClick={() => void onClearDocuments()}
-        disabled={activeDocuments.length === 0}
+        disabled={activeDocuments.length === 0 || !canDelete}
+        title={canDelete ? undefined : t("auth.deleteNotAllowed")}
       >
         {t("sidebar.clearWorkspace")}
       </Button>

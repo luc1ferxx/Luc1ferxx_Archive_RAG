@@ -38,7 +38,13 @@ STARTUP_HEALTH_STRICT=false
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `VITE_DOMAIN` | `http://localhost:5001` | 后端 API 地址。 |
-| `VITE_API_AUTH_TOKEN` | 空 | 启用 API auth 时，前端通过 `x-api-key` 发送的 token。 |
+| `VITE_API_AUTH_TOKEN` | 空 | 启用 API auth 时，前端通过 `x-api-key` 发送的 token。有 OIDC 会话时不再发送，改发 `Authorization: Bearer`。 |
+| `VITE_OIDC_ISSUER` | 空 | OIDC issuer。只在 `GET /auth/config` 不存在或不可达时作为回退；该端点返回 `mode: "token"` 或 `"disabled"` 时不启用 OIDC。 |
+| `VITE_OIDC_CLIENT_ID` | 空 | SPA 的 public client id（同上，只作回退）。 |
+| `VITE_OIDC_SCOPES` | `openid profile email` | 登录 scope；总会补上 `openid`。 |
+| `VITE_OIDC_AUDIENCE` | 空 | 非空时在 authorize 请求里附带 `audience` 参数（Auth0 风格）。 |
+| `VITE_OIDC_REDIRECT_URI` | `${window.location.origin}/` | 回调地址，必须在 IdP 登记（开发 `http://localhost:3000/`，单容器 `http://localhost:5001/`）。 |
+| `VITE_OIDC_POST_LOGOUT_REDIRECT_URI` | 同 redirect URI | IdP 提供 `end_session_endpoint` 时，退出后的回跳地址。 |
 
 ## 后端基础配置
 
@@ -326,6 +332,72 @@ API_AUTH_TOKENS={"admin-token":{"userId":"admin","workspaceId":"workspace-a","ro
 ```
 
 `GET /admin/audit` 默认只返回当前 token workspace 下的 compact authorization events；支持 `limit`、`offset`、`userId`、`workspaceId`、`actionId`、`permissionId`、`result=allowed|denied`、`from` 和 `to` 查询参数。事件只包含 compact principal、request 和 authorization decision，不保存 token、payload、prompt 或 raw trace。
+
+### OIDC
+
+`API_AUTH_OIDC_ENABLED=true`（需要同时 `API_AUTH_ENABLED=true`）让 `requireApiAuth` 接受外部 IdP 签发的 access token（`Authorization: Bearer`，也可以放在 `x-api-key`）。不设置时行为与之前完全一致。分流规则：静态 token 先匹配；OIDC 开启时，`API_AUTH_JWT_ENABLED` 开着的情况下 HS* JWT 仍走 HS256 校验器，其余 JWS 一律走 OIDC（OIDC 拒绝 HS*/none）。
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `API_AUTH_OIDC_ENABLED` | `false` | 是否接受 OIDC access token。 |
+| `API_AUTH_OIDC_ISSUER` | 空 | 启用时必填。必须与 discovery 文档的 `issuer` 完全一致；https，只有 loopback 主机允许 http。缺失时配置状态为 error，API 返回 500。 |
+| `API_AUTH_OIDC_AUDIENCE` | 空 | 启用时必填。token 的 `aud` 必须包含它。请用 API 自己的 audience，不要填 SPA 的 client id（否则 ID token 也能当 access token 用，除非 `API_AUTH_OIDC_REQUIRE_TYP=true`）。 |
+| `API_AUTH_OIDC_CLIENT_ID` | 空 | 非空时 token 的 `azp`（或 `client_id`）必须等于它；也通过 `GET /auth/config` 告诉 SPA。Okta 的 `cid`、Azure v1 的 `appid` 不被接受。 |
+| `API_AUTH_OIDC_SCOPES` | `openid profile email` | 只展示给 SPA。 |
+| `API_AUTH_OIDC_ALGORITHMS` | `RS256,PS256,ES256,EdDSA` | 允许的签名算法；其他值被忽略，有效列表为空时返回 500。alg 必须与 JWK 的 kty/crv（以及 JWK 自带的 alg）一致，RSA 密钥至少 2048 位，带 `crit` 头的 token 被拒绝。 |
+| `API_AUTH_OIDC_CLOCK_SKEW_SEC` | `60` | `exp`/`nbf`/`iat` 的时钟偏差，最大 600。`exp` 必须存在。 |
+| `API_AUTH_OIDC_JWKS_TTL_MS` | `600000` | discovery 和 JWKS 的缓存时间。从 JWKS 删除的密钥最多在一个 TTL 内失效。 |
+| `API_AUTH_OIDC_JWKS_MIN_REFRESH_MS` | `30000` | 遇到未知 `kid` 时最多每个窗口刷新一次 JWKS（并发请求共用同一次刷新），防止伪造 kid 打爆 IdP。0 关闭限速，不建议。 |
+| `API_AUTH_OIDC_HTTP_TIMEOUT_MS` | `5000` | 拉取 discovery/JWKS 的超时。IdP 不可达时继续用上一份可用密钥；一份都没有时返回 503。 |
+| `API_AUTH_OIDC_REQUIRE_TYP` | `false` | 为 `true` 时 token 头的 `typ` 必须是 `at+jwt` 或 `application/at+jwt`。 |
+| `API_AUTH_OIDC_USER_CLAIM` | `sub` | 映射为 `accessScope.userId`。所有 claim 名都支持点号路径。 |
+| `API_AUTH_OIDC_WORKSPACE_CLAIM` | `workspace_id` | 固定 workspace。 |
+| `API_AUTH_OIDC_WORKSPACES_CLAIM` | `workspaces` | 允许的 workspace 列表，`x-workspace-id` 必须落在其中。没有 workspaces 也没有 workspace_id 的 token 可以通过 `x-workspace-id` 选任意 workspace，所以生产环境应让 IdP 为每个用户签发该 claim。 |
+| `API_AUTH_OIDC_ROLES_CLAIM` | `roles` | 全局角色（例如 Keycloak 的 `realm_access.roles`）。 |
+| `API_AUTH_OIDC_GROUPS_CLAIM` | `groups` | 组 claim，经 `API_AUTH_OIDC_GROUP_ROLE_MAP` 映射成角色后并入 roles。 |
+| `API_AUTH_OIDC_GROUP_ROLE_MAP` | 空 | JSON `{"group": "role" \| ["role", ...]}`；非法 JSON 返回 500。组名区分大小写。 |
+| `API_AUTH_OIDC_PERMISSIONS_CLAIM` | `permissions` | 直接授予的权限 id。 |
+| `API_AUTH_OIDC_WORKSPACE_ROLES_CLAIM` | `workspace_roles` | 按 workspace 授予的角色：对象 `{"ws": ["role"] \| "a,b"}` 或数组 `[{"workspaceId": "ws", "roles": [...]}]`。静态 `API_AUTH_TOKENS` 条目也可以写 `workspaceRoles` / `workspace_roles`。 |
+
+`API_AUTH_REVOKED_JTIS` 和 `API_AUTH_REVOKED_TOKEN_HASHES` 同样适用于 OIDC token。失败统一返回 401 `{"error":"Unauthorized."}`、503 `{"error":"OIDC provider is unavailable."}` 或配置错误时的 500，响应体从不包含 token。
+
+`GET /auth/config`（公开，`Cache-Control: no-store`，在限流和鉴权之前）返回 `{mode, oidc}`：`mode` 为 `disabled`（auth 关闭）、`token`（auth 开、OIDC 关）或 `oidc`；`oidc` 只在启用时为 `{issuer, clientId, scopes, audience}`，不含任何密钥。
+
+开发用 IdP（`npm run oidc:dev`，即 `server/dev-oidc-provider.mjs`，只用于开发和测试）读取这些变量：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `DEV_OIDC_PORT` | `5556` | 监听端口（只绑定 127.0.0.1），也可用 `--port`。 |
+| `DEV_OIDC_USERS_FILE` | 空（内置 alice/bob/carol） | 用户 JSON 数组 `[{sub, name?, email?, username?, claims: {workspace_id, workspaces, roles, groups, permissions, workspace_roles}}]`，也可用 `--users`。 |
+| `DEV_OIDC_CLIENT_ID` | `archive-rag-spa` | 唯一登记的 public client。 |
+| `DEV_OIDC_AUDIENCE` | `archive-rag-api` | access token 的 `aud`。 |
+| `DEV_OIDC_REDIRECT_URIS` | 空（任意 loopback http(s) URI） | 逗号分隔的允许回调地址。 |
+| `DEV_OIDC_ACCESS_TOKEN_TTL_SEC` | `600` | access token 有效期。 |
+
+### RBAC
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `RBAC_MODE` | `off` | `off` 不改变任何行为；`enforce` 时每个路由都要有 `RBAC_ROUTE_TABLE` 里声明的权限，不在表里的路由一律 403。其他值拒绝启动。 |
+| `RBAC_DEFAULT_ROLE` | `workspace.member` | 主体在当前 workspace 没有任何 workspace 权限时补上的角色，让开启 enforce 后的现有静态 token 用户继续可用；它不会抬高显式授予的角色（例如 viewer）。`none` 关闭。必须是策略里存在的角色。OIDC 部署建议在所有用户都有角色后设为 `none`。 |
+| `RBAC_POLICY_JSON` | 空 | 覆盖或新增角色：`{"roles":{"<role>":["perm",...]}}`、扁平 `{"<role>":[...]}` 或 `{"<role>":{"permissions":[...]}}`。未知权限 id 或非法 JSON 拒绝启动。 |
+| `RBAC_POLICY_FILE` | 空 | 同上，从文件读取；与 `RBAC_POLICY_JSON` 只能设一个。 |
+
+权限：`documents.read`、`documents.write`、`documents.delete`、`chat.ask`、`tasks.run`、`memory.read`、`memory.write`、`quality.feedback`，加上全部 `admin.*` 权限（`admin.status.read`、`admin.audit.read`、`admin.actions.*`、`agent_runs.recovery.action`、`agent_tasks.action`）。角色：`workspace.viewer`（read、chat）、`workspace.member`（再加 write、tasks、memory、feedback）、`workspace.admin`（再加 delete；作为全局角色时还有 `admin.status.read`），以及原有的 `admin.viewer`、`admin.quality_operator`、`admin.recovery_operator`、`admin.operator`、`admin.owner`（全部权限）。
+
+有效权限 = 全局 roles/permissions 的权限 ∪ 当前 workspace 的 `workspaceRoles` 的权限（只取 workspace 类权限，`admin.*` 只能来自全局角色或权限）∪ 默认角色（仅在前两者没有任何 workspace 权限时）。RBAC 只决定能做什么动作，不改变文档可见性：文档仍按 owner/workspace 过滤。`GET /auth/me` 返回 `{userId, workspaceId, workspaceIds, roles, permissions, authProvider, rbacMode}`（当前 workspace 的有效权限，`no-store`，不含 token）。拒绝时返回 403 `{"code":"RBAC_PERMISSION_DENIED","error":"Forbidden.","permission":<id>|null}`，并写入 admin audit（只含 id）。
+
+本地开发示例：
+
+```env
+API_AUTH_ENABLED=true
+API_AUTH_OIDC_ENABLED=true
+API_AUTH_OIDC_ISSUER=http://127.0.0.1:5556
+API_AUTH_OIDC_AUDIENCE=archive-rag-api
+API_AUTH_OIDC_CLIENT_ID=archive-rag-spa
+API_AUTH_OIDC_REQUIRE_TYP=true
+RBAC_MODE=enforce
+```
 
 ## 拆分部署
 

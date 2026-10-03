@@ -335,6 +335,23 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - 模型 0 ms 时的"在途峰值"是假服务同步回复造成的，没有意义，现在不显示。
 - 事件循环延迟没有减去 10 ms 的采样间隔，现在减掉了。
 
+### 3.22 OIDC 登录与 RBAC（2026-10-03）
+
+默认都关：`API_AUTH_OIDC_ENABLED`、`RBAC_MODE=off`，不开时鉴权与以前完全一样。
+
+- **OIDC 资源服务器**（`rag/oidc.js`，不加依赖）：从签发方的发现地址取 JWKS，缓存带 TTL；遇到不认识的 kid 时限速刷新（换密钥自动跟上，乱造的 kid 刷不爆 IdP）；IdP 挂了继续用最后一份好的公钥。支持 RS256 / PS256 / ES256 / EdDSA，算法必须和密钥类型一致，拒绝 HS*、none、对称密钥和 2048 位以下的 RSA。校验 iss、aud、azp、exp/nbf/iat（带时钟偏差）、可选 `typ: at+jwt`；吊销列表同样作用于 OIDC token。
+  - 验签开销（公钥已缓存，1 万次）：RS256 p50 约 20 µs、ES256 约 48 µs，HS256 约 4 µs；相对 `/chat` 可以忽略。
+- **本地开发 IdP**（`npm run oidc:dev`）：只绑 127.0.0.1、拒绝在生产环境启动；授权码 + PKCE S256（必需），授权码一次性、60 秒过期，失败一次即作废；refresh token 轮换，旧的被重用就吊销整条链；可以在线换密钥。
+- **RBAC**（`rag/rbac.js`）：权限目录（读文档、上传、删除、提问、任务、记忆、反馈，加上原有的管理权限），角色 workspace.viewer / member / admin，加上原有的 admin.owner / operator / viewer；角色可以按 workspace 授予，只在那个 workspace 生效，而且 workspace 内授予的角色拿不到部署级的 admin 权限。一张路由权限表覆盖所有接口，有接口没登记时测试直接失败；不在表里的一律拒绝；拒绝写审计。拆分部署时在入口层统一检查。
+- **前端**：授权码 + PKCE，access token 只放内存，校验 state 和 nonce；登录后按 `/auth/me` 的权限隐藏没权限的按钮，服务端仍是最终判断。
+- **安全审查和修复**：
+  - workspace 内授予的 workspace.admin 能读部署级的 `/admin/status`（跨租户的部署信息）：改为 workspace 角色只授 workspace 权限。
+  - 默认角色 member 会把显式给的 viewer 抬成 member，viewer 什么也没限制住：改为只有没有任何 workspace 权限时才补默认角色。
+  - **一个早就存在的租户隔离漏洞**：workspace 的权限匹配不区分大小写，但数据库租户用的是请求头原值，只被授权访问 `acme` 的 token 发 `ACME` 就进了另一个租户。改为 token 列了允许的 workspace 时统一用列表里的小写形式；workspace 角色只在租户名完全一致时生效。
+- **端到端测试**：真实的授权码 + PKCE 流程拿 token，viewer 能读和提问但上传、删除 403；member 能上传不能删；ws-a 的 admin 只能删 ws-a；过期 token 401；IdP 换密钥后新 kid 通过，旧 kid 在缓存过期后被拒；经拆分部署的入口转发结果与单体一致。
+- 测试：后端全量在 Node 24 和 Node 20 下都是 2616 个（通过 2602、跳过 14、失败 0）；前端 158 个测试通过，构建通过；覆盖率门禁通过。
+- 没做的：没接过真实的 Keycloak / Auth0 / Entra ID（接入步骤按各家文档写）；RBAC 只管动作，不管文档可见性（文档仍按上传者过滤）；不带 `workspaces` claim 的 token 仍可选任意 workspace，文档要求 IdP 签发它。
+
 ### 3.21 Agent 路径答题率：诊断、7 个开关、没有改默认（2026-10-03）
 
 本地 qwen2.5:7b + nomic-embed-text，确定性规划器。先诊断再修，修完按事先定的规则测；结论是**一个默认都没改**，这是如实的结果。
@@ -451,6 +468,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **文档解析**：只读 PDF 文本层，没有 OCR、表格和版面解析；换行会把句子切断，导致模板答案出现半句话。
 - **租户隔离**：行级安全不覆盖会话记忆（只有 session id）和 admin audit（管理员需要跨用户读取）。租户靠异步上下文传递，上下文丢失时回落到 owner 身份，也就是只剩应用层过滤，而不是拒绝访问；要做到拒绝访问需要一个没有表权限的独立登录角色。这层防护针对漏写过滤条件的 bug，不防 SQL 注入（注入的语句可以 `RESET ROLE`）。
 - **安全**：提示注入有了自建红队集和攻击成功率数据（见 3.10），但用例是自己构造的、数量小、攻击方式公开；确定性筛查挡得住已知写法，挡不住刻意改写（`evasion_paraphrase` 仍 3/3 成功），只靠 prompt 规则挡不住 7B 模型。没有用第三方基准（如 BIPIA、AgentDojo）测过。
+- **登录和权限**：OIDC 只在自带的开发 IdP 上端到端测过，没接过真实 IdP；RBAC 只管动作，不管文档可见性。
 - **拆分部署**：只在一台机器上测过；同样进程数下单体比拆分快 1.56 倍，拆分的收益是只扩瓶颈层和故障隔离，不是效率；层间身份可选 Ed25519（每服务一把私钥），但仍不是 mTLS；没有 K8s 和服务发现，compose 文件没有真正跑过。
 - **读副本**：主库语句只减少 28.8%，没达到事先定的 30%，吞吐也没变快；副本和主库在同一台机器上，CI 里没有副本。
 - **告警规则**：没有在真实 Prometheus 里加载和求值过，99.5% 可用性和 20 秒延迟目标是建议值，不是从真实流量定的。

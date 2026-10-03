@@ -11,8 +11,14 @@ import {
   getApiAuthTokens,
   isApiAuthEnabled,
   isApiAuthJwtEnabled,
+  isApiAuthOidcEnabled,
   isApiAuthWorkspaceRequired,
 } from "./rag/config.js";
+import {
+  normalizeWorkspaceRoles,
+  peekJwtHeader,
+  verifyOidcAccessToken,
+} from "./rag/oidc.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
 
 const PUBLIC_PATH_PREFIXES = ["/health", "/ready"];
@@ -45,6 +51,20 @@ const getProvidedToken = (req) => {
   return bearerMatch?.[1]?.trim() ?? "";
 };
 
+// Per-workspace role grants ({ [workspaceId]: roleId[] }), set only when the
+// principal has some, so every existing access scope keeps its shape.
+const addWorkspaceRoles = (target, principal = {}) => {
+  const workspaceRoles = normalizeWorkspaceRoles(
+    principal.workspaceRoles ?? principal.workspace_roles
+  );
+
+  if (Object.keys(workspaceRoles).length > 0) {
+    target.workspaceRoles = workspaceRoles;
+  }
+
+  return target;
+};
+
 const normalizeTokenPrincipal = (token, principal = {}) => {
   if (typeof principal === "string") {
     return {
@@ -55,15 +75,18 @@ const normalizeTokenPrincipal = (token, principal = {}) => {
     };
   }
 
-  return addAccessPrincipalAuthorizationMetadata(
-    {
-      authProvider: "static_token",
-      token,
-      userId: normalizeString(principal.userId ?? principal.user_id),
-      workspaceId: normalizeString(
-        principal.workspaceId ?? principal.workspace_id
-      ),
-    },
+  return addWorkspaceRoles(
+    addAccessPrincipalAuthorizationMetadata(
+      {
+        authProvider: "static_token",
+        token,
+        userId: normalizeString(principal.userId ?? principal.user_id),
+        workspaceId: normalizeString(
+          principal.workspaceId ?? principal.workspace_id
+        ),
+      },
+      principal
+    ),
     principal
   );
 };
@@ -159,16 +182,23 @@ const resolveWorkspaceId = (req, principal = {}) => {
   }
 
   if (requestedWorkspaceId) {
-    if (
-      allowedWorkspaceIds.length > 0 &&
-      !allowedWorkspaceIds.includes(normalizeScopeId(requestedWorkspaceId))
-    ) {
+    if (allowedWorkspaceIds.length === 0) {
+      return requestedWorkspaceId;
+    }
+
+    const allowedWorkspaceId = normalizeScopeId(requestedWorkspaceId);
+
+    if (!allowedWorkspaceIds.includes(allowedWorkspaceId)) {
       throw new AccessScopeError(
         "Requested workspace is outside authenticated scope."
       );
     }
 
-    return requestedWorkspaceId;
+    // The allowed list is compared case-insensitively, so the tenant must be
+    // the canonical allowed id (as the single-workspace branch below already
+    // returns), not the header as sent: "ACME" for a token limited to "acme"
+    // would otherwise become another database tenant.
+    return allowedWorkspaceId;
   }
 
   if (allowedWorkspaceIds.length === 1) {
@@ -197,7 +227,10 @@ const buildAccessScope = (req, principal = {}) => {
     delete target.authProvider;
   }
 
-  return addAccessPrincipalAuthorizationMetadata(target, principal);
+  return addWorkspaceRoles(
+    addAccessPrincipalAuthorizationMetadata(target, principal),
+    principal
+  );
 };
 
 const resolveAuthenticatedPrincipal = ({ providedToken, staticPrincipals }) => {
@@ -211,11 +244,41 @@ const resolveAuthenticatedPrincipal = ({ providedToken, staticPrincipals }) => {
     return staticPrincipal;
   }
 
+  // API_AUTH_OIDC_ENABLED: a JWS bearer token goes to the OIDC verifier
+  // (asynchronous: discovery and JWKS), except an HS* token while HS256 JWT
+  // auth is on, which stays with the shared-secret verifier. The OIDC verifier
+  // itself refuses every HS* and "none" token.
+  if (providedToken && isApiAuthOidcEnabled()) {
+    const header = peekJwtHeader(providedToken);
+    const sharedSecretToken =
+      isApiAuthJwtEnabled() &&
+      typeof header?.alg === "string" &&
+      /^HS/iu.test(header.alg);
+
+    if (header && !sharedSecretToken) {
+      return verifyOidcAccessToken(providedToken);
+    }
+  }
+
   if (providedToken && isApiAuthJwtEnabled()) {
     return verifyJwtAuthToken(providedToken);
   }
 
   return null;
+};
+
+const sendAuthError = (res, error) => {
+  const status = Number(error?.status ?? 500) || 500;
+  const message =
+    status === 401
+      ? "Unauthorized."
+      : error instanceof Error
+        ? error.message
+        : "API authentication configuration is invalid.";
+
+  res.status(status).json({
+    error: message,
+  });
 };
 
 export const getRequestAccessScope = (req) => req.accessScope ?? {};
@@ -248,6 +311,29 @@ export const requireApiAuth = (req, res, next) => {
 
   let principal = null;
 
+  const continueWithPrincipal = (resolvedPrincipal) => {
+    if (!resolvedPrincipal) {
+      res.status(401).json({
+        error: "Unauthorized.",
+      });
+      return;
+    }
+
+    try {
+      req.accessScope = buildAccessScope(req, {
+        ...resolvedPrincipal,
+        authenticated: true,
+      });
+    } catch (error) {
+      res.status(error?.status ?? 403).json({
+        error: error instanceof Error ? error.message : "Forbidden.",
+      });
+      return;
+    }
+
+    next();
+  };
+
   try {
     const configuredPrincipals = parseConfiguredTokenPrincipals();
     const authConfig = getApiAuthConfigStatus();
@@ -265,38 +351,19 @@ export const requireApiAuth = (req, res, next) => {
       staticPrincipals: configuredPrincipals,
     });
   } catch (error) {
-    const status = Number(error?.status ?? 500) || 500;
-    const message =
-      status === 401
-        ? "Unauthorized."
-        : error instanceof Error
-          ? error.message
-          : "API authentication configuration is invalid.";
+    sendAuthError(res, error);
+    return;
+  }
 
-    res.status(status).json({
-      error: message,
+  // Only the OIDC verifier is asynchronous; every other path stays synchronous.
+  if (typeof principal?.then === "function") {
+    principal.then(continueWithPrincipal, (error) => {
+      if (!res.headersSent) {
+        sendAuthError(res, error);
+      }
     });
     return;
   }
 
-  if (!principal) {
-    res.status(401).json({
-      error: "Unauthorized.",
-    });
-    return;
-  }
-
-  try {
-    req.accessScope = buildAccessScope(req, {
-      ...principal,
-      authenticated: true,
-    });
-  } catch (error) {
-    res.status(error?.status ?? 403).json({
-      error: error instanceof Error ? error.message : "Forbidden.",
-    });
-    return;
-  }
-
-  next();
+  continueWithPrincipal(principal);
 };

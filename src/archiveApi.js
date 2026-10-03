@@ -1,5 +1,12 @@
-import { apiDelete, apiDownload, apiGet, apiPost } from "./apiClient";
+import {
+  apiDelete,
+  apiDownload,
+  apiGet,
+  apiPost,
+  withForbiddenMessage,
+} from "./apiClient";
 import { API_DOMAIN, buildApiRequestConfig } from "./config";
+import { handleUnauthorizedResponse, hasOidcAccessToken } from "./auth/tokenStore";
 
 export const fetchDocuments = async () => {
   return apiGet("/documents");
@@ -224,20 +231,32 @@ export const parseServerSentEvents = (buffer) => {
  * /chat returns once the verified answer is ready.
  */
 export const streamChat = async ({ docIds, question, sessionId, userId, signal, onEvent }) => {
-  const response = await fetch(`${API_DOMAIN}/chat/stream`, {
-    body: JSON.stringify({ question, docIds: docIds.join(","), sessionId, userId }),
-    headers: buildApiRequestConfig({
-      headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
-    }).headers,
-    method: "POST",
-    signal,
-  });
+  const openStream = () =>
+    fetch(`${API_DOMAIN}/chat/stream`, {
+      body: JSON.stringify({ question, docIds: docIds.join(","), sessionId, userId }),
+      headers: buildApiRequestConfig({
+        headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
+      }).headers,
+      method: "POST",
+      signal,
+    });
+  const usedBearer = hasOidcAccessToken();
+  let response = await openStream();
+
+  // Same 401 rule as apiClient: refresh once and retry, else re-login.
+  if (response.status === 401 && usedBearer && (await handleUnauthorizedResponse())) {
+    response = await openStream();
+  }
 
   if (!response.ok || !response.body) {
     // Validation and auth failures answer with plain JSON before any stream starts.
     const error = new Error(`Chat stream failed with status ${response.status}.`);
     error.status = response.status;
     error.body = await response.json().catch(() => null);
+    if (response.status === 403) {
+      error.body = withForbiddenMessage(error.body);
+      error.permissionDenied = true;
+    }
     // Same shape as an axios error, so callers of requestChat need no change.
     error.response = { data: error.body, status: response.status };
     throw error;

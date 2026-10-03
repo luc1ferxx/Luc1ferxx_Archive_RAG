@@ -10,6 +10,7 @@
     "start:retrieval": "ARCHIVE_RAG_ROLE=retrieval node server.js",
     "start:model-gateway": "ARCHIVE_RAG_ROLE=model-gateway node server.js",
     "service:keys": "node service-keys.mjs",
+    "oidc:dev": "node dev-oidc-provider.mjs",
     "archive:ingest": "node archive-ingest.mjs",
     "vector:reindex": "node vector-reindex.mjs",
     "vector:index": "node vector-index.mjs",

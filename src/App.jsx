@@ -18,6 +18,8 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar";
 import WorkspaceEntryPanel from "./components/WorkspaceEntryPanel";
 import WorkspaceArtifactsPanel from "./components/WorkspaceArtifactsPanel";
 import LocaleSwitch from "./components/LocaleSwitch";
+import AuthStatus from "./auth/AuthStatus";
+import { useAuth } from "./auth/AuthProvider";
 import {
   requestAnswerFeedback,
   requestTaskAction,
@@ -78,6 +80,10 @@ const App = () => {
   const [pendingHomeTask, setPendingHomeTask] = useState(null);
   const [selectedHomeSkillId, setSelectedHomeSkillId] = useState("document_rag");
   const mainRef = useRef(null);
+  const { can: canUseCapability, status: authStatus } = useAuth();
+  const canUpload = canUseCapability("upload");
+  const canDelete = canUseCapability("delete");
+  const canAdmin = canUseCapability("admin");
   const composerRef = useRef(null);
   const homeUploadRef = useRef(null);
   const hadActiveTasksRef = useRef(false);
@@ -754,16 +760,27 @@ const App = () => {
     [locale, t]
   );
   const languageSlot = useMemo(
-    () => <LocaleSwitch locale={locale} onLocaleChange={handleLocaleChange} t={t} />,
+    () => (
+      <>
+        <AuthStatus t={t} />
+        <LocaleSwitch locale={locale} onLocaleChange={handleLocaleChange} t={t} />
+      </>
+    ),
     [handleLocaleChange, locale, t]
   );
   const uploadSlot = useMemo(
     () => (
       <div ref={homeUploadRef}>
-        <PdfUploader onUploadSuccess={handleHomeUploadSuccess} t={t} />
+        {canUpload ? (
+          <PdfUploader onUploadSuccess={handleHomeUploadSuccess} t={t} />
+        ) : (
+          <p className="archive-permission-note" role="note">
+            {t(authStatus === "signed_in" ? "auth.uploadNotAllowed" : "auth.signInRequired")}
+          </p>
+        )}
       </div>
     ),
-    [handleHomeUploadSuccess, t]
+    [authStatus, canUpload, handleHomeUploadSuccess, t]
   );
 
   const renderConversationView = () => {
@@ -966,6 +983,7 @@ const App = () => {
             </div>
 
             <div className="archive-header-actions">
+              <AuthStatus t={t} />
               <LocaleSwitch
                 locale={locale}
                 onLocaleChange={handleLocaleChange}
@@ -999,6 +1017,10 @@ const App = () => {
           <WorkspaceSidebar
             activeNavItem={activeWorkspaceNav}
             activeDocuments={visibleDocuments}
+            authStatus={authStatus}
+            canAdmin={canAdmin}
+            canDelete={canDelete}
+            canUpload={canUpload}
             arxivSuggestion={isDemoWorkbench ? null : arxivSuggestion}
             conversationCount={visibleConversation.length}
             documentListRef={documentListRef}

@@ -224,3 +224,27 @@ export const verifyJwtAuthToken = (
     workspaceId: normalizeText(getClaimByPath(payload, workspaceClaim)),
   };
 };
+
+/**
+ * The revocation lists (API_AUTH_REVOKED_TOKEN_HASHES / API_AUTH_REVOKED_JTIS)
+ * shared by every bearer-token verifier, the OIDC one included. Returns
+ * "token_hash", "jti" or "" (not revoked).
+ */
+export const getAuthTokenRevocation = ({
+  jti,
+  revokedJtis = getApiAuthRevokedJtis(),
+  revokedTokenHashes = getApiAuthRevokedTokenHashes(),
+  tokenHash,
+} = {}) => {
+  if (tokenHash && toSet(revokedTokenHashes).has(tokenHash)) {
+    return "token_hash";
+  }
+
+  const normalizedJti = normalizeText(jti);
+
+  if (normalizedJti && toSet(revokedJtis).has(normalizedJti)) {
+    return "jti";
+  }
+
+  return "";
+};

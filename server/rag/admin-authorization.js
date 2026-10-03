@@ -4,8 +4,10 @@ import {
   buildAdminAccessDecision,
   getPermissionForAdminAction,
 } from "./admin-permissions.js";
+import { isAdminPermissionGrantedByRbac } from "./rbac.js";
 
 export const ADMIN_AUTHORIZATION_REASONS = Object.freeze({
+  allowedByRbac: "allowed_by_rbac",
   apiAuthDisabled: "api_auth_disabled",
   notRequired: "not_required",
 });
@@ -54,13 +56,30 @@ export const buildAdminAuthorizationDecision = ({
     };
   }
 
-  return compactDecision(
+  const decision = compactDecision(
     buildAdminAccessDecision({
       permissionId,
       principal: accessScope,
       requireAuthenticated: true,
     })
   );
+
+  // RBAC_MODE=enforce: a workspace role may grant an admin permission inside
+  // its workspace (workspace.admin -> admin.status.read). Off mode: unchanged.
+  if (
+    !decision.allowed &&
+    accessScope?.authenticated === true &&
+    isAdminPermissionGrantedByRbac(accessScope, permissionId)
+  ) {
+    return {
+      allowed: true,
+      permissionId: decision.permissionId,
+      reason: ADMIN_AUTHORIZATION_REASONS.allowedByRbac,
+      roleId: "",
+    };
+  }
+
+  return decision;
 };
 
 const getRequestAuditContext = (req) => ({

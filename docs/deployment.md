@@ -258,6 +258,61 @@ node service-keys.mjs generate ingest-worker   # 只有独立入库 worker 调�
 - 各层的 `/health` 不需要认证，会列出内部副本地址和密钥 id（不含密钥本身）；api 的 `/health` 每次都会探测每个 agent 副本。
 - 拆分模式下检索请求有上限（`RETRIEVAL_SERVICE_MAX_*`），超长问题或配得过大的 topK 返回 400，单体没有这些限制。
 
+## OIDC 登录和 RBAC（可选）
+
+默认不启用：不设 `API_AUTH_OIDC_ENABLED` 和 `RBAC_MODE` 时，鉴权仍是静态 token / HS256 JWT / 关闭。所有变量见 `docs/configuration.md` 的“OIDC”和“RBAC”。
+
+### 在本机跑开发 IdP
+
+`server/dev-oidc-provider.mjs` 是一个只用于开发和测试的 OIDC provider：只绑定 127.0.0.1，`NODE_ENV=production` 时拒绝启动，所有状态在内存里，登录不校验密码（用 `login_hint` 或页面上的下拉框选用户）。它强制 Authorization Code + PKCE S256，code 一次性、60 秒有效；只有请求 `offline_access` 时才签发 refresh token，refresh token 轮换，复用旧的会吊销整组。不要把它接进 compose 或生产镜像。
+
+```bash
+cd server && npm run oidc:dev            # http://127.0.0.1:5556，启动时打印 admin secret
+# 自定义用户：DEV_OIDC_USERS_FILE=./dev-oidc-users.json npm run oidc:dev
+```
+
+内置用户：`alice`（全局 `admin.operator`；workspace-a 的 `workspace.admin`，workspace-b 的 `workspace.viewer`）、`bob`（workspace-a 的 `workspace.member`）、`carol`（组 `archive-viewers`；workspace-b 的 `workspace.viewer`）。然后在 `server/.env`：
+
+```env
+API_AUTH_ENABLED=true
+API_AUTH_OIDC_ENABLED=true
+API_AUTH_OIDC_ISSUER=http://127.0.0.1:5556
+API_AUTH_OIDC_AUDIENCE=archive-rag-api
+API_AUTH_OIDC_CLIENT_ID=archive-rag-spa
+API_AUTH_OIDC_REQUIRE_TYP=true
+RBAC_MODE=enforce
+```
+
+`npm run dev` 打开 http://localhost:3000，前端从 `GET /auth/config` 读到 issuer 和 client id，点 Sign in 走 PKCE 登录。`POST /admin/rotate-keys`（带 `x-dev-oidc-admin-secret`，可选 `?drop_previous=1`）轮换签名密钥，用来演练 JWKS 轮换。
+
+### 接真实 IdP
+
+不论哪家 IdP，需要准备：
+
+1. 一个 public client（SPA）：Authorization Code + PKCE，不用 client secret；登记回调地址 `http://localhost:3000/`（开发）或 `https://<你的域名>/`（单容器部署是 `http://localhost:5001/`）；允许 SPA 的 origin 跨域访问 discovery 和 token 端点。它的 client id 填 `API_AUTH_OIDC_CLIENT_ID`。
+2. 一个代表 API 的 audience，填 `API_AUTH_OIDC_AUDIENCE`。不要用 SPA 的 client id 当 audience；如果 IdP 只能这样做，设 `API_AUTH_OIDC_REQUIRE_TYP=true`，前提是它签发 `typ: at+jwt`。
+3. `API_AUTH_OIDC_ISSUER` 必须与 discovery 文档里的 `issuer` 一字不差，包括末尾斜杠。
+4. 角色：全局角色放进 roles claim（或用组 + `API_AUTH_OIDC_GROUP_ROLE_MAP`），按 workspace 的角色放进 `workspace_roles`，允许的 workspace 放进 `workspaces`。没有 `workspaces` / `workspace_id` 的 token 可以用 `x-workspace-id` 选任意 workspace，生产环境应保证每个用户都有该 claim，并在角色配齐后设 `RBAC_DEFAULT_ROLE=none`。
+5. claim 名按点号拆成路径，所以名字里本身含点的 claim（例如 `https://archive.example.com/roles`）无法引用，请用不含点的名字。
+
+**Keycloak**：issuer 是 `https://<host>/realms/<realm>`。给 SPA client 加一个 Audience mapper，把 `archive-rag-api` 写进 access token 的 `aud`（默认只有 `account`）；access token 的 `azp` 就是 SPA client id。realm 角色在 `realm_access.roles`，设 `API_AUTH_OIDC_ROLES_CLAIM=realm_access.roles`；组用 Group Membership mapper（关掉 full path）输出到 `groups`。`workspaces` / `workspace_roles` 用 User Attribute mapper（多值或 JSON 类型）。
+
+**Auth0**：issuer 是 `https://<tenant>.auth0.com/`（带末尾斜杠）。在 APIs 里建一个 API，identifier 即 `API_AUTH_OIDC_AUDIENCE`；前端在 authorize 请求里带 `audience` 参数（`/auth/config` 返回 audience 时 SPA 会自动带上），否则 Auth0 会签发不透明 token。用 Post-Login Action 写入 `roles`、`workspaces`、`workspace_roles` 等不带命名空间的自定义 claim。access token 里有 `azp`。
+
+**Azure AD / Entra ID**：issuer 是 `https://login.microsoftonline.com/<tenant-id>/v2.0`。为 API 注册一个应用，manifest 里设 `accessTokenAcceptedVersion: 2`（v1 token 用 `appid` 而不是 `azp`，会被拒绝），`aud` 就是这个 API 应用的 client id（GUID），把它填进 `API_AUTH_OIDC_AUDIENCE`；SPA 申请 `api://<api-app-id>/<scope>` scope（写进 `API_AUTH_OIDC_SCOPES`）。App roles 在 `roles` claim；组 claim 是对象 ID，`API_AUTH_OIDC_GROUP_ROLE_MAP` 的键要用 GUID。`workspaces` / `workspace_roles` 这类自定义 claim 需要 claims mapping policy 或目录扩展属性，做不到时可以只用全局 app roles 加 `RBAC_DEFAULT_ROLE`。
+
+### RBAC 在部署里的位置
+
+`RBAC_MODE=enforce` 时检查在 `requireApiAuth` 之后、路由之前。拆分部署里由 api edge 在转发前检查，agent 层不挂 RBAC，只信任 edge 签名的内部身份，所以 agent 层的端口不能暴露到公网。`workspaceRoles` 不随内部身份转发，这在 RBAC 只在 edge 执行时不影响结果。
+
+### OIDC 和 RBAC 的限制
+
+- 浏览器端不校验 ID token 签名（public client），API 只认 access token。
+- refresh token（如有）放在 sessionStorage，XSS 可读。
+- workspace id 的权限匹配不区分大小写。token 列了允许的 workspace 时，数据库租户统一用列表里的小写形式，请求头写成 `ACME` 也落在 `acme`；token 没列时按请求头原样使用，此时只差大小写的两个 workspace 是两个租户，按 workspace 授予的角色只在小写形式完全一致的那个里生效。仍建议 workspace id 统一用小写。
+- 没有 `WWW-Authenticate` 头，健康报告也不含 JWKS 状态。
+- `RBAC_MODE=enforce` 时不在路由表里的路径返回 403 而不是 404。
+
 ## 读副本（可选）
 
 检索可以交给 PostgreSQL 的流复制热备。默认关闭；不设 `POSTGRES_READ_REPLICA_URLS` 时一切照旧。变量和一致性设计见 [configuration.md](configuration.md#读副本)。

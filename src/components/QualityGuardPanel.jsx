@@ -169,6 +169,7 @@ const RecoveryGateCard = ({ gate, t = defaultT }) => {
 };
 
 const QualityGuardPanel = ({
+  canRunSynthetic = true,
   isQualityLoading,
   onLoadHistory,
   onLoadLatest,
@@ -232,6 +233,8 @@ const QualityGuardPanel = ({
           className="archive-secondary-button quality-action-button"
           icon={<ExperimentOutlined />}
           loading={isQualityLoading}
+          disabled={!canRunSynthetic}
+          title={canRunSynthetic ? undefined : t("auth.adminNotAllowed")}
           onClick={() => void onRunSynthetic()}
         >
           {t("quality.runEval")}

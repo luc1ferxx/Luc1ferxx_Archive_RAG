@@ -1,0 +1,44 @@
+.archive-auth-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #344155;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.archive-auth-status .archive-auth-user {
+  font-weight: 680;
+}
+
+.archive-auth-status .archive-auth-workspace,
+.archive-auth-status .archive-auth-role {
+  color: #5b677d;
+}
+
+.archive-auth-status .archive-auth-error {
+  color: #b42318;
+  white-space: normal;
+}
+
+.archive-auth-status button,
+.archive-header-actions .archive-auth-status button {
+  display: inline-flex;
+  width: auto;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid #dbe4f0;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #344155;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 680;
+}
+
+.archive-permission-note {
+  margin: 8px 0;
+  color: #5b677d;
+  font-size: 0.82rem;
+}

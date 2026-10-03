@@ -1347,11 +1347,16 @@ export const getApiAuthConfigStatus = () => {
   const staticTokenConfigured = Boolean(
     getApiAuthToken().trim() || getApiAuthTokens().trim()
   );
+  // OIDC (end of file) adds fields only when API_AUTH_OIDC_ENABLED is on, so
+  // the report keeps its shape for every existing configuration.
+  const oidc = getApiAuthOidcConfigStatus();
   const status = !enabled
     ? "disabled"
-    : jwtEnabled && !jwtSecretConfigured
+    : (jwtEnabled && !jwtSecretConfigured) || oidc.status === "error"
       ? "error"
-      : staticTokenConfigured || (jwtEnabled && jwtSecretConfigured)
+      : staticTokenConfigured ||
+          (jwtEnabled && jwtSecretConfigured) ||
+          oidc.status === "ok"
         ? "ok"
         : "error";
 
@@ -1364,7 +1369,15 @@ export const getApiAuthConfigStatus = () => {
     modes: [
       ...(staticTokenConfigured ? ["static_token"] : []),
       ...(jwtEnabled ? ["jwt"] : []),
+      ...(oidc.enabled ? ["oidc"] : []),
     ],
+    ...(oidc.enabled
+      ? {
+          oidcEnabled: true,
+          oidcIssuerConfigured: oidc.issuerConfigured,
+          oidcAudienceConfigured: oidc.audienceConfigured,
+        }
+      : {}),
     status,
   };
 };
@@ -1674,3 +1687,90 @@ export const getRetrievalServiceMaxTopK = () =>
 export const getRetrievalServiceTimeoutMs = () =>
   Math.floor(toNonNegativeNumber(process.env.RETRIEVAL_SERVICE_TIMEOUT_MS, 0));
 // --- End RETRIEVAL track -----------------------------------------------------
+
+// --- OIDC track: OpenID Connect resource server (rag/oidc.js) ---------------
+// API_AUTH_OIDC_ENABLED=true makes requireApiAuth accept access tokens from
+// API_AUTH_OIDC_ISSUER (Authorization: Bearer) next to static tokens and HS256
+// JWTs. Unset, nothing about authentication changes.
+const readOidcText = (rawValue, fallbackValue = "") =>
+  (typeof rawValue === "string" && rawValue.trim() ? rawValue.trim() : fallbackValue);
+
+export const OIDC_DEFAULT_ALGORITHMS = Object.freeze(["RS256", "PS256", "ES256", "EdDSA"]);
+
+export const isApiAuthOidcEnabled = () =>
+  toBoolean(process.env.API_AUTH_OIDC_ENABLED, false);
+
+export const getApiAuthOidcIssuer = () => readOidcText(process.env.API_AUTH_OIDC_ISSUER);
+
+export const getApiAuthOidcAudience = () => readOidcText(process.env.API_AUTH_OIDC_AUDIENCE);
+
+export const getApiAuthOidcClientId = () => readOidcText(process.env.API_AUTH_OIDC_CLIENT_ID);
+
+export const getApiAuthOidcScopes = () =>
+  readOidcText(process.env.API_AUTH_OIDC_SCOPES, "openid profile email");
+
+export const getApiAuthOidcAlgorithms = () => {
+  const configured = readOidcText(process.env.API_AUTH_OIDC_ALGORITHMS)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  return configured.length > 0 ? configured : [...OIDC_DEFAULT_ALGORITHMS];
+};
+
+export const getApiAuthOidcClockSkewSec = () =>
+  Math.min(600, Math.floor(toNonNegativeNumber(process.env.API_AUTH_OIDC_CLOCK_SKEW_SEC, 60)));
+
+export const getApiAuthOidcJwksTtlMs = () =>
+  Math.floor(toPositiveNumber(process.env.API_AUTH_OIDC_JWKS_TTL_MS, 10 * 60 * 1000));
+
+export const getApiAuthOidcJwksMinRefreshMs = () =>
+  Math.floor(toNonNegativeNumber(process.env.API_AUTH_OIDC_JWKS_MIN_REFRESH_MS, 30 * 1000));
+
+export const getApiAuthOidcHttpTimeoutMs = () =>
+  Math.floor(toPositiveNumber(process.env.API_AUTH_OIDC_HTTP_TIMEOUT_MS, 5000));
+
+export const isApiAuthOidcTypRequired = () =>
+  toBoolean(process.env.API_AUTH_OIDC_REQUIRE_TYP, false);
+
+export const getApiAuthOidcUserClaim = () =>
+  readOidcText(process.env.API_AUTH_OIDC_USER_CLAIM, "sub");
+
+export const getApiAuthOidcWorkspaceClaim = () =>
+  readOidcText(process.env.API_AUTH_OIDC_WORKSPACE_CLAIM, "workspace_id");
+
+export const getApiAuthOidcWorkspacesClaim = () =>
+  readOidcText(process.env.API_AUTH_OIDC_WORKSPACES_CLAIM, "workspaces");
+
+export const getApiAuthOidcRolesClaim = () =>
+  readOidcText(process.env.API_AUTH_OIDC_ROLES_CLAIM, "roles");
+
+export const getApiAuthOidcGroupsClaim = () =>
+  readOidcText(process.env.API_AUTH_OIDC_GROUPS_CLAIM, "groups");
+
+export const getApiAuthOidcGroupRoleMap = () =>
+  readOidcText(process.env.API_AUTH_OIDC_GROUP_ROLE_MAP);
+
+export const getApiAuthOidcPermissionsClaim = () =>
+  readOidcText(process.env.API_AUTH_OIDC_PERMISSIONS_CLAIM, "permissions");
+
+export const getApiAuthOidcWorkspaceRolesClaim = () =>
+  readOidcText(process.env.API_AUTH_OIDC_WORKSPACE_ROLES_CLAIM, "workspace_roles");
+
+export const getApiAuthOidcConfigStatus = () => {
+  const enabled = isApiAuthOidcEnabled();
+  const issuerConfigured = Boolean(getApiAuthOidcIssuer());
+  const audienceConfigured = Boolean(getApiAuthOidcAudience());
+
+  return {
+    enabled,
+    issuerConfigured,
+    audienceConfigured,
+    status: !enabled
+      ? "disabled"
+      : issuerConfigured && audienceConfigured
+        ? "ok"
+        : "error",
+  };
+};
+// --- End OIDC track ----------------------------------------------------------

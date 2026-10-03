@@ -1,3 +1,5 @@
+import { getAccessToken } from "./auth/tokenStore";
+
 // "same-origin" is for the single-container deployment, where the API server
 // also serves this build (FRONTEND_BUILD_DIRECTORY): requests go to relative
 // paths on whatever host served the page.
@@ -14,7 +16,13 @@ export const buildApiRequestConfig = (config = {}) => {
     ...(config.headers ?? {}),
   };
 
-  if (API_AUTH_TOKEN) {
+  // An OIDC session (src/auth) wins; without one the static token path is
+  // exactly what it was before OIDC existed.
+  const oidcAccessToken = getAccessToken();
+
+  if (oidcAccessToken) {
+    nextHeaders.Authorization = `Bearer ${oidcAccessToken}`;
+  } else if (API_AUTH_TOKEN) {
     nextHeaders["x-api-key"] = API_AUTH_TOKEN;
   }
 

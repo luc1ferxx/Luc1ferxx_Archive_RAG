@@ -126,6 +126,10 @@ flowchart LR
   - 每条带租户范围的 SQL 都在事务里切换到租户角色，由行级安全兜底：即使漏写了过滤条件，也读不到其他租户的数据。
   - 租户设置和语句用扩展协议流水线一次往返发出。
   - 行级安全下全文检索用不上 GIN（`@@` 不是 leakproof），多文档检索改由一个只返回 id 和分数的 owner 函数排序。
+- **登录和权限（可选，默认关闭）。**
+  - `API_AUTH_OIDC_ENABLED=true` 后 API 接受外部 IdP 签发的 access token：通过 discovery 和 JWKS 校验签名（只收非对称算法），检查 iss、aud、azp、exp；JWKS 有缓存，遇到未知 kid 限速刷新，IdP 不可达时沿用上一份密钥。前端用 Authorization Code + PKCE 登录，access token 只放内存。
+  - `RBAC_MODE=enforce` 后每个路由都要有路由表里声明的权限（读、写、删、问答、任务、记忆、反馈、admin），不在表里的路由一律拒绝，拒绝写入审计。角色可以是全局的，也可以按 workspace 授予（`workspace_roles` claim）；按 workspace 授予的角色拿不到 admin 权限。拆分部署时由 api 层在转发前检查。
+  - `server/dev-oidc-provider.mjs`（`npm run oidc:dev`）是只用于本机开发的 IdP。
 - **读副本（可选）。**
   - 设了 `POSTGRES_READ_REPLICA_URLS` 后，带租户的 pgvector 检索可以交给流复制热备；写入、迁移、文档列表、运行和任务的读取都留在主库。
   - 副本在同一次往返里先过新鲜度检查：每个被检索文档的版本不低于主库上的、索引指针不旧于这次检索用的，否则由主库回答。按 LSN 测延迟，超过上限的副本不用。
@@ -202,6 +206,8 @@ RAG_EMBEDDING_DIMENSIONS=768
 | 开关 | 作用 |
 | --- | --- |
 | `DOCCOMPARE_STANDALONE=1` | 没有 PostgreSQL 时改用文件存储 |
+| `API_AUTH_OIDC_ENABLED=true` + `API_AUTH_OIDC_ISSUER` / `API_AUTH_OIDC_AUDIENCE` / `API_AUTH_OIDC_CLIENT_ID` | 接受 OIDC access token，前端走 PKCE 登录（需要 `API_AUTH_ENABLED=true`） |
+| `RBAC_MODE=enforce`（`RBAC_DEFAULT_ROLE`、`RBAC_POLICY_JSON`） | 按角色和权限放行每个路由 |
 | `ARCHIVE_RAG_ROLE=api\|agent\|retrieval\|model-gateway` | 拆分部署时这个进程跑哪一层；不设就是 `all`，单进程 |
 | `AGENT_SERVICE_URL` / `RETRIEVAL_SERVICE_URL` / `MODEL_GATEWAY_URL` + `INTERNAL_SERVICE_KEYS` | 把对应的工作交给独立的层（可列多个副本），层间用这组密钥签名 |
 | `INTERNAL_SERVICE_AUTH=ed25519` + `INTERNAL_SERVICE_SIGNING_KEY` / `INTERNAL_SERVICE_TRUSTED_KEYS` | 层间改用每层自己的 Ed25519 密钥（`node server/service-keys.mjs` 生成） |
@@ -226,6 +232,7 @@ RAG_EMBEDDING_DIMENSIONS=768
 | `cd server && bash scripts/run-pgvector-integration.sh` | 在一次性 PostgreSQL 上跑数据库集成测试 |
 | `cd server && bash scripts/run-pgvector-replica-integration.sh` | 在一次性主库 + 流复制备库上跑读副本集成测试 |
 | `cd server && node service-keys.mjs generate <issuer>` / `compose` | 生成层间 Ed25519 密钥（只打印，不写文件） |
+| `cd server && npm run oidc:dev` | 在 127.0.0.1:5556 启动开发用 OIDC IdP（只用于本机） |
 | `cd server && npm run coverage:gate` | 后端覆盖率门禁 |
 | `cd server && npm run quality:current` | PR 质量门禁 |
 | `cd server && npm run verify:quality` | 用真实模型跑端到端检查：问答、对比、拒答、跨进程持久化 |
@@ -303,7 +310,8 @@ RAG_EMBEDDING_DIMENSIONS=768
 - **校验**：默认的词法校验对改写很严格。不开评审时，Agent 路径常常转为请用户澄清：QASPER train 50 题里一道可答题都没答出来，为此加的 7 个开关（屈折、章节标题、标签继承、follow-up 用原问题、单文档路由等）单开或全开都没改变这一点。开评审能多答，但同时会回答不可答题，也放行了明显错答；再加上答案模型的拒答标记（`RAG_QA_ANSWER_VERDICT`），train 上没有回答不可答题，但 dev 上仍答了 2/9 道（基线 0/9），也没有通过。第三轮给拒答标记加了确定性复核（`RAG_QA_VERDICT_OVERRIDE`），用来修 `verify:quality` 里的误拒，结果也没有通过：在 QASPER train 上，复核一次都没让答案通过；候选答了 1/7 道不可答题（基线 0/7），走的是普通作答路径。所以评审、拒答标记、复核和这些开关都保持关闭。
 - **拒答**：门控的区分能力有限（词覆盖 AUC 约 0.59，重排概率约 0.64）；按代价规则选出的阈值偏向多答。
 - **检索**：BM25 没证明优于 `ts_rank_cd`；只由常见词组成的查询剪枝后，前 10 条会和不剪枝时明显不同；查询适配器只针对 QASPER 训练，换语料要重训。
-- **安全**：提示注入的确定性筛查挡不住刻意改写；行级安全防的是漏写过滤条件的 bug，不防 SQL 注入；只有静态 token，没有 SSO。
+- **安全**：提示注入的确定性筛查挡不住刻意改写；行级安全防的是漏写过滤条件的 bug，不防 SQL 注入。
+- **登录和权限**：OIDC 只在内置的开发 IdP 上端到端测过，没接过 Keycloak、Auth0 或 Entra ID；不带 `workspaces` claim 的 token 可以用 `x-workspace-id` 选任意 workspace，开启 RBAC 后还会拿到默认角色；token 没列允许的 workspace 时，只差大小写的 workspace id 是两个租户（列了时统一用小写）；RBAC 只管动作，不管文档可见性（文档仍按上传者过滤，viewer 看不到同 workspace 里别人上传的文档）；refresh token 放在 sessionStorage；`workspaceRoles` 不随层间身份转发，agent 层只依赖 api 层的检查。
 - **规模与运维**：所有测量都在一台机器上、用假模型；没有 K8s、自动扩缩和备份演练；重排服务只能跑 CPU。告警规则和 SLO 目标（99.5% 可用、95% 在 20 秒内）是建议值，规则没有用 promtool 检查过，也没在真实的 Prometheus 里跑过；compose 文件里没有打开指标，也没有 Prometheus 和 Alertmanager。
 - **读副本**：只在同一台机器上的主库 + 一个流复制备库上测过；只分流 pgvector 检索，没有访问范围的请求（owner 路径）不分流；副本上的语句没有语句超时，也不受请求截止时间限制；`vector:reindex --apply` 期间落后的副本可能少返回重新向量化的分块，直到追上；不检查副本是否真的跟随这个主库。
 - **截止时间**：模型并发上限的排队不响应取消；检索层不会因为调用方断开而停止；写操作越过截止时间跑完后，V1 路径把运行记为不可重试的失败，统一图则会完成运行，两条路径不一致；统一图里非主节点的依赖故障仍返回 409。
