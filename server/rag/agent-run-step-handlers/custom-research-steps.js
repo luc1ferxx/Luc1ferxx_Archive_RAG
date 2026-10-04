@@ -458,6 +458,9 @@ export const createResearchQuestionStepExecutor = ({ ragService } = {}) => async
       ragService.chat(stepInput.docIds, stepInput.question, {
         accessScope,
         includeRetrievedContexts: true,
+        // A research question is text the brief composed: it never writes
+        // conversation memory, on the first run or on a retry.
+        memoryWrites: false,
         retrievalPlan: stepInput.retrievalPlan,
         sessionId: stepInput.sessionId,
         userId: stepInput.userId,

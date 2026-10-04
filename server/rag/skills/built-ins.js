@@ -445,6 +445,7 @@ const createDocumentRagSkill = () => ({
     userId,
     accessScope,
     retrievalPlan,
+    memoryWrites,
   }) => {
     const value = await ragService.chat(docIds, question, {
       sessionId,
@@ -452,6 +453,9 @@ const createDocumentRagSkill = () => ({
       includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,
+      // The agent's follow-up asks a question it composed; only the primary
+      // call (the user's own question) records the exchange in memory.
+      ...(memoryWrites === false ? { memoryWrites: false } : {}),
     });
     const evidence = projectDocumentEvidence(value, { allowMissing: true });
 
@@ -870,9 +874,10 @@ const createResearchBriefSkill = () => ({
   kind: "built_in",
   budgetKey: "researchQuestions",
   requiresAccessScope: true,
-  // Each question calls ragService.chat with the live session/user identity,
-  // which can persist a session turn and long-term user memory. A restarted
-  // worker cannot infer from an in-flight step whether those writes landed.
+  // The questions call ragService.chat with the live session/user identity
+  // (memoryWrites: false), and the brief then records the user's exchange as
+  // one session turn plus the long-term preferences the question states. A
+  // restarted worker cannot infer from an in-flight run whether that landed.
   effects: SKILL_EFFECTS.workspaceWrite,
   idempotency: SKILL_IDEMPOTENCY.adapterDefined,
   parallelSafe: false,
@@ -958,11 +963,15 @@ const createResearchBriefSkill = () => ({
       });
 
       try {
+        // A research question is text this skill composed around the user's
+        // topic, not the user's message: it reads session memory but writes
+        // none. The user's own exchange is recorded once, after the brief.
         const value = await ragService.chat(docIds, entry.question, {
           sessionId: sessionId ?? null,
           userId: userId ?? null,
           includeRetrievedContexts: true,
           accessScope,
+          memoryWrites: false,
         });
         const citations = value.citations ?? [];
         const result = {
@@ -1045,6 +1054,23 @@ const createResearchBriefSkill = () => ({
       results,
     });
     const evidenceCitations = rebaseEvidenceResults(evidenceResults).citations;
+
+    // The user's exchange: their question and the brief, as one session turn,
+    // plus the preferences their question states. A failure here never fails
+    // the brief.
+    try {
+      await ragService.recordConversationTurn?.({
+        accessScope,
+        answer: brief.text,
+        docIds,
+        query: question,
+        routeMode: "research_brief",
+        sessionId: sessionId ?? null,
+        userId: userId ?? null,
+      });
+    } catch (error) {
+      console.error("Failed to record the research brief exchange in memory.", error);
+    }
 
     return {
       value: {

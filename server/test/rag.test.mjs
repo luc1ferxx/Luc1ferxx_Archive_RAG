@@ -8,8 +8,10 @@ import chat, {
   getDocument,
   ingestDocumentPages,
   listDocuments,
+  recordConversationTurn,
 } from "../chat.js";
 import { runAgentRag } from "../rag/agent.js";
+import { runWithoutConversationMemoryWrites } from "../rag/conversation-memory-writes.js";
 import { formatAskResult, toMcpTextContent } from "../archive-mcp-tools.js";
 import { buildPublicFilePath } from "../rag/document-utils.js";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
@@ -4302,5 +4304,310 @@ test("an agent follow-up keeps its resolved question out of the session rewrite 
 
     assert.equal(response.memoryApplied, false);
     assert.equal(response.resolvedQuery, "And approval?");
+  });
+});
+
+// Agent sub-calls (follow-up retrieval, research questions) send text the agent
+// composed. They read conversation memory but must never write it: the session
+// keeps exactly the user's exchange, and long-term preferences come only from
+// the user's own message.
+const MEMORY_SESSION_ID = "memory-writes-session";
+const MEMORY_USER_ID = "memory-writes-user";
+const AGENT_TEXT_PATTERN =
+  /Re-check the uploaded documents|Original question:|Unsupported claims:|Evidence issue:|What are the most important facts|Focus on these documents/;
+
+const withConversationMemory = async (callback) => {
+  const sessionStore = createFakeSessionMemoryStore();
+
+  configureSessionMemoryStore(sessionStore);
+  configureLongMemoryStore(createFakeLongMemoryStore());
+
+  try {
+    return await withEnv({ RAG_LONG_MEMORY_ENABLED: "true" }, () =>
+      callback({
+        readSession: async () => sessionStore.get(MEMORY_SESSION_ID),
+        readMemories: () => listLongMemories({ userId: MEMORY_USER_ID }),
+      })
+    );
+  } finally {
+    configureOpenAIProvider(provider);
+    await resetLongMemoryStore();
+  }
+};
+
+// The user turn is the user's message; the assistant turn is the answer the
+// user was given (a research brief lists its own questions as next questions,
+// so only a plain answer is checked for agent text).
+const assertOnlyUserExchange = (session, question, { plainAnswer = true } = {}) => {
+  assert.ok(session, "the user's exchange is recorded");
+  assert.deepEqual(
+    session.messages.map((message) => message.role),
+    ["user", "assistant"]
+  );
+  assert.equal(session.messages[0].text, question);
+  assert.doesNotMatch(session.messages[0].resolvedQuery ?? "", AGENT_TEXT_PATTERN);
+
+  if (plainAnswer) {
+    assert.doesNotMatch(session.messages[1].text ?? "", AGENT_TEXT_PATTERN);
+  }
+};
+
+test("chat with memoryWrites false reads conversation memory but writes none", async () => {
+  const capturedPrompts = [];
+
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      capturedPrompts.push(prompt);
+      return provider.completeText(prompt);
+    },
+  });
+
+  await withConversationMemory(async ({ readMemories, readSession }) => {
+    await ingestFixture({
+      docId: "memory-writes-policy",
+      fileName: "memory-writes-policy.pdf",
+      pages: [
+        "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+      ],
+    });
+
+    await chat(
+      ["memory-writes-policy"],
+      "Re-check the remote work policy. Reply in Chinese from now on.",
+      {
+        memoryWrites: false,
+        sessionId: MEMORY_SESSION_ID,
+        userId: MEMORY_USER_ID,
+      }
+    );
+
+    assert.equal(await readSession(), null);
+    assert.deepEqual(await readMemories(), []);
+
+    const userQuestion = "以后用中文回答。What is the remote work policy?";
+
+    await chat(["memory-writes-policy"], userQuestion, {
+      sessionId: MEMORY_SESSION_ID,
+      userId: MEMORY_USER_ID,
+    });
+
+    assertOnlyUserExchange(await readSession(), userQuestion);
+    const memories = await readMemories();
+    assert.deepEqual(
+      memories.map((memory) => [memory.memoryKey, memory.memoryValue, memory.source]),
+      [["reply_language", "zh", "user_explicit"]]
+    );
+
+    // Reads are unchanged: the internal call still sees the stored preference
+    // and the session, and still leaves both as they were.
+    capturedPrompts.length = 0;
+    await chat(
+      ["memory-writes-policy"],
+      "What is the remote work policy?",
+      {
+        memoryWrites: false,
+        sessionId: MEMORY_SESSION_ID,
+        userId: MEMORY_USER_ID,
+      }
+    );
+
+    assert.ok(
+      capturedPrompts.some((prompt) => prompt.includes("Reply language: Chinese."))
+    );
+    assertOnlyUserExchange(await readSession(), userQuestion);
+    assert.deepEqual(
+      (await readMemories()).map((memory) => [memory.memoryKey, memory.memoryValue]),
+      [["reply_language", "zh"]]
+    );
+  });
+});
+
+test("an agent follow-up retrieval writes no session turn or long-term preference", async () => {
+  // The answer cites nothing, so the evidence check asks for a follow-up whose
+  // question (gaps.js) quotes this unsupported claim, "reply ... Chinese"
+  // included: before memoryWrites it flipped reply_language from system text.
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      if (
+        prompt.includes("preserved_ambiguity") ||
+        prompt.includes("Standalone retrieval question:")
+      ) {
+        return provider.completeText(prompt);
+      }
+
+      return "Vendors must reply in Chinese to every notice.";
+    },
+  });
+
+  await withConversationMemory(async ({ readMemories, readSession }) => {
+    await ingestFixture({
+      docId: "vendor-notice-policy",
+      fileName: "vendor-notice-policy.pdf",
+      pages: [
+        "Vendor notice policy: the vendor notice deadline is five business days after the incident.",
+      ],
+    });
+
+    const question = "What is the vendor notice deadline?";
+    const response = await runAgentRag({
+      ragService: {
+        chat,
+        getDocument,
+        listDocuments,
+        recordConversationTurn,
+      },
+      webChatService: async () => ({ text: "Web search should not run." }),
+      question,
+      docIds: ["vendor-notice-policy"],
+      sessionId: MEMORY_SESSION_ID,
+      userId: MEMORY_USER_ID,
+      accessScope: {},
+    });
+
+    assert.ok(
+      response.body.agentTrace.some((step) => step.type === "follow_up_retrieval"),
+      "the run took a follow-up retrieval"
+    );
+    assertOnlyUserExchange(await readSession(), question);
+    assert.deepEqual(await readMemories(), []);
+  });
+});
+
+test("a research brief records the user's exchange once and no research question", async () => {
+  // The research questions name the selected files, so this file name puts
+  // "reply ... chinese" into every question the brief composes.
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      if (
+        prompt.includes("preserved_ambiguity") ||
+        prompt.includes("Standalone retrieval question:")
+      ) {
+        return provider.completeText(prompt);
+      }
+
+      return "The vendor notice deadline is five business days after the incident. [Source 1]";
+    },
+  });
+
+  await withConversationMemory(async ({ readMemories, readSession }) => {
+    await ingestFixture({
+      docId: "vendor-research-guide",
+      fileName: "reply-in-chinese-vendor-guide.pdf",
+      pages: [
+        [
+          "Vendor notice facts terms obligations: the vendor notice deadline is five business days after the incident.",
+          "Document evidence supports and qualifies the main findings about the vendor notice deadline.",
+          "Conflicts gaps risks and uncertainties about the vendor notice deadline are reviewed quarterly.",
+        ].join(" "),
+      ],
+    });
+
+    // Not "brief": the long-memory extractor reads that word in the user's
+    // own message as an answer_style preference.
+    const question = "Write a research report on the vendor notice deadline.";
+    const response = await runAgentRag({
+      ragService: {
+        chat,
+        getDocument,
+        listDocuments,
+        recordConversationTurn,
+      },
+      webChatService: async () => ({ text: "Web search should not run." }),
+      question,
+      docIds: ["vendor-research-guide"],
+      sessionId: MEMORY_SESSION_ID,
+      userId: MEMORY_USER_ID,
+      accessScope: {},
+    });
+
+    assert.equal(response.status, 200);
+    assert.ok(response.body.researchBrief);
+    assert.ok(
+      response.body.agentTrace.filter((step) => step.type === "research_question")
+        .length >= 2,
+      "the brief ran several research questions"
+    );
+    const session = await readSession();
+    assertOnlyUserExchange(session, question, { plainAnswer: false });
+    assert.equal(session.messages[1].routeMode, "research_brief");
+    assert.match(session.messages[1].text, /^Executive Summary/);
+    assert.deepEqual(await readMemories(), []);
+  });
+});
+
+test("a request run without conversation memory writes reads memory but writes none", async () => {
+  // A background task iteration asks a composed workflow question through the
+  // whole agent; every chat() and the research brief's exchange inside it must
+  // leave memory as the user's own messages left it.
+  const capturedPrompts = [];
+
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      capturedPrompts.push(prompt);
+      return provider.completeText(prompt);
+    },
+  });
+
+  await withConversationMemory(async ({ readMemories, readSession }) => {
+    await ingestFixture({
+      docId: "memory-suppressed-policy",
+      fileName: "memory-suppressed-policy.pdf",
+      pages: [
+        "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+      ],
+    });
+
+    const userQuestion = "以后用中文回答。What is the remote work policy?";
+
+    await chat(["memory-suppressed-policy"], userQuestion, {
+      sessionId: MEMORY_SESSION_ID,
+      userId: MEMORY_USER_ID,
+    });
+    assertOnlyUserExchange(await readSession(), userQuestion);
+
+    // Phase text that would otherwise flip reply_language to en and set
+    // answer_style=concise ("brief"), and append a session turn.
+    const composed =
+      "Create a document-grounded research brief for this dossier. Reply in English. Original goal: remote work policy";
+
+    capturedPrompts.length = 0;
+    await runWithoutConversationMemoryWrites(async () => {
+      await chat(["memory-suppressed-policy"], composed, {
+        sessionId: MEMORY_SESSION_ID,
+        userId: MEMORY_USER_ID,
+      });
+      await recordConversationTurn({
+        answer: "Executive Summary",
+        docIds: ["memory-suppressed-policy"],
+        query: composed,
+        routeMode: "research_brief",
+        sessionId: MEMORY_SESSION_ID,
+        userId: MEMORY_USER_ID,
+      });
+    });
+
+    // Reads are unchanged: the suppressed call still sees the preference.
+    assert.ok(
+      capturedPrompts.some((prompt) => prompt.includes("Reply language: Chinese."))
+    );
+    assertOnlyUserExchange(await readSession(), userQuestion);
+    assert.deepEqual(
+      (await readMemories()).map((memory) => [memory.memoryKey, memory.memoryValue]),
+      [["reply_language", "zh"]]
+    );
+
+    // Outside the wrapper the same calls write again.
+    await recordConversationTurn({
+      answer: "Executive Summary",
+      docIds: ["memory-suppressed-policy"],
+      query: "What else does the remote work policy say?",
+      sessionId: MEMORY_SESSION_ID,
+      userId: MEMORY_USER_ID,
+    });
+    assert.equal((await readSession()).messages.length, 4);
   });
 });

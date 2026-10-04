@@ -121,7 +121,7 @@ Changed files (all agent track):
 
 ## 文档循环、预算与副作用
 
-`ragService.chat` 会记录 session turn，且在有 `userId` 时可能写用户 long memory；因此内置 `document_rag` 不能视为纯读取或无条件安全重放。统一图中的文档循环须声明实际写效应、非并行安全及非自动重放；未知进行中的调用只能进入人工恢复，除非以后引入经验证的幂等键/事务 outbox。
+`ragService.chat` 默认会记录 session turn，且在有 `userId` 时可能写用户 long memory；只有 `question` 绑定上游输出的节点（follow-up）传 `memoryWrites: false` 不写，主 `document_rag` 节点照常写。因此内置 `document_rag` 不能视为纯读取或无条件安全重放。统一图中的文档循环须声明实际写效应、非并行安全及非自动重放；未知进行中的调用只能进入人工恢复，除非以后引入经验证的幂等键/事务 outbox。
 
 目标图中 primary 与条件 follow-up 是两个独立 `document_rag` 调用，各从运行时预算原子预留 **1 次**；只有检查节点确实建议 follow-up 时才调度第二次，不能让 V1 文档循环再对相同调用重复计费。预算不足仍须保留现有 clarification 和 trace 行为。checkpoint 必须记录各调用的实际尝试/计费、最终 `ragResult`、evidence clarification、working-memory/loop 状态和必要的 trace/观测状态，跨进程恢复后不能把 follow-up 计作新的免费调用，也不能丢失证据缺口。
 

@@ -426,6 +426,28 @@ test("admission accepts a Web node only with a standing, input-independent grant
   );
 });
 
+test("the graph's follow-up node asks agent text and writes no conversation memory", async () => {
+  const writes = [];
+  const ragService = createDocumentLoopRagService({
+    onChat: async ({ memoryWrites, phase }) => {
+      writes.push([phase, memoryWrites]);
+    },
+  });
+
+  await ask({
+    agentRunService: newService(createInMemoryAgentRunStore()),
+    mode: "guarded",
+    ragService,
+  });
+
+  // The primary node asks the user's question and records the exchange as
+  // before; the follow-up reads its check's followUpQuestion (agent text).
+  assert.deepEqual(writes, [
+    ["primary", undefined],
+    ["follow_up", false],
+  ]);
+});
+
 const reference = async (followUp = "resolves") =>
   ask({
     agentRunService: newService(createInMemoryAgentRunStore()),

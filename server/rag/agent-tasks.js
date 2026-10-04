@@ -26,6 +26,7 @@ import {
   AGENT_TASK_TYPE,
 } from "./agent-task-contract.js";
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
+import { runWithoutConversationMemoryWrites } from "./conversation-memory-writes.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 export { AGENT_TASK_RUNNER_ID, AGENT_TASK_TYPE };
@@ -154,6 +155,12 @@ const getAgentTaskControl = (body = {}) => normalizeRecord(body.agentTask, null)
 const shouldContinueFromBody = (body = {}) =>
   getAgentTaskControl(body)?.continue === true &&
   Boolean(normalizeText(getAgentTaskControl(body)?.nextQuestion));
+
+const isTaskOwnQuestion = ({ payload = {}, question = "" } = {}) => {
+  const ownQuestion = normalizeText(payload.question);
+
+  return Boolean(ownQuestion) && normalizeText(question) === ownQuestion;
+};
 
 const getNextQuestion = (body = {}) =>
   normalizeText(getAgentTaskControl(body)?.nextQuestion);
@@ -637,17 +644,25 @@ export const createAgentTaskRunner = ({
         payload.resumeAgentRunId === true
           ? normalizeText(payload.agentRunId) || undefined
           : undefined;
-      const response = await runAgentTask({
-        accessScope,
-        agentRunId: requestedAgentRunId,
-        capabilityApprovals: payload.capabilityApprovals,
-        docIds: payload.docIds,
-        question,
-        sessionId: payload.sessionId,
-        signal,
-        taskMemory: buildAgentTaskPlanningContext(payload.taskMemory),
-        userId: payload.userId,
-      });
+      const runIteration = () =>
+        runAgentTask({
+          accessScope,
+          agentRunId: requestedAgentRunId,
+          capabilityApprovals: payload.capabilityApprovals,
+          docIds: payload.docIds,
+          question,
+          sessionId: payload.sessionId,
+          signal,
+          taskMemory: buildAgentTaskPlanningContext(payload.taskMemory),
+          userId: payload.userId,
+        });
+      // Only the task's own question is the user's message. A workflow phase
+      // question or the agent's planned next question is composed text: the
+      // iteration still reads the conversation, but writes no session turn or
+      // long-term preference (conversation-memory-writes.js).
+      const response = isTaskOwnQuestion({ payload, question })
+        ? await runIteration()
+        : await runWithoutConversationMemoryWrites(runIteration);
       assertClaimActive?.();
       const body = normalizeRecord(response?.body);
       const responseStatus = Number(response?.status ?? 200);

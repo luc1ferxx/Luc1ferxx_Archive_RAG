@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile as readBinaryFile } from "node:fs/promises";
 import { chunkDocument } from "./chunker.js";
 import { isAgentFollowUpOriginalQuestionEnabled } from "./config.js";
+import { areConversationMemoryWritesSuppressed } from "./conversation-memory-writes.js";
 import {
   clearDocuments as clearRegisteredDocuments,
   deleteDocument as deleteRegisteredDocument,
@@ -756,6 +757,77 @@ export const clearDocuments = async ({
   });
 };
 
+// The user's own exchange: one session turn (question + answer) and the
+// long-term preferences the question states. Only the user's message may reach
+// it, never text the agent composed.
+const recordUserExchange = async ({
+  answer,
+  documents,
+  query,
+  resolvedQuery = null,
+  routeMode = null,
+  sessionId = null,
+  userId = null,
+}) => {
+  // A whole request on composed text (a background task iteration) runs
+  // under runWithoutConversationMemoryWrites: nothing in it is the user's.
+  if (areConversationMemoryWritesSuppressed()) {
+    return;
+  }
+
+  await recordSessionTurn({
+    sessionId,
+    query,
+    resolvedQuery,
+    answer,
+    documents,
+    routeMode,
+  });
+
+  if (userId) {
+    try {
+      await recordLongMemoryFromUserMessage({
+        userId,
+        query,
+      });
+    } catch (error) {
+      console.error("Failed to persist long-term memory from user message.", error);
+    }
+  }
+};
+
+/**
+ * Records the user's exchange for an agent answer that no memory-writing
+ * chat() call produced (a research brief, whose document lookups run with
+ * memoryWrites: false). Same writes as chat()'s own: one session turn and the
+ * preferences the user's question states.
+ */
+export const recordConversationTurn = async ({
+  accessScope = {},
+  answer = "",
+  docIds = [],
+  query,
+  routeMode = null,
+  sessionId = null,
+  userId = null,
+} = {}) => {
+  if (typeof query !== "string" || !query.trim() || (!sessionId && !userId)) {
+    return;
+  }
+
+  await initializeDocumentRegistry();
+  const documents = getDocuments(normalizeDocIds(docIds), accessScope);
+
+  await recordUserExchange({
+    answer,
+    documents,
+    query,
+    routeMode,
+    sessionId,
+    userId,
+  });
+};
+
 const chat = async (docIds, query, options = {}) => {
   const {
     sessionId = null,
@@ -763,6 +835,11 @@ const chat = async (docIds, query, options = {}) => {
     includeRetrievedContexts = false,
     accessScope = {},
     retrievalPlan = null,
+    // false for the agent's own sub-calls (follow-up retrieval, research
+    // questions, composed Skill prompts): their question is system text, so
+    // it must not become a session turn or a long-term preference. Memory
+    // reads (query rewrite, preference block) are unchanged either way.
+    memoryWrites = true,
   } = options;
   const agentRetrievalPlan = normalizeRetrievalPlan(retrievalPlan);
   const traceId = randomUUID();
@@ -840,24 +917,16 @@ const chat = async (docIds, query, options = {}) => {
         delete result.retrievedContexts;
       }
 
-      await recordSessionTurn({
-        sessionId,
-        query,
-        resolvedQuery,
-        answer: result.text,
-        documents: selectedDocuments,
-        routeMode,
-      });
-
-      if (userId) {
-        try {
-          await recordLongMemoryFromUserMessage({
-            userId,
-            query,
-          });
-        } catch (error) {
-          console.error("Failed to persist long-term memory from user message.", error);
-        }
+      if (memoryWrites !== false) {
+        await recordUserExchange({
+          answer: result.text,
+          documents: selectedDocuments,
+          query,
+          resolvedQuery,
+          routeMode,
+          sessionId,
+          userId,
+        });
       }
 
       return result;

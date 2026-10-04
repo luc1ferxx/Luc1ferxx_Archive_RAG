@@ -77,6 +77,8 @@ export const createSummarizeContractSkill = () => ({
     const value = await ragService.chat(docIds, summaryQuestion, {
       sessionId: null,
       userId: null,
+      // A composed Skill prompt, not the user's message: never memory.
+      memoryWrites: false,
       includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,

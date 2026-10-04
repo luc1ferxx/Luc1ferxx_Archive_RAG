@@ -7,6 +7,7 @@ import {
   digestExecutionGraphTypedOutput,
 } from "./agent-execution-graph-checkpoint.js";
 import {
+  EXECUTION_GRAPH_BINDING_SOURCES,
   EXECUTION_GRAPH_FAILURE_POLICIES,
   EXECUTION_GRAPH_LIMITS,
   EXECUTION_GRAPH_REASON_CODES,
@@ -101,6 +102,10 @@ const buildSkillStepError = (result = {}) =>
         message: serializeError(result.error, "Unable to run custom skill."),
         name: result.error?.name ?? "Error",
       };
+
+const isQuestionBoundToNodeOutput = (node) =>
+  node?.inputBindings?.question?.source ===
+  EXECUTION_GRAPH_BINDING_SOURCES.node;
 
 const graphNodeIdentity = (graph, nodeId) => {
   const heterogeneous = graph.version === EXECUTION_GRAPH_VERSIONS.v3;
@@ -651,6 +656,12 @@ export const runExecutionGraph = async ({
                 services: nodeRuntime?.services ?? services,
                 sessionId,
                 userId,
+                // A node whose question is bound to an upstream output (the
+                // unified graph's follow-up reads its check's followUpQuestion)
+                // asks agent text, so it must not write conversation memory.
+                ...(isQuestionBoundToNodeOutput(node)
+                  ? { memoryWrites: false }
+                  : {}),
               },
               {
                 budget,

@@ -223,6 +223,12 @@ export const createDocumentRagStepExecutor = ({ ragService } = {}) => async ({
         retrievalPlan: stepInput.retrievalPlan,
         sessionId: stepInput.sessionId,
         userId: stepInput.userId,
+        // A follow-up's question is agent text: re-running it reads memory
+        // but writes none, as the original call did. A primary document_rag
+        // retry is the user's question and records the exchange again.
+        ...(getStepType(step) === "follow_up_retrieval"
+          ? { memoryWrites: false }
+          : {}),
       }),
     failureMessage: "Document RAG execution failed.",
     getCitations: getDocumentRagResultCitations,

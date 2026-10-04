@@ -77,6 +77,8 @@ export const createCompareDocumentsSkill = () => ({
     const value = await ragService.chat(docIds, compareQuestion, {
       sessionId: null,
       userId: null,
+      // A composed Skill prompt, not the user's message: never memory.
+      memoryWrites: false,
       includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,

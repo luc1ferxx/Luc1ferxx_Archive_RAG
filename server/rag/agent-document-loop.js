@@ -62,9 +62,10 @@ const buildLifecycleStepError = (result = {}, fallbackMessage) => {
 const DOCUMENT_RAG_PRIMARY_STEP_ID = "document_rag:primary";
 
 // Both phases call ragService.chat with the live session/user identity. The
-// call can persist a session turn and long-term memory before the step settles,
-// so a stored input must not misrepresent it as a replay-safe RAG read. Use a
-// conservative declaration even if an injected legacy Skill omits metadata.
+// primary call can persist a session turn and long-term memory before the step
+// settles, so a stored input must not misrepresent it as a replay-safe RAG
+// read. The follow-up runs with memoryWrites: false, but keeps the same
+// conservative declaration (an injected legacy Skill may ignore the flag).
 const buildDocumentRagStepInput = ({
   docIds,
   documentRagSkill,
@@ -367,6 +368,10 @@ export const runDocumentRagLoop = async ({
           {
             ...followUpInput,
             accessScope,
+            // The follow-up question is agent text (gaps.js); the primary call
+            // already recorded the user's exchange. Runtime-only: the stored
+            // step input is unchanged, and a retry decides by step type.
+            memoryWrites: false,
             ragService,
           },
           {

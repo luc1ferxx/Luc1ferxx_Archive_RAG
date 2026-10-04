@@ -16,6 +16,7 @@ export {
   listDocuments,
   listLongMemories,
   loadDocumentsFromStore,
+  recordConversationTurn,
   refreshDocumentRegistry,
   rememberLongMemory,
   resyncDocument,

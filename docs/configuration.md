@@ -153,7 +153,7 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `TASKS_POSTGRES_TABLE` | `rag_tasks` | task/job 当前快照表。 |
 | `TASK_EVENTS_POSTGRES_TABLE` | `rag_task_events` | task/job 审计事件表。 |
 | `AGENT_RUN_STORE_PROVIDER` | `auto` | Agent run 存储；`auto` 在 PostgreSQL 配好时使用 `postgres`，否则使用 `memory`。 |
-| `AGENT_RUN_RECOVERY_MODE` | PostgreSQL-backed run store 时为 `auto`，否则 `manual` | Agent run 启动恢复模式；PostgreSQL-backed run store 默认尝试恢复 replay matrix 允许的安全 step，非持久化 run store 默认 `manual`。`document_rag`、`follow_up_retrieval`、`research_question` 调用真实 `ragService.chat` 时可能写入会话和长期记忆，包括旧记录未持久化 replay metadata 的情况，都不自动重放；显式 `manual` 只标记 recoverable run 等待人工处理，`auto` 遇到审批或不安全 step 会回落人工，`off` 跳过启动恢复。失败步骤仍可显式 `retry_failed_step`，但可能重复这些写入，不保证 exactly-once。 |
+| `AGENT_RUN_RECOVERY_MODE` | PostgreSQL-backed run store 时为 `auto`，否则 `manual` | Agent run 启动恢复模式；PostgreSQL-backed run store 默认尝试恢复 replay matrix 允许的安全 step，非持久化 run store 默认 `manual`。`document_rag`、`follow_up_retrieval`、`research_question` 都调用真实 `ragService.chat`，都不自动重放，包括旧记录未持久化 replay metadata 的情况。现在只有主 `document_rag` 调用会写会话和长期记忆，另外两类传 `memoryWrites: false`；但注入的 `ragService` 或旧的文档 Skill 不一定遵守这个选项，所以三类 step 的 replay 元数据都保持不变；显式 `manual` 只标记 recoverable run 等待人工处理，`auto` 遇到审批或不安全 step 会回落人工，`off` 跳过启动恢复。失败步骤仍可显式 `retry_failed_step`；重试主 `document_rag` 会再记一次用户的交流，不保证 exactly-once。 |
 | `AGENT_RUNS_POSTGRES_TABLE` | `rag_agent_runs` | Agent run 当前快照表。 |
 | `AGENT_RUN_EVENTS_POSTGRES_TABLE` | `rag_agent_run_events` | Agent run 审计事件表。 |
 | `WORKSPACE_ARTIFACT_STORE_PROVIDER` | `auto` | Workspace artifact 存储；`auto` 在 PostgreSQL 配好时使用 `postgres`，否则回退到 `memory`。 |

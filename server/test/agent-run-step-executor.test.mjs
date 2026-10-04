@@ -1086,6 +1086,8 @@ test("agent run step executor retries document_rag through the wired document ha
   assert.equal(calls[0].question, "What is annual leave?");
   assert.deepEqual(calls[0].options.accessScope, accessScope);
   assert.deepEqual(calls[0].options.retrievalPlan, retrievalPlan);
+  // The primary call is the user's question: a retry records it as before.
+  assert.equal(calls[0].options.memoryWrites, undefined);
   assert.equal(retried.response.agentMode, "document");
   assert.match(retried.response.agentAnswer, /Retried document answer/);
   assert.equal(retried.response.ragSources.length, 1);
@@ -1201,6 +1203,8 @@ test("agent run step executor retries follow_up_retrieval through the wired docu
   assert.deepEqual(calls[0].options.retrievalPlan, {
     phase: "follow_up",
   });
+  // A follow-up question is agent text: the retry writes no memory.
+  assert.equal(calls[0].options.memoryWrites, false);
   assert.equal(retried.response.agentMode, "document");
   assert.match(retried.response.agentAnswer, /Retried follow-up answer/);
   assert.equal(retryStep.type, "follow_up_retrieval");
@@ -1506,6 +1510,8 @@ test("agent run step executor retries research_question through the wired resear
   assert.equal(calls[0].question, "What facts matter?");
   assert.deepEqual(calls[0].options.accessScope, accessScope);
   assert.equal(calls[0].options.includeRetrievedContexts, true);
+  // A research question is text the brief composed: no memory writes.
+  assert.equal(calls[0].options.memoryWrites, false);
   assert.equal(retried.response.agentMode, "research_brief");
   assert.equal(retried.response.researchBrief.findings[0].id, "rq-1");
   assert.match(retried.response.agentAnswer, /Retried research answer/);

@@ -10,6 +10,7 @@ import {
   AGENT_RUN_STEP_STATUSES,
 } from "../rag/agent-run-steps.js";
 import { createJobOrchestrator } from "../rag/job-orchestrator.js";
+import { areConversationMemoryWritesSuppressed } from "../rag/conversation-memory-writes.js";
 import {
   AGENT_TASK_ACTIONS,
   AGENT_TASK_RUNNER_ID,
@@ -1449,6 +1450,7 @@ test("long task ids produce bounded artifact keys and a deterministic follow-up 
 
 test("agent task runs a staged research dossier flow before report delivery", async () => {
   const questions = [];
+  const memoryWritesSuppressed = [];
   const taskService = createTaskService({
     taskStore: createInMemoryTaskStore(),
   });
@@ -1456,6 +1458,7 @@ test("agent task runs a staged research dossier flow before report delivery", as
     capabilityRegistry: createDeliverableCapabilityRegistry(),
     runAgentTask: async ({ question }) => {
       questions.push(question);
+      memoryWritesSuppressed.push(areConversationMemoryWritesSuppressed());
 
       return {
         body: {
@@ -1580,6 +1583,9 @@ test("agent task runs a staged research dossier flow before report delivery", as
   assert.match(questions[3], /Compare the selected documents/);
   assert.match(questions[4], /citation self-check/);
   assert.match(questions[5], /final research dossier/);
+  // Every phase asks a composed workflow question, never the user's message:
+  // no phase may write a session turn or a long-term preference.
+  assert.deepEqual(memoryWritesSuppressed, questions.map(() => true));
   assert.equal(reportSpec.input, undefined);
   assert.match(reportSnapshot.executionInput.content, /## Research Flow/);
   assert.match(
@@ -2536,12 +2542,14 @@ test("postgres-backed agent task retry resumes the failed question after restart
 
 test("agent task runner continues until blocked and resumes with preserved run context", async () => {
   const calls = [];
+  const memoryWritesSuppressed = [];
   const taskService = createTaskService({
     taskStore: createInMemoryTaskStore(),
   });
   const runner = createAgentTaskRunner({
     runAgentTask: async (request) => {
       calls.push(request);
+      memoryWritesSuppressed.push(areConversationMemoryWritesSuppressed());
 
       if (calls.length === 1) {
         return {
@@ -2717,6 +2725,10 @@ test("agent task runner continues until blocked and resumes with preserved run c
       source: "task_action",
     },
   });
+  // The first iteration asks the user's own question and records it; the
+  // agent's planned next question (and its approved resume) is composed text
+  // and writes no conversation memory.
+  assert.deepEqual(memoryWritesSuppressed, [false, true, true]);
 });
 
 test("agent task runner persists task memory as planning-only context", async () => {

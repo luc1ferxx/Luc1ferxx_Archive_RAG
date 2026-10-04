@@ -176,7 +176,7 @@ export const createDocumentLoopRagService = ({
     chat: async (docIds, question, options = {}) => {
       const phase = options.retrievalPlan?.phase === "follow_up" ? "follow_up" : "primary";
       calls.push({ docIds, phase, question });
-      await onChat({ docIds, phase, question });
+      await onChat({ docIds, memoryWrites: options.memoryWrites, phase, question });
 
       if (/Upstream findings from an earlier step/.test(question)) {
         return {

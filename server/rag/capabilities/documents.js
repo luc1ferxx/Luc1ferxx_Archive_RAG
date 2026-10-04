@@ -345,6 +345,8 @@ export const createDocumentCompareBatchCapability = ({ ragService } = {}) => ({
       });
       const value = await ragService.chat(batch.docIds, compareQuestion, {
         accessScope,
+        // A composed comparison prompt, not the user's message: never memory.
+        memoryWrites: false,
         retrievalPlan: input.retrievalPlan ?? null,
       });
 

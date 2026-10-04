@@ -164,7 +164,15 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 - **持久化声明收窄（无 registry 的一侧）。** Step type 是粗粒度分类，同一个 `custom_skill` 既可能是只读 RAG 检索，也可能是 contract 允许的写操作。执行时 skill 的 replay contract（`effects`、`idempotency`、`replaySafe`）会随 step input 持久化，recovery 只拿得到持久化的 step，所以这是 skill 自身声明唯一能影响"是否可无人值守重放"的通道。该声明只能收窄不能放宽：可以撤回 auto-replay，不能授予；contract 出现之前写下的 step 没有声明，结论与今天完全一致；无法识别的 `effects` 按写操作处理——读不懂的值不是安全的证据。V1 chain 和 V2 graph 都持久化同一份声明。Graph node 绑定的上游输入 `priorFindings` 也随 step input 持久化，retry 用原来的那份数据重放；V1 chain step 把上游输出折进了 question，因此没有这个字段，retry 行为不变。
 - **实时 contract 复核（有 registry 的一侧）。** `server/rag/agent-run-step-handlers/custom-research-steps.js` 在 resume 时从 registry 重新解析 skill：持久化的 contract 是它当时的声明，中断和重放之间可能发生一次部署。声明了副作用的 skill 在这条没有审批机制的路径上被拒绝，而不是被静默重跑。
 
-外层的 `document_rag`、`follow_up_retrieval` 和 built-in `research_question` 不属于上面的 custom-only DAG。它们调用带真实 `sessionId` / `userId` 的 `ragService.chat`，可能先写入会话记录和长期记忆、后丢失 step 结算结果；因此 replay matrix 对这三类 step 禁止启动自动重放，旧的无 replay metadata 记录也按 step type fail-closed。新的 V1 step input 显式持久化 `effects: workspace_write`、`idempotency: adapter_defined`、`replaySafe: false`。显式 `retry_failed_step` 继续可用，但操作员需要接受可能重复写入的风险；现有路径没有跨 RAG 写入与 step 结算的 exactly-once 保证。
+外层的 `document_rag`、`follow_up_retrieval` 和 built-in `research_question` 不属于上面的 custom-only DAG。它们调用带真实 `sessionId` / `userId` 的 `ragService.chat`。replay matrix 对这三类 step 禁止启动自动重放，旧的无 replay metadata 记录也按 step type fail-closed。新的 V1 step input 显式持久化 `effects: workspace_write`、`idempotency: adapter_defined`、`replaySafe: false`。显式 `retry_failed_step` 继续可用；现有路径没有跨 RAG 写入与 step 结算的 exactly-once 保证。
+
+**会话记忆只记用户自己的话。** `chat()` 的 `memoryWrites` 选项默认 `true`；传 `false` 时不写会话 turn，也不从问题里提取长期偏好，但会话改写和偏好块照常读取。
+
+- 写入：主 `document_rag` 调用（用户的问题，一条用户 turn 加一条助手 turn，加上问题里说明的偏好）及其重试；research brief 在子问题都跑完后，经 `ragService.recordConversationTurn` 记一次（用户问题加 brief 文本）。
+- 不写入：V1 follow-up（问题是 `gaps.js` 拼的 "Re-check the uploaded documents…"）、统一图里 `question` 绑定上游输出的节点、每个 `research_question` 子调用、这两类 step 的重试、四个自定义 Skill 和 `document.compare_batch` 拼的 prompt。
+- 后台任务：问题不是任务自身问题的迭代（研究 dossier 的阶段问题、agent 规划的 `nextQuestion`）在 `runWithoutConversationMemoryWrites` 下运行，整次迭代只读不写。
+
+这三类 step 的 replay 元数据没有因此改动：注入的 `ragService` 或旧的文档 Skill 不一定遵守 `memoryWrites`，证明不了这些 step 什么都不写。重试主 `document_rag` 会再记一次用户的交流。
 
 两处是纵深防御的两层，分别覆盖"记录被伪造/过期"和"记录缺失"两种情况。Approval 仍然绑定原始 input hash。
 
