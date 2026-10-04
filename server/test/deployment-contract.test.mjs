@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import {
   getCrossEncoderEndpoint,
   getCrossEncoderModel,
@@ -29,6 +30,7 @@ import {
   isRerankEnabled,
 } from "../rag/config.js";
 import { resolveRolePort } from "../rag/agent-service/role-server.js";
+import { MODEL_GATEWAY_PATHS } from "../rag/model-gateway/protocol.js";
 import { signServiceToken, verifyServiceToken } from "../rag/service-identity.js";
 import { describeServiceTopology, validateServiceTopology } from "../rag/service-topology.js";
 import { COMPOSE_SIGNING_KEY_VARIABLES, runServiceKeysCommand } from "../service-keys.mjs";
@@ -475,7 +477,9 @@ test("only the api publishes a port, and internal keys come from the shell alone
 
   const apiPorts = nestedLines(serviceLines(override, "api"), "ports", 4).filter(isContentLine);
 
-  assert.deepEqual(apiPorts.map((line) => line.trim()), ['- "${ARCHIVE_RAG_API_PORTS:-5001}:5001"']);
+  assert.deepEqual(apiPorts.map((line) => line.trim()), [
+    '- "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:${ARCHIVE_RAG_API_PORTS:-5001}:5001"',
+  ]);
   assert.equal(listeningPort(t, tierEnvironment(override, "api")), 5001);
 
   for (const serviceName of tierServiceNames) {
@@ -679,4 +683,197 @@ test("each role has a start script through the image's entry point", async () =>
   }
 
   assert.equal(packageJson.scripts?.start, "node server.js", "the monolith start is unchanged");
+});
+
+// Network exposure of the one-click deployment. On Linux a port docker
+// publishes bypasses ufw/firewalld, and the defaults (the postgres superuser
+// with a known password, Redis without one, API auth off) are only fit for
+// loopback. Every published port therefore binds ARCHIVE_RAG_BIND_HOST, which
+// defaults to 127.0.0.1; 0.0.0.0 is a deliberate choice (docs/deployment.md).
+const composeFilesWithPorts = [composePath, rerankOverridePath, servicesOverridePath];
+const bindHostPrefix = "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:";
+
+// Every entry of every `ports:` block in a compose file, at any depth, plus
+// any long-syntax `published:` key (which would escape the short-form check).
+const publishedPorts = (composeText) => {
+  const lines = composeText.split("\n");
+  const entries = [];
+
+  lines.forEach((line, index) => {
+    if (!isContentLine(line) || line.trim() !== "ports:") {
+      return;
+    }
+
+    for (const next of lines.slice(index + 1)) {
+      if (isContentLine(next) && indentationOf(next) <= indentationOf(line)) {
+        break;
+      }
+
+      if (isContentLine(next)) {
+        entries.push(unquote(next.trim().replace(/^-\s*/, "")));
+      }
+    }
+  });
+
+  return {
+    entries,
+    longSyntax: lines.filter((line) => isContentLine(line) && /^\s*-?\s*(published|host_ip):/.test(line)),
+  };
+};
+
+test("every published port binds ARCHIVE_RAG_BIND_HOST, loopback by default", async () => {
+  const expectedPorts = {
+    [composePath]: ["5432:5432", "6379:6379", "5001:5001", "5010:5001"],
+    [rerankOverridePath]: [],
+    [servicesOverridePath]: ["${ARCHIVE_RAG_API_PORTS:-5001}:5001"],
+  };
+
+  for (const filePath of composeFilesWithPorts) {
+    const name = path.basename(filePath);
+    const { entries, longSyntax } = publishedPorts(await readText(filePath));
+
+    assert.deepEqual(longSyntax, [], `${name}: use the short form so the bind host stays pinned`);
+    assert.deepEqual(
+      entries.map((entry) => entry.slice(bindHostPrefix.length)),
+      expectedPorts[filePath],
+      `${name}: published ports`
+    );
+
+    for (const entry of entries) {
+      assert.ok(entry.startsWith(bindHostPrefix), `${name}: ${entry} must bind ARCHIVE_RAG_BIND_HOST`);
+      // As compose resolves it with no shell variables set, and with the LAN opt-in.
+      assert.match(interpolate(entry, {}), /^127\.0\.0\.1:[0-9-]+:\d+$/, `${name}: ${entry}`);
+      assert.match(interpolate(entry, { ARCHIVE_RAG_BIND_HOST: "0.0.0.0" }), /^0\.0\.0\.0:[0-9-]+:\d+$/);
+    }
+  }
+
+  // The standalone evaluation reranker (not part of the deployment) already
+  // publishes on loopback only.
+  const standalone = publishedPorts(await readText(standaloneComposePath));
+
+  assert.deepEqual(standalone.entries, ["127.0.0.1:8081:8081"]);
+});
+
+test("the postgres password comes from POSTGRES_PASSWORD, and every database URL follows it", async () => {
+  const [compose, override] = await Promise.all([readText(composePath), readText(servicesOverridePath)]);
+  const passwordVariable = "${POSTGRES_PASSWORD:-postgres}";
+
+  assert.equal(rawServiceEnvironment(compose, "postgres").POSTGRES_PASSWORD, passwordVariable);
+  assert.equal(rawServiceEnvironment(compose, "postgres").POSTGRES_USER, "postgres");
+
+  const urlServices = [
+    [compose, "app"],
+    ...tierServiceNames.map((serviceName) => [override, serviceName]),
+  ];
+  let urlCount = 0;
+
+  for (const [text, serviceName] of urlServices) {
+    for (const [key, value] of Object.entries(rawServiceEnvironment(text, serviceName))) {
+      if (!/^postgres(ql)?:\/\//.test(value)) {
+        continue;
+      }
+
+      urlCount += 1;
+      assert.equal(
+        value,
+        `postgresql://postgres:${passwordVariable}@postgres:5432/agentai`,
+        `${serviceName}.${key} uses the postgres service's password variable`
+      );
+      // A password set in the shell reaches the server and its clients alike.
+      assert.equal(
+        new URL(interpolate(value, { POSTGRES_PASSWORD: "from-shell" })).password,
+        interpolate(rawServiceEnvironment(compose, "postgres").POSTGRES_PASSWORD, { POSTGRES_PASSWORD: "from-shell" })
+      );
+    }
+  }
+
+  // app (2) and api, agent, retrieval (2 each); the gateway has no database.
+  assert.equal(urlCount, 8);
+
+  // No hard-coded password anywhere else in either file.
+  for (const [name, text] of [["docker-compose.yml", compose], ["compose.services.yml", override]]) {
+    for (const line of text.split("\n").filter(isContentLine)) {
+      assert.doesNotMatch(line, /^\s*-?\s*POSTGRES_PASSWORD\s*[:=](?!\s*\$\{POSTGRES_PASSWORD:-)/, `${name}: ${line.trim()}`);
+      assert.doesNotMatch(line, /postgres(ql)?:\/\/[^:/@\s]+:(?!\$\{POSTGRES_PASSWORD:-)[^@\s]*@/, `${name}: ${line.trim()}`);
+    }
+  }
+});
+
+// The script of the app image's HEALTHCHECK (`CMD node -e "..."`, shell form).
+const imageHealthcheckScript = (dockerfile) => {
+  const match = dockerfile.match(/^HEALTHCHECK [^\n]*\\\n\s+CMD node -e "([^"\n]*)"\s*$/m);
+
+  assert.ok(match, "the app Dockerfile has one node -e HEALTHCHECK");
+
+  return match[1];
+};
+
+// The URL the HEALTHCHECK probes in a container with `environment`.
+const imageHealthcheckUrl = (script, environment) => {
+  const urls = [];
+
+  vm.runInNewContext(script, {
+    fetch: (url) => {
+      urls.push(url);
+
+      return new Promise(() => {});
+    },
+    process: { env: { ...environment }, exit: () => {} },
+  });
+
+  assert.equal(urls.length, 1);
+
+  return urls[0];
+};
+
+test("the app service is healthy only when ready; the image probes each role's liveness", async (t) => {
+  const [compose, override, dockerfile, systemRoutes, retrievalApp] = await Promise.all([
+    readText(composePath),
+    readText(servicesOverridePath),
+    readText(appDockerfilePath),
+    readText(path.join(serverDirectory, "routes", "system.js")),
+    readText(path.join(serverDirectory, "rag", "retrieval-service", "app.js")),
+  ]);
+  const imagePort = dockerfile.match(/^\s+PORT=(\d+) \\$/m)?.[1];
+
+  assert.equal(imagePort, "5001", "the image's own PORT");
+  // /health answers 200 whatever it finds; /ready is 503 unless every check passes.
+  assert.deepEqual(healthcheckTarget(compose, "app"), { path: "/ready", port: Number(imagePort) });
+  assert.match(systemRoutes, /router\.get\("\/ready"[\s\S]*?status\(report\.status === "ok" \? 200 : 503\)/);
+  assert.match(systemRoutes, /router\.get\("\/livez"/);
+
+  const script = imageHealthcheckScript(dockerfile);
+
+  // Shell form: nothing the shell would expand or unquote inside "...".
+  assert.doesNotMatch(script, /[$`\\"]/);
+
+  // The paths each role's app really serves without an identity: /livez from
+  // routes/system.js (all, api, agent), the tiers' own /health otherwise.
+  assert.match(retrievalApp, /app\.get\("\/health"/);
+  assert.equal(MODEL_GATEWAY_PATHS.health, "/health");
+
+  const livenessPaths = { agent: "/livez", all: "/livez", api: "/livez", "model-gateway": "/health", retrieval: "/health" };
+  const cases = [
+    // The monolith as the one-click deployment runs it: the image's ENV only.
+    { environment: { PORT: imagePort }, role: "all" },
+    // Each split tier as compose.services.yml runs it, over the image's ENV.
+    ...tierServiceNames.map((serviceName) => ({
+      environment: { PORT: imagePort, ...tierEnvironment(override, serviceName) },
+      role: tierRoles[serviceName],
+    })),
+    // A tier started from the image with its own default port.
+    { environment: { ARCHIVE_RAG_ROLE: "retrieval" }, role: "retrieval" },
+    { environment: { ARCHIVE_RAG_ROLE: "model-gateway" }, role: "model-gateway" },
+    { environment: { ARCHIVE_RAG_ROLE: " Model-Gateway ", MODEL_GATEWAY_PORT: "5013", PORT: imagePort }, role: "model-gateway" },
+  ];
+
+  for (const { environment, role } of cases) {
+    const port = listeningPort(t, { ...environment, ARCHIVE_RAG_ROLE: role });
+
+    assert.equal(
+      imageHealthcheckUrl(script, environment),
+      `http://127.0.0.1:${port}${livenessPaths[role]}`,
+      `${role} with ${JSON.stringify(environment)}`
+    );
+  }
 });

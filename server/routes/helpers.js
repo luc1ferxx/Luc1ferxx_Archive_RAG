@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { open, rm } from "fs/promises";
 import path from "path";
 
-import { getRequestAccessScope } from "../auth.js";
+import { resolveRequestUserId } from "../auth.js";
 import { isSafeUploadFileName } from "../upload-policy.js";
 
 export {
@@ -182,5 +182,8 @@ export const sendBufferedFile = ({
   res.end(chunk);
 };
 
+// The user a route acts for. The decision lives in auth.js
+// (resolveRequestUserId): an authenticated request acts for the user its
+// credential resolved to and never for a body or query userId of its own.
 export const resolveScopedUserId = (req, rawUserId) =>
-  getRequestAccessScope(req).userId || rawUserId?.trim() || "";
+  resolveRequestUserId(req, rawUserId);

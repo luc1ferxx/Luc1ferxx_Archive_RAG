@@ -9,6 +9,13 @@
 # `--profile layout` (and PDF_PARSER=docling) for Docling layout parsing, and
 # `-f docker-compose.yml -f compose.rerank.yml --profile rerank` for the
 # cross-encoder reranker.
+#
+# Every published port binds ${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}: loopback
+# only by default, because on Linux a published port bypasses ufw/firewalld
+# and the defaults below (the postgres superuser, Redis without a password,
+# API auth off) are not fit for a network. Set ARCHIVE_RAG_BIND_HOST=0.0.0.0
+# (or one interface's address) to expose them on a LAN deliberately, and set
+# POSTGRES_PASSWORD first (docs/deployment.md).
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -17,9 +24,11 @@ services:
     environment:
       POSTGRES_DB: agentai
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      # Applied only when the pgdata volume is first initialised; the default
+      # keeps the one-click start and server/.env.example working.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
-      - "5432:5432"
+      - "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d agentai"]
       interval: 10s
@@ -39,7 +48,7 @@ services:
     profiles: ["shared-state"]
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
-      - "6379:6379"
+      - "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -60,8 +69,8 @@ services:
       - path: server/.env
         required: false
     environment:
-      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
-      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      POSTGRES_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
       VECTOR_STORE_PROVIDER: pgvector
       PDF_PARSER: ${PDF_PARSER:-pdfjs}
       DOCLING_SERVE_URL: ${DOCLING_SERVE_URL:-http://docling:5001}
@@ -69,7 +78,16 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "5001:5001"
+      - "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:5001:5001"
+    # Readiness, not liveness: healthy only while /ready is 200 (every health
+    # check passes), so a running app with an unusable database or model
+    # setup shows as unhealthy. /health answers 200 whatever its report says.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5001/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,13 +97,15 @@ services:
   # Optional layout-aware PDF parsing (PDF_PARSER=docling): tables as cell
   # grids and multi-column reading order. About 2 GB compressed, CPU only.
   # Run `PDF_PARSER=docling docker compose --profile app --profile layout up -d`.
+  # The tag is not pinned: no version of docling-serve has been recorded as
+  # measured in this repository (docs/evaluation.md names none).
   docling:
     image: ghcr.io/docling-project/docling-serve-cpu:latest
     container_name: luc1ferxx-archive-docling
     restart: unless-stopped
     profiles: ["layout"]
     ports:
-      - "5010:5001"
+      - "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:5010:5001"
 
   # Optional cross-encoder reranker, the one measured in docs/evaluation.md:
   # server/evaluation/neural-cross-encoder-endpoint.py with the pinned

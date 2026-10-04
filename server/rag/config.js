@@ -1,5 +1,20 @@
+const hasEnvValue = (rawValue) =>
+  typeof rawValue === "string" && rawValue.trim() !== "";
+
+// Number("") and Number("   ") are 0, so without this an empty line in .env
+// (VAR=) would silently replace a default, and for many settings 0 means "off"
+// or "no limit". An empty or whitespace-only value counts as unset; a number
+// passed directly is used as is.
+const parseEnvNumber = (rawValue) => {
+  if (typeof rawValue === "number") {
+    return rawValue;
+  }
+
+  return hasEnvValue(rawValue) ? Number(rawValue) : Number.NaN;
+};
+
 const toPositiveNumber = (rawValue, fallbackValue) => {
-  const parsedValue = Number(rawValue);
+  const parsedValue = parseEnvNumber(rawValue);
 
   return Number.isFinite(parsedValue) && parsedValue > 0
     ? parsedValue
@@ -7,7 +22,7 @@ const toPositiveNumber = (rawValue, fallbackValue) => {
 };
 
 const toNonNegativeNumber = (rawValue, fallbackValue) => {
-  const parsedValue = Number(rawValue);
+  const parsedValue = parseEnvNumber(rawValue);
 
   return Number.isFinite(parsedValue) && parsedValue >= 0
     ? parsedValue
@@ -31,9 +46,6 @@ const toBoolean = (rawValue, fallbackValue = false) => {
 
   return fallbackValue;
 };
-
-const hasEnvValue = (rawValue) =>
-  typeof rawValue === "string" && rawValue.trim() !== "";
 
 const toChoice = (rawValue, fallbackValue, allowedValues) => {
   if (typeof rawValue !== "string") {

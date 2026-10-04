@@ -128,11 +128,29 @@ const getDispatchMode = ({ event = {}, mode = "" } = {}) => {
     : "";
 };
 
+// The user a dispatched task acts for. An authenticated scope already carries
+// the user auth.js decided (resolveUserId), so a payload userId is never
+// consulted for it: requireApiAuth only refuses a client userId at the top of
+// the body, and the built-in research_dossier trigger allows a nested "userId"
+// payload field, which let a token without its own user act as anyone. This
+// is the rule routes follow through resolveRequestUserId. Without
+// authentication the scope's user, else the payload's, as before.
+const resolveTriggerUserId = ({ accessScope = {}, payloadUserId } = {}) => {
+  const scopedUserId = normalizeText(accessScope.userId);
+
+  if (accessScope.authenticated === true) {
+    return scopedUserId;
+  }
+
+  return scopedUserId || payloadUserId;
+};
+
 const assertTriggerScope = ({ accessScope = {}, scopePolicy = {}, taskInput = {} } = {}) => {
   if (
     scopePolicy.requiresUserId &&
-    !normalizeText(accessScope.userId) &&
-    !normalizeText(taskInput.userId)
+    !normalizeText(
+      resolveTriggerUserId({ accessScope, payloadUserId: taskInput.userId })
+    )
   ) {
     throw buildDispatchError("Agent trigger requires a user scope.", 403);
   }
@@ -202,7 +220,7 @@ const buildTaskRequest = ({ accessScope = {}, trigger = {}, values = {} } = {}) 
     question,
     sessionId: values.sessionId,
     userPreferences: values.userPreferences,
-    userId: normalizeText(accessScope.userId) || values.userId,
+    userId: resolveTriggerUserId({ accessScope, payloadUserId: values.userId }),
   };
 };
 

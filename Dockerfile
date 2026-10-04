@@ -39,6 +39,9 @@ RUN mkdir -p /data && chown -R node:node /data
 USER node
 VOLUME ["/data"]
 EXPOSE 5001
+# Liveness on the port each role listens on (resolveRolePort): /livez where
+# routes/system.js serves it (all, api, agent); the retrieval and model-gateway
+# apps have no /livez, so there it is their own /health.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
-  CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 5001) + '/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+  CMD node -e "const e = process.env, role = String(e.ARCHIVE_RAG_ROLE || '').trim().toLowerCase(), gw = role === 'model-gateway', tier = gw || role === 'retrieval'; const port = (gw && parseInt(e.MODEL_GATEWAY_PORT, 10)) || parseInt(e.PORT, 10) || (gw ? 5003 : role === 'retrieval' ? 5002 : 5001); fetch('http://127.0.0.1:' + port + (tier ? '/health' : '/livez')).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
 CMD ["node", "server.js"]

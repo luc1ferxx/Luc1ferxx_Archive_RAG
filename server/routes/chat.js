@@ -6,7 +6,7 @@ import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
 import { describeAgentRequestFailure } from "../rag/dependency-outage.js";
 import { runAgentRequestWithCancellation } from "../rag/request-deadline.js";
 
-import { parseDocIds, serializeError } from "./helpers.js";
+import { parseDocIds, resolveScopedUserId, serializeError } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
 
 const questionSchema = z.object({
@@ -78,7 +78,7 @@ export const createChatRouter = (services) => {
       docIds: parseDocIds(payload.docIds, payload.docId),
       question: parsed.question,
       sessionId: payload.sessionId?.trim() || null,
-      userId: accessScope.userId || payload.userId?.trim() || null,
+      userId: resolveScopedUserId(req, payload.userId) || null,
     };
   };
 

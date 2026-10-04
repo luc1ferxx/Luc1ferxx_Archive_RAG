@@ -11,7 +11,33 @@ docker compose --profile app up -d --build
 - 数据位置：
   - 文档、分块、向量、运行记录在 PostgreSQL 的 `pgdata` 卷里；
   - 上传的原始文件和本地数据在 `appdata` 卷里（容器内 `/data`）。
-- 数据库迁移在启动时自动执行。`docker compose ps` 里 `app` 显示 `healthy` 即表示 `/health` 返回正常。
+- 数据库迁移在启动时自动执行。`docker compose ps` 里 `app` 显示 `healthy` 表示 `/ready` 返回 200，也就是健康报告里每一项检查都通过（`/health` 无论结果如何都返回 200，不能当健康检查用）。显示 `unhealthy` 时进程仍在运行，用 `curl -s http://localhost:5001/ready` 看是哪一项报 `error`。
+- 所有发布的端口默认只绑定 `127.0.0.1`，只能从本机访问，见下面的"端口与网络暴露"。
+
+### 端口与网络暴露
+
+| 服务 | 宿主机端口 | 默认绑定 |
+| --- | --- | --- |
+| `app`（`--profile app`） | 5001 | `127.0.0.1` |
+| `postgres` | 5432 | `127.0.0.1` |
+| `redis`（`--profile shared-state`） | 6379 | `127.0.0.1` |
+| `docling`（`--profile layout`） | 5010 | `127.0.0.1` |
+| `compose.services.yml` 的 `api` | `ARCHIVE_RAG_API_PORTS`，默认 5001 | `127.0.0.1` |
+
+- **为什么默认只绑本机**：默认配置不适合放到网络上：PostgreSQL 是超级用户 `postgres`，密码也是 `postgres`；Redis 没有密码；API 默认不开鉴权。而在 Linux 上，Docker 发布的端口会绕过 ufw / firewalld，防火墙规则挡不住。
+- **有意在局域网开放**：所有发布的端口都绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`）。按下面的顺序做：
+  1. 设数据库密码。`POSTGRES_PASSWORD` 同时用于 `postgres` 服务和 compose 里所有的数据库地址，不设时仍是 `postgres`。密码会原样拼进连接 URL，所以只用 URL 安全的字符，例如 `openssl rand -hex 24` 生成的值。
+  2. 在 `server/.env` 里开启 API 鉴权（`API_AUTH_ENABLED=true`，加上 `API_AUTH_TOKENS`，见 [configuration.md](configuration.md)；或者用 OIDC，见下面的"OIDC 登录和 RBAC"）。
+  3. 带上这两个变量启动：
+
+     ```bash
+     export POSTGRES_PASSWORD="$(openssl rand -hex 24)"   # 保存好，以后每次启动都要带同一个值
+     ARCHIVE_RAG_BIND_HOST=0.0.0.0 docker compose --profile app up -d
+     ```
+
+  `0.0.0.0` 表示所有网卡；只想在一块网卡上开放时，写那块网卡的地址（例如 `192.168.1.20`）。
+- **这个变量对所有发布的端口一起生效**：开放 app 时，5432 的 PostgreSQL 和（启用时）6379 的 Redis 也会对外。Redis 仍然没有密码。只想开放应用时，保持默认的 `127.0.0.1`，在宿主机上用反向代理（nginx、Caddy 等）转发到 `127.0.0.1:5001`。
+- **`POSTGRES_PASSWORD` 只在数据卷第一次初始化时生效**：`pgdata` 卷已经存在时，改这个变量不会改掉库里的密码，应用会因为密码不对连不上。已有数据时先在库里改密码（`docker compose exec postgres psql -U postgres -c "ALTER USER postgres PASSWORD '<新密码>'"`），再用同一个值带上 `POSTGRES_PASSWORD` 重启。不在容器里跑后端（`npm run server`）时，`server/.env` 里 `POSTGRES_DATABASE_URL` 的密码也要一起改。
 
 ### 模型配置
 
@@ -36,6 +62,7 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 - 另起一个 `docling` 服务：docling-serve CPU 版，压缩后约 2 GB，自带模型；
 - 应用会把 PDF 交给它解析。它能按多栏的阅读顺序输出正文，并把表格还原成带列名的行；
 - 服务不可用时退回 pdf.js，并在 `/health` 的 `checks.pdfParser` 里报错；
+- 镜像标签是 `latest`，没有固定版本：仓库里没有记录评测时用的 docling-serve 版本。要可复现的部署，自己把 `docker-compose.yml` 里的标签换成确定的版本；
 - 效果和代价见 [evaluation.md](evaluation.md) 的"版面解析"。
 
 ### 交叉编码器重排（可选，推荐）
@@ -169,7 +196,7 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
 
 ### 用镜像部署
 
-- 同一个镜像，给每个容器设不同的 `ARCHIVE_RAG_ROLE`，`CMD` 不用改。镜像里预设了 `PORT=5001`，所以每个角色在自己的容器里都监听 5001，镜像的健康检查也探测这个端口；不要单独给网关设 `MODEL_GATEWAY_PORT`，否则健康检查会探错端口。
+- 同一个镜像，给每个容器设不同的 `ARCHIVE_RAG_ROLE`，`CMD` 不用改。镜像里预设了 `PORT=5001`，所以每个角色在自己的容器里都监听 5001。镜像的健康检查只判断进程是否存活：按角色选端口（网关先看 `MODEL_GATEWAY_PORT`，其余看 `PORT`，和进程自己选端口的规则一样），`all`、`api`、`agent` 探测 `/livez`；`retrieval` 和 `model-gateway` 的应用没有 `/livez`，探测它们自己的 `/health`。要按就绪状态摘流量，在编排里另配 `/ready`。
 - 只有 api 容器需要对外发布端口；其他层放在内部网络，服务地址写容器名，例如 `AGENT_SERVICE_URL=http://agent:5001`。
 - `compose.services.yml` 把四个角色作为四个服务跑，用同一个镜像，只有 api 发布端口：
 
@@ -189,6 +216,7 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
   - 缺密钥时 compose 不会在解析阶段报错，而是容器启动时拓扑校验拒绝启动、进程退出，`restart: unless-stopped` 会一直重启它。看到某个层反复重启，先查 `docker compose logs <服务>`。
   - 这几项变量也可能从 `server/.env` 流进各个层（`env_file`）：`INTERNAL_SERVICE_SIGNING_KEY_ID`、`INTERNAL_SERVICE_ISSUER`、`INTERNAL_SERVICE_REQUEST_BINDING`、`INTERNAL_SERVICE_REPLAY_CACHE`；model-gateway 服务没有覆盖 `INTERNAL_SERVICE_SIGNING_KEY`，`server/.env` 里如果有这个值会被网关继承。不要在 `server/.env` 里放私钥。
   - 它是追加在基础文件上的 override，不能和 `--profile app` 同时用（两者都占 5001）。多个 api 副本要把 `ARCHIVE_RAG_API_PORTS` 设成端口范围（例如 `5001-5003`），或者自己在前面放负载均衡。
+  - api 的端口和基础文件里的端口一样绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`），各层的数据库地址用同一个 `POSTGRES_PASSWORD`，见上面的"端口与网络暴露"。
   - `--scale` 起的副本共用一个 DNS 名（例如 `http://agent:5001`），service client 把它当成一个副本，负载靠 Docker DNS 在建连时分散。要用按副本的最少在途选择和故障转移，得在地址里逐个列出副本。
   - 这个文件还没有真正构建和启动过，只用 `docker compose config` 校验过解析，由 `test/deployment-contract.test.mjs` 固定。
 - 仓库里没有 Kubernetes 清单。

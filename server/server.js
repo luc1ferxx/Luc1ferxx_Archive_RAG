@@ -54,7 +54,8 @@ if (String(process.env.OTEL_TRACING_ENABLED ?? "").trim().toLowerCase() === "tru
   console.log("[tracing] OpenTelemetry tracing enabled (OTLP/HTTP export).");
 }
 
-const PORT = Number.parseInt(process.env.PORT ?? "5001", 10);
+// An empty PORT= counts as unset (it used to parse to NaN and fail listen).
+const PORT = Number.parseInt(String(process.env.PORT ?? "").trim() || "5001", 10);
 
 // The monolith: today's start-up. With AGENT_SERVICE_URL set it also acts as
 // the public edge (app.js forwards agent work), so the topology is checked

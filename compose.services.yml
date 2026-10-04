@@ -7,10 +7,12 @@
 #   docker compose -f docker-compose.yml -f compose.services.yml up -d --scale agent=3 --scale retrieval=2
 #
 # Only the api publishes a port: ARCHIVE_RAG_API_PORTS (default 5001; a range
-# such as 5001-5003 gives each of `--scale api=3` its own host port). The
-# other tiers are reached on the compose network only, with signed internal
-# tokens. Do not add `--profile app`, which runs the monolith on the same host
-# port.
+# such as 5001-5003 gives each of `--scale api=3` its own host port), bound to
+# ARCHIVE_RAG_BIND_HOST (default 127.0.0.1, loopback only; 0.0.0.0 exposes it
+# on every interface, as docker-compose.yml explains). The database URLs use
+# the same POSTGRES_PASSWORD as the postgres service. The other tiers are
+# reached on the compose network only, with signed internal tokens. Do not add
+# `--profile app`, which runs the monolith on the same host port.
 #
 # Internal identity (server/rag/service-identity.js) comes from the shell
 # alone; nothing below holds or defaults to a key, and a tier whose keys are
@@ -64,15 +66,15 @@ services:
       INTERNAL_SERVICE_KEYS: ${INTERNAL_SERVICE_KEYS:-}
       INTERNAL_SERVICE_SIGNING_KEY: ${INTERNAL_SERVICE_SIGNING_KEY_API:-}
       INTERNAL_SERVICE_TRUSTED_KEYS: ${INTERNAL_SERVICE_TRUSTED_KEYS:-}
-      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
-      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      POSTGRES_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
       VECTOR_STORE_PROVIDER: pgvector
       PDF_PARSER: ${PDF_PARSER:-pdfjs}
       DOCLING_SERVE_URL: ${DOCLING_SERVE_URL:-http://docling:5001}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       OTEL_SERVICE_NAME: luc1ferxx-archive-rag-api
     ports:
-      - "${ARCHIVE_RAG_API_PORTS:-5001}:5001"
+      - "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:${ARCHIVE_RAG_API_PORTS:-5001}:5001"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5001/livez').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 15s
@@ -109,8 +111,8 @@ services:
       INTERNAL_SERVICE_KEYS: ${INTERNAL_SERVICE_KEYS:-}
       INTERNAL_SERVICE_SIGNING_KEY: ${INTERNAL_SERVICE_SIGNING_KEY_AGENT:-}
       INTERNAL_SERVICE_TRUSTED_KEYS: ${INTERNAL_SERVICE_TRUSTED_KEYS:-}
-      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
-      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      POSTGRES_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
       VECTOR_STORE_PROVIDER: pgvector
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       OTEL_SERVICE_NAME: luc1ferxx-archive-rag-agent
@@ -149,8 +151,8 @@ services:
       INTERNAL_SERVICE_KEYS: ${INTERNAL_SERVICE_KEYS:-}
       INTERNAL_SERVICE_SIGNING_KEY: ${INTERNAL_SERVICE_SIGNING_KEY_RETRIEVAL:-}
       INTERNAL_SERVICE_TRUSTED_KEYS: ${INTERNAL_SERVICE_TRUSTED_KEYS:-}
-      POSTGRES_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
-      LONG_MEMORY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentai
+      POSTGRES_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
+      LONG_MEMORY_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
       VECTOR_STORE_PROVIDER: pgvector
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       OTEL_SERVICE_NAME: luc1ferxx-archive-rag-retrieval

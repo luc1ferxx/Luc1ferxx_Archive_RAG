@@ -11,6 +11,17 @@ cp server/.env.example server/.env
 
 前端读取根目录 `.env`，后端读取 `server/.env`。
 
+数字类变量留空（`VAR=`）或只写空白，等同于没设置，使用默认值，不会被当成 `0`。要设成 `0` 就显式写 `0`，例如 `RAG_LLM_MAX_CONCURRENCY=0` 仍表示不限并发。所以 `server/.env.example` 里留空的 `RAG_LLMOPS_MAX_COST_USD_PER_EVENT` / `RAG_LLMOPS_MAX_TOKENS_PER_EVENT` 表示不设预算，而不是预算为 0。
+
+### Docker Compose 变量
+
+下面两个变量由 `docker compose` 在解析 compose 文件时读取，要在执行命令的 shell 里设置（compose 也会读仓库根目录 `.env` 里的同名变量）；写在 `server/.env` 里不起作用。用法和注意事项见 [deployment.md 的"端口与网络暴露"](deployment.md#端口与网络暴露)。
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `ARCHIVE_RAG_BIND_HOST` | `127.0.0.1` | 所有发布端口绑定的宿主机地址：`postgres` 5432、`redis` 6379、`app` 5001、`docling` 5010，以及 `compose.services.yml` 的 `api`。默认只能从本机访问；设成 `0.0.0.0` 或某块网卡的地址会让这些端口一起对外，Redis 没有密码，先设好 `POSTGRES_PASSWORD` 并开启 API 鉴权。 |
+| `POSTGRES_PASSWORD` | `postgres` | `postgres` 服务的密码，也拼进 compose 里所有的数据库地址（`POSTGRES_DATABASE_URL`、`LONG_MEMORY_DATABASE_URL`）。原样拼进 URL，只用 URL 安全的字符（例如 `openssl rand -hex 24`）。只在 `pgdata` 卷第一次初始化时生效；已有数据卷要先在库里 `ALTER USER`。 |
+
 ## 最小后端配置
 
 ```env
@@ -324,6 +335,18 @@ API_AUTH_JWT_AUDIENCE=archive-rag
 ```
 
 启用带 `userId/workspaceId` 的 principal 后，文档列表、chat、删除和 PDF 文件流都会按访问范围过滤。使用 PostgreSQL 时，数据库行级安全会再检查一遍（见下文“数据库行级安全”）。`workspaceId` / `workspace_id` 表示固定 workspace；`allowedWorkspaceIds` 或 JWT `workspaces` 表示允许的 workspace 列表，请求里的 `x-workspace-id` / `workspaceId` 必须落在该列表内。旧的无 scope 文档不会出现在 scoped 用户视图中，需要重新上传或迁移 owner/workspace 元数据。
+
+请求里能不能自己指定用户（header `x-user-id`，或 body / query 里的 `x-user-id` / `userId`），取决于凭证：
+
+- 凭证自带 `userId`（带 `userId` 的 `API_AUTH_TOKENS` 条目、HS256 JWT、OIDC）：始终按这个用户处理，请求里的 userId 会被忽略。
+- 不开鉴权、单个 `API_AUTH_TOKEN`、或者 `API_AUTH_TOKENS` 条目写了 `"allowClientUserId": true`：按请求里的 userId 处理，和以前一样。只认 JSON 的 `true`，字符串 `"true"` 不算。
+- 其他不带 `userId` 的凭证（例如只写了 `workspaceId` 的 `API_AUTH_TOKENS` 条目）：不代表任何用户；请求里一旦写了非空的 userId，就返回 403。唯一的例外是 `GET /admin/audit` 的 `userId` 查询参数，它是筛选条件。
+
+这是一个不兼容的变化：以前不带 `userId` 的 token 条目可以用 `x-user-id` 冒充任何用户，读写、删除他的文档和长期记忆。依赖这种用法的部署，要给条目加上 `userId`，或者明确写 `"allowClientUserId": true`。前端每次 `/chat` 都会在 body 里带一个本地生成的 `userId`，所以和前端一起用的条目必须是这两种之一：
+
+```env
+API_AUTH_TOKENS={"shared-token":{"workspaceId":"workspace-a","allowClientUserId":true}}
+```
 
 Admin 端点还会读取 token principal 或 JWT claims 上的 `roles` / `roleIds` 和 `permissions` / `permissionIds`。内置角色包括 `admin.viewer`、`admin.quality_operator`、`admin.recovery_operator`、`admin.operator`、`admin.owner`；也可以直接授予 `admin.status.read`、`admin.audit.read`、`admin.actions.recovery_scan`、`admin.actions.quality_refresh`、`admin.actions.recover_tasks` 等权限：
 

@@ -38,6 +38,74 @@ const getRequestValue = (req, key) =>
   normalizeString(req.body?.[key]) ||
   normalizeString(req.query?.[key]);
 
+// Set only by this module on a static principal that may name its user per
+// request: the single shared API_AUTH_TOKEN (the documented local setup) and an
+// API_AUTH_TOKENS entry with "allowClientUserId": true. A symbol, so no token
+// claim or JSON field can set it on another principal.
+const CLIENT_USER_ID_ALLOWED = Symbol("archiveRag.clientUserIdAllowed");
+
+const CLIENT_USER_ID_KEYS = ["x-user-id", "userId"];
+
+// Routes whose `userId` query parameter is a filter over other users' records,
+// not the caller's identity: GET /admin/audit?userId=... (admin.audit.read).
+const USER_ID_FILTER_QUERY_PATHS = new Set(["/admin/audit"]);
+
+// Every userId the client sent, from each place getRequestValue reads (header,
+// JSON body, query), so a refusal cannot be dodged by putting the value where
+// the first non-empty read does not look.
+const listRequestedUserIds = (req) => {
+  const userIdQueryIsFilter = USER_ID_FILTER_QUERY_PATHS.has(req.path);
+
+  return [
+    ...new Set(
+      CLIENT_USER_ID_KEYS.flatMap((key) => [
+        normalizeString(req.get(key)),
+        normalizeString(req.body?.[key]),
+        key === "userId" && userIdQueryIsFilter
+          ? ""
+          : normalizeString(req.query?.[key]),
+      ]).filter(Boolean)
+    ),
+  ];
+};
+
+const allowsClientUserId = (principal = {}) =>
+  !principal.authenticated || principal[CLIENT_USER_ID_ALLOWED] === true;
+
+/**
+ * The one decision about which user a request acts for.
+ *
+ * - A principal with its own userId (a token entry with one, an HS256 JWT,
+ *   OIDC) acts as that user; a client userId is ignored, as before (pinned by
+ *   app.test.mjs and service-roles.test.mjs).
+ * - Without one, auth off, the single API_AUTH_TOKEN (the documented local
+ *   setup) and an API_AUTH_TOKENS entry with "allowClientUserId": true take the
+ *   client's x-user-id / userId (header, body, query), unchanged.
+ * - Every other principal without a userId acts as no user, and a request that
+ *   names one anyway is refused with 403 instead of acting as that user (an
+ *   empty value is ignored). Before, such a workspace token could read and
+ *   delete any user's documents and long-term memory by naming them.
+ */
+const resolveUserId = (req, principal = {}) => {
+  const principalUserId = normalizeString(principal.userId);
+
+  if (principalUserId) {
+    return principalUserId;
+  }
+
+  if (allowsClientUserId(principal)) {
+    return getRequestValue(req, "x-user-id") || getRequestValue(req, "userId");
+  }
+
+  if (listRequestedUserIds(req).length > 0) {
+    throw new AccessScopeError(
+      "This credential does not allow the client to choose a user."
+    );
+  }
+
+  return "";
+};
+
 const getProvidedToken = (req) => {
   const apiKeyHeader = req.get("x-api-key")?.trim();
 
@@ -75,7 +143,7 @@ const normalizeTokenPrincipal = (token, principal = {}) => {
     };
   }
 
-  return addWorkspaceRoles(
+  const normalized = addWorkspaceRoles(
     addAccessPrincipalAuthorizationMetadata(
       {
         authProvider: "static_token",
@@ -89,6 +157,13 @@ const normalizeTokenPrincipal = (token, principal = {}) => {
     ),
     principal
   );
+
+  // Only the literal JSON true opts in; "true", 1 and the like do not.
+  if (principal?.allowClientUserId === true) {
+    normalized[CLIENT_USER_ID_ALLOWED] = true;
+  }
+
+  return normalized;
 };
 
 const parseConfiguredTokenPrincipals = () => {
@@ -135,6 +210,7 @@ const parseConfiguredTokenPrincipals = () => {
           token: fallbackToken,
           userId: "",
           workspaceId: "",
+          [CLIENT_USER_ID_ALLOWED]: true,
         },
       ]
     : [];
@@ -216,10 +292,7 @@ const buildAccessScope = (req, principal = {}) => {
   const target = {
     authenticated: Boolean(principal.authenticated),
     authProvider: normalizeString(principal.authProvider),
-    userId:
-      normalizeString(principal.userId) ||
-      getRequestValue(req, "x-user-id") ||
-      getRequestValue(req, "userId"),
+    userId: resolveUserId(req, principal),
     workspaceId: resolveWorkspaceId(req, principal),
   };
 
@@ -282,6 +355,26 @@ const sendAuthError = (res, error) => {
 };
 
 export const getRequestAccessScope = (req) => req.accessScope ?? {};
+
+/**
+ * The user a route acts for, given the userId the route itself read from the
+ * request (body or query). Every route that takes a client userId goes through
+ * this (routes/helpers.js resolveScopedUserId). An authenticated scope already
+ * carries the user resolveUserId decided (and requireApiAuth refused a
+ * conflicting client value with 403), so the raw value is never consulted for
+ * it; the agent tier's scope comes from the edge's token and is treated the
+ * same. Without authentication the scope's user, else the raw value, as before.
+ */
+export const resolveRequestUserId = (req, rawUserId) => {
+  const accessScope = getRequestAccessScope(req);
+  const scopedUserId = normalizeString(accessScope.userId);
+
+  if (accessScope.authenticated === true) {
+    return scopedUserId;
+  }
+
+  return scopedUserId || (typeof rawUserId === "string" ? rawUserId.trim() : "");
+};
 
 /**
  * Runs the rest of the request under its access scope as the database tenant,
