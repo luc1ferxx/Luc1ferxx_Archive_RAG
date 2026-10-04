@@ -182,7 +182,7 @@ docker compose --profile app up -d --build
 
 所有发布的端口（5001、5432，以及可选的 6379、5010）默认只绑定 `127.0.0.1`，数据库密码默认是 `postgres`。要在局域网里访问，先设 `POSTGRES_PASSWORD`（只在数据卷第一次初始化时生效）并在 `server/.env` 里开启 API 鉴权，再用 `ARCHIVE_RAG_BIND_HOST=0.0.0.0` 启动；这会让所有端口一起对外，Redis 没有密码。只开放应用时更推荐反向代理。详见 [docs/deployment.md 的"端口与网络暴露"](docs/deployment.md#端口与网络暴露)。
 
-**本地开发：**
+**本地开发**（需要 Node 22.13 及以上）：
 
 ```bash
 npm install && (cd server && npm install)

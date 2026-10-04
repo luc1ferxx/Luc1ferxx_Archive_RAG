@@ -106,7 +106,7 @@ test("quality gate workflow runs frontend checks in an independent root job", as
   const frontendJob = frontendJobMatch[0];
 
   assert.match(frontendJob, /runs-on:\s*ubuntu-latest/);
-  assert.match(frontendJob, /node-version:\s*"20"/);
+  assert.match(frontendJob, /node-version:\s*"22"/);
   assert.match(frontendJob, /cache-dependency-path:\s*package-lock\.json/);
   assert.doesNotMatch(frontendJob, /working-directory:\s*server/);
 
@@ -151,7 +151,7 @@ test("quality gate workflow regenerates and validates current-commit evidence", 
   assert.match(workflow, /push:/);
   assert.match(workflow, /branches:\s*\n\s*-\s*main/);
   assert.match(workflow, /working-directory:\s*server/);
-  assert.match(workflow, /node-version:\s*"20"/);
+  assert.match(workflow, /node-version:\s*"22"/);
   assert.match(workflow, /cache-dependency-path:\s*server\/package-lock\.json/);
   assert.match(workflow, /run:\s*npm ci/);
   assert.match(workflow, /run:\s*npm test/);
@@ -265,7 +265,7 @@ test("planner real provider workflow runs a required scheduled gate", async () =
   assert.match(workflow, /AGENT_INTENT_PLANNER:\s*llm/);
   assert.match(workflow, /AGENT_EXECUTION_PLANNER:\s*llm/);
   assert.match(workflow, /working-directory:\s*server/);
-  assert.match(workflow, /node-version:\s*"20"/);
+  assert.match(workflow, /node-version:\s*"22"/);
   assert.match(workflow, /run:\s*npm ci/);
   // A revoked key fails up front with an actionable error, before any eval.
   assert.match(
@@ -302,7 +302,7 @@ test("robust eval suite is manual-only because the scheduled release gate owns t
   assert.doesNotMatch(workflow, /cron:/);
   assert.match(workflow, /OPENAI_API_KEY:\s*\$\{\{\s*secrets\.OPENAI_API_KEY\s*\}\}/);
   assert.match(workflow, /working-directory:\s*server/);
-  assert.match(workflow, /node-version:\s*"20"/);
+  assert.match(workflow, /node-version:\s*"22"/);
   assert.match(workflow, /cache-dependency-path:\s*server\/package-lock\.json/);
   assert.match(workflow, /run:\s*npm ci/);
   assert.match(workflow, /name:\s*Require OpenAI key/);
@@ -407,7 +407,7 @@ test("release evidence workflow generates every required report in one Postgres-
   );
   assert.doesNotMatch(workflow, /run:\s*[^\n]*secrets\./);
   assert.match(workflow, /working-directory:\s*server/);
-  assert.match(workflow, /node-version:\s*"20"/);
+  assert.match(workflow, /node-version:\s*"22"/);
   assert.match(workflow, /cache-dependency-path:\s*server\/package-lock\.json/);
   assert.match(workflow, /run:\s*npm ci/);
   assert.match(workflow, /name:\s*Require OpenAI key/);
