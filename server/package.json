@@ -97,7 +97,7 @@
     "fast-xml-parser": "^5.8.0",
     "helmet": "^8.3.0",
     "ioredis": "^5.11.1",
-    "multer": "^1.4.5-lts.1",
+    "multer": "^2.4.0",
     "pdfjs-dist": "5.6.205",
     "pg": "^8.20.0",
     "serpapi": "^2.2.1",

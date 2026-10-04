@@ -174,7 +174,9 @@ export const createUploadsRouter = (services) => {
   const upload = multer({
     storage,
     limits: {
-      fileSize: MAX_DIRECT_UPLOAD_SIZE + 1,
+      // multer 2 rejects a file only when it exceeds fileSize (1.x did so at
+      // fileSize), so the limit is the public maximum itself.
+      fileSize: MAX_DIRECT_UPLOAD_SIZE,
       files: 1,
       fields: 0,
       parts: 2,
@@ -187,10 +189,10 @@ export const createUploadsRouter = (services) => {
   const chunkUpload = multer({
     storage: multer.memoryStorage(),
     limits: {
-      // Busboy marks a file as truncated when it reaches its transport limit.
-      // Keep that limit one byte above the public maximum; the store remains
-      // authoritative for the declared and actual chunk geometry.
-      fileSize: MAX_CHUNK_UPLOAD_SIZE + 1,
+      // multer 2 rejects a file only when it exceeds fileSize, so the limit is
+      // the public maximum itself; the store remains authoritative for the
+      // declared and actual chunk geometry.
+      fileSize: MAX_CHUNK_UPLOAD_SIZE,
       files: 1,
       fields: MAX_UPLOAD_MULTIPART_FIELDS,
       parts: MAX_UPLOAD_MULTIPART_FIELDS + 2,
