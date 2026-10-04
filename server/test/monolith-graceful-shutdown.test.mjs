@@ -293,6 +293,25 @@ const connectionRefused = (port) =>
     socket.once("error", (error) => resolve(error.code === "ECONNREFUSED"));
   });
 
+// The drain log is written as the listener starts closing; the socket itself
+// closes on a later turn of the event loop, and on Linux a connection that
+// was already in the accept backlog can still connect. So poll: within the
+// drain, new connections must start being refused while the held request is
+// still running.
+const becomesConnectionRefused = async (port, { timeoutMs = 3000, intervalMs = 25 } = {}) => {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await connectionRefused(port)) {
+      return true;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return false;
+};
+
 test("SIGTERM drains an in-flight /chat: it answers 200, its run completes, new connections are refused, exit 0", async () => {
   const graceMs = 20_000;
   const model = await startFakeModel();
@@ -304,7 +323,7 @@ test("SIGTERM drains an in-flight /chat: it answers 200, its run completes, new 
   await monolith.waitForOutput(DRAIN_LOG);
 
   // The listener is closed while the request is still running.
-  assert.equal(await connectionRefused(monolith.port), true, "a new connection is refused during the drain");
+  assert.equal(await becomesConnectionRefused(monolith.port), true, "a new connection is refused during the drain");
 
   release();
 
