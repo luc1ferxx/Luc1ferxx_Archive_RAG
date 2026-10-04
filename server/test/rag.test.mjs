@@ -4611,3 +4611,46 @@ test("a request run without conversation memory writes reads memory but writes n
     assert.equal((await readSession()).messages.length, 4);
   });
 });
+
+test("compare trace records why the model comparison answer was replaced, codes and counts only", async () => {
+  await ingestFixture({
+    docId: "handbook-reject-2024",
+    fileName: "handbook-reject-2024.pdf",
+    pages: [
+      "Remote work policy: employees may work remotely 2 days per week with manager approval.",
+    ],
+  });
+  await ingestFixture({
+    docId: "handbook-reject-2025",
+    fileName: "handbook-reject-2025.pdf",
+    pages: [
+      "Remote work policy: employees may work remotely 3 days per week with manager approval.",
+    ],
+  });
+
+  await withEnv(
+    {
+      RAG_OBSERVABILITY_ENABLED: "true",
+      RAG_OBSERVABILITY_INCLUDE_CONTEXT: undefined,
+    },
+    async () => {
+      // The default fixture model answers a comparison without a Differences
+      // section, so the gate replaces it.
+      const response = await chat(
+        ["handbook-reject-2024", "handbook-reject-2025"],
+        "Compare the remote work policy."
+      );
+      const [event] = await readRagObservabilityEvents();
+
+      assert.equal(event.routeMode, "compare");
+      assert.equal(event.modelRejectReason.code, "no_differences_section");
+      assert.match(event.modelRejectReason.fallback, /^(?:grounded_template|abstained)$/);
+      assert.ok(
+        Object.entries(event.modelRejectReason).every(([key, value]) =>
+          key === "code" || key === "fallback" ? /^[a-z_]+$/.test(value) : Number.isInteger(value)
+        )
+      );
+      assert.equal("modelRejectReason" in response, false);
+    }
+  );
+});

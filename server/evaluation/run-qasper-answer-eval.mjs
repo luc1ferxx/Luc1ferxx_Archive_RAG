@@ -5,7 +5,12 @@
 // judge: token F1 against every annotator's answer, keeping the best, with an
 // abstention scored as "Unanswerable". Also reports how often the system
 // abstains on answerable questions, how many unanswerable ones it catches, and
-// whether the annotated evidence paragraph was among the retrieved sources.
+// where the annotated evidence paragraph was: among the pages the answer cites
+// ([Source N] labels resolved to citations; cited evidence recall, citation
+// precision, no-citation rate), and, as a separate context figure, among the
+// pages the model was shown (contextEvidenceRecall, what reports before the
+// split called evidenceRecall). The QA path returns every context chunk as a
+// citation, so only the label-resolved pages say what the answer cites.
 //
 // Cases come from a corpus built by import-qasper.mjs (--granularity
 // paragraph). A seeded sample is ingested into a throwaway standalone archive
@@ -31,7 +36,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  citedSourcePages,
   qasperAnswerF1,
+  scoreQasperEvidence,
   summarizeQasperRuns,
   toQasperPrediction,
 } from "./qasper-answer-metrics.js";
@@ -91,6 +98,24 @@ const describePromptTemplates = async () => {
   }
 };
 
+// The rag surface's answer as this eval scores it. contextPages are the pages
+// the model was shown (a gate abstention still carries them); citedPages are
+// the pages its [Source N] labels name, empty for an abstention.
+export const describeRagSurfaceAnswer = (result) => {
+  const abstained = Boolean(result?.abstained);
+
+  return {
+    abstained,
+    // "answer_model" when the model said the evidence does not answer;
+    // otherwise an abstention is the confidence gate's.
+    abstainSource: abstained ? result.abstainSource ?? "gate" : null,
+    citedPages: citedSourcePages({ abstained, citations: result?.citations ?? [], text: result?.text }),
+    contextPages: (result?.retrievedContexts ?? []).map((context) => Number(context.pageNumber)),
+    text: result?.text,
+    verdictOverridden: result?.verdictOverridden === true,
+  };
+};
+
 // RAG_QA_VERDICT_OVERRIDE: answers given although the answer model opened with
 // NOT_IN_EVIDENCE:, split by whether the question was answerable.
 const summarizeVerdictOverrides = (rows) => {
@@ -111,7 +136,10 @@ const formatMarkdown = (report) => {
     `Generated ${report.generatedAt}; surface \`${report.config.surface}\`; chat model ${report.config.chatModel}; ${summary.cases} questions (${summary.unanswerableCases} unanswerable), seed ${report.config.seed}; query adapter ${report.config.queryAdapter ?? "none"}.`,
     "",
     `- Answer F1 (official QASPER, best over annotators): ${summary.answerF1}`,
-    `- Evidence paragraph among the answer's sources (answerable; an abstention has none): ${summary.evidenceRecall}; among answers actually given: ${summary.evidenceRecallWhenAnswered}`,
+    `- Cited evidence recall (an evidence paragraph among the pages the answer's [Source N] labels cite; answerable, an abstention cites none): ${summary.citedEvidenceRecall}; among answers actually given: ${summary.citedEvidenceRecallWhenAnswered}`,
+    `- Citation precision (share of cited pages holding annotated evidence; answered answerable questions citing a page, n=${summary.citationPrecisionCases}): ${summary.citationPrecision}`,
+    `- Answers citing no page (all answered questions): ${summary.noCitationRateWhenAnswered}`,
+    `- Context evidence recall (${report.config.surface === "agent" ? "an evidence paragraph among the response's ragSources, cited or not, none for an abstention" : "an evidence paragraph among the pages the model was shown, cited or not; a gate abstention keeps them"}; earlier reports' evidenceRecall): ${summary.contextEvidenceRecall}; among answers actually given: ${summary.contextEvidenceRecallWhenAnswered}`,
     `- Answer F1 on answerable questions it did answer: ${summary.f1WhenAnswered}`,
     `- Abstained on answerable questions: ${summary.answerableAbstainRate}`,
     `- Unanswerable questions caught (abstain recall): ${summary.abstainRecall}; abstentions that were right (precision): ${summary.abstainPrecision}`,
@@ -206,15 +234,7 @@ const main = async () => {
           sessionId: `qasper-${testCase.id}`,
         });
 
-        answer = {
-          abstained: Boolean(result?.abstained),
-          // "answer_model" when the model said the evidence does not answer;
-          // otherwise an abstention is the confidence gate's.
-          abstainSource: result?.abstained ? result.abstainSource ?? "gate" : null,
-          pages: (result?.retrievedContexts ?? []).map((context) => Number(context.pageNumber)),
-          text: result?.text,
-          verdictOverridden: result?.verdictOverridden === true,
-        };
+        answer = describeRagSurfaceAnswer(result);
       } else {
         const response = await runAgentRag({
           accessScope,
@@ -229,6 +249,9 @@ const main = async () => {
         // A clarification and the grounded abstention sentence are both
         // abstentions (agent-answer-outcome.js).
         const outcome = classifyAgentAnswer(body);
+        // The finalizer projects ragSources and rebases the answer's labels to
+        // them, so the labels resolve against ragSources as on the rag surface.
+        const sources = body.ragSources ?? body.citations ?? [];
 
         answer = {
           abstained: !outcome.answered,
@@ -236,23 +259,32 @@ const main = async () => {
           agent: { ...outcome, ...describeAgentFollowUp(body) },
           // The agent body carries its cited sources as ragSources; it has no
           // citations field, so reading that gave every agent row no pages.
-          // An abstention counts as returning no sources, as on the rag surface.
-          pages: outcome.answered
-            ? (body.ragSources ?? body.citations ?? []).map((citation) => Number(citation.pageNumber))
-            : [],
+          // An abstention counts as returning no sources. contextPages keeps
+          // the figure earlier agent reports called evidenceRecall.
+          citedPages: citedSourcePages({ abstained: !outcome.answered, citations: sources, text: body.agentAnswer }),
+          contextPages: outcome.answered ? sources.map((citation) => Number(citation.pageNumber)) : [],
           text: body.agentAnswer,
           verdictOverridden: isAgentVerdictOverridden(body),
         };
       }
 
       const prediction = toQasperPrediction(answer);
-      const expectedPages = new Set(testCase.expectedEvidence?.[0]?.pages ?? []);
+      const evidence = scoreQasperEvidence({
+        abstained: answer.abstained,
+        citedPages: answer.citedPages,
+        contextPages: answer.contextPages,
+        expectedPages: testCase.expectedEvidence?.[0]?.pages ?? [],
+        shouldAbstain: testCase.shouldAbstain,
+      });
       const row = {
         abstained: answer.abstained,
         abstainSource: answer.abstainSource ?? null,
         ...(answer.agent ?? {}),
         answerType: testCase.answerType,
-        evidenceHit: testCase.shouldAbstain ? null : answer.pages.some((page) => expectedPages.has(page)),
+        citationPrecision: evidence.citationPrecision,
+        citedEvidenceHit: evidence.citedEvidenceHit,
+        citedPages: answer.citedPages,
+        contextEvidenceHit: evidence.contextEvidenceHit,
         f1: Number(qasperAnswerF1(prediction, testCase.referenceAnswers ?? []).toFixed(4)),
         id: testCase.id,
         prediction: prediction.slice(0, 400),
@@ -263,7 +295,7 @@ const main = async () => {
 
       rows.push(row);
       console.log(
-        `${String(index + 1).padStart(3)}/${cases.length} ${row.answerType?.padEnd(11)} f1=${row.f1.toFixed(2)} abstained=${row.abstained} evidence=${row.evidenceHit}`
+        `${String(index + 1).padStart(3)}/${cases.length} ${row.answerType?.padEnd(11)} f1=${row.f1.toFixed(2)} abstained=${row.abstained} cited=${row.citedEvidenceHit} context=${row.contextEvidenceHit}`
       );
     }
   } finally {

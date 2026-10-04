@@ -19,6 +19,8 @@ import {
 } from "./citations.js";
 import { evaluateClaimSupport } from "./agent-self-check.js";
 import { normalizeGroupedSourceLabels } from "./self-check/text.js";
+import { isStructuralSectionHeading, joinWrappedLines } from "./self-check/attribution.js";
+import { hasClaimPredicate, splitAnswerStructure } from "./self-check/claims.js";
 import { completeText } from "./openai.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import {
@@ -496,6 +498,79 @@ const buildComparisonExtraCandidates = (alignment) =>
       .slice(0, Math.max(0, MAX_COMPARE_SELECTED_RESULTS_PER_DOC - 1));
   });
 
+// A line of evidence that is only a heading or a bare label ("Remote Work
+// Policy", "Eligibility:", "## Scope"): no sentence-final punctuation, no claim
+// predicate, and every word in Title Case. The fallback templates quote
+// evidence sentences, and such a line quoted on its own states nothing.
+// Chinese lines have no case and are never treated as headings here.
+// A number is a heading word only as a leading enumerator ("2. Eligibility",
+// "3.1) Scope"): a PDF table row such as "Notice Period 30 Days" reads like a
+// heading, but its number is the fact a comparison quotes.
+const BARE_HEADING_WORD_PATTERN = /^\p{Lu}[\p{L}'’/&.-]*$/u;
+const BARE_HEADING_ENUMERATOR_PATTERN = /^\d{1,3}(?:\.\d+)*[.)]$/;
+const BARE_HEADING_MINOR_WORDS = new Set([
+  "a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with",
+]);
+const MAX_BARE_HEADING_WORDS = 12;
+
+const isBareHeadingSentence = (sentence = "") => {
+  const text = normalizeWhitespace(sentence);
+
+  if (/^#{1,6}\s/.test(text) || isStructuralSectionHeading(text)) {
+    return true;
+  }
+
+  if (/[.!?。！？]$/u.test(text) || hasClaimPredicate(text)) {
+    return false;
+  }
+
+  const words = text.replace(/\s*[:：]$/u, "").split(/\s+/u).filter(Boolean);
+
+  return (
+    words.length > 0 &&
+    words.length <= MAX_BARE_HEADING_WORDS &&
+    words.some((word) => /\p{L}/u.test(word)) &&
+    words.every(
+      (word, index) =>
+        BARE_HEADING_WORD_PATTERN.test(word) ||
+        BARE_HEADING_MINOR_WORDS.has(word.toLowerCase()) ||
+        (index === 0 && BARE_HEADING_ENUMERATOR_PATTERN.test(word))
+    )
+  );
+};
+
+// joinWrappedLines joins a line that starts in lowercase onto any previous
+// line without final punctuation, a heading included ("Notice Period" / "the
+// supplier must ..."). A bare heading line is therefore kept apart before the
+// soft wraps around it are rejoined, so it is never glued onto the sentence
+// under it (nor that sentence dropped with it).
+const joinEvidenceSoftWraps = (text = "") => {
+  const blocks = [];
+  let wrappedLines = [];
+  const flush = () => {
+    if (wrappedLines.length > 0) {
+      blocks.push(joinWrappedLines(wrappedLines.join("\n")));
+      wrappedLines = [];
+    }
+  };
+
+  for (const line of String(text ?? "").split(/\n+/)) {
+    if (isBareHeadingSentence(line)) {
+      flush();
+      blocks.push(line.trim());
+    } else {
+      wrappedLines.push(line);
+    }
+  }
+
+  flush();
+  return blocks.filter(Boolean).join("\n");
+};
+
+// PDF text keeps the page layout, so a sentence wrapped across lines arrives
+// in pieces. The soft wraps are rejoined first (joinEvidenceSoftWraps keeps
+// headings, list items and "Label:" lines on their own lines), and only then
+// are bare headings dropped, so the fallback templates quote whole sentences.
 const buildDocEvidenceEntries = (bundle) => {
   const entriesByDocId = new Map();
 
@@ -514,10 +589,12 @@ const buildDocEvidenceEntries = (bundle) => {
     const entry = entriesByDocId.get(docId);
     entry.ranks.push(result.rank);
 
-    for (const sentence of splitEvidenceSentences(result.document.pageContent)) {
+    for (const sentence of splitEvidenceSentences(
+      joinEvidenceSoftWraps(result.document.pageContent)
+    )) {
       const canonical = normalizeComparableSentence(sentence);
 
-      if (!canonical) {
+      if (!canonical || isBareHeadingSentence(sentence)) {
         continue;
       }
 
@@ -710,26 +787,56 @@ const buildGroundedDifferenceAnswer = ({ analysis, bundle }) => {
   ].join("\n");
 };
 
-const isSafeStructuredDifferenceAnswer = ({ analysis, bundle, text }) => {
-  if (!/^Differences:\s*$/im.test(String(text ?? ""))) {
-    return false;
+// The Differences section is found by the claim parser the self-check uses
+// (splitAnswerStructure), not by matching one spelling, so "Differences:",
+// "## Differences", "**Differences**" and "差异：" all count and then go
+// through the same claim checks. A rejection is described by a code and
+// counts only, never by answer or evidence text, because it goes to the trace.
+const assessStructuredDifferenceAnswer = ({ analysis, bundle, text }) => {
+  const answerText = String(text ?? "");
+
+  if (!answerText.trim()) {
+    return { safe: false, reason: { code: "empty_answer" } };
+  }
+
+  const citations = attachRetrievedEvidence({
+    citations: bundle.citations ?? [],
+    retrievedContexts: bundle.retrievedContexts ?? [],
+  });
+  const { nodes } = splitAnswerStructure(answerText, citations);
+
+  if (
+    !nodes.some(
+      (node) => node.type === "heading" && node.section === "differences"
+    )
+  ) {
+    return { safe: false, reason: { code: "no_differences_section" } };
   }
 
   const claimSupport = evaluateClaimSupport({
-    answerText: text,
-    citations: attachRetrievedEvidence({
-      citations: bundle.citations,
-      retrievedContexts: bundle.retrievedContexts,
-    }),
+    answerText,
+    citations,
     comparisonAnalysisSummary: analysis,
   });
+  const claims = claimSupport.claims ?? [];
+  const counts = {
+    claimCount: claims.length,
+    differenceClaimCount: claims.filter(
+      (claim) => claim.section === "differences"
+    ).length,
+    unsupportedClaimCount: claimSupport.unsupportedClaimCount ?? 0,
+  };
 
-  if (claimSupport.checked !== true || claimSupport.unsupportedClaimCount > 0) {
-    return false;
+  if (claimSupport.checked !== true) {
+    return { safe: false, reason: { code: "claims_not_checked", ...counts } };
+  }
+
+  if (counts.unsupportedClaimCount > 0) {
+    return { safe: false, reason: { code: "unsupported_claims", ...counts } };
   }
 
   const citationByRank = new Map(
-    bundle.citations.map((citation, index) => [
+    (bundle.citations ?? []).map((citation, index) => [
       Number(citation.rank) || index + 1,
       citation,
     ])
@@ -738,7 +845,7 @@ const isSafeStructuredDifferenceAnswer = ({ analysis, bundle, text }) => {
     (bundle.citations ?? []).map((citation) => citation.docId).filter(Boolean)
   );
   const differenceDocIds = new Set(
-    claimSupport.claims
+    claims
       .filter(
         (claim) =>
           claim.supported === true && claim.section === "differences"
@@ -747,11 +854,23 @@ const isSafeStructuredDifferenceAnswer = ({ analysis, bundle, text }) => {
       .map((rank) => citationByRank.get(Number(rank))?.docId)
       .filter(Boolean)
   );
+  const coveredDocumentCount = [...selectedDocIds].filter((docId) =>
+    differenceDocIds.has(docId)
+  ).length;
 
-  return (
-    selectedDocIds.size >= 2 &&
-    [...selectedDocIds].every((docId) => differenceDocIds.has(docId))
-  );
+  if (selectedDocIds.size < 2 || coveredDocumentCount < selectedDocIds.size) {
+    return {
+      safe: false,
+      reason: {
+        code: "differences_not_bound_to_every_document",
+        ...counts,
+        documentCount: selectedDocIds.size,
+        coveredDocumentCount,
+      },
+    };
+  }
+
+  return { safe: true, reason: null };
 };
 
 const buildComparisonDiagnostics = ({ analysis, nearDuplicateGuardEnabled }) => {
@@ -1142,19 +1261,15 @@ export const writeComparisonAnswer = async ({
     { allowedText: buildAllowedLinkText({ bundle, query, resolvedQuery }) }
   );
   const text = guarded.text;
-  const generatedText =
-    text ||
-    "I couldn't produce a reliable comparison from the retrieved document evidence.";
+  const modelGate = assessStructuredDifferenceAnswer({
+    analysis,
+    bundle,
+    text,
+  });
 
-  if (
-    isSafeStructuredDifferenceAnswer({
-      analysis,
-      bundle,
-      text: generatedText,
-    })
-  ) {
+  if (modelGate.safe) {
     return {
-      text: generatedText,
+      text,
       citations: bundle.citations,
     };
   }
@@ -1163,15 +1278,21 @@ export const writeComparisonAnswer = async ({
     analysis,
     bundle,
   });
-
-  if (
-    !groundedDifferenceAnswer ||
-    !isSafeStructuredDifferenceAnswer({
+  const groundedSafe =
+    Boolean(groundedDifferenceAnswer) &&
+    assessStructuredDifferenceAnswer({
       analysis,
       bundle,
       text: groundedDifferenceAnswer,
-    })
-  ) {
+    }).safe;
+  // Why the model's answer was not used (codes and counts only); the caller
+  // moves it to the RAG trace and keeps it out of the response.
+  const modelRejectReason = {
+    ...modelGate.reason,
+    fallback: groundedSafe ? "grounded_template" : "abstained",
+  };
+
+  if (!groundedSafe) {
     const abstainReason =
       "I do not have enough citation-backed evidence to identify a concrete difference reliably.";
 
@@ -1180,11 +1301,13 @@ export const writeComparisonAnswer = async ({
       citations: bundle.citations,
       abstained: true,
       abstainReason,
+      modelRejectReason,
     };
   }
 
   return {
     text: groundedDifferenceAnswer,
     citations: bundle.citations,
+    modelRejectReason,
   };
 };

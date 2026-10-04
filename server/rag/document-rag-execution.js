@@ -692,13 +692,20 @@ const executeComparisonRag = async ({
     };
   }
 
-  const generatedAnswer = await writeComparisonAnswer({
+  const { modelRejectReason, ...generatedAnswer } = await writeComparisonAnswer({
     query,
     resolvedQuery,
     bundle,
     analysis,
     preferenceBlock,
   });
+
+  // Why the model's comparison answer was replaced (codes and counts only)
+  // goes to the trace, not into the response.
+  if (modelRejectReason) {
+    traceFields.modelRejectReason = modelRejectReason;
+  }
+
   return {
     routeMode: route.mode,
     traceFields,
