@@ -75,6 +75,17 @@ const buildDocumentContract = (document, expectedConfig = {}) => {
   };
 };
 
+// Chunking the corpus is the expensive part of ranking validation and its
+// result depends only on the documents and the config, so a report-wide
+// validation builds this map once and hands it to every case.
+const buildDocumentsByKey = (documentContracts, expectedConfig) =>
+  new Map(
+    documentContracts.map((document) => [
+      document?.key,
+      buildDocumentContract(document, expectedConfig ?? {}),
+    ])
+  );
+
 const buildIssue = ({
   actual,
   caseId = null,
@@ -1245,6 +1256,7 @@ export const validateRerankCaseRanking = (
   {
     caseContract = null,
     documentContracts = [],
+    documentsByKey: prebuiltDocumentsByKey = null,
     expectedConfig = null,
     expectedReplay = null,
   } = {}
@@ -1266,12 +1278,10 @@ export const validateRerankCaseRanking = (
       ? "per-document"
       : "global"
     : null;
-  const documentsByKey = new Map(
-    documentContracts.map((document) => [
-      document?.key,
-      buildDocumentContract(document, expectedConfig ?? {}),
-    ])
-  );
+  const documentsByKey =
+    prebuiltDocumentsByKey instanceof Map
+      ? prebuiltDocumentsByKey
+      : buildDocumentsByKey(documentContracts, expectedConfig);
 
   if (!caseId) {
     issues.push(
@@ -1698,6 +1708,9 @@ export const validateRerankReportRankings = (
   }
 
   const seenCaseIds = new Set();
+  const documentsByKey = Array.isArray(documentContracts)
+    ? buildDocumentsByKey(documentContracts, expectedConfig)
+    : null;
   const caseContractById = new Map(
     caseContracts.map((caseContract) => [caseContract?.id, caseContract])
   );
@@ -1757,6 +1770,7 @@ export const validateRerankReportRankings = (
     const result = validateRerankCaseRanking(caseResult, {
       caseContract,
       documentContracts,
+      documentsByKey,
       expectedConfig,
       expectedReplay,
     });

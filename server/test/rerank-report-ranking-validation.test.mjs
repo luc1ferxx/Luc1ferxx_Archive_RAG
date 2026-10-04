@@ -703,3 +703,74 @@ test("report replay fails closed when the authoritative config is unsupported", 
     )
   );
 });
+
+test("report validation chunks the corpus once and matches per-case validation exactly", () => {
+  const reportSpec = getRobustEvalSuiteReport("rerank-hard-cs");
+  const corpus = readEvaluationCorpus(reportSpec.corpusPath);
+  const expectedConfig = {
+    ...reportSpec.rankingConfig,
+    rerankProvider: reportSpec.rerankProvider,
+    rerankWeight: reportSpec.rerankWeight,
+  };
+  const report = buildPassingRobustRerankReport({
+    corpusPath: reportSpec.corpusPath,
+    createdAt: "2026-08-01T00:00:00.000Z",
+    reportId: reportSpec.id,
+    runId: "hard-cs-shared-chunking",
+  });
+  const forged = structuredClone(report);
+  const forgedEntry = forged.cases[0].candidateRanking?.[0] ??
+    forged.cases[0].perDocument[0].candidateRanking[0];
+
+  // A text mismatch is only caught through the chunked corpus, so the
+  // shared map must still be consulted for every case.
+  forgedEntry.text = `${forgedEntry.text} forged`;
+
+  for (const payload of [report, forged]) {
+    const result = validateRerankReportRankings(payload, {
+      caseContracts: corpus.cases,
+      documentContracts: corpus.documents,
+      expectedConfig,
+    });
+    const caseContractById = new Map(
+      corpus.cases.map((caseContract) => [caseContract.id, caseContract])
+    );
+
+    // Each case validated on its own builds its own documents map, which is
+    // what the report-wide call did per case before it shared one map.
+    payload.cases.forEach((caseResult, index) => {
+      const caseContract = caseContractById.get(caseResult.id);
+      const standalone = validateRerankCaseRanking(caseResult, {
+        caseContract,
+        documentContracts: corpus.documents,
+        expectedConfig,
+        expectedReplay: replayRerankCaseRankings({
+          caseContract,
+          config: expectedConfig,
+          documentContracts: corpus.documents,
+        }),
+      });
+
+      assert.deepEqual(result.cases[index], {
+        id: caseResult.id,
+        ...standalone,
+      });
+    });
+  }
+
+  const forgedResult = validateRerankReportRankings(forged, {
+    caseContracts: corpus.cases,
+    documentContracts: corpus.documents,
+    expectedConfig,
+  });
+
+  assert.equal(forgedResult.status, "fail");
+  assert.ok(
+    forgedResult.issues.some(
+      (issue) =>
+        issue.caseId === forged.cases[0].id &&
+        issue.reasonCode === "candidate_corpus_source_mismatch"
+    ),
+    JSON.stringify(forgedResult.issues.map((issue) => issue.reasonCode))
+  );
+});

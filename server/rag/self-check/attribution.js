@@ -13,6 +13,11 @@ import {
 } from "./patterns.js";
 import { splitModalityClauses } from "./modality.js";
 import {
+  copyArray,
+  copyObjectArray,
+  memoizeInEvidenceContext,
+} from "./evidence-context.js";
+import {
   hasNegativePolarity,
   includesNormalizedPhrase,
   normalizeEvidenceText,
@@ -54,7 +59,21 @@ export const getCitationDocumentLabels = (citations = []) =>
 const VARIANT_LABEL_PATTERN =
   /[-_\s]([a-z]|ii|iii|iv|vi|vii|viii|ix|xi|xii|alpha|beta|gamma|delta)$/i;
 
-export const getCitationDocumentAliasEntries = (citation = {}) => {
+const isAliasKeyPart = (value) =>
+  value === undefined || value === null || typeof value === "string";
+
+// The entries depend on the citation's file name and docId alone.
+export const getCitationDocumentAliasEntries = (citation = {}) =>
+  memoizeInEvidenceContext(
+    "citationDocumentAliasEntries",
+    isAliasKeyPart(citation?.fileName) && isAliasKeyPart(citation?.docId)
+      ? JSON.stringify([citation?.fileName ?? "", citation?.docId ?? ""])
+      : null,
+    () => computeCitationDocumentAliasEntries(citation),
+    copyObjectArray
+  );
+
+const computeCitationDocumentAliasEntries = (citation = {}) => {
   const fileName = normalizeEvidenceText(citation?.fileName);
   const fileNameWithoutExtension = fileName.replace(/\.[^.]+$/, "");
   const docId = normalizeEvidenceText(citation?.docId);
@@ -300,10 +319,16 @@ export const getGroupDocumentAliases = (group = {}) =>
   );
 
 const splitSupportSentences = (text = "") =>
-  text
-    .split(/(?<=[.!?。！？])\s+|\n+/g)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
+  memoizeInEvidenceContext(
+    "splitSupportSentences",
+    text,
+    () =>
+      text
+        .split(/(?<=[.!?。！？])\s+|\n+/g)
+        .map((sentence) => sentence.trim())
+        .filter(Boolean),
+    copyArray
+  );
 
 /**
  * PDF text keeps the page layout, so a sentence wrapped across lines arrives
@@ -317,7 +342,12 @@ const splitSupportSentences = (text = "") =>
  * or labelled values ("Fee: 100" / "Term: 12 months") into one sentence.
  * Scripts without case, such as Chinese, are not rejoined.
  */
-export const joinWrappedLines = (text = "") => {
+export const joinWrappedLines = (text = "") =>
+  memoizeInEvidenceContext("joinWrappedLines", text, () =>
+    computeJoinWrappedLines(text)
+  );
+
+const computeJoinWrappedLines = (text = "") => {
   const lines = String(text ?? "")
     .split(/\n+/)
     .map((line) => line.trim())
@@ -337,17 +367,23 @@ export const joinWrappedLines = (text = "") => {
 
 // Line-level sentences stay; the rejoined ones are added beside them, never in
 // their place, so a claim is checked against both readings of the layout.
+const splitCitationFieldSentences = (text = "") =>
+  memoizeInEvidenceContext(
+    "citationFieldSentences",
+    text,
+    () => [
+      ...splitSupportSentences(text),
+      ...(text.includes("\n") ? splitSupportSentences(joinWrappedLines(text)) : []),
+    ],
+    copyArray
+  );
+
 export const buildCitationSupportSentences = (citations = []) =>
   uniqueValues(
     citations.flatMap((citation) =>
-      CHECKABLE_CITATION_FIELDS.flatMap((field) => {
-        const text = String(citation?.[field] ?? "");
-
-        return [
-          ...splitSupportSentences(text),
-          ...(text.includes("\n") ? splitSupportSentences(joinWrappedLines(text)) : []),
-        ];
-      })
+      CHECKABLE_CITATION_FIELDS.flatMap((field) =>
+        splitCitationFieldSentences(String(citation?.[field] ?? ""))
+      )
     )
   );
 

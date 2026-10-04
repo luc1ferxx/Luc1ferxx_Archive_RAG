@@ -7,6 +7,11 @@ import { evaluateClaimSupport } from "./agent-self-check.js";
 import { getClaimJudgeMode } from "./config.js";
 import { judgeClaimSupport } from "./self-check/claim-judge.js";
 import {
+  createSelfCheckEvidenceContext,
+  getBoundSelfCheckEvidenceContext,
+  releaseSelfCheckEvidenceContext,
+} from "./self-check/evidence-context.js";
+import {
   projectGroundedAnswer,
   projectGroundedRankedContent,
 } from "./grounded-answer-projection.js";
@@ -413,27 +418,47 @@ export const finalizeAgentRun = async ({
   let finalizer = finalVerification.finalizer ?? null;
 
   if (!finalizer && shouldFinalizeAnswer && !finalVerification.check) {
+    // The document loop's claim-check memo travels with its result: when the
+    // answer text and evidence are the ones the loop checked, the lexical
+    // check is reused instead of run again.
+    const evidenceContext =
+      getBoundSelfCheckEvidenceContext(ragResult) ??
+      createSelfCheckEvidenceContext();
     // With RAG_CLAIM_JUDGE=llm, claims the lexical check rejects get a second
     // opinion before the finalizer removes them; verdicts the document loop
     // already obtained for the same claim and evidence come from the cache.
-    const judgedClaimSupport = getClaimJudgeMode() === "llm"
+    // Without the judge, this is the check finalizeAgentAnswer would run on
+    // the same trimmed text and evidence.
+    const finalizerClaimSupport = getClaimJudgeMode() === "llm"
       ? await judgeClaimSupport({
           citations: graphVerificationSources,
           claimSupport: evaluateClaimSupport({
             answerText: baseAgentAnswer,
             citations: graphVerificationSources,
             comparisonAnalysisSummary,
+            evidenceContext,
           }),
           comparisonAnalysisSummary,
         })
-      : null;
+      : evaluateClaimSupport({
+          answerText: String(baseAgentAnswer ?? "").trim(),
+          // finalizeAgentAnswer's evidenceCitations default to its citations.
+          citations:
+            graphVerificationSources !== undefined
+              ? graphVerificationSources
+              : ragSources,
+          comparisonAnalysisSummary,
+          evidenceContext,
+        });
+
+    releaseSelfCheckEvidenceContext(ragResult);
 
     finalizer = finalizeAgentAnswer({
       answerText: baseAgentAnswer,
       citations: ragSources,
       evidenceCitations: graphVerificationSources,
       comparisonAnalysisSummary,
-      claimSupport: judgedClaimSupport,
+      claimSupport: finalizerClaimSupport,
     });
 
     recordWorkingMemoryClaimSupport({

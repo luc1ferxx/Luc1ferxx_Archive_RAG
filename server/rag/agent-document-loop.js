@@ -16,6 +16,10 @@ import {
   buildSelfCheckSummary,
 } from "./agent-trace.js";
 import { toDependencyOutageError } from "./dependency-outage.js";
+import {
+  bindSelfCheckEvidenceContext,
+  createSelfCheckEvidenceContext,
+} from "./self-check/evidence-context.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 import {
   SKILL_EFFECTS,
@@ -126,6 +130,10 @@ export const runDocumentRagLoop = async ({
 
   let documentEvidenceClarification = null;
   let ragResult = null;
+  // One claim-check memo for this /chat: the follow-up check, the choice
+  // between the two answers, and the finalizer (through the returned result)
+  // reuse what an earlier check computed for the same text and evidence.
+  const evidenceContext = createSelfCheckEvidenceContext();
   const primaryInput = buildDocumentRagStepInput({
     docIds,
     documentRagSkill,
@@ -254,6 +262,7 @@ export const runDocumentRagLoop = async ({
   const primaryCheck = await evaluateDocumentEvidenceWithJudge({
     ragResult: primaryRagResult,
     docIds,
+    evidenceContext,
   });
 
   if (primaryBudget.ok) {
@@ -439,6 +448,7 @@ export const runDocumentRagLoop = async ({
         const followUpCheck = await evaluateDocumentEvidenceWithJudge({
           ragResult: followUpRagResult,
           docIds,
+          evidenceContext,
         });
         recordWorkingMemoryClaimSupport({
           skill: documentRagSkill,
@@ -487,6 +497,7 @@ export const runDocumentRagLoop = async ({
       }
 
       ragResult = selectBetterRagResult({
+        evidenceContext,
         primary: primaryRagResult,
         retry: followUpRagResult,
       });
@@ -504,6 +515,6 @@ export const runDocumentRagLoop = async ({
 
   return {
     documentEvidenceClarification,
-    ragResult,
+    ragResult: bindSelfCheckEvidenceContext(ragResult, evidenceContext),
   };
 };

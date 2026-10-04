@@ -36,6 +36,7 @@ jobs:
 
   server-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -73,10 +74,10 @@ jobs:
       - name: Install server dependencies
         run: npm ci
 
-      - name: Run server tests
-        run: npm test
-
-      - name: Enforce backend coverage
+      # coverage:gate runs the same test files as npm test (every
+      # test/*.test.mjs except run.test.mjs, ci-workflow.test.mjs included)
+      # and fails on any failing test, so the suite runs once here.
+      - name: Run server tests with coverage gate
         run: npm run coverage:gate
 
   quality-gate:

@@ -13,6 +13,7 @@ import {
   stripNumericValueSurfaces,
   uniqueValues,
 } from "./text.js";
+import { copyStructured, memoizeInEvidenceContext } from "./evidence-context.js";
 
 export const NUMERIC_MEASUREMENT_TERMS = new Set([
   "allowance",
@@ -424,10 +425,32 @@ const getDirectionalFrame = ({
   };
 };
 
+const getNumericOccurrenceFactsKey = (value, ignoredTerms) => {
+  if (typeof value !== "string" || !(ignoredTerms instanceof Set)) {
+    return null;
+  }
+
+  const terms = [...ignoredTerms];
+
+  return terms.every((term) => typeof term === "string")
+    ? JSON.stringify([value, terms])
+    : null;
+};
+
+// Memoised per evidence context; every caller gets its own copy, because
+// haveSameNumericOccurrences writes role terms onto the facts it receives.
 export const buildNumericOccurrenceFacts = (
   value = "",
   { ignoredTerms = new Set() } = {}
-) => {
+) =>
+  memoizeInEvidenceContext(
+    "buildNumericOccurrenceFacts",
+    getNumericOccurrenceFactsKey(value, ignoredTerms),
+    () => computeNumericOccurrenceFacts(value, ignoredTerms),
+    copyStructured
+  );
+
+const computeNumericOccurrenceFacts = (value, ignoredTerms) => {
   const text = normalizeNumericSyntax(value);
   const occurrences = extractNumericOccurrences(text);
 

@@ -124,7 +124,7 @@ test("quality gate workflow runs frontend checks in an independent root job", as
   }
 });
 
-test("quality gate workflow enforces backend route coverage", async () => {
+test("quality gate workflow runs the backend suite once, under the coverage gate", async () => {
   const workflow = await readFile(workflowPath, "utf8");
   const serverJobMatch = workflow.match(
     /\n  server-tests:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:\n|$)/
@@ -133,13 +133,82 @@ test("quality gate workflow enforces backend route coverage", async () => {
   assert.ok(serverJobMatch, "server-tests must be a top-level job");
 
   const serverJob = serverJobMatch[0];
-  const testIndex = serverJob.indexOf("run: npm test");
+  const installIndex = serverJob.indexOf("run: npm ci");
   const coverageIndex = serverJob.indexOf("run: npm run coverage:gate");
 
-  assert.ok(testIndex >= 0, "server-tests must run the backend tests");
+  assert.ok(installIndex >= 0, "server-tests must install dependencies");
   assert.ok(
-    coverageIndex > testIndex,
-    "server-tests must enforce coverage after the backend tests"
+    coverageIndex > installIndex,
+    "server-tests must run the backend tests through the coverage gate"
+  );
+  assert.equal(
+    serverJob.match(/run:\s*npm run coverage:gate/g)?.length,
+    1,
+    "the coverage gate runs once"
+  );
+  assert.doesNotMatch(
+    serverJob,
+    /run:\s*npm (run )?test\b/,
+    "npm test would run the same test files a second time"
+  );
+  assert.match(
+    serverJob,
+    /\n    timeout-minutes:\s*20\n/,
+    "server-tests must have a job-level timeout"
+  );
+});
+
+test("coverage gate discovers exactly the test files npm test runs", async () => {
+  // The workflow drops npm test because coverage:gate runs the same files.
+  // Pin both discoveries so that stays true: every test/*.test.mjs except
+  // the runner itself, read from the same directory.
+  const serverPackage = JSON.parse(await readFile(serverPackagePath, "utf8"));
+  const runner = await readFile(path.join(__dirname, "run.test.mjs"), "utf8");
+  const coverageGate = await readFile(
+    path.join(__dirname, "coverage-gate.mjs"),
+    "utf8"
+  );
+  const compact = (source) => source.replace(/\s+/g, "");
+
+  assert.equal(serverPackage.scripts.test, "node test/run.test.mjs");
+  assert.equal(serverPackage.scripts["coverage:gate"], "node test/coverage-gate.mjs");
+
+  assert.ok(compact(runner).includes("readdir(__dirname,"));
+  assert.ok(
+    compact(runner).includes(
+      '.filter((fileName)=>fileName.endsWith(".test.mjs")&&fileName!=="run.test.mjs")'
+    ),
+    "npm test runs every *.test.mjs except run.test.mjs"
+  );
+
+  assert.ok(
+    compact(coverageGate).includes(
+      'consttestDirectory=path.join(serverDirectory,"test");'
+    )
+  );
+  assert.ok(
+    compact(coverageGate).includes(
+      'constserverDirectory=path.join(__dirname,"..");'
+    )
+  );
+  assert.ok(compact(coverageGate).includes("readdir(testDirectory,"));
+  assert.ok(
+    compact(coverageGate).includes(
+      'constTEST_FILE_EXCLUDES=newSet(["run.test.mjs",]);'
+    ),
+    "the coverage gate excludes only the runner"
+  );
+  assert.ok(
+    compact(coverageGate).includes(
+      'fileName.endsWith(".test.mjs")&&!TEST_FILE_EXCLUDES.has(fileName)'
+    ),
+    "the coverage gate runs every *.test.mjs not excluded"
+  );
+  assert.ok(
+    compact(coverageGate).includes(
+      "if(coverageResult.exitCode!==0){"
+    ),
+    "a failing test must fail the coverage gate"
   );
 });
 
@@ -158,7 +227,7 @@ test("quality gate workflow regenerates and validates current-commit evidence", 
   assert.match(workflow, /\n  server-tests:\n/);
   assert.match(
     workflow,
-    /server-tests:[\s\S]*run:\s*npm test[\s\S]*quality-gate:/,
+    /server-tests:[\s\S]*run:\s*npm run coverage:gate[\s\S]*quality-gate:/,
     "server tests must run as a parallel job, not a quality-gate step"
   );
   assert.doesNotMatch(

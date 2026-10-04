@@ -1607,7 +1607,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 | `/chat`，模型 800 ms | p50 836 ms，1.2 req/s | p50 1607 ms，9.87 req/s，在途峰值 8 | p50 3213 ms，9.86 req/s，在途峰值 8 |
 | `GET /documents` | p50 0.1 ms，6,500 req/s | 13,244 req/s | p95 2.7 ms，13,350 req/s |
 
-- **模型 0 ms**：吞吐停在约 91 req/s（local 约 108）。每个请求约 12–13 ms 的应用 CPU，单个事件循环就是瓶颈。要更高吞吐得开多进程或多实例。
+- **模型 0 ms**：吞吐停在约 91 req/s（local 约 108）。每个请求约 12–13 ms 的应用 CPU（2026-10-04 claim 检查 memo 之后约 5 ms，吞吐约 240–258 req/s，见"Claim 检查 memo"），单个事件循环就是瓶颈。要更高吞吐得开多进程或多实例。
 - **模型 800 ms**：并发 16 以上时在途峰值正好是 8，也就是 `RAG_LLM_MAX_CONCURRENCY`，吞吐约 8 / 0.8 s = 10 req/s，其余请求在上限后面排队。模型并发上限决定容量。
 - **`GET /documents`**：上表是多实例改动之前测的，当时两种存储都只读进程内注册表。现在 pgvector 下注册表以 PostgreSQL 为准（其他实例和入库 worker 也会写），每个请求和每个 `POST /chat` 的开头先按租户重读一次 documents 表，同一租户的并发请求共用一次查询。2026-09-26 重测（单实例、无租户）：pgvector 并发 1 约 2,800 req/s（每请求 1 次查询），并发 32 约 12,500 req/s、p95 3.1 ms（每请求约 0.08 次查询）；local 并发 32 约 13,900 req/s。
 - **查询 embedding 缓存**：80 个问题循环使用，第一轮之后查询 embedding 全部命中缓存，所以表里的 `/chat` 吞吐不含查询 embedding 的成本。
@@ -1840,6 +1840,35 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 - 第一次测量发现缺陷：被截止时间取消的模型调用被熔断器记成失败，5 次后熔断打开，234 次运行里 226 次直接 503。修复后（取消既不算失败也不算成功）复测：234 次全部以 `deadline_exceeded` 结束，504，0 次 503；失败延迟 p50 309 ms（并发 4）/ 322 ms（并发 16）；模型调用被应用中止 64 / 94 次（并发 16 时其余请求还在等模型槽位就到点了），排空后在途 0。
 
+### Claim 检查 memo（2026-10-04）
+
+改动：`evaluateClaimSupport` 在一次调用内按精确输入缓存引用拆句、别名、数字归一化等纯函数的结果；一次 `/chat` 内的 primary、follow-up、两个答案的比较和 finalizer 共用一个 context，相同文本和证据的检查只算一次（没有 follow-up 时 2 次调用算 1 次，有 follow-up 时 5 次调用算 2 次）。另外，`normalizeUnicodeDecimalDigits` 遇到不含阿拉伯-印度、天城文、孟加拉数字的字符串直接返回原值。范围和禁止缓存的内容见 AGENTS.md "Claim-check memo"。
+
+判定规则在测量前写好：同一并发下，3 次重复的应用 CPU ms/请求区间不重叠，才算更快；吞吐只有区间不重叠才说更高；p50/p95 只报告。
+
+命令（两边相同；改前在 `git archive HEAD` 的副本里跑，`server/node_modules` 用符号链接）：
+
+```bash
+cd server
+bash scripts/run-load-test-pgvector.sh --storage pgvector --tenant --model-latency-ms 0 \
+  --concurrency 1,16,32 --repeat 3 --latest-name latest-load-test-memo-before   # 改后用 latest-load-test-memo-after
+```
+
+单体，pgvector，行级安全，确定性规划器，假模型 0 ms，20 篇文档、80 个分块。每档 128 个请求（并发 32 为 256 个），每档 3 次，写 min–max。全部 0 错误，两边每个回答都是 document 模式且带引用：
+
+| 并发 | 应用 CPU ms/请求（前 → 后） | 吞吐 req/s（前 → 后） | p50 ms（前 → 后） | p95 ms（前 → 后） | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 12.03–13.35 → 5.11–5.78 | 63.5–71.4 → 110.3–138.6 | 13.1–15.9 → 7.1–8.3 | 17.3–22.1 → 7.9–9.2 | 更快；吞吐更高 |
+| 16 | 12.22–13.65 → 4.98–5.77 | 82.1–91.0 → 226.3–230.0 | 177.8–194.9 → 72.6–72.8 | 201.2–224.4 → 79.0–81.9 | 更快；吞吐更高 |
+| 32 | 11.74–13.52 → 4.64–4.91 | 82.6–93.8 → 239.4–257.7 | 358.9–380.4 → 129.3–138.5 | 393.9–412.7 → 138.7–147.6 | 更快；吞吐更高 |
+
+- **判定**：三个并发档的 CPU 区间和吞吐区间都不重叠，按事先定的规则算更快、吞吐更高。并发 32 时吞吐约 2.6 倍。
+- **没变的部分**：每个请求的数据库查询（约 21–22 次）、PostgreSQL 每请求 CPU（3.5–4.5 ms）、每请求 1 次 chat 调用，前后相同。省下的是 agent 事件循环里的 claim 检查。上面"API 压测"一节里"每个请求约 12–13 ms 的应用 CPU"是这次改动之前的数字。
+- **拆开看**：在改后的副本里只关掉数字快速路径，再跑一次（并发 1 和 32，各 3 次）：CPU 6.05–6.94 / 5.04–5.11 ms/请求。所以大部分（约 12.8 → 5–7 ms）来自 memo，快速路径再省约 0.3–1 ms。
+- **拆分部署，只测了改后，作背景参考**（`--topology split --tenant`，并发 1 和 32，各 3 次）：agent 层每请求 4.3–6.3 ms，占总 CPU 的 62–67%（2026-09-30 那组是 84%，不是配对测量）；并发 32 时吞吐 232.5–273.1 req/s，`model.directCalls` 为 0。agent 仍是最忙的一层。
+- **结果不变**：`eval:trajectory`（19/19 个 case，84/84 项检查）以及确定性 provider 下 near-duplicate 和 compare-hard 的 `eval:synthetic` 报告，改前改后逐行相同。唯一的差别是 UUID、时间戳和耗时字段，比较前把这些字段遮掉。这些评测用 `VECTOR_STORE_PROVIDER=local` 跑，memo 在检索之后，与存储无关。`test/self-check-memo.test.mjs` 把 claim-support 和答案草稿各套件里的每一次检查，与关闭 memo 的结果做 `deepStrictEqual` 比较。
+- **可比性**：Apple M5 Pro，测量期间主机有约 2 核的后台负载。压测器、假模型和应用在同一台机器上运行，只和同一台机器的结果比较。报告：`evaluation/results/latest-load-test-memo-{before,after,nofastpath,split-after}.*`（已忽略）。
+
 ## Ragas supplement
 
 `ragas` 不替代自定义 compare harness，但适合补充观察语义相关性和 grounding：
@@ -1853,15 +1882,14 @@ npm run eval:ragas -- --input evaluation/results/latest.json
 
 ## CI quality gate
 
-GitHub Actions 的 `Quality Gate` workflow 会在 PR 和 `main` push 时执行：
+GitHub Actions 的 `Quality Gate` workflow 会在 PR 和 `main` push 时执行三个并行的 job：`frontend-checks`（前端测试和构建）、`server-tests` 和 `quality-gate`。`server-tests`（`timeout-minutes: 20`，带 pgvector 服务）只跑一遍后端测试：`cd server && npm run coverage:gate`。它和 `npm test` 发现的是同一组文件（`server/test/*.test.mjs`，排除 `run.test.mjs`），任何测试失败都会让门禁失败，所以 workflow 契约测试仍然会跑；`ci-workflow.test.mjs` 钉住了这一点。gate 会把测试的 stdout 缓冲到结束才输出，所以 CI 日志里要等全部测试跑完才看得到测试输出。`quality-gate` job 依次执行：
 
-1. `cd server && npm test`
-2. 用 near-duplicate corpus 和 deterministic provider 生成独立 `latest-quality.*`
-3. `npm run eval:trajectory`
-4. `npm run eval:planner -- --provider mock`
-5. `npm run eval:recovery-observability`
-6. `npm run eval:feedback`
-7. `npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA"`
+1. 用 near-duplicate corpus 和 deterministic provider 生成独立 `latest-quality.*`
+2. `npm run eval:trajectory`
+3. `npm run eval:planner -- --provider mock`
+4. `npm run eval:recovery-observability`
+5. `npm run eval:feedback`
+6. `npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA"`
 
 PR/main Quality Gate 只消费 deterministic/mock provider，不读取 `OPENAI_API_KEY`，因此无效密钥、限流或外部模型抖动不会让普通代码提交失败。真实 provider 由独立的 `Planner Real Provider Gate` 和每周 `Release Evidence Gate` 强制验证。eval producer 和 current gate 都使用 `!cancelled()`，因此单个 producer 失败后仍会运行其余诊断；job 保持失败，最后通过 `always()` 上传原始 latest reports 与 `latest-current-quality-gate.*`。workflow 不再把兼容命令 `quality:gate` 的历史 PASS 当作 PR current 证据。
 

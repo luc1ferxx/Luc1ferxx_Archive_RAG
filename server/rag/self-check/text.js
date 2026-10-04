@@ -13,6 +13,11 @@ import {
   SOURCE_LABEL_PATTERN,
   SOURCE_LABEL_CAPTURE_PATTERN,
 } from "./patterns.js";
+import {
+  copyArray,
+  copyObjectArray,
+  memoizeInEvidenceContext,
+} from "./evidence-context.js";
 
 const UNICODE_DECIMAL_DIGIT_BASES = [
   0x0660,
@@ -21,8 +26,23 @@ const UNICODE_DECIMAL_DIGIT_BASES = [
   0x09e6,
 ];
 
-const normalizeUnicodeDecimalDigits = (value = "") =>
-  [...value].map((character) => {
+const UNICODE_DECIMAL_DIGIT_PATTERN = new RegExp(
+  `[${UNICODE_DECIMAL_DIGIT_BASES.map(
+    (base) =>
+      `\\u${base.toString(16).padStart(4, "0")}-\\u${(base + 9)
+        .toString(16)
+        .padStart(4, "0")}`
+  ).join("")}]`
+);
+
+// A string without any of these digits comes back unchanged, so it skips the
+// per-character pass.
+const normalizeUnicodeDecimalDigits = (value = "") => {
+  if (!UNICODE_DECIMAL_DIGIT_PATTERN.test(value)) {
+    return value;
+  }
+
+  return [...value].map((character) => {
     const codePoint = character.codePointAt(0);
     const base = UNICODE_DECIMAL_DIGIT_BASES.find(
       (candidate) => codePoint >= candidate && codePoint <= candidate + 9
@@ -30,6 +50,7 @@ const normalizeUnicodeDecimalDigits = (value = "") =>
 
     return base === undefined ? character : String(codePoint - base);
   }).join("");
+};
 
 export const normalizeSemanticText = (value = "") =>
   normalizeUnicodeDecimalDigits(String(value ?? "").normalize("NFKC"))
@@ -272,11 +293,17 @@ export const normalizeReportiveWrappersForTokens = (value = "") =>
   );
 
 export const extractOrderedFactTerms = (value = "") =>
-  extractMeaningfulTokens(
-    normalizeReportiveWrappersForTokens(
-      normalizeDottedAbbreviationsForTokens(normalizeSemanticText(value))
-    )
-  ).map(canonicalizeFactTerm);
+  memoizeInEvidenceContext(
+    "extractOrderedFactTerms",
+    value,
+    () =>
+      extractMeaningfulTokens(
+        normalizeReportiveWrappersForTokens(
+          normalizeDottedAbbreviationsForTokens(normalizeSemanticText(value))
+        )
+      ).map(canonicalizeFactTerm),
+    copyArray
+  );
 
 export const extractFactTerms = (value = "") =>
   uniqueValues(extractOrderedFactTerms(value));
@@ -321,7 +348,14 @@ export const collapseParenthesizedNumberRestatements = (value = "") =>
     }
   );
 
-export const normalizeNumericSyntax = (value = "") => {
+// Memoised by exact input only: the function is not idempotent, and callers
+// that run it on its own output keep that second pass.
+export const normalizeNumericSyntax = (value = "") =>
+  memoizeInEvidenceContext("normalizeNumericSyntax", value, () =>
+    computeNormalizeNumericSyntax(value)
+  );
+
+const computeNormalizeNumericSyntax = (value = "") => {
   const normalizedSigns = collapseParenthesizedNumberRestatements(
     normalizeSemanticText(value)
   )
@@ -559,7 +593,15 @@ export const normalizeNumericConstraint = (value = "") => {
   return compact;
 };
 
-const extractNumericConstraintOccurrences = (value = "") => {
+const extractNumericConstraintOccurrences = (value = "") =>
+  memoizeInEvidenceContext(
+    "extractNumericConstraintOccurrences",
+    value,
+    () => computeNumericConstraintOccurrences(value),
+    copyObjectArray
+  );
+
+const computeNumericConstraintOccurrences = (value = "") => {
   const normalizedText = normalizeNumericSyntax(value);
   DATE_PATTERN.lastIndex = 0;
   const dateSpans = [...normalizedText.matchAll(DATE_PATTERN)].map((match) => ({
@@ -627,7 +669,21 @@ const UNPARSED_NUMERIC_PREFIX_HINT_PATTERN =
 const UNPARSED_NUMERIC_SUFFIX_HINT_PATTERN =
   /^\s*(?:(?:[a-z]+\s+){0,3}(?:(?:or|and)\s+(?:above|below|fewer|greater|higher|less|longer|lower|more|over)|at\s+least|at\s+most|no\s+(?:fewer|more)\s+than|about|approx(?:imately)?|around|circa|max(?:imum)?|min(?:imum)?|only|roughly|tops?)\b|(?:个?工作日|天|日|周|月|年|小时|分钟|个|人|次|项|元|席|页)?\s*(?:及|或)?(?:以上|以下|以内|左右|内|起))/i;
 
-export const extractNumericOccurrences = (value = "") => {
+const copyNumericOccurrences = (occurrences) =>
+  occurrences.map((occurrence) => ({
+    ...occurrence,
+    values: [...occurrence.values],
+  }));
+
+export const extractNumericOccurrences = (value = "") =>
+  memoizeInEvidenceContext(
+    "extractNumericOccurrences",
+    value,
+    () => computeNumericOccurrences(value),
+    copyNumericOccurrences
+  );
+
+const computeNumericOccurrences = (value = "") => {
   const normalizedText = normalizeNumericSyntax(value);
   const constraints = extractNumericConstraintOccurrences(normalizedText);
   DATE_PATTERN.lastIndex = 0;

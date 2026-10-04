@@ -29,19 +29,83 @@ import {
   uniqueValues,
 } from "./text.js";
 import { buildEvidenceGaps } from "./gaps.js";
+import {
+  buildClaimSupportContentKey,
+  copyStructured,
+  createSelfCheckEvidenceContext,
+  getActiveSelfCheckEvidenceContext,
+  isSelfCheckEvidenceContext,
+  memoizeInEvidenceContext,
+  notifyClaimSupportObserver,
+  runWithSelfCheckEvidenceContext,
+} from "./evidence-context.js";
 
+/**
+ * `evidenceContext` (self-check/evidence-context.js) shares exact memos across
+ * calls that belong to one /chat; without one, each call gets its own. With
+ * the same content key (answer text, citations with their evidence, comparison
+ * summary, flags) a context returns a copy of the earlier result.
+ */
 export const evaluateClaimSupport = ({
   answerText = "",
   citations = [],
   comparisonAnalysisSummary = null,
+  evidenceContext = null,
 } = {}) => {
-  // RAG_CLAIM_SOURCE_INHERITANCE and RAG_CLAIM_INFLECTION apply to answers
-  // that are not comparisons; a comparison answer is checked as before.
-  const comparisonAnswer = Boolean(comparisonAnalysisSummary);
-  const inflection = !comparisonAnswer && isClaimInflectionEnabled();
-  const headingContext = !comparisonAnswer && isClaimHeadingContextEnabled();
+  const context = isSelfCheckEvidenceContext(evidenceContext)
+    ? evidenceContext
+    : getActiveSelfCheckEvidenceContext() ?? createSelfCheckEvidenceContext();
+  const result = runWithSelfCheckEvidenceContext(context, () => {
+    // RAG_CLAIM_SOURCE_INHERITANCE and RAG_CLAIM_INFLECTION apply to answers
+    // that are not comparisons; a comparison answer is checked as before.
+    const comparisonAnswer = Boolean(comparisonAnalysisSummary);
+    const inflection = !comparisonAnswer && isClaimInflectionEnabled();
+    const headingContext = !comparisonAnswer && isClaimHeadingContextEnabled();
+    const inheritSourceLabels =
+      !comparisonAnswer && isClaimSourceInheritanceEnabled();
+    const contentKey = context.enabled
+      ? buildClaimSupportContentKey({
+          answerText,
+          citations,
+          comparisonAnalysisSummary,
+          flags: [inflection, headingContext, inheritSourceLabels],
+        })
+      : null;
+
+    return memoizeInEvidenceContext(
+      "claimSupport",
+      contentKey,
+      () =>
+        computeClaimSupport({
+          answerText,
+          citations,
+          comparisonAnalysisSummary,
+          headingContext,
+          inflection,
+          inheritSourceLabels,
+        }),
+      copyStructured
+    );
+  });
+
+  notifyClaimSupportObserver(
+    { answerText, citations, comparisonAnalysisSummary, evidenceContext },
+    result
+  );
+
+  return result;
+};
+
+const computeClaimSupport = ({
+  answerText,
+  citations,
+  comparisonAnalysisSummary,
+  headingContext,
+  inflection,
+  inheritSourceLabels,
+}) => {
   const claims = splitAnswerClaims(answerText, citations, {
-    inheritSourceLabels: !comparisonAnswer && isClaimSourceInheritanceEnabled(),
+    inheritSourceLabels,
   });
   const citationRankEntries = citations.map((citation, index) => {
     const explicitRank = Number(citation?.rank);
@@ -306,6 +370,7 @@ export const evaluateAnswerEvidence = ({
     `${claimCount} answer claim${claimCount === 1 ? "" : "s"} lacks citation support.`,
   // Precomputed support, e.g. after the claim judge; evaluated here otherwise.
   claimSupport: precomputedClaimSupport = null,
+  evidenceContext = null,
 } = {}) => {
   const safeCitations = Array.isArray(citations) ? citations : [];
   const safeDocIds = Array.isArray(docIds) ? docIds : [];
@@ -318,6 +383,7 @@ export const evaluateAnswerEvidence = ({
         answerText,
         citations: safeCitations,
         comparisonAnalysisSummary,
+        evidenceContext,
       })
   );
   const answerCitations = filterCitationsToSourceRanks({
@@ -369,7 +435,7 @@ export const evaluateAnswerEvidence = ({
   };
 };
 
-const getEvidenceScore = (ragResult) => {
+const getEvidenceScore = (ragResult, evidenceContext = null) => {
   if (!ragResult?.ok) {
     return -1;
   }
@@ -385,6 +451,7 @@ const getEvidenceScore = (ragResult) => {
     answerText: value.text,
     citations,
     comparisonAnalysisSummary: value.comparisonAnalysisSummary,
+    evidenceContext,
   });
 
   return (
@@ -396,7 +463,7 @@ const getEvidenceScore = (ragResult) => {
   );
 };
 
-export const selectBetterRagResult = ({ primary, retry } = {}) => {
+export const selectBetterRagResult = ({ primary, retry, evidenceContext = null } = {}) => {
   if (!retry?.ok) {
     return primary;
   }
@@ -405,10 +472,18 @@ export const selectBetterRagResult = ({ primary, retry } = {}) => {
     return retry;
   }
 
-  return getEvidenceScore(retry) > getEvidenceScore(primary) ? retry : primary;
+  return getEvidenceScore(retry, evidenceContext) >
+    getEvidenceScore(primary, evidenceContext)
+    ? retry
+    : primary;
 };
 
-export const evaluateDocumentEvidence = ({ ragResult, docIds = [], claimSupport = null } = {}) => {
+export const evaluateDocumentEvidence = ({
+  ragResult,
+  docIds = [],
+  claimSupport = null,
+  evidenceContext = null,
+} = {}) => {
   if (!ragResult?.ok) {
     return {
       passed: false,
@@ -441,6 +516,7 @@ export const evaluateDocumentEvidence = ({ ragResult, docIds = [], claimSupport 
     comparisonAnalysisSummary: value.comparisonAnalysisSummary,
     docIds,
     emptyAnswerReason: "Document answer is empty.",
+    evidenceContext,
     initialReasons: value.abstained
       ? ["Document RAG explicitly reported insufficient evidence."]
       : [],
@@ -461,9 +537,13 @@ export const evaluateDocumentEvidence = ({ ragResult, docIds = [], claimSupport 
  * rejects get a second opinion (self-check/claim-judge.js). With the judge off
  * this is exactly evaluateDocumentEvidence.
  */
-export const evaluateDocumentEvidenceWithJudge = async ({ ragResult, docIds = [] } = {}) => {
+export const evaluateDocumentEvidenceWithJudge = async ({
+  ragResult,
+  docIds = [],
+  evidenceContext = null,
+} = {}) => {
   if (getClaimJudgeMode() !== "llm" || !ragResult?.ok) {
-    return evaluateDocumentEvidence({ docIds, ragResult });
+    return evaluateDocumentEvidence({ docIds, evidenceContext, ragResult });
   }
 
   const value = ragResult.value ?? {};
@@ -477,10 +557,11 @@ export const evaluateDocumentEvidenceWithJudge = async ({ ragResult, docIds = []
       answerText: value.text,
       citations,
       comparisonAnalysisSummary: value.comparisonAnalysisSummary,
+      evidenceContext,
     }),
     comparisonAnalysisSummary: value.comparisonAnalysisSummary,
   });
 
-  return evaluateDocumentEvidence({ claimSupport, docIds, ragResult });
+  return evaluateDocumentEvidence({ claimSupport, docIds, evidenceContext, ragResult });
 };
 
