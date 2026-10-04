@@ -675,6 +675,20 @@ test("tiers start in dependency order and drain before docker stops them", async
   }
 });
 
+// The monolith (server.js, role all) drains the same window and then gives its
+// finalizers 3 s (SHUTDOWN_FINALIZER_MARGIN_MS) before it exits anyway, so the
+// one-click app service must wait longer than both before docker's SIGKILL.
+test("the one-click app service outlasts the monolith's drain and finalizers", async (t) => {
+  const compose = await readText(composePath);
+
+  withEnvironment(t, { SERVICE_SHUTDOWN_GRACE_MS: "" });
+
+  const seconds = Number(serviceText(compose, "app").match(/^\s{4}stop_grace_period:\s*(\d+)s\s*$/m)?.[1]);
+
+  assert.ok(Number.isFinite(seconds), "the app service sets stop_grace_period in seconds");
+  assert.ok(seconds * 1000 > getServiceShutdownGraceMs() + 3_000, "app outlasts the drain window and the finalizers");
+});
+
 test("each role has a start script through the image's entry point", async () => {
   const packageJson = JSON.parse(await readText(serverPackagePath));
 

@@ -123,8 +123,10 @@ const buildOverlapParagraphs = (paragraphs, overlapSize) => {
   return overlap;
 };
 
-const buildChunkText = (sectionHeading, paragraphs) =>
-  sectionHeading ? [sectionHeading, ...paragraphs].join("\n\n") : paragraphs.join("\n\n");
+const buildChunkText = (sectionHeading, paragraphs, leadingParagraphs = []) =>
+  [...leadingParagraphs, ...(sectionHeading ? [sectionHeading] : []), ...paragraphs].join(
+    "\n\n"
+  );
 
 const buildChunkRecord = ({
   docId,
@@ -228,40 +230,104 @@ const chunkPageWithStructure = ({
 
   const chunks = [];
   let currentHeading = null;
+  // Heading-like lines that were followed directly by another heading-like
+  // line (table rows, "Label:" lead-ins, a chapter title above a section
+  // title). They stay in reading order in front of the heading in force, so
+  // the chunk keeps that heading as its sectionHeading while their text is
+  // still indexed.
+  let leading = [];
   let buffer = [];
   let chunkIndex = startingChunkIndex;
+  // The parts of the last chunk this page emitted, so trailing heading-like
+  // lines at the end of the page can be appended to it.
+  let lastChunk = null;
+
+  const pushChunk = ({ heading, leadingParagraphs, paragraphs }) => {
+    const record = buildChunkRecord({
+      docId,
+      fileName,
+      publicFilePath,
+      pageNumber: page.pageNumber,
+      chunkIndex,
+      pageContent: buildChunkText(heading, paragraphs, leadingParagraphs),
+      sectionHeading: heading,
+      source,
+    });
+
+    chunks.push(record);
+    lastChunk = {
+      record,
+      heading,
+      leadingParagraphs: [...leadingParagraphs],
+      paragraphs: [...paragraphs],
+    };
+    chunkIndex += 1;
+  };
 
   const flushBuffer = () => {
     if (buffer.length === 0) {
       return;
     }
 
-    chunks.push(
-      buildChunkRecord({
-        docId,
-        fileName,
-        publicFilePath,
-        pageNumber: page.pageNumber,
-        chunkIndex,
-        pageContent: buildChunkText(currentHeading, buffer),
-        sectionHeading: currentHeading,
-        source,
-      })
-    );
+    pushChunk({
+      heading: currentHeading,
+      leadingParagraphs: leading,
+      paragraphs: buffer,
+    });
+    leading = [];
+  };
 
-    chunkIndex += 1;
+  // Emits the heading in force (and the heading-like lines kept in front of
+  // it) as a chunk of its own, for when they cannot share a chunk with body
+  // text without exceeding the chunk size.
+  const flushHeadingOnly = () => {
+    if (currentHeading === null && leading.length === 0) {
+      return;
+    }
+
+    pushChunk({
+      heading: currentHeading,
+      leadingParagraphs: leading,
+      paragraphs: [],
+    });
+    leading = [];
   };
 
   for (const paragraph of rawParagraphs) {
     if (isLikelyHeading(paragraph)) {
-      flushBuffer();
-      buffer = [];
+      if (buffer.length > 0) {
+        flushBuffer();
+        buffer = [];
+      } else if (currentHeading !== null) {
+        // The heading in force had no body text before this heading replaced
+        // it: keep its text instead of dropping it.
+        const kept = [...leading, currentHeading];
+
+        if (getParagraphLength([...kept, paragraph]) > chunkSize) {
+          flushHeadingOnly();
+        } else {
+          leading = kept;
+        }
+      }
+
       currentHeading = paragraph;
       continue;
     }
 
+    if (
+      buffer.length === 0 &&
+      leading.length > 0 &&
+      getParagraphLength([...leading, paragraph]) > chunkSize
+    ) {
+      // The kept heading-like lines and this paragraph do not fit together;
+      // the body chunk then looks exactly as it would without them.
+      flushHeadingOnly();
+    }
+
     const nextLength =
-      getParagraphLength(buffer) + paragraph.length + (buffer.length > 0 ? 2 : 0);
+      getParagraphLength([...leading, ...buffer]) +
+      paragraph.length +
+      (leading.length + buffer.length > 0 ? 2 : 0);
 
     if (buffer.length > 0 && nextLength > chunkSize) {
       const overlap = buildOverlapParagraphs(buffer, chunkOverlap);
@@ -273,7 +339,36 @@ const chunkPageWithStructure = ({
     buffer.push(paragraph);
   }
 
-  flushBuffer();
+  if (buffer.length > 0) {
+    flushBuffer();
+  } else if (currentHeading !== null) {
+    // Heading-like lines at the end of the page with no body after them on
+    // this page. A heading never carries over to the next page, so they are
+    // appended to this page's last chunk when they fit, or become a chunk of
+    // their own.
+    const trailing = [...leading, currentHeading];
+    const previousLength = lastChunk
+      ? getParagraphLength([
+          ...lastChunk.leadingParagraphs,
+          ...lastChunk.paragraphs,
+        ])
+      : 0;
+
+    if (
+      lastChunk &&
+      previousLength + 2 + getParagraphLength(trailing) <= chunkSize
+    ) {
+      lastChunk.paragraphs.push(...trailing);
+      lastChunk.record.pageContent = buildChunkText(
+        lastChunk.heading,
+        lastChunk.paragraphs,
+        lastChunk.leadingParagraphs
+      );
+      leading = [];
+    } else {
+      flushHeadingOnly();
+    }
+  }
 
   return {
     chunks,
@@ -334,3 +429,60 @@ export const chunkDocument = (input) =>
     chunkOverlap: getChunkOverlap(),
     chunkStrategy: getChunkStrategy(),
   });
+
+const tokenizeText = (value) => String(value ?? "").split(/\s+/).filter(Boolean);
+
+// Only the first and last token of a chunk or of one of its paragraphs can be
+// a piece of a longer token: a fixed window or an oversized-paragraph slice
+// cuts there.
+const collectBoundaryTokens = (pageContent) =>
+  [pageContent, ...String(pageContent ?? "").split(/\n{2,}/)].flatMap((part) => {
+    const tokens = tokenizeText(part);
+
+    return tokens.length > 0 ? [tokens[0], tokens.at(-1)] : [];
+  });
+
+const isTokenCoveredByPieces = (token, pieces) => {
+  // A token longer than one chunk, or cut by a fixed window, is split across
+  // chunks (the pieces may overlap); it counts as indexed when the pieces
+  // cover every character of it.
+  const covered = new Array(token.length).fill(false);
+
+  for (const piece of pieces) {
+    for (
+      let position = token.indexOf(piece);
+      position !== -1;
+      position = token.indexOf(piece, position + 1)
+    ) {
+      covered.fill(true, position, position + piece.length);
+    }
+  }
+
+  return covered.every(Boolean);
+};
+
+// Lists the non-whitespace character sequences of a page's text that no chunk
+// of that page contains, in page order. An empty list means every character of
+// the page reached the index.
+export const findUnindexedPageText = (page, chunks = []) => {
+  const pageChunks = chunks.filter(
+    (chunk) => chunk?.metadata?.pageNumber === page?.pageNumber
+  );
+  const chunkTokens = new Set(
+    pageChunks.flatMap((chunk) => tokenizeText(chunk?.pageContent))
+  );
+  const pieces = [
+    ...new Set(pageChunks.flatMap((chunk) => collectBoundaryTokens(chunk?.pageContent))),
+  ];
+  const unindexed = [];
+
+  for (const token of tokenizeText(normalizeWhitespace(String(page?.text ?? "")))) {
+    if (chunkTokens.has(token) || isTokenCoveredByPieces(token, pieces)) {
+      continue;
+    }
+
+    unindexed.push(token);
+  }
+
+  return unindexed;
+};

@@ -173,6 +173,40 @@ npm run eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json
 
 默认报告写入 `server/evaluation/results/latest.json` 和 `.md`。Synthetic corpus 必须声明稳定的顶层 `id` 和 `version`，且每个 document `key` 唯一；runner 用三者生成确定性 document ID，门禁才能把 raw citation/context 精确绑定回受版本控制的 corpus，而不是信任报告自报的来源标识。
 
+### 切块丢字：改前 / 改后（2026-10-04）
+
+这是丢字修复，不是检索优化。测量前写下的成功标准是：55 个本地 PDF 上没进任何 chunk 的非空白字符降到 0，剩下的逐个解释。这些数字不说明检索或答案变好了。
+
+- 数据：`server/evaluation/generated/qasper-pdfs/` 的 30 篇 QASPER arXiv 论文，加上 25 个合成评测 PDF，共 336 页。
+- 解析：`loadPdfPages`，pdf.js 默认设置，两边用同一份页面文本。
+- 切块：入库路径的 `chunkDocumentPages`（`rag/index.js`），structured / 900 / 180。改前是 `git archive HEAD`（9a988c6f）的副本，改后是工作区。
+- 主口径：逐页对齐。把页面按切块器自己的段落单元（`splitParagraphs` 和 `splitOversizedParagraph`）拆开，按阅读顺序和 chunk 里的段落一一对上，统计没对上的单元。
+- 辅助口径：`findUnindexedPageText`。它只看 token 在不在本页某个 chunk 里，所以数字更小。
+
+| 指标 | 改前 | 改后 |
+| --- | ---: | ---: |
+| 页面总字符（含空白） | 1,017,364 | 1,017,364 |
+| 非空白字符 | 859,089 | 859,089 |
+| 未进任何 chunk 的段落单元 | 612（全部是 `isLikelyHeading` 判成标题的行） | 0 |
+| 未进任何 chunk 的非空白字符 | 7,866 | 0 |
+| 有丢字的页 / 文档 | 119 / 28 | 0 / 0 |
+| `findUnindexedPageText` 报告的 token（字符） | 1,190（5,801） | 0（0） |
+| chunk 数 | 2,551 | 2,557 |
+| 最长 chunk（字符） | 975 | 975 |
+
+- 丢掉的是表格行、"Label:" 引导句，以及页尾或连续出现的标题样式行。旧切块器在一个标题被下一个标题替换、或标题在页尾时，会直接扔掉它。
+- 改后没有剩余情况需要解释。
+
+确定性评测（`VECTOR_STORE_PROVIDER=local`，`--openai-provider deterministic`，改前和改后各跑一次，都在临时数据目录）：
+
+- near-duplicate：8/8 通过，两边一致。
+- compare-hard：8/8 通过，两边一致。
+- trajectory：19 个用例、84 项检查全部通过，两边一致。
+
+两边报告只差耗时、随机文件 id、run id 和时间戳。答案、引用、各项指标完全相同，因为 7 个合成语料文件（34 个文档）的切块输出逐字节不变。near-duplicate 的指标和 config 与固定基线 `evaluation/baselines/quality-near-duplicate-deterministic-v1.json` 一致，所以基线不用改。
+
+已入库的文档要运行 `npm run vector:reindex -- --from documents --apply` 才会用新切块器重建，见 `docs/deployment.md`。
+
 ## Robust hard/real suite
 
 `eval:robust-suite` 是固定周期入口，不放进每个 PR 的默认轻量 gate。它集中维护 hard/real 语料集合，避免 npm scripts、CI 和 quality gate 各自硬编码：

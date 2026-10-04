@@ -82,8 +82,27 @@ export const startTracing = ({
 };
 
 /**
- * Flushes buffered spans on shutdown, so the last requests before a restart
- * still reach the backend.
+ * A graceful-shutdown finalizer that flushes buffered spans, so the last
+ * requests before a restart still reach the backend. server.js runs it after
+ * the in-flight requests have drained (createGracefulShutdown in
+ * rag/agent-service/role-server.js), for the monolith and every split role,
+ * so the spans of the drained requests are flushed too. A failed flush is
+ * logged and does not stop the rest of the shutdown.
+ */
+export const createTracingShutdownFinalizer = (provider) => async () => {
+  try {
+    await provider.shutdown();
+  } catch (error) {
+    console.error("[tracing] failed to flush spans on shutdown.", error);
+  }
+};
+
+/**
+ * Flushes buffered spans and exits on SIGTERM/SIGINT. It exits as soon as the
+ * flush settles, so next to a graceful drain it races the drain and cuts off
+ * the requests the drain waits for; server.js therefore uses
+ * createTracingShutdownFinalizer. retrieval-service.mjs and model-gateway.mjs
+ * still register this next to their own close handlers.
  */
 export const shutdownTracingOnExit = (provider) => {
   const shutdown = async () => {

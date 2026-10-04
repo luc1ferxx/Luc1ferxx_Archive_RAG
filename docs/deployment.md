@@ -124,8 +124,25 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 - 停机：收到 SIGTERM 或 SIGINT 后停止领取新任务，给运行中的任务 5 秒；没完成的归还队列（不计入尝试次数），其他 worker 可以立即接手。进程被强制结束时，任务在租约过期后由其他 worker 重试。
 - 从 `async` 切回 `sync` 前先等队列清空：`sync` 下 API 进程不运行 worker，剩下的任务要靠 `npm run worker:ingest`。
 
+### 停机（`docker stop`、`docker compose down`、重新部署）
+
+`app` 容器里 `node server.js` 是 PID 1（Dockerfile 用 exec 形式的 `CMD`），直接收到 docker 发的 SIGTERM。单体进程收到后：
+
+1. 停止监听：新连接被拒绝，`/ready` 不再响应。
+2. 等在途请求做完，最多 `SERVICE_SHUTDOWN_GRACE_MS`（默认 25 秒）：进行中的 `/chat`、`/chat/stream` 和上传会正常返回，agent run 正常完成，不会因为停机变成需要人工恢复。进程内的入库 worker 同时停止领取任务，运行中的任务最多再等 5 秒，没做完的归还队列。
+3. 依次执行收尾：flush OpenTelemetry span、关闭指标端口、关闭数据库连接池，然后以 0 退出。
+
+窗口到期后还没结束的请求会被断开。收到第二个 SIGTERM 或 Ctrl+C 时立即以 1 退出。收尾卡住时也以 1 退出，截止时间是 max(等待窗口, 有 worker 时的 5 秒) + 3 秒。
+
+`docker-compose.yml` 给 `app` 设了 `stop_grace_period: 30s`，比默认的 25 + 3 秒长，docker 不会在收尾前就发 SIGKILL。调大 `SERVICE_SHUTDOWN_GRACE_MS` 时，要把 `stop_grace_period` 一起调大，至少比它多 3 秒以上。
+
+限制：
+- 等待只覆盖 HTTP 请求。进程内的后台 agent 任务停机时仍会被中断，下次启动时由启动恢复处理。
+- 进程还在启动、没注册信号处理时收到的 SIGTERM，按默认行为立即退出。
+
 ### 其他说明
 
+- 升级到包含分块丢字修复的版本后，已入库文档仍是旧分块：表格行、"Label:" 引导句和页尾标题行可能不在任何 chunk 里。运行 `cd server && npm run vector:reindex -- --from documents --apply` 按新切块器重建。新上传和 `PUT /documents/:docId` 替换自动使用新切块器。重复上传相同内容不会重建，入库去重会直接指向已有文档。
 - 镜像构建时把 `VITE_DOMAIN` 设成 `same-origin`。构建参数 `VITE_API_AUTH_TOKEN` 会打进前端包、发给每个浏览器，只适合单个可信用户。多用户部署用 `API_AUTH_TOKENS`，由前端之外的方式分发 token。
 - 镜像以非 root 用户 `node` 运行，只有 `/data` 可写。
 - 镜像里的 npm 10 在安装服务端依赖时会要求 `@qdrant/js-client-rest` 的 peer 依赖 typescript。本机 npm 11 生成的锁文件里没有它，而运行时也用不到，所以 Dockerfile 用 `--legacy-peer-deps` 安装。

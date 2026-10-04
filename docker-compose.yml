@@ -65,6 +65,11 @@ services:
     container_name: luc1ferxx-archive-app
     restart: unless-stopped
     profiles: ["app"]
+    # On SIGTERM the server drains in-flight requests for up to
+    # SERVICE_SHUTDOWN_GRACE_MS (default 25 s) and then gets 3 s to flush spans
+    # and close its pool (server.js); docker waits longer than both before it
+    # sends SIGKILL, so a deploy does not cut a running /chat.
+    stop_grace_period: 30s
     env_file:
       - path: server/.env
         required: false

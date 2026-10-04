@@ -191,6 +191,24 @@ const joinLabels = (labels, language) => {
   return `${cleanedLabels.slice(0, -1).join(", ")}, and ${cleanedLabels.at(-1)}`;
 };
 
+// The chunk text without its section heading, so a heading such as
+// "2025 Fees" never counts as date or number evidence. The heading usually
+// opens the chunk; when the chunker kept earlier heading-like lines that had
+// no body of their own (rag/chunker.js), it sits on its own line further
+// down, and only that whole line is removed.
+export const stripSectionHeading = (text, sectionHeading) => {
+  const escapedHeading = escapeRegExp(sectionHeading);
+  const atStart = new RegExp(`^${escapedHeading}\\s*`, "i");
+
+  if (atStart.test(text)) {
+    return text.replace(atStart, "").trim();
+  }
+
+  return text
+    .replace(new RegExp(`^${escapedHeading}[ \\t]*(?:\\r?\\n|$)`, "im"), "")
+    .trim();
+};
+
 const buildSearchableEntry = (result, index) => {
   const fileName = result?.document?.metadata?.fileName ?? "Unknown document";
   const sectionHeading = result?.document?.metadata?.sectionHeading ?? null;
@@ -205,9 +223,7 @@ const buildSearchableEntry = (result, index) => {
     .slice(0, 220);
   const bodyText = String(result?.document?.pageContent ?? "");
   const bodyOnlyText = sectionHeading
-    ? bodyText
-        .replace(new RegExp(`^${escapeRegExp(sectionHeading)}\\s*`, "i"), "")
-        .trim()
+    ? stripSectionHeading(bodyText, sectionHeading)
     : bodyText;
   const searchableText = [fileName, sectionHeading, result?.document?.pageContent]
     .filter(Boolean)
