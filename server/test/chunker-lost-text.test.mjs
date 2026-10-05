@@ -219,7 +219,9 @@ describe("structured chunking keeps heading-like lines", () => {
         text: ["1 Overview", body, "Appendix A"].join("\n"),
       },
     ];
-    const chunkSize = body.length + 4;
+    // The heading counts toward the chunk size: the body chunk fits with 4
+    // characters to spare, the trailing heading does not.
+    const chunkSize = "1 Overview".length + 2 + body.length + 4;
     const chunks = structured(pages, { chunkSize, chunkOverlap: 0 });
 
     assertEveryPageIndexed(pages, chunks);
@@ -280,7 +282,9 @@ describe("structured chunking keeps heading-like lines", () => {
         text: ["Part One", "Chapter Two", "Section Three", paragraph].join("\n"),
       },
     ];
-    const chunkSize = paragraph.length + 10;
+    // The heading counts toward the chunk size: the heading and the paragraph
+    // fit, the kept lines in front of them do not.
+    const chunkSize = "Section Three".length + 2 + paragraph.length + 10;
     const chunks = structured(pages, { chunkSize, chunkOverlap: 0 });
 
     assertEveryPageIndexed(pages, chunks);
@@ -294,8 +298,8 @@ describe("structured chunking keeps heading-like lines", () => {
   });
 });
 
-describe("structured chunking without consecutive headings is unchanged", () => {
-  test("heading and body chunks keep their text, headings and overlap", () => {
+describe("structured chunking without consecutive headings", () => {
+  test("heading and body chunks keep their text and headings; a paragraph longer than the overlap is not carried", () => {
     const pages = [
       {
         pageNumber: 4,
@@ -309,10 +313,14 @@ describe("structured chunking without consecutive headings is unchanged", () => 
         ].join("\n"),
       },
     ];
-    const chunks = structured(pages, { chunkSize: 60, chunkOverlap: 10 });
+    const chunkSize = 64;
+    const chunks = structured(pages, { chunkSize, chunkOverlap: 10 });
 
     assertEveryPageIndexed(pages, chunks);
     assertContiguousChunkIds(chunks);
+    // Before the overlap was capped, the third chunk carried the whole first
+    // paragraph (48 characters against an overlap of 10) and ran to 109
+    // characters.
     assert.deepEqual(
       chunks.map((chunk) => [chunk.metadata.sectionHeading, chunk.pageContent]),
       [
@@ -323,14 +331,158 @@ describe("structured chunking without consecutive headings is unchanged", () => 
         ],
         [
           "1 Background",
-          [
-            "1 Background",
-            "First background paragraph explains the setting.",
-            "Second background paragraph adds the details.",
-          ].join("\n\n"),
+          "1 Background\n\nSecond background paragraph adds the details.",
         ],
         ["2 Results", "2 Results\n\nThe results paragraph reports the numbers."],
       ]
     );
+    assert.ok(chunks.every((chunk) => chunk.pageContent.length <= chunkSize));
+  });
+});
+
+describe("structured chunking stays within the chunk size", () => {
+  const assertWithinSize = (chunks, chunkSize) => {
+    for (const chunk of chunks) {
+      assert.ok(
+        chunk.pageContent.length <= chunkSize,
+        `chunk ${chunk.metadata.chunkIndex} is ${chunk.pageContent.length} characters`
+      );
+    }
+  };
+
+  test("the overlap of a long paragraph is its trailing whole sentences that fit", () => {
+    const paragraph = [
+      "Retrieval quality depends on chunking.",
+      "Smith et al. report that whole sentences help.",
+      "Overlap carries context, e.g. a definition.",
+      "The next chunk starts after it.",
+      "Version 2.1 kept 3.5 times fewer duplicates.",
+      "A final short sentence closes it.",
+    ].join(" ");
+    const pages = [{ pageNumber: 1, text: ["2 Method", paragraph].join("\n") }];
+    const chunkSize = 120;
+    const chunks = structured(pages, { chunkSize, chunkOverlap: 60 });
+
+    assertEveryPageIndexed(pages, chunks);
+    assertContiguousChunkIds(chunks);
+    assertWithinSize(chunks, chunkSize);
+    // The overlap is cut with the sentence splitter, so "et al." and "2.1"
+    // stay inside their sentences. The packing of the paragraph itself still
+    // cuts at every ". " (here after "e.g.").
+    assert.deepEqual(
+      chunks.map((chunk) => [chunk.metadata.sectionHeading, chunk.pageContent]),
+      [
+        [
+          "2 Method",
+          "2 Method\n\nRetrieval quality depends on chunking. Smith et al. report that whole sentences help.",
+        ],
+        [
+          "2 Method",
+          "2 Method\n\nSmith et al. report that whole sentences help.\n\nOverlap carries context, e.g.",
+        ],
+        [
+          "2 Method",
+          "2 Method\n\na definition. The next chunk starts after it. Version 2.1 kept 3.5 times fewer duplicates.",
+        ],
+        [
+          "2 Method",
+          "2 Method\n\nVersion 2.1 kept 3.5 times fewer duplicates.\n\nA final short sentence closes it.",
+        ],
+      ]
+    );
+  });
+
+  test("whole previous paragraphs are carried while they fit the overlap", () => {
+    const pages = [
+      {
+        pageNumber: 2,
+        text: [
+          "Short line one.",
+          "Second paragraph is a bit longer than the first one.",
+          "Third paragraph needs a new chunk because it does not fit.",
+        ].join("\n"),
+      },
+    ];
+    const chunkSize = 120;
+    const chunks = structured(pages, { chunkSize, chunkOverlap: 60 });
+
+    assertEveryPageIndexed(pages, chunks);
+    assertWithinSize(chunks, chunkSize);
+    assert.deepEqual(
+      chunks.map((chunk) => chunk.pageContent),
+      [
+        "Short line one.\n\nSecond paragraph is a bit longer than the first one.",
+        "Second paragraph is a bit longer than the first one.\n\nThird paragraph needs a new chunk because it does not fit.",
+      ]
+    );
+  });
+
+  test("a sentence longer than the chunk size is cut at word boundaries and never carried", () => {
+    const longSentence = Array.from({ length: 30 }, (_, index) => `term${index}`).join(" ");
+    const pages = [
+      { pageNumber: 1, text: ["Preface text.", longSentence, "After."].join("\n") },
+    ];
+    const chunkSize = 60;
+    const chunks = structured(pages, { chunkSize, chunkOverlap: 30 });
+
+    assertEveryPageIndexed(pages, chunks);
+    assertWithinSize(chunks, chunkSize);
+    assert.deepEqual(
+      chunks.map((chunk) => chunk.pageContent),
+      [
+        "Preface text.",
+        "term0 term1 term2 term3 term4 term5 term6 term7 term8 term9",
+        "term10 term11 term12 term13 term14 term15 term16 term17",
+        "term18 term19 term20 term21 term22 term23 term24 term25",
+        "term26 term27 term28 term29\n\nAfter.",
+      ]
+    );
+  });
+
+  test("long paragraphs at the default size and overlap stay within the size", () => {
+    const sentence = (index) =>
+      `Sentence ${index} reports a measured value of ${index}.5 percent on the held-out split.`;
+    const paragraphs = [0, 1, 2].map((block) =>
+      Array.from({ length: 25 }, (_, index) => sentence(block * 25 + index)).join(" ")
+    );
+    const pages = [
+      { pageNumber: 1, text: ["3 Experiments", ...paragraphs].join("\n") },
+    ];
+    const chunks = structured(pages);
+
+    assertEveryPageIndexed(pages, chunks);
+    assertContiguousChunkIds(chunks);
+    assertWithinSize(chunks, 900);
+
+    let chunksWithOverlap = 0;
+
+    for (const [index, chunk] of chunks.entries()) {
+      assert.equal(chunk.metadata.sectionHeading, "3 Experiments");
+
+      if (index === 0) {
+        continue;
+      }
+
+      // Whatever the chunk repeats from the previous one is at most the
+      // overlap and ends on a whole sentence.
+      const previous = chunks[index - 1].pageContent;
+      const body = chunk.pageContent.slice("3 Experiments\n\n".length);
+      let repeated = 0;
+
+      for (let length = 1; length <= body.length; length += 1) {
+        if (previous.endsWith(body.slice(0, length))) {
+          repeated = length;
+        }
+      }
+
+      assert.ok(repeated <= 180, `chunk ${index} repeats ${repeated} characters`);
+
+      if (repeated > 0) {
+        chunksWithOverlap += 1;
+        assert.match(body.slice(0, repeated), /split\.$/);
+      }
+    }
+
+    assert.ok(chunksWithOverlap > 0);
   });
 });

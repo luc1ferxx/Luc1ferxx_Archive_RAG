@@ -268,7 +268,7 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `RAG_CHUNK_STRATEGY` | `structured` | `structured` 或 `simple`。 |
+| `RAG_CHUNK_STRATEGY` | `structured` | `structured`、`sentence` 或 `simple`。`sentence` 沿用 structured 的标题与分节规则，节内按整句装箱：整块（含重复的标题）不超过 `RAG_CHUNK_SIZE`，只有单句超长时才在分句/词边界切开；overlap 只取上一块末尾、总长不超过 `RAG_CHUNK_OVERLAP` 的整句；列表项和表格行不与正文合并，chunk 不跨页。 |
 | `RAG_CHUNK_SIZE` | `900` | Chunk 最大长度。 |
 | `RAG_CHUNK_OVERLAP` | `180` | Chunk overlap。 |
 | `RAG_RETRIEVAL_TOP_K` | `6` | QA 路径召回数量。 |

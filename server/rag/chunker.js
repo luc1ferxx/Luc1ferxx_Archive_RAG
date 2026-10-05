@@ -1,5 +1,6 @@
 import { getChunkOverlap, getChunkSize, getChunkStrategy } from "./config.js";
 import { buildPublicFilePath } from "./document-utils.js";
+import { splitLongSentence, splitSentenceSegments } from "./sentence-splitter.js";
 import { normalizeWhitespace, splitParagraphs } from "./text-utils.js";
 
 const SENTENCE_BOUNDARY = /(?<=[.!?\u3002\uff01\uff1f])\s+/;
@@ -51,7 +52,11 @@ const isLikelyHeading = (paragraph) => {
   return uppercaseRatio > 0.7;
 };
 
-const splitOversizedParagraph = (paragraph, chunkSize) => {
+// Cuts a paragraph longer than the chunk size into runs of whole sentences
+// that fit it. A single sentence longer than the chunk size is cut at a
+// clause or word boundary (splitLongSentence, as in the sentence chunker);
+// its pieces are recorded in fragments so the overlap never carries one.
+const splitOversizedParagraph = (paragraph, chunkSize, fragments) => {
   if (paragraph.length <= chunkSize) {
     return [paragraph];
   }
@@ -62,13 +67,13 @@ const splitOversizedParagraph = (paragraph, chunkSize) => {
     .filter(Boolean);
 
   if (sentences.length <= 1) {
-    const slices = [];
+    const pieces = splitLongSentence(paragraph, chunkSize).map((piece) => piece.text);
 
-    for (let cursor = 0; cursor < paragraph.length; cursor += chunkSize) {
-      slices.push(paragraph.slice(cursor, cursor + chunkSize).trim());
+    for (const piece of pieces) {
+      fragments.add(piece);
     }
 
-    return slices.filter(Boolean);
+    return pieces;
   }
 
   const segments = [];
@@ -84,7 +89,7 @@ const splitOversizedParagraph = (paragraph, chunkSize) => {
     }
 
     if (candidate.length > chunkSize) {
-      segments.push(...splitOversizedParagraph(sentence, chunkSize));
+      segments.push(...splitOversizedParagraph(sentence, chunkSize, fragments));
       buffer = "";
       continue;
     }
@@ -106,18 +111,56 @@ const getParagraphLength = (paragraphs) =>
     0
   );
 
-const buildOverlapParagraphs = (paragraphs, overlapSize) => {
+const joinSentenceSegments = (segments) =>
+  segments.map((segment, index) => (index > 0 ? segment.separator : "") + segment.text).join("");
+
+// The overlap a structured chunk hands to the next one: the trailing whole
+// sentences of its body whose joined length (with the "\n\n" between
+// paragraphs) fits overlapSize. Whole paragraphs are taken from the end while
+// they fit, then the trailing sentences of the paragraph that does not
+// (rag/sentence-splitter.js); nothing when not even the last sentence fits.
+// A piece of a sentence that splitOversizedParagraph had to cut is never
+// carried, and neither is anything before it.
+const buildOverlapParagraphs = (paragraphs, overlapSize, fragments) => {
   const overlap = [];
   let currentLength = 0;
 
   for (let index = paragraphs.length - 1; index >= 0; index -= 1) {
     const paragraph = paragraphs[index];
-    overlap.unshift(paragraph);
-    currentLength += paragraph.length;
 
-    if (currentLength >= overlapSize) {
+    if (fragments.has(paragraph)) {
       break;
     }
+
+    const separatorLength = overlap.length > 0 ? 2 : 0;
+
+    if (currentLength + separatorLength + paragraph.length <= overlapSize) {
+      overlap.unshift(paragraph);
+      currentLength += separatorLength + paragraph.length;
+      continue;
+    }
+
+    const segments = splitSentenceSegments(paragraph);
+    const tail = [];
+    let tailLength = 0;
+
+    for (let segmentIndex = segments.length - 1; segmentIndex >= 1; segmentIndex -= 1) {
+      const segment = segments[segmentIndex];
+      const added = segment.text.length + (tail.length > 0 ? tail[0].separator.length : 0);
+
+      if (currentLength + separatorLength + tailLength + added > overlapSize) {
+        break;
+      }
+
+      tail.unshift(segment);
+      tailLength += added;
+    }
+
+    if (tail.length > 0) {
+      overlap.unshift(joinSentenceSegments(tail));
+    }
+
+    break;
   }
 
   return overlap;
@@ -217,8 +260,9 @@ const chunkPageWithStructure = ({
   chunkOverlap,
   startingChunkIndex,
 }) => {
+  const fragments = new Set();
   const rawParagraphs = splitParagraphs(page.text).flatMap((paragraph) =>
-    splitOversizedParagraph(paragraph, chunkSize)
+    splitOversizedParagraph(paragraph, chunkSize, fragments)
   );
 
   if (rawParagraphs.length === 0) {
@@ -293,6 +337,44 @@ const chunkPageWithStructure = ({
     leading = [];
   };
 
+  const getHeadingLength = () => (currentHeading === null ? 0 : currentHeading.length + 2);
+
+  // The length a chunk would have with the parts given plus the heading in
+  // force and the heading-like lines kept in front of it.
+  const getChunkLength = (paragraphs) =>
+    getParagraphLength([
+      ...leading,
+      ...(currentHeading === null ? [] : [currentHeading]),
+      ...paragraphs,
+    ]);
+
+  const addBodyParagraph = (paragraph) => {
+    if (
+      buffer.length === 0 &&
+      leading.length > 0 &&
+      getChunkLength([paragraph]) > chunkSize
+    ) {
+      // The kept heading-like lines and this paragraph do not fit together;
+      // the body chunk then looks exactly as it would without them.
+      flushHeadingOnly();
+    }
+
+    if (buffer.length > 0 && getChunkLength([...buffer, paragraph]) > chunkSize) {
+      // The overlap never makes the next chunk (its heading, the overlap and
+      // this paragraph) longer than the chunk size.
+      const overlap = buildOverlapParagraphs(
+        buffer,
+        Math.min(chunkOverlap, chunkSize - getHeadingLength() - paragraph.length - 2),
+        fragments
+      );
+      flushBuffer();
+      buffer = [...overlap, paragraph];
+      return;
+    }
+
+    buffer.push(paragraph);
+  };
+
   for (const paragraph of rawParagraphs) {
     if (isLikelyHeading(paragraph)) {
       if (buffer.length > 0) {
@@ -314,29 +396,18 @@ const chunkPageWithStructure = ({
       continue;
     }
 
-    if (
-      buffer.length === 0 &&
-      leading.length > 0 &&
-      getParagraphLength([...leading, paragraph]) > chunkSize
-    ) {
-      // The kept heading-like lines and this paragraph do not fit together;
-      // the body chunk then looks exactly as it would without them.
-      flushHeadingOnly();
+    // A paragraph that does not fit under the heading in force is cut like
+    // an oversized one, to the room the heading leaves (unless the heading
+    // takes more than half of the chunk size).
+    const room = chunkSize - getHeadingLength();
+    const pieces =
+      paragraph.length > room && room >= chunkSize / 2
+        ? splitOversizedParagraph(paragraph, room, fragments)
+        : [paragraph];
+
+    for (const piece of pieces) {
+      addBodyParagraph(piece);
     }
-
-    const nextLength =
-      getParagraphLength([...leading, ...buffer]) +
-      paragraph.length +
-      (leading.length + buffer.length > 0 ? 2 : 0);
-
-    if (buffer.length > 0 && nextLength > chunkSize) {
-      const overlap = buildOverlapParagraphs(buffer, chunkOverlap);
-      flushBuffer();
-      buffer = [...overlap, paragraph];
-      continue;
-    }
-
-    buffer.push(paragraph);
   }
 
   if (buffer.length > 0) {
@@ -347,16 +418,10 @@ const chunkPageWithStructure = ({
     // appended to this page's last chunk when they fit, or become a chunk of
     // their own.
     const trailing = [...leading, currentHeading];
-    const previousLength = lastChunk
-      ? getParagraphLength([
-          ...lastChunk.leadingParagraphs,
-          ...lastChunk.paragraphs,
-        ])
-      : 0;
 
     if (
       lastChunk &&
-      previousLength + 2 + getParagraphLength(trailing) <= chunkSize
+      lastChunk.record.pageContent.length + 2 + getParagraphLength(trailing) <= chunkSize
     ) {
       lastChunk.paragraphs.push(...trailing);
       lastChunk.record.pageContent = buildChunkText(
@@ -367,6 +432,384 @@ const chunkPageWithStructure = ({
       leading = [];
     } else {
       flushHeadingOnly();
+    }
+  }
+
+  return {
+    chunks,
+    nextChunkIndex: chunkIndex,
+  };
+};
+
+// Sentence chunking (RAG_CHUNK_STRATEGY=sentence).
+//
+// Structure-aware like the structured chunker: every line of a page is tested
+// with the same isLikelyHeading, a heading starts a section and is the
+// sectionHeading of that section's chunks (repeated at the top of each), the
+// heading-like lines without body text are kept as text under the same rules,
+// and nothing carries over to the next page. Inside a section the body is
+// packed from whole sentences:
+// - The lines of one paragraph (blank-line separated) are joined into one
+//   prose block, so a sentence broken across lines stays whole. A list item
+//   (a line with a list marker, plus its continuation lines until a line
+//   ends a sentence) and a table row (a line of mostly numeric cells, or
+//   with a tab or "|") each form a block of their own and are never joined
+//   with prose. Blocks are separated by a blank line in the chunk text.
+// - Prose and list blocks are cut into sentences (rag/sentence-splitter.js);
+//   a table row is one unit.
+// - A chunk's whole pageContent (kept heading-like lines, heading and body)
+//   never exceeds the chunk size. A unit longer than the room under the
+//   heading is cut at a clause or word boundary into pieces that fit, and
+//   only those pieces are not whole sentences.
+// - The next chunk starts with the trailing whole sentences of the previous
+//   chunk whose joined length fits the overlap (none if even the last one
+//   does not fit, and never a piece of a cut sentence).
+// Units keep the separator they had in the page text, so a chunk's body is a
+// contiguous stretch of its section with whitespace collapsed.
+
+const LIST_ITEM_PATTERN =
+  /^(?:[•▪◦‣∙·●○■□\-–—*]\s|\(?(?:\d{1,3}|[a-z]|[ivxlc]{1,5})[.)]\s)/iu;
+const NUMERIC_CELL = /^(?:[-+±~≈<>]?[(]?[$€£¥]?\d[\d.,]*[%‰]?[)]?[*†‡]*|[-–—]+)$/u;
+const SENTENCE_FINAL_LINE_END =
+  /[.!?…。！？；]["'”’)\]）」』]*$/u;
+
+const isTableRowLine = (line) => {
+  if (/\t|(?:^|\s)\|(?:\s|$)/.test(line)) {
+    return true;
+  }
+
+  const cells = line.split(/\s+/).filter(Boolean);
+
+  if (cells.length < 2 || SENTENCE_FINAL_LINE_END.test(line)) {
+    return false;
+  }
+
+  const numericCells = cells.filter((cell) => NUMERIC_CELL.test(cell)).length;
+
+  return numericCells >= 2 && numericCells * 2 >= cells.length;
+};
+
+const classifySentenceLine = (line) => {
+  if (LIST_ITEM_PATTERN.test(line)) {
+    return "list";
+  }
+
+  return isTableRowLine(line) ? "table" : "prose";
+};
+
+// The page as a sequence of heading lines and body blocks, in reading order.
+// The lines are exactly the units splitParagraphs gives the structured
+// chunker, so both strategies see the same headings.
+const collectSentencePageEvents = (pageText) => {
+  const events = [];
+  let block = null;
+
+  const closeBlock = () => {
+    if (block) {
+      events.push({ type: "block", block });
+      block = null;
+    }
+  };
+
+  for (const paragraph of normalizeWhitespace(String(pageText ?? "")).split(/\n{2,}/)) {
+    closeBlock();
+
+    for (const rawLine of paragraph.split("\n")) {
+      const line = normalizeWhitespace(rawLine);
+
+      if (!line) {
+        continue;
+      }
+
+      if (isLikelyHeading(line)) {
+        closeBlock();
+        events.push({ type: "heading", text: line });
+        continue;
+      }
+
+      const kind = classifySentenceLine(line);
+      const continuesBlock =
+        block !== null &&
+        kind === "prose" &&
+        (block.kind === "prose" ||
+          (block.kind === "list" && !SENTENCE_FINAL_LINE_END.test(block.lines.at(-1))));
+
+      if (!continuesBlock) {
+        closeBlock();
+        block = { kind, lines: [] };
+      }
+
+      block.lines.push(line);
+    }
+  }
+
+  closeBlock();
+
+  return events;
+};
+
+const getUnitsLength = (units) =>
+  units.reduce(
+    (length, unit, index) =>
+      length + unit.text.length + (index > 0 ? unit.separator.length : 0),
+    0
+  );
+
+const joinUnits = (units) =>
+  units.map((unit, index) => (index > 0 ? unit.separator : "") + unit.text).join("");
+
+const buildSectionUnits = (blocks, budget) => {
+  const units = [];
+
+  blocks.forEach((block, blockIndex) => {
+    const text = block.lines.join(" ");
+    const segments =
+      block.kind === "table" ? [{ text, separator: "" }] : splitSentenceSegments(text);
+
+    segments.forEach((segment, segmentIndex) => {
+      const separator =
+        segmentIndex > 0 ? segment.separator : blockIndex > 0 ? "\n\n" : "";
+
+      if (segment.text.length <= budget) {
+        units.push({ text: segment.text, separator, fragment: false });
+        return;
+      }
+
+      splitLongSentence(segment.text, budget).forEach((piece, pieceIndex) => {
+        units.push({
+          text: piece.text,
+          separator: pieceIndex === 0 ? separator : piece.separator,
+          fragment: true,
+        });
+      });
+    });
+  });
+
+  return units;
+};
+
+// The trailing whole sentences of a chunk body that fit the overlap; never
+// the whole body and never a piece of a cut sentence.
+const selectSentenceOverlap = (units, overlapSize) => {
+  const overlap = [];
+  let length = 0;
+
+  for (let index = units.length - 1; index >= 1; index -= 1) {
+    const unit = units[index];
+
+    if (unit.fragment) {
+      break;
+    }
+
+    const added = unit.text.length + (overlap.length > 0 ? overlap[0].separator.length : 0);
+
+    if (length + added > overlapSize) {
+      break;
+    }
+
+    overlap.unshift(unit);
+    length += added;
+  }
+
+  return overlap;
+};
+
+const chunkPageWithSentences = ({
+  docId,
+  fileName,
+  publicFilePath,
+  page,
+  source = null,
+  chunkSize,
+  chunkOverlap,
+  startingChunkIndex,
+}) => {
+  const events = collectSentencePageEvents(page.text);
+  const chunks = [];
+  let chunkIndex = startingChunkIndex;
+  let lastChunk = null;
+
+  const pushChunk = (heading, parts) => {
+    const record = buildChunkRecord({
+      docId,
+      fileName,
+      publicFilePath,
+      pageNumber: page.pageNumber,
+      chunkIndex,
+      pageContent: parts.filter((part) => part !== null && part !== "").join("\n\n"),
+      sectionHeading: heading,
+      source,
+    });
+
+    chunks.push(record);
+    lastChunk = record;
+    chunkIndex += 1;
+  };
+
+  // Heading-like lines emitted without body text. They fit one chunk unless a
+  // single line is longer than the chunk size (a size under 90 characters);
+  // such a line is cut like a long sentence, one piece per chunk.
+  const pushLines = (heading, lines) => {
+    if (getParagraphLength(lines) <= chunkSize) {
+      pushChunk(heading, lines);
+      return;
+    }
+
+    let current = [];
+
+    const flush = () => {
+      if (current.length > 0) {
+        pushChunk(heading, current);
+        current = [];
+      }
+    };
+
+    for (const line of lines) {
+      if (line.length > chunkSize) {
+        flush();
+
+        for (const piece of splitLongSentence(line, chunkSize)) {
+          pushChunk(heading, [piece.text]);
+        }
+
+        continue;
+      }
+
+      if (current.length > 0 && getParagraphLength([...current, line]) > chunkSize) {
+        flush();
+      }
+
+      current.push(line);
+    }
+
+    flush();
+  };
+
+  const emitSection = ({ heading, leading, blocks }) => {
+    if (blocks.length === 0) {
+      pushLines(heading, [...leading, heading]);
+      return;
+    }
+
+    // The heading is repeated at the top of every chunk of its section unless
+    // it would take more than half of the chunk size; it then becomes a chunk
+    // of its own and the body chunks only carry it as sectionHeading.
+    const repeatHeading = heading !== null && heading.length + 2 <= chunkSize / 2;
+    const headingCost = repeatHeading ? heading.length + 2 : 0;
+    const budget = Math.max(1, chunkSize - headingCost);
+    let pendingLeading = leading;
+
+    if (heading !== null && !repeatHeading) {
+      pushLines(heading, [...pendingLeading, heading]);
+      pendingLeading = [];
+    }
+
+    const getLeadingCost = () =>
+      pendingLeading.length > 0 ? getParagraphLength(pendingLeading) + 2 : 0;
+    let current = [];
+
+    const emitCurrent = () => {
+      pushChunk(heading, [
+        ...pendingLeading,
+        repeatHeading ? heading : null,
+        joinUnits(current),
+      ]);
+      pendingLeading = [];
+    };
+
+    for (const unit of buildSectionUnits(blocks, budget)) {
+      if (current.length === 0) {
+        if (
+          pendingLeading.length > 0 &&
+          getLeadingCost() + headingCost + unit.text.length > chunkSize
+        ) {
+          // The kept heading-like lines do not fit with the first sentence.
+          pushLines(heading, [...pendingLeading, heading]);
+          pendingLeading = [];
+        }
+
+        current = [unit];
+        continue;
+      }
+
+      const candidate = [...current, unit];
+
+      if (getLeadingCost() + headingCost + getUnitsLength(candidate) <= chunkSize) {
+        current = candidate;
+        continue;
+      }
+
+      emitCurrent();
+      let overlap = selectSentenceOverlap(current, chunkOverlap);
+
+      while (
+        overlap.length > 0 &&
+        headingCost + getUnitsLength([...overlap, unit]) > chunkSize
+      ) {
+        overlap = overlap.slice(1);
+      }
+
+      current = [...overlap, unit];
+    }
+
+    if (current.length > 0) {
+      emitCurrent();
+    }
+  };
+
+  const sections = [];
+  let section = { heading: null, leading: [], blocks: [] };
+
+  for (const event of events) {
+    if (event.type === "block") {
+      section.blocks.push(event.block);
+      continue;
+    }
+
+    const heading = event.text;
+
+    if (section.blocks.length === 0 && section.heading !== null) {
+      // The heading in force had no body text before this heading replaced
+      // it: keep its text in front of the new heading, or give it a chunk of
+      // its own when both do not fit together.
+      const kept = [...section.leading, section.heading];
+
+      if (getParagraphLength([...kept, heading]) > chunkSize) {
+        sections.push({ heading: section.heading, leading: section.leading, blocks: [] });
+        section = { heading, leading: [], blocks: [] };
+      } else {
+        section = { heading, leading: kept, blocks: [] };
+      }
+
+      continue;
+    }
+
+    if (section.blocks.length > 0) {
+      sections.push(section);
+    }
+
+    section = { heading, leading: [], blocks: [] };
+  }
+
+  for (const entry of sections) {
+    emitSection(entry);
+  }
+
+  if (section.blocks.length > 0) {
+    emitSection(section);
+  } else if (section.heading !== null) {
+    // Heading-like lines at the end of the page with no body after them on
+    // this page: appended to the page's last chunk when they fit, else a
+    // chunk of their own.
+    const trailing = [...section.leading, section.heading];
+
+    if (
+      lastChunk &&
+      lastChunk.pageContent.length + 2 + getParagraphLength(trailing) <= chunkSize
+    ) {
+      lastChunk.pageContent = [lastChunk.pageContent, ...trailing].join("\n\n");
+    } else {
+      pushLines(section.heading, trailing);
     }
   }
 
@@ -391,29 +834,24 @@ export const chunkDocumentWithConfig = ({
   const chunks = [];
   let chunkIndex = 0;
 
+  const chunkPage =
+    chunkStrategy === "simple"
+      ? chunkPageWithFixedWindows
+      : chunkStrategy === "sentence"
+        ? chunkPageWithSentences
+        : chunkPageWithStructure;
+
   for (const page of pages) {
-    const pageChunks =
-      chunkStrategy === "simple"
-        ? chunkPageWithFixedWindows({
-            docId,
-            fileName,
-            publicFilePath: resolvedPublicFilePath,
-            page,
-            source,
-            chunkSize,
-            chunkOverlap,
-            startingChunkIndex: chunkIndex,
-          })
-        : chunkPageWithStructure({
-            docId,
-            fileName,
-            publicFilePath: resolvedPublicFilePath,
-            page,
-            source,
-            chunkSize,
-            chunkOverlap,
-            startingChunkIndex: chunkIndex,
-          });
+    const pageChunks = chunkPage({
+      docId,
+      fileName,
+      publicFilePath: resolvedPublicFilePath,
+      page,
+      source,
+      chunkSize,
+      chunkOverlap,
+      startingChunkIndex: chunkIndex,
+    });
 
     chunks.push(...pageChunks.chunks);
     chunkIndex = pageChunks.nextChunkIndex;

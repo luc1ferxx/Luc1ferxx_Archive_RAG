@@ -45,7 +45,7 @@ const resolveChunkConfig = (executionConfig) => {
   const chunkOverlap = executionConfig?.chunkOverlap;
 
   if (
-    !["simple", "structured"].includes(chunkStrategy) ||
+    !["simple", "structured", "sentence"].includes(chunkStrategy) ||
     !Number.isInteger(chunkSize) ||
     chunkSize <= 0 ||
     !Number.isInteger(chunkOverlap) ||
@@ -355,7 +355,7 @@ export const validateSyntheticEvidenceContract = ({
         actual: executionConfig,
         caseId,
         expected: {
-          chunkStrategy: "simple or structured",
+          chunkStrategy: "simple, structured or sentence",
           chunkSize: "positive integer",
           chunkOverlap: "integer from 0 through chunkSize - 1",
         },
