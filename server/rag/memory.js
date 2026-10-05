@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   createChatPromptTemplate,
   createPromptTemplate,
@@ -7,9 +9,15 @@ import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import {
   getPromptVersion,
   getSessionMemoryPostgresTable,
+  isApiAuthEnabled,
 } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { queryPostgres } from "./postgres.js";
+import {
+  getActiveDatabaseTenant,
+  runAsDatabaseSystem,
+  toDatabaseTenant,
+} from "./postgres-tenant.js";
 import { tokenize } from "./text-utils.js";
 
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
@@ -201,6 +209,75 @@ const trimMemoryText = (value = "", maxLength = MAX_MESSAGE_CHARS) => {
 
 const normalizeSessionId = (sessionId) => String(sessionId ?? "").trim();
 
+// The session id is chosen by the client, so on its own it is no boundary
+// between tenants: anyone who learns or guesses another tenant's id would
+// read, extend or clear that conversation. With API auth on, a session is
+// therefore stored under a key derived from the tenant and the id, in every
+// session store; the PostgreSQL store adds the owner columns and the
+// tenant_isolation policy of migration 031 on top.
+//
+// The tenant is the caller's access scope (chat, research brief, the session
+// DELETE route) or, when a caller passes none or one without a user and
+// workspace, the active database tenant. The key is derived only when the
+// scope is authenticated or API auth is on (a task's stored scope carries no
+// `authenticated` flag), so with auth off a session keeps its raw id: the
+// local frontend sends a userId with every chat but not with the session
+// DELETE, and both must name the same session.
+const TENANT_SESSION_KEY_PREFIX = "tenant:";
+
+const resolveSessionTenant = (accessScope) => {
+  const explicitScope =
+    accessScope && typeof accessScope === "object" && toDatabaseTenant(accessScope)
+      ? accessScope
+      : null;
+  const scope = explicitScope ?? getActiveDatabaseTenant();
+
+  if (!scope || (scope.authenticated !== true && !isApiAuthEnabled())) {
+    return null;
+  }
+
+  return toDatabaseTenant(scope);
+};
+
+/**
+ * The key a session is stored under: the trimmed client id when no tenant
+ * applies, otherwise `tenant:` + sha256(userId \0 workspaceId \0 sessionId).
+ * Empty when there is no session id, or when a tenant-less caller's id starts
+ * with the reserved `tenant:` prefix.
+ */
+export const resolveSessionMemoryKey = (sessionId, accessScope = null) => {
+  const normalizedSessionId = normalizeSessionId(sessionId);
+
+  if (!normalizedSessionId) {
+    return "";
+  }
+
+  const tenant = resolveSessionTenant(accessScope);
+
+  if (!tenant) {
+    // A raw id spelled like a derived key would reach that tenant's session
+    // from a tenant-less caller (auth off, or a credential with neither a
+    // user nor a workspace, whose statements run on the owner path past the
+    // policy), so such an id names no session at all.
+    return normalizedSessionId.startsWith(TENANT_SESSION_KEY_PREFIX)
+      ? ""
+      : normalizedSessionId;
+  }
+
+  const digest = createHash("sha256")
+    .update(`${tenant.userId}\u0000${tenant.workspaceId}\u0000${normalizedSessionId}`)
+    .digest("hex");
+
+  return `${TENANT_SESSION_KEY_PREFIX}${digest}`;
+};
+
+// PostgreSQL raises insufficient_privilege (42501) when a tenant's upsert
+// meets a row the tenant_isolation policy hides: a session written before
+// migration 031 (no owner) or, with auth off, another client-named user's row
+// under the same raw id. The turn is then not recorded rather than failing the
+// answer; the hidden row is never read or changed.
+const isRowLevelSecurityViolation = (error) => error?.code === "42501";
+
 const sanitizeMessage = (message = {}) => {
   const role = message.role === "assistant" ? "assistant" : "user";
   const text = trimMemoryText(message.text ?? "", role === "user" ? 400 : MAX_MESSAGE_CHARS);
@@ -251,12 +328,17 @@ const createDefaultStore = () => ({
 
     const tableName = ensureTableName();
     lastSessionCleanupAt = Date.now();
-    const result = await queryPostgres(
-      `
-        DELETE FROM ${tableName}
-        WHERE updated_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')
-      `,
-      [SESSION_TTL_MS]
+    // The TTL purge is system-wide: as a tenant it would only ever expire the
+    // tenant's own rows, and owner-less rows from before migration 031 would
+    // never go.
+    const result = await runAsDatabaseSystem(() =>
+      queryPostgres(
+        `
+          DELETE FROM ${tableName}
+          WHERE updated_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')
+        `,
+        [SESSION_TTL_MS]
+      )
     );
 
     return Number(result.rowCount ?? 0);
@@ -298,22 +380,41 @@ const createDefaultStore = () => ({
 
     const tableName = ensureTableName();
     const sanitizedMessages = sanitizeSessionMessages(messages);
-    const result = await queryPostgres(
-      `
-        INSERT INTO ${tableName} (session_id, updated_at, messages)
-        VALUES ($1, $2, $3::jsonb)
-        ON CONFLICT (session_id)
-        DO UPDATE SET
-          updated_at = EXCLUDED.updated_at,
-          messages = EXCLUDED.messages
-        RETURNING session_id, updated_at, messages
-      `,
-      [
-        normalizedSessionId,
-        new Date(updatedAt).toISOString(),
-        JSON.stringify(sanitizedMessages),
-      ]
-    );
+    // The owner columns are the active database tenant's, exactly the values
+    // the tenant_isolation policy compares against; empty on the owner path.
+    // An existing row keeps its owner.
+    const tenant = getActiveDatabaseTenant();
+    let result;
+
+    try {
+      result = await queryPostgres(
+        `
+          INSERT INTO ${tableName} (session_id, updated_at, messages, owner_user_id, workspace_id)
+          VALUES ($1, $2, $3::jsonb, $4, $5)
+          ON CONFLICT (session_id)
+          DO UPDATE SET
+            updated_at = EXCLUDED.updated_at,
+            messages = EXCLUDED.messages
+          RETURNING session_id, updated_at, messages
+        `,
+        [
+          normalizedSessionId,
+          new Date(updatedAt).toISOString(),
+          JSON.stringify(sanitizedMessages),
+          tenant?.userId ?? "",
+          tenant?.workspaceId ?? "",
+        ]
+      );
+    } catch (error) {
+      if (tenant && isRowLevelSecurityViolation(error)) {
+        console.warn(
+          "Session memory turn not recorded: the session id belongs to a row this tenant cannot see."
+        );
+        return null;
+      }
+
+      throw error;
+    }
 
     return result.rows[0] ? mapRowToSession(result.rows[0]) : null;
   },
@@ -364,16 +465,16 @@ const initializeSessionMemoryStore = async () => {
   return true;
 };
 
-const getSession = async (sessionId) => {
-  const normalizedSessionId = normalizeSessionId(sessionId);
+const getSession = async (sessionId, accessScope) => {
+  const sessionKey = resolveSessionMemoryKey(sessionId, accessScope);
 
-  if (!normalizedSessionId) {
+  if (!sessionKey) {
     return null;
   }
 
   await initializeSessionMemoryStore();
   const store = getSessionMemoryStore();
-  return store.get ? store.get(normalizedSessionId) : null;
+  return store.get ? store.get(sessionKey) : null;
 };
 
 const formatRecentConversation = (messages) =>
@@ -482,12 +583,13 @@ export const configureSessionMemoryStore = (store) => {
 };
 
 export const resolveQueryWithSessionMemory = async ({
+  accessScope = null,
   sessionId,
   query,
   documents,
   longTermMemory = "",
 }) => {
-  const session = await getSession(sessionId);
+  const session = await getSession(sessionId, accessScope);
 
   if (!shouldRewriteQuestion({ query, session })) {
     return {
@@ -527,6 +629,7 @@ export const resolveQueryWithSessionMemory = async ({
 };
 
 export const recordSessionTurn = async ({
+  accessScope = null,
   sessionId,
   query,
   resolvedQuery,
@@ -534,15 +637,15 @@ export const recordSessionTurn = async ({
   documents,
   routeMode,
 }) => {
-  const normalizedSessionId = normalizeSessionId(sessionId);
+  const sessionKey = resolveSessionMemoryKey(sessionId, accessScope);
 
-  if (!normalizedSessionId) {
+  if (!sessionKey) {
     return null;
   }
 
   await initializeSessionMemoryStore();
   const store = getSessionMemoryStore();
-  const existingSession = store.get ? await store.get(normalizedSessionId) : null;
+  const existingSession = store.get ? await store.get(sessionKey) : null;
   const docLabels = documents.map((document) => document.fileName);
   const nextMessages = [
     ...(existingSession?.messages ?? []),
@@ -565,23 +668,23 @@ export const recordSessionTurn = async ({
 
   return store.upsert
     ? store.upsert({
-        sessionId: normalizedSessionId,
+        sessionId: sessionKey,
         messages: nextMessages,
         updatedAt: Date.now(),
       })
     : null;
 };
 
-export const clearSessionMemory = async (sessionId) => {
-  const normalizedSessionId = normalizeSessionId(sessionId);
+export const clearSessionMemory = async (sessionId, accessScope = null) => {
+  const sessionKey = resolveSessionMemoryKey(sessionId, accessScope);
 
-  if (!normalizedSessionId) {
+  if (!sessionKey) {
     return false;
   }
 
   await initializeSessionMemoryStore();
   const store = getSessionMemoryStore();
-  return store.delete ? store.delete(normalizedSessionId) : false;
+  return store.delete ? store.delete(sessionKey) : false;
 };
 
 export const resetSessionMemory = () => {

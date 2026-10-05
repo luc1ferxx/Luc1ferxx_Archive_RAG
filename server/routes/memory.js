@@ -29,7 +29,12 @@ export const createMemoryRouter = (services) => {
 
     try {
       return res.json({
-        cleared: await ragService.clearSessionMemory(sessionId),
+        // The caller's scope is part of the session key, so a tenant can
+        // only ever clear its own session of that id.
+        cleared: await ragService.clearSessionMemory(
+          sessionId,
+          getRequestAccessScope(req)
+        ),
       });
     } catch (error) {
       return res.status(error.status ?? 500).json({

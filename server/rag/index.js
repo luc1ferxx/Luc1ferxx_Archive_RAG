@@ -761,6 +761,7 @@ export const clearDocuments = async ({
 // long-term preferences the question states. Only the user's message may reach
 // it, never text the agent composed.
 const recordUserExchange = async ({
+  accessScope = {},
   answer,
   documents,
   query,
@@ -776,6 +777,8 @@ const recordUserExchange = async ({
   }
 
   await recordSessionTurn({
+    // The tenant is part of the session key (rag/memory.js).
+    accessScope,
     sessionId,
     query,
     resolvedQuery,
@@ -819,6 +822,7 @@ export const recordConversationTurn = async ({
   const documents = getDocuments(normalizeDocIds(docIds), accessScope);
 
   await recordUserExchange({
+    accessScope,
     answer,
     documents,
     query,
@@ -896,6 +900,7 @@ const chat = async (docIds, query, options = {}) => {
       agentRetrievalPlan?.phase === "follow_up" && isAgentFollowUpOriginalQuestionEnabled()
         ? { resolvedQuery: query, memoryApplied: false }
         : await resolveQueryWithSessionMemory({
+            accessScope,
             sessionId,
             query,
             documents: selectedDocuments,
@@ -919,6 +924,7 @@ const chat = async (docIds, query, options = {}) => {
 
       if (memoryWrites !== false) {
         await recordUserExchange({
+          accessScope,
           answer: result.text,
           documents: selectedDocuments,
           query,

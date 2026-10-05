@@ -762,10 +762,11 @@ if (childMode === "crash-build") {
       RAG_EMBEDDING_DIMENSIONS: String(DIMENSIONS[MODEL_C]),
     });
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
-    // Eleven tenant tables (ten plus the staged ingest's outputs, migration
-    // 017), the live version's own chunk table, and the four sparse
-    // statistics tables (migration 030) of each of the two live versions.
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 20);
+    // Twelve tenant tables (ten plus the staged ingest's outputs, migration
+    // 017, and session memory, migration 031), the live version's own chunk
+    // table, and the four sparse statistics tables (migration 030) of each of
+    // the two live versions.
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 21);
     assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
     // Pruning is on by default, so tenants call migration 030's search function.
     assert.equal(report.checks.rowLevelSecurity.sparseSearchExecutable, true);

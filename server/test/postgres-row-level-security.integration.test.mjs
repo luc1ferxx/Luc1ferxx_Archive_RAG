@@ -535,17 +535,190 @@ if (!adminDatabaseUrl) {
     assert.deepEqual(raw.rows.map((row) => row.chunk_id), ["doc-alice:0", "doc-bob:0"]);
   });
 
+  test("session memory is keyed and stored per tenant, and the policy refuses another tenant's session rows", async () => {
+    const memory = await import("../rag/memory.js");
+    const sessionTable = modules.config.getSessionMemoryPostgresTable();
+    const q = modules.postgres.queryPostgres;
+    const sessionId = "shared-client-session";
+    const aliceScope = { ...ALICE, authenticated: true };
+    const bobScope = { ...BOB, authenticated: true };
+    const record = (scope, text) =>
+      modules.tenant.runWithDatabaseTenant(scope, () =>
+        memory.recordSessionTurn({
+          accessScope: scope,
+          answer: `${text} answer`,
+          documents: [],
+          query: text,
+          routeMode: "qa",
+          sessionId,
+        })
+      );
+
+    memory.configureSessionMemoryStore(null);
+    memory.resetSessionMemory();
+
+    // A pre-migration row (no owner) that has outlived the TTL, and a fresh
+    // one under the raw id a tenant without a derived key would use.
+    await q(
+      `INSERT INTO ${sessionTable} (session_id, updated_at, messages)
+       VALUES ('legacy-expired', NOW() - INTERVAL '7 hours', '[]'::jsonb),
+              ('legacy-fresh', NOW(), '[{"role":"user","text":"legacy question"}]'::jsonb)`
+    );
+
+    try {
+      await record(aliceScope, "alice question");
+      await record(bobScope, "bob question");
+
+      const aliceKey = memory.resolveSessionMemoryKey(sessionId, aliceScope);
+      const bobKey = memory.resolveSessionMemoryKey(sessionId, bobScope);
+      const owned = await q(
+        `SELECT session_id, owner_user_id, workspace_id, messages
+         FROM ${sessionTable} WHERE session_id = ANY($1::text[]) ORDER BY owner_user_id`,
+        [[aliceKey, bobKey]]
+      );
+
+      assert.notEqual(aliceKey, bobKey);
+      assert.deepEqual(
+        owned.rows.map((row) => [row.session_id, row.owner_user_id, row.workspace_id]),
+        [
+          [aliceKey, "alice", "ws-a"],
+          [bobKey, "bob", "ws-b"],
+        ]
+      );
+      assert.equal(owned.rows[0].messages[0].text, "alice question");
+      assert.equal(owned.rows[1].messages[0].text, "bob question");
+
+      // The TTL purge ran as the owner from inside alice's request, so the
+      // expired owner-less row is gone; the fresh legacy row stays.
+      const legacy = await q(
+        `SELECT session_id FROM ${sessionTable} WHERE session_id LIKE 'legacy-%' ORDER BY 1`
+      );
+      assert.deepEqual(legacy.rows.map((row) => row.session_id), ["legacy-fresh"]);
+
+      await modules.tenant.runWithDatabaseTenant(BOB, async () => {
+        // Direct SQL as the tenant role, naming alice's row by its key.
+        const visible = await q(`SELECT session_id FROM ${sessionTable} ORDER BY 1`);
+        assert.deepEqual(visible.rows.map((row) => row.session_id), [bobKey]);
+
+        const read = await q(`SELECT messages FROM ${sessionTable} WHERE session_id = $1`, [aliceKey]);
+        const updated = await q(
+          `UPDATE ${sessionTable} SET messages = '[]'::jsonb WHERE session_id = ANY($1::text[])`,
+          [[aliceKey, "legacy-fresh"]]
+        );
+        const deleted = await q(
+          `DELETE FROM ${sessionTable} WHERE session_id = ANY($1::text[])`,
+          [[aliceKey, "legacy-fresh"]]
+        );
+
+        assert.equal(read.rowCount, 0, "alice's session is invisible to bob");
+        assert.equal(updated.rowCount, 0, "bob cannot overwrite alice's or a legacy session");
+        assert.equal(deleted.rowCount, 0, "bob cannot delete alice's or a legacy session");
+
+        await assert.rejects(
+          q(
+            `INSERT INTO ${sessionTable} (session_id, messages, owner_user_id, workspace_id)
+             VALUES ('forged', '[]'::jsonb, 'alice', 'ws-a')`
+          ),
+          (error) => error.code === "42501"
+        );
+        await assert.rejects(
+          q(
+            `INSERT INTO ${sessionTable} (session_id, messages, owner_user_id, workspace_id)
+             VALUES ($1, '[]'::jsonb, 'bob', 'ws-b')
+             ON CONFLICT (session_id) DO UPDATE SET messages = EXCLUDED.messages`,
+            [aliceKey]
+          ),
+          (error) => error.code === "42501"
+        );
+
+        // A raw-id upsert over the owner-less legacy row (auth off with a
+        // client user id) is dropped instead of failing the answer.
+        assert.equal(
+          await memory.recordSessionTurn({
+            accessScope: { ...BOB, authenticated: false },
+            answer: "x",
+            documents: [],
+            query: "y",
+            sessionId: "legacy-fresh",
+          }),
+          null
+        );
+
+        // Bob's clear derives bob's key and leaves alice's session alone.
+        assert.equal(await memory.clearSessionMemory(sessionId, bobScope), true);
+        assert.equal(await memory.clearSessionMemory(sessionId, bobScope), false);
+      });
+
+      const remaining = await q(
+        `SELECT session_id, messages FROM ${sessionTable} ORDER BY session_id`
+      );
+      assert.deepEqual(remaining.rows.map((row) => row.session_id), ["legacy-fresh", aliceKey].sort());
+      assert.equal(
+        remaining.rows.find((row) => row.session_id === "legacy-fresh").messages[0].text,
+        "legacy question"
+      );
+
+      // The owner path (auth off, no tenant) still reaches a session by its
+      // raw id, as before the migration.
+      assert.equal(await memory.clearSessionMemory("legacy-fresh"), true);
+    } finally {
+      await q(`DELETE FROM ${sessionTable}`);
+      memory.resetSessionMemory();
+    }
+  });
+
   test("the health report proves the tenant role switch and every covered policy", async () => {
     const { buildHealthReport } = await import("../health.js");
     const report = await buildHealthReport();
 
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     assert.equal(report.checks.rowLevelSecurity.role, tenantRole);
-    // Ten tenant tables plus the staged ingest's outputs (migration 017), and
-    // the four sparse statistics tables of the chunk table (migration 030).
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 15);
+    // Ten tenant tables plus the staged ingest's outputs (migration 017), the
+    // four sparse statistics tables of the chunk table (migration 030), and
+    // session memory (migration 031).
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 16);
     assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
     assert.equal(report.checks.rowLevelSecurity.sparseSearchExecutable, true);
+
+    // Migration 031's policy is the exact-pair expression of the other
+    // owner_user_id/workspace_id tables (workspace artifacts), so an
+    // owner-less row is visible to no tenant.
+    const q = modules.postgres.queryPostgres;
+    const sessionTable = modules.config.getSessionMemoryPostgresTable();
+    const artifactsTable = modules.config.getWorkspaceArtifactsPostgresTable();
+    const policies = await q(
+      `SELECT tablename, roles::text[] AS roles, cmd, qual, with_check
+       FROM pg_policies
+       WHERE policyname = 'tenant_isolation' AND tablename = ANY($1::text[])`,
+      [[sessionTable, artifactsTable]]
+    );
+    const sessionPolicy = policies.rows.find((row) => row.tablename === sessionTable);
+    const artifactsPolicy = policies.rows.find((row) => row.tablename === artifactsTable);
+
+    assert.ok(sessionPolicy, "session memory carries the tenant_isolation policy");
+    assert.deepEqual(sessionPolicy.roles, [tenantRole]);
+    assert.equal(sessionPolicy.cmd, "ALL");
+    assert.equal(sessionPolicy.qual, artifactsPolicy.qual);
+    assert.equal(sessionPolicy.with_check, artifactsPolicy.with_check);
+
+    // Without that policy the check fails and names the table.
+    await q(`DROP POLICY tenant_isolation ON ${sessionTable}`);
+
+    try {
+      const missing = (await buildHealthReport()).checks.rowLevelSecurity;
+
+      assert.equal(missing.status, "error");
+      assert.deepEqual(missing.unprotectedTables, [sessionTable]);
+    } finally {
+      await q(
+        `CREATE POLICY tenant_isolation ON ${sessionTable}
+           TO ${tenantRole}
+           USING (${sessionPolicy.qual})
+           WITH CHECK (${sessionPolicy.with_check})`
+      );
+    }
+
+    assert.equal((await buildHealthReport()).checks.rowLevelSecurity.status, "ok");
   });
 
   test("POSTGRES_ROW_LEVEL_SECURITY=off keeps the owner connection", async () => {

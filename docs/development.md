@@ -40,7 +40,7 @@
 | `POST` | `/upload` | 旧版直接上传接口，限制 50 MB。 |
 | `GET` / `POST` | `/chat` | 对选中文档提问，返回 RAG answer、sources、web answer 和 AgentRAG observability。 |
 | `POST` | `/chat/stream` | 与 `/chat` 同参数的 Server-Sent Events 版本：agent 每记录一步 trace 就推送一个 `trace_step` 事件（只含 id/type/label/status/summary，不含 detail），主文档答案生成时，每写完一句就用 finalizer 同一套 claim 校验检查已生成的部分，通过的句子以 `answer_draft` 事件推送（`{ draft: { index, text } }`），模型调用重试或切换备用模型时推送 `answer_draft_reset`，客户端应清空草稿；原始 token 不会发出。草稿是临时的：最终答案经 finalizer 校验后以 `result` 事件发送，内容与 `/chat` 的 status 和 body 完全一致，客户端用它替换草稿，随后是 `done`；失败时发送 `error`。客户端断开后 run 仍会完成。前端入口是 `src/archiveApi.js` 的 `streamChatAnswer`（聊天界面在用）和底层的 `streamChat`。 |
-| `DELETE` | `/sessions/:sessionId` | 清理指定会话记忆。 |
+| `DELETE` | `/sessions/:sessionId` | 清理调用方自己租户下这个 sessionId 的会话记忆（开启 auth 时按租户推导 key，见 configuration.md 行级安全一节）。 |
 | `GET` | `/memory` | 查询长期记忆。 |
 | `POST` | `/memory` | 写入长期记忆。 |
 | `DELETE` | `/memory/:memoryId` | 删除单条长期记忆。 |

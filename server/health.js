@@ -776,7 +776,7 @@ const checkWorkspaceArtifactStoreHealth = async () => {
   }
 };
 
-// The tables migration 013 puts under the tenant_isolation policy.
+// The tables migrations 013, 015, 017 and 031 put under the tenant_isolation policy.
 const getRowLevelSecurityTables = () => [
   getDocumentsPostgresTable(),
   getDocumentChunksPostgresTable(),
@@ -790,6 +790,8 @@ const getRowLevelSecurityTables = () => [
   getIngestJobsPostgresTable(),
   // Migration 017: the staged ingest's outputs hold tenant document text.
   getIngestJobOutputsPostgresTable(),
+  // Migration 031: session memory rows carry their tenant.
+  getSessionMemoryPostgresTable(),
 ];
 
 const ROW_LEVEL_SECURITY_PROBE_TENANT = Object.freeze({ userId: "__health_probe__" });

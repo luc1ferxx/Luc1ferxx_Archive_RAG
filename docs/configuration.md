@@ -168,15 +168,16 @@ Agent experience memory 只进入 planner hints，不进入 citations/evidence�
 
 各个 store 在应用层按 user/workspace 过滤。迁移 `013_enable_tenant_row_level_security.sql` 让 PostgreSQL 也执行同样的规则，这样即使某条查询漏写了过滤条件，也读不到、写不进其他租户的行。
 
-- **覆盖的表**（9 张）：文档、切块、任务、任务事件、Agent run、run 事件、审批快照、workspace artifacts、长期记忆。文档和切块沿用 `documentMatchesAccessScope` 的规则（owner 和 workspace 都为空的行对任何租户不可见）；其余表按 `(user, workspace)` 精确匹配；长期记忆只按用户匹配。
-- **不覆盖**：会话记忆（只有 session id，没有 owner 列）；admin audit（workspace 管理员需要跨用户读取，由 admin 权限检查控制）。
+- **覆盖的表**：文档、切块、任务、任务事件、Agent run、run 事件、审批快照、workspace artifacts、长期记忆（迁移 013），ingest jobs 及其阶段产物（015/017），会话记忆（031）。文档和切块沿用 `documentMatchesAccessScope` 的规则（owner 和 workspace 都为空的行对任何租户不可见）；其余表按 `(user, workspace)` 精确匹配；长期记忆只按用户匹配。
+- **会话记忆**：session id 由客户端选择，本身不是租户边界。开启 API auth 时，`rag/memory.js` 把会话存在 `tenant:` + sha256(userId \0 workspaceId \0 sessionId) 下，所有 session store（PostgreSQL、内存、standalone）都一样，所以两个租户用同一个 sessionId 是两个会话，同一用户在两个 workspace 也是两个会话；读、写、`DELETE /sessions/:sessionId` 都按调用方的 scope 推导同一个 key（没传 scope 的调用用当前数据库租户）。迁移 031 再加 `owner_user_id` / `workspace_id` 列和 `tenant_isolation` 策略，PostgreSQL store 按当前数据库租户写 owner 列，租户角色即使直接写 SQL 也读不到、改不了、删不掉别的租户的会话行。关闭 auth 时仍用原始 sessionId（本地前端 chat 带 userId、DELETE 不带，两者要指向同一会话）；没有租户的调用方（auth 关闭，或既无 user 也无 workspace 的凭据，语句走 owner 路径、不受策略约束）传来以 `tenant:` 开头的 sessionId 时不对应任何会话，否则拿到别人的 user、workspace 和 sessionId 就能直接按推导出的 key 读写那个会话。split 部署里各 tier 的 `API_AUTH_ENABLED` 要一致，否则后台任务（存储的 scope 不带 `authenticated`）推导的 key 会不同。迁移前写入的会话行 owner 为空：租户看不到，只有 owner 路径（auth 关闭且不带 userId、系统工作）能读；升级后租户丢失升级前会话的上下文，这些行由以 owner 身份运行的 6 小时 TTL 清理删除。租户对这种不可见行的 upsert 会被策略拒绝，此时该轮不记录、回答照常返回。
+- **不覆盖**：admin audit（workspace 管理员需要跨用户读取，由 admin 权限检查控制）。
 - **生效方式**：鉴权之后的中间件把请求的访问范围放进 `AsyncLocalStorage`。`rag/postgres.js` 看到租户时，把这条语句放进一个短事务：`SET LOCAL ROLE` 切到租户角色，并设置 `archive_rag.user_id` / `archive_rag.workspace_id`，事务结束后自动恢复，不会残留在连接池里。
 - **后台任务**：任务执行和启动时的 Agent run 恢复，都以该记录自己的范围作为租户。
 - **以 owner 身份执行的工作**（`runAsDatabaseSystem`）：迁移、进程级缓存加载（文档 registry）、pgvector 表结构检查和状态统计、跨租户的恢复扫描。
 - **不带范围的请求**：鉴权关闭且没有 `x-user-id` / `x-workspace-id` 的请求没有租户，仍以 owner 身份执行，与之前一样。
 - **权限要求**：应用登录角色需要 `CREATEROLE`（或由 DBA 预先创建租户角色并授予它）。表的 owner 不受策略约束（`ENABLE`，而不是 `FORCE ROW LEVEL SECURITY`）。
 - **新表**：新增的应用表必须在迁移里 `GRANT` 给租户角色；需要隔离的表还要加 `tenant_isolation` 策略。否则租户请求访问它会报权限错误，即失败时拒绝访问。
-- **健康检查**：`checks.rowLevelSecurity` 以一个探测租户真实执行一次，确认能切到租户角色、9 张表都带策略；任一条件不满足即报 `error`。
+- **健康检查**：`checks.rowLevelSecurity` 以一个探测租户真实执行一次，确认能切到租户角色、上面列出的每张表（含会话记忆表和各索引版本的切块与 BM25 统计表）都带策略；任一条件不满足即报 `error`。
 
 已知边界：
 
