@@ -15,13 +15,18 @@
 // layout parsing must not cost ordinary paragraphs. Paired bootstrap 95% CIs
 // are Docling minus pdf.js over the same questions.
 //
+// --parsers <base>,<variant> picks the two arms (default pdfjs,docling; the
+// delta is variant minus base). pdfjs is the legacy pdf.js text with paragraph
+// detection forced off; pdfjs-paragraphs is pdf.js with PDF_PARAGRAPH_DETECTION
+// forced on (pdf-paragraphs.js), which needs no docling-serve.
+//
 // Usage (docling-serve running, a real chat model and embeddings):
 //   DOCLING_SERVE_URL=http://127.0.0.1:5010 OPENAI_BASE_URL=http://127.0.0.1:11434/v1 \
 //   OPENAI_API_KEY=ollama OPENAI_CHAT_MODEL=qwen2.5:7b OPENAI_EMBEDDING_MODEL=nomic-embed-text \
 //   RAG_EMBEDDING_DIMENSIONS=768 node evaluation/run-layout-parsing-eval.mjs
 //     [--qasper evaluation/generated/qasper/qasper-dev-v0.3.json]
 //     [--pdf-dir evaluation/generated/qasper-pdfs] [--papers 30]
-//     [--latest-name latest-layout-parsing]
+//     [--parsers pdfjs,docling] [--concurrency 1] [--latest-name latest-layout-parsing]
 // PDFs are https://arxiv.org/pdf/<paper id>, downloaded beforehand.
 
 import "dotenv/config";
@@ -34,8 +39,28 @@ import { normalizeQasperAnswer, qasperAnswerF1, toQasperPrediction } from "./qas
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
-const PARSERS = Object.freeze(["pdfjs", "docling"]);
+const DEFAULT_PARSERS = Object.freeze(["pdfjs", "docling"]);
+const KNOWN_PARSERS = Object.freeze(["pdfjs", "docling", "pdfjs-paragraphs"]);
+const PARSER_LABELS = Object.freeze({ docling: "Docling", pdfjs: "pdf.js", "pdfjs-paragraphs": "pdf.js + paragraphs" });
 const METRICS = Object.freeze(["f1", "inDocument", "inContext"]);
+
+/** `--parsers base,variant`: exactly two distinct known parsers; the delta is variant minus base. */
+export const parseParserPair = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return [...DEFAULT_PARSERS];
+  }
+
+  const parsers = String(value)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (parsers.length !== 2 || parsers[0] === parsers[1] || !parsers.every((parser) => KNOWN_PARSERS.includes(parser))) {
+    throw new Error(`--parsers takes two distinct parsers out of ${KNOWN_PARSERS.join(", ")}, base first.`);
+  }
+
+  return parsers;
+};
 
 const isTableEvidence = (qa) =>
   (qa.answers ?? []).some((entry) =>
@@ -74,11 +99,21 @@ const createSeededRandom = (seed) => {
   };
 };
 
-/** Paired bootstrap of docling minus pdfjs for one metric over rows that have both. */
-export const pairedDelta = (rows, metric, { iterations = 4000, seed = 1 } = {}) => {
+/** Paired bootstrap of variant minus base (default docling minus pdfjs) for one metric over rows that have both. */
+export const pairedDelta = (
+  rows,
+  metric,
+  { base = "pdfjs", iterations = 4000, seed = 1, variant = "docling" } = {}
+) => {
   const diffs = rows
-    .filter((row) => typeof row.pdfjs?.[metric] !== "undefined" && row.pdfjs[metric] !== null && row.docling?.[metric] !== null)
-    .map((row) => Number(row.docling[metric]) - Number(row.pdfjs[metric]));
+    .filter(
+      (row) =>
+        typeof row[base]?.[metric] !== "undefined" &&
+        row[base][metric] !== null &&
+        typeof row[variant]?.[metric] !== "undefined" &&
+        row[variant][metric] !== null
+    )
+    .map((row) => Number(row[variant][metric]) - Number(row[base][metric]));
 
   if (diffs.length === 0) {
     return { cases: 0, ci95: null, delta: null };
@@ -107,12 +142,12 @@ export const pairedDelta = (rows, metric, { iterations = 4000, seed = 1 } = {}) 
   };
 };
 
-const summarize = (rows) => {
+const summarize = (rows, parsers = DEFAULT_PARSERS) => {
   const mean = (values) =>
     values.length === 0 ? null : Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(4));
 
   return Object.fromEntries(
-    PARSERS.map((parser) => [
+    parsers.map((parser) => [
       parser,
       Object.fromEntries(
         METRICS.map((metric) => [
@@ -125,28 +160,31 @@ const summarize = (rows) => {
 };
 
 const formatMarkdown = (report) => {
+  const [base, variant] = report.config.parsers ?? DEFAULT_PARSERS;
+  const label = (parser) => PARSER_LABELS[parser] ?? parser;
   const section = (title, group) => [
     `## ${title} (${group.rows} questions)`,
     "",
-    "| Metric | pdf.js | Docling | Docling - pdf.js [95% CI] |",
+    `| Metric | ${label(base)} | ${label(variant)} | ${label(variant)} - ${label(base)} [95% CI] |`,
     "|---|---|---|---|",
     ...METRICS.map(
       (metric) =>
-        `| ${metric} | ${group.summary.pdfjs[metric]} | ${group.summary.docling[metric]} | ${group.deltas[metric].delta} [${group.deltas[metric].ci95?.join(", ") ?? "n/a"}] (n=${group.deltas[metric].cases}) |`
+        `| ${metric} | ${group.summary[base][metric]} | ${group.summary[variant][metric]} | ${group.deltas[metric].delta} [${group.deltas[metric].ci95?.join(", ") ?? "n/a"}] (n=${group.deltas[metric].cases}) |`
     ),
     "",
   ];
 
   return [
-    "# Layout parsing: pdf.js vs Docling on QASPER papers",
+    `# Layout parsing: ${label(base)} vs ${label(variant)} on QASPER papers`,
     "",
     `Generated ${report.generatedAt}; ${report.config.papers} papers (${report.config.failedPapers.length} failed to parse and were left out); chat model ${report.config.chatModel}; embedding ${report.config.embeddingModel}.`,
-    `Parse time: pdf.js ${report.parseSeconds.pdfjs}s, Docling ${report.parseSeconds.docling}s in total.`,
+    `Parse time: ${label(base)} ${report.parseSeconds[base]}s, ${label(variant)} ${report.parseSeconds[variant]}s in total.`,
     "",
     "inDocument / inContext: a gold extractive span occurs in the parsed text / in the retrieved chunks (questions with extractive answers only). f1: official QASPER answer F1.",
     "",
     ...section("Evidence in a table", report.table),
     ...section("Control: evidence in text", report.control),
+    ...(report.all ? section("All questions", report.all) : []),
   ].join("\n");
 };
 
@@ -163,6 +201,9 @@ const main = async () => {
   const pdfDirectory = path.resolve(process.cwd(), option("--pdf-dir", path.join(__dirname, "generated", "qasper-pdfs")));
   const paperCount = Math.max(1, Number(option("--papers", "30")) || 30);
   const latestName = option("--latest-name", "latest-layout-parsing");
+  const parsers = parseParserPair(option("--parsers"));
+  const [baseParser, variantParser] = parsers;
+  const concurrency = Math.max(1, Number(option("--concurrency", "1")) || 1);
   const qasper = JSON.parse(await readFile(qasperPath, "utf8"));
   const paperIds = selectTablePapers(qasper, paperCount);
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "layout-parsing-"));
@@ -178,10 +219,11 @@ const main = async () => {
   const { loadPdfPagesWithDocling } = await import("../rag/docling-parser.js");
   const parseWith = {
     docling: (filePath) => loadPdfPagesWithDocling(filePath),
-    pdfjs: async (filePath) => (await loadPdfDocument(filePath)).pages,
+    pdfjs: async (filePath) => (await loadPdfDocument(filePath, { paragraphDetection: false })).pages,
+    "pdfjs-paragraphs": async (filePath) => (await loadPdfDocument(filePath, { paragraphDetection: true })).pages,
   };
   const parsedText = new Map();
-  const parseSeconds = { docling: 0, pdfjs: 0 };
+  const parseSeconds = Object.fromEntries(parsers.map((parser) => [parser, 0]));
   const failedPapers = [];
   const rows = [];
 
@@ -199,7 +241,7 @@ const main = async () => {
       const parsed = {};
 
       try {
-        for (const parser of PARSERS) {
+        for (const parser of parsers) {
           const started = Date.now();
 
           parsed[parser] = await parseWith[parser](filePath);
@@ -210,7 +252,7 @@ const main = async () => {
         continue;
       }
 
-      for (const parser of PARSERS) {
+      for (const parser of parsers) {
         const docId = `${paperId}__${parser}`;
 
         parsedText.set(docId, parsed[parser].map((page) => page.text).join("\n"));
@@ -227,12 +269,13 @@ const main = async () => {
         (qasper[paperId].qas ?? []).filter(isAnswerable).map((qa) => ({ paperId, qa }))
       );
 
-    for (const [index, { paperId, qa }] of questions.entries()) {
+    const askQuestion = async (index) => {
+      const { paperId, qa } = questions[index];
       const references = (qa.answers ?? []).map((entry) => describeQasperAnswer(entry.answer)?.text).filter(Boolean);
       const spans = (qa.answers ?? []).flatMap((entry) => entry.answer?.extractive_spans ?? []).filter(Boolean);
       const row = { group: isTableEvidence(qa) ? "table" : "control", paperId, question: qa.question, questionId: qa.question_id };
 
-      for (const parser of PARSERS) {
+      for (const parser of parsers) {
         const docId = `${paperId}__${parser}`;
         const result = await rag.default([docId], qa.question, {
           accessScope,
@@ -249,22 +292,41 @@ const main = async () => {
         };
       }
 
-      rows.push(row);
+      rowsByIndex[index] = row;
+      completed += 1;
       console.log(
-        `${String(index + 1).padStart(3)}/${questions.length} ${row.group.padEnd(7)} f1 ${row.pdfjs.f1.toFixed(2)} -> ${row.docling.f1.toFixed(2)}`
+        `${String(completed).padStart(3)}/${questions.length} ${row.group.padEnd(7)} f1 ${row[baseParser].f1.toFixed(2)} -> ${row[variantParser].f1.toFixed(2)}`
       );
-    }
+    };
+    const rowsByIndex = new Array(questions.length);
+    let completed = 0;
+    let nextIndex = 0;
+
+    // Questions in flight (--concurrency, default 1); rows keep question order.
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, questions.length) }, async () => {
+        while (nextIndex < questions.length) {
+          const index = nextIndex;
+
+          nextIndex += 1;
+          await askQuestion(index);
+        }
+      })
+    );
+    rows.push(...rowsByIndex);
   } finally {
     await rm(tempRoot, { force: true, recursive: true });
   }
 
   const group = (name) => {
-    const groupRows = rows.filter((row) => row.group === name);
+    const groupRows = name === "all" ? rows : rows.filter((row) => row.group === name);
 
     return {
-      deltas: Object.fromEntries(METRICS.map((metric) => [metric, pairedDelta(groupRows, metric)])),
+      deltas: Object.fromEntries(
+        METRICS.map((metric) => [metric, pairedDelta(groupRows, metric, { base: baseParser, variant: variantParser })])
+      ),
       rows: groupRows.length,
-      summary: summarize(groupRows),
+      summary: summarize(groupRows, parsers),
     };
   };
   const report = {
@@ -274,8 +336,11 @@ const main = async () => {
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
       failedPapers,
       paperIds,
+      concurrency,
       papers: paperIds.length,
+      parsers,
     },
+    all: group("all"),
     control: group("control"),
     generatedAt: new Date().toISOString(),
     parseSeconds: Object.fromEntries(Object.entries(parseSeconds).map(([key, value]) => [key, Number(value.toFixed(1))])),

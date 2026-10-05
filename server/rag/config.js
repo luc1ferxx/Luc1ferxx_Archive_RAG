@@ -77,6 +77,14 @@ export const getPdfParser = () => {
   return value;
 };
 
+// pdf.js only: rebuild paragraphs from line geometry (pdf-paragraphs.js), so a
+// soft-wrapped paragraph reaches the chunker as one unit instead of one unit
+// per visual line. On by default since the QASPER pdfjs vs pdfjs-paragraphs
+// run met the pre-declared non-inferiority rule (docs/evaluation.md); false
+// keeps the legacy page text byte for byte. Docling output is never touched.
+export const isPdfParagraphDetectionEnabled = () =>
+  toBoolean(process.env.PDF_PARAGRAPH_DETECTION, true);
+
 // docling-serve listens on 5001 inside its container, the backend's own
 // default port, so the documented local mapping is 5010.
 export const getDoclingServeUrl = () =>

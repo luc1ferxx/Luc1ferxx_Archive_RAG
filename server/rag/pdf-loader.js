@@ -10,8 +10,17 @@ import {
   version as pdfJsVersion,
   VerbosityLevel,
 } from "pdfjs-dist/legacy/build/pdf.mjs";
-import { getDoclingFallback, getPdfParser } from "./config.js";
+import {
+  getDoclingFallback,
+  getPdfParser,
+  isPdfParagraphDetectionEnabled,
+} from "./config.js";
 import { loadPdfPagesWithDocling } from "./docling-parser.js";
+import {
+  buildHyphenationVocabulary,
+  buildPdfTextLines,
+  renderPdfParagraphText,
+} from "./pdf-paragraphs.js";
 
 const normalizePageText = (text = "") =>
   String(text)
@@ -23,10 +32,13 @@ const normalizePageText = (text = "") =>
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-const renderPdfPageText = async (pageData) => {
-  const textContent = await pageData.getTextContent({
+const readPdfPageTextContent = (pageData) =>
+  pageData.getTextContent({
     disableNormalization: false,
   });
+
+const renderPdfPageText = async (pageData) => {
+  const textContent = await readPdfPageTextContent(pageData);
   let text = "";
   let lastY = null;
 
@@ -67,10 +79,14 @@ export const loadPdfDocument = async (
   {
     maxPages = 0,
     includeMetadata = false,
+    // PDF_PARAGRAPH_DETECTION: rebuild paragraphs from line geometry
+    // (pdf-paragraphs.js). Off keeps the legacy one-line-per-"\n" text.
+    paragraphDetection = isPdfParagraphDetectionEnabled(),
   } = {}
 ) => {
   const dataBuffer = await readFile(filePath);
   const pages = [];
+  const pageLines = [];
   let pageCount = 0;
   let info = null;
   const loadingTask = getDocument({
@@ -95,14 +111,28 @@ export const loadPdfDocument = async (
       const pageData = await document.getPage(pageNumber);
 
       try {
-        const text = await renderPdfPageText(pageData);
-        pages.push({
-          pageNumber,
-          text: normalizePageText(text),
-        });
+        if (paragraphDetection) {
+          const textContent = await readPdfPageTextContent(pageData);
+          pageLines.push(buildPdfTextLines(textContent.items));
+          pages.push({ pageNumber, text: "" });
+        } else {
+          const text = await renderPdfPageText(pageData);
+          pages.push({
+            pageNumber,
+            text: normalizePageText(text),
+          });
+        }
       } finally {
         pageData.cleanup();
       }
+    }
+
+    if (paragraphDetection) {
+      // A line-end hyphen is judged against the whole document's spelling.
+      const vocabulary = buildHyphenationVocabulary(pageLines);
+      pages.forEach((page, index) => {
+        page.text = renderPdfParagraphText(pageLines[index], { vocabulary });
+      });
     }
 
     if (includeMetadata) {

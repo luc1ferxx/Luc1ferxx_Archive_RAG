@@ -178,7 +178,7 @@ npm run eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json
 这是丢字修复，不是检索优化。测量前写下的成功标准是：55 个本地 PDF 上没进任何 chunk 的非空白字符降到 0，剩下的逐个解释。这些数字不说明检索或答案变好了。
 
 - 数据：`server/evaluation/generated/qasper-pdfs/` 的 30 篇 QASPER arXiv 论文，加上 25 个合成评测 PDF，共 336 页。
-- 解析：`loadPdfPages`，pdf.js 默认设置，两边用同一份页面文本。
+- 解析：`loadPdfPages`，pdf.js 默认设置（当时还没有段落识别，即现在的 `PDF_PARAGRAPH_DETECTION=false`），两边用同一份页面文本。
 - 切块：入库路径的 `chunkDocumentPages`（`rag/index.js`），structured / 900 / 180。改前是 `git archive HEAD`（9a988c6f）的副本，改后是工作区。
 - 主口径：逐页对齐。把页面按切块器自己的段落单元（`splitParagraphs` 和 `splitOversizedParagraph`）拆开，按阅读顺序和 chunk 里的段落一一对上，统计没对上的单元。
 - 辅助口径：`findUnindexedPageText`。它只看 token 在不在本页某个 chunk 里，所以数字更小。
@@ -1006,6 +1006,52 @@ train 上（400 题）的损失拆解：
   - 对照组也没有变差。
 - **代价很大**：30 篇论文，Docling 在 CPU 上解析共 350 秒（一篇 10 页的论文约 12 秒），pdf.js 共 1.4 秒；镜像压缩后约 2 GB。
 - **结论**：默认仍用 pdf.js。`PDF_PARSER=docling` 作为可选项，适合扫描件（`DOCLING_OCR=true`）或表格很多、需要列名的文档。要在这类数据上证明 Docling 更好，需要更多带标注原文的表格题，或者用能读表格结构的更强模型。
+
+### pdf.js 段落识别（`PDF_PARAGRAPH_DETECTION`，2026-10-04）
+
+**改了什么**：pdf.js 每个视觉行给一个换行，一段话折成几行，切块器就把每一行当成一个单元。`PDF_PARAGRAPH_DETECTION` 按行的几何信息切段落、把段内软换行并回去（规则见 docs/configuration.md）。只改 pdf.js 路径，Docling 和切块器不变。
+
+**事先定的规则**（测量前写下）：四条都满足才改为默认开启。
+- (a) 55 个本地 PDF 上开启后没有未入索引的文字；
+- (b) 30 篇 QASPER dev 论文的全部可回答题合并计算，"标注原文出现在检索给模型的上下文里"（inContext）配对 bootstrap 95% CI（4000 次，seed 1）下界 > −0.02，或 CI 含 0 且均值不为负；
+- (c) 官方答案 F1，同 (b)；
+- (d) 确定性合成评测（near-duplicate、compare-hard）和锁定基线不变。
+
+**(a) 文字不丢**：开启后丢失单元 0、丢失非空白字符 0，`findUnindexedPageText` 为 0。逐字符对齐脚本还有残差（关闭 3512、开启 2558），抽查是重复字符串造成的对齐误差（例如某句在页面里出现 8 次、chunk 里 9 次），关闭时同样存在。
+
+**文本和切块**（55 个 PDF，336 页，structured/900/180）：
+
+| 指标 | 关闭 | 开启 |
+| --- | --- | --- |
+| 每页行数 | 65.6 | 31.3 |
+| 每页段落数 | 1.05 | 20.5 |
+| chunk 数 | 2557 | 2338 |
+| 平均 chunk 长度 | 486 | 643 |
+| 从句中开始的 chunk | 12.8% | 5.3% |
+| 结尾不在句末的 chunk | 68.9% | 48.1% |
+| 超过 900 字符的 chunk | 0 | 183（最长 1910） |
+
+非空白字符从 859089 变成 859472，多出来的是保留下来的复合词连字符。chunk 变大的原因在切块器：段落重叠会把上一段整段带进下一个 chunk，现在一个单元是一整段而不是一行，chunk 文本总量多了 21%。这次没有改切块器。
+
+**(b)(c) QASPER**（30 篇论文、149 道可回答题，qwen2.5:7b + nomic-embed-text，`npm run eval:layout-parsing -- --parsers pdfjs,pdfjs-paragraphs --concurrency 2`，差值是开启减关闭）：
+
+| 分组 | 指标 | 关闭 | 开启 | 差 [95% CI] | n |
+| --- | --- | --- | --- | --- | --- |
+| 全部（主指标） | 官方答案 F1 | 0.1996 | 0.1996 | −0.0001 [−0.0185, +0.0204] | 149 |
+| 全部（主指标） | inContext | 0.3605 | 0.3605 | 0 [−0.0465, +0.0465] | 86 |
+| 全部 | 原文出现在解析文本里 | 0.8953 | 0.8953 | 0 [0, 0] | 86 |
+| 表格题 | 官方答案 F1 | 0.1599 | 0.1546 | −0.0053 [−0.0293, +0.0180] | 69 |
+| 表格题 | inContext | 0.3043 | 0.3478 | +0.0435 [0, +0.1304] | 23 |
+| 正文题 | 官方答案 F1 | 0.2339 | 0.2383 | +0.0044 [−0.0237, +0.0357] | 80 |
+| 正文题 | inContext | 0.3810 | 0.3651 | −0.0159 [−0.0635, +0.0317] | 63 |
+
+- (c) F1 的下界 −0.0185 > −0.02，按第一条通过，但离界限很近。
+- (b) inContext 的下界 −0.0465 没有达到 −0.02；按规则的第二条（CI 含 0、均值 0 不为负）通过。只有 4 对不一致（2 对变成命中、2 对变成未命中），统计功效很弱。
+- 所有 CI 都含 0，不能说哪一边更好。F1 变化的 73 题里升 37、降 36，弃答 67 对 64，基本是模型输出的随机差异；同一解析器重复跑的噪声没有测。
+
+**(d) 确定性评测**：flag 开关两次 near-duplicate 和 compare-hard 的结果除路径、id 和耗时外相同，near-duplicate 与锁定基线 `quality-near-duplicate-deterministic-v1` 的 metrics、config、cases 一致。但合成评测的 PDF 在开关下文本完全相同（24/24），所以这两项其实没有覆盖这个开关；段落行为只由 `test/pdf-paragraphs.test.mjs` 和 `test/load-bench-pdf.test.mjs` 验证。
+
+**结论**：四条都满足，`PDF_PARAGRAPH_DETECTION` 改为默认开启，`false` 恢复旧文本。理由是切块更贴近句子边界、文字不丢，而问答指标没有显著变差；不是因为测出了提升。已入库的文档要跑 `npm run vector:reindex -- --from documents --apply` 才会换成新切块。待办：切块器的段落重叠要不要限长（现在有 chunk 超过 `RAG_CHUNK_SIZE`）。
 
 ### 交叉编码器重排（BAAI/bge-reranker-v2-m3）
 

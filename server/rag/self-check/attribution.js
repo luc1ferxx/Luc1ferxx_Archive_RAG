@@ -12,6 +12,7 @@ import {
   STRUCTURAL_SECTION_HEADING_PATTERN,
 } from "./patterns.js";
 import { splitModalityClauses } from "./modality.js";
+import { isWrappedLineContinuation } from "../wrapped-lines.js";
 import {
   copyArray,
   copyObjectArray,
@@ -358,8 +359,7 @@ const computeJoinWrappedLines = (text = "") => {
       return line;
     }
 
-    const previous = lines[index - 1];
-    const wrapped = !/[.!?。！？:：;；]$/.test(previous) && /^[a-z]/.test(line);
+    const wrapped = isWrappedLineContinuation(lines[index - 1], line);
 
     return `${joined}${wrapped ? " " : "\n"}${line}`;
   }, "");

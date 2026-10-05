@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   containsGoldSpan,
   pairedDelta,
+  parseParserPair,
   selectTablePapers,
 } from "../evaluation/run-layout-parsing-eval.mjs";
 
@@ -47,4 +48,26 @@ test("paired deltas use only questions both parsers scored", () => {
   assert.ok(f1.ci95[0] >= 0 && f1.ci95[1] <= 1);
   assert.deepEqual(inContext, { cases: 1, ci95: [1, 1], delta: 1 });
   assert.deepEqual(pairedDelta([], "f1"), { cases: 0, ci95: null, delta: null });
+});
+
+test("--parsers picks two distinct known parsers, base first; pdf.js vs Docling by default", () => {
+  assert.deepEqual(parseParserPair(undefined), ["pdfjs", "docling"]);
+  assert.deepEqual(parseParserPair("pdfjs, pdfjs-paragraphs"), ["pdfjs", "pdfjs-paragraphs"]);
+  assert.throws(() => parseParserPair("pdfjs"), /two distinct parsers/);
+  assert.throws(() => parseParserPair("pdfjs,pdfjs"), /two distinct parsers/);
+  assert.throws(() => parseParserPair("pdfjs,tika"), /two distinct parsers/);
+});
+
+test("paired deltas follow the chosen pair: variant minus base", () => {
+  const rows = [
+    { pdfjs: { f1: 0.25 }, "pdfjs-paragraphs": { f1: 0.75 } },
+    { pdfjs: { f1: 0.5 }, "pdfjs-paragraphs": { f1: null } },
+    { pdfjs: { f1: 0.5 } },
+  ];
+
+  assert.deepEqual(pairedDelta(rows, "f1", { base: "pdfjs", iterations: 50, variant: "pdfjs-paragraphs" }), {
+    cases: 1,
+    ci95: [0.5, 0.5],
+    delta: 0.5,
+  });
 });

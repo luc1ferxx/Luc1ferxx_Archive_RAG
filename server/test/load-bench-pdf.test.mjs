@@ -19,6 +19,11 @@ const parse = async (t, bytes) => {
   return loadPdfDocument(filePath, { includeMetadata: true });
 };
 
+// One sentence per line either way: PDF_PARAGRAPH_DETECTION only adds blank
+// lines between these lines (each ends a sentence, so none is rejoined), and
+// the chunker splits on any run of line breaks.
+const pageTexts = (parsed) => parsed.pages.map((page) => page.text.replace(/\n{2,}/g, "\n"));
+
 test("a hand-written PDF parses with pdf.js into one line per sentence", async (t) => {
   const pdf = buildTextPdf({
     pages: [
@@ -35,7 +40,7 @@ test("a hand-written PDF parses with pdf.js into one line per sentence", async (
 
   assert.equal(parsed.pageCount, 2);
   assert.deepEqual(
-    parsed.pages.map((page) => page.text),
+    pageTexts(parsed),
     ["First page, first line.\nParentheses (like these) and a back\\slash survive.", "Second page only line."]
   );
   assert.equal(parsed.info?.Title, "Load test (sample)");
@@ -76,7 +81,7 @@ test("ingest documents are deterministic, distinct per tag and parse page by pag
 
   assert.equal(parsed.pageCount, 2);
   assert.deepEqual(
-    parsed.pages.map((page) => page.text),
+    pageTexts(parsed),
     documents[1].pageLines.map((lines) => lines.join("\n"))
   );
 });
