@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   real-model-eval:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
       OLLAMA_MODELS: /home/runner/.ollama/models
@@ -51,10 +51,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -64,22 +64,30 @@ jobs:
         run: npm ci
 
       - name: Cache Ollama models
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /home/runner/.ollama/models
           key: ollama-models-${{ env.OPENAI_CHAT_MODEL }}-nomic-embed-text
 
       - name: Install and start Ollama
+        env:
+          # Pinned so a new Ollama release cannot change results or break the
+          # job without a commit; bump it on purpose.
+          OLLAMA_VERSION: 0.40.3
         run: |
-          curl -fsSL https://ollama.com/install.sh | sh
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$RUNNER_TEMP/ollama-install.sh" https://ollama.com/install.sh
+          for attempt in 1 2 3; do sh "$RUNNER_TEMP/ollama-install.sh" && break; [ "$attempt" = 3 ] && exit 1; sleep 30; done
           # The installer starts a system service with its own model store;
           # serve as the runner user instead so the model cache above applies.
           sudo systemctl stop ollama || true
           mkdir -p "$OLLAMA_MODELS"
           nohup ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
           for attempt in $(seq 1 60); do curl -sf http://127.0.0.1:11434/api/tags > /dev/null && break; sleep 1; done
-          ollama pull nomic-embed-text
-          ollama pull "$OPENAI_CHAT_MODEL"
+          curl -sf http://127.0.0.1:11434/api/tags > /dev/null || { tail -n 50 "$RUNNER_TEMP/ollama.log"; exit 1; }
+          # A restored cache already holds both models, so the registry is
+          # needed only on a cache miss; retry it there rather than fail.
+          ollama show nomic-embed-text > /dev/null 2>&1 || for attempt in 1 2 3; do ollama pull nomic-embed-text && break; [ "$attempt" = 3 ] && exit 1; sleep 30; done
+          ollama show "$OPENAI_CHAT_MODEL" > /dev/null 2>&1 || for attempt in 1 2 3; do ollama pull "$OPENAI_CHAT_MODEL" && break; [ "$attempt" = 3 ] && exit 1; sleep 30; done
 
       - name: Real-model quality verification
         run: npm run verify:quality
@@ -87,7 +95,7 @@ jobs:
       - name: Fetch and convert QASPER dev
         run: |
           mkdir -p evaluation/generated/qasper
-          curl -fsSL -o "$RUNNER_TEMP/qasper.tgz" https://qasper-dataset.s3.us-west-2.amazonaws.com/qasper-train-dev-v0.3.tgz
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$RUNNER_TEMP/qasper.tgz" https://qasper-dataset.s3.us-west-2.amazonaws.com/qasper-train-dev-v0.3.tgz
           tar -xzf "$RUNNER_TEMP/qasper.tgz" -C evaluation/generated/qasper
           npm run corpus:qasper -- --input evaluation/generated/qasper/qasper-dev-v0.3.json --papers all --output evaluation/generated/qasper-dev.json
 
@@ -100,7 +108,7 @@ jobs:
 
       - name: Upload real-model reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: real-model-eval
           if-no-files-found: warn

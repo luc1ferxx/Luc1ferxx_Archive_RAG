@@ -190,9 +190,9 @@ export const getRequestCallOptions = (defaultTimeoutMs) => {
  * One request's cancellation: an AbortController that aborts with a deadline
  * error at `deadlineAt` (a timer that never keeps the process alive) or with
  * `cancel(reason)`. `dispose()` clears the timer; call it once the request is
- * done.
+ * done. `now` is the wall clock the deadline is read against.
  */
-export const createRequestCancellation = ({ deadlineAt = null } = {}) => {
+export const createRequestCancellation = ({ deadlineAt = null, now = Date.now } = {}) => {
   const controller = new AbortController();
   const boundDeadlineAt = toDeadlineAt(deadlineAt);
   let timer = null;
@@ -206,15 +206,23 @@ export const createRequestCancellation = ({ deadlineAt = null } = {}) => {
   // A timer longer than MAX_TIMER_DELAY_MS fires after 1 ms in Node (a
   // TimeoutOverflowWarning), which would cancel a request with a far deadline
   // (AGENT_REQUEST_TIMEOUT_MS has no upper bound) at once: such a deadline is
-  // waited for in steps.
+  // waited for in steps. Node also runs timers on its monotonic loop clock,
+  // which can fire one a millisecond before the wall clock reaches the
+  // deadline (seen on Node 20, 22 and 24): every fire reads the wall clock
+  // again and waits out what is left, so the signal never aborts before
+  // getRequestCancellation() would say the deadline passed.
   const arm = () => {
-    const delayMs = Math.max(0, Math.ceil(boundDeadlineAt - Date.now()));
+    const delayMs = Math.max(0, Math.ceil(boundDeadlineAt - now()));
 
-    timer =
-      delayMs > MAX_TIMER_DELAY_MS
-        ? setTimeout(arm, MAX_TIMER_DELAY_MS)
-        : setTimeout(() => cancel(REQUEST_CANCELLATION_REASONS.deadlineExceeded), delayMs);
+    timer = setTimeout(onTimer, Math.min(delayMs, MAX_TIMER_DELAY_MS));
     timer.unref?.();
+  };
+  const onTimer = () => {
+    if (now() < boundDeadlineAt) {
+      arm();
+    } else {
+      cancel(REQUEST_CANCELLATION_REASONS.deadlineExceeded);
+    }
   };
 
   if (boundDeadlineAt !== null) {

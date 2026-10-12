@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   release-evidence:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -49,12 +49,12 @@ jobs:
 
     steps:
       - name: Checkout target commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.EVAL_TARGET_COMMIT_SHA }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -108,7 +108,7 @@ jobs:
 
       - name: Upload release evidence bundle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-evidence-${{ env.EVAL_TARGET_COMMIT_SHA }}
           path: |

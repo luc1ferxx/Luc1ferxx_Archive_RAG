@@ -3,11 +3,15 @@
 import { spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const serverDirectory = path.join(__dirname, "..");
+// Preloaded into every test file's process; see the file for why.
+const keepEventLoopAliveUrl = pathToFileURL(
+  path.join(__dirname, "keep-event-loop-alive.mjs")
+).href;
 
 const collectTestFiles = async () => {
   const entries = await readdir(__dirname, {
@@ -27,8 +31,8 @@ const runTests = async (testFiles) =>
     // Each test file runs in its own child process (node --test default
     // isolation), so per-process state (process.env, globalThis.fetch,
     // module singletons) never leaks across files even when they run
-    // concurrently.
-    const child = spawn(process.execPath, ["--test", ...testFiles], {
+    // concurrently. node --test passes --import on to each of them.
+    const child = spawn(process.execPath, ["--import", keepEventLoopAliveUrl, "--test", ...testFiles], {
       cwd: serverDirectory,
       env: process.env,
       stdio: "inherit",

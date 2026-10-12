@@ -105,7 +105,7 @@ test("quality gate workflow runs frontend checks in an independent root job", as
 
   const frontendJob = frontendJobMatch[0];
 
-  assert.match(frontendJob, /runs-on:\s*ubuntu-latest/);
+  assert.match(frontendJob, /runs-on:\s*ubuntu-24\.04/);
   assert.match(frontendJob, /node-version:\s*"22"/);
   assert.match(frontendJob, /cache-dependency-path:\s*package-lock\.json/);
   assert.doesNotMatch(frontendJob, /working-directory:\s*server/);
@@ -297,7 +297,7 @@ test("quality gate workflow preserves diagnostics after an eval failure", async 
 
   assert.match(workflow, /name:\s*Upload current quality evidence/);
   assert.match(workflow, /if:\s*always\(\)/);
-  assert.match(workflow, /uses:\s*actions\/upload-artifact@v4/);
+  assert.match(workflow, /uses:\s*actions\/upload-artifact@v7/);
   assert.match(
     workflow,
     /server\/evaluation\/results\/latest-current-quality-gate\.\*/
@@ -359,7 +359,7 @@ test("planner real provider workflow runs a required scheduled gate", async () =
   );
   assert.match(workflow, /server\/evaluation\/results\/latest-rollout-readiness\.\*/);
   assert.match(workflow, /server\/evaluation\/results\/latest-runtime-smoke\.\*/);
-  assert.match(workflow, /actions\/upload-artifact@v4/);
+  assert.match(workflow, /actions\/upload-artifact@v7/);
 });
 
 test("robust eval suite is manual-only because the scheduled release gate owns the same suite", async () => {
@@ -389,7 +389,7 @@ test("robust eval suite is manual-only because the scheduled release gate owns t
     workflow.includes(pinnedArxivCorpusArtifactPath),
     "the robust artifact must include the exact pinned corpus used by the report"
   );
-  assert.match(workflow, /actions\/upload-artifact@v4/);
+  assert.match(workflow, /actions\/upload-artifact@v7/);
 });
 
 test("evaluation docs identify release evidence as the only weekly robust owner", async () => {
@@ -431,7 +431,7 @@ test("release evidence workflow pins manual and scheduled runs to one target SHA
   assert.match(workflow, /EVAL_EVIDENCE_PROFILE:\s*release/);
   assert.match(
     workflow,
-    /uses:\s*actions\/checkout@v4[\s\S]*ref:\s*\$\{\{\s*env\.EVAL_TARGET_COMMIT_SHA\s*\}\}/
+    /uses:\s*actions\/checkout@v7[\s\S]*ref:\s*\$\{\{\s*env\.EVAL_TARGET_COMMIT_SHA\s*\}\}/
   );
 });
 
@@ -567,7 +567,7 @@ test("release evidence workflow uploads the complete JSON and Markdown evidence 
   const workflow = await readFile(releaseEvidenceWorkflowPath, "utf8");
 
   assert.match(workflow, /if:\s*always\(\)/);
-  assert.match(workflow, /uses:\s*actions\/upload-artifact@v4/);
+  assert.match(workflow, /uses:\s*actions\/upload-artifact@v7/);
   assert.match(
     workflow,
     /name:\s*release-evidence-\$\{\{\s*env\.EVAL_TARGET_COMMIT_SHA\s*\}\}/
@@ -659,5 +659,5 @@ test("real model eval workflow runs a real local model with no API key and gates
     assert.match(content, new RegExp(`npm run ${script}`));
   }
   assert.match(content, /eval:qasper-retrieval -- .*--min-hit-at-all 0\.6/);
-  assert.match(content, /if: always\(\)\s*\n\s*uses: actions\/upload-artifact@v4/);
+  assert.match(content, /if: always\(\)\s*\n\s*uses: actions\/upload-artifact@v7/);
 });

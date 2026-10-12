@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
-import test, { after, before } from "node:test";
+import test from "node:test";
 
 import {
   classifyDependencyOutage,
@@ -54,16 +54,6 @@ import {
   ServiceUnavailableError,
 } from "../rag/service-client.js";
 import { createTaskService, TASK_STATUSES } from "../rag/tasks.js";
-
-// The deadline and collector timers are unref'd so they never hold a process
-// open. A test that awaits one needs something else keeping the event loop
-// alive: on Node 20 (CI) the loop drains first and every later test in the
-// file is cancelled.
-let keepEventLoopAlive = null;
-before(() => {
-  keepEventLoopAlive = setInterval(() => {}, 60_000);
-});
-after(() => clearInterval(keepEventLoopAlive));
 
 // The request-scoped deadline and cancellation signal (rag/request-deadline.js)
 // and the outage classification (rag/dependency-outage.js), unit by unit:
@@ -318,6 +308,48 @@ test("a deadline further away than setTimeout can wait (AGENT_REQUEST_TIMEOUT_MS
   );
 
   assert.deepEqual(aborted, { aborted: false, budget: 60_000 });
+});
+
+test("a deadline timer that fires before the wall clock reaches the deadline waits out the rest instead of cancelling", { timeout: 15_000 }, async () => {
+  // Node runs timers on its monotonic loop clock and can fire one a
+  // millisecond before Date.now() reaches the deadline. This wall clock moves
+  // only when the test moves it, so the first fire always comes early; each
+  // read of it is observed through a deferred, never a timing.
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + 20;
+  let clock = startedAt;
+  let onRead = null;
+  const now = () => {
+    onRead?.(clock);
+    return clock;
+  };
+  const nextRead = () =>
+    new Promise((resolve) => {
+      onRead = (reading) => {
+        onRead = null;
+        resolve(reading);
+      };
+    });
+  const cancellation = createRequestCancellation({ deadlineAt, now });
+  const aborted = new Promise((resolve) => cancellation.signal.addEventListener("abort", resolve, { once: true }));
+  const earlyFire = nextRead();
+
+  clock = deadlineAt - 1;
+  // The first fire either reads the clock again or, if it trusts the timer,
+  // aborts.
+  await Promise.race([earlyFire, aborted]);
+  assert.equal(cancellation.signal.aborted, false, "a timer that fires early is not the deadline");
+  assert.equal(await earlyFire, deadlineAt - 1, "the timer fired and read the clock");
+  assert.equal(
+    runWithRequestCancellation(cancellation, () => getRequestCancellation({ now })),
+    null,
+    "the signal agrees with getRequestCancellation"
+  );
+
+  clock = deadlineAt;
+  await aborted;
+  assert.equal(cancellation.signal.reason.reason, REQUEST_CANCELLATION_REASONS.deadlineExceeded);
+  cancellation.dispose();
 });
 
 test("with AGENT_CANCEL_ON_DISCONNECT on, a client that left before the route bound its run cancels it from the start", async (t) => {

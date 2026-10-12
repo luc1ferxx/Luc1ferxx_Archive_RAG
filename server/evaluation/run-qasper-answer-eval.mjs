@@ -212,12 +212,27 @@ const main = async () => {
       const filePath = path.join(sourceDirectory, `${doc.key}.txt`);
 
       await writeFile(filePath, doc.pages.join("\n\n"), "utf8");
-      await rag.ingestDocumentPages({
-        docId: doc.key,
-        filePath,
-        fileName: doc.fileName,
-        pages: doc.pages.map((text, index) => ({ pageNumber: index + 1, text })),
-      });
+
+      // A local embedding server can restart its runner mid-run and report
+      // it as a 400; a long ingest should not be lost to one such blip.
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await rag.ingestDocumentPages({
+            docId: doc.key,
+            filePath,
+            fileName: doc.fileName,
+            pages: doc.pages.map((text, index) => ({ pageNumber: index + 1, text })),
+          });
+          break;
+        } catch (error) {
+          if (attempt >= 3) {
+            throw error;
+          }
+
+          console.warn(`ingest ${doc.key} failed (${error.message}); retrying`);
+          await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+        }
+      }
     }
 
     const accessScope = { authenticated: false, userId: "", workspaceId: "" };

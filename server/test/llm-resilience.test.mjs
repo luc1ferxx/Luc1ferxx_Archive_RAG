@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import http from "node:http";
 import test from "node:test";
 import {
@@ -171,22 +172,64 @@ test("once a down primary opens its circuit, later calls go straight to the fall
   assert.deepEqual(server.stats().byModel, { "resilience-fallback": 3, "resilience-primary": 5 });
 });
 
+// The delays of the timers a call schedules (a retry backoff is one). Only timers
+// set in the call's own async context count, not those other work in the process
+// sets meanwhile, such as the keep-alive sockets of earlier requests.
+const recordTimerDelays = async (call) => {
+  const insideCall = new AsyncLocalStorage();
+  const originalSetTimeout = globalThis.setTimeout;
+  const delays = [];
+
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (insideCall.getStore()) delays.push(delay);
+    return originalSetTimeout(callback, delay, ...args);
+  };
+
+  try {
+    await insideCall.run(true, call);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+
+  return delays;
+};
+
+// Each backoff lies in [half its window, its window), whatever the jitter.
+const isBackoffDelay = (delay, attempt) =>
+  delay >= computeRetryDelayMs({ attempt, random: () => 0 }) &&
+  delay < computeRetryDelayMs({ attempt, random: () => 1 });
+
 test("without a fallback, an open circuit fails fast instead of retrying a dead model", async (t) => {
   const server = await withFaultServer(t, { fallback: "" });
   server.setScenario(scenario("primary_model_down"), 1);
 
-  await assert.rejects(completeTextWithMetadata("ping"), /overloaded/);
+  // A call that does retry shows the recorder sees a backoff: one timer in each
+  // of its three backoff windows.
+  const retryingDelays = await recordTimerDelays(() =>
+    assert.rejects(completeTextWithMetadata("ping"), /overloaded/)
+  );
+  assert.ok(
+    [0, 1, 2].every((attempt) => retryingDelays.some((delay) => isBackoffDelay(delay, attempt))),
+    `the recorder sees each backoff (timers: ${retryingDelays.join(", ")})`
+  );
   await assert.rejects(completeTextWithMetadata("ping"), /Circuit open/);
   const requestsBefore = server.stats().requests;
-  const started = performance.now();
 
-  await assert.rejects(
-    completeTextWithMetadata("ping"),
-    (error) => error.code === "CIRCUIT_OPEN" && error.status === 503
+  // No backoff is shown by the timers the call set, not by its wall-clock time,
+  // which a GC or scheduling pause on a shared CI runner can push past any bound.
+  const openDelays = await recordTimerDelays(() =>
+    assert.rejects(
+      completeTextWithMetadata("ping"),
+      (error) => error.code === "CIRCUIT_OPEN" && error.status === 503
+    )
   );
 
   assert.equal(server.stats().requests, requestsBefore, "nothing sent while open");
-  assert.ok(performance.now() - started < 100, "no backoff while open");
+  assert.deepEqual(
+    openDelays.filter((delay) => delay >= computeRetryDelayMs({ attempt: 0, random: () => 0 })),
+    [],
+    "no backoff while open"
+  );
 });
 
 test("the concurrency cap bounds the queue a saturated server sees", async (t) => {

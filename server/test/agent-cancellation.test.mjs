@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import test, { after, before } from "node:test";
+import test from "node:test";
 
 import { createApp as createProductionApp } from "../app.js";
 import { continueAgentExecutionGraphApproval, runAgentRag } from "../rag/agent.js";
@@ -17,9 +17,12 @@ import {
 import { DependencyOutageError } from "../rag/dependency-outage.js";
 import { completeText, configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import {
+  createRequestCancellation,
   getRequestDeadline,
   getRequestSignal,
+  REQUEST_CANCELLATION_REASONS,
   RequestCancelledError,
+  runWithRequestCancellation,
   runWithRequestDeadline,
 } from "../rag/request-deadline.js";
 import { ServiceTimeoutError, ServiceUnavailableError } from "../rag/service-client.js";
@@ -35,16 +38,6 @@ import {
   createProposalAdapter,
   createTaskCapabilityRegistry,
 } from "./fixtures/unified-graph-run-fixtures.mjs";
-
-// The deadline and collector timers are unref'd so they never hold a process
-// open. A test that awaits one needs something else keeping the event loop
-// alive: on Node 20 (CI) the loop drains first and every later test in the
-// file is cancelled.
-let keepEventLoopAlive = null;
-before(() => {
-  keepEventLoopAlive = setInterval(() => {}, 60_000);
-});
-after(() => clearInterval(keepEventLoopAlive));
 
 // Cancellation and outages through the agent run, in one process: runAgentRag
 // under a request deadline, and the monolith's /chat and /chat/stream with
@@ -181,6 +174,7 @@ const installSlowModel = (t) => {
 
 // A model server that takes every request and never answers.
 const startHangingModel = async (t) => {
+  const arrived = createDeferred();
   const requests = [];
   const open = new Set();
   const server = createServer((req, res) => {
@@ -188,6 +182,7 @@ const startHangingModel = async (t) => {
     const entry = { closed: closed.promise, closedAt: null };
 
     requests.push(entry);
+    arrived.resolve(entry);
     open.add(res);
     req.resume();
     res.on("close", () => {
@@ -204,7 +199,31 @@ const startHangingModel = async (t) => {
     await new Promise((resolve) => server.close(resolve));
   });
 
-  return { requests, url: `http://127.0.0.1:${server.address().port}` };
+  return { arrived: arrived.promise, requests, url: `http://127.0.0.1:${server.address().port}` };
+};
+
+// A bound request deadline that passes on cue instead of by the clock. All
+// createRequestCancellation's deadline timer does when it fires is cancel
+// with deadline_exceeded, and expire() does the same, so the run sees exactly
+// a passed deadline: the signal aborts with the deadline error, and every
+// later safe point throws it. A test expires it once the run is where the
+// test needs it (in the model call, inside a write), which a short wall-clock
+// deadline cannot promise on a busy runner. deadlineAt is far but real, so a
+// deadline is bound all along.
+const createDeadlineOnCue = () => {
+  const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
+
+  return {
+    expire: () => cancellation.cancel(REQUEST_CANCELLATION_REASONS.deadlineExceeded),
+    run: (work) => {
+      const result = runWithRequestCancellation(cancellation, work);
+
+      // Also marks a rejection handled until the test awaits it.
+      result.then(cancellation.dispose, cancellation.dispose);
+      return result;
+    },
+    signal: cancellation.signal,
+  };
 };
 
 const createRunService = () => {
@@ -250,10 +269,16 @@ test("a deadline that passes mid-run aborts the in-flight model call and ends th
   t.after(() => resetOpenAIProvider());
 
   const { agentRunService } = createRunService();
-  const startedAt = Date.now();
-  const error = await runWithRequestDeadline({ deadlineAt: startedAt + 250 }, () =>
-    runOneAgent({ agentRunService, ragService: createRagService() })
-  ).then(
+  const deadline = createDeadlineOnCue();
+  const running = deadline.run(() => runOneAgent({ agentRunService, ragService: createRagService() }));
+
+  // The deadline passes once the model request is on the wire.
+  await Promise.race([model.arrived, running.catch(() => {})]);
+  const expiredAt = Date.now();
+
+  deadline.expire();
+
+  const error = await running.then(
     () => assert.fail("the run should not complete"),
     (rejection) => rejection
   );
@@ -266,7 +291,7 @@ test("a deadline that passes mid-run aborts the in-flight model call and ends th
   // after the 10 s request timeout and not retried.
   await model.requests[0].closed;
   assert.equal(model.requests.length, 1);
-  assert.ok(model.requests[0].closedAt - startedAt < 3_000);
+  assert.ok(model.requests[0].closedAt - expiredAt < 3_000);
 
   const run = await agentRunService.getRun({ accessScope, runId: error.agentRunId });
 
@@ -426,7 +451,10 @@ const listRuns = async (agentRunService) => (await agentRunService.listRuns({ ac
 
 test("with AGENT_REQUEST_TIMEOUT_MS /chat answers 504 when the run passes its deadline, and /chat/stream ends with an error event", { timeout: 20_000 }, async (t) => {
   const model = installSlowModel(t);
-  const { agentRunService, baseUrl } = await startMonolith(t, { env: { AGENT_REQUEST_TIMEOUT_MS: "250" } });
+  // The real deadline, timed from the request's arrival, so it must leave the
+  // run room to reach the model call (which then hangs until aborted): a
+  // loaded runner has taken over 200 ms to get there.
+  const { agentRunService, baseUrl } = await startMonolith(t, { env: { AGENT_REQUEST_TIMEOUT_MS: "1500" } });
 
   const response = await postChat(baseUrl);
   const body = await response.json();
@@ -435,6 +463,7 @@ test("with AGENT_REQUEST_TIMEOUT_MS /chat answers 504 when the run passes its de
   assert.equal(body.code, "AGENT_DEADLINE_EXCEEDED");
   assert.equal(body.reason, "deadline_exceeded");
   assert.equal(body.retryable, true);
+  assert.equal(model.calls.length, 1, "the run reached the model call before its deadline");
   assert.equal(model.calls[0].aborted, true, "the in-flight model call was aborted");
 
   const [run] = await listRuns(agentRunService);
@@ -717,7 +746,8 @@ test("a deadline that passes inside a guarded custom-Skill graph node settles th
 
   const model = installSlowModel(t);
   const { agentRunService } = createRunService();
-  const error = await runWithRequestDeadline({ deadlineAt: Date.now() + 200 }, () =>
+  const deadline = createDeadlineOnCue();
+  const running = deadline.run(() =>
     runAgentRag({
       accessScope,
       agentRunService,
@@ -732,7 +762,13 @@ test("a deadline that passes inside a guarded custom-Skill graph node settles th
         throw new Error("Web search must not run.");
       },
     })
-  ).then(
+  );
+
+  // The deadline passes while the node's model call is in flight.
+  await Promise.race([model.arrived, running.catch(() => {})]);
+  deadline.expire();
+
+  const error = await running.then(
     () => assert.fail("the run should not complete"),
     (rejection) => rejection
   );
@@ -837,17 +873,22 @@ test("an approval continuation whose request is already cancelled ends the run w
 
 test("an approved Capability that writes is never cut by the deadline: it runs once, outside the request's signal", { timeout: 20_000 }, async (t) => {
   const inside = [];
+  // The deadline passes inside the write, on cue. A wall-clock deadline short
+  // enough to pass during the write could also pass before the approved node
+  // launched, and that safe point would cancel the continuation instead.
+  const deadline = createDeadlineOnCue();
   const { agentRunService, approve, runId, writes } = await pauseAtTaskApproval(t, {
     onWrite: async () => {
       inside.push({ deadline: getRequestDeadline(), signal: getRequestSignal() });
-      // Still writing when the request's deadline passes.
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // Still writing when the request's deadline passes: the run gets to
+      // react to it before the write ends.
+      deadline.expire();
+      await new Promise((resolve) => setTimeout(resolve, 20));
     },
   });
-  const deadlineAt = Date.now() + 50;
-  const approved = await runWithRequestDeadline({ deadlineAt }, approve);
+  const approved = await deadline.run(approve);
 
-  assert.ok(Date.now() > deadlineAt, "the write outlived the deadline");
+  assert.equal(deadline.signal.reason?.reason, "deadline_exceeded", "the write outlived the deadline");
   assert.deepEqual(inside, [{ deadline: null, signal: null }]);
   assert.equal(writes.length, 1);
   // The write was the graph's last node: its step completed and, with no safe

@@ -114,7 +114,9 @@ const embed = (text) => {
 };
 
 const embedCalls = { query: 0, texts: 0 };
-let slowQueries = new Map();
+// A query in heldQueries is embedded only once its promise settles, so a test
+// decides when a slow embedding finishes instead of racing a timer.
+let heldQueries = new Map();
 let failingQueries = new Map();
 
 const useStandInModels = () =>
@@ -123,8 +125,8 @@ const useStandInModels = () =>
     embedQuery: async (query) => {
       embedCalls.query += 1;
 
-      if (slowQueries.has(query)) {
-        await new Promise((resolve) => setTimeout(resolve, slowQueries.get(query)));
+      if (heldQueries.has(query)) {
+        await heldQueries.get(query);
       }
 
       if (failingQueries.has(query)) {
@@ -276,7 +278,7 @@ before(async () => {
 afterEach(() => {
   useInProcess();
   resetEmbeddingCache();
-  slowQueries = new Map();
+  heldQueries = new Map();
   failingQueries = new Map();
 });
 
@@ -872,7 +874,10 @@ test("a retrieval tier that is down is a 503 with a stable code, and one that ha
   );
   assert.ok(Number(hanging[0].deadline) <= 300, "the budget went out as the deadline header");
 
-  // A bound caller deadline shortens the budget further ...
+  // A bound caller deadline shortens the budget further. The budget is 50x the
+  // deadline, so a call cut at the deadline ends seconds before the budget
+  // could have cut it, even after an event-loop stall on a loaded runner.
+  process.env.RETRIEVAL_SERVICE_TIMEOUT_MS = "5000";
   const deadlineStartedAt = Date.now();
 
   await assert.rejects(
@@ -881,7 +886,7 @@ test("a retrieval tier that is down is a 503 with a stable code, and one that ha
     ),
     (error) => error instanceof ServiceTimeoutError
   );
-  assert.ok(Date.now() - deadlineStartedAt < 290, "cut off at the caller's deadline, not the 300 ms budget");
+  assert.ok(Date.now() - deadlineStartedAt < 2500, "cut off at the caller's deadline, not the 5000 ms budget");
   assert.ok(Number(hanging.at(-1).deadline) <= 100);
 
   // ... and a deadline that already passed sends nothing.
@@ -897,13 +902,26 @@ test("a retrieval tier that is down is a 503 with a stable code, and one that ha
   assert.equal(runWithServiceCallDeadline(null, () => getServiceCallBudgetMs(1234)), 1234);
 });
 
-test("the retrieval tier honours the caller's deadline: refused on arrival, answered 504 when it runs out", async () => {
+test("the retrieval tier honours the caller's deadline: refused on arrival, answered 504 when it runs out", async (t) => {
   const late = await post(RETRIEVAL_SERVICE_PATHS.global, VALID_GLOBAL, { headers: { [SERVICE_DEADLINE_HEADER]: "0" } });
 
   assert.equal(late.status, 504);
   assert.equal(late.json.code, RETRIEVAL_SERVICE_ERROR_CODES.deadlineExceeded);
 
-  slowQueries = new Map([["a slow question about leave", 400]]);
+  // The slow embedding finishes when the test ends, or after 5 s at the latest
+  // so a tier that waits for it fails below instead of hanging the suite. An
+  // answer well inside those 5 s came at the 80 ms deadline.
+  let finishSlowEmbedding;
+  const slowEmbedding = new Promise((resolve) => {
+    finishSlowEmbedding = resolve;
+  });
+  const finishAtTheLatest = setTimeout(() => finishSlowEmbedding(), 5000);
+
+  t.after(() => {
+    clearTimeout(finishAtTheLatest);
+    finishSlowEmbedding();
+  });
+  heldQueries = new Map([["a slow question about leave", slowEmbedding]]);
 
   const startedAt = Date.now();
   const slow = await post(
@@ -914,7 +932,7 @@ test("the retrieval tier honours the caller's deadline: refused on arrival, answ
 
   assert.equal(slow.status, 504);
   assert.equal(slow.json.code, RETRIEVAL_SERVICE_ERROR_CODES.deadlineExceeded);
-  assert.ok(Date.now() - startedAt < 380, "answered at the deadline, before the slow embedding finished");
+  assert.ok(Date.now() - startedAt < 2500, "answered at the deadline, before the slow embedding finished");
   assert.ok(!slow.text.includes("slow question"));
 });
 

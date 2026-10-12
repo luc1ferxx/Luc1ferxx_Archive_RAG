@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizeChildProcessClose } from "./coverage-process-result.mjs";
 import {
   isTestCoverageRow,
@@ -32,6 +32,10 @@ const coverageReporterPath = path.join(
   testDirectory,
   "coverage-event-reporter.mjs"
 );
+// Preloaded into every test file's process, as npm test does; see the file.
+const keepEventLoopAliveUrl = pathToFileURL(
+  path.join(testDirectory, "keep-event-loop-alive.mjs")
+).href;
 
 const parseArgs = () => {
   const args = new Set(process.argv.slice(2));
@@ -80,6 +84,8 @@ const runCoverage = async (testFiles) =>
     const child = spawn(
       process.execPath,
       [
+        "--import",
+        keepEventLoopAliveUrl,
         "--test",
         "--experimental-test-coverage",
         "--test-reporter=spec",
