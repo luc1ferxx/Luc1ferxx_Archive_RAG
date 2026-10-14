@@ -8,6 +8,7 @@ import {
   isRagIngestWorkerEnabled,
 } from "./rag/config.js";
 import { createIngestWorker, resolveApiIngestWorkerPlan } from "./rag/ingest-worker.js";
+import { assertLangSmithTracingDisabled } from "./rag/langgraph/langsmith-guard.js";
 import { startMetricsFromEnv } from "./rag/metrics-server.js";
 import { resetPostgresPool } from "./rag/postgres.js";
 import {
@@ -19,6 +20,11 @@ import {
   applyStandaloneProfile,
   isStandaloneProfileEnabled,
 } from "./standalone-profile.js";
+
+// LangSmith would ship prompts and document text to a third party; a process
+// with its tracing variables set refuses to start (rag/langgraph/langsmith-guard.js).
+// After "dotenv/config", so a value from .env is refused too.
+assertLangSmithTracingDisabled();
 
 // Applied before createApp() because createApp initializes the document registry
 // while booting (app.js:118). Without the profile that call runs the PostgreSQL

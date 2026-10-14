@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**提议**。阶段 0（本 ADR + 依赖 + spike）已完成，等待评审后进入阶段 1。
+- 状态：**已采纳**（2026-10-14）。阶段 0、1 已完成；取消方案（drain，不把请求 signal 直接交给 LangGraph）已认可。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -172,9 +172,32 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - LangGraph 记录的修剪：目前每个 superstep 都在增长。
 - 阶段 1 的模型与检索适配器、LangChain 回调到 OTel 的桥。
 
+## 阶段 1 结果：适配层
+
+`server/rag/langgraph/` 下 6 个文件，生产代码还没有 import 它们（`server.js` 只用到守卫）。每个适配器都有"直接调用 vs 经适配器"的 `deepStrictEqual` 套件；`prompt-registry`、`llmops-metrics`、`tracing` 三个套件没有改动，照常通过。
+
+| 文件 | 包的是什么 | 要点 |
+| --- | --- | --- |
+| `langsmith-guard.js` | 启动断言与每次调用的检查 | 5 个追踪变量任一为 `"true"` 时 `server.js` 拒绝启动；`guardRunnableEntryPoints` 给适配器自己建的、以及由它们组合出来的 runnable 加检查 |
+| `model.js` | `completeTextWithMetadata` | `maxRetries: 0`；不转发 LangChain 的 `signal` / `timeout`（drain 方案）；`withRetry` / `withFallbacks` 拒绝；`withStructuredOutput` 只接 JSON Schema，发严格 `json_schema`，用 `parseFirstJsonValue` 解析；只接受 system / human 字符串消息 |
+| `embeddings.js` | `embedQueryCached` / `embedTexts` | 返回同一个向量对象，embedding 空间标签和缓存不变 |
+| `retriever.js` | `retrieveGlobalContextForQueries` / `retrievePerDocumentContextForQueries` | 这两个分发函数改为导出（只加了 `export`），所以远程检索层也覆盖到了；`toRetrievalResults` 能还原原始结果 |
+| `tools.js` | `executeAgentSkill` | 只有授权目录里的 Skill 才能成为 tool；模型能写的字段只有 `question`、`priorFindings`（白名单），其余由运行时决定，模型传来就拒绝；Skill 失败时返回 `status: "error"` 的 ToolMessage |
+| `prompts.js` | `lib/prompt-template.js` 的模板 | 13 个生产模板渲染结果逐字一致；指纹始终按未渲染的原文计算；planner 和 claim judge 的 prompt 由函数构建，保留原 builder |
+
+验证中发现并已处理：
+- 组合调用会绕过逐次检查：`template.pipe(model).invoke(...)` 在适配器代码运行之前就挂上 LangSmith tracer，把渲染后的 prompt 发出去。现在由 `guardRunnableEntryPoints` 覆盖。
+- 适配器转发 LangChain 的 `signal`，会让 LangGraph 里兄弟节点失败时中止在途的模型调用，调用方的超时还会计入熔断器。现在不再转发，截止时间由 `request-deadline.js` 经 ALS 传到 `openai.js`。
+
+留给阶段 2 的事：
+- 由其他 runnable 发起的组合（`RunnableSequence.from`、`other.pipe(adapter)`、`graph.invoke`）仍然先挂 tracer，测试钉住了这一点。阶段 2 的每个外层入口必须先调 `assertLangSmithTracingDisabled()`。
+- tool 不预留预算、不开 lifecycle step、不记 Skill 观测，调用方要自己包上。`createAgent` 不能直接用这些 tool。
+- LangGraph 的 `messages` 流模式会在调用结束时发出完整回复，必须保持关闭（约束 4）。
+- 两处包装依赖 `@langchain/core` 1.2.17 的内部行为（`invoke` 内部调 `this.call`，`tool()` 的包装函数读 `config.signal`），升级 core 时要重跑对应测试。
+
 ## 后果
 
-**需要评审拍板的一处偏离。** 目标文件第 10 条写的是"`RunnableConfig.signal` 接 `request-deadline.js`"。spike 证明这样做是"至少一次"：取消后在途节点在后台跑完、写入被丢、续跑时重跑。本 ADR 改为：请求 signal 触发 `RunControl.requestDrain()`，配合节点安全点、等待在途节点、v2 checkpoint 复用。终态和错误码不变（仍走 `failRun` 的 revision CAS）。
+**已认可的一处偏离（2026-10-14）。** 目标文件第 10 条写的是"`RunnableConfig.signal` 接 `request-deadline.js`"。spike 证明这样做是"至少一次"：取消后在途节点在后台跑完、写入被丢、续跑时重跑。本 ADR 改为：请求 signal 触发 `RunControl.requestDrain()`，配合节点安全点、等待在途节点、v2 checkpoint 复用。终态和错误码不变（仍走 `failRun` 的 revision CAS）。
 
 **阶段 1 要做的事：**
 - 生产代码第一次 import `@langchain/*` 的同时，加启动断言：四个 LangSmith 追踪变量不得为 `"true"`。
