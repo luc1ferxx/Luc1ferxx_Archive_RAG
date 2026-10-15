@@ -1,0 +1,480 @@
+import {
+  Annotation,
+  END,
+  GraphDrained,
+  START,
+  StateGraph,
+  isGraphDrained,
+} from "@langchain/langgraph";
+
+import { normalizeTrimmedText } from "../../lib/normalize-text.js";
+import { digestExecutionGraphTypedOutput } from "../agent-execution-graph-checkpoint.js";
+import {
+  EXECUTION_GRAPH_NODE_STATUSES,
+  EXECUTION_GRAPH_SCHEDULE_DECISIONS,
+  decideExecutionGraphNode,
+  isExecutionGraphNodeSettledOk,
+  recordExecutionGraphNodeSkip,
+  runExecutionGraphNode,
+} from "../agent-execution-graph-node.js";
+import { getRequestCancellation } from "../request-deadline.js";
+import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
+
+// A validated ExecutionGraph (custom-Skill v2, or v3) as a LangGraph
+// StateGraph: one LangGraph node per graph node, START into every node
+// without dependencies, a join edge from a node's dependencies into it, and
+// every node no other node depends on into END.
+//
+// LangGraph only decides when a node is entered. What it then does is the
+// native node code (agent-execution-graph-node.js) on the run's in-process
+// state: the skip decision, the budget, the fenced step lifecycle, the typed
+// output and the graph checkpoint write all happen exactly as under the
+// native scheduler. LangGraph's own state is one channel of receipts, keyed by
+// node (toExecutionGraphReceiptKey): { status, reason, outputDigest } -- ids,
+// codes and a digest, never a typed output, a question or an answer, because
+// whatever a state channel holds is what the thread checkpoint persists. The
+// typed outputs stay in the run's v1 graph checkpoint, which remains the
+// authority for reuse and recovery.
+//
+// Every node returns its receipt, skipped and parked ones included, so a join
+// always fires and every node of the graph is entered exactly once, in the
+// superstep of its topological layer.
+//
+// Edges are resolved by the validator's node id (trimmed), as it resolved
+// them when it accepted the graph; the node code then looks dependencies up
+// by the id as written, exactly as the native scheduler does (a dependency
+// written " a" for node "a" is accepted and never counts as settled there,
+// so the node stays pending on both runtimes).
+
+export const LANGGRAPH_EXECUTION_GRAPH_ERROR_CODES = Object.freeze({
+  // What LangGraph records for a node that stopped the graph (see below).
+  nodeStopped: "AGENT_LANGGRAPH_NODE_STOPPED",
+});
+
+const NODE_NAME_PREFIX = "node_";
+
+/**
+ * The LangGraph node name of the graph node declared at `index`. LangGraph
+ * refuses names containing ":" or "|", starting with "__", or equal to a
+ * state key, and a planner may author any non-empty nodeId; base64url has
+ * none of those characters, and the prefix keeps the name off "__" and off
+ * "receipts". The zero-padded index comes first because LangGraph enters a
+ * superstep's nodes in name order (pregel/algo.js candidateNodes sorts them):
+ * with it, that order is declaration order, the order the native queue
+ * launches in (within one superstep; see isExecutionGraphDeclaredInLayerOrder
+ * for across them). The name never leaves one invocation, so it does not need
+ * to stay stable across a replan.
+ */
+export const encodeExecutionGraphNodeName = ({ index, nodeCount, nodeId }) => {
+  const width = String(Math.max(nodeCount - 1, 0)).length;
+  const encodedId = Buffer.from(String(nodeId), "utf8").toString("base64url");
+
+  return `${NODE_NAME_PREFIX}${String(index).padStart(width, "0")}_${encodedId}`;
+};
+
+/**
+ * The key of a node's receipt in the receipts channel: "node:" + nodeId. Not
+ * the bare nodeId, because LangGraph's deserializer (JsonPlusSerializer)
+ * rebuilds an object by assigning its keys, and assigning "__proto__" -- a
+ * nodeId the validator accepts -- would replace the prototype of a state read
+ * back from the thread instead of adding a receipt.
+ */
+export const toExecutionGraphReceiptKey = (nodeId) => `node:${nodeId}`;
+
+/**
+ * Whether the graph is declared in layer order: every node after every node
+ * of an earlier topological layer, i.e. graph.nodes in the order of
+ * compiled.order (the validator's layers, declaration order within each).
+ * `compiled` is the compileExecutionGraph result admission returned for
+ * `graph`.
+ */
+export const isExecutionGraphDeclaredInLayerOrder = ({ compiled, graph }) => {
+  const order = compiled?.order ?? [];
+  const nodes = graph?.nodes ?? [];
+
+  return (
+    nodes.length === order.length &&
+    nodes.every((node, index) => normalizeTrimmedText(node?.nodeId) === order[index])
+  );
+};
+
+// The most nodes of `pending` that can ever be in flight at once: the size of
+// the largest set of them none of which depends on another, directly or
+// through any node (a node starts only once its dependencies settled, so
+// nodes in flight together are always such a set). Dilworth: the pending
+// nodes less a maximum matching of "u is an ancestor of v". A graph has at
+// most EXECUTION_GRAPH_LIMITS.maxNodes nodes, so the cubic cost is nothing.
+const measurePendingWidth = ({ pending, states }) => {
+  const indexById = new Map(
+    states.map((state, index) => [normalizeTrimmedText(state.node.nodeId), index])
+  );
+  const parents = states.map((state) =>
+    (state.node.dependsOn ?? [])
+      .map((dependencyId) => indexById.get(normalizeTrimmedText(dependencyId)))
+      .filter((index) => index !== undefined)
+  );
+  const ancestors = states.map(() => null);
+  const collectAncestors = (index) => {
+    if (ancestors[index] === null) {
+      ancestors[index] = new Set();
+
+      for (const parent of parents[index]) {
+        ancestors[index].add(parent);
+        collectAncestors(parent).forEach((ancestor) => ancestors[index].add(ancestor));
+      }
+    }
+
+    return ancestors[index];
+  };
+  const matchedAncestor = new Map();
+  const augment = (descendant, seen) => {
+    for (const ancestor of pending) {
+      if (!collectAncestors(descendant).has(ancestor) || seen.has(ancestor)) {
+        continue;
+      }
+
+      seen.add(ancestor);
+
+      // matchedAncestor maps an ancestor to the descendant it is matched to.
+      if (!matchedAncestor.has(ancestor) || augment(matchedAncestor.get(ancestor), seen)) {
+        matchedAncestor.set(ancestor, descendant);
+        return true;
+      }
+    }
+
+    return false;
+  };
+  let matching = 0;
+
+  for (const descendant of pending) {
+    if (augment(descendant, new Set())) {
+      matching += 1;
+    }
+  }
+
+  return pending.length - matching;
+};
+
+/**
+ * Whether LangGraph's order of arrival at the gate makes the same scheduling
+ * decisions as the native queue for this invocation. `states` are the node
+ * states of createExecutionGraphNodeStates, `concurrencyCap` admission's cap.
+ *
+ * The native queue is declaration order over the whole graph; LangGraph
+ * enters the nodes superstep by superstep, declaration order inside one. The
+ * two differ only where the native queue holds a ready node back (the cap is
+ * reached, or an exclusive node runs) and a node of a later layer is declared
+ * ahead of a node of an earlier one: natively the later layer's node then
+ * starts first, whatever the timing, so the two runtimes would fund
+ * (budget), run and abort (fail_fast) different nodes. A forward reference
+ * (a node declared before its own dependency) is one case; [a, c after a, b]
+ * under a cap of 1 is another. So LangGraph schedules a graph declared in
+ * layer order, or one whose queue never holds anything back: every node left
+ * to run is parallel-safe and no more of them can be in flight together than
+ * the cap admits.
+ */
+export const canScheduleExecutionGraphOnLangGraph = ({
+  compiled,
+  concurrencyCap,
+  graph,
+  states,
+}) => {
+  if (isExecutionGraphDeclaredInLayerOrder({ compiled, graph })) {
+    return true;
+  }
+
+  const pending = states.flatMap((state, index) =>
+    state.status === EXECUTION_GRAPH_NODE_STATUSES.pending ? [index] : []
+  );
+
+  return (
+    pending.every((index) => states[index].contract.parallelSafe) &&
+    measurePendingWidth({ pending, states }) <= concurrencyCap
+  );
+};
+
+// A node only ever writes its own key, so a keyed merge is the whole reducer.
+// A reducer (not LastValue) is required anyway: nodes of one superstep write
+// the channel concurrently.
+const mergeReceipts = (current = {}, update = {}) => ({ ...current, ...update });
+
+export const ExecutionGraphReceiptState = Annotation.Root({
+  receipts: Annotation({ default: () => ({}), reducer: mergeReceipts }),
+});
+
+/**
+ * The receipt a node returns to LangGraph: its status and skip reason as the
+ * in-process node state holds them, and for a completed or reused node the
+ * digest of the typed output its dependants bind.
+ */
+export const buildExecutionGraphReceipt = ({ nodeOutputs, state }) => ({
+  outputDigest: isExecutionGraphNodeSettledOk(state.status)
+    ? digestExecutionGraphTypedOutput(nodeOutputs.get(state.node.nodeId))
+    : null,
+  reason: state.reason ?? null,
+  status: state.status,
+});
+
+// What LangGraph is allowed to persist for a node that stopped the graph: a
+// stable code. LangGraph writes { message, name } of a node's error into the
+// thread checkpoint (pregel/runner.js _commit); the original error stays in
+// this process, on control.fatalError, and is the one the caller sees.
+const createNodeStoppedError = (cause) => {
+  const rawCode = typeof cause?.code === "string" ? cause.code : cause?.name;
+  const code = /^[A-Za-z0-9_.-]{1,80}$/.test(String(rawCode ?? ""))
+    ? String(rawCode)
+    : "error";
+  const error = new Error(`A graph node stopped the graph (${code}).`);
+  error.name = "GraphNodeStopped";
+  error.code = LANGGRAPH_EXECUTION_GRAPH_ERROR_CODES.nodeStopped;
+  return error;
+};
+
+// The safe point of a native launch (throwIfRequestCancelled at the top of
+// executeExecutionGraphNodeLaunch, which throws getRequestCancellation()), as
+// a drain. A GraphDrained a node throws
+// leaves no error write and no receipt for it, and the superstep's other
+// nodes still finish and commit (pregel/runner.js tick keeps a drain as a
+// bubble-up), which is what the native scheduler does with a cancellation:
+// launch nothing more, let what is in flight settle. The cancellation itself
+// is the run's fatal error, as it is natively.
+const passSafePoint = (control) => {
+  const cancellation = getRequestCancellation();
+
+  if (cancellation) {
+    control.fatalError ??= cancellation;
+    control.aborted = true;
+    throw new GraphDrained(cancellation.reason);
+  }
+};
+
+const createNodeAction = ({
+  context,
+  control,
+  gate,
+  graph,
+  nodeOutputs,
+  state,
+  statesByNodeId,
+  trackNode,
+}) => {
+  const { nodeId } = state.node;
+  const toUpdate = () => ({
+    receipts: {
+      [toExecutionGraphReceiptKey(nodeId)]: buildExecutionGraphReceipt({ nodeOutputs, state }),
+    },
+  });
+  const decide = () =>
+    decideExecutionGraphNode({
+      aborted: control.aborted,
+      dependencyStatuses: (state.node.dependsOn ?? []).map(
+        (dependencyId) => statesByNodeId.get(dependencyId)?.status
+      ),
+      graphVersion: graph.version,
+      interrupted: Boolean(control.interrupt),
+      node: state.node,
+      nodeOutputs,
+    });
+
+  // `holdSlot` receives the gate's release once the node holds a slot; the
+  // slot is given back by the caller (see below), not here.
+  const runNode = async (holdSlot) => {
+    // LangGraph configures a node's callbacks before calling it; a tracer
+    // switched on since the outer entry checked must not see the next one.
+    assertLangSmithTracingDisabled();
+
+    // Settled before this invocation: reused from the graph checkpoint or
+    // denied at its approval gate. Nothing is launched, so, as natively, no
+    // safe point applies.
+    if (state.status !== EXECUTION_GRAPH_NODE_STATUSES.pending) {
+      return toUpdate();
+    }
+
+    passSafePoint(control);
+
+    let { decision, reason } = decide();
+
+    // `wait` (a dependency left pending by an interrupt or never settled)
+    // and `hold` (a v3 graph with a pending interrupt) both leave the node
+    // pending, as the native loop does once nothing else can run; the native
+    // pass passes over such a node without stopping, so it takes no turn.
+    if (decision !== EXECUTION_GRAPH_SCHEDULE_DECISIONS.launch) {
+      if (decision === EXECUTION_GRAPH_SCHEDULE_DECISIONS.skip) {
+        // The native pass decides a skip when its scan reaches the node:
+        // after the nodes ahead of it started, never ahead of one the cap or
+        // an exclusive node still holds back, and not at all once a fatal
+        // error ended scheduling. The turn decides at that point (a fail_fast
+        // failure ahead of it in the queue turns its skip into
+        // aborted_after_failure), and the skip is recorded once the nodes
+        // started in that pass have run their synchronous part, as the scan
+        // records it after theirs.
+        const turn = await gate.awaitTurn(() => ({
+          stopped: Boolean(control.fatalError),
+          ...decide(),
+        }));
+
+        if (turn.stopped) {
+          throw createNodeStoppedError({ code: "graph_stopped" });
+        }
+
+        if (turn.decision === EXECUTION_GRAPH_SCHEDULE_DECISIONS.skip) {
+          recordExecutionGraphNodeSkip({ context, reason: turn.reason, state });
+        }
+      }
+
+      return toUpdate();
+    }
+
+    holdSlot(await gate.acquire({ exclusive: !state.contract.parallelSafe }));
+
+    // A node that waited for its slot re-checks what may have changed
+    // meanwhile, as the native loop does on every pass: a cancellation
+    // launches nothing, a fatal error stops scheduling, and a fail_fast
+    // failure or an interrupt skips what has not started.
+    passSafePoint(control);
+
+    if (control.fatalError) {
+      throw createNodeStoppedError({ code: "graph_stopped" });
+    }
+
+    ({ decision, reason } = decide());
+
+    if (decision === EXECUTION_GRAPH_SCHEDULE_DECISIONS.launch) {
+      await runExecutionGraphNode({ context, control, nodeOutputs, state });
+
+      // An AgentRunInterruptError hands the node back as pending, and the
+      // native loop decides it again on its next pass: a v2 node is then
+      // skipped (aborted_after_failure, so its dependants are skipped too),
+      // a v3 node is held pending. Entered only once here, the node takes
+      // that decision now. It cannot be `launch` again: the interrupt is
+      // pending.
+      ({ decision, reason } = state.status === EXECUTION_GRAPH_NODE_STATUSES.pending
+        ? decide()
+        : { decision: null, reason: null });
+    }
+
+    if (decision === EXECUTION_GRAPH_SCHEDULE_DECISIONS.skip) {
+      recordExecutionGraphNodeSkip({ context, reason, state });
+    }
+
+    // The node's status is final here: execute resolves only after the
+    // checkpoint write, so no receipt ever reaches LangGraph (and no
+    // dependant is entered) before the run store holds the output.
+    return toUpdate();
+  };
+
+  // No retryPolicy is ever set on these nodes: a retried node would run its
+  // effect again before the step-start fence could tell, and LangGraph's
+  // default retry handler retries a RequestCancelledError.
+  return () => {
+    let releaseSlot = null;
+    const task = runNode((release) => {
+      releaseSlot = release;
+    })
+      .catch((error) => {
+        if (
+          isGraphDrained(error) ||
+          error?.code === LANGGRAPH_EXECUTION_GRAPH_ERROR_CODES.nodeStopped
+        ) {
+          throw error;
+        }
+
+        // As the native scheduler's tracked task: the first error stops the
+        // graph, and the original error is what the run throws.
+        control.fatalError ??= error;
+        control.aborted = true;
+        throw createNodeStoppedError(error);
+      })
+      // The slot is given back only after this node's outcome is recorded,
+      // as the native loop launches nothing before the in-flight promise
+      // that failed has set fatalError: a node waiting for the slot must
+      // see a checkpoint failure of the node it replaces, even when a
+      // sibling's success lands in the same turn.
+      .finally(() => releaseSlot?.());
+
+    return trackNode(task);
+  };
+};
+
+/**
+ * Compiles one invocation's graph. `states` are the node states of
+ * createExecutionGraphNodeStates (declaration order), `context`, `control`
+ * and `nodeOutputs` the run's shared node context, control flags and typed
+ * outputs, `gate` the concurrency gate, and `trackNode(promise)` registers a
+ * node's in-flight work and returns it. `checkpointer` is a
+ * BaseCheckpointSaver or false.
+ */
+export const compileExecutionGraphOnLangGraph = ({
+  checkpointer = false,
+  context,
+  control,
+  gate,
+  graph,
+  nodeOutputs,
+  states,
+  statesByNodeId,
+  trackNode,
+}) => {
+  const builder = new StateGraph(ExecutionGraphReceiptState);
+  // Keyed by the validator's id (see the header): every dependency it
+  // accepted resolves here.
+  const names = new Map();
+  const dependencyIds = (state) => [
+    ...new Set((state.node.dependsOn ?? []).map(normalizeTrimmedText)),
+  ];
+
+  states.forEach((state, index) => {
+    const name = encodeExecutionGraphNodeName({
+      index,
+      nodeCount: states.length,
+      nodeId: state.node.nodeId,
+    });
+
+    names.set(normalizeTrimmedText(state.node.nodeId), name);
+    builder.addNode(
+      name,
+      createNodeAction({
+        context,
+        control,
+        gate,
+        graph,
+        nodeOutputs,
+        state,
+        statesByNodeId,
+        trackNode,
+      })
+    );
+  });
+
+  const dependedOn = new Set(states.flatMap(dependencyIds));
+
+  for (const state of states) {
+    const nodeId = normalizeTrimmedText(state.node.nodeId);
+    const name = names.get(nodeId);
+    const dependencies = dependencyIds(state).map((dependencyId) => {
+      const dependencyName = names.get(dependencyId);
+
+      // The validator refuses a dangling dependency; reaching this would
+      // mean a graph that never passed admission.
+      if (dependencyName === undefined) {
+        throw new TypeError("A compiled execution graph has an unresolved dependency.");
+      }
+
+      return dependencyName;
+    });
+
+    if (dependencies.length === 0) {
+      builder.addEdge(START, name);
+    } else {
+      // A join barrier for more than one dependency: the node is entered
+      // once, after every dependency returned its receipt.
+      builder.addEdge(dependencies.length === 1 ? dependencies[0] : dependencies, name);
+    }
+
+    if (!dependedOn.has(nodeId)) {
+      builder.addEdge(name, END);
+    }
+  }
+
+  return builder.compile({ checkpointer });
+};

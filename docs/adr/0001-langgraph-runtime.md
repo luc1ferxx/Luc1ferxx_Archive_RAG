@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0、1 已完成；取消方案（drain，不把请求 signal 直接交给 LangGraph）已认可。
+- 状态：**已采纳**（2026-10-14）。阶段 0、1、2 已完成（阶段 2 在 `AGENT_RUNTIME=langgraph` 后面，默认 `native`）；取消方案（drain，不把请求 signal 直接交给 LangGraph）已认可。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -195,6 +195,21 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - LangGraph 的 `messages` 流模式会在调用结束时发出完整回复，必须保持关闭（约束 4）。
 - 两处包装依赖 `@langchain/core` 1.2.17 的内部行为（`invoke` 内部调 `this.call`，`tool()` 的包装函数读 `config.signal`），升级 core 时要重跑对应测试。
 
+## 阶段 2 结果：custom-Skill DAG 跑在 LangGraph 上
+
+- **开关**：`AGENT_RUNTIME`（`rag/config.js` 的 `getAgentRuntime()`），默认 `native`，除 `langgraph` 外的任何值都回落到 `native`。custom-Skill 阶段据此选择 `runExecutionGraph` 或 `runExecutionGraphOnLangGraph`；`AGENT_SKILL_GRAPH_ROLLOUT` 语义不变；v3 统一图仍走原生调度器。
+- **复用，不复制**：原生 runner 的单节点执行、跳过判定、节点状态和结果组装抽到 `agent-execution-graph-node.js`，准入和收尾以 `admitExecutionGraphRun` / `finishExecutionGraphRun` 导出。原生 runner 从 1,055 行减到 373 行，只剩调度。用差分工具对比 HEAD 的原 runner，几十万次比较零差异；三个确定性评测在重构前后逐字节一致。LangGraph 一侧只有 `compile-execution-graph.js`（480 行）、`run-execution-graph.js`（329 行）和 `concurrency-gate.js`（129 行）。
+- **checkpointer**：`rag/langgraph/checkpointer.js` 只经 `agent-runs.js` 新增的 `getLangGraphCheckpointRecord` / `mutateLangGraphCheckpointRecord` 写入，与原生图写入共用 fencing，不写事件。`__langGraphCheckpoint` 从所有公开投影里剥离，通用更新不能碰它。
+- **每次调用都是新的 LangGraph invocation**：replan 和启动恢复都会先把旧线程写成墓碑，再从 `completedNodeRuns` 复用已完成的节点。agent run 的图 checkpoint 仍是权威。
+- **等价证据**：
+  - `langgraph-execution-graph-runtime` 39 个场景，在两种 runtime 下 `deepStrictEqual`：结果、step、事件、trace、预算、v1 checkpoint。
+  - 原生 runner 的测试套件改指 LangGraph 执行器后 51/51 通过（`langgraph-native-runner-suite`）。
+  - 4 个 skill_graph trajectory 用例、`planner_dynamic_skill_graph` 和恢复评测的 replan / startup resume 信号完全一致（`langgraph-runtime-parity`）。
+  - `eval:trajectory` 19/19、`eval:planner` 7/7、`eval:recovery-observability` 8/8 在两种 runtime 下屏蔽后逐字节一致。
+  - PostgreSQL：`test:pgvector` 102/102，其中跨进程续跑在 langgraph 下不重放已完成的写节点。
+- **钉住的差异**：都来自 superstep 屏障，只影响事件、trace 和 Skill 调用的先后，节点结果不变；`test/langgraph-execution-graph-runtime.test.mjs` 逐条钉住。
+- **未解决：写放大**。内存实测，一个 3 节点的 guarded 阶段在 LangGraph 上：run 读 48 次对 38 次，普通 update 21 次对 13 次，最大的 `result` 9,302 字节对 3,273 字节。原因是线程记录留在 run 行里，之后每次 CAS 都要重写它。阶段 3 之前要先降下来，再用 `pg_stat_statements` 和 load test 验证。
+
 ## 后果
 
 **已认可的一处偏离（2026-10-14）。** 目标文件第 10 条写的是"`RunnableConfig.signal` 接 `request-deadline.js`"。spike 证明这样做是"至少一次"：取消后在途节点在后台跑完、写入被丢、续跑时重跑。本 ADR 改为：请求 signal 触发 `RunControl.requestDrain()`，配合节点安全点、等待在途节点、v2 checkpoint 复用。终态和错误码不变（仍走 `failRun` 的 revision CAS）。
@@ -215,6 +230,8 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 只在节点边界 put；
   - 统一使用 run cursor 作为 CAS 基准。
 - 降不下来就要用 `pg_stat_statements` 实测后更新 `test/agent-run-chat-statement-count.test.mjs`，并在阶段 3 的 load test 里验证。
+
+**阶段 2 的一处保留（2026-10-14）。** 原生队列按整张图的声明顺序发射节点，LangGraph 按超步进入节点。如果图不是按层声明（例如节点写在它的依赖之前，或者 `[a, c 依赖 a, b]` 且并发上限为 1），而上限或独占节点又会让原生队列压住一个就绪节点，原生每次都会先发射后层的节点。这时两个运行时会给不同节点拨预算、跑不同节点、因 fail_fast 中止不同节点，而且与时序无关。这类调用（`canScheduleExecutionGraphOnLangGraph` 为假）先丢弃线程记录，再整体交给原生调度器，结果与原生完全一致。阶段 4 删除原生调度之前必须先解决它。一种做法是在规划阶段把声明顺序规范化，但这会改变原生行为，需要单独评估。
 
 **代码量不会自动变少。** spike 的 runner 有 2,143 行，原生 `agent-execution-graph-runner.js` 是 1,055 行。原因是 runner 自己实现了准入、复用、恢复检查、审批门绑定、取消桥接、并发闸门，还要绕开 LangGraph 的两个并发缺陷。阶段 2 要复用原生模块（调用导出的恢复检查、审批 preflight），不能复制。阶段 4 删掉原生调度后，再用行数和测试数衡量维护面有没有真的缩小。如果到阶段 3 结束仍明显变大，应回到这里重新评估方案 A。
 

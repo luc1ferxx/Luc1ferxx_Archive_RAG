@@ -266,6 +266,22 @@ export const normalizeAgentRun = (run = {}) => {
   };
 };
 
+/**
+ * Where the LangGraph checkpointer (rag/langgraph/checkpointer.js) keeps its
+ * record: a private key on the run's result, next to the graph checkpoint and
+ * never inside it. The graph checkpoint stays the authority for recovery,
+ * node reuse, fencing and replay safety; this record only lets LangGraph
+ * resume its own loop, and it is written only through
+ * mutateLangGraphCheckpointRecord, under the graph checkpoint's fences.
+ */
+export const LANGGRAPH_CHECKPOINT_RESULT_KEY = "__langGraphCheckpoint";
+
+// The LangGraph record is stripped from every projection, including the ones
+// that keep the graph checkpoint for an internal decision: the record holds
+// serialized LangGraph channel state that no caller of this service reads,
+// and getRun, listRuns, the cursor's peek and GET /agent-runs all come
+// through here. Only the LangGraph service methods read it, from the stored
+// run itself (readLangGraphCheckpointRecord).
 const stripInternalRunFields = (run = {}, { includeGraphCheckpoint = false } = {}) => {
   const {
     accessScope,
@@ -276,11 +292,23 @@ const stripInternalRunFields = (run = {}, { includeGraphCheckpoint = false } = {
 
   const result = structuredClone(publicRun);
 
-  if (!includeGraphCheckpoint && result.result) {
-    delete result.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+  if (result.result) {
+    if (!includeGraphCheckpoint) {
+      delete result.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+    }
+
+    delete result.result[LANGGRAPH_CHECKPOINT_RESULT_KEY];
   }
 
   return result;
+};
+
+// A private copy: the in-memory store hands out its own nested objects. A
+// missing key and the null tombstone both read as no record.
+const readLangGraphCheckpointRecord = (run) => {
+  const record = run?.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY];
+
+  return record === undefined || record === null ? null : structuredClone(record);
 };
 
 const createApprovalBindingError = (message, code) => {
@@ -1222,6 +1250,62 @@ const assertExecutionGraphRunOwner = ({ expectedResumeClaimId = null, run } = {}
   return true;
 };
 
+const isExecutionGraphCheckpointIntact = (checkpoint) => {
+  try {
+    return sealExecutionGraphCheckpoint(checkpoint).digest === checkpoint.digest;
+  } catch {
+    // An unknown checkpoint version cannot be resealed: not intact.
+    return false;
+  }
+};
+
+const LANGGRAPH_WRITABLE_RUN_STATUSES = new Set([
+  AGENT_RUN_STATUSES.running,
+  AGENT_RUN_STATUSES.waitingForUser,
+]);
+
+/**
+ * The fence every LangGraph record write passes, decided on the run snapshot
+ * the same revision CAS commits against. It is the graph-writer rule of
+ * recordRunStep and assertExecutionGraphRunOwner, so a LangGraph superstep is
+ * owned by exactly the worker that owns the graph's node steps:
+ *   - the run is open (running or waiting for the user) and not handed to an
+ *     operator;
+ *   - with a graph checkpoint (v1 custom-Skill DAG or v2 heterogeneous
+ *     graph): the run and the graph phase are running, the checkpoint digest
+ *     reseals, and its resume claim is the writer's (null for the original
+ *     request's worker, the UUID claimExecutionGraphResume issued for a
+ *     startup-recovery worker). A graph paused for approval or settled has no
+ *     LangGraph writer: the decision CAS reopens it first, and the runner
+ *     writes the final phase only after LangGraph has stopped writing.
+ *   - without one: the writer holds no claim, since there is no graph it
+ *     could have claimed.
+ * A stale worker's next superstep therefore fails as soon as a recovery
+ * worker claims the graph or an operator takes the run.
+ */
+const assertLangGraphCheckpointWriter = ({ graphResumeClaimId = null, run } = {}) => {
+  const checkpoint = run?.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+  const expectedClaimId = normalizeText(graphResumeClaimId);
+
+  if (
+    !LANGGRAPH_WRITABLE_RUN_STATUSES.has(run?.status) ||
+    isRunMarkedForManualRecovery(run) ||
+    (checkpoint
+      ? run.status !== AGENT_RUN_STATUSES.running ||
+        checkpoint.phase !== "running" ||
+        !isExecutionGraphCheckpointIntact(checkpoint) ||
+        normalizeText(checkpoint.resumeClaim?.claimId) !== expectedClaimId
+      : expectedClaimId !== "")
+  ) {
+    const error = new Error(
+      "LangGraph checkpoint writer does not own the run's running graph."
+    );
+    error.code = "AGENT_GRAPH_EXECUTION_FENCED";
+    error.status = 409;
+    throw error;
+  }
+};
+
 const DEFAULT_AGENT_RUN_MUTATION_RETRIES = 32;
 
 const buildAgentRunCursorKey = ({ accessScope = {}, runId } = {}) =>
@@ -1311,10 +1395,16 @@ export const createAgentRunService = ({
     allowRetryTransition,
     existingRun,
     includeGraphCheckpoint,
+    includeLangGraphCheckpoint = false,
     mutate,
   }) => {
+    // The LangGraph record never rides on the run projection (see
+    // stripInternalRunFields); its own methods get it as a second argument.
     const mutation = await mutate(
-      stripInternalRunFields(existingRun, { includeGraphCheckpoint })
+      stripInternalRunFields(existingRun, { includeGraphCheckpoint }),
+      includeLangGraphCheckpoint
+        ? { langGraphCheckpoint: readLangGraphCheckpointRecord(existingRun) }
+        : undefined
     );
 
     if (!mutation) {
@@ -1329,6 +1419,21 @@ export const createAgentRunService = ({
     ) {
       const error = new Error(
         "Execution graph checkpoint requires the scoped checkpoint API."
+      );
+      error.code = "AGENT_GRAPH_CHECKPOINT_PRIVATE_FIELD";
+      error.status = 409;
+      throw error;
+    }
+
+    if (
+      !includeLangGraphCheckpoint &&
+      Object.hasOwn(normalizeRecord(patch.result), LANGGRAPH_CHECKPOINT_RESULT_KEY)
+    ) {
+      // Every other method is refused, the graph-checkpoint ones included:
+      // nothing may forge, replace or drop the record past
+      // mutateLangGraphCheckpointRecord's writer fence.
+      const error = new Error(
+        "LangGraph checkpoint requires the scoped checkpoint API."
       );
       error.code = "AGENT_GRAPH_CHECKPOINT_PRIVATE_FIELD";
       error.status = 409;
@@ -1411,6 +1516,7 @@ export const createAgentRunService = ({
     accessScope = {},
     allowRetryTransition = false,
     includeGraphCheckpoint = false,
+    includeLangGraphCheckpoint = false,
     maxRetries = 0,
     mutate,
     requiresFreshRun = null,
@@ -1432,6 +1538,7 @@ export const createAgentRunService = ({
           allowRetryTransition,
           existingRun: knownRun,
           includeGraphCheckpoint,
+          includeLangGraphCheckpoint,
           mutate,
         });
       } catch {
@@ -1484,6 +1591,7 @@ export const createAgentRunService = ({
         allowRetryTransition,
         existingRun,
         includeGraphCheckpoint,
+        includeLangGraphCheckpoint,
         mutate,
       });
 
@@ -1952,6 +2060,91 @@ export const createAgentRunService = ({
     }
 
     return structuredClone(checkpoint);
+  },
+
+  /**
+   * The LangGraph checkpointer's record of one run, read fresh from the store
+   * (never from a run cursor, which is a CAS base and not a cache). Returns
+   * null when the run does not exist in this scope, and { record } otherwise,
+   * with record null when there is none or it was tombstoned. Reads are not
+   * fenced: a worker that lost its claim may still read, only its writes fail.
+   */
+  async getLangGraphCheckpointRecord({ accessScope = {}, runId } = {}) {
+    const run = await agentRunStore.get?.({ accessScope, runId });
+
+    return run ? { record: readLangGraphCheckpointRecord(run) } : null;
+  },
+
+  /**
+   * One fenced revision CAS on the LangGraph record. `decide(record)` gets a
+   * private copy of the stored record (null when absent) and returns null for
+   * a no-op, or { record, value? } where record is the whole next record and
+   * null is the tombstone (a result key can be overwritten, never removed).
+   * It may be called more than once (a cursor attempt, then each retry after
+   * a revision conflict, up to the same 32 retries as every graph write), each
+   * time on that attempt's snapshot, so it must decide from its argument
+   * alone. The writer fence (assertLangGraphCheckpointWriter) is decided on
+   * the same snapshot before `decide` runs.
+   *
+   * No event is recorded: one per LangGraph superstep and task write would
+   * grow every run's event log (and, on PostgreSQL, the events every CAS
+   * returns) for a record nothing outside the checkpointer reads
+   * (docs/adr/0001-langgraph-runtime.md, write amplification). Returns null
+   * when the run does not exist in this scope, else { applied, value }.
+   */
+  async mutateLangGraphCheckpointRecord({
+    accessScope = {},
+    decide,
+    graphResumeClaimId = null,
+    runCursor = null,
+    runId,
+  } = {}) {
+    if (typeof decide !== "function") {
+      throw new TypeError("mutateLangGraphCheckpointRecord requires a decide function.");
+    }
+
+    const mutation = await mutateStoredRun({
+      accessScope,
+      includeGraphCheckpoint: true,
+      includeLangGraphCheckpoint: true,
+      maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      runCursor,
+      runId,
+      mutate: async (run, { langGraphCheckpoint }) => {
+        assertLangGraphCheckpointWriter({ graphResumeClaimId, run });
+
+        const decision = await decide(langGraphCheckpoint);
+
+        if (!decision) {
+          return null;
+        }
+
+        if (
+          !Object.hasOwn(decision, "record") ||
+          (decision.record !== null &&
+            (typeof decision.record !== "object" || Array.isArray(decision.record)))
+        ) {
+          throw new TypeError("A LangGraph checkpoint record must be an object or null.");
+        }
+
+        return {
+          // Only this key: decide cannot reach any other run field. The
+          // shallow result merge keeps every other result key, the graph
+          // checkpoint and the finalization receipt included. A copy, since
+          // the in-memory store keeps what it is given by reference.
+          patch: {
+            result: {
+              [LANGGRAPH_CHECKPOINT_RESULT_KEY]: structuredClone(decision.record),
+            },
+          },
+          value: decision.value ?? null,
+        };
+      },
+    });
+
+    return mutation.run
+      ? { applied: mutation.applied, value: mutation.value }
+      : null;
   },
 
   async pauseExecutionGraphForApproval({

@@ -261,6 +261,19 @@ export const getAgentSkillGraphRollout = () => {
   return toChoice(rawValue, "off", ["guarded", "off", "shadow"]);
 };
 
+// Which scheduler runs a guarded custom-Skill graph (docs/adr/0001-
+// langgraph-runtime.md, phase 2). `native` (default) is
+// agent-execution-graph-runner.js; `langgraph` runs the same nodes
+// (agent-execution-graph-node.js) on LangGraph.js. It only replaces the
+// scheduler: the graph, the planner, the rollout dial above, the v1 graph
+// checkpoint and the run store are the same either way, and the v3 unified
+// graph stays native in this phase.
+//
+// Anything but `langgraph` resolves to `native`, the path every existing
+// guarantee was proven on, so a mistyped value can only fall back to it.
+export const getAgentRuntime = () =>
+  toChoice(process.env.AGENT_RUNTIME, "native", ["langgraph", "native"]);
+
 // --- AGENT track: heterogeneous v3 unified graph rollout ---------------------
 // `off` (default) keeps the V1 outer order. `shadow` plans and validates a v3
 // graph beside the V1 answer without executing it. `guarded` executes an

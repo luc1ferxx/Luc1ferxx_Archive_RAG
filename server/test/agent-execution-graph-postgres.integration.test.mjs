@@ -46,6 +46,62 @@ const graphNodes = [
   },
 ];
 
+// The two cross-process cases also run with AGENT_RUNTIME=langgraph
+// (docs/adr/0001-langgraph-runtime.md, phase 2): the stage in this process,
+// the recovery or claim worker in the child and the in-process resume then
+// schedule the graph on LangGraph, over the same PostgreSQL rows and with
+// the same assertions. A null runtime is the original case, run as written.
+const CROSS_PROCESS_RUNTIMES = [
+  { runtime: null, title: "" },
+  { runtime: "langgraph", title: " (AGENT_RUNTIME=langgraph)" },
+];
+
+const withAgentRuntime = async (runtime, work) => {
+  if (!runtime) {
+    return work();
+  }
+
+  // LangGraph refuses to run while a LangSmith tracing variable is on
+  // (rag/langgraph/langsmith-guard.js). The child inherits this environment.
+  const { LANGSMITH_TRACING_VARIABLES } = await import("../rag/langgraph/langsmith-guard.js");
+  const names = ["AGENT_RUNTIME", ...LANGSMITH_TRACING_VARIABLES];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+
+  for (const name of LANGSMITH_TRACING_VARIABLES) {
+    delete process.env[name];
+  }
+  process.env.AGENT_RUNTIME = runtime;
+
+  try {
+    return await work();
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+};
+
+// Each node's status in the latest checkpoint of the run's LangGraph thread,
+// read through the production saver from the run row. Only LangGraph writes
+// these receipts, so they show which nodes it settled and in which pass.
+const readLangGraphReceiptStatuses = async (service, runId) => {
+  const { RunStoreCheckpointSaver } = await import("../rag/langgraph/checkpointer.js");
+  const saver = new RunStoreCheckpointSaver({ accessScope, agentRunService: service, runId });
+  const tuple = await saver.getTuple({
+    configurable: { checkpoint_ns: "", thread_id: saver.threadId },
+  });
+
+  return Object.fromEntries(
+    Object.entries(tuple?.checkpoint?.channel_values?.receipts ?? {}).map(
+      ([key, receipt]) => [key, receipt.status]
+    )
+  );
+};
+
 const effectTable = (value) => {
   if (!/^agent_graph_it_effects_[a-f0-9]{32}$/.test(value ?? "")) {
     throw new Error("Invalid integration effect table name.");
@@ -361,312 +417,388 @@ if (workerMode === "1") {
     skip: "PGVECTOR_TEST_DATABASE_URL is not set; use server/scripts/run-pgvector-integration.sh",
   }, () => {});
 } else {
-  test("PostgreSQL guarded graph survives a separate Node process without replaying a completed write", {
-    timeout: 120_000,
-  }, async () => {
-    const modules = await loadModules();
-    const suffix = randomUUID().replaceAll("-", "");
-    const tableName = effectTable(`agent_graph_it_effects_${suffix}`);
-    const runId = `graph-postgres-it-${suffix}`;
-    const service = newRunService(modules);
-    const skills = createSkills(modules, tableName, runId);
-    const registry = modules.createSkillRegistry(skills);
-    const plan = { mode: modules.SKILL_CHAIN_MODE };
-    let effectTableCreated = false;
-    let runCreated = false;
+  for (const { runtime, title } of CROSS_PROCESS_RUNTIMES) {
+    test(`PostgreSQL guarded graph survives a separate Node process without replaying a completed write${title}`, {
+      timeout: 120_000,
+    }, () => withAgentRuntime(runtime, async () => {
+      const modules = await loadModules();
+      const suffix = randomUUID().replaceAll("-", "");
+      const tableName = effectTable(`agent_graph_it_effects_${suffix}`);
+      const runId = `graph-postgres-it-${suffix}`;
+      const service = newRunService(modules);
+      const skills = createSkills(modules, tableName, runId);
+      const registry = modules.createSkillRegistry(skills);
+      const plan = { mode: modules.SKILL_CHAIN_MODE };
+      let effectTableCreated = false;
+      let runCreated = false;
 
-    try {
-      await service.initialize();
-      await createEffectTable(modules, tableName);
-      effectTableCreated = true;
-      await service.createRun({
-        accessScope,
-        goal: question,
-        input: { docIds, sessionId, userId: accessScope.userId },
-        plan: {
-          mode: plan.mode,
-          selectedSkills: skills.map((skill) => ({
-            skillId: skill.id,
-            skillVersion: skill.version,
-          })),
-        },
-        runId,
-      });
-      runCreated = true;
-      await service.appendRunEvent({
-        accessScope,
-        runId,
-        type: "execution_planned",
-        payload: { planner: { stepIds: ["custom_skills"] } },
-      });
-
-      const budgetState = modules.createAgentBudget({ maxCustomSkillCalls: 3 });
-      const tracker = modules.createAgentSkillTracker({ budgetState, selectedSkills: [] });
-      let interrupted = false;
-      await assert.rejects(
-        modules.runCustomSkillStage({
-          accessScope,
-          authorizedCustomSkills: skills,
-          authorizedDocIds: docIds,
-          budgetState,
-          buildSkillTraceDetail: tracker.buildSkillTraceDetail,
-          customSkills: skills,
-          docIds,
-          executeObservedSkill: tracker.executeObservedSkill,
-          loadExecutionGraphCheckpoint: () =>
-            service.getExecutionGraphCheckpoint({ accessScope, runId }),
-          mode: "guarded",
-          plan,
-          plannerAdapter: {
-            createExecutionGraph: () => ({ nodes: graphNodes }),
-            id: "postgres_graph_integration_planner",
-          },
-          question,
-          ragService: {},
-          recordSkillResult: tracker.recordSkillResult,
-          recordSkippedSkill: tracker.recordSkippedSkill,
-          registry,
-          saveExecutionGraphCheckpoint: async (checkpoint) => {
-            await service.saveExecutionGraphCheckpoint({ accessScope, checkpoint, runId });
-            if (!interrupted && checkpoint.nodeRuns.length === 1) {
-              interrupted = true;
-              throw new Error("simulated exit after durable graph checkpoint");
-            }
-          },
-          sessionId,
-          stepLifecycle: modules.createAgentRunStepLifecycle({
-            accessScope,
-            agentRunService: service,
-            runId,
-          }),
-          userId: accessScope.userId,
-        }),
-        /simulated exit after durable graph checkpoint/
-      );
-
-      const firstCheckpoint = await service.getExecutionGraphCheckpoint({ accessScope, runId });
-      assert.deepEqual(firstCheckpoint.checkpoint.nodeRuns.map((node) => node.nodeId), ["compare"]);
-      assert.deepEqual(firstCheckpoint.steps.map((step) => step.status), ["completed"]);
-      assert.deepEqual(await countEffects(modules, tableName, runId), {
-        compare_documents: 1,
-      });
-
-      // This is a real process boundary: the worker imports production modules
-      // afresh and builds a new Postgres pool and run service from persisted rows.
-      const child = await execFileAsync(process.execPath, [fileURLToPath(import.meta.url)], {
-        env: {
-          ...process.env,
-          AGENT_GRAPH_POSTGRES_RESUME_WORKER: "1",
-          AGENT_GRAPH_POSTGRES_EFFECT_TABLE: tableName,
-          AGENT_GRAPH_POSTGRES_RUN_ID: runId,
-        },
-        timeout: 90_000,
-      });
-      assert.match(child.stdout, /GRAPH_POSTGRES_RESUME_COMPLETE/);
-
-      const restartedService = newRunService(modules);
-      const completed = await restartedService.getRun({ accessScope, runId });
-      const finalCheckpoint = await restartedService.getExecutionGraphCheckpoint({ accessScope, runId });
-      const secondClaim = await restartedService.claimExecutionGraphResume({
-        accessScope,
-        checkpointDigest: finalCheckpoint.checkpoint.digest,
-        runId,
-      });
-      assert.equal(secondClaim.claimed, false);
-      assert.equal(completed.status, "completed");
-      assert.equal(finalCheckpoint.checkpoint.phase, "completed");
-      assert.ok(finalCheckpoint.checkpoint.resumeClaim?.claimId);
-      assert.deepEqual(await countEffects(modules, tableName, runId), {
-        compare_documents: 1,
-        risk_review: 1,
-      });
-      assert.equal(completed.events.filter((event) => event.type === "skill_graph_resume_claimed").length, 1);
-      assert.equal(completed.events.filter((event) => event.type === "auto_recovery_completed").length, 1);
-      assert.equal(completed.events.filter((event) => event.type === "manual_recovery_required").length, 0);
-      const graphEvent = completed.events.find((event) => event.type === "skill_graph_planned");
-      assert.deepEqual(graphEvent?.payload?.nodeRuns.map((node) => [node.nodeId, node.status]), [
-        ["compare", "reused"],
-        ["risk", "completed"],
-      ]);
-    } finally {
       try {
-        if (runCreated) {
-          const runsTable = modules.getAgentRunsPostgresTable();
-          const eventsTable = modules.getAgentRunEventsPostgresTable();
-          if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(runsTable) ||
-              !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(eventsTable)) {
-            throw new Error("Invalid configured agent-run integration table name.");
-          }
-          const values = [accessScope.userId, accessScope.workspaceId, runId];
-          await modules.queryPostgres(
-            `DELETE FROM ${eventsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
-            values
-          );
-          await modules.queryPostgres(
-            `DELETE FROM ${runsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
-            values
-          );
-        }
-        if (effectTableCreated) {
-          await modules.queryPostgres(`DROP TABLE ${tableName}`);
-        }
-      } finally {
-        await modules.resetPostgresPool();
-      }
-    }
-  });
-
-  test("PostgreSQL cross-process claim fences a still-live graph before its first write", {
-    timeout: 120_000,
-  }, async () => {
-    const modules = await loadModules();
-    const suffix = randomUUID().replaceAll("-", "");
-    const tableName = effectTable(`agent_graph_it_effects_${suffix}`);
-    const runId = `graph-postgres-it-${suffix}`;
-    const service = newRunService(modules);
-    const skills = createSkills(modules, tableName, runId);
-    const registry = modules.createSkillRegistry(skills);
-    const plan = { mode: modules.SKILL_CHAIN_MODE };
-    const checkpointSaved = deferred();
-    const releaseOriginal = deferred();
-    let effectTableCreated = false;
-    let runCreated = false;
-
-    try {
-      await service.initialize();
-      await createEffectTable(modules, tableName);
-      effectTableCreated = true;
-      await service.createRun({
-        accessScope,
-        goal: question,
-        input: { docIds, sessionId, userId: accessScope.userId },
-        plan: {
-          mode: plan.mode,
-          selectedSkills: skills.map((skill) => ({
-            skillId: skill.id,
-            skillVersion: skill.version,
-          })),
-        },
-        runId,
-      });
-      runCreated = true;
-      await service.appendRunEvent({
-        accessScope,
-        runId,
-        type: "execution_planned",
-        payload: { planner: { stepIds: ["custom_skills"] } },
-      });
-
-      const budgetState = modules.createAgentBudget({ maxCustomSkillCalls: 3 });
-      const tracker = modules.createAgentSkillTracker({ budgetState, selectedSkills: [] });
-      const originalOutcome = modules.runCustomSkillStage({
-        accessScope,
-        authorizedCustomSkills: skills,
-        authorizedDocIds: docIds,
-        budgetState,
-        buildSkillTraceDetail: tracker.buildSkillTraceDetail,
-        customSkills: skills,
-        docIds,
-        executeObservedSkill: tracker.executeObservedSkill,
-        loadExecutionGraphCheckpoint: () =>
-          service.getExecutionGraphCheckpoint({ accessScope, runId }),
-        mode: "guarded",
-        plan,
-        plannerAdapter: {
-          createExecutionGraph: () => ({ nodes: graphNodes }),
-          id: "postgres_graph_integration_planner",
-        },
-        question,
-        ragService: {},
-        recordSkillResult: tracker.recordSkillResult,
-        recordSkippedSkill: tracker.recordSkippedSkill,
-        registry,
-        saveExecutionGraphCheckpoint: async (checkpoint) => {
-          await service.saveExecutionGraphCheckpoint({ accessScope, checkpoint, runId });
-          if (checkpoint.nodeRuns.length === 0) {
-            checkpointSaved.resolve();
-            await releaseOriginal.promise;
-          }
-        },
-        sessionId,
-        stepLifecycle: modules.createAgentRunStepLifecycle({
+        await service.initialize();
+        await createEffectTable(modules, tableName);
+        effectTableCreated = true;
+        await service.createRun({
           accessScope,
-          agentRunService: service,
+          goal: question,
+          input: { docIds, sessionId, userId: accessScope.userId },
+          plan: {
+            mode: plan.mode,
+            selectedSkills: skills.map((skill) => ({
+              skillId: skill.id,
+              skillVersion: skill.version,
+            })),
+          },
           runId,
-        }),
-        userId: accessScope.userId,
-      }).then(
-        () => ({ error: null }),
-        (error) => ({ error })
-      );
+        });
+        runCreated = true;
+        await service.appendRunEvent({
+          accessScope,
+          runId,
+          type: "execution_planned",
+          payload: { planner: { stepIds: ["custom_skills"] } },
+        });
 
-      await checkpointSaved.promise;
-      const child = await execFileAsync(process.execPath, [fileURLToPath(import.meta.url)], {
-        env: {
-          ...process.env,
-          AGENT_GRAPH_POSTGRES_RESUME_WORKER: "claim",
-          AGENT_GRAPH_POSTGRES_RUN_ID: runId,
-        },
-        timeout: 90_000,
-      });
-      assert.match(child.stdout, /GRAPH_POSTGRES_CLAIMED/);
+        const budgetState = modules.createAgentBudget({ maxCustomSkillCalls: 3 });
+        const tracker = modules.createAgentSkillTracker({ budgetState, selectedSkills: [] });
+        let interrupted = false;
+        await assert.rejects(
+          modules.runCustomSkillStage({
+            accessScope,
+            authorizedCustomSkills: skills,
+            authorizedDocIds: docIds,
+            budgetState,
+            buildSkillTraceDetail: tracker.buildSkillTraceDetail,
+            customSkills: skills,
+            docIds,
+            executeObservedSkill: tracker.executeObservedSkill,
+            loadExecutionGraphCheckpoint: () =>
+              service.getExecutionGraphCheckpoint({ accessScope, runId }),
+            mode: "guarded",
+            plan,
+            plannerAdapter: {
+              createExecutionGraph: () => ({ nodes: graphNodes }),
+              id: "postgres_graph_integration_planner",
+            },
+            question,
+            ragService: {},
+            recordSkillResult: tracker.recordSkillResult,
+            recordSkippedSkill: tracker.recordSkippedSkill,
+            registry,
+            saveExecutionGraphCheckpoint: async (checkpoint) => {
+              await service.saveExecutionGraphCheckpoint({ accessScope, checkpoint, runId });
+              if (!interrupted && checkpoint.nodeRuns.length === 1) {
+                interrupted = true;
+                throw new Error("simulated exit after durable graph checkpoint");
+              }
+            },
+            sessionId,
+            stepLifecycle: modules.createAgentRunStepLifecycle({
+              accessScope,
+              agentRunService: service,
+              runId,
+            }),
+            userId: accessScope.userId,
+          }),
+          /simulated exit after durable graph checkpoint/
+        );
 
-      releaseOriginal.resolve();
-      const original = await originalOutcome;
-      assert.equal(original.error?.code, "AGENT_GRAPH_EXECUTION_FENCED");
-      assert.deepEqual(await countEffects(modules, tableName, runId), {});
-
-      const loaded = await service.getExecutionGraphCheckpoint({ accessScope, runId });
-      assert.deepEqual(loaded.steps, []);
-      const resumed = await modules.resumeAgentExecutionGraphRun({
-        accessScope,
-        agentRunService: newRunService(modules),
-        checkpoint: loaded.checkpoint,
-        ragService: {
-          getDocument: (docId, scope) =>
-            docIds.includes(docId) &&
-            scope?.userId === accessScope.userId &&
-            scope?.workspaceId === accessScope.workspaceId
-              ? { docId }
-              : null,
-        },
-        run: await service.getRun({ accessScope, runId }),
-        runId,
-        skillRegistry: registry,
-      });
-      assert.equal(resumed.body?.agentRunStatus, "completed");
-      assert.deepEqual(await countEffects(modules, tableName, runId), {
-        compare_documents: 1,
-        risk_review: 1,
-      });
-    } finally {
-      releaseOriginal.resolve();
-      try {
-        if (runCreated) {
-          const runsTable = modules.getAgentRunsPostgresTable();
-          const eventsTable = modules.getAgentRunEventsPostgresTable();
-          if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(runsTable) ||
-              !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(eventsTable)) {
-            throw new Error("Invalid configured agent-run integration table name.");
-          }
-          const values = [accessScope.userId, accessScope.workspaceId, runId];
-          await modules.queryPostgres(
-            `DELETE FROM ${eventsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
-            values
-          );
-          await modules.queryPostgres(
-            `DELETE FROM ${runsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
-            values
+        const firstCheckpoint = await service.getExecutionGraphCheckpoint({ accessScope, runId });
+        assert.deepEqual(firstCheckpoint.checkpoint.nodeRuns.map((node) => node.nodeId), ["compare"]);
+        assert.deepEqual(firstCheckpoint.steps.map((step) => step.status), ["completed"]);
+        assert.deepEqual(await countEffects(modules, tableName, runId), {
+          compare_documents: 1,
+        });
+        if (runtime) {
+          // The first worker stopped before LangGraph reached `risk`.
+          assert.equal(
+            Object.hasOwn(await readLangGraphReceiptStatuses(service, runId), "node:risk"),
+            false
           );
         }
-        if (effectTableCreated) {
-          await modules.queryPostgres(`DROP TABLE ${tableName}`);
+
+        // This is a real process boundary: the worker imports production modules
+        // afresh and builds a new Postgres pool and run service from persisted rows.
+        const child = await execFileAsync(process.execPath, [fileURLToPath(import.meta.url)], {
+          env: {
+            ...process.env,
+            ...(runtime ? { AGENT_RUNTIME: runtime } : {}),
+            AGENT_GRAPH_POSTGRES_RESUME_WORKER: "1",
+            AGENT_GRAPH_POSTGRES_EFFECT_TABLE: tableName,
+            AGENT_GRAPH_POSTGRES_RUN_ID: runId,
+          },
+          timeout: 90_000,
+        });
+        assert.match(child.stdout, /GRAPH_POSTGRES_RESUME_COMPLETE/);
+
+        const restartedService = newRunService(modules);
+        const completed = await restartedService.getRun({ accessScope, runId });
+        const finalCheckpoint = await restartedService.getExecutionGraphCheckpoint({ accessScope, runId });
+        const secondClaim = await restartedService.claimExecutionGraphResume({
+          accessScope,
+          checkpointDigest: finalCheckpoint.checkpoint.digest,
+          runId,
+        });
+        assert.equal(secondClaim.claimed, false);
+        assert.equal(completed.status, "completed");
+        assert.equal(finalCheckpoint.checkpoint.phase, "completed");
+        assert.ok(finalCheckpoint.checkpoint.resumeClaim?.claimId);
+        assert.deepEqual(await countEffects(modules, tableName, runId), {
+          compare_documents: 1,
+          risk_review: 1,
+        });
+        assert.equal(completed.events.filter((event) => event.type === "skill_graph_resume_claimed").length, 1);
+        assert.equal(completed.events.filter((event) => event.type === "auto_recovery_completed").length, 1);
+        assert.equal(completed.events.filter((event) => event.type === "manual_recovery_required").length, 0);
+        const graphEvent = completed.events.find((event) => event.type === "skill_graph_planned");
+        assert.deepEqual(graphEvent?.payload?.nodeRuns.map((node) => [node.nodeId, node.status]), [
+          ["compare", "reused"],
+          ["risk", "completed"],
+        ]);
+        if (runtime) {
+          // The child's recovery ran the graph on LangGraph: a new thread
+          // that took `compare` from the graph checkpoint and settled `risk`.
+          assert.deepEqual(await readLangGraphReceiptStatuses(restartedService, runId), {
+            "node:compare": "reused",
+            "node:risk": "completed",
+          });
         }
       } finally {
-        await modules.resetPostgresPool();
+        try {
+          if (runCreated) {
+            const runsTable = modules.getAgentRunsPostgresTable();
+            const eventsTable = modules.getAgentRunEventsPostgresTable();
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(runsTable) ||
+                !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(eventsTable)) {
+              throw new Error("Invalid configured agent-run integration table name.");
+            }
+            const values = [accessScope.userId, accessScope.workspaceId, runId];
+            await modules.queryPostgres(
+              `DELETE FROM ${eventsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
+              values
+            );
+            await modules.queryPostgres(
+              `DELETE FROM ${runsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
+              values
+            );
+          }
+          if (effectTableCreated) {
+            await modules.queryPostgres(`DROP TABLE ${tableName}`);
+          }
+        } finally {
+          await modules.resetPostgresPool();
+        }
       }
+    }));
+  }
+
+  // Where the child claims the graph from the still-live original worker:
+  // before its first node (the original case), or between its two nodes,
+  // once compare's run is durable and before risk starts. The first fenced
+  // write the stale worker reaches differs by runtime: natively it is always
+  // a node step; on LangGraph it is the thread's tombstone before the first
+  // node, and the thread's record of compare's superstep between them.
+  const CLAIM_POINTS = [
+    {
+      fencedBy: {
+        langgraph: "LangGraph checkpoint writer does not own the run's running graph.",
+        native: null,
+      },
+      pauseAtNodeRuns: 0,
+      title: "before its first write",
+    },
+    {
+      fencedBy: {
+        langgraph: "LangGraph checkpoint writer does not own the run's running graph.",
+        native: "Execution graph node transition conflicts with the persisted graph owner.",
+      },
+      pauseAtNodeRuns: 1,
+      title: "between its nodes",
+    },
+  ];
+
+  for (const { runtime, title } of CROSS_PROCESS_RUNTIMES) {
+    for (const claimPoint of CLAIM_POINTS) {
+      test(`PostgreSQL cross-process claim fences a still-live graph ${claimPoint.title}${title}`, {
+        timeout: 120_000,
+      }, () => withAgentRuntime(runtime, async () => {
+        const modules = await loadModules();
+        const suffix = randomUUID().replaceAll("-", "");
+        const tableName = effectTable(`agent_graph_it_effects_${suffix}`);
+        const runId = `graph-postgres-it-${suffix}`;
+        const service = newRunService(modules);
+        const skills = createSkills(modules, tableName, runId);
+        const registry = modules.createSkillRegistry(skills);
+        const plan = { mode: modules.SKILL_CHAIN_MODE };
+        const checkpointSaved = deferred();
+        const releaseOriginal = deferred();
+        let effectTableCreated = false;
+        let runCreated = false;
+
+        try {
+          await service.initialize();
+          await createEffectTable(modules, tableName);
+          effectTableCreated = true;
+          await service.createRun({
+            accessScope,
+            goal: question,
+            input: { docIds, sessionId, userId: accessScope.userId },
+            plan: {
+              mode: plan.mode,
+              selectedSkills: skills.map((skill) => ({
+                skillId: skill.id,
+                skillVersion: skill.version,
+              })),
+            },
+            runId,
+          });
+          runCreated = true;
+          await service.appendRunEvent({
+            accessScope,
+            runId,
+            type: "execution_planned",
+            payload: { planner: { stepIds: ["custom_skills"] } },
+          });
+
+          const budgetState = modules.createAgentBudget({ maxCustomSkillCalls: 3 });
+          const tracker = modules.createAgentSkillTracker({ budgetState, selectedSkills: [] });
+          const originalOutcome = modules.runCustomSkillStage({
+            accessScope,
+            authorizedCustomSkills: skills,
+            authorizedDocIds: docIds,
+            budgetState,
+            buildSkillTraceDetail: tracker.buildSkillTraceDetail,
+            customSkills: skills,
+            docIds,
+            executeObservedSkill: tracker.executeObservedSkill,
+            loadExecutionGraphCheckpoint: () =>
+              service.getExecutionGraphCheckpoint({ accessScope, runId }),
+            mode: "guarded",
+            plan,
+            plannerAdapter: {
+              createExecutionGraph: () => ({ nodes: graphNodes }),
+              id: "postgres_graph_integration_planner",
+            },
+            question,
+            ragService: {},
+            recordSkillResult: tracker.recordSkillResult,
+            recordSkippedSkill: tracker.recordSkippedSkill,
+            registry,
+            saveExecutionGraphCheckpoint: async (checkpoint) => {
+              await service.saveExecutionGraphCheckpoint({ accessScope, checkpoint, runId });
+              if (checkpoint.nodeRuns.length === claimPoint.pauseAtNodeRuns) {
+                checkpointSaved.resolve();
+                await releaseOriginal.promise;
+              }
+            },
+            sessionId,
+            stepLifecycle: modules.createAgentRunStepLifecycle({
+              accessScope,
+              agentRunService: service,
+              runId,
+            }),
+            userId: accessScope.userId,
+          }).then(
+            () => ({ error: null }),
+            (error) => ({ error })
+          );
+
+          await checkpointSaved.promise;
+          const child = await execFileAsync(process.execPath, [fileURLToPath(import.meta.url)], {
+            env: {
+              ...process.env,
+              ...(runtime ? { AGENT_RUNTIME: runtime } : {}),
+              AGENT_GRAPH_POSTGRES_RESUME_WORKER: "claim",
+              AGENT_GRAPH_POSTGRES_RUN_ID: runId,
+            },
+            timeout: 90_000,
+          });
+          assert.match(child.stdout, /GRAPH_POSTGRES_CLAIMED/);
+
+          releaseOriginal.resolve();
+          const original = await originalOutcome;
+          assert.equal(original.error?.code, "AGENT_GRAPH_EXECUTION_FENCED");
+          const fencedBy = claimPoint.fencedBy[runtime ?? "native"];
+          if (fencedBy) {
+            assert.equal(original.error?.message, fencedBy);
+          }
+          if (claimPoint.pauseAtNodeRuns === 0) {
+            assert.deepEqual(await countEffects(modules, tableName, runId), {});
+          } else {
+            // compare ran before the claim; risk never started.
+            assert.deepEqual(await countEffects(modules, tableName, runId), {
+              compare_documents: 1,
+            });
+          }
+
+          const loaded = await service.getExecutionGraphCheckpoint({ accessScope, runId });
+          if (claimPoint.pauseAtNodeRuns === 0) {
+            assert.deepEqual(loaded.steps, []);
+          } else {
+            assert.deepEqual(
+              loaded.steps.map(({ id, status }) => `${id}:${status}`),
+              ["custom_skill:compare:completed"]
+            );
+          }
+          const resumed = await modules.resumeAgentExecutionGraphRun({
+            accessScope,
+            agentRunService: newRunService(modules),
+            checkpoint: loaded.checkpoint,
+            ragService: {
+              getDocument: (docId, scope) =>
+                docIds.includes(docId) &&
+                scope?.userId === accessScope.userId &&
+                scope?.workspaceId === accessScope.workspaceId
+                  ? { docId }
+                  : null,
+            },
+            run: await service.getRun({ accessScope, runId }),
+            runId,
+            skillRegistry: registry,
+          });
+          assert.equal(resumed.body?.agentRunStatus, "completed");
+          assert.deepEqual(await countEffects(modules, tableName, runId), {
+            compare_documents: 1,
+            risk_review: 1,
+          });
+          if (runtime) {
+            // What the resume ran, on LangGraph, in a thread of its own: its
+            // tombstone replaced anything the fenced worker had written, so
+            // these receipts say nothing about that worker (the effects and
+            // steps above and its error do).
+            assert.deepEqual(await readLangGraphReceiptStatuses(service, runId), {
+              "node:compare": claimPoint.pauseAtNodeRuns === 0 ? "completed" : "reused",
+              "node:risk": "completed",
+            });
+          }
+        } finally {
+          releaseOriginal.resolve();
+          try {
+            if (runCreated) {
+              const runsTable = modules.getAgentRunsPostgresTable();
+              const eventsTable = modules.getAgentRunEventsPostgresTable();
+              if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(runsTable) ||
+                  !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(eventsTable)) {
+                throw new Error("Invalid configured agent-run integration table name.");
+              }
+              const values = [accessScope.userId, accessScope.workspaceId, runId];
+              await modules.queryPostgres(
+                `DELETE FROM ${eventsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
+                values
+              );
+              await modules.queryPostgres(
+                `DELETE FROM ${runsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
+                values
+              );
+            }
+            if (effectTableCreated) {
+              await modules.queryPostgres(`DROP TABLE ${tableName}`);
+            }
+          } finally {
+            await modules.resetPostgresPool();
+          }
+        }
+      }));
     }
-  });
+  }
 
   test("PostgreSQL manual recovery CAS wins over a concurrent graph claim and fences the old worker", {
     timeout: 120_000,

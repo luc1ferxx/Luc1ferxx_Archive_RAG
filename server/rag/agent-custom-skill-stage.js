@@ -20,7 +20,9 @@ import {
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import { runShadowPlanner, sameStringList } from "./agent-planner-shadow.js";
 import { REPLAN_DECISIONS, createReplanResult } from "./agent-replanner.js";
-import { getAgentSkillGraphRollout } from "./config.js";
+import { getAgentRunStepLifecycleTarget } from "./agent-run-step-lifecycle.js";
+import { getAgentRuntime, getAgentSkillGraphRollout } from "./config.js";
+import { assertLangSmithTracingDisabled } from "./langgraph/langsmith-guard.js";
 import { setSpanAttributes, withSpan } from "./tracing.js";
 
 // The migration incision.
@@ -40,6 +42,11 @@ import { setSpanAttributes, withSpan } from "./tracing.js";
 // There is deliberately no fallback after partial execution. Once a node has
 // spent budget and written a step, re-running the chain would repeat that work
 // under a different plan and bill the user twice for one request.
+//
+// A second dial, AGENT_RUNTIME, picks who schedules a guarded graph: the
+// native scheduler (default) or LangGraph (docs/adr/0001-langgraph-runtime.md,
+// phase 2). Planning, the checkpoint, replans and recovery below are the same
+// for both; only runGraph's executor changes.
 
 const noop = () => {};
 
@@ -47,6 +54,11 @@ export const CUSTOM_SKILL_STAGE_MODES = Object.freeze({
   guarded: "guarded",
   off: "off",
   shadow: "shadow",
+});
+
+export const CUSTOM_SKILL_GRAPH_RUNTIMES = Object.freeze({
+  langgraph: "langgraph",
+  native: "native",
 });
 
 const describeGraph = (graph) =>
@@ -105,6 +117,7 @@ export const runCustomSkillStage = async ({
   registry,
   replanAdapter = null,
   retrievalPlan,
+  runtime = getAgentRuntime(),
   saveExecutionGraphCheckpoint = null,
   sessionId,
   stepLifecycle,
@@ -221,6 +234,20 @@ export const runCustomSkillStage = async ({
     }
 
     return results;
+  }
+
+  let executeGraph = runExecutionGraph;
+
+  if (runtime === CUSTOM_SKILL_GRAPH_RUNTIMES.langgraph) {
+    // Refused before anything durable exists: a request that cannot run on
+    // its runtime must not leave a graph checkpoint for recovery to resume.
+    // The executor checks again at its own entry.
+    assertLangSmithTracingDisabled();
+    // Imported only when selected, so a process on the native runtime never
+    // loads LangGraph.
+    ({ runExecutionGraphOnLangGraph: executeGraph } = await import(
+      "./langgraph/run-execution-graph.js"
+    ));
   }
 
   const loadedCheckpoint = await loadExecutionGraphCheckpoint?.();
@@ -416,8 +443,24 @@ export const runCustomSkillStage = async ({
     return checkpointQueue;
   };
 
+  // LangGraph checkpoints its thread into the run whose graph checkpoint this
+  // stage keeps, and only then: that checkpoint is what recovery, reuse and
+  // fencing are decided from, so a thread record without one would be state
+  // nothing can trust. The run, scope and cursor are the ones the node steps
+  // are written with (getAgentRunStepLifecycleTarget).
+  const langGraphRun = executeGraph !== runExecutionGraph && checkpoint
+    ? getAgentRunStepLifecycleTarget(stepLifecycle)
+    : null;
+
   const runGraph = (graph, settledRuns = []) =>
-    runExecutionGraph({
+    executeGraph({
+      ...(langGraphRun
+        ? {
+            agentRunId: langGraphRun.runId,
+            agentRunService: langGraphRun.agentRunService,
+            runCursor: langGraphRun.runCursor,
+          }
+        : {}),
       accessScope,
       addBudgetLimitTrace,
       addTraceStep,
