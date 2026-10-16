@@ -19,7 +19,10 @@ import {
   createExecutionGraph,
 } from "../rag/agent-execution-graph.js";
 import { EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY } from "../rag/agent-execution-graph-checkpoint.js";
-import { createExecutionGraphNodeStates } from "../rag/agent-execution-graph-node.js";
+import {
+  createExecutionGraphNodeStates,
+  orderExecutionGraphNodeStatesByLayer,
+} from "../rag/agent-execution-graph-node.js";
 import {
   admitExecutionGraphRun,
   runExecutionGraph,
@@ -46,9 +49,7 @@ import {
 } from "../rag/langgraph/checkpointer.js";
 import {
   ExecutionGraphReceiptState,
-  canScheduleExecutionGraphOnLangGraph,
   encodeExecutionGraphNodeName,
-  isExecutionGraphDeclaredInLayerOrder,
 } from "../rag/langgraph/compile-execution-graph.js";
 import { createExecutionGraphConcurrencyGate } from "../rag/langgraph/concurrency-gate.js";
 import { LANGSMITH_TRACING_ENABLED_CODE } from "../rag/langgraph/langsmith-guard.js";
@@ -2369,36 +2370,36 @@ test("a typed output that carries a boolean flag reaches dependants through the 
 });
 
 // ---------------------------------------------------------------------------
-// Queue order: which graphs LangGraph schedules, and skip turns
+// Queue order: the layer-order queue, and skip turns
 // ---------------------------------------------------------------------------
 
-const admitForPredicate = ({ graph, maxConcurrency, skills, completedNodeRuns = [] }) => {
+const queueOf = ({ graph, skills }) => {
   const registry = createSkillRegistry(skills);
   const admission = admitExecutionGraphRun({
     authorizedDocIds: [...DOC_IDS],
     authorizedSkillIds: skills.map((skill) => skill.id),
     docIds: [...DOC_IDS],
     graph,
-    maxConcurrency,
     registry,
   });
 
   assert.equal(admission.rejected, null);
 
-  const { states } = createExecutionGraphNodeStates({ completedNodeRuns, graph, registry });
+  const { states } = createExecutionGraphNodeStates({ graph, registry });
 
-  return {
-    canSchedule: canScheduleExecutionGraphOnLangGraph({
-      compiled: admission.compiled,
-      concurrencyCap: admission.concurrencyCap,
-      graph,
-      states,
-    }),
-    layered: isExecutionGraphDeclaredInLayerOrder({ compiled: admission.compiled, graph }),
-  };
+  return orderExecutionGraphNodeStatesByLayer({ compiled: admission.compiled, states }).map(
+    (state) => state.node.nodeId
+  );
 };
 
-test("LangGraph schedules a graph declared in layer order or one whose native queue never holds a node back", () => {
+// Phase 5 (docs/adr/0001-langgraph-runtime.md). Until then this place pinned
+// canScheduleExecutionGraphOnLangGraph: which graphs LangGraph could schedule
+// with the native queue's decisions (declared in layer order, or never
+// holding a ready node back), the rest being handed to the native scheduler.
+// Both schedulers now queue in the validator's layer order, which makes that
+// predicate true for every graph admission accepts, so it and the hand-over
+// were removed. What is pinned instead is the shared queue itself.
+test("both schedulers queue the nodes in the validator's layer order, declaration order within a layer", () => {
   const probe = createProbe();
   const skills = ["risk_review", "extract_timeline", "summarize_contract", "compare_documents"].map(
     (id) => createScriptedSkill({ id, probe })
@@ -2417,64 +2418,53 @@ test("LangGraph schedules a graph declared in layer order or one whose native qu
     skillId: "compare_documents",
   });
   const publish = graphNode({ nodeId: "publish", skillId: "publish_report" });
-  const decide = (nodes, maxConcurrency, extra = {}) =>
-    admitForPredicate({
-      graph: createExecutionGraph({ nodes, version: "v2" }),
-      maxConcurrency,
-      skills: [...skills, writer],
-      ...extra,
-    });
+  const queue = (nodes) =>
+    queueOf({ graph: createExecutionGraph({ nodes, version: "v2" }), skills: [...skills, writer] });
 
-  // Layer order: always, whatever the cap.
-  assert.deepEqual(decide([risk, timeline, summary, compare], 1), { canSchedule: true, layered: true });
-  // A forward reference, and a later layer declared before an earlier one:
-  // with a cap of 1 the native queue starts summary before timeline.
-  assert.deepEqual(decide([summary, risk, timeline], 1), { canSchedule: false, layered: false });
-  assert.deepEqual(decide([risk, summary, timeline], 1), { canSchedule: false, layered: false });
-  // The same graphs where at most 2 nodes can ever run at once and the cap
-  // is 2: the native queue never holds a ready node back.
-  assert.deepEqual(decide([summary, risk, timeline], 2), { canSchedule: true, layered: false });
-  assert.deepEqual(decide([risk, summary, timeline, compare], 2), {
-    canSchedule: true,
-    layered: false,
-  });
-  // A node that runs alone holds the others back whatever the cap.
-  assert.deepEqual(decide([risk, summary, publish], 3), { canSchedule: false, layered: false });
-  assert.deepEqual(decide([publish, risk, summary], 3), { canSchedule: true, layered: true });
-  // Reused nodes never run again, so they do not count towards the width:
-  // with risk reused, only summary and timeline are left, and they fit a cap
-  // of 2 but not of 1.
-  const completedNodeRuns = [{
-    nodeId: "risk",
-    result: {
-      abstained: false,
-      citations: [{ docId: "doc-1", page: 1 }],
-      ok: true,
-      skillId: "risk_review",
-      skillVersion: "1.0.0",
-      status: "completed",
-      text: "risk_review answered.",
-    },
-    skillId: "risk_review",
-    skillVersion: "1.0.0",
-    status: "completed",
-  }];
-  const reused = (cap) =>
-    decide([summary, risk, timeline, graphNode({ nodeId: "extra", skillId: "compare_documents" })], cap, {
-      completedNodeRuns,
-    }).canSchedule;
+  // Declared in layer order: the queue is the declaration.
+  assert.deepEqual(queue([risk, timeline, summary, compare]), ["risk", "timeline", "summary", "compare"]);
+  assert.deepEqual(queue([publish, risk, summary]), ["publish", "risk", "summary"]);
+  // The graphs that used to be handed to the native scheduler: a forward
+  // reference, a later layer declared before an earlier one, a node behind
+  // an exclusive one. A later layer never comes first.
+  assert.deepEqual(queue([summary, risk, timeline]), ["risk", "timeline", "summary"]);
+  assert.deepEqual(queue([risk, summary, timeline]), ["risk", "timeline", "summary"]);
+  assert.deepEqual(queue([risk, summary, timeline, compare]), ["risk", "timeline", "summary", "compare"]);
+  assert.deepEqual(queue([compare, summary, timeline, risk]), ["timeline", "risk", "summary", "compare"]);
+  assert.deepEqual(queue([risk, summary, publish]), ["risk", "publish", "summary"]);
+  // Ids resolve as the validator's (trimmed); the states keep them as written.
+  assert.deepEqual(
+    queue([
+      graphNode({ dependsOn: ["risk"], nodeId: " summary", skillId: "summarize_contract" }),
+      graphNode({ nodeId: "risk ", skillId: "risk_review" }),
+    ]),
+    ["risk ", " summary"]
+  );
 
-  assert.equal(reused(3), true);
-  assert.equal(reused(2), false);
+  // A compiled order that does not belong to the states is refused.
+  const graph = createExecutionGraph({ nodes: [risk, summary], version: "v2" });
+  const { states } = createExecutionGraphNodeStates({ graph, registry: createSkillRegistry(skills) });
+
+  for (const order of [["risk"], ["risk", "summary", "timeline"], ["risk", "risk"], ["risk", "other"]]) {
+    assert.throws(
+      () => orderExecutionGraphNodeStatesByLayer({ compiled: { order }, states }),
+      /compiled order does not match/
+    );
+  }
 });
 
-test("parity: a graph whose native queue starts a later layer first runs on the native scheduler", async () => {
-  // Under a cap of 1, the native queue starts `summary` (declared ahead of
-  // `timeline`) as soon as `risk` settled, so the budget funds summary and a
-  // fail_fast summary aborts timeline. Scheduled superstep by superstep,
-  // timeline would run before summary on every run. Such an invocation is
-  // handed to the native scheduler, so both runtimes agree exactly, and
-  // LangGraph writes nothing.
+// The scenarios that used to be handed to the native scheduler (cap 1, a
+// later layer declared first, under budget or fail_fast pressure). This test
+// pinned the hand-over: the native journal (risk, then summary, which the
+// declaration-order queue reached first) and no LangGraph record. It now pins
+// the phase-5 behaviour: LangGraph schedules them itself (its thread holds a
+// receipt for every node), the parity check is the same exact
+// deepStrictEqual as before, and the native journal is the layer order
+// (risk, timeline, then summary). That is the native behaviour change for a
+// graph not declared in layer order: the budget now funds timeline instead of
+// summary, and a fail_fast summary no longer aborts timeline, which already
+// ran.
+test("parity: a graph whose declaration order puts a later layer first runs on LangGraph in layer order, as natively", async () => {
   for (const order of ["forward_reference", "later_layer_first"]) {
     for (const pressure of ["budget", "fail_fast"]) {
       const { langgraph, native } = await assertParity({
@@ -2521,10 +2511,17 @@ test("parity: a graph whose native queue starts a later layer first runs on the 
         },
       });
       const label = `${order}/${pressure}`;
+      const expected = {
+        risk: "completed",
+        summary: pressure === "budget" ? "skipped/budget_exhausted" : "failed",
+        timeline: "completed",
+      };
 
       assert.deepEqual(
         native.observed.journal.filter(({ event }) => event === "start").map(({ skillId }) => skillId),
-        ["risk_review", "summarize_contract"],
+        pressure === "budget"
+          ? ["risk_review", "extract_timeline"]
+          : ["risk_review", "extract_timeline", "summarize_contract"],
         label
       );
       assert.deepEqual(
@@ -2534,24 +2531,198 @@ test("parity: a graph whose native queue starts a later layer first runs on the 
             reason ? `${status}/${reason}` : status,
           ])
         ),
-        {
-          risk: "completed",
-          summary: pressure === "budget" ? "completed" : "failed",
-          timeline: pressure === "budget"
-            ? "skipped/budget_exhausted"
-            : "skipped/aborted_after_failure",
-        },
+        expected,
         label
       );
-      assert.equal(langgraph.langGraphRecord, null, label);
+
+      // Scheduled by LangGraph, not handed over: only LangGraph writes the
+      // thread, and it holds every node's receipt.
+      const { receipts } = await readThread(langgraph.agentRunService);
+
+      assert.deepEqual(
+        Object.fromEntries(
+          Object.entries(receipts).map(([nodeId, { reason, status }]) => [
+            nodeId,
+            reason ? `${status}/${reason}` : status,
+          ])
+        ),
+        expected,
+        label
+      );
     }
   }
 });
 
-test("a call handed to the native scheduler drops the run's earlier LangGraph thread first", async () => {
+// Every validator-accepted shape of one five-node graph runs on LangGraph
+// with native-equal results: each of the 120 declaration orders, with the
+// queue held back by the cap (cap 1) or by exclusivity (every node a
+// workspace write, cap 3), and with no pressure, a budget that funds three
+// nodes, or a fail_fast failure in the middle layer. Nothing runs beside
+// anything else here, so the races of the superstep barrier (known
+// differences 1 and 2) cannot happen and the comparison is assertParity's
+// exact one; known difference 3 is the only one a sequential graph could
+// show, and it does not (skillRunOrder "exact" holds for all of them).
+test("parity: every declaration order of a five-node graph runs on LangGraph in layer order, held back by the cap or by exclusivity", async () => {
+  const permutations = (items) =>
+    items.length <= 1
+      ? [items]
+      : items.flatMap((item, index) =>
+          permutations([...items.slice(0, index), ...items.slice(index + 1)]).map((rest) => [
+            item,
+            ...rest,
+          ])
+        );
+  const SKILLS = {
+    compare: "compare_documents",
+    review: "timeline_review",
+    risk: "risk_review",
+    summary: "summarize_contract",
+    timeline: "extract_timeline",
+  };
+  const DEPENDS_ON = {
+    compare: ["summary", "review"],
+    review: ["timeline"],
+    risk: [],
+    summary: ["risk"],
+    timeline: [],
+  };
+  const LAYERS = [["risk", "timeline"], ["summary", "review"], ["compare"]];
+  // The queue: layer by layer, declaration order within a layer.
+  const queueFor = (declared) =>
+    LAYERS.flatMap((layer) => declared.filter((nodeId) => layer.includes(nodeId)));
+  // What the layer-order queue does, one node at a time.
+  const expectOutcome = ({ declared, pressure }) => {
+    const queue = queueFor(declared);
+
+    if (pressure === "budget") {
+      // Budget 3: the first three of the queue; the fourth (the other node
+      // of the middle layer) is not funded, so compare has a skipped
+      // dependency.
+      return Object.fromEntries(
+        queue.map((nodeId, index) => [
+          nodeId,
+          index < 3
+            ? "completed"
+            : nodeId === "compare"
+              ? "skipped/dependency_skipped"
+              : "skipped/budget_exhausted",
+        ])
+      );
+    }
+
+    if (pressure === "fail_fast") {
+      // summary fails fast: what the queue has behind it is aborted, and
+      // compare has a failed dependency.
+      const failedAt = queue.indexOf("summary");
+
+      return Object.fromEntries(
+        queue.map((nodeId, index) => [
+          nodeId,
+          index < failedAt
+            ? "completed"
+            : nodeId === "summary"
+              ? "failed"
+              : nodeId === "compare"
+                ? "skipped/dependency_failed"
+                : "skipped/aborted_after_failure",
+        ])
+      );
+    }
+
+    return Object.fromEntries(queue.map((nodeId) => [nodeId, "completed"]));
+  };
+  const describeNodeRuns = (nodeRuns) =>
+    Object.fromEntries(
+      nodeRuns.map(({ nodeId, reason, status }) => [nodeId, reason ? `${status}/${reason}` : status])
+    );
+  let scenarios = 0;
+
+  for (const declared of permutations(LAYERS.flat())) {
+    for (const holdBack of ["cap", "exclusive"]) {
+      for (const pressure of ["none", "budget", "fail_fast"]) {
+        const label = `${declared.join(",")}/${holdBack}/${pressure}`;
+        const { langgraph, native } = await assertParity({
+          level: "executor",
+          build: () => {
+            const probe = createProbe();
+
+            return {
+              budget: { maxCustomSkillCalls: pressure === "budget" ? 3 : 8 },
+              graph: createExecutionGraph({
+                nodes: declared.map((nodeId) =>
+                  graphNode({
+                    dependsOn: DEPENDS_ON[nodeId],
+                    failurePolicy: pressure === "fail_fast" && nodeId === "summary"
+                      ? EXECUTION_GRAPH_FAILURE_POLICIES.failFast
+                      : EXECUTION_GRAPH_FAILURE_POLICIES.continue,
+                    nodeId,
+                    skillId: SKILLS[nodeId],
+                  })
+                ),
+              }),
+              maxConcurrency: holdBack === "cap" ? 1 : 3,
+              probe,
+              skills: Object.entries(SKILLS).map(([nodeId, id]) =>
+                createScriptedSkill({
+                  ...(holdBack === "exclusive" ? { effects: SKILL_EFFECTS.workspaceWrite } : {}),
+                  id,
+                  probe,
+                  ...(pressure === "fail_fast" && nodeId === "summary"
+                    ? {
+                        respond: async () => {
+                          throw new Error("summary failed");
+                        },
+                      }
+                    : {}),
+                })
+              ),
+            };
+          },
+        });
+        const outcome = expectOutcome({ declared, pressure });
+
+        assert.equal(native.probe.maxActive, 1, label);
+        assert.deepEqual(
+          native.observed.journal.filter(({ event }) => event === "start").map(({ skillId }) => skillId),
+          queueFor(declared)
+            .filter((nodeId) => outcome[nodeId] === "completed" || outcome[nodeId] === "failed")
+            .map((nodeId) => SKILLS[nodeId]),
+          label
+        );
+        assert.deepEqual(describeNodeRuns(native.observed.outcome.result.nodeRuns), outcome, label);
+        // Node runs keep declaration order.
+        assert.deepEqual(
+          native.observed.outcome.result.nodeRuns.map(({ nodeId }) => nodeId),
+          declared,
+          label
+        );
+        // LangGraph scheduled it: its thread holds every node's receipt.
+        assert.deepEqual(
+          describeNodeRuns(
+            Object.entries((await readThread(langgraph.agentRunService)).receipts).map(
+              ([nodeId, receipt]) => ({ nodeId, ...receipt })
+            )
+          ),
+          outcome,
+          label
+        );
+        scenarios += 1;
+      }
+    }
+  }
+
+  assert.equal(scenarios, 120 * 2 * 3);
+});
+
+test("a graph not declared in layer order runs on a fresh LangGraph thread after the run's earlier one is dropped", async () => {
   // As after a replan: the run already holds the thread of a graph LangGraph
-  // ran, and the next graph goes to the native scheduler. No record may
-  // outlive the call that would be mistaken for it.
+  // ran, and the next graph is not declared in layer order. Until phase 5
+  // this pinned that such a call went to the native scheduler and left no
+  // record (the earlier thread was dropped first). It is now scheduled on
+  // LangGraph in layer order: the earlier thread is still dropped before the
+  // new invocation (no receipt of `first` survives), and the new thread holds
+  // the second graph's receipts. Under the cap of 1, `c` (layer 0) now runs
+  // before `b` (layer 1), where the declaration-order queue ran b first.
   const probe = createProbe();
   const skills = ["risk_review", "extract_timeline", "summarize_contract"].map((id) =>
     createScriptedSkill({ id, probe })
@@ -2585,15 +2756,13 @@ test("a call handed to the native scheduler drops the run's earlier LangGraph th
       }),
       userId: USER_ID,
     });
-  const readRecord = async () =>
-    (await agentRunService.getLangGraphCheckpointRecord({ accessScope, runId: RUN_ID })).record;
 
   const first = await run(createExecutionGraph({
     nodes: [graphNode({ nodeId: "first", skillId: "risk_review" })],
   }));
 
   assert.equal(first.status, "completed");
-  assert.ok(await readRecord());
+  assert.deepEqual(Object.keys((await readThread(agentRunService)).receipts), ["first"]);
 
   const second = await run(createExecutionGraph({
     nodes: [
@@ -2604,10 +2773,18 @@ test("a call handed to the native scheduler drops the run's earlier LangGraph th
   }));
 
   assert.equal(second.status, "completed");
-  assert.equal(await readRecord(), null);
+  assert.deepEqual(second.nodeRuns.map(({ nodeId }) => nodeId), ["b", "a", "c"]);
+
+  const thread = await readThread(agentRunService);
+
+  assert.deepEqual(Object.keys(thread.receipts).sort(), ["a", "b", "c"]);
+  assert.deepEqual(
+    Object.values(thread.receipts).map(({ status }) => status),
+    ["completed", "completed", "completed"]
+  );
   assert.deepEqual(
     probe.journal.filter(({ event }) => event === "start").map(({ skillId }) => skillId),
-    ["risk_review", "extract_timeline", "summarize_contract", "risk_review"]
+    ["risk_review", "extract_timeline", "risk_review", "summarize_contract"]
   );
 });
 

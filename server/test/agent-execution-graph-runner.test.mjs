@@ -1195,6 +1195,50 @@ test("runExecutionGraph returns results in declaration order regardless of compl
   );
 });
 
+test("runExecutionGraph queues nodes in layer order, so a node declared ahead of an earlier layer never starts first", async () => {
+  // Declared [summary (after risk), risk, timeline] under a cap of 1 and a
+  // budget of two calls. The queue is the validator's layer order (risk,
+  // timeline, then summary), so the budget funds both first-layer nodes;
+  // a declaration-order queue started summary as soon as risk settled and
+  // left timeline unfunded. Node runs keep declaration order.
+  const started = [];
+  const registry = createRegistry(
+    ["risk_review", "extract_timeline", "summarize_contract"].map((id) =>
+      createSkill({
+        execute: async () => {
+          started.push(id);
+          return { citations: [], text: `${id} answered.` };
+        },
+        id,
+      })
+    )
+  );
+  const graph = createExecutionGraph({
+    nodes: [
+      node({ dependsOn: ["risk"], nodeId: "summary", skillId: "summarize_contract" }),
+      node({ nodeId: "risk", skillId: "risk_review" }),
+      node({ nodeId: "timeline", skillId: "extract_timeline" }),
+    ],
+  });
+
+  const { outcome } = await runGraph({
+    budgetState: createAgentBudget({ maxCustomSkillCalls: 2 }),
+    graph,
+    maxConcurrency: 1,
+    registry,
+  });
+
+  assert.deepEqual(started, ["risk_review", "extract_timeline"]);
+  assert.deepEqual(
+    outcome.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason ?? null]),
+    [
+      ["summary", "skipped", "budget_exhausted"],
+      ["risk", "completed", null],
+      ["timeline", "completed", null],
+    ]
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Budget
 // ---------------------------------------------------------------------------

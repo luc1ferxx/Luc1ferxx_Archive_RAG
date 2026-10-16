@@ -18,12 +18,11 @@
 // would reach it, after every node ahead of it started, and synchronously
 // with those starts, as the native pass decides in one synchronous scan.
 //
-// "First come" is declaration order only inside one superstep: LangGraph
-// enters a superstep's nodes in node name order, and
-// langgraph/compile-execution-graph.js names nodes so that order is
-// declaration order. Across supersteps it holds only for a graph declared in
-// layer order, which is why run-execution-graph.js hands any other graph to
-// the native scheduler.
+// "First come" is the native queue's order, the validator's layer order
+// (orderExecutionGraphNodeStatesByLayer in agent-execution-graph-node.js):
+// LangGraph enters a superstep's nodes in node name order, and
+// langgraph/compile-execution-graph.js names nodes so that order is the
+// queue's; across supersteps it holds because each layer is one superstep.
 
 /**
  * A gate admitting at most `cap` holders, exclusive holders alone, in arrival

@@ -13,7 +13,6 @@ import {
 import {
   admitExecutionGraphRun,
   finishExecutionGraphRun,
-  runExecutionGraph,
 } from "../agent-execution-graph-runner.js";
 import { EXECUTION_GRAPH_LIMITS } from "../agent-execution-graph.js";
 import {
@@ -23,7 +22,6 @@ import {
 } from "./checkpointer.js";
 import {
   buildExecutionGraphReceipt,
-  canScheduleExecutionGraphOnLangGraph,
   compileExecutionGraphOnLangGraph,
   toExecutionGraphReceiptKey,
 } from "./compile-execution-graph.js";
@@ -40,14 +38,17 @@ import {
 // phase 2), selected by AGENT_RUNTIME=langgraph in agent-custom-skill-stage.js
 // and, since phase 3, in agent-unified-graph-stage.js for the v3 graph. Since
 // phase 4 it is the default (AGENT_RUNTIME unset); runExecutionGraph is the
-// AGENT_RUNTIME=native rollback and the scheduler a call is handed to below.
+// AGENT_RUNTIME=native rollback, and no call is handed to it from here.
 //
 // Same options, same result, same errors. Admission, the node states (and
 // with them checkpoint reuse and denied nodes), each node's work and the end
 // of the run are the native modules' own functions; only the scheduling
 // changes hands. LangGraph enters the nodes superstep by superstep, and the
 // in-process gate (concurrency-gate.js) holds each one to the native cap,
-// side-effect exclusivity and queue order. What that changes is when a node
+// side-effect exclusivity and queue order. Both schedulers queue in the
+// validator's layer order (orderExecutionGraphNodeStatesByLayer), so the
+// supersteps are the native queue cut at its layer boundaries. What that
+// changes is when a node
 // is decided, never what a node may do: a node is decided once its whole
 // superstep has finished, not the moment its own dependencies have. So
 //   - a dependant starts only after the slowest node of the superstep before
@@ -68,12 +69,14 @@ import {
 // superstep finishes before any dependant starts; that also decides which
 // nodes a budget that cannot fund them all funds. The others change what is
 // recorded and when, never which node runs. A difference that changes which
-// nodes run without any race is not accepted: where the native queue would
-// hold a ready node back while a node of a later layer is declared ahead of
-// one of an earlier layer, native starts the later one first on every run
-// (canScheduleExecutionGraphOnLangGraph). Such an invocation is handed to the
-// native scheduler whole, after the previous thread is dropped so no record
-// outlives the call, and its result is exactly the native one.
+// nodes run without any race is not accepted, and there is none left: with
+// the queue in layer order the native scan reaches a later layer's node ahead
+// of an earlier layer's only when that earlier node is not ready yet, i.e.
+// waits for a dependency still in flight beside a sibling that already
+// settled, which is race 1. Until the queue was layer-ordered (phase 5), a
+// graph not declared in layer order made native start a later layer first
+// on every run where the cap or an exclusive node held a ready node back,
+// and such a call was handed to the native scheduler whole.
 //
 // An approval pause is not a difference either. The native scheduler pauses
 // once nothing else can run; a parked v3 node interrupts the thread only when
@@ -186,8 +189,7 @@ const assertReceipts = ({ interrupted, nodeOutputs, receipts, states }) => {
  * a run service and run id, LangGraph checkpoints into that run
  * (RunStoreCheckpointSaver bound to `graphResumeClaimId`, so its writes are
  * fenced exactly like the node steps); otherwise it runs without one, and a
- * node cannot park there. A graph not declared in layer order runs on
- * runExecutionGraph (see above).
+ * node cannot park there. Every graph admission accepts is scheduled here.
  *
  * `approvalResume` ({ gateId, nodeId }, the stored approval boundary) says
  * this call continues a decided approval gate: the thread is resumed when
@@ -198,29 +200,26 @@ export const runExecutionGraphOnLangGraph = async ({
   agentRunId = null,
   agentRunService = null,
   approvalResume = null,
+  authorizedDocIds,
+  authorizedSkillIds = null,
+  completedNodeRuns = [],
+  deniedNodeIds = [],
+  docIds = [],
+  graph,
+  limits = EXECUTION_GRAPH_LIMITS,
+  maxConcurrency,
+  pauseForApproval = null,
+  registry,
   runCursor = null,
-  ...executorOptions
+  // accessScope, the observability and lifecycle hooks, the request values
+  // and the services every node reads: createExecutionGraphNodeContext.
+  ...nodeOptions
 } = {}) => {
   // Before LangGraph or LangChain configures anything: a graph invocation
   // attaches the LangSmith tracer, with the graph's input, before any node or
   // adapter code could refuse it (langsmith-guard.js).
   assertLangSmithTracingDisabled();
 
-  const {
-    authorizedDocIds,
-    authorizedSkillIds = null,
-    completedNodeRuns = [],
-    deniedNodeIds = [],
-    docIds = [],
-    graph,
-    limits = EXECUTION_GRAPH_LIMITS,
-    maxConcurrency,
-    pauseForApproval = null,
-    registry,
-    // accessScope, the observability and lifecycle hooks, the request values
-    // and the services every node reads: createExecutionGraphNodeContext.
-    ...nodeOptions
-  } = executorOptions;
   const { compiled, concurrencyCap, rejected, scopedDocIds } = admitExecutionGraphRun({
     authorizedDocIds,
     authorizedSkillIds,
@@ -288,18 +287,6 @@ export const runExecutionGraphOnLangGraph = async ({
   // nothing ever reads back.
   const threadId = checkpointer?.threadId ??
     deriveLangGraphThreadId(nodeOptions.accessScope, `ephemeral:${randomUUID()}`);
-
-  if (!canScheduleExecutionGraphOnLangGraph({ compiled, concurrencyCap, graph, states })) {
-    if (checkpointer) {
-      // No record outlives a call the native scheduler takes.
-      await checkpointer.deleteThread(threadId);
-    }
-
-    // The native scheduler, given exactly what the stage gave this call.
-    // Admission and the node states are pure, so building them twice
-    // changes nothing.
-    return runExecutionGraph(executorOptions);
-  }
 
   const resume = checkpointer && approvalResume
     ? await prepareUnifiedGraphApprovalResume({

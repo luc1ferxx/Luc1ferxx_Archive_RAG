@@ -14,14 +14,26 @@ import { uuid6 } from "@langchain/langgraph-checkpoint";
 
 import { emitAgentEvent, hasAgentEventSink, runWithAgentEventSink } from "../rag/agent-event-stream.js";
 
+import { createAgentBudget } from "../rag/agent-budget.js";
 import { continueAgentExecutionGraphApproval, resumeAgentExecutionGraphRun, runAgentRag } from "../rag/agent.js";
-import { buildExecutionGraphNodeStepId } from "../rag/agent-execution-graph-checkpoint.js";
+import { createExecutionGraph } from "../rag/agent-execution-graph.js";
+import {
+  buildExecutionGraphNodeStepId,
+  snapshotExecutionGraphNodeRun,
+} from "../rag/agent-execution-graph-checkpoint.js";
+import {
+  replayExecutionGraphRun,
+  runExecutionGraph,
+} from "../rag/agent-execution-graph-runner.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
+import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
 import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
+import { deterministicUnifiedGraphPlannerAdapter } from "../rag/agent-unified-dag-planner-adapter.js";
 import { UNIFIED_GRAPH_RUNTIMES } from "../rag/agent-unified-graph-stage.js";
 import { getAgentRuntime } from "../rag/config.js";
 import {
@@ -60,7 +72,8 @@ import {
   runWithRequestCancellation,
 } from "../rag/request-deadline.js";
 import { getActiveRunUsage } from "../rag/run-usage.js";
-import { createDefaultSkillRegistry } from "../rag/skills/registry.js";
+import { CUSTOM_RAG_SKILL_CONTRACT } from "../rag/skills/custom/custom-skill-contract.js";
+import { createDefaultSkillRegistry, createSkillRegistry } from "../rag/skills/registry.js";
 import { createUnifiedGraphEvidenceGatedSkillCase } from "../evaluation/trajectory/cases/unified-graph.js";
 import { createUnifiedGraphApprovalGatedActionCase } from "../evaluation/trajectory/cases/unified-graph-approval.js";
 import {
@@ -70,6 +83,7 @@ import {
   UNIFIED_DOC_ID,
   UNIFIED_FILE_NAME,
   UNIFIED_SESSION_ID,
+  WEB_QUESTION,
   createApprovalGatedTaskProposal,
   createCrashingRunService,
   createDocumentLoopProposal,
@@ -78,6 +92,7 @@ import {
   createTaskBeforeIndependentCheckProposal,
   createTaskCapabilityRegistry,
   createTaskWithIndependentLaterWorkProposal,
+  createWebChatService,
 } from "./fixtures/unified-graph-run-fixtures.mjs";
 
 // The guarded v3 unified graph on LangGraph (AGENT_RUNTIME=langgraph,
@@ -253,10 +268,11 @@ const askOn = async (
     question = APPROVAL_TASK_QUESTION,
     ragOptions = {},
     store = newStore(),
+    // A service over `store` (e.g. one that crashes at a chosen write).
+    agentRunService = newService(store),
     withCapability = true,
   } = {}
 ) => {
-  const agentRunService = newService(store);
   const ragService = createDocumentLoopRagService({ primary, ...ragOptions });
   const { registry, writes } = withCapability
     ? await createTaskCapabilityRegistry({ onWrite, ragService })
@@ -497,6 +513,94 @@ test("parity: the evidence-gated document loop (follow-up resolves / unresolved)
     assert.equal(outcomes.native.checkpoint.phase, "completed");
     assert.ok(outcomes.native.checkpoint.finalization);
   }
+});
+
+test("parity: the deterministic document_web graph, declared out of layer order, runs on LangGraph in layer order, as natively", async () => {
+  // The production graph that used to be handed to the native scheduler:
+  // createDeterministicUnifiedExecutionGraph declares [document,
+  // evidence_check, follow_up, follow_up_check, web], so web (third layer) is
+  // declared after follow_up_check (fourth), and document_rag and web nodes
+  // run alone. With a declaration-order queue, native ran follow_up_check
+  // before web on every run, which LangGraph's supersteps could not; since
+  // phase 5 both queue in layer order, so web runs before follow_up_check on
+  // both and the graph is scheduled by LangGraph. Measured against the
+  // declaration-order queue, only the order of agentTrace, agentRunSteps and
+  // agentObservability.runs changed natively; the answer, sources and
+  // statuses did not.
+  const outcomes = {};
+
+  for (const runtime of RUNTIMES) {
+    const store = newStore();
+    const agentRunService = newService(store);
+    const ragService = createDocumentLoopRagService({ followUp: "unresolved", primary: "unsupported" });
+    const webCalls = [];
+    const fetchWeb = createWebChatService({ calls: webCalls });
+    let receiptsAtWeb;
+    const response = await onRuntime(runtime, () =>
+      runAgentRag({
+        accessScope,
+        agentRunService,
+        capabilityApprovals: { "web.search": { approved: true } },
+        docIds: [UNIFIED_DOC_ID],
+        question: WEB_QUESTION,
+        ragService,
+        sessionId: UNIFIED_SESSION_ID,
+        unifiedGraphPlannerAdapter: deterministicUnifiedGraphPlannerAdapter,
+        userId: accessScope.userId,
+        webChatService: async (question) => {
+          const listed = await store.list({ accessScope });
+          const [{ runId }] = listed?.runs ?? listed;
+          const thread = await readThread(agentRunService, runId);
+
+          receiptsAtWeb = thread ? receiptStatuses(thread) : null;
+          return fetchWeb(question);
+        },
+      })
+    );
+    const context = { agentRunService, error: null, response, runId: response.body.agentRunId };
+    const { checkpoint, run } = await load(agentRunService, context.runId);
+
+    assert.equal(response.status, 200, runtime);
+    assert.equal(response.body.agentMode, "document_web", runtime);
+    assert.equal(run.status, "completed", runtime);
+    assert.deepEqual(ragService.calls.map((call) => call.phase), ["primary", "follow_up"], runtime);
+    assert.equal(webCalls.length, 1, runtime);
+    assert.deepEqual(
+      checkpoint.graph.nodes.map((node) => node.nodeId),
+      ["document", "evidence_check", "follow_up", "follow_up_check", "web"],
+      runtime
+    );
+    // Layer order: web (third layer) before follow_up_check (fourth).
+    assert.deepEqual(
+      run.steps
+        .filter((step) => step.type === "graph_node")
+        .map((step) => `${step.input?.nodeId}:${step.status}`),
+      [
+        "document:completed",
+        "evidence_check:completed",
+        "follow_up:completed",
+        "web:completed",
+        "follow_up_check:completed",
+      ],
+      runtime
+    );
+    // LangGraph scheduled it: its thread held the first two layers' receipts
+    // when web ran (follow_up's lands at the end of their shared superstep).
+    assert.deepEqual(
+      receiptsAtWeb,
+      runtime === UNIFIED_GRAPH_RUNTIMES.langgraph
+        ? { document: "completed", evidence_check: "completed" }
+        : null,
+      runtime
+    );
+    assert.equal(await rawRecord(store, context.runId), null, runtime);
+    outcomes[runtime] = await describeOutcome(context);
+  }
+
+  assert.deepEqual(
+    outcomes[UNIFIED_GRAPH_RUNTIMES.langgraph],
+    outcomes[UNIFIED_GRAPH_RUNTIMES.native]
+  );
 });
 
 test("parity: the two unified_graph trajectory cases report the same checks and projection on both runtimes", async () => {
@@ -2084,5 +2188,368 @@ test("on LangGraph each request's tenant, deadline, event sink and run usage rea
   for (const context of contexts) {
     context.pause.cancellation.dispose();
     context.approve.cancellation.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Finalization replay: no scheduler on either runtime
+// ---------------------------------------------------------------------------
+
+// The stage rebuilds a settled graph's receipts with replayExecutionGraphRun
+// (agent-execution-graph-runner.js) on both runtimes; it used to run the
+// native scheduler for it, also on LangGraph. Every settled shape of one
+// five-node v3 graph, in each of the 120 declaration orders, with a `when`
+// that holds or not and with or without a denied node: the replay returns
+// the native scheduler's result and records the same skips, and touches no
+// other hook. A graph with a node still to run is refused before any hook.
+test("replayExecutionGraphRun settles every settled graph exactly as the native scheduler does, and launches nothing", async () => {
+  const permutations = (items) =>
+    items.length <= 1
+      ? [items]
+      : items.flatMap((item, index) =>
+          permutations([...items.slice(0, index), ...items.slice(index + 1)]).map((rest) => [
+            item,
+            ...rest,
+          ])
+        );
+  const replayDocIds = ["doc-a"];
+  const skills = ["a", "b", "c", "d", "e"].map((nodeId) => ({
+    ...CUSTOM_RAG_SKILL_CONTRACT,
+    budgetKey: "customSkillCalls",
+    execute: async ({ docIds }) => ({
+      abstained: false,
+      citations: [{ docId: docIds[0], page: 1 }],
+      text: `${nodeId} answered.`,
+    }),
+    id: `replay_${nodeId}`,
+    kind: "custom",
+    label: `replay_${nodeId}`,
+    match: () => true,
+    requiresAccessScope: true,
+    version: "1.0.0",
+  }));
+  const registry = createSkillRegistry(skills);
+  const request = (field) => ({ field, source: "request" });
+  // c runs only while a did not abstain (`equals`), d only after c, e after
+  // a and b (b may be denied).
+  const createNodes = (equals) => ({
+    a: { dependsOn: [] },
+    b: { dependsOn: [] },
+    c: { dependsOn: ["a"], when: { equals, nodeId: "a", output: "abstained" } },
+    d: { dependsOn: ["c"] },
+    e: { dependsOn: ["a", "b"] },
+  });
+  const createGraph = (declared, equals) => {
+    const nodes = createNodes(equals);
+
+    return createExecutionGraph({
+      nodes: declared.map((nodeId) => ({
+        ...nodes[nodeId],
+        failurePolicy: "fail_fast",
+        inputBindings: { docIds: request("docIds"), question: request("question") },
+        nodeId,
+        skillId: `replay_${nodeId}`,
+      })),
+      version: "v3",
+    });
+  };
+  const replayGuard = ({ nodeId } = {}) => {
+    const error = new Error(`replay would launch ${nodeId}`);
+    error.code = "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY";
+    return error;
+  };
+  const baseOptions = (graph) => ({
+    accessScope,
+    authorizedDocIds: replayDocIds,
+    authorizedSkillIds: skills.map((skill) => skill.id),
+    docIds: replayDocIds,
+    graph,
+    graphResumeClaimId: "claim-1",
+    question: "What do the documents say?",
+    registry,
+    sessionId: "session-1",
+    userId: accessScope.userId,
+  });
+  // Every hook a scheduler may call, logged in call order.
+  const createHooks = () => {
+    const log = [];
+    const record = (name) => (...args) => {
+      log.push([name, ...args]);
+    };
+    const refuse = (name) => async (...args) => {
+      log.push([name, ...args]);
+      throw replayGuard({ nodeId: args[0]?.node?.nodeId ?? null });
+    };
+    const lifecycleMethod = (name) => async (step) => {
+      log.push([name, step]);
+      return { stepId: step.id };
+    };
+
+    return {
+      hooks: {
+        addBudgetLimitTrace: record("addBudgetLimitTrace"),
+        addTraceStep: record("addTraceStep"),
+        budgetState: createAgentBudget({ maxCustomSkillCalls: 8 }),
+        executeObservedSkill: refuse("executeObservedSkill"),
+        onNodeSettled: async (...args) => {
+          log.push(["onNodeSettled", ...args]);
+        },
+        pauseForApproval: refuse("pauseForApproval"),
+        preflightNode: refuse("preflightNode"),
+        recordSkillResult: record("recordSkillResult"),
+        recordSkippedSkill: record("recordSkippedSkill"),
+        stepLifecycle: Object.fromEntries(
+          ["completeGraphStep", "failGraphStep", "pauseGraphStep", "startGraphStep"].map(
+            (name) => [name, lifecycleMethod(name)]
+          )
+        ),
+      },
+      log,
+    };
+  };
+  // Everything but the run meter's wall-clock start.
+  const budgetUsage = ({ limits, run, used }) => ({ limits, runUsed: run?.used, used });
+  let settledShapes = 0;
+  let refusals = 0;
+
+  for (const declared of permutations(["a", "b", "c", "d", "e"])) {
+    for (const equals of [false, true]) {
+      for (const deniedNodeIds of [[], ["b"]]) {
+        const label = `${declared.join(",")}/when=${equals}/denied=${deniedNodeIds.join(",") || "-"}`;
+        const graph = createGraph(declared, equals);
+        const budgetState = createAgentBudget({ maxCustomSkillCalls: 8 });
+        const tracker = createAgentSkillTracker({ budgetState, selectedSkills: [] });
+        // The graph as it first ran: its completed receipts are what a
+        // completed checkpoint stores.
+        const original = await runExecutionGraph({
+          ...baseOptions(graph),
+          budgetState,
+          deniedNodeIds,
+          executeObservedSkill: tracker.executeObservedSkill,
+          graphResumeClaimId: undefined,
+          stepLifecycle: createAgentRunStepLifecycle(),
+        });
+        assert.equal(original.status, "completed", label);
+        const completedNodeRuns = original.nodeRuns
+          .filter((nodeRun) => nodeRun.status === "completed")
+          .map(snapshotExecutionGraphNodeRun);
+
+        // As the stage replays it, before and after.
+        const native = createHooks();
+        const nativeResult = await runExecutionGraph({
+          ...baseOptions(graph),
+          ...native.hooks,
+          completedNodeRuns,
+          deniedNodeIds,
+        });
+        const replay = createHooks();
+        const { executeObservedSkill, onNodeSettled, pauseForApproval, preflightNode, ...replayHooks } =
+          replay.hooks;
+        const replayResult = replayExecutionGraphRun({
+          ...baseOptions(graph),
+          ...replayHooks,
+          completedNodeRuns,
+          deniedNodeIds,
+          refuseLaunch: replayGuard,
+        });
+
+        assert.deepEqual(replayResult, nativeResult, label);
+        assert.deepEqual(replay.log, native.log, label);
+        assert.deepEqual(budgetUsage(replay.hooks.budgetState), budgetUsage(native.hooks.budgetState), label);
+        assert.ok(
+          native.log.every(([name]) => name === "recordSkippedSkill"),
+          `${label}: only skips are recorded`
+        );
+        assert.deepEqual(
+          replayResult.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason]),
+          declared.map((nodeId) => {
+            if (deniedNodeIds.includes(nodeId)) {
+              return [nodeId, "skipped", "approval_denied"];
+            }
+            if (nodeId === "e" && deniedNodeIds.length > 0) {
+              return [nodeId, "skipped", "dependency_skipped"];
+            }
+            if (equals && nodeId === "c") {
+              return [nodeId, "skipped", "condition_not_met"];
+            }
+            if (equals && nodeId === "d") {
+              return [nodeId, "skipped", "dependency_skipped"];
+            }
+            return [nodeId, "reused", null];
+          }),
+          label
+        );
+        settledShapes += 1;
+
+        // A "completed" checkpoint without the receipt of a node that must
+        // run: both refuse it; the replay before any hook.
+        const missing = equals ? "a" : "d";
+        const incomplete = completedNodeRuns.filter((nodeRun) => nodeRun.nodeId !== missing);
+        const refusedNatively = createHooks();
+        const refusedReplay = createHooks();
+
+        await assert.rejects(
+          runExecutionGraph({
+            ...baseOptions(graph),
+            ...refusedNatively.hooks,
+            completedNodeRuns: incomplete,
+            deniedNodeIds,
+          }),
+          (error) => error.code === "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY",
+          label
+        );
+        assert.throws(
+          () =>
+            replayExecutionGraphRun({
+              ...baseOptions(graph),
+              ...refusedReplay.hooks,
+              completedNodeRuns: incomplete,
+              deniedNodeIds,
+              refuseLaunch: replayGuard,
+            }),
+          (error) =>
+            error.code === "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY" &&
+            error.message === `replay would launch ${missing}`,
+          label
+        );
+        assert.ok(
+          refusedReplay.log.every(([name]) => name === "recordSkippedSkill"),
+          `${label}: the refused replay reached no hook but skips`
+        );
+        assert.deepEqual(
+          budgetUsage(refusedReplay.hooks.budgetState),
+          budgetUsage(createAgentBudget({ maxCustomSkillCalls: 8 })),
+          label
+        );
+        refusals += 1;
+      }
+    }
+  }
+
+  assert.equal(settledShapes, 480);
+  assert.equal(refusals, 480);
+});
+
+const findOnlyRunId = async (store) => {
+  const listed = await store.list({ accessScope });
+  const [{ runId }] = listed?.runs ?? listed;
+
+  return runId;
+};
+
+const crashBeforeFinalizationReceipt = (store) =>
+  createCrashingRunService(newService(store), {
+    crashBefore: (method, args) =>
+      method === "saveExecutionGraphCheckpoint" && Boolean(args.checkpoint?.finalization),
+  });
+
+// What a node that ran again would change. The finalization binds each step
+// to its trace step (traceStepId, detail.traceStatus) and is not a re-run.
+const graphNodeSteps = (run) =>
+  run.steps
+    .filter((step) => step.type === "graph_node")
+    .map(({ attempt, completedAt, error, id, input, output, startedAt, status }) => ({
+      attempt,
+      completedAt,
+      error,
+      id,
+      input,
+      output,
+      startedAt,
+      status,
+    }));
+
+test("parity: a graph that completed before its finalization receipt is replayed without a scheduler on both runtimes: skips re-derived, nothing re-run, no thread", async () => {
+  const documentLoop = {
+    proposal: createDocumentLoopProposal,
+    question: DOCUMENT_LOOP_QUESTION,
+    withCapability: false,
+  };
+  const scenarios = [
+    // The check passed: follow_up is condition_not_met and follow_up_check
+    // dependency_skipped, both re-derived by the replay.
+    ["follow-up not needed", { ...documentLoop, primary: "supported" }, null, [
+      ["primary", "reused", null],
+      ["primary_check", "reused", null],
+      ["follow_up", "skipped", "condition_not_met"],
+      ["follow_up_check", "skipped", "dependency_skipped"],
+    ]],
+    ["follow-up resolved", { ...documentLoop, primary: "unsupported" }, null, [
+      ["primary", "reused", null],
+      ["primary_check", "reused", null],
+      ["follow_up", "reused", null],
+      ["follow_up_check", "reused", null],
+    ]],
+    ["approved gate", {}, "approve", [
+      ["document", "reused", null],
+      ["evidence_check", "reused", null],
+      ["task", "reused", null],
+    ]],
+    ["denied gate", {}, "deny", [
+      ["document", "reused", null],
+      ["evidence_check", "reused", null],
+      ["task", "skipped", "approval_denied"],
+    ]],
+  ];
+
+  for (const [label, options, action, replayedNodeRuns] of scenarios) {
+    const outcomes = {};
+
+    for (const runtime of RUNTIMES) {
+      const store = newStore();
+      let context;
+
+      if (action) {
+        context = await askOn(runtime, { ...options, store });
+        assert.equal(context.error, null, `${label}/${runtime}: ${context.error?.message}`);
+        const decided = await settle(
+          decideOn(runtime, { action, context, service: crashBeforeFinalizationReceipt(store).service })
+        );
+        assert.equal(decided.error?.code, "SIMULATED_PROCESS_EXIT", `${label}/${runtime}`);
+      } else {
+        context = await askOn(runtime, {
+          ...options,
+          agentRunService: crashBeforeFinalizationReceipt(store).service,
+          store,
+        });
+        assert.equal(context.error?.code, "SIMULATED_PROCESS_EXIT", `${label}/${runtime}`);
+        context = { ...context, runId: await findOnlyRunId(store) };
+      }
+
+      const before = await load(newService(store), context.runId);
+      const ragCalls = context.ragService.calls.length;
+      const writes = context.writes.length;
+
+      assert.equal(before.run.status, "running", `${label}/${runtime}`);
+      assert.equal(before.checkpoint.phase, "completed", `${label}/${runtime}`);
+      assert.equal(before.checkpoint.finalization, undefined, `${label}/${runtime}`);
+
+      const service = newService(store);
+      const recovered = await recoverOn(runtime, { context, service });
+      const after = await load(service, context.runId);
+
+      assert.equal(recovered.autoRecoveredCount, 1, `${label}/${runtime}: ${JSON.stringify(recovered)}`);
+      assert.equal(recovered.manualRecoveredCount, 0, `${label}/${runtime}`);
+      assert.ok(after.checkpoint.finalization, `${label}/${runtime}`);
+      // Nothing ran again: no document call, no Capability write, and the
+      // graph's node steps are the ones the crashed process wrote.
+      assert.equal(context.ragService.calls.length, ragCalls, `${label}/${runtime}`);
+      assert.equal(context.writes.length, writes, `${label}/${runtime}`);
+      assert.deepEqual(graphNodeSteps(after.run), graphNodeSteps(before.run), `${label}/${runtime}`);
+      assert.equal(await rawRecord(store, context.runId), null, `${label}/${runtime}`);
+      const executed = after.run.events.filter((event) => event.type === "unified_graph_executed");
+      assert.equal(executed.at(-1).payload.replayed, true, `${label}/${runtime}`);
+      assert.deepEqual(
+        executed.at(-1).payload.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason]),
+        replayedNodeRuns,
+        `${label}/${runtime}`
+      );
+      outcomes[runtime] = await describeOutcome(
+        { ...context, agentRunService: service, error: null, response: null },
+        maskRunBound
+      );
+    }
+
+    assert.deepEqual(outcomes.langgraph, outcomes.native, label);
   }
 });

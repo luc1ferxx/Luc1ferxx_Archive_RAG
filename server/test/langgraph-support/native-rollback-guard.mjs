@@ -24,6 +24,7 @@ const counterUrl = new URL("./native-runner-counter.mjs", import.meta.url).href;
 globalThis.__archiveRagNativeRollbackGuard = {
   langGraphExecutorImports: 0,
   nativeSchedulerCalls: 0,
+  settledGraphReplays: 0,
 };
 
 register("../langgraph-runtime-parity/redirect-hooks.mjs", import.meta.url, {

@@ -48,10 +48,10 @@ import { setSpanAttributes, withSpan } from "./tracing.js";
 // native scheduler. Planning, the checkpoint, replans and recovery below are
 // the same for both; only runGraph's executor changes. The native executor
 // stays as the AGENT_RUNTIME=native rollback path for at least one release on
-// the new default (ADR constraint 12) and is to be deleted after it, once the
-// phase-2 delegation case (graphs canScheduleExecutionGraphOnLangGraph hands
-// to runExecutionGraph) is solved. The V1 chain (runV1) is a separate
-// matter: it is the whole-graph-rejection fallback and the `off` opt-out.
+// the new default (ADR constraint 12) and is to be deleted after it; since
+// phase 5 both executors queue in layer order and LangGraph never hands a
+// graph to the native one. The V1 chain (runV1) is a separate matter: it is
+// the whole-graph-rejection fallback and the `off` opt-out.
 
 const noop = () => {};
 
