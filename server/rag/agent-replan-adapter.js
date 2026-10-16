@@ -1,6 +1,6 @@
 import { parsePlannerJson } from "./agent-dag-planner-adapter.js";
 import { buildReplannerPrompt } from "./agent-replanner.js";
-import { completeTextWithMetadata } from "./openai.js";
+import { completePlannerText } from "./langgraph/planner-model.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import { MODEL_CAPABILITIES, MODEL_ROUTE_IDS } from "./model-providers/index.js";
 
@@ -31,7 +31,7 @@ export const getReplannerPromptDescriptor = () =>
 
 export const replanAdapter = {
   createPatch: async (replanContext = {}) => {
-    const completion = await completeTextWithMetadata(
+    const completion = await completePlannerText(
       buildReplannerPrompt(replanContext),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,

@@ -88,6 +88,7 @@ const { completeText, configureOpenAIProvider, resetOpenAIProvider } = await imp
   "../rag/openai.js"
 );
 const { describeAgentRouteError } = await import("../routes/chat.js");
+const { getRequestSignal } = await import("../rag/request-deadline.js");
 
 // The three passes, by the two dials they pin: everything native; the outer
 // plan (and with it the stream relay) on LangGraph, with AGENT_RUNTIME=
@@ -515,6 +516,59 @@ test("a deadline that passes mid-run ends the stream with the same error and don
   assert.equal(runs[0].error.reason, "deadline_exceeded");
   assert.equal(model.calls.length, PASS_NAMES.length);
   assert.ok(model.calls.every((call) => call.aborted), "every in-flight model call was aborted");
+});
+
+// The deadline passes while the primary answer is produced, and that answer
+// holds an unsupported claim, so the document stage emits its document_rag,
+// self_check and gap_analysis steps and then throws at the follow-up step's
+// start, a safe point inside the same stage. With the outer plan on
+// LangGraph those steps travel as custom stream chunks, which LangGraph
+// drops when it errors its stream after the failed node unless the node
+// waits for them to be forwarded: every trace_step frame must still precede
+// the error and done frames, byte for byte as natively.
+test("a deadline that throws inside a stage right after a burst of trace steps streams every frame before error and done on both runtimes", { timeout: 30_000 }, async (t) => {
+  const ragService = createRagService({
+    chat: async (docIds, question) => {
+      const signal = getRequestSignal();
+
+      assert.ok(signal, "the route bound the request's deadline");
+      await new Promise((resolve) => {
+        if (signal.aborted) {
+          resolve();
+        } else {
+          signal.addEventListener("abort", resolve, { once: true });
+        }
+      });
+
+      // The answer still arrives: the call did not read the signal.
+      return {
+        abstained: false,
+        citations: [{ ...CITATION, sourceLabel: "Source 1", text: CITATION.excerpt }],
+        memoryApplied: false,
+        resolvedQuery: question,
+        text: [SUPPORTED_SENTENCES[0], UNSUPPORTED_SENTENCE].join("\n"),
+      };
+    },
+  });
+  const passes = await streamOnEveryPass(t, {
+    env: { AGENT_REQUEST_TIMEOUT_MS: "200" },
+    ragService,
+  });
+
+  assertStreamsIdentical(passes);
+
+  const { frames, runs } = passes.native;
+
+  assert.deepStrictEqual(
+    frames
+      .filter(({ event }) => event === "trace_step")
+      .slice(-3)
+      .map(({ data }) => data.step.type),
+    ["document_rag", "self_check", "gap_analysis"]
+  );
+  assert.deepStrictEqual(frames.slice(-2).map(({ event }) => event), ["error", "done"]);
+  assert.equal(frames.at(-2).data.code, "AGENT_DEADLINE_EXCEEDED");
+  assert.equal(runs[0].status, AGENT_RUN_STATUSES.failed);
 });
 
 test("with AGENT_CANCEL_ON_DISCONNECT on, a client that leaves /chat/stream cancels the run to the same terminal record on both runtimes", { timeout: 30_000 }, async (t) => {

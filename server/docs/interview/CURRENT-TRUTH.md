@@ -335,6 +335,14 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - 模型 0 ms 时的"在途峰值"是假服务同步回复造成的，没有意义，现在不显示。
 - 事件循环延迟没有减去 10 ms 的采样间隔，现在减掉了。
 
+### 3.29 LangGraph 迁移收尾：外层计划再测一次，仍不切（2026-10-16）
+
+- **做了什么**：对照目标文件的"完成定义"逐条处理（ADR 0001"阶段 5 结果"）。外层 V1 计划的 LangGraph 实现从 StateGraph 改为底层 Pregel：按计划形状只编译一次，请求状态放在 `config.configurable`，未选中 Skill 的五个内置阶段静态剪掉。五个规划器的模型调用在 `AGENT_RUNTIME=langgraph` 下改走 LangChain 的 ChatModel 适配器，结果与原生一致。
+- **开销**（微基准，桩阶段）：文档问答 416 → 143 µs CPU，7 阶段 1,086 → 347 µs；每次调用的 LangSmith `RunTree` 54 → 2。进程内同一个 `runAgentRag`：外层计划放到 LangGraph 上多 0.28 ms（原来 1.23 ms）。
+- **压测硬门仍不过**：pgvector、模型 0 ms，native 与 langgraph 交替跑四轮、每轮 5 次。并发 1 时每请求 CPU 中位数 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%），超过 10%。并发 32 两对结果方向相反（同一配置不同轮次就漂移约 15–20%），不下结论。所以外层计划默认仍是原生循环。
+- **没做的**：v3 统一图不设为默认（mock 下每请求 CPU 是 V1 的数倍到十几倍，还会改变拒答、Skill、错误码和流式草稿等可见行为）；原生调度器按"新默认发布一个周期"的约束保留；检索和工具适配器接进生产会改变 `/chat` 契约或缺预算与观测，不接。
+- **面试里可以讲**：同一个门禁测了两次，第二次把框架开销削到四分之一，仍在低并发下超标；进程内微基准（+0.28 ms）会低估真实请求的开销（约 +1 ms），因为请求之间有空闲。结论是记录偏离和理由，不放宽门。
+
 ### 3.28 编排运行时迁到 LangGraph.js：阶段 0–4（2026-10-16）
 
 - **做了什么**：按 ADR 0001（`docs/adr/0001-langgraph-runtime.md`）用 strangler 方式迁移，开关 `AGENT_RUNTIME=native|langgraph`，阶段 4 起默认 `langgraph`，`native` 作为整体回退保留一个发布周期（回退后未完成的 run 由原生路径从图 checkpoint 接管）。`langgraph` 下 custom-Skill typed DAG 和 v3 统一图由 LangGraph 调度：节点执行代码和原生调度器共用（`agent-execution-graph-node.js`），状态只放回执，typed 输出仍在 agent run 的私有 checkpoint；审批用 `interrupt()` + `Command({resume})` 在同一线程续跑；checkpointer 是写现有 run store 的自定义 `BaseCheckpointSaver`，没有新表；取消走 drain（`RunControl.requestDrain`），不把请求 signal 交给 LangGraph（直接交会让在途节点被重跑）。LangSmith 永不启用（追踪变量为 true 时拒绝启动）。
@@ -543,7 +551,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **拆分部署**：只在一台机器上测过；同样进程数下单体比拆分快 1.56 倍，拆分的收益是只扩瓶颈层和故障隔离，不是效率；层间身份可选 Ed25519（每服务一把私钥），但仍不是 mTLS；没有 K8s 和服务发现，compose 文件没有真正跑过。
 - **读副本**：主库语句只减少 28.8%，没达到事先定的 30%，吞吐也没变快；副本和主库在同一台机器上，CI 里没有副本。
 - **告警规则**：没有在真实 Prometheus 里加载和求值过，99.5% 可用性和 20 秒延迟目标是建议值，不是从真实流量定的。
-- **架构**：V2 typed DAG 已是自定义 Skill 阶段的默认执行器，V1 顺序链只作为整图被拒时的兜底和运维回退；v3 统一图有 `guarded` 档可执行（默认 off）。外层文档、Web、内置 Skill 仍是固定顺序。LangGraph 运行时（3.28）默认开启（`AGENT_RUNTIME=native` 可回退），只接管 custom-Skill DAG 和 v3 统一图；外层计划交给 LangGraph 会让每个 `/chat` 多约 30% CPU，所以保持原生循环。
+- **架构**：V2 typed DAG 已是自定义 Skill 阶段的默认执行器，V1 顺序链只作为整图被拒时的兜底和运维回退；v3 统一图有 `guarded` 档可执行（默认 off）。外层文档、Web、内置 Skill 仍是固定顺序。LangGraph 运行时（3.28）默认开启（`AGENT_RUNTIME=native` 可回退），只接管 custom-Skill DAG 和 v3 统一图；外层计划交给 LangGraph 起初让每个 `/chat` 多约 30% CPU；阶段 5 改用底层 Pregel 后降到低并发 +17.6%，仍超 10% 的门，所以保持原生循环（3.29）。规划器的模型调用在 langgraph 下经 LangChain ChatModel 适配器。
 - **Agent 路径的答题率**：用 qwen2.5:7b 走 agent（`/chat` 的真实路径），合同和政策 7 题里 6 题、论文 12 题里 11 题最终改为澄清，因为词法校验器拒绝了大部分答案；`verify:quality` 的 18/18 测的是不经过 agent 自检的纯 RAG 路径。修了两个校验器 bug（"twelve (12)"被算成两个数；证据在 PDF 换行处被切断）后，合同和政策题从 2/21 升到 4/21（各 3 轮），论文题不变；剩下的主要是改写用词过不了词法校验。打开 LLM 评审后合同和政策题 3/21 → 14/21 得到回答且 14 个全对，p50 延迟多约 0.8 秒；两道管辖法律题仍在检索阶段判为证据不足。2026-10-03 按正确口径重测（见 3.21）：QASPER 训练题评审关 0/41 可答题被回答；开评审能答 10–17/41，但会回答不可答题，所以默认仍关。
 - **流式草稿**：机制已上线并有测试，但在上面的校验器下很少产生草稿（修 bug 后合同和政策题 21 次里 4 次，论文题 0 次），所以还没有实际的延迟收益。
 

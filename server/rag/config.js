@@ -299,7 +299,11 @@ export const getAgentRuntime = () => {
 // AGENT_RUNTIME, and AGENT_RUNTIME=langgraph keeps LangGraph for the graphs
 // that need it (the custom-Skill DAG and the v3 unified graph).
 // `langgraph` (rag/langgraph/execution-plan-graph.js and the agent-stream.js
-// relay) stays as an experimental opt-in with that measured overhead.
+// relay) stays as an experimental opt-in. Phase 5 rewrote it on low-level
+// Pregel with the inert built-in stages pruned: +0.28 ms per run in process
+// instead of +1.23, but the load test still failed at concurrency 1 (four
+// alternating runs: CPU per request 5.68 -> 6.68 ms median, +17.6%; p95
+// +13%), so the default stays native.
 //
 // Anything but `langgraph` (unset, empty, whitespace, a typo) resolves to
 // `native`. Unlike AGENT_RUNTIME, unset stays `native`: phase 4 flipped only

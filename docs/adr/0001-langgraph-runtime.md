@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`，`native` 作为整体回退保留一个发布周期。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。
+- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`，`native` 作为整体回退保留一个发布周期。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论与未达成的条目见"阶段 5 结果"。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -174,7 +174,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ## 阶段 1 结果：适配层
 
-`server/rag/langgraph/` 下 6 个文件，生产代码还没有 import 它们（`server.js` 只用到守卫）。每个适配器都有"直接调用 vs 经适配器"的 `deepStrictEqual` 套件；`prompt-registry`、`llmops-metrics`、`tracing` 三个套件没有改动，照常通过。
+`server/rag/langgraph/` 下 6 个文件，阶段 1 时生产代码还没有 import 它们（`server.js` 只用到守卫；阶段 5 起 `model.js` 经 `planner-model.js` 承接规划器的模型调用，见"阶段 5 结果"）。每个适配器都有"直接调用 vs 经适配器"的 `deepStrictEqual` 套件；`prompt-registry`、`llmops-metrics`、`tracing` 三个套件没有改动，照常通过。
 
 | 文件 | 包的是什么 | 要点 |
 | --- | --- | --- |
@@ -267,6 +267,63 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **测试环境**：`npm test` 和覆盖率闸门给每个测试子进程去掉 LangSmith 追踪变量（变量列表取自生产守卫），由 `ci-workflow.test.mjs` 钉住。
 - **压测脚本**：`--agent-runtime` 默认改为 `langgraph`，与应用一致。
 - **代码量**：现在原生 runner 386 行、共享节点模块 1,138 行、`server/rag/langgraph/` 下 19 个文件共 6,463 行（含阶段 1 的适配器）。维护面还没有缩小：要等回退窗口结束、删除原生调度器之后才会体现，届时再按行数和测试数衡量。如果解决交回情形的成本过高，应重新评估是否保留原生调度器作为长期的第二调度器。
+
+## 阶段 5 结果：收尾（2026-10-16）
+
+阶段 4 之后按"完成的定义"逐条检查，先做只读调查（性能、交回情形、v3 默认、适配器、发布证据五个方向），再实现能做的部分。
+
+### 外层计划：降到底层 Pregel，压测仍不过，默认保持原生
+
+- **开销从哪来**（微基准，桩阶段，生产包装层）：文档问答的确定性计划有 7 个阶段，StateGraph 版本跑 8 个 superstep。每个阶段被包成节点 `RunnableCallable`、`ChannelWrite` 及其 mapper、控制分支、条件边路径，每个都经 `runWithConfig` 新建一个 LangSmith `RunTree`：每次调用 54 个 `RunTree`、78 次回调配置、约 800 次环境变量读取，约 1.09 ms CPU。建图加编译只有约 37 µs，所以缓存编译结果只省约 3%。`invoke`/`stream`、`durability`、`streamMode`、`recursionLimit` 都在噪声内；`callbacks: []` 反而 +22%。StateGraph 层面能做到的最好结果（缓存 + `Command` 路由 + 直接调用的节点）是 7 阶段约 0.65 ms。
+- **改动**（`rag/langgraph/execution-plan-graph.js`，只在 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 时运行）：
+  - 改用公开的底层 API `@langchain/langgraph/pregel` 与 `/channels`：每个阶段一个节点，触发 channel → 直接调用阶段的小 `Runnable` → 一个 `ChannelWrite`。写回执并在阶段没有给出响应时触发下一阶段；mapper 返回 `undefined` 即不写，计划就此结束。没有 START superstep 和控制分支。
+  - 按计划形状只编译一次（LRU 64 项，键是被调度的阶段 id 序列）。每个请求的状态都放在 `config.configurable` 的一个私有键下，节点闭包里没有请求数据。`langgraph-execution-plan-graph-isolation` 用 1,024 个请求（64 个并发，随机延迟、提前结束、失败、取消）共用一张编译好的图，结果、错误对象和事件流各归各的。
+  - 剪枝：`isAgentExecutionPlanStageStaticallyInert`（`agent-execution-plan-runner.js` 导出）为真时不调度该阶段。只对 arxiv_import、workspace_action、research_brief、inventory、document_discovery 五个内置阶段成立，条件是 `selected_skill` 且阶段体用的同一个 `getSelectedSkill` 查不到 Skill；custom_skills、document_rag、web_search 从不剪。`agent-execution-plan-pruning` 用记录型 Proxy 证明这五个阶段在未选中时不碰任何协作者、不发事件、不改状态，并验证剪枝前取消在两种调度器下结果相同。原生循环不变，仍进入每个阶段。
+  - 回执检查更严：进入的阶段必须按计划顺序，且要么走到最后一个阶段，要么停在给出响应的那个阶段，否则 `AGENT_LANGGRAPH_PLAN_RECEIPT_MISMATCH`。
+  - 审查发现并修复：LangGraph 1.5.0 在节点失败或 drain 后一个微任务就让输出流出错，`ReadableStream` 出错时丢弃消费者还没读的 custom chunk，阶段在抛错前发出的 trace 事件因此会从 SSE 里丢失（StateGraph 版本因调用链更长碰巧没丢）。现在节点要等消费者确认已转发它经 `config.writer` 发出的每个事件后才结算（`createEventRelay`），`langgraph-chat-stream` 与 `langgraph-execution-plan-graph` 各加了先发事件再失败的用例。
+- **微基准**（同一方法）：7 阶段 1,086 → 347 µs CPU（并发 32 时 955 → 320）；剪枝后的文档问答形状（document_rag + web_search 两个节点）416 → 143 µs（并发 32 时 392 → 132）；每次调用的 `RunTree` 54 → 2。进程内同一个 `runAgentRag`（桩 RAG）：native 0.69 ms，外层计划在 LangGraph 上 0.97 ms，多 0.28 ms（阶段 3 时多 1.23 ms）；阶段里加 400 个异步等待后差值不变（0.88–0.91 对 1.19 ms）。
+- **压测**（pgvector、owner 路径、模型 0 ms、确定性规划器，两边都给两个参数：`--agent-runtime X --outer-plan-runtime X`）：
+  - 第一对 `latest-load-test-p5-{native,langgraph}-r3`（native 先跑，每档 3 次）：每请求 CPU 并发 1 时 4.87–5.14 → 6.65–7.24 ms，并发 32 时 4.91–5.51 → 4.38–4.91 ms；并发 32 的 p95 153.7–175 → 137.5–142 ms。
+  - 反向一对 `latest-load-test-p5b-{langgraph,native}-r3`（langgraph 先跑）：并发 1 时 5.83–6.31 → 6.63–7.43 ms，并发 32 时 4.76–5.03 → 5.44–5.81 ms；并发 32 的 p95 148–149.6 → 168.8–174.8 ms。
+  - 两对在并发 32 上方向相反，同一配置在不同轮次之间就有约 15–20% 的漂移，所以并发 32 的结论不确定。并发 1 两对都是 langgraph 更贵，于是交替跑了四轮（`latest-load-test-p5c-{1..4}-*`，native、langgraph、native、langgraph，各 5 次、每次 256 个请求）。并发 1 的中位数：每请求 CPU 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%），平均延迟 7.8 → 8.6 ms。
+  - 按 10% 的硬门判为**不通过**（并发 1）。剩下的开销是 Pregel 每次调用固定要做的事：执行循环、任务 id（uuid5/SHA-1）、checkpoint 对象（uuid6）、配置合并，每个 superstep 约 40 µs、每次调用约 100 µs 起步，属于库内部，不改库削不掉。进程内只多 0.28 ms、压测并发 1 却多约 1 ms，与"请求间有空闲时 CPU 降频、缓存变冷，同样的指令更贵"相符，这一条是推断，没有单独测量。
+- **决定**：外层 V1 计划默认继续走原生循环，与阶段 3 的决定一致；新实现替换了 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 后面的 StateGraph 版本，开销约为原来的四分之一，仍不建议开启。`agent-execution-plan-runner.js` 的原生循环因此不能删。
+
+### 规划器的模型调用经 LangChain ChatModel
+
+- `rag/langgraph/planner-model.js` 的 `completePlannerText`：`AGENT_RUNTIME=langgraph` 时，意图、执行、DAG、v3 统一图、replan 五个规划器的模型调用经 `ArchiveRagChatModel.invoke(prompt, { promptTemplate, responseFormat, temperature })`；`native` 时仍直接调 `completeTextWithMetadata`。适配器按需动态加载（原生进程不加载 `@langchain/*`），每个（capability, routeId）缓存一个实例，调用在空的 LangChain 异步上下文里进行，不建根 `RunTree`。只接受 capability、promptTemplate、responseFormat、routeId、temperature 五个选项，多传就拒绝。
+- 各规划器保留自己的 JSON 解析和校验器，不用 `withStructuredOutput`：实测 `parseFirstJsonValue` 在"文字里带 `[...]`/`{...}`、后面跟 fenced JSON"的回复上解析失败，而规划器自己的解析器能解析；它也不接受意图规划器在没有候选时构造的 null schema；replan 根本不发 schema。
+- LangSmith 追踪变量为 `"true"` 时，`completePlannerText` 在任何 runtime 下都走直接调用，不进入 LangChain（审查发现：最初实现在这种情况下拒绝调用，让 LLM 规划器在默认 runtime 下退回确定性计划，破坏了"不建图的请求与 native 一致"）。
+- 等价证据：`langgraph-planner-model`（五个规划器在两种 runtime 下 `deepStrictEqual` 结果、每次 provider 输入、每条 LLMOps 事件、各类失败的错误对象；langgraph 下确实经过适配器，native 下没有加载）；现有规划器套件在两种 runtime 下各跑一遍；`eval:planner -- --provider mock` 两种 runtime 屏蔽后一致。每次调用多约 13–19 µs CPU（微基准）；压测用确定性规划器，测不到这部分。
+
+### 没有做的部分与理由
+
+- **其余适配器不接入生产**：
+  - `retriever.js` 一次只接一个查询、不共享查询向量，也带不回 `/chat` 和质量门要读的 `retrieval` 摘要；接到生产调用点会改变 `/chat` 契约。
+  - `tools.js` 的形状不适合图调度器：没有预算预留、lifecycle step、Skill 观测、preflight 授权和逐节点 scope，每个请求建一次 tool 还要约 283 µs。
+  - `embeddings.js` 与 `prompts.js` 很便宜，但它们所在的位置（检索层之下、答案生成器里）没有任何 LangChain 组件会消费它们。
+- **工作记忆进图状态、replan 改成条件边：不做。** 工作记忆的主要写入发生在外层计划里，外层计划仍是原生循环；v3 图本来就从持久化的 typed 输出重建工作记忆。replan 上限是 1 次，而且从 v1 图 checkpoint 恢复；改成回环至少给每个 guarded custom-Skill 阶段多一次 LangGraph 调用（1 节点图实测 260–310 µs CPU），没有收益。
+- **v3 统一图不设为默认主图**（`AGENT_UNIFIED_GRAPH_ROLLOUT` 仍默认 `off`）：
+  - 生产其实有默认的统一图规划适配器（`app-services.js` 的 `createUnifiedGraphPlannerAdapter`，跟随规划器开关），所以改成 `guarded` 会立刻改变行为，不是"没有规划器就什么都不变"。
+  - 它覆盖不了全部请求：research brief、没有文档的 discovery 和 Web、没有常设授权的 document_web、未配 `AGENT_UNIFIED_GRAPH_CAPABILITIES` 的 workspace action、已有 run 的重入、规划前就返回的澄清，仍要 V1 外层计划回答。
+  - 被接管的请求行为会变（mock 实测）：文档问答拒答时不再提议 Web 审批；custom Skill 请求多一次 `document_rag` 和一次会话记忆写入，证据不通过时 Skill 被跳过；非主节点失败从 200 或可重试的 503 变成 409 `AGENT_UNIFIED_GRAPH_PARTIAL`；`/chat/stream` 不再有 `answer_draft`；trace 改为 `graph_node`。trajectory 与 planner 评测的投影会变，需要按流程给 manifest 升版本。
+  - 性能（进程内微基准，内存 run store、mock RAG）：一次文档问答 V1 约 0.8–1.2 ms CPU，v3 native 约 5.8–7.4 ms，v3 在 LangGraph 上约 11–15 ms；带事件的 CAS 写 3 → 10 次，LangGraph 下另加 11 次无事件写。必然违反 10% 的硬门。
+  - 真实模型证据不足：v3 规划器在 qwen2.5:7b 上的采纳率是 3/15（2026-09-27，提交 85efbb6a）。
+- **原生调度器不删除**：
+  - 约束 12 要求 `AGENT_RUNTIME=native` 在新默认发布后至少保留一个周期；阶段 4 刚切默认。
+  - 目标点名的四个文件里，只有 `agent-execution-graph-runner.js` 有可删的调度循环（`runExecutionGraph`）。`agent-execution-graph-checkpoint.js` 和 `agent-unified-graph-run.js` 没有调度代码：前者是 run 的权威图 checkpoint，后者是 v3 的入口与准入流程。`agent-execution-plan-runner.js` 的原生循环是外层计划的生产调度器（见上）。
+  - 交回情形：`eval:trajectory` 里实测为 0 次（17 次执行器调用）；生产默认的 custom-Skill DAG 不会出现（预算 2、四个 custom Skill 都可并行、上限 3）；v3 带 Web 的确定性文档图每次都会出现（非按层声明，document_rag 与 web 节点独占）。可行的解法是两种 runtime 都按校验器的层序调度（按层声明的图不受影响）。在草稿副本里试过：原生 runner 套件 51/51 通过，LangGraph 运行时套件 41/43（失败的两个正是钉住交回的用例）。但这会改变原生对非按层图的行为，需要单独认可。删除 `runExecutionGraph` 还要替换 v3 stage 里另外两处对它的使用（finalization 回放、step lifecycle 没有 run 目标的分支）。
+- **发布证据**：`release:gate` 要九份报告都来自同一提交、干净工作区、`release` 配置。确定性的几份（rerank-hard-cs、arxiv-real-paper-rerank、trajectory、planner-mock、recovery-observability）可以在本机生成；compare-hard-synthetic（要求 8/8，qwen2.5:7b 上一次 6/8）、planner-real（7/7 固定投影）、runtime-smoke 和 rollout-readiness 需要 GPT 级模型，本机没有 `OPENAI_API_KEY`，只能在 CI 的 `Release Evidence Gate` 或提供密钥后生成。
+
+### 对照"迁移完成的定义"
+
+| 条目 | 状态 |
+| --- | --- |
+| `AGENT_RUNTIME=langgraph` 为默认 | 达成（阶段 4） |
+| 被替代的调度代码已删除 | 未达成：外层原生循环因压测硬门保留为生产调度器；`runExecutionGraph` 按约束 12 保留到回退窗口之后，删除前需认可层序调度；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
+| 确定性评测屏蔽后逐字节一致 | 达成：`eval:trajectory`、`eval:planner`、`eval:recovery-observability` 两种 runtime 一致；`quality:current` 通过 |
+| `verify:quality` 18/18 | 达成（阶段 3，qwen2.5:7b；文档 RAG 路径与 runtime 无关） |
+| 压测退化不超过 10% | 默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%） |
 
 ## 后果
 

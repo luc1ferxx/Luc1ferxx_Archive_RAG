@@ -1,5 +1,5 @@
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
-import { completeTextWithMetadata } from "./openai.js";
+import { completePlannerText } from "./langgraph/planner-model.js";
 import {
   compactPlanCandidate,
   normalizeIntentSelection,
@@ -133,7 +133,7 @@ export const llmIntentPlannerAdapter = {
   id: "llm",
   selectIntentPlan: async (plannerContext = {}) => {
     const promptTemplate = getIntentPlannerPromptDescriptor();
-    const completion = await completeTextWithMetadata(
+    const completion = await completePlannerText(
       buildIntentPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.intentPlanner,

@@ -7,7 +7,7 @@ import {
   EXECUTION_GRAPH_VERSIONS,
 } from "./agent-execution-graph.js";
 import { parsePlannerJson } from "./agent-dag-planner-adapter.js";
-import { completeTextWithMetadata } from "./openai.js";
+import { completePlannerText } from "./langgraph/planner-model.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import { MODEL_CAPABILITIES, MODEL_ROUTE_IDS } from "./model-providers/index.js";
 import { getActiveRunUsage, getRunPromptUsage } from "./run-usage.js";
@@ -573,7 +573,7 @@ export const unifiedGraphLlmPlannerAdapter = Object.freeze({
     const tokensBefore = readPlannerTokens(runUsage);
     const responseFormat = buildUnifiedGraphPlannerResponseFormat(context);
     const startedAt = Date.now();
-    const completion = await completeTextWithMetadata(
+    const completion = await completePlannerText(
       buildUnifiedGraphPlannerPrompt(context),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,

@@ -103,8 +103,10 @@ const { getAgentOuterPlanRuntime, getAgentRuntime } = await import("../rag/confi
 const { DependencyOutageError } = await import("../rag/dependency-outage.js");
 const { LANGSMITH_TRACING_ENABLED_CODE } = await import("../rag/langgraph/langsmith-guard.js");
 const {
+  EXECUTION_PLAN_GRAPH_INPUT,
   EXECUTION_PLAN_RECEIPT_REASONS,
   LANGGRAPH_EXECUTION_PLAN_ERROR_CODES,
+  bindExecutionPlanGraphContext,
   compileAgentExecutionPlanGraph,
   runAgentExecutionPlanOnLangGraph,
 } = await import("../rag/langgraph/execution-plan-graph.js");
@@ -133,17 +135,43 @@ const { createPlannerFallbackCase, createPrivacySanitizationCase } = await impor
 const { createApprovalResumeCase, createCustomSkillRetryCase, createWebApprovalDenyCase } =
   await import("../evaluation/trajectory/cases/run-control.js");
 
+// The stages each LangGraph pass really scheduled: every outer-plan graph
+// LangGraph streams (one whose nodes are all execution step ids, never the
+// custom-Skill DAG's or the v3 graph's) records its node ids in order. The
+// graph leaves out a built-in stage whose Skill was not selected
+// (isAgentExecutionPlanStageStaticallyInert), so a parity pass proves that
+// pruning changed nothing only if it is seen to have pruned.
+const { Pregel } = await import("@langchain/langgraph/pregel");
+const OUTER_PLAN_STEP_IDS = new Set(Object.values(AGENT_EXECUTION_STEP_IDS));
+const RUNTIME_DECIDED_STEP_IDS = new Set([
+  AGENT_EXECUTION_STEP_IDS.customSkills,
+  AGENT_EXECUTION_STEP_IDS.documentRag,
+  AGENT_EXECUTION_STEP_IDS.webSearch,
+]);
+const scheduledShapes = [];
+const streamPregel = Pregel.prototype.stream;
+
+Pregel.prototype.stream = function streamRecordingOuterPlanShape(...args) {
+  const nodeIds = Object.keys(this.nodes ?? {});
+
+  if (nodeIds.length > 0 && nodeIds.every((nodeId) => OUTER_PLAN_STEP_IDS.has(nodeId))) {
+    scheduledShapes.push(nodeIds);
+  }
+
+  return streamPregel.apply(this, args);
+};
+
 const CREATED_AT = "2026-10-14T00:00:00.000Z";
 // The four passes of every scenario, by the two dials they pin:
 //   native      -- everything on the native schedulers;
 //   langgraph   -- AGENT_RUNTIME=langgraph plus the experimental
 //                  AGENT_OUTER_PLAN_RUNTIME=langgraph: the outer plan on the
-//                  StateGraph (what this suite was written to prove);
+//                  LangGraph Pregel (what this suite was written to prove);
 //   outerNative -- AGENT_RUNTIME=langgraph alone: the outer plan stays on the
 //                  native loop, the custom-Skill DAG runs on LangGraph;
 //   outerOnly   -- AGENT_OUTER_PLAN_RUNTIME=langgraph with AGENT_RUNTIME=
-//                  native: the outer plan on the StateGraph with a native
-//                  custom-Skill DAG inside its custom_skills node.
+//                  native: the outer plan on the LangGraph Pregel with a
+//                  native custom-Skill DAG inside its custom_skills node.
 const PASSES = Object.freeze({
   native: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined, AGENT_RUNTIME: "native" }),
   langgraph: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph", AGENT_RUNTIME: "langgraph" }),
@@ -204,6 +232,7 @@ const runOnPass = (pass, work) =>
     await takeCreatedAgentRuns();
     takePlanGraphInvocations();
     takeLangGraphInvocations();
+    scheduledShapes.splice(0);
     assert.equal(getAgentRuntime(), PASS_DIALS[pass].runtime);
     assert.equal(getAgentOuterPlanRuntime(), PASS_DIALS[pass].outerPlan);
 
@@ -220,6 +249,7 @@ const runOnPass = (pass, work) =>
         invocations: takePlanGraphInvocations(),
         outcome,
         runs: await takeCreatedAgentRuns(),
+        scheduledShapes: scheduledShapes.splice(0),
       };
     } finally {
       currentPass = null;
@@ -268,6 +298,32 @@ const assertOuterPlanFollowsItsOwnDial = ({ langgraph, native, outerNative, oute
   assert.deepStrictEqual(outerNative.graphInvocations, langgraph.graphInvocations);
   assert.deepStrictEqual(outerOnly.invocations, langgraph.invocations);
   assert.deepStrictEqual(outerOnly.graphInvocations, []);
+  assert.deepStrictEqual(native.scheduledShapes, []);
+  assert.deepStrictEqual(outerNative.scheduledShapes, []);
+  assert.deepStrictEqual(outerOnly.scheduledShapes, langgraph.scheduledShapes);
+};
+
+// Every plan the LangGraph pass received was streamed as a graph of its
+// stages in plan order, without any stage that decides at run time
+// (custom_skills, document_rag, web_search) left out.
+const assertScheduledShapesFollowPlans = ({ langgraph }) => {
+  assert.equal(langgraph.scheduledShapes.length, langgraph.invocations.length);
+
+  langgraph.invocations.forEach(({ stepIds }, index) => {
+    const shape = langgraph.scheduledShapes[index];
+    const label = JSON.stringify({ shape, stepIds });
+
+    assert.ok(shape.length > 0, label);
+    assert.deepStrictEqual(
+      stepIds.filter((stepId) => shape.includes(stepId)),
+      shape,
+      label
+    );
+    assert.ok(
+      stepIds.every((stepId) => !RUNTIME_DECIDED_STEP_IDS.has(stepId) || shape.includes(stepId)),
+      label
+    );
+  });
 };
 
 // The native pass never touches the graph; the LangGraph pass schedules every
@@ -291,6 +347,8 @@ const assertScheduledOnLangGraph = (passes, { minimumInvocations = 1 } = {}) => 
       JSON.stringify(invocation.stepIds)
     );
   }
+
+  assertScheduledShapesFollowPlans(passes);
 };
 
 const runTrajectoryCase = async (createCase) => {
@@ -505,6 +563,14 @@ test("a research brief is identical on both runtimes", async () => {
   assertPassesIdentical(passes);
   assertScheduledOnLangGraph(passes);
   assert.deepStrictEqual(passes.langgraph.invocations[0].stepIds, DETERMINISTIC_STEP_IDS);
+  // Only the selected built-in stage of the five is scheduled.
+  assert.deepStrictEqual(passes.langgraph.scheduledShapes, [
+    [
+      AGENT_EXECUTION_STEP_IDS.researchBrief,
+      AGENT_EXECUTION_STEP_IDS.documentRag,
+      AGENT_EXECUTION_STEP_IDS.webSearch,
+    ],
+  ]);
 });
 
 test("an abstention falls through to the Web stage identically: without a standing approval the run parks at the gate, with one Web answers", async () => {
@@ -629,6 +695,11 @@ test("a request already cancelled stops at the first stage boundary with the sam
     assert.deepStrictEqual(native.outcome.runs[0].steps, []);
     assertPassesIdentical(passes);
     assertScheduledOnLangGraph(passes);
+    // The document question's five built-in stages, the first of them the
+    // one whose safe point stops the native loop, are not scheduled.
+    assert.deepStrictEqual(passes.langgraph.scheduledShapes, [
+      [AGENT_EXECUTION_STEP_IDS.documentRag, AGENT_EXECUTION_STEP_IDS.webSearch],
+    ]);
   }
 });
 
@@ -707,6 +778,176 @@ test("a deadline that passes inside a stage ends the run failed with AGENT_DEADL
   assert.equal(native.outcome.runs[0].error.reason, "deadline_exceeded");
   assertPassesIdentical(passes);
   assertScheduledOnLangGraph(passes);
+});
+
+// A stage that fails right after a burst of agent events. Natively each event
+// reaches the client as it is emitted, then the error. On the LangGraph
+// Pregel the events travel as custom stream chunks, and LangGraph errors its
+// stream (a ReadableStream, which drops every chunk not yet read) a microtask
+// after a node fails or a drain stops the loop, so a node may settle only once
+// the consumer has forwarded what it relayed. Here the primary answer carries
+// an unsupported claim (the stipend), so the document stage emits its
+// document_rag, self_check and gap_analysis steps and plans a follow-up
+// retrieval; the cancellation raised during the primary call throws at the
+// follow-up step's start, a safe point inside the same stage, right after
+// that burst.
+test("a stage that throws right after a burst of agent events streams every event before the error on both runtimes, for both reasons", async () => {
+  for (const [reason, code, status] of [
+    [REQUEST_CANCELLATION_REASONS.deadlineExceeded, "AGENT_DEADLINE_EXCEEDED", AGENT_RUN_STATUSES.failed],
+    [REQUEST_CANCELLATION_REASONS.clientCancelled, "AGENT_CLIENT_CANCELLED", AGENT_RUN_STATUSES.canceled],
+  ]) {
+    const passes = await runDirectScenario(({ agentRunService }) => {
+      const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
+
+      return runWithRequestCancellation(cancellation, () =>
+        askAgent({
+          agentRunService,
+          question: "What does remote work require and what stipend is paid?",
+          ragService: createRagService({
+            chat: async (docIds, question) => {
+              cancellation.cancel(reason);
+
+              return {
+                abstained: false,
+                citations: [CITATION],
+                memoryApplied: false,
+                resolvedQuery: question,
+                text:
+                  "Remote work requires manager approval. Employees also receive a 500 " +
+                  "dollar stipend for home office equipment. [Source 1]",
+              };
+            },
+          }),
+        })
+      ).finally(cancellation.dispose);
+    });
+    const { native } = passes;
+
+    assert.equal(native.outcome.errorIsCancellation, true, reason);
+    assert.equal(native.outcome.error.code, code, reason);
+    assert.equal(native.outcome.runs[0].status, status, reason);
+    assert.ok(
+      native.outcome.runs[0].steps.some(
+        (step) => step.id === "document_rag:primary" && step.status === "completed"
+      ),
+      "the primary document step settled before the cancellation surfaced"
+    );
+    // The burst the stage emitted before its own safe point threw.
+    assert.deepStrictEqual(
+      native.events.slice(-3).map((event) => event.step?.type),
+      ["document_rag", "self_check", "gap_analysis"],
+      reason
+    );
+    assertPassesIdentical(passes);
+    assertScheduledOnLangGraph(passes);
+  }
+});
+
+// On LangGraph a built-in stage whose Skill was not selected is not scheduled
+// at all (isAgentExecutionPlanStageStaticallyInert): its body would return at
+// once, so only its safe point is left out, and the next node's safe point or
+// the drain stands in for it. Natively that safe point is where the
+// cancellation surfaces. A plan with such stages first and between two
+// scheduled ones (inventory and research_brief here, neither selected for a
+// document question) must end every cancellation the same way: before the
+// first stage (natively at inventory's safe point; on LangGraph the drain
+// stops the pruned graph before its first superstep), and during the
+// document stage (natively at research_brief's safe point; on LangGraph the
+// drain after that superstep), for both reasons.
+test("a cancellation before a stage the LangGraph plan does not schedule ends the run identically on both runtimes", async () => {
+  const interleavedPlan = [
+    AGENT_EXECUTION_STEP_IDS.inventory,
+    AGENT_EXECUTION_STEP_IDS.documentRag,
+    AGENT_EXECUTION_STEP_IDS.researchBrief,
+    AGENT_EXECUTION_STEP_IDS.webSearch,
+  ];
+  const interleavedPlannerAdapter = {
+    createExecutionPlan: () => [...interleavedPlan],
+    id: "interleaved_test_plan",
+  };
+  const scenarios = [
+    {
+      cancelBeforeTheRun: true,
+      reason: REQUEST_CANCELLATION_REASONS.clientCancelled,
+      status: AGENT_RUN_STATUSES.canceled,
+    },
+    {
+      cancelBeforeTheRun: true,
+      reason: REQUEST_CANCELLATION_REASONS.deadlineExceeded,
+      status: AGENT_RUN_STATUSES.failed,
+    },
+    {
+      cancelBeforeTheRun: false,
+      reason: REQUEST_CANCELLATION_REASONS.clientCancelled,
+      status: AGENT_RUN_STATUSES.canceled,
+    },
+    {
+      cancelBeforeTheRun: false,
+      reason: REQUEST_CANCELLATION_REASONS.deadlineExceeded,
+      status: AGENT_RUN_STATUSES.failed,
+    },
+  ];
+
+  for (const { cancelBeforeTheRun, reason, status } of scenarios) {
+    const label = `${reason} ${cancelBeforeTheRun ? "before the run" : "during the document stage"}`;
+    const passes = await runDirectScenario(({ agentRunService }) => {
+      const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
+
+      if (cancelBeforeTheRun) {
+        cancellation.cancel(reason);
+      }
+
+      return runWithRequestCancellation(cancellation, () =>
+        askAgent({
+          agentRunService,
+          executionPlannerAdapter: interleavedPlannerAdapter,
+          ragService: createRagService({
+            chat: async (docIds, question) => {
+              if (cancelBeforeTheRun) {
+                throw new Error("No stage may run once the request is cancelled.");
+              }
+
+              cancellation.cancel(reason);
+
+              return {
+                abstained: false,
+                citations: [CITATION],
+                memoryApplied: false,
+                resolvedQuery: question,
+                text: ANSWER_TEXT,
+              };
+            },
+          }),
+        })
+      ).finally(cancellation.dispose);
+    });
+    const { native } = passes;
+
+    assert.equal(native.outcome.errorIsCancellation, true, label);
+    assert.equal(native.outcome.error.reason, reason, label);
+    assert.equal(native.outcome.runs[0].status, status, label);
+    assert.equal(native.outcome.runs[0].error.reason, reason, label);
+    assert.deepStrictEqual(
+      native.outcome.runs[0].steps.map((step) => [step.id, step.status]),
+      cancelBeforeTheRun ? [] : [["document_rag:primary", "completed"]],
+      label
+    );
+    assertPassesIdentical(passes);
+    assertScheduledOnLangGraph(passes);
+    // The planner's interleaved plan reached the LangGraph entry as planned
+    // (no fallback to the deterministic plan); the entry itself schedules
+    // only document_rag and web_search of it.
+    assert.deepStrictEqual(
+      passes.langgraph.invocations.map((entry) => entry.stepIds),
+      [interleavedPlan],
+      label
+    );
+    assert.deepStrictEqual(
+      passes.langgraph.scheduledShapes,
+      [[AGENT_EXECUTION_STEP_IDS.documentRag, AGENT_EXECUTION_STEP_IDS.webSearch]],
+      label
+    );
+  }
 });
 
 // The one deliberate difference: LangGraph refuses to run with a LangSmith
@@ -813,10 +1054,14 @@ const PLAN = validateAgentExecutionPlan({
   selectedSkills: [],
 });
 
+// The graph is compiled per plan shape and shared; what a request owns (its
+// stages, execution state and control flags) travels with each invocation in
+// config.configurable.
 const compileWithStages = ({ stages, state }) => {
   const entered = [];
   const control = { entered: [], fatalError: null };
-  const app = compileAgentExecutionPlanGraph({
+  const app = compileAgentExecutionPlanGraph({ executionPlan: PLAN });
+  const context = bindExecutionPlanGraphContext({
     control,
     executionPlan: PLAN,
     getStage: (step) => async () => {
@@ -826,18 +1071,19 @@ const compileWithStages = ({ stages, state }) => {
     state,
   });
 
-  return { app, control, entered };
+  return { app, context, control, entered };
 };
 
-const invokeGraph = (app) =>
-  app.invoke(
-    { receipts: {} },
-    { configurable: { thread_id: "plan-graph-unit" }, durability: "sync", recursionLimit: 4 }
-  );
+const invokeGraph = ({ app, context }) =>
+  app.invoke(EXECUTION_PLAN_GRAPH_INPUT, {
+    configurable: { thread_id: "plan-graph-unit", ...context },
+    durability: "sync",
+    recursionLimit: 4,
+  });
 
 test("the compiled graph enters the stages in plan order and ends at the stage that set the response", async () => {
   const state = { response: null };
-  const { app, entered } = compileWithStages({
+  const responding = compileWithStages({
     stages: {
       [AGENT_EXECUTION_STEP_IDS.documentRag]: async () => {
         state.response = { body: {}, status: 200 };
@@ -845,8 +1091,9 @@ test("the compiled graph enters the stages in plan order and ends at the stage t
     },
     state,
   });
+  const { entered } = responding;
 
-  const output = await invokeGraph(app);
+  const output = await invokeGraph(responding);
 
   assert.deepStrictEqual(entered, [AGENT_EXECUTION_STEP_IDS.documentRag]);
   assert.deepStrictEqual(output.receipts, {
@@ -858,7 +1105,7 @@ test("the compiled graph enters the stages in plan order and ends at the stage t
 
   const whole = { response: null };
   const all = compileWithStages({ stages: {}, state: whole });
-  const everyStage = await invokeGraph(all.app);
+  const everyStage = await invokeGraph(all);
 
   assert.deepStrictEqual(all.entered, PLAN.map((step) => step.id));
   assert.deepStrictEqual(everyStage.receipts, {
@@ -870,7 +1117,7 @@ test("the compiled graph enters the stages in plan order and ends at the stage t
 test("a stage error leaves the invocation as the original error object, an interrupt with the execution state attached", async () => {
   const interrupt = new AgentRunInterruptError({ type: "capability_approval_required" });
   const state = { response: null, webResult: null };
-  const { control, app, entered } = compileWithStages({
+  const failing = compileWithStages({
     stages: {
       [AGENT_EXECUTION_STEP_IDS.documentRag]: async () => {
         throw interrupt;
@@ -878,8 +1125,9 @@ test("a stage error leaves the invocation as the original error object, an inter
     },
     state,
   });
+  const { control, entered } = failing;
 
-  await assert.rejects(invokeGraph(app), (error) => {
+  await assert.rejects(invokeGraph(failing), (error) => {
     // LangGraph sees a stand-in with a stable code only.
     assert.equal(error.code, LANGGRAPH_EXECUTION_PLAN_ERROR_CODES.stageStopped);
     assert.equal(error.message.includes("capability_approval_required"), false);

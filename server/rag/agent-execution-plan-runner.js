@@ -1,6 +1,7 @@
 import { runDocumentRagLoop } from "./agent-document-loop.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import {
+  AGENT_EXECUTION_CONDITIONS,
   AGENT_EXECUTION_STEP_IDS,
   createDeterministicAgentExecutionPlan,
   validateAgentExecutionPlan,
@@ -23,8 +24,8 @@ import { AGENT_SKILL_IDS } from "./skills/registry.js";
 // Skills, the document loop, the Web fallback) in the order the validated plan
 // lists them. Two schedulers walk the same stages: runAgentExecutionPlan below
 // (the native loop, under both values of AGENT_RUNTIME) and
-// rag/langgraph/execution-plan-graph.js (a LangGraph StateGraph, only under
-// the experimental AGENT_OUTER_PLAN_RUNTIME=langgraph). The stages, their
+// rag/langgraph/execution-plan-graph.js (a low-level LangGraph Pregel, only
+// under the experimental AGENT_OUTER_PLAN_RUNTIME=langgraph). The stages, their
 // closure-owned state and the two decisions the loop makes between them (the
 // safe point before a stage, the early return once a stage produced the
 // response) are defined here once, so the graph reuses them and never
@@ -55,6 +56,57 @@ const findWholeStageOutage = (results = []) => {
 
 /** The loop's one routing decision: a stage set the response, so the plan ends. */
 export const hasAgentExecutionPlanResponse = (state) => Boolean(state?.response);
+
+// The built-in stages whose body, without its selected Skill, is a
+// getSelectedSkill lookup and a runner whose first statement is
+// `if (!skill) return null` (agent-built-in-skill-runners.js): stage id -> the
+// Skill id that stage body looks up. custom_skills, document_rag and
+// web_search are deliberately absent: each decides at run time (the custom
+// stage may run authorized Skills the intent did not select, the document
+// loop runs without a selected Skill, the Web stage is the document result's
+// fallback). test/agent-execution-plan-pruning.test.mjs runs each of these
+// stage bodies with every collaborator wired to a tripwire and pins that the
+// body looks up exactly this Skill id and touches nothing else.
+const SELECTED_SKILL_ONLY_STAGE_SKILL_IDS = Object.freeze({
+  [AGENT_EXECUTION_STEP_IDS.arxivImport]: AGENT_SKILL_IDS.arxivImport,
+  [AGENT_EXECUTION_STEP_IDS.workspaceAction]: AGENT_SKILL_IDS.workspaceAction,
+  [AGENT_EXECUTION_STEP_IDS.researchBrief]: AGENT_SKILL_IDS.researchBrief,
+  [AGENT_EXECUTION_STEP_IDS.inventory]: AGENT_SKILL_IDS.inventory,
+  [AGENT_EXECUTION_STEP_IDS.documentDiscovery]: AGENT_SKILL_IDS.documentDiscovery,
+});
+
+/**
+ * True exactly when the stage body of `step` would return without any effect
+ * (no step, run event, trace step, budget charge, agent event or state
+ * change): one of the five built-in stages above, under its `selected_skill`
+ * condition, whose Skill `getSelectedSkill` -- the same lookup, over the same
+ * options, the stage body makes -- does not return. A scheduler may skip such
+ * a stage; the only thing it then leaves out is the safe point before it,
+ * which the next stage's safe point (or the end of the plan) stands in for,
+ * because the skipped body could not have changed anything in between.
+ * Anything it cannot decide (no lookup, a lookup that throws) is not inert,
+ * so the stage runs and fails exactly as natively. The native loop never
+ * calls it.
+ */
+export const isAgentExecutionPlanStageStaticallyInert = (step, { getSelectedSkill } = {}) => {
+  const skillId = Object.hasOwn(SELECTED_SKILL_ONLY_STAGE_SKILL_IDS, step?.id)
+    ? SELECTED_SKILL_ONLY_STAGE_SKILL_IDS[step.id]
+    : null;
+
+  if (
+    !skillId ||
+    step.condition !== AGENT_EXECUTION_CONDITIONS.selectedSkill ||
+    typeof getSelectedSkill !== "function"
+  ) {
+    return false;
+  }
+
+  try {
+    return !getSelectedSkill(skillId);
+  } catch {
+    return false;
+  }
+};
 
 /**
  * An error a stage threw, as the loop rethrows it: an approval interrupt
@@ -398,7 +450,7 @@ export const runAgentExecutionPlan = async (options = {}) => {
 /**
  * The scheduler of the outer plan for `runtime` (AGENT_OUTER_PLAN_RUNTIME,
  * never AGENT_RUNTIME: config.js says why): the native loop, or the LangGraph
- * StateGraph over the same stages. The LangGraph module is imported only when
+ * Pregel over the same stages. The LangGraph module is imported only when
  * selected, so a process with the outer plan on the native loop never loads
  * it. Both take runAgentExecutionPlan's options and return its state.
  */

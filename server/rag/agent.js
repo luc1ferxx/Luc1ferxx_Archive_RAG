@@ -1239,9 +1239,9 @@ const runAgentRagInScope = async ({
 
     // AGENT_OUTER_PLAN_RUNTIME, never AGENT_RUNTIME: the native loop (the
     // default, also under AGENT_RUNTIME=langgraph), or the experimental
-    // LangGraph StateGraph over the same stages
-    // (rag/langgraph/execution-plan-graph.js), whose per-node cost the phase-3
-    // load test measured (config.js).
+    // LangGraph graph over the same stages (rag/langgraph/execution-plan-
+    // graph.js, low-level Pregel since phase 5), whose cost the load tests
+    // measured (config.js).
     const runExecutionPlan = await resolveAgentExecutionPlanRunner(getAgentOuterPlanRuntime());
     const executionResult = await runExecutionPlan({
       accessScope,

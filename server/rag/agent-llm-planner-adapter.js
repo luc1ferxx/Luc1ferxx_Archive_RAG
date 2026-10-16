@@ -5,7 +5,7 @@ import {
   AGENT_EXECUTION_STEP_SCHEMA,
 } from "./agent-execution-plan.js";
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
-import { completeTextWithMetadata } from "./openai.js";
+import { completePlannerText } from "./langgraph/planner-model.js";
 import {
   boundedArray,
   boundedString,
@@ -313,7 +313,7 @@ export const llmPlannerAdapter = {
   id: "llm",
   createExecutionPlan: async (plannerContext = {}) => {
     const promptTemplate = getExecutionPlannerPromptDescriptor();
-    const completion = await completeTextWithMetadata(
+    const completion = await completePlannerText(
       buildPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,

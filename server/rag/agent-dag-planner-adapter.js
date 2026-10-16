@@ -12,7 +12,7 @@ import {
   sameStringList,
 } from "./agent-planner-shadow.js";
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
-import { completeTextWithMetadata } from "./openai.js";
+import { completePlannerText } from "./langgraph/planner-model.js";
 import { definePrompt, normalizePromptDescriptor, PROMPT_IDS } from "./prompt-registry.js";
 import { MODEL_CAPABILITIES, MODEL_ROUTE_IDS } from "./model-providers/index.js";
 import {
@@ -473,7 +473,7 @@ export const getDagPlannerPromptDescriptor = () =>
 export const dagPlannerAdapter = {
   createExecutionGraph: async (plannerContext = {}) => {
     const promptTemplate = getDagPlannerPromptDescriptor();
-    const completion = await completeTextWithMetadata(
+    const completion = await completePlannerText(
       buildDagPlannerPrompt(plannerContext),
       {
         capability: MODEL_CAPABILITIES.executionPlanner,
