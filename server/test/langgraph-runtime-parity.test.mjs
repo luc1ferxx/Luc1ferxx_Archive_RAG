@@ -158,12 +158,17 @@ const projectRun = (run) => {
   };
 };
 
+// The outer-plan dial is pinned unset, the production setting: the outer plan
+// stays on the native loop under both runtimes, so only the custom-Skill DAG
+// moves.
+const PASS_ENV = Object.freeze({ ...ANSWER_RATE_FLAGS_OFF, AGENT_OUTER_PLAN_RUNTIME: undefined });
+
 /**
  * Runs `work` with AGENT_RUNTIME pinned and returns its outcome with every run
  * the evaluation modules created and every LangGraph invocation made meanwhile.
  */
 const runOnRuntime = (runtime, work) =>
-  withEnv({ ...ANSWER_RATE_FLAGS_OFF, AGENT_RUNTIME: runtime }, async () => {
+  withEnv({ ...PASS_ENV, AGENT_RUNTIME: runtime }, async () => {
     // Nothing recorded before this pass may be attributed to it.
     await takeCreatedAgentRuns();
     takeLangGraphInvocations();
@@ -219,6 +224,11 @@ const assertLangGraphRecords = ({ langgraph, native }) => {
     assert.ok(run.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]);
     assert.equal(record.format, LANGGRAPH_CHECKPOINT_FORMAT);
     assert.equal(record.threadId, deriveLangGraphThreadId(run.accessScope, run.runId));
+    // The graph checkpoints into the root namespace, never a subgraph's
+    // (with AGENT_OUTER_PLAN_RUNTIME=langgraph it is invoked from inside the
+    // outer plan graph's custom_skills node, test/agent-run-chat-statement-
+    // count.test.mjs pins that case).
+    assert.deepStrictEqual(record.namespaces.map((namespace) => namespace.ns), [""]);
     assert.equal(JSON.stringify(record).includes(run.goal), false);
   }
 };

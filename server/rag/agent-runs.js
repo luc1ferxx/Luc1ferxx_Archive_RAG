@@ -1264,6 +1264,10 @@ const LANGGRAPH_WRITABLE_RUN_STATUSES = new Set([
   AGENT_RUN_STATUSES.waitingForUser,
 ]);
 
+// The graph phases after which no LangGraph superstep can follow: only a
+// save of one of these may drop the thread record (saveExecutionGraphCheckpoint).
+const SETTLED_EXECUTION_GRAPH_CHECKPOINT_PHASES = new Set(["completed", "partial"]);
+
 /**
  * The fence every LangGraph record write passes, decided on the run snapshot
  * the same revision CAS commits against. It is the graph-writer rule of
@@ -1321,7 +1325,12 @@ const buildAgentRunCursorKey = ({ accessScope = {}, runId } = {}) =>
  * which makes the snapshot exactly the stored row. Every other outcome (a
  * revision conflict, a no-op, a rejected mutation) is decided again from a
  * fresh read with the method's full retry budget, so it behaves exactly as if
- * the cursor had not been passed. Its event list is the stored list as of the
+ * the cursor had not been passed. One method opts out of that for its no-ops
+ * (mutateStoredRun's acceptCursorNoOp): the LangGraph record's, whose
+ * decision reads nothing but that record, which only the invocation's own
+ * checkpointer writes and every commit of which the cursor remembers, so the
+ * snapshot's record is the stored one and a decision to write nothing needs
+ * no read to confirm it. Its event list is the stored list as of the
  * write or read that produced it (the PostgreSQL CAS locks the run row before
  * its snapshot, so a concurrent append that committed first is included) and
  * may lag appends made after it, which do not bump the revision; a mutation
@@ -1464,7 +1473,13 @@ export const createAgentRunService = ({
 
   // One revision CAS of a decided mutation on existingRun. Throws the store's
   // revision conflict when existingRun is no longer the stored revision.
-  const commitRunMutation = async ({ accessScope, existingRun, mutation, runId }) => {
+  const commitRunMutation = async ({
+    accessScope,
+    existingRun,
+    mutation,
+    reuseBaseEvents = false,
+    runId,
+  }) => {
     const patch = mutation.patch ?? mutation;
     const approvalSnapshots = toArray(mutation.approvalSnapshots);
 
@@ -1490,7 +1505,13 @@ export const createAgentRunService = ({
           approvalSnapshots,
           event: mutation.event,
         })
-      : await agentRunStore.update?.(updateOptions);
+      : await agentRunStore.update?.({
+          ...updateOptions,
+          // An event-less write whose caller takes the base's event list as
+          // the returned run's (see mutateStoredRun): the PostgreSQL store
+          // then skips the event-list read its plain UPDATE cannot return.
+          ...(reuseBaseEvents ? { reuseBaseEvents: true } : {}),
+        });
 
     if (updatedRun && mutation.event && !agentRunStore.updateWithEvent) {
       await agentRunStore.appendEvent?.({
@@ -1512,7 +1533,16 @@ export const createAgentRunService = ({
     };
   };
 
+  // `reuseBaseEvents`: the returned run of an event-less write carries the
+  // event list of the snapshot it was decided on (the cursor's, or this
+  // method's own fresh read) instead of a list read after the write. Only for
+  // a method whose decision never reads events and whose callers never
+  // answer a read from the returned run: the thread record's. Its cost is the
+  // documented cursor staleness (an append between the snapshot and the
+  // write is missing until the next read or event-carrying write); its gain
+  // is one statement less per LangGraph superstep on PostgreSQL.
   const mutateStoredRun = async ({
+    acceptCursorNoOp = false,
     accessScope = {},
     allowRetryTransition = false,
     includeGraphCheckpoint = false,
@@ -1520,6 +1550,7 @@ export const createAgentRunService = ({
     maxRetries = 0,
     mutate,
     requiresFreshRun = null,
+    reuseBaseEvents = false,
     runCursor = null,
     runId,
   } = {}) => {
@@ -1532,6 +1563,7 @@ export const createAgentRunService = ({
       // below, which decides again exactly as without a cursor. Store errors
       // other than a revision conflict propagate unchanged.
       let mutation = null;
+      let decided = false;
 
       try {
         mutation = await decideRunMutation({
@@ -1541,8 +1573,21 @@ export const createAgentRunService = ({
           includeLangGraphCheckpoint,
           mutate,
         });
+        decided = true;
       } catch {
         mutation = null;
+      }
+
+      if (!mutation && decided && acceptCursorNoOp) {
+        // A decision to write nothing, taken on a snapshot the caller vouches
+        // for (see createAgentRunCursor): final without a read, as a no-op
+        // from the fresh-read loop would be reported.
+        return {
+          applied: false,
+          current: false,
+          run: stripInternalRunFields(knownRun),
+          value: null,
+        };
       }
 
       if (mutation) {
@@ -1551,6 +1596,7 @@ export const createAgentRunService = ({
             accessScope,
             existingRun: knownRun,
             mutation,
+            reuseBaseEvents,
             runId,
           });
 
@@ -1609,6 +1655,7 @@ export const createAgentRunService = ({
           accessScope,
           existingRun,
           mutation,
+          reuseBaseEvents,
           runId,
         });
 
@@ -1926,9 +1973,22 @@ export const createAgentRunService = ({
       : { checkpoint: null, claimed: false };
   },
 
+  /**
+   * One revision CAS of the graph checkpoint, with its skill_graph_checkpointed
+   * event. `dropLangGraphRecord: true` also clears the LangGraph thread record
+   * (rag/langgraph/checkpointer.js) in that same CAS, and is accepted only
+   * for a settled graph (phase completed or partial): it is for the graph's
+   * final save, so a finished run never carries a thread, while a running or
+   * approval-paused graph keeps the thread its continuation resumes. The
+   * drop rides on this save's own fences (owner, sequence,
+   * resume claim, run status), which admit exactly the worker that owns the
+   * graph, the one whose checkpointer wrote the thread. A run without a
+   * record gets no tombstone (absent and null both read as no record).
+   */
   async saveExecutionGraphCheckpoint({
     accessScope = {},
     checkpoint,
+    dropLangGraphRecord = false,
     runCursor = null,
     runId,
   } = {}) {
@@ -1937,6 +1997,19 @@ export const createAgentRunService = ({
       sealExecutionGraphCheckpoint(checkpoint).digest !== checkpoint.digest
     ) {
       throw new Error("Execution graph checkpoint has an invalid digest.");
+    }
+
+    if (typeof dropLangGraphRecord !== "boolean") {
+      throw new TypeError("dropLangGraphRecord must be a boolean.");
+    }
+
+    if (
+      dropLangGraphRecord &&
+      !SETTLED_EXECUTION_GRAPH_CHECKPOINT_PHASES.has(checkpoint.phase)
+    ) {
+      throw new TypeError(
+        "The LangGraph record can be dropped only with a settled graph checkpoint."
+      );
     }
 
     const requestedScope = normalizeTaskAccessScope(accessScope);
@@ -1955,11 +2028,20 @@ export const createAgentRunService = ({
     const mutation = await mutateStoredRun({
       accessScope,
       includeGraphCheckpoint: true,
+      // Only a drop may name the record key in its patch (decideRunMutation
+      // refuses it otherwise); the record itself is read, never changed, by
+      // anything else here.
+      includeLangGraphCheckpoint: dropLangGraphRecord,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
       runCursor,
       runId,
-      mutate: (run) => {
+      mutate: (run, { langGraphCheckpoint = null } = {}) => {
         const previous = run.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
+        // The tombstone, when there is a thread to drop.
+        const recordPatch =
+          dropLangGraphRecord && langGraphCheckpoint !== null
+            ? { [LANGGRAPH_CHECKPOINT_RESULT_KEY]: null }
+            : {};
 
         if (isRunMarkedForManualRecovery(run)) {
           const error = new Error(
@@ -2006,7 +2088,15 @@ export const createAgentRunService = ({
         }
 
         if (previous?.digest === checkpoint.digest) {
-          return null;
+          // The checkpoint is already stored. A replayed final save still
+          // owes the drop (and nothing else, so no second event) while the
+          // replaying worker still owns the running graph; otherwise it is
+          // the no-op it always was.
+          return Object.keys(recordPatch).length > 0 &&
+            run.status === AGENT_RUN_STATUSES.running &&
+            isDeepStrictEqual(previous.resumeClaim ?? null, checkpoint.resumeClaim ?? null)
+            ? { patch: { result: recordPatch } }
+            : null;
         }
 
         if (
@@ -2047,6 +2137,7 @@ export const createAgentRunService = ({
           patch: {
             result: {
               [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: checkpoint,
+              ...recordPatch,
             },
           },
         };
@@ -2089,8 +2180,14 @@ export const createAgentRunService = ({
    * No event is recorded: one per LangGraph superstep and task write would
    * grow every run's event log (and, on PostgreSQL, the events every CAS
    * returns) for a record nothing outside the checkpointer reads
-   * (docs/adr/0001-langgraph-runtime.md, write amplification). Returns null
-   * when the run does not exist in this scope, else { applied, value }.
+   * (docs/adr/0001-langgraph-runtime.md, write amplification). For the same
+   * reason a no-op decided on the run cursor's snapshot is final without a
+   * fresh read (acceptCursorNoOp; the cursor's doc says why that snapshot's
+   * record is the stored one), so the thread tombstone every invocation
+   * writes first costs nothing on a run that holds no thread; and the write
+   * does not read the event list back (reuseBaseEvents), because nothing
+   * decides on the returned run's events. Returns null when the run does not
+   * exist in this scope, else { applied, value }.
    */
   async mutateLangGraphCheckpointRecord({
     accessScope = {},
@@ -2104,10 +2201,12 @@ export const createAgentRunService = ({
     }
 
     const mutation = await mutateStoredRun({
+      acceptCursorNoOp: true,
       accessScope,
       includeGraphCheckpoint: true,
       includeLangGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
+      reuseBaseEvents: true,
       runCursor,
       runId,
       mutate: async (run, { langGraphCheckpoint }) => {
@@ -2654,10 +2753,14 @@ export const createAgentRunService = ({
     const mutation = await mutateStoredRun({
       accessScope,
       includeGraphCheckpoint: true,
+      // A terminal run carries no LangGraph thread (rag/langgraph/checkpointer.js):
+      // the thread of a run that fails or is cancelled inside its graph is
+      // dropped in this same CAS, under this method's own graph-owner fence.
+      includeLangGraphCheckpoint: true,
       maxRetries: DEFAULT_AGENT_RUN_MUTATION_RETRIES,
       runCursor,
       runId,
-      mutate: (existingRun) => {
+      mutate: (existingRun, { langGraphCheckpoint = null } = {}) => {
         const hasGraph = assertExecutionGraphRunOwner({
           expectedResumeClaimId: graphResumeClaimId,
           run: existingRun,
@@ -2701,6 +2804,11 @@ export const createAgentRunService = ({
           patch: {
             error: runError,
             status: terminalStatus,
+            // The tombstone (null, the key is never removed), only when there
+            // is a thread to drop; a run without one keeps its result as is.
+            ...(langGraphCheckpoint !== null
+              ? { result: { [LANGGRAPH_CHECKPOINT_RESULT_KEY]: null } }
+              : {}),
           },
         };
       },

@@ -190,6 +190,7 @@
 //     [--llm-max-concurrency 8] [--embedding-dimensions 1536]
 //     [--documents 20] [--pages 4] [--cheap-path /documents]
 //     [--request-timeout-ms 120000] [--planner deterministic|llm]
+//     [--agent-runtime native|langgraph] [--outer-plan-runtime native|langgraph]
 //     [--auth] [--rate-limit] [--no-embedding-cache] [--tenant] [--no-analyze]
 //     [--postgres-pid-file <postmaster.pid>] [--repeat 1]
 //     [--read-replica-url <disposable streaming replica URL>]   (pgvector, --tenant)
@@ -265,6 +266,7 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   // AGENT_REQUEST_TIMEOUT_MS of every app process (null: unset, the app's
   // default of no request deadline).
   agentRequestTimeoutMs: null,
+  agentRuntime: "native",
   analyze: true,
   auth: false,
   balance: "least-outstanding",
@@ -307,6 +309,7 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   // pg_stat_statements per node over each measured /chat level (on with
   // --read-replica-url; --node-statements asks for it on the primary alone).
   nodeStatements: false,
+  outerPlanRuntime: "native",
   pages: 4,
   planner: "deterministic",
   postgresPidFile: "",
@@ -347,6 +350,19 @@ export const DEFAULT_INDEX_SWITCH_LATEST_NAME = "latest-load-test-index-switch";
 
 const STORAGE_MODES = new Set(["local", "pgvector"]);
 const PLANNER_MODES = new Set(["deterministic", "llm"]);
+// Which schedulers run the agent. The app's environment drops every inherited
+// AGENT_* variable, so the runtimes of a before/after pair are named here and
+// recorded in the report, never taken from the shell. Two dials, because the
+// phase-3 decision (docs/adr/0001-langgraph-runtime.md) split them:
+// --agent-runtime is AGENT_RUNTIME (rag/config.js getAgentRuntime), the
+// scheduler of the custom-Skill DAG and the v3 unified graph only; it no
+// longer puts the V1 outer plan on LangGraph, so a `langgraph` run now is not
+// the configuration the phase-3 latest-load-test-p3-langgraph-* reports
+// measured (those predate the split and ran the outer plan on LangGraph too).
+// --outer-plan-runtime is AGENT_OUTER_PLAN_RUNTIME (getAgentOuterPlanRuntime),
+// the scheduler of the V1 outer plan and the /chat/stream relay; reproducing
+// those reports takes both at `langgraph`.
+const AGENT_RUNTIMES = new Set(["native", "langgraph"]);
 const SCENARIOS = new Set(["chat", "ingest", "index-switch"]);
 const EMBED_BATCHING_MODES = new Set(["on", "off"]);
 const INGEST_MODES = new Set(["sync", "async"]);
@@ -472,6 +488,7 @@ export const parseLoadTestArgs = (argv = []) => {
     ...INDEX_SWITCH_ONLY_FLAGS,
     ...Object.keys(TIER_REPLICA_FLAGS),
     "agent-request-timeout-ms",
+    "agent-runtime",
     "balance",
     "cheap-path",
     "cheap-requests",
@@ -489,6 +506,7 @@ export const parseLoadTestArgs = (argv = []) => {
     "metrics-scrape-ms",
     "min-requests-per-client",
     "model-latency-ms",
+    "outer-plan-runtime",
     "pages",
     "planner",
     "postgres-pid-file",
@@ -514,6 +532,15 @@ export const parseLoadTestArgs = (argv = []) => {
   if (raw["metrics-scrape-ms"] !== undefined) {
     if (!options.metrics) throw new Error("--metrics-scrape-ms needs --metrics.");
     options.metricsScrapeMs = toPositiveInteger(raw["metrics-scrape-ms"], "--metrics-scrape-ms", { allowZero: true });
+  }
+  if (raw["agent-runtime"] !== undefined) {
+    if (!AGENT_RUNTIMES.has(raw["agent-runtime"])) throw new Error("--agent-runtime must be native or langgraph.");
+    options.agentRuntime = raw["agent-runtime"];
+  }
+  if (raw["outer-plan-runtime"] !== undefined) {
+    if (!AGENT_RUNTIMES.has(raw["outer-plan-runtime"]))
+      throw new Error("--outer-plan-runtime must be native or langgraph.");
+    options.outerPlanRuntime = raw["outer-plan-runtime"];
   }
   if (raw["agent-request-timeout-ms"] !== undefined)
     options.agentRequestTimeoutMs = toPositiveInteger(raw["agent-request-timeout-ms"], "--agent-request-timeout-ms");
@@ -2169,6 +2196,8 @@ export const buildAppEnvironment = ({
     AGENT_PLANNER_ROLLOUT: options.planner === "llm" ? "llm" : "deterministic",
     AGENT_INTENT_PLANNER: options.planner,
     AGENT_EXECUTION_PLANNER: options.planner,
+    AGENT_RUNTIME: options.agentRuntime,
+    AGENT_OUTER_PLAN_RUNTIME: options.outerPlanRuntime,
     LOAD_TEST_STORAGE: storage,
     LOAD_TEST_TEMP_ROOT: tempRoot,
     LOAD_TEST_ROLE: role,
@@ -5934,6 +5963,14 @@ export const formatLoadTestMarkdown = (report) => {
 
   lines.push(
     `| Planner | ${config.planner} |`,
+    `| Agent runtime (AGENT_RUNTIME: custom-Skill DAG, v3 unified graph) | ${config.agentRuntime ?? "native"} |`,
+    // A report written before AGENT_OUTER_PLAN_RUNTIME existed has no
+    // outerPlanRuntime: AGENT_RUNTIME scheduled the outer plan then, so say
+    // which runtime that was rather than print a native the run never had.
+    `| Outer plan runtime (AGENT_OUTER_PLAN_RUNTIME: V1 outer plan, /chat/stream relay) | ${
+      config.outerPlanRuntime ??
+      `${config.agentRuntime ?? "native"} (not recorded: before AGENT_OUTER_PLAN_RUNTIME, AGENT_RUNTIME scheduled the outer plan too)`
+    } |`,
     `| Auth / rate limit | ${config.auth ? "enabled" : "disabled"} / ${config.rateLimit ? "enabled" : "disabled"} |`,
     `| Access scope | ${formatAccessScope(config.accessScope)} |`,
     ...(Array.isArray(config.storage) && config.storage.includes("pgvector")
@@ -6793,6 +6830,8 @@ const main = async () => {
       nodeVersion: process.version,
       pages: options.pages,
       planner: options.planner,
+      agentRuntime: options.agentRuntime,
+      outerPlanRuntime: options.outerPlanRuntime,
       platform: `${os.platform()} ${os.release()} ${os.arch()}`,
       pollIntervalMs: ingest ? options.pollIntervalMs : null,
       postgresCpuSampled: Boolean(postmasterPid),

@@ -379,8 +379,13 @@ const spawnTier = async ({ args, environment, name }) => {
 
 // Only what a process needs to run; nothing from the developer's shell or
 // server/.env (DOTENV_CONFIG_PATH names an empty file, and the working
-// directory is the temp root) can point a tier elsewhere.
-const INHERITED_VARIABLES = /^(HOME|LANG|LC_ALL|NODE_V8_COVERAGE|PATH|SYSTEMROOT|TEMP|TMP|TMPDIR)$/u;
+// directory is the temp root) can point a tier elsewhere. AGENT_RUNTIME and
+// AGENT_OUTER_PLAN_RUNTIME are the settings handed through: they select the
+// schedulers every tier runs its agent graphs and its outer plan on
+// (docs/adr/0001-langgraph-runtime.md), so the split can be driven on either
+// runtime from the shell, as the monolith suites are.
+const INHERITED_VARIABLES =
+  /^(AGENT_OUTER_PLAN_RUNTIME|AGENT_RUNTIME|HOME|LANG|LC_ALL|NODE_V8_COVERAGE|PATH|SYSTEMROOT|TEMP|TMP|TMPDIR)$/u;
 const emptyEnvironmentFile = path.join(tempRoot, "empty.env");
 
 writeFileSync(emptyEnvironmentFile, "", "utf8");

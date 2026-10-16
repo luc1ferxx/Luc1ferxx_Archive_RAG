@@ -10,7 +10,7 @@
 
 | 层 | 主要模块 | 行数 |
 | --- | --- | --- |
-| 外层执行计划（document loop → Web → custom Skills → Capability → finalize 的固定阶段） | `agent-execution-plan.js`、`agent-execution-plan-runner.js` | 343（runner） |
+| 外层执行计划（内置 Skill 与 Capability → custom Skills → document loop → Web 兜底 → finalize 的固定阶段） | `agent-execution-plan.js`、`agent-execution-plan-runner.js` | 343（runner） |
 | V2 custom-Skill typed DAG 与 v3 统一图的调度 | `agent-execution-graph-runner.js`（拓扑调度、并发上限、原子预算预留、副作用串行、输入/输出 schema gate、审批停靠） | 1055 |
 | 图 checkpoint、启动续跑、审批续跑、finalization 收据 | `agent-execution-graph-checkpoint.js`、`agent-unified-graph-run.js`、`agent-unified-graph-stage.js`、`agent-run-recovery.js`、`agent-run-graph-replay-guard.js` | 409 + 1223 + 823 + 671 + 199 |
 
@@ -209,6 +209,46 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - PostgreSQL：`test:pgvector` 102/102，其中跨进程续跑在 langgraph 下不重放已完成的写节点。
 - **钉住的差异**：都来自 superstep 屏障，只影响事件、trace 和 Skill 调用的先后，节点结果不变；`test/langgraph-execution-graph-runtime.test.mjs` 逐条钉住。
 - **未解决：写放大**。内存实测，一个 3 节点的 guarded 阶段在 LangGraph 上：run 读 48 次对 38 次，普通 update 21 次对 13 次，最大的 `result` 9,302 字节对 3,273 字节。原因是线程记录留在 run 行里，之后每次 CAS 都要重写它。阶段 3 之前要先降下来，再用 `pg_stat_statements` 和 load test 验证。
+
+## 阶段 3 结果：v3 统一图跑在 LangGraph 上（外层计划改为可选）
+
+- **范围**（两个开关，默认都是 `native`，`native` 逐字节不变）：
+  - `AGENT_RUNTIME=langgraph`：guarded v3 统一图用阶段 2 的同一执行器调度（`agent-unified-graph-stage.js` 把执行器绑定到节点 step 所写的 run），与阶段 2 的 custom-Skill DAG 一起。只有这两张需要持久状态与中断的图受它控制；外层计划与 `/chat/stream` 在它的两种取值下都走原生循环与原生路由。
+  - `AGENT_OUTER_PLAN_RUNTIME=langgraph`（实验开关，见下文"压测硬门与外层计划的决定"）：V1 外层执行计划编成一张不带 checkpointer 的 StateGraph（`rag/langgraph/execution-plan-graph.js`，阶段体不变，由 step 持久化续跑）；`/chat/stream` 经 `graph.stream(streamMode ["updates","custom"])` 中继（`rag/langgraph/agent-stream.js`），SSE 字节与 native 一致。两个开关互相独立。
+  - 取消在两条路径上都仍是 drain。
+- **审批停靠与同线程续跑**：被 preflight 停靠的 v3 节点以 `interrupt()` 作为第一个有副作用的操作（此前没有 step、预算、trace、checkpoint 写入），载荷只有公开 id（`rag/langgraph/unified-graph-approval.js`）；门仍由原来的 `pauseExecutionGraphForApproval` 在一个 CAS 里持久化。续跑（`/agent-runs/:runId/actions/*` 与后台任务同一入口）先把线程回执与 checkpoint 建出的节点状态核对（`unified-graph-thread.js`、`unified-graph-resume.js`），再以 `Command({resume: {[interruptId]: 运行时标记}})` 续同一线程：已结算节点不再进入，被批准的节点从第一行重跑进 stage 的 preflight，拿到经 `verifyCapabilityGraphApproval` 核验的门后在 run+node 幂等键下只执行一次；拒绝的节点在调度前结算为 `skipped/approval_denied`。resume 值永远只是运行时标记，决定从 run store 读。
+- **停靠时机与 native 对齐**：native 只在"再没有能跑的节点"时停靠。`interrupt()` 会让 LangGraph 在该 superstep 之后就停，所以只在"后面各层所有待跑节点都依赖被停靠节点"时才调用（`compile-execution-graph.js` 的 `hasExecutionGraphWorkBeforePause`，层是静态的）；否则停靠节点像普通节点一样返回回执，后面各层把 native 会跑的节点跑完，执行器丢弃线程并按 native 方式持久化停靠，续跑是从 checkpoint 播种的新 invocation。两种形状下停靠时与批准/拒绝后的 run 事件、步骤、预算、`unified_graph_executed.nodeRuns` 都与 native `deepStrictEqual`（`test/langgraph-unified-graph.test.mjs`）。
+- **启动恢复**：claim 之前先读线程并与 v2 checkpoint 核对（`unified-graph-recovery.js`）；矛盾转 manual `langgraph_thread_mismatch`，saver 自己拒绝的记录（损坏、他人/他租户的）转 `langgraph_thread_unreadable`，其他读取故障像别的 claim 前读取一样抛出、下次启动再恢复；一致、落后或没有线程的 run 以新 invocation 恢复（旧线程在 claim 下写墓碑）；批准节点内崩溃仍是 `unknown_in_flight_node`，不重放。
+- **线程记录**：只在 `run.result.__langGraphCheckpoint`，始终是根命名空间 `""`（开 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 时，custom-Skill DAG 是在外层计划图的 `custom_skills` 节点里被调用的；执行器在空的 LangChain 异步上下文里 invoke，否则会以嵌套子图落到 `custom_skills:<task id>` 命名空间而 `readLangGraphThread` 读不到。外层计划走原生循环时不存在外层图，DAG 本来就在根命名空间）。v3 图结算保存与 `failRun` 在同一 CAS 里丢弃它；审批停靠保留；下一次 invocation 先写墓碑。
+- **写放大（部分完成）**：已接入——无变化的线程写在 run cursor 上不读库（`acceptCursorNoOp`）、无事件写不回读事件表（`reuseBaseEvents`）、v3 结算与终态丢记录。未接入——saver 的 K=2 保留（`retainCheckpoints`，执行器未传，阶段 2 的测试钉着每次 invocation 3 个 checkpoint）与 custom-Skill DAG 完成后的记录丢弃。真库 `pg_stat_statements` 实测（PostgreSQL 18，2 节点 guarded custom-Skill `/chat`，owner 路径）：native 1 insert、9 带事件 CAS、3 追加事件、1 run 读、1 事件表读；langgraph 多 7 次无事件 CAS、1 次 run 读、1 次事件表读，完成后 `result` 11,860 → 17,006 字节（v2 记录 5,116 字节留在行里）。
+- **证据**：`langgraph-unified-graph` 19、`langgraph-routes` 8、`langgraph-execution-plan-graph` 24（每个场景四组 pass：两者皆 native、两者皆 `langgraph`、只开 `AGENT_RUNTIME`、只开 `AGENT_OUTER_PLAN_RUNTIME`）、`langgraph-chat-stream` 7、`langgraph-checkpointer-write-amplification` 9、`langgraph-execution-graph-runtime` 39、`langgraph-native-runner-suite` 52、`langgraph-runtime-parity` 6、`agent-run-chat-statement-count` 10；`eval:trajectory` 19/19 两种 runtime；PostgreSQL：`langgraph-checkpointer-postgres.integration` 4/4、`agent-unified-graph-postgres.integration` 12/12（五个跨进程用例也在 langgraph 下跑）。
+- **压测硬门与外层计划的决定（2026-10-16）**：
+  - 压测脚本新增 `--agent-runtime native|langgraph`。app 子进程会丢掉继承来的 `AGENT_*` 变量，所以必须用参数显式指定，报告配置里会记录 `Agent runtime`。决定之后又加了 `--outer-plan-runtime native|langgraph`（即 `AGENT_OUTER_PLAN_RUNTIME`），报告配置记录 `Outer plan runtime`；此后 `--agent-runtime langgraph` 不再把外层计划放到 LangGraph 上，要复现下面第一轮的 langgraph 配置需两个参数都给 `langgraph`。决定之前写的报告没有 `outerPlanRuntime` 字段，报告里注明外层计划当时跟随 `AGENT_RUNTIME`。
+  - 第一轮配对：`latest-load-test-p3-{native,langgraph}-r3`，pgvector，owner 路径，模型 0 ms，每档 3 次。当时 langgraph 下每个 `/chat` 都把外层 V1 计划作为 StateGraph 跑。
+    - 每请求 CPU：并发 1 时 5.02–5.19 → 6.35–7.31 ms，并发 32 时 3.93–4.26 → 5.27–5.47 ms（+29–35%）。
+    - p95：并发 32 时 125–138 → 165–169 ms。
+    - 吞吐：并发 32 时 273–281 → 208–214 req/s。
+    - 模型 800 ms 档的 p95 两边相差不到 1%。
+  - 按 10% 的硬门判为不通过。
+  - 原因：进程内同一个 `runAgentRag`，native 0.65 ms、langgraph 1.88 ms CPU。剖析结果如下。
+    - LangChain、LangGraph、LangSmith 自身代码占 45%。
+    - 其中最大的一块是 core 在每个节点调用时新建 `RunTree`，没有配置项能关掉。
+    - 空图底价：3 节点 0.38 ms，5 节点 0.59 ms；改用不建 `RunTree` 的节点包装后仍有 0.38–0.52 ms。
+    - 而 native 每个 `/chat` 只有约 4 ms CPU，10% 的预算是 0.4 ms，所以这是结构性的，不是可以调掉的。
+  - **决定**（用户认可）：外层 V1 计划在两种 runtime 下都走 native 循环。LangGraph 只跑需要持久状态和中断的图，也就是 custom-Skill DAG 和 v3 统一图。外层计划图（`rag/langgraph/execution-plan-graph.js`）与它的 `/chat/stream` 中继保留，改到单独的实验开关 `AGENT_OUTER_PLAN_RUNTIME` 后面，默认 `native`。
+  - 这偏离了目标文件"删除 `agent-execution-plan-runner.js` 调度部分"这一条：外层计划的调度只是按计划顺序执行阶段的一个循环，交给 LangGraph 没有带来持久化或中断能力，只带来开销。阶段 4 保留这个循环。
+  - **决定后的复测（通过）**：同一份 harness（sha256 `1577ba554459a74a`）配对 `latest-load-test-p3b-{native,langgraph}-r3`，`--agent-runtime langgraph`、外层计划 native，pgvector、owner 路径、模型 0 ms、每档 3 次，与 native 相比如下。
+    - 每请求 CPU：并发 1 时 4.94–5.14 → 4.59–4.91 ms，并发 32 时 3.78–4.20 → 3.82–4.34 ms，区间重叠。
+    - p95：并发 32 时 121.8–123.5 → 120.6–126.4 ms。
+    - 吞吐：并发 32 时 280–287 → 274–289 req/s。
+    - 模型 800 ms 档的 p95 相差在 2% 以内。
+    - 整轮里 800 ms、并发 4 这一档的 native 每请求 CPU 偏低（4.9–5.4 ms，langgraph 9.3–10.3 ms）。单独复测这一档（`...-800c4`，各 3 次），两边都是 836.5–840.4 ms 的 p95、约 9.6 ms CPU，没有差别。偏低来自档位顺序，不是 runtime 的差异。
+    - 进程内同一个 `runAgentRag`：两边都是 0.65 ms CPU。文档问答请求在 `AGENT_RUNTIME=langgraph` 下不加载 LangGraph。
+  - **其余验收**：
+    - `verify:quality` 18/18（qwen2.5:7b + nomic-embed-text，`AGENT_RUNTIME=langgraph`；它走文档 RAG 路径，与 runtime 无关，确认迁移没有碰坏真实模型下的检索与回答）。
+    - 覆盖率闸门：3296 个测试，3281 通过、15 跳过、0 失败，全局行覆盖 90.46%。
+    - `test:pgvector` 109/109。
+- **有意的差异**：开 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 时，LangSmith 追踪变量为 `"true"` 会让 `/chat/stream` 在 run 创建前拒绝，`/chat` 在规划之后、图构建之前拒绝并把 run 置为 failed（native 没有 tracer 可拒绝）。只开 `AGENT_RUNTIME=langgraph` 时，不建 LangGraph 图的请求（如文档问答）与 native 一样作答；custom-Skill 阶段与 v3 入口仍在各自路径上拒绝。
 
 ## 后果
 

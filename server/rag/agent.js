@@ -4,7 +4,7 @@ import {
   createAgentExecutionPlanResult,
   deterministicPlannerAdapter,
 } from "./agent-execution-plan.js";
-import { runAgentExecutionPlan } from "./agent-execution-plan-runner.js";
+import { resolveAgentExecutionPlanRunner } from "./agent-execution-plan-runner.js";
 import { createAgentRunStepLifecycle } from "./agent-run-step-lifecycle.js";
 import {
   buildAgentExperienceMemoryWriteObservability,
@@ -41,6 +41,7 @@ import {
 } from "./agent-run-steps.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import {
+  getAgentOuterPlanRuntime,
   getAgentSkillGraphRollout,
   getAgentUnifiedGraphCapabilityIds,
   getAgentUnifiedGraphRollout,
@@ -647,10 +648,11 @@ const resumeAgentExecutionGraphRunInScope = async ({
     registry: session.registry,
     replanAdapter,
     retrievalPlan: owner.retrievalPlan,
-    saveExecutionGraphCheckpoint: (nextCheckpoint) =>
+    saveExecutionGraphCheckpoint: (nextCheckpoint, { dropLangGraphRecord = false } = {}) =>
       agentRunService.saveExecutionGraphCheckpoint({
         accessScope,
         checkpoint: nextCheckpoint,
+        dropLangGraphRecord,
         runCursor,
         runId,
       }),
@@ -1235,7 +1237,13 @@ const runAgentRagInScope = async ({
       },
     });
 
-    const executionResult = await runAgentExecutionPlan({
+    // AGENT_OUTER_PLAN_RUNTIME, never AGENT_RUNTIME: the native loop (the
+    // default, also under AGENT_RUNTIME=langgraph), or the experimental
+    // LangGraph StateGraph over the same stages
+    // (rag/langgraph/execution-plan-graph.js), whose per-node cost the phase-3
+    // load test measured (config.js).
+    const runExecutionPlan = await resolveAgentExecutionPlanRunner(getAgentOuterPlanRuntime());
+    const executionResult = await runExecutionPlan({
       accessScope,
       addBudgetLimitTrace,
       addTraceStep,
@@ -1288,9 +1296,11 @@ const runAgentRagInScope = async ({
       retrievalPlan: agentRetrievalPlan,
       returnClarification,
       saveExecutionGraphCheckpoint: agentRunId && agentRunService?.saveExecutionGraphCheckpoint
-        ? (checkpoint) => agentRunService.saveExecutionGraphCheckpoint({
+        ? (checkpoint, { dropLangGraphRecord = false } = {}) =>
+          agentRunService.saveExecutionGraphCheckpoint({
             accessScope,
             checkpoint,
+            dropLangGraphRecord,
             runCursor,
             runId: agentRunId,
           })

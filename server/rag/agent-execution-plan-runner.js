@@ -14,9 +14,21 @@ import {
 } from "./agent-built-in-skill-runners.js";
 import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
 import { runWebSearchSkill } from "./agent-web-runner.js";
+import { getAgentOuterPlanRuntime } from "./config.js";
 import { toDependencyOutageError } from "./dependency-outage.js";
 import { throwIfRequestCancelled } from "./request-deadline.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
+
+// The V1 outer execution plan: the fixed stages (built-in Skills, custom
+// Skills, the document loop, the Web fallback) in the order the validated plan
+// lists them. Two schedulers walk the same stages: runAgentExecutionPlan below
+// (the native loop, under both values of AGENT_RUNTIME) and
+// rag/langgraph/execution-plan-graph.js (a LangGraph StateGraph, only under
+// the experimental AGENT_OUTER_PLAN_RUNTIME=langgraph). The stages, their
+// closure-owned state and the two decisions the loop makes between them (the
+// safe point before a stage, the early return once a stage produced the
+// response) are defined here once, so the graph reuses them and never
+// re-derives the plan.
 
 const getCustomSkills = (selectedSkills = []) =>
   selectedSkills.filter((skill) => skill.kind === "custom");
@@ -34,7 +46,33 @@ const findWholeStageOutage = (results = []) => {
   return outages.every(Boolean) ? outages[0] : null;
 };
 
-export const runAgentExecutionPlan = async ({
+/** The loop's one routing decision: a stage set the response, so the plan ends. */
+export const hasAgentExecutionPlanResponse = (state) => Boolean(state?.response);
+
+/**
+ * An error a stage threw, as the loop rethrows it: an approval interrupt
+ * carries the execution state so far (agent.js answers the clarification
+ * with the document result already in hand); every other error is unchanged.
+ */
+export const tagAgentExecutionPlanError = (error, state) => {
+  if (isAgentRunInterrupt(error)) {
+    error.agentExecutionState = state;
+  }
+
+  return error;
+};
+
+/**
+ * Validates the plan and builds its stages over one shared state object:
+ * `{ executionPlan, getStage, state }`, where `getStage(step)` returns the
+ * stage body of a validated step (and throws for an unknown one). Each stage
+ * decides for itself whether its Skill was selected, exactly as the native
+ * loop always ran them (a built-in stage without its Skill returns null,
+ * the custom stage may run authorized Skills the intent did not select, and
+ * the Web stage reads the document result), so a scheduler enters every
+ * stage of the plan in order and reads the two decisions above between them.
+ */
+export const createAgentExecutionPlanStages = ({
   accessScope,
   addBudgetLimitTrace,
   addTraceStep,
@@ -314,12 +352,24 @@ export const runAgentExecutionPlan = async ({
     },
   };
 
-  for (const step of validatedExecutionPlan) {
+  const getStage = (step) => {
     const runStep = stepHandlers[step.id];
 
     if (!runStep) {
       throw new Error(`Unknown AgentRAG execution step: ${step.id}.`);
     }
+
+    return runStep;
+  };
+
+  return { executionPlan: validatedExecutionPlan, getStage, state };
+};
+
+export const runAgentExecutionPlan = async (options = {}) => {
+  const { executionPlan, getStage, state } = createAgentExecutionPlanStages(options);
+
+  for (const step of executionPlan) {
+    const runStep = getStage(step);
 
     try {
       // Each stage boundary is a safe point for a cancelled request
@@ -327,17 +377,34 @@ export const runAgentExecutionPlan = async ({
       throwIfRequestCancelled();
       await runStep(step);
     } catch (error) {
-      if (isAgentRunInterrupt(error)) {
-        error.agentExecutionState = state;
-      }
-
-      throw error;
+      throw tagAgentExecutionPlanError(error, state);
     }
 
-    if (state.response) {
+    if (hasAgentExecutionPlanResponse(state)) {
       return state;
     }
   }
 
   return state;
+};
+
+/**
+ * The scheduler of the outer plan for `runtime` (AGENT_OUTER_PLAN_RUNTIME,
+ * never AGENT_RUNTIME: config.js says why): the native loop, or the LangGraph
+ * StateGraph over the same stages. The LangGraph module is imported only when
+ * selected, so a process with the outer plan on the native loop never loads
+ * it. Both take runAgentExecutionPlan's options and return its state.
+ */
+export const resolveAgentExecutionPlanRunner = async (
+  runtime = getAgentOuterPlanRuntime()
+) => {
+  if (runtime !== "langgraph") {
+    return runAgentExecutionPlan;
+  }
+
+  const { runAgentExecutionPlanOnLangGraph } = await import(
+    "./langgraph/execution-plan-graph.js"
+  );
+
+  return runAgentExecutionPlanOnLangGraph;
 };

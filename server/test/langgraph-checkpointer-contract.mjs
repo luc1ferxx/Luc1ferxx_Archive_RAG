@@ -188,6 +188,48 @@ export const buildApprovalGraph = ({ checkpointer, effects, tenantsSeen = [] }) 
     .addEdge("finish", END)
     .compile({ checkpointer });
 
+/**
+ * buildApprovalGraph with `stepsBeforeGate` nodes between plan and gate, so a
+ * thread holds more than K checkpoints before it pauses (the retention tests
+ * need pruning to have happened before the interrupt).
+ */
+export const buildLongApprovalGraph = ({ checkpointer, effects, stepsBeforeGate }) => {
+  const builder = new StateGraph(ApprovalState).addNode("plan", () => {
+    effects.plan += 1;
+    return { trail: ["plan"] };
+  });
+  const stepNames = Array.from({ length: stepsBeforeGate }, (_, index) => `step_${index + 1}`);
+
+  for (const name of stepNames) {
+    builder.addNode(name, () => ({ trail: [name] }));
+  }
+
+  builder
+    .addNode("gate", () => {
+      effects.beforeInterrupt += 1;
+      const decision = interrupt({ gateId: "gate-1" });
+      effects.afterInterrupt += 1;
+      return {
+        approval: decision?.approved === true ? "approved" : "denied",
+        trail: ["gate"],
+      };
+    })
+    .addNode("finish", () => {
+      effects.finish += 1;
+      return { trail: ["finish"] };
+    })
+    .addEdge(START, "plan");
+
+  let previous = "plan";
+
+  for (const name of stepNames) {
+    builder.addEdge(previous, name);
+    previous = name;
+  }
+
+  return builder.addEdge(previous, "gate").addEdge("gate", "finish").addEdge("finish", END).compile({ checkpointer });
+};
+
 const ChainState = Annotation.Root({
   trail: Annotation({ reducer: (left, right) => left.concat(right), default: () => [] }),
 });

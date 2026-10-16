@@ -15,7 +15,7 @@ import {
   sealExecutionGraphCheckpoint,
 } from "./agent-execution-graph-checkpoint.js";
 import { hasUnifiedGuardedGraphPath } from "./agent-unified-graph-run.js";
-import { getAgentUnifiedGraphRollout } from "./config.js";
+import { getAgentRuntime, getAgentUnifiedGraphRollout } from "./config.js";
 
 const normalizeMode = (value) => {
   const mode = normalizeText(value).toLowerCase();
@@ -108,6 +108,26 @@ const hasSettledAfterResumeClaim = (run = {}) => {
   return run?.status === AGENT_RUN_STATUSES.waitingForUser &&
     claimIndex >= 0 &&
     events.slice(claimIndex + 1).some((event) => SETTLED_WAITING_EVENTS.has(event.type));
+};
+
+// Under AGENT_RUNTIME=langgraph a v3 graph that will resume at a node
+// boundary also has a LangGraph thread on its run row. Its receipts must
+// agree with the graph checkpoint (the authority) before the graph is
+// claimed; a thread that contradicts it hands the run to an operator
+// (rag/langgraph/unified-graph-recovery.js, imported only on that runtime so
+// a native process never loads LangGraph). A missing thread, or one behind
+// the checkpoint, resumes: the continuation starts a fresh invocation from
+// the checkpoint and drops the stale thread under its claim.
+const verifyLangGraphThread = async ({ accessScope, agentRunService, checkpoint, runId }) => {
+  if (getAgentRuntime() !== "langgraph" || checkpoint?.phase !== "running") {
+    return { ok: true, reason: null };
+  }
+
+  const { verifyLangGraphThreadForRecovery } = await import(
+    "./langgraph/unified-graph-recovery.js"
+  );
+
+  return verifyLangGraphThreadForRecovery({ accessScope, agentRunService, checkpoint, runId });
 };
 
 // A v3 graph parked at its approval gate is waiting for a person, not
@@ -562,6 +582,27 @@ export const createAgentRunRecoveryService = ({
               typeof resumeExecutionGraph === "function" &&
               typeof agentRunService.claimExecutionGraphResume === "function"
             ) {
+              // Read before the claim, so a run whose thread cannot be
+              // trusted is never claimed (and so never resumed) at all.
+              const thread = unifiedGraph
+                ? await verifyLangGraphThread({
+                    accessScope,
+                    agentRunService,
+                    checkpoint: loadedGraph.checkpoint,
+                    runId: run.runId,
+                  })
+                : { ok: true, reason: null };
+
+              if (!thread.ok) {
+                await markManualRecovery({
+                  accessScope,
+                  fallbackReason: thread.reason,
+                  requestedMode: "auto",
+                  run,
+                });
+                return;
+              }
+
               const claim = await agentRunService.claimExecutionGraphResume({
                 accessScope,
                 checkpointDigest: loadedGraph.checkpoint.digest,

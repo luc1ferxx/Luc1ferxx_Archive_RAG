@@ -261,18 +261,39 @@ export const getAgentSkillGraphRollout = () => {
   return toChoice(rawValue, "off", ["guarded", "off", "shadow"]);
 };
 
-// Which scheduler runs a guarded custom-Skill graph (docs/adr/0001-
-// langgraph-runtime.md, phase 2). `native` (default) is
+// Which scheduler runs a guarded custom-Skill graph and a guarded v3 unified
+// graph (docs/adr/0001-langgraph-runtime.md, phases 2-3). `native` (default) is
 // agent-execution-graph-runner.js; `langgraph` runs the same nodes
 // (agent-execution-graph-node.js) on LangGraph.js. It only replaces the
 // scheduler: the graph, the planner, the rollout dial above, the v1 graph
-// checkpoint and the run store are the same either way, and the v3 unified
-// graph stays native in this phase.
+// checkpoint and the run store are the same either way. The v3 unified graph
+// stayed native in phase 2; phase 3 moved it under this same dial
+// (agent-unified-graph-stage.js). The V1 outer plan is not on this dial: see
+// getAgentOuterPlanRuntime below.
 //
 // Anything but `langgraph` resolves to `native`, the path every existing
 // guarantee was proven on, so a mistyped value can only fall back to it.
 export const getAgentRuntime = () =>
   toChoice(process.env.AGENT_RUNTIME, "native", ["langgraph", "native"]);
+
+// Which scheduler walks the V1 outer execution plan (agent-execution-plan-
+// runner.js), and with it which /chat/stream relay the route uses. A dial of
+// its own, not AGENT_RUNTIME: the phase-3 load test (docs/adr/0001-langgraph-
+// runtime.md) measured the outer plan as a LangGraph StateGraph at about
+// +1.2 ms CPU per /chat (+29-35% CPU per request, +25% p95 at concurrency 32
+// on pgvector with a 0 ms model), because LangChain core builds a RunTree per
+// node call and a bare 3-5 node graph already costs 0.38-0.59 ms. The outer
+// plan needs neither durable state nor interrupts (its durability is the
+// run's persisted steps), so the native loop runs it under both values of
+// AGENT_RUNTIME, and AGENT_RUNTIME=langgraph keeps LangGraph for the graphs
+// that need it (the custom-Skill DAG and the v3 unified graph).
+// `langgraph` (rag/langgraph/execution-plan-graph.js and the agent-stream.js
+// relay) stays as an experimental opt-in with that measured overhead.
+//
+// Anything but `langgraph` (unset, empty, whitespace, a typo) resolves to
+// `native`, as AGENT_RUNTIME does.
+export const getAgentOuterPlanRuntime = () =>
+  toChoice(process.env.AGENT_OUTER_PLAN_RUNTIME, "native", ["langgraph", "native"]);
 
 // --- AGENT track: heterogeneous v3 unified graph rollout ---------------------
 // `off` (default) keeps the V1 outer order. `shadow` plans and validates a v3

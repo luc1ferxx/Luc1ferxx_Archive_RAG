@@ -407,6 +407,45 @@ export const createTaskBeforeIndependentCheckProposal = () => {
 };
 
 /**
+ * The gated task depends on the document answer only, while the evidence
+ * check leads to a follow-up retrieval (when the check recommends one) and
+ * its own check, in later layers that do not depend on the task: the native
+ * scheduler runs all of them before it pauses for the approval. The shape the
+ * model planner can produce for a workspace action over a document loop.
+ */
+export const createTaskWithIndependentLaterWorkProposal = () => {
+  const [documentNode, checkNode, taskNode] = createApprovalGatedTaskProposal().nodes;
+  const { when, ...unconditionalTask } = taskNode;
+  const [, , followUpNode, followUpCheckNode] = createDocumentLoopProposal().nodes;
+
+  return {
+    nodes: [
+      documentNode,
+      { ...unconditionalTask, dependsOn: ["document"] },
+      checkNode,
+      {
+        ...followUpNode,
+        dependsOn: ["evidence_check"],
+        inputBindings: {
+          ...followUpNode.inputBindings,
+          question: nodeBinding("evidence_check", "followUpQuestion"),
+          retrievalPlan: nodeBinding("evidence_check", "followUpRetrievalPlan"),
+        },
+        when: { equals: true, nodeId: "evidence_check", output: "retryRecommended" },
+      },
+      {
+        ...followUpCheckNode,
+        dependsOn: ["follow_up"],
+        inputBindings: {
+          ...followUpCheckNode.inputBindings,
+          evidence: nodeBinding("follow_up", "evidence"),
+        },
+      },
+    ],
+  };
+};
+
+/**
  * A capability registry whose task.create writes go through `onWrite` (which
  * may record the effect durably, or stop the process right after it) and are
  * counted in `writes`. `version` overrides the Capability version, as after a

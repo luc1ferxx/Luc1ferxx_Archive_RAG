@@ -36,11 +36,52 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 // amplification item), and there is no record-level claim. A run that has a
 // graph checkpoint is claimed through claimExecutionGraphResume, whose
 // resumeClaim fences this saver; a run without one has no claim to hold.
+//
+// Write amplification (ADR phase 2 open item, phase 3). The record rides on
+// the run row, so every later CAS of the row (a step, a graph checkpoint
+// save, the next LangGraph superstep) rewrites it whole. Three rules keep it
+// small and short-lived; what each is wired to is stated, because the
+// phase-3 load test is still owed (AGENTS.md, "Write amplification"):
+//   - Retention. With `retainCheckpoints: K`, each put keeps only the K
+//     newest checkpoints of its namespace and the pending writes of those
+//     ids; older ones are dropped in the same write. LangGraph resumes from
+//     the newest checkpoint and its pending writes alone, so the thread is
+//     lossless for its reader, while getStateHistory, list() and an
+//     addressed getTuple see at most K per namespace (a retained checkpoint
+//     may still name a pruned parent in parentConfig). The default, null,
+//     keeps everything: that is MemorySaver's contract, which the contract
+//     suites compare against. LANGGRAPH_CHECKPOINT_RETENTION (2) is the
+//     value meant for the executors' savers, but no executor passes it yet:
+//     test/langgraph-execution-graph-runtime.test.mjs pins three checkpoints
+//     per invocation, so wiring it is a change of that pin
+//     (test/langgraph-checkpointer-write-amplification.test.mjs proves the
+//     rule itself, an interrupt and resume after pruning included).
+//   - No read for a no-op (wired). The run service decides a thread write on
+//     the request's run cursor when it holds the run, and a decision that
+//     changes nothing (a deleteThread of a thread that has no record, a
+//     replayed put) is final there: only this saver writes the record, and
+//     every write it commits is remembered by the cursor, so the cursor's
+//     record is the stored one. A write still commits by revision CAS and a
+//     conflict falls back to a fresh read.
+//   - Completion drops the record (wired for the v3 unified graph and for
+//     terminal runs). The v3 graph's final checkpoint save (phase completed
+//     or partial) clears the key in the same CAS (saveExecutionGraphCheckpoint's
+//     dropLangGraphRecord), and failRun clears it when a run fails or is
+//     cancelled inside its graph, so a finished or terminal v3 run never
+//     carries a thread; a paused one (approval) keeps it, because the
+//     continuation resumes that thread. The custom-Skill DAG's final save
+//     (agent-custom-skill-stage.js) does not pass the flag: a completed v2
+//     run keeps its record (test/agent-run-chat-statement-count.test.mjs and
+//     test/langgraph-runtime-parity.test.mjs pin that), the second open
+//     item next to retention.
 
 export { LANGGRAPH_CHECKPOINT_RESULT_KEY };
 export const LANGGRAPH_CHECKPOINT_FORMAT = "archive-rag.langgraph-saver/v1";
 export const LANGGRAPH_THREAD_ID_PREFIX = "agent-run:v1:";
 export const DEFAULT_LANGGRAPH_MAX_RECORD_BYTES = 262_144;
+// The checkpoints per namespace the executor keeps: the newest (what a resume
+// reads) and its parent. Nothing in the runtime reads further back.
+export const LANGGRAPH_CHECKPOINT_RETENTION = 2;
 
 export const LANGGRAPH_SAVER_ERROR_CODES = Object.freeze({
   checkpointConflict: "LANGGRAPH_CHECKPOINT_CONFLICT",
@@ -150,6 +191,20 @@ const latestCheckpointEntry = (namespace) =>
     null
   );
 
+// Keeps the `retain` newest checkpoints of a sorted namespace and the pending
+// writes of the ids that stay. Mutates the namespace; returns whether
+// anything was dropped.
+const pruneNamespace = (namespace, retain) => {
+  if (retain === null || namespace.checkpoints.length <= retain) {
+    return false;
+  }
+
+  namespace.checkpoints.splice(0, namespace.checkpoints.length - retain);
+  const retained = new Set(namespace.checkpoints.map((entry) => entry.id));
+  namespace.writes = namespace.writes.filter((write) => retained.has(write.checkpointId));
+  return true;
+};
+
 const isValidTypedValue = (value) =>
   isPlainRecord(value) &&
   (value.t === "json" || value.t === "bytes") &&
@@ -212,9 +267,11 @@ const isValidRecordShape = (record) =>
  * by the step lifecycle (startGraphStep with the same claim).
  *
  * Cost. A write reads the run once (or not at all when the run cursor holds
- * the latest snapshot) and commits once, with no event; getTuple and list
- * always read the run fresh. On PostgreSQL every read of a run also returns
- * its whole event list.
+ * the latest snapshot) and commits once, with no event, and a write that
+ * changes nothing costs no read at all on a cursor-held run; getTuple and
+ * list always read the run fresh. On PostgreSQL every read of a run also
+ * returns its whole event list. `retainCheckpoints` bounds the record (see
+ * the header); the default keeps every checkpoint.
  */
 export class RunStoreCheckpointSaver extends BaseCheckpointSaver {
   #agentRunService;
@@ -226,6 +283,7 @@ export class RunStoreCheckpointSaver extends BaseCheckpointSaver {
   #graphResumeClaimId;
   #runCursor;
   #maxRecordBytes;
+  #retainCheckpoints;
   // LangGraph calls putWrites fire-and-forget once per finished task, so
   // Send branches of one superstep arrive concurrently and overlap the next
   // put (pregel/loop.js putWrites / _checkpointerPutAfterPrevious). One
@@ -242,6 +300,7 @@ export class RunStoreCheckpointSaver extends BaseCheckpointSaver {
     graphResumeClaimId = null,
     runCursor = null,
     maxRecordBytes = DEFAULT_LANGGRAPH_MAX_RECORD_BYTES,
+    retainCheckpoints = null,
   } = {}) {
     // Before super(): nothing of LangChain is constructed while LangSmith
     // tracing is switched on (langsmith-guard.js).
@@ -259,6 +318,13 @@ export class RunStoreCheckpointSaver extends BaseCheckpointSaver {
 
     if (!Number.isSafeInteger(maxRecordBytes) || maxRecordBytes <= 0) {
       throw new TypeError("maxRecordBytes must be a positive integer.");
+    }
+
+    if (
+      retainCheckpoints !== null &&
+      (!Number.isSafeInteger(retainCheckpoints) || retainCheckpoints <= 0)
+    ) {
+      throw new TypeError("retainCheckpoints must be a positive integer or null.");
     }
 
     const scope = normalizeTaskAccessScope(accessScope ?? {});
@@ -281,6 +347,7 @@ export class RunStoreCheckpointSaver extends BaseCheckpointSaver {
     this.#graphResumeClaimId = normalizeText(graphResumeClaimId) || null;
     this.#runCursor = runCursor;
     this.#maxRecordBytes = maxRecordBytes;
+    this.#retainCheckpoints = retainCheckpoints;
   }
 
   get threadId() {
@@ -293,6 +360,10 @@ export class RunStoreCheckpointSaver extends BaseCheckpointSaver {
 
   get graphResumeClaimId() {
     return this.#graphResumeClaimId;
+  }
+
+  get retainCheckpoints() {
+    return this.#retainCheckpoints;
   }
 
   async getTuple(config) {
@@ -462,6 +533,9 @@ export class RunStoreCheckpointSaver extends BaseCheckpointSaver {
 
         namespace.checkpoints.push(entry);
         namespace.checkpoints.sort((left, right) => compareIds(left.id, right.id));
+        // In the same write as the checkpoint that pushed them out, so the
+        // record never holds more than K and no second CAS is spent on it.
+        pruneNamespace(namespace, this.#retainCheckpoints);
         next.sequence += 1;
         return next;
       });
