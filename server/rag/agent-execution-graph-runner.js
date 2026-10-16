@@ -46,8 +46,9 @@ import {
 // phase-2 delegation case (a graph not declared in layer order, whose
 // declaration-order queue started a later layer first) is gone; the ADR's
 // phase 5 section records what that changed natively. It is the rollback path
-// to delete after that release. Admission, the tail (finishExecutionGraphRun)
-// and the node module stay: LangGraph runs them.
+// to delete after that release. Admission, the tail (finishExecutionGraphRun),
+// the replay of a settled graph (replayExecutionGraphRun, which schedules
+// nothing) and the node module stay: LangGraph and the v3 stage run them.
 
 export {
   EXECUTION_GRAPH_NODE_STATUSES,
@@ -213,6 +214,94 @@ export const finishExecutionGraphRun = ({
   }
 
   return buildExecutionGraphRunResult({ graph, states, statesByNodeId });
+};
+
+/**
+ * The result of a graph whose work is all settled, rebuilt without a
+ * scheduler: every node is reused from `completedNodeRuns`, denied, or skipped
+ * because of those (a false condition, a skipped dependency). Each pending
+ * node is decided in the validator's layer order exactly as a scheduling pass
+ * decides it, and every skip is recorded through recordSkippedSkill as a
+ * scheduler records it. A node that would launch (or wait for one that
+ * would) throws `refuseLaunch({ nodeId })` instead: nothing is launched, so
+ * no step, budget, preflight or checkpoint hook is ever reached.
+ *
+ * For a settled graph this is the same result and the same skip records as
+ * runExecutionGraph, which then launches nothing either: in layer order a
+ * dependency is decided before its dependants, so one pass settles every
+ * node. Takes runExecutionGraph's options and returns its result
+ * synchronously (a rejected one for a graph admission refuses).
+ */
+export const replayExecutionGraphRun = ({
+  authorizedDocIds,
+  authorizedSkillIds = null,
+  completedNodeRuns = [],
+  deniedNodeIds = [],
+  docIds = [],
+  graph,
+  limits = EXECUTION_GRAPH_LIMITS,
+  maxConcurrency,
+  refuseLaunch,
+  registry,
+  // As runExecutionGraph: createExecutionGraphNodeContext. Only
+  // recordSkippedSkill is ever called.
+  ...nodeOptions
+} = {}) => {
+  const { compiled, rejected, scopedDocIds } = admitExecutionGraphRun({
+    authorizedDocIds,
+    authorizedSkillIds,
+    docIds,
+    graph,
+    limits,
+    maxConcurrency,
+    registry,
+  });
+
+  if (rejected) {
+    return rejected;
+  }
+
+  const { nodeOutputs, states, statesByNodeId } = createExecutionGraphNodeStates({
+    completedNodeRuns,
+    deniedNodeIds,
+    graph,
+    registry,
+  });
+  const context = createExecutionGraphNodeContext({
+    ...nodeOptions,
+    authorizedDocIds: scopedDocIds,
+    docIds,
+    graph,
+  });
+
+  for (const state of orderExecutionGraphNodeStatesByLayer({ compiled, states })) {
+    if (state.status !== EXECUTION_GRAPH_NODE_STATUSES.pending) {
+      continue;
+    }
+
+    const { decision, reason } = decideExecutionGraphNode({
+      dependencyStatuses: (state.node.dependsOn ?? []).map(
+        (dependencyId) => statesByNodeId.get(dependencyId)?.status
+      ),
+      graphVersion: graph.version,
+      node: state.node,
+      nodeOutputs,
+    });
+
+    if (decision !== EXECUTION_GRAPH_SCHEDULE_DECISIONS.skip) {
+      throw refuseLaunch({ nodeId: state.node.nodeId });
+    }
+
+    recordExecutionGraphNodeSkip({ context, reason, state });
+  }
+
+  return finishExecutionGraphRun({
+    context,
+    control: createExecutionGraphRunControl(),
+    graph,
+    states,
+    statesByNodeId,
+  });
 };
 
 export const runExecutionGraph = async ({

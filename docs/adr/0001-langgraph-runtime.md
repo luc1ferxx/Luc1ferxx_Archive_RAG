@@ -316,7 +316,49 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - `agent-execution-graph-node`、`langgraph-runtime-parity`、`agent-unified-graph-*`（PostgreSQL 集成用例无库时跳过）、`agent-graph-suites-native-rollback` 全部通过。
   - `eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8：`AGENT_RUNTIME=native` 与未设置两次运行，屏蔽 UUID、时间戳和时长后逐字节一致，只差报告自己的 runId。
   - `coverage:gate` 通过：3,294 个测试，0 失败，15 个跳过（都是需要 PostgreSQL、只读副本或 Redis 的用例）；五组覆盖率最低线全部通过。
-- **删除原生调度器还剩什么**：一是回退窗口（约束 12）；二是 v3 stage 里另外两处直接调用 `runExecutionGraph` 的地方（finalization 回放，不跑 node；step lifecycle 没有 run 目标时走原生），要先换掉。
+- **删除原生调度器还剩什么**：当时是两件：回退窗口（约束 12），以及 v3 stage 里另外两处直接调用 `runExecutionGraph` 的地方（finalization 回放，不跑 node；step lifecycle 没有 run 目标时走原生）。后一件已在下一节解决。
+
+### v3 stage 不再直接调用原生调度器（2026-10-16）
+
+- **改动**：`agent-unified-graph-stage.js` 在 `AGENT_RUNTIME=langgraph` 下原来还有两处直接调用 `runExecutionGraph`，都已换掉；`runExecutionGraph` 本身保留（约束 12）。
+  - **finalization 回放**（启动恢复为一张已完成的图重建 node 收据，交给 `finalizeAgentRun`）：两种 runtime 都改用 `agent-execution-graph-runner.js` 新导出的 `replayExecutionGraphRun`，它不调度。
+    - 它用 checkpoint 里已完成的收据和被拒绝的节点建 node 状态，再按校验器层序对每个 pending 节点做与调度器相同的判断（`decideExecutionGraphNode`）。
+    - 判为跳过的（`condition_not_met`、`dependency_skipped`）照常经 `recordSkippedSkill` 记录，最后用 `finishExecutionGraphRun` 收尾。
+    - 判为要执行或等待的节点，直接抛回放守卫错误（`AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY`），不碰 step、预算、preflight 和 checkpoint 钩子。
+  - **step lifecycle 没有 run 目标**（`getAgentRunStepLifecycleTarget` 返回 null）：改为不带 checkpointer 调用 `runExecutionGraphOnLangGraph`，执行器本来就支持这种调用。
+    - thread id 是临时派生的，没有人读回。
+    - 审批节点不调用 `interrupt()`，而是交回自己的收据，暂停由 stage 的 `pauseForApproval` 持久化，和原生一样。
+    - 审批之后的继续是一次新调用，也和原生暂停之后一样。
+    - 生产调用方传入的 lifecycle 都带 run 目标，所以这个分支只会出现在注入的 lifecycle 上。
+  - 结果：`AGENT_RUNTIME=langgraph` 下，没有任何生产路径再调用 `runExecutionGraph`，custom-Skill stage 本来就不调用。只剩两个 stage 的 `native` 分支（回退开关）在用它。
+  - LangSmith 守卫和 LangGraph 执行器的按需加载，现在在 langgraph 下总会执行；以前没有 run 目标时会跳过。
+- **为什么结果不变**：
+  - **回放**：对一张已完成的图，原生循环也不发射任何节点。按层序，依赖总是先于依赖它的节点判定，所以一遍扫描就能把每个节点定为 reused 或 skipped，第二遍时已没有 pending 节点。`replayExecutionGraphRun` 做的就是这一遍，判断、跳过记录和收尾都是同一套代码。
+  - 唯一的不同出现在本来就会失败的路径上：checkpoint 标为 completed，却缺某个必跑节点的收据。两者都以回放守卫失败。区别是原生会先发射这个节点（输入无效时还会写一条失败的 step），新实现在任何钩子之前就拒绝。
+  - **没有 run 目标**：用的是有 run 目标时同一个 LangGraph 执行器，已认可的四类 superstep 差异同样适用。不带 checkpointer 只意味着不写 thread、不在 interrupt 处停下。
+- **证据**：
+  - **`langgraph-unified-graph`** 新增两个用例，共 26/26：
+    - **等价扫描**：一张 5 节点 v3 图，120 种声明顺序 × `when` 成立与否 × 有无被拒绝节点，共 480 种已结算形状。`replayExecutionGraphRun` 与按旧 stage 回放方式传参的 `runExecutionGraph` 相比，结果 `deepStrictEqual`，钩子调用记录逐条相同（只有 `recordSkippedSkill`），预算用量相同。
+    - **拒绝路径**：另有 480 种缺一个必跑节点收据的形状。两者都拒绝，回放在任何钩子之前就拒绝。
+    - **端到端回放**：图完成后、finalization 收据写入前崩溃，再由启动恢复回放。覆盖四个场景：需要重新推导跳过的文档循环、follow-up 已解决的文档循环、已批准的审批门、已拒绝的审批门。两种 runtime 屏蔽后一致；没有任何节点重跑（RAG 调用、Capability 写入、`graph_node` step 都不变），也没有 thread。
+    - **与旧实现对照**：临时换回旧 stage 跑同样四个场景，屏蔽后的结果与新实现逐字节相同。
+  - **新套件 `langgraph-unified-graph-without-run-target`**，4/4：
+    - 在独立进程里，把 stage 对 run 目标的查询重定向为 null（`test/langgraph-support/stage-run-target-switch.mjs`）。
+    - 把 stage 对 runner 的导入换成绊线（`stage-native-scheduler-tripwire.mjs`）：按 runtime 计数，langgraph 下一旦调用 `runExecutionGraph` 就抛错。
+    - 覆盖四个场景：没有 run 目标时的证据门文档循环、审批暂停加批准、拒绝，以及有和没有 run 目标两种情况下的 finalization 回放。两种 runtime 屏蔽后一致。
+    - LangGraph 下，Skill 调用和 Capability 写入都发生在一个临时 thread 里（不是 run 的 thread），run 上没有 thread 记录，langgraph 下的原生调度器调用数为 0。
+    - 临时换回旧 stage 时，四个用例全部失败。
+  - **`agent-graph-suites-native-rollback`**：守卫把 `replayExecutionGraphRun` 单独计数。guarded 套件原来记为 36 次原生调度，现在是 33 次调度加 3 次回放，下限按此改写，9/9。
+  - `agent-unified-graph-*`、`agent-execution-graph-runner` 52/52、`langgraph-native-runner-suite` 53/53、`langgraph-execution-graph-runtime` 44/44 通过。
+  - `eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8：`AGENT_RUNTIME=native` 与未设置各跑一次，屏蔽 UUID、时间戳和时长后逐字节一致，只差报告自己的 runId。
+  - `coverage:gate` 通过：3,300 个测试，0 失败，15 个跳过（都是需要 PostgreSQL、只读副本或 Redis 的用例）；五组覆盖率最低线全部通过。
+- **删除原生调度器还剩什么**：代码上已没有阻碍，只剩回退窗口（约束 12）。窗口过后要删的是：
+  - `runExecutionGraph` 的调度循环；
+  - 两个 stage 的 `native` 分支；
+  - `agent-graph-suites-native-rollback.test.mjs` 及其守卫；
+  - 各 parity 套件里的 native 一侧。
+
+  准入（`admitExecutionGraphRun`）、收尾（`finishExecutionGraphRun`）、`replayExecutionGraphRun` 和 node 模块保留。
 
 ### 没有做的部分与理由
 
@@ -334,7 +376,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **原生调度器不删除**：
   - 约束 12 要求 `AGENT_RUNTIME=native` 在新默认发布后至少保留一个周期；阶段 4 刚切默认。
   - 目标点名的四个文件里，只有 `agent-execution-graph-runner.js` 有可删的调度循环（`runExecutionGraph`）。`agent-execution-graph-checkpoint.js` 和 `agent-unified-graph-run.js` 没有调度代码：前者是 run 的权威图 checkpoint，后者是 v3 的入口与准入流程。`agent-execution-plan-runner.js` 的原生循环是外层计划的生产调度器（见上）。
-  - 交回情形：`eval:trajectory` 里实测为 0 次（17 次执行器调用）；生产默认的 custom-Skill DAG 不会出现（预算 2、四个 custom Skill 都可并行、上限 3）；v3 带 Web 的确定性文档图以前每次都会出现（非按层声明，document_rag 与 web 节点独占）。解法是两种 runtime 都按校验器的层序调度（按层声明的图不受影响），已实现，见上面的“层序调度”。删除 `runExecutionGraph` 还要替换 v3 stage 里另外两处对它的使用（finalization 回放、step lifecycle 没有 run 目标的分支）。
+  - 交回情形：`eval:trajectory` 里实测为 0 次（17 次执行器调用）；生产默认的 custom-Skill DAG 不会出现（预算 2、四个 custom Skill 都可并行、上限 3）；v3 带 Web 的确定性文档图以前每次都会出现（非按层声明，document_rag 与 web 节点独占）。解法是两种 runtime 都按校验器的层序调度（按层声明的图不受影响），已实现，见上面的“层序调度”。v3 stage 里另外两处对它的使用（finalization 回放、step lifecycle 没有 run 目标的分支）也已替换，见“v3 stage 不再直接调用原生调度器”。
 - **发布证据**：`release:gate` 要九份报告都来自同一提交、干净工作区、`release` 配置。确定性的几份（rerank-hard-cs、arxiv-real-paper-rerank、trajectory、planner-mock、recovery-observability）可以在本机生成；compare-hard-synthetic（要求 8/8，qwen2.5:7b 上一次 6/8）、planner-real（7/7 固定投影）、runtime-smoke 和 rollout-readiness 需要 GPT 级模型，本机没有 `OPENAI_API_KEY`，只能在 CI 的 `Release Evidence Gate` 或提供密钥后生成。
 
 ### 对照"迁移完成的定义"
@@ -342,7 +384,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | 条目 | 状态 |
 | --- | --- |
 | `AGENT_RUNTIME=langgraph` 为默认 | 达成（阶段 4） |
-| 被替代的调度代码已删除 | 未达成：外层原生循环因压测硬门保留为生产调度器；`runExecutionGraph` 按约束 12 保留到回退窗口之后（层序调度已实现，交回路径已删；v3 stage 另两处对它的使用待替换）；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
+| 被替代的调度代码已删除 | 未达成：外层原生循环因压测硬门保留为生产调度器；`runExecutionGraph` 按约束 12 保留到回退窗口之后（层序调度已实现，交回路径已删，v3 stage 的两处直接调用已替换，`AGENT_RUNTIME=langgraph` 下没有生产路径再调用它）；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
 | 确定性评测屏蔽后逐字节一致 | 达成：`eval:trajectory`、`eval:planner`、`eval:recovery-observability` 两种 runtime 一致；`quality:current` 通过 |
 | `verify:quality` 18/18 | 达成（阶段 3，qwen2.5:7b；文档 RAG 路径与 runtime 无关） |
 | 压测退化不超过 10% | 默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%） |

@@ -25,19 +25,22 @@ const keepEventLoopAliveUrl = pathToFileURL(path.join(testDirectory, "keep-event
 const guardUrl = pathToFileURL(path.join(testDirectory, "langgraph-support", "native-rollback-guard.mjs")).href;
 const GUARD_PREFIX = "NATIVE_ROLLBACK_GUARD ";
 
-// Each suite with the graphs it scheduled natively, measured 2026-10-16. A
-// suite may add graphs; one that schedules fewer has stopped testing the
-// rollback scheduler and must be looked at.
+// Each suite with the graphs it scheduled natively and the settled v3 graphs
+// it replayed for their finalization (no scheduler on either runtime since
+// the stage replays them with replayExecutionGraphRun), measured 2026-10-16.
+// The guarded suite's 36 native graphs of the first measurement are those 33
+// and 3 replays. A suite may add graphs; one that schedules or replays fewer
+// has stopped testing the rollback and must be looked at.
 const SUITES = Object.freeze([
-  ["agent-cancellation.test.mjs", 7],
-  ["agent-custom-skill-stage.test.mjs", 15],
-  ["agent-execution-graph-checkpoint.test.mjs", 20],
-  ["agent-unified-graph-approval.test.mjs", 24],
-  ["agent-unified-graph-boundaries.test.mjs", 9],
-  ["agent-unified-graph-guarded.test.mjs", 36],
-  ["agent-unified-graph-stage.test.mjs", 3],
-  ["app-planner-adapters.test.mjs", 1],
-  ["runtime-smoke-graph-signal.test.mjs", 1],
+  ["agent-cancellation.test.mjs", 7, 0],
+  ["agent-custom-skill-stage.test.mjs", 15, 0],
+  ["agent-execution-graph-checkpoint.test.mjs", 20, 0],
+  ["agent-unified-graph-approval.test.mjs", 24, 0],
+  ["agent-unified-graph-boundaries.test.mjs", 9, 0],
+  ["agent-unified-graph-guarded.test.mjs", 33, 3],
+  ["agent-unified-graph-stage.test.mjs", 3, 0],
+  ["app-planner-adapters.test.mjs", 1, 0],
+  ["runtime-smoke-graph-signal.test.mjs", 1, 0],
 ]);
 
 const runSuiteOnNative = (suite) =>
@@ -68,7 +71,7 @@ const runSuiteOnNative = (suite) =>
     child.on("close", (exitCode) => resolve({ exitCode, stderr, stdout }));
   });
 
-for (const [suite, measuredNativeGraphs] of SUITES) {
+for (const [suite, measuredNativeGraphs, measuredReplays] of SUITES) {
   test(`${suite} passes unchanged on the AGENT_RUNTIME=native rollback scheduler`, { timeout: 300_000 }, async () => {
     const { exitCode, stderr, stdout } = await runSuiteOnNative(suite);
     const output = `${stdout}\n${stderr}`.slice(-8000);
@@ -82,6 +85,10 @@ for (const [suite, measuredNativeGraphs] of SUITES) {
     assert.ok(
       guard.nativeSchedulerCalls >= measuredNativeGraphs,
       `${suite} scheduled ${guard.nativeSchedulerCalls} graphs natively, ${measuredNativeGraphs} measured`
+    );
+    assert.ok(
+      guard.settledGraphReplays >= measuredReplays,
+      `${suite} replayed ${guard.settledGraphReplays} settled graphs, ${measuredReplays} measured`
     );
   });
 }
