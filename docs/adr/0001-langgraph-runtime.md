@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`，`native` 作为整体回退保留一个发布周期。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论与未达成的条目见"阶段 5 结果"。
+- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`，`native` 作为整体回退保留一个发布周期。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论与未达成的条目见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，已定为最终决定（用户认可）。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -30,11 +30,11 @@
 | 3 | 统一图成为主图：外层阶段编进 StateGraph；审批走 `interrupt()`；SSE 走 `stream`；启动恢复走 checkpointer | `native` 下不变 |
 | 4 | `AGENT_RUNTIME` 默认改为 `langgraph`，删除被替代的调度代码，`native` 保留一个发布周期 | 切换 |
 
-**迁移完成的定义**（来自目标文件）：`AGENT_RUNTIME=langgraph` 为默认；被替代的调度代码已删除；所有确定性评测在屏蔽 id 和时间后与迁移前逐字节一致，或差异已按流程在 `quality-current-suite-manifest.js` 升版本并逐条说明；`verify:quality` 18/18；`eval:load-test:pgvector` 的 app CPU/请求和 p95 退化不超过 10%。
+**迁移完成的定义**（来自目标文件；阶段 5 的最终决定修订了“被替代的调度代码已删除”一条：外层计划的原生循环 `runAgentExecutionPlan` 是生产调度器，不属于被替代的调度代码，要删的只有回退窗口之后的 `runExecutionGraph`，见“阶段 5 结果”）：`AGENT_RUNTIME=langgraph` 为默认；被替代的调度代码已删除；所有确定性评测在屏蔽 id 和时间后与迁移前逐字节一致，或差异已按流程在 `quality-current-suite-manifest.js` 升版本并逐条说明；`verify:quality` 18/18；`eval:load-test:pgvector` 的 app CPU/请求和 p95 退化不超过 10%。
 
 ### 不可放松的约束
 
-1. 模型只提议、运行时决定。外层用显式 StateGraph 和确定性条件边，不用 `createAgent` 的自由 ReAct 循环。
+1. 模型只提议、运行时决定。外层计划按确定性的阶段顺序执行（生产为原生循环 `runAgentExecutionPlan`，见阶段 5 的最终决定；实验开关下为同序的底层 Pregel 图），只用确定性条件，不用 `createAgent` 的自由 ReAct 循环。
 2. 不出现第二个 run store 和第二套回放安全矩阵。checkpointer 是自定义 `BaseCheckpointSaver`，写现有 agent run store（revision CAS、RLS 租户、事件契约不变），不用 `PostgresSaver` 的 `checkpoints` 表。
 3. 有副作用的节点在审批前零写入，审批后只跑一次，带 run+node 幂等键；`interrupt()` 是节点里第一个有效操作。
 4. 原始答案 token 不出服务器：SSE 只用 `streamMode: ["updates", "custom"]`，不开 `messages`。
@@ -288,6 +288,11 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 两对在并发 32 上方向相反，同一配置在不同轮次之间就有约 15–20% 的漂移，所以并发 32 的结论不确定。并发 1 两对都是 langgraph 更贵，于是交替跑了四轮（`latest-load-test-p5c-{1..4}-*`，native、langgraph、native、langgraph，各 5 次、每次 256 个请求）。并发 1 的中位数：每请求 CPU 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%），平均延迟 7.8 → 8.6 ms。
   - 按 10% 的硬门判为**不通过**（并发 1）。剩下的开销是 Pregel 每次调用固定要做的事：执行循环、任务 id（uuid5/SHA-1）、checkpoint 对象（uuid6）、配置合并，每个 superstep 约 40 µs、每次调用约 100 µs 起步，属于库内部，不改库削不掉。进程内只多 0.28 ms、压测并发 1 却多约 1 ms，与"请求间有空闲时 CPU 降频、缓存变冷，同样的指令更贵"相符，这一条是推断，没有单独测量。
 - **决定**：外层 V1 计划默认继续走原生循环，与阶段 3 的决定一致；新实现替换了 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 后面的 StateGraph 版本，开销约为原来的四分之一，仍不建议开启。`agent-execution-plan-runner.js` 的原生循环因此不能删。
+- **最终决定（2026-10-16，用户认可）**：不放宽 10% 的硬门，外层 V1 计划长期保持原生循环。
+  - 理由：外层计划不需要持久状态或中断，续跑靠 run 的 step；交给 LangGraph 只增加开销，没有带来能力。
+  - "完成的定义"据此修订：`runAgentExecutionPlan`（`agent-execution-plan-runner.js` 的原生循环）是外层计划的生产调度器，不属于"被替代的调度代码"。要删的只剩回退窗口之后的原生图调度器 `runExecutionGraph`。
+  - `AGENT_OUTER_PLAN_RUNTIME=langgraph` 与底层 Pregel 实现保留为实验开关，不再计划转正，`test/langgraph-execution-plan-graph*.test.mjs` 继续守住它与原生的等价。
+  - 重新评估的条件：升级 `@langchain/langgraph` 或 `@langchain/core` 后，Pregel 每次调用的固定开销（执行循环、任务 id、checkpoint 对象）有实质下降。届时按本节的方法重测：进程内对比，交替四轮、每轮 5 次的并发 1 压测，以及并发 32。每一档都在 10% 以内，才考虑切换默认值。
 
 ### 规划器的模型调用经 LangChain ChatModel
 
@@ -323,7 +328,9 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | 被替代的调度代码已删除 | 未达成：外层原生循环因压测硬门保留为生产调度器；`runExecutionGraph` 按约束 12 保留到回退窗口之后，删除前需认可层序调度；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
 | 确定性评测屏蔽后逐字节一致 | 达成：`eval:trajectory`、`eval:planner`、`eval:recovery-observability` 两种 runtime 一致；`quality:current` 通过 |
 | `verify:quality` 18/18 | 达成（阶段 3，qwen2.5:7b；文档 RAG 路径与 runtime 无关） |
-| 压测退化不超过 10% | 默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%） |
+| 压测退化不超过 10% | 默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%），按最终决定门不放宽，外层计划不交给 LangGraph |
+
+按最终决定，“被替代的调度代码已删除”一行只剩原生图调度器 `runExecutionGraph` 未删（回退窗口，约束 12）；外层原生循环 `runAgentExecutionPlan` 是外层计划的生产调度器，不属于被替代的调度代码。阶段 4“回退窗口”一条把外层原生循环列为原生调度器的一处用途，那里说的“删除原生调度器”也只指 `runExecutionGraph`。
 
 ## 后果
 
