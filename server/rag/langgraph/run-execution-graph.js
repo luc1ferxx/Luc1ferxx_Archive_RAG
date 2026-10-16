@@ -188,8 +188,9 @@ const assertReceipts = ({ interrupted, nodeOutputs, receipts, states }) => {
  * { agentRunService, agentRunId, runCursor } for the thread checkpointer. With
  * a run service and run id, LangGraph checkpoints into that run
  * (RunStoreCheckpointSaver bound to `graphResumeClaimId`, so its writes are
- * fenced exactly like the node steps); otherwise it runs without one, and a
- * node cannot park there. Every graph admission accepts is scheduled here.
+ * fenced exactly like the node steps); otherwise it runs without one (an ephemeral
+ * thread nothing reads back), and a parked node returns its receipt instead
+ * of calling interrupt(), so the caller persists the pause as natively. Every graph admission accepts is scheduled here.
  *
  * `approvalResume` ({ gateId, nodeId }, the stored approval boundary) says
  * this call continues a decided approval gate: the thread is resumed when

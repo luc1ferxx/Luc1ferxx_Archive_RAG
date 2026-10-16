@@ -443,7 +443,8 @@ export const runCustomSkillStage = async ({
   // graph's thread (a replan or a recovery starts a fresh invocation, and a
   // settled graph is replayed from the graph checkpoint without one). A
   // running graph keeps its thread. On a run that holds no record (the
-  // native scheduler, a graph handed to it) the flag changes nothing.
+  // native scheduler, or LangGraph run without a graph checkpoint and so
+  // without a checkpointer) the flag changes nothing.
   let checkpointQueue = Promise.resolve();
   const persistCheckpoint = (update, { settles = false } = {}) => {
     if (!checkpoint || !saveExecutionGraphCheckpoint) {

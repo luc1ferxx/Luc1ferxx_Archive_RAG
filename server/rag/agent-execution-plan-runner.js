@@ -128,8 +128,10 @@ export const tagAgentExecutionPlanError = (error, state) => {
  * decides for itself whether its Skill was selected, exactly as the native
  * loop always ran them (a built-in stage without its Skill returns null,
  * the custom stage may run authorized Skills the intent did not select, and
- * the Web stage reads the document result), so a scheduler enters every
- * stage of the plan in order and reads the two decisions above between them.
+ * the Web stage reads the document result), so a scheduler enters the
+ * stages of the plan in order and reads the two decisions above between them
+ * (the native loop enters every one; the experimental Pregel graph leaves out
+ * a stage isAgentExecutionPlanStageStaticallyInert proves inert).
  */
 export const createAgentExecutionPlanStages = ({
   accessScope,

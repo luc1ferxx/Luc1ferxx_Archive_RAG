@@ -253,7 +253,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 ## 阶段 4 结果：默认切到 langgraph
 
 - **默认值**：`AGENT_RUNTIME` 未设、为空或只有空白时取 `langgraph`；`native`、`langgraph`（不分大小写）照用；其他任何值回落到 `native`，因为拼错的回退指令应当落到经过长期验证的运行时。`AGENT_OUTER_PLAN_RUNTIME` 仍默认 `native`。
-- **回退窗口**：原生调度器不删，作为一个发布周期的整体回退（约束 12），见“回退”。它同时仍在两处使用：LangGraph 无法按原生声明顺序调度的图（`canScheduleExecutionGraphOnLangGraph`）交给它跑；外层 V1 计划在两种 runtime 下都是原生循环（阶段 3 的决定）。删除原生调度器的前提是先解决前一种交回情形，计划在新默认发布一个周期后单独进行。（交回情形已在阶段 5 解决，见“层序调度”。）
+- **回退窗口**：原生图调度器 `runExecutionGraph` 不删，作为一个发布周期的整体回退（约束 12），见“回退”。阶段 4 时它还接手 LangGraph 无法按原生声明顺序调度的图（`canScheduleExecutionGraphOnLangGraph`）；这个交回情形已在阶段 5 解决，见“层序调度”。删除它计划在新默认发布一个周期后单独进行。外层 V1 计划在两种 runtime 下都走原生循环 `runAgentExecutionPlan`（阶段 3 的决定，阶段 5 定为长期）；那是外层计划的生产调度器，不属于原生图调度器，也不在删除之列。
 - **写放大已接上**：执行器把 `retainCheckpoints: 2` 交给 saver；custom-Skill DAG 结算保存与 v3 一样在同一个 CAS 里丢弃线程记录。真库 `pg_stat_statements` 重测（PostgreSQL 18，2 节点 guarded custom-Skill `/chat`）：
   - 语句数与阶段 3 相同：native 是 1 insert、9 带事件 CAS、3 追加事件、1 run 读、1 事件表读；langgraph 在此之外多 7 次无事件 CAS、1 次 run 读、1 次事件表读。
   - 完成后的 `result` 从 17,006 字节降到 11,894 字节（native 11,860 字节，多出的是 29 字节的墓碑）。
@@ -266,7 +266,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **回退路径不失去覆盖**：新套件 `agent-graph-suites-native-rollback` 在 `AGENT_RUNTIME=native` 下原样重跑 9 个图相关套件。预加载钩子会让任何进入 LangGraph 执行器的调用直接失败，同时统计原生调度的图数。两个 PostgreSQL 集成套件的跨进程用例在两种 runtime 下各跑一遍。
 - **测试环境**：`npm test` 和覆盖率闸门给每个测试子进程去掉 LangSmith 追踪变量（变量列表取自生产守卫），由 `ci-workflow.test.mjs` 钉住。
 - **压测脚本**：`--agent-runtime` 默认改为 `langgraph`，与应用一致。
-- **代码量**：现在原生 runner 386 行、共享节点模块 1,138 行、`server/rag/langgraph/` 下 19 个文件共 6,463 行（含阶段 1 的适配器）。维护面还没有缩小：要等回退窗口结束、删除原生调度器之后才会体现，届时再按行数和测试数衡量。如果解决交回情形的成本过高，应重新评估是否保留原生调度器作为长期的第二调度器。
+- **代码量**：现在原生 runner 386 行、共享节点模块 1,138 行、`server/rag/langgraph/` 下 19 个文件共 6,463 行（含阶段 1 的适配器）。维护面还没有缩小：要等回退窗口结束、删除原生调度器之后才会体现，届时再按行数和测试数衡量。如果解决交回情形的成本过高，应重新评估是否保留原生调度器作为长期的第二调度器。（交回情形已在阶段 5 解决，见“层序调度”；原生图调度器在回退窗口之后即删，不留作第二调度器。）
 
 ## 阶段 5 结果：收尾（2026-10-16）
 
@@ -389,12 +389,10 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | 条目 | 状态 |
 | --- | --- |
 | `AGENT_RUNTIME=langgraph` 为默认 | 达成（阶段 4） |
-| 被替代的调度代码已删除 | 未达成：外层原生循环因压测硬门保留为生产调度器；`runExecutionGraph` 按约束 12 保留到回退窗口之后（层序调度已实现，交回路径已删，v3 stage 的两处直接调用已替换，`AGENT_RUNTIME=langgraph` 下没有生产路径再调用它）；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
+| 被替代的调度代码已删除 | 未达成，只差回退窗口：`runExecutionGraph` 按约束 12 保留到窗口之后（层序调度已实现，交回路径已删，v3 stage 的两处直接调用已替换，`AGENT_RUNTIME=langgraph` 下没有生产路径再调用它）。按最终决定，外层原生循环 `runAgentExecutionPlan` 是外层计划的生产调度器，不属于被替代的调度代码；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
 | 确定性评测屏蔽后逐字节一致 | 达成：`eval:trajectory`、`eval:planner`、`eval:recovery-observability` 两种 runtime 一致；`quality:current` 通过 |
 | `verify:quality` 18/18 | 达成（阶段 3，qwen2.5:7b；文档 RAG 路径与 runtime 无关） |
 | 压测退化不超过 10% | 默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%），按最终决定门不放宽，外层计划不交给 LangGraph |
-
-按最终决定，“被替代的调度代码已删除”一行只剩原生图调度器 `runExecutionGraph` 未删（回退窗口，约束 12）；外层原生循环 `runAgentExecutionPlan` 是外层计划的生产调度器，不属于被替代的调度代码。阶段 4“回退窗口”一条把外层原生循环列为原生调度器的一处用途，那里说的“删除原生调度器”也只指 `runExecutionGraph`。
 
 ## 后果
 
@@ -419,7 +417,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 **阶段 2 的一处保留（2026-10-14）。** 原生队列按整张图的声明顺序发射节点，LangGraph 按超步进入节点。如果图不是按层声明（例如节点写在它的依赖之前，或者 `[a, c 依赖 a, b]` 且并发上限为 1），而上限或独占节点又会让原生队列压住一个就绪节点，原生每次都会先发射后层的节点。这时两个运行时会给不同节点拨预算、跑不同节点、因 fail_fast 中止不同节点，而且与时序无关。这类调用（`canScheduleExecutionGraphOnLangGraph` 为假）先丢弃线程记录，再整体交给原生调度器，结果与原生完全一致。阶段 4 删除原生调度之前必须先解决它。一种做法是在规划阶段把声明顺序规范化，但这会改变原生行为，需要单独评估。（阶段 5 已解决：没有改规划，而是让两种调度器都按校验器的层序排队，原生行为的变化与证据见阶段 5“层序调度”。）
 
-**代码量不会自动变少。** spike 的 runner 有 2,143 行，原生 `agent-execution-graph-runner.js` 是 1,055 行。原因是 runner 自己实现了准入、复用、恢复检查、审批门绑定、取消桥接、并发闸门，还要绕开 LangGraph 的两个并发缺陷。阶段 2 要复用原生模块（调用导出的恢复检查、审批 preflight），不能复制。阶段 4 删掉原生调度后，再用行数和测试数衡量维护面有没有真的缩小。如果到阶段 3 结束仍明显变大，应回到这里重新评估方案 A。
+**代码量不会自动变少。** spike 的 runner 有 2,143 行，原生 `agent-execution-graph-runner.js` 是 1,055 行。原因是 runner 自己实现了准入、复用、恢复检查、审批门绑定、取消桥接、并发闸门，还要绕开 LangGraph 的两个并发缺陷。阶段 2 要复用原生模块（调用导出的恢复检查、审批 preflight），不能复制。回退窗口结束、删掉原生图调度器 `runExecutionGraph` 后（见阶段 5“对照迁移完成的定义”；外层原生循环不在删除之列），再用行数和测试数衡量维护面有没有真的缩小。如果到阶段 3 结束仍明显变大，应回到这里重新评估方案 A。
 
 ## 回退
 
