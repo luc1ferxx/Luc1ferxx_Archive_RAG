@@ -216,17 +216,17 @@ const approvalBoundaryMatches = (boundary, gate) =>
  * `langgraph` by default since phase 4) picks the scheduler: LangGraph
  * (langgraph/run-execution-graph.js), or the native one, which stays as the
  * AGENT_RUNTIME=native rollback path for at least one release on the new
- * default (ADR constraint 12) and is to be deleted after it, once the
- * phase-2 delegation case (graphs canScheduleExecutionGraphOnLangGraph hands
- * to the native scheduler) is solved. LangGraph runs the same node code and
- * parks an approval-gated node with interrupt() on the run's thread, so the
- * decision continues that thread. Everything durable is the same on both:
- * the graph checkpoint, the preflight and the pause CAS above, the fenced
- * step lifecycle. LangGraph checkpoints into the run the step lifecycle
- * writes (getAgentRunStepLifecycleTarget); a lifecycle without a run target
- * keeps the native scheduler, since a thread without its run could not be
- * fenced or resumed. A finalization replay runs no node, so it needs no
- * scheduler and takes the native pass on either runtime.
+ * default (ADR constraint 12) and is to be deleted after it (since phase 5
+ * both queue in layer order, so LangGraph hands no graph to the native
+ * scheduler; the two native uses below remain). LangGraph runs the same
+ * node code and parks an approval-gated node with interrupt() on the run's
+ * thread, so the decision continues that thread. Everything durable is the
+ * same on both: the graph checkpoint, the preflight and the pause CAS above,
+ * the fenced step lifecycle. LangGraph checkpoints into the run the step
+ * lifecycle writes (getAgentRunStepLifecycleTarget); a lifecycle without a
+ * run target keeps the native scheduler, since a thread without its run could
+ * not be fenced or resumed. A finalization replay runs no node, so it needs
+ * no scheduler and takes the native pass on either runtime.
  */
 export const runUnifiedGraphStage = async ({
   accessScope,

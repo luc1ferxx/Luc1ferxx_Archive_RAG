@@ -271,12 +271,11 @@ export const getAgentSkillGraphRollout = () => {
 //
 // Unset, empty or whitespace is `langgraph`. `native` stays the whole-runtime
 // rollback switch for at least one release on the new default (ADR constraint
-// 12); the native scheduler is also what LangGraph hands a graph to when
-// canScheduleExecutionGraphOnLangGraph rejects it. Any other value (a typo,
-// "true", "lang-graph") resolves to `native`, not to the default: an operator
-// who set this dial to something unrecognized was most likely reaching for
-// the rollback, and native is the scheduler every guarantee was first proven
-// on, so a mistyped value can only land on the long-proven path.
+// 12). Any other value (a typo, "true", "lang-graph") resolves to `native`,
+// not to the default: an operator who set this dial to something
+// unrecognized was most likely reaching for the rollback, and native is the
+// scheduler every guarantee was first proven on, so a mistyped value can only
+// land on the long-proven path.
 export const getAgentRuntime = () => {
   const rawValue = process.env.AGENT_RUNTIME;
 

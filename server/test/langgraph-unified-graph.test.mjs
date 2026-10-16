@@ -22,6 +22,7 @@ import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import { deterministicUnifiedGraphPlannerAdapter } from "../rag/agent-unified-dag-planner-adapter.js";
 import { UNIFIED_GRAPH_RUNTIMES } from "../rag/agent-unified-graph-stage.js";
 import { getAgentRuntime } from "../rag/config.js";
 import {
@@ -70,6 +71,7 @@ import {
   UNIFIED_DOC_ID,
   UNIFIED_FILE_NAME,
   UNIFIED_SESSION_ID,
+  WEB_QUESTION,
   createApprovalGatedTaskProposal,
   createCrashingRunService,
   createDocumentLoopProposal,
@@ -78,6 +80,7 @@ import {
   createTaskBeforeIndependentCheckProposal,
   createTaskCapabilityRegistry,
   createTaskWithIndependentLaterWorkProposal,
+  createWebChatService,
 } from "./fixtures/unified-graph-run-fixtures.mjs";
 
 // The guarded v3 unified graph on LangGraph (AGENT_RUNTIME=langgraph,
@@ -497,6 +500,94 @@ test("parity: the evidence-gated document loop (follow-up resolves / unresolved)
     assert.equal(outcomes.native.checkpoint.phase, "completed");
     assert.ok(outcomes.native.checkpoint.finalization);
   }
+});
+
+test("parity: the deterministic document_web graph, declared out of layer order, runs on LangGraph in layer order, as natively", async () => {
+  // The production graph that used to be handed to the native scheduler:
+  // createDeterministicUnifiedExecutionGraph declares [document,
+  // evidence_check, follow_up, follow_up_check, web], so web (third layer) is
+  // declared after follow_up_check (fourth), and document_rag and web nodes
+  // run alone. With a declaration-order queue, native ran follow_up_check
+  // before web on every run, which LangGraph's supersteps could not; since
+  // phase 5 both queue in layer order, so web runs before follow_up_check on
+  // both and the graph is scheduled by LangGraph. Measured against the
+  // declaration-order queue, only the order of agentTrace, agentRunSteps and
+  // agentObservability.runs changed natively; the answer, sources and
+  // statuses did not.
+  const outcomes = {};
+
+  for (const runtime of RUNTIMES) {
+    const store = newStore();
+    const agentRunService = newService(store);
+    const ragService = createDocumentLoopRagService({ followUp: "unresolved", primary: "unsupported" });
+    const webCalls = [];
+    const fetchWeb = createWebChatService({ calls: webCalls });
+    let receiptsAtWeb;
+    const response = await onRuntime(runtime, () =>
+      runAgentRag({
+        accessScope,
+        agentRunService,
+        capabilityApprovals: { "web.search": { approved: true } },
+        docIds: [UNIFIED_DOC_ID],
+        question: WEB_QUESTION,
+        ragService,
+        sessionId: UNIFIED_SESSION_ID,
+        unifiedGraphPlannerAdapter: deterministicUnifiedGraphPlannerAdapter,
+        userId: accessScope.userId,
+        webChatService: async (question) => {
+          const listed = await store.list({ accessScope });
+          const [{ runId }] = listed?.runs ?? listed;
+          const thread = await readThread(agentRunService, runId);
+
+          receiptsAtWeb = thread ? receiptStatuses(thread) : null;
+          return fetchWeb(question);
+        },
+      })
+    );
+    const context = { agentRunService, error: null, response, runId: response.body.agentRunId };
+    const { checkpoint, run } = await load(agentRunService, context.runId);
+
+    assert.equal(response.status, 200, runtime);
+    assert.equal(response.body.agentMode, "document_web", runtime);
+    assert.equal(run.status, "completed", runtime);
+    assert.deepEqual(ragService.calls.map((call) => call.phase), ["primary", "follow_up"], runtime);
+    assert.equal(webCalls.length, 1, runtime);
+    assert.deepEqual(
+      checkpoint.graph.nodes.map((node) => node.nodeId),
+      ["document", "evidence_check", "follow_up", "follow_up_check", "web"],
+      runtime
+    );
+    // Layer order: web (third layer) before follow_up_check (fourth).
+    assert.deepEqual(
+      run.steps
+        .filter((step) => step.type === "graph_node")
+        .map((step) => `${step.input?.nodeId}:${step.status}`),
+      [
+        "document:completed",
+        "evidence_check:completed",
+        "follow_up:completed",
+        "web:completed",
+        "follow_up_check:completed",
+      ],
+      runtime
+    );
+    // LangGraph scheduled it: its thread held the first two layers' receipts
+    // when web ran (follow_up's lands at the end of their shared superstep).
+    assert.deepEqual(
+      receiptsAtWeb,
+      runtime === UNIFIED_GRAPH_RUNTIMES.langgraph
+        ? { document: "completed", evidence_check: "completed" }
+        : null,
+      runtime
+    );
+    assert.equal(await rawRecord(store, context.runId), null, runtime);
+    outcomes[runtime] = await describeOutcome(context);
+  }
+
+  assert.deepEqual(
+    outcomes[UNIFIED_GRAPH_RUNTIMES.langgraph],
+    outcomes[UNIFIED_GRAPH_RUNTIMES.native]
+  );
 });
 
 test("parity: the two unified_graph trajectory cases report the same checks and projection on both runtimes", async () => {

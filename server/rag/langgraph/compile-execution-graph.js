@@ -16,6 +16,7 @@ import {
   EXECUTION_GRAPH_SCHEDULE_DECISIONS,
   decideExecutionGraphNode,
   isExecutionGraphNodeSettledOk,
+  orderExecutionGraphNodeStatesByLayer,
   recordExecutionGraphNodeSkip,
   runExecutionGraphNode,
 } from "../agent-execution-graph-node.js";
@@ -39,18 +40,20 @@ import { buildApprovalInterruptPayload } from "./unified-graph-approval.js";
 // typed outputs stay in the run's v1 graph checkpoint, which remains the
 // authority for reuse and recovery.
 //
-// Every node returns its receipt, skipped ones included, so a join always
-// fires and every node of the graph is entered exactly once, in the superstep
-// of its topological layer. The one exception is a v3 node its approval
-// preflight parked (phase 3): on a checkpointed thread it calls interrupt()
-// instead of returning, so LangGraph stops after that superstep with the
-// pause recorded in the thread, and the approval decision later resumes the
-// same thread (run-execution-graph.js). The park spent nothing -- no step, no
-// budget, no trace, no checkpoint write (agent-execution-graph-node.js) -- so
-// interrupt() is the node's first effectful operation, and the re-run
-// LangGraph does on resume repeats only reads before the stage's preflight
-// hands the node its decided gate. The value interrupt() returns on that
-// re-run is never read: the decision comes from the run store.
+// Every node returns its receipt, skipped ones included, so a join always fires
+// and every node of the graph is entered exactly once, in the superstep of its
+// topological layer, and in name order inside it, which is the layer-order
+// queue the native scheduler scans (orderExecutionGraphNodeStatesByLayer). The
+// one exception is a v3 node its approval preflight parked (phase 3): on a
+// checkpointed thread it calls interrupt() instead of returning, so LangGraph
+// stops after that superstep with the pause recorded in the thread, and the
+// approval decision later resumes the same thread (run-execution-graph.js). The
+// park spent nothing -- no step, no budget, no trace, no checkpoint write
+// (agent-execution-graph-node.js) -- so interrupt() is the node's first
+// effectful operation, and the re-run LangGraph does on resume repeats only
+// reads before the stage's preflight hands the node its decided gate. The value
+// interrupt() returns on that re-run is never read: the decision comes from the
+// run store.
 //
 // The native scheduler pauses only once nothing else can run: after a node
 // parks it keeps launching every pending node that does not depend on it,
@@ -79,16 +82,18 @@ export const LANGGRAPH_EXECUTION_GRAPH_ERROR_CODES = Object.freeze({
 const NODE_NAME_PREFIX = "node_";
 
 /**
- * The LangGraph node name of the graph node declared at `index`. LangGraph
- * refuses names containing ":" or "|", starting with "__", or equal to a
- * state key, and a planner may author any non-empty nodeId; base64url has
- * none of those characters, and the prefix keeps the name off "__" and off
- * "receipts". The zero-padded index comes first because LangGraph enters a
- * superstep's nodes in name order (pregel/algo.js candidateNodes sorts them):
- * with it, that order is declaration order, the order the native queue
- * launches in (within one superstep; see isExecutionGraphDeclaredInLayerOrder
- * for across them). The name never leaves one invocation, so it does not need
- * to stay stable across a replan.
+ * The LangGraph node name of the graph node at `index` of the launch queue
+ * (orderExecutionGraphNodeStatesByLayer: the validator's layer order,
+ * declaration order within a layer). LangGraph refuses names containing ":"
+ * or "|", starting with "__", or equal to a state key, and a planner may
+ * author any non-empty nodeId; base64url has none of those characters, and
+ * the prefix keeps the name off "__" and off "receipts". The zero-padded
+ * index comes first because LangGraph enters a superstep's nodes in name
+ * order (pregel/algo.js candidateNodes sorts them): with it, that order is
+ * the queue order, the order the native scheduler scans in. Across
+ * supersteps the queue order holds by construction, since every node is
+ * entered in the superstep of its layer. The name never leaves one
+ * invocation, so it does not need to stay stable across a replan.
  */
 export const encodeExecutionGraphNodeName = ({ index, nodeCount, nodeId }) => {
   const width = String(Math.max(nodeCount - 1, 0)).length;
@@ -105,118 +110,6 @@ export const encodeExecutionGraphNodeName = ({ index, nodeCount, nodeId }) => {
  * back from the thread instead of adding a receipt.
  */
 export const toExecutionGraphReceiptKey = (nodeId) => `node:${nodeId}`;
-
-/**
- * Whether the graph is declared in layer order: every node after every node
- * of an earlier topological layer, i.e. graph.nodes in the order of
- * compiled.order (the validator's layers, declaration order within each).
- * `compiled` is the compileExecutionGraph result admission returned for
- * `graph`.
- */
-export const isExecutionGraphDeclaredInLayerOrder = ({ compiled, graph }) => {
-  const order = compiled?.order ?? [];
-  const nodes = graph?.nodes ?? [];
-
-  return (
-    nodes.length === order.length &&
-    nodes.every((node, index) => normalizeTrimmedText(node?.nodeId) === order[index])
-  );
-};
-
-// The most nodes of `pending` that can ever be in flight at once: the size of
-// the largest set of them none of which depends on another, directly or
-// through any node (a node starts only once its dependencies settled, so
-// nodes in flight together are always such a set). Dilworth: the pending
-// nodes less a maximum matching of "u is an ancestor of v". A graph has at
-// most EXECUTION_GRAPH_LIMITS.maxNodes nodes, so the cubic cost is nothing.
-const measurePendingWidth = ({ pending, states }) => {
-  const indexById = new Map(
-    states.map((state, index) => [normalizeTrimmedText(state.node.nodeId), index])
-  );
-  const parents = states.map((state) =>
-    (state.node.dependsOn ?? [])
-      .map((dependencyId) => indexById.get(normalizeTrimmedText(dependencyId)))
-      .filter((index) => index !== undefined)
-  );
-  const ancestors = states.map(() => null);
-  const collectAncestors = (index) => {
-    if (ancestors[index] === null) {
-      ancestors[index] = new Set();
-
-      for (const parent of parents[index]) {
-        ancestors[index].add(parent);
-        collectAncestors(parent).forEach((ancestor) => ancestors[index].add(ancestor));
-      }
-    }
-
-    return ancestors[index];
-  };
-  const matchedAncestor = new Map();
-  const augment = (descendant, seen) => {
-    for (const ancestor of pending) {
-      if (!collectAncestors(descendant).has(ancestor) || seen.has(ancestor)) {
-        continue;
-      }
-
-      seen.add(ancestor);
-
-      // matchedAncestor maps an ancestor to the descendant it is matched to.
-      if (!matchedAncestor.has(ancestor) || augment(matchedAncestor.get(ancestor), seen)) {
-        matchedAncestor.set(ancestor, descendant);
-        return true;
-      }
-    }
-
-    return false;
-  };
-  let matching = 0;
-
-  for (const descendant of pending) {
-    if (augment(descendant, new Set())) {
-      matching += 1;
-    }
-  }
-
-  return pending.length - matching;
-};
-
-/**
- * Whether LangGraph's order of arrival at the gate makes the same scheduling
- * decisions as the native queue for this invocation. `states` are the node
- * states of createExecutionGraphNodeStates, `concurrencyCap` admission's cap.
- *
- * The native queue is declaration order over the whole graph; LangGraph
- * enters the nodes superstep by superstep, declaration order inside one. The
- * two differ only where the native queue holds a ready node back (the cap is
- * reached, or an exclusive node runs) and a node of a later layer is declared
- * ahead of a node of an earlier one: natively the later layer's node then
- * starts first, whatever the timing, so the two runtimes would fund
- * (budget), run and abort (fail_fast) different nodes. A forward reference
- * (a node declared before its own dependency) is one case; [a, c after a, b]
- * under a cap of 1 is another. So LangGraph schedules a graph declared in
- * layer order, or one whose queue never holds anything back: every node left
- * to run is parallel-safe and no more of them can be in flight together than
- * the cap admits.
- */
-export const canScheduleExecutionGraphOnLangGraph = ({
-  compiled,
-  concurrencyCap,
-  graph,
-  states,
-}) => {
-  if (isExecutionGraphDeclaredInLayerOrder({ compiled, graph })) {
-    return true;
-  }
-
-  const pending = states.flatMap((state, index) =>
-    state.status === EXECUTION_GRAPH_NODE_STATUSES.pending ? [index] : []
-  );
-
-  return (
-    pending.every((index) => states[index].contract.parallelSafe) &&
-    measurePendingWidth({ pending, states }) <= concurrencyCap
-  );
-};
 
 // The nodes reachable from `nodeId` through dependsOn edges (the ones whose
 // launch waits on it), by the validator's trimmed id.
@@ -508,11 +401,12 @@ const createNodeAction = ({
 };
 
 /**
- * Compiles one invocation's graph. `compiled` is admission's compiled graph,
- * `states` the node states of createExecutionGraphNodeStates (declaration
- * order), `context`, `control` and `nodeOutputs` the run's shared node
- * context, control flags and typed outputs, `gate` the concurrency gate, and
- * `trackNode(promise)` registers a node's in-flight work and returns it.
+ * Compiles one invocation's graph. `compiled` is admission's compiled graph
+ * (required: its order names the nodes), `states` the node states of
+ * createExecutionGraphNodeStates (declaration order), `context`, `control`
+ * and `nodeOutputs` the run's shared node context, control flags and typed
+ * outputs, `gate` the concurrency gate, and `trackNode(promise)` registers a
+ * node's in-flight work and returns it.
  * `checkpointer` is a BaseCheckpointSaver or false. With `interruptOnApproval`
  * (which needs a checkpointer: interrupt() refuses to run without one) a node
  * parked at its approval gate stops the graph with interrupt() instead of
@@ -522,7 +416,7 @@ const createNodeAction = ({
  */
 export const compileExecutionGraphOnLangGraph = ({
   checkpointer = false,
-  compiled = null,
+  compiled,
   context,
   control,
   gate,
@@ -537,8 +431,8 @@ export const compileExecutionGraphOnLangGraph = ({
     throw new TypeError("An approval interrupt needs a LangGraph checkpointer.");
   }
 
-  if (interruptOnApproval && !Array.isArray(compiled?.layers)) {
-    throw new TypeError("An approval interrupt needs the compiled graph's layers.");
+  if (!Array.isArray(compiled?.layers) || !Array.isArray(compiled?.order)) {
+    throw new TypeError("A LangGraph execution graph needs the compiled graph's layers.");
   }
 
   const builder = new StateGraph(ExecutionGraphReceiptState);
@@ -549,7 +443,9 @@ export const compileExecutionGraphOnLangGraph = ({
     ...new Set((state.node.dependsOn ?? []).map(normalizeTrimmedText)),
   ];
 
-  states.forEach((state, index) => {
+  // Named in queue order, so the gate's arrival order inside a superstep is
+  // the native scan's (see encodeExecutionGraphNodeName).
+  orderExecutionGraphNodeStatesByLayer({ compiled, states }).forEach((state, index) => {
     const name = encodeExecutionGraphNodeName({
       index,
       nodeCount: states.length,

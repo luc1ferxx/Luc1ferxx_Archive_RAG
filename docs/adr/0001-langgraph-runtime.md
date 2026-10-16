@@ -253,7 +253,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 ## 阶段 4 结果：默认切到 langgraph
 
 - **默认值**：`AGENT_RUNTIME` 未设、为空或只有空白时取 `langgraph`；`native`、`langgraph`（不分大小写）照用；其他任何值回落到 `native`，因为拼错的回退指令应当落到经过长期验证的运行时。`AGENT_OUTER_PLAN_RUNTIME` 仍默认 `native`。
-- **回退窗口**：原生调度器不删，作为一个发布周期的整体回退（约束 12），见“回退”。它同时仍在两处使用：LangGraph 无法按原生声明顺序调度的图（`canScheduleExecutionGraphOnLangGraph`）交给它跑；外层 V1 计划在两种 runtime 下都是原生循环（阶段 3 的决定）。删除原生调度器的前提是先解决前一种交回情形，计划在新默认发布一个周期后单独进行。
+- **回退窗口**：原生调度器不删，作为一个发布周期的整体回退（约束 12），见“回退”。它同时仍在两处使用：LangGraph 无法按原生声明顺序调度的图（`canScheduleExecutionGraphOnLangGraph`）交给它跑；外层 V1 计划在两种 runtime 下都是原生循环（阶段 3 的决定）。删除原生调度器的前提是先解决前一种交回情形，计划在新默认发布一个周期后单独进行。（交回情形已在阶段 5 解决，见“层序调度”。）
 - **写放大已接上**：执行器把 `retainCheckpoints: 2` 交给 saver；custom-Skill DAG 结算保存与 v3 一样在同一个 CAS 里丢弃线程记录。真库 `pg_stat_statements` 重测（PostgreSQL 18，2 节点 guarded custom-Skill `/chat`）：
   - 语句数与阶段 3 相同：native 是 1 insert、9 带事件 CAS、3 追加事件、1 run 读、1 事件表读；langgraph 在此之外多 7 次无事件 CAS、1 次 run 读、1 次事件表读。
   - 完成后的 `result` 从 17,006 字节降到 11,894 字节（native 11,860 字节，多出的是 29 字节的墓碑）。
@@ -296,6 +296,28 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - LangSmith 追踪变量为 `"true"` 时，`completePlannerText` 在任何 runtime 下都走直接调用，不进入 LangChain（审查发现：最初实现在这种情况下拒绝调用，让 LLM 规划器在默认 runtime 下退回确定性计划，破坏了"不建图的请求与 native 一致"）。
 - 等价证据：`langgraph-planner-model`（五个规划器在两种 runtime 下 `deepStrictEqual` 结果、每次 provider 输入、每条 LLMOps 事件、各类失败的错误对象；langgraph 下确实经过适配器，native 下没有加载）；现有规划器套件在两种 runtime 下各跑一遍；`eval:planner -- --provider mock` 两种 runtime 屏蔽后一致。每次调用多约 13–19 µs CPU（微基准）；压测用确定性规划器，测不到这部分。
 
+### 层序调度：交回情形已解决（2026-10-16）
+
+- **改动**：两种调度器都按校验器的拓扑层序排队，即 `compiled.order`（Kahn 分层，层内按声明顺序），由 `agent-execution-graph-node.js` 的 `orderExecutionGraphNodeStatesByLayer` 统一给出。
+  - 原生 `runExecutionGraph` 的扫描从声明顺序改为这个队列。
+  - LangGraph 的节点名改用队列位置编号，所以 superstep 内的进入顺序就是队列顺序；跨 superstep 本来就是逐层进入。
+  - `canScheduleExecutionGraphOnLangGraph`、`isExecutionGraphDeclaredInLayerOrder` 和执行器里的交回分支已删除，`runExecutionGraphOnLangGraph` 不再引用 `runExecutionGraph`。
+  - 结果、node run 和 v1/v2 checkpoint 仍按声明顺序记录，只有排队顺序变了。
+- **为什么这就够了**：队列按层序后，原生扫描先碰到后层 node 只有一种情况：前一层某个 node 还没就绪（它的依赖仍在途，而另一个 node 已经结算）。这正是已认可的 superstep 屏障差异 1，取决于谁先完成。旧的确定性差异是：上限或独占 node 压住就绪 node 时，声明顺序会先发射后层 node，与时序无关。这一差异已不存在。
+- **原生行为的变化**：只影响不按层声明的图；按层声明的图队列就是声明顺序，行为不变。
+  - 上限或独占 node 压住就绪 node 时，先跑前一层的 node。例如 `[summary 依赖 risk, risk, timeline]`、上限 1：以前是 risk → summary → timeline，现在是 risk → timeline → summary。预算只够两次时，以前资助 summary，现在资助 timeline；summary 为 fail_fast 且失败时，以前会中止 timeline，现在 timeline 已经先跑完。
+  - 生产中出现的唯一形状是带 Web 的 v3 确定性文档图（`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded`）。它声明为 document、evidence_check、follow_up、follow_up_check、web：web 在第三层，follow_up_check 在第四层，document_rag 与 web 节点独占。follow-up 与 Web 都触发时，以前 follow_up_check 先于 web，现在 web 先于 follow_up_check。用 mock 实测（primary 不受支持、follow-up 未解决），与旧队列相比只有 `agentTrace`、`agentRunSteps`、`agentObservability.runs` 的顺序变了，答案、来源和各 node 状态不变。
+  - 生产默认的 custom-Skill DAG（预算 2、四个 custom Skill 都可并行、上限 3）和 `eval:trajectory` 的 17 次执行器调用都不受影响。
+- **证据**：
+  - `langgraph-execution-graph-runtime` 44/44。新用例覆盖一张 5 节点三层图的全部 120 种声明顺序，乘以两种压住方式（上限 1；全部独占、上限 3）和三种压力（无、预算 3、中间层 fail_fast），共 720 个场景。两种 runtime 用同一个精确的 `assertParity` 比较，没有放宽；LangGraph 线程持有每个 node 的回执。把原生循环临时改回声明顺序时，这个用例和四个旧交回场景都失败。
+  - 原来钉住交回的两个用例改为钉住新行为：四个旧交回场景仍用同一个精确 parity，原生 journal 变成层序；另一个用例改为验证旧线程被丢弃后，LangGraph 在新线程上把不按层声明的图跑完。钉住谓词的用例改为钉住共享队列。
+  - `agent-execution-graph-runner` 新增一个层序用例，52/52。`langgraph-native-runner-suite` 53/53：原生 runner 套件在 LangGraph 执行器上跑，至少 45 次调度到 LangGraph。
+  - `langgraph-unified-graph` 新增上面那张 v3 文档 + Web 图的两 runtime parity，24/24：`/chat` 响应、run 和 v2 checkpoint 屏蔽后一致，Web 运行时线程里已有前两层的回执。
+  - `agent-execution-graph-node`、`langgraph-runtime-parity`、`agent-unified-graph-*`（PostgreSQL 集成用例无库时跳过）、`agent-graph-suites-native-rollback` 全部通过。
+  - `eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8：`AGENT_RUNTIME=native` 与未设置两次运行，屏蔽 UUID、时间戳和时长后逐字节一致，只差报告自己的 runId。
+  - `coverage:gate` 通过：3,294 个测试，0 失败，15 个跳过（都是需要 PostgreSQL、只读副本或 Redis 的用例）；五组覆盖率最低线全部通过。
+- **删除原生调度器还剩什么**：一是回退窗口（约束 12）；二是 v3 stage 里另外两处直接调用 `runExecutionGraph` 的地方（finalization 回放，不跑 node；step lifecycle 没有 run 目标时走原生），要先换掉。
+
 ### 没有做的部分与理由
 
 - **其余适配器不接入生产**：
@@ -312,7 +334,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **原生调度器不删除**：
   - 约束 12 要求 `AGENT_RUNTIME=native` 在新默认发布后至少保留一个周期；阶段 4 刚切默认。
   - 目标点名的四个文件里，只有 `agent-execution-graph-runner.js` 有可删的调度循环（`runExecutionGraph`）。`agent-execution-graph-checkpoint.js` 和 `agent-unified-graph-run.js` 没有调度代码：前者是 run 的权威图 checkpoint，后者是 v3 的入口与准入流程。`agent-execution-plan-runner.js` 的原生循环是外层计划的生产调度器（见上）。
-  - 交回情形：`eval:trajectory` 里实测为 0 次（17 次执行器调用）；生产默认的 custom-Skill DAG 不会出现（预算 2、四个 custom Skill 都可并行、上限 3）；v3 带 Web 的确定性文档图每次都会出现（非按层声明，document_rag 与 web 节点独占）。可行的解法是两种 runtime 都按校验器的层序调度（按层声明的图不受影响）。在草稿副本里试过：原生 runner 套件 51/51 通过，LangGraph 运行时套件 41/43（失败的两个正是钉住交回的用例）。但这会改变原生对非按层图的行为，需要单独认可。删除 `runExecutionGraph` 还要替换 v3 stage 里另外两处对它的使用（finalization 回放、step lifecycle 没有 run 目标的分支）。
+  - 交回情形：`eval:trajectory` 里实测为 0 次（17 次执行器调用）；生产默认的 custom-Skill DAG 不会出现（预算 2、四个 custom Skill 都可并行、上限 3）；v3 带 Web 的确定性文档图以前每次都会出现（非按层声明，document_rag 与 web 节点独占）。解法是两种 runtime 都按校验器的层序调度（按层声明的图不受影响），已实现，见上面的“层序调度”。删除 `runExecutionGraph` 还要替换 v3 stage 里另外两处对它的使用（finalization 回放、step lifecycle 没有 run 目标的分支）。
 - **发布证据**：`release:gate` 要九份报告都来自同一提交、干净工作区、`release` 配置。确定性的几份（rerank-hard-cs、arxiv-real-paper-rerank、trajectory、planner-mock、recovery-observability）可以在本机生成；compare-hard-synthetic（要求 8/8，qwen2.5:7b 上一次 6/8）、planner-real（7/7 固定投影）、runtime-smoke 和 rollout-readiness 需要 GPT 级模型，本机没有 `OPENAI_API_KEY`，只能在 CI 的 `Release Evidence Gate` 或提供密钥后生成。
 
 ### 对照"迁移完成的定义"
@@ -320,7 +342,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | 条目 | 状态 |
 | --- | --- |
 | `AGENT_RUNTIME=langgraph` 为默认 | 达成（阶段 4） |
-| 被替代的调度代码已删除 | 未达成：外层原生循环因压测硬门保留为生产调度器；`runExecutionGraph` 按约束 12 保留到回退窗口之后，删除前需认可层序调度；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
+| 被替代的调度代码已删除 | 未达成：外层原生循环因压测硬门保留为生产调度器；`runExecutionGraph` 按约束 12 保留到回退窗口之后（层序调度已实现，交回路径已删；v3 stage 另两处对它的使用待替换）；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
 | 确定性评测屏蔽后逐字节一致 | 达成：`eval:trajectory`、`eval:planner`、`eval:recovery-observability` 两种 runtime 一致；`quality:current` 通过 |
 | `verify:quality` 18/18 | 达成（阶段 3，qwen2.5:7b；文档 RAG 路径与 runtime 无关） |
 | 压测退化不超过 10% | 默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%） |
@@ -346,7 +368,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 统一使用 run cursor 作为 CAS 基准。
 - 降不下来就要用 `pg_stat_statements` 实测后更新 `test/agent-run-chat-statement-count.test.mjs`，并在阶段 3 的 load test 里验证。
 
-**阶段 2 的一处保留（2026-10-14）。** 原生队列按整张图的声明顺序发射节点，LangGraph 按超步进入节点。如果图不是按层声明（例如节点写在它的依赖之前，或者 `[a, c 依赖 a, b]` 且并发上限为 1），而上限或独占节点又会让原生队列压住一个就绪节点，原生每次都会先发射后层的节点。这时两个运行时会给不同节点拨预算、跑不同节点、因 fail_fast 中止不同节点，而且与时序无关。这类调用（`canScheduleExecutionGraphOnLangGraph` 为假）先丢弃线程记录，再整体交给原生调度器，结果与原生完全一致。阶段 4 删除原生调度之前必须先解决它。一种做法是在规划阶段把声明顺序规范化，但这会改变原生行为，需要单独评估。
+**阶段 2 的一处保留（2026-10-14）。** 原生队列按整张图的声明顺序发射节点，LangGraph 按超步进入节点。如果图不是按层声明（例如节点写在它的依赖之前，或者 `[a, c 依赖 a, b]` 且并发上限为 1），而上限或独占节点又会让原生队列压住一个就绪节点，原生每次都会先发射后层的节点。这时两个运行时会给不同节点拨预算、跑不同节点、因 fail_fast 中止不同节点，而且与时序无关。这类调用（`canScheduleExecutionGraphOnLangGraph` 为假）先丢弃线程记录，再整体交给原生调度器，结果与原生完全一致。阶段 4 删除原生调度之前必须先解决它。一种做法是在规划阶段把声明顺序规范化，但这会改变原生行为，需要单独评估。（阶段 5 已解决：没有改规划，而是让两种调度器都按校验器的层序排队，原生行为的变化与证据见阶段 5“层序调度”。）
 
 **代码量不会自动变少。** spike 的 runner 有 2,143 行，原生 `agent-execution-graph-runner.js` 是 1,055 行。原因是 runner 自己实现了准入、复用、恢复检查、审批门绑定、取消桥接、并发闸门，还要绕开 LangGraph 的两个并发缺陷。阶段 2 要复用原生模块（调用导出的恢复检查、审批 preflight），不能复制。阶段 4 删掉原生调度后，再用行数和测试数衡量维护面有没有真的缩小。如果到阶段 3 结束仍明显变大，应回到这里重新评估方案 A。
 

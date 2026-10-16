@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { normalizeTrimmedText } from "../lib/normalize-text.js";
 import { releaseBudget, reserveBudget } from "./agent-budget.js";
 import {
   EXECUTION_GRAPH_CHECKPOINT_VERSIONS,
@@ -380,6 +381,38 @@ export const createExecutionGraphNodeStates = ({
   }
 
   return { nodeOutputs, states, statesByNodeId };
+};
+
+/**
+ * The launch queue every scheduler uses: `states` (declaration order) in the
+ * validator's topological layer order, `compiled.order` (Kahn layers,
+ * declaration order within a layer). `compiled` is admission's
+ * compileExecutionGraph result for the graph the states were built from, so
+ * each id resolves to exactly one state by the validator's trimmed id.
+ *
+ * For a graph declared in layer order this is `states` itself. Otherwise a
+ * node is never queued ahead of a node of an earlier layer, so a queue held
+ * back by the cap or an exclusive node never starts a later layer first.
+ * Results, node runs and checkpoints keep declaration order: only the queue
+ * is ordered here.
+ */
+export const orderExecutionGraphNodeStatesByLayer = ({ compiled, states }) => {
+  const statesByTrimmedId = new Map(
+    states.map((state) => [normalizeTrimmedText(state.node.nodeId), state])
+  );
+  const order = Array.isArray(compiled?.order) ? compiled.order : [];
+  const queue = order.map((nodeId) => statesByTrimmedId.get(nodeId));
+
+  if (
+    statesByTrimmedId.size !== states.length ||
+    queue.length !== states.length ||
+    queue.some((state) => state === undefined) ||
+    new Set(queue).size !== queue.length
+  ) {
+    throw new TypeError("The compiled order does not match the graph's node states.");
+  }
+
+  return queue;
 };
 
 /**

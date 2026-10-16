@@ -36,15 +36,15 @@ describe("native runner suite on the LangGraph executor", async () => {
   await import(RUNNER_SUITE_URL);
 });
 
-test("the runner suite's graphs were scheduled on LangGraph, not passed through to native", async () => {
+test("the runner suite's graphs were scheduled on LangGraph", async () => {
   const { getRunnerSuiteCalls } = await import(SHIM_URL);
   const calls = getRunnerSuiteCalls();
 
   // Measured 2026-10-14: 45 calls scheduled on LangGraph, 6 refused at
-  // admission (identically on both runtimes), none handed to native. A graph
-  // the suite adds that LangGraph hands to native must be looked at, not
-  // absorbed: it would pass here without testing LangGraph.
-  assert.equal(calls.native, 0);
+  // admission (identically on both runtimes), none handed to native. Since
+  // phase 5 the executor cannot hand a call to native (both runtimes queue in
+  // layer order), so every admitted call is a LangGraph one; the floor keeps
+  // the suite from passing on refusals alone.
   assert.ok(calls.langgraph >= 45, `only ${calls.langgraph} calls reached LangGraph`);
   assert.ok(calls.refused >= 1);
 });

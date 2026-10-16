@@ -10,6 +10,7 @@ import {
   createExecutionGraphRunControl,
   decideExecutionGraphNode,
   executeExecutionGraphNodeLaunch,
+  orderExecutionGraphNodeStatesByLayer,
   prepareExecutionGraphNodeLaunch,
   recordExecutionGraphNodeSkip,
 } from "./agent-execution-graph-node.js";
@@ -29,7 +30,8 @@ import {
 // What a node does once it is launched (inputs, gates, budget, the fenced
 // lifecycle, the settle order) lives in agent-execution-graph-node.js, so a
 // second scheduler can run the same nodes. This file keeps the native
-// scheduling: declaration order as the queue, the concurrency cap, side-effect
+// scheduling: the validator's topological layer order as the queue
+// (orderExecutionGraphNodeStatesByLayer), the concurrency cap, side-effect
 // exclusivity, and the approval pause once nothing else can run. The two ends
 // of a run that do not depend on how nodes are scheduled -- whole-graph
 // admission before anything runs, and the tail once nothing more can run --
@@ -38,15 +40,13 @@ import {
 //
 // Since phase 4 of docs/adr/0001-langgraph-runtime.md, LangGraph is the
 // default scheduler (AGENT_RUNTIME unset). runExecutionGraph's scheduling
-// loop is kept for two reasons only: AGENT_RUNTIME=native is the
-// whole-runtime rollback switch for at least one release on the new default
-// (ADR constraint 12), and runExecutionGraphOnLangGraph still hands it every
-// call canScheduleExecutionGraphOnLangGraph rejects (a graph not declared in
-// layer order whose native queue would start a later layer first: the ADR's
-// phase-2 delegation case). It is the rollback path to delete after that
-// release, and only once the delegation case is solved, e.g. by normalizing
-// the declaration order at planning time, which changes native behaviour and
-// needs its own evaluation. Admission, the tail (finishExecutionGraphRun)
+// loop is kept only as the AGENT_RUNTIME=native whole-runtime rollback switch
+// for at least one release on the new default (ADR constraint 12). LangGraph
+// no longer hands it any call: both schedulers queue in layer order, so the
+// phase-2 delegation case (a graph not declared in layer order, whose
+// declaration-order queue started a later layer first) is gone; the ADR's
+// phase 5 section records what that changed natively. It is the rollback path
+// to delete after that release. Admission, the tail (finishExecutionGraphRun)
 // and the node module stay: LangGraph runs them.
 
 export {
@@ -230,7 +230,7 @@ export const runExecutionGraph = async ({
   // and the services every node reads: createExecutionGraphNodeContext.
   ...nodeOptions
 } = {}) => {
-  const { concurrencyCap, rejected, scopedDocIds } = admitExecutionGraphRun({
+  const { compiled, concurrencyCap, rejected, scopedDocIds } = admitExecutionGraphRun({
     authorizedDocIds,
     authorizedSkillIds,
     docIds,
@@ -250,6 +250,7 @@ export const runExecutionGraph = async ({
     graph,
     registry,
   });
+  const queue = orderExecutionGraphNodeStatesByLayer({ compiled, states });
   const context = createExecutionGraphNodeContext({
     ...nodeOptions,
     authorizedDocIds: scopedDocIds,
@@ -306,7 +307,7 @@ export const runExecutionGraph = async ({
 
     let progressed = false;
 
-    for (const state of states) {
+    for (const state of queue) {
       if (state.status !== EXECUTION_GRAPH_NODE_STATUSES.pending) {
         continue;
       }
@@ -332,9 +333,11 @@ export const runExecutionGraph = async ({
         continue;
       }
 
-      // Declaration order is the queue: a ready node that cannot start yet
-      // blocks the ones behind it, so scheduling stays reproducible instead of
-      // depending on which skill happened to resolve first.
+      // Layer order is the queue: a ready node that cannot start yet blocks
+      // the ones behind it, so scheduling stays reproducible instead of
+      // depending on which skill happened to resolve first. A held-back node
+      // of an earlier layer is never overtaken by one of a later layer;
+      // LangGraph enters the layers superstep by superstep, in this order.
       if (inFlight.size >= concurrencyCap) {
         break;
       }

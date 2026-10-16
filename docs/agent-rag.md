@@ -133,9 +133,9 @@ Node 输入只有两个来源：已校验的 request 字段，或它显式 `depe
 
 ### Scheduler
 
-谁来调度由 `AGENT_RUNTIME` 决定，custom Skill DAG 与 guarded v3 统一图共用同一个开关。阶段 4 起默认是 `langgraph`：LangGraph.js 按 superstep 调度，进程内闸门（`rag/langgraph/concurrency-gate.js`）保持原生的并发上限、副作用独占和声明顺序，单个 node 的执行、准入和收尾仍是原生模块的同一批函数，图 checkpoint 仍是恢复与复用的依据。`AGENT_RUNTIME=native` 是整体回退开关，至少保留一个发布周期；不能在 LangGraph 上按原生顺序调度的图（声明顺序不是按层的，`canScheduleExecutionGraphOnLangGraph` 为假）目前整图交给原生调度器。superstep 屏障带来的已知差异、取消用 drain 而不是请求 signal 的原因、写放大的处理，见 [ADR 0001](adr/0001-langgraph-runtime.md)。外层 V1 执行计划不受这个开关影响，始终由原生循环执行。
+谁来调度由 `AGENT_RUNTIME` 决定，custom Skill DAG 与 guarded v3 统一图共用同一个开关。阶段 4 起默认是 `langgraph`：LangGraph.js 按 superstep 调度，进程内闸门（`rag/langgraph/concurrency-gate.js`）保持原生的并发上限、副作用独占和队列顺序，单个 node 的执行、准入和收尾仍是原生模块的同一批函数，图 checkpoint 仍是恢复与复用的依据。`AGENT_RUNTIME=native` 是整体回退开关，至少保留一个发布周期；阶段 5 起两种调度器都按校验器的拓扑层序排队，LangGraph 不再把任何图交给原生调度器。superstep 屏障带来的已知差异、取消用 drain 而不是请求 signal 的原因、写放大的处理，见 [ADR 0001](adr/0001-langgraph-runtime.md)。外层 V1 执行计划不受这个开关影响，始终由原生循环执行。
 
-调度顺序按 node 声明顺序做稳定拓扑排序，因此同一张图的调度是可复现的。只有依赖已满足、`parallelSafe`、彼此无冲突的只读 node 才会并发；并发上限由 runtime 收敛，调用方传入的 `maxConcurrency` 只能收紧不能放宽。预算在启动前原子预留，approval interrupt 会把预留退回，避免一次审批被计费两次。`failurePolicy` 为 `fail_fast` 的 node 失败后中止后续调度，`continue` 则只让下游 node 标记为 `dependency_failed` / `dependency_skipped`。
+调度队列是校验器的拓扑层序（Kahn 分层，层内按 node 声明顺序，`orderExecutionGraphNodeStatesByLayer`），因此同一张图的调度是可复现的，被并发上限或独占 node 压住的就绪 node 不会被后层 node 抢先；结果与 node run 仍按声明顺序返回。只有依赖已满足、`parallelSafe`、彼此无冲突的只读 node 才会并发；并发上限由 runtime 收敛，调用方传入的 `maxConcurrency` 只能收紧不能放宽。预算在启动前原子预留，approval interrupt 会把预留退回，避免一次审批被计费两次。`failurePolicy` 为 `fail_fast` 的 node 失败后中止后续调度，`continue` 则只让下游 node 标记为 `dependency_failed` / `dependency_skipped`。
 
 ### 有界 replan
 
