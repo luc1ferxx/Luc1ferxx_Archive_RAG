@@ -21,6 +21,8 @@ import {
 import {
   CAPABILITY_IDS,
   createApprovalExecutionSnapshot,
+  createDefaultCapabilityRegistry,
+  createInMemoryActionTaskService,
 } from "../rag/capabilities/index.js";
 import {
   buildAgentTaskPlanningContext,
@@ -3014,4 +3016,136 @@ test("agent task runner can continue after iteration budget is exhausted", async
     calls.map((call) => call.question),
     ["Run two steps.", "Finish the second step."]
   );
+});
+
+// Regression: a goal that asks for a follow-up task without any report wording
+// used to build a `follow_up_task:task.create` deliverable with `priority: ""`.
+// The real task.create Capability declares `priority` as a string, so the
+// policy enforcer rejected the spec and the background task ended `failed`
+// ("priority must be a non-empty string"). The fake registry used by the other
+// deliverable tests has no inputSchema and never saw it, so this test goes
+// through the real registry.
+test("goal deliverables give a follow-up task a valid default priority when the goal does not ask for a report", async () => {
+  const question = "Create a follow-up task for these documents";
+  const specs = buildAgentGoalDeliverableSpecs({
+    body: {
+      agentAnswer: "Follow-up answer.",
+      agentRunId: "run-follow-up",
+    },
+    payload: {
+      docIds: ["doc-1"],
+      question,
+    },
+    sourceTaskId: "agent_goal:follow-up",
+  });
+
+  assert.deepEqual(
+    specs.map((spec) => spec.capabilityId),
+    [CAPABILITY_IDS.taskCreate]
+  );
+  assert.equal(specs[0].input.priority, "medium");
+
+  const actionTasks = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const capabilityRegistry = createDefaultCapabilityRegistry({
+    actionTaskService: createInMemoryActionTaskService({
+      taskService: actionTasks,
+    }),
+  });
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const runner = createAgentTaskRunner({
+    capabilityRegistry,
+    runAgentTask: async () => ({
+      body: {
+        agentAnswer: "Follow-up answer.",
+        agentMode: "document",
+        agentRunId: "run-follow-up",
+        ragSources: [
+          {
+            docId: "doc-1",
+            title: "Paper A",
+          },
+        ],
+      },
+      status: 200,
+    }),
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: {
+      [AGENT_TASK_RUNNER_ID]: runner,
+    },
+    taskService,
+  });
+  const agentTaskService = createAgentTaskService({
+    createTaskId: () => "follow-up",
+    jobOrchestrator: null,
+    taskService,
+  });
+
+  await agentTaskService.createTask({
+    accessScope,
+    docIds: ["doc-1"],
+    maxIterations: 2,
+    question,
+    sessionId: "session-follow-up",
+    userId: "alice",
+  });
+  await orchestrator.runTask({
+    accessScope,
+    taskId: "agent_goal:follow-up",
+  });
+
+  let task = await taskService.getInternalTask({
+    accessScope,
+    taskId: "agent_goal:follow-up",
+  });
+
+  assert.equal(task.error ?? "", "");
+  assert.equal(task.status, TASK_STATUSES.waitingForUser);
+  assert.equal(task.requiredUserAction, AGENT_TASK_ACTIONS.approveDeliverables);
+  assert.deepEqual(
+    task.payload.deliverables.specs.map((spec) => spec.capabilityId),
+    [CAPABILITY_IDS.taskCreate]
+  );
+  assert.equal(task.result.approvalGates.length, 1);
+  assert.equal(task.result.approvalGates[0].inputPreview.priority, "medium");
+
+  await orchestrator.resumeTask({
+    accessScope,
+    action: AGENT_TASK_ACTIONS.approveDeliverables,
+    payload: {
+      approvalBindings: task.result.approvalGates.map((gate) => ({
+        approvalObjectHash: gate.approvalObjectHash,
+        gateId: gate.id,
+      })),
+    },
+    runImmediately: false,
+    taskId: "agent_goal:follow-up",
+  });
+  await orchestrator.runTask({
+    accessScope,
+    taskId: "agent_goal:follow-up",
+  });
+
+  task = await taskService.getInternalTask({
+    accessScope,
+    taskId: "agent_goal:follow-up",
+  });
+
+  assert.equal(task.status, TASK_STATUSES.completed);
+  assert.equal(task.payload.deliverables.status, "completed");
+  assert.equal(task.result.goalPlan.deliverables.counts.completed, 1);
+
+  const followUpTaskId = specs[0].input.taskId;
+  const actionTask = await actionTasks.getInternalTask({
+    accessScope,
+    taskId: followUpTaskId,
+  });
+
+  assert.equal(actionTask.action, CAPABILITY_IDS.taskCreate);
+  assert.equal(actionTask.result.priority, "medium");
+  assert.deepEqual(actionTask.result.tags, ["agent-goal", "follow-up"]);
 });
