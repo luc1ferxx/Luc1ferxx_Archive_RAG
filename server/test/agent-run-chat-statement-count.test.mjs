@@ -1,6 +1,6 @@
 // Must stay the first import: the LangGraph /chat below loads @langchain, which
 // reads the LangSmith tracing variables as it loads.
-import "./langgraph-spike/langsmith-off.mjs";
+import "./langgraph-support/langsmith-off.mjs";
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -16,7 +16,10 @@ import {
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
 import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
-import { LANGGRAPH_CHECKPOINT_FORMAT } from "../rag/langgraph/checkpointer.js";
+import {
+  LANGGRAPH_CHECKPOINT_FORMAT,
+  LANGGRAPH_CHECKPOINT_RETENTION,
+} from "../rag/langgraph/checkpointer.js";
 import { createPostgresAgentRunStore } from "../rag/postgres-agent-run-store.js";
 
 // Pins how often one /chat touches the agent run store. Every store call is
@@ -79,8 +82,13 @@ const runOneChat = (agentRunService) =>
 
 // Counts the calls the service makes; the store's own internal calls (the
 // in-memory createWithEvent calls its create/appendEvent/get) stay uncounted.
+// `langGraphRecords` keeps a copy of every non-null LangGraph thread record a
+// write hands the store, taken from its patch before the write: the save that
+// settles the graph drops the record, so these copies are what is left to
+// check once the run finished.
 const createCountingStore = (store) => {
   const counts = {};
+  const langGraphRecords = [];
   const countingStore = {};
 
   for (const [name, value] of Object.entries(store)) {
@@ -88,12 +96,18 @@ const createCountingStore = (store) => {
       typeof value === "function"
         ? (...args) => {
             counts[name] = (counts[name] ?? 0) + 1;
+            const record = args[0]?.patch?.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY];
+
+            if ((name === "update" || name === "updateWithEvent") && record) {
+              langGraphRecords.push(structuredClone(record));
+            }
+
             return value.apply(store, args);
           }
         : value;
   }
 
-  return { counts, store: countingStore };
+  return { counts, langGraphRecords, store: countingStore };
 };
 
 test("one /chat writes its run without reading it back", async () => {
@@ -574,16 +588,30 @@ test("a PostgreSQL CAS on a caller-supplied base run rejects a stale revision wi
 // at invoke. The event log and the run's public shape are the native ones.
 //
 // These counts are the in-memory store's calls and the stand-in's
-// statements, not pg_stat_statements; they were checked once against a real
-// PostgreSQL 18 (Postgres.app) with pg_stat_statements on the working tree of
-// a4380782 (2026-10-14, scratch script over createPostgresAgentRunStore,
-// owner path), which gave exactly these shapes and counts for both runtimes:
-// native 1 insert, 9 event-carrying CAS, 3 event appends, 1 run read, 1
-// event-list read; langgraph the same plus 7 event-less CAS, 1 more run read
-// and 1 more event-list read. The real server also runs one
-// `SELECT ... FOR NO KEY UPDATE` row lock inside each event-carrying CAS
-// pipeline (9 on both runtimes, none for the plain UPDATE), which the stand-in
-// folds into the CAS. Re-measure before changing a pinned count.
+// statements, not pg_stat_statements; they were checked against a real
+// PostgreSQL 18 (Postgres.app) with pg_stat_statements, a scratch script over
+// createPostgresAgentRunStore on the owner path, which gave exactly these
+// shapes and counts both times:
+//   - a4380782 (2026-10-14): native 1 insert, 9 event-carrying CAS, 3 event
+//     appends, 1 run read, 1 event-list read; langgraph the same plus 7
+//     event-less CAS, 1 more run read and 1 more event-list read. The
+//     completed run's `result` was 11,860 bytes native and 17,006 on
+//     LangGraph, the thread record (5,116 bytes) staying with the run.
+//   - phase 4 (2026-10-16, AGENT_RUNTIME defaulting to langgraph, the
+//     executor's saver keeping LANGGRAPH_CHECKPOINT_RETENTION = 2
+//     checkpoints, and the custom-Skill DAG's settling save dropping the
+//     record): the same counts on native, on AGENT_RUNTIME=langgraph and with
+//     AGENT_RUNTIME unset (the new default; both 16 revisions), since
+//     retention shrinks each thread write without adding one and the drop
+//     rides on the settling save's own CAS. The completed run's `result` is
+//     11,860 bytes native and 11,894 on LangGraph (the null tombstone is 29
+//     of the 34; the scratch run's session ids and durations differ by a few
+//     bytes), the largest record any write carried is 2,975 bytes, and the
+//     largest `result` any write committed 14,639 bytes.
+// The real server also runs one `SELECT ... FOR NO KEY UPDATE` row lock
+// inside each event-carrying CAS pipeline (9 on both runtimes, none for the
+// plain UPDATE), which the stand-in folds into the CAS. Re-measure before
+// changing a pinned count.
 
 const CONTRACT_DOC_ID = "contract-1";
 const CONTRACT_QUESTION = "Review this contract for risks and key terms.";
@@ -653,11 +681,13 @@ const withEnv = async (overrides, work) => {
 };
 
 // `langgraph` is AGENT_RUNTIME=langgraph alone (the outer plan on the native
-// loop); `outerPlan` adds the outer-plan dial.
+// loop); `outerPlan` adds the outer-plan dial; `default` sets neither, which
+// since phase 4 is LangGraph for the graph and native for the outer plan.
 const RUNTIME_PASSES = Object.freeze({
   native: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined, AGENT_RUNTIME: "native" }),
   langgraph: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined, AGENT_RUNTIME: "langgraph" }),
   outerPlan: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph", AGENT_RUNTIME: "langgraph" }),
+  default: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined, AGENT_RUNTIME: undefined }),
 });
 
 const runOneGuardedGraphChat = (agentRunService, pass) =>
@@ -695,6 +725,7 @@ const assertGuardedGraphRun = (response, run) => {
 
 test("one guarded custom-Skill /chat on LangGraph adds one run read and seven event-less CAS to the native run, and no event", async () => {
   const counts = {};
+  const records = {};
   const runs = {};
 
   for (const runtime of Object.keys(RUNTIME_PASSES)) {
@@ -713,6 +744,7 @@ test("one guarded custom-Skill /chat on LangGraph adds one run read and seven ev
 
     assertGuardedGraphRun(response, run);
     counts[runtime] = counting.counts;
+    records[runtime] = counting.langGraphRecords;
     runs[runtime] = run;
   }
 
@@ -734,25 +766,42 @@ test("one guarded custom-Skill /chat on LangGraph adds one run read and seven ev
   });
   // The outer plan on LangGraph has no checkpointer: not one store call more.
   assert.deepEqual(counts.outerPlan, counts.langgraph);
+  // The default is the LangGraph pass, store call for store call.
+  assert.deepEqual(counts.default, counts.langgraph);
   assert.equal(runs.native.revision, 9);
   assert.equal(runs.langgraph.revision, 16);
   assert.equal(runs.outerPlan.revision, 16);
+  assert.equal(runs.default.revision, 16);
 
   // The thread record is private to the run row: absent natively, LangGraph's
   // own format on the other runtime, never in the public projection, and it
-  // holds nothing of the question or the evidence.
+  // holds nothing of the question or the evidence. Since phase 4 the
+  // completed run keeps only the null tombstone: the graph's settling save
+  // (agent-custom-skill-stage.js, dropLangGraphRecord) dropped the thread in
+  // its own CAS, which is why no count above changed. Before, the record
+  // stayed with the finished run and was checked there; now every record
+  // the seven event-less writes carried is checked as it was written.
   assert.equal(Object.hasOwn(runs.native.result, LANGGRAPH_CHECKPOINT_RESULT_KEY), false);
-  for (const pass of ["langgraph", "outerPlan"]) {
-    const record = runs[pass].result[LANGGRAPH_CHECKPOINT_RESULT_KEY];
-    assert.equal(record.format, LANGGRAPH_CHECKPOINT_FORMAT, pass);
-    // The custom-Skill graph checkpoints into the root namespace, which is
-    // the one readLangGraphThread reads, whoever scheduled the outer plan:
-    // invoked from the native loop (`langgraph`), and invoked from inside the
-    // outer plan graph's custom_skills node (`outerPlan`), where it must not
-    // land in a subgraph namespace named after that node.
-    assert.deepEqual(record.namespaces.map((namespace) => namespace.ns), [""], pass);
-    assert.equal(JSON.stringify(record).includes(CONTRACT_QUESTION), false, pass);
-    assert.equal(JSON.stringify(record).includes("renewal risk"), false, pass);
+  assert.deepEqual(records.native, []);
+  for (const pass of ["langgraph", "outerPlan", "default"]) {
+    assert.equal(Object.hasOwn(runs[pass].result, LANGGRAPH_CHECKPOINT_RESULT_KEY), true, pass);
+    assert.equal(runs[pass].result[LANGGRAPH_CHECKPOINT_RESULT_KEY], null, pass);
+    assert.equal(records[pass].length, counts[pass].update, pass);
+
+    for (const record of records[pass]) {
+      assert.equal(record.format, LANGGRAPH_CHECKPOINT_FORMAT, pass);
+      // The custom-Skill graph checkpoints into the root namespace, which is
+      // the one readLangGraphThread reads, whoever scheduled the outer plan:
+      // invoked from the native loop (`langgraph`), and invoked from inside
+      // the outer plan graph's custom_skills node (`outerPlan`), where it
+      // must not land in a subgraph namespace named after that node.
+      assert.deepEqual(record.namespaces.map((namespace) => namespace.ns), [""], pass);
+      // Retention (LANGGRAPH_CHECKPOINT_RETENTION): never more than the
+      // newest checkpoint and its parent.
+      assert.ok(record.namespaces[0].checkpoints.length <= LANGGRAPH_CHECKPOINT_RETENTION, pass);
+      assert.equal(JSON.stringify(record).includes(CONTRACT_QUESTION), false, pass);
+      assert.equal(JSON.stringify(record).includes("renewal risk"), false, pass);
+    }
   }
   for (const run of Object.values(runs)) {
     assert.equal(
@@ -802,6 +851,7 @@ test("one guarded custom-Skill /chat on the PostgreSQL run store: LangGraph adds
     read_run: 2,
   });
   assert.deepEqual(statements.outerPlan, statements.langgraph);
+  assert.deepEqual(statements.default, statements.langgraph);
 });
 
 test("an event-less PostgreSQL update that reuses its base's events sends no event-list read; without the flag it reads as before", async () => {

@@ -1,11 +1,11 @@
 // Must stay the first import: it clears the LangSmith tracing variables before
 // any @langchain module can read them.
-import "./langgraph-spike/langsmith-off.mjs";
+import "./langgraph-support/langsmith-off.mjs";
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { Command, MemorySaver } from "@langchain/langgraph";
+import { Annotation, Command, END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
 
 import {
   EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY,
@@ -31,6 +31,11 @@ import {
 } from "../rag/langgraph/checkpointer.js";
 import { LANGSMITH_TRACING_ENABLED_CODE } from "../rag/langgraph/langsmith-guard.js";
 import {
+  createRequestCancellation,
+  isRequestCancelledError,
+  runWithRequestCancellation,
+} from "../rag/request-deadline.js";
+import {
   getActiveDatabaseTenant,
   runAsDatabaseSystem,
   runWithDatabaseTenant,
@@ -54,8 +59,8 @@ import {
 } from "./langgraph-checkpointer-contract.mjs";
 
 // The production checkpointer (rag/langgraph/checkpointer.js) over the
-// in-memory agent run store. Ported from the phase-0 spike suite
-// (langgraph-spike-checkpointer.test.mjs), with the production differences:
+// in-memory agent run store. Ported from the phase-0 spike's checkpointer
+// suite (removed in phase 4), with the production differences:
 // every write goes through the run service's fenced CAS, no event is
 // recorded, and the graph checkpoint's resume claim is the only claim.
 
@@ -1449,4 +1454,100 @@ test("mutateLangGraphCheckpointRecord commits one event-less CAS of that key onl
   assert.equal(tombstoned.result[LANGGRAPH_CHECKPOINT_RESULT_KEY], null);
   assert.deepStrictEqual(await service.getLangGraphCheckpointRecord(scoped), { record: null });
   assert.deepStrictEqual(tombstoned.events, before.events);
+});
+
+// --- Why cancellation is a drain (ported from the phase-0 spike) -------------
+
+// Pins LangGraph 1.5.0, not this module: a request signal handed to LangGraph
+// as RunnableConfig.signal rejects invoke at once while the node is still
+// running, the node finishes in the background with its writes discarded,
+// and a resume runs it a second time. That is at-least-once for every node,
+// so the executors never pass the signal: the request's cancellation asks
+// RunControl to drain at the next superstep boundary instead
+// (rag/langgraph/drain-bridge.js; docs/adr/0001-langgraph-runtime.md, the
+// accepted deviation). If a LangGraph upgrade changes this behaviour, this
+// test fails and the drain can be re-evaluated; the drain itself is proven
+// by the cancellation parity tests of the execution-graph, unified-graph and
+// execution-plan-graph suites.
+test("pinned LangGraph behaviour on the run-store saver: an AbortSignal rejects invoke while the node is still running, discards its writes, and the resume runs it again", async () => {
+  const { instrumented, instrumentedService, ...fixture } = await createInstrumentedFixture({
+    runId: "lg-run-raw-abort",
+  });
+  const saver = createSaver(fixture, { agentRunService: instrumentedService });
+  const fx = { a: 0, bEnd: 0, bStart: 0, c: 0 };
+  const bEntered = deferred();
+  const bRelease = deferred();
+  const bDone = deferred();
+  const Trail = Annotation.Root({
+    trail: Annotation({ default: () => [], reducer: (left, right) => left.concat(right) }),
+  });
+  const app = new StateGraph(Trail)
+    .addNode("a", () => {
+      fx.a += 1;
+      return { trail: ["a"] };
+    })
+    .addNode("b", async () => {
+      fx.bStart += 1;
+      const first = fx.bStart === 1;
+      if (first) {
+        bEntered.resolve();
+        await bRelease.promise;
+      }
+      fx.bEnd += 1;
+      if (first) {
+        bDone.resolve();
+      }
+      return { trail: ["b"] };
+    })
+    .addNode("c", () => {
+      fx.c += 1;
+      return { trail: ["c"] };
+    })
+    .addEdge(START, "a")
+    .addEdge("a", "b")
+    .addEdge("b", "c")
+    .addEdge("c", END)
+    .compile({ checkpointer: saver });
+  const config = { configurable: { thread_id: saver.threadId }, durability: "sync" };
+  const request = createRequestCancellation();
+  const order = [];
+
+  const rejected = runWithRequestCancellation(request, () =>
+    app.invoke({ trail: [] }, { ...config, signal: request.signal })
+  ).then(
+    () => assert.fail("the aborted invoke resolved"),
+    (error) => {
+      order.push(`rejected:bEnd=${fx.bEnd}`);
+      return error;
+    }
+  );
+
+  await bEntered.promise;
+  request.cancel("client_cancelled");
+  const error = await rejected;
+  const writesAtRejection = instrumented.stats.writes;
+
+  // The caller is told at once, while b is still inside its body.
+  assert.deepStrictEqual(order, ["rejected:bEnd=0"]);
+  assert.ok(isRequestCancelledError(error));
+  assert.equal(error.code, "AGENT_CLIENT_CANCELLED");
+
+  bRelease.resolve();
+  await bDone.promise;
+  for (let turn = 0; turn < 3; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  // b ran to the end in the background, but LangGraph wrote nothing for it.
+  assert.deepStrictEqual(fx, { a: 1, bEnd: 1, bStart: 1, c: 0 });
+  assert.equal(instrumented.stats.writes, writesAtRejection);
+  const state = await app.getState(config);
+  assert.deepStrictEqual(state.next, ["b"]);
+  assert.deepStrictEqual(state.values.trail, ["a"]);
+
+  // Resuming runs b a second time: LangGraph alone is at-least-once here.
+  const resumed = await app.invoke(null, config);
+  assert.deepStrictEqual(resumed.trail, ["a", "b", "c"]);
+  assert.deepStrictEqual(fx, { a: 1, bEnd: 2, bStart: 2, c: 1 });
+  request.dispose();
 });

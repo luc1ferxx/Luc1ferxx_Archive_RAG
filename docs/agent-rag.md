@@ -114,7 +114,7 @@ Custom skill 阶段内部有两条执行路径，由 `AGENT_SKILL_GRAPH_ROLLOUT`
 | Graph contract | `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph`；node 至少包含 `nodeId`、`skillId`、`dependsOn`、`inputBindings`、`failurePolicy`、`rationale`。同一个 skill 可以出现在多个 `nodeId` 下，step id 变成 `custom_skill:<nodeId>`。 |
 | Validator / compiler | 同上的 `validateExecutionGraph()` / `compileExecutionGraph()` | 纯函数校验和拓扑分层，返回稳定 reason code。 |
 | Planner adapter | `server/rag/agent-dag-planner-adapter.js` | 直接产出原子 skill node 和依赖，不再输出 `skill_chain_compare_risk` 这类复合 id。 |
-| Scheduler | `server/rag/agent-execution-graph-runner.js` | 拓扑调度、并发上限、预算预留、side-effect 串行化，以及解析后的输入和真实/恢复输出的运行时 schema gate。 |
+| Scheduler | `server/rag/langgraph/run-execution-graph.js`（默认）/ `server/rag/agent-execution-graph-runner.js`（`AGENT_RUNTIME=native`） | 拓扑调度、并发上限、预算预留、side-effect 串行化，以及解析后的输入和真实/恢复输出的运行时 schema gate；单个 node 的执行在两者共用的 `agent-execution-graph-node.js`。 |
 | Replanner | `server/rag/agent-replanner.js` | 有界局部重规划，只返回 graph patch。 |
 
 Node 输入只有两个来源：已校验的 request 字段，或它显式 `dependsOn` 的上游 node 的 typed 输出字段（`inputBindings` 的 `source` 只接受 `request` 和 `node`）。这是和 V1 最实质的区别——拼接自由文本不再是主数据接口。当前输出 schema 是 `text`、`citations`、`abstained` 的答案封套，`priorFindings` 仍是上游 `text` 字段；它没有把对比差异或风险变成经过语义验证的独立对象。
@@ -132,6 +132,8 @@ Node 输入只有两个来源：已校验的 request 字段，或它显式 `depe
 静态图验证后仍有运行时边界：runner 在预算预留和 Skill 执行前检查解析后的输入值，在结果可供下游 `inputBindings` 使用前检查 Skill 的真实输出；恢复复用的 node 输出也要按当前 live contract 复核。schema 不符的结果不会被当作成功的上游事实。这里验证的是形状/类型，不替代 citation 和 claim support 的语义检查。
 
 ### Scheduler
+
+谁来调度由 `AGENT_RUNTIME` 决定，custom Skill DAG 与 guarded v3 统一图共用同一个开关。阶段 4 起默认是 `langgraph`：LangGraph.js 按 superstep 调度，进程内闸门（`rag/langgraph/concurrency-gate.js`）保持原生的并发上限、副作用独占和声明顺序，单个 node 的执行、准入和收尾仍是原生模块的同一批函数，图 checkpoint 仍是恢复与复用的依据。`AGENT_RUNTIME=native` 是整体回退开关，至少保留一个发布周期；不能在 LangGraph 上按原生顺序调度的图（声明顺序不是按层的，`canScheduleExecutionGraphOnLangGraph` 为假）目前整图交给原生调度器。superstep 屏障带来的已知差异、取消用 drain 而不是请求 signal 的原因、写放大的处理，见 [ADR 0001](adr/0001-langgraph-runtime.md)。外层 V1 执行计划不受这个开关影响，始终由原生循环执行。
 
 调度顺序按 node 声明顺序做稳定拓扑排序，因此同一张图的调度是可复现的。只有依赖已满足、`parallelSafe`、彼此无冲突的只读 node 才会并发；并发上限由 runtime 收敛，调用方传入的 `maxConcurrency` 只能收紧不能放宽。预算在启动前原子预留，approval interrupt 会把预留退回，避免一次审批被计费两次。`failurePolicy` 为 `fail_fast` 的 node 失败后中止后续调度，`continue` 则只让下游 node 标记为 `dependency_failed` / `dependency_skipped`。
 
@@ -210,7 +212,7 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 | `server/rag/agent-custom-skill-stage.js` | 迁移切口：按 `AGENT_SKILL_GRAPH_ROLLOUT` 在 V1 chain、shadow 规划和 guarded DAG 之间选择，对外仍返回同一个扁平 skill result 数组。 |
 | `server/rag/skills/authorized-catalog.js` | 根据已注册 custom Skill 的显式 typed contract、`accessScope` 和选中文档核验构造模型可见的原子候选；与 V1 intent/chain 选择分离。 |
 | `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph` contract 和纯函数 validator/compiler；整体接受或整体拒绝，返回稳定 reason code。 |
-| `server/rag/agent-execution-graph-runner.js` | Graph scheduler：拓扑调度、并发上限、预算预留/退回、side-effect 串行化、运行时 input/output schema gate 和 node run 记录。 |
+| `server/rag/agent-execution-graph-runner.js` | 原生 graph scheduler（`AGENT_RUNTIME=native` 的回退路径，也接手 LangGraph 不能按原生顺序调度的图）与两种调度器共用的准入、收尾：拓扑调度、并发上限、预算预留/退回、side-effect 串行化、运行时 input/output schema gate 和 node run 记录。默认调度器是 `server/rag/langgraph/run-execution-graph.js`（LangGraph.js，见 ADR 0001）。 |
 | `server/rag/agent-execution-graph-checkpoint.js` | 私有 graph checkpoint 的摘要/owner 验证、node/step 对账和完成节点复用判定；保存在既有 agent run store，而非第二套运行时。 |
 | `server/rag/agent-dag-planner-adapter.js` | V2 planner adapter；只暴露脱敏后的白名单 capability 描述、schema、授权文档范围和 planning context，产出原子 skill node 与依赖。 |
 | `server/rag/agent-replanner.js` | 有界局部重规划；只返回需重新校验的 graph patch，不执行工具，默认 `maxReplans: 1`。 |

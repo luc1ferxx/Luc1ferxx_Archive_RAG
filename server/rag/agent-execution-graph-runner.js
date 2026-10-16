@@ -35,6 +35,19 @@ import {
 // admission before anything runs, and the tail once nothing more can run --
 // are exported, so the LangGraph scheduler (langgraph/run-execution-graph.js)
 // rejects, interrupts, pauses and reports exactly as this one does.
+//
+// Since phase 4 of docs/adr/0001-langgraph-runtime.md, LangGraph is the
+// default scheduler (AGENT_RUNTIME unset). runExecutionGraph's scheduling
+// loop is kept for two reasons only: AGENT_RUNTIME=native is the
+// whole-runtime rollback switch for at least one release on the new default
+// (ADR constraint 12), and runExecutionGraphOnLangGraph still hands it every
+// call canScheduleExecutionGraphOnLangGraph rejects (a graph not declared in
+// layer order whose native queue would start a later layer first: the ADR's
+// phase-2 delegation case). It is the rollback path to delete after that
+// release, and only once the delegation case is solved, e.g. by normalizing
+// the declaration order at planning time, which changes native behaviour and
+// needs its own evaluation. Admission, the tail (finishExecutionGraphRun)
+// and the node module stay: LangGraph runs them.
 
 export {
   EXECUTION_GRAPH_NODE_STATUSES,

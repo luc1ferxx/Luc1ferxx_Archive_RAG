@@ -46,13 +46,16 @@ const graphNodes = [
   },
 ];
 
-// The two cross-process cases also run with AGENT_RUNTIME=langgraph
-// (docs/adr/0001-langgraph-runtime.md, phase 2): the stage in this process,
-// the recovery or claim worker in the child and the in-process resume then
-// schedule the graph on LangGraph, over the same PostgreSQL rows and with
-// the same assertions. A null runtime is the original case, run as written.
+// The two cross-process cases run once per runtime
+// (docs/adr/0001-langgraph-runtime.md): the stage in this process, the
+// recovery or claim worker in the child and the in-process resume schedule
+// the graph on that runtime, over the same PostgreSQL rows and with the same
+// assertions. `langgraph` is the default since phase 4. `native` is pinned,
+// not left unset: unset no longer means native, and this pass is
+// specifically the AGENT_RUNTIME=native rollback scheduler's (ADR constraint
+// 12), which must stay proven across processes while it is the rollback.
 const CROSS_PROCESS_RUNTIMES = [
-  { runtime: null, title: "" },
+  { runtime: "native", title: " (AGENT_RUNTIME=native)" },
   { runtime: "langgraph", title: " (AGENT_RUNTIME=langgraph)" },
 ];
 
@@ -179,7 +182,7 @@ const loadModules = async () => {
 // the real ones).
 const createEffectTable = async (modules, tableName) => {
   await modules.queryPostgres(
-    `CREATE TABLE ${tableName} (id BIGSERIAL PRIMARY KEY, run_id TEXT NOT NULL, skill_id TEXT NOT NULL)`
+    `CREATE TABLE ${tableName} (id BIGSERIAL PRIMARY KEY, run_id TEXT NOT NULL, skill_id TEXT NOT NULL, observed_receipts TEXT)`
   );
   await modules.queryPostgres(
     `GRANT SELECT, INSERT ON ${tableName} TO ${modules.getPostgresTenantRole()}`
@@ -195,9 +198,14 @@ const createSkills = (modules, tableName, runId) => {
     budgetKey: "customSkillCalls",
     effects,
     execute: async ({ docIds: scopedDocIds }) => {
+      // What the run's LangGraph thread holds while this Skill runs, in
+      // whichever process runs it (empty natively). The save that settles
+      // the graph drops the thread (phase 4), so a finished run no longer
+      // shows what the last invocation ran; this does.
+      const observedReceipts = await readLangGraphReceiptStatuses(newRunService(modules), runId);
       await modules.queryPostgres(
-        `INSERT INTO ${tableName} (run_id, skill_id) VALUES ($1, $2)`,
-        [runId, id]
+        `INSERT INTO ${tableName} (run_id, skill_id, observed_receipts) VALUES ($1, $2, $3)`,
+        [runId, id, JSON.stringify(observedReceipts)]
       );
       return {
         abstained: false,
@@ -311,6 +319,28 @@ const deleteIntegrationRun = async (modules, runId) => {
     `DELETE FROM ${runsTable} WHERE user_id = $1 AND workspace_id = $2 AND run_id = $3`,
     values
   );
+};
+
+// The thread receipts each run of `skillId` saw, in execution order.
+const receiptsSeenBy = async (modules, tableName, runId, skillId) => {
+  const result = await modules.queryPostgres(
+    `SELECT observed_receipts FROM ${tableName} WHERE run_id = $1 AND skill_id = $2 ORDER BY id`,
+    [runId, skillId]
+  );
+  return result.rows.map((row) => JSON.parse(row.observed_receipts));
+};
+
+// Whether the run row carries the LangGraph record key, and its value: the
+// native scheduler never writes the key; a settled LangGraph run keeps the
+// null tombstone of the drop.
+const readStoredLangGraphRecord = async (modules, runId) => {
+  const { LANGGRAPH_CHECKPOINT_RESULT_KEY } = await import("../rag/langgraph/checkpointer.js");
+  const row = await modules.createPostgresAgentRunStore().get({ accessScope, runId });
+
+  return {
+    hasKey: Object.hasOwn(row?.result ?? {}, LANGGRAPH_CHECKPOINT_RESULT_KEY),
+    record: row?.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY] ?? null,
+  };
 };
 
 const countEffects = async (modules, tableName, runId) => {
@@ -507,7 +537,7 @@ if (workerMode === "1") {
         assert.deepEqual(await countEffects(modules, tableName, runId), {
           compare_documents: 1,
         });
-        if (runtime) {
+        if (runtime === "langgraph") {
           // The first worker stopped before LangGraph reached `risk`.
           assert.equal(
             Object.hasOwn(await readLangGraphReceiptStatuses(service, runId), "node:risk"),
@@ -553,12 +583,25 @@ if (workerMode === "1") {
           ["compare", "reused"],
           ["risk", "completed"],
         ]);
-        if (runtime) {
-          // The child's recovery ran the graph on LangGraph: a new thread
-          // that took `compare` from the graph checkpoint and settled `risk`.
-          assert.deepEqual(await readLangGraphReceiptStatuses(restartedService, runId), {
-            "node:compare": "reused",
-            "node:risk": "completed",
+        if (runtime === "langgraph") {
+          // The child's recovery ran the graph on LangGraph: while `risk` ran
+          // there, the thread was a new one that took `compare` from the
+          // graph checkpoint (risk's own superstep not yet committed). Read
+          // inside risk because, since phase 4, the save that settles the
+          // graph drops the thread; before, this read the finished run's
+          // receipts, risk "completed" included.
+          assert.deepEqual(await receiptsSeenBy(modules, tableName, runId, "risk_review"), [
+            { "node:compare": "reused" },
+          ]);
+          assert.deepEqual(await readStoredLangGraphRecord(modules, runId), {
+            hasKey: true,
+            record: null,
+          });
+        } else {
+          assert.deepEqual(await receiptsSeenBy(modules, tableName, runId, "risk_review"), [{}]);
+          assert.deepEqual(await readStoredLangGraphRecord(modules, runId), {
+            hasKey: false,
+            record: null,
           });
         }
       } finally {
@@ -759,14 +802,24 @@ if (workerMode === "1") {
             compare_documents: 1,
             risk_review: 1,
           });
-          if (runtime) {
+          if (runtime === "langgraph") {
             // What the resume ran, on LangGraph, in a thread of its own: its
             // tombstone replaced anything the fenced worker had written, so
             // these receipts say nothing about that worker (the effects and
-            // steps above and its error do).
-            assert.deepEqual(await readLangGraphReceiptStatuses(service, runId), {
-              "node:compare": claimPoint.pauseAtNodeRuns === 0 ? "completed" : "reused",
-              "node:risk": "completed",
+            // steps above and its error do). Seen by `risk` while it ran in
+            // the resume, since the settling save drops the thread (phase 4;
+            // before, this read the finished run's receipts).
+            assert.deepEqual(await receiptsSeenBy(modules, tableName, runId, "risk_review"), [
+              { "node:compare": claimPoint.pauseAtNodeRuns === 0 ? "completed" : "reused" },
+            ]);
+            assert.deepEqual(await readStoredLangGraphRecord(modules, runId), {
+              hasKey: true,
+              record: null,
+            });
+          } else {
+            assert.deepEqual(await readStoredLangGraphRecord(modules, runId), {
+              hasKey: false,
+              record: null,
             });
           }
         } finally {

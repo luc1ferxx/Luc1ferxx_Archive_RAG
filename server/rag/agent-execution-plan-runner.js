@@ -29,6 +29,13 @@ import { AGENT_SKILL_IDS } from "./skills/registry.js";
 // safe point before a stage, the early return once a stage produced the
 // response) are defined here once, so the graph reuses them and never
 // re-derives the plan.
+//
+// The native loop is not part of the phase-4 rollback set
+// (docs/adr/0001-langgraph-runtime.md): the phase-3 load test decided that
+// the outer plan stays on it whatever AGENT_RUNTIME says, so it is the
+// production scheduler of the outer plan, not a fallback to delete. Phase 4
+// flipped only AGENT_RUNTIME's default; AGENT_OUTER_PLAN_RUNTIME still
+// defaults to `native`.
 
 const getCustomSkills = (selectedSkills = []) =>
   selectedSkills.filter((skill) => skill.kind === "custom");

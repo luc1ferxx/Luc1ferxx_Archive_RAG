@@ -212,6 +212,31 @@ test("coverage gate discovers exactly the test files npm test runs", async () =>
   );
 });
 
+test("npm test and the coverage gate hand their test children no LangSmith tracing variable", async () => {
+  // AGENT_RUNTIME defaults to langgraph, so every suite that runs a guarded
+  // graph reaches the LangGraph executor, which refuses to run while a
+  // LangSmith tracing variable is "true". Both runners strip them from the
+  // child environment so a developer shell cannot fail those suites.
+  const compact = (source) => source.replace(/\s+/g, "");
+
+  for (const file of ["run.test.mjs", "coverage-gate.mjs"]) {
+    const source = compact(await readFile(path.join(__dirname, file), "utf8"));
+
+    assert.ok(
+      source.includes('import{LANGSMITH_TRACING_VARIABLES}from"../rag/langgraph/langsmith-guard.js";'),
+      `${file} takes the variable list from the production guard`
+    );
+    assert.ok(
+      source.includes(
+        "constenvironment={...process.env};for(constnameofLANGSMITH_TRACING_VARIABLES){deleteenvironment[name];}"
+      ),
+      `${file} removes every LangSmith tracing variable`
+    );
+    assert.ok(source.includes("env:childEnvironment(),"), `${file} spawns with the stripped environment`);
+    assert.equal(source.includes("env:process.env"), false, `${file} never hands the raw environment on`);
+  }
+});
+
 test("quality gate workflow regenerates and validates current-commit evidence", async () => {
   const workflow = await readFile(workflowPath, "utf8");
 

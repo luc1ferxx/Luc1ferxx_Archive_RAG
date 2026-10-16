@@ -449,9 +449,11 @@ export const createTaskWithIndependentLaterWorkProposal = () => {
  * A capability registry whose task.create writes go through `onWrite` (which
  * may record the effect durably, or stop the process right after it) and are
  * counted in `writes`. `version` overrides the Capability version, as after a
- * deploy.
+ * deploy. `approvalPolicy` replaces its approval policy under the same id and
+ * version, as a policy change after a gate was created would.
  */
 export const createTaskCapabilityRegistry = async ({
+  approvalPolicy = null,
   onWrite = async () => {},
   ragService,
   version = null,
@@ -474,11 +476,15 @@ export const createTaskCapabilityRegistry = async ({
   };
   const defaults = createDefaultCapabilityRegistry({ actionTaskService, ragService, webChatService });
   const capabilities = defaults.list().map((capability) => defaults.get(capability.id));
-  const registry = version
+  const registry = version || approvalPolicy
     ? createCapabilityRegistry(
         capabilities.map((capability) =>
           capability.id === APPROVAL_TASK_CAPABILITY_ID
-            ? { ...createTaskCreateCapability({ actionTaskService }), version }
+            ? {
+                ...createTaskCreateCapability({ actionTaskService }),
+                ...(version ? { version } : {}),
+                ...(approvalPolicy ? { approvalPolicy } : {}),
+              }
             : capability
         )
       )

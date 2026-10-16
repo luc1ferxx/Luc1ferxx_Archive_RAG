@@ -212,9 +212,13 @@ const approvalBoundaryMatches = (boundary, gate) =>
  * node receipts of a graph that already completed, without executing a node,
  * so the run can be finalized from the same persisted outputs.
  *
- * `runtime` (AGENT_RUNTIME, docs/adr/0001-langgraph-runtime.md phase 3)
- * picks the scheduler: the native one, or LangGraph
- * (langgraph/run-execution-graph.js), which runs the same node code and
+ * `runtime` (AGENT_RUNTIME, docs/adr/0001-langgraph-runtime.md phase 3;
+ * `langgraph` by default since phase 4) picks the scheduler: LangGraph
+ * (langgraph/run-execution-graph.js), or the native one, which stays as the
+ * AGENT_RUNTIME=native rollback path for at least one release on the new
+ * default (ADR constraint 12) and is to be deleted after it, once the
+ * phase-2 delegation case (graphs canScheduleExecutionGraphOnLangGraph hands
+ * to the native scheduler) is solved. LangGraph runs the same node code and
  * parks an approval-gated node with interrupt() on the run's thread, so the
  * decision continues that thread. Everything durable is the same on both:
  * the graph checkpoint, the preflight and the pause CAS above, the fenced

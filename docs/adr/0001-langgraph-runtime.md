@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0、1、2 已完成（阶段 2 在 `AGENT_RUNTIME=langgraph` 后面，默认 `native`）；取消方案（drain，不把请求 signal 直接交给 LangGraph）已认可。
+- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`，`native` 作为整体回退保留一个发布周期。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -71,8 +71,8 @@
 
 - `zod` 的声明范围从 `^4.1.13` 改为 `^4.2.0`，对齐 LangGraph 的 peer 下限；锁定版本仍是 4.3.5。
 - `npm audit --omit=dev` 为 0。基线原本不是 0（`proxy-addr` critical、`@modelcontextprotocol/sdk` high），已在单独的 commit `ef826f57` 里修掉，只改 lock。
-- spike 全部放在 `server/test/`：辅助模块在 `server/test/langgraph-spike/`，四个套件为 `langgraph-spike-{checkpointer,evidence-gated-case,runner-mechanics,runtime-semantics}.test.mjs`，共 61 个用例。生产代码没有任何改动，覆盖率闸门不计入 `server/test/`。
-- 每个套件第一个 import 是 `langgraph-spike/langsmith-off.mjs`，在 LangChain 读取环境变量之前清掉 LangSmith 的追踪开关。
+- spike 全部放在 `server/test/`：辅助模块在 `server/test/langgraph-spike/`，四个套件为 `langgraph-spike-{checkpointer,evidence-gated-case,runner-mechanics,runtime-semantics}.test.mjs`，共 61 个用例。生产代码没有任何改动，覆盖率闸门不计入 `server/test/`。阶段 4 删除了这些文件，它们证明过的性质都已由生产套件覆盖（见“阶段 4 结果”）。
+- 每个套件第一个 import 是 `langsmith-off.mjs`（阶段 4 起位于 `server/test/langgraph-support/`），在 LangChain 读取环境变量之前清掉 LangSmith 的追踪开关。
 
 ### 四项证明
 
@@ -197,7 +197,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ## 阶段 2 结果：custom-Skill DAG 跑在 LangGraph 上
 
-- **开关**：`AGENT_RUNTIME`（`rag/config.js` 的 `getAgentRuntime()`），默认 `native`，除 `langgraph` 外的任何值都回落到 `native`。custom-Skill 阶段据此选择 `runExecutionGraph` 或 `runExecutionGraphOnLangGraph`；`AGENT_SKILL_GRAPH_ROLLOUT` 语义不变；v3 统一图仍走原生调度器。
+- **开关**：`AGENT_RUNTIME`（`rag/config.js` 的 `getAgentRuntime()`），阶段 2、3 默认 `native`，除 `langgraph` 外的任何值都回落到 `native`（阶段 4 起默认 `langgraph`，见下文）。custom-Skill 阶段据此选择 `runExecutionGraph` 或 `runExecutionGraphOnLangGraph`；`AGENT_SKILL_GRAPH_ROLLOUT` 语义不变；v3 统一图仍走原生调度器。
 - **复用，不复制**：原生 runner 的单节点执行、跳过判定、节点状态和结果组装抽到 `agent-execution-graph-node.js`，准入和收尾以 `admitExecutionGraphRun` / `finishExecutionGraphRun` 导出。原生 runner 从 1,055 行减到 373 行，只剩调度。用差分工具对比 HEAD 的原 runner，几十万次比较零差异；三个确定性评测在重构前后逐字节一致。LangGraph 一侧只有 `compile-execution-graph.js`（480 行）、`run-execution-graph.js`（329 行）和 `concurrency-gate.js`（129 行）。
 - **checkpointer**：`rag/langgraph/checkpointer.js` 只经 `agent-runs.js` 新增的 `getLangGraphCheckpointRecord` / `mutateLangGraphCheckpointRecord` 写入，与原生图写入共用 fencing，不写事件。`__langGraphCheckpoint` 从所有公开投影里剥离，通用更新不能碰它。
 - **每次调用都是新的 LangGraph invocation**：replan 和启动恢复都会先把旧线程写成墓碑，再从 `completedNodeRuns` 复用已完成的节点。agent run 的图 checkpoint 仍是权威。
@@ -250,6 +250,24 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
     - `test:pgvector` 109/109。
 - **有意的差异**：开 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 时，LangSmith 追踪变量为 `"true"` 会让 `/chat/stream` 在 run 创建前拒绝，`/chat` 在规划之后、图构建之前拒绝并把 run 置为 failed（native 没有 tracer 可拒绝）。只开 `AGENT_RUNTIME=langgraph` 时，不建 LangGraph 图的请求（如文档问答）与 native 一样作答；custom-Skill 阶段与 v3 入口仍在各自路径上拒绝。
 
+## 阶段 4 结果：默认切到 langgraph
+
+- **默认值**：`AGENT_RUNTIME` 未设、为空或只有空白时取 `langgraph`；`native`、`langgraph`（不分大小写）照用；其他任何值回落到 `native`，因为拼错的回退指令应当落到经过长期验证的运行时。`AGENT_OUTER_PLAN_RUNTIME` 仍默认 `native`。
+- **回退窗口**：原生调度器不删，作为一个发布周期的整体回退（约束 12），见“回退”。它同时仍在两处使用：LangGraph 无法按原生声明顺序调度的图（`canScheduleExecutionGraphOnLangGraph`）交给它跑；外层 V1 计划在两种 runtime 下都是原生循环（阶段 3 的决定）。删除原生调度器的前提是先解决前一种交回情形，计划在新默认发布一个周期后单独进行。
+- **写放大已接上**：执行器把 `retainCheckpoints: 2` 交给 saver；custom-Skill DAG 结算保存与 v3 一样在同一个 CAS 里丢弃线程记录。真库 `pg_stat_statements` 重测（PostgreSQL 18，2 节点 guarded custom-Skill `/chat`）：
+  - 语句数与阶段 3 相同：native 是 1 insert、9 带事件 CAS、3 追加事件、1 run 读、1 事件表读；langgraph 在此之外多 7 次无事件 CAS、1 次 run 读、1 次事件表读。
+  - 完成后的 `result` 从 17,006 字节降到 11,894 字节（native 11,860 字节，多出的是 29 字节的墓碑）。
+  - 运行中单次写入的线程记录最大 2,975 字节，`result` 最大 14,639 字节。
+- **spike 删除**：`server/test/langgraph-spike/` 和四个 spike 套件已删除。只有 spike 证明过的性质移进了生产套件：
+  - LangGraph 1.5.0 的两个 `maxConcurrency` 缺陷、只有 Capability 的 preflight 能停靠或拒绝节点：`langgraph-execution-graph-runtime`。
+  - 直接交给 LangGraph 的 `AbortSignal` 会重跑在途节点：`langgraph-checkpointer`。
+  - 两租户重叠执行时上下文与线程写入各归各的；被放弃的停靠节点；排队的门控 Capability 在取消后不被预检；暂停后 policy 变化时拒绝执行（`graph_approval_not_required`）：`langgraph-unified-graph`。
+  - 有待定审批门时拒绝启动 claim：`agent-execution-graph-checkpoint`。
+- **回退路径不失去覆盖**：新套件 `agent-graph-suites-native-rollback` 在 `AGENT_RUNTIME=native` 下原样重跑 9 个图相关套件。预加载钩子会让任何进入 LangGraph 执行器的调用直接失败，同时统计原生调度的图数。两个 PostgreSQL 集成套件的跨进程用例在两种 runtime 下各跑一遍。
+- **测试环境**：`npm test` 和覆盖率闸门给每个测试子进程去掉 LangSmith 追踪变量（变量列表取自生产守卫），由 `ci-workflow.test.mjs` 钉住。
+- **压测脚本**：`--agent-runtime` 默认改为 `langgraph`，与应用一致。
+- **代码量**：现在原生 runner 386 行、共享节点模块 1,138 行、`server/rag/langgraph/` 下 19 个文件共 6,463 行（含阶段 1 的适配器）。维护面还没有缩小：要等回退窗口结束、删除原生调度器之后才会体现，届时再按行数和测试数衡量。如果解决交回情形的成本过高，应重新评估是否保留原生调度器作为长期的第二调度器。
+
 ## 后果
 
 **已认可的一处偏离（2026-10-14）。** 目标文件第 10 条写的是"`RunnableConfig.signal` 接 `request-deadline.js`"。spike 证明这样做是"至少一次"：取消后在途节点在后台跑完、写入被丢、续跑时重跑。本 ADR 改为：请求 signal 触发 `RunControl.requestDrain()`，配合节点安全点、等待在途节点、v2 checkpoint 复用。终态和错误码不变（仍走 `failRun` 的 revision CAS）。
@@ -279,7 +297,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 - 阶段 2、3：`AGENT_RUNTIME` 默认 `native`，LangGraph 路径只在显式打开时运行。
 - 阶段 4 起：`AGENT_RUNTIME=native` 保留一个发布周期，作为整体回退。`AGENT_SKILL_GRAPH_ROLLOUT=off`（V1 顺序链）同样保留。
-- 数据：LangGraph checkpoint 写在 run 行 `result` 下的独立私有键，原生路径不读它；回退后已有的 run 不受影响。正在 LangGraph 上执行、尚未结束的 run 在回退后由启动恢复转人工，不由原生路径接管。
+- 数据：LangGraph 的线程记录写在 run 行 `result` 下的独立私有键，原生路径不读它。回退到 `native` 后，正在 LangGraph 上执行、尚未结束的 run 由原生路径接管：启动恢复和审批续跑都从 agent run 的图 checkpoint（权威）继续，不看线程；结算保存或 `failRun` 用 null 墓碑覆盖旧线程记录。已批准、尚未写入的 Capability 在原生路径上以 run+node 幂等键执行一次；写入后崩溃（step 为 running）仍转人工，不重放。反方向（native 停靠、langgraph 续跑）走一次新的 invocation。两个方向都有测试钉住（`langgraph-unified-graph`、`langgraph-execution-graph-runtime` 的启动恢复交叉用例、`agent-unified-graph-postgres.integration` 的 7 个跨进程用例在两种 runtime 下各跑一遍）。
 
 ## 明确不做
 

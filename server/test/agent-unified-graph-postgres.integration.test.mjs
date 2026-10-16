@@ -110,16 +110,18 @@ const loadModules = async () => {
   };
 };
 
-// Five of the cases also run with AGENT_RUNTIME=langgraph
-// (docs/adr/0001-langgraph-runtime.md, phase 3): the request in this process
-// and the recovery or approval worker in the child then schedule the v3 graph
-// on LangGraph over the same PostgreSQL rows, with the same assertions, plus
-// what only LangGraph leaves behind: the run row's thread (read through the
-// production saver), which must hold the pause as a pending interrupt of
-// public ids while the graph waits, and must be gone once the run settled. A
-// null runtime is the original case, run as written.
+// Every case runs once per runtime (docs/adr/0001-langgraph-runtime.md): the
+// request in this process and the recovery or approval worker in the child
+// schedule the v3 graph on that runtime over the same PostgreSQL rows, with
+// the same assertions, plus, on LangGraph, what only it leaves behind: the run
+// row's thread (read through the production saver), which must hold the pause
+// as a pending interrupt of public ids while the graph waits, and must be gone
+// once the run settled. `langgraph` is the default since phase 4. `native` is
+// pinned, not left unset: unset no longer means native, and this pass is
+// specifically the AGENT_RUNTIME=native rollback scheduler's (ADR constraint
+// 12), which must stay proven across processes while it is the rollback.
 const CROSS_PROCESS_RUNTIMES = [
-  { runtime: null, title: "" },
+  { runtime: "native", title: " (AGENT_RUNTIME=native)" },
   { runtime: "langgraph", title: " (AGENT_RUNTIME=langgraph)" },
 ];
 
@@ -645,7 +647,7 @@ if (workerMode === "recover") {
           assert.equal(countEvents(run, "skill_graph_resume_claimed"), 1, label);
           assert.equal(countEvents(run, "auto_recovery_completed"), 1, label);
           assert.equal(countEvents(run, "manual_recovery_required"), 0, label);
-          if (runtime) {
+          if (runtime === "langgraph") {
             // The thread the crashed process left on the row was verified
             // before the claim and dropped when the resumed graph settled.
             assert.equal(await hasLangGraphRecord(modules, runId), false, label);
@@ -765,7 +767,7 @@ if (workerMode === "recover") {
             "primary@parent": 1,
           }, label);
         }
-        if (runtime) {
+        if (runtime === "langgraph") {
           for (const crashed of [sealed, unsealed]) {
             assert.equal(await hasLangGraphRecord(modules, crashed.runId), false, crashed.label);
           }
@@ -789,200 +791,216 @@ if (workerMode === "recover") {
     }));
   }
 
-  test("cross-process resume reuses only reconciled nodes and leaves unknown in-flight work manual", {
-    timeout: 180_000,
-  }, async () => {
-    await withFixture(async (context) => {
-      const { modules, table } = context;
-      const afterPrimaryCheck = (method, args) =>
-        method === "saveExecutionGraphCheckpoint" &&
-        checkpointHasNodeRun(args.checkpoint, "primary_check") &&
-        !checkpointHasNodeRun(args.checkpoint, "follow_up");
-      const boundary = track(context, await crashRun(modules, {
-        crashAfter: afterPrimaryCheck,
-        label: "node_boundary",
-        table,
-      }));
-      const tampered = track(context, await crashRun(modules, {
-        crashAfter: afterPrimaryCheck,
-        label: "tampered_digest",
-        table,
-      }));
-      const inFlight = track(context, await crashRun(modules, {
-        crashAfter: (method, args) =>
-          method === "recordRunStep" &&
-          args.status === "running" &&
-          args.input?.nodeId === "follow_up",
-        label: "in_flight_follow_up",
-        table,
-      }));
-
-      // Rewrite one completed receipt so its typed-output digest no longer
-      // matches the checkpointed output.
-      const store = modules.createPostgresAgentRunStore();
-      const stored = await store.get({ accessScope, runId: tampered.runId });
-      await store.update({
-        accessScope,
-        expectedRevision: stored.revision,
-        patch: {
-          steps: stored.steps.map((step) =>
-            step.input?.nodeId === "primary"
-              ? { ...step, output: { ...step.output, typedOutputDigest: "v1:sha256:tampered" } }
-              : step
-          ),
-        },
-        runId: tampered.runId,
-      });
-
-      const outcome = await runRecoveryProcess({ runs: [boundary, tampered, inFlight], table });
-      assert.deepEqual(outcome, {
-        autoRecoveredCount: 1,
-        failedCount: 0,
-        manualRecoveredCount: 2,
-        skippedCount: 0,
-      });
-
-      const resumed = await loadRun(modules, boundary.runId);
-      assert.equal(resumed.run.status, "completed");
-      assert.deepEqual(
-        resumed.run.events.filter((event) => event.type === "unified_graph_executed")
-          .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
-        [
-          ["primary", "reused"],
-          ["primary_check", "reused"],
-          ["follow_up", "completed"],
-          ["follow_up_check", "completed"],
-        ]
-      );
-      // The primary call ran once, before the exit; only the pending
-      // follow-up ran in the recovering process.
-      assert.deepEqual(await countEffects(modules, table, boundary.label), {
-        "follow_up@worker": 1,
-        "primary@parent": 1,
-      });
-      assert.deepEqual(
-        describeAnswerState(resumed.checkpoint.finalization.response),
-        await referenceAnswer(modules, "resolves")
-      );
-
-      for (const [crashed, reason] of [
-        [tampered, "completed_step_without_checkpoint"],
-        [inFlight, "unknown_in_flight_node"],
-      ]) {
-        const { checkpoint, run } = await loadRun(modules, crashed.runId);
-        assert.equal(run.status, "waiting_for_user", crashed.label);
-        assert.equal(run.result.recovery.mode, "manual", crashed.label);
-        assert.equal(run.result.recovery.reason, reason, crashed.label);
-        assert.equal(checkpoint.resumeClaim, undefined, crashed.label);
-        assert.equal(countEvents(run, "skill_graph_resume_claimed"), 0, crashed.label);
-        assert.equal(
-          Object.keys(await countEffects(modules, table, crashed.label))
-            .some((key) => key.endsWith("@worker")),
-          false,
-          crashed.label
-        );
-      }
-    });
-  });
-  test("a skipped Web fallback resumes, and only a sealed answer survives a Skill version bump", {
-    timeout: 180_000,
-  }, async () => {
-    await withFixture(async (context) => {
-      const { modules, table } = context;
-      // The primary answer is supported, so the evidence check passes and
-      // the Web node (and the node after it) will be skipped; the process
-      // exits right after that passing check was checkpointed.
-      const webSkipped = track(context, await crashRun(modules, {
-        crashAfter: (method, args) =>
+  // Natively these two cases are the rollback's recovery boundaries
+  // (reconciled reuse, unknown in-flight work, a skipped Web fallback, a
+  // sealed answer after a Skill version bump), so they run on both runtimes
+  // like the five above and below.
+  for (const { runtime, title } of CROSS_PROCESS_RUNTIMES) {
+    test(`cross-process resume reuses only reconciled nodes and leaves unknown in-flight work manual${title}`, {
+      timeout: 180_000,
+    }, () => withAgentRuntime(runtime, async () => {
+      await withFixture(async (context) => {
+        const { modules, table } = context;
+        const afterPrimaryCheck = (method, args) =>
           method === "saveExecutionGraphCheckpoint" &&
-          checkpointHasNodeRun(args.checkpoint, "evidence_check"),
-        label: "web_skipped",
-        primary: "supported",
-        scenario: "conditionalWeb",
-        table,
-      }));
-      const sealedBumped = track(context, await crashRun(modules, {
-        bumpSkillVersion: true,
-        crashAfter: (method, args) =>
-          method === "saveExecutionGraphCheckpoint" && Boolean(args.checkpoint?.finalization),
-        label: "sealed_bumped",
-        table,
-      }));
-      const unsealedBumped = track(context, await crashRun(modules, {
-        bumpSkillVersion: true,
-        crashBefore: (method, args) =>
-          method === "saveExecutionGraphCheckpoint" && Boolean(args.checkpoint?.finalization),
-        label: "unsealed_bumped",
-        table,
-      }));
-      const sealedBefore = await loadRun(modules, sealedBumped.runId);
+          checkpointHasNodeRun(args.checkpoint, "primary_check") &&
+          !checkpointHasNodeRun(args.checkpoint, "follow_up");
+        const boundary = track(context, await crashRun(modules, {
+          crashAfter: afterPrimaryCheck,
+          label: "node_boundary",
+          table,
+        }));
+        const tampered = track(context, await crashRun(modules, {
+          crashAfter: afterPrimaryCheck,
+          label: "tampered_digest",
+          table,
+        }));
+        const inFlight = track(context, await crashRun(modules, {
+          crashAfter: (method, args) =>
+            method === "recordRunStep" &&
+            args.status === "running" &&
+            args.input?.nodeId === "follow_up",
+          label: "in_flight_follow_up",
+          table,
+        }));
 
-      const outcome = await runRecoveryProcess({
-        runs: [webSkipped, sealedBumped, unsealedBumped],
-        table,
-      });
-      assert.deepEqual(outcome, {
-        autoRecoveredCount: 2,
-        failedCount: 1,
-        manualRecoveredCount: 1,
-        skippedCount: 0,
-      });
+        // Rewrite one completed receipt so its typed-output digest no longer
+        // matches the checkpointed output.
+        const store = modules.createPostgresAgentRunStore();
+        const stored = await store.get({ accessScope, runId: tampered.runId });
+        await store.update({
+          accessScope,
+          expectedRevision: stored.revision,
+          patch: {
+            steps: stored.steps.map((step) =>
+              step.input?.nodeId === "primary"
+                ? { ...step, output: { ...step.output, typedOutputDigest: "v1:sha256:tampered" } }
+                : step
+            ),
+          },
+          runId: tampered.runId,
+        });
 
-      // The recovering process has no Web grant, and needs none: the passing
-      // check already decided that Web never runs.
-      const resumed = await loadRun(modules, webSkipped.runId);
-      assert.equal(resumed.run.status, "completed");
-      assert.deepEqual(await countEffects(modules, table, webSkipped.label), {
-        "primary@parent": 1,
-      });
-      assert.deepEqual(
-        resumed.run.events.filter((event) => event.type === "unified_graph_executed")
-          .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
-        [
-          ["document", "reused"],
-          ["evidence_check", "reused"],
-          ["web", "skipped"],
-          ["risk", "skipped"],
-        ]
-      );
+        const outcome = await runRecoveryProcess({ runs: [boundary, tampered, inFlight], table });
+        assert.deepEqual(outcome, {
+          autoRecoveredCount: 1,
+          failedCount: 0,
+          manualRecoveredCount: 2,
+          skippedCount: 0,
+        });
 
-      // A sealed receipt needs no live Skill: it completes the run as stored.
-      const sealedAfter = await loadRun(modules, sealedBumped.runId);
-      assert.equal(sealedAfter.run.status, "completed");
-      assert.equal(
-        sealedAfter.run.result.answer,
-        sealedBefore.checkpoint.finalization.response.body.agentAnswer
-      );
-
-      // Recomputing needs the changed catalog: the claim holder hands the run
-      // to an operator instead of leaving it running behind a spent claim.
-      const manual = await loadRun(modules, unsealedBumped.runId);
-      assert.equal(manual.run.status, "waiting_for_user");
-      assert.equal(manual.run.result.recovery.mode, "manual");
-      assert.equal(manual.run.result.recovery.reason, "graph_resume_failed");
-      assert.ok(manual.checkpoint.resumeClaim?.claimId);
-      assert.equal(manual.checkpoint.finalization, undefined);
-      assert.equal(countEvents(manual.run, "manual_recovery_required"), 1);
-      for (const crashed of [sealedBumped, unsealedBumped]) {
-        assert.deepEqual(await countEffects(modules, table, crashed.label), {
-          "follow_up@parent": 1,
+        const resumed = await loadRun(modules, boundary.runId);
+        assert.equal(resumed.run.status, "completed");
+        assert.deepEqual(
+          resumed.run.events.filter((event) => event.type === "unified_graph_executed")
+            .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
+          [
+            ["primary", "reused"],
+            ["primary_check", "reused"],
+            ["follow_up", "completed"],
+            ["follow_up_check", "completed"],
+          ]
+        );
+        // The primary call ran once, before the exit; only the pending
+        // follow-up ran in the recovering process.
+        assert.deepEqual(await countEffects(modules, table, boundary.label), {
+          "follow_up@worker": 1,
           "primary@parent": 1,
-        }, crashed.label);
-      }
+        });
+        assert.deepEqual(
+          describeAnswerState(resumed.checkpoint.finalization.response),
+          await referenceAnswer(modules, "resolves")
+        );
 
-      // A later startup changes nothing.
-      const again = await runRecoveryProcess({
-        runs: [webSkipped, sealedBumped, unsealedBumped],
-        table,
+        for (const [crashed, reason] of [
+          [tampered, "completed_step_without_checkpoint"],
+          [inFlight, "unknown_in_flight_node"],
+        ]) {
+          const { checkpoint, run } = await loadRun(modules, crashed.runId);
+          assert.equal(run.status, "waiting_for_user", crashed.label);
+          assert.equal(run.result.recovery.mode, "manual", crashed.label);
+          assert.equal(run.result.recovery.reason, reason, crashed.label);
+          assert.equal(checkpoint.resumeClaim, undefined, crashed.label);
+          assert.equal(countEvents(run, "skill_graph_resume_claimed"), 0, crashed.label);
+          assert.equal(
+            Object.keys(await countEffects(modules, table, crashed.label))
+              .some((key) => key.endsWith("@worker")),
+            false,
+            crashed.label
+          );
+        }
+        if (runtime === "langgraph") {
+          // The resumed run settled, and its settling save dropped the thread.
+          assert.equal(await hasLangGraphRecord(modules, boundary.runId), false);
+        }
       });
-      assert.deepEqual(again, {
-        autoRecoveredCount: 0,
-        failedCount: 0,
-        manualRecoveredCount: 0,
-        skippedCount: 1,
+    }));
+    test(`a skipped Web fallback resumes, and only a sealed answer survives a Skill version bump${title}`, {
+      timeout: 180_000,
+    }, () => withAgentRuntime(runtime, async () => {
+      await withFixture(async (context) => {
+        const { modules, table } = context;
+        // The primary answer is supported, so the evidence check passes and
+        // the Web node (and the node after it) will be skipped; the process
+        // exits right after that passing check was checkpointed.
+        const webSkipped = track(context, await crashRun(modules, {
+          crashAfter: (method, args) =>
+            method === "saveExecutionGraphCheckpoint" &&
+            checkpointHasNodeRun(args.checkpoint, "evidence_check"),
+          label: "web_skipped",
+          primary: "supported",
+          scenario: "conditionalWeb",
+          table,
+        }));
+        const sealedBumped = track(context, await crashRun(modules, {
+          bumpSkillVersion: true,
+          crashAfter: (method, args) =>
+            method === "saveExecutionGraphCheckpoint" && Boolean(args.checkpoint?.finalization),
+          label: "sealed_bumped",
+          table,
+        }));
+        const unsealedBumped = track(context, await crashRun(modules, {
+          bumpSkillVersion: true,
+          crashBefore: (method, args) =>
+            method === "saveExecutionGraphCheckpoint" && Boolean(args.checkpoint?.finalization),
+          label: "unsealed_bumped",
+          table,
+        }));
+        const sealedBefore = await loadRun(modules, sealedBumped.runId);
+
+        const outcome = await runRecoveryProcess({
+          runs: [webSkipped, sealedBumped, unsealedBumped],
+          table,
+        });
+        assert.deepEqual(outcome, {
+          autoRecoveredCount: 2,
+          failedCount: 1,
+          manualRecoveredCount: 1,
+          skippedCount: 0,
+        });
+
+        // The recovering process has no Web grant, and needs none: the passing
+        // check already decided that Web never runs.
+        const resumed = await loadRun(modules, webSkipped.runId);
+        assert.equal(resumed.run.status, "completed");
+        assert.deepEqual(await countEffects(modules, table, webSkipped.label), {
+          "primary@parent": 1,
+        });
+        assert.deepEqual(
+          resumed.run.events.filter((event) => event.type === "unified_graph_executed")
+            .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
+          [
+            ["document", "reused"],
+            ["evidence_check", "reused"],
+            ["web", "skipped"],
+            ["risk", "skipped"],
+          ]
+        );
+
+        // A sealed receipt needs no live Skill: it completes the run as stored.
+        const sealedAfter = await loadRun(modules, sealedBumped.runId);
+        assert.equal(sealedAfter.run.status, "completed");
+        assert.equal(
+          sealedAfter.run.result.answer,
+          sealedBefore.checkpoint.finalization.response.body.agentAnswer
+        );
+
+        // Recomputing needs the changed catalog: the claim holder hands the run
+        // to an operator instead of leaving it running behind a spent claim.
+        const manual = await loadRun(modules, unsealedBumped.runId);
+        assert.equal(manual.run.status, "waiting_for_user");
+        assert.equal(manual.run.result.recovery.mode, "manual");
+        assert.equal(manual.run.result.recovery.reason, "graph_resume_failed");
+        assert.ok(manual.checkpoint.resumeClaim?.claimId);
+        assert.equal(manual.checkpoint.finalization, undefined);
+        assert.equal(countEvents(manual.run, "manual_recovery_required"), 1);
+        for (const crashed of [sealedBumped, unsealedBumped]) {
+          assert.deepEqual(await countEffects(modules, table, crashed.label), {
+            "follow_up@parent": 1,
+            "primary@parent": 1,
+          }, crashed.label);
+        }
+
+        // A later startup changes nothing.
+        const again = await runRecoveryProcess({
+          runs: [webSkipped, sealedBumped, unsealedBumped],
+          table,
+        });
+        assert.deepEqual(again, {
+          autoRecoveredCount: 0,
+          failedCount: 0,
+          manualRecoveredCount: 0,
+          skippedCount: 1,
+        });
+        if (runtime === "langgraph") {
+          // Both completed runs settled without a thread.
+          for (const completed of [webSkipped, sealedBumped]) {
+            assert.equal(await hasLangGraphRecord(modules, completed.runId), false, completed.label);
+          }
+        }
       });
-    });
-  });
+    }));
+  }
 
   for (const { runtime, title } of CROSS_PROCESS_RUNTIMES) {
     test(`a graph paused at its approval gate in one process is approved and continued in another${title}`, {
@@ -997,7 +1015,7 @@ if (workerMode === "recover") {
         assert.equal(before.checkpoint.phase, "awaiting_approval");
         assert.equal(before.checkpoint.approvalBoundary.gateId, paused.gate.id);
         assert.deepEqual(await countEffects(modules, table, "approved"), { "primary@parent": 1 });
-        if (runtime) {
+        if (runtime === "langgraph") {
           // The parked graph on the PostgreSQL row: one pending interrupt of
           // public ids for the task node, the receipts of the two nodes that
           // ran, and no text of the request or the answer.
@@ -1051,7 +1069,7 @@ if (workerMode === "recover") {
         );
         assert.equal(countEvents(after.run, "graph_approval_approved"), 1);
         assert.equal(countEvents(after.run, "unified_graph_planned"), 1);
-        if (runtime) {
+        if (runtime === "langgraph") {
           // The approving process continued that thread and the settling
           // save dropped it: the completed run carries no thread.
           assert.equal(await hasLangGraphRecord(modules, paused.runId), false);
@@ -1124,7 +1142,7 @@ if (workerMode === "recover") {
         assert.equal(after.run.result.recovery.mode, "manual");
         assert.equal(after.run.result.recovery.reason, "unknown_in_flight_node");
         assert.equal(countEvents(after.run, "skill_graph_resume_claimed"), 0);
-        if (runtime) {
+        if (runtime === "langgraph") {
           // The dead approver's resumed thread is still on the row (the node
           // never returned its receipt), untouched by the manual verdict.
           assert.equal(await hasLangGraphRecord(modules, paused.runId), true);
@@ -1173,7 +1191,7 @@ if (workerMode === "recover") {
           ]
         );
         assert.ok(after.checkpoint.finalization);
-        if (runtime) {
+        if (runtime === "langgraph") {
           assert.equal(await hasLangGraphRecord(modules, paused.runId), false);
         }
       });

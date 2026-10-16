@@ -1,6 +1,6 @@
 // Must stay the first import: it clears the LangSmith tracing variables before
 // any @langchain module can read them.
-import "./langgraph-spike/langsmith-off.mjs";
+import "./langgraph-support/langsmith-off.mjs";
 
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -774,12 +774,18 @@ test("AGENT_OUTER_PLAN_RUNTIME alone selects the outer plan's scheduler: it defa
     [" LangGraph ", "langgraph"],
     ["pregel", "native"],
   ]) {
-    for (const runtime of ["native", "langgraph"]) {
+    // AGENT_RUNTIME unset is `langgraph` since phase 4: the new default
+    // moves the outer plan no more than an explicit value does.
+    for (const [runtime, resolvedRuntime] of [
+      ["native", "native"],
+      ["langgraph", "langgraph"],
+      [undefined, "langgraph"],
+    ]) {
       await withEnv({ AGENT_OUTER_PLAN_RUNTIME: value, AGENT_RUNTIME: runtime }, async () => {
         const label = `AGENT_OUTER_PLAN_RUNTIME=${JSON.stringify(value)} AGENT_RUNTIME=${runtime}`;
 
         assert.equal(getAgentOuterPlanRuntime(), expected, label);
-        assert.equal(getAgentRuntime(), runtime, label);
+        assert.equal(getAgentRuntime(), resolvedRuntime, label);
         // The runner agent.js resolves with no argument follows the outer
         // dial only.
         assert.equal(

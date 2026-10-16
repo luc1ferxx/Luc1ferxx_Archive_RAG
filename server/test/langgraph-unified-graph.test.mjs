@@ -1,13 +1,21 @@
 // Must stay the first import: it clears the LangSmith tracing variables before
 // any @langchain module can read them.
-import "./langgraph-spike/langsmith-off.mjs";
+import "./langgraph-support/langsmith-off.mjs";
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
+import https from "node:https";
+import { syncBuiltinESMExports } from "node:module";
+import net from "node:net";
+import { isDeepStrictEqual } from "node:util";
 
 import { uuid6 } from "@langchain/langgraph-checkpoint";
 
+import { emitAgentEvent, hasAgentEventSink, runWithAgentEventSink } from "../rag/agent-event-stream.js";
+
 import { continueAgentExecutionGraphApproval, resumeAgentExecutionGraphRun, runAgentRag } from "../rag/agent.js";
+import { buildExecutionGraphNodeStepId } from "../rag/agent-execution-graph-checkpoint.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
@@ -39,11 +47,19 @@ import {
   reconcileLangGraphThreadReceipts,
 } from "../rag/langgraph/unified-graph-thread.js";
 import {
+  getActiveDatabaseTenant,
+  runWithDatabaseTenant,
+  toDatabaseTenant,
+} from "../rag/postgres-tenant.js";
+import {
   REQUEST_CANCELLATION_REASONS,
   createRequestCancellation,
+  getRequestDeadline,
+  getRequestSignal,
   isRequestCancelledError,
   runWithRequestCancellation,
 } from "../rag/request-deadline.js";
+import { getActiveRunUsage } from "../rag/run-usage.js";
 import { createDefaultSkillRegistry } from "../rag/skills/registry.js";
 import { createUnifiedGraphEvidenceGatedSkillCase } from "../evaluation/trajectory/cases/unified-graph.js";
 import { createUnifiedGraphApprovalGatedActionCase } from "../evaluation/trajectory/cases/unified-graph-approval.js";
@@ -52,6 +68,7 @@ import {
   DOCUMENT_LOOP_QUESTION,
   UNIFIED_ACCESS_SCOPE as accessScope,
   UNIFIED_DOC_ID,
+  UNIFIED_FILE_NAME,
   UNIFIED_SESSION_ID,
   createApprovalGatedTaskProposal,
   createCrashingRunService,
@@ -402,8 +419,11 @@ const privateTexts = (context) => [
 
 test("AGENT_RUNTIME selects the scheduler and the stage names both", async () => {
   assert.deepEqual(UNIFIED_GRAPH_RUNTIMES, { langgraph: "langgraph", native: "native" });
-  assert.equal(await withEnv({ AGENT_RUNTIME: undefined }, () => getAgentRuntime()), "native");
+  // Unset is LangGraph since phase 4 (docs/adr/0001-langgraph-runtime.md);
+  // `native` is the rollback, and an unknown value falls back to it.
+  assert.equal(await withEnv({ AGENT_RUNTIME: undefined }, () => getAgentRuntime()), "langgraph");
   assert.equal(await withEnv({ AGENT_RUNTIME: "langgraph" }, () => getAgentRuntime()), "langgraph");
+  assert.equal(await withEnv({ AGENT_RUNTIME: "native" }, () => getAgentRuntime()), "native");
   assert.equal(await withEnv({ AGENT_RUNTIME: "pregel" }, () => getAgentRuntime()), "native");
 });
 
@@ -676,6 +696,77 @@ test("a wrong approval object, a stale Capability version and a non-guarded roll
   assert.equal(run.result.recovery.reason, "unified_graph_rollout_not_guarded");
 });
 
+test("parity: an approved gate whose live policy no longer asks for approval is refused, and the parked Capability never runs", async () => {
+  // Ported from the phase-0 spike, which pinned it only against its own
+  // reimplementation. When the approved node starts, the gate is derived
+  // again from the live Capability (verifyCapabilityGraphApproval): a policy
+  // that stopped asking for approval after the pause (same id and version,
+  // so the stale-version check does not fire) must not turn the approval
+  // into a licence to run. The node refuses before its step, budget or call,
+  // and the run goes to an operator, identically on both runtimes.
+  const refused = {};
+
+  for (const runtime of RUNTIMES) {
+    const context = await askOn(runtime);
+    const { registry: drifted, writes: driftedWrites } = await createTaskCapabilityRegistry({
+      approvalPolicy: { mode: "direct", writesWorkspace: true },
+      ragService: context.ragService,
+    });
+    const before = await load(context.agentRunService, context.runId);
+
+    assert.equal(before.checkpoint.phase, "awaiting_approval", runtime);
+    await assert.rejects(decideOn(runtime, { action: "approve", context, registry: drifted }), (error) => {
+      assert.equal(error.code, "graph_approval_not_required", runtime);
+      assert.equal(error.status, 409, runtime);
+      return true;
+    });
+
+    const after = await load(context.agentRunService, context.runId);
+
+    // Neither Capability (the one that parked, the drifted one) wrote.
+    assert.equal(context.writes.length + driftedWrites.length, 0, runtime);
+    // The gated node opened no step and settled nowhere; the owner's budget
+    // and the settled nodes are exactly those of the pause. Only the phase
+    // (the continuation reopened the graph), its sequence and seal moved.
+    assert.equal(after.run.steps.some((step) => step.input?.nodeId === "task"), false, runtime);
+    assert.deepEqual(after.checkpoint.nodeRuns, before.checkpoint.nodeRuns, runtime);
+    assert.deepEqual(after.checkpoint.owner, before.checkpoint.owner, runtime);
+    assert.deepEqual(
+      Object.keys({ ...before.checkpoint, ...after.checkpoint })
+        .filter((key) => !isDeepStrictEqual(before.checkpoint[key], after.checkpoint[key]))
+        .sort(),
+      ["digest", "phase", "sequence"],
+      runtime
+    );
+    assert.equal(after.checkpoint.phase, "running", runtime);
+    assert.equal(after.run.status, "waiting_for_user", runtime);
+    assert.equal(after.run.result.recovery.mode, "manual", runtime);
+    assert.equal(after.run.result.recovery.reason, "graph_approval_continuation_failed", runtime);
+    assert.deepEqual(after.run.events.slice(-2).map((event) => event.type), [
+      "graph_approval_approved",
+      "manual_recovery_required",
+    ]);
+
+    // Restoring the policy does not reopen it: the gate is spent and the run
+    // belongs to an operator.
+    await assert.rejects(decideOn(runtime, { action: "approve", context }), (error) => error.status === 409);
+    assert.equal(context.writes.length + driftedWrites.length, 0, runtime);
+
+    refused[runtime] = { context, outcome: await describeOutcome({ ...context, response: null }) };
+  }
+
+  assert.deepEqual(refused.langgraph.outcome, refused.native.outcome);
+
+  // On LangGraph the decision resumed the thread (the runtime's marker is its
+  // resume write) and the node refused inside it, so the pause is still the
+  // thread's pending interrupt and no receipt was added for the task.
+  const thread = await readThread(refused.langgraph.context.agentRunService, refused.langgraph.context.runId);
+  assert.deepEqual(thread.interrupts.map((pending) => pending.value), [buildApprovalInterruptPayload({ nodeId: "task" })]);
+  assert.deepEqual(receiptStatuses(thread), { document: "completed", evidence_check: "completed" });
+  assert.deepEqual(thread.resumeWrites, [[RUNTIME_RESUME_MARKER]]);
+  assert.equal(await rawRecord(refused.native.context.store, refused.native.context.runId), null);
+});
+
 test("a runtime switch between the pause and the decision continues the graph either way", async () => {
   // Paused natively (no thread), decided on LangGraph: a fresh invocation
   // seeded from the checkpoint, so the settled nodes are entered as reused
@@ -848,16 +939,26 @@ test("startup recovery reads the thread before claiming and refuses one that con
   }
 
   // Natively the same forged thread is never read: the native runtime does
-  // not know it exists, and recovery runs the approved node once.
+  // not know it exists, and recovery runs the approved node once. This is
+  // what an AGENT_RUNTIME=native rollback does with a run LangGraph left
+  // unfinished: it resumes from the graph checkpoint, and the save that
+  // settles the graph drops the stale thread (the null tombstone).
   const native = await askOn("langgraph");
   await approveThenCrashBeforeTask(native);
   await forgeThreadReceipts(native, (receipts) => ({
     ...receipts,
     "node:document": { ...receipts["node:document"], outputDigest: `v1:sha256:${"0".repeat(64)}` },
   }));
+  assert.notEqual(await rawRecord(native.store, native.runId), null);
   const nativeOutcome = await recoverOn("native", { context: native });
   assert.equal(nativeOutcome.autoRecoveredCount, 1);
   assert.equal(native.writes.length, 1);
+  assert.equal((await load(native.agentRunService, native.runId)).run.status, "completed");
+  assert.equal(await rawRecord(native.store, native.runId), null);
+  assert.equal(
+    Object.hasOwn((await native.store.get({ accessScope, runId: native.runId })).result, LANGGRAPH_CHECKPOINT_RESULT_KEY),
+    true
+  );
 
   // A thread behind its checkpoint, or none at all, is no contradiction: the
   // fresh invocation resumes from the checkpoint.
@@ -1040,6 +1141,146 @@ test("parity: a request cancelled inside the unified graph stops at the next nod
       // failed (or cancelled) the run.
       assert.equal(await rawRecord(store, runId), null, `${runtime}/${reason}`);
       outcomes[runtime] = { checkpoint: mask(checkpoint), error: mask(outcome.error), run: mask(run) };
+    }
+
+    assert.deepEqual(outcomes.langgraph, outcomes.native, reason);
+  }
+});
+
+// The task depends on the document answer only and is declared after the
+// evidence check, so both are ready in the same pass (one superstep); the
+// task is not parallel-safe, so it waits until the check has settled.
+const createTaskQueuedBehindCheckProposal = () => {
+  const [documentNode, checkNode, taskNode] = createApprovalGatedTaskProposal().nodes;
+  const { when, ...unconditionalTask } = taskNode;
+
+  return { nodes: [documentNode, checkNode, { ...unconditionalTask, dependsOn: ["document"] }] };
+};
+
+// Counts the Capability preflights of task.create: the registry reads the
+// graph-approval preflight makes (resolveCapability), told apart from the
+// catalog's and admission's reads by the preflight's frame on the stack.
+const countTaskPreflights = (registry) => {
+  const counter = { count: 0 };
+
+  counter.registry = new Proxy(registry, {
+    get(target, property) {
+      const value = target[property];
+
+      if (property === "get") {
+        return (capabilityId, ...rest) => {
+          if (capabilityId === "task.create" && /preflightCapabilityGraphApproval/.test(new Error().stack)) {
+            counter.count += 1;
+          }
+          return value.call(target, capabilityId, ...rest);
+        };
+      }
+
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  return counter;
+};
+
+test("parity: an exclusive approval-gated Capability queued behind a running sibling is never preflighted, parked or charged once the request is cancelled", async () => {
+  // Ported from the phase-0 spike. The cancellation arrives while the check
+  // is in flight and the task waits for it (natively in the queue, on
+  // LangGraph at the concurrency gate). The request's error is the answer,
+  // never an approval pause: the task passes the launch safe point first
+  // (agent-execution-graph-node.js runs throwIfRequestCancelled before
+  // preflightNode), so it is not preflighted, parked, stepped or charged.
+  const run = async (runtime, { cancelReason = null } = {}) => {
+    const store = newStore();
+    const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
+    let checkStepId = null;
+    const { service: agentRunService } = createCrashingRunService(newService(store), {
+      // Never crashes: only observes the check's step completing, while its
+      // node is still in flight (its checkpoint not yet saved).
+      crashAfter: (method, args) => {
+        if (method === "recordRunStep" && args.status === "running" && args.input?.nodeId === "evidence_check") {
+          checkStepId = args.stepId;
+        }
+        if (cancelReason && method === "recordRunStep" && args.status === "completed" && args.stepId === checkStepId) {
+          cancellation.cancel(cancelReason);
+        }
+        return false;
+      },
+    });
+    const ragService = createDocumentLoopRagService({ primary: "supported" });
+    const { registry, writes } = await createTaskCapabilityRegistry({ ragService });
+    const preflights = countTaskPreflights(registry);
+    const outcome = await settle(
+      runWithRequestCancellation(cancellation, () =>
+        onRuntime(runtime, () =>
+          runAgentRag({
+            accessScope,
+            agentRunService,
+            capabilityRegistry: preflights.registry,
+            docIds: [UNIFIED_DOC_ID],
+            question: APPROVAL_TASK_QUESTION,
+            ragService,
+            sessionId: UNIFIED_SESSION_ID,
+            unifiedGraphAllowedCapabilityIds: ["task.create"],
+            unifiedGraphPlannerAdapter: createProposalAdapter(createTaskQueuedBehindCheckProposal),
+            userId: accessScope.userId,
+          })
+        )
+      )
+    );
+    cancellation.dispose();
+    const runId = outcome.value?.body?.agentRunId ?? outcome.error?.agentRunId ?? null;
+
+    return { ...(await load(newService(store), runId)), outcome, preflights: preflights.count, runId, store, writes };
+  };
+
+  for (const [reason, status, code] of [
+    [REQUEST_CANCELLATION_REASONS.deadlineExceeded, "failed", "AGENT_DEADLINE_EXCEEDED"],
+    [REQUEST_CANCELLATION_REASONS.clientCancelled, "canceled", "AGENT_CLIENT_CANCELLED"],
+  ]) {
+    const outcomes = {};
+
+    for (const runtime of RUNTIMES) {
+      // Not vacuous: uncancelled, the same graph preflights the task (in the
+      // node, then again to bind the gate; the counter sees both registry
+      // reads of each) and parks it.
+      const control = await run(runtime);
+      assert.equal(control.outcome.error, null, `${runtime}: ${control.outcome.error?.message}`);
+      assert.equal(control.outcome.value.body.clarification.reason, "capability_approval_required", runtime);
+      assert.equal(control.preflights, 4, runtime);
+      assert.equal(control.checkpoint.phase, "awaiting_approval", runtime);
+
+      const cancelled = await run(runtime, { cancelReason: reason });
+      const where = `${runtime}/${reason}`;
+
+      assert.ok(isRequestCancelledError(cancelled.outcome.error), `${where}: ${cancelled.outcome.error?.message}`);
+      assert.equal(cancelled.outcome.error.code, code, where);
+      assert.equal(cancelled.run.status, status, where);
+      // The task was never preflighted, so never parked: no gate, no gate
+      // event, and the run is not waiting for anyone.
+      assert.equal(cancelled.preflights, 0, where);
+      assert.deepEqual(cancelled.run.approvalGates ?? [], [], where);
+      assert.equal(cancelled.run.events.some((event) => event.type === "graph_approval_gate_created"), false, where);
+      // Nor started or charged: no step, no node run (budget is reserved in
+      // the node's lifecycle), no write. The check settled first.
+      assert.deepEqual(
+        cancelled.run.steps.map((step) => [step.input?.nodeId, step.status]),
+        [["document", "completed"], ["evidence_check", "completed"]],
+        where
+      );
+      assert.deepEqual(
+        cancelled.checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
+        [["document", "completed"], ["evidence_check", "completed"]],
+        where
+      );
+      assert.equal(cancelled.checkpoint.phase, "running", where);
+      assert.equal(cancelled.writes.length, 0, where);
+      assert.equal(await rawRecord(cancelled.store, cancelled.runId), null, where);
+      outcomes[runtime] = {
+        checkpoint: mask(cancelled.checkpoint),
+        error: mask(cancelled.outcome.error),
+        run: mask(cancelled.run),
+      };
     }
 
     assert.deepEqual(outcomes.langgraph, outcomes.native, reason);
@@ -1397,4 +1638,451 @@ test("a failed receipt agrees with a checkpoint that holds the node as failed, a
     reconcile({ check: { ...failed, reason: "x" } }, new Set(["check"])).reason,
     LANGGRAPH_THREAD_RECONCILIATION_REASONS.failedReceipt
   );
+});
+
+test("parity: a gated task whose graph then fails a later node is abandoned, never approved or run, identically on both runtimes", async () => {
+  // Ported from the phase-0 spike, whose own runner settled this case
+  // differently from native (a pinned divergence). Production schedules the
+  // parked node's end with the native tail (finishExecutionGraphRun): a graph
+  // that already failed a node never asks the user to approve more work, so
+  // the parked task is skipped, no gate is persisted, and the run fails as
+  // partial, with the same run, steps, events and checkpoint on both
+  // runtimes. On LangGraph the parked node returned its receipt (later layers
+  // still had work), and the settling save left no thread.
+  const failingFollowUp = async ({ phase }) => {
+    if (phase === "follow_up") {
+      throw Object.assign(new Error("The follow-up model refused the request."), { status: 400 });
+    }
+  };
+  const outcomes = {};
+
+  for (const runtime of RUNTIMES) {
+    const context = await askOn(runtime, {
+      primary: "unsupported",
+      proposal: createTaskWithIndependentLaterWorkProposal,
+      ragOptions: { onChat: failingFollowUp },
+    });
+    // The 409 carries no run id: the run is the store's only one.
+    const [{ runId }] = (await context.agentRunService.listRuns({ accessScope })).runs ??
+      (await context.agentRunService.listRuns({ accessScope }));
+    const located = { ...context, runId };
+
+    assert.equal(context.error?.code, "AGENT_UNIFIED_GRAPH_PARTIAL", runtime);
+    assert.equal(context.writes.length, 0, runtime);
+    assert.deepEqual(context.ragService.calls.map((call) => call.phase), ["primary", "follow_up"], runtime);
+    outcomes[runtime] = {
+      outcome: await describeOutcome(located),
+      raw: await rawRecord(context.store, runId),
+    };
+  }
+
+  assert.deepEqual(outcomes.langgraph.outcome, outcomes.native.outcome);
+
+  const { checkpoint, run } = outcomes.native.outcome;
+
+  assert.equal(run.status, "failed");
+  assert.equal(checkpoint.phase, "partial");
+  assert.deepEqual(
+    checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
+    [
+      ["document", "completed"],
+      ["task", "skipped"],
+      ["evidence_check", "completed"],
+      ["follow_up", "failed"],
+      ["follow_up_check", "skipped"],
+    ]
+  );
+  assert.deepEqual(run.approvalGates ?? [], []);
+  // The document's node step exists; the task's never opened.
+  const stepIdOf = (nodeId) => buildExecutionGraphNodeStepId({ checkpointVersion: "v2", nodeId });
+  assert.equal(run.steps.some((step) => step.id === stepIdOf("document")), true);
+  assert.equal(run.steps.some((step) => step.id === stepIdOf("task")), false);
+  assert.equal(outcomes.native.raw, null);
+  assert.equal(outcomes.langgraph.raw, null);
+});
+
+// ---------------------------------------------------------------------------
+// The request's async context on LangGraph (ported from the phase-0 spike)
+// ---------------------------------------------------------------------------
+
+// What the code at `where` sees of the stores a request binds before the
+// agent runs (auth.js bindDatabaseTenant, routes/chat.js
+// runAgentRequestWithCancellation and its event sink; agent.js binds the run
+// usage itself). The probe event goes to whichever sink is bound there, so
+// sink identity is checked by where the event lands.
+let alsProbeSequence = 0;
+const observeAls = (where) => {
+  alsProbeSequence += 1;
+  const probeId = `als-probe-${alsProbeSequence}`;
+  emitAgentEvent({ probeId, type: "als_probe", where });
+
+  return {
+    deadlineAt: getRequestDeadline(),
+    hasSink: hasAgentEventSink(),
+    probeId,
+    signal: getRequestSignal(),
+    tenant: getActiveDatabaseTenant(),
+    usage: getActiveRunUsage(),
+    where,
+  };
+};
+
+const createRequestStack = ({ label, scope }) => {
+  const sinkEvents = [];
+  const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 10 * 60 * 1000 });
+  const sink = (event) => sinkEvents.push(event);
+  const observations = [];
+
+  return {
+    cancellation,
+    label,
+    observations,
+    observe: (where) => observations.push(observeAls(where)),
+    run: (callback) =>
+      runWithDatabaseTenant(scope, () =>
+        runWithRequestCancellation(cancellation, () => runWithAgentEventSink(sink, callback))
+      ),
+    scope,
+    sinkEvents,
+  };
+};
+
+// `detachedDeadline`: a Capability that writes the workspace runs outside the
+// request's deadline once started (request-deadline.js, "What is
+// cancelled"), so it sees no deadline and no signal, by design.
+const assertSeesOwnStack = (observation, stack, others, { detachedDeadline = false } = {}) => {
+  const where = `${observation.where} under ${stack.label}`;
+
+  assert.deepStrictEqual(observation.tenant, toDatabaseTenant(stack.scope), `tenant at ${where}`);
+  assert.equal(observation.signal, detachedDeadline ? null : stack.cancellation.signal, `signal at ${where}`);
+  assert.equal(
+    observation.deadlineAt,
+    detachedDeadline ? null : stack.cancellation.store.deadlineAt,
+    `deadline at ${where}`
+  );
+  assert.equal(observation.hasSink, true, `event sink at ${where}`);
+  assert.ok(
+    stack.sinkEvents.some((event) => event.probeId === observation.probeId),
+    `the probe at ${where} reached its own sink`
+  );
+  for (const other of others) {
+    assert.equal(
+      other.sinkEvents.some((event) => event.probeId === observation.probeId),
+      false,
+      `the probe at ${where} leaked into ${other.label}'s sink`
+    );
+  }
+};
+
+// Every call the run service makes to the store, observed where it is made
+// (the saver's thread writes included), with the arguments it names: the
+// call's own access scope is what attributes it to a request, so the ambient
+// context seen there is checked against it, never chosen by it.
+const createObservedStore = (store, observe) => {
+  const observed = {};
+
+  for (const [name, value] of Object.entries(store)) {
+    observed[name] = typeof value === "function"
+      ? (...args) => {
+          observe(`store:${name}`, args[0]);
+          return value.apply(store, args);
+        }
+      : value;
+  }
+
+  return observed;
+};
+
+// Counts every way this process could reach the network; the assertion is
+// that there are none. syncBuiltinESMExports carries the patched properties
+// to ESM named imports of the builtins.
+const withNetworkSpy = async (callback) => {
+  const calls = [];
+  const patches = [
+    [globalThis, "fetch"],
+    [http, "request"],
+    [http, "get"],
+    [https, "request"],
+    [https, "get"],
+    [net, "connect"],
+    [net, "createConnection"],
+    [net.Socket.prototype, "connect"],
+  ];
+  const originals = patches.map(([target, key]) => target[key]);
+
+  patches.forEach(([target, key], index) => {
+    const original = originals[index];
+    target[key] = function spied(...args) {
+      calls.push(key);
+      return original.apply(this, args);
+    };
+  });
+  syncBuiltinESMExports();
+
+  try {
+    return { calls, result: await callback() };
+  } finally {
+    patches.forEach(([target, key], index) => {
+      target[key] = originals[index];
+    });
+    syncBuiltinESMExports();
+  }
+};
+
+// Resolves once `count` callers arrived, so their work provably overlapped.
+const createArrivalBarrier = (count) => {
+  let arrived = 0;
+  let open;
+  const opened = new Promise((resolve) => {
+    open = resolve;
+  });
+
+  return {
+    arrive() {
+      arrived += 1;
+      if (arrived === count) {
+        open();
+      }
+      return opened;
+    },
+    get arrived() {
+      return arrived;
+    },
+  };
+};
+
+test("on LangGraph each request's tenant, deadline, event sink and run usage reach every node, Skill call, Capability write and thread write, two tenants' overlapping graphs never share them, and an approval continues under its own request", async () => {
+  // Not vacuous: outside a request nothing is bound.
+  const outside = observeAls("outside");
+  assert.deepStrictEqual(
+    [outside.tenant, outside.usage, outside.signal, outside.deadlineAt, outside.hasSink],
+    [null, null, null, null, false]
+  );
+
+  const store = newStore();
+  const tenants = [
+    { label: "alice", scope: accessScope },
+    { label: "bob", scope: { userId: "unified-bob", workspaceId: accessScope.workspaceId } },
+  ];
+  const chatBarrier = createArrivalBarrier(tenants.length);
+  const writeBarrier = createArrivalBarrier(tenants.length);
+  // The stack of the request a store call belongs to: each call is
+  // attributed by the access scope it names (the run service passes the
+  // request's scope explicitly), not by the ambient tenant. The ambient
+  // context there -- tenant, deadline, signal, sink -- is then checked
+  // against that request's own stack (assertSeesOwnStack below), so a
+  // context swapped between the two overlapping requests at a saver write
+  // fails the test instead of being attributed to the other request.
+  const stacksByTenant = new Map();
+  const unattributedStoreCalls = [];
+  const storeTenantMismatches = [];
+  // Every LangGraph thread record a write hands the store, by the tenant the
+  // write names, copied at write time (the settling save drops the record).
+  const threadRecordsByTenant = new Map();
+  const observeStore = (where, args) => {
+    const callScope = args?.accessScope ?? null;
+    const slot = stacksByTenant.get(callScope?.userId);
+
+    if (!slot) {
+      // A store call that names no tenant, or an unknown one: it would be a leak.
+      unattributedStoreCalls.push(where);
+      return;
+    }
+
+    if (!isDeepStrictEqual(getActiveDatabaseTenant(), toDatabaseTenant(callScope))) {
+      storeTenantMismatches.push({ ambient: getActiveDatabaseTenant(), named: callScope.userId, where });
+    }
+    slot.current.observe(where);
+
+    const record = args?.patch?.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY];
+
+    if (record !== null && record !== undefined) {
+      threadRecordsByTenant.get(callScope.userId).push(structuredClone(record));
+    }
+  };
+  const agentRunStore = createObservedStore(store, observeStore);
+  const sameScope = (scope, expected) =>
+    scope?.userId === expected.userId && scope?.workspaceId === expected.workspaceId;
+
+  const contexts = await Promise.all(
+    tenants.map(async ({ label, scope }) => {
+      const pause = createRequestStack({ label: `${label}:pause`, scope });
+      const approve = createRequestStack({ label: `${label}:approve`, scope });
+      const slot = { current: pause };
+      stacksByTenant.set(scope.userId, slot);
+      threadRecordsByTenant.set(scope.userId, []);
+      const base = createDocumentLoopRagService({
+        onChat: async ({ phase }) => {
+          slot.current.observe(`chat:${phase}`);
+          // Both tenants' document nodes are in flight at once.
+          await chatBarrier.arrive();
+          slot.current.observe(`chat-after-barrier:${phase}`);
+        },
+        primary: "supported",
+      });
+      const ragService = {
+        ...base,
+        getDocument: (docId, requested) =>
+          sameScope(requested, scope) && docId === UNIFIED_DOC_ID
+            ? { docId, fileName: UNIFIED_FILE_NAME }
+            : null,
+        listDocuments: (requested) =>
+          sameScope(requested, scope) ? [{ docId: UNIFIED_DOC_ID, fileName: UNIFIED_FILE_NAME }] : [],
+      };
+      const { registry, writes } = await createTaskCapabilityRegistry({
+        onWrite: async () => {
+          slot.current.observe("capability:write");
+          await writeBarrier.arrive();
+        },
+        ragService,
+      });
+
+      return { approve, base, label, pause, ragService, registry, scope, slot, writes };
+    })
+  );
+
+  const { calls, result } = await withNetworkSpy(() =>
+    onRuntime("langgraph", async () => {
+      // Both requests park at the task's gate, their graphs overlapping.
+      const paused = await Promise.all(
+        contexts.map((context) =>
+          context.pause.run(() =>
+            runAgentRag({
+              accessScope: context.scope,
+              agentRunService: newService(agentRunStore),
+              capabilityRegistry: context.registry,
+              docIds: [UNIFIED_DOC_ID],
+              question: APPROVAL_TASK_QUESTION,
+              ragService: context.ragService,
+              sessionId: UNIFIED_SESSION_ID,
+              unifiedGraphAllowedCapabilityIds: ["task.create"],
+              unifiedGraphPlannerAdapter: createProposalAdapter(createApprovalGatedTaskProposal),
+              userId: context.scope.userId,
+            })
+          )
+        )
+      );
+
+      for (const context of contexts) {
+        context.slot.current = context.approve;
+      }
+
+      // Both approvals, each a new request on a new run service, continue
+      // their own graph at the same time.
+      const approved = await Promise.all(
+        contexts.map((context, index) => {
+          const service = newService(agentRunStore);
+          const gate = paused[index].body.approvalGates[0];
+
+          return context.approve.run(() =>
+            createAgentRunStepExecutor({
+              agentRunService: service,
+              capabilityRegistry: context.registry,
+              continueExecutionGraphApproval: (args) =>
+                continueAgentExecutionGraphApproval({
+                  ...args,
+                  agentRunService: service,
+                  capabilityRegistry: context.registry,
+                  ragService: context.ragService,
+                }),
+            }).applyApprovalAction({
+              accessScope: context.scope,
+              action: "approve",
+              gateId: gate.id,
+              payload: { approvalObjectHash: gate.approvalObjectHash },
+              runId: paused[index].body.agentRunId,
+            })
+          );
+        })
+      );
+
+      return { approved, paused };
+    })
+  );
+
+  // Not one network call: LangGraph and LangChain neither trace nor phone
+  // home on their own.
+  assert.deepStrictEqual(calls, []);
+  assert.deepStrictEqual(unattributedStoreCalls, []);
+  // At every store call the ambient database tenant is the tenant the call
+  // names (the thread writes included).
+  assert.deepStrictEqual(storeTenantMismatches, []);
+  assert.equal(chatBarrier.arrived, tenants.length);
+  assert.equal(writeBarrier.arrived, tenants.length);
+
+  for (const [index, context] of contexts.entries()) {
+    const others = contexts
+      .filter((_, otherIndex) => otherIndex !== index)
+      .flatMap((other) => [other.pause, other.approve]);
+    const { approved, paused } = result;
+
+    assert.equal(paused[index].body.clarification.reason, "capability_approval_required", context.label);
+    assert.equal(approved[index].run.status, "completed", context.label);
+    assert.equal(context.writes.length, 1, context.label);
+
+    const pauseWheres = context.pause.observations.map((observation) => observation.where);
+    const approveWheres = context.approve.observations.map((observation) => observation.where);
+
+    // The document node ran in the first request, the Capability in the
+    // second, and both requests wrote the run, the thread included.
+    assert.deepEqual(
+      pauseWheres.filter((where) => where.startsWith("chat")),
+      ["chat:primary", "chat-after-barrier:primary"],
+      context.label
+    );
+    assert.equal(approveWheres.some((where) => where.startsWith("chat")), false, context.label);
+    assert.deepEqual(approveWheres.filter((where) => where.startsWith("capability")), ["capability:write"]);
+    assert.ok(pauseWheres.includes("store:update"), `${context.label}: the thread writes`);
+    assert.ok(approveWheres.some((where) => where.startsWith("store:")), context.label);
+
+    // One run usage per request, the same in every node and write of it.
+    for (const stack of [context.pause, context.approve]) {
+      const usages = new Set(
+        stack.observations
+          .filter((observation) => !observation.where.startsWith("store:"))
+          .map((observation) => observation.usage)
+      );
+      assert.equal(usages.size, 1, stack.label);
+      assert.notEqual([...usages][0], null, stack.label);
+    }
+    assert.notEqual(
+      context.pause.observations.find((observation) => observation.where === "chat:primary").usage,
+      context.approve.observations.find((observation) => observation.where === "capability:write").usage
+    );
+
+    for (const observation of context.pause.observations) {
+      assertSeesOwnStack(observation, context.pause, [...others, context.approve]);
+    }
+    for (const observation of context.approve.observations) {
+      assertSeesOwnStack(observation, context.approve, [...others, context.pause], {
+        detachedDeadline: observation.where === "capability:write",
+      });
+    }
+  }
+
+  // Each tenant's thread records belong to its own run and hold nothing of
+  // the other tenant's: not its user id, not its run id.
+  for (const [index, context] of contexts.entries()) {
+    const runId = result.paused[index].body.agentRunId;
+    const records = threadRecordsByTenant.get(context.scope.userId);
+    const [other] = contexts.filter((_, otherIndex) => otherIndex !== index);
+    const otherRunId = result.paused[contexts.indexOf(other)].body.agentRunId;
+
+    assert.ok(records.length > 0, `${context.label} wrote its thread`);
+    for (const record of records) {
+      assert.deepStrictEqual(record.owner, { runId, userId: context.scope.userId, workspaceId: context.scope.workspaceId });
+      assertNoText(record, [other.scope.userId, otherRunId]);
+    }
+  }
+
+  // The tenants' usages are their own.
+  assert.notEqual(
+    contexts[0].pause.observations.find((observation) => observation.where === "chat:primary").usage,
+    contexts[1].pause.observations.find((observation) => observation.where === "chat:primary").usage
+  );
+
+  for (const context of contexts) {
+    context.pause.cancellation.dispose();
+    context.approve.cancellation.dispose();
+  }
 });

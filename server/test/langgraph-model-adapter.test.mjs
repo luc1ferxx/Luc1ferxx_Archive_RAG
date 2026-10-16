@@ -1,4 +1,4 @@
-import "./langgraph-spike/langsmith-off.mjs";
+import "./langgraph-support/langsmith-off.mjs";
 
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";

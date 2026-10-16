@@ -1,4 +1,4 @@
-import "./langgraph-spike/langsmith-off.mjs";
+import "./langgraph-support/langsmith-off.mjs";
 
 import test, { after, afterEach, before } from "node:test";
 import assert from "node:assert/strict";

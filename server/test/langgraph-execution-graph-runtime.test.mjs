@@ -1,11 +1,11 @@
 // Must stay the first import: it clears the LangSmith tracing variables before
 // any @langchain module can read them.
-import "./langgraph-spike/langsmith-off.mjs";
+import "./langgraph-support/langsmith-off.mjs";
 
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { END, START, StateGraph } from "@langchain/langgraph";
+import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
 
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { resumeAgentExecutionGraphRun } from "../rag/agent.js";
@@ -18,6 +18,7 @@ import {
   EXECUTION_GRAPH_FAILURE_POLICIES,
   createExecutionGraph,
 } from "../rag/agent-execution-graph.js";
+import { EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY } from "../rag/agent-execution-graph-checkpoint.js";
 import { createExecutionGraphNodeStates } from "../rag/agent-execution-graph-node.js";
 import {
   admitExecutionGraphRun,
@@ -32,13 +33,17 @@ import {
   getAgentRunStepLifecycleTarget,
 } from "../rag/agent-run-step-lifecycle.js";
 import {
+  LANGGRAPH_CHECKPOINT_RESULT_KEY,
   createAgentRunCursor,
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
 import { getAgentRuntime } from "../rag/config.js";
-import { RunStoreCheckpointSaver } from "../rag/langgraph/checkpointer.js";
+import {
+  LANGGRAPH_CHECKPOINT_RETENTION,
+  RunStoreCheckpointSaver,
+} from "../rag/langgraph/checkpointer.js";
 import {
   ExecutionGraphReceiptState,
   canScheduleExecutionGraphOnLangGraph,
@@ -332,9 +337,8 @@ const settleOutcome = async (work) => {
 };
 
 const createRunHarness = async ({ skills }) => {
-  const agentRunService = createAgentRunService({
-    agentRunStore: createInMemoryAgentRunStore(),
-  });
+  const agentRunStore = createInMemoryAgentRunStore();
+  const agentRunService = createAgentRunService({ agentRunStore });
 
   await agentRunService.createRun({
     accessScope,
@@ -350,7 +354,7 @@ const createRunHarness = async ({ skills }) => {
     runId: RUN_ID,
   });
 
-  return { agentRunService, runCursor: createAgentRunCursor() };
+  return { agentRunService, agentRunStore, runCursor: createAgentRunCursor() };
 };
 
 const collectRun = async ({ agentRunService, budgetState, extra, probe, tracker, trace }) => {
@@ -439,6 +443,10 @@ const runStageScenario = async ({ runtime, scenario }) => {
         replanAdapter,
         retrievalPlan: RETRIEVAL_PLAN,
         runtime,
+        // Leaves out the settling save's dropLangGraphRecord (agent.js
+        // forwards it), so a scenario can still read the LangGraph thread
+        // after the stage; the drop itself is pinned by "the stage reads
+        // AGENT_RUNTIME ..." below and by the /chat suites.
         saveExecutionGraphCheckpoint: async (checkpoint) => {
           const saved = await agentRunService.saveExecutionGraphCheckpoint({
             accessScope,
@@ -488,6 +496,7 @@ const runExecutorScenario = async ({ runtime, scenario }) => {
     docIds = [...DOC_IDS],
     graph,
     maxConcurrency,
+    preflightNode = null,
     probe,
     skills,
     wrap = (work) => work(),
@@ -522,6 +531,7 @@ const runExecutorScenario = async ({ runtime, scenario }) => {
         onNodeSettled: ({ nodeRun }) => {
           settled.push(nodeRun);
         },
+        ...(preflightNode ? { preflightNode } : {}),
         question: QUESTION,
         ragService: {},
         recordSkillResult: tracker.recordSkillResult,
@@ -583,6 +593,8 @@ const readThread = async (agentRunService) => {
 
   return {
     checkpointCount: checkpoints.length,
+    // LangGraph's step of each retained checkpoint, newest first.
+    steps: checkpoints.map((tuple) => tuple.metadata?.step ?? null),
     // Back to nodeId keys for the assertions; the stored keys are
     // "node:" + nodeId.
     receipts: stored === null
@@ -646,18 +658,25 @@ const assertParity = async ({ build, level = "stage", skillRunOrder = "exact" })
 // AGENT_RUNTIME
 // ---------------------------------------------------------------------------
 
-test("AGENT_RUNTIME defaults to native and only `langgraph` selects LangGraph", async () => {
+test("AGENT_RUNTIME defaults to langgraph, `native` is the rollback, and an unknown value falls back to native", async () => {
+  // Phase 4 (docs/adr/0001-langgraph-runtime.md) flipped the default: unset,
+  // empty or whitespace is `langgraph`. `native` stays the rollback switch,
+  // and anything unrecognized lands on native, the long-proven scheduler,
+  // never on the new default (rag/config.js says why).
   const cases = [
-    [undefined, "native"],
-    ["", "native"],
-    ["   ", "native"],
-    ["\t", "native"],
+    [undefined, "langgraph"],
+    ["", "langgraph"],
+    ["   ", "langgraph"],
+    ["\t", "langgraph"],
     ["native", "native"],
+    [" Native ", "native"],
+    ["NATIVE", "native"],
     ["langgraph", "langgraph"],
     [" LangGraph ", "langgraph"],
     ["LANGGRAPH", "langgraph"],
     ["lang-graph", "native"],
     ["true", "native"],
+    ["off", "native"],
   ];
 
   for (const [value, expected] of cases) {
@@ -668,10 +687,18 @@ test("AGENT_RUNTIME defaults to native and only `langgraph` selects LangGraph", 
 });
 
 test("the stage reads AGENT_RUNTIME when no runtime is passed, and native writes no LangGraph record", async () => {
-  for (const [value, expectRecord] of [[undefined, false], ["langgraph", true]]) {
+  // Unset is LangGraph since phase 4. A LangGraph run that settled holds the
+  // null tombstone its settling checkpoint save left (the record key, with
+  // no thread behind it); the native scheduler never writes the key at all.
+  for (const [value, scheduledOnLangGraph] of [
+    [undefined, true],
+    ["langgraph", true],
+    ["native", false],
+    ["lang-graph", false],
+  ]) {
     const probe = createProbe();
     const skills = [createScriptedSkill({ id: "compare_documents", probe })];
-    const { agentRunService, runCursor } = await createRunHarness({ skills });
+    const { agentRunService, agentRunStore, runCursor } = await createRunHarness({ skills });
     const budgetState = createAgentBudget({ maxCustomSkillCalls: 4 });
     const tracker = createAgentSkillTracker({ budgetState, selectedSkills: [] });
 
@@ -698,10 +725,14 @@ test("the stage reads AGENT_RUNTIME when no runtime is passed, and native writes
         recordSkillResult: tracker.recordSkillResult,
         recordSkippedSkill: tracker.recordSkippedSkill,
         registry: createSkillRegistry(skills),
-        saveExecutionGraphCheckpoint: (checkpoint) =>
+        // Forwards the settling save's drop, as agent.js wires the stage
+        // (the parity harness's hook above leaves it out, so its scenarios
+        // can read the thread after the stage).
+        saveExecutionGraphCheckpoint: (checkpoint, { dropLangGraphRecord = false } = {}) =>
           agentRunService.saveExecutionGraphCheckpoint({
             accessScope,
             checkpoint,
+            dropLangGraphRecord,
             runCursor,
             runId: RUN_ID,
           }),
@@ -720,8 +751,19 @@ test("the stage reads AGENT_RUNTIME when no runtime is passed, and native writes
       accessScope,
       runId: RUN_ID,
     });
+    const stored = await agentRunStore.get({ accessScope, runId: RUN_ID });
 
-    assert.equal(record.record !== null, expectRecord, `AGENT_RUNTIME=${value}`);
+    // No thread outlives the settled graph on either runtime.
+    assert.equal(record.record, null, `AGENT_RUNTIME=${value}`);
+    assert.equal(
+      Object.hasOwn(stored.result, LANGGRAPH_CHECKPOINT_RESULT_KEY),
+      scheduledOnLangGraph,
+      `AGENT_RUNTIME=${value}`
+    );
+    if (scheduledOnLangGraph) {
+      assert.equal(stored.result[LANGGRAPH_CHECKPOINT_RESULT_KEY], null, `AGENT_RUNTIME=${value}`);
+    }
+    assert.equal(stored.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY].phase, "completed");
     assert.equal(probe.journal.filter((entry) => entry.event === "start").length, 1);
   }
 });
@@ -1509,10 +1551,16 @@ test("parity: a bounded replan runs a fresh LangGraph invocation that reuses the
     ),
     { compare: "reused", risk: "reused", timeline: "completed" }
   );
-  // One invocation's checkpoints only: the input, LangGraph's own __start__
-  // superstep, and the graph's single layer. Without the tombstone the
-  // first invocation's three would still be in the thread.
-  assert.equal(thread.checkpointCount, 3);
+  // The second invocation's newest checkpoints only. It writes three (the
+  // input, LangGraph's own __start__ superstep, the graph's single layer);
+  // since phase 4 the executor's saver keeps LANGGRAPH_CHECKPOINT_RETENTION
+  // (2) per namespace, so the input checkpoint is pruned and two remain
+  // (was 3 before retention was wired). Their steps say they are this
+  // invocation's: the __start__ superstep at 0 and the layer at 1. Without
+  // the tombstone the first invocation's thread would have continued, and
+  // the newest steps would be past 1.
+  assert.equal(thread.checkpointCount, LANGGRAPH_CHECKPOINT_RETENTION);
+  assert.deepEqual(thread.steps, [1, 0]);
 });
 
 test("parity: an approval interrupt inside a node pauses its step and leaves the graph", async () => {
@@ -1578,136 +1626,166 @@ test("parity: an approval interrupt inside a node pauses its step and leaves the
   assert.equal(native.observed.graphEvents[0].status, "interrupted");
 });
 
+// A guarded two-node custom-Skill graph whose process exits right after the
+// first node's checkpoint save (crashRuntime schedules it), then startup
+// recovery in a new process (recoverRuntime): the stage reads AGENT_RUNTIME
+// in both, as agent.js does.
+const runStartupRecoveryScenario = async ({ crashRuntime, recoverRuntime }) => {
+  const probe = createProbe();
+  // What the run's thread holds while risk runs in the recovery
+  // worker's invocation: the settling save drops the thread once the
+  // graph completes, so this is where it can still be read.
+  const threadSeenByRisk = [];
+  const skills = [
+    createScriptedSkill({
+      effects: SKILL_EFFECTS.workspaceWrite,
+      id: "compare_documents",
+      probe,
+    }),
+    createScriptedSkill({
+      id: "risk_review",
+      probe,
+      respond: async (context) => {
+        threadSeenByRisk.push({
+          raw: (await store.get({ accessScope, runId: RUN_ID }))
+            ?.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY] ?? null,
+          thread: await readThread(agentRunService),
+        });
+        return answer("risk_review", context);
+      },
+    }),
+  ];
+  const registry = createSkillRegistry(skills);
+  const store = createInMemoryAgentRunStore();
+  let agentRunService = createAgentRunService({ agentRunStore: store });
+
+  await agentRunService.createRun({
+    accessScope,
+    goal: QUESTION,
+    input: { docIds: [...DOC_IDS], sessionId: SESSION_ID, userId: USER_ID },
+    plan: {
+      mode: SKILL_CHAIN_MODE,
+      selectedSkills: skills.map((skill) => ({ skillId: skill.id, skillVersion: skill.version })),
+    },
+    runId: RUN_ID,
+  });
+  await agentRunService.appendRunEvent({
+    accessScope,
+    payload: { planner: { stepIds: ["custom_skills"] } },
+    runId: RUN_ID,
+    type: "execution_planned",
+  });
+
+  const budgetState = createAgentBudget({ maxCustomSkillCalls: 3 });
+  const tracker = createAgentSkillTracker({ budgetState, selectedSkills: [] });
+  let crashed = false;
+  const first = await withEnv({ AGENT_RUNTIME: crashRuntime }, () => settleOutcome(() =>
+    runCustomSkillStage({
+      accessScope,
+      authorizedCustomSkills: skills,
+      authorizedDocIds: [...DOC_IDS],
+      budgetState,
+      buildSkillTraceDetail: tracker.buildSkillTraceDetail,
+      customSkills: skills,
+      docIds: [...DOC_IDS],
+      executeObservedSkill: tracker.executeObservedSkill,
+      loadExecutionGraphCheckpoint: () =>
+        agentRunService.getExecutionGraphCheckpoint({ accessScope, runId: RUN_ID }),
+      mode: CUSTOM_SKILL_STAGE_MODES.guarded,
+      plan: { mode: SKILL_CHAIN_MODE },
+      plannerAdapter: {
+        createExecutionGraph: () => ({
+          nodes: [
+            graphNode({ nodeId: "compare", skillId: "compare_documents" }),
+            graphNode({
+              dependsOn: ["compare"],
+              inputBindings: {
+                docIds: requestField("docIds"),
+                priorFindings: nodeOutput("compare", "text"),
+                question: requestField("question"),
+              },
+              nodeId: "risk",
+              skillId: "risk_review",
+            }),
+          ],
+        }),
+        id: "parity_planner",
+      },
+      question: QUESTION,
+      ragService: {},
+      recordSkillResult: tracker.recordSkillResult,
+      recordSkippedSkill: tracker.recordSkippedSkill,
+      registry,
+      saveExecutionGraphCheckpoint: async (checkpoint) => {
+        await agentRunService.saveExecutionGraphCheckpoint({
+          accessScope,
+          checkpoint,
+          runId: RUN_ID,
+        });
+
+        if (!crashed && checkpoint.nodeRuns.length === 1) {
+          crashed = true;
+          throw new Error("simulated process exit");
+        }
+      },
+      sessionId: SESSION_ID,
+      stepLifecycle: createAgentRunStepLifecycle({ accessScope, agentRunService, runId: RUN_ID }),
+      userId: USER_ID,
+    })
+  ));
+
+  assert.equal(first.error?.message, "simulated process exit");
+  const crashedRecord = (await store.get({ accessScope, runId: RUN_ID }))
+    ?.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY] ?? null;
+
+  // A new process: new services over the same store.
+  return withEnv({ AGENT_RUNTIME: recoverRuntime }, async () => {
+    agentRunService = createAgentRunService({ agentRunStore: store });
+    const recovery = createAgentRunRecoveryService({
+      agentRunService,
+      recordRecoveryTrace: async () => {},
+      resumeExecutionGraph: (args) =>
+        resumeAgentExecutionGraphRun({
+          ...args,
+          agentRunService,
+          ragService: { getDocument: (docId) => ({ docId }) },
+          skillRegistry: registry,
+        }),
+    });
+    const outcome = await recovery.recoverOnStartup({ mode: "auto" });
+    const run = await agentRunService.getRun({ accessScope, runId: RUN_ID });
+    const loaded = await agentRunService.getExecutionGraphCheckpoint({ accessScope, runId: RUN_ID });
+    const record = await agentRunService.getLangGraphCheckpointRecord({ accessScope, runId: RUN_ID });
+
+    const stored = await store.get({ accessScope, runId: RUN_ID });
+
+    return {
+      agentRunService,
+      crashedRecord,
+      langGraphRecord: record.record,
+      storedRecordKey: Object.hasOwn(stored.result, LANGGRAPH_CHECKPOINT_RESULT_KEY),
+      threadSeenByRisk,
+      observed: mask({
+        checkpoint: loaded.checkpoint,
+        events: run.events,
+        journal: probe.journal,
+        outcome: {
+          autoRecoveredCount: outcome.autoRecoveredCount,
+          manualRecoveredCount: outcome.manualRecoveredCount,
+        },
+        result: run.result,
+        status: run.status,
+        steps: run.steps,
+      }),
+    };
+  });
+};
+
 test("parity: startup recovery resumes the graph and never repeats a completed node", async () => {
   const observed = {};
 
   for (const runtime of RUNTIMES) {
-    observed[runtime] = await withEnv({ AGENT_RUNTIME: runtime }, async () => {
-      const probe = createProbe();
-      const skills = [
-        createScriptedSkill({
-          effects: SKILL_EFFECTS.workspaceWrite,
-          id: "compare_documents",
-          probe,
-        }),
-        createScriptedSkill({ id: "risk_review", probe }),
-      ];
-      const registry = createSkillRegistry(skills);
-      const store = createInMemoryAgentRunStore();
-      let agentRunService = createAgentRunService({ agentRunStore: store });
-
-      await agentRunService.createRun({
-        accessScope,
-        goal: QUESTION,
-        input: { docIds: [...DOC_IDS], sessionId: SESSION_ID, userId: USER_ID },
-        plan: {
-          mode: SKILL_CHAIN_MODE,
-          selectedSkills: skills.map((skill) => ({ skillId: skill.id, skillVersion: skill.version })),
-        },
-        runId: RUN_ID,
-      });
-      await agentRunService.appendRunEvent({
-        accessScope,
-        payload: { planner: { stepIds: ["custom_skills"] } },
-        runId: RUN_ID,
-        type: "execution_planned",
-      });
-
-      const budgetState = createAgentBudget({ maxCustomSkillCalls: 3 });
-      const tracker = createAgentSkillTracker({ budgetState, selectedSkills: [] });
-      let crashed = false;
-      const first = await settleOutcome(() =>
-        runCustomSkillStage({
-          accessScope,
-          authorizedCustomSkills: skills,
-          authorizedDocIds: [...DOC_IDS],
-          budgetState,
-          buildSkillTraceDetail: tracker.buildSkillTraceDetail,
-          customSkills: skills,
-          docIds: [...DOC_IDS],
-          executeObservedSkill: tracker.executeObservedSkill,
-          loadExecutionGraphCheckpoint: () =>
-            agentRunService.getExecutionGraphCheckpoint({ accessScope, runId: RUN_ID }),
-          mode: CUSTOM_SKILL_STAGE_MODES.guarded,
-          plan: { mode: SKILL_CHAIN_MODE },
-          plannerAdapter: {
-            createExecutionGraph: () => ({
-              nodes: [
-                graphNode({ nodeId: "compare", skillId: "compare_documents" }),
-                graphNode({
-                  dependsOn: ["compare"],
-                  inputBindings: {
-                    docIds: requestField("docIds"),
-                    priorFindings: nodeOutput("compare", "text"),
-                    question: requestField("question"),
-                  },
-                  nodeId: "risk",
-                  skillId: "risk_review",
-                }),
-              ],
-            }),
-            id: "parity_planner",
-          },
-          question: QUESTION,
-          ragService: {},
-          recordSkillResult: tracker.recordSkillResult,
-          recordSkippedSkill: tracker.recordSkippedSkill,
-          registry,
-          saveExecutionGraphCheckpoint: async (checkpoint) => {
-            await agentRunService.saveExecutionGraphCheckpoint({
-              accessScope,
-              checkpoint,
-              runId: RUN_ID,
-            });
-
-            if (!crashed && checkpoint.nodeRuns.length === 1) {
-              crashed = true;
-              throw new Error("simulated process exit");
-            }
-          },
-          sessionId: SESSION_ID,
-          stepLifecycle: createAgentRunStepLifecycle({ accessScope, agentRunService, runId: RUN_ID }),
-          userId: USER_ID,
-        })
-      );
-
-      assert.equal(first.error?.message, "simulated process exit");
-
-      // A new process: new services over the same store.
-      agentRunService = createAgentRunService({ agentRunStore: store });
-      const recovery = createAgentRunRecoveryService({
-        agentRunService,
-        recordRecoveryTrace: async () => {},
-        resumeExecutionGraph: (args) =>
-          resumeAgentExecutionGraphRun({
-            ...args,
-            agentRunService,
-            ragService: { getDocument: (docId) => ({ docId }) },
-            skillRegistry: registry,
-          }),
-      });
-      const outcome = await recovery.recoverOnStartup({ mode: "auto" });
-      const run = await agentRunService.getRun({ accessScope, runId: RUN_ID });
-      const loaded = await agentRunService.getExecutionGraphCheckpoint({ accessScope, runId: RUN_ID });
-      const record = await agentRunService.getLangGraphCheckpointRecord({ accessScope, runId: RUN_ID });
-
-      return {
-        agentRunService,
-        langGraphRecord: record.record,
-        observed: mask({
-          checkpoint: loaded.checkpoint,
-          events: run.events,
-          journal: probe.journal,
-          outcome: {
-            autoRecoveredCount: outcome.autoRecoveredCount,
-            manualRecoveredCount: outcome.manualRecoveredCount,
-          },
-          result: run.result,
-          status: run.status,
-          steps: run.steps,
-        }),
-      };
-    });
+    observed[runtime] = await runStartupRecoveryScenario({ crashRuntime: runtime, recoverRuntime: runtime });
   }
 
   const native = observed[CUSTOM_SKILL_GRAPH_RUNTIMES.native];
@@ -1722,18 +1800,82 @@ test("parity: startup recovery resumes the graph and never repeats a completed n
   );
   assert.equal(native.observed.journal[2].priorFindings, "compare_documents answered.");
   assert.equal(native.langGraphRecord, null);
+  assert.equal(native.storedRecordKey, false);
+  assert.equal(native.threadSeenByRisk.length, 1);
+  assert.equal(native.threadSeenByRisk[0].raw, null);
 
   // The recovery worker's invocation replaced the crashed attempt's thread:
-  // compare came back from the graph checkpoint, risk ran once.
-  const thread = await readThread(langgraph.agentRunService);
+  // while risk ran (its superstep not committed yet), the thread held
+  // compare as reused from the graph checkpoint, and risk ran once. Read
+  // inside risk because, since phase 4, the save that settles the graph
+  // drops the thread (before, the finished run kept it and this read the
+  // receipts after recovery, risk "completed" included).
+  assert.equal(langgraph.threadSeenByRisk.length, 1);
+  const [{ raw, thread }] = langgraph.threadSeenByRisk;
 
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(thread.receipts).map(([nodeId, { status }]) => [nodeId, status])
     ),
-    { compare: "reused", risk: "completed" }
+    { compare: "reused" }
   );
-  assertRecordHoldsNoText(langgraph.langGraphRecord, ["answered"]);
+  assertRecordHoldsNoText(raw, ["answered"]);
+  // The settled run keeps no thread: the null tombstone of the drop.
+  assert.equal(langgraph.langGraphRecord, null);
+  assert.equal(langgraph.storedRecordKey, true);
+});
+
+test("a graph that crashed on one runtime is recovered on the other: the AGENT_RUNTIME=native rollback ignores the LangGraph thread and drops it when the graph settles", async () => {
+  // The rollback switch flips AGENT_RUNTIME with runs in flight. Recovery
+  // resumes from the graph checkpoint whichever runtime crashed: the native
+  // scheduler never reads the thread LangGraph left on the run row, and the
+  // save that settles the graph drops it; LangGraph, the other way round,
+  // starts a fresh invocation. Either way the completed node is reused, each
+  // Skill runs once, and the run ends as an uninterrupted recovery on one
+  // runtime would.
+  const reference = await runStartupRecoveryScenario({ crashRuntime: "native", recoverRuntime: "native" });
+  const rolledBack = await runStartupRecoveryScenario({ crashRuntime: "langgraph", recoverRuntime: "native" });
+  const rolledForward = await runStartupRecoveryScenario({ crashRuntime: "native", recoverRuntime: "langgraph" });
+
+  for (const [label, crossed] of [["langgraph -> native", rolledBack], ["native -> langgraph", rolledForward]]) {
+    assert.deepStrictEqual(crossed.observed, reference.observed, label);
+  }
+  assert.equal(reference.observed.status, "completed");
+  assert.equal(reference.observed.outcome.autoRecoveredCount, 1);
+  assert.deepEqual(
+    reference.observed.journal.filter(({ event }) => event === "start").map(({ skillId }) => skillId),
+    ["compare_documents", "risk_review"]
+  );
+  assert.deepEqual(
+    reference.observed.checkpoint.nodeRuns.map(({ nodeId, status }) => [nodeId, status]),
+    [["compare", "reused"], ["risk", "completed"]]
+  );
+
+  // Rolled back: the crash left LangGraph's thread on the run row (behind the
+  // graph checkpoint: the process exited inside compare's settlement, before
+  // its superstep committed a receipt). The native recovery ran risk with
+  // that stale thread untouched, byte for byte, never resumed from it, and
+  // the settling save replaced it with the null tombstone.
+  assert.notEqual(rolledBack.crashedRecord, null);
+  assert.equal(rolledBack.threadSeenByRisk.length, 1);
+  assert.deepStrictEqual(rolledBack.threadSeenByRisk[0].raw, rolledBack.crashedRecord);
+  assert.deepEqual(rolledBack.threadSeenByRisk[0].thread.receipts, {});
+  assert.equal(rolledBack.langGraphRecord, null);
+  assert.equal(rolledBack.storedRecordKey, true);
+
+  // Rolled forward: no thread to start from, so LangGraph's fresh invocation
+  // seeds compare as reused from the graph checkpoint, and drops its own
+  // thread when the graph settles.
+  assert.equal(rolledForward.crashedRecord, null);
+  assert.equal(rolledForward.threadSeenByRisk.length, 1);
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(rolledForward.threadSeenByRisk[0].thread.receipts).map(([nodeId, { status }]) => [nodeId, status])
+    ),
+    { compare: "reused" }
+  );
+  assert.equal(rolledForward.langGraphRecord, null);
+  assert.equal(rolledForward.storedRecordKey, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -3028,4 +3170,155 @@ test("parity: manual recovery while a node runs fences that node's settlement on
   assert.ok(observed.langgraph.threadCheckpoints > 0);
   assert.deepEqual(observed.langgraph.receiptKeys, []);
   assert.equal(observed.native.threadCheckpoints, 0);
+});
+
+// ---------------------------------------------------------------------------
+// A node's preflight grant (ported from the phase-0 spike)
+// ---------------------------------------------------------------------------
+
+test("parity: only a Capability's preflight may park or reject a node; the same answer for a custom Skill stops the run before its budget, step or call", async () => {
+  // The node code (agent-execution-graph-node.js) refuses a preflight answer
+  // for anything but a Capability: a custom Skill can be neither parked for
+  // approval nor failed by a preflight. Both answers stop the run with the
+  // same error on both runtimes, after the upstream node settled and before
+  // the refused node reserved budget, opened a step or called its Skill.
+  for (const answer of [
+    { awaitingApproval: true },
+    { rejectedInput: new Error("not a Capability") },
+  ]) {
+    const label = Object.keys(answer)[0];
+    const { native } = await assertParity({
+      level: "executor",
+      build: () => {
+        const probe = createProbe();
+        const preflights = [];
+
+        return {
+          graph: createExecutionGraph({
+            nodes: [
+              graphNode({ nodeId: "compare", skillId: "compare_documents" }),
+              graphNode({ dependsOn: ["compare"], nodeId: "risk", skillId: "risk_review" }),
+            ],
+          }),
+          preflightNode: ({ node }) => {
+            preflights.push(node.nodeId);
+            return node.nodeId === "risk" ? answer : null;
+          },
+          preflights,
+          probe,
+          skills: [
+            createScriptedSkill({ id: "compare_documents", probe }),
+            createScriptedSkill({ id: "risk_review", probe }),
+          ],
+        };
+      },
+    });
+
+    assert.equal(
+      native.observed.outcome.error?.message,
+      "Only a trusted Capability preflight may provide node runtime grants.",
+      label
+    );
+    assert.deepEqual(
+      native.probe.journal.filter(({ event }) => event === "start").map(({ skillId }) => skillId),
+      ["compare_documents"],
+      label
+    );
+    assert.equal(native.observed.budget.used.customSkillCalls, 1, label);
+    assert.deepEqual(
+      native.observed.steps.map(({ id, status }) => ({ id, status })),
+      [{ id: "custom_skill:compare", status: "completed" }],
+      label
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Pinned LangGraph 1.5.0 behaviour the executor is built around (ported from
+// the phase-0 spike). These pin the library, not this code: they say why
+// run-execution-graph.js passes LangGraph a maxConcurrency equal to the node
+// count and holds the runtime cap in its own gate (concurrency-gate.js). If
+// a LangGraph upgrade makes either one fail, the defect is gone and the
+// workaround can be re-evaluated; until then the parity tests above prove
+// the workaround.
+// ---------------------------------------------------------------------------
+
+const createWideGraph = ({ calls, failFirst = null }) => {
+  const node = (name) => async () => {
+    calls[name] = (calls[name] ?? 0) + 1;
+    // A real await, so every task is genuinely in flight at once.
+    await new Promise((resolve) => setImmediate(resolve));
+    if (name === failFirst && calls[name] === 1) {
+      throw new Error("first attempt fails");
+    }
+    return { receipts: { [name]: "ok" } };
+  };
+  const State = Annotation.Root({
+    receipts: Annotation({ default: () => ({}), reducer: (left, right) => ({ ...left, ...right }) }),
+  });
+
+  return new StateGraph(State)
+    .addNode("a", node("a"))
+    .addNode("b", node("b"))
+    .addNode("c", node("c"))
+    .addNode("d", node("d"))
+    .addNode("join", node("join"))
+    .addEdge(START, "a")
+    .addEdge(START, "b")
+    .addEdge(START, "c")
+    .addEdge(START, "d")
+    .addEdge(["a", "b", "c", "d"], "join")
+    .addEdge("join", END)
+    .compile({ checkpointer: new MemorySaver() });
+};
+
+test("pinned LangGraph 1.5.0 defect: maxConcurrency 1 below a superstep's width ends the step after one task and invoke resolves as if finished", async () => {
+  const calls = {};
+  const app = createWideGraph({ calls });
+  const config = {
+    configurable: { thread_id: "langgraph-pin:width-1" },
+    durability: "sync",
+    maxConcurrency: 1,
+  };
+
+  const output = await app.invoke({ receipts: {} }, config);
+
+  // b, c, d and join never ran, no error was raised, and even a's receipt is
+  // missing from the result.
+  assert.deepStrictEqual(calls, { a: 1 });
+  assert.deepStrictEqual(output.receipts, {});
+  assert.deepStrictEqual((await app.getState(config)).next, ["b", "c", "d"]);
+});
+
+test("pinned LangGraph 1.5.0 defect: with maxConcurrency below the width, a failing task gets its unstarted siblings committed as __no_writes__, and a resume never runs them", async () => {
+  const run = async (maxConcurrency) => {
+    const calls = {};
+    const app = createWideGraph({ calls, failFirst: "a" });
+    const config = {
+      configurable: { thread_id: `langgraph-pin:width-fail-${maxConcurrency ?? "none"}` },
+      durability: "sync",
+      ...(maxConcurrency ? { maxConcurrency } : {}),
+    };
+
+    await assert.rejects(app.invoke({ receipts: {} }, config), /first attempt fails/);
+    const firstCalls = { ...calls };
+    const resumed = await app.invoke(null, config);
+    return { calls, firstCalls, resumed, next: (await app.getState(config)).next };
+  };
+
+  const throttled = await run(2);
+  assert.deepStrictEqual(throttled.firstCalls, { a: 1, b: 1 });
+  // c and d never ran in either invoke; join never fired; nothing is "next".
+  assert.deepStrictEqual(throttled.calls, { a: 2, b: 2 });
+  assert.deepStrictEqual(Object.keys(throttled.resumed.receipts).sort(), ["a", "b"]);
+  assert.deepStrictEqual(throttled.next, []);
+
+  // Unthrottled, every sibling had started, so each got an error write and
+  // the resume ran the whole superstep and the join. This is what the
+  // executor relies on (it passes maxConcurrency = node count and caps in
+  // its gate).
+  const unthrottled = await run(undefined);
+  assert.deepStrictEqual(unthrottled.firstCalls, { a: 1, b: 1, c: 1, d: 1 });
+  assert.deepStrictEqual(unthrottled.calls, { a: 2, b: 2, c: 2, d: 2, join: 1 });
+  assert.equal(unthrottled.resumed.receipts.join, "ok");
 });

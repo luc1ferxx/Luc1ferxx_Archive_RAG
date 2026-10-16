@@ -388,20 +388,26 @@ test("the app environment pins every store and model setting and drops inherited
 });
 
 test("the agent runtime is named by --agent-runtime, never inherited from the shell", () => {
-  const base = { AGENT_RUNTIME: "langgraph", PATH: "/usr/bin" };
-  const environmentFor = (options) =>
+  const environmentFor = (options, shellRuntime) =>
     buildAppEnvironment({
-      baseEnvironment: base,
+      baseEnvironment: { AGENT_RUNTIME: shellRuntime, PATH: "/usr/bin" },
       modelBaseUrl: "http://127.0.0.1:1/v1",
       options,
       storage: "local",
       tempRoot: "/tmp/load",
     });
 
-  assert.equal(parseLoadTestArgs([]).agentRuntime, "native");
-  assert.equal(environmentFor(parseLoadTestArgs([])).AGENT_RUNTIME, "native");
+  // The default is the app's own since phase 4 (AGENT_RUNTIME unset is
+  // langgraph), so a flagless run measures production; the rollback is
+  // named. Either way the shell's value never reaches the app.
+  assert.equal(parseLoadTestArgs([]).agentRuntime, "langgraph");
+  assert.equal(environmentFor(parseLoadTestArgs([]), "native").AGENT_RUNTIME, "langgraph");
   assert.equal(
-    environmentFor(parseLoadTestArgs(["--agent-runtime", "langgraph"])).AGENT_RUNTIME,
+    environmentFor(parseLoadTestArgs(["--agent-runtime", "native"]), "langgraph").AGENT_RUNTIME,
+    "native"
+  );
+  assert.equal(
+    environmentFor(parseLoadTestArgs(["--agent-runtime", "langgraph"]), "native").AGENT_RUNTIME,
     "langgraph"
   );
   assert.throws(() => parseLoadTestArgs(["--agent-runtime", "graph"]), /agent-runtime/);
@@ -428,9 +434,16 @@ test("the outer plan runtime is named by --outer-plan-runtime, never inherited f
   assert.equal(agentOnly.AGENT_RUNTIME, "langgraph");
   assert.equal(agentOnly.AGENT_OUTER_PLAN_RUNTIME, "native", "--agent-runtime no longer moves the outer plan");
 
+  // Independent dials: the outer one alone leaves AGENT_RUNTIME at its own
+  // default (langgraph since phase 4), and native stays native.
   const outerOnly = environmentFor(parseLoadTestArgs(["--outer-plan-runtime", "langgraph"]));
   assert.equal(outerOnly.AGENT_OUTER_PLAN_RUNTIME, "langgraph");
-  assert.equal(outerOnly.AGENT_RUNTIME, "native", "the two dials are independent");
+  assert.equal(outerOnly.AGENT_RUNTIME, "langgraph", "the two dials are independent");
+  const outerOnNative = environmentFor(
+    parseLoadTestArgs(["--outer-plan-runtime", "langgraph", "--agent-runtime", "native"])
+  );
+  assert.equal(outerOnNative.AGENT_OUTER_PLAN_RUNTIME, "langgraph");
+  assert.equal(outerOnNative.AGENT_RUNTIME, "native", "the two dials are independent");
 
   const both = environmentFor(parseLoadTestArgs(["--agent-runtime", "langgraph", "--outer-plan-runtime", "langgraph"]));
   assert.equal(both.AGENT_RUNTIME, "langgraph");

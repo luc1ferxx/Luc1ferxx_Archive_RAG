@@ -43,10 +43,15 @@ import { setSpanAttributes, withSpan } from "./tracing.js";
 // spent budget and written a step, re-running the chain would repeat that work
 // under a different plan and bill the user twice for one request.
 //
-// A second dial, AGENT_RUNTIME, picks who schedules a guarded graph: the
-// native scheduler (default) or LangGraph (docs/adr/0001-langgraph-runtime.md,
-// phase 2). Planning, the checkpoint, replans and recovery below are the same
-// for both; only runGraph's executor changes.
+// A second dial, AGENT_RUNTIME, picks who schedules a guarded graph: LangGraph
+// (docs/adr/0001-langgraph-runtime.md; the default since phase 4) or the
+// native scheduler. Planning, the checkpoint, replans and recovery below are
+// the same for both; only runGraph's executor changes. The native executor
+// stays as the AGENT_RUNTIME=native rollback path for at least one release on
+// the new default (ADR constraint 12) and is to be deleted after it, once the
+// phase-2 delegation case (graphs canScheduleExecutionGraphOnLangGraph hands
+// to runExecutionGraph) is solved. The V1 chain (runV1) is a separate
+// matter: it is the whole-graph-rejection fallback and the `off` opt-out.
 
 const noop = () => {};
 
@@ -428,15 +433,28 @@ export const runCustomSkillStage = async ({
     await saveExecutionGraphCheckpoint(checkpoint);
   }
 
+  // The save that settles the graph (phase completed or partial) also drops
+  // the run's LangGraph thread record in the same CAS
+  // (saveExecutionGraphCheckpoint's dropLangGraphRecord), exactly as the v3
+  // stage does (agent-unified-graph-stage.js): the record rides on the run
+  // row, so a thread kept after the graph settled would be rewritten whole
+  // by every later CAS of the run (the finalizer's steps, completeRun) and
+  // stored with the finished run, while nothing ever resumes a settled
+  // graph's thread (a replan or a recovery starts a fresh invocation, and a
+  // settled graph is replayed from the graph checkpoint without one). A
+  // running graph keeps its thread. On a run that holds no record (the
+  // native scheduler, a graph handed to it) the flag changes nothing.
   let checkpointQueue = Promise.resolve();
-  const persistCheckpoint = (update) => {
+  const persistCheckpoint = (update, { settles = false } = {}) => {
     if (!checkpoint || !saveExecutionGraphCheckpoint) {
       return Promise.resolve();
     }
 
     checkpointQueue = checkpointQueue.then(async () => {
       const next = updateExecutionGraphCheckpoint(checkpoint, update(checkpoint));
-      await saveExecutionGraphCheckpoint(next);
+      await (settles
+        ? saveExecutionGraphCheckpoint(next, { dropLangGraphRecord: true })
+        : saveExecutionGraphCheckpoint(next));
       checkpoint = next;
     });
 
@@ -573,7 +591,7 @@ export const runCustomSkillStage = async ({
     phase: run.ok ? "completed" : "partial",
     replanCount: replans.length,
     replans,
-  }));
+  }), { settles: true });
 
   await recordExecutionGraph({
     errorCodes: (run.errors ?? []).map((error) => error.code),

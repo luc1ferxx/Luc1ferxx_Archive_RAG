@@ -1,4 +1,5 @@
-// Imported first by every LangGraph spike suite, before any @langchain module.
+// Imported first by every suite that loads LangGraph or LangChain, before any
+// @langchain module.
 //
 // @langchain/core turns the LangSmith tracer on from the environment alone:
 // any of these variables set to "true" adds a LangChainTracer that ships run

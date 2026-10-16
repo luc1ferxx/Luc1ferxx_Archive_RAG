@@ -1,6 +1,6 @@
 // Must stay the first import: it clears the LangSmith tracing variables before
 // any @langchain module can read them.
-import "./langgraph-spike/langsmith-off.mjs";
+import "./langgraph-support/langsmith-off.mjs";
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -201,35 +201,51 @@ const assertRunsIdentical = ({ langgraph, native }) => {
   );
 };
 
-// Native never loads a LangGraph record; on LangGraph every run whose graph
-// went through a bound invocation keeps one, in this run's thread, and none
-// of the run's question.
+// Native never writes a LangGraph record. On LangGraph every run whose graph
+// went through a bound invocation wrote its thread into the run row while the
+// graph ran: LangGraph's format, this run's thread, the root namespace, and
+// none of the run's question. Since phase 4 the save that settles the graph
+// drops that thread in the same CAS, so the finished run keeps only the null
+// tombstone; the records are checked as the run-store tap copied them from
+// each write (before phase 4 the finished run kept its record and this read
+// it from the run).
 const assertLangGraphRecords = ({ langgraph, native }) => {
   for (const run of native.runs) {
     assert.equal(run.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY], undefined);
+    assert.deepStrictEqual(run.langGraphRecordsWritten, []);
   }
 
   const boundInvocationCount = langgraph.invocations.filter(
     (invocation) => invocation.boundToRun
   ).length;
-  const runsWithRecord = langgraph.runs.filter(
-    (run) => run.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY]
+  const runsThatWroteRecords = langgraph.runs.filter(
+    (run) => run.langGraphRecordsWritten.length > 0
   );
 
-  assert.equal(runsWithRecord.length > 0, boundInvocationCount > 0);
+  assert.equal(runsThatWroteRecords.length > 0, boundInvocationCount > 0);
 
-  for (const run of runsWithRecord) {
-    const record = run.result[LANGGRAPH_CHECKPOINT_RESULT_KEY];
+  for (const run of langgraph.runs) {
+    // No finished run carries a thread, whichever runtime ran it.
+    assert.equal(run.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY] ?? null, null);
+  }
 
+  for (const run of runsThatWroteRecords) {
     assert.ok(run.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]);
-    assert.equal(record.format, LANGGRAPH_CHECKPOINT_FORMAT);
-    assert.equal(record.threadId, deriveLangGraphThreadId(run.accessScope, run.runId));
-    // The graph checkpoints into the root namespace, never a subgraph's
-    // (with AGENT_OUTER_PLAN_RUNTIME=langgraph it is invoked from inside the
-    // outer plan graph's custom_skills node, test/agent-run-chat-statement-
-    // count.test.mjs pins that case).
-    assert.deepStrictEqual(record.namespaces.map((namespace) => namespace.ns), [""]);
-    assert.equal(JSON.stringify(record).includes(run.goal), false);
+    assert.ok(["completed", "partial"].includes(run.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY].phase));
+    // The drop's tombstone: the key, with no thread behind it.
+    assert.equal(Object.hasOwn(run.result, LANGGRAPH_CHECKPOINT_RESULT_KEY), true);
+    assert.equal(run.result[LANGGRAPH_CHECKPOINT_RESULT_KEY], null);
+
+    for (const record of run.langGraphRecordsWritten) {
+      assert.equal(record.format, LANGGRAPH_CHECKPOINT_FORMAT);
+      assert.equal(record.threadId, deriveLangGraphThreadId(run.accessScope, run.runId));
+      // The graph checkpoints into the root namespace, never a subgraph's
+      // (with AGENT_OUTER_PLAN_RUNTIME=langgraph it is invoked from inside the
+      // outer plan graph's custom_skills node, test/agent-run-chat-statement-
+      // count.test.mjs pins that case).
+      assert.deepStrictEqual(record.namespaces.map((namespace) => namespace.ns), [""]);
+      assert.equal(JSON.stringify(record).includes(run.goal), false);
+    }
   }
 };
 

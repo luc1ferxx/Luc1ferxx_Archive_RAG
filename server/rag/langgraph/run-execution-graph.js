@@ -16,7 +16,11 @@ import {
   runExecutionGraph,
 } from "../agent-execution-graph-runner.js";
 import { EXECUTION_GRAPH_LIMITS } from "../agent-execution-graph.js";
-import { RunStoreCheckpointSaver, deriveLangGraphThreadId } from "./checkpointer.js";
+import {
+  LANGGRAPH_CHECKPOINT_RETENTION,
+  RunStoreCheckpointSaver,
+  deriveLangGraphThreadId,
+} from "./checkpointer.js";
 import {
   buildExecutionGraphReceipt,
   canScheduleExecutionGraphOnLangGraph,
@@ -34,7 +38,9 @@ import {
 
 // runExecutionGraph on LangGraph.js (docs/adr/0001-langgraph-runtime.md,
 // phase 2), selected by AGENT_RUNTIME=langgraph in agent-custom-skill-stage.js
-// and, since phase 3, in agent-unified-graph-stage.js for the v3 graph.
+// and, since phase 3, in agent-unified-graph-stage.js for the v3 graph. Since
+// phase 4 it is the default (AGENT_RUNTIME unset); runExecutionGraph is the
+// AGENT_RUNTIME=native rollback and the scheduler a call is handed to below.
 //
 // Same options, same result, same errors. Admission, the node states (and
 // with them checkpoint reuse and denied nodes), each node's work and the end
@@ -266,6 +272,14 @@ export const runExecutionGraphOnLangGraph = async ({
         accessScope: nodeOptions.accessScope,
         agentRunService,
         graphResumeClaimId: nodeOptions.graphResumeClaimId ?? null,
+        // Only the newest checkpoint of the thread and its parent are kept
+        // (checkpointer.js, "Retention"): the record rides on the run row and
+        // is rewritten whole by every later CAS of the run, and nothing here
+        // reads further back than the newest checkpoint and its pending
+        // writes -- a resume of a parked node's interrupt
+        // (unified-graph-resume.js), the recovery read (unified-graph-
+        // thread.js) and the receipts check after invoke.
+        retainCheckpoints: LANGGRAPH_CHECKPOINT_RETENTION,
         runCursor,
         runId: agentRunId,
       })

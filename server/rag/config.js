@@ -262,19 +262,30 @@ export const getAgentSkillGraphRollout = () => {
 };
 
 // Which scheduler runs a guarded custom-Skill graph and a guarded v3 unified
-// graph (docs/adr/0001-langgraph-runtime.md, phases 2-3). `native` (default) is
-// agent-execution-graph-runner.js; `langgraph` runs the same nodes
-// (agent-execution-graph-node.js) on LangGraph.js. It only replaces the
-// scheduler: the graph, the planner, the rollout dial above, the v1 graph
-// checkpoint and the run store are the same either way. The v3 unified graph
-// stayed native in phase 2; phase 3 moved it under this same dial
-// (agent-unified-graph-stage.js). The V1 outer plan is not on this dial: see
-// getAgentOuterPlanRuntime below.
+// graph (docs/adr/0001-langgraph-runtime.md). `langgraph` (the default since
+// phase 4) runs the nodes (agent-execution-graph-node.js) on LangGraph.js;
+// `native` is agent-execution-graph-runner.js. It only replaces the scheduler:
+// the graph, the planner, the rollout dial above, the v1 graph checkpoint and
+// the run store are the same either way. The V1 outer plan is not on this
+// dial: see getAgentOuterPlanRuntime below.
 //
-// Anything but `langgraph` resolves to `native`, the path every existing
-// guarantee was proven on, so a mistyped value can only fall back to it.
-export const getAgentRuntime = () =>
-  toChoice(process.env.AGENT_RUNTIME, "native", ["langgraph", "native"]);
+// Unset, empty or whitespace is `langgraph`. `native` stays the whole-runtime
+// rollback switch for at least one release on the new default (ADR constraint
+// 12); the native scheduler is also what LangGraph hands a graph to when
+// canScheduleExecutionGraphOnLangGraph rejects it. Any other value (a typo,
+// "true", "lang-graph") resolves to `native`, not to the default: an operator
+// who set this dial to something unrecognized was most likely reaching for
+// the rollback, and native is the scheduler every guarantee was first proven
+// on, so a mistyped value can only land on the long-proven path.
+export const getAgentRuntime = () => {
+  const rawValue = process.env.AGENT_RUNTIME;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "langgraph";
+  }
+
+  return toChoice(rawValue, "native", ["langgraph", "native"]);
+};
 
 // Which scheduler walks the V1 outer execution plan (agent-execution-plan-
 // runner.js), and with it which /chat/stream relay the route uses. A dial of
@@ -291,7 +302,8 @@ export const getAgentRuntime = () =>
 // relay) stays as an experimental opt-in with that measured overhead.
 //
 // Anything but `langgraph` (unset, empty, whitespace, a typo) resolves to
-// `native`, as AGENT_RUNTIME does.
+// `native`. Unlike AGENT_RUNTIME, unset stays `native`: phase 4 flipped only
+// AGENT_RUNTIME's default.
 export const getAgentOuterPlanRuntime = () =>
   toChoice(process.env.AGENT_OUTER_PLAN_RUNTIME, "native", ["langgraph", "native"]);
 

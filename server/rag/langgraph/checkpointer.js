@@ -17,8 +17,8 @@ import { normalizeTaskAccessScope } from "../tasks.js";
 import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 
 // The production LangGraph checkpointer (docs/adr/0001-langgraph-runtime.md,
-// phase 2), ported from the phase-0 spike
-// (test/langgraph-spike/run-store-checkpoint-saver.mjs).
+// phase 2), ported from the phase-0 spike's run-store saver (the spike was
+// removed in phase 4; its properties are covered by the production suites).
 //
 // Its only storage is the agent run row the rest of the runtime already
 // writes: run.result.__langGraphCheckpoint, read and written through the run
@@ -37,25 +37,23 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 // graph checkpoint is claimed through claimExecutionGraphResume, whose
 // resumeClaim fences this saver; a run without one has no claim to hold.
 //
-// Write amplification (ADR phase 2 open item, phase 3). The record rides on
-// the run row, so every later CAS of the row (a step, a graph checkpoint
-// save, the next LangGraph superstep) rewrites it whole. Three rules keep it
-// small and short-lived; what each is wired to is stated, because the
-// phase-3 load test is still owed (AGENTS.md, "Write amplification"):
-//   - Retention. With `retainCheckpoints: K`, each put keeps only the K
-//     newest checkpoints of its namespace and the pending writes of those
-//     ids; older ones are dropped in the same write. LangGraph resumes from
-//     the newest checkpoint and its pending writes alone, so the thread is
-//     lossless for its reader, while getStateHistory, list() and an
-//     addressed getTuple see at most K per namespace (a retained checkpoint
-//     may still name a pruned parent in parentConfig). The default, null,
-//     keeps everything: that is MemorySaver's contract, which the contract
-//     suites compare against. LANGGRAPH_CHECKPOINT_RETENTION (2) is the
-//     value meant for the executors' savers, but no executor passes it yet:
-//     test/langgraph-execution-graph-runtime.test.mjs pins three checkpoints
-//     per invocation, so wiring it is a change of that pin
-//     (test/langgraph-checkpointer-write-amplification.test.mjs proves the
-//     rule itself, an interrupt and resume after pruning included).
+// Write amplification (ADR phase 2 open item, wired in phases 3 and 4). The
+// record rides on the run row, so every later CAS of the row (a step, a graph
+// checkpoint save, the next LangGraph superstep) rewrites it whole. Three
+// rules keep it small and short-lived:
+//   - Retention (wired in phase 4). With `retainCheckpoints: K`, each put
+//     keeps only the K newest checkpoints of its namespace and the pending
+//     writes of those ids; older ones are dropped in the same write.
+//     LangGraph resumes from the newest checkpoint and its pending writes
+//     alone, so the thread is lossless for its reader, while
+//     getStateHistory, list() and an addressed getTuple see at most K per
+//     namespace (a retained checkpoint may still name a pruned parent in
+//     parentConfig). The default, null, keeps everything: that is
+//     MemorySaver's contract, which the contract suites compare against.
+//     The executor's saver (run-execution-graph.js) passes
+//     LANGGRAPH_CHECKPOINT_RETENTION (2);
+//     test/langgraph-checkpointer-write-amplification.test.mjs proves the
+//     rule itself, an interrupt and resume after pruning included.
 //   - No read for a no-op (wired). The run service decides a thread write on
 //     the request's run cursor when it holds the run, and a decision that
 //     changes nothing (a deleteThread of a thread that has no record, a
@@ -63,24 +61,22 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 //     every write it commits is remembered by the cursor, so the cursor's
 //     record is the stored one. A write still commits by revision CAS and a
 //     conflict falls back to a fresh read.
-//   - Completion drops the record (wired for the v3 unified graph and for
-//     terminal runs). The v3 graph's final checkpoint save (phase completed
-//     or partial) clears the key in the same CAS (saveExecutionGraphCheckpoint's
-//     dropLangGraphRecord), and failRun clears it when a run fails or is
-//     cancelled inside its graph, so a finished or terminal v3 run never
-//     carries a thread; a paused one (approval) keeps it, because the
-//     continuation resumes that thread. The custom-Skill DAG's final save
-//     (agent-custom-skill-stage.js) does not pass the flag: a completed v2
-//     run keeps its record (test/agent-run-chat-statement-count.test.mjs and
-//     test/langgraph-runtime-parity.test.mjs pin that), the second open
-//     item next to retention.
+//   - Completion drops the record (wired). The final graph checkpoint save
+//     (phase completed or partial) of both graphs -- the v3 unified graph
+//     (agent-unified-graph-stage.js) and, since phase 4, the custom-Skill DAG
+//     (agent-custom-skill-stage.js) -- clears the key in the same CAS
+//     (saveExecutionGraphCheckpoint's dropLangGraphRecord), and failRun
+//     clears it when a run fails or is cancelled inside its graph, so a
+//     finished or terminal run never carries a thread; a paused one
+//     (approval) keeps it, because the continuation resumes that thread.
 
 export { LANGGRAPH_CHECKPOINT_RESULT_KEY };
 export const LANGGRAPH_CHECKPOINT_FORMAT = "archive-rag.langgraph-saver/v1";
 export const LANGGRAPH_THREAD_ID_PREFIX = "agent-run:v1:";
 export const DEFAULT_LANGGRAPH_MAX_RECORD_BYTES = 262_144;
-// The checkpoints per namespace the executor keeps: the newest (what a resume
-// reads) and its parent. Nothing in the runtime reads further back.
+// The checkpoints per namespace the executor keeps (run-execution-graph.js):
+// the newest (what a resume reads) and its parent. Nothing in the runtime
+// reads further back.
 export const LANGGRAPH_CHECKPOINT_RETENTION = 2;
 
 export const LANGGRAPH_SAVER_ERROR_CODES = Object.freeze({

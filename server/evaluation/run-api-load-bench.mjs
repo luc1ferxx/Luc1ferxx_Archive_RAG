@@ -266,7 +266,10 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   // AGENT_REQUEST_TIMEOUT_MS of every app process (null: unset, the app's
   // default of no request deadline).
   agentRequestTimeoutMs: null,
-  agentRuntime: "native",
+  // AGENT_RUNTIME of every app process: the app's own default since phase 4
+  // (rag/config.js getAgentRuntime), so a run without the flag measures what
+  // production runs; `--agent-runtime native` measures the rollback.
+  agentRuntime: "langgraph",
   analyze: true,
   auth: false,
   balance: "least-outstanding",
@@ -355,10 +358,12 @@ const PLANNER_MODES = new Set(["deterministic", "llm"]);
 // recorded in the report, never taken from the shell. Two dials, because the
 // phase-3 decision (docs/adr/0001-langgraph-runtime.md) split them:
 // --agent-runtime is AGENT_RUNTIME (rag/config.js getAgentRuntime), the
-// scheduler of the custom-Skill DAG and the v3 unified graph only; it no
-// longer puts the V1 outer plan on LangGraph, so a `langgraph` run now is not
-// the configuration the phase-3 latest-load-test-p3-langgraph-* reports
-// measured (those predate the split and ran the outer plan on LangGraph too).
+// scheduler of the custom-Skill DAG and the v3 unified graph only, default
+// `langgraph` like the app's since phase 4 (reports written before that ran
+// `native` unless they say otherwise); it no longer puts the V1 outer plan on
+// LangGraph, so a `langgraph` run now is not the configuration the phase-3
+// latest-load-test-p3-langgraph-* reports measured (those predate the split
+// and ran the outer plan on LangGraph too).
 // --outer-plan-runtime is AGENT_OUTER_PLAN_RUNTIME (getAgentOuterPlanRuntime),
 // the scheduler of the V1 outer plan and the /chat/stream relay; reproducing
 // those reports takes both at `langgraph`.
