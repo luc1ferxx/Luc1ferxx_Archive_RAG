@@ -517,7 +517,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - `coverage:gate`：3,250 个测试，3,235 通过、15 跳过、0 失败，全局行覆盖 90.46%。删除前是 3,300 个，少掉的主要是删除的 `agent-graph-suites-native-rollback`、`langgraph-native-runner-suite` 和各套件里的开关测试。
   - `eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8：删除前（e1385c1c）与删除后各跑一次，屏蔽 UUID、时间戳、时长和 git 状态后逐字节一致。
   - `test:pgvector`（一次性集群，`scripts/run-pgvector-integration.sh`）：101/101。删除前是 111 个，因为跨进程用例原来在两种 runtime 下各跑一遍。
-  - `quality:current`：在删除提交上于模拟 CI 的环境里运行，结果记在随后的文档提交里。
+  - `quality:current`：在删除提交 f7535832 上于模拟 CI 的环境里运行（一次性 PostgreSQL、干净工作区、五项确定性评测都由该提交生成），通过，指标 `pass`。
   - CI（Node 22）上的 golden 比较：还没跑。golden 在 Node 24 上生成，推送后由 CI 验证。
 - 代码量（阶段 4 说过要等删掉原生调度器后再衡量维护面）：`agent-execution-graph-runner.js` 478 → 295 行；生产代码 +397 −533 行，净减 136 行；测试（不含 golden）+4,353 −4,088 行，净增 265 行；golden 共 102 个文件、约 5.3 MB。维护面在生产代码上缩小了，测试一侧因为固定期望而变大。
 

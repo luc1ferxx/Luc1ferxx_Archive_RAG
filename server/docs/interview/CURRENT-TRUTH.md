@@ -344,7 +344,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **等价怎么保住**：删除之前先把 native 一侧的结果冻结成 golden：第一批 6 个套件、94 个文件；评审发现路由层（v3 批准/拒绝、v3 流、后台任务的审批重入、启动恢复）和外层计划套件里三个跑 custom-Skill DAG 的用例没有冻结，又从 HEAD e1385c1c 以 `AGENT_RUNTIME=native` 补冻了 8 个文件，共 8 个套件、102 个文件，扫描太大的只存 sha256。这些场景现在只在 LangGraph 上跑一次、对照 golden，屏蔽规则与删除前相同，例外两处：v3 回放扫描原来在同一进程里不屏蔽地比较，现在屏蔽后比摘要；规划器 golden 规范化了临时端口和 V8 的 JSON.parse 位置后缀。原生 runner 的 52 个调度契约测试直接跑在 LangGraph 执行器上，断言一条没改。
 - **golden 怎么改**：只有 `UPDATE_GRAPH_GOLDENS=1` 能从 LangGraph 改写；改写了也让本次测试失败，要先看 diff、在同一次改动里写明行为变化，再不带变量重跑。其他取值（如 `native`）一律拒绝。
 - **回退**：没有运行时开关了，只能 `git revert` 这次提交。
-- **数字**：覆盖率闸门 3,250 个测试，3,235 通过、15 跳过、0 失败，全局行覆盖 90.46%；`eval:trajectory` 19/19、`eval:planner` 7/7、`eval:recovery-observability` 8/8 与删除前屏蔽后逐字节一致；`test:pgvector` 101/101。代码量：`agent-execution-graph-runner.js` 478 → 295 行，生产代码净减 136 行，测试净增 265 行（不含约 5.3 MB 的 golden）。
+- **数字**：覆盖率闸门 3,250 个测试，3,235 通过、15 跳过、0 失败，全局行覆盖 90.46%；`eval:trajectory` 19/19、`eval:planner` 7/7、`eval:recovery-observability` 8/8 与删除前屏蔽后逐字节一致；`test:pgvector` 101/101；`quality:current` 在删除提交 f7535832 上通过。代码量：`agent-execution-graph-runner.js` 478 → 295 行，生产代码净减 136 行，测试净增 265 行（不含约 5.3 MB 的 golden）。
 - **局限**：golden 只记录删除前 native 在这些固定场景上的行为，不是对任意图形状的证明；只描述 native 自身行为的少量断言没有替代；两个 PostgreSQL 集成套件原来在 native 下也跑一遍，冻结要真库，没有做，现在只有 LangGraph 一侧和用例自己的断言（`test:pgvector` 里通过）；golden 在 Node 24 上生成，CI 的 Node 22 上还没验证。
 - **面试里可以讲**：回退窗口是手段，不是目的。分支还没发布时删掉第二套调度器，等于用"把旧实现的输出冻结成 golden"代替"两套实现长期并跑"；同时把它记成对约束的豁免，并写清唯一的回退方式。
 
