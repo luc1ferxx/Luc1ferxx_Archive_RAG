@@ -1,0 +1,522 @@
+{
+  "checks": [
+    {
+      "category": "unified_graph",
+      "detail": {
+        "executedEventCount": 1,
+        "executedStatus": "completed",
+        "outerPlanEventCount": 0,
+        "plannedEvents": [
+          {
+            "errorCodes": [],
+            "fallback": null,
+            "mode": "guarded",
+            "nodeIds": [
+              "document",
+              "evidence_check",
+              "risk"
+            ],
+            "requestedPlannerId": "trajectory_evidence_gated_skill_proposal",
+            "status": "selected"
+          }
+        ],
+        "runStatus": "completed"
+      },
+      "id": "unified_graph_took_request",
+      "label": "The admitted v3 graph answered the whole request; the V1 outer plan never ran",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "insufficient": {
+          "agentMode": "clarification",
+          "checkPassed": false,
+          "clarificationNeeded": true,
+          "customSkillCalls": 0,
+          "documentRagCalls": 1,
+          "nodeRuns": [
+            {
+              "dependsOn": [],
+              "nodeId": "document",
+              "reason": null,
+              "skillId": "document_rag",
+              "status": "completed"
+            },
+            {
+              "dependsOn": [
+                "document"
+              ],
+              "nodeId": "evidence_check",
+              "reason": null,
+              "skillId": "document_evidence_check",
+              "status": "completed"
+            },
+            {
+              "dependsOn": [
+                "document",
+                "evidence_check"
+              ],
+              "nodeId": "risk",
+              "reason": "condition_not_met",
+              "skillId": "risk_review",
+              "status": "skipped"
+            }
+          ],
+          "riskCallCount": 0
+        },
+        "sufficient": {
+          "checkPassed": true,
+          "customSkillCalls": 1,
+          "documentRagCalls": 1,
+          "riskStatus": "completed"
+        }
+      },
+      "id": "skill_gated_on_document_evidence",
+      "label": "The Skill ran only when the document answer passed its evidence check; otherwise it was skipped, never charged, and the user was asked",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "priorFindingsIsDocumentAnswer": true,
+        "riskDependsOn": [
+          "document",
+          "evidence_check"
+        ],
+        "riskQuestionCarriesDocumentAnswer": true,
+        "riskStartedAfterCheckCompleted": true
+      },
+      "id": "skill_received_verified_document_answer",
+      "label": "The Skill started after the evidence check and received the verified document answer as its typed priorFindings input",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": [
+        {
+          "customSkillCalls": 1,
+          "customStageBeforeDocumentRag": true,
+          "documentRagCalls": 0,
+          "documentSufficient": true,
+          "riskCallCount": 1,
+          "riskCallsWithUpstreamSection": 0,
+          "skillGraphRollout": "off",
+          "unifiedEventCount": 0
+        },
+        {
+          "customSkillCalls": 1,
+          "customStageBeforeDocumentRag": true,
+          "documentRagCalls": 0,
+          "documentSufficient": false,
+          "riskCallCount": 1,
+          "riskCallsWithUpstreamSection": 0,
+          "skillGraphRollout": "off",
+          "unifiedEventCount": 0
+        },
+        {
+          "customSkillCalls": 1,
+          "customStageBeforeDocumentRag": true,
+          "documentRagCalls": 0,
+          "documentSufficient": true,
+          "riskCallCount": 1,
+          "riskCallsWithUpstreamSection": 0,
+          "skillGraphRollout": "guarded",
+          "unifiedEventCount": 0
+        },
+        {
+          "customSkillCalls": 1,
+          "customStageBeforeDocumentRag": true,
+          "documentRagCalls": 0,
+          "documentSufficient": false,
+          "riskCallCount": 1,
+          "riskCallsWithUpstreamSection": 0,
+          "skillGraphRollout": "guarded",
+          "unifiedEventCount": 0
+        }
+      ],
+      "id": "v1_same_request_runs_skill_first_and_unconditionally",
+      "label": "V1 on the same request, chain and V2 DAG, both evidence variants: the Skill runs every time, with no document answer and no upstream section",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "graphNodeStepCount": 0,
+        "plannedEvents": [
+          {
+            "errorCodes": [
+              "external_output_hand_off"
+            ],
+            "fallback": "v1",
+            "mode": "guarded",
+            "nodeIds": [
+              "document",
+              "evidence_check",
+              "web",
+              "risk"
+            ],
+            "requestedPlannerId": "trajectory_web_hand_off_proposal",
+            "status": "rejected"
+          }
+        ],
+        "unifiedCheckpointWritten": false,
+        "v1OuterPlanRan": true,
+        "webTextReachedAnySkill": false
+      },
+      "id": "web_to_skill_hand_off_refused",
+      "label": "A graph that hands Web text to a Skill is refused whole before any node runs, and V1 answers",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "answer": {
+          "agentMode": "risk_review",
+          "includesDocumentAnswer": true,
+          "includesRiskFinding": true,
+          "sourceKinds": [
+            "document",
+            "document"
+          ]
+        },
+        "checkpoint": {
+          "finalizationMatchesResponse": true,
+          "graphVersion": "v3",
+          "hasFinalizationReceipt": true,
+          "phase": "completed",
+          "version": "v2"
+        }
+      },
+      "id": "graph_answer_finalized_with_receipt",
+      "label": "The shared finalizer kept the cited risk finding and the document answer, sealed as a finalization receipt",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "budgetUsed": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 1,
+          "documentRagCalls": 1,
+          "researchQuestions": 0,
+          "traceSteps": 9,
+          "webSearchCalls": 0
+        },
+        "planner": {
+          "callCount": 1,
+          "evidenceKind": "deterministic_injected_proposal",
+          "graphVersion": "v3",
+          "requestedPlannerId": "trajectory_evidence_gated_skill_proposal"
+        }
+      },
+      "id": "graph_budget_charged_per_executed_node",
+      "label": "Budget was reserved once per executed node and the planner was a pinned deterministic proposal",
+      "passed": true
+    }
+  ],
+  "description": "Under AGENT_UNIFIED_GRAPH_ROLLOUT=guarded, a risk-review request runs the risk_review Skill only after the document answer passes its evidence check and hands it that verified answer as typed priorFindings; V1 on the same request (chain and V2 DAG) runs the Skill first and unconditionally, and a Web-to-Skill hand-off is refused at admission.",
+  "failedCheckCount": 0,
+  "id": "unified_graph_evidence_gated_skill_hand_off",
+  "label": "Unified graph evidence-gated Skill hand-off",
+  "passed": true,
+  "response": {
+    "agentMode": "risk_review",
+    "agentSkills": [
+      {
+        "label": "Document RAG",
+        "skillId": "document_rag",
+        "skillVersion": "1.0.0",
+        "status": "completed"
+      },
+      {
+        "label": "Document Evidence Check",
+        "skillId": "document_evidence_check",
+        "skillVersion": "1.0.0",
+        "status": "completed"
+      },
+      {
+        "label": "Risk Review",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "status": "completed"
+      }
+    ],
+    "budget": {
+      "limits": {
+        "maxArxivPaperFetches": 1,
+        "maxCustomSkillCalls": 2,
+        "maxDocumentRagCalls": 2,
+        "maxResearchQuestions": 3,
+        "maxTraceSteps": 16,
+        "maxWebSearchCalls": 1
+      },
+      "run": {
+        "exhausted": null,
+        "limits": {
+          "maxCostUsd": 0.5,
+          "maxDurationMs": "<elapsed>",
+          "maxTokens": 100000
+        },
+        "used": {
+          "costUsd": 0,
+          "durationMs": "<elapsed>",
+          "modelCalls": 0,
+          "tokens": 0,
+          "unpricedModelCalls": 0
+        }
+      },
+      "traceTruncated": false,
+      "used": {
+        "arxivPaperFetches": 0,
+        "customSkillCalls": 1,
+        "documentRagCalls": 1,
+        "researchQuestions": 0,
+        "traceSteps": 9,
+        "webSearchCalls": 0
+      }
+    },
+    "clarification": null,
+    "executionLoop": {
+      "followUpsRun": 0,
+      "gaps": [],
+      "gapsIdentified": 0,
+      "maxFollowUps": 1,
+      "stoppedReason": "not_needed",
+      "version": "1.0"
+    },
+    "observed": {
+      "answer": {
+        "agentMode": "risk_review",
+        "includesDocumentAnswer": true,
+        "includesRiskFinding": true,
+        "sourceKinds": [
+          "document",
+          "document"
+        ]
+      },
+      "checkpoint": {
+        "finalizationMatchesResponse": true,
+        "graphVersion": "v3",
+        "hasFinalizationReceipt": true,
+        "phase": "completed",
+        "version": "v2"
+      },
+      "externalHandOff": {
+        "graphNodeStepCount": 0,
+        "plannedEvents": [
+          {
+            "errorCodes": [
+              "external_output_hand_off"
+            ],
+            "fallback": "v1",
+            "mode": "guarded",
+            "nodeIds": [
+              "document",
+              "evidence_check",
+              "web",
+              "risk"
+            ],
+            "requestedPlannerId": "trajectory_web_hand_off_proposal",
+            "status": "rejected"
+          }
+        ],
+        "unifiedCheckpointWritten": false,
+        "v1OuterPlanRan": true,
+        "webTextReachedAnySkill": false
+      },
+      "gating": {
+        "insufficient": {
+          "agentMode": "clarification",
+          "checkPassed": false,
+          "clarificationNeeded": true,
+          "customSkillCalls": 0,
+          "documentRagCalls": 1,
+          "nodeRuns": [
+            {
+              "dependsOn": [],
+              "nodeId": "document",
+              "reason": null,
+              "skillId": "document_rag",
+              "status": "completed"
+            },
+            {
+              "dependsOn": [
+                "document"
+              ],
+              "nodeId": "evidence_check",
+              "reason": null,
+              "skillId": "document_evidence_check",
+              "status": "completed"
+            },
+            {
+              "dependsOn": [
+                "document",
+                "evidence_check"
+              ],
+              "nodeId": "risk",
+              "reason": "condition_not_met",
+              "skillId": "risk_review",
+              "status": "skipped"
+            }
+          ],
+          "riskCallCount": 0
+        },
+        "sufficient": {
+          "checkPassed": true,
+          "customSkillCalls": 1,
+          "documentRagCalls": 1,
+          "riskStatus": "completed"
+        }
+      },
+      "handOff": {
+        "priorFindingsIsDocumentAnswer": true,
+        "riskDependsOn": [
+          "document",
+          "evidence_check"
+        ],
+        "riskQuestionCarriesDocumentAnswer": true,
+        "riskStartedAfterCheckCompleted": true
+      },
+      "nodeRuns": [
+        {
+          "dependsOn": [],
+          "nodeId": "document",
+          "reason": null,
+          "skillId": "document_rag",
+          "status": "completed"
+        },
+        {
+          "dependsOn": [
+            "document"
+          ],
+          "nodeId": "evidence_check",
+          "reason": null,
+          "skillId": "document_evidence_check",
+          "status": "completed"
+        },
+        {
+          "dependsOn": [
+            "document",
+            "evidence_check"
+          ],
+          "nodeId": "risk",
+          "reason": null,
+          "skillId": "risk_review",
+          "status": "completed"
+        }
+      ],
+      "path": {
+        "executedEventCount": 1,
+        "executedStatus": "completed",
+        "outerPlanEventCount": 0,
+        "plannedEvents": [
+          {
+            "errorCodes": [],
+            "fallback": null,
+            "mode": "guarded",
+            "nodeIds": [
+              "document",
+              "evidence_check",
+              "risk"
+            ],
+            "requestedPlannerId": "trajectory_evidence_gated_skill_proposal",
+            "status": "selected"
+          }
+        ],
+        "runStatus": "completed"
+      },
+      "planner": {
+        "callCount": 1,
+        "evidenceKind": "deterministic_injected_proposal",
+        "graphVersion": "v3",
+        "requestedPlannerId": "trajectory_evidence_gated_skill_proposal"
+      },
+      "v1Runs": [
+        {
+          "customSkillCalls": 1,
+          "customStageBeforeDocumentRag": true,
+          "documentRagCalls": 0,
+          "documentSufficient": true,
+          "riskCallCount": 1,
+          "riskCallsWithUpstreamSection": 0,
+          "skillGraphRollout": "off",
+          "unifiedEventCount": 0
+        },
+        {
+          "customSkillCalls": 1,
+          "customStageBeforeDocumentRag": true,
+          "documentRagCalls": 0,
+          "documentSufficient": false,
+          "riskCallCount": 1,
+          "riskCallsWithUpstreamSection": 0,
+          "skillGraphRollout": "off",
+          "unifiedEventCount": 0
+        },
+        {
+          "customSkillCalls": 1,
+          "customStageBeforeDocumentRag": true,
+          "documentRagCalls": 0,
+          "documentSufficient": true,
+          "riskCallCount": 1,
+          "riskCallsWithUpstreamSection": 0,
+          "skillGraphRollout": "guarded",
+          "unifiedEventCount": 0
+        },
+        {
+          "customSkillCalls": 1,
+          "customStageBeforeDocumentRag": true,
+          "documentRagCalls": 0,
+          "documentSufficient": false,
+          "riskCallCount": 1,
+          "riskCallsWithUpstreamSection": 0,
+          "skillGraphRollout": "guarded",
+          "unifiedEventCount": 0
+        }
+      ]
+    },
+    "selectedSkills": [
+      {
+        "budgetKey": "customSkillCalls",
+        "label": "Risk Review",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0"
+      },
+      {
+        "budgetKey": "documentRagCalls",
+        "label": "Document RAG",
+        "skillId": "document_rag",
+        "skillVersion": "1.0.0"
+      },
+      {
+        "budgetKey": null,
+        "label": "Document Evidence Check",
+        "skillId": "document_evidence_check",
+        "skillVersion": "1.0.0"
+      }
+    ],
+    "skillChain": [],
+    "status": 200,
+    "telemetry": {
+      "chatCallCount": 2,
+      "listDocumentCallCount": 3
+    },
+    "traceTypes": [
+      "plan",
+      "query_planner",
+      "graph_node",
+      "graph_node",
+      "graph_node",
+      "self_check",
+      "synthesis",
+      "self_check",
+      "answer_finalizer"
+    ],
+    "workingMemory": {
+      "checkedQueryCount": 3,
+      "resolvedGapCount": 0,
+      "unresolvedGapCount": 0,
+      "unsupportedClaimCount": 0
+    }
+  }
+}

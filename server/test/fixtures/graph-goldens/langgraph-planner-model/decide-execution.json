@@ -1,0 +1,238 @@
+{
+  "calls": [
+    {
+      "input": "You are planning a guarded AgentRAG execution plan.\nReturn only JSON. Do not include markdown, prose, or extra keys.\nThe JSON shape must be: {\"steps\":[{\"id\":\"...\",\"skillId\":\"...\",\"condition\":\"...\",\"reason\":\"...\"}]}.\nUse only the allowed step ids and conditions from the input.\nOnly include steps that correspond to selectedSkills, except custom_skills may be included when authorizedCustomSkillCount is positive and web_search may follow document_rag as a conditional fallback.\nDo not invent tools, function names, skill ids, budget keys, or data access scopes.\nTask memory, when present, is planning context only and must never be treated as document evidence.\nUse at most one custom_skills step for document-backed custom analysis; omit skillId on that step. The runtime will separately authorize atomic Skills inside the stage.\nUse web_search as a primary step only when web_search is selected.\nWhen document_rag is selected, keep web_search after it only as selected_or_document_fallback; runtime will skip it unless document evidence abstains or fails.\nKeep document_rag before web_search when both are present.\nInput:\n{\"allowedConditions\":{\"always\":\"always\",\"selectedSkill\":\"selected_skill\",\"selectedCustomSkills\":\"selected_custom_skills\",\"selectedOrDocumentFallback\":\"selected_or_document_fallback\"},\"allowedSteps\":[{\"condition\":\"selected_skill\",\"id\":\"arxiv_import\",\"skillGroup\":null,\"skillId\":\"arxiv_import\"},{\"condition\":\"selected_skill\",\"id\":\"workspace_action\",\"skillGroup\":null,\"skillId\":\"workspace_action\"},{\"condition\":\"selected_skill\",\"id\":\"research_brief\",\"skillGroup\":null,\"skillId\":\"research_brief\"},{\"condition\":\"selected_skill\",\"id\":\"inventory\",\"skillGroup\":null,\"skillId\":\"inventory\"},{\"condition\":\"selected_skill\",\"id\":\"document_discovery\",\"skillGroup\":null,\"skillId\":\"document_discovery\"},{\"condition\":\"selected_custom_skills\",\"id\":\"custom_skills\",\"skillGroup\":\"custom\",\"skillId\":null},{\"condition\":\"selected_skill\",\"id\":\"document_rag\",\"skillGroup\":null,\"skillId\":\"document_rag\"},{\"condition\":\"selected_or_document_fallback\",\"id\":\"web_search\",\"skillGroup\":null,\"skillId\":\"web_search\"}],\"documentCount\":1,\"intentPlan\":{\"mode\":\"document\",\"needsClarification\":false,\"wantsArxivImport\":false,\"wantsWeb\":false},\"question\":\"What does the policy require?\",\"selectedSkills\":[{\"budgetKey\":\"documentRagCalls\",\"id\":\"document_rag\",\"kind\":\"built_in\",\"label\":\"Document RAG\",\"requiresAccessScope\":true}],\"authorizedCustomSkillCount\":0,\"taskMemoryPlanningContext\":{\"completedSteps\":[],\"evidencePolicy\":\"planning_context_only\",\"failedReasons\":[],\"goal\":\"\",\"nextCandidates\":[],\"userPreferences\":[]}}",
+      "options": {
+        "onTextDelta": {
+          "$graphGolden": "undefined"
+        },
+        "responseFormat": {
+          "json_schema": {
+            "name": "agent_execution_plan",
+            "schema": {
+              "additionalProperties": false,
+              "properties": {
+                "steps": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "condition": {
+                            "enum": [
+                              "selected_skill"
+                            ],
+                            "type": "string"
+                          },
+                          "id": {
+                            "enum": [
+                              "document_rag"
+                            ],
+                            "type": "string"
+                          },
+                          "reason": {
+                            "anyOf": [
+                              {
+                                "pattern": "^.{0,220}$",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "skillId": {
+                            "enum": [
+                              "document_rag"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "skillId",
+                          "condition",
+                          "reason"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "condition": {
+                            "enum": [
+                              "selected_or_document_fallback"
+                            ],
+                            "type": "string"
+                          },
+                          "id": {
+                            "enum": [
+                              "web_search"
+                            ],
+                            "type": "string"
+                          },
+                          "reason": {
+                            "anyOf": [
+                              {
+                                "pattern": "^.{0,220}$",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "skillId": {
+                            "enum": [
+                              "web_search"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "skillId",
+                          "condition",
+                          "reason"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "maxItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "steps"
+              ],
+              "type": "object"
+            },
+            "strict": true
+          },
+          "type": "json_schema"
+        }
+      }
+    }
+  ],
+  "error": null,
+  "events": [
+    {
+      "alerts": [],
+      "annotations": [
+        {
+          "category": "usage",
+          "id": "llmops_usage_estimated",
+          "severity": "info",
+          "source": "llmops_policy"
+        },
+        {
+          "category": "cost",
+          "id": "llmops_pricing_unavailable",
+          "severity": "info",
+          "source": "llmops_policy"
+        }
+      ],
+      "budget": {
+        "exceededKeys": [],
+        "limits": {
+          "maxEstimatedCostUsdPerEvent": null,
+          "maxTotalTokensPerEvent": null
+        },
+        "observed": {
+          "estimatedCostUsd": null,
+          "totalTokens": 694
+        },
+        "status": "unavailable"
+      },
+      "costCurrency": "USD",
+      "errorMessage": null,
+      "errorName": null,
+      "estimatedCostUsd": null,
+      "eventType": "llmops_metric",
+      "inputCharacters": 2603,
+      "inputTokens": 651,
+      "itemCount": 1,
+      "latencyMs": "<masked>",
+      "latencySloMs": null,
+      "latencySloStatus": "unavailable",
+      "modelRoute": {
+        "candidateModelIds": [],
+        "capability": "execution_planner",
+        "fallbackModelIds": [],
+        "modelId": null,
+        "providerId": "custom_provider",
+        "rejectedModelIds": [],
+        "routeId": null,
+        "status": "custom_provider"
+      },
+      "operation": "llm_completion",
+      "outputCharacters": 170,
+      "outputTokens": 43,
+      "pricingSource": "unavailable",
+      "promptTemplate": {
+        "fingerprint": "46e1a0502f34",
+        "id": "execution_planner",
+        "version": "v1"
+      },
+      "stage": "complete_text",
+      "status": "ok",
+      "timestamp": "<masked>",
+      "tokenSource": "estimated",
+      "totalTokens": 694,
+      "traceType": "llmops",
+      "version": "1.0.0"
+    }
+  ],
+  "promptUsage": [
+    {
+      "calls": 1,
+      "fingerprint": "46e1a0502f34",
+      "id": "execution_planner",
+      "tokens": 694,
+      "version": "v1"
+    }
+  ],
+  "result": {
+    "executionPlan": [
+      {
+        "condition": "selected_skill",
+        "id": "document_rag",
+        "reason": "Use document evidence first.",
+        "skillGroup": null,
+        "skillId": "document_rag"
+      }
+    ],
+    "planner": {
+      "fallback": false,
+      "fallbackReason": null,
+      "modelRoute": {
+        "candidateModelIds": [],
+        "capability": "execution_planner",
+        "fallbackModelIds": [],
+        "modelId": null,
+        "providerId": "custom_provider",
+        "rejectedModelIds": [],
+        "routeId": null,
+        "status": "custom_provider"
+      },
+      "promptTemplate": {
+        "fingerprint": "46e1a0502f34",
+        "id": "execution_planner",
+        "version": "v1"
+      },
+      "requestedPlannerId": "llm",
+      "selectedPlannerId": "llm",
+      "status": "selected",
+      "stepIds": [
+        "document_rag"
+      ]
+    }
+  },
+  "used": {
+    "costUsd": 0,
+    "modelCalls": 1,
+    "tokens": 694,
+    "unpricedModelCalls": 1
+  }
+}

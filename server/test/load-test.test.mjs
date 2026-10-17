@@ -387,6 +387,73 @@ test("the app environment pins every store and model setting and drops inherited
   assert.equal(pg.RAG_EMBEDDING_CACHE_MAX, String(400 * 8 + 64));
 });
 
+// Since ADR 0001 phase 6 the custom-Skill DAG and the v3 unified graph run on
+// LangGraph only: the app refuses AGENT_RUNTIME=native at start-up, so the
+// bench never hands AGENT_RUNTIME to an app process (the shell's value is
+// dropped, and unset is LangGraph), records `langgraph`, and refuses
+// --agent-runtime native rather than measure something else under its name.
+test("the agent graphs always run on LangGraph: --agent-runtime accepts only langgraph, and AGENT_RUNTIME never reaches the app", () => {
+  const environmentFor = (options, shellRuntime) =>
+    buildAppEnvironment({
+      baseEnvironment: { AGENT_RUNTIME: shellRuntime, PATH: "/usr/bin" },
+      modelBaseUrl: "http://127.0.0.1:1/v1",
+      options,
+      storage: "local",
+      tempRoot: "/tmp/load",
+    });
+
+  assert.equal(parseLoadTestArgs([]).agentRuntime, "langgraph");
+  assert.equal(parseLoadTestArgs(["--agent-runtime", "langgraph"]).agentRuntime, "langgraph");
+  for (const shellRuntime of ["native", "langgraph", undefined]) {
+    for (const args of [[], ["--agent-runtime", "langgraph"]]) {
+      assert.equal(
+        Object.hasOwn(environmentFor(parseLoadTestArgs(args), shellRuntime), "AGENT_RUNTIME"),
+        false,
+        `${JSON.stringify(args)} with AGENT_RUNTIME=${shellRuntime} in the shell`
+      );
+    }
+  }
+  assert.throws(
+    () => parseLoadTestArgs(["--agent-runtime", "native"]),
+    /--agent-runtime native was removed \(ADR 0001 phase 6\)/
+  );
+  assert.throws(() => parseLoadTestArgs(["--agent-runtime", "graph"]), /--agent-runtime must be langgraph/);
+  assert.throws(() => parseLoadTestArgs(["--agent-runtime", ""]), /--agent-runtime must be langgraph/);
+});
+
+// The outer plan has its own dial since the phase-3 decision, so the agent
+// graphs on LangGraph leave it native; the phase-3 reports that ran the outer
+// plan on LangGraph need --outer-plan-runtime langgraph.
+test("the outer plan runtime is named by --outer-plan-runtime, never inherited from the shell", () => {
+  const base = { AGENT_OUTER_PLAN_RUNTIME: "langgraph", AGENT_RUNTIME: "langgraph", PATH: "/usr/bin" };
+  const environmentFor = (options) =>
+    buildAppEnvironment({
+      baseEnvironment: base,
+      modelBaseUrl: "http://127.0.0.1:1/v1",
+      options,
+      storage: "local",
+      tempRoot: "/tmp/load",
+    });
+
+  assert.equal(parseLoadTestArgs([]).outerPlanRuntime, "native");
+  assert.equal(environmentFor(parseLoadTestArgs([])).AGENT_OUTER_PLAN_RUNTIME, "native");
+
+  const agentOnly = environmentFor(parseLoadTestArgs(["--agent-runtime", "langgraph"]));
+  assert.equal(agentOnly.AGENT_OUTER_PLAN_RUNTIME, "native", "--agent-runtime never moves the outer plan");
+
+  const outerOnly = environmentFor(parseLoadTestArgs(["--outer-plan-runtime", "langgraph"]));
+  assert.equal(outerOnly.AGENT_OUTER_PLAN_RUNTIME, "langgraph");
+  assert.equal(Object.hasOwn(outerOnly, "AGENT_RUNTIME"), false);
+  assert.equal(parseLoadTestArgs(["--outer-plan-runtime", "langgraph"]).agentRuntime, "langgraph");
+
+  const both = environmentFor(parseLoadTestArgs(["--agent-runtime", "langgraph", "--outer-plan-runtime", "langgraph"]));
+  assert.equal(both.AGENT_OUTER_PLAN_RUNTIME, "langgraph");
+  assert.equal(Object.hasOwn(both, "AGENT_RUNTIME"), false);
+
+  assert.throws(() => parseLoadTestArgs(["--outer-plan-runtime", "graph"]), /outer-plan-runtime/);
+  assert.throws(() => parseLoadTestArgs(["--outer-plan-runtime", ""]), /outer-plan-runtime/);
+});
+
 test("the query cache size covers every retrieval query of the seed pool and the ingest probes", () => {
   assert.equal(QUERY_EMBEDDINGS_PER_QUESTION, 8);
   assert.equal(embeddingCacheEntriesFor({ documents: 5, pages: 4, scenario: "chat" }), 256, "never below the app default");
@@ -1384,6 +1451,54 @@ test("markdown report has the config, the host's core tiers and one table per sc
   assert.match(markdown, /c=4: http_429 x1/);
   assert.match(markdown, /pgvector \(dense pgvector, sparse postgres_fts, rrf fusion\); 4 chunk rows counted in PostgreSQL/);
   assert.doesNotMatch(markdown, /Per instance/);
+});
+
+// --agent-runtime langgraph no longer means the outer plan ran on LangGraph,
+// so the report names each dial; a report written before the split has no
+// outerPlanRuntime, and printing native there would mislabel the phase-3
+// langgraph runs, whose outer plan followed AGENT_RUNTIME. Reports that
+// recorded agentRuntime `native` (the rollback phase 6 removed) and reports
+// from before the field still render as they were.
+test("markdown report names both runtimes, and a report from before the outer-plan dial says what ran the outer plan", () => {
+  const markdownFor = (overrides) =>
+    formatLoadTestMarkdown({
+      config: reportConfig({ storage: ["local"], ...overrides }),
+      generatedAt: "2026-10-16T00:00:00.000Z",
+      method: { notes: ["note"], percentile: "nearest-rank" },
+      runs: [
+        {
+          idle: [{ cpuMsPerSecond: 3.5, dbQueriesPerSecond: 0 }],
+          idleMs: 3000,
+          ingest: reportIngest,
+          ingestWorkers: 0,
+          instances: [{ index: 0, ingestWorker: null, port: 4001 }],
+          scenarios: [{ endpoint: "POST /chat", kind: "chat", levels: [chatLevel()], modelLatencyMs: 800 }],
+          storage: "local",
+        },
+      ],
+    });
+  const agentLabel = String.raw`\| Agent runtime \(AGENT_RUNTIME: custom-Skill DAG, v3 unified graph\) \| `;
+  const outerLabel = String.raw`\| Outer plan runtime \(AGENT_OUTER_PLAN_RUNTIME: V1 outer plan, \/chat\/stream relay\) \| `;
+
+  const recorded = markdownFor({ agentRuntime: "langgraph", outerPlanRuntime: "native" });
+  assert.match(recorded, new RegExp(`${agentLabel}langgraph \\|`));
+  assert.match(recorded, new RegExp(`${outerLabel}native \\|`));
+
+  const legacy = markdownFor({ agentRuntime: "langgraph" });
+  assert.match(
+    legacy,
+    new RegExp(
+      `${outerLabel}langgraph \\(not recorded: before AGENT_OUTER_PLAN_RUNTIME, AGENT_RUNTIME scheduled the outer plan too\\) \\|`
+    )
+  );
+
+  const neither = markdownFor({});
+  assert.match(neither, new RegExp(`${agentLabel}native \\|`));
+  assert.match(neither, new RegExp(`${outerLabel}native \\(not recorded`));
+
+  const rollback = markdownFor({ agentRuntime: "native", outerPlanRuntime: "native" });
+  assert.match(rollback, new RegExp(`${agentLabel}native \\|`));
+  assert.match(rollback, new RegExp(`${outerLabel}native \\|`));
 });
 
 test("markdown report of a multi-instance chat run adds a per-instance table with latency and the mean", () => {

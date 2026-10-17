@@ -359,14 +359,19 @@ export const createPostgresAgentRunStore = ({
 
   // The event list a write returned with its row. An injected query function
   // that does not model the aggregate (a unit-test fake) gets the separate
-  // read the store always used to make.
-  const resolveWrittenRunEvents = async ({ accessScope, row, runId }) =>
+  // read the store always used to make, and so does the plain UPDATE, which
+  // returns no list -- unless the caller supplied the list of the base it
+  // decided the write on (`knownEvents`), in which case that list is the
+  // returned run's, as of that base.
+  const resolveWrittenRunEvents = async ({ accessScope, knownEvents = null, row, runId }) =>
     hasReturnedRunEvents(row)
       ? mapReturnedRunEvents(row)
-      : getEvents({
-          accessScope,
-          runId,
-        });
+      : Array.isArray(knownEvents)
+        ? knownEvents
+        : getEvents({
+            accessScope,
+            runId,
+          });
 
   const runEventListCte = buildRunEventListCte({
     eventsTable: runEventsTable,
@@ -557,6 +562,7 @@ export const createPostgresAgentRunStore = ({
     event = null,
     expectedRevision,
     patch = {},
+    reuseBaseEvents = false,
     runId,
   } = {}) => {
     // The caller already holds the run at expectedRevision when it decided
@@ -924,6 +930,14 @@ export const createPostgresAgentRunStore = ({
       result.rows[0],
       await resolveWrittenRunEvents({
         accessScope: scope,
+        // Only the event-less UPDATE returns no list, and only a caller that
+        // decided the write on `baseRun` and asked for its list gets it
+        // (agent-runs.js mutateStoredRun reuseBaseEvents); a write that
+        // records an event returns the exact list from its CTE.
+        knownEvents:
+          reuseBaseEvents && existingRun === baseRun && !normalizedEvent
+            ? toArray(existingRun.events)
+            : null,
         row: result.rows[0],
         runId,
       })
@@ -1101,6 +1115,7 @@ export const createPostgresAgentRunStore = ({
       baseRun = null,
       expectedRevision,
       patch = {},
+      reuseBaseEvents = false,
       runId,
     } = {}) {
       return commitRunUpdate({
@@ -1108,6 +1123,7 @@ export const createPostgresAgentRunStore = ({
         baseRun,
         expectedRevision,
         patch,
+        reuseBaseEvents: reuseBaseEvents === true,
         runId,
       });
     },

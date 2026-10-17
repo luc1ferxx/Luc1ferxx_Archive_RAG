@@ -1,0 +1,224 @@
+{
+  "budget": {
+    "limits": {
+      "maxArxivPaperFetches": 1,
+      "maxCustomSkillCalls": 8,
+      "maxDocumentRagCalls": 2,
+      "maxResearchQuestions": 3,
+      "maxTraceSteps": 16,
+      "maxWebSearchCalls": 1
+    },
+    "traceTruncated": false,
+    "used": {
+      "arxivPaperFetches": 0,
+      "customSkillCalls": 0,
+      "documentRagCalls": 0,
+      "researchQuestions": 0,
+      "traceSteps": 0,
+      "webSearchCalls": 0
+    }
+  },
+  "budgetLimits": [],
+  "checkpoint": null,
+  "events": [
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:1",
+      "payload": {
+        "status": "running"
+      },
+      "type": "run_created"
+    }
+  ],
+  "journal": [],
+  "outcome": {
+    "result": {
+      "errors": [],
+      "graphVersion": "v1",
+      "nodeRuns": [
+        {
+          "citationCount": 1,
+          "dependsOn": [],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "compare",
+          "parallelSafe": true,
+          "reason": null,
+          "result": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "durationMs": "<duration>",
+            "graphOutput": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "compare_documents answered."
+            },
+            "label": "compare_documents",
+            "ok": true,
+            "skillId": "compare_documents",
+            "skillVersion": "1.0.0",
+            "text": "compare_documents answered.",
+            "traceDetail": null,
+            "value": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "compare_documents answered."
+            }
+          },
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0",
+          "status": "reused",
+          "stepId": "custom_skill:compare"
+        },
+        {
+          "citationCount": 1,
+          "dependsOn": [
+            "compare"
+          ],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "risk",
+          "parallelSafe": true,
+          "reason": null,
+          "result": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "durationMs": "<duration>",
+            "graphOutput": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "risk_review answered."
+            },
+            "label": "risk_review",
+            "ok": true,
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "text": "risk_review answered.",
+            "traceDetail": null,
+            "value": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "risk_review answered."
+            }
+          },
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "status": "reused",
+          "stepId": "custom_skill:risk"
+        }
+      ],
+      "ok": true,
+      "results": [
+        {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "durationMs": "<duration>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "compare_documents answered."
+          },
+          "label": "compare_documents",
+          "ok": true,
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0",
+          "text": "compare_documents answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "compare_documents answered."
+          }
+        },
+        {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "durationMs": "<duration>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "risk_review answered."
+          },
+          "label": "risk_review",
+          "ok": true,
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "text": "risk_review answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "risk_review answered."
+          }
+        }
+      ],
+      "status": "completed"
+    }
+  },
+  "runError": null,
+  "runStatus": "running",
+  "settled": [],
+  "skillRuns": [],
+  "steps": [],
+  "trace": []
+}

@@ -1016,6 +1016,63 @@ test("only one startup worker can claim a graph checkpoint", async () => {
   );
 });
 
+test("a startup claim refuses a graph whose run holds a pending approval gate, and takes it once the gate is decided", async () => {
+  // Ported from the phase-0 LangGraph spike, whose saver copied this refusal
+  // from claimExecutionGraphResume: a pending approval belongs to the user's
+  // decision, never to a recovery worker's takeover. The refusal writes
+  // nothing.
+  const harness = await createHarness();
+  const checkpoint = createExecutionGraphCheckpoint({
+    graph: createExecutionGraph({ nodes: graphNodes }),
+    owner: buildExecutionGraphCheckpointOwner({
+      accessScope,
+      budgetState: createAgentBudget({ maxCustomSkillCalls: 3 }),
+      docIds,
+      plan,
+      question,
+      retrievalPlan: null,
+      selectedSkills: harness.skills,
+      sessionId,
+      userId,
+    }),
+  });
+  await harness.agentRunService.saveExecutionGraphCheckpoint({
+    accessScope,
+    checkpoint,
+    runId,
+  });
+  // Written straight through the store, as another worker's commit lands.
+  const setGate = async (status) => {
+    const raw = await harness.store.get({ accessScope, runId });
+    await harness.store.update({
+      accessScope,
+      expectedRevision: raw.revision,
+      patch: {
+        approvalGates: [
+          { capabilityId: "task.create", id: "gate-1", status, type: "capability_approval" },
+        ],
+      },
+      runId,
+    });
+    return harness.store.get({ accessScope, runId });
+  };
+  const claim = () =>
+    harness.agentRunService.claimExecutionGraphResume({
+      accessScope,
+      checkpointDigest: checkpoint.digest,
+      runId,
+    });
+
+  const gated = await setGate("pending");
+  assert.equal(gated.approvalGates[0].status, "pending");
+  assert.equal((await claim()).claimed, false);
+  assert.equal((await harness.store.get({ accessScope, runId })).revision, gated.revision);
+
+  // Control: the same run is claimable once the gate is decided.
+  await setGate("denied");
+  assert.equal((await claim()).claimed, true);
+});
+
 test("an active standalone step atomically prevents initial graph ownership", async () => {
   const harness = await createHarness();
   await harness.agentRunService.recordRunStep({

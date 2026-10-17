@@ -1,0 +1,178 @@
+{
+  "calls": [
+    {
+      "input": "You are selecting a guarded AgentRAG intent plan.\nReturn only JSON. Do not include markdown, prose, or extra keys.\nThe JSON shape must be: {\"selectedIntentId\":\"...\",\"reason\":\"...\"}\nChoose exactly one selectedIntentId from the candidates input.\nDo not invent tools, modes, skill ids, data access scopes, or candidate ids.\nPrefer the narrowest candidate that satisfies the user request.\nAgent experience memory, when present, is a planning hint only and must never be treated as document evidence.\nTask memory, when present, is planning context only and must never be treated as document evidence.\nInput:\n{\"candidates\":[{\"id\":\"risk_review\",\"mode\":\"risk_review\",\"reason\":\"Risk-review wording was detected.\",\"requiresDocuments\":true,\"skillChain\":[],\"summary\":\"Review selected documents for cited risks, gaps, conflicts, and exceptions.\",\"wants\":{\"arxivImport\":false,\"compareDocuments\":false,\"contractSummary\":false,\"discovery\":false,\"documentRag\":false,\"inventory\":false,\"research\":false,\"riskReview\":true,\"timeline\":false,\"web\":false}},{\"id\":\"research_brief\",\"mode\":\"research_brief\",\"reason\":\"Research or analysis wording was detected.\",\"requiresDocuments\":true,\"skillChain\":[],\"summary\":\"Create a structured research brief from selected documents.\",\"wants\":{\"arxivImport\":false,\"compareDocuments\":false,\"contractSummary\":false,\"discovery\":false,\"documentRag\":false,\"inventory\":false,\"research\":true,\"riskReview\":false,\"timeline\":false,\"web\":false}},{\"id\":\"document\",\"mode\":\"document\",\"reason\":\"Default fallback: answer from selected documents.\",\"requiresDocuments\":true,\"skillChain\":[],\"summary\":\"Use selected documents and synthesize a grounded answer.\",\"wants\":{\"arxivImport\":false,\"compareDocuments\":false,\"contractSummary\":false,\"discovery\":false,\"documentRag\":true,\"inventory\":false,\"research\":false,\"riskReview\":false,\"timeline\":false,\"web\":false}}],\"documentCount\":1,\"experiencePlanningHints\":[],\"question\":\"Review this policy for risks and gaps.\",\"taskMemoryPlanningContext\":{\"completedSteps\":[],\"evidencePolicy\":\"planning_context_only\",\"failedReasons\":[],\"goal\":\"\",\"nextCandidates\":[],\"userPreferences\":[]}}",
+      "options": {
+        "onTextDelta": {
+          "$graphGolden": "undefined"
+        },
+        "responseFormat": {
+          "json_schema": {
+            "name": "agent_intent_selection",
+            "schema": {
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "pattern": "^.{0,220}$",
+                  "type": "string"
+                },
+                "selectedIntentId": {
+                  "enum": [
+                    "risk_review",
+                    "research_brief",
+                    "document"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "selectedIntentId",
+                "reason"
+              ],
+              "type": "object"
+            },
+            "strict": true
+          },
+          "type": "json_schema"
+        }
+      }
+    }
+  ],
+  "error": null,
+  "events": [
+    {
+      "alerts": [],
+      "annotations": [
+        {
+          "category": "usage",
+          "id": "llmops_usage_estimated",
+          "severity": "info",
+          "source": "llmops_policy"
+        },
+        {
+          "category": "cost",
+          "id": "llmops_pricing_unavailable",
+          "severity": "info",
+          "source": "llmops_policy"
+        }
+      ],
+      "budget": {
+        "exceededKeys": [],
+        "limits": {
+          "maxEstimatedCostUsdPerEvent": null,
+          "maxTotalTokensPerEvent": null
+        },
+        "observed": {
+          "estimatedCostUsd": null,
+          "totalTokens": 562
+        },
+        "status": "unavailable"
+      },
+      "costCurrency": "USD",
+      "errorMessage": null,
+      "errorName": null,
+      "estimatedCostUsd": null,
+      "eventType": "llmops_metric",
+      "inputCharacters": 2114,
+      "inputTokens": 529,
+      "itemCount": 1,
+      "latencyMs": "<masked>",
+      "latencySloMs": null,
+      "latencySloStatus": "unavailable",
+      "modelRoute": {
+        "candidateModelIds": [],
+        "capability": "intent_planner",
+        "fallbackModelIds": [],
+        "modelId": null,
+        "providerId": "custom_provider",
+        "rejectedModelIds": [],
+        "routeId": null,
+        "status": "custom_provider"
+      },
+      "operation": "llm_completion",
+      "outputCharacters": 129,
+      "outputTokens": 33,
+      "pricingSource": "unavailable",
+      "promptTemplate": {
+        "fingerprint": "088ec96ebb85",
+        "id": "intent_planner",
+        "version": "v1"
+      },
+      "stage": "complete_text",
+      "status": "ok",
+      "timestamp": "<masked>",
+      "tokenSource": "estimated",
+      "totalTokens": 562,
+      "traceType": "llmops",
+      "version": "1.0.0"
+    }
+  ],
+  "promptUsage": [
+    {
+      "calls": 1,
+      "fingerprint": "088ec96ebb85",
+      "id": "intent_planner",
+      "tokens": 562,
+      "version": "v1"
+    }
+  ],
+  "result": {
+    "plan": {
+      "actionCapabilityId": null,
+      "mode": "risk_review",
+      "requiresDocuments": true,
+      "summary": "Review selected documents for cited risks, gaps, conflicts, and exceptions.",
+      "wantsAction": false,
+      "wantsArxivImport": false,
+      "wantsCompareDocuments": false,
+      "wantsContractSummary": false,
+      "wantsDiscovery": false,
+      "wantsDocumentRag": false,
+      "wantsInventory": false,
+      "wantsResearch": false,
+      "wantsRiskReview": true,
+      "wantsTimeline": false,
+      "wantsWeb": false
+    },
+    "planner": {
+      "candidateIntentIds": [
+        "risk_review",
+        "research_brief",
+        "document"
+      ],
+      "experienceMemory": {
+        "applied": false,
+        "hintCount": 0
+      },
+      "fallback": false,
+      "fallbackReason": null,
+      "modelRoute": {
+        "candidateModelIds": [],
+        "capability": "intent_planner",
+        "fallbackModelIds": [],
+        "modelId": null,
+        "providerId": "custom_provider",
+        "rejectedModelIds": [],
+        "routeId": null,
+        "status": "custom_provider"
+      },
+      "promptTemplate": {
+        "fingerprint": "088ec96ebb85",
+        "id": "intent_planner",
+        "version": "v1"
+      },
+      "requestedPlannerId": "llm",
+      "selectedIntentId": "risk_review",
+      "selectedMode": "risk_review",
+      "selectedPlannerId": "llm",
+      "selectionReason": "Risk wording should use the risk-review skill.",
+      "status": "selected"
+    }
+  },
+  "used": {
+    "costUsd": 0,
+    "modelCalls": 1,
+    "tokens": 562,
+    "unpricedModelCalls": 1
+  }
+}

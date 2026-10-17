@@ -29,9 +29,11 @@ import {
 } from "./capabilities/index.js";
 import { createCapabilityGraphAdapter } from "./capabilities/graph-contract.js";
 import {
+  assertAgentRuntimeSupported,
   getAgentUnifiedGraphCapabilityIds,
   getAgentUnifiedGraphRollout,
 } from "./config.js";
+import { assertLangSmithTracingDisabled } from "./langgraph/langsmith-guard.js";
 
 // The guarded v3 path of one /chat or background-task request, and its
 // cross-process continuation.
@@ -325,6 +327,17 @@ const setUnifiedExecutionPlanner = (session, { graph, planner }) =>
 
 const identity = async (response) => response;
 
+// Every entry that runs the graph on LangGraph (a fresh request, an approval
+// continuation, a startup resume) refuses LangSmith tracing before anything
+// else happens, as the ADR requires of every outer entry, and refuses a
+// removed AGENT_RUNTIME value (native above all), which asked for a scheduler
+// that no longer exists; the stage and the executor refuse again on their
+// own path.
+const assertRuntimeEntryAllowed = () => {
+  assertLangSmithTracingDisabled();
+  assertAgentRuntimeSupported();
+};
+
 const isPersistedGraphApprovalPause = (error) =>
   isAgentRunInterrupt(error) && error.unifiedGraphApprovalPersisted === true;
 
@@ -367,6 +380,8 @@ export const runGuardedUnifiedAgentGraph = async ({
   taskMemory = null,
   userId,
 } = {}) => {
+  assertRuntimeEntryAllowed();
+
   const recordEvent = (type, payload) =>
     agentRunService?.appendRunEvent?.({
       accessScope,
@@ -629,12 +644,15 @@ const runGuardedStageInvocation = ({
     recordSkippedSkill: session.recordSkippedSkill,
     registry,
     retrievalPlan,
-    saveExecutionGraphCheckpoint: (checkpoint) =>
+    // `options`: the stage's own save flags (dropLangGraphRecord on the save
+    // that settles the graph).
+    saveExecutionGraphCheckpoint: (checkpoint, options = {}) =>
       agentRunService.saveExecutionGraphCheckpoint({
         accessScope,
         checkpoint,
         ...(runCursor ? { runCursor } : {}),
         runId: agentRunId,
+        ...options,
       }),
     sessionId,
     stepLifecycle,
@@ -687,6 +705,8 @@ const continueStoredUnifiedGraph = async ({
   skillRegistry,
   webChatService,
 } = {}) => {
+  assertRuntimeEntryAllowed();
+
   const owner = checkpoint?.owner;
   const plan = owner?.intentPlan;
   const runCursor = createAgentRunCursor();
@@ -856,12 +876,13 @@ const continueStoredUnifiedGraph = async ({
       registry: session.registry,
       resumeRun: currentRun,
       retrievalPlan: owner.retrievalPlan,
-      saveExecutionGraphCheckpoint: (next) =>
+      saveExecutionGraphCheckpoint: (next, options = {}) =>
         agentRunService.saveExecutionGraphCheckpoint({
           accessScope,
           checkpoint: next,
           runCursor,
           runId,
+          ...options,
         }),
       sessionId: owner.sessionId,
       stepLifecycle,
@@ -1080,6 +1101,8 @@ export const continueUnifiedAgentGraphAfterApproval = async ({
   skillRegistry,
   webChatService,
 } = {}) => {
+  assertRuntimeEntryAllowed();
+
   const normalizedAction = normalizeText(action).toLowerCase();
   const loaded = await agentRunService?.getExecutionGraphCheckpoint?.({ accessScope, runId });
   const checkpoint = loaded?.checkpoint;

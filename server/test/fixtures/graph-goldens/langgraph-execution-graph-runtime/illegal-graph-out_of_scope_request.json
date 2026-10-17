@@ -1,0 +1,56 @@
+{
+  "budget": {
+    "limits": {
+      "maxArxivPaperFetches": 1,
+      "maxCustomSkillCalls": 8,
+      "maxDocumentRagCalls": 2,
+      "maxResearchQuestions": 3,
+      "maxTraceSteps": 16,
+      "maxWebSearchCalls": 1
+    },
+    "traceTruncated": false,
+    "used": {
+      "arxivPaperFetches": 0,
+      "customSkillCalls": 0,
+      "documentRagCalls": 0,
+      "researchQuestions": 0,
+      "traceSteps": 0,
+      "webSearchCalls": 0
+    }
+  },
+  "budgetLimits": [],
+  "checkpoint": null,
+  "events": [
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:1",
+      "payload": {
+        "status": "running"
+      },
+      "type": "run_created"
+    }
+  ],
+  "journal": [],
+  "outcome": {
+    "result": {
+      "errors": [
+        {
+          "code": "out_of_scope_document",
+          "message": "Request docIds exceed the authorized document scope.",
+          "nodeId": null
+        }
+      ],
+      "graphVersion": "v1",
+      "nodeRuns": [],
+      "ok": false,
+      "results": [],
+      "status": "rejected"
+    }
+  },
+  "runError": null,
+  "runStatus": "running",
+  "settled": [],
+  "skillRuns": [],
+  "steps": [],
+  "trace": []
+}

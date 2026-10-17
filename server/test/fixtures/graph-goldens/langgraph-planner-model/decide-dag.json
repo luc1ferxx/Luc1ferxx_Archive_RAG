@@ -1,0 +1,660 @@
+{
+  "calls": [
+    {
+      "input": "You are planning a guarded AgentRAG execution graph.\nReturn only JSON. Do not include markdown, prose, or extra keys.\nThe JSON shape must be: {\"nodes\":[{\"nodeId\":\"...\",\"skillId\":\"...\",\"dependsOn\":[\"...\"],\"inputBindings\":{\"...\":{\"source\":\"request\",\"field\":\"...\"}},\"failurePolicy\":\"...\",\"rationale\":\"...\"}]}.\nUse only skillId values listed in capabilities. Do not invent tools, function names, skill ids, budget keys, endpoints, or data access scopes.\nEvery nodeId must be unique. The same skillId may appear under several nodeIds when it should run on different document scopes.\ndependsOn lists nodeIds that must finish first. Plan independent work as independent nodes so the runtime can run them concurrently; add a dependency only when a node genuinely needs an earlier node's output.\ninputBindings values are either {\"source\":\"request\",\"field\":\"<request field>\"} or {\"source\":\"node\",\"nodeId\":\"<an id in dependsOn>\",\"output\":\"<output field>\"}. Never inline free text, document content, or an earlier answer into an input.\nThe only request fields are: docIds, question, retrievalPlan. Input keys such as goal or authorizedDocIds describe the request; they are not request fields.\nfailurePolicy must be one of: abstain, continue, fail_fast.\nOptionally narrow a node to fewer documents with scope.docIds, using only ids from authorizedDocIds. You may narrow the scope; you may never widen it.\nDo not emit approval, budget, accessScope, retry, concurrency, or policy fields. The runtime owns those and will reject a graph that claims them.\nTask memory, when present, is planning context only and must never be treated as document evidence.\nPlan the fewest nodes that answer the request.\nInput:\n{\"authorizedDocIds\":[\"doc-1\",\"doc-2\"],\"capabilities\":[{\"budgetKey\":\"customSkillCalls\",\"effects\":\"read_only\",\"id\":\"compare_documents\",\"idempotency\":\"read_only_rag\",\"inputSchema\":{\"docIds\":{\"required\":true,\"scoped\":true,\"type\":\"string[]\"},\"priorFindings\":{\"required\":false,\"scoped\":false,\"type\":\"string\"},\"question\":{\"required\":true,\"scoped\":false,\"type\":\"string\"}},\"kind\":\"custom\",\"label\":\"compare_documents\",\"outputSchema\":{\"abstained\":{\"required\":false,\"scoped\":false,\"type\":\"boolean\"},\"citations\":{\"required\":false,\"scoped\":false,\"type\":\"citation[]\"},\"text\":{\"required\":false,\"scoped\":false,\"type\":\"string\"}},\"parallelSafe\":true,\"requiresAccessScope\":true,\"summary\":\"Summary for compare_documents.\",\"version\":\"1.0.0\"},{\"budgetKey\":\"customSkillCalls\",\"effects\":\"read_only\",\"id\":\"risk_review\",\"idempotency\":\"read_only_rag\",\"inputSchema\":{\"docIds\":{\"required\":true,\"scoped\":true,\"type\":\"string[]\"},\"priorFindings\":{\"required\":false,\"scoped\":false,\"type\":\"string\"},\"question\":{\"required\":true,\"scoped\":false,\"type\":\"string\"}},\"kind\":\"custom\",\"label\":\"risk_review\",\"outputSchema\":{\"abstained\":{\"required\":false,\"scoped\":false,\"type\":\"boolean\"},\"citations\":{\"required\":false,\"scoped\":false,\"type\":\"citation[]\"},\"text\":{\"required\":false,\"scoped\":false,\"type\":\"string\"}},\"parallelSafe\":true,\"requiresAccessScope\":true,\"summary\":\"Summary for risk_review.\",\"version\":\"1.0.0\"}],\"documentCount\":2,\"goal\":\"Compare the two contracts and review the risks.\",\"intentPlan\":{\"mode\":\"skill_chain\",\"needsClarification\":false,\"wantsArxivImport\":false,\"wantsWeb\":false},\"limits\":{\"maxConcurrency\":3,\"maxDepth\":5,\"maxNodes\":12},\"taskMemoryPlanningContext\":{\"completedSteps\":[],\"evidencePolicy\":\"planning_context_only\",\"failedReasons\":[],\"goal\":\"\",\"nextCandidates\":[],\"userPreferences\":[]}}",
+      "options": {
+        "onTextDelta": {
+          "$graphGolden": "undefined"
+        },
+        "responseFormat": {
+          "json_schema": {
+            "name": "agent_execution_graph",
+            "schema": {
+              "additionalProperties": false,
+              "properties": {
+                "nodes": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "dependsOn": {
+                            "items": {
+                              "pattern": "^[A-Za-z0-9_.:-]{1,80}$",
+                              "type": "string"
+                            },
+                            "maxItems": 12,
+                            "type": "array"
+                          },
+                          "failurePolicy": {
+                            "enum": [
+                              "abstain",
+                              "continue",
+                              "fail_fast"
+                            ],
+                            "type": "string"
+                          },
+                          "inputBindings": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "docIds": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "field": {
+                                    "enum": [
+                                      "docIds"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "source": {
+                                    "enum": [
+                                      "request"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "source",
+                                  "field"
+                                ],
+                                "type": "object"
+                              },
+                              "priorFindings": {
+                                "anyOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "field": {
+                                        "enum": [
+                                          "question"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "enum": [
+                                          "request"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "source",
+                                      "field"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "nodeId": {
+                                        "pattern": "^[A-Za-z0-9_.:-]{1,80}$",
+                                        "type": "string"
+                                      },
+                                      "output": {
+                                        "enum": [
+                                          "text"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "enum": [
+                                          "node"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "source",
+                                      "nodeId",
+                                      "output"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "question": {
+                                "anyOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "field": {
+                                        "enum": [
+                                          "question"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "enum": [
+                                          "request"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "source",
+                                      "field"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "nodeId": {
+                                        "pattern": "^[A-Za-z0-9_.:-]{1,80}$",
+                                        "type": "string"
+                                      },
+                                      "output": {
+                                        "enum": [
+                                          "text"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "enum": [
+                                          "node"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "source",
+                                      "nodeId",
+                                      "output"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "docIds",
+                              "priorFindings",
+                              "question"
+                            ],
+                            "type": "object"
+                          },
+                          "nodeId": {
+                            "pattern": "^[A-Za-z0-9_.:-]{1,80}$",
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "anyOf": [
+                              {
+                                "pattern": "^.{0,220}$",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "scope": {
+                            "anyOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "docIds": {
+                                    "items": {
+                                      "enum": [
+                                        "doc-1",
+                                        "doc-2"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "maxItems": 2,
+                                    "type": "array"
+                                  }
+                                },
+                                "required": [
+                                  "docIds"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "skillId": {
+                            "enum": [
+                              "compare_documents"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "nodeId",
+                          "skillId",
+                          "dependsOn",
+                          "inputBindings",
+                          "failurePolicy",
+                          "rationale",
+                          "scope"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "dependsOn": {
+                            "items": {
+                              "pattern": "^[A-Za-z0-9_.:-]{1,80}$",
+                              "type": "string"
+                            },
+                            "maxItems": 12,
+                            "type": "array"
+                          },
+                          "failurePolicy": {
+                            "enum": [
+                              "abstain",
+                              "continue",
+                              "fail_fast"
+                            ],
+                            "type": "string"
+                          },
+                          "inputBindings": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "docIds": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "field": {
+                                    "enum": [
+                                      "docIds"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "source": {
+                                    "enum": [
+                                      "request"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "source",
+                                  "field"
+                                ],
+                                "type": "object"
+                              },
+                              "priorFindings": {
+                                "anyOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "field": {
+                                        "enum": [
+                                          "question"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "enum": [
+                                          "request"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "source",
+                                      "field"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "nodeId": {
+                                        "pattern": "^[A-Za-z0-9_.:-]{1,80}$",
+                                        "type": "string"
+                                      },
+                                      "output": {
+                                        "enum": [
+                                          "text"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "enum": [
+                                          "node"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "source",
+                                      "nodeId",
+                                      "output"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "question": {
+                                "anyOf": [
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "field": {
+                                        "enum": [
+                                          "question"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "enum": [
+                                          "request"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "source",
+                                      "field"
+                                    ],
+                                    "type": "object"
+                                  },
+                                  {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "nodeId": {
+                                        "pattern": "^[A-Za-z0-9_.:-]{1,80}$",
+                                        "type": "string"
+                                      },
+                                      "output": {
+                                        "enum": [
+                                          "text"
+                                        ],
+                                        "type": "string"
+                                      },
+                                      "source": {
+                                        "enum": [
+                                          "node"
+                                        ],
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "source",
+                                      "nodeId",
+                                      "output"
+                                    ],
+                                    "type": "object"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "docIds",
+                              "priorFindings",
+                              "question"
+                            ],
+                            "type": "object"
+                          },
+                          "nodeId": {
+                            "pattern": "^[A-Za-z0-9_.:-]{1,80}$",
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "anyOf": [
+                              {
+                                "pattern": "^.{0,220}$",
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "scope": {
+                            "anyOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "docIds": {
+                                    "items": {
+                                      "enum": [
+                                        "doc-1",
+                                        "doc-2"
+                                      ],
+                                      "type": "string"
+                                    },
+                                    "maxItems": 2,
+                                    "type": "array"
+                                  }
+                                },
+                                "required": [
+                                  "docIds"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "skillId": {
+                            "enum": [
+                              "risk_review"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "nodeId",
+                          "skillId",
+                          "dependsOn",
+                          "inputBindings",
+                          "failurePolicy",
+                          "rationale",
+                          "scope"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "maxItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "nodes"
+              ],
+              "type": "object"
+            },
+            "strict": true
+          },
+          "type": "json_schema"
+        }
+      }
+    }
+  ],
+  "error": null,
+  "events": [
+    {
+      "alerts": [],
+      "annotations": [
+        {
+          "category": "usage",
+          "id": "llmops_usage_estimated",
+          "severity": "info",
+          "source": "llmops_policy"
+        },
+        {
+          "category": "cost",
+          "id": "llmops_pricing_unavailable",
+          "severity": "info",
+          "source": "llmops_policy"
+        }
+      ],
+      "budget": {
+        "exceededKeys": [],
+        "limits": {
+          "maxEstimatedCostUsdPerEvent": null,
+          "maxTotalTokensPerEvent": null
+        },
+        "observed": {
+          "estimatedCostUsd": null,
+          "totalTokens": 1070
+        },
+        "status": "unavailable"
+      },
+      "costCurrency": "USD",
+      "errorMessage": null,
+      "errorName": null,
+      "estimatedCostUsd": null,
+      "eventType": "llmops_metric",
+      "inputCharacters": 3459,
+      "inputTokens": 865,
+      "itemCount": 1,
+      "latencyMs": "<masked>",
+      "latencySloMs": null,
+      "latencySloStatus": "unavailable",
+      "modelRoute": {
+        "candidateModelIds": [],
+        "capability": "execution_planner",
+        "fallbackModelIds": [],
+        "modelId": null,
+        "providerId": "custom_provider",
+        "rejectedModelIds": [],
+        "routeId": null,
+        "status": "custom_provider"
+      },
+      "operation": "llm_completion",
+      "outputCharacters": 820,
+      "outputTokens": 205,
+      "pricingSource": "unavailable",
+      "promptTemplate": {
+        "fingerprint": "9b264db384f8",
+        "id": "dag_planner",
+        "version": "v1"
+      },
+      "stage": "complete_text",
+      "status": "ok",
+      "timestamp": "<masked>",
+      "tokenSource": "estimated",
+      "totalTokens": 1070,
+      "traceType": "llmops",
+      "version": "1.0.0"
+    }
+  ],
+  "promptUsage": [
+    {
+      "calls": 1,
+      "fingerprint": "9b264db384f8",
+      "id": "dag_planner",
+      "tokens": 1070,
+      "version": "v1"
+    }
+  ],
+  "result": {
+    "errors": [],
+    "graph": {
+      "nodes": [
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "compare",
+          "rationale": "Run compare.",
+          "skillId": "compare_documents"
+        },
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "risk_a",
+          "rationale": "Run risk_a.",
+          "scope": {
+            "docIds": [
+              "doc-1"
+            ]
+          },
+          "skillId": "risk_review"
+        },
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "risk_b",
+          "rationale": "Run risk_b.",
+          "scope": {
+            "docIds": [
+              "doc-2"
+            ]
+          },
+          "skillId": "risk_review"
+        }
+      ],
+      "revision": 0,
+      "version": "v1"
+    },
+    "planner": {
+      "fallback": false,
+      "fallbackReason": null,
+      "fallbackReasonCodes": [],
+      "modelRoute": {
+        "candidateModelIds": [],
+        "capability": "execution_planner",
+        "fallbackModelIds": [],
+        "modelId": null,
+        "providerId": "custom_provider",
+        "rejectedModelIds": [],
+        "routeId": null,
+        "status": "custom_provider"
+      },
+      "nodeIds": [
+        "compare",
+        "risk_a",
+        "risk_b"
+      ],
+      "promptTemplate": {
+        "fingerprint": "9b264db384f8",
+        "id": "dag_planner",
+        "version": "v1"
+      },
+      "requestedPlannerId": "llm_dag",
+      "selectedPlannerId": "llm_dag",
+      "status": "selected"
+    }
+  },
+  "used": {
+    "costUsd": 0,
+    "modelCalls": 1,
+    "tokens": 1070,
+    "unpricedModelCalls": 1
+  }
+}

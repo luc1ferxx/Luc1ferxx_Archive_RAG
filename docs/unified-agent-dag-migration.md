@@ -1,5 +1,7 @@
 # Unified AgentRAG DAG：迁移决策与验收清单
 
+> **运行时状态（2026-10-16，LangGraph 迁移阶段 6）**：`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 时，v3 统一图一律在 LangGraph.js 上调度；审批停靠是 run 线程上的 `interrupt()`，审批续跑以 `Command({resume})` 续同一线程。准入、v2 graph checkpoint、finalization 收据、回放矩阵和启动恢复仍是本文描述的同一批模块。原生图调度器和 `AGENT_RUNTIME=native` 回退已在阶段 6 按用户决定删除（提前结束了 ADR 约束 12 的回退窗口），`AGENT_RUNTIME` 设为 `native` 或其他非 `langgraph` 的值会拒绝启动；恢复原生调度器只能 revert 阶段 6 的提交。v3 图本身的运维回退不变：`AGENT_UNIFIED_GRAPH_ROLLOUT=off`（默认）。见 [ADR 0001](adr/0001-langgraph-runtime.md)。
+
 状态：**审批续跑也已解冻（2026-09-27）**。`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 可以执行含审批节点的统一图：图在审批节点暂停，批准后从 checkpoint 续跑，Capability 只执行一次。默认值仍为 `off`。统一图规划器已接上真实模型，但本地 qwen2.5:7b 只有 3/15 的计划被接受，其余回落到确定性图（见下文"真实模型规划"）。本文件不能用来宣称真实模型能可靠地规划全阶段图。
 
 ## 冻结与部分解冻
@@ -18,7 +20,7 @@
      - 收据写入前崩溃（图已 completed）：从同一批持久化节点输出重算，不执行任何节点，结果与未中断运行一致。
      - 之后再次启动不会产生第二个答案：claim 已用尽，run 已终结。
   3. **节点边界的跨进程续跑**：只复用 typed-output 摘要能对账的已完成节点，待执行节点在新进程运行。篡改收据摘要会进入人工恢复（`completed_step_without_checkpoint`）。进行中的文档调用（step 为 running）会进入人工恢复（`unknown_in_flight_node`），绝不重放。
-- **仍冻结：审批续跑**。原因如下：
+- **原冻结：审批续跑（2026-09-27 第一轮；同日第二轮已解冻，见下文“审批续跑与真实模型规划”）**。当时的原因如下：
   - 图内暂停、批准后继续执行，需要把审批对象和输入 hash 绑定到图节点，还要对“批准后执行、结果未知”的状态做跨进程恢复。这一块没有新的恢复证据。
   - 常设授权只存在于原请求里，恢复进程无法重建。
   - 因此在 guarded 下，任何可能中途等待用户确认的节点都会在所有节点运行之前被整图拒绝，然后回退 V1。这包括声明审批门的 Capability 适配器，以及没有常设、与输入无关授权的 Web / 文档发现内置节点。拒绝原因写入 `unified_graph_planned` 事件（`fallback: "v1"`）和 `unified_graph_fallback` trace 步骤。

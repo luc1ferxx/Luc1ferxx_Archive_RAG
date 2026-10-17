@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
 import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
+import { getAgentOuterPlanRuntime } from "../rag/config.js";
 import { describeAgentRequestFailure } from "../rag/dependency-outage.js";
 import { runAgentRequestWithCancellation } from "../rag/request-deadline.js";
 
@@ -155,23 +156,61 @@ export const createChatRouter = (services) => {
     const heartbeat = setInterval(() => {
       if (open) res.write(": keep-alive\n\n");
     }, 15000);
+    const fallbackMessage = "Failed to answer the question.";
+    let doneSent = false;
 
     try {
-      const response = await runAgentRequestWithCancellation(req, res, () =>
-        runWithAgentEventSink(
-          (event) => send(event.type, event),
-          () => answer(request)
-        )
-      );
+      if (getAgentOuterPlanRuntime() === "langgraph") {
+        // AGENT_OUTER_PLAN_RUNTIME=langgraph (experimental): the same events,
+        // result and done come out of one generator
+        // (rag/langgraph/agent-stream.js), which bridges the sink into the
+        // outer plan graph's custom stream and refuses a LangSmith tracer
+        // before the run exists; its modules are loaded only on this dial.
+        // It follows the outer plan's dial only: the relay only matters to a
+        // graph that streams "custom" chunks, which only the outer plan graph
+        // does. The custom-Skill DAG and the v3 graph, always on LangGraph
+        // since phase 6, are invoked without the relay, so their nodes emit
+        // to the sink the native branch below binds around the run
+        // (agent-event-stream.js), and their own entries refuse LangSmith.
+        const { streamAgentRun, toAgentStreamFrame } = await import(
+          "../rag/langgraph/agent-stream.js"
+        );
 
-      send("result", { body: response.body, status: response.status });
+        await runAgentRequestWithCancellation(req, res, async () => {
+          const events = streamAgentRun({
+            answer: () => answer(request),
+            describeError: describeAgentRouteError,
+            fallbackMessage,
+          });
+
+          for await (const event of events) {
+            const frame = toAgentStreamFrame(event);
+
+            send(frame.event, frame.data);
+            doneSent ||= frame.event === "done";
+          }
+        });
+      } else {
+        const response = await runAgentRequestWithCancellation(req, res, () =>
+          runWithAgentEventSink(
+            (event) => send(event.type, event),
+            () => answer(request)
+          )
+        );
+
+        send("result", { body: response.body, status: response.status });
+      }
     } catch (error) {
-      const { body, status } = describeAgentRouteError(error, "Failed to answer the question.");
+      const { body, status } = describeAgentRouteError(error, fallbackMessage);
 
       send("error", { ...body, status });
     } finally {
       clearInterval(heartbeat);
-      send("done", {});
+
+      if (!doneSent) {
+        send("done", {});
+      }
+
       res.end();
     }
   };

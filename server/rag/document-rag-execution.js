@@ -436,12 +436,12 @@ export const searchGlobalContextInProcess = async ({ docIds, queryText, topK = n
     topK,
   });
 
-const retrieveGlobalContextForQueries = ({ accessScope = null, ...args }) =>
+export const retrieveGlobalContextForQueries = ({ accessScope = null, ...args }) =>
   isRetrievalRemote()
     ? retrieveGlobalContextRemotely({ accessScope, ...args })
     : retrieveGlobalContextForQueriesInProcess(args);
 
-const retrievePerDocumentContextForQueries = ({ accessScope = null, ...args }) =>
+export const retrievePerDocumentContextForQueries = ({ accessScope = null, ...args }) =>
   isRetrievalRemote()
     ? retrievePerDocumentContextRemotely({ accessScope, ...args })
     : retrievePerDocumentContextForQueriesInProcess(args);

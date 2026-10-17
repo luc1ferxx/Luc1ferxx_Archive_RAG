@@ -22,6 +22,7 @@ import {
   summarizeCoverageGroup,
 } from "./coverage-policy.mjs";
 import { collectTrackedBackendSourcePaths } from "./coverage-source-inventory.mjs";
+import { LANGSMITH_TRACING_VARIABLES } from "../rag/langgraph/langsmith-guard.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -79,6 +80,19 @@ const collectTestFiles = async () => {
     .map((fileName) => path.join("test", fileName));
 };
 
+// The shell's environment minus the LangSmith tracing variables, as npm test
+// hands its children (see run.test.mjs): the LangGraph executor, which runs
+// every guarded graph, refuses to run while one of them is "true".
+const childEnvironment = () => {
+  const environment = { ...process.env };
+
+  for (const name of LANGSMITH_TRACING_VARIABLES) {
+    delete environment[name];
+  }
+
+  return environment;
+};
+
 const runCoverage = async (testFiles) =>
   new Promise((resolve) => {
     const child = spawn(
@@ -96,7 +110,7 @@ const runCoverage = async (testFiles) =>
       ],
       {
         cwd: serverDirectory,
-        env: process.env,
+        env: childEnvironment(),
         stdio: ["ignore", "pipe", "pipe"],
       }
     );

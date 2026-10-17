@@ -1,6 +1,7 @@
 import { createApp } from "../../app.js";
 import { isStandaloneProfileEnabled } from "../../standalone-profile.js";
 import {
+  assertAgentRuntimeSupported,
   getModelGatewayPort,
   getServiceShutdownGraceMs,
   getVectorStoreProviderConfigStatus,
@@ -324,6 +325,13 @@ export const startServiceRole = async ({
   shutdownFinalizers = [],
   signals = process,
 }) => {
+  // A removed AGENT_RUNTIME value (native, or anything but langgraph) refuses
+  // the start before anything is built (rag/config.js). server.js checks it
+  // before the role dispatch too; this covers a caller that starts a role
+  // directly (the load bench's split topology), against the environment the
+  // role is handed.
+  assertAgentRuntimeSupported(env);
+
   const { errors, warnings } = validateServiceTopology(env);
 
   if (errors.length > 0) {

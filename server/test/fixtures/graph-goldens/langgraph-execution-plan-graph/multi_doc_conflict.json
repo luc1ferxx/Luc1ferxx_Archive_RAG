@@ -1,0 +1,245 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Compare selected documents for cited common ground, differences, conflicts, and missing terms.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 3 comparison retrieval queries with comparison topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "custom_skill:compare_documents",
+        "label": "Compare Documents",
+        "status": "completed",
+        "summary": "Compare Documents completed with 2 citations.",
+        "type": "custom_skill"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "4-synthesis",
+        "label": "Synthesis",
+        "status": "completed",
+        "summary": "Composed the final agent answer from completed tool results.",
+        "type": "synthesis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "5-self_check",
+        "label": "Final Self Check",
+        "status": "completed",
+        "summary": "Evidence check passed with 2 citations across 2 cited documents.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "6-answer_finalizer",
+        "label": "Answer Finalizer",
+        "status": "completed",
+        "summary": "Final answer passed claim-level citation finalization with 1 supported claim.",
+        "type": "answer_finalizer"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "checks": [
+      {
+        "category": "conflict",
+        "detail": [
+          "compare_documents"
+        ],
+        "id": "compare_skill_selected",
+        "label": "Compare documents custom skill selected",
+        "passed": true
+      },
+      {
+        "category": "conflict",
+        "detail": {
+          "agentMode": "compare_documents",
+          "answer": "Document Comparison\nConflicts\n- Conflict: Policy A allows two remote work days per week, while Policy B allows three remote work days per week. [Source 1] [Source 2]"
+        },
+        "id": "conflict_answered",
+        "label": "Answer surfaces a conflict",
+        "passed": true
+      },
+      {
+        "category": "conflict",
+        "detail": {
+          "citationDocIds": [
+            "policy-a",
+            "policy-b"
+          ],
+          "customStep": {
+            "abstained": false,
+            "citations": 2,
+            "compareQuestion": "Create a concise citation-backed document comparison across the selected documents.\n\nUse only document evidence. Do not infer common ground, differences, conflicts, or missing terms.\n\nOrganize the answer as Document Comparison, Common Ground, Differences, Conflicts, Missing Terms, and Evidence Limits.\n\nEvery evidence-backed bullet must include source citations from the relevant documents. If a category is not supported, say it is not specified.\n\nSelected documents:\n- remote-policy-a.pdf\n- remote-policy-b.pdf\n\nOriginal request: Compare these remote work policies for differences.",
+            "dependsOn": [],
+            "durationMs": "<elapsed>",
+            "graphVersion": "v1",
+            "nodeId": "compare_documents",
+            "rationale": "Run Compare Documents as selected for this request.",
+            "retrievalPlan": {
+              "intent": "comparison",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "comparison",
+                "queryCount": 3,
+                "topK": 8,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Compare these remote work policies for differences."
+                },
+                {
+                  "id": "compare-differences",
+                  "label": "Cross-document differences",
+                  "primary": false,
+                  "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare these remote work policies for differences."
+                },
+                {
+                  "id": "per-document-evidence",
+                  "label": "Per-document evidence",
+                  "primary": false,
+                  "query": "Find per-document cited evidence for each side of: Compare these remote work policies for differences."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "selectedDocumentCount": 2,
+            "skillId": "compare_documents",
+            "skillKind": "custom",
+            "skillVersion": "1.0.0",
+            "usedPriorFindings": false
+          }
+        },
+        "id": "both_documents_cited",
+        "label": "Conflict cites both selected documents",
+        "passed": true
+      }
+    ],
+    "description": "A multi-document comparison should surface conflicts with evidence from each selected document.",
+    "failedCheckCount": 0,
+    "id": "multi_doc_conflict",
+    "label": "Multi-doc conflict",
+    "passed": true,
+    "response": {
+      "agentMode": "compare_documents",
+      "agentSkills": [
+        {
+          "label": "Compare Documents",
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        }
+      ],
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "run": {
+          "exhausted": null,
+          "limits": {
+            "maxCostUsd": 0.5,
+            "maxDurationMs": 300000,
+            "maxTokens": 100000
+          },
+          "used": {
+            "costUsd": 0,
+            "durationMs": "<elapsed>",
+            "modelCalls": 0,
+            "tokens": 0,
+            "unpricedModelCalls": 0
+          }
+        },
+        "traceTruncated": false,
+        "used": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 1,
+          "documentRagCalls": 0,
+          "researchQuestions": 0,
+          "traceSteps": 6,
+          "webSearchCalls": 0
+        }
+      },
+      "clarification": null,
+      "executionLoop": {
+        "followUpsRun": 0,
+        "gaps": [],
+        "gapsIdentified": 0,
+        "maxFollowUps": 1,
+        "stoppedReason": "not_needed",
+        "version": "1.0"
+      },
+      "observed": {
+        "agentMode": "compare_documents",
+        "answerHasConflict": true,
+        "citationDocIds": [
+          "policy-a",
+          "policy-b"
+        ],
+        "selectedDocumentCount": 2,
+        "selectedSkillIds": [
+          "compare_documents"
+        ]
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Compare Documents",
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 1,
+        "listDocumentCallCount": 1
+      },
+      "traceTypes": [
+        "plan",
+        "query_planner",
+        "custom_skill",
+        "synthesis",
+        "self_check",
+        "answer_finalizer"
+      ],
+      "workingMemory": {
+        "checkedQueryCount": 3,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 0
+      }
+    }
+  },
+  "runs": []
+}

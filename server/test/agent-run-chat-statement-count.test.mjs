@@ -1,3 +1,7 @@
+// Must stay the first import: the LangGraph /chat below loads @langchain, which
+// reads the LangSmith tracing variables as it loads.
+import "./langgraph-support/langsmith-off.mjs";
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -6,12 +10,18 @@ import { EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY } from "../rag/agent-execution-gr
 import { isAgentRunRevisionConflictError } from "../rag/agent-run-revision.js";
 import {
   AGENT_RUN_STATUSES,
+  LANGGRAPH_CHECKPOINT_RESULT_KEY,
   createAgentRunCursor,
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
 import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
+import {
+  LANGGRAPH_CHECKPOINT_FORMAT,
+  LANGGRAPH_CHECKPOINT_RETENTION,
+} from "../rag/langgraph/checkpointer.js";
 import { createPostgresAgentRunStore } from "../rag/postgres-agent-run-store.js";
+import { assertMatchesGraphGolden } from "./langgraph-support/graph-goldens.mjs";
 
 // Pins how often one /chat touches the agent run store. Every store call is
 // one PostgreSQL statement (plus BEGIN, the tenant settings and COMMIT on the
@@ -73,8 +83,13 @@ const runOneChat = (agentRunService) =>
 
 // Counts the calls the service makes; the store's own internal calls (the
 // in-memory createWithEvent calls its create/appendEvent/get) stay uncounted.
+// `langGraphRecords` keeps a copy of every non-null LangGraph thread record a
+// write hands the store, taken from its patch before the write: the save that
+// settles the graph drops the record, so these copies are what is left to
+// check once the run finished.
 const createCountingStore = (store) => {
   const counts = {};
+  const langGraphRecords = [];
   const countingStore = {};
 
   for (const [name, value] of Object.entries(store)) {
@@ -82,12 +97,18 @@ const createCountingStore = (store) => {
       typeof value === "function"
         ? (...args) => {
             counts[name] = (counts[name] ?? 0) + 1;
+            const record = args[0]?.patch?.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY];
+
+            if ((name === "update" || name === "updateWithEvent") && record) {
+              langGraphRecords.push(structuredClone(record));
+            }
+
             return value.apply(store, args);
           }
         : value;
   }
 
-  return { counts, store: countingStore };
+  return { counts, langGraphRecords, store: countingStore };
 };
 
 test("one /chat writes its run without reading it back", async () => {
@@ -214,6 +235,23 @@ const createCountingPostgresQuery = () => {
       runs.set(key, row);
       recordEvent(values, values[15], values[16]);
       return { rows: [withRunEvents(row, key)] };
+    }
+
+    if (queryText.trimStart().startsWith("UPDATE rag_agent_runs_count")) {
+      // The event-less CAS (agentRunStore.update): the LangGraph
+      // checkpointer's writes are the only ones on the /chat path.
+      statements.push("cas_update");
+      assert.match(queryText, /AND revision = \$4/);
+      const existing = runs.get(key);
+
+      if (!existing || existing.revision !== values[3]) {
+        return { rows: [] };
+      }
+
+      const row = writeRow(values, existing);
+
+      runs.set(key, row);
+      return { rows: [row] };
     }
 
     if (queryText.includes("WITH touched_run AS")) {
@@ -525,4 +563,459 @@ test("a PostgreSQL CAS on a caller-supplied base run rejects a stale revision wi
 
   assert.deepEqual(storedRun.result, { first: true });
   assert.equal(storedRun.revision, 1);
+});
+
+// --- One guarded custom-Skill /chat on LangGraph -----------------------------
+//
+// One request on LangGraph (docs/adr/0001-langgraph-runtime.md phase 3, write
+// amplification), held to the counts the native scheduler made before phase
+// 6 deleted it plus LangGraph's own additions, and once more with the
+// experimental AGENT_OUTER_PLAN_RUNTIME=langgraph, which also puts the outer
+// plan on LangGraph (without a checkpointer, so it must add nothing to the
+// counts):
+// a contract review that the deterministic planner turns into
+// the two-node summarize -> risk DAG under AGENT_SKILL_GRAPH_ROLLOUT=guarded.
+// LangGraph checkpoints its thread into the same run row through
+// rag/langgraph/checkpointer.js, so every superstep and every task write is
+// one more event-less CAS, and the thread is read back once when the graph is
+// invoked. Measured before the phase-3 write-amplification changes, with the
+// same counting store and stand-in as below (a scratch run of this scenario,
+// not the ADR's phase-2 numbers, which are a 3-node stage): 3 run reads and 7
+// event-less CAS on the in-memory store, 4 run-row and 11 event-list reads on
+// the PostgreSQL stand-in; the thread tombstone every invocation writes first
+// read the run although there was no thread to drop, and the plain UPDATE
+// read the event list back. Now that no-op costs no read (mutateStoredRun's
+// acceptCursorNoOp), the event-less write reuses its base's events
+// (reuseBaseEvents), and the one remaining LangGraph read is the thread load
+// at invoke. The event log and the run's public shape are the native ones
+// (the golden below).
+//
+// These counts are the in-memory store's calls and the stand-in's
+// statements, not pg_stat_statements; they were checked against a real
+// PostgreSQL 18 (Postgres.app) with pg_stat_statements, a scratch script over
+// createPostgresAgentRunStore on the owner path, which gave exactly these
+// shapes and counts both times:
+//   - a4380782 (2026-10-14): native 1 insert, 9 event-carrying CAS, 3 event
+//     appends, 1 run read, 1 event-list read; langgraph the same plus 7
+//     event-less CAS, 1 more run read and 1 more event-list read. The
+//     completed run's `result` was 11,860 bytes native and 17,006 on
+//     LangGraph, the thread record (5,116 bytes) staying with the run.
+//   - phase 4 (2026-10-16, AGENT_RUNTIME defaulting to langgraph, the
+//     executor's saver keeping LANGGRAPH_CHECKPOINT_RETENTION = 2
+//     checkpoints, and the custom-Skill DAG's settling save dropping the
+//     record): the same counts on native, on AGENT_RUNTIME=langgraph and with
+//     AGENT_RUNTIME unset (the new default; both 16 revisions), since
+//     retention shrinks each thread write without adding one and the drop
+//     rides on the settling save's own CAS. The completed run's `result` is
+//     11,860 bytes native and 11,894 on LangGraph (the null tombstone is 29
+//     of the 34; the scratch run's session ids and durations differ by a few
+//     bytes), the largest record any write carried is 2,975 bytes, and the
+//     largest `result` any write committed 14,639 bytes.
+// The real server also runs one `SELECT ... FOR NO KEY UPDATE` row lock
+// inside each event-carrying CAS pipeline (9 on both runtimes, none for the
+// plain UPDATE), which the stand-in folds into the CAS. Re-measure before
+// changing a pinned count.
+
+const CONTRACT_DOC_ID = "contract-1";
+const CONTRACT_QUESTION = "Review this contract for risks and key terms.";
+const CONTRACT_EXCERPT =
+  "Acme and Beta signed a services agreement. It renews every 12 months unless either party gives 30 days notice. Late notice creates renewal risk.";
+const EXPECTED_GUARDED_CHAT_EVENTS = [
+  "run_created",
+  "run_prepared",
+  "execution_planned",
+  "skill_graph_checkpointed",
+  "step_started",
+  "step_completed",
+  "skill_graph_checkpointed",
+  "step_started",
+  "step_completed",
+  "skill_graph_checkpointed",
+  "skill_graph_checkpointed",
+  "skill_graph_planned",
+  "run_completed",
+];
+
+const createContractRagService = () => ({
+  chat: async (docIds, question) => ({
+    abstained: false,
+    citations: [
+      {
+        docId: CONTRACT_DOC_ID,
+        excerpt: CONTRACT_EXCERPT,
+        fileName: "services-agreement.pdf",
+        pageNumber: 3,
+      },
+    ],
+    memoryApplied: false,
+    resolvedQuery: question,
+    text: /risk review|risks?|gaps?|exceptions?/i.test(question)
+      ? "Risk Review\n- Risk: Late notice creates renewal risk. [Source 1]"
+      : "Contract Summary\n- Parties: Acme and Beta signed a services agreement. [Source 1]",
+  }),
+  getDocument: (docId) =>
+    docId === CONTRACT_DOC_ID
+      ? { docId: CONTRACT_DOC_ID, fileName: "services-agreement.pdf" }
+      : null,
+  listDocuments: () => [{ docId: CONTRACT_DOC_ID, fileName: "services-agreement.pdf" }],
+});
+
+const withEnv = async (overrides, work) => {
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((name) => [name, process.env[name]])
+  );
+  const apply = (values) => {
+    for (const [name, value] of Object.entries(values)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  };
+
+  apply(overrides);
+
+  try {
+    return await work();
+  } finally {
+    apply(previous);
+  }
+};
+
+// `default` is the production setting (the graph on LangGraph, the outer plan
+// on the native loop); `outerPlan` adds the experimental outer-plan dial. The
+// graph's runtime is no longer a dial (phase 6), so there is no pass for it.
+const RUNTIME_PASSES = Object.freeze({
+  default: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined }),
+  outerPlan: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph" }),
+});
+
+const runOneGuardedGraphChat = (agentRunService, pass) =>
+  withEnv({ ...RUNTIME_PASSES[pass], AGENT_SKILL_GRAPH_ROLLOUT: "guarded" }, () =>
+    runAgentRag({
+      accessScope,
+      agentRunService,
+      docIds: [CONTRACT_DOC_ID],
+      question: CONTRACT_QUESTION,
+      ragService: createContractRagService(),
+      sessionId: "session-graph",
+      userId: accessScope.userId,
+      webChatService: async () => {
+        throw new Error("Web search should not run.");
+      },
+    })
+  );
+
+// --- The native golden ---------------------------------------------------------
+//
+// Every pass is held to a golden frozen from the native scheduler's pass
+// before phase 6 deleted it (test/fixtures/graph-goldens/agent-run-chat-
+// statement-count/, see test/langgraph-support/graph-goldens.mjs). A pass is
+// compared with its own LangGraph additions taken off: its store calls
+// minus the run read and the seven event-less CAS, its revision minus those
+// seven writes, and the rest unchanged: the committed run (events, steps,
+// result without the private thread record) and the /chat response are the
+// native ones. Masked: UUIDs, ISO timestamps, the wall-clock measurements
+// `durationMs`, `latencyMs` and `totalDurationMs` (the per-Skill observation's
+// sum, which test/langgraph-execution-plan-graph.test.mjs masks too) and the
+// graph checkpoint's `digest`, as test/langgraph-runtime-parity.test.mjs
+// masks them.
+const GOLDEN_SUITE = "agent-run-chat-statement-count";
+const LANGGRAPH_STORE_CALLS = Object.freeze({ get: 1, update: 7 });
+const LANGGRAPH_POSTGRES_STATEMENTS = Object.freeze({ cas_update: 7, read_events: 1, read_run: 1 });
+const LANGGRAPH_EXTRA_REVISIONS = LANGGRAPH_STORE_CALLS.update;
+
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const ISO_TIMESTAMP_PATTERN = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g;
+const WALL_CLOCK_KEYS = new Set(["durationMs", "latencyMs", "totalDurationMs"]);
+
+const maskVolatile = (value, key = "") => {
+  if (typeof value === "string") {
+    return key === "digest"
+      ? "<digest>"
+      : value.replace(UUID_PATTERN, "<id>").replace(ISO_TIMESTAMP_PATTERN, "<time>");
+  }
+
+  if (typeof value === "number" && WALL_CLOCK_KEYS.has(key)) {
+    return "<elapsed>";
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => maskVolatile(item));
+  }
+
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([name, item]) => [name, maskVolatile(item, name)])
+    );
+  }
+
+  return value;
+};
+
+// Counts with the given additions taken off (a count that reaches 0 is
+// dropped, as a call never made is absent from the counts).
+const withoutAdditions = (counts, additions) => {
+  const remaining = { ...counts };
+
+  for (const [name, added] of Object.entries(additions)) {
+    assert.ok((remaining[name] ?? 0) >= added, `${name}: at least ${added} on LangGraph`);
+    remaining[name] -= added;
+
+    if (remaining[name] === 0) {
+      delete remaining[name];
+    }
+  }
+
+  return remaining;
+};
+
+// The stored run without the revision (compared on its own) and without the
+// private LangGraph thread record, which the native scheduler never wrote and
+// the tests check themselves.
+const projectStoredRun = (run) => {
+  const { [LANGGRAPH_CHECKPOINT_RESULT_KEY]: _langGraphRecord, ...result } = run.result ?? {};
+  const { revision: _revision, ...rest } = run;
+
+  return { ...rest, result };
+};
+
+const toGuardedChatGolden = ({ calls, response, revision, run }) =>
+  maskVolatile({ calls, response, revision, run: projectStoredRun(run) });
+
+// Only the production pass may write the golden (UPDATE_GRAPH_GOLDENS=1; see
+// the helper's rules); the outer-plan pass is only ever compared with it. A
+// failure names the pass.
+const assertPassesMatchGolden = (caseName, passes, additions) => {
+  for (const [pass, observed] of Object.entries(passes)) {
+    try {
+      assertMatchesGraphGolden(
+        GOLDEN_SUITE,
+        caseName,
+        toGuardedChatGolden({
+          ...observed,
+          calls: withoutAdditions(observed.calls, additions),
+          revision: observed.revision - LANGGRAPH_EXTRA_REVISIONS,
+        }),
+        { write: pass === "default" }
+      );
+    } catch (error) {
+      error.message = `${pass} pass: ${error.message}`;
+      throw error;
+    }
+  }
+};
+
+const assertGuardedGraphRun = (response, run) => {
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentRunStatus, AGENT_RUN_STATUSES.completed);
+  assert.deepEqual(run.events.map(({ type }) => type), EXPECTED_GUARDED_CHAT_EVENTS);
+  assert.equal(run.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY].phase, "completed");
+  assert.deepEqual(
+    run.events.find(({ type }) => type === "skill_graph_planned").payload.nodeRuns.map(
+      ({ nodeId, status }) => [nodeId, status]
+    ),
+    [
+      ["summarize_contract", "completed"],
+      ["risk_review", "completed"],
+    ]
+  );
+  assert.deepEqual(response.body.agentRunSteps, run.steps);
+};
+
+test("one guarded custom-Skill /chat on LangGraph adds one run read and seven event-less CAS to the native run, and no event", async () => {
+  const counts = {};
+  const records = {};
+  const responses = {};
+  const runs = {};
+
+  for (const runtime of Object.keys(RUNTIME_PASSES)) {
+    const memoryStore = createInMemoryAgentRunStore({
+      now: () => "2026-06-22T00:00:00.000Z",
+    });
+    const counting = createCountingStore(memoryStore);
+    const response = await runOneGuardedGraphChat(
+      createAgentRunService({ agentRunStore: counting.store }),
+      runtime
+    );
+    const run = await memoryStore.get({
+      accessScope,
+      runId: response.body.agentRunId,
+    });
+
+    assertGuardedGraphRun(response, run);
+    counts[runtime] = counting.counts;
+    records[runtime] = counting.langGraphRecords;
+    responses[runtime] = response;
+    runs[runtime] = run;
+  }
+
+  // Every pass against the native golden, LangGraph's additions taken off:
+  // there the native counts are appendEvent 3, createWithEvent 1, get 1 and
+  // updateWithEvent 9, at revision 9.
+  assertPassesMatchGolden(
+    "guarded-custom-skill-chat-in-memory",
+    Object.fromEntries(
+      Object.keys(RUNTIME_PASSES).map((pass) => [
+        pass,
+        { calls: counts[pass], response: responses[pass], revision: runs[pass].revision, run: runs[pass] },
+      ])
+    ),
+    LANGGRAPH_STORE_CALLS
+  );
+
+  // The native counts + the thread load at invoke (get) and LangGraph's four
+  // checkpoints and three task writes (update); the tombstone before the
+  // invocation is a no-op on the request's cursor and reads nothing.
+  assert.deepEqual(counts.default, {
+    appendEvent: 3,
+    createWithEvent: 1,
+    get: 2,
+    update: 7,
+    updateWithEvent: 9,
+  });
+  // The outer plan on LangGraph has no checkpointer: not one store call more.
+  assert.deepEqual(counts.outerPlan, counts.default);
+  assert.equal(runs.default.revision, 16);
+  assert.equal(runs.outerPlan.revision, 16);
+
+  // The thread record is private to the run row: LangGraph's own format,
+  // never in the public projection, and it holds nothing of the question or
+  // the evidence. Since phase 4 the
+  // completed run keeps only the null tombstone: the graph's settling save
+  // (agent-custom-skill-stage.js, dropLangGraphRecord) dropped the thread in
+  // its own CAS, which is why no count above changed. Before, the record
+  // stayed with the finished run and was checked there; now every record
+  // the seven event-less writes carried is checked as it was written.
+  for (const pass of Object.keys(RUNTIME_PASSES)) {
+    assert.equal(Object.hasOwn(runs[pass].result, LANGGRAPH_CHECKPOINT_RESULT_KEY), true, pass);
+    assert.equal(runs[pass].result[LANGGRAPH_CHECKPOINT_RESULT_KEY], null, pass);
+    assert.equal(records[pass].length, counts[pass].update, pass);
+
+    for (const record of records[pass]) {
+      assert.equal(record.format, LANGGRAPH_CHECKPOINT_FORMAT, pass);
+      // The custom-Skill graph checkpoints into the root namespace, which is
+      // the one readLangGraphThread reads, whoever scheduled the outer plan:
+      // invoked from the native loop (`default`), and invoked from inside
+      // the outer plan graph's custom_skills node (`outerPlan`), where it
+      // must not land in a subgraph namespace named after that node.
+      assert.deepEqual(record.namespaces.map((namespace) => namespace.ns), [""], pass);
+      // Retention (LANGGRAPH_CHECKPOINT_RETENTION): never more than the
+      // newest checkpoint and its parent.
+      assert.ok(record.namespaces[0].checkpoints.length <= LANGGRAPH_CHECKPOINT_RETENTION, pass);
+      assert.equal(JSON.stringify(record).includes(CONTRACT_QUESTION), false, pass);
+      assert.equal(JSON.stringify(record).includes("renewal risk"), false, pass);
+    }
+  }
+  for (const run of Object.values(runs)) {
+    assert.equal(
+      Object.hasOwn(
+        (await createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() })
+          .getRun({ accessScope, runId: "missing" })) ?? {},
+        LANGGRAPH_CHECKPOINT_RESULT_KEY
+      ),
+      false
+    );
+    assert.equal(run.status, AGENT_RUN_STATUSES.completed);
+  }
+});
+
+test("one guarded custom-Skill /chat on the PostgreSQL run store: LangGraph adds one run read, one event-list read and seven event-less CAS", async () => {
+  const statements = {};
+  const observed = {};
+
+  for (const runtime of Object.keys(RUNTIME_PASSES)) {
+    const { agentRunService, agentRunStore, database } =
+      createCountingPostgresService();
+    const response = await runOneGuardedGraphChat(agentRunService, runtime);
+    const run = await agentRunStore.get({
+      accessScope,
+      runId: response.body.agentRunId,
+    });
+
+    // The read-back above is not part of the request.
+    const requestStatements = database.statements.slice(0, -2);
+    assert.deepEqual(database.statements.slice(-2), ["read_run", "read_events"]);
+    assertGuardedGraphRun(response, run);
+    statements[runtime] = countStatements(requestStatements);
+    observed[runtime] = { calls: statements[runtime], response, revision: run.revision, run };
+  }
+
+  // Every pass against the native golden, LangGraph's additions taken off:
+  // there the native statements are append_event 3, cas_update_with_event 9,
+  // insert_run_with_event 1, read_events 1 and read_run 1.
+  assertPassesMatchGolden(
+    "guarded-custom-skill-chat-postgres",
+    observed,
+    LANGGRAPH_POSTGRES_STATEMENTS
+  );
+
+  assert.deepEqual(statements.default, {
+    append_event: 3,
+    cas_update: 7,
+    cas_update_with_event: 9,
+    insert_run_with_event: 1,
+    read_events: 2,
+    read_run: 2,
+  });
+  assert.deepEqual(statements.outerPlan, statements.default);
+});
+
+test("an event-less PostgreSQL update that reuses its base's events sends no event-list read; without the flag it reads as before", async () => {
+  const { agentRunStore, database } = createCountingPostgresService();
+  const createdRun = await agentRunStore.createWithEvent({
+    accessScope,
+    event: { type: "run_created" },
+    run: { goal: question, runId: "run-base-events" },
+  });
+  database.statements.length = 0;
+
+  // The flag with a usable base: one statement, and the returned run's
+  // events are the base's.
+  const reused = await agentRunStore.update({
+    accessScope,
+    baseRun: createdRun,
+    expectedRevision: 0,
+    patch: { result: { first: true } },
+    reuseBaseEvents: true,
+    runId: "run-base-events",
+  });
+
+  assert.deepEqual(database.statements, ["cas_update"]);
+  assert.equal(reused.revision, 1);
+  assert.deepEqual(reused.events, createdRun.events);
+  assert.deepEqual(reused.result, { first: true });
+  database.statements.length = 0;
+
+  // Without the flag the plain UPDATE still reads the list back ...
+  const read = await agentRunStore.update({
+    accessScope,
+    baseRun: reused,
+    expectedRevision: 1,
+    patch: { result: { second: true } },
+    runId: "run-base-events",
+  });
+
+  assert.deepEqual(database.statements, ["cas_update", "read_events"]);
+  assert.deepEqual(read.events, createdRun.events);
+  database.statements.length = 0;
+
+  // ... and so does the flag without a usable base (a stale revision has
+  // no base to take the list from).
+  await agentRunStore.update({
+    accessScope,
+    baseRun: createdRun,
+    expectedRevision: 2,
+    patch: { result: { third: true } },
+    reuseBaseEvents: true,
+    runId: "run-base-events",
+  });
+
+  assert.deepEqual(database.statements, ["read_run", "read_events", "cas_update", "read_events"]);
+  assert.deepEqual((await agentRunStore.get({ accessScope, runId: "run-base-events" })).result, {
+    first: true,
+    second: true,
+    third: true,
+  });
 });

@@ -261,6 +261,72 @@ export const getAgentSkillGraphRollout = () => {
   return toChoice(rawValue, "off", ["guarded", "off", "shadow"]);
 };
 
+// AGENT_RUNTIME used to pick who schedules a guarded custom-Skill graph and a
+// guarded v3 unified graph: LangGraph (the default since phase 4 of
+// docs/adr/0001-langgraph-runtime.md) or the native scheduler kept as the
+// rollback. Phase 6 deleted the native scheduler, so both graphs always run on
+// LangGraph and nothing reads this variable to decide anything. It is still
+// checked: when a process starts (server.js, and startServiceRole in
+// agent-service/role-server.js), when the app services are built
+// (createAppServices in app-services.js, so every in-process app refuses,
+// evaluation runners that build createApp included), and at every entry that
+// schedules a graph on LangGraph (the custom-Skill stage, the v3 unified
+// graph's entries and stage, and runExecutionGraphOnLangGraph), which covers
+// in-process callers of runAgentRag that build no app, such as the
+// evaluation runners. Unset, empty, whitespace or `langgraph` (trimmed, any
+// case) pass; any other value -- `native` above all, but also a typo such as
+// "lang-graph" -- refuses, because an operator who set it was asking for a
+// scheduler that no longer exists, and running LangGraph instead would ignore
+// that silently.
+export const AGENT_RUNTIME_REMOVED_CODE = "AGENT_RUNTIME_REMOVED";
+
+export const assertAgentRuntimeSupported = (env = process.env) => {
+  const rawValue = env?.AGENT_RUNTIME;
+
+  if (typeof rawValue !== "string") {
+    return;
+  }
+
+  const value = rawValue.trim().toLowerCase();
+
+  if (value === "" || value === "langgraph") {
+    return;
+  }
+
+  const error = new Error(
+    value === "native"
+      ? "AGENT_RUNTIME=native was removed (ADR 0001 phase 6): the agent graphs " +
+          "always run on LangGraph. Unset AGENT_RUNTIME or set it to langgraph."
+      : `AGENT_RUNTIME=${JSON.stringify(rawValue)} is not a runtime: the native ` +
+          "scheduler was removed (ADR 0001 phase 6) and langgraph is the only one " +
+          "left. Unset AGENT_RUNTIME or set it to langgraph."
+  );
+  error.code = AGENT_RUNTIME_REMOVED_CODE;
+  throw error;
+};
+
+// Which scheduler walks the V1 outer execution plan (agent-execution-plan-
+// runner.js), and with it which /chat/stream relay the route uses. A dial of
+// its own, separate from the graphs' runtime: the phase-3 load test
+// (docs/adr/0001-langgraph-runtime.md) measured the outer plan as a LangGraph StateGraph at about
+// +1.2 ms CPU per /chat (+29-35% CPU per request, +25% p95 at concurrency 32
+// on pgvector with a 0 ms model), because LangChain core builds a RunTree per
+// node call and a bare 3-5 node graph already costs 0.38-0.59 ms. The outer
+// plan needs neither durable state nor interrupts (its durability is the
+// run's persisted steps), so the native loop runs it, and LangGraph runs only
+// the graphs that need it (the custom-Skill DAG and the v3 unified graph).
+// `langgraph` (rag/langgraph/execution-plan-graph.js and the agent-stream.js
+// relay) stays as an experimental opt-in. Phase 5 rewrote it on low-level
+// Pregel with the inert built-in stages pruned: +0.28 ms per run in process
+// instead of +1.23, but the load test still failed at concurrency 1 (four
+// alternating runs: CPU per request 5.68 -> 6.68 ms median, +17.6%; p95
+// +13%), so the default stays native.
+//
+// Anything but `langgraph` (unset, empty, whitespace, a typo) resolves to
+// `native`. Phase 4 flipped only the graphs' default, never this one.
+export const getAgentOuterPlanRuntime = () =>
+  toChoice(process.env.AGENT_OUTER_PLAN_RUNTIME, "native", ["langgraph", "native"]);
+
 // --- AGENT track: heterogeneous v3 unified graph rollout ---------------------
 // `off` (default) keeps the V1 outer order. `shadow` plans and validates a v3
 // graph beside the V1 answer without executing it. `guarded` executes an

@@ -110,6 +110,70 @@ const loadModules = async () => {
   };
 };
 
+// The request in this process and the recovery or approval worker in the
+// child schedule the v3 graph on LangGraph over the same PostgreSQL rows
+// (docs/adr/0001-langgraph-runtime.md), and every case also checks what
+// LangGraph leaves behind: the run row's thread (read through the production
+// saver), which must hold the pause as a pending interrupt of public ids while
+// the graph waits, and must be gone once the run settled. Until phase 6
+// removed the native graph scheduler every case also ran under
+// AGENT_RUNTIME=native with the same assertions.
+const withLangSmithTracingOff = async (work) => {
+  // LangGraph refuses to run while a LangSmith tracing variable is on
+  // (rag/langgraph/langsmith-guard.js). The children inherit this environment.
+  const { LANGSMITH_TRACING_VARIABLES } = await import("../rag/langgraph/langsmith-guard.js");
+  const previous = Object.fromEntries(
+    LANGSMITH_TRACING_VARIABLES.map((name) => [name, process.env[name]])
+  );
+
+  for (const name of LANGSMITH_TRACING_VARIABLES) {
+    delete process.env[name];
+  }
+
+  try {
+    return await work();
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+};
+
+// The run's LangGraph thread as the production saver reads it from the
+// PostgreSQL row: its pending interrupts (values only) and each node's receipt
+// status; null when the row holds no thread.
+const readLangGraphThreadState = async (modules, runId) => {
+  const [{ RunStoreCheckpointSaver }, { readLangGraphThread }] = await Promise.all([
+    import("../rag/langgraph/checkpointer.js"),
+    import("../rag/langgraph/unified-graph-thread.js"),
+  ]);
+  const thread = await readLangGraphThread(
+    new RunStoreCheckpointSaver({ accessScope, agentRunService: newRunService(modules), runId })
+  );
+
+  return thread
+    ? {
+        interrupts: thread.interrupts.map((pending) => pending.value),
+        receipts: Object.fromEntries(
+          [...thread.receipts].map(([nodeId, receipt]) => [nodeId, receipt.status])
+        ),
+      }
+    : null;
+};
+
+// Whether the run row still carries a thread record at all (the private
+// result key the saver writes), read from the raw store.
+const hasLangGraphRecord = async (modules, runId) => {
+  const { LANGGRAPH_CHECKPOINT_RESULT_KEY } = await import("../rag/langgraph/checkpointer.js");
+  const row = await modules.createPostgresAgentRunStore().get({ accessScope, runId });
+
+  return (row?.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY] ?? null) !== null;
+};
+
 const newRunService = (modules) =>
   modules.createAgentRunService({ agentRunStore: modules.createPostgresAgentRunStore() });
 
@@ -499,7 +563,7 @@ if (workerMode === "recover") {
 } else {
   test("document-loop gaps and working memory survive a process restart without a second follow-up", {
     timeout: 180_000,
-  }, async () => {
+  }, () => withLangSmithTracingOff(async () => {
     await withFixture(async (context) => {
       const { modules, table } = context;
       const crashAfterFollowUp = (method, args) =>
@@ -571,6 +635,9 @@ if (workerMode === "recover") {
         assert.equal(countEvents(run, "skill_graph_resume_claimed"), 1, label);
         assert.equal(countEvents(run, "auto_recovery_completed"), 1, label);
         assert.equal(countEvents(run, "manual_recovery_required"), 0, label);
+        // The thread the crashed process left on the row was verified
+        // before the claim and dropped when the resumed graph settled.
+        assert.equal(await hasLangGraphRecord(modules, runId), false, label);
         const executed = run.events.filter((event) => event.type === "unified_graph_executed");
         assert.deepEqual(
           executed.at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
@@ -619,11 +686,11 @@ if (workerMode === "recover") {
       assert.equal(settledAfter.run.events.length, settledBefore.run.events.length);
       assert.deepEqual(settledAfter.checkpoint, settledBefore.checkpoint);
     });
-  });
+  }));
 
   test("a crash after the final answer is computed never completes the run with a second answer", {
     timeout: 180_000,
-  }, async () => {
+  }, () => withLangSmithTracingOff(async () => {
     await withFixture(async (context) => {
       const { modules, table } = context;
       const sealed = track(context, await crashRun(modules, {
@@ -684,6 +751,9 @@ if (workerMode === "recover") {
           "primary@parent": 1,
         }, label);
       }
+      for (const crashed of [sealed, unsealed]) {
+        assert.equal(await hasLangGraphRecord(modules, crashed.runId), false, crashed.label);
+      }
 
       // A later startup finds nothing to do: completion is terminal and the
       // claim is spent, so no second answer can be produced.
@@ -700,11 +770,13 @@ if (workerMode === "recover") {
       );
       assert.equal(countEvents((await loadRun(modules, sealed.runId)).run, "skill_graph_resume_claimed"), 1);
     });
-  });
+  }));
 
+  // The recovery boundaries: reconciled reuse, unknown in-flight work, a
+  // skipped Web fallback, and a sealed answer after a Skill version bump.
   test("cross-process resume reuses only reconciled nodes and leaves unknown in-flight work manual", {
     timeout: 180_000,
-  }, async () => {
+  }, () => withLangSmithTracingOff(async () => {
     await withFixture(async (context) => {
       const { modules, table } = context;
       const afterPrimaryCheck = (method, args) =>
@@ -795,11 +867,13 @@ if (workerMode === "recover") {
           crashed.label
         );
       }
+      // The resumed run settled, and its settling save dropped the thread.
+      assert.equal(await hasLangGraphRecord(modules, boundary.runId), false);
     });
-  });
+  }));
   test("a skipped Web fallback resumes, and only a sealed answer survives a Skill version bump", {
     timeout: 180_000,
-  }, async () => {
+  }, () => withLangSmithTracingOff(async () => {
     await withFixture(async (context) => {
       const { modules, table } = context;
       // The primary answer is supported, so the evidence check passes and
@@ -894,12 +968,16 @@ if (workerMode === "recover") {
         manualRecoveredCount: 0,
         skippedCount: 1,
       });
+      // Both completed runs settled without a thread.
+      for (const completed of [webSkipped, sealedBumped]) {
+        assert.equal(await hasLangGraphRecord(modules, completed.runId), false, completed.label);
+      }
     });
-  });
+  }));
 
   test("a graph paused at its approval gate in one process is approved and continued in another", {
     timeout: 180_000,
-  }, async () => {
+  }, () => withLangSmithTracingOff(async () => {
     await withFixture(async (context) => {
       const { modules, table } = context;
       const paused = track(context, await pauseAtApproval(modules, { label: "approved", table }));
@@ -909,6 +987,17 @@ if (workerMode === "recover") {
       assert.equal(before.checkpoint.phase, "awaiting_approval");
       assert.equal(before.checkpoint.approvalBoundary.gateId, paused.gate.id);
       assert.deepEqual(await countEffects(modules, table, "approved"), { "primary@parent": 1 });
+      // The parked graph on the PostgreSQL row: one pending interrupt of
+      // public ids for the task node, the receipts of the two nodes that
+      // ran, and no text of the request or the answer.
+      assert.deepEqual(await readLangGraphThreadState(modules, paused.runId), {
+        interrupts: [{ gateId: null, kind: "archive-rag.graph-approval/v1", nodeId: "task" }],
+        receipts: { document: "completed", evidence_check: "completed" },
+      });
+      const row = await modules.createPostgresAgentRunStore().get({ accessScope, runId: paused.runId });
+      for (const text of [APPROVAL_TASK_QUESTION, "30 days written notice", paused.gate.approvalObjectHash]) {
+        assert.equal(JSON.stringify(row.result.__langGraphCheckpoint).includes(text), false, text);
+      }
 
       // A startup in another process leaves the parked graph alone.
       assert.deepEqual(await runRecoveryProcess({ runs: [paused], table }), {
@@ -950,6 +1039,9 @@ if (workerMode === "recover") {
       );
       assert.equal(countEvents(after.run, "graph_approval_approved"), 1);
       assert.equal(countEvents(after.run, "unified_graph_planned"), 1);
+      // The approving process continued that thread and the settling
+      // save dropped it: the completed run carries no thread.
+      assert.equal(await hasLangGraphRecord(modules, paused.runId), false);
 
       // Deciding again from yet another process is refused, and a later
       // startup finds nothing to do.
@@ -972,11 +1064,11 @@ if (workerMode === "recover") {
         "task@approver": 1,
       });
     });
-  });
+  }));
 
   test("a process that dies after the approved write and before its receipt leaves the run manual", {
     timeout: 180_000,
-  }, async () => {
+  }, () => withLangSmithTracingOff(async () => {
     await withFixture(async (context) => {
       const { modules, table } = context;
       const paused = track(context, await pauseAtApproval(modules, { label: "crashed", table }));
@@ -1016,17 +1108,24 @@ if (workerMode === "recover") {
       assert.equal(after.run.result.recovery.mode, "manual");
       assert.equal(after.run.result.recovery.reason, "unknown_in_flight_node");
       assert.equal(countEvents(after.run, "skill_graph_resume_claimed"), 0);
+      // The dead approver's resumed thread is still on the row (the node
+      // never returned its receipt), untouched by the manual verdict.
+      assert.equal(await hasLangGraphRecord(modules, paused.runId), true);
+      assert.deepEqual((await readLangGraphThreadState(modules, paused.runId)).receipts, {
+        document: "completed",
+        evidence_check: "completed",
+      });
       // Never replayed: the write happened once, in the process that died.
       assert.deepEqual(await countEffects(modules, table, "crashed"), {
         "primary@parent": 1,
         "task@approver": 1,
       });
     });
-  });
+  }));
 
   test("a rejection decided in another process finalizes the same graph without the write", {
     timeout: 180_000,
-  }, async () => {
+  }, () => withLangSmithTracingOff(async () => {
     await withFixture(async (context) => {
       const { modules, table } = context;
       const paused = track(context, await pauseAtApproval(modules, { label: "denied", table }));
@@ -1054,6 +1153,7 @@ if (workerMode === "recover") {
         ]
       );
       assert.ok(after.checkpoint.finalization);
+      assert.equal(await hasLangGraphRecord(modules, paused.runId), false);
     });
-  });
+  }));
 }

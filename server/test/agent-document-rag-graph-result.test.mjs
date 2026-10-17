@@ -1,9 +1,13 @@
+// Must stay the first import: it clears the LangSmith tracing variables before
+// any @langchain module can read them.
+import "./langgraph-support/langsmith-off.mjs";
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { createExecutionGraph } from "../rag/agent-execution-graph.js";
-import { runExecutionGraph } from "../rag/agent-execution-graph-runner.js";
+import { runExecutionGraphOnLangGraph } from "../rag/langgraph/run-execution-graph.js";
 import { createBuiltInSkills } from "../rag/skills/built-ins.js";
 import { hasConsistentDocumentRagGraphResult } from "../rag/skills/document-rag-graph-result.js";
 import { executeAgentSkill } from "../rag/skills/registry.js";
@@ -46,7 +50,7 @@ const createRegistry = (documentRag) => {
 };
 
 const run = ({ completedNodeRuns = [], documentRag, executeObservedSkill } = {}) =>
-  runExecutionGraph({
+  runExecutionGraphOnLangGraph({
     accessScope: { userId: "alice", workspaceId: "workspace-a" },
     authorizedDocIds: ["doc-a"],
     authorizedSkillIds: ["document_rag", "document_evidence_check"],

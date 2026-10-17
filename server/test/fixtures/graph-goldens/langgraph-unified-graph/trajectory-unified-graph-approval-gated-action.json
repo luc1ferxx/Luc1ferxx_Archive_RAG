@@ -1,0 +1,375 @@
+{
+  "checks": [
+    {
+      "category": "unified_graph",
+      "detail": {
+        "actionNodeId": "task",
+        "agentMode": "clarification",
+        "checkpointPhase": "awaiting_approval",
+        "clarificationReason": "capability_approval_required",
+        "completedBeforePause": [
+          "document_rag",
+          "document_evidence_check"
+        ],
+        "documentCallsBeforePause": 1,
+        "gateBoundToCheckpoint": true,
+        "gateCapabilityId": "task.create",
+        "gateInputCarriesVerifiedAnswer": true,
+        "gateType": "graph_capability_approval",
+        "lastEvent": "graph_approval_gate_created",
+        "outerPlanEventCount": 0,
+        "runStatus": "waiting_for_user",
+        "writesBeforeDecision": 0
+      },
+      "id": "graph_paused_at_capability_gate",
+      "label": "The guarded graph ran the document answer and its check, then paused at a graph-bound gate whose input carries the verified answer; the Capability did not run",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "agentMode": "workspace_action",
+        "answerNamesTask": true,
+        "documentCallsTotal": 1,
+        "error": null,
+        "finalizationMatchesAnswer": true,
+        "graphNodeCount": 3,
+        "nodeRuns": [
+          {
+            "nodeId": "document",
+            "reason": null,
+            "skillId": "document_rag",
+            "status": "reused"
+          },
+          {
+            "nodeId": "evidence_check",
+            "reason": null,
+            "skillId": "document_evidence_check",
+            "status": "reused"
+          },
+          {
+            "nodeId": "task",
+            "reason": null,
+            "skillId": "capability:task.create",
+            "status": "completed"
+          }
+        ],
+        "plannedEventCount": 1,
+        "runStatus": "completed",
+        "writeInputMatchesGate": true,
+        "writes": 1
+      },
+      "id": "approval_continued_same_graph_once",
+      "label": "The approval endpoint continued the same graph: completed nodes reused, the Capability ran once with the approved input, and the run completed with a sealed answer",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "repeatedApproval": {
+          "code": "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY",
+          "status": 409
+        },
+        "staleCapability": {
+          "code": "graph_approval_stale",
+          "status": 409
+        },
+        "staleRunStatus": "waiting_for_user",
+        "staleWrites": 0,
+        "unchangedAfterWrongObject": true,
+        "wrongObject": {
+          "code": "approval_object_hash_mismatch",
+          "status": 409
+        }
+      },
+      "id": "stale_or_repeated_approval_refused",
+      "label": "A wrong approval object, a repeated decision, and an approval of a changed Capability version are refused without writing anything",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "agentAnswer": "Create Task was not run: the approval was denied.",
+        "error": null,
+        "gateStatus": "denied",
+        "nodeRuns": [
+          {
+            "nodeId": "document",
+            "reason": null,
+            "skillId": "document_rag",
+            "status": "reused"
+          },
+          {
+            "nodeId": "evidence_check",
+            "reason": null,
+            "skillId": "document_evidence_check",
+            "status": "reused"
+          },
+          {
+            "nodeId": "task",
+            "reason": "approval_denied",
+            "skillId": "capability:task.create",
+            "status": "skipped"
+          }
+        ],
+        "runStatus": "completed",
+        "writes": 0
+      },
+      "id": "denied_approval_finalized_without_capability",
+      "label": "A rejection finalized the same graph without the Capability: its node is skipped as approval_denied and nothing was written",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "agentMode": "clarification",
+        "documentCalls": 0,
+        "gateInputIsRawQuestion": true,
+        "outerPlanRan": true,
+        "unifiedEventCount": 0,
+        "writes": 0
+      },
+      "id": "v1_same_request_action_ungrounded",
+      "label": "V1 on the same request runs the action alone: no document answer, and the approval shows a task built from the raw question",
+      "passed": true
+    },
+    {
+      "category": "unified_graph",
+      "detail": {
+        "budgetUsed": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 1,
+          "researchQuestions": 0,
+          "traceSteps": 4,
+          "webSearchCalls": 0
+        },
+        "plannerCallCount": 1
+      },
+      "id": "approval_graph_budget_and_planner",
+      "label": "Budget was charged once for the document answer and the planner was the configured one",
+      "passed": true
+    }
+  ],
+  "description": "Under AGENT_UNIFIED_GRAPH_ROLLOUT=guarded, a task-creation request runs task.create only after the document answer passes its evidence check, pauses at a graph-bound approval gate whose input carries the verified answer, and the approval endpoint continues the same graph (approve: the Capability runs once; deny: finalized without it; a changed Capability version is refused); V1 on the same request asks to approve a task built from the raw question.",
+  "failedCheckCount": 0,
+  "id": "unified_graph_approval_gated_action",
+  "label": "Unified graph approval-gated action",
+  "passed": true,
+  "response": {
+    "agentMode": "workspace_action",
+    "agentSkills": [
+      {
+        "label": "Create Task",
+        "skillId": "capability:task.create",
+        "skillVersion": "1.0.0",
+        "status": "completed"
+      },
+      {
+        "label": "Document RAG",
+        "skillId": "document_rag",
+        "skillVersion": "1.0.0",
+        "status": "completed"
+      },
+      {
+        "label": "Document Evidence Check",
+        "skillId": "document_evidence_check",
+        "skillVersion": "1.0.0",
+        "status": "completed"
+      }
+    ],
+    "budget": {
+      "limits": {
+        "maxArxivPaperFetches": 1,
+        "maxCustomSkillCalls": 2,
+        "maxDocumentRagCalls": 2,
+        "maxResearchQuestions": 3,
+        "maxTraceSteps": 16,
+        "maxWebSearchCalls": 1
+      },
+      "run": {
+        "exhausted": null,
+        "limits": {
+          "maxCostUsd": 0.5,
+          "maxDurationMs": "<elapsed>",
+          "maxTokens": 100000
+        },
+        "used": {
+          "costUsd": 0,
+          "durationMs": "<elapsed>",
+          "modelCalls": 0,
+          "tokens": 0,
+          "unpricedModelCalls": 0
+        }
+      },
+      "traceTruncated": false,
+      "used": {
+        "arxivPaperFetches": 0,
+        "customSkillCalls": 0,
+        "documentRagCalls": 1,
+        "researchQuestions": 0,
+        "traceSteps": 4,
+        "webSearchCalls": 0
+      }
+    },
+    "clarification": null,
+    "executionLoop": {
+      "followUpsRun": 0,
+      "gaps": [],
+      "gapsIdentified": 0,
+      "maxFollowUps": 1,
+      "stoppedReason": "not_needed",
+      "version": "1.0"
+    },
+    "observed": {
+      "approval": {
+        "agentMode": "workspace_action",
+        "answerNamesTask": true,
+        "documentCallsTotal": 1,
+        "error": null,
+        "finalizationMatchesAnswer": true,
+        "graphNodeCount": 3,
+        "nodeRuns": [
+          {
+            "nodeId": "document",
+            "reason": null,
+            "skillId": "document_rag",
+            "status": "reused"
+          },
+          {
+            "nodeId": "evidence_check",
+            "reason": null,
+            "skillId": "document_evidence_check",
+            "status": "reused"
+          },
+          {
+            "nodeId": "task",
+            "reason": null,
+            "skillId": "capability:task.create",
+            "status": "completed"
+          }
+        ],
+        "plannedEventCount": 1,
+        "runStatus": "completed",
+        "writeInputMatchesGate": true,
+        "writes": 1
+      },
+      "denial": {
+        "agentAnswer": "Create Task was not run: the approval was denied.",
+        "error": null,
+        "gateStatus": "denied",
+        "nodeRuns": [
+          {
+            "nodeId": "document",
+            "reason": null,
+            "skillId": "document_rag",
+            "status": "reused"
+          },
+          {
+            "nodeId": "evidence_check",
+            "reason": null,
+            "skillId": "document_evidence_check",
+            "status": "reused"
+          },
+          {
+            "nodeId": "task",
+            "reason": "approval_denied",
+            "skillId": "capability:task.create",
+            "status": "skipped"
+          }
+        ],
+        "runStatus": "completed",
+        "writes": 0
+      },
+      "pause": {
+        "actionNodeId": "task",
+        "agentMode": "clarification",
+        "checkpointPhase": "awaiting_approval",
+        "clarificationReason": "capability_approval_required",
+        "completedBeforePause": [
+          "document_rag",
+          "document_evidence_check"
+        ],
+        "documentCallsBeforePause": 1,
+        "gateBoundToCheckpoint": true,
+        "gateCapabilityId": "task.create",
+        "gateInputCarriesVerifiedAnswer": true,
+        "gateType": "graph_capability_approval",
+        "lastEvent": "graph_approval_gate_created",
+        "outerPlanEventCount": 0,
+        "runStatus": "waiting_for_user",
+        "writesBeforeDecision": 0
+      },
+      "refusals": {
+        "repeatedApproval": {
+          "code": "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY",
+          "status": 409
+        },
+        "staleCapability": {
+          "code": "graph_approval_stale",
+          "status": 409
+        },
+        "staleRunStatus": "waiting_for_user",
+        "staleWrites": 0,
+        "unchangedAfterWrongObject": true,
+        "wrongObject": {
+          "code": "approval_object_hash_mismatch",
+          "status": 409
+        }
+      },
+      "v1": {
+        "agentMode": "clarification",
+        "documentCalls": 0,
+        "gateInputIsRawQuestion": true,
+        "outerPlanRan": true,
+        "unifiedEventCount": 0,
+        "writes": 0
+      }
+    },
+    "selectedSkills": [
+      {
+        "budgetKey": null,
+        "label": "Workspace Action",
+        "skillId": "workspace_action",
+        "skillVersion": "1.0.0"
+      },
+      {
+        "budgetKey": "documentRagCalls",
+        "label": "Document RAG",
+        "skillId": "document_rag",
+        "skillVersion": "1.0.0"
+      },
+      {
+        "budgetKey": null,
+        "label": "Document Evidence Check",
+        "skillId": "document_evidence_check",
+        "skillVersion": "1.0.0"
+      },
+      {
+        "budgetKey": null,
+        "label": "Create Task",
+        "skillId": "capability:task.create",
+        "skillVersion": "1.0.0"
+      }
+    ],
+    "skillChain": [],
+    "status": 200,
+    "telemetry": {
+      "chatCallCount": 1,
+      "listDocumentCallCount": 3
+    },
+    "traceTypes": [
+      "graph_node",
+      "graph_node",
+      "graph_node",
+      "self_check",
+      "synthesis"
+    ],
+    "workingMemory": {
+      "checkedQueryCount": 0,
+      "resolvedGapCount": 0,
+      "unresolvedGapCount": 0,
+      "unsupportedClaimCount": 0
+    }
+  }
+}
