@@ -8,7 +8,7 @@
         "maxIterations": 2
       },
       "createdAt": "<time>",
-      "error": "Goal deliverable follow_up_task:task.create is invalid: priority must be a non-empty string.",
+      "error": null,
       "id": "agent_goal:routes-approval",
       "input": {
         "docIds": [
@@ -66,42 +66,99 @@
         },
         {
           "error": null,
+          "id": "user-input",
+          "label": "Deliverable approval required",
+          "result": {
+            "agentRunId": "<id>",
+            "approvalGateCount": 1,
+            "deliverableCount": 1,
+            "reason": "deliverable_approval_required",
+            "requiredUserAction": "approve_deliverables"
+          },
+          "status": "waiting_for_user",
+          "summary": "Approve creation of 1 goal deliverable: Follow-up task.",
+          "updatedAt": ""
+        },
+        {
+          "error": null,
           "id": "deliverable",
           "label": "Deliver result",
           "result": {
             "agentMode": "workspace_action",
             "agentRunId": "<id>",
             "deliverables": {
-              "approvalRequired": false,
+              "approvalRequired": true,
               "counts": {
                 "completed": 0,
                 "failed": 0,
-                "planned": 0
+                "planned": 1
               },
-              "items": [],
-              "status": "not_requested"
+              "items": [
+                {
+                  "artifactType": "follow_up_task",
+                  "capabilityId": "task.create",
+                  "id": "follow_up_task:task.create",
+                  "label": "Follow-up task",
+                  "status": "waiting_for_approval",
+                  "title": "Review follow-ups for Create a follow-up task for the vendor renewal notice period"
+                }
+              ],
+              "status": "waiting_for_approval"
             }
           },
-          "status": "pending",
-          "summary": "Waiting for the agent to finish the goal.",
+          "status": "waiting_for_user",
+          "summary": "Waiting for approval to create 1 deliverable.",
           "updatedAt": ""
         }
       ],
       "label": "Agent task",
       "provider": null,
-      "requiredUserAction": "",
+      "requiredUserAction": "approve_deliverables",
       "result": {
         "agentMode": "workspace_action",
         "agentRunId": "<id>",
         "answer": "Task recorded as task capability-artifact:<id>:task:capability:task.create.",
-        "approvalGates": [],
+        "approvalGates": [
+          {
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "task.create",
+            "capabilityLabel": "Create Task",
+            "capabilityVersion": "1.0.0",
+            "deliverableId": "follow_up_task:task.create",
+            "id": "approval:task.create:1.0.0:<approval-hash>",
+            "inputPreview": {
+              "description": "Task recorded as task capability-artifact:<id>:task:capability:task.create.",
+              "priority": "medium",
+              "tags": [
+                "agent-goal",
+                "follow-up"
+              ],
+              "taskId": "goal-follow-up:agent_goal:routes-approval:task.create",
+              "title": "Review follow-ups for Create a follow-up task for the vendor renewal notice period"
+            },
+            "policy": {
+              "externalCall": false,
+              "mode": "user_confirmation",
+              "storesResult": true,
+              "writesWorkspace": true
+            },
+            "reason": "User confirmation is required before this capability can execute.",
+            "riskFlags": [
+              "writes_workspace",
+              "stores_result"
+            ],
+            "snapshotVersion": 1,
+            "status": "pending",
+            "type": "goal_deliverable_approval"
+          }
+        ],
         "clarification": null,
         "goalCompletion": {
           "blockers": [
             {
               "detail": {
-                "stoppedReason": "running",
-                "taskStatus": "running"
+                "stoppedReason": "waiting_for_deliverable_approval",
+                "taskStatus": "waiting_for_user"
               },
               "id": "terminal_status_completed",
               "label": "Task reached a terminal completed state"
@@ -110,19 +167,41 @@
               "detail": {
                 "incompleteStepIds": [
                   "iteration-1",
+                  "user-input",
                   "deliverable"
                 ],
-                "totalStepCount": 4
+                "totalStepCount": 5
               },
               "id": "plan_steps_completed",
               "label": "All public plan steps completed"
+            },
+            {
+              "detail": {
+                "artifactCompleted": 0,
+                "artifactPlanned": 0,
+                "completed": 0,
+                "failed": 0,
+                "missingArtifactCapabilityIds": [],
+                "planned": 1,
+                "status": "waiting_for_approval"
+              },
+              "id": "deliverables_created",
+              "label": "Requested goal deliverables were created"
+            },
+            {
+              "detail": {
+                "pendingReason": "deliverable_approval_required",
+                "requiredUserAction": "approve_deliverables"
+              },
+              "id": "no_pending_user_action",
+              "label": "No pending approval or user action remains"
             }
           ],
           "checks": [
             {
               "detail": {
-                "stoppedReason": "running",
-                "taskStatus": "running"
+                "stoppedReason": "waiting_for_deliverable_approval",
+                "taskStatus": "waiting_for_user"
               },
               "id": "terminal_status_completed",
               "label": "Task reached a terminal completed state",
@@ -132,9 +211,10 @@
               "detail": {
                 "incompleteStepIds": [
                   "iteration-1",
+                  "user-input",
                   "deliverable"
                 ],
-                "totalStepCount": 4
+                "totalStepCount": 5
               },
               "id": "plan_steps_completed",
               "label": "All public plan steps completed",
@@ -158,21 +238,21 @@
                 "completed": 0,
                 "failed": 0,
                 "missingArtifactCapabilityIds": [],
-                "planned": 0,
-                "status": "not_requested"
+                "planned": 1,
+                "status": "waiting_for_approval"
               },
               "id": "deliverables_created",
               "label": "Requested goal deliverables were created",
-              "passed": true
+              "passed": false
             },
             {
               "detail": {
-                "pendingReason": "",
-                "requiredUserAction": ""
+                "pendingReason": "deliverable_approval_required",
+                "requiredUserAction": "approve_deliverables"
               },
               "id": "no_pending_user_action",
               "label": "No pending approval or user action remains",
-              "passed": true
+              "passed": false
             },
             {
               "detail": {
@@ -202,8 +282,8 @@
               "passed": true
             }
           ],
-          "status": "running",
-          "summary": "Goal completion checks are still running.",
+          "status": "pending",
+          "summary": "Goal completion checks are waiting for user action.",
           "version": "1.0.0"
         },
         "goalPlan": {
@@ -211,27 +291,36 @@
           "counts": {
             "completed": 2,
             "failed": 0,
-            "total": 4,
-            "waiting": 1
+            "total": 5,
+            "waiting": 3
           },
           "currentStepId": "iteration-1",
           "deliverables": {
-            "approvalRequired": false,
+            "approvalRequired": true,
             "counts": {
               "completed": 0,
               "failed": 0,
-              "planned": 0
+              "planned": 1
             },
-            "items": [],
-            "status": "not_requested"
+            "items": [
+              {
+                "artifactType": "follow_up_task",
+                "capabilityId": "task.create",
+                "id": "follow_up_task:task.create",
+                "label": "Follow-up task",
+                "status": "waiting_for_approval",
+                "title": "Review follow-ups for Create a follow-up task for the vendor renewal notice period"
+              }
+            ],
+            "status": "waiting_for_approval"
           },
           "goal": "Create a follow-up task for the vendor renewal notice period",
           "goalCompletion": {
             "blockers": [
               {
                 "detail": {
-                  "stoppedReason": "running",
-                  "taskStatus": "running"
+                  "stoppedReason": "waiting_for_deliverable_approval",
+                  "taskStatus": "waiting_for_user"
                 },
                 "id": "terminal_status_completed",
                 "label": "Task reached a terminal completed state"
@@ -240,19 +329,41 @@
                 "detail": {
                   "incompleteStepIds": [
                     "iteration-1",
+                    "user-input",
                     "deliverable"
                   ],
-                  "totalStepCount": 4
+                  "totalStepCount": 5
                 },
                 "id": "plan_steps_completed",
                 "label": "All public plan steps completed"
+              },
+              {
+                "detail": {
+                  "artifactCompleted": 0,
+                  "artifactPlanned": 0,
+                  "completed": 0,
+                  "failed": 0,
+                  "missingArtifactCapabilityIds": [],
+                  "planned": 1,
+                  "status": "waiting_for_approval"
+                },
+                "id": "deliverables_created",
+                "label": "Requested goal deliverables were created"
+              },
+              {
+                "detail": {
+                  "pendingReason": "deliverable_approval_required",
+                  "requiredUserAction": "approve_deliverables"
+                },
+                "id": "no_pending_user_action",
+                "label": "No pending approval or user action remains"
               }
             ],
             "checks": [
               {
                 "detail": {
-                  "stoppedReason": "running",
-                  "taskStatus": "running"
+                  "stoppedReason": "waiting_for_deliverable_approval",
+                  "taskStatus": "waiting_for_user"
                 },
                 "id": "terminal_status_completed",
                 "label": "Task reached a terminal completed state",
@@ -262,9 +373,10 @@
                 "detail": {
                   "incompleteStepIds": [
                     "iteration-1",
+                    "user-input",
                     "deliverable"
                   ],
-                  "totalStepCount": 4
+                  "totalStepCount": 5
                 },
                 "id": "plan_steps_completed",
                 "label": "All public plan steps completed",
@@ -288,21 +400,21 @@
                   "completed": 0,
                   "failed": 0,
                   "missingArtifactCapabilityIds": [],
-                  "planned": 0,
-                  "status": "not_requested"
+                  "planned": 1,
+                  "status": "waiting_for_approval"
                 },
                 "id": "deliverables_created",
                 "label": "Requested goal deliverables were created",
-                "passed": true
+                "passed": false
               },
               {
                 "detail": {
-                  "pendingReason": "",
-                  "requiredUserAction": ""
+                  "pendingReason": "deliverable_approval_required",
+                  "requiredUserAction": "approve_deliverables"
                 },
                 "id": "no_pending_user_action",
                 "label": "No pending approval or user action remains",
-                "passed": true
+                "passed": false
               },
               {
                 "detail": {
@@ -332,20 +444,20 @@
                 "passed": true
               }
             ],
-            "status": "running",
-            "summary": "Goal completion checks are still running.",
+            "status": "pending",
+            "summary": "Goal completion checks are waiting for user action.",
             "version": "1.0.0"
           },
           "maxIterations": 2,
-          "requiredUserAction": "",
+          "requiredUserAction": "approve_deliverables",
           "researchTask": null,
-          "status": "running",
-          "stoppedReason": "running",
+          "status": "waiting_for_user",
+          "stoppedReason": "waiting_for_deliverable_approval",
           "version": "1.0.0"
         },
         "researchTask": null,
         "responseStatus": 200,
-        "stoppedReason": "running",
+        "stoppedReason": "waiting_for_deliverable_approval",
         "taskMemory": {
           "completedSteps": [
             {
@@ -362,9 +474,9 @@
         }
       },
       "runnerId": "agent_goal_runner",
-      "status": "failed",
+      "status": "waiting_for_user",
       "subject": null,
-      "summary": "Agent task completed 2 iteration(s).",
+      "summary": "Agent task is waiting for deliverable approval.",
       "type": "agent_goal",
       "updatedAt": "<time>"
     },

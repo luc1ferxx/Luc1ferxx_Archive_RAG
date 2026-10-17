@@ -197,6 +197,9 @@ const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const ISO_TIMESTAMP_PATTERN = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g;
 const APPROVAL_HASH_PATTERN = /(?<!v1:)sha256:[0-9a-f]{64}/g;
 const GATE_ID_PATTERN = /graph-approval:[0-9a-f]{64}/g;
+// A goal deliverable's approval gate id: approval:<capability>:<version>:<sha256
+// of an approval object that names the run>, so it differs between runs.
+const DELIVERABLE_GATE_ID_PATTERN = /\bapproval:([a-z][a-z0-9._-]*):(\d[0-9.]*):[0-9a-f]{64}/g;
 const SEAL_PATTERN = /^[0-9a-f]{64}$/;
 const SEAL_KEYS = new Set(["digest", "graphDigest"]);
 const DIGEST_KEYS = new Set(["typedOutputDigest", "outputDigest", "answerDigest"]);
@@ -216,7 +219,8 @@ const mask = (value, key = "") => {
       .replace(UUID_PATTERN, "<id>")
       .replace(ISO_TIMESTAMP_PATTERN, "<time>")
       .replace(APPROVAL_HASH_PATTERN, "sha256:<approval-hash>")
-      .replace(GATE_ID_PATTERN, "graph-approval:<approval-hash>");
+      .replace(GATE_ID_PATTERN, "graph-approval:<approval-hash>")
+      .replace(DELIVERABLE_GATE_ID_PATTERN, "approval:$1:$2:<approval-hash>");
   }
 
   if (typeof value === "number" && WALL_CLOCK_KEY_PATTERN.test(key)) {
@@ -1113,6 +1117,16 @@ test("a background task runs the v3 graph, parks at the gate, and its approve ac
 
   // The task while it waits, the parked run, the completed task and the
   // finished run are exactly what the native scheduler left (the golden).
+  // Rewritten once from LangGraph (UPDATE_GRAPH_GOLDENS=1) when the goal
+  // deliverable fix merged (e24fc954, agent-goal-deliverables.js): the
+  // follow-up task deliverable now gets the default priority "medium"
+  // instead of an empty one, so after the graph the task waits for the
+  // deliverable approval (approve_deliverables) instead of failing with
+  // "priority must be a non-empty string". The change is outside the graph
+  // scheduler; the graph part of the golden is unchanged. The new
+  // deliverable gate's id hashes an approval object that names the run, so
+  // mask() now replaces it (DELIVERABLE_GATE_ID_PATTERN); no other golden of
+  // this suite contains such an id.
   assertMatchesGraphGolden("langgraph-routes", "background-task-approval-reentry", {
     completed: mask(langgraph.completed),
     finished: mask(langgraph.finished),
