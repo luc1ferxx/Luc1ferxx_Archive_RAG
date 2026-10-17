@@ -23,6 +23,10 @@ export const AGENT_GOAL_DELIVERABLE_STATUSES = Object.freeze({
 
 const MAX_TEXT_LENGTH = 240;
 const MAX_CONTENT_LENGTH = 12000;
+// task.create declares `priority` as a string, and the policy enforcer rejects
+// an empty string for a declared string field, so every follow-up task carries
+// a non-empty default (the value the report case always used).
+const DEFAULT_FOLLOW_UP_TASK_PRIORITY = "medium";
 
 const ARTIFACT_TYPES_BY_CAPABILITY = Object.freeze({
   [CAPABILITY_IDS.documentOrganize]: ARTIFACT_TYPES.documentCollection,
@@ -337,7 +341,7 @@ export const buildAgentGoalDeliverableSpecs = ({
           description:
             answer ||
             `Review the completed agent goal and capture follow-up actions: ${goal}`,
-          priority: wantsReport(goal) ? "medium" : "",
+          priority: DEFAULT_FOLLOW_UP_TASK_PRIORITY,
           tags: ["agent-goal", "follow-up"].filter(Boolean),
           taskId: buildCapabilityArtifactIdempotencyKey({
             namespace: "goal-follow-up",
