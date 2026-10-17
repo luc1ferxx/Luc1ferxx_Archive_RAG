@@ -21,10 +21,7 @@ import {
   buildExecutionGraphNodeStepId,
   snapshotExecutionGraphNodeRun,
 } from "../rag/agent-execution-graph-checkpoint.js";
-import {
-  replayExecutionGraphRun,
-  runExecutionGraph,
-} from "../rag/agent-execution-graph-runner.js";
+import { replayExecutionGraphRun } from "../rag/agent-execution-graph-runner.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
@@ -34,14 +31,13 @@ import {
 } from "../rag/agent-runs.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
 import { deterministicUnifiedGraphPlannerAdapter } from "../rag/agent-unified-dag-planner-adapter.js";
-import { UNIFIED_GRAPH_RUNTIMES } from "../rag/agent-unified-graph-stage.js";
-import { getAgentRuntime } from "../rag/config.js";
 import {
   LANGGRAPH_CHECKPOINT_RESULT_KEY,
   LANGGRAPH_SAVER_ERROR_CODES,
   RunStoreCheckpointSaver,
 } from "../rag/langgraph/checkpointer.js";
 import { hasExecutionGraphWorkBeforePause } from "../rag/langgraph/compile-execution-graph.js";
+import { runExecutionGraphOnLangGraph } from "../rag/langgraph/run-execution-graph.js";
 import {
   RUNTIME_RESUME_MARKER,
   UNIFIED_GRAPH_INTERRUPT_KIND,
@@ -94,20 +90,26 @@ import {
   createTaskWithIndependentLaterWorkProposal,
   createWebChatService,
 } from "./fixtures/unified-graph-run-fixtures.mjs";
+import {
+  assertMatchesGraphGolden,
+  assertMatchesGraphGoldenDigest,
+} from "./langgraph-support/graph-goldens.mjs";
 
-// The guarded v3 unified graph on LangGraph (AGENT_RUNTIME=langgraph,
-// docs/adr/0001-langgraph-runtime.md phase 3), against the native scheduler on
-// the same scenarios and the same in-memory run store.
+// The guarded v3 unified graph on LangGraph (docs/adr/0001-langgraph-
+// runtime.md phase 3), held to what the native scheduler did on the same
+// scenarios and the same in-memory run store before phase 6 deleted it.
 //
-// Parity tests run a scenario once per runtime, each on a fresh store, and
-// deepStrictEqual everything the request leaves behind: the /chat response
-// (status and body, agentObservability included), the run (events, steps,
-// status, result; the private LangGraph record is never in a run projection)
-// and the v2 graph checkpoint. Masked, and only these: random ids (UUIDs,
-// also inside composite ids), ISO timestamps, durationMs/latencyMs, and the
-// checkpoint seal with everything derived from it (the gate's graphDigest, its
-// approval object hash and id, which hash the seal), since the seal covers
-// durations. Typed-output digests are content hashes and stay.
+// Parity tests run a scenario on a fresh store and compare everything the
+// request leaves behind with the golden frozen from the native scheduler's
+// run (test/fixtures/graph-goldens/langgraph-unified-graph/; see
+// test/langgraph-support/graph-goldens.mjs): the /chat response (status and
+// body, agentObservability included), the run (events, steps, status,
+// result; the private LangGraph record is never in a run projection) and the
+// v2 graph checkpoint. Masked, and only these: random ids (UUIDs, also inside
+// composite ids), ISO timestamps, durationMs/latencyMs, and the checkpoint
+// seal with everything derived from it (the gate's graphDigest, its approval
+// object hash and id, which hash the seal), since the seal covers durations.
+// Typed-output digests are content hashes and stay.
 //
 // The approval tests then look at what only LangGraph has: the run's thread,
 // read through the production saver, which must hold the pause as a pending
@@ -116,11 +118,18 @@ import {
 // text. Startup recovery reads that thread before claiming the graph and
 // refuses one that contradicts the checkpoint.
 
-const RUNTIMES = Object.freeze([UNIFIED_GRAPH_RUNTIMES.native, UNIFIED_GRAPH_RUNTIMES.langgraph]);
+const GOLDEN_SUITE = "langgraph-unified-graph";
+
+const toCaseName = (label) => label.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+// An outcome against the golden the native scheduler's run froze
+// (UPDATE_GRAPH_GOLDENS=1 rewrites it from this run; see the helper's rules).
+const assertMatchesNativeGolden = (caseName, outcome) =>
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, outcome);
 
 const ENV = Object.freeze({
-  // The production setting: AGENT_RUNTIME alone moves the v3 graph, and the
-  // outer plan of a V1 fallback stays on the native loop.
+  // The production setting: the v3 graph on LangGraph, and the outer plan of
+  // a V1 fallback on the native loop.
   AGENT_OUTER_PLAN_RUNTIME: undefined,
   AGENT_PLANNER_ROLLOUT: "deterministic",
   AGENT_UNIFIED_GRAPH_CAPABILITIES: "task.create",
@@ -161,8 +170,7 @@ const withEnv = async (overrides, work) => {
   }
 };
 
-const onRuntime = (runtime, work, env = {}) =>
-  withEnv({ ...ENV, ...env, AGENT_RUNTIME: runtime }, work);
+const inEnv = (work, env = {}) => withEnv({ ...ENV, ...env }, work);
 
 // ---------------------------------------------------------------------------
 // Masking
@@ -258,27 +266,24 @@ const settle = (promise) =>
     (error) => ({ error, value: null })
   );
 
-/** A fresh store, run service and document-loop request on one runtime. */
-const askOn = async (
-  runtime,
-  {
-    onWrite = async () => {},
-    primary = "supported",
-    proposal = createApprovalGatedTaskProposal,
-    question = APPROVAL_TASK_QUESTION,
-    ragOptions = {},
-    store = newStore(),
-    // A service over `store` (e.g. one that crashes at a chosen write).
-    agentRunService = newService(store),
-    withCapability = true,
-  } = {}
-) => {
+/** A fresh store, run service and document-loop request. */
+const ask = async ({
+  onWrite = async () => {},
+  primary = "supported",
+  proposal = createApprovalGatedTaskProposal,
+  question = APPROVAL_TASK_QUESTION,
+  ragOptions = {},
+  store = newStore(),
+  // A service over `store` (e.g. one that crashes at a chosen write).
+  agentRunService = newService(store),
+  withCapability = true,
+} = {}) => {
   const ragService = createDocumentLoopRagService({ primary, ...ragOptions });
   const { registry, writes } = withCapability
     ? await createTaskCapabilityRegistry({ onWrite, ragService })
     : { registry: undefined, writes: [] };
   const outcome = await settle(
-    onRuntime(runtime, () =>
+    inEnv(() =>
       runAgentRag({
         accessScope,
         agentRunService,
@@ -304,7 +309,6 @@ const askOn = async (
     registry,
     response,
     runId,
-    runtime,
     store,
     writes,
   };
@@ -312,12 +316,15 @@ const askOn = async (
 
 // The approval endpoint's handler, wired as app-services wires it, on a NEW
 // run service over the same store (another process deciding the gate).
-const decideOn = (
-  runtime,
-  { action, context, env = {}, hash, registry = context.registry, service = newService(context.store) }
-) =>
-  onRuntime(
-    runtime,
+const decide = ({
+  action,
+  context,
+  env = {},
+  hash,
+  registry = context.registry,
+  service = newService(context.store),
+}) =>
+  inEnv(
     () =>
       createAgentRunStepExecutor({
         agentRunService: service,
@@ -339,9 +346,8 @@ const decideOn = (
     env
   );
 
-const recoverOn = (runtime, { context, env = {}, registry = context.registry, service = newService(context.store) }) =>
-  onRuntime(
-    runtime,
+const recover = ({ context, env = {}, registry = context.registry, service = newService(context.store) }) =>
+  inEnv(
     () =>
       createAgentRunRecoveryService({
         agentRunService: service,
@@ -433,85 +439,62 @@ const privateTexts = (context) => [
 // Parity: the evidence-gated document loop and the trajectory cases
 // ---------------------------------------------------------------------------
 
-test("AGENT_RUNTIME selects the scheduler and the stage names both", async () => {
-  assert.deepEqual(UNIFIED_GRAPH_RUNTIMES, { langgraph: "langgraph", native: "native" });
-  // Unset is LangGraph since phase 4 (docs/adr/0001-langgraph-runtime.md);
-  // `native` is the rollback, and an unknown value falls back to it.
-  assert.equal(await withEnv({ AGENT_RUNTIME: undefined }, () => getAgentRuntime()), "langgraph");
-  assert.equal(await withEnv({ AGENT_RUNTIME: "langgraph" }, () => getAgentRuntime()), "langgraph");
-  assert.equal(await withEnv({ AGENT_RUNTIME: "native" }, () => getAgentRuntime()), "native");
-  assert.equal(await withEnv({ AGENT_RUNTIME: "pregel" }, () => getAgentRuntime()), "native");
-});
+// The AGENT_RUNTIME dial is gone (phase 6); the refusal of a removed value,
+// at start-up and at every graph entry, is pinned in
+// test/agent-runtime-removed.test.mjs.
 
-test("parity: the evidence-gated document loop (follow-up resolves / unresolved) is identical on both runtimes", async () => {
+test("parity: the evidence-gated document loop (follow-up resolves / unresolved) is the native one", async () => {
   for (const followUp of ["resolves", "unresolved"]) {
-    const outcomes = {};
+    // The thread as the document calls see it from inside their nodes (the
+    // only time a finished run's thread can be seen: the settling save drops
+    // it). The run id is the store's only run's.
+    const seen = [];
+    const store = newStore();
+    const probeService = newService(store);
+    const context = await ask({
+      primary: "unsupported",
+      proposal: createDocumentLoopProposal,
+      question: DOCUMENT_LOOP_QUESTION,
+      ragOptions: {
+        followUp,
+        onChat: async ({ phase }) => {
+          const listed = await store.list({ accessScope });
+          const [{ runId }] = listed?.runs ?? listed;
+          const thread = await readThread(probeService, runId);
 
-    for (const runtime of RUNTIMES) {
-      // The thread as the document calls see it from inside their nodes (the
-      // only time a finished run's thread can be seen: the settling save
-      // drops it). The run id is the store's only run's.
-      const seen = [];
-      const store = newStore();
-      const probeService = newService(store);
-      const context = await askOn(runtime, {
-        primary: "unsupported",
-        proposal: createDocumentLoopProposal,
-        question: DOCUMENT_LOOP_QUESTION,
-        ragOptions: {
-          followUp,
-          onChat: async ({ phase }) => {
-            const listed = await store.list({ accessScope });
-            const [{ runId }] = listed?.runs ?? listed;
-            const thread = await readThread(probeService, runId);
-
-            seen.push({
-              phase,
-              receipts: thread ? receiptStatuses(thread) : null,
-              record: await rawRecord(store, runId),
-            });
-          },
+          seen.push({
+            phase,
+            receipts: thread ? receiptStatuses(thread) : null,
+            record: await rawRecord(store, runId),
+          });
         },
-        store,
-        withCapability: false,
-      });
+      },
+      store,
+      withCapability: false,
+    });
 
-      assert.equal(context.error, null, `${runtime}/${followUp}: ${context.error?.message}`);
-      outcomes[runtime] = await describeOutcome(context);
-      assert.deepEqual(
-        context.ragService.calls.map((call) => call.phase),
-        ["primary", "follow_up"],
-        `${runtime}/${followUp}`
-      );
-      // A finished run carries no thread on either runtime.
-      assert.equal(await rawRecord(context.store, context.runId), null, runtime);
-      assert.deepEqual(seen.map((entry) => entry.phase), ["primary", "follow_up"]);
-
-      if (runtime === UNIFIED_GRAPH_RUNTIMES.langgraph) {
-        // The graph ran on LangGraph: the thread existed while the nodes ran,
-        // held the settled nodes' receipts when the follow-up ran, and no
-        // text of the request or the answers at any time.
-        assert.deepEqual(seen[0].receipts, {});
-        assert.deepEqual(seen[1].receipts, { primary: "completed", primary_check: "completed" });
-        for (const entry of seen) {
-          assert.notEqual(entry.record, null, entry.phase);
-          assertNoText(entry.record, [DOCUMENT_LOOP_QUESTION, "60 days notice", "30 days written notice"]);
-        }
-      } else {
-        assert.deepEqual(seen.map((entry) => entry.record), [null, null], "native writes no thread");
-      }
+    assert.equal(context.error, null, `${followUp}: ${context.error?.message}`);
+    const outcome = await describeOutcome(context);
+    assert.deepEqual(context.ragService.calls.map((call) => call.phase), ["primary", "follow_up"], followUp);
+    // A finished run carries no thread.
+    assert.equal(await rawRecord(context.store, context.runId), null, followUp);
+    assert.deepEqual(seen.map((entry) => entry.phase), ["primary", "follow_up"]);
+    // The graph ran on LangGraph: the thread existed while the nodes ran,
+    // held the settled nodes' receipts when the follow-up ran, and no text of
+    // the request or the answers at any time.
+    assert.deepEqual(seen[0].receipts, {});
+    assert.deepEqual(seen[1].receipts, { primary: "completed", primary_check: "completed" });
+    for (const entry of seen) {
+      assert.notEqual(entry.record, null, entry.phase);
+      assertNoText(entry.record, [DOCUMENT_LOOP_QUESTION, "60 days notice", "30 days written notice"]);
     }
 
-    assert.deepEqual(
-      outcomes[UNIFIED_GRAPH_RUNTIMES.langgraph],
-      outcomes[UNIFIED_GRAPH_RUNTIMES.native],
-      followUp
-    );
+    assertMatchesNativeGolden(`document-loop-${followUp}`, outcome);
     // The unresolved variant ends as a clarification (the run waits for the
     // user); the resolved one completes.
-    assert.equal(outcomes.native.run.status, followUp === "resolves" ? "completed" : "waiting_for_user");
-    assert.equal(outcomes.native.checkpoint.phase, "completed");
-    assert.ok(outcomes.native.checkpoint.finalization);
+    assert.equal(outcome.run.status, followUp === "resolves" ? "completed" : "waiting_for_user");
+    assert.equal(outcome.checkpoint.phase, "completed");
+    assert.ok(outcome.checkpoint.finalization);
   }
 });
 
@@ -527,103 +510,80 @@ test("parity: the deterministic document_web graph, declared out of layer order,
   // declaration-order queue, only the order of agentTrace, agentRunSteps and
   // agentObservability.runs changed natively; the answer, sources and
   // statuses did not.
-  const outcomes = {};
+  const store = newStore();
+  const agentRunService = newService(store);
+  const ragService = createDocumentLoopRagService({ followUp: "unresolved", primary: "unsupported" });
+  const webCalls = [];
+  const fetchWeb = createWebChatService({ calls: webCalls });
+  let receiptsAtWeb;
+  const response = await inEnv(() =>
+    runAgentRag({
+      accessScope,
+      agentRunService,
+      capabilityApprovals: { "web.search": { approved: true } },
+      docIds: [UNIFIED_DOC_ID],
+      question: WEB_QUESTION,
+      ragService,
+      sessionId: UNIFIED_SESSION_ID,
+      unifiedGraphPlannerAdapter: deterministicUnifiedGraphPlannerAdapter,
+      userId: accessScope.userId,
+      webChatService: async (question) => {
+        const listed = await store.list({ accessScope });
+        const [{ runId }] = listed?.runs ?? listed;
+        const thread = await readThread(agentRunService, runId);
 
-  for (const runtime of RUNTIMES) {
-    const store = newStore();
-    const agentRunService = newService(store);
-    const ragService = createDocumentLoopRagService({ followUp: "unresolved", primary: "unsupported" });
-    const webCalls = [];
-    const fetchWeb = createWebChatService({ calls: webCalls });
-    let receiptsAtWeb;
-    const response = await onRuntime(runtime, () =>
-      runAgentRag({
-        accessScope,
-        agentRunService,
-        capabilityApprovals: { "web.search": { approved: true } },
-        docIds: [UNIFIED_DOC_ID],
-        question: WEB_QUESTION,
-        ragService,
-        sessionId: UNIFIED_SESSION_ID,
-        unifiedGraphPlannerAdapter: deterministicUnifiedGraphPlannerAdapter,
-        userId: accessScope.userId,
-        webChatService: async (question) => {
-          const listed = await store.list({ accessScope });
-          const [{ runId }] = listed?.runs ?? listed;
-          const thread = await readThread(agentRunService, runId);
-
-          receiptsAtWeb = thread ? receiptStatuses(thread) : null;
-          return fetchWeb(question);
-        },
-      })
-    );
-    const context = { agentRunService, error: null, response, runId: response.body.agentRunId };
-    const { checkpoint, run } = await load(agentRunService, context.runId);
-
-    assert.equal(response.status, 200, runtime);
-    assert.equal(response.body.agentMode, "document_web", runtime);
-    assert.equal(run.status, "completed", runtime);
-    assert.deepEqual(ragService.calls.map((call) => call.phase), ["primary", "follow_up"], runtime);
-    assert.equal(webCalls.length, 1, runtime);
-    assert.deepEqual(
-      checkpoint.graph.nodes.map((node) => node.nodeId),
-      ["document", "evidence_check", "follow_up", "follow_up_check", "web"],
-      runtime
-    );
-    // Layer order: web (third layer) before follow_up_check (fourth).
-    assert.deepEqual(
-      run.steps
-        .filter((step) => step.type === "graph_node")
-        .map((step) => `${step.input?.nodeId}:${step.status}`),
-      [
-        "document:completed",
-        "evidence_check:completed",
-        "follow_up:completed",
-        "web:completed",
-        "follow_up_check:completed",
-      ],
-      runtime
-    );
-    // LangGraph scheduled it: its thread held the first two layers' receipts
-    // when web ran (follow_up's lands at the end of their shared superstep).
-    assert.deepEqual(
-      receiptsAtWeb,
-      runtime === UNIFIED_GRAPH_RUNTIMES.langgraph
-        ? { document: "completed", evidence_check: "completed" }
-        : null,
-      runtime
-    );
-    assert.equal(await rawRecord(store, context.runId), null, runtime);
-    outcomes[runtime] = await describeOutcome(context);
-  }
-
-  assert.deepEqual(
-    outcomes[UNIFIED_GRAPH_RUNTIMES.langgraph],
-    outcomes[UNIFIED_GRAPH_RUNTIMES.native]
+        receiptsAtWeb = thread ? receiptStatuses(thread) : null;
+        return fetchWeb(question);
+      },
+    })
   );
+  const context = { agentRunService, error: null, response, runId: response.body.agentRunId };
+  const { checkpoint, run } = await load(agentRunService, context.runId);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, "document_web");
+  assert.equal(run.status, "completed");
+  assert.deepEqual(ragService.calls.map((call) => call.phase), ["primary", "follow_up"]);
+  assert.equal(webCalls.length, 1);
+  assert.deepEqual(
+    checkpoint.graph.nodes.map((node) => node.nodeId),
+    ["document", "evidence_check", "follow_up", "follow_up_check", "web"]
+  );
+  // Layer order: web (third layer) before follow_up_check (fourth).
+  assert.deepEqual(
+    run.steps
+      .filter((step) => step.type === "graph_node")
+      .map((step) => `${step.input?.nodeId}:${step.status}`),
+    [
+      "document:completed",
+      "evidence_check:completed",
+      "follow_up:completed",
+      "web:completed",
+      "follow_up_check:completed",
+    ]
+  );
+  // LangGraph scheduled it: its thread held the first two layers' receipts
+  // when web ran (follow_up's lands at the end of their shared superstep).
+  assert.deepEqual(receiptsAtWeb, { document: "completed", evidence_check: "completed" });
+  assert.equal(await rawRecord(store, context.runId), null);
+  assertMatchesNativeGolden("document-web-layer-order", await describeOutcome(context));
 });
 
-test("parity: the two unified_graph trajectory cases report the same checks and projection on both runtimes", async () => {
+test("parity: the two unified_graph trajectory cases report the native checks and projection", async () => {
   for (const [label, createCase] of [
     ["unified_graph_evidence_gated_skill_hand_off", createUnifiedGraphEvidenceGatedSkillCase],
     ["unified_graph_approval_gated_action", createUnifiedGraphApprovalGatedActionCase],
   ]) {
-    const results = {};
+    const result = await inEnv(() => createCase().run());
 
-    for (const runtime of RUNTIMES) {
-      const result = await onRuntime(runtime, () => createCase().run());
-
-      assert.equal(result.id, label);
-      assert.ok(result.checks.length > 0, `${label}/${runtime}`);
-      assert.deepEqual(
-        result.checks.filter((check) => !check.passed).map((check) => check.id),
-        [],
-        `${label}/${runtime}`
-      );
-      results[runtime] = mask(result);
-    }
-
-    assert.deepEqual(results.langgraph, results.native, label);
+    assert.equal(result.id, label);
+    assert.ok(result.checks.length > 0, label);
+    assert.deepEqual(
+      result.checks.filter((check) => !check.passed).map((check) => check.id),
+      [],
+      label
+    );
+    assertMatchesNativeGolden(`trajectory-${toCaseName(label)}`, mask(result));
   }
 });
 
@@ -631,33 +591,28 @@ test("parity: the two unified_graph trajectory cases report the same checks and 
 // Approval: pause, approve, deny, refusals
 // ---------------------------------------------------------------------------
 
-test("parity: an approval-gated Capability parks the graph identically; on LangGraph the pause is the thread's pending interrupt and nothing ran", async () => {
+test("parity: an approval-gated Capability parks the graph as natively; the pause is the thread's pending interrupt and nothing ran", async () => {
   for (const [label, proposal] of [
     ["gated task", createApprovalGatedTaskProposal],
     ["task declared before an independent check", createTaskBeforeIndependentCheckProposal],
   ]) {
-    const paused = {};
+    const context = await ask({ proposal });
 
-    for (const runtime of RUNTIMES) {
-      const context = await askOn(runtime, { proposal });
+    assert.equal(context.error, null, `${label}: ${context.error?.message}`);
+    assert.equal(context.response.body.clarification.reason, "capability_approval_required", label);
+    assert.equal(context.writes.length, 0, label);
+    const outcome = await describeOutcome(context);
 
-      assert.equal(context.error, null, `${label}/${runtime}: ${context.error?.message}`);
-      assert.equal(context.response.body.clarification.reason, "capability_approval_required", runtime);
-      assert.equal(context.writes.length, 0, runtime);
-      paused[runtime] = { context, outcome: await describeOutcome(context) };
-    }
-
-    assert.deepEqual(paused.langgraph.outcome, paused.native.outcome, label);
-    assert.equal(paused.native.outcome.run.status, "waiting_for_user");
-    assert.equal(paused.native.outcome.checkpoint.phase, "awaiting_approval");
-    // The independent check settled before the pause on both runtimes (it
-    // shares the gated node's superstep), so the gate binds to it.
+    assertMatchesNativeGolden(`approval-pause-${toCaseName(label)}`, outcome);
+    assert.equal(outcome.run.status, "waiting_for_user");
+    assert.equal(outcome.checkpoint.phase, "awaiting_approval");
+    // The independent check settled before the pause (it shares the gated
+    // node's superstep), so the gate binds to it.
     assert.deepEqual(
-      paused.native.outcome.checkpoint.nodeRuns.map((nodeRun) => nodeRun.nodeId).sort(),
+      outcome.checkpoint.nodeRuns.map((nodeRun) => nodeRun.nodeId).sort(),
       ["document", "evidence_check"]
     );
 
-    const { context } = paused.langgraph;
     const thread = await readThread(context.agentRunService, context.runId);
 
     assert.deepEqual(receiptStatuses(thread), { document: "completed", evidence_check: "completed" });
@@ -676,100 +631,82 @@ test("parity: an approval-gated Capability parks the graph identically; on LangG
 });
 
 test("parity: approving on a new run service continues the SAME LangGraph thread, runs the Capability once, and answers like native", async () => {
-  const approved = {};
+  const probe = createThreadProbe();
+  const context = await ask({ onWrite: probe.onWrite });
+  probe.context = context;
+  const service = newService(context.store);
+  const result = await decide({ action: "approve", context, service });
 
-  for (const runtime of RUNTIMES) {
-    const probe = createThreadProbe();
-    const context = await askOn(runtime, { onWrite: probe.onWrite });
-    probe.context = context;
-    const service = newService(context.store);
-    const result = await decideOn(runtime, { action: "approve", context, service });
+  assert.equal(result.run.status, "completed");
+  assert.equal(context.writes.length, 1);
+  assert.deepEqual(context.writes[0].input, {
+    description: context.gate.inputPreview.description,
+    title: context.gate.inputPreview.title,
+  });
+  assert.equal(context.writes[0].taskId, `capability-artifact:${context.runId}:task:capability:task.create`);
+  assert.equal(context.ragService.calls.length, 1);
+  // A finished run carries no thread.
+  assert.equal(await rawRecord(context.store, context.runId), null);
+  const approved = {
+    decision: maskRunBound({ response: result.response, status: result.status }),
+    outcome: await describeOutcome({ ...context, agentRunService: service, response: null }, maskRunBound),
+  };
 
-    assert.equal(result.run.status, "completed", runtime);
-    assert.equal(context.writes.length, 1, runtime);
-    assert.deepEqual(context.writes[0].input, {
-      description: context.gate.inputPreview.description,
-      title: context.gate.inputPreview.title,
-    });
-    assert.equal(context.writes[0].taskId, `capability-artifact:${context.runId}:task:capability:task.create`);
-    assert.equal(context.ragService.calls.length, 1, runtime);
-    // A finished run carries no thread, on either runtime.
-    assert.equal(await rawRecord(context.store, context.runId), null, runtime);
-    approved[runtime] = {
-      context,
-      decision: maskRunBound({ response: result.response, status: result.status }),
-      outcome: await describeOutcome({ ...context, agentRunService: service, response: null }, maskRunBound),
-      probe,
-    };
-  }
-
-  assert.deepEqual(approved.langgraph.decision, approved.native.decision);
-  assert.deepEqual(approved.langgraph.outcome, approved.native.outcome);
-  assert.equal(approved.native.outcome.checkpoint.phase, "completed");
-  assert.ok(approved.native.outcome.checkpoint.finalization);
+  assertMatchesNativeGolden("approval-approve", approved);
+  assert.equal(approved.outcome.checkpoint.phase, "completed");
+  assert.ok(approved.outcome.checkpoint.finalization);
   assert.deepEqual(
-    approved.native.outcome.run.events
+    approved.outcome.run.events
       .filter((event) => event.type === "unified_graph_executed")
       .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
     [["document", "reused"], ["evidence_check", "reused"], ["task", "completed"]]
   );
 
-  // Seen from inside the Capability's write: natively there is no thread.
-  // On LangGraph the thread was resumed, not restarted: the receipts the
+  // Seen from inside the Capability's write (the native scheduler had no
+  // thread there): the thread was resumed, not restarted: the receipts the
   // first invocation wrote before the pause are still "completed" (a fresh
   // invocation re-enters those nodes as "reused"), the pause is still the
   // pending interrupt (the node has not returned yet), the resume value is
   // the runtime's marker and nothing else, and no text is in the record.
-  assert.deepEqual(approved.native.probe.seen, [null]);
-  const [seen] = approved.langgraph.probe.seen;
+  const [seen] = probe.seen;
   assert.deepEqual(seen.receipts, { document: "completed", evidence_check: "completed" });
   assert.deepEqual(seen.interrupts, [buildApprovalInterruptPayload({ nodeId: "task" })]);
   assert.deepEqual(seen.resumeWrites, [[RUNTIME_RESUME_MARKER]]);
-  assertNoText(seen.record, privateTexts(approved.langgraph.context));
+  assertNoText(seen.record, privateTexts(context));
 
-  // A decided gate cannot be decided again, on either runtime.
-  const { context } = approved.langgraph;
-  await assert.rejects(decideOn("langgraph", { action: "approve", context }), (error) => error.status === 409);
+  // A decided gate cannot be decided again.
+  await assert.rejects(decide({ action: "approve", context }), (error) => error.status === 409);
   assert.equal(context.writes.length, 1);
 });
 
 test("parity: a denied gate settles the parked node as approval_denied without entering it", async () => {
-  const denied = {};
+  const context = await ask();
+  const service = newService(context.store);
+  const result = await decide({ action: "deny", context, service });
 
-  for (const runtime of RUNTIMES) {
-    const context = await askOn(runtime);
-    const service = newService(context.store);
-    const result = await decideOn(runtime, { action: "deny", context, service });
+  assert.equal(result.run.status, "completed");
+  assert.equal(result.response.agentAnswer, "Create Task was not run: the approval was denied.");
+  assert.equal(context.writes.length, 0);
+  // Nothing was left to run, so no scheduler ran: the denied node was
+  // settled before scheduling, and the thread is dropped with the run.
+  assert.equal(await rawRecord(context.store, context.runId), null);
+  const denied = {
+    decision: mask({ response: result.response, status: result.status }),
+    outcome: await describeOutcome({ ...context, agentRunService: service, response: null }),
+  };
 
-    assert.equal(result.run.status, "completed", runtime);
-    assert.equal(result.response.agentAnswer, "Create Task was not run: the approval was denied.");
-    assert.equal(context.writes.length, 0, runtime);
-    // Nothing was left to run, so no scheduler ran: the denied node was
-    // settled before scheduling, and the thread is dropped with the run.
-    assert.equal(await rawRecord(context.store, context.runId), null, runtime);
-    denied[runtime] = {
-      context,
-      decision: mask({ response: result.response, status: result.status }),
-      outcome: await describeOutcome({ ...context, agentRunService: service, response: null }),
-    };
-  }
-
-  assert.deepEqual(denied.langgraph.decision, denied.native.decision);
-  assert.deepEqual(denied.langgraph.outcome, denied.native.outcome);
+  assertMatchesNativeGolden("approval-deny", denied);
   assert.deepEqual(
-    denied.native.outcome.run.events
+    denied.outcome.run.events
       .filter((event) => event.type === "unified_graph_executed")
       .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.reason]),
     [["document", "reused", null], ["evidence_check", "reused", null], ["task", "skipped", "approval_denied"]]
   );
-  assert.equal(
-    denied.langgraph.outcome.run.steps.some((step) => step.input?.nodeId === "task"),
-    false
-  );
+  assert.equal(denied.outcome.run.steps.some((step) => step.input?.nodeId === "task"), false);
 });
 
 test("a wrong approval object, a stale Capability version and a non-guarded rollout refuse before the thread is touched", async () => {
-  const context = await askOn("langgraph");
+  const context = await ask();
   const recordBefore = await rawRecord(context.store, context.runId);
   const { registry: bumped, writes: bumpedWrites } = await createTaskCapabilityRegistry({
     ragService: context.ragService,
@@ -777,9 +714,9 @@ test("a wrong approval object, a stale Capability version and a non-guarded roll
   });
 
   for (const [label, attempt, code] of [
-    ["forged object", () => decideOn("langgraph", { action: "approve", context, hash: `sha256:${"0".repeat(64)}` }), "approval_object_hash_mismatch"],
-    ["stale version", () => decideOn("langgraph", { action: "approve", context, registry: bumped }), "graph_approval_stale"],
-    ["rollout off", () => decideOn("langgraph", { action: "approve", context, env: { AGENT_UNIFIED_GRAPH_ROLLOUT: "off" } }), "unified_graph_rollout_not_guarded"],
+    ["forged object", () => decide({ action: "approve", context, hash: `sha256:${"0".repeat(64)}` }), "approval_object_hash_mismatch"],
+    ["stale version", () => decide({ action: "approve", context, registry: bumped }), "graph_approval_stale"],
+    ["rollout off", () => decide({ action: "approve", context, env: { AGENT_UNIFIED_GRAPH_ROLLOUT: "off" } }), "unified_graph_rollout_not_guarded"],
   ]) {
     await assert.rejects(attempt(), (error) => {
       assert.equal(error.code, code, label);
@@ -807,96 +744,106 @@ test("parity: an approved gate whose live policy no longer asks for approval is 
   // that stopped asking for approval after the pause (same id and version,
   // so the stale-version check does not fire) must not turn the approval
   // into a licence to run. The node refuses before its step, budget or call,
-  // and the run goes to an operator, identically on both runtimes.
-  const refused = {};
+  // and the run goes to an operator, as it did natively.
+  const context = await ask();
+  const { registry: drifted, writes: driftedWrites } = await createTaskCapabilityRegistry({
+    approvalPolicy: { mode: "direct", writesWorkspace: true },
+    ragService: context.ragService,
+  });
+  const before = await load(context.agentRunService, context.runId);
 
-  for (const runtime of RUNTIMES) {
-    const context = await askOn(runtime);
-    const { registry: drifted, writes: driftedWrites } = await createTaskCapabilityRegistry({
-      approvalPolicy: { mode: "direct", writesWorkspace: true },
-      ragService: context.ragService,
-    });
-    const before = await load(context.agentRunService, context.runId);
+  assert.equal(before.checkpoint.phase, "awaiting_approval");
+  await assert.rejects(decide({ action: "approve", context, registry: drifted }), (error) => {
+    assert.equal(error.code, "graph_approval_not_required");
+    assert.equal(error.status, 409);
+    return true;
+  });
 
-    assert.equal(before.checkpoint.phase, "awaiting_approval", runtime);
-    await assert.rejects(decideOn(runtime, { action: "approve", context, registry: drifted }), (error) => {
-      assert.equal(error.code, "graph_approval_not_required", runtime);
-      assert.equal(error.status, 409, runtime);
-      return true;
-    });
+  const after = await load(context.agentRunService, context.runId);
 
-    const after = await load(context.agentRunService, context.runId);
+  // Neither Capability (the one that parked, the drifted one) wrote.
+  assert.equal(context.writes.length + driftedWrites.length, 0);
+  // The gated node opened no step and settled nowhere; the owner's budget
+  // and the settled nodes are exactly those of the pause. Only the phase
+  // (the continuation reopened the graph), its sequence and seal moved.
+  assert.equal(after.run.steps.some((step) => step.input?.nodeId === "task"), false);
+  assert.deepEqual(after.checkpoint.nodeRuns, before.checkpoint.nodeRuns);
+  assert.deepEqual(after.checkpoint.owner, before.checkpoint.owner);
+  assert.deepEqual(
+    Object.keys({ ...before.checkpoint, ...after.checkpoint })
+      .filter((key) => !isDeepStrictEqual(before.checkpoint[key], after.checkpoint[key]))
+      .sort(),
+    ["digest", "phase", "sequence"]
+  );
+  assert.equal(after.checkpoint.phase, "running");
+  assert.equal(after.run.status, "waiting_for_user");
+  assert.equal(after.run.result.recovery.mode, "manual");
+  assert.equal(after.run.result.recovery.reason, "graph_approval_continuation_failed");
+  assert.deepEqual(after.run.events.slice(-2).map((event) => event.type), [
+    "graph_approval_approved",
+    "manual_recovery_required",
+  ]);
 
-    // Neither Capability (the one that parked, the drifted one) wrote.
-    assert.equal(context.writes.length + driftedWrites.length, 0, runtime);
-    // The gated node opened no step and settled nowhere; the owner's budget
-    // and the settled nodes are exactly those of the pause. Only the phase
-    // (the continuation reopened the graph), its sequence and seal moved.
-    assert.equal(after.run.steps.some((step) => step.input?.nodeId === "task"), false, runtime);
-    assert.deepEqual(after.checkpoint.nodeRuns, before.checkpoint.nodeRuns, runtime);
-    assert.deepEqual(after.checkpoint.owner, before.checkpoint.owner, runtime);
-    assert.deepEqual(
-      Object.keys({ ...before.checkpoint, ...after.checkpoint })
-        .filter((key) => !isDeepStrictEqual(before.checkpoint[key], after.checkpoint[key]))
-        .sort(),
-      ["digest", "phase", "sequence"],
-      runtime
-    );
-    assert.equal(after.checkpoint.phase, "running", runtime);
-    assert.equal(after.run.status, "waiting_for_user", runtime);
-    assert.equal(after.run.result.recovery.mode, "manual", runtime);
-    assert.equal(after.run.result.recovery.reason, "graph_approval_continuation_failed", runtime);
-    assert.deepEqual(after.run.events.slice(-2).map((event) => event.type), [
-      "graph_approval_approved",
-      "manual_recovery_required",
-    ]);
+  // Restoring the policy does not reopen it: the gate is spent and the run
+  // belongs to an operator.
+  await assert.rejects(decide({ action: "approve", context }), (error) => error.status === 409);
+  assert.equal(context.writes.length + driftedWrites.length, 0);
 
-    // Restoring the policy does not reopen it: the gate is spent and the run
-    // belongs to an operator.
-    await assert.rejects(decideOn(runtime, { action: "approve", context }), (error) => error.status === 409);
-    assert.equal(context.writes.length + driftedWrites.length, 0, runtime);
+  assertMatchesNativeGolden(
+    "approval-policy-drift-refused",
+    await describeOutcome({ ...context, response: null })
+  );
 
-    refused[runtime] = { context, outcome: await describeOutcome({ ...context, response: null }) };
-  }
-
-  assert.deepEqual(refused.langgraph.outcome, refused.native.outcome);
-
-  // On LangGraph the decision resumed the thread (the runtime's marker is its
-  // resume write) and the node refused inside it, so the pause is still the
-  // thread's pending interrupt and no receipt was added for the task.
-  const thread = await readThread(refused.langgraph.context.agentRunService, refused.langgraph.context.runId);
+  // The decision resumed the thread (the runtime's marker is its resume
+  // write) and the node refused inside it, so the pause is still the thread's
+  // pending interrupt and no receipt was added for the task.
+  const thread = await readThread(context.agentRunService, context.runId);
   assert.deepEqual(thread.interrupts.map((pending) => pending.value), [buildApprovalInterruptPayload({ nodeId: "task" })]);
   assert.deepEqual(receiptStatuses(thread), { document: "completed", evidence_check: "completed" });
   assert.deepEqual(thread.resumeWrites, [[RUNTIME_RESUME_MARKER]]);
-  assert.equal(await rawRecord(refused.native.context.store, refused.native.context.runId), null);
 });
 
-test("a runtime switch between the pause and the decision continues the graph either way", async () => {
-  // Paused natively (no thread), decided on LangGraph: a fresh invocation
-  // seeded from the checkpoint, so the settled nodes are entered as reused
-  // and nothing is resumed.
+test("a pause without its thread (a run the native scheduler paused before phase 6) is decided on a fresh invocation", async () => {
+  // Before phase 6 a run could be paused by the native scheduler, which writes
+  // no thread, and decided on LangGraph: a fresh invocation seeded from the
+  // checkpoint, so the settled nodes are entered as reused and nothing is
+  // resumed. Such a run is a LangGraph pause without its thread, so the same
+  // pause on LangGraph with the thread dropped must be decided exactly as
+  // that native pause was: the golden holds what the decision left of it
+  // (the decision, the run, the checkpoint, and the thread as the write sees
+  // it, without the raw record, whose channel versions are random).
   const probe = createThreadProbe();
-  const nativePause = await askOn("native", { onWrite: probe.onWrite });
-  probe.context = nativePause;
-  assert.equal(await rawRecord(nativePause.store, nativePause.runId), null);
-  const onLangGraph = await decideOn("langgraph", { action: "approve", context: nativePause });
-  assert.equal(onLangGraph.run.status, "completed");
-  assert.equal(nativePause.writes.length, 1);
+  const decidedWithoutThread = async (context, decision) => ({
+    decision: maskRunBound({ response: decision.response, status: decision.status }),
+    outcome: await describeOutcome({ ...context, response: null }, maskRunBound),
+    seen: probe.seen.map(({ interrupts, receipts, resumeWrites }) => ({ interrupts, receipts, resumeWrites })),
+  });
+  const threadDropped = await ask({ onWrite: probe.onWrite });
+  probe.context = threadDropped;
+  assert.equal((await readThread(threadDropped.agentRunService, threadDropped.runId)).interrupts.length, 1);
+  // The saver refuses to write a paused run's thread (no graph is running),
+  // so the record is dropped below every fence, as a store that never held
+  // one reads.
+  const pausedRaw = await threadDropped.store.get({ accessScope, runId: threadDropped.runId });
+  await threadDropped.store.update({
+    accessScope,
+    expectedRevision: pausedRaw.revision,
+    patch: { result: { [LANGGRAPH_CHECKPOINT_RESULT_KEY]: null } },
+    runId: threadDropped.runId,
+  });
+  assert.equal(await readThread(threadDropped.agentRunService, threadDropped.runId), null);
+  const droppedDecision = await decide({ action: "approve", context: threadDropped });
+  assert.equal(droppedDecision.run.status, "completed");
+  assert.equal(threadDropped.writes.length, 1);
+  assert.equal(await rawRecord(threadDropped.store, threadDropped.runId), null);
   const [seen] = probe.seen;
   assert.deepEqual(seen.receipts, { document: "reused", evidence_check: "reused" });
   assert.deepEqual(seen.interrupts, []);
   assert.deepEqual(seen.resumeWrites, []);
-  assert.equal(await rawRecord(nativePause.store, nativePause.runId), null);
-
-  // Paused on LangGraph, decided natively: native ignores the thread and
-  // continues from the checkpoint, and its settling save drops the stale
-  // thread like any other.
-  const langGraphPause = await askOn("langgraph");
-  assert.equal((await readThread(langGraphPause.agentRunService, langGraphPause.runId)).interrupts.length, 1);
-  const onNative = await decideOn("native", { action: "approve", context: langGraphPause });
-  assert.equal(onNative.run.status, "completed");
-  assert.equal(langGraphPause.writes.length, 1);
-  assert.equal(await rawRecord(langGraphPause.store, langGraphPause.runId), null);
+  assertMatchesNativeGolden(
+    "runtime-switch-pause-without-thread-decided-on-langgraph",
+    await decidedWithoutThread(threadDropped, droppedDecision)
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -912,7 +859,7 @@ const approveThenCrashBeforeTask = async (context) => {
   });
 
   await assert.rejects(
-    decideOn("langgraph", { action: "approve", context, service }),
+    decide({ action: "approve", context, service }),
     (error) => error.code === "SIMULATED_PROCESS_EXIT"
   );
   assert.equal(context.writes.length, 0);
@@ -921,7 +868,7 @@ const approveThenCrashBeforeTask = async (context) => {
 test("a crash after the approved Capability's write is manual on recovery; a crash before its step is resumed once", async () => {
   // After the write, before its receipt: the step is running, the outcome
   // unknown, and the thread (which never saw the node return) proves nothing.
-  const late = await askOn("langgraph");
+  const late = await ask();
   const { service: crashingLate, state } = createCrashingRunService(newService(late.store));
   const { registry: crashAfterWrite, writes: lateWrites } = await createTaskCapabilityRegistry({
     onWrite: async () => { state.crashed = true; },
@@ -929,11 +876,11 @@ test("a crash after the approved Capability's write is manual on recovery; a cra
   });
 
   await assert.rejects(
-    decideOn("langgraph", { action: "approve", context: late, registry: crashAfterWrite, service: crashingLate }),
+    decide({ action: "approve", context: late, registry: crashAfterWrite, service: crashingLate }),
     (error) => error.code === "SIMULATED_PROCESS_EXIT"
   );
   assert.equal(lateWrites.length, 1);
-  const lateOutcome = await recoverOn("langgraph", { context: late, registry: crashAfterWrite });
+  const lateOutcome = await recover({ context: late, registry: crashAfterWrite });
   const lateAfter = await load(late.agentRunService, late.runId);
   assert.equal(lateOutcome.manualRecoveredCount, 1);
   assert.equal(lateOutcome.autoRecoveredCount, 0);
@@ -946,7 +893,7 @@ test("a crash after the approved Capability's write is manual on recovery; a cra
   // invocation seeded from the checkpoint (the stale thread is dropped under
   // the claim).
   const probe = createThreadProbe();
-  const early = await askOn("langgraph", { onWrite: probe.onWrite });
+  const early = await ask({ onWrite: probe.onWrite });
   probe.context = early;
   await approveThenCrashBeforeTask(early);
   const verified = await verifyLangGraphThreadForRecovery({
@@ -957,7 +904,7 @@ test("a crash after the approved Capability's write is manual on recovery; a cra
   });
   assert.equal(verified.ok, true);
   assert.equal(verified.thread.behind, false);
-  const earlyOutcome = await recoverOn("langgraph", { context: early });
+  const earlyOutcome = await recover({ context: early });
   const earlyAfter = await load(early.agentRunService, early.runId);
   assert.equal(earlyOutcome.autoRecoveredCount, 1, JSON.stringify(earlyOutcome));
   assert.equal(earlyOutcome.manualRecoveredCount, 0);
@@ -1016,7 +963,7 @@ test("startup recovery reads the thread before claiming and refuses one that con
       LANGGRAPH_THREAD_RECONCILIATION_REASONS.foreignReceipt,
     ],
   ]) {
-    const context = await askOn("langgraph");
+    const context = await ask();
     await approveThenCrashBeforeTask(context);
     await forgeThreadReceipts(context, patchReceipts);
 
@@ -1030,7 +977,7 @@ test("startup recovery reads the thread before claiming and refuses one that con
     assert.equal(verified.reason, LANGGRAPH_RECOVERY_REASONS.threadMismatch, label);
     assert.equal(verified.detail, detail, label);
 
-    const outcome = await recoverOn("langgraph", { context });
+    const outcome = await recover({ context });
     const after = await load(context.agentRunService, context.runId);
     assert.equal(outcome.manualRecoveredCount, 1, label);
     assert.equal(outcome.autoRecoveredCount, 0, label);
@@ -1042,31 +989,9 @@ test("startup recovery reads the thread before claiming and refuses one that con
     assert.equal(after.run.steps.some((step) => step.input?.nodeId === "task"), false, label);
   }
 
-  // Natively the same forged thread is never read: the native runtime does
-  // not know it exists, and recovery runs the approved node once. This is
-  // what an AGENT_RUNTIME=native rollback does with a run LangGraph left
-  // unfinished: it resumes from the graph checkpoint, and the save that
-  // settles the graph drops the stale thread (the null tombstone).
-  const native = await askOn("langgraph");
-  await approveThenCrashBeforeTask(native);
-  await forgeThreadReceipts(native, (receipts) => ({
-    ...receipts,
-    "node:document": { ...receipts["node:document"], outputDigest: `v1:sha256:${"0".repeat(64)}` },
-  }));
-  assert.notEqual(await rawRecord(native.store, native.runId), null);
-  const nativeOutcome = await recoverOn("native", { context: native });
-  assert.equal(nativeOutcome.autoRecoveredCount, 1);
-  assert.equal(native.writes.length, 1);
-  assert.equal((await load(native.agentRunService, native.runId)).run.status, "completed");
-  assert.equal(await rawRecord(native.store, native.runId), null);
-  assert.equal(
-    Object.hasOwn((await native.store.get({ accessScope, runId: native.runId })).result, LANGGRAPH_CHECKPOINT_RESULT_KEY),
-    true
-  );
-
   // A thread behind its checkpoint, or none at all, is no contradiction: the
   // fresh invocation resumes from the checkpoint.
-  const behind = await askOn("langgraph");
+  const behind = await ask();
   await approveThenCrashBeforeTask(behind);
   await forgeThreadReceipts(behind, () => ({}));
   const behindVerified = await verifyLangGraphThreadForRecovery({
@@ -1076,15 +1001,15 @@ test("startup recovery reads the thread before claiming and refuses one that con
     runId: behind.runId,
   });
   assert.deepEqual([behindVerified.ok, behindVerified.thread.behind], [true, true]);
-  assert.equal((await recoverOn("langgraph", { context: behind })).autoRecoveredCount, 1);
+  assert.equal((await recover({ context: behind })).autoRecoveredCount, 1);
   assert.equal(behind.writes.length, 1);
 
-  const missing = await askOn("langgraph");
+  const missing = await ask();
   await approveThenCrashBeforeTask(missing);
   const saver = new RunStoreCheckpointSaver({ accessScope, agentRunService: missing.agentRunService, runId: missing.runId });
   await saver.deleteThread(saver.threadId);
   assert.equal(await readThread(missing.agentRunService, missing.runId), null);
-  assert.equal((await recoverOn("langgraph", { context: missing })).autoRecoveredCount, 1);
+  assert.equal((await recover({ context: missing })).autoRecoveredCount, 1);
   assert.equal(missing.writes.length, 1);
 });
 
@@ -1092,14 +1017,14 @@ test("a thread that contradicts the checkpoint refuses the approval continuation
   // The thread holds the document answer under another digest than the
   // checkpoint: neither can be trusted to continue, and the run goes to an
   // operator without running the Capability.
-  const context = await askOn("langgraph");
+  const context = await ask();
   await forgeStoredThread(context, (receipts) => ({
     ...receipts,
     "node:document": { ...receipts["node:document"], outputDigest: `v1:sha256:${"1".repeat(64)}` },
   }));
 
   await assert.rejects(
-    decideOn("langgraph", { action: "approve", context }),
+    decide({ action: "approve", context }),
     (error) => error.code === "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY" && error.status === 409
   );
   const after = await load(context.agentRunService, context.runId);
@@ -1183,71 +1108,69 @@ test("parity: a request cancelled inside the unified graph stops at the next nod
     [REQUEST_CANCELLATION_REASONS.deadlineExceeded, "failed", "AGENT_DEADLINE_EXCEEDED"],
     [REQUEST_CANCELLATION_REASONS.clientCancelled, "canceled", "AGENT_CLIENT_CANCELLED"],
   ]) {
-    const outcomes = {};
-
-    for (const runtime of RUNTIMES) {
-      const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
-      const store = newStore();
-      const agentRunService = newService(store);
-      // The request is cancelled while the primary document call is in
-      // flight; the mock call completes regardless (as a Capability write
-      // would), so the run stops at the next safe point: the evidence check.
-      const ragService = createDocumentLoopRagService({
-        onChat: async ({ phase }) => {
-          if (phase === "primary") {
-            cancellation.cancel(reason);
-          }
-        },
-        primary: "supported",
-      });
-      const outcome = await settle(
-        runWithRequestCancellation(cancellation, () =>
-          onRuntime(runtime, () =>
-            runAgentRag({
-              accessScope,
-              agentRunService,
-              docIds: [UNIFIED_DOC_ID],
-              question: DOCUMENT_LOOP_QUESTION,
-              ragService,
-              sessionId: UNIFIED_SESSION_ID,
-              unifiedGraphPlannerAdapter: createProposalAdapter(createDocumentLoopProposal),
-              userId: accessScope.userId,
-            })
-          )
+    const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
+    const store = newStore();
+    const agentRunService = newService(store);
+    // The request is cancelled while the primary document call is in
+    // flight; the mock call completes regardless (as a Capability write
+    // would), so the run stops at the next safe point: the evidence check.
+    const ragService = createDocumentLoopRagService({
+      onChat: async ({ phase }) => {
+        if (phase === "primary") {
+          cancellation.cancel(reason);
+        }
+      },
+      primary: "supported",
+    });
+    const outcome = await settle(
+      runWithRequestCancellation(cancellation, () =>
+        inEnv(() =>
+          runAgentRag({
+            accessScope,
+            agentRunService,
+            docIds: [UNIFIED_DOC_ID],
+            question: DOCUMENT_LOOP_QUESTION,
+            ragService,
+            sessionId: UNIFIED_SESSION_ID,
+            unifiedGraphPlannerAdapter: createProposalAdapter(createDocumentLoopProposal),
+            userId: accessScope.userId,
+          })
         )
-      );
-      cancellation.dispose();
+      )
+    );
+    cancellation.dispose();
 
-      assert.ok(isRequestCancelledError(outcome.error), `${runtime}/${reason}: ${outcome.error?.message}`);
-      assert.equal(outcome.error.reason, reason, runtime);
-      assert.equal(outcome.error.code, code, runtime);
-      const runId = outcome.error.agentRunId;
-      const { checkpoint, run } = await load(agentRunService, runId);
+    assert.ok(isRequestCancelledError(outcome.error), `${reason}: ${outcome.error?.message}`);
+    assert.equal(outcome.error.reason, reason);
+    assert.equal(outcome.error.code, code);
+    const runId = outcome.error.agentRunId;
+    const { checkpoint, run } = await load(agentRunService, runId);
 
-      assert.equal(run.status, status, runtime);
-      assert.deepEqual(
-        { code: run.error.code, reason: run.error.reason, retryable: run.error.retryable },
-        { code, reason, retryable: reason === REQUEST_CANCELLATION_REASONS.deadlineExceeded },
-        runtime
-      );
-      // The primary node settled (its step, trace and checkpoint written);
-      // nothing after it started.
-      assert.deepEqual(
-        run.steps.map((step) => [step.input?.nodeId, step.status]),
-        [["primary", "completed"]],
-        runtime
-      );
-      assert.deepEqual(checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]), [["primary", "completed"]]);
-      assert.equal(checkpoint.phase, "running");
-      assert.equal(ragService.calls.length, 1, runtime);
-      assert.equal(run.events.some((event) => event.type === "manual_recovery_required"), false);
-      // A terminal run carries no thread: failRun dropped it in the CAS that
-      // failed (or cancelled) the run.
-      assert.equal(await rawRecord(store, runId), null, `${runtime}/${reason}`);
-      outcomes[runtime] = { checkpoint: mask(checkpoint), error: mask(outcome.error), run: mask(run) };
-    }
-
-    assert.deepEqual(outcomes.langgraph, outcomes.native, reason);
+    assert.equal(run.status, status);
+    assert.deepEqual(
+      { code: run.error.code, reason: run.error.reason, retryable: run.error.retryable },
+      { code, reason, retryable: reason === REQUEST_CANCELLATION_REASONS.deadlineExceeded },
+      reason
+    );
+    // The primary node settled (its step, trace and checkpoint written);
+    // nothing after it started.
+    assert.deepEqual(
+      run.steps.map((step) => [step.input?.nodeId, step.status]),
+      [["primary", "completed"]],
+      reason
+    );
+    assert.deepEqual(checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]), [["primary", "completed"]]);
+    assert.equal(checkpoint.phase, "running");
+    assert.equal(ragService.calls.length, 1);
+    assert.equal(run.events.some((event) => event.type === "manual_recovery_required"), false);
+    // A terminal run carries no thread: failRun dropped it in the CAS that
+    // failed (or cancelled) the run.
+    assert.equal(await rawRecord(store, runId), null, reason);
+    assertMatchesNativeGolden(`cancelled-inside-graph-${toCaseName(reason)}`, {
+      checkpoint: mask(checkpoint),
+      error: mask(outcome.error),
+      run: mask(run),
+    });
   }
 });
 
@@ -1289,12 +1212,12 @@ const countTaskPreflights = (registry) => {
 
 test("parity: an exclusive approval-gated Capability queued behind a running sibling is never preflighted, parked or charged once the request is cancelled", async () => {
   // Ported from the phase-0 spike. The cancellation arrives while the check
-  // is in flight and the task waits for it (natively in the queue, on
-  // LangGraph at the concurrency gate). The request's error is the answer,
+  // is in flight and the task waits for it at the concurrency gate (the
+  // native scheduler held it in its queue). The request's error is the answer,
   // never an approval pause: the task passes the launch safe point first
   // (agent-execution-graph-node.js runs throwIfRequestCancelled before
   // preflightNode), so it is not preflighted, parked, stepped or charged.
-  const run = async (runtime, { cancelReason = null } = {}) => {
+  const run = async ({ cancelReason = null } = {}) => {
     const store = newStore();
     const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
     let checkStepId = null;
@@ -1316,7 +1239,7 @@ test("parity: an exclusive approval-gated Capability queued behind a running sib
     const preflights = countTaskPreflights(registry);
     const outcome = await settle(
       runWithRequestCancellation(cancellation, () =>
-        onRuntime(runtime, () =>
+        inEnv(() =>
           runAgentRag({
             accessScope,
             agentRunService,
@@ -1342,102 +1265,94 @@ test("parity: an exclusive approval-gated Capability queued behind a running sib
     [REQUEST_CANCELLATION_REASONS.deadlineExceeded, "failed", "AGENT_DEADLINE_EXCEEDED"],
     [REQUEST_CANCELLATION_REASONS.clientCancelled, "canceled", "AGENT_CLIENT_CANCELLED"],
   ]) {
-    const outcomes = {};
+    // Not vacuous: uncancelled, the same graph preflights the task (in the
+    // node, then again to bind the gate; the counter sees both registry
+    // reads of each) and parks it.
+    const control = await run();
+    assert.equal(control.outcome.error, null, control.outcome.error?.message);
+    assert.equal(control.outcome.value.body.clarification.reason, "capability_approval_required");
+    assert.equal(control.preflights, 4);
+    assert.equal(control.checkpoint.phase, "awaiting_approval");
 
-    for (const runtime of RUNTIMES) {
-      // Not vacuous: uncancelled, the same graph preflights the task (in the
-      // node, then again to bind the gate; the counter sees both registry
-      // reads of each) and parks it.
-      const control = await run(runtime);
-      assert.equal(control.outcome.error, null, `${runtime}: ${control.outcome.error?.message}`);
-      assert.equal(control.outcome.value.body.clarification.reason, "capability_approval_required", runtime);
-      assert.equal(control.preflights, 4, runtime);
-      assert.equal(control.checkpoint.phase, "awaiting_approval", runtime);
+    const cancelled = await run({ cancelReason: reason });
+    const where = reason;
 
-      const cancelled = await run(runtime, { cancelReason: reason });
-      const where = `${runtime}/${reason}`;
-
-      assert.ok(isRequestCancelledError(cancelled.outcome.error), `${where}: ${cancelled.outcome.error?.message}`);
-      assert.equal(cancelled.outcome.error.code, code, where);
-      assert.equal(cancelled.run.status, status, where);
-      // The task was never preflighted, so never parked: no gate, no gate
-      // event, and the run is not waiting for anyone.
-      assert.equal(cancelled.preflights, 0, where);
-      assert.deepEqual(cancelled.run.approvalGates ?? [], [], where);
-      assert.equal(cancelled.run.events.some((event) => event.type === "graph_approval_gate_created"), false, where);
-      // Nor started or charged: no step, no node run (budget is reserved in
-      // the node's lifecycle), no write. The check settled first.
-      assert.deepEqual(
-        cancelled.run.steps.map((step) => [step.input?.nodeId, step.status]),
-        [["document", "completed"], ["evidence_check", "completed"]],
-        where
-      );
-      assert.deepEqual(
-        cancelled.checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
-        [["document", "completed"], ["evidence_check", "completed"]],
-        where
-      );
-      assert.equal(cancelled.checkpoint.phase, "running", where);
-      assert.equal(cancelled.writes.length, 0, where);
-      assert.equal(await rawRecord(cancelled.store, cancelled.runId), null, where);
-      outcomes[runtime] = {
-        checkpoint: mask(cancelled.checkpoint),
-        error: mask(cancelled.outcome.error),
-        run: mask(cancelled.run),
-      };
-    }
-
-    assert.deepEqual(outcomes.langgraph, outcomes.native, reason);
+    assert.ok(isRequestCancelledError(cancelled.outcome.error), `${where}: ${cancelled.outcome.error?.message}`);
+    assert.equal(cancelled.outcome.error.code, code, where);
+    assert.equal(cancelled.run.status, status, where);
+    // The task was never preflighted, so never parked: no gate, no gate
+    // event, and the run is not waiting for anyone.
+    assert.equal(cancelled.preflights, 0, where);
+    assert.deepEqual(cancelled.run.approvalGates ?? [], [], where);
+    assert.equal(cancelled.run.events.some((event) => event.type === "graph_approval_gate_created"), false, where);
+    // Nor started or charged: no step, no node run (budget is reserved in
+    // the node's lifecycle), no write. The check settled first.
+    assert.deepEqual(
+      cancelled.run.steps.map((step) => [step.input?.nodeId, step.status]),
+      [["document", "completed"], ["evidence_check", "completed"]],
+      where
+    );
+    assert.deepEqual(
+      cancelled.checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
+      [["document", "completed"], ["evidence_check", "completed"]],
+      where
+    );
+    assert.equal(cancelled.checkpoint.phase, "running", where);
+    assert.equal(cancelled.writes.length, 0, where);
+    assert.equal(await rawRecord(cancelled.store, cancelled.runId), null, where);
+    assertMatchesNativeGolden(`cancelled-queued-gated-capability-${toCaseName(reason)}`, {
+      checkpoint: mask(cancelled.checkpoint),
+      error: mask(cancelled.outcome.error),
+      run: mask(cancelled.run),
+    });
   }
 });
 
-test("parity: a dependency outage inside the primary node fails the run with the native code on both runtimes, and the thread is dropped", async () => {
-  const outcomes = {};
+test("parity: a dependency outage inside the primary node fails the run with the native code, and the thread is dropped", async () => {
+  const store = newStore();
+  const agentRunService = newService(store);
+  const ragService = createDocumentLoopRagService({
+    onChat: async ({ phase }) => {
+      if (phase === "primary") {
+        const error = new Error("gateway down");
+        error.code = "MODEL_GATEWAY_UNAVAILABLE";
+        error.status = 503;
+        error.retryAfterSeconds = 7;
+        throw error;
+      }
+    },
+    primary: "supported",
+  });
+  const outcome = await settle(
+    inEnv(() =>
+      runAgentRag({
+        accessScope,
+        agentRunService,
+        docIds: [UNIFIED_DOC_ID],
+        question: DOCUMENT_LOOP_QUESTION,
+        ragService,
+        sessionId: UNIFIED_SESSION_ID,
+        unifiedGraphPlannerAdapter: createProposalAdapter(createDocumentLoopProposal),
+        userId: accessScope.userId,
+      })
+    )
+  );
 
-  for (const runtime of RUNTIMES) {
-    const store = newStore();
-    const agentRunService = newService(store);
-    const ragService = createDocumentLoopRagService({
-      onChat: async ({ phase }) => {
-        if (phase === "primary") {
-          const error = new Error("gateway down");
-          error.code = "MODEL_GATEWAY_UNAVAILABLE";
-          error.status = 503;
-          error.retryAfterSeconds = 7;
-          throw error;
-        }
-      },
-      primary: "supported",
-    });
-    const outcome = await settle(
-      onRuntime(runtime, () =>
-        runAgentRag({
-          accessScope,
-          agentRunService,
-          docIds: [UNIFIED_DOC_ID],
-          question: DOCUMENT_LOOP_QUESTION,
-          ragService,
-          sessionId: UNIFIED_SESSION_ID,
-          unifiedGraphPlannerAdapter: createProposalAdapter(createDocumentLoopProposal),
-          userId: accessScope.userId,
-        })
-      )
-    );
+  assert.equal(outcome.error?.code, "AGENT_DEPENDENCY_UNAVAILABLE", outcome.error?.message);
+  assert.equal(outcome.error.status, 503);
+  const runId = outcome.error.agentRunId;
+  const { checkpoint, run } = await load(agentRunService, runId);
 
-    assert.equal(outcome.error?.code, "AGENT_DEPENDENCY_UNAVAILABLE", `${runtime}: ${outcome.error?.message}`);
-    assert.equal(outcome.error.status, 503, runtime);
-    const runId = outcome.error.agentRunId;
-    const { checkpoint, run } = await load(agentRunService, runId);
-
-    assert.equal(run.status, "failed", runtime);
-    assert.equal(run.error.code, "AGENT_DEPENDENCY_UNAVAILABLE", runtime);
-    assert.deepEqual(checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]), [["primary", "failed"]]);
-    assert.equal(checkpoint.phase, "running");
-    assert.equal(await rawRecord(store, runId), null, runtime);
-    outcomes[runtime] = { checkpoint: mask(checkpoint), error: mask(outcome.error), run: mask(run) };
-  }
-
-  assert.deepEqual(outcomes.langgraph, outcomes.native);
+  assert.equal(run.status, "failed");
+  assert.equal(run.error.code, "AGENT_DEPENDENCY_UNAVAILABLE");
+  assert.deepEqual(checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]), [["primary", "failed"]]);
+  assert.equal(checkpoint.phase, "running");
+  assert.equal(await rawRecord(store, runId), null);
+  assertMatchesNativeGolden("dependency-outage-primary", {
+    checkpoint: mask(checkpoint),
+    error: mask(outcome.error),
+    run: mask(run),
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1514,129 +1429,114 @@ test("hasExecutionGraphWorkBeforePause: a pending node of a later layer that doe
   );
 });
 
-test("parity: a gated task with independent work in later layers pauses after that work on both runtimes; LangGraph persists that pause natively and drops its thread", async () => {
-  const paused = {};
-
-  for (const runtime of RUNTIMES) {
-    const context = await askOn(runtime, {
+test("parity: a gated task with independent work in later layers pauses after that work, as natively; LangGraph persists that pause through the stage and drops its thread", async () => {
+  const askLaterWork = (options = {}) =>
+    ask({
+      ...options,
       primary: "unsupported",
       proposal: createTaskWithIndependentLaterWorkProposal,
       ragOptions: { followUp: "resolves" },
     });
 
-    assert.equal(context.error, null, `${runtime}: ${context.error?.message}`);
-    assert.equal(context.response.body.clarification.reason, "capability_approval_required", runtime);
-    assert.equal(context.writes.length, 0, runtime);
-    // The follow-up retrieval ran before the pause, as it does natively.
-    assert.deepEqual(context.ragService.calls.map((call) => call.phase), ["primary", "follow_up"], runtime);
-    paused[runtime] = { context, outcome: await describeOutcome(context) };
+  {
+    const context = await askLaterWork();
+
+    assert.equal(context.error, null, context.error?.message);
+    assert.equal(context.response.body.clarification.reason, "capability_approval_required");
+    assert.equal(context.writes.length, 0);
+    // The follow-up retrieval ran before the pause, as it did natively.
+    assert.deepEqual(context.ragService.calls.map((call) => call.phase), ["primary", "follow_up"]);
+    const outcome = await describeOutcome(context);
+
+    assertMatchesNativeGolden("later-work-pause", outcome);
+    assert.equal(outcome.run.status, "waiting_for_user");
+    assert.equal(outcome.checkpoint.phase, "awaiting_approval");
+    assert.deepEqual(
+      outcome.checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
+      [["document", "completed"], ["evidence_check", "completed"], ["follow_up", "completed"], ["follow_up_check", "completed"]]
+    );
+    assert.equal(outcome.response.body.agentObservability.budget.used.documentRagCalls, 2);
+    // The parked node returned its receipt instead of interrupting (later
+    // layers still had work), the executor dropped the thread, and the
+    // stage's pauseForApproval persisted the pause: no thread to resume.
+    assert.equal(await rawRecord(context.store, context.runId), null);
+    assert.equal(await readThread(context.agentRunService, context.runId), null);
+    assert.equal(outcome.run.events.at(-1).type, "graph_approval_gate_created");
   }
 
-  assert.deepEqual(paused.langgraph.outcome, paused.native.outcome);
-  assert.equal(paused.native.outcome.run.status, "waiting_for_user");
-  assert.equal(paused.native.outcome.checkpoint.phase, "awaiting_approval");
-  assert.deepEqual(
-    paused.native.outcome.checkpoint.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
-    [["document", "completed"], ["evidence_check", "completed"], ["follow_up", "completed"], ["follow_up_check", "completed"]]
-  );
-  assert.equal(paused.native.outcome.response.body.agentObservability.budget.used.documentRagCalls, 2);
-  // On LangGraph the parked node returned its receipt instead of
-  // interrupting (later layers still had work), the executor dropped the
-  // thread, and the pause was persisted natively: no thread to resume.
-  assert.equal(await rawRecord(paused.langgraph.context.store, paused.langgraph.context.runId), null);
-  assert.equal(await readThread(paused.langgraph.context.agentRunService, paused.langgraph.context.runId), null);
-  assert.equal(paused.langgraph.outcome.run.events.at(-1).type, "graph_approval_gate_created");
-
-  // Approve: a fresh invocation seeded from the checkpoint on LangGraph (the
-  // settled nodes entered as reused, no pause and no resume on the new
-  // thread), the same run as native.
-  const approved = {};
-
-  for (const runtime of RUNTIMES) {
+  // Approve: a fresh invocation seeded from the checkpoint (the settled nodes
+  // entered as reused, no pause and no resume on the new thread), the same
+  // run as native.
+  {
     const probe = createThreadProbe();
-    const context = await askOn(runtime, {
-      onWrite: probe.onWrite,
-      primary: "unsupported",
-      proposal: createTaskWithIndependentLaterWorkProposal,
-      ragOptions: { followUp: "resolves" },
-    });
+    const context = await askLaterWork({ onWrite: probe.onWrite });
     probe.context = context;
     const service = newService(context.store);
-    const result = await decideOn(runtime, { action: "approve", context, service });
+    const result = await decide({ action: "approve", context, service });
 
-    assert.equal(result.run.status, "completed", runtime);
-    assert.equal(context.writes.length, 1, runtime);
-    assert.equal(context.ragService.calls.length, 2, runtime);
-    assert.equal(await rawRecord(context.store, context.runId), null, runtime);
-    approved[runtime] = {
+    assert.equal(result.run.status, "completed");
+    assert.equal(context.writes.length, 1);
+    assert.equal(context.ragService.calls.length, 2);
+    assert.equal(await rawRecord(context.store, context.runId), null);
+    const approved = {
       decision: maskRunBound({ response: result.response, status: result.status }),
       outcome: await describeOutcome({ ...context, agentRunService: service, response: null }, maskRunBound),
-      probe,
     };
+
+    assertMatchesNativeGolden("later-work-approve", approved);
+    assert.deepEqual(
+      approved.outcome.run.events
+        .filter((event) => event.type === "unified_graph_executed")
+        .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
+      // Declaration order: the task was declared right after the document.
+      [
+        ["document", "reused"],
+        ["task", "completed"],
+        ["evidence_check", "reused"],
+        ["follow_up", "reused"],
+        ["follow_up_check", "reused"],
+      ]
+    );
+    // Seen from inside the write, on the new thread: the document node of the
+    // superstep before the task's came back as reused (a resumed thread would
+    // still hold it as completed), the task's own superstep is not committed
+    // yet, and there is no pause and no resume.
+    const [seen] = probe.seen;
+    assert.equal(seen.receipts.document, "reused");
+    assert.equal(Object.hasOwn(seen.receipts, "task"), false);
+    assert.ok(Object.values(seen.receipts).every((status) => status === "reused"));
+    assert.deepEqual(seen.interrupts, []);
+    assert.deepEqual(seen.resumeWrites, []);
   }
 
-  assert.deepEqual(approved.langgraph.decision, approved.native.decision);
-  assert.deepEqual(approved.langgraph.outcome, approved.native.outcome);
-  assert.deepEqual(
-    approved.native.outcome.run.events
-      .filter((event) => event.type === "unified_graph_executed")
-      .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
-    // Declaration order: the task was declared right after the document.
-    [
-      ["document", "reused"],
-      ["task", "completed"],
-      ["evidence_check", "reused"],
-      ["follow_up", "reused"],
-      ["follow_up_check", "reused"],
-    ]
-  );
-  assert.deepEqual(approved.native.probe.seen, [null]);
-  // Seen from inside the write, on the new thread: the document node of the
-  // superstep before the task's came back as reused (a resumed thread would
-  // still hold it as completed), the task's own superstep is not committed
-  // yet, and there is no pause and no resume.
-  const [seen] = approved.langgraph.probe.seen;
-  assert.equal(seen.receipts.document, "reused");
-  assert.equal(Object.hasOwn(seen.receipts, "task"), false);
-  assert.ok(Object.values(seen.receipts).every((status) => status === "reused"));
-  assert.deepEqual(seen.interrupts, []);
-  assert.deepEqual(seen.resumeWrites, []);
-
-  // Deny: the parked node settles as approval_denied, identically.
-  const denied = {};
-
-  for (const runtime of RUNTIMES) {
-    const context = await askOn(runtime, {
-      primary: "unsupported",
-      proposal: createTaskWithIndependentLaterWorkProposal,
-      ragOptions: { followUp: "resolves" },
-    });
+  // Deny: the parked node settles as approval_denied, as natively.
+  {
+    const context = await askLaterWork();
     const service = newService(context.store);
-    const result = await decideOn(runtime, { action: "deny", context, service });
+    const result = await decide({ action: "deny", context, service });
 
-    assert.equal(result.run.status, "completed", runtime);
-    assert.equal(context.writes.length, 0, runtime);
-    assert.equal(await rawRecord(context.store, context.runId), null, runtime);
-    denied[runtime] = {
+    assert.equal(result.run.status, "completed");
+    assert.equal(context.writes.length, 0);
+    assert.equal(await rawRecord(context.store, context.runId), null);
+    const denied = {
       decision: mask({ response: result.response, status: result.status }),
       outcome: await describeOutcome({ ...context, agentRunService: service, response: null }),
     };
-  }
 
-  assert.deepEqual(denied.langgraph.decision, denied.native.decision);
-  assert.deepEqual(denied.langgraph.outcome, denied.native.outcome);
-  assert.deepEqual(
-    denied.native.outcome.run.events
-      .filter((event) => event.type === "unified_graph_executed")
-      .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.reason]),
-    [
-      ["document", "reused", null],
-      ["task", "skipped", "approval_denied"],
-      ["evidence_check", "reused", null],
-      ["follow_up", "reused", null],
-      ["follow_up_check", "reused", null],
-    ]
-  );
+    assertMatchesNativeGolden("later-work-deny", denied);
+    assert.deepEqual(
+      denied.outcome.run.events
+        .filter((event) => event.type === "unified_graph_executed")
+        .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.reason]),
+      [
+        ["document", "reused", null],
+        ["task", "skipped", "approval_denied"],
+        ["evidence_check", "reused", null],
+        ["follow_up", "reused", null],
+        ["follow_up_check", "reused", null],
+      ]
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1646,7 +1546,7 @@ test("parity: a gated task with independent work in later layers pauses after th
 test("startup recovery marks a run manual only for a record the saver refuses; a transient read fault propagates and leaves the run resumable", async () => {
   // A malformed record (another writer touched the private key): unreadable,
   // the run goes to an operator with that reason, nothing is claimed.
-  const malformed = await askOn("langgraph");
+  const malformed = await ask();
   await approveThenCrashBeforeTask(malformed);
   const raw = await malformed.store.get({ accessScope, runId: malformed.runId });
   await malformed.store.update({
@@ -1666,7 +1566,7 @@ test("startup recovery marks a run manual only for a record the saver refuses; a
     ok: false,
     reason: LANGGRAPH_RECOVERY_REASONS.threadUnreadable,
   });
-  const malformedOutcome = await recoverOn("langgraph", { context: malformed });
+  const malformedOutcome = await recover({ context: malformed });
   const malformedAfter = await load(malformed.agentRunService, malformed.runId);
   assert.equal(malformedOutcome.manualRecoveredCount, 1);
   assert.equal(malformedOutcome.autoRecoveredCount, 0);
@@ -1677,7 +1577,7 @@ test("startup recovery marks a run manual only for a record the saver refuses; a
   // A store fault while reading the thread (an outage, a pool timeout): the
   // read throws like every other pre-claim read of the scan, the run is not
   // marked manual, and the next startup recovers it.
-  const faulty = await askOn("langgraph");
+  const faulty = await ask();
   await approveThenCrashBeforeTask(faulty);
   let faults = 0;
   const faultingService = new Proxy(newService(faulty.store), {
@@ -1705,7 +1605,7 @@ test("startup recovery marks a run manual only for a record the saver refuses; a
     (error) => error.code === "ECONNRESET"
   );
   await assert.rejects(
-    recoverOn("langgraph", { context: faulty, service: faultingService }),
+    recover({ context: faulty, service: faultingService }),
     (error) => error.code === "ECONNRESET"
   );
   assert.equal(faults, 2);
@@ -1715,7 +1615,7 @@ test("startup recovery marks a run manual only for a record the saver refuses; a
   assert.equal(faultyAfter.checkpoint.resumeClaim, null);
   // The store is back: the same run is recovered once, as it would be at
   // the next startup.
-  assert.equal((await recoverOn("langgraph", { context: faulty })).autoRecoveredCount, 1);
+  assert.equal((await recover({ context: faulty })).autoRecoveredCount, 1);
   assert.equal(faulty.writes.length, 1);
 });
 
@@ -1744,45 +1644,38 @@ test("a failed receipt agrees with a checkpoint that holds the node as failed, a
   );
 });
 
-test("parity: a gated task whose graph then fails a later node is abandoned, never approved or run, identically on both runtimes", async () => {
+test("parity: a gated task whose graph then fails a later node is abandoned, never approved or run, as natively", async () => {
   // Ported from the phase-0 spike, whose own runner settled this case
   // differently from native (a pinned divergence). Production schedules the
-  // parked node's end with the native tail (finishExecutionGraphRun): a graph
+  // parked node's end with the shared tail (finishExecutionGraphRun): a graph
   // that already failed a node never asks the user to approve more work, so
   // the parked task is skipped, no gate is persisted, and the run fails as
-  // partial, with the same run, steps, events and checkpoint on both
-  // runtimes. On LangGraph the parked node returned its receipt (later layers
-  // still had work), and the settling save left no thread.
+  // partial, with the run, steps, events and checkpoint the native scheduler
+  // left. The parked node returned its receipt (later layers still had
+  // work), and the settling save left no thread.
   const failingFollowUp = async ({ phase }) => {
     if (phase === "follow_up") {
       throw Object.assign(new Error("The follow-up model refused the request."), { status: 400 });
     }
   };
-  const outcomes = {};
+  const context = await ask({
+    primary: "unsupported",
+    proposal: createTaskWithIndependentLaterWorkProposal,
+    ragOptions: { onChat: failingFollowUp },
+  });
+  // The 409 carries no run id: the run is the store's only one.
+  const [{ runId }] = (await context.agentRunService.listRuns({ accessScope })).runs ??
+    (await context.agentRunService.listRuns({ accessScope }));
+  const located = { ...context, runId };
 
-  for (const runtime of RUNTIMES) {
-    const context = await askOn(runtime, {
-      primary: "unsupported",
-      proposal: createTaskWithIndependentLaterWorkProposal,
-      ragOptions: { onChat: failingFollowUp },
-    });
-    // The 409 carries no run id: the run is the store's only one.
-    const [{ runId }] = (await context.agentRunService.listRuns({ accessScope })).runs ??
-      (await context.agentRunService.listRuns({ accessScope }));
-    const located = { ...context, runId };
+  assert.equal(context.error?.code, "AGENT_UNIFIED_GRAPH_PARTIAL");
+  assert.equal(context.writes.length, 0);
+  assert.deepEqual(context.ragService.calls.map((call) => call.phase), ["primary", "follow_up"]);
+  const outcome = await describeOutcome(located);
 
-    assert.equal(context.error?.code, "AGENT_UNIFIED_GRAPH_PARTIAL", runtime);
-    assert.equal(context.writes.length, 0, runtime);
-    assert.deepEqual(context.ragService.calls.map((call) => call.phase), ["primary", "follow_up"], runtime);
-    outcomes[runtime] = {
-      outcome: await describeOutcome(located),
-      raw: await rawRecord(context.store, runId),
-    };
-  }
+  assertMatchesNativeGolden("later-node-failure-abandons-gate", outcome);
 
-  assert.deepEqual(outcomes.langgraph.outcome, outcomes.native.outcome);
-
-  const { checkpoint, run } = outcomes.native.outcome;
+  const { checkpoint, run } = outcome;
 
   assert.equal(run.status, "failed");
   assert.equal(checkpoint.phase, "partial");
@@ -1801,8 +1694,7 @@ test("parity: a gated task whose graph then fails a later node is abandoned, nev
   const stepIdOf = (nodeId) => buildExecutionGraphNodeStepId({ checkpointVersion: "v2", nodeId });
   assert.equal(run.steps.some((step) => step.id === stepIdOf("document")), true);
   assert.equal(run.steps.some((step) => step.id === stepIdOf("task")), false);
-  assert.equal(outcomes.native.raw, null);
-  assert.equal(outcomes.langgraph.raw, null);
+  assert.equal(await rawRecord(context.store, runId), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -2046,7 +1938,7 @@ test("on LangGraph each request's tenant, deadline, event sink and run usage rea
   );
 
   const { calls, result } = await withNetworkSpy(() =>
-    onRuntime("langgraph", async () => {
+    inEnv(async () => {
       // Both requests park at the task's gate, their graphs overlapping.
       const paused = await Promise.all(
         contexts.map((context) =>
@@ -2192,17 +2084,19 @@ test("on LangGraph each request's tenant, deadline, event sink and run usage rea
 });
 
 // ---------------------------------------------------------------------------
-// Finalization replay: no scheduler on either runtime
+// Finalization replay: no scheduler
 // ---------------------------------------------------------------------------
 
 // The stage rebuilds a settled graph's receipts with replayExecutionGraphRun
-// (agent-execution-graph-runner.js) on both runtimes; it used to run the
-// native scheduler for it, also on LangGraph. Every settled shape of one
-// five-node v3 graph, in each of the 120 declaration orders, with a `when`
-// that holds or not and with or without a denied node: the replay returns
-// the native scheduler's result and records the same skips, and touches no
-// other hook. A graph with a node still to run is refused before any hook.
-test("replayExecutionGraphRun settles every settled graph exactly as the native scheduler does, and launches nothing", async () => {
+// (agent-execution-graph-runner.js); before phase 5 it ran the native
+// scheduler for it. Every settled shape of one five-node v3 graph, in each of
+// the 120 declaration orders, with a `when` that holds or not and with or
+// without a denied node: the replay returns the result the native scheduler
+// returned for it, records the same skips, and touches no other hook. A
+// graph with a node still to run is refused before any hook. The graph's
+// first run (the receipts a completed checkpoint stores) is LangGraph's,
+// held to the native scheduler's first run.
+test("replayExecutionGraphRun settles every settled graph exactly as the native scheduler did, and launches nothing", async () => {
   const permutations = (items) =>
     items.length <= 1
       ? [items]
@@ -2309,6 +2203,14 @@ test("replayExecutionGraphRun settles every settled graph exactly as the native 
   };
   // Everything but the run meter's wall-clock start.
   const budgetUsage = ({ limits, run, used }) => ({ limits, runUsed: run?.used, used });
+  // What a replay leaves (its result, every hook call, the budget), masked
+  // as the parity suites mask. The native scheduler's, run on the settled
+  // graph, is frozen per shape as a digest (and in full for the declaration
+  // order a,b,c,d,e), and the replay is held to it.
+  const settledShape = (result, { hooks, log }) =>
+    mask({ budget: budgetUsage(hooks.budgetState), log, result });
+  const exampleName = (equals, deniedNodeIds) =>
+    `replay-sweep-example-when-${equals}-denied-${deniedNodeIds.join("-") || "none"}`;
   let settledShapes = 0;
   let refusals = 0;
 
@@ -2316,12 +2218,13 @@ test("replayExecutionGraphRun settles every settled graph exactly as the native 
     for (const equals of [false, true]) {
       for (const deniedNodeIds of [[], ["b"]]) {
         const label = `${declared.join(",")}/when=${equals}/denied=${deniedNodeIds.join(",") || "-"}`;
+        const isExample = declared.join(",") === "a,b,c,d,e";
         const graph = createGraph(declared, equals);
         const budgetState = createAgentBudget({ maxCustomSkillCalls: 8 });
         const tracker = createAgentSkillTracker({ budgetState, selectedSkills: [] });
         // The graph as it first ran: its completed receipts are what a
         // completed checkpoint stores.
-        const original = await runExecutionGraph({
+        const original = await runExecutionGraphOnLangGraph({
           ...baseOptions(graph),
           budgetState,
           deniedNodeIds,
@@ -2333,15 +2236,15 @@ test("replayExecutionGraphRun settles every settled graph exactly as the native 
         const completedNodeRuns = original.nodeRuns
           .filter((nodeRun) => nodeRun.status === "completed")
           .map(snapshotExecutionGraphNodeRun);
+        const originalShape = mask({ completedNodeRuns, original });
 
-        // As the stage replays it, before and after.
-        const native = createHooks();
-        const nativeResult = await runExecutionGraph({
-          ...baseOptions(graph),
-          ...native.hooks,
-          completedNodeRuns,
-          deniedNodeIds,
-        });
+        // The native scheduler's first run of the same graph.
+        assertMatchesGraphGoldenDigest(GOLDEN_SUITE, `replay-sweep/${label}/original`, originalShape);
+        if (isExample) {
+          assertMatchesGraphGolden(GOLDEN_SUITE, `${exampleName(equals, deniedNodeIds)}-original`, originalShape);
+        }
+
+        // As the stage replays it.
         const replay = createHooks();
         const { executeObservedSkill, onNodeSettled, pauseForApproval, preflightNode, ...replayHooks } =
           replay.hooks;
@@ -2352,13 +2255,17 @@ test("replayExecutionGraphRun settles every settled graph exactly as the native 
           deniedNodeIds,
           refuseLaunch: replayGuard,
         });
+        const replayShape = settledShape(replayResult, replay);
 
-        assert.deepEqual(replayResult, nativeResult, label);
-        assert.deepEqual(replay.log, native.log, label);
-        assert.deepEqual(budgetUsage(replay.hooks.budgetState), budgetUsage(native.hooks.budgetState), label);
+        // The replay against what the native scheduler left of the settled
+        // graph: its result, every hook call (skips only) and the budget.
+        assertMatchesGraphGoldenDigest(GOLDEN_SUITE, `replay-sweep/${label}/settled`, replayShape);
+        if (isExample) {
+          assertMatchesGraphGolden(GOLDEN_SUITE, `${exampleName(equals, deniedNodeIds)}-settled`, replayShape);
+        }
         assert.ok(
-          native.log.every(([name]) => name === "recordSkippedSkill"),
-          `${label}: only skips are recorded`
+          replay.log.every(([name]) => name === "recordSkippedSkill"),
+          `${label}: the replay records only skips`
         );
         assert.deepEqual(
           replayResult.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason]),
@@ -2382,22 +2289,11 @@ test("replayExecutionGraphRun settles every settled graph exactly as the native 
         settledShapes += 1;
 
         // A "completed" checkpoint without the receipt of a node that must
-        // run: both refuse it; the replay before any hook.
+        // run: the replay refuses it before any hook.
         const missing = equals ? "a" : "d";
         const incomplete = completedNodeRuns.filter((nodeRun) => nodeRun.nodeId !== missing);
-        const refusedNatively = createHooks();
         const refusedReplay = createHooks();
 
-        await assert.rejects(
-          runExecutionGraph({
-            ...baseOptions(graph),
-            ...refusedNatively.hooks,
-            completedNodeRuns: incomplete,
-            deniedNodeIds,
-          }),
-          (error) => error.code === "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY",
-          label
-        );
         assert.throws(
           () =>
             replayExecutionGraphRun({
@@ -2459,7 +2355,7 @@ const graphNodeSteps = (run) =>
       status,
     }));
 
-test("parity: a graph that completed before its finalization receipt is replayed without a scheduler on both runtimes: skips re-derived, nothing re-run, no thread", async () => {
+test("parity: a graph that completed before its finalization receipt is replayed without a scheduler, as natively: skips re-derived, nothing re-run, no thread", async () => {
   const documentLoop = {
     proposal: createDocumentLoopProposal,
     question: DOCUMENT_LOOP_QUESTION,
@@ -2493,63 +2389,57 @@ test("parity: a graph that completed before its finalization receipt is replayed
   ];
 
   for (const [label, options, action, replayedNodeRuns] of scenarios) {
-    const outcomes = {};
+    const store = newStore();
+    let context;
 
-    for (const runtime of RUNTIMES) {
-      const store = newStore();
-      let context;
-
-      if (action) {
-        context = await askOn(runtime, { ...options, store });
-        assert.equal(context.error, null, `${label}/${runtime}: ${context.error?.message}`);
-        const decided = await settle(
-          decideOn(runtime, { action, context, service: crashBeforeFinalizationReceipt(store).service })
-        );
-        assert.equal(decided.error?.code, "SIMULATED_PROCESS_EXIT", `${label}/${runtime}`);
-      } else {
-        context = await askOn(runtime, {
-          ...options,
-          agentRunService: crashBeforeFinalizationReceipt(store).service,
-          store,
-        });
-        assert.equal(context.error?.code, "SIMULATED_PROCESS_EXIT", `${label}/${runtime}`);
-        context = { ...context, runId: await findOnlyRunId(store) };
-      }
-
-      const before = await load(newService(store), context.runId);
-      const ragCalls = context.ragService.calls.length;
-      const writes = context.writes.length;
-
-      assert.equal(before.run.status, "running", `${label}/${runtime}`);
-      assert.equal(before.checkpoint.phase, "completed", `${label}/${runtime}`);
-      assert.equal(before.checkpoint.finalization, undefined, `${label}/${runtime}`);
-
-      const service = newService(store);
-      const recovered = await recoverOn(runtime, { context, service });
-      const after = await load(service, context.runId);
-
-      assert.equal(recovered.autoRecoveredCount, 1, `${label}/${runtime}: ${JSON.stringify(recovered)}`);
-      assert.equal(recovered.manualRecoveredCount, 0, `${label}/${runtime}`);
-      assert.ok(after.checkpoint.finalization, `${label}/${runtime}`);
-      // Nothing ran again: no document call, no Capability write, and the
-      // graph's node steps are the ones the crashed process wrote.
-      assert.equal(context.ragService.calls.length, ragCalls, `${label}/${runtime}`);
-      assert.equal(context.writes.length, writes, `${label}/${runtime}`);
-      assert.deepEqual(graphNodeSteps(after.run), graphNodeSteps(before.run), `${label}/${runtime}`);
-      assert.equal(await rawRecord(store, context.runId), null, `${label}/${runtime}`);
-      const executed = after.run.events.filter((event) => event.type === "unified_graph_executed");
-      assert.equal(executed.at(-1).payload.replayed, true, `${label}/${runtime}`);
-      assert.deepEqual(
-        executed.at(-1).payload.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason]),
-        replayedNodeRuns,
-        `${label}/${runtime}`
+    if (action) {
+      context = await ask({ ...options, store });
+      assert.equal(context.error, null, `${label}: ${context.error?.message}`);
+      const decided = await settle(
+        decide({ action, context, service: crashBeforeFinalizationReceipt(store).service })
       );
-      outcomes[runtime] = await describeOutcome(
-        { ...context, agentRunService: service, error: null, response: null },
-        maskRunBound
-      );
+      assert.equal(decided.error?.code, "SIMULATED_PROCESS_EXIT", label);
+    } else {
+      context = await ask({
+        ...options,
+        agentRunService: crashBeforeFinalizationReceipt(store).service,
+        store,
+      });
+      assert.equal(context.error?.code, "SIMULATED_PROCESS_EXIT", label);
+      context = { ...context, runId: await findOnlyRunId(store) };
     }
 
-    assert.deepEqual(outcomes.langgraph, outcomes.native, label);
+    const before = await load(newService(store), context.runId);
+    const ragCalls = context.ragService.calls.length;
+    const writes = context.writes.length;
+
+    assert.equal(before.run.status, "running", label);
+    assert.equal(before.checkpoint.phase, "completed", label);
+    assert.equal(before.checkpoint.finalization, undefined, label);
+
+    const service = newService(store);
+    const recovered = await recover({ context, service });
+    const after = await load(service, context.runId);
+
+    assert.equal(recovered.autoRecoveredCount, 1, `${label}: ${JSON.stringify(recovered)}`);
+    assert.equal(recovered.manualRecoveredCount, 0, label);
+    assert.ok(after.checkpoint.finalization, label);
+    // Nothing ran again: no document call, no Capability write, and the
+    // graph's node steps are the ones the crashed process wrote.
+    assert.equal(context.ragService.calls.length, ragCalls, label);
+    assert.equal(context.writes.length, writes, label);
+    assert.deepEqual(graphNodeSteps(after.run), graphNodeSteps(before.run), label);
+    assert.equal(await rawRecord(store, context.runId), null, label);
+    const executed = after.run.events.filter((event) => event.type === "unified_graph_executed");
+    assert.equal(executed.at(-1).payload.replayed, true, label);
+    assert.deepEqual(
+      executed.at(-1).payload.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason]),
+      replayedNodeRuns,
+      label
+    );
+    assertMatchesNativeGolden(
+      `finalization-replay-${toCaseName(label)}`,
+      await describeOutcome({ ...context, agentRunService: service, error: null, response: null }, maskRunBound)
+    );
   }
 });

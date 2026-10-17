@@ -48,9 +48,9 @@ import {
 // tool returns exactly what executeAgentSkill returns for the same context and
 // contract gates, and the Skill sends exactly the same ragService.chat call.
 // The reference (runNatively) is executeAgentSkill called directly; it is not
-// the graph scheduler, which goes through executeObservedSkill with a budget
+// a graph node's launch, which goes through executeObservedSkill with a budget
 // and sets memoryWrites false only for a question bound to an upstream output
-// (agent-execution-graph-runner.js launchNode).
+// (executeExecutionGraphNodeLaunch in agent-execution-graph-node.js).
 
 const ACCESS_SCOPE = Object.freeze({ ...DEFAULT_ACCESS_SCOPE });
 const OTHER_SCOPE = Object.freeze({ userId: "other-user", workspaceId: "other-workspace" });
@@ -120,10 +120,10 @@ const createRuntime = ({ ragService, registry = createDefaultSkillRegistry(), ..
 });
 
 // executeAgentSkill with the context and gates the adapter is meant to build,
-// written out by hand rather than through the adapter: launchNode's bound-
+// written out by hand rather than through the adapter: a node launch's bound-
 // input validation (question/priorFindings as given, docIds and retrievalPlan
-// from the request) and memoryWrites false, which launchNode itself sets only
-// for a question bound to an upstream output.
+// from the request) and memoryWrites false, which a node launch itself sets
+// only for a question bound to an upstream output.
 const runNatively = (skill, { args, ragService }) => {
   const contract = getSkillContract(skill);
   const resolvedInputs = { ...args, docIds: [...DOC_IDS], retrievalPlan: RETRIEVAL_PLAN };

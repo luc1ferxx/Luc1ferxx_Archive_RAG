@@ -1,0 +1,441 @@
+{
+  "budget": {
+    "limits": {
+      "maxArxivPaperFetches": 1,
+      "maxCustomSkillCalls": 8,
+      "maxDocumentRagCalls": 2,
+      "maxResearchQuestions": 3,
+      "maxTraceSteps": 16,
+      "maxWebSearchCalls": 1
+    },
+    "runUsed": {
+      "costUsd": 0,
+      "modelCalls": 0,
+      "tokens": 0,
+      "unpricedModelCalls": 0
+    },
+    "used": {
+      "arxivPaperFetches": 0,
+      "customSkillCalls": 0,
+      "documentRagCalls": 0,
+      "researchQuestions": 0,
+      "traceSteps": 0,
+      "webSearchCalls": 0
+    }
+  },
+  "log": [
+    [
+      "recordSkippedSkill",
+      {
+        "budget": null,
+        "phase": "primary",
+        "result": {
+          "abstained": false,
+          "citations": [],
+          "error": {
+            "code": {
+              "$graphGolden": "undefined"
+            },
+            "message": "Node c skipped: condition_not_met.",
+            "name": "Error",
+            "reason": {
+              "$graphGolden": "undefined"
+            },
+            "status": {
+              "$graphGolden": "undefined"
+            }
+          },
+          "label": "replay_c",
+          "ok": false,
+          "skillId": "replay_c",
+          "skillVersion": "1.0.0",
+          "text": "",
+          "traceDetail": null,
+          "value": null
+        },
+        "skill": {
+          "budgetKey": "customSkillCalls",
+          "effects": "read_only",
+          "execute": {
+            "$graphGolden": "function",
+            "name": "execute"
+          },
+          "id": "replay_c",
+          "idempotency": "read_only_rag",
+          "inputSchema": {
+            "docIds": {
+              "required": true,
+              "scoped": true,
+              "type": "string[]"
+            },
+            "priorFindings": {
+              "required": false,
+              "type": "string"
+            },
+            "question": {
+              "required": true,
+              "type": "string"
+            },
+            "retrievalPlan": {
+              "required": false,
+              "type": "object"
+            }
+          },
+          "kind": "custom",
+          "label": "replay_c",
+          "match": {
+            "$graphGolden": "function",
+            "name": "match"
+          },
+          "outputSchema": {
+            "abstained": {
+              "required": true,
+              "type": "boolean"
+            },
+            "citations": {
+              "required": true,
+              "type": "citation[]"
+            },
+            "text": {
+              "required": true,
+              "type": "string"
+            }
+          },
+          "parallelSafe": true,
+          "replaySafe": true,
+          "requiresAccessScope": true,
+          "retryable": true,
+          "version": "1.0.0"
+        }
+      }
+    ],
+    [
+      "recordSkippedSkill",
+      {
+        "budget": null,
+        "phase": "primary",
+        "result": {
+          "abstained": false,
+          "citations": [],
+          "error": {
+            "code": {
+              "$graphGolden": "undefined"
+            },
+            "message": "Node e skipped: dependency_skipped.",
+            "name": "Error",
+            "reason": {
+              "$graphGolden": "undefined"
+            },
+            "status": {
+              "$graphGolden": "undefined"
+            }
+          },
+          "label": "replay_e",
+          "ok": false,
+          "skillId": "replay_e",
+          "skillVersion": "1.0.0",
+          "text": "",
+          "traceDetail": null,
+          "value": null
+        },
+        "skill": {
+          "budgetKey": "customSkillCalls",
+          "effects": "read_only",
+          "execute": {
+            "$graphGolden": "function",
+            "name": "execute"
+          },
+          "id": "replay_e",
+          "idempotency": "read_only_rag",
+          "inputSchema": {
+            "docIds": {
+              "required": true,
+              "scoped": true,
+              "type": "string[]"
+            },
+            "priorFindings": {
+              "required": false,
+              "type": "string"
+            },
+            "question": {
+              "required": true,
+              "type": "string"
+            },
+            "retrievalPlan": {
+              "required": false,
+              "type": "object"
+            }
+          },
+          "kind": "custom",
+          "label": "replay_e",
+          "match": {
+            "$graphGolden": "function",
+            "name": "match"
+          },
+          "outputSchema": {
+            "abstained": {
+              "required": true,
+              "type": "boolean"
+            },
+            "citations": {
+              "required": true,
+              "type": "citation[]"
+            },
+            "text": {
+              "required": true,
+              "type": "string"
+            }
+          },
+          "parallelSafe": true,
+          "replaySafe": true,
+          "requiresAccessScope": true,
+          "retryable": true,
+          "version": "1.0.0"
+        }
+      }
+    ],
+    [
+      "recordSkippedSkill",
+      {
+        "budget": null,
+        "phase": "primary",
+        "result": {
+          "abstained": false,
+          "citations": [],
+          "error": {
+            "code": {
+              "$graphGolden": "undefined"
+            },
+            "message": "Node d skipped: dependency_skipped.",
+            "name": "Error",
+            "reason": {
+              "$graphGolden": "undefined"
+            },
+            "status": {
+              "$graphGolden": "undefined"
+            }
+          },
+          "label": "replay_d",
+          "ok": false,
+          "skillId": "replay_d",
+          "skillVersion": "1.0.0",
+          "text": "",
+          "traceDetail": null,
+          "value": null
+        },
+        "skill": {
+          "budgetKey": "customSkillCalls",
+          "effects": "read_only",
+          "execute": {
+            "$graphGolden": "function",
+            "name": "execute"
+          },
+          "id": "replay_d",
+          "idempotency": "read_only_rag",
+          "inputSchema": {
+            "docIds": {
+              "required": true,
+              "scoped": true,
+              "type": "string[]"
+            },
+            "priorFindings": {
+              "required": false,
+              "type": "string"
+            },
+            "question": {
+              "required": true,
+              "type": "string"
+            },
+            "retrievalPlan": {
+              "required": false,
+              "type": "object"
+            }
+          },
+          "kind": "custom",
+          "label": "replay_d",
+          "match": {
+            "$graphGolden": "function",
+            "name": "match"
+          },
+          "outputSchema": {
+            "abstained": {
+              "required": true,
+              "type": "boolean"
+            },
+            "citations": {
+              "required": true,
+              "type": "citation[]"
+            },
+            "text": {
+              "required": true,
+              "type": "string"
+            }
+          },
+          "parallelSafe": true,
+          "replaySafe": true,
+          "requiresAccessScope": true,
+          "retryable": true,
+          "version": "1.0.0"
+        }
+      }
+    ]
+  ],
+  "result": {
+    "errors": [],
+    "graphVersion": "v3",
+    "nodeRuns": [
+      {
+        "citationCount": 1,
+        "dependsOn": [],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "a",
+        "parallelSafe": true,
+        "reason": null,
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "durationMs": "<elapsed>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "a answered."
+          },
+          "label": "replay_a",
+          "ok": true,
+          "skillId": "replay_a",
+          "skillVersion": "1.0.0",
+          "text": "a answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "a answered."
+          }
+        },
+        "skillId": "replay_a",
+        "skillVersion": "1.0.0",
+        "status": "reused",
+        "stepId": "agent_graph_node:YQ"
+      },
+      {
+        "citationCount": 0,
+        "dependsOn": [],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "b",
+        "parallelSafe": true,
+        "reason": "approval_denied",
+        "result": null,
+        "skillId": "replay_b",
+        "skillVersion": "1.0.0",
+        "status": "skipped",
+        "stepId": "agent_graph_node:Yg"
+      },
+      {
+        "citationCount": 0,
+        "dependsOn": [
+          "a"
+        ],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "c",
+        "parallelSafe": true,
+        "reason": "condition_not_met",
+        "result": null,
+        "skillId": "replay_c",
+        "skillVersion": "1.0.0",
+        "status": "skipped",
+        "stepId": "agent_graph_node:Yw"
+      },
+      {
+        "citationCount": 0,
+        "dependsOn": [
+          "c"
+        ],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "d",
+        "parallelSafe": true,
+        "reason": "dependency_skipped",
+        "result": null,
+        "skillId": "replay_d",
+        "skillVersion": "1.0.0",
+        "status": "skipped",
+        "stepId": "agent_graph_node:ZA"
+      },
+      {
+        "citationCount": 0,
+        "dependsOn": [
+          "a",
+          "b"
+        ],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "e",
+        "parallelSafe": true,
+        "reason": "dependency_skipped",
+        "result": null,
+        "skillId": "replay_e",
+        "skillVersion": "1.0.0",
+        "status": "skipped",
+        "stepId": "agent_graph_node:ZQ"
+      }
+    ],
+    "ok": true,
+    "results": [
+      {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-a",
+            "page": 1
+          }
+        ],
+        "durationMs": "<elapsed>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "a answered."
+        },
+        "label": "replay_a",
+        "ok": true,
+        "skillId": "replay_a",
+        "skillVersion": "1.0.0",
+        "text": "a answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "a answered."
+        }
+      }
+    ],
+    "status": "completed"
+  }
+}

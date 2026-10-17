@@ -23,7 +23,7 @@ import { AGENT_SKILL_IDS } from "./skills/registry.js";
 // The V1 outer execution plan: the fixed stages (built-in Skills, custom
 // Skills, the document loop, the Web fallback) in the order the validated plan
 // lists them. Two schedulers walk the same stages: runAgentExecutionPlan below
-// (the native loop, under both values of AGENT_RUNTIME) and
+// (the native loop, the production scheduler) and
 // rag/langgraph/execution-plan-graph.js (a low-level LangGraph Pregel, only
 // under the experimental AGENT_OUTER_PLAN_RUNTIME=langgraph). The stages, their
 // closure-owned state and the two decisions the loop makes between them (the
@@ -31,12 +31,13 @@ import { AGENT_SKILL_IDS } from "./skills/registry.js";
 // response) are defined here once, so the graph reuses them and never
 // re-derives the plan.
 //
-// The native loop is not part of the phase-4 rollback set
-// (docs/adr/0001-langgraph-runtime.md): the phase-3 load test decided that
-// the outer plan stays on it whatever AGENT_RUNTIME says, so it is the
-// production scheduler of the outer plan, not a fallback to delete. Phase 4
-// flipped only AGENT_RUNTIME's default; AGENT_OUTER_PLAN_RUNTIME still
-// defaults to `native`.
+// The native loop was never part of the graph-runtime rollback that phase 6
+// of docs/adr/0001-langgraph-runtime.md deleted with the native graph
+// scheduler: the phase-3 load test decided that the outer plan stays on it,
+// and phase 5 made that final, so it is the production scheduler of the
+// outer plan, not a fallback to delete. AGENT_OUTER_PLAN_RUNTIME defaults to
+// `native`; AGENT_RUNTIME (only a refusal of removed values since phase 6)
+// never selected it.
 
 const getCustomSkills = (selectedSkills = []) =>
   selectedSkills.filter((skill) => skill.kind === "custom");
@@ -450,8 +451,8 @@ export const runAgentExecutionPlan = async (options = {}) => {
 };
 
 /**
- * The scheduler of the outer plan for `runtime` (AGENT_OUTER_PLAN_RUNTIME,
- * never AGENT_RUNTIME: config.js says why): the native loop, or the LangGraph
+ * The scheduler of the outer plan for `runtime` (AGENT_OUTER_PLAN_RUNTIME;
+ * config.js says why it is a dial of its own): the native loop, or the LangGraph
  * Pregel over the same stages. The LangGraph module is imported only when
  * selected, so a process with the outer plan on the native loop never loads
  * it. Both take runAgentExecutionPlan's options and return its state.

@@ -4,8 +4,9 @@
 // It does two things:
 //   - reports, through the MessagePort the suite hands over, every resolution
 //     of an @langchain/* module requested from outside node_modules (who
-//     loaded LangChain first), so the suite can show that a planner on the
-//     native runtime loads none;
+//     loaded LangChain first), so the suite can show that nothing loads
+//     LangChain before the first planner call through the adapter (the
+//     native runtime that loaded none was removed in ADR 0001 phase 6);
 //   - sends rag/langgraph/planner-model.js's import of rag/langgraph/model.js
 //     to the counting stand-in (model-tap.mjs), whose own import of model.js
 //     reaches the real module.

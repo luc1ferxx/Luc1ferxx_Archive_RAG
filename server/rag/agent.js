@@ -1237,8 +1237,9 @@ const runAgentRagInScope = async ({
       },
     });
 
-    // AGENT_OUTER_PLAN_RUNTIME, never AGENT_RUNTIME: the native loop (the
-    // default, also under AGENT_RUNTIME=langgraph), or the experimental
+    // AGENT_OUTER_PLAN_RUNTIME (AGENT_RUNTIME never chose the outer plan's
+    // scheduler, and since phase 6 selects nothing): the native loop (the
+    // default and the production scheduler), or the experimental
     // LangGraph graph over the same stages (rag/langgraph/execution-plan-
     // graph.js, low-level Pregel since phase 5), whose cost the load tests
     // measured (config.js).

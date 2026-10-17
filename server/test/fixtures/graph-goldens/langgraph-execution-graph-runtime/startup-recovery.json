@@ -1,0 +1,933 @@
+{
+  "checkpoint": {
+    "digest": "<seal>",
+    "fingerprints": [],
+    "graph": {
+      "nodes": [
+        {
+          "dependsOn": [],
+          "failurePolicy": "continue",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "compare",
+          "rationale": "Run compare.",
+          "skillId": "compare_documents"
+        },
+        {
+          "dependsOn": [
+            "compare"
+          ],
+          "failurePolicy": "continue",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "priorFindings": {
+              "nodeId": "compare",
+              "output": "text",
+              "source": "node"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "risk",
+          "rationale": "Run risk.",
+          "skillId": "risk_review"
+        }
+      ],
+      "revision": 0,
+      "version": "v1"
+    },
+    "nodeRuns": [
+      {
+        "nodeId": "compare",
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "durationMs": "<duration>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "compare_documents answered."
+          },
+          "label": "compare_documents",
+          "ok": true,
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0",
+          "text": "compare_documents answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "compare_documents answered."
+          }
+        },
+        "skillId": "compare_documents",
+        "skillVersion": "1.0.0",
+        "status": "reused",
+        "stepId": "custom_skill:compare"
+      },
+      {
+        "nodeId": "risk",
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "durationMs": "<duration>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "risk_review answered."
+          },
+          "label": "risk_review",
+          "ok": true,
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "text": "risk_review answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "risk_review answered."
+          }
+        },
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "status": "completed",
+        "stepId": "custom_skill:risk"
+      }
+    ],
+    "owner": {
+      "accessScope": {
+        "userId": "alice",
+        "workspaceId": "workspace-a"
+      },
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 3,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "usedAtEntry": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 0,
+          "researchQuestions": 0,
+          "traceSteps": 0,
+          "webSearchCalls": 0
+        }
+      },
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "intentPlan": {
+        "mode": "skill_chain"
+      },
+      "question": "Compare these contracts and flag the risks.",
+      "retrievalPlan": null,
+      "selectedSkills": [
+        {
+          "id": "compare_documents",
+          "version": "1.0.0"
+        },
+        {
+          "id": "risk_review",
+          "version": "1.0.0"
+        }
+      ],
+      "sessionId": "session-1",
+      "taskMemory": null,
+      "userId": "alice"
+    },
+    "phase": "completed",
+    "planner": {
+      "fallback": false,
+      "fallbackReason": null,
+      "fallbackReasonCodes": [],
+      "nodeIds": [
+        "compare",
+        "risk"
+      ],
+      "requestedPlannerId": "parity_planner",
+      "selectedPlannerId": "parity_planner",
+      "status": "selected"
+    },
+    "replanCount": 0,
+    "replans": [],
+    "resumeClaim": {
+      "claimId": "<uuid>",
+      "claimedAt": "<time>"
+    },
+    "sequence": 5,
+    "version": "v1"
+  },
+  "events": [
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:1",
+      "payload": {
+        "status": "running"
+      },
+      "type": "run_created"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:2",
+      "payload": {
+        "planner": {
+          "stepIds": [
+            "custom_skills"
+          ]
+        }
+      },
+      "type": "execution_planned"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:3",
+      "payload": {
+        "graphRevision": 0,
+        "phase": "running",
+        "sequence": 1,
+        "version": "v1"
+      },
+      "type": "skill_graph_checkpointed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:4",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:compare"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:5",
+      "payload": {
+        "status": "completed",
+        "stepId": "custom_skill:compare"
+      },
+      "type": "step_completed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:6",
+      "payload": {
+        "graphRevision": 0,
+        "phase": "running",
+        "sequence": 2,
+        "version": "v1"
+      },
+      "type": "skill_graph_checkpointed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:7",
+      "payload": {
+        "sequence": 3,
+        "version": "v1"
+      },
+      "type": "skill_graph_resume_claimed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:8",
+      "payload": {
+        "originalStatus": "running",
+        "reason": "server_startup_recovery",
+        "type": "execution_graph"
+      },
+      "type": "auto_recovery_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:9",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:risk"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:10",
+      "payload": {
+        "status": "completed",
+        "stepId": "custom_skill:risk"
+      },
+      "type": "step_completed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:11",
+      "payload": {
+        "graphRevision": 0,
+        "phase": "running",
+        "sequence": 4,
+        "version": "v1"
+      },
+      "type": "skill_graph_checkpointed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:12",
+      "payload": {
+        "graphRevision": 0,
+        "phase": "completed",
+        "sequence": 5,
+        "version": "v1"
+      },
+      "type": "skill_graph_checkpointed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:13",
+      "payload": {
+        "errorCodes": [],
+        "executed": true,
+        "fallback": null,
+        "graph": {
+          "nodeIds": [
+            "compare",
+            "risk"
+          ],
+          "version": "v1"
+        },
+        "mode": "guarded",
+        "nodeRuns": [
+          {
+            "abstained": false,
+            "citationCount": 1,
+            "dependsOn": [],
+            "effects": "workspace_write",
+            "idempotency": "nondeterministic",
+            "nodeId": "compare",
+            "ok": true,
+            "parallelSafe": false,
+            "reason": null,
+            "skillId": "compare_documents",
+            "skillVersion": "1.0.0",
+            "status": "reused",
+            "stepId": "custom_skill:compare"
+          },
+          {
+            "abstained": false,
+            "citationCount": 1,
+            "dependsOn": [
+              "compare"
+            ],
+            "effects": "read_only",
+            "idempotency": "read_only_rag",
+            "nodeId": "risk",
+            "ok": true,
+            "parallelSafe": true,
+            "reason": null,
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "status": "completed",
+            "stepId": "custom_skill:risk"
+          }
+        ],
+        "planner": {
+          "fallback": false,
+          "fallbackReason": null,
+          "fallbackReasonCodes": [],
+          "nodeIds": [
+            "compare",
+            "risk"
+          ],
+          "requestedPlannerId": "parity_planner",
+          "selectedPlannerId": "parity_planner",
+          "status": "selected"
+        },
+        "replans": [],
+        "status": "completed"
+      },
+      "type": "skill_graph_planned"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:14",
+      "payload": {
+        "status": "completed"
+      },
+      "type": "run_completed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:15",
+      "payload": {
+        "status": "completed",
+        "type": "execution_graph"
+      },
+      "type": "auto_recovery_completed"
+    }
+  ],
+  "journal": [
+    {
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "event": "start",
+      "priorFindings": null,
+      "question": "Compare these contracts and flag the risks.",
+      "skillId": "compare_documents"
+    },
+    {
+      "event": "end",
+      "skillId": "compare_documents"
+    },
+    {
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "event": "start",
+      "priorFindings": "compare_documents answered.",
+      "question": "Compare these contracts and flag the risks.",
+      "skillId": "risk_review"
+    },
+    {
+      "event": "end",
+      "skillId": "risk_review"
+    }
+  ],
+  "outcome": {
+    "autoRecoveredCount": 1,
+    "manualRecoveredCount": 0
+  },
+  "result": {
+    "agentMode": "skill_chain",
+    "answer": "I do not have enough citation-backed evidence to answer reliably.",
+    "citationCount": 0,
+    "ragAbstained": true,
+    "recovery": {
+      "mode": "auto",
+      "originalStatus": "running",
+      "reason": "server_startup_recovery",
+      "recoveredAt": "<time>"
+    },
+    "status": 200
+  },
+  "status": "completed",
+  "steps": [
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": {
+        "traceStatus": "completed"
+      },
+      "error": null,
+      "id": "custom_skill:compare",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "workspace_write",
+        "graphVersion": "v1",
+        "idempotency": "nondeterministic",
+        "nodeId": "compare",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": false,
+        "retrievalPlan": {
+          "$graphGolden": "undefined"
+        },
+        "sessionId": "session-1",
+        "skillId": "compare_documents",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "kind": "tool_call",
+      "label": "compare_documents",
+      "output": {
+        "abstained": false,
+        "citationCount": 1,
+        "text": "compare_documents answered.",
+        "typedOutputDigest": "v1:sha256:3c035976ef971248599af96117220f74e43947b8d157856425f881e75bb8c405"
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "completed",
+      "summary": "",
+      "traceStepId": "custom_skill:compare",
+      "type": "custom_skill",
+      "updatedAt": "<time>"
+    },
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": {
+        "dependsOn": [
+          "compare"
+        ],
+        "durationMs": "<duration>",
+        "graphVersion": "v1",
+        "nodeId": "risk",
+        "rationale": "Run risk.",
+        "skillId": "risk_review",
+        "skillKind": "custom",
+        "skillVersion": "1.0.0",
+        "traceStatus": "completed"
+      },
+      "error": null,
+      "id": "custom_skill:risk",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "priorFindings": "compare_documents answered.",
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "risk",
+        "priorFindings": "compare_documents answered.",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": null,
+        "sessionId": "session-1",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "kind": "tool_call",
+      "label": "risk_review",
+      "output": {
+        "abstained": false,
+        "citationCount": 1,
+        "text": "risk_review answered.",
+        "typedOutputDigest": "v1:sha256:82d370bac4ec596aacebc61e0164353665e37639be405202cf027b2656a7149a"
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "completed",
+      "summary": "risk_review completed with 1 citation.",
+      "traceStepId": "custom_skill:risk",
+      "type": "custom_skill",
+      "updatedAt": "<time>"
+    },
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": {
+        "budget": {
+          "limits": {
+            "maxArxivPaperFetches": 1,
+            "maxCustomSkillCalls": 3,
+            "maxDocumentRagCalls": 2,
+            "maxResearchQuestions": 3,
+            "maxTraceSteps": 16,
+            "maxWebSearchCalls": 1
+          },
+          "run": {
+            "exhausted": null,
+            "limits": {
+              "maxCostUsd": 0.5,
+              "maxDurationMs": 300000,
+              "maxTokens": 100000
+            },
+            "used": {
+              "costUsd": 0,
+              "durationMs": "<duration>",
+              "modelCalls": 0,
+              "tokens": 0,
+              "unpricedModelCalls": 0
+            }
+          },
+          "traceTruncated": false,
+          "used": {
+            "arxivPaperFetches": 0,
+            "customSkillCalls": 2,
+            "documentRagCalls": 0,
+            "researchQuestions": 0,
+            "traceSteps": 1,
+            "webSearchCalls": 0
+          }
+        },
+        "traceStatus": "completed"
+      },
+      "error": null,
+      "id": "3-synthesis",
+      "input": {
+        "agentMode": "skill_chain",
+        "customSkillResultCount": 2,
+        "hasActionAnswer": false,
+        "hasArxivImportAnswer": false,
+        "hasDiscoveryAnswer": false,
+        "hasInventoryAnswer": false,
+        "hasRagResult": false,
+        "hasResearchBrief": false,
+        "hasWebResult": false,
+        "sourceCount": 2
+      },
+      "kind": "decision",
+      "label": "Synthesis",
+      "output": {
+        "answerLength": 50,
+        "sourceCount": 2
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "completed",
+      "summary": "Composed the final agent answer from completed tool results.",
+      "traceStepId": "3-synthesis",
+      "type": "synthesis",
+      "updatedAt": "<time>"
+    },
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": {
+        "answerLabel": "Final answer",
+        "citationCount": 2,
+        "citedDocCount": 0,
+        "claimSupport": {
+          "checked": true,
+          "claims": [
+            {
+              "ambiguousSourceRanks": [],
+              "anchors": [],
+              "citedDocIds": [
+                "doc-1"
+              ],
+              "misattributedCitationIdentities": [],
+              "missingAnchors": [],
+              "missingSourceRanks": [],
+              "section": "",
+              "sectionId": null,
+              "sectionLabel": "",
+              "sourceRanks": [],
+              "supported": false,
+              "supportedCitedDocIds": [],
+              "supportedSourceRanks": [],
+              "text": "compare_documents answered",
+              "tokenOverlap": 0,
+              "verifiedSourceRanks": []
+            },
+            {
+              "ambiguousSourceRanks": [],
+              "anchors": [],
+              "citedDocIds": [
+                "doc-1"
+              ],
+              "misattributedCitationIdentities": [],
+              "missingAnchors": [],
+              "missingSourceRanks": [],
+              "section": "",
+              "sectionId": null,
+              "sectionLabel": "",
+              "sourceRanks": [],
+              "supported": false,
+              "supportedCitedDocIds": [],
+              "supportedSourceRanks": [],
+              "text": "risk_review answered",
+              "tokenOverlap": 0,
+              "verifiedSourceRanks": []
+            }
+          ],
+          "supportedClaimCount": 0,
+          "unsupportedClaimCount": 2
+        },
+        "finalAnswer": true,
+        "gaps": [
+          {
+            "citedDocCount": 0,
+            "message": "Citations cover 0 of 2 required documents.",
+            "requiredDocCoverage": 2,
+            "severity": "repairable",
+            "type": "document_coverage"
+          },
+          {
+            "claim": "compare_documents answered",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [],
+            "severity": "repairable",
+            "tokenOverlap": 0,
+            "type": "unsupported_claim"
+          },
+          {
+            "claim": "risk_review answered",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [],
+            "severity": "repairable",
+            "tokenOverlap": 0,
+            "type": "unsupported_claim"
+          }
+        ],
+        "passed": false,
+        "reasons": [
+          "Final answer citations do not include checkable evidence text.",
+          "Citations cover 0 of 2 required documents.",
+          "2 final answer claims lacks citation support."
+        ],
+        "requiredCitationCount": 1,
+        "requiredDocCoverage": 2,
+        "retryRecommended": false,
+        "traceStatus": "failed"
+      },
+      "error": {
+        "message": "Evidence check needs attention: Final answer citations do not include checkable evidence text. Citations cover 0 of 2 required documents. 2 final answer claims lacks citation support."
+      },
+      "id": "4-self_check",
+      "input": null,
+      "kind": "observation",
+      "label": "Final Self Check",
+      "output": {
+        "gapCount": 3,
+        "passed": false,
+        "retryRecommended": false,
+        "unsupportedClaimCount": 2
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "failed",
+      "summary": "Evidence check needs attention: Final answer citations do not include checkable evidence text. Citations cover 0 of 2 required documents. 2 final answer claims lacks citation support.",
+      "traceStepId": "4-self_check",
+      "type": "self_check",
+      "updatedAt": "<time>"
+    },
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": {
+        "finalAnswer": true,
+        "followUpRecommended": false,
+        "gaps": [
+          {
+            "citedDocCount": 0,
+            "message": "Citations cover 0 of 2 required documents.",
+            "requiredDocCoverage": 2,
+            "severity": "repairable",
+            "skillId": "compare_documents",
+            "skillVersion": "1.0.0",
+            "type": "document_coverage"
+          },
+          {
+            "claim": "compare_documents answered",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [],
+            "severity": "repairable",
+            "skillId": "compare_documents",
+            "skillVersion": "1.0.0",
+            "tokenOverlap": 0,
+            "type": "unsupported_claim"
+          },
+          {
+            "claim": "risk_review answered",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [],
+            "severity": "repairable",
+            "skillId": "compare_documents",
+            "skillVersion": "1.0.0",
+            "tokenOverlap": 0,
+            "type": "unsupported_claim"
+          }
+        ],
+        "skillId": "compare_documents",
+        "skillVersion": "1.0.0",
+        "traceStatus": "completed"
+      },
+      "error": null,
+      "id": "5-gap_analysis",
+      "input": null,
+      "kind": "observation",
+      "label": "Final Gap Analysis",
+      "output": {
+        "finalAnswer": true,
+        "followUpRecommended": false,
+        "gapCount": 3
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "completed",
+      "summary": "Identified 3 evidence gaps for follow-up: document_coverage, unsupported_claim.",
+      "traceStepId": "5-gap_analysis",
+      "type": "gap_analysis",
+      "updatedAt": "<time>"
+    },
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": {
+        "abstained": true,
+        "changed": true,
+        "claimSupport": {
+          "checked": true,
+          "claims": [
+            {
+              "ambiguousSourceRanks": [],
+              "anchors": [],
+              "citedDocIds": [
+                "doc-1"
+              ],
+              "misattributedCitationIdentities": [],
+              "missingAnchors": [],
+              "missingSourceRanks": [],
+              "section": "",
+              "sectionId": null,
+              "sectionLabel": "",
+              "sourceRanks": [],
+              "supported": false,
+              "supportedCitedDocIds": [],
+              "supportedSourceRanks": [],
+              "text": "compare_documents answered",
+              "tokenOverlap": 0,
+              "verifiedSourceRanks": []
+            },
+            {
+              "ambiguousSourceRanks": [],
+              "anchors": [],
+              "citedDocIds": [
+                "doc-1"
+              ],
+              "misattributedCitationIdentities": [],
+              "missingAnchors": [],
+              "missingSourceRanks": [],
+              "section": "",
+              "sectionId": null,
+              "sectionLabel": "",
+              "sourceRanks": [],
+              "supported": false,
+              "supportedCitedDocIds": [],
+              "supportedSourceRanks": [],
+              "text": "risk_review answered",
+              "tokenOverlap": 0,
+              "verifiedSourceRanks": []
+            }
+          ],
+          "supportedClaimCount": 0,
+          "unsupportedClaimCount": 2
+        },
+        "reason": "missing_checkable_citation_text",
+        "removedClaims": [
+          "compare_documents answered",
+          "risk_review answered"
+        ],
+        "traceStatus": "completed"
+      },
+      "error": null,
+      "id": "6-answer_finalizer",
+      "input": null,
+      "kind": "observation",
+      "label": "Answer Finalizer",
+      "output": {
+        "abstained": true,
+        "changed": true,
+        "removedClaimCount": 2,
+        "skippedReason": "",
+        "unsupportedClaimCount": 2
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "completed",
+      "summary": "Finalizer removed 2 unsupported claims and returned an evidence-limited answer.",
+      "traceStepId": "6-answer_finalizer",
+      "type": "answer_finalizer",
+      "updatedAt": "<time>"
+    }
+  ]
+}

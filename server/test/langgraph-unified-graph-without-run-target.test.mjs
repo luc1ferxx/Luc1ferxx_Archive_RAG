@@ -19,39 +19,44 @@ import {
   createProposalAdapter,
   createTaskCapabilityRegistry,
 } from "./fixtures/unified-graph-run-fixtures.mjs";
+// Only node builtins: safe to load before register() below.
+import { assertMatchesGraphGolden } from "./langgraph-support/graph-goldens.mjs";
 
-// The v3 stage (rag/agent-unified-graph-stage.js) on AGENT_RUNTIME=langgraph
-// never calls the native scheduler (docs/adr/0001-langgraph-runtime.md,
-// phase 5): a step lifecycle without a run target runs LangGraph without a
-// checkpointer, and a finalization replay runs no scheduler at all
-// (replayExecutionGraphRun), on either runtime.
+// The v3 stage (rag/agent-unified-graph-stage.js) with a step lifecycle
+// without a run target runs LangGraph without a checkpointer, and a
+// finalization replay runs no scheduler at all (replayExecutionGraphRun)
+// (docs/adr/0001-langgraph-runtime.md, phase 5).
 //
 // Every production caller hands the stage a lifecycle with a run target, so
 // the first case is reached here by redirecting the stage's own lookup of
 // that target (langgraph-support/stage-run-target-switch.mjs): the lifecycle
 // still records every step on the run, as before. The stage's import of the
-// runner goes to a tripwire (langgraph-support/stage-native-scheduler-
-// tripwire.mjs) that counts both entries per runtime and makes the native
-// scheduler throw on LangGraph. The redirects apply to the stage's imports
-// only, and the suite runs in its own process (test/run.test.mjs), so every
-// other module keeps the real ones; that is also why every rag module is
-// imported dynamically, after register().
+// runner goes to a counter of its replays (langgraph-support/stage-replay-
+// counter.mjs), and its import of the LangGraph executor to the recording
+// tap of the parity suite (langgraph-runtime-parity/langgraph-executor-
+// tap.mjs), which shows whether an invocation was bound to the run. The
+// redirects apply to the stage's imports only, and the suite runs in its own
+// process (test/run.test.mjs), so every other module keeps the real ones;
+// that is also why every rag module is imported dynamically, after
+// register().
 //
-// Each scenario runs on both runtimes, on fresh stores, and the request's
-// whole outcome must be equal after masking (ids, timestamps, durations, the
-// checkpoint seal and the hashes derived from it): the /chat response, the
-// run (events, steps, status, result) and the v2 graph checkpoint.
+// Each scenario's whole outcome, after masking (ids, timestamps, durations,
+// the checkpoint seal and the hashes derived from it) -- the /chat response,
+// the run (events, steps, status, result) and the v2 graph checkpoint -- must
+// equal the golden frozen from the native scheduler's run of the same
+// scenario before phase 6 deleted it
+// (test/fixtures/graph-goldens/langgraph-unified-graph-without-run-target/).
 
 const ragUrl = new URL("../rag/", import.meta.url).href;
 const stageUrl = new URL("agent-unified-graph-stage.js", ragUrl).href;
 
 globalThis.__archiveRagStageProbe = {
   hideRunTarget: false,
-  nativeScheduler: { langgraph: 0, native: 0 },
-  replays: { langgraph: 0, native: 0 },
+  replays: 0,
   targetLookups: 0,
 };
 const probe = globalThis.__archiveRagStageProbe;
+const executorTapUrl = new URL("./langgraph-runtime-parity/langgraph-executor-tap.mjs", import.meta.url).href;
 
 register("./langgraph-runtime-parity/redirect-hooks.mjs", import.meta.url, {
   data: {
@@ -62,9 +67,14 @@ register("./langgraph-runtime-parity/redirect-hooks.mjs", import.meta.url, {
         target: new URL("agent-run-step-lifecycle.js", ragUrl).href,
       },
       {
-        capture: new URL("./langgraph-support/stage-native-scheduler-tripwire.mjs", import.meta.url).href,
+        capture: new URL("./langgraph-support/stage-replay-counter.mjs", import.meta.url).href,
         fromPrefix: stageUrl,
         target: new URL("agent-execution-graph-runner.js", ragUrl).href,
+      },
+      {
+        capture: executorTapUrl,
+        fromPrefix: stageUrl,
+        target: new URL("langgraph/run-execution-graph.js", ragUrl).href,
       },
     ],
   },
@@ -78,6 +88,7 @@ const [
   { createAgentRunService, createInMemoryAgentRunStore },
   { LANGGRAPH_CHECKPOINT_RESULT_KEY, RunStoreCheckpointSaver },
   { createDefaultSkillRegistry },
+  { takeLangGraphInvocations },
 ] = await Promise.all([
   import("@langchain/core/singletons"),
   import("../rag/agent.js"),
@@ -86,12 +97,18 @@ const [
   import("../rag/agent-runs.js"),
   import("../rag/langgraph/checkpointer.js"),
   import("../rag/skills/registry.js"),
+  import(executorTapUrl),
 ]);
 
-const RUNTIMES = Object.freeze(["native", "langgraph"]);
+const GOLDEN_SUITE = "langgraph-unified-graph-without-run-target";
 
-// As test/langgraph-unified-graph.test.mjs: AGENT_RUNTIME alone moves the v3
-// graph, and the answer-rate flags stay off.
+// The outcome against the golden the native scheduler's run froze
+// (UPDATE_GRAPH_GOLDENS=1 rewrites it from this run; see the helper's rules).
+const assertMatchesNativeGolden = (caseName, outcome) =>
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, outcome);
+
+// As test/langgraph-unified-graph.test.mjs: the guarded v3 graph with the
+// outer plan on the native loop, and the answer-rate flags off.
 const ENV = Object.freeze({
   AGENT_FOLLOW_UP_ORIGINAL_QUESTION: undefined,
   AGENT_OUTER_PLAN_RUNTIME: undefined,
@@ -131,24 +148,22 @@ const withEnv = async (overrides, work) => {
   }
 };
 
-const onRuntime = (runtime, work) => withEnv({ ...ENV, AGENT_RUNTIME: runtime }, work);
+const inEnv = (work) => withEnv(ENV, work);
 
-// What the stage was handed, and what reached the runner, while `work` ran.
+// What the stage was handed, what it replayed, and what it handed the
+// LangGraph executor, while `work` ran.
 const observeStage = async ({ hideRunTarget }, work) => {
-  const before = structuredClone({ ...probe, hideRunTarget: undefined });
+  const before = { replays: probe.replays, targetLookups: probe.targetLookups };
 
   probe.hideRunTarget = hideRunTarget;
+  takeLangGraphInvocations();
 
   try {
     const value = await work();
-    const delta = (field) =>
-      Object.fromEntries(
-        Object.entries(probe[field]).map(([runtime, count]) => [runtime, count - before[field][runtime]])
-      );
 
     return {
-      nativeScheduler: delta("nativeScheduler"),
-      replays: delta("replays"),
+      invocations: takeLangGraphInvocations(),
+      replays: probe.replays - before.replays,
       targetLookups: probe.targetLookups - before.targetLookups,
       value,
     };
@@ -242,17 +257,14 @@ const settle = (promise) =>
 const currentThreadId = () =>
   AsyncLocalStorageProviderSingleton.getRunnableConfig()?.configurable?.thread_id ?? null;
 
-const askOn = async (
-  runtime,
-  {
-    proposal = createApprovalGatedTaskProposal,
-    question = APPROVAL_TASK_QUESTION,
-    ragOptions = {},
-    store = newStore(),
-    agentRunService = newService(store),
-    withCapability = true,
-  } = {}
-) => {
+const ask = async ({
+  proposal = createApprovalGatedTaskProposal,
+  question = APPROVAL_TASK_QUESTION,
+  ragOptions = {},
+  store = newStore(),
+  agentRunService = newService(store),
+  withCapability = true,
+} = {}) => {
   const threads = [];
   const ragService = createDocumentLoopRagService({
     primary: "supported",
@@ -270,7 +282,7 @@ const askOn = async (
       })
     : { registry: undefined, writes: [] };
   const outcome = await settle(
-    onRuntime(runtime, () =>
+    inEnv(() =>
       runAgentRag({
         accessScope,
         agentRunService,
@@ -303,8 +315,8 @@ const askOn = async (
 
 // The approval endpoint's handler, wired as app-services wires it, on a NEW
 // run service over the same store.
-const decideOn = (runtime, { action, context, service = newService(context.store) }) =>
-  onRuntime(runtime, () =>
+const decide = ({ action, context, service = newService(context.store) }) =>
+  inEnv(() =>
     createAgentRunStepExecutor({
       agentRunService: service,
       capabilityRegistry: context.registry,
@@ -324,8 +336,8 @@ const decideOn = (runtime, { action, context, service = newService(context.store
     })
   );
 
-const recoverOn = (runtime, { context, service = newService(context.store) }) =>
-  onRuntime(runtime, () =>
+const recover = ({ context, service = newService(context.store) }) =>
+  inEnv(() =>
     createAgentRunRecoveryService({
       agentRunService: service,
       recordRecoveryTrace: async () => {},
@@ -354,15 +366,10 @@ const runThreadId = (context) =>
     runId: context.runId,
   }).threadId;
 
-// Natively no Skill call or write runs in a thread. On LangGraph without a run
-// target each one runs in a thread of its own invocation, never the run's.
-const assertThreads = (runtime, context, label) => {
+// Without a run target each Skill call and write runs in a thread of its own
+// invocation, never the run's. (The native scheduler ran them in none.)
+const assertThreads = (context, label) => {
   assert.ok(context.threads.length > 0, label);
-
-  if (runtime === "native") {
-    assert.deepEqual(context.threads, context.threads.map(() => null), label);
-    return;
-  }
 
   for (const threadId of context.threads) {
     assert.equal(typeof threadId, "string", label);
@@ -370,23 +377,21 @@ const assertThreads = (runtime, context, label) => {
   }
 };
 
-const assertStageEntries = (runtime, observed, { native, replays = 0 }, label) => {
-  // Only the LangGraph branch asks for the run its thread would live on.
-  assert.equal(
+// The stage asked for the run its thread would live on, handed the LangGraph
+// executor `executorCalls` graphs (as many as it once handed the native
+// scheduler), bound to the run only when the target was visible, and
+// replayed `replays` settled graphs without any scheduler.
+const assertStageEntries = (observed, { boundToRun, executorCalls, replays = 0 }, label) => {
+  assert.ok(
     observed.targetLookups > 0,
-    runtime === "langgraph",
     `${label}: the stage looked up its run target ${observed.targetLookups} times`
   );
   assert.deepEqual(
-    observed.nativeScheduler,
-    { langgraph: 0, native: runtime === "native" ? native : 0 },
-    `${label}: native scheduler calls`
+    observed.invocations.map((invocation) => invocation.boundToRun),
+    Array.from({ length: executorCalls }, () => boundToRun),
+    `${label}: LangGraph executor calls`
   );
-  assert.deepEqual(
-    observed.replays,
-    { langgraph: runtime === "langgraph" ? replays : 0, native: runtime === "native" ? replays : 0 },
-    `${label}: replays`
-  );
+  assert.equal(observed.replays, replays, `${label}: replays`);
 };
 
 // ---------------------------------------------------------------------------
@@ -395,71 +400,63 @@ const assertStageEntries = (runtime, observed, { native, replays = 0 }, label) =
 
 test("without a run target, the evidence-gated document loop runs on LangGraph without a thread, exactly as natively", async () => {
   for (const followUp of ["resolves", "unresolved"]) {
-    const outcomes = {};
+    const label = followUp;
+    const observed = await observeStage({ hideRunTarget: true }, () =>
+      ask({
+        proposal: createDocumentLoopProposal,
+        question: DOCUMENT_LOOP_QUESTION,
+        ragOptions: { followUp, primary: "unsupported" },
+        withCapability: false,
+      })
+    );
+    const context = observed.value;
 
-    for (const runtime of RUNTIMES) {
-      const label = `${followUp}/${runtime}`;
-      const observed = await observeStage({ hideRunTarget: true }, () =>
-        askOn(runtime, {
-          proposal: createDocumentLoopProposal,
-          question: DOCUMENT_LOOP_QUESTION,
-          ragOptions: { followUp, primary: "unsupported" },
-          withCapability: false,
-        })
-      );
-      const context = observed.value;
+    assert.equal(context.error, null, `${label}: ${context.error?.message}`);
+    assert.deepEqual(context.ragService.calls.map((call) => call.phase), ["primary", "follow_up"], label);
+    assertThreads(context, label);
+    assertStageEntries(observed, { boundToRun: false, executorCalls: 1 }, label);
+    assert.equal(await rawRecord(context.store, context.runId), null, label);
+    const outcome = await describeOutcome(context);
 
-      assert.equal(context.error, null, `${label}: ${context.error?.message}`);
-      assert.deepEqual(context.ragService.calls.map((call) => call.phase), ["primary", "follow_up"], label);
-      assertThreads(runtime, context, label);
-      assertStageEntries(runtime, observed, { native: 1 }, label);
-      assert.equal(await rawRecord(context.store, context.runId), null, label);
-      outcomes[runtime] = await describeOutcome(context);
-    }
-
-    assert.deepEqual(outcomes.langgraph, outcomes.native, followUp);
-    assert.equal(outcomes.native.checkpoint.phase, "completed");
+    assertMatchesNativeGolden(`document-loop-${followUp}`, outcome);
+    assert.equal(outcome.checkpoint.phase, "completed", label);
   }
 });
 
 test("without a run target, an approval-gated Capability pauses through the stage's own pause, and the approval continues as a fresh invocation, exactly as natively", async () => {
-  const outcomes = {};
+  const asked = await observeStage({ hideRunTarget: true }, () => ask());
+  const context = asked.value;
 
-  for (const runtime of RUNTIMES) {
-    const asked = await observeStage({ hideRunTarget: true }, () => askOn(runtime));
-    const context = asked.value;
+  assert.equal(context.error, null, context.error?.message);
+  assert.equal(context.response.body.clarification.reason, "capability_approval_required");
+  assert.equal(context.writes.length, 0);
+  assertStageEntries(asked, { boundToRun: false, executorCalls: 1 }, "pause");
+  // No checkpointer, so no thread holds the pause: the gate and the paused
+  // checkpoint are the stage's pauseForApproval CAS, as natively.
+  assert.equal(await rawRecord(context.store, context.runId), null);
+  const paused = await describeOutcome(context);
 
-    assert.equal(context.error, null, `${runtime}: ${context.error?.message}`);
-    assert.equal(context.response.body.clarification.reason, "capability_approval_required", runtime);
-    assert.equal(context.writes.length, 0, runtime);
-    assertStageEntries(runtime, asked, { native: 1 }, `pause/${runtime}`);
-    // No checkpointer, so no thread holds the pause: the gate and the paused
-    // checkpoint are the stage's pauseForApproval CAS, as natively.
-    assert.equal(await rawRecord(context.store, context.runId), null, runtime);
-    const paused = await describeOutcome(context);
+  const service = newService(context.store);
+  const decided = await observeStage({ hideRunTarget: true }, () =>
+    decide({ action: "approve", context, service })
+  );
 
-    const service = newService(context.store);
-    const decided = await observeStage({ hideRunTarget: true }, () =>
-      decideOn(runtime, { action: "approve", context, service })
-    );
+  assert.equal(decided.value.run.status, "completed");
+  assert.equal(context.writes.length, 1);
+  assert.equal(context.ragService.calls.length, 1);
+  assertStageEntries(decided, { boundToRun: false, executorCalls: 1 }, "approve");
+  assertThreads(context, "approve");
+  assert.equal(await rawRecord(context.store, context.runId), null);
+  const outcome = {
+    approved: await describeOutcome(context, { agentRunService: service, response: null }),
+    decision: mask({ response: decided.value.response, status: decided.value.status }),
+    paused,
+  };
 
-    assert.equal(decided.value.run.status, "completed", runtime);
-    assert.equal(context.writes.length, 1, runtime);
-    assert.equal(context.ragService.calls.length, 1, runtime);
-    assertStageEntries(runtime, decided, { native: 1 }, `approve/${runtime}`);
-    assertThreads(runtime, context, `approve/${runtime}`);
-    assert.equal(await rawRecord(context.store, context.runId), null, runtime);
-    outcomes[runtime] = {
-      approved: await describeOutcome(context, { agentRunService: service, response: null }),
-      decision: mask({ response: decided.value.response, status: decided.value.status }),
-      paused,
-    };
-  }
-
-  assert.deepEqual(outcomes.langgraph, outcomes.native);
-  assert.equal(outcomes.native.paused.checkpoint.phase, "awaiting_approval");
+  assertMatchesNativeGolden("approval-approve", outcome);
+  assert.equal(outcome.paused.checkpoint.phase, "awaiting_approval");
   assert.deepEqual(
-    outcomes.native.approved.run.events
+    outcome.approved.run.events
       .filter((event) => event.type === "unified_graph_executed")
       .at(-1).payload.nodeRuns.map(({ nodeId, status }) => [nodeId, status]),
     [["document", "reused"], ["evidence_check", "reused"], ["task", "completed"]]
@@ -467,29 +464,25 @@ test("without a run target, an approval-gated Capability pauses through the stag
 });
 
 test("without a run target, a denied gate settles the parked node as approval_denied, exactly as natively", async () => {
-  const outcomes = {};
+  const { value: context } = await observeStage({ hideRunTarget: true }, () => ask());
+  const service = newService(context.store);
+  const decided = await observeStage({ hideRunTarget: true }, () =>
+    decide({ action: "deny", context, service })
+  );
 
-  for (const runtime of RUNTIMES) {
-    const { value: context } = await observeStage({ hideRunTarget: true }, () => askOn(runtime));
-    const service = newService(context.store);
-    const decided = await observeStage({ hideRunTarget: true }, () =>
-      decideOn(runtime, { action: "deny", context, service })
-    );
+  assert.equal(decided.value.run.status, "completed");
+  assert.equal(context.writes.length, 0);
+  // Nothing is left to run once the denied node is settled: the executor
+  // returns before a LangGraph invocation (natively the loop ran no pass).
+  assertStageEntries(decided, { boundToRun: false, executorCalls: 1 }, "deny");
+  const outcome = {
+    decision: mask({ response: decided.value.response, status: decided.value.status }),
+    denied: await describeOutcome(context, { agentRunService: service, response: null }),
+  };
 
-    assert.equal(decided.value.run.status, "completed", runtime);
-    assert.equal(context.writes.length, 0, runtime);
-    // Nothing is left to run once the denied node is settled: LangGraph
-    // returns before an invocation, natively the loop runs no pass.
-    assertStageEntries(runtime, decided, { native: 1 }, `deny/${runtime}`);
-    outcomes[runtime] = {
-      decision: mask({ response: decided.value.response, status: decided.value.status }),
-      denied: await describeOutcome(context, { agentRunService: service, response: null }),
-    };
-  }
-
-  assert.deepEqual(outcomes.langgraph, outcomes.native);
+  assertMatchesNativeGolden("approval-deny", outcome);
   assert.deepEqual(
-    outcomes.native.denied.run.events
+    outcome.denied.run.events
       .filter((event) => event.type === "unified_graph_executed")
       .at(-1).payload.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason]),
     [["document", "reused", null], ["evidence_check", "reused", null], ["task", "skipped", "approval_denied"]]
@@ -500,57 +493,58 @@ test("without a run target, a denied gate settles the parked node as approval_de
 // Finalization replay, with and without a run target
 // ---------------------------------------------------------------------------
 
-test("a finalization replay reaches no scheduler on either runtime, with or without a run target", async () => {
+test("a finalization replay reaches no scheduler, with or without a run target", async () => {
   for (const hideRunTarget of [false, true]) {
-    const outcomes = {};
+    const label = hideRunTarget ? "no run target" : "run target";
+    const store = newStore();
+    const { service: crashing } = createCrashingRunService(newService(store), {
+      crashBefore: (method, args) =>
+        method === "saveExecutionGraphCheckpoint" && Boolean(args.checkpoint?.finalization),
+    });
+    const asked = await observeStage({ hideRunTarget }, () =>
+      ask({
+        agentRunService: crashing,
+        proposal: createDocumentLoopProposal,
+        question: DOCUMENT_LOOP_QUESTION,
+        store,
+        withCapability: false,
+      })
+    );
+    const context = asked.value;
 
-    for (const runtime of RUNTIMES) {
-      const label = `${hideRunTarget ? "no run target" : "run target"}/${runtime}`;
-      const store = newStore();
-      const { service: crashing } = createCrashingRunService(newService(store), {
-        crashBefore: (method, args) =>
-          method === "saveExecutionGraphCheckpoint" && Boolean(args.checkpoint?.finalization),
-      });
-      const asked = await observeStage({ hideRunTarget }, () =>
-        askOn(runtime, {
-          agentRunService: crashing,
-          proposal: createDocumentLoopProposal,
-          question: DOCUMENT_LOOP_QUESTION,
-          store,
-          withCapability: false,
-        })
-      );
-      const context = asked.value;
+    assert.equal(context.error?.code, "SIMULATED_PROCESS_EXIT", label);
+    assertStageEntries(asked, { boundToRun: !hideRunTarget, executorCalls: 1 }, `ask/${label}`);
+    const calls = context.ragService.calls.length;
+    const service = newService(store);
+    const recovered = await observeStage({ hideRunTarget }, () =>
+      recover({ context, service })
+    );
 
-      assert.equal(context.error?.code, "SIMULATED_PROCESS_EXIT", label);
-      assertStageEntries(runtime, asked, { native: 1 }, `ask/${label}`);
-      const calls = context.ragService.calls.length;
-      const service = newService(store);
-      const recovered = await observeStage({ hideRunTarget }, () =>
-        recoverOn(runtime, { context, service })
-      );
-
-      assert.equal(recovered.value.autoRecoveredCount, 1, `${label}: ${JSON.stringify(recovered.value)}`);
-      assertStageEntries(runtime, recovered, { native: 0, replays: 1 }, `replay/${label}`);
-      assert.equal(context.ragService.calls.length, calls, label);
-      assert.equal(await rawRecord(store, context.runId), null, label);
-      const { checkpoint, run } = await load(service, context.runId);
-      assert.ok(checkpoint.finalization, label);
-      assert.deepEqual(
-        run.events
-          .filter((event) => event.type === "unified_graph_executed")
-          .at(-1).payload.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason]),
-        [
-          ["primary", "reused", null],
-          ["primary_check", "reused", null],
-          ["follow_up", "skipped", "condition_not_met"],
-          ["follow_up_check", "skipped", "dependency_skipped"],
-        ],
-        label
-      );
-      outcomes[runtime] = await describeOutcome({ ...context, error: null }, { agentRunService: service, response: null });
-    }
-
-    assert.deepEqual(outcomes.langgraph, outcomes.native, hideRunTarget ? "no run target" : "run target");
+    assert.equal(recovered.value.autoRecoveredCount, 1, `${label}: ${JSON.stringify(recovered.value)}`);
+    assertStageEntries(
+      recovered,
+      { boundToRun: !hideRunTarget, executorCalls: 0, replays: 1 },
+      `replay/${label}`
+    );
+    assert.equal(context.ragService.calls.length, calls, label);
+    assert.equal(await rawRecord(store, context.runId), null, label);
+    const { checkpoint, run } = await load(service, context.runId);
+    assert.ok(checkpoint.finalization, label);
+    assert.deepEqual(
+      run.events
+        .filter((event) => event.type === "unified_graph_executed")
+        .at(-1).payload.nodeRuns.map(({ nodeId, reason, status }) => [nodeId, status, reason]),
+      [
+        ["primary", "reused", null],
+        ["primary_check", "reused", null],
+        ["follow_up", "skipped", "condition_not_met"],
+        ["follow_up_check", "skipped", "dependency_skipped"],
+      ],
+      label
+    );
+    assertMatchesNativeGolden(
+      `finalization-replay-${hideRunTarget ? "no-run-target" : "run-target"}`,
+      await describeOutcome({ ...context, error: null }, { agentRunService: service, response: null })
+    );
   }
 });

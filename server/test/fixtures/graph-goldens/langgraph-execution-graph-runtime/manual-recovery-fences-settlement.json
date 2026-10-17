@@ -1,0 +1,72 @@
+{
+  "error": {
+    "code": "AGENT_GRAPH_EXECUTION_FENCED",
+    "executionGraphNodeRuns": null,
+    "message": "Execution graph node transition conflicts with the persisted graph owner.",
+    "name": "Error",
+    "reason": null,
+    "retryable": null,
+    "status": 409,
+    "type": null
+  },
+  "events": [
+    {
+      "createdAt": "<time>",
+      "payload": {
+        "status": "running"
+      },
+      "type": "run_created"
+    },
+    {
+      "createdAt": "<time>",
+      "payload": {
+        "planner": {
+          "stepIds": [
+            "custom_skills"
+          ]
+        }
+      },
+      "type": "execution_planned"
+    },
+    {
+      "createdAt": "<time>",
+      "payload": {
+        "graphRevision": 0,
+        "phase": "running",
+        "sequence": 1,
+        "version": "v1"
+      },
+      "type": "skill_graph_checkpointed"
+    },
+    {
+      "createdAt": "<time>",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:compare"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "payload": {
+        "mode": "manual",
+        "originalStatus": "running",
+        "reason": "operator_required",
+        "requestedMode": {
+          "$graphGolden": "undefined"
+        },
+        "status": "waiting_for_user",
+        "stepId": null,
+        "stepType": null
+      },
+      "type": "manual_recovery_required"
+    }
+  ],
+  "starts": [
+    "compare_documents"
+  ],
+  "status": "waiting_for_user",
+  "steps": [
+    "custom_skill:compare:running"
+  ]
+}

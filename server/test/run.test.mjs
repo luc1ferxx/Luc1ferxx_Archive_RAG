@@ -28,9 +28,10 @@ const collectTestFiles = async () => {
 };
 
 // Every test child gets the shell's environment minus the LangSmith tracing
-// variables. AGENT_RUNTIME defaults to langgraph, so any suite that runs a
-// guarded custom-Skill or v3 graph reaches the LangGraph executor, which
-// refuses to start while one of them is "true" (rag/langgraph/langsmith-guard.js).
+// variables. Every guarded custom-Skill or v3 graph runs on the LangGraph
+// executor (the native graph scheduler was removed in ADR 0001 phase 6), so
+// any suite that runs one reaches that executor, which refuses to start while
+// one of them is "true" (rag/langgraph/langsmith-guard.js).
 // A developer shell with one set would otherwise fail those suites (closed:
 // nothing is traced). Suites that load LangChain themselves also import
 // langgraph-support/langsmith-off.mjs, so a single-file run of them is clean

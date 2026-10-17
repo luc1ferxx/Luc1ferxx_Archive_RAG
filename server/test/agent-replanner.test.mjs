@@ -1,3 +1,7 @@
+// Must stay the first import: it clears the LangSmith tracing variables before
+// any @langchain module can read them.
+import "./langgraph-support/langsmith-off.mjs";
+
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAgentBudget } from "../rag/agent-budget.js";
@@ -6,7 +10,7 @@ import {
   EXECUTION_GRAPH_REASON_CODES,
   createExecutionGraph,
 } from "../rag/agent-execution-graph.js";
-import { runExecutionGraph } from "../rag/agent-execution-graph-runner.js";
+import { runExecutionGraphOnLangGraph } from "../rag/langgraph/run-execution-graph.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
 import {
   DEFAULT_MAX_REPLANS,
@@ -764,7 +768,7 @@ const countingSkill = ({ calls, id, result, ...rest }) =>
 const runScenarioGraph = async ({ budgetState, completedNodeRuns, graph, registry }) => {
   const tracker = createAgentSkillTracker({ budgetState, selectedSkills: [] });
 
-  return runExecutionGraph({
+  return runExecutionGraphOnLangGraph({
     accessScope: { userId: "alice", workspaceId: "acme" },
     authorizedDocIds: ["doc-1", "doc-2"],
     authorizedSkillIds: registry.list().map((skill) => skill.id),

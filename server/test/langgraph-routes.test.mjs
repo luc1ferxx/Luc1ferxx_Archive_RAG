@@ -10,16 +10,26 @@ import test from "node:test";
 // Phase-3 acceptance evidence for the public surface on the LangGraph runtime
 // (docs/adr/0001-langgraph-runtime.md): the real app (createApp over the local
 // vector store, an in-memory run store, in-memory task and artifact stores and
-// a stand-in model) answers the same requests under AGENT_RUNTIME=native and
-// AGENT_RUNTIME=langgraph, and everything a client or a later process can see
-// must be identical after masking what two runs never share. Since the
-// phase-3 load test AGENT_RUNTIME=langgraph keeps the V1 outer plan (and the
-// /chat/stream route) on the native loop and puts only the custom-Skill DAG
-// and the v3 graph on LangGraph; the requests the outer plan answers also run
-// a third pass, `outerPlan`, with the experimental
+// a stand-in model) answers these requests in the production setting, which
+// keeps the V1 outer plan (and the /chat/stream route) on the native loop and
+// puts the custom-Skill DAG and the v3 graph on LangGraph. Until ADR 0001
+// phase 6 removed the native graph scheduler, every request also ran under
+// AGENT_RUNTIME=native and was compared with it after masking. Before the
+// deletion, the native side of every request that runs a graph (the v3
+// approve and deny, the v3 stream up to its pause, the background task's
+// approval re-entry, and startup recovery) was frozen, masked exactly as
+// below, under test/fixtures/graph-goldens/langgraph-routes/ from HEAD
+// e1385c1c with AGENT_RUNTIME=native, and the production setting is now held
+// to those goldens with the same deepStrictEqual (assertMatchesGraphGolden;
+// rewriting one is a decision, see test/langgraph-support/graph-goldens.mjs).
+// The requests that build no graph (document QA, its stream, the V1
+// Capability approval) never depended on AGENT_RUNTIME and have no golden.
+// The requests the outer plan answers
+// also run a second pass, `outerPlan`, with the experimental
 // AGENT_OUTER_PLAN_RUNTIME=langgraph that schedules the outer plan on
 // LangGraph and streams through the LangGraph relay (config.js says why it is
-// opt-in):
+// opt-in), and everything a client or a later process can see must be
+// identical between the two passes after masking what two runs never share:
 //
 //   - POST /chat on the V1 outer plan (on LangGraph only in the outerPlan
 //     pass);
@@ -36,11 +46,10 @@ import test from "node:test";
 //     app instance left at a node boundary.
 //
 // The on-demand imports of both LangGraph schedulers are redirected to the
-// phase-2/3 counting taps, so each LangGraph pass also proves that LangGraph
-// really scheduled the graph (identical results from two native passes would
-// prove nothing), and each native pass proves it never did; the route's
-// import of the stream relay is tapped too, so a stream pass also shows which
-// branch of routes/chat.js answered.
+// phase-2/3 counting taps, so each pass also proves what LangGraph really
+// scheduled (the v3 graph on every pass, the outer plan only with the outer
+// dial); the route's import of the stream relay is tapped too, so a stream
+// pass also shows which branch of routes/chat.js answered.
 
 const RAG_PREFIX = new URL("../rag/", import.meta.url).href;
 const EXECUTOR_TAP_URL = new URL(
@@ -102,6 +111,7 @@ const { RUNTIME_RESUME_MARKER, buildApprovalInterruptPayload } = await import(
   "../rag/langgraph/unified-graph-approval.js"
 );
 const { readLangGraphThread } = await import("../rag/langgraph/unified-graph-thread.js");
+const { assertMatchesGraphGolden } = await import("./langgraph-support/graph-goldens.mjs");
 const { configureOpenAIProvider, resetOpenAIProvider } = await import("../rag/openai.js");
 const { createInMemoryTaskStore } = await import("../rag/tasks.js");
 const { createInMemoryWorkspaceArtifactStore } = await import(
@@ -122,14 +132,13 @@ const {
   createTaskCapabilityRegistry,
 } = await import("./fixtures/unified-graph-run-fixtures.mjs");
 
-// `langgraph` is AGENT_RUNTIME=langgraph alone, the production setting;
-// `outerPlan` adds the experimental AGENT_OUTER_PLAN_RUNTIME=langgraph.
-const RUNTIMES = Object.freeze(["native", "langgraph"]);
-const OUTER_PLAN_PASSES = Object.freeze([...RUNTIMES, "outerPlan"]);
+// `langgraph` is the production setting (every graph on LangGraph, the outer
+// plan on the native loop); `outerPlan` adds the experimental
+// AGENT_OUTER_PLAN_RUNTIME=langgraph.
+const OUTER_PLAN_PASSES = Object.freeze(["langgraph", "outerPlan"]);
 const PASS_ENV = Object.freeze({
-  langgraph: Object.freeze({ AGENT_RUNTIME: "langgraph" }),
-  native: Object.freeze({ AGENT_RUNTIME: "native" }),
-  outerPlan: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph", AGENT_RUNTIME: "langgraph" }),
+  langgraph: Object.freeze({}),
+  outerPlan: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph" }),
 });
 
 // Every pass runs with the answer-rate flags off and nothing in the ambient
@@ -364,7 +373,7 @@ const loadRun = async (agentRunService, accessScope, runId) => {
 };
 
 // The run's LangGraph thread as the production saver reads it, and the raw
-// private record (null on native, and on a finished run).
+// private record (null on a finished run).
 const readThread = (agentRunService, accessScope, runId) =>
   readLangGraphThread(new RunStoreCheckpointSaver({ accessScope, agentRunService, runId }));
 
@@ -466,22 +475,19 @@ test("POST /chat answers a document question identically on every pass, and only
     );
   }
 
-  const { langgraph, native, outerPlan } = passes;
+  const { langgraph, outerPlan } = passes;
 
-  assert.equal(native.answer.status, 200);
-  assert.equal(native.answer.body.agentMode, "document");
+  assert.equal(langgraph.answer.status, 200);
+  assert.equal(langgraph.answer.body.agentMode, "document");
   for (const sentence of QA_SENTENCES) {
-    assert.ok(native.answer.body.agentAnswer.includes(sentence), sentence);
+    assert.ok(langgraph.answer.body.agentAnswer.includes(sentence), sentence);
   }
-  assert.equal(native.run.run.status, "completed");
-  for (const [pass, other] of [["langgraph", langgraph], ["outerPlan", outerPlan]]) {
-    assert.deepStrictEqual(mask(other.answer), mask(native.answer), pass);
-    assert.deepStrictEqual(mask(other.run), mask(native.run), pass);
-  }
-  // AGENT_RUNTIME=langgraph alone kept the outer plan on the native loop.
-  // With the outer dial the plan was scheduled on LangGraph once, bound to
-  // the run; no custom-Skill or unified graph exists on this request.
-  assert.deepStrictEqual(native.invocations, { graph: [], plan: [] });
+  assert.equal(langgraph.run.run.status, "completed");
+  assert.deepStrictEqual(mask(outerPlan.answer), mask(langgraph.answer));
+  assert.deepStrictEqual(mask(outerPlan.run), mask(langgraph.run));
+  // The production setting kept the outer plan on the native loop. With the
+  // outer dial the plan was scheduled on LangGraph once, bound to the run; no
+  // custom-Skill or unified graph exists on this request.
   assert.deepStrictEqual(langgraph.invocations, { graph: [], plan: [] });
   assert.deepStrictEqual(outerPlan.invocations.graph, []);
   assert.equal(outerPlan.invocations.plan.length, 1);
@@ -509,7 +515,7 @@ test("POST /chat/stream relays identical SSE bytes on every pass, drafts include
         const relayCalls = takeAgentStreamRelayCalls();
         const query = new URLSearchParams(qaRequest).toString();
         // The router mounts GET /chat and POST /chat/stream (routes/chat.js);
-        // a GET of the stream path is a 404 on both runtimes.
+        // a GET of the stream path is a 404 on every pass.
         const getStream = await fetch(`${app.baseUrl}/chat/stream?${query}`, { headers });
         await getStream.text();
         const got = await getJson(`${app.baseUrl}/chat?${query}`, headers);
@@ -534,7 +540,7 @@ test("POST /chat/stream relays identical SSE bytes on every pass, drafts include
     );
   }
 
-  const { langgraph, native, outerPlan } = passes;
+  const { langgraph, outerPlan } = passes;
 
   for (const [runtime, pass] of Object.entries(passes)) {
     assert.equal(pass.stream.status, 200, runtime);
@@ -554,18 +560,14 @@ test("POST /chat/stream relays identical SSE bytes on every pass, drafts include
     assert.deepStrictEqual(mask(pass.get), mask(pass.post), runtime);
   }
 
-  for (const [pass, other] of [["langgraph", langgraph], ["outerPlan", outerPlan]]) {
-    assert.equal(maskVolatileText(other.stream.text), maskVolatileText(native.stream.text), pass);
-    assert.deepStrictEqual(mask(other.get), mask(native.get), pass);
-    assert.deepStrictEqual(mask(other.post), mask(native.post), pass);
-    assert.deepStrictEqual(mask(other.runs), mask(native.runs), pass);
-  }
-  assert.equal(native.runs.length, 3);
-  assert.deepStrictEqual(native.invocations, { graph: [], plan: [] });
-  // AGENT_RUNTIME=langgraph alone: the native route branch and the native
-  // outer loop for the stream and both /chat methods.
+  assert.equal(maskVolatileText(outerPlan.stream.text), maskVolatileText(langgraph.stream.text));
+  assert.deepStrictEqual(mask(outerPlan.get), mask(langgraph.get));
+  assert.deepStrictEqual(mask(outerPlan.post), mask(langgraph.post));
+  assert.deepStrictEqual(mask(outerPlan.runs), mask(langgraph.runs));
+  assert.equal(langgraph.runs.length, 3);
+  // The production setting: the native route branch and the native outer
+  // loop for the stream and both /chat methods.
   assert.deepStrictEqual(langgraph.invocations, { graph: [], plan: [] });
-  assert.equal(native.relayCalls, 0);
   assert.equal(langgraph.relayCalls, 0);
   // With the outer dial the stream went through the LangGraph relay, and the
   // stream and GET /chat each scheduled the outer plan on LangGraph (the
@@ -617,139 +619,128 @@ const decideGate = (app, { action, gate, hash = gate.approvalObjectHash, runId }
     unifiedHeaders
   );
 
-test("a v3 graph parked at its approval gate through POST /chat is approved or denied through POST /agent-runs/:runId/actions/:action identically on both runtimes", async () => {
+test("a v3 graph parked at its approval gate through POST /chat is approved or denied through POST /agent-runs/:runId/actions/:action, continuing the parked thread", async () => {
   for (const action of ["approve", "deny"]) {
-    const passes = {};
-
-    for (const runtime of RUNTIMES) {
-      passes[runtime] = await onRuntime(
-        runtime,
-        () =>
-          withUnifiedApp({}, async (app) => {
-            const paused = await postJson(
-              `${app.baseUrl}/chat`,
-              unifiedRequest(APPROVAL_TASK_QUESTION),
-              unifiedHeaders
-            );
-            const pauseInvocations = takeInvocations();
-            const runId = paused.body.agentRunId;
-            const gate = paused.body.approvalGates?.[0];
-
-            assert.equal(paused.status, 200, runtime);
-            assert.equal(paused.body.clarification?.reason, "capability_approval_required", runtime);
-            assert.ok(gate?.id, runtime);
-            assert.equal(app.writes.length, 0, runtime);
-
-            const pausedRun = await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
-            const pausedThread = await readThread(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
-            const pausedRecord = await rawRecord(app.store, UNIFIED_ACCESS_SCOPE, runId);
-
-            // A wrong approval object is refused before anything is decided.
-            const refused = await decideGate(app, {
-              action,
-              gate,
-              hash: `sha256:${"0".repeat(64)}`,
-              runId,
-            });
-            assert.equal(refused.status, 409, runtime);
-            assert.equal(app.writes.length, 0, runtime);
-            assert.deepStrictEqual(
-              await rawRecord(app.store, UNIFIED_ACCESS_SCOPE, runId),
-              pausedRecord,
-              `${runtime}: a refused decision leaves the thread record untouched`
-            );
-
-            const decided = await decideGate(app, { action, gate, runId });
-            const decisionInvocations = takeInvocations();
-            const finished = await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
-
-            // The same gate cannot be decided twice.
-            const again = await decideGate(app, { action, gate, runId });
-            assert.equal(again.status, 409, runtime);
-
-            return {
-              decided,
-              decisionInvocations,
-              finished,
-              finishedRecord: await rawRecord(app.store, UNIFIED_ACCESS_SCOPE, runId),
-              gate,
-              pauseInvocations,
-              paused,
-              pausedRecord,
-              pausedRun,
-              pausedThread: pausedThread
-                ? {
-                    interrupts: pausedThread.interrupts.map((pending) => pending.value),
-                    receipts: receiptStatuses(pausedThread),
-                    resumeWrites: pausedThread.resumeWrites,
-                  }
-                : null,
-              writes: app.writes.length,
-            };
-          }),
-        UNIFIED_ENV
-      );
-    }
-
-    const { langgraph, native } = passes;
     const label = `action=${action}`;
+    const langgraph = await onRuntime(
+      "langgraph",
+      () =>
+        withUnifiedApp({}, async (app) => {
+          const paused = await postJson(
+            `${app.baseUrl}/chat`,
+            unifiedRequest(APPROVAL_TASK_QUESTION),
+            unifiedHeaders
+          );
+          const pauseInvocations = takeInvocations();
+          const runId = paused.body.agentRunId;
+          const gate = paused.body.approvalGates?.[0];
 
-    // Identical to a client and to a later process: the pause response, the
+          assert.equal(paused.status, 200, label);
+          assert.equal(paused.body.clarification?.reason, "capability_approval_required", label);
+          assert.ok(gate?.id, label);
+          assert.equal(app.writes.length, 0, label);
+
+          const pausedRun = await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
+          const pausedThread = await readThread(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
+          const pausedRecord = await rawRecord(app.store, UNIFIED_ACCESS_SCOPE, runId);
+
+          // A wrong approval object is refused before anything is decided.
+          const refused = await decideGate(app, {
+            action,
+            gate,
+            hash: `sha256:${"0".repeat(64)}`,
+            runId,
+          });
+          assert.equal(refused.status, 409, label);
+          assert.equal(app.writes.length, 0, label);
+          assert.deepStrictEqual(
+            await rawRecord(app.store, UNIFIED_ACCESS_SCOPE, runId),
+            pausedRecord,
+            `${label}: a refused decision leaves the thread record untouched`
+          );
+
+          const decided = await decideGate(app, { action, gate, runId });
+          const decisionInvocations = takeInvocations();
+          const finished = await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
+
+          // The same gate cannot be decided twice.
+          const again = await decideGate(app, { action, gate, runId });
+          assert.equal(again.status, 409, label);
+
+          return {
+            decided,
+            decisionInvocations,
+            finished,
+            finishedRecord: await rawRecord(app.store, UNIFIED_ACCESS_SCOPE, runId),
+            gate,
+            pauseInvocations,
+            paused,
+            pausedRecord,
+            pausedRun,
+            pausedThread: pausedThread
+              ? {
+                  interrupts: pausedThread.interrupts.map((pending) => pending.value),
+                  receipts: receiptStatuses(pausedThread),
+                  resumeWrites: pausedThread.resumeWrites,
+                }
+              : null,
+            writes: app.writes.length,
+          };
+        }),
+      UNIFIED_ENV
+    );
+
+    // What a client and a later process see -- the pause response, the
     // paused run, the decision response, and the finished run with its
-    // checkpoint.
-    assert.deepStrictEqual(mask(langgraph.paused), mask(native.paused), label);
-    assert.deepStrictEqual(mask(langgraph.pausedRun), mask(native.pausedRun), label);
-    assert.deepStrictEqual(mask(langgraph.decided), mask(native.decided), label);
-    assert.deepStrictEqual(mask(langgraph.finished), mask(native.finished), label);
-    assert.equal(native.pausedRun.run.status, "waiting_for_user", label);
-    assert.equal(native.pausedRun.checkpoint.phase, "awaiting_approval", label);
-    assert.equal(native.decided.status, 200, label);
-    assert.equal(native.decided.body.run.status, "completed", label);
-    assert.equal(native.finished.run.status, "completed", label);
-    assert.equal(native.finished.checkpoint.phase, "completed", label);
-    assert.ok(native.finished.checkpoint.finalization, label);
+    // checkpoint -- is exactly what the native scheduler left (the golden).
+    assertMatchesGraphGolden("langgraph-routes", `v3-approval-${action}`, {
+      decided: mask(langgraph.decided),
+      finished: mask(langgraph.finished),
+      paused: mask(langgraph.paused),
+      pausedRun: mask(langgraph.pausedRun),
+    });
+    assert.equal(langgraph.pausedRun.run.status, "waiting_for_user", label);
+    assert.equal(langgraph.pausedRun.checkpoint.phase, "awaiting_approval", label);
+    assert.equal(langgraph.decided.status, 200, label);
+    assert.equal(langgraph.decided.body.run.status, "completed", label);
+    assert.equal(langgraph.finished.run.status, "completed", label);
+    assert.equal(langgraph.finished.checkpoint.phase, "completed", label);
+    assert.ok(langgraph.finished.checkpoint.finalization, label);
 
     if (action === "approve") {
-      assert.equal(native.writes, 1, label);
       assert.equal(langgraph.writes, 1, label);
-      assert.equal(native.decided.body.response.agentMode, "workspace_action", label);
-      assert.match(native.decided.body.response.agentAnswer, /^Task recorded as task /, label);
+      assert.equal(langgraph.decided.body.response.agentMode, "workspace_action", label);
+      assert.match(langgraph.decided.body.response.agentAnswer, /^Task recorded as task /, label);
       assert.deepStrictEqual(
-        native.finished.run.events
+        langgraph.finished.run.events
           .filter((event) => event.type === "unified_graph_executed")
           .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
         [["document", "reused"], ["evidence_check", "reused"], ["task", "completed"]],
         label
       );
-      assert.equal(native.finished.run.approvalGates[0].status, "approved", label);
+      assert.equal(langgraph.finished.run.approvalGates[0].status, "approved", label);
     } else {
-      assert.equal(native.writes, 0, label);
       assert.equal(langgraph.writes, 0, label);
       assert.equal(
-        native.decided.body.response.agentAnswer,
+        langgraph.decided.body.response.agentAnswer,
         "Create Task was not run: the approval was denied.",
         label
       );
       assert.deepStrictEqual(
-        native.finished.run.events
+        langgraph.finished.run.events
           .filter((event) => event.type === "unified_graph_executed")
           .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.reason]),
         [["document", "reused", null], ["evidence_check", "reused", null], ["task", "skipped", "approval_denied"]],
         label
       );
-      assert.equal(native.finished.run.approvalGates[0].status, "denied", label);
+      assert.equal(langgraph.finished.run.approvalGates[0].status, "denied", label);
     }
 
-    // Native never touched LangGraph and wrote no thread. On LangGraph the
-    // graph was scheduled there at the pause and again at the decision, both
-    // bound to the run; the parked thread held exactly one pending
-    // interrupt of public ids for the task node, the receipts of the two
-    // nodes that ran, no resume value, and no text; the finished run carries
-    // no thread on either runtime.
-    assert.deepStrictEqual(native.pauseInvocations, { graph: [], plan: [] }, label);
-    assert.deepStrictEqual(native.decisionInvocations, { graph: [], plan: [] }, label);
-    assert.equal(native.pausedThread, null, label);
-    assert.equal(native.pausedRecord, null, label);
+    // The graph was scheduled on LangGraph at the pause and again at the
+    // decision, both bound to the run; the parked thread held exactly one
+    // pending interrupt of public ids for the task node, the receipts of the
+    // two nodes that ran, no resume value, and no text; the finished run
+    // carries no thread.
     assert.equal(langgraph.pauseInvocations.graph.length, 1, label);
     assert.deepStrictEqual(langgraph.pauseInvocations.plan, [], label);
     assert.deepStrictEqual(
@@ -767,7 +758,6 @@ test("a v3 graph parked at its approval gate through POST /chat is approved or d
     assert.notEqual(langgraph.pausedRecord, null, label);
     assertNoText(langgraph.pausedRecord, privateTexts(langgraph.gate));
     assert.equal(langgraph.finishedRecord, null, label);
-    assert.equal(native.finishedRecord, null, label);
   }
 });
 
@@ -821,12 +811,11 @@ test("on LangGraph the approval continues the parked thread itself: the Capabili
   );
 });
 
-// Under AGENT_RUNTIME=langgraph alone the route streams on its native branch
-// (no relay), and the v3 graph LangGraph schedules is invoked without the
-// relay, so its nodes emit to the sink the native branch bound around the
-// run: the graph's steps must reach the client exactly as natively. With the
-// outer dial as well, the route streams through the LangGraph relay, and the
-// same bytes come out.
+// In the production setting the route streams on its native branch (no
+// relay), and the v3 graph LangGraph schedules is invoked without the relay,
+// so its nodes emit to the sink the native branch bound around the run: the
+// graph's steps must reach the client in order. With the outer dial as well,
+// the route streams through the LangGraph relay, and the same bytes come out.
 test("POST /chat/stream over the v3 graph relays identical SSE bytes on every pass up to the approval pause, and the graph's events reach the client in order", async () => {
   const passes = {};
 
@@ -861,42 +850,45 @@ test("POST /chat/stream over the v3 graph relays identical SSE bytes on every pa
     );
   }
 
-  const { langgraph, native, outerPlan } = passes;
+  const { langgraph, outerPlan } = passes;
 
-  assert.equal(native.status, 200);
-  for (const [pass, other] of [["langgraph", langgraph], ["outerPlan", outerPlan]]) {
-    assert.equal(other.status, 200, pass);
-    assert.equal(maskText(other.text), maskText(native.text), pass);
-    assert.deepStrictEqual(mask(other.frames), mask(native.frames), pass);
-    assert.deepStrictEqual(mask(other.run), mask(native.run), pass);
-  }
-  const events = native.frames.map((frame) => frame.event);
+  assert.equal(langgraph.status, 200);
+  assert.equal(outerPlan.status, 200);
+  // The production setting streams exactly the bytes, frames and run the
+  // native scheduler did (the golden); the outer dial changes none of them.
+  assertMatchesGraphGolden("langgraph-routes", "v3-stream-approval-pause", {
+    frames: mask(langgraph.frames),
+    run: mask(langgraph.run),
+    text: maskText(langgraph.text),
+  });
+  assert.equal(maskText(outerPlan.text), maskText(langgraph.text));
+  assert.deepStrictEqual(mask(outerPlan.frames), mask(langgraph.frames));
+  assert.deepStrictEqual(mask(outerPlan.run), mask(langgraph.run));
+  const events = langgraph.frames.map((frame) => frame.event);
   assert.deepStrictEqual(events.slice(-2), ["result", "done"]);
-  assert.equal(native.frames.at(-2).data.status, 200);
-  assert.equal(native.frames.at(-2).data.body.clarification?.reason, "capability_approval_required");
-  assert.equal(native.run.run.status, "waiting_for_user");
+  assert.equal(langgraph.frames.at(-2).data.status, 200);
+  assert.equal(langgraph.frames.at(-2).data.body.clarification?.reason, "capability_approval_required");
+  assert.equal(langgraph.run.run.status, "waiting_for_user");
   // The graph's own steps were streamed (the document node and its check),
   // before the result; nothing of the answer text other than through the
-  // compact step summaries the native stream carries too.
-  const stepTypes = native.frames
+  // compact step summaries.
+  const stepTypes = langgraph.frames
     .filter((frame) => frame.event === "trace_step")
     .map((frame) => frame.data.step?.type);
   assert.ok(stepTypes.length > 0, JSON.stringify(events));
   // One graph_node step per node that ran before the pause (the document node
-  // and its check), each emitted from inside a graph node -- on LangGraph,
-  // inside a LangGraph node -- between the plan and the approval gate.
+  // and its check), each emitted from inside a LangGraph node, between the
+  // plan and the approval gate.
   assert.deepStrictEqual(stepTypes, ["plan", "graph_node", "graph_node", "capability_approval_gate"]);
-  assert.deepStrictEqual(native.run.run.steps.map((step) => step.type), ["graph_node", "graph_node"]);
-  assert.deepStrictEqual(native.invocations, { graph: [], plan: [] });
-  // Both LangGraph passes scheduled the v3 graph on LangGraph and never the
-  // outer plan (the graph answers the request); only the outer dial moved
-  // the stream onto the relay.
+  assert.deepStrictEqual(langgraph.run.run.steps.map((step) => step.type), ["graph_node", "graph_node"]);
+  // Both passes scheduled the v3 graph on LangGraph and never the outer plan
+  // (the graph answers the request); only the outer dial moved the stream
+  // onto the relay.
   for (const [pass, other] of [["langgraph", langgraph], ["outerPlan", outerPlan]]) {
     assert.equal(other.invocations.graph.length, 1, pass);
     assert.equal(other.invocations.graph[0].boundToRun, true, pass);
     assert.deepStrictEqual(other.invocations.plan, [], pass);
   }
-  assert.equal(native.relayCalls, 0);
   assert.equal(langgraph.relayCalls, 0);
   assert.equal(outerPlan.relayCalls, 1);
 });
@@ -993,22 +985,20 @@ test("the V1 Capability approval pauses the run and resumes it through POST /age
     });
   }
 
-  const { langgraph, native, outerPlan } = passes;
+  const { langgraph, outerPlan } = passes;
 
-  for (const [pass, other] of [["langgraph", langgraph], ["outerPlan", outerPlan]]) {
-    assert.deepStrictEqual(mask(other.paused), mask(native.paused), pass);
-    assert.deepStrictEqual(mask(other.pausedRun), mask(native.pausedRun), pass);
-    assert.deepStrictEqual(mask(other.approved), mask(native.approved), pass);
-    assert.deepStrictEqual(mask(other.finished), mask(native.finished), pass);
-    assert.deepStrictEqual(other.calls, native.calls, pass);
-  }
-  assert.deepStrictEqual(native.calls, [WEB_QUESTION]);
-  assert.equal(native.approved.status, 200);
-  assert.equal(native.approved.body.response.agentMode, "web");
-  assert.equal(native.approved.body.run.status, "completed");
-  assert.equal(native.finished.run.approvalGates[0].status, "approved");
+  assert.deepStrictEqual(mask(outerPlan.paused), mask(langgraph.paused));
+  assert.deepStrictEqual(mask(outerPlan.pausedRun), mask(langgraph.pausedRun));
+  assert.deepStrictEqual(mask(outerPlan.approved), mask(langgraph.approved));
+  assert.deepStrictEqual(mask(outerPlan.finished), mask(langgraph.finished));
+  assert.deepStrictEqual(outerPlan.calls, langgraph.calls);
+  assert.deepStrictEqual(langgraph.calls, [WEB_QUESTION]);
+  assert.equal(langgraph.approved.status, 200);
+  assert.equal(langgraph.approved.body.response.agentMode, "web");
+  assert.equal(langgraph.approved.body.run.status, "completed");
+  assert.equal(langgraph.finished.run.approvalGates[0].status, "approved");
   assert.deepStrictEqual(
-    native.finished.run.events.map((event) => event.type),
+    langgraph.finished.run.events.map((event) => event.type),
     [
       "run_created",
       "run_prepared",
@@ -1023,11 +1013,9 @@ test("the V1 Capability approval pauses the run and resumes it through POST /age
     ]
   );
   // With the outer dial the V1 plan was scheduled on LangGraph for the
-  // request that parked the Capability; AGENT_RUNTIME=langgraph alone kept it
-  // on the native loop. The approval action resumes the paused step itself
-  // (the step executor, no outer plan) on every pass.
-  assert.deepStrictEqual(native.pauseInvocations, { graph: [], plan: [] });
-  assert.deepStrictEqual(native.decisionInvocations, { graph: [], plan: [] });
+  // request that parked the Capability; the production setting kept it on the
+  // native loop. The approval action resumes the paused step itself (the step
+  // executor, no outer plan) on every pass.
   assert.deepStrictEqual(langgraph.pauseInvocations, { graph: [], plan: [] });
   assert.deepStrictEqual(langgraph.decisionInvocations, { graph: [], plan: [] });
   assert.equal(outerPlan.pauseInvocations.plan.length, 1);
@@ -1040,125 +1028,124 @@ test("the V1 Capability approval pauses the run and resumes it through POST /age
 // A background task whose v3 graph pauses for approval
 // ---------------------------------------------------------------------------
 
-test("a background task runs the v3 graph, parks at the gate, and its approve action re-enters the SAME graph identically on both runtimes", async () => {
-  const passes = {};
+test("a background task runs the v3 graph, parks at the gate, and its approve action re-enters the SAME graph", async () => {
+  const langgraph = await onRuntime(
+    "langgraph",
+    async () => {
+      const scheduled = [];
+      const drain = async () => {
+        while (scheduled.length > 0) {
+          await Promise.all(scheduled.splice(0));
+        }
+      };
 
-  for (const runtime of RUNTIMES) {
-    passes[runtime] = await onRuntime(
-      runtime,
-      async () => {
-        const scheduled = [];
-        const drain = async () => {
-          while (scheduled.length > 0) {
-            await Promise.all(scheduled.splice(0));
-          }
-        };
-
-        return withUnifiedApp(
-          {
-            createAgentTaskId: () => "routes-approval",
-            jobSchedule: (work) => {
-              scheduled.push(Promise.resolve().then(work));
-            },
-            taskStore: createInMemoryTaskStore(),
-            workspaceArtifactStore: createInMemoryWorkspaceArtifactStore(),
+      return withUnifiedApp(
+        {
+          createAgentTaskId: () => "routes-approval",
+          jobSchedule: (work) => {
+            scheduled.push(Promise.resolve().then(work));
           },
-          async (app) => {
-            const taskUrl = `${app.baseUrl}/tasks/${encodeURIComponent("agent_goal:routes-approval")}`;
-            const created = await postJson(
-              `${app.baseUrl}/agent-tasks`,
-              {
-                docIds: [UNIFIED_DOC_ID],
-                maxIterations: 2,
-                question: APPROVAL_TASK_QUESTION,
-                sessionId: UNIFIED_SESSION_ID,
-                userId: UNIFIED_ACCESS_SCOPE.userId,
-              },
-              unifiedHeaders
-            );
+          taskStore: createInMemoryTaskStore(),
+          workspaceArtifactStore: createInMemoryWorkspaceArtifactStore(),
+        },
+        async (app) => {
+          const taskUrl = `${app.baseUrl}/tasks/${encodeURIComponent("agent_goal:routes-approval")}`;
+          const created = await postJson(
+            `${app.baseUrl}/agent-tasks`,
+            {
+              docIds: [UNIFIED_DOC_ID],
+              maxIterations: 2,
+              question: APPROVAL_TASK_QUESTION,
+              sessionId: UNIFIED_SESSION_ID,
+              userId: UNIFIED_ACCESS_SCOPE.userId,
+            },
+            unifiedHeaders
+          );
 
-            assert.equal(created.status, 202, runtime);
-            await drain();
+          assert.equal(created.status, 202);
+          await drain();
 
-            const waiting = await getJson(taskUrl, unifiedHeaders);
-            const pauseInvocations = takeInvocations();
-            const runId = waiting.body.result?.agentRunId;
-            const gate = waiting.body.result?.approvalGates?.[0];
+          const waiting = await getJson(taskUrl, unifiedHeaders);
+          const pauseInvocations = takeInvocations();
+          const runId = waiting.body.result?.agentRunId;
+          const gate = waiting.body.result?.approvalGates?.[0];
 
-            assert.equal(waiting.status, 200, runtime);
-            assert.equal(waiting.body.status, "waiting_for_user", runtime);
-            assert.equal(waiting.body.requiredUserAction, "approve_capability", runtime);
-            assert.ok(gate?.id, runtime);
-            assert.equal(app.writes.length, 0, runtime);
+          assert.equal(waiting.status, 200);
+          assert.equal(waiting.body.status, "waiting_for_user");
+          assert.equal(waiting.body.requiredUserAction, "approve_capability");
+          assert.ok(gate?.id);
+          assert.equal(app.writes.length, 0);
 
-            const pausedRun = await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
-            const pausedThread = await readThread(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
-            const approved = await postJson(
-              `${taskUrl}/actions/${AGENT_TASK_ACTIONS.approve}`,
-              { approvalObjectHash: gate.approvalObjectHash, gateId: gate.id },
-              unifiedHeaders
-            );
+          const pausedRun = await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
+          const pausedThread = await readThread(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
+          const approved = await postJson(
+            `${taskUrl}/actions/${AGENT_TASK_ACTIONS.approve}`,
+            { approvalObjectHash: gate.approvalObjectHash, gateId: gate.id },
+            unifiedHeaders
+          );
 
-            assert.equal(approved.status, 202, runtime);
-            assert.equal(approved.body.task.status, "queued", runtime);
-            await drain();
+          assert.equal(approved.status, 202);
+          assert.equal(approved.body.task.status, "queued");
+          await drain();
 
-            const completed = await getJson(taskUrl, unifiedHeaders);
-            const decisionInvocations = takeInvocations();
-            const finished = await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
+          const completed = await getJson(taskUrl, unifiedHeaders);
+          const decisionInvocations = takeInvocations();
+          const finished = await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId);
 
-            return {
-              completed,
-              decisionInvocations,
-              finished,
-              finishedRecord: await rawRecord(app.store, UNIFIED_ACCESS_SCOPE, runId),
-              pauseInvocations,
-              pausedRun,
-              pausedThread: pausedThread
-                ? { interrupts: pausedThread.interrupts.map((pending) => pending.value), receipts: receiptStatuses(pausedThread) }
-                : null,
-              waiting,
-              writes: app.writes.length,
-            };
-          }
-        );
-      },
-      UNIFIED_ENV
-    );
-  }
+          return {
+            completed,
+            decisionInvocations,
+            finished,
+            finishedRecord: await rawRecord(app.store, UNIFIED_ACCESS_SCOPE, runId),
+            pauseInvocations,
+            pausedRun,
+            pausedThread: pausedThread
+              ? { interrupts: pausedThread.interrupts.map((pending) => pending.value), receipts: receiptStatuses(pausedThread) }
+              : null,
+            waiting,
+            writes: app.writes.length,
+          };
+        }
+      );
+    },
+    UNIFIED_ENV
+  );
 
-  const { langgraph, native } = passes;
-
-  assert.deepStrictEqual(mask(langgraph.waiting), mask(native.waiting));
-  assert.deepStrictEqual(mask(langgraph.pausedRun), mask(native.pausedRun));
-  assert.deepStrictEqual(mask(langgraph.completed), mask(native.completed));
-  assert.deepStrictEqual(mask(langgraph.finished), mask(native.finished));
+  // The task while it waits, the parked run, the completed task and the
+  // finished run are exactly what the native scheduler left (the golden).
+  assertMatchesGraphGolden("langgraph-routes", "background-task-approval-reentry", {
+    completed: mask(langgraph.completed),
+    finished: mask(langgraph.finished),
+    pausedRun: mask(langgraph.pausedRun),
+    waiting: mask(langgraph.waiting),
+  });
+  assert.equal(langgraph.pausedRun.run.status, "waiting_for_user");
+  assert.equal(langgraph.pausedRun.checkpoint.phase, "awaiting_approval");
   // The approved iteration is the parked run's own answer: one agent run in
   // all, re-entered rather than re-planned. (What the task does after that
-  // is the goal-deliverable step of agent-goal-deliverables.js, the same on
-  // both runtimes and no part of the graph; it is compared above, not pinned
-  // here.)
-  const iterations = native.completed.body.items.filter((item) => /^iteration-/.test(item.id));
+  // is the goal-deliverable step of agent-goal-deliverables.js, no part of
+  // the graph, and not pinned here.)
+  const iterations = langgraph.completed.body.items.filter((item) => /^iteration-/.test(item.id));
   assert.deepStrictEqual(
     iterations.map((item) => [item.id, item.status, item.result.agentMode]),
     [["iteration-1", "waiting_for_user", "clarification"], ["iteration-2", "completed", "workspace_action"]]
   );
   assert.match(iterations[1].summary, /^Task recorded as task /);
-  assert.equal(native.completed.body.result.agentRunId, native.waiting.body.result.agentRunId);
-  assert.equal(native.completed.body.counts.agentRuns, 1);
-  assert.equal(native.finished.run.status, "completed");
-  assert.equal(native.finished.checkpoint.phase, "completed");
-  assert.equal(native.writes, 1);
+  assert.equal(langgraph.completed.body.result.agentRunId, langgraph.waiting.body.result.agentRunId);
+  assert.equal(langgraph.completed.body.counts.agentRuns, 1);
+  assert.equal(langgraph.finished.run.status, "completed");
+  assert.equal(langgraph.finished.checkpoint.phase, "completed");
   assert.equal(langgraph.writes, 1);
   assert.deepStrictEqual(
-    native.finished.run.events
+    langgraph.finished.run.events
       .filter((event) => event.type === "unified_graph_executed")
       .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
     [["document", "reused"], ["evidence_check", "reused"], ["task", "completed"]]
   );
-  assert.deepStrictEqual(native.pauseInvocations, { graph: [], plan: [] });
-  assert.deepStrictEqual(native.decisionInvocations, { graph: [], plan: [] });
-  assert.equal(native.pausedThread, null);
+  // The graph was scheduled on LangGraph at the pause and again at the
+  // re-entry; the parked thread held the task node's pending interrupt and
+  // the receipts of the two nodes that ran; the finished run carries no
+  // thread.
   assert.equal(langgraph.pauseInvocations.graph.length, 1);
   assert.equal(langgraph.decisionInvocations.graph.length, 1);
   assert.deepStrictEqual(langgraph.pauseInvocations.plan, []);
@@ -1168,102 +1155,101 @@ test("a background task runs the v3 graph, parks at the gate, and its approve ac
     receipts: { document: "completed", evidence_check: "completed" },
   });
   assert.equal(langgraph.finishedRecord, null);
-  assert.equal(native.finishedRecord, null);
 });
 
 // ---------------------------------------------------------------------------
 // Startup recovery through the app's own recoverOnStartup
 // ---------------------------------------------------------------------------
 
-test("startup recovery of a v3 run another app instance left at a node boundary resumes it identically on both runtimes", async () => {
-  const passes = {};
+test("startup recovery of a v3 run another app instance left at a node boundary resumes it from the thread and the checkpoint", async () => {
+  const langgraph = await onRuntime(
+    "langgraph",
+    async () => {
+      const store = newStore();
+      const planner = createProposalAdapter(createDocumentLoopProposal);
+      // The first instance exits right after the primary check's
+      // checkpoint write; every later write of that process fails.
+      const { service: crashing, state } = createCrashingRunService(newService(store), {
+        crashAfter: (method, args) =>
+          method === "saveExecutionGraphCheckpoint" &&
+          checkpointHasNodeRun(args.checkpoint, "primary_check") &&
+          !checkpointHasNodeRun(args.checkpoint, "follow_up"),
+      });
+      const firstRag = createDocumentLoopRagService({ followUp: "resolves" });
+      const crashed = await withApp(
+        {
+          agentRunService: crashing,
+          ragService: appRagService(firstRag),
+          unifiedGraphPlannerAdapter: planner,
+        },
+        async (app) => {
+          const response = await postJson(
+            `${app.baseUrl}/chat`,
+            unifiedRequest(DOCUMENT_LOOP_QUESTION),
+            unifiedHeaders
+          );
 
-  for (const runtime of RUNTIMES) {
-    passes[runtime] = await onRuntime(
-      runtime,
-      async () => {
-        const store = newStore();
-        const planner = createProposalAdapter(createDocumentLoopProposal);
-        // The first instance exits right after the primary check's
-        // checkpoint write; every later write of that process fails.
-        const { service: crashing, state } = createCrashingRunService(newService(store), {
-          crashAfter: (method, args) =>
-            method === "saveExecutionGraphCheckpoint" &&
-            checkpointHasNodeRun(args.checkpoint, "primary_check") &&
-            !checkpointHasNodeRun(args.checkpoint, "follow_up"),
-        });
-        const firstRag = createDocumentLoopRagService({ followUp: "resolves" });
-        const crashed = await withApp(
-          {
-            agentRunService: crashing,
-            ragService: appRagService(firstRag),
-            unifiedGraphPlannerAdapter: planner,
-          },
-          async (app) => {
-            const response = await postJson(
-              `${app.baseUrl}/chat`,
-              unifiedRequest(DOCUMENT_LOOP_QUESTION),
-              unifiedHeaders
-            );
+          return { invocations: takeInvocations(), response };
+        }
+      );
 
-            return { invocations: takeInvocations(), response };
-          }
-        );
+      assert.equal(crashed.response.status, 500);
+      assert.equal(state.runIds.length, 1);
+      assert.deepStrictEqual(firstRag.calls.map((call) => call.phase), ["primary"]);
+      const runId = state.runIds[0];
+      const before = await loadRun(newService(store), UNIFIED_ACCESS_SCOPE, runId);
+      const beforeRecord = await rawRecord(store, UNIFIED_ACCESS_SCOPE, runId);
 
-        assert.equal(crashed.response.status, 500, runtime);
-        assert.equal(state.runIds.length, 1, runtime);
-        assert.deepStrictEqual(firstRag.calls.map((call) => call.phase), ["primary"], runtime);
-        const runId = state.runIds[0];
-        const before = await loadRun(newService(store), UNIFIED_ACCESS_SCOPE, runId);
-        const beforeRecord = await rawRecord(store, UNIFIED_ACCESS_SCOPE, runId);
+      assert.equal(before.run.status, "running");
+      assert.equal(before.checkpoint.phase, "running");
 
-        assert.equal(before.run.status, "running", runtime);
-        assert.equal(before.checkpoint.phase, "running", runtime);
+      // The second instance's startup recovery (createApp runs it before
+      // the routes exist) finds the run and resumes it.
+      const secondRag = createDocumentLoopRagService({ followUp: "resolves" });
+      const recovered = await withApp(
+        {
+          agentRunService: newService(store),
+          ragService: appRagService(secondRag),
+          recovery: null,
+          unifiedGraphPlannerAdapter: planner,
+        },
+        async (app) => ({
+          after: await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId),
+          afterRecord: await rawRecord(store, UNIFIED_ACCESS_SCOPE, runId),
+          startupInvocations: app.startupInvocations,
+        })
+      );
 
-        // The second instance's startup recovery (createApp runs it before
-        // the routes exist) finds the run and resumes it.
-        const secondRag = createDocumentLoopRagService({ followUp: "resolves" });
-        const recovered = await withApp(
-          {
-            agentRunService: newService(store),
-            ragService: appRagService(secondRag),
-            recovery: null,
-            unifiedGraphPlannerAdapter: planner,
-          },
-          async (app) => ({
-            after: await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId),
-            afterRecord: await rawRecord(store, UNIFIED_ACCESS_SCOPE, runId),
-            startupInvocations: app.startupInvocations,
-          })
-        );
+      return {
+        ...recovered,
+        before,
+        beforeRecord,
+        crashInvocations: crashed.invocations,
+        secondCalls: secondRag.calls.map((call) => call.phase),
+      };
+    },
+    { ...UNIFIED_ENV, AGENT_RUN_RECOVERY_MODE: "auto" }
+  );
 
-        return {
-          ...recovered,
-          before,
-          beforeRecord,
-          crashInvocations: crashed.invocations,
-          secondCalls: secondRag.calls.map((call) => call.phase),
-        };
-      },
-      { ...UNIFIED_ENV, AGENT_RUN_RECOVERY_MODE: "auto" }
-    );
-  }
-
-  const { langgraph, native } = passes;
   const countEvents = (run, type) => run.events.filter((event) => event.type === type).length;
 
-  assert.deepStrictEqual(mask(langgraph.before), mask(native.before));
-  assert.deepStrictEqual(mask(langgraph.after), mask(native.after));
-  assert.deepStrictEqual(langgraph.secondCalls, native.secondCalls);
-  assert.deepStrictEqual(native.secondCalls, ["follow_up"]);
-  assert.equal(native.after.run.status, "completed");
-  assert.equal(native.after.checkpoint.phase, "completed");
-  assert.ok(native.after.checkpoint.finalization);
-  assert.equal(countEvents(native.after.run, "skill_graph_resume_claimed"), 1);
-  assert.equal(countEvents(native.after.run, "auto_recovery_completed"), 1);
-  assert.equal(countEvents(native.after.run, "manual_recovery_required"), 0);
+  // The run the crashed instance left and the run recovery completed, with
+  // their checkpoints, and the calls the second instance made, are exactly
+  // what the native scheduler left and made (the golden).
+  assertMatchesGraphGolden("langgraph-routes", "v3-startup-recovery", {
+    after: mask(langgraph.after),
+    before: mask(langgraph.before),
+    secondCalls: langgraph.secondCalls,
+  });
+  assert.deepStrictEqual(langgraph.secondCalls, ["follow_up"]);
+  assert.equal(langgraph.after.run.status, "completed");
+  assert.equal(langgraph.after.checkpoint.phase, "completed");
+  assert.ok(langgraph.after.checkpoint.finalization);
+  assert.equal(countEvents(langgraph.after.run, "skill_graph_resume_claimed"), 1);
+  assert.equal(countEvents(langgraph.after.run, "auto_recovery_completed"), 1);
+  assert.equal(countEvents(langgraph.after.run, "manual_recovery_required"), 0);
   assert.deepStrictEqual(
-    native.after.run.events
+    langgraph.after.run.events
       .filter((event) => event.type === "unified_graph_executed")
       .at(-1).payload.nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status]),
     [
@@ -1273,13 +1259,10 @@ test("startup recovery of a v3 run another app instance left at a node boundary 
       ["follow_up_check", "completed"],
     ]
   );
-  // Native: no thread at any time, nothing on LangGraph. LangGraph: the
-  // crashed instance left its thread on the run row; recovery read it before
-  // claiming, then resumed on a fresh invocation seeded from the checkpoint
-  // (the two settled nodes reused), and the completed run carries no thread.
-  assert.deepStrictEqual(native.crashInvocations, { graph: [], plan: [] });
-  assert.deepStrictEqual(native.startupInvocations, { graph: [], plan: [] });
-  assert.equal(native.beforeRecord, null);
+  // The crashed instance left its thread on the run row; recovery read it
+  // before claiming, then resumed on a fresh invocation seeded from the
+  // checkpoint (the two settled nodes reused), and the completed run carries
+  // no thread.
   assert.equal(langgraph.crashInvocations.graph.length, 1);
   assert.notEqual(langgraph.beforeRecord, null);
   assertNoText(langgraph.beforeRecord, [DOCUMENT_LOOP_QUESTION, "60 days notice", "30 days written notice"]);
@@ -1292,5 +1275,4 @@ test("startup recovery of a v3 run another app instance left at a node boundary 
     },
   ]);
   assert.equal(langgraph.afterRecord, null);
-  assert.equal(native.afterRecord, null);
 });

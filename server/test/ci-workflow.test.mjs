@@ -213,9 +213,9 @@ test("coverage gate discovers exactly the test files npm test runs", async () =>
 });
 
 test("npm test and the coverage gate hand their test children no LangSmith tracing variable", async () => {
-  // AGENT_RUNTIME defaults to langgraph, so every suite that runs a guarded
-  // graph reaches the LangGraph executor, which refuses to run while a
-  // LangSmith tracing variable is "true". Both runners strip them from the
+  // Every suite that runs a guarded graph reaches the LangGraph executor (the
+  // only graph scheduler since ADR 0001 phase 6), which refuses to run while
+  // a LangSmith tracing variable is "true". Both runners strip them from the
   // child environment so a developer shell cannot fail those suites.
   const compact = (source) => source.replace(/\s+/g, "");
 

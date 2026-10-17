@@ -30,11 +30,11 @@ import { AGENT_INTERRUPT_TYPES, AgentRunInterruptError } from "../rag/agent-inte
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
 import { CUSTOM_RAG_SKILL_CONTRACT } from "../rag/skills/custom/custom-skill-contract.js";
 
-// The per-node half of runExecutionGraph, exercised directly. A second
-// scheduler (LangGraph) drives nodes through exactly these functions, so what
-// they promise on their own -- which flag is raised when, which status a node
-// is in while its checkpoint is written, what a launch returns -- is the
-// contract that scheduler builds on. runExecutionGraph's own behaviour stays
+// The per-node half of a graph run, exercised directly. The scheduler
+// (LangGraph, runExecutionGraphOnLangGraph) drives nodes through exactly these
+// functions, so what they promise on their own -- which flag is raised when,
+// which status a node is in while its checkpoint is written, what a launch
+// returns -- is the contract it builds on. The scheduler's own behaviour is
 // pinned by agent-execution-graph-runner.test.mjs.
 //
 // Timing is asserted with deferred promises, never with elapsed milliseconds.
@@ -149,7 +149,7 @@ test("the runner re-exports the node module's status vocabularies unchanged", ()
   assert.equal(runnerModule.EXECUTION_GRAPH_RUN_STATUSES, EXECUTION_GRAPH_RUN_STATUSES);
 });
 
-test("decideExecutionGraphNode applies the native precedence of skip reasons", () => {
+test("decideExecutionGraphNode applies the scheduler's precedence of skip reasons", () => {
   const { completed, failed, pending, reused, running, skipped } = EXECUTION_GRAPH_NODE_STATUSES;
   const { hold, launch, skip, wait } = EXECUTION_GRAPH_SCHEDULE_DECISIONS;
   const conditional = node({
@@ -517,7 +517,7 @@ test("createExecutionGraphStepLifecycle fences every transition only under a res
   }
 });
 
-test("createExecutionGraphNodeContext applies runExecutionGraph's defaults and is frozen", () => {
+test("createExecutionGraphNodeContext applies the scheduler's defaults and is frozen", () => {
   const context = createExecutionGraphNodeContext({
     authorizedDocIds: ["doc-1", "doc-2"],
     docIds: ["doc-1"],

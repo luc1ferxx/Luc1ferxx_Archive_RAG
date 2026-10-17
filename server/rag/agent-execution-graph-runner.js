@@ -9,9 +9,7 @@ import {
   createExecutionGraphNodeStates,
   createExecutionGraphRunControl,
   decideExecutionGraphNode,
-  executeExecutionGraphNodeLaunch,
   orderExecutionGraphNodeStatesByLayer,
-  prepareExecutionGraphNodeLaunch,
   recordExecutionGraphNodeSkip,
 } from "./agent-execution-graph-node.js";
 import {
@@ -20,35 +18,27 @@ import {
   compileExecutionGraph,
 } from "./agent-execution-graph.js";
 
-// Scheduler for a validated ExecutionGraph.
+// The two ends of a validated ExecutionGraph's run that do not depend on how
+// its nodes are scheduled, plus the replay of a settled graph.
 //
-// It owns everything the planner is not allowed to decide: what runs, when,
-// how many at once, what each node is allowed to read, and what a failure
-// costs. The graph only says what the planner wants; this file says what
-// actually happens.
+// The runtime owns everything the planner is not allowed to decide: what
+// runs, when, how many at once, what each node is allowed to read, and what a
+// failure costs. The graph only says what the planner wants; the runtime says
+// what actually happens. Whole-graph admission (admitExecutionGraphRun)
+// decides before anything runs; the tail (finishExecutionGraphRun) decides
+// once nothing more can run. What a node does once it is launched (inputs,
+// gates, budget, the fenced lifecycle, the settle order) lives in
+// agent-execution-graph-node.js.
 //
-// What a node does once it is launched (inputs, gates, budget, the fenced
-// lifecycle, the settle order) lives in agent-execution-graph-node.js, so a
-// second scheduler can run the same nodes. This file keeps the native
-// scheduling: the validator's topological layer order as the queue
-// (orderExecutionGraphNodeStatesByLayer), the concurrency cap, side-effect
-// exclusivity, and the approval pause once nothing else can run. The two ends
-// of a run that do not depend on how nodes are scheduled -- whole-graph
-// admission before anything runs, and the tail once nothing more can run --
-// are exported, so the LangGraph scheduler (langgraph/run-execution-graph.js)
-// rejects, interrupts, pauses and reports exactly as this one does.
-//
-// Since phase 4 of docs/adr/0001-langgraph-runtime.md, LangGraph is the
-// default scheduler (AGENT_RUNTIME unset). runExecutionGraph's scheduling
-// loop is kept only as the AGENT_RUNTIME=native whole-runtime rollback switch
-// for at least one release on the new default (ADR constraint 12). LangGraph
-// no longer hands it any call: both schedulers queue in layer order, so the
-// phase-2 delegation case (a graph not declared in layer order, whose
-// declaration-order queue started a later layer first) is gone; the ADR's
-// phase 5 section records what that changed natively. It is the rollback path
-// to delete after that release. Admission, the tail (finishExecutionGraphRun),
-// the replay of a settled graph (replayExecutionGraphRun, which schedules
-// nothing) and the node module stay: LangGraph and the v3 stage run them.
+// The scheduler is LangGraph (langgraph/run-execution-graph.js
+// runExecutionGraphOnLangGraph): the validator's topological layer order
+// (orderExecutionGraphNodeStatesByLayer) as the queue, the concurrency cap,
+// side-effect exclusivity and the approval pause. Phase 6 of
+// docs/adr/0001-langgraph-runtime.md deleted the native scheduling loop
+// (runExecutionGraph) that used to live here as the AGENT_RUNTIME=native
+// rollback; what it did is frozen as golden fixtures under
+// test/fixtures/graph-goldens/. replayExecutionGraphRun schedules nothing, so
+// it needs no scheduler.
 
 export {
   EXECUTION_GRAPH_NODE_STATUSES,
@@ -58,7 +48,7 @@ export {
 
 /**
  * Whole-graph admission, before any node state exists. Returns
- * { rejected } with runExecutionGraph's rejected result when the request's
+ * { rejected } with the run's rejected result when the request's
  * docIds leave the authorized scope or the graph does not compile, and
  * otherwise { compiled, concurrencyCap, rejected: null, scopedDocIds }.
  * Nothing is run or persisted either way.
@@ -154,8 +144,8 @@ const pauseExecutionGraphRunForApproval = async ({ graph, pauseForApproval, stat
  *
  * Synchronous on every path but the approval pause, which returns the
  * (always rejecting) promise of pauseForApproval: a scheduler that returns
- * this from its own async function settles in the same turn it did when this
- * code was inline in runExecutionGraph.
+ * this from its own async function settles in the turn its last node
+ * settled.
  */
 export const finishExecutionGraphRun = ({
   context,
@@ -165,8 +155,8 @@ export const finishExecutionGraphRun = ({
   states,
   statesByNodeId,
 }) => {
-  // A rejected sibling may already have been removed from inFlight by the
-  // time a successful Promise.race winner resumes the loop.
+  // The first fatal error wins, even when a node that settled after it
+  // succeeded: the scheduler records it the moment the node rejects.
   if (control.fatalError) {
     throw control.fatalError;
   }
@@ -226,11 +216,11 @@ export const finishExecutionGraphRun = ({
  * would) throws `refuseLaunch({ nodeId })` instead: nothing is launched, so
  * no step, budget, preflight or checkpoint hook is ever reached.
  *
- * For a settled graph this is the same result and the same skip records as
- * runExecutionGraph, which then launches nothing either: in layer order a
+ * For a settled graph this is the same result and the same skip records a
+ * scheduler produces, which then launches nothing either: in layer order a
  * dependency is decided before its dependants, so one pass settles every
- * node. Takes runExecutionGraph's options and returns its result
- * synchronously (a rejected one for a graph admission refuses).
+ * node. Takes runExecutionGraphOnLangGraph's graph options and returns its
+ * result synchronously (a rejected one for a graph admission refuses).
  */
 export const replayExecutionGraphRun = ({
   authorizedDocIds,
@@ -243,7 +233,7 @@ export const replayExecutionGraphRun = ({
   maxConcurrency,
   refuseLaunch,
   registry,
-  // As runExecutionGraph: createExecutionGraphNodeContext. Only
+  // As runExecutionGraphOnLangGraph: createExecutionGraphNodeContext. Only
   // recordSkippedSkill is ever called.
   ...nodeOptions
 } = {}) => {
@@ -299,179 +289,6 @@ export const replayExecutionGraphRun = ({
     context,
     control: createExecutionGraphRunControl(),
     graph,
-    states,
-    statesByNodeId,
-  });
-};
-
-export const runExecutionGraph = async ({
-  authorizedDocIds,
-  authorizedSkillIds = null,
-  completedNodeRuns = [],
-  deniedNodeIds = [],
-  docIds = [],
-  graph,
-  limits = EXECUTION_GRAPH_LIMITS,
-  maxConcurrency,
-  pauseForApproval = null,
-  registry,
-  // accessScope, the observability and lifecycle hooks, the request values
-  // and the services every node reads: createExecutionGraphNodeContext.
-  ...nodeOptions
-} = {}) => {
-  const { compiled, concurrencyCap, rejected, scopedDocIds } = admitExecutionGraphRun({
-    authorizedDocIds,
-    authorizedSkillIds,
-    docIds,
-    graph,
-    limits,
-    maxConcurrency,
-    registry,
-  });
-
-  if (rejected) {
-    return rejected;
-  }
-
-  const { nodeOutputs, states, statesByNodeId } = createExecutionGraphNodeStates({
-    completedNodeRuns,
-    deniedNodeIds,
-    graph,
-    registry,
-  });
-  const queue = orderExecutionGraphNodeStatesByLayer({ compiled, states });
-  const context = createExecutionGraphNodeContext({
-    ...nodeOptions,
-    authorizedDocIds: scopedDocIds,
-    docIds,
-    graph,
-  });
-  const control = createExecutionGraphRunControl();
-  const inFlight = new Map();
-  const exclusiveInFlight = new Set();
-
-  const launchNode = (state) => {
-    const { node } = state;
-    // The synchronous half runs inside this scheduling pass, as it always
-    // has: the node is `running` before the loop looks at the next state, and
-    // a throw there stops the pass without waiting for nodes in flight.
-    const launch = prepareExecutionGraphNodeLaunch({ context, nodeOutputs, state });
-    const task = executeExecutionGraphNodeLaunch({
-      context,
-      control,
-      launch,
-      nodeOutputs,
-      state,
-    });
-
-    const tracked = task.catch((error) => {
-      // Promise.race can resolve from a successful sibling in the same turn
-      // that this node's checkpoint rejects. Keep the rejection independent of
-      // the in-flight map, because finally removes settled promises from it.
-      control.fatalError ??= error;
-      control.aborted = true;
-      throw error;
-    }).finally(() => {
-      inFlight.delete(node.nodeId);
-      exclusiveInFlight.delete(node.nodeId);
-    });
-
-    inFlight.set(node.nodeId, tracked);
-
-    if (!state.contract.parallelSafe) {
-      exclusiveInFlight.add(node.nodeId);
-    }
-
-    return tracked;
-  };
-
-  const hasPending = () =>
-    states.some((state) => state.status === EXECUTION_GRAPH_NODE_STATUSES.pending);
-
-  while (hasPending() || inFlight.size > 0) {
-    if (control.fatalError) {
-      await Promise.allSettled(inFlight.values());
-      throw control.fatalError;
-    }
-
-    let progressed = false;
-
-    for (const state of queue) {
-      if (state.status !== EXECUTION_GRAPH_NODE_STATUSES.pending) {
-        continue;
-      }
-
-      const { decision, reason } = decideExecutionGraphNode({
-        aborted: control.aborted,
-        dependencyStatuses: (state.node.dependsOn ?? []).map(
-          (dependencyId) => statesByNodeId.get(dependencyId)?.status
-        ),
-        graphVersion: graph.version,
-        interrupted: Boolean(control.interrupt),
-        node: state.node,
-        nodeOutputs,
-      });
-
-      if (decision === EXECUTION_GRAPH_SCHEDULE_DECISIONS.skip) {
-        recordExecutionGraphNodeSkip({ context, reason, state });
-        progressed = true;
-        continue;
-      }
-
-      if (decision !== EXECUTION_GRAPH_SCHEDULE_DECISIONS.launch) {
-        continue;
-      }
-
-      // Layer order is the queue: a ready node that cannot start yet blocks
-      // the ones behind it, so scheduling stays reproducible instead of
-      // depending on which skill happened to resolve first. A held-back node
-      // of an earlier layer is never overtaken by one of a later layer;
-      // LangGraph enters the layers superstep by superstep, in this order.
-      if (inFlight.size >= concurrencyCap) {
-        break;
-      }
-
-      const needsExclusivity = !state.contract.parallelSafe;
-
-      if ((needsExclusivity || exclusiveInFlight.size > 0) && inFlight.size > 0) {
-        break;
-      }
-
-      const launched = launchNode(state);
-      progressed = true;
-
-      if (launched && needsExclusivity) {
-        break;
-      }
-    }
-
-    if (inFlight.size > 0) {
-      try {
-        await Promise.race(inFlight.values());
-      } catch (error) {
-        control.fatalError ??= error;
-      }
-
-      if (control.fatalError) {
-        // A checkpoint failure must stop scheduling. Other already-running
-        // nodes may settle; await them so their persistence errors cannot be
-        // left unhandled while no dependent is launched.
-        await Promise.allSettled(inFlight.values());
-        throw control.fatalError;
-      }
-      continue;
-    }
-
-    if (!progressed) {
-      break;
-    }
-  }
-
-  return finishExecutionGraphRun({
-    context,
-    control,
-    graph,
-    pauseForApproval,
     states,
     statesByNodeId,
   });

@@ -1,0 +1,1739 @@
+{
+  "outcome": {
+    "checks": [
+      {
+        "category": "planner",
+        "detail": {
+          "candidateIntentIds": [
+            "skill_chain_compare_risk",
+            "compare_documents",
+            "research_brief",
+            "document"
+          ],
+          "experienceMemory": {
+            "applied": false,
+            "hintCount": 0
+          },
+          "fallback": false,
+          "fallbackReason": null,
+          "requestedPlannerId": "deterministic",
+          "selectedIntentId": "compare_documents",
+          "selectedMode": "compare_documents",
+          "selectedPlannerId": "deterministic",
+          "selectionReason": "Pin the narrower compare intent to test atomic DAG composition.",
+          "status": "selected"
+        },
+        "id": "compare_only_intent_selected",
+        "label": "The upstream intent selected only comparison",
+        "passed": true
+      },
+      {
+        "category": "planner",
+        "detail": {
+          "errorCodes": [],
+          "executed": true,
+          "fallback": null,
+          "mode": "guarded",
+          "nodeSkills": [
+            "compare_documents",
+            "risk_review"
+          ],
+          "nodeStatuses": [
+            "completed",
+            "completed"
+          ],
+          "plannerFallback": false,
+          "plannerFallbackReason": null,
+          "riskDependsOnCompare": true,
+          "selectedPlannerId": "llm_dag",
+          "status": "completed"
+        },
+        "id": "real_dag_planner_selected",
+        "label": "The guarded DAG used the LLM planner without fallback",
+        "passed": true
+      },
+      {
+        "category": "execution",
+        "detail": {
+          "errorCodes": [],
+          "executed": true,
+          "fallback": null,
+          "mode": "guarded",
+          "nodeSkills": [
+            "compare_documents",
+            "risk_review"
+          ],
+          "nodeStatuses": [
+            "completed",
+            "completed"
+          ],
+          "plannerFallback": false,
+          "plannerFallbackReason": null,
+          "riskDependsOnCompare": true,
+          "selectedPlannerId": "llm_dag",
+          "status": "completed"
+        },
+        "id": "dag_composed_compare_then_risk",
+        "label": "The DAG composed comparison then risk review",
+        "passed": true
+      },
+      {
+        "category": "observability",
+        "detail": [
+          "compare_documents",
+          "risk_review"
+        ],
+        "id": "dag_selected_skills_observed",
+        "label": "Both executed skills are visible in Agent observability",
+        "passed": true
+      },
+      {
+        "category": "execution",
+        "detail": [
+          [
+            "agreement-a",
+            "agreement-b"
+          ],
+          [
+            "agreement-a",
+            "agreement-b"
+          ]
+        ],
+        "id": "dag_kept_document_scope",
+        "label": "Both skills read exactly the two selected documents",
+        "passed": true
+      }
+    ],
+    "description": "With only the compare intent selected, the DAG planner must compose comparison and risk review from the authorized atomic Skill catalog.",
+    "failedCheckCount": 0,
+    "id": "planner_dynamic_skill_graph",
+    "label": "Real DAG planner composes atomic skills",
+    "passed": true,
+    "response": {
+      "agentMode": "compare_documents",
+      "agentSkills": [
+        {
+          "label": "Compare Documents",
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        },
+        {
+          "label": "Risk Review",
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        }
+      ],
+      "intentPlanner": {
+        "candidateIntentIds": [
+          "skill_chain_compare_risk",
+          "compare_documents",
+          "research_brief",
+          "document"
+        ],
+        "experienceMemory": {
+          "applied": false,
+          "hintCount": 0
+        },
+        "fallback": false,
+        "fallbackReason": null,
+        "requestedPlannerId": "deterministic",
+        "selectedIntentId": "compare_documents",
+        "selectedMode": "compare_documents",
+        "selectedPlannerId": "deterministic",
+        "selectionReason": "Pin the narrower compare intent to test atomic DAG composition.",
+        "status": "selected"
+      },
+      "planner": {
+        "fallback": false,
+        "fallbackReason": null,
+        "modelRoute": {
+          "candidateModelIds": [],
+          "capability": "execution_planner",
+          "fallbackModelIds": [],
+          "modelId": null,
+          "providerId": "custom_provider",
+          "rejectedModelIds": [],
+          "routeId": null,
+          "status": "custom_provider"
+        },
+        "promptTemplate": {
+          "fingerprint": "46e1a0502f34",
+          "id": "execution_planner",
+          "version": "v1"
+        },
+        "requestedPlannerId": "llm",
+        "selectedPlannerId": "llm",
+        "status": "selected",
+        "stepIds": [
+          "custom_skills"
+        ]
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Compare Documents",
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0"
+        },
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Risk Review",
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [],
+      "skillGraph": {
+        "errorCodes": [],
+        "executed": true,
+        "fallback": null,
+        "mode": "guarded",
+        "nodeSkills": [
+          "compare_documents",
+          "risk_review"
+        ],
+        "nodeStatuses": [
+          "completed",
+          "completed"
+        ],
+        "plannerFallback": false,
+        "plannerFallbackReason": null,
+        "riskDependsOnCompare": true,
+        "selectedPlannerId": "llm_dag",
+        "status": "completed"
+      },
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 2,
+        "listDocumentCallCount": 2
+      },
+      "traceTypes": [
+        "plan",
+        "query_planner",
+        "custom_skill",
+        "custom_skill",
+        "synthesis",
+        "self_check",
+        "gap_analysis",
+        "answer_finalizer"
+      ]
+    }
+  },
+  "runs": [
+    {
+      "events": [
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:1",
+          "payload": {
+            "status": "running"
+          },
+          "type": "run_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:2",
+          "payload": {
+            "traceStepCount": 2
+          },
+          "type": "run_prepared"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:3",
+          "payload": {
+            "planner": {
+              "fallback": false,
+              "fallbackReason": null,
+              "modelRoute": {
+                "candidateModelIds": [],
+                "capability": "execution_planner",
+                "fallbackModelIds": [],
+                "modelId": null,
+                "providerId": "custom_provider",
+                "rejectedModelIds": [],
+                "routeId": null,
+                "status": "custom_provider"
+              },
+              "promptTemplate": {
+                "fingerprint": "46e1a0502f34",
+                "id": "execution_planner",
+                "version": "v1"
+              },
+              "requestedPlannerId": "llm",
+              "selectedPlannerId": "llm",
+              "status": "selected",
+              "stepIds": [
+                "custom_skills"
+              ]
+            }
+          },
+          "type": "execution_planned"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:4",
+          "payload": {
+            "graphRevision": 0,
+            "phase": "running",
+            "sequence": 1,
+            "version": "v1"
+          },
+          "type": "skill_graph_checkpointed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:5",
+          "payload": {
+            "status": "running",
+            "stepId": "custom_skill:compare_documents"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:6",
+          "payload": {
+            "status": "completed",
+            "stepId": "custom_skill:compare_documents"
+          },
+          "type": "step_completed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:7",
+          "payload": {
+            "graphRevision": 0,
+            "phase": "running",
+            "sequence": 2,
+            "version": "v1"
+          },
+          "type": "skill_graph_checkpointed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:8",
+          "payload": {
+            "status": "running",
+            "stepId": "custom_skill:risk_review"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:9",
+          "payload": {
+            "status": "completed",
+            "stepId": "custom_skill:risk_review"
+          },
+          "type": "step_completed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:10",
+          "payload": {
+            "graphRevision": 0,
+            "phase": "running",
+            "sequence": 3,
+            "version": "v1"
+          },
+          "type": "skill_graph_checkpointed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:11",
+          "payload": {
+            "graphRevision": 0,
+            "phase": "completed",
+            "sequence": 4,
+            "version": "v1"
+          },
+          "type": "skill_graph_checkpointed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:12",
+          "payload": {
+            "errorCodes": [],
+            "executed": true,
+            "fallback": null,
+            "graph": {
+              "nodeIds": [
+                "compare_documents",
+                "risk_review"
+              ],
+              "version": "v1"
+            },
+            "mode": "guarded",
+            "nodeRuns": [
+              {
+                "abstained": false,
+                "citationCount": 2,
+                "dependsOn": [],
+                "effects": "read_only",
+                "idempotency": "read_only_rag",
+                "nodeId": "compare_documents",
+                "ok": true,
+                "parallelSafe": true,
+                "reason": null,
+                "skillId": "compare_documents",
+                "skillVersion": "1.0.0",
+                "status": "completed",
+                "stepId": "custom_skill:compare_documents"
+              },
+              {
+                "abstained": false,
+                "citationCount": 2,
+                "dependsOn": [
+                  "compare_documents"
+                ],
+                "effects": "read_only",
+                "idempotency": "read_only_rag",
+                "nodeId": "risk_review",
+                "ok": true,
+                "parallelSafe": true,
+                "reason": null,
+                "skillId": "risk_review",
+                "skillVersion": "1.0.0",
+                "status": "completed",
+                "stepId": "custom_skill:risk_review"
+              }
+            ],
+            "planner": {
+              "fallback": false,
+              "fallbackReason": null,
+              "fallbackReasonCodes": [],
+              "modelRoute": {
+                "candidateModelIds": [],
+                "capability": "execution_planner",
+                "fallbackModelIds": [],
+                "modelId": null,
+                "providerId": "custom_provider",
+                "rejectedModelIds": [],
+                "routeId": null,
+                "status": "custom_provider"
+              },
+              "nodeIds": [
+                "compare_documents",
+                "risk_review"
+              ],
+              "promptTemplate": {
+                "fingerprint": "9b264db384f8",
+                "id": "dag_planner",
+                "version": "v1"
+              },
+              "requestedPlannerId": "llm_dag",
+              "selectedPlannerId": "llm_dag",
+              "status": "selected"
+            },
+            "replans": [],
+            "status": "completed"
+          },
+          "type": "skill_graph_planned"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:13",
+          "payload": {
+            "status": "completed"
+          },
+          "type": "run_completed"
+        }
+      ],
+      "result": {
+        "__skillGraphCheckpoint": {
+          "digest": "<digest>",
+          "fingerprints": [],
+          "graph": {
+            "nodes": [
+              {
+                "dependsOn": [],
+                "failurePolicy": "fail_fast",
+                "inputBindings": {
+                  "docIds": {
+                    "field": "docIds",
+                    "source": "request"
+                  },
+                  "question": {
+                    "field": "question",
+                    "source": "request"
+                  }
+                },
+                "nodeId": "compare_documents",
+                "rationale": "Establish the document facts first.",
+                "skillId": "compare_documents"
+              },
+              {
+                "dependsOn": [
+                  "compare_documents"
+                ],
+                "failurePolicy": "fail_fast",
+                "inputBindings": {
+                  "docIds": {
+                    "field": "docIds",
+                    "source": "request"
+                  },
+                  "priorFindings": {
+                    "nodeId": "compare_documents",
+                    "output": "text",
+                    "source": "node"
+                  },
+                  "question": {
+                    "field": "question",
+                    "source": "request"
+                  }
+                },
+                "nodeId": "risk_review",
+                "rationale": "Review risks arising from the documented differences.",
+                "skillId": "risk_review"
+              }
+            ],
+            "revision": 0,
+            "version": "v1"
+          },
+          "nodeRuns": [
+            {
+              "nodeId": "compare_documents",
+              "result": {
+                "abstained": false,
+                "citations": [
+                  {
+                    "docId": "agreement-a",
+                    "excerpt": "Agreement A requires 30 days notice before renewal.",
+                    "fileName": "agreement-a.pdf",
+                    "pageNumber": 2
+                  },
+                  {
+                    "docId": "agreement-b",
+                    "excerpt": "Agreement B requires 60 days notice before renewal.",
+                    "fileName": "agreement-b.pdf",
+                    "pageNumber": 3
+                  }
+                ],
+                "durationMs": "<elapsed>",
+                "graphOutput": {
+                  "abstained": false,
+                  "citations": [
+                    {
+                      "docId": "agreement-a",
+                      "excerpt": "Agreement A requires 30 days notice before renewal.",
+                      "fileName": "agreement-a.pdf",
+                      "pageNumber": 2
+                    },
+                    {
+                      "docId": "agreement-b",
+                      "excerpt": "Agreement B requires 60 days notice before renewal.",
+                      "fileName": "agreement-b.pdf",
+                      "pageNumber": 3
+                    }
+                  ],
+                  "text": "Comparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2]."
+                },
+                "label": "Compare Documents",
+                "ok": true,
+                "skillId": "compare_documents",
+                "skillVersion": "1.0.0",
+                "text": "Comparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2].",
+                "traceDetail": {
+                  "abstained": false,
+                  "citations": 2,
+                  "compareQuestion": "Create a concise citation-backed document comparison across the selected documents.\n\nUse only document evidence. Do not infer common ground, differences, conflicts, or missing terms.\n\nOrganize the answer as Document Comparison, Common Ground, Differences, Conflicts, Missing Terms, and Evidence Limits.\n\nEvery evidence-backed bullet must include source citations from the relevant documents. If a category is not supported, say it is not specified.\n\nSelected documents:\n- agreement-a.pdf\n- agreement-b.pdf\n\nOriginal request: Compare the two selected agreements and identify risks caused by their differences.",
+                  "retrievalPlan": {
+                    "intent": "comparison",
+                    "phase": "primary",
+                    "retrievalOptions": {
+                      "profile": "comparison",
+                      "queryCount": 3,
+                      "topK": 8,
+                      "topKPerDoc": 4
+                    },
+                    "retrievalQueries": [
+                      {
+                        "id": "primary",
+                        "label": "Original request",
+                        "primary": true,
+                        "query": "Compare the two selected agreements and identify risks caused by their differences."
+                      },
+                      {
+                        "id": "compare-differences",
+                        "label": "Cross-document differences",
+                        "primary": false,
+                        "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare the two selected agreements and identify risks caused by their differences."
+                      },
+                      {
+                        "id": "per-document-evidence",
+                        "label": "Per-document evidence",
+                        "primary": false,
+                        "query": "Find per-document cited evidence for each side of: Compare the two selected agreements and identify risks caused by their differences."
+                      }
+                    ],
+                    "source": "agent-query-planner"
+                  },
+                  "selectedDocumentCount": 2,
+                  "usedPriorFindings": false
+                },
+                "value": {
+                  "abstained": false,
+                  "citations": [
+                    {
+                      "docId": "agreement-a",
+                      "excerpt": "Agreement A requires 30 days notice before renewal.",
+                      "fileName": "agreement-a.pdf",
+                      "pageNumber": 2
+                    },
+                    {
+                      "docId": "agreement-b",
+                      "excerpt": "Agreement B requires 60 days notice before renewal.",
+                      "fileName": "agreement-b.pdf",
+                      "pageNumber": 3
+                    }
+                  ],
+                  "compareQuestion": "Create a concise citation-backed document comparison across the selected documents.\n\nUse only document evidence. Do not infer common ground, differences, conflicts, or missing terms.\n\nOrganize the answer as Document Comparison, Common Ground, Differences, Conflicts, Missing Terms, and Evidence Limits.\n\nEvery evidence-backed bullet must include source citations from the relevant documents. If a category is not supported, say it is not specified.\n\nSelected documents:\n- agreement-a.pdf\n- agreement-b.pdf\n\nOriginal request: Compare the two selected agreements and identify risks caused by their differences.",
+                  "memoryApplied": false,
+                  "resolvedQuery": "Create a concise citation-backed document comparison across the selected documents.\n\nUse only document evidence. Do not infer common ground, differences, conflicts, or missing terms.\n\nOrganize the answer as Document Comparison, Common Ground, Differences, Conflicts, Missing Terms, and Evidence Limits.\n\nEvery evidence-backed bullet must include source citations from the relevant documents. If a category is not supported, say it is not specified.\n\nSelected documents:\n- agreement-a.pdf\n- agreement-b.pdf\n\nOriginal request: Compare the two selected agreements and identify risks caused by their differences.",
+                  "selectedDocumentCount": 2,
+                  "text": "Comparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2]."
+                }
+              },
+              "skillId": "compare_documents",
+              "skillVersion": "1.0.0",
+              "status": "completed",
+              "stepId": "custom_skill:compare_documents"
+            },
+            {
+              "nodeId": "risk_review",
+              "result": {
+                "abstained": false,
+                "citations": [
+                  {
+                    "docId": "agreement-a",
+                    "excerpt": "Agreement A requires 30 days notice before renewal.",
+                    "fileName": "agreement-a.pdf",
+                    "pageNumber": 2
+                  },
+                  {
+                    "docId": "agreement-b",
+                    "excerpt": "Agreement B requires 60 days notice before renewal.",
+                    "fileName": "agreement-b.pdf",
+                    "pageNumber": 3
+                  }
+                ],
+                "durationMs": "<elapsed>",
+                "graphOutput": {
+                  "abstained": false,
+                  "citations": [
+                    {
+                      "docId": "agreement-a",
+                      "excerpt": "Agreement A requires 30 days notice before renewal.",
+                      "fileName": "agreement-a.pdf",
+                      "pageNumber": 2
+                    },
+                    {
+                      "docId": "agreement-b",
+                      "excerpt": "Agreement B requires 60 days notice before renewal.",
+                      "fileName": "agreement-b.pdf",
+                      "pageNumber": 3
+                    }
+                  ],
+                  "text": "Risk review: A 45-day notice meets Agreement A's 30-day requirement [Source 1] but misses Agreement B's 60-day requirement [Source 2]."
+                },
+                "label": "Risk Review",
+                "ok": true,
+                "skillId": "risk_review",
+                "skillVersion": "1.0.0",
+                "text": "Risk review: A 45-day notice meets Agreement A's 30-day requirement [Source 1] but misses Agreement B's 60-day requirement [Source 2].",
+                "traceDetail": {
+                  "abstained": false,
+                  "citations": 2,
+                  "retrievalPlan": {
+                    "intent": "comparison",
+                    "phase": "primary",
+                    "retrievalOptions": {
+                      "profile": "comparison",
+                      "queryCount": 3,
+                      "topK": 8,
+                      "topKPerDoc": 4
+                    },
+                    "retrievalQueries": [
+                      {
+                        "id": "primary",
+                        "label": "Original request",
+                        "primary": true,
+                        "query": "Compare the two selected agreements and identify risks caused by their differences."
+                      },
+                      {
+                        "id": "compare-differences",
+                        "label": "Cross-document differences",
+                        "primary": false,
+                        "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare the two selected agreements and identify risks caused by their differences."
+                      },
+                      {
+                        "id": "per-document-evidence",
+                        "label": "Per-document evidence",
+                        "primary": false,
+                        "query": "Find per-document cited evidence for each side of: Compare the two selected agreements and identify risks caused by their differences."
+                      }
+                    ],
+                    "source": "agent-query-planner"
+                  },
+                  "riskQuestion": "Perform a concise citation-backed risk review from the selected documents.\n\nIdentify risks, gaps, contradictions, exceptions, missing terms, and uncertainty. Use only document evidence.\n\nDo not guess. If a risk, gap, or exception is not supported by the selected documents, say it is not specified.\n\nReturn concise bullets grouped as Risks, Gaps, Conflicts Or Exceptions, and Evidence Limits. Put source citations on every evidence-backed bullet.\n\nSelected documents:\n- agreement-a.pdf\n- agreement-b.pdf\n\nUpstream findings from an earlier step in this same task (context only, not evidence):\n\nComparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2].\n\nUse these findings to avoid repeating work. Verify every claim you keep against the selected document citations, and drop anything the documents do not support.\n\nOriginal request: Compare the two selected agreements and identify risks caused by their differences.",
+                  "selectedDocumentCount": 2,
+                  "usedPriorFindings": true
+                },
+                "value": {
+                  "abstained": false,
+                  "citations": [
+                    {
+                      "docId": "agreement-a",
+                      "excerpt": "Agreement A requires 30 days notice before renewal.",
+                      "fileName": "agreement-a.pdf",
+                      "pageNumber": 2
+                    },
+                    {
+                      "docId": "agreement-b",
+                      "excerpt": "Agreement B requires 60 days notice before renewal.",
+                      "fileName": "agreement-b.pdf",
+                      "pageNumber": 3
+                    }
+                  ],
+                  "memoryApplied": false,
+                  "resolvedQuery": "Perform a concise citation-backed risk review from the selected documents.\n\nIdentify risks, gaps, contradictions, exceptions, missing terms, and uncertainty. Use only document evidence.\n\nDo not guess. If a risk, gap, or exception is not supported by the selected documents, say it is not specified.\n\nReturn concise bullets grouped as Risks, Gaps, Conflicts Or Exceptions, and Evidence Limits. Put source citations on every evidence-backed bullet.\n\nSelected documents:\n- agreement-a.pdf\n- agreement-b.pdf\n\nUpstream findings from an earlier step in this same task (context only, not evidence):\n\nComparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2].\n\nUse these findings to avoid repeating work. Verify every claim you keep against the selected document citations, and drop anything the documents do not support.\n\nOriginal request: Compare the two selected agreements and identify risks caused by their differences.",
+                  "riskQuestion": "Perform a concise citation-backed risk review from the selected documents.\n\nIdentify risks, gaps, contradictions, exceptions, missing terms, and uncertainty. Use only document evidence.\n\nDo not guess. If a risk, gap, or exception is not supported by the selected documents, say it is not specified.\n\nReturn concise bullets grouped as Risks, Gaps, Conflicts Or Exceptions, and Evidence Limits. Put source citations on every evidence-backed bullet.\n\nSelected documents:\n- agreement-a.pdf\n- agreement-b.pdf\n\nUpstream findings from an earlier step in this same task (context only, not evidence):\n\nComparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2].\n\nUse these findings to avoid repeating work. Verify every claim you keep against the selected document citations, and drop anything the documents do not support.\n\nOriginal request: Compare the two selected agreements and identify risks caused by their differences.",
+                  "selectedDocumentCount": 2,
+                  "text": "Risk review: A 45-day notice meets Agreement A's 30-day requirement [Source 1] but misses Agreement B's 60-day requirement [Source 2]."
+                }
+              },
+              "skillId": "risk_review",
+              "skillVersion": "1.0.0",
+              "status": "completed",
+              "stepId": "custom_skill:risk_review"
+            }
+          ],
+          "owner": {
+            "accessScope": {
+              "userId": "planner-user",
+              "workspaceId": "planner-workspace"
+            },
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "usedAtEntry": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 2,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [
+              "agreement-a",
+              "agreement-b"
+            ],
+            "intentPlan": {
+              "actionCapabilityId": null,
+              "mode": "compare_documents",
+              "requiresDocuments": true,
+              "summary": "Compare selected documents for cited common ground, differences, conflicts, and missing terms.",
+              "wantsAction": false,
+              "wantsArxivImport": false,
+              "wantsCompareDocuments": true,
+              "wantsContractSummary": false,
+              "wantsDiscovery": false,
+              "wantsDocumentRag": false,
+              "wantsInventory": false,
+              "wantsResearch": false,
+              "wantsRiskReview": false,
+              "wantsTimeline": false,
+              "wantsWeb": false
+            },
+            "question": "Compare the two selected agreements and identify risks caused by their differences.",
+            "retrievalPlan": {
+              "intent": "comparison",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "comparison",
+                "queryCount": 3,
+                "topK": 8,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "compare-differences",
+                  "label": "Cross-document differences",
+                  "primary": false,
+                  "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "per-document-evidence",
+                  "label": "Per-document evidence",
+                  "primary": false,
+                  "query": "Find per-document cited evidence for each side of: Compare the two selected agreements and identify risks caused by their differences."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "selectedSkills": [
+              {
+                "id": "compare_documents",
+                "version": "1.0.0"
+              },
+              {
+                "id": "extract_timeline",
+                "version": "1.0.0"
+              },
+              {
+                "id": "risk_review",
+                "version": "1.0.0"
+              },
+              {
+                "id": "summarize_contract",
+                "version": "1.0.0"
+              }
+            ],
+            "sessionId": "planner-dynamic-graph-eval",
+            "taskMemory": null,
+            "userId": "planner-user"
+          },
+          "phase": "completed",
+          "planner": {
+            "fallback": false,
+            "fallbackReason": null,
+            "fallbackReasonCodes": [],
+            "modelRoute": {
+              "candidateModelIds": [],
+              "capability": "execution_planner",
+              "fallbackModelIds": [],
+              "modelId": null,
+              "providerId": "custom_provider",
+              "rejectedModelIds": [],
+              "routeId": null,
+              "status": "custom_provider"
+            },
+            "nodeIds": [
+              "compare_documents",
+              "risk_review"
+            ],
+            "promptTemplate": {
+              "fingerprint": "9b264db384f8",
+              "id": "dag_planner",
+              "version": "v1"
+            },
+            "requestedPlannerId": "llm_dag",
+            "selectedPlannerId": "llm_dag",
+            "status": "selected"
+          },
+          "replanCount": 0,
+          "replans": [],
+          "sequence": 4,
+          "version": "v1"
+        },
+        "agentMode": "compare_documents",
+        "answer": "I do not have enough citation-backed evidence to answer reliably.",
+        "citationCount": 0,
+        "ragAbstained": true,
+        "status": 200
+      },
+      "status": "completed",
+      "steps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Compare selected documents for cited common ground, differences, conflicts, and missing terms."
+              },
+              {
+                "id": "compare_documents",
+                "label": "Compare documents",
+                "summary": "Compare common ground, differences, conflicts, and missing terms across 2 selected documents."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": 300000,
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [
+              "agreement-a",
+              "agreement-b"
+            ],
+            "mode": "compare_documents",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "1-plan",
+          "input": null,
+          "kind": "plan",
+          "label": "Plan",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Compare selected documents for cited common ground, differences, conflicts, and missing terms.",
+          "traceStepId": "1-plan",
+          "type": "plan",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "intent": "comparison",
+            "phase": "primary",
+            "retrievalOptions": {
+              "profile": "comparison",
+              "queryCount": 3,
+              "topK": 8,
+              "topKPerDoc": 4
+            },
+            "retrievalQueries": [
+              {
+                "id": "primary",
+                "label": "Original request",
+                "primary": true,
+                "query": "Compare the two selected agreements and identify risks caused by their differences."
+              },
+              {
+                "id": "compare-differences",
+                "label": "Cross-document differences",
+                "primary": false,
+                "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare the two selected agreements and identify risks caused by their differences."
+              },
+              {
+                "id": "per-document-evidence",
+                "label": "Per-document evidence",
+                "primary": false,
+                "query": "Find per-document cited evidence for each side of: Compare the two selected agreements and identify risks caused by their differences."
+              }
+            ],
+            "source": "agent-query-planner",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "2-query_planner",
+          "input": null,
+          "kind": "plan",
+          "label": "Query Planner",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Planned 3 comparison retrieval queries with comparison topK profile.",
+          "traceStepId": "2-query_planner",
+          "type": "query_planner",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "abstained": false,
+            "citations": 2,
+            "compareQuestion": "Create a concise citation-backed document comparison across the selected documents.\n\nUse only document evidence. Do not infer common ground, differences, conflicts, or missing terms.\n\nOrganize the answer as Document Comparison, Common Ground, Differences, Conflicts, Missing Terms, and Evidence Limits.\n\nEvery evidence-backed bullet must include source citations from the relevant documents. If a category is not supported, say it is not specified.\n\nSelected documents:\n- agreement-a.pdf\n- agreement-b.pdf\n\nOriginal request: Compare the two selected agreements and identify risks caused by their differences.",
+            "dependsOn": [],
+            "durationMs": "<elapsed>",
+            "graphVersion": "v1",
+            "nodeId": "compare_documents",
+            "rationale": "Establish the document facts first.",
+            "retrievalPlan": {
+              "intent": "comparison",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "comparison",
+                "queryCount": 3,
+                "topK": 8,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "compare-differences",
+                  "label": "Cross-document differences",
+                  "primary": false,
+                  "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "per-document-evidence",
+                  "label": "Per-document evidence",
+                  "primary": false,
+                  "query": "Find per-document cited evidence for each side of: Compare the two selected agreements and identify risks caused by their differences."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "selectedDocumentCount": 2,
+            "skillId": "compare_documents",
+            "skillKind": "custom",
+            "skillVersion": "1.0.0",
+            "traceStatus": "completed",
+            "usedPriorFindings": false
+          },
+          "error": null,
+          "id": "custom_skill:compare_documents",
+          "input": {
+            "boundInputs": {
+              "docIds": [
+                "agreement-a",
+                "agreement-b"
+              ],
+              "question": "Compare the two selected agreements and identify risks caused by their differences."
+            },
+            "docIds": [
+              "agreement-a",
+              "agreement-b"
+            ],
+            "effects": "read_only",
+            "graphVersion": "v1",
+            "idempotency": "read_only_rag",
+            "nodeId": "compare_documents",
+            "question": "Compare the two selected agreements and identify risks caused by their differences.",
+            "replaySafe": true,
+            "retrievalPlan": {
+              "intent": "comparison",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "comparison",
+                "queryCount": 3,
+                "topK": 8,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "compare-differences",
+                  "label": "Cross-document differences",
+                  "primary": false,
+                  "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "per-document-evidence",
+                  "label": "Per-document evidence",
+                  "primary": false,
+                  "query": "Find per-document cited evidence for each side of: Compare the two selected agreements and identify risks caused by their differences."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "planner-dynamic-graph-eval",
+            "skillId": "compare_documents",
+            "skillVersion": "1.0.0",
+            "userId": "planner-user"
+          },
+          "kind": "tool_call",
+          "label": "Compare Documents",
+          "output": {
+            "abstained": false,
+            "citationCount": 2,
+            "text": "Comparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2].",
+            "typedOutputDigest": "v1:sha256:498c91aeda77bcb15aa69cf34b62ed12af6f9a12b5d9f798ae0081ccf8b2c5cb"
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Compare Documents completed with 2 citations.",
+          "traceStepId": "custom_skill:compare_documents",
+          "type": "custom_skill",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "abstained": false,
+            "citations": 2,
+            "dependsOn": [
+              "compare_documents"
+            ],
+            "durationMs": "<elapsed>",
+            "graphVersion": "v1",
+            "nodeId": "risk_review",
+            "rationale": "Review risks arising from the documented differences.",
+            "retrievalPlan": {
+              "intent": "comparison",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "comparison",
+                "queryCount": 3,
+                "topK": 8,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "compare-differences",
+                  "label": "Cross-document differences",
+                  "primary": false,
+                  "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "per-document-evidence",
+                  "label": "Per-document evidence",
+                  "primary": false,
+                  "query": "Find per-document cited evidence for each side of: Compare the two selected agreements and identify risks caused by their differences."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "riskQuestion": "Perform a concise citation-backed risk review from the selected documents.\n\nIdentify risks, gaps, contradictions, exceptions, missing terms, and uncertainty. Use only document evidence.\n\nDo not guess. If a risk, gap, or exception is not supported by the selected documents, say it is not specified.\n\nReturn concise bullets grouped as Risks, Gaps, Conflicts Or Exceptions, and Evidence Limits. Put source citations on every evidence-backed bullet.\n\nSelected documents:\n- agreement-a.pdf\n- agreement-b.pdf\n\nUpstream findings from an earlier step in this same task (context only, not evidence):\n\nComparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2].\n\nUse these findings to avoid repeating work. Verify every claim you keep against the selected document citations, and drop anything the documents do not support.\n\nOriginal request: Compare the two selected agreements and identify risks caused by their differences.",
+            "selectedDocumentCount": 2,
+            "skillId": "risk_review",
+            "skillKind": "custom",
+            "skillVersion": "1.0.0",
+            "traceStatus": "completed",
+            "usedPriorFindings": true
+          },
+          "error": null,
+          "id": "custom_skill:risk_review",
+          "input": {
+            "boundInputs": {
+              "docIds": [
+                "agreement-a",
+                "agreement-b"
+              ],
+              "priorFindings": "Comparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2].",
+              "question": "Compare the two selected agreements and identify risks caused by their differences."
+            },
+            "docIds": [
+              "agreement-a",
+              "agreement-b"
+            ],
+            "effects": "read_only",
+            "graphVersion": "v1",
+            "idempotency": "read_only_rag",
+            "nodeId": "risk_review",
+            "priorFindings": "Comparison: Agreement A requires 30 days notice [Source 1]; Agreement B requires 60 days notice [Source 2].",
+            "question": "Compare the two selected agreements and identify risks caused by their differences.",
+            "replaySafe": true,
+            "retrievalPlan": {
+              "intent": "comparison",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "comparison",
+                "queryCount": 3,
+                "topK": 8,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "compare-differences",
+                  "label": "Cross-document differences",
+                  "primary": false,
+                  "query": "Compare differences, similarities, conflicts, and exceptions across selected documents for: Compare the two selected agreements and identify risks caused by their differences."
+                },
+                {
+                  "id": "per-document-evidence",
+                  "label": "Per-document evidence",
+                  "primary": false,
+                  "query": "Find per-document cited evidence for each side of: Compare the two selected agreements and identify risks caused by their differences."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "planner-dynamic-graph-eval",
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "userId": "planner-user"
+          },
+          "kind": "tool_call",
+          "label": "Risk Review",
+          "output": {
+            "abstained": false,
+            "citationCount": 2,
+            "text": "Risk review: A 45-day notice meets Agreement A's 30-day requirement [Source 1] but misses Agreement B's 60-day requirement [Source 2].",
+            "typedOutputDigest": "v1:sha256:95d4bc6be112b03a0ab64e0b2623a1617eeba83583d04297033ea489f8363099"
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Risk Review completed with 2 citations.",
+          "traceStepId": "custom_skill:risk_review",
+          "type": "custom_skill",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": 300000,
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 2,
+                  "tokens": 2235,
+                  "unpricedModelCalls": 2
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 2,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 4,
+                "webSearchCalls": 0
+              }
+            },
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "5-synthesis",
+          "input": {
+            "agentMode": "compare_documents",
+            "customSkillResultCount": 2,
+            "hasActionAnswer": false,
+            "hasArxivImportAnswer": false,
+            "hasDiscoveryAnswer": false,
+            "hasInventoryAnswer": false,
+            "hasRagResult": false,
+            "hasResearchBrief": false,
+            "hasWebResult": false,
+            "sourceCount": 4
+          },
+          "kind": "decision",
+          "label": "Synthesis",
+          "output": {
+            "answerLength": 243,
+            "sourceCount": 4
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Composed the final agent answer from completed tool results.",
+          "traceStepId": "5-synthesis",
+          "type": "synthesis",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "answerLabel": "Final answer",
+            "citationCount": 4,
+            "citedDocCount": 0,
+            "claimSupport": {
+              "checked": true,
+              "claims": [
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "30",
+                    "require"
+                  ],
+                  "citedDocIds": [
+                    "agreement-a"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [
+                    "30"
+                  ],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [],
+                  "supported": false,
+                  "supportedCitedDocIds": [],
+                  "supportedSourceRanks": [],
+                  "text": "Comparison: Agreement A requires 30 days notice",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": []
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "60",
+                    "require"
+                  ],
+                  "citedDocIds": [
+                    "agreement-b"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [
+                    "60"
+                  ],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [],
+                  "supported": false,
+                  "supportedCitedDocIds": [],
+                  "supportedSourceRanks": [],
+                  "text": "Agreement B requires 60 days notice",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": []
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "45",
+                    "30",
+                    "60"
+                  ],
+                  "citedDocIds": [
+                    "agreement-a",
+                    "agreement-b"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [
+                    "45",
+                    "30",
+                    "term:risk",
+                    "term:review",
+                    "term:day",
+                    "term:meets",
+                    "term:requirement",
+                    "60",
+                    "term:misses"
+                  ],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [],
+                  "supported": false,
+                  "supportedCitedDocIds": [],
+                  "supportedSourceRanks": [],
+                  "text": "Risk review: A 45-day notice meets Agreement A's 30-day requirement  but misses Agreement B's 60-day requirement",
+                  "tokenOverlap": 0,
+                  "verifiedSourceRanks": []
+                }
+              ],
+              "supportedClaimCount": 0,
+              "unsupportedClaimCount": 3
+            },
+            "finalAnswer": true,
+            "gaps": [
+              {
+                "citedDocCount": 0,
+                "message": "Citations cover 0 of 2 required documents.",
+                "requiredDocCoverage": 2,
+                "severity": "repairable",
+                "type": "document_coverage"
+              },
+              {
+                "claim": "Comparison: Agreement A requires 30 days notice",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [
+                  "30"
+                ],
+                "severity": "repairable",
+                "tokenOverlap": 1,
+                "type": "unsupported_claim"
+              },
+              {
+                "claim": "Agreement B requires 60 days notice",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [
+                  "60"
+                ],
+                "severity": "repairable",
+                "tokenOverlap": 1,
+                "type": "unsupported_claim"
+              },
+              {
+                "claim": "Risk review: A 45-day notice meets Agreement A's 30-day requirement  but misses Agreement B's 60-day requirement",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [
+                  "45",
+                  "30",
+                  "term:risk",
+                  "term:review",
+                  "term:day",
+                  "term:meets",
+                  "term:requirement",
+                  "60",
+                  "term:misses"
+                ],
+                "severity": "repairable",
+                "tokenOverlap": 0,
+                "type": "unsupported_claim"
+              }
+            ],
+            "passed": false,
+            "reasons": [
+              "Citations cover 0 of 2 required documents.",
+              "3 final answer claims lacks citation support."
+            ],
+            "requiredCitationCount": 1,
+            "requiredDocCoverage": 2,
+            "retryRecommended": false,
+            "traceStatus": "failed"
+          },
+          "error": {
+            "message": "Evidence check needs attention: Citations cover 0 of 2 required documents. 3 final answer claims lacks citation support."
+          },
+          "id": "6-self_check",
+          "input": null,
+          "kind": "observation",
+          "label": "Final Self Check",
+          "output": {
+            "gapCount": 4,
+            "passed": false,
+            "retryRecommended": false,
+            "unsupportedClaimCount": 3
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "failed",
+          "summary": "Evidence check needs attention: Citations cover 0 of 2 required documents. 3 final answer claims lacks citation support.",
+          "traceStepId": "6-self_check",
+          "type": "self_check",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "finalAnswer": true,
+            "followUpRecommended": false,
+            "gaps": [
+              {
+                "citedDocCount": 0,
+                "message": "Citations cover 0 of 2 required documents.",
+                "requiredDocCoverage": 2,
+                "severity": "repairable",
+                "skillId": "compare_documents",
+                "skillVersion": "1.0.0",
+                "type": "document_coverage"
+              },
+              {
+                "claim": "Comparison: Agreement A requires 30 days notice",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [
+                  "30"
+                ],
+                "severity": "repairable",
+                "skillId": "compare_documents",
+                "skillVersion": "1.0.0",
+                "tokenOverlap": 1,
+                "type": "unsupported_claim"
+              },
+              {
+                "claim": "Agreement B requires 60 days notice",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [
+                  "60"
+                ],
+                "severity": "repairable",
+                "skillId": "compare_documents",
+                "skillVersion": "1.0.0",
+                "tokenOverlap": 1,
+                "type": "unsupported_claim"
+              },
+              {
+                "claim": "Risk review: A 45-day notice meets Agreement A's 30-day requirement  but misses Agreement B's 60-day requirement",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [
+                  "45",
+                  "30",
+                  "term:risk",
+                  "term:review",
+                  "term:day",
+                  "term:meets",
+                  "term:requirement",
+                  "60",
+                  "term:misses"
+                ],
+                "severity": "repairable",
+                "skillId": "compare_documents",
+                "skillVersion": "1.0.0",
+                "tokenOverlap": 0,
+                "type": "unsupported_claim"
+              }
+            ],
+            "skillId": "compare_documents",
+            "skillVersion": "1.0.0",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "7-gap_analysis",
+          "input": null,
+          "kind": "observation",
+          "label": "Final Gap Analysis",
+          "output": {
+            "finalAnswer": true,
+            "followUpRecommended": false,
+            "gapCount": 4
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Identified 4 evidence gaps for follow-up: document_coverage, unsupported_claim.",
+          "traceStepId": "7-gap_analysis",
+          "type": "gap_analysis",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "abstained": true,
+            "changed": true,
+            "claimSupport": {
+              "checked": true,
+              "claims": [
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "30",
+                    "require"
+                  ],
+                  "citedDocIds": [
+                    "agreement-a"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [
+                    "30"
+                  ],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [],
+                  "supported": false,
+                  "supportedCitedDocIds": [],
+                  "supportedSourceRanks": [],
+                  "text": "Comparison: Agreement A requires 30 days notice",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": []
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "60",
+                    "require"
+                  ],
+                  "citedDocIds": [
+                    "agreement-b"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [
+                    "60"
+                  ],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [],
+                  "supported": false,
+                  "supportedCitedDocIds": [],
+                  "supportedSourceRanks": [],
+                  "text": "Agreement B requires 60 days notice",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": []
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "45",
+                    "30",
+                    "60"
+                  ],
+                  "citedDocIds": [
+                    "agreement-a",
+                    "agreement-b"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [
+                    "45",
+                    "30",
+                    "term:risk",
+                    "term:review",
+                    "term:day",
+                    "term:meets",
+                    "term:requirement",
+                    "60",
+                    "term:misses"
+                  ],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [],
+                  "supported": false,
+                  "supportedCitedDocIds": [],
+                  "supportedSourceRanks": [],
+                  "text": "Risk review: A 45-day notice meets Agreement A's 30-day requirement  but misses Agreement B's 60-day requirement",
+                  "tokenOverlap": 0,
+                  "verifiedSourceRanks": []
+                }
+              ],
+              "supportedClaimCount": 0,
+              "unsupportedClaimCount": 3
+            },
+            "removedClaims": [
+              "Comparison: Agreement A requires 30 days notice",
+              "Agreement B requires 60 days notice",
+              "Risk review: A 45-day notice meets Agreement A's 30-day requirement  but misses Agreement B's 60-day requirement"
+            ],
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "8-answer_finalizer",
+          "input": null,
+          "kind": "observation",
+          "label": "Answer Finalizer",
+          "output": {
+            "abstained": true,
+            "changed": true,
+            "removedClaimCount": 3,
+            "skippedReason": "",
+            "unsupportedClaimCount": 3
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Finalizer removed 3 unsupported claims and returned an evidence-limited answer.",
+          "traceStepId": "8-answer_finalizer",
+          "type": "answer_finalizer",
+          "updatedAt": "<time>"
+        }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,7 @@ import {
   finishExecutionGraphRun,
 } from "../agent-execution-graph-runner.js";
 import { EXECUTION_GRAPH_LIMITS } from "../agent-execution-graph.js";
+import { assertAgentRuntimeSupported } from "../config.js";
 import {
   LANGGRAPH_CHECKPOINT_RETENTION,
   RunStoreCheckpointSaver,
@@ -34,64 +35,64 @@ import {
   prepareUnifiedGraphApprovalResume,
 } from "./unified-graph-resume.js";
 
-// runExecutionGraph on LangGraph.js (docs/adr/0001-langgraph-runtime.md,
-// phase 2), selected by AGENT_RUNTIME=langgraph in agent-custom-skill-stage.js
-// and, since phase 3, in agent-unified-graph-stage.js for the v3 graph. Since
-// phase 4 it is the default (AGENT_RUNTIME unset); runExecutionGraph is the
-// AGENT_RUNTIME=native rollback, and no call is handed to it from here.
+// The scheduler of every guarded execution graph: the custom-Skill DAG
+// (agent-custom-skill-stage.js, since phase 2 of
+// docs/adr/0001-langgraph-runtime.md) and the v3 unified graph
+// (agent-unified-graph-stage.js, since phase 3). Phase 6 deleted the native
+// scheduler (runExecutionGraph in agent-execution-graph-runner.js) that was
+// the AGENT_RUNTIME=native rollback, and with it the dial; what it did on the
+// parity suites' scenarios is frozen in test/fixtures/graph-goldens/, which
+// LangGraph is now compared with. "Natively" below means that deleted
+// scheduler, whose contract this one kept.
 //
-// Same options, same result, same errors. Admission, the node states (and
-// with them checkpoint reuse and denied nodes), each node's work and the end
-// of the run are the native modules' own functions; only the scheduling
-// changes hands. LangGraph enters the nodes superstep by superstep, and the
-// in-process gate (concurrency-gate.js) holds each one to the native cap,
-// side-effect exclusivity and queue order. Both schedulers queue in the
-// validator's layer order (orderExecutionGraphNodeStatesByLayer), so the
-// supersteps are the native queue cut at its layer boundaries. What that
-// changes is when a node
-// is decided, never what a node may do: a node is decided once its whole
-// superstep has finished, not the moment its own dependencies have. So
+// Admission, the node states (and with them checkpoint reuse and denied
+// nodes), each node's work and the end of the run are the shared modules'
+// functions (agent-execution-graph-runner.js, agent-execution-graph-node.js);
+// this file only schedules. LangGraph enters the nodes superstep by
+// superstep, and the in-process gate (concurrency-gate.js) holds each one to
+// the concurrency cap, side-effect exclusivity and queue order. The queue is
+// the validator's layer order (orderExecutionGraphNodeStatesByLayer), so the
+// supersteps are that queue cut at its layer boundaries. A node is decided
+// once its whole superstep has finished, not the moment its own dependencies
+// have. Against the native scheduler, which decided a node as soon as its
+// dependencies settled, that changed when a node is decided, never what a
+// node may do:
 //   - a dependant starts only after the slowest node of the superstep before
 //     it, so steps, run events, trace, Skill calls and per-Skill
 //     observations can come in another order than natively, and the
 //     request's latency follows the slowest sibling;
 //   - a fail_fast failure in that superstep can skip a node the native loop
-//     might already have launched (native takes the same branch whenever the
-//     failure lands first);
+//     might already have launched (native took the same branch whenever the
+//     failure landed first);
 //   - a skip whose cause the native pass saw in the same pass (a node it had
 //     just skipped) is recorded a superstep later;
 //   - a cancellation stops before a superstep the native loop would have
 //     settled without launching anything.
 // All four are pinned in test/langgraph-execution-graph-runtime.test.mjs.
 //
-// The first two are races native itself has (which Skill finishes first),
-// which LangGraph always settles the way native does when every node of a
-// superstep finishes before any dependant starts; that also decides which
-// nodes a budget that cannot fund them all funds. The others change what is
-// recorded and when, never which node runs. A difference that changes which
-// nodes run without any race is not accepted, and there is none left: with
-// the queue in layer order the native scan reaches a later layer's node ahead
-// of an earlier layer's only when that earlier node is not ready yet, i.e.
-// waits for a dependency still in flight beside a sibling that already
-// settled, which is race 1. Until the queue was layer-ordered (phase 5), a
-// graph not declared in layer order made native start a later layer first
-// on every run where the cap or an exclusive node held a ready node back,
-// and such a call was handed to the native scheduler whole.
+// The first two are races the native scheduler had too (which Skill finishes
+// first), which LangGraph always settles the way native did when every node
+// of a superstep finished before any dependant started; that also decides
+// which nodes a budget that cannot fund them all funds. The others change
+// what is recorded and when, never which node runs. No difference changes
+// which nodes run without a race: with the queue in layer order the native
+// scan reached a later layer's node ahead of an earlier layer's only when
+// that earlier node was not ready yet, i.e. waited for a dependency still in
+// flight beside a sibling that already settled, which is race 1.
 //
-// An approval pause is not a difference either. The native scheduler pauses
-// once nothing else can run; a parked v3 node interrupts the thread only when
-// every pending node of a later layer depends on it
-// (compile-execution-graph.js hasExecutionGraphWorkBeforePause), so the pause
-// binds to the same settled nodes. When native would still run something
-// (an independent node of a later layer, or a node it would skip), the parked
-// node returns its receipt instead, those layers run, and the pause is
-// persisted natively with the thread dropped: the continuation is then the
-// fresh invocation a native pause gets. Both shapes are pinned in
-// test/langgraph-unified-graph.test.mjs.
+// An approval pause binds to the settled nodes the native scheduler's pause
+// did. A graph pauses once nothing else can run; a parked v3 node interrupts
+// the thread only when every pending node of a later layer depends on it
+// (compile-execution-graph.js hasExecutionGraphWorkBeforePause). When
+// something could still run (an independent node of a later layer, or a node
+// that would be skipped), the parked node returns its receipt instead, those
+// layers run, and the stage persists the pause through pauseForApproval with
+// the thread dropped: the continuation is then a fresh invocation. Both
+// shapes are pinned in test/langgraph-unified-graph.test.mjs.
 //
 // Durability. The agent run's graph checkpoint stays the authority: node
-// outputs, reuse, recovery, fencing and replay safety are decided from it
-// exactly as natively. LangGraph's own thread checkpoint
+// outputs, reuse, recovery, fencing and replay safety are decided from it.
+// LangGraph's own thread checkpoint
 // (RunStoreCheckpointSaver, on the same run row) is secondary: it holds
 // receipts, and a call is a fresh invocation -- a replan or a startup
 // recovery starts a new thread, seeded from the graph checkpoint's completed
@@ -102,7 +103,7 @@ import {
 // the graph checkpoint, so the nodes that settled before the pause are not
 // entered again and the parked node re-runs from its first line into the
 // stage's preflight, which now holds the decided gate. A thread that has no
-// such interrupt (the pause happened natively), or that is behind the
+// such interrupt (the pause was persisted without one), or that is behind the
 // checkpoint, gets the fresh invocation; a thread that contradicts the
 // checkpoint refuses the continuation.
 //
@@ -120,7 +121,7 @@ import {
 // Cancellation is a drain (ADR, accepted decision; drain-bridge.js): the
 // request's signal is never handed to LangGraph, which would abandon the node
 // in flight and run it again on resume. It asks RunControl to stop at the
-// next superstep boundary, each node keeps the native safe points (on entry,
+// next superstep boundary, each node passes the run's safe points (on entry,
 // and again once the gate admits it), and every node in flight settles before
 // the run fails with the request's cancellation.
 
@@ -184,13 +185,15 @@ const assertReceipts = ({ interrupted, nodeOutputs, receipts, states }) => {
 };
 
 /**
- * runExecutionGraph's contract on LangGraph: the same options and result, plus
+ * Runs a validated execution graph: the graph options of
+ * createExecutionGraphNodeContext plus admission's, and
  * { agentRunService, agentRunId, runCursor } for the thread checkpointer. With
  * a run service and run id, LangGraph checkpoints into that run
  * (RunStoreCheckpointSaver bound to `graphResumeClaimId`, so its writes are
  * fenced exactly like the node steps); otherwise it runs without one (an ephemeral
  * thread nothing reads back), and a parked node returns its receipt instead
- * of calling interrupt(), so the caller persists the pause as natively. Every graph admission accepts is scheduled here.
+ * of calling interrupt(), so the caller persists the pause through
+ * pauseForApproval once nothing else can run.
  *
  * `approvalResume` ({ gateId, nodeId }, the stored approval boundary) says
  * this call continues a decided approval gate: the thread is resumed when
@@ -220,6 +223,11 @@ export const runExecutionGraphOnLangGraph = async ({
   // attaches the LangSmith tracer, with the graph's input, before any node or
   // adapter code could refuse it (langsmith-guard.js).
   assertLangSmithTracingDisabled();
+  // Every graph is scheduled here, whoever called (a route, a task, startup
+  // recovery, an evaluation runner calling runAgentRag directly): a removed
+  // AGENT_RUNTIME value asked for the native scheduler, and running LangGraph
+  // instead would ignore it silently (ADR 0001 phase 6).
+  assertAgentRuntimeSupported();
 
   const { compiled, concurrencyCap, rejected, scopedDocIds } = admitExecutionGraphRun({
     authorizedDocIds,
@@ -236,7 +244,7 @@ export const runExecutionGraphOnLangGraph = async ({
   }
 
   // Built before anything is written: an invalid reuse or denial list throws
-  // here, as natively, with nothing changed.
+  // here, with nothing changed.
   const { nodeOutputs, states, statesByNodeId } = createExecutionGraphNodeStates({
     completedNodeRuns,
     deniedNodeIds,
@@ -251,9 +259,9 @@ export const runExecutionGraphOnLangGraph = async ({
   });
   const control = createExecutionGraphRunControl();
 
-  // Nothing left to launch (every node reused or denied): the native loop
-  // does not run a single pass, and an invocation could only add a drain the
-  // native scheduler would not stop at. Decided before the thread is touched:
+  // Nothing left to launch (every node reused or denied): there is nothing to
+  // schedule, and an invocation could only add a drain stop between nodes
+  // that never run. Decided before the thread is touched:
   // a graph with nothing to run has no LangGraph writer (a settled graph,
   // replayed for its finalization, is fenced off the thread record).
   if (!states.some(isPending)) {
@@ -303,10 +311,10 @@ export const runExecutionGraphOnLangGraph = async ({
 
   if (checkpointer && !resume) {
     // Every other call starts a new thread: an earlier invocation's record
-    // (the graph before a replan, a crashed attempt, a pause that happened
-    // natively) must not be resumed or mistaken for this one. The tombstone
-    // is fenced like any saver write, so only the graph's current owner can
-    // drop it.
+    // (the graph before a replan, a crashed attempt, a pause persisted
+    // without an interrupt) must not be resumed or mistaken for this one.
+    // The tombstone is fenced like any saver write, so only the graph's
+    // current owner can drop it.
     await checkpointer.deleteThread(threadId);
   }
 
@@ -408,16 +416,16 @@ export const runExecutionGraphOnLangGraph = async ({
 
   if (checkpointer && interrupts.length === 0 && parked.length > 0) {
     // The parked node returned its receipt because later layers still had
-    // work native runs before pausing (compile-execution-graph.js); the graph
-    // ran them and stops here, where native stops. The thread holds no
-    // interrupt to resume, so it is dropped now: the continuation starts the
-    // fresh invocation a native pause gets, and no thread without a pause
-    // outlives the pause the stage persists next.
+    // work to run before the pause (compile-execution-graph.js); the graph
+    // ran them and stops here, once nothing else can run. The thread holds
+    // no interrupt to resume, so it is dropped now: the continuation starts
+    // a fresh invocation, and no thread without a pause outlives the pause
+    // the stage persists next.
     await checkpointer.deleteThread(threadId);
   }
 
-  // On a pause: the stage's pauseForApproval, exactly as natively once
-  // nothing else can run (or the parked node's abandonment after a failure).
+  // On a pause: the stage's pauseForApproval, now that nothing else can run
+  // (or the parked node's abandonment after a failure).
   return finishExecutionGraphRun({
     context,
     control,

@@ -190,7 +190,7 @@
 //     [--llm-max-concurrency 8] [--embedding-dimensions 1536]
 //     [--documents 20] [--pages 4] [--cheap-path /documents]
 //     [--request-timeout-ms 120000] [--planner deterministic|llm]
-//     [--agent-runtime native|langgraph] [--outer-plan-runtime native|langgraph]
+//     [--agent-runtime langgraph] [--outer-plan-runtime native|langgraph]
 //     [--auth] [--rate-limit] [--no-embedding-cache] [--tenant] [--no-analyze]
 //     [--postgres-pid-file <postmaster.pid>] [--repeat 1]
 //     [--read-replica-url <disposable streaming replica URL>]   (pgvector, --tenant)
@@ -266,9 +266,10 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   // AGENT_REQUEST_TIMEOUT_MS of every app process (null: unset, the app's
   // default of no request deadline).
   agentRequestTimeoutMs: null,
-  // AGENT_RUNTIME of every app process: the app's own default since phase 4
-  // (rag/config.js getAgentRuntime), so a run without the flag measures what
-  // production runs; `--agent-runtime native` measures the rollback.
+  // The scheduler of the custom-Skill DAG and the v3 unified graph, recorded
+  // in the report: always LangGraph since ADR 0001 phase 6 removed the native
+  // graph scheduler and AGENT_RUNTIME=native (`--agent-runtime langgraph` is
+  // still accepted, and changes nothing).
   agentRuntime: "langgraph",
   analyze: true,
   auth: false,
@@ -355,19 +356,22 @@ const STORAGE_MODES = new Set(["local", "pgvector"]);
 const PLANNER_MODES = new Set(["deterministic", "llm"]);
 // Which schedulers run the agent. The app's environment drops every inherited
 // AGENT_* variable, so the runtimes of a before/after pair are named here and
-// recorded in the report, never taken from the shell. Two dials, because the
-// phase-3 decision (docs/adr/0001-langgraph-runtime.md) split them:
-// --agent-runtime is AGENT_RUNTIME (rag/config.js getAgentRuntime), the
-// scheduler of the custom-Skill DAG and the v3 unified graph only, default
-// `langgraph` like the app's since phase 4 (reports written before that ran
-// `native` unless they say otherwise); it no longer puts the V1 outer plan on
-// LangGraph, so a `langgraph` run now is not the configuration the phase-3
-// latest-load-test-p3-langgraph-* reports measured (those predate the split
-// and ran the outer plan on LangGraph too).
+// recorded in the report, never taken from the shell
+// (docs/adr/0001-langgraph-runtime.md):
+// --agent-runtime names the scheduler of the custom-Skill DAG and the v3
+// unified graph. Since phase 6 that is always LangGraph: only `langgraph` is
+// accepted, it is recorded and nothing is set in the app's environment (the
+// app refuses AGENT_RUNTIME=native at start-up). Reports written before phase
+// 4 ran `native` unless they say otherwise; a report that recorded
+// agentRuntime `native` measured the rollback that phase 6 removed. It no
+// longer puts the V1 outer plan on LangGraph, so a run now is not the
+// configuration the phase-3 latest-load-test-p3-langgraph-* reports measured
+// (those predate the split and ran the outer plan on LangGraph too).
 // --outer-plan-runtime is AGENT_OUTER_PLAN_RUNTIME (getAgentOuterPlanRuntime),
 // the scheduler of the V1 outer plan and the /chat/stream relay; reproducing
-// those reports takes both at `langgraph`.
-const AGENT_RUNTIMES = new Set(["native", "langgraph"]);
+// those reports takes it at `langgraph`.
+const AGENT_RUNTIMES = new Set(["langgraph"]);
+const OUTER_PLAN_RUNTIMES = new Set(["native", "langgraph"]);
 const SCENARIOS = new Set(["chat", "ingest", "index-switch"]);
 const EMBED_BATCHING_MODES = new Set(["on", "off"]);
 const INGEST_MODES = new Set(["sync", "async"]);
@@ -539,11 +543,16 @@ export const parseLoadTestArgs = (argv = []) => {
     options.metricsScrapeMs = toPositiveInteger(raw["metrics-scrape-ms"], "--metrics-scrape-ms", { allowZero: true });
   }
   if (raw["agent-runtime"] !== undefined) {
-    if (!AGENT_RUNTIMES.has(raw["agent-runtime"])) throw new Error("--agent-runtime must be native or langgraph.");
+    if (raw["agent-runtime"] === "native")
+      throw new Error(
+        "--agent-runtime native was removed (ADR 0001 phase 6): the custom-Skill DAG and the v3 unified graph always run on LangGraph; drop the flag."
+      );
+    if (!AGENT_RUNTIMES.has(raw["agent-runtime"]))
+      throw new Error("--agent-runtime must be langgraph, the only graph scheduler since ADR 0001 phase 6.");
     options.agentRuntime = raw["agent-runtime"];
   }
   if (raw["outer-plan-runtime"] !== undefined) {
-    if (!AGENT_RUNTIMES.has(raw["outer-plan-runtime"]))
+    if (!OUTER_PLAN_RUNTIMES.has(raw["outer-plan-runtime"]))
       throw new Error("--outer-plan-runtime must be native or langgraph.");
     options.outerPlanRuntime = raw["outer-plan-runtime"];
   }
@@ -2201,7 +2210,8 @@ export const buildAppEnvironment = ({
     AGENT_PLANNER_ROLLOUT: options.planner === "llm" ? "llm" : "deterministic",
     AGENT_INTENT_PLANNER: options.planner,
     AGENT_EXECUTION_PLANNER: options.planner,
-    AGENT_RUNTIME: options.agentRuntime,
+    // No AGENT_RUNTIME: its inherited value was dropped above, and unset is
+    // the only graph scheduler (LangGraph) since phase 6.
     AGENT_OUTER_PLAN_RUNTIME: options.outerPlanRuntime,
     LOAD_TEST_STORAGE: storage,
     LOAD_TEST_TEMP_ROOT: tempRoot,

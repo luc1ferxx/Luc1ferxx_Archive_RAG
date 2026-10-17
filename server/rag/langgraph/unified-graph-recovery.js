@@ -5,9 +5,10 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 
 // Startup recovery's look at a v3 run's LangGraph thread
 // (docs/adr/0001-langgraph-runtime.md, phase 3), called by
-// agent-run-recovery.js under AGENT_RUNTIME=langgraph before the graph is
-// claimed. The graph checkpoint stays the authority: this only refuses to
-// resume a run whose thread tells another story than its checkpoint, which
+// agent-run-recovery.js before the graph is claimed (on every recovery since
+// phase 6 removed the native runtime, which ignored the thread). The graph
+// checkpoint stays the authority: this only refuses to resume a run whose
+// thread tells another story than its checkpoint, which
 // means some writer other than the run's own graph execution touched one of
 // the two. Such a run goes to an operator with a reason code and nothing
 // else (no ids of nodes or gates in the run row, no text anywhere).

@@ -1,6 +1,6 @@
 # Unified AgentRAG DAG：迁移决策与验收清单
 
-> **运行时状态（2026-10-16，LangGraph 迁移阶段 4）**：`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 时，v3 统一图默认在 LangGraph.js 上调度（`AGENT_RUNTIME` 未设置即 `langgraph`）；审批停靠是 run 线程上的 `interrupt()`，审批续跑以 `Command({resume})` 续同一线程。准入、v2 graph checkpoint、finalization 收据、回放矩阵和启动恢复仍是本文描述的同一批模块。回退：`AGENT_RUNTIME=native`，至少保留一个发布周期。见 [ADR 0001](adr/0001-langgraph-runtime.md)。
+> **运行时状态（2026-10-16，LangGraph 迁移阶段 6）**：`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 时，v3 统一图一律在 LangGraph.js 上调度；审批停靠是 run 线程上的 `interrupt()`，审批续跑以 `Command({resume})` 续同一线程。准入、v2 graph checkpoint、finalization 收据、回放矩阵和启动恢复仍是本文描述的同一批模块。原生图调度器和 `AGENT_RUNTIME=native` 回退已在阶段 6 按用户决定删除（提前结束了 ADR 约束 12 的回退窗口），`AGENT_RUNTIME` 设为 `native` 或其他非 `langgraph` 的值会拒绝启动；恢复原生调度器只能 revert 阶段 6 的提交。v3 图本身的运维回退不变：`AGENT_UNIFIED_GRAPH_ROLLOUT=off`（默认）。见 [ADR 0001](adr/0001-langgraph-runtime.md)。
 
 状态：**审批续跑也已解冻（2026-09-27）**。`AGENT_UNIFIED_GRAPH_ROLLOUT=guarded` 可以执行含审批节点的统一图：图在审批节点暂停，批准后从 checkpoint 续跑，Capability 只执行一次。默认值仍为 `off`。统一图规划器已接上真实模型，但本地 qwen2.5:7b 只有 3/15 的计划被接受，其余回落到确定性图（见下文"真实模型规划"）。本文件不能用来宣称真实模型能可靠地规划全阶段图。
 

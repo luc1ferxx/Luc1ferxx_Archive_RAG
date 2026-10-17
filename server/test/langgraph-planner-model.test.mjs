@@ -9,19 +9,33 @@ import path from "node:path";
 import test from "node:test";
 import { MessageChannel } from "node:worker_threads";
 
+import {
+  assertMatchesGraphGolden,
+  assertMatchesGraphGoldenDigest,
+} from "./langgraph-support/graph-goldens.mjs";
+
 // The five planners' model call (rag/langgraph/planner-model.js) runs through
-// ArchiveRagChatModel under AGENT_RUNTIME=langgraph and calls
-// completeTextWithMetadata directly under native. Every scenario below runs
-// the same planner input once per runtime and requires deepStrictEqual on
-// everything the two can differ in: the planner's result or decision record,
-// every call the provider (or the HTTP backend) receives, every LLMOps event,
-// what the run is charged, and the thrown error. Only clock fields
-// (latencyMs, durationMs, timestamp) are masked.
+// ArchiveRagChatModel. Until phase 6 of docs/adr/0001-langgraph-runtime.md
+// AGENT_RUNTIME=native called completeTextWithMetadata directly instead, and
+// every scenario below ran the same planner input on both paths and required
+// deepStrictEqual on everything the two can differ in: the planner's result
+// or decision record, every call the provider (or the HTTP backend) receives,
+// every LLMOps event, what the run is charged, and the thrown error. Only
+// clock fields (latencyMs, durationMs, timestamp) are masked.
+//
+// The direct path's side of each comparison was frozen before it was
+// deleted, in test/fixtures/graph-goldens/langgraph-planner-model/: the
+// sha256 of each compared value's canonical form in digests.json, and the
+// five planners' whole decisions in full (decide-<planner>.json). The values
+// are masked as they are compared; see test/langgraph-support/graph-goldens.mjs.
+// So every scenario now runs once and is compared with what the direct call
+// produced.
 //
 // The suite also shows which path ran. hooks.mjs sends planner-model.js's
 // import of model.js to a counting stand-in (model-tap.mjs) and reports every
-// @langchain module loaded from outside node_modules, so a native pass that
-// loaded LangChain, or a langgraph pass that never reached the adapter, fails.
+// @langchain module loaded from outside node_modules, so a call that never
+// reached the adapter, or a LangSmith-variable call that loaded LangChain,
+// fails.
 
 const tap = (globalThis.__archiveRagPlannerModelTap = { generations: [], loads: 0, models: [] });
 const langChainLoads = [];
@@ -79,7 +93,6 @@ const {
 const { PLANNER_MODEL_ERROR_CODES, completePlannerText } = await import(
   "../rag/langgraph/planner-model.js"
 );
-const { getAgentRuntime } = await import("../rag/config.js");
 const { MODEL_CAPABILITIES, MODEL_ROUTE_IDS } = await import("../rag/model-providers/index.js");
 const { configureOpenAIProvider, resetOpenAIProvider } = await import("../rag/openai.js");
 const {
@@ -92,7 +105,9 @@ const { createRunUsage, getRunPromptUsage, runWithRunUsage } = await import("../
 const { parseFirstJsonValue } = await import("../rag/structured-output.js");
 const { withSpan } = await import("../rag/tracing.js");
 
-const RUNTIMES = Object.freeze(["native", "langgraph"]);
+// Each scenario's one side is keyed by the path it ran on: the chat model
+// (LangGraph's adapter). The golden is the deleted direct path's.
+const SIDE = "langgraph";
 
 const withEnv = async (values, action) => {
   const saved = Object.fromEntries(Object.keys(values).map((name) => [name, process.env[name]]));
@@ -211,7 +226,7 @@ function mask(value) {
   return copy;
 }
 
-// One planner call on one runtime, under its own run meter: what it returned
+// One planner call, under its own run meter: what it returned
 // or threw, what the provider received, the LLMOps events it added, what the
 // run was charged, and what the LangChain adapter saw.
 const runSide = async ({ call, calls, readEvents }) => {
@@ -260,52 +275,76 @@ const createRecordingProvider = (respond) => {
   };
 };
 
-// Runs `call` once per runtime against the stand-in provider. `respond` gets
-// the prompt and options and returns the reply (or throws). A runtime of
-// undefined leaves AGENT_RUNTIME unset (the default) and is keyed "default".
-const runOnBothRuntimes = ({ call, respond, runtimes = RUNTIMES }) =>
+// Runs `call` once against the stand-in provider and returns its side keyed
+// SIDE. `respond` gets the prompt and options and returns the reply (or
+// throws).
+const runPlannerCall = ({ call, respond }) =>
   withLlmOpsEvents(async (readEvents) => {
     const recording = createRecordingProvider(respond);
-    const sides = {};
 
     configureOpenAIProvider(recording.provider);
 
     try {
-      for (const runtime of runtimes) {
-        sides[runtime ?? "default"] = await withEnv({ AGENT_RUNTIME: runtime }, () =>
-          runSide({ call, calls: recording.calls, readEvents })
-        );
-      }
+      return { [SIDE]: await runSide({ call, calls: recording.calls, readEvents }) };
     } finally {
       resetOpenAIProvider();
     }
-
-    return sides;
   });
 
-// The two runtimes agree on everything compared, the native pass never
-// reached the adapter, and the langgraph pass reached it once per model call,
-// as a root LangChain run with no LangChain signal.
-// The first path where two compared values differ, for a readable failure.
-const findDifference = (left, right, at = "$") => {
-  if (Object.is(left, right)) return null;
-  if (left && right && typeof left === "object" && typeof right === "object") {
-    for (const key of new Set([...Reflect.ownKeys(left), ...Reflect.ownKeys(right)])) {
-      const found = findDifference(left[key], right[key], `${at}.${String(key)}`);
-      if (found) return found;
-    }
-    return null;
+const GOLDEN_SUITE = "langgraph-planner-model";
+
+// Two things in a compared value vary between processes and Node versions
+// though both sides of one comparison share them, so a golden holds them
+// normalized: the fake OpenAI server's ephemeral port (inside the circuit
+// breaker's key, which reaches error messages), and the " (line L column C)"
+// suffix V8 adds to a JSON.parse SyntaxError's message on newer Node versions
+// only (Node 20 has none, Node 24 has it).
+const EPHEMERAL_LOOPBACK_ORIGIN = /http:\/\/127\.0\.0\.1:\d+/g;
+const V8_JSON_POSITION_SUFFIX = / \(line \d+ column \d+\)/g;
+
+const toPortableGoldenValue = (value) => {
+  if (typeof value === "string") {
+    return value
+      .replace(EPHEMERAL_LOOPBACK_ORIGIN, "http://127.0.0.1:<port>")
+      .replace(V8_JSON_POSITION_SUFFIX, "");
   }
-  return at;
+
+  if (Array.isArray(value)) {
+    return Array.from(value, (item) => toPortableGoldenValue(item));
+  }
+
+  if (isPlainObject(value)) {
+    const copy = Object.getPrototypeOf(value) === null ? Object.create(null) : {};
+
+    for (const key of Reflect.ownKeys(value)) {
+      copy[key] = toPortableGoldenValue(value[key]);
+    }
+
+    return copy;
+  }
+
+  return value;
 };
 
-const assertRuntimeParity = (sides, label, { modelCalls = 1 } = {}) => {
-  assert.deepStrictEqual(
-    sides.langgraph.comparable,
-    sides.native.comparable,
-    `${label} (first difference at ${findDifference(sides.langgraph.comparable, sides.native.comparable)})`
-  );
-  assert.equal(sides.native.adapterCalls.length, 0, `${label}: native never used the adapter`);
+// The compared value against the native golden `golden` (a digests.json
+// entry, or the whole <golden>.json with `full`). UPDATE_GRAPH_GOLDENS=1
+// rewrites it from this side (see the helper's rules).
+const assertMatchesNativeGolden = (golden, comparedValue, { full = false } = {}) => {
+  assert.equal(typeof golden, "string", "every comparison names its native golden");
+  const assertGolden = full ? assertMatchesGraphGolden : assertMatchesGraphGoldenDigest;
+
+  try {
+    assertGolden(GOLDEN_SUITE, golden, toPortableGoldenValue(comparedValue));
+  } catch (error) {
+    error.message = `${golden}: ${error.message}`;
+    throw error;
+  }
+};
+
+// The call matches the direct path's golden, and it reached the adapter once
+// per model call, as a root LangChain run with no LangChain signal.
+const assertPlannerCall = (sides, label, { full = false, golden, modelCalls = 1 } = {}) => {
+  assertMatchesNativeGolden(golden, sides.langgraph.comparable, { full });
   assert.equal(
     sides.langgraph.adapterCalls.length,
     modelCalls,
@@ -618,21 +657,13 @@ const PROVIDER_FAILURES = Object.freeze([
 
 // --- Tests ------------------------------------------------------------------
 
-// A LangSmith tracing variable keeps the planner call on the direct path on
-// every runtime, so the LLM planners (the default dials) still plan with the
-// model and a request that builds no LangGraph graph answers as natively
-// (AGENTS.md, "Deliberate difference"); nothing goes through LangChain, so
-// there is no run a tracer could attach to. The default (AGENT_RUNTIME unset)
-// is checked too, since that is the configuration a deployment runs. First in
-// the file, so it can show that this path loads no LangChain module at all;
-// the next test's native check (nothing loaded yet) repeats that.
-test("a LangSmith tracing variable keeps every planner on the direct call: it decides as natively on every runtime and loads no LangChain", async () => {
-  const runtimes = ["native", "langgraph", undefined];
-
-  await withEnv({ AGENT_RUNTIME: undefined }, async () =>
-    assert.equal(getAgentRuntime(), "langgraph", "unset is the langgraph default")
-  );
-
+// A LangSmith tracing variable keeps the planner call on the direct path, so
+// the LLM planners (the default dials) still plan with the model and a
+// request that builds no LangGraph graph answers as it did before the
+// migration (AGENTS.md, "Deliberate difference"); nothing goes through
+// LangChain, so there is no run a tracer could attach to. First in the file,
+// so it can show that this path loads no LangChain module at all.
+test("a LangSmith tracing variable keeps every planner on the direct call: it decides as natively and loads no LangChain", async () => {
   for (const planner of PLANNERS) {
     for (const [kind, call] of [
       ["adapter", planner.adapterCall],
@@ -640,30 +671,18 @@ test("a LangSmith tracing variable keeps every planner on the direct call: it de
     ]) {
       const label = `${planner.name} ${kind} under LANGSMITH_TRACING=true`;
       const sides = await withEnv({ LANGSMITH_TRACING: "true" }, () =>
-        runOnBothRuntimes({ call, respond: planner.reply, runtimes })
+        runPlannerCall({ call, respond: planner.reply })
       );
+      const side = sides.langgraph;
 
-      for (const runtime of ["langgraph", "default"]) {
-        assert.deepStrictEqual(
-          sides[runtime].comparable,
-          sides.native.comparable,
-          `${label}, ${runtime} (first difference at ${findDifference(
-            sides[runtime].comparable,
-            sides.native.comparable
-          )})`
-        );
-      }
-
-      for (const side of Object.values(sides)) {
-        assert.equal(side.adapterCalls.length, 0, `${label}: the chat model never ran`);
-      }
-
-      assert.equal(sides.native.error, null, label);
-      assert.equal(sides.native.comparable.calls.length, 1, `${label}: the model was called once`);
-      assert.equal(sides.native.comparable.events.length, 1, `${label}: one LLMOps event`);
+      assertMatchesNativeGolden(`langsmith/${planner.name} ${kind}`, side.comparable);
+      assert.equal(side.adapterCalls.length, 0, `${label}: the chat model never ran`);
+      assert.equal(side.error, null, label);
+      assert.equal(side.comparable.calls.length, 1, `${label}: the model was called once`);
+      assert.equal(side.comparable.events.length, 1, `${label}: one LLMOps event`);
 
       if (kind === "decision") {
-        assert.ok(planner.isSelected(sides.native.result), `${label}: the model's plan was used`);
+        assert.ok(planner.isSelected(side.result), `${label}: the model's plan was used`);
       }
     }
   }
@@ -674,7 +693,7 @@ test("a LangSmith tracing variable keeps every planner on the direct call: it de
   assert.deepStrictEqual(tap.models, [], "no chat model was built");
 });
 
-test("every planner decides identically on both runtimes; native never loads LangChain, langgraph runs each call through the adapter", async () => {
+test("every planner decides as natively, with each call through the adapter", async () => {
   const replies = Object.fromEntries(
     await Promise.all(PLANNERS.map(async (planner) => [planner.name, await planner.reply()]))
   );
@@ -696,21 +715,17 @@ test("every planner decides identically on both runtimes; native never loads Lan
     configureOpenAIProvider(recording.provider);
 
     try {
-      // Every native pass first, so the load check below covers all five.
-      for (const runtime of RUNTIMES) {
-        for (const planner of PLANNERS) {
-          recording.current = planner.name;
-          sidesByPlanner[planner.name] ??= {};
-          sidesByPlanner[planner.name][runtime] = await withEnv({ AGENT_RUNTIME: runtime }, () =>
-            runSide({ call: planner.decide, calls: recording.calls, readEvents })
-          );
-        }
+      // Nothing has loaded LangChain yet (the LangSmith test above ran on the
+      // direct path), so the load check below is this test's.
+      await waitForLoadReports();
+      assert.deepStrictEqual(langChainLoads, [], "no @langchain module was loaded yet");
+      assert.equal(tap.loads, 0, "model.js was not loaded yet");
 
-        if (runtime === "native") {
-          await waitForLoadReports();
-          assert.deepStrictEqual(langChainLoads, [], "no @langchain module was loaded on native");
-          assert.equal(tap.loads, 0, "model.js was not loaded on native");
-        }
+      for (const planner of PLANNERS) {
+        recording.current = planner.name;
+        sidesByPlanner[planner.name] = {
+          [SIDE]: await runSide({ call: planner.decide, calls: recording.calls, readEvents }),
+        };
       }
     } finally {
       resetOpenAIProvider();
@@ -720,11 +735,17 @@ test("every planner decides identically on both runtimes; native never loads Lan
   for (const planner of PLANNERS) {
     const sides = sidesByPlanner[planner.name];
 
-    assertRuntimeParity(sides, planner.name);
-    assert.equal(sides.native.error, null, planner.name);
-    assert.ok(planner.isSelected(sides.native.result), `${planner.name}: the model's plan was used`);
+    // The whole decision in full where it is small enough to read (the
+    // unified planner's result carries its graph registry and catalog, about
+    // 370 KB, so it keeps a digest).
+    assertPlannerCall(sides, planner.name, {
+      full: planner.name !== "unified",
+      golden: planner.name === "unified" ? "decide/unified" : `decide-${planner.name}`,
+    });
+    assert.equal(sides.langgraph.error, null, planner.name);
+    assert.ok(planner.isSelected(sides.langgraph.result), `${planner.name}: the model's plan was used`);
 
-    const [providerCall] = sides.native.comparable.calls;
+    const [providerCall] = sides.langgraph.comparable.calls;
 
     assert.equal(typeof providerCall.input, "string", `${planner.name}: a string prompt`);
     assert.equal(
@@ -732,19 +753,19 @@ test("every planner decides identically on both runtimes; native never loads Lan
       planner.sendsSchema,
       `${planner.name}: a strict schema exactly when the planner builds one`
     );
-    assert.equal(sides.native.comparable.events.length, 1, `${planner.name}: one LLMOps event`);
-    assert.equal(sides.native.comparable.used.modelCalls, 1, `${planner.name}: one model call charged`);
+    assert.equal(sides.langgraph.comparable.events.length, 1, `${planner.name}: one LLMOps event`);
+    assert.equal(sides.langgraph.comparable.used.modelCalls, 1, `${planner.name}: one model call charged`);
   }
 
   // The replan sends no schema at all.
-  assert.equal(sidesByPlanner.replan.native.comparable.calls[0].options.responseFormat, null);
+  assert.equal(sidesByPlanner.replan.langgraph.comparable.calls[0].options.responseFormat, null);
 
   // Loaded once, from the planner helper; two models (one per route).
   await waitForLoadReports();
   assert.equal(tap.loads, 1);
   assert.ok(
     langChainLoads.some(({ parentURL }) => parentURL.endsWith("/rag/langgraph/planner-model.js")),
-    "the planner helper loaded LangChain on langgraph"
+    "the planner helper loaded LangChain"
   );
   assert.deepStrictEqual(
     tap.models.map(({ capability, routeId }) => [capability, routeId]).sort(),
@@ -755,8 +776,8 @@ test("every planner decides identically on both runtimes; native never loads Lan
   );
 });
 
-test("the intent planner without candidates sends no schema, alike on both runtimes", async () => {
-  const sides = await runOnBothRuntimes({
+test("the intent planner without candidates sends no schema, as natively", async () => {
+  const sides = await runPlannerCall({
     call: () =>
       llmIntentPlannerAdapter.selectIntentPlan({
         candidates: [],
@@ -766,13 +787,13 @@ test("the intent planner without candidates sends no schema, alike on both runti
     respond: async () => '{"selectedIntentId":"","reason":"No candidate fits."}',
   });
 
-  assertRuntimeParity(sides, "no candidates");
-  assert.equal(sides.native.error, null);
-  assert.equal(sides.native.comparable.calls[0].options.responseFormat, null);
+  assertPlannerCall(sides, "no candidates", { golden: "intent-no-candidates" });
+  assert.equal(sides.langgraph.error, null);
+  assert.equal(sides.langgraph.comparable.calls[0].options.responseFormat, null);
   assert.equal(sides.langgraph.adapterCalls[0].responseFormat, null);
 });
 
-test("a malformed, empty or missing reply fails each planner the same way on both runtimes", async () => {
+test("a malformed, empty or missing reply fails each planner as natively", async () => {
   const replies = [
     { label: "prose with brackets and no JSON", reply: "I cannot plan [this] request {now}." },
     { label: "an empty reply", reply: "" },
@@ -781,14 +802,18 @@ test("a malformed, empty or missing reply fails each planner the same way on bot
 
   for (const planner of PLANNERS) {
     for (const { label, reply } of replies) {
-      const adapter = await runOnBothRuntimes({ call: planner.adapterCall, respond: async () => reply });
-      const decision = await runOnBothRuntimes({ call: planner.decide, respond: async () => reply });
+      const adapter = await runPlannerCall({ call: planner.adapterCall, respond: async () => reply });
+      const decision = await runPlannerCall({ call: planner.decide, respond: async () => reply });
 
-      assertRuntimeParity(adapter, `${planner.name} adapter, ${label}`);
-      assertRuntimeParity(decision, `${planner.name} decision, ${label}`);
-      assert.ok(adapter.native.error, `${planner.name}: ${label} is refused by the planner's parser`);
+      assertPlannerCall(adapter, `${planner.name} adapter, ${label}`, {
+        golden: `unusable-reply/${planner.name} adapter, ${label}`,
+      });
+      assertPlannerCall(decision, `${planner.name} decision, ${label}`, {
+        golden: `unusable-reply/${planner.name} decision, ${label}`,
+      });
+      assert.ok(adapter.langgraph.error, `${planner.name}: ${label} is refused by the planner's parser`);
       assert.equal(
-        planner.isSelected(decision.native.result),
+        planner.isSelected(decision.langgraph.result),
         false,
         `${planner.name}: ${label} does not become the plan`
       );
@@ -796,7 +821,7 @@ test("a malformed, empty or missing reply fails each planner the same way on bot
   }
 });
 
-test("a provider failure reaches each planner as the same error object on both runtimes, and the same fallback", async () => {
+test("a provider failure reaches each planner as the same error object, and the same fallback, as natively", async () => {
   for (const planner of PLANNERS) {
     for (const { fields, label } of PROVIDER_FAILURES) {
       const thrown = [];
@@ -805,25 +830,28 @@ test("a provider failure reaches each planner as the same error object on both r
         thrown.push(error);
         throw error;
       };
-      const adapter = await runOnBothRuntimes({ call: planner.adapterCall, respond });
+      const adapter = await runPlannerCall({ call: planner.adapterCall, respond });
 
-      assertRuntimeParity(adapter, `${planner.name} adapter, ${label}`);
-      assert.equal(thrown.length, 2);
-      // The very object the provider threw, unwrapped, on both runtimes.
-      assert.equal(adapter.native.error, thrown[0], `${planner.name}, ${label}: native`);
-      assert.equal(adapter.langgraph.error, thrown[1], `${planner.name}, ${label}: langgraph`);
-      assert.equal(adapter.native.comparable.events[0].status, "error");
+      assertPlannerCall(adapter, `${planner.name} adapter, ${label}`, {
+        golden: `provider-failure/${planner.name} adapter, ${label}`,
+      });
+      assert.equal(thrown.length, 1);
+      // The very object the provider threw, unwrapped.
+      assert.equal(adapter.langgraph.error, thrown[0], `${planner.name}, ${label}`);
+      assert.equal(adapter.langgraph.comparable.events[0].status, "error");
 
-      const decision = await runOnBothRuntimes({ call: planner.decide, respond });
+      const decision = await runPlannerCall({ call: planner.decide, respond });
 
-      assertRuntimeParity(decision, `${planner.name} decision, ${label}`);
-      assert.equal(planner.isSelected(decision.native.result), false, `${planner.name}, ${label}`);
+      assertPlannerCall(decision, `${planner.name} decision, ${label}`, {
+        golden: `provider-failure/${planner.name} decision, ${label}`,
+      });
+      assert.equal(planner.isSelected(decision.langgraph.result), false, `${planner.name}, ${label}`);
     }
   }
 });
 
 // The provider honours the abort signal openai.js hands it, as a real client
-// does. Neither planner path passes a signal: both get the bound request's.
+// does. The planner passes no signal of its own: it gets the bound request's.
 const createGatedResponder = () => {
   const state = { signals: [], started: null };
   let notifyStarted = () => {};
@@ -850,11 +878,11 @@ const createGatedResponder = () => {
   return state;
 };
 
-test("a cancelled request and a passed deadline stop each planner's call the same way on both runtimes", async () => {
+test("a cancelled request and a passed deadline stop each planner's call as natively", async () => {
   for (const planner of PLANNERS) {
     const gate = createGatedResponder();
     const cancellations = [];
-    const cancelled = await runOnBothRuntimes({
+    const cancelled = await runPlannerCall({
       call: async () => {
         const cancellation = createRequestCancellation();
         cancellations.push(cancellation);
@@ -870,42 +898,48 @@ test("a cancelled request and a passed deadline stop each planner's call the sam
       respond: gate.respond,
     });
 
-    assertRuntimeParity(cancelled, `${planner.name}, client cancelled`);
+    assertPlannerCall(cancelled, `${planner.name}, client cancelled`, {
+      golden: `cancelled/${planner.name} adapter, client cancelled`,
+    });
 
-    for (const [index, runtime] of RUNTIMES.entries()) {
-      const { error } = cancelled[runtime];
+    const { error } = cancelled.langgraph;
 
-      assert.ok(error instanceof RequestCancelledError, `${planner.name}, ${runtime}`);
-      assert.equal(error, cancellations[index].signal.reason, `${planner.name}, ${runtime}: the request's own error`);
-      assert.equal(gate.signals[index], cancellations[index].signal, `${planner.name}, ${runtime}: the request's signal`);
-    }
+    assert.equal(cancellations.length, 1, planner.name);
+    assert.ok(error instanceof RequestCancelledError, planner.name);
+    assert.equal(error, cancellations[0].signal.reason, `${planner.name}: the request's own error`);
+    assert.equal(gate.signals[0], cancellations[0].signal, `${planner.name}: the request's signal`);
 
     const deadlineGate = createGatedResponder();
-    const expired = await runOnBothRuntimes({
+    const expired = await runPlannerCall({
       call: () => runWithRequestDeadline({ deadlineAt: Date.now() + 25 }, planner.adapterCall),
       respond: deadlineGate.respond,
     });
 
-    assertRuntimeParity(expired, `${planner.name}, deadline`);
-    assert.ok(expired.native.error instanceof RequestCancelledError);
-    assert.equal(expired.native.error.code, "AGENT_DEADLINE_EXCEEDED");
+    assertPlannerCall(expired, `${planner.name}, deadline`, {
+      golden: `cancelled/${planner.name} adapter, deadline`,
+    });
+    assert.ok(expired.langgraph.error instanceof RequestCancelledError);
+    assert.equal(expired.langgraph.error.code, "AGENT_DEADLINE_EXCEEDED");
   }
 });
 
-test("an option the planner call cannot carry is refused on both runtimes before the model is called", async () => {
+test("an option the planner call cannot carry is refused before the model is called", async () => {
   for (const options of [
     { signal: new AbortController().signal },
     { modelName: "other-model" },
     { onTextDelta: () => {} },
   ]) {
-    const sides = await runOnBothRuntimes({
+    const sides = await runPlannerCall({
       call: () => completePlannerText("plan", { promptTemplate: null, ...options }),
       respond: async () => "{}",
     });
 
-    assert.deepStrictEqual(sides.langgraph.comparable, sides.native.comparable);
-    assert.equal(sides.native.error.code, PLANNER_MODEL_ERROR_CODES.unsupportedOption);
-    assert.deepStrictEqual(sides.native.comparable.calls, []);
+    assertMatchesNativeGolden(
+      `unsupported-option/${Object.keys(options).join(",")}`,
+      sides.langgraph.comparable
+    );
+    assert.equal(sides.langgraph.error.code, PLANNER_MODEL_ERROR_CODES.unsupportedOption);
+    assert.deepStrictEqual(sides.langgraph.comparable.calls, []);
     assert.equal(sides.langgraph.adapterCalls.length, 0);
   }
 });
@@ -923,15 +957,15 @@ test("inside a LangGraph node the planner call stays a root run and decides as n
     .addEdge(START, "plan")
     .addEdge("plan", END)
     .compile();
-  const sides = await runOnBothRuntimes({
+  const sides = await runPlannerCall({
     call: async () =>
       (await graph.invoke({}, { configurable: { thread_id: "planner-node" }, signal: new AbortController().signal }))
         .planned,
     respond: dag.reply,
   });
 
-  assertRuntimeParity(sides, "dag inside a LangGraph node");
-  assert.equal(dag.isSelected(sides.native.result), true);
+  assertPlannerCall(sides, "dag inside a LangGraph node", { golden: "langgraph-node/dag decision" });
+  assert.equal(dag.isSelected(sides.langgraph.result), true);
 });
 
 // --- Over HTTP: the real client path (retries, circuit breaker, timeouts) ----
@@ -1018,32 +1052,27 @@ const withFakeOpenAI = async (env, action) => {
   }
 };
 
-// Each side starts from fresh clients and closed circuits (resetOpenAIProvider)
+// The call starts from fresh clients and closed circuits (resetOpenAIProvider)
 // and keeps only the requests it sent.
-const runHttpOnBothRuntimes = async ({ call, readEvents, server, warmUp = null }) => {
-  const sides = {};
+const runHttpPlannerCall = async ({ call, readEvents, server, warmUp = null }) => {
+  resetOpenAIProvider();
 
-  for (const runtime of RUNTIMES) {
-    resetOpenAIProvider();
-    await withEnv({ AGENT_RUNTIME: runtime }, async () => {
-      if (warmUp) {
-        await warmUp().catch(() => {});
-      }
-
-      const before = server.requests.length;
-      const side = await runSide({ call, calls: [], readEvents });
-
-      sides[runtime] = {
-        ...side,
-        comparable: { ...side.comparable, requests: server.requests.slice(before) },
-      };
-    });
+  if (warmUp) {
+    await warmUp().catch(() => {});
   }
 
-  return sides;
+  const before = server.requests.length;
+  const side = await runSide({ call, calls: [], readEvents });
+
+  return {
+    [SIDE]: {
+      ...side,
+      comparable: { ...side.comparable, requests: server.requests.slice(before) },
+    },
+  };
 };
 
-test("over HTTP each planner sends byte-identical requests and decides identically on both runtimes", async () => {
+test("over HTTP each planner sends the native requests byte for byte and decides as natively", async () => {
   const replies = Object.fromEntries(
     await Promise.all(PLANNERS.map(async (planner) => [planner.name, await planner.reply()]))
   );
@@ -1052,14 +1081,14 @@ test("over HTTP each planner sends byte-identical requests and decides identical
     for (const planner of PLANNERS) {
       server.setResponder(() => ({ content: replies[planner.name], status: 200 }));
 
-      const sides = await runHttpOnBothRuntimes({ call: planner.decide, readEvents, server });
+      const sides = await runHttpPlannerCall({ call: planner.decide, readEvents, server });
 
-      assertRuntimeParity(sides, `${planner.name} over HTTP`);
-      assert.equal(sides.native.error, null, planner.name);
-      assert.ok(planner.isSelected(sides.native.result), planner.name);
-      assert.equal(sides.native.comparable.requests.length, 1, planner.name);
+      assertPlannerCall(sides, `${planner.name} over HTTP`, { golden: `http/${planner.name} decision` });
+      assert.equal(sides.langgraph.error, null, planner.name);
+      assert.ok(planner.isSelected(sides.langgraph.result), planner.name);
+      assert.equal(sides.langgraph.comparable.requests.length, 1, planner.name);
 
-      const body = JSON.parse(sides.native.comparable.requests[0].body);
+      const body = JSON.parse(sides.langgraph.comparable.requests[0].body);
 
       assert.equal(body.messages.length, 1, planner.name);
       assert.equal(body.messages[0].role, "user", planner.name);
@@ -1068,7 +1097,7 @@ test("over HTTP each planner sends byte-identical requests and decides identical
   });
 });
 
-test("over HTTP a refusal, an outage that opens the circuit, an open circuit and a timeout fail alike on both runtimes", async () => {
+test("over HTTP a refusal, an outage that opens the circuit, an open circuit and a timeout fail as natively", async () => {
   const intent = PLANNERS.find(({ name }) => name === "intent");
   const cases = [
     {
@@ -1115,27 +1144,31 @@ test("over HTTP a refusal, an outage that opens the circuit, an open circuit and
     await withFakeOpenAI(env, async ({ readEvents, server }) => {
       server.setResponder(respond);
 
-      const adapter = await runHttpOnBothRuntimes({ call: intent.adapterCall, readEvents, server, warmUp });
+      const adapter = await runHttpPlannerCall({ call: intent.adapterCall, readEvents, server, warmUp });
 
-      assertRuntimeParity(adapter, `intent adapter, ${label}`);
-      expect(adapter.native.error, adapter.native.comparable.requests);
+      assertPlannerCall(adapter, `intent adapter, ${label}`, {
+        golden: `http-failure/intent adapter, ${label}`,
+      });
+      expect(adapter.langgraph.error, adapter.langgraph.comparable.requests);
 
-      const decision = await runHttpOnBothRuntimes({ call: intent.decide, readEvents, server, warmUp });
+      const decision = await runHttpPlannerCall({ call: intent.decide, readEvents, server, warmUp });
 
-      assertRuntimeParity(decision, `intent decision, ${label}`);
-      assert.equal(decision.native.result.planner.fallback, true, label);
+      assertPlannerCall(decision, `intent decision, ${label}`, {
+        golden: `http-failure/intent decision, ${label}`,
+      });
+      assert.equal(decision.langgraph.result.planner.fallback, true, label);
     });
   }
 });
 
-test("over HTTP a request cancelled mid-flight stops the call alike on both runtimes", async () => {
+test("over HTTP a request cancelled mid-flight stops the call as natively", async () => {
   const dag = PLANNERS.find(({ name }) => name === "dag");
 
   await withFakeOpenAI({ RAG_LLM_CIRCUIT_FAILURE_THRESHOLD: "1" }, async ({ readEvents, server }) => {
     server.setResponder(() => ({ content: DAG_REPLY, delayMs: 5000, status: 200 }));
 
     const cancellations = [];
-    const sides = await runHttpOnBothRuntimes({
+    const sides = await runHttpPlannerCall({
       call: async () => {
         const cancellation = createRequestCancellation();
         const before = server.requests.length;
@@ -1154,15 +1187,15 @@ test("over HTTP a request cancelled mid-flight stops the call alike on both runt
       server,
     });
 
-    assertRuntimeParity(sides, "dag cancelled over HTTP");
-    assert.equal(sides.native.error, cancellations[0].signal.reason);
-    assert.equal(sides.langgraph.error, cancellations[1].signal.reason);
-    assert.equal(sides.native.comparable.requests.length, 1);
+    assertPlannerCall(sides, "dag cancelled over HTTP", { golden: "http-cancelled/dag adapter" });
+    assert.equal(cancellations.length, 1);
+    assert.equal(sides.langgraph.error, cancellations[0].signal.reason);
+    assert.equal(sides.langgraph.comparable.requests.length, 1);
   });
 });
 
 // Last: registering the tracing SDK is process-wide.
-test("the model span nests under the planner span alike on both runtimes", async (t) => {
+test("the model span nests under the planner span as natively", async (t) => {
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-node");
   const { startTracing } = await import("../otel.js");
   const exporter = new InMemorySpanExporter();
@@ -1185,24 +1218,24 @@ test("the model span nests under the planner span alike on both runtimes", async
 
   for (const planner of PLANNERS) {
     const reply = await planner.reply();
-    const spansByRuntime = {};
+    let spans = null;
 
-    await runOnBothRuntimes({
+    await runPlannerCall({
       call: async () => {
         exporter.reset();
         const result = await withSpan(`agent.plan ${planner.name}`, {}, () => planner.decide());
 
         await provider.forceFlush();
-        spansByRuntime[process.env.AGENT_RUNTIME] = projectSpans(exporter.getFinishedSpans());
+        spans = projectSpans(exporter.getFinishedSpans());
 
         return result;
       },
       respond: async () => reply,
     });
 
-    assert.deepStrictEqual(spansByRuntime.langgraph, spansByRuntime.native, planner.name);
+    assertMatchesNativeGolden(`spans/${planner.name} decision`, spans);
 
-    const chat = spansByRuntime.native.find((span) => span.attributes["gen_ai.operation.name"] === "chat");
+    const chat = spans.find((span) => span.attributes["gen_ai.operation.name"] === "chat");
 
     assert.ok(chat, `${planner.name}: a model span`);
     assert.equal(chat.parent, `agent.plan ${planner.name}`, `${planner.name}: under the planner span`);

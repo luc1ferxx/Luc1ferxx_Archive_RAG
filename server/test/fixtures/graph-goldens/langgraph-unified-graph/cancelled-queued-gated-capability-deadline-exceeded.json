@@ -1,0 +1,733 @@
+{
+  "checkpoint": {
+    "digest": "<seal>",
+    "fingerprints": [],
+    "graph": {
+      "nodes": [
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "document",
+          "rationale": null,
+          "skillId": "document_rag"
+        },
+        {
+          "dependsOn": [
+            "document"
+          ],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "evidence": {
+              "nodeId": "document",
+              "output": "evidence",
+              "source": "node"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "evidence_check",
+          "rationale": null,
+          "skillId": "document_evidence_check"
+        },
+        {
+          "dependsOn": [
+            "document"
+          ],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "description": {
+              "nodeId": "document",
+              "output": "text",
+              "source": "node"
+            },
+            "title": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "task",
+          "rationale": null,
+          "skillId": "capability:task.create"
+        }
+      ],
+      "revision": 0,
+      "version": "v3"
+    },
+    "nodeRuns": [
+      {
+        "nodeId": "document",
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "vendor-msa",
+              "excerpt": "The vendor requires 30 days written notice before renewal.",
+              "fileName": "vendor-msa.pdf",
+              "pageNumber": 2
+            }
+          ],
+          "durationMs": "<elapsed>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "vendor-msa",
+                "excerpt": "The vendor requires 30 days written notice before renewal.",
+                "fileName": "vendor-msa.pdf",
+                "pageNumber": 2
+              }
+            ],
+            "evidence": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "vendor-msa",
+                  "excerpt": "The vendor requires 30 days written notice before renewal.",
+                  "fileName": "vendor-msa.pdf",
+                  "pageNumber": 2
+                }
+              ],
+              "comparisonAnalysisSummary": null,
+              "retrievedContexts": [],
+              "text": "The vendor requires 30 days written notice before renewal. [Source 1]"
+            },
+            "text": "The vendor requires 30 days written notice before renewal. [Source 1]"
+          },
+          "label": "Document RAG",
+          "ok": true,
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0",
+          "text": "The vendor requires 30 days written notice before renewal. [Source 1]",
+          "traceDetail": {
+            "abstained": false,
+            "citations": 1,
+            "retrievalPlan": null
+          },
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "vendor-msa",
+                "excerpt": "The vendor requires 30 days written notice before renewal.",
+                "fileName": "vendor-msa.pdf",
+                "pageNumber": 2
+              }
+            ],
+            "text": "The vendor requires 30 days written notice before renewal. [Source 1]"
+          }
+        },
+        "skillId": "document_rag",
+        "skillVersion": "1.0.0",
+        "status": "completed",
+        "stepId": "agent_graph_node:ZG9jdW1lbnQ"
+      },
+      {
+        "nodeId": "evidence_check",
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "vendor-msa",
+              "excerpt": "The vendor requires 30 days written notice before renewal.",
+              "fileName": "vendor-msa.pdf",
+              "pageNumber": 2
+            }
+          ],
+          "durationMs": "<elapsed>",
+          "graphOutput": {
+            "abstained": false,
+            "check": {
+              "answerLabel": "Document answer",
+              "citationCount": 1,
+              "citedDocCount": 1,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "30",
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "vendor-msa"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      1
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "vendor-msa"
+                    ],
+                    "supportedSourceRanks": [
+                      1
+                    ],
+                    "text": "The vendor requires 30 days written notice before renewal",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      1
+                    ]
+                  }
+                ],
+                "supportedClaimCount": 1,
+                "unsupportedClaimCount": 0
+              },
+              "gaps": [],
+              "passed": true,
+              "reasons": [],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 1,
+              "retryRecommended": false
+            },
+            "citations": [
+              {
+                "docId": "vendor-msa",
+                "excerpt": "The vendor requires 30 days written notice before renewal.",
+                "fileName": "vendor-msa.pdf",
+                "pageNumber": 2
+              }
+            ],
+            "followUpQuestion": "",
+            "passed": true,
+            "retryRecommended": false,
+            "text": "The vendor requires 30 days written notice before renewal. [Source 1]"
+          },
+          "label": "Document Evidence Check",
+          "ok": true,
+          "skillId": "document_evidence_check",
+          "skillVersion": "1.0.0",
+          "text": "The vendor requires 30 days written notice before renewal. [Source 1]",
+          "traceDetail": {
+            "passed": true,
+            "reasons": [],
+            "retryRecommended": false
+          },
+          "value": {
+            "abstained": false,
+            "check": {
+              "answerLabel": "Document answer",
+              "citationCount": 1,
+              "citedDocCount": 1,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "30",
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "vendor-msa"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      1
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "vendor-msa"
+                    ],
+                    "supportedSourceRanks": [
+                      1
+                    ],
+                    "text": "The vendor requires 30 days written notice before renewal",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      1
+                    ]
+                  }
+                ],
+                "supportedClaimCount": 1,
+                "unsupportedClaimCount": 0
+              },
+              "gaps": [],
+              "passed": true,
+              "reasons": [],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 1,
+              "retryRecommended": false
+            },
+            "citations": [
+              {
+                "docId": "vendor-msa",
+                "excerpt": "The vendor requires 30 days written notice before renewal.",
+                "fileName": "vendor-msa.pdf",
+                "pageNumber": 2
+              }
+            ],
+            "followUpQuestion": "",
+            "passed": true,
+            "retryRecommended": false,
+            "text": "The vendor requires 30 days written notice before renewal. [Source 1]",
+            "traceDetail": {
+              "passed": true,
+              "reasons": [],
+              "retryRecommended": false
+            }
+          }
+        },
+        "skillId": "document_evidence_check",
+        "skillVersion": "1.0.0",
+        "status": "completed",
+        "stepId": "agent_graph_node:ZXZpZGVuY2VfY2hlY2s"
+      }
+    ],
+    "owner": {
+      "accessScope": {
+        "userId": "unified-graph-user",
+        "workspaceId": "unified-graph-workspace"
+      },
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "usedAtEntry": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 0,
+          "researchQuestions": 0,
+          "traceSteps": 1,
+          "webSearchCalls": 0
+        }
+      },
+      "docIds": [
+        "vendor-msa"
+      ],
+      "intentPlan": {
+        "actionCapabilityId": "task.create",
+        "mode": "workspace_action",
+        "requiresDocuments": false,
+        "summary": "Execute a scoped workspace action through the capability registry.",
+        "wantsAction": true,
+        "wantsArxivImport": false,
+        "wantsCompareDocuments": false,
+        "wantsContractSummary": false,
+        "wantsDiscovery": false,
+        "wantsDocumentRag": false,
+        "wantsInventory": false,
+        "wantsResearch": false,
+        "wantsRiskReview": false,
+        "wantsTimeline": false,
+        "wantsWeb": false
+      },
+      "question": "Create a follow-up task for the vendor renewal notice period",
+      "retrievalPlan": null,
+      "selectedSkills": [
+        {
+          "id": "capability:task.create",
+          "version": "1.0.0"
+        },
+        {
+          "id": "compare_documents",
+          "version": "1.0.0"
+        },
+        {
+          "id": "document_discovery",
+          "version": "1.0.0"
+        },
+        {
+          "id": "document_evidence_check",
+          "version": "1.0.0"
+        },
+        {
+          "id": "document_rag",
+          "version": "1.0.0"
+        },
+        {
+          "id": "extract_timeline",
+          "version": "1.0.0"
+        },
+        {
+          "id": "inventory",
+          "version": "1.0.0"
+        },
+        {
+          "id": "risk_review",
+          "version": "1.0.0"
+        },
+        {
+          "id": "summarize_contract",
+          "version": "1.0.0"
+        },
+        {
+          "id": "web_search",
+          "version": "1.0.0"
+        }
+      ],
+      "sessionId": "unified-graph-session",
+      "taskMemory": null,
+      "userId": "unified-graph-user"
+    },
+    "phase": "running",
+    "replanCount": 0,
+    "sequence": 2,
+    "version": "v2"
+  },
+  "error": {
+    "code": "AGENT_DEADLINE_EXCEEDED",
+    "message": "The request deadline passed before the answer was complete.",
+    "name": "RequestCancelledError",
+    "reason": "deadline_exceeded",
+    "status": 504
+  },
+  "run": {
+    "approvalGates": [],
+    "createdAt": "<time>",
+    "decisions": [],
+    "error": {
+      "code": "AGENT_DEADLINE_EXCEEDED",
+      "message": "The request deadline passed before the answer was complete.",
+      "name": "RequestCancelledError",
+      "reason": "deadline_exceeded",
+      "retryable": true
+    },
+    "events": [
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:1",
+        "payload": {
+          "status": "running"
+        },
+        "type": "run_created"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:2",
+        "payload": {
+          "traceStepCount": 1
+        },
+        "type": "run_prepared"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:3",
+        "payload": {
+          "blockedNodeIds": [],
+          "errorCodes": [],
+          "executed": false,
+          "fallback": null,
+          "graph": {
+            "nodeCount": 3,
+            "nodeIds": [
+              "document",
+              "evidence_check",
+              "task"
+            ],
+            "skillIds": [
+              "document_rag",
+              "document_evidence_check",
+              "capability:task.create"
+            ],
+            "version": "v3"
+          },
+          "mode": "guarded",
+          "planner": {
+            "fallback": false,
+            "fallbackReason": null,
+            "fallbackReasonCodes": [],
+            "nodeIds": [
+              "document",
+              "evidence_check",
+              "task"
+            ],
+            "plannerCall": null,
+            "reasonCodes": [],
+            "requestedPlannerId": "unified_graph_test_proposal",
+            "selectedPlannerId": "unified_graph_test_proposal",
+            "status": "selected"
+          },
+          "requestContext": {
+            "experienceMemory": {
+              "enabled": false,
+              "error": null,
+              "hitCount": 0,
+              "memoryApplied": false,
+              "planningHints": [],
+              "reason": "env_disabled",
+              "status": "disabled"
+            },
+            "intentPlanner": {
+              "candidateIntentIds": [
+                "workspace_action",
+                "document"
+              ],
+              "experienceMemory": {
+                "applied": false,
+                "hintCount": 0
+              },
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedIntentId": "workspace_action",
+              "selectedMode": "workspace_action",
+              "selectedPlannerId": "deterministic",
+              "selectionReason": "Selected the highest-priority deterministic rule candidate.",
+              "status": "selected"
+            }
+          },
+          "status": "selected"
+        },
+        "type": "unified_graph_planned"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:4",
+        "payload": {
+          "graphRevision": 0,
+          "phase": "running",
+          "sequence": 0,
+          "version": "v2"
+        },
+        "type": "skill_graph_checkpointed"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:5",
+        "payload": {
+          "status": "running",
+          "stepId": "agent_graph_node:ZG9jdW1lbnQ"
+        },
+        "type": "step_started"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:6",
+        "payload": {
+          "status": "completed",
+          "stepId": "agent_graph_node:ZG9jdW1lbnQ"
+        },
+        "type": "step_completed"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:7",
+        "payload": {
+          "graphRevision": 0,
+          "phase": "running",
+          "sequence": 1,
+          "version": "v2"
+        },
+        "type": "skill_graph_checkpointed"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:8",
+        "payload": {
+          "status": "running",
+          "stepId": "agent_graph_node:ZXZpZGVuY2VfY2hlY2s"
+        },
+        "type": "step_started"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:9",
+        "payload": {
+          "status": "completed",
+          "stepId": "agent_graph_node:ZXZpZGVuY2VfY2hlY2s"
+        },
+        "type": "step_completed"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:10",
+        "payload": {
+          "graphRevision": 0,
+          "phase": "running",
+          "sequence": 2,
+          "version": "v2"
+        },
+        "type": "skill_graph_checkpointed"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:11",
+        "payload": {
+          "error": {
+            "code": "AGENT_DEADLINE_EXCEEDED",
+            "message": "The request deadline passed before the answer was complete.",
+            "name": "RequestCancelledError",
+            "reason": "deadline_exceeded",
+            "retryable": true
+          }
+        },
+        "type": "run_failed"
+      }
+    ],
+    "goal": "Create a follow-up task for the vendor renewal notice period",
+    "input": {
+      "docIds": [
+        "vendor-msa"
+      ],
+      "sessionId": "unified-graph-session",
+      "userId": "unified-graph-user"
+    },
+    "observations": [],
+    "plan": {
+      "mode": "workspace_action",
+      "selectedSkills": [
+        {
+          "budgetKey": null,
+          "label": "Workspace Action",
+          "skillId": "workspace_action",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "summary": "Execute a scoped workspace action through the capability registry."
+    },
+    "result": {},
+    "runId": "<id>",
+    "status": "failed",
+    "steps": [
+      {
+        "approvalGateId": "",
+        "attempt": 1,
+        "capabilityId": "",
+        "capabilityVersion": "",
+        "completedAt": "<time>",
+        "createdAt": "<time>",
+        "decision": "",
+        "detail": null,
+        "error": null,
+        "id": "agent_graph_node:ZG9jdW1lbnQ",
+        "input": {
+          "boundInputs": {
+            "docIds": [
+              "vendor-msa"
+            ],
+            "question": "Create a follow-up task for the vendor renewal notice period"
+          },
+          "docIds": [
+            "vendor-msa"
+          ],
+          "effects": "workspace_write",
+          "graphVersion": "v3",
+          "idempotency": "adapter_defined",
+          "nodeId": "document",
+          "question": "Create a follow-up task for the vendor renewal notice period",
+          "replaySafe": false,
+          "retrievalPlan": null,
+          "sessionId": "unified-graph-session",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0",
+          "userId": "unified-graph-user"
+        },
+        "kind": "observation",
+        "label": "Document RAG",
+        "output": {
+          "abstained": false,
+          "citationCount": 1,
+          "text": "The vendor requires 30 days written notice before renewal. [Source 1]",
+          "typedOutputDigest": "v1:sha256:2246bd798b5ab49b89eab04ffc6eb8c49115414b89b36762ed419b7a63fabb2d"
+        },
+        "parentStepId": "",
+        "pausedAt": "",
+        "retryOfStepId": "",
+        "startedAt": "<time>",
+        "status": "completed",
+        "summary": "",
+        "traceStepId": "",
+        "type": "graph_node",
+        "updatedAt": "<time>"
+      },
+      {
+        "approvalGateId": "",
+        "attempt": 1,
+        "capabilityId": "",
+        "capabilityVersion": "",
+        "completedAt": "<time>",
+        "createdAt": "<time>",
+        "decision": "",
+        "detail": null,
+        "error": null,
+        "id": "agent_graph_node:ZXZpZGVuY2VfY2hlY2s",
+        "input": {
+          "boundInputs": {
+            "docIds": [
+              "vendor-msa"
+            ],
+            "evidence": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "vendor-msa",
+                  "excerpt": "The vendor requires 30 days written notice before renewal.",
+                  "fileName": "vendor-msa.pdf",
+                  "pageNumber": 2
+                }
+              ],
+              "comparisonAnalysisSummary": null,
+              "retrievedContexts": [],
+              "text": "The vendor requires 30 days written notice before renewal. [Source 1]"
+            },
+            "question": "Create a follow-up task for the vendor renewal notice period"
+          },
+          "docIds": [
+            "vendor-msa"
+          ],
+          "effects": "read_only",
+          "graphVersion": "v3",
+          "idempotency": "deterministic",
+          "nodeId": "evidence_check",
+          "question": "Create a follow-up task for the vendor renewal notice period",
+          "replaySafe": true,
+          "retrievalPlan": null,
+          "sessionId": "unified-graph-session",
+          "skillId": "document_evidence_check",
+          "skillVersion": "1.0.0",
+          "userId": "unified-graph-user"
+        },
+        "kind": "observation",
+        "label": "Document Evidence Check",
+        "output": {
+          "abstained": false,
+          "citationCount": 1,
+          "text": "The vendor requires 30 days written notice before renewal. [Source 1]",
+          "typedOutputDigest": "v1:sha256:2270d06e8641eddcbad4012d844910daec455812b845f03504db93d5d6ff0dbb"
+        },
+        "parentStepId": "",
+        "pausedAt": "",
+        "retryOfStepId": "",
+        "startedAt": "<time>",
+        "status": "completed",
+        "summary": "",
+        "traceStepId": "",
+        "type": "graph_node",
+        "updatedAt": "<time>"
+      }
+    ],
+    "updatedAt": "<time>"
+  }
+}

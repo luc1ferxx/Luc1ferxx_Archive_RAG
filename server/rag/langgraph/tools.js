@@ -17,19 +17,20 @@ import { assertLangSmithTracingDisabled, guardRunnableEntryPoints } from "./lang
 // tools: the model may only propose inside the whitelist the runtime already
 // authorized (constraint 1), the same pool the DAG planner sees. A tool runs
 // its Skill through executeAgentSkill with the same input and output contract
-// gates the graph scheduler gives it (agent-execution-graph-runner.js
-// launchNode), and with the context this adapter builds: the runtime fields
-// below plus memoryWrites false. What that proves, and all it proves, is that
-// the tool's result is executeAgentSkill's for that context
-// (test/langgraph-tools-adapter.test.mjs). It is not the scheduler's own
-// call: launchNode goes through executeObservedSkill with a reserved budget,
-// adds graphOutput checks, and sets memoryWrites false only when the node's
-// question is bound to an upstream output.
+// gates a graph node gives it (executeExecutionGraphNodeLaunch in
+// agent-execution-graph-node.js), and with the context this adapter builds:
+// the runtime fields below plus memoryWrites false. What that proves, and all
+// it proves, is that the tool's result is executeAgentSkill's for that
+// context (test/langgraph-tools-adapter.test.mjs). It is not a graph node's
+// own call: a node launch goes through executeObservedSkill with a reserved
+// budget, adds graphOutput checks, and sets memoryWrites false only when the
+// node's question is bound to an upstream output.
 //
 // What the tool does not do: reserve budget, open a lifecycle step, record
-// Skill observations or a span. In the native runtime the scheduler and
-// executeObservedSkill do that around executeAgentSkill; the caller that hands
-// these tools to a graph or agent keeps that responsibility (constraint 11).
+// Skill observations or a span. In a graph run the node launch
+// (agent-execution-graph-node.js) and executeObservedSkill do that around
+// executeAgentSkill; the caller that hands these tools to a graph or agent
+// keeps that responsibility (constraint 11).
 //
 // The model fills only the fields in MODEL_WRITABLE_SKILL_FIELDS (question,
 // priorFindings), an allowlist: a field a Skill contract adds later is not

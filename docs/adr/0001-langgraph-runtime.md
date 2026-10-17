@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`，`native` 作为整体回退保留一个发布周期。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论与未达成的条目见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，已定为最终决定（用户认可）。
+- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，已定为最终决定（用户认可）。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -30,7 +30,9 @@
 | 3 | 统一图成为主图：外层阶段编进 StateGraph；审批走 `interrupt()`；SSE 走 `stream`；启动恢复走 checkpointer | `native` 下不变 |
 | 4 | `AGENT_RUNTIME` 默认改为 `langgraph`，删除被替代的调度代码，`native` 保留一个发布周期 | 切换 |
 
-**迁移完成的定义**（来自目标文件；阶段 5 的最终决定修订了“被替代的调度代码已删除”一条：外层计划的原生循环 `runAgentExecutionPlan` 是生产调度器，不属于被替代的调度代码，要删的只有回退窗口之后的 `runExecutionGraph`，见“阶段 5 结果”）：`AGENT_RUNTIME=langgraph` 为默认；被替代的调度代码已删除；所有确定性评测在屏蔽 id 和时间后与迁移前逐字节一致，或差异已按流程在 `quality-current-suite-manifest.js` 升版本并逐条说明；`verify:quality` 18/18；`eval:load-test:pgvector` 的 app CPU/请求和 p95 退化不超过 10%。
+阶段 5（收尾）和阶段 6（删除原生图调度器）是后加的，见各自的"结果"一节。阶段 6 提前结束了阶段 4 这一行的"`native` 保留一个发布周期"。
+
+**迁移完成的定义**（来自目标文件；阶段 5 的最终决定修订了“被替代的调度代码已删除”一条：外层计划的原生循环 `runAgentExecutionPlan` 是生产调度器，不属于被替代的调度代码，要删的只有原生图调度器 `runExecutionGraph`，阶段 6 已删除，见“阶段 5 结果”“阶段 6 结果”）：`AGENT_RUNTIME=langgraph` 为默认；被替代的调度代码已删除；所有确定性评测在屏蔽 id 和时间后与迁移前逐字节一致，或差异已按流程在 `quality-current-suite-manifest.js` 升版本并逐条说明；`verify:quality` 18/18；`eval:load-test:pgvector` 的 app CPU/请求和 p95 退化不超过 10%。
 
 ### 不可放松的约束
 
@@ -45,7 +47,7 @@
 9. `bindDatabaseTenant` 的 AsyncLocalStorage 必须穿过节点和 Send 分支；`thread_id` 由 userId、workspaceId 和 runId 派生。
 10. 截止时间与取消的终态仍走 `failRun` 的 revision CAS，错误码不变。
 11. 预算仍由 `consumeBudget` / `reserveBudget` / `run-usage.js` 负责。
-12. V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 保留到 LangGraph 成为默认后至少一个发布周期；`AGENT_RUNTIME=native` 是整体回退开关。
+12. V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 保留到 LangGraph 成为默认后至少一个发布周期；`AGENT_RUNTIME=native` 是整体回退开关。**后半条已由用户于 2026-10-16 豁免**：分支还没推送、没发布，回退窗口还没开始计算，用户决定提前结束它。原生图调度器和 `AGENT_RUNTIME=native` 已删除，不再存在（阶段 6）。前半条不受影响：V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 仍保留。
 13. 依赖固定精确版本，`@langchain/core` 单一版本，`npm audit --omit=dev` 为 0。
 14. 新代码放 `server/rag/langgraph/`，每个文件一个职责，`agent.js` 不再长大。
 
@@ -197,7 +199,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ## 阶段 2 结果：custom-Skill DAG 跑在 LangGraph 上
 
-- **开关**：`AGENT_RUNTIME`（`rag/config.js` 的 `getAgentRuntime()`），阶段 2、3 默认 `native`，除 `langgraph` 外的任何值都回落到 `native`（阶段 4 起默认 `langgraph`，见下文）。custom-Skill 阶段据此选择 `runExecutionGraph` 或 `runExecutionGraphOnLangGraph`；`AGENT_SKILL_GRAPH_ROLLOUT` 语义不变；v3 统一图仍走原生调度器。
+- **开关**：`AGENT_RUNTIME`（`rag/config.js` 的 `getAgentRuntime()`），阶段 2、3 默认 `native`，除 `langgraph` 外的任何值都回落到 `native`（阶段 4 起默认 `langgraph`，见下文；阶段 6 删除了 `native` 和这个开关）。custom-Skill 阶段据此选择 `runExecutionGraph` 或 `runExecutionGraphOnLangGraph`；`AGENT_SKILL_GRAPH_ROLLOUT` 语义不变；v3 统一图仍走原生调度器。
 - **复用，不复制**：原生 runner 的单节点执行、跳过判定、节点状态和结果组装抽到 `agent-execution-graph-node.js`，准入和收尾以 `admitExecutionGraphRun` / `finishExecutionGraphRun` 导出。原生 runner 从 1,055 行减到 373 行，只剩调度。用差分工具对比 HEAD 的原 runner，几十万次比较零差异；三个确定性评测在重构前后逐字节一致。LangGraph 一侧只有 `compile-execution-graph.js`（480 行）、`run-execution-graph.js`（329 行）和 `concurrency-gate.js`（129 行）。
 - **checkpointer**：`rag/langgraph/checkpointer.js` 只经 `agent-runs.js` 新增的 `getLangGraphCheckpointRecord` / `mutateLangGraphCheckpointRecord` 写入，与原生图写入共用 fencing，不写事件。`__langGraphCheckpoint` 从所有公开投影里剥离，通用更新不能碰它。
 - **每次调用都是新的 LangGraph invocation**：replan 和启动恢复都会先把旧线程写成墓碑，再从 `completedNodeRuns` 复用已完成的节点。agent run 的图 checkpoint 仍是权威。
@@ -253,7 +255,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 ## 阶段 4 结果：默认切到 langgraph
 
 - **默认值**：`AGENT_RUNTIME` 未设、为空或只有空白时取 `langgraph`；`native`、`langgraph`（不分大小写）照用；其他任何值回落到 `native`，因为拼错的回退指令应当落到经过长期验证的运行时。`AGENT_OUTER_PLAN_RUNTIME` 仍默认 `native`。
-- **回退窗口**：原生图调度器 `runExecutionGraph` 不删，作为一个发布周期的整体回退（约束 12），见“回退”。阶段 4 时它还接手 LangGraph 无法按原生声明顺序调度的图（`canScheduleExecutionGraphOnLangGraph`）；这个交回情形已在阶段 5 解决，见“层序调度”。删除它计划在新默认发布一个周期后单独进行。外层 V1 计划在两种 runtime 下都走原生循环 `runAgentExecutionPlan`（阶段 3 的决定，阶段 5 定为长期）；那是外层计划的生产调度器，不属于原生图调度器，也不在删除之列。
+- **回退窗口**：原生图调度器 `runExecutionGraph` 不删，作为一个发布周期的整体回退（约束 12），见“回退”。阶段 4 时它还接手 LangGraph 无法按原生声明顺序调度的图（`canScheduleExecutionGraphOnLangGraph`）；这个交回情形已在阶段 5 解决，见“层序调度”。删除它原计划在新默认发布一个周期后单独进行；阶段 6 已提前删除（用户豁免了约束 12 的回退窗口），见“阶段 6 结果”。外层 V1 计划在两种 runtime 下都走原生循环 `runAgentExecutionPlan`（阶段 3 的决定，阶段 5 定为长期）；那是外层计划的生产调度器，不属于原生图调度器，也不在删除之列。
 - **写放大已接上**：执行器把 `retainCheckpoints: 2` 交给 saver；custom-Skill DAG 结算保存与 v3 一样在同一个 CAS 里丢弃线程记录。真库 `pg_stat_statements` 重测（PostgreSQL 18，2 节点 guarded custom-Skill `/chat`）：
   - 语句数与阶段 3 相同：native 是 1 insert、9 带事件 CAS、3 追加事件、1 run 读、1 事件表读；langgraph 在此之外多 7 次无事件 CAS、1 次 run 读、1 次事件表读。
   - 完成后的 `result` 从 17,006 字节降到 11,894 字节（native 11,860 字节，多出的是 29 字节的墓碑）。
@@ -263,10 +265,10 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 直接交给 LangGraph 的 `AbortSignal` 会重跑在途节点：`langgraph-checkpointer`。
   - 两租户重叠执行时上下文与线程写入各归各的；被放弃的停靠节点；排队的门控 Capability 在取消后不被预检；暂停后 policy 变化时拒绝执行（`graph_approval_not_required`）：`langgraph-unified-graph`。
   - 有待定审批门时拒绝启动 claim：`agent-execution-graph-checkpoint`。
-- **回退路径不失去覆盖**：新套件 `agent-graph-suites-native-rollback` 在 `AGENT_RUNTIME=native` 下原样重跑 9 个图相关套件。预加载钩子会让任何进入 LangGraph 执行器的调用直接失败，同时统计原生调度的图数。两个 PostgreSQL 集成套件的跨进程用例在两种 runtime 下各跑一遍。
+- **回退路径不失去覆盖**：新套件 `agent-graph-suites-native-rollback` 在 `AGENT_RUNTIME=native` 下原样重跑 9 个图相关套件。预加载钩子会让任何进入 LangGraph 执行器的调用直接失败，同时统计原生调度的图数。两个 PostgreSQL 集成套件的跨进程用例在两种 runtime 下各跑一遍。（阶段 6 随原生调度器一起删除了这个套件和它的预加载，native 一侧改为 golden，见“阶段 6 结果”。）
 - **测试环境**：`npm test` 和覆盖率闸门给每个测试子进程去掉 LangSmith 追踪变量（变量列表取自生产守卫），由 `ci-workflow.test.mjs` 钉住。
-- **压测脚本**：`--agent-runtime` 默认改为 `langgraph`，与应用一致。
-- **代码量**：现在原生 runner 386 行、共享节点模块 1,138 行、`server/rag/langgraph/` 下 19 个文件共 6,463 行（含阶段 1 的适配器）。维护面还没有缩小：要等回退窗口结束、删除原生调度器之后才会体现，届时再按行数和测试数衡量。如果解决交回情形的成本过高，应重新评估是否保留原生调度器作为长期的第二调度器。（交回情形已在阶段 5 解决，见“层序调度”；原生图调度器在回退窗口之后即删，不留作第二调度器。）
+- **压测脚本**：`--agent-runtime` 默认改为 `langgraph`，与应用一致。（阶段 6 起只接受 `langgraph`，见“阶段 6 结果”的“删了什么”。）
+- **代码量**：现在原生 runner 386 行、共享节点模块 1,138 行、`server/rag/langgraph/` 下 19 个文件共 6,463 行（含阶段 1 的适配器）。维护面还没有缩小：要等回退窗口结束、删除原生调度器之后才会体现，届时再按行数和测试数衡量。如果解决交回情形的成本过高，应重新评估是否保留原生调度器作为长期的第二调度器。（交回情形已在阶段 5 解决，见“层序调度”；原生图调度器不留作第二调度器，阶段 6 已删除，见“阶段 6 结果”。）
 
 ## 阶段 5 结果：收尾（2026-10-16）
 
@@ -290,13 +292,13 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **决定**：外层 V1 计划默认继续走原生循环，与阶段 3 的决定一致；新实现替换了 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 后面的 StateGraph 版本，开销约为原来的四分之一，仍不建议开启。`agent-execution-plan-runner.js` 的原生循环因此不能删。
 - **最终决定（2026-10-16，用户认可）**：不放宽 10% 的硬门，外层 V1 计划长期保持原生循环。
   - 理由：外层计划不需要持久状态或中断，续跑靠 run 的 step；交给 LangGraph 只增加开销，没有带来能力。
-  - "完成的定义"据此修订：`runAgentExecutionPlan`（`agent-execution-plan-runner.js` 的原生循环）是外层计划的生产调度器，不属于"被替代的调度代码"。要删的只剩回退窗口之后的原生图调度器 `runExecutionGraph`。
-  - `AGENT_OUTER_PLAN_RUNTIME=langgraph` 与底层 Pregel 实现保留为实验开关，不再计划转正，`test/langgraph-execution-plan-graph*.test.mjs` 继续守住它与原生的等价。
+  - "完成的定义"据此修订：`runAgentExecutionPlan`（`agent-execution-plan-runner.js` 的原生循环）是外层计划的生产调度器，不属于"被替代的调度代码"。要删的只剩原生图调度器 `runExecutionGraph`（阶段 6 已删除）。
+  - `AGENT_OUTER_PLAN_RUNTIME=langgraph` 与底层 Pregel 实现保留为实验开关，不再计划转正，`test/langgraph-execution-plan-graph*.test.mjs` 继续守住它与原生外层循环的等价（阶段 6 不动这个开关）。
   - 重新评估的条件：升级 `@langchain/langgraph` 或 `@langchain/core` 后，Pregel 每次调用的固定开销（执行循环、任务 id、checkpoint 对象）有实质下降。届时按本节的方法重测：进程内对比，交替四轮、每轮 5 次的并发 1 压测，以及并发 32。每一档都在 10% 以内，才考虑切换默认值。
 
 ### 规划器的模型调用经 LangChain ChatModel
 
-- `rag/langgraph/planner-model.js` 的 `completePlannerText`：`AGENT_RUNTIME=langgraph` 时，意图、执行、DAG、v3 统一图、replan 五个规划器的模型调用经 `ArchiveRagChatModel.invoke(prompt, { promptTemplate, responseFormat, temperature })`；`native` 时仍直接调 `completeTextWithMetadata`。适配器按需动态加载（原生进程不加载 `@langchain/*`），每个（capability, routeId）缓存一个实例，调用在空的 LangChain 异步上下文里进行，不建根 `RunTree`。只接受 capability、promptTemplate、responseFormat、routeId、temperature 五个选项，多传就拒绝。
+- `rag/langgraph/planner-model.js` 的 `completePlannerText`：`AGENT_RUNTIME=langgraph` 时，意图、执行、DAG、v3 统一图、replan 五个规划器的模型调用经 `ArchiveRagChatModel.invoke(prompt, { promptTemplate, responseFormat, temperature })`；`native` 时仍直接调 `completeTextWithMetadata`（阶段 6 删除了 `native`，见“阶段 6 结果”）。适配器按需动态加载（原生进程不加载 `@langchain/*`），每个（capability, routeId）缓存一个实例，调用在空的 LangChain 异步上下文里进行，不建根 `RunTree`。只接受 capability、promptTemplate、responseFormat、routeId、temperature 五个选项，多传就拒绝。
 - 各规划器保留自己的 JSON 解析和校验器，不用 `withStructuredOutput`：实测 `parseFirstJsonValue` 在"文字里带 `[...]`/`{...}`、后面跟 fenced JSON"的回复上解析失败，而规划器自己的解析器能解析；它也不接受意图规划器在没有候选时构造的 null schema；replan 根本不发 schema。
 - LangSmith 追踪变量为 `"true"` 时，`completePlannerText` 在任何 runtime 下都走直接调用，不进入 LangChain（审查发现：最初实现在这种情况下拒绝调用，让 LLM 规划器在默认 runtime 下退回确定性计划，破坏了"不建图的请求与 native 一致"）。
 - 等价证据：`langgraph-planner-model`（五个规划器在两种 runtime 下 `deepStrictEqual` 结果、每次 provider 输入、每条 LLMOps 事件、各类失败的错误对象；langgraph 下确实经过适配器，native 下没有加载）；现有规划器套件在两种 runtime 下各跑一遍；`eval:planner -- --provider mock` 两种 runtime 屏蔽后一致。每次调用多约 13–19 µs CPU（微基准）；压测用确定性规划器，测不到这部分。
@@ -357,13 +359,13 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - `agent-unified-graph-*`、`agent-execution-graph-runner` 52/52、`langgraph-native-runner-suite` 53/53、`langgraph-execution-graph-runtime` 44/44 通过。
   - `eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8：`AGENT_RUNTIME=native` 与未设置各跑一次，屏蔽 UUID、时间戳和时长后逐字节一致，只差报告自己的 runId。
   - `coverage:gate` 通过：3,300 个测试，0 失败，15 个跳过（都是需要 PostgreSQL、只读副本或 Redis 的用例）；五组覆盖率最低线全部通过。
-- **删除原生调度器还剩什么**：代码上已没有阻碍，只剩回退窗口（约束 12）。窗口过后要删的是：
+- **删除原生调度器还剩什么**：代码上已没有阻碍，只剩回退窗口（约束 12）。窗口过后要删的是下面四项（阶段 6 没有等窗口，按用户决定删掉了这四项，见“阶段 6 结果”）：
   - `runExecutionGraph` 的调度循环；
   - 两个 stage 的 `native` 分支；
   - `agent-graph-suites-native-rollback.test.mjs` 及其守卫；
   - 各 parity 套件里的 native 一侧。
 
-  准入（`admitExecutionGraphRun`）、收尾（`finishExecutionGraphRun`）、`replayExecutionGraphRun` 和 node 模块保留。
+  准入（`admitExecutionGraphRun`）、收尾（`finishExecutionGraphRun`）、`replayExecutionGraphRun` 和 node 模块不在删除之列，阶段 6 之后仍然保留（LangGraph 执行器、v3 的 finalization 回放和启动恢复都依赖它们）。
 
 ### 没有做的部分与理由
 
@@ -378,7 +380,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 被接管的请求行为会变（mock 实测）：文档问答拒答时不再提议 Web 审批；custom Skill 请求多一次 `document_rag` 和一次会话记忆写入，证据不通过时 Skill 被跳过；非主节点失败从 200 或可重试的 503 变成 409 `AGENT_UNIFIED_GRAPH_PARTIAL`；`/chat/stream` 不再有 `answer_draft`；trace 改为 `graph_node`。trajectory 与 planner 评测的投影会变，需要按流程给 manifest 升版本。
   - 性能（进程内微基准，内存 run store、mock RAG）：一次文档问答 V1 约 0.8–1.2 ms CPU，v3 native 约 5.8–7.4 ms，v3 在 LangGraph 上约 11–15 ms；带事件的 CAS 写 3 → 10 次，LangGraph 下另加 11 次无事件写。必然违反 10% 的硬门。
   - 真实模型证据不足：v3 规划器在 qwen2.5:7b 上的采纳率是 3/15（2026-09-27，提交 85efbb6a）。
-- **原生调度器不删除**：
+- **原生调度器不删除**（阶段 5 时的结论；阶段 6 按用户决定提前删除，见“阶段 6 结果”）：
   - 约束 12 要求 `AGENT_RUNTIME=native` 在新默认发布后至少保留一个周期；阶段 4 刚切默认。
   - 目标点名的四个文件里，只有 `agent-execution-graph-runner.js` 有可删的调度循环（`runExecutionGraph`）。`agent-execution-graph-checkpoint.js` 和 `agent-unified-graph-run.js` 没有调度代码：前者是 run 的权威图 checkpoint，后者是 v3 的入口与准入流程。`agent-execution-plan-runner.js` 的原生循环是外层计划的生产调度器（见上）。
   - 交回情形：`eval:trajectory` 里实测为 0 次（17 次执行器调用）；生产默认的 custom-Skill DAG 不会出现（预算 2、四个 custom Skill 都可并行、上限 3）；v3 带 Web 的确定性文档图以前每次都会出现（非按层声明，document_rag 与 web 节点独占）。解法是两种 runtime 都按校验器的层序调度（按层声明的图不受影响），已实现，见上面的“层序调度”。v3 stage 里另外两处对它的使用（finalization 回放、step lifecycle 没有 run 目标的分支）也已替换，见“v3 stage 不再直接调用原生调度器”。
@@ -389,10 +391,135 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | 条目 | 状态 |
 | --- | --- |
 | `AGENT_RUNTIME=langgraph` 为默认 | 达成（阶段 4） |
-| 被替代的调度代码已删除 | 未达成，只差回退窗口：`runExecutionGraph` 按约束 12 保留到窗口之后（层序调度已实现，交回路径已删，v3 stage 的两处直接调用已替换，`AGENT_RUNTIME=langgraph` 下没有生产路径再调用它）。按最终决定，外层原生循环 `runAgentExecutionPlan` 是外层计划的生产调度器，不属于被替代的调度代码；checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
-| 确定性评测屏蔽后逐字节一致 | 达成：`eval:trajectory`、`eval:planner`、`eval:recovery-observability` 两种 runtime 一致；`quality:current` 通过 |
+| 被替代的调度代码已删除 | 达成（阶段 6）：`runExecutionGraph` 的调度循环、两个 stage 的 `native` 分支和 `AGENT_RUNTIME=native` 已删除。这是用户提前结束约束 12 回退窗口的结果，不是等窗口过去。外层原生循环 `runAgentExecutionPlan` 不是被替代的调度代码：按阶段 5 的最终决定，它是外层计划的生产调度器，保留。checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
+| 确定性评测屏蔽后逐字节一致 | 阶段 5 达成：`eval:trajectory`、`eval:planner`、`eval:recovery-observability` 在两种 runtime 下一致，`quality:current` 通过。阶段 6 达成：删除前后三项评测屏蔽后逐字节一致，`quality:current` 的结果见“阶段 6 结果”的证据；阶段 6 起没有 native 可比，图相关套件对照删除前从 native 冻结的 golden |
 | `verify:quality` 18/18 | 达成（阶段 3，qwen2.5:7b；文档 RAG 路径与 runtime 无关） |
 | 压测退化不超过 10% | 默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%），按最终决定门不放宽，外层计划不交给 LangGraph |
+
+## 阶段 6 结果：删除原生图调度器（2026-10-16）
+
+### 决定
+
+- 用户决定提前结束约束 12 的回退窗口，现在就删除原生图调度器。
+- 这是对约束 12 后半条的豁免。按约束 12，LangGraph 成为默认后，`AGENT_RUNTIME=native` 要至少保留一个发布周期。分支 `feat/langgraph-runtime` 还没推送、没发布，这个周期还没开始算。
+- 删除之后 `AGENT_RUNTIME=native` 不再存在，也没有别的运行时回退开关。要回到原生调度器，只能 revert（见下文"怎样恢复回退"）。
+- 不动的部分：
+  - 外层计划的原生循环 `runAgentExecutionPlan`。按阶段 5 的最终决定，它是外层计划的生产调度器，长期保留。
+  - `AGENT_OUTER_PLAN_RUNTIME` 实验开关和它的底层 Pregel 图。
+  - 约束 12 的前半条：V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off`。
+
+### 删了什么
+
+- `agent-execution-graph-runner.js`：`runExecutionGraph` 的调度循环，以及只有它用到的导入（`prepareExecutionGraphNodeLaunch`、`executeExecutionGraphNodeLaunch`）。文件从 478 行减到 295 行，文件名不变。
+- `agent-custom-skill-stage.js` 和 `agent-unified-graph-stage.js`：
+  - 删掉 native 分支、`runtime` 参数，以及导出的 `CUSTOM_SKILL_GRAPH_RUNTIMES` / `UNIFIED_GRAPH_RUNTIMES`。
+  - 图一律交给 `runExecutionGraphOnLangGraph`。
+  - 执行器仍按需动态导入：在 `agent.js` 之后再加载 LangGraph 实测多 174 ms，api 边缘层和 rollout 为 `off` 的进程不必承担。
+  - v3 stage 现在总会检查 lifecycle target 的 runId 等于 `agentRunId`。原来的默认 runtime 下本来就检查。
+- `rag/config.js` 的 `getAgentRuntime()`，以及依赖它的所有分支：
+  - `agent-run-recovery.js`：线程核对（`verifyLangGraphThread`）总是执行。
+  - `agent-unified-graph-run.js`：LangSmith 守卫总是执行。
+  - `rag/langgraph/planner-model.js`：五个规划器始终经 `ArchiveRagChatModel`。只有 LangSmith 追踪变量为 `"true"` 时走直接调用，这是阶段 5 已有的路径。第三个参数 `runtime` 删除。
+- 压测 `evaluation/run-api-load-bench.mjs`：
+  - `--agent-runtime` 只接受 `langgraph`，它不改变任何设置；`--agent-runtime native` 在参数检查时给出压测自己的错误（"--agent-runtime native was removed (ADR 0001 phase 6) ..."），其他值也拒绝。
+  - app 子进程本来就丢掉继承来的 `AGENT_*` 变量，现在也不再设 `AGENT_RUNTIME`，所以压测的子进程碰不到 app 的启动拒绝，shell 里的 `AGENT_RUNTIME` 也到不了子进程。
+  - 报告照旧记录 `config.agentRuntime`，阶段 6 起总是 `langgraph`，报告里的 `Agent runtime` 一行仍然打印它。
+- 测试：
+  - `agent-graph-suites-native-rollback.test.mjs`，以及它的预加载 `native-rollback-guard.mjs`、`langgraph-executor-forbidden.mjs`、`native-runner-counter.mjs`。
+  - `langgraph-native-runner-suite.test.mjs` 和 `langgraph-runtime-parity/runner-on-langgraph.mjs`。它的职责成了默认：`agent-execution-graph-runner.test.mjs` 直接对 `runExecutionGraphOnLangGraph` 跑。
+  - `stage-native-scheduler-tripwire.mjs`，由只统计回放次数的 `stage-replay-counter.mjs` 替代。
+  - 各 parity 套件里的 native 一侧。
+
+### 保留什么
+
+- `agent-execution-graph-runner.js` 里的准入 `admitExecutionGraphRun`、收尾 `finishExecutionGraphRun`、不调度的 `replayExecutionGraphRun`。
+- node 模块 `agent-execution-graph-node.js`（代码没改；评审之后只把文件头和一处 JSDoc 里指向已删除的 `runExecutionGraph` 的注释改成了现在的调度器和 `admitExecutionGraphRun`，1,171 → 1,175 行）。
+- 图 checkpoint、回放安全矩阵、启动恢复、审批表与 policy。
+- 外层原生循环 `runAgentExecutionPlan` 和 `AGENT_OUTER_PLAN_RUNTIME`。
+
+### 拒绝已删除的取值（启动时与每个图入口）
+
+- `rag/config.js` 的 `assertAgentRuntimeSupported(env)`，错误码 `AGENT_RUNTIME_REMOVED`。
+  - 照常启动：未设置、空串、纯空白、`langgraph`（去首尾空白，大小写不限）。
+  - `native`：拒绝，信息是"AGENT_RUNTIME=native was removed (ADR 0001 phase 6) ... Unset AGENT_RUNTIME or set it to langgraph."
+  - 其他值（如 `lang-graph`）：同样拒绝，信息里带原值。
+- 为什么拒绝而不是忽略：阶段 4 时拼错的值会落到 native。现在没有 native 可落，静默跑 LangGraph 等于忽略运维的意图。
+- 检查位置：
+  - `server.js`：紧接在 LangSmith 启动守卫之后。
+  - `startServiceRole`（`rag/agent-service/role-server.js`）：一开头检查传入的 env，在 topology 校验之前。它覆盖不经过 `server.js` 直接起角色的调用方，例如压测的 split 拓扑。
+  - `createAppServices`（`app-services.js`）：第一行就检查，还没读任何 option。所有进程内的 app 都经过它：monolith、agent tier，以及调用 `createApp` 的 eval runner（如 runtime smoke）。压测子进程也经过它，但压测从不把 `AGENT_RUNTIME` 交给子进程，这里不会触发。
+  - 每个把图交给 LangGraph 的入口，和 LangSmith 守卫在同一位置：custom-Skill stage（写图 checkpoint 之前）、v3 统一图的三个入口（新请求、审批续跑、启动续跑）和 v3 stage、执行器 `runExecutionGraphOnLangGraph`（准入之前）。这一层覆盖不建 app、直接调用 `runAgentRag` 的 eval runner（`eval:trajectory`、`eval:planner`、`eval:recovery-observability`、`eval:prompt-injection`、`eval:answer-drafts`、`eval:qasper-answers -- --surface agent` 等）：需要调度图的请求以 `AGENT_RUNTIME_REMOVED` 失败，trajectory 报告里是一条 `case_error`，不会被当成 native 的证据。
+- 这一层之外不检查的：
+  - 不调度图的请求（文档问答、research brief、V1 外层计划本身）。这些请求在 native 和 LangGraph 下本来就走同一份代码，结果不依赖这个变量。
+  - 规划器的模型调用（`completePlannerText`）。它总经 ChatModel 适配器，与直接调用的等价由 `langgraph-planner-model` 的 golden 钉住；在这里拒绝只会让 LLM 规划器回落到确定性规划，反而悄悄改变行为。
+  - `chat-mcp.js`、`ingest-worker.mjs`、`retrieval-service.mjs`、`model-gateway.mjs`：不跑图。
+- `test/agent-runtime-removed.test.mjs`（9 个测试）覆盖 8 种取值：`assertAgentRuntimeSupported` 本身、`startServiceRole` 在 topology 检查前拒绝、真实执行 `node server.js` 时以非 0 退出且 stderr 带 `AGENT_RUNTIME_REMOVED`、`createAppServices` 在读任何 option 之前拒绝、执行器在准入之前拒绝，以及 eval runner 的进程内调用（custom-Skill DAG 与 v3 统一图各一个 trajectory 用例）在 `native` 下得到 `case_error`、未设置时没有。后三个测试在去掉这些检查的副本上都失败。
+
+### 等价保护怎么保住
+
+- 删除之前，先从 native 一侧冻结 golden，放在 `server/test/fixtures/graph-goldens/<套件>/`。第一批 6 个套件共 94 个文件，约 4.7 MB；评审之后又从 HEAD e1385c1c（原生调度器还在）以 `AGENT_RUNTIME=native` 补冻了两个套件的 8 个文件（见下面 `langgraph-routes`、`langgraph-execution-plan-graph`），现在共 8 个套件、102 个文件，约 5.4 MB。补冻的文件在同一提交上连跑两次，逐字节相同。
+  - 能存全量的，存屏蔽后的完整 JSON。
+  - 扫描太大的，存规范化序列化的 sha256（`digests.json`）。
+  - 规范形式保留 `deepStrictEqual` 在纯数据上比较的一切：键排序、数组保序；`undefined`、`-0`、`NaN`、±Infinity、Map、Set、Date 加标签，不丢弃。
+- 下列套件里原来比较两种 runtime 的场景，现在只在 LangGraph 上跑一次，对照 golden（`test/langgraph-support/graph-goldens.mjs`）。比较的屏蔽规则与删除前相同，下面单独列出的两处例外除外。第一批 94 个文件的 sha256 在改动前后一致。逐套件：
+  - `langgraph-execution-graph-runtime`：`assertParity` 对照 golden；五节点扫描的 720 个场景存摘要，另有 6 份完整 golden。
+  - `langgraph-unified-graph`：回放扫描的 480 个原始运行现在由 LangGraph 跑出，对照 native 的 480 条摘要和 8 份完整 golden；回放结果对照 native 调度器重跑已完成图的 golden。
+  - `langgraph-unified-graph-without-run-target`：执行器 tap 代替绊线。断言执行器调用次数等于原来原生调度器的调用次数，没有 run 目标时一律不绑定 run；回放计数器断言 finalization 回放时执行器调用 0 次、回放 1 次。
+  - `langgraph-runtime-parity`：每个用例只跑一次，对照 `<case id>.json`。
+  - `agent-run-chat-statement-count`：native 的语句数存在 golden 里，注释也写了原值；剩 `default` 和 `outerPlan` 两个 pass。
+  - `langgraph-planner-model`：每个场景只走 ChatModel 路径一次，对照直接调用路径的 golden（115 条摘要和 4 份完整决策）。另外断言第一次走适配器之前没有任何 `@langchain` 模块被加载。
+  - `langgraph-routes`（补冻，5 个文件）：经真实 app 的 v3 批准与拒绝（暂停响应、暂停的 run、决定响应、完成的 run 和 checkpoint）、v3 的 `/chat/stream` 到审批暂停（SSE 字节、帧、run）、后台任务的审批重入（等待中的 task、暂停的 run、完成的 task、完成的 run）、启动恢复（崩溃留下的 run、恢复后的 run、第二个实例的调用）。生产配置（`AGENT_OUTER_PLAN_RUNTIME` 未设置）对照 golden，屏蔽规则就是套件里原来的 `mask` / `maskText`。只读文档问答、它的流和 V1 Capability 审批不建图，从来不依赖 `AGENT_RUNTIME`，没有 golden。
+  - `langgraph-execution-plan-graph`（补冻，3 个文件）：custom-Skill 阶段跑 guarded DAG 的三个 trajectory 用例（`skill_chain_contract_review`、`custom_skill_access_scope`、`multi_doc_conflict`）的结果、agent 事件和 run，生产 pass 对照 golden。其余场景不建 custom-Skill DAG 或 v3 图，规划用注入的适配器，与 `AGENT_RUNTIME` 无关。
+- 比较方式与删除前不同的两处：
+  - `langgraph-unified-graph` 的回放扫描：删除前在同一进程里拿回放结果和原生重跑的结果直接比较，不屏蔽（用的是 `assert.deepEqual`）；现在两边都按套件的 `mask` 屏蔽后存摘要再比较。UUID、时间戳这类进程间不同的值不再参与比较；反过来，规范形式区分类型和 `undefined`，比原来的 `deepEqual` 严格。
+  - `langgraph-planner-model`：golden 里把假 OpenAI 服务的临时端口规范成 `http://127.0.0.1:<port>`，并去掉 V8 在新版 Node 上给 `JSON.parse` 错误加的 " (line L column C)" 后缀。删除前两边在同一进程里共享这两个值，不需要规范化。
+- superstep 屏障的四类已知差异，改为对 golden 的投影比较。例如要求 skillRuns 两边顺序不同、排序后相同。这类 golden 只经 `readGolden` 读取，没有代码路径能改写。
+- 直接调用调度器的套件改指 `runExecutionGraphOnLangGraph`，断言一条没改：`agent-execution-graph-runner`（52 个）、`agent-document-rag-graph-result`、`agent-replanner`。
+
+### UPDATE_GRAPH_GOLDENS 规则
+
+- 不设或为空：只比较。缺失或不同即失败，不写文件。
+- `=1`：从被测运行时（LangGraph）写入，只限允许写入的一侧。必须对照调度器 golden 的一侧（例如回放）传 `write: false`，永远不写。
+- 写入新的或改变了的 fixture 后，本次测试仍然失败，并给出文件名。要先看 diff，在同一次改动里用注释说明有意的行为变化，再不带变量重跑。所以更新模式只有什么都没变时才通过。
+- 其他值（`native`、`true`、`yes`、`" 1"` 等）一律拒绝。
+- 只读的 golden（superstep 与已知差异）要有意改变时，只能手工编辑 fixture。
+- `test/graph-goldens.test.mjs` 钉住这些规则。
+- "在注释里说明行为变化"这一条代码无法强制，只写在报错文案和 helper 的文件头里。
+
+### 失去、且没有替代的覆盖
+
+- 只描述 native 自身的断言：native 不写线程、native 的 fence 报错信息、recovery-claim 与预算已知差异里 native 的字面期望（原值留在注释里）。
+- 两个 PostgreSQL 集成套件的 native 跨进程运行：`agent-execution-graph-postgres.integration` 的两个用例、`agent-unified-graph-postgres.integration` 的七个用例，删除前各在 `AGENT_RUNTIME=native` 下再跑一遍、用同样的断言。冻结 golden 需要真库，没有做；现在它们只在 LangGraph 上跑，只受各自的字面断言约束，没有 native 锚点。
+- `langgraph-chat-stream` 原来的 `AGENT_RUNTIME=native` pass：它只发文档问题，不建图，那一 pass 跑的就是现在 native pass 的同一份代码，所以没有冻结，也没有实际损失。
+- 两类回退场景：LangGraph 暂停后由 native 决定、native 恢复一个伪造的线程。原生路径已不存在，它们没有对象了。
+- `getAgentRuntime()` 的开关测试，由 `agent-runtime-removed` 的启动拒绝测试替代。
+
+### 升级时在途的 run
+
+- 阶段 6 之前在 `AGENT_RUNTIME=native` 下暂停或崩溃的 run 只有图 checkpoint，没有 LangGraph 线程。
+- LangGraph 的审批续跑和启动恢复对没有线程的 run 本来就走一次新的 invocation（阶段 3）。
+- 两个改写过的用例钉住了这一点，都对照同一份 golden：
+  - LangGraph 暂停，从 store 删掉线程，再决定。
+  - LangGraph 崩溃，删掉线程，再由 LangGraph 恢复；compare 节点在新线程里是 reused。
+
+### 怎样恢复回退
+
+- `git revert` 阶段 6 的提交。没有别的开关能恢复原生调度。
+- revert 恢复 `runExecutionGraph`、两个 stage 的 native 分支、`getAgentRuntime()`、回退套件和各 parity 套件的 native 一侧，同时去掉启动拒绝和 golden。
+- revert 之后在途 run 怎么处理，见下文"回退"一节里阶段 4、5 的规则。
+
+### 证据
+
+- 删除提交前逐个运行的单文件套件（Node 24.21.0）：`agent-execution-graph-runner` 52/52、`langgraph-execution-graph-runtime` 43/43（原 44 个，删了开关测试）、`langgraph-unified-graph` 25/25（原 26 个，同上）、`langgraph-unified-graph-without-run-target` 4/4、`langgraph-runtime-parity` 6/6（`UPDATE_GRAPH_GOLDENS=1` 下也是 6/6 且没有文件被改写，`=native` 下按预期被拒绝）、`agent-run-chat-statement-count` 10/10、`langgraph-planner-model` 12/12、`agent-runtime-removed` 6/6、`graph-goldens` 5/5。
+- 评审修复之后逐个重跑（Node 24.21.0）：`langgraph-routes` 8/8、`langgraph-execution-plan-graph` 26/26（两者对照补冻的 golden）、`agent-runtime-removed` 9/9（新增的三个测试在去掉进程内检查的副本上失败）、`agent-execution-graph-runner` 52/52、`langgraph-execution-graph-runtime` 43/43、`langgraph-unified-graph` 25/25、`langgraph-unified-graph-without-run-target` 4/4、`langgraph-runtime-parity` 6/6、`langgraph-planner-model` 12/12、`langgraph-tools-adapter` 23/23、`graph-goldens` 5/5、`agent-unified-graph-guarded` 21/21、`agent-custom-skill-stage` 23/23。`AGENT_RUNTIME=native` 下 `langgraph-runtime-parity` 现在 5 个用例以 `AGENT_RUNTIME_REMOVED` 失败（剩下的 shadow 用例不调度图）；修复前 6 个全部通过，即悄悄跑了 LangGraph。把 `langgraph-routes` 的启动恢复 golden 删掉一个 `skill_graph_resume_claimed` 事件，比较按预期失败。
+- 两个 PostgreSQL 集成套件（`agent-execution-graph-postgres.integration`、`agent-unified-graph-postgres.integration`）现在只在 LangGraph 上跑，没有从 native 冻结的 golden（冻结需要真库），只靠用例自己的行为断言；它们在下面的 `test:pgvector` 里通过。
+- 删除之后的整体验证（本机 Node 24.21.0）：
+  - `coverage:gate`：3,250 个测试，3,235 通过、15 跳过、0 失败，全局行覆盖 90.46%。删除前是 3,300 个，少掉的主要是删除的 `agent-graph-suites-native-rollback`、`langgraph-native-runner-suite` 和各套件里的开关测试。
+  - `eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8：删除前（e1385c1c）与删除后各跑一次，屏蔽 UUID、时间戳、时长和 git 状态后逐字节一致。
+  - `test:pgvector`（一次性集群，`scripts/run-pgvector-integration.sh`）：101/101。删除前是 111 个，因为跨进程用例原来在两种 runtime 下各跑一遍。
+  - `quality:current`：在删除提交上于模拟 CI 的环境里运行，结果记在随后的文档提交里。
+  - CI（Node 22）上的 golden 比较：还没跑。golden 在 Node 24 上生成，推送后由 CI 验证。
+- 代码量（阶段 4 说过要等删掉原生调度器后再衡量维护面）：`agent-execution-graph-runner.js` 478 → 295 行；生产代码 +397 −533 行，净减 136 行；测试（不含 golden）+4,353 −4,088 行，净增 265 行；golden 共 102 个文件、约 5.3 MB。维护面在生产代码上缩小了，测试一侧因为固定期望而变大。
 
 ## 后果
 
@@ -417,13 +544,18 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 **阶段 2 的一处保留（2026-10-14）。** 原生队列按整张图的声明顺序发射节点，LangGraph 按超步进入节点。如果图不是按层声明（例如节点写在它的依赖之前，或者 `[a, c 依赖 a, b]` 且并发上限为 1），而上限或独占节点又会让原生队列压住一个就绪节点，原生每次都会先发射后层的节点。这时两个运行时会给不同节点拨预算、跑不同节点、因 fail_fast 中止不同节点，而且与时序无关。这类调用（`canScheduleExecutionGraphOnLangGraph` 为假）先丢弃线程记录，再整体交给原生调度器，结果与原生完全一致。阶段 4 删除原生调度之前必须先解决它。一种做法是在规划阶段把声明顺序规范化，但这会改变原生行为，需要单独评估。（阶段 5 已解决：没有改规划，而是让两种调度器都按校验器的层序排队，原生行为的变化与证据见阶段 5“层序调度”。）
 
-**代码量不会自动变少。** spike 的 runner 有 2,143 行，原生 `agent-execution-graph-runner.js` 是 1,055 行。原因是 runner 自己实现了准入、复用、恢复检查、审批门绑定、取消桥接、并发闸门，还要绕开 LangGraph 的两个并发缺陷。阶段 2 要复用原生模块（调用导出的恢复检查、审批 preflight），不能复制。回退窗口结束、删掉原生图调度器 `runExecutionGraph` 后（见阶段 5“对照迁移完成的定义”；外层原生循环不在删除之列），再用行数和测试数衡量维护面有没有真的缩小。如果到阶段 3 结束仍明显变大，应回到这里重新评估方案 A。
+**代码量不会自动变少。** spike 的 runner 有 2,143 行，原生 `agent-execution-graph-runner.js` 是 1,055 行。原因是 runner 自己实现了准入、复用、恢复检查、审批门绑定、取消桥接、并发闸门，还要绕开 LangGraph 的两个并发缺陷。阶段 2 要复用原生模块（调用导出的恢复检查、审批 preflight），不能复制。删掉原生图调度器 `runExecutionGraph` 后（阶段 6 已删，提前结束了回退窗口；外层原生循环不在删除之列），再用行数和测试数衡量维护面有没有真的缩小，数字见“阶段 6 结果”的证据。如果到阶段 3 结束仍明显变大，应回到这里重新评估方案 A。
 
 ## 回退
 
 - 阶段 2、3：`AGENT_RUNTIME` 默认 `native`，LangGraph 路径只在显式打开时运行。
-- 阶段 4 起：`AGENT_RUNTIME=native` 保留一个发布周期，作为整体回退。`AGENT_SKILL_GRAPH_ROLLOUT=off`（V1 顺序链）同样保留。
-- 数据：LangGraph 的线程记录写在 run 行 `result` 下的独立私有键，原生路径不读它。回退到 `native` 后，正在 LangGraph 上执行、尚未结束的 run 由原生路径接管：启动恢复和审批续跑都从 agent run 的图 checkpoint（权威）继续，不看线程；结算保存或 `failRun` 用 null 墓碑覆盖旧线程记录。已批准、尚未写入的 Capability 在原生路径上以 run+node 幂等键执行一次；写入后崩溃（step 为 running）仍转人工，不重放。反方向（native 停靠、langgraph 续跑）走一次新的 invocation。两个方向都有测试钉住（`langgraph-unified-graph`、`langgraph-execution-graph-runtime` 的启动恢复交叉用例、`agent-unified-graph-postgres.integration` 的 7 个跨进程用例在两种 runtime 下各跑一遍）。
+- 阶段 4、5：`AGENT_RUNTIME=native` 作为整体回退保留。
+- 阶段 6 起：没有运行时回退开关。
+  - 用户豁免了约束 12 的回退窗口，原生图调度器和 `AGENT_RUNTIME=native` 已删除。
+  - `AGENT_RUNTIME` 只接受未设置、空值、空白或 `langgraph`，其他值拒绝启动（`AGENT_RUNTIME_REMOVED`）。
+  - 恢复原生调度器的唯一办法是 `git revert` 阶段 6 的提交，见“阶段 6 结果”。
+  - 仍然可用的运维回退：`AGENT_SKILL_GRAPH_ROLLOUT=off` 让 custom-Skill 阶段回到 V1 顺序链；`AGENT_UNIFIED_GRAPH_ROLLOUT` 默认 `off`，v3 图不执行。
+- 数据（阶段 4、5 的规则，revert 阶段 6 之后同样适用）：LangGraph 的线程记录写在 run 行 `result` 下的独立私有键，原生路径不读它。回退到 `native` 后，正在 LangGraph 上执行、尚未结束的 run 由原生路径接管：启动恢复和审批续跑都从 agent run 的图 checkpoint（权威）继续，不看线程；结算保存或 `failRun` 用 null 墓碑覆盖旧线程记录。已批准、尚未写入的 Capability 在原生路径上以 run+node 幂等键执行一次；写入后崩溃（step 为 running）仍转人工，不重放。反方向（native 停靠、langgraph 续跑）走一次新的 invocation。阶段 4、5 时两个方向都有测试钉住（`langgraph-unified-graph`、`langgraph-execution-graph-runtime` 的启动恢复交叉用例、`agent-unified-graph-postgres.integration` 的 7 个跨进程用例在两种 runtime 下各跑一遍）。阶段 6 删掉了“交给 native 接管”这一方向的用例，revert 会把它们一起恢复；“native 留下的 run 由 LangGraph 接管”这一方向仍由删掉线程后续跑、恢复的用例钉住（见“阶段 6 结果”的“升级时在途的 run”）。
 
 ## 明确不做
 

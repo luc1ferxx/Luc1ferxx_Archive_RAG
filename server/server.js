@@ -2,6 +2,7 @@ import "dotenv/config";
 
 import { createApp } from "./app.js";
 import {
+  assertAgentRuntimeSupported,
   getServiceShutdownGraceMs,
   getVectorStoreProviderConfigStatus,
   isRagIngestAsync,
@@ -25,6 +26,13 @@ import {
 // with its tracing variables set refuses to start (rag/langgraph/langsmith-guard.js).
 // After "dotenv/config", so a value from .env is refused too.
 assertLangSmithTracingDisabled();
+
+// AGENT_RUNTIME=native named the native graph scheduler that phase 6 of
+// docs/adr/0001-langgraph-runtime.md deleted; a process asked for it (or for
+// any runtime but langgraph) refuses to start instead of running LangGraph
+// without saying so (rag/config.js). startServiceRole checks again for a
+// caller that starts a role without coming through here.
+assertAgentRuntimeSupported();
 
 // Applied before createApp() because createApp initializes the document registry
 // while booting (app.js:118). Without the profile that call runs the PostgreSQL

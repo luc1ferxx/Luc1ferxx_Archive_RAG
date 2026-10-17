@@ -1,0 +1,246 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Summarize selected contract documents, then review them for cited risks and gaps.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 3 analysis retrieval queries with broad topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "3-skill_chain",
+        "label": "Skill Chain",
+        "status": "completed",
+        "summary": "Chained 2 skills: Summarize Contract -> Risk Review.",
+        "type": "skill_chain"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "custom_skill:summarize_contract",
+        "label": "Summarize Contract",
+        "status": "completed",
+        "summary": "Summarize Contract completed with 1 citation.",
+        "type": "custom_skill"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "custom_skill:risk_review",
+        "label": "Risk Review",
+        "status": "completed",
+        "summary": "Risk Review completed with 1 citation.",
+        "type": "custom_skill"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "6-synthesis",
+        "label": "Synthesis",
+        "status": "completed",
+        "summary": "Composed the final agent answer from completed tool results.",
+        "type": "synthesis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "7-self_check",
+        "label": "Final Self Check",
+        "status": "completed",
+        "summary": "Evidence check passed with 2 citations across 1 cited document.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "8-answer_finalizer",
+        "label": "Answer Finalizer",
+        "status": "completed",
+        "summary": "Final answer passed claim-level citation finalization with 4 supported claims.",
+        "type": "answer_finalizer"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "checks": [
+      {
+        "category": "skill_selection",
+        "detail": "skill_chain",
+        "id": "mode_is_skill_chain",
+        "label": "Agent mode is skill_chain",
+        "passed": true
+      },
+      {
+        "category": "skill_selection",
+        "detail": [
+          "summarize_contract",
+          "risk_review"
+        ],
+        "id": "expected_chain_order",
+        "label": "Selected chain order is summarize_contract -> risk_review",
+        "passed": true
+      },
+      {
+        "category": "skill_selection",
+        "detail": [
+          "plan",
+          "query_planner",
+          "skill_chain",
+          "custom_skill",
+          "custom_skill",
+          "synthesis",
+          "self_check",
+          "answer_finalizer"
+        ],
+        "id": "skill_chain_trace_step",
+        "label": "Trace records the skill_chain step",
+        "passed": true
+      },
+      {
+        "category": "skill_selection",
+        "detail": [
+          "summarize_contract",
+          "risk_review"
+        ],
+        "id": "both_custom_skills_ran",
+        "label": "Both custom skills ran in the trajectory",
+        "passed": true
+      }
+    ],
+    "description": "A contract risk review should select the summarize_contract -> risk_review whitelist chain.",
+    "failedCheckCount": 0,
+    "id": "skill_chain_contract_review",
+    "label": "Contract review skill chain",
+    "passed": true,
+    "response": {
+      "agentMode": "skill_chain",
+      "agentSkills": [
+        {
+          "label": "Summarize Contract",
+          "skillId": "summarize_contract",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        },
+        {
+          "label": "Risk Review",
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        }
+      ],
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "run": {
+          "exhausted": null,
+          "limits": {
+            "maxCostUsd": 0.5,
+            "maxDurationMs": 300000,
+            "maxTokens": 100000
+          },
+          "used": {
+            "costUsd": 0,
+            "durationMs": "<elapsed>",
+            "modelCalls": 0,
+            "tokens": 0,
+            "unpricedModelCalls": 0
+          }
+        },
+        "traceTruncated": false,
+        "used": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 2,
+          "documentRagCalls": 0,
+          "researchQuestions": 0,
+          "traceSteps": 8,
+          "webSearchCalls": 0
+        }
+      },
+      "clarification": null,
+      "executionLoop": {
+        "followUpsRun": 0,
+        "gaps": [],
+        "gapsIdentified": 0,
+        "maxFollowUps": 1,
+        "stoppedReason": "not_needed",
+        "version": "1.0"
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Summarize Contract",
+          "skillId": "summarize_contract",
+          "skillVersion": "1.0.0"
+        },
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Risk Review",
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Summarize Contract",
+          "skillId": "summarize_contract",
+          "skillVersion": "1.0.0"
+        },
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Risk Review",
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 2,
+        "listDocumentCallCount": 2
+      },
+      "traceTypes": [
+        "plan",
+        "query_planner",
+        "skill_chain",
+        "custom_skill",
+        "custom_skill",
+        "synthesis",
+        "self_check",
+        "answer_finalizer"
+      ],
+      "workingMemory": {
+        "checkedQueryCount": 3,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 0
+      }
+    }
+  },
+  "runs": []
+}

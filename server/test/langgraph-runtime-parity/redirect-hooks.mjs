@@ -1,9 +1,9 @@
 // Module resolve hook, registered with module.register() by
-// test/langgraph-runtime-parity.test.mjs and
-// test/langgraph-native-runner-suite.test.mjs (each in its own process). Each
-// redirect sends the imports of `target` made by modules under `fromPrefix`
-// to the recording stand-in `capture`; the stand-in's own import of the
-// target is never redirected, so it reaches the real module.
+// test/langgraph-runtime-parity.test.mjs and the other suites that tap a
+// module's import (each in its own process). Each redirect sends the imports
+// of `target` made by modules under `fromPrefix` to the recording stand-in
+// `capture`; the stand-in's own import of the target is never redirected, so
+// it reaches the real module.
 let redirects = [];
 
 export const initialize = (data) => {

@@ -6,25 +6,32 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 
-// Phase-2 acceptance evidence for AGENT_RUNTIME (docs/adr/0001-langgraph-
-// runtime.md): the evaluation cases that exercise the custom-Skill DAG -- the
-// four skill_graph trajectory cases, the planner's dynamic-skill-graph case on
-// its mock provider, and the recovery-observability replan and startup-resume
-// signal -- run once per runtime through the evaluations' own runners and must
-// come out identical: every check (with its detail), the whole response
-// projection a case reports, the recovery report, and every run the cases
-// created (events, status, steps and result, private LangGraph record aside).
+import { assertMatchesGraphGolden } from "./langgraph-support/graph-goldens.mjs";
+
+// Phase-2 acceptance evidence for the LangGraph runtime (docs/adr/0001-
+// langgraph-runtime.md), kept after phase 6 deleted the native scheduler: the
+// evaluation cases that exercise the custom-Skill DAG -- the four skill_graph
+// trajectory cases, the planner's dynamic-skill-graph case on its mock
+// provider, and the recovery-observability replan and startup-resume signal
+// -- run through the evaluations' own runners and must come out exactly as
+// they did on the native scheduler: every check (with its detail), the whole
+// response projection a case reports, the recovery report, and every run the
+// cases created (events, status, steps and result, private LangGraph record
+// aside). Until phase 6 that was a second, native pass of each case; it is
+// now the golden frozen from that pass
+// (test/fixtures/graph-goldens/langgraph-runtime-parity/<case id>.json; see
+// test/langgraph-support/graph-goldens.mjs).
 //
 // The cases keep their run stores private, so the evaluation modules' import
 // of rag/agent-runs.js is redirected to a stand-in that records each store and
-// run (test/langgraph-runtime-parity/). Parity alone would also hold if the
-// LangGraph pass never left the native scheduler, so the executor's import is
-// redirected too, and every LangGraph invocation is pinned per case.
+// run (test/langgraph-runtime-parity/). The executor's import is redirected
+// too, and every LangGraph invocation is pinned per case, so a case that
+// stopped reaching the graph fails here.
 //
 // Masked, and only these: random ids (UUIDs, also inside run and event ids),
 // ISO timestamps, the wall-clock measurements `durationMs` and `latencyMs`,
 // and the graph checkpoint's `digest`, a seal over the checkpoint that covers
-// those durations. Each one differs between two runs on the same runtime.
+// those durations. Each one differs between two runs.
 const PARITY_DIRECTORY = new URL("./langgraph-runtime-parity/", import.meta.url);
 const RUN_STORE_TAP_URL = new URL("agent-run-store-tap.mjs", PARITY_DIRECTORY).href;
 const EXECUTOR_TAP_URL = new URL("langgraph-executor-tap.mjs", PARITY_DIRECTORY).href;
@@ -55,8 +62,6 @@ const { takeLangGraphInvocations } = await import(EXECUTOR_TAP_URL);
 const { EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY } = await import(
   "../rag/agent-execution-graph-checkpoint.js"
 );
-const { CUSTOM_SKILL_GRAPH_RUNTIMES } = await import("../rag/agent-custom-skill-stage.js");
-const { getAgentRuntime } = await import("../rag/config.js");
 const { LANGGRAPH_CHECKPOINT_FORMAT, deriveLangGraphThreadId } = await import(
   "../rag/langgraph/checkpointer.js"
 );
@@ -76,13 +81,9 @@ const {
 } = await import("../evaluation/recovery-observability-eval.js");
 
 const CREATED_AT = "2026-10-14T00:00:00.000Z";
-const RUNTIMES = Object.freeze([
-  CUSTOM_SKILL_GRAPH_RUNTIMES.native,
-  CUSTOM_SKILL_GRAPH_RUNTIMES.langgraph,
-]);
 // The answer-rate flags change pinned response projections when on
-// (test/trajectory-eval.test.mjs pins them off for the same reason), so both
-// passes run with every one of them off whatever the ambient environment says.
+// (test/trajectory-eval.test.mjs pins them off for the same reason), so every
+// pass runs with every one of them off whatever the ambient environment says.
 const ANSWER_RATE_FLAGS_OFF = Object.freeze({
   AGENT_FOLLOW_UP_ORIGINAL_QUESTION: undefined,
   AGENT_SINGLE_DOCUMENT_ROUTING: undefined,
@@ -145,7 +146,8 @@ const maskVolatile = (value, key = "") => {
 };
 
 // Everything a run leaves in the store except LangGraph's own thread record,
-// which exists on one runtime only and is checked on its own below.
+// which the native scheduler never wrote (so the golden cannot hold it) and
+// is checked on its own below.
 const projectRun = (run) => {
   const { [LANGGRAPH_CHECKPOINT_RESULT_KEY]: _langGraphRecord, ...result } =
     run?.result ?? {};
@@ -159,20 +161,18 @@ const projectRun = (run) => {
 };
 
 // The outer-plan dial is pinned unset, the production setting: the outer plan
-// stays on the native loop under both runtimes, so only the custom-Skill DAG
-// moves.
+// stays on the native loop, so only the custom-Skill DAG runs on LangGraph.
 const PASS_ENV = Object.freeze({ ...ANSWER_RATE_FLAGS_OFF, AGENT_OUTER_PLAN_RUNTIME: undefined });
 
 /**
- * Runs `work` with AGENT_RUNTIME pinned and returns its outcome with every run
- * the evaluation modules created and every LangGraph invocation made meanwhile.
+ * Runs `work` and returns its outcome with every run the evaluation modules
+ * created and every LangGraph invocation made meanwhile.
  */
-const runOnRuntime = (runtime, work) =>
-  withEnv({ ...PASS_ENV, AGENT_RUNTIME: runtime }, async () => {
+const runPass = (work) =>
+  withEnv(PASS_ENV, async () => {
     // Nothing recorded before this pass may be attributed to it.
     await takeCreatedAgentRuns();
     takeLangGraphInvocations();
-    assert.equal(getAgentRuntime(), runtime);
 
     const outcome = await work();
 
@@ -183,38 +183,27 @@ const runOnRuntime = (runtime, work) =>
     };
   });
 
-const runOnBothRuntimes = async (work) => {
-  const passes = {};
+const GOLDEN_SUITE = "langgraph-runtime-parity";
 
-  for (const runtime of RUNTIMES) {
-    passes[runtime] = await runOnRuntime(runtime, work);
-  }
-
-  return passes;
+// The golden holds the masked outcome and every run the pass created, as the
+// native pass produced them (UPDATE_GRAPH_GOLDENS=1 rewrites it from this
+// pass; see the helper's rules).
+const assertPassMatchesGolden = (caseName, pass) => {
+  assert.ok(pass.runs.length > 0, "the cases created no run to compare");
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, {
+    outcome: maskVolatile(pass.outcome),
+    runs: maskVolatile(pass.runs.map(projectRun)),
+  });
 };
 
-const assertRunsIdentical = ({ langgraph, native }) => {
-  assert.ok(native.runs.length > 0, "the cases created no run to compare");
-  assert.deepStrictEqual(
-    maskVolatile(langgraph.runs.map(projectRun)),
-    maskVolatile(native.runs.map(projectRun))
-  );
-};
-
-// Native never writes a LangGraph record. On LangGraph every run whose graph
-// went through a bound invocation wrote its thread into the run row while the
-// graph ran: LangGraph's format, this run's thread, the root namespace, and
-// none of the run's question. Since phase 4 the save that settles the graph
-// drops that thread in the same CAS, so the finished run keeps only the null
-// tombstone; the records are checked as the run-store tap copied them from
-// each write (before phase 4 the finished run kept its record and this read
-// it from the run).
-const assertLangGraphRecords = ({ langgraph, native }) => {
-  for (const run of native.runs) {
-    assert.equal(run.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY], undefined);
-    assert.deepStrictEqual(run.langGraphRecordsWritten, []);
-  }
-
+// Every run whose graph went through a bound invocation wrote its thread into
+// the run row while the graph ran: LangGraph's format, this run's thread, the
+// root namespace, and none of the run's question. Since phase 4 the save that
+// settles the graph drops that thread in the same CAS, so the finished run
+// keeps only the null tombstone; the records are checked as the run-store tap
+// copied them from each write (before phase 4 the finished run kept its
+// record and this read it from the run).
+const assertLangGraphRecords = (langgraph) => {
   const boundInvocationCount = langgraph.invocations.filter(
     (invocation) => invocation.boundToRun
   ).length;
@@ -225,7 +214,7 @@ const assertLangGraphRecords = ({ langgraph, native }) => {
   assert.equal(runsThatWroteRecords.length > 0, boundInvocationCount > 0);
 
   for (const run of langgraph.runs) {
-    // No finished run carries a thread, whichever runtime ran it.
+    // No finished run carries a thread.
     assert.equal(run.result?.[LANGGRAPH_CHECKPOINT_RESULT_KEY] ?? null, null);
   }
 
@@ -321,27 +310,25 @@ const EVALUATION_CASES = [
 ];
 
 for (const evaluationCase of EVALUATION_CASES) {
-  test(`${evaluationCase.id} is identical on the native and LangGraph runtimes`, async () => {
-    const passes = await runOnBothRuntimes(evaluationCase.run);
-    const { langgraph, native } = passes;
+  test(`${evaluationCase.id} on LangGraph matches its native golden`, async () => {
+    const langgraph = await runPass(evaluationCase.run);
 
-    // Parity of two broken runs proves nothing: the case holds natively.
-    assert.equal(native.outcome.id, evaluationCase.id);
-    assert.equal(native.outcome.passed, true, JSON.stringify(native.outcome.checks));
-    assert.equal(native.outcome.failedCheckCount, 0);
-    // Every check with its detail, and the whole response projection
-    // (summary plus the case's observed fields).
-    assert.deepStrictEqual(maskVolatile(langgraph.outcome), maskVolatile(native.outcome));
-    assertRunsIdentical(passes);
+    // A golden match of a broken run would prove nothing: the case holds.
+    assert.equal(langgraph.outcome.id, evaluationCase.id);
+    assert.equal(langgraph.outcome.passed, true, JSON.stringify(langgraph.outcome.checks));
+    assert.equal(langgraph.outcome.failedCheckCount, 0);
+    // Every check with its detail, the whole response projection (summary
+    // plus the case's observed fields) and every run the case created, as
+    // the native pass produced them.
+    assertPassMatchesGolden(evaluationCase.id, langgraph);
 
-    assert.deepStrictEqual(native.invocations, []);
     assert.deepStrictEqual(langgraph.invocations, evaluationCase.langGraphInvocations);
-    assertLangGraphRecords(passes);
+    assertLangGraphRecords(langgraph);
   });
 }
 
-test("the recovery-observability replan and startup-resume signal is identical on the native and LangGraph runtimes", async () => {
-  const passes = await runOnBothRuntimes(async () => {
+test("the recovery-observability replan and startup-resume signal on LangGraph matches its native golden", async () => {
+  const langgraph = await runPass(async () => {
     // The production builders: a real guarded run with one applied replan,
     // and a startup resume (checkpoint, re-instantiated services, the
     // application's recovery API) that asserts its own expectations.
@@ -356,7 +343,6 @@ test("the recovery-observability replan and startup-resume signal is identical o
       }),
     };
   });
-  const { langgraph, native } = passes;
   const signal = (report) => {
     const skillGraphCase = report.cases.find((entry) => entry.id === "skill_graph_signal");
     const resumeCase = report.cases.find(
@@ -375,17 +361,15 @@ test("the recovery-observability replan and startup-resume signal is identical o
     };
   };
 
-  assert.equal(native.outcome.report.summary.status, "pass");
-  assert.ok(signal(native.outcome.report).checks.every((check) => check.passed));
-  assert.equal(signal(native.outcome.report).replanAppliedCount, 1);
-  assert.equal(signal(native.outcome.report).startupResumeObservedCount, 1);
-  assert.equal(signal(native.outcome.report).unsafeFallbackCount, 0);
-  assert.deepStrictEqual(signal(langgraph.outcome.report), signal(native.outcome.report));
-  // The whole report and every event it was built from, not only the signal.
-  assert.deepStrictEqual(maskVolatile(langgraph.outcome), maskVolatile(native.outcome));
-  assertRunsIdentical(passes);
+  assert.equal(langgraph.outcome.report.summary.status, "pass");
+  assert.ok(signal(langgraph.outcome.report).checks.every((check) => check.passed));
+  assert.equal(signal(langgraph.outcome.report).replanAppliedCount, 1);
+  assert.equal(signal(langgraph.outcome.report).startupResumeObservedCount, 1);
+  assert.equal(signal(langgraph.outcome.report).unsafeFallbackCount, 0);
+  // The whole report and every event it was built from, not only the signal,
+  // and every run, as the native pass produced them.
+  assertPassMatchesGolden("recovery_observability_skill_graph_signal", langgraph);
 
-  assert.deepStrictEqual(native.invocations, []);
   assert.deepStrictEqual(langgraph.invocations, [
     // The replan run.
     invocation(CONTRACT_NODE_IDS),
@@ -395,5 +379,5 @@ test("the recovery-observability replan and startup-resume signal is identical o
     invocation(["compare", "risk"]),
     invocation(["compare", "risk"], ["compare"]),
   ]);
-  assertLangGraphRecords(passes);
+  assertLangGraphRecords(langgraph);
 });

@@ -15,10 +15,7 @@ import {
   EXECUTION_GRAPH_VERSIONS,
   validateExecutionGraph,
 } from "./agent-execution-graph.js";
-import {
-  replayExecutionGraphRun,
-  runExecutionGraph,
-} from "./agent-execution-graph-runner.js";
+import { replayExecutionGraphRun } from "./agent-execution-graph-runner.js";
 import { AGENT_INTERRUPT_TYPES, AgentRunInterruptError } from "./agent-interrupts.js";
 import { getAgentRunStepLifecycleTarget } from "./agent-run-step-lifecycle.js";
 import {
@@ -33,16 +30,12 @@ import {
   verifyCapabilityGraphApproval,
 } from "./capabilities/graph-approval-preflight.js";
 import { CAPABILITY_POLICY_DECISIONS } from "./capabilities/policy-enforcer.js";
-import { getAgentRuntime } from "./config.js";
+import { assertAgentRuntimeSupported } from "./config.js";
 import { assertLangSmithTracingDisabled } from "./langgraph/langsmith-guard.js";
 import { buildAuthorizedUnifiedGraphCatalog } from "./skills/unified-graph-catalog.js";
 
 const noop = () => {};
 
-export const UNIFIED_GRAPH_RUNTIMES = Object.freeze({
-  langgraph: "langgraph",
-  native: "native",
-});
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
@@ -215,24 +208,19 @@ const approvalBoundaryMatches = (boundary, gate) =>
  * node receipts of a graph that already completed, without executing a node,
  * so the run can be finalized from the same persisted outputs.
  *
- * `runtime` (AGENT_RUNTIME, docs/adr/0001-langgraph-runtime.md phase 3;
- * `langgraph` by default since phase 4) picks the scheduler: LangGraph
- * (langgraph/run-execution-graph.js), or the native one, which stays as the
- * AGENT_RUNTIME=native rollback path for at least one release on the new
- * default (ADR constraint 12) and is to be deleted after it (since phase 5
- * both queue in layer order, so LangGraph hands no graph to the native
- * scheduler, and on the langgraph runtime this stage never calls it).
- * LangGraph runs the same node code and parks an approval-gated node with
- * interrupt() on the run's thread, so the decision continues that thread.
- * Everything durable is the same on both: the graph checkpoint, the preflight
- * and the pause CAS above, the fenced step lifecycle. LangGraph checkpoints
- * into the run the step lifecycle writes (getAgentRunStepLifecycleTarget); a
- * lifecycle without a run target runs LangGraph without a checkpointer (an
- * ephemeral thread nothing reads back), where a parked node returns its
- * receipt and the pause is the stage's pauseForApproval, exactly as natively,
- * and a continuation is the fresh invocation a native pause gets. A
- * finalization replay runs no node, so it needs no scheduler on either
- * runtime: replayExecutionGraphRun rebuilds the receipts.
+ * The scheduler is LangGraph (langgraph/run-execution-graph.js,
+ * docs/adr/0001-langgraph-runtime.md; phase 6 deleted the native one and the
+ * AGENT_RUNTIME dial). It runs the node code of agent-execution-graph-node.js
+ * and parks an approval-gated node with interrupt() on the run's thread, so
+ * the decision continues that thread. The durable state is the graph
+ * checkpoint, the preflight and the pause CAS above, and the fenced step
+ * lifecycle. LangGraph checkpoints into the run the step lifecycle writes
+ * (getAgentRunStepLifecycleTarget); a lifecycle without a run target runs
+ * LangGraph without a checkpointer (an ephemeral thread nothing reads back),
+ * where a parked node returns its receipt, the pause is the stage's
+ * pauseForApproval once nothing else can run, and a continuation is a fresh
+ * invocation. A finalization replay runs no node, so it needs no scheduler:
+ * replayExecutionGraphRun rebuilds the receipts.
  */
 export const runUnifiedGraphStage = async ({
   accessScope,
@@ -268,7 +256,6 @@ export const runUnifiedGraphStage = async ({
   registry,
   resumeRun = null,
   retrievalPlan,
-  runtime = getAgentRuntime(),
   saveExecutionGraphCheckpoint,
   services,
   sessionId,
@@ -289,34 +276,30 @@ export const runUnifiedGraphStage = async ({
     });
   }
 
-  let executeGraph = runExecutionGraph;
   // The run LangGraph checkpoints into: the one the node steps are written
   // to, with the same scope and CAS cursor, so the thread is fenced exactly
   // like the steps (same pattern as agent-custom-skill-stage.js). Null for a
   // lifecycle without a run: LangGraph then runs without a checkpointer.
-  let langGraphRun = null;
+  const langGraphRun = getAgentRunStepLifecycleTarget(stepLifecycle);
 
-  if (runtime === UNIFIED_GRAPH_RUNTIMES.langgraph) {
-    const target = getAgentRunStepLifecycleTarget(stepLifecycle);
-
-    if (target && target.runId !== agentRunId) {
-      fail(
-        "the step lifecycle records another run than the graph",
-        "AGENT_UNIFIED_GRAPH_STAGE_INVALID",
-        { preExecution: true }
-      );
-    }
-
-    // Refused before anything durable exists: a request that cannot run on
-    // its runtime must not leave a graph checkpoint for recovery to resume.
-    // The executor checks again at its own entry. Imported only when
-    // selected, so a process on the native runtime never loads LangGraph.
-    assertLangSmithTracingDisabled();
-    ({ runExecutionGraphOnLangGraph: executeGraph } = await import(
-      "./langgraph/run-execution-graph.js"
-    ));
-    langGraphRun = target;
+  if (langGraphRun && langGraphRun.runId !== agentRunId) {
+    fail(
+      "the step lifecycle records another run than the graph",
+      "AGENT_UNIFIED_GRAPH_STAGE_INVALID",
+      { preExecution: true }
+    );
   }
+
+  // Refused before anything durable exists: a request that cannot run on
+  // LangGraph must not leave a graph checkpoint for recovery to resume. The
+  // executor checks again at its own entry. Imported on first use, so a
+  // process that never runs a guarded v3 graph never loads LangGraph. A
+  // removed AGENT_RUNTIME value is refused at the same point.
+  assertLangSmithTracingDisabled();
+  assertAgentRuntimeSupported();
+  const { runExecutionGraphOnLangGraph: executeGraph } = await import(
+    "./langgraph/run-execution-graph.js"
+  );
 
   const effectiveLimits = { ...EXECUTION_GRAPH_LIMITS, ...limits };
   const catalog = buildAuthorizedUnifiedGraphCatalog({
@@ -616,7 +599,7 @@ export const runUnifiedGraphStage = async ({
   // The save that settles the graph (phase completed or partial) also drops
   // the run's LangGraph thread record in the same CAS
   // (saveExecutionGraphCheckpoint's dropLangGraphRecord): a finished run
-  // never carries a thread, whichever runtime wrote it, and a running or
+  // never carries a thread, and a running or
   // approval-paused graph keeps the thread its continuation resumes. On a run
   // that holds no record the flag changes nothing.
   let checkpointQueue = Promise.resolve();
@@ -830,8 +813,8 @@ export const runUnifiedGraphStage = async ({
       : null;
 
   // A finalization replay executes nothing: every node is reused or
-  // re-derived as skipped, on either runtime without a scheduler or a thread,
-  // and a node that would still run is refused before its step or budget.
+  // re-derived as skipped, without a scheduler or a thread, and a node that
+  // would still run is refused before its step or budget.
   const run = finalizationReplay
     ? replayExecutionGraphRun({ ...graphOptions, refuseLaunch: replayGuardError })
     : await executeGraph({

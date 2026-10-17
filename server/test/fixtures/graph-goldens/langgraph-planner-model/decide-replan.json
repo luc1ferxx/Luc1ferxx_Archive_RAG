@@ -1,0 +1,230 @@
+{
+  "calls": [
+    {
+      "input": "A guarded AgentRAG execution graph has already run and did not satisfy the request.\nPropose the smallest patch that could change that. Return only JSON.\nThe JSON shape must be: {\"addNodes\":[<graph node>],\"removeNodeIds\":[\"...\"],\"rationale\":\"...\"}.\nA graph node has the same shape as in the original plan: nodeId, skillId, dependsOn, inputBindings, failurePolicy, rationale.\nNodes that already completed stay in the graph and will not run again. Do not re-add, rename, or remove them.\nEvery new nodeId must be unique across the whole graph. Use only skillId values listed in capabilities.\nYou may narrow a node with scope.docIds using ids from authorizedDocIds. You may never widen the scope, add documents, or name a skill that is not listed.\nDo not emit approval, budget, accessScope, retry, concurrency, replan, or policy fields. The runtime owns those and will reject a patch that claims them.\nYou are proposing a plan, not producing an answer, and you cannot call anything yourself.\nIf no legal patch would help, return an empty addNodes array.\nInput:\n{\"authorizedDocIds\":[\"doc-1\",\"doc-2\"],\"capabilities\":[{\"budgetKey\":\"customSkillCalls\",\"effects\":\"read_only\",\"id\":\"compare_documents\",\"idempotency\":\"read_only_rag\",\"inputSchema\":{\"docIds\":{\"required\":true,\"scoped\":true,\"type\":\"string[]\"},\"priorFindings\":{\"required\":false,\"scoped\":false,\"type\":\"string\"},\"question\":{\"required\":true,\"scoped\":false,\"type\":\"string\"}},\"kind\":\"custom\",\"label\":\"compare_documents\",\"outputSchema\":{\"abstained\":{\"required\":false,\"scoped\":false,\"type\":\"boolean\"},\"citations\":{\"required\":false,\"scoped\":false,\"type\":\"citation[]\"},\"text\":{\"required\":false,\"scoped\":false,\"type\":\"string\"}},\"parallelSafe\":true,\"requiresAccessScope\":true,\"summary\":\"Summary for compare_documents.\",\"version\":\"1.0.0\"},{\"budgetKey\":\"customSkillCalls\",\"effects\":\"read_only\",\"id\":\"risk_review\",\"idempotency\":\"read_only_rag\",\"inputSchema\":{\"docIds\":{\"required\":true,\"scoped\":true,\"type\":\"string[]\"},\"priorFindings\":{\"required\":false,\"scoped\":false,\"type\":\"string\"},\"question\":{\"required\":true,\"scoped\":false,\"type\":\"string\"}},\"kind\":\"custom\",\"label\":\"risk_review\",\"outputSchema\":{\"abstained\":{\"required\":false,\"scoped\":false,\"type\":\"boolean\"},\"citations\":{\"required\":false,\"scoped\":false,\"type\":\"citation[]\"},\"text\":{\"required\":false,\"scoped\":false,\"type\":\"string\"}},\"parallelSafe\":true,\"requiresAccessScope\":true,\"summary\":\"Summary for risk_review.\",\"version\":\"1.0.0\"},{\"budgetKey\":\"customSkillCalls\",\"effects\":\"read_only\",\"id\":\"extract_timeline\",\"idempotency\":\"read_only_rag\",\"inputSchema\":{\"docIds\":{\"required\":true,\"scoped\":true,\"type\":\"string[]\"},\"priorFindings\":{\"required\":false,\"scoped\":false,\"type\":\"string\"},\"question\":{\"required\":true,\"scoped\":false,\"type\":\"string\"}},\"kind\":\"custom\",\"label\":\"extract_timeline\",\"outputSchema\":{\"abstained\":{\"required\":false,\"scoped\":false,\"type\":\"boolean\"},\"citations\":{\"required\":false,\"scoped\":false,\"type\":\"citation[]\"},\"text\":{\"required\":false,\"scoped\":false,\"type\":\"string\"}},\"parallelSafe\":true,\"requiresAccessScope\":true,\"summary\":\"Summary for extract_timeline.\",\"version\":\"1.0.0\"}],\"goal\":\"Compare the two contracts and review the risks.\",\"graph\":{\"nodes\":[{\"dependsOn\":[],\"nodeId\":\"compare\",\"skillId\":\"compare_documents\"},{\"dependsOn\":[],\"nodeId\":\"risk\",\"skillId\":\"risk_review\"}],\"revision\":0},\"limits\":{\"maxConcurrency\":3,\"maxDepth\":5,\"maxNodes\":12},\"nodeRuns\":[{\"abstained\":true,\"citationCount\":0,\"nodeId\":\"compare\",\"reason\":null,\"skillId\":\"compare_documents\",\"status\":\"completed\"},{\"abstained\":true,\"citationCount\":0,\"nodeId\":\"risk\",\"reason\":null,\"skillId\":\"risk_review\",\"status\":\"completed\"}],\"trigger\":\"insufficient_evidence\"}",
+      "options": {
+        "onTextDelta": {
+          "$graphGolden": "undefined"
+        },
+        "responseFormat": null
+      }
+    }
+  ],
+  "error": null,
+  "events": [
+    {
+      "alerts": [],
+      "annotations": [
+        {
+          "category": "usage",
+          "id": "llmops_usage_estimated",
+          "severity": "info",
+          "source": "llmops_policy"
+        },
+        {
+          "category": "cost",
+          "id": "llmops_pricing_unavailable",
+          "severity": "info",
+          "source": "llmops_policy"
+        }
+      ],
+      "budget": {
+        "exceededKeys": [],
+        "limits": {
+          "maxEstimatedCostUsdPerEvent": null,
+          "maxTotalTokensPerEvent": null
+        },
+        "observed": {
+          "estimatedCostUsd": null,
+          "totalTokens": 1003
+        },
+        "status": "unavailable"
+      },
+      "costCurrency": "USD",
+      "errorMessage": null,
+      "errorName": null,
+      "estimatedCostUsd": null,
+      "eventType": "llmops_metric",
+      "inputCharacters": 3638,
+      "inputTokens": 910,
+      "itemCount": 1,
+      "latencyMs": "<masked>",
+      "latencySloMs": null,
+      "latencySloStatus": "unavailable",
+      "modelRoute": {
+        "candidateModelIds": [],
+        "capability": "execution_planner",
+        "fallbackModelIds": [],
+        "modelId": null,
+        "providerId": "custom_provider",
+        "rejectedModelIds": [],
+        "routeId": null,
+        "status": "custom_provider"
+      },
+      "operation": "llm_completion",
+      "outputCharacters": 372,
+      "outputTokens": 93,
+      "pricingSource": "unavailable",
+      "promptTemplate": {
+        "fingerprint": "16e4034680c7",
+        "id": "replanner",
+        "version": "v1"
+      },
+      "stage": "complete_text",
+      "status": "ok",
+      "timestamp": "<masked>",
+      "tokenSource": "estimated",
+      "totalTokens": 1003,
+      "traceType": "llmops",
+      "version": "1.0.0"
+    }
+  ],
+  "promptUsage": [
+    {
+      "calls": 1,
+      "fingerprint": "16e4034680c7",
+      "id": "replanner",
+      "tokens": 1003,
+      "version": "v1"
+    }
+  ],
+  "result": {
+    "completedNodeRuns": [
+      {
+        "citationCount": 0,
+        "dependsOn": [],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "compare",
+        "parallelSafe": true,
+        "reason": null,
+        "result": {
+          "abstained": true,
+          "citations": [],
+          "ok": true,
+          "skillId": "compare_documents",
+          "text": ""
+        },
+        "skillId": "compare_documents",
+        "status": "completed",
+        "stepId": "custom_skill:compare_documents"
+      },
+      {
+        "citationCount": 0,
+        "dependsOn": [],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "risk",
+        "parallelSafe": true,
+        "reason": null,
+        "result": {
+          "abstained": true,
+          "citations": [],
+          "ok": true,
+          "skillId": "risk_review",
+          "text": ""
+        },
+        "skillId": "risk_review",
+        "status": "completed",
+        "stepId": "custom_skill:risk_review"
+      }
+    ],
+    "decision": "applied",
+    "errors": [],
+    "fingerprint": "{\"nodes\":[{\"dependsOn\":[],\"failurePolicy\":\"fail_fast\",\"inputBindings\":{\"docIds\":{\"field\":\"docIds\",\"source\":\"request\"},\"question\":{\"field\":\"question\",\"source\":\"request\"}},\"nodeId\":\"compare\",\"rationale\":\"Run compare.\",\"skillId\":\"compare_documents\"},{\"dependsOn\":[],\"failurePolicy\":\"fail_fast\",\"inputBindings\":{\"docIds\":{\"field\":\"docIds\",\"source\":\"request\"},\"question\":{\"field\":\"question\",\"source\":\"request\"}},\"nodeId\":\"risk\",\"rationale\":\"Run risk.\",\"skillId\":\"risk_review\"},{\"dependsOn\":[],\"failurePolicy\":\"fail_fast\",\"inputBindings\":{\"docIds\":{\"field\":\"docIds\",\"source\":\"request\"},\"question\":{\"field\":\"question\",\"source\":\"request\"}},\"nodeId\":\"timeline\",\"rationale\":\"Run timeline.\",\"skillId\":\"extract_timeline\"}],\"version\":\"v1\"}",
+    "fingerprints": [
+      "{\"nodes\":[{\"dependsOn\":[],\"failurePolicy\":\"fail_fast\",\"inputBindings\":{\"docIds\":{\"field\":\"docIds\",\"source\":\"request\"},\"question\":{\"field\":\"question\",\"source\":\"request\"}},\"nodeId\":\"compare\",\"rationale\":\"Run compare.\",\"skillId\":\"compare_documents\"},{\"dependsOn\":[],\"failurePolicy\":\"fail_fast\",\"inputBindings\":{\"docIds\":{\"field\":\"docIds\",\"source\":\"request\"},\"question\":{\"field\":\"question\",\"source\":\"request\"}},\"nodeId\":\"risk\",\"rationale\":\"Run risk.\",\"skillId\":\"risk_review\"}],\"version\":\"v1\"}",
+      "{\"nodes\":[{\"dependsOn\":[],\"failurePolicy\":\"fail_fast\",\"inputBindings\":{\"docIds\":{\"field\":\"docIds\",\"source\":\"request\"},\"question\":{\"field\":\"question\",\"source\":\"request\"}},\"nodeId\":\"compare\",\"rationale\":\"Run compare.\",\"skillId\":\"compare_documents\"},{\"dependsOn\":[],\"failurePolicy\":\"fail_fast\",\"inputBindings\":{\"docIds\":{\"field\":\"docIds\",\"source\":\"request\"},\"question\":{\"field\":\"question\",\"source\":\"request\"}},\"nodeId\":\"risk\",\"rationale\":\"Run risk.\",\"skillId\":\"risk_review\"},{\"dependsOn\":[],\"failurePolicy\":\"fail_fast\",\"inputBindings\":{\"docIds\":{\"field\":\"docIds\",\"source\":\"request\"},\"question\":{\"field\":\"question\",\"source\":\"request\"}},\"nodeId\":\"timeline\",\"rationale\":\"Run timeline.\",\"skillId\":\"extract_timeline\"}],\"version\":\"v1\"}"
+    ],
+    "graph": {
+      "nodes": [
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "compare",
+          "rationale": "Run compare.",
+          "skillId": "compare_documents"
+        },
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "risk",
+          "rationale": "Run risk.",
+          "skillId": "risk_review"
+        },
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "timeline",
+          "rationale": "Run timeline.",
+          "skillId": "extract_timeline"
+        }
+      ],
+      "revision": 1,
+      "version": "v1"
+    },
+    "patch": {
+      "addNodes": [
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "timeline",
+          "rationale": "Run timeline.",
+          "skillId": "extract_timeline"
+        }
+      ],
+      "rationale": "Both nodes abstained; widen the evidence with a timeline pass.",
+      "removeNodeIds": []
+    },
+    "reason": "Both nodes abstained; widen the evidence with a timeline pass.",
+    "reasonCode": null,
+    "replanCount": 1,
+    "trigger": "insufficient_evidence"
+  },
+  "used": {
+    "costUsd": 0,
+    "modelCalls": 1,
+    "tokens": 1003,
+    "unpricedModelCalls": 1
+  }
+}

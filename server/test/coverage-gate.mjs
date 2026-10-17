@@ -81,8 +81,8 @@ const collectTestFiles = async () => {
 };
 
 // The shell's environment minus the LangSmith tracing variables, as npm test
-// hands its children (see run.test.mjs): the LangGraph executor, the default
-// AGENT_RUNTIME, refuses to run while one of them is "true".
+// hands its children (see run.test.mjs): the LangGraph executor, which runs
+// every guarded graph, refuses to run while one of them is "true".
 const childEnvironment = () => {
   const environment = { ...process.env };
 

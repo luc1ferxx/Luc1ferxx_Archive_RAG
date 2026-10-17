@@ -21,23 +21,29 @@ import test from "node:test";
 // a stage boundary (both reasons), a cancellation surfaced by the drain
 // after a stage settled, and a dependency outage.
 //
-// Every scenario runs four times (PASSES below): natively, with the outer
-// plan on LangGraph, under AGENT_RUNTIME=langgraph with the outer dial
-// unset -- the production setting, which must keep the outer plan on the
-// native loop while the custom-Skill DAG still runs on LangGraph -- and with
-// the outer dial alone (AGENT_RUNTIME=native), where the outer plan runs on
-// LangGraph and the custom-Skill DAG nested in its custom_skills node stays
-// native, because the two dials are documented as independent. All four
-// answer exactly alike.
+// Every scenario runs twice (PASSES below), once per value of the outer
+// plan's own dial: AGENT_OUTER_PLAN_RUNTIME unset -- the production setting,
+// the outer plan on the native loop -- and AGENT_OUTER_PLAN_RUNTIME=langgraph,
+// the outer plan on the LangGraph Pregel. The custom-Skill DAG runs on
+// LangGraph in both: the native graph scheduler and the AGENT_RUNTIME dial
+// were removed in ADR 0001 phase 6 (until then a pass ran everything under
+// AGENT_RUNTIME=native and anchored the others). Before the deletion the
+// native pass of the three trajectory cases whose custom-Skill stage runs a
+// guarded DAG (`customSkillGraph` below) was frozen, masked exactly as here,
+// under test/fixtures/graph-goldens/langgraph-execution-plan-graph/ from HEAD
+// e1385c1c with AGENT_RUNTIME=native, and the production pass is now held to
+// it (assertMatchesGraphGolden); every other scenario builds no custom-Skill
+// DAG or v3 graph and plans through injected adapters, so AGENT_RUNTIME
+// never changed how it ran. Both passes answer exactly alike.
 //
 // The trajectory cases keep their run stores private, so the evaluation
 // modules' import of rag/agent-runs.js is redirected to the phase-2 recording
 // stand-in, and the runner's on-demand import of the graph module is
 // redirected to a tap that records each invocation; a LangGraph pass that
-// never left the native loop fails the suite, and so does an
-// AGENT_RUNTIME=langgraph pass that left it without the outer dial. The
-// custom-Skill stage's import of the LangGraph executor is tapped too, so the
-// DAG's LangGraph invocations are compared between the two LangGraph passes.
+// never left the native loop fails the suite, and so does a native pass that
+// left it. The custom-Skill stage's import of the LangGraph executor is
+// tapped too, so the DAG's LangGraph invocations are compared between the two
+// passes: who schedules the outer plan must not change them.
 //
 // Masked, and only these: UUIDs, ISO timestamps, wall-clock measurements
 // (durationMs, latencyMs, totalDurationMs) and the checkpoint digest.
@@ -99,7 +105,7 @@ const { AGENT_RUN_STATUSES, createAgentRunService, createInMemoryAgentRunStore }
   "../rag/agent-runs.js"
 );
 const { CAPABILITY_IDS } = await import("../rag/capabilities/index.js");
-const { getAgentOuterPlanRuntime, getAgentRuntime } = await import("../rag/config.js");
+const { getAgentOuterPlanRuntime } = await import("../rag/config.js");
 const { DependencyOutageError } = await import("../rag/dependency-outage.js");
 const { LANGSMITH_TRACING_ENABLED_CODE } = await import("../rag/langgraph/langsmith-guard.js");
 const {
@@ -118,6 +124,7 @@ const {
 } = await import("../rag/request-deadline.js");
 const { ServiceUnavailableError } = await import("../rag/service-client.js");
 const { runTrajectoryEvaluation } = await import("../evaluation/trajectory-eval.js");
+const { assertMatchesGraphGolden } = await import("./langgraph-support/graph-goldens.mjs");
 const {
   createAccessScopeCase,
   createBudgetCase,
@@ -162,27 +169,20 @@ Pregel.prototype.stream = function streamRecordingOuterPlanShape(...args) {
 };
 
 const CREATED_AT = "2026-10-14T00:00:00.000Z";
-// The four passes of every scenario, by the two dials they pin:
-//   native      -- everything on the native schedulers;
-//   langgraph   -- AGENT_RUNTIME=langgraph plus the experimental
-//                  AGENT_OUTER_PLAN_RUNTIME=langgraph: the outer plan on the
-//                  LangGraph Pregel (what this suite was written to prove);
-//   outerNative -- AGENT_RUNTIME=langgraph alone: the outer plan stays on the
-//                  native loop, the custom-Skill DAG runs on LangGraph;
-//   outerOnly   -- AGENT_OUTER_PLAN_RUNTIME=langgraph with AGENT_RUNTIME=
-//                  native: the outer plan on the LangGraph Pregel with a
-//                  native custom-Skill DAG inside its custom_skills node.
+// The two passes of every scenario, by the outer plan's dial they pin (the
+// custom-Skill DAG runs on LangGraph in both):
+//   native    -- AGENT_OUTER_PLAN_RUNTIME unset, the production setting: the
+//                outer plan on the native loop;
+//   langgraph -- the experimental AGENT_OUTER_PLAN_RUNTIME=langgraph: the
+//                outer plan on the LangGraph Pregel (what this suite was
+//                written to prove).
 const PASSES = Object.freeze({
-  native: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined, AGENT_RUNTIME: "native" }),
-  langgraph: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph", AGENT_RUNTIME: "langgraph" }),
-  outerNative: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined, AGENT_RUNTIME: "langgraph" }),
-  outerOnly: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph", AGENT_RUNTIME: "native" }),
+  native: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined }),
+  langgraph: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph" }),
 });
 const PASS_DIALS = Object.freeze({
-  native: Object.freeze({ outerPlan: "native", runtime: "native" }),
-  langgraph: Object.freeze({ outerPlan: "langgraph", runtime: "langgraph" }),
-  outerNative: Object.freeze({ outerPlan: "native", runtime: "langgraph" }),
-  outerOnly: Object.freeze({ outerPlan: "langgraph", runtime: "native" }),
+  native: Object.freeze({ outerPlan: "native" }),
+  langgraph: Object.freeze({ outerPlan: "langgraph" }),
 });
 const ACCESS_SCOPE = Object.freeze({ userId: "alice", workspaceId: "workspace-a" });
 const QUESTION = "What does remote work require?";
@@ -233,7 +233,6 @@ const runOnPass = (pass, work) =>
     takePlanGraphInvocations();
     takeLangGraphInvocations();
     scheduledShapes.splice(0);
-    assert.equal(getAgentRuntime(), PASS_DIALS[pass].runtime);
     assert.equal(getAgentOuterPlanRuntime(), PASS_DIALS[pass].outerPlan);
 
     const events = [];
@@ -266,41 +265,26 @@ const runOnEveryPass = async (work) => {
   return passes;
 };
 
-// Every LangGraph pass against the native one: neither the outer plan's
-// scheduler nor the DAG's changes anything a client, the run store or a
-// streaming client can see.
-const assertPassesIdentical = (passes) => {
-  const { native } = passes;
-
-  for (const pass of ["langgraph", "outerNative", "outerOnly"]) {
-    const other = passes[pass];
-
-    assert.deepStrictEqual(maskVolatile(other.outcome), maskVolatile(native.outcome), pass);
-    assert.deepStrictEqual(maskVolatile(other.events), maskVolatile(native.events), pass);
-    assert.deepStrictEqual(
-      maskVolatile(other.runs.map(projectAgentRun)),
-      maskVolatile(native.runs.map(projectAgentRun)),
-      pass
-    );
-  }
+// The LangGraph pass against the native one: the outer plan's scheduler
+// changes nothing a client, the run store or a streaming client can see.
+const assertPassesIdentical = ({ langgraph, native }) => {
+  assert.deepStrictEqual(maskVolatile(langgraph.outcome), maskVolatile(native.outcome));
+  assert.deepStrictEqual(maskVolatile(langgraph.events), maskVolatile(native.events));
+  assert.deepStrictEqual(
+    maskVolatile(langgraph.runs.map(projectAgentRun)),
+    maskVolatile(native.runs.map(projectAgentRun))
+  );
 };
 
-// AGENT_RUNTIME=langgraph without the outer dial keeps the outer plan on the
-// native loop (no plan-graph invocation), and the custom-Skill DAG's
+// The outer dial unset keeps the outer plan on the native loop (no plan-graph
+// invocation, no outer-plan graph streamed), and the custom-Skill DAG's
 // LangGraph invocations do not depend on who scheduled the outer plan: the
-// same ones as with both dials on LangGraph, none natively. The outer dial
-// alone schedules exactly the plan-graph invocations both dials do, and the
-// DAG inside its custom_skills node follows AGENT_RUNTIME=native: no
-// executor invocation.
-const assertOuterPlanFollowsItsOwnDial = ({ langgraph, native, outerNative, outerOnly }) => {
-  assert.deepStrictEqual(outerNative.invocations, []);
-  assert.deepStrictEqual(native.graphInvocations, []);
-  assert.deepStrictEqual(outerNative.graphInvocations, langgraph.graphInvocations);
-  assert.deepStrictEqual(outerOnly.invocations, langgraph.invocations);
-  assert.deepStrictEqual(outerOnly.graphInvocations, []);
+// native loop's custom_skills stage makes exactly the ones the LangGraph
+// pass's custom_skills node makes.
+const assertOuterPlanFollowsItsOwnDial = ({ langgraph, native }) => {
+  assert.deepStrictEqual(native.invocations, []);
   assert.deepStrictEqual(native.scheduledShapes, []);
-  assert.deepStrictEqual(outerNative.scheduledShapes, []);
-  assert.deepStrictEqual(outerOnly.scheduledShapes, langgraph.scheduledShapes);
+  assert.deepStrictEqual(native.graphInvocations, langgraph.graphInvocations);
 };
 
 // Every plan the LangGraph pass received was streamed as a graph of its
@@ -326,14 +310,11 @@ const assertScheduledShapesFollowPlans = ({ langgraph }) => {
   });
 };
 
-// The native pass never touches the graph; the LangGraph pass schedules every
-// outer plan on it, with the validated plan's step ids, and so does the outer
-// dial alone (the same invocations); the AGENT_RUNTIME=langgraph pass without
-// the outer dial never does.
+// The native pass never touches the outer-plan graph; the LangGraph pass
+// schedules every outer plan on it, with the validated plan's step ids.
 const assertScheduledOnLangGraph = (passes, { minimumInvocations = 1 } = {}) => {
-  const { langgraph, native } = passes;
+  const { langgraph } = passes;
 
-  assert.deepStrictEqual(native.invocations, []);
   assertOuterPlanFollowsItsOwnDial(passes);
   assert.ok(
     langgraph.invocations.length >= minimumInvocations,
@@ -367,11 +348,12 @@ const runTrajectoryCase = async (createCase) => {
 // one proves about the outer plan on LangGraph. `planned: false` marks a case
 // whose request never reaches the plan (a pre-execution clarification, an
 // import approval asked before execution, a goal driven through tasks): it
-// must make no LangGraph invocation on either runtime. `customSkillGraph:
+// must make no plan-graph invocation on either pass. `customSkillGraph:
 // true` marks a case whose custom-Skill stage runs a guarded DAG, which both
-// AGENT_RUNTIME=langgraph passes must schedule on LangGraph (the same
-// invocations, assertOuterPlanFollowsItsOwnDial); every other case makes no
-// executor invocation.
+// passes must schedule on LangGraph (the same invocations,
+// assertOuterPlanFollowsItsOwnDial) and whose outcome, agent events and runs
+// must equal what the removed native scheduler produced (its golden); every
+// other case makes no executor invocation.
 const TRAJECTORY_CASES = [
   ["document_follow_up_retrieval", createFollowUpCase, "document QA with a follow-up retrieval"],
   [
@@ -447,13 +429,18 @@ for (const [
     if (planned) {
       assertScheduledOnLangGraph(passes);
     } else {
-      assert.deepStrictEqual(native.invocations, []);
       assert.deepStrictEqual(passes.langgraph.invocations, []);
       assertOuterPlanFollowsItsOwnDial(passes);
-      assert.deepStrictEqual(passes.outerOnly.invocations, []);
     }
 
     if (customSkillGraph) {
+      // The production pass (the other one equals it, above) against what
+      // the native scheduler did before phase 6.
+      assertMatchesGraphGolden("langgraph-execution-plan-graph", caseId, {
+        events: maskVolatile(native.events),
+        outcome: maskVolatile(native.outcome),
+        runs: maskVolatile(native.runs.map(projectAgentRun)),
+      });
       assert.ok(
         passes.langgraph.graphInvocations.length > 0,
         "the custom-Skill DAG was scheduled on LangGraph"
@@ -602,7 +589,7 @@ test("an abstention falls through to the Web stage identically: without a standi
   assertPassesIdentical(withoutApproval);
   assertScheduledOnLangGraph(withoutApproval);
 
-  const webCalls = { langgraph: 0, native: 0, outerNative: 0, outerOnly: 0 };
+  const webCalls = { langgraph: 0, native: 0 };
   const withApproval = await runDirectScenario(({ agentRunService }) =>
     askAgent({
       agentRunService,
@@ -630,7 +617,7 @@ test("an abstention falls through to the Web stage identically: without a standi
     ),
     "the Web step ran"
   );
-  assert.deepStrictEqual(webCalls, { langgraph: 1, native: 1, outerNative: 1, outerOnly: 1 });
+  assert.deepStrictEqual(webCalls, { langgraph: 1, native: 1 });
   assertPassesIdentical(withApproval);
   assertScheduledOnLangGraph(withApproval);
 });
@@ -952,12 +939,11 @@ test("a cancellation before a stage the LangGraph plan does not schedule ends th
 
 // The one deliberate difference: LangGraph refuses to run with a LangSmith
 // tracer switched on, before the graph is built; the run is failed with the
-// guard's code. The native loop has no tracer to refuse, and neither has
-// AGENT_RUNTIME=langgraph without the outer dial on a request that builds no
-// LangGraph graph (a document question): the outer plan runs on the native
-// loop, and the refusal stays with the graphs that are still built on
-// LangGraph (the custom-Skill stage and the v3 entry refuse on their own
-// path, test/langgraph-execution-graph-runtime.test.mjs and
+// guard's code. The outer plan on the native loop has no tracer to refuse on
+// a request that builds no LangGraph graph (a document question): the
+// refusal stays with the graphs that are built on LangGraph (the custom-Skill
+// stage and the v3 entry refuse on their own path,
+// test/langgraph-execution-graph-runtime.test.mjs and
 // test/langgraph-unified-graph.test.mjs).
 test("a LangSmith tracing variable refuses the LangGraph plan before any stage runs, and the run is failed with the guard's code", async () => {
   const passes = await withEnv({ LANGSMITH_TRACING: "true" }, () =>
@@ -966,17 +952,12 @@ test("a LangSmith tracing variable refuses the LangGraph plan before any stage r
     )
   );
 
+  // The outer plan on the native loop: nothing to refuse, the native answer
+  // and run, and no graph built.
   assert.equal(passes.native.outcome.error, null);
   assert.equal(passes.native.outcome.response.status, 200);
-  // The outer plan on the native loop under AGENT_RUNTIME=langgraph: nothing
-  // to refuse, the native answer and run.
-  assert.equal(passes.outerNative.outcome.error, null);
-  assert.deepStrictEqual(
-    maskVolatile(passes.outerNative.outcome),
-    maskVolatile(passes.native.outcome)
-  );
-  assert.deepStrictEqual(passes.outerNative.invocations, []);
-  assert.deepStrictEqual(passes.outerNative.graphInvocations, []);
+  assert.deepStrictEqual(passes.native.invocations, []);
+  assert.deepStrictEqual(passes.native.graphInvocations, []);
 
   assert.equal(passes.langgraph.outcome.error?.code, LANGSMITH_TRACING_ENABLED_CODE);
   assert.equal(passes.langgraph.outcome.response, null);
@@ -988,22 +969,16 @@ test("a LangSmith tracing variable refuses the LangGraph plan before any stage r
   assert.deepStrictEqual(passes.langgraph.invocations.map((entry) => entry.stepIds), [
     DETERMINISTIC_STEP_IDS,
   ]);
-  // The refusal follows the outer dial, not AGENT_RUNTIME: the outer dial
-  // alone refuses exactly as both dials do.
-  assert.deepStrictEqual(
-    maskVolatile(passes.outerOnly.outcome),
-    maskVolatile(passes.langgraph.outcome)
-  );
-  assert.deepStrictEqual(passes.outerOnly.invocations, passes.langgraph.invocations);
-  assert.deepStrictEqual(passes.outerOnly.graphInvocations, []);
+  assert.deepStrictEqual(passes.langgraph.graphInvocations, []);
 });
 
 // --- The dial -------------------------------------------------------------
 
 // The phase-3 load test put the outer plan behind a dial of its own
-// (config.js): AGENT_RUNTIME, whatever its value, never moves the outer plan
-// onto LangGraph; only AGENT_OUTER_PLAN_RUNTIME=langgraph does, and anything
-// else (unset, empty, whitespace, a typo) is native.
+// (config.js): only AGENT_OUTER_PLAN_RUNTIME=langgraph moves the outer plan
+// onto LangGraph, and anything else (unset, empty, whitespace, a typo) is
+// native. AGENT_RUNTIME, which since phase 6 accepts only unset or
+// `langgraph`, never moves it.
 test("AGENT_OUTER_PLAN_RUNTIME alone selects the outer plan's scheduler: it defaults to native, only `langgraph` selects the graph, and AGENT_RUNTIME never does", async () => {
   for (const [value, expected] of [
     [undefined, "native"],
@@ -1015,18 +990,11 @@ test("AGENT_OUTER_PLAN_RUNTIME alone selects the outer plan's scheduler: it defa
     [" LangGraph ", "langgraph"],
     ["pregel", "native"],
   ]) {
-    // AGENT_RUNTIME unset is `langgraph` since phase 4: the new default
-    // moves the outer plan no more than an explicit value does.
-    for (const [runtime, resolvedRuntime] of [
-      ["native", "native"],
-      ["langgraph", "langgraph"],
-      [undefined, "langgraph"],
-    ]) {
+    for (const runtime of [undefined, "langgraph"]) {
       await withEnv({ AGENT_OUTER_PLAN_RUNTIME: value, AGENT_RUNTIME: runtime }, async () => {
         const label = `AGENT_OUTER_PLAN_RUNTIME=${JSON.stringify(value)} AGENT_RUNTIME=${runtime}`;
 
         assert.equal(getAgentOuterPlanRuntime(), expected, label);
-        assert.equal(getAgentRuntime(), resolvedRuntime, label);
         // The runner agent.js resolves with no argument follows the outer
         // dial only.
         assert.equal(
@@ -1147,24 +1115,22 @@ test("runAgentExecutionPlanOnLangGraph rethrows the original stage error by iden
   const webSkill = { budgetKey: "webSearchCalls", id: "web_search", kind: "built_in" };
 
   await assert.rejects(
-    withEnv({ AGENT_RUNTIME: "langgraph" }, () =>
-      runAgentExecutionPlanOnLangGraph({
-        accessScope: ACCESS_SCOPE,
-        // A planned Web Skill makes the Web stage run; it then fails on its
-        // first call into the budget, which this call does not provide.
-        budgetState: null,
-        executionPlan: PLAN,
-        getSelectedSkill: (skillId) => (skillId === webSkill.id ? webSkill : null),
-        ragService: { chat: async () => ({ abstained: false, citations: [], text: "" }) },
-        registry: {
-          get: (skillId) => (skillId === webSkill.id ? webSkill : null),
-        },
-        selectedSkills: [webSkill],
-        webChatService: async () => {
-          throw thrown;
-        },
-      })
-    ),
+    runAgentExecutionPlanOnLangGraph({
+      accessScope: ACCESS_SCOPE,
+      // A planned Web Skill makes the Web stage run; it then fails on its
+      // first call into the budget, which this call does not provide.
+      budgetState: null,
+      executionPlan: PLAN,
+      getSelectedSkill: (skillId) => (skillId === webSkill.id ? webSkill : null),
+      ragService: { chat: async () => ({ abstained: false, citations: [], text: "" }) },
+      registry: {
+        get: (skillId) => (skillId === webSkill.id ? webSkill : null),
+      },
+      selectedSkills: [webSkill],
+      webChatService: async () => {
+        throw thrown;
+      },
+    }),
     (error) => {
       assert.notEqual(error?.code, LANGGRAPH_EXECUTION_PLAN_ERROR_CODES.stageStopped);
       assert.ok(error instanceof Error);

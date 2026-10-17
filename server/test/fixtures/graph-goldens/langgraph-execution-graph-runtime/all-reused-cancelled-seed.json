@@ -1,0 +1,182 @@
+{
+  "errors": [],
+  "graphVersion": "v1",
+  "nodeRuns": [
+    {
+      "citationCount": 1,
+      "dependsOn": [],
+      "effects": "read_only",
+      "idempotency": "read_only_rag",
+      "nodeId": "compare",
+      "parallelSafe": true,
+      "reason": null,
+      "result": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "durationMs": "<duration>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "compare_documents answered."
+        },
+        "label": "compare_documents",
+        "ok": true,
+        "skillId": "compare_documents",
+        "skillVersion": "1.0.0",
+        "text": "compare_documents answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "compare_documents answered."
+        }
+      },
+      "skillId": "compare_documents",
+      "skillVersion": "1.0.0",
+      "status": "completed",
+      "stepId": "custom_skill:compare"
+    },
+    {
+      "citationCount": 1,
+      "dependsOn": [
+        "compare"
+      ],
+      "effects": "read_only",
+      "idempotency": "read_only_rag",
+      "nodeId": "risk",
+      "parallelSafe": true,
+      "reason": null,
+      "result": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "durationMs": "<duration>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "risk_review answered."
+        },
+        "label": "risk_review",
+        "ok": true,
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "text": "risk_review answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "risk_review answered."
+        }
+      },
+      "skillId": "risk_review",
+      "skillVersion": "1.0.0",
+      "status": "completed",
+      "stepId": "custom_skill:risk"
+    }
+  ],
+  "ok": true,
+  "results": [
+    {
+      "abstained": false,
+      "citations": [
+        {
+          "docId": "doc-1",
+          "page": 1
+        }
+      ],
+      "durationMs": "<duration>",
+      "graphOutput": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "text": "compare_documents answered."
+      },
+      "label": "compare_documents",
+      "ok": true,
+      "skillId": "compare_documents",
+      "skillVersion": "1.0.0",
+      "text": "compare_documents answered.",
+      "traceDetail": null,
+      "value": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "text": "compare_documents answered."
+      }
+    },
+    {
+      "abstained": false,
+      "citations": [
+        {
+          "docId": "doc-1",
+          "page": 1
+        }
+      ],
+      "durationMs": "<duration>",
+      "graphOutput": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "text": "risk_review answered."
+      },
+      "label": "risk_review",
+      "ok": true,
+      "skillId": "risk_review",
+      "skillVersion": "1.0.0",
+      "text": "risk_review answered.",
+      "traceDetail": null,
+      "value": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "text": "risk_review answered."
+      }
+    }
+  ],
+  "status": "completed"
+}

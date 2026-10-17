@@ -1,5 +1,6 @@
-// The native scheduler's launch queue (agent-execution-graph-runner.js), for
-// a scheduler that does not choose when a node starts.
+// A launch queue for a scheduler that does not choose when a node starts:
+// the rules of the native scheduler's launch queue, which lived in
+// agent-execution-graph-runner.js until ADR 0001 phase 6 deleted it.
 //
 // LangGraph starts every task of a superstep at once (pregel/runner.js
 // _executeTasksWithRetry), and its own maxConcurrency must not be used to cap
@@ -7,16 +8,17 @@
 // ends after its first task; above 1, once a task throws, the tasks not yet
 // started are committed as __no_writes__ and never run on resume). So
 // LangGraph is told every node may start, and each node asks this gate before
-// it does anything a native scheduling pass does.
+// it does anything a native scheduling pass did.
 //
-// The rules are the native pass's: at most `cap` nodes in flight; a node that
+// The rules are the deleted native pass's, kept exactly (the native goldens
+// pin them): at most `cap` nodes in flight; a node that
 // is not parallelSafe starts only when nothing else runs, and nothing starts
 // -- or is even decided -- beside it; and the queue is first come, first
 // served, so a node that cannot start blocks the ones behind it rather than
 // being overtaken. A node the pass would only skip takes a turn (awaitTurn)
 // instead of a slot: it needs no capacity, but it is decided where the pass
 // would reach it, after every node ahead of it started, and synchronously
-// with those starts, as the native pass decides in one synchronous scan.
+// with those starts, as the native pass decided in one synchronous scan.
 //
 // "First come" is the native queue's order, the validator's layer order
 // (orderExecutionGraphNodeStatesByLayer in agent-execution-graph-node.js):
@@ -45,9 +47,9 @@ export const createExecutionGraphConcurrencyGate = (cap) => {
 
   const pump = () => {
     while (queue.length > 0) {
-      // The native pass that launched an exclusive node stops there, and the
-      // next pass runs only once that node has finished: nothing behind it is
-      // started or decided meanwhile.
+      // As the native pass that launched an exclusive node stopped there, and
+      // the next pass ran only once that node had finished: nothing behind
+      // it is started or decided meanwhile.
       if (exclusiveActive) {
         return;
       }

@@ -1,0 +1,1242 @@
+{
+  "budget": {
+    "limits": {
+      "maxArxivPaperFetches": 1,
+      "maxCustomSkillCalls": 8,
+      "maxDocumentRagCalls": 2,
+      "maxResearchQuestions": 3,
+      "maxTraceSteps": 16,
+      "maxWebSearchCalls": 1
+    },
+    "traceTruncated": false,
+    "used": {
+      "arxivPaperFetches": 0,
+      "customSkillCalls": 4,
+      "documentRagCalls": 0,
+      "researchQuestions": 0,
+      "traceSteps": 0,
+      "webSearchCalls": 0
+    }
+  },
+  "budgetLimits": [],
+  "checkpoint": null,
+  "events": [
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:1",
+      "payload": {
+        "status": "running"
+      },
+      "type": "run_created"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:2",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:y"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:3",
+      "payload": {
+        "status": "completed",
+        "stepId": "custom_skill:y"
+      },
+      "type": "step_completed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:4",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:x"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:5",
+      "payload": {
+        "status": "failed",
+        "stepId": "custom_skill:x"
+      },
+      "type": "step_failed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:6",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:a"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:7",
+      "payload": {
+        "status": "completed",
+        "stepId": "custom_skill:a"
+      },
+      "type": "step_completed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:8",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:b"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:9",
+      "payload": {
+        "status": "completed",
+        "stepId": "custom_skill:b"
+      },
+      "type": "step_completed"
+    }
+  ],
+  "journal": [
+    {
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "event": "start",
+      "priorFindings": null,
+      "question": "Compare these contracts and flag the risks.",
+      "skillId": "risk_review"
+    },
+    {
+      "event": "end",
+      "skillId": "risk_review"
+    },
+    {
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "event": "start",
+      "priorFindings": null,
+      "question": "Compare these contracts and flag the risks.",
+      "skillId": "extract_timeline"
+    },
+    {
+      "event": "end",
+      "skillId": "extract_timeline"
+    },
+    {
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "event": "start",
+      "priorFindings": null,
+      "question": "Compare these contracts and flag the risks.",
+      "skillId": "compare_documents"
+    },
+    {
+      "event": "end",
+      "skillId": "compare_documents"
+    },
+    {
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "event": "start",
+      "priorFindings": null,
+      "question": "Compare these contracts and flag the risks.",
+      "skillId": "summarize_contract"
+    },
+    {
+      "event": "end",
+      "skillId": "summarize_contract"
+    }
+  ],
+  "outcome": {
+    "result": {
+      "errors": [],
+      "graphVersion": "v1",
+      "nodeRuns": [
+        {
+          "citationCount": 1,
+          "dependsOn": [],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "y",
+          "parallelSafe": true,
+          "reason": null,
+          "result": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "durationMs": "<duration>",
+            "graphOutput": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "risk_review answered."
+            },
+            "label": "risk_review",
+            "ok": true,
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "text": "risk_review answered.",
+            "traceDetail": null,
+            "value": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "risk_review answered."
+            }
+          },
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "status": "completed",
+          "stepId": "custom_skill:y"
+        },
+        {
+          "citationCount": 0,
+          "dependsOn": [],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "x",
+          "parallelSafe": true,
+          "reason": null,
+          "result": {
+            "abstained": false,
+            "citations": [],
+            "durationMs": "<duration>",
+            "error": {
+              "message": "timeline failed",
+              "name": "Error"
+            },
+            "label": "extract_timeline",
+            "ok": false,
+            "skillId": "extract_timeline",
+            "skillVersion": "1.0.0",
+            "text": "",
+            "traceDetail": null,
+            "value": null
+          },
+          "skillId": "extract_timeline",
+          "skillVersion": "1.0.0",
+          "status": "failed",
+          "stepId": "custom_skill:x"
+        },
+        {
+          "citationCount": 1,
+          "dependsOn": [
+            "y"
+          ],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "a",
+          "parallelSafe": true,
+          "reason": null,
+          "result": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "durationMs": "<duration>",
+            "graphOutput": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "compare_documents answered."
+            },
+            "label": "compare_documents",
+            "ok": true,
+            "skillId": "compare_documents",
+            "skillVersion": "1.0.0",
+            "text": "compare_documents answered.",
+            "traceDetail": null,
+            "value": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "compare_documents answered."
+            }
+          },
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0",
+          "status": "completed",
+          "stepId": "custom_skill:a"
+        },
+        {
+          "citationCount": 1,
+          "dependsOn": [
+            "y"
+          ],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "b",
+          "parallelSafe": true,
+          "reason": null,
+          "result": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "durationMs": "<duration>",
+            "graphOutput": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "summarize_contract answered."
+            },
+            "label": "summarize_contract",
+            "ok": true,
+            "skillId": "summarize_contract",
+            "skillVersion": "1.0.0",
+            "text": "summarize_contract answered.",
+            "traceDetail": null,
+            "value": {
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "page": 1
+                }
+              ],
+              "text": "summarize_contract answered."
+            }
+          },
+          "skillId": "summarize_contract",
+          "skillVersion": "1.0.0",
+          "status": "completed",
+          "stepId": "custom_skill:b"
+        },
+        {
+          "citationCount": 0,
+          "dependsOn": [
+            "x"
+          ],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "c",
+          "parallelSafe": true,
+          "reason": "dependency_failed",
+          "result": null,
+          "skillId": "timeline_review",
+          "skillVersion": "1.0.0",
+          "status": "skipped",
+          "stepId": "custom_skill:c"
+        }
+      ],
+      "ok": false,
+      "results": [
+        {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "durationMs": "<duration>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "risk_review answered."
+          },
+          "label": "risk_review",
+          "ok": true,
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "text": "risk_review answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "risk_review answered."
+          }
+        },
+        {
+          "abstained": false,
+          "citations": [],
+          "durationMs": "<duration>",
+          "error": {
+            "message": "timeline failed",
+            "name": "Error"
+          },
+          "label": "extract_timeline",
+          "ok": false,
+          "skillId": "extract_timeline",
+          "skillVersion": "1.0.0",
+          "text": "",
+          "traceDetail": null,
+          "value": null
+        },
+        {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "durationMs": "<duration>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "compare_documents answered."
+          },
+          "label": "compare_documents",
+          "ok": true,
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0",
+          "text": "compare_documents answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "compare_documents answered."
+          }
+        },
+        {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "durationMs": "<duration>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "summarize_contract answered."
+          },
+          "label": "summarize_contract",
+          "ok": true,
+          "skillId": "summarize_contract",
+          "skillVersion": "1.0.0",
+          "text": "summarize_contract answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-1",
+                "page": 1
+              }
+            ],
+            "text": "summarize_contract answered."
+          }
+        }
+      ],
+      "status": "partial"
+    }
+  },
+  "runError": null,
+  "runStatus": "running",
+  "settled": [
+    {
+      "citationCount": 1,
+      "dependsOn": [],
+      "effects": "read_only",
+      "idempotency": "read_only_rag",
+      "nodeId": "y",
+      "parallelSafe": true,
+      "reason": null,
+      "result": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "durationMs": "<duration>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "risk_review answered."
+        },
+        "label": "risk_review",
+        "ok": true,
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "text": "risk_review answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "risk_review answered."
+        }
+      },
+      "skillId": "risk_review",
+      "skillVersion": "1.0.0",
+      "status": "completed",
+      "stepId": "custom_skill:y"
+    },
+    {
+      "citationCount": 0,
+      "dependsOn": [],
+      "effects": "read_only",
+      "idempotency": "read_only_rag",
+      "nodeId": "x",
+      "parallelSafe": true,
+      "reason": null,
+      "result": {
+        "abstained": false,
+        "citations": [],
+        "durationMs": "<duration>",
+        "error": {
+          "message": "timeline failed",
+          "name": "Error"
+        },
+        "label": "extract_timeline",
+        "ok": false,
+        "skillId": "extract_timeline",
+        "skillVersion": "1.0.0",
+        "text": "",
+        "traceDetail": null,
+        "value": null
+      },
+      "skillId": "extract_timeline",
+      "skillVersion": "1.0.0",
+      "status": "failed",
+      "stepId": "custom_skill:x"
+    },
+    {
+      "citationCount": 1,
+      "dependsOn": [
+        "y"
+      ],
+      "effects": "read_only",
+      "idempotency": "read_only_rag",
+      "nodeId": "a",
+      "parallelSafe": true,
+      "reason": null,
+      "result": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "durationMs": "<duration>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "compare_documents answered."
+        },
+        "label": "compare_documents",
+        "ok": true,
+        "skillId": "compare_documents",
+        "skillVersion": "1.0.0",
+        "text": "compare_documents answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "compare_documents answered."
+        }
+      },
+      "skillId": "compare_documents",
+      "skillVersion": "1.0.0",
+      "status": "completed",
+      "stepId": "custom_skill:a"
+    },
+    {
+      "citationCount": 1,
+      "dependsOn": [
+        "y"
+      ],
+      "effects": "read_only",
+      "idempotency": "read_only_rag",
+      "nodeId": "b",
+      "parallelSafe": true,
+      "reason": null,
+      "result": {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-1",
+            "page": 1
+          }
+        ],
+        "durationMs": "<duration>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "summarize_contract answered."
+        },
+        "label": "summarize_contract",
+        "ok": true,
+        "skillId": "summarize_contract",
+        "skillVersion": "1.0.0",
+        "text": "summarize_contract answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-1",
+              "page": 1
+            }
+          ],
+          "text": "summarize_contract answered."
+        }
+      },
+      "skillId": "summarize_contract",
+      "skillVersion": "1.0.0",
+      "status": "completed",
+      "stepId": "custom_skill:b"
+    }
+  ],
+  "skillRuns": [
+    {
+      "abstained": false,
+      "budget": {
+        "key": "customSkillCalls",
+        "label": "custom skill",
+        "limit": 8,
+        "ok": true,
+        "reason": null,
+        "remaining": 7,
+        "used": 1
+      },
+      "budgetDelta": {},
+      "citationCount": 1,
+      "durationMs": "<duration>",
+      "error": null,
+      "label": "risk_review",
+      "phase": "primary",
+      "skillId": "risk_review",
+      "skillVersion": "1.0.0",
+      "status": "completed"
+    },
+    {
+      "abstained": false,
+      "budget": {
+        "key": "customSkillCalls",
+        "label": "custom skill",
+        "limit": 8,
+        "ok": true,
+        "reason": null,
+        "remaining": 6,
+        "used": 2
+      },
+      "budgetDelta": {},
+      "citationCount": 0,
+      "durationMs": "<duration>",
+      "error": "timeline failed",
+      "label": "extract_timeline",
+      "phase": "primary",
+      "skillId": "extract_timeline",
+      "skillVersion": "1.0.0",
+      "status": "failed"
+    },
+    {
+      "abstained": false,
+      "budget": {
+        "key": "customSkillCalls",
+        "label": "custom skill",
+        "limit": 8,
+        "ok": true,
+        "reason": null,
+        "remaining": 5,
+        "used": 3
+      },
+      "budgetDelta": {},
+      "citationCount": 1,
+      "durationMs": "<duration>",
+      "error": null,
+      "label": "compare_documents",
+      "phase": "primary",
+      "skillId": "compare_documents",
+      "skillVersion": "1.0.0",
+      "status": "completed"
+    },
+    {
+      "abstained": false,
+      "budget": null,
+      "budgetDelta": {},
+      "citationCount": 0,
+      "durationMs": "<duration>",
+      "error": "Node c skipped: dependency_failed.",
+      "label": "timeline_review",
+      "phase": "primary",
+      "skillId": "timeline_review",
+      "skillVersion": "1.0.0",
+      "status": "skipped"
+    },
+    {
+      "abstained": false,
+      "budget": {
+        "key": "customSkillCalls",
+        "label": "custom skill",
+        "limit": 8,
+        "ok": true,
+        "reason": null,
+        "remaining": 4,
+        "used": 4
+      },
+      "budgetDelta": {},
+      "citationCount": 1,
+      "durationMs": "<duration>",
+      "error": null,
+      "label": "summarize_contract",
+      "phase": "primary",
+      "skillId": "summarize_contract",
+      "skillVersion": "1.0.0",
+      "status": "completed"
+    }
+  ],
+  "steps": [
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": null,
+      "error": null,
+      "id": "custom_skill:y",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "y",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "kind": "tool_call",
+      "label": "risk_review",
+      "output": {
+        "abstained": false,
+        "citationCount": 1,
+        "text": "risk_review answered.",
+        "typedOutputDigest": "v1:sha256:82d370bac4ec596aacebc61e0164353665e37639be405202cf027b2656a7149a"
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "completed",
+      "summary": "",
+      "traceStepId": "",
+      "type": "custom_skill",
+      "updatedAt": "<time>"
+    },
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": null,
+      "error": {
+        "message": "timeline failed",
+        "name": "Error"
+      },
+      "id": "custom_skill:x",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "x",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "extract_timeline",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "kind": "tool_call",
+      "label": "extract_timeline",
+      "output": null,
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "failed",
+      "summary": "",
+      "traceStepId": "",
+      "type": "custom_skill",
+      "updatedAt": "<time>"
+    },
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": null,
+      "error": null,
+      "id": "custom_skill:a",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "a",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "compare_documents",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "kind": "tool_call",
+      "label": "compare_documents",
+      "output": {
+        "abstained": false,
+        "citationCount": 1,
+        "text": "compare_documents answered.",
+        "typedOutputDigest": "v1:sha256:3c035976ef971248599af96117220f74e43947b8d157856425f881e75bb8c405"
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "completed",
+      "summary": "",
+      "traceStepId": "",
+      "type": "custom_skill",
+      "updatedAt": "<time>"
+    },
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": null,
+      "error": null,
+      "id": "custom_skill:b",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "b",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "summarize_contract",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "kind": "tool_call",
+      "label": "summarize_contract",
+      "output": {
+        "abstained": false,
+        "citationCount": 1,
+        "text": "summarize_contract answered.",
+        "typedOutputDigest": "v1:sha256:f674f4f94e51ede1f0c0327ddf57bb4589287edf07ce213486ff173fce094746"
+      },
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "completed",
+      "summary": "",
+      "traceStepId": "",
+      "type": "custom_skill",
+      "updatedAt": "<time>"
+    }
+  ],
+  "trace": [
+    {
+      "detail": {
+        "dependsOn": [],
+        "durationMs": "<duration>",
+        "graphVersion": "v1",
+        "nodeId": "y",
+        "rationale": "Run y.",
+        "skillId": "risk_review",
+        "skillKind": "custom",
+        "skillVersion": "1.0.0"
+      },
+      "error": null,
+      "id": "custom_skill:y",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "y",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "label": "risk_review",
+      "output": {
+        "abstained": false,
+        "citationCount": 1,
+        "text": "risk_review answered.",
+        "typedOutputDigest": "v1:sha256:82d370bac4ec596aacebc61e0164353665e37639be405202cf027b2656a7149a"
+      },
+      "status": "completed",
+      "summary": "risk_review completed with 1 citation.",
+      "type": "custom_skill"
+    },
+    {
+      "detail": {
+        "dependsOn": [],
+        "durationMs": "<duration>",
+        "graphVersion": "v1",
+        "nodeId": "x",
+        "rationale": "Run x.",
+        "skillId": "extract_timeline",
+        "skillKind": "custom",
+        "skillVersion": "1.0.0"
+      },
+      "error": {
+        "message": "timeline failed",
+        "name": "Error"
+      },
+      "id": "custom_skill:x",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "x",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "extract_timeline",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "label": "extract_timeline",
+      "output": null,
+      "status": "failed",
+      "summary": "extract_timeline failed: timeline failed",
+      "type": "custom_skill"
+    },
+    {
+      "detail": {
+        "dependsOn": [
+          "y"
+        ],
+        "durationMs": "<duration>",
+        "graphVersion": "v1",
+        "nodeId": "a",
+        "rationale": "Run a.",
+        "skillId": "compare_documents",
+        "skillKind": "custom",
+        "skillVersion": "1.0.0"
+      },
+      "error": null,
+      "id": "custom_skill:a",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "a",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "compare_documents",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "label": "compare_documents",
+      "output": {
+        "abstained": false,
+        "citationCount": 1,
+        "text": "compare_documents answered.",
+        "typedOutputDigest": "v1:sha256:3c035976ef971248599af96117220f74e43947b8d157856425f881e75bb8c405"
+      },
+      "status": "completed",
+      "summary": "compare_documents completed with 1 citation.",
+      "type": "custom_skill"
+    },
+    {
+      "detail": {
+        "dependsOn": [
+          "y"
+        ],
+        "durationMs": "<duration>",
+        "graphVersion": "v1",
+        "nodeId": "b",
+        "rationale": "Run b.",
+        "skillId": "summarize_contract",
+        "skillKind": "custom",
+        "skillVersion": "1.0.0"
+      },
+      "error": null,
+      "id": "custom_skill:b",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "b",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "summarize_contract",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "label": "summarize_contract",
+      "output": {
+        "abstained": false,
+        "citationCount": 1,
+        "text": "summarize_contract answered.",
+        "typedOutputDigest": "v1:sha256:f674f4f94e51ede1f0c0327ddf57bb4589287edf07ce213486ff173fce094746"
+      },
+      "status": "completed",
+      "summary": "summarize_contract completed with 1 citation.",
+      "type": "custom_skill"
+    }
+  ]
+}

@@ -166,13 +166,12 @@ export const createChatRouter = (services) => {
         // (rag/langgraph/agent-stream.js), which bridges the sink into the
         // outer plan graph's custom stream and refuses a LangSmith tracer
         // before the run exists; its modules are loaded only on this dial.
-        // It follows the outer plan's dial, not AGENT_RUNTIME: the relay only
-        // matters to a graph that streams "custom" chunks, which only the
-        // outer plan graph does. The custom-Skill DAG and the v3 graph that
-        // AGENT_RUNTIME=langgraph puts on LangGraph are invoked without the
-        // relay, so their nodes emit to the sink the native branch below binds
-        // around the run (agent-event-stream.js), and their own entries
-        // refuse LangSmith.
+        // It follows the outer plan's dial only: the relay only matters to a
+        // graph that streams "custom" chunks, which only the outer plan graph
+        // does. The custom-Skill DAG and the v3 graph, always on LangGraph
+        // since phase 6, are invoked without the relay, so their nodes emit
+        // to the sink the native branch below binds around the run
+        // (agent-event-stream.js), and their own entries refuse LangSmith.
         const { streamAgentRun, toAgentStreamFrame } = await import(
           "../rag/langgraph/agent-stream.js"
         );

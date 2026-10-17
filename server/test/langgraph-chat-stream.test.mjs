@@ -11,24 +11,26 @@ import test from "node:test";
 // (rag/langgraph/agent-stream.js, routes/chat.js; behind the experimental
 // AGENT_OUTER_PLAN_RUNTIME=langgraph since the phase-3 load test, config.js
 // says why): the real app (createApp over the local store, an in-memory run
-// store and a stand-in model) answers the same request natively, with the
-// outer plan on LangGraph, and under AGENT_RUNTIME=langgraph with the outer
-// dial unset (the production setting: the native route and loop), and the SSE
-// bytes must be identical after masking -- every trace_step and answer_draft
-// event in order, the result event (which equals the /chat answer), then
-// done. Answer drafts carry only sentences the finalizer's claim check
-// supports; a deadline ends the stream with the same error/done frames; a
-// client that leaves cancels the run to the same terminal record; with the
-// outer plan on LangGraph a LangSmith tracer switched on is refused as an
-// error/done sequence before the run starts, and AGENT_RUNTIME=langgraph
-// alone, which builds no graph for a document question, answers it natively.
+// store and a stand-in model) answers the same request with the outer dial
+// unset (the production setting: the native route branch and loop) and with
+// the outer plan on LangGraph, and the SSE bytes must be identical after
+// masking -- every trace_step and answer_draft event in order, the result
+// event (which equals the /chat answer), then done. Answer drafts carry only
+// sentences the finalizer's claim check supports; a deadline ends the stream
+// with the same error/done frames; a client that leaves cancels the run to
+// the same terminal record; with the outer plan on LangGraph a LangSmith
+// tracer switched on is refused as an error/done sequence before the run
+// starts, while the native branch, which builds no graph for a document
+// question, answers it. (Until ADR 0001 phase 6 a third pass ran everything
+// under AGENT_RUNTIME=native; a document question builds no graph, so that
+// pass ran exactly the code of the native pass here.)
 //
 // The runner's on-demand import of the plan graph is redirected to a tap, so
 // the suite also proves the outer-dial pass scheduled the outer plan on
-// LangGraph and the AGENT_RUNTIME=langgraph pass did not (a stream identical
-// because every pass ran natively would prove nothing); the route's import of
-// the stream relay is tapped too, so each pass also shows which branch of the
-// route answered.
+// LangGraph and the native pass did not (a stream identical because both
+// passes ran natively would prove nothing); the route's import of the stream
+// relay is tapped too, so each pass also shows which branch of the route
+// answered.
 const PLAN_GRAPH_TAP_URL = new URL(
   "./langgraph-execution-plan-graph/plan-graph-tap.mjs",
   import.meta.url
@@ -90,14 +92,12 @@ const { completeText, configureOpenAIProvider, resetOpenAIProvider } = await imp
 const { describeAgentRouteError } = await import("../routes/chat.js");
 const { getRequestSignal } = await import("../rag/request-deadline.js");
 
-// The three passes, by the two dials they pin: everything native; the outer
-// plan (and with it the stream relay) on LangGraph, with AGENT_RUNTIME=
-// langgraph as well; and AGENT_RUNTIME=langgraph alone, which keeps the outer
-// plan on the native loop and the route on its native branch.
+// The two passes, by the outer plan's dial they pin: unset, which keeps the
+// outer plan on the native loop and the route on its native branch; and the
+// outer plan (and with it the stream relay) on LangGraph.
 const PASSES = Object.freeze({
-  native: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined, AGENT_RUNTIME: "native" }),
-  langgraph: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph", AGENT_RUNTIME: "langgraph" }),
-  outerNative: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined, AGENT_RUNTIME: "langgraph" }),
+  native: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined }),
+  langgraph: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph" }),
 });
 const PASS_NAMES = Object.freeze(Object.keys(PASSES));
 const QUESTION = "What are the renewal term and the monthly fee?";
@@ -374,31 +374,24 @@ const streamOnEveryPass = async (t, { env = {}, ragService, request = {} } = {})
 };
 
 // Only the outer dial moves the outer plan and the route's stream onto
-// LangGraph: the native pass and the AGENT_RUNTIME=langgraph pass without it
-// ran the native loop behind the route's native branch.
-const assertOuterPlanFollowsItsOwnDial = ({ langgraph, native, outerNative }) => {
+// LangGraph: the native pass ran the native loop behind the route's native
+// branch.
+const assertOuterPlanFollowsItsOwnDial = ({ langgraph, native }) => {
   assert.deepStrictEqual(native.invocations, []);
-  assert.deepStrictEqual(outerNative.invocations, []);
   assert.equal(langgraph.invocations.length, 1, "the outer-dial pass scheduled the outer plan");
-  assert.equal(native.relayCalls, 0);
-  assert.equal(outerNative.relayCalls, 0, "AGENT_RUNTIME=langgraph alone streams on the native branch");
+  assert.equal(native.relayCalls, 0, "the outer dial unset streams on the native branch");
   assert.equal(langgraph.relayCalls, 1, "the outer-dial pass streamed through the LangGraph relay");
 };
 
 const assertStreamsIdentical = (passes) => {
-  const { native } = passes;
+  const { langgraph, native } = passes;
 
   assert.equal(native.status, 200);
-
-  for (const pass of ["langgraph", "outerNative"]) {
-    const other = passes[pass];
-
-    assert.equal(other.status, 200, pass);
-    // The bytes on the wire, masked, and the frames they parse into.
-    assert.equal(maskVolatileText(other.text), maskVolatileText(native.text), pass);
-    assert.deepStrictEqual(maskVolatile(other.frames), maskVolatile(native.frames), pass);
-    assert.deepStrictEqual(maskVolatile(other.runs), maskVolatile(native.runs), pass);
-  }
+  assert.equal(langgraph.status, 200);
+  // The bytes on the wire, masked, and the frames they parse into.
+  assert.equal(maskVolatileText(langgraph.text), maskVolatileText(native.text));
+  assert.deepStrictEqual(maskVolatile(langgraph.frames), maskVolatile(native.frames));
+  assert.deepStrictEqual(maskVolatile(langgraph.runs), maskVolatile(native.runs));
 
   assertOuterPlanFollowsItsOwnDial(passes);
 };
@@ -432,9 +425,9 @@ test("a fully supported answer streams the same trace steps, drafts, result and 
     assert.ok(result.body.agentAnswer.includes(draft), draft);
   }
   // The result event is the /chat answer: the same request through /chat,
-  // with the outer plan on LangGraph and under AGENT_RUNTIME=langgraph alone,
-  // gives the same status and body.
-  for (const pass of ["langgraph", "outerNative"]) {
+  // with the outer plan on LangGraph and with the outer dial unset, gives the
+  // same status and body.
+  for (const pass of PASS_NAMES) {
     const monolith = await startMonolith(t, {
       env: PASSES[pass],
       ragService: createDraftingRagService(),
@@ -625,16 +618,15 @@ test("with AGENT_CANCEL_ON_DISCONNECT on, a client that leaves /chat/stream canc
   });
   assert.ok(records.native.run.steps.every((step) => step.status !== "running"));
   assert.deepStrictEqual(maskVolatile(records.langgraph.run), maskVolatile(records.native.run));
-  assert.deepStrictEqual(maskVolatile(records.outerNative.run), maskVolatile(records.native.run));
   assertOuterPlanFollowsItsOwnDial(records);
 });
 
-// The refusal belongs to the paths that still build a LangGraph graph: with
-// the outer plan on LangGraph the stream refuses before the run exists;
-// AGENT_RUNTIME=langgraph alone streams a document question on the native
-// branch and loop, which build no graph and have no tracer to refuse (a
-// custom-Skill DAG or a v3 graph on that request refuses at its own entry).
-test("a LangSmith tracing variable makes the LangGraph stream refuse with an error frame and done before the run starts; native and AGENT_RUNTIME=langgraph alone are unaffected", async (t) => {
+// The refusal belongs to the paths that build a LangGraph graph: with the
+// outer plan on LangGraph the stream refuses before the run exists; with the
+// outer dial unset a document question streams on the native branch and
+// loop, which build no graph and have no tracer to refuse (a custom-Skill DAG
+// or a v3 graph on that request refuses at its own entry).
+test("a LangSmith tracing variable makes the LangGraph stream refuse with an error frame and done before the run starts; the native branch is unaffected", async (t) => {
   installStreamingModel(t, () => SUPPORTED_SENTENCES.join("\n"));
 
   const monolith = await startMonolith(t, { ragService: createDraftingRagService() });
@@ -662,24 +654,16 @@ test("a LangSmith tracing variable makes the LangGraph stream refuse with an err
   assert.deepStrictEqual(await listRuns(monolith.agentRunService), []);
   assert.equal(refused.relayCalls, 1);
 
-  const native = await requestUnderTracer("native");
-
-  assert.deepStrictEqual(native.frames.map(({ event }) => event).slice(-2), ["result", "done"]);
-  assert.equal(native.frames.at(-2).data.status, 200);
-
   takePlanGraphInvocations();
 
-  const outerNative = await requestUnderTracer("outerNative");
+  const native = await requestUnderTracer("native");
 
-  assert.equal(outerNative.status, 200);
-  assert.equal(outerNative.relayCalls, 0);
+  assert.equal(native.status, 200);
+  assert.deepStrictEqual(native.frames.map(({ event }) => event).slice(-2), ["result", "done"]);
+  assert.equal(native.frames.at(-2).data.status, 200);
+  assert.equal(native.relayCalls, 0);
   assert.deepStrictEqual(takePlanGraphInvocations(), []);
-  assert.deepStrictEqual(
-    maskVolatile(outerNative.frames),
-    maskVolatile(native.frames),
-    "the native stream under AGENT_RUNTIME=langgraph alone"
-  );
-  assert.equal((await listRuns(monolith.agentRunService)).length, 2);
+  assert.equal((await listRuns(monolith.agentRunService)).length, 1);
 });
 
 // --- The generator and the bridge on their own ----------------------------

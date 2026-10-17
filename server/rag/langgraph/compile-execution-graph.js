@@ -29,10 +29,17 @@ import { buildApprovalInterruptPayload } from "./unified-graph-approval.js";
 // without dependencies, a join edge from a node's dependencies into it, and
 // every node no other node depends on into END.
 //
+// "Native" in this file (the native scheduler, natively, the native pass or
+// loop, what native would do) means the native graph scheduler that phase 6
+// of docs/adr/0001-langgraph-runtime.md deleted. LangGraph must keep doing
+// exactly what it did; the goldens frozen from it before the deletion
+// (test/fixtures/graph-goldens/) pin that, and the known superstep
+// differences are listed in run-execution-graph.js.
+//
 // LangGraph only decides when a node is entered. What it then does is the
-// native node code (agent-execution-graph-node.js) on the run's in-process
-// state: the skip decision, the budget, the fenced step lifecycle, the typed
-// output and the graph checkpoint write all happen exactly as under the
+// node code (agent-execution-graph-node.js) on the run's in-process state:
+// the skip decision, the budget, the fenced step lifecycle, the typed output
+// and the graph checkpoint write all happen exactly as they did under the
 // native scheduler. LangGraph's own state is one channel of receipts, keyed by
 // node (toExecutionGraphReceiptKey): { status, reason, outputDigest } -- ids,
 // codes and a digest, never a typed output, a question or an answer, because
@@ -43,7 +50,7 @@ import { buildApprovalInterruptPayload } from "./unified-graph-approval.js";
 // Every node returns its receipt, skipped ones included, so a join always fires
 // and every node of the graph is entered exactly once, in the superstep of its
 // topological layer, and in name order inside it, which is the layer-order
-// queue the native scheduler scans (orderExecutionGraphNodeStatesByLayer). The
+// queue the native scheduler scanned (orderExecutionGraphNodeStatesByLayer). The
 // one exception is a v3 node its approval preflight parked (phase 3): on a
 // checkpointed thread it calls interrupt() instead of returning, so LangGraph
 // stops after that superstep with the pause recorded in the thread, and the
@@ -55,9 +62,10 @@ import { buildApprovalInterruptPayload } from "./unified-graph-approval.js";
 // interrupt() returns on that re-run is never read: the decision comes from the
 // run store.
 //
-// The native scheduler pauses only once nothing else can run: after a node
-// parks it keeps launching every pending node that does not depend on it,
-// and the gate binds to the checkpoint those nodes settled into. An
+// The native scheduler paused only once nothing else could run: after a node
+// parked it kept launching every pending node that did not depend on it,
+// and the gate bound to the checkpoint those nodes settled into; LangGraph
+// keeps that pause state. An
 // interrupt() stops LangGraph after the parked node's superstep, so it is
 // called only when every pending node of a later layer depends on the parked
 // one (hasExecutionGraphWorkBeforePause); layers are static here, since every
@@ -70,9 +78,9 @@ import { buildApprovalInterruptPayload } from "./unified-graph-approval.js";
 //
 // Edges are resolved by the validator's node id (trimmed), as it resolved
 // them when it accepted the graph; the node code then looks dependencies up
-// by the id as written, exactly as the native scheduler does (a dependency
+// by the id as written, exactly as the native scheduler did (a dependency
 // written " a" for node "a" is accepted and never counts as settled there,
-// so the node stays pending on both runtimes).
+// so the node stays pending, as it did natively).
 
 export const LANGGRAPH_EXECUTION_GRAPH_ERROR_CODES = Object.freeze({
   // What LangGraph records for a node that stopped the graph (see below).
@@ -90,7 +98,7 @@ const NODE_NAME_PREFIX = "node_";
  * the prefix keeps the name off "__" and off "receipts". The zero-padded
  * index comes first because LangGraph enters a superstep's nodes in name
  * order (pregel/algo.js candidateNodes sorts them): with it, that order is
- * the queue order, the order the native scheduler scans in. Across
+ * the queue order, the order the native scheduler scanned in. Across
  * supersteps the queue order holds by construction, since every node is
  * entered in the superstep of its layer. The name never leaves one
  * invocation, so it does not need to stay stable across a replan.
@@ -213,9 +221,9 @@ const createNodeStoppedError = (cause) => {
 // a drain. A GraphDrained a node throws
 // leaves no error write and no receipt for it, and the superstep's other
 // nodes still finish and commit (pregel/runner.js tick keeps a drain as a
-// bubble-up), which is what the native scheduler does with a cancellation:
+// bubble-up), which is what the native scheduler did with a cancellation:
 // launch nothing more, let what is in flight settle. The cancellation itself
-// is the run's fatal error, as it is natively.
+// is the run's fatal error, as it was natively.
 const passSafePoint = (control) => {
   const cancellation = getRequestCancellation();
 

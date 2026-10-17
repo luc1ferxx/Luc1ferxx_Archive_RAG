@@ -1,0 +1,534 @@
+{
+  "checkpoint": {
+    "digest": "<seal>",
+    "fingerprints": [],
+    "graph": {
+      "nodes": [
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            },
+            "retrievalPlan": {
+              "field": "retrievalPlan",
+              "source": "request"
+            }
+          },
+          "nodeId": "primary",
+          "rationale": null,
+          "skillId": "document_rag"
+        },
+        {
+          "dependsOn": [
+            "primary"
+          ],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "evidence": {
+              "nodeId": "primary",
+              "output": "evidence",
+              "source": "node"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "primary_check",
+          "rationale": null,
+          "skillId": "document_evidence_check"
+        },
+        {
+          "dependsOn": [
+            "primary_check"
+          ],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "nodeId": "primary_check",
+              "output": "followUpQuestion",
+              "source": "node"
+            },
+            "retrievalPlan": {
+              "nodeId": "primary_check",
+              "output": "followUpRetrievalPlan",
+              "source": "node"
+            }
+          },
+          "nodeId": "follow_up",
+          "rationale": null,
+          "skillId": "document_rag",
+          "when": {
+            "equals": true,
+            "nodeId": "primary_check",
+            "output": "retryRecommended"
+          }
+        },
+        {
+          "dependsOn": [
+            "follow_up"
+          ],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "evidence": {
+              "nodeId": "follow_up",
+              "output": "evidence",
+              "source": "node"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "follow_up_check",
+          "rationale": null,
+          "skillId": "document_evidence_check"
+        }
+      ],
+      "revision": 0,
+      "version": "v3"
+    },
+    "nodeRuns": [
+      {
+        "nodeId": "primary",
+        "skillId": "document_rag",
+        "skillVersion": "1.0.0",
+        "status": "failed",
+        "stepId": "agent_graph_node:cHJpbWFyeQ"
+      }
+    ],
+    "owner": {
+      "accessScope": {
+        "userId": "unified-graph-user",
+        "workspaceId": "unified-graph-workspace"
+      },
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "usedAtEntry": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 0,
+          "researchQuestions": 0,
+          "traceSteps": 2,
+          "webSearchCalls": 0
+        }
+      },
+      "docIds": [
+        "vendor-msa"
+      ],
+      "intentPlan": {
+        "actionCapabilityId": null,
+        "mode": "document",
+        "requiresDocuments": true,
+        "summary": "Use selected documents and synthesize a grounded answer.",
+        "wantsAction": false,
+        "wantsArxivImport": false,
+        "wantsCompareDocuments": false,
+        "wantsContractSummary": false,
+        "wantsDiscovery": false,
+        "wantsDocumentRag": true,
+        "wantsInventory": false,
+        "wantsResearch": false,
+        "wantsRiskReview": false,
+        "wantsTimeline": false,
+        "wantsWeb": false
+      },
+      "question": "What notice period does the vendor require before renewal?",
+      "retrievalPlan": {
+        "intent": "fact",
+        "phase": "primary",
+        "retrievalOptions": {
+          "profile": "narrow",
+          "queryCount": 2,
+          "topK": 4,
+          "topKPerDoc": 2
+        },
+        "retrievalQueries": [
+          {
+            "id": "primary",
+            "label": "Original request",
+            "primary": true,
+            "query": "What notice period does the vendor require before renewal?"
+          },
+          {
+            "id": "fact-citation",
+            "label": "Exact citation evidence",
+            "primary": false,
+            "query": "Find exact cited evidence for: What notice period does the vendor require before renewal?"
+          }
+        ],
+        "source": "agent-query-planner"
+      },
+      "selectedSkills": [
+        {
+          "id": "capability:task.create",
+          "version": "1.0.0"
+        },
+        {
+          "id": "compare_documents",
+          "version": "1.0.0"
+        },
+        {
+          "id": "document_discovery",
+          "version": "1.0.0"
+        },
+        {
+          "id": "document_evidence_check",
+          "version": "1.0.0"
+        },
+        {
+          "id": "document_rag",
+          "version": "1.0.0"
+        },
+        {
+          "id": "extract_timeline",
+          "version": "1.0.0"
+        },
+        {
+          "id": "inventory",
+          "version": "1.0.0"
+        },
+        {
+          "id": "risk_review",
+          "version": "1.0.0"
+        },
+        {
+          "id": "summarize_contract",
+          "version": "1.0.0"
+        },
+        {
+          "id": "web_search",
+          "version": "1.0.0"
+        }
+      ],
+      "sessionId": "unified-graph-session",
+      "taskMemory": null,
+      "userId": "unified-graph-user"
+    },
+    "phase": "running",
+    "replanCount": 0,
+    "sequence": 1,
+    "version": "v2"
+  },
+  "error": {
+    "code": "AGENT_DEPENDENCY_UNAVAILABLE",
+    "message": "A service this answer depends on is unavailable (MODEL_GATEWAY_UNAVAILABLE). Try again shortly.",
+    "name": "DependencyOutageError",
+    "reason": {
+      "$graphGolden": "undefined"
+    },
+    "status": 503
+  },
+  "run": {
+    "approvalGates": [],
+    "createdAt": "<time>",
+    "decisions": [],
+    "error": {
+      "causeCode": "MODEL_GATEWAY_UNAVAILABLE",
+      "code": "AGENT_DEPENDENCY_UNAVAILABLE",
+      "dependency": "model",
+      "message": "A service this answer depends on is unavailable (MODEL_GATEWAY_UNAVAILABLE). Try again shortly.",
+      "name": "DependencyOutageError",
+      "reason": "dependency_unavailable",
+      "retryable": true
+    },
+    "events": [
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:1",
+        "payload": {
+          "status": "running"
+        },
+        "type": "run_created"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:2",
+        "payload": {
+          "traceStepCount": 2
+        },
+        "type": "run_prepared"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:3",
+        "payload": {
+          "blockedNodeIds": [],
+          "errorCodes": [],
+          "executed": false,
+          "fallback": null,
+          "graph": {
+            "nodeCount": 4,
+            "nodeIds": [
+              "primary",
+              "primary_check",
+              "follow_up",
+              "follow_up_check"
+            ],
+            "skillIds": [
+              "document_rag",
+              "document_evidence_check",
+              "document_rag",
+              "document_evidence_check"
+            ],
+            "version": "v3"
+          },
+          "mode": "guarded",
+          "planner": {
+            "fallback": false,
+            "fallbackReason": null,
+            "fallbackReasonCodes": [],
+            "nodeIds": [
+              "primary",
+              "primary_check",
+              "follow_up",
+              "follow_up_check"
+            ],
+            "plannerCall": null,
+            "reasonCodes": [],
+            "requestedPlannerId": "unified_graph_test_proposal",
+            "selectedPlannerId": "unified_graph_test_proposal",
+            "status": "selected"
+          },
+          "requestContext": {
+            "experienceMemory": {
+              "enabled": false,
+              "error": null,
+              "hitCount": 0,
+              "memoryApplied": false,
+              "planningHints": [],
+              "reason": "env_disabled",
+              "status": "disabled"
+            },
+            "intentPlanner": {
+              "candidateIntentIds": [
+                "document"
+              ],
+              "experienceMemory": {
+                "applied": false,
+                "hintCount": 0
+              },
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedIntentId": "document",
+              "selectedMode": "document",
+              "selectedPlannerId": "deterministic",
+              "selectionReason": "Selected the highest-priority deterministic rule candidate.",
+              "status": "selected"
+            }
+          },
+          "status": "selected"
+        },
+        "type": "unified_graph_planned"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:4",
+        "payload": {
+          "graphRevision": 0,
+          "phase": "running",
+          "sequence": 0,
+          "version": "v2"
+        },
+        "type": "skill_graph_checkpointed"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:5",
+        "payload": {
+          "status": "running",
+          "stepId": "agent_graph_node:cHJpbWFyeQ"
+        },
+        "type": "step_started"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:6",
+        "payload": {
+          "status": "failed",
+          "stepId": "agent_graph_node:cHJpbWFyeQ"
+        },
+        "type": "step_failed"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:7",
+        "payload": {
+          "graphRevision": 0,
+          "phase": "running",
+          "sequence": 1,
+          "version": "v2"
+        },
+        "type": "skill_graph_checkpointed"
+      },
+      {
+        "createdAt": "<time>",
+        "eventId": "<id>:8",
+        "payload": {
+          "error": {
+            "causeCode": "MODEL_GATEWAY_UNAVAILABLE",
+            "code": "AGENT_DEPENDENCY_UNAVAILABLE",
+            "dependency": "model",
+            "message": "A service this answer depends on is unavailable (MODEL_GATEWAY_UNAVAILABLE). Try again shortly.",
+            "name": "DependencyOutageError",
+            "reason": "dependency_unavailable",
+            "retryable": true
+          }
+        },
+        "type": "run_failed"
+      }
+    ],
+    "goal": "What notice period does the vendor require before renewal?",
+    "input": {
+      "docIds": [
+        "vendor-msa"
+      ],
+      "sessionId": "unified-graph-session",
+      "userId": "unified-graph-user"
+    },
+    "observations": [],
+    "plan": {
+      "mode": "document",
+      "selectedSkills": [
+        {
+          "budgetKey": "documentRagCalls",
+          "label": "Document RAG",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "summary": "Use selected documents and synthesize a grounded answer."
+    },
+    "result": {},
+    "runId": "<id>",
+    "status": "failed",
+    "steps": [
+      {
+        "approvalGateId": "",
+        "attempt": 1,
+        "capabilityId": "",
+        "capabilityVersion": "",
+        "completedAt": "<time>",
+        "createdAt": "<time>",
+        "decision": "",
+        "detail": null,
+        "error": {
+          "message": "gateway down",
+          "name": "Error"
+        },
+        "id": "agent_graph_node:cHJpbWFyeQ",
+        "input": {
+          "boundInputs": {
+            "docIds": [
+              "vendor-msa"
+            ],
+            "question": "What notice period does the vendor require before renewal?",
+            "retrievalPlan": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What notice period does the vendor require before renewal?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What notice period does the vendor require before renewal?"
+                }
+              ],
+              "source": "agent-query-planner"
+            }
+          },
+          "docIds": [
+            "vendor-msa"
+          ],
+          "effects": "workspace_write",
+          "graphVersion": "v3",
+          "idempotency": "adapter_defined",
+          "nodeId": "primary",
+          "question": "What notice period does the vendor require before renewal?",
+          "replaySafe": false,
+          "retrievalPlan": {
+            "intent": "fact",
+            "phase": "primary",
+            "retrievalOptions": {
+              "profile": "narrow",
+              "queryCount": 2,
+              "topK": 4,
+              "topKPerDoc": 2
+            },
+            "retrievalQueries": [
+              {
+                "id": "primary",
+                "label": "Original request",
+                "primary": true,
+                "query": "What notice period does the vendor require before renewal?"
+              },
+              {
+                "id": "fact-citation",
+                "label": "Exact citation evidence",
+                "primary": false,
+                "query": "Find exact cited evidence for: What notice period does the vendor require before renewal?"
+              }
+            ],
+            "source": "agent-query-planner"
+          },
+          "sessionId": "unified-graph-session",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0",
+          "userId": "unified-graph-user"
+        },
+        "kind": "observation",
+        "label": "Document RAG",
+        "output": null,
+        "parentStepId": "",
+        "pausedAt": "",
+        "retryOfStepId": "",
+        "startedAt": "<time>",
+        "status": "failed",
+        "summary": "",
+        "traceStepId": "",
+        "type": "graph_node",
+        "updatedAt": "<time>"
+      }
+    ],
+    "updatedAt": "<time>"
+  }
+}

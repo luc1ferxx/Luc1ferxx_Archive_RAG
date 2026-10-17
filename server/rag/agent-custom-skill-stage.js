@@ -13,15 +13,12 @@ import {
   EXECUTION_GRAPH_LIMITS,
   validateExecutionGraph,
 } from "./agent-execution-graph.js";
-import {
-  EXECUTION_GRAPH_RUN_STATUSES,
-  runExecutionGraph,
-} from "./agent-execution-graph-runner.js";
+import { EXECUTION_GRAPH_RUN_STATUSES } from "./agent-execution-graph-runner.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import { runShadowPlanner, sameStringList } from "./agent-planner-shadow.js";
 import { REPLAN_DECISIONS, createReplanResult } from "./agent-replanner.js";
 import { getAgentRunStepLifecycleTarget } from "./agent-run-step-lifecycle.js";
-import { getAgentRuntime, getAgentSkillGraphRollout } from "./config.js";
+import { assertAgentRuntimeSupported, getAgentSkillGraphRollout } from "./config.js";
 import { assertLangSmithTracingDisabled } from "./langgraph/langsmith-guard.js";
 import { setSpanAttributes, withSpan } from "./tracing.js";
 
@@ -43,15 +40,12 @@ import { setSpanAttributes, withSpan } from "./tracing.js";
 // spent budget and written a step, re-running the chain would repeat that work
 // under a different plan and bill the user twice for one request.
 //
-// A second dial, AGENT_RUNTIME, picks who schedules a guarded graph: LangGraph
-// (docs/adr/0001-langgraph-runtime.md; the default since phase 4) or the
-// native scheduler. Planning, the checkpoint, replans and recovery below are
-// the same for both; only runGraph's executor changes. The native executor
-// stays as the AGENT_RUNTIME=native rollback path for at least one release on
-// the new default (ADR constraint 12) and is to be deleted after it; since
-// phase 5 both executors queue in layer order and LangGraph never hands a
-// graph to the native one. The V1 chain (runV1) is a separate matter: it is
-// the whole-graph-rejection fallback and the `off` opt-out.
+// A guarded graph is scheduled by LangGraph (langgraph/run-execution-graph.js,
+// docs/adr/0001-langgraph-runtime.md). Phase 6 deleted the native scheduler
+// and the AGENT_RUNTIME dial that picked it; planning, the checkpoint,
+// replans and recovery below did not change. The V1 chain (runV1) is a
+// separate matter: it is the whole-graph-rejection fallback and the `off`
+// opt-out.
 
 const noop = () => {};
 
@@ -59,11 +53,6 @@ export const CUSTOM_SKILL_STAGE_MODES = Object.freeze({
   guarded: "guarded",
   off: "off",
   shadow: "shadow",
-});
-
-export const CUSTOM_SKILL_GRAPH_RUNTIMES = Object.freeze({
-  langgraph: "langgraph",
-  native: "native",
 });
 
 const describeGraph = (graph) =>
@@ -122,7 +111,6 @@ export const runCustomSkillStage = async ({
   registry,
   replanAdapter = null,
   retrievalPlan,
-  runtime = getAgentRuntime(),
   saveExecutionGraphCheckpoint = null,
   sessionId,
   stepLifecycle,
@@ -241,19 +229,19 @@ export const runCustomSkillStage = async ({
     return results;
   }
 
-  let executeGraph = runExecutionGraph;
-
-  if (runtime === CUSTOM_SKILL_GRAPH_RUNTIMES.langgraph) {
-    // Refused before anything durable exists: a request that cannot run on
-    // its runtime must not leave a graph checkpoint for recovery to resume.
-    // The executor checks again at its own entry.
-    assertLangSmithTracingDisabled();
-    // Imported only when selected, so a process on the native runtime never
-    // loads LangGraph.
-    ({ runExecutionGraphOnLangGraph: executeGraph } = await import(
-      "./langgraph/run-execution-graph.js"
-    ));
-  }
+  // Refused before anything durable exists: a request that cannot run on
+  // LangGraph must not leave a graph checkpoint for recovery to resume. The
+  // executor checks again at its own entry. A removed AGENT_RUNTIME value
+  // asked for the native scheduler, which no longer exists: running the graph
+  // on LangGraph instead would ignore it silently.
+  assertLangSmithTracingDisabled();
+  assertAgentRuntimeSupported();
+  // Imported on first use, so a process that never runs a guarded graph (the
+  // api edge of a split deployment, a deployment whose rollout is off) never
+  // loads LangGraph.
+  const { runExecutionGraphOnLangGraph: executeGraph } = await import(
+    "./langgraph/run-execution-graph.js"
+  );
 
   const loadedCheckpoint = await loadExecutionGraphCheckpoint?.();
   const persistedCheckpoint = loadedCheckpoint?.checkpoint ?? null;
@@ -442,9 +430,9 @@ export const runCustomSkillStage = async ({
   // stored with the finished run, while nothing ever resumes a settled
   // graph's thread (a replan or a recovery starts a fresh invocation, and a
   // settled graph is replayed from the graph checkpoint without one). A
-  // running graph keeps its thread. On a run that holds no record (the
-  // native scheduler, or LangGraph run without a graph checkpoint and so
-  // without a checkpointer) the flag changes nothing.
+  // running graph keeps its thread. On a run that holds no record (a graph
+  // run without a graph checkpoint, and so without a checkpointer) the flag
+  // changes nothing.
   let checkpointQueue = Promise.resolve();
   const persistCheckpoint = (update, { settles = false } = {}) => {
     if (!checkpoint || !saveExecutionGraphCheckpoint) {
@@ -467,7 +455,7 @@ export const runCustomSkillStage = async ({
   // fencing are decided from, so a thread record without one would be state
   // nothing can trust. The run, scope and cursor are the ones the node steps
   // are written with (getAgentRunStepLifecycleTarget).
-  const langGraphRun = executeGraph !== runExecutionGraph && checkpoint
+  const langGraphRun = checkpoint
     ? getAgentRunStepLifecycleTarget(stepLifecycle)
     : null;
 

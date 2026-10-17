@@ -15,7 +15,7 @@ import {
   sealExecutionGraphCheckpoint,
 } from "./agent-execution-graph-checkpoint.js";
 import { hasUnifiedGuardedGraphPath } from "./agent-unified-graph-run.js";
-import { getAgentRuntime, getAgentUnifiedGraphRollout } from "./config.js";
+import { getAgentUnifiedGraphRollout } from "./config.js";
 
 const normalizeMode = (value) => {
   const mode = normalizeText(value).toLowerCase();
@@ -110,16 +110,18 @@ const hasSettledAfterResumeClaim = (run = {}) => {
     events.slice(claimIndex + 1).some((event) => SETTLED_WAITING_EVENTS.has(event.type));
 };
 
-// Under AGENT_RUNTIME=langgraph a v3 graph that will resume at a node
-// boundary also has a LangGraph thread on its run row. Its receipts must
-// agree with the graph checkpoint (the authority) before the graph is
-// claimed; a thread that contradicts it hands the run to an operator
-// (rag/langgraph/unified-graph-recovery.js, imported only on that runtime so
-// a native process never loads LangGraph). A missing thread, or one behind
-// the checkpoint, resumes: the continuation starts a fresh invocation from
-// the checkpoint and drops the stale thread under its claim.
+// A v3 graph that will resume at a node boundary may also have a LangGraph
+// thread on its run row. Its receipts must agree with the graph checkpoint
+// (the authority) before the graph is claimed; a thread that contradicts it
+// hands the run to an operator (rag/langgraph/unified-graph-recovery.js,
+// imported on first use so a startup that finds no such run never loads
+// LangGraph). A missing thread, or one behind the checkpoint, resumes: the
+// continuation starts a fresh invocation from the checkpoint and drops the
+// stale thread under its claim. Since phase 6 of
+// docs/adr/0001-langgraph-runtime.md this check always runs: there is no
+// native runtime left that would ignore the thread.
 const verifyLangGraphThread = async ({ accessScope, agentRunService, checkpoint, runId }) => {
-  if (getAgentRuntime() !== "langgraph" || checkpoint?.phase !== "running") {
+  if (checkpoint?.phase !== "running") {
     return { ok: true, reason: null };
   }
 

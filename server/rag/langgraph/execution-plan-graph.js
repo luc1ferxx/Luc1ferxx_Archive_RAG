@@ -23,9 +23,9 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 
 // The V1 outer execution plan on LangGraph.js (docs/adr/0001-langgraph-
 // runtime.md, phase 3), selected by the experimental
-// AGENT_OUTER_PLAN_RUNTIME=langgraph at the one call site in agent.js (not by
-// AGENT_RUNTIME, which leaves the outer plan on the native loop). Same options
-// and result as runAgentExecutionPlan, same errors.
+// AGENT_OUTER_PLAN_RUNTIME=langgraph at the one call site in agent.js (never
+// by AGENT_RUNTIME, which since phase 6 only refuses removed values). Same
+// options and result as runAgentExecutionPlan, same errors.
 //
 // Built on LangGraph's public low-level Pregel API (@langchain/langgraph/
 // pregel and /channels), not on StateGraph. The phase-3 load test measured the

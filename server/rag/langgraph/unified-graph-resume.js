@@ -55,7 +55,9 @@ const createThreadConflictError = () => {
  * same typed-output digest; a skipped receipt is a node the native pass would
  * skip again now, for the same reason, from the reused outputs (it is settled
  * here exactly as that pass would settle it, since LangGraph will not enter
- * it again); a pending receipt is a node that stays pending on both runtimes.
+ * it again); a pending receipt is a node that stays pending, as it did on
+ * the native scheduler phase 6 deleted ("native" below means that scheduler,
+ * whose results the graph goldens pin).
  * Returns { interruptId } then. Returns null for a thread that has no such
  * interrupt (the pause happened natively, or the executor persisted it
  * natively because later layers still had work), is behind the checkpoint, or
@@ -171,8 +173,8 @@ export const prepareUnifiedGraphApprovalResume = async ({
   }
 
   // Recorded before the thread is resumed, where the native continuation's
-  // first pass records them (before it launches anything): a continuation
-  // that then fails leaves these skips in the trace on both runtimes. They
+  // first pass recorded them (before it launched anything): a continuation
+  // that then fails leaves these skips in the trace, as it did natively. They
   // must be settled before LangGraph enters their dependants, which read the
   // in-process states.
   for (const { reason, state } of seeds) {

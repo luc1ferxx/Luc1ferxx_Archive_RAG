@@ -1,0 +1,290 @@
+{
+  "budget": {
+    "limits": {
+      "maxArxivPaperFetches": 1,
+      "maxCustomSkillCalls": 8,
+      "maxDocumentRagCalls": 2,
+      "maxResearchQuestions": 3,
+      "maxTraceSteps": 16,
+      "maxWebSearchCalls": 1
+    },
+    "traceTruncated": false,
+    "used": {
+      "arxivPaperFetches": 0,
+      "customSkillCalls": 0,
+      "documentRagCalls": 0,
+      "researchQuestions": 0,
+      "traceSteps": 0,
+      "webSearchCalls": 0
+    }
+  },
+  "budgetLimits": [],
+  "checkpoint": null,
+  "events": [
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:1",
+      "payload": {
+        "status": "running"
+      },
+      "type": "run_created"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:2",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:risk"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:3",
+      "payload": {
+        "status": "failed",
+        "stepId": "custom_skill:risk"
+      },
+      "type": "step_failed"
+    }
+  ],
+  "journal": [],
+  "outcome": {
+    "result": {
+      "errors": [],
+      "graphVersion": "v1",
+      "nodeRuns": [
+        {
+          "citationCount": 0,
+          "dependsOn": [],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "risk",
+          "parallelSafe": true,
+          "reason": null,
+          "result": {
+            "abstained": false,
+            "citations": [],
+            "error": {
+              "message": "Skill input contract failed: scoped docIds must contain at least one document.",
+              "name": "SkillInputContractError"
+            },
+            "label": "risk_review",
+            "ok": false,
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "text": "",
+            "traceDetail": null,
+            "value": null
+          },
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "status": "failed",
+          "stepId": "custom_skill:risk"
+        },
+        {
+          "citationCount": 0,
+          "dependsOn": [
+            "risk"
+          ],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "timeline",
+          "parallelSafe": true,
+          "reason": "dependency_failed",
+          "result": null,
+          "skillId": "extract_timeline",
+          "skillVersion": "1.0.0",
+          "status": "skipped",
+          "stepId": "custom_skill:timeline"
+        }
+      ],
+      "ok": false,
+      "results": [
+        {
+          "abstained": false,
+          "citations": [],
+          "error": {
+            "message": "Skill input contract failed: scoped docIds must contain at least one document.",
+            "name": "SkillInputContractError"
+          },
+          "label": "risk_review",
+          "ok": false,
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "text": "",
+          "traceDetail": null,
+          "value": null
+        }
+      ],
+      "status": "partial"
+    }
+  },
+  "runError": null,
+  "runStatus": "running",
+  "settled": [
+    {
+      "citationCount": 0,
+      "dependsOn": [],
+      "effects": "read_only",
+      "idempotency": "read_only_rag",
+      "nodeId": "risk",
+      "parallelSafe": true,
+      "reason": null,
+      "result": {
+        "abstained": false,
+        "citations": [],
+        "error": {
+          "message": "Skill input contract failed: scoped docIds must contain at least one document.",
+          "name": "SkillInputContractError"
+        },
+        "label": "risk_review",
+        "ok": false,
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "text": "",
+        "traceDetail": null,
+        "value": null
+      },
+      "skillId": "risk_review",
+      "skillVersion": "1.0.0",
+      "status": "failed",
+      "stepId": "custom_skill:risk"
+    }
+  ],
+  "skillRuns": [
+    {
+      "abstained": false,
+      "budget": null,
+      "budgetDelta": {},
+      "citationCount": 0,
+      "durationMs": "<duration>",
+      "error": "Skill input contract failed: scoped docIds must contain at least one document.",
+      "label": "risk_review",
+      "phase": "primary",
+      "skillId": "risk_review",
+      "skillVersion": "1.0.0",
+      "status": "failed"
+    },
+    {
+      "abstained": false,
+      "budget": null,
+      "budgetDelta": {},
+      "citationCount": 0,
+      "durationMs": "<duration>",
+      "error": "Node timeline skipped: dependency_failed.",
+      "label": "extract_timeline",
+      "phase": "primary",
+      "skillId": "extract_timeline",
+      "skillVersion": "1.0.0",
+      "status": "skipped"
+    }
+  ],
+  "steps": [
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": null,
+      "error": {
+        "message": "Skill input contract failed: scoped docIds must contain at least one document.",
+        "name": "SkillInputContractError"
+      },
+      "id": "custom_skill:risk",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "risk",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "kind": "tool_call",
+      "label": "risk_review",
+      "output": null,
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "failed",
+      "summary": "",
+      "traceStepId": "",
+      "type": "custom_skill",
+      "updatedAt": "<time>"
+    }
+  ],
+  "trace": [
+    {
+      "detail": {
+        "dependsOn": [],
+        "durationMs": null,
+        "graphVersion": "v1",
+        "nodeId": "risk",
+        "rationale": "Run risk.",
+        "skillId": "risk_review",
+        "skillKind": "custom",
+        "skillVersion": "1.0.0"
+      },
+      "error": {
+        "message": "Skill input contract failed: scoped docIds must contain at least one document.",
+        "name": "SkillInputContractError"
+      },
+      "id": "custom_skill:risk",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "risk",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "label": "risk_review",
+      "output": null,
+      "status": "failed",
+      "summary": "risk_review failed: Skill input contract failed: scoped docIds must contain at least one document.",
+      "type": "custom_skill"
+    }
+  ]
+}

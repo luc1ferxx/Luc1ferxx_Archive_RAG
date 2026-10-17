@@ -1,0 +1,526 @@
+{
+  "budget": {
+    "limits": {
+      "maxArxivPaperFetches": 1,
+      "maxCustomSkillCalls": 8,
+      "maxDocumentRagCalls": 2,
+      "maxResearchQuestions": 3,
+      "maxTraceSteps": 16,
+      "maxWebSearchCalls": 1
+    },
+    "traceTruncated": false,
+    "used": {
+      "arxivPaperFetches": 0,
+      "customSkillCalls": 1,
+      "documentRagCalls": 0,
+      "researchQuestions": 0,
+      "traceSteps": 0,
+      "webSearchCalls": 0
+    }
+  },
+  "budgetLimits": [],
+  "checkpoint": {
+    "digest": "<seal>",
+    "fingerprints": [],
+    "graph": {
+      "nodes": [
+        {
+          "dependsOn": [],
+          "failurePolicy": "fail_fast",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "risk",
+          "rationale": "Run risk.",
+          "skillId": "risk_review"
+        },
+        {
+          "dependsOn": [],
+          "failurePolicy": "continue",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "timeline",
+          "rationale": "Run timeline.",
+          "skillId": "extract_timeline"
+        },
+        {
+          "dependsOn": [
+            "risk"
+          ],
+          "failurePolicy": "continue",
+          "inputBindings": {
+            "docIds": {
+              "field": "docIds",
+              "source": "request"
+            },
+            "question": {
+              "field": "question",
+              "source": "request"
+            }
+          },
+          "nodeId": "summary",
+          "rationale": "Run summary.",
+          "skillId": "summarize_contract"
+        }
+      ],
+      "revision": 0,
+      "version": "v1"
+    },
+    "nodeRuns": [
+      {
+        "nodeId": "risk",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "status": "failed",
+        "stepId": "custom_skill:risk"
+      },
+      {
+        "nodeId": "timeline",
+        "skillId": "extract_timeline",
+        "skillVersion": "1.0.0",
+        "status": "skipped",
+        "stepId": "custom_skill:timeline"
+      },
+      {
+        "nodeId": "summary",
+        "skillId": "summarize_contract",
+        "skillVersion": "1.0.0",
+        "status": "skipped",
+        "stepId": "custom_skill:summary"
+      }
+    ],
+    "owner": {
+      "accessScope": {
+        "userId": "alice",
+        "workspaceId": "workspace-a"
+      },
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 8,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "usedAtEntry": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 0,
+          "researchQuestions": 0,
+          "traceSteps": 0,
+          "webSearchCalls": 0
+        }
+      },
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "intentPlan": {
+        "mode": "skill_chain"
+      },
+      "question": "Compare these contracts and flag the risks.",
+      "retrievalPlan": {
+        "retrievalQueries": [
+          {
+            "id": "primary",
+            "query": "contract risks"
+          }
+        ]
+      },
+      "selectedSkills": [
+        {
+          "id": "extract_timeline",
+          "version": "1.0.0"
+        },
+        {
+          "id": "risk_review",
+          "version": "1.0.0"
+        },
+        {
+          "id": "summarize_contract",
+          "version": "1.0.0"
+        }
+      ],
+      "sessionId": "session-1",
+      "taskMemory": null,
+      "userId": "alice"
+    },
+    "phase": "partial",
+    "planner": {
+      "fallback": false,
+      "fallbackReason": null,
+      "fallbackReasonCodes": [],
+      "nodeIds": [
+        "risk",
+        "timeline",
+        "summary"
+      ],
+      "requestedPlannerId": "parity_planner",
+      "selectedPlannerId": "parity_planner",
+      "status": "selected"
+    },
+    "replanCount": 0,
+    "replans": [],
+    "sequence": 3,
+    "version": "v1"
+  },
+  "events": [
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:1",
+      "payload": {
+        "status": "running"
+      },
+      "type": "run_created"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:2",
+      "payload": {
+        "graphRevision": 0,
+        "phase": "running",
+        "sequence": 1,
+        "version": "v1"
+      },
+      "type": "skill_graph_checkpointed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:3",
+      "payload": {
+        "status": "running",
+        "stepId": "custom_skill:risk"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:4",
+      "payload": {
+        "status": "failed",
+        "stepId": "custom_skill:risk"
+      },
+      "type": "step_failed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:5",
+      "payload": {
+        "graphRevision": 0,
+        "phase": "running",
+        "sequence": 2,
+        "version": "v1"
+      },
+      "type": "skill_graph_checkpointed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "langgraph-parity-run:6",
+      "payload": {
+        "graphRevision": 0,
+        "phase": "partial",
+        "sequence": 3,
+        "version": "v1"
+      },
+      "type": "skill_graph_checkpointed"
+    }
+  ],
+  "graphEvents": [
+    {
+      "errorCodes": [],
+      "executed": true,
+      "fallback": null,
+      "graph": {
+        "nodeIds": [
+          "risk",
+          "timeline",
+          "summary"
+        ],
+        "version": "v1"
+      },
+      "mode": "guarded",
+      "nodeRuns": [
+        {
+          "abstained": false,
+          "citationCount": 0,
+          "dependsOn": [],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "risk",
+          "ok": false,
+          "parallelSafe": true,
+          "reason": null,
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "status": "failed",
+          "stepId": "custom_skill:risk"
+        },
+        {
+          "abstained": false,
+          "citationCount": 0,
+          "dependsOn": [],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "timeline",
+          "ok": false,
+          "parallelSafe": true,
+          "reason": "aborted_after_failure",
+          "skillId": "extract_timeline",
+          "skillVersion": "1.0.0",
+          "status": "skipped",
+          "stepId": "custom_skill:timeline"
+        },
+        {
+          "abstained": false,
+          "citationCount": 0,
+          "dependsOn": [
+            "risk"
+          ],
+          "effects": "read_only",
+          "idempotency": "read_only_rag",
+          "nodeId": "summary",
+          "ok": false,
+          "parallelSafe": true,
+          "reason": "dependency_failed",
+          "skillId": "summarize_contract",
+          "skillVersion": "1.0.0",
+          "status": "skipped",
+          "stepId": "custom_skill:summary"
+        }
+      ],
+      "planner": {
+        "fallback": false,
+        "fallbackReason": null,
+        "fallbackReasonCodes": [],
+        "nodeIds": [
+          "risk",
+          "timeline",
+          "summary"
+        ],
+        "requestedPlannerId": "parity_planner",
+        "selectedPlannerId": "parity_planner",
+        "status": "selected"
+      },
+      "replans": [],
+      "status": "partial"
+    }
+  ],
+  "journal": [
+    {
+      "docIds": [
+        "doc-1",
+        "doc-2"
+      ],
+      "event": "start",
+      "priorFindings": null,
+      "question": "Compare these contracts and flag the risks.",
+      "skillId": "risk_review"
+    },
+    {
+      "event": "end",
+      "skillId": "risk_review"
+    }
+  ],
+  "outcome": {
+    "result": [
+      {
+        "abstained": false,
+        "citations": [],
+        "durationMs": "<duration>",
+        "error": {
+          "message": "risk review failed",
+          "name": "Error"
+        },
+        "label": "risk_review",
+        "ok": false,
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "text": "",
+        "traceDetail": null,
+        "value": null
+      }
+    ]
+  },
+  "runError": null,
+  "runStatus": "running",
+  "skillRuns": [
+    {
+      "abstained": false,
+      "budget": {
+        "key": "customSkillCalls",
+        "label": "custom skill",
+        "limit": 8,
+        "ok": true,
+        "reason": null,
+        "remaining": 7,
+        "used": 1
+      },
+      "budgetDelta": {},
+      "citationCount": 0,
+      "durationMs": "<duration>",
+      "error": "risk review failed",
+      "label": "risk_review",
+      "phase": "primary",
+      "skillId": "risk_review",
+      "skillVersion": "1.0.0",
+      "status": "failed"
+    },
+    {
+      "abstained": false,
+      "budget": null,
+      "budgetDelta": {},
+      "citationCount": 0,
+      "durationMs": "<duration>",
+      "error": "Node timeline skipped: aborted_after_failure.",
+      "label": "extract_timeline",
+      "phase": "primary",
+      "skillId": "extract_timeline",
+      "skillVersion": "1.0.0",
+      "status": "skipped"
+    },
+    {
+      "abstained": false,
+      "budget": null,
+      "budgetDelta": {},
+      "citationCount": 0,
+      "durationMs": "<duration>",
+      "error": "Node summary skipped: dependency_failed.",
+      "label": "summarize_contract",
+      "phase": "primary",
+      "skillId": "summarize_contract",
+      "skillVersion": "1.0.0",
+      "status": "skipped"
+    }
+  ],
+  "steps": [
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": null,
+      "error": {
+        "message": "risk review failed",
+        "name": "Error"
+      },
+      "id": "custom_skill:risk",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "risk",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "kind": "tool_call",
+      "label": "risk_review",
+      "output": null,
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "failed",
+      "summary": "",
+      "traceStepId": "",
+      "type": "custom_skill",
+      "updatedAt": "<time>"
+    }
+  ],
+  "trace": [
+    {
+      "detail": {
+        "dependsOn": [],
+        "durationMs": "<duration>",
+        "graphVersion": "v1",
+        "nodeId": "risk",
+        "rationale": "Run risk.",
+        "skillId": "risk_review",
+        "skillKind": "custom",
+        "skillVersion": "1.0.0"
+      },
+      "error": {
+        "message": "risk review failed",
+        "name": "Error"
+      },
+      "id": "custom_skill:risk",
+      "input": {
+        "boundInputs": {
+          "docIds": [
+            "doc-1",
+            "doc-2"
+          ],
+          "question": "Compare these contracts and flag the risks."
+        },
+        "docIds": [
+          "doc-1",
+          "doc-2"
+        ],
+        "effects": "read_only",
+        "graphVersion": "v1",
+        "idempotency": "read_only_rag",
+        "nodeId": "risk",
+        "question": "Compare these contracts and flag the risks.",
+        "replaySafe": true,
+        "retrievalPlan": {
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "query": "contract risks"
+            }
+          ]
+        },
+        "sessionId": "session-1",
+        "skillId": "risk_review",
+        "skillVersion": "1.0.0",
+        "userId": "alice"
+      },
+      "label": "risk_review",
+      "output": null,
+      "status": "failed",
+      "summary": "risk_review failed: risk review failed",
+      "type": "custom_skill"
+    }
+  ]
+}

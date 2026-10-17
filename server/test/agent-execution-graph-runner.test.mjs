@@ -1,3 +1,7 @@
+// Must stay the first import: it clears the LangSmith tracing variables before
+// any @langchain module can read them.
+import "./langgraph-support/langsmith-off.mjs";
+
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAgentBudget, getBudgetSnapshot } from "../rag/agent-budget.js";
@@ -6,7 +10,7 @@ import {
   EXECUTION_GRAPH_REASON_CODES,
   createExecutionGraph,
 } from "../rag/agent-execution-graph.js";
-import { runExecutionGraph } from "../rag/agent-execution-graph-runner.js";
+import { runExecutionGraphOnLangGraph } from "../rag/langgraph/run-execution-graph.js";
 import { AGENT_INTERRUPT_TYPES, AgentRunInterruptError } from "../rag/agent-interrupts.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
 import { createBuiltInSkills } from "../rag/skills/built-ins.js";
@@ -20,6 +24,15 @@ import {
   SKILL_IDEMPOTENCY,
   SKILL_VALUE_TYPES,
 } from "../rag/skills/skill-contract.js";
+
+// The scheduler contract of a guarded execution graph (concurrency,
+// exclusivity, layer order, fail_fast, budget, input and output gates,
+// checkpoints, interrupts, approvals, recovery fences), on the only scheduler
+// left: runExecutionGraphOnLangGraph. These assertions were written for the
+// native scheduler that phase 6 of docs/adr/0001-langgraph-runtime.md deleted
+// and held unchanged on LangGraph (they ran there through
+// test/langgraph-native-runner-suite.test.mjs until then); none was changed
+// when the suite moved.
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -158,7 +171,7 @@ const runGraph = async ({
   const trace = [];
   const lifecycle = [];
 
-  const outcome = await runExecutionGraph({
+  const outcome = await runExecutionGraphOnLangGraph({
     accessScope: { userId: "alice", workspaceId: "acme" },
     addBudgetLimitTrace: (step) => budgetTrace.push(step),
     addTraceStep: (step) => trace.push(step),
@@ -274,7 +287,7 @@ test("graph preflight interrupts before lifecycle start, budget charge, or adapt
   });
 
   await assert.rejects(
-    runExecutionGraph({
+    runExecutionGraphOnLangGraph({
       accessScope: { userId: "alice", workspaceId: "acme" },
       authorizedDocIds: ["doc-1"],
       authorizedSkillIds: [skill.id],
@@ -563,7 +576,7 @@ test("a dynamic empty scoped document list fails before adapter execution or bud
 // Scenario D -- an illegal graph is refused as a whole
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph rejects an illegal graph without executing any node", async () => {
+test("runExecutionGraphOnLangGraph rejects an illegal graph without executing any node", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -598,7 +611,7 @@ test("runExecutionGraph rejects an illegal graph without executing any node", as
   );
 });
 
-test("runExecutionGraph rejects a cyclic graph without executing the acyclic part", async () => {
+test("runExecutionGraphOnLangGraph rejects a cyclic graph without executing the acyclic part", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -633,7 +646,7 @@ test("runExecutionGraph rejects a cyclic graph without executing the acyclic par
 // Scenario A -- parallel fan-out with per-document citation integrity
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph runs independent parallel-safe nodes concurrently", async () => {
+test("runExecutionGraphOnLangGraph runs independent parallel-safe nodes concurrently", async () => {
   const barrier = createBarrier(3);
   const registry = createRegistry([
     createSkill({
@@ -696,7 +709,7 @@ test("runExecutionGraph runs independent parallel-safe nodes concurrently", asyn
   );
 });
 
-test("runExecutionGraph keeps per-node citations attributed to the node that produced them", async () => {
+test("runExecutionGraphOnLangGraph keeps per-node citations attributed to the node that produced them", async () => {
   const registry = createRegistry([
     createSkill({
       execute: async ({ docIds }) => ({
@@ -735,7 +748,7 @@ test("runExecutionGraph keeps per-node citations attributed to the node that pro
   );
 });
 
-test("runExecutionGraph narrows docIds to the node scope without widening the request scope", async () => {
+test("runExecutionGraphOnLangGraph narrows docIds to the node scope without widening the request scope", async () => {
   const seenDocIds = [];
   const registry = createRegistry([
     createSkill({
@@ -765,7 +778,7 @@ test("runExecutionGraph narrows docIds to the node scope without widening the re
   assert.deepEqual(seenDocIds, [["doc-2"], ["doc-1", "doc-2"]]);
 });
 
-test("runExecutionGraph rejects out-of-scope request docIds even without node scope", async () => {
+test("runExecutionGraphOnLangGraph rejects out-of-scope request docIds even without node scope", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -802,7 +815,7 @@ test("runExecutionGraph rejects out-of-scope request docIds even without node sc
 // Scenario B -- dependency ordering
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph does not start a dependent node before its dependency resolves", async () => {
+test("runExecutionGraphOnLangGraph does not start a dependent node before its dependency resolves", async () => {
   const started = [];
   const compareStarted = createDeferred();
   const compareGate = createDeferred();
@@ -1006,7 +1019,7 @@ test("v2 condition can take the false-valued branch", async () => {
   assert.equal(outcome.status, "completed");
 });
 
-test("runExecutionGraph binds an upstream output into a typed input instead of concatenating free text", async () => {
+test("runExecutionGraphOnLangGraph binds an upstream output into a typed input instead of concatenating free text", async () => {
   const contexts = [];
   const registry = createRegistry([
     createSkill({
@@ -1052,7 +1065,7 @@ test("runExecutionGraph binds an upstream output into a typed input instead of c
 // Scheduling policy
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph never exceeds the configured concurrency", async () => {
+test("runExecutionGraphOnLangGraph never exceeds the configured concurrency", async () => {
   let inFlight = 0;
   let peakInFlight = 0;
   const release = createDeferred();
@@ -1094,7 +1107,7 @@ test("runExecutionGraph never exceeds the configured concurrency", async () => {
   assert.equal(outcome.nodeRuns.length, 4);
 });
 
-test("runExecutionGraph runs a side-effecting node alone", async () => {
+test("runExecutionGraphOnLangGraph runs a side-effecting node alone", async () => {
   let inFlight = 0;
   const publishInFlightPeers = [];
   const readBarrier = createBarrier(2);
@@ -1140,7 +1153,7 @@ test("runExecutionGraph runs a side-effecting node alone", async () => {
   assert.equal(readBarrier.arrivals.length, 2);
 });
 
-test("runExecutionGraph returns results in declaration order regardless of completion order", async () => {
+test("runExecutionGraphOnLangGraph returns results in declaration order regardless of completion order", async () => {
   const gates = { first: createDeferred(), second: createDeferred() };
   const registry = createRegistry([
     createSkill({
@@ -1195,7 +1208,7 @@ test("runExecutionGraph returns results in declaration order regardless of compl
   );
 });
 
-test("runExecutionGraph queues nodes in layer order, so a node declared ahead of an earlier layer never starts first", async () => {
+test("runExecutionGraphOnLangGraph queues nodes in layer order, so a node declared ahead of an earlier layer never starts first", async () => {
   // Declared [summary (after risk), risk, timeline] under a cap of 1 and a
   // budget of two calls. The queue is the validator's layer order (risk,
   // timeline, then summary), so the budget funds both first-layer nodes;
@@ -1243,7 +1256,7 @@ test("runExecutionGraph queues nodes in layer order, so a node declared ahead of
 // Budget
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph reserves budget before launch and skips nodes it cannot fund", async () => {
+test("runExecutionGraphOnLangGraph reserves budget before launch and skips nodes it cannot fund", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -1290,7 +1303,7 @@ test("runExecutionGraph reserves budget before launch and skips nodes it cannot 
   );
 });
 
-test("runExecutionGraph does not strand a reservation when a node is never launched", async () => {
+test("runExecutionGraphOnLangGraph does not strand a reservation when a node is never launched", async () => {
   const registry = createRegistry([
     createSkill({
       execute: async () => {
@@ -1329,7 +1342,7 @@ test("runExecutionGraph does not strand a reservation when a node is never launc
 // Failure policy
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph skips dependents of a failed node and reports the reason", async () => {
+test("runExecutionGraphOnLangGraph skips dependents of a failed node and reports the reason", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -1392,7 +1405,7 @@ test("runExecutionGraph skips dependents of a failed node and reports the reason
   assert.deepEqual(executed.sort(), ["compare", "risk"]);
 });
 
-test("runExecutionGraph fail_fast stops nodes that have not started yet", async () => {
+test("runExecutionGraphOnLangGraph fail_fast stops nodes that have not started yet", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -1447,7 +1460,7 @@ test("runExecutionGraph fail_fast stops nodes that have not started yet", async 
 // Scenario C -- minimal graphs stay minimal
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph runs exactly one node for a single-node graph", async () => {
+test("runExecutionGraphOnLangGraph runs exactly one node for a single-node graph", async () => {
   let calls = 0;
   const registry = createRegistry([
     createSkill({
@@ -1479,7 +1492,7 @@ test("runExecutionGraph runs exactly one node for a single-node graph", async ()
 // Scenario F -- recovery
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph reuses completed node runs instead of re-executing them", async () => {
+test("runExecutionGraphOnLangGraph reuses completed node runs instead of re-executing them", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -1553,7 +1566,7 @@ test("runExecutionGraph reuses completed node runs instead of re-executing them"
  * one correctly skipped -- wasted budget for a read, a repeated write for
  * anything else.
  */
-test("runExecutionGraph reuses a node run a previous replan had already reused", async () => {
+test("runExecutionGraphOnLangGraph reuses a node run a previous replan had already reused", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -1597,7 +1610,7 @@ test("runExecutionGraph reuses a node run a previous replan had already reused",
   assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 0);
 });
 
-test("runExecutionGraph refuses a completed node run whose skill no longer matches the node", async () => {
+test("runExecutionGraphOnLangGraph refuses a completed node run whose skill no longer matches the node", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -1633,7 +1646,7 @@ test("runExecutionGraph refuses a completed node run whose skill no longer match
 // Persistence / observability contracts
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph keeps the replay-safe custom_skill step contract", async () => {
+test("runExecutionGraphOnLangGraph keeps the replay-safe custom_skill step contract", async () => {
   const registry = createRegistry([
     createSkill({
       execute: async () => ({ citations: [{ docId: "doc-1" }], text: "ok" }),
@@ -1659,7 +1672,7 @@ test("runExecutionGraph keeps the replay-safe custom_skill step contract", async
   assert.deepEqual(trace[0].detail.dependsOn, []);
 });
 
-test("runExecutionGraph records the node rationale and graph version on each trace step", async () => {
+test("runExecutionGraphOnLangGraph records the node rationale and graph version on each trace step", async () => {
   const registry = createRegistry([
     createSkill({
       execute: async () => ({ citations: [], text: "ok" }),
@@ -1682,7 +1695,7 @@ test("runExecutionGraph records the node rationale and graph version on each tra
   assert.equal(trace[0].detail.graphVersion, graph.version);
 });
 
-test("runExecutionGraph does not mutate the graph it is given", async () => {
+test("runExecutionGraphOnLangGraph does not mutate the graph it is given", async () => {
   const registry = createRegistry([
     createSkill({
       execute: async () => ({ citations: [], text: "ok" }),
@@ -1706,7 +1719,7 @@ test("runExecutionGraph does not mutate the graph it is given", async () => {
   assert.equal(JSON.stringify(graph), snapshot);
 });
 
-test("runExecutionGraph reports node idempotency so the recovery layer can reason about replay", async () => {
+test("runExecutionGraphOnLangGraph reports node idempotency so the recovery layer can reason about replay", async () => {
   const registry = createRegistry([
     createSkill({
       execute: async () => ({ citations: [], text: "ok" }),
@@ -1746,7 +1759,7 @@ test("runExecutionGraph reports node idempotency so the recovery layer can reaso
  * travels with the step input there is nothing in the record that would stop
  * auto recovery from re-running a skill that writes.
  */
-test("runExecutionGraph persists each node's replay contract with the step input", async () => {
+test("runExecutionGraphOnLangGraph persists each node's replay contract with the step input", async () => {
   const registry = createRegistry([
     createSkill({
       execute: async () => ({ citations: [], text: "ok" }),
@@ -1815,7 +1828,7 @@ test("runExecutionGraph persists each node's replay contract with the step input
 // Scenario F -- a retry must run on the input the node was originally given
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraph persists the upstream-bound input with the step so a replay sees the same data", async () => {
+test("runExecutionGraphOnLangGraph persists the upstream-bound input with the step so a replay sees the same data", async () => {
   const registry = createRegistry([
     createSkill({
       execute: answering("Compare found a renewal clause.", [{ docId: "doc-1", page: 2 }]),
@@ -1862,7 +1875,7 @@ test("runExecutionGraph persists the upstream-bound input with the step so a rep
   );
 });
 
-test("runExecutionGraph fails malformed success before a dependent can consume it", async () => {
+test("runExecutionGraphOnLangGraph fails malformed success before a dependent can consume it", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -1917,7 +1930,7 @@ test("runExecutionGraph fails malformed success before a dependent can consume i
   assert.equal(tracker.getSkillObservations()[0].status, "failed");
 });
 
-test("runExecutionGraph rejects a wrong output type without forwarding citations", async () => {
+test("runExecutionGraphOnLangGraph rejects a wrong output type without forwarding citations", async () => {
   const registry = createRegistry([
     createSkill({
       execute: async () => ({ abstained: false, citations: "doc-1", text: "bad" }),
@@ -1936,7 +1949,7 @@ test("runExecutionGraph rejects a wrong output type without forwarding citations
   assert.deepEqual(outcome.nodeRuns[0].result.citations, []);
 });
 
-test("runExecutionGraph applies fail_fast when a skill returns malformed output", async () => {
+test("runExecutionGraphOnLangGraph applies fail_fast when a skill returns malformed output", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({
@@ -1972,7 +1985,7 @@ test("runExecutionGraph applies fail_fast when a skill returns malformed output"
   assert.equal(outcome.nodeRuns[1].reason, "aborted_after_failure");
 });
 
-test("runExecutionGraph rejects a concrete request input with the wrong type before calling the skill", async () => {
+test("runExecutionGraphOnLangGraph rejects a concrete request input with the wrong type before calling the skill", async () => {
   let executions = 0;
   const budgetState = createAgentBudget({ maxCustomSkillCalls: 1 });
   const registry = createRegistry([
@@ -2004,7 +2017,7 @@ test("runExecutionGraph rejects a concrete request input with the wrong type bef
   assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 0);
 });
 
-test("runExecutionGraph blocks invalid resolved input even when an observer ignores validation hooks", async () => {
+test("runExecutionGraphOnLangGraph blocks invalid resolved input even when an observer ignores validation hooks", async () => {
   let observerCalls = 0;
   let executions = 0;
   const budgetState = createAgentBudget({ maxCustomSkillCalls: 1 });
@@ -2021,7 +2034,7 @@ test("runExecutionGraph blocks invalid resolved input even when an observer igno
     nodes: [node({ nodeId: "compare", skillId: "compare_documents" })],
   });
 
-  const outcome = await runExecutionGraph({
+  const outcome = await runExecutionGraphOnLangGraph({
     accessScope: { userId: "alice", workspaceId: "acme" },
     authorizedDocIds: ["doc-1"],
     budgetState,
@@ -2044,7 +2057,7 @@ test("runExecutionGraph blocks invalid resolved input even when an observer igno
   assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 0);
 });
 
-test("runExecutionGraph still supplies runtime identity to the Skill context", async () => {
+test("runExecutionGraphOnLangGraph still supplies runtime identity to the Skill context", async () => {
   let observedIdentity = null;
   const registry = createRegistry([
     createSkill({
@@ -2065,7 +2078,7 @@ test("runExecutionGraph still supplies runtime identity to the Skill context", a
   assert.deepEqual(observedIdentity, { sessionId: "session-1", userId: "alice" });
 });
 
-test("runExecutionGraph treats a null optional retrieval plan as absent", async () => {
+test("runExecutionGraphOnLangGraph treats a null optional retrieval plan as absent", async () => {
   const observed = [];
   const registry = createRegistry([
     createSkill({
@@ -2097,7 +2110,7 @@ test("runExecutionGraph treats a null optional retrieval plan as absent", async 
   assert.deepEqual(observed, [null]);
 });
 
-test("runExecutionGraph fails a required input absent from an optional upstream output", async () => {
+test("runExecutionGraphOnLangGraph fails a required input absent from an optional upstream output", async () => {
   const executed = [];
   const budgetState = createAgentBudget({ maxCustomSkillCalls: 2 });
   const registry = createRegistry([
@@ -2151,7 +2164,7 @@ test("runExecutionGraph fails a required input absent from an optional upstream 
   assert.equal(getBudgetSnapshot(budgetState).used.customSkillCalls, 1);
 });
 
-test("runExecutionGraph refuses a malformed completed output without repeating effects", async () => {
+test("runExecutionGraphOnLangGraph refuses a malformed completed output without repeating effects", async () => {
   let executions = 0;
   const registry = createRegistry([
     createSkill({
@@ -2189,7 +2202,7 @@ test("runExecutionGraph refuses a malformed completed output without repeating e
   assert.equal(executions, 0);
 });
 
-test("runExecutionGraph refuses a completed output whose typed envelope disagrees with the saved result", async () => {
+test("runExecutionGraphOnLangGraph refuses a completed output whose typed envelope disagrees with the saved result", async () => {
   let executions = 0;
   const registry = createRegistry([
     createSkill({
@@ -2226,7 +2239,7 @@ test("runExecutionGraph refuses a completed output whose typed envelope disagree
   assert.equal(executions, 0);
 });
 
-test("runExecutionGraph forwards only validated declared structured outputs", async () => {
+test("runExecutionGraphOnLangGraph forwards only validated declared structured outputs", async () => {
   const observed = [];
   const registry = createRegistry([
     createSkill({
@@ -2290,7 +2303,7 @@ test("runExecutionGraph forwards only validated declared structured outputs", as
   assert.equal(Object.hasOwn(outcome.nodeRuns[0].result.graphOutput, "undeclared"), false);
 });
 
-test("runExecutionGraph awaits checkpoint before launching a dependent node", async () => {
+test("runExecutionGraphOnLangGraph awaits checkpoint before launching a dependent node", async () => {
   const checkpointEntered = createDeferred();
   const releaseCheckpoint = createDeferred();
   const executed = [];
@@ -2401,7 +2414,7 @@ test("a parallel sibling cannot wake dependents while their checkpoint is pendin
   assert.deepEqual(executed, ["compare", "summary", "risk"]);
 });
 
-test("runExecutionGraph stops before dependents when checkpoint persistence fails", async () => {
+test("runExecutionGraphOnLangGraph stops before dependents when checkpoint persistence fails", async () => {
   const executed = [];
   const registry = createRegistry([
     createSkill({

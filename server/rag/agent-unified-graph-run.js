@@ -29,7 +29,7 @@ import {
 } from "./capabilities/index.js";
 import { createCapabilityGraphAdapter } from "./capabilities/graph-contract.js";
 import {
-  getAgentRuntime,
+  assertAgentRuntimeSupported,
   getAgentUnifiedGraphCapabilityIds,
   getAgentUnifiedGraphRollout,
 } from "./config.js";
@@ -327,15 +327,15 @@ const setUnifiedExecutionPlanner = (session, { graph, planner }) =>
 
 const identity = async (response) => response;
 
-// Every entry that may run the graph on LangGraph (AGENT_RUNTIME=langgraph:
-// a fresh request, an approval continuation, a startup resume) refuses
-// LangSmith tracing before anything else happens, as the ADR requires of
-// every outer entry; the stage and the executor refuse again on their own
-// path. On the native runtime this reads one environment value.
+// Every entry that runs the graph on LangGraph (a fresh request, an approval
+// continuation, a startup resume) refuses LangSmith tracing before anything
+// else happens, as the ADR requires of every outer entry, and refuses a
+// removed AGENT_RUNTIME value (native above all), which asked for a scheduler
+// that no longer exists; the stage and the executor refuse again on their
+// own path.
 const assertRuntimeEntryAllowed = () => {
-  if (getAgentRuntime() === "langgraph") {
-    assertLangSmithTracingDisabled();
-  }
+  assertLangSmithTracingDisabled();
+  assertAgentRuntimeSupported();
 };
 
 const isPersistedGraphApprovalPause = (error) =>

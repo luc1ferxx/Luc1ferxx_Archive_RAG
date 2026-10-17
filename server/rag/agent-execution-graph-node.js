@@ -30,14 +30,17 @@ import {
 
 // What one node of a validated ExecutionGraph does, apart from when it runs.
 //
-// The scheduler in agent-execution-graph-runner.js decides order, the
-// concurrency cap and side-effect exclusivity. Everything a node does once it
-// is chosen lives here: which inputs it may read, the input and output gates,
+// The scheduler -- LangGraph, through rag/langgraph/run-execution-graph.js and
+// its concurrency gate (rag/langgraph/concurrency-gate.js) -- decides order,
+// the concurrency cap and side-effect exclusivity; admission and the run tail
+// are agent-execution-graph-runner.js. Everything a node does once it is
+// chosen lives here: which inputs it may read, the input and output gates,
 // the safe point, the approval park, the budget reservation, the fenced step
 // lifecycle and the settle order (trace, then the durable checkpoint, then the
-// status a dependant can see). A second scheduler (LangGraph, behind
-// AGENT_RUNTIME) calls these same functions, so the two runtimes cannot drift
-// apart on what a node is allowed to do, only on when it does it.
+// status a dependant can see). Until ADR 0001 phase 6 a native scheduler
+// called these same functions beside LangGraph, which is why they keep no
+// closure state and why what a node may do never depended on who scheduled
+// it.
 //
 // Nothing here keeps state between calls. A run's mutable state is handed in
 // explicitly: the node states and the map of validated outputs
@@ -549,9 +552,10 @@ export const createExecutionGraphStepLifecycle = ({
 
 /**
  * The run-wide inputs every node of one graph run reads. It takes the same
- * options as runExecutionGraph (the scheduler-only ones are ignored) and
- * applies the same defaults. `docIds` must already be checked against the
- * authorized scope; runExecutionGraph does that before it compiles the graph.
+ * options as runExecutionGraphOnLangGraph (the scheduler-only ones are
+ * ignored) and applies the same defaults. `docIds` must already be checked
+ * against the authorized scope; admitExecutionGraphRun does that before the
+ * graph is compiled.
  */
 export const createExecutionGraphNodeContext = ({
   accessScope,

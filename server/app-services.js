@@ -88,6 +88,7 @@ import {
   createWorkspaceArtifactService,
 } from "./rag/workspace-artifacts/index.js";
 import {
+  assertAgentRuntimeSupported,
   getAgentExecutionPlanner,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
@@ -280,6 +281,13 @@ export const buildChatResponse = async ({
 };
 
 export const createAppServices = (options = {}, { uploadsDirectory }) => {
+  // A removed AGENT_RUNTIME value (native above all) refuses to build the
+  // services, so every in-process app -- the monolith, the agent tier, an
+  // evaluation runner that calls createApp -- fails before it serves anything
+  // instead of running LangGraph regardless (ADR 0001 phase 6; server.js and
+  // startServiceRole check earlier still).
+  assertAgentRuntimeSupported();
+
   const ragService = {
     chat,
     clearDocuments,

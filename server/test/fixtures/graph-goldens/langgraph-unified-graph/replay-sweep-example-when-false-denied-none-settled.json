@@ -1,0 +1,469 @@
+{
+  "budget": {
+    "limits": {
+      "maxArxivPaperFetches": 1,
+      "maxCustomSkillCalls": 8,
+      "maxDocumentRagCalls": 2,
+      "maxResearchQuestions": 3,
+      "maxTraceSteps": 16,
+      "maxWebSearchCalls": 1
+    },
+    "runUsed": {
+      "costUsd": 0,
+      "modelCalls": 0,
+      "tokens": 0,
+      "unpricedModelCalls": 0
+    },
+    "used": {
+      "arxivPaperFetches": 0,
+      "customSkillCalls": 0,
+      "documentRagCalls": 0,
+      "researchQuestions": 0,
+      "traceSteps": 0,
+      "webSearchCalls": 0
+    }
+  },
+  "log": [],
+  "result": {
+    "errors": [],
+    "graphVersion": "v3",
+    "nodeRuns": [
+      {
+        "citationCount": 1,
+        "dependsOn": [],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "a",
+        "parallelSafe": true,
+        "reason": null,
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "durationMs": "<elapsed>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "a answered."
+          },
+          "label": "replay_a",
+          "ok": true,
+          "skillId": "replay_a",
+          "skillVersion": "1.0.0",
+          "text": "a answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "a answered."
+          }
+        },
+        "skillId": "replay_a",
+        "skillVersion": "1.0.0",
+        "status": "reused",
+        "stepId": "agent_graph_node:YQ"
+      },
+      {
+        "citationCount": 1,
+        "dependsOn": [],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "b",
+        "parallelSafe": true,
+        "reason": null,
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "durationMs": "<elapsed>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "b answered."
+          },
+          "label": "replay_b",
+          "ok": true,
+          "skillId": "replay_b",
+          "skillVersion": "1.0.0",
+          "text": "b answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "b answered."
+          }
+        },
+        "skillId": "replay_b",
+        "skillVersion": "1.0.0",
+        "status": "reused",
+        "stepId": "agent_graph_node:Yg"
+      },
+      {
+        "citationCount": 1,
+        "dependsOn": [
+          "a"
+        ],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "c",
+        "parallelSafe": true,
+        "reason": null,
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "durationMs": "<elapsed>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "c answered."
+          },
+          "label": "replay_c",
+          "ok": true,
+          "skillId": "replay_c",
+          "skillVersion": "1.0.0",
+          "text": "c answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "c answered."
+          }
+        },
+        "skillId": "replay_c",
+        "skillVersion": "1.0.0",
+        "status": "reused",
+        "stepId": "agent_graph_node:Yw"
+      },
+      {
+        "citationCount": 1,
+        "dependsOn": [
+          "c"
+        ],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "d",
+        "parallelSafe": true,
+        "reason": null,
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "durationMs": "<elapsed>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "d answered."
+          },
+          "label": "replay_d",
+          "ok": true,
+          "skillId": "replay_d",
+          "skillVersion": "1.0.0",
+          "text": "d answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "d answered."
+          }
+        },
+        "skillId": "replay_d",
+        "skillVersion": "1.0.0",
+        "status": "reused",
+        "stepId": "agent_graph_node:ZA"
+      },
+      {
+        "citationCount": 1,
+        "dependsOn": [
+          "a",
+          "b"
+        ],
+        "effects": "read_only",
+        "idempotency": "read_only_rag",
+        "nodeId": "e",
+        "parallelSafe": true,
+        "reason": null,
+        "result": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "durationMs": "<elapsed>",
+          "graphOutput": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "e answered."
+          },
+          "label": "replay_e",
+          "ok": true,
+          "skillId": "replay_e",
+          "skillVersion": "1.0.0",
+          "text": "e answered.",
+          "traceDetail": null,
+          "value": {
+            "abstained": false,
+            "citations": [
+              {
+                "docId": "doc-a",
+                "page": 1
+              }
+            ],
+            "text": "e answered."
+          }
+        },
+        "skillId": "replay_e",
+        "skillVersion": "1.0.0",
+        "status": "reused",
+        "stepId": "agent_graph_node:ZQ"
+      }
+    ],
+    "ok": true,
+    "results": [
+      {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-a",
+            "page": 1
+          }
+        ],
+        "durationMs": "<elapsed>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "a answered."
+        },
+        "label": "replay_a",
+        "ok": true,
+        "skillId": "replay_a",
+        "skillVersion": "1.0.0",
+        "text": "a answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "a answered."
+        }
+      },
+      {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-a",
+            "page": 1
+          }
+        ],
+        "durationMs": "<elapsed>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "b answered."
+        },
+        "label": "replay_b",
+        "ok": true,
+        "skillId": "replay_b",
+        "skillVersion": "1.0.0",
+        "text": "b answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "b answered."
+        }
+      },
+      {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-a",
+            "page": 1
+          }
+        ],
+        "durationMs": "<elapsed>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "c answered."
+        },
+        "label": "replay_c",
+        "ok": true,
+        "skillId": "replay_c",
+        "skillVersion": "1.0.0",
+        "text": "c answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "c answered."
+        }
+      },
+      {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-a",
+            "page": 1
+          }
+        ],
+        "durationMs": "<elapsed>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "d answered."
+        },
+        "label": "replay_d",
+        "ok": true,
+        "skillId": "replay_d",
+        "skillVersion": "1.0.0",
+        "text": "d answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "d answered."
+        }
+      },
+      {
+        "abstained": false,
+        "citations": [
+          {
+            "docId": "doc-a",
+            "page": 1
+          }
+        ],
+        "durationMs": "<elapsed>",
+        "graphOutput": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "e answered."
+        },
+        "label": "replay_e",
+        "ok": true,
+        "skillId": "replay_e",
+        "skillVersion": "1.0.0",
+        "text": "e answered.",
+        "traceDetail": null,
+        "value": {
+          "abstained": false,
+          "citations": [
+            {
+              "docId": "doc-a",
+              "page": 1
+            }
+          ],
+          "text": "e answered."
+        }
+      }
+    ],
+    "status": "completed"
+  }
+}
