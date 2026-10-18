@@ -470,6 +470,19 @@ describe("GET /health, /ready and /livez", () => {
     });
   });
 
+  // The hardened demo profile (deploy/demo/hardened.env): before, the setting
+  // made resolveOptionalAccessScope's scope throw for every credential naming
+  // no workspace, so no platform admin could read the checks at all.
+  test("API_AUTH_REQUIRE_WORKSPACE=true: a platform admin without a workspace still reads the details", async () => {
+    await withServer(authEnv({ API_AUTH_REQUIRE_WORKSPACE: "true" }), async (server) => {
+      await assertDetailed(server, apiKey("platform-token"), "tenantless platform admin");
+      await assertDetailed(server, apiKey("multi-workspace-admin-token"), "admin with a workspace list");
+      await assertDetailed(server, apiKey("viewer-token"), "admin.viewer in a workspace");
+      await assertStatusOnly(server, apiKey("member-token"), "member");
+      await assertStatusOnly(server, {}, "no credential");
+    });
+  });
+
   test("RBAC enforce: a global workspace.admin reads the details, a workspace-scoped one does not", async () => {
     await withServer(authEnv({ RBAC_MODE: "enforce" }), async (server) => {
       await assertDetailed(server, apiKey("global-workspace-admin-token"), "global workspace.admin");

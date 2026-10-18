@@ -285,7 +285,19 @@ const constantTimeEqual = (left, right) => {
   return crypto.timingSafeEqual(leftBuffer, rightBuffer);
 };
 
-const resolveWorkspaceId = (req, principal = {}) => {
+// API_AUTH_REQUIRE_WORKSPACE asks every authenticated request for a
+// workspace, except a principal with no workspace list on a tenantless
+// platform route (TENANTLESS_PLATFORM_PATHS): requireTenantScope lets exactly
+// those principals through there without a tenant, because the platform
+// routes act across tenants by design. Without the exception the setting
+// refused every platform admin: no workspace could be registered (POST
+// /admin/workspaces), erased or exported, and no usage or audit read across
+// tenants, since naming a workspace makes the routes treat the caller as that
+// workspace's admin instead.
+const waivesWorkspaceRequirement = (req, principal = {}) =>
+  normalizeAccessPrincipalWorkspaceIds(principal).length === 0 && isTenantlessPlatformPath(req.path);
+
+const resolveWorkspaceId = (req, principal = {}, { requireWorkspace = isApiAuthWorkspaceRequired() } = {}) => {
   const requestedWorkspaceId =
     getRequestValue(req, "x-workspace-id") ||
     (isTenantTargetPath(req) ? "" : getRequestValue(req, "workspaceId"));
@@ -339,19 +351,19 @@ const resolveWorkspaceId = (req, principal = {}) => {
     return allowedWorkspaceIds[0];
   }
 
-  if (isApiAuthWorkspaceRequired() && Boolean(principal.authenticated)) {
+  if (requireWorkspace && Boolean(principal.authenticated) && !waivesWorkspaceRequirement(req, principal)) {
     throw new AccessScopeError("Authenticated requests require a workspace scope.");
   }
 
   return "";
 };
 
-const buildAccessScope = (req, principal = {}) => {
+const buildAccessScope = (req, principal = {}, options = {}) => {
   const target = {
     authenticated: Boolean(principal.authenticated),
     authProvider: normalizeString(principal.authProvider),
     userId: resolveUserId(req, principal),
-    workspaceId: resolveWorkspaceId(req, principal),
+    workspaceId: resolveWorkspaceId(req, principal, options),
   };
 
   if (!target.authProvider) {
@@ -424,9 +436,11 @@ export const getRequestAccessScope = (req) => req.accessScope ?? {};
  * null, so a probe without a key keeps its status code. requireTenantScope is
  * not applied: the scope only feeds a permission decision and never binds a
  * database tenant or reaches a store, which is what a tenantless scope would
- * widen. The TENANT_MEMBERSHIP=enforce check is (a refusal, or a registry that
- * cannot answer, is null too). With auth off it is the unauthenticated scope
- * requireApiAuth builds.
+ * widen. For the same reason API_AUTH_REQUIRE_WORKSPACE does not ask for a
+ * workspace here, so a platform admin (no workspace) reads the details with
+ * the setting on as with it off. The TENANT_MEMBERSHIP=enforce check is (a
+ * refusal, or a registry that cannot answer, is null too). With auth off it is
+ * the unauthenticated scope requireApiAuth builds.
  */
 export const resolveOptionalAccessScope = async (req) => {
   if (!isApiAuthEnabled()) {
@@ -456,7 +470,11 @@ export const resolveOptionalAccessScope = async (req) => {
       return null;
     }
 
-    const accessScope = buildAccessScope(req, { ...principal, authenticated: true });
+    const accessScope = buildAccessScope(
+      req,
+      { ...principal, authenticated: true },
+      { requireWorkspace: false }
+    );
     const membership = checkTenantMembership(req, principal, accessScope);
 
     if (!membership) {

@@ -275,7 +275,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 
 ## 多租户治理
 
-第 3、4 阶段新增的设置。除特别注明外，默认都是关闭或不限，不设置时行为与之前一致。
+第 3、4 阶段新增的设置。除特别注明外，默认都是关闭或不限，不设置时行为与之前一致。把这些开关和第 1、2 阶段的开关全部打开的完整示例是 `deploy/demo/hardened.env`（只用于演示，token 和密码是公开的演示值），用法见 [demo-tenant-isolation.md](demo-tenant-isolation.md)。
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
@@ -390,7 +390,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | `API_AUTH_ENABLED` | `false` | 是否启用 API token 鉴权。 |
 | `API_AUTH_TOKEN` | 空 | 单用户/本地开发 token。 |
 | `API_AUTH_TOKENS` | 空 | 多用户 token 映射。 |
-| `API_AUTH_REQUIRE_WORKSPACE` | `false` | 鉴权请求是否必须解析出 workspace scope；多租户部署建议设为 `true`。 |
+| `API_AUTH_REQUIRE_WORKSPACE` | `false` | 鉴权请求是否必须解析出 workspace scope；多租户部署建议设为 `true`。没有 workspace 列表的平台身份在平台管理路由（`TENANTLESS_PLATFORM_PATHS`：`/admin/workspaces`、`/admin/tenants/*`、`/admin/usage`、`/admin/audit`、`/admin/status` 等）上不受此限制，健康探针的权限判断也不要求 workspace；其他路由照常要求。 |
 | `API_AUTH_JWT_ENABLED` | `false` | 是否允许 `Authorization: Bearer <jwt>` 走 HS256 JWT 验证。静态 token 仍优先匹配。 |
 | `API_AUTH_JWT_HS256_SECRET` / `API_AUTH_JWT_SECRET` | 空 | JWT HS256 secret；`API_AUTH_JWT_ENABLED=true` 时必须配置。 |
 | `API_AUTH_JWT_ISSUER` | 空 | 可选 issuer 校验，对应 JWT `iss`。 |

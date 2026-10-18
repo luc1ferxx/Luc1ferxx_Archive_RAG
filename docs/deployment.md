@@ -23,6 +23,7 @@ docker compose --profile app up -d --build
 | `redis`（`--profile shared-state`） | 6379 | `127.0.0.1` |
 | `docling`（`--profile layout`） | 5010 | `127.0.0.1` |
 | `compose.services.yml` 的 `api` | `ARCHIVE_RAG_API_PORTS`，默认 5001 | `127.0.0.1` |
+| `compose.demo.yml` | 不新增端口（`demo-model` 只在 compose 网络内） | — |
 
 - **为什么默认只绑本机**：默认配置不适合放到网络上：PostgreSQL 是超级用户 `postgres`，密码也是 `postgres`；Redis 没有密码；API 默认不开鉴权。而在 Linux 上，Docker 发布的端口会绕过 ufw / firewalld，防火墙规则挡不住。
 - **有意在局域网开放**：所有发布的端口都绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`）。按下面的顺序做：
@@ -145,6 +146,7 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 - 升级到包含分块丢字修复的版本后，已入库文档仍是旧分块：表格行、"Label:" 引导句和页尾标题行可能不在任何 chunk 里。运行 `cd server && npm run vector:reindex -- --from documents --apply` 按新切块器重建。新上传和 `PUT /documents/:docId` 替换自动使用新切块器。重复上传相同内容不会重建，入库去重会直接指向已有文档。
 - 镜像构建时把 `VITE_DOMAIN` 设成 `same-origin`。构建参数 `VITE_API_AUTH_TOKEN` 会打进前端包、发给每个浏览器，只适合单个可信用户。多用户部署用 `API_AUTH_TOKENS`，由前端之外的方式分发 token。
 - 镜像以非 root 用户 `node` 运行，只有 `/data` 可写。
+- 多租户隔离演示：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app up -d --build` 用 `deploy/demo/hardened.env` 打开全部租户隔离开关，PostgreSQL 用独立的 `pgdata-demo` 卷并在初始化时建好角色拆分的两个登录，app 以运行时登录连接，另起一个不发布端口的假模型。token 和密码都是公开的演示值，不发布新端口，不要配合 `ARCHIVE_RAG_BIND_HOST=0.0.0.0` 使用。详见 [demo-tenant-isolation.md](demo-tenant-isolation.md)。
 - 镜像里的 npm 10 在安装服务端依赖时会要求 `@qdrant/js-client-rest` 的 peer 依赖 typescript。本机 npm 11 生成的锁文件里没有它，而运行时也用不到，所以 Dockerfile 用 `--legacy-peer-deps` 安装。
 
 ## 拆分部署（可选）

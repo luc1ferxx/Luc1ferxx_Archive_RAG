@@ -30,6 +30,7 @@ const ENV_KEYS = [
   "API_AUTH_ENABLED",
   "API_AUTH_JWT_ENABLED",
   "API_AUTH_OIDC_ENABLED",
+  "API_AUTH_REQUIRE_WORKSPACE",
   "API_AUTH_TOKEN",
   "API_AUTH_TOKENS",
   "ARCHIVE_RAG_ROLE",
@@ -508,6 +509,56 @@ test("RBAC enforce checks the same permissions app-wide first", async () => {
     response = await call("operator-token", "PUT", "/admin/workspaces/ws-a/members/x", { roles: [] });
     assert.equal(response.status, 403);
     assert.equal(response.json.permission, "admin.tenants.write");
+  } finally {
+    await harness.close();
+  }
+});
+
+// The hardened demo profile (deploy/demo/hardened.env) turns
+// API_AUTH_REQUIRE_WORKSPACE on next to the registry. Before, the setting
+// refused every platform credential (no workspace) with "Authenticated
+// requests require a workspace scope." on the platform routes too, so no
+// workspace could be registered at all; naming one by header made the caller
+// that workspace's admin, which may not register workspaces either.
+test("API_AUTH_REQUIRE_WORKSPACE=true: platform credentials still use the platform routes; tenant routes still need a workspace", async () => {
+  const harness = await setup(
+    authEnv({
+      API_AUTH_REQUIRE_WORKSPACE: "true",
+      API_AUTH_TOKENS: JSON.stringify({
+        ...TOKENS,
+        // A workspace list is no platform credential: it still has to pick one.
+        "listed-manager-token": { roles: ["admin.tenant_manager"], userId: "lia", workspaces: ["ws-a", "ws-b"] },
+      }),
+    })
+  );
+  const { call } = harness;
+
+  try {
+    let response = await call("manager-token", "POST", "/admin/workspaces", { id: "ws-a" });
+    assert.equal(response.status, 201, JSON.stringify(response.json));
+
+    response = await call("manager-token", "PUT", "/admin/workspaces/ws-a/members/mia", { roles: ["workspace.member"] });
+    assert.equal(response.status, 201, JSON.stringify(response.json));
+
+    response = await call("owner-token", "GET", "/admin/workspaces");
+    assert.equal(response.status, 200, JSON.stringify(response.json));
+    assert.deepEqual(response.json.workspaces.map((workspace) => workspace.workspaceId), ["ws-a"]);
+
+    response = await call("owner-token", "GET", "/admin/audit");
+    assert.equal(response.status, 200, JSON.stringify(response.json));
+
+    // Outside the platform routes the requirement holds for the same
+    // credential, and on them for a credential with a workspace list.
+    response = await call("manager-token", "GET", "/documents");
+    assert.equal(response.status, 403);
+    assert.equal(response.json.error, "Authenticated requests require a workspace scope.");
+
+    response = await call("listed-manager-token", "GET", "/admin/workspaces");
+    assert.equal(response.status, 403);
+    assert.equal(response.json.error, "Authenticated requests require a workspace scope.");
+
+    response = await call("member-token", "GET", "/documents");
+    assert.equal(response.status, 200);
   } finally {
     await harness.close();
   }

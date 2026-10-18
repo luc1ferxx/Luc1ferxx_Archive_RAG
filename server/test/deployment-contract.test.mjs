@@ -21,6 +21,7 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import dotenv from "dotenv";
 import {
   getCrossEncoderEndpoint,
   getCrossEncoderModel,
@@ -45,6 +46,9 @@ const serviceDirectory = path.join(evaluationDirectory, "cross-encoder-service")
 const composePath = path.join(repositoryRoot, "docker-compose.yml");
 const rerankOverridePath = path.join(repositoryRoot, "compose.rerank.yml");
 const servicesOverridePath = path.join(repositoryRoot, "compose.services.yml");
+const demoOverridePath = path.join(repositoryRoot, "compose.demo.yml");
+const demoProfilePath = path.join(repositoryRoot, "deploy", "demo", "hardened.env");
+const splitRolesSqlPath = path.join(repositoryRoot, "deploy", "postgres", "create-split-roles.sql");
 const appDockerfilePath = path.join(repositoryRoot, "Dockerfile");
 const rerankerDockerfilePath = path.join(serviceDirectory, "Dockerfile");
 const rerankerDockerignorePath = path.join(serviceDirectory, "Dockerfile.dockerignore");
@@ -725,7 +729,7 @@ test("each role has a start script through the image's entry point", async () =>
 // with a known password, Redis without one, API auth off) are only fit for
 // loopback. Every published port therefore binds ARCHIVE_RAG_BIND_HOST, which
 // defaults to 127.0.0.1; 0.0.0.0 is a deliberate choice (docs/deployment.md).
-const composeFilesWithPorts = [composePath, rerankOverridePath, servicesOverridePath];
+const composeFilesWithPorts = [composePath, rerankOverridePath, servicesOverridePath, demoOverridePath];
 const bindHostPrefix = "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:";
 
 // Every entry of every `ports:` block in a compose file, at any depth, plus
@@ -761,6 +765,9 @@ test("every published port binds ARCHIVE_RAG_BIND_HOST, loopback by default", as
     [composePath]: ["5432:5432", "6379:6379", "5001:5001", "5010:5001"],
     [rerankOverridePath]: [],
     [servicesOverridePath]: ["${ARCHIVE_RAG_API_PORTS:-5001}:5001"],
+    // The demo override publishes nothing of its own: the app and postgres
+    // keep docker-compose.yml's loopback ports, the demo model none.
+    [demoOverridePath]: [],
   };
 
   for (const filePath of composeFilesWithPorts) {
@@ -833,6 +840,81 @@ test("the postgres password comes from POSTGRES_PASSWORD, and every database URL
       assert.doesNotMatch(line, /postgres(ql)?:\/\/[^:/@\s]+:(?!\$\{POSTGRES_PASSWORD:-)[^@\s]*@/, `${name}: ${line.trim()}`);
     }
   }
+});
+
+// compose.demo.yml: the one-click app on the hardened tenant-isolation profile
+// (docs/demo-tenant-isolation.md), connected as the role split's runtime
+// login. Its database passwords and tokens are public demo values on purpose;
+// what must hold is that they are the profile's, that the app never connects
+// as the postgres superuser, and that the demo never touches the default
+// data volume.
+test("the demo override runs the app on the hardened profile as the split's runtime login", async () => {
+  const [demo, profileText, splitRolesSql] = await Promise.all([
+    readText(demoOverridePath),
+    readText(demoProfilePath),
+    readText(splitRolesSqlPath),
+  ]);
+  const profile = dotenv.parse(profileText);
+  const app = rawServiceEnvironment(demo, "app");
+  const postgres = rawServiceEnvironment(demo, "postgres");
+  const atComposeHost = (url) => {
+    const parsed = new URL(url);
+
+    parsed.hostname = "postgres";
+    return parsed.toString();
+  };
+
+  // The profile after server/.env, and required: without it there is no demo.
+  assert.match(
+    serviceText(demo, "app"),
+    /^\s{4}env_file:\n\s{6}- path: deploy\/demo\/hardened\.env\n\s{8}required: true$/m
+  );
+
+  // The profile's two logins, at the postgres service instead of 127.0.0.1.
+  assert.equal(app.POSTGRES_DATABASE_URL, atComposeHost(profile.POSTGRES_DATABASE_URL));
+  assert.equal(app.POSTGRES_MIGRATION_DATABASE_URL, atComposeHost(profile.POSTGRES_MIGRATION_DATABASE_URL));
+  assert.equal(app.LONG_MEMORY_DATABASE_URL, app.POSTGRES_DATABASE_URL);
+
+  const runtime = new URL(app.POSTGRES_DATABASE_URL);
+  const owner = new URL(app.POSTGRES_MIGRATION_DATABASE_URL);
+
+  assert.notEqual(runtime.username, "postgres", "the app does not connect as the superuser");
+  assert.notEqual(runtime.username, owner.username);
+
+  // create-split-roles.sql creates exactly these logins and the database by
+  // default, and reads the passwords the postgres service is given.
+  assert.match(splitRolesSql, new RegExp(`\\\\set runtime ${runtime.username}\\n`, "u"));
+  assert.match(splitRolesSql, new RegExp(`\\\\set owner ${owner.username}\\n`, "u"));
+  assert.match(splitRolesSql, new RegExp(`\\\\set database ${runtime.pathname.slice(1)}\\n`, "u"));
+  assert.match(splitRolesSql, /\\getenv owner_password ARCHIVE_RAG_OWNER_PASSWORD/u);
+  assert.match(splitRolesSql, /\\getenv runtime_password ARCHIVE_RAG_RUNTIME_PASSWORD/u);
+  assert.equal(postgres.ARCHIVE_RAG_OWNER_PASSWORD, decodeURIComponent(owner.password));
+  assert.equal(postgres.ARCHIVE_RAG_RUNTIME_PASSWORD, decodeURIComponent(runtime.password));
+
+  // The init script is mounted, into a volume of its own (the image runs
+  // init scripts only on an empty data directory).
+  const postgresText = serviceText(demo, "postgres");
+
+  assert.match(postgresText, /^\s{6}- pgdata-demo:\/var\/lib\/postgresql\/data$/m);
+  assert.match(
+    postgresText,
+    /^\s{6}- \.\/deploy\/postgres\/create-split-roles\.sql:\/docker-entrypoint-initdb\.d\/[0-9a-z-]+\.sql:ro$/m
+  );
+  assert.doesNotMatch(demo, /^\s*- pgdata:/m);
+
+  // The demo model: the app image, on the compose network only, in the app
+  // profile, and the app waits for it.
+  const model = serviceText(demo, "demo-model");
+  const modelPort = model.match(/"fake-model", "--host", "0\.0\.0\.0", "--port", "(\d+)"/u)?.[1];
+
+  assert.ok(modelPort, "demo-model runs demo-tenants.mjs fake-model");
+  assert.match(model, /^\s{4}profiles: \["app"\]$/m);
+  assert.match(model, /^\s{4}image: luc1ferxx-archive-rag:local$/m);
+  assert.doesNotMatch(model, /^\s{4}ports:/m);
+  assert.equal(app.OPENAI_BASE_URL, `http://demo-model:${modelPort}/v1`);
+  assert.equal(dependsOn(demo, "app")["demo-model"], "service_healthy");
+  // Its own healthcheck (the image's probes the app's /livez on 5001).
+  assert.equal(model.match(/fetch\('http:\/\/127\.0\.0\.1:(\d+)\/v1\/embeddings'/u)?.[1], modelPort);
 });
 
 // The script of the app image's HEALTHCHECK (`CMD node -e "..."`, shell form).
