@@ -63,7 +63,7 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 - 另起一个 `docling` 服务：docling-serve CPU 版，压缩后约 2 GB，自带模型；
 - 应用会把 PDF 交给它解析。它能按多栏的阅读顺序输出正文，并把表格还原成带列名的行；
 - 服务不可用时退回 pdf.js，并在 `/health` 的 `checks.pdfParser` 里报错；
-- 镜像标签是 `latest`，没有固定版本：仓库里没有记录评测时用的 docling-serve 版本。要可复现的部署，自己把 `docker-compose.yml` 里的标签换成确定的版本；
+- 镜像标签是 `latest`，没有固定版本。`PDF_PARSER=auto` 和页段请求是在 docling-serve-cpu 1.37.0（docling 2.138.0，`ghcr.io/docling-project/docling-serve-cpu@sha256:5a8367f3f657c26755605c3b2255546674833209a18afc2011598f4c045c6db3`）上验证的（[evaluation.md](evaluation.md)「真实 docling-serve 上的验证」）；之前的"版面解析"评测没有记录版本。要可复现的部署，把 `docker-compose.yml` 里的标签换成这个 digest 或确定的版本；
 - 效果和代价见 [evaluation.md](evaluation.md) 的"版面解析"。
 
 **只把需要的页交给 Docling（`PDF_PARSER=auto`）**：
