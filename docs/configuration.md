@@ -311,6 +311,25 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 - **保留期清理**：读不到按 workspace 的保留期策略时（包括系统角色丢了权限），这一轮不删任何数据库记录，下一轮再试，不会退回全局期限。
 - **长期记忆按 workspace（`LONG_MEMORY_SCOPE=workspace`）**：开启前写入的记忆 workspace 为空，仍是用户级，在该用户的每个 workspace 里都能看到，直到删除。逐条删 `DELETE /memory/:memoryId`，或在任一 workspace 里 `DELETE /memory` 清空（会删掉这个 workspace 能看到的全部：本 workspace 的行和用户级的行，包括偏好）；也可以对"不在任何 workspace 的该用户"做一次租户擦除（`--user <id>`，不带 `--workspace`）。改回 `user` 后，带 workspace 的行在租户请求里只在自己的 workspace 可见（RLS），按用户的擦除仍会全部覆盖，但只按 workspace 的擦除不再覆盖长期记忆。
 
+### 租户文件加密（第 5 阶段）
+
+默认关闭。关闭时写入的字节和以前完全一样；读取时不管开关，都能识别密文和旧的明文。
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `TENANT_ENCRYPTION` | `off` | `on`：租户文件字节写入时做信封加密（每个对象一把随机数据密钥，AES-256-GCM，数据密钥由租户密钥包裹）。覆盖 `rag_documents.file_bytes`（以及无数据库时文件注册表里的文档文件）、`rag_ingest_jobs.file_bytes`、`rag_ingest_jobs_outputs.payload`（PDF、页面和切块文本、向量）、上传会话的分块文件。一次请求或一次入库尝试内的临时文件（multer 收到的上传、合并后的分块上传、`ingest-tmp/`、arXiv 下载、reindex 和索引版本构建的临时副本）用只存在于本进程内存里的密钥加密，进程结束后就无法读取。其他值拒绝启动。 |
+| `TENANT_KMS_PROVIDER` | `local` | 密钥管理实现。目前只有 `local`：本机上的密钥文件，**仅用于演示**。生产环境应换成云 KMS 或 HSM（同一个接口，见 `server/rag/kms/index.js`），本仓库没有实现。 |
+| `TENANT_KEYSTORE_DIR` | `RAG_DATA_DIRECTORY` 的上一级目录下的 `tenant-keystore` | 每个租户密钥一个文件（文件名是作用域的哈希，不含原始 id），目录 0700、文件 0600。 |
+| `TENANT_KMS_MASTER_KEY_FILE` | 同一目录下的 `tenant-kms-master.key` | 包裹所有租户密钥的主密钥，首次使用时以 0600 创建；其他用户可读时拒绝使用。 |
+
+- **密钥作用域**：一个 workspace 一把；不属于任何 workspace 的记录按用户一把；没有任何归属的记录（关闭 auth、单个共享 token）共用一把 `unscoped` 密钥。擦除 workspace 时销毁该 workspace 的密钥；擦除不在任何 workspace 里的用户时销毁该用户的密钥；只擦除 workspace 里的某一个用户时只删行、不销毁密钥（密钥是整个 workspace 共用的，结果里列为 `kept`）。
+- **密文绑定**：每个信封的 AAD 都包含记录的 workspace、用户、对象类型和对象 id，由读取方从行本身取得。把一行的密文复制到另一个租户或另一个文档的行里，会以带错误码的 500 失败，不会返回乱码。改动任何一个字节、密钥被销毁或找不到，也一样以错误码失败（`TENANT_ENVELOPE_AUTH_FAILED`、`TENANT_KEY_DESTROYED` 等）。
+- **备份**：密钥库和主密钥都不在 PostgreSQL 里，所以数据库备份里没有可用的密钥；擦除后销毁密钥，旧备份里这个租户的文件字节也就无法再解密。密钥库本身不要和数据库备份放在一起，也不要用同样长的保留期备份它。多实例或拆分部署时，所有读写租户文件的进程（api、入库 worker、agent tier、CLI）必须看到同一个密钥库和主密钥。
+- **不加密的部分**：切块文本、向量、tsvector、run 快照、反馈和记忆仍是明文，因为检索和 agent 要直接读它们；内存版入库队列也不加密（不落盘）。擦除会删除这些数据，但更早的数据库备份里仍然有，所以数据库备份的保留期必须有上限。`content_sha256` 和 `file_size` 记录的是明文的哈希和大小；入库排队的字节上限按存储的字节计算（每个信封多约 200 字节）。
+- **运维命令**：`npm run tenant:keys -- status [--workspace <id> | --user <id> | --unscoped]`；`rotate`（新版本用于新写入，旧版本仍可读）；`rewrap`（把已有信封的数据密钥改由最新版本包裹，只改头部，不重新加密内容；它挡不住已经同时拿到旧版本密钥和数据库副本的人，因为数据密钥没变）；`encrypt-existing`（在系统路径上把 PostgreSQL 里的旧明文逐行加密，跳过正被写入的行和运行中的入库任务，可重复执行；`--apply` 需要先打开 `TENANT_ENCRYPTION`；不覆盖无数据库时的文件注册表，那些文件在文档再次写入时加密）；`destroy`（必须加 `--apply`）。除 `status` 外默认只预览。
+- **健康检查**：只有打开 `TENANT_ENCRYPTION` 时才出现 `checks.tenantEncryption`（排在最后，仅在承担 api 或 agent 的进程里），报告密钥库和主密钥是否可读；有密钥却没有可用的主密钥、密钥文件损坏、主密钥权限过宽时为 error。
+- **本地实现的限制**：销毁密钥时先用零覆盖密钥文件再换成只记录版本号的墓碑文件；在 APFS、btrfs、ZFS 这类写时复制文件系统或 SSD 上，旧数据块可能仍然存在，而且它们由仍然存在的主密钥包裹，所以本地实现的"粉碎"只是尽力而为。
+
 ## Vector store
 ## Vector store
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -47,6 +47,8 @@ import {
   renderPgvectorBm25InstallStatement,
 } from "./vector-store-pgvector-sparse.js";
 import { stampChunkDocumentVersion } from "./vector-store.js";
+import { decryptTenantBytes, documentFileContext } from "./tenant-encryption.js";
+import { writeWorkingFile } from "./working-files.js";
 import {
   EMBEDDING_SPACE_SOURCES,
   INDEX_VERSION_ERROR_CODES,
@@ -548,7 +550,8 @@ const readDocumentSource = async (docId) =>
     await runAsDatabaseSystem(() =>
       getPgvectorRuntime().query(
         `/* index_versions:document_source */
-          SELECT doc_id, file_name, file_bytes, profile, uploaded_at::text AS uploaded_at, content_version
+          SELECT doc_id, file_name, file_bytes, profile, uploaded_at::text AS uploaded_at, content_version,
+                 owner_user_id, workspace_id
           FROM ${getDocumentsTableName()}
           WHERE doc_id = $1`,
         [docId]
@@ -567,7 +570,7 @@ export const loadStoredDocumentPages = async ({ fileBuffer }) => {
   const filePath = path.join(directory, "document.pdf");
 
   try {
-    await writeFile(filePath, fileBuffer);
+    await writeWorkingFile(filePath, fileBuffer);
     return await loadPdfPages(filePath);
   } finally {
     await rm(directory, { force: true, recursive: true });
@@ -576,10 +579,30 @@ export const loadStoredDocumentPages = async ({ fileBuffer }) => {
 
 const buildDocumentChunks = async ({ loadPages, source }) => {
   const docId = String(source.doc_id);
-  const fileBuffer = Buffer.from(source.file_bytes ?? []);
+  const storedBytes = Buffer.from(source.file_bytes ?? []);
 
-  if (fileBuffer.byteLength === 0) {
+  if (storedBytes.byteLength === 0) {
     throw new DocumentSourceError(`No PDF bytes are stored for ${docId}.`);
+  }
+
+  // TENANT_ENCRYPTION: an envelope is decrypted with the row's own owner
+  // columns; a key that was destroyed (or a changed byte) fails the build of
+  // this document, never the parser on ciphertext. Plaintext passes through.
+  let fileBuffer;
+
+  try {
+    fileBuffer = await decryptTenantBytes(
+      storedBytes,
+      documentFileContext({
+        docId,
+        userId: source.owner_user_id ?? "",
+        workspaceId: source.workspace_id ?? "",
+      })
+    );
+  } catch (error) {
+    throw new DocumentSourceError(
+      `Decrypting the stored PDF of ${docId} failed: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 
   let pages;

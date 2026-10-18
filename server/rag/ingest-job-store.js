@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { open, writeFile } from "node:fs/promises";
 
 import {
   getDocumentsPostgresTable,
@@ -11,6 +10,7 @@ import {
   getRagIngestMaxPendingJobsPerWorkspace,
   getRagIngestStageRetryPolicy,
   isPostgresDatabaseConfigured,
+  isTenantEncryptionEnabled,
 } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import {
@@ -33,10 +33,20 @@ import {
 import { createPostgresNotificationListener } from "./postgres-notification-listener.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import {
+  createTenantBytesDecoder,
+  decryptTenantBytes,
+  encryptTenantBytes,
+  ingestJobFileContext,
+  ingestJobOutputContext,
+  isTenantEnvelope,
+  maybeEncryptTenantBytes,
+} from "./tenant-encryption.js";
+import {
   createPostgresTenantRecordMethods,
   summarizeTenantRecords,
   tenantSelectorMatches,
 } from "./tenant-records.js";
+import { createWorkingFileWriter, writeWorkingFile } from "./working-files.js";
 
 // Jobs for RAG_INGEST_MODE=async (migration 015). The upload route enqueues a
 // validated PDF; a worker (rag/ingest-worker.js) claims it, ingests it and
@@ -95,6 +105,18 @@ import {
 //   dead-letter jobs of deleted documents as failed with canceled_reason
 //   'document_deleted' (migration 040) and drops their bytes and outputs
 //   (rag/document-deletion-cascade.js), by the same access scope rule.
+//
+// Encryption at rest (TENANT_ENCRYPTION=on, rag/tenant-encryption.js): the
+// PostgreSQL store writes a job's file bytes and every stage output payload as
+// tenant envelopes, the PDF bound to the job (one context whether it sits in
+// the row or, after parse, in the document_file output) and each other
+// output to the job and its name. Its readers decrypt with the job row's own
+// owner columns, read under the attempt's fence, and only when the bytes are
+// an envelope, so legacy rows cost no extra statement; the files they write
+// for an attempt are working files (rag/working-files.js). The pending byte
+// caps count the stored bytes (an envelope adds about 200). The in-memory
+// store holds its bytes in this process's memory, not at rest, and keeps
+// them as they are.
 
 export const INGEST_JOB_STATUSES = Object.freeze({
   deadLetter: "dead_letter",
@@ -643,6 +665,57 @@ export const createPostgresIngestJobStore = ({
     return true;
   };
 
+  // The owner columns of the job the attempt holds, under its fence: the
+  // context an envelope of the job is decrypted (or encrypted) with. Null when
+  // the attempt no longer holds it. Runs only for an envelope, or for a write
+  // with TENANT_ENCRYPTION=on.
+  const readFencedOwner = async (fence) => {
+    const result = await queryPostgres(
+      `SELECT owner_user_id, workspace_id FROM ${tableName()} WHERE ${FENCE_SQL}`,
+      fenceValues(fence)
+    );
+    const row = result.rows[0];
+
+    return row ? { userId: normalizeText(row.owner_user_id), workspaceId: normalizeText(row.workspace_id) } : null;
+  };
+
+  const resolveFencedContext = (fence, toContext) => async () => {
+    const owner = await readFencedOwner(fence);
+
+    if (!owner) {
+      throw Object.assign(new Error("The ingest job no longer belongs to this attempt."), { retryable: false });
+    }
+
+    return toContext({ jobId: fence.jobId, ...owner });
+  };
+
+  // Writes a stored value, read in slices, to `filePath` as a working file,
+  // decrypting it on the way when it is an envelope. A value that fails to
+  // decrypt leaves no file behind.
+  const copyStoredValueToFile = async ({ filePath, partSql, resolveContext, sizeSql, values }) => {
+    const writer = await createWorkingFileWriter(filePath, { flags: "w" });
+    const decoder = createTenantBytesDecoder({ resolveContext });
+
+    try {
+      const found = await readInSlices({
+        partSql,
+        sink: async (part) => writer.write(await decoder.push(part)),
+        sizeSql,
+        values,
+      });
+
+      if (found) {
+        await writer.write(await decoder.finish());
+      }
+
+      await writer.close();
+      return found;
+    } catch (error) {
+      await writer.abort();
+      throw error;
+    }
+  };
+
   const outputSizeSql = () => `
     SELECT octet_length(o.payload) AS size
     FROM ${outputsTableName()} AS o
@@ -716,15 +789,31 @@ export const createPostgresIngestJobStore = ({
     // after them. An export keeps an output's bytes only for document_file
     // (the upload itself, once parse moved it out of the job row); the pages,
     // chunks and embeddings outputs are derived from it and listed without
-    // their payload.
+    // their payload. Exported bytes are plaintext (envelopes decrypted with
+    // the row's owner columns).
     ...createPostgresTenantRecordMethods({
       initialize: () => runMigrations(),
       query: queryPostgres,
       tables: () => [
         {
           keyColumns: ["job_id", "output"],
-          mapRow: ({ payload, ...row }) =>
-            row.output === "document_file" ? { ...row, payload } : row,
+          mapRow: async ({ payload, ...row }) =>
+            row.output === "document_file"
+              ? {
+                  ...row,
+                  payload:
+                    payload === null || payload === undefined
+                      ? payload
+                      : await decryptTenantBytes(
+                          payload,
+                          ingestJobFileContext({
+                            jobId: row.job_id,
+                            userId: row.owner_user_id,
+                            workspaceId: row.workspace_id,
+                          })
+                        ),
+                }
+              : row,
           name: "ingest_job_outputs",
           pageSize: 5,
           sweepAfter: true,
@@ -733,6 +822,20 @@ export const createPostgresIngestJobStore = ({
         },
         {
           keyColumns: ["job_id"],
+          mapRow: async (row) =>
+            row.file_bytes === null || row.file_bytes === undefined
+              ? row
+              : {
+                  ...row,
+                  file_bytes: await decryptTenantBytes(
+                    row.file_bytes,
+                    ingestJobFileContext({
+                      jobId: row.job_id,
+                      userId: row.owner_user_id,
+                      workspaceId: row.workspace_id,
+                    })
+                  ),
+                },
           name: "ingest_jobs",
           pageSize: 5,
           table: tableName(),
@@ -811,6 +914,10 @@ export const createPostgresIngestJobStore = ({
           return insertResolvedDuplicate(job, duplicate);
         }
       }
+
+      // TENANT_ENCRYPTION=on: the row holds an envelope bound to this job and
+      // its owner; the content hash above stays the plaintext's.
+      job.fileBytes = await maybeEncryptTenantBytes(job.fileBytes, ingestJobFileContext(job));
 
       const limits = readPendingLimits(getPendingLimits);
       const { maxPendingBytes, maxPendingJobs } = limits;
@@ -1036,7 +1143,12 @@ export const createPostgresIngestJobStore = ({
           return false;
         }
 
-        const handle = await open(filePath, "w");
+        // A working file (encrypted with TENANT_ENCRYPTION=on); an envelope
+        // in the row is decrypted on the way, and fails without a file.
+        const writer = await createWorkingFileWriter(filePath, { flags: "w" });
+        const decoder = createTenantBytesDecoder({
+          resolveContext: resolveFencedContext(fence, ingestJobFileContext),
+        });
 
         try {
           for (let offset = 0; offset < Number(size); offset += fileReadChunkBytes) {
@@ -1051,13 +1163,18 @@ export const createPostgresIngestJobStore = ({
             const part = slice.rows[0]?.part;
 
             if (!part) {
+              await writer.close();
               return false;
             }
 
-            await handle.write(part);
+            await writer.write(await decoder.push(part));
           }
-        } finally {
-          await handle.close();
+
+          await writer.write(await decoder.finish());
+          await writer.close();
+        } catch (error) {
+          await writer.abort();
+          throw error;
         }
 
         return true;
@@ -1068,20 +1185,15 @@ export const createPostgresIngestJobStore = ({
     async copyOutputFile({ filePath, output, ...fence }) {
       const name = normalizeOutputName(output);
 
-      return runAsSystem(async () => {
-        const handle = await open(filePath, "w");
-
-        try {
-          return await readInSlices({
-            partSql: outputPartSql(),
-            sink: (part) => handle.write(part),
-            sizeSql: outputSizeSql(),
-            values: [...fenceValues(fence), name],
-          });
-        } finally {
-          await handle.close();
-        }
-      });
+      return runAsSystem(() =>
+        copyStoredValueToFile({
+          filePath,
+          partSql: outputPartSql(),
+          resolveContext: resolveFencedContext(fence, (owner) => ingestJobOutputContext({ ...owner, output: name })),
+          sizeSql: outputSizeSql(),
+          values: [...fenceValues(fence), name],
+        })
+      );
     },
 
     /**
@@ -1102,6 +1214,7 @@ export const createPostgresIngestJobStore = ({
         }
 
         const read = {};
+        let owner = null;
 
         for (const name of names) {
           const parts = [];
@@ -1115,7 +1228,14 @@ export const createPostgresIngestJobStore = ({
           });
 
           if (found) {
-            read[name] = Buffer.concat(parts);
+            const stored = Buffer.concat(parts);
+
+            if (isTenantEnvelope(stored)) {
+              owner ??= await resolveFencedContext(fence, (jobOwner) => jobOwner)();
+              read[name] = await decryptTenantBytes(stored, ingestJobOutputContext({ ...owner, output: name }));
+            } else {
+              read[name] = stored;
+            }
           }
         }
 
@@ -1140,9 +1260,26 @@ export const createPostgresIngestJobStore = ({
       ...fence
     }) {
       const outputName = output ? normalizeOutputName(output.name) : null;
-      const payload = output ? Buffer.from(output.payload ?? []) : null;
+      let payload = output ? Buffer.from(output.payload ?? []) : null;
       const table = tableName();
       const outputsTable = outputsTableName();
+
+      // TENANT_ENCRYPTION=on: the output is sealed for the job's owner (read
+      // under the fence first). An attempt that no longer holds the job writes
+      // nothing, as the statement below would not.
+      if (payload && isTenantEncryptionEnabled()) {
+        const owner = await runAsSystem(() => readFencedOwner(fence));
+
+        if (!owner) {
+          return false;
+        }
+
+        payload = await encryptTenantBytes(
+          payload,
+          ingestJobOutputContext({ jobId: fence.jobId, output: outputName, ...owner })
+        );
+      }
+
       const result = await runAsSystem(() =>
         queryPostgres(
           `
@@ -1966,7 +2103,7 @@ export const createInMemoryIngestJobStore = ({
         return false;
       }
 
-      await writeFile(filePath, job.fileBytes);
+      await writeWorkingFile(filePath, job.fileBytes);
       return true;
     },
 
@@ -1977,7 +2114,7 @@ export const createInMemoryIngestJobStore = ({
         return false;
       }
 
-      await writeFile(filePath, payload);
+      await writeWorkingFile(filePath, payload);
       return true;
     },
 

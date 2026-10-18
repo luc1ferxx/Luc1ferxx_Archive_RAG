@@ -43,7 +43,7 @@
 
 import "dotenv/config";
 
-import { mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdtemp, rm } from "fs/promises";
 import os from "os";
 import path from "path";
 import { pathToFileURL } from "url";
@@ -70,6 +70,7 @@ import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataPath, readJsonFileSync } from "./rag/storage.js";
 import { flushTenantUsageOnExit } from "./rag/tenant-usage.js";
 import { stampChunkDocumentVersion } from "./rag/vector-store.js";
+import { writeWorkingFile } from "./rag/working-files.js";
 import {
   beginPgvectorIndexWrite,
   buildSearchText,
@@ -349,7 +350,8 @@ const prepareFromDocumentBytes = async (document) => {
   const tempPath = path.join(tempDirectory, "document.pdf");
 
   try {
-    await writeFile(tempPath, stored.fileBuffer);
+    // The decrypted bytes (getDocumentFile), parsed from a working file.
+    await writeWorkingFile(tempPath, stored.fileBuffer);
     const pages = await loadPdfPages(tempPath);
     const chunks = chunkDocument({
       docId: document.docId,

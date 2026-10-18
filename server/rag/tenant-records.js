@@ -214,6 +214,7 @@ const DEFAULT_PAGE_SIZE = 200;
  *   before its parent. It is deleted once more after every table, so a row a
  *   racing writer appended between the two statements does not stay behind.
  * - `keyColumns`: the primary key, for keyset pages in a stable order.
+ * - `mapRow(row)`: the exported form of a row (may return a promise).
  *
  * Counting and deleting run in whatever database context the caller bound;
  * rag/tenant-lifecycle.js runs them as the system (runAsDatabaseSystem).
@@ -359,7 +360,8 @@ export const createPostgresTenantRecordMethods = ({
         const rows = result?.rows ?? [];
 
         for (const row of rows) {
-          yield { record: toTenantExportValue(spec.mapRow(row)), table: spec.name };
+          // mapRow may be async (it decrypts file bytes, rag/tenant-encryption.js).
+          yield { record: toTenantExportValue(await spec.mapRow(row)), table: spec.name };
         }
 
         if (spec.keyColumns.length === 0 || rows.length < spec.pageSize) {

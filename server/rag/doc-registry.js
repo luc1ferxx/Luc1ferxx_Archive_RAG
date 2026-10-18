@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { readFile as readBinaryFile } from "fs/promises";
 import { getDocumentsPostgresTable, isPostgresDatabaseConfigured } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { createDocumentLegacyImporter as createDefaultDocumentLegacyImporter } from "./document-legacy-importer.js";
@@ -7,6 +6,12 @@ import { buildPublicFilePath } from "./document-utils.js";
 import { queryPostgres as queryDefaultPostgres } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { createPostgresTenantRecordMethods, tenantSelectorMatches } from "./tenant-records.js";
+import {
+  decryptTenantBytes,
+  documentFileContext,
+  maybeEncryptTenantBytes,
+} from "./tenant-encryption.js";
+import { readWorkingFile } from "./working-files.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -292,9 +297,12 @@ const toPublicDocument = (document) =>
       }
     : null;
 
+// A source file path is a working file (an ingest attempt's copy, a merged
+// upload), encrypted with TENANT_ENCRYPTION=on; readWorkingFile returns its
+// plaintext and passes any other file through.
 export const resolveFileBuffer = async ({
   fileBuffer = null,
-  readFile = readBinaryFile,
+  readFile = readWorkingFile,
   sourceFilePath = "",
 } = {}) => {
   if (Buffer.isBuffer(fileBuffer)) {
@@ -329,6 +337,22 @@ const LEGACY_DOCUMENT_METADATA_COLUMNS =
   "doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at";
 const UNDEFINED_COLUMN = "42703";
 
+// A row's file bytes as plaintext (TENANT_ENCRYPTION, rag/tenant-encryption.js):
+// an envelope is decrypted with the row's own owner columns and docId as its
+// context, so bytes copied in from another row fail; legacy plaintext and a
+// null column pass through.
+const decryptStoredFileBytes = async (row = {}) =>
+  row.file_bytes === null || row.file_bytes === undefined
+    ? row.file_bytes
+    : decryptTenantBytes(
+        row.file_bytes,
+        documentFileContext({
+          docId: row.doc_id,
+          userId: row.owner_user_id,
+          workspaceId: row.workspace_id,
+        })
+      );
+
 const queryDocumentColumns = async (query, buildSql, values) => {
   try {
     return await query(buildSql(DOCUMENT_METADATA_COLUMNS), values);
@@ -352,15 +376,15 @@ export const createDocumentRegistryStore = ({
   createDocumentLegacyImporter = createDefaultDocumentLegacyImporter,
   getDocumentsTable = getDocumentsPostgresTable,
   queryPostgres = queryDefaultPostgres,
-  readFile = readBinaryFile,
+  readFile = readWorkingFile,
   runMigrations = runPostgresMigrations,
 } = {}) => ({
   backend: DOCUMENT_REGISTRY_BACKENDS.postgres,
 
   // The tenant export (rag/tenant-records.js): the tenant's rows with their
-  // file bytes, a few at a time. An erase goes through rag/index.js
-  // eraseTenantDocuments instead (chunks first, in the writers' lock order),
-  // so this listing cannot delete.
+  // file bytes (decrypted: an export holds plaintext), a few at a time. An
+  // erase goes through rag/index.js eraseTenantDocuments instead (chunks
+  // first, in the writers' lock order), so this listing cannot delete.
   ...createPostgresTenantRecordMethods({
     allowDelete: false,
     initialize: () => runMigrations(),
@@ -368,6 +392,10 @@ export const createDocumentRegistryStore = ({
     tables: () => [
       {
         keyColumns: ["doc_id"],
+        mapRow: async (row) => ({
+          ...row,
+          file_bytes: await decryptStoredFileBytes(row),
+        }),
         name: "documents",
         pageSize: 5,
         table: ensureTableName(getDocumentsTable),
@@ -575,6 +603,18 @@ export const createDocumentRegistryStore = ({
       sourceFilePath: document.sourceFilePath,
     });
     const fileSize = normalizedDocument.fileSize || fileBuffer.byteLength;
+    // Size and hash are the plaintext's; the column holds an envelope with
+    // TENANT_ENCRYPTION=on, bound to this docId and owner.
+    const contentSha256 =
+      normalizedDocument.contentSha256 ?? createHash("sha256").update(fileBuffer).digest("hex");
+    const storedBytes = await maybeEncryptTenantBytes(
+      fileBuffer,
+      documentFileContext({
+        docId: normalizedDocument.docId,
+        userId: normalizedDocument.ownerUserId,
+        workspaceId: normalizedDocument.workspaceId,
+      })
+    );
     const result = await resolveQuery(queryPostgres, client)(
       `
         INSERT INTO ${tableName} (
@@ -616,14 +656,14 @@ export const createDocumentRegistryStore = ({
         normalizedDocument.fileName,
         normalizedDocument.mimeType,
         fileSize,
-        fileBuffer,
+        storedBytes,
         normalizedDocument.chunkCount,
         normalizedDocument.pageCount,
         normalizedDocument.ownerUserId,
         normalizedDocument.workspaceId,
         normalizedDocument.profile,
         normalizedDocument.uploadedAt,
-        normalizedDocument.contentSha256 ?? createHash("sha256").update(fileBuffer).digest("hex"),
+        contentSha256,
         normalizedDocument.version,
         // The database's clock when the writer asks for it: async jobs order
         // replacements by their enqueue time (created_at, this clock too), so a
@@ -635,7 +675,11 @@ export const createDocumentRegistryStore = ({
     return mapRowToStoredDocument(result.rows[0]);
   },
 
-  async getFile(docId, accessScope = {}) {
+  // The file bytes come back as plaintext; an envelope that does not decrypt
+  // (a destroyed key, a changed byte, a row copied from another document)
+  // throws its coded error instead. `decrypt: false` (delete's visibility
+  // check, which does not read the bytes) skips the decryption.
+  async getFile(docId, accessScope = {}, { decrypt = true } = {}) {
     const normalizedDocId = normalizeDocId(docId);
 
     if (!normalizedDocId) {
@@ -665,9 +709,11 @@ export const createDocumentRegistryStore = ({
       return null;
     }
 
+    const storedBytes = Buffer.from(row.file_bytes ?? []);
+
     return {
       document,
-      fileBuffer: Buffer.from(row.file_bytes ?? []),
+      fileBuffer: decrypt ? await decryptStoredFileBytes({ ...row, file_bytes: storedBytes }) : storedBytes,
       mimeType: String(row.mime_type ?? "application/pdf"),
       fileName: String(row.file_name ?? "document.pdf"),
       fileSize: toPositiveInteger(row.file_size),
@@ -682,7 +728,7 @@ export const createDocumentRegistryStore = ({
     }
 
     const tableName = ensureTableName(getDocumentsTable);
-    const existingFile = await this.getFile(normalizedDocId, accessScope);
+    const existingFile = await this.getFile(normalizedDocId, accessScope, { decrypt: false });
 
     if (!existingFile) {
       return null;
@@ -1465,7 +1511,11 @@ export const eraseStoredDocuments = async (
  * Fills content_sha256 (migration 018) for rows stored before it, in batches
  * the database hashes itself, so no PDF crosses the wire. Until a row has its
  * hash, an identical upload is not recognised as a duplicate of it. `dryRun`
- * only counts. Runs as the owner: every tenant's rows.
+ * only counts. Runs as the owner: every tenant's rows. The database hashes
+ * the stored bytes, which is the plaintext only for a row without an
+ * envelope; that holds for every row it meets, because every write that
+ * stores an envelope (upsert, `tenant:keys -- encrypt-existing`) records the
+ * plaintext's hash in the same statement.
  */
 export const backfillDocumentContentHashes = async ({
   batchSize = 100,

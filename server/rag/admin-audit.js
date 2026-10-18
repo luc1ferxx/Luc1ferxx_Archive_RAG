@@ -248,6 +248,7 @@ export const compactDataAccess = (value = {}) => {
 const AUDIT_DETAIL_KEY_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const AUDIT_DETAIL_WORD_PATTERN = /^[a-z0-9_]{1,64}$/;
 const MAX_AUDIT_DETAIL_ENTRIES = 64;
+const AUDIT_DETAIL_KEY_ID_PATTERN = /^tk_[0-9a-f]{40}$/;
 
 const normalizeDetailId = (value) =>
   value === null || value === undefined ? null : normalizeScopeText(value).slice(0, 256);
@@ -302,6 +303,32 @@ export const normalizeAdminAuditDetails = (details) => {
     normalized.skippedStores = record.skippedStores
       .filter((store) => typeof store === "string" && AUDIT_DETAIL_WORD_PATTERN.test(store))
       .slice(0, MAX_AUDIT_DETAIL_ENTRIES);
+  }
+
+  // The crypto-shred of an erase (TENANT_ENCRYPTION, rag/tenant-encryption.js):
+  // key ids (hashes of the scope) and version numbers only, never material.
+  const tenantKeys = normalizeRecord(record.tenantKeys, null);
+
+  if (tenantKeys) {
+    const keyEntries = (entries) =>
+      (Array.isArray(entries) ? entries : [])
+        .map((entry) => normalizeRecord(entry, null))
+        .filter((entry) => entry && AUDIT_DETAIL_KEY_ID_PATTERN.test(String(entry.keyId ?? "")))
+        .slice(0, MAX_AUDIT_DETAIL_ENTRIES);
+
+    normalized.tenantKeys = {
+      destroyed: keyEntries(tenantKeys.destroyed).map((entry) => ({
+        keyId: entry.keyId,
+        versions: (Array.isArray(entry.versions) ? entry.versions : [])
+          .filter((version) => Number.isSafeInteger(version) && version > 0)
+          .slice(0, MAX_AUDIT_DETAIL_ENTRIES),
+      })),
+      kept: keyEntries(tenantKeys.kept).map((entry) => ({ keyId: entry.keyId })),
+      status:
+        typeof tenantKeys.status === "string" && AUDIT_DETAIL_WORD_PATTERN.test(tenantKeys.status)
+          ? tenantKeys.status
+          : "",
+    };
   }
 
   return Object.keys(normalized).length > 0 ? normalized : null;

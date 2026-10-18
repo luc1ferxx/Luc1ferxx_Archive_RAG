@@ -73,7 +73,8 @@ import { createPostgresIngestJobStore } from "./rag/ingest-job-store.js";
 import { checkReadReplicaHealth } from "./rag/postgres-replicas.js";
 import { checkSharedStateHealth } from "./rag/shared-state.js";
 import { probeDoclingServe } from "./rag/docling-parser.js";
-import { getDoclingFallback, getPdfParser } from "./rag/config.js";
+import { getDoclingFallback, getPdfParser, getTenantEncryptionMode } from "./rag/config.js";
+import { getTenantKmsProvider } from "./rag/kms/index.js";
 import { getOpenAIApiKey } from "./rag/openai.js";
 import { getRagDataDirectory } from "./rag/storage.js";
 import { AGENT_SERVICE_PING_PATH } from "./rag/agent-service/contract.js";
@@ -1363,6 +1364,47 @@ const checkIngestJobsHealth = async ({ createStore = createPostgresIngestJobStor
   }
 };
 
+// Encryption at rest (TENANT_ENCRYPTION=on, rag/tenant-encryption.js): the
+// KMS provider's own status (rag/kms/). Reads only: a keystore or master key
+// that does not exist yet is fine (the first encrypted write creates them);
+// tenant keys without a usable master key, a damaged key file, or a master
+// key other users can read is an error, because every read of an encrypted
+// file would fail. Reported only with the setting on (an invalid value is
+// reported too), so the default report keeps its checks and their order.
+const checkTenantEncryptionHealth = async (mode) => {
+  if (mode !== "on") {
+    return buildEntry("error", {
+      code: "TENANT_ENCRYPTION_MODE_INVALID",
+      message: "TENANT_ENCRYPTION is invalid; it must be on or off.",
+    });
+  }
+
+  try {
+    const status = await getTenantKmsProvider().status();
+
+    return buildEntry(status.status, {
+      errors: status.errors,
+      keystore: status.keystore,
+      masterKey: status.masterKey,
+      message:
+        status.status === "error"
+          ? "Encrypted tenant files cannot be read with this keystore."
+          : status.masterKey.state === "absent"
+            ? "No tenant key yet; the first encrypted write creates the master key and the keystore."
+            : "The keystore and its master key are readable.",
+      mode,
+      provider: status.provider,
+      warnings: status.warnings,
+    });
+  } catch (error) {
+    return buildEntry("error", {
+      code: error?.code ?? "ERROR",
+      message: error instanceof Error ? error.message : "Tenant encryption check failed.",
+      mode,
+    });
+  }
+};
+
 // --- Split deployment (ARCHIVE_RAG_ROLE, rag/service-topology.js) ----------
 //
 // A process reports only the checks of the tiers it runs, so a tier never
@@ -1578,6 +1620,14 @@ export const buildHealthReport = async ({ env = process.env } = {}) => {
 
   if (postgresTls) {
     checks.postgresTls = postgresTls;
+  }
+
+  // Only with TENANT_ENCRYPTION on (or invalid), and only where tenant file
+  // bytes are written or read: the edge and the agent tier.
+  const tenantEncryptionMode = readSafely(() => getTenantEncryptionMode(), "invalid");
+
+  if (tenantEncryptionMode !== "off" && (tiers.includes("api") || tiers.includes("agent"))) {
+    checks.tenantEncryption = await checkTenantEncryptionHealth(tenantEncryptionMode);
   }
 
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));

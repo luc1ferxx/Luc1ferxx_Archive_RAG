@@ -25,8 +25,14 @@ import {
   isSafeUploadFileName,
 } from "./upload-policy.js";
 import { resolveDataDirectory } from "./runtime-paths.js";
+import {
+  decryptTenantBytes,
+  maybeEncryptTenantBytes,
+  uploadChunkContext,
+} from "./rag/tenant-encryption.js";
 import { tenantSelectorMatches } from "./rag/tenant-records.js";
 import { recordTenantRefusal } from "./rag/tenant-refusals.js";
+import { createWorkingFileWriter } from "./rag/working-files.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -147,6 +153,21 @@ const getChunkPath = (identity, chunkIndex) =>
 
 const getFinalizationClaimPath = (identity) =>
   path.join(getSessionDirectory(identity), finalizationClaimFileName);
+
+// A chunk file rests on disk until the upload completes or expires, so with
+// TENANT_ENCRYPTION=on it holds a tenant envelope (rag/tenant-encryption.js)
+// bound to the session's owner, its directory and its index; one written
+// before is plaintext and reads as it is.
+const getChunkContext = (identity, chunkIndex) =>
+  uploadChunkContext({
+    chunkIndex,
+    sessionId: hashSessionIdentity(identity),
+    userId: identity.accessScope.userId,
+    workspaceId: identity.accessScope.workspaceId,
+  });
+
+const readChunkPlaintext = async (identity, chunkIndex) =>
+  decryptTenantBytes(await readFile(getChunkPath(identity, chunkIndex)), getChunkContext(identity, chunkIndex));
 
 const parseChunkIndex = (entryName) => {
   const match = entryName.match(chunkNamePattern);
@@ -810,11 +831,11 @@ export const storeUploadChunk = async (request = {}) => {
   const chunkPath = getChunkPath(identity, chunkIndex);
   const installed = await installBufferAtomically(
     chunkPath,
-    request.chunkBuffer
+    await maybeEncryptTenantBytes(request.chunkBuffer, getChunkContext(identity, chunkIndex))
   );
 
   if (!installed) {
-    const existingChunk = await readFile(chunkPath);
+    const existingChunk = await readChunkPlaintext(identity, chunkIndex);
 
     if (hashBuffer(existingChunk) !== actualChunkSha256) {
       throw createUploadError(
@@ -852,6 +873,9 @@ const mergeChunksIntoFile = async ({
   const temporaryPath = `${destinationPath}.upload-${randomUUID()}.tmp`;
   const hash = createHash("sha256");
   let bytesWritten = 0;
+  // The merged upload is a working file (rag/working-files.js), encrypted
+  // with TENANT_ENCRYPTION=on; sizes and the hash are the plaintext's.
+  let writer = null;
 
   try {
     for (
@@ -859,11 +883,10 @@ const mergeChunksIntoFile = async ({
       chunkIndex < manifest.totalChunks;
       chunkIndex += 1
     ) {
-      const chunkPath = getChunkPath(identity, chunkIndex);
       let chunkBuffer;
 
       try {
-        chunkBuffer = await readFile(chunkPath);
+        chunkBuffer = await readChunkPlaintext(identity, chunkIndex);
       } catch (error) {
         if (error.code === "ENOENT") {
           throw createUploadError(
@@ -886,10 +909,11 @@ const mergeChunksIntoFile = async ({
 
       hash.update(chunkBuffer);
       bytesWritten += chunkBuffer.byteLength;
-      await writeFile(temporaryPath, chunkBuffer, {
-        flag: chunkIndex === 0 ? "wx" : "a",
-      });
+      writer ??= await createWorkingFileWriter(temporaryPath, { flags: "wx" });
+      await writer.write(chunkBuffer);
     }
+
+    await writer?.close();
 
     if (bytesWritten !== manifest.fileSize) {
       throw createUploadError(
@@ -925,6 +949,8 @@ const mergeChunksIntoFile = async ({
       sha256,
     };
   } finally {
+    // Closed already on success; a merge that failed part-way closes it here.
+    await writer?.close().catch(() => {});
     await unlink(temporaryPath).catch((error) => {
       if (error.code !== "ENOENT") {
         throw error;

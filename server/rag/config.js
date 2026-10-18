@@ -2463,3 +2463,71 @@ export const getApiAuthOidcConfigStatus = () => {
   };
 };
 // --- End OIDC track ----------------------------------------------------------
+
+// --- Tenant encryption at rest (tenant isolation phase 5) -------------------
+// TENANT_ENCRYPTION=on encrypts tenant file bytes when they are written
+// (rag/tenant-encryption.js): the documents' and ingest jobs' file bytes, the
+// ingest stage outputs, the upload session chunks, and the working files of
+// one request or ingest attempt (rag/working-files.js). Reads recognise both
+// forms whatever the setting, so rows written before it (or while it was off)
+// stay readable. `off` (default) writes exactly what was written before. An
+// unknown value refuses the start, never falls back to off.
+export const TENANT_ENCRYPTION_MODES = Object.freeze(["off", "on"]);
+
+export const getTenantEncryptionMode = () => {
+  const rawValue = process.env.TENANT_ENCRYPTION;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "off";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!TENANT_ENCRYPTION_MODES.includes(normalizedValue)) {
+    const error = new Error(
+      `TENANT_ENCRYPTION must be one of ${TENANT_ENCRYPTION_MODES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "TENANT_ENCRYPTION_MODE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
+export const isTenantEncryptionEnabled = () => getTenantEncryptionMode() === "on";
+
+// The key management provider behind the envelopes (rag/kms/). Only `local`
+// exists: demo-grade key files on this machine (rag/kms/local-provider.js).
+export const TENANT_KMS_PROVIDERS = Object.freeze(["local"]);
+
+export const getTenantKmsProviderId = () => {
+  const rawValue = process.env.TENANT_KMS_PROVIDER;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "local";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!TENANT_KMS_PROVIDERS.includes(normalizedValue)) {
+    const error = new Error(
+      `TENANT_KMS_PROVIDER must be one of ${TENANT_KMS_PROVIDERS.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "TENANT_KMS_PROVIDER_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
+// The local provider's paths as configured, or null when unset: the provider
+// derives the defaults from the data directory (rag/kms/local-provider.js).
+export const getTenantKeystoreDirectorySetting = () =>
+  String(process.env.TENANT_KEYSTORE_DIR ?? "").trim() || null;
+
+export const getTenantKmsMasterKeyFileSetting = () =>
+  String(process.env.TENANT_KMS_MASTER_KEY_FILE ?? "").trim() || null;

@@ -17,6 +17,8 @@ import {
   getLongMemoryScope,
   getPostgresTenantContextMode,
   getQueryEmbeddingCacheScope,
+  getTenantEncryptionMode,
+  getTenantKmsProviderId,
   getTenantMembershipMode,
   getTenantRegistryCacheScope,
   getTrustProxySetting,
@@ -122,6 +124,10 @@ export const createApp = async (options = {}) => {
   getLongMemoryScope();
   getQueryEmbeddingCacheScope();
   getTenantRegistryCacheScope();
+  // And an unknown TENANT_ENCRYPTION or TENANT_KMS_PROVIDER (every tenant file
+  // write and read consults them, rag/tenant-encryption.js).
+  getTenantEncryptionMode();
+  getTenantKmsProviderId();
   // TRUST_PROXY: an invalid value refuses the start (TRUST_PROXY_INVALID);
   // unset keeps Express's default (req.ip is the socket peer).
   const trustProxy = getTrustProxySetting();

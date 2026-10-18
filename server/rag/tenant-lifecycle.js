@@ -62,6 +62,21 @@
 // derived index data (chunks, embeddings, the parse/chunk/embed stage
 // outputs' payloads) are not exported: they are rebuilt from the documents.
 //
+// Crypto-shred (TENANT_ENCRYPTION, rag/tenant-encryption.js): once every
+// store was erased without a failure, an applied erase destroys the tenant's
+// key -- a workspace selector the workspace key, a user outside any workspace
+// that user's key -- so the file bytes any older database backup still holds
+// for the tenant can no longer be decrypted. A user inside a workspace shares
+// the workspace key with every other member: that erase deletes the user's
+// rows and destroys no key (reported as `kept`). An erase that failed before
+// the key step leaves the key; running it again finishes it. The result and
+// the tombstone name key ids and versions only (`tenantKeys`); a dry run says
+// what would be destroyed. With encryption off and no key on file the erase
+// has no key step and its result is exactly what it was before. Chunk text,
+// embeddings, runs, feedback and memory are not encrypted (search and the
+// agent read them): the erase deletes them, but an older database backup
+// still holds them, so backup retention must stay bounded.
+//
 // Neither job revokes the tenant's credentials. Revoke them first, or new
 // requests write new records after the erase (with TENANT_MEMBERSHIP=enforce
 // the `deleting` status refuses a workspace's requests, but not those of a
@@ -83,6 +98,7 @@ import {
   countSemanticCacheTenantEntries,
   invalidateSemanticCacheTenant,
 } from "./semantic-cache.js";
+import { describeTenantKeysForErase, destroyTenantKeysForErase } from "./tenant-encryption.js";
 import {
   TENANT_ACTIVE_STATUSES,
   normalizeTenantSelector,
@@ -241,6 +257,9 @@ export const createTenantLifecycleService = ({
   },
   sessionMemory = getSessionMemoryTenantRecordStore,
   taskStore = null,
+  // The crypto-shred step (rag/tenant-encryption.js): `describe(selector)`
+  // and `destroy(selector)` over the configured KMS. Null leaves it out.
+  tenantKeys = { describe: describeTenantKeysForErase, destroy: destroyTenantKeysForErase },
   // The registry service (rag/tenant-registry.js) whose workspace a workspace
   // erase marks `deleting` and whose rows it deletes last: the instance the
   // app's enforcement reads, so this process's lookup cache is dropped at
@@ -490,6 +509,35 @@ export const createTenantLifecycleService = ({
       )
     );
 
+  // What the erase does to keys, or null when it does nothing with them
+  // (encryption off and no key on file), so such an erase reports exactly
+  // what it did before. A keystore that cannot be read is reported, not
+  // thrown: the rows can still go, and the key step then fails.
+  const planTenantKeys = async (selector) => {
+    if (typeof tenantKeys?.describe !== "function" || typeof tenantKeys?.destroy !== "function") {
+      return null;
+    }
+
+    try {
+      const plan = await tenantKeys.describe(selector);
+
+      return plan?.applies ? { destroy: plan.destroy ?? [], kept: plan.kept ?? [] } : null;
+    } catch (error) {
+      logger.error?.("[tenant-lifecycle] reading the tenant keys failed.", error);
+      return { destroy: [], error: describeError(error), kept: [] };
+    }
+  };
+
+  // The tombstone's form of the key step: key ids and versions only.
+  const toAuditTenantKeys = (tenantKeysResult) => ({
+    destroyed: (tenantKeysResult.destroyed ?? []).map(({ destroyedVersions, keyId }) => ({
+      keyId,
+      versions: destroyedVersions,
+    })),
+    kept: (tenantKeysResult.kept ?? []).map(({ keyId }) => ({ keyId })),
+    status: tenantKeysResult.status,
+  });
+
   const recordLifecycleEvent = async ({ actor, details, permissionId, reason, request, type, actionId }) => {
     if (typeof adminAuditService?.recordTenantLifecycleEvent !== "function") {
       return false;
@@ -569,12 +617,15 @@ export const createTenantLifecycleService = ({
         tenant,
       };
 
+      const keyPlan = await planTenantKeys(selector);
+
       if (dryRun !== false) {
         return {
           ...base,
           complete: skippedStores.length === 0,
           status: "dry_run",
           stores: counted,
+          ...(keyPlan ? { tenantKeys: { status: "dry_run", ...keyPlan } } : {}),
           totals: { records: totalCounts(counted, "records") },
         };
       }
@@ -659,6 +710,28 @@ export const createTenantLifecycleService = ({
         }
       }
 
+      // The key step, last: only after every store went without a failure
+      // (a store left out as unsupported or not configured does not stop
+      // it; its file bytes become unreadable with the key). A failed erase
+      // keeps the key for the rerun that finishes it.
+      let tenantKeysResult = null;
+
+      if (keyPlan && failure) {
+        tenantKeysResult = { ...keyPlan, status: "not_attempted" };
+      } else if (keyPlan) {
+        try {
+          tenantKeysResult = {
+            destroyed: await tenantKeys.destroy(selector),
+            kept: keyPlan.kept,
+            status: "destroyed",
+          };
+        } catch (error) {
+          logger.error?.("[tenant-lifecycle] destroying the tenant keys failed.", error);
+          failure = { store: "tenant_keys", ...describeError(error) };
+          tenantKeysResult = { ...keyPlan, error: describeError(error), status: "failed" };
+        }
+      }
+
       const deletedTotals = totalCounts(stores, "deleted");
       const outcome = failure
         ? "failed"
@@ -674,6 +747,7 @@ export const createTenantLifecycleService = ({
           outcome,
           skippedStores,
           tenant,
+          ...(tenantKeysResult ? { tenantKeys: toAuditTenantKeys(tenantKeysResult) } : {}),
         },
         permissionId,
         reason: `tenant_erase_${outcome}`,
@@ -687,6 +761,7 @@ export const createTenantLifecycleService = ({
         ...(failure ? { failure } : {}),
         status: outcome,
         stores,
+        ...(tenantKeysResult ? { tenantKeys: tenantKeysResult } : {}),
         tombstoneRecorded,
         totals: { deleted: deletedTotals, records: totalCounts(counted, "records") },
       };

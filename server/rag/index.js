@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile as readBinaryFile } from "node:fs/promises";
 import { chunkDocument } from "./chunker.js";
 import { isAgentFollowUpOriginalQuestionEnabled } from "./config.js";
 import { areConversationMemoryWritesSuppressed } from "./conversation-memory-writes.js";
@@ -53,6 +52,7 @@ import { runDocumentDeletionCascade } from "./document-deletion-cascade.js";
 import { recordRagTrace } from "./observability.js";
 import { invalidateSemanticCacheDocuments } from "./semantic-cache.js";
 import { loadPdfPages } from "./pdf-loader.js";
+import { readWorkingFile } from "./working-files.js";
 import { withPostgresTransaction } from "./postgres.js";
 import { STAGED_INGEST } from "./ingest-stages.js";
 import {
@@ -652,7 +652,8 @@ export const ingestDocument = async ({
   replace = false,
   requestedAt = null,
 }) => {
-  const fileBuffer = await readBinaryFile(filePath);
+  // A working file (rag/working-files.js): encrypted with TENANT_ENCRYPTION=on.
+  const fileBuffer = await readWorkingFile(filePath);
   const hash = normalizeContentSha256(contentSha256) ?? hashDocumentBytes(fileBuffer);
 
   if (deduplicate && !replace) {

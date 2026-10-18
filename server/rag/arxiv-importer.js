@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
   findExistingArxivDocument,
 } from "./arxiv-identity.js";
 import { refreshDocumentsIngestedElsewhere } from "./ingest-worker.js";
+import { writeWorkingFile } from "./working-files.js";
 import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_IMPORT_DELAY_MS = 1000;
@@ -328,7 +329,8 @@ export const importArxivPapers = async ({
         assertClaimActive,
         signal,
       });
-      await writeFile(
+      // A working file: encrypted with TENANT_ENCRYPTION=on (rag/working-files.js).
+      await writeWorkingFile(
         pdfPath,
         buffer,
         signal

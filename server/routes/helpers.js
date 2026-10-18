@@ -3,6 +3,7 @@ import { open, rm } from "fs/promises";
 import path from "path";
 
 import { resolveRequestUserId } from "../auth.js";
+import { isWorkingFileEnvelope, readWorkingFile } from "../rag/working-files.js";
 import { isSafeUploadFileName } from "../upload-policy.js";
 
 export {
@@ -124,8 +125,14 @@ export const hasPdfMagicBytes = async (filePath) => {
       PDF_MAGIC_SCAN_WINDOW,
       0
     );
+    const head = headBuffer.subarray(0, bytesRead);
 
-    return headBuffer.subarray(0, bytesRead).includes(PDF_MAGIC);
+    // An encrypted working file (TENANT_ENCRYPTION=on): its plaintext decides.
+    if (isWorkingFileEnvelope(head)) {
+      return (await readWorkingFile(filePath)).subarray(0, PDF_MAGIC_SCAN_WINDOW).includes(PDF_MAGIC);
+    }
+
+    return head.includes(PDF_MAGIC);
   } finally {
     await fileHandle.close();
   }

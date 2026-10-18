@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, stat, utimes } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -26,6 +26,7 @@ import {
   supportsStagedIngest,
 } from "./ingest-stages.js";
 import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js";
+import { writeWorkingFile } from "./working-files.js";
 
 // The worker side of RAG_INGEST_MODE=async. Each loop claims one job at a time
 // from the store (as the owner role, because the queue holds every tenant's
@@ -336,7 +337,7 @@ export const createIngestWorker = ({
       return false;
     }
 
-    await writeFile(tempFilePath, job.fileBytes);
+    await writeWorkingFile(tempFilePath, job.fileBytes);
     return true;
   };
 

@@ -302,6 +302,27 @@ const formatEraseResult = (result) => {
     lines.push(`Not reached from here: ${result.skippedStores.join(", ")}`);
   }
 
+  // The crypto-shred step (TENANT_ENCRYPTION): key ids and versions only.
+  if (result.tenantKeys) {
+    const keys = result.tenantKeys;
+
+    lines.push(`  tenant_keys: ${keys.status}${keys.error ? ` (${keys.error.code})` : ""}`);
+
+    for (const key of keys.destroyed ?? []) {
+      lines.push(`    destroyed ${key.keyId} (${key.scope}) versions ${key.destroyedVersions.join(", ") || "none"}`);
+    }
+
+    for (const key of keys.destroy ?? []) {
+      lines.push(
+        `    ${result.dryRun ? "would destroy" : "not destroyed"} ${key.keyId} (${key.scope}, ${key.state}) versions ${key.versions.join(", ") || "none"}`
+      );
+    }
+
+    for (const key of keys.kept ?? []) {
+      lines.push(`    kept ${key.keyId} (${key.scope}, shared by the workspace's other members)`);
+    }
+  }
+
   if (result.withheldStores?.documents) {
     lines.push(CLI_DOCUMENTS_WITHHELD_HINT);
   }

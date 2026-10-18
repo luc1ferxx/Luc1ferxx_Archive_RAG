@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { readFile } from "fs/promises";
 import multer from "multer";
 import path from "path";
 import { createHash, randomUUID } from "crypto";
@@ -34,6 +33,8 @@ import {
   MAX_UPLOAD_MULTIPART_FIELDS,
 } from "../upload-policy.js";
 import { UPLOAD_SESSION_LIMIT_EXCEEDED } from "../upload-session-store.js";
+import { readWorkingFile } from "../rag/working-files.js";
+import { createWorkingFileDiskStorage } from "./working-file-storage.js";
 
 import {
   cleanupUploadedFile,
@@ -107,7 +108,9 @@ export const createUploadsRouter = (services) => {
   // either mode can resolve a duplicate (RAG_INGEST_DEDUP) and every document
   // records it.
   const ingestUpload = async ({ accessScope, docId, fileName, filePath, kind = INGEST_JOB_KINDS.create }) => {
-    const fileBytes = await readFile(filePath);
+    // The upload is a working file (encrypted with TENANT_ENCRYPTION=on); the
+    // hash, the quota and the queued job all see its plaintext.
+    const fileBytes = await readWorkingFile(filePath);
     const contentSha256 = createHash("sha256").update(fileBytes).digest("hex");
     const deduplicate = kind === INGEST_JOB_KINDS.create && isRagIngestDedupEnabled();
     const replacing = kind === INGEST_JOB_KINDS.replace;
@@ -185,7 +188,7 @@ export const createUploadsRouter = (services) => {
     };
   };
 
-  const storage = multer.diskStorage({
+  const storage = createWorkingFileDiskStorage({
     destination: (req, file, cb) => {
       cb(null, uploadsDirectory);
     },
