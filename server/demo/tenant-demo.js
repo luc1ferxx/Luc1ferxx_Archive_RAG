@@ -903,11 +903,15 @@ export const DEMO_CHECKS = Object.freeze([
         JSON.stringify(sorted(carol.workspaceIds)) === JSON.stringify(["alpha", "beta"]) &&
         alice.workspaceId === "alpha" &&
         JSON.stringify(sorted(alice.workspaceIds)) === JSON.stringify(["alpha"]) &&
-        Array.isArray(anna.workspaceIds) &&
-        anna.workspaceIds.length === 0;
+        // A user-only token lists the workspaces its user is an active
+        // member of (TENANT_MEMBERSHIP=enforce), and the profile requires one.
+        !anna.workspaceId &&
+        JSON.stringify(sorted(anna.workspaceIds)) === JSON.stringify(["alpha"]) &&
+        carol.workspaceRequired === true &&
+        anna.workspaceRequired === true;
 
       return (ok ? pass : fail)(
-        `carol: ${JSON.stringify(sorted(carol.workspaceIds))} to choose from; alice: fixed ${alice.workspaceId || "-"}; anna (user-only token, membership by header): ${JSON.stringify(anna.workspaceIds ?? null)}`
+        `carol: ${JSON.stringify(sorted(carol.workspaceIds))} to choose from; alice: fixed ${alice.workspaceId || "-"}; anna (user-only token, memberships from the registry): ${JSON.stringify(anna.workspaceIds ?? null)}; workspace required: ${carol.workspaceRequired === true}`
       );
     },
   },

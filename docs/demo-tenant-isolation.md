@@ -91,7 +91,7 @@ npm run demo:seed && npm run demo:walkthrough             # 终端 3
 
 - `demo-carol-token`：切换器列出 `alpha` 和 `beta`，切换后文档、对话、任务都换成那个 workspace 的；
 - `demo-alice-token`、`demo-bob-token`：固定在一个 workspace，不显示切换器，直接可用；
-- 只有用户的 token（anna、ben、dave）不能用界面：`/auth/me` 不列出 workspace（成员关系在注册表里，不在 token 里），切换器不出现，请求不带 workspace，`API_AUTH_REQUIRE_WORKSPACE` 会拒绝。
+- 只有用户的 token（anna、ben、dave）也能用界面：`TENANT_MEMBERSHIP=enforce` 下，`/auth/me` 列出该用户在注册表里所有 active 的成员关系，并返回 `workspaceRequired: true`，切换器因此不提供"不选 workspace"，默认选中第一个。
 
 本地：仓库根目录 `.env` 里设 `VITE_DOMAIN=http://localhost:5001`、`VITE_API_AUTH_TOKEN=demo-carol-token`，再 `npm start`（`hardened.env` 的 `ALLOWED_ORIGINS` 已包含 `http://localhost:3000`）。compose：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app build --build-arg VITE_API_AUTH_TOKEN=demo-carol-token app` 后再 `up -d`。token 会打进前端包，只适合本机演示。
 
@@ -121,7 +121,7 @@ npm run demo:seed && npm run demo:walkthrough             # 终端 3
 | `chat_stream_isolation` | 同上，走 `/chat/stream`（SSE）。 |
 | `viewer_is_read_only` | workspace.viewer 能读共享文档，上传和删除都被 RBAC 拒绝（403 `RBAC_PERMISSION_DENIED`）。 |
 | `membership_roles_in_rbac` | `/auth/me` 的权限就是注册表里成员角色对应的权限：anna 是 viewer，alice 是 admin，carol 在 beta 是 member。 |
-| `workspace_switcher` | 前端切换器读的那条路径：不带 `x-workspace-id` 的 `/auth/me` 给 carol 列出 `alpha`、`beta`；alice 固定在 alpha；anna 的 token 不列出 workspace。 |
+| `workspace_switcher` | 前端切换器读的那条路径：不带 `x-workspace-id` 的 `/auth/me` 给 carol 列出 `alpha`、`beta`；alice 固定在 alpha；anna 的 token 本身不带 workspace，列表来自注册表里的成员关系（`alpha`）；两人都返回 `workspaceRequired: true`。 |
 | `memory_isolation` | 长期记忆只属于写入它的用户，别人列不出、删不掉；两个租户用同一个 sessionId 各自清空自己的会话。 |
 | `workspace_memory` | carol 在 alpha 记下一条笔记（"Remember that …"）：在 beta 的 `GET /memory` 里看不到；在 beta 问一个和笔记用词相同的问题后，笔记的 `lastUsedAt` 仍然为空（没有被召回进 beta 的回答）；同样的问题在 alpha 会召回它。回答语言偏好（`reply_language`）按用户保存，在 beta 也能看到。最后两条记忆都删掉。 |
 | `tenant_manager_least_privilege` | tenant-manager 能管理注册表，但不能擦除租户，也不能读任何 workspace 的文档。 |
