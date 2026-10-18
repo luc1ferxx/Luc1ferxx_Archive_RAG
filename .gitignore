@@ -13,7 +13,7 @@
 /build
 
 server/.env
-/server/node_modules/
+/server/node_modules
 /server/data/
 /server/tmp-rag-data/
 /server/upload-sessions/
