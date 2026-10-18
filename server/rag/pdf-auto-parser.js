@@ -6,9 +6,11 @@
 // document is parsed once with pdf.js, which also collects per-page signals
 // (text amount, tabular lines, image coverage, garbled characters;
 // pdf-page-extraction.js), pdf-page-router.js picks each page's route, and the
-// routed pages go to docling-serve as page-range requests: a contiguous run of
-// pages on one route is one request (split at DOCLING_PAGE_BATCH_SIZE), all
-// sent at once and bounded by the per-process limiter in docling-parser.js.
+// routed pages go to docling-serve as page-range requests: a run of pages on
+// one route is one request, with up to DOCLING_MERGE_GAP_PAGES text pages
+// inside it (they keep their pdf.js text; a request costs more than a few
+// pages), split at DOCLING_PAGE_BATCH_SIZE, all sent at once and bounded by
+// the per-process limiter in docling-parser.js.
 // Docling's text then replaces pdf.js text for those pages:
 //
 //   - a page Docling returns empty while pdf.js had text keeps the pdf.js text
@@ -28,7 +30,7 @@
 // never page text, file names or URLs.
 
 import path from "node:path";
-import { getDoclingFallback, getDoclingPageBatchSize, isDoclingOcrEnabled } from "./config.js";
+import { getDoclingFallback, getDoclingMergeGapPages, getDoclingPageBatchSize, isDoclingOcrEnabled } from "./config.js";
 import {
   convertPdfBytesWithDocling,
   createDoclingPdfBlob,
@@ -172,6 +174,7 @@ export const loadPdfPagesWithRouting = async (
   const thresholds = resolvePdfAutoRoutingConfig();
   const fallback = getDoclingFallback();
   const maxPagesPerRequest = getDoclingPageBatchSize();
+  const mergeGapPages = getDoclingMergeGapPages();
   const fileName = path.basename(filePath);
   const bytes = await readFile(filePath);
   const parsed = await parseDocument(bytes, { collectSignals: true });
@@ -183,7 +186,7 @@ export const loadPdfPagesWithRouting = async (
 
     return { pageNumber, route, reasons, parser: "pdfjs" };
   });
-  const batches = planDoclingBatches(routes, { maxPagesPerRequest });
+  const batches = planDoclingBatches(routes, { maxPagesPerRequest, mergeGapPages });
   const settled = batches.length === 0 ? [] : await convertBatches({ batches, bytes, fallback, fetchImpl, fileName });
   const failed = [];
 
@@ -194,7 +197,12 @@ export const loadPdfPagesWithRouting = async (
       failed.push({ batch, error: result.error });
 
       for (let pageNumber = batch.firstPage; pageNumber <= batch.lastPage; pageNumber += 1) {
-        routes[pageIndex.get(pageNumber)].fallback = PDF_AUTO_FALLBACKS.doclingFailed;
+        const entry = routes[pageIndex.get(pageNumber)];
+
+        // A text page inside a merged request was never going to change.
+        if (entry && entry.route !== "text") {
+          entry.fallback = PDF_AUTO_FALLBACKS.doclingFailed;
+        }
       }
 
       return;
@@ -203,7 +211,8 @@ export const loadPdfPagesWithRouting = async (
     for (const doclingPage of result.pages) {
       const index = pageIndex.get(doclingPage.pageNumber);
 
-      if (index === undefined) {
+      // Gap pages of a merged request (route text) keep their pdf.js text.
+      if (index === undefined || routes[index].route === "text") {
         continue;
       }
 

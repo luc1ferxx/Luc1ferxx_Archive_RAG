@@ -10,6 +10,7 @@ import { checkPdfParserHealth } from "../health.js";
 const SETTINGS = [
   "DOCLING_FALLBACK",
   "DOCLING_MAX_CONCURRENCY",
+  "DOCLING_MERGE_GAP_PAGES",
   "DOCLING_PAGE_BATCH_SIZE",
   "DOCLING_SERVE_URL",
   "PDF_AUTO_GARBLED_RATIO",
@@ -107,6 +108,7 @@ test("auto reports its routes and probes docling-serve when a route is enabled",
 
   assert.deepEqual(await checkPdfParserHealth({ fetchImpl: probe.up }), {
     doclingMaxConcurrency: 4,
+    doclingMergeGapPages: 0,
     doclingPageBatchSize: 0,
     message: "docling-serve is reachable.",
     parser: "auto",

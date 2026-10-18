@@ -8,6 +8,7 @@ import {
   loadPdfPagesWithDocling,
   probeDoclingServe,
   renderDoclingTable,
+  splitDoclingTextByPage,
 } from "../rag/docling-parser.js";
 
 const text = (index, label, value, page, extra = {}) => ({
@@ -175,4 +176,69 @@ test("the health probe reports whether docling-serve answers", async () => {
 
   assert.equal(down.reachable, false);
   assert.match(down.error, /ECONNREFUSED/);
+});
+
+test("a paragraph Docling merged over a page break is split back by page at whitespace", () => {
+  // Spans count characters before dehyphenation ("repr-" + "esentation"), so
+  // they can overshoot the merged text by a few characters.
+  const merged = {
+    label: "text",
+    prov: [
+      { charspan: [0, 26], page_no: 1 },
+      { charspan: [27, 52], page_no: 2 },
+    ],
+    text: "Concept spaces are a representation of text by its concepts.",
+  };
+
+  assert.deepEqual(splitDoclingTextByPage(merged), [
+    { page: 1, text: "Concept spaces are a" },
+    { page: 2, text: " representation of text by its concepts." },
+  ]);
+  assert.equal(splitDoclingTextByPage(merged).map((part) => part.text).join(""), merged.text);
+  // Three pages; several boxes on one page count as one part.
+  assert.deepEqual(
+    splitDoclingTextByPage({
+      prov: [
+        { charspan: [0, 5], page_no: 3 },
+        { charspan: [6, 11], page_no: 3 },
+        { charspan: [12, 17], page_no: 4 },
+        { charspan: [18, 23], page_no: 5 },
+      ],
+      text: "aaaaa bbbbb ccccc ddddd",
+    }),
+    [
+      { page: 3, text: "aaaaa bbbbb" },
+      { page: 4, text: " ccccc" },
+      { page: 5, text: " ddddd" },
+    ]
+  );
+  // Without usable spans (missing, or pages going back) the item stays on its first page.
+  for (const prov of [
+    [{ page_no: 2 }, { page_no: 3 }],
+    [{ charspan: [0, 4], page_no: 3 }, { charspan: [5, 9], page_no: 2 }],
+    [{ charspan: [0, 9], page_no: 2 }],
+  ]) {
+    assert.deepEqual(splitDoclingTextByPage({ prov, text: "some text" }), [{ page: prov[0].page_no, text: "some text" }]);
+  }
+});
+
+test("doclingDocumentToPages puts each part of a cross-page paragraph on its own page; a list item keeps one marker", () => {
+  const pages = doclingDocumentToPages({
+    body: { children: [{ $ref: "#/texts/0" }, { $ref: "#/texts/1" }] },
+    pages: { 1: {}, 2: {} },
+    texts: [
+      text(0, "text", "First half of a sentence that ends on the next page.", 1, {
+        prov: [
+          { charspan: [0, 16], page_no: 1 },
+          { charspan: [17, 54], page_no: 2 },
+        ],
+      }),
+      text(1, "list_item", "an item that also runs over", 2),
+    ],
+  });
+
+  assert.deepEqual(pages, [
+    { pageNumber: 1, text: "First half of a" },
+    { pageNumber: 2, text: "sentence that ends on the next page.\n\n- an item that also runs over" },
+  ]);
 });

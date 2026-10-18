@@ -149,6 +149,16 @@ export const getDoclingMaxConcurrency = () =>
 export const getDoclingPageBatchSize = () =>
   Math.floor(toNonNegativeNumber(process.env.DOCLING_PAGE_BATCH_SIZE, 0));
 
+// PDF_PARSER=auto: two runs of pages on the same Docling route at most this
+// many text pages apart go as one request (every docling-serve request
+// uploads the whole file and pays a fixed cost); the gap pages are converted
+// but keep their pdf.js text. 0 (default) = one request per contiguous run.
+// On 30 QASPER papers 2 cut the requests from 55 to 34: 4.5% faster at
+// DOCLING_MAX_CONCURRENCY=1, but about 6% slower at the default 2, where
+// smaller requests overlap better (docs/evaluation.md "真实 docling-serve 上的验证").
+export const getDoclingMergeGapPages = () =>
+  Math.floor(toNonNegativeNumber(process.env.DOCLING_MERGE_GAP_PAGES, 0));
+
 // PDF_PARSER=auto: which Docling routes pdf-page-router.js may pick. `layout`
 // sends table pages to docling-serve without OCR, `ocr` sends scanned,
 // image-only and garbled pages with OCR forced. `none` routes nothing (every

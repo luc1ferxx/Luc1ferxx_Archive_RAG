@@ -44,6 +44,64 @@ const resolveRef = (document, ref) => {
 
 const pageOf = (item) => Number(item?.prov?.[0]?.page_no) || null;
 
+// How far from a provenance boundary a cross-page split looks for whitespace.
+const PAGE_SPLIT_WHITESPACE_WINDOW = 40;
+
+const nearestWhitespaceCut = (text, target, floor) => {
+  for (let distance = 0; distance <= PAGE_SPLIT_WHITESPACE_WINDOW; distance += 1) {
+    for (const index of [target - distance, target + distance]) {
+      if (index > floor && index < text.length && /\s/.test(text[index])) {
+        return index;
+      }
+    }
+  }
+
+  return target;
+};
+
+/**
+ * A text item's parts per page. Docling merges a paragraph that runs over a
+ * page break into one item whose provenance names every page it is on, each
+ * with the span of the text it holds there (charspan). The text is cut at
+ * those spans, moved to the nearest whitespace so no word is split (the spans
+ * count characters before dehyphenation, so they can overshoot by a few), and
+ * each part goes to its own page: a cited page then holds the sentence, and a
+ * page converted on its own (a page_range request) reads like the same page of
+ * a whole-document conversion. Without usable spans the item stays on its
+ * first page, as before.
+ */
+export const splitDoclingTextByPage = (item) => {
+  const text = String(item?.text ?? "");
+  const segments = [];
+
+  for (const prov of item?.prov ?? []) {
+    const page = Number(prov?.page_no) || null;
+
+    if (page && segments.at(-1)?.page !== page) {
+      segments.push({ page, start: Number(prov?.charspan?.[0]) });
+    }
+  }
+
+  const usable =
+    segments.length > 1 &&
+    segments.slice(1).every((segment, index) => Number.isInteger(segment.start) && segment.start > 0 && segment.page > segments[index].page);
+
+  if (!usable) {
+    return [{ page: pageOf(item), text }];
+  }
+
+  const cuts = [0];
+
+  for (const segment of segments.slice(1)) {
+    const floor = cuts.at(-1);
+
+    cuts.push(Math.max(floor, nearestWhitespaceCut(text, Math.min(segment.start, text.length), floor)));
+  }
+
+  cuts.push(text.length);
+  return segments.map((segment, index) => ({ page: segment.page, text: text.slice(cuts[index], cuts[index + 1]) }));
+};
+
 const cleanCell = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
 // The grid repeats a spanning cell in every position it covers; a row keeps
@@ -107,7 +165,8 @@ export const renderDoclingTable = (table) => {
 
 /**
  * Flattens a DoclingDocument (docling-serve `json_content`) into pages of
- * text, 1..page count, in reading order.
+ * text, 1..page count, in reading order. A paragraph Docling merged over a
+ * page break is split back by page (splitDoclingTextByPage).
  */
 export const doclingDocumentToPages = (document) => {
   const pageCount = Math.max(
@@ -161,7 +220,9 @@ export const doclingDocumentToPages = (document) => {
     } else if (resolved.collection === "pictures") {
       emit(pageOf(item), captionText(item));
     } else if (resolved.collection === "texts" && !SKIPPED_TEXT_LABELS.has(item.label)) {
-      emit(pageOf(item), item.label === "list_item" ? `- ${item.text}` : item.text);
+      splitDoclingTextByPage(item).forEach((part, index) =>
+        emit(part.page, item.label === "list_item" && index === 0 ? `- ${part.text}` : part.text)
+      );
     }
 
     for (const child of item.children ?? []) {

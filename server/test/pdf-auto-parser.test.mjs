@@ -24,6 +24,7 @@ import { checkHistogram, parseExposition, sampleValue } from "./metrics-expositi
 const SETTINGS = [
   "DOCLING_FALLBACK",
   "DOCLING_MAX_CONCURRENCY",
+  "DOCLING_MERGE_GAP_PAGES",
   "DOCLING_OCR",
   "DOCLING_PAGE_BATCH_SIZE",
   "DOCLING_SERVE_URL",
@@ -49,6 +50,9 @@ beforeEach(() => {
   }
 
   process.env.DOCLING_SERVE_URL = "http://docling.test:5010";
+  // Every run is its own request unless a test merges gaps: most fixtures
+  // alternate routed and text pages to get several requests.
+  process.env.DOCLING_MERGE_GAP_PAGES = "0";
   resetDoclingRequestLimiter();
   warnings = [];
   console.warn = (message) => warnings.push(String(message));
@@ -330,6 +334,63 @@ test("DOCLING_PAGE_BATCH_SIZE splits a run of routed pages into requests", async
   assert.deepEqual(serve.calls.map((call) => call.pageRange), [[1, 2], [3, 4], [5, 5]]);
   assert.deepEqual(routing.batches.map((batch) => [batch.firstPage, batch.lastPage]), [[1, 2], [3, 4], [5, 5]]);
   assert.deepEqual(textsOf(pages), [1, 2, 3, 4, 5].map((page) => `docling text ${page}`).concat("pdf.js text 6"));
+});
+
+test("DOCLING_MERGE_GAP_PAGES: same-route runs a few text pages apart go as one request; the gap pages keep pdf.js text", async () => {
+  // Unset means the default, 0: contiguous runs only.
+  delete process.env.DOCLING_MERGE_GAP_PAGES;
+
+  const unmerged = createDoclingServe({ respond: answerRange });
+
+  await routeAuto("LTL", unmerged);
+  assert.deepEqual(unmerged.calls.map((call) => call.pageRange), [[1, 1], [3, 3]]);
+
+  setEnv({ DOCLING_MERGE_GAP_PAGES: "2" });
+
+  const serve = createDoclingServe({ respond: answerRange });
+  const { pages, routing } = await routeAuto("LTLTTLTTTL", serve);
+
+  assert.deepEqual(serve.calls.map((call) => call.pageRange), [[1, 6], [10, 10]]);
+  assert.deepEqual(textsOf(pages), [
+    "docling text 1",
+    "pdf.js text 2",
+    "docling text 3",
+    "pdf.js text 4",
+    "pdf.js text 5",
+    "docling text 6",
+    "pdf.js text 7",
+    "pdf.js text 8",
+    "pdf.js text 9",
+    "docling text 10",
+  ]);
+  assert.deepEqual(
+    routing.routes.filter((route) => route.parser === "docling").map((route) => route.pageNumber),
+    [1, 3, 6, 10]
+  );
+  assert.deepEqual(routing.batches.map((batch) => [batch.firstPage, batch.lastPage]), [[1, 6], [10, 10]]);
+
+  // 1 merges only single-page gaps; a page on the other Docling route always
+  // ends a run.
+  setEnv({ DOCLING_MERGE_GAP_PAGES: "1" });
+
+  const narrow = createDoclingServe({ respond: answerRange });
+
+  await routeAuto("LTLTTLOL", narrow);
+  assert.deepEqual(narrow.calls.map((call) => call.pageRange), [[1, 3], [6, 6], [7, 7], [8, 8]]);
+});
+
+test("a failed merged request marks only its routed pages docling_failed", async () => {
+  setEnv({ DOCLING_MERGE_GAP_PAGES: "2" });
+
+  const serve = createDoclingServe({ respond: () => failedResponse(503) });
+  const { pages, routing } = await routeAuto("LTTL", serve);
+
+  assert.deepEqual(serve.calls.map((call) => call.pageRange), [[1, 4]]);
+  assert.deepEqual(textsOf(pages), ["pdf.js text 1", "pdf.js text 2", "pdf.js text 3", "pdf.js text 4"]);
+  assert.deepEqual(
+    routing.routes.map((route) => route.fallback ?? null),
+    ["docling_failed", null, null, "docling_failed"]
+  );
 });
 
 test("a document with no routed page sends no request at all", async () => {

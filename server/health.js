@@ -77,6 +77,7 @@ import { resolvePdfAutoRoutingConfig } from "./rag/pdf-page-router.js";
 import {
   getDoclingFallback,
   getDoclingMaxConcurrency,
+  getDoclingMergeGapPages,
   getDoclingPageBatchSize,
   getPdfParser,
   getTenantEncryptionMode,
@@ -1316,7 +1317,7 @@ export const checkPdfParserHealth = async ({ fetchImpl } = {}) => {
   }
 
   const probe = await probeDoclingServe({ fetchImpl });
-  const autoDetails = routes ? { routes: [...routes] } : {};
+  const autoDetails = routes ? { doclingMergeGapPages: getDoclingMergeGapPages(), routes: [...routes] } : {};
 
   if (probe.reachable) {
     return buildEntry("ok", { parser, ...autoDetails, ...docling, url: probe.url, message: "docling-serve is reachable." });

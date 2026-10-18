@@ -301,3 +301,50 @@ test("a run is split at maxPagesPerRequest; 0 leaves it whole", () => {
     { firstPage: 1, lastPage: 3, route: "layout" },
   ]);
 });
+
+test("mergeGapPages joins same-route runs separated only by that many text pages; requests start and end on routed pages", () => {
+  assert.deepEqual(planDoclingBatches(routesOf("LTLTTLTTTL"), { mergeGapPages: 2 }), [
+    { firstPage: 1, lastPage: 6, route: "layout" },
+    { firstPage: 10, lastPage: 10, route: "layout" },
+  ]);
+  assert.deepEqual(planDoclingBatches(routesOf("LTLTTLTTTL"), { mergeGapPages: 3 }), [
+    { firstPage: 1, lastPage: 10, route: "layout" },
+  ]);
+  // A page on the other Docling route ends the run, whatever the gap.
+  assert.deepEqual(planDoclingBatches(routesOf("LOL"), { mergeGapPages: 5 }), [
+    { firstPage: 1, lastPage: 1, route: "layout" },
+    { firstPage: 2, lastPage: 2, route: "ocr" },
+    { firstPage: 3, lastPage: 3, route: "layout" },
+  ]);
+  assert.deepEqual(planDoclingBatches(routesOf("OTO"), { mergeGapPages: 1 }), [
+    { firstPage: 1, lastPage: 3, route: "ocr" },
+  ]);
+  // The page limit counts the gap pages too, and a split never leaves a
+  // request that starts or ends on a gap page.
+  assert.deepEqual(planDoclingBatches(routesOf("LTTLLTL"), { maxPagesPerRequest: 3, mergeGapPages: 2 }), [
+    { firstPage: 1, lastPage: 1, route: "layout" },
+    { firstPage: 4, lastPage: 5, route: "layout" },
+    { firstPage: 7, lastPage: 7, route: "layout" },
+  ]);
+  // A page missing from the routes is no gap to merge over.
+  assert.deepEqual(
+    planDoclingBatches(
+      [
+        { pageNumber: 1, route: "layout" },
+        { pageNumber: 3, route: "layout" },
+      ],
+      { mergeGapPages: 2 }
+    ),
+    [
+      { firstPage: 1, lastPage: 1, route: "layout" },
+      { firstPage: 3, lastPage: 3, route: "layout" },
+    ]
+  );
+  // 0, negative or non-integer values merge nothing.
+  for (const mergeGapPages of [0, -1, 1.5, undefined]) {
+    assert.deepEqual(planDoclingBatches(routesOf("LTL"), { mergeGapPages }), [
+      { firstPage: 1, lastPage: 1, route: "layout" },
+      { firstPage: 3, lastPage: 3, route: "layout" },
+    ]);
+  }
+});

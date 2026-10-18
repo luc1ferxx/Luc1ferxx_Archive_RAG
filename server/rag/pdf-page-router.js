@@ -109,35 +109,55 @@ export const classifyPdfPage = (signals = {}, thresholds = resolvePdfAutoRouting
 };
 
 /**
- * The docling-serve requests for a document's routed pages: each contiguous
- * run of pages on the same Docling route (layout or ocr), split into requests
- * of at most `maxPagesPerRequest` pages (0 = unsplit). `routes` is
- * `[{ pageNumber, route }]`; text pages make no request.
+ * The docling-serve requests for a document's routed pages. Pages on the same
+ * Docling route (layout or ocr) form one run while at most `mergeGapPages`
+ * text pages separate them (0 = contiguous pages only; a page on the other
+ * Docling route always ends a run), and each run is split into requests of at
+ * most `maxPagesPerRequest` pages (0 = unsplit), every request starting and
+ * ending on a routed page. `routes` is `[{ pageNumber, route }]`; a request
+ * covers `firstPage..lastPage`, gap pages included (they keep pdf.js text).
  */
-export const planDoclingBatches = (routes = [], { maxPagesPerRequest = 0 } = {}) => {
+export const planDoclingBatches = (routes = [], { maxPagesPerRequest = 0, mergeGapPages = 0 } = {}) => {
   const limit = Number.isInteger(maxPagesPerRequest) && maxPagesPerRequest > 0 ? maxPagesPerRequest : Infinity;
-  const ordered = [...routes].sort((left, right) => left.pageNumber - right.pageNumber);
+  const gap = Number.isInteger(mergeGapPages) && mergeGapPages > 0 ? mergeGapPages : 0;
+  const routeByPage = new Map(routes.map(({ pageNumber, route }) => [pageNumber, route]));
+  const routed = [...routes]
+    .filter(({ route }) => DOCLING_ROUTES.has(route))
+    .sort((left, right) => left.pageNumber - right.pageNumber);
+  const onlyTextBetween = (from, to) => {
+    for (let pageNumber = from + 1; pageNumber < to; pageNumber += 1) {
+      if (routeByPage.get(pageNumber) !== "text") {
+        return false;
+      }
+    }
+
+    return true;
+  };
+  const runs = [];
+
+  for (const { pageNumber, route } of routed) {
+    const run = runs.at(-1);
+
+    if (run && run.route === route && pageNumber - run.pages.at(-1) - 1 <= gap && onlyTextBetween(run.pages.at(-1), pageNumber)) {
+      run.pages.push(pageNumber);
+    } else {
+      runs.push({ pages: [pageNumber], route });
+    }
+  }
+
   const batches = [];
-  let current = null;
 
-  for (const { pageNumber, route } of ordered) {
-    if (!DOCLING_ROUTES.has(route)) {
-      current = null;
-      continue;
+  for (const { pages, route } of runs) {
+    let current = null;
+
+    for (const pageNumber of pages) {
+      if (current && pageNumber - current.firstPage + 1 <= limit) {
+        current.lastPage = pageNumber;
+      } else {
+        current = { firstPage: pageNumber, lastPage: pageNumber, route };
+        batches.push(current);
+      }
     }
-
-    if (
-      current &&
-      current.route === route &&
-      current.lastPage === pageNumber - 1 &&
-      current.lastPage - current.firstPage + 1 < limit
-    ) {
-      current.lastPage = pageNumber;
-      continue;
-    }
-
-    current = { firstPage: pageNumber, lastPage: pageNumber, route };
-    batches.push(current);
   }
 
   return batches;
