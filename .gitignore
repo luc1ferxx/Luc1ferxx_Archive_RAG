@@ -50,8 +50,6 @@ server/.env
 /server/evaluation/results/*rerank*.md
 /server/evaluation/results/latest-ragas.json
 /server/evaluation/results/latest-ragas.md
-/server/evaluation/results/latest-pdf-parse-bench*.json
-/server/evaluation/results/latest-pdf-parse-bench*.md
 server/uploads/*
 !server/uploads/.gitkeep
 /.npm-cache/

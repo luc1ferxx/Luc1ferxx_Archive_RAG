@@ -31,3 +31,7 @@ latest-pgvector-scale*.json
 latest-pgvector-scale*.md
 latest-semantic-cache*.json
 latest-semantic-cache*.md
+latest-pdf-parse-bench*.json
+latest-pdf-parse-bench*.md
+latest-docling-routing*.json
+latest-docling-routing*.md
