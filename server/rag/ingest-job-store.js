@@ -35,6 +35,7 @@ import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import {
   createTenantBytesDecoder,
   decryptTenantBytes,
+  decryptTenantRecordBytesForExport,
   encryptTenantBytes,
   ingestJobFileContext,
   ingestJobOutputContext,
@@ -798,22 +799,21 @@ export const createPostgresIngestJobStore = ({
       tables: () => [
         {
           keyColumns: ["job_id", "output"],
+          // Bytes that do not decrypt are exported as null with the code
+          // (unreadableBytes) instead of ending the export.
           mapRow: async ({ payload, ...row }) =>
             row.output === "document_file"
-              ? {
-                  ...row,
-                  payload:
-                    payload === null || payload === undefined
-                      ? payload
-                      : await decryptTenantBytes(
-                          payload,
-                          ingestJobFileContext({
-                            jobId: row.job_id,
-                            userId: row.owner_user_id,
-                            workspaceId: row.workspace_id,
-                          })
-                        ),
-                }
+              ? payload === null || payload === undefined
+                ? { ...row, payload }
+                : decryptTenantRecordBytesForExport(
+                    { ...row, payload },
+                    "payload",
+                    ingestJobFileContext({
+                      jobId: row.job_id,
+                      userId: row.owner_user_id,
+                      workspaceId: row.workspace_id,
+                    })
+                  )
               : row,
           name: "ingest_job_outputs",
           pageSize: 5,
@@ -826,17 +826,15 @@ export const createPostgresIngestJobStore = ({
           mapRow: async (row) =>
             row.file_bytes === null || row.file_bytes === undefined
               ? row
-              : {
-                  ...row,
-                  file_bytes: await decryptTenantBytes(
-                    row.file_bytes,
-                    ingestJobFileContext({
-                      jobId: row.job_id,
-                      userId: row.owner_user_id,
-                      workspaceId: row.workspace_id,
-                    })
-                  ),
-                },
+              : decryptTenantRecordBytesForExport(
+                  row,
+                  "file_bytes",
+                  ingestJobFileContext({
+                    jobId: row.job_id,
+                    userId: row.owner_user_id,
+                    workspaceId: row.workspace_id,
+                  })
+                ),
           name: "ingest_jobs",
           pageSize: 5,
           table: tableName(),

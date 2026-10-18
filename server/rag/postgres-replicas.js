@@ -998,6 +998,11 @@ export const resetReadReplicas = async () => {
   const previous = runtime?.state ?? null;
 
   runtime = null;
+  // The parsed configuration too: it is keyed by the variables' text, so a
+  // CA file replaced under the same POSTGRES_SSL_CA_FILE would otherwise keep
+  // its old certificate until the process restarts.
+  configCache.key = null;
+  configCache.value = null;
 
   if (previous) {
     stopMonitor(previous);

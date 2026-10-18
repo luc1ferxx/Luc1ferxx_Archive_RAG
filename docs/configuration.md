@@ -264,7 +264,7 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `CHAT_MAX_QUESTION_CHARS` | `8000` | `/chat`、GET `/chat`、`/chat/stream` 问题的最大长度（去掉首尾空白后），超过返回 400。 |
-| `CHAT_MAX_DOC_IDS` | 进程内检索：不限；配了 `RETRIEVAL_SERVICE_URL`：`1000` | 每个请求最多的 docId 数，`0` 为不限。前端会把当前范围内的所有文档都发过来，所以单体默认不设上限；拆分部署默认与检索层自己的 `RETRIEVAL_SERVICE_MAX_DOC_IDS` 一致。 |
+| `CHAT_MAX_DOC_IDS` | 进程内检索：不限；配了 `RETRIEVAL_SERVICE_URL` 或 `AGENT_SERVICE_URL`：`1000` | 每个请求最多的 docId 数，`0` 为不限。前端会把当前范围内的所有文档都发过来，所以单体默认不设上限；拆分部署默认与检索层自己的 `RETRIEVAL_SERVICE_MAX_DOC_IDS` 一致，转发给 agent 层的 api 边缘也用 `1000`，在边缘就拒绝 agent 层会拒绝的请求，而不是转发过去。 |
 | `CHAT_MAX_ID_CHARS` | `256` | 单个 docId 和 sessionId 的最大长度。任务、触发器和 agent run 路由的 id（路径参数、gateId、sessionId、userId、幂等键及其 `x-idempotency-key` / `x-request-id` 头、列表过滤参数）也用它。 |
 | `TASK_MAX_PAYLOAD_BYTES` | `262144`（256 KiB） | 任务、触发器、agent run 路由里自由格式 JSON 的上限：动作的请求体、触发器的 event/input/request、`/agent-tasks` 除 docIds 以外的部分，按 JSON 序列化后的 UTF-8 字节数计，`0` 不限（2 MB 的解析上限仍在）。嵌套超过 32 层一律拒绝。`/agent-tasks` 的问题按 `CHAT_MAX_QUESTION_CHARS`、docIds 按 `CHAT_MAX_DOC_IDS` / `CHAT_MAX_ID_CHARS` 限制，`userPreferences` 最多 64 条、每条不超过问题长度。超限返回 400 `{ error }`，与 `/chat` 相同；拆分部署的 api 边缘用同一套校验，在转发前拒绝。 |
 | `UPLOAD_SESSION_MAX_PER_TENANT` | `200` | 每个 (user, workspace) 同时打开的分片上传会话数；超出时 `POST /upload/init` 返回 429 `UPLOAD_SESSION_LIMIT_EXCEEDED`，`limit: "sessions"`。续传不受限。`0` 不限。按进程计数，多个进程共用一个会话目录时可能各多出一个。 |

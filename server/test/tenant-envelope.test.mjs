@@ -24,6 +24,7 @@ import {
   encryptTenantBytes,
   ingestJobFileContext,
   ingestJobOutputContext,
+  isParseableTenantEnvelopeHead,
   isTenantEnvelope,
   maybeEncryptTenantBytes,
   rewrapTenantEnvelope,
@@ -105,6 +106,35 @@ test("an envelope round-trips and holds no plaintext", async () => {
   const again = await encryptTenantBytes(PLAINTEXT, ACME_ANN);
 
   assert.notDeepEqual(again, sealed, "every write has its own data key and nonce");
+});
+
+test("only bytes whose framing and header parse count as an envelope by their head", async () => {
+  const sealed = await encryptTenantBytes(PLAINTEXT, ACME_ANN);
+  // The head the maintenance SQL reads: the fixed 12 bytes plus the header.
+  const head = (bytes) => bytes.subarray(0, 12 + bytes.readUInt32BE(8));
+
+  assert.equal(isParseableTenantEnvelopeHead(head(sealed), sealed.length), true);
+  assert.equal(isParseableTenantEnvelopeHead(sealed, sealed.length), true, "a longer head is fine");
+  // A PDF stored with the magic and version in front: "%PDF" read as the
+  // header length is far out of range.
+  const prefixed = Buffer.concat([TENANT_ENVELOPE_MAGIC, Buffer.from([1]), PLAINTEXT]);
+
+  assert.equal(isParseableTenantEnvelopeHead(prefixed.subarray(0, 4108), prefixed.length), false);
+  // A header that is not the envelope's JSON, a wrong version, a value too
+  // short for its nonce and tag, a head cut inside the header, plaintext.
+  const damaged = Buffer.from(sealed);
+
+  damaged[13] = 0x7b;
+  damaged[14] = 0x7b;
+  assert.equal(isParseableTenantEnvelopeHead(head(damaged), damaged.length), false);
+
+  const otherVersion = Buffer.from(sealed);
+
+  otherVersion[7] = 2;
+  assert.equal(isParseableTenantEnvelopeHead(head(otherVersion), otherVersion.length), false);
+  assert.equal(isParseableTenantEnvelopeHead(head(sealed), head(sealed).length + 27), false);
+  assert.equal(isParseableTenantEnvelopeHead(head(sealed).subarray(0, 20), sealed.length), false);
+  assert.equal(isParseableTenantEnvelopeHead(PLAINTEXT.subarray(0, 64), PLAINTEXT.length), false);
 });
 
 test("legacy plaintext passes through unchanged without touching the KMS", async () => {

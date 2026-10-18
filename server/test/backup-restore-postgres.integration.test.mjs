@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,7 +28,12 @@ import { buildTextPdf } from "../evaluation/load-bench-pdf.mjs";
 //   check: migrations, row and tenant counts, the health report's
 //   rowLevelSecurity entry and the audit chains;
 // * the verify step fails (exit 1) when a restored row is missing or an
-//   audit row was changed.
+//   audit row was changed, checks the dump and files archive next to the
+//   manifest, and with --allow-pending-migrations never migrates the
+//   restored database;
+// * every file a backup writes is 0600 and the --out directory it creates
+//   0700; --with-files leaves local KMS key material out by path (flags,
+//   variables) and by content, and the manifest names what it found.
 //
 // It runs only when PGVECTOR_TEST_DATABASE_URL points at a pgvector-enabled
 // PostgreSQL whose login may create roles and databases (`bash
@@ -348,6 +353,13 @@ if (!adminDatabaseUrl || clientTools.skip) {
     assert.equal(manifest.database.database, sourceDatabase);
     assert.equal(manifestText.includes(ownerPassword), false, "no credential in the manifest");
     assert.equal(manifestText.includes(ownerRole), false, "not even the login's name");
+
+    // Only this login reads what a backup writes, whatever the umask.
+    const modeOf = async (target) => (await stat(target)).mode & 0o777;
+
+    assert.equal(await modeOf(path.join(tempRoot, "backups")), 0o700, "the --out directory it created");
+    assert.equal(await modeOf(backup.dump), 0o600);
+    assert.equal(await modeOf(backup.manifest), 0o600);
   });
 
   test("--with-files archives the state outside PostgreSQL and leaves the tenant keystore and master key out", async () => {
@@ -365,6 +377,29 @@ if (!adminDatabaseUrl || clientTools.skip) {
     // under the default name (left out by name).
     await writeFile(path.join(root, "data", "wrapping.key"), "not a real master key");
     await writeFile(path.join(root, "data", "tenant-kms-master.key"), "not a real master key");
+    // A keystore and a master key the flags name (as server/.env would, which
+    // the script does not read), under names no pattern knows.
+    await mkdir(path.join(root, "data", "vault-by-flag"), { recursive: true });
+    await writeFile(path.join(root, "data", "vault-by-flag", "opaque.bin"), "not a real key");
+    await writeFile(path.join(root, "uploads", "wrap-by-flag.bin"), "not a real master key");
+    // And key material nothing names: a key file, a destroyed key's
+    // tombstone and a master key copied anywhere, found by content.
+    const keyFileFormat = "archive-rag-local-tenant-key";
+    const masterKeyFormat = "archive-rag-local-kms-master-key";
+
+    await mkdir(path.join(root, "data", "copied"), { recursive: true });
+    await writeFile(
+      path.join(root, "data", "copied", "tk_aaaa.json"),
+      JSON.stringify({ format: keyFileFormat, keyId: "tk_aaaa", versions: [{ version: 1, wrappedKey: "S0VZLU1BVEVSSUFM" }] })
+    );
+    await writeFile(
+      path.join(root, "data", "copied", "tk_bbbb.json"),
+      JSON.stringify({ currentVersion: null, destroyedThroughVersion: 2, format: keyFileFormat, keyId: "tk_bbbb", versions: [] })
+    );
+    await writeFile(
+      path.join(root, "upload-sessions", "stray.json"),
+      JSON.stringify({ format: masterKeyFormat, key: "TUFTVEVSLUtFWS1NQVRFUklBTA==" })
+    );
 
     const result = await runScript(
       "bash",
@@ -389,7 +424,8 @@ if (!adminDatabaseUrl || clientTools.skip) {
 
     assert.equal(result.code, 0, result.stderr);
 
-    const manifest = JSON.parse(await readFile(JSON.parse(result.stdout).manifest, "utf8"));
+    const manifestText = await readFile(JSON.parse(result.stdout).manifest, "utf8");
+    const manifest = JSON.parse(manifestText);
     const archive = path.join(tempRoot, "backups", manifest.files.file);
     const listing = await runScript("tar", ["-tzf", archive]);
     const members = listing.stdout.split("\n").filter(Boolean);
@@ -403,6 +439,54 @@ if (!adminDatabaseUrl || clientTools.skip) {
     assert.equal(members.some((member) => member.endsWith(".key")), false, members.join(", "));
     assert.ok(manifest.files.excluded.includes("data/wrapping.key"));
     assert.equal(manifest.files.sha256.length, 64);
+    assert.deepEqual(
+      manifest.files.keyMaterialExcluded,
+      [
+        { file: "data/copied/tk_aaaa.json", format: keyFileFormat },
+        { file: "data/copied/tk_bbbb.json", format: keyFileFormat },
+        { file: "upload-sessions/stray.json", format: masterKeyFormat },
+      ],
+      "found by content, listed by path and format"
+    );
+    assert.equal(members.some((member) => member.includes("copied/tk_")), false, members.join(", "));
+    assert.equal(members.some((member) => member.endsWith("stray.json")), false, members.join(", "));
+    assert.ok(members.some((member) => member.endsWith("data/vault-by-flag/opaque.bin")), "no flag yet: archived");
+    assert.equal(manifestText.includes("S0VZLU1BVEVSSUFM") || manifestText.includes("TUFTVEVS"), false, "no key material");
+    assert.equal((await stat(archive)).mode & 0o777, 0o600);
+
+    // The flags name a keystore and a master key the shell's variables do not.
+    const flagged = await runScript("bash", [
+      "scripts/backup-postgres.sh",
+      "--database-url",
+      ownerUrl(sourceDatabase),
+      "--out",
+      path.join(tempRoot, "backups"),
+      "--name",
+      "with-files-flags",
+      "--with-files",
+      "--uploads-dir",
+      path.join(root, "uploads"),
+      "--upload-sessions-dir",
+      path.join(root, "upload-sessions"),
+      "--data-dir",
+      path.join(root, "data"),
+      "--keystore-dir",
+      path.join(root, "data", "vault-by-flag"),
+      "--kms-master-key-file",
+      path.join(root, "uploads", "wrap-by-flag.bin"),
+    ]);
+
+    assert.equal(flagged.code, 0, flagged.stderr);
+
+    const flaggedManifest = JSON.parse(await readFile(JSON.parse(flagged.stdout).manifest, "utf8"));
+    const flaggedMembers = (await runScript("tar", ["-tzf", path.join(tempRoot, "backups", flaggedManifest.files.file)])).stdout
+      .split("\n")
+      .filter(Boolean);
+
+    assert.ok(flaggedManifest.files.excluded.includes("data/vault-by-flag"));
+    assert.ok(flaggedManifest.files.excluded.includes("uploads/wrap-by-flag.bin"));
+    assert.equal(flaggedMembers.some((member) => member.includes("by-flag")), false, flaggedMembers.join(", "));
+    assert.ok(flaggedMembers.some((member) => member.endsWith("uploads/upload.pdf")));
   });
 
   test("restore-postgres.sh restores into an empty database and refuses a non-empty one", async () => {
@@ -493,6 +577,88 @@ if (!adminDatabaseUrl || clientTools.skip) {
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     assert.equal(report.checks.auditChains.chains, 2);
     assert.deepEqual(report.checks.migrations.pending, []);
+  });
+
+  test("verify checks the dump and the files archive it finds next to the manifest", async () => {
+    // The --with-files backup of the same source (nothing changed it since
+    // the drill's dump), verified against the drill's restored database.
+    const directory = path.join(tempRoot, "backups");
+    const manifestPath = path.join(directory, "with-files.manifest.json");
+    const verify = (manifest) =>
+      runScript(process.execPath, [
+        "backup-tools.mjs",
+        "verify",
+        "--database-url",
+        ownerUrl(drillDatabase),
+        "--manifest",
+        manifest,
+      ]);
+
+    let result = await verify(manifestPath);
+    let report = JSON.parse(result.stdout);
+
+    assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(report.checks.dumpChecksum.ok, true);
+    assert.equal(report.checks.dumpChecksum.file, "with-files.dump");
+    assert.equal(report.checks.filesChecksum.ok, true);
+
+    // A copy whose files archive changed after the manifest was written.
+    const copy = path.join(tempRoot, "backups-tampered");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+
+    await mkdir(copy, { recursive: true });
+    await copyFile(manifestPath, path.join(copy, "with-files.manifest.json"));
+    await copyFile(path.join(directory, manifest.dump.file), path.join(copy, manifest.dump.file));
+
+    const archive = await readFile(path.join(directory, manifest.files.file));
+
+    archive[archive.length - 1] ^= 0xff;
+    await writeFile(path.join(copy, manifest.files.file), archive);
+    result = await verify(path.join(copy, "with-files.manifest.json"));
+    report = JSON.parse(result.stdout);
+
+    assert.equal(result.code, 1);
+    assert.equal(report.checks.filesChecksum.ok, false);
+    assert.equal(report.checks.dumpChecksum.ok, true);
+  });
+
+  test("verify --allow-pending-migrations never migrates the restored database", async () => {
+    // A backup taken before the newest migration, restored under the newer
+    // code: the drill database without its newest schema_migrations row, and
+    // a manifest that says so.
+    const manifest = JSON.parse(await readFile(backup.manifest, "utf8"));
+    const newest = manifest.migrations.at(-1);
+    const older = {
+      ...manifest,
+      migrations: manifest.migrations.slice(0, -1),
+      tables: { ...manifest.tables, schema_migrations: manifest.tables.schema_migrations - 1 },
+    };
+    const olderPath = path.join(tempRoot, "older.manifest.json");
+
+    await writeFile(olderPath, JSON.stringify(older));
+    await adminQuery(ownerUrl(drillDatabase), "DELETE FROM schema_migrations WHERE id = $1", [newest]);
+
+    const result = await runScript(process.execPath, [
+      "backup-tools.mjs",
+      "verify",
+      "--database-url",
+      ownerUrl(drillDatabase),
+      "--manifest",
+      olderPath,
+      "--allow-pending-migrations",
+    ]);
+    const report = JSON.parse(result.stdout);
+
+    assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
+    assert.deepEqual(report.checks.migrations.pending, [newest]);
+    assert.equal(report.checks.rowLevelSecurity.skipped, "pending_migrations");
+    assert.equal(report.checks.auditChains.ok, true);
+    assert.equal(
+      (await adminQuery(ownerUrl(drillDatabase), "SELECT COUNT(*)::int AS n FROM schema_migrations WHERE id = $1", [newest]))
+        .rows[0].n,
+      0,
+      "the pending migration was not applied"
+    );
   });
 
   // The drill as an operator runs it: no database named, so the script brings

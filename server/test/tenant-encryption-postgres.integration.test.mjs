@@ -538,6 +538,52 @@ if (!adminDatabaseUrl) {
     assert.deepEqual((await request(`/documents/${documents.bob}/file`, { token: TOKENS.bob })).bytes, pdfs.bob);
   });
 
+  test("a value that only begins with the magic is counted malformed, never encrypted, and the export marks it and goes on", async () => {
+    const forgedId = await upload(TOKENS.bob, "bob-forged", pdfFor(`${BOB_MARKER}-forged`));
+    const before = await modules.maintenance.countTenantFileEncryption();
+
+    // As an upload from before the upload checks stored it: a PDF with the
+    // envelope magic and version in front, which no read can decrypt.
+    await raw(
+      `UPDATE rag_documents SET file_bytes = decode('00415254454e4301', 'hex') || convert_to('%PDF-1.4 forged', 'UTF8') WHERE doc_id = $1`,
+      [forgedId]
+    );
+
+    try {
+      const counted = await modules.maintenance.countTenantFileEncryption();
+
+      assert.equal(counted.documents.malformed, 1);
+      assert.equal(counted.documents.encrypted, before.documents.encrypted - 1, "no longer counted as an envelope");
+
+      const preview = await modules.maintenance.encryptExistingTenantFiles();
+
+      assert.equal(preview.tables.documents.malformed, 1);
+      assert.equal(preview.tables.documents.changed, 0, "encrypt-existing leaves it alone");
+
+      const lines = [];
+
+      await modules.tenant.runAsDatabaseSystem(async () => {
+        for await (const line of service.exportTenant({ ...BOB, actor: { userId: "ops" } })) {
+          lines.push(JSON.parse(line));
+        }
+      });
+
+      const forged = lines.find((line) => line.table === "documents" && line.record.doc_id === forgedId);
+
+      assert.equal(lines.some((line) => line.type === "error"), false, JSON.stringify(lines.filter((line) => line.type === "error")));
+      assert.equal(forged.record.file_bytes, null);
+      assert.deepEqual(forged.record.unreadableBytes, { file_bytes: "TENANT_ENVELOPE_MALFORMED" });
+      assert.deepEqual(lines.at(-1).unreadableRecords, { documents: 1 });
+      assert.equal(lines.at(-1).status, "partial");
+      assert.ok(
+        lines.some((line) => line.table === "documents" && line.record.doc_id === documents.bob && line.record.file_bytes?.base64),
+        "bob's other documents are still exported"
+      );
+    } finally {
+      await raw(`DELETE FROM rag_documents WHERE doc_id = $1`, [forgedId]);
+    }
+  });
+
   test("the export holds the plaintext of the tenant's files", async () => {
     const lines = [];
 

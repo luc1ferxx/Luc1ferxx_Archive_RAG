@@ -67,7 +67,7 @@ import { runDocumentDeletionCascade } from "./document-deletion-cascade.js";
 import { recordRagTrace } from "./observability.js";
 import { invalidateSemanticCacheDocuments } from "./semantic-cache.js";
 import { loadPdfPages } from "./pdf-loader.js";
-import { readWorkingFile, writeWorkingFile } from "./working-files.js";
+import { readWorkingFile, startsWithReservedFileMagic, writeWorkingFile } from "./working-files.js";
 import { withPostgresTransaction } from "./postgres.js";
 import { STAGED_INGEST } from "./ingest-stages.js";
 import {
@@ -246,6 +246,7 @@ const createReplacementUnsupportedError = () =>
 export const DOCUMENT_TRASH_ERROR_CODES = Object.freeze({
   notInTrash: "DOCUMENT_NOT_IN_TRASH",
   restoreDuplicate: "DOCUMENT_RESTORE_DUPLICATE",
+  restoreReservedPrefix: "DOCUMENT_RESTORE_RESERVED_PREFIX",
   unsupported: "DOCUMENT_TRASH_UNSUPPORTED",
 });
 
@@ -264,6 +265,17 @@ const createTrashUnsupportedError = () =>
     code: DOCUMENT_TRASH_ERROR_CODES.unsupported,
     retryable: false,
   });
+
+// Stored bytes whose plaintext begins with an envelope's or a working file's
+// magic (rag/working-files.js startsWithReservedFileMagic): an upload from
+// before the upload checks refused them. Every later reader would take them
+// for a broken envelope, so they are not restored (415, as no PDF).
+const createRestoreReservedPrefixError = (docId) =>
+  createStatusError(
+    `The stored file of document ${docId} begins with bytes reserved for encrypted files, so it is not restored as a PDF.`,
+    415,
+    { code: DOCUMENT_TRASH_ERROR_CODES.restoreReservedPrefix, retryable: false }
+  );
 
 // Restored or purged since the caller looked: a 404 like any document the
 // caller's trash does not hold.
@@ -1152,7 +1164,9 @@ const loadStoredPdfPages = async (fileBuffer) => {
  * profile stay. Null when the caller's trash holds no such document (the
  * route answers 404, as for a document of another tenant); 409
  * DOCUMENT_RESTORE_DUPLICATE when, with RAG_INGEST_DEDUP on, the tenant has
- * since stored the same bytes as another document.
+ * since stored the same bytes as another document; 415
+ * DOCUMENT_RESTORE_RESERVED_PREFIX when the stored plaintext begins with an
+ * envelope's or a working file's magic.
  */
 export const restoreDocument = async ({
   accessScope = {},
@@ -1170,6 +1184,11 @@ export const restoreDocument = async ({
   }
 
   const { document, fileBuffer } = trashedFile;
+
+  if (startsWithReservedFileMagic(fileBuffer)) {
+    throw createRestoreReservedPrefixError(document.docId);
+  }
+
   const source = document.profile?.source ?? null;
   const pages = await loadStoredPdfPages(fileBuffer);
   const chunked = chunkDocumentPages({ docId: document.docId, fileName: document.fileName, pages, source });

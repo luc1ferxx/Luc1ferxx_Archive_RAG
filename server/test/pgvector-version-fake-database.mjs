@@ -445,6 +445,16 @@ export const createFakeVersionDatabase = ({
             .filter((row) => row.active_count !== row.target_count)
         );
       }
+      case "unreadable_sources": {
+        const docIds = new Set(values[1]);
+
+        return rows(
+          progressFor(values[0])
+            .filter((entry) => entry.outcome === "failed" && docIds.has(entry.doc_id))
+            .sort((left, right) => (left.doc_id < right.doc_id ? -1 : 1))
+            .map((entry) => ({ doc_id: entry.doc_id, error: entry.error }))
+        );
+      }
       case "count_totals": {
         const names = [...sql.matchAll(/FROM\s+(\w+)\)/g)].map((match) => match[1]);
         const activeUnread = /NULL::bigint AS active_chunks/.test(sql);

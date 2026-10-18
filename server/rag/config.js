@@ -1438,15 +1438,21 @@ export const getUploadSessionCleanupIntervalMs = () =>
 // cap has no default in a process that retrieves itself (a large monolith
 // workspace kept chatting before the cap existed); with RETRIEVAL_SERVICE_URL
 // it defaults to RETRIEVAL_SERVICE_MAX_DOC_IDS' 1000, which the retrieval tier
-// refuses past anyway. CHAT_MAX_DOC_IDS sets it everywhere, 0 = no limit. A
-// request past a limit is answered 400.
+// refuses past anyway, and so it does with AGENT_SERVICE_URL: an api edge
+// forwards /chat to an agent tier whose own default (it retrieves through the
+// retrieval tier) is 1000, so the edge refuses what the agent tier would, as
+// a 400 of its own, instead of forwarding it. CHAT_MAX_DOC_IDS sets it
+// everywhere, 0 = no limit. A request past a limit is answered 400.
 export const getChatMaxQuestionChars = () =>
   Math.floor(toPositiveNumber(process.env.CHAT_MAX_QUESTION_CHARS, 8000));
 
 export const getChatMaxDocIds = () => {
-  const remoteRetrievalDefault = String(process.env.RETRIEVAL_SERVICE_URL ?? "").trim() ? 1000 : 0;
+  const splitDefault =
+    String(process.env.RETRIEVAL_SERVICE_URL ?? "").trim() || String(process.env.AGENT_SERVICE_URL ?? "").trim()
+      ? 1000
+      : 0;
 
-  return Math.floor(toNonNegativeNumber(process.env.CHAT_MAX_DOC_IDS, remoteRetrievalDefault));
+  return Math.floor(toNonNegativeNumber(process.env.CHAT_MAX_DOC_IDS, splitDefault));
 };
 
 // The longest docId (each entry of docIds, or docId) and sessionId accepted.

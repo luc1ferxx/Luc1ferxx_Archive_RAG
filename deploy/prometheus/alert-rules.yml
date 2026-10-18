@@ -35,7 +35,7 @@ groups:
             First three checks:
             1. Where and why: sum by (role, instance) (rate(archive_rag_http_requests_total{route="/chat",status_class="5xx"}[5m])) and sum by (reason) (rate(archive_rag_agent_runs_total{outcome="failed"}[5m])). A split deployment that answers 503/504 at the edge while the agent tier is down shows no failed runs: check sum by (tier, code) (rate(archive_rag_service_client_calls_total[5m])).
             2. Dependencies: sum by (model, status) (rate(archive_rag_model_calls_total{metering!="mirror"}[5m])), archive_rag_model_circuits{state="open"}, sum by (sqlstate_class) (rate(archive_rag_postgres_statement_errors_total[5m])) and archive_rag_postgres_pool_clients{state="waiting"}.
-            3. Health of each process: curl -s http://<host>:<PORT>/health (every checks.* entry and its message) and /ready; in a split deployment also the agent, retrieval and model-gateway tiers.
+            3. Health of each process: curl -s -H "x-api-key: <token with admin.status.read>" http://<host>:<PORT>/health (every checks.* entry and its message) and /ready; with API auth on, a request without such a credential (or the single shared API_AUTH_TOKEN) gets only {status}. In a split deployment also the agent tier the same way, and the retrieval and model-gateway tiers through a signed internal probe (createServiceClient({ audience }).request({ path: "/health", system: true }), docs/deployment.md): an unsigned curl to them gets only {status}.
             Commands: grep the process logs for "[service]" and "Failed to"; cd server && npm run eval:llm-resilience reproduces model failure modes (429, 503, hangs, a down primary) against a local fake model.
       - alert: ArchiveRagChatAvailabilitySlowBurn
         expr: |
@@ -55,7 +55,7 @@ groups:
             1. Which reasons dominate: sum by (outcome, reason) (increase(archive_rag_agent_runs_total[6h])) and sum by (role, instance) (increase(archive_rag_http_requests_total{route="/chat",status_class="5xx"}[6h])); one instance alone points at that host.
             2. Recurring dependency errors: sum by (model, operation, status) (increase(archive_rag_model_calls_total{metering!="mirror"}[6h])), sum by (route, outcome) (increase(archive_rag_retrieval_route_duration_seconds_count[6h])), sum by (tier, code) (increase(archive_rag_service_client_calls_total[6h])).
             3. Recent changes: a deploy, a model or prompt change, an index version switch (cd server && npm run vector:index -- status).
-            Commands: curl -s http://<host>:<PORT>/health; cd server && npm run observability:report summarizes recorded RAG and agent traces when RAG_OBSERVABILITY_ENABLED=true.
+            Commands: curl -s -H "x-api-key: <token with admin.status.read>" http://<host>:<PORT>/health (without it, under API auth, only {status}); cd server && npm run observability:report summarizes recorded RAG and agent traces when RAG_OBSERVABILITY_ENABLED=true.
       - alert: ArchiveRagChatLatencyFastBurn
         expr: |
           (1 - archive_rag:chat_latency_sli:ratio_rate1h) > (14.4 * 0.05)
@@ -110,7 +110,7 @@ groups:
             First three checks:
             1. Which jobs and why: cd server && npm run ingest:jobs -- dead-letter list --all (stage, message-free reason, attempts).
             2. Which stage keeps failing: sum by (stage, result) (increase(archive_rag_ingest_stage_failures_total[1h])). embed points at the embedding model (archive_rag_model_calls_total{operation="embedding",status="error"}), parse at the PDF or docling-serve (DOCLING_SERVE_URL), index at PostgreSQL (archive_rag_postgres_statement_errors_total).
-            3. Queue health: curl -s http://<api-host>:<PORT>/health and read checks.ingestJobs; archive_rag_ingest_jobs by status.
+            3. Queue health: curl -s -H "x-api-key: <token with admin.status.read>" http://<api-host>:<PORT>/health and read checks.ingestJobs (without the credential, under API auth, only {status}); archive_rag_ingest_jobs by status.
             Commands: once the cause is fixed, cd server && npm run ingest:jobs -- dead-letter requeue <jobId> --all (it resumes at the stage it died in), or POST /admin/ingest-jobs/<jobId>/requeue for one tenant.
       - alert: ArchiveRagModelCircuitOpen
         # Not closed (open, or half_open while its one probe is in flight) and
@@ -133,7 +133,7 @@ groups:
           runbook: |
             What it means: RAG_LLM_CIRCUIT_FAILURE_THRESHOLD consecutive unavailable errors (5xx, 408, timeouts, refused connections; never 429) opened the model-call guard. After RAG_LLM_CIRCUIT_COOLDOWN_MS one probe is let through (half_open while it is in flight); the circuit stays open while probes keep failing. A guard that has had no call since it opened is still reported open, so the alert also requires failing model calls on the process: it resolves once nothing calls that model.
             First three checks:
-            1. Is the model endpoint up: curl -s <OPENAI_BASE_URL>/models from the same host, or GET /health on the model gateway (guard state per upstream replica).
+            1. Is the model endpoint up: curl -s <OPENAI_BASE_URL>/models from the same host, or the model gateway's /health through a signed internal probe (guard state per upstream replica: createServiceClient({ audience: "model-gateway" }).request({ path: "/health", system: true }), docs/deployment.md); an unsigned curl gets only {status}.
             2. What the calls see: sum by (model, operation, status) (rate(archive_rag_model_calls_total[5m])) and the latency histogram archive_rag_model_call_duration_seconds; hanging requests end at RAG_LLM_REQUEST_TIMEOUT_MS.
             3. Fallback and sharing: is OPENAI_CHAT_FALLBACK_MODEL set and answering (model="openai.chat.fallback"); with RAG_SHARED_STATE=redis every instance shares the circuit, otherwise each opens its own.
             Commands: cd server && npm run eval:llm-resilience exercises the breaker against a local fake model.

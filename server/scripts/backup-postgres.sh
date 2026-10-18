@@ -7,6 +7,7 @@
 #   server/scripts/backup-postgres.sh --database-url <url> [--out <dir>] [--name <base>]
 #                                     [--with-files] [--uploads-dir <dir>]
 #                                     [--upload-sessions-dir <dir>] [--data-dir <dir>]
+#                                     [--keystore-dir <dir>] [--kms-master-key-file <file>]
 #
 # * The URL comes from --database-url or BACKUP_DATABASE_URL in the
 #   environment; server/.env is never read. Use the login that owns the tables
@@ -24,9 +25,14 @@
 #   PostgreSQL: uploads (UPLOADS_DIRECTORY), upload sessions
 #   (UPLOAD_SESSION_DIRECTORY) and the data directory (server/data: the local
 #   index, file registry, JSONL stores, traces). The tenant keystore
-#   (TENANT_KEYSTORE_DIR, envelope encryption) is left out on purpose -- see
-#   the documentation: it is backed up separately or not at all, so erasing a
-#   tenant's key also shreds that tenant's bytes in every backup.
+#   (TENANT_KEYSTORE_DIR, envelope encryption) and the KMS master key are left
+#   out on purpose -- see the documentation: they are backed up separately or
+#   not at all, so erasing a tenant's key also shreds that tenant's bytes in
+#   every backup. This script does not read server/.env, so pass a keystore or
+#   master key outside the defaults with --keystore-dir /
+#   --kms-master-key-file (or the variables); any file holding local KMS key
+#   material is also left out by its content, and the manifest lists those.
+# * Every file it writes is 0600, an --out directory it creates 0700.
 #
 # Exit code 0 on success, 2 on an error.
 set -euo pipefail

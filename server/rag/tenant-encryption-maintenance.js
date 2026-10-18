@@ -19,6 +19,15 @@
 // are the outputs of one: its worker reads them in slices across statements,
 // and a change between two slices would hand it half of each form; locking
 // the job row keeps a claim from starting it while its bytes change.
+//
+// A value counts as an envelope only when its framing and header parse
+// (isParseableTenantEnvelopeHead, from the value's head and length read in
+// SQL), not merely because it begins with the magic: a PDF stored with the
+// magic in front (an upload from before the upload checks refused that), or a
+// damaged header, is counted `malformed`. Every read of such a value fails
+// (TENANT_ENVELOPE_MALFORMED), encrypting it would hand the damaged bytes out
+// as plaintext, and nothing can rewrap it, so every command reports it and
+// none changes it.
 import { createHash } from "node:crypto";
 
 import {
@@ -34,11 +43,14 @@ import {
 import { isTenantEncryptionError } from "./kms/index.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import {
+  TENANT_ENVELOPE_FIXED_HEAD_BYTES,
   TENANT_ENVELOPE_MAGIC,
+  TENANT_ENVELOPE_MAX_HEADER_BYTES,
   documentFileContext,
   encryptTenantBytes,
   ingestJobFileContext,
   ingestJobOutputContext,
+  isParseableTenantEnvelopeHead,
   isTenantEnvelope,
   rewrapTenantEnvelope,
 } from "./tenant-encryption.js";
@@ -114,9 +126,69 @@ export const describeTenantFileTables = ({
 const keyMatch = (spec, offset = 0) =>
   spec.keyColumns.map((column, index) => `t.${column} = $${offset + index + 1}`).join(" AND ");
 
+// A value's head as isParseableTenantEnvelopeHead reads it: the fixed bytes
+// plus the header length they name (big-endian uint32 at offset 8, capped),
+// so a page carries a few hundred bytes per value, never the file.
+const envelopeHeadSql = (column) => `CASE
+          WHEN octet_length(t.${column}) >= ${TENANT_ENVELOPE_FIXED_HEAD_BYTES}
+            THEN substring(t.${column} FROM 1 FOR ${TENANT_ENVELOPE_FIXED_HEAD_BYTES} + LEAST(
+              ${TENANT_ENVELOPE_MAX_HEADER_BYTES},
+              (get_byte(t.${column}, 8)::bigint << 24) | (get_byte(t.${column}, 9)::bigint << 16)
+                | (get_byte(t.${column}, 10)::bigint << 8) | get_byte(t.${column}, 11)::bigint
+            )::int)
+          ELSE t.${column}
+        END`;
+
+// Per table: values beginning with the magic, split into envelopes whose
+// framing and header parse and `malformed` ones, a page of heads at a time.
+const classifyMagicValues = async ({ batchSize = 500, queryPostgres, spec }) => {
+  const counts = { encrypted: 0, malformed: 0 };
+  let after = null;
+
+  for (;;) {
+    const values = [TENANT_ENVELOPE_MAGIC];
+    const keyset = after
+      ? ` AND (${spec.keyColumns.map((column) => `t.${column}`).join(", ")}) > (${after
+          .map((value) => {
+            values.push(value);
+            return `$${values.length}`;
+          })
+          .join(", ")})`
+      : "";
+
+    values.push(batchSize);
+
+    const result = await queryPostgres(
+      `
+        SELECT ${spec.keyColumns.map((column) => `t.${column}`).join(", ")},
+               ${envelopeHeadSql(spec.column)} AS archive_rag_head,
+               octet_length(t.${spec.column}) AS archive_rag_length
+        FROM ${spec.table} AS t
+        WHERE substring(t.${spec.column} FROM 1 FOR ${MAGIC_LENGTH}) = $1::bytea${keyset}
+        ORDER BY ${spec.keyColumns.map((column) => `t.${column}`).join(", ")}
+        LIMIT $${values.length}
+      `,
+      values
+    );
+    const rows = result?.rows ?? [];
+
+    for (const row of rows) {
+      counts[isParseableTenantEnvelopeHead(row.archive_rag_head, row.archive_rag_length) ? "encrypted" : "malformed"] += 1;
+    }
+
+    if (rows.length < batchSize) {
+      return counts;
+    }
+
+    after = spec.keyColumns.map((column) => rows[rows.length - 1][column]);
+  }
+};
+
 /**
- * Per table: rows holding an envelope, rows holding plaintext (null bytes are
- * neither). Reads the first bytes of every row; for the CLI's status.
+ * Per table: rows holding an envelope, rows holding plaintext, and rows that
+ * begin with the magic but do not parse as an envelope (`malformed`; null
+ * bytes are none of them). Reads the first bytes of every row; for the CLI's
+ * status.
  */
 export const countTenantFileEncryption = async ({
   queryPostgres = queryDefaultPostgres,
@@ -132,7 +204,6 @@ export const countTenantFileEncryption = async ({
       const result = await queryPostgres(
         `
           SELECT
-            COUNT(*) FILTER (WHERE substring(${spec.column} FROM 1 FOR ${MAGIC_LENGTH}) = $1::bytea)::int AS encrypted,
             COUNT(*) FILTER (
               WHERE ${spec.column} IS NOT NULL
                 AND substring(${spec.column} FROM 1 FOR ${MAGIC_LENGTH}) <> $1::bytea
@@ -141,9 +212,11 @@ export const countTenantFileEncryption = async ({
         `,
         [TENANT_ENVELOPE_MAGIC]
       );
+      const { encrypted, malformed } = await classifyMagicValues({ queryPostgres, spec });
 
       counts[spec.name] = {
-        encrypted: Number(result.rows[0]?.encrypted) || 0,
+        encrypted,
+        malformed,
         plaintext: Number(result.rows[0]?.plaintext) || 0,
       };
     }
@@ -319,6 +392,12 @@ const runOverTables = async ({
         }
       }
 
+      // encrypt-existing never visits values that begin with the magic; the
+      // ones that do not parse as an envelope are counted, never changed.
+      if (mode === "encrypt") {
+        counts.malformed = (await classifyMagicValues({ batchSize: limit, queryPostgres, spec })).malformed;
+      }
+
       report[spec.name] = Object.keys(failureCodes).length > 0 ? { ...counts, failureCodes } : counts;
     }
 
@@ -328,7 +407,9 @@ const runOverTables = async ({
 /**
  * Encrypts every legacy plaintext value of the tables (dry run unless
  * `apply`): each under its record's tenant key, as a write would. Values
- * already enveloped are left alone, so a rerun only finishes what was left.
+ * already enveloped are left alone, so a rerun only finishes what was left;
+ * values that begin with the magic but do not parse are counted as
+ * `malformed` and left alone too (see the header).
  */
 export const encryptExistingTenantFiles = ({
   apply = false,

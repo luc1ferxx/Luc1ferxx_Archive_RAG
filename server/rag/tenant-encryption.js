@@ -46,6 +46,7 @@ import {
   TENANT_ENCRYPTION_ERROR_CODES as CODES,
   createTenantEncryptionError,
   getTenantKmsProvider,
+  isTenantEncryptionError,
   isTenantKeyId,
   resolveTenantKeyScope,
   resolveTenantKeyScopesForErase,
@@ -303,6 +304,26 @@ export const decryptTenantBytes = async (bytes, context, { kms = null } = {}) =>
 };
 
 /**
+ * A record of the tenant export (rag/tenant-lifecycle.js) with its stored
+ * bytes in `field` as plaintext, or -- when they cannot be decrypted (any
+ * TENANT_* coded error: a key destroyed by a standalone `tenant:keys
+ * destroy`, a changed byte, bytes that only look like an envelope) -- with
+ * that field null and `unreadableBytes: { [field]: code }`, so one unreadable
+ * object does not end the tenant's export. Every other error propagates.
+ */
+export const decryptTenantRecordBytesForExport = async (record, field, context) => {
+  try {
+    return { ...record, [field]: await decryptTenantBytes(record[field], context) };
+  } catch (error) {
+    if (!isTenantEncryptionError(error)) {
+      throw error;
+    }
+
+    return { ...record, [field]: null, unreadableBytes: { ...record.unreadableBytes, [field]: error.code } };
+  }
+};
+
+/**
  * Decrypts bytes that arrive in parts (a bytea read in slices) without
  * holding them all: push(part) resolves to the plaintext ready so far,
  * finish() to the rest, and throws when the payload does not authenticate.
@@ -413,6 +434,48 @@ export const createTenantBytesDecoder = ({ kms = null, resolveContext }) => {
       return EMPTY;
     },
   };
+};
+
+// The first bytes of a stored value that decide whether it parses as an
+// envelope: the magic, the version, the header length and the header itself
+// (rag/tenant-encryption-maintenance.js reads only these in SQL).
+export const TENANT_ENVELOPE_FIXED_HEAD_BYTES = PREFIX_BYTES + LENGTH_BYTES;
+export const TENANT_ENVELOPE_MAX_HEADER_BYTES = MAX_HEADER_BYTES;
+
+/**
+ * Whether a stored value is an envelope whose framing and header parse,
+ * judged from its head (the first TENANT_ENVELOPE_FIXED_HEAD_BYTES plus the
+ * header length it names, at most TENANT_ENVELOPE_MAX_HEADER_BYTES) and its
+ * total length. False for bytes that merely begin with the magic -- a PDF
+ * stored with it in front, a damaged header, a truncated value -- which every
+ * read refuses as TENANT_ENVELOPE_MALFORMED. The payload is not
+ * authenticated here: only a read with the record's key can do that.
+ */
+export const isParseableTenantEnvelopeHead = (head, totalLength) => {
+  const bytes = toBuffer(head);
+
+  if (!isTenantEnvelope(bytes) || bytes.length < TENANT_ENVELOPE_FIXED_HEAD_BYTES) {
+    return false;
+  }
+
+  const headerEnd = TENANT_ENVELOPE_FIXED_HEAD_BYTES + bytes.readUInt32BE(PREFIX_BYTES);
+
+  if (bytes.length < headerEnd || !(Number(totalLength) >= headerEnd + NONCE_BYTES + TAG_BYTES)) {
+    return false;
+  }
+
+  try {
+    // The nonce and tag are not needed to parse the header: zeros stand in.
+    return readEnvelopeFraming(
+      Buffer.concat([bytes.subarray(0, headerEnd), Buffer.alloc(NONCE_BYTES + TAG_BYTES)])
+    ).complete;
+  } catch (error) {
+    if (error?.code === CODES.envelopeMalformed) {
+      return false;
+    }
+
+    throw error;
+  }
 };
 
 /** The key an envelope names ({ keyId, version, provider }), or null for plaintext. */

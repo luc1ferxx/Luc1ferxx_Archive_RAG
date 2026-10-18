@@ -456,3 +456,26 @@ export const createPostgresTenantRecordMethods = ({
     },
   };
 };
+
+/**
+ * The export's mapRow of an event table keyed by a BIGSERIAL every tenant
+ * shares (agent run events, task events): the raw id, whose gaps count other
+ * tenants' events, becomes `${parent}:${n}`, the event's ordinal among its
+ * parent's (`parentColumn`: run_id, task_id) events in id order -- the form
+ * the API hands out for run events (rag/agent-runs.js). The listing's keyset
+ * pages still use the raw id. Rows must arrive in id order within a (user,
+ * workspace) pair, as iterateTenantRecords reads them; make one per listing
+ * (inside `tables()`), so the counts start from 1 each time.
+ */
+export const createExportEventOrdinalMapper = (parentColumn) => {
+  const counts = new Map();
+
+  return (row) => {
+    const parent = String(row[parentColumn] ?? "");
+    const key = JSON.stringify([String(row.user_id ?? ""), String(row.workspace_id ?? ""), parent]);
+    const ordinal = (counts.get(key) ?? 0) + 1;
+
+    counts.set(key, ordinal);
+    return { ...row, event_id: `${parent}:${ordinal}` };
+  };
+};

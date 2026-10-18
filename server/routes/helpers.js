@@ -3,7 +3,12 @@ import { open, rm } from "fs/promises";
 import path from "path";
 
 import { resolveRequestUserId } from "../auth.js";
-import { isWorkingFileEnvelope, readWorkingFile } from "../rag/working-files.js";
+import { TENANT_ENCRYPTION_ERROR_CODES } from "../rag/kms/errors.js";
+import {
+  isWorkingFileEnvelope,
+  readWorkingFile,
+  startsWithReservedFileMagic,
+} from "../rag/working-files.js";
 import { isSafeUploadFileName } from "../upload-policy.js";
 
 export {
@@ -125,14 +130,26 @@ export const hasPdfMagicBytes = async (filePath) => {
       PDF_MAGIC_SCAN_WINDOW,
       0
     );
-    const head = headBuffer.subarray(0, bytesRead);
+    let head = headBuffer.subarray(0, bytesRead);
 
     // An encrypted working file (TENANT_ENCRYPTION=on): its plaintext decides.
+    // One this process cannot decrypt is plaintext that merely begins with
+    // the working-file magic (an upload with TENANT_ENCRYPTION=off): no PDF.
     if (isWorkingFileEnvelope(head)) {
-      return (await readWorkingFile(filePath)).subarray(0, PDF_MAGIC_SCAN_WINDOW).includes(PDF_MAGIC);
+      try {
+        head = (await readWorkingFile(filePath)).subarray(0, PDF_MAGIC_SCAN_WINDOW);
+      } catch (error) {
+        if (error?.code === TENANT_ENCRYPTION_ERROR_CODES.workingFileUnreadable) {
+          return false;
+        }
+
+        throw error;
+      }
     }
 
-    return head.includes(PDF_MAGIC);
+    // Plaintext that begins with an envelope's or a working file's magic is
+    // refused like any other non-PDF (rag/working-files.js).
+    return !startsWithReservedFileMagic(head) && head.includes(PDF_MAGIC);
   } finally {
     await fileHandle.close();
   }

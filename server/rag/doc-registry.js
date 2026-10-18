@@ -8,6 +8,7 @@ import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { createPostgresTenantRecordMethods, tenantSelectorMatches } from "./tenant-records.js";
 import {
   decryptTenantBytes,
+  decryptTenantRecordBytesForExport,
   documentFileContext,
   maybeEncryptTenantBytes,
 } from "./tenant-encryption.js";
@@ -432,10 +433,16 @@ export const createDocumentRegistryStore = ({
     tables: () => [
       {
         keyColumns: ["doc_id"],
-        mapRow: async (row) => ({
-          ...row,
-          file_bytes: await decryptStoredFileBytes(row),
-        }),
+        // Bytes that do not decrypt are exported as null with the code
+        // (unreadableBytes) instead of ending the export.
+        mapRow: async (row) =>
+          row.file_bytes === null || row.file_bytes === undefined
+            ? row
+            : decryptTenantRecordBytesForExport(
+                row,
+                "file_bytes",
+                documentFileContext({ docId: row.doc_id, userId: row.owner_user_id, workspaceId: row.workspace_id })
+              ),
         name: "documents",
         pageSize: 5,
         table: ensureTableName(getDocumentsTable),

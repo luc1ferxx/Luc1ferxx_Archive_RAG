@@ -4,7 +4,7 @@ import {
 } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { queryPostgres } from "./postgres.js";
-import { createPostgresTenantRecordMethods } from "./tenant-records.js";
+import { createExportEventOrdinalMapper, createPostgresTenantRecordMethods } from "./tenant-records.js";
 import {
   AGENT_RUN_STATUSES,
   normalizeAgentRun,
@@ -187,7 +187,12 @@ const mapEventRowToAgentRunEvent = (row = {}) =>
   });
 
 const agentRunEventColumns = "event_id, event_type, event_payload, created_at";
-const RUN_EVENT_ORDER = "ORDER BY created_at ASC, event_id ASC";
+// A run's events in commit order: every event insert takes the run row's lock
+// first and draws its id under it, so ids grow in commit order. created_at is
+// the writing transaction's start, taken before that lock, so two appends
+// racing for it could list in the other order (rag/agent-runs.js numbers the
+// public ids by id rank).
+const RUN_EVENT_ORDER = "ORDER BY event_id ASC";
 
 /**
  * A write that already touches a run returns the run's whole event list in
@@ -367,7 +372,7 @@ export const createPostgresAgentRunStore = ({
         WHERE user_id = $1
           AND workspace_id = $2
           AND run_id = $3
-        ORDER BY created_at ASC, event_id ASC
+        ${RUN_EVENT_ORDER}
       `,
       [scope.userId, scope.workspaceId, normalizeText(runId)]
     );
@@ -970,7 +975,8 @@ export const createPostgresAgentRunStore = ({
     // The tenant erase and export (rag/tenant-records.js). The approval
     // snapshots cascade with their run; they and the events (no foreign key)
     // are deleted before the runs and swept again after them, so an event a
-    // run appended between the statements does not stay behind.
+    // run appended between the statements does not stay behind. An exported
+    // event names `${runId}:n` as the API does, never the shared id.
     ...createPostgresTenantRecordMethods({
       initialize,
       query,
@@ -984,6 +990,7 @@ export const createPostgresAgentRunStore = ({
         },
         {
           keyColumns: ["event_id"],
+          mapRow: createExportEventOrdinalMapper("run_id"),
           name: "agent_run_events",
           sweepAfter: true,
           table: runEventsTable,

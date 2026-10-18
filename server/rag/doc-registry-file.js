@@ -32,6 +32,7 @@ import { buildPublicFilePath } from "./document-utils.js";
 import { getRagDataPath, readJsonFileSync, writeJsonFileAsync } from "./storage.js";
 import {
   decryptTenantBytes,
+  decryptTenantRecordBytesForExport,
   documentFileContext,
   maybeEncryptTenantBytes,
 } from "./tenant-encryption.js";
@@ -354,8 +355,9 @@ export const createFileDocumentRegistryStore = ({
 
     // The tenant export (rag/tenant-records.js): the tenant's records, each
     // with its file bytes as plaintext (null when the file cannot be read; an
-    // envelope that does not decrypt fails the export). An erase deletes
-    // through delete() (rag/doc-registry.js eraseStoredDocuments).
+    // envelope that does not decrypt is null too, with its code in
+    // unreadableBytes). An erase deletes through delete()
+    // (rag/doc-registry.js eraseStoredDocuments).
     async listTenantRecords(selector) {
       const entries = [];
 
@@ -370,11 +372,12 @@ export const createFileDocumentRegistryStore = ({
           fileBytes = null;
         }
 
-        if (fileBytes) {
-          fileBytes = await decryptTenantBytes(fileBytes, toDocumentFileContext(record));
-        }
-
-        entries.push({ record: { ...record, fileBytes }, table: "documents" });
+        entries.push({
+          record: fileBytes
+            ? await decryptTenantRecordBytesForExport({ ...record, fileBytes }, "fileBytes", toDocumentFileContext(record))
+            : { ...record, fileBytes },
+          table: "documents",
+        });
       }
 
       return entries;

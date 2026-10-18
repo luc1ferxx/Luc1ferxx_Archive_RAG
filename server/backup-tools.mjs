@@ -16,6 +16,28 @@
 // - Credentials never reach a command line or the manifest: pg_dump and
 //   pg_restore get them through PG* environment variables, and the manifest
 //   names only host, port and database.
+// - One server for every connection: the tool's own pg.Clients (the
+//   inventory, the role checks, verify) and pg_dump / pg_restore are given the
+//   same host, port, database, user and password, resolved from the URL alone
+//   (resolveBackupConnection). The children run without the caller's PG*
+//   variables, and the clients are built with them hidden, because node-pg
+//   would otherwise fill any part the URL leaves out from the shell's
+//   PGHOST / PGPORT / PGPASSWORD. A URL without a host (libpq's default
+//   socket, node-pg's localhost) is refused for the same reason.
+// - TLS as the app resolves it (rag/postgres-tls.js): with
+//   POSTGRES_SSL_ENABLED on, POSTGRES_SSL_MODE and POSTGRES_SSL_CA_FILE set
+//   the clients' ssl option exactly as for the app's pools, and pg_dump /
+//   pg_restore get the libpq equivalent (verify-full -> PGSSLMODE=verify-full
+//   with PGSSLROOTCERT the CA file, or "system" without one, which needs libpq
+//   16; verify-ca -> verify-ca with the CA file; no-verify -> require); a URL
+//   that carries TLS parameters of its own is then refused before anything
+//   connects (POSTGRES_SSL_CONNECTION_STRING_CONFLICT), as the app and verify's
+//   health probe would refuse it. With it off, the URL's own sslmode,
+//   sslrootcert, sslcert and sslkey decide for both, as before; a URL with
+//   none connects the clients without TLS and leaves pg_dump / pg_restore at
+//   libpq's default (prefer).
+// - Every file a backup writes (dump, manifest, files archive) is created
+//   0600, and an --out directory the tool creates 0700.
 // - backup: pg_dump -Fc inside an exported REPEATABLE READ snapshot, and in
 //   that same snapshot the manifest's inventory (applied migrations, every
 //   table's row count, per-tenant document counts, the head of every admin
@@ -30,31 +52,50 @@
 //   --single-transaction (all or nothing), then grants the tenant role to the
 //   restoring login as migration 013 does. --dry-run prints the plan only.
 // - verify: everything a restore drill must show before the backup counts as
-//   good: every migration file applied and none unknown, every table's row
-//   count and every tenant's document counts equal to the manifest, the
-//   health check's rowLevelSecurity entry without an error, every admin
-//   audit chain verifying (audit:verify's own code) and ending where the
-//   manifest says it ended. Exit 0 when all hold, 1 when one does not.
+//   good: the dump's checksum (the --dump given, else the dump the manifest
+//   names when it lies next to it) and the files archive's when it does,
+//   every migration file applied and none unknown, every table's row count
+//   and every tenant's document counts equal to the manifest, the health
+//   check's rowLevelSecurity entry without an error, every admin audit chain
+//   verifying (audit:verify's own code) and ending where the manifest says it
+//   ended. Exit 0 when all hold, 1 when one does not. It never migrates the
+//   restored database: with --allow-pending-migrations and migrations pending,
+//   the rowLevelSecurity check (which migrates first) is skipped as
+//   `pending_migrations`, and the audit chains are read without migrating.
 //
 // Not in a backup, deliberately: the tenant keystore of envelope encryption
 // (TENANT_KEYSTORE_DIR) and the local KMS master key that wraps it
 // (TENANT_KMS_MASTER_KEY_FILE), kept outside PostgreSQL and outside this tar so that
 // erasing a tenant's key also makes that tenant's bytes in every backup copy
 // unreadable; back it up separately, on its own schedule and retention, or
-// not at all), server/.env and every other secret, role passwords and role
-// memberships (cluster-wide, not part of a database dump), Redis shared state
-// (rebuilt at run time), and the in-process caches.
+// not at all. The tar leaves them out three ways, because this process never
+// reads server/.env where those two settings usually live: by path (the
+// --keystore-dir / --kms-master-key-file flags, else the variables, else the
+// defaults under the data root), by name (*keystore*, *kms-master*), and by
+// content (any file of at most 1 MiB in the archived directories whose JSON
+// `format` is a local KMS key file's, tombstones included, or the master
+// key's), and the manifest lists what the content check found, by path and
+// format only. Also not in it: server/.env and every other secret, role
+// passwords and role memberships (cluster-wide, not part of a database dump),
+// Redis shared state (rebuilt at run time), and the in-process caches.
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
 
-import { resolveLocalKmsPaths } from "./rag/kms/local-provider.js";
+import { isPostgresSslEnabled } from "./rag/config.js";
+import { LOCAL_KMS_FILE_FORMATS, resolveLocalKmsPaths } from "./rag/kms/local-provider.js";
+import {
+  CONNECTION_STRING_TLS_PARAMETERS,
+  buildPostgresSslOption,
+  getPostgresSslCaFile,
+  getPostgresSslMode,
+} from "./rag/postgres-tls.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const SERVER_DIRECTORY = path.dirname(__filename);
@@ -64,18 +105,26 @@ export const BACKUP_MANIFEST_FORMAT = "archive-rag-backup/1";
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
 // By name too, for a keystore or master key copied under another path.
 const KEY_MATERIAL_EXCLUDE_PATTERNS = ["*keystore*", "*kms-master*"];
+// And by content: files no larger than this are read for a local KMS format.
+export const KEY_MATERIAL_SCAN_MAX_BYTES = 1024 * 1024;
 // An extension's own entry, or its comment, in pg_restore --list output.
 const EXTENSION_TOC_ENTRY = /^\d+;\s+\d+\s+\d+\s+(COMMENT\s+-\s+)?EXTENSION\s/;
 
 export const USAGE = `Usage:
   node backup-tools.mjs backup  --database-url <url> [--out <dir>] [--name <base>] [--with-files]
                                 [--uploads-dir <dir>] [--upload-sessions-dir <dir>] [--data-dir <dir>]
+                                [--keystore-dir <dir>] [--kms-master-key-file <file>]
   node backup-tools.mjs restore --database-url <url> --dump <file> [--manifest <file>] [--force] [--dry-run]
   node backup-tools.mjs verify  --database-url <url> --manifest <file> [--dump <file>] [--allow-pending-migrations]
 
 The database URL may come from BACKUP_DATABASE_URL instead of --database-url.
 server/.env is never read. Binaries: --pg-dump / --pg-restore, else PG_DUMP /
-PG_RESTORE, else the ones on PATH.
+PG_RESTORE, else the ones on PATH. --keystore-dir and --kms-master-key-file
+(else TENANT_KEYSTORE_DIR / TENANT_KMS_MASTER_KEY_FILE) name the tenant keystore
+and master key to leave out of --with-files; files holding local KMS key
+material are left out by their content too. TLS follows POSTGRES_SSL_ENABLED /
+POSTGRES_SSL_MODE / POSTGRES_SSL_CA_FILE in the environment, else the URL's
+own sslmode.
 `;
 
 // ---------------------------------------------------------------------------
@@ -137,41 +186,174 @@ export const describeDatabaseUrl = (url) => {
   };
 };
 
-/** PG* variables for pg_dump / pg_restore, so no credential is on a command line. */
-export const toPgEnvironment = (url) => {
+// Where every connection of a command goes, from the URL alone: libpq's own
+// defaults for what it leaves out (port 5432, the login's OS user name, a
+// database named like the user), never the caller's PG* variables.
+const resolveConnectionParts = (url) => {
   const parsed = new URL(url);
-  const env = {
-    PGDATABASE: decodeURIComponent(parsed.pathname.replace(/^\//, "")),
-    PGHOST: parsed.searchParams.get("host") || parsed.hostname || "",
-    PGPORT: parsed.port || "5432",
+  const host = parsed.searchParams.get("host") || parsed.hostname.replace(/^\[(.*)\]$/, "$1");
+
+  if (!host) {
+    throw new Error(
+      "The database URL names no host. Name one, or a socket directory with ?host=/path/to/socket/dir: without it pg_dump and pg_restore would use libpq's default socket while this tool's own connections went to localhost, which need not be the same server."
+    );
+  }
+
+  const user = parsed.username ? decodeURIComponent(parsed.username) : os.userInfo().username;
+
+  return {
+    database: decodeURIComponent(parsed.pathname.replace(/^\//, "")) || user,
+    host,
+    password: parsed.password ? decodeURIComponent(parsed.password) : null,
+    port: parsed.searchParams.get("port") || parsed.port || "5432",
+    user,
   };
+};
 
-  if (parsed.username) {
-    env.PGUSER = decodeURIComponent(parsed.username);
+const URL_TLS_VARIABLES = Object.freeze([
+  ["sslmode", "PGSSLMODE"],
+  ["sslrootcert", "PGSSLROOTCERT"],
+  ["sslcert", "PGSSLCERT"],
+  ["sslkey", "PGSSLKEY"],
+]);
+
+// POSTGRES_SSL_MODE as libpq spells it (rag/postgres-tls.js has the modes).
+const LIBPQ_SSL_MODES = Object.freeze({ "no-verify": "require", "verify-ca": "verify-ca", "verify-full": "verify-full" });
+
+// Runs `build` with every PG* variable of this process hidden, and puts them
+// back: node-pg's constructor reads them for any value its config leaves out
+// (the password, ssl, the connect timeout, the application name), and the
+// children never see them either (runProcess). Synchronous, so nothing else
+// runs while they are gone.
+const withoutPgVariables = (build) => {
+  const hidden = Object.entries(process.env).filter(([key]) => key.startsWith("PG"));
+
+  for (const [key] of hidden) {
+    delete process.env[key];
   }
 
-  if (parsed.password) {
-    env.PGPASSWORD = decodeURIComponent(parsed.password);
-  }
-
-  for (const [param, variable] of [
-    ["sslmode", "PGSSLMODE"],
-    ["sslrootcert", "PGSSLROOTCERT"],
-    ["sslcert", "PGSSLCERT"],
-    ["sslkey", "PGSSLKEY"],
-  ]) {
-    if (parsed.searchParams.get(param)) {
-      env[variable] = parsed.searchParams.get(param);
+  try {
+    return build();
+  } finally {
+    for (const [key, value] of hidden) {
+      process.env[key] = value;
     }
   }
+};
 
-  return env;
+// The TLS of a command's connections (see the header): { clientSsl, pgEnv }.
+const resolveBackupTls = (url, env) => {
+  // Validates the mode even with TLS off, refuses a URL with TLS parameters
+  // with it on, and reads the CA file: the app's own rules.
+  const clientSsl = buildPostgresSslOption({ connectionString: url, env, label: "The backup database URL" });
+
+  if (isPostgresSslEnabled(env)) {
+    const mode = getPostgresSslMode(env);
+    const caFile = getPostgresSslCaFile(env);
+
+    return {
+      clientSsl,
+      pgEnv: {
+        PGSSLMODE: LIBPQ_SSL_MODES[mode],
+        ...(mode !== "no-verify" && caFile
+          ? { PGSSLROOTCERT: path.resolve(caFile) }
+          : mode === "verify-full"
+            ? { PGSSLROOTCERT: "system" }
+            : {}),
+      },
+    };
+  }
+
+  const parsed = new URL(url);
+  const pgEnv = Object.fromEntries(
+    URL_TLS_VARIABLES.filter(([param]) => parsed.searchParams.get(param)).map(([param, variable]) => [
+      variable,
+      parsed.searchParams.get(param),
+    ])
+  );
+
+  // The URL's TLS parameters as node-pg reads them (they used to reach the
+  // client through its connection string); none: no TLS.
+  return {
+    clientSsl: [...parsed.searchParams.keys()].some((name) => CONNECTION_STRING_TLS_PARAMETERS.includes(name))
+      ? withoutPgVariables(() => new pg.Client({ connectionString: url }).connectionParameters.ssl)
+      : false,
+    pgEnv,
+  };
+};
+
+/**
+ * Every connection setting of a command, resolved once: `clientConfig` for
+ * this tool's pg.Clients and `pgEnv`, the PG* variables of pg_dump and
+ * pg_restore, naming the same server, login and TLS (see the header). Throws
+ * on a URL without a host and on TLS settings the app would refuse.
+ */
+export const resolveBackupConnection = (url, env = process.env) => {
+  const parts = resolveConnectionParts(url);
+  const { clientSsl, pgEnv: tlsEnv } = resolveBackupTls(url, env);
+
+  return {
+    clientConfig: {
+      database: parts.database,
+      host: parts.host,
+      ...(parts.password === null ? {} : { password: parts.password }),
+      port: Number(parts.port),
+      ssl: clientSsl,
+      user: parts.user,
+    },
+    pgEnv: {
+      PGDATABASE: parts.database,
+      PGHOST: parts.host,
+      ...(parts.password === null ? {} : { PGPASSWORD: parts.password }),
+      PGPORT: parts.port,
+      PGUSER: parts.user,
+      ...tlsEnv,
+    },
+  };
+};
+
+/** PG* variables for pg_dump / pg_restore, so no credential is on a command line. */
+export const toPgEnvironment = (url, env = process.env) => resolveBackupConnection(url, env).pgEnv;
+
+/**
+ * `url` with every part a connection takes from it spelled out (host or
+ * socket, port, user, database; its query kept), for the app code verify runs
+ * in process: node-pg fills a part a connection string leaves out from the
+ * shell's PG* variables, which must not send the health probe to another
+ * server than the inventory read.
+ */
+export const toCanonicalDatabaseUrl = (url) => {
+  const parts = resolveConnectionParts(url);
+  const parsed = new URL(url);
+  const canonical = new URL("postgresql://localhost");
+
+  if (!parsed.searchParams.get("host")) {
+    canonical.hostname = parts.host.includes(":") ? `[${parts.host}]` : parts.host;
+  }
+
+  canonical.port = parts.port;
+  canonical.username = encodeURIComponent(parts.user);
+
+  if (parts.password !== null) {
+    canonical.password = encodeURIComponent(parts.password);
+  }
+
+  canonical.pathname = `/${encodeURIComponent(parts.database)}`;
+
+  for (const [key, value] of parsed.searchParams) {
+    canonical.searchParams.append(key, value);
+  }
+
+  return canonical.href;
 };
 
 const quoteIdentifier = (name) => `"${String(name).replaceAll('"', '""')}"`;
 
-const connect = async (url) => {
-  const client = new pg.Client({ connectionString: url });
+/** An unconnected pg.Client for `connection` (resolveBackupConnection), built with PG* hidden. */
+export const createBackupClient = (connection) => withoutPgVariables(() => new pg.Client(connection.clientConfig));
+
+const connect = async (connection) => {
+  const client = createBackupClient(connection);
 
   await client.connect();
   return client;
@@ -418,14 +600,117 @@ const resolveFileSources = (options) => ({
   uploads: path.resolve(options.uploadsDir ?? process.env.UPLOADS_DIRECTORY ?? path.join(SERVER_DIRECTORY, "uploads")),
 });
 
+// The keystore and master key a backup leaves out by path: the flags, else
+// the settings in the environment, else their defaults under the data root.
+const resolveKeyMaterialPaths = (options) => {
+  const configured = resolveLocalKmsPaths();
+
+  return {
+    keystoreDirectory: options.keystoreDir ? path.resolve(options.keystoreDir) : configured.keystoreDirectory,
+    masterKeyFile: options.kmsMasterKeyFile ? path.resolve(options.kmsMasterKeyFile) : configured.masterKeyFile,
+  };
+};
+
+const KEY_MATERIAL_FORMATS = new Set(Object.values(LOCAL_KMS_FILE_FORMATS));
+
+// The local KMS format a file's JSON names, or null: only regular files of
+// at most `maxBytes` whose first byte is "{" are read whole.
+const readKeyMaterialFormat = async (filePath, maxBytes) => {
+  let handle;
+
+  try {
+    handle = await open(filePath, "r");
+
+    const { size } = await handle.stat();
+
+    if (size === 0 || size > maxBytes) {
+      return null;
+    }
+
+    const first = Buffer.alloc(1);
+
+    await handle.read(first, 0, 1, 0);
+
+    if (first[0] !== 0x7b) {
+      return null;
+    }
+
+    // From the same handle, so a file that grew since the size check is not
+    // read past it.
+    const parsed = JSON.parse(await handle.readFile("utf8"));
+
+    return typeof parsed?.format === "string" && KEY_MATERIAL_FORMATS.has(parsed.format) ? parsed.format : null;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+};
+
+/**
+ * The files under `sources` that hold local KMS key material by their
+ * content (a key file, a destroyed key's tombstone, a key file's temp copy,
+ * the master key), wherever they lie and whatever their name, as tar member
+ * paths (each source under its own name) with the format found: { file,
+ * format }. Symbolic links are archived as links and not followed.
+ */
+export const findKeyMaterialFiles = async (sources, { maxBytes = KEY_MATERIAL_SCAN_MAX_BYTES } = {}) => {
+  const found = [];
+  const visit = async (directory, member) => {
+    let entries;
+
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+        return;
+      }
+
+      throw error;
+    }
+
+    for (const entry of entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
+      const filePath = path.join(directory, entry.name);
+      const memberPath = `${member}/${entry.name}`;
+
+      if (entry.isDirectory()) {
+        await visit(filePath, memberPath);
+      } else if (entry.isFile()) {
+        const format = await readKeyMaterialFormat(filePath, maxBytes);
+
+        if (format) {
+          found.push({ file: memberPath, format });
+        }
+      }
+    }
+  };
+
+  for (const source of sources) {
+    await visit(source, path.basename(source));
+  }
+
+  return found;
+};
+
+// An exact member path as a tar --exclude pattern (GNU tar and bsdtar both
+// read wildcards there; a backslash quotes one).
+const toExactTarPattern = (member) => member.replace(/[\\*?[]/g, "\\$&");
+
+// A new file only this login can read, which pg_dump and tar then write into
+// (they truncate it and keep its mode).
+const createPrivateFile = async (filePath) => {
+  const handle = await open(filePath, "wx", 0o600);
+
+  await handle.close();
+};
+
 const writeFilesArchive = async ({ archivePath, options, tar }) => {
   const sources = Object.values(resolveFileSources(options));
   const present = sources.filter((source) => existsSync(source));
   // The tenant keystore and the local KMS master key stay out (see the
-  // header): by the paths the local provider resolves (the settings, else
-  // their defaults under the data root, which is one of the directories
-  // here) when they lie inside one of the directories, and by name everywhere.
-  const { keystoreDirectory, masterKeyFile } = resolveLocalKmsPaths();
+  // header): by path when they lie inside one of the directories, by name
+  // everywhere, and by content.
+  const { keystoreDirectory, masterKeyFile } = resolveKeyMaterialPaths(options);
   const excluded = [
     ...present.flatMap((source) =>
       [keystoreDirectory, masterKeyFile].flatMap((keyPath) => {
@@ -440,13 +725,17 @@ const writeFilesArchive = async ({ archivePath, options, tar }) => {
   ];
 
   if (present.length === 0) {
-    return { excluded, included: [], missing: sources };
+    return { excluded, included: [], keyMaterialExcluded: [], missing: sources };
   }
 
+  const keyMaterialExcluded = await findKeyMaterialFiles(present);
+
+  await createPrivateFile(archivePath);
   await runProcess(tar, [
     "-czf",
     archivePath,
     ...excluded.map((pattern) => `--exclude=${pattern}`),
+    ...keyMaterialExcluded.map(({ file }) => `--exclude=${toExactTarPattern(file)}`),
     ...present.flatMap((source) => ["-C", path.dirname(source), path.basename(source)]),
   ]);
 
@@ -455,6 +744,7 @@ const writeFilesArchive = async ({ archivePath, options, tar }) => {
     excluded,
     file: path.basename(archivePath),
     included: present,
+    keyMaterialExcluded,
     missing: sources.filter((source) => !present.includes(source)),
     sha256: await sha256File(archivePath),
   };
@@ -462,6 +752,7 @@ const writeFilesArchive = async ({ archivePath, options, tar }) => {
 
 export const runBackup = async (options, { log = (line) => process.stderr.write(`${line}\n`) } = {}) => {
   const databaseUrl = resolveDatabaseUrl(options);
+  const connection = resolveBackupConnection(databaseUrl);
   const pgDump = options.pgDump ?? process.env.PG_DUMP ?? "pg_dump";
   const outDirectory = path.resolve(options.out ?? path.join(SERVER_DIRECTORY, "backups"));
   const createdAt = new Date();
@@ -473,39 +764,50 @@ export const runBackup = async (options, { log = (line) => process.stderr.write(
     throw new Error(`${dumpPath} or its manifest already exists; pick another --name or --out.`);
   }
 
-  await mkdir(outDirectory, { recursive: true });
+  // 0700 for every directory this creates; one that exists is the operator's.
+  // The dump file is created 0600 before pg_dump writes into it, and removed
+  // again when this run cannot finish it.
+  await mkdir(outDirectory, { mode: 0o700, recursive: true });
+  await createPrivateFile(dumpPath);
 
-  const tableNames = await loadTableNames();
-  const client = await connect(databaseUrl);
   let inventory;
   let roles;
   let serverVersion;
   let snapshot;
+  let tableNames;
 
   try {
-    // One snapshot for the dump and the inventory: the counts are the dump's.
-    // row_security off, as pg_dump sets it: a login the row policies would
-    // filter gets an error instead of short counts.
-    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    await client.query("SET LOCAL row_security = off");
-    snapshot = String((await client.query("SELECT pg_export_snapshot() AS id")).rows[0].id);
-    serverVersion = String((await client.query("SHOW server_version")).rows[0].server_version);
-    log(`[backup] dumping ${JSON.stringify(describeDatabaseUrl(databaseUrl))} to ${dumpPath}`);
+    tableNames = await loadTableNames();
+    const client = await connect(connection);
 
-    const dump = runProcess(
-      pgDump,
-      ["--format=custom", `--snapshot=${snapshot}`, `--file=${dumpPath}`, "--no-password"],
-      { env: toPgEnvironment(databaseUrl) }
-    );
+    try {
+      // One snapshot for the dump and the inventory: the counts are the dump's.
+      // row_security off, as pg_dump sets it: a login the row policies would
+      // filter gets an error instead of short counts.
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await client.query("SET LOCAL row_security = off");
+      snapshot = String((await client.query("SELECT pg_export_snapshot() AS id")).rows[0].id);
+      serverVersion = String((await client.query("SHOW server_version")).rows[0].server_version);
+      log(`[backup] dumping ${JSON.stringify(describeDatabaseUrl(databaseUrl))} to ${dumpPath}`);
 
-    [inventory, roles] = await Promise.all([readDatabaseInventory(client, tableNames), readRoles(client)]);
-    await dump;
-    await client.query("COMMIT");
+      const dump = runProcess(
+        pgDump,
+        ["--format=custom", `--snapshot=${snapshot}`, `--file=${dumpPath}`, "--no-password"],
+        { env: connection.pgEnv }
+      );
+
+      [inventory, roles] = await Promise.all([readDatabaseInventory(client, tableNames), readRoles(client)]);
+      await dump;
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      await client.end();
+    }
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    await rm(dumpPath, { force: true }).catch(() => {});
     throw error;
-  } finally {
-    await client.end();
   }
 
   const dumpStat = await stat(dumpPath);
@@ -540,7 +842,7 @@ export const runBackup = async (options, { log = (line) => process.stderr.write(
     ...inventory,
   };
 
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx", mode: 0o600 });
   log(`[backup] wrote ${manifestPath}`);
 
   return { dumpPath, manifest, manifestPath };
@@ -595,6 +897,7 @@ const validRoleNames = (manifest) =>
 
 export const runRestore = async (options, { log = (line) => process.stderr.write(`${line}\n`) } = {}) => {
   const databaseUrl = resolveDatabaseUrl(options);
+  const connection = resolveBackupConnection(databaseUrl);
   const pgRestore = options.pgRestore ?? process.env.PG_RESTORE ?? "pg_restore";
 
   if (!options.dump) {
@@ -624,7 +927,7 @@ export const runRestore = async (options, { log = (line) => process.stderr.write
         .filter((name) => name && IDENTIFIER.test(name))
     ),
   ];
-  const client = await connect(databaseUrl);
+  const client = await connect(connection);
 
   try {
     const relations = await countTargetRelations(client);
@@ -711,16 +1014,16 @@ export const runRestore = async (options, { log = (line) => process.stderr.write
         "--no-password",
         ...(options.force ? ["--clean", "--if-exists"] : []),
         `--use-list=${listPath}`,
-        `--dbname=${toPgEnvironment(databaseUrl).PGDATABASE}`,
+        `--dbname=${connection.pgEnv.PGDATABASE}`,
         dumpPath,
       ],
-      { env: toPgEnvironment(databaseUrl) }
+      { env: connection.pgEnv }
     );
   } finally {
     await rm(listDirectory, { force: true, recursive: true });
   }
 
-  const grantClient = await connect(databaseUrl);
+  const grantClient = await connect(connection);
 
   try {
     const tenantRole = manifest.roles?.tenant;
@@ -773,26 +1076,53 @@ const compareCounts = (expected = {}, actual = {}) => {
 const tenantKey = (tenant) => JSON.stringify([tenant.ownerUserId, tenant.workspaceId]);
 const chainKey = (chain) => JSON.stringify([chain.workspaceId, chain.userId]);
 
+// A file the manifest names (a bare file name) in the manifest's directory,
+// or null when the name is not a bare file name or nothing is there.
+const findNextToManifest = (manifestPath, fileName) => {
+  if (typeof fileName !== "string" || !fileName || path.basename(fileName) !== fileName) {
+    return null;
+  }
+
+  const candidate = path.join(path.dirname(manifestPath), fileName);
+
+  return existsSync(candidate) ? candidate : null;
+};
+
+const checksumCheck = async (filePath, expected) => {
+  const checksum = await sha256File(filePath);
+
+  return { ok: checksum === expected, actual: checksum, expected: expected ?? null, file: path.basename(filePath) };
+};
+
 export const runVerify = async (options, { log = (line) => process.stderr.write(`${line}\n`) } = {}) => {
   const databaseUrl = resolveDatabaseUrl(options);
+  const connection = resolveBackupConnection(databaseUrl);
 
   if (!options.manifest) {
     throw new Error("verify needs --manifest <file>.");
   }
 
-  const manifest = await readManifest(path.resolve(options.manifest));
+  const manifestPath = path.resolve(options.manifest);
+  const manifest = await readManifest(manifestPath);
   const checks = {};
+  // The dump: the one given, else the one the manifest names next to it; the
+  // files archive when it lies next to the manifest. Absent files are not
+  // checked (a drill may restore from a copy elsewhere).
+  const dumpPath = options.dump ? path.resolve(options.dump) : findNextToManifest(manifestPath, manifest.dump?.file);
+  const filesPath = manifest.files?.file ? findNextToManifest(manifestPath, manifest.files.file) : null;
 
-  if (options.dump) {
-    const checksum = await sha256File(path.resolve(options.dump));
+  if (dumpPath) {
+    checks.dumpChecksum = await checksumCheck(dumpPath, manifest.dump?.sha256);
+  }
 
-    checks.dumpChecksum = { ok: checksum === manifest.dump.sha256, actual: checksum, expected: manifest.dump.sha256 };
+  if (filesPath) {
+    checks.filesChecksum = await checksumCheck(filesPath, manifest.files.sha256);
   }
 
   // The application code reads the restored database from here on, as the
   // owner login with row-level security enforced and the manifest's roles.
   Object.assign(process.env, {
-    POSTGRES_DATABASE_URL: databaseUrl,
+    POSTGRES_DATABASE_URL: toCanonicalDatabaseUrl(databaseUrl),
     POSTGRES_ROW_LEVEL_SECURITY: "enforce",
     ...(manifest.roles?.tenant ? { POSTGRES_TENANT_ROLE: manifest.roles.tenant } : {}),
     ...(manifest.roles?.system ? { POSTGRES_SYSTEM_ROLE: manifest.roles.system } : {}),
@@ -802,7 +1132,7 @@ export const runVerify = async (options, { log = (line) => process.stderr.write(
   delete process.env.POSTGRES_MIGRATION_DATABASE_URL;
   delete process.env.LONG_MEMORY_DATABASE_URL;
 
-  const client = await connect(databaseUrl);
+  const client = await connect(connection);
   let inventory;
 
   try {
@@ -843,23 +1173,34 @@ export const runVerify = async (options, { log = (line) => process.stderr.write(
   checks.tenantDocuments = { ok: tenantMismatches.length === 0, mismatches: tenantMismatches, owners: actualTenants.size };
 
   // Row-level security as the health report checks it. It runs the
-  // migrations first, so it waits for the migration check: a restored
-  // database is never migrated behind the operator's back.
-  if (checks.migrations.ok) {
+  // migrations first, so it waits for the migration check and runs only when
+  // none is pending: a restored database is never migrated behind the
+  // operator's back. With --allow-pending-migrations and migrations pending
+  // it is skipped (the operator accepted an older schema; the check would
+  // migrate it).
+  if (checks.migrations.ok && pending.length === 0) {
     const { checkRowLevelSecurityHealth } = await import("./health.js");
     const { runAsDatabaseSystem } = await import("./rag/postgres-tenant.js");
     const entry = await runAsDatabaseSystem(() => checkRowLevelSecurityHealth());
 
     checks.rowLevelSecurity = { ok: entry.status !== "error", message: entry.message ?? null, status: entry.status };
+  } else if (checks.migrations.ok) {
+    checks.rowLevelSecurity = { ok: true, skipped: "pending_migrations", status: null };
+    log(`[verify] rowLevelSecurity skipped: ${pending.length} migration(s) pending, and the check would apply them.`);
   } else {
     checks.rowLevelSecurity = { ok: false, skipped: "migrations_not_verified", status: null };
   }
 
   // The admin audit chains with audit:verify's own code (in process: the
-  // command itself would read server/.env), and each chain's head against the
-  // manifest, which also catches rows lost from a chain's end.
+  // command itself would read server/.env), over a store that does not run
+  // the migrations, and each chain's head against the manifest, which also
+  // catches rows lost from a chain's end.
   const { runAuditVerifyCommand } = await import("./audit-verify.mjs");
-  const audit = await runAuditVerifyCommand(["--json"], { write: () => {} });
+  const { createPostgresAdminAuditStore } = await import("./rag/postgres-admin-audit-store.js");
+  const audit = await runAuditVerifyCommand(["--json"], {
+    createStore: () => createPostgresAdminAuditStore({ runMigrations: async () => ({ appliedMigrations: [] }) }),
+    write: () => {},
+  });
   const restoredHeads = new Map(inventory.auditChains.map((chain) => [chainKey(chain), chain]));
   const headMismatches = (manifest.auditChains ?? [])
     .filter((chain) => {
@@ -882,7 +1223,7 @@ export const runVerify = async (options, { log = (line) => process.stderr.write(
   await resetPostgresPool();
 
   const ok = Object.values(checks).every((check) => check.ok === true);
-  const report = { checks, manifest: path.resolve(options.manifest), ok, target: describeDatabaseUrl(databaseUrl) };
+  const report = { checks, manifest: manifestPath, ok, target: describeDatabaseUrl(databaseUrl) };
 
   log(`[verify] ${ok ? "OK" : "FAILED"}: ${Object.entries(checks).map(([name, check]) => `${name}=${check.ok ? "ok" : "failed"}`).join(" ")}`);
   return report;

@@ -1,6 +1,6 @@
 // /chat and /chat/stream bound what one request may carry: the question
 // (CHAT_MAX_QUESTION_CHARS, default 8000), the number of docIds
-// (CHAT_MAX_DOC_IDS: no default in process, 1000 with a retrieval tier) and the length of each id and of the
+// (CHAT_MAX_DOC_IDS: no default in process, 1000 with a retrieval or agent tier) and the length of each id and of the
 // sessionId (CHAT_MAX_ID_CHARS, default 256). A request past one, or with a
 // docIds / docId / sessionId of the wrong type, is answered 400 before the
 // agent runs; the edge of a split deployment checks the same function.
@@ -21,6 +21,8 @@ const ENV_KEYS = [
   "CHAT_MAX_DOC_IDS",
   "CHAT_MAX_ID_CHARS",
   "CHAT_MAX_QUESTION_CHARS",
+  "AGENT_SERVICE_URL",
+  "RETRIEVAL_SERVICE_URL",
 ];
 let savedEnv;
 const unhandledRejections = [];
@@ -119,6 +121,15 @@ test("the bounds default to 8000 question characters, no docIds limit in process
   process.env.RETRIEVAL_SERVICE_URL = "http://retrieval.internal:5002";
   assert.equal(getChatMaxDocIds(), 1000);
   delete process.env.RETRIEVAL_SERVICE_URL;
+  // An api edge that forwards to an agent tier takes the agent tier's
+  // default, so it never forwards a body the agent tier refuses.
+  process.env.AGENT_SERVICE_URL = "http://agent.internal:5001";
+  assert.equal(getChatMaxDocIds(), 1000);
+  process.env.CHAT_MAX_DOC_IDS = "0";
+  assert.equal(getChatMaxDocIds(), 0, "0 still means no limit");
+  delete process.env.CHAT_MAX_DOC_IDS;
+  delete process.env.AGENT_SERVICE_URL;
+  assert.equal(getChatMaxDocIds(), 0, "the monolith keeps no default");
   assert.equal(getChatMaxIdChars(), 256);
 
   process.env.CHAT_MAX_QUESTION_CHARS = "120";

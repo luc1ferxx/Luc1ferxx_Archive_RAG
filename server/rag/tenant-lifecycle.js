@@ -55,7 +55,11 @@
 // running) unless forced; see eraseTenant.
 //
 // The export streams JSON Lines: a header, one line per record (bytes as
-// { base64 }, document file bytes included), and a summary. Every PostgreSQL
+// { base64 }, document file bytes included), and a summary. Stored bytes that
+// cannot be decrypted (a key destroyed outside an erase, a changed byte) are
+// exported as null with the code in the record's `unreadableBytes`, counted in
+// the summary's `unreadableRecords`, and make the export `partial`; they do
+// not end it. Every PostgreSQL
 // read runs under runWithDatabaseTenant for one (user, workspace) pair at a
 // time, so row-level security bounds it to that tenant on top of the WHERE
 // clause; in-memory stores select by the same exact owner match. Caches and
@@ -817,6 +821,7 @@ export const createTenantLifecycleService = ({
         )
         .map(({ store }) => store);
       const counts = {};
+      const unreadableRecords = {};
       let failure = null;
       let recorded = false;
       let escaped = false;
@@ -860,6 +865,11 @@ export const createTenantLifecycleService = ({
           try {
             for await (const { record, table } of source.iterate()) {
               counts[table] = (counts[table] ?? 0) + 1;
+
+              if (record?.unreadableBytes) {
+                unreadableRecords[table] = (unreadableRecords[table] ?? 0) + 1;
+              }
+
               yield JSON.stringify({
                 record: toTenantExportValue(record),
                 store: source.id,
@@ -875,7 +885,8 @@ export const createTenantLifecycleService = ({
           }
         }
 
-        const outcome = failure ? "failed" : skippedStores.length > 0 ? "partial" : "completed";
+        const unreadable = Object.keys(unreadableRecords).length > 0;
+        const outcome = failure ? "failed" : skippedStores.length > 0 || unreadable ? "partial" : "completed";
 
         // Before the summary: a caller that stops after the last record has
         // the export recorded with its outcome, not as aborted.
@@ -890,6 +901,7 @@ export const createTenantLifecycleService = ({
             skippedStores,
             status: outcome,
             type: "summary",
+            ...(unreadable ? { unreadableRecords } : {}),
           });
         }
       } catch (error) {

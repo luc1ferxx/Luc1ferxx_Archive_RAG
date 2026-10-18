@@ -34,7 +34,21 @@ import {
 } from "../rag/postgres-replicas.js";
 
 const URL_WITH_PASSWORD = "postgres://owner:tls-test-password@db.internal:5432/archive";
-const CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----\n";
+// A throwaway self-signed CA certificate (its key was discarded when it was
+// made): the CA file's certificates must parse (X509Certificate).
+const CA_PEM = `${[
+  "-----BEGIN CERTIFICATE-----",
+  "MIIBkzCCATmgAwIBAgIUcXFlHdmeInL0Y2TsKi6wvMwBh1kwCgYIKoZIzj0EAwIw",
+  "HjEcMBoGA1UEAwwTYXJjaGl2ZS1yYWctdGVzdC1jYTAgFw0yNjEwMTgwOTUwMTJa",
+  "GA8yMTI2MDkyNDA5NTAxMlowHjEcMBoGA1UEAwwTYXJjaGl2ZS1yYWctdGVzdC1j",
+  "YTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJwoo1ZyUmfFEkj2LAfiQjWvqnHg",
+  "oaPpv719cnDpbgPqMAjL93a9R3BCGdbNSIcEUMDc+xNJliNaQ/3d73TDRTWjUzBR",
+  "MB0GA1UdDgQWBBTjMzMa7UEix5Ev2FXBFHUpqwovYTAfBgNVHSMEGDAWgBTjMzMa",
+  "7UEix5Ev2FXBFHUpqwovYTAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gA",
+  "MEUCIGs4qE0S83L6Nb8vi+8S4i5RKxPNTdseL/cXB5zheeVgAiEAm7vfu0yIK5pT",
+  "HmIzY4rycEtfLD4dVdoZhXt74E2OneI=",
+  "-----END CERTIFICATE-----",
+].join("\n")}\n`;
 const ENV_KEYS = [
   "LONG_MEMORY_DATABASE_URL",
   "LONG_MEMORY_POSTGRES_SSL_ENABLED",
@@ -180,6 +194,26 @@ test("an unreadable or non-PEM CA file refuses, naming the variable and never th
     refusedWith("POSTGRES_SSL_CA_FILE_INVALID")
   );
 
+  // Markers alone are not a certificate: a truncated or damaged one, one
+  // without its end marker, or one bad certificate in a bundle is refused
+  // here instead of failing every handshake later.
+  const withCa = (text) => () =>
+    buildPostgresSslOption({
+      connectionString: URL_WITH_PASSWORD,
+      env: { ...env, POSTGRES_SSL_CA_FILE: "/any" },
+      readFile: () => text,
+    });
+  const [beginLine, ...rest] = CA_PEM.trim().split("\n");
+  const endLine = rest.pop();
+  const truncated = [beginLine, ...rest.slice(0, 2), endLine].join("\n");
+
+  assert.throws(withCa("-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----\n"), refusedWith("POSTGRES_SSL_CA_FILE_INVALID"));
+  assert.throws(withCa(truncated), (error) => refusedWith("POSTGRES_SSL_CA_FILE_INVALID")(error) && /certificate 1 of 1/.test(error.message));
+  assert.throws(withCa(CA_PEM.slice(0, CA_PEM.indexOf("-----END"))), refusedWith("POSTGRES_SSL_CA_FILE_INVALID"));
+  assert.throws(withCa(`${CA_PEM}${truncated}\n`), (error) => /certificate 2 of 2/.test(error.message));
+  assert.throws(withCa(`${CA_PEM}-----BEGIN CERTIFICATE-----\nMIIB\n`), /without its end marker/);
+  assert.deepEqual(withCa(`${CA_PEM}${CA_PEM}`)().ca, `${CA_PEM}${CA_PEM}`, "a bundle of good certificates is kept as is");
+
   let reads = 0;
   const readFile = () => {
     reads += 1;
@@ -311,6 +345,20 @@ test("replica read and poll pools carry the primary's TLS option; a bad setting 
       [replica, { ca: CA_PEM, rejectUnauthorized: true }],
     ]
   );
+
+  // The parsed configuration is cached by the variables' text: a CA file
+  // replaced in place is read again only after a reset (resetPostgresPool
+  // calls resetReadReplicas), which must not keep the old certificate.
+  const rotatedCaFile = join(directory, "rotated-ca.pem");
+
+  writeFileSync(rotatedCaFile, CA_PEM);
+  process.env.POSTGRES_SSL_CA_FILE = rotatedCaFile;
+  assert.equal(getReadReplicaConfig().ssl.ca, CA_PEM);
+  writeFileSync(rotatedCaFile, `${CA_PEM}${CA_PEM}`);
+  assert.equal(getReadReplicaConfig().ssl.ca, CA_PEM, "cached until a reset");
+  await resetReadReplicas();
+  assert.equal(getReadReplicaConfig().ssl.ca, `${CA_PEM}${CA_PEM}`, "the reset reads the file again");
+  process.env.POSTGRES_SSL_CA_FILE = caFile;
 
   // TLS off: no ssl option, as before.
   assert.equal(getReadReplicaConfig({ POSTGRES_READ_REPLICA_URLS: replica }).ssl, undefined);

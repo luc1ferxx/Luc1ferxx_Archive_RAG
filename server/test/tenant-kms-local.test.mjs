@@ -231,6 +231,91 @@ test("processes rotating at once each get their own version, and none is lost", 
   assert.deepEqual(await readdir(paths.keystoreDirectory), [`${scope.keyId}.json`], "no lock or temp file left");
 });
 
+test("a rotation that found no key file never replaces a first version created meanwhile", async () => {
+  const paths = await freshPaths("rotate-vs-create");
+  const scope = resolveTenantKeyScope({ workspaceId: "first-use-race" });
+  const dataKey = randomBytes(32);
+  const creator = createLocalTenantKmsProvider(paths);
+  let sealed = null;
+  // The rotator read "no key file" under its lock; before it writes, another
+  // process's lock-free first use links version 1 in and seals with it.
+  const rotator = createLocalTenantKmsProvider({
+    ...paths,
+    beforeKeyFileWrite: async ({ current }) => {
+      if (!current && !sealed) {
+        const key = await creator.getOrCreateKey(scope);
+
+        sealed = {
+          version: key.version,
+          wrapped: await creator.wrapDataKey({ aad: Buffer.from("race"), dataKey, keyId: key.keyId, version: key.version }),
+        };
+      }
+    },
+  });
+  const rotation = await rotator.rotateKey(scope);
+
+  assert.equal(sealed.version, 1);
+  assert.deepEqual(rotation, { dryRun: false, keyId: scope.keyId, previousVersion: 1, version: 2 }, "rotated on top of it");
+
+  const reader = createLocalTenantKmsProvider(paths);
+
+  assert.deepEqual(
+    await reader.unwrapDataKey({ aad: Buffer.from("race"), keyId: scope.keyId, version: 1, wrapped: sealed.wrapped }),
+    dataKey,
+    "what the first use sealed still decrypts"
+  );
+  assert.deepEqual((await reader.describeKey(scope)).versions, [1, 2]);
+  assert.deepEqual(await readdir(paths.keystoreDirectory), [`${scope.keyId}.json`], "no lock or temp file left");
+});
+
+test("processes creating and rotating a new key at once lose no version anyone sealed with", async () => {
+  const paths = await freshPaths("race-create-rotate");
+  const scope = resolveTenantKeyScope({ workspaceId: "racing-rotate" });
+  const dataKey = randomBytes(32);
+  const startAt = Date.now() + 700;
+  const results = await Promise.all(
+    Array.from({ length: 6 }, (_, index) =>
+      runInChild(
+        paths,
+        index % 2 === 0
+          ? `
+          const key = await provider.getOrCreateKey(scope);
+          const wrapped = await provider.wrapDataKey({
+            aad: Buffer.from("race"),
+            dataKey: Buffer.from(args.dataKey, "hex"),
+            keyId: key.keyId,
+            version: key.version,
+          });
+          return { version: key.version, wrapped: wrapped.toString("base64") };
+        `
+          : "const rotated = await provider.rotateKey(scope); return { rotated: rotated.version };",
+        { dataKey: dataKey.toString("hex"), scope },
+        startAt
+      )
+    )
+  );
+  const reader = createLocalTenantKmsProvider(paths);
+  const described = await reader.describeKey(scope);
+
+  for (const result of results.filter((entry) => entry.wrapped)) {
+    assert.deepEqual(
+      await reader.unwrapDataKey({
+        aad: Buffer.from("race"),
+        keyId: scope.keyId,
+        version: result.version,
+        wrapped: Buffer.from(result.wrapped, "base64"),
+      }),
+      dataKey,
+      `version ${result.version} still holds the material it was sealed with`
+    );
+  }
+
+  const rotated = results.filter((entry) => entry.rotated).map((entry) => entry.rotated);
+
+  assert.equal(new Set(rotated).size, rotated.length, "every rotation got its own version");
+  assert.deepEqual(described.versions, Array.from({ length: described.versions.length }, (_, index) => index + 1));
+});
+
 test("one process's concurrent first uses share one creation", async () => {
   const paths = await freshPaths("same-process");
   const provider = createLocalTenantKmsProvider(paths);

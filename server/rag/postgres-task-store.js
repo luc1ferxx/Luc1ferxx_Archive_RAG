@@ -4,7 +4,7 @@ import {
 } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { queryPostgres } from "./postgres.js";
-import { createPostgresTenantRecordMethods } from "./tenant-records.js";
+import { createExportEventOrdinalMapper, createPostgresTenantRecordMethods } from "./tenant-records.js";
 import {
   buildTaskScopeKey,
   DEFAULT_TASK_CLAIM_LEASE_MS,
@@ -529,12 +529,14 @@ export const createPostgresTaskStore = ({
     // The tenant erase and export (rag/tenant-records.js): events first and
     // swept again after the tasks, so an event a task wrote between the two
     // statements does not stay behind (the events table has no foreign key).
+    // An exported event names its ordinal in its task, not the shared id.
     ...createPostgresTenantRecordMethods({
       initialize,
       query,
       tables: () => [
         {
           keyColumns: ["event_id"],
+          mapRow: createExportEventOrdinalMapper("task_id"),
           name: "task_events",
           sweepAfter: true,
           table: taskEventsTable,

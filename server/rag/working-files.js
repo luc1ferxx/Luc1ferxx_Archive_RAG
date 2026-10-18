@@ -25,8 +25,27 @@ import { Transform } from "node:stream";
 
 import { isTenantEncryptionEnabled } from "./config.js";
 import { TENANT_ENCRYPTION_ERROR_CODES as CODES, createTenantEncryptionError } from "./kms/errors.js";
+import { TENANT_ENVELOPE_MAGIC } from "./tenant-encryption.js";
 
 export const WORKING_FILE_MAGIC = Buffer.from([0x00, 0x41, 0x52, 0x54, 0x57, 0x52, 0x4b]);
+
+// The two magics every reader of a tenant's file bytes recognises and then
+// decrypts: a tenant envelope ("\0ARTENC", rag/tenant-encryption.js) and a
+// working file ("\0ARTWRK", above). A PDF whose own bytes begin with one would
+// be read as a broken envelope by every later reader (a 500 on download, a
+// failed index build, export and restore), so the upload checks and the trash
+// restore refuse such plaintext as no PDF. A real PDF never begins with
+// either: its header is "%PDF" (or, at most 1024 bytes in, junk before it).
+const RESERVED_FILE_MAGICS = Object.freeze([TENANT_ENVELOPE_MAGIC, WORKING_FILE_MAGIC]);
+
+/** Whether plaintext `bytes` begin with a magic the stored-file readers reserve. */
+export const startsWithReservedFileMagic = (bytes) =>
+  (Buffer.isBuffer(bytes) || bytes instanceof Uint8Array) &&
+  RESERVED_FILE_MAGICS.some(
+    (magic) =>
+      bytes.length >= magic.length &&
+      Buffer.from(bytes.buffer, bytes.byteOffset, magic.length).equals(magic)
+  );
 
 const PREFIX = Buffer.concat([WORKING_FILE_MAGIC, Buffer.from([1])]);
 const NONCE_BYTES = 12;

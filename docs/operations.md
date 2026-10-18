@@ -93,7 +93,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 
 1. **哪些任务、为什么**：`cd server && npm run ingest:jobs -- dead-letter list --all`（阶段、不含错误信息的原因、尝试次数）。
 2. **哪个阶段一直失败**：`sum by (stage, result) (increase(archive_rag_ingest_stage_failures_total[1h]))`。`embed` 指向 embedding 模型（`archive_rag_model_calls_total{operation="embedding",status="error"}`），`parse` 指向 PDF 本身或 docling-serve（`DOCLING_SERVE_URL`），`index` 指向 PostgreSQL（`archive_rag_postgres_statement_errors_total`）。
-3. **队列状态**：`curl -s http://<api-host>:<PORT>/health` 的 `checks.ingestJobs`；`archive_rag_ingest_jobs` 按状态的数量。多个进程上报的是同一个队列的总数，聚合时用 `max`。
+3. **队列状态**：`curl -s -H "x-api-key: <token>" http://<api-host>:<PORT>/health` 的 `checks.ingestJobs`（开启 API auth 时要带 `admin.status.read` 或单个共享 token 的凭据，否则只返回 `{status}`）；`archive_rag_ingest_jobs` 按状态的数量。多个进程上报的是同一个队列的总数，聚合时用 `max`。
 
 修好原因后重新入队，任务从死掉的那个阶段继续：`cd server && npm run ingest:jobs -- dead-letter requeue <jobId> --all`，或者按租户 `POST /admin/ingest-jobs/<jobId>/requeue`。
 
@@ -182,15 +182,15 @@ critical 表示现在就要有人处理，warning 进工单队列。
 | `npm run backup:verify -- --dump <file>` | 恢复演练：把 dump 恢复到一个一次性集群里并逐项检查。 |
 | `npm run backup:restore -- --database-url <目标库> --dump <file> [--dry-run] [--force]` | 恢复到指定的库。 |
 
-数据库地址只从 `--database-url` 或环境变量 `BACKUP_DATABASE_URL` 读，脚本不读 `server/.env`。密码通过 `PGPASSWORD` 交给 `pg_dump`/`pg_restore`，不出现在命令行里；manifest 只记主机、端口和库名。`pg_dump`/`pg_restore` 默认取最新的 Postgres.app，`PG_BIN_DIR` 可以指定；`pg_dump` 的大版本不能低于服务器。
+数据库地址只从 `--database-url` 或环境变量 `BACKUP_DATABASE_URL` 读，脚本不读 `server/.env`。密码通过 `PGPASSWORD` 交给 `pg_dump`/`pg_restore`，不出现在命令行里；manifest 只记主机、端口和库名。工具自己的连接（统计、角色检查、校验）和 `pg_dump`/`pg_restore` 用的主机、端口、库、用户和密码都只从这个 URL 解析，不会从 shell 里的 `PGHOST`/`PGPORT`/`PGPASSWORD` 补齐，所以不会连到两台不同的服务器；URL 里没有主机（也没有 `?host=<socket 目录>`）的直接拒绝。TLS 与应用一致：环境里开了 `POSTGRES_SSL_ENABLED` 时按 `POSTGRES_SSL_MODE` / `POSTGRES_SSL_CA_FILE` 校验证书，子进程拿到对应的 `PGSSLMODE` / `PGSSLROOTCERT`（`verify-full` 没有 CA 文件时用 `system`，需要 libpq 16），此时 URL 里不能再带 `sslmode` 之类的参数；没开时由 URL 自己的 `sslmode` 决定。`pg_dump`/`pg_restore` 默认取最新的 Postgres.app，`PG_BIN_DIR` 可以指定；`pg_dump` 的大版本不能低于服务器。
 
 ### 备份
 
 - 用拥有表的登录（role split 时是迁移登录 `POSTGRES_MIGRATION_DATABASE_URL`）：备份要读到所有租户的行。脚本在会话里设 `row_security = off`，被行策略过滤的登录会直接报错，不会悄悄少算。
 - dump 和 manifest 的统计在同一个导出快照里完成（`pg_export_snapshot` + `pg_dump --snapshot`），备份期间有写入也一致。
 - manifest 记录：时间、已应用的迁移（`schema_migrations`）、每张表的行数、每个 (owner, workspace) 的文档数（正常的和回收站里的分开）和字节数、每条审计哈希链最后一行的 id 和哈希、行策略引用的角色、dump 的 SHA-256 和大小。
-- 默认输出到 `server/backups/`（已在 `.gitignore` 里）。备份文件里有所有租户的文档和文本，存放时要加密、限制访问，并设自己的保留期。
-- `--with-files` 另外打包数据库以外的磁盘状态：`UPLOADS_DIRECTORY`（默认 `server/uploads`）、`UPLOAD_SESSION_DIRECTORY`（默认 `server/upload-sessions`）和数据目录（默认 `server/data`：本地索引、文件注册表、JSONL 存储、trace）。默认的 PostgreSQL 部署里这些大多是临时数据；用 local / Qdrant 或文件注册表时才必须带上（Qdrant 自己的数据要另外按 Qdrant 的方式备份）。
+- 默认输出到 `server/backups/`（已在 `.gitignore` 里）。备份写出的每个文件都是 0600，它新建的输出目录是 0700。备份文件里有所有租户的文档和文本，存放时要加密、限制访问，并设自己的保留期。
+- `--with-files` 另外打包数据库以外的磁盘状态：`UPLOADS_DIRECTORY`（默认 `server/uploads`）、`UPLOAD_SESSION_DIRECTORY`（默认 `server/upload-sessions`）和数据目录（默认 `server/data`：本地索引、文件注册表、JSONL 存储、trace）。默认的 PostgreSQL 部署里这些大多是临时数据；用 local / Qdrant 或文件注册表时才必须带上（Qdrant 自己的数据要另外按 Qdrant 的方式备份）。密钥库和 KMS 主密钥不进这个 tar：按路径排除（`--keystore-dir` / `--kms-master-key-file`，没给就用环境里的 `TENANT_KEYSTORE_DIR` / `TENANT_KMS_MASTER_KEY_FILE`，再没有就用默认位置；脚本不读 `server/.env`，这两个设置在 `.env` 里时要用参数传），按名字排除，并且按内容排除：打包目录里 1 MiB 以内、JSON 的 `format` 是本地 KMS 密钥文件（包括已销毁密钥的墓碑）或主密钥的文件，不论放在哪里、叫什么名字都会排除，manifest 的 `files.keyMaterialExcluded` 只列路径和格式。
 
 ### 恢复演练
 
@@ -202,8 +202,8 @@ npm run backup:verify -- --dump /srv/backups/archive-rag-<时间>.dump
 
 `backup:verify` 不带 `--database-url` 时自己起一个一次性集群（和 `run-pgvector-integration.sh` 一样：`$TMPDIR` 下的新数据目录，只监听 `/tmp` 下一个 0700 目录里的 unix socket，trust 认证，所以不需要任何密码），用一个非超级用户登录（拥有临时库，和生产里的迁移登录一样）恢复，然后检查：
 
-1. dump 的 SHA-256 与 manifest 一致；
-2. 代码里每个迁移都已应用、没有未知的迁移，已应用列表与 manifest 一致（旧代码的备份用 `--allow-pending-migrations`）；
+1. dump 的 SHA-256 与 manifest 一致（没传 `--dump` 时，检查 manifest 旁边的那个 dump）；manifest 旁边有 `--with-files` 的 tar 时也校验它的 SHA-256；
+2. 代码里每个迁移都已应用、没有未知的迁移，已应用列表与 manifest 一致（旧代码的备份用 `--allow-pending-migrations`）。校验从不迁移恢复出来的库：有待执行的迁移时，第 4 项会先跑迁移，所以跳过（`skipped: "pending_migrations"`），审计链也在不跑迁移的情况下读取；
 3. 每张表的行数、每个租户的文档数与 manifest 一致；
 4. 健康报告的 `checks.rowLevelSecurity` 没有 error（角色、策略、授权、角色切换）；
 5. 审计哈希链全部校验通过（`audit:verify` 的同一段代码），且每条链的最后一行与 manifest 记录的一致，能发现链尾被删的行。
@@ -233,7 +233,7 @@ npm run backup:restore -- --database-url <目标库> --dump <file>
 
 ### 不在备份里的
 
-- **租户密钥库**（信封加密，`TENANT_KEYSTORE_DIR`，在 PostgreSQL 之外）：故意不进数据库备份，也不进 `--with-files` 的 tar（按 `TENANT_KEYSTORE_DIR` 和名字里带 `keystore` 的路径排除）。这样擦除一个租户的密钥，所有备份副本里这个租户加密过的文件字节就再也读不出来（crypto-shredding）。密钥库要单独备份：放在不同的介质上、单独控制访问和保留期，并且擦除租户时把该租户的密钥也从密钥库的备份里删掉，否则粉碎不成立；或者不备份密钥库，接受丢失密钥库等于丢失加密数据。恢复数据库时要配一个包含这些租户密钥的密钥库。注意加密只覆盖文件字节：切块文本、run、反馈等仍以明文在数据库备份里，擦除租户不会改变已有的备份。
+- **租户密钥库**（信封加密，`TENANT_KEYSTORE_DIR`，在 PostgreSQL 之外）：故意不进数据库备份，也不进 `--with-files` 的 tar（按路径、名字和内容排除，见上面的“备份”）。这样擦除一个租户的密钥，所有备份副本里这个租户加密过的文件字节就再也读不出来（crypto-shredding）。密钥库要单独备份：放在不同的介质上、单独控制访问和保留期，并且擦除租户时把该租户的密钥也从密钥库的备份里删掉，否则粉碎不成立；或者不备份密钥库，接受丢失密钥库等于丢失加密数据。恢复数据库时要配一个包含这些租户密钥的密钥库。注意加密只覆盖文件字节：切块文本、run、反馈等仍以明文在数据库备份里，擦除租户不会改变已有的备份。
 - `server/.env` 和其他密钥、角色密码和成员关系、Redis、进程内缓存。
 - Qdrant 自己的存储（只在 `VECTOR_STORE_PROVIDER=qdrant` 时有）。
 

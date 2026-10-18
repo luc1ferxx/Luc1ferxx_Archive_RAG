@@ -291,14 +291,24 @@ export const LANGGRAPH_CHECKPOINT_RESULT_KEY = "__langGraphCheckpoint";
 // run's ids grow in commit order and a later event never ranks before an
 // earlier one. The stores keep the BIGSERIAL, which orders the event list and
 // pages the tenant export.
+//
+// The store lists events by created_at, the start of the writing transaction,
+// which is taken before that lock: of two appends racing for it, the one that
+// started first may commit second and list first with the higher id. So when
+// every event carries a store id, the projection lists them in id order (the
+// order of the numbers), never `run:2` before `run:1`. Numbering by list
+// position instead would renumber an event when a racing append with an
+// earlier created_at commits after a read; the id rank never moves.
 const STORE_SEQUENCE_EVENT_ID = /^\d+$/;
 
 const compareBigInts = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
 
+const isStoreSequenceEventId = (eventId) => typeof eventId === "string" && STORE_SEQUENCE_EVENT_ID.test(eventId);
+
 const toPublicRunEventIds = (runId, events) => {
   const sequenceIds = events
     .map((event) => event?.eventId)
-    .filter((eventId) => typeof eventId === "string" && STORE_SEQUENCE_EVENT_ID.test(eventId))
+    .filter(isStoreSequenceEventId)
     .map((eventId) => BigInt(eventId))
     .sort(compareBigInts);
 
@@ -308,12 +318,23 @@ const toPublicRunEventIds = (runId, events) => {
 
   const ordinals = new Map(sequenceIds.map((eventId, index) => [eventId, index + 1]));
   const publicRunId = normalizeText(runId);
-
-  return events.map((event) =>
-    typeof event?.eventId === "string" && STORE_SEQUENCE_EVENT_ID.test(event.eventId)
+  const numbered = events.map((event) =>
+    isStoreSequenceEventId(event?.eventId)
       ? { ...event, eventId: `${publicRunId}:${ordinals.get(BigInt(event.eventId))}` }
       : event
   );
+
+  // Every id from the store: list them in the order of their numbers (a
+  // stable sort on the rank; a list with ids in any other form keeps its
+  // order, which mixes no sequence to sort by).
+  if (sequenceIds.length !== events.length) {
+    return numbered;
+  }
+
+  return numbered
+    .map((event, index) => ({ event, rank: ordinals.get(BigInt(events[index].eventId)) }))
+    .sort((left, right) => left.rank - right.rank)
+    .map(({ event }) => event);
 };
 
 // The LangGraph record is stripped from every projection, including the ones

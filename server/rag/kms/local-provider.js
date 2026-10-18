@@ -27,8 +27,10 @@
 // first use agree on one key (the losers re-read it). Every later change of a
 // key file (rotate, destroy, a new version after a destroy) takes an O_EXCL
 // lock file, re-reads, and replaces the file with rename(), so a reader sees
-// the old file or the new one, never half of either. A lock older than
-// `staleLockMs` (a holder that crashed) is broken.
+// the old file or the new one, never half of either; a change that finds no
+// file creates it with the same exclusive link() as a first use, so it can
+// never replace a first version a lock-free first use linked in meanwhile. A
+// lock older than `staleLockMs` (a holder that crashed) is broken.
 //
 // Caching: a key file's unwrapped versions are kept in memory and reused while
 // the file's identity (inode, size, mtime) is unchanged, checked with one
@@ -63,6 +65,11 @@ export const LOCAL_KMS_PROVIDER_ID = "local";
 
 const KEY_FILE_FORMAT = "archive-rag-local-tenant-key";
 const MASTER_KEY_FORMAT = "archive-rag-local-kms-master-key";
+
+// The `format` of the provider's files (a destroyed key's tombstone keeps the
+// key file's): backup-tools.mjs leaves any file carrying one out of a backup,
+// wherever it lies.
+export const LOCAL_KMS_FILE_FORMATS = Object.freeze({ keyFile: KEY_FILE_FORMAT, masterKey: MASTER_KEY_FORMAT });
 const FORMAT_VERSION = 1;
 const KEY_BYTES = 32;
 const NONCE_BYTES = 12;
@@ -196,6 +203,10 @@ const overwriteInPlace = async (filePath) => {
  * default provider when the settings change).
  */
 export const createLocalTenantKmsProvider = ({
+  // Test seam: awaited under the key's lock right before a key file is
+  // written (after the re-read), so a test can create a first version in
+  // between, as another process may.
+  beforeKeyFileWrite = null,
   keystoreDirectory = resolveLocalKmsPaths().keystoreDirectory,
   lockRetryMs = 10,
   lockTimeoutMs = 10000,
@@ -545,7 +556,12 @@ export const createLocalTenantKmsProvider = ({
 
   // One change of a key file: under this process's queue for the key and the
   // cross-process file lock, the file is re-read, `mutate(current)` returns
-  // the next content (or null for no change), and the file is replaced.
+  // the next content (or null for no change), and the file is replaced. A key
+  // with no file yet is created with the same exclusive link() as a first use
+  // (createFirstVersion), which takes no lock: a rename() here could replace
+  // a version 1 another process linked in after the read, and whatever it had
+  // already sealed under that material would never decrypt again. When the
+  // link finds a file, the mutation runs again on it.
   const mutateKeyFile = (keyId, mutate) => {
     const previous = mutationQueues.get(keyId) ?? Promise.resolve();
     const run = previous
@@ -554,20 +570,32 @@ export const createLocalTenantKmsProvider = ({
         await ensureKeystoreDirectory();
 
         return withFileLock(keyId, async () => {
-          const read = await readKeyFileWithSignature(keyId);
-          const current = read?.file ?? null;
-          const next = await mutate(current);
+          for (;;) {
+            const read = await readKeyFileWithSignature(keyId);
+            const current = read?.file ?? null;
+            const next = await mutate(current);
 
-          if (next) {
-            if (next.versions.length === 0 && current) {
-              await overwriteInPlace(keyFilePath(keyId));
+            if (next) {
+              const content = `${JSON.stringify(next, null, 2)}\n`;
+
+              await beforeKeyFileWrite?.({ current, keyId });
+
+              if (!current) {
+                if (!(await createFileExclusively(keyFilePath(keyId), content))) {
+                  continue;
+                }
+              } else {
+                if (next.versions.length === 0) {
+                  await overwriteInPlace(keyFilePath(keyId));
+                }
+
+                await replaceFileAtomically(keyFilePath(keyId), content);
+              }
             }
 
-            await replaceFileAtomically(keyFilePath(keyId), `${JSON.stringify(next, null, 2)}\n`);
+            keyCache.delete(keyId);
+            return { current, next };
           }
-
-          keyCache.delete(keyId);
-          return { current, next };
         });
       });
 

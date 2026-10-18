@@ -135,7 +135,8 @@ export const createDocumentsRouter = (services) => {
   // caller's trash does not hold (another tenant's document, a document that
   // is not deleted, one already purged), so it tells nothing about another
   // tenant; 409 DOCUMENT_RESTORE_DUPLICATE when the tenant has since stored
-  // the same PDF as another document (RAG_INGEST_DEDUP).
+  // the same PDF as another document (RAG_INGEST_DEDUP); 415
+  // DOCUMENT_RESTORE_RESERVED_PREFIX for stored bytes no upload accepts now.
   router.post("/documents/:docId/restore", async (req, res) => {
     const parsed = parseOrRespond(docIdSchema, req.params, res);
     if (!parsed) return;

@@ -1,3 +1,4 @@
+import { X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isPostgresSslEnabled } from "./config.js";
 
@@ -12,8 +13,9 @@ import { isPostgresSslEnabled } from "./config.js";
 //                          needs POSTGRES_SSL_CA_FILE, because a chain to a
 //                          public CA proves nothing about whose server it is
 //   no-verify              nothing (the behaviour before this setting existed)
-// POSTGRES_SSL_CA_FILE (PEM, read when a pool is built) replaces Node's
-// default trusted CAs for verify-full and verify-ca; no-verify ignores it.
+// POSTGRES_SSL_CA_FILE (PEM, read when a pool is built; every certificate in
+// it must parse) replaces Node's default trusted CAs for verify-full and
+// verify-ca; no-verify ignores it.
 // Any other mode refuses: never a silent fallback to a weaker check.
 //
 // With TLS off nothing changes: no ssl option is passed, and the connection
@@ -41,6 +43,8 @@ export const CONNECTION_STRING_TLS_PARAMETERS = Object.freeze([
 ]);
 
 const PEM_CERTIFICATE = /-----BEGIN CERTIFICATE-----/;
+const PEM_CERTIFICATE_GLOBAL = /-----BEGIN CERTIFICATE-----/g;
+const PEM_CERTIFICATE_BLOCKS = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
 const MAX_QUOTED_MODE_LENGTH = 64;
 
 const tlsError = (code, message) => Object.assign(new Error(message), { code });
@@ -120,9 +124,29 @@ const readCaFile = (path, readFile) => {
     );
   }
 
-  if (!PEM_CERTIFICATE.test(text)) {
+  const blocks = text.match(PEM_CERTIFICATE_BLOCKS) ?? [];
+
+  if (!PEM_CERTIFICATE.test(text) || blocks.length === 0) {
     throw tlsError("POSTGRES_SSL_CA_FILE_INVALID", "POSTGRES_SSL_CA_FILE holds no PEM certificate.");
   }
+
+  // Every certificate of the bundle must parse: a truncated or damaged one
+  // would pass a marker check here and the health report, and then fail
+  // every connection's handshake. Begin markers without their end count too.
+  if ((text.match(PEM_CERTIFICATE_GLOBAL) ?? []).length !== blocks.length) {
+    throw tlsError("POSTGRES_SSL_CA_FILE_INVALID", "POSTGRES_SSL_CA_FILE holds a PEM certificate without its end marker.");
+  }
+
+  blocks.forEach((block, index) => {
+    try {
+      new X509Certificate(block);
+    } catch {
+      throw tlsError(
+        "POSTGRES_SSL_CA_FILE_INVALID",
+        `POSTGRES_SSL_CA_FILE certificate ${index + 1} of ${blocks.length} cannot be parsed.`
+      );
+    }
+  });
 
   return text;
 };

@@ -451,6 +451,25 @@ if (!adminDatabaseUrl) {
     assert.equal(Number(before.document_count), 3);
   });
 
+  test("a stored file whose plaintext begins with a reserved magic is not restored (415)", async () => {
+    await ingest(ALICE, "doc-a3", "epsilon");
+    assert.equal((await call("DELETE", "/documents/doc-a3", { headers: AS_ALICE })).status, 200);
+    // As an upload from before the upload checks stored it: a PDF prefixed
+    // with the working-file magic ("\0ARTWRK" + 1), which every working-file
+    // reader would take for a damaged working file (a 500 before).
+    await q(`UPDATE rag_documents SET file_bytes = decode('0041525457524b01', 'hex') || file_bytes WHERE doc_id = 'doc-a3'`);
+
+    const refused = await call("POST", "/documents/doc-a3/restore", { body: {}, headers: AS_ALICE });
+
+    assert.equal(refused.status, 415, refused.text);
+    assert.equal(refused.json.code, "DOCUMENT_RESTORE_RESERVED_PREFIX");
+    assert.ok((await documentRow("doc-a3")).deleted_at, "the refused restore changed nothing");
+    assert.equal(await chunkCount("doc-a3"), 0);
+
+    // Out of the way of the sweep and erase cases below.
+    await q(`DELETE FROM rag_documents WHERE doc_id = 'doc-a3'`);
+  });
+
   test("the sweep purges what is past the window only, redacts then, and leaves the other tenant alone", async () => {
     assert.equal((await call("DELETE", "/documents/doc-a1", { headers: AS_ALICE })).status, 200);
     assert.equal((await call("DELETE", "/documents/doc-b1", { headers: AS_BOB })).status, 200);
