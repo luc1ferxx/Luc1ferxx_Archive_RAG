@@ -9,6 +9,12 @@ import { getTenantUsageTableName } from "./db-migrations.js";
 import { isPostgresConfigured, queryPostgres as queryDefaultPostgres } from "./postgres.js";
 import { getActiveDatabaseTenant, runAsDatabaseSystem } from "./postgres-tenant.js";
 import { createPostgresTenantRecordMethods, tenantSelectorMatches } from "./tenant-records.js";
+import {
+  fromTenantRefusalLedgerMetric,
+  isTenantRefusalReason,
+  TENANT_REFUSAL_LEDGER_METRICS,
+  toTenantRefusalLedgerMetric,
+} from "./tenant-refusal-reasons.js";
 
 // The tenant usage ledger (migration 037): hourly aggregates per tenant of
 // what a deployment spends on it.
@@ -37,6 +43,17 @@ import { createPostgresTenantRecordMethods, tenantSelectorMatches } from "./tena
 //       commitDocument): the bytes of a new or replaced document, and 1 for a
 //       new document. A duplicate upload or a superseded replacement stores
 //       nothing and counts nothing.
+//   refused_<reason>  one per per-tenant refusal (rag/tenant-refusals.js
+//       recordTenantRefusal): a rate or concurrency limit, a membership or
+//       workspace-status check, a storage, model, task, upload-session or
+//       ingest-queue cap; one metric per stable code
+//       (rag/tenant-refusal-reasons.js), charged to the tenant the refusal
+//       was decided for. They are ordinary rows of the same table, so the
+//       flush, the tenant policy, the erase and the export cover them as they
+//       are; GET /admin/usage?metric=refusals reads them. Refusals hold at
+//       most TENANT_USAGE_MAX_PENDING_REFUSAL_ENTRIES of the pending totals,
+//       so a flood of them (a client probing workspace ids) cannot crowd out
+//       the usage totals while the database is away.
 // The tenant is the (user, workspace) pair; usage outside a tenant (auth
 // disabled, system work) is recorded under ('', '').
 
@@ -48,16 +65,32 @@ export const TENANT_USAGE_METRICS = Object.freeze({
   modelTokens: "model_tokens",
 });
 
+// GET /admin/usage's view over every refused_<reason> metric at once.
+export const TENANT_USAGE_REFUSALS_METRIC = "refusals";
+
 const KNOWN_METRICS = new Set(Object.values(TENANT_USAGE_METRICS));
+const REFUSAL_METRICS = new Set(TENANT_REFUSAL_LEDGER_METRICS);
+const LEDGER_METRICS = new Set([...KNOWN_METRICS, ...REFUSAL_METRICS]);
 const HOUR_MS = 60 * 60 * 1000;
 const MIRROR_ANNOTATION_ID = "model_gateway_mirror";
 // Distinct (tenant, metric, hour) keys kept between flushes. Far above what
 // one process produces in a flush interval; past it new keys are dropped (and
 // counted) rather than growing without bound while the database is away.
 export const TENANT_USAGE_MAX_PENDING_ENTRIES = 50_000;
+// The share of those keys refusal totals may hold.
+export const TENANT_USAGE_MAX_PENDING_REFUSAL_ENTRIES = 10_000;
+// The longest user or workspace id a row may carry (the registry's
+// MAX_TENANT_ID_LENGTH). A client-chosen id (an x-workspace-id a membership
+// check refused) can be far longer, and one row whose primary key exceeds
+// PostgreSQL's index tuple limit, or an id holding U+0000 (which text cannot
+// store), would fail its whole batch at every flush. Such usage is dropped
+// and counted (snapshot().unstorableEntries) instead.
+export const TENANT_USAGE_MAX_ID_LENGTH = 256;
 const FLUSH_BATCH_ROWS = 500;
 
 const normalizeId = (value) => String(value ?? "").trim();
+
+const isStorableId = (id) => id.length <= TENANT_USAGE_MAX_ID_LENGTH && !id.includes("\u0000");
 
 const toAmount = (value) => {
   const amount = Math.round(Number(value));
@@ -103,6 +136,7 @@ export const createTenantUsageLedger = ({
   isEnabled = isTenantUsageLedgerEnabled,
   logger = console,
   maxPendingEntries = TENANT_USAGE_MAX_PENDING_ENTRIES,
+  maxPendingRefusalEntries = TENANT_USAGE_MAX_PENDING_REFUSAL_ENTRIES,
   now = Date.now,
   query = queryDefaultPostgres,
   runAsSystem = runAsDatabaseSystem,
@@ -112,6 +146,9 @@ export const createTenantUsageLedger = ({
   let timer = null;
   let flushing = null;
   let droppedEntries = 0;
+  let droppedRefusalEntries = 0;
+  let pendingRefusalEntries = 0;
+  let unstorableEntries = 0;
   let failedFlushes = 0;
   let flushedRows = 0;
   let lastFlushError = null;
@@ -144,13 +181,26 @@ export const createTenantUsageLedger = ({
       return true;
     }
 
+    const refusal = REFUSAL_METRICS.has(metric);
+
+    if (refusal && pendingRefusalEntries >= maxPendingRefusalEntries) {
+      droppedRefusalEntries += 1;
+      return false;
+    }
+
     if (pending.size >= maxPendingEntries) {
       droppedEntries += 1;
       return false;
     }
 
     pending.set(key, { metric, periodStart, userId, value, workspaceId });
+    pendingRefusalEntries += refusal ? 1 : 0;
     return true;
+  };
+
+  const forget = (key, entry) => {
+    pending.delete(key);
+    pendingRefusalEntries -= REFUSAL_METRICS.has(entry.metric) ? 1 : 0;
   };
 
   /**
@@ -172,7 +222,12 @@ export const createTenantUsageLedger = ({
       for (const [metric, rawValue] of Object.entries(values ?? {})) {
         const value = toAmount(rawValue);
 
-        if (!KNOWN_METRICS.has(metric) || value === 0) {
+        if (!LEDGER_METRICS.has(metric) || value === 0) {
+          continue;
+        }
+
+        if (!isStorableId(workspaceId) || !isStorableId(userId)) {
+          unstorableEntries += 1;
           continue;
         }
 
@@ -188,6 +243,17 @@ export const createTenantUsageLedger = ({
       logger.error?.("Failed to record tenant usage.", error);
       return false;
     }
+  };
+
+  /**
+   * One refusal with `reason` (a rag/tenant-refusal-reasons.js code) for the
+   * tenant it was decided for (null = ('', '')). An unknown reason is
+   * ignored. Never throws.
+   */
+  const recordRefusal = (tenant, reason, options) => {
+    const metric = isTenantRefusalReason(reason) ? toTenantRefusalLedgerMetric(reason) : null;
+
+    return metric ? record(tenant, { [metric]: 1 }, options) : false;
   };
 
   const writeBatch = async (table, batch) =>
@@ -219,6 +285,7 @@ export const createTenantUsageLedger = ({
     const entries = [...pending.values()].sort(comparePendingEntries);
 
     pending.clear();
+    pendingRefusalEntries = 0;
     flushing = (async () => {
       let written = 0;
       let index = 0;
@@ -276,11 +343,14 @@ export const createTenantUsageLedger = ({
   const snapshot = () => ({
     active: isActive(),
     droppedEntries,
+    droppedRefusalEntries,
     failedFlushes,
     flushedRows,
     lastFlushError,
     pendingEntries: pending.size,
+    pendingRefusalEntries,
     timerRunning: timer !== null,
+    unstorableEntries,
   });
 
   const matchesSelector = (selector, entry) =>
@@ -307,7 +377,7 @@ export const createTenantUsageLedger = ({
 
     for (const [key, entry] of [...pending.entries()]) {
       if (matchesSelector(selector, entry)) {
-        pending.delete(key);
+        forget(key, entry);
         erased += 1;
       }
     }
@@ -315,7 +385,7 @@ export const createTenantUsageLedger = ({
     return erased;
   };
 
-  return { countPending, erasePending, flush, record, snapshot, stop };
+  return { countPending, erasePending, flush, record, recordRefusal, snapshot, stop };
 };
 
 let defaultLedger = null;
@@ -522,11 +592,97 @@ export const TENANT_USAGE_GROUP_BY = Object.freeze({
 
 export const TENANT_USAGE_MAX_TOP = 100;
 
+const invalidUsageQuery = (message) => Object.assign(new Error(message), { expose: true, status: 400 });
+
+const toUsageRange = ({ from, limit, to, workspaceId }) => ({
+  filterWorkspace: workspaceId === null || workspaceId === undefined ? null : String(workspaceId),
+  fromStart: new Date(toPeriodStart(new Date(from))).toISOString(),
+  safeLimit: Math.max(1, Math.min(TENANT_USAGE_MAX_TOP, Math.floor(Number(limit) || 10))),
+  toEnd: new Date(to).toISOString(),
+});
+
+/**
+ * The top `limit` tenants (or workspaces) by refusals over the hours that
+ * start in [from rounded down to its hour, to): every refused_<reason> metric
+ * added up, or only `reason`'s (a rag/tenant-refusal-reasons.js code). Each
+ * row also carries `refusals`, its count per reason code over the range.
+ * Same context rules as listTenantUsageTop.
+ */
+export const listTenantRefusalsTop = async ({
+  from,
+  getTable = getTenantUsagePostgresTable,
+  groupBy = TENANT_USAGE_GROUP_BY.tenant,
+  limit = 10,
+  query = queryDefaultPostgres,
+  reason = null,
+  to,
+  workspaceId = null,
+} = {}) => {
+  const reasonMetric = reason === null || reason === undefined ? null : toTenantRefusalLedgerMetric(reason);
+
+  if (reason !== null && reason !== undefined && !reasonMetric) {
+    throw invalidUsageQuery(`Unknown refusal reason "${reason}".`);
+  }
+
+  const table = getTenantUsageTableName(getTable());
+  const byWorkspace = groupBy === TENANT_USAGE_GROUP_BY.workspace;
+  const { filterWorkspace, fromStart, safeLimit, toEnd } = toUsageRange({ from, limit, to, workspaceId });
+  const owner = byWorkspace ? "''::text" : "owner_user_id";
+  const result = await query(
+    `
+      WITH per_reason AS (
+        SELECT workspace_id, ${owner} AS owner_user_id, metric, SUM(value) AS value
+        FROM ${table}
+        WHERE metric = ANY($1::text[])
+          AND period_start >= $2::timestamptz
+          AND period_start < $3::timestamptz
+          AND ($4::text IS NULL OR workspace_id = $4::text)
+        GROUP BY workspace_id${byWorkspace ? "" : ", owner_user_id"}, metric
+      )
+      SELECT workspace_id, owner_user_id, SUM(value)::text AS value,
+             array_agg(metric ORDER BY metric) AS reason_metrics,
+             array_agg(value::text ORDER BY metric) AS reason_values
+      FROM per_reason
+      GROUP BY workspace_id, owner_user_id
+      ORDER BY SUM(value) DESC, workspace_id ASC, owner_user_id ASC
+      LIMIT $5
+    `,
+    [reasonMetric ? [reasonMetric] : [...TENANT_REFUSAL_LEDGER_METRICS], fromStart, toEnd, filterWorkspace, safeLimit]
+  );
+
+  return {
+    from: fromStart,
+    rows: (result?.rows ?? []).map((row) => {
+      const metrics = Array.isArray(row.reason_metrics) ? row.reason_metrics : [];
+      const values = Array.isArray(row.reason_values) ? row.reason_values : [];
+      const refusals = {};
+
+      metrics.forEach((metric, index) => {
+        const code = fromTenantRefusalLedgerMetric(metric);
+
+        if (code) {
+          refusals[code] = Number(values[index] ?? 0);
+        }
+      });
+
+      return {
+        refusals,
+        ...(byWorkspace ? {} : { userId: String(row.owner_user_id ?? "") }),
+        value: Number(row.value ?? 0),
+        workspaceId: String(row.workspace_id ?? ""),
+      };
+    }),
+    to: toEnd,
+  };
+};
+
 /**
  * The top `limit` tenants (or workspaces) by `metric` over the hours that
  * start in [from rounded down to its hour, to). `workspaceId` narrows to one
  * workspace. Runs in whatever database context the caller bound: the route
  * binds the system context for the platform and workspace views.
+ * `metric: "refusals"` (TENANT_USAGE_REFUSALS_METRIC) is
+ * listTenantRefusalsTop, with its optional `reason`.
  */
 export const listTenantUsageTop = async ({
   from,
@@ -535,19 +691,25 @@ export const listTenantUsageTop = async ({
   limit = 10,
   metric,
   query = queryDefaultPostgres,
+  reason = null,
   to,
   workspaceId = null,
 } = {}) => {
+  if (metric === TENANT_USAGE_REFUSALS_METRIC) {
+    return listTenantRefusalsTop({ from, getTable, groupBy, limit, query, reason, to, workspaceId });
+  }
+
   if (!KNOWN_METRICS.has(metric)) {
-    throw Object.assign(new Error(`Unknown usage metric "${metric}".`), { expose: true, status: 400 });
+    throw invalidUsageQuery(`Unknown usage metric "${metric}".`);
+  }
+
+  if (reason !== null && reason !== undefined) {
+    throw invalidUsageQuery(`reason applies only to metric ${TENANT_USAGE_REFUSALS_METRIC}.`);
   }
 
   const table = getTenantUsageTableName(getTable());
   const byWorkspace = groupBy === TENANT_USAGE_GROUP_BY.workspace;
-  const safeLimit = Math.max(1, Math.min(TENANT_USAGE_MAX_TOP, Math.floor(Number(limit) || 10)));
-  const fromStart = new Date(toPeriodStart(new Date(from))).toISOString();
-  const toEnd = new Date(to).toISOString();
-  const filterWorkspace = workspaceId === null || workspaceId === undefined ? null : String(workspaceId);
+  const { filterWorkspace, fromStart, safeLimit, toEnd } = toUsageRange({ from, limit, to, workspaceId });
   const result = await query(
     `
       SELECT workspace_id, ${byWorkspace ? "''::text AS owner_user_id" : "owner_user_id"},

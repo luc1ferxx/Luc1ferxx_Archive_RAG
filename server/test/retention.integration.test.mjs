@@ -438,6 +438,44 @@ if (!adminDatabaseUrl) {
     }
   });
 
+  // PATCH /admin/workspaces/:workspaceId and `tenant:registry -- set-retention`
+  // (registry.setWorkspaceRetentionPolicy) change a policy after creation, as
+  // the system role; the next sweep reads the new one.
+  test("a retention policy changed after creation applies from the next sweep", async () => {
+    await clearTables();
+
+    const registry = modules.tenantRegistry.createTenantRegistryService({
+      cacheTtlMs: 0,
+      store: modules.tenantRegistry.createPostgresTenantRegistryStore(),
+    });
+
+    await modules.tenant.runAsDatabaseSystem(() =>
+      registry.createWorkspace({ retentionPolicy: { agentRuns: 0 }, workspaceId: "ws-b" })
+    );
+
+    try {
+      await seed(BOB, "b6");
+      await buildSweeper().sweep();
+      assert.equal((await idsLike(tables.runs, "run_id", "b6")).length, 6, "ws-b keeps its runs forever");
+
+      const updated = await modules.tenant.runAsDatabaseSystem(() =>
+        registry.setWorkspaceRetentionPolicy("ws-b", { agentRuns: 30, feedback: 0 })
+      );
+
+      assert.deepEqual(updated.retentionPolicy, { agentRuns: 30, feedback: 0 });
+      // Invalid policies are refused before anything is written.
+      await assert.rejects(
+        modules.tenant.runAsDatabaseSystem(() => registry.setWorkspaceRetentionPolicy("ws-b", { agentRuns: -1 })),
+        (error) => error.status === 400
+      );
+
+      await buildSweeper().sweep();
+      assert.equal((await idsLike(tables.runs, "run_id", "b6")).length, 3, "ws-b now keeps its runs 30 days");
+    } finally {
+      await ownerQuery(`DELETE FROM ${tables.workspaces} WHERE workspace_id = 'ws-b'`);
+    }
+  });
+
   test("policies the system role cannot read stop the sweep: nothing is deleted, and the next readable sweep applies them", async () => {
     await clearTables();
 

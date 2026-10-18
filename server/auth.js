@@ -21,6 +21,7 @@ import {
   verifyOidcAccessToken,
 } from "./rag/oidc.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
+import { recordTenantRefusal } from "./rag/tenant-refusals.js";
 import {
   decideTenantMembership,
   getDefaultTenantRegistry,
@@ -712,10 +713,15 @@ export const requireApiAuth = (req, res, next) => {
 
     // TENANT_MEMBERSHIP=enforce: the registry lookups are asynchronous. The
     // decision itself never rejects (a registry fault is its 503); anything
-    // else fails the request closed rather than leaving it unanswered.
+    // else fails the request closed rather than leaving it unanswered. A
+    // refusal is counted (rag/tenant-refusals.js) under the scope it was
+    // decided for: the user and the workspace it asked for, which is how an
+    // operator sees who is knocking on which workspace. The probes'
+    // resolveOptionalAccessScope only hides details and counts nothing.
     membership
       .then((decision) => {
         if (!decision.allowed) {
+          recordTenantRefusal(decision.code, req.accessScope);
           res.status(decision.status).json({ code: decision.code, error: decision.message });
           return;
         }

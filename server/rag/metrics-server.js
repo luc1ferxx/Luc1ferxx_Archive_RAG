@@ -10,6 +10,7 @@ import "./metrics-postgres.js";
 import { startProcessMetrics, stopProcessMetrics } from "./metrics-process.js";
 import "./metrics-retrieval.js";
 import "./metrics-service-client.js";
+import "./metrics-tenant.js";
 
 // GET /metrics on a listener of its own, in every role (server.js for the
 // monolith, rag/agent-service/role-server.js for the split roles):

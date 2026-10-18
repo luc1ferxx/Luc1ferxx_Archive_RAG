@@ -29,8 +29,10 @@ import {
   createKeyedSerializer,
   createTenantTaskLimitedError,
   readTenantTaskLimits,
+  TENANT_TASK_LIMITED,
 } from "./job-orchestrator.js";
 import { buildTaskScopeKey, createTaskService, TASK_STATUSES } from "./tasks.js";
+import { recordTenantRefusal } from "./tenant-refusals.js";
 import { runWithoutConversationMemoryWrites } from "./conversation-memory-writes.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
@@ -438,7 +440,8 @@ const buildDeliverableApprovalQuestion = (deliverables = {}) => {
 // (rag/job-orchestrator.js) included. The count and the write are serialized
 // per tenant in this process; creations racing in several processes may
 // overshoot by the number racing. An idempotent replay of an existing task is
-// never refused. Without a cap `write` runs exactly as before.
+// never refused. Without a cap `write` runs exactly as before. A refusal is
+// counted for that pair (rag/tenant-refusals.js).
 const serializeTenantTaskCreates = createKeyedSerializer();
 
 const writeWithinQueuedTaskCap = async ({ accessScope, taskLimits, taskService }, write) => {
@@ -456,6 +459,7 @@ const writeWithinQueuedTaskCap = async ({ accessScope, taskLimits, taskService }
     const active = await taskService.countActiveTasks({ accessScope });
 
     if ((Number(active?.queued) || 0) >= maxQueued) {
+      recordTenantRefusal(TENANT_TASK_LIMITED, accessScope);
       throw createTenantTaskLimitedError();
     }
 

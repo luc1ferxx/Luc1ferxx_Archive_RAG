@@ -16,6 +16,7 @@ import {
   SHARED_STATE_TTL_MS,
   whenSharedStateReady,
 } from "./shared-state.js";
+import { recordTenantRefusal } from "./tenant-refusals.js";
 
 // Client-side protection for one model endpoint: a concurrency cap and a
 // circuit breaker, applied to every HTTP request the model client sends.
@@ -145,7 +146,11 @@ const resolveModelCallTenant = () => {
   const tenant = getActiveDatabaseTenant();
 
   return tenant
-    ? { queueKey: `tenant:${JSON.stringify([tenant.userId, tenant.workspaceId])}`, refs: [describeModelCallTenantRef(tenant)] }
+    ? {
+        queueKey: `tenant:${JSON.stringify([tenant.userId, tenant.workspaceId])}`,
+        refs: [describeModelCallTenantRef(tenant)],
+        tenant,
+      }
     : { queueKey: SYSTEM_QUEUE_KEY, refs: [SYSTEM_TENANT_REF] };
 };
 
@@ -900,7 +905,20 @@ export const guardModelCall = async (
     throw createCircuitOpenError(guardKey);
   }
 
-  const release = await limiter.acquire({ queueKey: tenant.queueKey, signal });
+  let release;
+
+  try {
+    release = await limiter.acquire({ queueKey: tenant.queueKey, signal });
+  } catch (error) {
+    // RAG_LLM_MAX_QUEUE: counted for the tenant whose queue was full
+    // (rag/tenant-refusals.js); the system queue (a merged ingest batch, a
+    // call without a tenant) is ('', ''). Each refused attempt counts once.
+    if (error?.code === MODEL_CALL_QUEUE_FULL_CODE) {
+      recordTenantRefusal(MODEL_CALL_QUEUE_FULL_CODE, tenant.tenant ?? null);
+    }
+
+    throw error;
+  }
 
   try {
     // Re-check after the wait: the circuit may have opened while this request

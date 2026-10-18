@@ -7,11 +7,13 @@ import { requireAdminPermission } from "../rag/admin-authorization.js";
 import { getTenantUsageFlushMs, isTenantUsageLedgerEnabled } from "../rag/config.js";
 import { isPostgresConfigured } from "../rag/postgres.js";
 import { runAsDatabaseSystem } from "../rag/postgres-tenant.js";
+import { TENANT_REFUSAL_REASON_LIST } from "../rag/tenant-refusal-reasons.js";
 import {
   listTenantUsageTop,
   TENANT_USAGE_GROUP_BY,
   TENANT_USAGE_MAX_TOP,
   TENANT_USAGE_METRICS,
+  TENANT_USAGE_REFUSALS_METRIC,
 } from "../rag/tenant-usage.js";
 
 import { parseOrRespond } from "./validation.js";
@@ -20,7 +22,11 @@ import { parseOrRespond } from "./validation.js";
 // from the usage ledger (migration 037, rag/tenant-usage.js).
 //
 //   metric   model_tokens (default), model_cost_micro_usd, chat_requests,
-//            ingested_bytes, documents
+//            ingested_bytes, documents, or refusals: the per-tenant
+//            refusals (rag/tenant-refusals.js), every reason added up, with
+//            each row's count per reason code in `refusals`
+//   reason   with metric=refusals only: rank by that one code
+//            (rag/tenant-refusal-reasons.js); echoed back as `reason`
 //   from,to  ISO 8601 instants; default the 24 hours before now. Hours that
 //            start at or after `from` (rounded down to its hour) and before
 //            `to` count. At most USAGE_MAX_RANGE_DAYS apart.
@@ -53,6 +59,8 @@ const instant = (field) =>
     })
     .optional();
 
+const USAGE_METRIC_VALUES = [...Object.values(TENANT_USAGE_METRICS), TENANT_USAGE_REFUSALS_METRIC];
+
 const usageQuerySchema = z.object({
   from: instant("from"),
   groupBy: z
@@ -67,8 +75,13 @@ const usageQuerySchema = z.object({
     .max(TENANT_USAGE_MAX_TOP, { error: `limit must be an integer from 1 to ${TENANT_USAGE_MAX_TOP}.` })
     .optional(),
   metric: z
-    .enum(Object.values(TENANT_USAGE_METRICS), {
-      error: `metric must be one of ${Object.values(TENANT_USAGE_METRICS).join(", ")}.`,
+    .enum(USAGE_METRIC_VALUES, {
+      error: `metric must be one of ${USAGE_METRIC_VALUES.join(", ")}.`,
+    })
+    .optional(),
+  reason: z
+    .enum(TENANT_REFUSAL_REASON_LIST, {
+      error: `reason must be one of ${TENANT_REFUSAL_REASON_LIST.join(", ")}.`,
     })
     .optional(),
   to: instant("to"),
@@ -120,6 +133,11 @@ export const createAdminUsageRouter = (services = {}) => {
 
       const metric = parsed.metric ?? TENANT_USAGE_METRICS.modelTokens;
       const groupBy = parsed.groupBy ?? TENANT_USAGE_GROUP_BY.tenant;
+      const reason = parsed.reason ?? null;
+
+      if (reason && metric !== TENANT_USAGE_REFUSALS_METRIC) {
+        return res.status(400).json({ error: `reason applies only to metric=${TENANT_USAGE_REFUSALS_METRIC}.` });
+      }
 
       try {
         const result = await runAsDatabaseSystem(() =>
@@ -128,6 +146,9 @@ export const createAdminUsageRouter = (services = {}) => {
             groupBy,
             limit: parsed.limit ?? 10,
             metric,
+            // Only named for a refusal view, so the other metrics' calls are
+            // exactly what they were.
+            ...(reason ? { reason } : {}),
             to,
             workspaceId: workspaceId || null,
           })
@@ -141,6 +162,7 @@ export const createAdminUsageRouter = (services = {}) => {
             flushIntervalMs: getTenantUsageFlushMs(),
           },
           metric,
+          ...(reason ? { reason } : {}),
           scope: workspaceId ? { kind: "workspace", workspaceId } : { kind: "platform" },
           tenants: result.rows,
           to: result.to,

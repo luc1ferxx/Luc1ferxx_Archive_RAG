@@ -31,6 +31,9 @@ import { getModelQueryVectorSpace } from "../rag/query-adapter.js";
 import { rerankResultsOrKeepOrder, rerankResultsWithProvider } from "../rag/reranker.js";
 import { createRunUsage, runWithRunUsage } from "../rag/run-usage.js";
 import { SERVICE_TOKEN_HEADER, signServiceToken } from "../rag/service-identity.js";
+import { getMetricsRegistry, setMetricsEnabled } from "../rag/metrics.js";
+import "../rag/metrics-tenant.js";
+import { configureTenantUsageLedger } from "../rag/tenant-usage.js";
 
 // The model gateway end to end in one process: a fake OpenAI-compatible
 // backend on an OS-assigned port, the gateway app on another, and this process
@@ -620,6 +623,49 @@ test("a workspace over its quota gets 429 with Retry-After and a stable code; ot
   assert.equal(alice.requests, 4);
   assert.deepEqual(alice.rejectedRequests, { requests_per_minute: 2 });
   assert.equal(usage.usage.tenants.find((entry) => entry.system).requests, 1);
+});
+
+// rag/tenant-refusals.js at the gateway: each quota refusal is counted once,
+// by the gateway, for the token's tenant (the calling tier counts nothing).
+test("a gateway quota refusal is counted once per refusal, for the token's tenant, with no tenant label", async (t) => {
+  withEnv(t, BASE_ENV);
+  const refusals = [];
+
+  configureTenantUsageLedger({
+    record: () => false,
+    recordRefusal: (tenant, reason) => {
+      refusals.push({ reason, tenant });
+      return true;
+    },
+  });
+  setMetricsEnabled(true);
+  getMetricsRegistry().getFamily("archive_rag_tenant_refusals_total").clear();
+  t.after(() => {
+    configureTenantUsageLedger(null);
+    setMetricsEnabled(null);
+  });
+
+  const upstream = await startUpstream(t);
+  withEnv(t, { OPENAI_BASE_URL: upstream.baseUrl });
+  await startGateway(t, {
+    quotas: createModelGatewayQuotas({ limits: { requestsPerMinute: 1 }, redis: null }),
+  });
+
+  await runWithDatabaseTenant(ALICE, () => completeTextWithMetadata("one"));
+  await assert.rejects(
+    runWithDatabaseTenant(ALICE, () => completeTextWithMetadata("two")),
+    (error) => error.code === MODEL_GATEWAY_ERROR_CODES.quotaExceeded
+  );
+
+  assert.deepEqual(refusals, [{ reason: MODEL_GATEWAY_ERROR_CODES.quotaExceeded, tenant: ALICE }]);
+
+  const family = getMetricsRegistry().getFamily("archive_rag_tenant_refusals_total");
+
+  assert.deepEqual([...family.labelNames], ["reason"]);
+  assert.deepEqual(
+    [...family.series.values()].map((entry) => [entry.labelValues, entry.value]),
+    [[[MODEL_GATEWAY_ERROR_CODES.quotaExceeded], 1]]
+  );
 });
 
 test("a token quota counts answered tokens per workspace", async (t) => {

@@ -19,6 +19,7 @@ import WorkspaceEntryPanel from "./components/WorkspaceEntryPanel";
 import WorkspaceArtifactsPanel from "./components/WorkspaceArtifactsPanel";
 import LocaleSwitch from "./components/LocaleSwitch";
 import AuthStatus from "./auth/AuthStatus";
+import WorkspaceSwitcher from "./auth/WorkspaceSwitcher";
 import { useAuth } from "./auth/AuthProvider";
 import {
   requestAnswerFeedback,
@@ -762,6 +763,7 @@ const App = () => {
   const languageSlot = useMemo(
     () => (
       <>
+        <WorkspaceSwitcher t={t} />
         <AuthStatus t={t} />
         <LocaleSwitch locale={locale} onLocaleChange={handleLocaleChange} t={t} />
       </>
@@ -983,6 +985,7 @@ const App = () => {
             </div>
 
             <div className="archive-header-actions">
+              <WorkspaceSwitcher t={t} />
               <AuthStatus t={t} />
               <LocaleSwitch
                 locale={locale}

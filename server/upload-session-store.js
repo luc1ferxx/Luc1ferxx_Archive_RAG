@@ -26,6 +26,7 @@ import {
 } from "./upload-policy.js";
 import { resolveDataDirectory } from "./runtime-paths.js";
 import { tenantSelectorMatches } from "./rag/tenant-records.js";
+import { recordTenantRefusal } from "./rag/tenant-refusals.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -533,13 +534,16 @@ const assertTenantSessionCapacity = async ({ accessScope, fileSize }) => {
 
   const sessions = await listTenantUploadSessions(accessScope);
 
+  // Each refusal is counted for the tenant (rag/tenant-refusals.js).
   if (maxSessions > 0 && sessions.length + 1 > maxSessions) {
+    recordTenantRefusal(UPLOAD_SESSION_LIMIT_EXCEEDED, accessScope);
     throw createUploadSessionLimitError("sessions", maxSessions);
   }
 
   const openBytes = sessions.reduce((total, session) => total + session.fileSize, 0);
 
   if (maxBytes > 0 && openBytes + fileSize > maxBytes) {
+    recordTenantRefusal(UPLOAD_SESSION_LIMIT_EXCEEDED, accessScope);
     throw createUploadSessionLimitError("bytes", maxBytes);
   }
 };

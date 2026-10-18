@@ -1709,6 +1709,103 @@ if (!adminDatabaseUrl) {
     }
   });
 
+  // Per-tenant refusals (rag/tenant-refusals.js) are refused_<reason> rows of
+  // the same ledger: the metric check admits them, the system path writes
+  // them, GET /admin/usage?metric=refusals ranks them, the tenant policy
+  // bounds them and the tenant erase takes them with the pair.
+  test("refusal counts are ledger rows: flushed as system work, ranked per reason, bounded by the tenant policy, erased with the pair", async () => {
+    const usage = await import("../rag/tenant-usage.js");
+    const q = modules.postgres.queryPostgres;
+    const usageTable = modules.config.getTenantUsagePostgresTable();
+    const hour = Date.UTC(2026, 9, 17, 10);
+    const ledger = usage.createTenantUsageLedger({
+      isDatabaseConfigured: () => true,
+      isEnabled: () => true,
+      now: () => hour + 5 * 60 * 1000,
+      setTimer: () => null,
+    });
+    const refusalsTop = (options = {}) =>
+      usage.listTenantUsageTop({
+        from: new Date(hour - 60 * 60 * 1000),
+        metric: usage.TENANT_USAGE_REFUSALS_METRIC,
+        to: new Date(hour + 2 * 60 * 60 * 1000),
+        ...options,
+      });
+
+    try {
+      ledger.recordRefusal(ALICE, "TENANT_RATE_LIMITED");
+      ledger.recordRefusal(ALICE, "TENANT_RATE_LIMITED");
+      ledger.recordRefusal(ALICE, "TENANT_STORAGE_QUOTA_EXCEEDED");
+      ledger.recordRefusal({ userId: "carol", workspaceId: "ws-a" }, "WORKSPACE_MEMBERSHIP_REQUIRED");
+      ledger.recordRefusal(BOB, "TENANT_RATE_LIMITED");
+      ledger.record(ALICE, { model_tokens: 40 });
+      // Recorded inside a tenant request, flushed as system work all the same.
+      assert.deepEqual(await asAlice(() => ledger.flush()), { rows: 5 });
+      ledger.recordRefusal(ALICE, "TENANT_RATE_LIMITED");
+      await ledger.flush();
+
+      const stored = await q(
+        `SELECT workspace_id, owner_user_id, metric, value::text AS value
+         FROM ${usageTable} WHERE metric LIKE 'refused%' ORDER BY workspace_id, owner_user_id, metric`
+      );
+
+      assert.deepEqual(
+        stored.rows.map((row) => [row.workspace_id, row.owner_user_id, row.metric, row.value]),
+        [
+          ["ws-a", "alice", "refused_tenant_rate_limited", "3"],
+          ["ws-a", "alice", "refused_tenant_storage_quota_exceeded", "1"],
+          ["ws-a", "carol", "refused_workspace_membership_required", "1"],
+          ["ws-b", "bob", "refused_tenant_rate_limited", "1"],
+        ]
+      );
+
+      // The platform view, every reason added up, with the counts per reason.
+      assert.deepEqual((await modules.tenant.runAsDatabaseSystem(() => refusalsTop())).rows, [
+        {
+          refusals: { TENANT_RATE_LIMITED: 3, TENANT_STORAGE_QUOTA_EXCEEDED: 1 },
+          userId: "alice",
+          value: 4,
+          workspaceId: "ws-a",
+        },
+        // Ties go by workspace, then user.
+        { refusals: { WORKSPACE_MEMBERSHIP_REQUIRED: 1 }, userId: "carol", value: 1, workspaceId: "ws-a" },
+        { refusals: { TENANT_RATE_LIMITED: 1 }, userId: "bob", value: 1, workspaceId: "ws-b" },
+      ]);
+      // One reason, by workspace; usage metrics never count as refusals.
+      assert.deepEqual(
+        (
+          await modules.tenant.runAsDatabaseSystem(() =>
+            refusalsTop({ groupBy: "workspace", reason: "TENANT_RATE_LIMITED" })
+          )
+        ).rows,
+        [
+          { refusals: { TENANT_RATE_LIMITED: 3 }, value: 3, workspaceId: "ws-a" },
+          { refusals: { TENANT_RATE_LIMITED: 1 }, value: 1, workspaceId: "ws-b" },
+        ]
+      );
+      // A tenant sees its own pair's refusals only.
+      assert.deepEqual((await asAlice(() => refusalsTop())).rows.map((row) => row.userId), ["alice"]);
+
+      // The tenant erase takes the pair's refusal rows with its usage rows.
+      const store = usage.createTenantUsageRecordStore({ isDatabaseConfigured: () => true, ledger });
+      const aliceSelector = { userId: "alice", workspaceId: "ws-a" };
+
+      assert.deepEqual(await modules.tenant.runAsDatabaseSystem(() => store.countTenantRecords(aliceSelector)), {
+        tenant_usage: { records: 3 },
+        "tenant_usage:pending": { records: 0 },
+      });
+      await modules.tenant.runAsDatabaseSystem(() => store.deleteTenantRecords(aliceSelector));
+      assert.deepEqual(
+        (await modules.tenant.runAsDatabaseSystem(() => refusalsTop({ workspaceId: "ws-a" }))).rows.map(
+          (row) => row.userId
+        ),
+        ["carol"]
+      );
+    } finally {
+      await q(`DELETE FROM ${usageTable}`);
+    }
+  });
+
   // rag/document-deletion-cascade.js with DOCUMENT_DELETE_REDACTION=on, over
   // the real stores and their statements: runs and artifacts under the
   // tenant's policy, feedback on the system path with its owner filter.

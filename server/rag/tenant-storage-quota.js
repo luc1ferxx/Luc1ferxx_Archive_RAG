@@ -6,6 +6,7 @@ import {
   listStoredDocumentSizes,
 } from "./doc-registry.js";
 import { isPostgresConfigured, queryPostgres as queryDefaultPostgres } from "./postgres.js";
+import { recordTenantRefusal } from "./tenant-refusals.js";
 
 // Storage quotas (TENANT_MAX_DOCUMENTS, TENANT_MAX_DOCUMENT_BYTES; 0 = no
 // limit, the default). A quota scope is a workspace (every user's documents in
@@ -221,6 +222,10 @@ export const assertTenantStorageQuota = async ({
   const exceeded = evaluateTenantStorageQuota({ addedBytes, addedDocuments, limits, totals });
 
   if (exceeded) {
+    // Counted for the owner pair (rag/tenant-refusals.js), once per check
+    // that refuses: a request the early check refuses never reaches the
+    // commit's.
+    recordTenantRefusal(TENANT_STORAGE_QUOTA_EXCEEDED, { userId: ownerUserId, workspaceId });
     throw createTenantStorageQuotaError(exceeded);
   }
 

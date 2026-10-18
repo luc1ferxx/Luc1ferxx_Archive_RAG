@@ -599,6 +599,36 @@ describe("the PostgreSQL store", () => {
     );
   });
 
+  test("a retention policy change replaces the jsonb column and reports updated, refused (deleting) or missing", async () => {
+    const updated = createStore([{ rows: [{ ...workspaceRow, retention_policy: { agentRuns: 7 } }] }]);
+    const result = await updated.store.updateWorkspaceRetentionPolicy({
+      refuseFrom: ["deleting"],
+      retentionPolicy: { agentRuns: 7 },
+      workspaceId: "ws-a",
+    });
+
+    assert.equal(result.outcome, "updated");
+    assert.deepEqual(result.workspace.retentionPolicy, { agentRuns: 7 });
+    assert.match(
+      updated.calls[0].text,
+      /UPDATE t_workspaces SET retention_policy = \$2::jsonb, updated_at = NOW\(\) WHERE workspace_id = \$1 AND NOT \(status = ANY\(\$3::text\[\]\)\) RETURNING/
+    );
+    assert.deepEqual(updated.calls[0].values, ["ws-a", '{"agentRuns":7}', ["deleting"]]);
+
+    const refused = createStore([{ rows: [] }, { rows: [{ ...workspaceRow, status: "deleting" }] }]);
+    assert.equal(
+      (await refused.store.updateWorkspaceRetentionPolicy({ refuseFrom: ["deleting"], retentionPolicy: {}, workspaceId: "ws-a" }))
+        .outcome,
+      "refused"
+    );
+
+    const missing = createStore([{ rows: [] }, { rows: [] }]);
+    assert.deepEqual(
+      await missing.store.updateWorkspaceRetentionPolicy({ refuseFrom: [], retentionPolicy: {}, workspaceId: "ws-x" }),
+      { outcome: "missing", workspace: null }
+    );
+  });
+
   test("members: upsert reports whether it inserted, a missing workspace is null, delete counts rows", async () => {
     const memberRow = {
       created_at: new Date("2026-10-17T10:00:00.000Z"),
@@ -917,6 +947,14 @@ describe("npm run tenant:registry", () => {
     assert.throws(() => parseTenantRegistryArgs(["suspend", "ws-a", "--roles", "x"]), /--roles does not apply to suspend/);
     assert.throws(() => parseTenantRegistryArgs(["list", "--force"]), /Unknown option: --force/);
     assert.throws(() => parseTenantRegistryArgs(["list", "--limit"]), /--limit needs a value/);
+    assert.deepEqual(parseTenantRegistryArgs(["set-retention", "ws-a", "--retention-policy", "{}"]).values, {
+      "retention-policy": "{}",
+    });
+    assert.throws(() => parseTenantRegistryArgs(["set-retention", "ws-a"]), /set-retention needs --retention-policy/);
+    assert.throws(
+      () => parseTenantRegistryArgs(["set-retention", "ws-a", "--plan", "x", "--retention-policy", "{}"]),
+      /--plan does not apply to set-retention/
+    );
   });
 
   test("runs every command on the system path and refuses without PostgreSQL", async () => {
@@ -958,6 +996,16 @@ describe("npm run tenant:registry", () => {
     });
     await assert.rejects(run(["create", "WS-B"]), /lower case/);
     await assert.rejects(run(["create", "ws-b", "--retention-policy", "{oops"]), /--retention-policy must be a JSON object/);
+
+    // set-retention replaces the whole policy with the same validation.
+    assert.deepEqual(
+      (await run(["set-retention", "ws-a", "--retention-policy", '{"tasks":14,"feedback":0}'])).workspace.retentionPolicy,
+      { feedback: 0, tasks: 14 }
+    );
+    assert.match(output.at(-1), /^ws-a\tactive\tplan=team\tregion=-\tretention=\{"tasks":14,"feedback":0\}\n$/);
+    await assert.rejects(run(["set-retention", "ws-a", "--retention-policy", '{"days":3}']), /retentionPolicy/);
+    await assert.rejects(run(["set-retention", "ws-missing", "--retention-policy", "{}"]), /Workspace not found/);
+    assert.deepEqual((await run(["set-retention", "ws-a", "--retention-policy", "{}"])).workspace.retentionPolicy, {});
 
     assert.ok(contexts.length >= 7);
     assert.deepEqual([...new Set(contexts)], ["system"], "every registry call ran on the system path");
@@ -1127,5 +1175,53 @@ describe("the registry's tenant records", () => {
       "a membership page as its user in the workspace, the workspace row as the workspace"
     );
     assert.match(pages[1].sql, /^SELECT \* FROM t_workspaces WHERE workspace_id = \$1 ORDER BY workspace_id LIMIT \$2$/);
+  });
+});
+
+// PATCH /admin/workspaces/:workspaceId and `set-retention`: the policy after
+// creation, with creation's validation.
+describe("setWorkspaceRetentionPolicy", () => {
+  test("replaces the whole policy, validates it like creation, and refuses a workspace being deleted", async () => {
+    const registry = createMemoryRegistry({ cacheTtlMs: 60_000 });
+
+    await registry.createWorkspace({ retentionPolicy: { agentRuns: 30, tasks: 7 }, workspaceId: "acme" });
+    await registry.createWorkspace({ workspaceId: "globex" });
+
+    assert.deepEqual((await registry.setWorkspaceRetentionPolicy("acme", { feedback: 0 })).retentionPolicy, {
+      feedback: 0,
+    });
+    assert.deepEqual((await registry.getWorkspace("acme")).retentionPolicy, { feedback: 0 });
+    assert.deepEqual((await registry.setWorkspaceRetentionPolicy("acme", null)).retentionPolicy, {});
+
+    for (const policy of [{ days: 30 }, { agentRuns: -1 }, { agentRuns: "30" }, [], "30d", { agentRuns: 36501 }]) {
+      await assert.rejects(registry.setWorkspaceRetentionPolicy("acme", policy), invalidInput, JSON.stringify(policy));
+    }
+
+    await assert.rejects(registry.setWorkspaceRetentionPolicy("Acme", {}), invalidInput, "ids are canonical");
+    await assert.rejects(
+      registry.setWorkspaceRetentionPolicy("nobody", {}),
+      isRegistryError(TENANT_REGISTRY_ERROR_CODES.workspaceNotFound, 404)
+    );
+
+    // The status lookup cache is dropped with the write (a write never leaves
+    // a stale entry), and the status itself is untouched.
+    assert.equal((await registry.lookupWorkspace("globex")).status, "active");
+    await registry.setWorkspaceRetentionPolicy("globex", { tasks: 1 });
+    assert.equal((await registry.lookupWorkspace("globex")).status, "active");
+
+    await registry.markWorkspaceDeleting("globex");
+    await assert.rejects(
+      registry.setWorkspaceRetentionPolicy("globex", { tasks: 2 }),
+      isRegistryError(TENANT_REGISTRY_ERROR_CODES.workspaceDeleting, 409)
+    );
+    assert.deepEqual((await registry.getWorkspace("globex")).retentionPolicy, { tasks: 1 });
+
+    // A store that cannot change policies says so instead of failing oddly.
+    const { updateWorkspaceRetentionPolicy, ...legacyStore } = createInMemoryTenantRegistryStore();
+    const legacy = createTenantRegistryService({ store: legacyStore });
+
+    assert.equal(typeof updateWorkspaceRetentionPolicy, "function");
+    await legacy.createWorkspace({ workspaceId: "acme" });
+    await assert.rejects(legacy.setWorkspaceRetentionPolicy("acme", {}), (error) => error.status === 501);
   });
 });

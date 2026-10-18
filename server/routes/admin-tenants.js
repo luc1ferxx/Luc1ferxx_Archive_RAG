@@ -12,6 +12,9 @@ import { TenantRegistryError, WORKSPACE_STATUSES } from "../rag/tenant-registry.
 //   POST   /admin/workspaces                                  admin.tenants.write
 //          body {id, plan?, region?, retentionPolicy?, status?: active|suspended}
 //   GET    /admin/workspaces/:workspaceId                     admin.tenants.read
+//   PATCH  /admin/workspaces/:workspaceId                     admin.tenants.write
+//          body {retentionPolicy}: replaces the whole policy ({} or null
+//          clears it); no other field may be changed here yet
 //   POST   /admin/workspaces/:workspaceId/actions/:action     admin.tenants.write (suspend | activate)
 //   GET    /admin/workspaces/:workspaceId/members             admin.tenants.read
 //   GET    /admin/workspaces/:workspaceId/members/:userId     admin.tenants.read
@@ -28,7 +31,11 @@ import { TenantRegistryError, WORKSPACE_STATUSES } from "../rag/tenant-registry.
 //   reaches every workspace. Any other holder of the permission reaches only
 //   the workspace of its own scope: it may read it and manage its members,
 //   another workspace answers 404 as if it did not exist, and registering a
-//   workspace or changing a status is refused (TENANT_ADMIN_PLATFORM_ONLY).
+//   workspace, changing a status or changing a retention policy is refused
+//   (TENANT_ADMIN_PLATFORM_ONLY).
+// - A retention policy change reaches the retention sweep of every instance
+//   at its next pass (rag/retention.js reads the policies at the start of
+//   each pass, not through the registry's lookup cache).
 // - The store calls run on the system path, after the permission and reach
 //   checks: the tenant role may read only its own registry rows and may not
 //   write them (migration 036).
@@ -56,9 +63,12 @@ const notFound = () =>
 
 const platformOnly = () =>
   new TenantRegistryError(
-    "Only a platform credential (no workspace in its scope and no workspace list) may register workspaces or change their status.",
+    "Only a platform credential (no workspace in its scope and no workspace list) may register workspaces or change their status or retention policy.",
     { code: PLATFORM_ONLY_CODE, status: 403 }
   );
+
+// The workspace fields PATCH /admin/workspaces/:workspaceId may change.
+const PATCHABLE_WORKSPACE_FIELDS = Object.freeze(["retentionPolicy"]);
 
 // A workspace-scoped admin reaches its own workspace only; another one is
 // answered exactly like a workspace that does not exist.
@@ -177,6 +187,43 @@ export const createAdminTenantsRouter = (services = {}, { tenantRegistry } = {})
       return res.json({ workspace });
     } catch (error) {
       return sendError(res, error, "Failed to load the workspace.");
+    }
+  });
+
+  router.patch("/admin/workspaces/:workspaceId", requireWrite, async (req, res) => {
+    try {
+      const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : null;
+
+      if (!body) {
+        throw new TenantRegistryError(
+          'The body must be a JSON object such as {"retentionPolicy": {"agentRuns": 30}}.'
+        );
+      }
+
+      // A workspaceId in the body would also select the caller's own
+      // workspace (auth.js resolveWorkspaceId); like any other field it is
+      // refused here.
+      if (Object.keys(body).some((key) => !PATCHABLE_WORKSPACE_FIELDS.includes(key))) {
+        throw new TenantRegistryError(
+          `Only ${PATCHABLE_WORKSPACE_FIELDS.join(", ")} can be changed with this request.`
+        );
+      }
+
+      if (!Object.hasOwn(body, "retentionPolicy")) {
+        throw new TenantRegistryError('Nothing to change: send {"retentionPolicy": {...}}.');
+      }
+
+      if (!describeReach(getRequestAccessScope(req)).platform) {
+        throw platformOnly();
+      }
+
+      const workspace = await asSystem(() =>
+        registry.setWorkspaceRetentionPolicy(req.params.workspaceId, body.retentionPolicy)
+      );
+
+      return res.json({ workspace });
+    } catch (error) {
+      return sendError(res, error, "Failed to update the workspace.");
     }
   });
 

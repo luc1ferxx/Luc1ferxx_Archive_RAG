@@ -259,6 +259,37 @@ test("bad parameters are refused before any read", async () => {
   });
 });
 
+test("metric=refusals reads the per-tenant refusals, optionally one reason; reason needs that metric", async () => {
+  await withUsageApp(async ({ reads, server }) => {
+    const all = await get(server, "/admin/usage?metric=refusals", "platform-admin-token");
+
+    assert.equal(all.status, 200);
+    assert.equal(all.body.metric, "refusals");
+    assert.equal(Object.hasOwn(all.body, "reason"), false);
+    assert.equal(reads[0].options.metric, "refusals");
+    assert.equal(Object.hasOwn(reads[0].options, "reason"), false);
+
+    const one = await get(
+      server,
+      "/admin/usage?metric=refusals&reason=TENANT_RATE_LIMITED&groupBy=workspace",
+      "ws-admin-token"
+    );
+
+    assert.equal(one.status, 200);
+    assert.equal(one.body.reason, "TENANT_RATE_LIMITED");
+    assert.deepEqual(one.body.scope, { kind: "workspace", workspaceId: "ws-a" });
+    assert.equal(reads[1].options.reason, "TENANT_RATE_LIMITED");
+    assert.equal(reads[1].options.workspaceId, "ws-a");
+    assert.equal(reads[1].context, "system");
+
+    for (const query of ["metric=refusals&reason=tenant_rate_limited", "metric=refusals&reason=NOPE", "reason=TENANT_RATE_LIMITED"]) {
+      assert.equal((await get(server, `/admin/usage?${query}`, "platform-admin-token")).status, 400, query);
+    }
+
+    assert.equal(reads.length, 2);
+  });
+});
+
 test("in the app: GET /admin/usage is mounted, open to a platform admin past the tenant gate, and needs a database", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "admin-usage-"));
 

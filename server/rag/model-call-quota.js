@@ -8,6 +8,7 @@ import {
 import { createWorkspaceModelQuotas, getQuotaTenantKey } from "./model-quotas.js";
 import { getActiveDatabaseTenant } from "./postgres-tenant.js";
 import { getSharedRedisClient } from "./shared-state.js";
+import { recordTenantRefusal } from "./tenant-refusals.js";
 import { addActiveSpanEvent } from "./tracing.js";
 
 // In-process per-workspace model quotas (MODEL_QUOTA_ENABLED=true, default
@@ -96,6 +97,9 @@ const admit = async (tenant) => {
   }
 
   current.rejections[admission.quota] = (current.rejections[admission.quota] ?? 0) + 1;
+  // Counted for the tenant it acted for (rag/tenant-refusals.js); a call the
+  // model gateway refuses is counted there, never here as well.
+  recordTenantRefusal(MODEL_GATEWAY_ERROR_CODES.quotaExceeded, tenant);
   // Numbers only: no tenant on a span.
   addActiveSpanEvent("model.quota_rejected", {
     "archive_rag.quota": String(admission.quota),

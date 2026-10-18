@@ -54,6 +54,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 | `ArchiveRagPostgresReplicaLagHigh` | 某个读副本的延迟超过 `POSTGRES_READ_REPLICA_MAX_LAG_MS` | 5 分钟 | warning |
 | `ArchiveRagMetricsTargetDown` | Prometheus 抓不到某个进程 | 2 分钟 | warning |
 | `ArchiveRagGatewayQuotaRejectionsSpike` | 模型网关的配额拒绝超过每秒 0.1 次（10 分钟平均） | 10 分钟 | warning |
+| `ArchiveRagTenantRefusalsSustained` | 同一种按租户的拒绝（同一个 `reason`）在所有进程合计超过每秒 0.2 次（15 分钟平均） | 15 分钟 | warning |
 
 ## 处理步骤
 
@@ -141,6 +142,21 @@ critical 表示现在就要有人处理，warning 进工单队列。
 3. **配额是不是按进程算的**：没有 `RAG_SHARED_STATE=redis` 时每个网关副本各算各的窗口，实际上限是设定值乘以副本数。
 
 处理：在网关的环境里调高配额并重启，或者找到推高用量的调用方（例如循环跑的后台任务；`cd server && npm run eval:trajectory` 检查预算行为）。
+
+### `ArchiveRagTenantRefusalsSustained`
+
+**含义**：某一种按租户的拒绝持续了 15 分钟（`archive_rag_tenant_refusals_total{reason}`，所有进程合计）。短暂的一阵 429 是限额在正常工作；这条告警只在同一种拒绝一直出现时触发：通常是某个租户一直顶着某个上限（客户端在循环重试），或者一次注册表、成员关系的改动把某个租户挡在了外面。`reason` 就是被拒的客户端看到的稳定错误码：
+
+- 限额类：`TENANT_RATE_LIMITED`、`TENANT_CONCURRENCY_LIMITED`（`TENANT_RATE_LIMIT_*`、`TENANT_MAX_CONCURRENT_RUNS`）、`TENANT_TASK_LIMITED`（`TENANT_MAX_QUEUED_TASKS`）、`UPLOAD_SESSION_LIMIT_EXCEEDED`（`UPLOAD_SESSION_MAX_*`）、`INGEST_PENDING_LIMIT_EXCEEDED` / `INGEST_WORKSPACE_PENDING_LIMIT_EXCEEDED`（`RAG_INGEST_MAX_PENDING_*`）、`TENANT_STORAGE_QUOTA_EXCEEDED`（`TENANT_MAX_DOCUMENTS`、`TENANT_MAX_DOCUMENT_BYTES`）、`MODEL_GATEWAY_QUOTA_EXCEEDED`（进程内 `MODEL_QUOTA_ENABLED` 或模型网关，各记一次，不重复）、`MODEL_CALL_QUEUE_FULL`（`RAG_LLM_MAX_QUEUE`，每次被拒的尝试记一次）。
+- 成员关系类（`TENANT_MEMBERSHIP=enforce`）：`WORKSPACE_MEMBERSHIP_REQUIRED`、`WORKSPACE_SUSPENDED`、`WORKSPACE_DELETING`、`WORKSPACE_NOT_REGISTERED`、`WORKSPACE_ROLES_LIMIT_EXCEEDED`；`TENANT_REGISTRY_UNAVAILABLE`（503）表示注册表读不出来，所有租户都会被拒，先查数据库。
+
+指标里没有租户标签（注册表拒绝这种标签）。被拒的是哪个租户记在用量账本里：每次拒绝按做出判断时针对的租户（用户和 workspace 这一对）记一条 `refused_<reason>`，和这个租户的其他用量一样按小时汇总、每 `TENANT_USAGE_FLUSH_MS` 刷入数据库。
+
+1. **哪个租户**：用平台管理员凭据（`admin.usage.read`）调 `GET /admin/usage?metric=refusals&reason=<reason>&from=<一小时前>`，按拒绝次数列出租户，每行的 `refusals` 是按错误码的次数；`groupBy=workspace` 按 workspace 汇总（按 workspace 计的限额就是这个数）。数据最多滞后 `TENANT_USAGE_FLUSH_MS`。
+2. **哪一种、在哪一层**：`sum by (reason, role) (rate(archive_rag_tenant_refusals_total[15m]))`；HTTP 限额对照 `archive_rag_http_requests_total{status_class="429"}`，网关配额对照 `archive_rag_model_gateway_quota_rejections_total`。
+3. **是上限设错了还是租户有问题**：拿对应变量和同一页里这个租户的用量比（`metric=chat_requests`、`model_tokens`、`ingested_bytes`）；成员关系类的错误码看 workspace 的状态和用户的成员关系（`cd server && npm run tenant:registry -- members <workspaceId>`、`list --status suspended`）。
+
+处理：上限确实太低就在环境里调高后重启；否则联系那个在循环重试的租户。按 IP 计的拒绝（请求既没有用户也没有 workspace）记在账本的 `('', '')` 下，那一行不对应任何租户。
 
 ## 其他常用查询
 

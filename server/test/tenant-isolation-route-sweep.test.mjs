@@ -243,6 +243,7 @@ const PLATFORM_ROUTES = new Set([
   "GET /admin/workspaces",
   "POST /admin/workspaces",
   "GET /admin/workspaces/:workspaceId",
+  "PATCH /admin/workspaces/:workspaceId",
   "POST /admin/workspaces/:workspaceId/actions/:action",
   "GET /admin/workspaces/:workspaceId/members",
   "GET /admin/workspaces/:workspaceId/members/:userId",
@@ -621,6 +622,18 @@ const OBJECT_ROUTE_FIXTURES = {
         method: "POST",
         path: `/admin/workspaces/${ALICE.workspaceId}/actions/${action}`,
       })),
+    statuses: { default: [403] },
+  },
+  // Changing a retention policy is platform-only too: 403 for every principal
+  // of B, A's admin included, and A's policy stays as it was.
+  "PATCH /admin/workspaces/:workspaceId": {
+    requests: () => [
+      {
+        body: { retentionPolicy: { agentRuns: 1 } },
+        method: "PATCH",
+        path: `/admin/workspaces/${ALICE.workspaceId}`,
+      },
+    ],
     statuses: { default: [403] },
   },
   "GET /admin/workspaces/:workspaceId/members": {

@@ -34,6 +34,7 @@ import {
   verifyServiceRequestBody,
 } from "../service-identity.js";
 import { SERVICE_TIERS } from "../service-topology.js";
+import { recordTenantRefusal } from "../tenant-refusals.js";
 import { runWithModelGatewayCall } from "./call-context.js";
 import {
   buildModelGatewayErrorBody,
@@ -342,6 +343,9 @@ export const createModelGatewayApp = ({
 
       if (!admission.ok) {
         recordGatewayQuotaRejection(admission.quota);
+        // Per tenant in this process's usage ledger (rag/tenant-refusals.js):
+        // the caller sees only the 429 and counts nothing itself.
+        recordTenantRefusal(MODEL_GATEWAY_ERROR_CODES.quotaExceeded, tenant);
         sendError(res, {
           code: MODEL_GATEWAY_ERROR_CODES.quotaExceeded,
           message: "The workspace has used its model quota for now.",

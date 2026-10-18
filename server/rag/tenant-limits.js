@@ -10,6 +10,7 @@ import {
   getSharedRedisClient,
   whenSharedStateReady,
 } from "./shared-state.js";
+import { recordTenantRefusal } from "./tenant-refusals.js";
 
 // Per-tenant HTTP limits, mounted app-wide in app.js after requireApiAuth and
 // bindDatabaseTenant (so the tenant is known), before RBAC and the routers.
@@ -42,6 +43,12 @@ import {
 // The cost class is decided from the route Express would run (matchRbacRoute:
 // case-insensitive literals, an optional trailing slash, HEAD as GET), so
 // /CHAT/ costs what /chat costs.
+//
+// Every refusal is counted (rag/tenant-refusals.js): in
+// archive_rag_tenant_refusals_total by its code, and in the usage ledger
+// under the request's (user, workspace) pair, so GET /admin/usage
+// ?metric=refusals&groupBy=workspace gives the per-workspace totals these
+// workspace-keyed limits count. An IP-keyed refusal is recorded under ('', '').
 
 export const TENANT_LIMIT_CLASSES = Object.freeze({
   chat: "chat",
@@ -402,6 +409,7 @@ export const createTenantLimits = ({
       const decision = await rateLimiter.admit(costClass, tenantKey);
 
       if (!decision.ok) {
+        recordTenantRefusal(TENANT_RATE_LIMITED_CODE, req.accessScope);
         sendRateLimited(res, decision);
         return false;
       }
@@ -418,6 +426,7 @@ export const createTenantLimits = ({
     const acquired = concurrencyLimiter.tryAcquire(tenantKey);
 
     if (!acquired) {
+      recordTenantRefusal(TENANT_CONCURRENCY_LIMITED_CODE, req.accessScope);
       sendConcurrencyLimited(res);
       return false;
     }

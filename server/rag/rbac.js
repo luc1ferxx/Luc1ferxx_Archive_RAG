@@ -565,6 +565,7 @@ export const RBAC_ROUTE_TABLE = Object.freeze(
     perm("GET", "/admin/workspaces", A.adminTenantsRead),
     perm("POST", "/admin/workspaces", A.adminTenantsWrite),
     perm("GET", "/admin/workspaces/:workspaceId", A.adminTenantsRead),
+    perm("PATCH", "/admin/workspaces/:workspaceId", A.adminTenantsWrite),
     perm("POST", "/admin/workspaces/:workspaceId/actions/:action", A.adminTenantsWrite),
     perm("GET", "/admin/workspaces/:workspaceId/members", A.adminTenantsRead),
     perm("GET", "/admin/workspaces/:workspaceId/members/:userId", A.adminTenantsRead),

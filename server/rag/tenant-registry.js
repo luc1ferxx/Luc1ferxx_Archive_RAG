@@ -34,7 +34,8 @@ import { describeWorkspaceRetentionPolicyProblem } from "./workspace-retention-p
 //   may not write these tables at all. The tenant export reads each page
 //   bound to its tenant (createPostgresTenantRecordMethods).
 // - A workspace's retention_policy is held to the retention sweep's format
-//   (rag/workspace-retention-policy.js; normalizeRetentionPolicy below).
+//   (rag/workspace-retention-policy.js; normalizeRetentionPolicy below), at
+//   creation and on every later change (setWorkspaceRetentionPolicy).
 
 export const WORKSPACE_STATUSES = Object.freeze({
   active: "active",
@@ -404,6 +405,22 @@ export const createInMemoryTenantRegistryStore = ({ now = () => Date.now() } = {
       return { outcome: "updated", workspace: copy(workspace) };
     },
 
+    async updateWorkspaceRetentionPolicy({ refuseFrom = [], retentionPolicy, workspaceId }) {
+      const workspace = workspaces.get(workspaceId);
+
+      if (!workspace) {
+        return { outcome: "missing", workspace: null };
+      }
+
+      if (refuseFrom.includes(workspace.status)) {
+        return { outcome: "refused", workspace: copy(workspace) };
+      }
+
+      workspace.retentionPolicy = copy(retentionPolicy) ?? {};
+      workspace.updatedAt = isoNow();
+      return { outcome: "updated", workspace: copy(workspace) };
+    },
+
     async getMember(workspaceId, userId) {
       return copy(members.get(memberKey(workspaceId, userId)));
     },
@@ -657,6 +674,33 @@ export const createPostgresTenantRegistryStore = ({
 
       // Nothing updated: either no such workspace or a status the change may
       // not leave. The second read reports which, as it is now.
+      const current = await selectWorkspace(workspaceId);
+
+      return current
+        ? { outcome: "refused", workspace: current }
+        : { outcome: "missing", workspace: null };
+    },
+
+    // Replaces the whole policy, like updateWorkspaceStatus refusing the
+    // statuses in `refuseFrom`. The system role's UPDATE grant on the table
+    // (migration 036) covers the column.
+    async updateWorkspaceRetentionPolicy({ refuseFrom = [], retentionPolicy, workspaceId }) {
+      await initialize();
+
+      const result = await query(
+        `
+          UPDATE ${workspacesTable}
+          SET retention_policy = $2::jsonb, updated_at = NOW()
+          WHERE workspace_id = $1 AND NOT (status = ANY($3::text[]))
+          RETURNING ${WORKSPACE_COLUMNS}
+        `,
+        [workspaceId, JSON.stringify(retentionPolicy ?? {}), refuseFrom]
+      );
+
+      if (result.rows?.[0]) {
+        return { outcome: "updated", workspace: mapWorkspaceRow(result.rows[0]) };
+      }
+
       const current = await selectWorkspace(workspaceId);
 
       return current
@@ -983,6 +1027,53 @@ export const createTenantRegistryService = ({
     suspendWorkspace: (workspaceId) => setStatus(workspaceId, WORKSPACE_STATUSES.suspended),
 
     activateWorkspace: (workspaceId) => setStatus(workspaceId, WORKSPACE_STATUSES.active),
+
+    /**
+     * Replaces a workspace's retention_policy with `retentionPolicy` (the
+     * create path's validation: rag/workspace-retention-policy.js keys and
+     * day counts, anything else refused; null or {} clears every override).
+     * Refused for a workspace that is being deleted. The retention sweep
+     * reads the policies from the store at the start of each pass
+     * (rag/retention.js), never through the lookup cache, which holds only
+     * status and memberships; so every instance applies the change from its
+     * next pass, at most RETENTION_SWEEP_INTERVAL_MS later.
+     * TENANT_REGISTRY_CACHE_TTL_MS does not delay it.
+     */
+    async setWorkspaceRetentionPolicy(rawWorkspaceId, retentionPolicy) {
+      const workspaceId = normalizeWorkspaceIdInput(rawWorkspaceId);
+      const policy = normalizeRetentionPolicy(retentionPolicy);
+
+      if (typeof store.updateWorkspaceRetentionPolicy !== "function") {
+        throw new TenantRegistryError("This tenant registry store cannot change retention policies.", {
+          code: TENANT_REGISTRY_ERROR_CODES.invalidInput,
+          status: 501,
+        });
+      }
+
+      const result = await store.updateWorkspaceRetentionPolicy({
+        refuseFrom: [WORKSPACE_STATUSES.deleting],
+        retentionPolicy: policy,
+        workspaceId,
+      });
+
+      invalidateWorkspace(workspaceId);
+
+      if (result.outcome === "missing") {
+        throw new TenantRegistryError("Workspace not found.", {
+          code: TENANT_REGISTRY_ERROR_CODES.workspaceNotFound,
+          status: 404,
+        });
+      }
+
+      if (result.outcome === "refused") {
+        throw new TenantRegistryError("This workspace is being deleted; its retention policy cannot change.", {
+          code: TENANT_REGISTRY_ERROR_CODES.workspaceDeleting,
+          status: 409,
+        });
+      }
+
+      return result.workspace;
+    },
 
     async getMember(rawWorkspaceId, rawUserId) {
       return store.getMember(normalizeWorkspaceIdInput(rawWorkspaceId), normalizeUserIdInput(rawUserId));

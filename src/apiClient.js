@@ -163,9 +163,12 @@ const sendWithAuth = async (send) => {
   }
 };
 
-export const apiGet = async (path) => {
+export const apiGet = async (path, requestConfig) => {
   const response = await sendWithAuth(() =>
-    axios.get(buildUrl(path), buildApiRequestConfig({ timeout: DEFAULT_TIMEOUT_MS }))
+    axios.get(
+      buildUrl(path),
+      buildApiRequestConfig({ timeout: DEFAULT_TIMEOUT_MS, ...(requestConfig ?? {}) })
+    )
   );
 
   return response.data;

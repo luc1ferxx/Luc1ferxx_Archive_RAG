@@ -187,3 +187,23 @@ groups:
             2. Which workspace: GET /usage on the model gateway (system identity, an admin claim, or admin.status.read) lists per-tenant totals and rejections since start.
             3. Whether the quota is per process: without RAG_SHARED_STATE=redis each gateway replica counts its own window, so the effective limit is the configured one times the number of replicas.
             Commands: raise the quota in the gateway's environment and restart it, or find the caller driving the volume (a background task loop: cd server && npm run eval:trajectory checks budget behaviour).
+      - alert: ArchiveRagTenantRefusalsSustained
+        # One kind of per-tenant refusal (rag/tenant-refusals.js) summed over
+        # every process. A short burst of 429s is the limits doing their job;
+        # this fires only when the same refusal keeps coming for 15 minutes.
+        # The series carry no tenant: the runbook's first check finds it.
+        expr: |
+          sum by (job, reason) (rate(archive_rag_tenant_refusals_total{job="archive-rag"}[15m])) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tenants are being refused more than 12 times a minute with {{ $labels.reason }}"
+          description: "A per-tenant limit, quota or registry check has refused requests at a steady rate for 15 minutes: a tenant is stuck against a limit, or a registry or membership change locked a tenant out."
+          runbook: |
+            What it means: the reason is the stable code the refused clients see. TENANT_RATE_LIMITED, TENANT_CONCURRENCY_LIMITED, TENANT_TASK_LIMITED, UPLOAD_SESSION_LIMIT_EXCEEDED, the INGEST_*_PENDING_LIMIT_EXCEEDED caps, TENANT_STORAGE_QUOTA_EXCEEDED, MODEL_GATEWAY_QUOTA_EXCEEDED and MODEL_CALL_QUEUE_FULL are limits a tenant keeps hitting; WORKSPACE_MEMBERSHIP_REQUIRED, WORKSPACE_SUSPENDED, WORKSPACE_DELETING, WORKSPACE_NOT_REGISTERED and WORKSPACE_ROLES_LIMIT_EXCEEDED come from TENANT_MEMBERSHIP=enforce; TENANT_REGISTRY_UNAVAILABLE (503) means the registry could not be read, which refuses every tenant.
+            First three checks:
+            1. Which tenant: GET /admin/usage?metric=refusals&reason=<reason>&from=<an hour ago> with a platform admin credential (admin.usage.read) lists the tenants by refusal count, each with its counts per reason; it lags by up to TENANT_USAGE_FLUSH_MS.
+            2. Which kind and where: sum by (reason, role) (rate(archive_rag_tenant_refusals_total[15m])); for the HTTP limits compare archive_rag_http_requests_total{status_class="429"}, for the gateway quota archive_rag_model_gateway_quota_rejections_total.
+            3. Whether the limit or the tenant is wrong: the limit's variable (TENANT_RATE_LIMIT_*, TENANT_MAX_*, RAG_INGEST_MAX_PENDING_*, MODEL_GATEWAY_QUOTA_*, RAG_LLM_MAX_QUEUE) against the tenant's usage on the same page (metric=chat_requests, model_tokens, ingested_bytes); for a membership code, the workspace's status and the user's membership.
+            Commands: cd server && npm run tenant:registry -- members <workspaceId> (and list --status suspended) for the membership codes; raise a limit in the environment and restart, or contact the tenant whose client loops.

@@ -25,6 +25,7 @@ import {
   INGEST_STAGES,
   isIngestStage,
 } from "./ingest-stages.js";
+import { recordTenantRefusal } from "./tenant-refusals.js";
 import {
   createDedicatedPostgresClient,
   queryPostgres as queryDefaultPostgres,
@@ -115,6 +116,10 @@ export const PENDING_LIMIT_ERROR_MESSAGE =
   "Too many uploads from this account are still waiting to be indexed. Try again once some have finished.";
 export const WORKSPACE_PENDING_LIMIT_ERROR_MESSAGE =
   "Too many uploads in this workspace are still waiting to be indexed. Try again once some have finished.";
+// The stable codes of the two pending caps (RAG_INGEST_MAX_PENDING_*_PER_TENANT
+// and _PER_WORKSPACE).
+export const INGEST_PENDING_LIMIT_EXCEEDED = "INGEST_PENDING_LIMIT_EXCEEDED";
+export const INGEST_WORKSPACE_PENDING_LIMIT_EXCEEDED = "INGEST_WORKSPACE_PENDING_LIMIT_EXCEEDED";
 // Statuses the ingest path itself sets for a problem with the upload (422: no
 // extractable text). Any other error may come from a dependency (a model
 // provider's 401 names part of the key, a socket error names a host), so the
@@ -164,11 +169,31 @@ export const toIngestJobErrorMessage = (error) => {
   return (firstLine || FALLBACK_ERROR_MESSAGE).slice(0, MAX_ERROR_MESSAGE_LENGTH);
 };
 
-const createPendingLimitError = () =>
-  Object.assign(new Error(PENDING_LIMIT_ERROR_MESSAGE), { expose: true, status: 429 });
+// Each refusal is counted for the job's owner pair (rag/tenant-refusals.js),
+// under these codes; the error carries the code too (the upload routes keep
+// answering with the message only).
+const createPendingLimitError = (job) => {
+  recordTenantRefusal(INGEST_PENDING_LIMIT_EXCEEDED, { userId: job?.ownerUserId, workspaceId: job?.workspaceId });
 
-const createWorkspacePendingLimitError = () =>
-  Object.assign(new Error(WORKSPACE_PENDING_LIMIT_ERROR_MESSAGE), { expose: true, status: 429 });
+  return Object.assign(new Error(PENDING_LIMIT_ERROR_MESSAGE), {
+    code: INGEST_PENDING_LIMIT_EXCEEDED,
+    expose: true,
+    status: 429,
+  });
+};
+
+const createWorkspacePendingLimitError = (job) => {
+  recordTenantRefusal(INGEST_WORKSPACE_PENDING_LIMIT_EXCEEDED, {
+    userId: job?.ownerUserId,
+    workspaceId: job?.workspaceId,
+  });
+
+  return Object.assign(new Error(WORKSPACE_PENDING_LIMIT_ERROR_MESSAGE), {
+    code: INGEST_WORKSPACE_PENDING_LIMIT_EXCEEDED,
+    expose: true,
+    status: 429,
+  });
+};
 
 // Whether a job of `bytes` bytes would take a workspace holding `pending`
 // ({ jobs, bytes }) over its caps. A cap of 0 is off.
@@ -820,7 +845,7 @@ export const createPostgresIngestJobStore = ({
             pending: { bytes: Number(row.pending_bytes) || 0, jobs: Number(row.pending_jobs) || 0 },
           })
         ) {
-          throw createWorkspacePendingLimitError();
+          throw createWorkspacePendingLimitError(job);
         }
       }
 
@@ -870,7 +895,7 @@ export const createPostgresIngestJobStore = ({
       );
 
       if (!result.rows[0]) {
-        throw createPendingLimitError();
+        throw createPendingLimitError(job);
       }
 
       subscribers.wake();
@@ -1835,7 +1860,7 @@ export const createInMemoryIngestJobStore = ({
             },
           })
         ) {
-          throw createWorkspacePendingLimitError();
+          throw createWorkspacePendingLimitError(normalized);
         }
       }
 
@@ -1851,7 +1876,7 @@ export const createInMemoryIngestJobStore = ({
         (maxPendingJobs > 0 && pending.length >= maxPendingJobs) ||
         (maxPendingBytes > 0 && pendingBytes + normalized.fileBytes.length > maxPendingBytes)
       ) {
-        throw createPendingLimitError();
+        throw createPendingLimitError(normalized);
       }
 
       const job = { ...base, status: INGEST_JOB_STATUSES.queued };

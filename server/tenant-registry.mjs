@@ -9,6 +9,8 @@
 //
 // A running server caches lookups for TENANT_REGISTRY_CACHE_TTL_MS (5 s by
 // default), so a change made here reaches requests after at most that long.
+// A retention policy (set-retention) is not in that cache: each server's
+// retention sweep reads the policies at the start of its next pass.
 
 import { pathToFileURL } from "node:url";
 
@@ -34,6 +36,9 @@ Commands
                                       refused with WORKSPACE_SUSPENDED under
                                       TENANT_MEMBERSHIP=enforce.
   activate <workspaceId>              Activate a suspended workspace.
+  set-retention <workspaceId>         Replace a workspace's retention policy
+                                      (--retention-policy <json>, required;
+                                      '{}' clears every override).
   members <workspaceId>               List a workspace's members (--limit, --offset).
   add-member <workspaceId> <userId>   Add a member, or replace its roles
                                       (--roles workspace.member,...; default none).
@@ -50,7 +55,9 @@ Workspace ids are canonical: trimmed and lower case.
 (rag/workspace-retention-policy.js): a JSON object with any of the keys
 agentRuns, tasks, workspaceArtifacts and feedback, each a whole number of days
 from 0 (keep forever) to 36500, e.g. '{"agentRuns": 30, "feedback": 0}'. It only
-adjusts a type whose *_RETENTION_DAYS setting is above 0.
+adjusts a type whose *_RETENTION_DAYS setting is above 0. A changed policy
+applies from each server's next retention sweep (RETENTION_SWEEP_INTERVAL_MS,
+1 hour by default); the registry's lookup cache does not hold it.
 `;
 
 const COMMANDS = Object.freeze({
@@ -60,6 +67,7 @@ const COMMANDS = Object.freeze({
   list: { args: [], options: ["limit", "offset", "status"] },
   members: { args: ["workspaceId"], options: ["limit", "offset"] },
   "remove-member": { args: ["workspaceId", "userId"], options: [] },
+  "set-retention": { args: ["workspaceId"], options: ["retention-policy"], required: ["retention-policy"] },
   suspend: { args: ["workspaceId"], options: [] },
 });
 
@@ -111,7 +119,9 @@ export const parseTenantRegistryArgs = (argv = []) => {
   const [command, ...rest] = positional;
 
   if (!command) {
-    throw new Error("A command is required (list, create, suspend, activate, members, add-member, remove-member).");
+    throw new Error(
+      "A command is required (list, create, suspend, activate, set-retention, members, add-member, remove-member)."
+    );
   }
 
   const spec = Object.hasOwn(COMMANDS, command) ? COMMANDS[command] : null;
@@ -129,6 +139,12 @@ export const parseTenantRegistryArgs = (argv = []) => {
   for (const name of Object.keys(options.values)) {
     if (!spec.options.includes(name)) {
       throw new Error(`--${name} does not apply to ${command}.`);
+    }
+  }
+
+  for (const name of spec.required ?? []) {
+    if (!Object.hasOwn(options.values, name)) {
+      throw new Error(`${command} needs --${name}.`);
     }
   }
 
@@ -180,6 +196,8 @@ const formatResult = (result) => {
     case "suspend":
     case "activate":
       return `${formatWorkspace(result.workspace)}\n`;
+    case "set-retention":
+      return `${formatWorkspace(result.workspace)}\tretention=${JSON.stringify(result.workspace.retentionPolicy ?? {})}\n`;
     case "add-member":
       return `${result.created ? "Added" : "Updated"} ${result.member.userId} in ${result.member.workspaceId}: ${
         result.member.roles.length ? result.member.roles.join(",") : "(no roles)"
@@ -244,6 +262,13 @@ export const runTenantRegistryCommand = async (
         return { workspace: await registry.suspendWorkspace(args.workspaceId) };
       case "activate":
         return { workspace: await registry.activateWorkspace(args.workspaceId) };
+      case "set-retention":
+        return {
+          workspace: await registry.setWorkspaceRetentionPolicy(
+            args.workspaceId,
+            parseRetentionPolicy(values["retention-policy"])
+          ),
+        };
       case "members":
         return {
           members: await registry.listMembers(args.workspaceId, {

@@ -407,6 +407,89 @@ test("a workspace-scoped holder reaches its own workspace only and may not regis
   }
 });
 
+test("PATCH /admin/workspaces/:workspaceId replaces the retention policy: platform only, validated, audited, refused while deleting", async () => {
+  const harness = await setup();
+  const { call } = harness;
+
+  try {
+    await harness.registry.createWorkspace({ retentionPolicy: { agentRuns: 30 }, workspaceId: "ws-a" });
+    await harness.registry.createWorkspace({ workspaceId: "ws-gone" });
+
+    let response = await call("manager-token", "PATCH", "/admin/workspaces/ws-a", {
+      retentionPolicy: { feedback: 0, tasks: 90 },
+    });
+    assert.equal(response.status, 200);
+    // The whole policy is replaced, not merged.
+    assert.deepEqual(response.json.workspace.retentionPolicy, { feedback: 0, tasks: 90 });
+    assert.deepEqual((await harness.registry.getWorkspace("ws-a")).retentionPolicy, { feedback: 0, tasks: 90 });
+
+    response = await call("owner-token", "PATCH", "/admin/workspaces/ws-a", { retentionPolicy: null });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.json.workspace.retentionPolicy, {}, "null (or {}) clears every override");
+
+    for (const body of [
+      {},
+      [],
+      { retentionPolicy: "30d" },
+      // Keys and values the sweep does not read are refused, as at creation.
+      { retentionPolicy: { days: 30 } },
+      { retentionPolicy: { agentRuns: -1 } },
+      { retentionPolicy: { agentRuns: 1.5 } },
+      { retentionPolicy: { agentRuns: 36501 } },
+      // Only the policy may change here, and a workspaceId never names the target.
+      { plan: "enterprise", retentionPolicy: {} },
+      { retentionPolicy: {}, workspaceId: "ws-a" },
+    ]) {
+      response = await call("manager-token", "PATCH", "/admin/workspaces/ws-a", body);
+      assert.equal(response.status, 400, JSON.stringify(body));
+    }
+
+    assert.deepEqual((await harness.registry.getWorkspace("ws-a")).retentionPolicy, {});
+
+    response = await call("manager-token", "PATCH", "/admin/workspaces/ws-missing", { retentionPolicy: {} });
+    assert.equal(response.status, 404);
+    assert.equal(response.json.code, "WORKSPACE_NOT_FOUND");
+
+    await harness.registry.markWorkspaceDeleting("ws-gone");
+    response = await call("manager-token", "PATCH", "/admin/workspaces/ws-gone", {
+      retentionPolicy: { agentRuns: 0 },
+    });
+    assert.equal(response.status, 409);
+    assert.equal(response.json.code, "WORKSPACE_DELETING");
+
+    // A workspace-scoped holder may not change a policy, not even its own;
+    // a holder without the permission is refused before that.
+    for (const workspaceId of ["ws-a", "ws-gone"]) {
+      response = await call("scoped-manager-token", "PATCH", `/admin/workspaces/${workspaceId}`, {
+        retentionPolicy: { agentRuns: 1 },
+      });
+      assert.equal(response.status, 403);
+      assert.equal(response.json.code, "TENANT_ADMIN_PLATFORM_ONLY");
+    }
+
+    for (const token of ["operator-token", "viewer-token", "workspace-admin-token"]) {
+      response = await call(token, "PATCH", "/admin/workspaces/ws-a", { retentionPolicy: { agentRuns: 1 } });
+      assert.equal(response.status, 403, token);
+      assert.equal(response.json.adminAuthorization.reason, "denied_missing_permission");
+    }
+
+    assert.deepEqual((await harness.registry.getWorkspace("ws-a")).retentionPolicy, {});
+
+    const { events } = await harness.auditService.listEvents({ accessScope: {}, limit: 500 });
+    const patches = events.filter(
+      (event) => event.request?.method === "PATCH" && event.request?.path === "/admin/workspaces/ws-a"
+    );
+
+    assert.ok(
+      patches.some((event) => event.result === "allowed" && event.authorization.permissionId === "admin.tenants.write")
+    );
+    assert.ok(patches.some((event) => event.result === "denied"));
+    assert.deepEqual([...new Set(harness.contexts.map((entry) => entry.context))], ["system"]);
+  } finally {
+    await harness.close();
+  }
+});
+
 test("RBAC enforce checks the same permissions app-wide first", async () => {
   const harness = await setup(authEnv({ RBAC_DEFAULT_ROLE: "none", RBAC_MODE: "enforce" }));
   const { call } = harness;

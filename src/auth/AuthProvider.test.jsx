@@ -265,6 +265,64 @@ describe("AuthProvider", () => {
     expect(tokensSeenAtMount).toEqual(["access-1"]);
   });
 
+  test("reloadMe reads /auth/me again (a workspace switch) and keeps the last answer when it fails", async () => {
+    savePendingLogin({
+      codeVerifier: "verifier-1",
+      createdAt: Date.now(),
+      nonce: "nonce-1",
+      redirectUri: "http://localhost:3000/",
+      state: "state-1",
+    });
+    const answers = [
+      { permissions: ["documents.read"], userId: "alice", workspaceId: "", workspaceIds: ["w1", "w2"] },
+      { permissions: ["documents.read", "documents.delete"], userId: "alice", workspaceId: "w2", workspaceIds: ["w1", "w2"] },
+    ];
+    const loadMe = vi.fn(async () => {
+      const answer = answers.shift();
+
+      if (!answer) {
+        throw new Error("403");
+      }
+
+      return answer;
+    });
+    const ReloadProbe = () => {
+      const { reloadMe } = useAuth();
+
+      return (
+        <button type="button" onClick={() => void reloadMe()}>
+          reload
+        </button>
+      );
+    };
+
+    render(
+      <AuthProvider
+        cryptoImpl={webcrypto}
+        env={{}}
+        fetchImpl={createFetch()}
+        loadMe={loadMe}
+        loadServerConfig={async () => oidcConfig}
+        location={createLocation("http://localhost:3000/?code=code-1&state=state-1")}
+        replaceUrl={vi.fn()}
+      >
+        <AuthStatus t={t} />
+        <CapabilityProbe />
+        <ReloadProbe />
+      </AuthProvider>
+    );
+
+    expect(await screen.findByText("delete:no")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "reload" }));
+    expect(await screen.findByText("delete:yes")).toBeInTheDocument();
+    expect(screen.getByText("Workspace: w2")).toBeInTheDocument();
+
+    // A failed reload keeps the previous answer.
+    fireEvent.click(screen.getByRole("button", { name: "reload" }));
+    await waitFor(() => expect(loadMe).toHaveBeenCalledTimes(3));
+    expect(screen.getByText("delete:yes")).toBeInTheDocument();
+  });
+
   test("a callback whose state does not match stays signed out with an error", async () => {
     savePendingLogin({
       codeVerifier: "verifier-1",

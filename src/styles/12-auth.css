@@ -37,6 +37,34 @@
   font-weight: 680;
 }
 
+.archive-workspace-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #5b677d;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.archive-workspace-switch select {
+  height: 28px;
+  max-width: 180px;
+  padding: 0 10px;
+  border: 1px solid #dbe4f0;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #344155;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 680;
+  text-overflow: ellipsis;
+}
+
+.archive-workspace-switch select:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .archive-permission-note {
   margin: 8px 0;
   color: #5b677d;

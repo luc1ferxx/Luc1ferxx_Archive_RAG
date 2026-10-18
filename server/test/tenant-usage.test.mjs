@@ -19,7 +19,9 @@ import {
   recordTenantModelUsageShares,
   runWithCallerAttributedModelUsage,
   TENANT_USAGE_METRICS,
+  TENANT_USAGE_REFUSALS_METRIC,
 } from "../rag/tenant-usage.js";
+import { TENANT_REFUSAL_LEDGER_METRICS } from "../rag/tenant-refusal-reasons.js";
 import * as config from "../rag/config.js";
 
 const HOUR = 60 * 60 * 1000;
@@ -571,4 +573,159 @@ test("an erase drops the tenant's unflushed totals (after a flush in flight) and
     "tenant_usage:pending": { records: 0 },
   });
   assert.deepEqual(statements, []);
+});
+
+// Per-tenant refusals (rag/tenant-refusals.js): refused_<reason> rows of the
+// same table, so the flush, the erase and the export need nothing new.
+test("refusals are ledger rows per tenant, reason and hour; unknown reasons are ignored", async () => {
+  const { ledger, statements } = createRecordingLedger();
+  const alice = { userId: "alice", workspaceId: "ws-a" };
+
+  assert.equal(ledger.recordRefusal(alice, "TENANT_RATE_LIMITED"), true);
+  ledger.recordRefusal(alice, "TENANT_RATE_LIMITED");
+  ledger.recordRefusal({ userId: "alice", workspaceId: "ws-b" }, "WORKSPACE_MEMBERSHIP_REQUIRED");
+  ledger.recordRefusal(null, "TENANT_RATE_LIMITED");
+  assert.equal(ledger.recordRefusal(alice, "NOT_A_REASON"), false);
+  // A refused_<reason> metric can be recorded directly too, a made-up one cannot.
+  assert.equal(ledger.record(alice, { refused_not_a_reason: 1 }), false);
+  assert.equal(ledger.snapshot().pendingRefusalEntries, 3);
+
+  assert.deepEqual(await ledger.flush(), { rows: 3 });
+  assert.deepEqual(rowsOf(statements[0]), [
+    { metric: "refused_tenant_rate_limited", periodStart: new Date(T0).toISOString(), userId: "", value: "1", workspaceId: "" },
+    { metric: "refused_tenant_rate_limited", periodStart: new Date(T0).toISOString(), userId: "alice", value: "2", workspaceId: "ws-a" },
+    {
+      metric: "refused_workspace_membership_required",
+      periodStart: new Date(T0).toISOString(),
+      userId: "alice",
+      value: "1",
+      workspaceId: "ws-b",
+    },
+  ]);
+  assert.equal(ledger.snapshot().pendingRefusalEntries, 0);
+});
+
+test("refusals hold a bounded share of the pending totals, so a flood cannot crowd out usage", () => {
+  const { ledger } = createRecordingLedger({ maxPendingEntries: 4, maxPendingRefusalEntries: 2 });
+
+  ledger.recordRefusal({ userId: "u", workspaceId: "probe-1" }, "WORKSPACE_MEMBERSHIP_REQUIRED");
+  ledger.recordRefusal({ userId: "u", workspaceId: "probe-2" }, "WORKSPACE_MEMBERSHIP_REQUIRED");
+  assert.equal(ledger.recordRefusal({ userId: "u", workspaceId: "probe-3" }, "WORKSPACE_MEMBERSHIP_REQUIRED"), false);
+  // An existing refusal key still grows, and usage still has room.
+  assert.equal(ledger.recordRefusal({ userId: "u", workspaceId: "probe-1" }, "WORKSPACE_MEMBERSHIP_REQUIRED"), true);
+  assert.equal(ledger.record({ userId: "alice", workspaceId: "ws-a" }, { chat_requests: 1 }), true);
+  assert.equal(ledger.record({ userId: "bob", workspaceId: "ws-b" }, { chat_requests: 1 }), true);
+
+  const snapshot = ledger.snapshot();
+
+  assert.equal(snapshot.droppedRefusalEntries, 1);
+  assert.equal(snapshot.droppedEntries, 0);
+  assert.equal(snapshot.pendingEntries, 4);
+  assert.equal(snapshot.pendingRefusalEntries, 2);
+});
+
+test("a failed flush keeps its refusals for the next one; an erase drops a tenant's unflushed refusals", async () => {
+  let fail = true;
+  const { ledger, statements } = createRecordingLedger({ fail: () => fail });
+  const alice = { userId: "alice", workspaceId: "ws-a" };
+
+  ledger.recordRefusal(alice, "TENANT_STORAGE_QUOTA_EXCEEDED");
+  ledger.recordRefusal({ userId: "bob", workspaceId: "ws-a" }, "TENANT_TASK_LIMITED");
+  await ledger.flush();
+  assert.equal(ledger.snapshot().pendingRefusalEntries, 2);
+
+  assert.equal(ledger.countPending({ userId: null, workspaceId: "ws-a" }), 2);
+  assert.equal(await ledger.erasePending({ userId: "alice", workspaceId: "ws-a" }), 1);
+  assert.equal(ledger.snapshot().pendingRefusalEntries, 1);
+
+  fail = false;
+  await ledger.flush();
+  assert.deepEqual(
+    rowsOf(statements.at(-1)).map((row) => [row.userId, row.metric]),
+    [["bob", "refused_tenant_task_limited"]]
+  );
+});
+
+test("ids no row can store (too long, or holding U+0000) are dropped and counted instead of failing every flush", async () => {
+  const { ledger, statements } = createRecordingLedger();
+
+  assert.equal(
+    ledger.recordRefusal({ userId: "u", workspaceId: "w".repeat(257) }, "WORKSPACE_MEMBERSHIP_REQUIRED"),
+    false
+  );
+  assert.equal(ledger.record({ userId: "a\u0000b" }, { chat_requests: 1 }), false);
+  assert.equal(ledger.record({ userId: "u", workspaceId: "w".repeat(256) }, { chat_requests: 1 }), true);
+  assert.equal(ledger.snapshot().unstorableEntries, 2);
+  assert.deepEqual(await ledger.flush(), { rows: 1 });
+  assert.equal(statements.length, 1);
+});
+
+test("listTenantUsageTop with metric refusals ranks tenants by refusals with their counts per reason", async () => {
+  const calls = [];
+  const query = async (text, params) => {
+    calls.push({ params, text });
+    return {
+      rows: [
+        {
+          owner_user_id: "bob",
+          reason_metrics: ["refused_tenant_rate_limited", "refused_workspace_membership_required"],
+          reason_values: ["5", "2"],
+          value: "7",
+          workspace_id: "ws-b",
+        },
+      ],
+    };
+  };
+  const result = await listTenantUsageTop({
+    from: new Date(T0 + 10 * 60 * 1000),
+    limit: 3,
+    metric: TENANT_USAGE_REFUSALS_METRIC,
+    query,
+    to: new Date(T0 + 2 * HOUR),
+  });
+
+  assert.deepEqual(result.rows, [
+    {
+      refusals: { TENANT_RATE_LIMITED: 5, WORKSPACE_MEMBERSHIP_REQUIRED: 2 },
+      userId: "bob",
+      value: 7,
+      workspaceId: "ws-b",
+    },
+  ]);
+  assert.equal(result.from, new Date(T0).toISOString());
+  assert.deepEqual(calls[0].params[0], [...TENANT_REFUSAL_LEDGER_METRICS]);
+  assert.deepEqual(calls[0].params.slice(1), [new Date(T0).toISOString(), new Date(T0 + 2 * HOUR).toISOString(), null, 3]);
+  assert.match(calls[0].text, /metric = ANY\(\$1::text\[\]\)/);
+  assert.match(calls[0].text, /GROUP BY workspace_id, owner_user_id, metric/);
+
+  // One reason, by workspace.
+  await listTenantUsageTop({
+    from: new Date(T0),
+    groupBy: "workspace",
+    metric: TENANT_USAGE_REFUSALS_METRIC,
+    query,
+    reason: "TENANT_RATE_LIMITED",
+    to: new Date(T0 + HOUR),
+    workspaceId: "ws-b",
+  });
+  assert.deepEqual(calls[1].params[0], ["refused_tenant_rate_limited"]);
+  assert.equal(calls[1].params[3], "ws-b");
+  assert.match(calls[1].text, /''::text AS owner_user_id/);
+  assert.match(calls[1].text, /GROUP BY workspace_id, metric/);
+
+  await assert.rejects(
+    listTenantUsageTop({ from: new Date(T0), metric: "refusals", query, reason: "NOPE", to: new Date(T0 + HOUR) }),
+    (error) => error.status === 400
+  );
+  await assert.rejects(
+    listTenantUsageTop({
+      from: new Date(T0),
+      metric: "model_tokens",
+      query,
+      reason: "TENANT_RATE_LIMITED",
+      to: new Date(T0 + HOUR),
+    }),
+    (error) => error.status === 400
+  );
+  assert.equal(calls.length, 2, "refused before any read");
 });
