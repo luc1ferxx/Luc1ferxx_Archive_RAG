@@ -6,7 +6,11 @@ import { mkdir } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { bindDatabaseTenant, requireApiAuth } from "./auth.js";
+import {
+  assertApiAuthTokenConfiguration,
+  bindDatabaseTenant,
+  requireApiAuth,
+} from "./auth.js";
 import {
   getAgentRunRecoveryMode,
   isApiAuthEnabled,
@@ -87,6 +91,8 @@ export const createApp = async (options = {}) => {
   // RBAC_MODE / RBAC_POLICY_JSON / RBAC_POLICY_FILE / RBAC_DEFAULT_ROLE are
   // validated before anything starts: a bad policy refuses the start.
   assertRbacConfiguration();
+  // An API_AUTH_TOKENS entry that can act for no tenant refuses the start.
+  assertApiAuthTokenConfiguration();
 
   const services = createAppServices(options, { uploadsDirectory });
 

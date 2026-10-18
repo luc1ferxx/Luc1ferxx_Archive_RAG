@@ -46,6 +46,25 @@ const CLIENT_USER_ID_ALLOWED = Symbol("archiveRag.clientUserIdAllowed");
 
 const CLIENT_USER_ID_KEYS = ["x-user-id", "userId"];
 
+// Set only on the single shared API_AUTH_TOKEN principal. That credential is
+// the documented single-tenant setup: it may already act as any user, so a
+// request that names none keeps acting for the whole archive, as auth off does.
+// Every other authenticated principal must end up with a user or a workspace
+// (see requireTenantScope).
+const SINGLE_TENANT_CREDENTIAL = Symbol("archiveRag.singleTenantCredential");
+
+// Platform admin routes that answer across tenants by design, behind their own
+// admin permission checks (routes/admin.js, GET /admin/index-versions in
+// routes/documents.js), plus GET /auth/me. Only a principal with no workspace
+// list may call them without a user or workspace.
+const TENANTLESS_PLATFORM_PATHS = new Set([
+  "/admin/audit",
+  "/admin/index-versions",
+  "/admin/status",
+  "/auth/me",
+]);
+const TENANTLESS_PLATFORM_PATH_PREFIXES = ["/admin/actions/"];
+
 // Routes whose `userId` query parameter is a filter over other users' records,
 // not the caller's identity: GET /admin/audit?userId=... (admin.audit.read).
 const USER_ID_FILTER_QUERY_PATHS = new Set(["/admin/audit"]);
@@ -211,6 +230,7 @@ const parseConfiguredTokenPrincipals = () => {
           userId: "",
           workspaceId: "",
           [CLIENT_USER_ID_ALLOWED]: true,
+          [SINGLE_TENANT_CREDENTIAL]: true,
         },
       ]
     : [];
@@ -356,6 +376,84 @@ const sendAuthError = (res, error) => {
 
 export const getRequestAccessScope = (req) => req.accessScope ?? {};
 
+// An authenticated scope that names neither a user nor a workspace. The
+// document registry, the feedback store, the ingest job store and the database
+// tenant binding all read such a scope as "every tenant" (the auth-off
+// meaning), so requireApiAuth lets it through only where that is intended.
+export const isTenantlessAuthenticatedScope = (accessScope = {}) =>
+  accessScope?.authenticated === true &&
+  !normalizeString(accessScope.userId) &&
+  !normalizeString(accessScope.workspaceId);
+
+const isTenantlessPlatformPath = (path = "") =>
+  TENANTLESS_PLATFORM_PATHS.has(path) ||
+  TENANTLESS_PLATFORM_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+
+/**
+ * Refuses (403) an authenticated request whose scope names neither a user nor
+ * a workspace, unless it comes from the single shared API_AUTH_TOKEN (the
+ * single-tenant setup) or is a platform admin route called by a principal with
+ * no workspace list. Before, such a request (for example an API_AUTH_TOKENS
+ * entry with two workspaces and no x-workspace-id) listed, read and cleared
+ * every tenant's documents, because an empty scope bypasses both the store
+ * filters and row-level security.
+ */
+const requireTenantScope = (req, principal = {}) => {
+  if (!isTenantlessAuthenticatedScope(req.accessScope)) {
+    return;
+  }
+
+  if (principal[SINGLE_TENANT_CREDENTIAL] === true) {
+    return;
+  }
+
+  if (
+    isTenantlessPlatformPath(req.path) &&
+    normalizeAccessPrincipalWorkspaceIds(principal).length === 0
+  ) {
+    return;
+  }
+
+  throw new AccessScopeError(
+    "This request needs a user or workspace scope: name a workspace with x-workspace-id."
+  );
+};
+
+/**
+ * Refuses an API_AUTH_TOKENS entry that names no user, no workspace, no
+ * workspace list, no roles, no workspace roles and no permissions and does not
+ * let the client choose its user. Without x-workspace-id such a token acts for
+ * no tenant (requireTenantScope refuses it), and with one it acts for any
+ * workspace it names, which is not a credential to issue on purpose.
+ * createApp calls this so the misconfiguration stops the start.
+ */
+export const assertApiAuthTokenConfiguration = () => {
+  if (!isApiAuthEnabled() || !getApiAuthTokens().trim()) {
+    return;
+  }
+
+  const unusable = parseConfiguredTokenPrincipals().filter(
+    (principal) =>
+      !principal.userId &&
+      !principal.workspaceId &&
+      !principal.allowedWorkspaceIds?.length &&
+      !principal.roleIds?.length &&
+      !principal.permissionIds?.length &&
+      !principal.workspaceRoles &&
+      principal[CLIENT_USER_ID_ALLOWED] !== true
+  );
+
+  if (unusable.length > 0) {
+    const error = new Error(
+      `API_AUTH_TOKENS has ${unusable.length} ${
+        unusable.length === 1 ? "entry" : "entries"
+      } without a userId, workspaceId, workspaces, roles or permissions; such a token acts for no tenant, or for any workspace it names in x-workspace-id. Give it a userId, a workspaceId or the workspaces it may use.`
+    );
+    error.code = "API_AUTH_TOKEN_WITHOUT_SCOPE";
+    throw error;
+  }
+};
+
 /**
  * The user a route acts for, given the userId the route itself read from the
  * request (body or query). Every route that takes a client userId goes through
@@ -417,6 +515,7 @@ export const requireApiAuth = (req, res, next) => {
         ...resolvedPrincipal,
         authenticated: true,
       });
+      requireTenantScope(req, resolvedPrincipal);
     } catch (error) {
       res.status(error?.status ?? 403).json({
         error: error instanceof Error ? error.message : "Forbidden.",

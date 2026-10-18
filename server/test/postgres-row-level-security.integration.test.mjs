@@ -674,9 +674,13 @@ if (!adminDatabaseUrl) {
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
     assert.equal(report.checks.rowLevelSecurity.role, tenantRole);
     // Ten tenant tables plus the staged ingest's outputs (migration 017), the
-    // four sparse statistics tables of the chunk table (migration 030), and
-    // session memory (migration 031).
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 16);
+    // four sparse statistics tables of the chunk table (migration 030),
+    // session memory (migration 031) and admin audit events (migration 032).
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 17);
+    assert.deepEqual(report.checks.rowLevelSecurity.roleAttributes, {
+      bypassRls: false,
+      superuser: false,
+    });
     assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
     assert.equal(report.checks.rowLevelSecurity.sparseSearchExecutable, true);
 
@@ -719,6 +723,166 @@ if (!adminDatabaseUrl) {
     }
 
     assert.equal((await buildHealthReport()).checks.rowLevelSecurity.status, "ok");
+  });
+
+  test("the health report fails on a BYPASSRLS tenant role, a table the tenant role owns, and a granted table without the policy", async () => {
+    const { buildHealthReport } = await import("../health.js");
+    const q = modules.postgres.queryPostgres;
+    const testDatabaseUrl = withDatabase(adminDatabaseUrl, databaseName);
+
+    // ALTER ROLE ... BYPASSRLS needs a superuser: the admin login, as a DBA.
+    await adminQuery(adminDatabaseUrl, `ALTER ROLE ${tenantRole} BYPASSRLS`);
+
+    try {
+      const bypassing = (await buildHealthReport()).checks.rowLevelSecurity;
+
+      assert.equal(bypassing.status, "error");
+      assert.deepEqual(bypassing.roleAttributes, { bypassRls: true, superuser: false });
+      assert.match(bypassing.message, /BYPASSRLS/);
+    } finally {
+      await adminQuery(adminDatabaseUrl, `ALTER ROLE ${tenantRole} NOBYPASSRLS`);
+    }
+
+    // A table the tenant role owns ignores its policy for that role (ENABLE,
+    // not FORCE, ROW LEVEL SECURITY), wherever the table came from.
+    await adminQuery(
+      testDatabaseUrl,
+      `CREATE TABLE rls_it_tenant_owned (id int); ALTER TABLE rls_it_tenant_owned OWNER TO ${tenantRole}`
+    );
+
+    try {
+      const owning = (await buildHealthReport()).checks.rowLevelSecurity;
+
+      assert.equal(owning.status, "error");
+      assert.deepEqual(owning.ownedTables, ["rls_it_tenant_owned"]);
+    } finally {
+      await adminQuery(testDatabaseUrl, "DROP TABLE rls_it_tenant_owned");
+    }
+
+    // A table the tenant role may read without the policy fails the check
+    // even though no covered table is missing one.
+    await q("CREATE TABLE rls_it_ungated (id int)");
+    await q(`GRANT SELECT ON rls_it_ungated TO ${tenantRole}`);
+
+    try {
+      const ungated = (await buildHealthReport()).checks.rowLevelSecurity;
+
+      assert.equal(ungated.status, "error");
+      assert.deepEqual(ungated.ungatedTables, ["rls_it_ungated"]);
+      assert.deepEqual(ungated.unprotectedTables, []);
+    } finally {
+      await q("DROP TABLE rls_it_ungated");
+    }
+
+    // Relations an extension owns are not tenant tables, even when the
+    // extension grants them to PUBLIC as pg_stat_statements does. Creating it
+    // needs a superuser; querying its views would need it preloaded, which the
+    // probe never does.
+    await adminQuery(testDatabaseUrl, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+
+    try {
+      const withExtension = (await buildHealthReport()).checks.rowLevelSecurity;
+
+      assert.equal(withExtension.status, "ok", withExtension.message);
+    } finally {
+      await adminQuery(testDatabaseUrl, "DROP EXTENSION IF EXISTS pg_stat_statements");
+    }
+
+    assert.equal((await buildHealthReport()).checks.rowLevelSecurity.status, "ok");
+  });
+
+  test("admin audit events are readable per workspace, append-only for the tenant role, and purged as the owner", async () => {
+    const q = modules.postgres.queryPostgres;
+    const auditTable = modules.config.getAdminAuditEventsPostgresTable();
+    const insertEvent = (eventId, scope, createdAt = new Date().toISOString()) =>
+      q(
+        `INSERT INTO ${auditTable} (event_id, event_type, result, user_id, workspace_id, created_at)
+         VALUES ($1, 'authorization_decision', 'allowed', $2, $3, $4::timestamptz)`,
+        [eventId, scope.userId, scope.workspaceId, createdAt]
+      );
+    const visibleEventIds = async () =>
+      (await q(`SELECT event_id FROM ${auditTable} ORDER BY event_id`)).rows.map(
+        (row) => row.event_id
+      );
+
+    // Seeded as the owner: two users of ws-a, one of ws-b, one user without a
+    // workspace, and an expired event of ws-b.
+    await insertEvent("audit-alice", ALICE);
+    await insertEvent("audit-carol", { userId: "carol", workspaceId: "ws-a" });
+    await insertEvent("audit-bob", BOB);
+    await insertEvent("audit-dave", { userId: "dave", workspaceId: "" });
+    await insertEvent("audit-bob-expired", BOB, "2000-01-01T00:00:00.000Z");
+
+    // A workspace tenant reads every user of its own workspace and nothing else.
+    assert.deepEqual(await asAlice(visibleEventIds), ["audit-alice", "audit-carol"]);
+    // A tenant without a workspace reads only its own user's events.
+    assert.deepEqual(
+      await modules.tenant.runWithDatabaseTenant({ userId: "dave", workspaceId: "" }, visibleEventIds),
+      ["audit-dave"]
+    );
+
+    // The tenant role may not change or remove audit events, its own included.
+    for (const statement of [
+      `UPDATE ${auditTable} SET result = 'denied' WHERE event_id = 'audit-alice'`,
+      `DELETE FROM ${auditTable} WHERE event_id = 'audit-alice'`,
+    ]) {
+      await assert.rejects(asAlice(() => q(statement)), (error) => error.code === "42501");
+    }
+
+    // It may append only events that name itself.
+    await assert.rejects(
+      asAlice(() => insertEvent("audit-forged-bob", BOB)),
+      (error) => error.code === "42501"
+    );
+    await asAlice(() => insertEvent("audit-alice-2", ALICE));
+
+    // Recording an event in a tenant request still purges every tenant's
+    // expired events: the purge runs as the owner.
+    const { createPostgresAdminAuditStore } = await import(
+      "../rag/postgres-admin-audit-store.js"
+    );
+    const store = createPostgresAdminAuditStore({
+      retentionDays: 30,
+      runMigrations: async () => {},
+      tableName: auditTable,
+    });
+
+    await asAlice(() =>
+      store.recordEvent({
+        eventId: "audit-alice-3",
+        principal: { userId: ALICE.userId, workspaceId: ALICE.workspaceId },
+        result: "allowed",
+        type: "authorization_decision",
+      })
+    );
+    assert.deepEqual(await visibleEventIds(), [
+      "audit-alice",
+      "audit-alice-2",
+      "audit-alice-3",
+      "audit-bob",
+      "audit-carol",
+      "audit-dave",
+    ]);
+
+    // A tenant id with a whitespace run: the event compaction collapses it,
+    // the tenant settings do not, and the row must still be written under the
+    // bound tenant's own ids rather than fail the policy and vanish.
+    const spaced = { userId: "erin", workspaceId: "ws\tspaced" };
+
+    await modules.tenant.runWithDatabaseTenant(spaced, () =>
+      store.recordEvent({
+        eventId: "audit-erin",
+        principal: spaced,
+        result: "allowed",
+        type: "authorization_decision",
+      })
+    );
+    assert.deepEqual(
+      await modules.tenant.runWithDatabaseTenant(spaced, visibleEventIds),
+      ["audit-erin"]
+    );
+
+    await q(`DELETE FROM ${auditTable}`);
   });
 
   test("POSTGRES_ROW_LEVEL_SECURITY=off keeps the owner connection", async () => {

@@ -5,6 +5,10 @@ import {
 import { runPostgresMigrations } from "./db-migrations.js";
 import { queryPostgres } from "./postgres.js";
 import {
+  getActiveDatabaseTenant,
+  runAsDatabaseSystem,
+} from "./postgres-tenant.js";
+import {
   buildAdminAuditListResponse,
   compactAdminAuditEvent,
   normalizeAdminAuditQuery,
@@ -165,12 +169,17 @@ export const createPostgresAdminAuditStore = ({
       return 0;
     }
 
-    const result = await query(
-      `
-        DELETE FROM ${auditEventsTable}
-        WHERE created_at < $1::timestamptz
-      `,
-      [cutoff]
+    // Retention applies to every tenant's events, and since migration 032 the
+    // tenant role may not delete audit events, so the purge runs as the owner
+    // even when a tenant request recorded the event that triggered it.
+    const result = await runAsDatabaseSystem(() =>
+      query(
+        `
+          DELETE FROM ${auditEventsTable}
+          WHERE created_at < $1::timestamptz
+        `,
+        [cutoff]
+      )
     );
 
     return Number(result.rowCount ?? 0) || 0;
@@ -229,6 +238,18 @@ export const createPostgresAdminAuditStore = ({
       await initialize();
 
       const compactEvent = compactAdminAuditEvent(event);
+      // Inside a tenant request the row's owner columns are the bound tenant's
+      // own ids, exactly as rag/postgres.js sets them, so migration 032's
+      // INSERT policy accepts the event. compactAdminAuditEvent collapses
+      // whitespace runs in ids and the tenant settings only trim, so an id
+      // such as "a<TAB>b" would otherwise fail the check and the record, whose
+      // errors the authorization middleware swallows, would be lost. The
+      // principal JSON keeps the compacted ids.
+      const tenant = getActiveDatabaseTenant();
+      const ownerUserId = tenant ? tenant.userId : compactEvent.principal.userId;
+      const ownerWorkspaceId = tenant
+        ? tenant.workspaceId
+        : compactEvent.principal.workspaceId;
 
       await query(
         `
@@ -270,8 +291,8 @@ export const createPostgresAdminAuditStore = ({
           compactEvent.eventId,
           compactEvent.type,
           compactEvent.result,
-          compactEvent.principal.userId,
-          compactEvent.principal.workspaceId,
+          ownerUserId,
+          ownerWorkspaceId,
           compactEvent.authorization.permissionId,
           compactEvent.authorization.actionId,
           compactEvent.request.method,

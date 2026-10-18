@@ -47,7 +47,10 @@ import {
   getPgvectorSparseRankFunctionName,
   listLivePgvectorVersionTables,
 } from "./rag/vector-store-pgvector.js";
-import { runPostgresMigrations } from "./rag/db-migrations.js";
+import {
+  getIndexVersionRegistryTableNames,
+  runPostgresMigrations,
+} from "./rag/db-migrations.js";
 import { PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS } from "./rag/db-migrations.js";
 import {
   checkLongMemoryPostgresHealth,
@@ -776,7 +779,7 @@ const checkWorkspaceArtifactStoreHealth = async () => {
   }
 };
 
-// The tables migrations 013, 015, 017 and 031 put under the tenant_isolation policy.
+// The tables migrations 013, 015, 017, 031 and 032 put under the tenant_isolation policy.
 const getRowLevelSecurityTables = () => [
   getDocumentsPostgresTable(),
   getDocumentChunksPostgresTable(),
@@ -792,9 +795,21 @@ const getRowLevelSecurityTables = () => [
   getIngestJobOutputsPostgresTable(),
   // Migration 031: session memory rows carry their tenant.
   getSessionMemoryPostgresTable(),
+  // Migration 032: admin audit events, read per workspace, append-only.
+  getAdminAuditEventsPostgresTable(),
 ];
 
 const ROW_LEVEL_SECURITY_PROBE_TENANT = Object.freeze({ userId: "__health_probe__" });
+
+// Tables the tenant role may read without a tenant_isolation policy: migration
+// 016's index version registry and pointer (SELECT only; they name chunk tables
+// and embedding spaces, never tenant data). Every other table the tenant role
+// holds a privilege on must carry the policy.
+const getTenantReadableSystemTables = () => {
+  const { pointerTable, versionsTable } = getIndexVersionRegistryTableNames();
+
+  return [versionsTable, pointerTable];
+};
 
 // Probes as a tenant rather than reading configuration: the check passes only
 // when the login role can really switch into the tenant role and every covered
@@ -863,9 +878,58 @@ const checkRowLevelSecurityHealth = async () => {
               AS sparse_rank_executable,
             CASE WHEN $3::text IS NULL THEN true
                  ELSE COALESCE(has_function_privilege(to_regprocedure($3::text)::oid, 'EXECUTE'), false)
-            END AS sparse_search_executable
+            END AS sparse_search_executable,
+            -- A superuser or BYPASSRLS tenant role skips every policy, and a
+            -- tenant role with the privileges of a table's owner skips that
+            -- table's policy (ENABLE, not FORCE, ROW LEVEL SECURITY).
+            COALESCE((SELECT r.rolsuper FROM pg_roles r WHERE r.rolname = current_user), false)
+              AS role_superuser,
+            COALESCE((SELECT r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user), false)
+              AS role_bypass_rls,
+            ARRAY(
+              SELECT c.relname::text
+              FROM pg_class c
+              WHERE c.relnamespace = current_schema()::regnamespace
+                AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                AND pg_has_role(current_user, c.relowner, 'USAGE')
+                AND NOT EXISTS (
+                  SELECT 1 FROM pg_depend d
+                  WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+                )
+              ORDER BY 1
+            ) AS owned_tables,
+            -- Every relation the tenant role may read or write in the schema
+            -- that has no tenant_isolation policy (or row-level security off),
+            -- whether the privilege was granted to it or to PUBLIC. Relations
+            -- an extension owns are left out: pg_stat_statements, for one,
+            -- grants its views to PUBLIC, and they hold no tenant rows.
+            ARRAY(
+              SELECT c.relname::text
+              FROM pg_class c
+              WHERE c.relnamespace = current_schema()::regnamespace
+                AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                AND NOT EXISTS (
+                  SELECT 1 FROM pg_depend d
+                  WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+                )
+                AND has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')
+                AND NOT (
+                  c.relrowsecurity
+                  AND EXISTS (
+                    SELECT 1 FROM pg_policy p
+                    WHERE p.polrelid = c.oid AND p.polname = 'tenant_isolation'
+                  )
+                )
+                AND c.relname <> ALL($4::text[])
+              ORDER BY 1
+            ) AS ungated_tables
         `,
-        [tables, `${sparseRankFunction}(tsquery, text[], integer)`, sparseSearchFunction]
+        [
+          tables,
+          `${sparseRankFunction}(tsquery, text[], integer)`,
+          sparseSearchFunction,
+          getTenantReadableSystemTables(),
+        ]
       )
     );
     const row = probe.rows[0] ?? {};
@@ -873,28 +937,47 @@ const checkRowLevelSecurityHealth = async () => {
     const unprotectedTables = tables.filter((table) => !protectedTables.has(table));
     const sparseRankExecutable = row.sparse_rank_executable === true;
     const sparseSearchExecutable = row.sparse_search_executable === true;
+    const roleAttributes = {
+      bypassRls: row.role_bypass_rls === true,
+      superuser: row.role_superuser === true,
+    };
+    const ownedTables = row.owned_tables ?? [];
+    const ungatedTables = row.ungated_tables ?? [];
+    const failure =
+      row.role !== role
+        ? `Scoped queries run as "${row.role}" instead of the tenant role "${role}".`
+        : roleAttributes.superuser || roleAttributes.bypassRls
+          ? `The tenant role "${role}" is ${roleAttributes.superuser ? "a superuser" : "BYPASSRLS"}, so row-level security does not apply to scoped queries. Set POSTGRES_TENANT_ROLE to a dedicated NOLOGIN role without SUPERUSER or BYPASSRLS.`
+          : ownedTables.length > 0
+            ? `The tenant role "${role}" has the privileges of the owner of ${ownedTables.join(", ")}, so their policies do not apply to it. Use a tenant role that owns nothing and is not a member of the owner role.`
+            : unprotectedTables.length > 0
+              ? `Tables without the tenant_isolation policy: ${unprotectedTables.join(", ")}.`
+              : ungatedTables.length > 0
+                ? `The tenant role can use tables without the tenant_isolation policy: ${ungatedTables.join(", ")}. Add a policy or revoke the grant.`
+                : !sparseRankExecutable
+                  ? `The tenant role cannot execute ${sparseRankFunction} (migration 014), so every multi-document full-text search a tenant makes would fail. Run the migrations.`
+                  : !sparseSearchExecutable
+                    ? `The tenant role cannot execute ${sparseSearchFunction} (migration 030), so every BM25 or pruned multi-document sparse search a tenant makes would fail. Run the migrations.`
+                    : null;
 
-    if (row.role !== role || unprotectedTables.length > 0 || !sparseRankExecutable || !sparseSearchExecutable) {
+    if (failure) {
       return buildEntry("error", {
         mode,
         role,
+        roleAttributes,
+        ownedTables,
         sparseRankExecutable,
         sparseSearchExecutable,
+        ungatedTables,
         unprotectedTables,
-        message:
-          row.role !== role
-            ? `Scoped queries run as "${row.role}" instead of the tenant role "${role}".`
-            : unprotectedTables.length > 0
-              ? `Tables without the tenant_isolation policy: ${unprotectedTables.join(", ")}.`
-              : !sparseRankExecutable
-                ? `The tenant role cannot execute ${sparseRankFunction} (migration 014), so every multi-document full-text search a tenant makes would fail. Run the migrations.`
-                : `The tenant role cannot execute ${sparseSearchFunction} (migration 030), so every BM25 or pruned multi-document sparse search a tenant makes would fail. Run the migrations.`,
+        message: failure,
       });
     }
 
     return buildEntry("ok", {
       mode,
       role,
+      roleAttributes,
       sparseRankExecutable,
       sparseSearchExecutable,
       protectedTableCount: tables.length,

@@ -146,7 +146,7 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `POSTGRES_DATABASE_URL` | 空 | 文档、会话记忆和长期记忆共用连接。 |
 | `POSTGRES_SSL_ENABLED` | `false` | PostgreSQL 是否启用 SSL。 |
 | `POSTGRES_ROW_LEVEL_SECURITY` | `enforce` | 行级安全。`enforce` 让带访问范围的请求和后台任务在租户角色下执行，数据库拒绝其他租户的行；`off` 保持 owner 连接（策略仍在，但 owner 绕过）。无法识别的值按 `enforce` 处理。`enforce` 下多文档的全文检索通过迁移 014 的 owner 函数排序候选（行级安全下 `@@` 用不上 GIN），函数只拿到租户在文档表里能看到的文档 id，返回的行仍由策略过滤；健康检查会确认租户角色能执行它。 |
-| `POSTGRES_TENANT_ROLE` | `archive_rag_tenant` | 行级安全使用的租户角色名（小写标识符）。迁移会创建它，并把它授予应用登录角色。 |
+| `POSTGRES_TENANT_ROLE` | `archive_rag_tenant` | 行级安全使用的租户角色名（小写标识符）。迁移会创建它，并把它授予应用登录角色。出现以下任一情况，健康检查 `checks.rowLevelSecurity` 都报 error：它是 SUPERUSER 或 BYPASSRLS；它拥有、或通过成员关系拥有当前 schema 里的某张表；它能读写一张没有 `tenant_isolation` 策略的表。迁移 016 的 index version 注册表和 pointer 表，以及扩展自带的关系（例如 `pg_stat_statements` 默认授权给 PUBLIC 的视图）不算在内。报 error 后，`/ready` 返回 503；`STARTUP_HEALTH_STRICT=true` 时服务拒绝启动。 |
 | `DOCUMENTS_POSTGRES_TABLE` | `rag_documents` | 文档表。 |
 | `SESSION_MEMORY_POSTGRES_TABLE` | `rag_session_memory` | 会话记忆表。 |
 | `LONG_MEMORY_POSTGRES_TABLE` | `long_memory_items` | 长期记忆表。 |
@@ -318,6 +318,8 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | `API_AUTH_JWT_PERMISSIONS_CLAIM` | `permissions` | 映射为 admin permission IDs 的 claim path。 |
 | `API_AUTH_REVOKED_TOKEN_HASHES` | 空 | 逗号分隔的 JWT SHA-256 token hash 撤销列表。 |
 | `API_AUTH_REVOKED_JTIS` | 空 | 逗号分隔的 JWT `jti` 撤销列表。 |
+
+鉴权开启后，一个请求如果既没有 user 也没有 workspace，会被返回 403（“This request needs a user or workspace scope”）。典型情况是 `API_AUTH_TOKENS` 里允许多个 workspace、又没有 userId 的 token，请求时没带 `x-workspace-id`。以前这种请求会被当成“所有租户”，能列出、读取并清空所有人的文档。有两个例外：一是单个共享的 `API_AUTH_TOKEN`（单租户模式，行为不变）；二是 `GET /admin/status`、`GET /admin/audit`、`GET /admin/index-versions`、`GET /auth/me` 和 `POST /admin/actions/:action`，但只对没有 workspace 列表的平台 admin token 放行，这些路由另有 admin 权限检查。另外，`API_AUTH_TOKENS` 里一个既没有 userId、workspaceId、workspaces，也没有 roles、permissions，又没开 `allowClientUserId` 的条目，会让服务拒绝启动（`API_AUTH_TOKEN_WITHOUT_SCOPE`）。
 
 多人部署可以继续使用 `API_AUTH_TOKENS`：
 

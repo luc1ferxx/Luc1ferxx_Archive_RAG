@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { getRequestAccessScope } from "../auth.js";
+import { runAsDatabaseSystem } from "../rag/postgres-tenant.js";
 import {
   getAdminActionPermissionForRequest,
   getAdminAuditReadPermission,
@@ -79,13 +80,27 @@ export const createAdminRouter = (services, { actionHandler } = {}) => {
     }),
     async (req, res) => {
       try {
-        return res.json(
-          await adminAuditService.listEvents({
-            accessScope: getRequestAccessScope(req),
+        const accessScope = getRequestAccessScope(req);
+        const listEvents = () =>
+          adminAuditService.listEvents({
+            accessScope,
             filters: req.query ?? {},
             limit: req.query?.limit,
             offset: req.query?.offset,
-          })
+          });
+
+        // Migration 032 limits a tenant to its own workspace's audit events
+        // (its own user's without a workspace). A platform admin, whose scope
+        // names no workspace and who has no workspace list, reads across
+        // tenants as before the policy, so that read runs as the owner, and
+        // only here, after the permission check above. A principal limited to
+        // a workspace list that names none keeps the tenant read.
+        const platformRead =
+          !String(accessScope.workspaceId ?? "").trim() &&
+          !(accessScope.allowedWorkspaceIds?.length > 0);
+
+        return res.json(
+          await (platformRead ? runAsDatabaseSystem(listEvents) : listEvents())
         );
       } catch {
         return res.status(500).json({
