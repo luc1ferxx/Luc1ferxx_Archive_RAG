@@ -559,6 +559,16 @@ test("API_AUTH_REQUIRE_WORKSPACE=true: platform credentials still use the platfo
 
     response = await call("member-token", "GET", "/documents");
     assert.equal(response.status, 200);
+
+    // GET /auth/me answers a workspace list without a header, so the SPA can
+    // offer the choice; the next request still has to name one.
+    response = await call("listed-manager-token", "GET", "/auth/me");
+    assert.equal(response.status, 200, JSON.stringify(response.json));
+    assert.equal(response.json.workspaceId, "");
+    assert.deepEqual([...response.json.workspaceIds].sort(), ["ws-a", "ws-b"]);
+
+    response = await call("listed-manager-token", "GET", "/documents");
+    assert.equal(response.status, 403);
   } finally {
     await harness.close();
   }

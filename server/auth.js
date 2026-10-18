@@ -294,8 +294,17 @@ const constantTimeEqual = (left, right) => {
 // /admin/workspaces), erased or exported, and no usage or audit read across
 // tenants, since naming a workspace makes the routes treat the caller as that
 // workspace's admin instead.
+//
+// GET /auth/me is waived for every principal, a workspace list included: it
+// answers only the caller's own identity, the workspaces its credential
+// lists and its permissions, and the SPA reads it without x-workspace-id to
+// learn which workspaces it may offer (src/auth/WorkspaceProvider.jsx).
+// Without the waiver a user of two workspaces could never pick one.
+const AUTH_ME_PATH = "/auth/me";
+
 const waivesWorkspaceRequirement = (req, principal = {}) =>
-  normalizeAccessPrincipalWorkspaceIds(principal).length === 0 && isTenantlessPlatformPath(req.path);
+  isTenantlessPlatformPath(req.path) &&
+  (req.path === AUTH_ME_PATH || normalizeAccessPrincipalWorkspaceIds(principal).length === 0);
 
 const resolveWorkspaceId = (req, principal = {}, { requireWorkspace = isApiAuthWorkspaceRequired() } = {}) => {
   const requestedWorkspaceId =
