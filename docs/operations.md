@@ -73,7 +73,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 2. **依赖**：
    - 模型：`sum by (model, status) (rate(archive_rag_model_calls_total{metering!="mirror"}[5m]))`、`archive_rag_model_circuits{state="open"}`。
    - 数据库：`sum by (sqlstate_class) (rate(archive_rag_postgres_statement_errors_total[5m]))`、`archive_rag_postgres_pool_clients{state="waiting"}`。
-3. **每个进程的健康**：`curl -s http://<host>:<PORT>/health` 看每个 `checks.*` 和它的 message，再看 `/ready`；拆分部署时 agent、检索层、模型网关也各看一遍。开启 API auth 时，要带上单个共享的 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据（`-H "x-api-key: <token>"`），否则只返回 `{status}`。
+3. **每个进程的健康**：`curl -s http://<host>:<PORT>/health` 看每个 `checks.*` 和它的 message，再看 `/ready`；拆分部署时 agent、检索层、模型网关也各看一遍。开启 API auth 时，要带上单个共享的 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据（`-H "x-api-key: <token>"`），否则只返回 `{status}`。检索层和模型网关的 `/health`（检索层还有 `/ready`）只对带内部身份 token 的请求返回完整报告，`curl` 只拿到 `{status}`；要看细节，在能签名的进程里用 service client 发系统探测（见 docs/deployment.md）。
 
 命令：日志里搜 `[service]` 和 `Failed to`；`cd server && npm run eval:llm-resilience` 在本地假模型上复现 429、503、挂起、主模型宕机等模型故障。慢烧时再看最近的变更：部署、模型或 prompt 变更、索引版本切换（`cd server && npm run vector:index -- status`）；开了 `RAG_OBSERVABILITY_ENABLED=true` 时 `cd server && npm run observability:report` 汇总记录下来的 trace。
 
@@ -103,7 +103,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 
 为什么条件里有 `half_open` 和"同一进程模型调用在失败"：模型挂起时，探测请求要等 `RAG_LLM_REQUEST_TIMEOUT_MS`（默认 120 秒）才结束，只看 `open` 告警会反复重置；守卫的状态只在下一次调用时更新，事故后没人再调用的模型（比如备用模型）会一直报 open，所以还要求有失败的调用。没有调用之后告警自己恢复。
 
-1. **模型端点在不在**：在同一台主机上 `curl -s <OPENAI_BASE_URL>/models`；拆分部署时看模型网关的 `GET /health`（按上游副本列出守卫状态）。
+1. **模型端点在不在**：在同一台主机上 `curl -s <OPENAI_BASE_URL>/models`；拆分部署时看模型网关的 `GET /health`（按上游副本列出守卫状态；只对带内部身份 token 的探测列出，见 docs/deployment.md）。
 2. **调用看到了什么**：`sum by (model, operation, status) (rate(archive_rag_model_calls_total[5m]))` 和 `archive_rag_model_call_duration_seconds`；挂起的请求在 `RAG_LLM_REQUEST_TIMEOUT_MS` 时结束。
 3. **备用模型和共享**：`OPENAI_CHAT_FALLBACK_MODEL` 有没有设、有没有在回答（`model="openai.chat.fallback"`）；设了 `RAG_SHARED_STATE=redis` 时所有实例共享熔断，否则每个实例各开各的。
 

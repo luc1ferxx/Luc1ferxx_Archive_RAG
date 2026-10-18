@@ -1,8 +1,6 @@
 import { getBm25B, getBm25K1 } from "./config.js";
-import {
-  buildTermFrequencyMap,
-  extractMeaningfulTokens,
-} from "./text-utils.js";
+import { selectSparseQueryTerms } from "./sparse-query-terms.js";
+import { buildTermFrequencyMap } from "./text-utils.js";
 import { getRagDataPath, readJsonFileSync, writeJsonFileSync, writeJsonFileAsync } from "./storage.js";
 
 // Okapi BM25 with Lucene's IDF. k1 / b come from RAG_BM25_K1 / RAG_BM25_B
@@ -260,7 +258,10 @@ export const clearSparseIndex = async () => {
 };
 
 export const searchSparseDocuments = async ({ queryText = "", docIds, topK }) => {
-  const queryTerms = [...new Set(extractMeaningfulTokens(queryText))];
+  // At most the first SPARSE_MAX_QUERY_TERMS distinct terms, chosen exactly
+  // as the pgvector route chooses them, so local and pgvector scores agree for
+  // a long query too and one query cannot cost a pass per term of thousands.
+  const queryTerms = selectSparseQueryTerms(queryText);
 
   if (queryTerms.length === 0) {
     return [];

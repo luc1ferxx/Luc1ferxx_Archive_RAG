@@ -407,6 +407,20 @@ export const flushTenantUsage = () => getTenantUsageLedger().flush();
 
 export const stopTenantUsageLedger = () => (defaultLedger ? defaultLedger.stop() : undefined);
 
+/**
+ * For a command that ends on its own (an operator CLI, an evaluation runner):
+ * stops the ledger, writing what it holds, and logs instead of throwing, so a
+ * failed write never replaces the command's own outcome. Call it before the
+ * PostgreSQL pool is closed.
+ */
+export const flushTenantUsageOnExit = async ({ logger = console } = {}) => {
+  try {
+    await stopTenantUsageLedger();
+  } catch (error) {
+    logger.error?.(`Failed to flush tenant usage: ${error instanceof Error ? error.message : error}`);
+  }
+};
+
 // Model calls whose usage the caller books itself, per tenant: the ingest
 // embedding batcher's merged requests (rag/ingest-embedding-batcher.js) run as
 // no tenant's call because they carry several tenants' texts, so the active

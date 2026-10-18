@@ -81,6 +81,83 @@ export const boundedIdList = (field, { maxCount, maxLength }) =>
       }
     });
 
+// Nesting deeper than this is refused before anything serializes or walks the
+// value recursively (a deep enough JSON body overflows the stack there).
+export const MAX_PAYLOAD_DEPTH = 32;
+
+// The nesting depth of a parsed JSON value (a scalar is 0), walked without
+// recursion and abandoned as soon as it passes `limit`.
+const exceedsDepth = (value, limit) => {
+  const pending = [[value, 0]];
+
+  while (pending.length > 0) {
+    const [current, depth] = pending.pop();
+
+    if (current === null || typeof current !== "object") {
+      continue;
+    }
+
+    if (depth + 1 > limit) {
+      return true;
+    }
+
+    for (const child of Array.isArray(current) ? current : Object.values(current)) {
+      pending.push([child, depth + 1]);
+    }
+  }
+
+  return false;
+};
+
+/** The UTF-8 size of `value` serialized as JSON (0 for undefined). */
+export const measureJsonBytes = (value) => {
+  const text = JSON.stringify(value);
+
+  return text === undefined ? 0 : Buffer.byteLength(text, "utf8");
+};
+
+/**
+ * Adds an issue to `context` when `value` (a parsed JSON value) is nested
+ * deeper than MAX_PAYLOAD_DEPTH or serializes to more than `maxBytes` bytes
+ * (0 = no size limit). Returns whether it passed.
+ */
+export const checkJsonPayloadBounds = (value, context, { field, maxBytes }) => {
+  if (exceedsDepth(value, MAX_PAYLOAD_DEPTH)) {
+    context.addIssue({ code: "custom", message: `${field} is nested more than ${MAX_PAYLOAD_DEPTH} levels deep.` });
+    return false;
+  }
+
+  const maximum = readLimit(maxBytes);
+
+  if (maximum > 0 && measureJsonBytes(value) > maximum) {
+    context.addIssue({ code: "custom", message: `${field} must be at most ${maximum} bytes as JSON.` });
+    return false;
+  }
+
+  return true;
+};
+
+// Any JSON value (absent passes) within checkJsonPayloadBounds.
+export const boundedJsonPayload = (field, { maxBytes }) =>
+  z.unknown().superRefine((value, context) => {
+    checkJsonPayloadBounds(value, context, { field, maxBytes });
+  });
+
+// An optional id that may arrive as a string or a number (an idempotency key,
+// which the routes turn into a string): at most `maxLength` characters once
+// stringified and trimmed. Any other type is refused.
+export const optionalBoundedKey = (field, { maxLength }) =>
+  z
+    .union([z.string(), z.number()], { error: `${field} must be a string.` })
+    .nullish()
+    .superRefine((value, context) => {
+      const maximum = readLimit(maxLength);
+
+      if (value != null && String(value).trim().length > maximum) {
+        context.addIssue({ code: "custom", message: `${field} must be at most ${maximum} characters.` });
+      }
+    });
+
 export const parseOrRespond = (schema, data, res) => {
   const result = schema.safeParse(data);
 

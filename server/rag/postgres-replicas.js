@@ -1,7 +1,12 @@
 import { AsyncResource } from "node:async_hooks";
 import pg from "pg";
 
-import { getPostgresDatabaseUrl, isPostgresSslEnabled } from "./config.js";
+import { getPostgresDatabaseUrl } from "./config.js";
+import {
+  assertConnectionStringHasNoTlsParameters,
+  buildPostgresSslOption,
+  getPostgresSslMode,
+} from "./postgres-tls.js";
 
 // Read replicas (POSTGRES_READ_REPLICA_URLS, off by default): which streaming
 // replica may answer a read, how far behind each one is, and what happened to
@@ -160,22 +165,49 @@ export const parseReadReplicaUrls = (value) => {
 
 const configCache = { key: null, value: null };
 
+// The primary's TLS settings (rag/postgres-tls.js) apply to every replica and
+// poll connection.
+const TLS_VARIABLES = Object.freeze([
+  "LONG_MEMORY_POSTGRES_SSL_ENABLED",
+  "POSTGRES_SSL_CA_FILE",
+  "POSTGRES_SSL_ENABLED",
+  "POSTGRES_SSL_MODE",
+]);
+
 /** The parsed configuration; throws on an invalid value (never a silent default). */
 export const getReadReplicaConfig = (env = process.env) => {
   const key = JSON.stringify([
     env[READ_REPLICA_URLS_ENV] ?? "",
     ...Object.values(CONFIG_VARIABLES).map(([name]) => env[name] ?? ""),
+    ...TLS_VARIABLES.map((name) => env[name] ?? ""),
   ]);
 
   if (env === process.env && configCache.key === key) {
     return configCache.value;
   }
 
+  const replicas = parseReadReplicaUrls(env[READ_REPLICA_URLS_ENV]);
+  // An invalid mode, an unreadable CA file or a replica URL with TLS
+  // parameters of its own is a configuration error like a bad URL: every
+  // read-only statement throws and the health entry is an error, never a
+  // replica connection with weaker TLS than the primary's. The CA file is read
+  // here, before any replica pool is built.
+  const ssl = buildPostgresSslOption({ connectionString: "", env, label: READ_REPLICA_URLS_ENV });
+
+  if (ssl) {
+    replicas.forEach((replica, index) =>
+      assertConnectionStringHasNoTlsParameters(replica.url, `${READ_REPLICA_URLS_ENV} entry ${index + 1}`)
+    );
+  }
+
   const value = {
-    replicas: parseReadReplicaUrls(env[READ_REPLICA_URLS_ENV]),
+    replicas,
     ...Object.fromEntries(
       Object.entries(CONFIG_VARIABLES).map(([field, variable]) => [field, readInteger(env, variable, DEFAULTS[field])])
     ),
+    ssl,
+    // Part of the runtime key too: verify-full and verify-ca serialize alike.
+    sslMode: ssl ? getPostgresSslMode(env) : null,
   };
 
   if (env === process.env) {
@@ -400,15 +432,21 @@ const getRuntime = () => {
   return runtime.state;
 };
 
-const sslOption = () => (isPostgresSslEnabled() ? { rejectUnauthorized: false } : undefined);
+const replicaPoolOptions = (url, config, { max }) => {
+  // Replica URLs were checked with the configuration; this covers the
+  // primary's poll pool, whose URL the runtime pool refuses the same way.
+  if (config.ssl) {
+    assertConnectionStringHasNoTlsParameters(url, "POSTGRES_DATABASE_URL");
+  }
 
-const replicaPoolOptions = (url, config, { max }) => ({
-  connectionString: url,
-  connectionTimeoutMillis: config.connectTimeoutMs,
-  keepAlive: true,
-  max,
-  ssl: sslOption(),
-});
+  return {
+    connectionString: url,
+    connectionTimeoutMillis: config.connectTimeoutMs,
+    keepAlive: true,
+    max,
+    ssl: config.ssl,
+  };
+};
 
 const getReplicaPool = (state, replica) => {
   if (!replica.pool) {

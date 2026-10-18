@@ -282,6 +282,40 @@ export const normalizeAgentRun = (run = {}) => {
  */
 export const LANGGRAPH_CHECKPOINT_RESULT_KEY = "__langGraphCheckpoint";
 
+// The PostgreSQL store's event ids are one BIGSERIAL every tenant shares
+// (migration 007), so the gaps between a run's ids would count every other
+// tenant's events. Every projection this service hands out numbers a run's
+// events per run instead, `${runId}:${n}` by id order, the form the in-memory
+// store assigns; ids in any other form (the in-memory store's) are kept. The
+// order is stable: every event insert takes the run row's lock first, so a
+// run's ids grow in commit order and a later event never ranks before an
+// earlier one. The stores keep the BIGSERIAL, which orders the event list and
+// pages the tenant export.
+const STORE_SEQUENCE_EVENT_ID = /^\d+$/;
+
+const compareBigInts = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+
+const toPublicRunEventIds = (runId, events) => {
+  const sequenceIds = events
+    .map((event) => event?.eventId)
+    .filter((eventId) => typeof eventId === "string" && STORE_SEQUENCE_EVENT_ID.test(eventId))
+    .map((eventId) => BigInt(eventId))
+    .sort(compareBigInts);
+
+  if (sequenceIds.length === 0) {
+    return events;
+  }
+
+  const ordinals = new Map(sequenceIds.map((eventId, index) => [eventId, index + 1]));
+  const publicRunId = normalizeText(runId);
+
+  return events.map((event) =>
+    typeof event?.eventId === "string" && STORE_SEQUENCE_EVENT_ID.test(event.eventId)
+      ? { ...event, eventId: `${publicRunId}:${ordinals.get(BigInt(event.eventId))}` }
+      : event
+  );
+};
+
 // The LangGraph record is stripped from every projection, including the ones
 // that keep the graph checkpoint for an internal decision: the record holds
 // serialized LangGraph channel state that no caller of this service reads,
@@ -297,6 +331,10 @@ const stripInternalRunFields = (run = {}, { includeGraphCheckpoint = false } = {
   } = run;
 
   const result = structuredClone(publicRun);
+
+  if (Array.isArray(result.events)) {
+    result.events = toPublicRunEventIds(result.runId, result.events);
+  }
 
   if (result.result) {
     if (!includeGraphCheckpoint) {

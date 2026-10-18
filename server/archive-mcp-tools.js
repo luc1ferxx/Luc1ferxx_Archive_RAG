@@ -211,3 +211,47 @@ export const toMcpTextContent = (payload) => ({
     },
   ],
 });
+
+// How long the way out waits for the usage ledger's last write, so a database
+// that does not answer cannot hold up the client that closed the server.
+export const ARCHIVE_MCP_SHUTDOWN_FLUSH_TIMEOUT_MS = 5000;
+
+/**
+ * The server's way out (its client closed stdin, or SIGTERM / SIGINT): what
+ * the tool calls booked in the tenant usage ledger (rag/tenant-usage.js: the
+ * model tokens and cost of every archive_ask) waits in memory for a flush
+ * timer that does not keep the process alive, so `stopLedger` writes it first,
+ * then `exit(code)`. Runs once however often it is called; a ledger that fails
+ * or takes longer than `timeoutMs` is logged and the server exits anyway.
+ */
+export const createArchiveMcpShutdown = ({
+  exit,
+  logger = console,
+  stopLedger,
+  timeoutMs = ARCHIVE_MCP_SHUTDOWN_FLUSH_TIMEOUT_MS,
+} = {}) => {
+  let stopping = null;
+
+  return (code = 0) => {
+    stopping ??= (async () => {
+      let timer = null;
+
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => stopLedger?.()),
+          new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+          }),
+        ]);
+      } catch (error) {
+        logger.error?.(`Failed to flush tenant usage: ${error instanceof Error ? error.message : error}`);
+      } finally {
+        clearTimeout(timer);
+      }
+
+      exit(code);
+    })();
+
+    return stopping;
+  };
+};

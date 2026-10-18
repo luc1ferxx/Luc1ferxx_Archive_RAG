@@ -28,6 +28,7 @@ import { pathToFileURL } from "url";
 
 import { resetPostgresPool } from "./rag/postgres.js";
 import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
+import { flushTenantUsageOnExit } from "./rag/tenant-usage.js";
 import {
   activateIndexVersion,
   assertIndexVersionsSupported,
@@ -427,5 +428,11 @@ if (invokedDirectly) {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 1;
     })
-    .finally(() => resetPostgresPool());
+    // A build, resume or validation probe embeds through the model, which
+    // books its tokens in the tenant usage ledger: write them before the pool
+    // the write needs is closed.
+    .finally(async () => {
+      await flushTenantUsageOnExit();
+      await resetPostgresPool();
+    });
 }

@@ -17,6 +17,7 @@ import { resetAgentExperienceMemoryStore } from "../rag/agent-experience-memory.
 import { clearLongMemories, resetLongMemoryStore } from "../rag/long-memory.js";
 import { createInMemoryTaskStore } from "../rag/tasks.js";
 import { MODEL_ROUTE_IDS } from "../rag/model-providers/schema.js";
+import { flushTenantUsageOnExit } from "../rag/tenant-usage.js";
 import { attachEvaluationEvidence } from "./eval-evidence.js";
 import { loadGuardedGraphSignal } from "./runtime-smoke-graph-signal.js";
 
@@ -471,6 +472,11 @@ const main = async () => {
     if (server) {
       await server.close();
     }
+
+    // The smoke's real model calls and /chat requests were booked in the
+    // tenant usage ledger, which this process never stops through
+    // app.locals.stop: write them before the command ends.
+    await flushTenantUsageOnExit();
 
     try {
       await clearLongMemories({ userId });

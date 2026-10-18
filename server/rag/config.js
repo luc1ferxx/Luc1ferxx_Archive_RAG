@@ -1161,10 +1161,12 @@ export const getAgentExperienceMemoryConfigStatus = () => {
 export const isAgentExperienceMemoryEnabled = () =>
   getAgentExperienceMemoryConfigStatus().enabled;
 
-export const isPostgresSslEnabled = () =>
+// TLS on or off; how the certificate is checked is POSTGRES_SSL_MODE
+// (rag/postgres-tls.js).
+export const isPostgresSslEnabled = (env = process.env) =>
   toBoolean(
-    process.env.POSTGRES_SSL_ENABLED,
-    toBoolean(process.env.LONG_MEMORY_POSTGRES_SSL_ENABLED, false)
+    env.POSTGRES_SSL_ENABLED,
+    toBoolean(env.LONG_MEMORY_POSTGRES_SSL_ENABLED, false)
   );
 
 // Row-level security: "enforce" runs every query issued for a scoped request or
@@ -1450,6 +1452,16 @@ export const getChatMaxDocIds = () => {
 // The longest docId (each entry of docIds, or docId) and sessionId accepted.
 export const getChatMaxIdChars = () =>
   Math.floor(toPositiveNumber(process.env.CHAT_MAX_ID_CHARS, 256));
+
+// The task, trigger and agent-run routes (routes/tasks.js, checked at the edge
+// too) take the question and id limits above, and bound every free-form JSON
+// they persist or hand on (an action's payload, a trigger's event and input,
+// an agent task's preferences) by its serialized size: at most
+// TASK_MAX_PAYLOAD_BYTES UTF-8 bytes (default 256 KiB, 0 = no limit; the
+// parser's 2 MB still applies). An agent task's docIds are bounded as /chat's
+// are and do not count toward it.
+export const getTaskMaxPayloadBytes = () =>
+  Math.floor(toNonNegativeNumber(process.env.TASK_MAX_PAYLOAD_BYTES, 262144));
 
 // --- Per-tenant HTTP limits (rag/tenant-limits.js) ---------------------------
 // Counted after API auth, per tenant (the workspace, else the user, else the

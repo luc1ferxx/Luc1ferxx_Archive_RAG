@@ -550,7 +550,9 @@ test("replicas share the load and each has its own breaker; a refused connection
   assert.ok(second.requests.length >= 2, `second replica took ${second.requests.length}`);
   assert.equal(first.requests.length + second.requests.length, 6);
 
-  const health = await (await fetch(`${gateway.url}/health`)).json();
+  const health = await (
+    await fetch(`${gateway.url}/health`, { headers: { [SERVICE_TOKEN_HEADER]: signToken({ system: true }) } })
+  ).json();
   const refusedReplica = health.upstreams.embedding.replicas.find((replica) =>
     replica.url.startsWith(refusedUrl)
   );
@@ -988,13 +990,28 @@ test("a stream that breaks, stalls or cannot be parsed fails with the gateway's 
   });
 });
 
-test("health reports replicas, guard state and quotas without secrets", async (t) => {
+test("health reports replicas, guard state and quotas without secrets, to a signed probe only", async (t) => {
   withEnv(t, BASE_ENV);
   const upstream = await startUpstream(t);
   withEnv(t, { OPENAI_BASE_URL: upstream.baseUrl });
   const gateway = await startGateway(t);
+  const probe = (headers = {}) => fetch(`${gateway.url}/health`, { headers });
 
-  const response = await fetch(`${gateway.url}/health`);
+  // Anyone else, a container healthcheck among them, gets the status alone,
+  // with the same status code: no token, a token for another tier, a forged
+  // or garbled one.
+  for (const headers of [
+    {},
+    { [SERVICE_TOKEN_HEADER]: signToken({ audience: "retrieval", system: true }) },
+    { [SERVICE_TOKEN_HEADER]: "not-a-token" },
+  ]) {
+    const unsigned = await probe(headers);
+
+    assert.equal(unsigned.status, 200);
+    assert.deepEqual(await unsigned.json(), { status: "ok" });
+  }
+
+  const response = await probe({ [SERVICE_TOKEN_HEADER]: signToken({ system: true }) });
   const text = await response.text();
   const health = JSON.parse(text);
 

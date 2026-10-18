@@ -1415,6 +1415,43 @@ export const requireServiceIdentity = ({
 };
 
 /**
+ * For a route that answers everyone but tells more to an internal caller (the
+ * retrieval tier's and the model gateway's /health and /ready): returns
+ * `(req) => Promise<identity | null>`, the request's verified identity exactly
+ * as requireServiceIdentity({ purpose: "probe", allowSystem: true }) would
+ * accept it (audience, SERVICE_CALL_POLICY probers, request binding, replay
+ * cache), or null for a missing or refused token. It never answers the
+ * request: the route decides what an unverified caller sees.
+ */
+export const createOptionalServiceIdentityReader = ({ audience, env, issuers, now, replayCache } = {}) => {
+  const verify = requireServiceIdentity({
+    allowSystem: true,
+    audience,
+    env,
+    issuers,
+    now,
+    purpose: "probe",
+    replayCache,
+  });
+
+  return (req) => {
+    if (!readHeader(req, SERVICE_TOKEN_HEADER)) {
+      return Promise.resolve(null);
+    }
+
+    return new Promise((resolve) => {
+      // The refusal requireServiceIdentity would send, swallowed.
+      const refused = {
+        json: () => resolve(null),
+        status: () => refused,
+      };
+
+      verify(req, refused, () => resolve(req.serviceIdentity ?? null));
+    });
+  };
+};
+
+/**
  * The JSON parser's `verify` hook on an internal tier
  * (express.json({ verify: verifyServiceRequestBody })): for a request whose
  * token is bound, the body bytes must hash to the digest the token names, and

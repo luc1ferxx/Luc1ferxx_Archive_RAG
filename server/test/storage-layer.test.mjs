@@ -30,7 +30,9 @@ import {
   forceRebuildSparseStatistics,
 } from "../rag/sparse-store.js";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
+import { selectSparseQueryTerms, SPARSE_MAX_QUERY_TERMS } from "../rag/sparse-query-terms.js";
 import { buildTermSet } from "../rag/text-utils.js";
+import { buildTsQuery, PGVECTOR_SPARSE_MAX_QUERY_TERMS } from "../rag/vector-store-pgvector.js";
 
 const originalDataDirectory = getRagDataDirectory();
 const EMBEDDING_DIMENSIONS = 64;
@@ -291,6 +293,39 @@ test("addDocumentsToSparseIndex persists and allows search", async () => {
 
   assert.ok(results.length > 0);
   assert.equal(results[0].document.metadata.docId, "sparse1");
+});
+
+test("a local sparse query keeps the same first 64 distinct terms the pgvector route keeps", async () => {
+  // 100 distinct terms, each repeated: the first 64 distinct ones are scored,
+  // exactly as buildTsQuery selects them.
+  const terms = Array.from({ length: 100 }, (_, index) => `term${String(index).padStart(3, "0")}`);
+  const queryText = [...terms, ...terms].join(" ");
+
+  assert.equal(SPARSE_MAX_QUERY_TERMS, 64);
+  assert.equal(PGVECTOR_SPARSE_MAX_QUERY_TERMS, SPARSE_MAX_QUERY_TERMS);
+  assert.deepEqual(selectSparseQueryTerms(queryText), terms.slice(0, 64));
+  assert.deepEqual(selectSparseQueryTerms(queryText), buildTsQuery(queryText).tokens);
+
+  await addDocumentsToSparseIndex({
+    documents: [
+      { id: "cap-early:0", metadata: { docId: "cap", fileName: "a.pdf" }, pageContent: "term002 early clause." },
+      { id: "cap-late:0", metadata: { docId: "cap", fileName: "b.pdf" }, pageContent: "term070 late clause." },
+    ],
+  });
+
+  const results = await searchSparseDocuments({ docIds: ["cap"], queryText, topK: 5 });
+
+  // A term past the cap matches nothing; the overlap is over the 64 kept.
+  assert.deepEqual(results.map((result) => result.document.id), ["cap-early:0"]);
+  assert.equal(results[0].keywordScore, 1 / 64);
+
+  // Below the cap nothing changes: the late term alone still finds its chunk.
+  assert.deepEqual(
+    (await searchSparseDocuments({ docIds: ["cap"], queryText: "term070 clause", topK: 5 })).map(
+      (result) => result.document.id
+    ).sort(),
+    ["cap-early:0", "cap-late:0"]
+  );
 });
 
 test("removeDocumentsFromSparseIndex removes by docId", async () => {

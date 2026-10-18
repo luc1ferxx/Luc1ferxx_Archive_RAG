@@ -163,8 +163,8 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 | `model-gateway` | `MODEL_GATEWAY_PORT`，否则 `PORT`，否则 5003 | OpenAI 兼容的模型服务：重试、退避、切换备用模型、并发上限、熔断、用量计量、按 workspace 的配额，并在多个上游副本之间分配请求。 | chat、embedding、重排的上游 |
 
 - `retrieval` 和 `model-gateway` 也有单独的入口：`node retrieval-service.mjs`、`node model-gateway.mjs`。两种启动方式做同样的启动检查；用 `node server.js` 启动时，停机有 `SERVICE_SHUTDOWN_GRACE_MS` 的上限，单独入口没有。
-- 每个角色都有 `GET /livez`（只说明进程在）、`GET /health` 和 `GET /ready`，都不需要身份；设了 `METRICS_ENABLED=true` 时，每个角色还在单独的端口上提供 `/metrics`（见下面的"指标与告警"）。api 的 `/health` 多两项：`checks.serviceTopology`，以及逐个探测 agent 副本的 `checks.agentService`。agent 层不可达时这一项是 `warning`，不会让 `/ready` 变成 503，所以公网入口留在负载均衡里，文档和上传照常可用，Agent 相关接口返回 503。
-- 模型网关的 `GET /health` 列出每个上游副本的在途数、熔断状态和配额设置；`GET /usage` 按租户列出用量，只接受系统身份、带 `admin` claim 或带 `admin.status.read` 权限的内部 token，不对公网开放。
+- 每个角色都有 `GET /livez`（只说明进程在）、`GET /health` 和 `GET /ready`，状态码都不需要身份（检索层和模型网关的完整报告要内部身份，见下）；设了 `METRICS_ENABLED=true` 时，每个角色还在单独的端口上提供 `/metrics`（见下面的"指标与告警"）。api 的 `/health` 多两项：`checks.serviceTopology`，以及逐个探测 agent 副本的 `checks.agentService`。agent 层不可达时这一项是 `warning`，不会让 `/ready` 变成 503，所以公网入口留在负载均衡里，文档和上传照常可用，Agent 相关接口返回 503。
+- 检索层的 `GET /health`、`GET /ready` 和模型网关的 `GET /health` 对谁都返回同样的状态码，但完整报告（检索层：向量库、索引版本、query adapter、拓扑和密钥 id；网关：每个上游副本的在途数、熔断状态、配额设置和密钥 id）只给带有效内部身份 token 的请求：audience 是这一层，issuer 在 `SERVICE_CALL_POLICY` 允许探测这一层的列表里，系统 token 也算，按 `requireServiceIdentity` 的规则校验（请求绑定、防重放）。其他调用方（包括容器健康检查）只拿到 `{status}`。要看细节，用 service client 签名请求（`createServiceClient({ audience }).request({ path: "/health", system: true })`）。`GET /usage` 按租户列出用量，只接受系统身份、带 `admin` claim 或带 `admin.status.read` 权限的内部 token，不对公网开放。
 
 ### 前提
 
@@ -300,7 +300,7 @@ node service-keys.mjs generate ingest-worker   # 只有独立入库 worker 调�
 - agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康，跳过 5 秒。
 - 检索层或模型网关停掉时，`/chat` 返回 503 `AGENT_DEPENDENCY_UNAVAILABLE`（带 `Retry-After` 和 `dependency`），运行记为可重试的失败；单体里模型或数据库故障时也一样。以前这种情况返回 200，请用户批准 Web 搜索。
 - 各进程的 `/metrics` 和 `deploy/prometheus/` 的告警规则没有在真实的 Prometheus 里加载过；`compose.services.yml` 没有设置 `METRICS_*`。
-- 开启 API auth 时，api 和 agent 层的 `/health`、`/ready`、`/livez` 只对单个共享 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据返回完整报告，其他人只拿到 `{status}`；检索层和模型网关的 `/health` 仍不需要认证，会列出内部副本地址和密钥 id（不含密钥本身），这两层的端口不能对外暴露。api 的 `/health` 每次都会探测每个 agent 副本。
+- 开启 API auth 时，api 和 agent 层的 `/health`、`/ready`、`/livez` 只对单个共享 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据返回完整报告，其他人只拿到 `{status}`；检索层和模型网关的 `/health` 不看 API auth，只对带内部身份 token 的探测返回完整报告（见上面），其他人只拿到 `{status}`。内部端口仍不能对外暴露。api 的 `/health` 每次都会探测每个 agent 副本。
 - 拆分模式下检索请求有上限（`RETRIEVAL_SERVICE_MAX_*`），超长问题或配得过大的 topK 返回 400，单体没有这些限制。
 
 ## OIDC 登录和 RBAC（可选）

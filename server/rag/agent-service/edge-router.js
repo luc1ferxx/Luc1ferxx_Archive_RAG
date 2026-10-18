@@ -7,15 +7,18 @@ import {
 } from "../../auth.js";
 import { validateChatRequest } from "../../routes/chat.js";
 import {
-  agentTaskBodySchema,
-  runActionSchema,
-  runIdSchema,
-  runStepRetrySchema,
-  taskActionSchema,
-  taskIdSchema,
-  triggerIdSchema,
+  validateAgentTaskRequest,
+  validateRunActionRequest,
+  validateRunIdRequest,
+  validateRunListRequest,
+  validateRunRecoveryActionRequest,
+  validateRunStepRetryRequest,
+  validateTaskActionRequest,
+  validateTaskIdRequest,
+  validateTaskListRequest,
+  validateTriggerDispatchRequest,
+  validateTriggerListRequest,
 } from "../../routes/tasks.js";
-import { parseOrRespond } from "../../routes/validation.js";
 import { getAdminActionPermissionForRequest } from "../admin-authorization.js";
 import { getAgentServiceTimeoutMs } from "../config.js";
 import { DEFAULT_OUTAGE_RETRY_AFTER_SECONDS } from "../dependency-outage.js";
@@ -91,11 +94,11 @@ const DONE_EVENT_PATTERN = /(?:^|\n)event: done\n/u;
 // smaller.
 const MAX_PENDING_EVENT_BYTES = 16 * 1024 * 1024;
 
-const validateParams = (schema) => (req, res) => parseOrRespond(schema, req.params, res);
-
 /**
  * Every route the agent tier serves, with the check the edge runs before
- * forwarding it. It mirrors routes/chat.js and routes/tasks.js; a test fails
+ * forwarding it: the monolith's own validators (routes/chat.js,
+ * routes/tasks.js), so the edge refuses past the same input bounds. It mirrors
+ * routes/chat.js and routes/tasks.js; a test fails
  * when either gains a route this table does not forward. `idempotent: false`
  * marks a GET that is not a read: GET /chat runs the agent (a run record,
  * session and long-term memory writes), so it is never sent to a second
@@ -105,41 +108,41 @@ export const AGENT_EDGE_ROUTES = Object.freeze([
   { idempotent: false, method: "get", path: "/chat", validate: validateChatRequest },
   { method: "post", path: "/chat", validate: validateChatRequest },
   { method: "post", path: "/chat/stream", stream: true, validate: validateChatRequest },
-  { method: "get", path: "/tasks" },
-  { method: "get", path: "/tasks/:taskId", validate: validateParams(taskIdSchema) },
+  { method: "get", path: "/tasks", validate: validateTaskListRequest },
+  { method: "get", path: "/tasks/:taskId", validate: validateTaskIdRequest },
   {
     method: "post",
     path: "/tasks/:taskId/actions/:action",
-    validate: validateParams(taskActionSchema),
+    validate: validateTaskActionRequest,
   },
   {
     method: "post",
     path: "/agent-tasks",
-    validate: (req, res) => parseOrRespond(agentTaskBodySchema, req.body ?? {}, res),
+    validate: validateAgentTaskRequest,
   },
-  { method: "get", path: "/agent-triggers" },
+  { method: "get", path: "/agent-triggers", validate: validateTriggerListRequest },
   {
     method: "post",
     path: "/agent-triggers/:triggerId/dispatch",
-    validate: validateParams(triggerIdSchema),
+    validate: validateTriggerDispatchRequest,
   },
-  { method: "get", path: "/agent-runs" },
+  { method: "get", path: "/agent-runs", validate: validateRunListRequest },
   { method: "get", path: "/agent-runs/recovery" },
-  { method: "get", path: "/agent-runs/:runId", validate: validateParams(runIdSchema) },
+  { method: "get", path: "/agent-runs/:runId", validate: validateRunIdRequest },
   {
     method: "post",
     path: "/agent-runs/:runId/recovery/actions/:action",
-    validate: validateParams(runActionSchema),
+    validate: validateRunRecoveryActionRequest,
   },
   {
     method: "post",
     path: "/agent-runs/:runId/actions/:action",
-    validate: validateParams(runActionSchema),
+    validate: validateRunActionRequest,
   },
   {
     method: "post",
     path: "/agent-runs/:runId/steps/:stepId/actions/retry",
-    validate: validateParams(runStepRetrySchema),
+    validate: validateRunStepRetryRequest,
   },
   { method: "get", path: "/capabilities" },
 ]);

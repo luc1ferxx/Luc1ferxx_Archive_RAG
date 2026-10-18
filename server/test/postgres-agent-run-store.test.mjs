@@ -2592,3 +2592,43 @@ test("postgres agent run approval snapshots cannot be written without a bound ev
   assert.equal(persistedRun.revision, 0);
   assert.equal(persistedRun.status, AGENT_RUN_STATUSES.running);
 });
+
+test("public run projections number a run's events per run; the store keeps the shared sequence", async () => {
+  // The fake database hands out one event id sequence to every tenant, as
+  // the BIGSERIAL of migration 007 does: interleaved writes leave gaps in
+  // each run's ids that count the other tenant's events.
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const agentRunService = createAgentRunService({ agentRunStore: store });
+  const bob = { userId: "bob", workspaceId: "workspace-b" };
+
+  await agentRunService.createRun({ accessScope, goal: "Alice's run", runId: "run-alice" });
+  await agentRunService.createRun({ accessScope: bob, goal: "Bob's run", runId: "run-bob" });
+  await agentRunService.appendRunEvent({ accessScope: bob, runId: "run-bob", type: "run_prepared" });
+  await agentRunService.appendRunEvent({ accessScope: bob, runId: "run-bob", type: "run_prepared" });
+  await agentRunService.appendRunEvent({ accessScope, runId: "run-alice", type: "run_prepared" });
+  await agentRunService.completeRun({ accessScope, result: { answer: "Done" }, runId: "run-alice" });
+
+  const stored = await store.get({ accessScope, runId: "run-alice" });
+
+  // The store, and everything that orders or pages by it, keeps the sequence.
+  assert.deepEqual(stored.events.map(({ eventId }) => eventId), ["1", "5", "6"]);
+
+  const publicRun = await agentRunService.getRun({ accessScope, runId: "run-alice" });
+  const bobRun = await agentRunService.getRun({ accessScope: bob, runId: "run-bob" });
+
+  assert.deepEqual(publicRun.events.map(({ eventId, type }) => [eventId, type]), [
+    ["run-alice:1", "run_created"],
+    ["run-alice:2", "run_prepared"],
+    ["run-alice:3", "run_completed"],
+  ]);
+  assert.deepEqual(bobRun.events.map(({ eventId }) => eventId), ["run-bob:1", "run-bob:2", "run-bob:3"]);
+  // Write results are projected the same way, and a re-read agrees.
+  assert.deepEqual(
+    (await agentRunService.completeRun({ accessScope: bob, result: {}, runId: "run-bob" })).events.map(
+      ({ eventId }) => eventId
+    ),
+    ["run-bob:1", "run-bob:2", "run-bob:3", "run-bob:4"]
+  );
+  assert.deepEqual(await agentRunService.getRun({ accessScope, runId: "run-alice" }), publicRun);
+});

@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createArchiveMcpShutdown } from "../archive-mcp-tools.js";
 import { runIngestWorkerProcess } from "../ingest-worker.mjs";
 import { runModelGatewayProcess } from "../model-gateway.mjs";
 import { runRetrievalServiceProcess } from "../retrieval-service.mjs";
@@ -220,6 +221,139 @@ test("archive-ingest writes the usage ledger before the command ends", async () 
       assert.equal(code, argv.length === 0 ? 1 : 0, output);
       assert.match(output, /Usage: node archive-ingest\.mjs/);
       assert.equal(output.match(/LEDGER_STOPPED/g)?.length, 1, `${argv.join(" ") || "(no files)"}: ${output}`);
+    }
+  } finally {
+    await rm(workDirectory, { force: true, recursive: true });
+  }
+});
+
+test("the vector index commands write the usage ledger before they end", async () => {
+  // Builds, resumes, validation probes and re-embedding call the embedding
+  // model, which books its tokens in the ledger. --help embeds nothing; the
+  // recorder marks the ledger's stop on the way out.
+  const workDirectory = await mkdtemp(path.join(os.tmpdir(), "usage-flush-vector-"));
+  const preload = new URL("./usage-ledger-shutdown-flush/ledger-stop-marker.mjs", import.meta.url).href;
+  const environment = { HOME: process.env.HOME ?? workDirectory, PATH: process.env.PATH ?? "" };
+
+  try {
+    for (const [command, usage] of [
+      ["vector-index.mjs", /Usage: node vector-index\.mjs/],
+      ["vector-reindex.mjs", /Usage: node vector-reindex\.mjs/],
+    ]) {
+      const child = spawn(process.execPath, ["--import", preload, path.join(SERVER_DIRECTORY, command), "--help"], {
+        cwd: workDirectory,
+        env: environment,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let output = "";
+
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+      });
+      child.stderr.on("data", (chunk) => {
+        output += chunk;
+      });
+
+      const code = await new Promise((resolve) => child.on("close", resolve));
+
+      assert.equal(code, 0, `${command}: ${output}`);
+      assert.match(output, usage);
+      assert.equal(output.match(/LEDGER_STOPPED/g)?.length, 1, `${command}: ${output}`);
+    }
+  } finally {
+    await rm(workDirectory, { force: true, recursive: true });
+  }
+});
+
+test("the archive MCP server's way out stops the ledger once, then exits, even when the ledger fails or hangs", async () => {
+  const run = async (stopLedger, { timeoutMs } = {}) => {
+    const order = [];
+    const logger = createLogger();
+    const shutdown = createArchiveMcpShutdown({
+      exit: (code) => order.push(`exit ${code}`),
+      logger,
+      stopLedger: async () => {
+        order.push("ledger stopped");
+        await stopLedger();
+      },
+      timeoutMs,
+    });
+
+    // The client closing stdin and a SIGTERM at once: one way out.
+    await Promise.all([shutdown(0), shutdown(0), shutdown(1)]);
+    return { errors: logger.lines.error, order };
+  };
+
+  assert.deepEqual(await run(async () => {}), { errors: [], order: ["ledger stopped", "exit 0"] });
+
+  const failed = await run(async () => {
+    throw new Error("database away");
+  });
+
+  assert.deepEqual(failed.order, ["ledger stopped", "exit 0"]);
+  assert.match(failed.errors.join("\n"), /Failed to flush tenant usage: database away/);
+
+  const hung = await run(() => new Promise(() => {}), { timeoutMs: 20 });
+
+  assert.deepEqual(hung.order, ["ledger stopped", "exit 0"]);
+  assert.match(hung.errors.join("\n"), /timed out after 20 ms/);
+});
+
+test("the archive MCP server writes the usage its tool calls booked when its client leaves or it is stopped", async () => {
+  // The real entry point as a child process, whose ledger is a real one that
+  // prints its writes (--import, before the server's own modules load) and
+  // already holds one archive_ask's tokens. It is stopped the two ways a
+  // client stops it: closing stdin, and SIGTERM.
+  const workDirectory = await mkdtemp(path.join(os.tmpdir(), "usage-flush-mcp-"));
+  const preload = new URL("./usage-ledger-shutdown-flush/ledger-recorder.mjs", import.meta.url).href;
+  const environment = {
+    HOME: process.env.HOME ?? workDirectory,
+    PATH: process.env.PATH ?? "",
+    RAG_DATA_DIRECTORY: path.join(workDirectory, "data"),
+  };
+  const expectedRows = `LEDGER_ROWS ${JSON.stringify([
+    { metric: "model_tokens", userId: "alice", value: 42, workspaceId: "ws-a" },
+  ])}`;
+
+  try {
+    for (const stop of ["close stdin", "SIGTERM"]) {
+      const child = spawn(process.execPath, ["--import", preload, path.join(SERVER_DIRECTORY, "archive-mcp-server.js")], {
+        cwd: workDirectory,
+        env: environment,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stderr = "";
+      const exited = new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
+      const timer = setTimeout(() => child.kill("SIGKILL"), 30000);
+
+      await new Promise((resolve, reject) => {
+        child.on("error", reject);
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+
+          if (stderr.includes("running on stdio")) {
+            resolve();
+          }
+        });
+        exited.then(() => reject(new Error(`the server exited before it served: ${stderr}`)));
+      });
+
+      assert.doesNotMatch(stderr, /LEDGER_ROWS/, "nothing is written while it serves");
+
+      if (stop === "SIGTERM") {
+        child.kill("SIGTERM");
+      } else {
+        child.stdin.end();
+      }
+
+      const { code, signal } = await exited;
+
+      clearTimeout(timer);
+      assert.equal(signal, null, `${stop}: ${stderr}`);
+      assert.equal(code, 0, `${stop}: ${stderr}`);
+      assert.equal(stderr.split("\n").filter((line) => line.startsWith("LEDGER_ROWS")).length, 1, `${stop}: ${stderr}`);
+      assert.ok(stderr.includes(expectedRows), `${stop}: ${stderr}`);
     }
   } finally {
     await rm(workDirectory, { force: true, recursive: true });

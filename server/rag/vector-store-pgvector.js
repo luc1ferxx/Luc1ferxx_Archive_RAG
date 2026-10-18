@@ -19,6 +19,7 @@ import { embedTexts } from "./openai.js";
 import { canRouteReadToReplica, getEnforcedDatabaseTenant } from "./postgres.js";
 import { buildDocumentFreshnessGuard } from "./postgres-replicas.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
+import { selectSparseQueryTerms, SPARSE_MAX_QUERY_TERMS } from "./sparse-query-terms.js";
 import { buildTermSet, extractMeaningfulTokens } from "./text-utils.js";
 import {
   PGVECTOR_SPARSE_SEARCH_SIGNATURE,
@@ -258,20 +259,14 @@ const assertDimensions = ({ actual, context, space = getConfiguredEmbeddingSpace
   }
 };
 
-// The most distinct terms one sparse query sends. Without a cap a long
-// question (or a retrieval-tier query of up to RETRIEVAL_SERVICE_MAX_QUERY_CHARS)
-// built an OR tsquery of thousands of terms, every one of which the GIN index
-// and the BM25 statistics are probed for. A question names its subject early,
-// so the first terms are kept, in their order. The local BM25 store
-// (sparse-store.js) has no such cap, so its scores equal this route's only for
-// a query of at most this many distinct terms.
-export const PGVECTOR_SPARSE_MAX_QUERY_TERMS = 64;
+// The most distinct terms one sparse query sends (sparse-query-terms.js): the
+// first ones, in their order. The local BM25 store (sparse-store.js) selects
+// its terms the same way, so its scores equal this route's for a query of any
+// length.
+export const PGVECTOR_SPARSE_MAX_QUERY_TERMS = SPARSE_MAX_QUERY_TERMS;
 
 export const buildTsQuery = (queryText) => {
-  const tokens = [...new Set(extractMeaningfulTokens(queryText))].slice(
-    0,
-    PGVECTOR_SPARSE_MAX_QUERY_TERMS
-  );
+  const tokens = selectSparseQueryTerms(queryText);
 
   if (tokens.length === 0) {
     return null;

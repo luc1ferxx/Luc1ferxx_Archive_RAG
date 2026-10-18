@@ -23,6 +23,7 @@ import { z } from "zod";
 import chat, { initializeDocumentRegistry, listDocuments } from "./chat.js";
 import { resetDocumentRegistry } from "./rag/doc-registry.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
+import { stopTenantUsageLedger } from "./rag/tenant-usage.js";
 import { resetVectorStore } from "./rag/vector-store.js";
 import {
   applyStandaloneProfile,
@@ -33,6 +34,7 @@ import {
   ARCHIVE_MCP_SCOPE_REQUIRED,
   assertArchiveMcpScope,
   buildEmptyArchiveResult,
+  createArchiveMcpShutdown,
   formatAskResult,
   formatDocumentList,
   formatToolError,
@@ -177,6 +179,21 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Every way out writes the usage the tool calls booked first: the client
+  // closing stdin (the transport does not watch for it, the process would
+  // just end) and the signals a client or supervisor stops it with.
+  const shutdown = createArchiveMcpShutdown({
+    exit: (code) => process.exit(code),
+    logger: console,
+    stopLedger: stopTenantUsageLedger,
+  });
+
+  process.stdin.once("end", () => void shutdown(0));
+  process.stdin.once("close", () => void shutdown(0));
+  process.once("SIGTERM", () => void shutdown(0));
+  process.once("SIGINT", () => void shutdown(0));
+
   console.error(
     standaloneProfile
       ? "Archive RAG MCP Server running on stdio (standalone: filesystem registry, no PostgreSQL)"

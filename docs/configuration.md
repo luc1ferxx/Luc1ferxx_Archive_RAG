@@ -144,7 +144,9 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `POSTGRES_DATABASE_URL` | 空 | 文档、会话记忆和长期记忆共用连接。 |
-| `POSTGRES_SSL_ENABLED` | `false` | PostgreSQL 是否启用 SSL。 |
+| `POSTGRES_SSL_ENABLED` | `false` | PostgreSQL 是否启用 SSL。关闭时什么都不变：不传 ssl 选项，连接串里自己的 `sslmode`（若有）按 node-pg 的规则生效。 |
+| `POSTGRES_SSL_MODE` | `verify-full` | SSL 开启时怎样校验服务端证书，作用于运行时连接池、角色拆分的 owner 池、LISTEN 专用连接和只读副本的读池、轮询池。`verify-full`：校验证书链和主机名；`verify-ca`：只校验证书链、不比对主机名，必须配 `POSTGRES_SSL_CA_FILE`（公共 CA 签出的链证明不了是谁的服务器）；`no-verify`：不校验（这个变量出现之前的行为，显式退回）。其他值在建池时拒绝（`POSTGRES_SSL_MODE_INVALID`），SSL 关闭时也校验，不会静默回退。**默认行为变化**：以前开 SSL 就是不校验，现在默认 `verify-full`，自签证书要配 CA 文件或显式设 `no-verify`。SSL 开启时连接串（包括 `POSTGRES_MIGRATION_DATABASE_URL` 和每个副本 URL）不能再带 `ssl`、`sslmode`、`sslrootcert`、`sslcert`、`sslkey`、`uselibpqcompat`：node-pg 会让这些参数整个覆盖显式的 ssl 选项，`?sslmode=no-verify` 就能悄悄关掉校验，所以直接拒绝（`POSTGRES_SSL_CONNECTION_STRING_CONFLICT`，报错只点名变量，不带 URL）。要用连接串里的 TLS 设置，就关掉 `POSTGRES_SSL_ENABLED`。`/health` 在 SSL 开启时多一项 `checks.postgresTls`：`verify-*` 为 ok，`no-verify` 为 warning，任何连接会被拒绝时为 error。 |
+| `POSTGRES_SSL_CA_FILE` | 空 | PEM 格式的 CA 证书文件，建池时读取，替代 Node 自带的受信 CA（`verify-full` 和 `verify-ca`）；`no-verify` 忽略它。读不到（`POSTGRES_SSL_CA_FILE_UNREADABLE`）或里面没有证书（`POSTGRES_SSL_CA_FILE_INVALID`）都拒绝建池，报错不带路径。 |
 | `POSTGRES_ROW_LEVEL_SECURITY` | `enforce` | 行级安全。`enforce` 让带访问范围的请求和后台任务在租户角色下执行，数据库拒绝其他租户的行；`off` 保持 owner 连接（策略仍在，但 owner 绕过）。无法识别的值按 `enforce` 处理。`enforce` 下多文档的全文检索通过迁移 014 的 owner 函数排序候选（行级安全下 `@@` 用不上 GIN），函数只拿到租户在文档表里能看到的文档 id，返回的行仍由策略过滤；健康检查会确认租户角色能执行它。 |
 | `POSTGRES_TENANT_ROLE` | `archive_rag_tenant` | 行级安全使用的租户角色名（小写标识符）。迁移会创建它，并把它授予应用登录角色。出现以下任一情况，健康检查 `checks.rowLevelSecurity` 都报 error：它是 SUPERUSER 或 BYPASSRLS；它拥有、或通过成员关系拥有当前 schema 里的某张表；它能读写一张没有 `tenant_isolation` 策略的表。迁移 016 的 index version 注册表和 pointer 表，以及扩展自带的关系（例如 `pg_stat_statements` 默认授权给 PUBLIC 的视图）不算在内。报 error 后，`/ready` 返回 503；`STARTUP_HEALTH_STRICT=true` 时服务拒绝启动。 |
 | `POSTGRES_ROW_LEVEL_SECURITY_OFF_CONFIRMED` | 空 | 开着 API auth 又设了 `POSTGRES_ROW_LEVEL_SECURITY=off` 时，`checks.rowLevelSecurity` 报 error；只有设为 `true`（不区分大小写）才放行，此时报 `disabled` 并带 `acknowledged: true`。auth 关闭时不起作用。 |
@@ -263,7 +265,8 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | --- | --- | --- |
 | `CHAT_MAX_QUESTION_CHARS` | `8000` | `/chat`、GET `/chat`、`/chat/stream` 问题的最大长度（去掉首尾空白后），超过返回 400。 |
 | `CHAT_MAX_DOC_IDS` | 进程内检索：不限；配了 `RETRIEVAL_SERVICE_URL`：`1000` | 每个请求最多的 docId 数，`0` 为不限。前端会把当前范围内的所有文档都发过来，所以单体默认不设上限；拆分部署默认与检索层自己的 `RETRIEVAL_SERVICE_MAX_DOC_IDS` 一致。 |
-| `CHAT_MAX_ID_CHARS` | `256` | 单个 docId 和 sessionId 的最大长度。 |
+| `CHAT_MAX_ID_CHARS` | `256` | 单个 docId 和 sessionId 的最大长度。任务、触发器和 agent run 路由的 id（路径参数、gateId、sessionId、userId、幂等键及其 `x-idempotency-key` / `x-request-id` 头、列表过滤参数）也用它。 |
+| `TASK_MAX_PAYLOAD_BYTES` | `262144`（256 KiB） | 任务、触发器、agent run 路由里自由格式 JSON 的上限：动作的请求体、触发器的 event/input/request、`/agent-tasks` 除 docIds 以外的部分，按 JSON 序列化后的 UTF-8 字节数计，`0` 不限（2 MB 的解析上限仍在）。嵌套超过 32 层一律拒绝。`/agent-tasks` 的问题按 `CHAT_MAX_QUESTION_CHARS`、docIds 按 `CHAT_MAX_DOC_IDS` / `CHAT_MAX_ID_CHARS` 限制，`userPreferences` 最多 64 条、每条不超过问题长度。超限返回 400 `{ error }`，与 `/chat` 相同；拆分部署的 api 边缘用同一套校验，在转发前拒绝。 |
 | `UPLOAD_SESSION_MAX_PER_TENANT` | `200` | 每个 (user, workspace) 同时打开的分片上传会话数；超出时 `POST /upload/init` 返回 429 `UPLOAD_SESSION_LIMIT_EXCEEDED`，`limit: "sessions"`。续传不受限。`0` 不限。按进程计数，多个进程共用一个会话目录时可能各多出一个。 |
 | `UPLOAD_SESSION_MAX_BYTES_PER_TENANT` | 10 GiB | 该租户所有打开会话声明的大小加上新文件的总和上限，超出返回 429，`limit: "bytes"`。`0` 不限。 |
 | `UPLOAD_SESSION_CLEANUP_INTERVAL_MS` | `900000` | API 进程运行期间清理过期上传会话的间隔（以前只在启动时清理一次）。`0` 只在启动时清理。 |

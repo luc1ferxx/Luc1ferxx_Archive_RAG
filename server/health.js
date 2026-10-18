@@ -64,6 +64,7 @@ import { PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS } from "./rag/db-migrations.js";
 import {
   checkLongMemoryPostgresHealth,
   checkPostgresHealth,
+  checkPostgresTlsHealth,
   isPostgresConfigured,
   queryPostgres,
 } from "./rag/postgres.js";
@@ -1569,6 +1570,14 @@ export const buildHealthReport = async ({ env = process.env } = {}) => {
 
   if (readReplicas) {
     checks.readReplicas = readReplicas;
+  }
+
+  // Only with POSTGRES_SSL_ENABLED on (or an invalid POSTGRES_SSL_MODE):
+  // no-verify is a warning, a connection TLS would refuse is an error.
+  const postgresTls = isPostgresConfigured() ? checkPostgresTlsHealth() : null;
+
+  if (postgresTls) {
+    checks.postgresTls = postgresTls;
   }
 
   const hasErrors = Object.values(checks).some((entry) => isErrorStatus(entry.status));

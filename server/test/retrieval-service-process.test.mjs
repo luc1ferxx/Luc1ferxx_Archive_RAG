@@ -2,6 +2,7 @@ import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
+import { SERVICE_TOKEN_HEADER, signServiceToken } from "../rag/service-identity.js";
 import { runRetrievalServiceProcess } from "../retrieval-service.mjs";
 
 // The entry point starts only as a retrieval tier that can see what the API
@@ -96,7 +97,23 @@ test("a configured retrieval tier listens, serves health without identity, and s
   assert.ok(started, logger.lines.error.join("\n"));
 
   const baseUrl = `http://127.0.0.1:${started.server.address().port}`;
-  const health = await fetch(`${baseUrl}/health`);
+  const bare = await fetch(`${baseUrl}/health`);
+
+  // A container healthcheck reads the status code; the details need a probe
+  // identity, here bound to the request the way the service client binds.
+  assert.equal(bare.status, 200);
+  assert.deepEqual(await bare.json(), { status: "ok" });
+
+  const health = await fetch(`${baseUrl}/health`, {
+    headers: {
+      [SERVICE_TOKEN_HEADER]: signServiceToken({
+        audience: "retrieval",
+        issuer: "agent",
+        request: { method: "GET", target: "/health" },
+        system: true,
+      }),
+    },
+  });
   const report = await health.json();
 
   assert.equal(health.status, 200);

@@ -13,13 +13,14 @@ import {
   getPostgresTenantRole,
   isLongMemoryEnabled,
   isPostgresRoleSplitEnabled,
-  isPostgresSslEnabled,
 } from "./config.js";
 import { rethrowPostgresError } from "./metrics-postgres.js";
+import { buildPostgresSslOption, describePostgresTlsHealth } from "./postgres-tls.js";
 import {
   acquireReadReplica,
   hasReadReplicaConfiguration,
   isReadReplicaRoutingEnabled,
+  parseReadReplicaUrls,
   recordPrimaryRead,
   resetReadReplicas,
 } from "./postgres-replicas.js";
@@ -53,11 +54,9 @@ const getConnectionConfig = () => {
 
   return {
     connectionString,
-    ssl: isPostgresSslEnabled()
-      ? {
-          rejectUnauthorized: false,
-        }
-      : undefined,
+    // POSTGRES_SSL_ENABLED / POSTGRES_SSL_MODE / POSTGRES_SSL_CA_FILE, read
+    // here, when a pool or dedicated client is built (rag/postgres-tls.js).
+    ssl: buildPostgresSslOption({ connectionString, label: "POSTGRES_DATABASE_URL" }),
   };
 };
 
@@ -111,11 +110,10 @@ export const getPostgresMigrationPoolOptions = () => ({
   connectionString: getPostgresMigrationDatabaseUrl(),
   connectionTimeoutMillis: getPostgresConnectionTimeoutMs(),
   max: MIGRATION_POOL_MAX,
-  ssl: isPostgresSslEnabled()
-    ? {
-        rejectUnauthorized: false,
-      }
-    : undefined,
+  ssl: buildPostgresSslOption({
+    connectionString: getPostgresMigrationDatabaseUrl(),
+    label: "POSTGRES_MIGRATION_DATABASE_URL",
+  }),
 });
 
 const getPostgresMigrationPool = () => {
@@ -943,6 +941,39 @@ export const readPostgresRuntimeLogin = async () => {
     .catch(rethrowPostgresError);
 
   return String(result.rows?.[0]?.login ?? "");
+};
+
+/**
+ * The `postgresTls` health entry (rag/postgres-tls.js): null while TLS is off
+ * and POSTGRES_SSL_MODE is valid or unset, so the report keeps its shape then.
+ * It checks every URL the process connects with: the runtime login, the owner
+ * login of the role split, and each read replica (an invalid replica list is
+ * the readReplicas entry's error, not this one's).
+ */
+export const checkPostgresTlsHealth = () => {
+  const connectionStrings = [{ connectionString: getConnectionString(), label: "POSTGRES_DATABASE_URL" }];
+
+  if (isPostgresRoleSplitEnabled()) {
+    connectionStrings.push({
+      connectionString: getPostgresMigrationDatabaseUrl(),
+      label: "POSTGRES_MIGRATION_DATABASE_URL",
+    });
+  }
+
+  if (hasReadReplicaConfiguration()) {
+    try {
+      parseReadReplicaUrls(process.env.POSTGRES_READ_REPLICA_URLS).forEach((replica, index) =>
+        connectionStrings.push({
+          connectionString: replica.url,
+          label: `POSTGRES_READ_REPLICA_URLS entry ${index + 1}`,
+        })
+      );
+    } catch {
+      // Reported by checks.readReplicas.
+    }
+  }
+
+  return describePostgresTlsHealth({ connectionStrings });
 };
 
 export const checkPostgresHealth = async () => {

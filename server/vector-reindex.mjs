@@ -68,6 +68,7 @@ import { loadPdfPages } from "./rag/pdf-loader.js";
 import { withPostgresTransaction } from "./rag/postgres.js";
 import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataPath, readJsonFileSync } from "./rag/storage.js";
+import { flushTenantUsageOnExit } from "./rag/tenant-usage.js";
 import { stampChunkDocumentVersion } from "./rag/vector-store.js";
 import {
   beginPgvectorIndexWrite,
@@ -643,8 +644,12 @@ const invokedDirectly =
 if (invokedDirectly) {
   // A backfill reads and rewrites every tenant's documents as the owner;
   // bound explicitly so POSTGRES_TENANT_CONTEXT=strict accepts it.
-  runAsDatabaseSystem(() => main()).catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  });
+  runAsDatabaseSystem(() => main())
+    .catch((error) => {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = 1;
+    })
+    // Re-embedding books its model tokens in the tenant usage ledger, whose
+    // flush timer does not keep the process alive: write them before it ends.
+    .finally(() => flushTenantUsageOnExit());
 }
