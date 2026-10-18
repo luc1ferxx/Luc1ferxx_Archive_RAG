@@ -11,7 +11,7 @@ docker compose --profile app up -d --build
 - 数据位置：
   - 文档、分块、向量、运行记录在 PostgreSQL 的 `pgdata` 卷里；
   - 上传的原始文件和本地数据在 `appdata` 卷里（容器内 `/data`）。
-- 数据库迁移在启动时自动执行。`docker compose ps` 里 `app` 显示 `healthy` 表示 `/ready` 返回 200，也就是健康报告里每一项检查都通过（`/health` 无论结果如何都返回 200，不能当健康检查用）。显示 `unhealthy` 时进程仍在运行，用 `curl -s http://localhost:5001/ready` 看是哪一项报 `error`。
+- 数据库迁移在启动时自动执行。`docker compose ps` 里 `app` 显示 `healthy` 表示 `/ready` 返回 200，也就是健康报告里每一项检查都通过（`/health` 无论结果如何都返回 200，不能当健康检查用）。显示 `unhealthy` 时进程仍在运行，用 `curl -s http://localhost:5001/ready` 看是哪一项报 `error`。开启 API auth 后，不带凭据只返回 `{status}`，要带上单个共享的 `API_AUTH_TOKEN`，或者带有 `admin.status.read` 的 token（例如 admin.viewer 角色）：`curl -s -H "x-api-key: <token>" http://localhost:5001/ready`。
 - 所有发布的端口默认只绑定 `127.0.0.1`，只能从本机访问，见下面的"端口与网络暴露"。
 
 ### 端口与网络暴露
@@ -23,6 +23,7 @@ docker compose --profile app up -d --build
 | `redis`（`--profile shared-state`） | 6379 | `127.0.0.1` |
 | `docling`（`--profile layout`） | 5010 | `127.0.0.1` |
 | `compose.services.yml` 的 `api` | `ARCHIVE_RAG_API_PORTS`，默认 5001 | `127.0.0.1` |
+| `compose.demo.yml` | 不新增端口（`demo-model` 只在 compose 网络内） | — |
 
 - **为什么默认只绑本机**：默认配置不适合放到网络上：PostgreSQL 是超级用户 `postgres`，密码也是 `postgres`；Redis 没有密码；API 默认不开鉴权。而在 Linux 上，Docker 发布的端口会绕过 ufw / firewalld，防火墙规则挡不住。
 - **有意在局域网开放**：所有发布的端口都绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`）。按下面的顺序做：
@@ -145,6 +146,7 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 - 升级到包含分块丢字修复的版本后，已入库文档仍是旧分块：表格行、"Label:" 引导句和页尾标题行可能不在任何 chunk 里。运行 `cd server && npm run vector:reindex -- --from documents --apply` 按新切块器重建。新上传和 `PUT /documents/:docId` 替换自动使用新切块器。重复上传相同内容不会重建，入库去重会直接指向已有文档。
 - 镜像构建时把 `VITE_DOMAIN` 设成 `same-origin`。构建参数 `VITE_API_AUTH_TOKEN` 会打进前端包、发给每个浏览器，只适合单个可信用户。多用户部署用 `API_AUTH_TOKENS`，由前端之外的方式分发 token。
 - 镜像以非 root 用户 `node` 运行，只有 `/data` 可写。
+- 多租户隔离演示：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app up -d --build` 用 `deploy/demo/hardened.env` 打开全部租户隔离开关（只读这一个文件，不读 `server/.env`），PostgreSQL 在初始化时建好角色拆分的两个登录，app 以运行时登录连接，另起一个不发布端口的假模型。它是一个单独的 compose 项目（`luc1ferxx-archive-rag-demo`），容器名和数据卷（`pgdata-demo`、`appdata-demo`，本地 KMS 的主密钥也在后者里）都是自己的，所以 `docker compose -f docker-compose.yml -f compose.demo.yml --profile app down -v` 只删演示的数据，不碰默认部署的 `pgdata`、`appdata`。两者端口相同，不能同时运行。token 和密码都是公开的演示值，不发布新端口，不要配合 `ARCHIVE_RAG_BIND_HOST=0.0.0.0` 使用。详见 [demo-tenant-isolation.md](demo-tenant-isolation.md)。
 - 镜像里的 npm 10 在安装服务端依赖时会要求 `@qdrant/js-client-rest` 的 peer 依赖 typescript。本机 npm 11 生成的锁文件里没有它，而运行时也用不到，所以 Dockerfile 用 `--legacy-peer-deps` 安装。
 
 ## 拆分部署（可选）
@@ -163,8 +165,8 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 | `model-gateway` | `MODEL_GATEWAY_PORT`，否则 `PORT`，否则 5003 | OpenAI 兼容的模型服务：重试、退避、切换备用模型、并发上限、熔断、用量计量、按 workspace 的配额，并在多个上游副本之间分配请求。 | chat、embedding、重排的上游 |
 
 - `retrieval` 和 `model-gateway` 也有单独的入口：`node retrieval-service.mjs`、`node model-gateway.mjs`。两种启动方式做同样的启动检查；用 `node server.js` 启动时，停机有 `SERVICE_SHUTDOWN_GRACE_MS` 的上限，单独入口没有。
-- 每个角色都有 `GET /livez`（只说明进程在）、`GET /health` 和 `GET /ready`，都不需要身份；设了 `METRICS_ENABLED=true` 时，每个角色还在单独的端口上提供 `/metrics`（见下面的"指标与告警"）。api 的 `/health` 多两项：`checks.serviceTopology`，以及逐个探测 agent 副本的 `checks.agentService`。agent 层不可达时这一项是 `warning`，不会让 `/ready` 变成 503，所以公网入口留在负载均衡里，文档和上传照常可用，Agent 相关接口返回 503。
-- 模型网关的 `GET /health` 列出每个上游副本的在途数、熔断状态和配额设置；`GET /usage` 按租户列出用量，只接受系统身份、带 `admin` claim 或带 `admin.status.read` 权限的内部 token，不对公网开放。
+- 每个角色都有 `GET /livez`（只说明进程在）、`GET /health` 和 `GET /ready`，状态码都不需要身份（检索层和模型网关的完整报告要内部身份，见下）；设了 `METRICS_ENABLED=true` 时，每个角色还在单独的端口上提供 `/metrics`（见下面的"指标与告警"）。api 的 `/health` 多两项：`checks.serviceTopology`，以及逐个探测 agent 副本的 `checks.agentService`。agent 层不可达时这一项是 `warning`，不会让 `/ready` 变成 503，所以公网入口留在负载均衡里，文档和上传照常可用，Agent 相关接口返回 503。
+- 检索层的 `GET /health`、`GET /ready` 和模型网关的 `GET /health` 对谁都返回同样的状态码，但完整报告（检索层：向量库、索引版本、query adapter、拓扑和密钥 id；网关：每个上游副本的在途数、熔断状态、配额设置和密钥 id）只给带有效内部身份 token 的请求：audience 是这一层，issuer 在 `SERVICE_CALL_POLICY` 允许探测这一层的列表里，系统 token 也算，按 `requireServiceIdentity` 的规则校验（请求绑定、防重放）。其他调用方（包括容器健康检查）只拿到 `{status}`。要看细节，用 service client 签名请求（`createServiceClient({ audience }).request({ path: "/health", system: true })`）。`GET /usage` 按租户列出用量，只接受系统身份、带 `admin` claim 或带 `admin.status.read` 权限的内部 token，不对公网开放。
 
 ### 前提
 
@@ -300,7 +302,7 @@ node service-keys.mjs generate ingest-worker   # 只有独立入库 worker 调�
 - agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康，跳过 5 秒。
 - 检索层或模型网关停掉时，`/chat` 返回 503 `AGENT_DEPENDENCY_UNAVAILABLE`（带 `Retry-After` 和 `dependency`），运行记为可重试的失败；单体里模型或数据库故障时也一样。以前这种情况返回 200，请用户批准 Web 搜索。
 - 各进程的 `/metrics` 和 `deploy/prometheus/` 的告警规则没有在真实的 Prometheus 里加载过；`compose.services.yml` 没有设置 `METRICS_*`。
-- 各层的 `/health` 不需要认证，会列出内部副本地址和密钥 id（不含密钥本身）；api 的 `/health` 每次都会探测每个 agent 副本。
+- 开启 API auth 时，api 和 agent 层的 `/health`、`/ready`、`/livez` 只对单个共享 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据返回完整报告，其他人只拿到 `{status}`；检索层和模型网关的 `/health` 不看 API auth，只对带内部身份 token 的探测返回完整报告（见上面），其他人只拿到 `{status}`。内部端口仍不能对外暴露。api 的 `/health` 每次都会探测每个 agent 副本。
 - 拆分模式下检索请求有上限（`RETRIEVAL_SERVICE_MAX_*`），超长问题或配得过大的 topK 返回 400，单体没有这些限制。
 
 ## OIDC 登录和 RBAC（可选）

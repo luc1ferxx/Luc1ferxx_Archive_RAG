@@ -7,9 +7,12 @@ import path from "node:path";
 import {
   main,
   parseArgs,
+  prepareDocumentForReindex,
   prepareFromStoredVectors,
   writeReindexedDocument,
 } from "../vector-reindex.mjs";
+import { TENANT_ENCRYPTION_ERROR_CODES, createTenantEncryptionError } from "../rag/kms/errors.js";
+import { WORKING_FILE_MAGIC } from "../rag/working-files.js";
 import { configureEmbeddingDimensions } from "../rag/config.js";
 import {
   configureDocumentRegistryStore,
@@ -456,4 +459,31 @@ test("an applied document is written only while it is still the content it was p
     resetPgvectorVectorStore();
     delete process.env.OPENAI_EMBEDDING_MODEL;
   }
+});
+
+test("--from documents skips a document whose stored PDF cannot be read, and only that", async () => {
+  const fail = (error) => async () => {
+    throw error;
+  };
+
+  // A decrypt failure in the registry's read (a destroyed key, a changed
+  // byte, bytes that only look like an envelope).
+  configureDocumentRegistryStore({
+    getFile: fail(createTenantEncryptionError(TENANT_ENCRYPTION_ERROR_CODES.keyDestroyed, "Version 1 was destroyed.")),
+  });
+  assert.deepEqual(await prepareDocumentForReindex(registeredDoc()), { unreadableCode: "TENANT_KEY_DESTROYED" });
+
+  // Stored plaintext that begins like a working file: its working copy
+  // cannot be read back (TENANT_ENCRYPTION off).
+  configureDocumentRegistryStore({
+    getFile: async () => ({
+      document: registeredDoc(),
+      fileBuffer: Buffer.concat([WORKING_FILE_MAGIC, Buffer.from([1]), Buffer.from("%PDF-1.4\n%%EOF\n")]),
+    }),
+  });
+  assert.deepEqual(await prepareDocumentForReindex(registeredDoc()), { unreadableCode: "WORKING_FILE_UNREADABLE" });
+
+  // Anything else still ends the run.
+  configureDocumentRegistryStore({ getFile: fail(Object.assign(new Error("connection lost"), { code: "57P01" })) });
+  await assert.rejects(prepareDocumentForReindex(registeredDoc()), /connection lost/);
 });

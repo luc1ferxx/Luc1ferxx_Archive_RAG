@@ -3,6 +3,7 @@ import {
   checkPostgresHealth,
   isPostgresConfigured,
   queryPostgres,
+  withPostgresOwnerTransaction,
   withPostgresTransaction,
 } from "./postgres.js";
 
@@ -54,12 +55,30 @@ const getTransactionRunner = () => {
   return withPostgresTransaction;
 };
 
+// The transaction DDL runs in (creating and dropping index version tables, an
+// empty table's resize): the owner pool under the role split
+// (POSTGRES_MIGRATION_DATABASE_URL), withPostgresTransaction without it. A
+// scripted runtime without its own owner hook runs it like any other
+// transaction, so tests see every statement in one log.
+const getOwnerTransactionRunner = () => {
+  if (typeof runtimeOverrides?.withOwnerTransaction === "function") {
+    return runtimeOverrides.withOwnerTransaction;
+  }
+
+  if (typeof runtimeOverrides?.withTransaction === "function" || typeof runtimeOverrides?.query === "function") {
+    return getTransactionRunner();
+  }
+
+  return withPostgresOwnerTransaction;
+};
+
 export const getPgvectorRuntime = () => ({
   checkHealth: runtimeOverrides?.checkPostgresHealth ?? checkPostgresHealth,
   isConfigured: runtimeOverrides?.isPostgresConfigured ?? isPostgresConfigured,
   now: runtimeOverrides?.now ?? Date.now,
   query: runtimeOverrides?.query ?? queryPostgres,
   runMigrations: runtimeOverrides?.runMigrations ?? runPostgresMigrations,
+  withOwnerTransaction: getOwnerTransactionRunner(),
   withTransaction: getTransactionRunner(),
 });
 

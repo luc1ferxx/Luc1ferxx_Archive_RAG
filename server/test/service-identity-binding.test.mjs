@@ -10,6 +10,7 @@ import { createServiceClient } from "../rag/service-client.js";
 import { generateServiceKeyPair, SERVICE_ISSUERS } from "../rag/service-identity-keys.js";
 import {
   canonicalizeServiceRequestTarget,
+  createOptionalServiceIdentityReader,
   digestServiceRequestBody,
   getServiceCallPolicyIssuers,
   handleServiceRequestBodyError,
@@ -455,6 +456,57 @@ test("a token is accepted once; failover and retries use fresh tokens", async (t
   assert.equal((await send(`${hmacTier.url}/x`, { token: hmacToken })).status, 200);
   assert.equal((await send(`${strictHmacTier.url}/x`, { token: hmacToken })).status, 200);
   assert.equal((await send(`${strictHmacTier.url}/x`, { token: hmacToken })).json.code, SERVICE_IDENTITY_ERROR_CODES.replayed);
+});
+
+test("the optional probe reader accepts exactly what a probe accepts and never answers itself", async (t) => {
+  // The retrieval tier's /health: the route always answers 200 and tells
+  // only a verified prober who it is.
+  const app = express();
+  const reader = createOptionalServiceIdentityReader({
+    audience: "retrieval",
+    env: edEnv("retrieval"),
+    replayCache: createServiceTokenReplayCache({ shared: null }),
+  });
+
+  app.get("*", async (req, res) => {
+    const identity = await reader(req);
+
+    res.json({ issuer: identity?.issuer ?? null, system: identity?.system ?? null });
+  });
+
+  const server = await listen(app);
+
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const token = ({ issuer = "api", target = "/health", request = { method: "GET", target }, system = true } = {}) =>
+    signServiceToken({
+      ...(system ? { system: true } : { accessScope: ALICE }),
+      audience: "retrieval",
+      env: edEnv(issuer),
+      issuer,
+      request: request ?? undefined,
+    });
+  const probe = async (headerToken, target = "/health") => {
+    const answer =
+      headerToken === undefined
+        ? await fetch(`${url}${target}`).then(async (response) => ({ json: await response.json(), status: response.status }))
+        : await send(`${url}${target}`, { token: headerToken });
+
+    assert.equal(answer.status, 200, "the reader never sends a refusal");
+    return answer.json;
+  };
+
+  const apiToken = token();
+
+  assert.deepEqual(await probe(apiToken), { issuer: "api", system: true });
+  assert.deepEqual(await probe(apiToken), { issuer: null, system: null }, "a replayed token");
+  assert.deepEqual(await probe(token({ issuer: "agent", system: false })), { issuer: "agent", system: false });
+  assert.deepEqual(await probe(token({ target: "/ready" })), { issuer: null, system: null }, "bound to another target");
+  assert.deepEqual(await probe(token({ request: null })), { issuer: null, system: null }, "an unbound EdDSA token");
+  assert.deepEqual(await probe(token({ issuer: "retrieval" })), { issuer: null, system: null }, "not a prober of retrieval");
+  assert.deepEqual(await probe("garbled"), { issuer: null, system: null });
+  assert.deepEqual(await probe(undefined), { issuer: null, system: null });
 });
 
 test("the replay cache is bounded, expires entries, and shares through a store", async () => {

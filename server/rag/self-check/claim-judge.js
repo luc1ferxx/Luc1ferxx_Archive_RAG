@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
-import { getChatModel, getClaimJudgeMode, getClaimJudgeTemperature } from "../config.js";
+import {
+  getChatModel,
+  getClaimJudgeMode,
+  getClaimJudgeTemperature,
+  getSharedStatePrefix,
+} from "../config.js";
 import { completeTextWithMetadata } from "../openai.js";
 import { definePrompt, PROMPT_IDS } from "../prompt-registry.js";
 import { screenUntrustedText } from "../prompt-injection-screen.js";
+import { getActiveDatabaseTenant, toDatabaseTenant } from "../postgres-tenant.js";
 import {
   buildSharedStateKey,
   getSharedRedisClient,
@@ -36,8 +42,8 @@ import { normalizeEvidenceText, normalizeNumericSyntax } from "./text.js";
 //   the lexical verdict. The judge can only turn "unsupported" into
 //   "supported", never the reverse.
 //
-// Verdicts are cached by claim and evidence, so the document loop's self-check
-// and the finalizer do not pay for the same claim twice.
+// Verdicts are cached by tenant, claim and evidence, so the document loop's
+// self-check and the finalizer do not pay for the same claim twice.
 
 const MAX_EVIDENCE_CHARS = 2000;
 const MAX_REASON_CHARS = 160;
@@ -46,22 +52,136 @@ const verdictCache = new Map();
 
 // With RAG_SHARED_STATE=redis, verdicts are also shared across instances for a
 // week. A verdict belongs to the judge template and the model that produced
-// it, so both are part of the shared key: a prompt or model change never
-// reuses an old verdict. Redis failures only cost the cache.
+// it, so both are part of the key: a prompt or model change never reuses an
+// old verdict. Redis failures only cost the cache.
 const SHARED_VERDICT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-const buildSharedVerdictKey = (cacheKey) =>
-  buildSharedStateKey(
-    "judge",
-    `${getClaimJudgePromptDescriptor().fingerprint}|${getChatModel()}|${cacheKey}`
-  );
+// Every key, in process and in Redis, starts with the tenant the call acts
+// for. A verdict reused across tenants would let one tenant's documents decide
+// another tenant's claims, and the trace's cachedClaimCount (and the model call
+// that did not happen) would tell a tenant that some other archive holds the
+// same passage. The tenant is the access scope the caller passes, else the
+// active database tenant (bound for every request by bindDatabaseTenant, and
+// for background tasks and startup recovery from the record's own scope); a
+// call with neither, such as an auth-off request without a user or an
+// evaluation runner, shares the unscoped partition as before. The partition is
+// a hash, so neither the in-process map nor Redis holds the tenant's ids.
+const UNSCOPED_VERDICT_PARTITION = "unscoped";
 
-const isVerdict = (value) =>
-  Boolean(value) && typeof value === "object" && typeof value.supported === "boolean";
+// A tenant's partition is two hashes, `<workspace tag>.<tenant tag>`: the
+// workspace alone and the (user, workspace) pair. Redis keys carry both as
+// segments (buildSharedVerdictKey), so a tenant erase can find every verdict
+// of one tenant, or of every user of one workspace, by key pattern
+// (eraseClaimJudgeTenantVerdicts) without the ids ever being stored in clear.
+const hashPartitionTag = (parts) =>
+  createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
 
-const readSharedVerdicts = async (items) => {
-  const redis = getSharedRedisClient();
+const toWorkspaceTag = (workspaceId) => hashPartitionTag(["claim_judge_workspace", workspaceId]);
 
+const toTenantTag = (tenant) =>
+  hashPartitionTag(["claim_judge_tenant", tenant.userId, tenant.workspaceId]);
+
+const resolveVerdictPartition = (accessScope) => {
+  const tenant = toDatabaseTenant(accessScope ?? {}) ?? getActiveDatabaseTenant();
+
+  return tenant
+    ? `${toWorkspaceTag(tenant.workspaceId)}.${toTenantTag(tenant)}`
+    : UNSCOPED_VERDICT_PARTITION;
+};
+
+const buildVerdictKeyPrefix = (accessScope) =>
+  [
+    resolveVerdictPartition(accessScope),
+    getClaimJudgePromptDescriptor().fingerprint,
+    getChatModel(),
+  ].join("|");
+
+// buildSharedStateKey hashes the whole key, so Redis key names carry neither
+// the tenant's ids nor the model in clear; the partition's two hash tags lead
+// the name (`judge:<workspace tag>:<tenant tag>:<key hash>`, or
+// `judge:unscoped:<key hash>`) so a tenant erase can match them.
+const buildSharedVerdictKey = (cacheKey) => {
+  const partition = cacheKey.slice(0, cacheKey.indexOf("|"));
+
+  return buildSharedStateKey(`judge:${partition.replace(".", ":")}`, cacheKey);
+};
+
+const describeTenantVerdictPartition = (selector) => {
+  const workspaceTag = toWorkspaceTag(selector.workspaceId);
+
+  if (selector.userId === null) {
+    return { localPrefix: `${workspaceTag}.`, sharedPattern: `judge:${workspaceTag}:*` };
+  }
+
+  const tenantTag = toTenantTag({ userId: selector.userId, workspaceId: selector.workspaceId });
+
+  return {
+    localPrefix: `${workspaceTag}.${tenantTag}|`,
+    sharedPattern: `judge:${workspaceTag}:${tenantTag}:*`,
+  };
+};
+
+/**
+ * The tenant erase (rag/tenant-lifecycle.js): drops the verdicts of one
+ * tenant selector ({ workspaceId, userId|null }; a workspace-wide selector
+ * covers every user of the workspace) from this process's cache and, with
+ * RAG_SHARED_STATE=redis, from Redis by SCAN over the partition's key pattern.
+ * `dryRun` only counts. A Redis failure is thrown: an erase must not report
+ * keys it could not delete as gone. Verdicts other processes hold in their
+ * own memory are not reached.
+ */
+export const eraseClaimJudgeTenantVerdicts = async (
+  selector,
+  { dryRun = false, sharedRedis = getSharedRedisClient() } = {}
+) => {
+  const { localPrefix, sharedPattern } = describeTenantVerdictPartition(selector);
+  const localKeys = [...verdictCache.keys()].filter((key) => key.startsWith(localPrefix));
+
+  if (!dryRun) {
+    for (const key of localKeys) {
+      verdictCache.delete(key);
+    }
+  }
+
+  let sharedKeys = 0;
+
+  if (sharedRedis) {
+    await whenSharedStateReady();
+
+    const pattern = `${getSharedStatePrefix()}${sharedPattern}`;
+    let cursor = "0";
+
+    do {
+      const [nextCursor, keys] = await sharedRedis.scan(cursor, "MATCH", pattern, "COUNT", 500);
+
+      cursor = String(nextCursor);
+
+      if (keys.length > 0) {
+        sharedKeys += keys.length;
+
+        if (!dryRun) {
+          await sharedRedis.del(...keys);
+        }
+      }
+    } while (cursor !== "0");
+  }
+
+  return { local: localKeys.length, shared: sharedKeys, sharedState: sharedRedis ? "redis" : "memory" };
+};
+
+// Redis holds the verdict alone. The model's reason is free text that can
+// quote the claim or the evidence, and a value other instances read must never
+// carry a tenant's document text, so the reason stays in the in-process cache
+// and a verdict taken from Redis comes back with an empty one. Whatever else a
+// stored value holds is dropped on the way in.
+const toSharedVerdict = (verdict) => ({ supported: verdict.supported === true });
+
+const fromSharedVerdict = (value) =>
+  value && typeof value === "object" && typeof value.supported === "boolean"
+    ? { reason: "", supported: value.supported }
+    : null;
+
+const readSharedVerdicts = async (items, redis) => {
   if (!redis || items.length === 0) {
     return new Map();
   }
@@ -72,17 +192,18 @@ const readSharedVerdicts = async (items) => {
 
     return new Map(
       items
-        .map((item, index) => [item.cacheKey, values[index] ? JSON.parse(values[index]) : null])
-        .filter(([, verdict]) => isVerdict(verdict))
+        .map((item, index) => [
+          item.cacheKey,
+          values[index] ? fromSharedVerdict(JSON.parse(values[index])) : null,
+        ])
+        .filter(([, verdict]) => verdict)
     );
   } catch {
     return new Map();
   }
 };
 
-const writeSharedVerdicts = async (entries) => {
-  const redis = getSharedRedisClient();
-
+const writeSharedVerdicts = async (entries, redis) => {
   if (!redis || entries.length === 0) {
     return;
   }
@@ -91,7 +212,12 @@ const writeSharedVerdicts = async (entries) => {
     const pipeline = redis.pipeline();
 
     for (const [cacheKey, verdict] of entries) {
-      pipeline.set(buildSharedVerdictKey(cacheKey), JSON.stringify(verdict), "PX", SHARED_VERDICT_TTL_MS);
+      pipeline.set(
+        buildSharedVerdictKey(cacheKey),
+        JSON.stringify(toSharedVerdict(verdict)),
+        "PX",
+        SHARED_VERDICT_TTL_MS
+      );
     }
 
     await pipeline.exec();
@@ -155,9 +281,16 @@ const isJudgeEligible = (claim) =>
   (claim.misattributedCitationIdentities ?? []).length === 0;
 
 // A verdict sampled at a set RAG_CLAIM_JUDGE_TEMPERATURE is cached apart from
-// one sampled at the server's default; with it unset the key is unchanged.
-const buildCacheKey = ({ claimText, evidence, temperature = getClaimJudgeTemperature() }) =>
-  createHash("sha256")
+// one sampled at the server's default; with it unset the content hash is
+// unchanged. `keyPrefix` is the tenant partition, prompt and model
+// (buildVerdictKeyPrefix); the claim and evidence enter the key only hashed.
+const buildCacheKey = ({
+  claimText,
+  evidence,
+  keyPrefix,
+  temperature = getClaimJudgeTemperature(),
+}) =>
+  `${keyPrefix}|${createHash("sha256")
     .update(
       JSON.stringify([
         claimText,
@@ -165,7 +298,7 @@ const buildCacheKey = ({ claimText, evidence, temperature = getClaimJudgeTempera
         ...(temperature === null ? [] : [{ temperature }]),
       ])
     )
-    .digest("hex");
+    .digest("hex")}`;
 
 export const buildClaimJudgePrompt = ({ items, sources }) =>
   [
@@ -254,13 +387,17 @@ const upgradeClaim = ({ claim, citationByRank, verdict }) => {
 /**
  * Returns claimSupport with lexically rejected claims re-judged, or the input
  * unchanged when the judge is off, has nothing eligible, or fails. Adds a
- * `judge` summary so traces show what the judge did.
+ * `judge` summary so traces show what the judge did. `accessScope` names the
+ * tenant whose cache partition is used (default: the active database tenant);
+ * `sharedRedis` is a test seam for the RAG_SHARED_STATE=redis client.
  */
 export const judgeClaimSupport = async ({
+  accessScope = null,
   claimSupport,
   citations = [],
   comparisonAnalysisSummary = null,
   complete = completeTextWithMetadata,
+  sharedRedis,
 } = {}) => {
   if (getClaimJudgeMode() !== "llm" || !claimSupport?.checked || comparisonAnalysisSummary) {
     return claimSupport;
@@ -281,6 +418,7 @@ export const judgeClaimSupport = async ({
     upgradedClaimCount: 0,
   };
   const items = [];
+  const keyPrefix = buildVerdictKeyPrefix(accessScope);
 
   claimSupport.claims.forEach((claim, index) => {
     if (!isJudgeEligible(claim)) {
@@ -301,7 +439,7 @@ export const judgeClaimSupport = async ({
     }
 
     items.push({
-      cacheKey: buildCacheKey({ claimText: claim.text, evidence }),
+      cacheKey: buildCacheKey({ claimText: claim.text, evidence, keyPrefix }),
       claimText: claim.text,
       evidence,
       index,
@@ -323,7 +461,15 @@ export const judgeClaimSupport = async ({
     }
     return true;
   });
-  const sharedVerdicts = await readSharedVerdicts(locallyUncached);
+  // Resolved only once there is something to look up, so a call that judges
+  // nothing never opens the shared-state connection.
+  const redis =
+    locallyUncached.length === 0
+      ? null
+      : sharedRedis === undefined
+        ? getSharedRedisClient()
+        : sharedRedis;
+  const sharedVerdicts = await readSharedVerdicts(locallyUncached, redis);
   const uncached = locallyUncached.filter((item) => {
     const shared = sharedVerdicts.get(item.cacheKey);
     if (shared) {
@@ -366,7 +512,7 @@ export const judgeClaimSupport = async ({
         }
       }
 
-      await writeSharedVerdicts(judged);
+      await writeSharedVerdicts(judged, redis);
     } catch (error) {
       // Fail closed: the lexical verdict stands.
       summary.status = "failed";

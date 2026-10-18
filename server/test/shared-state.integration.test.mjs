@@ -21,12 +21,13 @@ if (!redisUrl) {
   process.env.REDIS_URL = redisUrl;
   process.env.RAG_SHARED_STATE_PREFIX = prefix;
 
-  const [guard, shared, judge, evaluate, openai] = await Promise.all([
+  const [guard, shared, judge, evaluate, openai, tenantStore] = await Promise.all([
     import("../rag/model-call-guard.js"),
     import("../rag/shared-state.js"),
     import("../rag/self-check/claim-judge.js"),
     import("../rag/self-check/evaluate.js"),
     import("../rag/openai.js"),
+    import("../rag/postgres-tenant.js"),
   ]);
   let redis;
 
@@ -301,5 +302,107 @@ if (!redisUrl) {
     process.env.OPENAI_CHAT_MODEL = "judge-model-b";
     await judgeOnce();
     assert.equal(modelCalls, 2, "a verdict belongs to the model that produced it");
+  });
+
+  test("claim-judge verdicts in Redis are the verdict alone, and one tenant never reads another's", async (t) => {
+    const previousJudge = process.env.RAG_CLAIM_JUDGE;
+    let modelCalls = 0;
+
+    process.env.RAG_CLAIM_JUDGE = "llm";
+    openai.configureOpenAIProvider({
+      completeText: async () => {
+        modelCalls += 1;
+        return JSON.stringify({
+          verdicts: [{ claim: 0, reason: "Contoso finishes deletion within 30 days.", supported: true }],
+        });
+      },
+    });
+    t.after(() => {
+      openai.resetOpenAIProvider();
+      judge.resetClaimJudgeCache();
+      process.env.RAG_CLAIM_JUDGE = previousJudge ?? "";
+    });
+
+    const citations = [{
+      docId: "retention",
+      evidenceText: "Contoso erases a verified account within 30 days of the request.",
+      excerpt: "Contoso erases a verified account within 30 days of the request.",
+      fileName: "retention.pdf",
+      pageNumber: 1,
+      rank: 1,
+    }];
+    const judgeAs = (tenant) =>
+      tenantStore.runWithDatabaseTenant(tenant, () =>
+        judge.judgeClaimSupport({
+          citations,
+          claimSupport: evaluate.evaluateClaimSupport({
+            answerText: "Account erasure is done inside a month by Contoso [Source 1].",
+            citations,
+          }),
+        })
+      );
+    const judgeKeys = async () => redis.keys(`${prefix}judge:*`);
+    const keysBefore = new Set(await judgeKeys());
+
+    await judgeAs({ userId: "alice", workspaceId: "acme" });
+    const aliceKeys = (await judgeKeys()).filter((key) => !keysBefore.has(key));
+
+    assert.equal(modelCalls, 1);
+    assert.equal(aliceKeys.length, 1);
+    assert.equal(await redis.get(aliceKeys[0]), JSON.stringify({ supported: true }));
+    assert.ok(!aliceKeys[0].includes("alice") && !aliceKeys[0].includes("acme"));
+
+    judge.resetClaimJudgeCache();
+    const reused = await judgeAs({ userId: "alice", workspaceId: "acme" });
+    assert.equal(modelCalls, 1, "the same tenant on another instance reuses the verdict");
+    assert.equal(reused.claims[0].judge.reason, "");
+
+    judge.resetClaimJudgeCache();
+    await judgeAs({ userId: "bob", workspaceId: "globex" });
+    assert.equal(modelCalls, 2, "another tenant asks the model itself");
+  });
+
+  test("within one instance the shared cap's waiters take turns per tenant", async () => {
+    const limiter = guard.createSharedConcurrencyLimiter({
+      key: "http://model|tenant-fair",
+      leaseMs: 60000,
+      limit: 1,
+      local: guard.createConcurrencyLimiter(1),
+      maxPollMs: 20,
+      pollMs: 5,
+      redis,
+    });
+    const order = [];
+    const holdThenRelease = (name) => async (release) => {
+      order.push(name);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      release();
+    };
+    const releaseFirst = await limiter.acquire({ queueKey: "tenant:alice" });
+    const calls = [1, 2, 3].map((index) =>
+      limiter.acquire({ queueKey: "tenant:alice" }).then(holdThenRelease(`alice-${index}`))
+    );
+
+    calls.push(limiter.acquire({ queueKey: "tenant:bob" }).then(holdThenRelease("bob-1")));
+    releaseFirst();
+    await Promise.all(calls);
+    assert.deepEqual(order, ["bob-1", "alice-1", "alice-2", "alice-3"]);
+  });
+
+  test("the in-process quota and the gateway's count one workspace quota in Redis", async () => {
+    const { createWorkspaceModelQuotas } = await import("../rag/model-quotas.js");
+    const { createModelGatewayQuotas } = await import("../rag/model-gateway/quotas.js");
+    // A fixed instant, so both instances read the same minute window.
+    const now = () => Date.UTC(2031, 0, 2, 3, 4, 5);
+    const inProcess = createWorkspaceModelQuotas({ limits: { requestsPerMinute: 2 }, now, redis });
+    const gateway = createModelGatewayQuotas({ limits: { requestsPerMinute: 2 }, now, redis });
+    const alice = { userId: "alice", workspaceId: `quota-${randomBytes(3).toString("hex")}` };
+
+    assert.deepEqual(await inProcess.admit(alice), { ok: true });
+    assert.deepEqual(await gateway.admit(alice), { ok: true });
+    assert.equal((await inProcess.admit(alice)).quota, "requests_per_minute");
+    assert.equal((await gateway.admit(alice)).quota, "requests_per_minute");
+    assert.deepEqual(await inProcess.admit({ userId: "bob", workspaceId: `${alice.workspaceId}-b` }), { ok: true });
+    assert.equal(inProcess.describe().shared.fallbacks, 0);
   });
 }

@@ -2,6 +2,8 @@ import { Router } from "express";
 import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
+import { DATA_ACCESS_ACTION_IDS } from "../rag/admin-audit.js";
+import { createDataAccessAudit } from "../rag/data-access-audit.js";
 
 import { resolveScopedUserId, serializeError } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
@@ -21,22 +23,31 @@ const textBodySchema = z.object({
 export const createMemoryRouter = (services) => {
   const router = Router();
   const { ragService } = services;
+  // ADMIN_AUDIT_DATA_EVENTS: ids and counts only, never memory text.
+  const dataAudit = createDataAccessAudit({ auditService: services.adminAuditService });
 
   router.delete("/sessions/:sessionId", async (req, res) => {
     const parsed = parseOrRespond(sessionIdSchema, req.params, res);
     if (!parsed) return;
     const { sessionId } = parsed;
+    const accessScope = getRequestAccessScope(req);
+    const audited = {
+      accessScope,
+      actionId: DATA_ACCESS_ACTION_IDS.sessionDelete,
+      resourceIds: [sessionId],
+    };
 
     try {
+      // The caller's scope is part of the session key, so a tenant can only
+      // ever clear its own session of that id.
+      const cleared = await ragService.clearSessionMemory(sessionId, accessScope);
+
+      await dataAudit.recordOutcome(req, { ...audited, count: cleared ? 1 : 0, status: 200 });
       return res.json({
-        // The caller's scope is part of the session key, so a tenant can
-        // only ever clear its own session of that id.
-        cleared: await ragService.clearSessionMemory(
-          sessionId,
-          getRequestAccessScope(req)
-        ),
+        cleared,
       });
     } catch (error) {
+      await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to clear session memory."),
       });
@@ -54,7 +65,10 @@ export const createMemoryRouter = (services) => {
     }
 
     try {
+      // The scope names the workspace under LONG_MEMORY_SCOPE=workspace
+      // (rag/long-memory.js); every memory route passes it.
       const memories = await ragService.listLongMemories({
+        accessScope: getRequestAccessScope(req),
         userId,
         limit,
       });
@@ -84,6 +98,7 @@ export const createMemoryRouter = (services) => {
 
     try {
       const memory = await ragService.rememberLongMemory({
+        accessScope: getRequestAccessScope(req),
         userId,
         category: req.body.category,
         memoryKey: req.body.memoryKey,
@@ -115,24 +130,34 @@ export const createMemoryRouter = (services) => {
     const parsed = parseOrRespond(memoryIdSchema, req.params, res);
     if (!parsed) return;
     const { memoryId } = parsed;
+    const audited = {
+      accessScope: getRequestAccessScope(req),
+      actionId: DATA_ACCESS_ACTION_IDS.memoryDelete,
+      resourceIds: [memoryId],
+      target: { userId },
+    };
 
     try {
       const memory = await ragService.deleteLongMemory({
+        accessScope: audited.accessScope,
         userId,
         memoryId,
       });
 
       if (!memory) {
+        await dataAudit.recordOutcome(req, { ...audited, count: 0, status: 404 });
         return res.status(404).json({
           error: "Memory not found.",
         });
       }
 
+      await dataAudit.recordOutcome(req, { ...audited, count: 1, status: 200 });
       return res.json({
         deleted: true,
         memory,
       });
     } catch (error) {
+      await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to delete long-term memory."),
       });
@@ -148,15 +173,24 @@ export const createMemoryRouter = (services) => {
       });
     }
 
+    const audited = {
+      accessScope: getRequestAccessScope(req),
+      actionId: DATA_ACCESS_ACTION_IDS.memoryClear,
+      target: { userId },
+    };
+
     try {
       const deletedCount = await ragService.clearLongMemories({
+        accessScope: audited.accessScope,
         userId,
       });
 
+      await dataAudit.recordOutcome(req, { ...audited, count: deletedCount, status: 200 });
       return res.json({
         deletedCount,
       });
     } catch (error) {
+      await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
       return res.status(error.status ?? 500).json({
         error: serializeError(error, "Failed to clear long-term memories."),
       });

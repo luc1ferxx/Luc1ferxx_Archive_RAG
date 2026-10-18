@@ -18,7 +18,10 @@ import {
   chargeRunUsage,
   checkRunUsage,
   createRunUsage,
+  createRunUsageCapture,
   getActiveRunUsage,
+  getCapturedRunUsageEvents,
+  getRunPromptUsage,
   getRunUsageSnapshot,
   resolveRunUsageLimits,
   runWithRunUsage,
@@ -307,4 +310,34 @@ test("a run out of tokens skips the next Skill instead of failing", async (t) =>
     ["custom_skill:summarize_contract"]
   );
   assert.match(body.agentAnswer, /\[Source 1\]/);
+});
+
+// Work several runs wait for (one shared in-flight query embedding) runs under
+// a capture, and its events are charged to one run afterwards. That replay
+// must charge exactly what charging the run directly would have.
+test("events charged to a capture replay into a run exactly as a direct charge", () => {
+  const prompt = { fingerprint: "f".repeat(16), id: "capture_test", version: "v1" };
+  const events = [
+    { estimatedCostUsd: 0.0000014, promptTemplate: prompt, status: "ok", totalTokens: 7 },
+    { estimatedCostUsd: 0.0000026, status: "ok", totalTokens: 13 },
+    { status: "ok", totalTokens: 3 },
+    { estimatedCostUsd: 1, status: "error", totalTokens: 999 },
+  ];
+  const noCeilings = { maxCostUsd: 0, maxDurationMs: 0, maxTokens: 0 };
+  const direct = createRunUsage({ limits: noCeilings, startedAt: 0 });
+  const replayed = createRunUsage({ limits: noCeilings, startedAt: 0 });
+  const capture = createRunUsageCapture();
+
+  chargeRunUsage(direct, { estimatedCostUsd: 0.0000003, status: "ok", totalTokens: 1 });
+  chargeRunUsage(replayed, { estimatedCostUsd: 0.0000003, status: "ok", totalTokens: 1 });
+  events.forEach((event) => chargeRunUsage(direct, event));
+  runWithRunUsage(capture, () => events.forEach((event) => chargeRunUsage(getActiveRunUsage(), event)));
+
+  assert.equal(getCapturedRunUsageEvents(capture).length, 3, "only successful calls are kept");
+  assert.deepEqual(getCapturedRunUsageEvents(createRunUsage()), [], "an ordinary meter keeps no events");
+  getCapturedRunUsageEvents(capture).forEach((event) => chargeRunUsage(replayed, event));
+
+  assert.deepEqual(replayed.used, direct.used);
+  assert.deepEqual(getRunPromptUsage(replayed), getRunPromptUsage(direct));
+  assert.deepEqual(capture.limits, noCeilings, "a capture has no ceilings");
 });

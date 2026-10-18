@@ -3,25 +3,51 @@ import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
 import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
-import { getAgentOuterPlanRuntime } from "../rag/config.js";
+import {
+  getAgentOuterPlanRuntime,
+  getChatMaxDocIds,
+  getChatMaxIdChars,
+  getChatMaxQuestionChars,
+} from "../rag/config.js";
 import { describeAgentRequestFailure } from "../rag/dependency-outage.js";
+import { toDatabaseTenant } from "../rag/postgres-tenant.js";
 import { runAgentRequestWithCancellation } from "../rag/request-deadline.js";
+import { recordTenantUsage, TENANT_USAGE_METRICS } from "../rag/tenant-usage.js";
 
 import { parseDocIds, resolveScopedUserId, serializeError } from "./helpers.js";
-import { parseOrRespond, requiredTrimmedString } from "./validation.js";
+import {
+  boundedIdList,
+  boundedRequiredTrimmedString,
+  optionalBoundedString,
+  parseOrRespond,
+} from "./validation.js";
 
-const questionSchema = z.object({
-  question: requiredTrimmedString("Question is required."),
+// Every field parseChatRequest reads, bounded (CHAT_MAX_QUESTION_CHARS,
+// CHAT_MAX_DOC_IDS, CHAT_MAX_ID_CHARS) and type-checked: a docIds entry or a
+// sessionId that is not a string used to throw before the handler's try
+// block, an unhandled rejection that ended the process.
+const chatRequestSchema = z.object({
+  question: boundedRequiredTrimmedString("Question is required.", {
+    field: "Question",
+    maxLength: getChatMaxQuestionChars,
+  }),
+  docIds: boundedIdList("docIds", {
+    maxCount: getChatMaxDocIds,
+    maxLength: getChatMaxIdChars,
+  }),
+  docId: optionalBoundedString("docId", { maxLength: getChatMaxIdChars }),
+  sessionId: optionalBoundedString("sessionId", { maxLength: getChatMaxIdChars }),
 });
 
 /**
- * The /chat and /chat/stream request check: the question from the query (GET)
- * or the JSON body. Answers 400 and returns null when it fails. Exported so the
- * public edge of a split deployment (rag/agent-service/edge-router.js) refuses
- * the same requests before forwarding them to the agent tier.
+ * The /chat and /chat/stream request check: the question, docIds / docId and
+ * sessionId from the query (GET) or the JSON body. Answers 400 and returns
+ * null when it fails. Exported so the public edge of a split deployment
+ * (rag/agent-service/edge-router.js) refuses the same requests before
+ * forwarding them to the agent tier.
  */
 export const validateChatRequest = (req, res) =>
-  parseOrRespond(questionSchema, req.method === "GET" ? req.query : req.body, res);
+  parseOrRespond(chatRequestSchema, req.method === "GET" ? req.query : req.body, res);
 
 /**
  * The answer for an agent request that failed: a cancellation (the deadline
@@ -83,7 +109,17 @@ export const createChatRouter = (services) => {
     };
   };
 
-  const answer = (request) =>
+  // One chat request in the tenant usage ledger (rag/tenant-usage.js; in
+  // memory, flushed later), whatever the answer was.
+  const answer = (request) => {
+    recordTenantUsage(toDatabaseTenant(request.accessScope), {
+      [TENANT_USAGE_METRICS.chatRequests]: 1,
+    });
+
+    return answerRequest(request);
+  };
+
+  const answerRequest = (request) =>
     buildChatResponse({
       agentBudget,
       agentRunService,

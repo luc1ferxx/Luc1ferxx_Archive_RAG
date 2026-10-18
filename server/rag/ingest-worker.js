@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, stat, utimes } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -25,7 +25,8 @@ import {
   getNextIngestStage,
   supportsStagedIngest,
 } from "./ingest-stages.js";
-import { runWithDatabaseTenant } from "./postgres-tenant.js";
+import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js";
+import { writeWorkingFile } from "./working-files.js";
 
 // The worker side of RAG_INGEST_MODE=async. Each loop claims one job at a time
 // from the store (as the owner role, because the queue holds every tenant's
@@ -336,7 +337,7 @@ export const createIngestWorker = ({
       return false;
     }
 
-    await writeFile(tempFilePath, job.fileBytes);
+    await writeWorkingFile(tempFilePath, job.fileBytes);
     return true;
   };
 
@@ -816,19 +817,28 @@ export const createIngestWorker = ({
     running = true;
     pendingWakes = 0;
     lastHousekeepingAt = Date.now();
-    void runHousekeeping();
 
-    // Never fails the start: without wake-ups the loops still poll.
-    try {
-      unsubscribeFromEnqueues = store.subscribeToEnqueues?.(wake) ?? null;
-    } catch (error) {
-      logger.error?.(
-        `[ingest-worker] could not subscribe to enqueued jobs; polling every ${pollIntervalMs} ms instead.`,
-        error
-      );
-    }
+    // The loops claim for every tenant, so they run as the system wherever
+    // start() was called (start-up, or a test inside a tenant); each claimed
+    // job's ingest binds the job's own scope (processJob), and the store's
+    // owner writes are system work either way. Bound explicitly so
+    // POSTGRES_TENANT_CONTEXT=strict accepts the loops, their housekeeping and
+    // the lease renewals they start.
+    runAsDatabaseSystem(() => {
+      void runHousekeeping();
 
-    loops = Array.from({ length: loopCount }, () => loop());
+      // Never fails the start: without wake-ups the loops still poll.
+      try {
+        unsubscribeFromEnqueues = store.subscribeToEnqueues?.(wake) ?? null;
+      } catch (error) {
+        logger.error?.(
+          `[ingest-worker] could not subscribe to enqueued jobs; polling every ${pollIntervalMs} ms instead.`,
+          error
+        );
+      }
+
+      loops = Array.from({ length: loopCount }, () => loop());
+    });
   };
 
   /**

@@ -21,6 +21,23 @@ export const AGENT_SERVICE_CALLER_ROLES = SERVICE_CALL_POLICY.agent.callers;
 // minted for /chat cannot be replayed against an admin action.
 export const ADMIN_PERMISSION_CLAIM = "adminPermission";
 
+// Claim on a forwarded call whose authenticated scope names neither a user nor
+// a workspace because the caller presented the single shared API_AUTH_TOKEN,
+// the single-tenant credential requireTenantScope (auth.js) lets act for the
+// whole archive. The agent tier refuses every other such scope outside the
+// admin actions (agent-service/app.js), so this is how the edge's exemption
+// reaches it. Its only value is SINGLE_TENANT_CREDENTIAL_SCOPE.
+export const TENANTLESS_SCOPE_CLAIM = "tenantlessScope";
+export const SINGLE_TENANT_CREDENTIAL_SCOPE = "single_tenant_credential";
+
+// Codes of refusals the agent tier makes on a valid identity. They are not
+// SERVICE_IDENTITY_ERROR_CODES, so the edge relays them to the client as they
+// are instead of reporting the tiers' keys out of step.
+export const AGENT_SERVICE_ERROR_CODES = Object.freeze({
+  // An authenticated scope that names neither a user nor a workspace.
+  tenantScopeRequired: "AGENT_TENANT_SCOPE_REQUIRED",
+});
+
 export const AGENT_EDGE_ERROR_CODES = Object.freeze({
   // The agent tier refused the edge's internal token (keys out of step).
   identityRejected: "SERVICE_IDENTITY_REJECTED",

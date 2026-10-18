@@ -27,6 +27,7 @@ import { toDatabaseTenant } from "../postgres-tenant.js";
 import { scoreTextsWithCrossEncoderBackend } from "../reranker.js";
 import { bindServiceTraceContext } from "../service-client.js";
 import {
+  createOptionalServiceIdentityReader,
   getServiceDeadlineRemainingMs,
   getServiceKeyStatus,
   handleServiceRequestBodyError,
@@ -34,6 +35,7 @@ import {
   verifyServiceRequestBody,
 } from "../service-identity.js";
 import { SERVICE_TIERS } from "../service-topology.js";
+import { recordTenantRefusal } from "../tenant-refusals.js";
 import { runWithModelGatewayCall } from "./call-context.js";
 import {
   buildModelGatewayErrorBody,
@@ -58,7 +60,8 @@ import { createModelUsageLedger } from "./usage-ledger.js";
 //   POST /rerank               { query, texts, model? } -> { scores }
 //   GET  /usage                per-tenant totals since start (system identity,
 //                              an `admin` claim, or admin.status.read)
-//   GET  /health               replicas, guard state, quota configuration
+//   GET  /health               replicas, guard state, quota configuration for
+//                              a signed probe identity; `{ status }` otherwise
 //
 // Every route but /health accepts only a signed internal identity for the
 // `model-gateway` audience (service-identity.js); the tenant comes from that
@@ -342,6 +345,9 @@ export const createModelGatewayApp = ({
 
       if (!admission.ok) {
         recordGatewayQuotaRejection(admission.quota);
+        // Per tenant in this process's usage ledger (rag/tenant-refusals.js):
+        // the caller sees only the 429 and counts nothing itself.
+        recordTenantRefusal(MODEL_GATEWAY_ERROR_CODES.quotaExceeded, tenant);
         sendError(res, {
           code: MODEL_GATEWAY_ERROR_CODES.quotaExceeded,
           message: "The workspace has used its model quota for now.",
@@ -558,11 +564,21 @@ export const createModelGatewayApp = ({
     res.json({ quotas: quotas.describe(), usage: ledger.snapshot() });
   });
 
-  // Unauthenticated so an orchestrator can probe it; it carries no secrets
-  // (replica URLs cannot hold credentials, keys appear by id only).
-  app.get(MODEL_GATEWAY_PATHS.health, (req, res) => {
+  // Open so an orchestrator can probe it, with the same status code for
+  // everyone; the details (replicas, guard state, quotas, key ids: no secrets,
+  // but internal) only for a signed identity SERVICE_CALL_POLICY lets probe
+  // the gateway, system tokens included. Anyone else gets `{ status }`.
+  const readProbeIdentity = createOptionalServiceIdentityReader({ audience: SERVICE_TIERS.modelGateway, env });
+
+  app.get(MODEL_GATEWAY_PATHS.health, async (req, res) => {
     const keyStatus = getServiceKeyStatus(env);
     const status = keyStatus.configured ? "ok" : "error";
+    const identity = await readProbeIdentity(req);
+
+    if (!identity) {
+      res.status(status === "ok" ? 200 : 503).json({ status });
+      return;
+    }
 
     res.status(status === "ok" ? 200 : 503).json({
       guard: getModelCallGuardTotals(),

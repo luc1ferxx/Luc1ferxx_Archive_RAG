@@ -36,6 +36,12 @@
 // committed while this command parsed and embedded the old bytes wins, and
 // the document is reported as skipped instead of rewritten with old text.
 //
+// A document whose stored PDF cannot be decrypted or read as a file (a
+// TENANT_* coded error, rag/kms/errors.js: a key destroyed by a standalone
+// `tenant:keys destroy`, a changed byte, bytes that only look like an
+// envelope) is reported as unreadable and skipped -- its chunks stay as they
+// are -- and the run goes on with every other tenant's documents.
+//
 // This rewrites the ACTIVE index version in place (and, like every write, the
 // versions it dual-writes). Moving to another embedding model without
 // downtime is `npm run vector:index -- build` followed by `activate`: a new
@@ -43,7 +49,7 @@
 
 import "dotenv/config";
 
-import { mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdtemp, rm } from "fs/promises";
 import os from "os";
 import path from "path";
 import { pathToFileURL } from "url";
@@ -64,10 +70,14 @@ import {
   readDocumentRegistrySnapshot,
 } from "./rag/doc-registry.js";
 import { buildPublicFilePath } from "./rag/document-utils.js";
+import { isTenantEncryptionError } from "./rag/kms/errors.js";
 import { loadPdfPages } from "./rag/pdf-loader.js";
 import { withPostgresTransaction } from "./rag/postgres.js";
+import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataPath, readJsonFileSync } from "./rag/storage.js";
+import { flushTenantUsageOnExit } from "./rag/tenant-usage.js";
 import { stampChunkDocumentVersion } from "./rag/vector-store.js";
+import { writeWorkingFile } from "./rag/working-files.js";
 import {
   beginPgvectorIndexWrite,
   buildSearchText,
@@ -336,7 +346,7 @@ export const writeReindexedDocument = async ({
     return { chunkCount: stamped.length, documentVersion: currentVersion, status: "written" };
   });
 
-const prepareFromDocumentBytes = async (document) => {
+export const prepareFromDocumentBytes = async (document) => {
   const stored = await getDocumentFile(document.docId);
 
   if (!stored?.fileBuffer) {
@@ -347,7 +357,8 @@ const prepareFromDocumentBytes = async (document) => {
   const tempPath = path.join(tempDirectory, "document.pdf");
 
   try {
-    await writeFile(tempPath, stored.fileBuffer);
+    // The decrypted bytes (getDocumentFile), parsed from a working file.
+    await writeWorkingFile(tempPath, stored.fileBuffer);
     const pages = await loadPdfPages(tempPath);
     const chunks = chunkDocument({
       docId: document.docId,
@@ -368,6 +379,23 @@ const prepareFromDocumentBytes = async (document) => {
     };
   } finally {
     await rm(tempDirectory, { force: true, recursive: true });
+  }
+};
+
+/**
+ * One document of --from documents: { prepared }, or { unreadableCode } when
+ * its stored PDF cannot be decrypted or read as a file (any TENANT_* coded
+ * error) -- skipped, never the end of the run. Every other error propagates.
+ */
+export const prepareDocumentForReindex = async (document, { prepare = prepareFromDocumentBytes } = {}) => {
+  try {
+    return { prepared: await prepare(document) };
+  } catch (error) {
+    if (isTenantEncryptionError(error)) {
+      return { unreadableCode: error.code };
+    }
+
+    throw error;
   }
 };
 
@@ -560,6 +588,7 @@ export const main = async () => {
 
   let written = 0;
   let skipped = 0;
+  let unreadable = 0;
 
   for (const item of plan) {
     if (item.action === "skip_missing_registry_row") {
@@ -596,14 +625,29 @@ export const main = async () => {
       }
     }
 
-    const prepared = item.entries
-      ? {
-          ...(await prepareFromStoredVectors(item.entries, {
-            trustSourceEmbeddings: options.trustSourceEmbeddings,
-          })),
-          expected: toContentIdentity(document),
-        }
-      : await prepareFromDocumentBytes(document);
+    let prepared;
+
+    if (item.entries) {
+      prepared = {
+        ...(await prepareFromStoredVectors(item.entries, {
+          trustSourceEmbeddings: options.trustSourceEmbeddings,
+        })),
+        expected: toContentIdentity(document),
+      };
+    } else {
+      const read = await prepareDocumentForReindex(document);
+
+      if (read.unreadableCode) {
+        skipped += 1;
+        unreadable += 1;
+        process.stdout.write(
+          `skip   ${item.docId}: its stored PDF cannot be read (${read.unreadableCode}); its chunks stay as they are.\n`
+        );
+        continue;
+      }
+
+      prepared = read.prepared;
+    }
     const outcome = await writeReindexedDocument({
       docId: item.docId,
       expected: prepared.expected,
@@ -629,7 +673,9 @@ export const main = async () => {
   }
 
   process.stdout.write(
-    `\nDone. ${written} chunk(s) written to pgvector${skipped > 0 ? `; ${skipped} document(s) skipped` : ""}.\n`
+    `\nDone. ${written} chunk(s) written to pgvector${skipped > 0 ? `; ${skipped} document(s) skipped` : ""}${
+      unreadable > 0 ? ` (${unreadable} with an unreadable stored PDF)` : ""
+    }.\n`
   );
 };
 
@@ -640,8 +686,14 @@ const invokedDirectly =
   Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (invokedDirectly) {
-  main().catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  });
+  // A backfill reads and rewrites every tenant's documents as the owner;
+  // bound explicitly so POSTGRES_TENANT_CONTEXT=strict accepts it.
+  runAsDatabaseSystem(() => main())
+    .catch((error) => {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = 1;
+    })
+    // Re-embedding books its model tokens in the tenant usage ledger, whose
+    // flush timer does not keep the process alive: write them before it ends.
+    .finally(() => flushTenantUsageOnExit());
 }

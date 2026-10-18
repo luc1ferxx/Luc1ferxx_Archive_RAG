@@ -15,13 +15,13 @@
 //     chunk still says what every number is;
 //   - figures as their captions only.
 
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   getDoclingServeUrl,
   getDoclingTimeoutMs,
   isDoclingOcrEnabled,
 } from "./config.js";
+import { readWorkingFile } from "./working-files.js";
 
 const SKIPPED_TEXT_LABELS = new Set(["page_header", "page_footer"]);
 const NUMERIC_CELL = /^[\s~<>≈±+\-−]*\d/;
@@ -184,7 +184,7 @@ export class DoclingParseError extends Error {
 export const loadPdfPagesWithDocling = async (filePath, { fetchImpl = globalThis.fetch } = {}) => {
   const form = new FormData();
 
-  form.append("files", new Blob([await readFile(filePath)], { type: "application/pdf" }), path.basename(filePath));
+  form.append("files", new Blob([await readWorkingFile(filePath)], { type: "application/pdf" }), path.basename(filePath));
   form.append("to_formats", "json");
   form.append("image_export_mode", "placeholder");
   form.append("do_ocr", String(isDoclingOcrEnabled()));

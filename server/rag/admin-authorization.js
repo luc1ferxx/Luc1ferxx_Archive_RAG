@@ -2,8 +2,10 @@ import { isApiAuthEnabled } from "./config.js";
 import {
   ADMIN_PERMISSION_IDS,
   buildAdminAccessDecision,
+  getAdminPermissionContract,
   getPermissionForAdminAction,
 } from "./admin-permissions.js";
+import { sendAuditUnavailable } from "./data-access-audit.js";
 import { isAdminPermissionGrantedByRbac } from "./rbac.js";
 
 export const ADMIN_AUTHORIZATION_REASONS = Object.freeze({
@@ -88,14 +90,16 @@ const getRequestAuditContext = (req) => ({
   route: req.route?.path,
 });
 
-const safeRecordAuthorizationDecision = async ({
+// Resolves false when the audit service exists and its write failed, true
+// otherwise (written, or no audit service configured).
+const recordAuthorizationDecision = async ({
   accessScope,
   auditService,
   decision,
   req,
 } = {}) => {
   if (typeof auditService?.recordAuthorizationDecision !== "function") {
-    return;
+    return true;
   }
 
   try {
@@ -105,9 +109,23 @@ const safeRecordAuthorizationDecision = async ({
       decision,
       request: getRequestAuditContext(req),
     });
+    return true;
   } catch {
-    // Authorization must not fail closed because an optional audit sink is down.
+    return false;
   }
+};
+
+/**
+ * Whether an allowed request for `permissionId` may only run once its audit
+ * record is written: every admin permission whose contract is not read-only
+ * (the controlled writes, replays and computes: recover-tasks, quality-refresh,
+ * a dead-letter requeue). Reads, and permissions without a contract, keep
+ * running when the audit sink is down.
+ */
+export const isAdminAuditRequiredForPermission = (permissionId) => {
+  const contract = permissionId ? getAdminPermissionContract(permissionId) : null;
+
+  return Boolean(contract) && contract.risk !== "read";
 };
 
 export const requireAdminPermission = (
@@ -116,6 +134,8 @@ export const requireAdminPermission = (
     auditService = null,
     getAccessScope = getDefaultAccessScope,
     isAuthEnabled = isApiAuthEnabled,
+    // undefined: decided per permission (isAdminAuditRequiredForPermission).
+    requireAudit,
   } = {}
 ) => async (req, res, next) => {
   const accessScope = getAccessScope(req);
@@ -125,7 +145,7 @@ export const requireAdminPermission = (
     permissionId: resolvePermissionId(permission, req),
   });
 
-  await safeRecordAuthorizationDecision({
+  const recorded = await recordAuthorizationDecision({
     accessScope,
     auditService,
     decision,
@@ -133,6 +153,18 @@ export const requireAdminPermission = (
   });
 
   if (decision.allowed) {
+    const auditRequired =
+      typeof requireAudit === "boolean"
+        ? requireAudit
+        : isAdminAuditRequiredForPermission(decision.permissionId);
+
+    // A state-changing admin action does not run unrecorded: when the audit
+    // record cannot be written it is refused instead (a read keeps running).
+    if (!recorded && auditRequired) {
+      sendAuditUnavailable(res);
+      return;
+    }
+
     next();
     return;
   }

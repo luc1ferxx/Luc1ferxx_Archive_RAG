@@ -7,6 +7,8 @@ import { bindDatabaseTenant } from "../../auth.js";
 import { derivePgvectorHealthProblems } from "../../health.js";
 import {
   getHybridFusionMethod,
+  getPostgresTenantContextMode,
+  getQueryEmbeddingCacheScope,
   getRetrievalRoute,
   getRetrievalServiceMaxDocIds,
   getRetrievalServiceMaxQueries,
@@ -31,9 +33,11 @@ import { isPostgresConfigured } from "../postgres.js";
 import { isReadReplicaRoutingEnabled } from "../postgres-replicas.js";
 import { runAsDatabaseSystem } from "../postgres-tenant.js";
 import { describeQueryAdapterHealth, QUERY_ADAPTER_SCOPE_QA } from "../query-adapter.js";
+import { isRequestCancelledError } from "../request-deadline.js";
 import { createRunUsage, runWithRunUsage } from "../run-usage.js";
 import { bindServiceTraceContext } from "../service-client.js";
 import {
+  createOptionalServiceIdentityReader,
   handleServiceRequestBodyError,
   requireServiceIdentity,
   SERVICE_CALL_POLICY,
@@ -87,10 +91,12 @@ import { decodeWireValue, encodeWireValue } from "./wire.js";
 // An unavailable dependency is 424 with its status as `dependencyStatus`
 // (toErrorAnswer), so callers do not fail over on an outage every replica
 // shares.
-// GET /health and GET /ready report the vector store, the index versions and
-// the query adapter, with no identity required; GET /internal/retrieval/v1/ping
-// answers any signed identity SERVICE_CALL_POLICY lets probe this tier, system
-// tokens included.
+// GET /health and GET /ready answer anyone with the same status codes, but the
+// report (vector store, index versions, query adapter, topology and key ids)
+// only to a signed identity SERVICE_CALL_POLICY lets probe this tier, system
+// tokens included; any other caller, a container healthcheck among them, gets
+// `{ status }` alone. GET /internal/retrieval/v1/ping answers the same
+// identities and refuses everyone else.
 
 // The callers SERVICE_CALL_POLICY admits: the agent tier and a monolith.
 export const DEFAULT_RETRIEVAL_SERVICE_ISSUERS = SERVICE_CALL_POLICY.retrieval.callers;
@@ -399,6 +405,16 @@ const toErrorAnswer = (error) => {
     return { body: { code: error.code, error: error.message }, status: error.status };
   }
 
+  // The only cancellation this tier binds is its caller's deadline
+  // (runWithServiceCallDeadline): a model call it cut, or a query embedding
+  // this request stopped waiting for (embedding-cache.js), is that deadline,
+  // never a dependency's 504.
+  if (isRequestCancelledError(error)) {
+    const deadline = createDeadlineError();
+
+    return { body: { code: deadline.code, error: deadline.message }, status: deadline.status };
+  }
+
   const rawStatus = Number(error?.status);
   const hasStatus = Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599;
   const dependencyUnavailable = hasStatus && [502, 503, 504].includes(rawStatus);
@@ -645,21 +661,27 @@ export const createRetrievalApp = ({
   logger = console,
   now = Date.now,
 } = {}) => {
+  // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js), and
+  // so does an unknown RAG_EMBEDDING_CACHE_SCOPE (this tier embeds queries).
+  getPostgresTenantContextMode();
+  getQueryEmbeddingCacheScope();
+
   const app = express();
 
   app.disable("x-powered-by");
 
-  app.get("/health", async (req, res) => {
-    const report = await buildRetrievalHealthReport({ env });
+  const readProbeIdentity = createOptionalServiceIdentityReader({ audience: RETRIEVAL_SERVICE_AUDIENCE, env, now });
+  // The status code never depends on the identity; the body does.
+  const sendHealth = async (req, res, { readiness }) => {
+    const [report, identity] = await Promise.all([buildRetrievalHealthReport({ env }), readProbeIdentity(req)]);
 
-    res.json(report);
-  });
+    res
+      .status(readiness && report.status !== "ok" ? 503 : 200)
+      .json(identity ? report : { status: report.status });
+  };
 
-  app.get("/ready", async (req, res) => {
-    const report = await buildRetrievalHealthReport({ env });
-
-    res.status(report.status === "ok" ? 200 : 503).json(report);
-  });
+  app.get("/health", (req, res) => sendHealth(req, res, { readiness: false }));
+  app.get("/ready", (req, res) => sendHealth(req, res, { readiness: true }));
 
   app.get(
     RETRIEVAL_SERVICE_PATHS.ping,

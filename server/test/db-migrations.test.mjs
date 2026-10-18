@@ -9,11 +9,13 @@ import {
   buildPgvectorIndexStatement,
   createPostgresMigrator,
   getPgvectorEmbeddingIndexName,
+  getSparseRankInstallFunctionName,
   isPgvectorAnnDimensionSupported,
   PGVECTOR_MIGRATION_ERROR_CODES,
   PGVECTOR_VECTOR_INDEX_MAX_DIMENSIONS,
   PgvectorAnnDimensionError,
   renderMigrationSql,
+  renderSparseRankInstallStatement,
 } from "../rag/db-migrations.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -603,4 +605,218 @@ test("the checked-in chunk migration is transactional-delete safe and fully rend
   assert.match(rendered, /REFERENCES rag_documents \(doc_id\) ON DELETE CASCADE/);
   assert.match(rendered, /vector\(1536\)/);
   assert.match(rendered, /rag_document_chunks_embedding_idx/);
+});
+
+// --- migration 033: the sparse-rank function filters by the tenant policy ----
+
+const migrationText = (fileName) =>
+  readFile(path.join(__dirname, "..", "db", "migrations", fileName), "utf8");
+
+const customTableNames = () => ({
+  adminAuditEventsTable: "a_audit",
+  agentRunEventsTable: "a_run_events",
+  agentRunsTable: "a_runs",
+  documentChunksTable: "custom_chunks",
+  documentsTable: "custom_documents",
+  indexVersionsTable: "custom_versions",
+  ingestJobsTable: "custom_jobs",
+  longMemoryTable: "a_memory",
+  sessionMemoryTable: "a_sessions",
+  taskEventsTable: "a_task_events",
+  tasksTable: "a_tasks",
+  workspaceArtifactsTable: "a_artifacts",
+});
+
+const squash = (text) => text.replace(/\s+/g, " ").trim();
+
+// PostgreSQL's format() for the conversions the migration uses (%n$s, %n$I,
+// %n$L, %%), enough to see the function body the installer creates. Simple
+// lower-case identifiers need no quoting, which is all the test passes.
+const pgFormat = (template, ...args) =>
+  template.replace(/%(?:(\d+)\$)?([sIL%])/g, (match, position, conversion) => {
+    if (conversion === "%") return "%";
+
+    assert.ok(position, `only positional conversions are used (${match})`);
+
+    const value = String(args[Number(position) - 1]);
+
+    if (conversion === "L") return `'${value.replaceAll("'", "''")}'`;
+    if (conversion === "I") {
+      assert.match(value, /^[a-z_][a-z0-9_]*$/, "the test only passes simple identifiers");
+    }
+
+    return value;
+  });
+
+// The single-quoted ranking statement handed to format() inside a function body.
+const extractRankingStatement = (sql) => {
+  const match = /'(SELECT c\.chunk_id, ts_rank_cd\(c\.search_vector, \$1, 32\)[\s\S]*?LIMIT \$3)'/.exec(sql);
+
+  assert.ok(match, "the ranking statement is present");
+  return squash(match[1]);
+};
+
+// The USING predicate of the documents policy of migration 013.
+const extractDocumentsPolicyPredicate = (sql) => {
+  const match =
+    /CREATE POLICY tenant_isolation ON __DOCUMENTS_TABLE__\s+TO __TENANT_ROLE__\s+USING \(([\s\S]*?)\)\s+WITH CHECK/.exec(sql);
+
+  assert.ok(match, "migration 013 has the documents policy");
+  return squash(match[1]);
+};
+
+test("migration 033 recreates the sparse-rank function with migration 014's shape and the documents policy for the tenant role", async () => {
+  const [template, sparseRank, rowLevelSecurity] = await Promise.all([
+    migrationText("033_harden_sparse_rank_function.sql"),
+    migrationText("014_create_sparse_rank_function.sql"),
+    migrationText("013_enable_tenant_row_level_security.sql"),
+  ]);
+  const rendered = renderMigrationSql(template, customTableNames(), {
+    embeddingDimensions: 8,
+    tenantRole: "custom_tenant",
+    textSearchConfig: "english",
+  });
+
+  assert.doesNotMatch(rendered, /__[A-Z_]+__/, "every placeholder is rendered");
+  assert.match(rendered, /CREATE OR REPLACE FUNCTION custom_chunks_install_sparse_rank\(target_table text\)/);
+  assert.match(rendered, /tenant_role CONSTANT text := 'custom_tenant';/);
+  assert.match(rendered, /documents_table CONSTANT text := lower\('custom_documents'\);/);
+  assert.match(rendered, /REVOKE ALL ON FUNCTION custom_chunks_install_sparse_rank\(text\) FROM PUBLIC;/);
+  assert.match(rendered, /SELECT custom_chunks_install_sparse_rank\('custom_chunks'\);/);
+  // Every registered version whose table still exists, whatever its status:
+  // a failed version and a retired one whose drop failed keep both.
+  assert.match(rendered, /FROM custom_versions AS v\s+WHERE lower\(v\.chunk_table\) <> base_table\s+AND to_regclass/);
+  assert.doesNotMatch(rendered, /v\.status/);
+  assert.match(rendered, /PERFORM custom_chunks_install_sparse_rank\(version_row\.chunk_table\);/);
+
+  // Same signature, return type, security, settings and row estimate as 014.
+  const shape = (sql) =>
+    squash(
+      /\(query tsquery, doc_ids text\[\], max_rows integer\)\s+(RETURNS TABLE[\s\S]*?SET enable_indexscan = off)/.exec(sql)[1]
+    );
+
+  assert.equal(shape(rendered), shape(sparseRank));
+  assert.equal(
+    shape(rendered),
+    "RETURNS TABLE (chunk_id text, sparse_score real) LANGUAGE plpgsql STABLE SECURITY DEFINER ROWS 20 SET search_path = pg_catalog, pg_temp SET enable_indexscan = off"
+  );
+  assert.match(rendered, /'REVOKE ALL ON FUNCTION %I\.%I%s FROM PUBLIC', schema_name, rank_function, rank_signature\)/);
+  assert.match(rendered, /'GRANT EXECUTE ON FUNCTION %I\.%I%s TO %I', schema_name, rank_function, rank_signature, tenant_role\)/);
+  assert.match(rendered, /rank_signature CONSTANT text := '\(tsquery, text\[\], integer\)';/);
+
+  // The body the installer creates, as format() renders it for one table.
+  const body = /rank_body CONSTANT text := \$rank\$([\s\S]*?)\$rank\$;/.exec(rendered)?.[1];
+
+  assert.ok(body, "the installer holds one function body");
+  assert.match(
+    rendered,
+    /format\(rank_body, schema_name, documents_table, chunk_table, tenant_role, schema_name\)/,
+    "the body's conversions are filled in this order"
+  );
+
+  const created = pgFormat(body, "public", "custom_documents", "custom_chunks", "custom_tenant", "public");
+
+  assert.match(created, /tenant_scoped CONSTANT boolean := current_setting\('role'\) = 'custom_tenant';/);
+  assert.match(created, /ranked_doc_ids text\[\] := doc_ids;/, "an owner call ranks the ids it was given");
+  assert.match(created, /IF tenant_scoped THEN\s+ranked_doc_ids := ARRAY\(/);
+  assert.match(created, /FROM public\.custom_documents AS d\s+WHERE d\.doc_id = ANY \(doc_ids\)/);
+  assert.match(created, /FROM %I\.%I c/, "the ranked table is bound at call time");
+  assert.match(created, /'public',\s+'custom_chunks'\s+\)\s+USING query, ranked_doc_ids, max_rows;/);
+  assert.doesNotMatch(created.replace(/%I/g, ""), /%/, "no conversion is left for the call-time format()");
+
+  // The filter is migration 013's documents policy, column for column.
+  const filter = /AND \(d\.owner_user_id <> ''[\s\S]*?archive_rag\.workspace_id', true\)\)/.exec(created)?.[0];
+
+  assert.ok(filter, "the tenant branch filters the doc ids");
+  assert.equal(
+    squash(filter.replace(/^AND /, "").replace(/\bd\./g, "")),
+    extractDocumentsPolicyPredicate(rowLevelSecurity)
+  );
+
+  // The ranking itself is migration 014's statement (014 escapes its call-time
+  // conversions once more, for the migration's own format()).
+  assert.equal(extractRankingStatement(created), extractRankingStatement(sparseRank).replaceAll("%%", "%"));
+});
+
+test("the sparse-rank installer name and call are validated identifiers", () => {
+  assert.equal(getSparseRankInstallFunctionName("rag_document_chunks"), "rag_document_chunks_install_sparse_rank");
+  assert.equal(getSparseRankInstallFunctionName("Custom_Chunks"), "custom_chunks_install_sparse_rank");
+  assert.throws(() => getSparseRankInstallFunctionName("bad-name"), /simple PostgreSQL identifier/);
+  assert.throws(() => getSparseRankInstallFunctionName("c".repeat(44)), /63 bytes/);
+  assert.equal(
+    renderSparseRankInstallStatement({ chunkTable: "rag_document_chunks_v7", documentChunksTable: "rag_document_chunks" }),
+    "SELECT rag_document_chunks_install_sparse_rank('rag_document_chunks_v7');"
+  );
+  assert.equal(
+    renderSparseRankInstallStatement({ chunkTable: "Rag_Document_Chunks_V8", documentChunksTable: "rag_document_chunks" }),
+    "SELECT rag_document_chunks_install_sparse_rank('rag_document_chunks_v8');"
+  );
+  assert.throws(
+    () =>
+      renderSparseRankInstallStatement({
+        chunkTable: "t'); DROP TABLE x; --",
+        documentChunksTable: "rag_document_chunks",
+      }),
+    /simple PostgreSQL identifier/
+  );
+});
+
+test("the feedback migration renders the tenant table, its read/append grant and the exact-pair policy", async () => {
+  const migrationSql = await readFile(
+    path.join(__dirname, "..", "db", "migrations", "034_create_rag_feedback.sql"),
+    "utf8"
+  );
+  const render = (names) =>
+    renderMigrationSql(migrationSql, names, {
+      embeddingDimensions: 8,
+      tenantRole: "archive_tenant",
+      vectorIndexStatement: "",
+    });
+  const rendered = render(tableNames());
+
+  assert.doesNotMatch(rendered, /__[A-Z_]+__/, "every placeholder is rendered");
+  assert.match(rendered, /CREATE TABLE IF NOT EXISTS rag_feedback \(/);
+  assert.match(rendered, /owner_user_id TEXT NOT NULL DEFAULT ''/);
+  assert.match(rendered, /workspace_id TEXT NOT NULL DEFAULT ''/);
+  assert.match(rendered, /feedback_id TEXT NOT NULL UNIQUE/);
+  assert.match(rendered, /rag_feedback_scope_created_idx\s+ON rag_feedback \(owner_user_id, workspace_id, created_at DESC, id ASC\)/);
+  assert.match(rendered, /GRANT SELECT, INSERT ON rag_feedback TO archive_tenant;/);
+  assert.doesNotMatch(rendered, /GRANT[^;]*(UPDATE|DELETE)[^;]*rag_feedback/, "the tenant role never changes feedback");
+  assert.match(rendered, /pg_get_serial_sequence\('rag_feedback', 'id'\)/);
+  assert.match(rendered, /ALTER TABLE rag_feedback ENABLE ROW LEVEL SECURITY;/);
+  assert.match(
+    rendered,
+    /CREATE POLICY tenant_isolation ON rag_feedback\s+TO archive_tenant\s+USING \(\s+owner_user_id = current_setting\('archive_rag\.user_id', true\)\s+AND workspace_id = current_setting\('archive_rag\.workspace_id', true\)\s+\)\s+WITH CHECK \(\s+owner_user_id = current_setting\('archive_rag\.user_id', true\)\s+AND workspace_id = current_setting\('archive_rag\.workspace_id', true\)\s+\);/
+  );
+  // The structured fields keep their text exactly (json, not jsonb).
+  assert.doesNotMatch(rendered, /^\s+\w+ JSONB\b/im);
+  assert.match(rendered, /^\s+agent_observability JSON NULL,$/m);
+
+  // FEEDBACK_POSTGRES_TABLE renames the table and everything named after it.
+  const renamed = render({ ...tableNames(), feedbackTable: "tenant_feedback" });
+
+  assert.match(renamed, /CREATE TABLE IF NOT EXISTS tenant_feedback \(/);
+  assert.match(renamed, /tenant_feedback_created_idx/);
+  assert.doesNotMatch(renamed, /rag_feedback/);
+  assert.throws(
+    () => render({ ...tableNames(), feedbackTable: "feedback; DROP TABLE x" }),
+    /FEEDBACK_POSTGRES_TABLE must be a simple PostgreSQL identifier/
+  );
+  // Its longest derived name must fit PostgreSQL's 63 bytes.
+  assert.throws(
+    () => render({ ...tableNames(), feedbackTable: `f${"x".repeat(45)}` }),
+    /derived feedback table identifier must be at most 63 bytes/
+  );
+  assert.doesNotThrow(() => render({ ...tableNames(), feedbackTable: `f${"x".repeat(44)}` }));
+
+  await withEnv({ FEEDBACK_POSTGRES_TABLE: "env_feedback" }, () => {
+    assert.match(
+      renderMigrationSql(migrationSql, undefined, {
+        embeddingDimensions: 8,
+        tenantRole: "archive_tenant",
+        vectorIndexStatement: "",
+      }),
+      /CREATE TABLE IF NOT EXISTS env_feedback \(/
+    );
+  });
 });

@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 
-import { addAccessPrincipalAuthorizationMetadata } from "../access-scope.js";
+import {
+  addAccessPrincipalAuthorizationMetadata,
+  normalizeScopeId,
+  normalizeScopeIds,
+  normalizeScopeText,
+} from "../access-scope.js";
 import {
   isServiceAuthModeValid,
   parseServiceSigningKey,
@@ -83,6 +88,18 @@ const MAX_SERVICE_DEADLINE_MS = 24 * 60 * 60 * 1000;
 const KEY_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const TOKEN_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
+
+// A token carries the workspace roles of the active workspace only (the only
+// grants rag/rbac.js applies to a request), as { [workspaceId]: roleId[] }, so
+// the scope a tier receives grants there exactly what the edge's does. These
+// bound it: signing refuses more (a RangeError, like an oversized token) rather
+// than forward a scope that silently differs, and a received token outside
+// them is malformed.
+export const MAX_FORWARDED_WORKSPACE_ROLES = 32;
+export const MAX_FORWARDED_ROLE_ID_LENGTH = 128;
+// Code points no role id needs (C0 controls, DEL); normalizeScopeId already
+// folds whitespace runs into one space.
+const ROLE_ID_FORBIDDEN_PATTERN = /[\u0000-\u001f\u007f]/u;
 
 export const SERVICE_IDENTITY_ERROR_CODES = Object.freeze({
   algorithm: "SERVICE_TOKEN_ALGORITHM",
@@ -659,17 +676,7 @@ const buildRequestBinding = (request) => {
 const isPlainObject = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-/**
- * The access scope a token carries, reduced to the fields requireApiAuth sets:
- * { authenticated, authProvider?, userId, workspaceId, permissionIds?,
- * roleIds?, allowedWorkspaceIds? }. Anything else on the object (a raw token,
- * a principal's secrets) is dropped, never signed.
- */
-export const normalizeServiceAccessScope = (accessScope) => {
-  if (!isPlainObject(accessScope)) {
-    throw new TypeError("accessScope must be an object.");
-  }
-
+const buildBaseServiceAccessScope = (accessScope) => {
   const target = {
     authenticated: accessScope.authenticated === true,
     authProvider: normalizeText(accessScope.authProvider),
@@ -682,6 +689,121 @@ export const normalizeServiceAccessScope = (accessScope) => {
   }
 
   return addAccessPrincipalAuthorizationMetadata(target, accessScope);
+};
+
+// The key a workspace role grant must have to apply: rag/rbac.js matches the
+// lower-cased grant key against the active workspace as resolved, so a role
+// granted in "acme" never applies in the distinct tenant "ACME".
+const getActiveWorkspaceRoleKey = (scope) => normalizeScopeText(scope.workspaceId);
+
+const isForwardableRoleId = (roleId) =>
+  typeof roleId === "string" &&
+  roleId.length > 0 &&
+  roleId.length <= MAX_FORWARDED_ROLE_ID_LENGTH &&
+  roleId === normalizeScopeId(roleId) &&
+  !ROLE_ID_FORBIDDEN_PATTERN.test(roleId);
+
+// The roles granted in the active workspace, collected exactly as rag/rbac.js
+// collects them (every grant key that matches, ids lower-cased, deduplicated),
+// or null when there are none. Grants for other workspaces never travel: they
+// apply to no request made under this scope, and a principal can hold many.
+const projectActiveWorkspaceRoles = (accessScope, target) => {
+  const activeKey = getActiveWorkspaceRoleKey(target);
+  const grants = accessScope.workspaceRoles ?? accessScope.workspace_roles;
+
+  if (!activeKey || !isPlainObject(grants)) {
+    return null;
+  }
+
+  const roleIds = [];
+
+  for (const [key, value] of Object.entries(grants)) {
+    if (normalizeScopeId(key) === activeKey) {
+      roleIds.push(...normalizeScopeIds(value));
+    }
+  }
+
+  const unique = [...new Set(roleIds)];
+
+  if (unique.length === 0) {
+    return null;
+  }
+
+  if (unique.length > MAX_FORWARDED_WORKSPACE_ROLES || !unique.every(isForwardableRoleId)) {
+    throw new RangeError(
+      `An internal service token carries at most ${MAX_FORWARDED_WORKSPACE_ROLES} workspace role ids of at most ${MAX_FORWARDED_ROLE_ID_LENGTH} characters, without control characters.`
+    );
+  }
+
+  return Object.fromEntries([[activeKey, unique]]);
+};
+
+/**
+ * The access scope a token carries, reduced to the fields requireApiAuth sets:
+ * { authenticated, authProvider?, userId, workspaceId, permissionIds?,
+ * roleIds?, allowedWorkspaceIds?, workspaceRoles? }. workspaceRoles keeps only
+ * the active workspace's grants ({ [workspaceId]: roleId[] }, bounded by
+ * MAX_FORWARDED_WORKSPACE_ROLES and MAX_FORWARDED_ROLE_ID_LENGTH; more throws a
+ * RangeError) and is left out when there are none, so a scope without
+ * workspace roles keeps its shape. Anything else on the object (a raw token, a
+ * principal's secrets) is dropped, never signed.
+ */
+export const normalizeServiceAccessScope = (accessScope) => {
+  if (!isPlainObject(accessScope)) {
+    throw new TypeError("accessScope must be an object.");
+  }
+
+  const target = buildBaseServiceAccessScope(accessScope);
+  const workspaceRoles = projectActiveWorkspaceRoles(accessScope, target);
+
+  if (workspaceRoles) {
+    target.workspaceRoles = workspaceRoles;
+  }
+
+  return target;
+};
+
+// A received scope's workspaceRoles must be exactly what a signer produces:
+// one grant, keyed by the active workspace, of 1 to
+// MAX_FORWARDED_WORKSPACE_ROLES distinct canonical role ids. Anything else is
+// refused (the token is malformed), never repaired. A token without the field
+// (an edge from before it was forwarded) carries no workspace roles.
+const readReceivedWorkspaceRoles = (scope, target) => {
+  const grants = scope.workspaceRoles;
+
+  if (grants === undefined) {
+    return null;
+  }
+
+  const activeKey = getActiveWorkspaceRoleKey(target);
+  const keys = isPlainObject(grants) ? Object.keys(grants) : [];
+  const roleIds = keys.length === 1 ? grants[keys[0]] : null;
+
+  if (
+    !activeKey ||
+    keys.length !== 1 ||
+    keys[0] !== activeKey ||
+    !Array.isArray(roleIds) ||
+    roleIds.length === 0 ||
+    roleIds.length > MAX_FORWARDED_WORKSPACE_ROLES ||
+    !roleIds.every(isForwardableRoleId) ||
+    new Set(roleIds).size !== roleIds.length
+  ) {
+    throw rejectToken(SERVICE_IDENTITY_ERROR_CODES.malformed);
+  }
+
+  return Object.fromEntries([[activeKey, [...roleIds]]]);
+};
+
+const readReceivedServiceAccessScope = (scope) => {
+  const target = buildBaseServiceAccessScope(scope);
+  const workspaceRoles = readReceivedWorkspaceRoles(scope, target);
+
+  if (workspaceRoles) {
+    target.workspaceRoles = workspaceRoles;
+  }
+
+  return target;
 };
 
 /**
@@ -971,6 +1093,7 @@ export const verifyServiceToken = (
     throw rejectToken(SERVICE_IDENTITY_ERROR_CODES.malformed);
   }
 
+  const accessScope = system ? null : readReceivedServiceAccessScope(payload.scope);
   const binding = readBinding(payload);
 
   if (request !== undefined && request !== null) {
@@ -978,7 +1101,7 @@ export const verifyServiceToken = (
   }
 
   return {
-    accessScope: system ? null : normalizeServiceAccessScope(payload.scope),
+    accessScope,
     algorithm: key.algorithm,
     audience: payload.aud,
     binding,
@@ -1288,6 +1411,43 @@ export const requireServiceIdentity = ({
     } else {
       settle(claimed);
     }
+  };
+};
+
+/**
+ * For a route that answers everyone but tells more to an internal caller (the
+ * retrieval tier's and the model gateway's /health and /ready): returns
+ * `(req) => Promise<identity | null>`, the request's verified identity exactly
+ * as requireServiceIdentity({ purpose: "probe", allowSystem: true }) would
+ * accept it (audience, SERVICE_CALL_POLICY probers, request binding, replay
+ * cache), or null for a missing or refused token. It never answers the
+ * request: the route decides what an unverified caller sees.
+ */
+export const createOptionalServiceIdentityReader = ({ audience, env, issuers, now, replayCache } = {}) => {
+  const verify = requireServiceIdentity({
+    allowSystem: true,
+    audience,
+    env,
+    issuers,
+    now,
+    purpose: "probe",
+    replayCache,
+  });
+
+  return (req) => {
+    if (!readHeader(req, SERVICE_TOKEN_HEADER)) {
+      return Promise.resolve(null);
+    }
+
+    return new Promise((resolve) => {
+      // The refusal requireServiceIdentity would send, swallowed.
+      const refused = {
+        json: () => resolve(null),
+        status: () => refused,
+      };
+
+      verify(req, refused, () => resolve(req.serviceIdentity ?? null));
+    });
   };
 };
 

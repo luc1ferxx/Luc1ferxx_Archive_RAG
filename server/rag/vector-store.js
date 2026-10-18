@@ -26,10 +26,12 @@ import {
   addDocumentsToPgvectorIndex,
   beginPgvectorIndexWrite,
   clearPgvectorIndex,
+  countPgvectorChunksInEveryTable,
   embedDocumentsInSpace,
   ensurePgvectorSchema,
   fenceFailedWriteSpace,
   prepareDocumentsForPgvectorIndex,
+  removeDocumentsFromEveryPgvectorTable,
   removeDocumentsFromPgvectorIndex,
   resetPgvectorVectorStore,
   searchPgvectorDocuments,
@@ -908,6 +910,33 @@ export const removeDocumentsFromIndex = async ({ client = null, docIds }) => {
   const implementation = getVectorStoreImplementation();
 
   await implementation.removeDocuments({ client, docIds });
+};
+
+/**
+ * The tenant erase (rag/index.js eraseTenantDocuments). pgvector deletes the
+ * documents' chunks from every existing chunk table on the caller's
+ * transaction (index versions outside the write targets included) and returns
+ * the count per table; local and Qdrant remove them through their own delete
+ * call and return null (they report no count).
+ */
+export const eraseDocumentsFromIndex = async ({ client = null, docIds }) => {
+  const implementation = getVectorStoreImplementation();
+
+  if (implementation.id === VECTOR_STORE_PROVIDERS.pgvector) {
+    return removeDocumentsFromEveryPgvectorTable({ client, docIds });
+  }
+
+  await implementation.removeDocuments({ client, docIds });
+  return null;
+};
+
+/** The dry run of eraseDocumentsFromIndex: pgvector's counts per table, else null. */
+export const countDocumentChunksForErase = async ({ docIds }) => {
+  const implementation = getVectorStoreImplementation();
+
+  return implementation.id === VECTOR_STORE_PROVIDERS.pgvector
+    ? countPgvectorChunksInEveryTable({ docIds })
+    : null;
 };
 
 export const clearVectorIndex = async ({ client = null } = {}) => {

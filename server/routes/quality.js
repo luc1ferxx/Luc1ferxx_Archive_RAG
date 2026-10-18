@@ -4,7 +4,7 @@ import { getRequestAccessScope } from "../auth.js";
 import { markHistoricalQualityEvidence } from "../evaluation/quality-evidence-scope.js";
 import { buildFeedbackRecord } from "../feedback.js";
 
-import { serializeError } from "./helpers.js";
+import { resolveScopedUserId, serializeError } from "./helpers.js";
 
 export const createQualityRouter = (services) => {
   const router = Router();
@@ -59,9 +59,16 @@ export const createQualityRouter = (services) => {
 
   router.post("/feedback", async (req, res) => {
     try {
+      // The record's user and workspace come from the access scope only. The
+      // user goes through the decision every route that reads one uses: an
+      // authenticated request acts for its credential's user.
+      const accessScope = getRequestAccessScope(req);
       const feedback = buildFeedbackRecord({
         payload: req.body,
-        accessScope: getRequestAccessScope(req),
+        accessScope: {
+          ...accessScope,
+          userId: resolveScopedUserId(req, req.body?.userId),
+        },
       });
       const storedFeedback = await feedbackService.recordFeedback(feedback);
       let agentExperienceMemory = null;

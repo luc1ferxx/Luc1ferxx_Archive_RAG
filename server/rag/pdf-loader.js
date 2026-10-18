@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 // Must stay above the pdfjs import: it installs globals that pdfjs reads while
 // evaluating its own module body, and sibling static imports run in source order.
@@ -21,6 +20,7 @@ import {
   buildPdfTextLines,
   renderPdfParagraphText,
 } from "./pdf-paragraphs.js";
+import { readWorkingFile } from "./working-files.js";
 
 const normalizePageText = (text = "") =>
   String(text)
@@ -84,7 +84,8 @@ export const loadPdfDocument = async (
     paragraphDetection = isPdfParagraphDetectionEnabled(),
   } = {}
 ) => {
-  const dataBuffer = await readFile(filePath);
+  // A working file (rag/working-files.js): encrypted with TENANT_ENCRYPTION=on.
+  const dataBuffer = await readWorkingFile(filePath);
   const pages = [];
   const pageLines = [];
   let pageCount = 0;

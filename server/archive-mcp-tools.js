@@ -4,7 +4,81 @@
 // without OpenAI, a vector store, or PostgreSQL. The MCP wiring file owns the
 // side effects; this file owns the shapes.
 
+import {
+  getApiAuthTokens,
+  isApiAuthEnabled,
+  isApiAuthJwtEnabled,
+  isApiAuthOidcEnabled,
+  isApiAuthWorkspaceRequired,
+} from "./rag/config.js";
+
 const EXCERPT_LIMIT = 220;
+
+export const ARCHIVE_MCP_SCOPE_REQUIRED = "ARCHIVE_MCP_SCOPE_REQUIRED";
+
+/**
+ * The principal the MCP server acts for. It runs in-process and never passes
+ * through API auth, so this is its whole identity: the document registry
+ * filter and the database tenant (row-level security) both use it. Null for
+ * an unset or blank variable.
+ */
+export const resolveArchiveMcpAccessScope = (env = process.env) => ({
+  userId: String(env.ARCHIVE_MCP_USER_ID ?? "").trim() || null,
+  workspaceId: String(env.ARCHIVE_MCP_WORKSPACE_ID ?? "").trim() || null,
+});
+
+/**
+ * The API auth settings that make this deployment serve more than one tenant:
+ * per-principal static tokens (API_AUTH_TOKENS), HS256 JWTs or OIDC tokens,
+ * each of which names its own user and workspace, or a required workspace on
+ * every request. Empty with API auth off and with the single shared
+ * API_AUTH_TOKEN, the single-tenant setups (auth.js treats that token as the
+ * whole archive's credential).
+ */
+export const listMultiTenantAuthSettings = () => {
+  if (!isApiAuthEnabled()) {
+    return [];
+  }
+
+  return [
+    getApiAuthTokens().trim() ? "API_AUTH_TOKENS" : "",
+    isApiAuthJwtEnabled() ? "API_AUTH_JWT_ENABLED" : "",
+    isApiAuthOidcEnabled() ? "API_AUTH_OIDC_ENABLED" : "",
+    isApiAuthWorkspaceRequired() ? "API_AUTH_REQUIRE_WORKSPACE" : "",
+  ].filter(Boolean);
+};
+
+/**
+ * Refuses to start the MCP server when it would act for no tenant against a
+ * multi-tenant configuration. A scope with neither a user nor a workspace is
+ * "every tenant" to the registry filter and runs on the database owner path
+ * (no row-level security), so archive_list_documents and archive_ask would
+ * read and answer from every tenant's documents. With API auth off or the
+ * single shared token, the archive is one tenant and an unscoped server keeps
+ * working as before.
+ *
+ * The rule reads this process's own environment, the same API_AUTH_*
+ * variables the API server reads; an MCP server launched without them is
+ * treated as a single-tenant setup.
+ */
+export const assertArchiveMcpScope = (accessScope = resolveArchiveMcpAccessScope()) => {
+  if (accessScope?.userId || accessScope?.workspaceId) {
+    return;
+  }
+
+  const settings = listMultiTenantAuthSettings();
+
+  if (settings.length === 0) {
+    return;
+  }
+
+  const error = new Error(
+    `The archive MCP server acts for no user or workspace, but API auth is configured for several tenants (${settings.join(", ")}); unscoped, it would read every tenant's documents. Set ARCHIVE_MCP_USER_ID and/or ARCHIVE_MCP_WORKSPACE_ID to the tenant it acts for.`
+  );
+  error.code = ARCHIVE_MCP_SCOPE_REQUIRED;
+  error.settings = settings;
+  throw error;
+};
 
 const normalizeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -137,3 +211,47 @@ export const toMcpTextContent = (payload) => ({
     },
   ],
 });
+
+// How long the way out waits for the usage ledger's last write, so a database
+// that does not answer cannot hold up the client that closed the server.
+export const ARCHIVE_MCP_SHUTDOWN_FLUSH_TIMEOUT_MS = 5000;
+
+/**
+ * The server's way out (its client closed stdin, or SIGTERM / SIGINT): what
+ * the tool calls booked in the tenant usage ledger (rag/tenant-usage.js: the
+ * model tokens and cost of every archive_ask) waits in memory for a flush
+ * timer that does not keep the process alive, so `stopLedger` writes it first,
+ * then `exit(code)`. Runs once however often it is called; a ledger that fails
+ * or takes longer than `timeoutMs` is logged and the server exits anyway.
+ */
+export const createArchiveMcpShutdown = ({
+  exit,
+  logger = console,
+  stopLedger,
+  timeoutMs = ARCHIVE_MCP_SHUTDOWN_FLUSH_TIMEOUT_MS,
+} = {}) => {
+  let stopping = null;
+
+  return (code = 0) => {
+    stopping ??= (async () => {
+      let timer = null;
+
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => stopLedger?.()),
+          new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+          }),
+        ]);
+      } catch (error) {
+        logger.error?.(`Failed to flush tenant usage: ${error instanceof Error ? error.message : error}`);
+      } finally {
+        clearTimeout(timer);
+      }
+
+      exit(code);
+    })();
+
+    return stopping;
+  };
+};

@@ -339,6 +339,33 @@ const getWorkspaceRoleIds = (accessScope, workspaceId) => {
   return [...new Set(roleIds)];
 };
 
+// API_AUTH_OIDC_ALLOW_PLATFORM_ROLES, read like rag/config.js reads it
+// (isApiAuthOidcPlatformRolesAllowed: default true; 1/true/yes/on and
+// 0/false/no/off, any case; anything else keeps the default), from `env`.
+const OIDC_PLATFORM_ROLES_FALSE_VALUES = new Set(["0", "false", "no", "off"]);
+
+export const isOidcPlatformGrantAllowed = (env = process.env) => {
+  const rawValue = env?.API_AUTH_OIDC_ALLOW_PLATFORM_ROLES;
+
+  return !(
+    typeof rawValue === "string" &&
+    OIDC_PLATFORM_ROLES_FALSE_VALUES.has(rawValue.trim().toLowerCase())
+  );
+};
+
+// API_AUTH_OIDC_ALLOW_PLATFORM_ROLES=false is meant to keep a customer's
+// identity provider from granting platform access. rag/oidc.js drops the
+// platform ids from the token (admin.* roles and every admin permission), but
+// a role id that is not a platform id can still resolve to an admin
+// permission here: the global workspace.admin role carries admin.status.read,
+// and an RBAC_POLICY_JSON role may carry any admin permission. So for a
+// principal the OIDC verifier authenticated, the global roles and permissions
+// it brings grant no admin permission while the flag is off; their workspace
+// permissions are kept, and the operator's own RBAC_DEFAULT_ROLE is not the
+// identity provider's grant and applies as before.
+const isOidcPlatformGrantRestricted = (scope, env) =>
+  normalizeScopeId(scope.authProvider) === "oidc" && !isOidcPlatformGrantAllowed(env);
+
 /**
  * The roles and permissions that apply to one request: global roles and
  * permissions on the principal, the roles granted inside the active workspace
@@ -347,7 +374,8 @@ const getWorkspaceRoleIds = (accessScope, workspaceId) => {
  * when the principal holds no workspace permission of its own (an explicit
  * lower role such as workspace.viewer is not raised to the default). Roles the
  * policy does not define grant nothing; permission ids outside the catalog are
- * dropped.
+ * dropped. An OIDC principal's global roles and permissions grant no admin
+ * permission while API_AUTH_OIDC_ALLOW_PLATFORM_ROLES is false.
  */
 export const describeEffectiveAccess = (
   accessScope = {},
@@ -359,10 +387,15 @@ export const describeEffectiveAccess = (
   const globalRoleIds = normalizeAccessPrincipalRoles(scope);
   const workspaceRoleIds = getWorkspaceRoleIds(scope, activeWorkspaceId);
   const permissions = new Set();
+  const grantsAdminPermissions = !isOidcPlatformGrantRestricted(scope, env);
+  const isGrantableGlobally = (permissionId) =>
+    grantsAdminPermissions || ORDINARY_PERMISSION_SET.has(permissionId);
 
   for (const roleId of globalRoleIds) {
     for (const permissionId of config.policy[roleId] ?? []) {
-      permissions.add(permissionId);
+      if (isGrantableGlobally(permissionId)) {
+        permissions.add(permissionId);
+      }
     }
   }
 
@@ -375,7 +408,7 @@ export const describeEffectiveAccess = (
   }
 
   for (const permissionId of normalizeAccessPrincipalPermissions(scope)) {
-    if (PERMISSION_SET.has(permissionId)) {
+    if (PERMISSION_SET.has(permissionId) && isGrantableGlobally(permissionId)) {
       permissions.add(permissionId);
     }
   }
@@ -444,7 +477,9 @@ const resolveAdminActionPermission = (params = {}) =>
 
 export const RBAC_ROUTE_TABLE = Object.freeze(
   [
-    // System and login configuration.
+    // System and login configuration. The probes answer everyone; with API
+    // auth on, the body beyond `status` needs admin.status.read, which
+    // routes/system.js checks itself (it is mounted before this middleware).
     pub("GET", "/livez"),
     pub("GET", "/health"),
     pub("GET", "/ready"),
@@ -457,6 +492,10 @@ export const RBAC_ROUTE_TABLE = Object.freeze(
     perm("DELETE", "/documents/:docId", P.documentsDelete),
     perm("POST", "/documents/clear", P.documentsDelete),
     perm("PUT", "/documents/:docId", P.documentsWrite),
+    // The document trash (rag/document-trash.js): listing it is a read; a
+    // restore undoes a delete, so it needs what the delete needed.
+    perm("GET", "/documents/trash", P.documentsRead),
+    perm("POST", "/documents/:docId/restore", P.documentsDelete),
 
     // Uploads and ingest jobs.
     perm("POST", "/upload/init", P.documentsWrite),
@@ -488,8 +527,10 @@ export const RBAC_ROUTE_TABLE = Object.freeze(
     perm("GET", "/agent-runs", P.chatAsk),
     perm("GET", "/agent-runs/:runId", P.chatAsk),
 
-    // Tasks, triggers, approvals and recovery of the caller's own runs. The
-    // recovery services keep their own admin permission checks on top.
+    // Tasks, triggers, approvals and recovery of the caller's own runs. These
+    // are tenant-scoped self-service routes gated only by tasks.run: the
+    // recovery and task services read through the caller's own scope (see the
+    // note next to the recovery permissions in rag/admin-permissions.js).
     perm("GET", "/tasks", P.tasksRun),
     perm("GET", "/tasks/:taskId", P.tasksRun),
     perm("POST", "/tasks/:taskId/actions/:action", P.tasksRun),
@@ -518,9 +559,27 @@ export const RBAC_ROUTE_TABLE = Object.freeze(
     perm("GET", "/admin/status", A.adminStatusRead),
     perm("GET", "/admin/audit", A.adminAuditRead),
     perm("GET", "/admin/index-versions", A.adminStatusRead),
+    perm("GET", "/admin/usage", A.adminUsageRead),
     perm("GET", "/admin/ingest-jobs/dead-letter", A.adminStatusRead),
     perm("POST", "/admin/ingest-jobs/:jobId/requeue", A.adminActionRecoverTasks),
     perm("POST", "/admin/actions/:action", resolveAdminActionPermission),
+
+    // The tenant registry (routes/admin-tenants.js; the routes check the same
+    // admin permissions and the caller's reach themselves).
+    perm("GET", "/admin/workspaces", A.adminTenantsRead),
+    perm("POST", "/admin/workspaces", A.adminTenantsWrite),
+    perm("GET", "/admin/workspaces/:workspaceId", A.adminTenantsRead),
+    perm("PATCH", "/admin/workspaces/:workspaceId", A.adminTenantsWrite),
+    perm("POST", "/admin/workspaces/:workspaceId/actions/:action", A.adminTenantsWrite),
+    perm("GET", "/admin/workspaces/:workspaceId/members", A.adminTenantsRead),
+    perm("GET", "/admin/workspaces/:workspaceId/members/:userId", A.adminTenantsRead),
+    perm("PUT", "/admin/workspaces/:workspaceId/members/:userId", A.adminTenantsWrite),
+    perm("DELETE", "/admin/workspaces/:workspaceId/members/:userId", A.adminTenantsWrite),
+
+    // Tenant erase and export (routes/admin-tenant-lifecycle.js): admin.owner
+    // only, platform principals only (the route checks that too).
+    perm("POST", "/admin/tenants/erase", A.adminTenantsErase),
+    perm("GET", "/admin/tenants/export", A.adminTenantsExport),
   ].map((entry) => Object.freeze(entry))
 );
 

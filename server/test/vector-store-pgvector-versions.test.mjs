@@ -59,6 +59,7 @@ import {
   isIndexVersionSnapshotFresh,
   isSameDocumentSpace,
   isSameQuerySpace,
+  listRetainedIndexVersionTables,
   lockIndexVersionWriteTargets,
   normalizeIndexParams,
   peekIndexVersionSnapshot,
@@ -327,7 +328,7 @@ test("registry names and version table names are validated identifiers that fit 
   );
 });
 
-test("a version table is rendered from the migration 012/013/014 templates at its own width and index parameters", async () => {
+test("a version table is rendered from the migration 012/013/014/033 templates at its own width and index parameters", async () => {
   const ddl = await renderIndexVersionChunkTableDdl({
     chunkTable: "rag_document_chunks_v3",
     dimensions: 768,
@@ -349,6 +350,16 @@ test("a version table is rendered from the migration 012/013/014 templates at it
   assert.match(ddl, /lower\('rag_document_chunks_v3_sparse_rank'\)/);
   assert.match(ddl, /SECURITY DEFINER/);
   assert.match(ddl, /ALTER TABLE rag_document_chunks_v3 ALTER COLUMN search_vector SET STATISTICS 1000/);
+
+  // Migration 033's installer replaces 014's function in the same statement,
+  // after 014's template ran, so the version's function filters a tenant's
+  // doc ids by the documents policy and 014's body is never committed.
+  const install = "SELECT rag_document_chunks_install_sparse_rank('rag_document_chunks_v3');";
+
+  assert.equal(ddl.split(install).length, 2, "the installer runs once");
+  assert.ok(ddl.endsWith(install), "the installer runs last");
+  assert.ok(ddl.indexOf(install) > ddl.indexOf("lower('rag_document_chunks_v3_sparse_rank')"));
+  assert.ok(ddl.indexOf(install) > ddl.indexOf("SET STATISTICS 1000"));
 
   const ivfflat = await renderIndexVersionChunkTableDdl({
     chunkTable: "rag_document_chunks_v4",
@@ -706,6 +717,84 @@ test("deletes and clears reach every target version and report the active versio
   assert.equal(await clearPgvectorIndex(), 1);
   assert.equal(await countPgvectorChunks({ versionId: 2 }), 0);
   await assert.rejects(countPgvectorChunks({ versionId: 9 }), /not live/);
+});
+
+test("deletes, clears and replacements also reach the live tables no write targets; a first ingest never looks for them", async () => {
+  useProvider();
+  const database = useDatabase();
+  const spaces = [getConfiguredEmbeddingSpace(), buildEmbeddingSpace({ dimensions: 3, model: PINNED_MODEL })];
+  // Versions 2 and 3 receive the first ingest, then stop being targets with
+  // their chunks still in place: 2 a failed build, 3 a ready version past its
+  // dual-write window. Version 4 was retired and its table already dropped.
+  addPinnedVersion(database, { status: "building", versionId: 2 });
+  addPinnedVersion(database, { status: "ready", versionId: 3 });
+  addPinnedVersion(database, { status: "retired", versionId: 4 });
+  database.state.tables.delete("rag_document_chunks_v4");
+
+  await writeDocumentsToPgvectorIndex({
+    preparedDocuments: await prepareDocumentsForPgvectorIndex({
+      documents: [...prepared("doc-1", ["alpha", "beta"]), ...prepared("doc-2", ["gamma"]), ...prepared("doc-3", ["delta"])],
+      spaces,
+    }),
+  });
+  assert.equal(database.tags().includes("retained_tables"), false, "a first ingest asks for no retained table");
+  database.state.versions.get(2).status = "failed";
+  database.state.versions.get(3).dual_write_until = new Date(database.clock.now - 1);
+
+  const rowsOf = (versionId, docId) =>
+    [...database.state.tables.get(versionId === 1 ? "rag_document_chunks" : `rag_document_chunks_v${versionId}`).rows.values()]
+      .filter((row) => row.doc_id === docId).length;
+
+  assert.deepEqual([rowsOf(2, "doc-1"), rowsOf(3, "doc-1")], [2, 2]);
+
+  // A delete reaches them in the same transaction as the target delete.
+  database.log.length = 0;
+  assert.equal(await removeDocumentsFromPgvectorIndex({ docIds: ["doc-1"] }), 2, "the count stays the active version's");
+  assert.deepEqual([rowsOf(1, "doc-1"), rowsOf(2, "doc-1"), rowsOf(3, "doc-1")], [0, 0, 0]);
+  assert.deepEqual([rowsOf(2, "doc-2"), rowsOf(3, "doc-2")], [1, 1], "only the deleted document");
+  const retainedQuery = database.log.find((entry) => entry.tag === "retained_tables");
+
+  assert.deepEqual(retainedQuery.values, [[1]], "the targets the transaction read are left out");
+  assert.deepEqual(
+    database.log.map((entry) => entry.sql).filter((sql) => /^DELETE FROM/.test(sql)),
+    [
+      "DELETE FROM rag_document_chunks WHERE doc_id = ANY($1::text[])",
+      "DELETE FROM rag_document_chunks_v2 WHERE doc_id = ANY($1::text[])",
+      "DELETE FROM rag_document_chunks_v3 WHERE doc_id = ANY($1::text[])",
+    ],
+    "the dropped table of version 4 is not touched"
+  );
+
+  // A replacement (content version 2) clears the old chunks there; the new
+  // ones go only to the targets.
+  await writeDocumentsToPgvectorIndex({
+    preparedDocuments: (
+      await prepareDocumentsForPgvectorIndex({ documents: prepared("doc-2", ["gamma two"]), spaces: [spaces[0]] })
+    ).map((document) => ({ ...document, metadata: stampChunkDocumentVersion(document.metadata, 2) })),
+  });
+  assert.deepEqual([rowsOf(1, "doc-2"), rowsOf(2, "doc-2"), rowsOf(3, "doc-2")], [1, 0, 0]);
+  assert.deepEqual([rowsOf(2, "doc-3"), rowsOf(3, "doc-3")], [1, 1]);
+
+  // A clear empties them.
+  assert.equal(await clearPgvectorIndex(), 2);
+  assert.deepEqual([rowsOf(2, "doc-3"), rowsOf(3, "doc-3")], [0, 0]);
+});
+
+test("the retained-table read leaves out the given versions and tables that no longer exist", async () => {
+  const database = useDatabase();
+
+  addPinnedVersion(database, { status: "failed", versionId: 2 });
+  addPinnedVersion(database, { status: "retired", versionId: 3 });
+  addPinnedVersion(database, { status: "ready", versionId: 5 });
+  database.state.tables.delete("rag_document_chunks_v3");
+
+  assert.deepEqual(
+    (await listRetainedIndexVersionTables(database.runtime, { excludeVersionIds: [1, 5, "x"] })).map(
+      (version) => [version.versionId, version.chunkTable, version.status]
+    ),
+    [[2, "rag_document_chunks_v2", "failed"]]
+  );
+  assert.deepEqual(await listRetainedIndexVersionTables(useDatabase({ registry: false }).runtime), []);
 });
 
 test("searches go to the active version: its table, its function and a query embedded in its own model", async () => {

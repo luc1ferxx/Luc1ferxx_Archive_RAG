@@ -12,9 +12,12 @@ import { createIngestWorker, resolveApiIngestWorkerPlan } from "./rag/ingest-wor
 import { assertLangSmithTracingDisabled } from "./rag/langgraph/langsmith-guard.js";
 import { startMetricsFromEnv } from "./rag/metrics-server.js";
 import { resetPostgresPool } from "./rag/postgres.js";
+import { startRetentionSweeper } from "./rag/retention.js";
 import {
   DEFAULT_SERVICE_ROLE,
   getServiceRole,
+  hostsServiceTier,
+  SERVICE_TIERS,
   validateServiceTopology,
 } from "./rag/service-topology.js";
 import {
@@ -177,6 +180,17 @@ const startMonolith = async () => {
     );
   }
 
+  // Retention (rag/retention.js): only when an *_RETENTION_DAYS setting (or
+  // DOCUMENT_TRASH_RETENTION_HOURS) is above 0 (all default to 0, and then
+  // nothing is started). The monolith
+  // hosts the API tier, and the agent tier unless AGENT_SERVICE_URL sends
+  // agent work elsewhere, which then sweeps runs and tasks itself.
+  const retentionSweeper = startRetentionSweeper({
+    hostsAgentTier: hostsServiceTier(SERVICE_TIERS.agent),
+    hostsApiTier: true,
+    services: app.locals.services,
+  });
+
   // The split roles' graceful shutdown (rag/agent-service/role-server.js):
   // stop accepting connections, let in-flight requests finish within
   // SERVICE_SHUTDOWN_GRACE_MS (an interrupted document_rag step cannot be
@@ -197,7 +211,10 @@ const startMonolith = async () => {
     graceMs,
     role: DEFAULT_SERVICE_ROLE,
     server,
-    stoppers: ingestWorker ? [() => ingestWorker.stop()] : [],
+    stoppers: [
+      ...(ingestWorker ? [() => ingestWorker.stop()] : []),
+      ...(retentionSweeper ? [() => retentionSweeper.stop()] : []),
+    ],
   });
 
   handleShutdownSignals({

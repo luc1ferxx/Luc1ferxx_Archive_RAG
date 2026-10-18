@@ -1,11 +1,18 @@
 import { createHash } from "node:crypto";
-import { readFile as readBinaryFile } from "fs/promises";
 import { getDocumentsPostgresTable, isPostgresDatabaseConfigured } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { createDocumentLegacyImporter as createDefaultDocumentLegacyImporter } from "./document-legacy-importer.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { queryPostgres as queryDefaultPostgres } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
+import { createPostgresTenantRecordMethods, tenantSelectorMatches } from "./tenant-records.js";
+import {
+  decryptTenantBytes,
+  decryptTenantRecordBytesForExport,
+  documentFileContext,
+  maybeEncryptTenantBytes,
+} from "./tenant-encryption.js";
+import { readWorkingFile } from "./working-files.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -291,9 +298,12 @@ const toPublicDocument = (document) =>
       }
     : null;
 
+// A source file path is a working file (an ingest attempt's copy, a merged
+// upload), encrypted with TENANT_ENCRYPTION=on; readWorkingFile returns its
+// plaintext and passes any other file through.
 export const resolveFileBuffer = async ({
   fileBuffer = null,
-  readFile = readBinaryFile,
+  readFile = readWorkingFile,
   sourceFilePath = "",
 } = {}) => {
   if (Buffer.isBuffer(fileBuffer)) {
@@ -328,17 +338,73 @@ const LEGACY_DOCUMENT_METADATA_COLUMNS =
   "doc_id, file_name, mime_type, file_size, chunk_count, page_count, owner_user_id, workspace_id, profile, uploaded_at";
 const UNDEFINED_COLUMN = "42703";
 
+// A row's file bytes as plaintext (TENANT_ENCRYPTION, rag/tenant-encryption.js):
+// an envelope is decrypted with the row's own owner columns and docId as its
+// context, so bytes copied in from another row fail; legacy plaintext and a
+// null column pass through.
+const decryptStoredFileBytes = async (row = {}) =>
+  row.file_bytes === null || row.file_bytes === undefined
+    ? row.file_bytes
+    : decryptTenantBytes(
+        row.file_bytes,
+        documentFileContext({
+          docId: row.doc_id,
+          userId: row.owner_user_id,
+          workspaceId: row.workspace_id,
+        })
+      );
+
+// The document trash (migration 042, DOCUMENT_TRASH_RETENTION_HOURS): a row
+// whose deleted_at is set was deleted into the trash. Its bytes stay until the
+// purge, but it is not a document any more: every read of the documents a
+// tenant works with (the map's loads and refreshes, the file download, the
+// content-hash lookup, a replacement's lock) leaves it out, whether or not the
+// trash is switched on now. Only the tenant erase and export, the storage
+// quota (rag/tenant-storage-quota.js) and the trash's own calls below see it.
+const ACTIVE_DOCUMENT = "deleted_at IS NULL";
+const TRASHED_DOCUMENT = "deleted_at IS NOT NULL";
+const TRASH_COLUMNS = "deleted_at, deleted_by_user_id, deleted_by_workspace_id";
+// The documentMatchesAccessScope rule in SQL (also migration 013's row
+// policy), with the scope's user and workspace in parameters $first and
+// $first + 1.
+const SCOPE_CONDITION = (first) => `(owner_user_id <> '' OR workspace_id <> '')
+          AND (owner_user_id = '' OR owner_user_id = $${first})
+          AND (workspace_id = '' OR workspace_id = $${first + 1})`;
+
+// `buildSql(columns, active)`: `active` is the condition that keeps a trashed
+// row out, or TRUE on a database migration 042 has not reached (no row there
+// can be trashed), which falls back once like the content columns of 018.
 const queryDocumentColumns = async (query, buildSql, values) => {
   try {
-    return await query(buildSql(DOCUMENT_METADATA_COLUMNS), values);
+    return await query(buildSql(DOCUMENT_METADATA_COLUMNS, ACTIVE_DOCUMENT), values);
+  } catch (error) {
+    if (error?.code !== UNDEFINED_COLUMN) {
+      throw error;
+    }
+  }
+
+  try {
+    return await query(buildSql(DOCUMENT_METADATA_COLUMNS, "TRUE"), values);
   } catch (error) {
     if (error?.code !== UNDEFINED_COLUMN) {
       throw error;
     }
 
-    return query(buildSql(LEGACY_DOCUMENT_METADATA_COLUMNS), values);
+    return query(buildSql(LEGACY_DOCUMENT_METADATA_COLUMNS, "TRUE"), values);
   }
 };
+
+const toTrashTimestamp = (value) =>
+  value === null || value === undefined ? null : toTimestampText(value, null);
+
+// A trashed row as the trash listing and the purge report it: the public
+// document plus when and by whom it was deleted.
+const mapRowToTrashedDocument = (row = {}) => ({
+  ...mapRowToStoredDocument(row),
+  deletedAt: toTrashTimestamp(row.deleted_at),
+  deletedByUserId: String(row.deleted_by_user_id ?? ""),
+  deletedByWorkspaceId: String(row.deleted_by_workspace_id ?? ""),
+});
 
 // Exact tenant equality, not the looser visibility rule: a duplicate is a
 // document this very owner and workspace stored.
@@ -351,10 +417,39 @@ export const createDocumentRegistryStore = ({
   createDocumentLegacyImporter = createDefaultDocumentLegacyImporter,
   getDocumentsTable = getDocumentsPostgresTable,
   queryPostgres = queryDefaultPostgres,
-  readFile = readBinaryFile,
+  readFile = readWorkingFile,
   runMigrations = runPostgresMigrations,
 } = {}) => ({
   backend: DOCUMENT_REGISTRY_BACKENDS.postgres,
+
+  // The tenant export (rag/tenant-records.js): the tenant's rows with their
+  // file bytes (decrypted: an export holds plaintext), a few at a time. An
+  // erase goes through rag/index.js eraseTenantDocuments instead (chunks
+  // first, in the writers' lock order), so this listing cannot delete.
+  ...createPostgresTenantRecordMethods({
+    allowDelete: false,
+    initialize: () => runMigrations(),
+    query: queryPostgres,
+    tables: () => [
+      {
+        keyColumns: ["doc_id"],
+        // Bytes that do not decrypt are exported as null with the code
+        // (unreadableBytes) instead of ending the export.
+        mapRow: async (row) =>
+          row.file_bytes === null || row.file_bytes === undefined
+            ? row
+            : decryptTenantRecordBytesForExport(
+                row,
+                "file_bytes",
+                documentFileContext({ docId: row.doc_id, userId: row.owner_user_id, workspaceId: row.workspace_id })
+              ),
+        name: "documents",
+        pageSize: 5,
+        table: ensureTableName(getDocumentsTable),
+        userColumn: "owner_user_id",
+      },
+    ],
+  }),
 
   async initialize() {
     await runMigrations();
@@ -399,21 +494,23 @@ export const createDocumentRegistryStore = ({
     const result = hasAccessScope(scope)
       ? await queryDocumentColumns(
           queryPostgres,
-          (columns) => `
+          (columns, active) => `
             SELECT ${columns}
             FROM ${tableName}
             WHERE (owner_user_id <> '' OR workspace_id <> '')
               AND (owner_user_id = '' OR owner_user_id = $1)
               AND (workspace_id = '' OR workspace_id = $2)
+              AND ${active}
             ORDER BY uploaded_at ASC, doc_id ASC
           `,
           [scope.userId, scope.workspaceId]
         )
       : await queryDocumentColumns(
           queryPostgres,
-          (columns) => `
+          (columns, active) => `
             SELECT ${columns}
             FROM ${tableName}
+            WHERE ${active}
             ORDER BY uploaded_at ASC, doc_id ASC
           `
         );
@@ -423,8 +520,32 @@ export const createDocumentRegistryStore = ({
       .filter((document) => documentMatchesAccessScope(document, accessScope));
   },
 
+  // The tenant erase (rag/tenant-records.js): metadata of the rows whose owner
+  // columns match a tenant selector exactly ({ workspaceId, userId|null }; a
+  // null user is every user of the workspace), not the visibility rule. The
+  // trash included: an erase removes the tenant's trashed documents too.
+  async listForTenant(selector = {}) {
+    const result = await queryDocumentColumns(
+      queryPostgres,
+      (columns) => `
+        SELECT ${columns}
+        FROM ${ensureTableName(getDocumentsTable)}
+        WHERE workspace_id = $1
+          AND ($2::text IS NULL OR owner_user_id = $2::text)
+        ORDER BY uploaded_at ASC, doc_id ASC
+      `,
+      [
+        String(selector.workspaceId ?? ""),
+        selector.userId === null || selector.userId === undefined ? null : String(selector.userId),
+      ]
+    );
+
+    return result.rows.map(mapRowToStoredDocument);
+  },
+
   // Metadata of the named documents only (no file bytes), for a process that
-  // needs to pick up documents another process registered.
+  // needs to pick up documents another process registered. A trashed one
+  // reads as gone.
   async listByIds(docIds = []) {
     const normalizedDocIds = normalizeDocIds(docIds);
 
@@ -435,10 +556,11 @@ export const createDocumentRegistryStore = ({
     const tableName = ensureTableName(getDocumentsTable);
     const result = await queryDocumentColumns(
       queryPostgres,
-      (columns) => `
+      (columns, active) => `
         SELECT ${columns}
         FROM ${tableName}
         WHERE doc_id = ANY($1::text[])
+          AND ${active}
       `,
       [normalizedDocIds]
     );
@@ -449,7 +571,8 @@ export const createDocumentRegistryStore = ({
   /**
    * The oldest document of exactly this owner and workspace whose stored
    * bytes hash to `contentSha256`, or null. Inside the ingest transaction it
-   * runs on `client`, after the caller took lockContentHash.
+   * runs on `client`, after the caller took lockContentHash. A trashed
+   * document is not a duplicate: the upload creates a new document.
    */
   async findByContentHash(contentSha256, owner = {}, { client = null } = {}) {
     const hash = normalizeContentSha256(contentSha256);
@@ -466,6 +589,7 @@ export const createDocumentRegistryStore = ({
         WHERE owner_user_id = $1
           AND workspace_id = $2
           AND content_sha256 = $3
+          AND ${ACTIVE_DOCUMENT}
         ORDER BY uploaded_at ASC, doc_id ASC
         LIMIT 1
       `,
@@ -503,7 +627,8 @@ export const createDocumentRegistryStore = ({
   /**
    * Locks the row a replacement is about to change (FOR UPDATE: concurrent
    * replacements and deletes, and the index-version builder's FOR SHARE read,
-   * wait for it) and returns it, or null when the document is gone.
+   * wait for it) and returns it, or null when the document is gone (or in
+   * the trash).
    */
   async lockForContentReplace(docId, { client }) {
     const result = await resolveQuery(queryPostgres, client)(
@@ -511,6 +636,7 @@ export const createDocumentRegistryStore = ({
         SELECT ${DOCUMENT_METADATA_COLUMNS}
         FROM ${ensureTableName(getDocumentsTable)}
         WHERE doc_id = $1
+          AND ${ACTIVE_DOCUMENT}
         FOR UPDATE
       `,
       [normalizeDocId(docId)]
@@ -533,6 +659,18 @@ export const createDocumentRegistryStore = ({
       sourceFilePath: document.sourceFilePath,
     });
     const fileSize = normalizedDocument.fileSize || fileBuffer.byteLength;
+    // Size and hash are the plaintext's; the column holds an envelope with
+    // TENANT_ENCRYPTION=on, bound to this docId and owner.
+    const contentSha256 =
+      normalizedDocument.contentSha256 ?? createHash("sha256").update(fileBuffer).digest("hex");
+    const storedBytes = await maybeEncryptTenantBytes(
+      fileBuffer,
+      documentFileContext({
+        docId: normalizedDocument.docId,
+        userId: normalizedDocument.ownerUserId,
+        workspaceId: normalizedDocument.workspaceId,
+      })
+    );
     const result = await resolveQuery(queryPostgres, client)(
       `
         INSERT INTO ${tableName} (
@@ -566,7 +704,10 @@ export const createDocumentRegistryStore = ({
           uploaded_at = EXCLUDED.uploaded_at,
           content_sha256 = EXCLUDED.content_sha256,
           content_version = EXCLUDED.content_version,
-          content_updated_at = EXCLUDED.content_updated_at
+          content_updated_at = EXCLUDED.content_updated_at,
+          deleted_at = NULL,
+          deleted_by_user_id = NULL,
+          deleted_by_workspace_id = NULL
         RETURNING ${DOCUMENT_METADATA_COLUMNS}
       `,
       [
@@ -574,14 +715,14 @@ export const createDocumentRegistryStore = ({
         normalizedDocument.fileName,
         normalizedDocument.mimeType,
         fileSize,
-        fileBuffer,
+        storedBytes,
         normalizedDocument.chunkCount,
         normalizedDocument.pageCount,
         normalizedDocument.ownerUserId,
         normalizedDocument.workspaceId,
         normalizedDocument.profile,
         normalizedDocument.uploadedAt,
-        normalizedDocument.contentSha256 ?? createHash("sha256").update(fileBuffer).digest("hex"),
+        contentSha256,
         normalizedDocument.version,
         // The database's clock when the writer asks for it: async jobs order
         // replacements by their enqueue time (created_at, this clock too), so a
@@ -593,7 +734,11 @@ export const createDocumentRegistryStore = ({
     return mapRowToStoredDocument(result.rows[0]);
   },
 
-  async getFile(docId, accessScope = {}) {
+  // The file bytes come back as plaintext; an envelope that does not decrypt
+  // (a destroyed key, a changed byte, a row copied from another document)
+  // throws its coded error instead. `decrypt: false` (delete's visibility
+  // check, which does not read the bytes) skips the decryption.
+  async getFile(docId, accessScope = {}, { decrypt = true } = {}) {
     const normalizedDocId = normalizeDocId(docId);
 
     if (!normalizedDocId) {
@@ -603,10 +748,11 @@ export const createDocumentRegistryStore = ({
     const tableName = ensureTableName(getDocumentsTable);
     const result = await queryDocumentColumns(
       queryPostgres,
-      (columns) => `
+      (columns, active) => `
         SELECT ${columns.replace("file_size,", "file_size, file_bytes,")}
         FROM ${tableName}
         WHERE doc_id = $1
+          AND ${active}
         LIMIT 1
       `,
       [normalizedDocId]
@@ -623,9 +769,11 @@ export const createDocumentRegistryStore = ({
       return null;
     }
 
+    const storedBytes = Buffer.from(row.file_bytes ?? []);
+
     return {
       document,
-      fileBuffer: Buffer.from(row.file_bytes ?? []),
+      fileBuffer: decrypt ? await decryptStoredFileBytes({ ...row, file_bytes: storedBytes }) : storedBytes,
       mimeType: String(row.mime_type ?? "application/pdf"),
       fileName: String(row.file_name ?? "document.pdf"),
       fileSize: toPositiveInteger(row.file_size),
@@ -640,16 +788,33 @@ export const createDocumentRegistryStore = ({
     }
 
     const tableName = ensureTableName(getDocumentsTable);
-    const existingFile = await this.getFile(normalizedDocId, accessScope);
+    const query = resolveQuery(queryPostgres, client);
+    // The scope check reads the row's metadata on the caller's connection:
+    // inside the delete transaction a read on the pool would take a second
+    // connection while the transaction holds one, and the bytes are not
+    // needed to decide.
+    const existing = await queryDocumentColumns(
+      query,
+      (columns, active) => `
+        SELECT ${columns}
+        FROM ${tableName}
+        WHERE doc_id = $1
+          AND ${active}
+        LIMIT 1
+      `,
+      [normalizedDocId]
+    );
+    const existingDocument = existing.rows[0] ? mapRowToStoredDocument(existing.rows[0]) : null;
 
-    if (!existingFile) {
+    if (!existingDocument || !documentMatchesAccessScope(existingDocument, accessScope)) {
       return null;
     }
 
-    const result = await resolveQuery(queryPostgres, client)(
+    const result = await query(
       `
         DELETE FROM ${tableName}
         WHERE doc_id = $1
+          AND ${ACTIVE_DOCUMENT}
         RETURNING ${DOCUMENT_METADATA_COLUMNS}
       `,
       [normalizedDocId]
@@ -658,9 +823,60 @@ export const createDocumentRegistryStore = ({
     return result.rows[0] ? mapRowToStoredDocument(result.rows[0]) : null;
   },
 
+  /**
+   * The tenant erase (rag/index.js eraseTenantDocuments): locks the named
+   * rows that still belong to `owner` (FOR UPDATE, in doc_id order, before
+   * any chunk row, as ingest and replacement lock), lets `beforeDelete`
+   * remove their chunks on the same client, then deletes the rows and
+   * returns them. `owner` is the tenant selector ({ workspaceId, userId|null }),
+   * so a row whose owner columns no longer match is neither locked nor deleted.
+   */
+  async eraseMany(docIds = [], { beforeDelete = null, client = null, owner } = {}) {
+    const normalizedDocIds = normalizeDocIds(docIds);
+
+    if (normalizedDocIds.length === 0) {
+      return [];
+    }
+
+    const tableName = ensureTableName(getDocumentsTable);
+    const query = resolveQuery(queryPostgres, client);
+    const userId = owner?.userId === null || owner?.userId === undefined ? null : String(owner.userId);
+    const locked = await query(
+      `
+        SELECT doc_id
+        FROM ${tableName}
+        WHERE doc_id = ANY($1::text[])
+          AND workspace_id = $2
+          AND ($3::text IS NULL OR owner_user_id = $3::text)
+        ORDER BY doc_id
+        FOR UPDATE
+      `,
+      [normalizedDocIds, String(owner?.workspaceId ?? ""), userId]
+    );
+    const lockedDocIds = (locked?.rows ?? []).map((row) => String(row.doc_id));
+
+    if (lockedDocIds.length === 0) {
+      return [];
+    }
+
+    await beforeDelete?.(lockedDocIds);
+
+    const result = await query(
+      `
+        DELETE FROM ${tableName}
+        WHERE doc_id = ANY($1::text[])
+        RETURNING ${DOCUMENT_METADATA_COLUMNS}
+      `,
+      [lockedDocIds]
+    );
+
+    return (result?.rows ?? []).map(mapRowToStoredDocument);
+  },
+
   // Deletes the scope's rows (every row when the scope is empty) in one
   // statement on `client` and returns the documents it deleted, including
   // rows another process registered that this process's map never loaded.
+  // Trashed rows are not documents any more and stay for the purge.
   async clear(accessScope = {}, { client = null } = {}) {
     const tableName = ensureTableName(getDocumentsTable);
     const query = resolveQuery(queryPostgres, client);
@@ -672,6 +888,7 @@ export const createDocumentRegistryStore = ({
             WHERE (owner_user_id <> '' OR workspace_id <> '')
               AND (owner_user_id = '' OR owner_user_id = $1)
               AND (workspace_id = '' OR workspace_id = $2)
+              AND ${ACTIVE_DOCUMENT}
             RETURNING ${DOCUMENT_METADATA_COLUMNS}
           `,
           [scope.userId, scope.workspaceId]
@@ -679,11 +896,199 @@ export const createDocumentRegistryStore = ({
       : await query(
           `
             DELETE FROM ${tableName}
+            WHERE ${ACTIVE_DOCUMENT}
             RETURNING ${DOCUMENT_METADATA_COLUMNS}
           `
         );
 
     return (result?.rows ?? []).map(mapRowToStoredDocument);
+  },
+
+  // --- The trash (migration 042) -------------------------------------------
+  // The only calls besides the tenant erase and export that see a trashed
+  // row. Each applies the scope rule in SQL too, as list and clear do.
+
+  /**
+   * Moves the document into the trash on `client` (the caller's transaction,
+   * which locked the row and removed its chunks first): sets deleted_at and
+   * the deleting scope, keeps the row and its bytes. Returns the trashed
+   * document, or null when this scope has no such document.
+   */
+  async trash(docId, accessScope = {}, { client = null, deletedBy = {} } = {}) {
+    const normalizedDocId = normalizeDocId(docId);
+
+    if (!normalizedDocId) {
+      return null;
+    }
+
+    const scope = normalizeAccessScope(accessScope);
+    const deleter = normalizeAccessScope(deletedBy);
+    const scoped = hasAccessScope(scope);
+    const result = await resolveQuery(queryPostgres, client)(
+      `
+        UPDATE ${ensureTableName(getDocumentsTable)}
+        SET deleted_at = NOW(),
+            deleted_by_user_id = $2,
+            deleted_by_workspace_id = $3
+        WHERE doc_id = $1
+          AND ${ACTIVE_DOCUMENT}${scoped ? `
+          AND ${SCOPE_CONDITION(4)}` : ""}
+        RETURNING ${DOCUMENT_METADATA_COLUMNS}, ${TRASH_COLUMNS}
+      `,
+      [normalizedDocId, deleter.userId, deleter.workspaceId, ...(scoped ? [scope.userId, scope.workspaceId] : [])]
+    );
+
+    return result?.rows?.[0] ? mapRowToTrashedDocument(result.rows[0]) : null;
+  },
+
+  // The clear of the trash: every document of the scope (every document for
+  // an empty scope) into the trash in one statement on `client`; returns them.
+  async trashScope(accessScope = {}, { client = null, deletedBy = {} } = {}) {
+    const scope = normalizeAccessScope(accessScope);
+    const deleter = normalizeAccessScope(deletedBy);
+    const scoped = hasAccessScope(scope);
+    const result = await resolveQuery(queryPostgres, client)(
+      `
+        UPDATE ${ensureTableName(getDocumentsTable)}
+        SET deleted_at = NOW(),
+            deleted_by_user_id = $1,
+            deleted_by_workspace_id = $2
+        WHERE ${ACTIVE_DOCUMENT}${scoped ? `
+          AND ${SCOPE_CONDITION(3)}` : ""}
+        RETURNING ${DOCUMENT_METADATA_COLUMNS}, ${TRASH_COLUMNS}
+      `,
+      [deleter.userId, deleter.workspaceId, ...(scoped ? [scope.userId, scope.workspaceId] : [])]
+    );
+
+    return (result?.rows ?? []).map(mapRowToTrashedDocument);
+  },
+
+  // The scope's trash, most recently deleted first (metadata only).
+  async listTrashed(accessScope = {}) {
+    const scope = normalizeAccessScope(accessScope);
+    const scoped = hasAccessScope(scope);
+    const result = await queryPostgres(
+      `
+        SELECT ${DOCUMENT_METADATA_COLUMNS}, ${TRASH_COLUMNS}
+        FROM ${ensureTableName(getDocumentsTable)}
+        WHERE ${TRASHED_DOCUMENT}${scoped ? `
+          AND ${SCOPE_CONDITION(1)}` : ""}
+        ORDER BY deleted_at DESC, doc_id ASC
+      `,
+      scoped ? [scope.userId, scope.workspaceId] : []
+    );
+
+    return (result?.rows ?? []).map(mapRowToTrashedDocument);
+  },
+
+  // One trashed document of the scope with its stored bytes (a restore
+  // re-chunks them), or null.
+  async getTrashedFile(docId, accessScope = {}) {
+    const normalizedDocId = normalizeDocId(docId);
+
+    if (!normalizedDocId) {
+      return null;
+    }
+
+    const scope = normalizeAccessScope(accessScope);
+    const scoped = hasAccessScope(scope);
+    const result = await queryPostgres(
+      `
+        SELECT ${DOCUMENT_METADATA_COLUMNS}, ${TRASH_COLUMNS}, file_bytes
+        FROM ${ensureTableName(getDocumentsTable)}
+        WHERE doc_id = $1
+          AND ${TRASHED_DOCUMENT}${scoped ? `
+          AND ${SCOPE_CONDITION(2)}` : ""}
+        LIMIT 1
+      `,
+      [normalizedDocId, ...(scoped ? [scope.userId, scope.workspaceId] : [])]
+    );
+    const row = result?.rows?.[0];
+
+    if (!row) {
+      return null;
+    }
+
+    const document = mapRowToTrashedDocument(row);
+
+    return documentMatchesAccessScope(document, accessScope)
+      ? { document, fileBuffer: await decryptStoredFileBytes({ ...row, file_bytes: Buffer.from(row.file_bytes ?? []) }) }
+      : null;
+  },
+
+  /**
+   * Locks a trashed row a restore is about to bring back (FOR UPDATE, after
+   * the index write lock and the content-hash lock, as a replacement locks its
+   * row) and returns it, or null when it is no longer in the trash (restored
+   * or purged meanwhile).
+   */
+  async lockTrashedForRestore(docId, { client }) {
+    const result = await resolveQuery(queryPostgres, client)(
+      `
+        SELECT ${DOCUMENT_METADATA_COLUMNS}, ${TRASH_COLUMNS}
+        FROM ${ensureTableName(getDocumentsTable)}
+        WHERE doc_id = $1
+          AND ${TRASHED_DOCUMENT}
+        FOR UPDATE
+      `,
+      [normalizeDocId(docId)]
+    );
+
+    return result?.rows?.[0] ? mapRowToTrashedDocument(result.rows[0]) : null;
+  },
+
+  /**
+   * One purge batch on `client` (a system transaction that already took the
+   * index write lock): a try-lock so two instances never purge at the same
+   * moment, then up to `limit` rows trashed before `cutoff`, oldest first,
+   * locked FOR UPDATE SKIP LOCKED (a restore holding one is passed over),
+   * `beforeDelete(docIds)` (their chunks in every chunk table), and the
+   * delete, which checks the condition again. Returns { acquired, documents }.
+   */
+  async purgeTrashed({ beforeDelete = null, client, cutoff, limit }) {
+    const tableName = ensureTableName(getDocumentsTable);
+    const query = resolveQuery(queryPostgres, client);
+    const lock = await query(
+      `SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS acquired`,
+      [`archive_rag:retention:${tableName}:trash`]
+    );
+
+    if (lock?.rows?.[0]?.acquired === false) {
+      return { acquired: false, documents: [] };
+    }
+
+    const locked = await query(
+      `
+        SELECT doc_id
+        FROM ${tableName}
+        WHERE ${TRASHED_DOCUMENT}
+          AND deleted_at < $1::timestamptz
+        ORDER BY deleted_at ASC, doc_id ASC
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+      `,
+      [cutoff, limit]
+    );
+    const docIds = (locked?.rows ?? []).map((row) => String(row.doc_id));
+
+    if (docIds.length === 0) {
+      return { acquired: true, documents: [] };
+    }
+
+    await beforeDelete?.(docIds);
+
+    const result = await query(
+      `
+        DELETE FROM ${tableName}
+        WHERE doc_id = ANY($1::text[])
+          AND ${TRASHED_DOCUMENT}
+          AND deleted_at < $2::timestamptz
+        RETURNING ${DOCUMENT_METADATA_COLUMNS}, ${TRASH_COLUMNS}
+      `,
+      [docIds, cutoff]
+    );
+
+    return { acquired: true, documents: (result?.rows ?? []).map(mapRowToTrashedDocument) };
   },
 });
 
@@ -751,6 +1156,18 @@ export const initializeDocumentRegistry = async () => {
 
   setDocumentRegistry(documents);
   return listDocuments();
+};
+
+/**
+ * Loads the map once, like initializeDocumentRegistry, without listing it
+ * afterwards. A write calls it before it takes a lock or a transaction, so
+ * registerDocument never loads the map on a second pooled connection while
+ * the write holds one (rag/index.js commitDocument).
+ */
+export const ensureDocumentRegistryInitialized = async () => {
+  if (!documentRegistryInitialized) {
+    await initializeDocumentRegistry();
+  }
 };
 
 /**
@@ -1181,6 +1598,16 @@ export const getDocuments = (docIds, accessScope = {}) =>
     .map((docId) => getDocument(docId, accessScope))
     .filter(Boolean);
 
+// Owner pair and stored size of every document in this process's map, for the
+// storage quotas (rag/tenant-storage-quota.js) where the map is the whole
+// registry (one writer). Copies, never the map's own entries.
+export const listStoredDocumentSizes = () =>
+  [...documentRegistry.values()].map((document) => ({
+    fileSize: document.fileSize,
+    ownerUserId: document.ownerUserId,
+    workspaceId: document.workspaceId,
+  }));
+
 export const listDocuments = (accessScope = {}) =>
   [...documentRegistry.values()]
     .filter((document) => documentMatchesAccessScope(document, accessScope))
@@ -1261,11 +1688,231 @@ export const clearDocuments = async ({
   return cleared;
 };
 
+// --- The document trash (migration 042) --------------------------------------
+//
+// Only a store with the trash calls keeps a trash: the PostgreSQL store (with
+// a database), or a configured store that declares them. The file-backed
+// registry and the evaluation stores do not; rag/document-trash.js refuses
+// DOCUMENT_TRASH_RETENTION_HOURS there at start-up, and the reads below answer
+// an empty trash.
+
+const TRASH_STORE_CALLS = Object.freeze([
+  "trash",
+  "trashScope",
+  "listTrashed",
+  "getTrashedFile",
+  "lockTrashedForRestore",
+  "purgeTrashed",
+]);
+
+/** Whether the registry store keeps a trash (see above). */
+export const supportsDocumentRegistryTrash = () => {
+  const store = getDocumentRegistryStore();
+  const hasCalls = TRASH_STORE_CALLS.every((call) => typeof store[call] === "function");
+
+  return configuredDocumentRegistryStore ? hasCalls : hasCalls && isPostgresDatabaseConfigured();
+};
+
+// A trashed document as the trash listing shows it: the public document and
+// when and by which scope it was deleted.
+const toPublicTrashedDocument = (document) => ({
+  ...toPublicDocument(toStoredDocument(document)),
+  deletedAt: document.deletedAt ?? null,
+  deletedByUserId: String(document.deletedByUserId ?? ""),
+  deletedByWorkspaceId: String(document.deletedByWorkspaceId ?? ""),
+});
+
+/**
+ * Moves a document this caller can see into the trash, on `client` (the
+ * caller's write transaction, which locked the row and removed its chunks),
+ * and drops it from the map. Null when the map does not hold it for the
+ * scope, or when the store had no document left to trash (another process
+ * deleted or trashed it first); the stale entry is dropped either way, as
+ * deleteDocument does.
+ */
+export const trashDocument = async (docId, accessScope = {}, { client = null, deletedBy = {} } = {}) => {
+  const storedDocument = getStoredDocument(docId, accessScope);
+
+  if (!storedDocument) {
+    return null;
+  }
+
+  const trashed = await getDocumentRegistryStore().trash(docId, accessScope, { client, deletedBy });
+
+  documentRegistry.delete(normalizeDocId(docId));
+  return trashed ? toPublicTrashedDocument(trashed) : null;
+};
+
+/**
+ * Moves the scope's documents (every document for an empty scope) into the
+ * trash in one statement on `client`, and drops them from the map; as
+ * clearDocuments, the store's own statement decides which documents that is,
+ * and `onTrashed(docIds)` is called with them before the map changes.
+ */
+export const trashDocuments = async ({
+  accessScope = {},
+  client = null,
+  deletedBy = {},
+  onTrashed = null,
+} = {}) => {
+  const trashed = (await getDocumentRegistryStore().trashScope(accessScope, { client, deletedBy })).map(
+    toPublicTrashedDocument
+  );
+
+  onTrashed?.(trashed.map((document) => document.docId));
+
+  for (const document of trashed) {
+    documentRegistry.delete(document.docId);
+  }
+
+  return trashed;
+};
+
+/** The scope's trash (empty for a store without one), newest first. */
+export const listTrashedDocuments = async (accessScope = {}) =>
+  supportsDocumentRegistryTrash()
+    ? (await getDocumentRegistryStore().listTrashed(accessScope)).map(toPublicTrashedDocument)
+    : [];
+
+/**
+ * One trashed document of the scope with its bytes, { document, fileBuffer }
+ * (the stored form plus deletedAt), or null.
+ */
+export const getTrashedDocumentFile = async (docId, accessScope = {}) =>
+  supportsDocumentRegistryTrash()
+    ? getDocumentRegistryStore().getTrashedFile(docId, accessScope)
+    : null;
+
+/** A restore's row lock on `client`; the stored form, or null when it is no longer trashed. */
+export const lockTrashedDocumentForRestore = async (docId, { client }) => {
+  const locked = await getDocumentRegistryStore().lockTrashedForRestore(docId, { client });
+
+  return locked ? { ...toStoredDocument(locked), deletedAt: locked.deletedAt } : null;
+};
+
+/**
+ * One purge batch on `client` (rag/index.js purgeTrashedDocumentsBatch):
+ * { acquired, documents } with the purged documents in the trash listing's
+ * form. A trashed document is never in the map, so the map is not touched.
+ */
+export const purgeTrashedDocuments = async ({ beforeDelete = null, client, cutoff, limit }) => {
+  const { acquired, documents } = await getDocumentRegistryStore().purgeTrashed({
+    beforeDelete,
+    client,
+    cutoff,
+    limit,
+  });
+
+  return { acquired, documents: documents.map(toPublicTrashedDocument) };
+};
+
+/**
+ * The registry store the tenant export lists documents from (its
+ * iterateTenantRecords or listTenantRecords, with the file bytes), as
+ * getSessionMemoryTenantRecordStore in memory.js: `not_configured` without a
+ * database or a configured store, `unsupported` for a configured store
+ * without the calls.
+ */
+export const getDocumentRegistryTenantRecordStore = () => {
+  if (configuredDocumentRegistryStore) {
+    return typeof configuredDocumentRegistryStore.listTenantRecords === "function" ||
+      typeof configuredDocumentRegistryStore.iterateTenantRecords === "function"
+      ? { status: "ok", store: configuredDocumentRegistryStore }
+      : { status: "unsupported", store: null };
+  }
+
+  return isPostgresDatabaseConfigured()
+    ? { status: "ok", store: getDocumentRegistryStore() }
+    : { status: "not_configured", store: null };
+};
+
+/**
+ * The stored documents of one tenant selector (rag/tenant-records.js), for
+ * the tenant erase and export: read from the store as the system (metadata
+ * only), so documents another process registered that this map never loaded
+ * count too, and matched on the owner columns exactly. Without a store that
+ * can list (no database and no file registry), this process's map is all
+ * there is.
+ */
+export const listStoredDocumentsForTenant = async (selector) => {
+  const store = getDocumentRegistryStore();
+  const storeAnswers = Boolean(configuredDocumentRegistryStore) || isPostgresDatabaseConfigured();
+  const documents =
+    storeAnswers && typeof store.listForTenant === "function"
+      ? await runAsDatabaseSystem(() => store.listForTenant(selector))
+      : storeAnswers && typeof store.list === "function"
+        ? await runAsDatabaseSystem(() => store.list())
+        : [...documentRegistry.values()];
+
+  return documents
+    .map((document) => toStoredDocument(document))
+    .filter((document) => document.docId && tenantSelectorMatches(selector, document))
+    .sort(compareByUploadOrder);
+};
+
+/**
+ * Erases the named documents of `selector` from the store and this process's
+ * map, and returns the stored documents erased. A PostgreSQL store does it in
+ * one locked statement on `client` (eraseMany: rows that no longer belong to
+ * the selector are left alone); other stores, which have one writer, per
+ * document. `beforeDelete(docIds)` runs first with the ids about to go, on the
+ * same transaction when there is one (the pgvector chunk rows). The map
+ * entries go before the caller's COMMIT, as deleteDocument's do; a caller
+ * whose transaction rolls back re-reads them (resyncDocument).
+ */
+export const eraseStoredDocuments = async (
+  docIds,
+  { beforeDelete = null, client = null, selector } = {}
+) => {
+  const store = getDocumentRegistryStore();
+  const requestedDocIds = normalizeDocIds(docIds);
+  let erased;
+
+  if (typeof store.eraseMany === "function" && (client || isDocumentRegistryShared())) {
+    erased = (
+      await store.eraseMany(requestedDocIds, { beforeDelete, client, owner: selector })
+    ).map((document) => toStoredDocument(document));
+  } else {
+    await beforeDelete?.(requestedDocIds);
+    erased = [];
+
+    for (const docId of requestedDocIds) {
+      const known = documentRegistry.get(docId) ?? null;
+
+      if (known && !tenantSelectorMatches(selector, known)) {
+        continue;
+      }
+
+      if (typeof store.delete === "function") {
+        const deleted = await store.delete(docId, {}, { client });
+
+        if (deleted) {
+          erased.push(toStoredDocument(deleted));
+        } else if (known) {
+          erased.push(known);
+        }
+      } else if (known) {
+        erased.push(known);
+      }
+    }
+  }
+
+  for (const document of erased) {
+    documentRegistry.delete(document.docId);
+  }
+
+  return erased;
+};
+
 /**
  * Fills content_sha256 (migration 018) for rows stored before it, in batches
  * the database hashes itself, so no PDF crosses the wire. Until a row has its
  * hash, an identical upload is not recognised as a duplicate of it. `dryRun`
- * only counts. Runs as the owner: every tenant's rows.
+ * only counts. Runs as the owner: every tenant's rows. The database hashes
+ * the stored bytes, which is the plaintext only for a row without an
+ * envelope; that holds for every row it meets, because every write that
+ * stores an envelope (upsert, `tenant:keys -- encrypt-existing`) records the
+ * plaintext's hash in the same statement.
  */
 export const backfillDocumentContentHashes = async ({
   batchSize = 100,

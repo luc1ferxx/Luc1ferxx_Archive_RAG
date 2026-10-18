@@ -9,6 +9,7 @@ import {
   resetDefaultEmbeddingBatcher,
 } from "../rag/ingest-embedding-batcher.js";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
+import { TENANT_ENVELOPE_MAGIC } from "../rag/tenant-encryption.js";
 import { renderPgvectorBm25DropDdl } from "../rag/vector-store-pgvector-sparse.js";
 import {
   configurePgvectorRuntime,
@@ -229,6 +230,11 @@ test("creating a version locks, renders its table and registers it building, all
     "COMMIT",
   ]);
   assert.match(database.state.tables.get("rag_document_chunks_v2").ddl, /WITH \(m = 24/);
+  // Migration 033's tenant-filtering sparse-rank function, in the same transaction.
+  assert.match(
+    database.state.tables.get("rag_document_chunks_v2").ddl,
+    /SELECT rag_document_chunks_install_sparse_rank\('rag_document_chunks_v2'\);/
+  );
   // The new space was probed once, before any statement: its model answered at its width.
   assert.deepEqual(
     calls.map((call) => [call.kind, call.model, call.texts.length]),
@@ -870,6 +876,75 @@ test("the gate passes a complete version and names every reason it refuses one",
   database.state.versions.get(2).status = "ready";
   database.state.versions.get(2).dual_write_until = new Date(database.clock.now - 1);
   assert.match((await validateIndexVersion({ versionId: 2 })).reasons[0], /stopped receiving writes/);
+});
+
+test("a document whose stored bytes do not decrypt is recorded as unreadable; the gate holds it back unless told to pass over it", async () => {
+  useProvider();
+  const database = useDatabase();
+
+  seedDocuments(database);
+  // Bytes that begin like a tenant envelope but are none (a PDF stored with
+  // the magic in front, or a damaged envelope): decrypting them fails with a
+  // coded error on every read. The active version indexed it at upload.
+  database.addDocument({ docId: "doc-sealed", owner: "carol", pages: ["Gamma sealed."] });
+  database.state.documents.get("doc-sealed").file_bytes = Buffer.concat([
+    TENANT_ENVELOPE_MAGIC,
+    Buffer.from([1]),
+    Buffer.from("%PDF-1.4 not an envelope"),
+  ]);
+  seedActiveChunks(database, "doc-sealed", ["Gamma sealed."], { owner: "carol" });
+
+  const outcomes = [];
+  const result = await build({ hooks: { afterDocument: ({ docId, outcome }) => outcomes.push([docId, outcome]) } });
+  const sealedProgress = [...database.state.progress.values()].find((entry) => entry.doc_id === "doc-sealed");
+
+  assert.deepEqual(
+    { failed: result.failed, indexed: result.indexed, unreadable: result.unreadable },
+    { failed: 1, indexed: 2, unreadable: 1 },
+    "the build went on past it"
+  );
+  assert.equal(sealedProgress.outcome, "failed");
+  assert.match(sealedProgress.error, /^unreadable_source TENANT_ENVELOPE_MALFORMED: Decrypting the stored PDF of doc-sealed failed/);
+  assert.deepEqual(outcomes.find(([docId]) => docId === "doc-sealed"), ["doc-sealed", "failed"]);
+
+  const held = await validateIndexVersion({ versionId: 2 });
+
+  assert.equal(held.ok, false);
+  assert.equal(held.unreadableDocuments, 1);
+  assert.deepEqual(held.unreadable, [
+    { activeCount: 1, code: "TENANT_ENVELOPE_MALFORMED", docId: "doc-sealed", targetCount: 0 },
+  ]);
+  assert.equal(held.reasons.length, 1, held.reasons.join(" "));
+  assert.match(
+    held.reasons[0],
+    /1 document\(s\) have no chunks in version 2 because the build could not read their stored PDF \(TENANT_ENVELOPE_MALFORMED; first: doc-sealed\)\..*--allow-unreadable-sources/
+  );
+
+  const passed = await validateIndexVersion({ allowUnreadableSources: true, versionId: 2 });
+
+  assert.equal(passed.ok, true, passed.reasons.join(" "));
+  assert.equal(passed.allowUnreadableSources, true);
+  assert.equal(passed.unreadableDocuments, 1, "still reported");
+
+  // Only the unreadable documents are passed over: any other drift blocks.
+  const table = database.state.tables.get("rag_document_chunks_v2");
+  const [docAKey, docARow] = [...table.rows.entries()].find(([, row]) => row.doc_id === "doc-a");
+
+  table.rows.delete(docAKey);
+
+  const drifting = await validateIndexVersion({ allowUnreadableSources: true, versionId: 2 });
+
+  assert.equal(drifting.ok, false);
+  assert.deepEqual(drifting.reasons.length, 1);
+  assert.match(drifting.reasons[0], /1 document\(s\) have a different chunk count .*doc-a 1->0/);
+
+  table.rows.set(docAKey, docARow);
+  await assert.rejects(activateIndexVersion({ versionId: 2 }), { code: INDEX_VERSION_ERROR_CODES.validationFailed });
+
+  const activated = await activateIndexVersion({ allowUnreadableSources: true, versionId: 2 });
+
+  assert.equal(activated.activeVersionId, 2);
+  assert.equal(activated.validation.unreadableDocuments, 1);
 });
 
 test("the gate compares content versions: a replacement the version missed blocks it even at equal chunk counts", async () => {

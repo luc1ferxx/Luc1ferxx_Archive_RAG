@@ -144,6 +144,64 @@ describe("OIDC bearer token", () => {
     expect(axios.delete.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-access");
   });
 
+  test("the retry after a 401 goes to the workspace the request started in, even after a switch", async () => {
+    const { apiClient, tokenStore } = await loadModules();
+    const workspaces = await import("./workspaceSelection");
+    tokenStore.setOidcTokens({ access_token: "expired-access", expires_in: 300 });
+    workspaces.setActiveWorkspaceId("ws-a");
+    // The tab switches to ws-b while the token is being refreshed.
+    const onRefresh = vi.fn(async () => {
+      workspaces.setActiveWorkspaceId("ws-b");
+      tokenStore.setOidcTokens({ access_token: "fresh-access", expires_in: 300 });
+      return true;
+    });
+    tokenStore.setTokenHandlers({ onReauthRequired: vi.fn(), onRefresh });
+    axios.post.mockRejectedValueOnce(unauthorized()).mockResolvedValueOnce({ data: { cleared: 1 } });
+
+    await apiClient.apiPost("/documents/clear", undefined, { timeout: 0 });
+
+    expect(axios.post).toHaveBeenCalledTimes(2);
+    expect(axios.post.mock.calls.map(([, , config]) => config.headers["x-workspace-id"])).toEqual(["ws-a", "ws-a"]);
+    expect(axios.post.mock.calls[1][2].headers.Authorization).toBe("Bearer fresh-access");
+    expect(axios.post.mock.calls[1][2]).not.toHaveProperty("workspaceId");
+
+    // The next request is a new one: it goes to the workspace now selected.
+    axios.get.mockResolvedValueOnce({ data: [] });
+    await apiClient.apiGet("/documents");
+    expect(axios.get.mock.calls[0][1].headers["x-workspace-id"]).toBe("ws-b");
+    workspaces.resetWorkspaceSelectionForTests();
+  });
+
+  test("the chat stream's retry after a 401 keeps its workspace too", async () => {
+    const { archiveApi, tokenStore } = await loadModules();
+    const workspaces = await import("./workspaceSelection");
+    tokenStore.setOidcTokens({ access_token: "expired-access", expires_in: 300 });
+    workspaces.setActiveWorkspaceId("ws-a");
+    tokenStore.setTokenHandlers({
+      onReauthRequired: vi.fn(),
+      onRefresh: vi.fn(async () => {
+        workspaces.setActiveWorkspaceId("ws-b");
+        tokenStore.setOidcTokens({ access_token: "fresh-access", expires_in: 300 });
+        return true;
+      }),
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      body: null,
+      json: async () => ({ error: "API authentication is required." }),
+      ok: false,
+      status: 401,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      archiveApi.streamChat({ docIds: ["doc-1"], question: "q", sessionId: "s", userId: "u" })
+    ).rejects.toMatchObject({ status: 401 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([, init]) => init.headers["x-workspace-id"])).toEqual(["ws-a", "ws-a"]);
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-access");
+    workspaces.resetWorkspaceSelectionForTests();
+  });
+
   test("a 401 that cannot be refreshed drops the token and starts re-authentication", async () => {
     const { apiClient, tokenStore } = await loadModules();
     tokenStore.setOidcTokens({ access_token: "expired-access", expires_in: 300 });

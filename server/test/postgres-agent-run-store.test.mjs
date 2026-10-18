@@ -2592,3 +2592,88 @@ test("postgres agent run approval snapshots cannot be written without a bound ev
   assert.equal(persistedRun.revision, 0);
   assert.equal(persistedRun.status, AGENT_RUN_STATUSES.running);
 });
+
+test("public run projections number a run's events per run; the store keeps the shared sequence", async () => {
+  // The fake database hands out one event id sequence to every tenant, as
+  // the BIGSERIAL of migration 007 does: interleaved writes leave gaps in
+  // each run's ids that count the other tenant's events.
+  const harness = createFakePostgresAgentRunHarness();
+  const store = harness.createStore();
+  const agentRunService = createAgentRunService({ agentRunStore: store });
+  const bob = { userId: "bob", workspaceId: "workspace-b" };
+
+  await agentRunService.createRun({ accessScope, goal: "Alice's run", runId: "run-alice" });
+  await agentRunService.createRun({ accessScope: bob, goal: "Bob's run", runId: "run-bob" });
+  await agentRunService.appendRunEvent({ accessScope: bob, runId: "run-bob", type: "run_prepared" });
+  await agentRunService.appendRunEvent({ accessScope: bob, runId: "run-bob", type: "run_prepared" });
+  await agentRunService.appendRunEvent({ accessScope, runId: "run-alice", type: "run_prepared" });
+  await agentRunService.completeRun({ accessScope, result: { answer: "Done" }, runId: "run-alice" });
+
+  const stored = await store.get({ accessScope, runId: "run-alice" });
+
+  // The store, and everything that orders or pages by it, keeps the sequence.
+  assert.deepEqual(stored.events.map(({ eventId }) => eventId), ["1", "5", "6"]);
+
+  const publicRun = await agentRunService.getRun({ accessScope, runId: "run-alice" });
+  const bobRun = await agentRunService.getRun({ accessScope: bob, runId: "run-bob" });
+
+  assert.deepEqual(publicRun.events.map(({ eventId, type }) => [eventId, type]), [
+    ["run-alice:1", "run_created"],
+    ["run-alice:2", "run_prepared"],
+    ["run-alice:3", "run_completed"],
+  ]);
+  assert.deepEqual(bobRun.events.map(({ eventId }) => eventId), ["run-bob:1", "run-bob:2", "run-bob:3"]);
+  // Write results are projected the same way, and a re-read agrees.
+  assert.deepEqual(
+    (await agentRunService.completeRun({ accessScope: bob, result: {}, runId: "run-bob" })).events.map(
+      ({ eventId }) => eventId
+    ),
+    ["run-bob:1", "run-bob:2", "run-bob:3", "run-bob:4"]
+  );
+  assert.deepEqual(await agentRunService.getRun({ accessScope, runId: "run-alice" }), publicRun);
+});
+
+test("public run projections list a run's events in the order of their numbers, whatever order the store read", async () => {
+  // Two appends raced for the run row's lock: the one whose transaction
+  // started first (earlier created_at, listed first) committed second and
+  // got the higher id. The projection numbers by id and lists by number.
+  const storedRun = {
+    accessScope,
+    createdAt: "2026-06-14T00:00:00.000Z",
+    events: [
+      { createdAt: "2026-06-14T00:00:00.000Z", eventId: "40", payload: {}, type: "run_created" },
+      { createdAt: "2026-06-14T00:00:01.000Z", eventId: "57", payload: { appended: "second" }, type: "run_prepared" },
+      { createdAt: "2026-06-14T00:00:02.000Z", eventId: "52", payload: { appended: "first" }, type: "run_prepared" },
+    ],
+    goal: "Racing appends",
+    revision: 3,
+    runId: "run-race",
+    status: AGENT_RUN_STATUSES.running,
+    updatedAt: "2026-06-14T00:00:02.000Z",
+  };
+  const agentRunService = createAgentRunService({
+    agentRunStore: { get: async () => structuredClone(storedRun), list: async () => [structuredClone(storedRun)] },
+  });
+  const expected = [
+    ["run-race:1", "run_created"],
+    ["run-race:2", "first"],
+    ["run-race:3", "second"],
+  ];
+  const project = (run) => run.events.map((event) => [event.eventId, event.payload.appended ?? event.type]);
+
+  assert.deepEqual(project(await agentRunService.getRun({ accessScope, runId: "run-race" })), expected);
+  assert.deepEqual(project((await agentRunService.listRuns({ accessScope })).runs[0]), expected);
+  // Stable across reads, and the store's own list is left as it was read.
+  assert.deepEqual(project(await agentRunService.getRun({ accessScope, runId: "run-race" })), expected);
+  assert.deepEqual(storedRun.events.map((event) => event.eventId), ["40", "57", "52"]);
+
+  // Ids in another form (the in-memory store's) keep their list order.
+  storedRun.events = [
+    { eventId: "run-race:2", payload: {}, type: "run_prepared" },
+    { eventId: "run-race:1", payload: {}, type: "run_created" },
+  ];
+  assert.deepEqual(
+    (await agentRunService.getRun({ accessScope, runId: "run-race" })).events.map((event) => event.eventId),
+    ["run-race:2", "run-race:1"]
+  );
+});

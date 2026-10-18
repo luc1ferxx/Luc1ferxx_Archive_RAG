@@ -9,13 +9,17 @@ import { createAgentApp as createProductionAgentApp } from "../rag/agent-service
 import {
   ADMIN_PERMISSION_CLAIM,
   AGENT_EDGE_ERROR_CODES,
+  AGENT_SERVICE_ERROR_CODES,
   AGENT_SERVICE_PING_PATH,
+  SINGLE_TENANT_CREDENTIAL_SCOPE,
+  TENANTLESS_SCOPE_CLAIM,
 } from "../rag/agent-service/contract.js";
 import { AGENT_EDGE_ROUTES, createAgentEdgeRouter } from "../rag/agent-service/edge-router.js";
-import { ADMIN_ROLE_IDS } from "../rag/admin-permissions.js";
+import { ADMIN_ACTION_PERMISSION_IDS, ADMIN_ROLE_IDS } from "../rag/admin-permissions.js";
 import { deterministicPlannerAdapter } from "../rag/agent-execution-plan.js";
 import { deterministicIntentPlannerAdapter } from "../rag/agent-intent-planner.js";
 import { AGENT_RUN_STATUSES } from "../rag/agent-runs.js";
+import { describeEffectiveAccess } from "../rag/rbac.js";
 import { resetServiceClients, SERVICE_CLIENT_ERROR_CODES } from "../rag/service-client.js";
 import {
   SERVICE_DEADLINE_HEADER,
@@ -876,9 +880,11 @@ test("the agent tier accepts only signed internal identities from the edge", asy
         assert.equal(scopes.length, 0);
 
         // Liveness and health need no identity; the ping needs any valid one.
+        // With API auth on, a caller without admin.status.read gets the
+        // status alone (routes/system.js), so the role is withheld here.
         const livez = await fetch(`${agent.baseUrl}/livez`);
 
-        assert.deepEqual(await livez.json(), { role: "agent", status: "ok" });
+        assert.deepEqual(await livez.json(), { status: "ok" });
         assert.equal((await fetch(`${agent.baseUrl}/health`)).status, 200);
         assert.equal((await fetch(`${agent.baseUrl}${AGENT_SERVICE_PING_PATH}`)).status, 401);
 
@@ -1010,6 +1016,312 @@ test("admin actions are authorized and audited at the edge and run by the agent 
       }
     }
   );
+});
+
+// The scope a stub task service sees for GET /tasks.
+const createScopeRecordingTaskService = (scopes) => ({
+  listTasks: async ({ accessScope }) => {
+    scopes.push(accessScope);
+
+    return { tasks: [] };
+  },
+});
+
+const readTokenClaims = (record) =>
+  JSON.parse(
+    Buffer.from(String(record.headers[SERVICE_TOKEN_HEADER]).split(".")[1], "base64url").toString("utf8")
+  ).claims ?? {};
+
+test("a forwarded task route and admin action carry the edge's workspace roles to the agent tier", async () => {
+  const RBAC_ENV = { RBAC_MODE: "enforce" };
+  const agentTaskScopes = [];
+  const monolithTaskScopes = [];
+  const adminScopes = [];
+
+  await withEnvironment(
+    {
+      API_AUTH_ENABLED: "true",
+      API_AUTH_TOKEN: "",
+      API_AUTH_TOKENS: JSON.stringify({
+        "member-token": {
+          userId: "alice",
+          workspaceRoles: {
+            "ws-a": ["workspace.viewer"],
+            "ws-b": ["workspace.admin", "workspace.member"],
+          },
+          workspaces: ["ws-a", "ws-b"],
+        },
+        "operator-token": {
+          roles: [ADMIN_ROLE_IDS.operator],
+          userId: "admin-user",
+          workspaceId: "ws-a",
+          workspaceRoles: { "ws-a": ["workspace.admin"], "ws-z": ["workspace.viewer"] },
+        },
+      }),
+    },
+    async () => {
+      const split = await startSplitDeployment({
+        agentOptions: {
+          agentRunRecoveryActionService: {
+            listRecoveryRuns: async ({ accessScope }) => {
+              adminScopes.push(accessScope);
+
+              return { runs: [] };
+            },
+          },
+          ragService: createStubRagService(),
+          taskService: createScopeRecordingTaskService(agentTaskScopes),
+        },
+        edgeOptions: {
+          ragService: createStubRagService(),
+          taskService: createScopeRecordingTaskService([]),
+        },
+      });
+      const monolith = await startServer(
+        await createMonolith({
+          ragService: createStubRagService(),
+          taskService: createScopeRecordingTaskService(monolithTaskScopes),
+        })
+      );
+
+      try {
+        for (const [workspaceId, roles] of [
+          ["ws-a", ["workspace.viewer"]],
+          ["ws-b", ["workspace.admin", "workspace.member"]],
+        ]) {
+          const headers = { "x-api-key": "member-token", "x-workspace-id": workspaceId };
+
+          assert.equal((await fetch(`${split.edge.baseUrl}/tasks`, { headers })).status, 200);
+          assert.equal((await fetch(`${monolith.baseUrl}/tasks`, { headers })).status, 200);
+
+          const agentScope = agentTaskScopes.at(-1);
+          const monolithScope = monolithTaskScopes.at(-1);
+
+          // The agent tier gets the active workspace's grant, which is every
+          // grant RBAC applies to the request; the monolith's scope holds all.
+          assert.deepEqual(agentScope.workspaceRoles, { [workspaceId]: roles });
+          assert.deepEqual(Object.keys(monolithScope.workspaceRoles).sort(), ["ws-a", "ws-b"]);
+          assert.deepEqual(
+            { ...agentScope, workspaceRoles: undefined },
+            { ...monolithScope, workspaceRoles: undefined }
+          );
+          assert.deepEqual(
+            describeEffectiveAccess(agentScope, { env: RBAC_ENV }),
+            describeEffectiveAccess(monolithScope, { env: RBAC_ENV })
+          );
+        }
+
+        const action = await postJson(
+          `${split.edge.baseUrl}/admin/actions/recovery-scan`,
+          {},
+          { "x-api-key": "operator-token" }
+        );
+
+        assert.equal(action.status, 200);
+        assert.equal(adminScopes.length, 1);
+        assert.equal(adminScopes[0].userId, "admin-user");
+        assert.equal(adminScopes[0].workspaceId, "ws-a");
+        assert.deepEqual(adminScopes[0].workspaceRoles, { "ws-a": ["workspace.admin"] });
+        assert.deepEqual(adminScopes[0].roleIds, [ADMIN_ROLE_IDS.operator]);
+      } finally {
+        await monolith.close();
+        await split.close();
+      }
+    }
+  );
+});
+
+test("the agent tier refuses an authenticated scope with neither user nor workspace outside admin actions", async () => {
+  const chatCalls = [];
+  const taskScopes = [];
+  const adminScopes = [];
+  const agent = await startAgentTier({
+    agentRunRecoveryActionService: {
+      listRecoveryRuns: async ({ accessScope }) => {
+        adminScopes.push(accessScope);
+
+        return { runs: [] };
+      },
+    },
+    ragService: createStubRagService({ chatCalls }),
+    taskService: createScopeRecordingTaskService(taskScopes),
+  });
+  const tenantless = { authenticated: true, authProvider: "static_token", userId: "", workspaceId: "" };
+  const getTasks = (tokenOptions) =>
+    fetch(`${agent.baseUrl}/tasks`, {
+      headers: { [SERVICE_TOKEN_HEADER]: signAgentToken(tokenOptions) },
+    });
+  const expectTenantRefusal = async (response) => {
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), {
+      code: AGENT_SERVICE_ERROR_CODES.tenantScopeRequired,
+      error: "This request needs a user or workspace scope: name a workspace with x-workspace-id.",
+    });
+  };
+
+  try {
+    await expectTenantRefusal(await getTasks({ accessScope: tenantless }));
+    await expectTenantRefusal(
+      await postJson(
+        `${agent.baseUrl}/chat`,
+        { docId: "doc-1", question: "What is the allocation amount?" },
+        { [SERVICE_TOKEN_HEADER]: signAgentToken({ accessScope: tenantless }) }
+      )
+    );
+    await expectTenantRefusal(
+      await postJson(
+        `${agent.baseUrl}/chat/stream`,
+        { docId: "doc-1", question: "What is the allocation amount?" },
+        { [SERVICE_TOKEN_HEADER]: signAgentToken({ accessScope: tenantless }) }
+      )
+    );
+
+    // Only the edge's single-tenant marker exempts it, with its exact value.
+    for (const value of [true, "yes", "SINGLE_TENANT_CREDENTIAL"]) {
+      await expectTenantRefusal(
+        await getTasks({ accessScope: tenantless, claims: { [TENANTLESS_SCOPE_CLAIM]: value } })
+      );
+    }
+
+    assert.equal(chatCalls.length, 0);
+    assert.equal(taskScopes.length, 0);
+
+    const singleTenant = await getTasks({
+      accessScope: tenantless,
+      claims: { [TENANTLESS_SCOPE_CLAIM]: SINGLE_TENANT_CREDENTIAL_SCOPE },
+    });
+
+    assert.equal(singleTenant.status, 200);
+    assert.deepEqual(taskScopes.at(-1), tenantless);
+
+    // A user or a workspace is a tenant; auth off (unauthenticated) is as before.
+    for (const accessScope of [
+      { authenticated: true, userId: "alice", workspaceId: "" },
+      { authenticated: true, userId: "", workspaceId: "ws-a" },
+      { authenticated: false, userId: "", workspaceId: "" },
+    ]) {
+      assert.equal((await getTasks({ accessScope })).status, 200);
+      assert.deepEqual(taskScopes.at(-1), accessScope);
+    }
+
+    // A forwarded admin action stays allowed: the edge authorized it, and its
+    // grant is still checked here.
+    const action = await postJson(
+      `${agent.baseUrl}/admin/actions/recovery-scan`,
+      {},
+      {
+        [SERVICE_TOKEN_HEADER]: signAgentToken({
+          accessScope: tenantless,
+          claims: { [ADMIN_PERMISSION_CLAIM]: ADMIN_ACTION_PERMISSION_IDS["recovery-scan"] },
+        }),
+      }
+    );
+
+    assert.equal(action.status, 200);
+    assert.equal(adminScopes.length, 1);
+    assert.deepEqual(adminScopes[0], tenantless);
+
+    const ungranted = await postJson(
+      `${agent.baseUrl}/admin/actions/recovery-scan`,
+      {},
+      { [SERVICE_TOKEN_HEADER]: signAgentToken({ accessScope: tenantless }) }
+    );
+
+    assert.equal(ungranted.status, 403);
+    assert.deepEqual(await ungranted.json(), { error: "Forbidden." });
+    assert.equal(adminScopes.length, 1);
+  } finally {
+    await agent.close();
+  }
+});
+
+test("the single shared API_AUTH_TOKEN keeps its tenantless scope through the edge", async () => {
+  const taskScopes = [];
+
+  await withEnvironment(
+    { API_AUTH_ENABLED: "true", API_AUTH_TOKEN: "single-shared-token", API_AUTH_TOKENS: "" },
+    async () => {
+      const split = await startSplitDeployment({
+        agentOptions: {
+          ragService: createStubRagService(),
+          taskService: createScopeRecordingTaskService(taskScopes),
+        },
+        edgeOptions: { ragService: createStubRagService() },
+      });
+
+      try {
+        const tenantless = await fetch(`${split.edge.baseUrl}/tasks`, {
+          headers: { "x-api-key": "single-shared-token" },
+        });
+
+        assert.equal(tenantless.status, 200);
+        assert.deepEqual(taskScopes.at(-1), {
+          authProvider: "static_token",
+          authenticated: true,
+          userId: "",
+          workspaceId: "",
+        });
+        assert.deepEqual(readTokenClaims(split.agent.requests.at(-1)), {
+          [TENANTLESS_SCOPE_CLAIM]: SINGLE_TENANT_CREDENTIAL_SCOPE,
+        });
+
+        // With a user named, the scope has a tenant and carries no marker.
+        const named = await fetch(`${split.edge.baseUrl}/tasks`, {
+          headers: { "x-api-key": "single-shared-token", "x-user-id": "bob" },
+        });
+
+        assert.equal(named.status, 200);
+        assert.equal(taskScopes.at(-1).userId, "bob");
+        assert.deepEqual(readTokenClaims(split.agent.requests.at(-1)), {});
+      } finally {
+        await split.close();
+      }
+    }
+  );
+});
+
+test("an edge that forwards a tenantless scope gets the agent tier's 403 relayed, not an identity failure", async () => {
+  const taskScopes = [];
+  const agent = await startAgentTier({
+    ragService: createStubRagService(),
+    taskService: createScopeRecordingTaskService(taskScopes),
+  });
+  // An edge whose authentication let a tenantless scope through (one from
+  // before requireTenantScope), with no single-tenant marker.
+  const edgeApp = await withEnvironment({ AGENT_SERVICE_URL: agent.baseUrl }, () => {
+    resetServiceClients();
+
+    const app = express();
+
+    app.use(express.json());
+    app.use((req, res, next) => {
+      req.accessScope = { authenticated: true, userId: "", workspaceId: "" };
+      next();
+    });
+    app.use(createAgentEdgeRouter({ logger: { error() {}, log() {}, warn() {} } }).router);
+
+    return app;
+  });
+  const edge = await startServer(edgeApp);
+
+  try {
+    for (const response of [
+      await fetch(`${edge.baseUrl}/tasks`),
+      await postJson(`${edge.baseUrl}/chat/stream`, {
+        docId: "doc-1",
+        question: "What is the allocation amount?",
+      }),
+    ]) {
+      assert.equal(response.status, 403);
+      assert.equal((await response.json()).code, AGENT_SERVICE_ERROR_CODES.tenantScopeRequired);
+    }
+
+    assert.equal(taskScopes.length, 0);
+  } finally {
+    await edge.close();
+    await agent.close();
+    resetServiceClients();
+  }
 });
 
 test("role api starts no agent recovery or background tasks; the agent tier and the monolith do", async () => {

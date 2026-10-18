@@ -115,6 +115,7 @@ test("parseArgs reads commands, numbers and --key=value, and rejects what it doe
   assert.deepEqual(parseArgs([]), {
     allowChunkCountDrift: false,
     allowUnreadableActive: false,
+    allowUnreadableSources: false,
     command: "status",
     force: false,
     help: false,
@@ -158,6 +159,7 @@ test("parseArgs reads commands, numbers and --key=value, and rejects what it doe
   assert.equal(activate.allowChunkCountDrift, true);
   assert.equal(parseArgs(["retire", "2", "--force"]).force, true);
   assert.equal(parseArgs(["rollback", "--active-unreadable"]).allowUnreadableActive, true);
+  assert.equal(parseArgs(["activate", "3", "--allow-unreadable-sources"]).allowUnreadableSources, true);
   assert.equal(parseArgs(["nonsense", "--help"]).help, true, "--help wins over everything else");
 
   assert.throws(() => parseArgs(["--nope"]), /Unknown option/);

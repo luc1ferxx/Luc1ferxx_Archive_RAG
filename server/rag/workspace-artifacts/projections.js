@@ -26,6 +26,14 @@ export const toWorkspaceArtifactSummary = (artifact = {}) => ({
   createdAt: artifact.createdAt ?? "",
   docCount: toArray(artifact.docIds).length,
   updatedAt: artifact.updatedAt ?? "",
+  // A source document was deleted and its quoted text removed (migration 040,
+  // DOCUMENT_DELETE_REDACTION=on); absent on every other artifact.
+  ...(artifact.sourceDeleted === true
+    ? {
+        sourceDeleted: true,
+        sourceDeletedDocIds: structuredClone(toArray(artifact.sourceDeletedDocIds)),
+      }
+    : {}),
 });
 
 export const toWorkspaceArtifactDetail = (artifact = {}) => ({

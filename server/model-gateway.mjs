@@ -37,11 +37,13 @@ export const runModelGatewayProcess = async ({
     { getModelGatewayPort },
     { createModelGatewayApp },
     { resetSharedState },
+    { stopTenantUsageLedger },
   ] = await Promise.all([
     import("./rag/service-topology.js"),
     import("./rag/config.js"),
     import("./rag/model-gateway/app.js"),
     import("./rag/shared-state.js"),
+    import("./rag/tenant-usage.js"),
   ]);
   const { errors, warnings } = validateServiceTopology(environment);
 
@@ -90,6 +92,15 @@ export const runModelGatewayProcess = async ({
       await new Promise((resolve) => server.close(resolve));
       app.locals.modelGateway.close();
       await metrics?.close();
+      // In a split deployment the gateway is the only process that books
+      // model tokens and cost per tenant (rag/tenant-usage.js; callers keep
+      // mirror events only): write what it has not flushed yet. Never fails
+      // the shutdown.
+      try {
+        await stopTenantUsageLedger();
+      } catch (error) {
+        logger.error(`[model-gateway] Failed to flush tenant usage on shutdown: ${error?.message ?? error}`);
+      }
       await resetSharedState();
       exit(0);
     })();

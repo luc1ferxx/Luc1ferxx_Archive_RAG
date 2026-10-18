@@ -6,14 +6,35 @@ import { mkdir } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { bindDatabaseTenant, requireApiAuth } from "./auth.js";
+import { noStoreTenantData } from "./routes/helpers.js";
+import {
+  assertApiAuthTokenConfiguration,
+  bindDatabaseTenant,
+  requireApiAuth,
+} from "./auth.js";
 import {
   getAgentRunRecoveryMode,
+  getLongMemoryScope,
+  getPostgresTenantContextMode,
+  getQueryEmbeddingCacheScope,
+  getTenantEncryptionMode,
+  getTenantKmsProviderId,
+  getTenantMembershipMode,
+  getTenantRegistryCacheScope,
+  getTrustProxySetting,
+  getUploadSessionCleanupIntervalMs,
   isApiAuthEnabled,
   isRagIngestAsync,
 } from "./rag/config.js";
-import { configureUploadSessionDirectory } from "./upload-session-store.js";
+import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
+import { stopTenantUsageLedger } from "./rag/tenant-usage.js";
+import {
+  configureUploadSessionDirectory,
+  startUploadSessionSweeper,
+} from "./upload-session-store.js";
 import { assertRbacConfiguration, createRbacMiddleware } from "./rag/rbac.js";
+import { createDefaultTenantRegistryService } from "./rag/tenant-registry.js";
+import { createTenantLimits } from "./rag/tenant-limits.js";
 import { createAgentEdgeRouter } from "./rag/agent-service/edge-router.js";
 import { stripInternalServiceHeadersMiddleware } from "./rag/service-identity.js";
 import {
@@ -23,7 +44,11 @@ import {
 } from "./rag/service-topology.js";
 
 import { createAppServices } from "./app-services.js";
+import { assertDocumentTrashSupported } from "./rag/document-trash.js";
 import { createAdminRouter } from "./routes/admin.js";
+import { createAdminTenantsRouter } from "./routes/admin-tenants.js";
+import { createAdminTenantLifecycleRouter } from "./routes/admin-tenant-lifecycle.js";
+import { createAdminUsageRouter } from "./routes/admin-usage.js";
 import { createArxivRouter } from "./routes/arxiv.js";
 import { createArtifactsRouter } from "./routes/artifacts.js";
 import { createAuthConfigRouter } from "./routes/auth-config.js";
@@ -87,8 +112,33 @@ export const createApp = async (options = {}) => {
   // RBAC_MODE / RBAC_POLICY_JSON / RBAC_POLICY_FILE / RBAC_DEFAULT_ROLE are
   // validated before anything starts: a bad policy refuses the start.
   assertRbacConfiguration();
+  // An API_AUTH_TOKENS entry that can act for no tenant refuses the start.
+  assertApiAuthTokenConfiguration();
+  // An unknown POSTGRES_TENANT_CONTEXT refuses the start here rather than at
+  // the first query (every query reads it again).
+  getPostgresTenantContextMode();
+  // So does an unknown TENANT_MEMBERSHIP (requireApiAuth reads it per request).
+  const tenantMembershipMode = getTenantMembershipMode();
+  // And an unknown LONG_MEMORY_SCOPE, RAG_EMBEDDING_CACHE_SCOPE or
+  // TENANT_REGISTRY_CACHE_SCOPE (read per call; none falls back to its
+  // unpartitioned default).
+  getLongMemoryScope();
+  getQueryEmbeddingCacheScope();
+  getTenantRegistryCacheScope();
+  // And an unknown TENANT_ENCRYPTION or TENANT_KMS_PROVIDER (every tenant file
+  // write and read consults them, rag/tenant-encryption.js).
+  getTenantEncryptionMode();
+  getTenantKmsProviderId();
+  // TRUST_PROXY: an invalid value refuses the start (TRUST_PROXY_INVALID);
+  // unset keeps Express's default (req.ip is the socket peer).
+  const trustProxy = getTrustProxySetting();
 
   const services = createAppServices(options, { uploadsDirectory });
+
+  // DOCUMENT_TRASH_RETENTION_HOURS above 0 where the trash cannot work (not
+  // pgvector with the PostgreSQL registry) refuses the start
+  // (DOCUMENT_TRASH_UNSUPPORTED, rag/document-trash.js).
+  assertDocumentTrashSupported({ ragService: services.ragService });
 
   const {
     adminAuditService,
@@ -111,17 +161,42 @@ export const createApp = async (options = {}) => {
   const forwardsAgentWork = isRemoteAgentEnabled();
   const hostsAgentWork = hostsServiceTier(SERVICE_TIERS.agent);
 
+  // The tenant registry (migration 036): the admin routes write it, and
+  // requireApiAuth reads it from app.locals under TENANT_MEMBERSHIP=enforce,
+  // so both share one instance and its lookup cache -- the one
+  // createAppServices built (options.tenantRegistry when given), which the
+  // tenant erase and the retention sweep use too.
+  const tenantRegistry = services.tenantRegistry ?? createDefaultTenantRegistryService();
+
   const app = express();
+
+  if (trustProxy !== undefined) {
+    // req.ip becomes the client behind the trusted proxies, for the per-IP
+    // limiter below and the per-tenant limiter's IP key.
+    app.set("trust proxy", trustProxy);
+  }
+
   // server.js starts the ingest worker on these same services, so a worker in
   // the API process shares the routes' job store (the only way the in-memory
   // store works).
   app.locals.services = services;
+  app.locals.tenantRegistry = tenantRegistry;
   const allowedOrigins = parseAllowedOrigins();
   const rateLimitEnabled = isRateLimitEnabled();
 
   if (!isApiAuthEnabled()) {
     console.warn(
       "[security] API authentication is DISABLED (API_AUTH_ENABLED is not true). Every endpoint, including destructive ones, is reachable without credentials. Do not expose this server beyond localhost."
+    );
+  }
+
+  if (tenantMembershipMode === "enforce" && !isApiAuthEnabled()) {
+    console.warn(
+      "[security] TENANT_MEMBERSHIP=enforce has no effect while API authentication is disabled: every request acts without a tenant check."
+    );
+  } else if (tenantMembershipMode === "enforce" && tenantRegistry.store?.backend === "memory") {
+    console.warn(
+      "[security] TENANT_MEMBERSHIP=enforce with an in-process tenant registry (no database): it starts empty, so every request naming a workspace is refused until workspaces and members are registered through /admin/workspaces in this process."
     );
   }
 
@@ -170,26 +245,65 @@ export const createApp = async (options = {}) => {
   await uploadStore.ensureUploadStorage();
   await uploadStore.recoverInterruptedUploadFinalizations?.();
   await uploadStore.cleanupExpiredUploadSessions?.();
-  await ragService.initializeDocumentRegistry?.();
-  await ragService.initializeLongMemory?.();
-  await ragService.initializeSessionMemory?.();
-  await taskService.initialize?.();
-  await agentRunService.initialize?.();
-  await adminAuditService.initialize?.();
-  await workspaceArtifactService.initialize?.();
 
-  if (isRagIngestAsync()) {
-    await ingestJobStore.initialize?.();
-  }
+  // Start-up is system work: migrations, the process-wide registry and memory
+  // stores, the cross-tenant recovery scans (each recovered run or task binds
+  // its own scope again) and the start-up health report. Bound explicitly so
+  // POSTGRES_TENANT_CONTEXT=strict accepts it; only this block, never the
+  // listener, so a request that loses its context later is still unbound.
+  await runAsDatabaseSystem(async () => {
+    await ragService.initializeDocumentRegistry?.();
+    await ragService.initializeLongMemory?.();
+    await ragService.initializeSessionMemory?.();
+    await taskService.initialize?.();
+    await agentRunService.initialize?.();
+    await adminAuditService.initialize?.();
+    await workspaceArtifactService.initialize?.();
 
-  if (hostsAgentWork) {
-    await agentRunRecoveryService.recoverOnStartup?.({
-      mode: getAgentRunRecoveryMode(),
-    });
-    await jobOrchestrator.recoverRunnableTasks?.();
-  }
+    if (isRagIngestAsync()) {
+      await ingestJobStore.initialize?.();
+    }
 
-  await healthService.runStartupHealthChecks?.();
+    // Enforcement reads the registry on every request naming a workspace, so
+    // its store must be ready before the first one; with the mode off it is
+    // initialized lazily by the admin routes.
+    if (tenantMembershipMode === "enforce") {
+      await tenantRegistry.initialize?.();
+    }
+
+    if (hostsAgentWork) {
+      await agentRunRecoveryService.recoverOnStartup?.({
+        mode: getAgentRunRecoveryMode(),
+      });
+      await jobOrchestrator.recoverRunnableTasks?.();
+    }
+
+    await healthService.runStartupHealthChecks?.();
+  });
+
+  // Expired upload sessions are swept again every
+  // UPLOAD_SESSION_CLEANUP_INTERVAL_MS while the process runs (the sweep above
+  // runs once at start-up), so an abandoned upload frees its disk and its place
+  // under the per-tenant session caps without a restart. Started only once
+  // start-up has succeeded, so a refused start leaves no timer behind; the
+  // graceful shutdown (server.js, rag/agent-service/role-server.js) runs
+  // app.locals.stop, which stops it.
+  const uploadSessionSweeper = uploadStore.cleanupExpiredUploadSessions
+    ? startUploadSessionSweeper({
+        cleanup: () => uploadStore.cleanupExpiredUploadSessions(),
+        intervalMs: getUploadSessionCleanupIntervalMs(),
+      })
+    : null;
+  app.locals.stop = async () => {
+    uploadSessionSweeper?.stop();
+    // Writes the usage this process still holds (rag/tenant-usage.js) before
+    // the shutdown closes the pool; never fails the shutdown.
+    try {
+      await stopTenantUsageLedger();
+    } catch (error) {
+      console.error("Failed to flush tenant usage on shutdown.", error);
+    }
+  };
 
   app.use(createSystemRouter(services));
   // Public login configuration for the SPA (OIDC issuer/client id, no secrets).
@@ -219,10 +333,33 @@ export const createApp = async (options = {}) => {
         max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5),
       })
     );
+    app.use(
+      "/admin/tenants/erase",
+      createRateLimiter({
+        max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5),
+      })
+    );
   }
 
   app.use(requireApiAuth);
   app.use(bindDatabaseTenant);
+  // Every route below answers for the caller's tenant (documents, chat, runs,
+  // tasks, memory, feedback, ingest jobs, admin views), so no shared cache may
+  // keep a response or serve it to another credential: private, no-store, and
+  // Vary on the identity headers. The static frontend and the probes are
+  // mounted above and keep their own headers.
+  app.use(noStoreTenantData);
+  // TENANT_RATE_LIMIT_ENABLED / TENANT_MAX_CONCURRENT_RUNS (rag/tenant-limits.js):
+  // per-tenant request windows and concurrent agent runs, counted once the
+  // tenant is known and before RBAC (whose denials write audit records). Off
+  // by default, and then nothing is mounted.
+  const tenantLimits = createTenantLimits();
+
+  if (tenantLimits.enabled) {
+    app.locals.tenantLimits = tenantLimits;
+    app.use(tenantLimits.middleware);
+  }
+
   // RBAC_MODE=enforce: every route below needs its RBAC_ROUTE_TABLE
   // permission (rag/rbac.js); off (default) is a no-op. At the edge of a split
   // deployment this runs before agent routes are forwarded.
@@ -240,6 +377,18 @@ export const createApp = async (options = {}) => {
       agentEdge ? { actionHandler: agentEdge.forwardAdminAction } : {}
     )
   );
+  // The tenant registry's admin API (always on the public edge: it writes
+  // the registry requireApiAuth reads here).
+  app.use(createAdminTenantsRouter(services, { tenantRegistry }));
+
+  // Tenant erase and export (admin.owner, platform principals only). At the
+  // edge of a split deployment they run here: every tier shares the one
+  // PostgreSQL they erase or export.
+  app.use(createAdminTenantLifecycleRouter(services));
+
+  // GET /admin/usage (migration 037's usage ledger): answered here at the
+  // edge too, from the shared database.
+  app.use(createAdminUsageRouter(services));
   app.use(createDocumentsRouter(services));
   // At the edge one router forwards both the task and the chat routes.
   app.use(agentEdge ? agentEdge.router : createTasksRouter(services));

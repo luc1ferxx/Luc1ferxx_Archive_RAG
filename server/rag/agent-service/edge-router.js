@@ -1,17 +1,24 @@
 import { Router } from "express";
 
-import { getRequestAccessScope } from "../../auth.js";
+import {
+  getRequestAccessScope,
+  isTenantlessAuthenticatedScope,
+  presentsSingleTenantCredential,
+} from "../../auth.js";
 import { validateChatRequest } from "../../routes/chat.js";
 import {
-  agentTaskBodySchema,
-  runActionSchema,
-  runIdSchema,
-  runStepRetrySchema,
-  taskActionSchema,
-  taskIdSchema,
-  triggerIdSchema,
+  validateAgentTaskRequest,
+  validateRunActionRequest,
+  validateRunIdRequest,
+  validateRunListRequest,
+  validateRunRecoveryActionRequest,
+  validateRunStepRetryRequest,
+  validateTaskActionRequest,
+  validateTaskIdRequest,
+  validateTaskListRequest,
+  validateTriggerDispatchRequest,
+  validateTriggerListRequest,
 } from "../../routes/tasks.js";
-import { parseOrRespond } from "../../routes/validation.js";
 import { getAdminActionPermissionForRequest } from "../admin-authorization.js";
 import { getAgentServiceTimeoutMs } from "../config.js";
 import { DEFAULT_OUTAGE_RETRY_AFTER_SECONDS } from "../dependency-outage.js";
@@ -23,7 +30,12 @@ import {
 import { SERVICE_TIERS } from "../service-topology.js";
 import { markSpanFailed, setSpanAttributes, SPAN_KINDS, withSpan } from "../tracing.js";
 
-import { ADMIN_PERMISSION_CLAIM, AGENT_EDGE_ERROR_CODES } from "./contract.js";
+import {
+  ADMIN_PERMISSION_CLAIM,
+  AGENT_EDGE_ERROR_CODES,
+  SINGLE_TENANT_CREDENTIAL_SCOPE,
+  TENANTLESS_SCOPE_CLAIM,
+} from "./contract.js";
 
 // The public edge's half of a split deployment: every route that runs the agent
 // or a model (chat, chat/stream, tasks, triggers, agent runs and their actions)
@@ -82,11 +94,11 @@ const DONE_EVENT_PATTERN = /(?:^|\n)event: done\n/u;
 // smaller.
 const MAX_PENDING_EVENT_BYTES = 16 * 1024 * 1024;
 
-const validateParams = (schema) => (req, res) => parseOrRespond(schema, req.params, res);
-
 /**
  * Every route the agent tier serves, with the check the edge runs before
- * forwarding it. It mirrors routes/chat.js and routes/tasks.js; a test fails
+ * forwarding it: the monolith's own validators (routes/chat.js,
+ * routes/tasks.js), so the edge refuses past the same input bounds. It mirrors
+ * routes/chat.js and routes/tasks.js; a test fails
  * when either gains a route this table does not forward. `idempotent: false`
  * marks a GET that is not a read: GET /chat runs the agent (a run record,
  * session and long-term memory writes), so it is never sent to a second
@@ -96,41 +108,41 @@ export const AGENT_EDGE_ROUTES = Object.freeze([
   { idempotent: false, method: "get", path: "/chat", validate: validateChatRequest },
   { method: "post", path: "/chat", validate: validateChatRequest },
   { method: "post", path: "/chat/stream", stream: true, validate: validateChatRequest },
-  { method: "get", path: "/tasks" },
-  { method: "get", path: "/tasks/:taskId", validate: validateParams(taskIdSchema) },
+  { method: "get", path: "/tasks", validate: validateTaskListRequest },
+  { method: "get", path: "/tasks/:taskId", validate: validateTaskIdRequest },
   {
     method: "post",
     path: "/tasks/:taskId/actions/:action",
-    validate: validateParams(taskActionSchema),
+    validate: validateTaskActionRequest,
   },
   {
     method: "post",
     path: "/agent-tasks",
-    validate: (req, res) => parseOrRespond(agentTaskBodySchema, req.body ?? {}, res),
+    validate: validateAgentTaskRequest,
   },
-  { method: "get", path: "/agent-triggers" },
+  { method: "get", path: "/agent-triggers", validate: validateTriggerListRequest },
   {
     method: "post",
     path: "/agent-triggers/:triggerId/dispatch",
-    validate: validateParams(triggerIdSchema),
+    validate: validateTriggerDispatchRequest,
   },
-  { method: "get", path: "/agent-runs" },
+  { method: "get", path: "/agent-runs", validate: validateRunListRequest },
   { method: "get", path: "/agent-runs/recovery" },
-  { method: "get", path: "/agent-runs/:runId", validate: validateParams(runIdSchema) },
+  { method: "get", path: "/agent-runs/:runId", validate: validateRunIdRequest },
   {
     method: "post",
     path: "/agent-runs/:runId/recovery/actions/:action",
-    validate: validateParams(runActionSchema),
+    validate: validateRunRecoveryActionRequest,
   },
   {
     method: "post",
     path: "/agent-runs/:runId/actions/:action",
-    validate: validateParams(runActionSchema),
+    validate: validateRunActionRequest,
   },
   {
     method: "post",
     path: "/agent-runs/:runId/steps/:stepId/actions/retry",
-    validate: validateParams(runStepRetrySchema),
+    validate: validateRunStepRetryRequest,
   },
   { method: "get", path: "/capabilities" },
 ]);
@@ -173,6 +185,22 @@ const toForwardPath = (originalUrl) => String(originalUrl ?? "").replace(/\\/gu,
 // keeps that refusal the client's, not a forwarding failure.
 const isForwardablePath = (path) =>
   typeof path === "string" && path.startsWith("/") && !path.startsWith("//") && !/[\s\\]/u.test(path);
+
+// The claims a forwarded call carries: the route's own, plus
+// TENANTLESS_SCOPE_CLAIM when requireApiAuth let a scope with neither a user
+// nor a workspace through because the caller presented the single shared
+// API_AUTH_TOKEN, so the agent tier (which refuses every other such scope)
+// keeps that single-tenant setup working. Every other call keeps its claims.
+const buildForwardClaims = (req, claims) => {
+  if (
+    !isTenantlessAuthenticatedScope(getRequestAccessScope(req)) ||
+    !presentsSingleTenantCredential(req)
+  ) {
+    return claims;
+  }
+
+  return { ...claims, [TENANTLESS_SCOPE_CLAIM]: SINGLE_TENANT_CREDENTIAL_SCOPE };
+};
 
 const clientDisconnected = () =>
   new DOMException("The public client disconnected.", "AbortError");
@@ -460,7 +488,7 @@ export const createAgentEdgeRouter = ({
             answer = await client.request({
               accessScope: getRequestAccessScope(req),
               body: readForwardBody(req),
-              claims,
+              claims: buildForwardClaims(req, claims),
               headers: pickRequestHeaders(req),
               idempotent,
               method: req.method,
@@ -513,6 +541,7 @@ export const createAgentEdgeRouter = ({
             upstream = await client.stream({
               accessScope: getRequestAccessScope(req),
               body: readForwardBody(req),
+              claims: buildForwardClaims(req, undefined),
               deadlineMs: streamDeadlineMs,
               headers: { ...pickRequestHeaders(req), accept: "text/event-stream" },
               method: req.method,

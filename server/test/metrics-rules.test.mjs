@@ -455,6 +455,7 @@ test("every metric a rule reads exists, with the labels it matches on and real h
     "archive_rag_postgres_replica_lag_seconds",
     "archive_rag_postgres_replica_max_lag_seconds",
     "archive_rag_model_gateway_quota_rejections_total",
+    "archive_rag_tenant_refusals_total",
     "up",
   ]) {
     assert.ok(seen.has(name), `${name} is read by a rule`);
@@ -622,12 +623,21 @@ test("burn-rate alerts pair a long and a short window at 14.4x and 6x of each ob
     "ArchiveRagPostgresReplicaLagHigh",
     "ArchiveRagMetricsTargetDown",
     "ArchiveRagGatewayQuotaRejectionsSpike",
+    "ArchiveRagTenantRefusalsSustained",
   ]) {
     assert.ok(alerts.has(name), name);
   }
 
   assert.equal(alerts.get("ArchiveRagModelCircuitOpen").for, "5m");
   assert.match(alerts.get("ArchiveRagIngestDeadLetters").expr, /> 0/u);
+
+  // Sustained, per reason, never per tenant (the family has no tenant label;
+  // the runbook sends the operator to the usage ledger for that).
+  const refusals = alerts.get("ArchiveRagTenantRefusalsSustained");
+
+  assert.equal(refusals.for, "15m");
+  assert.match(refusals.expr.replace(/\s+/gu, " "), /^sum by \(job, reason\) \(rate\(archive_rag_tenant_refusals_total\{[^}]*\}\[15m\]\)\) > /u);
+  assert.match(refusals.annotations.runbook, /GET \/admin\/usage\?metric=refusals/u);
 });
 
 test("every alert has a severity, summary, description and a runbook with three checks and real commands", async () => {

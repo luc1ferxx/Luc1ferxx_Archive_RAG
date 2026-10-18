@@ -1,6 +1,14 @@
 import { getWorkspaceArtifactsPostgresTable } from "../config.js";
 import { runPostgresMigrations } from "../db-migrations.js";
 import { queryPostgres } from "../postgres.js";
+import { createPostgresTenantRecordMethods } from "../tenant-records.js";
+import {
+  buildRetentionLockKey,
+  normalizeRetentionBatchLimit,
+  normalizeRetentionCutoffs,
+  readRetentionLockAcquired,
+  renderRetentionPreludeCtes,
+} from "../retention-sql.js";
 import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -61,7 +69,9 @@ const artifactSelectColumns = `
   idempotency_key,
   created_at,
   updated_at,
-  archived_at
+  archived_at,
+  source_deleted,
+  source_deleted_doc_ids
 `;
 
 const mapRowToArtifact = (row = {}) => ({
@@ -85,6 +95,14 @@ const mapRowToArtifact = (row = {}) => ({
   updatedAt: toIsoText(row.updated_at),
   version: normalizeText(row.version),
   workspaceId: normalizeText(row.workspace_id),
+  // Migration 040: set only once a source document was deleted under
+  // DOCUMENT_DELETE_REDACTION=on, so every other artifact maps as before.
+  ...(row.source_deleted === true
+    ? {
+        sourceDeleted: true,
+        sourceDeletedDocIds: parseJsonValue(row.source_deleted_doc_ids, []),
+      }
+    : {}),
 });
 
 export const createPostgresWorkspaceArtifactStore = ({
@@ -122,6 +140,21 @@ export const createPostgresWorkspaceArtifactStore = ({
   };
 
   return {
+    // The tenant erase and export (rag/tenant-records.js).
+    ...createPostgresTenantRecordMethods({
+      initialize,
+      query,
+      tables: () => [
+        {
+          keyColumns: ["owner_user_id", "workspace_id", "artifact_id"],
+          name: "workspace_artifacts",
+          pageSize: 50,
+          table: artifactsTable,
+          userColumn: "owner_user_id",
+        },
+      ],
+    }),
+
     async initialize() {
       return initialize();
     },
@@ -225,6 +258,134 @@ export const createPostgresWorkspaceArtifactStore = ({
       });
     },
 
+    /**
+     * Artifacts that name one of `docIds` in doc_ids, or as a `"docId": ...`
+     * member (`needles`, rag/document-deletion-redaction.js) of their
+     * citation manifest or payload, in key order from `after` (the previous
+     * page's `next`). Exactly the scope's (user, workspace) pair, or every
+     * pair for a scope naming neither (the unscoped context). Archived ones
+     * included: they still hold the text.
+     */
+    async listArtifactsReferencingDocuments({
+      accessScope = {},
+      after = null,
+      docIds = [],
+      limit = 25,
+      needles = [],
+    } = {}) {
+      await initialize();
+
+      const ids = (Array.isArray(docIds) ? docIds : []).map(normalizeText).filter(Boolean);
+
+      if (ids.length === 0) {
+        return { artifacts: [], next: null };
+      }
+
+      const userId = normalizeText(accessScope.userId);
+      const workspaceId = normalizeText(accessScope.workspaceId);
+      const pageSize = Math.max(1, Math.min(100, Number.parseInt(limit, 10) || 25));
+      const result = await query(
+        `
+          SELECT ${artifactSelectColumns}
+          FROM ${artifactsTable}
+          WHERE ($1::boolean = FALSE OR (owner_user_id = $2 AND workspace_id = $3))
+            AND ($4::text IS NULL
+              OR (owner_user_id, workspace_id, artifact_id) > ($4::text, $5::text, $6::text))
+            AND (
+              doc_ids ?| $7::text[]
+              OR EXISTS (
+                SELECT 1
+                FROM unnest($8::text[]) AS needle(value)
+                WHERE strpos(citation_manifest::text, needle.value) > 0
+                   OR strpos(payload::text, needle.value) > 0
+              )
+            )
+          ORDER BY owner_user_id, workspace_id, artifact_id
+          LIMIT $9
+        `,
+        [
+          Boolean(userId || workspaceId),
+          userId,
+          workspaceId,
+          after ? normalizeText(after.userId) : null,
+          after ? normalizeText(after.workspaceId) : null,
+          after ? normalizeText(after.artifactId) : null,
+          ids,
+          (Array.isArray(needles) ? needles : []).map(String).filter(Boolean),
+          pageSize,
+        ]
+      );
+      const artifacts = result.rows.map(mapRowToArtifact);
+      const last = artifacts.at(-1);
+
+      return {
+        artifacts,
+        next:
+          artifacts.length === pageSize && last
+            ? { artifactId: last.artifactId, userId: last.ownerUserId, workspaceId: last.workspaceId }
+            : null,
+      };
+    },
+
+    /**
+     * Writes an artifact's redacted citation manifest, content and payload
+     * and marks it source_deleted with `deletedDocIds` added to its list
+     * (migration 040). Compare-and-set on the three values `previous` holds,
+     * so a concurrent redaction is never overwritten with text it removed:
+     * null when they moved (the caller reads the artifact again) or the
+     * artifact is gone.
+     */
+    async markArtifactSourceDeleted({
+      accessScope = {},
+      artifactId,
+      citationManifest = [],
+      content = "",
+      deletedDocIds = [],
+      payload = {},
+      previous = {},
+      timestamp,
+    } = {}) {
+      await initialize();
+
+      const result = await query(
+        `
+          UPDATE ${artifactsTable}
+          SET
+            citation_manifest = $4::jsonb,
+            content = $5,
+            payload = $6::jsonb,
+            source_deleted = TRUE,
+            source_deleted_doc_ids = (
+              SELECT COALESCE(jsonb_agg(DISTINCT merged.value ORDER BY merged.value), '[]'::jsonb)
+              FROM jsonb_array_elements_text(source_deleted_doc_ids || $7::jsonb) AS merged(value)
+            ),
+            updated_at = $8::timestamptz
+          WHERE owner_user_id = $1
+            AND workspace_id = $2
+            AND artifact_id = $3
+            AND citation_manifest = $9::jsonb
+            AND content = $10
+            AND payload = $11::jsonb
+          RETURNING ${artifactSelectColumns}
+        `,
+        [
+          normalizeText(accessScope.userId),
+          normalizeText(accessScope.workspaceId),
+          normalizeText(artifactId),
+          JSON.stringify(citationManifest ?? []),
+          String(content ?? ""),
+          JSON.stringify(payload ?? {}),
+          JSON.stringify((Array.isArray(deletedDocIds) ? deletedDocIds : []).map(normalizeText).filter(Boolean)),
+          timestamp,
+          JSON.stringify(previous.citationManifest ?? []),
+          String(previous.content ?? ""),
+          JSON.stringify(previous.payload ?? {}),
+        ]
+      );
+
+      return result.rows[0] ? mapRowToArtifact(result.rows[0]) : null;
+    },
+
     async getArtifact({ accessScope = {}, artifactId } = {}) {
       await initialize();
 
@@ -292,6 +453,64 @@ export const createPostgresWorkspaceArtifactStore = ({
         limit,
         offset,
         total: Number(countResult.rows[0]?.total ?? 0) || 0,
+      };
+    },
+
+    /**
+     * Retention (rag/retention.js): deletes at most `limit` ARCHIVED
+     * artifacts of every tenant whose archive time (archived_at, else
+     * updated_at) is before their workspace's cutoff. An active artifact is a
+     * deliverable someone kept and is never deleted by age; archiving it is
+     * the explicit step that starts its retention clock. A row another
+     * transaction holds is skipped (SKIP LOCKED). One statement, holding the
+     * table's advisory try-lock while it runs. System work: the caller binds
+     * runAsDatabaseSystem. Resolves to { acquired, deleted }.
+     */
+    async deleteExpired({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+      await initialize();
+
+      const normalized = normalizeRetentionCutoffs({ cutoff, workspaceCutoffs });
+      const result = await query(
+        `
+          WITH ${renderRetentionPreludeCtes({ lockKey: 1, workspaceCutoffs: 5, workspaceIds: 4 })},
+          expired AS (
+            SELECT a.owner_user_id, a.workspace_id, a.artifact_id
+            FROM ${artifactsTable} AS a
+            LEFT JOIN retention_overrides AS o ON o.workspace_id = a.workspace_id
+            WHERE (SELECT acquired FROM retention_lock)
+              AND a.status = 'archived'
+              AND COALESCE(a.archived_at, a.updated_at) < $3::timestamptz
+              AND COALESCE(a.archived_at, a.updated_at) < COALESCE(o.cutoff, $2::timestamptz)
+            ORDER BY COALESCE(a.archived_at, a.updated_at) ASC, a.artifact_id ASC
+            LIMIT $6
+            FOR UPDATE OF a SKIP LOCKED
+          ),
+          deleted_artifacts AS (
+            DELETE FROM ${artifactsTable} AS a
+            USING expired AS x
+            WHERE a.owner_user_id = x.owner_user_id
+              AND a.workspace_id = x.workspace_id
+              AND a.artifact_id = x.artifact_id
+            RETURNING 1
+          )
+          SELECT
+            (SELECT acquired FROM retention_lock) AS acquired,
+            (SELECT COUNT(*) FROM deleted_artifacts)::int AS deleted
+        `,
+        [
+          buildRetentionLockKey(artifactsTable),
+          normalized.cutoff,
+          normalized.upperBound,
+          normalized.workspaceIds,
+          normalized.workspaceCutoffs,
+          normalizeRetentionBatchLimit(limit),
+        ]
+      );
+      const row = result.rows?.[0];
+
+      return {
+        acquired: readRetentionLockAcquired(row),
+        deleted: Number(row?.deleted ?? 0) || 0,
       };
     },
   };

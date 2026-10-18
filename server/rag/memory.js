@@ -6,18 +6,12 @@ import {
 } from "../lib/prompt-template.js";
 import { completeText } from "./openai.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
-import {
-  getPromptVersion,
-  getSessionMemoryPostgresTable,
-  isApiAuthEnabled,
-} from "./config.js";
+import { getPromptVersion, getSessionMemoryPostgresTable } from "./config.js";
+import { resolveConversationMemoryTenant } from "./conversation-memory-tenant.js";
 import { runPostgresMigrations } from "./db-migrations.js";
-import { queryPostgres } from "./postgres.js";
-import {
-  getActiveDatabaseTenant,
-  runAsDatabaseSystem,
-  toDatabaseTenant,
-} from "./postgres-tenant.js";
+import { isPostgresConfigured, queryPostgres } from "./postgres.js";
+import { createPostgresTenantRecordMethods } from "./tenant-records.js";
+import { getActiveDatabaseTenant, runAsDatabaseSystem } from "./postgres-tenant.js";
 import { tokenize } from "./text-utils.js";
 
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
@@ -222,22 +216,11 @@ const normalizeSessionId = (sessionId) => String(sessionId ?? "").trim();
 // scope is authenticated or API auth is on (a task's stored scope carries no
 // `authenticated` flag), so with auth off a session keeps its raw id: the
 // local frontend sends a userId with every chat but not with the session
-// DELETE, and both must name the same session.
+// DELETE, and both must name the same session. The rule lives in
+// rag/conversation-memory-tenant.js, shared with LONG_MEMORY_SCOPE=workspace.
 const TENANT_SESSION_KEY_PREFIX = "tenant:";
 
-const resolveSessionTenant = (accessScope) => {
-  const explicitScope =
-    accessScope && typeof accessScope === "object" && toDatabaseTenant(accessScope)
-      ? accessScope
-      : null;
-  const scope = explicitScope ?? getActiveDatabaseTenant();
-
-  if (!scope || (scope.authenticated !== true && !isApiAuthEnabled())) {
-    return null;
-  }
-
-  return toDatabaseTenant(scope);
-};
+const resolveSessionTenant = resolveConversationMemoryTenant;
 
 /**
  * The key a session is stored under: the trimmed client id when no tenant
@@ -445,6 +428,22 @@ const createDefaultStore = () => ({
     const result = await queryPostgres(`DELETE FROM ${tableName}`);
     return Number(result.rowCount ?? 0);
   },
+
+  // The tenant erase and export (rag/tenant-records.js), by the owner columns
+  // of migration 031. A session stored before that migration has empty owner
+  // columns, so it belongs to no tenant here; the TTL purge removes it.
+  ...createPostgresTenantRecordMethods({
+    initialize: () => runPostgresMigrations(),
+    query: queryPostgres,
+    tables: () => [
+      {
+        keyColumns: ["session_id"],
+        name: "session_memory",
+        table: ensureTableName(),
+        userColumn: "owner_user_id",
+      },
+    ],
+  }),
 });
 
 const getSessionMemoryStore = () =>
@@ -685,6 +684,24 @@ export const clearSessionMemory = async (sessionId, accessScope = null) => {
   await initializeSessionMemoryStore();
   const store = getSessionMemoryStore();
   return store.delete ? store.delete(sessionKey) : false;
+};
+
+/**
+ * The session store the tenant erase and export use (rag/tenant-records.js
+ * calls), with why it may not be usable: `not_configured` when the default
+ * PostgreSQL store has no database, `unsupported` when a configured store
+ * keeps no owner for its sessions.
+ */
+export const getSessionMemoryTenantRecordStore = () => {
+  if (configuredSessionMemoryStore) {
+    return typeof configuredSessionMemoryStore.countTenantRecords === "function"
+      ? { status: "ok", store: configuredSessionMemoryStore }
+      : { status: "unsupported", store: null };
+  }
+
+  return isPostgresConfigured()
+    ? { status: "ok", store: getSessionMemoryStore() }
+    : { status: "not_configured", store: null };
 };
 
 export const resetSessionMemory = () => {

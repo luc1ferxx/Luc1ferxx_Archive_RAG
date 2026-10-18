@@ -40,6 +40,7 @@ export {
   normalizeAgentRunStatus,
 } from "./agent-run-state-machine.js";
 import { normalizeText } from "../lib/normalize-text.js";
+import { summarizeTenantRecords, tenantSelectorMatches } from "./tenant-records.js";
 import {
   EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY,
   buildExecutionGraphNodeStepId,
@@ -49,6 +50,11 @@ import {
 } from "./agent-execution-graph-checkpoint.js";
 import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
 import { GRAPH_CAPABILITY_APPROVAL_TYPE } from "./capabilities/graph-approval-preflight.js";
+import {
+  isRetentionExpired,
+  normalizeRetentionBatchLimit,
+  normalizeRetentionCutoffs,
+} from "./retention-sql.js";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -276,6 +282,61 @@ export const normalizeAgentRun = (run = {}) => {
  */
 export const LANGGRAPH_CHECKPOINT_RESULT_KEY = "__langGraphCheckpoint";
 
+// The PostgreSQL store's event ids are one BIGSERIAL every tenant shares
+// (migration 007), so the gaps between a run's ids would count every other
+// tenant's events. Every projection this service hands out numbers a run's
+// events per run instead, `${runId}:${n}` by id order, the form the in-memory
+// store assigns; ids in any other form (the in-memory store's) are kept. The
+// order is stable: every event insert takes the run row's lock first, so a
+// run's ids grow in commit order and a later event never ranks before an
+// earlier one. The stores keep the BIGSERIAL, which orders the event list and
+// pages the tenant export.
+//
+// The store lists events by created_at, the start of the writing transaction,
+// which is taken before that lock: of two appends racing for it, the one that
+// started first may commit second and list first with the higher id. So when
+// every event carries a store id, the projection lists them in id order (the
+// order of the numbers), never `run:2` before `run:1`. Numbering by list
+// position instead would renumber an event when a racing append with an
+// earlier created_at commits after a read; the id rank never moves.
+const STORE_SEQUENCE_EVENT_ID = /^\d+$/;
+
+const compareBigInts = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+
+const isStoreSequenceEventId = (eventId) => typeof eventId === "string" && STORE_SEQUENCE_EVENT_ID.test(eventId);
+
+const toPublicRunEventIds = (runId, events) => {
+  const sequenceIds = events
+    .map((event) => event?.eventId)
+    .filter(isStoreSequenceEventId)
+    .map((eventId) => BigInt(eventId))
+    .sort(compareBigInts);
+
+  if (sequenceIds.length === 0) {
+    return events;
+  }
+
+  const ordinals = new Map(sequenceIds.map((eventId, index) => [eventId, index + 1]));
+  const publicRunId = normalizeText(runId);
+  const numbered = events.map((event) =>
+    isStoreSequenceEventId(event?.eventId)
+      ? { ...event, eventId: `${publicRunId}:${ordinals.get(BigInt(event.eventId))}` }
+      : event
+  );
+
+  // Every id from the store: list them in the order of their numbers (a
+  // stable sort on the rank; a list with ids in any other form keeps its
+  // order, which mixes no sequence to sort by).
+  if (sequenceIds.length !== events.length) {
+    return numbered;
+  }
+
+  return numbered
+    .map((event, index) => ({ event, rank: ordinals.get(BigInt(events[index].eventId)) }))
+    .sort((left, right) => left.rank - right.rank)
+    .map(({ event }) => event);
+};
+
 // The LangGraph record is stripped from every projection, including the ones
 // that keep the graph checkpoint for an internal decision: the record holds
 // serialized LangGraph channel state that no caller of this service reads,
@@ -291,6 +352,10 @@ const stripInternalRunFields = (run = {}, { includeGraphCheckpoint = false } = {
   } = run;
 
   const result = structuredClone(publicRun);
+
+  if (Array.isArray(result.events)) {
+    result.events = toPublicRunEventIds(result.runId, result.events);
+  }
 
   if (result.result) {
     if (!includeGraphCheckpoint) {
@@ -549,9 +614,48 @@ export const createInMemoryAgentRunStore = ({
     approvalSnapshotsByRunKey.set(runKey, snapshots);
   };
 
+  // The tenant erase and export (rag/tenant-records.js): a run with its
+  // events and approval snapshots.
+  const listTenantRuns = (selector) =>
+    [...runs.entries()].filter(([, run]) => tenantSelectorMatches(selector, run.accessScope));
+  const TENANT_TABLES = ["agent_runs", "agent_run_events", "agent_run_approval_snapshots"];
+
   return {
     initialize() {
       return true;
+    },
+
+    countTenantRecords(selector) {
+      return summarizeTenantRecords(this.listTenantRecords(selector), TENANT_TABLES);
+    },
+
+    listTenantRecords(selector) {
+      return listTenantRuns(selector).flatMap(([runKey, run]) => [
+        { record: structuredClone(run), table: "agent_runs" },
+        ...getRunEvents(runKey).map((event) => ({
+          record: structuredClone({ ...event, runId: run.runId }),
+          table: "agent_run_events",
+        })),
+        ...[...getRunApprovalSnapshots(runKey).values()].map((snapshot) => ({
+          record: structuredClone({ ...snapshot, runId: run.runId }),
+          table: "agent_run_approval_snapshots",
+        })),
+      ]);
+    },
+
+    deleteTenantRecords(selector) {
+      const deleted = Object.fromEntries(TENANT_TABLES.map((table) => [table, { deleted: 0 }]));
+
+      for (const [runKey] of listTenantRuns(selector)) {
+        deleted.agent_run_events.deleted += getRunEvents(runKey).length;
+        deleted.agent_run_approval_snapshots.deleted += getRunApprovalSnapshots(runKey).size;
+        deleted.agent_runs.deleted += 1;
+        eventsByRunKey.delete(runKey);
+        approvalSnapshotsByRunKey.delete(runKey);
+        runs.delete(runKey);
+      }
+
+      return deleted;
     },
 
     create({ accessScope = {}, run } = {}) {
@@ -678,6 +782,56 @@ export const createInMemoryAgentRunStore = ({
         );
     },
 
+    // The PostgreSQL store's contract (postgres-agent-run-store.js): runs that
+    // serialize one of `needles`, exact pair or every pair, in key order.
+    listRunsReferencingDocuments({
+      accessScope = {},
+      after = null,
+      limit = 25,
+      needles = [],
+    } = {}) {
+      const values = toArray(needles).map(String).filter(Boolean);
+      const scope = normalizeTaskAccessScope(accessScope);
+      const scoped = Boolean(scope.userId || scope.workspaceId);
+      const pageSize = Math.max(1, Math.min(100, Number.parseInt(limit, 10) || 25));
+      const orderKey = (run) => `${run.scopeKey}\u0000${run.runId}`;
+      const afterKey = after
+        ? `${buildTaskScopeKey(after)}\u0000${normalizeText(after.runId)}`
+        : null;
+
+      if (values.length === 0) {
+        return { next: null, runs: [] };
+      }
+
+      const matches = [...runs.entries()]
+        .filter(([, run]) => !scoped || run.scopeKey === buildTaskScopeKey(scope))
+        .filter(([, run]) => afterKey === null || orderKey(run) > afterKey)
+        .filter(([, run]) => {
+          const serialized = JSON.stringify([
+            run.steps,
+            run.observations,
+            run.decisions,
+            run.result,
+          ]);
+
+          return values.some((needle) => serialized.includes(needle));
+        })
+        .sort(([, left], [, right]) => (orderKey(left) < orderKey(right) ? -1 : 1))
+        .slice(0, pageSize);
+      const last = matches.at(-1)?.[1];
+
+      return {
+        next:
+          matches.length === pageSize && last
+            ? { runId: last.runId, ...last.accessScope }
+            : null,
+        runs: matches.map(([runKey, run]) => ({
+          ...structuredClone(run),
+          events: getRunEvents(runKey),
+        })),
+      };
+    },
+
     listRecoverable({
       statuses = [
         AGENT_RUN_STATUSES.running,
@@ -693,6 +847,39 @@ export const createInMemoryAgentRunStore = ({
         .sort((left, right) =>
           String(left.updatedAt).localeCompare(String(right.updatedAt))
         );
+    },
+
+    // Retention (rag/retention.js), as the PostgreSQL store: at most `limit`
+    // finished runs last updated before their workspace's cutoff, oldest
+    // first, with their events and approval snapshots.
+    deleteExpired({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+      const normalized = normalizeRetentionCutoffs({ cutoff, workspaceCutoffs });
+      const expiredKeys = [...runs.entries()]
+        .filter(
+          ([, run]) =>
+            TERMINAL_AGENT_RUN_STATUSES.has(run.status) &&
+            isRetentionExpired(normalized, {
+              timestamp: run.updatedAt,
+              workspaceId: run.accessScope?.workspaceId,
+            })
+        )
+        .sort(
+          ([, left], [, right]) =>
+            Date.parse(left.updatedAt) - Date.parse(right.updatedAt) ||
+            String(left.runId).localeCompare(String(right.runId))
+        )
+        .slice(0, normalizeRetentionBatchLimit(limit))
+        .map(([runKey]) => runKey);
+      let deletedEvents = 0;
+
+      for (const runKey of expiredKeys) {
+        deletedEvents += getRunEvents(runKey).length;
+        runs.delete(runKey);
+        eventsByRunKey.delete(runKey);
+        approvalSnapshotsByRunKey.delete(runKey);
+      }
+
+      return { acquired: true, deleted: expiredKeys.length, deletedEvents };
     },
 
     update({
@@ -3380,6 +3567,19 @@ export const createAgentRunService = ({
         })
       ).map(stripInternalRunFields),
     };
+  },
+
+  /**
+   * Retention (rag/retention.js): one batch of expired finished runs, or
+   * null when the store has no retention delete. See the stores'
+   * deleteExpired.
+   */
+  async deleteExpiredRuns({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+    if (typeof agentRunStore.deleteExpired !== "function") {
+      return null;
+    }
+
+    return agentRunStore.deleteExpired({ cutoff, limit, workspaceCutoffs });
   },
 
   async listRecoverableRuns({

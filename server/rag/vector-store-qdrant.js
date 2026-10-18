@@ -176,9 +176,20 @@ const toSparseSearchResult = (point, keywordScore) => {
   };
 };
 
+// Qdrant has no tenant boundary of its own: a search is scoped only by the
+// docIds its caller passes (the registry's documents, already filtered by the
+// caller's access scope), and a query without a filter reads every point in
+// the collection. So a search with an empty or missing docIds list finds
+// nothing, as the pgvector and local stores do, and is never sent unfiltered.
+// That is an application filter, not isolation: this store is supported for
+// single-tenant use (health.js warns when multi-principal auth is configured).
+const hasDocIds = (docIds) => Array.isArray(docIds) && docIds.length > 0;
+
 const buildDocIdFilter = (docIds) => {
-  if (!Array.isArray(docIds) || docIds.length === 0) {
-    return undefined;
+  // Every caller checks first; a filter that matched every point would turn a
+  // scoped search or delete into one over the whole collection.
+  if (!hasDocIds(docIds)) {
+    throw new Error("A Qdrant docId filter needs at least one docId.");
   }
 
   if (docIds.length === 1) {
@@ -482,7 +493,7 @@ const ensureSparseState = async () => {
 };
 
 const deleteDocumentsByDocIds = async ({ docIds }) => {
-  if (!Array.isArray(docIds) || docIds.length === 0) {
+  if (!hasDocIds(docIds)) {
     return;
   }
 
@@ -616,6 +627,10 @@ export const searchQdrantDocuments = async ({
   topK,
   scoringMode = "combined",
 }) => {
+  if (!hasDocIds(docIds)) {
+    return [];
+  }
+
   const ready = await ensureCollection();
 
   if (!ready) {
@@ -652,6 +667,10 @@ export const searchQdrantSparseDocuments = async ({
   docIds,
   topK,
 }) => {
+  if (!hasDocIds(docIds)) {
+    return [];
+  }
+
   const ready = await ensureCollection();
 
   if (!ready) {
@@ -697,7 +716,7 @@ export const searchQdrantDocumentsPerDocument = async ({
 }) => {
   const perDocumentResults = new Map();
 
-  for (const docId of docIds) {
+  for (const docId of Array.isArray(docIds) ? docIds : []) {
     perDocumentResults.set(
       docId,
       await searchQdrantDocuments({

@@ -392,6 +392,101 @@ if (!adminDatabaseUrl) {
     );
   });
 
+  // rag/document-deletion-cascade.js: the delete of a document settles its
+  // waiting jobs (migration 040's canceled_reason) under the tenant's policy.
+  test("deleting a document cancels the tenant's queued and dead-letter jobs for it, drops their outputs and leaves the rest", async () => {
+    await clearJobs();
+
+    const store = modules.store.createPostgresIngestJobStore({ logger: silentLogger });
+    const asAlice = (callback) => modules.tenant.runWithDatabaseTenant(ALICE, callback);
+    const fence = (job) => ({ attemptCount: job.attemptCount, jobId: job.jobId, workerId: "cancel-worker" });
+    const deleted = "doc-deleted-it";
+
+    // Dead-lettered: its only attempt failed; it keeps its bytes and an output.
+    const dead = await asAlice(() =>
+      store.enqueue({
+        docId: deleted,
+        fileBytes: PDF_BYTES,
+        fileName: "dead.pdf",
+        kind: "replace",
+        maxAttempts: 1,
+        ownerUserId: ALICE.userId,
+        workspaceId: ALICE.workspaceId,
+      })
+    );
+    const deadClaim = await store.claim({ leaseMs: 60_000, workerId: "cancel-worker" });
+
+    assert.equal(deadClaim.jobId, dead.jobId);
+    assert.equal(
+      await store.fail({ ...fence(deadClaim), error: new Error("busy"), retryable: true }),
+      modules.store.INGEST_JOB_STATUSES.deadLetter
+    );
+    await modules.tenant.runAsDatabaseSystem(() =>
+      q(
+        `INSERT INTO ${tables.jobs}_outputs (job_id, output, payload, byte_size, owner_user_id, workspace_id)
+         VALUES ($1, 'pages', $2, 4, $3, $4)`,
+        [dead.jobId, Buffer.from("text"), ALICE.userId, ALICE.workspaceId]
+      )
+    );
+
+    // Running: held by a worker, left to it.
+    const running = await enqueueFor(store, ALICE, deleted);
+    const runningClaim = await store.claim({ leaseMs: 60_000, workerId: "cancel-worker" });
+
+    assert.equal(runningClaim.jobId, running.jobId);
+
+    const queued = await enqueueFor(store, ALICE, deleted);
+    const otherDocument = await enqueueFor(store, ALICE, "doc-kept-it");
+    const bobs = await enqueueFor(store, BOB, deleted);
+
+    const canceled = await asAlice(() => store.cancelDocumentJobs({ accessScope: ALICE, docIds: [deleted] }));
+
+    assert.deepEqual(canceled.sort(), [dead.jobId, queued.jobId].sort());
+
+    const rows = Object.fromEntries(
+      (
+        await modules.tenant.runAsDatabaseSystem(() =>
+          q(
+            `SELECT job_id, status, canceled_reason, file_bytes IS NULL AS bytes_gone, dead_letter_reason
+               FROM ${tables.jobs}`
+          )
+        )
+      ).rows.map((row) => [row.job_id, row])
+    );
+
+    for (const jobId of canceled) {
+      assert.equal(rows[jobId].status, "failed");
+      assert.equal(rows[jobId].canceled_reason, "document_deleted");
+      assert.equal(rows[jobId].bytes_gone, true);
+      assert.equal(rows[jobId].dead_letter_reason, null);
+    }
+
+    assert.equal(rows[running.jobId].status, "running");
+    assert.equal(rows[otherDocument.jobId].status, "queued");
+    assert.equal(rows[bobs.jobId].status, "queued", "another tenant's job is untouched under the policy");
+    assert.equal(rows[otherDocument.jobId].canceled_reason, null);
+    assert.equal(
+      (
+        await modules.tenant.runAsDatabaseSystem(() =>
+          q(`SELECT COUNT(*)::int AS n FROM ${tables.jobs}_outputs WHERE job_id = $1`, [dead.jobId])
+        )
+      ).rows[0].n,
+      0,
+      "the stage outputs holding the document's text are gone"
+    );
+
+    const publicJob = modules.store.toPublicIngestJob(await asAlice(() => store.get(dead.jobId, ALICE)));
+
+    assert.equal(publicJob.status, "failed");
+    assert.equal(publicJob.canceledReason, "document_deleted");
+    assert.equal(publicJob.error, modules.store.DOCUMENT_DELETED_JOB_ERROR_MESSAGE);
+    assert.equal(
+      "canceledReason" in modules.store.toPublicIngestJob(await asAlice(() => store.get(otherDocument.jobId, ALICE))),
+      false
+    );
+    await clearJobs();
+  });
+
   test("an exhausted expired job succeeds when its document committed and is dead-lettered otherwise", async () => {
     await clearJobs();
 

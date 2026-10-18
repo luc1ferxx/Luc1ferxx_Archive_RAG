@@ -22,7 +22,9 @@ import { randomUUID } from "crypto";
 import { ingestDocument } from "./chat.js";
 import { isPdfFileName, hasPdfMagicBytes } from "./routes/helpers.js";
 import { isPostgresDatabaseConfigured } from "./rag/config.js";
+import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataDirectory } from "./rag/storage.js";
+import { stopTenantUsageLedger } from "./rag/tenant-usage.js";
 import { MAX_DIRECT_UPLOAD_SIZE } from "./upload-policy.js";
 import {
   applyStandaloneProfile,
@@ -234,8 +236,20 @@ const main = async () => {
 };
 
 try {
-  await main();
+  // An operator command that writes as the owner, as it always has (the
+  // owner columns carry --user-id / --workspace-id); bound explicitly so
+  // POSTGRES_TENANT_CONTEXT=strict accepts it.
+  await runAsDatabaseSystem(() => main());
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
+} finally {
+  // What the ingests recorded in the tenant usage ledger (ingested bytes,
+  // documents, embedding tokens) waits in memory for a flush timer that does
+  // not keep the process alive: write it before the command ends.
+  try {
+    await stopTenantUsageLedger();
+  } catch (error) {
+    console.error(`Failed to flush tenant usage: ${error instanceof Error ? error.message : error}`);
+  }
 }

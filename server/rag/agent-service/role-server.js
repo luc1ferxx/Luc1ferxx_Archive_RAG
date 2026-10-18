@@ -13,7 +13,9 @@ import {
 import { createIngestWorker, resolveApiIngestWorkerPlan } from "../ingest-worker.js";
 import { startMetricsFromEnv } from "../metrics-server.js";
 import { resetPostgresPool } from "../postgres.js";
+import { startRetentionSweeper } from "../retention.js";
 import { resetSharedState } from "../shared-state.js";
+import { stopTenantUsageLedger } from "../tenant-usage.js";
 import { validateServiceTopology } from "../service-topology.js";
 
 import { createAgentApp } from "./app.js";
@@ -184,11 +186,36 @@ export const createRoleApp = async ({ appOptions = {}, loaders, logger = console
     case "api": {
       const app = await createApp(appOptions);
       const worker = startEdgeIngestWorker({ app, logger });
+      // Retention of what the edge owns (feedback, archived workspace
+      // artifacts, its observability files); null unless one of their
+      // *_RETENTION_DAYS settings is above 0 (rag/retention.js).
+      const retention = startRetentionSweeper({
+        hostsApiTier: true,
+        logger,
+        services: app.locals.services,
+      });
 
-      return { app, finalizers: [], stoppers: worker ? [() => worker.stop()] : [] };
+      return {
+        app,
+        finalizers: [],
+        stoppers: [
+          ...(worker ? [() => worker.stop()] : []),
+          ...(retention ? [() => retention.stop()] : []),
+        ],
+      };
     }
-    case "agent":
-      return { app: await createAgentApp(appOptions), finalizers: [], stoppers: [] };
+    case "agent": {
+      const app = await createAgentApp(appOptions);
+      // Retention of agent runs, tasks and this tier's observability files;
+      // null unless one of their *_RETENTION_DAYS settings is above 0.
+      const retention = startRetentionSweeper({
+        hostsAgentTier: true,
+        logger,
+        services: app.locals.services,
+      });
+
+      return { app, finalizers: [], stoppers: retention ? [() => retention.stop()] : [] };
+    }
     case "retrieval":
       return {
         app: await loadTierApp(role, { appOptions, loaders, logger }),
@@ -360,9 +387,20 @@ export const startServiceRole = async ({
   // closes, so nothing in flight loses what it depends on.
   const appStop = typeof app.locals?.stop === "function" ? [() => app.locals.stop()] : [];
   const metricsStop = metrics ? [() => metrics.close()] : [];
+  // The usage this tier still holds in memory (rag/tenant-usage.js), written
+  // before the pool closes; a no-op when nothing was recorded or after the
+  // api role's app.locals.stop already wrote it.
+  const usageStop = [() => stopTenantUsageLedger()];
   const shutdown = createGracefulShutdown({
     exit,
-    finalizers: [...appStop, ...finalizers, ...shutdownFinalizers, ...metricsStop, resetPostgresPool],
+    finalizers: [
+      ...appStop,
+      ...finalizers,
+      ...shutdownFinalizers,
+      ...metricsStop,
+      ...usageStop,
+      resetPostgresPool,
+    ],
     graceMs,
     logger,
     role,

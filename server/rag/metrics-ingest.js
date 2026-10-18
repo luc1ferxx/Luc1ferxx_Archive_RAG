@@ -1,4 +1,5 @@
 import { getMetricsRegistry, isMetricsEnabled, pickLabel, secondsSince } from "./metrics.js";
+import { runAsDatabaseSystem } from "./postgres-tenant.js";
 
 // Asynchronous ingestion (RAG_INGEST_MODE=async):
 //   - queue depth by status and the dead-letter count, read on scrape from the
@@ -133,7 +134,9 @@ export const createIngestQueueCollector = ({ cacheMs = QUEUE_CACHE_MS, now = Dat
   let pending = null;
 
   const read = async () => {
-    const counts = await store.countByStatus();
+    // Every tenant's jobs, read from the metrics listener where nothing is
+    // bound: system work, bound so POSTGRES_TENANT_CONTEXT=strict accepts it.
+    const counts = await runAsDatabaseSystem(() => store.countByStatus());
 
     for (const status of JOB_STATUSES) {
       jobs.set({ status }, Number(counts?.[status]) || 0);

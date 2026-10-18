@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 const hasEnvValue = (rawValue) =>
   typeof rawValue === "string" && rawValue.trim() !== "";
 
@@ -156,6 +158,24 @@ export const getLlmRequestTimeoutMs = () => {
 // Requests in flight per endpoint and model; 0 means no cap.
 export const getLlmMaxConcurrency = () =>
   Math.floor(toNonNegativeNumber(process.env.RAG_LLM_MAX_CONCURRENCY, 8));
+
+// Document (batch) embeddings -- ingest, index-version builds, reindex. Unset,
+// they share the endpoint and model's one guard (one RAG_LLM_MAX_CONCURRENCY
+// cap, one circuit; the per-tenant fair queue still keeps a query from waiting
+// behind the whole backlog). Set to a number >= 0 they get their own guard lane
+// with this cap and its own circuit, so a large ingest cannot take the slots
+// query embeddings wait for, and the endpoint may then see both caps in flight
+// at once; 0 means no cap for the lane. See resolveModelCallLane.
+export const getLlmIngestMaxConcurrency = () =>
+  Math.floor(
+    toNonNegativeNumber(process.env.RAG_LLM_INGEST_MAX_CONCURRENCY, getLlmMaxConcurrency())
+  );
+
+// The most calls one tenant (or the shared system queue) may have waiting for a
+// slot of one guard; one more is refused with 429 MODEL_CALL_QUEUE_FULL. 0 (the
+// default) leaves the wait queue unbounded.
+export const getLlmMaxQueue = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_LLM_MAX_QUEUE, 0));
 
 // Consecutive unavailable errors (5xx, timeouts, connection failures) that open
 // the circuit; 0 turns the breaker off.
@@ -1077,6 +1097,38 @@ export const getLongMemoryConfigStatus = () => {
 export const isLongMemoryEnabled = () =>
   getLongMemoryConfigStatus().enabled;
 
+// LONG_MEMORY_SCOPE (rag/long-memory.js). `user` (default): a user's notes,
+// preferences and agent experience follow the user into every workspace, as
+// before migration 045. `workspace`: notes and agent experience are stored in
+// and read from the active workspace only; the fixed-enum preferences (reply
+// language, answer style) stay user-level. An unknown value refuses the start,
+// never falls back to `user`.
+export const LONG_MEMORY_SCOPES = Object.freeze(["user", "workspace"]);
+
+export const getLongMemoryScope = () => {
+  const rawValue = process.env.LONG_MEMORY_SCOPE;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "user";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!LONG_MEMORY_SCOPES.includes(normalizedValue)) {
+    const error = new Error(
+      `LONG_MEMORY_SCOPE must be one of ${LONG_MEMORY_SCOPES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "LONG_MEMORY_SCOPE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
+export const isLongMemoryWorkspaceScoped = () => getLongMemoryScope() === "workspace";
+
 export const getAgentExperienceMemoryConfigStatus = () => {
   const longMemory = getLongMemoryConfigStatus();
   const explicitlyConfigured = hasEnvValue(
@@ -1109,10 +1161,12 @@ export const getAgentExperienceMemoryConfigStatus = () => {
 export const isAgentExperienceMemoryEnabled = () =>
   getAgentExperienceMemoryConfigStatus().enabled;
 
-export const isPostgresSslEnabled = () =>
+// TLS on or off; how the certificate is checked is POSTGRES_SSL_MODE
+// (rag/postgres-tls.js).
+export const isPostgresSslEnabled = (env = process.env) =>
   toBoolean(
-    process.env.POSTGRES_SSL_ENABLED,
-    toBoolean(process.env.LONG_MEMORY_POSTGRES_SSL_ENABLED, false)
+    env.POSTGRES_SSL_ENABLED,
+    toBoolean(env.LONG_MEMORY_POSTGRES_SSL_ENABLED, false)
   );
 
 // Row-level security: "enforce" runs every query issued for a scoped request or
@@ -1123,6 +1177,71 @@ export const isPostgresSslEnabled = () =>
 export const getPostgresRowLevelSecurityMode = () =>
   toChoice(process.env.POSTGRES_ROW_LEVEL_SECURITY, "enforce", ["enforce", "off"]);
 
+// What a statement does when its call chain is bound to nothing at all (no
+// request middleware, task, system or tenant binding; rag/postgres-tenant.js).
+// `lenient` (default) runs it as the owner, as always; `strict` refuses it
+// with ARCHIVE_RAG_TENANT_CONTEXT_MISSING while row-level security is
+// enforced, so a lost AsyncLocalStorage context fails closed instead of
+// silently bypassing the policies. An unknown value refuses, never falls back
+// to the weaker mode.
+export const POSTGRES_TENANT_CONTEXT_MODES = Object.freeze(["lenient", "strict"]);
+
+export const getPostgresTenantContextMode = () => {
+  const rawValue = process.env.POSTGRES_TENANT_CONTEXT;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "lenient";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!POSTGRES_TENANT_CONTEXT_MODES.includes(normalizedValue)) {
+    throw new Error(
+      `POSTGRES_TENANT_CONTEXT must be one of ${POSTGRES_TENANT_CONTEXT_MODES.join(", ")}. Received "${rawValue}".`
+    );
+  }
+
+  return normalizedValue;
+};
+
+// PostgreSQL keeps these in a 32-bit integer of milliseconds; a larger value
+// would make set_config fail on every tenant statement, so it is clamped.
+const MAX_POSTGRES_INTERVAL_MS = 2_147_483_647;
+
+const toPostgresIntervalMs = (rawValue) =>
+  Math.min(MAX_POSTGRES_INTERVAL_MS, Math.floor(toNonNegativeNumber(rawValue, 0)));
+
+// The primary pool (rag/postgres.js). node-pg's own defaults: 10 connections,
+// and no bound on the wait for one (0), which is also the wait for a pool
+// slot when every connection is busy. Read replicas have their own pool
+// settings (POSTGRES_READ_REPLICA_POOL_MAX, ..._CONNECT_TIMEOUT_MS).
+export const getPostgresPoolMax = () =>
+  Math.max(1, Math.floor(toPositiveNumber(process.env.POSTGRES_POOL_MAX, 10)));
+
+export const getPostgresConnectionTimeoutMs = () =>
+  toPostgresIntervalMs(process.env.POSTGRES_CONNECTION_TIMEOUT_MS);
+
+// statement_timeout and idle_in_transaction_session_timeout for tenant work
+// only: each tenant statement and tenant transaction sets them transaction-
+// locally in the same step as the tenant settings. 0 (default) leaves the
+// server's own value in force. Owner work (migrations, index builds, recovery
+// scans) never gets them.
+export const getPostgresStatementTimeoutMs = () =>
+  toPostgresIntervalMs(process.env.POSTGRES_STATEMENT_TIMEOUT_MS);
+
+export const getPostgresIdleInTransactionTimeoutMs = () =>
+  toPostgresIntervalMs(process.env.POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS);
+
+// The operator's acknowledgement that POSTGRES_ROW_LEVEL_SECURITY=off is meant
+// while API auth separates tenants: without it the health check reports that
+// combination as an error, because every scoped query then runs as the owner
+// and only the stores' own WHERE clauses keep tenants apart. Only the literal
+// "true" (any case) counts, so a stray "1" or "yes" cannot silence the error.
+export const isPostgresRowLevelSecurityOffConfirmed = () =>
+  String(process.env.POSTGRES_ROW_LEVEL_SECURITY_OFF_CONFIRMED ?? "")
+    .trim()
+    .toLowerCase() === "true";
+
 const POSTGRES_ROLE_NAME_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
 
 export const getPostgresTenantRole = () => {
@@ -1132,6 +1251,44 @@ export const getPostgresTenantRole = () => {
     throw new Error(
       `POSTGRES_TENANT_ROLE must be a lowercase PostgreSQL identifier of at most 63 bytes. Received "${role}".`
     );
+  }
+
+  return role;
+};
+
+// The database role split (tenant isolation phase 2). POSTGRES_MIGRATION_
+// DATABASE_URL is an owner login: migrations and every DDL the application
+// runs (index version tables, their drops, an empty table's resize) use a
+// pool of their own on it. Set, it turns the split on, and POSTGRES_DATABASE_
+// URL is then a runtime login that owns nothing: tenant statements switch into
+// POSTGRES_TENANT_ROLE as before, system and unscoped statements into
+// POSTGRES_SYSTEM_ROLE, and a statement bound to no context runs as the
+// runtime login itself, which holds no table privilege and fails closed.
+// Unset (the default), one pool logs in as the owner, exactly as before.
+// Whitespace counts as unset.
+export const getPostgresMigrationDatabaseUrl = () =>
+  String(process.env.POSTGRES_MIGRATION_DATABASE_URL ?? "").trim();
+
+export const isPostgresRoleSplitEnabled = () => Boolean(getPostgresMigrationDatabaseUrl());
+
+// The NOLOGIN role system work runs as under the split (migration 035): every
+// application table's privileges the owner path uses, and a permissive
+// system_access policy (USING (true)) on every table under row-level security,
+// so it sees every tenant's rows without owning anything. Migration 035 creates
+// it whether or not the split is on. Validated like POSTGRES_TENANT_ROLE, and
+// it must differ from it: a system statement that switched into the tenant role
+// would see no row at all.
+export const getPostgresSystemRole = () => {
+  const role = String(process.env.POSTGRES_SYSTEM_ROLE ?? "").trim() || "archive_rag_system";
+
+  if (!POSTGRES_ROLE_NAME_PATTERN.test(role)) {
+    throw new Error(
+      `POSTGRES_SYSTEM_ROLE must be a lowercase PostgreSQL identifier of at most 63 bytes. Received "${role}".`
+    );
+  }
+
+  if (role === getPostgresTenantRole()) {
+    throw new Error(`POSTGRES_SYSTEM_ROLE must differ from POSTGRES_TENANT_ROLE (both are "${role}").`);
   }
 
   return role;
@@ -1195,6 +1352,275 @@ export const getRagIngestMaxPendingBytesPerTenant = () =>
   Math.floor(
     toNonNegativeNumber(process.env.RAG_INGEST_MAX_PENDING_BYTES_PER_TENANT, 1024 * 1024 * 1024)
   );
+
+// The same caps over a whole workspace (every user's queued and running jobs
+// in it), checked in addition to the per-tenant ones for a job that names a
+// workspace. 0 (default) disables a cap.
+export const getRagIngestMaxPendingJobsPerWorkspace = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_INGEST_MAX_PENDING_JOBS_PER_WORKSPACE, 0));
+
+export const getRagIngestMaxPendingBytesPerWorkspace = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_INGEST_MAX_PENDING_BYTES_PER_WORKSPACE, 0));
+
+// Storage quotas (rag/tenant-storage-quota.js): the documents a workspace
+// holds (every user's), or for a scope without a workspace the user's own
+// workspace-less documents, counted and summed by stored file size. Checked
+// when a document is committed (rag/index.js commitDocument) and early at
+// upload time. 0 (default) means no limit.
+export const getTenantMaxDocuments = () =>
+  Math.floor(toNonNegativeNumber(process.env.TENANT_MAX_DOCUMENTS, 0));
+
+export const getTenantMaxDocumentBytes = () =>
+  Math.floor(toNonNegativeNumber(process.env.TENANT_MAX_DOCUMENT_BYTES, 0));
+
+// Background agent tasks per tenant (the task's exact user and workspace
+// pair, the unit the task store and its row policy use). Over the queued cap
+// a new task is refused (429 TENANT_TASK_LIMITED); over the running cap a
+// task stays queued until one of the tenant's tasks finishes. 0 (default)
+// disables a cap.
+export const getTenantMaxRunningTasks = () =>
+  Math.floor(toNonNegativeNumber(process.env.TENANT_MAX_RUNNING_TASKS, 0));
+
+export const getTenantMaxQueuedTasks = () =>
+  Math.floor(toNonNegativeNumber(process.env.TENANT_MAX_QUEUED_TASKS, 0));
+
+// The tenant usage ledger (rag/tenant-usage.js, migration 037): hourly
+// aggregates per tenant, flushed asynchronously every TENANT_USAGE_FLUSH_MS,
+// so it adds no statement to a request. On by default; it does nothing
+// without a database. Only "off", "false", "0" and "no" turn it off.
+export const isTenantUsageLedgerEnabled = () =>
+  toBoolean(process.env.TENANT_USAGE_LEDGER, true);
+
+export const getTenantUsageFlushMs = () =>
+  Math.min(
+    Math.floor(toPositiveNumber(process.env.TENANT_USAGE_FLUSH_MS, 60_000)) || 60_000,
+    2 ** 31 - 1
+  );
+
+export const getTenantUsagePostgresTable = () =>
+  String(process.env.TENANT_USAGE_POSTGRES_TABLE ?? "").trim() || "tenant_usage";
+
+// Chunked upload sessions (upload-session-store.js) hold their chunks on disk
+// until they are completed or expire (UPLOAD_SESSION_TTL_MS), so without a cap
+// one tenant could open sessions until the disk is full. Counted per (user,
+// workspace) over the sessions it has open, the declared fileSize summed; a
+// POST /upload/init over either cap answers 429. 0 disables a cap. A session
+// being resumed is never refused.
+// Defaults sit well above what the workbench sends at once (it opens one
+// chunked session per dropped PDF, all in parallel), so a bulk drop of a few
+// dozen files still uploads while a runaway client is bounded.
+export const getUploadSessionMaxPerTenant = () =>
+  Math.floor(toNonNegativeNumber(process.env.UPLOAD_SESSION_MAX_PER_TENANT, 200));
+
+export const getUploadSessionMaxBytesPerTenant = () =>
+  Math.floor(
+    toNonNegativeNumber(process.env.UPLOAD_SESSION_MAX_BYTES_PER_TENANT, 10 * 1024 * 1024 * 1024)
+  );
+
+// How often a running API process sweeps expired upload sessions (it also
+// sweeps once at start-up). 0 keeps the start-up sweep only. Capped at the
+// largest delay setInterval accepts (about 24.8 days); a larger value would
+// make Node fire the timer at once and on every millisecond after.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+export const getUploadSessionCleanupIntervalMs = () =>
+  Math.min(
+    Math.floor(toNonNegativeNumber(process.env.UPLOAD_SESSION_CLEANUP_INTERVAL_MS, 15 * 60 * 1000)),
+    MAX_TIMER_DELAY_MS
+  );
+
+// /chat and /chat/stream input bounds (routes/chat.js; also checked at the
+// edge of a split deployment before forwarding). The JSON body is already
+// capped at 2 MB; these keep one request from carrying a question or a
+// document list the rest of the pipeline was never sized for. Lengths are
+// JavaScript string lengths (UTF-16 code units), measured after trimming.
+// The frontend sends every active document of the workspace, so the docIds
+// cap has no default in a process that retrieves itself (a large monolith
+// workspace kept chatting before the cap existed); with RETRIEVAL_SERVICE_URL
+// it defaults to RETRIEVAL_SERVICE_MAX_DOC_IDS' 1000, which the retrieval tier
+// refuses past anyway, and so it does with AGENT_SERVICE_URL: an api edge
+// forwards /chat to an agent tier whose own default (it retrieves through the
+// retrieval tier) is 1000, so the edge refuses what the agent tier would, as
+// a 400 of its own, instead of forwarding it. CHAT_MAX_DOC_IDS sets it
+// everywhere, 0 = no limit. A request past a limit is answered 400.
+export const getChatMaxQuestionChars = () =>
+  Math.floor(toPositiveNumber(process.env.CHAT_MAX_QUESTION_CHARS, 8000));
+
+export const getChatMaxDocIds = () => {
+  const splitDefault =
+    String(process.env.RETRIEVAL_SERVICE_URL ?? "").trim() || String(process.env.AGENT_SERVICE_URL ?? "").trim()
+      ? 1000
+      : 0;
+
+  return Math.floor(toNonNegativeNumber(process.env.CHAT_MAX_DOC_IDS, splitDefault));
+};
+
+// The longest docId (each entry of docIds, or docId) and sessionId accepted.
+export const getChatMaxIdChars = () =>
+  Math.floor(toPositiveNumber(process.env.CHAT_MAX_ID_CHARS, 256));
+
+// The task, trigger and agent-run routes (routes/tasks.js, checked at the edge
+// too) take the question and id limits above, and bound every free-form JSON
+// they persist or hand on (an action's payload, a trigger's event and input,
+// an agent task's preferences) by its serialized size: at most
+// TASK_MAX_PAYLOAD_BYTES UTF-8 bytes (default 256 KiB, 0 = no limit; the
+// parser's 2 MB still applies). An agent task's docIds are bounded as /chat's
+// are and do not count toward it.
+export const getTaskMaxPayloadBytes = () =>
+  Math.floor(toNonNegativeNumber(process.env.TASK_MAX_PAYLOAD_BYTES, 262144));
+
+// --- Per-tenant HTTP limits (rag/tenant-limits.js) ---------------------------
+// Counted after API auth, per tenant (the workspace, else the user, else the
+// client IP for a scope naming neither) and per cost class. Off by default;
+// the per-class maxima only matter once TENANT_RATE_LIMIT_ENABLED is on, and
+// sit well above what one workspace's workbench sends (a chunked upload sends
+// one request per 2 MB chunk). 0 turns one class's limit off.
+export const isTenantRateLimitEnabled = () =>
+  toBoolean(process.env.TENANT_RATE_LIMIT_ENABLED, false);
+
+// Fixed windows: every class of every tenant restarts at the same boundary
+// (multiples of the window since the epoch), on every instance.
+export const getTenantRateLimitWindowMs = () =>
+  Math.max(1, Math.floor(toPositiveNumber(process.env.TENANT_RATE_LIMIT_WINDOW_MS, 60 * 1000)));
+
+export const getTenantRateLimits = () => ({
+  chat: Math.floor(toNonNegativeNumber(process.env.TENANT_RATE_LIMIT_CHAT_MAX, 120)),
+  default: Math.floor(toNonNegativeNumber(process.env.TENANT_RATE_LIMIT_DEFAULT_MAX, 1200)),
+  destructive: Math.floor(
+    toNonNegativeNumber(process.env.TENANT_RATE_LIMIT_DESTRUCTIVE_MAX, 60)
+  ),
+  ingest: Math.floor(toNonNegativeNumber(process.env.TENANT_RATE_LIMIT_INGEST_MAX, 600)),
+});
+
+// Concurrent agent-running requests (/chat, /chat/stream, agent-run actions)
+// one tenant may have in flight in this process. 0 (the default) = no cap.
+export const getTenantMaxConcurrentRuns = () =>
+  Math.floor(toNonNegativeNumber(process.env.TENANT_MAX_CONCURRENT_RUNS, 0));
+
+// TRUST_PROXY, handed to Express's `trust proxy` so req.ip (and with it the
+// per-IP limiter and the per-tenant limiter's IP key) is the client behind a
+// reverse proxy. Unset or empty: undefined, Express's default (no proxy is
+// trusted, req.ip is the socket peer). Accepted: true / false (any case), a
+// number of hops (a non-negative integer), or a comma-separated list of
+// addresses, CIDR ranges (address/prefix, or an IPv4 address with a
+// contiguous netmask) and the names loopback, linklocal and uniquelocal (any
+// case; handed on in lower case). Anything else throws
+// TRUST_PROXY_INVALID, which refuses the start (createApp reads it first).
+// `true` trusts every hop: the left-most X-Forwarded-For entry, which a
+// client can write itself, becomes req.ip. Prefer a hop count or a list.
+const TRUST_PROXY_PRESETS = new Set(["loopback", "linklocal", "uniquelocal"]);
+
+const isContiguousIpv4Netmask = (netmask) => {
+  const value =
+    netmask
+      .split(".")
+      .reduce((total, octet) => total * 256 + Number(octet), 0) >>> 0;
+  const inverted = ~value >>> 0;
+
+  // The host bits are a run of ones at the bottom: inverted + 1 is a power of two.
+  return (inverted & (inverted + 1)) === 0;
+};
+
+const isTrustProxyListEntry = (entry) => {
+  if (TRUST_PROXY_PRESETS.has(entry)) {
+    return true;
+  }
+
+  const slash = entry.indexOf("/");
+
+  if (slash === -1) {
+    return isIP(entry) !== 0;
+  }
+
+  const address = entry.slice(0, slash);
+  const range = entry.slice(slash + 1);
+  const family = isIP(address);
+
+  if (family === 0) {
+    return false;
+  }
+
+  if (/^\d{1,3}$/u.test(range)) {
+    return Number(range) <= (family === 4 ? 32 : 128);
+  }
+
+  // An IPv4 netmask (255.255.255.0) is accepted for an IPv4 address only, and
+  // only a contiguous one (Express refuses 255.0.255.0).
+  return family === 4 && isIP(range) === 4 && isContiguousIpv4Netmask(range);
+};
+
+export const getTrustProxySetting = () => {
+  const rawValue = String(process.env.TRUST_PROXY ?? "").trim();
+
+  if (!rawValue) {
+    return undefined;
+  }
+
+  const lowered = rawValue.toLowerCase();
+
+  if (lowered === "true") {
+    return true;
+  }
+
+  if (lowered === "false") {
+    return false;
+  }
+
+  if (/^\d+$/u.test(rawValue) && Number.isSafeInteger(Number(rawValue))) {
+    return Number(rawValue);
+  }
+
+  // The preset names are matched case-insensitively and handed to Express in
+  // lower case, the only spelling it knows.
+  const entries = rawValue
+    .split(",")
+    .map((entry) => entry.trim())
+    .map((entry) => (TRUST_PROXY_PRESETS.has(entry.toLowerCase()) ? entry.toLowerCase() : entry));
+  const invalid = entries.filter((entry) => !entry || !isTrustProxyListEntry(entry));
+
+  if (invalid.length > 0) {
+    const error = new Error(
+      `TRUST_PROXY must be true, false, a number of hops, or a comma-separated list of addresses, CIDR ranges, loopback, linklocal or uniquelocal; ${invalid.length} entr${
+        invalid.length === 1 ? "y is" : "ies are"
+      } not (${invalid.map((entry) => JSON.stringify(entry)).join(", ")}).`
+    );
+
+    error.code = "TRUST_PROXY_INVALID";
+    throw error;
+  }
+
+  return entries;
+};
+// --- End per-tenant HTTP limits ----------------------------------------------
+
+// What deleting a document also removes elsewhere (rag/document-deletion-
+// cascade.js). Always: its queued, retry-waiting and dead-lettered ingest jobs
+// and its chunks in every live index version table. Opt-in with
+// DOCUMENT_DELETE_REDACTION=on (also true, 1, yes; anything else is off): the
+// copies of its text in the deleting tenant's settled agent runs, workspace
+// artifacts and answer feedback are replaced with a marker, ids kept.
+export const isDocumentDeleteRedactionEnabled = () =>
+  ["1", "true", "on", "yes"].includes(
+    String(process.env.DOCUMENT_DELETE_REDACTION ?? "").trim().toLowerCase()
+  );
+
+// The document trash (migration 042, rag/document-trash.js). 0 (the default)
+// keeps DELETE /documents/:docId and POST /documents/clear an immediate hard
+// delete. Above 0 they move documents into the trash instead: out of search
+// and every listing at once, bytes kept, restorable with POST
+// /documents/:docId/restore, and purged by the retention sweep once they have
+// been there this many whole hours. Needs VECTOR_STORE_PROVIDER=pgvector with
+// the PostgreSQL document registry; anything else refuses the start
+// (DOCUMENT_TRASH_UNSUPPORTED). At most ten years.
+export const MAX_DOCUMENT_TRASH_RETENTION_HOURS = 87_600;
+
+export const getDocumentTrashRetentionHours = () =>
+  Math.min(
+    Math.floor(toNonNegativeNumber(process.env.DOCUMENT_TRASH_RETENTION_HOURS, 0)),
+    MAX_DOCUMENT_TRASH_RETENTION_HOURS
+  );
+
+export const isDocumentTrashEnabled = () => getDocumentTrashRetentionHours() > 0;
 
 // Succeeded and failed jobs (their bytes are already gone) are deleted by the
 // workers' housekeeping once they are this old. 0 keeps them forever.
@@ -1383,6 +1809,170 @@ export const getAdminAuditEventsPostgresTable = () =>
 export const getAdminAuditRetentionDays = () =>
   Math.floor(toNonNegativeNumber(process.env.ADMIN_AUDIT_RETENTION_DAYS, 90));
 
+// Data-plane audit events (rag/data-access-audit.js): document download,
+// delete, clear and replace, memory and session clears, and a platform admin's
+// cross-tenant reads, recorded with ids and counts only. Off by default; on,
+// documents clear and document delete refuse (503 AUDIT_UNAVAILABLE) when
+// their audit record cannot be written.
+export const isAdminAuditDataEventsEnabled = () =>
+  toBoolean(process.env.ADMIN_AUDIT_DATA_EVENTS, false);
+
+// Retention of the other data types (rag/retention.js). Whole days, fractions
+// rounded down; 0 (the default, and any value below 1) keeps the data forever,
+// so nothing is ever deleted unless an operator sets one. Each type is swept
+// only by the process that hosts it: agent runs and tasks by the agent tier,
+// feedback and archived workspace artifacts by the API tier, the RAG
+// observability files by both.
+//
+//   AGENT_RUN_RETENTION_DAYS           finished runs (completed, failed,
+//                                      canceled), with their events and
+//                                      approval snapshots, by last update
+//   TASK_RETENTION_DAYS                finished tasks and their events, by
+//                                      last update
+//   WORKSPACE_ARTIFACT_RETENTION_DAYS  archived artifacts only, by archive time
+//   FEEDBACK_RETENTION_DAYS            answer feedback in PostgreSQL, by
+//                                      creation time
+//   RAG_OBSERVABILITY_RETENTION_DAYS   rotated RAG observability JSONL segments
+//   TENANT_USAGE_RETENTION_DAYS        usage ledger rows (refused_* included),
+//                                      by the start of their hour; API tier
+const readRetentionDays = (rawValue) => Math.floor(toNonNegativeNumber(rawValue, 0));
+
+export const getAgentRunRetentionDays = () =>
+  readRetentionDays(process.env.AGENT_RUN_RETENTION_DAYS);
+
+export const getTaskRetentionDays = () => readRetentionDays(process.env.TASK_RETENTION_DAYS);
+
+export const getWorkspaceArtifactRetentionDays = () =>
+  readRetentionDays(process.env.WORKSPACE_ARTIFACT_RETENTION_DAYS);
+
+export const getFeedbackRetentionDays = () => readRetentionDays(process.env.FEEDBACK_RETENTION_DAYS);
+
+export const getRagObservabilityRetentionDays = () =>
+  readRetentionDays(process.env.RAG_OBSERVABILITY_RETENTION_DAYS);
+
+export const getTenantUsageRetentionDays = () =>
+  readRetentionDays(process.env.TENANT_USAGE_RETENTION_DAYS);
+
+// How often the retention sweep runs (the first sweep runs a minute after
+// start-up, or after one interval when that is shorter). 0 turns the
+// periodic sweep off. Capped like the upload session sweep.
+export const getRetentionSweepIntervalMs = () =>
+  Math.min(
+    Math.floor(toNonNegativeNumber(process.env.RETENTION_SWEEP_INTERVAL_MS, 60 * 60 * 1000)),
+    MAX_TIMER_DELAY_MS
+  );
+
+// Rows one retention statement deletes at most; a sweep repeats the
+// statement until a batch comes back short.
+export const getRetentionSweepBatchSize = () =>
+  Math.min(Math.floor(toPositiveNumber(process.env.RETENTION_SWEEP_BATCH_SIZE, 500)), 10_000) || 500;
+
+// Answer feedback (POST /feedback). Deliberately no provider setting: with a
+// database the records live in PostgreSQL under row-level security (migration
+// 034), and the JSONL file serves only the profile without one, so no setting
+// can put a multi-tenant deployment back on one file every tenant shares.
+export const getFeedbackStoreConfigStatus = ({
+  postgresConfigured = isPostgresDatabaseConfigured(),
+} = {}) => ({
+  backend: postgresConfigured ? "postgres" : "file",
+  persistent: true,
+  postgresConfigured,
+  reason: postgresConfigured ? "postgres_configured_default" : "postgres_not_configured",
+});
+
+export const getFeedbackPostgresTable = () =>
+  (process.env.FEEDBACK_POSTGRES_TABLE || "rag_feedback").trim();
+
+// Tenant registry (migration 036, rag/tenant-registry.js): the workspaces a
+// deployment knows and who belongs to each. Like feedback, no provider
+// setting: PostgreSQL whenever a database is configured, an in-process store
+// otherwise.
+export const getWorkspacesPostgresTable = () =>
+  (process.env.WORKSPACES_POSTGRES_TABLE || "rag_workspaces").trim();
+
+export const getWorkspaceMembersPostgresTable = () =>
+  (process.env.WORKSPACE_MEMBERS_POSTGRES_TABLE || "rag_workspace_members").trim();
+
+export const getTenantRegistryStoreConfigStatus = ({
+  postgresConfigured = isPostgresDatabaseConfigured(),
+} = {}) => ({
+  backend: postgresConfigured ? "postgres" : "memory",
+  persistent: postgresConfigured,
+  postgresConfigured,
+  reason: postgresConfigured ? "postgres_configured_default" : "postgres_not_configured",
+});
+
+// TENANT_MEMBERSHIP=enforce makes requireApiAuth refuse (403) an
+// authenticated request whose resolved workspace is not registered, not
+// active, or (when the scope names a user) has no membership for that user,
+// and merges the membership's roles into the scope's workspaceRoles. `off`
+// (default) changes nothing: the registry is then read only by the admin
+// routes. An unknown value refuses the start, never falls back to off.
+export const TENANT_MEMBERSHIP_MODES = Object.freeze(["off", "enforce"]);
+
+export const getTenantMembershipMode = () => {
+  const rawValue = process.env.TENANT_MEMBERSHIP;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "off";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!TENANT_MEMBERSHIP_MODES.includes(normalizedValue)) {
+    const error = new Error(
+      `TENANT_MEMBERSHIP must be one of ${TENANT_MEMBERSHIP_MODES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "TENANT_MEMBERSHIP_MODE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
+export const isTenantMembershipEnforced = () => getTenantMembershipMode() === "enforce";
+
+// How long one process keeps a workspace or membership lookup (found or not).
+// A write through this process's registry service drops the entries it
+// touches at once; other processes see it after at most this long. 0 turns
+// the cache off.
+export const getTenantRegistryCacheTtlMs = () =>
+  Math.floor(toNonNegativeNumber(process.env.TENANT_REGISTRY_CACHE_TTL_MS, 5000));
+
+// TENANT_REGISTRY_CACHE_SCOPE (rag/tenant-registry.js): `shared` (default)
+// caches a workspace lookup once for every caller; `tenant` caches it per
+// requesting user, so an authenticated non-member probing a workspace id
+// neither hits nor joins a lookup another principal's request left (a hit is
+// faster than a database read, and told the prober that the workspace had a
+// request within the TTL). Membership lookups are per (workspace, user) under
+// both. A sibling of RAG_EMBEDDING_CACHE_SCOPE; an unknown value refuses the
+// start.
+export const TENANT_REGISTRY_CACHE_SCOPES = Object.freeze(["shared", "tenant"]);
+
+export const getTenantRegistryCacheScope = () => {
+  const rawValue = process.env.TENANT_REGISTRY_CACHE_SCOPE;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "shared";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!TENANT_REGISTRY_CACHE_SCOPES.includes(normalizedValue)) {
+    const error = new Error(
+      `TENANT_REGISTRY_CACHE_SCOPE must be one of ${TENANT_REGISTRY_CACHE_SCOPES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "TENANT_REGISTRY_CACHE_SCOPE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
 export const isApiAuthEnabled = () =>
   toBoolean(process.env.API_AUTH_ENABLED, false);
 
@@ -1524,6 +2114,36 @@ export const getQueryEmbeddingCacheMaxEntries = () =>
 
 export const getQueryEmbeddingCacheTtlMs = () =>
   Math.floor(toPositiveNumber(process.env.RAG_EMBEDDING_CACHE_TTL_MS, 10 * 60 * 1000)) || 10 * 60 * 1000;
+
+// RAG_EMBEDDING_CACHE_SCOPE: `shared` (default) lets every tenant of the
+// process hit a vector another tenant's identical query left in the cache;
+// `tenant` partitions the cached vectors the way flights already are (the
+// tenant pair, or the non-tenant context), so a hit no longer tells a tenant
+// that some other tenant recently asked the same text. An unknown value
+// refuses the start and fails every cached embedding, never falls back.
+export const QUERY_EMBEDDING_CACHE_SCOPES = Object.freeze(["shared", "tenant"]);
+
+export const getQueryEmbeddingCacheScope = () => {
+  const rawValue = process.env.RAG_EMBEDDING_CACHE_SCOPE;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "shared";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!QUERY_EMBEDDING_CACHE_SCOPES.includes(normalizedValue)) {
+    const error = new Error(
+      `RAG_EMBEDDING_CACHE_SCOPE must be one of ${QUERY_EMBEDDING_CACHE_SCOPES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "RAG_EMBEDDING_CACHE_SCOPE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
 
 // ---------------------------------------------------------------------------
 // ADAPTER track: query-side linear embedding adapter (rag/query-adapter.js).
@@ -1712,6 +2332,12 @@ export const getModelGatewayQuotaLimits = () => ({
     toNonNegativeNumber(process.env.MODEL_GATEWAY_QUOTA_TOKENS_PER_MINUTE, 0)
   ),
 });
+
+// The same per-workspace limits, enforced in this process for the model calls
+// it sends itself (rag/model-call-quota.js): a monolith, or a tier that calls
+// models without MODEL_GATEWAY_URL. Off by default; a call that goes to the
+// model gateway is admitted there instead, never twice.
+export const isModelQuotaEnabled = () => toBoolean(process.env.MODEL_QUOTA_ENABLED, false);
 // --- End model gateway -------------------------------------------------------
 
 // --- ROLES track: split-deployment edge and agent tier ----------------------
@@ -1819,6 +2445,12 @@ export const getApiAuthOidcHttpTimeoutMs = () =>
 export const isApiAuthOidcTypRequired = () =>
   toBoolean(process.env.API_AUTH_OIDC_REQUIRE_TYP, false);
 
+// false: admin.* roles and admin permissions from an OIDC token (the roles and
+// permissions claims and API_AUTH_OIDC_GROUP_ROLE_MAP) are dropped, so the
+// identity provider can grant workspace roles but no platform role.
+export const isApiAuthOidcPlatformRolesAllowed = () =>
+  toBoolean(process.env.API_AUTH_OIDC_ALLOW_PLATFORM_ROLES, true);
+
 export const getApiAuthOidcUserClaim = () =>
   readOidcText(process.env.API_AUTH_OIDC_USER_CLAIM, "sub");
 
@@ -1860,3 +2492,71 @@ export const getApiAuthOidcConfigStatus = () => {
   };
 };
 // --- End OIDC track ----------------------------------------------------------
+
+// --- Tenant encryption at rest (tenant isolation phase 5) -------------------
+// TENANT_ENCRYPTION=on encrypts tenant file bytes when they are written
+// (rag/tenant-encryption.js): the documents' and ingest jobs' file bytes, the
+// ingest stage outputs, the upload session chunks, and the working files of
+// one request or ingest attempt (rag/working-files.js). Reads recognise both
+// forms whatever the setting, so rows written before it (or while it was off)
+// stay readable. `off` (default) writes exactly what was written before. An
+// unknown value refuses the start, never falls back to off.
+export const TENANT_ENCRYPTION_MODES = Object.freeze(["off", "on"]);
+
+export const getTenantEncryptionMode = () => {
+  const rawValue = process.env.TENANT_ENCRYPTION;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "off";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!TENANT_ENCRYPTION_MODES.includes(normalizedValue)) {
+    const error = new Error(
+      `TENANT_ENCRYPTION must be one of ${TENANT_ENCRYPTION_MODES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "TENANT_ENCRYPTION_MODE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
+export const isTenantEncryptionEnabled = () => getTenantEncryptionMode() === "on";
+
+// The key management provider behind the envelopes (rag/kms/). Only `local`
+// exists: demo-grade key files on this machine (rag/kms/local-provider.js).
+export const TENANT_KMS_PROVIDERS = Object.freeze(["local"]);
+
+export const getTenantKmsProviderId = () => {
+  const rawValue = process.env.TENANT_KMS_PROVIDER;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "local";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!TENANT_KMS_PROVIDERS.includes(normalizedValue)) {
+    const error = new Error(
+      `TENANT_KMS_PROVIDER must be one of ${TENANT_KMS_PROVIDERS.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "TENANT_KMS_PROVIDER_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
+// The local provider's paths as configured, or null when unset: the provider
+// derives the defaults from the data directory (rag/kms/local-provider.js).
+export const getTenantKeystoreDirectorySetting = () =>
+  String(process.env.TENANT_KEYSTORE_DIR ?? "").trim() || null;
+
+export const getTenantKmsMasterKeyFileSetting = () =>
+  String(process.env.TENANT_KMS_MASTER_KEY_FILE ?? "").trim() || null;

@@ -288,7 +288,11 @@ if (!adminDatabaseUrl) {
     assert.ok(local.results.length > 0);
     assert.deepStrictEqual(remote, local);
 
-    const health = await (await fetch(`${serverUrl}/health`)).json();
+    // The details need a probe identity (an unsigned /health gets the status
+    // alone); the service client signs and binds it.
+    const { json: health } = await modules.serviceClient
+      .createServiceClient({ audience: "retrieval", urls: [serverUrl] })
+      .request({ path: "/health", system: true });
 
     assert.equal(health.checks.vectorStore.provider, "pgvector");
     assert.equal(health.checks.vectorStore.status, "ok", health.checks.vectorStore.message);

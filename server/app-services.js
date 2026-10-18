@@ -27,9 +27,10 @@ import {
   readQualityHistory,
   runSyntheticQualityEvaluation,
 } from "./evaluation/quality-report.js";
-import { listFeedback, recordFeedback } from "./feedback.js";
+import { createFeedbackService, getDefaultFeedbackStore } from "./feedback.js";
 import { buildHealthReport, runStartupHealthChecks } from "./health.js";
 import { runWithPrimaryReads } from "./rag/postgres.js";
+import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { createArxivEnrichmentService } from "./rag/arxiv-enrichment.js";
 import { createArxivService } from "./rag/arxiv-client.js";
 import { createArxivImportService } from "./rag/arxiv-importer.js";
@@ -93,7 +94,16 @@ import {
   getAgentIntentPlanner,
   getAgentPlannerRollout,
 } from "./rag/config.js";
+import { createDocumentDeletionCascade } from "./rag/document-deletion-cascade.js";
+import { createDocumentTrashService } from "./rag/document-trash.js";
+import {
+  listTrashedDocuments,
+  restoreDocument,
+  supportsDocumentTrash,
+} from "./rag/index.js";
 import { createDefaultIngestJobStore } from "./rag/ingest-job-store.js";
+import { createTenantLifecycleService } from "./rag/tenant-lifecycle.js";
+import { createDefaultTenantRegistryService } from "./rag/tenant-registry.js";
 import {
   loadDocumentsIngestedElsewhere,
   refreshDocumentsIngestedElsewhere,
@@ -103,9 +113,11 @@ import {
   cleanupExpiredUploadSessions,
   clearUploadSession,
   ensureUploadStorage,
+  eraseUploadSessionsForTenant,
   finalizeUploadSession,
   getUploadSessionStatus,
   initializeUploadSession,
+  listUploadSessionsForTenant,
   recoverInterruptedUploadFinalizations,
   releaseUploadSessionFinalization,
   removeMergedUpload,
@@ -288,13 +300,20 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
   // startServiceRole check earlier still).
   assertAgentRuntimeSupported();
 
+  // What a document delete also cleans up in the stores built below
+  // (rag/document-deletion-cascade.js); assigned once they exist, read when a
+  // delete runs. A ragService override of deleteDocument/clearDocuments
+  // replaces the cascade with it.
+  let documentDeletionCascade = null;
   const ragService = {
     chat,
-    clearDocuments,
+    clearDocuments: (clearOptions = {}) =>
+      clearDocuments({ cascade: documentDeletionCascade, ...clearOptions }),
     clearLongMemories,
     clearSessionMemory,
     deleteLongMemory,
-    deleteDocument,
+    deleteDocument: (docId, deleteOptions = {}) =>
+      deleteDocument(docId, { cascade: documentDeletionCascade, ...deleteOptions }),
     getDocument,
     getDocumentFile,
     ingestDocument,
@@ -304,11 +323,15 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     isDocumentRegistryShared,
     listDocuments,
     listLongMemories,
+    // The document trash (DOCUMENT_TRASH_RETENTION_HOURS, rag/document-trash.js).
+    listTrashedDocuments,
     loadDocumentsFromStore,
     recordConversationTurn,
     refreshDocumentRegistry,
     rememberLongMemory,
+    restoreDocument,
     resyncDocument,
+    supportsDocumentTrash,
     ...(options.ragService ?? {}),
   };
   const webChatService = options.chatMcp ?? chatMCP;
@@ -512,9 +535,11 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     cleanupExpiredUploadSessions,
     clearUploadSession,
     ensureUploadStorage,
+    eraseUploadSessionsForTenant,
     finalizeUploadSession,
     getUploadSessionStatus,
     initializeUploadSession,
+    listUploadSessionsForTenant,
     recoverInterruptedUploadFinalizations,
     releaseUploadSessionFinalization,
     removeMergedUpload,
@@ -523,19 +548,49 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
   // Shared by the upload routes and, in this process, the worker server.js
   // starts; the in-memory store (no PostgreSQL) only works that way.
   const ingestJobStore = options.ingestJobStore ?? createDefaultIngestJobStore();
+  // The health report describes the process, not a tenant: /health and /ready
+  // run before any tenant is bound, the admin status page inside a tenant
+  // request, start-up inside the system block. It runs as the system in each
+  // case (its row-level security probe binds its own probe tenant), so
+  // POSTGRES_TENANT_CONTEXT=strict accepts it and a tenant's admin page reads
+  // the index-version registry with the owner's view, as start-up does.
   const healthService = options.healthService ?? {
-    buildHealthReport,
-    runStartupHealthChecks,
+    buildHealthReport: (...args) => runAsDatabaseSystem(() => buildHealthReport(...args)),
+    runStartupHealthChecks: (...args) => runAsDatabaseSystem(() => runStartupHealthChecks(...args)),
   };
   const qualityService = options.qualityService ?? {
     readLatestQualityReport,
     readQualityHistory,
     runSyntheticQualityEvaluation,
   };
-  const feedbackService = options.feedbackService ?? {
-    listFeedback,
-    recordFeedback,
-  };
+  // PostgreSQL (migration 034, under row-level security) whenever a database
+  // is configured, the JSONL file only without one. The store opens no
+  // connection until a feedback route is called.
+  // An injected feedback service hides its store: the tenant erase then sees
+  // only an explicitly passed feedbackStore.
+  const feedbackStore = options.feedbackService
+    ? options.feedbackStore ?? null
+    : options.feedbackStore ?? getDefaultFeedbackStore();
+  const feedbackService =
+    options.feedbackService ??
+    createFeedbackService({
+      store: feedbackStore,
+    });
+
+  // A store is cleaned only when it is the one the services here use: a test
+  // that injects only a service keeps the default store out of reach.
+  documentDeletionCascade =
+    options.documentDeletionCascade ??
+    createDocumentDeletionCascade({
+      agentRunStore:
+        options.agentRunService && !options.agentRunStore ? null : agentRunStore,
+      feedbackStore,
+      ingestJobStore,
+      workspaceArtifactStore:
+        options.workspaceArtifactService && !options.workspaceArtifactStore
+          ? null
+          : workspaceArtifactStore,
+    });
   const adminStatusService =
     options.adminStatusService ??
     createAdminStatusService({
@@ -556,6 +611,46 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     });
   const adminAuditService =
     options.adminAuditService ?? createDefaultAdminAuditService();
+  // The trash's purge for the retention sweep (rag/retention.js, the
+  // document_trash type): the deletion cascade and the purge audit event run
+  // per deleting scope after each batch.
+  const documentTrashService =
+    options.documentTrashService ??
+    createDocumentTrashService({
+      adminAuditService,
+      getCascade: () => documentDeletionCascade,
+    });
+  // The tenant registry (migration 036): the admin routes write it,
+  // requireApiAuth reads it under TENANT_MEMBERSHIP=enforce (app.js puts this
+  // instance on app.locals), the tenant erase marks and removes its rows, and
+  // the retention sweep reads its retention policies without a database. One
+  // instance for all of them, so they share its lookup cache. It opens no
+  // connection until it is used.
+  const tenantRegistry = options.tenantRegistry ?? createDefaultTenantRegistryService();
+  // Tenant erase and export (routes/admin-tenant-lifecycle.js, npm run
+  // tenant:erase / tenant:export) over exactly the stores built above; a
+  // store injected without the tenant record calls is reported, not skipped
+  // in silence. Documents, session and long-term memory, the caches and the
+  // usage ledger are the module-level stores.
+  const tenantLifecycleService =
+    options.tenantLifecycleService ??
+    createTenantLifecycleService({
+      adminAuditService,
+      // A store an injected service may not be using is left out (reported
+      // as not configured) unless it was passed too.
+      agentRunStore: options.agentRunService && !options.agentRunStore ? null : agentRunStore,
+      feedbackStore,
+      ingestJobStore,
+      taskStore: options.taskService && !options.taskStore ? null : taskStore,
+      tenantRegistry,
+      ...(options.tenantUsageStore ? { tenantUsageStore: options.tenantUsageStore } : {}),
+      uploadStore,
+      uploadsDirectory,
+      workspaceArtifactStore:
+        options.workspaceArtifactService && !options.workspaceArtifactStore
+          ? null
+          : workspaceArtifactStore,
+    });
   const agentExperienceMemoryService = options.agentExperienceMemoryService ?? {
     recordFromFeedback: recordAgentExperienceFromFeedback,
   };
@@ -581,6 +676,8 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     capabilityRegistry,
     dagPlannerAdapter: resolvedDagPlannerAdapter,
     executionPlannerAdapter,
+    documentDeletionCascade,
+    documentTrashService,
     feedbackService,
     healthService,
     ingestJobStore,
@@ -593,6 +690,8 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     replanAdapter: resolvedReplanAdapter,
     skillRegistry,
     taskService,
+    tenantLifecycleService,
+    tenantRegistry,
     unifiedGraphPlannerAdapter,
     uploadStore,
     uploadsDirectory,

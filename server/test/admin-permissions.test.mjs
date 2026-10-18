@@ -55,6 +55,11 @@ test("admin permissions define the required RBAC contract surface", () => {
     ADMIN_PERMISSION_IDS.adminActionRecoveryScan,
     ADMIN_PERMISSION_IDS.adminAuditRead,
     ADMIN_PERMISSION_IDS.adminStatusRead,
+    ADMIN_PERMISSION_IDS.adminTenantsRead,
+    ADMIN_PERMISSION_IDS.adminTenantsWrite,
+    ADMIN_PERMISSION_IDS.adminTenantsErase,
+    ADMIN_PERMISSION_IDS.adminTenantsExport,
+    ADMIN_PERMISSION_IDS.adminUsageRead,
     ADMIN_PERMISSION_IDS.agentRunsRecoveryAction,
     ADMIN_PERMISSION_IDS.agentTasksAction,
   ].sort());
@@ -70,9 +75,11 @@ test("admin role matrix grants least-privilege defaults", () => {
     (permission) => permission.id
   );
 
+  // GET /admin/usage (migration 037) is read-only, like the status view.
   assert.deepEqual(viewer.permissionIds, [
     ADMIN_PERMISSION_IDS.adminStatusRead,
     ADMIN_PERMISSION_IDS.adminActionRecoveryScan,
+    ADMIN_PERMISSION_IDS.adminUsageRead,
   ]);
   assert.equal(
     viewer.permissionIds.includes(ADMIN_PERMISSION_IDS.adminAuditRead),
@@ -110,8 +117,43 @@ test("admin role matrix grants least-privilege defaults", () => {
     recoveryOperator.permissionIds.includes(ADMIN_PERMISSION_IDS.adminAuditRead),
     false
   );
-  assert.deepEqual(operator.permissionIds.sort(), allPermissionIds.sort());
+  // The tenant registry permissions (migration 036) are held apart: the
+  // operator keeps every admin permission it had before they existed, and
+  // only the owner and the tenant manager carry them. The tenant erase and
+  // export (admin.tenants.erase / .export) are admin.owner's alone.
+  const tenantRegistryPermissionIds = [
+    ADMIN_PERMISSION_IDS.adminTenantsRead,
+    ADMIN_PERMISSION_IDS.adminTenantsWrite,
+  ];
+  const ownerOnly = [
+    ADMIN_PERMISSION_IDS.adminTenantsErase,
+    ADMIN_PERMISSION_IDS.adminTenantsExport,
+  ];
+  assert.deepEqual(
+    operator.permissionIds.sort(),
+    allPermissionIds
+      .filter((id) => !tenantRegistryPermissionIds.includes(id) && !ownerOnly.includes(id))
+      .sort()
+  );
   assert.deepEqual(owner.permissionIds.sort(), allPermissionIds.sort());
+  assert.deepEqual(
+    getAdminRoleContract(ADMIN_ROLE_IDS.tenantManager).permissionIds,
+    tenantRegistryPermissionIds
+  );
+  for (const role of listAdminRoleContracts()) {
+    if (role.id !== ADMIN_ROLE_IDS.owner) {
+      assert.equal(
+        role.permissionIds.some((permissionId) => ownerOnly.includes(permissionId)),
+        false,
+        `${role.id} holds no tenant erase or export`
+      );
+    }
+  }
+  for (const role of [viewer, qualityOperator, recoveryOperator, operator]) {
+    for (const permissionId of tenantRegistryPermissionIds) {
+      assert.equal(role.permissionIds.includes(permissionId), false, `${role.id} ${permissionId}`);
+    }
+  }
 
   for (const role of listAdminRoleContracts()) {
     for (const permissionId of role.permissionIds) {

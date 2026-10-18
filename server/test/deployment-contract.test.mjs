@@ -15,12 +15,17 @@
 // service-keys.mjs exports them), and every tier's environment fed through
 // the real topology validator and port resolution, so the URLs the tiers call
 // are where their neighbours listen and a tier without keys does not start.
+//
+// The tenant-isolation demo (compose.demo.yml) too: the hardened profile
+// alone, the split's runtime login, and nothing shared with the default
+// deployment (its own project, container names and volumes).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import dotenv from "dotenv";
 import {
   getCrossEncoderEndpoint,
   getCrossEncoderModel,
@@ -45,6 +50,9 @@ const serviceDirectory = path.join(evaluationDirectory, "cross-encoder-service")
 const composePath = path.join(repositoryRoot, "docker-compose.yml");
 const rerankOverridePath = path.join(repositoryRoot, "compose.rerank.yml");
 const servicesOverridePath = path.join(repositoryRoot, "compose.services.yml");
+const demoOverridePath = path.join(repositoryRoot, "compose.demo.yml");
+const demoProfilePath = path.join(repositoryRoot, "deploy", "demo", "hardened.env");
+const splitRolesSqlPath = path.join(repositoryRoot, "deploy", "postgres", "create-split-roles.sql");
 const appDockerfilePath = path.join(repositoryRoot, "Dockerfile");
 const rerankerDockerfilePath = path.join(serviceDirectory, "Dockerfile");
 const rerankerDockerignorePath = path.join(serviceDirectory, "Dockerfile.dockerignore");
@@ -664,7 +672,8 @@ test("tiers start in dependency order and drain before docker stops them", async
     "model-gateway": "service_healthy",
     postgres: "service_healthy",
   });
-  assert.deepEqual(dependsOn(override, "model-gateway"), {});
+  // The gateway writes the tenant usage ledger (see the next test).
+  assert.deepEqual(dependsOn(override, "model-gateway"), { postgres: "service_healthy" });
 
   withEnvironment(t, { SERVICE_SHUTDOWN_GRACE_MS: "" });
 
@@ -673,6 +682,26 @@ test("tiers start in dependency order and drain before docker stops them", async
 
     assert.ok(seconds * 1000 > getServiceShutdownGraceMs(), `${serviceName} outlasts the drain window`);
   }
+});
+
+// In a split deployment the callers send every model call through the
+// gateway and keep only mirror events, which the tenant usage ledger skips
+// (rag/tenant-usage.js), so the gateway alone books model tokens and cost per
+// tenant: it needs the compose network's database like every other tier.
+// Without it, a server/.env copied from the example would point the gateway
+// at 127.0.0.1:5432, its own container, and every ledger flush would fail.
+test("the model gateway gets the compose database for the tenant usage ledger", async () => {
+  const override = await readText(servicesOverridePath);
+  const databaseUrls = tierServiceNames.map(
+    (serviceName) => rawServiceEnvironment(override, serviceName).POSTGRES_DATABASE_URL
+  );
+
+  assert.equal(
+    rawServiceEnvironment(override, "model-gateway").POSTGRES_DATABASE_URL,
+    "postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai"
+  );
+  assert.equal(new Set(databaseUrls).size, 1, "every tier names the same database");
+  assert.equal(new URL(interpolate(databaseUrls[0], {})).hostname, "postgres", "the compose service, never loopback");
 });
 
 // The monolith (server.js, role all) drains the same window and then gives its
@@ -704,7 +733,7 @@ test("each role has a start script through the image's entry point", async () =>
 // with a known password, Redis without one, API auth off) are only fit for
 // loopback. Every published port therefore binds ARCHIVE_RAG_BIND_HOST, which
 // defaults to 127.0.0.1; 0.0.0.0 is a deliberate choice (docs/deployment.md).
-const composeFilesWithPorts = [composePath, rerankOverridePath, servicesOverridePath];
+const composeFilesWithPorts = [composePath, rerankOverridePath, servicesOverridePath, demoOverridePath];
 const bindHostPrefix = "${ARCHIVE_RAG_BIND_HOST:-127.0.0.1}:";
 
 // Every entry of every `ports:` block in a compose file, at any depth, plus
@@ -740,6 +769,9 @@ test("every published port binds ARCHIVE_RAG_BIND_HOST, loopback by default", as
     [composePath]: ["5432:5432", "6379:6379", "5001:5001", "5010:5001"],
     [rerankOverridePath]: [],
     [servicesOverridePath]: ["${ARCHIVE_RAG_API_PORTS:-5001}:5001"],
+    // The demo override publishes nothing of its own: the app and postgres
+    // keep docker-compose.yml's loopback ports, the demo model none.
+    [demoOverridePath]: [],
   };
 
   for (const filePath of composeFilesWithPorts) {
@@ -801,8 +833,9 @@ test("the postgres password comes from POSTGRES_PASSWORD, and every database URL
     }
   }
 
-  // app (2) and api, agent, retrieval (2 each); the gateway has no database.
-  assert.equal(urlCount, 8);
+  // app (2), api, agent, retrieval (2 each), and the gateway's
+  // POSTGRES_DATABASE_URL for the tenant usage ledger.
+  assert.equal(urlCount, 9);
 
   // No hard-coded password anywhere else in either file.
   for (const [name, text] of [["docker-compose.yml", compose], ["compose.services.yml", override]]) {
@@ -811,6 +844,141 @@ test("the postgres password comes from POSTGRES_PASSWORD, and every database URL
       assert.doesNotMatch(line, /postgres(ql)?:\/\/[^:/@\s]+:(?!\$\{POSTGRES_PASSWORD:-)[^@\s]*@/, `${name}: ${line.trim()}`);
     }
   }
+});
+
+// compose.demo.yml: the one-click app on the hardened tenant-isolation profile
+// (docs/demo-tenant-isolation.md), connected as the role split's runtime
+// login. Its database passwords and tokens are public demo values on purpose;
+// what must hold is that they are the profile's, that the app never connects
+// as the postgres superuser, and that the demo never touches the default
+// data volume.
+test("the demo override runs the app on the hardened profile as the split's runtime login", async () => {
+  const [demo, profileText, splitRolesSql] = await Promise.all([
+    readText(demoOverridePath),
+    readText(demoProfilePath),
+    readText(splitRolesSqlPath),
+  ]);
+  const profile = dotenv.parse(profileText);
+  const app = rawServiceEnvironment(demo, "app");
+  const postgres = rawServiceEnvironment(demo, "postgres");
+  const atComposeHost = (url) => {
+    const parsed = new URL(url);
+
+    parsed.hostname = "postgres";
+    return parsed.toString();
+  };
+
+  // The profile alone, required (`!override` replaces docker-compose.yml's
+  // server/.env instead of appending to it, so none of the default
+  // deployment's keys or settings reach the demo; `docker compose config
+  // --no-env-resolution` shows the one file).
+  assert.match(
+    serviceText(demo, "app"),
+    /^\s{4}env_file: !override\n\s{6}- path: deploy\/demo\/hardened\.env\n\s{8}required: true$/m
+  );
+
+  // The profile's two logins, at the postgres service instead of 127.0.0.1.
+  assert.equal(app.POSTGRES_DATABASE_URL, atComposeHost(profile.POSTGRES_DATABASE_URL));
+  assert.equal(app.POSTGRES_MIGRATION_DATABASE_URL, atComposeHost(profile.POSTGRES_MIGRATION_DATABASE_URL));
+  assert.equal(app.LONG_MEMORY_DATABASE_URL, app.POSTGRES_DATABASE_URL);
+
+  const runtime = new URL(app.POSTGRES_DATABASE_URL);
+  const owner = new URL(app.POSTGRES_MIGRATION_DATABASE_URL);
+
+  assert.notEqual(runtime.username, "postgres", "the app does not connect as the superuser");
+  assert.notEqual(runtime.username, owner.username);
+
+  // create-split-roles.sql creates exactly these logins and the database by
+  // default, and reads the passwords the postgres service is given.
+  assert.match(splitRolesSql, new RegExp(`\\\\set runtime ${runtime.username}\\n`, "u"));
+  assert.match(splitRolesSql, new RegExp(`\\\\set owner ${owner.username}\\n`, "u"));
+  assert.match(splitRolesSql, new RegExp(`\\\\set database ${runtime.pathname.slice(1)}\\n`, "u"));
+  assert.match(splitRolesSql, /\\getenv owner_password ARCHIVE_RAG_OWNER_PASSWORD/u);
+  assert.match(splitRolesSql, /\\getenv runtime_password ARCHIVE_RAG_RUNTIME_PASSWORD/u);
+  assert.equal(postgres.ARCHIVE_RAG_OWNER_PASSWORD, decodeURIComponent(owner.password));
+  assert.equal(postgres.ARCHIVE_RAG_RUNTIME_PASSWORD, decodeURIComponent(runtime.password));
+
+  // The init script is mounted, into a volume of its own (the image runs
+  // init scripts only on an empty data directory).
+  const postgresText = serviceText(demo, "postgres");
+
+  assert.match(postgresText, /^\s{6}- pgdata-demo:\/var\/lib\/postgresql\/data$/m);
+  assert.match(
+    postgresText,
+    /^\s{6}- \.\/deploy\/postgres\/create-split-roles\.sql:\/docker-entrypoint-initdb\.d\/[0-9a-z-]+\.sql:ro$/m
+  );
+
+  // The demo never touches the default deployment's data: its own compose
+  // project (so `down -v` removes only the demo's volumes), its own container
+  // names, and its own volume at every mount target the base file gives a
+  // named volume (compose merges volumes by target). Before, the app kept the
+  // default `appdata` at /data: upload sessions, RAG data and the local KMS's
+  // master key were shared, and the demo's `down -v` deleted them.
+  const base = await readText(composePath);
+  const topLevelName = demo.match(/^name: (\S+)$/m)?.[1];
+
+  assert.ok(topLevelName, "compose.demo.yml names its own project");
+  assert.equal(base.match(/^name: /m), null, "docker-compose.yml keeps the directory's project name");
+  assert.match(topLevelName, /-demo$/u);
+
+  for (const serviceName of ["postgres", "app"]) {
+    const baseName = serviceText(base, serviceName).match(/^\s{4}container_name: (\S+)$/m)?.[1];
+    const demoName = serviceText(demo, serviceName).match(/^\s{4}container_name: (\S+)$/m)?.[1];
+
+    assert.ok(baseName && demoName && demoName !== baseName, `${serviceName}: its own container name`);
+  }
+
+  const namedMounts = (text, serviceName) =>
+    (nestedLines(serviceLines(text, serviceName) ?? [], "volumes", 4) ?? [])
+      .filter(isContentLine)
+      .map((line) => line.trim().replace(/^-\s*/u, ""))
+      .filter((entry) => /^[a-z][a-z0-9_-]*:/u.test(entry))
+      .map((entry) => ({ target: entry.split(":")[1], volume: entry.split(":")[0] }));
+
+  for (const serviceName of ["postgres", "app"]) {
+    const demoMounts = namedMounts(demo, serviceName);
+
+    assert.equal(namedMounts(base, serviceName).length, 1, `${serviceName} has one named volume in docker-compose.yml`);
+
+    for (const { target, volume } of namedMounts(base, serviceName)) {
+      const replacement = demoMounts.find((mount) => mount.target === target);
+
+      assert.ok(replacement, `${serviceName}: ${target} gets a demo volume instead of ${volume}`);
+      assert.match(replacement.volume, /-demo$/u, `${serviceName}: ${target}`);
+      assert.match(demo, new RegExp(`^  ${replacement.volume}:$`, "mu"), `${replacement.volume} is declared`);
+    }
+  }
+
+  assert.doesNotMatch(demo, /^\s*- (pgdata|appdata):/m);
+  assert.match(demo, /docker compose -f docker-compose\.yml -f compose\.demo\.yml --profile app down -v/u);
+
+  // The demo model: the app image, on the compose network only, in the app
+  // profile, and the app waits for it.
+  const model = serviceText(demo, "demo-model");
+  const modelPort = model.match(/"fake-model", "--host", "0\.0\.0\.0", "--port", "(\d+)"/u)?.[1];
+
+  assert.ok(modelPort, "demo-model runs demo-tenants.mjs fake-model");
+  assert.match(model, /^\s{4}profiles: \["app"\]$/m);
+  // Not node as PID 1 without an init: docker's SIGTERM reaches it.
+  assert.match(model, /^\s{4}init: true$/m);
+  assert.match(model, /^\s{4}image: luc1ferxx-archive-rag:local$/m);
+  assert.doesNotMatch(model, /^\s{4}ports:/m);
+  assert.equal(app.OPENAI_BASE_URL, `http://demo-model:${modelPort}/v1`);
+
+  // The profile encrypts stored files; the local KMS keeps its key files and
+  // master key in the demo's own app volume (appdata-demo at /data), not in
+  // the database volume, not where the image's code lives, and not in the
+  // default deployment's appdata.
+  assert.equal(profile.TENANT_ENCRYPTION, "on");
+  assert.match(serviceText(demo, "app"), /^\s{6}- appdata-demo:\/data$/m);
+
+  for (const key of ["TENANT_KEYSTORE_DIR", "TENANT_KMS_MASTER_KEY_FILE"]) {
+    assert.match(app[key], /^\/data\/[a-z][a-z.-]*$/u, `${key} lies in the app volume`);
+    assert.equal(profile[key], undefined, `the profile leaves ${key} to the local default`);
+  }
+  assert.equal(dependsOn(demo, "app")["demo-model"], "service_healthy");
+  // Its own healthcheck (the image's probes the app's /livez on 5001).
+  assert.equal(model.match(/fetch\('http:\/\/127\.0\.0\.1:(\d+)\/v1\/embeddings'/u)?.[1], modelPort);
 });
 
 // The script of the app image's HEALTHCHECK (`CMD node -e "..."`, shell form).

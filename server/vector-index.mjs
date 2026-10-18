@@ -27,6 +27,8 @@ import { readFile } from "fs/promises";
 import { pathToFileURL } from "url";
 
 import { resetPostgresPool } from "./rag/postgres.js";
+import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
+import { flushTenantUsageOnExit } from "./rag/tenant-usage.js";
 import {
   activateIndexVersion,
   assertIndexVersionsSupported,
@@ -71,6 +73,10 @@ Activation options (activate, validate, rollback)
                                 (a rebuild under another chunking), as long as no document loses all chunks.
   --active-unreadable           The active version's table is gone: skip the comparisons with it and
                                 judge the target on its own checks; the old active version is marked failed.
+  --allow-unreadable-sources    Activate without the documents the build could not read (their stored PDF
+                                does not decrypt: a destroyed key, a changed byte); they are reported, and not
+                                searchable in the new version. Check the keystore first: a builder that cannot
+                                see the keystore or the master key reports every encrypted document this way.
   --probe-sample <n>            Recall probe: embed n stored chunks as queries; each must find itself in the top K.
   --probe-queries <file.json>   Recall probe: stored queries (strings or {"query": ...}); the new version must
                                 return the active version's top K.
@@ -111,6 +117,7 @@ const VALUE_OPTIONS = new Map([
 const FLAG_OPTIONS = new Map([
   ["--active-unreadable", "allowUnreadableActive"],
   ["--allow-chunk-count-drift", "allowChunkCountDrift"],
+  ["--allow-unreadable-sources", "allowUnreadableSources"],
   ["--force", "force"],
   ["--json", "json"],
   ["--help", "help"],
@@ -134,6 +141,7 @@ export const parseArgs = (argv = []) => {
   const options = {
     allowChunkCountDrift: false,
     allowUnreadableActive: false,
+    allowUnreadableSources: false,
     command: null,
     force: false,
     help: false,
@@ -285,7 +293,11 @@ const formatValidation = (report) =>
     report.totals
       ? `  ${report.totals.documents} document(s); ${report.totals.activeChunks ?? "?"} chunk(s) active, ${report.totals.targetChunks} in version ${report.versionId}; ${
           report.mismatchedDocuments ?? "unknown (active table unreadable)"
-        } document(s) with a different chunk count, ${report.staleDocuments ?? 0} with stale content`
+        } document(s) with a different chunk count, ${report.staleDocuments ?? 0} with stale content${
+          report.unreadableDocuments > 0
+            ? `, ${report.unreadableDocuments} unreadable${report.allowUnreadableSources ? " (passed over)" : ""}`
+            : ""
+        }`
       : null,
     report.probe?.selfRetrieval
       ? `  self-retrieval recall@${report.probe.topK}: ${report.probe.selfRetrieval.recall} over ${report.probe.selfRetrieval.sampled} chunk(s)`
@@ -346,7 +358,9 @@ export const main = async ({ argv = process.argv.slice(2), stdout = process.stdo
         : await resumeIndexVersionBuild(buildOptions);
 
     print(result, (entry) =>
-      `Version ${entry.versionId} is ready: ${entry.indexed} document(s) indexed, ${entry.skippedDeleted} deleted during the build, ${entry.failed} failed. Validate and activate it with: npm run vector:index -- activate ${entry.versionId}\n`
+      `Version ${entry.versionId} is ready: ${entry.indexed} document(s) indexed, ${entry.skippedDeleted} deleted during the build, ${entry.failed} failed${
+        entry.unreadable > 0 ? ` (${entry.unreadable} whose stored PDF cannot be decrypted; see --allow-unreadable-sources)` : ""
+      }. Validate and activate it with: npm run vector:index -- activate ${entry.versionId}\n`
     );
     return result;
   }
@@ -355,6 +369,7 @@ export const main = async ({ argv = process.argv.slice(2), stdout = process.stdo
   const gateOptions = pickDefined({
     allowChunkCountDrift: options.allowChunkCountDrift,
     allowUnreadableActive: options.allowUnreadableActive,
+    allowUnreadableSources: options.allowUnreadableSources,
     graceMs: options.graceMs,
     probe,
   });
@@ -412,7 +427,10 @@ if (invokedDirectly) {
   // that imports the module never picks one up.
   await import("dotenv/config");
 
-  main()
+  // An operator command acts as the owner, like every index-version lifecycle
+  // step it calls; bound explicitly so POSTGRES_TENANT_CONTEXT=strict accepts
+  // the statements it issues outside those steps too.
+  runAsDatabaseSystem(() => main())
     .catch((error) => {
       const validation = error?.details?.validation;
 
@@ -423,5 +441,11 @@ if (invokedDirectly) {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 1;
     })
-    .finally(() => resetPostgresPool());
+    // A build, resume or validation probe embeds through the model, which
+    // books its tokens in the tenant usage ledger: write them before the pool
+    // the write needs is closed.
+    .finally(async () => {
+      await flushTenantUsageOnExit();
+      await resetPostgresPool();
+    });
 }

@@ -1,5 +1,5 @@
 import { getLlmRequestTimeoutMs } from "./config.js";
-import { guardModelCall } from "./model-call-guard.js";
+import { guardModelCall, MODEL_CALL_LANES } from "./model-call-guard.js";
 
 const EMBEDDING_BATCH_SIZE = 512;
 
@@ -21,17 +21,22 @@ export const configureModelUpstreamPools = ({ chat = null, embedding = null } = 
 export const resetModelUpstreamPools = () => configureModelUpstreamPools();
 
 // `send(baseUrl)` performs one request; the pool (or the single endpoint)
-// passes it through the model-call guard.
-const sendToUpstream = (kind, model, send) => {
+// passes it through the model-call guard. `signal` (the caller's) takes a
+// request still waiting for a guard slot out of the queue when it aborts.
+// `lane` requests the single endpoint's guard lane (MODEL_CALL_LANES):
+// document embeddings get their own only when RAG_LLM_INGEST_MAX_CONCURRENCY
+// is set (resolveModelCallLane), else they share the default guard. A gateway upstream pool keeps one guard per
+// replica and model for every lane (its keys and health output are unchanged).
+const sendToUpstream = (kind, model, send, { lane = MODEL_CALL_LANES.default, signal } = {}) => {
   const pool = upstreamPools[kind];
 
   if (pool) {
-    return pool.run({ model, send });
+    return pool.run({ model, send, signal });
   }
 
   const baseUrl = resolveBaseUrl();
 
-  return guardModelCall(`${baseUrl}|${model}`, () => send(baseUrl));
+  return guardModelCall(`${baseUrl}|${model}`, () => send(baseUrl), { lane, signal });
 };
 
 // The request timeout, plus the caller's signal when it has one (the gateway
@@ -199,26 +204,33 @@ const fetchChatStream = async (url, { signal, ...options }, onDelta) => {
 };
 
 export const createEmbeddingsClient = ({ apiKey, model }) => {
-  const requestEmbeddings = (input, signal) =>
-    sendToUpstream("embedding", model, (baseUrl) =>
-      fetchJson(`${baseUrl}/embeddings`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({ input, model }),
-        signal,
-      })
+  const requestEmbeddings = (input, signal, lane = MODEL_CALL_LANES.default) =>
+    sendToUpstream(
+      "embedding",
+      model,
+      (baseUrl) =>
+        fetchJson(`${baseUrl}/embeddings`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({ input, model }),
+          signal,
+        }),
+      { lane, signal }
     );
 
   return {
+    // Document embeddings (embedTexts: ingest, index builds, reindex) wait in
+    // the ingest lane, so a large ingest never holds the slots a query
+    // embedding (embedQuery, below) waits for.
     async embedDocuments(texts, { signal } = {}) {
       const allVectors = [];
 
       for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
         const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
-        const result = await requestEmbeddings(batch, signal);
+        const result = await requestEmbeddings(batch, signal, MODEL_CALL_LANES.ingest);
         const sorted = result.data.sort((a, b) => a.index - b.index);
         for (const item of sorted) {
           allVectors.push(item.embedding);
@@ -292,21 +304,25 @@ export const createChatClient = ({ apiKey, model }) => ({
 
     // Every request, including each retry, passes the endpoint's circuit and
     // concurrency cap; see model-call-guard.js.
-    const result = await sendToUpstream("chat", model, (baseUrl) =>
-      fetchJson(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          ...(responseFormat ? { response_format: responseFormat } : {}),
-          ...toTemperatureField(temperature),
+    const result = await sendToUpstream(
+      "chat",
+      model,
+      (baseUrl) =>
+        fetchJson(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            ...(responseFormat ? { response_format: responseFormat } : {}),
+            ...toTemperatureField(temperature),
+          }),
+          signal,
         }),
-        signal,
-      })
+      { signal }
     );
 
     return {
@@ -319,27 +335,31 @@ export const createChatClient = ({ apiKey, model }) => ({
   // Same request with `stream: true`. include_usage asks for a final usage
   // chunk; servers that ignore it leave usage null and LLMOps estimates it.
   async invokeStream(prompt, { onDelta, responseFormat, signal, temperature } = {}) {
-    return sendToUpstream("chat", model, (baseUrl) =>
-      fetchChatStream(
-        `${baseUrl}/chat/completions`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
+    return sendToUpstream(
+      "chat",
+      model,
+      (baseUrl) =>
+        fetchChatStream(
+          `${baseUrl}/chat/completions`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model,
+              messages: toChatMessages(prompt),
+              stream: true,
+              stream_options: { include_usage: true },
+              ...(responseFormat ? { response_format: responseFormat } : {}),
+              ...toTemperatureField(temperature),
+            }),
+            signal,
           },
-          body: JSON.stringify({
-            model,
-            messages: toChatMessages(prompt),
-            stream: true,
-            stream_options: { include_usage: true },
-            ...(responseFormat ? { response_format: responseFormat } : {}),
-            ...toTemperatureField(temperature),
-          }),
-          signal,
-        },
-        onDelta
-      )
+          onDelta
+        ),
+      { signal }
     );
   },
 });

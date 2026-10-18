@@ -6,11 +6,18 @@ import test from "node:test";
 import express from "express";
 import { bindDatabaseTenant } from "../auth.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
-import { getPostgresRowLevelSecurityMode, getPostgresTenantRole } from "../rag/config.js";
+import {
+  getPostgresRowLevelSecurityMode,
+  getPostgresTenantContextMode,
+  getPostgresTenantRole,
+} from "../rag/config.js";
 import { renderMigrationSql } from "../rag/db-migrations.js";
 import { createJobOrchestrator } from "../rag/job-orchestrator.js";
+import { queryPostgres, TENANT_CONTEXT_MISSING_ERROR_CODE } from "../rag/postgres.js";
 import {
+  DATABASE_TENANT_CONTEXTS,
   getActiveDatabaseTenant,
+  getDatabaseTenantContext,
   runAsDatabaseSystem,
   runWithDatabaseTenant,
   toDatabaseTenant,
@@ -83,6 +90,128 @@ test("the tenant follows the async call chain and inner scopes replace outer one
   });
 
   assert.equal(getActiveDatabaseTenant(), null);
+});
+
+test("a call chain is in exactly one of four states, and only the tenant state has a tenant", async () => {
+  const observe = () => ({ context: getDatabaseTenantContext(), tenant: getActiveDatabaseTenant() });
+
+  assert.deepEqual(observe(), { context: DATABASE_TENANT_CONTEXTS.unbound, tenant: null });
+
+  await runWithDatabaseTenant(ALICE, async () => {
+    assert.deepEqual(observe(), { context: "tenant", tenant: ALICE });
+
+    // An empty scope is the explicit unscoped state, not the outer tenant
+    // and not unbound.
+    await runWithDatabaseTenant({}, async () => {
+      assert.deepEqual(observe(), { context: "unscoped", tenant: null });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(getDatabaseTenantContext(), "unscoped", "it follows the async chain like a tenant");
+    });
+    await runWithDatabaseTenant({ authenticated: true, userId: " ", workspaceId: "" }, async () => {
+      assert.equal(getDatabaseTenantContext(), "unscoped");
+    });
+    await runAsDatabaseSystem(async () => {
+      assert.deepEqual(observe(), { context: "system", tenant: null });
+
+      // Per-record work inside system work binds its record again.
+      await runWithDatabaseTenant(BOB, async () => {
+        assert.deepEqual(observe(), { context: "tenant", tenant: BOB });
+      });
+      assert.equal(getDatabaseTenantContext(), "system");
+    });
+    assert.deepEqual(observe(), { context: "tenant", tenant: ALICE });
+  });
+
+  assert.deepEqual(observe(), { context: "unbound", tenant: null });
+});
+
+test("no scope can pass for the system or unscoped marker, and a returned tenant is a copy", async () => {
+  for (const scope of [
+    { databaseContext: "system", userId: "mallory" },
+    { databaseContext: "unscoped", workspaceId: "ws-m" },
+    { userId: "system" },
+  ]) {
+    await runWithDatabaseTenant(scope, async () => {
+      assert.equal(getDatabaseTenantContext(), "tenant", JSON.stringify(scope));
+      assert.equal(Object.hasOwn(getActiveDatabaseTenant(), "databaseContext"), false);
+    });
+  }
+
+  await runWithDatabaseTenant(ALICE, async () => {
+    getActiveDatabaseTenant().userId = "mallory";
+    assert.deepEqual(getActiveDatabaseTenant(), ALICE);
+  });
+});
+
+test("bindDatabaseTenant binds a scope without a tenant as unscoped: auth off, the shared token, a platform path", async () => {
+  const contextOf = (req) =>
+    new Promise((resolve) => {
+      bindDatabaseTenant(req, {}, () => setTimeout(() => resolve(getDatabaseTenantContext()), 0));
+    });
+
+  assert.equal(await contextOf({}), "unscoped");
+  assert.equal(await contextOf({ accessScope: { authenticated: false, userId: "", workspaceId: "" } }), "unscoped");
+  assert.equal(await contextOf({ accessScope: { authenticated: true, roles: ["admin.owner"] } }), "unscoped");
+  assert.equal(await contextOf({ accessScope: { authenticated: true, ...ALICE } }), "tenant");
+});
+
+test("POSTGRES_TENANT_CONTEXT is lenient by default and refuses an unknown value", async () => {
+  await withEnv({ POSTGRES_TENANT_CONTEXT: undefined }, () => {
+    assert.equal(getPostgresTenantContextMode(), "lenient");
+  });
+
+  for (const blank of ["", "   ", "\t"]) {
+    await withEnv({ POSTGRES_TENANT_CONTEXT: blank }, () => {
+      assert.equal(getPostgresTenantContextMode(), "lenient");
+    });
+  }
+
+  await withEnv({ POSTGRES_TENANT_CONTEXT: " STRICT " }, () => {
+    assert.equal(getPostgresTenantContextMode(), "strict");
+  });
+
+  for (const unknown of ["on", "true", "enforce"]) {
+    await withEnv({ POSTGRES_TENANT_CONTEXT: unknown }, () => {
+      assert.throws(() => getPostgresTenantContextMode(), /POSTGRES_TENANT_CONTEXT must be one of lenient, strict/);
+    });
+  }
+});
+
+// Without a database the owner path fails on the missing URL; the strict
+// refusal comes first and never reaches the pool.
+test("strict mode refuses only the unbound state; system, unscoped and tenant calls reach the database layer", async () => {
+  const strictEnv = {
+    LONG_MEMORY_DATABASE_URL: undefined,
+    POSTGRES_DATABASE_URL: undefined,
+    POSTGRES_ROW_LEVEL_SECURITY: "enforce",
+    POSTGRES_TENANT_CONTEXT: "strict",
+  };
+  const originalConsoleError = console.error;
+
+  console.error = () => {};
+
+  try {
+    await withEnv(strictEnv, async () => {
+      await assert.rejects(queryPostgres("SELECT 1"), { code: TENANT_CONTEXT_MISSING_ERROR_CODE });
+
+      for (const run of [
+        (work) => runAsDatabaseSystem(work),
+        (work) => runWithDatabaseTenant({}, work),
+        (work) => runWithDatabaseTenant(ALICE, work),
+      ]) {
+        await assert.rejects(
+          run(() => queryPostgres("SELECT 1")),
+          (error) => error.code !== TENANT_CONTEXT_MISSING_ERROR_CODE && /POSTGRES_DATABASE_URL/.test(error.message)
+        );
+      }
+    });
+
+    await withEnv({ ...strictEnv, POSTGRES_TENANT_CONTEXT: "lenient" }, async () => {
+      await assert.rejects(queryPostgres("SELECT 1"), /POSTGRES_DATABASE_URL/);
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
 });
 
 test("row-level security defaults to enforce, fails closed on unknown values, and validates the role", async () => {

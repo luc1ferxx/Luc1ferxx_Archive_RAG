@@ -453,13 +453,22 @@ test("PostgreSQL document registry store applies migrations, legacy import, and 
         };
       }
 
+      // A delete's scope check reads the one row's metadata (on the
+      // caller's client, never the pool; migration 042: trashed rows left
+      // out, and this store holds none).
+      if (/SELECT doc_id, file_name, mime_type, file_size, chunk_count[\s\S]*WHERE doc_id = \$1\s+AND deleted_at IS NULL/.test(sql)) {
+        return {
+          rows: rows.has(values[0]) ? [rows.get(values[0])] : [],
+        };
+      }
+
       if (/SELECT doc_id, file_name, mime_type, file_size, chunk_count/.test(sql)) {
         return {
           rows: [...rows.values()],
         };
       }
 
-      if (/DELETE FROM rag_documents\s+WHERE doc_id = \$1\s+RETURNING/.test(sql)) {
+      if (/DELETE FROM rag_documents\s+WHERE doc_id = \$1\s+AND deleted_at IS NULL\s+RETURNING/.test(sql)) {
         const row = rows.get(values[0]);
         rows.delete(values[0]);
         return {
@@ -485,7 +494,7 @@ test("PostgreSQL document registry store applies migrations, legacy import, and 
         };
       }
 
-      if (/^DELETE FROM rag_documents\s+RETURNING doc_id/.test(sql.trim())) {
+      if (/^DELETE FROM rag_documents\s+WHERE deleted_at IS NULL\s+RETURNING doc_id/.test(sql.trim())) {
         const deleted = [...rows.values()];
         rows.clear();
         return {

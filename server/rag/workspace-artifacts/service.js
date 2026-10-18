@@ -42,6 +42,16 @@ export const createWorkspaceArtifactService = ({
     });
   },
 
+  // Retention (rag/retention.js): one batch of expired archived artifacts, or
+  // null when the store has no retention delete.
+  async deleteExpiredArtifacts({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+    if (typeof store.deleteExpired !== "function") {
+      return null;
+    }
+
+    return store.deleteExpired({ cutoff, limit, workspaceCutoffs });
+  },
+
   async getArtifact({ accessScope = {}, artifactId } = {}) {
     return store.getArtifact({
       accessScope: normalizeWorkspaceArtifactAccessScope(accessScope),

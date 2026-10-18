@@ -65,10 +65,14 @@ test("the default role catalog composes the existing admin permissions", () => {
   assert.ok(workspaceAdmin.includes(ADMIN_PERMISSION_IDS.adminStatusRead));
   assert.equal(workspaceAdmin.includes(ADMIN_PERMISSION_IDS.adminAuditRead), false);
 
+  // admin.usage.read (GET /admin/usage, migration 037) joined the viewer role.
   assert.deepEqual(DEFAULT_RBAC_ROLE_POLICY[ADMIN_ROLE_IDS.viewer], [
     ADMIN_PERMISSION_IDS.adminStatusRead,
     ADMIN_PERMISSION_IDS.adminActionRecoveryScan,
+    ADMIN_PERMISSION_IDS.adminUsageRead,
   ]);
+  // A workspace role never carries it: usage reads across users.
+  assert.equal(workspaceAdmin.includes(ADMIN_PERMISSION_IDS.adminUsageRead), false);
   assert.ok(DEFAULT_RBAC_ROLE_POLICY[ADMIN_ROLE_IDS.owner].includes(P.documentsDelete));
 });
 
@@ -459,5 +463,111 @@ test("the admin check accepts an RBAC global grant only in enforce mode", () => 
     else process.env.RBAC_MODE = originalMode;
     if (originalDefault === undefined) delete process.env.RBAC_DEFAULT_ROLE;
     else process.env.RBAC_DEFAULT_ROLE = originalDefault;
+  }
+});
+
+// API_AUTH_OIDC_ALLOW_PLATFORM_ROLES=false: rag/oidc.js drops admin.* roles and
+// admin permissions from the token by id, so the remaining way for an
+// identity provider to grant platform access is a role whose policy resolves
+// to an admin permission (the global workspace.admin role carries
+// admin.status.read; an RBAC_POLICY_JSON role may carry any). RBAC grants an
+// OIDC principal none of them while the flag is off.
+test("with OIDC platform roles off, an OIDC principal's global roles resolve to no admin permission", () => {
+  const env = {
+    ...ENFORCE,
+    API_AUTH_OIDC_ALLOW_PLATFORM_ROLES: "false",
+    RBAC_POLICY_JSON: JSON.stringify({ ops: [ADMIN_PERMISSION_IDS.adminAuditRead, P.documentsRead] }),
+  };
+  const oidcScope = {
+    authenticated: true,
+    authProvider: "oidc",
+    roleIds: [RBAC_ROLE_IDS.workspaceAdmin, "ops"],
+    userId: "alice",
+    workspaceId: "",
+  };
+  const permissions = resolveEffectivePermissions(oidcScope, { env });
+
+  assert.equal(permissions.includes(ADMIN_PERMISSION_IDS.adminStatusRead), false);
+  assert.equal(permissions.includes(ADMIN_PERMISSION_IDS.adminAuditRead), false);
+  // The roles' workspace permissions stay.
+  for (const permission of [P.documentsDelete, P.documentsRead, P.chatAsk, P.tasksRun]) {
+    assert.ok(permissions.includes(permission), permission);
+  }
+
+  // A permission the scope names itself is held to the same rule.
+  assert.equal(
+    resolveEffectivePermissions({ ...oidcScope, permissionIds: [ADMIN_PERMISSION_IDS.adminStatusRead] }, { env })
+      .includes(ADMIN_PERMISSION_IDS.adminStatusRead),
+    false
+  );
+
+  // Unchanged: the flag on (the default) or unset, and every other provider.
+  for (const allowed of [
+    { ...env, API_AUTH_OIDC_ALLOW_PLATFORM_ROLES: "true" },
+    { ...env, API_AUTH_OIDC_ALLOW_PLATFORM_ROLES: "" },
+    { ...env, API_AUTH_OIDC_ALLOW_PLATFORM_ROLES: "maybe" },
+    { ...ENFORCE, RBAC_POLICY_JSON: env.RBAC_POLICY_JSON },
+  ]) {
+    assert.ok(
+      resolveEffectivePermissions(oidcScope, { env: allowed }).includes(ADMIN_PERMISSION_IDS.adminStatusRead),
+      JSON.stringify(allowed.API_AUTH_OIDC_ALLOW_PLATFORM_ROLES)
+    );
+  }
+
+  for (const authProvider of ["static_token", "jwt", undefined]) {
+    assert.ok(
+      resolveEffectivePermissions({ ...oidcScope, authProvider }, { env }).includes(ADMIN_PERMISSION_IDS.adminAuditRead),
+      String(authProvider)
+    );
+  }
+
+  for (const value of ["0", "false", "no", "off", " OFF "]) {
+    assert.equal(
+      resolveEffectivePermissions(oidcScope, { env: { ...env, API_AUTH_OIDC_ALLOW_PLATFORM_ROLES: value } })
+        .includes(ADMIN_PERMISSION_IDS.adminStatusRead),
+      false,
+      value
+    );
+  }
+
+  // The operator's default role is not the identity provider's grant.
+  assert.ok(
+    resolveEffectivePermissions(
+      { authenticated: true, authProvider: "oidc", userId: "bob", workspaceId: "" },
+      { env: { ...env, RBAC_DEFAULT_ROLE: RBAC_ROLE_IDS.workspaceAdmin } }
+    ).includes(ADMIN_PERMISSION_IDS.adminStatusRead)
+  );
+});
+
+test("the admin check follows it: GET /admin/status is refused to an OIDC workspace.admin with platform roles off", () => {
+  const keys = ["RBAC_MODE", "RBAC_DEFAULT_ROLE", "API_AUTH_OIDC_ALLOW_PLATFORM_ROLES", "RBAC_POLICY_JSON", "RBAC_POLICY_FILE"];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const decide = (accessScope) =>
+    buildAdminAuthorizationDecision({
+      accessScope,
+      apiAuthEnabled: true,
+      permissionId: ADMIN_PERMISSION_IDS.adminStatusRead,
+    });
+  const scope = { authenticated: true, roleIds: [RBAC_ROLE_IDS.workspaceAdmin], userId: "alice", workspaceId: "" };
+
+  try {
+    for (const key of keys) delete process.env[key];
+    process.env.RBAC_MODE = "enforce";
+    process.env.RBAC_DEFAULT_ROLE = "none";
+    process.env.API_AUTH_OIDC_ALLOW_PLATFORM_ROLES = "false";
+
+    assert.deepEqual(
+      [decide({ ...scope, authProvider: "oidc" }).allowed, decide({ ...scope, authProvider: "oidc" }).reason],
+      [false, "denied_missing_permission"]
+    );
+    assert.equal(decide({ ...scope, authProvider: "static_token" }).reason, ADMIN_AUTHORIZATION_REASONS.allowedByRbac);
+
+    process.env.API_AUTH_OIDC_ALLOW_PLATFORM_ROLES = "true";
+    assert.equal(decide({ ...scope, authProvider: "oidc" }).reason, ADMIN_AUTHORIZATION_REASONS.allowedByRbac);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });

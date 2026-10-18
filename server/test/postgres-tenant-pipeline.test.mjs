@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { AsyncResource } from "node:async_hooks";
 import net from "node:net";
 import test, { after, afterEach, before } from "node:test";
+import express from "express";
+
+import { bindDatabaseTenant } from "../auth.js";
 
 // Protocol-level checks of the tenant transaction in rag/postgres.js, against
 // a fake PostgreSQL server on an OS-assigned 127.0.0.1 port: the real pg
@@ -20,7 +24,27 @@ const HOSTILE = {
 };
 const ALICE = { userId: "alice", workspaceId: "ws-a" };
 
-const TENANT_SETTINGS_TEXT = /set_config\('role', \$1, true\),\s*set_config\('archive_rag\.user_id', \$2, true\),\s*set_config\('archive_rag\.workspace_id', \$3, true\)/;
+// The whole settings statement: the tenant role and ids, then the tenant
+// work's statement_timeout and idle_in_transaction_session_timeout, which ride
+// in the same step as bind parameters $4 and $5 (NULL when off, keeping the
+// server's own value) so they cost no round trip of their own.
+const TENANT_SETTINGS_TEXT = new RegExp(
+  [
+    String.raw`set_config\('role', \$1, true\),`,
+    String.raw`set_config\('archive_rag\.user_id', \$2, true\),`,
+    String.raw`set_config\('archive_rag\.workspace_id', \$3, true\),`,
+    String.raw`set_config\('statement_timeout', COALESCE\(\$4::text, current_setting\('statement_timeout'\)\), true\),`,
+    String.raw`set_config\(\s*'idle_in_transaction_session_timeout',\s*COALESCE\(\$5::text, current_setting\('idle_in_transaction_session_timeout'\)\),\s*true\s*\)`,
+  ].join(String.raw`\s*`)
+);
+// The settings' bind values with both limits off (the default).
+const settingsValues = (scope, { idleInTransaction = null, statement = null } = {}) => [
+  "archive_rag_tenant",
+  scope.userId,
+  scope.workspaceId,
+  statement,
+  idleInTransaction,
+];
 
 // ---- fake server -----------------------------------------------------------
 
@@ -68,12 +92,12 @@ const dataRow = (row) =>
       }),
     ])
   );
-const errorResponse = ({ code, message: text }) =>
+const errorResponse = ({ code, message: text, severity = "ERROR" }) =>
   message(
     "E",
     Buffer.concat([
-      Buffer.from("S"), cstring("ERROR"),
-      Buffer.from("V"), cstring("ERROR"),
+      Buffer.from("S"), cstring(severity),
+      Buffer.from("V"), cstring(severity),
       Buffer.from("C"), cstring(code),
       Buffer.from("M"), cstring(text),
       Buffer.from([0]),
@@ -124,7 +148,7 @@ class Reader {
  * the statement's Sync that much later than its other replies.
  */
 const startFakePostgres = async (respond) => {
-  const state = { closed: new Set(), connections: 0, messages: [] };
+  const state = { closed: new Set(), connections: 0, messages: [], sockets: new Map() };
 
   const answer = (text, values) => {
     const keyword = text.trim().split(/\s+/)[0]?.toUpperCase();
@@ -139,12 +163,14 @@ const startFakePostgres = async (respond) => {
 
     // set_config returns the value it set, one row, as PostgreSQL does.
     return TENANT_SETTINGS_TEXT.test(text)
-      ? { command: "SELECT 1", fields: ["set_config", "set_config", "set_config"], rows: [values] }
+      ? { command: "SELECT 1", fields: values.map(() => "set_config"), rows: [values] }
       : { command: "SELECT 0", fields: [], rows: [] };
   };
 
   const server = net.createServer((socket) => {
     const connectionId = ++state.connections;
+
+    state.sockets.set(connectionId, socket);
     let pending = Buffer.alloc(0);
     let started = false;
     let status = "I";
@@ -319,6 +345,19 @@ const startFakePostgres = async (respond) => {
 
   return {
     close: () => new Promise((resolve) => server.close(resolve)),
+    // Ends a session the way PostgreSQL does on idle_in_transaction_session_
+    // timeout: a FATAL ErrorResponse, then the socket closes.
+    terminate: (connectionId) => {
+      const socket = state.sockets.get(connectionId);
+
+      socket.end(
+        errorResponse({
+          code: "25P03",
+          message: "terminating connection due to idle-in-transaction timeout",
+          severity: "FATAL",
+        })
+      );
+    },
     port: server.address().port,
     state,
   };
@@ -340,6 +379,38 @@ const shape = (messages) =>
         : entry.type
   );
 
+const POOL_AND_LIMIT_VARIABLES = [
+  "POSTGRES_CONNECTION_TIMEOUT_MS",
+  "POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS",
+  "POSTGRES_POOL_MAX",
+  "POSTGRES_STATEMENT_TIMEOUT_MS",
+  "POSTGRES_TENANT_CONTEXT",
+];
+
+// Sets `overrides` (undefined deletes) for the callback, with a fresh pool on
+// both sides so the pool reads the settings it is created with.
+const withEnv = async (overrides, callback) => {
+  const previous = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+  const apply = (entries) =>
+    Object.entries(entries).forEach(([key, value]) => {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    });
+
+  apply(overrides);
+  await modules.postgres.resetPostgresPool();
+
+  try {
+    return await callback();
+  } finally {
+    apply(previous);
+    await modules.postgres.resetPostgresPool();
+  }
+};
+
 let fake;
 let modules;
 let responder = () => undefined;
@@ -352,6 +423,11 @@ before(async () => {
   delete process.env.LONG_MEMORY_POSTGRES_SSL_ENABLED;
   process.env.POSTGRES_ROW_LEVEL_SECURITY = "enforce";
   process.env.POSTGRES_TENANT_ROLE = "archive_rag_tenant";
+  // The pinned messages are the defaults': no limits, lenient context, the
+  // default pool. Tests that change one set it themselves (withEnv).
+  for (const name of POOL_AND_LIMIT_VARIABLES) {
+    delete process.env[name];
+  }
 
   const [postgres, tenant] = await Promise.all([
     import("../rag/postgres.js"),
@@ -405,7 +481,7 @@ test("a tenant statement is one round trip: the settings and the statement share
     shape(messages).map((line) => line.replace(TENANT_SETTINGS_TEXT, "<tenant settings>")),
     [
       "Parse SELECT <tenant settings>",
-      'Bind ["archive_rag_tenant","alice","ws-a"]',
+      `Bind ${JSON.stringify(settingsValues(ALICE))}`,
       "Execute SELECT <tenant settings>",
       "Parse SELECT task_id FROM rag_tasks WHERE task_id = $1",
       'Bind ["task-1"]',
@@ -432,7 +508,7 @@ test("hostile ids travel only as exact bind values and never reach any SQL text"
 
   assert.equal(settingsBinds.length, 2, "one settings bind per tenant transaction");
   settingsBinds.forEach((entry) => {
-    assert.deepEqual(entry.values, ["archive_rag_tenant", HOSTILE.userId, HOSTILE.workspaceId]);
+    assert.deepEqual(entry.values, settingsValues(HOSTILE));
   });
 
   const texts = fake.state.messages.filter((entry) => entry.text).map((entry) => entry.text);
@@ -465,7 +541,7 @@ test("a tenant transaction sends BEGIN and the settings in one round trip, then 
       "Bind []",
       "Execute BEGIN",
       "Parse SELECT <tenant settings>",
-      'Bind ["archive_rag_tenant","alice","ws-a"]',
+      `Bind ${JSON.stringify(settingsValues(ALICE))}`,
       "Describe",
       "Execute SELECT <tenant settings>",
       "Sync",
@@ -693,7 +769,7 @@ test("a prelude runs before the statement in the same round trip, on the tenant 
     shape(fake.state.messages).map((line) => line.replace(TENANT_SETTINGS_TEXT, "<tenant settings>")),
     [
       "Parse SELECT <tenant settings>",
-      'Bind ["archive_rag_tenant","alice","ws-a"]',
+      `Bind ${JSON.stringify(settingsValues(ALICE))}`,
       "Execute SELECT <tenant settings>",
       "Parse SELECT 1 FROM rag_tasks WHERE task_id = $1 FOR NO KEY UPDATE",
       'Bind ["task-1"]',
@@ -798,4 +874,297 @@ test("a failed tenant statement keeps an idle connection but destroys one left i
 
     poll();
   });
+});
+
+// ---- limits, pool, strict context -----------------------------------------
+
+test("statement and idle-in-transaction limits ride in the tenant settings step: bind values, no extra round trip, never on the owner path", async () => {
+  responder = statementAnswer;
+
+  await withEnv(
+    { POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS: "60000", POSTGRES_STATEMENT_TIMEOUT_MS: "1500" },
+    async () => {
+      const limited = settingsValues(ALICE, { idleInTransaction: "60000", statement: "1500" });
+
+      await asTenant(ALICE, () => modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks"));
+      assert.equal(roundTrips(fake.state.messages), 1, "still one round trip for a tenant statement");
+      assert.deepEqual(
+        shape(fake.state.messages).map((line) => line.replace(TENANT_SETTINGS_TEXT, "<tenant settings>")),
+        [
+          "Parse SELECT <tenant settings>",
+          `Bind ${JSON.stringify(limited)}`,
+          "Execute SELECT <tenant settings>",
+          "Parse SELECT task_id FROM rag_tasks",
+          "Bind []",
+          "Describe",
+          "Execute SELECT task_id FROM rag_tasks",
+          "Sync",
+        ]
+      );
+
+      fake.state.messages.length = 0;
+      await asTenant(ALICE, () =>
+        modules.postgres.withPostgresTransaction((client) => client.query("SELECT task_id FROM rag_tasks"))
+      );
+      assert.equal(roundTrips(fake.state.messages), 3, "BEGIN+settings, the statement, COMMIT");
+      assert.deepEqual(
+        fake.state.messages.find(
+          (entry, index, all) => entry.type === "Bind" && TENANT_SETTINGS_TEXT.test(all[index - 1]?.text ?? "")
+        )?.values,
+        limited
+      );
+
+      // The limits only ever travel as bind values.
+      for (const entry of fake.state.messages.filter((item) => item.text)) {
+        assert.ok(!/1500|60000/.test(entry.text), `no limit in SQL text: ${entry.text}`);
+      }
+
+      fake.state.messages.length = 0;
+      await modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks");
+      await modules.postgres.withPostgresTransaction((client) => client.query("SELECT task_id FROM rag_tasks"));
+      assert.ok(
+        fake.state.messages.every((entry) => !/statement_timeout|set_config/.test(entry.text ?? "")),
+        "owner work (migrations, index builds, recovery scans) gets no tenant limits"
+      );
+    }
+  );
+});
+
+test("a limit out of PostgreSQL's range is clamped, and an invalid one leaves the server's value", async () => {
+  responder = statementAnswer;
+
+  for (const [raw, expected] of [
+    ["99999999999", "2147483647"],
+    ["2500.9", "2500"],
+    ["0", null],
+    ["-5", null],
+    ["soon", null],
+    ["", null],
+  ]) {
+    await withEnv({ POSTGRES_STATEMENT_TIMEOUT_MS: raw }, async () => {
+      fake.state.messages.length = 0;
+      await asTenant(ALICE, () => modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks"));
+      assert.deepEqual(
+        fake.state.messages.find((entry) => entry.type === "Bind").values,
+        settingsValues(ALICE, { statement: expected }),
+        `POSTGRES_STATEMENT_TIMEOUT_MS=${JSON.stringify(raw)}`
+      );
+    });
+  }
+});
+
+// What POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS makes the server do to a
+// tenant transaction whose caller holds it too long between statements. The
+// checked-out client has no pg-pool error listener: without the lease's own,
+// its 'error' event would be unhandled and end the process (here: fail the
+// test as an uncaught exception).
+test("a session the server ends while a tenant transaction holds it idle fails that transaction and is discarded, with no unhandled error", async () => {
+  responder = statementAnswer;
+
+  let heldOn = null;
+
+  await assert.rejects(
+    asTenant(ALICE, () =>
+      modules.postgres.withPostgresTransaction(async (client) => {
+        await client.query("SELECT task_id FROM rag_tasks");
+        heldOn = fake.state.messages.at(-1).connectionId;
+        fake.terminate(heldOn);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        return client.query("SELECT task_id FROM rag_tasks");
+      })
+    )
+  );
+  await new Promise((resolve) => {
+    const poll = () => (fake.state.closed.has(heldOn) ? resolve() : setImmediate(poll));
+
+    poll();
+  });
+
+  const next = await asTenant(ALICE, () => modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks"));
+
+  assert.deepEqual(next.rows, [{ task_id: "task-1" }]);
+  assert.notEqual(fake.state.messages.at(-1).connectionId, heldOn, "the ended session was not pooled again");
+});
+
+test("POSTGRES_POOL_MAX and POSTGRES_CONNECTION_TIMEOUT_MS bound the pool; unset they are node-pg's defaults", async () => {
+  assert.equal(modules.postgres.getPostgresPool().options.max, 10);
+  assert.equal(modules.postgres.getPostgresPool().options.connectionTimeoutMillis, 0);
+
+  await withEnv({ POSTGRES_CONNECTION_TIMEOUT_MS: "150", POSTGRES_POOL_MAX: "1" }, async () => {
+    assert.equal(modules.postgres.getPostgresPool().options.max, 1);
+    assert.equal(modules.postgres.getPostgresPool().options.connectionTimeoutMillis, 150);
+
+    // One slow statement holds the only connection until its ReadyForQuery;
+    // the next caller waits for the slot no longer than the timeout.
+    responder = (text) =>
+      /pg_sleep/.test(text) ? { command: "SELECT 0", fields: [], readyDelayMs: 600, rows: [] } : statementAnswer(text);
+
+    // With a bind value, so it goes out as Parse/Bind/Execute/Sync and the
+    // fake holds back the ReadyForQuery of its Sync.
+    const slow = modules.postgres.queryPostgres("SELECT pg_sleep($1)", [0.6]);
+    const startedAt = Date.now();
+
+    await assert.rejects(modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks"), /timeout/i);
+    assert.ok(Date.now() - startedAt < 550, "gave up on the slot before the slow statement finished");
+    await slow;
+    assert.equal(fake.state.connections - fake.state.closed.size, 1, "never more than POSTGRES_POOL_MAX connections");
+  });
+
+  await withEnv({ POSTGRES_CONNECTION_TIMEOUT_MS: "nope", POSTGRES_POOL_MAX: "0" }, () => {
+    assert.equal(modules.postgres.getPostgresPool().options.max, 10, "an invalid size keeps the default");
+    assert.equal(modules.postgres.getPostgresPool().options.connectionTimeoutMillis, 0);
+  });
+});
+
+// The statements a message slice sent, in order: Parse texts (extended
+// protocol) and Query texts (simple protocol: an owner statement without bind
+// values), with the tenant settings abbreviated.
+const statements = (messages) =>
+  shape(messages)
+    .filter((line) => /^(Parse|Query) /.test(line))
+    .map((line) => line.replace(TENANT_SETTINGS_TEXT, "<tenant settings>"));
+
+// A library that resumes a callback from a resource it created before any
+// request (a stream, a pool, a parser) runs that callback in the resource's
+// context: this one, created at module load, is bound to nothing.
+const lostContext = new AsyncResource("ArchiveRagTestLostContext");
+
+const captureConsoleErrors = async (callback) => {
+  const original = console.error;
+  const lines = [];
+
+  console.error = (...args) => lines.push(args.map(String).join(" "));
+
+  try {
+    return { lines, result: await callback() };
+  } finally {
+    console.error = original;
+  }
+};
+
+test("strict mode refuses an unbound statement, transaction or session before anything is sent", async () => {
+  responder = statementAnswer;
+
+  await withEnv({ POSTGRES_TENANT_CONTEXT: "strict" }, async () => {
+    const refused = (error) => {
+      assert.equal(error.code, modules.postgres.TENANT_CONTEXT_MISSING_ERROR_CODE);
+      assert.equal(error.code, "ARCHIVE_RAG_TENANT_CONTEXT_MISSING");
+      return true;
+    };
+    const { lines } = await captureConsoleErrors(async () => {
+      await assert.rejects(modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks"), refused);
+      await assert.rejects(
+        modules.postgres.withPostgresTransaction((client) => client.query("SELECT 1")),
+        refused
+      );
+      await assert.rejects(modules.postgres.withPostgresClient((client) => client.query("SELECT 1")), refused);
+      assert.throws(() => modules.postgres.createDedicatedPostgresClient(), refused);
+      // Inside a tenant request, a callback resumed in a lost context.
+      await asTenant(ALICE, () =>
+        assert.rejects(
+          lostContext.runInAsyncScope(() => modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks")),
+          refused
+        )
+      );
+    });
+
+    assert.deepEqual(fake.state.messages, [], "nothing reached the server");
+    assert.equal(fake.state.connections - fake.state.closed.size, 0, "not even a connection");
+    assert.equal(lines.filter((line) => line.includes("ARCHIVE_RAG_TENANT_CONTEXT_MISSING")).length, 5);
+    assert.ok(lines.every((line) => !/rag_tasks/.test(line)), "the refusal never logs SQL text");
+
+    // System, unscoped and tenant work all go out: the first two as the owner.
+    await modules.tenant.runAsDatabaseSystem(() => modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks"));
+    await modules.tenant.runWithDatabaseTenant({}, () =>
+      modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks")
+    );
+    await asTenant(ALICE, () => modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks"));
+    assert.deepEqual(statements(fake.state.messages), [
+      "Query SELECT task_id FROM rag_tasks",
+      "Query SELECT task_id FROM rag_tasks",
+      "Parse SELECT <tenant settings>",
+      "Parse SELECT task_id FROM rag_tasks",
+    ]);
+  });
+});
+
+test("lenient mode (the default) and row-level security off keep the owner path for unbound work", async () => {
+  responder = statementAnswer;
+
+  await lostContext.runInAsyncScope(() => modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks"));
+  assert.deepEqual(statements(fake.state.messages), ["Query SELECT task_id FROM rag_tasks"]);
+
+  fake.state.messages.length = 0;
+  await withEnv({ POSTGRES_ROW_LEVEL_SECURITY: "off", POSTGRES_TENANT_CONTEXT: "strict" }, () =>
+    modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks")
+  );
+  assert.deepEqual(statements(fake.state.messages), ["Query SELECT task_id FROM rag_tasks"]);
+
+  await withEnv({ POSTGRES_TENANT_CONTEXT: "paranoid" }, async () => {
+    await assert.rejects(
+      modules.postgres.queryPostgres("SELECT 1"),
+      /POSTGRES_TENANT_CONTEXT must be one of lenient, strict/
+    );
+  });
+});
+
+test("strict mode: a request that loses its context in a middleware fails closed; lenient runs it as the owner", async () => {
+  responder = statementAnswer;
+
+  const app = express();
+
+  app.use((req, res, next) => {
+    req.accessScope = req.get("x-test-tenant") === "alice" ? ALICE : { authenticated: false };
+    next();
+  });
+  app.use(bindDatabaseTenant);
+  app.get("/context", (req, res) => res.json({ context: modules.tenant.getDatabaseTenantContext() }));
+  // A middleware that resumes the chain in a context of its own, as multer's
+  // memory storage does.
+  app.use((req, res, next) => lostContext.runInAsyncScope(next));
+  app.get("/tasks", async (req, res) => {
+    try {
+      const result = await modules.postgres.queryPostgres("SELECT task_id FROM rag_tasks");
+
+      res.json({ context: modules.tenant.getDatabaseTenantContext(), rows: result.rows });
+    } catch (error) {
+      res.status(500).json({ code: error.code ?? null });
+    }
+  });
+
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
+  });
+  const url = (pathname) => `http://127.0.0.1:${server.address().port}${pathname}`;
+
+  try {
+    // An auth-off request is bound as the explicit unscoped state.
+    assert.deepEqual(await (await fetch(url("/context"))).json(), { context: "unscoped" });
+    assert.deepEqual(
+      await (await fetch(url("/context"), { headers: { "x-test-tenant": "alice" } })).json(),
+      { context: "tenant" }
+    );
+
+    await withEnv({ POSTGRES_TENANT_CONTEXT: "strict" }, async () => {
+      const { result } = await captureConsoleErrors(() =>
+        fetch(url("/tasks"), { headers: { "x-test-tenant": "alice" } })
+      );
+
+      assert.equal(result.status, 500);
+      assert.deepEqual(await result.json(), { code: "ARCHIVE_RAG_TENANT_CONTEXT_MISSING" });
+      assert.deepEqual(fake.state.messages, [], "alice's request never reached the owner path");
+    });
+
+    const lenient = await fetch(url("/tasks"), { headers: { "x-test-tenant": "alice" } });
+
+    assert.deepEqual(await lenient.json(), { context: "unbound", rows: [{ task_id: "task-1" }] });
+    assert.deepEqual(
+      statements(fake.state.messages),
+      ["Query SELECT task_id FROM rag_tasks"],
+      "lenient: the lost context runs as the owner, without tenant settings (the hole strict closes)"
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

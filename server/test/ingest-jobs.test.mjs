@@ -1752,7 +1752,11 @@ test("the PostgreSQL registry lists a scope with the tenant rule in SQL", async 
   assert.match(calls[0].sql, /WHERE \(owner_user_id <> '' OR workspace_id <> ''\)/);
   assert.match(calls[0].sql, /\(owner_user_id = '' OR owner_user_id = \$1\)/);
   assert.deepEqual(calls[0].values, ["alice", "ws-a"]);
-  assert.doesNotMatch(calls[1].sql, /WHERE/);
+  // The unscoped listing has no tenant condition; both leave the document
+  // trash out (migration 042).
+  assert.doesNotMatch(calls[1].sql, /owner_user_id = |workspace_id = /);
+  assert.match(calls[0].sql, /AND deleted_at IS NULL/);
+  assert.match(calls[1].sql, /WHERE deleted_at IS NULL/);
 });
 
 test("the cross-process document helpers read the store whenever the registry is shared, in either ingest mode", async () => {

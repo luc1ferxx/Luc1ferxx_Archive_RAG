@@ -257,7 +257,10 @@ if (invokedDirectly) {
   // that imports the module never picks one up.
   await import("dotenv/config");
 
-  runIngestJobsCommand(process.argv.slice(2))
+  // An operator command acts as the owner (dead letters are listed and
+  // requeued across tenants unless --owner narrows them); bound explicitly so
+  // POSTGRES_TENANT_CONTEXT=strict accepts the store's set-up and counts too.
+  runAsDatabaseSystem(() => runIngestJobsCommand(process.argv.slice(2)))
     .catch((error) => {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 1;

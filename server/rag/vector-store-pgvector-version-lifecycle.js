@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -24,6 +24,7 @@ import {
   assertPgvectorAnnDimensionsSupported,
   renderIndexVersionChunkTableDdl,
   renderIndexVersionDropDdl,
+  renderSystemAccessInstallStatement,
 } from "./db-migrations.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { getDefaultEmbeddingBatcher } from "./ingest-embedding-batcher.js";
@@ -46,6 +47,9 @@ import {
   renderPgvectorBm25InstallStatement,
 } from "./vector-store-pgvector-sparse.js";
 import { stampChunkDocumentVersion } from "./vector-store.js";
+import { isTenantEncryptionError } from "./kms/errors.js";
+import { decryptTenantBytes, documentFileContext } from "./tenant-encryption.js";
+import { writeWorkingFile } from "./working-files.js";
 import {
   EMBEDDING_SPACE_SOURCES,
   INDEX_VERSION_ERROR_CODES,
@@ -100,6 +104,18 @@ import {
 // `resume` continues with the documents that have no progress row. While the
 // build runs, every ingest, delete and clear writes the building version too,
 // so the snapshot the builder works from never misses a change.
+//
+// A document whose stored PDF cannot be decrypted or read as a file
+// (TENANT_ENCRYPTION's coded errors, rag/kms/errors.js: a key destroyed by a
+// standalone `tenant:keys destroy`, a changed byte, bytes that only look like
+// an envelope) is recorded as failed with an `unreadable_source <code>:`
+// error and the build goes on. It keeps its chunks in the active version but
+// gets none in the new one, so the gate's chunk-count comparison holds it
+// back; `allowUnreadableSources` (--allow-unreadable-sources) lets the gate
+// pass over exactly those documents, which then are not searchable in the new
+// version. That is an operator's call, never a default: the same codes also
+// come from a builder that cannot see the keystore or the master key, and a
+// silent pass would then activate a version without any encrypted document.
 
 const DDL_LOCK_TIMEOUT = "10s";
 const PROBE_TEXT_LIMIT = 1000;
@@ -115,12 +131,19 @@ const CREATION_PROBE_TEXT = "Index version creation probe.";
 
 const noop = () => {};
 
+// The progress error of a document whose stored bytes cannot be read (see the
+// header); the gate finds them by it.
+const UNREADABLE_SOURCE_ERROR_PREFIX = "unreadable_source ";
+
 class DocumentSourceError extends Error {
-  constructor(message) {
-    super(message);
+  constructor(message, { unreadableCode = null } = {}) {
+    super(unreadableCode ? `${UNREADABLE_SOURCE_ERROR_PREFIX}${unreadableCode}: ${message}` : message);
     this.name = "DocumentSourceError";
+    this.unreadableCode = unreadableCode;
   }
 }
+
+const toUnreadableCode = (error) => (isTenantEncryptionError(error) ? error.code : null);
 
 const getDocumentsTableName = () => {
   const tableName = getDocumentsPostgresTable();
@@ -272,7 +295,11 @@ export const probeEmbeddingSpace = async (space) => {
  * Registers a new `building` version and creates its table, indexes, policy,
  * grant and sparse-rank function in one owner transaction under the exclusive
  * lifecycle lock, so the version becomes a write target in the same commit
- * that makes its table exist. At most one version builds at a time.
+ * that makes its table exist. At most one version builds at a time. With the
+ * role split on the whole transaction runs on the owner pool
+ * (POSTGRES_MIGRATION_DATABASE_URL), registry row included; the system role
+ * gets the new table (migration 035's installer) in the same statement as the
+ * DDL, so the build's own writes, which run as the system role, can reach it.
  */
 export const createIndexVersion = async ({
   builderId = null,
@@ -293,7 +320,7 @@ export const createIndexVersion = async ({
 
   const { pointerTable, versionsTable } = getIndexVersionTableNames();
   const version = await runAsDatabaseSystem(() =>
-    getPgvectorRuntime().withTransaction(async (client) => {
+    getPgvectorRuntime().withOwnerTransaction(async (client) => {
       const query = getPgvectorQuery(client);
 
       await query(
@@ -357,6 +384,9 @@ export const createIndexVersion = async ({
           // Migration 030's BM25 statistics, triggers and rank function, in the
           // version's own text search configuration.
           renderPgvectorBm25InstallStatement({ chunkTable, textSearchConfig: params.textSearchConfig }),
+          // Migration 035: the system role's grant and policies on the table
+          // and its statistics, and EXECUTE on both search functions.
+          renderSystemAccessInstallStatement({ chunkTable }),
         ].join("\n")
       );
 
@@ -514,6 +544,9 @@ const recordProgressUnderLease = (lease, progress) =>
     await recordProgress(query, progress);
   });
 
+// A document in the trash (migration 042) has no chunks in any live version
+// and gets none: the builder skips it like a deleted one, and a restore
+// writes it into the building version itself (it is a write target).
 const listPendingDocuments = async ({ cursor, limit, versionId }) => {
   const { buildProgressTable } = getIndexVersionTableNames();
   const result = await runAsDatabaseSystem(() =>
@@ -522,6 +555,7 @@ const listPendingDocuments = async ({ cursor, limit, versionId }) => {
         SELECT d.doc_id
         FROM ${getDocumentsTableName()} d
         WHERE d.doc_id > $2
+          AND d.deleted_at IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM ${buildProgressTable} p
             WHERE p.version_id = $1 AND p.doc_id = d.doc_id AND p.outcome <> 'failed'
@@ -540,9 +574,11 @@ const readDocumentSource = async (docId) =>
     await runAsDatabaseSystem(() =>
       getPgvectorRuntime().query(
         `/* index_versions:document_source */
-          SELECT doc_id, file_name, file_bytes, profile, uploaded_at::text AS uploaded_at, content_version
+          SELECT doc_id, file_name, file_bytes, profile, uploaded_at::text AS uploaded_at, content_version,
+                 owner_user_id, workspace_id
           FROM ${getDocumentsTableName()}
-          WHERE doc_id = $1`,
+          WHERE doc_id = $1
+            AND deleted_at IS NULL`,
         [docId]
       )
     )
@@ -559,7 +595,7 @@ export const loadStoredDocumentPages = async ({ fileBuffer }) => {
   const filePath = path.join(directory, "document.pdf");
 
   try {
-    await writeFile(filePath, fileBuffer);
+    await writeWorkingFile(filePath, fileBuffer);
     return await loadPdfPages(filePath);
   } finally {
     await rm(directory, { force: true, recursive: true });
@@ -568,10 +604,31 @@ export const loadStoredDocumentPages = async ({ fileBuffer }) => {
 
 const buildDocumentChunks = async ({ loadPages, source }) => {
   const docId = String(source.doc_id);
-  const fileBuffer = Buffer.from(source.file_bytes ?? []);
+  const storedBytes = Buffer.from(source.file_bytes ?? []);
 
-  if (fileBuffer.byteLength === 0) {
+  if (storedBytes.byteLength === 0) {
     throw new DocumentSourceError(`No PDF bytes are stored for ${docId}.`);
+  }
+
+  // TENANT_ENCRYPTION: an envelope is decrypted with the row's own owner
+  // columns; a key that was destroyed (or a changed byte) fails the build of
+  // this document, never the parser on ciphertext. Plaintext passes through.
+  let fileBuffer;
+
+  try {
+    fileBuffer = await decryptTenantBytes(
+      storedBytes,
+      documentFileContext({
+        docId,
+        userId: source.owner_user_id ?? "",
+        workspaceId: source.workspace_id ?? "",
+      })
+    );
+  } catch (error) {
+    throw new DocumentSourceError(
+      `Decrypting the stored PDF of ${docId} failed: ${error instanceof Error ? error.message : String(error)}`,
+      { unreadableCode: toUnreadableCode(error) }
+    );
   }
 
   let pages;
@@ -579,8 +636,11 @@ const buildDocumentChunks = async ({ loadPages, source }) => {
   try {
     pages = await loadPages({ docId, fileBuffer, fileName: String(source.file_name ?? "") });
   } catch (error) {
+    // A coded error here is the working copy's (rag/working-files.js), not
+    // the PDF parser's: stored bytes that begin like a working file.
     throw new DocumentSourceError(
-      `Parsing the stored PDF of ${docId} failed: ${error instanceof Error ? error.message : String(error)}`
+      `Parsing the stored PDF of ${docId} failed: ${error instanceof Error ? error.message : String(error)}`,
+      { unreadableCode: toUnreadableCode(error) }
     );
   }
 
@@ -618,6 +678,7 @@ const writeVersionDocument = ({ contentToken, docId, lease, prepared, space, upl
           SELECT uploaded_at::text AS uploaded_at, content_version, owner_user_id, workspace_id
           FROM ${getDocumentsTableName()}
           WHERE doc_id = $1
+            AND deleted_at IS NULL
           FOR SHARE`,
         [docId]
       )
@@ -716,7 +777,7 @@ const buildOneDocument = async ({ batcher, docId, hooks, lease, loadPages, maxAt
         uploadedAt: source.uploaded_at,
         versionId: version.versionId,
       });
-      return "failed";
+      return error.unreadableCode ? "unreadable" : "failed";
     }
 
     const prepared = await prepareVersionChunks({ batcher, documents, space });
@@ -760,7 +821,8 @@ const refreshBuildCounters = (lease) => {
                    SELECT COUNT(*) FROM ${buildProgressTable} WHERE version_id = $1 AND outcome <> 'failed'),
                  build_documents_failed = (
                    SELECT COUNT(*) FROM ${buildProgressTable} WHERE version_id = $1 AND outcome = 'failed'),
-                 build_documents_total = (SELECT COUNT(*) FROM ${getDocumentsTableName()}),
+                 build_documents_total = (
+                   SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) FROM ${getDocumentsTableName()}),
                  lease_expires_at = NOW() + ($3::bigint * INTERVAL '1 millisecond'),
                  updated_at = NOW()
            WHERE version_id = $1 AND builder_id = $2 AND status = 'building'
@@ -989,7 +1051,9 @@ export const runIndexVersionBuild = async ({
   const version = await claimIndexVersionBuild({ builderId, leaseMs: safeLeaseMs, versionId: safeVersionId });
   const space = resolveVersionSpace(version);
   const lease = { builderId, leaseMs: safeLeaseMs, versionId: safeVersionId };
-  const summary = { builderId, failed: 0, indexed: 0, skippedDeleted: 0, versionId: safeVersionId };
+  // `unreadable`: the failed documents whose stored bytes cannot be read
+  // (counted in `failed` too).
+  const summary = { builderId, failed: 0, indexed: 0, skippedDeleted: 0, unreadable: 0, versionId: safeVersionId };
   let cursor = "";
 
   try {
@@ -997,7 +1061,11 @@ export const runIndexVersionBuild = async ({
       concurrency: safeConcurrency,
       finishPage: async () => {
         await refreshBuildCounters(lease);
-        logger?.(`version ${safeVersionId}: ${summary.indexed} indexed, ${summary.skippedDeleted} deleted meanwhile, ${summary.failed} failed`);
+        logger?.(
+          `version ${safeVersionId}: ${summary.indexed} indexed, ${summary.skippedDeleted} deleted meanwhile, ${summary.failed} failed${
+            summary.unreadable > 0 ? ` (${summary.unreadable} with unreadable stored bytes)` : ""
+          }`
+        );
         await safeHooks.afterBatch({ ...summary });
       },
       listPage: async () => {
@@ -1024,9 +1092,15 @@ export const runIndexVersionBuild = async ({
           summary.skippedDeleted += 1;
         } else {
           summary.failed += 1;
+          summary.unreadable += outcome === "unreadable" ? 1 : 0;
         }
 
-        await safeHooks.afterDocument({ docId, outcome, versionId: safeVersionId });
+        // The progress row says `failed` for an unreadable document too.
+        await safeHooks.afterDocument({
+          docId,
+          outcome: outcome === "unreadable" ? "failed" : outcome,
+          versionId: safeVersionId,
+        });
       },
     });
 
@@ -1225,6 +1299,35 @@ const buildCountDriftSql = ({ activeTable, targetTable }) => `/* index_versions:
 
 const formatSpace = (space) => `${space.identity}/${space.dimensions}`;
 
+// docId -> code of the documents among `docIds` the build of `versionId`
+// recorded as unreadable (an unreadable_source progress error).
+const readUnreadableSources = async (query, { docIds, versionId }) => {
+  if (docIds.length === 0) {
+    return new Map();
+  }
+
+  const { buildProgressTable } = getIndexVersionTableNames();
+  const rows =
+    (
+      await query(
+        `/* index_versions:unreadable_sources */
+          SELECT doc_id, error
+          FROM ${buildProgressTable}
+          WHERE version_id = $1 AND outcome = 'failed' AND doc_id = ANY($2::text[])
+          ORDER BY doc_id`,
+        [versionId, docIds]
+      )
+    )?.rows ?? [];
+
+  return new Map(
+    rows.flatMap((row) => {
+      const code = /^unreadable_source ([A-Z0-9_]+):/.exec(String(row.error ?? ""))?.[1];
+
+      return code ? [[String(row.doc_id), code]] : [];
+    })
+  );
+};
+
 /**
  * The activation gate, read-only. A candidate passes when it is ready and
  * still receiving writes, its table has its declared width and only its own
@@ -1236,6 +1339,12 @@ const formatSpace = (space) => `${space.identity}/${space.dimensions}`;
  * comparison is one statement, so it sees one snapshot of both tables; dual
  * writes keep them equal from then until the switch.
  *
+ * `allowUnreadableSources` passes over the documents the build recorded as
+ * unreadable (their stored bytes cannot be decrypted, see the header): they
+ * have chunks in the active version and none in the candidate, which would
+ * otherwise block it until they are deleted. They are reported in
+ * `unreadable` either way.
+ *
  * `allowUnreadableActive` is for the case the active version's table is gone
  * (a manual DROP, a partial restore): the comparisons with the active version
  * are skipped and the candidate is judged on its own checks, so a rollback is
@@ -1244,6 +1353,7 @@ const formatSpace = (space) => `${space.identity}/${space.dimensions}`;
 export const validateIndexVersion = async ({
   allowChunkCountDrift = false,
   allowUnreadableActive = false,
+  allowUnreadableSources = false,
   probe = null,
   versionId,
 } = {}) =>
@@ -1267,6 +1377,7 @@ export const validateIndexVersion = async ({
       activeReadable: null,
       activeVersionId: active.versionId,
       allowChunkCountDrift: Boolean(allowChunkCountDrift),
+      allowUnreadableSources: Boolean(allowUnreadableSources),
       mismatchedDocuments: 0,
       mismatches: [],
       ok: false,
@@ -1275,6 +1386,8 @@ export const validateIndexVersion = async ({
       staleDocuments: 0,
       stale: [],
       totals: null,
+      unreadable: [],
+      unreadableDocuments: 0,
       versionId: safeVersionId,
     };
 
@@ -1358,12 +1471,25 @@ export const validateIndexVersion = async ({
           targetCount: Number(row.target_count) || 0,
         }))
       : [];
-    const blocking = allowChunkCountDrift
+    const drifting = allowChunkCountDrift
       ? mismatches.filter((entry) => entry.activeCount > 0 && entry.targetCount === 0)
       : mismatches;
+    // The documents the build could not read (see the header): no chunks in
+    // the target, an unreadable_source progress row. Read only when some
+    // document has no chunks there, so a passing gate runs no extra statement.
+    const unreadableCodes = await readUnreadableSources(query, {
+      docIds: drifting.filter((entry) => entry.targetCount === 0).map((entry) => entry.docId),
+      versionId: safeVersionId,
+    });
+    const unreadable = drifting
+      .filter((entry) => entry.targetCount === 0 && unreadableCodes.has(entry.docId))
+      .map((entry) => ({ ...entry, code: unreadableCodes.get(entry.docId) }));
+    const blocking = drifting.filter((entry) => !(entry.targetCount === 0 && unreadableCodes.has(entry.docId)));
 
     report.mismatchedDocuments = activeReadable ? mismatches.length : null;
     report.mismatches = mismatches.slice(0, MAX_REPORTED_MISMATCHES);
+    report.unreadableDocuments = unreadable.length;
+    report.unreadable = unreadable.slice(0, MAX_REPORTED_MISMATCHES);
 
     const stale = ((await query(buildContentDriftSql({ targetTable: target.chunkTable })))?.rows ?? []).map(
       (row) => ({
@@ -1388,6 +1514,17 @@ export const validateIndexVersion = async ({
       );
     }
 
+    if (unreadable.length > 0 && !allowUnreadableSources) {
+      const codes = [...new Set(unreadable.map((entry) => entry.code))].sort();
+
+      report.reasons.push(
+        `${unreadable.length} document(s) have no chunks in version ${safeVersionId} because the build could not read their stored PDF (${codes.join(", ")}; first: ${unreadable
+          .slice(0, 3)
+          .map((entry) => entry.docId)
+          .join(", ")}). Fix the keystore if a key file or the master key was missing for the builder and resume; otherwise pass --allow-unreadable-sources to activate without them (they are not searchable in version ${safeVersionId}).`
+      );
+    }
+
     if (blocking.length > 0) {
       report.reasons.push(
         `${blocking.length} document(s) ${
@@ -1404,7 +1541,7 @@ export const validateIndexVersion = async ({
     const totals = firstRow(
       await query(
         `/* index_versions:count_totals */
-          SELECT (SELECT COUNT(*) FROM ${getDocumentsTableName()})::bigint AS document_count,
+          SELECT (SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) FROM ${getDocumentsTableName()})::bigint AS document_count,
                  ${activeReadable ? `(SELECT COUNT(*) FROM ${active.chunkTable})::bigint` : "NULL::bigint"} AS active_chunks,
                  (SELECT COUNT(*) FROM ${target.chunkTable})::bigint AS target_chunks`
       )
@@ -1468,6 +1605,7 @@ const lockPointer = async (query) => {
 export const activateIndexVersion = async ({
   allowChunkCountDrift = false,
   allowUnreadableActive = false,
+  allowUnreadableSources = false,
   graceMs = getIndexVersionDualWriteGraceMs(),
   mode = "activate",
   probe = null,
@@ -1477,6 +1615,7 @@ export const activateIndexVersion = async ({
   const validation = await validateIndexVersion({
     allowChunkCountDrift,
     allowUnreadableActive,
+    allowUnreadableSources,
     probe,
     versionId: safeVersionId,
   });
@@ -1672,8 +1811,9 @@ export const dropRetiredIndexVersionStorage = async ({
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      // DROP and TRUNCATE belong to the owner: the owner pool under the role split.
       await runAsDatabaseSystem(() =>
-        getPgvectorRuntime().withTransaction(async (client) => {
+        getPgvectorRuntime().withOwnerTransaction(async (client) => {
           const query = getPgvectorQuery(client);
 
           await query("SELECT set_config('lock_timeout', $1, true)", [timeout]);

@@ -25,7 +25,14 @@ import {
   AGENT_TASK_RUNNER_ID,
   AGENT_TASK_TYPE,
 } from "./agent-task-contract.js";
-import { createTaskService, TASK_STATUSES } from "./tasks.js";
+import {
+  createKeyedSerializer,
+  createTenantTaskLimitedError,
+  readTenantTaskLimits,
+  TENANT_TASK_LIMITED,
+} from "./job-orchestrator.js";
+import { buildTaskScopeKey, createTaskService, TASK_STATUSES } from "./tasks.js";
+import { recordTenantRefusal } from "./tenant-refusals.js";
 import { runWithoutConversationMemoryWrites } from "./conversation-memory-writes.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
@@ -427,9 +434,43 @@ const buildDeliverableApprovalQuestion = (deliverables = {}) => {
   }${labels.length > 0 ? `: ${labels.join(", ")}` : ""}.`;
 };
 
+// TENANT_MAX_QUEUED_TASKS (0, the default, is off): a new task is refused with
+// 429 TENANT_TASK_LIMITED while its tenant (the exact user and workspace pair)
+// already has that many queued tasks, the ones the running cap holds back
+// (rag/job-orchestrator.js) included. The count and the write are serialized
+// per tenant in this process; creations racing in several processes may
+// overshoot by the number racing. An idempotent replay of an existing task is
+// never refused. Without a cap `write` runs exactly as before. A refusal is
+// counted for that pair (rag/tenant-refusals.js).
+const serializeTenantTaskCreates = createKeyedSerializer();
+
+const writeWithinQueuedTaskCap = async ({ accessScope, taskLimits, taskService }, write) => {
+  const maxQueued = Math.floor(Number(taskLimits?.()?.maxQueued));
+
+  if (
+    !Number.isFinite(maxQueued) ||
+    maxQueued <= 0 ||
+    typeof taskService.countActiveTasks !== "function"
+  ) {
+    return write();
+  }
+
+  return serializeTenantTaskCreates(buildTaskScopeKey(accessScope), async () => {
+    const active = await taskService.countActiveTasks({ accessScope });
+
+    if ((Number(active?.queued) || 0) >= maxQueued) {
+      recordTenantRefusal(TENANT_TASK_LIMITED, accessScope);
+      throw createTenantTaskLimitedError();
+    }
+
+    return write();
+  });
+};
+
 export const createAgentTaskService = ({
   createTaskId = randomUUID,
   jobOrchestrator,
+  taskLimits = readTenantTaskLimits,
   taskService = createTaskService(),
 } = {}) => ({
   async createTask({
@@ -489,27 +530,29 @@ export const createAgentTaskService = ({
       stoppedReason: "queued",
       taskStatus: TASK_STATUSES.queued,
     });
-    const task = await taskService.upsertTask({
-      accessScope,
-      task: {
-        id: taskId,
-        input,
-        items: planFields.items,
-        label: "Agent task",
-        payload,
-        requiredUserAction: "",
-        result: planFields.result,
-        runnerId: AGENT_TASK_RUNNER_ID,
-        status: TASK_STATUSES.queued,
-        summary: "Agent task queued.",
-        type: AGENT_TASK_TYPE,
-        counts: {
-          agentRuns: 0,
-          iterations: 0,
-          maxIterations: input.maxIterations,
+    const task = await writeWithinQueuedTaskCap({ accessScope, taskLimits, taskService }, () =>
+      taskService.upsertTask({
+        accessScope,
+        task: {
+          id: taskId,
+          input,
+          items: planFields.items,
+          label: "Agent task",
+          payload,
+          requiredUserAction: "",
+          result: planFields.result,
+          runnerId: AGENT_TASK_RUNNER_ID,
+          status: TASK_STATUSES.queued,
+          summary: "Agent task queued.",
+          type: AGENT_TASK_TYPE,
+          counts: {
+            agentRuns: 0,
+            iterations: 0,
+            maxIterations: input.maxIterations,
+          },
         },
-      },
-    });
+      })
+    );
 
     jobOrchestrator?.scheduleTaskRun?.({
       accessScope,

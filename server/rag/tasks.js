@@ -1,4 +1,10 @@
 import { normalizeText } from "../lib/normalize-text.js";
+import { summarizeTenantRecords, tenantSelectorMatches } from "./tenant-records.js";
+import {
+  isRetentionExpired,
+  normalizeRetentionBatchLimit,
+  normalizeRetentionCutoffs,
+} from "./retention-sql.js";
 
 
 export const normalizeTaskAccessScope = (accessScope = {}) => ({
@@ -43,6 +49,13 @@ export const TASK_MUTATION_OUTCOMES = Object.freeze({
 });
 
 const VALID_TASK_STATUSES = new Set(Object.values(TASK_STATUSES));
+
+// The statuses retention may delete (rag/retention.js): a finished task.
+const RETAINABLE_TASK_STATUSES = new Set([
+  TASK_STATUSES.canceled,
+  TASK_STATUSES.completed,
+  TASK_STATUSES.failed,
+]);
 
 const normalizeTaskStatus = (status) => {
   const normalizedStatus = normalizeText(status);
@@ -204,9 +217,34 @@ export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() }
   const buildTaskKey = ({ accessScope = {}, taskId }) =>
     `${buildTaskScopeKey(accessScope)}\u0000${normalizeText(taskId)}`;
 
+  // The tenant erase and export (rag/tenant-records.js).
+  const listTenantTasks = (selector) =>
+    [...tasks.entries()].filter(([, task]) => tenantSelectorMatches(selector, task.accessScope));
+
   return {
     initialize() {
       return true;
+    },
+
+    countTenantRecords(selector) {
+      return summarizeTenantRecords(this.listTenantRecords(selector), ["tasks"]);
+    },
+
+    listTenantRecords(selector) {
+      return listTenantTasks(selector).map(([, task]) => ({
+        record: structuredClone(task),
+        table: "tasks",
+      }));
+    },
+
+    deleteTenantRecords(selector) {
+      const matched = listTenantTasks(selector);
+
+      for (const [key] of matched) {
+        tasks.delete(key);
+      }
+
+      return { tasks: { deleted: matched.length } };
     },
 
     delete({ accessScope = {}, taskId } = {}) {
@@ -251,6 +289,39 @@ export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() }
         );
     },
 
+    // The tenant's queued tasks and its running tasks whose claim lease is
+    // still live (a running task with an expired lease is held by nobody),
+    // leaving out `excludeTaskId`. Feeds the per-tenant task caps
+    // (TENANT_MAX_QUEUED_TASKS, TENANT_MAX_RUNNING_TASKS).
+    countActive({
+      accessScope = {},
+      excludeTaskId = "",
+      leaseMs = DEFAULT_TASK_CLAIM_LEASE_MS,
+    } = {}) {
+      const scopeKey = buildTaskScopeKey(accessScope);
+      const excludedTaskId = normalizeText(excludeTaskId);
+      const timestamp = now();
+      let queued = 0;
+      let running = 0;
+
+      for (const task of tasks.values()) {
+        if (task.scopeKey !== scopeKey || (excludedTaskId && task.id === excludedTaskId)) {
+          continue;
+        }
+
+        if (task.status === TASK_STATUSES.queued) {
+          queued += 1;
+        } else if (
+          task.status === TASK_STATUSES.running &&
+          !isTaskRunnable({ leaseMs, now: timestamp, task })
+        ) {
+          running += 1;
+        }
+      }
+
+      return { queued, running };
+    },
+
     listRecoverable({ statuses = [] } = {}) {
       const normalizedStatuses = new Set(
         toArray(statuses).map(normalizeTaskStatus)
@@ -261,6 +332,33 @@ export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() }
         .sort((left, right) =>
           String(left.updatedAt).localeCompare(String(right.updatedAt))
         );
+    },
+
+    // Retention (rag/retention.js), as the PostgreSQL store: at most `limit`
+    // finished tasks last updated before their workspace's cutoff, oldest
+    // first. This store keeps no task events.
+    deleteExpired({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+      const normalized = normalizeRetentionCutoffs({ cutoff, workspaceCutoffs });
+      const expiredKeys = [...tasks.entries()]
+        .filter(
+          ([, task]) =>
+            RETAINABLE_TASK_STATUSES.has(task.status) &&
+            isRetentionExpired(normalized, {
+              timestamp: task.updatedAt,
+              workspaceId: task.accessScope?.workspaceId,
+            })
+        )
+        .sort(
+          ([, left], [, right]) =>
+            Date.parse(left.updatedAt) - Date.parse(right.updatedAt) ||
+            String(left.id).localeCompare(String(right.id))
+        )
+        .slice(0, normalizeRetentionBatchLimit(limit))
+        .map(([taskKey]) => taskKey);
+
+      expiredKeys.forEach((taskKey) => tasks.delete(taskKey));
+
+      return { acquired: true, deleted: expiredKeys.length, deletedEvents: 0 };
     },
 
     claim({
@@ -602,6 +700,16 @@ export const createTaskService = ({
     });
   },
 
+  // Retention (rag/retention.js): one batch of expired finished tasks, or
+  // null when the store has no retention delete.
+  async deleteExpiredTasks({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+    if (typeof taskStore.deleteExpired !== "function") {
+      return null;
+    }
+
+    return taskStore.deleteExpired({ cutoff, limit, workspaceCutoffs });
+  },
+
   async getTask({ accessScope = {}, taskId } = {}) {
     const task = await taskStore.get({
       accessScope,
@@ -628,6 +736,33 @@ export const createTaskService = ({
           offset,
         })
       ).map(stripInternalTaskFields),
+    };
+  },
+
+  // { queued, running } for the per-tenant task caps. A store without
+  // countActive (an injected test store) is counted from its full listing.
+  async countActiveTasks({
+    accessScope = {},
+    excludeTaskId = "",
+    leaseMs = DEFAULT_TASK_CLAIM_LEASE_MS,
+  } = {}) {
+    if (typeof taskStore.countActive === "function") {
+      return taskStore.countActive({ accessScope, excludeTaskId, leaseMs });
+    }
+
+    const excludedTaskId = normalizeText(excludeTaskId);
+    const tasks = toArray(await taskStore.list({ accessScope, limit: "all" })).filter(
+      (task) => !excludedTaskId || task.id !== excludedTaskId
+    );
+    const timestamp = new Date().toISOString();
+
+    return {
+      queued: tasks.filter((task) => task.status === TASK_STATUSES.queued).length,
+      running: tasks.filter(
+        (task) =>
+          task.status === TASK_STATUSES.running &&
+          !isTaskRunnable({ leaseMs, now: timestamp, task })
+      ).length,
     };
   },
 

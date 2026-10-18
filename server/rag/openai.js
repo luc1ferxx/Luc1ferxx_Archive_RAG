@@ -1,6 +1,7 @@
 import { createChatClient, createEmbeddingsClient, toChatMessages } from "./openai-client.js";
 import { CIRCUIT_OPEN_CODE, resetModelCallGuards } from "./model-call-guard.js";
-import { getModelGatewayCall, recordModelMetricEvent } from "./model-gateway/call-context.js";
+import { admitModelCallQuota, recordModelMetricEventWithQuota } from "./model-call-quota.js";
+import { getModelGatewayCall } from "./model-gateway/call-context.js";
 import {
   requestModelGatewayCompletion,
   requestModelGatewayEmbeddings,
@@ -183,6 +184,20 @@ const withRetry = async (operation, failureMessage, { signal } = {}) => {
 // process, and so does a call the gateway is serving.
 const routesThroughModelGateway = () =>
   !customProvider && !getModelGatewayCall() && isModelGatewayEnabled();
+
+/** Whether a model call made here now would go to the model gateway. */
+export const isModelCallRoutedToGateway = () => routesThroughModelGateway();
+
+// In-process per-workspace quota admission (model-call-quota.js), once per
+// call and outside its retries and failover; a call routed to the gateway is
+// admitted there. Resolves at once (no await) when nothing is enforced here.
+const admitInProcessQuota = () => {
+  if (routesThroughModelGateway()) {
+    return null;
+  }
+
+  return admitModelCallQuota();
+};
 
 // The route a gateway call reports before the gateway has said which model
 // answered; the event's route is replaced by the gateway's on success.
@@ -525,6 +540,11 @@ export const embedTexts = async (texts, options = {}) => {
   // The caller's signal plus the bound request's (request-deadline.js), so a
   // cancelled agent request aborts its in-flight embedding call.
   const signal = withRequestSignal(options?.signal);
+  const admission = admitInProcessQuota();
+
+  if (admission) {
+    await admission;
+  }
 
   if (customProvider?.embedTexts) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
@@ -544,7 +564,7 @@ export const embedTexts = async (texts, options = {}) => {
         stage: "embed_documents",
       }),
       policy: getRuntimeLlmOpsPolicy(),
-      recorder: recordModelMetricEvent,
+      recorder: recordModelMetricEventWithQuota,
     });
   }
 
@@ -590,7 +610,7 @@ export const embedTexts = async (texts, options = {}) => {
       stage: "embed_documents",
     }),
     policy: getRuntimeLlmOpsPolicy(),
-    recorder: recordModelMetricEvent,
+    recorder: recordModelMetricEventWithQuota,
   });
 };
 
@@ -624,7 +644,7 @@ const embedThroughModelGateway = ({ input, inputCharacters, itemCount, modelName
       stage,
     }),
     policy: getRuntimeLlmOpsPolicy(),
-    recorder: recordModelMetricEvent,
+    recorder: recordModelMetricEventWithQuota,
     successMetric: (result) => ({
       ...buildModelGatewayUsageMetric(result, estimate),
       modelRoute: result.modelRoute ?? modelRoute,
@@ -662,6 +682,12 @@ export const embedQuery = async (query, options = {}) => {
 };
 
 const embedQueryWithModel = async (query, embeddingSpace, signal) => {
+  const admission = admitInProcessQuota();
+
+  if (admission) {
+    await admission;
+  }
+
   if (customProvider?.embedQuery) {
     const modelRoute = buildCustomProviderRoute(MODEL_CAPABILITIES.embedding);
     const metricContext = buildCustomRouteMetricContext();
@@ -679,7 +705,7 @@ const embedQueryWithModel = async (query, embeddingSpace, signal) => {
         stage: "embed_query",
       }),
       policy: getRuntimeLlmOpsPolicy(),
-      recorder: recordModelMetricEvent,
+      recorder: recordModelMetricEventWithQuota,
     });
 
     return { modelName: null, vector };
@@ -726,7 +752,7 @@ const embedQueryWithModel = async (query, embeddingSpace, signal) => {
       stage: "embed_query",
     }),
     policy: getRuntimeLlmOpsPolicy(),
-    recorder: recordModelMetricEvent,
+    recorder: recordModelMetricEventWithQuota,
   });
 
   return { modelName, vector };
@@ -756,6 +782,13 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
   // The caller's signal plus the bound request's (request-deadline.js): a
   // cancelled agent request aborts the call and stops its retries and failover.
   const signal = withRequestSignal(options.signal);
+  // Once per call, before the retries and the failover below: a refused call
+  // is never retried on this model or sent to the fallback.
+  const admission = admitInProcessQuota();
+
+  if (admission) {
+    await admission;
+  }
 
   if (customProvider?.completeText) {
     const modelRoute = buildCustomProviderRoute(capability);
@@ -792,7 +825,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         outputCharacters: getTextCharacters(result),
       }),
       policy: getRuntimeLlmOpsPolicy(),
-      recorder: recordModelMetricEvent,
+      recorder: recordModelMetricEventWithQuota,
     });
 
     return {
@@ -877,7 +910,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         outputCharacters: getTextCharacters(normalizeContent(result?.content)),
       }),
       policy: getRuntimeLlmOpsPolicy(),
-      recorder: recordModelMetricEvent,
+      recorder: recordModelMetricEventWithQuota,
     }).then((response) => {
       // The gateway answers with the provider's model name and finish reason,
       // which the returned shape does not carry.
@@ -969,7 +1002,7 @@ const completeThroughModelGateway = ({
       stage: "complete_text",
     },
     policy: getRuntimeLlmOpsPolicy(),
-    recorder: recordModelMetricEvent,
+    recorder: recordModelMetricEventWithQuota,
     successMetric: (result) => ({
       ...buildModelGatewayUsageMetric(result, {
         ...estimate,

@@ -88,6 +88,9 @@ test("the pgvector app processes get POSTGRES_READ_REPLICA_URLS; nothing else do
 test("pg_stat_statements entries are classified by what a replica can take", () => {
   const cases = {
     "SELECT set_config($4, $1, $5), set_config($6, $2, $7), set_config($8, $3, $9)": "tenantSettings",
+    // The same step since it also carries the tenant statement limits.
+    "SELECT set_config($6, $1, $7), set_config($8, $2, $9), set_config($10, $3, $11), set_config($12, COALESCE($4::text, current_setting($13)), $14), set_config( $15, COALESCE($5::text, current_setting($16)), $17 )":
+      "tenantSettings",
     "SELECT (CASE WHEN ( SELECT count(*) FROM unnest($1::text[], $2::integer[]) AS expected(doc_id, content_version) JOIN rag_documents d ON true) = $3 THEN $4 ELSE $5 END)::integer AS fresh": "guard",
     "SELECT chunk_id, 1 - (embedding <=> $1::vector) AS vector_score FROM rag_document_chunks": "search",
     "SELECT c.chunk_id FROM rag_document_chunks_sparse_search(to_tsquery($1::regconfig, $2)) AS r": "search",

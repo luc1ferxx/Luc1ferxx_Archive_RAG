@@ -4,6 +4,7 @@ import {
 } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { queryPostgres } from "./postgres.js";
+import { createExportEventOrdinalMapper, createPostgresTenantRecordMethods } from "./tenant-records.js";
 import {
   buildTaskScopeKey,
   DEFAULT_TASK_CLAIM_LEASE_MS,
@@ -12,9 +13,24 @@ import {
   TASK_MUTATION_OUTCOMES,
   TASK_STATUSES,
 } from "./tasks.js";
+import {
+  buildRetentionLockKey,
+  normalizeRetentionBatchLimit,
+  normalizeRetentionCutoffs,
+  readRetentionLockAcquired,
+  renderRetentionPreludeCtes,
+} from "./retention-sql.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// The only task statuses retention may delete: a finished task (the
+// in-memory store in rag/tasks.js uses the same three).
+const RETAINABLE_TASK_STATUSES = Object.freeze([
+  TASK_STATUSES.canceled,
+  TASK_STATUSES.completed,
+  TASK_STATUSES.failed,
+]);
 
 const ensureTableName = (tableName, envName) => {
   if (!TABLE_NAME_PATTERN.test(tableName)) {
@@ -510,6 +526,31 @@ export const createPostgresTaskStore = ({
       return initialize();
     },
 
+    // The tenant erase and export (rag/tenant-records.js): events first and
+    // swept again after the tasks, so an event a task wrote between the two
+    // statements does not stay behind (the events table has no foreign key).
+    // An exported event names its ordinal in its task, not the shared id.
+    ...createPostgresTenantRecordMethods({
+      initialize,
+      query,
+      tables: () => [
+        {
+          keyColumns: ["event_id"],
+          mapRow: createExportEventOrdinalMapper("task_id"),
+          name: "task_events",
+          sweepAfter: true,
+          table: taskEventsTable,
+          userColumn: "user_id",
+        },
+        {
+          keyColumns: ["user_id", "workspace_id", "task_id"],
+          name: "tasks",
+          table: tasksTable,
+          userColumn: "user_id",
+        },
+      ],
+    }),
+
     async delete({ accessScope = {}, taskId } = {}) {
       await initialize();
 
@@ -569,6 +610,50 @@ export const createPostgresTaskStore = ({
       return result.rows.map(mapRowToTask).filter(Boolean);
     },
 
+    // The tenant's queued tasks and its running tasks with a live claim
+    // lease (the claim's own rule, on the database clock), for the per-tenant
+    // task caps. Runs under the request's or the task's tenant, so the row
+    // policy keeps it to that pair as well.
+    async countActive({
+      accessScope = {},
+      excludeTaskId = "",
+      leaseMs = DEFAULT_TASK_CLAIM_LEASE_MS,
+    } = {}) {
+      await initialize();
+
+      const scope = normalizeTaskAccessScope(accessScope);
+      const result = await query(
+        `
+          SELECT
+            COUNT(*) FILTER (WHERE status = $4) AS queued,
+            COUNT(*) FILTER (
+              WHERE status = $5
+                AND COALESCE(claimed_at, updated_at)
+                  > clock_timestamp() - ($6::double precision * INTERVAL '1 millisecond')
+            ) AS running
+          FROM ${tasksTable}
+          WHERE user_id = $1
+            AND workspace_id = $2
+            AND ($3 = '' OR task_id <> $3)
+            AND status IN ($4, $5)
+        `,
+        [
+          scope.userId,
+          scope.workspaceId,
+          normalizeText(excludeTaskId),
+          TASK_STATUSES.queued,
+          TASK_STATUSES.running,
+          normalizeLeaseMs(leaseMs),
+        ]
+      );
+      const row = result.rows[0] ?? {};
+
+      return {
+        queued: Number(row.queued) || 0,
+        running: Number(row.running) || 0,
+      };
+    },
+
     async listRecoverable({
       statuses = [TASK_STATUSES.queued, TASK_STATUSES.running],
     } = {}) {
@@ -593,6 +678,74 @@ export const createPostgresTaskStore = ({
       );
 
       return result.rows.map(mapRowToTask).filter(Boolean);
+    },
+
+    /**
+     * Retention (rag/retention.js): deletes at most `limit` finished tasks
+     * (completed, failed, canceled) of every tenant last updated before their
+     * workspace's cutoff, with their events. Pending, queued, running and
+     * waiting tasks always stay, and so does a row another transaction holds
+     * (SKIP LOCKED). One statement, holding the table's advisory try-lock
+     * while it runs. System work: the caller binds runAsDatabaseSystem.
+     * Resolves to { acquired, deleted, deletedEvents }.
+     */
+    async deleteExpired({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+      await initialize();
+
+      const normalized = normalizeRetentionCutoffs({ cutoff, workspaceCutoffs });
+      const result = await query(
+        `
+          WITH ${renderRetentionPreludeCtes({ lockKey: 1, workspaceCutoffs: 6, workspaceIds: 5 })},
+          expired AS (
+            SELECT t.user_id, t.workspace_id, t.task_id
+            FROM ${tasksTable} AS t
+            LEFT JOIN retention_overrides AS o ON o.workspace_id = t.workspace_id
+            WHERE (SELECT acquired FROM retention_lock)
+              AND t.status = ANY($2::text[])
+              AND t.updated_at < $4::timestamptz
+              AND t.updated_at < COALESCE(o.cutoff, $3::timestamptz)
+            ORDER BY t.updated_at ASC, t.task_id ASC
+            LIMIT $7
+            FOR UPDATE OF t SKIP LOCKED
+          ),
+          deleted_events AS (
+            DELETE FROM ${taskEventsTable} AS e
+            USING expired AS x
+            WHERE e.user_id = x.user_id
+              AND e.workspace_id = x.workspace_id
+              AND e.task_id = x.task_id
+            RETURNING 1
+          ),
+          deleted_tasks AS (
+            DELETE FROM ${tasksTable} AS t
+            USING expired AS x
+            WHERE t.user_id = x.user_id
+              AND t.workspace_id = x.workspace_id
+              AND t.task_id = x.task_id
+            RETURNING 1
+          )
+          SELECT
+            (SELECT acquired FROM retention_lock) AS acquired,
+            (SELECT COUNT(*) FROM deleted_tasks)::int AS deleted,
+            (SELECT COUNT(*) FROM deleted_events)::int AS deleted_events
+        `,
+        [
+          buildRetentionLockKey(tasksTable),
+          RETAINABLE_TASK_STATUSES,
+          normalized.cutoff,
+          normalized.upperBound,
+          normalized.workspaceIds,
+          normalized.workspaceCutoffs,
+          normalizeRetentionBatchLimit(limit),
+        ]
+      );
+      const row = result.rows?.[0];
+
+      return {
+        acquired: readRetentionLockAcquired(row),
+        deleted: Number(row?.deleted ?? 0) || 0,
+        deletedEvents: Number(row?.deleted_events ?? 0) || 0,
+      };
     },
 
     async claim({

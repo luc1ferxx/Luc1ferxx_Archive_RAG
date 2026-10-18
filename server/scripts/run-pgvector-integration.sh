@@ -24,6 +24,8 @@
 #   PG_BIN_DIR   directory holding initdb/pg_ctl/createdb/psql (auto-detected otherwise)
 #   PGVTEST_DB   disposable database name (default: agentai_pgvtest)
 #   KEEP_CLUSTER if set to 1, leave the cluster running after the suite (for debugging)
+#   TEST_FILES   space-separated test files (relative to server/) to run instead
+#                of the pgvector suite, one file at a time
 #   FULL_SUITE   if set to 1, run the whole backend suite (npm test) against the
 #                throwaway cluster: test/run.test.mjs globs *.test.mjs and passes
 #                env through, so the pgvector integration runs UNSKIPPED *and* the
@@ -192,6 +194,16 @@ if [[ "${FULL_SUITE:-0}" == "1" ]]; then
   log "running: npm test (cwd=${SERVER_DIR}) — ${RUN_LABEL}"
   set +e
   ( cd "${SERVER_DIR}" && npm test )
+  SUITE_STATUS=$?
+  set -e
+elif [[ -n "${TEST_FILES:-}" ]]; then
+  # TEST_FILES="test/a.test.mjs test/b.test.mjs": only those files, one at a
+  # time, against the throwaway cluster (paths relative to server/).
+  RUN_LABEL="selected suites (${TEST_FILES})"
+  log "running: node --test --test-concurrency=1 ${TEST_FILES}"
+  set +e
+  # shellcheck disable=SC2086
+  ( cd "${SERVER_DIR}" && node --test --test-concurrency=1 ${TEST_FILES} )
   SUITE_STATUS=$?
   set -e
 else

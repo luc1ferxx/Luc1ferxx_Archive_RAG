@@ -3,6 +3,12 @@ import { open, rm } from "fs/promises";
 import path from "path";
 
 import { resolveRequestUserId } from "../auth.js";
+import { TENANT_ENCRYPTION_ERROR_CODES } from "../rag/kms/errors.js";
+import {
+  isWorkingFileEnvelope,
+  readWorkingFile,
+  startsWithReservedFileMagic,
+} from "../rag/working-files.js";
 import { isSafeUploadFileName } from "../upload-policy.js";
 
 export {
@@ -23,9 +29,18 @@ export const serializeError = (error, fallbackMessage) => {
   return fallbackMessage;
 };
 
+// /chat checks docIds before this runs (routes/validation.js boundedIdList);
+// /agent-tasks does not, so an entry that is not a string is dropped here
+// instead of throwing.
 export const parseDocIds = (rawDocIds, fallbackDocId) => {
   if (Array.isArray(rawDocIds)) {
-    return [...new Set(rawDocIds.map((docId) => docId?.trim()).filter(Boolean))];
+    return [
+      ...new Set(
+        rawDocIds
+          .map((docId) => (typeof docId === "string" ? docId.trim() : ""))
+          .filter(Boolean)
+      ),
+    ];
   }
 
   if (typeof rawDocIds === "string" && rawDocIds.trim()) {
@@ -115,11 +130,63 @@ export const hasPdfMagicBytes = async (filePath) => {
       PDF_MAGIC_SCAN_WINDOW,
       0
     );
+    let head = headBuffer.subarray(0, bytesRead);
 
-    return headBuffer.subarray(0, bytesRead).includes(PDF_MAGIC);
+    // An encrypted working file (TENANT_ENCRYPTION=on): its plaintext decides.
+    // One this process cannot decrypt is plaintext that merely begins with
+    // the working-file magic (an upload with TENANT_ENCRYPTION=off): no PDF.
+    if (isWorkingFileEnvelope(head)) {
+      try {
+        head = (await readWorkingFile(filePath)).subarray(0, PDF_MAGIC_SCAN_WINDOW);
+      } catch (error) {
+        if (error?.code === TENANT_ENCRYPTION_ERROR_CODES.workingFileUnreadable) {
+          return false;
+        }
+
+        throw error;
+      }
+    }
+
+    // Plaintext that begins with an envelope's or a working file's magic is
+    // refused like any other non-PDF (rag/working-files.js).
+    return !startsWithReservedFileMagic(head) && head.includes(PDF_MAGIC);
   } finally {
     await fileHandle.close();
   }
+};
+
+// The request headers that select whose data a response carries: the
+// credential (Authorization, x-api-key) and the workspace and user a request
+// names (x-workspace-id; x-user-id where the principal may choose its user,
+// and always with auth off).
+export const TENANT_DATA_VARY_HEADERS = Object.freeze([
+  "Authorization",
+  "x-api-key",
+  "x-workspace-id",
+  "x-user-id",
+]);
+
+/**
+ * Marks a response as one tenant's data. `no-store` keeps it out of every
+ * cache, shared (a CDN or proxy in front of the API, which would otherwise
+ * serve one tenant's document list or PDF to the next caller of the same URL)
+ * and private (a browser profile whose user switches workspace or token);
+ * `Vary` names the identity headers for any cache that ignores `no-store`.
+ * Set before the handler answers, so errors carry it too.
+ */
+export const setTenantDataCacheHeaders = (res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+
+  for (const header of TENANT_DATA_VARY_HEADERS) {
+    res.vary(header);
+  }
+
+  return res;
+};
+
+export const noStoreTenantData = (req, res, next) => {
+  setTenantDataCacheHeaders(res);
+  next();
 };
 
 export const buildContentDisposition = (
@@ -144,7 +211,10 @@ export const sendBufferedFile = ({
     "Content-Disposition",
     buildContentDisposition(fileName, disposition)
   );
-  res.setHeader("Cache-Control", "private, max-age=300");
+  // Every file this sends is one tenant's (a stored PDF, a workspace
+  // artifact). It used to allow private caching for five minutes, which kept
+  // the bytes in a browser cache keyed by URL alone.
+  setTenantDataCacheHeaders(res);
 
   if (!rangeHeader) {
     res.setHeader("Content-Length", String(totalSize));

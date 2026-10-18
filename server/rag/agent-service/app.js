@@ -4,9 +4,15 @@ import path from "path";
 
 import { getDefaultUploadsDirectory } from "../../app.js";
 import { createAppServices } from "../../app-services.js";
-import { bindDatabaseTenant } from "../../auth.js";
+import { bindDatabaseTenant, isTenantlessAuthenticatedScope } from "../../auth.js";
 import { getAdminActionPermissionForRequest } from "../admin-authorization.js";
-import { getAgentRunRecoveryMode } from "../config.js";
+import {
+  getAgentRunRecoveryMode,
+  getLongMemoryScope,
+  getPostgresTenantContextMode,
+  getQueryEmbeddingCacheScope,
+} from "../config.js";
+import { runAsDatabaseSystem } from "../postgres-tenant.js";
 import { createAdminActionHandler } from "../../routes/admin.js";
 import { createChatRouter } from "../../routes/chat.js";
 import { createSystemRouter } from "../../routes/system.js";
@@ -23,7 +29,10 @@ import { SERVICE_TIERS } from "../service-topology.js";
 import {
   ADMIN_PERMISSION_CLAIM,
   AGENT_SERVICE_CALLER_ROLES,
+  AGENT_SERVICE_ERROR_CODES,
   AGENT_SERVICE_PING_PATH,
+  SINGLE_TENANT_CREDENTIAL_SCOPE,
+  TENANTLESS_SCOPE_CLAIM,
 } from "./contract.js";
 
 // The agent tier of a split deployment (ARCHIVE_RAG_ROLE=agent): agent
@@ -67,6 +76,40 @@ const requireEdgeAdminAuthorization = (req, res, next) => {
   next();
 };
 
+// The forwarded admin action route (POST /admin/actions/:action), matched the
+// way Express matches it (case-insensitive, optional trailing slash).
+const ADMIN_ACTION_PATH_PATTERN = /^\/admin\/actions\/[^/]+\/?$/iu;
+
+/**
+ * Defence in depth for requireTenantScope at the edge (auth.js): refuses (403)
+ * a forwarded scope that is authenticated and names neither a user nor a
+ * workspace, which every store and the database tenant binding would read as
+ * "every tenant". Two exemptions mirror the edge's: a forwarded admin action
+ * (the edge authorized and audited it, and requireEdgeAdminAuthorization still
+ * checks its grant), and a call the edge marked as made with the single shared
+ * API_AUTH_TOKEN (TENANTLESS_SCOPE_CLAIM). An unauthenticated scope (API auth
+ * off) passes as before.
+ */
+const requireForwardedTenantScope = (req, res, next) => {
+  if (!isTenantlessAuthenticatedScope(req.accessScope)) {
+    next();
+    return;
+  }
+
+  if (
+    (req.method === "POST" && ADMIN_ACTION_PATH_PATTERN.test(req.path)) ||
+    req.serviceIdentity?.claims?.[TENANTLESS_SCOPE_CLAIM] === SINGLE_TENANT_CREDENTIAL_SCOPE
+  ) {
+    next();
+    return;
+  }
+
+  res.status(403).json({
+    code: AGENT_SERVICE_ERROR_CODES.tenantScopeRequired,
+    error: "This request needs a user or workspace scope: name a workspace with x-workspace-id.",
+  });
+};
+
 /**
  * Builds the agent tier's Express app over createAppServices(options), the
  * same services the monolith uses (tests inject stubs the same way). It
@@ -94,21 +137,33 @@ export const createAgentApp = async (options = {}) => {
   app.locals.services = services;
   app.disable("x-powered-by");
 
+  // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js), and
+  // so does an unknown LONG_MEMORY_SCOPE or RAG_EMBEDDING_CACHE_SCOPE.
+  getPostgresTenantContextMode();
+  getLongMemoryScope();
+  getQueryEmbeddingCacheScope();
+
   // arXiv import tasks write their downloads below the uploads directory.
   await mkdir(uploadsDirectory, { recursive: true });
-  await ragService.initializeDocumentRegistry?.();
-  await ragService.initializeLongMemory?.();
-  await ragService.initializeSessionMemory?.();
-  await taskService.initialize?.();
-  await agentRunService.initialize?.();
-  await adminAuditService.initialize?.();
-  await workspaceArtifactService.initialize?.();
 
-  await agentRunRecoveryService.recoverOnStartup?.({
-    mode: getAgentRunRecoveryMode(),
+  // Start-up is system work, bound explicitly for POSTGRES_TENANT_CONTEXT=
+  // strict as in app.js: each recovered run or task binds its own scope again,
+  // and the listener the caller opens later stays unbound.
+  await runAsDatabaseSystem(async () => {
+    await ragService.initializeDocumentRegistry?.();
+    await ragService.initializeLongMemory?.();
+    await ragService.initializeSessionMemory?.();
+    await taskService.initialize?.();
+    await agentRunService.initialize?.();
+    await adminAuditService.initialize?.();
+    await workspaceArtifactService.initialize?.();
+
+    await agentRunRecoveryService.recoverOnStartup?.({
+      mode: getAgentRunRecoveryMode(),
+    });
+    await jobOrchestrator.recoverRunnableTasks?.();
+    await healthService.runStartupHealthChecks?.();
   });
-  await jobOrchestrator.recoverRunnableTasks?.();
-  await healthService.runStartupHealthChecks?.();
 
   // Liveness and health stay unauthenticated, as in the monolith, so an
   // orchestrator can probe them without a key.
@@ -130,8 +185,10 @@ export const createAgentApp = async (options = {}) => {
   // context, so the tenant and trace bindings come after it (as in app.js).
   // The public 2 MB limit is the edge's; the edge re-serializes the body it
   // parsed, which can come out longer (1e9 becomes 1000000000), so the limit
-  // here only guards against a runaway caller that already holds a key.
+  // here only guards against a runaway caller that already holds a key. A
+  // tenantless authenticated scope is refused before its body is read.
   app.use(requireServiceIdentity(identityOptions));
+  app.use(requireForwardedTenantScope);
   // The parser also checks the body against the token's request binding.
   app.use(express.json({ limit: "8mb", verify: verifyServiceRequestBody }));
   app.use(handleServiceRequestBodyError);

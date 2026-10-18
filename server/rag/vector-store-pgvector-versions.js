@@ -662,6 +662,52 @@ export const lockIndexVersionWriteTargets = async (client) => {
   return versions.length > 0 ? versions : [buildLegacyIndexVersion()];
 };
 
+/**
+ * The chunk tables a delete must also reach besides the write targets: every
+ * registered version left out of `excludeVersionIds` (the targets the same
+ * transaction read) whose table still exists -- a failed build, a ready
+ * version past its dual-write window, a retired one whose drop has not landed
+ * yet. No search reads them and none can become active again, but they still
+ * hold the document's text. The foreign key on doc_id cascades a document
+ * row's delete into them as well; a replacement keeps the row, so its old
+ * chunks would otherwise stay there. Called after
+ * lockIndexVersionWriteTargets on the same transaction (the shared lock keeps
+ * registration and retire out); a database without the registry has no such
+ * table.
+ */
+export const listRetainedIndexVersionTables = async (client, { excludeVersionIds = [] } = {}) => {
+  const query = getPgvectorQuery(client);
+  const { versionsTable } = getIndexVersionTableNames();
+  const excluded = [...new Set(excludeVersionIds.map(Number).filter(Number.isInteger))];
+  let result;
+
+  try {
+    result = await query(
+      `/* index_versions:retained_tables */
+        SELECT v.version_id, v.chunk_table, v.status
+        FROM ${versionsTable} v
+        WHERE NOT (v.version_id = ANY($1::int[]))
+          AND to_regclass(format('%I.%I', current_schema(), lower(v.chunk_table))) IS NOT NULL
+        ORDER BY v.version_id`,
+      [excluded]
+    );
+  } catch (error) {
+    if (error?.code === UNDEFINED_TABLE) {
+      return [];
+    }
+
+    throw error;
+  }
+
+  return (Array.isArray(result?.rows) ? result.rows : [])
+    .map((row) => ({
+      chunkTable: String(row.chunk_table ?? ""),
+      status: String(row.status ?? ""),
+      versionId: Number(row.version_id),
+    }))
+    .filter((version) => TABLE_NAME_PATTERN.test(version.chunkTable));
+};
+
 /** Exclusive counterpart, for registration, the pointer switch and retire. */
 export const lockIndexVersionLifecycle = (query) =>
   query(

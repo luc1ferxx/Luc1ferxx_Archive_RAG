@@ -8,6 +8,7 @@ import {
   getAgentRunEventsPostgresTable,
   getAgentRunsPostgresTable,
   getEmbeddingDimensions,
+  getFeedbackPostgresTable,
   getIndexVersionPointerTtlMs,
   getIndexVersionsPostgresTable,
   getIngestJobsPostgresTable,
@@ -17,16 +18,22 @@ import {
   getPgvectorIndexType,
   getPgvectorIvfflatLists,
   getPgvectorTextSearchConfig,
+  getPostgresSystemRole,
   getPostgresTenantRole,
   getSessionMemoryPostgresTable,
   getTaskEventsPostgresTable,
   getTasksPostgresTable,
+  getTenantUsagePostgresTable,
   getWorkspaceArtifactsPostgresTable,
+  getWorkspaceMembersPostgresTable,
+  getWorkspacesPostgresTable,
+  isPostgresRoleSplitEnabled,
 } from "./config.js";
 import {
   isPostgresConfigured,
-  queryPostgres,
-  withPostgresClient,
+  queryPostgresAsOwner,
+  readPostgresRuntimeLogin,
+  withPostgresOwnerClient,
 } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 
@@ -51,6 +58,69 @@ const ensureSimpleTableName = (tableName, envName) => {
 
   return tableName;
 };
+
+// Migration 034's feedback table. The indexes it names after the table must
+// fit PostgreSQL's 63 bytes too, or PostgreSQL would truncate them.
+export const getFeedbackTableName = (feedbackTable = getFeedbackPostgresTable()) => {
+  const base = ensureSimpleTableName(feedbackTable, "FEEDBACK_POSTGRES_TABLE");
+
+  for (const derived of [`${base}_scope_created_idx`, `${base}_feedback_id_key`]) {
+    ensureSimpleTableName(derived, "derived feedback table identifier");
+  }
+
+  return base;
+};
+
+// Migration 036's tenant registry tables. The index it names after the
+// members table must fit PostgreSQL's 63 bytes too.
+export const getTenantRegistryTableNames = ({
+  workspaceMembersTable = getWorkspaceMembersPostgresTable(),
+  workspacesTable = getWorkspacesPostgresTable(),
+} = {}) => {
+  const workspaces = ensureSimpleTableName(workspacesTable, "WORKSPACES_POSTGRES_TABLE");
+  const members = ensureSimpleTableName(
+    workspaceMembersTable,
+    "WORKSPACE_MEMBERS_POSTGRES_TABLE"
+  );
+
+  if (workspaces.toLowerCase() === members.toLowerCase()) {
+    throw new Error(
+      `WORKSPACES_POSTGRES_TABLE and WORKSPACE_MEMBERS_POSTGRES_TABLE must differ (both are "${workspaces}").`
+    );
+  }
+
+  for (const derived of [`${members}_user_idx`, `${workspaces}_status_idx`]) {
+    ensureSimpleTableName(derived, "derived tenant registry identifier");
+  }
+
+  return { workspaceMembersTable: members, workspacesTable: workspaces };
+};
+
+// Migration 037's usage ledger table (TENANT_USAGE_POSTGRES_TABLE). The
+// constraints and the index it names after the table must fit PostgreSQL's 63
+// bytes too.
+export const getTenantUsageTableName = (tenantUsageTable = getTenantUsagePostgresTable()) => {
+  const base = ensureSimpleTableName(tenantUsageTable, "TENANT_USAGE_POSTGRES_TABLE");
+
+  for (const derived of [
+    `${base}_metric_period_idx`,
+    `${base}_period_check`,
+    `${base}_metric_check`,
+    `${base}_value_check`,
+  ]) {
+    ensureSimpleTableName(derived, "derived tenant usage identifier");
+  }
+
+  return base;
+};
+
+// Migration 037's SECURITY DEFINER storage-quota function and the index it
+// adds, both named after the documents table.
+export const getDocumentStorageTotalsFunctionName = (documentsTable = getDocumentsPostgresTable()) =>
+  ensureSimpleTableName(
+    `${ensureSimpleTableName(documentsTable, "DOCUMENTS_POSTGRES_TABLE")}_storage_totals`.toLowerCase(),
+    "derived document storage-totals function"
+  );
 
 const getTableNames = () => ({
   longMemoryTable: ensureSimpleTableName(
@@ -101,6 +171,9 @@ const getTableNames = () => ({
     getIndexVersionsPostgresTable(),
     "INDEX_VERSIONS_POSTGRES_TABLE"
   ),
+  feedbackTable: getFeedbackTableName(),
+  ...getTenantRegistryTableNames(),
+  tenantUsageTable: getTenantUsageTableName(),
 });
 
 const validateTableNames = (tableNames = {}) => ({
@@ -140,8 +213,8 @@ const validateTableNames = (tableNames = {}) => ({
     tableNames.workspaceArtifactsTable,
     "WORKSPACE_ARTIFACTS_POSTGRES_TABLE"
   ),
-  // These two are optional for injected table maps so older callers keep
-  // working; the runtime map always carries them.
+  // The tables below are optional for injected table maps so older callers
+  // keep working; the runtime map always carries them.
   documentChunksTable: ensureSimpleTableName(
     tableNames.documentChunksTable ?? getDocumentChunksPostgresTable(),
     "DOCUMENT_CHUNKS_POSTGRES_TABLE"
@@ -153,6 +226,17 @@ const validateTableNames = (tableNames = {}) => ({
   indexVersionsTable: ensureSimpleTableName(
     tableNames.indexVersionsTable ?? getIndexVersionsPostgresTable(),
     "INDEX_VERSIONS_POSTGRES_TABLE"
+  ),
+  feedbackTable: getFeedbackTableName(
+    tableNames.feedbackTable ?? getFeedbackPostgresTable()
+  ),
+  ...getTenantRegistryTableNames({
+    workspaceMembersTable:
+      tableNames.workspaceMembersTable ?? getWorkspaceMembersPostgresTable(),
+    workspacesTable: tableNames.workspacesTable ?? getWorkspacesPostgresTable(),
+  }),
+  tenantUsageTable: getTenantUsageTableName(
+    tableNames.tenantUsageTable ?? getTenantUsagePostgresTable()
   ),
 });
 
@@ -357,9 +441,13 @@ export const assertIndexVersionChunkTableName = (chunkTable) => {
 
 // Mirrors the chunk-table policy of migration 013: a row with neither owner
 // nor workspace is never visible to a tenant, and each non-empty owner column
-// must equal the tenant's setting.
-const buildChunkTableTenantPolicySql = ({ chunkTable, tenantRole }) => `
+// must equal the tenant's setting. The system role (migration 035) gets its
+// grant and its permissive system_access policy in the same statement; the
+// installer that runs after the BM25 install restates them and covers the
+// statistics tables and search functions too.
+const buildChunkTableTenantPolicySql = ({ chunkTable, systemRole, tenantRole }) => `
 GRANT SELECT, INSERT, UPDATE, DELETE ON ${chunkTable} TO ${tenantRole};
+GRANT SELECT, INSERT, UPDATE, DELETE ON ${chunkTable} TO ${systemRole};
 
 ALTER TABLE ${chunkTable} ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation ON ${chunkTable};
@@ -375,16 +463,150 @@ CREATE POLICY tenant_isolation ON ${chunkTable}
     AND (owner_user_id = '' OR owner_user_id = current_setting('archive_rag.user_id', true))
     AND (workspace_id = '' OR workspace_id = current_setting('archive_rag.workspace_id', true))
   );
+
+DROP POLICY IF EXISTS system_access ON ${chunkTable};
+CREATE POLICY system_access ON ${chunkTable}
+  TO ${systemRole}
+  USING (true)
+  WITH CHECK (true);
 `;
+
+/**
+ * The owner-only installer migration 035 creates, named after the
+ * migration-012 table: it gives the system role one chunk table (grant and
+ * system_access policy), the system_access policy on that table's BM25
+ * statistics tables, and EXECUTE on its sparse-rank and sparse-search
+ * functions.
+ */
+export const getSystemAccessInstallFunctionName = (
+  documentChunksTable = getDocumentChunksPostgresTable()
+) =>
+  ensureSimpleTableName(
+    `${ensureSimpleTableName(documentChunksTable, "DOCUMENT_CHUNKS_POSTGRES_TABLE")}_install_system_access`.toLowerCase(),
+    "derived system-access installer"
+  );
+
+/**
+ * The statement that gives the system role a new index version's table. It
+ * runs in the transaction that creates the table, after the table DDL and the
+ * BM25 install, so the statistics tables and the search function exist
+ * (vector-store-pgvector-version-lifecycle.js). Needs migration 035.
+ */
+export const renderSystemAccessInstallStatement = ({
+  chunkTable,
+  documentChunksTable = getDocumentChunksPostgresTable(),
+}) => {
+  const safeChunkTable = assertIndexVersionChunkTableName(chunkTable).toLowerCase();
+
+  return `SELECT ${getSystemAccessInstallFunctionName(documentChunksTable)}('${safeChunkTable}');`;
+};
+
+/**
+ * The grant the migrator runs on every run while the role split is on: the
+ * tenant and system roles to the runtime login, with SET (it switches into
+ * them per transaction) and without INHERIT (it must not use their privileges
+ * without switching: an unbound statement would otherwise read through the
+ * system role's policies). PostgreSQL 16 split SET and INHERIT out of plain
+ * membership; before 16 a plain grant is made and the runtime login itself
+ * must be NOINHERIT (the health check reports a login that can use a table
+ * directly). A login that already holds SET is left as it is, so a role
+ * administrator may make the grant beforehand
+ * (deploy/postgres/create-split-roles.sql) and the migration login then
+ * needs no ADMIN option. The login's name travels as a transaction-local
+ * setting set with a bind parameter, never in the SQL text; the two role names
+ * are validated identifiers.
+ */
+export const renderRuntimeRoleGrantSql = ({
+  systemRole = getPostgresSystemRole(),
+  tenantRole = getPostgresTenantRole(),
+} = {}) => {
+  const safeTenantRole = ensureSimpleTableName(tenantRole, "POSTGRES_TENANT_ROLE");
+  const safeSystemRole = ensureSimpleTableName(systemRole, "POSTGRES_SYSTEM_ROLE");
+
+  if (safeTenantRole === safeSystemRole) {
+    throw new Error(`POSTGRES_SYSTEM_ROLE must differ from POSTGRES_TENANT_ROLE (both are "${safeTenantRole}").`);
+  }
+
+  return `DO $grant$
+DECLARE
+  runtime_login CONSTANT text := current_setting('archive_rag.runtime_login', true);
+  granted_role text;
+BEGIN
+  IF runtime_login IS NULL OR runtime_login = '' THEN
+    RAISE EXCEPTION 'The runtime login to grant the tenant and system roles to is not set.';
+  END IF;
+
+  FOREACH granted_role IN ARRAY ARRAY['${safeTenantRole}', '${safeSystemRole}'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = granted_role) THEN
+      RAISE EXCEPTION 'Role "%" does not exist; migrations 013 and 035 create it.', granted_role;
+    END IF;
+
+    BEGIN
+      IF current_setting('server_version_num')::int >= 160000 THEN
+        IF NOT pg_has_role(runtime_login, granted_role, 'SET') THEN
+          EXECUTE format('GRANT %I TO %I WITH INHERIT FALSE, SET TRUE', granted_role, runtime_login);
+        END IF;
+      ELSIF NOT pg_has_role(runtime_login, granted_role, 'MEMBER') THEN
+        EXECUTE format('GRANT %I TO %I', granted_role, runtime_login);
+      END IF;
+    EXCEPTION
+      WHEN insufficient_privilege THEN
+        RAISE EXCEPTION 'The migration login "%" may not grant role "%" to the runtime login "%".', current_user, granted_role, runtime_login
+          USING HINT = format('Grant it as a role administrator: GRANT %I TO %I WITH INHERIT FALSE, SET TRUE;', granted_role, runtime_login);
+      -- Another process made the same grant at the same moment.
+      WHEN unique_violation THEN
+        NULL;
+    END;
+  END LOOP;
+END
+$grant$;`;
+};
+
+/**
+ * The owner-only installer migration 033 creates, named after the
+ * migration-012 table: it (re)creates `<table>_sparse_rank` for one chunk
+ * table with the tenant filter migration 014's body lacks.
+ */
+export const getSparseRankInstallFunctionName = (
+  documentChunksTable = getDocumentChunksPostgresTable()
+) =>
+  ensureSimpleTableName(
+    `${ensureSimpleTableName(documentChunksTable, "DOCUMENT_CHUNKS_POSTGRES_TABLE")}_install_sparse_rank`.toLowerCase(),
+    "derived sparse-rank installer"
+  );
+
+/**
+ * The statement that gives one chunk table migration 033's sparse-rank
+ * function. The table name is a validated simple identifier, so it is safe
+ * inside the string literal.
+ */
+export const renderSparseRankInstallStatement = ({
+  chunkTable,
+  documentChunksTable = getDocumentChunksPostgresTable(),
+}) => {
+  const safeChunkTable = assertIndexVersionChunkTableName(chunkTable).toLowerCase();
+
+  return `SELECT ${getSparseRankInstallFunctionName(documentChunksTable)}('${safeChunkTable}');`;
+};
 
 /**
  * The owner-only DDL that creates one index version's physical table: the
  * chunk table of migration 012 rendered at the version's width with its own
  * ANN and GIN indexes and foreign key to the documents table, the tenant grant
- * and row policy of migration 013, and the sparse-rank function of migration
- * 014 rendered for this table -- the same templates, so a version table cannot
- * drift from the schema the migrations maintain. CREATE TABLE is not IF NOT
- * EXISTS: a version id is never reused, so an existing table is an error.
+ * and row policy of migration 013, and the sparse-rank function of migrations
+ * 014 and 033 for this table -- the same templates, so a version table cannot
+ * drift from the schema the migrations maintain. Migration 014's template
+ * still sets the search_vector statistics target; migration 033's installer,
+ * called right after it in the same statement, then replaces 014's function
+ * with the one that filters a tenant's doc ids by the documents policy, so the
+ * unfiltered body is never committed for a version. That call needs migration
+ * 033 applied, as the BM25 install needs migration 030. CREATE TABLE is not IF
+ * NOT EXISTS: a version id is never reused, so an existing table is an error.
+ * The system role (migration 035) gets its grant and system_access policy on
+ * the table here too; the lifecycle then runs migration 035's installer after
+ * the BM25 install for the statistics tables and the search functions
+ * (renderSystemAccessInstallStatement). Under the role split the whole
+ * statement runs on the owner pool.
  */
 export const renderIndexVersionChunkTableDdl = async ({
   chunkTable,
@@ -392,15 +614,18 @@ export const renderIndexVersionChunkTableDdl = async ({
   indexParams = {},
   migrationsDirectory = defaultMigrationsDirectory,
   readFile = readTextFile,
+  systemRole = getPostgresSystemRole(),
   tableNames = getTableNames(),
   tenantRole = getPostgresTenantRole(),
 } = {}) => {
   const safeChunkTable = assertIndexVersionChunkTableName(chunkTable);
   const safeTenantRole = ensureSimpleTableName(tenantRole, "POSTGRES_TENANT_ROLE");
+  const safeSystemRole = ensureSimpleTableName(systemRole, "POSTGRES_SYSTEM_ROLE");
   const safeDimensions = ensureEmbeddingDimensions(dimensions);
   const names = { ...tableNames, documentChunksTable: safeChunkTable };
   const options = {
     embeddingDimensions: safeDimensions,
+    systemRole: safeSystemRole,
     tenantRole: safeTenantRole,
     textSearchConfig: indexParams.textSearchConfig ?? getPgvectorTextSearchConfig(),
     vectorIndexStatement: buildPgvectorIndexStatement({
@@ -423,8 +648,16 @@ export const renderIndexVersionChunkTableDdl = async ({
 
   return [
     tableSql,
-    buildChunkTableTenantPolicySql({ chunkTable: safeChunkTable, tenantRole: safeTenantRole }),
+    buildChunkTableTenantPolicySql({
+      chunkTable: safeChunkTable,
+      systemRole: safeSystemRole,
+      tenantRole: safeTenantRole,
+    }),
     renderMigrationSql(sparseRankTemplate, names, options),
+    renderSparseRankInstallStatement({
+      chunkTable: safeChunkTable,
+      documentChunksTable: tableNames.documentChunksTable ?? getDocumentChunksPostgresTable(),
+    }),
   ].join("\n");
 };
 
@@ -445,6 +678,7 @@ export const renderMigrationSql = (
   {
     embeddingDimensions = getEmbeddingDimensions(),
     indexVersionPointerTtlMs = getIndexVersionPointerTtlMs(),
+    systemRole = getPostgresSystemRole(),
     tenantRole = getPostgresTenantRole(),
     textSearchConfig = getPgvectorTextSearchConfig(),
     vectorIndexStatement = null,
@@ -458,6 +692,7 @@ export const renderMigrationSql = (
   const safeDimensions = ensureEmbeddingDimensions(embeddingDimensions);
   const safeTextSearchConfig = ensureTextSearchConfig(textSearchConfig);
   const safeTenantRole = ensureSimpleTableName(tenantRole, "POSTGRES_TENANT_ROLE");
+  const safeSystemRole = ensureSimpleTableName(systemRole, "POSTGRES_SYSTEM_ROLE");
   const safePointerTtlMs = Math.floor(Number(indexVersionPointerTtlMs));
 
   if (!Number.isInteger(safePointerTtlMs) || safePointerTtlMs <= 0) {
@@ -500,24 +735,71 @@ export const renderMigrationSql = (
     .replaceAll("__DOCUMENT_CHUNKS_TABLE__", safeTableNames.documentChunksTable)
     .replaceAll("__INGEST_JOB_OUTPUTS_TABLE__", getIngestJobOutputsTableName(safeTableNames.ingestJobsTable))
     .replaceAll("__INGEST_JOBS_TABLE__", safeTableNames.ingestJobsTable)
+    .replaceAll("__FEEDBACK_TABLE__", safeTableNames.feedbackTable)
+    .replaceAll("__WORKSPACE_MEMBERS_TABLE__", safeTableNames.workspaceMembersTable)
+    .replaceAll("__WORKSPACES_TABLE__", safeTableNames.workspacesTable)
+    .replaceAll("__TENANT_USAGE_TABLE__", safeTableNames.tenantUsageTable)
     .replaceAll("__INDEX_VERSION_POINTER_TTL_MS__", String(safePointerTtlMs))
     .replaceAll("__EMBEDDING_DIMENSIONS__", String(safeDimensions))
     .replaceAll("__TEXT_SEARCH_CONFIG__", safeTextSearchConfig)
     .replaceAll("__TENANT_ROLE__", safeTenantRole)
+    .replaceAll("__SYSTEM_ROLE__", safeSystemRole)
     .replaceAll("__VECTOR_INDEX_STATEMENT__", indexStatement);
 };
 
+/**
+ * The role split's grant step (renderRuntimeRoleGrantSql) on an owner client:
+ * the runtime login's name as a transaction-local setting (bind parameter),
+ * then the grant, in one transaction. Resolves to the login's name.
+ */
+export const grantRuntimeRoles = async ({
+  readRuntimeLogin = readPostgresRuntimeLogin,
+  systemRole = getPostgresSystemRole(),
+  tenantRole = getPostgresTenantRole(),
+  withClient = withPostgresOwnerClient,
+} = {}) => {
+  const runtimeLogin = await readRuntimeLogin();
+  const grantSql = renderRuntimeRoleGrantSql({ systemRole, tenantRole });
+
+  await withClient(async (client) => {
+    await client.query("BEGIN");
+
+    try {
+      await client.query("SELECT set_config('archive_rag.runtime_login', $1, true)", [runtimeLogin]);
+      await client.query(grantSql);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+  });
+
+  return runtimeLogin;
+};
+
+/**
+ * Applies the pending migrations, in file order, each in its own transaction
+ * on a raw owner session. With the role split on (POSTGRES_MIGRATION_DATABASE_
+ * URL) that session and the bookkeeping statements use the owner pool, and
+ * after the migrations the tenant and system roles are granted to the runtime
+ * login (grantRuntimeRoles) on every run, so a database migrated before the
+ * split was switched on needs no extra step; without the split they use the
+ * one pool exactly as before and nothing is granted.
+ */
 export const createPostgresMigrator = ({
   getEmbeddingDimensions: resolveEmbeddingDimensions = getEmbeddingDimensions,
+  getSystemRole: resolveSystemRole = getPostgresSystemRole,
   getTableNames: resolveTableNames = getTableNames,
   getTenantRole: resolveTenantRole = getPostgresTenantRole,
   getTextSearchConfig: resolveTextSearchConfig = getPgvectorTextSearchConfig,
+  grantRuntimeRoles: grantRoles = grantRuntimeRoles,
   isPostgresConfigured: isConfigured = isPostgresConfigured,
+  isRoleSplitEnabled = isPostgresRoleSplitEnabled,
   migrationsDirectory = defaultMigrationsDirectory,
-  queryPostgres: query = queryPostgres,
+  queryPostgres: query = queryPostgresAsOwner,
   readFile = readTextFile,
   readdir = readDirectory,
-  withPostgresClient: withClient = withPostgresClient,
+  withPostgresClient: withClient = withPostgresOwnerClient,
 } = {}) => {
   let migrationsInitialized = false;
 
@@ -574,6 +856,7 @@ export const createPostgresMigrator = ({
         resolveTableNames(),
         {
           embeddingDimensions: resolveEmbeddingDimensions(),
+          systemRole: resolveSystemRole(),
           tenantRole: resolveTenantRole(),
           textSearchConfig: resolveTextSearchConfig(),
         }
@@ -597,11 +880,16 @@ export const createPostgresMigrator = ({
       });
     }
 
+    const runtimeLogin = isRoleSplitEnabled()
+      ? await grantRoles({ systemRole: resolveSystemRole(), tenantRole: resolveTenantRole(), withClient })
+      : null;
+
     migrationsInitialized = true;
 
     return {
       status: "ok",
       appliedMigrations: newlyAppliedMigrations,
+      ...(runtimeLogin === null ? {} : { runtimeLogin }),
     };
   };
 

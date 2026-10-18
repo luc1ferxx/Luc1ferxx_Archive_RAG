@@ -31,6 +31,9 @@ import { getModelQueryVectorSpace } from "../rag/query-adapter.js";
 import { rerankResultsOrKeepOrder, rerankResultsWithProvider } from "../rag/reranker.js";
 import { createRunUsage, runWithRunUsage } from "../rag/run-usage.js";
 import { SERVICE_TOKEN_HEADER, signServiceToken } from "../rag/service-identity.js";
+import { getMetricsRegistry, setMetricsEnabled } from "../rag/metrics.js";
+import "../rag/metrics-tenant.js";
+import { configureTenantUsageLedger } from "../rag/tenant-usage.js";
 
 // The model gateway end to end in one process: a fake OpenAI-compatible
 // backend on an OS-assigned port, the gateway app on another, and this process
@@ -547,7 +550,9 @@ test("replicas share the load and each has its own breaker; a refused connection
   assert.ok(second.requests.length >= 2, `second replica took ${second.requests.length}`);
   assert.equal(first.requests.length + second.requests.length, 6);
 
-  const health = await (await fetch(`${gateway.url}/health`)).json();
+  const health = await (
+    await fetch(`${gateway.url}/health`, { headers: { [SERVICE_TOKEN_HEADER]: signToken({ system: true }) } })
+  ).json();
   const refusedReplica = health.upstreams.embedding.replicas.find((replica) =>
     replica.url.startsWith(refusedUrl)
   );
@@ -620,6 +625,49 @@ test("a workspace over its quota gets 429 with Retry-After and a stable code; ot
   assert.equal(alice.requests, 4);
   assert.deepEqual(alice.rejectedRequests, { requests_per_minute: 2 });
   assert.equal(usage.usage.tenants.find((entry) => entry.system).requests, 1);
+});
+
+// rag/tenant-refusals.js at the gateway: each quota refusal is counted once,
+// by the gateway, for the token's tenant (the calling tier counts nothing).
+test("a gateway quota refusal is counted once per refusal, for the token's tenant, with no tenant label", async (t) => {
+  withEnv(t, BASE_ENV);
+  const refusals = [];
+
+  configureTenantUsageLedger({
+    record: () => false,
+    recordRefusal: (tenant, reason) => {
+      refusals.push({ reason, tenant });
+      return true;
+    },
+  });
+  setMetricsEnabled(true);
+  getMetricsRegistry().getFamily("archive_rag_tenant_refusals_total").clear();
+  t.after(() => {
+    configureTenantUsageLedger(null);
+    setMetricsEnabled(null);
+  });
+
+  const upstream = await startUpstream(t);
+  withEnv(t, { OPENAI_BASE_URL: upstream.baseUrl });
+  await startGateway(t, {
+    quotas: createModelGatewayQuotas({ limits: { requestsPerMinute: 1 }, redis: null }),
+  });
+
+  await runWithDatabaseTenant(ALICE, () => completeTextWithMetadata("one"));
+  await assert.rejects(
+    runWithDatabaseTenant(ALICE, () => completeTextWithMetadata("two")),
+    (error) => error.code === MODEL_GATEWAY_ERROR_CODES.quotaExceeded
+  );
+
+  assert.deepEqual(refusals, [{ reason: MODEL_GATEWAY_ERROR_CODES.quotaExceeded, tenant: ALICE }]);
+
+  const family = getMetricsRegistry().getFamily("archive_rag_tenant_refusals_total");
+
+  assert.deepEqual([...family.labelNames], ["reason"]);
+  assert.deepEqual(
+    [...family.series.values()].map((entry) => [entry.labelValues, entry.value]),
+    [[[MODEL_GATEWAY_ERROR_CODES.quotaExceeded], 1]]
+  );
 });
 
 test("a token quota counts answered tokens per workspace", async (t) => {
@@ -942,13 +990,28 @@ test("a stream that breaks, stalls or cannot be parsed fails with the gateway's 
   });
 });
 
-test("health reports replicas, guard state and quotas without secrets", async (t) => {
+test("health reports replicas, guard state and quotas without secrets, to a signed probe only", async (t) => {
   withEnv(t, BASE_ENV);
   const upstream = await startUpstream(t);
   withEnv(t, { OPENAI_BASE_URL: upstream.baseUrl });
   const gateway = await startGateway(t);
+  const probe = (headers = {}) => fetch(`${gateway.url}/health`, { headers });
 
-  const response = await fetch(`${gateway.url}/health`);
+  // Anyone else, a container healthcheck among them, gets the status alone,
+  // with the same status code: no token, a token for another tier, a forged
+  // or garbled one.
+  for (const headers of [
+    {},
+    { [SERVICE_TOKEN_HEADER]: signToken({ audience: "retrieval", system: true }) },
+    { [SERVICE_TOKEN_HEADER]: "not-a-token" },
+  ]) {
+    const unsigned = await probe(headers);
+
+    assert.equal(unsigned.status, 200);
+    assert.deepEqual(await unsigned.json(), { status: "ok" });
+  }
+
+  const response = await probe({ [SERVICE_TOKEN_HEADER]: signToken({ system: true }) });
   const text = await response.text();
   const health = JSON.parse(text);
 

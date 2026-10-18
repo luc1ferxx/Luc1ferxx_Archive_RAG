@@ -1,17 +1,18 @@
 import { Router } from "express";
-import { readFile } from "fs/promises";
 import multer from "multer";
 import path from "path";
 import { createHash, randomUUID } from "crypto";
 import { z } from "zod";
 
 import { bindDatabaseTenant, getRequestAccessScope } from "../auth.js";
+import { DATA_ACCESS_ACTION_IDS } from "../rag/admin-audit.js";
 import { ADMIN_PERMISSION_IDS } from "../rag/admin-permissions.js";
 import {
   getAdminStatusReadPermission,
   requireAdminPermission,
 } from "../rag/admin-authorization.js";
 import { isRagIngestAsync, isRagIngestDedupEnabled } from "../rag/config.js";
+import { createDataAccessAudit } from "../rag/data-access-audit.js";
 import {
   REPLACEMENT_NEEDS_TRANSACTION_MESSAGE,
   replaceDocument as replaceDocumentInProcess,
@@ -24,9 +25,16 @@ import {
 import { INGEST_JOB_KINDS } from "../rag/ingest-stages.js";
 import { loadDocumentsIngestedElsewhere } from "../rag/ingest-worker.js";
 import {
+  assertTenantStorageQuotaAllows,
+  describeTenantStorageQuotaError,
+} from "../rag/tenant-storage-quota.js";
+import {
   MAX_UPLOAD_MULTIPART_FIELD_BYTES,
   MAX_UPLOAD_MULTIPART_FIELDS,
 } from "../upload-policy.js";
+import { UPLOAD_SESSION_LIMIT_EXCEEDED } from "../upload-session-store.js";
+import { readWorkingFile } from "../rag/working-files.js";
+import { createWorkingFileDiskStorage } from "./working-file-storage.js";
 
 import {
   cleanupUploadedFile,
@@ -73,6 +81,8 @@ const uploadChunkBodySchema = z
 export const createUploadsRouter = (services) => {
   const router = Router();
   const { ingestJobStore, ragService, uploadStore, uploadsDirectory } = services;
+  // ADMIN_AUDIT_DATA_EVENTS: a document replace (ids only).
+  const dataAudit = createDataAccessAudit({ auditService: services.adminAuditService });
   const runBestEffort = async (label, operation) => {
     try {
       await operation();
@@ -98,9 +108,25 @@ export const createUploadsRouter = (services) => {
   // either mode can resolve a duplicate (RAG_INGEST_DEDUP) and every document
   // records it.
   const ingestUpload = async ({ accessScope, docId, fileName, filePath, kind = INGEST_JOB_KINDS.create }) => {
-    const fileBytes = await readFile(filePath);
+    // The upload is a working file (encrypted with TENANT_ENCRYPTION=on); the
+    // hash, the quota and the queued job all see its plaintext.
+    const fileBytes = await readWorkingFile(filePath);
     const contentSha256 = createHash("sha256").update(fileBytes).digest("hex");
     const deduplicate = kind === INGEST_JOB_KINDS.create && isRagIngestDedupEnabled();
+    const replacing = kind === INGEST_JOB_KINDS.replace;
+
+    // Storage quotas (TENANT_MAX_DOCUMENTS / TENANT_MAX_DOCUMENT_BYTES, off by
+    // default): refused here before the PDF is parsed, embedded or queued;
+    // the commit checks again under its locks (rag/index.js commitDocument).
+    await assertTenantStorageQuotaAllows({
+      addedBytes: replacing
+        ? fileBytes.length - (Number(ragService.getDocument?.(docId, accessScope)?.fileSize) || 0)
+        : fileBytes.length,
+      addedDocuments: replacing ? 0 : 1,
+      duplicateOfSha256: deduplicate ? contentSha256 : null,
+      ownerUserId: accessScope.userId,
+      workspaceId: accessScope.workspaceId,
+    });
 
     if (!isRagIngestAsync()) {
       if (kind === INGEST_JOB_KINDS.replace) {
@@ -162,7 +188,7 @@ export const createUploadsRouter = (services) => {
     };
   };
 
-  const storage = multer.diskStorage({
+  const storage = createWorkingFileDiskStorage({
     destination: (req, file, cb) => {
       cb(null, uploadsDirectory);
     },
@@ -209,6 +235,16 @@ export const createUploadsRouter = (services) => {
 
     try {
       const accessScope = getRequestAccessScope(req);
+
+      // An upload the storage quota would refuse at commit is refused before
+      // any chunk is sent (declared size; off by default).
+      await assertTenantStorageQuotaAllows({
+        addedBytes: Number(req.body?.fileSize) || 0,
+        addedDocuments: 1,
+        ownerUserId: accessScope.userId,
+        workspaceId: accessScope.workspaceId,
+      });
+
       const session = await uploadStore.initializeUploadSession({
         accessScope,
         fileId: req.body.fileId,
@@ -222,7 +258,15 @@ export const createUploadsRouter = (services) => {
 
       return res.status(201).json(session);
     } catch (error) {
+      // A per-tenant session cap (UPLOAD_SESSION_MAX_PER_TENANT,
+      // UPLOAD_SESSION_MAX_BYTES_PER_TENANT) answers 429 with its stable code
+      // and which cap it hit; no other error's code is exposed.
+      const limitExceeded =
+        error?.status === 429 && error?.code === UPLOAD_SESSION_LIMIT_EXCEEDED;
+
       return res.status(error.status ?? 500).json({
+        ...(limitExceeded ? { code: error.code, limit: error.limit } : {}),
+        ...describeTenantStorageQuotaError(error),
         error: serializeError(error, "Failed to initialize the upload session."),
       });
     }
@@ -384,6 +428,7 @@ export const createUploadsRouter = (services) => {
       }
 
       return res.status(error.status ?? 500).json({
+        ...describeTenantStorageQuotaError(error),
         error: serializeError(error, "Failed to finalize the uploaded PDF."),
       });
     }
@@ -434,6 +479,7 @@ export const createUploadsRouter = (services) => {
       await cleanupUploadedFile(req.file.path);
 
       return res.status(error.status ?? 500).json({
+        ...describeTenantStorageQuotaError(error),
         error: serializeError(error, "Failed to ingest uploaded PDF."),
       });
     }
@@ -495,32 +541,49 @@ export const createUploadsRouter = (services) => {
       }
 
       const accessScope = getRequestAccessScope(req);
+      const recordReplace = (status) =>
+        dataAudit.recordOutcome(req, {
+          accessScope,
+          actionId: DATA_ACCESS_ACTION_IDS.documentReplace,
+          resourceIds: [parsed.docId],
+          status,
+        });
 
       // Another instance may have registered (or deleted) it.
       await loadDocumentsIngestedElsewhere(ragService, [parsed.docId]);
 
       if (!ragService.getDocument?.(parsed.docId, accessScope)) {
         await cleanupUploadedFile(req.file.path);
+        await recordReplace(404);
 
         return res.status(404).json({
           error: "Document not found.",
         });
       }
 
-      const ingestion = await ingestUpload({
-        accessScope,
-        docId: parsed.docId,
-        fileName: req.file.originalname,
-        filePath: req.file.path,
-        kind: INGEST_JOB_KINDS.replace,
-      });
+      let ingestion;
+
+      try {
+        ingestion = await ingestUpload({
+          accessScope,
+          docId: parsed.docId,
+          fileName: req.file.originalname,
+          filePath: req.file.path,
+          kind: INGEST_JOB_KINDS.replace,
+        });
+      } catch (error) {
+        await recordReplace(error.status ?? 500);
+        throw error;
+      }
 
       await cleanupUploadedFile(req.file.path);
+      await recordReplace(ingestion.status);
       return res.status(ingestion.status).json(ingestion.body);
     } catch (error) {
       await cleanupUploadedFile(req.file.path);
 
       return res.status(error.status ?? 500).json({
+        ...describeTenantStorageQuotaError(error),
         error: serializeError(error, "Failed to replace the document."),
       });
     }

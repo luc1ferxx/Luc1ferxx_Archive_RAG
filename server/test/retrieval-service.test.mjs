@@ -777,10 +777,29 @@ test("only a signed identity for the retrieval audience from an allowed issuer g
   assert.equal((await ping(null)).status, 401);
   assert.equal((await ping(tokenFor({ audience: "agent", system: true }))).status, 403);
 
-  const health = await fetch(`${replica.url}/health`);
+  const probe = (pathName, token) =>
+    fetch(`${replica.url}${pathName}`, { headers: token ? { [SERVICE_TOKEN_HEADER]: token } : {} });
+
+  // Without a probe identity /health and /ready answer the status alone, with
+  // the same status code: no token, another tier's, one from an issuer the
+  // policy does not let probe this tier, a garbled one.
+  for (const token of [
+    null,
+    tokenFor({ audience: "agent", system: true }),
+    tokenFor({ issuer: "retrieval", system: true }),
+    "not-a-token",
+  ]) {
+    const bare = await probe("/health", token);
+
+    assert.equal(bare.status, 200, "health needs no identity");
+    assert.deepEqual(Object.keys(await bare.json()), ["status"]);
+  }
+
+  // The api edge may probe (SERVICE_CALL_POLICY probers), system tokens included.
+  const health = await probe("/health", tokenFor({ issuer: "api", system: true }));
   const report = await health.json();
 
-  assert.equal(health.status, 200, "health needs no identity");
+  assert.equal(health.status, 200);
   assert.equal(report.service, "retrieval");
   assert.equal(report.checks.vectorStore.provider, "local");
   assert.equal(report.checks.vectorStore.runtime.vectorStoreProvider, "local");
@@ -792,9 +811,19 @@ test("only a signed identity for the retrieval audience from an allowed issuer g
     "vectorStore",
   ]);
 
-  const ready = await fetch(`${replica.url}/ready`);
+  const ready = await probe("/ready");
 
   assert.equal(ready.status, report.status === "ok" ? 200 : 503);
+  assert.deepEqual(await ready.json(), { status: report.status });
+
+  const signedReady = await probe("/ready", tokenFor({ issuer: "agent", system: true }));
+
+  assert.equal(signedReady.status, ready.status);
+  assert.deepEqual(Object.keys((await signedReady.json()).checks).sort(), [
+    "queryAdapter",
+    "serviceTopology",
+    "vectorStore",
+  ]);
 });
 
 // ---------------------------------------------------------------------------

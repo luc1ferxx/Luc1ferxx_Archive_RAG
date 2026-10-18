@@ -48,6 +48,7 @@ const DISABLED_AUTH = Object.freeze({
   error: "",
   me: null,
   oidcEnabled: false,
+  reloadMe: async () => null,
   signIn: () => undefined,
   signOut: () => undefined,
   status: "disabled",
@@ -332,9 +333,29 @@ export const AuthProvider = ({
 
   const can = useCallback((capability) => decideCapability(state, capability), [state]);
 
+  // Reads /auth/me again for the workspace now selected (WorkspaceProvider
+  // calls it after a switch, so the UI gates follow that workspace's roles).
+  // A failed read keeps the previous answer; the server decides either way.
+  const reloadMe = useCallback(async () => {
+    if (!hasOidcAccessToken()) {
+      return null;
+    }
+
+    const me = await Promise.resolve()
+      .then(() => loadMe())
+      .catch(() => null);
+
+    if (me && typeof me === "object" && !Array.isArray(me)) {
+      setState((current) => (current.status === "signed_in" ? { ...current, me } : current));
+      return me;
+    }
+
+    return null;
+  }, [loadMe]);
+
   const value = useMemo(
-    () => ({ ...state, can, signIn: () => signIn(), signOut }),
-    [can, signIn, signOut, state]
+    () => ({ ...state, can, reloadMe, signIn: () => signIn(), signOut }),
+    [can, reloadMe, signIn, signOut, state]
   );
 
   // Children mount only once auth is settled, so the app's first requests

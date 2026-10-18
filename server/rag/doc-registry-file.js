@@ -30,6 +30,14 @@ import {
 } from "./doc-registry.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { getRagDataPath, readJsonFileSync, writeJsonFileAsync } from "./storage.js";
+import {
+  decryptTenantBytes,
+  decryptTenantRecordBytesForExport,
+  documentFileContext,
+  maybeEncryptTenantBytes,
+} from "./tenant-encryption.js";
+import { tenantSelectorMatches } from "./tenant-records.js";
+import { readWorkingFile } from "./working-files.js";
 
 const REGISTRY_FILE_NAME = "documents.json";
 const DOCUMENTS_DIRECTORY_NAME = "documents";
@@ -135,10 +143,16 @@ const writeFileAtomically = async (filePath, buffer) => {
   }
 };
 
+// A record's stored file as plaintext: with TENANT_ENCRYPTION=on the file
+// holds an envelope bound to the docId and owner (rag/tenant-encryption.js);
+// a file written before is plaintext and passes through.
+const toDocumentFileContext = (record) =>
+  documentFileContext({ docId: record.docId, userId: record.ownerUserId, workspaceId: record.workspaceId });
+
 export const createFileDocumentRegistryStore = ({
   getDocumentsDirectory = () => getRagDataPath(DOCUMENTS_DIRECTORY_NAME),
   getRegistryFilePath = () => getRagDataPath(REGISTRY_FILE_NAME),
-  readFile = readBinaryFile,
+  readFile = readWorkingFile,
 } = {}) => {
   let writeQueue = Promise.resolve();
 
@@ -224,12 +238,13 @@ export const createFileDocumentRegistryStore = ({
         fileSize: storedRecord.fileSize || fileBuffer.byteLength,
         updatedAt: storedRecord.updatedAt ?? storedRecord.uploadedAt,
       };
+      const storedBytes = await maybeEncryptTenantBytes(fileBuffer, toDocumentFileContext(record));
 
       return withWriteLock(async () => {
         // Bytes before registry entry. Interrupted here you get orphan bytes that
         // nothing references; the other order would leave a registered document
         // whose file does not exist, which reads as corruption to every caller.
-        await writeFileAtomically(documentFilePath(record.docId), fileBuffer);
+        await writeFileAtomically(documentFilePath(record.docId), storedBytes);
         await persistRecords([
           ...loadRecords().filter((existing) => existing.docId !== record.docId),
           record,
@@ -270,7 +285,9 @@ export const createFileDocumentRegistryStore = ({
 
       return {
         document: record,
-        fileBuffer,
+        // Throws its coded error when an envelope does not decrypt (a
+        // destroyed key, a changed byte): never an unreadable PDF.
+        fileBuffer: await decryptTenantBytes(fileBuffer, toDocumentFileContext(record)),
         mimeType: record.mimeType,
         fileName: record.fileName,
         fileSize: record.fileSize,
@@ -334,6 +351,36 @@ export const createFileDocumentRegistryStore = ({
 
         return true;
       });
+    },
+
+    // The tenant export (rag/tenant-records.js): the tenant's records, each
+    // with its file bytes as plaintext (null when the file cannot be read; an
+    // envelope that does not decrypt is null too, with its code in
+    // unreadableBytes). An erase deletes through delete()
+    // (rag/doc-registry.js eraseStoredDocuments).
+    async listTenantRecords(selector) {
+      const entries = [];
+
+      for (const record of loadRecords().filter((candidate) =>
+        tenantSelectorMatches(selector, candidate)
+      )) {
+        let fileBytes = null;
+
+        try {
+          fileBytes = await readBinaryFile(documentFilePath(record.docId));
+        } catch {
+          fileBytes = null;
+        }
+
+        entries.push({
+          record: fileBytes
+            ? await decryptTenantRecordBytesForExport({ ...record, fileBytes }, "fileBytes", toDocumentFileContext(record))
+            : { ...record, fileBytes },
+          table: "documents",
+        });
+      }
+
+      return entries;
     },
 
     // Deliberately not a wipe. resetDocumentRegistryStore() calls reset() to drop
