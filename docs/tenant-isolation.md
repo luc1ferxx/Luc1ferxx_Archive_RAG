@@ -102,6 +102,14 @@
 | 擦除和导出 | `test/tenant-lifecycle-postgres.integration.test.mjs` |
 | 共享状态（Redis）下的限流 | `test/tenant-limits-redis.integration.test.mjs`（需要 `REDIS_TEST_URL`） |
 
+### 2026-10-18 的一次完整验证（提交 837345f2 前后）
+
+- 后端全量测试在一次性 PostgreSQL 18.6 + pgvector 0.8.6 上运行，同时提供 Redis（`REDIS_TEST_URL`）和旧版本检出（`ARCHIVE_RAG_UPGRADE_FROM`）：4038 项，4036 通过，0 失败，2 项跳过（需要流复制副本）。这 2 项用 `scripts/run-pgvector-replica-integration.sh` 补跑：5/5 通过。
+- 前端测试 177/177 通过，`npm run build` 成功。
+- CI 的确定性评测：合成评测全部通过，并与固定基线一致；trajectory 84/84，planner（mock）27/27，recovery 29/29，feedback 通过。`quality:current` 只用这次生成的报告时为 pass（本地一份 9 月的真实模型 planner 报告不属于这次运行）。
+- Docker：镜像构建成功；`compose.demo.yml` 下三个容器都健康。seed 之后 walkthrough 连跑两遍，都是 26 PASS / 0 FAIL / 1 SKIP（审计链校验只能在命令行跑），之后对容器里的库运行 `audit:verify`：63 条记录、5 条链，全部校验通过。应用日志里没有错误，也没有缺少租户上下文的报错。`down -v` 只删除演示自己的数据卷。
+- 压测（`run-load-test-pgvector.sh --tenant --model-latency-ms 0 --repeat 3`，main 与本分支在同一台机器上依次运行，取 3 次的平均）：`POST /chat` 吞吐在并发 1/4/16/32 下分别为 −3.5%、+1.5%、+0.2%、−2.1%，并发 32 时每个请求的 CPU 约多 4–5%。`GET /documents` 为 −5.8% 到 +0.5%；本地存储模式在并发 32 时为 −10.7%，但这一项两边各只跑了一轮，而并发 32 不同轮次之间本身会漂 15–20%，不能当成确定的开销。
+
 ## 已知限制
 
 - **加密范围**：切块文本、向量、tsvector、run 快照、反馈和记忆仍是明文，因为检索和 agent 要直接读。擦除会删掉它们，但更早的数据库备份里还在，所以备份保留期必须有上限。
