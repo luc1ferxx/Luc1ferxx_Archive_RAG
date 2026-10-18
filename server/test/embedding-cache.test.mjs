@@ -577,3 +577,95 @@ test("concurrent embeddings of one text from two tenants are two flights, so one
   assert.equal(b.meter.used.modelCalls, 1);
   assert.deepEqual(describeEmbeddingFlights(), []);
 });
+
+// RAG_EMBEDDING_CACHE_SCOPE=tenant: a cache hit answers without a model call,
+// so under the shared default a tenant can time its own query to learn that
+// another tenant recently asked exactly that text. The tenant scope keys the
+// cached vectors by the flight's tenant partition.
+describe("RAG_EMBEDDING_CACHE_SCOPE", () => {
+  const embedAs = (scope, text) => runWithDatabaseTenant(scope, () => embedQueryCached(text));
+
+  test("shared (default and blank): tenant B's identical query hits the vector tenant A cached", async () => {
+    for (const value of [undefined, "", "  ", "shared", " Shared "]) {
+      resetEmbeddingCache();
+      const { calls, provider } = createCallTracker();
+      configureOpenAIProvider(provider);
+
+      await withEnv({ RAG_EMBEDDING_CACHE_SCOPE: value }, async () => {
+        await embedAs(ALICE, "Is Acme acquiring Beta?");
+        await embedAs(BOB, "Is Acme acquiring Beta?");
+        await embedAs(ALICE, "Is Acme acquiring Beta?");
+      });
+
+      assert.equal(calls.length, 1, `scope ${JSON.stringify(value)}: one model call for all three`);
+      assert.equal(describeEmbeddingCache().entries, 1);
+    }
+  });
+
+  test("tenant: B's identical query misses (calls the model) while A's repeat and B's own repeat hit", async () => {
+    const { calls, provider } = createCallTracker();
+    configureOpenAIProvider(provider);
+
+    await withEnv({ RAG_EMBEDDING_CACHE_SCOPE: "tenant" }, async () => {
+      assert.deepEqual(await embedAs(ALICE, "Is Acme acquiring Beta?"), FAKE_VECTOR);
+      assert.equal(calls.length, 1);
+
+      assert.deepEqual(await embedAs(BOB, "Is Acme acquiring Beta?"), FAKE_VECTOR);
+      assert.equal(calls.length, 2, "another tenant's cached vector is not served to B");
+
+      await embedAs(ALICE, "Is Acme acquiring Beta?");
+      await embedAs(BOB, "Is Acme acquiring Beta?");
+      assert.equal(calls.length, 2, "each tenant's repeat is a hit");
+
+      // The same user in another workspace is another tenant; a non-tenant
+      // context (here unbound: system work, auth off) is a partition of its own.
+      await embedAs({ ...ALICE, workspaceId: "globex" }, "Is Acme acquiring Beta?");
+      await embedQueryCached("Is Acme acquiring Beta?");
+      assert.equal(calls.length, 4);
+      await embedQueryCached("Is Acme acquiring Beta?");
+      assert.equal(calls.length, 4);
+    });
+
+    // The space key still leads every entry (diagnostics).
+    const { bySpace, entries } = describeEmbeddingCache();
+
+    assert.equal(entries, 4);
+    assert.deepEqual(Object.values(bySpace), [4]);
+  });
+
+  test("tenant: concurrent callers of one tenant still share one flight, and the space tag survives", async (t) => {
+    const held = createHeldProvider();
+    configureOpenAIProvider(held.provider);
+    t.after(() => held.release());
+
+    await withEnv({ RAG_EMBEDDING_CACHE_SCOPE: "tenant" }, async () => {
+      const first = embedAs(ALICE, "shared flight text");
+      const second = embedAs(ALICE, "shared flight text");
+
+      await waitUntil(() => held.seen.length === 1, "one call for one tenant");
+      assert.deepEqual(describeEmbeddingFlights(), [{ waiters: 2 }]);
+      held.release();
+
+      const [vectorA, vectorB] = await Promise.all([first, second]);
+
+      assert.equal(vectorA, vectorB);
+      assert.ok(getQueryVectorEmbeddingSpace(vectorA), "the cached vector keeps its space tag");
+      assert.equal(await embedAs(ALICE, "shared flight text"), vectorA, "and is then a hit");
+      assert.equal(held.seen.length, 1);
+    });
+  });
+
+  test("an unknown value fails the cached embedding instead of falling back to the shared cache", async () => {
+    const { calls, provider } = createCallTracker();
+    configureOpenAIProvider(provider);
+
+    await withEnv({ RAG_EMBEDDING_CACHE_SCOPE: "per-tenant" }, async () => {
+      await assert.rejects(
+        embedAs(ALICE, "anything"),
+        (error) => error.code === "RAG_EMBEDDING_CACHE_SCOPE_INVALID"
+      );
+    });
+
+    assert.equal(calls.length, 0);
+  });
+});

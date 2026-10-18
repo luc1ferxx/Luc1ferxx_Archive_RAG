@@ -12,8 +12,11 @@
 // A record matches on its stored owner columns exactly (trimmed), never on the
 // looser document visibility rule (documentMatchesAccessScope), under which
 // ann in acme also sees the workspace's shared documents and her personal ones.
-// Long-term memory has no workspace column: it belongs to the user in every
-// workspace and is covered only by a selector that names a user.
+// Long-term memory under LONG_MEMORY_SCOPE=user (the default) belongs to the
+// user in every workspace and is covered only by a selector that names a user
+// (userOnly below); under `workspace` its rows carry a workspace (migration
+// 045) and match like any other table, user-level rows (workspace '') only by
+// a selector of the user outside any workspace.
 //
 // Every store that keeps tenant records offers the same three calls:
 //   countTenantRecords(selector)   -> { [table]: { records, active? } }
@@ -109,7 +112,7 @@ export const tenantSelectorMatches = (selector, owner = {}) => {
   );
 };
 
-/** For a user-only store (long-term memory): the selector's user, if any. */
+/** For a user-only store (long-term memory, LONG_MEMORY_SCOPE=user): the selector's user, if any. */
 export const tenantSelectorMatchesUser = (selector, userId) =>
   selector.userId !== null && String(userId ?? "").trim() === selector.userId;
 
@@ -200,8 +203,9 @@ const DEFAULT_PAGE_SIZE = 200;
  *
  * - `name` is the report key (TENANT_ACTIVE_STATUSES names the ones with an
  *   `active` count, read from their `status` column).
- * - `userOnly` (long-term memory): the table has no workspace column; it is
- *   matched on the user alone and skipped by a workspace-wide selector.
+ * - `userOnly` (long-term memory under LONG_MEMORY_SCOPE=user): matched on
+ *   the user alone, whatever its workspace column holds, and skipped by a
+ *   workspace-wide selector.
  * - `workspaceOnly` (the tenant registry's workspace rows): the table has no
  *   user column (`userColumn` is not needed); it is matched on the workspace
  *   alone and skipped by every selector that names a user. Its pages are

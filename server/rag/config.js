@@ -1097,6 +1097,38 @@ export const getLongMemoryConfigStatus = () => {
 export const isLongMemoryEnabled = () =>
   getLongMemoryConfigStatus().enabled;
 
+// LONG_MEMORY_SCOPE (rag/long-memory.js). `user` (default): a user's notes,
+// preferences and agent experience follow the user into every workspace, as
+// before migration 045. `workspace`: notes and agent experience are stored in
+// and read from the active workspace only; the fixed-enum preferences (reply
+// language, answer style) stay user-level. An unknown value refuses the start,
+// never falls back to `user`.
+export const LONG_MEMORY_SCOPES = Object.freeze(["user", "workspace"]);
+
+export const getLongMemoryScope = () => {
+  const rawValue = process.env.LONG_MEMORY_SCOPE;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "user";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!LONG_MEMORY_SCOPES.includes(normalizedValue)) {
+    const error = new Error(
+      `LONG_MEMORY_SCOPE must be one of ${LONG_MEMORY_SCOPES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "LONG_MEMORY_SCOPE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
+export const isLongMemoryWorkspaceScoped = () => getLongMemoryScope() === "workspace";
+
 export const getAgentExperienceMemoryConfigStatus = () => {
   const longMemory = getLongMemoryConfigStatus();
   const explicitlyConfigured = hasEnvValue(
@@ -1868,6 +1900,38 @@ export const isTenantMembershipEnforced = () => getTenantMembershipMode() === "e
 export const getTenantRegistryCacheTtlMs = () =>
   Math.floor(toNonNegativeNumber(process.env.TENANT_REGISTRY_CACHE_TTL_MS, 5000));
 
+// TENANT_REGISTRY_CACHE_SCOPE (rag/tenant-registry.js): `shared` (default)
+// caches a workspace lookup once for every caller; `tenant` caches it per
+// requesting user, so an authenticated non-member probing a workspace id
+// neither hits nor joins a lookup another principal's request left (a hit is
+// faster than a database read, and told the prober that the workspace had a
+// request within the TTL). Membership lookups are per (workspace, user) under
+// both. A sibling of RAG_EMBEDDING_CACHE_SCOPE; an unknown value refuses the
+// start.
+export const TENANT_REGISTRY_CACHE_SCOPES = Object.freeze(["shared", "tenant"]);
+
+export const getTenantRegistryCacheScope = () => {
+  const rawValue = process.env.TENANT_REGISTRY_CACHE_SCOPE;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "shared";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!TENANT_REGISTRY_CACHE_SCOPES.includes(normalizedValue)) {
+    const error = new Error(
+      `TENANT_REGISTRY_CACHE_SCOPE must be one of ${TENANT_REGISTRY_CACHE_SCOPES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "TENANT_REGISTRY_CACHE_SCOPE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
+
 export const isApiAuthEnabled = () =>
   toBoolean(process.env.API_AUTH_ENABLED, false);
 
@@ -2009,6 +2073,36 @@ export const getQueryEmbeddingCacheMaxEntries = () =>
 
 export const getQueryEmbeddingCacheTtlMs = () =>
   Math.floor(toPositiveNumber(process.env.RAG_EMBEDDING_CACHE_TTL_MS, 10 * 60 * 1000)) || 10 * 60 * 1000;
+
+// RAG_EMBEDDING_CACHE_SCOPE: `shared` (default) lets every tenant of the
+// process hit a vector another tenant's identical query left in the cache;
+// `tenant` partitions the cached vectors the way flights already are (the
+// tenant pair, or the non-tenant context), so a hit no longer tells a tenant
+// that some other tenant recently asked the same text. An unknown value
+// refuses the start and fails every cached embedding, never falls back.
+export const QUERY_EMBEDDING_CACHE_SCOPES = Object.freeze(["shared", "tenant"]);
+
+export const getQueryEmbeddingCacheScope = () => {
+  const rawValue = process.env.RAG_EMBEDDING_CACHE_SCOPE;
+
+  if (typeof rawValue !== "string" || rawValue.trim() === "") {
+    return "shared";
+  }
+
+  const normalizedValue = rawValue.trim().toLowerCase();
+
+  if (!QUERY_EMBEDDING_CACHE_SCOPES.includes(normalizedValue)) {
+    const error = new Error(
+      `RAG_EMBEDDING_CACHE_SCOPE must be one of ${QUERY_EMBEDDING_CACHE_SCOPES.join(", ")}. Received "${rawValue}".`
+    );
+
+    error.code = "RAG_EMBEDDING_CACHE_SCOPE_INVALID";
+    error.status = 500;
+    throw error;
+  }
+
+  return normalizedValue;
+};
 
 // ---------------------------------------------------------------------------
 // ADAPTER track: query-side linear embedding adapter (rag/query-adapter.js).

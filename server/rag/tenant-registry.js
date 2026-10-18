@@ -1,5 +1,6 @@
 import { normalizeScopeId, normalizeScopeIds } from "../access-scope.js";
 import {
+  getTenantRegistryCacheScope,
   getTenantRegistryCacheTtlMs,
   getTenantRegistryStoreConfigStatus,
 } from "./config.js";
@@ -739,7 +740,10 @@ export const createDefaultTenantRegistryStore = ({ memory = {}, postgres = {} } 
 // Service
 // ---------------------------------------------------------------------------
 
-const workspaceCacheKey = (workspaceId) => `w\u0000${workspaceId}`;
+// Under TENANT_REGISTRY_CACHE_SCOPE=tenant a workspace lookup is cached per
+// requesting user (`partition`); the bare key is the `shared` scope's.
+const workspaceCacheKey = (workspaceId, partition = null) =>
+  partition === null ? `w\u0000${workspaceId}` : `w\u0000${workspaceId}\u0000${partition}`;
 const memberCacheKey = (workspaceId, userId) => `m\u0000${workspaceId}\u0000${userId}`;
 const memberCachePrefix = (workspaceId) => `m\u0000${workspaceId}\u0000`;
 
@@ -784,7 +788,9 @@ export const createTenantRegistryService = ({
     const prefix = memberCachePrefix(workspaceId);
     const workspaceKey = workspaceCacheKey(workspaceId);
 
-    invalidate((key) => key === workspaceKey || key.startsWith(prefix));
+    invalidate(
+      (key) => key === workspaceKey || key.startsWith(`${workspaceKey}\u0000`) || key.startsWith(prefix)
+    );
   };
 
   const invalidateMember = (workspaceId, userId) => {
@@ -909,10 +915,16 @@ export const createTenantRegistryService = ({
     /**
      * Enforcement's workspace read: { workspaceId, status } or null, cached.
      * Bound as the workspace itself (no user), which is what migration 036's
-     * workspace policy lets read its row.
+     * workspace policy lets read its row. `forUserId` is the requesting user
+     * ('' for a credential bound to the workspace): under
+     * TENANT_REGISTRY_CACHE_SCOPE=tenant the entry and the in-flight read are
+     * that user's alone.
      */
-    lookupWorkspace(workspaceId) {
-      return cachedLookup(workspaceCacheKey(workspaceId), () =>
+    lookupWorkspace(workspaceId, { forUserId = "" } = {}) {
+      const partition =
+        getTenantRegistryCacheScope() === "tenant" ? String(forUserId ?? "") : null;
+
+      return cachedLookup(workspaceCacheKey(workspaceId, partition), () =>
         runWithDatabaseTenant({ userId: "", workspaceId }, async () => {
           const workspace = await store.getWorkspace(workspaceId);
 
@@ -1157,7 +1169,7 @@ export const decideTenantMembership = async ({
     if (userId) {
       const [membership, workspace] = await Promise.all([
         registry.lookupMembership(workspaceId, userId),
-        registry.lookupWorkspace(workspaceId),
+        registry.lookupWorkspace(workspaceId, { forUserId: userId }),
       ]);
 
       if (!membership) {

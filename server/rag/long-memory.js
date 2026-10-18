@@ -3,7 +3,9 @@ import {
   getLongMemoryConfigStatus,
   getLongMemoryPostgresTable,
   isLongMemoryEnabled,
+  isLongMemoryWorkspaceScoped,
 } from "./config.js";
+import { resolveConversationMemoryTenant } from "./conversation-memory-tenant.js";
 import { resetPostgresMigrations, runPostgresMigrations } from "./db-migrations.js";
 import {
   isPostgresConfigured,
@@ -19,6 +21,58 @@ const MAX_LIST_LIMIT = 500;
 const MAX_CONTEXT_ITEMS = 6;
 const USER_NOTE_MIN_LENGTH = 4;
 const PUBLIC_MEMORY_CATEGORIES = Object.freeze(["preference", "note"]);
+
+// LONG_MEMORY_SCOPE=workspace (migration 045). A workspace is a tenant, and a
+// user who belongs to two of them (a consultant serving two clients) must not
+// have a note taken in one recalled into answers in the other. Under that
+// scope every row carries the workspace it was written in, and a read in
+// workspace W sees the user's rows of W plus the user's user-level rows
+// (workspace_id ''); the tenant_isolation policy of migration 045 enforces the
+// same rule in PostgreSQL.
+//
+// User-level rows are the preferences below and nothing else: each holds one
+// value out of a fixed set and a fixed text (buildPreferenceMemoryText), so
+// nothing a user said in one workspace reaches another through them. Notes,
+// agent experience (whose text quotes request terms), any other category and
+// a preference with another key or value carry free text and stay in their
+// workspace. Rows written before the scope was turned on have workspace_id ''
+// and so stay visible in every workspace until the user deletes or clears
+// them.
+//
+// The workspace is the conversation memory tenant's
+// (rag/conversation-memory-tenant.js, the derivation session memory keys on):
+// the caller's access scope, else the active database tenant; '' when that
+// tenant has no workspace, and also with auth off, where every row stays
+// user-level as before. Under the default `user` scope none of this applies:
+// the store calls, their SQL and the stored rows are those of before 045.
+const USER_LEVEL_PREFERENCE_VALUES = new Map([
+  ["reply_language", Object.freeze(["zh", "en"])],
+  ["answer_style", Object.freeze(["concise", "detailed"])],
+]);
+
+const isUserLevelPreference = ({ category, memoryKey, memoryValue } = {}) =>
+  String(category ?? "").trim() === "preference" &&
+  (USER_LEVEL_PREFERENCE_VALUES.get(String(memoryKey ?? "").trim())?.includes(
+    String(memoryValue ?? "").trim()
+  ) ??
+    false);
+
+/**
+ * The workspace long-term memory reads and writes in for `accessScope` under
+ * LONG_MEMORY_SCOPE=workspace ('' = user-level only), or null under the
+ * default `user` scope, where memory is not partitioned by workspace.
+ */
+export const resolveLongMemoryWorkspace = (accessScope = null) =>
+  isLongMemoryWorkspaceScoped()
+    ? resolveConversationMemoryTenant(accessScope)?.workspaceId ?? ""
+    : null;
+
+// The store arguments a workspace adds: nothing under the `user` scope, so a
+// store sees exactly the calls it saw before LONG_MEMORY_SCOPE existed.
+const withWorkspace = (input, workspaceId) =>
+  workspaceId === null ? input : { ...input, workspaceId };
+
+const isWorkspaceArgument = (workspaceId) => typeof workspaceId === "string";
 
 const CHINESE_REPLY_PATTERNS = [
   /\u4ee5\u540e.*(?:\u7528\u4e2d\u6587|\u4e2d\u6587\u56de\u7b54)/i,
@@ -112,7 +166,17 @@ const mapRowToMemory = (row) => ({
   createdAt: toIsoString(row.created_at),
   updatedAt: toIsoString(row.updated_at),
   lastUsedAt: toIsoString(row.last_used_at),
+  // Only the workspace-scoped statements select the column, so a memory read
+  // under the `user` scope keeps the shape it had before migration 045.
+  ...(row.workspace_id === undefined ? {} : { workspaceId: String(row.workspace_id) }),
 });
+
+const MEMORY_COLUMNS = `memory_id, user_id, category, memory_key, memory_value, text, source,
+          confidence, created_at, updated_at, last_used_at`;
+
+// A read in workspace $n: the workspace's rows and the user-level rows.
+const visibleInWorkspace = (placeholder) =>
+  `(workspace_id = '' OR workspace_id = ${placeholder})`;
 
 const buildPreferenceMemoryText = (memoryKey, memoryValue) => {
   if (memoryKey === "reply_language" && memoryValue === "zh") {
@@ -134,6 +198,86 @@ const buildPreferenceMemoryText = (memoryKey, memoryValue) => {
   return "";
 };
 
+// remember() under LONG_MEMORY_SCOPE=workspace: the same dedupe and upsert,
+// within the row's workspace. The tenant_isolation policy (migration 045)
+// refuses a tenant's row for a workspace other than its own or ''.
+const rememberInWorkspace = async ({
+  category,
+  confidence,
+  memoryKey,
+  memoryValue,
+  source,
+  tableName,
+  text,
+  userId,
+  workspaceId,
+}) => {
+  const existing = await queryLongMemoryPostgres(
+    memoryKey
+      ? `
+          SELECT memory_id
+          FROM ${tableName}
+          WHERE user_id = $1
+            AND category = $2
+            AND memory_key = $3
+            AND workspace_id = $4
+            AND archived = FALSE
+          LIMIT 1
+        `
+      : `
+          SELECT memory_id
+          FROM ${tableName}
+          WHERE user_id = $1
+            AND category = $2
+            AND text = $3
+            AND workspace_id = $4
+            AND archived = FALSE
+          LIMIT 1
+        `,
+    [userId, category, memoryKey ?? text, workspaceId]
+  );
+
+  if (existing.rows[0]?.memory_id) {
+    const updated = await queryLongMemoryPostgres(
+      `
+        UPDATE ${tableName}
+        SET text = $2,
+            memory_value = $3,
+            source = $4,
+            confidence = $5,
+            archived = FALSE,
+            updated_at = NOW()
+        WHERE memory_id = $1 AND workspace_id = $6
+        RETURNING ${MEMORY_COLUMNS}, workspace_id
+      `,
+      [String(existing.rows[0].memory_id), text, memoryValue, source, confidence, workspaceId]
+    );
+
+    return updated.rows[0] ? mapRowToMemory(updated.rows[0]) : null;
+  }
+
+  const inserted = await queryLongMemoryPostgres(
+    `
+      INSERT INTO ${tableName} (
+        memory_id,
+        user_id,
+        category,
+        memory_key,
+        memory_value,
+        text,
+        source,
+        confidence,
+        workspace_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING ${MEMORY_COLUMNS}, workspace_id
+    `,
+    [randomUUID(), userId, category, memoryKey, memoryValue, text, source, confidence, workspaceId]
+  );
+
+  return mapRowToMemory(inserted.rows[0]);
+};
+
 const createDefaultStore = () => ({
   async initialize() {
     if (!isLongMemoryEnabled()) {
@@ -144,7 +288,14 @@ const createDefaultStore = () => ({
     return true;
   },
 
-  async list({ userId, limit = DEFAULT_LIST_LIMIT, categories = PUBLIC_MEMORY_CATEGORIES }) {
+  // `workspaceId` (a string, LONG_MEMORY_SCOPE=workspace only): that
+  // workspace's rows and the user-level rows. Absent: every row of the user.
+  async list({
+    userId,
+    limit = DEFAULT_LIST_LIMIT,
+    categories = PUBLIC_MEMORY_CATEGORIES,
+    workspaceId,
+  }) {
     const normalizedUserId = ensureUserId(userId);
     const normalizedCategories = Array.isArray(categories)
       ? [
@@ -171,6 +322,25 @@ const createDefaultStore = () => ({
       1,
       Math.min(MAX_LIST_LIMIT, Number(limit) || DEFAULT_LIST_LIMIT)
     );
+
+    if (isWorkspaceArgument(workspaceId)) {
+      const scoped = await queryLongMemoryPostgres(
+        `
+          SELECT ${MEMORY_COLUMNS}, workspace_id
+          FROM ${tableName}
+          WHERE user_id = $1
+            AND category = ANY($3::text[])
+            AND archived = FALSE
+            AND ${visibleInWorkspace("$4")}
+          ORDER BY updated_at DESC
+          LIMIT $2
+        `,
+        [normalizedUserId, safeLimit, normalizedCategories, workspaceId.trim()]
+      );
+
+      return scoped.rows.map(mapRowToMemory);
+    }
+
     const result = await queryLongMemoryPostgres(
       `
         SELECT memory_id, user_id, category, memory_key, memory_value, text, source,
@@ -196,6 +366,9 @@ const createDefaultStore = () => ({
     text,
     source = "user_explicit",
     confidence = 1,
+    // A string under LONG_MEMORY_SCOPE=workspace only: the row's workspace
+    // ('' = user-level), decided by rememberLongMemory.
+    workspaceId,
   }) {
     const normalizedUserId = ensureUserId(userId);
     const normalizedText = normalizeMemoryText(text);
@@ -215,6 +388,21 @@ const createDefaultStore = () => ({
     await this.initialize();
 
     const tableName = ensureTableName();
+
+    if (isWorkspaceArgument(workspaceId)) {
+      return rememberInWorkspace({
+        category: normalizedCategory,
+        confidence: normalizedConfidence,
+        memoryKey: normalizedKey,
+        memoryValue: normalizedValue,
+        source: normalizedSource,
+        tableName,
+        text: normalizedText,
+        userId: normalizedUserId,
+        workspaceId: workspaceId.trim(),
+      });
+    }
+
     const dedupeQuery = normalizedKey
       ? `
           SELECT memory_id
@@ -296,7 +484,8 @@ const createDefaultStore = () => ({
     return mapRowToMemory(inserted.rows[0]);
   },
 
-  async delete({ userId, memoryId }) {
+  // `workspaceId` as in list: only a memory that workspace sees.
+  async delete({ userId, memoryId, workspaceId }) {
     const normalizedUserId = ensureUserId(userId);
     const normalizedMemoryId = String(memoryId ?? "").trim();
 
@@ -307,6 +496,20 @@ const createDefaultStore = () => ({
     await this.initialize();
 
     const tableName = ensureTableName();
+
+    if (isWorkspaceArgument(workspaceId)) {
+      const scoped = await queryLongMemoryPostgres(
+        `
+          DELETE FROM ${tableName}
+          WHERE user_id = $1 AND memory_id = $2 AND ${visibleInWorkspace("$3")}
+          RETURNING ${MEMORY_COLUMNS}, workspace_id
+        `,
+        [normalizedUserId, normalizedMemoryId, workspaceId.trim()]
+      );
+
+      return scoped.rows[0] ? mapRowToMemory(scoped.rows[0]) : null;
+    }
+
     const result = await queryLongMemoryPostgres(
       `
         DELETE FROM ${tableName}
@@ -320,7 +523,9 @@ const createDefaultStore = () => ({
     return result.rows[0] ? mapRowToMemory(result.rows[0]) : null;
   },
 
-  async clear({ userId }) {
+  // `workspaceId` as in list: everything that workspace sees, the user-level
+  // rows (preferences, rows from before the scope) included.
+  async clear({ userId, workspaceId }) {
     const normalizedUserId = ensureUserId(userId);
 
     if (!isLongMemoryEnabled() || !normalizedUserId) {
@@ -330,6 +535,19 @@ const createDefaultStore = () => ({
     await this.initialize();
 
     const tableName = ensureTableName();
+
+    if (isWorkspaceArgument(workspaceId)) {
+      const scoped = await queryLongMemoryPostgres(
+        `
+          DELETE FROM ${tableName}
+          WHERE user_id = $1 AND ${visibleInWorkspace("$2")}
+        `,
+        [normalizedUserId, workspaceId.trim()]
+      );
+
+      return Number(scoped.rowCount ?? 0);
+    }
+
     const result = await queryLongMemoryPostgres(
       `
         DELETE FROM ${tableName}
@@ -372,20 +590,32 @@ const createDefaultStore = () => ({
   },
 
   // The tenant erase and export (rag/tenant-records.js): every category and
-  // archived row of the user, whatever RAG_LONG_MEMORY_ENABLED says now (a
-  // memory written while it was on is still the user's). The table has no
-  // workspace column, so only a selector that names a user reaches it.
+  // archived row, whatever RAG_LONG_MEMORY_ENABLED says now (a memory written
+  // while it was on is still the user's). Under LONG_MEMORY_SCOPE=user the
+  // memory belongs to the user in every workspace, so only a selector that
+  // names a user reaches it, and then every row of that user. Under
+  // `workspace` a row is matched on its (user, workspace_id) pair like every
+  // other tenant table: a workspace selector takes the workspace's rows of
+  // every user, a user in a workspace that pair's rows, and a user outside
+  // any workspace that user's user-level rows (workspace_id '').
   ...createPostgresTenantRecordMethods({
     initialize: () => runPostgresMigrations(),
     query: queryLongMemoryPostgres,
     tables: () => [
-      {
-        keyColumns: ["memory_id"],
-        name: "long_memory",
-        table: ensureTableName(),
-        userColumn: "user_id",
-        userOnly: true,
-      },
+      isLongMemoryWorkspaceScoped()
+        ? {
+            keyColumns: ["memory_id"],
+            name: "long_memory",
+            table: ensureTableName(),
+            userColumn: "user_id",
+          }
+        : {
+            keyColumns: ["memory_id"],
+            name: "long_memory",
+            table: ensureTableName(),
+            userColumn: "user_id",
+            userOnly: true,
+          },
     ],
   }),
 });
@@ -409,6 +639,15 @@ export const getLongMemoryTenantRecordStore = () => {
     ? { status: "ok", store: getLongMemoryStore() }
     : { status: "not_configured", store: null };
 };
+
+/**
+ * Whether a tenant erase or export selector reaches long-term memory: under
+ * LONG_MEMORY_SCOPE=user only a selector that names a user; under `workspace`
+ * every selector, a workspace-wide one included (see the tenant record
+ * methods of the default store).
+ */
+export const longMemoryAppliesToTenantSelector = (selector) =>
+  selector.userId !== null || isLongMemoryWorkspaceScoped();
 
 const addCandidate = (candidates, candidate) => {
   if (!candidate?.text) {
@@ -582,31 +821,66 @@ export const resetLongMemoryStore = async () => {
   await resetLongMemoryPostgresPool();
 };
 
+// Every entry point takes the caller's `accessScope` (optional; the active
+// database tenant otherwise) and, under LONG_MEMORY_SCOPE=workspace only,
+// hands the store the workspace it resolves to (resolveLongMemoryWorkspace).
 export const listLongMemories = async ({
+  accessScope = null,
   userId,
   limit = DEFAULT_LIST_LIMIT,
   categories = PUBLIC_MEMORY_CATEGORIES,
 }) => {
   const store = getLongMemoryStore();
-  return store.list ? store.list({ userId, limit, categories }) : [];
+  return store.list
+    ? store.list(withWorkspace({ userId, limit, categories }, resolveLongMemoryWorkspace(accessScope)))
+    : [];
 };
 
-export const rememberLongMemory = async (input) => {
+export const rememberLongMemory = async ({ accessScope = null, ...input } = {}) => {
   const store = getLongMemoryStore();
-  return store.remember ? store.remember(input) : null;
+  const workspaceId = resolveLongMemoryWorkspace(accessScope);
+
+  if (!store.remember) {
+    return null;
+  }
+
+  if (workspaceId === null) {
+    return store.remember(input);
+  }
+
+  if (!isUserLevelPreference(input)) {
+    return store.remember({ ...input, workspaceId });
+  }
+
+  // A user-level row keeps only the preference's fixed value and its fixed
+  // text, never text the caller wrote (POST /memory takes any text).
+  const memoryKey = String(input.memoryKey).trim();
+  const memoryValue = String(input.memoryValue).trim();
+
+  return store.remember({
+    ...input,
+    memoryKey,
+    memoryValue,
+    text: buildPreferenceMemoryText(memoryKey, memoryValue),
+    workspaceId: "",
+  });
 };
 
-export const deleteLongMemory = async ({ userId, memoryId }) => {
+export const deleteLongMemory = async ({ accessScope = null, userId, memoryId }) => {
   const store = getLongMemoryStore();
-  return store.delete ? store.delete({ userId, memoryId }) : null;
+  return store.delete
+    ? store.delete(withWorkspace({ userId, memoryId }, resolveLongMemoryWorkspace(accessScope)))
+    : null;
 };
 
-export const clearLongMemories = async ({ userId }) => {
+export const clearLongMemories = async ({ accessScope = null, userId }) => {
   const store = getLongMemoryStore();
-  return store.clear ? store.clear({ userId }) : 0;
+  return store.clear
+    ? store.clear(withWorkspace({ userId }, resolveLongMemoryWorkspace(accessScope)))
+    : 0;
 };
 
-export const getLongMemoryContext = async ({ userId, query }) => {
+export const getLongMemoryContext = async ({ accessScope = null, userId, query }) => {
   const normalizedUserId = ensureUserId(userId);
   const configStatus = getLongMemoryConfigStatus();
 
@@ -622,6 +896,7 @@ export const getLongMemoryContext = async ({ userId, query }) => {
   }
 
   const memories = await listLongMemories({
+    accessScope,
     categories: PUBLIC_MEMORY_CATEGORIES,
     userId: normalizedUserId,
     limit: DEFAULT_LIST_LIMIT,
@@ -663,7 +938,7 @@ export const getLongMemoryContext = async ({ userId, query }) => {
   };
 };
 
-export const recordLongMemoryFromUserMessage = async ({ userId, query }) => {
+export const recordLongMemoryFromUserMessage = async ({ accessScope = null, userId, query }) => {
   const normalizedUserId = ensureUserId(userId);
 
   if (!isLongMemoryEnabled() || !normalizedUserId) {
@@ -679,6 +954,7 @@ export const recordLongMemoryFromUserMessage = async ({ userId, query }) => {
   const storedMemories = await Promise.all(
     candidates.map((candidate) =>
       rememberLongMemory({
+        accessScope,
         userId: normalizedUserId,
         category: candidate.category,
         memoryKey: candidate.memoryKey ?? null,

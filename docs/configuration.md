@@ -278,6 +278,9 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | --- | --- | --- |
 | `TENANT_MEMBERSHIP` | `off` | `enforce`：开启 API auth 时，请求的 workspace 必须登记在租户注册表里（迁移 036）、状态为 active，且有用户时该用户必须是成员；否则返回 403（`WORKSPACE_MEMBERSHIP_REQUIRED`、`WORKSPACE_SUSPENDED`、`WORKSPACE_DELETING`、`WORKSPACE_NOT_REGISTERED`）。没有 workspace 列表的凭据不能再靠 `x-workspace-id` 随意指定 workspace。成员角色会合并进 `workspaceRoles`。注册表不可用时返回 503，不会放行。单个共享 token、auth 关闭、平台 admin 不受影响。其他值拒绝启动。 |
 | `TENANT_REGISTRY_CACHE_TTL_MS` | `5000` | 成员和 workspace 查询在进程内的缓存时间，`0` 关闭缓存。本进程写入时立即失效，其他进程最多晚一个 TTL。 |
+| `TENANT_REGISTRY_CACHE_SCOPE` | `shared` | `tenant`：workspace 查询按发起请求的用户分别缓存（在途查询也不共享）。`shared` 时所有调用方共用一条缓存，非成员测 403 的耗时就能知道别人在 TTL 内是否用过这个 workspace id。成员查询本来就按 (workspace, user) 缓存。其他值拒绝启动。 |
+| `LONG_MEMORY_SCOPE` | `user` | `workspace`：长期记忆里的笔记（"记住…"/"remember that …"）和 agent experience 按当前 workspace 存取，在另一个 workspace 里读不到；只有固定枚举的偏好（回答语言、回答风格）仍按用户保存，存成固定文本。workspace 取自调用方的 access scope，没有时取当前数据库租户，与会话记忆同一套规则；auth 关闭或租户没有 workspace 时仍按用户保存。迁移 045 加了 `workspace_id` 列，RLS 策略改为"同一用户，且 workspace 为空或等于当前 workspace"，不论开关都生效（默认 `user` 下每行都是空，等同于原策略）。租户擦除和导出在 `workspace` 下按 (用户, workspace) 匹配：workspace 选择器覆盖该 workspace 所有用户的记忆，workspace+用户覆盖这一对，只有用户覆盖其用户级（workspace 为空）的行；`user` 下与以前相同。其他值拒绝启动。 |
+| `RAG_EMBEDDING_CACHE_SCOPE` | `shared` | `tenant`：查询嵌入缓存按租户（user, workspace 一对，或系统/未绑定等非租户上下文）分区，和在途合并的分区相同。`shared` 时缓存命中不调模型、明显更快，一个租户可以靠计时得知别的租户最近是否问过一模一样的问题。代价是每个租户对同一文本各调一次模型。其他值拒绝启动，嵌入调用也会直接失败，不会退回共享缓存。 |
 | `WORKSPACES_POSTGRES_TABLE` / `WORKSPACE_MEMBERS_POSTGRES_TABLE` | `rag_workspaces` / `rag_workspace_members` | 注册表的两张表。用 `npm run tenant:registry` 或 `/admin/workspaces` 接口管理（权限 `admin.tenants.read|write`，角色 `admin.tenant_manager`）。 |
 | `TENANT_RATE_LIMIT_ENABLED` | `false` | 认证之后按租户（workspace，没有时按用户，再没有按 IP）和成本类别限流，超出返回 429 `TENANT_RATE_LIMITED`。`RAG_SHARED_STATE=redis` 时跨实例共享。 |
 | `TENANT_RATE_LIMIT_WINDOW_MS` | `60000` | 固定窗口长度。 |
@@ -303,6 +306,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 - **审计防篡改**：迁移 041 起每条审计记录接在它所在链（按 workspace，没有时按用户）的上一条后面，`npm run audit:verify` 在同一个快照里检查哪一条开始断开。迁移之前的记录不在链上；滚动升级期间旧实例写的无哈希记录，在迁移 041 执行后 24 小时内（`--upgrade-grace-hours`，或用 `--upgrade-window-end <ISO>` 指定）计为升级记录而不是断链，所以旧版本实例要在这个窗口内全部停掉。
 - **升级顺序**：拆分部署用单个共享 token 时，先升级 api 入口再升级 agent tier。`compose.services.yml` 的模型网关现在也连数据库，用来写用量账本。
 - **保留期清理**：读不到按 workspace 的保留期策略时（包括系统角色丢了权限），这一轮不删任何数据库记录，下一轮再试，不会退回全局期限。
+- **长期记忆按 workspace（`LONG_MEMORY_SCOPE=workspace`）**：开启前写入的记忆 workspace 为空，仍是用户级，在该用户的每个 workspace 里都能看到，直到删除。逐条删 `DELETE /memory/:memoryId`，或在任一 workspace 里 `DELETE /memory` 清空（会删掉这个 workspace 能看到的全部：本 workspace 的行和用户级的行，包括偏好）；也可以对"不在任何 workspace 的该用户"做一次租户擦除（`--user <id>`，不带 `--workspace`）。改回 `user` 后，带 workspace 的行在租户请求里只在自己的 workspace 可见（RLS），按用户的擦除仍会全部覆盖，但只按 workspace 的擦除不再覆盖长期记忆。
 
 ## Vector store
 ## Vector store

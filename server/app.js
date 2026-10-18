@@ -14,8 +14,11 @@ import {
 } from "./auth.js";
 import {
   getAgentRunRecoveryMode,
+  getLongMemoryScope,
   getPostgresTenantContextMode,
+  getQueryEmbeddingCacheScope,
   getTenantMembershipMode,
+  getTenantRegistryCacheScope,
   getTrustProxySetting,
   getUploadSessionCleanupIntervalMs,
   isApiAuthEnabled,
@@ -113,6 +116,12 @@ export const createApp = async (options = {}) => {
   getPostgresTenantContextMode();
   // So does an unknown TENANT_MEMBERSHIP (requireApiAuth reads it per request).
   const tenantMembershipMode = getTenantMembershipMode();
+  // And an unknown LONG_MEMORY_SCOPE, RAG_EMBEDDING_CACHE_SCOPE or
+  // TENANT_REGISTRY_CACHE_SCOPE (read per call; none falls back to its
+  // unpartitioned default).
+  getLongMemoryScope();
+  getQueryEmbeddingCacheScope();
+  getTenantRegistryCacheScope();
   // TRUST_PROXY: an invalid value refuses the start (TRUST_PROXY_INVALID);
   // unset keeps Express's default (req.ip is the socket peer).
   const trustProxy = getTrustProxySetting();

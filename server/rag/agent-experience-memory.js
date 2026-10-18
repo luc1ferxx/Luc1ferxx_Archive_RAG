@@ -384,13 +384,26 @@ const normalizeExperienceRecord = (record = {}) => {
   };
 };
 
+// Experience lives in long-term memory, so LONG_MEMORY_SCOPE=workspace stores
+// and reads it in one workspace (rag/long-memory.js): each call hands long
+// memory the user and workspace this module resolved from the caller's scope
+// (getScopedUserId / getScopedWorkspaceId), and long memory derives the row's
+// workspace from them the way it does for every caller. Under the default
+// `user` scope the scope is ignored and the calls are those of before. The
+// workspace filter on the record values below stays either way.
+const toExperienceAccessScope = ({ userId, workspaceId } = {}) => ({
+  userId: normalizeText(userId),
+  workspaceId: normalizeText(workspaceId),
+});
+
 const createLongMemoryBackedAgentExperienceStore = () => ({
-  async list({ userId, limit = DEFAULT_LIST_LIMIT } = {}) {
+  async list({ userId, workspaceId, limit = DEFAULT_LIST_LIMIT } = {}) {
     if (!isAgentExperienceMemoryEnabled() || !normalizeText(userId)) {
       return [];
     }
 
     return listLongMemories({
+      accessScope: toExperienceAccessScope({ userId, workspaceId }),
       categories: [AGENT_EXPERIENCE_MEMORY_CATEGORY],
       limit,
       userId,
@@ -415,6 +428,7 @@ const createLongMemoryBackedAgentExperienceStore = () => ({
     };
 
     return rememberLongMemory({
+      accessScope: toExperienceAccessScope(record),
       category: AGENT_EXPERIENCE_MEMORY_CATEGORY,
       confidence: record.confidence ?? 1,
       memoryKey: record.memoryKey,
@@ -425,7 +439,7 @@ const createLongMemoryBackedAgentExperienceStore = () => ({
     });
   },
 
-  async delete({ memoryId, userId } = {}) {
+  async delete({ memoryId, userId, workspaceId } = {}) {
     if (
       !isAgentExperienceMemoryEnabled() ||
       !normalizeText(userId) ||
@@ -435,6 +449,7 @@ const createLongMemoryBackedAgentExperienceStore = () => ({
     }
 
     return deleteLongMemory({
+      accessScope: toExperienceAccessScope({ userId, workspaceId }),
       memoryId,
       userId,
     });
@@ -710,6 +725,9 @@ const pruneExperienceMemoryScope = async ({
       const deleted = await store.delete({
         memoryId: record.memoryId,
         userId,
+        // The scope's workspace, so a workspace-scoped long memory
+        // (LONG_MEMORY_SCOPE=workspace) prunes the row it listed.
+        workspaceId,
       });
 
       if (deleted) {

@@ -1020,6 +1020,8 @@ const recordUserExchange = async ({
   if (userId) {
     try {
       await recordLongMemoryFromUserMessage({
+        // The workspace under LONG_MEMORY_SCOPE=workspace (rag/long-memory.js).
+        accessScope,
         userId,
         query,
       });
@@ -1115,6 +1117,7 @@ const chat = async (docIds, query, options = {}) => {
 
     try {
       longMemoryContext = await getLongMemoryContext({
+        accessScope,
         userId,
         query,
       });

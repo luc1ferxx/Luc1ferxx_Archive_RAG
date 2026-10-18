@@ -5,6 +5,7 @@ import {
 import { embedQuery } from "./openai.js";
 import {
   getQueryEmbeddingCacheMaxEntries,
+  getQueryEmbeddingCacheScope,
   getQueryEmbeddingCacheTtlMs,
   isQueryEmbeddingCacheEnabled,
 } from "./config.js";
@@ -45,8 +46,16 @@ import {
 // One LRU for every space, bounded by RAG_EMBEDDING_CACHE_MAX entries with a
 // RAG_EMBEDDING_CACHE_TTL_MS lifetime; RAG_EMBEDDING_CACHE_ENABLED=false turns
 // caching off (a query is then embedded once per call, still in one space, in
-// the caller's own context). The cache is shared by every tenant of the
-// process: an embedding of a text is not tenant data.
+// the caller's own context). By default (RAG_EMBEDDING_CACHE_SCOPE=shared)
+// the cache is shared by every tenant of the process: an embedding of a text
+// is not tenant data. A hit is still observable, though: it answers without a
+// model call, so it is measurably faster, and a tenant could time its own
+// query to learn whether another tenant recently asked exactly that text ("Is
+// Acme acquiring Beta?"). RAG_EMBEDDING_CACHE_SCOPE=tenant closes that timing
+// channel by keying cached vectors by the same tenant partition flights use
+// (describeFlightTenant), at the cost of one model call per tenant per text.
+// Flights, the space tagging and the vector-to-space map are the same under
+// both scopes.
 //
 // Concurrent callers of one key share one embedding call, a flight. The call
 // serves all of them, so it runs for none of them in particular:
@@ -95,9 +104,14 @@ const toEmbeddingSpaceRequest = (space) => ({
 
 // The cache holds the model's own vectors only: the query adapter
 // (rag/query-adapter.js) adapts a copy at the retrieval seam, so it is not
-// part of the key.
-const buildCacheKey = (space, query) =>
-  [space.key, space.model, space.queryPrefix].join("\u0000") + `\n${query}`;
+// part of the key. Under RAG_EMBEDDING_CACHE_SCOPE=tenant the tenant partition
+// joins the head of the key (before the first newline; the partition is JSON,
+// so it holds no raw newline or NUL), and the space key stays its first field
+// (describeEmbeddingCache). Under `shared` the key is unchanged.
+const buildCacheKey = (space, query, partition = null) =>
+  [space.key, space.model, space.queryPrefix, ...(partition === null ? [] : [partition])].join(
+    "\u0000"
+  ) + `\n${query}`;
 
 // Evicting a cached entry leaves a flight of the same key alone: the flight
 // settles its own callers and caches its result when it ends.
@@ -267,7 +281,13 @@ export const embedQueryCached = async (query, { space = null } = {}) => {
     return embedInSpace(query, target);
   }
 
-  const key = buildCacheKey(target, query);
+  // Read per call, so an unknown value fails the embedding (and refuses the
+  // start, app.js), never falls back to the shared cache.
+  const key = buildCacheKey(
+    target,
+    query,
+    getQueryEmbeddingCacheScope() === "tenant" ? describeFlightTenant() : null
+  );
   const now = Date.now();
 
   const existing = cache.get(key);
@@ -288,7 +308,8 @@ export const embedQueryCached = async (query, { space = null } = {}) => {
   // Flights are shared within one tenant only: a flight runs as its starter's
   // tenant (the model gateway's identity, quota and ledger), so a starter's
   // quota refusal or policy error must never reach another tenant's request.
-  // The finished vector is still cached for every tenant under `key`.
+  // The finished vector is cached under `key`: for every tenant under the
+  // `shared` scope, for the flight's own tenant partition under `tenant`.
   const flightKey = `${describeFlightTenant()}\u0000${key}`;
   const inflight = inflightPromises.get(flightKey);
 

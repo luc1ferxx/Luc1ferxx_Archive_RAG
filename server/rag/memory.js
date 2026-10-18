@@ -6,19 +6,12 @@ import {
 } from "../lib/prompt-template.js";
 import { completeText } from "./openai.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
-import {
-  getPromptVersion,
-  getSessionMemoryPostgresTable,
-  isApiAuthEnabled,
-} from "./config.js";
+import { getPromptVersion, getSessionMemoryPostgresTable } from "./config.js";
+import { resolveConversationMemoryTenant } from "./conversation-memory-tenant.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { isPostgresConfigured, queryPostgres } from "./postgres.js";
 import { createPostgresTenantRecordMethods } from "./tenant-records.js";
-import {
-  getActiveDatabaseTenant,
-  runAsDatabaseSystem,
-  toDatabaseTenant,
-} from "./postgres-tenant.js";
+import { getActiveDatabaseTenant, runAsDatabaseSystem } from "./postgres-tenant.js";
 import { tokenize } from "./text-utils.js";
 
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
@@ -223,22 +216,11 @@ const normalizeSessionId = (sessionId) => String(sessionId ?? "").trim();
 // scope is authenticated or API auth is on (a task's stored scope carries no
 // `authenticated` flag), so with auth off a session keeps its raw id: the
 // local frontend sends a userId with every chat but not with the session
-// DELETE, and both must name the same session.
+// DELETE, and both must name the same session. The rule lives in
+// rag/conversation-memory-tenant.js, shared with LONG_MEMORY_SCOPE=workspace.
 const TENANT_SESSION_KEY_PREFIX = "tenant:";
 
-const resolveSessionTenant = (accessScope) => {
-  const explicitScope =
-    accessScope && typeof accessScope === "object" && toDatabaseTenant(accessScope)
-      ? accessScope
-      : null;
-  const scope = explicitScope ?? getActiveDatabaseTenant();
-
-  if (!scope || (scope.authenticated !== true && !isApiAuthEnabled())) {
-    return null;
-  }
-
-  return toDatabaseTenant(scope);
-};
+const resolveSessionTenant = resolveConversationMemoryTenant;
 
 /**
  * The key a session is stored under: the trimmed client id when no tenant

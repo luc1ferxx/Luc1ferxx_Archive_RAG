@@ -65,7 +65,10 @@ export const createMemoryRouter = (services) => {
     }
 
     try {
+      // The scope names the workspace under LONG_MEMORY_SCOPE=workspace
+      // (rag/long-memory.js); every memory route passes it.
       const memories = await ragService.listLongMemories({
+        accessScope: getRequestAccessScope(req),
         userId,
         limit,
       });
@@ -95,6 +98,7 @@ export const createMemoryRouter = (services) => {
 
     try {
       const memory = await ragService.rememberLongMemory({
+        accessScope: getRequestAccessScope(req),
         userId,
         category: req.body.category,
         memoryKey: req.body.memoryKey,
@@ -135,6 +139,7 @@ export const createMemoryRouter = (services) => {
 
     try {
       const memory = await ragService.deleteLongMemory({
+        accessScope: audited.accessScope,
         userId,
         memoryId,
       });
@@ -176,6 +181,7 @@ export const createMemoryRouter = (services) => {
 
     try {
       const deletedCount = await ragService.clearLongMemories({
+        accessScope: audited.accessScope,
         userId,
       });
 

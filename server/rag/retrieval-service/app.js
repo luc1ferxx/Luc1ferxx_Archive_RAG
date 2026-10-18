@@ -8,6 +8,7 @@ import { derivePgvectorHealthProblems } from "../../health.js";
 import {
   getHybridFusionMethod,
   getPostgresTenantContextMode,
+  getQueryEmbeddingCacheScope,
   getRetrievalRoute,
   getRetrievalServiceMaxDocIds,
   getRetrievalServiceMaxQueries,
@@ -657,8 +658,10 @@ export const createRetrievalApp = ({
   logger = console,
   now = Date.now,
 } = {}) => {
-  // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js).
+  // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js), and
+  // so does an unknown RAG_EMBEDDING_CACHE_SCOPE (this tier embeds queries).
   getPostgresTenantContextMode();
+  getQueryEmbeddingCacheScope();
 
   const app = express();
 

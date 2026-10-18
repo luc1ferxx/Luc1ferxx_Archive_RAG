@@ -17,7 +17,9 @@
 //   workspace_artifacts
 //   feedback           PostgreSQL (migration 034) or the JSONL file
 //   session_memory     by the owner columns of migration 031
-//   long_memory        per user: only a selector that names a user
+//   long_memory        LONG_MEMORY_SCOPE=user: per user, only a selector that
+//                      names a user; `workspace`: by the (user, workspace_id)
+//                      pair of migration 045, like the other tables
 //   claim_judge_cache  this process's verdicts and, with RAG_SHARED_STATE=redis,
 //                      the tenant's Redis keys (SCAN by partition pattern)
 //   semantic_cache     this process's entries cached for the tenant
@@ -73,7 +75,7 @@ import { ADMIN_AUDIT_EVENT_TYPES } from "./admin-audit.js";
 import { getDocumentRegistryTenantRecordStore } from "./doc-registry.js";
 import { countTenantDocuments, eraseTenantDocuments } from "./index.js";
 import { INGEST_TEMP_SUBDIRECTORY } from "./ingest-worker.js";
-import { getLongMemoryTenantRecordStore } from "./long-memory.js";
+import { getLongMemoryTenantRecordStore, longMemoryAppliesToTenantSelector } from "./long-memory.js";
 import { getSessionMemoryTenantRecordStore } from "./memory.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { eraseClaimJudgeTenantVerdicts } from "./self-check/claim-judge.js";
@@ -374,7 +376,7 @@ export const createTenantLifecycleService = ({
     { ...recordAdapter("session_memory", null), resolve: resolveModuleStore(sessionMemory) },
     {
       ...recordAdapter("long_memory", null),
-      appliesTo: (selector) => selector.userId !== null,
+      appliesTo: longMemoryAppliesToTenantSelector,
       resolve: resolveModuleStore(longMemory),
     },
     {

@@ -833,6 +833,166 @@ if (!adminDatabaseUrl) {
     }
   });
 
+  test("long-term memory: migration 045's policy keeps a workspace's rows in that workspace, and LONG_MEMORY_SCOPE=workspace reads, writes and erases by it", async () => {
+    const longMemory = await import("../rag/long-memory.js");
+    const { normalizeTenantSelector } = await import("../rag/tenant-records.js");
+    const table = tables.longMemory;
+    const q = modules.postgres.queryPostgres;
+    const carolX = { authenticated: true, userId: "carol", workspaceId: "ws-x" };
+    const carolY = { authenticated: true, userId: "carol", workspaceId: "ws-y" };
+    const savedScope = process.env.LONG_MEMORY_SCOPE;
+    const memoryIds = async (where = "TRUE", values = []) =>
+      (await q(`SELECT memory_id FROM ${table} WHERE ${where} ORDER BY memory_id`, values)).rows.map(
+        (row) => row.memory_id
+      );
+
+    // The policy: the user's own rows that are user-level ('') or of the
+    // active workspace, for USING and WITH CHECK alike.
+    const policy = (
+      await q(
+        `SELECT roles::text[] AS roles, cmd, qual, with_check
+         FROM pg_policies WHERE policyname = 'tenant_isolation' AND tablename = $1`,
+        [table]
+      )
+    ).rows[0];
+
+    assert.deepEqual(policy.roles, [tenantRole]);
+    assert.equal(policy.cmd, "ALL");
+    assert.match(policy.qual, /user_id = current_setting\('archive_rag\.user_id'::text, true\)/);
+    assert.match(policy.qual, /workspace_id = ''::text/);
+    assert.match(policy.qual, /workspace_id = current_setting\('archive_rag\.workspace_id'::text, true\)/);
+    assert.equal(policy.with_check, policy.qual);
+
+    // Seeded as the owner: alice's row of her workspace, and one of another
+    // workspace. Her user-level row is the suite's seed (alice-1).
+    await q(
+      `INSERT INTO ${table} (memory_id, user_id, category, text, workspace_id)
+       VALUES ('lm-alice-ws-a', 'alice', 'note', 'ws-a note', 'ws-a'),
+              ('lm-alice-ws-other', 'alice', 'note', 'other workspace note', 'ws-other')`
+    );
+
+    try {
+      await asAlice(async () => {
+        assert.deepEqual(await memoryIds(), ["alice-1", "lm-alice-ws-a"], "no WHERE: user-level and ws-a rows only");
+        assert.equal(
+          (await q(`UPDATE ${table} SET text = 'x' WHERE memory_id = 'lm-alice-ws-other'`)).rowCount,
+          0,
+          "another workspace's row cannot be updated"
+        );
+        assert.equal(
+          (await q(`DELETE FROM ${table} WHERE memory_id = 'lm-alice-ws-other'`)).rowCount,
+          0,
+          "nor deleted"
+        );
+        await assert.rejects(
+          q(
+            `INSERT INTO ${table} (memory_id, user_id, category, text, workspace_id)
+             VALUES ('lm-forged', 'alice', 'note', 'forged', 'ws-other')`
+          ),
+          (error) => error.code === "42501"
+        );
+        await assert.rejects(
+          q(`UPDATE ${table} SET workspace_id = 'ws-other' WHERE memory_id = 'lm-alice-ws-a'`),
+          (error) => error.code === "42501",
+          "a row cannot be moved into another workspace"
+        );
+        await q(
+          `INSERT INTO ${table} (memory_id, user_id, category, text, workspace_id)
+           VALUES ('lm-alice-own', 'alice', 'note', 'own', 'ws-a'), ('lm-alice-user', 'alice', 'note', 'user-level', '')`
+        );
+      });
+      assert.equal(
+        (await q(`SELECT text FROM ${table} WHERE memory_id = 'lm-alice-ws-other'`)).rows[0].text,
+        "other workspace note"
+      );
+
+      // The store under LONG_MEMORY_SCOPE=workspace, each call bound to the
+      // caller as bindDatabaseTenant binds a request.
+      process.env.LONG_MEMORY_SCOPE = "workspace";
+      longMemory.configureLongMemoryStore(null);
+
+      const asCarol = (scope, work) => modules.tenant.runWithDatabaseTenant(scope, work);
+
+      await asCarol(carolX, () =>
+        longMemory.recordLongMemoryFromUserMessage({
+          accessScope: carolX,
+          query: "remember that the Xylo merger closes in May",
+          userId: "carol",
+        })
+      );
+      await asCarol(carolX, () =>
+        longMemory.recordLongMemoryFromUserMessage({ accessScope: carolX, query: "以后用中文回答", userId: "carol" })
+      );
+
+      const inY = await asCarol(carolY, () =>
+        longMemory.getLongMemoryContext({ accessScope: carolY, query: "When does the Xylo merger close?", userId: "carol" })
+      );
+      const inX = await asCarol(carolX, () =>
+        longMemory.getLongMemoryContext({ accessScope: carolX, query: "When does the Xylo merger close?", userId: "carol" })
+      );
+
+      assert.deepEqual(inY.memories.map((memory) => [memory.category, memory.workspaceId]), [["preference", ""]]);
+      assert.doesNotMatch(inY.answerBlock, /Xylo/);
+      assert.deepEqual(
+        inX.memories.map((memory) => [memory.category, memory.workspaceId]).sort(),
+        [["note", "ws-x"], ["preference", ""]]
+      );
+      assert.equal(
+        await asCarol(carolY, () => longMemory.clearLongMemories({ accessScope: carolY, userId: "carol" })),
+        1,
+        "a clear in ws-y removes the user-level preference only"
+      );
+      await asCarol(carolX, () =>
+        longMemory.recordLongMemoryFromUserMessage({ accessScope: carolX, query: "以后用中文回答", userId: "carol" })
+      );
+
+      // The tenant erase and export selectors (rag/tenant-records.js) by the
+      // (user, workspace_id) pair: a workspace takes every user's rows of it,
+      // a user in a workspace that pair's, a user outside any workspace the
+      // user-level rows.
+      const recordStore = longMemory.getLongMemoryTenantRecordStore().store;
+      const count = (selector) =>
+        modules.tenant.runAsDatabaseSystem(() => recordStore.countTenantRecords(normalizeTenantSelector(selector)));
+      const exported = async (selector) => {
+        const rows = [];
+
+        for await (const { record } of recordStore.iterateTenantRecords(normalizeTenantSelector(selector))) {
+          rows.push([record.user_id, record.workspace_id, record.category]);
+        }
+
+        return rows.sort();
+      };
+
+      assert.deepEqual(await count({ workspaceId: "ws-a" }), { long_memory: { records: 2 } });
+      assert.deepEqual(await count({ userId: "carol", workspaceId: "ws-x" }), { long_memory: { records: 1 } });
+      assert.deepEqual(await count({ userId: "carol", workspaceId: "" }), { long_memory: { records: 1 } });
+      assert.deepEqual(await count({ userId: "carol", workspaceId: "ws-y" }), { long_memory: { records: 0 } });
+      assert.deepEqual(await exported({ workspaceId: "ws-x" }), [["carol", "ws-x", "note"]]);
+      assert.deepEqual(await exported({ userId: "carol", workspaceId: "" }), [["carol", "", "preference"]]);
+      assert.deepEqual(
+        await modules.tenant.runAsDatabaseSystem(() =>
+          recordStore.deleteTenantRecords(normalizeTenantSelector({ workspaceId: "ws-x" }))
+        ),
+        { long_memory: { deleted: 1 } }
+      );
+      assert.equal((await memoryIds("user_id = 'carol'")).length, 1, "the preference stays");
+
+      // Under the default scope a selector that names a user takes every row
+      // of the user, as before migration 045, and a workspace one none.
+      delete process.env.LONG_MEMORY_SCOPE;
+      assert.deepEqual(await count({ userId: "alice", workspaceId: "ws-b" }), { long_memory: { records: 5 } });
+      assert.deepEqual(await count({ workspaceId: "ws-a" }), { long_memory: { notApplicable: true, records: 0 } });
+    } finally {
+      if (savedScope === undefined) {
+        delete process.env.LONG_MEMORY_SCOPE;
+      } else {
+        process.env.LONG_MEMORY_SCOPE = savedScope;
+      }
+
+      await q(`DELETE FROM ${table} WHERE memory_id NOT IN ('alice-1', 'bob-1')`);
+    }
+  });
+
   test("the health report proves the tenant role switch and every covered policy", async () => {
     const { buildHealthReport } = await import("../health.js");
     const report = await buildHealthReport();

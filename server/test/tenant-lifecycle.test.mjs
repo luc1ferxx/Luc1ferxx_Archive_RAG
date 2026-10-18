@@ -848,6 +848,36 @@ describe("erase and export over every in-memory store", () => {
     assert.deepEqual(counts.workspaces, { records: 1 });
     assert.equal((await state.tenantRegistry.getWorkspace("globex")).status, "active", "a dry run marks nothing");
   });
+
+  test("under LONG_MEMORY_SCOPE=workspace a workspace-wide erase asks long memory too", async () => {
+    // Long-term memory rows then carry their workspace (migration 045), and
+    // the store matches them on the pair like every other table; the real
+    // store's selectors are pinned in postgres-row-level-security.integration.
+    const saved = process.env.LONG_MEMORY_SCOPE;
+    const selectors = [];
+    const countTenantRecords = state.longMemoryStore.countTenantRecords;
+
+    process.env.LONG_MEMORY_SCOPE = "workspace";
+    state.longMemoryStore.countTenantRecords = async function (selector) {
+      selectors.push(selector);
+      return countTenantRecords.call(this, selector);
+    };
+
+    try {
+      const result = await state.service.eraseTenant({ dryRun: true, workspaceId: "globex" });
+
+      assert.equal(result.stores.find(({ store }) => store === "long_memory").status, "ok");
+      assert.deepEqual(selectors, [{ userId: null, workspaceId: "globex" }]);
+    } finally {
+      state.longMemoryStore.countTenantRecords = countTenantRecords;
+
+      if (saved === undefined) {
+        delete process.env.LONG_MEMORY_SCOPE;
+      } else {
+        process.env.LONG_MEMORY_SCOPE = saved;
+      }
+    }
+  });
 });
 
 // The registry and the usage ledger in an erase (rag/tenant-lifecycle.js):

@@ -10,7 +10,11 @@ import path from "node:path";
 import test, { describe } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { getTenantMembershipMode, getTenantRegistryCacheTtlMs } from "../rag/config.js";
+import {
+  getTenantMembershipMode,
+  getTenantRegistryCacheScope,
+  getTenantRegistryCacheTtlMs,
+} from "../rag/config.js";
 import { getTenantRegistryTableNames, renderMigrationSql } from "../rag/db-migrations.js";
 import {
   getActiveDatabaseTenant,
@@ -419,6 +423,54 @@ describe("the lookup cache", () => {
     await withEnv({ TENANT_REGISTRY_CACHE_TTL_MS: " " }, () => {
       assert.equal(getTenantRegistryCacheTtlMs(), 5000);
     });
+  });
+
+  test("TENANT_REGISTRY_CACHE_SCOPE=tenant: a non-member's probe neither hits nor joins another user's workspace lookup", async () => {
+    // Under the shared default a workspace lookup is one entry for every
+    // caller, so a non-member who times the 403 learns whether someone else's
+    // request named the workspace within the TTL. Under `tenant` each
+    // requesting user has an entry (and a flight) of its own.
+    for (const value of [undefined, " ", "shared", "tenant", " Tenant "]) {
+      await withEnv({ TENANT_REGISTRY_CACHE_SCOPE: value }, () =>
+        assert.equal(getTenantRegistryCacheScope(), value?.trim().toLowerCase() || "shared")
+      );
+    }
+
+    await withEnv({ TENANT_REGISTRY_CACHE_SCOPE: "per-user" }, () =>
+      assert.throws(getTenantRegistryCacheScope, (error) => error.code === "TENANT_REGISTRY_CACHE_SCOPE_INVALID")
+    );
+
+    // The workspace reads each step makes: one user's decision, then two
+    // users' decisions at once after a write dropped the workspace's entries.
+    const probe = async (scope) => {
+      const { counts, store } = countingStore();
+      const registry = createTenantRegistryService({ cacheTtlMs: 60_000, store });
+
+      await registry.createWorkspace({ workspaceId: "acme" });
+      await registry.putMember({ roles: ["workspace.member"], userId: "alice", workspaceId: "acme" });
+
+      return withEnv({ TENANT_REGISTRY_CACHE_SCOPE: scope }, async () => {
+        const reads = [];
+        const step = async (work) => {
+          const before = counts.getWorkspace;
+
+          await work();
+          reads.push(counts.getWorkspace - before);
+        };
+        const decide = (userId) => decideTenantMembership({ registry, userId, workspaceId: "acme" });
+
+        await step(async () => assert.equal((await decide("alice")).allowed, true));
+        await step(async () => assert.equal((await decide("eve")).allowed, false));
+        await step(async () => assert.equal((await decide("alice")).allowed, true));
+        // A write still drops every user's entry of the workspace.
+        await registry.suspendWorkspace("acme");
+        await step(() => Promise.all([decide("alice"), decide("eve")]));
+        return reads;
+      });
+    };
+
+    assert.deepEqual(await probe(undefined), [1, 0, 0, 1], "shared: eve hits, then joins, alice's lookup");
+    assert.deepEqual(await probe("tenant"), [1, 1, 0, 2], "tenant: each user reads for itself");
   });
 
   test("each lookup binds the tenant it checks, whatever context it is called from", async () => {

@@ -6,7 +6,12 @@ import { getDefaultUploadsDirectory } from "../../app.js";
 import { createAppServices } from "../../app-services.js";
 import { bindDatabaseTenant, isTenantlessAuthenticatedScope } from "../../auth.js";
 import { getAdminActionPermissionForRequest } from "../admin-authorization.js";
-import { getAgentRunRecoveryMode, getPostgresTenantContextMode } from "../config.js";
+import {
+  getAgentRunRecoveryMode,
+  getLongMemoryScope,
+  getPostgresTenantContextMode,
+  getQueryEmbeddingCacheScope,
+} from "../config.js";
 import { runAsDatabaseSystem } from "../postgres-tenant.js";
 import { createAdminActionHandler } from "../../routes/admin.js";
 import { createChatRouter } from "../../routes/chat.js";
@@ -132,8 +137,11 @@ export const createAgentApp = async (options = {}) => {
   app.locals.services = services;
   app.disable("x-powered-by");
 
-  // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js).
+  // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js), and
+  // so does an unknown LONG_MEMORY_SCOPE or RAG_EMBEDDING_CACHE_SCOPE.
   getPostgresTenantContextMode();
+  getLongMemoryScope();
+  getQueryEmbeddingCacheScope();
 
   // arXiv import tasks write their downloads below the uploads directory.
   await mkdir(uploadsDirectory, { recursive: true });
