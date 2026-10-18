@@ -1,173 +1,59 @@
 import path from "node:path";
-// Must stay above the pdfjs import: it installs globals that pdfjs reads while
-// evaluating its own module body, and sibling static imports run in source order.
-// Moving or sorting this line breaks single-file executable builds. See the file
-// itself for why pdfjs needs the help.
+// pdfjs is imported by pdf-page-extraction.js (through pdfjs-document.js),
+// which imports this shim right above it: the shim installs globals pdfjs
+// reads while evaluating its own module body, and sibling static imports run
+// in source order. It stays first here as well, so no import added below can
+// reach pdfjs ahead of it. Moving or sorting these lines breaks single-file
+// executable builds. See the file itself for why pdfjs needs the help.
 import "./pdf-runtime-shim.js";
-import {
-  getDocument,
-  version as pdfJsVersion,
-  VerbosityLevel,
-} from "pdfjs-dist/legacy/build/pdf.mjs";
-import {
-  getDoclingFallback,
-  getPdfParser,
-  isPdfParagraphDetectionEnabled,
-} from "./config.js";
+import { getDoclingFallback, getPdfParser } from "./config.js";
 import { loadPdfPagesWithDocling } from "./docling-parser.js";
-import {
-  buildHyphenationVocabulary,
-  buildPdfTextLines,
-  renderPdfParagraphText,
-} from "./pdf-paragraphs.js";
+import { recordPdfPages, recordPdfParseFallback } from "./metrics-pdf.js";
+import { loadPdfPagesAuto } from "./pdf-auto-parser.js";
+import { parsePdfBytesWithPdfjs } from "./pdfjs-document.js";
 import { readWorkingFile } from "./working-files.js";
 
-const normalizePageText = (text = "") =>
-  String(text)
-    .replace(/\u0000/g, "")
-    .replace(/\r/g, "")
-    .replace(/-\n(?=[a-z])/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-const readPdfPageTextContent = (pageData) =>
-  pageData.getTextContent({
-    disableNormalization: false,
-  });
-
-const renderPdfPageText = async (pageData) => {
-  const textContent = await readPdfPageTextContent(pageData);
-  let text = "";
-  let lastY = null;
-
-  for (const item of textContent.items) {
-    const y = item.transform?.[5];
-    const value = item.str ?? "";
-
-    if (!value) {
-      continue;
-    }
-
-    if (lastY === null || lastY === y) {
-      text += value;
-    } else {
-      text += `\n${value}`;
-    }
-
-    lastY = y;
-  }
-
-  return text;
-};
-
-const resolvePageLimit = ({ maxPages, pageCount }) => {
-  if (maxPages === undefined || maxPages === null || maxPages === 0) {
-    return pageCount;
-  }
-
-  if (!Number.isInteger(maxPages) || maxPages < 0) {
-    throw new TypeError("maxPages must be a non-negative integer.");
-  }
-
-  return Math.min(maxPages, pageCount);
-};
-
-export const loadPdfDocument = async (
-  filePath,
-  {
-    maxPages = 0,
-    includeMetadata = false,
-    // PDF_PARAGRAPH_DETECTION: rebuild paragraphs from line geometry
-    // (pdf-paragraphs.js). Off keeps the legacy one-line-per-"\n" text.
-    paragraphDetection = isPdfParagraphDetectionEnabled(),
-  } = {}
-) => {
+// { pages, pageCount, renderedPageCount, pdfVersion, info, signals? }: options
+// as parsePdfBytesWithPdfjs (maxPages, includeMetadata, paragraphDetection,
+// collectSignals, workers), in this thread unless PDF_PARSE_WORKERS > 0.
+export const loadPdfDocument = async (filePath, options = {}) => {
   // A working file (rag/working-files.js): encrypted with TENANT_ENCRYPTION=on.
   const dataBuffer = await readWorkingFile(filePath);
-  const pages = [];
-  const pageLines = [];
-  let pageCount = 0;
-  let info = null;
-  const loadingTask = getDocument({
-    data: new Uint8Array(dataBuffer),
-    isEvalSupported: false,
-    verbosity: VerbosityLevel.ERRORS,
-  });
 
-  try {
-    const document = await loadingTask.promise;
-    pageCount = document.numPages;
-    const renderedPageCount = resolvePageLimit({
-      maxPages,
-      pageCount,
-    });
+  return parsePdfBytesWithPdfjs(dataBuffer, options);
+};
 
-    for (
-      let pageNumber = 1;
-      pageNumber <= renderedPageCount;
-      pageNumber += 1
-    ) {
-      const pageData = await document.getPage(pageNumber);
-
-      try {
-        if (paragraphDetection) {
-          const textContent = await readPdfPageTextContent(pageData);
-          pageLines.push(buildPdfTextLines(textContent.items));
-          pages.push({ pageNumber, text: "" });
-        } else {
-          const text = await renderPdfPageText(pageData);
-          pages.push({
-            pageNumber,
-            text: normalizePageText(text),
-          });
-        }
-      } finally {
-        pageData.cleanup();
-      }
-    }
-
-    if (paragraphDetection) {
-      // A line-end hyphen is judged against the whole document's spelling.
-      const vocabulary = buildHyphenationVocabulary(pageLines);
-      pages.forEach((page, index) => {
-        page.text = renderPdfParagraphText(pageLines[index], { vocabulary });
-      });
-    }
-
-    if (includeMetadata) {
-      const metadata = await document.getMetadata();
-      info = metadata.info ?? null;
-    }
-  } finally {
-    await loadingTask.destroy();
-  }
-
-  return {
-    pages,
-    pageCount,
-    renderedPageCount: pages.length,
-    pdfVersion: pdfJsVersion,
-    info,
-  };
+// PDF_PARSER=pdfjs and docling route nothing: their pages count as `unrouted`.
+const countUnroutedPages = (pages, parser) => {
+  recordPdfPages({ count: pages.length, parser, route: "unrouted" });
+  return pages;
 };
 
 // Every ingest path reads pages through here, so PDF_PARSER applies to
 // uploads, archive ingest and vector:reindex alike.
 export const loadPdfPages = async (filePath) => {
-  if (getPdfParser() !== "docling") {
-    return (await loadPdfDocument(filePath)).pages;
+  const parser = getPdfParser();
+
+  if (parser === "auto") {
+    return loadPdfPagesAuto(filePath);
+  }
+
+  if (parser !== "docling") {
+    return countUnroutedPages((await loadPdfDocument(filePath)).pages, "pdfjs");
   }
 
   try {
-    return await loadPdfPagesWithDocling(filePath);
+    return countUnroutedPages(await loadPdfPagesWithDocling(filePath), "docling");
   } catch (error) {
     if (getDoclingFallback() === "none") {
       throw error;
     }
 
     console.warn(`${error.message} Parsing ${path.basename(filePath)} with pdf.js instead (DOCLING_FALLBACK=pdfjs).`);
-    return (await loadPdfDocument(filePath)).pages;
+
+    const { pages } = await loadPdfDocument(filePath);
+
+    recordPdfParseFallback("docling_document", pages.length);
+    return countUnroutedPages(pages, "pdfjs");
   }
 };

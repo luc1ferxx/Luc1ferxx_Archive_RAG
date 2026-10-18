@@ -73,7 +73,15 @@ import { createPostgresIngestJobStore } from "./rag/ingest-job-store.js";
 import { checkReadReplicaHealth } from "./rag/postgres-replicas.js";
 import { checkSharedStateHealth } from "./rag/shared-state.js";
 import { probeDoclingServe } from "./rag/docling-parser.js";
-import { getDoclingFallback, getPdfParser, getTenantEncryptionMode } from "./rag/config.js";
+import { resolvePdfAutoRoutingConfig } from "./rag/pdf-page-router.js";
+import {
+  getDoclingFallback,
+  getDoclingMaxConcurrency,
+  getDoclingMergeGapPages,
+  getDoclingPageBatchSize,
+  getPdfParser,
+  getTenantEncryptionMode,
+} from "./rag/config.js";
 import { getTenantKmsProvider } from "./rag/kms/index.js";
 import { getOpenAIApiKey } from "./rag/openai.js";
 import { getRagDataDirectory } from "./rag/storage.js";
@@ -1270,7 +1278,9 @@ export const checkRowLevelSecurityHealth = async () => {
 // PDF_PARSER=docling depends on a docling-serve instance. Uploads still parse
 // with pdf.js when it is down (DOCLING_FALLBACK=pdfjs), so like shared state
 // this reports the configured dependency as broken rather than the app.
-const checkPdfParserHealth = async () => {
+// PDF_PARSER=auto depends on it only for the pages it routes there, and only
+// with a route enabled; an invalid PDF_AUTO_* setting fails every PDF upload.
+export const checkPdfParserHealth = async ({ fetchImpl } = {}) => {
   let parser;
 
   try {
@@ -1279,22 +1289,55 @@ const checkPdfParserHealth = async () => {
     return buildEntry("error", { message: error.message });
   }
 
-  if (parser !== "docling") {
+  if (parser === "pdfjs") {
     return buildEntry("ok", { parser, message: "PDFs are parsed in-process with pdf.js." });
   }
 
-  const probe = await probeDoclingServe();
+  const docling = {
+    doclingMaxConcurrency: getDoclingMaxConcurrency(),
+    doclingPageBatchSize: getDoclingPageBatchSize(),
+  };
+  let routes = null;
 
-  return probe.reachable
-    ? buildEntry("ok", { parser, url: probe.url, message: "docling-serve is reachable." })
-    : buildEntry("error", {
+  if (parser === "auto") {
+    try {
+      ({ routes } = resolvePdfAutoRoutingConfig());
+    } catch (error) {
+      return buildEntry("error", { parser, message: error.message });
+    }
+
+    if (routes.length === 0) {
+      return buildEntry("ok", {
         parser,
-        url: probe.url,
-        fallback: getDoclingFallback(),
-        message: `docling-serve at ${probe.url} is unreachable${probe.error ? ` (${probe.error})` : ""}; uploads ${
-          getDoclingFallback() === "none" ? "will fail" : "fall back to pdf.js"
-        }.`,
+        routes: [...routes],
+        ...docling,
+        message: "PDF_AUTO_ROUTES=none: every page keeps its pdf.js text; docling-serve is not used.",
       });
+    }
+  }
+
+  const probe = await probeDoclingServe({ fetchImpl });
+  const autoDetails = routes ? { doclingMergeGapPages: getDoclingMergeGapPages(), routes: [...routes] } : {};
+
+  if (probe.reachable) {
+    return buildEntry("ok", { parser, ...autoDetails, ...docling, url: probe.url, message: "docling-serve is reachable." });
+  }
+
+  const unreachable = `docling-serve at ${probe.url} is unreachable${probe.error ? ` (${probe.error})` : ""}`;
+  const fallback = getDoclingFallback();
+
+  return buildEntry("error", {
+    parser,
+    ...autoDetails,
+    ...docling,
+    url: probe.url,
+    fallback,
+    message: routes
+      ? `${unreachable}; pages routed to ${routes.join(" or ")} ${
+          fallback === "none" ? "make their uploads fail" : "fall back to their pdf.js text"
+        }.`
+      : `${unreachable}; uploads ${fallback === "none" ? "will fail" : "fall back to pdf.js"}.`,
+  });
 };
 
 // RAG_EMBEDDING_QUERY_ADAPTER (rag/query-adapter.js): a configured file that

@@ -168,6 +168,10 @@ critical 表示现在就要有人处理，warning 进工单队列。
 | 运行为什么失败或被取消 | `sum by (outcome, reason) (rate(archive_rag_agent_runs_total[5m]))` |
 | 模型 token 和估算成本 | `sum by (model) (rate(archive_rag_model_tokens_total{metering!="mirror"}[1h]))`、`archive_rag_model_estimated_cost_usd_total{metering!="mirror"}` |
 | 重排降级 | `rate(archive_rag_retrieval_rerank_degradations_total[5m])` |
+| PDF 页走了哪条路由、用了谁的文本 | `sum by (route, parser) (increase(archive_rag_pdf_pages_total[1h]))`（`route` 是 `PDF_PARSER=auto` 的路由，其他模式为 `unrouted`） |
+| docling-serve 请求的结果和耗时 | `sum by (route, outcome) (rate(archive_rag_pdf_docling_requests_total[5m]))`（`outcome`：`ok`、`error`、`timeout`、`aborted`）、`histogram_quantile(0.95, sum by (le, route) (rate(archive_rag_pdf_docling_request_duration_seconds_bucket[5m])))`（从拿到 `DOCLING_MAX_CONCURRENCY` 名额算起） |
+| 多少页退回了 pdf.js 文本 | `sum by (reason) (increase(archive_rag_pdf_parse_fallbacks_total[1h]))`（`docling_failed`、`docling_empty`、`docling_document`） |
+| pdf.js worker 池（`PDF_PARSE_WORKERS` > 0） | `archive_rag_pdf_parse_pool_size`、`archive_rag_pdf_parse_workers{state="busy"}`、`archive_rag_pdf_parse_queued_tasks`、`rate(archive_rag_pdf_parse_tasks_total{outcome="failed"}[5m])`、`increase(archive_rag_pdf_parse_worker_restarts_total[1h])`（worker 崩溃、超出内存上限或 `PDF_PARSE_TIMEOUT_MS`） |
 | 指标本身出了问题 | `archive_rag_metrics_series_overflow_total`（某个指标族超过 1000 组标签）、`archive_rag_metrics_collector_errors_total` |
 
 跨进程汇总模型指标时排除 `metering="mirror"`：拆分部署下网关记一份权威数据，调用方再记一份镜像。

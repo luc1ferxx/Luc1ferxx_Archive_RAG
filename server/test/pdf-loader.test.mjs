@@ -186,7 +186,7 @@ test("PDF_PARSER=docling falls back to pdf.js when docling-serve is down, unless
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-loader-docling-"));
   const pdfPath = path.join(tempDir, "test.pdf");
   const saved = Object.fromEntries(
-    ["PDF_PARSER", "DOCLING_SERVE_URL", "DOCLING_FALLBACK"].map((key) => [key, process.env[key]])
+    ["PDF_PARSER", "DOCLING_SERVE_URL", "DOCLING_FALLBACK", "PDF_AUTO_ROUTES"].map((key) => [key, process.env[key]])
   );
   const originalWarn = console.warn;
   const warnings = [];
@@ -211,8 +211,12 @@ test("PDF_PARSER=docling falls back to pdf.js when docling-serve is down, unless
   assert.match(warnings.join("\n"), /unreachable.*Parsing test\.pdf with pdf\.js instead/);
 
   process.env.DOCLING_FALLBACK = "none";
-  await assert.rejects(loadPdfPages(pdfPath), { name: "DoclingParseError" });
+  await assert.rejects(loadPdfPages(pdfPath), { code: "DOCLING_UNREACHABLE", name: "DoclingParseError" });
+
+  // auto goes to the auto parser, which checks its settings before parsing.
+  Object.assign(process.env, { PDF_AUTO_ROUTES: "tables", PDF_PARSER: "auto" });
+  await assert.rejects(loadPdfPages(pdfPath), /PDF_AUTO_ROUTES must be a comma list of layout, ocr, or none/);
 
   process.env.PDF_PARSER = "pdfminer";
-  await assert.rejects(loadPdfPages(pdfPath), /PDF_PARSER must be one of pdfjs, docling/);
+  await assert.rejects(loadPdfPages(pdfPath), /PDF_PARSER must be one of pdfjs, docling, auto; got "pdfminer"/);
 });

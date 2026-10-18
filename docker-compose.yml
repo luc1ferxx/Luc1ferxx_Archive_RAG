@@ -102,8 +102,10 @@ services:
   # Optional layout-aware PDF parsing (PDF_PARSER=docling): tables as cell
   # grids and multi-column reading order. About 2 GB compressed, CPU only.
   # Run `PDF_PARSER=docling docker compose --profile app --profile layout up -d`.
-  # The tag is not pinned: no version of docling-serve has been recorded as
-  # measured in this repository (docs/evaluation.md names none).
+  # The tag is not pinned. PDF_PARSER=auto and page-range requests were
+  # verified on docling-serve-cpu 1.37.0 (docling 2.138.0); pin
+  # @sha256:5a8367f3f657c26755605c3b2255546674833209a18afc2011598f4c045c6db3
+  # for a reproducible deployment (docs/deployment.md).
   docling:
     image: ghcr.io/docling-project/docling-serve-cpu:latest
     container_name: luc1ferxx-archive-docling

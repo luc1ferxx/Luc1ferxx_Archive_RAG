@@ -28,6 +28,7 @@ import {
 } from "./rag/config.js";
 import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { stopTenantUsageLedger } from "./rag/tenant-usage.js";
+import { stopPdfParsePool } from "./rag/pdf-parse-pool.js";
 import {
   configureUploadSessionDirectory,
   startUploadSessionSweeper,
@@ -303,6 +304,11 @@ export const createApp = async (options = {}) => {
     } catch (error) {
       console.error("Failed to flush tenant usage on shutdown.", error);
     }
+    // Ends the pdf.js workers (PDF_PARSE_WORKERS > 0; nothing without them).
+    // Requests and the ingest worker have stopped by now; a parse still
+    // running fails with PDF_PARSE_POOL_STOPPED (503), which the ingest queue
+    // retries.
+    await stopPdfParsePool();
   };
 
   app.use(createSystemRouter(services));
