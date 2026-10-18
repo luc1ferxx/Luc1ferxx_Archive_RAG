@@ -17,6 +17,7 @@ server/.env
 /server/data/
 /server/tmp-rag-data/
 /server/upload-sessions/
+/server/backups/
 /server/evaluation/results/20*.json
 !/server/evaluation/results/latest.json
 /server/evaluation/results/latest-feedback.json

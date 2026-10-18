@@ -524,6 +524,9 @@ const recordProgressUnderLease = (lease, progress) =>
     await recordProgress(query, progress);
   });
 
+// A document in the trash (migration 042) has no chunks in any live version
+// and gets none: the builder skips it like a deleted one, and a restore
+// writes it into the building version itself (it is a write target).
 const listPendingDocuments = async ({ cursor, limit, versionId }) => {
   const { buildProgressTable } = getIndexVersionTableNames();
   const result = await runAsDatabaseSystem(() =>
@@ -532,6 +535,7 @@ const listPendingDocuments = async ({ cursor, limit, versionId }) => {
         SELECT d.doc_id
         FROM ${getDocumentsTableName()} d
         WHERE d.doc_id > $2
+          AND d.deleted_at IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM ${buildProgressTable} p
             WHERE p.version_id = $1 AND p.doc_id = d.doc_id AND p.outcome <> 'failed'
@@ -553,7 +557,8 @@ const readDocumentSource = async (docId) =>
           SELECT doc_id, file_name, file_bytes, profile, uploaded_at::text AS uploaded_at, content_version,
                  owner_user_id, workspace_id
           FROM ${getDocumentsTableName()}
-          WHERE doc_id = $1`,
+          WHERE doc_id = $1
+            AND deleted_at IS NULL`,
         [docId]
       )
     )
@@ -649,6 +654,7 @@ const writeVersionDocument = ({ contentToken, docId, lease, prepared, space, upl
           SELECT uploaded_at::text AS uploaded_at, content_version, owner_user_id, workspace_id
           FROM ${getDocumentsTableName()}
           WHERE doc_id = $1
+            AND deleted_at IS NULL
           FOR SHARE`,
         [docId]
       )
@@ -791,7 +797,8 @@ const refreshBuildCounters = (lease) => {
                    SELECT COUNT(*) FROM ${buildProgressTable} WHERE version_id = $1 AND outcome <> 'failed'),
                  build_documents_failed = (
                    SELECT COUNT(*) FROM ${buildProgressTable} WHERE version_id = $1 AND outcome = 'failed'),
-                 build_documents_total = (SELECT COUNT(*) FROM ${getDocumentsTableName()}),
+                 build_documents_total = (
+                   SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) FROM ${getDocumentsTableName()}),
                  lease_expires_at = NOW() + ($3::bigint * INTERVAL '1 millisecond'),
                  updated_at = NOW()
            WHERE version_id = $1 AND builder_id = $2 AND status = 'building'
@@ -1435,7 +1442,7 @@ export const validateIndexVersion = async ({
     const totals = firstRow(
       await query(
         `/* index_versions:count_totals */
-          SELECT (SELECT COUNT(*) FROM ${getDocumentsTableName()})::bigint AS document_count,
+          SELECT (SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) FROM ${getDocumentsTableName()})::bigint AS document_count,
                  ${activeReadable ? `(SELECT COUNT(*) FROM ${active.chunkTable})::bigint` : "NULL::bigint"} AS active_chunks,
                  (SELECT COUNT(*) FROM ${target.chunkTable})::bigint AS target_chunks`
       )

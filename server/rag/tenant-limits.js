@@ -84,13 +84,15 @@ export const TENANT_CHAT_CLASS_ROUTES = Object.freeze([
 
 // ingest: everything that brings document bytes in (direct and chunked
 // uploads, one request per chunk; a document replace; an arXiv import, which
-// downloads and ingests a PDF).
+// downloads and ingests a PDF), and a restore from the trash, which parses
+// and embeds a stored PDF again.
 export const TENANT_INGEST_CLASS_ROUTES = Object.freeze([
   "POST /upload",
   "POST /upload/init",
   "POST /upload/chunk",
   "POST /upload/complete",
   "PUT /documents/:docId",
+  "POST /documents/:docId/restore",
   "POST /arxiv/import",
   "POST /documents/:docId/arxiv/import",
 ]);

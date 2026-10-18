@@ -740,6 +740,7 @@ export const createPostgresIngestJobStore = ({
         WHERE owner_user_id = $1
           AND workspace_id = $2
           AND content_sha256 = $3
+          AND deleted_at IS NULL
         ORDER BY uploaded_at ASC, doc_id ASC
         LIMIT 1
       `,

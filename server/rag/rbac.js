@@ -492,6 +492,10 @@ export const RBAC_ROUTE_TABLE = Object.freeze(
     perm("DELETE", "/documents/:docId", P.documentsDelete),
     perm("POST", "/documents/clear", P.documentsDelete),
     perm("PUT", "/documents/:docId", P.documentsWrite),
+    // The document trash (rag/document-trash.js): listing it is a read; a
+    // restore undoes a delete, so it needs what the delete needed.
+    perm("GET", "/documents/trash", P.documentsRead),
+    perm("POST", "/documents/:docId/restore", P.documentsDelete),
 
     // Uploads and ingest jobs.
     perm("POST", "/upload/init", P.documentsWrite),

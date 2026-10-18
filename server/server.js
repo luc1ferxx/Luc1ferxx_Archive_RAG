@@ -180,8 +180,9 @@ const startMonolith = async () => {
     );
   }
 
-  // Retention (rag/retention.js): only when an *_RETENTION_DAYS setting is
-  // above 0 (all default to 0, and then nothing is started). The monolith
+  // Retention (rag/retention.js): only when an *_RETENTION_DAYS setting (or
+  // DOCUMENT_TRASH_RETENTION_HOURS) is above 0 (all default to 0, and then
+  // nothing is started). The monolith
   // hosts the API tier, and the agent tier unless AGENT_SERVICE_URL sends
   // agent work elsewhere, which then sweeps runs and tasks itself.
   const retentionSweeper = startRetentionSweeper({

@@ -1,6 +1,6 @@
 # 运维：SLO、告警和处理步骤
 
-这份文档说明 `/chat` 的服务目标、每条告警的含义和处理步骤。规则文件在 [`deploy/prometheus/`](../deploy/prometheus/)，怎么打开指标、怎么接 Prometheus 见 [deployment.md](deployment.md#指标与告警可选)，变量见 [configuration.md](configuration.md#prometheus-指标)。
+这份文档说明 `/chat` 的服务目标、每条告警的含义和处理步骤，以及数据库的[备份与恢复](#备份与恢复)。规则文件在 [`deploy/prometheus/`](../deploy/prometheus/)，怎么打开指标、怎么接 Prometheus 见 [deployment.md](deployment.md#指标与告警可选)，变量见 [configuration.md](configuration.md#prometheus-指标)。
 
 先说清楚边界：
 
@@ -171,6 +171,81 @@ critical 表示现在就要有人处理，warning 进工单队列。
 | 指标本身出了问题 | `archive_rag_metrics_series_overflow_total`（某个指标族超过 1000 组标签）、`archive_rag_metrics_collector_errors_total` |
 
 跨进程汇总模型指标时排除 `metering="mirror"`：拆分部署下网关记一份权威数据，调用方再记一份镜像。
+
+## 备份与恢复
+
+三个脚本都在 `server/scripts/`，实际工作在 `server/backup-tools.mjs`：
+
+| 命令 | 做什么 |
+| --- | --- |
+| `npm run backup:postgres -- --database-url <url> [--out <dir>] [--with-files]` | `pg_dump -Fc` 出一个 `.dump`，旁边写 `.manifest.json`。 |
+| `npm run backup:verify -- --dump <file>` | 恢复演练：把 dump 恢复到一个一次性集群里并逐项检查。 |
+| `npm run backup:restore -- --database-url <目标库> --dump <file> [--dry-run] [--force]` | 恢复到指定的库。 |
+
+数据库地址只从 `--database-url` 或环境变量 `BACKUP_DATABASE_URL` 读，脚本不读 `server/.env`。密码通过 `PGPASSWORD` 交给 `pg_dump`/`pg_restore`，不出现在命令行里；manifest 只记主机、端口和库名。`pg_dump`/`pg_restore` 默认取最新的 Postgres.app，`PG_BIN_DIR` 可以指定；`pg_dump` 的大版本不能低于服务器。
+
+### 备份
+
+- 用拥有表的登录（role split 时是迁移登录 `POSTGRES_MIGRATION_DATABASE_URL`）：备份要读到所有租户的行。脚本在会话里设 `row_security = off`，被行策略过滤的登录会直接报错，不会悄悄少算。
+- dump 和 manifest 的统计在同一个导出快照里完成（`pg_export_snapshot` + `pg_dump --snapshot`），备份期间有写入也一致。
+- manifest 记录：时间、已应用的迁移（`schema_migrations`）、每张表的行数、每个 (owner, workspace) 的文档数（正常的和回收站里的分开）和字节数、每条审计哈希链最后一行的 id 和哈希、行策略引用的角色、dump 的 SHA-256 和大小。
+- 默认输出到 `server/backups/`（已在 `.gitignore` 里）。备份文件里有所有租户的文档和文本，存放时要加密、限制访问，并设自己的保留期。
+- `--with-files` 另外打包数据库以外的磁盘状态：`UPLOADS_DIRECTORY`（默认 `server/uploads`）、`UPLOAD_SESSION_DIRECTORY`（默认 `server/upload-sessions`）和数据目录（默认 `server/data`：本地索引、文件注册表、JSONL 存储、trace）。默认的 PostgreSQL 部署里这些大多是临时数据；用 local / Qdrant 或文件注册表时才必须带上（Qdrant 自己的数据要另外按 Qdrant 的方式备份）。
+
+### 恢复演练
+
+```bash
+cd server
+npm run backup:postgres -- --database-url "$BACKUP_DATABASE_URL" --out /srv/backups
+npm run backup:verify -- --dump /srv/backups/archive-rag-<时间>.dump
+```
+
+`backup:verify` 不带 `--database-url` 时自己起一个一次性集群（和 `run-pgvector-integration.sh` 一样：`$TMPDIR` 下的新数据目录，只监听 `/tmp` 下一个 0700 目录里的 unix socket，trust 认证，所以不需要任何密码），用一个非超级用户登录（拥有临时库，和生产里的迁移登录一样）恢复，然后检查：
+
+1. dump 的 SHA-256 与 manifest 一致；
+2. 代码里每个迁移都已应用、没有未知的迁移，已应用列表与 manifest 一致（旧代码的备份用 `--allow-pending-migrations`）；
+3. 每张表的行数、每个租户的文档数与 manifest 一致；
+4. 健康报告的 `checks.rowLevelSecurity` 没有 error（角色、策略、授权、角色切换）；
+5. 审计哈希链全部校验通过（`audit:verify` 的同一段代码），且每条链的最后一行与 manifest 记录的一致，能发现链尾被删的行。
+
+全部通过退出 0，有一项不通过退出 1，脚本出错退出 2。也可以用 `--database-url` 指向一个空的临时库来演练。建议每次备份后自动跑一次，至少定期跑；只有演练通过的备份才算可用。
+
+### 恢复
+
+```bash
+npm run backup:restore -- --database-url <目标库> --dump <file> --dry-run   # 只打印计划
+npm run backup:restore -- --database-url <目标库> --dump <file>
+```
+
+- 先打印计划（目标、dump 和校验和、要建的角色和扩展、`pg_restore` 参数）；dump 与 manifest 的校验和不一致时拒绝。
+- 目标库里已经有表时拒绝（退出 3）；`--force` 用 `--clean --if-exists` 覆盖 dump 里的对象。恢复到生产前先停掉所有实例和 ingest worker。
+- 缺少行策略引用的 NOLOGIN 角色（租户角色、系统角色）时先创建；缺少 pgvector 时先尝试创建，没有权限时提示由超级用户执行 `CREATE EXTENSION vector`。
+- `pg_restore --no-owner --exit-on-error --single-transaction`：要么全部恢复，要么什么都不变；所有对象归恢复所用的登录所有（用迁移登录）。扩展本身和扩展的注释不在恢复里（需要超级用户），由上一步预先创建。
+- 最后把租户角色授给恢复所用的登录（迁移 013 在原库上做过的事）。角色密码和成员关系是整个集群的，不在 dump 里：role split 时，用新的 `POSTGRES_DATABASE_URL` / `POSTGRES_MIGRATION_DATABASE_URL` 启动应用，迁移器会重新授予运行时登录；运行时登录本身要先建好（`deploy/postgres/create-split-roles.sql`）。
+- `--with-files` 的 tar 在停服时解压到对应目录（成员名是 `uploads/`、`upload-sessions/`、`data/`）。
+- 恢复的是备份那一刻：之后的上传、删除、租户擦除都不在里面。尤其是备份之后擦除的租户，用旧备份恢复会把它的数据带回来，恢复后要重新执行那些擦除（审计日志里的 `admin.tenant.erased` 记录了是谁）。回收站里的文档按原来的 `deleted_at` 继续计时。
+
+### RPO 和 RTO
+
+- 这里只实现了逻辑备份（`pg_dump`）。RPO 等于两次备份的间隔：每天备份一次，最坏丢一天的写入。RTO 是 `pg_restore` 的时间加上演练检查和启动，随数据量线性增长；只在测试库上量过（几个文档，恢复加检查约 1 秒），没有生产规模的数字，上线前要用接近生产的数据量量一次。
+- 生产环境的做法是 PostgreSQL 的物理备份：基础备份加 WAL 归档（`archive_command` / pgBackRest / WAL-G），可以做时间点恢复（PITR），RPO 到秒或分钟级。**本仓库没有实现、配置或测试 WAL 归档和 PITR**，需要部署方用托管数据库的自动备份或上述工具自己配置。逻辑备份仍然有用：跨大版本迁移、恢复演练、把一个库完整搬到别处。
+- Redis（`RAG_SHARED_STATE=redis`）不需要备份：熔断器、并发令牌、judge 缓存都会重建。
+
+### 不在备份里的
+
+- **租户密钥库**（信封加密，`TENANT_KEYSTORE_DIR`，在 PostgreSQL 之外）：故意不进数据库备份，也不进 `--with-files` 的 tar（按 `TENANT_KEYSTORE_DIR` 和名字里带 `keystore` 的路径排除）。这样擦除一个租户的密钥，所有备份副本里这个租户加密过的文件字节就再也读不出来（crypto-shredding）。密钥库要单独备份：放在不同的介质上、单独控制访问和保留期，并且擦除租户时把该租户的密钥也从密钥库的备份里删掉，否则粉碎不成立；或者不备份密钥库，接受丢失密钥库等于丢失加密数据。恢复数据库时要配一个包含这些租户密钥的密钥库。注意加密只覆盖文件字节：切块文本、run、反馈等仍以明文在数据库备份里，擦除租户不会改变已有的备份。
+- `server/.env` 和其他密钥、角色密码和成员关系、Redis、进程内缓存。
+- Qdrant 自己的存储（只在 `VECTOR_STORE_PROVIDER=qdrant` 时有）。
+
+### 按租户恢复
+
+目前**没有**按租户恢复的工具。`npm run tenant:export` 能导出一个租户的全部记录（NDJSON，文档字节是 base64），但没有对应的导入命令；把单个租户的行用 SQL 拷回生产库也没有实现（要处理依赖顺序、行策略、审计哈希链、每个索引版本的切块表和 BM25 统计）。现在能做的：
+
+1. 用 `backup:verify -- --keep-cluster`（或 `backup:restore` 到一个临时库）把整份备份恢复出来；
+2. 在临时库上用 `npm run tenant:export -- --workspace <id> [--user <id>] --output <file>` 导出这个租户；
+3. 文档可以从导出的字节通过正常的上传接口重新上传（重新切块、重新 embedding，docId 会变）；run、任务、反馈、记忆和审计记录没有导入路径。
+
+完整的按租户恢复需要一个与 `tenant:export` 对称的导入工具，这里没有做。
 
 ## 已知限制
 

@@ -95,6 +95,12 @@ import {
   getAgentPlannerRollout,
 } from "./rag/config.js";
 import { createDocumentDeletionCascade } from "./rag/document-deletion-cascade.js";
+import { createDocumentTrashService } from "./rag/document-trash.js";
+import {
+  listTrashedDocuments,
+  restoreDocument,
+  supportsDocumentTrash,
+} from "./rag/index.js";
 import { createDefaultIngestJobStore } from "./rag/ingest-job-store.js";
 import { createTenantLifecycleService } from "./rag/tenant-lifecycle.js";
 import { createDefaultTenantRegistryService } from "./rag/tenant-registry.js";
@@ -317,11 +323,15 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     isDocumentRegistryShared,
     listDocuments,
     listLongMemories,
+    // The document trash (DOCUMENT_TRASH_RETENTION_HOURS, rag/document-trash.js).
+    listTrashedDocuments,
     loadDocumentsFromStore,
     recordConversationTurn,
     refreshDocumentRegistry,
     rememberLongMemory,
+    restoreDocument,
     resyncDocument,
+    supportsDocumentTrash,
     ...(options.ragService ?? {}),
   };
   const webChatService = options.chatMcp ?? chatMCP;
@@ -601,6 +611,15 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     });
   const adminAuditService =
     options.adminAuditService ?? createDefaultAdminAuditService();
+  // The trash's purge for the retention sweep (rag/retention.js, the
+  // document_trash type): the deletion cascade and the purge audit event run
+  // per deleting scope after each batch.
+  const documentTrashService =
+    options.documentTrashService ??
+    createDocumentTrashService({
+      adminAuditService,
+      getCascade: () => documentDeletionCascade,
+    });
   // The tenant registry (migration 036): the admin routes write it,
   // requireApiAuth reads it under TENANT_MEMBERSHIP=enforce (app.js puts this
   // instance on app.locals), the tenant erase marks and removes its rows, and
@@ -658,6 +677,7 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     dagPlannerAdapter: resolvedDagPlannerAdapter,
     executionPlannerAdapter,
     documentDeletionCascade,
+    documentTrashService,
     feedbackService,
     healthService,
     ingestJobStore,

@@ -556,6 +556,22 @@ const ensureActivePgvectorVersion = async ({
   force = false,
   allowForeignEmbeddings = false,
 } = {}) => {
+  // Inside a write transaction (the handle beginPgvectorIndexWrite returned)
+  // the transaction has already read its write targets under the shared
+  // lifecycle lock, active version first. When that is the version verified
+  // last, nothing more is read: the pointer read below would take a second
+  // pooled connection whenever the TTL had expired, while the transaction
+  // holds one, and with every connection held by such a write the pool would
+  // never hand it out (rag/index.js commitDocument). A version switched since
+  // the last verification still takes the slow path.
+  if (!force && verified && client && !allowForeignEmbeddings) {
+    const targets = writeTargetsByHandle.get(client);
+
+    if (targets?.length > 0 && getVersionVerificationKey(targets[0]) === verified.key) {
+      return verified.version;
+    }
+  }
+
   // Fast path: the pointer (cached for its TTL, then one cheap read) still
   // names the version verified last, under the same embedding space.
   let pendingKey = null;

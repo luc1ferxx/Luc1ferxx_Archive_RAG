@@ -1598,6 +1598,24 @@ export const isDocumentDeleteRedactionEnabled = () =>
     String(process.env.DOCUMENT_DELETE_REDACTION ?? "").trim().toLowerCase()
   );
 
+// The document trash (migration 042, rag/document-trash.js). 0 (the default)
+// keeps DELETE /documents/:docId and POST /documents/clear an immediate hard
+// delete. Above 0 they move documents into the trash instead: out of search
+// and every listing at once, bytes kept, restorable with POST
+// /documents/:docId/restore, and purged by the retention sweep once they have
+// been there this many whole hours. Needs VECTOR_STORE_PROVIDER=pgvector with
+// the PostgreSQL document registry; anything else refuses the start
+// (DOCUMENT_TRASH_UNSUPPORTED). At most ten years.
+export const MAX_DOCUMENT_TRASH_RETENTION_HOURS = 87_600;
+
+export const getDocumentTrashRetentionHours = () =>
+  Math.min(
+    Math.floor(toNonNegativeNumber(process.env.DOCUMENT_TRASH_RETENTION_HOURS, 0)),
+    MAX_DOCUMENT_TRASH_RETENTION_HOURS
+  );
+
+export const isDocumentTrashEnabled = () => getDocumentTrashRetentionHours() > 0;
+
 // Succeeded and failed jobs (their bytes are already gone) are deleted by the
 // workers' housekeeping once they are this old. 0 keeps them forever.
 export const getRagIngestJobRetentionMs = () =>

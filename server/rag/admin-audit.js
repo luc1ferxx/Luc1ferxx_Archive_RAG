@@ -32,8 +32,18 @@ export const DATA_ACCESS_ACTION_IDS = Object.freeze({
   adminStatusCrossTenantRead: "admin.status.cross_tenant_read",
   documentDelete: "document.delete",
   documentFileDownload: "document.file.download",
+  // The document trash (DOCUMENT_TRASH_RETENTION_HOURS, rag/document-trash.js):
+  // DELETE /documents/:docId and POST /documents/clear while the trash is on
+  // record document.trash and documents.trash instead of the two above; POST
+  // /documents/:docId/restore records document.restore; the retention sweep's
+  // purge records document.purge per deleting scope, after the rows are gone
+  // (no route, so no intent record).
+  documentPurge: "document.purge",
   documentReplace: "document.replace",
+  documentRestore: "document.restore",
+  documentTrash: "document.trash",
   documentsClear: "documents.clear",
+  documentsTrash: "documents.trash",
   memoryClear: "memory.clear",
   memoryDelete: "memory.delete",
   sessionDelete: "session.delete",
@@ -63,12 +73,28 @@ export const DATA_ACCESS_ACTIONS = Object.freeze({
     DATA_ACCESS_ACTION_IDS.documentFileDownload,
     { permissionId: "documents.read", resourceType: "document" }
   ),
+  [DATA_ACCESS_ACTION_IDS.documentPurge]: defineDataAccessAction(
+    DATA_ACCESS_ACTION_IDS.documentPurge,
+    { permissionId: "documents.delete", resourceType: "document" }
+  ),
   [DATA_ACCESS_ACTION_IDS.documentReplace]: defineDataAccessAction(
     DATA_ACCESS_ACTION_IDS.documentReplace,
     { permissionId: "documents.write", resourceType: "document" }
   ),
+  [DATA_ACCESS_ACTION_IDS.documentRestore]: defineDataAccessAction(
+    DATA_ACCESS_ACTION_IDS.documentRestore,
+    { permissionId: "documents.delete", resourceType: "document" }
+  ),
+  [DATA_ACCESS_ACTION_IDS.documentTrash]: defineDataAccessAction(
+    DATA_ACCESS_ACTION_IDS.documentTrash,
+    { destructive: true, permissionId: "documents.delete", resourceType: "document" }
+  ),
   [DATA_ACCESS_ACTION_IDS.documentsClear]: defineDataAccessAction(
     DATA_ACCESS_ACTION_IDS.documentsClear,
+    { destructive: true, permissionId: "documents.delete", resourceType: "document" }
+  ),
+  [DATA_ACCESS_ACTION_IDS.documentsTrash]: defineDataAccessAction(
+    DATA_ACCESS_ACTION_IDS.documentsTrash,
     { destructive: true, permissionId: "documents.delete", resourceType: "document" }
   ),
   [DATA_ACCESS_ACTION_IDS.memoryClear]: defineDataAccessAction(

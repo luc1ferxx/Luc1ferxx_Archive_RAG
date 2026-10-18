@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
   getAgentRunRetentionDays,
+  getDocumentTrashRetentionHours,
   getFeedbackRetentionDays,
   getRagObservabilityRetentionDays,
   getRetentionSweepBatchSize,
@@ -15,7 +16,7 @@ import { getTenantRegistryTableNames } from "./db-migrations.js";
 import { getObservabilityEventsPath } from "./observability.js";
 import { isPostgresConfigured, queryPostgres } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
-import { computeRetentionCutoff } from "./retention-sql.js";
+import { computeRetentionCutoff, computeRetentionCutoffHours } from "./retention-sql.js";
 import {
   parseWorkspaceRetentionPolicy,
   readWorkspaceRetentionPolicyDays,
@@ -50,6 +51,13 @@ import {
 //                        write is older than the cutoff is deleted. Files on
 //                        one host: swept by every process that runs the
 //                        sweeper (API and agent tiers).
+//   document_trash       DOCUMENT_TRASH_RETENTION_HOURS (hours, not days):
+//                        documents in the trash (migration 042) deleted into
+//                        it before the cutoff, with their bytes, then the
+//                        deletion cascade per deleting scope
+//                        (rag/document-trash.js). API tier. No workspace
+//                        policy adjusts it, so it is swept even when the
+//                        policies cannot be read.
 //
 // Database work runs under runAsDatabaseSystem in batches of
 // RETENTION_SWEEP_BATCH_SIZE rows, one statement each (the stores'
@@ -91,6 +99,7 @@ const REGISTRY_PAGE_SIZE = 1000;
 
 export const RETENTION_DATA_TYPES = Object.freeze({
   agentRuns: "agent_runs",
+  documentTrash: "document_trash",
   feedback: "feedback",
   ragObservability: "rag_observability",
   tasks: "tasks",
@@ -139,6 +148,17 @@ const DATABASE_TYPES = Object.freeze([
         ? (options) => services.feedbackService.deleteExpiredFeedback(options)
         : null,
     tier: "api",
+  },
+  {
+    envName: "DOCUMENT_TRASH_RETENTION_HOURS",
+    getHours: getDocumentTrashRetentionHours,
+    id: RETENTION_DATA_TYPES.documentTrash,
+    resolveDelete: (services) =>
+      typeof services?.documentTrashService?.deleteExpiredTrash === "function"
+        ? (options) => services.documentTrashService.deleteExpiredTrash(options)
+        : null,
+    tier: "api",
+    workspacePolicies: false,
   },
 ]);
 
@@ -525,12 +545,16 @@ export const resolveRetentionTargets = ({
   const hosted = new Set([...(hostsAgentTier ? ["agent"] : []), ...(hostsApiTier ? ["api"] : [])]);
   const database = DATABASE_TYPES.filter((type) => hosted.has(type.tier))
     .map((type) => ({
-      days: type.getDays(),
+      // A type counted in hours (the document trash) carries `hours` and
+      // days 0, and is not adjusted by workspace policies.
+      days: type.getDays ? type.getDays() : 0,
       deleteBatch: type.resolveDelete(services),
       envName: type.envName,
       id: type.id,
+      ...(type.getHours ? { hours: Math.floor(Number(type.getHours())) || 0 } : {}),
+      ...(type.workspacePolicies === false ? { workspacePolicies: false } : {}),
     }))
-    .filter((type) => type.days > 0);
+    .filter((type) => (type.hours ?? type.days) > 0);
   const observability =
     hosted.size > 0 && Math.floor(Number(observabilityDays)) > 0
       ? { days: Math.floor(Number(observabilityDays)), id: RETENTION_DATA_TYPES.ragObservability }
@@ -549,7 +573,10 @@ const sweepDatabaseType = async ({
   target,
   warned,
 }) => {
-  const cutoff = computeRetentionCutoff({ days: target.days, now });
+  const cutoff =
+    target.hours === undefined
+      ? computeRetentionCutoff({ days: target.days, now })
+      : computeRetentionCutoffHours({ hours: target.hours, now });
 
   if (!cutoff) {
     return null;
@@ -566,7 +593,8 @@ const sweepDatabaseType = async ({
     return null;
   }
 
-  const workspaceCutoffs = buildWorkspaceCutoffs({ dataType: target.id, now, policies });
+  const workspaceCutoffs =
+    target.workspacePolicies === false ? [] : buildWorkspaceCutoffs({ dataType: target.id, now, policies });
   const summary = { batches: 0, cutoff, deleted: 0, deletedEvents: 0, locked: false, more: false };
 
   while (!isStopping()) {
@@ -610,6 +638,9 @@ const sweepDatabaseType = async ({
   return summary;
 };
 
+const describeTargetPeriod = (target) =>
+  target.hours === undefined ? `${target.days} days` : `${target.hours} hours`;
+
 const logDatabaseSummary = (logger, target, summary) => {
   if (summary.locked && summary.deleted === 0) {
     logger.log?.(`[retention] ${target.id}: another instance holds this table's sweep; skipped.`);
@@ -624,7 +655,7 @@ const logDatabaseSummary = (logger, target, summary) => {
   const more = summary.more ? "; more remain for the next sweep" : "";
 
   logger.log?.(
-    `[retention] ${target.id}: deleted ${summary.deleted}${events} older than ${target.days} days (before ${summary.cutoff})${more}.`
+    `[retention] ${target.id}: deleted ${summary.deleted}${events} older than ${describeTargetPeriod(target)} (before ${summary.cutoff})${more}.`
   );
 };
 
@@ -668,14 +699,16 @@ export const createRetentionSweeper = ({
     let database = targets.database ?? [];
     let policies = new Map();
 
-    if (database.some((target) => target.deleteBatch)) {
+    const usesPolicies = (target) => Boolean(target.deleteBatch) && target.workspacePolicies !== false;
+
+    if (database.some(usesPolicies)) {
       try {
         policies = (await loadPolicies({ logger })) ?? new Map();
       } catch (error) {
         // Fail closed: without the policies a global cutoff could delete what
-        // a workspace keeps longer or forever, so no database type is swept
-        // this pass. The next pass reads them again.
-        const skipped = database.filter((target) => target.deleteBatch);
+        // a workspace keeps longer or forever, so no database type a policy
+        // can adjust is swept this pass. The next pass reads them again.
+        const skipped = database.filter(usesPolicies);
 
         logger.error?.(
           `[retention] workspace retention policies could not be read (${describeError(error)}); nothing is deleted from ${skipped
@@ -690,7 +723,7 @@ export const createRetentionSweeper = ({
           };
         }
 
-        database = database.filter((target) => !target.deleteBatch);
+        database = database.filter((target) => !usesPolicies(target));
       }
     }
 
@@ -822,7 +855,9 @@ export const startRetentionSweeper = ({
 
   const intervalMs = options.intervalMs ?? getRetentionSweepIntervalMs();
   const described = [
-    ...targets.database.map((target) => `${target.id}=${target.days}d`),
+    ...targets.database.map((target) =>
+      target.hours === undefined ? `${target.id}=${target.days}d` : `${target.id}=${target.hours}h`
+    ),
     ...(targets.observability ? [`${targets.observability.id}=${targets.observability.days}d`] : []),
   ].join(", ");
 

@@ -516,6 +516,14 @@ const OBJECT_ROUTE_FIXTURES = {
     requests: () => [{ method: "DELETE", path: `/documents/${IDS.doc}` }],
     statuses: { default: [404] },
   },
+  // The document trash: a restore looks in the caller's own trash only, so
+  // A's document (active here; trashed in the PostgreSQL suite,
+  // document-trash-postgres.integration.test.mjs) answers 404 like a
+  // document that does not exist, never "not deleted".
+  "POST /documents/:docId/restore": {
+    requests: () => [{ body: {}, method: "POST", path: `/documents/${IDS.doc}/restore` }],
+    statuses: { default: [404] },
+  },
   "GET /documents/:docId/arxiv/suggestions": {
     requests: () => [{ method: "GET", path: `/documents/${IDS.doc}/arxiv/suggestions` }],
     statuses: { default: [404] },
@@ -1175,6 +1183,7 @@ describe("cross-tenant object access", () => {
     const failures = [];
     const requests = [
       { method: "GET", path: "/documents" },
+      { method: "GET", path: "/documents/trash" },
       { method: "GET", path: "/documents/arxiv/suggestions" },
       { method: "GET", path: "/agent-runs" },
       { method: "GET", path: "/agent-runs/recovery" },
@@ -1208,6 +1217,10 @@ describe("cross-tenant object access", () => {
     // The lists are filtered, not broken: B's own objects still show.
     const bob = { "x-api-key": "bob-token" };
     let response = await call(state.server, { headers: bob, method: "GET", path: "/documents" });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.json, []);
+
+    response = await call(state.server, { headers: bob, method: "GET", path: "/documents/trash" });
     assert.equal(response.status, 200);
     assert.deepEqual(response.json, []);
 

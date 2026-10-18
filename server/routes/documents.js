@@ -7,8 +7,13 @@ import {
   requireAdminPermission,
 } from "../rag/admin-authorization.js";
 import { DATA_ACCESS_ACTION_IDS } from "../rag/admin-audit.js";
-import { getVectorStoreProviderConfigStatus } from "../rag/config.js";
+import {
+  getDocumentTrashRetentionHours,
+  getVectorStoreProviderConfigStatus,
+  isDocumentTrashEnabled,
+} from "../rag/config.js";
 import { createDataAccessAudit } from "../rag/data-access-audit.js";
+import { computeTrashPurgeAfter, describeTrashedDocument } from "../rag/document-trash.js";
 import {
   loadDocumentsIngestedElsewhere,
   refreshDocumentsIngestedElsewhere,
@@ -106,12 +111,76 @@ export const createDocumentsRouter = (services) => {
     return res.json(ragService.listDocuments(accessScope));
   });
 
+  // The caller's document trash (DOCUMENT_TRASH_RETENTION_HOURS,
+  // rag/document-trash.js), newest first, each with the time the purge will
+  // remove it (null while the trash is off: then nothing purges it). Empty on
+  // a registry that keeps no trash.
+  router.get("/documents/trash", noStoreTenantData, async (req, res) => {
+    const accessScope = getRequestAccessScope(req);
+
+    try {
+      const documents = (await ragService.listTrashedDocuments?.(accessScope)) ?? [];
+      const hours = getDocumentTrashRetentionHours();
+
+      return res.json(documents.map((document) => describeTrashedDocument(document, { hours })));
+    } catch (error) {
+      return res.status(error.status ?? 500).json({
+        error: serializeError(error, "Failed to list the document trash."),
+      });
+    }
+  });
+
+  // Brings a document of the caller's trash back: re-chunked and re-embedded
+  // from its stored bytes (rag/index.js restoreDocument). 404 for anything the
+  // caller's trash does not hold (another tenant's document, a document that
+  // is not deleted, one already purged), so it tells nothing about another
+  // tenant; 409 DOCUMENT_RESTORE_DUPLICATE when the tenant has since stored
+  // the same PDF as another document (RAG_INGEST_DEDUP).
+  router.post("/documents/:docId/restore", async (req, res) => {
+    const parsed = parseOrRespond(docIdSchema, req.params, res);
+    if (!parsed) return;
+    const { docId } = parsed;
+    const accessScope = getRequestAccessScope(req);
+    const audited = { accessScope, actionId: DATA_ACCESS_ACTION_IDS.documentRestore, resourceIds: [docId] };
+
+    try {
+      const document = (await ragService.restoreDocument?.({ accessScope, docId })) ?? null;
+
+      if (!document) {
+        await dataAudit.recordOutcome(req, { ...audited, count: 0, status: 404 });
+        return res.status(404).json({ error: "Document not found in the trash." });
+      }
+
+      await dataAudit.recordOutcome(req, { ...audited, count: 1, status: 200 });
+      return res.json({ document, restored: true });
+    } catch (error) {
+      const status = error.status ?? 500;
+
+      await dataAudit.recordOutcome(req, { ...audited, status });
+      return res.status(status).json({
+        ...(typeof error.code === "string" && status < 500 ? { code: error.code } : {}),
+        ...(typeof error.duplicateDocId === "string" ? { duplicateDocId: error.duplicateDocId } : {}),
+        error:
+          status === 404
+            ? "Document not found in the trash."
+            : serializeError(error, "Failed to restore the document."),
+      });
+    }
+  });
+
   router.delete("/documents/:docId", async (req, res) => {
     const parsed = parseOrRespond(docIdSchema, req.params, res);
     if (!parsed) return;
     const { docId } = parsed;
     const accessScope = getRequestAccessScope(req);
-    const audited = { accessScope, actionId: DATA_ACCESS_ACTION_IDS.documentDelete, resourceIds: [docId] };
+    // With the trash on the document goes there (rag/index.js deleteDocument)
+    // and the audit names that.
+    const trash = isDocumentTrashEnabled();
+    const audited = {
+      accessScope,
+      actionId: trash ? DATA_ACCESS_ACTION_IDS.documentTrash : DATA_ACCESS_ACTION_IDS.documentDelete,
+      resourceIds: [docId],
+    };
 
     // Destructive: nothing is deleted unless its audit record is written.
     if (!(await dataAudit.recordIntent(req, res, audited))) return;
@@ -136,6 +205,7 @@ export const createDocumentsRouter = (services) => {
       return res.json({
         deleted: true,
         document,
+        ...(trash ? { purgeAfter: computeTrashPurgeAfter(document.deletedAt), trashed: true } : {}),
       });
     } catch (error) {
       await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
@@ -177,7 +247,11 @@ export const createDocumentsRouter = (services) => {
 
   router.post("/documents/clear", async (req, res) => {
     const accessScope = getRequestAccessScope(req);
-    const audited = { accessScope, actionId: DATA_ACCESS_ACTION_IDS.documentsClear };
+    const trash = isDocumentTrashEnabled();
+    const audited = {
+      accessScope,
+      actionId: trash ? DATA_ACCESS_ACTION_IDS.documentsTrash : DATA_ACCESS_ACTION_IDS.documentsClear,
+    };
 
     // Destructive: nothing is cleared unless its audit record is written.
     if (!(await dataAudit.recordIntent(req, res, audited))) return;
@@ -196,6 +270,7 @@ export const createDocumentsRouter = (services) => {
       return res.json({
         deletedCount: documents.length,
         documents,
+        ...(trash ? { trashed: true } : {}),
       });
     } catch (error) {
       await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });

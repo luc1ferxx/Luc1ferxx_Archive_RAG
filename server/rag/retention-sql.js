@@ -42,6 +42,24 @@ export const computeRetentionCutoff = ({ days, now }) => {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * The cutoff `hours` whole hours before `now`, or null for 0 or fewer hours
+ * (the document trash, DOCUMENT_TRASH_RETENTION_HOURS, counts in hours).
+ */
+export const computeRetentionCutoffHours = ({ hours, now }) => {
+  const wholeHours = Math.floor(Number(hours));
+
+  if (!Number.isFinite(wholeHours) || wholeHours <= 0) {
+    return null;
+  }
+
+  const date = new Date(Number(now) - wholeHours * HOUR_MS);
+
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
 /**
  * Validates the cutoffs a store is handed. Returns
  *   { cutoff, upperBound, workspaceIds, workspaceCutoffs, overrides }

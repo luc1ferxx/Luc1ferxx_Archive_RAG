@@ -35,6 +35,12 @@ import {
 //     text removed, verbatim quotes in the body replaced, and the artifact
 //     marked source_deleted (migration 040).
 //   * answer feedback: the citation excerpts (system path, migration 040).
+//
+// The document trash (DOCUMENT_TRASH_RETENTION_HOURS, rag/document-trash.js)
+// splits it: moving a document into the trash cancels its ingest jobs at once
+// (`redact: false`), and the purge runs the whole cascade, the redaction
+// included, in the deleting scope's context once the trash window is over.
+// A restore therefore finds every record that cited the document as it was.
 
 const SETTLED_RUN_STATUSES = new Set([
   AGENT_RUN_STATUSES.canceled,
@@ -295,8 +301,9 @@ export const createDocumentDeletionCascade = ({
     /**
      * The cascade for documents the caller's delete just removed. Resolves to
      * what each part did ({ ingestJobs, redaction }); never rejects.
+     * `redact: false` (a move into the trash) cancels the ingest jobs only.
      */
-    async afterDocumentsDeleted({ accessScope = {}, docIds = [] } = {}) {
+    async afterDocumentsDeleted({ accessScope = {}, docIds = [], redact = true } = {}) {
       const deleted = toDeletedDocIdSet(docIds);
       const ids = [...deleted];
 
@@ -309,7 +316,7 @@ export const createDocumentDeletionCascade = ({
         cancelIngestJobs({ accessScope: scope, docIds: ids })
       );
 
-      if (!isRedactionEnabled()) {
+      if (redact === false || !isRedactionEnabled()) {
         return { ingestJobs, redaction: null };
       }
 

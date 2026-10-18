@@ -247,9 +247,14 @@ test("every data action names a permission the route table or the admin catalog 
 
   assert.deepEqual(
     Object.values(DATA_ACCESS_ACTIONS).filter((action) => action.destructive).map((action) => action.id).sort(),
+    // The trash's two moves (document.trash, documents.trash) take a
+    // document out of search as a delete does, so they record their intent
+    // first too; its restore and purge do not (the purge has no route).
     [
       DATA_ACCESS_ACTION_IDS.documentDelete,
+      DATA_ACCESS_ACTION_IDS.documentTrash,
       DATA_ACCESS_ACTION_IDS.documentsClear,
+      DATA_ACCESS_ACTION_IDS.documentsTrash,
       DATA_ACCESS_ACTION_IDS.tenantErase,
     ]
   );

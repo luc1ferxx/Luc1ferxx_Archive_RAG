@@ -44,6 +44,7 @@ import {
 } from "./rag/service-topology.js";
 
 import { createAppServices } from "./app-services.js";
+import { assertDocumentTrashSupported } from "./rag/document-trash.js";
 import { createAdminRouter } from "./routes/admin.js";
 import { createAdminTenantsRouter } from "./routes/admin-tenants.js";
 import { createAdminTenantLifecycleRouter } from "./routes/admin-tenant-lifecycle.js";
@@ -133,6 +134,11 @@ export const createApp = async (options = {}) => {
   const trustProxy = getTrustProxySetting();
 
   const services = createAppServices(options, { uploadsDirectory });
+
+  // DOCUMENT_TRASH_RETENTION_HOURS above 0 where the trash cannot work (not
+  // pgvector with the PostgreSQL registry) refuses the start
+  // (DOCUMENT_TRASH_UNSUPPORTED, rag/document-trash.js).
+  assertDocumentTrashSupported({ ragService: services.ragService });
 
   const {
     adminAuditService,

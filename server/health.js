@@ -840,7 +840,7 @@ const checkWorkspaceArtifactStoreHealth = async () => {
 };
 
 // The tables migrations 013, 015, 017, 031, 032, 034, 036 and 037 put under the
-// tenant_isolation policy (17; migrations 038-041 add columns, functions and
+// tenant_isolation policy (17; migrations 038-042 add columns, functions and
 // grants, no table). The probe adds every live index version's chunk table and
 // the BM25 statistics tables of each (migration 030).
 const getRowLevelSecurityTables = () => [
