@@ -138,6 +138,16 @@ export const DEMO_DOCUMENTS = Object.freeze([
     uploader: "ben",
     workspaceId: "beta",
   }),
+  // carol's own document in her second workspace, so she can ask in beta too
+  // (the long-term memory check).
+  Object.freeze({
+    answer: /Tuesday mornings/u,
+    fileName: "beta-onboarding-checklist.pdf",
+    lines: Object.freeze(["Beta Industries onboarding checklist.", "Beta new hires collect their badges on Tuesday mornings."]),
+    question: "When do Beta new hires collect their badges?",
+    uploader: "carol",
+    workspaceId: "beta",
+  }),
 ]);
 
 // The storage-quota check uploads these to gamma until the quota refuses one.
@@ -440,6 +450,27 @@ const listDocuments = async (client, personaName, workspace) => {
   return { documents: Array.isArray(response.json) ? response.json : null, response };
 };
 
+// The persona's trash (DOCUMENT_TRASH_RETENTION_HOURS): the trashed document
+// named `fileName`, newest first, or null.
+const findInTrash = async (client, personaName, fileName, workspace) => {
+  const response = await client.call(personaName, "/documents/trash", { workspace });
+
+  return (Array.isArray(response.json) ? response.json : []).find((document) => document.fileName === fileName) ?? null;
+};
+
+// What the deletion redaction writes in place of a deleted document's text
+// (rag/document-deletion-redaction.js).
+export const DELETED_SOURCE_MARKER = "[source document deleted]";
+
+// bob's probe for the redaction check, uploaded once and then restored from
+// the trash and deleted again by every later walkthrough.
+export const DEMO_REDACTION_PROBE = Object.freeze({
+  fact: "Beta stores its nightly backups in the Juniper vault.",
+  fileName: "beta-redaction-probe.pdf",
+  lines: Object.freeze(["Beta Industries backup policy.", "Beta stores its nightly backups in the Juniper vault."]),
+  question: "Where does Beta store its nightly backups?",
+});
+
 /**
  * The seeded documents as the server lists them to their uploaders:
  * { [fileName]: { docId, workspaceId } }. Throws when one is missing (run
@@ -524,7 +555,10 @@ const readWorkspaceField = (record = {}) => {
  * resolves { status: "PASS" | "FAIL" | "SKIP", detail }. The order matters
  * only where a check changes state: the noisy-neighbour checks run on gamma
  * (suspension, rate limit, storage quota) and leave alpha and beta as the
- * seed made them, and nothing here deletes a document that exists.
+ * seed made them; the trash check restores the seeded document it deletes,
+ * the memory check removes what it stored, and the redaction check keeps one
+ * probe in bob's trash between walkthroughs. The refusal check needs the
+ * rate-limit check before it.
  */
 export const DEMO_CHECKS = Object.freeze([
   {
@@ -551,14 +585,23 @@ export const DEMO_CHECKS = Object.freeze([
       const status = await client.call("platformAdmin", "/admin/status");
       const indexVersions = await client.call("platformAdmin", "/admin/index-versions");
 
+      // Present only with TENANT_ENCRYPTION=on: the keystore and master key.
+      const encryption = health.json?.checks?.tenantEncryption;
+
       if (health.status !== 200 || !rls) {
         return fail(`GET /health ${describeResponse(health)}; no rowLevelSecurity check in the report`);
       }
 
-      return rls.status === "ok" && roleSplit?.status === "ok" && status.status === 200 && indexVersions.status === 200
-        ? pass("rowLevelSecurity ok, roleSplit ok; /admin/status 200, /admin/index-versions 200")
+      return rls.status === "ok" &&
+        roleSplit?.status === "ok" &&
+        (encryption === undefined || encryption.status === "ok") &&
+        status.status === 200 &&
+        indexVersions.status === 200
+        ? pass(
+            `rowLevelSecurity ok, roleSplit ok, tenantEncryption ${encryption ? encryption.status : "off"}; /admin/status 200, /admin/index-versions 200`
+          )
         : fail(
-            `rowLevelSecurity ${rls.status}, roleSplit ${roleSplit?.status ?? "missing"}; /admin/status ${describeResponse(status)}, /admin/index-versions ${describeResponse(indexVersions)}`
+            `rowLevelSecurity ${rls.status}, roleSplit ${roleSplit?.status ?? "missing"}, tenantEncryption ${encryption?.status ?? "off"}; /admin/status ${describeResponse(status)}, /admin/index-versions ${describeResponse(indexVersions)}`
           );
     },
   },
@@ -668,6 +711,61 @@ export const DEMO_CHECKS = Object.freeze([
       return attempt.status === 404 && survived
         ? pass("alice (alpha workspace.admin) DELETE beta's document 404; bob still lists it")
         : fail(`alice DELETE ${describeResponse(attempt)}; still in beta: ${survived}`);
+    },
+  },
+  {
+    id: "document_trash",
+    title: "A delete moves the document to its owner's trash: gone from list, download and chat, invisible and unrestorable to others, restored by its owner",
+    run: async ({ client, documents }) => {
+      const document = DEMO_DOCUMENTS.find((entry) => entry.fileName === "alpha-leave-policy.pdf");
+      const { docId } = documents[document.fileName];
+      const ask = () =>
+        client.call("alice", "/chat", { json: { docIds: [docId], question: document.question }, method: "POST" });
+      const lists = async (personaName, pathname, workspace) => {
+        const response = await client.call(personaName, pathname, { workspace });
+
+        return (Array.isArray(response.json) ? response.json : []).some((entry) => entry.docId === docId);
+      };
+      const outcome = {};
+      let restored = null;
+
+      outcome.delete = await client.call("alice", `/documents/${docId}`, { method: "DELETE" });
+
+      try {
+        outcome.listed = await lists("alice", "/documents");
+        outcome.download = await client.call("alice", `/documents/${docId}/file`);
+        outcome.chat = await ask();
+        outcome.ownTrash = await findInTrash(client, "alice", document.fileName);
+        // Another tenant, and another member of the same workspace: the trash
+        // is the deleting (user, workspace) pair's.
+        outcome.bobTrash = await lists("bob", "/documents/trash");
+        outcome.carolTrash = await lists("carol", "/documents/trash", "alpha");
+        outcome.bobRestore = await client.call("bob", `/documents/${docId}/restore`, { method: "POST" });
+      } finally {
+        restored = await client.call("alice", `/documents/${docId}/restore`, { method: "POST" });
+      }
+
+      const listedAgain = await lists("alice", "/documents");
+      const chatAgain = await ask();
+      const ok =
+        outcome.delete.status === 200 &&
+        outcome.listed === false &&
+        outcome.download.status === 404 &&
+        outcome.chat.status === 404 &&
+        outcome.ownTrash?.docId === docId &&
+        Boolean(outcome.ownTrash?.purgeAfter) &&
+        outcome.bobTrash === false &&
+        outcome.carolTrash === false &&
+        outcome.bobRestore.status === 404 &&
+        restored.status === 200 &&
+        restored.json?.document?.docId === docId &&
+        listedAgain &&
+        chatAgain.status === 200 &&
+        document.answer.test(String(chatAgain.json?.agentAnswer ?? ""));
+
+      return (ok ? pass : fail)(
+        `alice DELETE ${describeResponse(outcome.delete)}; listed ${outcome.listed}, download ${outcome.download ? describeResponse(outcome.download) : "-"}, chat ${outcome.chat ? describeResponse(outcome.chat) : "-"}; in her trash ${Boolean(outcome.ownTrash)} (purge after ${outcome.ownTrash?.purgeAfter ?? "-"}); in bob's trash ${outcome.bobTrash}, in carol's ${outcome.carolTrash}; bob restores ${outcome.bobRestore ? describeResponse(outcome.bobRestore) : "-"}; alice restores ${describeResponse(restored)}, listed again ${listedAgain}, chat ${describeResponse(chatAgain)}`
+      );
     },
   },
   {
@@ -792,6 +890,28 @@ export const DEMO_CHECKS = Object.freeze([
     },
   },
   {
+    id: "workspace_switcher",
+    title: "GET /auth/me without x-workspace-id lists the workspaces a credential may switch between (the SPA's switcher)",
+    run: async ({ client }) => {
+      const me = async (personaName) => (await client.call(personaName, "/auth/me", { workspace: null })).json ?? {};
+      const carol = await me("carol");
+      const alice = await me("alice");
+      const anna = await me("anna");
+      const sorted = (values) => [...(values ?? [])].sort();
+      const ok =
+        !carol.workspaceId &&
+        JSON.stringify(sorted(carol.workspaceIds)) === JSON.stringify(["alpha", "beta"]) &&
+        alice.workspaceId === "alpha" &&
+        JSON.stringify(sorted(alice.workspaceIds)) === JSON.stringify(["alpha"]) &&
+        Array.isArray(anna.workspaceIds) &&
+        anna.workspaceIds.length === 0;
+
+      return (ok ? pass : fail)(
+        `carol: ${JSON.stringify(sorted(carol.workspaceIds))} to choose from; alice: fixed ${alice.workspaceId || "-"}; anna (user-only token, membership by header): ${JSON.stringify(anna.workspaceIds ?? null)}`
+      );
+    },
+  },
+  {
     id: "memory_isolation",
     title: "Long-term memory and sessions stay with their user",
     run: async ({ client }) => {
@@ -819,6 +939,68 @@ export const DEMO_CHECKS = Object.freeze([
 
       return (ok ? pass : fail)(
         `alice remembers ${describeResponse(remembered)} and lists it: ${listed(own)}; bob lists it: ${listed(bob)}; bob deletes it ${bobDelete ? describeResponse(bobDelete) : "no id"}; still alice's: ${listed(stillThere)}; session clears ${aliceSession.status}/${bobSession.status}`
+      );
+    },
+  },
+  {
+    id: "workspace_memory",
+    title: "A note carol stores in alpha stays in alpha (LONG_MEMORY_SCOPE=workspace); her reply-language preference follows her",
+    run: async ({ client, documents }) => {
+      const note = "Remember that the Alpha incident bridge is called Harbor Line.";
+      const question = "What is the Alpha incident bridge called?";
+      const alphaDocument = DEMO_DOCUMENTS.find((entry) => entry.uploader === "carol" && entry.workspaceId === "alpha");
+      const betaDocument = DEMO_DOCUMENTS.find((entry) => entry.uploader === "carol" && entry.workspaceId === "beta");
+      const memories = async (workspace) =>
+        (await client.call("carol", "/memory", { workspace })).json?.memories ?? [];
+      const noteIn = (list) => list.find((memory) => /Harbor Line/u.test(memory.text ?? ""));
+      const preferenceIn = (list) => list.find((memory) => memory.memoryKey === "reply_language");
+      const ask = (workspace, document) =>
+        client.call("carol", "/chat", {
+          json: { docIds: [documents[document.fileName].docId], question },
+          method: "POST",
+          workspace,
+        });
+      const stored = await client.call("carol", "/memory", { json: { text: note }, method: "POST", workspace: "alpha" });
+      const preference = await client.call("carol", "/memory", {
+        json: { category: "preference", memoryKey: "reply_language", memoryValue: "en", text: "Reply in English." },
+        method: "POST",
+        workspace: "alpha",
+      });
+      const result = {};
+
+      try {
+        const inBeta = await memories("beta");
+
+        result.noteInBeta = Boolean(noteIn(inBeta));
+        result.preferenceInBeta = preferenceIn(inBeta)?.memoryValue ?? null;
+        // A beta question that shares the note's words: had the note been
+        // recalled, the store would have marked it used (lastUsedAt).
+        result.betaChat = (await ask("beta", betaDocument)).status;
+        result.usedAfterBeta = noteIn(await memories("alpha"))?.lastUsedAt ?? null;
+        // The same question in alpha recalls it.
+        result.alphaChat = (await ask("alpha", alphaDocument)).status;
+        result.usedAfterAlpha = noteIn(await memories("alpha"))?.lastUsedAt ?? null;
+        result.noteWorkspace = noteIn(await memories("alpha"))?.workspaceId ?? null;
+      } finally {
+        // Back to the seed's state: neither memory stays.
+        for (const memoryId of [stored.json?.memory?.memoryId, preference.json?.memory?.memoryId].filter(Boolean)) {
+          await client.call("carol", `/memory/${memoryId}`, { method: "DELETE", workspace: "alpha" });
+        }
+      }
+
+      const ok =
+        stored.status === 201 &&
+        preference.status === 201 &&
+        result.noteInBeta === false &&
+        result.preferenceInBeta === "en" &&
+        result.betaChat === 200 &&
+        result.usedAfterBeta === null &&
+        result.alphaChat === 200 &&
+        result.usedAfterAlpha !== null &&
+        result.noteWorkspace === "alpha";
+
+      return (ok ? pass : fail)(
+        `note ${describeResponse(stored)} (workspace ${result.noteWorkspace ?? "-"}), preference ${describeResponse(preference)}; in beta: note listed ${result.noteInBeta}, reply language ${result.preferenceInBeta ?? "none"}; beta chat ${result.betaChat} left the note unused (${result.usedAfterBeta ?? "never used"}); alpha chat ${result.alphaChat} recalled it (${result.usedAfterAlpha ?? "never used"})`
       );
     },
   },
@@ -911,34 +1093,45 @@ export const DEMO_CHECKS = Object.freeze([
   },
   {
     id: "delete_redaction",
-    title: "Deleting a document redacts the excerpts other records keep of it (DOCUMENT_DELETE_REDACTION)",
-    // Answer feedback keeps the cited excerpts the client sent with it; the
-    // delete's cascade replaces them (as the system role, which may update
-    // only that column under the role split: migration 040). A settled agent
-    // run is redacted the same way where it holds a document's text under its
-    // id; the runs of this setup keep only the answer, which a model wrote
-    // and the redaction leaves alone (rag/document-deletion-redaction.js).
+    title: "Excerpts of a deleted document are redacted when it is purged; while it is in the trash they stay",
+    // Answer feedback keeps the cited excerpts the client sent with it. The
+    // deletion cascade replaces them (as the system role, which may update
+    // only that column under the role split: migration 040) when the
+    // document is gone for good: at once without the trash, at the purge
+    // with it (DOCUMENT_TRASH_RETENTION_HOURS), because a trashed document
+    // can still be restored. A settled agent run is redacted the same way
+    // where it holds a document's text under its id; the runs of this setup
+    // keep only the answer, which a model wrote and the redaction leaves
+    // alone (rag/document-deletion-redaction.js). The e2e test ages the
+    // trashed probe past the retention and sees the purge redact.
     run: async ({ client }) => {
-      const probe = {
-        fileName: "beta-redaction-probe.pdf",
-        lines: ["Beta Industries backup policy.", "Beta stores its nightly backups in the Juniper vault."],
-      };
-      const fact = "Beta stores its nightly backups in the Juniper vault.";
-      const question = "Where does Beta store its nightly backups?";
-      const uploaded = await uploadDemoDocument(client, "bob", probe);
+      const probe = DEMO_REDACTION_PROBE;
+      // One probe per walkthrough: a probe a previous run left in the trash is
+      // restored rather than uploaded again (an upload of trashed bytes would
+      // be a new document, and trashed documents count against the quota).
+      const trashed = await findInTrash(client, "bob", probe.fileName);
+      const restored = trashed
+        ? await client.call("bob", `/documents/${trashed.docId}/restore`, { method: "POST" })
+        : null;
+      const uploaded = trashed
+        ? { code: restored.json?.code ?? null, docId: trashed.docId, outcome: restored.status === 200 ? "restored" : "refused", status: restored.status }
+        : await uploadDemoDocument(client, "bob", probe);
 
-      if (uploaded.outcome !== "created" && uploaded.outcome !== "duplicate") {
-        return fail(`uploading the probe ended ${uploaded.outcome} (${uploaded.status}${uploaded.code ? ` ${uploaded.code}` : ""})`);
+      if (!["created", "duplicate", "restored"].includes(uploaded.outcome)) {
+        return fail(`getting the probe in place ended ${uploaded.outcome} (${uploaded.status}${uploaded.code ? ` ${uploaded.code}` : ""})`);
       }
 
-      const chat = await client.call("bob", "/chat", { json: { docIds: [uploaded.docId], question }, method: "POST" });
+      const chat = await client.call("bob", "/chat", {
+        json: { docIds: [uploaded.docId], question: probe.question },
+        method: "POST",
+      });
       const recorded = await client.call("bob", "/feedback", {
         json: {
-          answer: { agentAnswer: String(chat.json?.agentAnswer ?? fact) },
-          citations: [{ docId: uploaded.docId, excerpt: fact, fileName: probe.fileName, pageNumber: 1 }],
+          answer: { agentAnswer: String(chat.json?.agentAnswer ?? probe.fact) },
+          citations: [{ docId: uploaded.docId, excerpt: probe.fact, fileName: probe.fileName, pageNumber: 1 }],
           docIds: [uploaded.docId],
           feedbackType: "helpful",
-          question,
+          question: probe.question,
         },
         method: "POST",
       });
@@ -951,17 +1144,20 @@ export const DEMO_CHECKS = Object.freeze([
       };
       const before = await readExcerpt();
       const removed = await client.call("bob", `/documents/${uploaded.docId}`, { method: "DELETE" });
+      const inTrash = await findInTrash(client, "bob", probe.fileName);
       const after = await readExcerpt();
-      const marker = "[source document deleted]";
+      // With the trash on the excerpt stays until the purge; without it the
+      // delete redacts at once.
+      const expectedAfter = inTrash ? probe.fact : DELETED_SOURCE_MARKER;
       const ok =
         chat.status === 200 &&
         recorded.status === 201 &&
-        before === fact &&
+        before === probe.fact &&
         removed.status === 200 &&
-        after === marker;
+        after === expectedAfter;
 
       return (ok ? pass : fail)(
-        `chat ${describeResponse(chat)}, feedback ${describeResponse(recorded)}; its excerpt before the delete ${JSON.stringify(before)}; DELETE ${describeResponse(removed)}; after ${JSON.stringify(after)}`
+        `probe ${uploaded.outcome}; chat ${describeResponse(chat)}, feedback ${describeResponse(recorded)}; excerpt before the delete ${JSON.stringify(before)}; DELETE ${describeResponse(removed)} (${inTrash ? `in the trash until ${inTrash.purgeAfter}` : "deleted for good"}); excerpt after ${JSON.stringify(after)}`
       );
     },
   },
@@ -993,10 +1189,47 @@ export const DEMO_CHECKS = Object.freeze([
     },
   },
   {
+    id: "refusal_accounting",
+    title: "The platform admin's usage view counts gamma's TENANT_RATE_LIMITED refusals, and none for alpha",
+    run: async ({ client, usageTimeoutMs = 30_000 }) => {
+      const deadline = Date.now() + usageTimeoutMs;
+      const pathname = "/admin/usage?metric=refusals&reason=TENANT_RATE_LIMITED&groupBy=workspace&limit=100";
+      let usage = null;
+      let rows = [];
+
+      // The ledger is flushed every TENANT_USAGE_FLUSH_MS.
+      while (Date.now() < deadline) {
+        usage = await client.call("platformAdmin", pathname);
+        rows = usage.json?.tenants ?? [];
+
+        if (rows.some((row) => row.workspaceId === "gamma")) {
+          break;
+        }
+
+        await sleep(1000);
+      }
+
+      const gamma = rows.find((row) => row.workspaceId === "gamma");
+      const alpha = rows.find((row) => row.workspaceId === "alpha");
+      const ok =
+        usage?.status === 200 &&
+        Number(gamma?.refusals?.TENANT_RATE_LIMITED ?? 0) > 0 &&
+        alpha === undefined;
+
+      return (ok ? pass : fail)(
+        `usage ${usage ? describeResponse(usage) : "-"}: gamma ${JSON.stringify(gamma?.refusals ?? null)}, alpha ${alpha ? JSON.stringify(alpha.refusals) : "none"}`
+      );
+    },
+  },
+  {
     id: "storage_quota",
-    title: "gamma's storage quota refuses an upload past TENANT_MAX_DOCUMENTS",
+    title: "gamma's storage quota refuses an upload past TENANT_MAX_DOCUMENTS (trashed documents count until purged)",
     run: async ({ client }) => {
       const outcomes = [];
+      const trashedBefore = await client.call("dave", "/documents/trash");
+      const trashedProbes = (Array.isArray(trashedBefore.json) ? trashedBefore.json : []).filter((document) =>
+        /^gamma-quota-probe-/u.test(document.fileName ?? "")
+      ).length;
 
       for (let index = 1; index <= DEMO_QUOTA_PROBE_LIMIT; index += 1) {
         const uploaded = await uploadDemoDocument(client, "dave", buildQuotaProbeDocument(index));
@@ -1010,8 +1243,9 @@ export const DEMO_CHECKS = Object.freeze([
 
       const last = outcomes.at(-1);
       const storedProbes = outcomes.filter((outcome) => outcome.outcome === "created" || outcome.outcome === "duplicate");
-      // Room again, so the next walkthrough starts from an empty gamma: dave
-      // (gamma workspace.admin) deletes the probes he stored.
+      // dave (gamma workspace.admin) deletes the probes he stored. With the
+      // trash on they go to gamma's trash and keep counting against the quota
+      // until the purge, so a later walkthrough is refused at once.
       const cleanup = [];
 
       for (const probe of storedProbes) {
@@ -1024,7 +1258,11 @@ export const DEMO_CHECKS = Object.freeze([
         cleanup.every((status) => status === 200);
 
       return ok
-        ? pass(`refused with ${last.status} TENANT_STORAGE_QUOTA_EXCEEDED after ${storedProbes.length} stored probes (deleted again)`)
+        ? pass(
+            `refused with ${last.status} TENANT_STORAGE_QUOTA_EXCEEDED after ${storedProbes.length} stored probes (deleted again)${
+              trashedProbes > 0 ? `, with ${trashedProbes} probes of an earlier walkthrough still in gamma's trash` : ""
+            }`
+          )
         : fail(
             `outcomes ${outcomes.map((outcome) => `${outcome.outcome}${outcome.code ? `:${outcome.code}` : ""}`).join(", ")}; cleanup ${cleanup.join(",") || "none"}`
           );

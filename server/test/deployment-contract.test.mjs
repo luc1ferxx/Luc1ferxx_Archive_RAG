@@ -15,6 +15,10 @@
 // service-keys.mjs exports them), and every tier's environment fed through
 // the real topology validator and port resolution, so the URLs the tiers call
 // are where their neighbours listen and a tier without keys does not start.
+//
+// The tenant-isolation demo (compose.demo.yml) too: the hardened profile
+// alone, the split's runtime login, and nothing shared with the default
+// deployment (its own project, container names and volumes).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
@@ -864,10 +868,13 @@ test("the demo override runs the app on the hardened profile as the split's runt
     return parsed.toString();
   };
 
-  // The profile after server/.env, and required: without it there is no demo.
+  // The profile alone, required (`!override` replaces docker-compose.yml's
+  // server/.env instead of appending to it, so none of the default
+  // deployment's keys or settings reach the demo; `docker compose config
+  // --no-env-resolution` shows the one file).
   assert.match(
     serviceText(demo, "app"),
-    /^\s{4}env_file:\n\s{6}- path: deploy\/demo\/hardened\.env\n\s{8}required: true$/m
+    /^\s{4}env_file: !override\n\s{6}- path: deploy\/demo\/hardened\.env\n\s{8}required: true$/m
   );
 
   // The profile's two logins, at the postgres service instead of 127.0.0.1.
@@ -900,7 +907,50 @@ test("the demo override runs the app on the hardened profile as the split's runt
     postgresText,
     /^\s{6}- \.\/deploy\/postgres\/create-split-roles\.sql:\/docker-entrypoint-initdb\.d\/[0-9a-z-]+\.sql:ro$/m
   );
-  assert.doesNotMatch(demo, /^\s*- pgdata:/m);
+
+  // The demo never touches the default deployment's data: its own compose
+  // project (so `down -v` removes only the demo's volumes), its own container
+  // names, and its own volume at every mount target the base file gives a
+  // named volume (compose merges volumes by target). Before, the app kept the
+  // default `appdata` at /data: upload sessions, RAG data and the local KMS's
+  // master key were shared, and the demo's `down -v` deleted them.
+  const base = await readText(composePath);
+  const topLevelName = demo.match(/^name: (\S+)$/m)?.[1];
+
+  assert.ok(topLevelName, "compose.demo.yml names its own project");
+  assert.equal(base.match(/^name: /m), null, "docker-compose.yml keeps the directory's project name");
+  assert.match(topLevelName, /-demo$/u);
+
+  for (const serviceName of ["postgres", "app"]) {
+    const baseName = serviceText(base, serviceName).match(/^\s{4}container_name: (\S+)$/m)?.[1];
+    const demoName = serviceText(demo, serviceName).match(/^\s{4}container_name: (\S+)$/m)?.[1];
+
+    assert.ok(baseName && demoName && demoName !== baseName, `${serviceName}: its own container name`);
+  }
+
+  const namedMounts = (text, serviceName) =>
+    (nestedLines(serviceLines(text, serviceName) ?? [], "volumes", 4) ?? [])
+      .filter(isContentLine)
+      .map((line) => line.trim().replace(/^-\s*/u, ""))
+      .filter((entry) => /^[a-z][a-z0-9_-]*:/u.test(entry))
+      .map((entry) => ({ target: entry.split(":")[1], volume: entry.split(":")[0] }));
+
+  for (const serviceName of ["postgres", "app"]) {
+    const demoMounts = namedMounts(demo, serviceName);
+
+    assert.equal(namedMounts(base, serviceName).length, 1, `${serviceName} has one named volume in docker-compose.yml`);
+
+    for (const { target, volume } of namedMounts(base, serviceName)) {
+      const replacement = demoMounts.find((mount) => mount.target === target);
+
+      assert.ok(replacement, `${serviceName}: ${target} gets a demo volume instead of ${volume}`);
+      assert.match(replacement.volume, /-demo$/u, `${serviceName}: ${target}`);
+      assert.match(demo, new RegExp(`^  ${replacement.volume}:$`, "mu"), `${replacement.volume} is declared`);
+    }
+  }
+
+  assert.doesNotMatch(demo, /^\s*- (pgdata|appdata):/m);
+  assert.match(demo, /docker compose -f docker-compose\.yml -f compose\.demo\.yml --profile app down -v/u);
 
   // The demo model: the app image, on the compose network only, in the app
   // profile, and the app waits for it.
@@ -909,9 +959,23 @@ test("the demo override runs the app on the hardened profile as the split's runt
 
   assert.ok(modelPort, "demo-model runs demo-tenants.mjs fake-model");
   assert.match(model, /^\s{4}profiles: \["app"\]$/m);
+  // Not node as PID 1 without an init: docker's SIGTERM reaches it.
+  assert.match(model, /^\s{4}init: true$/m);
   assert.match(model, /^\s{4}image: luc1ferxx-archive-rag:local$/m);
   assert.doesNotMatch(model, /^\s{4}ports:/m);
   assert.equal(app.OPENAI_BASE_URL, `http://demo-model:${modelPort}/v1`);
+
+  // The profile encrypts stored files; the local KMS keeps its key files and
+  // master key in the demo's own app volume (appdata-demo at /data), not in
+  // the database volume, not where the image's code lives, and not in the
+  // default deployment's appdata.
+  assert.equal(profile.TENANT_ENCRYPTION, "on");
+  assert.match(serviceText(demo, "app"), /^\s{6}- appdata-demo:\/data$/m);
+
+  for (const key of ["TENANT_KEYSTORE_DIR", "TENANT_KMS_MASTER_KEY_FILE"]) {
+    assert.match(app[key], /^\/data\/[a-z][a-z.-]*$/u, `${key} lies in the app volume`);
+    assert.equal(profile[key], undefined, `the profile leaves ${key} to the local default`);
+  }
   assert.equal(dependsOn(demo, "app")["demo-model"], "service_healthy");
   // Its own healthcheck (the image's probes the app's /livez on 5001).
   assert.equal(model.match(/fetch\('http:\/\/127\.0\.0\.1:(\d+)\/v1\/embeddings'/u)?.[1], modelPort);

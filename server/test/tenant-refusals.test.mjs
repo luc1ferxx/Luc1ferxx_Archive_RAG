@@ -278,7 +278,13 @@ test("tenant limits: a rate-limited and a concurrency-limited request are counte
   assert.deepEqual(counted(), { [TENANT_CONCURRENCY_LIMITED_CODE]: 1, [TENANT_RATE_LIMITED_CODE]: 1 });
 });
 
-test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted for the user and the workspace it asked for", async () => {
+// A registered workspace's refusals are counted under it; a workspace id the
+// registry does not hold (made up, or erased) or one being deleted is counted
+// for the user alone. Before, every made-up x-workspace-id became ledger rows
+// of its own, and the hardened demo's erase test saw an erased workspace's id
+// come back into the ledger with a former member's first refused request
+// (test/tenant-isolation-hardened.e2e.test.mjs).
+test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted for the user and the registered workspace it asked for", async () => {
   const store = createInMemoryTenantRegistryStore();
   const registry = createTenantRegistryService({ cacheTtlMs: 0, store });
   const broken = createTenantRegistryService({
@@ -296,8 +302,12 @@ test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted for the 
 
   await registry.createWorkspace({ workspaceId: "ws-a" });
   await registry.createWorkspace({ status: "suspended", workspaceId: "ws-s" });
+  await registry.createWorkspace({ workspaceId: "ws-c" });
+  await registry.createWorkspace({ workspaceId: "ws-d" });
   await registry.putMember({ roles: [], userId: "alice", workspaceId: "ws-a" });
   await registry.putMember({ roles: [], userId: "alice", workspaceId: "ws-s" });
+  await registry.putMember({ roles: [], userId: "alice", workspaceId: "ws-d" });
+  await registry.setWorkspaceStatus("ws-d", "deleting");
 
   const tokens = { "alice-token": { userId: "alice" } };
   const call = async (activeRegistry, workspaceId) => {
@@ -331,8 +341,12 @@ test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted for the 
     },
     async () => {
       assert.equal((await call(registry, "ws-a")).status, 200);
+      // Not registered, then registered but not hers: the same answer, but
+      // only the registered one is counted under its workspace.
       assert.equal((await call(registry, "ws-b")).body.code, TENANT_MEMBERSHIP_CODES.membershipRequired);
+      assert.equal((await call(registry, "ws-c")).body.code, TENANT_MEMBERSHIP_CODES.membershipRequired);
       assert.equal((await call(registry, "ws-s")).body.code, TENANT_MEMBERSHIP_CODES.workspaceSuspended);
+      assert.equal((await call(registry, "ws-d")).body.code, TENANT_MEMBERSHIP_CODES.workspaceDeleting);
 
       const consoleError = console.error;
 
@@ -348,8 +362,10 @@ test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted for the 
   );
 
   assert.deepEqual(refusals, [
-    { reason: TENANT_MEMBERSHIP_CODES.membershipRequired, tenant: { userId: "alice", workspaceId: "ws-b" } },
+    { reason: TENANT_MEMBERSHIP_CODES.membershipRequired, tenant: { userId: "alice", workspaceId: "" } },
+    { reason: TENANT_MEMBERSHIP_CODES.membershipRequired, tenant: { userId: "alice", workspaceId: "ws-c" } },
     { reason: TENANT_MEMBERSHIP_CODES.workspaceSuspended, tenant: { userId: "alice", workspaceId: "ws-s" } },
+    { reason: TENANT_MEMBERSHIP_CODES.workspaceDeleting, tenant: { userId: "alice", workspaceId: "" } },
     { reason: TENANT_MEMBERSHIP_CODES.registryUnavailable, tenant: ALICE },
   ]);
 });

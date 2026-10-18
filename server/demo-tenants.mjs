@@ -136,15 +136,32 @@ export const runDemoCommand = async (argv, { stdout = process.stdout, stderr = p
   }
 
   if (options.command === "fake-model") {
-    const { url } = await startDemoFakeModel({
+    const { server, url } = await startDemoFakeModel({
       chatDelayMs: options.chatDelayMs,
       host: options.host,
       port: options.port,
     });
 
+    // Runs until SIGTERM (docker compose stop/down; as PID 1 node has no
+    // default handler for it) or SIGINT, then closes its connections and
+    // resolves 0, so the process exits on its own. The handlers are in place
+    // before the line below announces the server, so a supervisor that
+    // signals as soon as it reads the line never meets the default action.
+    const stopped = new Promise((resolve) => {
+      const stop = (signal) => {
+        process.off("SIGTERM", stop);
+        process.off("SIGINT", stop);
+        stdout.write(`[demo] fake model stopping (${signal}).\n`);
+        server.close(() => resolve(0));
+        server.closeAllConnections?.();
+      };
+
+      process.once("SIGTERM", stop);
+      process.once("SIGINT", stop);
+    });
+
     stdout.write(`[demo] fake model serving ${url} (OPENAI_BASE_URL); Ctrl-C stops it.\n`);
-    // Runs until the process is interrupted.
-    return new Promise(() => {});
+    return stopped;
   }
 
   const client = createDemoClient({ baseUrl: options.url });

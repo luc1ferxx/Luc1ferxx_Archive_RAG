@@ -26,6 +26,8 @@ import {
   decideTenantMembership,
   getDefaultTenantRegistry,
   resolveMembershipScope,
+  TENANT_MEMBERSHIP_CODES,
+  WORKSPACE_STATUSES,
 } from "./rag/tenant-registry.js";
 
 const PUBLIC_PATH_PREFIXES = ["/health", "/ready"];
@@ -623,6 +625,45 @@ const checkTenantMembership = (req, principal = {}, accessScope = {}) => {
 };
 
 /**
+ * Whom a membership refusal is counted for in the usage ledger
+ * (rag/tenant-refusals.js): the user and the workspace it asked for, so an
+ * operator sees who is knocking on which workspace -- but only a workspace
+ * the registry holds and is not deleting. A workspace id the registry does
+ * not hold is whatever the client wrote into x-workspace-id: counted under
+ * it, every made-up id became ledger rows of its own (the ledger keeps them
+ * with no retention), and an erased workspace's id came back into the
+ * ledger the erase had just cleared with the first refused request of a
+ * former member (the erase deletes the ledger before the registry, so a
+ * WORKSPACE_DELETING refusal could do the same). Those are counted for the
+ * user alone. A registry that cannot answer keeps the scope as asked (the
+ * lookup would fail too). Never rejects.
+ */
+const resolveRefusalLedgerScope = async (req, accessScope = {}, decision = {}) => {
+  const userId = normalizeString(accessScope.userId);
+  const workspaceId = normalizeString(accessScope.workspaceId);
+
+  if (!workspaceId || decision.code === TENANT_MEMBERSHIP_CODES.registryUnavailable) {
+    return accessScope;
+  }
+
+  try {
+    // The read the decision just made (the same cache entry).
+    const workspace = await resolveTenantRegistry(req).lookupWorkspace(
+      workspaceId,
+      userId ? { forUserId: userId } : undefined
+    );
+
+    if (workspace && workspace.status !== WORKSPACE_STATUSES.deleting) {
+      return accessScope;
+    }
+  } catch {
+    // Unknown: not counted under a workspace that may not exist.
+  }
+
+  return { userId };
+};
+
+/**
  * Refuses an API_AUTH_TOKENS entry that names no user, no workspace, no
  * workspace list, no roles, no workspace roles and no permissions and does not
  * let the client choose its user. Without x-workspace-id such a token acts for
@@ -746,9 +787,11 @@ export const requireApiAuth = (req, res, next) => {
     // operator sees who is knocking on which workspace. The probes'
     // resolveOptionalAccessScope only hides details and counts nothing.
     membership
-      .then((decision) => {
+      .then(async (decision) => {
         if (!decision.allowed) {
-          recordTenantRefusal(decision.code, req.accessScope);
+          // The workspace read the decision just made (cached), so counting
+          // never changes the answer; it is counted before it is sent.
+          recordTenantRefusal(decision.code, await resolveRefusalLedgerScope(req, req.accessScope, decision));
           res.status(decision.status).json({ code: decision.code, error: decision.message });
           return;
         }

@@ -11,10 +11,19 @@ import pg from "pg";
 
 import { startDevOidcProvider } from "../dev-oidc-provider.mjs";
 import { startDemoFakeModel } from "../demo/fake-model.js";
+import { createLocalTenantKmsProvider } from "../rag/kms/local-provider.js";
+import {
+  decryptTenantBytes,
+  describeTenantEnvelope,
+  documentFileContext,
+  isTenantEnvelope,
+} from "../rag/tenant-encryption.js";
 import {
   createDemoClient,
   DEMO_DOCUMENTS,
   DEMO_PERSONAS,
+  DEMO_REDACTION_PROBE,
+  DELETED_SOURCE_MARKER,
   demoDocumentsVisibleTo,
   discoverDemoDocuments,
   formatDemoResultTable,
@@ -103,6 +112,32 @@ if (!adminDatabaseUrl) {
     POSTGRES_TENANT_CONTEXT: profile.POSTGRES_TENANT_CONTEXT,
     POSTGRES_TENANT_ROLE: tenantRole,
   };
+  // TENANT_ENCRYPTION=on (the profile): one keystore and master key for the
+  // server and every operator command of the run, as compose.demo.yml gives
+  // them one volume. The test reads envelopes with the same local KMS.
+  const kmsEnvironment = {
+    TENANT_KEYSTORE_DIR: path.join(tempRoot, "tenant-keystore"),
+    TENANT_KMS_MASTER_KEY_FILE: path.join(tempRoot, "tenant-kms-master.key"),
+  };
+  const createTestKms = () =>
+    createLocalTenantKmsProvider({
+      keystoreDirectory: kmsEnvironment.TENANT_KEYSTORE_DIR,
+      masterKeyFile: kmsEnvironment.TENANT_KMS_MASTER_KEY_FILE,
+    });
+  // Every stored document file, as the owner reads the table.
+  const readStoredDocumentFiles = async () =>
+    (
+      await adminQuery(
+        ownerUrl,
+        "SELECT doc_id, owner_user_id, workspace_id, file_name, file_bytes FROM rag_documents ORDER BY doc_id"
+      )
+    ).rows;
+  const decryptStoredFile = (row, kms = createTestKms()) =>
+    decryptTenantBytes(
+      row.file_bytes,
+      documentFileContext({ docId: row.doc_id, ownerUserId: row.owner_user_id, workspaceId: row.workspace_id }),
+      { kms }
+    );
 
   const findPsql = () => {
     const candidates = [
@@ -253,6 +288,7 @@ if (!adminDatabaseUrl) {
         ...inheritedEnvironment(),
         ...profile,
         ...databaseEnvironment,
+        ...kmsEnvironment,
         API_AUTH_OIDC_AUDIENCE: idp.audience,
         API_AUTH_OIDC_CLIENT_ID: idp.clientId,
         API_AUTH_OIDC_ENABLED: "true",
@@ -388,6 +424,79 @@ if (!adminDatabaseUrl) {
     assertCleanLog("seed and walkthrough");
   });
 
+  test("every stored document file is an envelope under its workspace's key, readable only with its own row's context", async () => {
+    const rows = await readStoredDocumentFiles();
+    const facts = DEMO_DOCUMENTS.map((document) => document.lines.at(-1));
+    const keyByWorkspace = new Map();
+
+    assert.ok(rows.length >= DEMO_DOCUMENTS.length, `${rows.length} stored documents`);
+
+    for (const row of rows) {
+      const bytes = row.file_bytes;
+      const text = bytes.toString("latin1");
+
+      assert.equal(isTenantEnvelope(bytes), true, `${row.file_name} is an envelope`);
+      assert.equal(text.includes("%PDF"), false, `${row.file_name}: no plaintext PDF marker`);
+      assert.deepEqual(facts.filter((fact) => text.includes(fact)), [], `${row.file_name}: no plaintext fact`);
+
+      const { keyId, provider } = describeTenantEnvelope(bytes);
+
+      assert.equal(provider, "local");
+      assert.match(keyId, /^tk_[0-9a-f]{40}$/u, "key ids are hashes, never raw tenant ids");
+      assert.equal(keyId.includes(row.workspace_id), false);
+
+      // One key per workspace, a different one for every workspace.
+      if (keyByWorkspace.has(row.workspace_id)) {
+        assert.equal(keyId, keyByWorkspace.get(row.workspace_id), `${row.workspace_id} has one key`);
+      } else {
+        keyByWorkspace.set(row.workspace_id, keyId);
+      }
+
+      const plaintext = await decryptStoredFile(row);
+
+      assert.equal(plaintext.subarray(0, 5).toString("latin1"), "%PDF-", `${row.file_name} decrypts to the PDF`);
+    }
+
+    assert.equal(new Set(keyByWorkspace.values()).size, keyByWorkspace.size, "no two workspaces share a key");
+
+    // Whatever the ingest queue still holds (the bytes of a finished job are
+    // cleared) is an envelope too.
+    const queued = [
+      ...(await adminQuery(ownerUrl, "SELECT file_bytes AS bytes FROM rag_ingest_jobs WHERE file_bytes IS NOT NULL")).rows,
+      ...(await adminQuery(ownerUrl, "SELECT payload AS bytes FROM rag_ingest_jobs_outputs WHERE payload IS NOT NULL")).rows,
+    ];
+
+    assert.deepEqual(
+      queued.filter((row) => !isTenantEnvelope(row.bytes)).length,
+      0,
+      `${queued.length} queued byte rows, all envelopes`
+    );
+
+    // The ciphertext is bound to its row: alpha's bytes read as beta's
+    // document fail instead of decrypting.
+    const alphaRow = rows.find((row) => row.workspace_id === "alpha");
+    const betaRow = rows.find((row) => row.workspace_id === "beta");
+
+    await assert.rejects(
+      decryptStoredFile({ ...betaRow, file_bytes: alphaRow.file_bytes }),
+      (error) => /^TENANT_(ENVELOPE|KEY)_/u.test(error?.code ?? "")
+    );
+
+    // The status command reads the same keystore as the server.
+    const status = runCli("tenant-keys.mjs", ["status", "--json"]);
+
+    assert.equal(status.status, 0, `${status.stdout}\n${status.stderr}`);
+
+    const report = JSON.parse(status.stdout);
+    const reportText = JSON.stringify(report);
+
+    for (const keyId of keyByWorkspace.values()) {
+      assert.ok(reportText.includes(keyId), `tenant:keys status lists ${keyId}: ${status.stdout}`);
+    }
+
+    assertCleanLog("encryption at rest");
+  });
+
   test("an OIDC identity: the registry decides its workspaces, and the IdP cannot grant platform roles", async (t) => {
     t.diagnostic(`split logins created with ${splitLoginsVia === "psql" ? "deploy/postgres/create-split-roles.sql (psql)" : "the same statements through pg (no psql found)"}`);
 
@@ -465,10 +574,20 @@ if (!adminDatabaseUrl) {
     modelServer.setChatDelayMs(1_500);
 
     try {
+      const chatsBefore = modelServer.requests.chat;
       const beta = [ask("bob", betaDocument), ask("bob", betaDocument)];
 
-      // Both of beta's runs hold their slot before the third arrives.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Both of beta's runs hold their slot before the third arrives: each
+      // has reached the model, which holds its completion for 1.5 s (the
+      // fake counts a chat request as it arrives, before the delay). A
+      // counter, not a timer, so a slow runner cannot reorder them.
+      const reachedBy = Date.now() + 30_000;
+
+      while (modelServer.requests.chat < chatsBefore + 2 && Date.now() < reachedBy) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      assert.ok(modelServer.requests.chat >= chatsBefore + 2, "both of beta's runs reached the model");
 
       const [first, second, third, alpha] = await Promise.all([...beta, ask("bob", betaDocument), ask("alice", alphaDocument)]);
 
@@ -498,11 +617,76 @@ if (!adminDatabaseUrl) {
     assert.equal(health.status, 200, health.text);
     assert.equal(rowLevelSecurity?.status, "ok", JSON.stringify(rowLevelSecurity));
     assert.equal(rowLevelSecurity?.roleSplit?.status, "ok", JSON.stringify(rowLevelSecurity?.roleSplit));
+    // TENANT_ENCRYPTION=on: the keystore and master key are readable and
+    // private.
+    assert.equal(health.json.checks.tenantEncryption?.status, "ok", JSON.stringify(health.json.checks.tenantEncryption));
     assert.equal(
       Object.values(health.json.checks).some((check) => check?.status === "error"),
       false,
       JSON.stringify(health.json.checks)
     );
+  });
+
+  // DOCUMENT_TRASH_RETENTION_HOURS (72 in the profile): the walkthrough left
+  // bob's redaction probe in his trash, its feedback excerpts intact. Aged
+  // past the retention, the sweep purges it (row and bytes, as the system)
+  // and only then runs the redaction, in bob's own database context.
+  test("the trash purge removes an aged trashed document and only then redacts its excerpts", async () => {
+    assert.match(monolith.output(), /\[retention\] sweeping every 2000 ms: [^\n]*document_trash=72h/u);
+
+    const excerpts = async () =>
+      ((await client.call("bob", "/feedback?limit=100")).json?.feedback ?? [])
+        .flatMap((record) => record.citations ?? [])
+        .filter((citation) => citation.fileName === DEMO_REDACTION_PROBE.fileName)
+        .map((citation) => citation.excerpt);
+    const trashed = (
+      await adminQuery(
+        ownerUrl,
+        "SELECT doc_id FROM rag_documents WHERE workspace_id = 'beta' AND file_name = $1 AND deleted_at IS NOT NULL",
+        [DEMO_REDACTION_PROBE.fileName]
+      )
+    ).rows;
+
+    assert.equal(trashed.length, 1, "one probe in bob's trash");
+    assert.ok((await excerpts()).length > 0);
+    assert.ok((await excerpts()).every((excerpt) => excerpt === DEMO_REDACTION_PROBE.fact), "kept while restorable");
+
+    await adminQuery(
+      ownerUrl,
+      `UPDATE rag_documents SET deleted_at = now() - interval '${Number(profile.DOCUMENT_TRASH_RETENTION_HOURS) + 8} hours' WHERE doc_id = $1`,
+      [trashed[0].doc_id]
+    );
+
+    const deadline = Date.now() + 20_000;
+    let left = 1;
+
+    while (Date.now() < deadline && left > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      left = (await adminQuery(ownerUrl, "SELECT count(*)::int AS n FROM rag_documents WHERE doc_id = $1", [trashed[0].doc_id]))
+        .rows[0].n;
+    }
+
+    assert.equal(left, 0, monolith.output());
+
+    // The cascade runs right after the purge commits.
+    const redactedBy = Date.now() + 5_000;
+    let after = await excerpts();
+
+    while (Date.now() < redactedBy && !after.every((excerpt) => excerpt === DELETED_SOURCE_MARKER)) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      after = await excerpts();
+    }
+
+    assert.ok(after.length > 0 && after.every((excerpt) => excerpt === DELETED_SOURCE_MARKER), JSON.stringify(after));
+
+    const trashListing = await client.call("bob", "/documents/trash");
+
+    assert.equal(
+      (trashListing.json ?? []).some((document) => document.docId === trashed[0].doc_id),
+      false,
+      "purged from the trash"
+    );
+    assertCleanLog("trash purge");
   });
 
   test("the retention sweep deletes aged runs, tasks and feedback as system work under the split", async () => {
@@ -587,6 +771,7 @@ if (!adminDatabaseUrl) {
         ...inheritedEnvironment(),
         ...profile,
         ...databaseEnvironment,
+        ...kmsEnvironment,
         DOTENV_CONFIG_PATH: emptyEnvironmentFile,
         DOTENV_CONFIG_QUIET: "true",
         RAG_DATA_DIRECTORY: path.join(tempRoot, "cli-rag-data"),
@@ -653,6 +838,30 @@ if (!adminDatabaseUrl) {
   test("a real erase removes alpha everywhere while beta's documents and chat keep working", async () => {
     const documents = await discoverDemoDocuments({ client });
     const betaDocument = DEMO_DOCUMENTS.find((document) => document.workspaceId === "beta");
+    // A copy of alpha's stored ciphertext, as an old database backup would
+    // keep it after the erase, and the key it names.
+    const storedBefore = await readStoredDocumentFiles();
+    const alphaCopy = storedBefore.find((row) => row.workspace_id === "alpha");
+    const alphaKey = describeTenantEnvelope(alphaCopy.file_bytes);
+
+    assert.equal((await decryptStoredFile(alphaCopy)).subarray(0, 5).toString("latin1"), "%PDF-");
+
+    // An erase sees the trash too: gamma's preview counts the quota probes the
+    // walkthrough left there, and names the one key it would destroy.
+    const gammaTrashed = (
+      await adminQuery(ownerUrl, "SELECT count(*)::int AS n FROM rag_documents WHERE workspace_id = 'gamma' AND deleted_at IS NOT NULL")
+    ).rows[0].n;
+    const gammaPreview = await client.call("platformAdmin", "/admin/tenants/erase", {
+      json: { workspaceId: "gamma" },
+      method: "POST",
+    });
+    const gammaDocuments = gammaPreview.json?.stores?.find((store) => store.store === "documents");
+
+    assert.ok(gammaTrashed > 0, "the walkthrough left gamma's probes in the trash");
+    assert.equal(gammaDocuments?.tables?.documents?.records, gammaTrashed, gammaPreview.text);
+    assert.equal(gammaPreview.json.tenantKeys?.status, "dry_run", gammaPreview.text);
+    assert.equal(gammaPreview.json.tenantKeys.destroy.length, 1, gammaPreview.text);
+
     const erased = await client.call("platformAdmin", "/admin/tenants/erase", {
       json: { dryRun: false, workspaceId: "alpha" },
       method: "POST",
@@ -661,6 +870,33 @@ if (!adminDatabaseUrl) {
     assert.equal(erased.status, 200, erased.text);
     assert.equal(erased.json.complete, true, erased.text);
     assert.equal(erased.json.status, "completed", erased.text);
+
+    // Crypto-shred: the erase destroyed alpha's workspace key, last, and
+    // reports it by id and versions only.
+    assert.equal(erased.json.tenantKeys?.status, "destroyed", erased.text);
+    assert.deepEqual(
+      erased.json.tenantKeys.destroyed.map((key) => [key.keyId, key.scope]),
+      [[alphaKey.keyId, "workspace"]],
+      erased.text
+    );
+    assert.ok(erased.json.tenantKeys.destroyed[0].destroyedVersions.includes(alphaKey.version), erased.text);
+    assert.equal(/alpha/u.test(JSON.stringify(erased.json.tenantKeys)), false, "no raw tenant id in the key report");
+
+    // The kept copy no longer decrypts, with a fresh KMS (nothing cached).
+    await assert.rejects(decryptStoredFile(alphaCopy), (error) => error?.code === "TENANT_KEY_DESTROYED");
+
+    // beta's key is untouched: its stored file decrypts, and bob downloads.
+    const betaRow = (await readStoredDocumentFiles()).find(
+      (row) => row.workspace_id === "beta" && row.doc_id === documents[betaDocument.fileName].docId
+    );
+
+    assert.equal((await decryptStoredFile(betaRow)).subarray(0, 5).toString("latin1"), "%PDF-");
+
+    const download = await client.call("bob", `/documents/${documents[betaDocument.fileName].docId}/file`);
+
+    assert.equal(download.status, 200, download.text.slice(0, 200));
+    assert.match(download.headers.get("content-type") ?? "", /pdf/u);
+    assert.ok(download.text.startsWith("%PDF-"), "bob gets the plaintext PDF");
     // Per table: every seeded alpha document (and its chunks) went.
     assert.equal(
       erased.json.totals.deleted.documents,
@@ -754,6 +990,18 @@ if (!adminDatabaseUrl) {
       assert.equal(rows[0].n, 0, `${table} holds alpha rows after the erase`);
     }
 
+    // alice's refused request after the erase is still counted, for her
+    // alone: the erased workspace's id does not come back into the ledger.
+    const aliceRefusals = await adminQuery(
+      ownerUrl,
+      "SELECT metric FROM tenant_usage WHERE owner_user_id = 'alice' AND workspace_id = '' AND metric LIKE 'refused_%'"
+    );
+
+    assert.deepEqual(
+      aliceRefusals.rows.map((row) => row.metric),
+      ["refused_workspace_membership_required"]
+    );
+
     // The erase and the requests after it still chain.
     const verified = runAuditVerify();
 
@@ -791,6 +1039,22 @@ if (!adminDatabaseUrl) {
       aliceAgain.json.map((document) => document.fileName).sort(),
       demoDocumentsVisibleTo("alice", "alpha").map((document) => document.fileName).sort()
     );
+
+    // The re-registered alpha writes under the same key id at a newer
+    // version; the destroyed version stays unreadable.
+    const newAlpha = (await readStoredDocumentFiles()).filter((row) => row.workspace_id === "alpha");
+
+    assert.ok(newAlpha.length > 0);
+
+    for (const row of newAlpha) {
+      const header = describeTenantEnvelope(row.file_bytes);
+
+      assert.equal(header.keyId, alphaKey.keyId);
+      assert.ok(header.version > alphaKey.version, `${row.file_name} is under version ${header.version}`);
+      assert.equal((await decryptStoredFile(row)).subarray(0, 5).toString("latin1"), "%PDF-");
+    }
+
+    await assert.rejects(decryptStoredFile(alphaCopy), (error) => error?.code === "TENANT_KEY_DESTROYED");
     assertCleanLog("erase");
   });
 

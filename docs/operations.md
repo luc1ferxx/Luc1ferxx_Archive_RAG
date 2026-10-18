@@ -150,7 +150,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 - 限额类：`TENANT_RATE_LIMITED`、`TENANT_CONCURRENCY_LIMITED`（`TENANT_RATE_LIMIT_*`、`TENANT_MAX_CONCURRENT_RUNS`）、`TENANT_TASK_LIMITED`（`TENANT_MAX_QUEUED_TASKS`）、`UPLOAD_SESSION_LIMIT_EXCEEDED`（`UPLOAD_SESSION_MAX_*`）、`INGEST_PENDING_LIMIT_EXCEEDED` / `INGEST_WORKSPACE_PENDING_LIMIT_EXCEEDED`（`RAG_INGEST_MAX_PENDING_*`）、`TENANT_STORAGE_QUOTA_EXCEEDED`（`TENANT_MAX_DOCUMENTS`、`TENANT_MAX_DOCUMENT_BYTES`）、`MODEL_GATEWAY_QUOTA_EXCEEDED`（进程内 `MODEL_QUOTA_ENABLED` 或模型网关，各记一次，不重复）、`MODEL_CALL_QUEUE_FULL`（`RAG_LLM_MAX_QUEUE`，每次被拒的尝试记一次）。
 - 成员关系类（`TENANT_MEMBERSHIP=enforce`）：`WORKSPACE_MEMBERSHIP_REQUIRED`、`WORKSPACE_SUSPENDED`、`WORKSPACE_DELETING`、`WORKSPACE_NOT_REGISTERED`、`WORKSPACE_ROLES_LIMIT_EXCEEDED`；`TENANT_REGISTRY_UNAVAILABLE`（503）表示注册表读不出来，所有租户都会被拒，先查数据库。
 
-指标里没有租户标签（注册表拒绝这种标签）。被拒的是哪个租户记在用量账本里：每次拒绝按做出判断时针对的租户（用户和 workspace 这一对）记一条 `refused_<reason>`，和这个租户的其他用量一样按小时汇总、每 `TENANT_USAGE_FLUSH_MS` 刷入数据库。
+指标里没有租户标签（注册表拒绝这种标签）。被拒的是哪个租户记在用量账本里：每次拒绝按做出判断时针对的租户（用户和 workspace 这一对）记一条 `refused_<reason>`，和这个租户的其他用量一样按小时汇总、每 `TENANT_USAGE_FLUSH_MS` 刷入数据库。`TENANT_MEMBERSHIP=enforce` 的拒绝只有在请求的 workspace 已登记且不在删除中时才记在这个 workspace 下；否则（客户端随便写的 id、已擦除的 workspace）只记在用户名下，账本里不会出现注册表里没有的 workspace id。
 
 1. **哪个租户**：用平台管理员凭据（`admin.usage.read`）调 `GET /admin/usage?metric=refusals&reason=<reason>&from=<一小时前>`，按拒绝次数列出租户，每行的 `refusals` 是按错误码的次数；`groupBy=workspace` 按 workspace 汇总（按 workspace 计的限额就是这个数）。数据最多滞后 `TENANT_USAGE_FLUSH_MS`。
 2. **哪一种、在哪一层**：`sum by (reason, role) (rate(archive_rag_tenant_refusals_total[15m]))`；HTTP 限额对照 `archive_rag_http_requests_total{status_class="429"}`，网关配额对照 `archive_rag_model_gateway_quota_rejections_total`。

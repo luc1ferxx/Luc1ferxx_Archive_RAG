@@ -146,7 +146,7 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 - 升级到包含分块丢字修复的版本后，已入库文档仍是旧分块：表格行、"Label:" 引导句和页尾标题行可能不在任何 chunk 里。运行 `cd server && npm run vector:reindex -- --from documents --apply` 按新切块器重建。新上传和 `PUT /documents/:docId` 替换自动使用新切块器。重复上传相同内容不会重建，入库去重会直接指向已有文档。
 - 镜像构建时把 `VITE_DOMAIN` 设成 `same-origin`。构建参数 `VITE_API_AUTH_TOKEN` 会打进前端包、发给每个浏览器，只适合单个可信用户。多用户部署用 `API_AUTH_TOKENS`，由前端之外的方式分发 token。
 - 镜像以非 root 用户 `node` 运行，只有 `/data` 可写。
-- 多租户隔离演示：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app up -d --build` 用 `deploy/demo/hardened.env` 打开全部租户隔离开关，PostgreSQL 用独立的 `pgdata-demo` 卷并在初始化时建好角色拆分的两个登录，app 以运行时登录连接，另起一个不发布端口的假模型。token 和密码都是公开的演示值，不发布新端口，不要配合 `ARCHIVE_RAG_BIND_HOST=0.0.0.0` 使用。详见 [demo-tenant-isolation.md](demo-tenant-isolation.md)。
+- 多租户隔离演示：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app up -d --build` 用 `deploy/demo/hardened.env` 打开全部租户隔离开关（只读这一个文件，不读 `server/.env`），PostgreSQL 在初始化时建好角色拆分的两个登录，app 以运行时登录连接，另起一个不发布端口的假模型。它是一个单独的 compose 项目（`luc1ferxx-archive-rag-demo`），容器名和数据卷（`pgdata-demo`、`appdata-demo`，本地 KMS 的主密钥也在后者里）都是自己的，所以 `docker compose -f docker-compose.yml -f compose.demo.yml --profile app down -v` 只删演示的数据，不碰默认部署的 `pgdata`、`appdata`。两者端口相同，不能同时运行。token 和密码都是公开的演示值，不发布新端口，不要配合 `ARCHIVE_RAG_BIND_HOST=0.0.0.0` 使用。详见 [demo-tenant-isolation.md](demo-tenant-isolation.md)。
 - 镜像里的 npm 10 在安装服务端依赖时会要求 `@qdrant/js-client-rest` 的 peer 依赖 typescript。本机 npm 11 生成的锁文件里没有它，而运行时也用不到，所以 Dockerfile 用 `--legacy-peer-deps` 安装。
 
 ## 拆分部署（可选）

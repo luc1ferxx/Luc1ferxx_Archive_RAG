@@ -5,28 +5,40 @@
 # docker-compose.yml:
 #   docker compose -f docker-compose.yml -f compose.demo.yml --profile app up -d --build
 #   cd server && npm run demo:seed && npm run demo:walkthrough
+# Start over (removes the demo's containers and volumes, nothing else):
+#   docker compose -f docker-compose.yml -f compose.demo.yml --profile app down -v
 #
 # DEMO ONLY, NOT FOR PRODUCTION. The two database passwords below and every
 # token in deploy/demo/hardened.env are fixed public demo values. Ports stay
 # on loopback (ARCHIVE_RAG_BIND_HOST, as in docker-compose.yml); do not set
 # ARCHIVE_RAG_BIND_HOST=0.0.0.0 with this file.
 #
-# - postgres: on first initialisation of its own volume (pgdata-demo, so the
-#   default pgdata volume is never reused or changed) the image runs
+# The demo never touches the default deployment's data:
+# - its own compose project (`name` below), so its containers, network and
+#   volumes are its own and `down -v` removes only those; its own container
+#   names, so a stopped default deployment can stay where it is (the host
+#   ports are the same, so the two do not run at the same time);
+# - its own volumes, pgdata-demo for PostgreSQL and appdata-demo for the
+#   app's /data (upload sessions, RAG data, and the local KMS's keystore and
+#   master key, without which the demo's encrypted files are unreadable);
+# - only deploy/demo/hardened.env, not server/.env (`!override`), so no key or
+#   setting of the default deployment reaches the demo.
+#
+# - postgres: on first initialisation of pgdata-demo the image runs
 #   deploy/postgres/create-split-roles.sql, which creates the owner login
 #   archive_rag_owner (owns the archive_rag database, CREATEROLE, runs the
 #   migrations) and the runtime login archive_rag_app (NOSUPERUSER,
-#   NOBYPASSRLS, NOINHERIT, owns nothing). To start the demo over, remove the
-#   volume: docker compose -f docker-compose.yml -f compose.demo.yml down -v.
-# - app: deploy/demo/hardened.env after server/.env (the profile wins over it,
-#   the environment below over both). It connects as the runtime login and
-#   migrates as the owner login; the postgres superuser URLs of
-#   docker-compose.yml are replaced.
+#   NOBYPASSRLS, NOINHERIT, owns nothing).
+# - app: connects as the runtime login and migrates as the owner login; the
+#   postgres superuser URLs of docker-compose.yml are replaced.
 # - demo-model: the deterministic fake model (server/demo/fake-model.js) from
 #   the same image, on the compose network only. To use a real model, point
 #   OPENAI_* in deploy/demo/hardened.env at it and drop OPENAI_BASE_URL below.
+name: luc1ferxx-archive-rag-demo
+
 services:
   postgres:
+    container_name: luc1ferxx-archive-demo-postgres
     environment:
       # Read by create-split-roles.sql (\getenv). Demo values, public.
       ARCHIVE_RAG_OWNER_PASSWORD: demo_owner_password
@@ -43,6 +55,9 @@ services:
     container_name: luc1ferxx-archive-demo-model
     restart: unless-stopped
     profiles: ["app"]
+    # An init process forwards docker's SIGTERM (the command also stops on
+    # it), so `docker compose stop` does not wait out the timeout.
+    init: true
     command: ["node", "demo-tenants.mjs", "fake-model", "--host", "0.0.0.0", "--port", "5199"]
     # The image's own HEALTHCHECK probes the app's /livez on 5001.
     healthcheck:
@@ -53,7 +68,8 @@ services:
       start_period: 10s
 
   app:
-    env_file:
+    container_name: luc1ferxx-archive-demo-app
+    env_file: !override
       - path: deploy/demo/hardened.env
         required: true
     environment:
@@ -61,9 +77,18 @@ services:
       POSTGRES_MIGRATION_DATABASE_URL: postgresql://archive_rag_owner:demo_owner_password@postgres:5432/archive_rag
       LONG_MEMORY_DATABASE_URL: postgresql://archive_rag_app:demo_runtime_password@postgres:5432/archive_rag
       OPENAI_BASE_URL: http://demo-model:5199/v1
+      # TENANT_ENCRYPTION=on (the profile): the local KMS's key files and
+      # master key in the demo's app volume (/data, as the image's defaults
+      # would put them), never in the database or the image. Demo-grade:
+      # whoever can read the volume can decrypt every tenant's files.
+      TENANT_KEYSTORE_DIR: /data/tenant-keystore
+      TENANT_KMS_MASTER_KEY_FILE: /data/tenant-kms-master.key
+    volumes:
+      - appdata-demo:/data
     depends_on:
       demo-model:
         condition: service_healthy
 
 volumes:
   pgdata-demo:
+  appdata-demo:

@@ -5,6 +5,7 @@
 // and the result table behave. test/tenant-isolation-hardened.e2e.test.mjs
 // runs the profile against a real `node server.js` on PostgreSQL.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -28,7 +29,15 @@ import {
 } from "../demo/tenant-demo.js";
 import {
   getAgentRunRetentionDays,
+  getDocumentTrashRetentionHours,
   getFeedbackRetentionDays,
+  getLongMemoryScope,
+  getQueryEmbeddingCacheScope,
+  getTenantEncryptionMode,
+  getTenantKmsProviderId,
+  getTenantRegistryCacheScope,
+  isDocumentTrashEnabled,
+  isTenantEncryptionEnabled,
   getModelGatewayQuotaLimits,
   getPostgresRowLevelSecurityMode,
   getPostgresTenantContextMode,
@@ -53,7 +62,9 @@ import {
   isRagIngestAsync,
   isTenantRateLimitEnabled,
 } from "../rag/config.js";
+import { resolveLocalKmsPaths } from "../rag/kms/local-provider.js";
 import { assertRbacConfiguration, getRbacMode } from "../rag/rbac.js";
+import { getRagDataDirectory } from "../rag/storage.js";
 
 const serverDirectory = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = path.join(serverDirectory, "..");
@@ -166,6 +177,39 @@ test("the server's own parsers read every isolation switch of the profile as on"
     ]) {
       assert.ok(days > 0);
     }
+
+    assert.equal(isDocumentTrashEnabled(), true);
+    assert.ok(getDocumentTrashRetentionHours() > 0);
+    assert.equal(getTenantEncryptionMode(), "on");
+    assert.equal(isTenantEncryptionEnabled(), true);
+    assert.equal(getTenantKmsProviderId(), "local");
+    assert.equal(getLongMemoryScope(), "workspace");
+    assert.equal(getQueryEmbeddingCacheScope(), "tenant");
+    assert.equal(getTenantRegistryCacheScope(), "tenant");
+  });
+});
+
+// The profile leaves TENANT_KEYSTORE_DIR and TENANT_KMS_MASTER_KEY_FILE unset:
+// a local run keeps both under server/data/ (git-ignored, resolved from the
+// server's directory whatever the working directory), and compose.demo.yml
+// names the app volume's paths (deployment-contract.test.mjs).
+test("a local run of the profile keeps the keystore and master key next to the data directory, git-ignored", async () => {
+  assert.equal(profile.TENANT_KEYSTORE_DIR, undefined);
+  assert.equal(profile.TENANT_KMS_MASTER_KEY_FILE, undefined);
+  assert.equal(profile.RAG_DATA_DIRECTORY, undefined);
+
+  await withProfile(() => {
+    const dataRoot = path.dirname(getRagDataDirectory());
+    const paths = resolveLocalKmsPaths();
+
+    assert.equal(paths.keystoreDirectory, path.join(dataRoot, "tenant-keystore"));
+    assert.equal(paths.masterKeyFile, path.join(dataRoot, "tenant-kms-master.key"));
+
+    // In a checkout (no RAG_DATA_DIRECTORY in this process) the data
+    // directory is server/data/rag, and server/data/ is git-ignored.
+    if (!process.env.RAG_DATA_DIRECTORY && dataRoot === path.join(serverDirectory, "data")) {
+      assert.match(readFileSync(path.join(repositoryRoot, ".gitignore"), "utf8"), /^\/server\/data\/$/mu);
+    }
   });
 });
 
@@ -212,7 +256,7 @@ test("demo documents are private to their uploader in its workspace, except the 
   assert.deepEqual(names("alice", "alpha"), ["alpha-leave-policy.pdf", "alpha-shared-glossary.pdf"]);
   assert.deepEqual(names("anna", "alpha"), ["alpha-shared-glossary.pdf"]);
   assert.deepEqual(names("carol", "alpha"), ["alpha-security-standard.pdf", "alpha-shared-glossary.pdf"]);
-  assert.deepEqual(names("carol", "beta"), []);
+  assert.deepEqual(names("carol", "beta"), ["beta-onboarding-checklist.pdf"]);
   assert.deepEqual(names("bob", "beta"), ["beta-travel-policy.pdf"]);
   assert.deepEqual(names("alice", "beta"), []);
   assert.equal(new Set(DEMO_DOCUMENTS.map((document) => document.fileName)).size, DEMO_DOCUMENTS.length);
@@ -277,6 +321,50 @@ test("the fake model answers embeddings, chat and streamed chat in the OpenAI sh
     assert.ok(Date.now() - started >= 140);
   } finally {
     await new Promise((resolve) => model.server.close(resolve));
+  }
+});
+
+// compose.demo.yml runs the command in the demo-model container (with
+// init: true too): without its own handler, node as PID 1 ignores docker's
+// SIGTERM, and `docker compose stop` waits out its timeout and kills it.
+test("the fake-model command stops cleanly on SIGTERM and SIGINT", async () => {
+  for (const signal of ["SIGTERM", "SIGINT"]) {
+    const child = spawn(process.execPath, [path.join(serverDirectory, "demo-tenants.mjs"), "fake-model", "--port", "0"], {
+      cwd: serverDirectory,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    const exited = new Promise((resolve) => child.once("exit", (code, exitSignal) => resolve({ code, exitSignal })));
+
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk;
+    });
+
+    try {
+      const deadline = Date.now() + 10_000;
+
+      while (!/fake model serving http:\/\/127\.0\.0\.1:\d+\/v1/u.test(output) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      assert.match(output, /fake model serving/u);
+      child.kill(signal);
+
+      const result = await Promise.race([
+        exited,
+        new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 5_000)),
+      ]);
+
+      assert.deepEqual(result, { code: 0, exitSignal: null }, output);
+      assert.match(output, new RegExp(`fake model stopping \\(${signal}\\)`, "u"));
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }
   }
 });
 
