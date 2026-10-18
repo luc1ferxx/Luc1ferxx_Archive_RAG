@@ -10,6 +10,7 @@ import {
   getRetentionSweepBatchSize,
   getRetentionSweepIntervalMs,
   getTaskRetentionDays,
+  getTenantUsageRetentionDays,
   getWorkspaceArtifactRetentionDays,
 } from "./config.js";
 import { getTenantRegistryTableNames } from "./db-migrations.js";
@@ -17,6 +18,7 @@ import { getObservabilityEventsPath } from "./observability.js";
 import { isPostgresConfigured, queryPostgres } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import { computeRetentionCutoff, computeRetentionCutoffHours } from "./retention-sql.js";
+import { deleteExpiredTenantUsage } from "./tenant-usage.js";
 import {
   parseWorkspaceRetentionPolicy,
   readWorkspaceRetentionPolicyDays,
@@ -58,6 +60,12 @@ import {
 //                        (rag/document-trash.js). API tier. No workspace
 //                        policy adjusts it, so it is swept even when the
 //                        policies cannot be read.
+//   tenant_usage         TENANT_USAGE_RETENTION_DAYS: usage ledger rows
+//                        (migration 037; model usage, chat requests, ingest
+//                        and every refused_<reason> count) whose hour started
+//                        before the cutoff, every tenant alike
+//                        (rag/tenant-usage.js deleteExpiredTenantUsage). API
+//                        tier. No workspace policy adjusts it either.
 //
 // Database work runs under runAsDatabaseSystem in batches of
 // RETENTION_SWEEP_BATCH_SIZE rows, one statement each (the stores'
@@ -103,6 +111,7 @@ export const RETENTION_DATA_TYPES = Object.freeze({
   feedback: "feedback",
   ragObservability: "rag_observability",
   tasks: "tasks",
+  tenantUsage: "tenant_usage",
   workspaceArtifacts: "workspace_artifacts",
 });
 
@@ -157,6 +166,24 @@ const DATABASE_TYPES = Object.freeze([
       typeof services?.documentTrashService?.deleteExpiredTrash === "function"
         ? (options) => services.documentTrashService.deleteExpiredTrash(options)
         : null,
+    tier: "api",
+    workspacePolicies: false,
+  },
+  {
+    envName: "TENANT_USAGE_RETENTION_DAYS",
+    getDays: getTenantUsageRetentionDays,
+    id: RETENTION_DATA_TYPES.tenantUsage,
+    // The ledger is a module of its own, not a service on `services`; a test
+    // (or another wiring) may hand one in as services.tenantUsageStore.
+    resolveDelete: (services) => {
+      const store = services?.tenantUsageStore;
+
+      if (store === undefined || store === null) {
+        return (options) => deleteExpiredTenantUsage(options);
+      }
+
+      return typeof store.deleteExpired === "function" ? (options) => store.deleteExpired(options) : null;
+    },
     tier: "api",
     workspacePolicies: false,
   },

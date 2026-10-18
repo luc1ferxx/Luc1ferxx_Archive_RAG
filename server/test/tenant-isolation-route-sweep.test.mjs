@@ -271,7 +271,7 @@ const sampleRequest = (entry, headers) => ({
   path: samplePath(entry.path),
 });
 
-test("an empty scope is refused on every non-public route, the platform paths only for a principal with no workspace list", async () => {
+test("an empty scope is refused on every non-public route, the platform paths only for a principal with no workspace list, GET /auth/me for none", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "tenant-gate-"));
 
   try {
@@ -298,8 +298,16 @@ test("an empty scope is refused on every non-public route, the platform paths on
           );
 
           // A workspace list without a chosen workspace is refused even on
-          // the platform paths: that token is a tenant credential.
-          if (!isScopeRefusal(multiWorkspace)) {
+          // the platform paths: that token is a tenant credential. Only GET
+          // /auth/me answers it, with its own identity and list and nothing
+          // of any tenant's data, so a client can learn which workspace to
+          // name.
+          if (key === "GET /auth/me") {
+            assert.equal(multiWorkspace.status, 200, key);
+            assert.equal(multiWorkspace.json?.userId, "", key);
+            assert.equal(multiWorkspace.json?.workspaceId, "", key);
+            assert.deepEqual([...(multiWorkspace.json?.workspaceIds ?? [])].sort(), ["ws-a", "ws-b"], key);
+          } else if (!isScopeRefusal(multiWorkspace)) {
             multiWorkspaceAnswered.push(`${key} -> ${multiWorkspace.status}`);
           }
 

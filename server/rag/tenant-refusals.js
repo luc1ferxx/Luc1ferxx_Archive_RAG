@@ -26,13 +26,20 @@ export {
 // reads it (toDatabaseTenant), so a refusal lands on the same ledger pair as
 // that tenant's other usage; null or a scope naming neither is ('', ''). A
 // refusal keyed by client IP (the per-tenant limits for a scope naming
-// neither) is recorded there too: an address is not a tenant. Recording never
-// throws, so it can never turn a refusal into a different error.
-export const recordTenantRefusal = (reason, scope = null, { ledger = null } = {}) => {
+// neither) is recorded there too: an address is not a tenant. `metricOnly`
+// leaves the ledger out (a membership refusal of a credential without a user
+// for a workspace id the client chose: rag/tenant-registry.js
+// resolveMembershipRefusalTenant). Recording never throws, so it can never
+// turn a refusal into a different error.
+export const recordTenantRefusal = (reason, scope = null, { ledger = null, metricOnly = false } = {}) => {
   try {
     recordTenantRefusalMetric(reason);
   } catch {
     // A metric must not change the refusal.
+  }
+
+  if (metricOnly) {
+    return;
   }
 
   try {

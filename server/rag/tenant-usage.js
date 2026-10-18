@@ -8,6 +8,13 @@ import {
 import { getTenantUsageTableName } from "./db-migrations.js";
 import { isPostgresConfigured, queryPostgres as queryDefaultPostgres } from "./postgres.js";
 import { getActiveDatabaseTenant, runAsDatabaseSystem } from "./postgres-tenant.js";
+import {
+  buildRetentionLockKey,
+  normalizeRetentionBatchLimit,
+  normalizeRetentionCutoffs,
+  readRetentionLockAcquired,
+  renderRetentionPreludeCtes,
+} from "./retention-sql.js";
 import { createPostgresTenantRecordMethods, tenantSelectorMatches } from "./tenant-records.js";
 import {
   fromTenantRefusalLedgerMetric,
@@ -48,14 +55,20 @@ import {
 //       workspace-status check, a storage, model, task, upload-session or
 //       ingest-queue cap; one metric per stable code
 //       (rag/tenant-refusal-reasons.js), charged to the tenant the refusal
-//       was decided for. They are ordinary rows of the same table, so the
-//       flush, the tenant policy, the erase and the export cover them as they
-//       are; GET /admin/usage?metric=refusals reads them. Refusals hold at
-//       most TENANT_USAGE_MAX_PENDING_REFUSAL_ENTRIES of the pending totals,
-//       so a flood of them (a client probing workspace ids) cannot crowd out
-//       the usage totals while the database is away.
+//       was decided for. A membership refusal keeps the workspace the client
+//       named only when the requester belongs to it; otherwise it is the
+//       user's own user-level tenant, or no row at all without a user
+//       (rag/tenant-registry.js resolveMembershipRefusalTenant), so probing
+//       workspace ids adds no row per id. They are ordinary rows of the same
+//       table, so the flush, the tenant policy, the erase and the export
+//       cover them as they are; GET /admin/usage?metric=refusals reads them.
+//       Refusals hold at most TENANT_USAGE_MAX_PENDING_REFUSAL_ENTRIES of
+//       the pending totals, so a flood of them cannot crowd out the usage
+//       totals while the database is away.
 // The tenant is the (user, workspace) pair; usage outside a tenant (auth
-// disabled, system work) is recorded under ('', '').
+// disabled, system work) is recorded under ('', ''). Rows are kept until a
+// tenant erase removes them, or, with TENANT_USAGE_RETENTION_DAYS set, until
+// the retention sweep does (deleteExpiredTenantUsage below).
 
 export const TENANT_USAGE_METRICS = Object.freeze({
   chatRequests: "chat_requests",
@@ -592,6 +605,74 @@ export const createTenantUsageRecordStore = ({
         yield* database.iterateTenantRecords(selector);
       }
     },
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Retention (rag/retention.js, TENANT_USAGE_RETENTION_DAYS)
+// ---------------------------------------------------------------------------
+
+/**
+ * Deletes at most `limit` ledger rows of every tenant and metric (the
+ * refused_<reason> rows included) whose hour started before `cutoff`. No
+ * workspace policy adjusts it (the registry's retention_policy has no key for
+ * the ledger). One statement, holding the table's advisory try-lock while it
+ * runs; rows a flush is adding to at that moment are skipped (SKIP LOCKED,
+ * which the system role's UPDATE grant of migration 037 allows). System
+ * work: the sweep binds runAsDatabaseSystem. Without a database the ledger
+ * keeps nothing, so nothing is deleted. Resolves to { acquired, deleted }.
+ */
+export const deleteExpiredTenantUsage = async ({
+  cutoff,
+  getTable = getTenantUsagePostgresTable,
+  isDatabaseConfigured = isPostgresConfigured,
+  limit,
+  query = queryDefaultPostgres,
+} = {}) => {
+  const normalized = normalizeRetentionCutoffs({ cutoff });
+
+  if (!isDatabaseConfigured()) {
+    return { acquired: true, deleted: 0 };
+  }
+
+  const table = getTenantUsageTableName(getTable());
+  const result = await query(
+    `
+      WITH ${renderRetentionPreludeCtes({ lockKey: 1, workspaceCutoffs: 4, workspaceIds: 3 })},
+      expired AS (
+        SELECT u.workspace_id, u.owner_user_id, u.metric, u.period_start
+        FROM ${table} AS u
+        WHERE (SELECT acquired FROM retention_lock)
+          AND u.period_start < $2::timestamptz
+        LIMIT $5
+        FOR UPDATE SKIP LOCKED
+      ),
+      deleted_usage AS (
+        DELETE FROM ${table} AS u
+        USING expired AS x
+        WHERE u.workspace_id = x.workspace_id
+          AND u.owner_user_id = x.owner_user_id
+          AND u.metric = x.metric
+          AND u.period_start = x.period_start
+        RETURNING 1
+      )
+      SELECT
+        (SELECT acquired FROM retention_lock) AS acquired,
+        (SELECT COUNT(*) FROM deleted_usage)::int AS deleted
+    `,
+    [
+      buildRetentionLockKey(table),
+      normalized.cutoff,
+      normalized.workspaceIds,
+      normalized.workspaceCutoffs,
+      normalizeRetentionBatchLimit(limit),
+    ]
+  );
+  const row = result?.rows?.[0];
+
+  return {
+    acquired: readRetentionLockAcquired(row),
+    deleted: Number(row?.deleted ?? 0) || 0,
   };
 };
 

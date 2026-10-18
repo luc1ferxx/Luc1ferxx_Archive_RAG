@@ -405,6 +405,73 @@ test("the PostgreSQL record calls: an exact WHERE, children swept again, pages r
   await assert.rejects(() => keep.deleteTenantRecords(pair), /kept by a tenant erase/);
 });
 
+test("a userWide table (long memory under LONG_MEMORY_SCOPE=user): a user takes every row, a workspace the rows that carry it", async () => {
+  const { getActiveDatabaseTenant, getDatabaseTenantContext, runAsDatabaseSystem } = await import(
+    "../rag/postgres-tenant.js"
+  );
+  const { createPostgresTenantRecordMethods } = await import("../rag/tenant-records.js");
+  const calls = [];
+  const query = async (sql, values = []) => {
+    const text = sql.replace(/\s+/g, " ").trim();
+
+    calls.push({ context: getDatabaseTenantContext(), tenant: getActiveDatabaseTenant(), text, values });
+
+    if (text.startsWith("SELECT COUNT")) return { rows: [{ records: 4 }] };
+    if (text.startsWith("DELETE")) return { rowCount: 1 };
+    if (text.includes("AS workspace_id")) return { rows: [{ workspace_id: "" }, { workspace_id: "acme" }] };
+    if (text.startsWith("SELECT DISTINCT")) return { rows: [{ user_id: "ann" }] };
+
+    return { rows: [{ id: `${values[0]}:${values[1]}` }] };
+  };
+  const methods = createPostgresTenantRecordMethods({
+    query,
+    tables: () => [{ keyColumns: ["id"], name: "long_memory", table: "t_memory", userColumn: "user_id", userWide: true }],
+  });
+  const user = normalizeTenantSelector({ userId: "ann", workspaceId: "globex" });
+  const workspace = normalizeTenantSelector({ workspaceId: "acme" });
+
+  // A selector naming a user: every row of the user, the statement of before.
+  assert.deepEqual(await runAsDatabaseSystem(() => methods.countTenantRecords(user)), { long_memory: { records: 4 } });
+  assert.equal(calls[0].text, "SELECT COUNT(*)::int AS records FROM t_memory WHERE user_id = $1");
+
+  // A workspace selector is no longer skipped: it takes the rows that carry
+  // the workspace, of every user.
+  calls.length = 0;
+  assert.deepEqual(await runAsDatabaseSystem(() => methods.deleteTenantRecords(workspace)), {
+    long_memory: { deleted: 1 },
+  });
+  assert.deepEqual(calls.map(({ text, values }) => [text, values]), [
+    ["DELETE FROM t_memory WHERE workspace_id = $1", ["acme"]],
+  ]);
+
+  // The user's export reads each workspace the rows carry, bound to that
+  // (user, workspace) tenant, so every row comes back once under its policy.
+  calls.length = 0;
+  const exported = [];
+
+  for await (const { record } of methods.iterateTenantRecords(user)) exported.push(record.id);
+
+  assert.deepEqual(exported, [":ann", "acme:ann"]);
+  assert.equal(calls[0].context, "system");
+  assert.match(calls[0].text, /^SELECT DISTINCT workspace_id AS workspace_id FROM t_memory WHERE user_id = \$1/);
+  assert.deepEqual(
+    calls.slice(1).map(({ tenant, text }) => [tenant, text.startsWith("SELECT * FROM t_memory WHERE workspace_id = $1 AND user_id = $2")]),
+    [
+      [{ userId: "ann", workspaceId: "" }, true],
+      [{ userId: "ann", workspaceId: "acme" }, true],
+    ]
+  );
+
+  // The workspace's export: each user of it, that pair's rows only.
+  calls.length = 0;
+  exported.length = 0;
+
+  for await (const { record } of methods.iterateTenantRecords(workspace)) exported.push(record.id);
+
+  assert.deepEqual(exported, ["acme:ann"]);
+  assert.match(calls[1].text, /^SELECT \* FROM t_memory WHERE workspace_id = \$1 AND user_id = \$2/);
+});
+
 describe("erase and export over every in-memory store", () => {
   const state = {};
 
@@ -842,7 +909,11 @@ describe("erase and export over every in-memory store", () => {
 
     assert.equal(counts.documents.records, 2, "bob's and alice's documents in globex");
     assert.equal(counts.tasks.records, 2);
-    assert.equal(result.stores.find(({ store }) => store === "long_memory").status, "not_applicable");
+    // Long memory is asked under the default `user` scope too: the real store
+    // then takes the rows that carry the workspace (written while the scope
+    // was `workspace`); this stand-in keeps memory per user only, so nothing.
+    assert.equal(result.stores.find(({ store }) => store === "long_memory").status, "ok");
+    assert.deepEqual(counts.long_memory, { records: 0 });
     assert.equal(counts["claim_judge_cache:shared"].records, 2);
     assert.deepEqual(counts.workspace_members, { records: 2 });
     assert.deepEqual(counts.workspaces, { records: 1 });

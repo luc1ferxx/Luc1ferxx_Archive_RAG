@@ -16,9 +16,14 @@ export const WORKSPACE_HEADER = "x-workspace-id";
 
 // Server-side workspace ids are at most 256 characters (the tenant registry's
 // MAX_TENANT_ID_LENGTH); anything longer, or with control characters, is not
-// one this tab will send.
+// one this tab will send. Nor is one with a character above U+00FF: a header
+// value must be a ByteString, and fetch and XHR throw on anything else before
+// the request leaves, so one such id (listed by /auth/me, or remembered) made
+// every request of the tab fail. It is not offered and not sent; the tenant
+// registry no longer registers such ids (printable ASCII only).
 const MAX_WORKSPACE_ID_LENGTH = 256;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
+const NOT_BYTE_STRING = /[^\u0000-ÿ]/u;
 
 export const normalizeWorkspaceId = (value) => {
   if (typeof value !== "string") {
@@ -27,7 +32,12 @@ export const normalizeWorkspaceId = (value) => {
 
   const text = value.trim();
 
-  return text && text.length <= MAX_WORKSPACE_ID_LENGTH && !CONTROL_CHARACTERS.test(text) ? text : "";
+  return text &&
+    text.length <= MAX_WORKSPACE_ID_LENGTH &&
+    !CONTROL_CHARACTERS.test(text) &&
+    !NOT_BYTE_STRING.test(text)
+    ? text
+    : "";
 };
 
 let activeWorkspaceId = "";
@@ -73,19 +83,24 @@ export const writeStoredWorkspaceId = (workspaceId) => {
 
 /**
  * What GET /auth/me (read without x-workspace-id) allows this tab to choose:
- * `{ options, switchable, personal }`.
+ * `{ fallback, options, switchable, personal }`.
  *
  * - Auth off (authProvider "none") or no answer: nothing to choose.
  * - A credential bound to one workspace (its own workspaceId, which /auth/me
  *   reports even without a header) cannot act in another: not switchable.
  * - Otherwise the workspaces it lists; more than one makes the selector
  *   worth showing. `personal` says whether acting in no workspace is a real
- *   choice (the credential names a user), which is what the tab does before
- *   anything is selected.
+ *   choice: the credential names a user and the server does not require a
+ *   workspace (`workspaceRequired`, API_AUTH_REQUIRE_WORKSPACE), where every
+ *   request without one is refused.
+ * - `fallback` is the workspace to act in when nothing (valid) is
+ *   remembered: "" (no workspace, as before) unless a workspace is required,
+ *   then the first one listed, so the tab never starts in a scope every
+ *   request is refused in.
  */
 export const describeWorkspaceChoice = (me) => {
   if (!me || typeof me !== "object" || Array.isArray(me) || me.authProvider === "none") {
-    return { options: [], personal: false, switchable: false };
+    return { fallback: "", options: [], personal: false, switchable: false };
   }
 
   const options = [
@@ -94,10 +109,12 @@ export const describeWorkspaceChoice = (me) => {
     ),
   ];
   const boundWorkspaceId = normalizeWorkspaceId(me.workspaceId);
+  const required = me.workspaceRequired === true;
 
   return {
+    fallback: required && !boundWorkspaceId ? options[0] ?? "" : "",
     options,
-    personal: typeof me.userId === "string" && me.userId.trim() !== "",
+    personal: !required && typeof me.userId === "string" && me.userId.trim() !== "",
     switchable: options.length > 1 && !boundWorkspaceId,
   };
 };

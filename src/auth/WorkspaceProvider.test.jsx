@@ -159,11 +159,48 @@ describe("workspace selection", () => {
     // A credential bound to ws-a: the server refuses any other workspace.
     expect(describeWorkspaceChoice({ ...TWO_WORKSPACES, workspaceId: "ws-a" }).switchable).toBe(false);
     expect(describeWorkspaceChoice(TWO_WORKSPACES)).toEqual({
+      fallback: "",
       options: ["ws-a", "ws-b"],
       personal: true,
       switchable: true,
     });
     expect(describeWorkspaceChoice({ ...TWO_WORKSPACES, userId: "" }).personal).toBe(false);
+  });
+
+  test("where the server requires a workspace, none is not offered and the first listed is the fallback", () => {
+    expect(describeWorkspaceChoice({ ...TWO_WORKSPACES, workspaceRequired: true })).toEqual({
+      fallback: "ws-a",
+      options: ["ws-a", "ws-b"],
+      personal: false,
+      switchable: true,
+    });
+    // One listed: nothing to switch, but the tab still acts in it.
+    expect(describeWorkspaceChoice({ ...TWO_WORKSPACES, workspaceIds: ["ws-b"], workspaceRequired: true })).toEqual({
+      fallback: "ws-b",
+      options: ["ws-b"],
+      personal: false,
+      switchable: false,
+    });
+    // A credential bound to a workspace already acts in it.
+    expect(describeWorkspaceChoice({ ...TWO_WORKSPACES, workspaceId: "ws-a", workspaceRequired: true }).fallback).toBe("");
+  });
+
+  test("an id a header cannot carry (above U+00FF) is never offered, remembered or sent", () => {
+    const choice = describeWorkspaceChoice({ ...TWO_WORKSPACES, workspaceIds: ["ws-a", "工作区", "café"] });
+
+    expect(choice.options).toEqual(["ws-a", "café"]);
+
+    setActiveWorkspaceId("工作区");
+    expect(getActiveWorkspaceId()).toBe("");
+    expect(buildApiRequestConfig()).toBeUndefined();
+    expect(buildApiRequestConfig({ workspaceId: "ws-\u{1f600}" })).toBeUndefined();
+
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, "工作区");
+    expect(readStoredWorkspaceId()).toBe("");
+
+    // Latin-1 is a ByteString: sent as it is.
+    setActiveWorkspaceId("café");
+    expect(buildApiRequestConfig().headers["x-workspace-id"]).toBe("café");
   });
 
   test("blocked storage reads as nothing remembered and writes are dropped", () => {
@@ -250,6 +287,30 @@ describe("WorkspaceProvider", () => {
     expect(window.localStorage.getItem(WORKSPACE_STORAGE_KEY)).toBeNull();
     expect(documentRequests()).toEqual([""]);
     expect(screen.getByRole("combobox", { name: "Switch workspace" })).toHaveValue("");
+  });
+
+  test("a required workspace: the first listed is selected and remembered, and no workspace cannot be chosen", async () => {
+    serveApi({ me: { ...TWO_WORKSPACES, workspaceRequired: true } });
+    const { mounts } = renderWithWorkspaces();
+
+    expect(await screen.findByText("alpha-contract.pdf")).toBeInTheDocument();
+    expect(getActiveWorkspaceId()).toBe("ws-a");
+    expect(window.localStorage.getItem(WORKSPACE_STORAGE_KEY)).toBe("ws-a");
+    expect(mounts.at(-1)).toBe("ws-a");
+
+    const select = screen.getByRole("combobox", { name: "Switch workspace" });
+
+    expect(select).toHaveValue("ws-a");
+    expect(screen.queryByRole("option", { name: "No workspace (personal)" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Choose a workspace" })).toBeDisabled();
+
+    // The next load starts in it: the app waits for /auth/me instead of
+    // asking in no workspace first.
+    axios.get.mockClear();
+    resetWorkspaceSelectionForTests();
+    renderWithWorkspaces();
+    expect(screen.getAllByRole("status").at(-1)).toHaveTextContent("Loading workspace…");
+    await waitFor(() => expect(documentRequests()).toEqual(["ws-a"]));
   });
 
   test("an unreachable /auth/me hides the selector and keeps the remembered workspace for later", async () => {

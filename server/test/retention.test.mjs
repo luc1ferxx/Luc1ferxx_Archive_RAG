@@ -31,6 +31,7 @@ import {
   RetentionPoliciesUnavailableError,
   startRetentionSweeper,
 } from "../rag/retention.js";
+import { deleteExpiredTenantUsage } from "../rag/tenant-usage.js";
 import { createAgentRunService, createInMemoryAgentRunStore } from "../rag/agent-runs.js";
 import { createInMemoryTaskStore, createTaskService } from "../rag/tasks.js";
 import {
@@ -59,6 +60,7 @@ const RETENTION_ENV = [
   "RETENTION_SWEEP_BATCH_SIZE",
   "RETENTION_SWEEP_INTERVAL_MS",
   "TASK_RETENTION_DAYS",
+  "TENANT_USAGE_RETENTION_DAYS",
   "WORKSPACE_ARTIFACT_RETENTION_DAYS",
 ];
 
@@ -103,6 +105,7 @@ describe("configuration", () => {
       assert.equal(config.getWorkspaceArtifactRetentionDays(), 0);
       assert.equal(config.getFeedbackRetentionDays(), 0);
       assert.equal(config.getRagObservabilityRetentionDays(), 0);
+      assert.equal(config.getTenantUsageRetentionDays(), 0);
       assert.equal(config.getRetentionSweepIntervalMs(), 3_600_000);
       assert.equal(config.getRetentionSweepBatchSize(), 500);
     });
@@ -529,6 +532,32 @@ describe("PostgreSQL stores (recording query)", () => {
     assert.doesNotMatch(sql, /FOR UPDATE/);
     assert.match(sql, /DELETE FROM rag_feedback AS f USING expired AS x WHERE f\.id = x\.id/);
     assert.equal(calls[0].values[0], "archive_rag:retention:rag_feedback");
+  });
+
+  test("usage ledger: every tenant's rows by the start of their hour, under SKIP LOCKED, nothing without a database", async () => {
+    const { calls, query } = recordingQuery([{ acquired: true, deleted: 4 }]);
+    const result = await deleteExpiredTenantUsage({
+      cutoff: daysAgo(90),
+      isDatabaseConfigured: () => true,
+      limit: 25,
+      query,
+    });
+    const sql = squash(calls[0].text);
+
+    assert.deepEqual(result, { acquired: true, deleted: 4 });
+    assert.match(sql, /u\.period_start < \$2::timestamptz LIMIT \$5 FOR UPDATE SKIP LOCKED/);
+    assert.doesNotMatch(sql, /retention_overrides AS o ON/, "no workspace policy applies to the ledger");
+    assert.match(sql, /DELETE FROM tenant_usage AS u USING expired AS x/);
+    assert.deepEqual(calls[0].values, ["archive_rag:retention:tenant_usage", daysAgo(90), [], [], 25]);
+
+    const offline = recordingQuery();
+
+    assert.deepEqual(
+      await deleteExpiredTenantUsage({ cutoff: daysAgo(90), isDatabaseConfigured: () => false, query: offline.query }),
+      { acquired: true, deleted: 0 }
+    );
+    assert.equal(offline.calls.length, 0);
+    await assert.rejects(deleteExpiredTenantUsage({ cutoff: "", query }), TypeError, "a bad cutoff never deletes");
   });
 });
 
@@ -1127,6 +1156,51 @@ describe("which process sweeps what", () => {
         "rag_observability=7",
       ]);
       assert.deepEqual(ids(resolveRetentionTargets({ services })), [], "a retrieval or gateway process sweeps nothing");
+    });
+  });
+
+  test("TENANT_USAGE_RETENTION_DAYS: the API tier sweeps the usage ledger without reading workspace policies", async () => {
+    await withEnv({ TENANT_USAGE_RETENTION_DAYS: "90" }, async () => {
+      assert.deepEqual(ids(resolveRetentionTargets({ hostsApiTier: true, services })), ["tenant_usage=90"]);
+      assert.deepEqual(ids(resolveRetentionTargets({ hostsAgentTier: true, services })), []);
+
+      const calls = [];
+      const targets = resolveRetentionTargets({
+        hostsApiTier: true,
+        services: {
+          ...services,
+          tenantUsageStore: {
+            deleteExpired: async (options) => {
+              calls.push({ context: getDatabaseTenantContext(), options });
+              return { acquired: true, deleted: 1 };
+            },
+          },
+        },
+      });
+      const sweeper = createRetentionSweeper({
+        batchSize: 10,
+        loadPolicies: async () => {
+          throw new Error("the ledger needs no policies");
+        },
+        logger: silentLogger(),
+        now: () => NOW,
+        targets,
+      });
+      const report = await sweeper.sweep();
+
+      assert.equal(report.tenant_usage.deleted, 1);
+      assert.deepEqual(calls, [
+        {
+          context: DATABASE_TENANT_CONTEXTS.system,
+          options: { cutoff: daysAgo(90), limit: 10, workspaceCutoffs: [] },
+        },
+      ]);
+
+      // The module's own delete when nothing is injected.
+      const [ledger] = resolveRetentionTargets({ hostsApiTier: true, services }).database;
+
+      assert.equal(typeof ledger.deleteBatch, "function");
+      assert.equal(ledger.workspacePolicies, false);
     });
   });
 

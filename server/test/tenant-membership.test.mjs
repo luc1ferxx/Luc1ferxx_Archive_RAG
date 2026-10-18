@@ -67,6 +67,7 @@ const TOKENS = {
   "alice-suspended-token": { userId: "alice", workspaceId: "ws-s" },
   "alice-deleting-token": { userId: "alice", workspaceId: "ws-d" },
   "alice-multi-token": { userId: "alice", workspaces: ["ws-a", "ws-x"] },
+  "alice-user-token": { userId: "alice" },
   "bob-token": { userId: "bob", workspaceId: "ws-a" },
   "carol-token": { userId: "carol", workspaceId: "ws-x" },
   "dave-token": { userId: "dave" },
@@ -81,6 +82,7 @@ const TOKENS = {
   "ws-a-token": { workspaceId: "ws-a" },
   "ws-s-token": { workspaceId: "ws-s" },
   "ws-x-token": { workspaceId: "ws-x" },
+  "ws-list-token": { workspaces: ["ws-a", "ws-x"] },
 };
 
 const authEnv = (extra = {}) => ({
@@ -568,4 +570,86 @@ test("enforce: a membership whose roles and the credential's exceed the forwarde
 
     assert.equal(overlap.status, 200, overlap.text);
   });
+});
+
+test("enforce: GET /auth/me lists a user-only credential's active memberships; a fixed or listed credential keeps its own", async () => {
+  const { reads, registry } = await createSeededRegistry();
+  const me = async (server, token, extra = {}) => call(server, { headers: asToken(token, extra), path: "/auth/me" });
+
+  // Off (the default): nothing is read and nothing is added.
+  await withServer(authEnv(), registry, async (server) => {
+    const response = await me(server, "alice-user-token");
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.json.workspaceIds, []);
+    assert.equal(Object.hasOwn(response.json, "workspaceRequired"), false);
+  });
+  assert.deepEqual(reads, []);
+
+  await withServer(authEnv({ TENANT_MEMBERSHIP: "enforce" }), registry, async (server) => {
+    // alice is a member of ws-a (active), ws-s (suspended) and ws-d
+    // (deleting): only the active one is offered.
+    let response = await me(server, "alice-user-token");
+
+    assert.equal(response.status, 200, response.text);
+    assert.equal(response.json.workspaceId, "");
+    assert.deepEqual(response.json.workspaceIds, ["ws-a"]);
+
+    // With the workspace named, the membership check passes and the same
+    // list comes back (the SPA's OIDC reload after a switch).
+    response = await me(server, "alice-user-token", { "x-workspace-id": "ws-a" });
+    assert.equal(response.status, 200, response.text);
+    assert.deepEqual(response.json.workspaceIds, ["ws-a"]);
+
+    // Its own fixed workspace or list is all a credential may use, so nothing
+    // is added; a user without memberships gets none.
+    assert.deepEqual((await me(server, "alice-token")).json.workspaceIds, ["ws-a"]);
+    assert.deepEqual([...(await me(server, "alice-multi-token")).json.workspaceIds].sort(), ["ws-a", "ws-x"]);
+    assert.deepEqual((await me(server, "dave-token")).json.workspaceIds, []);
+  });
+
+  // A registry that cannot answer refuses, as the membership check does.
+  const failing = await createSeededRegistry({ failing: true });
+  const originalError = console.error;
+  console.error = () => {};
+
+  try {
+    await withServer(authEnv({ TENANT_MEMBERSHIP: "enforce" }), failing.registry, async (server) => {
+      const response = await me(server, "alice-user-token");
+
+      assert.equal(response.status, 503);
+      assert.equal(response.json.code, TENANT_MEMBERSHIP_CODES.registryUnavailable);
+      assert.equal(response.text.includes("database unreachable"), false);
+    });
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("GET /auth/me answers a workspace-list credential without a user, and says when a workspace is required", async () => {
+  const { registry } = await createSeededRegistry();
+
+  for (const required of [false, true]) {
+    await withServer(authEnv(required ? { API_AUTH_REQUIRE_WORKSPACE: "true" } : {}), registry, async (server) => {
+      // No user, no fixed workspace, two listed: a tenantless scope, which
+      // only /auth/me answers.
+      const response = await call(server, { headers: asToken("ws-list-token"), path: "/auth/me" });
+
+      assert.equal(response.status, 200, response.text);
+      assert.equal(response.json.userId, "");
+      assert.deepEqual([...response.json.workspaceIds].sort(), ["ws-a", "ws-x"]);
+      assert.equal(response.json.workspaceRequired, required ? true : undefined);
+
+      const documents = await call(server, { headers: asToken("ws-list-token"), path: "/documents" });
+
+      assert.equal(documents.status, 403, "every other route still needs a workspace");
+
+      const named = await call(server, {
+        headers: asToken("ws-list-token", { "x-workspace-id": "ws-a" }),
+        path: "/documents",
+      });
+
+      assert.equal(named.status, 200, named.text);
+    });
+  }
 });

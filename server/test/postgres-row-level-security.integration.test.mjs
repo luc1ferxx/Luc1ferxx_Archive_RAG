@@ -833,21 +833,23 @@ if (!adminDatabaseUrl) {
     }
   });
 
-  test("long-term memory: migration 045's policy keeps a workspace's rows in that workspace, and LONG_MEMORY_SCOPE=workspace reads, writes and erases by it", async () => {
+  test("long-term memory: the policy of migrations 045 and 046 keeps a workspace's rows in that workspace and personal rows out of every workspace, and LONG_MEMORY_SCOPE=workspace reads, writes and erases by it", async () => {
     const longMemory = await import("../rag/long-memory.js");
     const { normalizeTenantSelector } = await import("../rag/tenant-records.js");
     const table = tables.longMemory;
     const q = modules.postgres.queryPostgres;
     const carolX = { authenticated: true, userId: "carol", workspaceId: "ws-x" };
     const carolY = { authenticated: true, userId: "carol", workspaceId: "ws-y" };
+    const carolPersonal = { authenticated: true, userId: "carol", workspaceId: "" };
     const savedScope = process.env.LONG_MEMORY_SCOPE;
     const memoryIds = async (where = "TRUE", values = []) =>
       (await q(`SELECT memory_id FROM ${table} WHERE ${where} ORDER BY memory_id`, values)).rows.map(
         (row) => row.memory_id
       );
 
-    // The policy: the user's own rows that are user-level ('') or of the
-    // active workspace, for USING and WITH CHECK alike.
+    // The policy: the user's own rows of the active workspace ('' in the
+    // personal scope) or user-level ('' and not personal), for USING and WITH
+    // CHECK alike.
     const policy = (
       await q(
         `SELECT roles::text[] AS roles, cmd, qual, with_check
@@ -861,6 +863,7 @@ if (!adminDatabaseUrl) {
     assert.match(policy.qual, /user_id = current_setting\('archive_rag\.user_id'::text, true\)/);
     assert.match(policy.qual, /workspace_id = ''::text/);
     assert.match(policy.qual, /workspace_id = current_setting\('archive_rag\.workspace_id'::text, true\)/);
+    assert.match(policy.qual, /NOT personal/);
     assert.equal(policy.with_check, policy.qual);
 
     // Seeded as the owner: alice's row of her workspace, and one of another
@@ -870,10 +873,44 @@ if (!adminDatabaseUrl) {
        VALUES ('lm-alice-ws-a', 'alice', 'note', 'ws-a note', 'ws-a'),
               ('lm-alice-ws-other', 'alice', 'note', 'other workspace note', 'ws-other')`
     );
+    await q(
+      `INSERT INTO ${table} (memory_id, user_id, category, text, workspace_id, personal)
+       VALUES ('lm-alice-personal', 'alice', 'note', 'personal note', '', TRUE)`
+    );
+    await assert.rejects(
+      q(
+        `INSERT INTO ${table} (memory_id, user_id, category, text, workspace_id, personal)
+         VALUES ('lm-personal-in-ws', 'alice', 'note', 'x', 'ws-a', TRUE)`
+      ),
+      (error) => error.code === "23514",
+      "a personal row is a row of no workspace"
+    );
 
     try {
       await asAlice(async () => {
-        assert.deepEqual(await memoryIds(), ["alice-1", "lm-alice-ws-a"], "no WHERE: user-level and ws-a rows only");
+        assert.deepEqual(
+          await memoryIds(),
+          ["alice-1", "lm-alice-ws-a"],
+          "no WHERE: user-level and ws-a rows only, never the personal one"
+        );
+        assert.equal(
+          (await q(`DELETE FROM ${table} WHERE memory_id = 'lm-alice-personal'`)).rowCount,
+          0,
+          "a workspace cannot delete a personal row"
+        );
+        await assert.rejects(
+          q(
+            `INSERT INTO ${table} (memory_id, user_id, category, text, workspace_id, personal)
+             VALUES ('lm-forged-personal', 'alice', 'note', 'forged', '', TRUE)`
+          ),
+          (error) => error.code === "42501",
+          "nor write one"
+        );
+        await assert.rejects(
+          q(`UPDATE ${table} SET personal = TRUE WHERE memory_id = 'alice-1'`),
+          (error) => error.code === "42501",
+          "nor turn a user-level row personal"
+        );
         assert.equal(
           (await q(`UPDATE ${table} SET text = 'x' WHERE memory_id = 'lm-alice-ws-other'`)).rowCount,
           0,
@@ -906,6 +943,12 @@ if (!adminDatabaseUrl) {
         "other workspace note"
       );
 
+      // The personal scope (alice without a workspace) sees every row of no
+      // workspace, the personal one included, and no workspace's rows.
+      await modules.tenant.runWithDatabaseTenant({ userId: "alice", workspaceId: "" }, async () => {
+        assert.deepEqual(await memoryIds(), ["alice-1", "lm-alice-personal", "lm-alice-user"]);
+      });
+
       // The store under LONG_MEMORY_SCOPE=workspace, each call bound to the
       // caller as bindDatabaseTenant binds a request.
       process.env.LONG_MEMORY_SCOPE = "workspace";
@@ -924,6 +967,24 @@ if (!adminDatabaseUrl) {
         longMemory.recordLongMemoryFromUserMessage({ accessScope: carolX, query: "以后用中文回答", userId: "carol" })
       );
 
+      // A note in the personal scope is stored personal and recalled there
+      // only; a clear in a workspace leaves it.
+      await asCarol(carolPersonal, () =>
+        longMemory.recordLongMemoryFromUserMessage({
+          accessScope: carolPersonal,
+          query: "remember that my Xylo bonus is paid in July",
+          userId: "carol",
+        })
+      );
+      assert.deepEqual(
+        (
+          await q(
+            `SELECT workspace_id, personal FROM ${table} WHERE user_id = 'carol' AND category = 'note' AND workspace_id = ''`
+          )
+        ).rows,
+        [{ personal: true, workspace_id: "" }]
+      );
+
       const inY = await asCarol(carolY, () =>
         longMemory.getLongMemoryContext({ accessScope: carolY, query: "When does the Xylo merger close?", userId: "carol" })
       );
@@ -933,6 +994,13 @@ if (!adminDatabaseUrl) {
 
       assert.deepEqual(inY.memories.map((memory) => [memory.category, memory.workspaceId]), [["preference", ""]]);
       assert.doesNotMatch(inY.answerBlock, /Xylo/);
+
+      const inPersonal = await asCarol(carolPersonal, () =>
+        longMemory.getLongMemoryContext({ accessScope: carolPersonal, query: "When is my Xylo bonus paid?", userId: "carol" })
+      );
+
+      assert.match(inPersonal.answerBlock, /bonus is paid in July/);
+      assert.doesNotMatch(inPersonal.answerBlock, /merger/);
       assert.deepEqual(
         inX.memories.map((memory) => [memory.category, memory.workspaceId]).sort(),
         [["note", "ws-x"], ["preference", ""]]
@@ -940,7 +1008,7 @@ if (!adminDatabaseUrl) {
       assert.equal(
         await asCarol(carolY, () => longMemory.clearLongMemories({ accessScope: carolY, userId: "carol" })),
         1,
-        "a clear in ws-y removes the user-level preference only"
+        "a clear in ws-y removes the user-level preference only, not the personal note"
       );
       await asCarol(carolX, () =>
         longMemory.recordLongMemoryFromUserMessage({ accessScope: carolX, query: "以后用中文回答", userId: "carol" })
@@ -949,7 +1017,7 @@ if (!adminDatabaseUrl) {
       // The tenant erase and export selectors (rag/tenant-records.js) by the
       // (user, workspace_id) pair: a workspace takes every user's rows of it,
       // a user in a workspace that pair's, a user outside any workspace the
-      // user-level rows.
+      // rows of no workspace (the user-level ones and the personal ones).
       const recordStore = longMemory.getLongMemoryTenantRecordStore().store;
       const count = (selector) =>
         modules.tenant.runAsDatabaseSystem(() => recordStore.countTenantRecords(normalizeTenantSelector(selector)));
@@ -965,23 +1033,48 @@ if (!adminDatabaseUrl) {
 
       assert.deepEqual(await count({ workspaceId: "ws-a" }), { long_memory: { records: 2 } });
       assert.deepEqual(await count({ userId: "carol", workspaceId: "ws-x" }), { long_memory: { records: 1 } });
-      assert.deepEqual(await count({ userId: "carol", workspaceId: "" }), { long_memory: { records: 1 } });
+      assert.deepEqual(await count({ userId: "carol", workspaceId: "" }), { long_memory: { records: 2 } });
       assert.deepEqual(await count({ userId: "carol", workspaceId: "ws-y" }), { long_memory: { records: 0 } });
       assert.deepEqual(await exported({ workspaceId: "ws-x" }), [["carol", "ws-x", "note"]]);
-      assert.deepEqual(await exported({ userId: "carol", workspaceId: "" }), [["carol", "", "preference"]]);
+      assert.deepEqual(await exported({ userId: "carol", workspaceId: "" }), [
+        ["carol", "", "note"],
+        ["carol", "", "preference"],
+      ]);
       assert.deepEqual(
         await modules.tenant.runAsDatabaseSystem(() =>
           recordStore.deleteTenantRecords(normalizeTenantSelector({ workspaceId: "ws-x" }))
         ),
         { long_memory: { deleted: 1 } }
       );
-      assert.equal((await memoryIds("user_id = 'carol'")).length, 1, "the preference stays");
+      assert.equal((await memoryIds("user_id = 'carol'")).length, 2, "the preference and the personal note stay");
 
       // Under the default scope a selector that names a user takes every row
-      // of the user, as before migration 045, and a workspace one none.
+      // of the user, as before migration 045, and exports each under the
+      // tenant it belongs to. A workspace one takes the rows that carry the
+      // workspace, written while the scope was `workspace`: before, it took
+      // none, and they outlived the workspace's erase.
       delete process.env.LONG_MEMORY_SCOPE;
-      assert.deepEqual(await count({ userId: "alice", workspaceId: "ws-b" }), { long_memory: { records: 5 } });
-      assert.deepEqual(await count({ workspaceId: "ws-a" }), { long_memory: { notApplicable: true, records: 0 } });
+      assert.deepEqual(await count({ userId: "alice", workspaceId: "ws-b" }), { long_memory: { records: 6 } });
+      assert.deepEqual(await exported({ userId: "alice", workspaceId: "ws-b" }), [
+        ["alice", "", "note"],
+        ["alice", "", "note"],
+        ["alice", "", "preference"],
+        ["alice", "ws-a", "note"],
+        ["alice", "ws-a", "note"],
+        ["alice", "ws-other", "note"],
+      ]);
+      assert.deepEqual(await count({ workspaceId: "ws-a" }), { long_memory: { records: 2 } });
+      assert.deepEqual(await exported({ workspaceId: "ws-a" }), [
+        ["alice", "ws-a", "note"],
+        ["alice", "ws-a", "note"],
+      ]);
+      assert.deepEqual(
+        await modules.tenant.runAsDatabaseSystem(() =>
+          recordStore.deleteTenantRecords(normalizeTenantSelector({ workspaceId: "ws-a" }))
+        ),
+        { long_memory: { deleted: 2 } }
+      );
+      assert.deepEqual(await memoryIds("user_id = 'alice' AND workspace_id = 'ws-a'"), []);
     } finally {
       if (savedScope === undefined) {
         delete process.env.LONG_MEMORY_SCOPE;
@@ -1535,7 +1628,15 @@ if (!adminDatabaseUrl) {
         { allowed: true, roles: [] }
       );
 
+      // GET /auth/me's listing: the user's own memberships through the
+      // membership policy (bound to the user without a workspace), each
+      // status through the workspace's own lookup. Nothing runs as the system.
+      assert.deepEqual(await registry.listMemberWorkspaces("alice"), ["ws-a", "ws-b"]);
+      assert.deepEqual(await registry.listMemberWorkspaces("bob"), ["ws-b"]);
+      assert.deepEqual(await registry.listMemberWorkspaces("nobody"), []);
+
       await asSystem(() => registry.suspendWorkspace("ws-b"));
+      assert.deepEqual(await registry.listMemberWorkspaces("alice"), ["ws-a"], "a suspended workspace is not offered");
       assert.equal(
         (await decideTenantMembership({ registry, userId: "bob", workspaceId: "ws-b" })).code,
         "WORKSPACE_SUSPENDED"
@@ -1639,6 +1740,16 @@ if (!adminDatabaseUrl) {
         ),
         (error) => error.code === "23514"
       );
+
+      // Retention (TENANT_USAGE_RETENTION_DAYS) deletes rows of every tenant
+      // whose hour started before the cutoff, as system work, in batches.
+      const sweep = (cutoff) =>
+        modules.tenant.runAsDatabaseSystem(() => usage.deleteExpiredTenantUsage({ cutoff, limit: 3 }));
+
+      assert.deepEqual(await sweep(new Date(hour).toISOString()), { acquired: true, deleted: 0 });
+      assert.deepEqual(await sweep(new Date(hour + 1).toISOString()), { acquired: true, deleted: 3 });
+      assert.deepEqual(await sweep(new Date(hour + 1).toISOString()), { acquired: true, deleted: 1 });
+      assert.equal((await q(`SELECT count(*)::int AS n FROM ${usageTable}`)).rows[0].n, 0);
 
       // Storage totals count a workspace's documents across users, as the
       // owner, but answer a tenant only for its own quota scope.

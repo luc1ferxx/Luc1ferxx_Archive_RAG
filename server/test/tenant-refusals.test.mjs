@@ -54,6 +54,7 @@ import { recordTenantRefusal } from "../rag/tenant-refusals.js";
 import {
   createInMemoryTenantRegistryStore,
   createTenantRegistryService,
+  resolveMembershipRefusalTenant,
   TENANT_MEMBERSHIP_CODES,
 } from "../rag/tenant-registry.js";
 import {
@@ -278,13 +279,16 @@ test("tenant limits: a rate-limited and a concurrency-limited request are counte
   assert.deepEqual(counted(), { [TENANT_CONCURRENCY_LIMITED_CODE]: 1, [TENANT_RATE_LIMITED_CODE]: 1 });
 });
 
-// A registered workspace's refusals are counted under it; a workspace id the
-// registry does not hold (made up, or erased) or one being deleted is counted
-// for the user alone. Before, every made-up x-workspace-id became ledger rows
-// of its own, and the hardened demo's erase test saw an erased workspace's id
-// come back into the ledger with a former member's first refused request
+// Only a member's refusal for a registered workspace that is not deleting is
+// counted under the workspace. A workspace id the registry does not hold
+// (made up, or erased), a registered workspace the user does not belong to,
+// one being deleted and an undecided one are counted for the user alone.
+// Before, every made-up x-workspace-id became ledger rows of its own, a
+// non-member's user id showed in the named workspace's usage view and export,
+// and the hardened demo's erase test saw an erased workspace's id come back
+// into the ledger with a former member's first refused request
 // (test/tenant-isolation-hardened.e2e.test.mjs).
-test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted for the user and the registered workspace it asked for", async () => {
+test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted; only a member's keeps the workspace it asked for", async () => {
   const store = createInMemoryTenantRegistryStore();
   const registry = createTenantRegistryService({ cacheTtlMs: 0, store });
   const broken = createTenantRegistryService({
@@ -341,8 +345,8 @@ test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted for the 
     },
     async () => {
       assert.equal((await call(registry, "ws-a")).status, 200);
-      // Not registered, then registered but not hers: the same answer, but
-      // only the registered one is counted under its workspace.
+      // Not registered, then registered but not hers: the same answer, and
+      // neither is counted under the workspace.
       assert.equal((await call(registry, "ws-b")).body.code, TENANT_MEMBERSHIP_CODES.membershipRequired);
       assert.equal((await call(registry, "ws-c")).body.code, TENANT_MEMBERSHIP_CODES.membershipRequired);
       assert.equal((await call(registry, "ws-s")).body.code, TENANT_MEMBERSHIP_CODES.workspaceSuspended);
@@ -361,13 +365,110 @@ test("membership: every refusal of TENANT_MEMBERSHIP=enforce is counted for the 
     }
   );
 
+  // A non-member's refusal, one for a deleting workspace and one the registry
+  // could not decide go to the user's own user-level tenant. Her refusal for
+  // a suspended workspace she is a member of keeps the pair.
   assert.deepEqual(refusals, [
     { reason: TENANT_MEMBERSHIP_CODES.membershipRequired, tenant: { userId: "alice", workspaceId: "" } },
-    { reason: TENANT_MEMBERSHIP_CODES.membershipRequired, tenant: { userId: "alice", workspaceId: "ws-c" } },
+    { reason: TENANT_MEMBERSHIP_CODES.membershipRequired, tenant: { userId: "alice", workspaceId: "" } },
     { reason: TENANT_MEMBERSHIP_CODES.workspaceSuspended, tenant: { userId: "alice", workspaceId: "ws-s" } },
     { reason: TENANT_MEMBERSHIP_CODES.workspaceDeleting, tenant: { userId: "alice", workspaceId: "" } },
-    { reason: TENANT_MEMBERSHIP_CODES.registryUnavailable, tenant: ALICE },
+    { reason: TENANT_MEMBERSHIP_CODES.registryUnavailable, tenant: { userId: "alice", workspaceId: "" } },
   ]);
+});
+
+test("membership: probing workspace ids makes no ledger row per id, and without a user none at all", async () => {
+  const registry = createTenantRegistryService({ cacheTtlMs: 0, store: createInMemoryTenantRegistryStore() });
+
+  await registry.createWorkspace({ workspaceId: "alpha" });
+  await registry.putMember({ roles: [], userId: "alice", workspaceId: "alpha" });
+
+  const tokens = {
+    "bob-token": { userId: "bob" },
+    "header-token": { roles: ["workspace.member"] },
+  };
+  const app = express();
+
+  app.locals.tenantRegistry = registry;
+  app.use(requireApiAuth);
+  app.get("/documents", (_req, res) => res.json({ ok: true }));
+
+  const server = await startServer(app);
+
+  try {
+    await withEnv(
+      {
+        API_AUTH_ENABLED: "true",
+        API_AUTH_TOKEN: undefined,
+        API_AUTH_TOKENS: JSON.stringify(tokens),
+        RBAC_MODE: undefined,
+        TENANT_MEMBERSHIP: "enforce",
+      },
+      async () => {
+        const probe = async (token, workspaceId) => {
+          const response = await fetch(`${server.baseUrl}/documents`, {
+            headers: { "x-api-key": token, "x-workspace-id": workspaceId },
+          });
+
+          return (await response.json()).code;
+        };
+
+        // bob is no member of alpha, nor of any probed id: every refusal is
+        // charged to bob outside any workspace, never to alpha, so alpha's
+        // usage view, export and erase never see bob.
+        assert.equal(await probe("bob-token", "alpha"), TENANT_MEMBERSHIP_CODES.membershipRequired);
+
+        for (let index = 0; index < 20; index += 1) {
+          assert.equal(await probe("bob-token", `probe-${index}`), TENANT_MEMBERSHIP_CODES.membershipRequired);
+        }
+
+        // A credential without a user naming a workspace by header.
+        for (let index = 0; index < 5; index += 1) {
+          assert.equal(await probe("header-token", `probe-${index}`), TENANT_MEMBERSHIP_CODES.membershipRequired);
+        }
+      }
+    );
+  } finally {
+    await server.close();
+  }
+
+  assert.equal(refusals.length, 21);
+  assert.deepEqual(
+    [...new Set(refusals.map((entry) => JSON.stringify(entry.tenant)))],
+    [JSON.stringify({ userId: "bob", workspaceId: "" })]
+  );
+  assert.deepEqual(counted(), { [TENANT_MEMBERSHIP_CODES.membershipRequired]: 26 });
+});
+
+test("membership: the ledger tenant follows the order of the checks", () => {
+  const scope = { authenticated: true, userId: "alice", workspaceId: "ws-a" };
+  const headerScope = { authenticated: true, userId: "", workspaceId: "ws-a" };
+  const refusal = (code) => ({ allowed: false, code });
+
+  for (const code of [TENANT_MEMBERSHIP_CODES.workspaceSuspended, TENANT_MEMBERSHIP_CODES.rolesLimitExceeded]) {
+    assert.deepEqual(resolveMembershipRefusalTenant(scope, refusal(code)), ALICE, code);
+    assert.deepEqual(
+      resolveMembershipRefusalTenant(headerScope, refusal(code)),
+      { userId: "", workspaceId: "ws-a" },
+      `${code} for the credential's own workspace`
+    );
+  }
+
+  // A deleting workspace is the erase's: no new row under it.
+  for (const code of [
+    TENANT_MEMBERSHIP_CODES.membershipRequired,
+    TENANT_MEMBERSHIP_CODES.notRegistered,
+    TENANT_MEMBERSHIP_CODES.registryUnavailable,
+    TENANT_MEMBERSHIP_CODES.workspaceDeleting,
+  ]) {
+    assert.deepEqual(resolveMembershipRefusalTenant(scope, refusal(code)), { userId: "alice", workspaceId: "" }, code);
+    assert.equal(resolveMembershipRefusalTenant(headerScope, refusal(code)), null, code);
+  }
+
+  // metricOnly counts the refusal and leaves the ledger alone.
+  recordTenantRefusal(TENANT_MEMBERSHIP_CODES.membershipRequired, null, { metricOnly: true });
+  assert.deepEqual(refusals, []);
+  assert.equal(counted()[TENANT_MEMBERSHIP_CODES.membershipRequired], 1);
 });
 
 test("storage quota: a refused check is counted for the document's owner pair", async () => {

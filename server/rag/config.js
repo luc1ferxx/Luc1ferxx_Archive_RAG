@@ -1827,6 +1827,8 @@ export const isAdminAuditDataEventsEnabled = () =>
 //   FEEDBACK_RETENTION_DAYS            answer feedback in PostgreSQL, by
 //                                      creation time
 //   RAG_OBSERVABILITY_RETENTION_DAYS   rotated RAG observability JSONL segments
+//   TENANT_USAGE_RETENTION_DAYS        usage ledger rows (refused_* included),
+//                                      by the start of their hour; API tier
 const readRetentionDays = (rawValue) => Math.floor(toNonNegativeNumber(rawValue, 0));
 
 export const getAgentRunRetentionDays = () =>
@@ -1841,6 +1843,9 @@ export const getFeedbackRetentionDays = () => readRetentionDays(process.env.FEED
 
 export const getRagObservabilityRetentionDays = () =>
   readRetentionDays(process.env.RAG_OBSERVABILITY_RETENTION_DAYS);
+
+export const getTenantUsageRetentionDays = () =>
+  readRetentionDays(process.env.TENANT_USAGE_RETENTION_DAYS);
 
 // How often the retention sweep runs (the first sweep runs a minute after
 // start-up, or after one interval when that is shorter). 0 turns the

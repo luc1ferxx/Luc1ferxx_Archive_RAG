@@ -1,6 +1,7 @@
 import axios from "axios";
 import { API_DOMAIN, buildApiRequestConfig } from "./config";
 import { handleUnauthorizedResponse, hasOidcAccessToken } from "./auth/tokenStore";
+import { getActiveWorkspaceId } from "./auth/workspaceSelection";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
@@ -141,11 +142,15 @@ export const normalizeForbiddenError = (error) => {
 // A 401 on a request that carried an OIDC bearer token refreshes once and
 // retries; if no refresh is possible the auth layer starts a new login. The
 // static VITE_API_AUTH_TOKEN path never carries a bearer and is not retried.
+// `send` receives `{ workspaceId }` for buildApiRequestConfig: the workspace
+// selected when the request started, read once, so the retry goes to the same
+// workspace even if the tab switched while the token was refreshed.
 const sendWithAuth = async (send) => {
   const usedBearer = hasOidcAccessToken();
+  const pinned = { workspaceId: getActiveWorkspaceId() };
 
   try {
-    return await send();
+    return await send(pinned);
   } catch (error) {
     if (
       error?.response?.status === 401 &&
@@ -153,7 +158,7 @@ const sendWithAuth = async (send) => {
       (await handleUnauthorizedResponse())
     ) {
       try {
-        return await send();
+        return await send(pinned);
       } catch (retryError) {
         throw normalizeForbiddenError(retryError);
       }
@@ -164,10 +169,10 @@ const sendWithAuth = async (send) => {
 };
 
 export const apiGet = async (path, requestConfig) => {
-  const response = await sendWithAuth(() =>
+  const response = await sendWithAuth((pinned) =>
     axios.get(
       buildUrl(path),
-      buildApiRequestConfig({ timeout: DEFAULT_TIMEOUT_MS, ...(requestConfig ?? {}) })
+      buildApiRequestConfig({ timeout: DEFAULT_TIMEOUT_MS, ...(requestConfig ?? {}), ...pinned })
     )
   );
 
@@ -176,13 +181,14 @@ export const apiGet = async (path, requestConfig) => {
 
 export const apiPost = async (path, payload, requestConfig) => {
   const url = buildUrl(path);
-  const response = await sendWithAuth(() =>
+  const response = await sendWithAuth((pinned) =>
     axios.post(
       url,
       payload,
       buildApiRequestConfig({
         timeout: DEFAULT_TIMEOUT_MS,
         ...(requestConfig ?? {}),
+        ...pinned,
       })
     )
   );
@@ -191,8 +197,8 @@ export const apiPost = async (path, payload, requestConfig) => {
 };
 
 export const apiDelete = async (path) => {
-  const response = await sendWithAuth(() =>
-    axios.delete(buildUrl(path), buildApiRequestConfig({ timeout: DEFAULT_TIMEOUT_MS }))
+  const response = await sendWithAuth((pinned) =>
+    axios.delete(buildUrl(path), buildApiRequestConfig({ timeout: DEFAULT_TIMEOUT_MS, ...pinned }))
   );
 
   return response.data;
@@ -202,13 +208,14 @@ export const apiDownload = async (path, requestConfig = {}) => {
   const normalizedRequestConfig = requestConfig ?? {};
 
   try {
-    const response = await sendWithAuth(() =>
+    const response = await sendWithAuth((pinned) =>
       axios.get(
         buildUrl(path),
         buildApiRequestConfig({
           ...normalizedRequestConfig,
           responseType: "blob",
           timeout: normalizedRequestConfig.timeout ?? DOWNLOAD_TIMEOUT_MS,
+          ...pinned,
         })
       )
     );

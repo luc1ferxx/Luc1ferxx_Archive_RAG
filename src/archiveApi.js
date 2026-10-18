@@ -7,6 +7,7 @@ import {
 } from "./apiClient";
 import { API_DOMAIN, buildApiRequestConfig } from "./config";
 import { handleUnauthorizedResponse, hasOidcAccessToken } from "./auth/tokenStore";
+import { getActiveWorkspaceId } from "./auth/workspaceSelection";
 
 export const fetchDocuments = async () => {
   return apiGet("/documents");
@@ -231,11 +232,15 @@ export const parseServerSentEvents = (buffer) => {
  * /chat returns once the verified answer is ready.
  */
 export const streamChat = async ({ docIds, question, sessionId, userId, signal, onEvent }) => {
+  // Read once: the retry after a 401 asks the same workspace even if the tab
+  // switched while the token was refreshed (only Authorization is rebuilt).
+  const workspaceId = getActiveWorkspaceId();
   const openStream = () =>
     fetch(`${API_DOMAIN}/chat/stream`, {
       body: JSON.stringify({ question, docIds: docIds.join(","), sessionId, userId }),
       headers: buildApiRequestConfig({
         headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
+        workspaceId,
       }).headers,
       method: "POST",
       signal,

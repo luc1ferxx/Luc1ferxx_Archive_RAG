@@ -135,6 +135,28 @@ describe("validation", () => {
     assert.deepEqual(await registry.listWorkspaces(), [], "nothing invalid was stored");
   });
 
+  test("a new workspace id must be printable ASCII (the x-workspace-id header); one registered before still works", async () => {
+    const store = createInMemoryTenantRegistryStore();
+    const registry = createTenantRegistryService({ cacheTtlMs: 0, store });
+
+    for (const workspaceId of ["工作区", "café", "ws-\u00e4", "ws-\u{1f600}"]) {
+      await assert.rejects(
+        registry.createWorkspace({ workspaceId }),
+        (error) => error.code === "TENANT_REGISTRY_INVALID_INPUT" && /printable ASCII/.test(error.message),
+        workspaceId
+      );
+    }
+
+    assert.equal((await registry.createWorkspace({ workspaceId: "ws a.b_c-1" })).workspaceId, "ws a.b_c-1");
+
+    // An id stored before the rule (written to the store directly) is looked
+    // up, joined and listed as before.
+    await store.insertWorkspace({ plan: "", region: "", retentionPolicy: {}, status: "active", workspaceId: "工作区" });
+    await registry.putMember({ roles: [], userId: "ann", workspaceId: "工作区" });
+    assert.equal((await registry.getWorkspace("工作区")).workspaceId, "工作区");
+    assert.deepEqual(await registry.listMemberWorkspaces("ann"), ["工作区"]);
+  });
+
   test("a retention policy the registry accepts is exactly what the retention sweep reads", async () => {
     const { readWorkspaceRetentionDays, RETENTION_DATA_TYPES } = await import("../rag/retention.js");
     const registry = createMemoryRegistry();

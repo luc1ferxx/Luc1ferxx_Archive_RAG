@@ -39,8 +39,10 @@ const ACME_QUESTION = "When does the Acme acquisition of Beta close?";
 
 // The store contract of the default PostgreSQL store (rag/long-memory.js), in
 // memory: `workspaceId` (a string) limits a call to that workspace's rows and
-// the user-level ones (''), as its SQL and migration 045's policy do; without
-// it a call sees every row of the user. Every call is recorded as made.
+// the user-level ones ('' and not personal), as its SQL and the policy of
+// migrations 045 and 046 do; in the personal scope (workspaceId '') that is
+// every row of no workspace, the personal ones included. Without it a call
+// sees every row of the user. Every call is recorded as made.
 const createRecordingStore = () => {
   const rows = [];
   const calls = [];
@@ -48,7 +50,9 @@ const createRecordingStore = () => {
   let nextId = 0;
   const sees = (row, userId, workspaceId) =>
     row.userId === userId &&
-    (typeof workspaceId !== "string" || row.workspaceId === "" || row.workspaceId === workspaceId);
+    (typeof workspaceId !== "string" ||
+      row.workspaceId === workspaceId ||
+      (row.workspaceId === "" && row.personal !== true));
   const copy = (row) => structuredClone(row);
 
   return {
@@ -72,12 +76,14 @@ const createRecordingStore = () => {
     async remember(args) {
       calls.push(["remember", args]);
       const workspaceId = typeof args.workspaceId === "string" ? args.workspaceId : "";
+      const personal = args.personal === true && workspaceId === "";
       const category = args.category ?? "note";
       const existing = rows.find(
         (row) =>
           row.userId === args.userId &&
           row.category === category &&
-          (typeof args.workspaceId !== "string" || row.workspaceId === workspaceId) &&
+          (typeof args.workspaceId !== "string" ||
+            (row.workspaceId === workspaceId && (row.personal === true) === personal)) &&
           (args.memoryKey ? row.memoryKey === args.memoryKey : row.text === args.text)
       );
       clock += 1;
@@ -93,6 +99,8 @@ const createRecordingStore = () => {
         memoryId: `m-${nextId}`,
         memoryKey: args.memoryKey ?? null,
         memoryValue: args.memoryValue ?? null,
+        ...(personal ? { personal: true } : {}),
+        source: args.source ?? "user_explicit",
         text: args.text,
         updatedAt: clock,
         userId: args.userId,
@@ -237,12 +245,14 @@ describe("LONG_MEMORY_SCOPE=user (default)", () => {
     assert.equal(resolveLongMemoryWorkspace(IN_ACME), null);
   });
 
-  test("a tenant erase reaches long memory only through a selector that names a user", () => {
-    assert.equal(longMemoryAppliesToTenantSelector(normalizeTenantSelector({ workspaceId: "client-acme" })), false);
-    assert.equal(
-      longMemoryAppliesToTenantSelector(normalizeTenantSelector({ userId: "ann", workspaceId: "client-acme" })),
-      true
-    );
+  test("a tenant erase reaches long memory through every selector (a workspace one finds the rows that carry it)", () => {
+    for (const selector of [
+      { workspaceId: "client-acme" },
+      { userId: "ann", workspaceId: "client-acme" },
+      { userId: "ann", workspaceId: "" },
+    ]) {
+      assert.equal(longMemoryAppliesToTenantSelector(normalizeTenantSelector(selector)), true);
+    }
   });
 });
 
@@ -305,6 +315,55 @@ describe("LONG_MEMORY_SCOPE=workspace", () => {
 
     await runWithDatabaseTenant(IN_GLOBEX, () => recordFrom(null, "remember that the Globex launch is in June"));
     assert.equal(store.rows.at(-1).workspaceId, "", "auth off: the bound tenant is no boundary");
+    assert.equal(store.rows.at(-1).personal, undefined, "auth off: no tenant, so not personal either");
+    assert.equal(store.calls.at(-1)[1].personal, undefined);
+  });
+
+  test("a note taken in the personal scope is recalled there only; a clear in a workspace leaves it", async () => {
+    const PERSONAL = Object.freeze({ authenticated: true, userId: "ann" });
+
+    await recordFrom(PERSONAL, "remember that my Acme salary review is in June");
+    await recordFrom(PERSONAL, "以后用中文回答");
+    await recordFrom(IN_ACME, ACME_NOTE);
+
+    assert.deepEqual(
+      store.rows.map(({ category, personal, workspaceId }) => [category, workspaceId, personal === true]),
+      [
+        ["note", "", true],
+        ["preference", "", false],
+        ["note", "client-acme", false],
+      ]
+    );
+    assert.deepEqual(
+      store.calls.filter(([kind]) => kind === "remember").map(([, args]) => [args.workspaceId, args.personal]),
+      [
+        ["", true],
+        ["", undefined],
+        ["client-acme", undefined],
+      ],
+      "only the personal scope's free text is marked; the preference stays user-level"
+    );
+
+    const salary = "When is my Acme salary review?";
+    const inAcme = await contextFor(IN_ACME, salary);
+    const inGlobex = await contextFor(IN_GLOBEX, salary);
+    const personal = await contextFor(PERSONAL, salary);
+
+    assert.doesNotMatch(inAcme.answerBlock, /salary/);
+    assert.doesNotMatch(inGlobex.answerBlock, /salary/);
+    assert.deepEqual(inGlobex.memories.map((memory) => memory.category), ["preference"]);
+    assert.match(personal.answerBlock, /salary review is in June/);
+    assert.match(personal.answerBlock, /Reply language: Chinese\./);
+    assert.doesNotMatch(personal.answerBlock, /acquisition/, "a workspace's note stays out of the personal scope");
+
+    // A clear in a workspace takes its rows and the user-level preference,
+    // never the personal note; a delete there cannot reach it either.
+    const note = store.rows.find((row) => row.personal === true);
+
+    assert.equal(await deleteLongMemory({ accessScope: IN_ACME, memoryId: note.memoryId, userId: "ann" }), null);
+    assert.equal(await clearLongMemories({ accessScope: IN_ACME, userId: "ann" }), 2);
+    assert.deepEqual(store.rows.map((row) => row.memoryId), [note.memoryId]);
+    assert.equal(await clearLongMemories({ accessScope: PERSONAL, userId: "ann" }), 1);
   });
 
   test("a user-level row holds a fixed preference value and its fixed text only", async () => {
@@ -322,8 +381,27 @@ describe("LONG_MEMORY_SCOPE=workspace", () => {
     await remember({ category: "note", memoryKey: "answer_style", memoryValue: "concise", text: "a note" });
     await remember({ category: "custom", text: "free text" });
 
+    // The user-level row (read in every workspace) also records a fixed
+    // source and confidence, never the caller's (POST /memory takes both).
+    await remember({
+      category: "preference",
+      confidence: 0.25,
+      memoryKey: "answer_style",
+      memoryValue: "concise",
+      source: "Acme's counsel is Jane Roe",
+      text: "t",
+    });
+    await remember({ category: "note", confidence: 0.5, source: "acme-import", text: "kept as written" });
+
     assert.deepEqual(
-      store.calls.map(([, args]) => [args.memoryKey ?? null, args.workspaceId, args.text]),
+      store.calls.slice(-2).map(([, args]) => [args.workspaceId, args.source, args.confidence, args.text]),
+      [
+        ["", "user_explicit", 1, "Keep answers concise by default."],
+        ["client-acme", "acme-import", 0.5, "kept as written"],
+      ]
+    );
+    assert.deepEqual(
+      store.calls.slice(0, -2).map(([, args]) => [args.memoryKey ?? null, args.workspaceId, args.text]),
       [
         ["reply_language", "", "Reply in Chinese by default."],
         ["reply_language", "client-acme", "fr text"],

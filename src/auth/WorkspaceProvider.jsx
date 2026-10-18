@@ -32,13 +32,22 @@ import {
 // - A remembered choice (localStorage) is used only when /auth/me still lists
 //   it; until that is known the app waits, so its first requests already go
 //   to the right workspace. One that is no longer listed is forgotten.
+// - When the server requires a workspace (/auth/me `workspaceRequired`,
+//   API_AUTH_REQUIRE_WORKSPACE) acting in none is not offered, and without a
+//   valid remembered choice the first listed workspace is selected (and
+//   remembered, so the next load waits for it).
 // - Switching unmounts the app first, then points every request at the new
 //   workspace (src/config.js), starts a new chat session id, refreshes the
 //   OIDC permissions for that workspace, and mounts the app again: documents
 //   are listed afresh and no conversation, preview or task of the previous
 //   workspace survives on screen.
 
-const HIDDEN_CHOICE = Object.freeze({ options: Object.freeze([]), personal: false, switchable: false });
+const HIDDEN_CHOICE = Object.freeze({
+  fallback: "",
+  options: Object.freeze([]),
+  personal: false,
+  switchable: false,
+});
 
 const DEFAULT_WORKSPACE = Object.freeze({
   choice: HIDDEN_CHOICE,
@@ -111,12 +120,16 @@ export const WorkspaceProvider = ({
       }
 
       const choice = me ? describeWorkspaceChoice(me) : HIDDEN_CHOICE;
-      const selected = choice.switchable && choice.options.includes(stored) ? stored : "";
+      // Without a valid remembered choice: no workspace, as before, unless
+      // the server requires one (workspaceRequired), then the first listed.
+      const selected = choice.switchable && choice.options.includes(stored) ? stored : choice.fallback;
 
       // Forgotten only on an answer that no longer lists it; an unreachable
-      // /auth/me keeps it for the next load.
-      if (stored && !selected && me) {
-        writeStoredWorkspaceId("");
+      // /auth/me keeps it for the next load. A required workspace picked for
+      // the tab is remembered, so the next load waits for it before the app's
+      // first request instead of starting in no workspace.
+      if (me && stored !== selected) {
+        writeStoredWorkspaceId(selected);
       }
 
       setActiveWorkspaceId(selected);

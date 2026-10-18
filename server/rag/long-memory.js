@@ -39,16 +39,29 @@ const PUBLIC_MEMORY_CATEGORIES = Object.freeze(["preference", "note"]);
 // and so stay visible in every workspace until the user deletes or clears
 // them.
 //
+// The personal scope (a user-only tenant: a user acting in no workspace) is a
+// tenant of its own too. Its free text is stored with workspace_id '' and
+// `personal` TRUE (migration 046), which no workspace reads: a read in W sees
+// W's rows and the user-level rows that are not personal; a read in the
+// personal scope sees the user-level rows and the personal ones. Without the
+// flag such a note had the user-level marker and was recalled in every
+// workspace, and a clear in any workspace deleted it.
+//
 // The workspace is the conversation memory tenant's
 // (rag/conversation-memory-tenant.js, the derivation session memory keys on):
 // the caller's access scope, else the active database tenant; '' when that
-// tenant has no workspace, and also with auth off, where every row stays
-// user-level as before. Under the default `user` scope none of this applies:
-// the store calls, their SQL and the stored rows are those of before 045.
+// tenant has no workspace (the personal scope), and also with auth off, where
+// there is no tenant and every row stays user-level, not personal, as before.
+// Under the default `user` scope none of this applies: the store calls, their
+// SQL and the stored rows are those of before 045.
 const USER_LEVEL_PREFERENCE_VALUES = new Map([
   ["reply_language", Object.freeze(["zh", "en"])],
   ["answer_style", Object.freeze(["concise", "detailed"])],
 ]);
+
+// What a user-level preference row records as its origin, whoever wrote it.
+const USER_LEVEL_PREFERENCE_SOURCE = "user_explicit";
+const USER_LEVEL_PREFERENCE_CONFIDENCE = 1;
 
 const isUserLevelPreference = ({ category, memoryKey, memoryValue } = {}) =>
   String(category ?? "").trim() === "preference" &&
@@ -66,6 +79,15 @@ export const resolveLongMemoryWorkspace = (accessScope = null) =>
   isLongMemoryWorkspaceScoped()
     ? resolveConversationMemoryTenant(accessScope)?.workspaceId ?? ""
     : null;
+
+// Whether a free-text write under LONG_MEMORY_SCOPE=workspace lands in the
+// personal scope: a tenant that names no workspace. Auth off has no tenant,
+// and its rows stay user-level as before.
+const isPersonalScope = (accessScope) => {
+  const tenant = resolveConversationMemoryTenant(accessScope);
+
+  return tenant !== null && !tenant.workspaceId;
+};
 
 // The store arguments a workspace adds: nothing under the `user` scope, so a
 // store sees exactly the calls it saw before LONG_MEMORY_SCOPE existed.
@@ -174,9 +196,11 @@ const mapRowToMemory = (row) => ({
 const MEMORY_COLUMNS = `memory_id, user_id, category, memory_key, memory_value, text, source,
           confidence, created_at, updated_at, last_used_at`;
 
-// A read in workspace $n: the workspace's rows and the user-level rows.
+// A read in workspace $n: the workspace's rows and the user-level rows that
+// are not personal; in the personal scope ($n = '') every row of no
+// workspace, the personal ones included (migration 046's policy).
 const visibleInWorkspace = (placeholder) =>
-  `(workspace_id = '' OR workspace_id = ${placeholder})`;
+  `(workspace_id = ${placeholder} OR (workspace_id = '' AND NOT personal))`;
 
 const buildPreferenceMemoryText = (memoryKey, memoryValue) => {
   if (memoryKey === "reply_language" && memoryValue === "zh") {
@@ -199,13 +223,17 @@ const buildPreferenceMemoryText = (memoryKey, memoryValue) => {
 };
 
 // remember() under LONG_MEMORY_SCOPE=workspace: the same dedupe and upsert,
-// within the row's workspace. The tenant_isolation policy (migration 045)
-// refuses a tenant's row for a workspace other than its own or ''.
+// within the row's workspace and personal flag (a personal note never merges
+// into a user-level row of the same text, nor the other way round). The
+// tenant_isolation policy (migration 046) refuses a tenant's row for a
+// workspace other than its own, and a personal row outside the personal
+// scope.
 const rememberInWorkspace = async ({
   category,
   confidence,
   memoryKey,
   memoryValue,
+  personal,
   source,
   tableName,
   text,
@@ -221,6 +249,7 @@ const rememberInWorkspace = async ({
             AND category = $2
             AND memory_key = $3
             AND workspace_id = $4
+            AND personal = $5
             AND archived = FALSE
           LIMIT 1
         `
@@ -231,10 +260,11 @@ const rememberInWorkspace = async ({
             AND category = $2
             AND text = $3
             AND workspace_id = $4
+            AND personal = $5
             AND archived = FALSE
           LIMIT 1
         `,
-    [userId, category, memoryKey ?? text, workspaceId]
+    [userId, category, memoryKey ?? text, workspaceId, personal]
   );
 
   if (existing.rows[0]?.memory_id) {
@@ -247,10 +277,10 @@ const rememberInWorkspace = async ({
             confidence = $5,
             archived = FALSE,
             updated_at = NOW()
-        WHERE memory_id = $1 AND workspace_id = $6
+        WHERE memory_id = $1 AND workspace_id = $6 AND personal = $7
         RETURNING ${MEMORY_COLUMNS}, workspace_id
       `,
-      [String(existing.rows[0].memory_id), text, memoryValue, source, confidence, workspaceId]
+      [String(existing.rows[0].memory_id), text, memoryValue, source, confidence, workspaceId, personal]
     );
 
     return updated.rows[0] ? mapRowToMemory(updated.rows[0]) : null;
@@ -267,12 +297,13 @@ const rememberInWorkspace = async ({
         text,
         source,
         confidence,
-        workspace_id
+        workspace_id,
+        personal
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING ${MEMORY_COLUMNS}, workspace_id
     `,
-    [randomUUID(), userId, category, memoryKey, memoryValue, text, source, confidence, workspaceId]
+    [randomUUID(), userId, category, memoryKey, memoryValue, text, source, confidence, workspaceId, personal]
   );
 
   return mapRowToMemory(inserted.rows[0]);
@@ -367,8 +398,11 @@ const createDefaultStore = () => ({
     source = "user_explicit",
     confidence = 1,
     // A string under LONG_MEMORY_SCOPE=workspace only: the row's workspace
-    // ('' = user-level), decided by rememberLongMemory.
+    // ('' = no workspace), decided by rememberLongMemory, with `personal`
+    // (migration 046) true for a free-text row of the personal scope and
+    // absent or false for a user-level row.
     workspaceId,
+    personal = false,
   }) {
     const normalizedUserId = ensureUserId(userId);
     const normalizedText = normalizeMemoryText(text);
@@ -390,16 +424,20 @@ const createDefaultStore = () => ({
     const tableName = ensureTableName();
 
     if (isWorkspaceArgument(workspaceId)) {
+      const rowWorkspaceId = workspaceId.trim();
+
       return rememberInWorkspace({
         category: normalizedCategory,
         confidence: normalizedConfidence,
         memoryKey: normalizedKey,
         memoryValue: normalizedValue,
+        // Only a row of no workspace can be personal (the table's check).
+        personal: personal === true && rowWorkspaceId === "",
         source: normalizedSource,
         tableName,
         text: normalizedText,
         userId: normalizedUserId,
-        workspaceId: workspaceId.trim(),
+        workspaceId: rowWorkspaceId,
       });
     }
 
@@ -592,12 +630,15 @@ const createDefaultStore = () => ({
   // The tenant erase and export (rag/tenant-records.js): every category and
   // archived row, whatever RAG_LONG_MEMORY_ENABLED says now (a memory written
   // while it was on is still the user's). Under LONG_MEMORY_SCOPE=user the
-  // memory belongs to the user in every workspace, so only a selector that
-  // names a user reaches it, and then every row of that user. Under
+  // memory belongs to the user in every workspace, so a selector that names a
+  // user takes every row of that user, and a workspace selector the rows that
+  // carry the workspace (written while the scope was `workspace`; rows
+  // written under `user` all have '', so it finds none of those). Under
   // `workspace` a row is matched on its (user, workspace_id) pair like every
   // other tenant table: a workspace selector takes the workspace's rows of
   // every user, a user in a workspace that pair's rows, and a user outside
-  // any workspace that user's user-level rows (workspace_id '').
+  // any workspace that user's rows of no workspace (workspace_id '': the
+  // user-level rows and the personal ones).
   ...createPostgresTenantRecordMethods({
     initialize: () => runPostgresMigrations(),
     query: queryLongMemoryPostgres,
@@ -614,7 +655,7 @@ const createDefaultStore = () => ({
             name: "long_memory",
             table: ensureTableName(),
             userColumn: "user_id",
-            userOnly: true,
+            userWide: true,
           },
     ],
   }),
@@ -641,13 +682,14 @@ export const getLongMemoryTenantRecordStore = () => {
 };
 
 /**
- * Whether a tenant erase or export selector reaches long-term memory: under
- * LONG_MEMORY_SCOPE=user only a selector that names a user; under `workspace`
- * every selector, a workspace-wide one included (see the tenant record
+ * Whether a tenant erase or export selector reaches long-term memory: every
+ * selector in both scopes. Under LONG_MEMORY_SCOPE=user a workspace-wide one
+ * finds only the rows that carry the workspace, written while the scope was
+ * `workspace`; before, it skipped long memory, and members' notes of an
+ * erased workspace survived a switch back to `user` (see the tenant record
  * methods of the default store).
  */
-export const longMemoryAppliesToTenantSelector = (selector) =>
-  selector.userId !== null || isLongMemoryWorkspaceScoped();
+export const longMemoryAppliesToTenantSelector = (selector) => Boolean(selector);
 
 const addCandidate = (candidates, candidate) => {
   if (!candidate?.text) {
@@ -849,18 +891,28 @@ export const rememberLongMemory = async ({ accessScope = null, ...input } = {}) 
   }
 
   if (!isUserLevelPreference(input)) {
-    return store.remember({ ...input, workspaceId });
+    // Free text stays in its workspace; in the personal scope (no workspace)
+    // it is marked personal, so no workspace reads it (migration 046).
+    return store.remember(
+      workspaceId === "" && isPersonalScope(accessScope)
+        ? { ...input, personal: true, workspaceId }
+        : { ...input, workspaceId }
+    );
   }
 
-  // A user-level row keeps only the preference's fixed value and its fixed
-  // text, never text the caller wrote (POST /memory takes any text).
+  // A user-level row is read in every workspace of the user, so it keeps only
+  // the preference's fixed value, its fixed text and a fixed source and
+  // confidence, never anything the caller wrote (POST /memory takes any text,
+  // source and confidence).
   const memoryKey = String(input.memoryKey).trim();
   const memoryValue = String(input.memoryValue).trim();
 
   return store.remember({
     ...input,
+    confidence: USER_LEVEL_PREFERENCE_CONFIDENCE,
     memoryKey,
     memoryValue,
+    source: USER_LEVEL_PREFERENCE_SOURCE,
     text: buildPreferenceMemoryText(memoryKey, memoryValue),
     workspaceId: "",
   });

@@ -102,6 +102,10 @@ export const TENANT_REGISTRY_LIST_DEFAULT_LIMIT = 100;
 export const TENANT_REGISTRY_LIST_MAX_LIMIT = 1000;
 const MAX_LIST_OFFSET = 1_000_000;
 const MAX_CACHE_ENTRIES = 10_000;
+// GET /auth/me's registry memberships (listMemberWorkspaces): the most it
+// lists for one user, and how many workspace lookups it has in flight at once.
+export const MAX_MEMBER_WORKSPACES = TENANT_REGISTRY_LIST_MAX_LIMIT;
+const MEMBER_WORKSPACE_LOOKUP_BATCH = 16;
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const ROLE_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,63}$/u;
@@ -287,9 +291,24 @@ export const normalizeListOptions = ({ limit, offset } = {}) => ({
   offset: toBoundedInteger(offset, { fallback: 0, max: MAX_LIST_OFFSET, min: 0 }),
 });
 
+// A new workspace's id: printable ASCII only. Clients name the workspace in
+// the x-workspace-id header, and a header value is a ByteString: a browser
+// cannot send an id with a character above U+00FF at all (fetch and XHR throw
+// before the request, so the SPA could not act in it), and Node reads header
+// bytes as Latin-1, so a UTF-8 id sent by any other client arrives as another
+// string than the one registered. Checked at creation only: ids registered
+// before keep working wherever they are looked up.
+const REGISTRABLE_WORKSPACE_ID = /^[ -~]+$/u;
+
 export const normalizeWorkspaceInput = (input = {}) => {
   if (!isPlainObject(input)) {
     throw invalid("The workspace must be a JSON object.");
+  }
+
+  const workspaceId = normalizeWorkspaceIdInput(input.workspaceId);
+
+  if (!REGISTRABLE_WORKSPACE_ID.test(workspaceId)) {
+    throw invalid("workspaceId must be printable ASCII: it travels in the x-workspace-id header.");
   }
 
   return {
@@ -302,7 +321,7 @@ export const normalizeWorkspaceInput = (input = {}) => {
         : normalizeStatusInput(input.status, {
             allowed: [WORKSPACE_STATUSES.active, WORKSPACE_STATUSES.suspended],
           }),
-    workspaceId: normalizeWorkspaceIdInput(input.workspaceId),
+    workspaceId,
   };
 };
 
@@ -430,6 +449,14 @@ export const createInMemoryTenantRegistryStore = ({ now = () => Date.now() } = {
         .filter((member) => member.workspaceId === workspaceId)
         .sort((left, right) => compareText(left.userId, right.userId))
         .slice(offset, offset + limit)
+        .map(copy);
+    },
+
+    async listUserMemberships({ limit, userId }) {
+      return [...members.values()]
+        .filter((member) => member.userId === userId)
+        .sort((left, right) => compareText(left.workspaceId, right.workspaceId))
+        .slice(0, limit)
         .map(copy);
     },
 
@@ -736,6 +763,27 @@ export const createPostgresTenantRegistryStore = ({
       return (result.rows ?? []).map(mapMemberRow);
     },
 
+    // One user's memberships in every workspace. The registry service reads
+    // it bound to that user without a workspace, which migration 036's
+    // membership policy admits for exactly that user's rows (and its
+    // (user_id, workspace_id) index serves).
+    async listUserMemberships({ limit, userId }) {
+      await initialize();
+
+      const result = await query(
+        `
+          SELECT ${MEMBER_COLUMNS}
+          FROM ${workspaceMembersTable}
+          WHERE user_id = $1
+          ORDER BY workspace_id COLLATE "C"
+          LIMIT $2
+        `,
+        [userId, limit]
+      );
+
+      return (result.rows ?? []).map(mapMemberRow);
+    },
+
     async upsertMember({ roles, userId, workspaceId }) {
       await initialize();
 
@@ -990,6 +1038,52 @@ export const createTenantRegistryService = ({
           return member ? { roles: [...member.roles] } : null;
         })
       );
+    },
+
+    /**
+     * The workspaces `userId` may act in under TENANT_MEMBERSHIP=enforce:
+     * its memberships (at most MAX_MEMBER_WORKSPACES, in id order) of
+     * workspaces that are active, for GET /auth/me (routes/auth-me.js). The
+     * memberships are read bound to that user without a workspace (migration
+     * 036's membership policy shows exactly that user's rows), each status
+     * through lookupWorkspace (cached, bound to the workspace), so nothing is
+     * read as the system. A store without the call lists nothing. A fault
+     * rejects with TENANT_REGISTRY_UNAVAILABLE (503).
+     */
+    async listMemberWorkspaces(rawUserId) {
+      const userId = normalizeUserIdInput(rawUserId);
+
+      if (typeof store.listUserMemberships !== "function") {
+        return [];
+      }
+
+      try {
+        const memberships = await runWithDatabaseTenant({ userId, workspaceId: "" }, () =>
+          store.listUserMemberships({ limit: MAX_MEMBER_WORKSPACES, userId })
+        );
+        const workspaceIds = [];
+
+        for (let index = 0; index < memberships.length; index += MEMBER_WORKSPACE_LOOKUP_BATCH) {
+          const batch = memberships.slice(index, index + MEMBER_WORKSPACE_LOOKUP_BATCH);
+          const workspaces = await Promise.all(
+            batch.map((member) => this.lookupWorkspace(member.workspaceId, { forUserId: userId }))
+          );
+
+          batch.forEach((member, position) => {
+            if (workspaces[position]?.status === WORKSPACE_STATUSES.active) {
+              workspaceIds.push(member.workspaceId);
+            }
+          });
+        }
+
+        return workspaceIds;
+      } catch (error) {
+        console.error("Tenant registry lookup failed; listing no memberships.", error);
+        throw new TenantRegistryError(MEMBERSHIP_MESSAGES[TENANT_MEMBERSHIP_CODES.registryUnavailable], {
+          code: TENANT_REGISTRY_ERROR_CODES.unavailable,
+          status: 503,
+        });
+      }
     },
 
     async getWorkspace(rawWorkspaceId) {
@@ -1289,6 +1383,49 @@ export const decideTenantMembership = async ({
     console.error("Tenant registry lookup failed; refusing the request.", error);
     return refuse(TENANT_MEMBERSHIP_CODES.registryUnavailable, 503);
   }
+};
+
+// The refusals decideTenantMembership (and resolveMembershipScope) make only
+// once the requester is shown to belong to the registered workspace it named:
+// a user's membership row was found first (suspended; the roles bound, which
+// only a membership's roles can exceed), or, without a user, the workspace is
+// the credential's own and registered (suspended). WORKSPACE_DELETING is
+// decided the same way but is left out: the tenant erase clears the ledger
+// before the registry, so a row under the workspace would bring its id back
+// into the ledger the erase had just cleared. Every other refusal
+// (WORKSPACE_MEMBERSHIP_REQUIRED, WORKSPACE_NOT_REGISTERED,
+// TENANT_REGISTRY_UNAVAILABLE) is decided before or without that, for a
+// workspace id the client may have chosen.
+const REFUSALS_CHARGED_TO_THE_WORKSPACE = new Set([
+  TENANT_MEMBERSHIP_CODES.rolesLimitExceeded,
+  TENANT_MEMBERSHIP_CODES.workspaceSuspended,
+]);
+
+/**
+ * The tenant a membership refusal is charged to in the usage ledger
+ * (requireApiAuth's resolveRefusalLedgerScope, which also checks the registry
+ * still holds the workspace), or null when it goes to the metric only.
+ *
+ * - A requester shown to belong to the workspace (above): the scope's own
+ *   (user, workspace) pair, so the workspace's operator sees its members
+ *   knocking on a suspended workspace.
+ * - Anyone else may name a workspace id the client chose. Charging it to
+ *   that pair let one credential create a permanent ledger row per probed id
+ *   (x-workspace-id: probe-<n>), and put a non-member's user id into the
+ *   named workspace's usage view and export (and into its erase), registered
+ *   or not. Such a refusal is charged to the requester's own user-level
+ *   tenant (userId, ''), one row per code and hour however many ids it
+ *   tries, and, without a user, to nothing (the metric still counts it).
+ */
+export const resolveMembershipRefusalTenant = (accessScope = {}, decision = {}) => {
+  const userId = String(accessScope?.userId ?? "").trim();
+  const workspaceId = String(accessScope?.workspaceId ?? "").trim();
+
+  if (REFUSALS_CHARGED_TO_THE_WORKSPACE.has(decision?.code) && workspaceId) {
+    return { userId, workspaceId };
+  }
+
+  return userId ? { userId, workspaceId: "" } : null;
 };
 
 /**

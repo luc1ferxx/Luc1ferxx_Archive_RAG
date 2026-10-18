@@ -13,10 +13,12 @@
 // looser document visibility rule (documentMatchesAccessScope), under which
 // ann in acme also sees the workspace's shared documents and her personal ones.
 // Long-term memory under LONG_MEMORY_SCOPE=user (the default) belongs to the
-// user in every workspace and is covered only by a selector that names a user
-// (userOnly below); under `workspace` its rows carry a workspace (migration
-// 045) and match like any other table, user-level rows (workspace '') only by
-// a selector of the user outside any workspace.
+// user in every workspace: a selector that names a user takes every row of
+// the user, and a workspace-wide one only the rows that carry the workspace
+// (written while the scope was `workspace`; userWide below). Under
+// `workspace` its rows carry a workspace (migration 045) and match like any
+// other table, rows of no workspace (user-level and personal, migration 046)
+// only by a selector of the user outside any workspace.
 //
 // Every store that keeps tenant records offers the same three calls:
 //   countTenantRecords(selector)   -> { [table]: { records, active? } }
@@ -203,9 +205,14 @@ const DEFAULT_PAGE_SIZE = 200;
  *
  * - `name` is the report key (TENANT_ACTIVE_STATUSES names the ones with an
  *   `active` count, read from their `status` column).
- * - `userOnly` (long-term memory under LONG_MEMORY_SCOPE=user): matched on
- *   the user alone, whatever its workspace column holds, and skipped by a
- *   workspace-wide selector.
+ * - `userOnly`: matched on the user alone, whatever its workspace column
+ *   holds, and skipped by a workspace-wide selector.
+ * - `userWide` (long-term memory under LONG_MEMORY_SCOPE=user): a selector
+ *   that names a user matches on the user alone, as `userOnly` does; a
+ *   workspace-wide selector matches the workspace column like any table, so
+ *   rows that carry the workspace (written while LONG_MEMORY_SCOPE was
+ *   `workspace`) go with a workspace erase. Its export reads the user's rows
+ *   per workspace they carry, each bound to that (user, workspace) tenant.
  * - `workspaceOnly` (the tenant registry's workspace rows): the table has no
  *   user column (`userColumn` is not needed); it is matched on the workspace
  *   alone and skipped by every selector that names a user. Its pages are
@@ -237,6 +244,7 @@ export const createPostgresTenantRecordMethods = ({
       mapRow: (row) => row,
       pageSize: DEFAULT_PAGE_SIZE,
       userOnly: false,
+      userWide: false,
       workspaceColumn: "workspace_id",
       workspaceOnly: false,
       ...spec,
@@ -264,6 +272,11 @@ export const createPostgresTenantRecordMethods = ({
   // The selector as SQL over one table, its values appended to `values`.
   const buildWhere = (spec, selector, values) => {
     const clauses = [];
+
+    if (spec.userWide && selector.userId !== null) {
+      values.push(selector.userId);
+      return `${spec.userColumn} = $${values.length}`;
+    }
 
     if (!spec.userOnly) {
       values.push(selector.workspaceId);
@@ -313,6 +326,23 @@ export const createPostgresTenantRecordMethods = ({
       return [{ userId: "", workspaceId: selector.workspaceId }];
     }
 
+    if (selector.userId !== null && spec.userWide) {
+      // Every row of the user, each page read as the tenant its row belongs
+      // to, so the policy of every workspace (and of the personal scope)
+      // admits it: the distinct workspaces of the user's rows, as the system.
+      const result = await runAsDatabaseSystem(() =>
+        query(
+          `SELECT DISTINCT ${spec.workspaceColumn} AS workspace_id FROM ${spec.table} WHERE ${spec.userColumn} = $1 ORDER BY 1`,
+          [selector.userId]
+        )
+      );
+
+      return (result?.rows ?? []).map((row) => ({
+        userId: selector.userId,
+        workspaceId: String(row.workspace_id ?? ""),
+      }));
+    }
+
     if (selector.userId !== null) {
       return [{ userId: selector.userId, workspaceId: selector.workspaceId }];
     }
@@ -331,13 +361,17 @@ export const createPostgresTenantRecordMethods = ({
   };
 
   async function* iterateTable(spec, selector) {
+    // The pages of a `userWide` table are read per (user, workspace) pair
+    // (listPairs), each with that pair's WHERE.
+    const pageSpec = spec.userWide ? { ...spec, userWide: false } : spec;
+
     for (const pair of await listPairs(spec, selector)) {
       const pairSelector = { userId: pair.userId, workspaceId: pair.workspaceId };
       let after = null;
 
       for (;;) {
         const values = [];
-        let where = buildWhere(spec, pairSelector, values);
+        let where = buildWhere(pageSpec, pairSelector, values);
 
         if (after && spec.keyColumns.length > 0) {
           const placeholders = after.map((value) => {
