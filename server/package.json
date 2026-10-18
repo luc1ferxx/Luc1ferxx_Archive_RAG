@@ -18,6 +18,7 @@
     "vector:reindex": "node vector-reindex.mjs",
     "vector:index": "node vector-index.mjs",
     "vector:sparse-length": "node sparse-length-backfill.mjs",
+    "pdf:route": "node pdf-route.mjs",
     "ingest:jobs": "node ingest-jobs.mjs",
     "tenant:erase": "node tenant-lifecycle.mjs erase",
     "tenant:export": "node tenant-lifecycle.mjs export",

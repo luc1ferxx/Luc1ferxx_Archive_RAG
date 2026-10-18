@@ -18,7 +18,13 @@
 // --parsers <base>,<variant> picks the two arms (default pdfjs,docling; the
 // delta is variant minus base). pdfjs is the legacy pdf.js text with paragraph
 // detection forced off; pdfjs-paragraphs is pdf.js with PDF_PARAGRAPH_DETECTION
-// forced on (pdf-paragraphs.js), which needs no docling-serve.
+// forced on (pdf-paragraphs.js), which needs no docling-serve; auto is what
+// PDF_PARSER=auto ingests (pdf-auto-parser.js): pdf.js under the configured
+// PDF_PARAGRAPH_DETECTION for every page, Docling's text for the pages the
+// router sends to docling-serve under the PDF_AUTO_* and DOCLING_* settings.
+// With auto in the pair the report adds `routing.auto`: pages per route,
+// Docling pages and fallbacks, in total and per paper, from each document's
+// routing report (codes and counts only).
 //
 // Usage (docling-serve running, a real chat model and embeddings):
 //   DOCLING_SERVE_URL=http://127.0.0.1:5010 OPENAI_BASE_URL=http://127.0.0.1:11434/v1 \
@@ -26,7 +32,8 @@
 //   RAG_EMBEDDING_DIMENSIONS=768 node evaluation/run-layout-parsing-eval.mjs
 //     [--qasper evaluation/generated/qasper/qasper-dev-v0.3.json]
 //     [--pdf-dir evaluation/generated/qasper-pdfs] [--papers 30]
-//     [--parsers pdfjs,docling] [--concurrency 1] [--latest-name latest-layout-parsing]
+//     [--parsers pdfjs,docling|pdfjs-paragraphs,auto|...] [--concurrency 1]
+//     [--latest-name latest-layout-parsing]
 // PDFs are https://arxiv.org/pdf/<paper id>, downloaded beforehand.
 
 import "dotenv/config";
@@ -40,8 +47,15 @@ import { normalizeQasperAnswer, qasperAnswerF1, toQasperPrediction } from "./qas
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
 const DEFAULT_PARSERS = Object.freeze(["pdfjs", "docling"]);
-const KNOWN_PARSERS = Object.freeze(["pdfjs", "docling", "pdfjs-paragraphs"]);
-const PARSER_LABELS = Object.freeze({ docling: "Docling", pdfjs: "pdf.js", "pdfjs-paragraphs": "pdf.js + paragraphs" });
+const KNOWN_PARSERS = Object.freeze(["pdfjs", "docling", "pdfjs-paragraphs", "auto"]);
+const PARSER_LABELS = Object.freeze({
+  auto: "auto (pdf.js + Docling pages)",
+  docling: "Docling",
+  pdfjs: "pdf.js",
+  "pdfjs-paragraphs": "pdf.js + paragraphs",
+});
+const PAGE_ROUTES = Object.freeze(["text", "layout", "ocr"]);
+const AUTO_FALLBACKS = Object.freeze(["docling_empty", "docling_failed"]);
 const METRICS = Object.freeze(["f1", "inDocument", "inContext"]);
 
 /** `--parsers base,variant`: exactly two distinct known parsers; the delta is variant minus base. */
@@ -60,6 +74,59 @@ export const parseParserPair = (value) => {
   }
 
   return parsers;
+};
+
+/**
+ * Each arm as `filePath -> { pages, routing }`; routing is the auto arm's
+ * routing report and null for the others. `deps` are the loaders (the eval
+ * passes the real ones) and an optional `fetchImpl` for docling-serve.
+ */
+export const createLayoutParsers = ({ fetchImpl, loadPdfDocument, loadPdfPagesWithDocling, loadPdfPagesWithRouting }) => ({
+  auto: async (filePath) => loadPdfPagesWithRouting(filePath, { fetchImpl }),
+  docling: async (filePath) => ({ pages: await loadPdfPagesWithDocling(filePath, { fetchImpl }), routing: null }),
+  pdfjs: async (filePath) => ({ pages: (await loadPdfDocument(filePath, { paragraphDetection: false })).pages, routing: null }),
+  "pdfjs-paragraphs": async (filePath) => ({
+    pages: (await loadPdfDocument(filePath, { paragraphDetection: true })).pages,
+    routing: null,
+  }),
+});
+
+const countAutoRouting = (routing) => {
+  const routes = routing?.routes ?? [];
+
+  return {
+    pageCount: routing?.pageCount ?? routes.length,
+    pagesByRoute: Object.fromEntries(PAGE_ROUTES.map((route) => [route, routes.filter((entry) => entry.route === route).length])),
+    doclingPages: routes.filter((entry) => entry.parser === "docling").length,
+    fallbackPages: Object.fromEntries(
+      AUTO_FALLBACKS.map((reason) => [reason, routes.filter((entry) => entry.fallback === reason).length])
+    ),
+    doclingRequests: routing?.batches?.length ?? 0,
+    failedRequests: (routing?.batches ?? []).filter((batch) => batch.outcome !== "ok").length,
+  };
+};
+
+/**
+ * The auto arm's routing over the papers it parsed: `entries` are
+ * `{ paperId, routing }` (loadPdfPagesWithRouting reports). Pages per route
+ * (the router's choice), Docling pages (pages whose text is Docling's),
+ * fallback pages, docling-serve requests and failed ones, in total and per
+ * paper. Codes and counts only.
+ */
+export const summarizeAutoRouting = (entries) => {
+  const papers = entries.map(({ paperId, routing }) => ({ paperId, ...countAutoRouting(routing) }));
+  const sum = (read) => papers.reduce((total, paper) => total + read(paper), 0);
+
+  return {
+    documents: papers.length,
+    pages: sum((paper) => paper.pageCount),
+    pagesByRoute: Object.fromEntries(PAGE_ROUTES.map((route) => [route, sum((paper) => paper.pagesByRoute[route])])),
+    doclingPages: sum((paper) => paper.doclingPages),
+    fallbackPages: Object.fromEntries(AUTO_FALLBACKS.map((reason) => [reason, sum((paper) => paper.fallbackPages[reason])])),
+    doclingRequests: sum((paper) => paper.doclingRequests),
+    failedRequests: sum((paper) => paper.failedRequests),
+    papers,
+  };
 };
 
 const isTableEvidence = (qa) =>
@@ -159,7 +226,12 @@ const summarize = (rows, parsers = DEFAULT_PARSERS) => {
   );
 };
 
-const formatMarkdown = (report) => {
+const formatAutoRouting = (auto) =>
+  `Auto routing: ${auto.pages} pages of ${auto.documents} papers, ${PAGE_ROUTES.map((route) => `${route} ${auto.pagesByRoute[route]}`).join(", ")}; ` +
+  `Docling pages ${auto.doclingPages} (${AUTO_FALLBACKS.map((reason) => `${reason} ${auto.fallbackPages[reason]}`).join(", ")}); ` +
+  `docling-serve requests ${auto.doclingRequests}, ${auto.failedRequests} failed.`;
+
+export const formatMarkdown = (report) => {
   const [base, variant] = report.config.parsers ?? DEFAULT_PARSERS;
   const label = (parser) => PARSER_LABELS[parser] ?? parser;
   const section = (title, group) => [
@@ -179,6 +251,7 @@ const formatMarkdown = (report) => {
     "",
     `Generated ${report.generatedAt}; ${report.config.papers} papers (${report.config.failedPapers.length} failed to parse and were left out); chat model ${report.config.chatModel}; embedding ${report.config.embeddingModel}.`,
     `Parse time: ${label(base)} ${report.parseSeconds[base]}s, ${label(variant)} ${report.parseSeconds[variant]}s in total.`,
+    ...(report.routing?.auto ? [formatAutoRouting(report.routing.auto)] : []),
     "",
     "inDocument / inContext: a gold extractive span occurs in the parsed text / in the retrieved chunks (questions with extractive answers only). f1: official QASPER answer F1.",
     "",
@@ -216,13 +289,18 @@ const main = async () => {
   applyStandaloneProfile();
   const rag = await import("../chat.js");
   const { loadPdfDocument } = await import("../rag/pdf-loader.js");
+  const { isPdfParagraphDetectionEnabled } = await import("../rag/config.js");
+  const { resolvePdfAutoRoutingConfig } = await import("../rag/pdf-page-router.js");
   const { loadPdfPagesWithDocling } = await import("../rag/docling-parser.js");
-  const parseWith = {
-    docling: (filePath) => loadPdfPagesWithDocling(filePath),
-    pdfjs: async (filePath) => (await loadPdfDocument(filePath, { paragraphDetection: false })).pages,
-    "pdfjs-paragraphs": async (filePath) => (await loadPdfDocument(filePath, { paragraphDetection: true })).pages,
-  };
+  const { loadPdfPagesWithRouting } = await import("../rag/pdf-auto-parser.js");
+  const parseWith = createLayoutParsers({ loadPdfDocument, loadPdfPagesWithDocling, loadPdfPagesWithRouting });
+  // Read before any paper is parsed, so an invalid PDF_AUTO_* value stops the
+  // run here rather than failing every paper.
+  const autoSettings = parsers.includes("auto")
+    ? { paragraphDetection: isPdfParagraphDetectionEnabled(), thresholds: resolvePdfAutoRoutingConfig() }
+    : null;
   const parsedText = new Map();
+  const autoRouting = [];
   const parseSeconds = Object.fromEntries(parsers.map((parser) => [parser, 0]));
   const failedPapers = [];
   const rows = [];
@@ -239,17 +317,24 @@ const main = async () => {
       }
 
       const parsed = {};
+      const routing = {};
 
       try {
         for (const parser of parsers) {
           const started = Date.now();
+          const outcome = await parseWith[parser](filePath);
 
-          parsed[parser] = await parseWith[parser](filePath);
+          parsed[parser] = outcome.pages;
+          routing[parser] = outcome.routing;
           parseSeconds[parser] += (Date.now() - started) / 1000;
         }
       } catch (error) {
         failedPapers.push({ paperId, reason: error.message });
         continue;
+      }
+
+      if (routing.auto) {
+        autoRouting.push({ paperId, routing: routing.auto });
       }
 
       for (const parser of parsers) {
@@ -344,6 +429,7 @@ const main = async () => {
     control: group("control"),
     generatedAt: new Date().toISOString(),
     parseSeconds: Object.fromEntries(Object.entries(parseSeconds).map(([key, value]) => [key, Number(value.toFixed(1))])),
+    ...(autoSettings ? { routing: { auto: { ...autoSettings, ...summarizeAutoRouting(autoRouting) } } } : {}),
     reportType: "layout-parsing",
     rows,
     table: group("table"),
