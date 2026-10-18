@@ -87,6 +87,31 @@ export const getPdfParser = () => {
 export const isPdfParagraphDetectionEnabled = () =>
   toBoolean(process.env.PDF_PARAGRAPH_DETECTION, true);
 
+// pdf.js on a pool of worker_threads (pdf-parse-pool.js). 0 (default) parses
+// in the calling thread exactly as before; N > 0 splits a document into page
+// ranges of PDF_PARSE_PAGES_PER_TASK pages that up to N workers parse at once,
+// with the same page text byte for byte. Each worker holds its own pdf.js, so
+// N workers cost N times its memory.
+export const MAX_PDF_PARSE_WORKERS = 64;
+
+export const getPdfParseWorkers = () =>
+  Math.min(MAX_PDF_PARSE_WORKERS, Math.floor(toNonNegativeNumber(process.env.PDF_PARSE_WORKERS, 0)));
+
+export const getPdfParsePagesPerTask = () =>
+  Math.max(1, Math.floor(toPositiveNumber(process.env.PDF_PARSE_PAGES_PER_TASK, 32)));
+
+// Bounds one worker task (a page range); 0 = none. A task over the limit
+// terminates its worker. The in-process path has no timeout.
+const MAX_PDF_PARSE_TIMEOUT_MS = 2_147_483_647;
+
+export const getPdfParseTimeoutMs = () =>
+  Math.min(MAX_PDF_PARSE_TIMEOUT_MS, Math.floor(toNonNegativeNumber(process.env.PDF_PARSE_TIMEOUT_MS, 0)));
+
+// V8 old-space limit of each worker (resourceLimits.maxOldGenerationSizeMb);
+// 0 = Node's default. A worker over it fails its task and is replaced.
+export const getPdfParseWorkerMaxOldGenerationMb = () =>
+  Math.floor(toNonNegativeNumber(process.env.PDF_PARSE_WORKER_MAX_OLD_GENERATION_MB, 0));
+
 // docling-serve listens on 5001 inside its container, the backend's own
 // default port, so the documented local mapping is 5010.
 export const getDoclingServeUrl = () =>

@@ -1,156 +1,24 @@
 import path from "node:path";
-// Must stay above the pdfjs import: it installs globals that pdfjs reads while
-// evaluating its own module body, and sibling static imports run in source order.
-// Moving or sorting this line breaks single-file executable builds. See the file
-// itself for why pdfjs needs the help.
+// pdfjs is imported by pdf-page-extraction.js (through pdfjs-document.js),
+// which imports this shim right above it: the shim installs globals pdfjs
+// reads while evaluating its own module body, and sibling static imports run
+// in source order. It stays first here as well, so no import added below can
+// reach pdfjs ahead of it. Moving or sorting these lines breaks single-file
+// executable builds. See the file itself for why pdfjs needs the help.
 import "./pdf-runtime-shim.js";
-import {
-  getDocument,
-  version as pdfJsVersion,
-  VerbosityLevel,
-} from "pdfjs-dist/legacy/build/pdf.mjs";
-import {
-  getDoclingFallback,
-  getPdfParser,
-  isPdfParagraphDetectionEnabled,
-} from "./config.js";
+import { getDoclingFallback, getPdfParser } from "./config.js";
 import { loadPdfPagesWithDocling } from "./docling-parser.js";
-import {
-  buildHyphenationVocabulary,
-  buildPdfTextLines,
-  renderPdfParagraphText,
-} from "./pdf-paragraphs.js";
+import { parsePdfBytesWithPdfjs } from "./pdfjs-document.js";
 import { readWorkingFile } from "./working-files.js";
 
-const normalizePageText = (text = "") =>
-  String(text)
-    .replace(/\u0000/g, "")
-    .replace(/\r/g, "")
-    .replace(/-\n(?=[a-z])/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-const readPdfPageTextContent = (pageData) =>
-  pageData.getTextContent({
-    disableNormalization: false,
-  });
-
-const renderPdfPageText = async (pageData) => {
-  const textContent = await readPdfPageTextContent(pageData);
-  let text = "";
-  let lastY = null;
-
-  for (const item of textContent.items) {
-    const y = item.transform?.[5];
-    const value = item.str ?? "";
-
-    if (!value) {
-      continue;
-    }
-
-    if (lastY === null || lastY === y) {
-      text += value;
-    } else {
-      text += `\n${value}`;
-    }
-
-    lastY = y;
-  }
-
-  return text;
-};
-
-const resolvePageLimit = ({ maxPages, pageCount }) => {
-  if (maxPages === undefined || maxPages === null || maxPages === 0) {
-    return pageCount;
-  }
-
-  if (!Number.isInteger(maxPages) || maxPages < 0) {
-    throw new TypeError("maxPages must be a non-negative integer.");
-  }
-
-  return Math.min(maxPages, pageCount);
-};
-
-export const loadPdfDocument = async (
-  filePath,
-  {
-    maxPages = 0,
-    includeMetadata = false,
-    // PDF_PARAGRAPH_DETECTION: rebuild paragraphs from line geometry
-    // (pdf-paragraphs.js). Off keeps the legacy one-line-per-"\n" text.
-    paragraphDetection = isPdfParagraphDetectionEnabled(),
-  } = {}
-) => {
+// { pages, pageCount, renderedPageCount, pdfVersion, info, signals? }: options
+// as parsePdfBytesWithPdfjs (maxPages, includeMetadata, paragraphDetection,
+// collectSignals, workers), in this thread unless PDF_PARSE_WORKERS > 0.
+export const loadPdfDocument = async (filePath, options = {}) => {
   // A working file (rag/working-files.js): encrypted with TENANT_ENCRYPTION=on.
   const dataBuffer = await readWorkingFile(filePath);
-  const pages = [];
-  const pageLines = [];
-  let pageCount = 0;
-  let info = null;
-  const loadingTask = getDocument({
-    data: new Uint8Array(dataBuffer),
-    isEvalSupported: false,
-    verbosity: VerbosityLevel.ERRORS,
-  });
 
-  try {
-    const document = await loadingTask.promise;
-    pageCount = document.numPages;
-    const renderedPageCount = resolvePageLimit({
-      maxPages,
-      pageCount,
-    });
-
-    for (
-      let pageNumber = 1;
-      pageNumber <= renderedPageCount;
-      pageNumber += 1
-    ) {
-      const pageData = await document.getPage(pageNumber);
-
-      try {
-        if (paragraphDetection) {
-          const textContent = await readPdfPageTextContent(pageData);
-          pageLines.push(buildPdfTextLines(textContent.items));
-          pages.push({ pageNumber, text: "" });
-        } else {
-          const text = await renderPdfPageText(pageData);
-          pages.push({
-            pageNumber,
-            text: normalizePageText(text),
-          });
-        }
-      } finally {
-        pageData.cleanup();
-      }
-    }
-
-    if (paragraphDetection) {
-      // A line-end hyphen is judged against the whole document's spelling.
-      const vocabulary = buildHyphenationVocabulary(pageLines);
-      pages.forEach((page, index) => {
-        page.text = renderPdfParagraphText(pageLines[index], { vocabulary });
-      });
-    }
-
-    if (includeMetadata) {
-      const metadata = await document.getMetadata();
-      info = metadata.info ?? null;
-    }
-  } finally {
-    await loadingTask.destroy();
-  }
-
-  return {
-    pages,
-    pageCount,
-    renderedPageCount: pages.length,
-    pdfVersion: pdfJsVersion,
-    info,
-  };
+  return parsePdfBytesWithPdfjs(dataBuffer, options);
 };
 
 // Every ingest path reads pages through here, so PDF_PARSER applies to
