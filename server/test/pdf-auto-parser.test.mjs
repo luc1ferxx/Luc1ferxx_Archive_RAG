@@ -704,6 +704,142 @@ test("DOCLING_TIMEOUT_MS starts when a request gets its slot: a queued request d
   assert.deepEqual(getDoclingRequestLimiterSnapshot(), { active: 0, limit: 1, queued: 0 });
 });
 
+// Counts the Blobs made while it is installed: each one is a copy of the PDF.
+const countBlobCopies = (t) => {
+  const OriginalBlob = globalThis.Blob;
+  const copies = [];
+
+  globalThis.Blob = class CountingBlob extends OriginalBlob {
+    constructor(...args) {
+      super(...args);
+      copies.push(this.size);
+    }
+  };
+  t.after(() => {
+    globalThis.Blob = OriginalBlob;
+  });
+
+  return copies;
+};
+
+const sentBytes = async (call) => Buffer.from(await call.form.get("files").arrayBuffer());
+
+test("a document's requests share one copy of the PDF, and a request waiting for a slot holds none", async (t) => {
+  setEnv({ DOCLING_MAX_CONCURRENCY: "1" });
+
+  const copies = countBlobCopies(t);
+
+  // auto: five table runs behind one slot.
+  const serve = createDoclingServe();
+  const routed = routeAuto("LTLTLTLTL", serve);
+
+  await serve.waitForCalls(1);
+  assert.deepEqual(getDoclingRequestLimiterSnapshot(), { active: 1, limit: 1, queued: 4 });
+  assert.deepEqual(copies, [BYTES.length], "one copy for the document's five requests");
+
+  for (let index = 0; index < 5; index += 1) {
+    await serve.waitForCalls(index + 1);
+    serve.calls[index].deferred.resolve(answerRange(serve.calls[index]));
+  }
+
+  const { routing } = await routed;
+
+  assert.ok(routing.batches.every((batch) => batch.outcome === "ok"));
+  assert.deepEqual(copies, [BYTES.length]);
+  for (const call of serve.calls) {
+    assert.deepEqual(await sentBytes(call), BYTES);
+  }
+
+  // PDF_PARSER=docling page ranges: one copy too.
+  setEnv({ DOCLING_PAGE_BATCH_SIZE: "1" });
+  copies.length = 0;
+
+  const filePath = await writeStubPdf();
+  const ranged = createDoclingServe({ respond: answerRange });
+
+  await loadPdfPagesWithDocling(filePath, { countPages: async () => 3, fetchImpl: ranged.fetchImpl });
+  assert.equal(ranged.calls.length, 3);
+  assert.deepEqual(copies, [BYTES.length]);
+
+  // Two whole-document requests: the queued one makes its copy only once it
+  // has the slot.
+  copies.length = 0;
+
+  const held = createDoclingServe();
+  const first = convertPdfBytesWithDocling(BYTES, "a.pdf", { fetchImpl: held.fetchImpl });
+  const second = convertPdfBytesWithDocling(BYTES, "b.pdf", { fetchImpl: held.fetchImpl });
+
+  await held.waitForCalls(1);
+  assert.deepEqual(getDoclingRequestLimiterSnapshot(), { active: 1, limit: 1, queued: 1 });
+  assert.deepEqual(copies, [BYTES.length], "the queued request built no body");
+  held.calls[0].deferred.resolve(answerRange(held.calls[0]));
+  await first;
+  await held.waitForCalls(2);
+  assert.deepEqual(copies, [BYTES.length, BYTES.length]);
+  held.calls[1].deferred.resolve(answerRange(held.calls[1]));
+  await second;
+});
+
+test("under DOCLING_FALLBACK=pdfjs an unreachable docling-serve drops the document's queued requests; the one in flight finishes", async () => {
+  setEnv({ DOCLING_MAX_CONCURRENCY: "2" });
+
+  const serve = createDoclingServe();
+  const result = routeAuto("LTLTLTL", serve);
+
+  await serve.waitForCalls(2);
+  assert.deepEqual(getDoclingRequestLimiterSnapshot(), { active: 2, limit: 2, queued: 2 });
+  serve.calls[0].deferred.reject(new Error("connect ECONNREFUSED"));
+  // The page-5 and page-7 requests left the queue without being sent.
+  while (getDoclingRequestLimiterSnapshot().queued > 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(getDoclingRequestLimiterSnapshot(), { active: 1, limit: 2, queued: 0 });
+  serve.calls[1].deferred.resolve(answerRange(serve.calls[1]));
+
+  const { pages, routing } = await result;
+
+  assert.equal(serve.calls.length, 2);
+  assert.deepEqual(textsOf(pages), [
+    "pdf.js text 1",
+    "pdf.js text 2",
+    "docling text 3",
+    "pdf.js text 4",
+    "pdf.js text 5",
+    "pdf.js text 6",
+    "pdf.js text 7",
+  ]);
+  assert.deepEqual(routing.batches.map((batch) => batch.outcome), ["error", "ok", "aborted", "aborted"]);
+  assert.deepEqual(
+    routing.routes.filter((route) => route.fallback).map((route) => route.pageNumber),
+    [1, 5, 7]
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(
+    warnings[0],
+    /pages 1 \(DOCLING_UNREACHABLE\), 5 \(DOCLING_REQUEST_ABORTED\), 7 \(DOCLING_REQUEST_ABORTED\) of paper\.pdf/
+  );
+});
+
+test("under DOCLING_FALLBACK=pdfjs a timed-out request ends the document's wait: one DOCLING_TIMEOUT_MS, not one per slot's worth of requests", async (t) => {
+  setEnv({ DOCLING_MAX_CONCURRENCY: "1", DOCLING_TIMEOUT_MS: "1000" });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const serve = createDoclingServe();
+  const result = routeAuto("LTLTLTL", serve);
+
+  await serve.waitForCalls(1);
+  assert.deepEqual(getDoclingRequestLimiterSnapshot(), { active: 1, limit: 1, queued: 3 });
+  t.mock.timers.tick(1000);
+
+  const { pages, routing } = await result;
+
+  assert.equal(serve.calls.length, 1, "no queued request was sent after the timeout");
+  assert.deepEqual(getDoclingRequestLimiterSnapshot(), { active: 0, limit: 1, queued: 0 });
+  assert.deepEqual(textsOf(pages), [1, 2, 3, 4, 5, 6, 7].map((page) => `pdf.js text ${page}`));
+  assert.deepEqual(routing.batches.map((batch) => batch.outcome), ["error", "aborted", "aborted", "aborted"]);
+  assert.match(warnings[0], /pages 1 \(DOCLING_TIMEOUT\), 3 \(DOCLING_REQUEST_ABORTED\)/);
+});
+
 const PDF_FAMILIES = [
   "archive_rag_pdf_docling_request_duration_seconds",
   "archive_rag_pdf_docling_requests_total",

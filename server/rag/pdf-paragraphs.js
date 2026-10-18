@@ -85,6 +85,11 @@ const finishLine = (line) => {
     font: font.key,
     fontShare: font.share,
     tabular: line.maxInkGap >= CELL_GAP_RATIO,
+    // The runs of ink a cell gap separates (1 without one), and the last of
+    // them on a tabular line ("" otherwise): a displayed equation is one run
+    // and its number another, a table row a run per cell (page signals).
+    cellCount: line.cellStarts.length + 1,
+    lastCellText: line.cellStarts.length > 0 ? line.text.slice(line.cellStarts.at(-1)).trim() : "",
   };
 };
 
@@ -133,7 +138,13 @@ export const buildPdfTextLines = (items = []) => {
       // A wide gap after sentence or clause punctuation is justified prose
       // (sentence spacing, reference lists), not a cell boundary.
       if (weight > 0 && line.inkRight !== null && !CELL_GAP_EXEMPT_TAIL.test(line.text.trimEnd())) {
-        line.maxInkGap = Math.max(line.maxInkGap, (x - line.inkRight) / Math.max(reference, 1));
+        const inkGap = (x - line.inkRight) / Math.max(reference, 1);
+
+        line.maxInkGap = Math.max(line.maxInkGap, inkGap);
+
+        if (inkGap >= CELL_GAP_RATIO) {
+          line.cellStarts.push(line.text.length + (needsSpace ? 1 : 0));
+        }
       }
 
       line.text += `${needsSpace ? " " : ""}${value}`;
@@ -151,6 +162,7 @@ export const buildPdfTextLines = (items = []) => {
         referenceSize: size,
         inkRight: null,
         maxInkGap: 0,
+        cellStarts: [],
         baselines: new Map(),
         sizes: new Map(),
         fonts: new Map(),

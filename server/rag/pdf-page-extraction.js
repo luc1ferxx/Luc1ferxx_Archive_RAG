@@ -108,9 +108,16 @@ const openPdfDocument = (data) =>
 // item's text before it counts a character.
 const sanitizeItemText = (value = "") => String(value).replace(/\u0000/g, "").replace(/\r/g, "");
 
-// "(3)", "(12)", "(4a)" at the end of a line: a displayed equation set off
-// from its number by a wide gap, which is not a table row.
-const EQUATION_NUMBER_PATTERN = /\(\s*\d+[a-z]?\s*\)$/i;
+// A displayed equation set off from its number by a wide gap is not a table
+// row: a line of exactly two runs of ink whose second is the number alone,
+// "(3)", "(12)", "(4a)", or as report classes and appendices number them,
+// "(2.1)", "(3-2)", "(A1)", "(A.3)". A table row is a run per cell, so one
+// that ends in "212 (48)" or holds several numbers in parentheses still
+// counts.
+const EQUATION_NUMBER_PATTERN = /^\(\s*(?:[a-z]\.?)?\d+(?:[.\-\u2013]\d+)*[a-z]?\s*\)$/i;
+
+const isNumberedEquationLine = (line) => line.cellCount === 2 && EQUATION_NUMBER_PATTERN.test(line.lastCellText ?? "");
+
 const TABLE_CAPTION_PATTERNS = [
   /^(?:table|tab\.)\s*(?:\d+|[ivxlc]+)\b/i,
   /^表\s*[0-9一二三四五六七八九十]+/,
@@ -304,7 +311,7 @@ export const measurePageText = (items = [], lines = buildPdfTextLines(items)) =>
     charCount: counts.charCount,
     itemCount,
     lineCount: lines.length,
-    tabularLineCount: lines.filter((line) => line.tabular && !EQUATION_NUMBER_PATTERN.test(line.text)).length,
+    tabularLineCount: lines.filter((line) => line.tabular && !isNumberedEquationLine(line)).length,
     tableCaption: lines.some((line) => isTableCaptionLine(line.text)),
     garbledCharRatio: counts.charCount > 0 ? counts.garbledCount / counts.charCount : 0,
   };

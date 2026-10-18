@@ -17,13 +17,24 @@
 //     their pdf.js text (`docling_failed`) and one warning per document names
 //     the page ranges and error codes; with `none` the document's other
 //     requests are cancelled and the upload fails with the DoclingParseError.
+//     Under `pdfjs` a request that timed out or found docling-serve
+//     unreachable also drops the document's requests still waiting for a
+//     slot (their pages keep pdf.js text too, outcome `aborted`); the ones
+//     already sent finish. A stalled docling-serve then costs a document
+//     about one DOCLING_TIMEOUT_MS, not one per DOCLING_MAX_CONCURRENCY of
+//     its requests, and its queued requests stop holding up other PDFs.
 //
 // The routing report (loadPdfPagesWithRouting) holds codes and numbers only,
 // never page text, file names or URLs.
 
 import path from "node:path";
 import { getDoclingFallback, getDoclingPageBatchSize, isDoclingOcrEnabled } from "./config.js";
-import { convertPdfBytesWithDocling, DOCLING_ERROR_CODES, DoclingParseError } from "./docling-parser.js";
+import {
+  convertPdfBytesWithDocling,
+  createDoclingPdfBlob,
+  DOCLING_ERROR_CODES,
+  DoclingParseError,
+} from "./docling-parser.js";
 import { recordPdfPages, recordPdfParseFallback } from "./metrics-pdf.js";
 import { classifyPdfPage, planDoclingBatches, resolvePdfAutoRoutingConfig } from "./pdf-page-router.js";
 import { readWorkingFile } from "./working-files.js";
@@ -50,6 +61,10 @@ const DOCLING_ROUTE_OPTIONS = Object.freeze({
 
 const BATCH_OUTCOME_BY_ERROR_CODE = Object.freeze({ [DOCLING_ERROR_CODES.aborted]: "aborted" });
 
+// Failures that say docling-serve itself is not answering, so the
+// document's requests still queued would only wait for the same outcome.
+const SERVER_STALLED_CODES = new Set([DOCLING_ERROR_CODES.timeout, DOCLING_ERROR_CODES.unreachable]);
+
 const elapsedMs = (startedAt) => Math.max(0, Math.round(performance.now() - startedAt));
 
 const formatPageRange = ({ firstPage, lastPage }) =>
@@ -60,18 +75,27 @@ const describeBatchError = (error) =>
     .filter(Boolean)
     .join(", ");
 
-// Every batch at once; the limiter decides how many are in flight. Under
-// DOCLING_FALLBACK=none the first failure cancels the others (queued or in
-// flight); every batch has settled before this returns.
+// Every batch at once; the limiter decides how many are in flight, and the
+// requests share one copy of the PDF. Under DOCLING_FALLBACK=none the first
+// failure cancels the others (queued or in flight); under pdfjs a timeout or
+// an unreachable server cancels the ones still queued. Every batch has
+// settled before this returns.
 const convertBatches = async ({ batches, bytes, fallback, fetchImpl, fileName }) => {
   const controller = new AbortController();
+  const queueController = new AbortController();
+  const file = createDoclingPdfBlob(bytes);
   let firstError = null;
-  // Runs before the failed request frees its slot, so no queued batch is sent
-  // only to be cancelled.
+  // Both run before the failed request frees its slot, so no queued batch is
+  // sent only to be cancelled.
   const cancelOthers = (error) => {
     if (!firstError) {
       firstError = error;
       controller.abort(error);
+    }
+  };
+  const dropQueuedWhenStalled = (error) => {
+    if (SERVER_STALLED_CODES.has(error?.code) && !queueController.signal.aborted) {
+      queueController.abort(error);
     }
   };
   const settled = await Promise.all(
@@ -79,11 +103,12 @@ const convertBatches = async ({ batches, bytes, fallback, fetchImpl, fileName })
       const startedAt = performance.now();
 
       try {
-        const pages = await convertPdfBytesWithDocling(bytes, fileName, {
+        const pages = await convertPdfBytesWithDocling(file, fileName, {
           ...DOCLING_ROUTE_OPTIONS[batch.route](),
           fetchImpl,
-          onFailure: fallback === "none" ? cancelOthers : undefined,
+          onFailure: fallback === "none" ? cancelOthers : dropQueuedWhenStalled,
           pageRange: [batch.firstPage, batch.lastPage],
+          queueSignal: queueController.signal,
           route: batch.route,
           signal: controller.signal,
         });

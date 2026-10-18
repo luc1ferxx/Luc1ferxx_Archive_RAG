@@ -348,16 +348,30 @@ const OUTCOME_BY_ERROR_CODE = Object.freeze({
 });
 
 /**
- * Converts PDF bytes through docling-serve. Without `pageRange` the whole
- * document, with exactly the form fields PDF_PARSER=docling has always sent,
- * and its pages 1..n; with `pageRange` ([first, last]) only those pages, each
- * one returned (empty when Docling found nothing on it). `forceOcr` replaces
- * a page's own text layer with OCR. The request waits for a slot of this
- * process's limiter, and DOCLING_TIMEOUT_MS bounds it from the moment it has
- * one; `signal` cancels it, queued or in flight. `onFailure(error)` runs
- * before a failed request gives up its slot, so a caller that cancels the
- * document's other requests does so before a queued one could take the slot
- * and be sent. `route` (document, layout or ocr) only labels the metrics.
+ * The PDF as the Blob a request uploads. Node's Blob copies the bytes, so a
+ * caller that sends one document as several requests makes it once and
+ * passes it to each (a form's File made from a Blob shares its storage).
+ */
+export const createDoclingPdfBlob = (bytes) =>
+  bytes instanceof Blob ? bytes : new Blob([bytes], { type: "application/pdf" });
+
+const waitSignalOf = (signal, queueSignal) =>
+  signal && queueSignal ? AbortSignal.any([signal, queueSignal]) : signal ?? queueSignal;
+
+/**
+ * Converts PDF bytes (or a createDoclingPdfBlob Blob) through
+ * docling-serve. Without `pageRange` the whole document, with exactly the
+ * form fields PDF_PARSER=docling has always sent, and its pages 1..n; with
+ * `pageRange` ([first, last]) only those pages, each one returned (empty when
+ * Docling found nothing on it). `forceOcr` replaces a page's own text layer
+ * with OCR. The request waits for a slot of this process's limiter, and
+ * DOCLING_TIMEOUT_MS bounds it from the moment it has one; the request body
+ * is built only then, so a queued request holds no copy of the PDF. `signal`
+ * cancels it, queued or in flight; `queueSignal` only while it still waits
+ * for a slot. `onFailure(error)` runs before a failed request gives up its
+ * slot, so a caller that cancels the document's other requests does so
+ * before a queued one could take the slot and be sent. `route` (document,
+ * layout or ocr) only labels the metrics.
  */
 export const convertPdfBytesWithDocling = async (
   bytes,
@@ -368,35 +382,40 @@ export const convertPdfBytesWithDocling = async (
     forceOcr = false,
     onFailure,
     pageRange = null,
+    queueSignal,
     route,
     signal,
   } = {}
 ) => {
   const range = normalizePageRange(pageRange);
   const metricRoute = route ?? (!range ? "document" : forceOcr ? "ocr" : "layout");
-  const form = new FormData();
+  const buildForm = () => {
+    const form = new FormData();
 
-  form.append("files", new Blob([bytes], { type: "application/pdf" }), fileName);
-  form.append("to_formats", "json");
-  form.append("image_export_mode", "placeholder");
-  form.append("do_ocr", String(doOcr));
+    form.append("files", createDoclingPdfBlob(bytes), fileName);
+    form.append("to_formats", "json");
+    form.append("image_export_mode", "placeholder");
+    form.append("do_ocr", String(doOcr));
 
-  if (forceOcr) {
-    form.append("force_ocr", "true");
-  }
+    if (forceOcr) {
+      form.append("force_ocr", "true");
+    }
 
-  if (range) {
-    // docling-serve's page_range is a (start, end) tuple, which FastAPI reads
-    // from a form field sent twice. The whole file still goes with every
-    // request; docling-serve converts only the range.
-    form.append("page_range", String(range.first));
-    form.append("page_range", String(range.last));
-  }
+    if (range) {
+      // docling-serve's page_range is a (start, end) tuple, which FastAPI
+      // reads from a form field sent twice. The whole file still goes with
+      // every request; docling-serve converts only the range.
+      form.append("page_range", String(range.first));
+      form.append("page_range", String(range.last));
+    }
+
+    return form;
+  };
 
   let release;
 
   try {
-    release = await requestLimiter.acquire(signal);
+    release = await requestLimiter.acquire(waitSignalOf(signal, queueSignal));
   } catch (error) {
     recordDoclingRequest({ outcome: "aborted", route: metricRoute });
     throw new DoclingParseError(`The docling-serve request for ${fileName} was cancelled before it was sent.`, {
@@ -414,11 +433,12 @@ export const convertPdfBytesWithDocling = async (
   timer.unref?.();
 
   try {
+    const body = buildForm();
     let response;
 
     try {
       response = await fetchImpl(`${getDoclingServeUrl()}/v1/convert/file`, {
-        body: form,
+        body,
         method: "POST",
         signal: signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal,
       });
@@ -476,9 +496,10 @@ export const convertPdfPageRangesWithDocling = async (bytes, fileName, ranges, {
       controller.abort(error);
     }
   };
+  const file = createDoclingPdfBlob(bytes);
   const results = await Promise.allSettled(
     ranges.map(({ firstPage, lastPage, ...options }) =>
-      convertPdfBytesWithDocling(bytes, fileName, {
+      convertPdfBytesWithDocling(file, fileName, {
         ...options,
         fetchImpl,
         onFailure: cancelOthers,

@@ -25,7 +25,7 @@ import {
 import { runPdfParseWorkerTask } from "../rag/pdf-parse-worker.js";
 import { parsePdfBytesWithPdfjs } from "../rag/pdfjs-document.js";
 import { parseExposition, sampleValue } from "./metrics-exposition.mjs";
-import { buildMixedPdf, buildProsePdf } from "./pdf-fixture-builder.mjs";
+import { buildMixedPdf, buildPdf, buildProsePdf, textLines } from "./pdf-fixture-builder.mjs";
 
 const SERVER_DIRECTORY = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const POOL_ENV = [
@@ -303,14 +303,52 @@ test("a range that fails fails the document's parse", async () => {
   const parse = parsePdfBytesWithPdfjs(buildProsePdf(), { workers: 2 });
   const outcome = assert.rejects(parse, { code: PDF_PARSE_POOL_STOPPED });
 
-  // Once the first range has answered, the other six are in the pool: two
-  // running, four waiting.
-  while (getPdfParsePoolSnapshot().completedTasks < 1 || getPdfParsePoolSnapshot().queued === 0) {
+  // Once the first range has answered, the next two are running (one per
+  // worker) and the other four are not in the pool yet.
+  while (getPdfParsePoolSnapshot().completedTasks < 1 || getPdfParsePoolSnapshot().busy === 0) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 
+  assert.equal(getPdfParsePoolSnapshot().queued, 0);
   await stopPdfParsePool();
   await outcome;
+});
+
+test("a document that arrives while a long one parses waits for one of its ranges, not for all of them", async () => {
+  setEnv({ PDF_PARSE_PAGES_PER_TASK: 1 });
+
+  const long = buildPdf({
+    pages: Array.from({ length: 40 }, (_value, index) => textLines([`Page ${index + 1} of the long manual.`])),
+  });
+  const short = buildPdf({ pages: [textLines(["A one-page upload."])] });
+  const expectedLong = await parsePdfBytesWithPdfjs(long, { workers: 0 });
+  const expectedShort = await parsePdfBytesWithPdfjs(short, { workers: 0 });
+  let longDone = false;
+  const longParse = parsePdfBytesWithPdfjs(long, { workers: 1 }).finally(() => {
+    longDone = true;
+  });
+
+  // The first range has answered and the long document's other 39 ranges
+  // are under way. It holds one task (one per worker): before this change
+  // the 39 were all queued here, and the short document waited for every one.
+  while (getPdfParsePoolSnapshot().completedTasks < 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const { busy, queued } = getPdfParsePoolSnapshot();
+
+  assert.ok(busy + queued <= 1, JSON.stringify({ busy, queued }));
+
+  const completedOnArrival = getPdfParsePoolSnapshot().completedTasks;
+  const shortResult = await parsePdfBytesWithPdfjs(short, { workers: 1 });
+  // The long range already in the pool, then the short document's own task.
+  const completedWhileWaiting = getPdfParsePoolSnapshot().completedTasks - completedOnArrival;
+
+  assert.ok(completedWhileWaiting <= 2, `the short document waited for ${completedWhileWaiting - 1} long ranges`);
+  assert.equal(longDone, false, "the short document finished first");
+  assert.deepStrictEqual(shortResult, expectedShort);
+  assert.deepStrictEqual(await longParse, expectedLong);
+  assert.equal(getPdfParsePoolSnapshot().completedTasks, 41);
 });
 
 test("a new pool size replaces the pool and ends the old one's idle workers", async () => {

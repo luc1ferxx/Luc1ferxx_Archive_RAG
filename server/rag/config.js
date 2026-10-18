@@ -119,6 +119,9 @@ export const getPdfParseWorkerMaxOldGenerationMb = () =>
 export const getDoclingServeUrl = () =>
   String(process.env.DOCLING_SERVE_URL || "http://127.0.0.1:5010").replace(/\/+$/, "");
 
+// Bounds one docling-serve request (a whole document, or one page range under
+// DOCLING_PAGE_BATCH_SIZE or auto) from the moment it has a
+// DOCLING_MAX_CONCURRENCY slot; the wait for the slot does not count.
 export const getDoclingTimeoutMs = () =>
   Math.floor(toPositiveNumber(process.env.DOCLING_TIMEOUT_MS, 300000));
 

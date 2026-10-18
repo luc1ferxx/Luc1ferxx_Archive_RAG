@@ -12,8 +12,12 @@
 //     size. When the size or PDF_PARSE_WORKER_MAX_OLD_GENERATION_MB changes,
 //     the next task gets a new pool and the old one finishes the tasks it
 //     holds, then terminates its workers, so for a moment both run.
-//   - Tasks wait in FIFO order. A worker is ref()'d while it runs a task and
-//     unref()'d while idle, so an idle pool never keeps a process alive.
+//   - Tasks wait in FIFO order. A document never has more tasks in the pool
+//     than it has workers (pdfjs-document.js queues its next range when one
+//     of its own finishes), so a later document waits behind at most one
+//     range per worker of each document ahead of it. A worker is ref()'d
+//     while it runs a task and unref()'d while idle, so an idle pool never
+//     keeps a process alive.
 //   - Every task posts its own copy of the bytes (transferred, so the worker
 //     owns it), made when the task starts, so a queue of a large document's
 //     ranges holds the caller's buffer once and never touches it.

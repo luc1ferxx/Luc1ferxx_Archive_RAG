@@ -4,8 +4,12 @@
 // parse pdf-loader.js has always done, with the same pdf.js calls in the same
 // order. With workers > 0 the document goes to the pool (pdf-parse-pool.js)
 // in page ranges of PDF_PARSE_PAGES_PER_TASK pages: the first range also
-// learns the page count, then every other range is queued at once and the
-// workers parse them in parallel. Ranges come back as extractPdfPageRange
+// learns the page count, then the other ranges follow in page order, at most
+// one per worker in the pool at a time (the next one is queued when one of
+// the document's own ranges finishes). The pool serves one FIFO queue for
+// every document, so a document that arrives while a long one is parsing
+// waits behind at most one range per worker of it, never behind the whole
+// rest of it. Ranges come back as extractPdfPageRange
 // results and are rendered here, over the whole document, exactly as in
 // process (a line-end hyphen is judged against the spelling of every page),
 // so the page text is the same byte for byte whichever path ran.
@@ -58,24 +62,42 @@ const extractRangesWithWorkers = async (
     ranges.push({ firstPage, lastPage: Math.min(firstPage + pagesPerTask - 1, renderedPageCount) });
   }
 
-  // After a failure the ranges still waiting for a worker are dropped; the
-  // ones running finish, and the error thrown is the failed range that comes
-  // first in page order, as the in-process parse would have stopped there.
+  // `workers` lanes, each taking the next range in page order once its last
+  // one has settled, so the document never holds more than `workers` tasks
+  // in the pool. After a failure no further range is queued, the ones still
+  // waiting for a worker are dropped, the ones running finish, and the error
+  // thrown is the failed range that comes first in page order, as the
+  // in-process parse would have stopped there.
   const controller = new AbortController();
-  const settled = await Promise.allSettled(
-    ranges.map((range) =>
-      runPdfParseTask(data, { ...rangeOptions, ...range, includeMetadata: false }, {
-        signal: controller.signal,
-        size: workers,
-      }).catch((error) => {
+  const settled = new Array(ranges.length);
+  let nextRange = 0;
+  const runLane = async () => {
+    while (nextRange < ranges.length && !controller.signal.aborted) {
+      const index = nextRange;
+
+      nextRange += 1;
+
+      try {
+        settled[index] = {
+          status: "fulfilled",
+          value: await runPdfParseTask(data, { ...rangeOptions, ...ranges[index], includeMetadata: false }, {
+            signal: controller.signal,
+            size: workers,
+          }),
+        };
+      } catch (error) {
+        settled[index] = { reason: error, status: "rejected" };
         controller.abort();
-        throw error;
-      })
-    )
-  );
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(workers, ranges.length) }, runLane));
+
+  const outcomes = settled.filter(Boolean);
   const failure =
-    settled.find((outcome) => outcome.status === "rejected" && outcome.reason?.code !== PDF_PARSE_TASK_CANCELLED) ??
-    settled.find((outcome) => outcome.status === "rejected");
+    outcomes.find((outcome) => outcome.status === "rejected" && outcome.reason?.code !== PDF_PARSE_TASK_CANCELLED) ??
+    outcomes.find((outcome) => outcome.status === "rejected");
 
   if (failure) {
     throw failure.reason;

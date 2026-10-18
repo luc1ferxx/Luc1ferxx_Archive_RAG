@@ -27,6 +27,7 @@ import {
   buildPdfTextLines,
   renderPdfParagraphText,
 } from "../rag/pdf-paragraphs.js";
+import { classifyPdfPage } from "../rag/pdf-page-router.js";
 import { parsePdfBytesWithPdfjs } from "../rag/pdfjs-document.js";
 import {
   buildMixedPdf,
@@ -482,6 +483,69 @@ test("the garbled share counts U+FFFD, private use and controls over non-whitesp
   assert.equal(text.lineCount, 1);
   assert.equal(text.garbledCharRatio, 1 / 3);
   assert.equal(measurePageText([]).garbledCharRatio, 0);
+});
+
+// One visual line of 10 pt items: [[x, text], ...]; cells far enough apart
+// to be a cell gap, the text inside a cell in one item.
+const lineItems = (y, cells) =>
+  cells.map(([x, str]) => ({ fontName: "f1", str, transform: [10, 0, 0, 10, x, y], width: str.length * 5 }));
+const pageItems = (rows) => rows.flatMap((cells, index) => lineItems(700 - index * 14, typeof cells === "string" ? [[72, cells]] : cells));
+const ROUTING_DEFAULTS = Object.freeze({
+  garbledRatio: 0.3,
+  imageCoverage: 0.3,
+  minTextChars: 200,
+  routes: ["layout", "ocr"],
+  tableMinRows: 4,
+});
+const PROSE_LINE = "We minimise the loss below over every training batch of the corpus.";
+
+test("only a two-run line ending in an equation number is exempt: an n (%) table still counts, chapter-numbered equations do not", () => {
+  const nPercentTable = pageItems([
+    "Table 1: Baseline characteristics, n (%)",
+    [[72, "Characteristic"], [220, "Group A"], [360, "Group B"]],
+    [[72, "Female"], [220, "212 (48)"], [360, "220 (50)"]],
+    [[72, "Male"], [220, "230 (52)"], [360, "221 (50)"]],
+    [[72, "Smoker"], [220, "101 (23)"], [360, "97 (22)"]],
+    [[72, "Diabetes"], [220, "66 (15)"], [360, "70 (16)"]],
+    [[72, "Statins"], [220, "150 (34)"], [360, "149 (34)"]],
+    [[72, "Aspirin"], [220, "88 (20)"], [360, "92 (21)"]],
+  ]);
+  const table = measurePageText(nPercentTable);
+
+  // Header and six rows; every row ends in "(n)", none is an equation.
+  assert.equal(table.tabularLineCount, 7);
+  assert.equal(table.tableCaption, true);
+  assert.deepEqual(classifyPdfPage(table, ROUTING_DEFAULTS), { reasons: ["table_rows"], route: "layout" });
+
+  // A header of counts in parentheses and a two-cell row with a count: rows.
+  assert.equal(measurePageText(pageItems([[[72, "Method"], [200, "(83)"], [260, "(300)"], [320, "(150)"], [380, "(450)"]]])).tabularLineCount, 1);
+  assert.equal(measurePageText(pageItems([[[72, "Female"], [220, "212 (48)"]]])).tabularLineCount, 1);
+
+  const lines = buildPdfTextLines(lineItems(700, [[72, "Female"], [220, "212 (48)"], [360, "220 (50)"]]));
+
+  assert.deepEqual(
+    lines.map(({ cellCount, lastCellText, tabular }) => ({ cellCount, lastCellText, tabular })),
+    [{ cellCount: 3, lastCellText: "220 (50)", tabular: true }]
+  );
+  assert.deepEqual(
+    buildPdfTextLines(lineItems(700, [[72, PROSE_LINE]])).map(({ cellCount, lastCellText }) => [cellCount, lastCellText]),
+    [[1, ""]]
+  );
+
+  // Four displayed equations, numbered as article, report/book and appendix
+  // classes number them: none is a table row, and the page stays on text.
+  for (const numbers of [
+    ["(1)", "(2)", "(3)", "(4a)"],
+    ["(2.1)", "(2.2)", "(2.3)", "(2.4)"],
+    ["(A.1)", "(A.2)", "(A.3)", "(A.4)"],
+    ["(3-1)", "(3-2)", "(3-3)", "(3-4)"],
+    ["(A1)", "(A2)", "(B1)", "(B2)"],
+  ]) {
+    const signals = measurePageText(pageItems([PROSE_LINE, ...numbers.map((number) => [[150, "f(x) = a x + b"], [500, number]])]));
+
+    assert.equal(signals.tabularLineCount, 0, numbers.join(" "));
+    assert.deepEqual(classifyPdfPage(signals, ROUTING_DEFAULTS), { reasons: ["plain_text"], route: "text" }, numbers.join(" "));
+  }
 });
 
 test("table captions in English and Chinese, and words that only start like one", () => {
