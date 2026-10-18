@@ -78,6 +78,7 @@
     "eval:load-test:split": "bash scripts/run-load-test-pgvector.sh --topology split --tenant",
     "eval:load-test:ingest": "bash scripts/run-load-test-pgvector.sh --scenario ingest",
     "eval:load-test:index-switch": "bash scripts/run-load-test-pgvector.sh --scenario index-switch --instances 2 --tenant --documents 200 --embedding-latency-ms 100 --switch-phase-ms 20000 --model-latency-ms 0",
+    "bench:pdf-parse": "node evaluation/run-pdf-parse-bench.mjs",
     "bench:pgvector-scale": "bash scripts/run-pgvector-scale-bench.sh",
     "eval:ragas": "python evaluation/run-ragas-eval.py",
     "bench:rerank": "node evaluation/benchmark-rerank-latency.mjs",

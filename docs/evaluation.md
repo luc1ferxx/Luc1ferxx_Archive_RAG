@@ -1014,7 +1014,7 @@ train 上（400 题）的损失拆解：
 - `PDF_PARSE_WORKERS`：pdf.js 放到 worker_threads 里，文档按 `PDF_PARSE_PAGES_PER_TASK` 切成页段并行解析。
 - 默认（`PDF_PARSER=pdfjs`、`PDF_PARSE_WORKERS=0`）和改动前一样。
 
-**环境和数据**：Node 24.21，本机 macOS，15 个 CPU。只测 pdf.js 这一侧，没有 docling-serve，也没有模型参与。38 个本地 PDF，共 290 页：上一节按表格题挑出的 30 篇 QASPER 论文，加 8 个合成评测文档（24 页）。一致性和耗时是直接对 `parsePdfBytesWithPdfjs` 比较和计时得到的，测量脚本没有进仓库；分流数字可以用 `npm run pdf:route -- <目录> --json` 复现。
+**环境和数据**：Node 24.21，本机 macOS，15 个 CPU。只测 pdf.js 这一侧，没有 docling-serve，也没有模型参与。38 个本地 PDF，共 290 页：上一节按表格题挑出的 30 篇 QASPER 论文，加 8 个合成评测文档（24 页）。一致性、耗时和分流都可以用 `cd server && npm run bench:pdf-parse -- --pdf-dir evaluation/generated/qasper-pdfs --pdf-dir <合成文档目录>` 复现（`evaluation/run-pdf-parse-bench.mjs`，写入被忽略的 `evaluation/results/latest-pdf-parse-bench.*`，有不一致时退出码为 1）；单看分流也可以用 `npm run pdf:route -- <目录> --json`。另外拿改动前的代码（main 5dc46718）对比过一次默认路径：46 个文件（按内容去重后 38 个）、段落识别开关、进程内和 3 个 worker（每任务 2 页），加上默认环境下的 `loadPdfPages`，共 230 次对照，页面文本和元数据 0 差异。
 
 **worker 池和进程内逐字节相同**：段落识别开、关两种，配置分别是 1 个 worker（每任务 32 页）、2 个（3 页）、4 个（2 页）、4 个（32 页），页面文本和信号都与进程内解析 `deepStrictEqual`，8 × 38 次对照 0 差异。
 
@@ -1022,9 +1022,9 @@ train 上（400 题）的损失拆解：
 
 | 场景 | 进程内 | 2 个 worker | 4 个 worker | 8 个 worker |
 | --- | --- | --- | --- | --- |
-| 一个接一个解析，只取文本 | 约 0.81 s | 约 0.84–0.85 s | 约 0.84–0.85 s | 没测 |
-| 38 个同时解析，只取文本 | 0.80–0.96 s | 0.45–0.67 s | 0.30–0.48 s | 0.22–0.43 s |
-| 38 个同时解析，带信号（`auto` 的 pdf.js 那一遍） | 2.25–2.48 s | 没测 | 1.0–1.18 s | 没测 |
+| 一个接一个解析，只取文本 | 0.80–0.85 s | 0.83–1.04 s | 0.83–1.06 s | 0.84–1.10 s |
+| 38 个同时解析，只取文本 | 0.79–0.96 s | 0.45–0.67 s | 0.30–0.48 s | 0.22–0.43 s |
+| 38 个同时解析，带信号（`auto` 的 pdf.js 那一遍） | 2.21–2.48 s | 1.25–1.52 s | 0.93–1.18 s | 0.90–1.18 s |
 
 - **逐个解析没有收益**：一次只有一个文档时，worker 只是把同样的工作换个线程做；第一遍还要多付约 250 ms 的 worker 启动。
 - **同时解析才有收益**：总耗时随 worker 数下降。更重要的是主线程不再被卡住：只取文本时，主线程最长的一次事件循环停顿在进程内是 21–33 ms，用 worker 时是 7–9 ms；带信号时是 66–74 ms 对 7 ms。
