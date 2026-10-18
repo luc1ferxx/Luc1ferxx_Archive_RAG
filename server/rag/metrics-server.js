@@ -7,6 +7,7 @@ import { instrumentHttpServer } from "./metrics-http.js";
 import { registerIngestQueueMetrics } from "./metrics-ingest.js";
 import "./metrics-model.js";
 import "./metrics-pdf-pool.js";
+import "./metrics-pdf.js";
 import "./metrics-postgres.js";
 import { startProcessMetrics, stopProcessMetrics } from "./metrics-process.js";
 import "./metrics-retrieval.js";

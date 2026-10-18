@@ -8,6 +8,8 @@ import path from "node:path";
 import "./pdf-runtime-shim.js";
 import { getDoclingFallback, getPdfParser } from "./config.js";
 import { loadPdfPagesWithDocling } from "./docling-parser.js";
+import { recordPdfPages, recordPdfParseFallback } from "./metrics-pdf.js";
+import { loadPdfPagesAuto } from "./pdf-auto-parser.js";
 import { parsePdfBytesWithPdfjs } from "./pdfjs-document.js";
 import { readWorkingFile } from "./working-files.js";
 
@@ -21,21 +23,37 @@ export const loadPdfDocument = async (filePath, options = {}) => {
   return parsePdfBytesWithPdfjs(dataBuffer, options);
 };
 
+// PDF_PARSER=pdfjs and docling route nothing: their pages count as `unrouted`.
+const countUnroutedPages = (pages, parser) => {
+  recordPdfPages({ count: pages.length, parser, route: "unrouted" });
+  return pages;
+};
+
 // Every ingest path reads pages through here, so PDF_PARSER applies to
 // uploads, archive ingest and vector:reindex alike.
 export const loadPdfPages = async (filePath) => {
-  if (getPdfParser() !== "docling") {
-    return (await loadPdfDocument(filePath)).pages;
+  const parser = getPdfParser();
+
+  if (parser === "auto") {
+    return loadPdfPagesAuto(filePath);
+  }
+
+  if (parser !== "docling") {
+    return countUnroutedPages((await loadPdfDocument(filePath)).pages, "pdfjs");
   }
 
   try {
-    return await loadPdfPagesWithDocling(filePath);
+    return countUnroutedPages(await loadPdfPagesWithDocling(filePath), "docling");
   } catch (error) {
     if (getDoclingFallback() === "none") {
       throw error;
     }
 
     console.warn(`${error.message} Parsing ${path.basename(filePath)} with pdf.js instead (DOCLING_FALLBACK=pdfjs).`);
-    return (await loadPdfDocument(filePath)).pages;
+
+    const { pages } = await loadPdfDocument(filePath);
+
+    recordPdfParseFallback("docling_document", pages.length);
+    return countUnroutedPages(pages, "pdfjs");
   }
 };

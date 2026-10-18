@@ -146,7 +146,13 @@ test("a failed conversion or an unreachable server is a DoclingParseError", asyn
         status: 200,
       }),
     }),
-    { message: /could not convert paper\.pdf .*bad pdf/, name: "DoclingParseError" }
+    {
+      code: "DOCLING_CONVERSION_FAILED",
+      httpStatus: 200,
+      message: /could not convert paper\.pdf .*bad pdf/,
+      name: "DoclingParseError",
+      status: 502,
+    }
   );
   await assert.rejects(
     loadPdfPagesWithDocling(filePath, {
@@ -154,7 +160,7 @@ test("a failed conversion or an unreachable server is a DoclingParseError", asyn
         throw new Error("connect ECONNREFUSED");
       },
     }),
-    { message: /unreachable: connect ECONNREFUSED/, name: "DoclingParseError" }
+    { code: "DOCLING_UNREACHABLE", httpStatus: null, message: /unreachable: connect ECONNREFUSED/, name: "DoclingParseError" }
   );
 });
 

@@ -65,9 +65,11 @@ export const getEmbeddingModel = () =>
 // PDF text extraction. `pdfjs` (default) reads the content stream in-process;
 // `docling` sends the file to a docling-serve instance for layout-aware
 // parsing (reading order across columns, tables as cell grids; see
-// docling-parser.js). Any other value fails at ingest rather than silently
-// parsing with something else.
-export const PDF_PARSERS = Object.freeze(["pdfjs", "docling"]);
+// docling-parser.js); `auto` parses every page with pdf.js and sends only the
+// pages that need it (tables, scans, a garbled text layer) to docling-serve
+// (pdf-auto-parser.js, pdf-page-router.js). Any other value fails at ingest
+// rather than silently parsing with something else.
+export const PDF_PARSERS = Object.freeze(["pdfjs", "docling", "auto"]);
 
 export const getPdfParser = () => {
   const value = String(process.env.PDF_PARSER ?? "pdfjs").trim().toLowerCase() || "pdfjs";
@@ -127,6 +129,112 @@ export const isDoclingOcrEnabled = () => toBoolean(process.env.DOCLING_OCR, fals
 // logs why; `none` fails the upload.
 export const getDoclingFallback = () =>
   String(process.env.DOCLING_FALLBACK ?? "pdfjs").trim().toLowerCase() === "none" ? "none" : "pdfjs";
+
+// docling-serve runs 2 local workers by default (DOCLING_SERVE_ENG_LOC_NUM_WORKERS);
+// a request beyond that only queues inside docling-serve while its
+// DOCLING_TIMEOUT_MS runs. Per process: every conversion (PDF_PARSER=docling
+// and auto alike) waits for one of these slots, first come first served, and
+// its timeout starts once it has one.
+export const getDoclingMaxConcurrency = () =>
+  Math.max(1, Math.floor(toPositiveNumber(process.env.DOCLING_MAX_CONCURRENCY, 2)));
+
+// Pages per docling-serve request. 0 (default) = no limit: one request per
+// document under PDF_PARSER=docling, one per contiguous run of routed pages
+// under auto. A limit splits a long document into page ranges converted
+// concurrently (within DOCLING_MAX_CONCURRENCY), so one request's timeout
+// covers at most this many pages.
+export const getDoclingPageBatchSize = () =>
+  Math.floor(toNonNegativeNumber(process.env.DOCLING_PAGE_BATCH_SIZE, 0));
+
+// PDF_PARSER=auto: which Docling routes pdf-page-router.js may pick. `layout`
+// sends table pages to docling-serve without OCR, `ocr` sends scanned,
+// image-only and garbled pages with OCR forced. `none` routes nothing (every
+// page keeps its pdf.js text; the routing report still says what would have
+// been routed). Any other token fails, like PDF_PARSER.
+export const PDF_AUTO_ROUTES = Object.freeze(["layout", "ocr"]);
+
+export const getPdfAutoRoutes = () => {
+  const rawValue = process.env.PDF_AUTO_ROUTES;
+
+  if (!hasEnvValue(rawValue)) {
+    return PDF_AUTO_ROUTES;
+  }
+
+  const tokens = rawValue
+    .split(",")
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (tokens.length === 1 && tokens[0] === "none") {
+    return Object.freeze([]);
+  }
+
+  const unknown = tokens.filter((token) => !PDF_AUTO_ROUTES.includes(token));
+
+  if (tokens.length === 0 || unknown.length > 0) {
+    throw new Error(
+      `PDF_AUTO_ROUTES must be a comma list of ${PDF_AUTO_ROUTES.join(", ")}, or none; got "${rawValue}".`
+    );
+  }
+
+  return Object.freeze(PDF_AUTO_ROUTES.filter((route) => tokens.includes(route)));
+};
+
+// The auto router's thresholds. Unset or empty is the default; a value out of
+// range fails (ingest and the health report name the variable) instead of
+// routing pages by some other bar.
+const readPdfAutoThreshold = (name, fallbackValue, { describe, isValid }) => {
+  const rawValue = process.env[name];
+
+  if (!hasEnvValue(rawValue)) {
+    return fallbackValue;
+  }
+
+  const value = toNonNegativeNumber(rawValue, Number.NaN);
+
+  if (!isValid(value)) {
+    throw new Error(`${name} must be ${describe}; got "${rawValue}".`);
+  }
+
+  return value;
+};
+
+const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
+const isNonNegativeInteger = (value) => Number.isInteger(value) && value >= 0;
+const isUnitRatio = (value) => Number.isFinite(value) && value > 0 && value <= 1;
+
+// Tabular lines (pdf-paragraphs.js: ink runs a blank stretch apart) a page
+// needs before it counts as a table page; with a "Table N" caption 2 suffice.
+export const getPdfAutoTableMinRows = () =>
+  readPdfAutoThreshold("PDF_AUTO_TABLE_MIN_ROWS", 4, {
+    describe: "a positive integer",
+    isValid: isPositiveInteger,
+  });
+
+// Fewer non-whitespace characters than this, on a page mostly covered by
+// images, is a scan or an image-only page.
+export const getPdfAutoMinTextChars = () =>
+  readPdfAutoThreshold("PDF_AUTO_MIN_TEXT_CHARS", 200, {
+    describe: "a non-negative integer",
+    isValid: isNonNegativeInteger,
+  });
+
+// Share of the page box painted with images (0..1) that, with too little
+// text, makes a page an OCR page.
+export const getPdfAutoImageCoverage = () =>
+  readPdfAutoThreshold("PDF_AUTO_IMAGE_COVERAGE", 0.3, {
+    describe: "a number in (0, 1]",
+    isValid: isUnitRatio,
+  });
+
+// Share of a page's characters that are U+FFFD, private-use or control
+// characters (a font without a usable ToUnicode map) that makes its text
+// layer unusable, so the page is OCRed instead.
+export const getPdfAutoGarbledRatio = () =>
+  readPdfAutoThreshold("PDF_AUTO_GARBLED_RATIO", 0.3, {
+    describe: "a number in (0, 1]",
+    isValid: isUnitRatio,
+  });
 
 // Task prefixes some embedding models are trained with and documented as
 // required. They are part of the model's input contract, so they apply to the

@@ -14,13 +14,22 @@
 //     its column header ("Model: BERT; F1: 84.2"), so a row split into another
 //     chunk still says what every number is;
 //   - figures as their captions only.
+//
+// A request covers the whole document, or a page range (DOCLING_PAGE_BATCH_SIZE
+// under PDF_PARSER=docling, and the pages PDF_PARSER=auto routes here; see
+// pdf-auto-parser.js). Every request waits for a slot of one per-process
+// limiter (DOCLING_MAX_CONCURRENCY), and its DOCLING_TIMEOUT_MS starts there.
 
 import path from "node:path";
 import {
+  getDoclingMaxConcurrency,
+  getDoclingPageBatchSize,
   getDoclingServeUrl,
   getDoclingTimeoutMs,
   isDoclingOcrEnabled,
 } from "./config.js";
+import { secondsSince } from "./metrics.js";
+import { recordDoclingRequest } from "./metrics-pdf.js";
 import { readWorkingFile } from "./working-files.js";
 
 const SKIPPED_TEXT_LABELS = new Set(["page_header", "page_footer"]);
@@ -172,47 +181,371 @@ export const doclingDocumentToPages = (document) => {
   }));
 };
 
+export const DOCLING_ERROR_CODES = Object.freeze({
+  aborted: "DOCLING_REQUEST_ABORTED",
+  conversionFailed: "DOCLING_CONVERSION_FAILED",
+  pageRangeMismatch: "DOCLING_PAGE_RANGE_MISMATCH",
+  timeout: "DOCLING_TIMEOUT",
+  unreachable: "DOCLING_UNREACHABLE",
+});
+
 export class DoclingParseError extends Error {
-  constructor(message, { cause } = {}) {
+  // `code` is a DOCLING_ERROR_CODES value and `httpStatus` docling-serve's
+  // answer when there was one. Messages name the server and the file, never
+  // document text.
+  constructor(message, { cause, code = DOCLING_ERROR_CODES.conversionFailed, httpStatus = null } = {}) {
     super(message, { cause });
     this.name = "DoclingParseError";
     this.status = 502;
+    this.code = code;
+    this.httpStatus = httpStatus;
   }
 }
 
-/** Converts one PDF through docling-serve and returns its pages. */
-export const loadPdfPagesWithDocling = async (filePath, { fetchImpl = globalThis.fetch } = {}) => {
-  const form = new FormData();
+// Every conversion this process sends waits here for one of
+// DOCLING_MAX_CONCURRENCY slots, first come first served, so neither a long
+// document split into page ranges nor several uploads at once queue more work
+// inside docling-serve than it has workers for (and time out there while
+// they wait). The limit is read on every grant, so a changed setting applies
+// from the next request on.
+const createRequestLimiter = () => {
+  const waiters = [];
+  let active = 0;
 
-  form.append("files", new Blob([await readWorkingFile(filePath)], { type: "application/pdf" }), path.basename(filePath));
-  form.append("to_formats", "json");
-  form.append("image_export_mode", "placeholder");
-  form.append("do_ocr", String(isDoclingOcrEnabled()));
+  const createRelease = () => {
+    let released = false;
 
-  let response;
+    return () => {
+      if (!released) {
+        released = true;
+        active -= 1;
+        grantWaiting();
+      }
+    };
+  };
 
-  try {
-    response = await fetchImpl(`${getDoclingServeUrl()}/v1/convert/file`, {
-      body: form,
-      method: "POST",
-      signal: AbortSignal.timeout(getDoclingTimeoutMs()),
-    });
-  } catch (error) {
-    throw new DoclingParseError(`docling-serve at ${getDoclingServeUrl()} is unreachable: ${error.message}`, { cause: error });
+  const grantWaiting = () => {
+    while (waiters.length > 0 && active < getDoclingMaxConcurrency()) {
+      const waiter = waiters.shift();
+
+      waiter.signal?.removeEventListener("abort", waiter.onAbort);
+      active += 1;
+      waiter.resolve(createRelease());
+    }
+  };
+
+  return {
+    // Resolves with a release function once a slot is free; rejects with the
+    // signal's reason when it aborts first (the request then never held one).
+    acquire(signal) {
+      if (signal?.aborted) {
+        return Promise.reject(signal.reason);
+      }
+
+      return new Promise((resolve, reject) => {
+        const waiter = { resolve, signal };
+
+        waiter.onAbort = () => {
+          const index = waiters.indexOf(waiter);
+
+          if (index !== -1) {
+            waiters.splice(index, 1);
+            reject(signal.reason);
+          }
+        };
+        signal?.addEventListener("abort", waiter.onAbort, { once: true });
+        waiters.push(waiter);
+        grantWaiting();
+      });
+    },
+    snapshot: () => ({ active, limit: getDoclingMaxConcurrency(), queued: waiters.length }),
+  };
+};
+
+let requestLimiter = createRequestLimiter();
+
+/** Tests: a fresh limiter (requests holding a slot of the old one keep it there). */
+export const resetDoclingRequestLimiter = () => {
+  requestLimiter = createRequestLimiter();
+};
+
+/** `{ limit, active, queued }` of this process's docling-serve request limiter. */
+export const getDoclingRequestLimiterSnapshot = () => requestLimiter.snapshot();
+
+const normalizePageRange = (pageRange) => {
+  if (pageRange === null || pageRange === undefined) {
+    return null;
   }
 
-  const payload = await response.json().catch(() => null);
-  const document = payload?.document?.json_content;
+  const [first, last] = pageRange;
 
-  if (!response.ok || payload?.status === "failure" || !document) {
-    const detail = payload?.errors?.map((error) => error.error_message ?? JSON.stringify(error)).join("; ");
+  if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first) {
+    throw new TypeError("pageRange must be [firstPage, lastPage] with 1 <= firstPage <= lastPage.");
+  }
 
-    throw new DoclingParseError(
-      `docling-serve could not convert ${path.basename(filePath)} (HTTP ${response.status}${detail ? `: ${detail}` : ""}).`
+  return { first, last };
+};
+
+// What AbortSignal.timeout aborts with. The timeout is a timer of its own,
+// started once the request has its slot and cleared as soon as it settles
+// (and tests can drive it with mock timers).
+const createTimeoutReason = () => new DOMException("The operation was aborted due to timeout", "TimeoutError");
+
+// The page numbers a ranged conversion returned: the pages Docling lists plus
+// any page a body item sits on.
+const listReturnedPageNumbers = (document, pages) => [
+  ...new Set([
+    ...Object.keys(document?.pages ?? {})
+      .map(Number)
+      .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0),
+    ...pages.filter((page) => page.text).map((page) => page.pageNumber),
+  ]),
+];
+
+// docling-serve numbers a ranged conversion's pages as in the original file.
+// Mapped defensively in case a version numbers them from 1: pages all inside
+// the range are kept as they are; pages that are exactly 1..N for an N-page
+// range are shifted into it; otherwise the pages inside the range are kept,
+// and a result with none inside is an error rather than text on the wrong
+// pages.
+const mapRangePages = (document, { first, last }, fileName) => {
+  const pages = doclingDocumentToPages(document);
+  const returned = listReturnedPageNumbers(document, pages);
+  const length = last - first + 1;
+  const isInside = (pageNumber) => pageNumber >= first && pageNumber <= last;
+  let offset = 0;
+
+  if (!returned.every(isInside)) {
+    if (returned.length === length && returned.every((pageNumber) => pageNumber <= length)) {
+      offset = first - 1;
+    } else if (!returned.some(isInside)) {
+      throw new DoclingParseError(
+        `docling-serve returned pages outside the requested range ${first}-${last} of ${fileName}.`,
+        { code: DOCLING_ERROR_CODES.pageRangeMismatch }
+      );
+    }
+  }
+
+  const textByPage = new Map(pages.map((page) => [page.pageNumber + offset, page.text]));
+
+  return Array.from({ length }, (_value, index) => ({
+    pageNumber: first + index,
+    text: textByPage.get(first + index) ?? "",
+  }));
+};
+
+const classifyFailure = ({ signal, timeoutSignal }, fallbackCode) => {
+  if (timeoutSignal.aborted) {
+    return DOCLING_ERROR_CODES.timeout;
+  }
+
+  return signal?.aborted ? DOCLING_ERROR_CODES.aborted : fallbackCode;
+};
+
+const OUTCOME_BY_ERROR_CODE = Object.freeze({
+  [DOCLING_ERROR_CODES.aborted]: "aborted",
+  [DOCLING_ERROR_CODES.timeout]: "timeout",
+});
+
+/**
+ * Converts PDF bytes through docling-serve. Without `pageRange` the whole
+ * document, with exactly the form fields PDF_PARSER=docling has always sent,
+ * and its pages 1..n; with `pageRange` ([first, last]) only those pages, each
+ * one returned (empty when Docling found nothing on it). `forceOcr` replaces
+ * a page's own text layer with OCR. The request waits for a slot of this
+ * process's limiter, and DOCLING_TIMEOUT_MS bounds it from the moment it has
+ * one; `signal` cancels it, queued or in flight. `onFailure(error)` runs
+ * before a failed request gives up its slot, so a caller that cancels the
+ * document's other requests does so before a queued one could take the slot
+ * and be sent. `route` (document, layout or ocr) only labels the metrics.
+ */
+export const convertPdfBytesWithDocling = async (
+  bytes,
+  fileName,
+  {
+    doOcr = isDoclingOcrEnabled(),
+    fetchImpl = globalThis.fetch,
+    forceOcr = false,
+    onFailure,
+    pageRange = null,
+    route,
+    signal,
+  } = {}
+) => {
+  const range = normalizePageRange(pageRange);
+  const metricRoute = route ?? (!range ? "document" : forceOcr ? "ocr" : "layout");
+  const form = new FormData();
+
+  form.append("files", new Blob([bytes], { type: "application/pdf" }), fileName);
+  form.append("to_formats", "json");
+  form.append("image_export_mode", "placeholder");
+  form.append("do_ocr", String(doOcr));
+
+  if (forceOcr) {
+    form.append("force_ocr", "true");
+  }
+
+  if (range) {
+    // docling-serve's page_range is a (start, end) tuple, which FastAPI reads
+    // from a form field sent twice. The whole file still goes with every
+    // request; docling-serve converts only the range.
+    form.append("page_range", String(range.first));
+    form.append("page_range", String(range.last));
+  }
+
+  let release;
+
+  try {
+    release = await requestLimiter.acquire(signal);
+  } catch (error) {
+    recordDoclingRequest({ outcome: "aborted", route: metricRoute });
+    throw new DoclingParseError(`The docling-serve request for ${fileName} was cancelled before it was sent.`, {
+      cause: error,
+      code: DOCLING_ERROR_CODES.aborted,
+    });
+  }
+
+  const startedAt = performance.now();
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(createTimeoutReason()), getDoclingTimeoutMs());
+  const signals = { signal, timeoutSignal: timeoutController.signal };
+  let outcome = "error";
+
+  timer.unref?.();
+
+  try {
+    let response;
+
+    try {
+      response = await fetchImpl(`${getDoclingServeUrl()}/v1/convert/file`, {
+        body: form,
+        method: "POST",
+        signal: signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal,
+      });
+    } catch (error) {
+      const code = classifyFailure(signals, DOCLING_ERROR_CODES.unreachable);
+
+      throw new DoclingParseError(
+        code === DOCLING_ERROR_CODES.aborted
+          ? `The docling-serve request for ${fileName} was cancelled.`
+          : `docling-serve at ${getDoclingServeUrl()} is unreachable: ${error.message}`,
+        { cause: error, code }
+      );
+    }
+
+    const payload = await response.json().catch(() => null);
+    const document = payload?.document?.json_content;
+
+    if (!response.ok || payload?.status === "failure" || !document) {
+      const detail = payload?.errors?.map((error) => error.error_message ?? JSON.stringify(error)).join("; ");
+
+      throw new DoclingParseError(
+        `docling-serve could not convert ${fileName} (HTTP ${response.status}${detail ? `: ${detail}` : ""}).`,
+        { code: classifyFailure(signals, DOCLING_ERROR_CODES.conversionFailed), httpStatus: response.status }
+      );
+    }
+
+    const pages = range ? mapRangePages(document, range, fileName) : doclingDocumentToPages(document);
+
+    outcome = "ok";
+    return pages;
+  } catch (error) {
+    outcome = OUTCOME_BY_ERROR_CODE[error?.code] ?? "error";
+    onFailure?.(error);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    release();
+    recordDoclingRequest({ durationSeconds: secondsSince(startedAt), outcome, route: metricRoute });
+  }
+};
+
+/**
+ * Sends `ranges` ([{ firstPage, lastPage, ...convert options }]) of one
+ * document at once (the limiter bounds how many run) and resolves with each
+ * range's pages, in order. The first failure cancels the document's other
+ * requests, queued or in flight, and is what this rejects with once they
+ * have all settled.
+ */
+export const convertPdfPageRangesWithDocling = async (bytes, fileName, ranges, { fetchImpl = globalThis.fetch } = {}) => {
+  const controller = new AbortController();
+  let firstError = null;
+  const cancelOthers = (error) => {
+    if (!firstError) {
+      firstError = error;
+      controller.abort(error);
+    }
+  };
+  const results = await Promise.allSettled(
+    ranges.map(({ firstPage, lastPage, ...options }) =>
+      convertPdfBytesWithDocling(bytes, fileName, {
+        ...options,
+        fetchImpl,
+        onFailure: cancelOthers,
+        pageRange: [firstPage, lastPage],
+        signal: controller.signal,
+      })
+    )
+  );
+
+  const failure = firstError ?? results.find((result) => result.status === "rejected")?.reason;
+
+  if (failure) {
+    throw failure instanceof DoclingParseError
+      ? failure
+      : new DoclingParseError(`docling-serve could not convert ${fileName}.`, { cause: failure });
+  }
+
+  return results.map((result) => result.value);
+};
+
+// pdf-page-extraction.js loads pdf.js; imported on first use, so a process
+// that never splits a document does not load it here.
+const countPdfPagesLazily = async (bytes) => {
+  const { countPdfPages } = await import("./pdf-page-extraction.js");
+
+  return countPdfPages(bytes);
+};
+
+/**
+ * Converts one PDF through docling-serve and returns its pages. With
+ * DOCLING_PAGE_BATCH_SIZE > 0 a document longer than that goes as page ranges
+ * converted concurrently; one whose pages cannot be counted goes whole, as
+ * every document did before.
+ */
+export const loadPdfPagesWithDocling = async (
+  filePath,
+  { countPages = countPdfPagesLazily, fetchImpl = globalThis.fetch } = {}
+) => {
+  const bytes = await readWorkingFile(filePath);
+  const fileName = path.basename(filePath);
+  const batchSize = getDoclingPageBatchSize();
+
+  if (batchSize === 0) {
+    return convertPdfBytesWithDocling(bytes, fileName, { fetchImpl });
+  }
+
+  let pageCount = null;
+
+  try {
+    pageCount = await countPages(bytes);
+  } catch (error) {
+    console.warn(
+      `Could not count the pages of ${fileName} (${error?.code ?? error?.name ?? "Error"}); sending it to docling-serve as one request.`
     );
   }
 
-  return doclingDocumentToPages(document);
+  if (!Number.isInteger(pageCount) || pageCount <= batchSize) {
+    return convertPdfBytesWithDocling(bytes, fileName, { fetchImpl });
+  }
+
+  const ranges = [];
+
+  for (let firstPage = 1; firstPage <= pageCount; firstPage += batchSize) {
+    ranges.push({ firstPage, lastPage: Math.min(pageCount, firstPage + batchSize - 1), route: "document" });
+  }
+
+  return (await convertPdfPageRangesWithDocling(bytes, fileName, ranges, { fetchImpl })).flat();
 };
 
 /** For the health report: is the configured docling-serve answering? */
