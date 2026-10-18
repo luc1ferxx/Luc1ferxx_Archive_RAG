@@ -7,6 +7,7 @@ import {
   TASK_MUTATION_OUTCOMES,
   TASK_STATUSES,
 } from "./tasks.js";
+import { getTenantMaxQueuedTasks, getTenantMaxRunningTasks } from "./config.js";
 import { recordRagTrace } from "./observability.js";
 import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js";
 import { runOutsideRequestDeadline } from "./request-deadline.js";
@@ -39,6 +40,65 @@ const buildTaskClaimLostError = () => {
 
 const isTaskClaimLostError = (error) => error?.code === TASK_CLAIM_LOST;
 
+// Per-tenant task caps (TENANT_MAX_RUNNING_TASKS, TENANT_MAX_QUEUED_TASKS; 0,
+// the default, is off). A tenant is the task's exact (user, workspace) pair,
+// the unit the task store and its row policy use.
+//   running  checked here right before a claim: a queued (or stale running)
+//            task whose tenant already holds that many live claims is not
+//            claimed and stays as it is; it is tried again when one of the
+//            tenant's tasks finishes in this process, and every
+//            DEFAULT_RUNNING_CAP_RETRY_MS (other processes' tasks finish
+//            too). Check and claim are serialized per tenant in this process;
+//            claims racing in several processes may overshoot by the number
+//            racing.
+//   queued   checked when a task is created (rag/agent-tasks.js): over it
+//            POST /agent-tasks answers 429 TENANT_TASK_LIMITED.
+export const TENANT_TASK_LIMITED = "TENANT_TASK_LIMITED";
+export const DEFAULT_RUNNING_CAP_RETRY_MS = 5_000;
+
+export const readTenantTaskLimits = () => ({
+  maxQueued: getTenantMaxQueuedTasks(),
+  maxRunning: getTenantMaxRunningTasks(),
+});
+
+export const createTenantTaskLimitedError = () =>
+  Object.assign(
+    new Error(
+      "Too many agent tasks of this account are waiting to run. Try again once some have finished."
+    ),
+    { code: TENANT_TASK_LIMITED, expose: true, status: 429 }
+  );
+
+// Serializes `callback`s that share `key` in this process (a promise chain
+// per key), so a cap check and the write it guards are not interleaved.
+export const createKeyedSerializer = () => {
+  const tails = new Map();
+
+  return async (key, callback) => {
+    const previous = tails.get(key) ?? Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.then(() => current);
+
+    tails.set(key, chained);
+
+    try {
+      await previous;
+      return await callback();
+    } finally {
+      release();
+
+      if (tails.get(key) === chained) {
+        tails.delete(key);
+      }
+    }
+  };
+};
+
+const CAPPED_CLAIM_STATUSES = new Set([TASK_STATUSES.queued, TASK_STATUSES.running]);
+
 const getClaimRetryDelayMs = ({ retryAfterMs, retryAt } = {}) => {
   const hasRetryAfterMs =
     retryAfterMs !== undefined && retryAfterMs !== null && retryAfterMs !== "";
@@ -66,11 +126,16 @@ export const createJobOrchestrator = ({
   now = () => performance.now(),
   recordTaskRecoveryTrace = recordRagTrace,
   runners = {},
+  runningCapRetryMs = DEFAULT_RUNNING_CAP_RETRY_MS,
   schedule = defaultSchedule,
   startTaskClaimHeartbeat = setInterval,
+  taskLimits = readTenantTaskLimits,
   taskService = createTaskService(),
 } = {}) => {
   const activeTaskExecutions = new Map();
+  // Runs held back by the running cap, per tenant, oldest first.
+  const deferredRuns = new Map();
+  const serializeTenantClaims = createKeyedSerializer();
   const recordTaskTrace = async (event = {}) =>
     recordTaskRecoveryTrace?.({
       traceType: "agent_task_recovery",
@@ -101,6 +166,93 @@ export const createJobOrchestrator = ({
     });
   const getActiveTaskExecutionKey = ({ accessScope = {}, taskId } = {}) =>
     `${buildTaskScopeKey(accessScope)}\u0000${normalizeText(taskId)}`;
+
+  const readMaxRunning = () => {
+    const maxRunning = Math.floor(Number(taskLimits?.()?.maxRunning));
+
+    return Number.isFinite(maxRunning) && maxRunning > 0 ? maxRunning : 0;
+  };
+
+  // The claim, unless the tenant's running cap is reached: then nothing is
+  // claimed and `{ deferred: true }` comes back. Without a cap (the default)
+  // this is exactly the claim.
+  const claimWithinRunningCap = async ({ accessScope, claimId, task, taskId }) => {
+    const claim = () =>
+      taskService.claimTaskForRun({
+        accessScope,
+        claimId,
+        leaseMs: claimLeaseMs,
+        taskId,
+      });
+    const maxRunning = readMaxRunning();
+
+    if (
+      maxRunning === 0 ||
+      typeof taskService.countActiveTasks !== "function" ||
+      !CAPPED_CLAIM_STATUSES.has(task?.status)
+    ) {
+      return claim();
+    }
+
+    return serializeTenantClaims(buildTaskScopeKey(accessScope), async () => {
+      const active = await taskService.countActiveTasks({
+        accessScope,
+        excludeTaskId: taskId,
+        leaseMs: claimLeaseMs,
+      });
+
+      if ((Number(active?.running) || 0) >= maxRunning) {
+        return { applied: false, deferred: true, outcome: "deferred_running_cap", task };
+      }
+
+      return claim();
+    });
+  };
+
+  const takeDeferredRun = (scopeKey, taskId, entry) => {
+    const waiting = deferredRuns.get(scopeKey);
+
+    if (!waiting || waiting.get(taskId) !== entry) {
+      return false;
+    }
+
+    waiting.delete(taskId);
+
+    if (waiting.size === 0) {
+      deferredRuns.delete(scopeKey);
+    }
+
+    return true;
+  };
+
+  // Holds a run back until the tenant has room: retried after
+  // runningCapRetryMs, or sooner when one of the tenant's tasks finishes here
+  // (wakeDeferredRun). Whichever comes first runs it; the other finds the
+  // entry gone. A newer deferral of the same task replaces the older one.
+  const deferTaskRun = ({ accessScope = {}, recovery = false, taskId } = {}) => {
+    const scopeKey = buildTaskScopeKey(accessScope);
+    const normalizedTaskId = normalizeText(taskId);
+    const waiting = deferredRuns.get(scopeKey) ?? new Map();
+    const entry = { accessScope, recovery, taskId: normalizedTaskId };
+
+    waiting.delete(normalizedTaskId);
+    waiting.set(normalizedTaskId, entry);
+    deferredRuns.set(scopeKey, waiting);
+    schedule(() => {
+      if (takeDeferredRun(scopeKey, normalizedTaskId, entry)) {
+        scheduleTaskRun(entry);
+      }
+    }, runningCapRetryMs);
+  };
+
+  const wakeDeferredRun = (accessScope = {}) => {
+    const scopeKey = buildTaskScopeKey(accessScope);
+    const oldest = deferredRuns.get(scopeKey)?.values().next().value;
+
+    if (oldest && takeDeferredRun(scopeKey, oldest.taskId, oldest)) {
+      scheduleTaskRun(oldest);
+    }
+  };
 
   const createClaimHeartbeat = ({
     accessScope = {},
@@ -247,12 +399,34 @@ export const createJobOrchestrator = ({
     }
 
     const claimId = normalizeText(createTaskClaimId());
-    const claimResult = await taskService.claimTaskForRun({
+    const claimResult = await claimWithinRunningCap({
       accessScope,
       claimId,
-      leaseMs: claimLeaseMs,
+      task,
       taskId,
     });
+
+    if (claimResult?.deferred) {
+      deferTaskRun({
+        accessScope,
+        recovery,
+        taskId,
+      });
+
+      await recordTaskTrace({
+        eventType: recovery ? "task_recovery_run" : "task_run_deferred",
+        reason: "tenant_running_cap",
+        resultStatus: task.status,
+        runnerId: normalizeText(task.runnerId),
+        status: "deferred",
+        taskId,
+      });
+
+      return getPublicTask({
+        accessScope,
+        taskId,
+      });
+    }
 
     if (claimResult?.outcome === TASK_MUTATION_OUTCOMES.notFound) {
       if (recovery) {
@@ -464,6 +638,10 @@ export const createJobOrchestrator = ({
       if (activeTaskExecutions.get(activeTaskExecutionKey) === execution) {
         activeTaskExecutions.delete(activeTaskExecutionKey);
       }
+
+      // This claim is settled, so a run the tenant's running cap held back
+      // may take its place.
+      wakeDeferredRun(accessScope);
     }
   };
 

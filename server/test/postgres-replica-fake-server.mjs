@@ -11,8 +11,18 @@ import net from "node:net";
 // row-level security through it) is proven by
 // postgres-replica.integration.test.mjs.
 
-export const TENANT_SETTINGS_TEXT =
-  /set_config\('role', \$1, true\),\s*set_config\('archive_rag\.user_id', \$2, true\),\s*set_config\('archive_rag\.workspace_id', \$3, true\)/;
+// The whole tenant settings step of rag/postgres.js, which a replica shares:
+// role and ids, then the tenant statement and idle-in-transaction limits as
+// bind parameters $4 and $5.
+export const TENANT_SETTINGS_TEXT = new RegExp(
+  [
+    String.raw`set_config\('role', \$1, true\),`,
+    String.raw`set_config\('archive_rag\.user_id', \$2, true\),`,
+    String.raw`set_config\('archive_rag\.workspace_id', \$3, true\),`,
+    String.raw`set_config\('statement_timeout', COALESCE\(\$4::text, current_setting\('statement_timeout'\)\), true\),`,
+    String.raw`set_config\(\s*'idle_in_transaction_session_timeout',\s*COALESCE\(\$5::text, current_setting\('idle_in_transaction_session_timeout'\)\),\s*true\s*\)`,
+  ].join(String.raw`\s*`)
+);
 
 const message = (type, body = Buffer.alloc(0)) => {
   const header = Buffer.alloc(5);
@@ -132,7 +142,7 @@ export const startFakePostgres = async (respond) => {
     if (answered) return answered;
 
     return TENANT_SETTINGS_TEXT.test(text)
-      ? { command: "SELECT 1", fields: ["set_config", "set_config", "set_config"], rows: [values] }
+      ? { command: "SELECT 1", fields: values.map(() => "set_config"), rows: [values] }
       : { command: "SELECT 0", fields: [], rows: [] };
   };
 

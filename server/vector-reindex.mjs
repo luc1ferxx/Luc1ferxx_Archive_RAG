@@ -66,6 +66,7 @@ import {
 import { buildPublicFilePath } from "./rag/document-utils.js";
 import { loadPdfPages } from "./rag/pdf-loader.js";
 import { withPostgresTransaction } from "./rag/postgres.js";
+import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataPath, readJsonFileSync } from "./rag/storage.js";
 import { stampChunkDocumentVersion } from "./rag/vector-store.js";
 import {
@@ -640,7 +641,9 @@ const invokedDirectly =
   Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (invokedDirectly) {
-  main().catch((error) => {
+  // A backfill reads and rewrites every tenant's documents as the owner;
+  // bound explicitly so POSTGRES_TENANT_CONTEXT=strict accepts it.
+  runAsDatabaseSystem(() => main()).catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });

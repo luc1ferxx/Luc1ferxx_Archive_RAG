@@ -123,9 +123,11 @@ export const createUpstreamPool = ({
 
   /**
    * Sends one request: `send(baseUrl)` performs it against the chosen replica.
-   * Resolves with its result or rejects with the last error.
+   * Resolves with its result or rejects with the last error. `signal` (the
+   * gateway caller's) takes a request still waiting for a replica's guard slot
+   * out of that queue when it aborts.
    */
-  const run = async ({ model = "", send }) => {
+  const run = async ({ model = "", send, signal }) => {
     if (replicas.length === 0) {
       const error = new Error(`No ${kind} backend is configured for the model gateway.`);
 
@@ -150,7 +152,7 @@ export const createUpstreamPool = ({
       replica.requests += 1;
 
       try {
-        const result = await guardModelCall(`${replica.url}|${model}`, () => send(replica.url));
+        const result = await guardModelCall(`${replica.url}|${model}`, () => send(replica.url), { signal });
 
         replica.unhealthyUntil = 0;
         return result;

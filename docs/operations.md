@@ -72,7 +72,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 2. **依赖**：
    - 模型：`sum by (model, status) (rate(archive_rag_model_calls_total{metering!="mirror"}[5m]))`、`archive_rag_model_circuits{state="open"}`。
    - 数据库：`sum by (sqlstate_class) (rate(archive_rag_postgres_statement_errors_total[5m]))`、`archive_rag_postgres_pool_clients{state="waiting"}`。
-3. **每个进程的健康**：`curl -s http://<host>:<PORT>/health` 看每个 `checks.*` 和它的 message，再看 `/ready`；拆分部署时 agent、检索层、模型网关也各看一遍。
+3. **每个进程的健康**：`curl -s http://<host>:<PORT>/health` 看每个 `checks.*` 和它的 message，再看 `/ready`；拆分部署时 agent、检索层、模型网关也各看一遍。开启 API auth 时，要带上单个共享的 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据（`-H "x-api-key: <token>"`），否则只返回 `{status}`。
 
 命令：日志里搜 `[service]` 和 `Failed to`；`cd server && npm run eval:llm-resilience` 在本地假模型上复现 429、503、挂起、主模型宕机等模型故障。慢烧时再看最近的变更：部署、模型或 prompt 变更、索引版本切换（`cd server && npm run vector:index -- status`）；开了 `RAG_OBSERVABILITY_ENABLED=true` 时 `cd server && npm run observability:report` 汇总记录下来的 trace。
 

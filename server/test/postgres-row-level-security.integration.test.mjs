@@ -502,11 +502,14 @@ if (!adminDatabaseUrl) {
     assert.deepEqual(sparse.map((result) => result.document.metadata.docId), ["doc-alice"]);
   });
 
-  test("the sparse rank function runs as its owner with a pinned search_path, only the tenant role may call it, and the join drops foreign ids", async () => {
-    const functionName = modules.pgvector.getPgvectorSparseRankFunctionName();
-    const definition = (
+  // What pg_proc says about a sparse-rank function: migration 014's shape,
+  // which migration 033 keeps.
+  const describeSparseRankFunction = async (functionName) =>
+    (
       await modules.postgres.queryPostgres(
-        `SELECT p.prosecdef, p.proconfig, p.prorows,
+        `SELECT p.prosecdef, p.proconfig, p.prorows, pg_get_userbyid(p.proowner) AS owner,
+                pg_get_function_identity_arguments(p.oid) AS arguments,
+                pg_get_function_result(p.oid) AS result,
                 has_function_privilege($2, p.oid, 'EXECUTE') AS tenant_may_execute,
                 has_function_privilege('public', p.oid, 'EXECUTE') AS public_may_execute
          FROM pg_proc p
@@ -514,25 +517,188 @@ if (!adminDatabaseUrl) {
         [functionName, tenantRole]
       )
     ).rows;
+  const assertSparseRankShape = (rows, label) => {
+    assert.equal(rows.length, 1, `${label}: one function`);
+    assert.equal(rows[0].prosecdef, true, `${label}: SECURITY DEFINER`);
+    assert.deepEqual(rows[0].proconfig, ["search_path=pg_catalog, pg_temp", "enable_indexscan=off"], label);
+    assert.equal(Number(rows[0].prorows), 20, label);
+    assert.equal(rows[0].owner, ownerRole, `${label}: owned by the table owner`);
+    assert.equal(rows[0].arguments, "query tsquery, doc_ids text[], max_rows integer", label);
+    assert.equal(rows[0].result, "TABLE(chunk_id text, sparse_score real)", `${label}: chunk ids and ranks only`);
+    assert.equal(rows[0].tenant_may_execute, true, label);
+    assert.equal(rows[0].public_may_execute, false, label);
+  };
+  // A direct call of a sparse-rank function, the way a statement running as
+  // the tenant role could make it, bypassing buildTenantSparseSearchSql.
+  const callSparseRank = (functionName, docIds, maxRows = 5) =>
+    modules.postgres.queryPostgres(
+      `SELECT chunk_id, sparse_score FROM ${functionName}(to_tsquery('simple', 'alpha'), $1::text[], $2)
+       ORDER BY chunk_id`,
+      [docIds, maxRows]
+    );
+  const chunkIds = (result) => result.rows.map((row) => row.chunk_id);
+  const ALL_DOCS = ["doc-alice", "doc-bob", "doc-unowned"];
+  // A checked-in migration rendered for this database's tables, with
+  // `overrides` replacing some of them (014 rendered for a version table).
+  const renderMigrationSqlFor = (sqlText, overrides = {}) =>
+    modules.migrations.renderMigrationSql(sqlText, {
+      adminAuditEventsTable: modules.config.getAdminAuditEventsPostgresTable(),
+      agentRunEventsTable: modules.config.getAgentRunEventsPostgresTable(),
+      agentRunsTable: modules.config.getAgentRunsPostgresTable(),
+      documentChunksTable: modules.config.getDocumentChunksPostgresTable(),
+      documentsTable: modules.config.getDocumentsPostgresTable(),
+      indexVersionsTable: modules.config.getIndexVersionsPostgresTable(),
+      ingestJobsTable: modules.config.getIngestJobsPostgresTable(),
+      longMemoryTable: modules.config.getLongMemoryPostgresTable(),
+      sessionMemoryTable: modules.config.getSessionMemoryPostgresTable(),
+      taskEventsTable: modules.config.getTaskEventsPostgresTable(),
+      tasksTable: modules.config.getTasksPostgresTable(),
+      workspaceArtifactsTable: modules.config.getWorkspaceArtifactsPostgresTable(),
+      ...overrides,
+    });
 
-    assert.equal(definition.length, 1);
-    assert.equal(definition[0].prosecdef, true);
-    assert.deepEqual(definition[0].proconfig, ["search_path=pg_catalog, pg_temp", "enable_indexscan=off"]);
-    assert.equal(Number(definition[0].prorows), 20);
-    assert.equal(definition[0].tenant_may_execute, true);
-    assert.equal(definition[0].public_may_execute, false);
+  test("the sparse rank function runs as its owner with a pinned search_path, only the tenant role may call it, and it ranks only the caller's own documents", async () => {
+    const functionName = modules.pgvector.getPgvectorSparseRankFunctionName();
 
-    // Called directly the function ranks by doc id alone and sees Bob's chunk;
-    // the search itself first narrows the doc ids to those Alice can see in the
-    // documents table, and joins back to the chunks as Alice (test above).
-    const raw = await asAlice(() =>
-      modules.postgres.queryPostgres(
-        `SELECT chunk_id FROM ${functionName}(to_tsquery('simple', 'alpha'), $1::text[], 5) ORDER BY chunk_id`,
-        [["doc-alice", "doc-bob"]]
+    assertSparseRankShape(await describeSparseRankFunction(functionName), functionName);
+
+    // Migration 033's installer is the owner's alone.
+    const installer = (
+      await modules.postgres.queryPostgres(
+        `SELECT has_function_privilege($2, p.oid, 'EXECUTE') AS tenant_may_execute,
+                has_function_privilege('public', p.oid, 'EXECUTE') AS public_may_execute
+         FROM pg_proc p WHERE p.proname = $1`,
+        [modules.migrations.getSparseRankInstallFunctionName(), tenantRole]
       )
+    ).rows;
+
+    assert.deepEqual(installer, [{ public_may_execute: false, tenant_may_execute: false }]);
+
+    // Called directly as a tenant, the function itself drops every doc id the
+    // documents policy hides: another tenant's, and the unowned document.
+    assert.deepEqual(chunkIds(await asAlice(() => callSparseRank(functionName, ALL_DOCS))), ["doc-alice:0"]);
+    assert.deepEqual(chunkIds(await asAlice(() => callSparseRank(functionName, ["doc-bob"]))), []);
+    assert.deepEqual(chunkIds(await asAlice(() => callSparseRank(functionName, ["doc-unowned"]))), []);
+    assert.deepEqual(
+      chunkIds(await modules.tenant.runWithDatabaseTenant(BOB, () => callSparseRank(functionName, ALL_DOCS))),
+      ["doc-bob:0"]
+    );
+    assert.deepEqual(
+      chunkIds(
+        await modules.tenant.runWithDatabaseTenant({ userId: "mallory", workspaceId: "ws-m" }, () =>
+          callSparseRank(functionName, ALL_DOCS)
+        )
+      ),
+      []
+    );
+    // A foreign chunk takes no place under max_rows either: the chunks tie,
+    // and doc-alice:0 sorts first, so Bob's one row is his own.
+    assert.deepEqual(
+      chunkIds(
+        await modules.tenant.runWithDatabaseTenant(BOB, () =>
+          callSparseRank(functionName, ["doc-alice", "doc-bob"], 1)
+        )
+      ),
+      ["doc-bob:0"]
     );
 
-    assert.deepEqual(raw.rows.map((row) => row.chunk_id), ["doc-alice:0", "doc-bob:0"]);
+    // The owner path is unchanged: every doc id it passes is ranked, and a
+    // tenant's own documents rank exactly as the owner ranks them.
+    const owner = await callSparseRank(functionName, ALL_DOCS);
+
+    assert.deepEqual(chunkIds(owner), ["doc-alice:0", "doc-bob:0", "doc-unowned:0"]);
+    assert.deepEqual(
+      (await asAlice(() => callSparseRank(functionName, ["doc-alice"]))).rows,
+      owner.rows.filter((row) => row.chunk_id === "doc-alice:0")
+    );
+  });
+
+  test("every index version's sparse rank function filters a tenant's doc ids: a new version's from the template, an existing one's from migration 033", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const migrationText = (fileName) =>
+      readFile(new URL(`../db/migrations/${fileName}`, import.meta.url), "utf8");
+    const versionsTable = modules.config.getIndexVersionsPostgresTable();
+    const created = `${tables.chunks}_v91`;
+    const existing = `${tables.chunks}_v92`;
+    const q = modules.postgres.queryPostgres;
+    const seedChunks = async (chunkTable) => {
+      const vector = `[${[1, 0, 0, 0, 0, 0, 0, 0.05].join(",")}]`;
+
+      for (const [scope, docId] of [
+        [ALICE, "doc-alice"],
+        [BOB, "doc-bob"],
+        [{ userId: "", workspaceId: "" }, "doc-unowned"],
+      ]) {
+        await q(
+          `INSERT INTO ${chunkTable}
+             (chunk_id, doc_id, chunk_index, content, search_text, owner_user_id, workspace_id,
+              embedding_model, embedding_dimensions, embedding)
+           VALUES ($1, $2, 0, $3, $3, $4, $5, 'rls-it-embedding', 8, $6::vector)`,
+          [`${docId}:0`, docId, `alpha policy text for ${docId}`, scope.userId, scope.workspaceId, vector]
+        );
+      }
+    };
+
+    try {
+      for (const chunkTable of [created, existing]) {
+        await modules.postgres.withPostgresTransaction(async (client) =>
+          client.query(await modules.migrations.renderIndexVersionChunkTableDdl({ chunkTable, dimensions: 8 }))
+        );
+        await seedChunks(chunkTable);
+      }
+
+      // A version table created from the template gets the filtering function.
+      assertSparseRankShape(await describeSparseRankFunction(`${created}_sparse_rank`), created);
+      assert.deepEqual(chunkIds(await asAlice(() => callSparseRank(`${created}_sparse_rank`, ALL_DOCS))), ["doc-alice:0"]);
+      assert.deepEqual(
+        chunkIds(await callSparseRank(`${created}_sparse_rank`, ALL_DOCS)),
+        ["doc-alice:0", "doc-bob:0", "doc-unowned:0"]
+      );
+
+      // A version from before migration 033: migration 014's body, registered
+      // under a status the search never serves (failed) but whose function
+      // the tenant role may still call.
+      await q(
+        renderMigrationSqlFor(await migrationText("014_create_sparse_rank_function.sql"), {
+          documentChunksTable: existing,
+        })
+      );
+      await q(
+        `INSERT INTO ${versionsTable} (version_id, status, chunk_table, sparse_rank_function, embedding_dimensions)
+         VALUES (92, 'failed', $1, $2, 8)`,
+        [existing, `${existing}_sparse_rank`]
+      );
+      assert.deepEqual(
+        chunkIds(await asAlice(() => callSparseRank(`${existing}_sparse_rank`, ALL_DOCS))),
+        ["doc-alice:0", "doc-bob:0", "doc-unowned:0"],
+        "migration 014's body ranks every doc id it is handed"
+      );
+
+      // Migration 033 (idempotent) fixes it in place, keeping its shape.
+      await modules.postgres.withPostgresTransaction(async (client) =>
+        client.query(renderMigrationSqlFor(await migrationText("033_harden_sparse_rank_function.sql")))
+      );
+      assertSparseRankShape(await describeSparseRankFunction(`${existing}_sparse_rank`), existing);
+      assert.deepEqual(chunkIds(await asAlice(() => callSparseRank(`${existing}_sparse_rank`, ALL_DOCS))), ["doc-alice:0"]);
+      assert.deepEqual(chunkIds(await asAlice(() => callSparseRank(`${existing}_sparse_rank`, ["doc-bob"]))), []);
+      assert.deepEqual(
+        chunkIds(await callSparseRank(`${existing}_sparse_rank`, ALL_DOCS)),
+        ["doc-alice:0", "doc-bob:0", "doc-unowned:0"]
+      );
+      // And the base table's function is still the filtering one.
+      assert.deepEqual(
+        chunkIds(await asAlice(() => callSparseRank(modules.pgvector.getPgvectorSparseRankFunctionName(), ALL_DOCS))),
+        ["doc-alice:0"]
+      );
+    } finally {
+      await q(`DELETE FROM ${versionsTable} WHERE version_id = 92`);
+
+      for (const chunkTable of [created, existing]) {
+        await q(
+          modules.migrations.renderIndexVersionDropDdl({ chunkTable, sparseRankFunction: `${chunkTable}_sparse_rank` })
+        );
+      }
+    }
   });
 
   test("session memory is keyed and stored per tenant, and the policy refuses another tenant's session rows", async () => {
@@ -675,8 +841,10 @@ if (!adminDatabaseUrl) {
     assert.equal(report.checks.rowLevelSecurity.role, tenantRole);
     // Ten tenant tables plus the staged ingest's outputs (migration 017), the
     // four sparse statistics tables of the chunk table (migration 030),
-    // session memory (migration 031) and admin audit events (migration 032).
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 17);
+    // session memory (migration 031), admin audit events (migration 032),
+    // answer feedback (migration 034), the tenant registry's workspaces and
+    // members (migration 036) and the tenant usage ledger (migration 037).
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 21);
     assert.deepEqual(report.checks.rowLevelSecurity.roleAttributes, {
       bypassRls: false,
       superuser: false,
@@ -883,6 +1051,625 @@ if (!adminDatabaseUrl) {
     );
 
     await q(`DELETE FROM ${auditTable}`);
+  });
+
+  // Sets `overrides` (undefined deletes) with a fresh pool on both sides, so
+  // the pool reads the settings it is created with.
+  const withPostgresEnv = async (overrides, callback) => {
+    const previous = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+    const apply = (entries) =>
+      Object.entries(entries).forEach(([key, value]) => {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      });
+
+    apply(overrides);
+    await modules.postgres.resetPostgresPool();
+
+    try {
+      return await callback();
+    } finally {
+      apply(previous);
+      await modules.postgres.resetPostgresPool();
+    }
+  };
+  const settingNow = async (name) =>
+    (await modules.postgres.queryPostgres("SELECT current_setting($1) AS value", [name])).rows[0].value;
+
+  test("POSTGRES_STATEMENT_TIMEOUT_MS cancels tenant statements and tenant transactions, ends with them, and never limits owner work", async () => {
+    // The server's own value, read on the owner path before the limit is on.
+    const serverDefault = await settingNow("statement_timeout");
+
+    // One connection, so the owner statement afterwards provably reuses the
+    // connection the tenant statements set the limit on.
+    await withPostgresEnv({ POSTGRES_POOL_MAX: "1", POSTGRES_STATEMENT_TIMEOUT_MS: "200" }, async () => {
+      await assert.rejects(asAlice(() => modules.postgres.queryPostgres("SELECT pg_sleep(2)")), { code: "57014" });
+      await assert.rejects(
+        asAlice(() => modules.postgres.withPostgresTransaction((client) => client.query("SELECT pg_sleep(2)"))),
+        { code: "57014" }
+      );
+      assert.equal(await asAlice(() => settingNow("statement_timeout")), "200ms");
+      // The cancelled statements left the tenant's view intact.
+      assert.deepEqual(await asAlice(() => scopedRows(tables.tasks)), ["alice"]);
+
+      const owner = await modules.postgres.queryPostgres(
+        "SELECT current_setting('statement_timeout') AS value, (SELECT true FROM pg_sleep(0.4)) AS slept"
+      );
+
+      assert.equal(owner.rows[0].value, serverDefault, "the limit did not outlive its transaction");
+      assert.equal(owner.rows[0].slept, true, "owner work ran past the tenant limit");
+    });
+  });
+
+  test("POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS ends a tenant transaction held idle; the process survives and the next statement gets a new connection", async () => {
+    const serverDefault = await settingNow("idle_in_transaction_session_timeout");
+
+    await withPostgresEnv({ POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS: "200", POSTGRES_POOL_MAX: "1" }, async () => {
+      assert.equal(
+        await asAlice(() =>
+          modules.postgres.withPostgresTransaction(async (client) =>
+            (await client.query("SELECT current_setting('idle_in_transaction_session_timeout') AS value")).rows[0].value
+          )
+        ),
+        "200ms"
+      );
+
+      const heldBackend = { pid: null };
+
+      // The server terminates the session while the callback waits; a
+      // checked-out client's 'error' must not end the process.
+      await assert.rejects(
+        asAlice(() =>
+          modules.postgres.withPostgresTransaction(async (client) => {
+            heldBackend.pid = (await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+            await new Promise((resolve) => setTimeout(resolve, 800));
+
+            return client.query("SELECT 1");
+          })
+        )
+      );
+
+      const next = await asAlice(() => modules.postgres.queryPostgres("SELECT pg_backend_pid() AS pid"));
+
+      assert.notEqual(next.rows[0].pid, heldBackend.pid, "the ended session was not pooled again");
+      assert.equal(await settingNow("idle_in_transaction_session_timeout"), serverDefault);
+    });
+  });
+
+  test("POSTGRES_TENANT_CONTEXT=strict refuses an unbound statement and lets system, unscoped and tenant work through", async () => {
+    const originalConsoleError = console.error;
+
+    console.error = () => {};
+
+    try {
+      await withPostgresEnv({ POSTGRES_TENANT_CONTEXT: "strict" }, async () => {
+        await assert.rejects(modules.postgres.queryPostgres(`SELECT 1 FROM ${tables.tasks}`), {
+          code: "ARCHIVE_RAG_TENANT_CONTEXT_MISSING",
+        });
+        await assert.rejects(
+          modules.postgres.withPostgresTransaction((client) => client.query("SELECT 1")),
+          { code: "ARCHIVE_RAG_TENANT_CONTEXT_MISSING" }
+        );
+        assert.deepEqual(await modules.tenant.runAsDatabaseSystem(() => scopedRows(tables.tasks)), ["alice", "bob"]);
+        // Unscoped (an auth-off request) is the owner, as before strict mode.
+        assert.deepEqual(await modules.tenant.runWithDatabaseTenant({}, () => scopedRows(tables.tasks)), [
+          "alice",
+          "bob",
+        ]);
+        assert.deepEqual(await asAlice(() => scopedRows(tables.tasks)), ["alice"]);
+      });
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  test("answer feedback is stored per tenant, read back exactly, and append-only for the tenant role", async () => {
+    const [{ buildFeedbackRecord }, { createPostgresFeedbackStore }] = await Promise.all([
+      import("../feedback.js"),
+      import("../rag/postgres-feedback-store.js"),
+    ]);
+    const q = modules.postgres.queryPostgres;
+    const feedbackTable = modules.config.getFeedbackPostgresTable();
+    const store = createPostgresFeedbackStore();
+    const asBob = (callback) => modules.tenant.runWithDatabaseTenant(BOB, callback);
+    const build = (accessScope, question) =>
+      buildFeedbackRecord({
+        accessScope,
+        payload: {
+          answerText: `${question} answer`,
+          feedbackType: "incomplete",
+          question,
+          // Key order and the \u0000 escape must survive the json column.
+          skills: [{ id: "document_rag", label: "nul\u0000label", status: "completed", version: "1" }],
+          userId: "mallory",
+          workspaceId: "ws-mallory",
+        },
+      });
+    const aliceRecord = build(ALICE, "alice question");
+    const bobRecord = build(BOB, "bob question");
+    const ids = (records) => records.map((record) => record.feedbackId);
+
+    try {
+      assert.deepStrictEqual(await asAlice(() => store.recordFeedback(aliceRecord)), aliceRecord);
+      await asBob(() => store.recordFeedback(bobRecord));
+      // Auth disabled without a user: the owner path, a record no tenant sees.
+      const unowned = await store.recordFeedback(build({}, "unowned question"));
+
+      const owners = await q(
+        `SELECT owner_user_id, workspace_id FROM ${feedbackTable} ORDER BY id`
+      );
+
+      assert.deepEqual(
+        owners.rows.map((row) => [row.owner_user_id, row.workspace_id]),
+        [
+          ["alice", "ws-a"],
+          ["bob", "ws-b"],
+          ["", ""],
+        ],
+        "the payload's user and workspace are never the record's"
+      );
+
+      const aliceSees = await asAlice(() => store.listFeedback({ accessScope: ALICE }));
+
+      assert.deepStrictEqual(aliceSees, [aliceRecord]);
+      assert.deepEqual(Object.keys(aliceSees[0]), Object.keys(aliceRecord));
+      assert.deepEqual(Object.keys(aliceSees[0].skills[0]), ["skillId", "skillVersion", "label", "status"]);
+      assert.equal(aliceSees[0].skills[0].label, "nul\u0000label");
+
+      // A store call that forgot its filter, or names another tenant, still
+      // returns only the bound tenant's rows.
+      assert.deepEqual(ids(await asAlice(() => store.listFeedback({ accessScope: {} }))), [aliceRecord.feedbackId]);
+      assert.deepEqual(await asAlice(() => store.listFeedback({ accessScope: BOB })), []);
+      assert.deepEqual(ids(await asAlice(() => store.listAllFeedback())), [aliceRecord.feedbackId]);
+      // A scope naming no tenant (the single shared token; requireApiAuth
+      // refuses every other such scope) reads like the owner path (auth
+      // disabled, operator tools): every record.
+      assert.equal(
+        (await store.listFeedback({ accessScope: { authenticated: true }, limit: 100 })).length,
+        (await store.listAllFeedback()).length
+      );
+      assert.deepEqual(ids(await store.listAllFeedback()), [
+        aliceRecord.feedbackId,
+        bobRecord.feedbackId,
+        unowned.feedbackId,
+      ]);
+
+      await asBob(async () => {
+        const visible = await q(`SELECT feedback_id FROM ${feedbackTable} ORDER BY id`);
+
+        assert.deepEqual(visible.rows.map((row) => row.feedback_id), [bobRecord.feedbackId]);
+        await assert.rejects(
+          store.recordFeedback({ ...aliceRecord, feedbackId: "forged-for-alice" }),
+          (error) => error.code === "42501" && /row-level security/.test(error.message)
+        );
+        await assert.rejects(
+          store.recordFeedback({ ...unowned, feedbackId: "forged-unowned" }),
+          (error) => error.code === "42501"
+        );
+
+        // No request changes or removes feedback, its own included.
+        for (const statement of [
+          `UPDATE ${feedbackTable} SET note = 'changed'`,
+          `DELETE FROM ${feedbackTable}`,
+        ]) {
+          await assert.rejects(q(statement), (error) => error.code === "42501");
+        }
+      });
+
+      // npm run feedback:import runs as the owner and keeps what is stored.
+      const imported = await modules.tenant.runAsDatabaseSystem(() =>
+        store.importFeedback([
+          { ...aliceRecord, note: "imported copy" },
+          { ...bobRecord, expectedAnswerIncludes: ["approval"], feedbackId: "imported-bob" },
+        ])
+      );
+
+      assert.deepEqual(imported, { alreadyPresent: 1, inserted: 1 });
+      assert.equal((await asAlice(() => store.listFeedback({ accessScope: ALICE })))[0].note, "");
+
+      const bobSees = await asBob(() => store.listFeedback({ accessScope: BOB, limit: 10 }));
+
+      assert.deepEqual(ids(bobSees).sort(), [bobRecord.feedbackId, "imported-bob"].sort());
+      assert.deepEqual(
+        bobSees.find((record) => record.feedbackId === "imported-bob").expectedAnswerIncludes,
+        ["approval"]
+      );
+    } finally {
+      await q(`DELETE FROM ${feedbackTable}`);
+    }
+  });
+
+  test("the tenant registry is read-only for the tenant role: its own workspace row and its own memberships", async () => {
+    const {
+      createPostgresTenantRegistryStore,
+      createTenantRegistryService,
+      decideTenantMembership,
+    } = await import("../rag/tenant-registry.js");
+    const q = modules.postgres.queryPostgres;
+    const workspacesTable = modules.config.getWorkspacesPostgresTable();
+    const membersTable = modules.config.getWorkspaceMembersPostgresTable();
+    const registry = createTenantRegistryService({
+      cacheTtlMs: 0,
+      store: createPostgresTenantRegistryStore(),
+    });
+    const asSystem = (callback) => modules.tenant.runAsDatabaseSystem(callback);
+    const asTenant = (scope, callback) => modules.tenant.runWithDatabaseTenant(scope, callback);
+    const visible = async () => ({
+      members: (
+        await q(`SELECT workspace_id, user_id FROM ${membersTable} ORDER BY 1, 2`)
+      ).rows.map((row) => `${row.workspace_id}/${row.user_id}`),
+      workspaces: (
+        await q(`SELECT workspace_id FROM ${workspacesTable} ORDER BY 1`)
+      ).rows.map((row) => row.workspace_id),
+    });
+
+    try {
+      await asSystem(async () => {
+        await registry.createWorkspace({ plan: "team", retentionPolicy: { agentRuns: 30 }, workspaceId: "ws-a" });
+        await registry.createWorkspace({ workspaceId: "ws-b" });
+        await registry.putMember({ roles: ["workspace.admin"], userId: "alice", workspaceId: "ws-a" });
+        await registry.putMember({ roles: ["workspace.viewer"], userId: "alice", workspaceId: "ws-b" });
+        await registry.putMember({ userId: "bob", workspaceId: "ws-b" });
+      });
+
+      // Read back exactly through the system path (jsonb, text[]).
+      const stored = await asSystem(() => registry.getWorkspace("ws-a"));
+
+      assert.deepEqual(stored.retentionPolicy, { agentRuns: 30 });
+      assert.equal(stored.plan, "team");
+      assert.equal(
+        (await asSystem(() => registry.putMember({ roles: ["workspace.admin"], userId: "alice", workspaceId: "ws-a" })))
+          .created,
+        false
+      );
+
+      // Alice in ws-a: her workspace's row and her membership there only.
+      assert.deepEqual(await asAlice(visible), { members: ["ws-a/alice"], workspaces: ["ws-a"] });
+      // A user-only tenant: its own memberships in every workspace, no row.
+      assert.deepEqual(await asTenant({ userId: "alice", workspaceId: "" }, visible), {
+        members: ["ws-a/alice", "ws-b/alice"],
+        workspaces: [],
+      });
+      // A workspace-only tenant: its row, no membership.
+      assert.deepEqual(await asTenant({ userId: "", workspaceId: "ws-b" }, visible), {
+        members: [],
+        workspaces: ["ws-b"],
+      });
+      // Bob inside ws-a, where he is no member.
+      assert.deepEqual(await asTenant({ userId: "bob", workspaceId: "ws-a" }, visible), {
+        members: [],
+        workspaces: ["ws-a"],
+      });
+
+      // The tenant role writes nothing, its own rows included.
+      await asAlice(async () => {
+        for (const statement of [
+          `INSERT INTO ${workspacesTable} (workspace_id) VALUES ('ws-forged')`,
+          `UPDATE ${workspacesTable} SET status = 'suspended'`,
+          `DELETE FROM ${workspacesTable}`,
+          `INSERT INTO ${membersTable} (workspace_id, user_id) VALUES ('ws-a', 'mallory')`,
+          `UPDATE ${membersTable} SET roles = ARRAY['workspace.admin']`,
+          `DELETE FROM ${membersTable}`,
+        ]) {
+          await assert.rejects(q(statement), (error) => error.code === "42501", statement);
+        }
+
+        await assert.rejects(registry.createWorkspace({ workspaceId: "ws-forged" }), (error) => error.code === "42501");
+      });
+
+      // The enforcement lookups bind the tenant they check and decide
+      // through those policies.
+      assert.deepEqual(await decideTenantMembership({ registry, userId: "alice", workspaceId: "ws-a" }), {
+        allowed: true,
+        roles: ["workspace.admin"],
+      });
+      assert.equal(
+        (await decideTenantMembership({ registry, userId: "bob", workspaceId: "ws-a" })).code,
+        "WORKSPACE_MEMBERSHIP_REQUIRED"
+      );
+      assert.deepEqual(
+        await decideTenantMembership({ registry, workspaceBoundByPrincipal: true, workspaceId: "ws-b" }),
+        { allowed: true, roles: [] }
+      );
+
+      await asSystem(() => registry.suspendWorkspace("ws-b"));
+      assert.equal(
+        (await decideTenantMembership({ registry, userId: "bob", workspaceId: "ws-b" })).code,
+        "WORKSPACE_SUSPENDED"
+      );
+      await asSystem(() => registry.setWorkspaceStatus("ws-b", "deleting"));
+      await assert.rejects(
+        asSystem(() => registry.activateWorkspace("ws-b")),
+        (error) => error.code === "WORKSPACE_DELETING"
+      );
+
+      // Removing a workspace row removes its memberships.
+      await q(`DELETE FROM ${workspacesTable} WHERE workspace_id = 'ws-b'`);
+      assert.deepEqual((await visible()).members, ["ws-a/alice"]);
+    } finally {
+      await q(`DELETE FROM ${workspacesTable}`);
+    }
+  });
+
+  test("the tenant usage ledger is written as system work and read by a tenant only for its own pair", async () => {
+    const [usage, quota] = await Promise.all([
+      import("../rag/tenant-usage.js"),
+      import("../rag/tenant-storage-quota.js"),
+    ]);
+    const q = modules.postgres.queryPostgres;
+    const usageTable = modules.config.getTenantUsagePostgresTable();
+    const asBob = (callback) => modules.tenant.runWithDatabaseTenant(BOB, callback);
+    const hour = Date.UTC(2026, 9, 17, 10);
+    const ledger = usage.createTenantUsageLedger({
+      isDatabaseConfigured: () => true,
+      isEnabled: () => true,
+      now: () => hour + 5 * 60 * 1000,
+      setTimer: () => null,
+    });
+    const top = (options = {}) =>
+      usage.listTenantUsageTop({
+        from: new Date(hour - 60 * 60 * 1000),
+        metric: usage.TENANT_USAGE_METRICS.modelTokens,
+        to: new Date(hour + 2 * 60 * 60 * 1000),
+        ...options,
+      });
+
+    try {
+      ledger.record(ALICE, { model_tokens: 120, model_cost_micro_usd: 7 });
+      ledger.record(ALICE, { model_tokens: 30 });
+      ledger.record(BOB, { model_tokens: 500 });
+      ledger.record(null, { model_tokens: 9 });
+      // Recorded inside a tenant request, flushed as system work all the same.
+      assert.deepEqual(await asAlice(() => ledger.flush()), { rows: 4 });
+      // A second flush adds to the stored totals.
+      ledger.record(ALICE, { model_tokens: 50 });
+      await ledger.flush();
+
+      const stored = await q(
+        `SELECT workspace_id, owner_user_id, metric, value::text AS value, period_start
+         FROM ${usageTable} ORDER BY workspace_id, owner_user_id, metric`
+      );
+
+      assert.deepEqual(
+        stored.rows.map((row) => [row.workspace_id, row.owner_user_id, row.metric, row.value]),
+        [
+          ["", "", "model_tokens", "9"],
+          ["ws-a", "alice", "model_cost_micro_usd", "7"],
+          ["ws-a", "alice", "model_tokens", "200"],
+          ["ws-b", "bob", "model_tokens", "500"],
+        ]
+      );
+      assert.equal(new Date(stored.rows[0].period_start).getTime(), hour);
+
+      // The platform view, as GET /admin/usage reads it.
+      const platform = await modules.tenant.runAsDatabaseSystem(() => top());
+
+      assert.deepEqual(platform.rows, [
+        { userId: "bob", value: 500, workspaceId: "ws-b" },
+        { userId: "alice", value: 200, workspaceId: "ws-a" },
+        { userId: "", value: 9, workspaceId: "" },
+      ]);
+      assert.deepEqual(
+        (await modules.tenant.runAsDatabaseSystem(() => top({ workspaceId: "ws-a" }))).rows,
+        [{ userId: "alice", value: 200, workspaceId: "ws-a" }]
+      );
+
+      // A tenant sees its own pair only, whatever it asks for, and writes nothing.
+      assert.deepEqual((await asAlice(() => top())).rows, [{ userId: "alice", value: 200, workspaceId: "ws-a" }]);
+      assert.deepEqual((await asAlice(() => top({ workspaceId: "ws-b" }))).rows, []);
+      await asBob(async () => {
+        await assert.rejects(
+          q(
+            `INSERT INTO ${usageTable} (workspace_id, owner_user_id, metric, period_start, value)
+             VALUES ('ws-b', 'bob', 'model_tokens', '2026-10-17T10:00:00Z', 1)`
+          ),
+          (error) => error.code === "42501"
+        );
+        await assert.rejects(q(`UPDATE ${usageTable} SET value = 0`), (error) => error.code === "42501");
+        await assert.rejects(q(`DELETE FROM ${usageTable}`), (error) => error.code === "42501");
+      });
+      // Periods are whole hours.
+      await assert.rejects(
+        q(
+          `INSERT INTO ${usageTable} (workspace_id, owner_user_id, metric, period_start, value)
+           VALUES ('ws-a', 'alice', 'model_tokens', '2026-10-17T10:30:00Z', 1)`
+        ),
+        (error) => error.code === "23514"
+      );
+
+      // Storage totals count a workspace's documents across users, as the
+      // owner, but answer a tenant only for its own quota scope.
+      await q(
+        `INSERT INTO ${tables.documents} (doc_id, file_name, file_bytes, file_size, owner_user_id, workspace_id)
+         VALUES ('doc-carol', 'doc-carol.pdf', $1, 300, 'carol', 'ws-a')`,
+        [Buffer.from("%PDF-1.4")]
+      );
+
+      const workspaceA = { kind: "workspace", userId: "", workspaceId: "ws-a" };
+
+      assert.deepEqual(await asAlice(() => quota.readTenantStorageTotals(workspaceA, { registryShared: () => true })), {
+        documentBytes: 300,
+        documentCount: 2,
+      });
+      assert.deepEqual(
+        await asAlice(() =>
+          modules.postgres.withPostgresTransaction((client) =>
+            quota.readTenantStorageTotals(workspaceA, { client })
+          )
+        ),
+        { documentBytes: 300, documentCount: 2 }
+      );
+      await assert.rejects(
+        asAlice(() =>
+          quota.readTenantStorageTotals(
+            { kind: "workspace", userId: "", workspaceId: "ws-b" },
+            { registryShared: () => true }
+          )
+        ),
+        (error) => error.code === "42501"
+      );
+      await assert.rejects(
+        asAlice(() =>
+          quota.readTenantStorageTotals({ kind: "user", userId: "alice", workspaceId: "" }, { registryShared: () => true })
+        ),
+        (error) => error.code === "42501"
+      );
+      assert.deepEqual(
+        await quota.readTenantStorageTotals(
+          { kind: "workspace", userId: "", workspaceId: "ws-b" },
+          { registryShared: () => true }
+        ),
+        { documentBytes: 0, documentCount: 1 }
+      );
+
+      // The commit-path check: the quota lock and the count in one tenant
+      // transaction.
+      await asAlice(() =>
+        modules.postgres.withPostgresTransaction(async (client) => {
+          await assert.rejects(
+            quota.assertTenantStorageQuota({
+              addedBytes: 10,
+              addedDocuments: 1,
+              client,
+              limits: { maxDocumentBytes: 0, maxDocuments: 2 },
+              lock: true,
+              ownerUserId: "alice",
+              workspaceId: "ws-a",
+            }),
+            (error) => error.code === quota.TENANT_STORAGE_QUOTA_EXCEEDED && error.status === 429
+          );
+        })
+      );
+    } finally {
+      await q(`DELETE FROM ${usageTable}`);
+      await q(`DELETE FROM ${tables.documents} WHERE doc_id = 'doc-carol'`);
+    }
+  });
+
+  // rag/document-deletion-cascade.js with DOCUMENT_DELETE_REDACTION=on, over
+  // the real stores and their statements: runs and artifacts under the
+  // tenant's policy, feedback on the system path with its owner filter.
+  test("deleting a document redacts its text in the tenant's own settled runs, artifacts and feedback, never another tenant's", async () => {
+    const [
+      { buildFeedbackRecord },
+      { createPostgresFeedbackStore },
+      { createPostgresAgentRunStore },
+      { createPostgresWorkspaceArtifactStore, createWorkspaceArtifactService },
+      { createDocumentDeletionCascade },
+      { DELETED_SOURCE_TEXT_MARKER },
+    ] = await Promise.all([
+      import("../feedback.js"),
+      import("../rag/postgres-feedback-store.js"),
+      import("../rag/postgres-agent-run-store.js"),
+      import("../rag/workspace-artifacts/index.js"),
+      import("../rag/document-deletion-cascade.js"),
+      import("../rag/document-deletion-redaction.js"),
+    ]);
+    const q = modules.postgres.queryPostgres;
+    const asBob = (callback) => modules.tenant.runWithDatabaseTenant(BOB, callback);
+    const excerpt = "Deleted clause: employees receive twelve paid leave days.";
+    const docId = "doc-redacted-it";
+    const citation = { chunkIndex: 0, docId, excerpt, fileName: "leave.pdf", pageNumber: 1 };
+    const agentRunStore = createPostgresAgentRunStore();
+    const artifactStore = createPostgresWorkspaceArtifactStore();
+    const feedbackStore = createPostgresFeedbackStore();
+    const createRun = (runId, status) =>
+      agentRunStore.create({
+        accessScope: modules.tenant.getActiveDatabaseTenant(),
+        run: {
+          goal: "leave",
+          result: { answer: "Twelve days [Source 1]." },
+          runId,
+          status,
+          steps: [{ id: "step:1", output: { citations: [citation] }, status: "completed", type: "document_rag" }],
+        },
+      });
+    const createArtifact = (artifactId) =>
+      createWorkspaceArtifactService({ createArtifactId: () => artifactId, store: artifactStore }).createArtifact({
+        accessScope: modules.tenant.getActiveDatabaseTenant(),
+        artifact: {
+          artifactType: "report",
+          citationManifest: [citation],
+          content: `Report quoting: ${excerpt}`,
+          docIds: [docId],
+          idempotencyKey: `key-${artifactId}`,
+          title: "Leave report",
+        },
+      });
+    const recordFeedback = (scope) =>
+      feedbackStore.recordFeedback(
+        buildFeedbackRecord({
+          accessScope: scope,
+          payload: { answerText: "Twelve days.", citations: [citation], feedbackType: "helpful", question: "leave?" },
+        })
+      );
+    const previous = process.env.DOCUMENT_DELETE_REDACTION;
+
+    try {
+      await asAlice(() => createRun("run-alice-done", "completed"));
+      await asAlice(() => createRun("run-alice-active", "running"));
+      await asBob(() => createRun("run-bob-done", "completed"));
+      await asAlice(() => createArtifact("artifact-alice"));
+      await asBob(() => createArtifact("artifact-bob"));
+      await asAlice(() => recordFeedback(ALICE));
+      await asBob(() => recordFeedback(BOB));
+
+      process.env.DOCUMENT_DELETE_REDACTION = "on";
+
+      const cascade = createDocumentDeletionCascade({ agentRunStore, feedbackStore, workspaceArtifactStore: artifactStore });
+      const summary = await asAlice(() => cascade.afterDocumentsDeleted({ accessScope: ALICE, docIds: [docId] }));
+
+      assert.deepEqual(summary.redaction.agentRuns, { conflicts: 0, redacted: 1, skippedActive: 1, unchanged: 0 });
+      assert.deepEqual(summary.redaction.artifacts, { conflicts: 0, redacted: 1, unchanged: 0 });
+      assert.deepEqual(summary.redaction.feedback, { redacted: 1 });
+
+      const aliceRun = await asAlice(() => agentRunStore.get({ accessScope: ALICE, runId: "run-alice-done" }));
+
+      assert.equal(aliceRun.steps[0].output.citations[0].excerpt, DELETED_SOURCE_TEXT_MARKER);
+      assert.equal(aliceRun.steps[0].output.citations[0].docId, docId);
+      assert.equal(aliceRun.revision, 1);
+      assert.equal(
+        (await asAlice(() => agentRunStore.get({ accessScope: ALICE, runId: "run-alice-active" }))).steps[0].output.citations[0].excerpt,
+        excerpt,
+        "a run still running is left for its resume"
+      );
+      assert.equal(
+        (await asBob(() => agentRunStore.get({ accessScope: BOB, runId: "run-bob-done" }))).steps[0].output.citations[0].excerpt,
+        excerpt
+      );
+
+      const aliceArtifact = await asAlice(() => artifactStore.getArtifact({ accessScope: ALICE, artifactId: "artifact-alice" }));
+
+      assert.equal(aliceArtifact.sourceDeleted, true);
+      assert.deepEqual(aliceArtifact.sourceDeletedDocIds, [docId]);
+      assert.equal(aliceArtifact.content.includes(excerpt), false);
+      assert.equal(aliceArtifact.citationManifest[0].excerpt, DELETED_SOURCE_TEXT_MARKER);
+      assert.equal(
+        (await asBob(() => artifactStore.getArtifact({ accessScope: BOB, artifactId: "artifact-bob" }))).sourceDeleted,
+        undefined
+      );
+
+      assert.equal(
+        (await asAlice(() => feedbackStore.listFeedback({ accessScope: ALICE })))[0].citations[0].excerpt,
+        DELETED_SOURCE_TEXT_MARKER
+      );
+      assert.equal((await asBob(() => feedbackStore.listFeedback({ accessScope: BOB })))[0].citations[0].excerpt, excerpt);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DOCUMENT_DELETE_REDACTION;
+      } else {
+        process.env.DOCUMENT_DELETE_REDACTION = previous;
+      }
+
+      await q(`DELETE FROM ${modules.config.getFeedbackPostgresTable()}`);
+      await q(`DELETE FROM ${modules.config.getWorkspaceArtifactsPostgresTable()} WHERE artifact_id IN ('artifact-alice', 'artifact-bob')`);
+      await q(
+        `DELETE FROM ${modules.config.getAgentRunsPostgresTable()} WHERE run_id IN ('run-alice-done', 'run-alice-active', 'run-bob-done')`
+      );
+    }
   });
 
   test("POSTGRES_ROW_LEVEL_SECURITY=off keeps the owner connection", async () => {

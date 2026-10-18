@@ -6,6 +6,7 @@ import { createDocumentLegacyImporter as createDefaultDocumentLegacyImporter } f
 import { buildPublicFilePath } from "./document-utils.js";
 import { queryPostgres as queryDefaultPostgres } from "./postgres.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
+import { createPostgresTenantRecordMethods, tenantSelectorMatches } from "./tenant-records.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -356,6 +357,25 @@ export const createDocumentRegistryStore = ({
 } = {}) => ({
   backend: DOCUMENT_REGISTRY_BACKENDS.postgres,
 
+  // The tenant export (rag/tenant-records.js): the tenant's rows with their
+  // file bytes, a few at a time. An erase goes through rag/index.js
+  // eraseTenantDocuments instead (chunks first, in the writers' lock order),
+  // so this listing cannot delete.
+  ...createPostgresTenantRecordMethods({
+    allowDelete: false,
+    initialize: () => runMigrations(),
+    query: queryPostgres,
+    tables: () => [
+      {
+        keyColumns: ["doc_id"],
+        name: "documents",
+        pageSize: 5,
+        table: ensureTableName(getDocumentsTable),
+        userColumn: "owner_user_id",
+      },
+    ],
+  }),
+
   async initialize() {
     await runMigrations();
 
@@ -421,6 +441,28 @@ export const createDocumentRegistryStore = ({
     return result.rows
       .map(mapRowToStoredDocument)
       .filter((document) => documentMatchesAccessScope(document, accessScope));
+  },
+
+  // The tenant erase (rag/tenant-records.js): metadata of the rows whose owner
+  // columns match a tenant selector exactly ({ workspaceId, userId|null }; a
+  // null user is every user of the workspace), not the visibility rule.
+  async listForTenant(selector = {}) {
+    const result = await queryDocumentColumns(
+      queryPostgres,
+      (columns) => `
+        SELECT ${columns}
+        FROM ${ensureTableName(getDocumentsTable)}
+        WHERE workspace_id = $1
+          AND ($2::text IS NULL OR owner_user_id = $2::text)
+        ORDER BY uploaded_at ASC, doc_id ASC
+      `,
+      [
+        String(selector.workspaceId ?? ""),
+        selector.userId === null || selector.userId === undefined ? null : String(selector.userId),
+      ]
+    );
+
+    return result.rows.map(mapRowToStoredDocument);
   },
 
   // Metadata of the named documents only (no file bytes), for a process that
@@ -656,6 +698,56 @@ export const createDocumentRegistryStore = ({
     );
 
     return result.rows[0] ? mapRowToStoredDocument(result.rows[0]) : null;
+  },
+
+  /**
+   * The tenant erase (rag/index.js eraseTenantDocuments): locks the named
+   * rows that still belong to `owner` (FOR UPDATE, in doc_id order, before
+   * any chunk row, as ingest and replacement lock), lets `beforeDelete`
+   * remove their chunks on the same client, then deletes the rows and
+   * returns them. `owner` is the tenant selector ({ workspaceId, userId|null }),
+   * so a row whose owner columns no longer match is neither locked nor deleted.
+   */
+  async eraseMany(docIds = [], { beforeDelete = null, client = null, owner } = {}) {
+    const normalizedDocIds = normalizeDocIds(docIds);
+
+    if (normalizedDocIds.length === 0) {
+      return [];
+    }
+
+    const tableName = ensureTableName(getDocumentsTable);
+    const query = resolveQuery(queryPostgres, client);
+    const userId = owner?.userId === null || owner?.userId === undefined ? null : String(owner.userId);
+    const locked = await query(
+      `
+        SELECT doc_id
+        FROM ${tableName}
+        WHERE doc_id = ANY($1::text[])
+          AND workspace_id = $2
+          AND ($3::text IS NULL OR owner_user_id = $3::text)
+        ORDER BY doc_id
+        FOR UPDATE
+      `,
+      [normalizedDocIds, String(owner?.workspaceId ?? ""), userId]
+    );
+    const lockedDocIds = (locked?.rows ?? []).map((row) => String(row.doc_id));
+
+    if (lockedDocIds.length === 0) {
+      return [];
+    }
+
+    await beforeDelete?.(lockedDocIds);
+
+    const result = await query(
+      `
+        DELETE FROM ${tableName}
+        WHERE doc_id = ANY($1::text[])
+        RETURNING ${DOCUMENT_METADATA_COLUMNS}
+      `,
+      [lockedDocIds]
+    );
+
+    return (result?.rows ?? []).map(mapRowToStoredDocument);
   },
 
   // Deletes the scope's rows (every row when the scope is empty) in one
@@ -1181,6 +1273,16 @@ export const getDocuments = (docIds, accessScope = {}) =>
     .map((docId) => getDocument(docId, accessScope))
     .filter(Boolean);
 
+// Owner pair and stored size of every document in this process's map, for the
+// storage quotas (rag/tenant-storage-quota.js) where the map is the whole
+// registry (one writer). Copies, never the map's own entries.
+export const listStoredDocumentSizes = () =>
+  [...documentRegistry.values()].map((document) => ({
+    fileSize: document.fileSize,
+    ownerUserId: document.ownerUserId,
+    workspaceId: document.workspaceId,
+  }));
+
 export const listDocuments = (accessScope = {}) =>
   [...documentRegistry.values()]
     .filter((document) => documentMatchesAccessScope(document, accessScope))
@@ -1259,6 +1361,104 @@ export const clearDocuments = async ({
 
   documentRegistryInitialized = true;
   return cleared;
+};
+
+/**
+ * The registry store the tenant export lists documents from (its
+ * iterateTenantRecords or listTenantRecords, with the file bytes), as
+ * getSessionMemoryTenantRecordStore in memory.js: `not_configured` without a
+ * database or a configured store, `unsupported` for a configured store
+ * without the calls.
+ */
+export const getDocumentRegistryTenantRecordStore = () => {
+  if (configuredDocumentRegistryStore) {
+    return typeof configuredDocumentRegistryStore.listTenantRecords === "function" ||
+      typeof configuredDocumentRegistryStore.iterateTenantRecords === "function"
+      ? { status: "ok", store: configuredDocumentRegistryStore }
+      : { status: "unsupported", store: null };
+  }
+
+  return isPostgresDatabaseConfigured()
+    ? { status: "ok", store: getDocumentRegistryStore() }
+    : { status: "not_configured", store: null };
+};
+
+/**
+ * The stored documents of one tenant selector (rag/tenant-records.js), for
+ * the tenant erase and export: read from the store as the system (metadata
+ * only), so documents another process registered that this map never loaded
+ * count too, and matched on the owner columns exactly. Without a store that
+ * can list (no database and no file registry), this process's map is all
+ * there is.
+ */
+export const listStoredDocumentsForTenant = async (selector) => {
+  const store = getDocumentRegistryStore();
+  const storeAnswers = Boolean(configuredDocumentRegistryStore) || isPostgresDatabaseConfigured();
+  const documents =
+    storeAnswers && typeof store.listForTenant === "function"
+      ? await runAsDatabaseSystem(() => store.listForTenant(selector))
+      : storeAnswers && typeof store.list === "function"
+        ? await runAsDatabaseSystem(() => store.list())
+        : [...documentRegistry.values()];
+
+  return documents
+    .map((document) => toStoredDocument(document))
+    .filter((document) => document.docId && tenantSelectorMatches(selector, document))
+    .sort(compareByUploadOrder);
+};
+
+/**
+ * Erases the named documents of `selector` from the store and this process's
+ * map, and returns the stored documents erased. A PostgreSQL store does it in
+ * one locked statement on `client` (eraseMany: rows that no longer belong to
+ * the selector are left alone); other stores, which have one writer, per
+ * document. `beforeDelete(docIds)` runs first with the ids about to go, on the
+ * same transaction when there is one (the pgvector chunk rows). The map
+ * entries go before the caller's COMMIT, as deleteDocument's do; a caller
+ * whose transaction rolls back re-reads them (resyncDocument).
+ */
+export const eraseStoredDocuments = async (
+  docIds,
+  { beforeDelete = null, client = null, selector } = {}
+) => {
+  const store = getDocumentRegistryStore();
+  const requestedDocIds = normalizeDocIds(docIds);
+  let erased;
+
+  if (typeof store.eraseMany === "function" && (client || isDocumentRegistryShared())) {
+    erased = (
+      await store.eraseMany(requestedDocIds, { beforeDelete, client, owner: selector })
+    ).map((document) => toStoredDocument(document));
+  } else {
+    await beforeDelete?.(requestedDocIds);
+    erased = [];
+
+    for (const docId of requestedDocIds) {
+      const known = documentRegistry.get(docId) ?? null;
+
+      if (known && !tenantSelectorMatches(selector, known)) {
+        continue;
+      }
+
+      if (typeof store.delete === "function") {
+        const deleted = await store.delete(docId, {}, { client });
+
+        if (deleted) {
+          erased.push(toStoredDocument(deleted));
+        } else if (known) {
+          erased.push(known);
+        }
+      } else if (known) {
+        erased.push(known);
+      }
+    }
+  }
+
+  for (const document of erased) {
+    documentRegistry.delete(document.docId);
+  }
+
+  return erased;
 };
 
 /**

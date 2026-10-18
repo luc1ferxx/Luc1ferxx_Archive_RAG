@@ -6,9 +6,11 @@ import {
 } from "./config.js";
 import { resetPostgresMigrations, runPostgresMigrations } from "./db-migrations.js";
 import {
+  isPostgresConfigured,
   queryLongMemoryPostgres,
   resetLongMemoryPostgresPool,
 } from "./postgres.js";
+import { createPostgresTenantRecordMethods } from "./tenant-records.js";
 import { extractMeaningfulTokens, normalizeWhitespace } from "./text-utils.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -368,9 +370,45 @@ const createDefaultStore = () => ({
 
     return Number(result.rowCount ?? 0);
   },
+
+  // The tenant erase and export (rag/tenant-records.js): every category and
+  // archived row of the user, whatever RAG_LONG_MEMORY_ENABLED says now (a
+  // memory written while it was on is still the user's). The table has no
+  // workspace column, so only a selector that names a user reaches it.
+  ...createPostgresTenantRecordMethods({
+    initialize: () => runPostgresMigrations(),
+    query: queryLongMemoryPostgres,
+    tables: () => [
+      {
+        keyColumns: ["memory_id"],
+        name: "long_memory",
+        table: ensureTableName(),
+        userColumn: "user_id",
+        userOnly: true,
+      },
+    ],
+  }),
 });
 
 const getLongMemoryStore = () => configuredLongMemoryStore ?? createDefaultStore();
+
+/**
+ * The long-term memory store the tenant erase and export use, as
+ * getSessionMemoryTenantRecordStore in rag/memory.js: `not_configured` when
+ * the default PostgreSQL store has no database, `unsupported` when a
+ * configured store has no tenant record calls.
+ */
+export const getLongMemoryTenantRecordStore = () => {
+  if (configuredLongMemoryStore) {
+    return typeof configuredLongMemoryStore.countTenantRecords === "function"
+      ? { status: "ok", store: configuredLongMemoryStore }
+      : { status: "unsupported", store: null };
+  }
+
+  return isPostgresConfigured()
+    ? { status: "ok", store: getLongMemoryStore() }
+    : { status: "not_configured", store: null };
+};
 
 const addCandidate = (candidates, candidate) => {
   if (!candidate?.text) {

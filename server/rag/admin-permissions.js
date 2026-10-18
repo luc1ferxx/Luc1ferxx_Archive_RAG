@@ -13,6 +13,11 @@ export const ADMIN_PERMISSION_IDS = Object.freeze({
   adminActionRecoveryScan: "admin.actions.recovery_scan",
   adminAuditRead: "admin.audit.read",
   adminStatusRead: "admin.status.read",
+  adminTenantsRead: "admin.tenants.read",
+  adminTenantsWrite: "admin.tenants.write",
+  adminTenantsErase: "admin.tenants.erase",
+  adminTenantsExport: "admin.tenants.export",
+  adminUsageRead: "admin.usage.read",
   agentRunsRecoveryAction: "agent_runs.recovery.action",
   agentTasksAction: "agent_tasks.action",
 });
@@ -22,6 +27,7 @@ export const ADMIN_ROLE_IDS = Object.freeze({
   owner: "admin.owner",
   qualityOperator: "admin.quality_operator",
   recoveryOperator: "admin.recovery_operator",
+  tenantManager: "admin.tenant_manager",
   viewer: "admin.viewer",
 });
 
@@ -90,6 +96,41 @@ export const ADMIN_PERMISSION_CONTRACTS = Object.freeze({
     resource: "admin.audit",
     risk: "read",
   }),
+  [ADMIN_PERMISSION_IDS.adminTenantsRead]: freezeContract({
+    id: ADMIN_PERMISSION_IDS.adminTenantsRead,
+    label: "Read the tenant registry",
+    resource: "admin.tenants",
+    risk: "read",
+  }),
+  [ADMIN_PERMISSION_IDS.adminTenantsWrite]: freezeContract({
+    id: ADMIN_PERMISSION_IDS.adminTenantsWrite,
+    label: "Register, suspend and activate workspaces and manage their members",
+    resource: "admin.tenants",
+    risk: "controlled_write",
+  }),
+  // Tenant erase and export (routes/admin-tenant-lifecycle.js): they read or
+  // remove one tenant's whole archive, so only admin.owner holds them.
+  [ADMIN_PERMISSION_IDS.adminTenantsErase]: freezeContract({
+    id: ADMIN_PERMISSION_IDS.adminTenantsErase,
+    label: "Erase a tenant's data",
+    resource: "admin.tenants",
+    risk: "irreversible_delete",
+  }),
+  [ADMIN_PERMISSION_IDS.adminTenantsExport]: freezeContract({
+    id: ADMIN_PERMISSION_IDS.adminTenantsExport,
+    label: "Export a tenant's data",
+    resource: "admin.tenants",
+    risk: "read_all_tenant_data",
+  }),
+  // GET /admin/usage (routes/admin-usage.js): per-tenant usage totals, every
+  // tenant's for a platform admin, its own workspace's for one scoped to a
+  // workspace.
+  [ADMIN_PERMISSION_IDS.adminUsageRead]: freezeContract({
+    id: ADMIN_PERMISSION_IDS.adminUsageRead,
+    label: "Read tenant usage",
+    resource: "admin.usage",
+    risk: "read",
+  }),
   [ADMIN_PERMISSION_IDS.agentRunsRecoveryAction]: freezeContract({
     id: ADMIN_PERMISSION_IDS.agentRunsRecoveryAction,
     label: "Run agent recovery action",
@@ -106,6 +147,29 @@ export const ADMIN_PERMISSION_CONTRACTS = Object.freeze({
 
 const permissionIds = Object.freeze(Object.values(ADMIN_PERMISSION_IDS));
 
+// The tenant registry permissions (routes/admin-tenants.js) decide which
+// workspaces exist, who belongs to them and with which roles, so they are
+// held apart: only admin.owner and admin.tenant_manager carry them, and
+// admin.operator, which had every admin permission before they existed, keeps
+// exactly the ones it had.
+const TENANT_REGISTRY_PERMISSION_IDS = Object.freeze([
+  ADMIN_PERMISSION_IDS.adminTenantsRead,
+  ADMIN_PERMISSION_IDS.adminTenantsWrite,
+]);
+
+// The permissions only admin.owner holds; admin.operator has every other one.
+export const OWNER_ONLY_ADMIN_PERMISSION_IDS = Object.freeze([
+  ADMIN_PERMISSION_IDS.adminTenantsErase,
+  ADMIN_PERMISSION_IDS.adminTenantsExport,
+]);
+const operatorPermissionIds = Object.freeze(
+  permissionIds.filter(
+    (id) =>
+      !TENANT_REGISTRY_PERMISSION_IDS.includes(id) &&
+      !OWNER_ONLY_ADMIN_PERMISSION_IDS.includes(id)
+  )
+);
+
 export const ADMIN_ACTION_PERMISSION_IDS = Object.freeze({
   [ADMIN_ACTION_IDS.qualityRefresh]:
     ADMIN_PERMISSION_IDS.adminActionQualityRefresh,
@@ -120,6 +184,7 @@ export const ADMIN_ROLE_CONTRACTS = Object.freeze({
     permissionIds: [
       ADMIN_PERMISSION_IDS.adminStatusRead,
       ADMIN_PERMISSION_IDS.adminActionRecoveryScan,
+      ADMIN_PERMISSION_IDS.adminUsageRead,
     ],
   }),
   [ADMIN_ROLE_IDS.qualityOperator]: freezeContract({
@@ -142,10 +207,15 @@ export const ADMIN_ROLE_CONTRACTS = Object.freeze({
       ADMIN_PERMISSION_IDS.agentTasksAction,
     ],
   }),
+  [ADMIN_ROLE_IDS.tenantManager]: freezeContract({
+    id: ADMIN_ROLE_IDS.tenantManager,
+    label: "Tenant manager",
+    permissionIds: TENANT_REGISTRY_PERMISSION_IDS,
+  }),
   [ADMIN_ROLE_IDS.operator]: freezeContract({
     id: ADMIN_ROLE_IDS.operator,
     label: "Admin operator",
-    permissionIds: permissionIds,
+    permissionIds: operatorPermissionIds,
   }),
   [ADMIN_ROLE_IDS.owner]: freezeContract({
     id: ADMIN_ROLE_IDS.owner,
@@ -173,6 +243,22 @@ export const getAdminRoleContract = (roleId) =>
 export const getPermissionForAdminAction = (actionId) =>
   ADMIN_ACTION_PERMISSION_IDS[normalizeScopeId(actionId)] ?? null;
 
+// Neither of these two is required by any route, on purpose. The routes they
+// name (routes/tasks.js) act only on the caller's own runs and tasks:
+//   GET  /agent-runs/recovery
+//   POST /agent-runs/:runId/recovery/actions/:action
+//   POST /tasks/:taskId/actions/:action
+// The run and task stores look a record up by its exact (user, workspace)
+// pair, so another tenant's id is a 404
+// (test/tenant-isolation-route-sweep.test.mjs). They are self-service and RBAC
+// gates them with tasks.run. The operator actions that do cross tenants
+// (recover-tasks, recovery-scan) go through POST /admin/actions/:action, which
+// requires their admin.actions.* permission. Requiring an admin permission on
+// the self-service routes would take recovery of a member's own stuck run away
+// from the member without protecting any other tenant. The two stay in the
+// catalog and in the recovery operator role so existing role grants keep
+// their meaning; enforce them only on a route that acts beyond the caller's
+// scope.
 export const getPermissionForAgentRunRecoveryAction = () =>
   ADMIN_PERMISSION_IDS.agentRunsRecoveryAction;
 

@@ -97,9 +97,14 @@ export const runRetrievalServiceProcess = async ({
     logger.log("[tracing] OpenTelemetry tracing enabled (OTLP/HTTP export).");
   }
 
-  const [{ buildRetrievalHealthReport, createRetrievalApp }, { resetPostgresPool }] = await Promise.all([
+  const [
+    { buildRetrievalHealthReport, createRetrievalApp },
+    { resetPostgresPool },
+    { stopTenantUsageLedger },
+  ] = await Promise.all([
     import("./rag/retrieval-service/app.js"),
     import("./rag/postgres.js"),
+    import("./rag/tenant-usage.js"),
   ]);
   const report = await buildRetrievalHealthReport({ env: environment });
   const summary = Object.entries(report.checks)
@@ -140,6 +145,14 @@ export const runRetrievalServiceProcess = async ({
       logger.log(`[retrieval-service] ${signal}: stopping.`);
       await new Promise((resolve) => server.close(() => resolve()));
       await metrics?.close();
+      // Usage this tier recorded (rag/tenant-usage.js) and has not flushed
+      // yet, written before the pool closes, as startServiceRole does. Never
+      // fails the shutdown.
+      try {
+        await stopTenantUsageLedger();
+      } catch (error) {
+        logger.error(`[retrieval-service] Failed to flush tenant usage on shutdown: ${error?.message ?? error}`);
+      }
       await resetPostgresPool();
       exit(0);
     })();

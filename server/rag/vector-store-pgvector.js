@@ -4,8 +4,10 @@ import {
   getKeywordWeight,
   getPgvectorIterativeScan,
   getVectorWeight,
+  isPostgresRoleSplitEnabled,
 } from "./config.js";
 import {
+  assertIndexVersionChunkTableName,
   assertPgvectorAnnDimensionsSupported,
   buildPgvectorIndexStatement,
   getPgvectorEmbeddingIndexName,
@@ -50,6 +52,7 @@ import {
   isIndexVersionWriteTarget,
   isSameDocumentSpace,
   isSameQuerySpace,
+  listRetainedIndexVersionTables,
   lockIndexVersionWriteTargets,
   peekIndexVersionSnapshot,
   readIndexVersionSnapshot,
@@ -255,8 +258,20 @@ const assertDimensions = ({ actual, context, space = getConfiguredEmbeddingSpace
   }
 };
 
-const buildTsQuery = (queryText) => {
-  const tokens = [...new Set(extractMeaningfulTokens(queryText))];
+// The most distinct terms one sparse query sends. Without a cap a long
+// question (or a retrieval-tier query of up to RETRIEVAL_SERVICE_MAX_QUERY_CHARS)
+// built an OR tsquery of thousands of terms, every one of which the GIN index
+// and the BM25 statistics are probed for. A question names its subject early,
+// so the first terms are kept, in their order. The local BM25 store
+// (sparse-store.js) has no such cap, so its scores equal this route's only for
+// a query of at most this many distinct terms.
+export const PGVECTOR_SPARSE_MAX_QUERY_TERMS = 64;
+
+export const buildTsQuery = (queryText) => {
+  const tokens = [...new Set(extractMeaningfulTokens(queryText))].slice(
+    0,
+    PGVECTOR_SPARSE_MAX_QUERY_TERMS
+  );
 
   if (tokens.length === 0) {
     return null;
@@ -486,6 +501,9 @@ const tableExists = async ({ query, tableName }) => {
   return Boolean(result.rows[0]?.relation);
 };
 
+// How long an owner-pool resize waits for the chunk table's lock (role split).
+const RESIZE_LOCK_TIMEOUT = "10s";
+
 /**
  * Resizes the embedding column to the configured width. Only legal on an empty
  * table: a populated table holds vectors of the old width, and pgvector would
@@ -639,12 +657,29 @@ const verifyPgvectorSchema = async ({ allowForeignEmbeddings = false, client = n
       });
     }
 
-    await resizeEmbeddingColumn({
-      dimensions: expectedDimensions,
-      indexParams: resolveVersionIndexParams(version),
-      query,
-      tableName,
-    });
+    const resize = (resizeQuery) =>
+      resizeEmbeddingColumn({
+        dimensions: expectedDimensions,
+        indexParams: resolveVersionIndexParams(version),
+        query: resizeQuery,
+        tableName,
+      });
+
+    if (isPostgresRoleSplitEnabled()) {
+      // Under the role split the runtime login (and the system role this
+      // runs as) may not alter the table: the resize is owner DDL on the
+      // owner pool, in a transaction of its own. A caller's transaction that
+      // already holds a lock on the table would make it wait for that caller
+      // forever, so the wait for the table's lock is bounded.
+      await runtime.withOwnerTransaction(async (ownerClient) => {
+        const ownerQuery = getPgvectorQuery(ownerClient);
+
+        await ownerQuery("SELECT set_config('lock_timeout', $1, true)", [RESIZE_LOCK_TIMEOUT]);
+        await resize(ownerQuery);
+      });
+    } else {
+      await resize(query);
+    }
   }
 
   const storedModels = await readPgvectorStoredEmbeddingModels({ query, tableName });
@@ -1180,6 +1215,40 @@ const withWriteTargets = async (client, callback) => {
   );
 };
 
+// The live version tables the write targets leave out (a failed build, a
+// ready version past its dual-write window, a retired one not dropped yet;
+// listRetainedIndexVersionTables): a delete, a clear and a replacement remove
+// the document's chunks there too, in the same transaction, so no table keeps
+// text the registry no longer has. `docIds` null empties them (an unscoped
+// clear). Nothing is written there otherwise: they receive no ingest.
+const removeFromRetainedVersions = async (query, targets, docIds = null) => {
+  const retained = await listRetainedIndexVersionTables(
+    { query },
+    { excludeVersionIds: targets.map((target) => target.versionId) }
+  );
+
+  for (const version of retained) {
+    if (docIds === null) {
+      await query(`DELETE FROM ${version.chunkTable}`);
+    } else {
+      await query(`DELETE FROM ${version.chunkTable} WHERE doc_id = ANY($1::text[])`, [docIds]);
+    }
+  }
+
+  return retained.length;
+};
+
+// A chunk stamped with a content version above 1 belongs to a replacement
+// (rag/index.js commitDocument): the document's earlier chunks may still sit
+// in a retained version table. A first ingest (version 1, or unstamped) has
+// none, so it costs no extra statement.
+const isContentReplacement = (preparedDocuments) =>
+  preparedDocuments.some((document) => {
+    const version = Number(document?.metadata?.documentVersion);
+
+    return Number.isInteger(version) && version > 1;
+  });
+
 const toOwnerScope = (accessScope = {}) => ({
   userId: String(accessScope?.userId ?? accessScope?.ownerUserId ?? "").trim(),
   workspaceId: String(accessScope?.workspaceId ?? "").trim(),
@@ -1222,6 +1291,10 @@ export const writeDocumentsToPgvectorIndex = async ({
       insertedChunkCount ??= count;
     }
 
+    if (isContentReplacement(preparedDocuments)) {
+      await removeFromRetainedVersions(query, targets, docIds);
+    }
+
     return { insertedChunkCount: insertedChunkCount ?? 0, replacedDocIds: docIds };
   });
 };
@@ -1236,7 +1309,10 @@ export const addDocumentsToPgvectorIndex = async ({
   return writeDocumentsToPgvectorIndex({ accessScope, client, preparedDocuments });
 };
 
-/** Deletes from every write-target version; returns the active version's count. */
+/**
+ * Deletes from every write-target version and from every other live version
+ * table (removeFromRetainedVersions); returns the active version's count.
+ */
 export const removeDocumentsFromPgvectorIndex = async ({ client = null, docIds } = {}) => {
   const normalizedDocIds = toDocIdArray(docIds);
 
@@ -1258,6 +1334,7 @@ export const removeDocumentsFromPgvectorIndex = async ({ client = null, docIds }
       removed ??= result.rowCount ?? 0;
     }
 
+    await removeFromRetainedVersions(query, targets, normalizedDocIds);
     return removed ?? 0;
   });
 };
@@ -1274,12 +1351,97 @@ export const clearPgvectorIndex = async ({ client = null } = {}) => {
       count ??= result.rowCount ?? 0;
     }
 
+    await removeFromRetainedVersions(query, targets, null);
     return count ?? 0;
   });
 
   // A cleared table is the one moment a dimension change is safe; let the next
   // ensure re-check the column instead of trusting the cached verdict.
   verified = null;
+
+  return removed;
+};
+
+/**
+ * Every chunk table that exists: the migration-012 table and the table of
+ * every registered index version, whatever its status (a failed or retired
+ * version whose drop has not run yet keeps its table and its rows), as
+ * migrations 033 and 035 walk them. For the tenant erase, which must reach
+ * chunks outside the write targets too.
+ */
+export const listExistingPgvectorChunkTables = async ({ client = null } = {}) => {
+  const query = getPgvectorQuery(client);
+  const { versionsTable } = getIndexVersionTableNames();
+  const baseTable = getPgvectorBaseTableName().toLowerCase();
+  const result = await query(
+    `
+      SELECT DISTINCT t.chunk_table
+      FROM (
+        SELECT $1::text AS chunk_table
+        UNION ALL
+        SELECT lower(v.chunk_table) FROM ${versionsTable} AS v
+      ) AS t
+      WHERE to_regclass(format('%I.%I', current_schema(), t.chunk_table)) IS NOT NULL
+      ORDER BY t.chunk_table
+    `,
+    [baseTable]
+  );
+
+  return (result?.rows ?? []).map((row) => assertIndexVersionChunkTableName(String(row.chunk_table)));
+};
+
+/** Per existing chunk table, how many chunks the documents have there. */
+export const countPgvectorChunksInEveryTable = async ({ client = null, docIds } = {}) => {
+  const normalizedDocIds = toDocIdArray(docIds);
+  const query = getPgvectorQuery(client);
+  const counts = {};
+
+  for (const tableName of await listExistingPgvectorChunkTables({ client })) {
+    counts[tableName] =
+      normalizedDocIds.length === 0
+        ? 0
+        : Number(
+            (
+              await query(
+                `SELECT COUNT(*)::int AS chunk_count FROM ${tableName} WHERE doc_id = ANY($1::text[])`,
+                [normalizedDocIds]
+              )
+            ).rows[0]?.chunk_count
+          ) || 0;
+  }
+
+  return counts;
+};
+
+/**
+ * Deletes the documents' chunks from every existing chunk table on the
+ * caller's transaction (the tenant erase), not only from the write targets
+ * removeDocumentsFromPgvectorIndex reaches; returns the count per table. The
+ * documents' rows must already be locked (their foreign keys would cascade
+ * these rows too; the explicit delete keeps a table without one honest). The
+ * BM25 statistics follow through their statement triggers (migration 030).
+ */
+export const removeDocumentsFromEveryPgvectorTable = async ({ client, docIds } = {}) => {
+  if (!client || typeof client.query !== "function") {
+    throw new Error("removeDocumentsFromEveryPgvectorTable needs the transaction's client.");
+  }
+
+  const normalizedDocIds = toDocIdArray(docIds);
+  const query = getPgvectorQuery(client);
+  const removed = {};
+
+  for (const tableName of await listExistingPgvectorChunkTables({ client })) {
+    removed[tableName] =
+      normalizedDocIds.length === 0
+        ? 0
+        : Number(
+            (
+              await query(`DELETE FROM ${tableName} WHERE doc_id = ANY($1::text[])`, [
+                normalizedDocIds,
+              ])
+            ).rowCount ?? 0
+          ) || 0;
+  }
 
   return removed;
 };
@@ -1618,7 +1780,10 @@ export const listLivePgvectorVersionTables = async () => {
 // planning cost more (0.76 ms against 1.37 ms p50 as a tenant). From ten
 // documents up the function is faster, and far faster for large sets. Every
 // index version has its own function over its own table (migration 014's
-// template, rendered when the version is created).
+// template, rendered when the version is created). Since migration 033 the
+// function also narrows the ids by the documents policy itself when called as
+// the tenant role, so a direct call with another tenant's doc ids ranks
+// nothing; the narrowing here stays, and so does the join.
 const buildTenantSparseSearchSql = (version) => `
   SELECT c.chunk_id, c.doc_id, c.chunk_index, c.page_number, c.section_heading, c.content, c.metadata,
          r.sparse_score

@@ -23,9 +23,18 @@ export const serializeError = (error, fallbackMessage) => {
   return fallbackMessage;
 };
 
+// /chat checks docIds before this runs (routes/validation.js boundedIdList);
+// /agent-tasks does not, so an entry that is not a string is dropped here
+// instead of throwing.
 export const parseDocIds = (rawDocIds, fallbackDocId) => {
   if (Array.isArray(rawDocIds)) {
-    return [...new Set(rawDocIds.map((docId) => docId?.trim()).filter(Boolean))];
+    return [
+      ...new Set(
+        rawDocIds
+          .map((docId) => (typeof docId === "string" ? docId.trim() : ""))
+          .filter(Boolean)
+      ),
+    ];
   }
 
   if (typeof rawDocIds === "string" && rawDocIds.trim()) {
@@ -122,6 +131,40 @@ export const hasPdfMagicBytes = async (filePath) => {
   }
 };
 
+// The request headers that select whose data a response carries: the
+// credential (Authorization, x-api-key) and the workspace and user a request
+// names (x-workspace-id; x-user-id where the principal may choose its user,
+// and always with auth off).
+export const TENANT_DATA_VARY_HEADERS = Object.freeze([
+  "Authorization",
+  "x-api-key",
+  "x-workspace-id",
+  "x-user-id",
+]);
+
+/**
+ * Marks a response as one tenant's data. `no-store` keeps it out of every
+ * cache, shared (a CDN or proxy in front of the API, which would otherwise
+ * serve one tenant's document list or PDF to the next caller of the same URL)
+ * and private (a browser profile whose user switches workspace or token);
+ * `Vary` names the identity headers for any cache that ignores `no-store`.
+ * Set before the handler answers, so errors carry it too.
+ */
+export const setTenantDataCacheHeaders = (res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+
+  for (const header of TENANT_DATA_VARY_HEADERS) {
+    res.vary(header);
+  }
+
+  return res;
+};
+
+export const noStoreTenantData = (req, res, next) => {
+  setTenantDataCacheHeaders(res);
+  next();
+};
+
 export const buildContentDisposition = (
   fileName = "document.pdf",
   disposition = "inline"
@@ -144,7 +187,10 @@ export const sendBufferedFile = ({
     "Content-Disposition",
     buildContentDisposition(fileName, disposition)
   );
-  res.setHeader("Cache-Control", "private, max-age=300");
+  // Every file this sends is one tenant's (a stored PDF, a workspace
+  // artifact). It used to allow private caching for five minutes, which kept
+  // the bytes in a browser cache keyed by URL alone.
+  setTenantDataCacheHeaders(res);
 
   if (!rangeHeader) {
     res.setHeader("Content-Length", String(totalSize));

@@ -173,6 +173,11 @@ services:
   # rerank backends: model-call guard, retries, failover, metering and quotas.
   # For Ollama on the host, set OPENAI_BASE_URL (or the MODEL_GATEWAY_*
   # upstream lists) to http://host.docker.internal:11434/v1.
+  # It is the only process that books model tokens and cost per tenant (the
+  # callers keep mirror events only), so it writes the tenant usage ledger and
+  # needs the database: without this URL a server/.env copied from the example
+  # would point it at 127.0.0.1, which inside the container is the gateway
+  # itself.
   model-gateway:
     build: .
     image: luc1ferxx-archive-rag:local
@@ -186,6 +191,7 @@ services:
       INTERNAL_SERVICE_AUTH: ${INTERNAL_SERVICE_AUTH:-hmac}
       INTERNAL_SERVICE_KEYS: ${INTERNAL_SERVICE_KEYS:-}
       INTERNAL_SERVICE_TRUSTED_KEYS: ${INTERNAL_SERVICE_TRUSTED_KEYS:-}
+      POSTGRES_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       OTEL_SERVICE_NAME: luc1ferxx-archive-rag-model-gateway
     extra_hosts:
@@ -197,6 +203,9 @@ services:
       retries: 5
       start_period: 30s
     stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   tierdata:

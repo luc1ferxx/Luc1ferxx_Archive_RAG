@@ -109,11 +109,32 @@ const recordPromptUse = (runUsage, event) => {
 export const getRunPromptUsage = (runUsage) =>
   runUsage ? [...(promptLedgers.get(runUsage)?.values() ?? [])].map((entry) => ({ ...entry })) : [];
 
+// Work several runs wait for at once (embedding-cache.js shares one in-flight
+// query embedding between concurrent requests) runs under a capture instead of
+// any one run's meter: the events chargeRunUsage would have charged are kept,
+// and the owner of the work charges them, unchanged and with chargeRunUsage,
+// to the run it decides the work was done for once that is known. Replaying
+// the events rather than adding up totals keeps the charge identical to a
+// direct one, rounding and prompt ledger included.
+const capturedEvents = new WeakMap();
+
+/** A meter with no ceilings that also keeps every event charged to it. */
+export const createRunUsageCapture = () => {
+  const meter = createRunUsage({ limits: { maxCostUsd: 0, maxDurationMs: 0, maxTokens: 0 } });
+
+  capturedEvents.set(meter, []);
+  return meter;
+};
+
+/** The events charged to a capture so far, in order; empty for any other meter. */
+export const getCapturedRunUsageEvents = (meter) => [...(capturedEvents.get(meter) ?? [])];
+
 export const chargeRunUsage = (runUsage, event = {}) => {
   if (!runUsage || event.status !== "ok") {
     return;
   }
 
+  capturedEvents.get(runUsage)?.push(event);
   recordPromptUse(runUsage, event);
   runUsage.used.modelCalls += 1;
   runUsage.used.tokens += Number.isFinite(event.totalTokens) ? event.totalTokens : 0;

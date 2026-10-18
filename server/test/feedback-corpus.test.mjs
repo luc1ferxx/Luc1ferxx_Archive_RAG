@@ -7,7 +7,10 @@ import {
   buildFeedbackCorpusFromRecords,
   buildFeedbackCorpusFromJsonlFile,
   buildFeedbackCorpusFromJsonlFiles,
+  buildFeedbackCorpusFromSources,
 } from "../evaluation/feedback-corpus.js";
+import { buildFeedbackRecord } from "../feedback.js";
+import { buildStoredFeedback } from "../rag/postgres-feedback-store.js";
 
 test("feedback corpus builder converts negative feedback into synthetic eval cases", () => {
   const corpus = buildFeedbackCorpusFromRecords([
@@ -212,6 +215,77 @@ test("feedback corpus builder reads jsonl files and writes stable corpus output"
     assert.equal(persistedCorpus.cases.length, 1);
     assert.equal(persistedCorpus.cases[0].metadata.feedback.feedbackType, "citation_error");
     assert.equal(persistedCorpus.cases[0].metadata.feedback.reviewRequired, true);
+  } finally {
+    await rm(tempRoot, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
+
+test("feedback:corpus builds the same corpus from the PostgreSQL store's records as from the JSONL file", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "feedback-corpus-store-test-"));
+  const seedInputPath = path.join(tempRoot, "feedback-seed.jsonl");
+  const runtimeInputPath = path.join(tempRoot, "feedback.jsonl");
+  const seed = {
+    citations: [{ docId: "doc-seed", excerpt: "Approval comes first.", fileName: "seed.pdf", pageNumber: 1 }],
+    docIds: ["doc-seed"],
+    feedbackId: "seed-feedback",
+    feedbackType: "citation_error",
+    note: "Cite the approval page.",
+    question: "Where is approval documented?",
+    source: "seed",
+  };
+  const runtime = [
+    buildFeedbackRecord({
+      accessScope: { userId: "alice", workspaceId: "workspace-a" },
+      payload: {
+        answer: {
+          agentAnswer: "Remote work is allowed.",
+          ragSources: [{ docId: "doc-policy", excerpt: "Manager approval first.", fileName: "policy.pdf", pageNumber: 4 }],
+        },
+        docIds: ["doc-policy"],
+        feedbackType: "incomplete",
+        note: "Missed the approval step.",
+        question: "What does the remote work policy require?",
+      },
+    }),
+    // A hand-curated record: expectedAnswerIncludes has no column of its own
+    // and travels in the table's extra column.
+    {
+      createdAt: "2026-06-07T08:00:00.000Z",
+      docIds: ["doc-handbook"],
+      expectedAnswerIncludes: ["no stipend"],
+      feedbackId: "curated",
+      feedbackType: "hallucination",
+      question: "What is the satellite stipend?",
+      userId: "bob",
+      workspaceId: "workspace-b",
+    },
+  ];
+
+  try {
+    await writeFile(seedInputPath, `${JSON.stringify(seed)}\n`, "utf8");
+    await writeFile(
+      runtimeInputPath,
+      runtime.map((record) => `${JSON.stringify(record)}\n`).join(""),
+      "utf8"
+    );
+
+    const fromFile = await buildFeedbackCorpusFromJsonlFiles({
+      inputPaths: [seedInputPath, runtimeInputPath],
+    });
+    const fromStore = await buildFeedbackCorpusFromSources({
+      inputPaths: [seedInputPath],
+      records: runtime.map((record) => buildStoredFeedback(record).record),
+    });
+
+    assert.equal(fromFile.cases.length, 3);
+    assert.deepEqual(fromStore, fromFile);
+    assert.deepEqual(
+      fromStore.cases.find((testCase) => testCase.id.includes("curated")).expectedAnswerIncludes,
+      ["no stipend"]
+    );
   } finally {
     await rm(tempRoot, {
       recursive: true,

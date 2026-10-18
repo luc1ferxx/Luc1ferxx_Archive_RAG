@@ -34,8 +34,25 @@ import {
   getApiAuthOidcWorkspacesClaim,
   isApiAuthEnabled,
   isApiAuthOidcEnabled,
+  isApiAuthOidcPlatformRolesAllowed,
   isApiAuthOidcTypRequired,
 } from "./config.js";
+
+// Platform ids a token may carry only while API_AUTH_OIDC_ALLOW_PLATFORM_ROLES
+// is on (the default): every admin.* role or permission, plus the two admin
+// permissions outside that prefix (ADMIN_PERMISSION_IDS in
+// rag/admin-permissions.js, not imported here because that module loads the
+// admin status service).
+const PLATFORM_PERMISSION_IDS_WITHOUT_PREFIX = new Set([
+  "agent_runs.recovery.action",
+  "agent_tasks.action",
+]);
+
+export const isOidcPlatformRoleOrPermission = (value) => {
+  const id = normalizeScopeId(value);
+
+  return id.startsWith("admin.") || PLATFORM_PERMISSION_IDS_WITHOUT_PREFIX.has(id);
+};
 
 const MAX_TOKEN_LENGTH = 16 * 1024;
 const MAX_DOCUMENT_BYTES = 512 * 1024;
@@ -452,6 +469,16 @@ const DEFAULT_CLAIMS = Object.freeze({
 
 export const createOidcVerifier = ({
   algorithms = OIDC_DEFAULT_ALGORITHMS,
+  // false: platform roles and permissions (isOidcPlatformRoleOrPermission) are
+  // dropped from the roles claim, the groups mapping and the permissions
+  // claim, so a customer's IdP cannot make anyone a platform admin; workspace
+  // roles (global or per workspace) still map. This filters ids only: a kept
+  // role can still resolve to an admin permission under RBAC_MODE=enforce (the
+  // global workspace.admin carries admin.status.read, an RBAC_POLICY_JSON role
+  // may carry any), so rag/rbac.js describeEffectiveAccess grants an OIDC
+  // principal's global roles and permissions no admin permission while
+  // API_AUTH_OIDC_ALLOW_PLATFORM_ROLES is false.
+  allowPlatformRoles = true,
   audience,
   claims = {},
   clientId = "",
@@ -697,11 +724,14 @@ export const createOidcVerifier = ({
     }
 
     const workspaceClaimValue = getClaimByPath(payload, claimNames.workspace);
+    const keepGrant = (id) => allowPlatformRoles !== false || !isOidcPlatformRoleOrPermission(id);
     const roles = uniqueTexts([
       ...toList(getClaimByPath(payload, claimNames.roles)),
       ...mapGroupsToRoles(getClaimByPath(payload, claimNames.groups), parsedGroupRoleMap),
-    ]);
-    const permissions = uniqueTexts(toList(getClaimByPath(payload, claimNames.permissions)));
+    ]).filter(keepGrant);
+    const permissions = uniqueTexts(toList(getClaimByPath(payload, claimNames.permissions))).filter(
+      keepGrant
+    );
     const allowedWorkspaceIds = uniqueTexts(
       toList(getClaimByPath(payload, claimNames.workspaces))
     );
@@ -799,6 +829,7 @@ export const createOidcVerifier = ({
 
 const readOidcVerifierOptionsFromConfig = () => ({
   algorithms: getApiAuthOidcAlgorithms(),
+  allowPlatformRoles: isApiAuthOidcPlatformRolesAllowed(),
   audience: getApiAuthOidcAudience(),
   claims: {
     groups: getApiAuthOidcGroupsClaim(),

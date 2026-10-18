@@ -33,6 +33,11 @@ const ENV_KEYS = [
   "POSTGRES_READ_REPLICA_URLS",
   "POSTGRES_ROW_LEVEL_SECURITY",
   "POSTGRES_SSL_ENABLED",
+  // The tenant limits ride in the settings step a replica shares; unset, both
+  // go out as NULL.
+  "POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS",
+  "POSTGRES_STATEMENT_TIMEOUT_MS",
+  "POSTGRES_TENANT_CONTEXT",
   "POSTGRES_TENANT_ROLE",
 ];
 
@@ -172,13 +177,44 @@ test("a tenant read marked read-only runs on the replica: settings, guard and st
   assert.deepEqual(shape(replicaMessages), ["<tenant settings>", "<freshness guard>", STATEMENT]);
   assert.equal(roundTrips(replicaMessages), 1);
   assert.equal(replicaMessages.filter((entry) => entry.type === "Query").length, 0, "no simple-protocol text");
-  assert.deepEqual(replicaMessages.find((entry) => entry.type === "Bind").values, ["archive_rag_tenant", "alice", "ws-a"]);
+  assert.deepEqual(replicaMessages.find((entry) => entry.type === "Bind").values, [
+    "archive_rag_tenant",
+    "alice",
+    "ws-a",
+    null,
+    null,
+  ]);
   assert.deepEqual(withoutMonitor(primary), [], "the primary's read pool was never used");
 
   const snapshot = modules.replicas.getReplicaRoutingSnapshot();
 
   assert.deepEqual(snapshot.reads, { primary: 0, replica: 1 });
   assert.equal(snapshot.replicas[0].reads, 1);
+});
+
+test("the tenant statement limits reach a replica read in the same settings step, still one round trip", async () => {
+  await primeMonitor();
+  process.env.POSTGRES_STATEMENT_TIMEOUT_MS = "2500";
+  process.env.POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS = "30000";
+
+  try {
+    await asTenant(() => modules.postgres.queryPostgres(STATEMENT, [["doc-1"]], { readOnly: { guard: guard() } }));
+  } finally {
+    delete process.env.POSTGRES_STATEMENT_TIMEOUT_MS;
+    delete process.env.POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS;
+  }
+
+  const replicaMessages = withoutMonitor(replica);
+
+  assert.deepEqual(shape(replicaMessages), ["<tenant settings>", "<freshness guard>", STATEMENT]);
+  assert.equal(roundTrips(replicaMessages), 1);
+  assert.deepEqual(replicaMessages.find((entry) => entry.type === "Bind").values, [
+    "archive_rag_tenant",
+    "alice",
+    "ws-a",
+    "2500",
+    "30000",
+  ]);
 });
 
 test("a prelude travels with the statement on the replica, after the guard", async () => {

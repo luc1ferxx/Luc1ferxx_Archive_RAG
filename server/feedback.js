@@ -1,7 +1,16 @@
-import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getFeedbackPostgresTable, getFeedbackStoreConfigStatus } from "./rag/config.js";
+import {
+  createPostgresFeedbackStore,
+  FEEDBACK_LIST_DEFAULT_LIMIT,
+  normalizeFeedbackListLimit,
+  resolveFeedbackReadScope,
+} from "./rag/postgres-feedback-store.js";
+import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
+import { summarizeTenantRecords, tenantSelectorMatches } from "./rag/tenant-records.js";
 import { resolveDataDirectory } from "./runtime-paths.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -9,12 +18,13 @@ const __dirname = path.dirname(__filename);
 
 const DEFAULT_FEEDBACK_DIRECTORY = path.join(__dirname, "data", "feedback");
 const DEFAULT_FEEDBACK_FILE = "feedback.jsonl";
-const ALLOWED_FEEDBACK_TYPES = new Set([
+export const FEEDBACK_TYPES = Object.freeze([
   "helpful",
   "citation_error",
   "incomplete",
   "hallucination",
 ]);
+const ALLOWED_FEEDBACK_TYPES = new Set(FEEDBACK_TYPES);
 
 let feedbackDirectory = resolveDataDirectory({
   explicitPath: process.env.FEEDBACK_DIRECTORY,
@@ -58,26 +68,24 @@ const createFeedbackError = (message, status = 400) => {
   return error;
 };
 
-const getFeedbackPath = () => path.join(feedbackDirectory, DEFAULT_FEEDBACK_FILE);
+/** The JSONL file the file store writes: FEEDBACK_DIRECTORY/feedback.jsonl. */
+export const getFeedbackFilePath = () => path.join(feedbackDirectory, DEFAULT_FEEDBACK_FILE);
 
-const hasScopedAccess = (accessScope = {}) =>
-  Boolean(normalizeString(accessScope.userId) || normalizeString(accessScope.workspaceId));
+// resolveFeedbackReadScope (rag/postgres-feedback-store.js) is the one
+// decision for both stores: the exact (user, workspace) pair for a tenant,
+// everything for a scope naming neither (the single-tenant setup; requireApiAuth
+// refuses every other such scope). Before, a scope naming only a user (or only
+// a workspace) saw none of its own records.
+export const recordMatchesAccessScope = (record = {}, accessScope = {}) => {
+  const scope = resolveFeedbackReadScope(accessScope);
 
-const recordMatchesAccessScope = (record = {}, accessScope = {}) => {
-  if (!hasScopedAccess(accessScope)) {
+  if (scope.mode !== "tenant") {
     return true;
   }
 
-  const userId = normalizeString(record.userId);
-  const workspaceId = normalizeString(record.workspaceId);
-  const scopedUserId = normalizeString(accessScope.userId);
-  const scopedWorkspaceId = normalizeString(accessScope.workspaceId);
-
   return (
-    userId &&
-    workspaceId &&
-    userId === scopedUserId &&
-    workspaceId === scopedWorkspaceId
+    normalizeString(record.userId) === scope.userId &&
+    normalizeString(record.workspaceId) === scope.workspaceId
   );
 };
 
@@ -399,12 +407,15 @@ export const buildFeedbackRecord = ({ payload = {}, accessScope = {} }) => {
         }
       : rawAgentObservability;
 
+  // Whose record this is comes from the access scope alone (the route
+  // resolves the user through resolveScopedUserId), never from the payload: a
+  // payload userId or workspaceId used to fill in whatever the scope left
+  // empty, so a record could be filed under a tenant the caller is not.
   return {
     feedbackId: randomUUID(),
     createdAt: new Date().toISOString(),
-    userId: normalizeString(accessScope.userId) || normalizeString(payload.userId),
-    workspaceId:
-      normalizeString(accessScope.workspaceId) || normalizeString(payload.workspaceId),
+    userId: normalizeString(accessScope?.userId),
+    workspaceId: normalizeString(accessScope?.workspaceId),
     sessionId: normalizeString(payload.sessionId),
     turnIndex: Number.isInteger(Number(payload.turnIndex))
       ? Number(payload.turnIndex)
@@ -430,18 +441,11 @@ export const buildFeedbackRecord = ({ payload = {}, accessScope = {} }) => {
   };
 };
 
-export const recordFeedback = async (feedback) => {
-  await mkdir(feedbackDirectory, { recursive: true });
-  await appendFile(getFeedbackPath(), `${JSON.stringify(feedback)}\n`, "utf8");
-
-  return feedback;
-};
-
-export const listFeedback = async ({ accessScope = {}, limit = 25 } = {}) => {
+const readFeedbackFile = async (filePath) => {
   let content = "";
 
   try {
-    content = await readFile(getFeedbackPath(), "utf8");
+    content = await readFile(filePath, "utf8");
   } catch (error) {
     if (error.code === "ENOENT") {
       return [];
@@ -449,8 +453,6 @@ export const listFeedback = async ({ accessScope = {}, limit = 25 } = {}) => {
 
     throw error;
   }
-
-  const safeLimit = Math.max(1, Math.min(100, Number.parseInt(limit, 10) || 25));
 
   return content
     .split("\n")
@@ -463,10 +465,254 @@ export const listFeedback = async ({ accessScope = {}, limit = 25 } = {}) => {
         return null;
       }
     })
-    .filter(Boolean)
-    .filter((record) => recordMatchesAccessScope(record, accessScope))
-    .sort((left, right) =>
-      String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
-    )
-    .slice(0, safeLimit);
+    .filter(Boolean);
 };
+
+// Appends and the redaction rewrite of one file run one at a time in this
+// process (the file store serves a single-process profile), so a rewrite never
+// drops a record appended while it ran.
+const feedbackFileLocks = new Map();
+
+const withFeedbackFileLock = (filePath, work) => {
+  const previous = feedbackFileLocks.get(filePath) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(work);
+  const settled = next.catch(() => {});
+
+  feedbackFileLocks.set(filePath, settled);
+  settled.then(() => {
+    if (feedbackFileLocks.get(filePath) === settled) {
+      feedbackFileLocks.delete(filePath);
+    }
+  });
+
+  return next;
+};
+
+/**
+ * The JSONL store: one file every tenant writes into, filtered in the
+ * application only. It serves the profile without a database (standalone,
+ * local development); with PostgreSQL configured the default store is the
+ * table (createPostgresFeedbackStore). Without `directory` it follows
+ * configureFeedbackDirectory at call time.
+ */
+export const createFileFeedbackStore = ({ directory } = {}) => {
+  const resolveDirectory = () => (directory ? path.resolve(directory) : feedbackDirectory);
+  const resolvePath = () => path.join(resolveDirectory(), DEFAULT_FEEDBACK_FILE);
+
+  return {
+    backend: "file",
+
+    describe() {
+      return { backend: "file", path: resolvePath() };
+    },
+
+    async initialize() {
+      return true;
+    },
+
+    async recordFeedback(feedback) {
+      await mkdir(resolveDirectory(), { recursive: true });
+      await withFeedbackFileLock(resolvePath(), () =>
+        appendFile(resolvePath(), `${JSON.stringify(feedback)}\n`, "utf8")
+      );
+
+      return feedback;
+    },
+
+    // The PostgreSQL store's contract (rag/postgres-feedback-store.js): the
+    // citations of the scope's records that name a deleted document, written
+    // back by rewriting the file (a temporary file renamed over it). Lines
+    // that do not parse, and every other record, are kept byte for byte.
+    async redactDocumentReferences({ accessScope = {}, needles = [], redactCitations } = {}) {
+      const values = (Array.isArray(needles) ? needles : []).map(String).filter(Boolean);
+      const filePath = resolvePath();
+
+      if (values.length === 0 || typeof redactCitations !== "function") {
+        return { redacted: 0 };
+      }
+
+      return withFeedbackFileLock(filePath, async () => {
+        let content;
+
+        try {
+          content = await readFile(filePath, "utf8");
+        } catch (error) {
+          if (error.code === "ENOENT") {
+            return { redacted: 0 };
+          }
+
+          throw error;
+        }
+
+        let redacted = 0;
+        const lines = content.split("\n").map((line) => {
+          if (!values.some((needle) => line.includes(needle))) {
+            return line;
+          }
+
+          let record;
+
+          try {
+            record = JSON.parse(line);
+          } catch {
+            return line;
+          }
+
+          if (!isPlainObject(record) || !recordMatchesAccessScope(record, accessScope)) {
+            return line;
+          }
+
+          const outcome = redactCitations(Array.isArray(record.citations) ? record.citations : []);
+
+          if (!outcome?.changed) {
+            return line;
+          }
+
+          redacted += 1;
+          return JSON.stringify({ ...record, citations: outcome.value ?? [] });
+        });
+
+        if (redacted > 0) {
+          const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+
+          await writeFile(temporaryPath, lines.join("\n"), "utf8");
+          await rename(temporaryPath, filePath);
+        }
+
+        return { redacted };
+      });
+    },
+
+    async listFeedback({ accessScope = {}, limit = FEEDBACK_LIST_DEFAULT_LIMIT } = {}) {
+      // Newest first. Array.prototype.sort is stable, so records with the same
+      // timestamp keep the order of their lines.
+      return (await readFeedbackFile(resolvePath()))
+        .filter((record) => recordMatchesAccessScope(record, accessScope))
+        .sort((left, right) =>
+          String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
+        )
+        .slice(0, normalizeFeedbackListLimit(limit));
+    },
+
+    // Every record in line order. The file has no tenants of its own, so this
+    // is every tenant's.
+    async listAllFeedback() {
+      return readFeedbackFile(resolvePath());
+    },
+
+    // The tenant erase and export (rag/tenant-records.js).
+    async countTenantRecords(selector) {
+      return summarizeTenantRecords(await this.listTenantRecords(selector), ["feedback"]);
+    },
+
+    async listTenantRecords(selector) {
+      return (await readFeedbackFile(resolvePath()))
+        .filter((record) => tenantSelectorMatches(selector, record))
+        .map((record) => ({ record, table: "feedback" }));
+    },
+
+    // Rewrites the file without the selector's records (temp file + rename,
+    // so a reader sees the old or the new file); every other line is kept
+    // byte for byte, unreadable ones included. The file has one writer per
+    // process and no lock: a record another process appends while the file is
+    // rewritten can be lost, which is acceptable only because this store
+    // serves the single-process profile without a database.
+    async deleteTenantRecords(selector) {
+      let content = "";
+
+      try {
+        content = await readFile(resolvePath(), "utf8");
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          return { feedback: { deleted: 0 } };
+        }
+
+        throw error;
+      }
+
+      const kept = [];
+      let deleted = 0;
+
+      for (const line of content.split("\n")) {
+        if (!line.trim()) {
+          continue;
+        }
+
+        let record = null;
+
+        try {
+          record = JSON.parse(line);
+        } catch {
+          record = null;
+        }
+
+        if (record && typeof record === "object" && tenantSelectorMatches(selector, record)) {
+          deleted += 1;
+        } else {
+          kept.push(line);
+        }
+      }
+
+      if (deleted > 0) {
+        const temporaryPath = `${resolvePath()}.${randomBytes(6).toString("hex")}.tmp`;
+
+        try {
+          await writeFile(temporaryPath, kept.length > 0 ? `${kept.join("\n")}\n` : "", "utf8");
+          await rename(temporaryPath, resolvePath());
+        } catch (error) {
+          await rm(temporaryPath, { force: true });
+          throw error;
+        }
+      }
+
+      return { feedback: { deleted } };
+    },
+  };
+};
+
+const defaultFeedbackStores = new Map();
+
+/**
+ * PostgreSQL whenever a database is configured, the JSONL file otherwise
+ * (getFeedbackStoreConfigStatus). Created on first use, so a process that
+ * never touches feedback opens no connection.
+ */
+export const getDefaultFeedbackStore = () => {
+  const { backend } = getFeedbackStoreConfigStatus();
+  const key = backend === "postgres" ? `postgres:${getFeedbackPostgresTable()}` : backend;
+  let store = defaultFeedbackStores.get(key);
+
+  if (!store) {
+    store = backend === "postgres" ? createPostgresFeedbackStore() : createFileFeedbackStore();
+    defaultFeedbackStores.set(key, store);
+  }
+
+  return store;
+};
+
+/** The routes' feedback service (app-services.js) over one store. */
+export const createFeedbackService = ({ store = getDefaultFeedbackStore() } = {}) => ({
+  backend: store.backend,
+  // Retention (rag/retention.js): one batch of expired records, or null when
+  // the store has no retention delete (the JSONL file store has none: it is
+  // never rewritten, so FEEDBACK_RETENTION_DAYS applies to PostgreSQL only).
+  deleteExpiredFeedback: async (options) =>
+    typeof store.deleteExpired === "function" ? store.deleteExpired(options) : null,
+  listFeedback: (options) => store.listFeedback(options),
+  recordFeedback: (feedback) => store.recordFeedback(feedback),
+});
+
+export const recordFeedback = async (feedback) =>
+  getDefaultFeedbackStore().recordFeedback(feedback);
+
+export const listFeedback = async (options = {}) =>
+  getDefaultFeedbackStore().listFeedback(options);
+
+/**
+ * Every tenant's records, oldest first, for operator tools
+ * (npm run feedback:corpus). PostgreSQL is read on the owner path: the tool
+ * runs outside any request and writes a local evaluation file, as reading the
+ * shared JSONL file always did.
+ */
+export const listAllFeedbackAcrossTenants = ({ store = getDefaultFeedbackStore() } = {}) =>
+  runAsDatabaseSystem(() => store.listAllFeedback());

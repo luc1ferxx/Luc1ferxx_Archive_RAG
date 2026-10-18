@@ -7,6 +7,7 @@ import { bindDatabaseTenant } from "../../auth.js";
 import { derivePgvectorHealthProblems } from "../../health.js";
 import {
   getHybridFusionMethod,
+  getPostgresTenantContextMode,
   getRetrievalRoute,
   getRetrievalServiceMaxDocIds,
   getRetrievalServiceMaxQueries,
@@ -31,6 +32,7 @@ import { isPostgresConfigured } from "../postgres.js";
 import { isReadReplicaRoutingEnabled } from "../postgres-replicas.js";
 import { runAsDatabaseSystem } from "../postgres-tenant.js";
 import { describeQueryAdapterHealth, QUERY_ADAPTER_SCOPE_QA } from "../query-adapter.js";
+import { isRequestCancelledError } from "../request-deadline.js";
 import { createRunUsage, runWithRunUsage } from "../run-usage.js";
 import { bindServiceTraceContext } from "../service-client.js";
 import {
@@ -399,6 +401,16 @@ const toErrorAnswer = (error) => {
     return { body: { code: error.code, error: error.message }, status: error.status };
   }
 
+  // The only cancellation this tier binds is its caller's deadline
+  // (runWithServiceCallDeadline): a model call it cut, or a query embedding
+  // this request stopped waiting for (embedding-cache.js), is that deadline,
+  // never a dependency's 504.
+  if (isRequestCancelledError(error)) {
+    const deadline = createDeadlineError();
+
+    return { body: { code: deadline.code, error: deadline.message }, status: deadline.status };
+  }
+
   const rawStatus = Number(error?.status);
   const hasStatus = Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599;
   const dependencyUnavailable = hasStatus && [502, 503, 504].includes(rawStatus);
@@ -645,6 +657,9 @@ export const createRetrievalApp = ({
   logger = console,
   now = Date.now,
 } = {}) => {
+  // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js).
+  getPostgresTenantContextMode();
+
   const app = express();
 
   app.disable("x-powered-by");

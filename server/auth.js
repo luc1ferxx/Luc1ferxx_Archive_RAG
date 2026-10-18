@@ -13,6 +13,7 @@ import {
   isApiAuthJwtEnabled,
   isApiAuthOidcEnabled,
   isApiAuthWorkspaceRequired,
+  isTenantMembershipEnforced,
 } from "./rag/config.js";
 import {
   normalizeWorkspaceRoles,
@@ -20,6 +21,11 @@ import {
   verifyOidcAccessToken,
 } from "./rag/oidc.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
+import {
+  decideTenantMembership,
+  getDefaultTenantRegistry,
+  resolveMembershipScope,
+} from "./rag/tenant-registry.js";
 
 const PUBLIC_PATH_PREFIXES = ["/health", "/ready"];
 
@@ -55,32 +61,60 @@ const SINGLE_TENANT_CREDENTIAL = Symbol("archiveRag.singleTenantCredential");
 
 // Platform admin routes that answer across tenants by design, behind their own
 // admin permission checks (routes/admin.js, GET /admin/index-versions in
-// routes/documents.js), plus GET /auth/me. Only a principal with no workspace
-// list may call them without a user or workspace.
+// routes/documents.js, the tenant registry in routes/admin-tenants.js, GET
+// /admin/usage in routes/admin-usage.js), plus GET /auth/me. Only a principal
+// with no workspace list may call them without a user or workspace.
 const TENANTLESS_PLATFORM_PATHS = new Set([
   "/admin/audit",
   "/admin/index-versions",
   "/admin/status",
+  "/admin/workspaces",
+  "/admin/tenants/erase",
+  "/admin/tenants/export",
+  "/admin/usage",
   "/auth/me",
 ]);
-const TENANTLESS_PLATFORM_PATH_PREFIXES = ["/admin/actions/"];
+const TENANTLESS_PLATFORM_PATH_PREFIXES = ["/admin/actions/", "/admin/workspaces/"];
 
 // Routes whose `userId` query parameter is a filter over other users' records,
 // not the caller's identity: GET /admin/audit?userId=... (admin.audit.read).
 const USER_ID_FILTER_QUERY_PATHS = new Set(["/admin/audit"]);
+
+// Routes whose `workspaceId` and `userId` (JSON body or query) name the
+// tenant the route acts on, not the caller: the tenant erase and export
+// (routes/admin-tenant-lifecycle.js). There only the x-workspace-id and
+// x-user-id headers select the caller's own scope, so a platform admin naming
+// a target stays a platform admin, and naming a user is not a request to act
+// as that user.
+const TENANT_TARGET_PATHS = new Set(["/admin/tenants/erase", "/admin/tenants/export"]);
+
+const isTenantTargetPath = (req) => TENANT_TARGET_PATHS.has(req.path);
+
+// Platform admin reads across tenants where naming a workspace (x-workspace-id
+// or ?workspaceId) narrows the view to it: GET /admin/usage
+// (routes/admin-usage.js) and GET /admin/audit (routes/admin.js). For a
+// principal with neither a fixed workspace nor a workspace list, that
+// workspace is a filter over a read the admin permission already allows
+// across every tenant, not a tenant the credential acts in, so
+// TENANT_MEMBERSHIP=enforce does not ask for a membership there (it would
+// refuse every such narrowing with WORKSPACE_MEMBERSHIP_REQUIRED); the route's
+// own admin permission check decides. A principal bound to a workspace or a
+// workspace list is still checked on these paths as on every other.
+const WORKSPACE_FILTER_PLATFORM_PATHS = new Set(["/admin/audit", "/admin/usage"]);
 
 // Every userId the client sent, from each place getRequestValue reads (header,
 // JSON body, query), so a refusal cannot be dodged by putting the value where
 // the first non-empty read does not look.
 const listRequestedUserIds = (req) => {
   const userIdQueryIsFilter = USER_ID_FILTER_QUERY_PATHS.has(req.path);
+  const userIdNamesTarget = isTenantTargetPath(req);
 
   return [
     ...new Set(
       CLIENT_USER_ID_KEYS.flatMap((key) => [
         normalizeString(req.get(key)),
-        normalizeString(req.body?.[key]),
-        key === "userId" && userIdQueryIsFilter
+        key === "userId" && userIdNamesTarget ? "" : normalizeString(req.body?.[key]),
+        key === "userId" && (userIdQueryIsFilter || userIdNamesTarget)
           ? ""
           : normalizeString(req.query?.[key]),
       ]).filter(Boolean)
@@ -113,7 +147,10 @@ const resolveUserId = (req, principal = {}) => {
   }
 
   if (allowsClientUserId(principal)) {
-    return getRequestValue(req, "x-user-id") || getRequestValue(req, "userId");
+    return (
+      getRequestValue(req, "x-user-id") ||
+      (isTenantTargetPath(req) ? "" : getRequestValue(req, "userId"))
+    );
   }
 
   if (listRequestedUserIds(req).length > 0) {
@@ -250,7 +287,7 @@ const constantTimeEqual = (left, right) => {
 const resolveWorkspaceId = (req, principal = {}) => {
   const requestedWorkspaceId =
     getRequestValue(req, "x-workspace-id") ||
-    getRequestValue(req, "workspaceId");
+    (isTenantTargetPath(req) ? "" : getRequestValue(req, "workspaceId"));
   const principalWorkspaceId = normalizeString(principal.workspaceId);
   const allowedWorkspaceIds = normalizeAccessPrincipalWorkspaceIds(principal);
 
@@ -376,6 +413,91 @@ const sendAuthError = (res, error) => {
 
 export const getRequestAccessScope = (req) => req.accessScope ?? {};
 
+/**
+ * The access scope of a request to a public route that answers everyone but
+ * shows more to a caller with a permission (GET /health, /ready and /livez in
+ * routes/system.js, which are mounted before requireApiAuth). With API auth on
+ * it resolves the presented credential exactly as requireApiAuth does, but
+ * never answers: no credential, an unknown or invalid one, an auth
+ * configuration error, or a scope requireApiAuth would refuse all resolve to
+ * null, so a probe without a key keeps its status code. requireTenantScope is
+ * not applied: the scope only feeds a permission decision and never binds a
+ * database tenant or reaches a store, which is what a tenantless scope would
+ * widen. The TENANT_MEMBERSHIP=enforce check is (a refusal, or a registry that
+ * cannot answer, is null too). With auth off it is the unauthenticated scope
+ * requireApiAuth builds.
+ */
+export const resolveOptionalAccessScope = async (req) => {
+  if (!isApiAuthEnabled()) {
+    return buildAccessScope(req, { authenticated: false });
+  }
+
+  const providedToken = getProvidedToken(req);
+
+  if (!providedToken) {
+    return null;
+  }
+
+  try {
+    const staticPrincipals = parseConfiguredTokenPrincipals();
+
+    if (getApiAuthConfigStatus().status !== "ok") {
+      return null;
+    }
+
+    // Only the OIDC verifier is asynchronous; awaiting covers both.
+    const principal = await resolveAuthenticatedPrincipal({
+      providedToken,
+      staticPrincipals,
+    });
+
+    if (!principal) {
+      return null;
+    }
+
+    const accessScope = buildAccessScope(req, { ...principal, authenticated: true });
+    const membership = checkTenantMembership(req, principal, accessScope);
+
+    if (!membership) {
+      return accessScope;
+    }
+
+    const decision = await membership;
+
+    return decision.allowed ? decision.accessScope : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Whether the request presents the single shared API_AUTH_TOKEN (no
+ * API_AUTH_TOKENS): the single-tenant credential that already acts for the
+ * whole archive. routes/system.js lets it read the health details, which no
+ * other permission-less credential may.
+ */
+export const presentsSingleTenantCredential = (req) => {
+  if (!isApiAuthEnabled()) {
+    return false;
+  }
+
+  const providedToken = getProvidedToken(req);
+
+  if (!providedToken) {
+    return false;
+  }
+
+  try {
+    return parseConfiguredTokenPrincipals().some(
+      (principal) =>
+        principal[SINGLE_TENANT_CREDENTIAL] === true &&
+        constantTimeEqual(providedToken, principal.token)
+    );
+  } catch {
+    return false;
+  }
+};
+
 // An authenticated scope that names neither a user nor a workspace. The
 // document registry, the feedback store, the ingest job store and the database
 // tenant binding all read such a scope as "every tenant" (the auth-off
@@ -417,6 +539,59 @@ const requireTenantScope = (req, principal = {}) => {
   throw new AccessScopeError(
     "This request needs a user or workspace scope: name a workspace with x-workspace-id."
   );
+};
+
+// Where requireApiAuth and resolveOptionalAccessScope find the registry:
+// createApp puts its own on app.locals; a router mounted elsewhere (tests)
+// gets the process default.
+const resolveTenantRegistry = (req) =>
+  req.app?.locals?.tenantRegistry ?? getDefaultTenantRegistry();
+
+/**
+ * TENANT_MEMBERSHIP=enforce (rag/tenant-registry.js decideTenantMembership):
+ * null when the check does not apply, else a promise of the decision with
+ * the scope to use (the membership's roles merged into workspaceRoles for the
+ * active workspace, refused when that makes more than the forwarded token's
+ * MAX_SCOPE_WORKSPACE_ROLES: resolveMembershipScope). It does not apply with
+ * the mode off (default), to the single shared API_AUTH_TOKEN (the
+ * single-tenant setup), to a scope that names no workspace (a user-only
+ * tenant, a platform admin on a platform path), or to a platform principal
+ * narrowing GET /admin/usage or /admin/audit to a workspace
+ * (WORKSPACE_FILTER_PLATFORM_PATHS). Called only with API auth on; auth off
+ * never reaches it.
+ */
+const checkTenantMembership = (req, principal = {}, accessScope = {}) => {
+  if (!isTenantMembershipEnforced()) {
+    return null;
+  }
+
+  if (principal[SINGLE_TENANT_CREDENTIAL] === true) {
+    return null;
+  }
+
+  const workspaceId = normalizeString(accessScope.workspaceId);
+
+  if (!workspaceId) {
+    return null;
+  }
+
+  // The workspace is the principal's own (its fixed workspace, or one of its
+  // workspace list) rather than one the client named by header with nothing
+  // binding the credential to it.
+  const workspaceBoundByPrincipal =
+    Boolean(normalizeString(principal.workspaceId)) ||
+    normalizeAccessPrincipalWorkspaceIds(principal).length > 0;
+
+  if (!workspaceBoundByPrincipal && WORKSPACE_FILTER_PLATFORM_PATHS.has(req.path)) {
+    return null;
+  }
+
+  return decideTenantMembership({
+    registry: resolveTenantRegistry(req),
+    userId: normalizeString(accessScope.userId),
+    workspaceBoundByPrincipal,
+    workspaceId,
+  }).then((decision) => resolveMembershipScope(accessScope, workspaceId, decision));
 };
 
 /**
@@ -477,9 +652,13 @@ export const resolveRequestUserId = (req, rawUserId) => {
 /**
  * Runs the rest of the request under its access scope as the database tenant,
  * so every PostgreSQL query a route issues is checked by row-level security
- * whether or not the store filtered it. Mounted after requireApiAuth; a
- * middleware that resumes the chain from a stream callback loses the async
- * context (multer's memory storage does) and must be followed by this again.
+ * whether or not the store filtered it. A scope that names no tenant (auth
+ * off, the single shared API_AUTH_TOKEN, a platform admin path) is bound as
+ * the explicit unscoped state, which runs as the owner like before but is not
+ * the unbound state POSTGRES_TENANT_CONTEXT=strict refuses
+ * (rag/postgres-tenant.js). Mounted after requireApiAuth; a middleware that
+ * resumes the chain from a stream callback loses the async context (multer's
+ * memory storage does) and must be followed by this again.
  */
 export const bindDatabaseTenant = (req, res, next) =>
   runWithDatabaseTenant(getRequestAccessScope(req), next);
@@ -510,12 +689,15 @@ export const requireApiAuth = (req, res, next) => {
       return;
     }
 
+    let membership = null;
+
     try {
       req.accessScope = buildAccessScope(req, {
         ...resolvedPrincipal,
         authenticated: true,
       });
       requireTenantScope(req, resolvedPrincipal);
+      membership = checkTenantMembership(req, resolvedPrincipal, req.accessScope);
     } catch (error) {
       res.status(error?.status ?? 403).json({
         error: error instanceof Error ? error.message : "Forbidden.",
@@ -523,7 +705,31 @@ export const requireApiAuth = (req, res, next) => {
       return;
     }
 
-    next();
+    if (!membership) {
+      next();
+      return;
+    }
+
+    // TENANT_MEMBERSHIP=enforce: the registry lookups are asynchronous. The
+    // decision itself never rejects (a registry fault is its 503); anything
+    // else fails the request closed rather than leaving it unanswered.
+    membership
+      .then((decision) => {
+        if (!decision.allowed) {
+          res.status(decision.status).json({ code: decision.code, error: decision.message });
+          return;
+        }
+
+        req.accessScope = decision.accessScope;
+        next();
+      })
+      .catch((error) => {
+        console.error("Tenant membership check failed.", error);
+
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Tenant membership check failed." });
+        }
+      });
   };
 
   try {

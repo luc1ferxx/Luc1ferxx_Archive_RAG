@@ -148,6 +148,16 @@ export const createFakeVersionDatabase = ({
             .map(withFlags)
             .sort((left, right) => Number(right.is_active) - Number(left.is_active) || left.version_id - right.version_id)
         );
+      case "retained_tables": {
+        const excluded = new Set((values[0] ?? []).map(Number));
+
+        return rows(
+          [...state.versions.values()]
+            .filter((row) => !excluded.has(row.version_id) && state.tables.has(String(row.chunk_table).toLowerCase()))
+            .sort((left, right) => left.version_id - right.version_id)
+            .map((row) => ({ chunk_table: row.chunk_table, status: row.status, version_id: row.version_id }))
+        );
+      }
       case "describe": {
         // The live versions and the pointer's two whatever their number, then
         // the newest `limit` of the rest.

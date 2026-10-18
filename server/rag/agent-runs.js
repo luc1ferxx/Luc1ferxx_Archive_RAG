@@ -40,6 +40,7 @@ export {
   normalizeAgentRunStatus,
 } from "./agent-run-state-machine.js";
 import { normalizeText } from "../lib/normalize-text.js";
+import { summarizeTenantRecords, tenantSelectorMatches } from "./tenant-records.js";
 import {
   EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY,
   buildExecutionGraphNodeStepId,
@@ -49,6 +50,11 @@ import {
 } from "./agent-execution-graph-checkpoint.js";
 import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
 import { GRAPH_CAPABILITY_APPROVAL_TYPE } from "./capabilities/graph-approval-preflight.js";
+import {
+  isRetentionExpired,
+  normalizeRetentionBatchLimit,
+  normalizeRetentionCutoffs,
+} from "./retention-sql.js";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -549,9 +555,48 @@ export const createInMemoryAgentRunStore = ({
     approvalSnapshotsByRunKey.set(runKey, snapshots);
   };
 
+  // The tenant erase and export (rag/tenant-records.js): a run with its
+  // events and approval snapshots.
+  const listTenantRuns = (selector) =>
+    [...runs.entries()].filter(([, run]) => tenantSelectorMatches(selector, run.accessScope));
+  const TENANT_TABLES = ["agent_runs", "agent_run_events", "agent_run_approval_snapshots"];
+
   return {
     initialize() {
       return true;
+    },
+
+    countTenantRecords(selector) {
+      return summarizeTenantRecords(this.listTenantRecords(selector), TENANT_TABLES);
+    },
+
+    listTenantRecords(selector) {
+      return listTenantRuns(selector).flatMap(([runKey, run]) => [
+        { record: structuredClone(run), table: "agent_runs" },
+        ...getRunEvents(runKey).map((event) => ({
+          record: structuredClone({ ...event, runId: run.runId }),
+          table: "agent_run_events",
+        })),
+        ...[...getRunApprovalSnapshots(runKey).values()].map((snapshot) => ({
+          record: structuredClone({ ...snapshot, runId: run.runId }),
+          table: "agent_run_approval_snapshots",
+        })),
+      ]);
+    },
+
+    deleteTenantRecords(selector) {
+      const deleted = Object.fromEntries(TENANT_TABLES.map((table) => [table, { deleted: 0 }]));
+
+      for (const [runKey] of listTenantRuns(selector)) {
+        deleted.agent_run_events.deleted += getRunEvents(runKey).length;
+        deleted.agent_run_approval_snapshots.deleted += getRunApprovalSnapshots(runKey).size;
+        deleted.agent_runs.deleted += 1;
+        eventsByRunKey.delete(runKey);
+        approvalSnapshotsByRunKey.delete(runKey);
+        runs.delete(runKey);
+      }
+
+      return deleted;
     },
 
     create({ accessScope = {}, run } = {}) {
@@ -678,6 +723,56 @@ export const createInMemoryAgentRunStore = ({
         );
     },
 
+    // The PostgreSQL store's contract (postgres-agent-run-store.js): runs that
+    // serialize one of `needles`, exact pair or every pair, in key order.
+    listRunsReferencingDocuments({
+      accessScope = {},
+      after = null,
+      limit = 25,
+      needles = [],
+    } = {}) {
+      const values = toArray(needles).map(String).filter(Boolean);
+      const scope = normalizeTaskAccessScope(accessScope);
+      const scoped = Boolean(scope.userId || scope.workspaceId);
+      const pageSize = Math.max(1, Math.min(100, Number.parseInt(limit, 10) || 25));
+      const orderKey = (run) => `${run.scopeKey}\u0000${run.runId}`;
+      const afterKey = after
+        ? `${buildTaskScopeKey(after)}\u0000${normalizeText(after.runId)}`
+        : null;
+
+      if (values.length === 0) {
+        return { next: null, runs: [] };
+      }
+
+      const matches = [...runs.entries()]
+        .filter(([, run]) => !scoped || run.scopeKey === buildTaskScopeKey(scope))
+        .filter(([, run]) => afterKey === null || orderKey(run) > afterKey)
+        .filter(([, run]) => {
+          const serialized = JSON.stringify([
+            run.steps,
+            run.observations,
+            run.decisions,
+            run.result,
+          ]);
+
+          return values.some((needle) => serialized.includes(needle));
+        })
+        .sort(([, left], [, right]) => (orderKey(left) < orderKey(right) ? -1 : 1))
+        .slice(0, pageSize);
+      const last = matches.at(-1)?.[1];
+
+      return {
+        next:
+          matches.length === pageSize && last
+            ? { runId: last.runId, ...last.accessScope }
+            : null,
+        runs: matches.map(([runKey, run]) => ({
+          ...structuredClone(run),
+          events: getRunEvents(runKey),
+        })),
+      };
+    },
+
     listRecoverable({
       statuses = [
         AGENT_RUN_STATUSES.running,
@@ -693,6 +788,39 @@ export const createInMemoryAgentRunStore = ({
         .sort((left, right) =>
           String(left.updatedAt).localeCompare(String(right.updatedAt))
         );
+    },
+
+    // Retention (rag/retention.js), as the PostgreSQL store: at most `limit`
+    // finished runs last updated before their workspace's cutoff, oldest
+    // first, with their events and approval snapshots.
+    deleteExpired({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+      const normalized = normalizeRetentionCutoffs({ cutoff, workspaceCutoffs });
+      const expiredKeys = [...runs.entries()]
+        .filter(
+          ([, run]) =>
+            TERMINAL_AGENT_RUN_STATUSES.has(run.status) &&
+            isRetentionExpired(normalized, {
+              timestamp: run.updatedAt,
+              workspaceId: run.accessScope?.workspaceId,
+            })
+        )
+        .sort(
+          ([, left], [, right]) =>
+            Date.parse(left.updatedAt) - Date.parse(right.updatedAt) ||
+            String(left.runId).localeCompare(String(right.runId))
+        )
+        .slice(0, normalizeRetentionBatchLimit(limit))
+        .map(([runKey]) => runKey);
+      let deletedEvents = 0;
+
+      for (const runKey of expiredKeys) {
+        deletedEvents += getRunEvents(runKey).length;
+        runs.delete(runKey);
+        eventsByRunKey.delete(runKey);
+        approvalSnapshotsByRunKey.delete(runKey);
+      }
+
+      return { acquired: true, deleted: expiredKeys.length, deletedEvents };
     },
 
     update({
@@ -3380,6 +3508,19 @@ export const createAgentRunService = ({
         })
       ).map(stripInternalRunFields),
     };
+  },
+
+  /**
+   * Retention (rag/retention.js): one batch of expired finished runs, or
+   * null when the store has no retention delete. See the stores'
+   * deleteExpired.
+   */
+  async deleteExpiredRuns({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+    if (typeof agentRunStore.deleteExpired !== "function") {
+      return null;
+    }
+
+    return agentRunStore.deleteExpired({ cutoff, limit, workspaceCutoffs });
   },
 
   async listRecoverableRuns({

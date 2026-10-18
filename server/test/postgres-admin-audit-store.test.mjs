@@ -71,6 +71,35 @@ const createFakePostgresAuditHarness = () => {
   };
 
   const query = async (queryText, values = []) => {
+    // Migration 041's chain: the per-chain lock (a single-threaded fake needs
+    // no real lock) and the chain head lookup.
+    if (queryText.includes("pg_advisory_xact_lock")) {
+      return { rowCount: 1, rows: [{}] };
+    }
+
+    if (queryText.includes("current_setting('transaction_isolation')")) {
+      const [workspaceId, userId] = values;
+      const head = rows
+        .filter(
+          (row) =>
+            row.row_hash &&
+            row.workspace_id === workspaceId &&
+            (workspaceId !== "" || row.user_id === userId)
+        )
+        .at(-1);
+
+      return {
+        rowCount: 1,
+        rows: [
+          {
+            created_at: head?.created_at ?? null,
+            isolation: "read committed",
+            row_hash: head?.row_hash ?? null,
+          },
+        ],
+      };
+    }
+
     if (queryText.includes("INSERT INTO rag_admin_audit_events_test")) {
       const row = {
         id: rows.length + 1,
@@ -88,6 +117,9 @@ const createFakePostgresAuditHarness = () => {
         principal: parseJson(values[11], {}),
         request: parseJson(values[12], {}),
         created_at: values[13],
+        data_access: parseJson(values[14], {}),
+        prev_hash: values[15],
+        row_hash: values[16],
       };
 
       if (!rows.some((existing) => existing.event_id === row.event_id)) {

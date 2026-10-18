@@ -10,8 +10,9 @@ import { getRagDataDirectory } from "./storage.js";
 const EXCERPT_PREVIEW_LENGTH = 120;
 
 // RAG_OBSERVABILITY_EVENTS_PATH lets an evaluation run keep its events in a file
-// of its own, apart from the server's default log.
-const getObservabilityEventsPath = () =>
+// of its own, apart from the server's default log. The retention sweep
+// (rag/retention.js) rotates and prunes the same file.
+export const getObservabilityEventsPath = () =>
   String(process.env.RAG_OBSERVABILITY_EVENTS_PATH ?? "").trim() ||
   path.join(path.dirname(getRagDataDirectory()), "rag-observability", "events.jsonl");
 

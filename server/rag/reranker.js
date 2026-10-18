@@ -16,7 +16,8 @@ import {
   LLMOPS_OPERATIONS,
   recordLlmOpsMetric,
 } from "./llmops-metrics.js";
-import { getModelGatewayCall, recordModelMetricEvent } from "./model-gateway/call-context.js";
+import { getModelGatewayCall } from "./model-gateway/call-context.js";
+import { admitModelCallQuota, recordModelMetricEventWithQuota } from "./model-call-quota.js";
 import { requestModelGatewayRerank } from "./model-gateway/client.js";
 import { MODEL_GATEWAY_MIRROR_ANNOTATION } from "./model-gateway/protocol.js";
 import { observeRerank, recordRerankDegradation } from "./metrics-retrieval.js";
@@ -299,7 +300,7 @@ const recordCrossEncoderLlmOpsMetric = async ({
     operation: LLMOPS_OPERATIONS.rerank,
     stage: "cross_encoder_score",
     status,
-  }, { recorder: recordModelMetricEvent });
+  }, { recorder: recordModelMetricEventWithQuota });
 };
 
 const normalizeScores = (scores) => {
@@ -577,6 +578,14 @@ const scoreWithCrossEncoder = async ({ queryText, results }) => {
   const gatewayMetric = viaGateway
     ? { annotations: [MODEL_GATEWAY_MIRROR_ANNOTATION], modelRoute: routeSelection.modelRoute, usage: null }
     : { annotations: [], modelRoute: routeSelection.modelRoute, usage: null };
+  // In-process per-workspace quota (model-call-quota.js), before the call is
+  // sent; the gateway admits a call routed to it. A refusal degrades the query
+  // to the fused order like any rerank failure (rerankResultsOrKeepOrder).
+  const admission = viaGateway ? null : admitModelCallQuota();
+
+  if (admission) {
+    await admission;
+  }
 
   try {
     let scores;

@@ -664,7 +664,8 @@ test("tiers start in dependency order and drain before docker stops them", async
     "model-gateway": "service_healthy",
     postgres: "service_healthy",
   });
-  assert.deepEqual(dependsOn(override, "model-gateway"), {});
+  // The gateway writes the tenant usage ledger (see the next test).
+  assert.deepEqual(dependsOn(override, "model-gateway"), { postgres: "service_healthy" });
 
   withEnvironment(t, { SERVICE_SHUTDOWN_GRACE_MS: "" });
 
@@ -673,6 +674,26 @@ test("tiers start in dependency order and drain before docker stops them", async
 
     assert.ok(seconds * 1000 > getServiceShutdownGraceMs(), `${serviceName} outlasts the drain window`);
   }
+});
+
+// In a split deployment the callers send every model call through the
+// gateway and keep only mirror events, which the tenant usage ledger skips
+// (rag/tenant-usage.js), so the gateway alone books model tokens and cost per
+// tenant: it needs the compose network's database like every other tier.
+// Without it, a server/.env copied from the example would point the gateway
+// at 127.0.0.1:5432, its own container, and every ledger flush would fail.
+test("the model gateway gets the compose database for the tenant usage ledger", async () => {
+  const override = await readText(servicesOverridePath);
+  const databaseUrls = tierServiceNames.map(
+    (serviceName) => rawServiceEnvironment(override, serviceName).POSTGRES_DATABASE_URL
+  );
+
+  assert.equal(
+    rawServiceEnvironment(override, "model-gateway").POSTGRES_DATABASE_URL,
+    "postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/agentai"
+  );
+  assert.equal(new Set(databaseUrls).size, 1, "every tier names the same database");
+  assert.equal(new URL(interpolate(databaseUrls[0], {})).hostname, "postgres", "the compose service, never loopback");
 });
 
 // The monolith (server.js, role all) drains the same window and then gives its
@@ -801,8 +822,9 @@ test("the postgres password comes from POSTGRES_PASSWORD, and every database URL
     }
   }
 
-  // app (2) and api, agent, retrieval (2 each); the gateway has no database.
-  assert.equal(urlCount, 8);
+  // app (2), api, agent, retrieval (2 each), and the gateway's
+  // POSTGRES_DATABASE_URL for the tenant usage ledger.
+  assert.equal(urlCount, 9);
 
   // No hard-coded password anywhere else in either file.
   for (const [name, text] of [["docker-compose.yml", compose], ["compose.services.yml", override]]) {

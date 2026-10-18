@@ -1,10 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
 import {
+  getPostgresConnectionTimeoutMs,
   getPostgresDatabaseUrl,
+  getPostgresIdleInTransactionTimeoutMs,
+  getPostgresMigrationDatabaseUrl,
+  getPostgresPoolMax,
   getPostgresRowLevelSecurityMode,
+  getPostgresStatementTimeoutMs,
+  getPostgresSystemRole,
+  getPostgresTenantContextMode,
   getPostgresTenantRole,
   isLongMemoryEnabled,
+  isPostgresRoleSplitEnabled,
   isPostgresSslEnabled,
 } from "./config.js";
 import { rethrowPostgresError } from "./metrics-postgres.js";
@@ -15,12 +23,19 @@ import {
   recordPrimaryRead,
   resetReadReplicas,
 } from "./postgres-replicas.js";
-import { getActiveDatabaseTenant } from "./postgres-tenant.js";
+import {
+  DATABASE_TENANT_CONTEXTS,
+  getActiveDatabaseTenant,
+  getDatabaseTenantContext,
+} from "./postgres-tenant.js";
 
 const { DatabaseError, Pool, Query } = pg;
 const { prepareValue } = pg.utils;
 
 let postgresPool = null;
+// The owner pool of the role split (POSTGRES_MIGRATION_DATABASE_URL); null
+// while the split is off, when the one pool above logs in as the owner.
+let migrationPool = null;
 
 const getConnectionString = () => getPostgresDatabaseUrl().trim();
 
@@ -46,14 +61,71 @@ const getConnectionConfig = () => {
   };
 };
 
+// POSTGRES_POOL_MAX and POSTGRES_CONNECTION_TIMEOUT_MS, read when the pool is
+// created (resetPostgresPool makes the next call read them again). Their
+// defaults are node-pg's own (10 connections; 0 = wait for a connection, or
+// for a free slot of a busy pool, without a bound), so an unset environment
+// builds the same pool as before they existed.
+export const getPostgresPoolOptions = () => ({
+  ...getConnectionConfig(),
+  connectionTimeoutMillis: getPostgresConnectionTimeoutMs(),
+  max: getPostgresPoolMax(),
+});
+
+// pg-pool re-emits an idle client's error (the server restarted, failed over or
+// ended the session) on the pool, and an EventEmitter without an 'error'
+// listener throws, which ended the process. The pool has already discarded
+// that client, so the next statement opens a fresh connection; the error is
+// only logged. Leased clients are covered by withPooledClient's own listener.
+const watchIdleClientErrors = (pool, name) => {
+  pool.on("error", (error) => {
+    console.warn(
+      `[postgres] idle ${name} connection closed: ${error?.code ?? error?.message ?? "unknown error"}`
+    );
+  });
+
+  return pool;
+};
+
 export const getPostgresPool = () => {
   if (postgresPool) {
     return postgresPool;
   }
 
-  postgresPool = new Pool(getConnectionConfig());
+  postgresPool = watchIdleClientErrors(new Pool(getPostgresPoolOptions()), "runtime");
 
   return postgresPool;
+};
+
+// Owner work is short and sequential (one migration, one version table's
+// DDL, one drop attempt at a time), so the owner pool stays small; idle owner
+// sessions close after node-pg's idle timeout instead of staying open next to
+// the runtime pool.
+const MIGRATION_POOL_MAX = 2;
+
+/**
+ * The owner pool's options: POSTGRES_MIGRATION_DATABASE_URL with the runtime
+ * pool's SSL and connect-timeout settings.
+ */
+export const getPostgresMigrationPoolOptions = () => ({
+  connectionString: getPostgresMigrationDatabaseUrl(),
+  connectionTimeoutMillis: getPostgresConnectionTimeoutMs(),
+  max: MIGRATION_POOL_MAX,
+  ssl: isPostgresSslEnabled()
+    ? {
+        rejectUnauthorized: false,
+      }
+    : undefined,
+});
+
+const getPostgresMigrationPool = () => {
+  if (migrationPool) {
+    return migrationPool;
+  }
+
+  migrationPool = watchIdleClientErrors(new Pool(getPostgresMigrationPoolOptions()), "owner");
+
+  return migrationPool;
 };
 
 /** The pool if one exists, without creating it (rag/metrics-postgres.js). */
@@ -61,13 +133,17 @@ export const peekPostgresPool = () => postgresPool;
 
 /**
  * A connection of its own, outside the pool, for a session that has to stay
- * open between statements (LISTEN). It logs in as the configured owner user and
- * never carries a tenant, so it may not be created under one: nothing it runs
- * is scoped by row-level security. The caller connects it, owns it and ends it.
- * TCP keepalive lets a connection whose peer vanished fail instead of idling
+ * open between statements (LISTEN). It logs in with POSTGRES_DATABASE_URL --
+ * the owner without the role split, the runtime login with it (LISTEN needs
+ * no privilege, and the session never switches role) -- and never carries a
+ * tenant, so it may not be created under one: nothing it runs is scoped by
+ * row-level security. The caller connects it, owns it and ends it. TCP
+ * keepalive lets a connection whose peer vanished fail instead of idling
  * silently forever.
  */
 export const createDedicatedPostgresClient = () => {
+  assertDatabaseContextBound("createDedicatedPostgresClient");
+
   if (getEnforcedDatabaseTenant()) {
     throw new Error(
       "createDedicatedPostgresClient cannot run under a database tenant; a dedicated session always acts as the owner."
@@ -76,6 +152,9 @@ export const createDedicatedPostgresClient = () => {
 
   return new pg.Client({
     ...getConnectionConfig(),
+    // The pool's bound on connecting (0 = none), so a LISTEN session to an
+    // unreachable server fails into its reconnect backoff.
+    connectionTimeoutMillis: getPostgresConnectionTimeoutMs(),
     keepAlive: true,
     keepAliveInitialDelayMillis: 10000,
   });
@@ -86,12 +165,36 @@ export const createDedicatedPostgresClient = () => {
 // transaction ends, so a pooled connection never leaves the transaction still
 // acting as a tenant. The role and the ids travel as bind parameters, never in
 // the SQL text.
+//
+// The same step sets the tenant work's limits, transaction-locally as well:
+// statement_timeout (POSTGRES_STATEMENT_TIMEOUT_MS) bounds every statement of
+// the tenant transaction, idle_in_transaction_session_timeout
+// (POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS) ends a tenant transaction whose
+// caller stopped sending statements while holding it open. They are bind
+// parameters too, so the text never changes; a limit that is off goes out as
+// NULL and its setting is set to its own current value, which leaves whatever
+// the server, database or login role configured in force. No round trip is
+// added: this is the step that already carried the tenant settings.
 const TENANT_SETTINGS_SQL = `
   SELECT
     set_config('role', $1, true),
     set_config('archive_rag.user_id', $2, true),
-    set_config('archive_rag.workspace_id', $3, true)
+    set_config('archive_rag.workspace_id', $3, true),
+    set_config('statement_timeout', COALESCE($4::text, current_setting('statement_timeout')), true),
+    set_config(
+      'idle_in_transaction_session_timeout',
+      COALESCE($5::text, current_setting('idle_in_transaction_session_timeout')),
+      true
+    )
 `;
+
+// With the role split on, system and unscoped work switches into the system
+// role (POSTGRES_SYSTEM_ROLE, migration 035) the same way: SET LOCAL ROLE
+// through set_config, the role as a bind parameter, in the same round trip as
+// the statement. Nothing else is set: system work never gets the tenant ids
+// (the system_access policies do not read them) nor the tenant work's limits
+// (owner work never had them either).
+const SYSTEM_SETTINGS_SQL = "SELECT set_config('role', $1, true)";
 
 // ReadyForQuery transaction status: idle, in a transaction block, in a failed
 // transaction block.
@@ -99,18 +202,50 @@ const TRANSACTION_IDLE = "I";
 const TRANSACTION_IN_BLOCK = "T";
 
 export const TENANT_PIPELINE_STATUS_ERROR_CODE = "ARCHIVE_RAG_TENANT_PIPELINE_STATUS";
+export const TENANT_CONTEXT_MISSING_ERROR_CODE = "ARCHIVE_RAG_TENANT_CONTEXT_MISSING";
 
 export const getEnforcedDatabaseTenant = () =>
   getPostgresRowLevelSecurityMode() === "enforce" ? getActiveDatabaseTenant() : null;
+
+/**
+ * POSTGRES_TENANT_CONTEXT=strict with row-level security enforced: a database
+ * call whose chain is bound to nothing (rag/postgres-tenant.js) throws instead
+ * of running as the owner. A request is bound by bindDatabaseTenant, a stored
+ * record's work by runWithDatabaseTenant, system work by runAsDatabaseSystem;
+ * a call that arrives unbound skipped all three or lost its async context on
+ * the way, and on the owner path it would see every tenant's rows. Every
+ * refusal is logged with its stack, the only pointer to the call site that
+ * lost the context. Lenient (the default) and RLS off keep the owner path.
+ */
+const assertDatabaseContextBound = (operation) => {
+  if (getPostgresTenantContextMode() !== "strict" || getPostgresRowLevelSecurityMode() !== "enforce") {
+    return;
+  }
+
+  if (getDatabaseTenantContext() !== DATABASE_TENANT_CONTEXTS.unbound) {
+    return;
+  }
+
+  const error = new Error(
+    `${operation} ran with no database tenant context while POSTGRES_TENANT_CONTEXT=strict; bind the request with bindDatabaseTenant, a record's work with runWithDatabaseTenant, or system work with runAsDatabaseSystem.`
+  );
+
+  error.code = TENANT_CONTEXT_MISSING_ERROR_CODE;
+  console.error(`[postgres] ${TENANT_CONTEXT_MISSING_ERROR_CODE}: ${error.stack}`);
+  throw error;
+};
+
+// A limit as its set_config value: milliseconds as text, or null for "leave
+// the current value" (see TENANT_SETTINGS_SQL).
+const toTimeoutSetting = (milliseconds) => (milliseconds > 0 ? String(milliseconds) : null);
 
 const getTenantSettingsValues = (tenant) => [
   getPostgresTenantRole(),
   tenant.userId,
   tenant.workspaceId,
+  toTimeoutSetting(getPostgresStatementTimeoutMs()),
+  toTimeoutSetting(getPostgresIdleInTransactionTimeoutMs()),
 ];
-
-const applyTenantSettings = (client, tenant) =>
-  client.query(TENANT_SETTINGS_SQL, getTenantSettingsValues(tenant));
 
 /**
  * Several statements in one round trip over the extended query protocol: a
@@ -317,18 +452,65 @@ const tenantSettingsStep = (tenant) => ({
   values: getTenantSettingsValues(tenant),
 });
 
-const withPooledClient = async (callback) => {
-  const client = await getPostgresPool().connect().catch(rethrowPostgresError);
+const systemSettingsStep = () => ({
+  text: SYSTEM_SETTINGS_SQL,
+  values: [getPostgresSystemRole()],
+});
+
+/**
+ * Who the current chain's statements run as, and the settings step that makes
+ * them so (null: the login itself, no step).
+ *
+ *   enforced tenant   the tenant role and settings, with or without the split.
+ *   split off         everything else runs as the login, which is the owner:
+ *                     the statement counts and wire messages from before the
+ *                     split existed.
+ *   split on, bound   system and unscoped chains (and, with row-level security
+ *                     off, tenant chains too: RLS off means no tenant role)
+ *                     switch into the system role.
+ *   split on, unbound the runtime login itself, which holds no table
+ *                     privilege: the statement fails with a permission error
+ *                     instead of reading every tenant (strict mode throws its
+ *                     own error before).
+ */
+const resolveStatementRole = () => {
+  const tenant = getEnforcedDatabaseTenant();
+
+  if (tenant) {
+    return { step: tenantSettingsStep(tenant), tenant };
+  }
+
+  if (!isPostgresRoleSplitEnabled() || getDatabaseTenantContext() === DATABASE_TENANT_CONTEXTS.unbound) {
+    return { step: null, tenant: null };
+  }
+
+  return { step: systemSettingsStep(), tenant: null };
+};
+
+const withPooledClient = async (callback, getPool = getPostgresPool) => {
+  const client = await getPool().connect().catch(rethrowPostgresError);
   // Set when the connection may still be inside a transaction or a pipeline
   // (a failed ROLLBACK, a pipeline that did not provably end idle): the pool
   // then destroys it instead of handing it to the next caller.
   const lease = { discard: false };
+  // pg-pool listens for errors on idle clients only. A session the server ends
+  // while a caller holds it between statements -- a tenant transaction past
+  // POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS, pg_terminate_backend, a restart --
+  // makes the checked-out client emit 'error' with no listener, which would
+  // end the process. The lease listens instead: the connection is discarded
+  // and the caller's next statement fails with pg's own error.
+  const onClientError = () => {
+    lease.discard = true;
+  };
+
+  client.on("error", onClientError);
 
   try {
     return await callback(client, lease);
   } catch (error) {
     rethrowPostgresError(error);
   } finally {
+    client.removeListener("error", onClientError);
     client.release(
       lease.discard ? new Error("PostgreSQL connection discarded after an unfinished transaction.") : undefined
     );
@@ -368,20 +550,44 @@ const rollbackQuietly = async (client, lease) => {
   }
 };
 
-// BEGIN, and for a tenant the tenant settings. With the JavaScript client both
-// go out in one round trip (the explicit block stays open after the Sync);
-// otherwise BEGIN and the settings are two. A failure rolls back.
-const beginTransaction = async (client, lease, tenant) => {
-  if (!tenant) {
-    await client.query("BEGIN");
+// BEGIN, and the role's settings step (the tenant settings, or the system role
+// under the split) when there is one. With the JavaScript client both go out
+// in one round trip (the explicit block stays open after the Sync); otherwise
+// BEGIN and the settings are two. A failure rolls back.
+// The isolation levels withPostgresTransaction may name. The level must be
+// part of BEGIN itself: the settings step that follows takes the snapshot, and
+// changing the level after that fails (25001).
+const TRANSACTION_ISOLATION_LEVELS = new Map([
+  ["read committed", "BEGIN ISOLATION LEVEL READ COMMITTED"],
+  ["repeatable read", "BEGIN ISOLATION LEVEL REPEATABLE READ"],
+  ["serializable", "BEGIN ISOLATION LEVEL SERIALIZABLE"],
+]);
+
+const resolveBeginText = (isolationLevel) => {
+  if (isolationLevel === undefined || isolationLevel === null) {
+    return "BEGIN";
+  }
+
+  const text = TRANSACTION_ISOLATION_LEVELS.get(String(isolationLevel).trim().toLowerCase());
+
+  if (!text) {
+    throw new TypeError(`Unknown transaction isolation level "${String(isolationLevel)}".`);
+  }
+
+  return text;
+};
+
+const beginTransaction = async (client, lease, step, beginText = "BEGIN") => {
+  if (!step) {
+    await client.query(beginText);
     return;
   }
 
   if (!canPipeline(client)) {
-    await client.query("BEGIN");
+    await client.query(beginText);
 
     try {
-      await applyTenantSettings(client, tenant);
+      await client.query(step.text, step.values);
     } catch (error) {
       await rollbackQuietly(client, lease);
       throw error;
@@ -393,8 +599,8 @@ const beginTransaction = async (client, lease, tenant) => {
   try {
     await runPipeline(client, {
       expectedTransactionStatus: TRANSACTION_IN_BLOCK,
-      prelude: [{ text: "BEGIN", values: [] }],
-      ...tenantSettingsStep(tenant),
+      prelude: [{ text: beginText, values: [] }],
+      ...step,
     });
   } catch (error) {
     noteDiscard(lease, error);
@@ -403,10 +609,10 @@ const beginTransaction = async (client, lease, tenant) => {
   }
 };
 
-// BEGIN (with the tenant settings when there is a tenant), the work, COMMIT;
+// BEGIN (with the role's settings step when there is one), the work, COMMIT;
 // ROLLBACK on any throw.
-const runInTransaction = async (client, lease, tenant, callback) => {
-  await beginTransaction(client, lease, tenant);
+const runInTransaction = async (client, lease, step, callback, beginText = "BEGIN") => {
+  await beginTransaction(client, lease, step, beginText);
 
   let result;
 
@@ -426,7 +632,12 @@ const runInTransaction = async (client, lease, tenant, callback) => {
  * For a tenant it runs in a transaction of its own, so the tenant role and
  * settings apply to it and to nothing after it: the settings and the
  * statement go out together in one round trip, in the implicit transaction
- * that the Sync ends (commit, or rollback when either fails).
+ * that the Sync ends (commit, or rollback when either fails). With the role
+ * split on (POSTGRES_MIGRATION_DATABASE_URL), system and unscoped statements
+ * take the same path with the system role's step instead, and only an unbound
+ * one goes straight to the pool, as the runtime login (resolveStatementRole).
+ * Under the split a system statement therefore always uses the extended
+ * protocol, as a tenant statement does: one call carries one statement.
  *
  * `prelude` ({ text, values } statements) runs first in that same implicit
  * transaction and round trip, for its effect only: a row lock taken there
@@ -456,17 +667,25 @@ const runInTransaction = async (client, lease, tenant, callback) => {
  * fresh as POSTGRES_READ_REPLICA_MAX_LAG_MS.
  */
 export const queryPostgres = async (queryText, values = [], { prelude = [], readOnly = null } = {}) => {
-  const tenant = getEnforcedDatabaseTenant();
+  assertDatabaseContextBound("queryPostgres");
+
+  const role = resolveStatementRole();
 
   if (readOnly && isReadReplicaRoutingEnabled()) {
-    const replicated = await queryReadReplica({ guard: readOnly.guard ?? null, prelude, queryText, tenant, values });
+    const replicated = await queryReadReplica({
+      guard: readOnly.guard ?? null,
+      prelude,
+      queryText,
+      tenant: role.tenant,
+      values,
+    });
 
     if (replicated) {
       return replicated.result;
     }
   }
 
-  const steps = [...(tenant ? [tenantSettingsStep(tenant)] : []), ...prelude];
+  const steps = [...(role.step ? [role.step] : []), ...prelude];
 
   if (steps.length === 0) {
     return getPostgresPool().query(queryText, values).catch(rethrowPostgresError);
@@ -474,7 +693,7 @@ export const queryPostgres = async (queryText, values = [], { prelude = [], read
 
   return withPooledClient(async (client, lease) => {
     if (!canPipeline(client) || typeof queryText !== "string") {
-      return runInTransaction(client, lease, tenant, async () => {
+      return runInTransaction(client, lease, role.step, async () => {
         for (const step of prelude) {
           await client.query(step.text, step.values ?? []);
         }
@@ -526,7 +745,7 @@ const runOnReplica = (pool, { guard, prelude, queryText, tenant, values }) =>
     const reads = [...(guard ? [guard] : []), ...prelude];
 
     if (!canPipeline(client) || typeof queryText !== "string") {
-      return runInTransaction(client, lease, tenant, async () => {
+      return runInTransaction(client, lease, tenantSettingsStep(tenant), async () => {
         for (const step of reads) {
           await client.query(step.text, step.values ?? []);
         }
@@ -582,17 +801,43 @@ const queryReadReplica = async ({ guard, prelude, queryText, tenant, values }) =
   }
 };
 
+export const ROLE_SPLIT_RAW_SESSION_ERROR_CODE = "ARCHIVE_RAG_ROLE_SPLIT_RAW_SESSION";
+export const OWNER_WORK_CONTEXT_ERROR_CODE = "ARCHIVE_RAG_OWNER_WORK_CONTEXT";
+
 /**
- * A raw pooled session for work that manages its own transactions (the
- * migrator). It cannot carry a tenant: settings made outside a transaction
- * would outlive the callback on a pooled connection. Under a tenant it throws
- * rather than silently running as the owner.
+ * A raw pooled session for work that manages its own transactions. It cannot
+ * carry a tenant: settings made outside a transaction would outlive the
+ * callback on a pooled connection. Under a tenant it throws rather than
+ * silently running as the owner.
+ *
+ * With the role split on it refuses outright. A raw runtime session either
+ * runs as the runtime login, which can do nothing, or would have to switch
+ * into the system role at session level (SET ROLE) for the callback's own
+ * BEGIN/COMMITs and switch back before release: a callback that changes the
+ * role itself, or a reset that fails on a broken connection, would return a
+ * pooled connection still acting as the system, and the next borrower's
+ * unbound statement would then read every tenant instead of failing closed.
+ * On the runtime pool a role is therefore only ever set transaction-locally
+ * (queryPostgres, withPostgresTransaction). Owner work that needs a raw
+ * session (the migrator) takes one from the owner pool through
+ * withPostgresOwnerClient.
  */
 export const withPostgresClient = async (callback) => {
+  assertDatabaseContextBound("withPostgresClient");
+
   if (getEnforcedDatabaseTenant()) {
     throw new Error(
       "withPostgresClient cannot run under a database tenant; use withPostgresTransaction for tenant-scoped work or runAsDatabaseSystem for system work."
     );
+  }
+
+  if (isPostgresRoleSplitEnabled()) {
+    const error = new Error(
+      "withPostgresClient hands out no raw session while the database role split is on (POSTGRES_MIGRATION_DATABASE_URL): a session-level role switch could outlive the callback on a pooled connection. Use withPostgresTransaction, or withPostgresOwnerClient for owner work."
+    );
+
+    error.code = ROLE_SPLIT_RAW_SESSION_ERROR_CODE;
+    throw error;
   }
 
   return withPooledClient((client) => callback(client));
@@ -602,13 +847,102 @@ export const withPostgresClient = async (callback) => {
  * Runs `callback` inside one BEGIN/COMMIT on a single pooled client and rolls
  * back on any throw. The pgvector ingest path uses it so the document row and
  * every chunk row land together or not at all. Under a tenant the whole
- * transaction runs as the tenant role.
+ * transaction runs as the tenant role; with the role split on, system and
+ * unscoped work runs as the system role (SET LOCAL ROLE in BEGIN's round
+ * trip), unbound work as the runtime login.
  */
-export const withPostgresTransaction = async (callback) => {
-  const tenant = getEnforcedDatabaseTenant();
-  const run = () => withPooledClient((client, lease) => runInTransaction(client, lease, tenant, callback));
+export const withPostgresTransaction = async (callback, { isolationLevel } = {}) => {
+  assertDatabaseContextBound("withPostgresTransaction");
+
+  // `isolationLevel` ("read committed", "repeatable read", "serializable")
+  // pins the level in BEGIN itself; without it the session default applies,
+  // with exactly the messages it always sent.
+  const beginText = resolveBeginText(isolationLevel);
+  const { step } = resolveStatementRole();
+  const run = () =>
+    withPooledClient((client, lease) => runInTransaction(client, lease, step, callback, beginText));
 
   return hasReadReplicaConfiguration() ? transactionScope.run(true, run) : run();
+};
+
+// ---------------------------------------------------------------------------
+// Owner work (the role split)
+// ---------------------------------------------------------------------------
+//
+// Migrations and every DDL the application runs need the tables' owner. With
+// the split off the one pool logs in as the owner and these helpers are the
+// ordinary system-context calls (queryPostgres, withPostgresClient,
+// withPostgresTransaction), with the same messages on the wire. With it on they
+// use the owner pool on POSTGRES_MIGRATION_DATABASE_URL, without any role
+// switch, and only for system work: a tenant, unscoped or unbound chain never
+// gets an owner session, whatever code it reaches.
+
+const assertOwnerWork = (operation) => {
+  assertDatabaseContextBound(operation);
+
+  if (getDatabaseTenantContext() !== DATABASE_TENANT_CONTEXTS.system) {
+    const error = new Error(
+      `${operation} runs as the owner login (POSTGRES_MIGRATION_DATABASE_URL) and only for system work; run it inside runAsDatabaseSystem.`
+    );
+
+    error.code = OWNER_WORK_CONTEXT_ERROR_CODE;
+    throw error;
+  }
+};
+
+/** One owner statement (the migrator's bookkeeping). */
+export const queryPostgresAsOwner = async (queryText, values = []) => {
+  if (!isPostgresRoleSplitEnabled()) {
+    return queryPostgres(queryText, values);
+  }
+
+  assertOwnerWork("queryPostgresAsOwner");
+
+  return getPostgresMigrationPool().query(queryText, values).catch(rethrowPostgresError);
+};
+
+/** A raw owner session for work that manages its own transactions (the migrator). */
+export const withPostgresOwnerClient = async (callback) => {
+  if (!isPostgresRoleSplitEnabled()) {
+    return withPostgresClient(callback);
+  }
+
+  assertOwnerWork("withPostgresOwnerClient");
+
+  return withPooledClient((client) => callback(client), getPostgresMigrationPool);
+};
+
+/**
+ * One owner transaction: BEGIN, the callback's statements on the client it is
+ * handed, COMMIT; ROLLBACK on any throw. The index version lifecycle creates
+ * and drops version tables in it.
+ */
+export const withPostgresOwnerTransaction = async (callback) => {
+  if (!isPostgresRoleSplitEnabled()) {
+    return withPostgresTransaction(callback);
+  }
+
+  assertOwnerWork("withPostgresOwnerTransaction");
+
+  return withPooledClient(
+    (client, lease) => runInTransaction(client, lease, null, callback),
+    getPostgresMigrationPool
+  );
+};
+
+/**
+ * The role POSTGRES_DATABASE_URL logs in as, read from the database itself
+ * (session_user on a runtime connection, no role switch, no privilege needed)
+ * rather than parsed from the URL, which may be a key/value string, leave the
+ * user to PGUSER, or pass through a proxy. The migrator grants the tenant and
+ * system roles to it under the split.
+ */
+export const readPostgresRuntimeLogin = async () => {
+  const result = await getPostgresPool()
+    .query("SELECT session_user::text AS login")
+    .catch(rethrowPostgresError);
+
+  return String(result.rows?.[0]?.login ?? "");
 };
 
 export const checkPostgresHealth = async () => {
@@ -637,6 +971,13 @@ export const checkPostgresHealth = async () => {
 
 export const resetPostgresPool = async () => {
   await resetReadReplicas();
+
+  if (migrationPool) {
+    const pool = migrationPool;
+
+    migrationPool = null;
+    await pool.end();
+  }
 
   if (!postgresPool) {
     return;

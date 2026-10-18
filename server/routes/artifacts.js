@@ -7,7 +7,11 @@ import {
   toWorkspaceArtifactSummary,
 } from "../rag/workspace-artifacts/index.js";
 
-import { sendBufferedFile, serializeError } from "./helpers.js";
+import {
+  noStoreTenantData,
+  sendBufferedFile,
+  serializeError,
+} from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
 
 const artifactIdSchema = z.object({
@@ -18,7 +22,10 @@ export const createArtifactsRouter = (services) => {
   const router = Router();
   const { workspaceArtifactService } = services;
 
-  router.get("/artifacts", async (req, res) => {
+  // The three reads answer with the caller's own workspace artifacts, selected
+  // by the identity headers: never cacheable (helpers.js
+  // setTenantDataCacheHeaders).
+  router.get("/artifacts", noStoreTenantData, async (req, res) => {
     try {
       const result = await workspaceArtifactService.listArtifacts({
         accessScope: getRequestAccessScope(req),
@@ -40,7 +47,7 @@ export const createArtifactsRouter = (services) => {
     }
   });
 
-  router.get("/artifacts/:artifactId/download", async (req, res) => {
+  router.get("/artifacts/:artifactId/download", noStoreTenantData, async (req, res) => {
     const parsed = parseOrRespond(artifactIdSchema, req.params, res);
     if (!parsed) return;
     const { artifactId } = parsed;
@@ -100,7 +107,7 @@ export const createArtifactsRouter = (services) => {
     }
   });
 
-  router.get("/artifacts/:artifactId", async (req, res) => {
+  router.get("/artifacts/:artifactId", noStoreTenantData, async (req, res) => {
     const parsed = parseOrRespond(artifactIdSchema, req.params, res);
     if (!parsed) return;
     const { artifactId } = parsed;

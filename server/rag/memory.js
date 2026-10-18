@@ -12,7 +12,8 @@ import {
   isApiAuthEnabled,
 } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
-import { queryPostgres } from "./postgres.js";
+import { isPostgresConfigured, queryPostgres } from "./postgres.js";
+import { createPostgresTenantRecordMethods } from "./tenant-records.js";
 import {
   getActiveDatabaseTenant,
   runAsDatabaseSystem,
@@ -445,6 +446,22 @@ const createDefaultStore = () => ({
     const result = await queryPostgres(`DELETE FROM ${tableName}`);
     return Number(result.rowCount ?? 0);
   },
+
+  // The tenant erase and export (rag/tenant-records.js), by the owner columns
+  // of migration 031. A session stored before that migration has empty owner
+  // columns, so it belongs to no tenant here; the TTL purge removes it.
+  ...createPostgresTenantRecordMethods({
+    initialize: () => runPostgresMigrations(),
+    query: queryPostgres,
+    tables: () => [
+      {
+        keyColumns: ["session_id"],
+        name: "session_memory",
+        table: ensureTableName(),
+        userColumn: "owner_user_id",
+      },
+    ],
+  }),
 });
 
 const getSessionMemoryStore = () =>
@@ -685,6 +702,24 @@ export const clearSessionMemory = async (sessionId, accessScope = null) => {
   await initializeSessionMemoryStore();
   const store = getSessionMemoryStore();
   return store.delete ? store.delete(sessionKey) : false;
+};
+
+/**
+ * The session store the tenant erase and export use (rag/tenant-records.js
+ * calls), with why it may not be usable: `not_configured` when the default
+ * PostgreSQL store has no database, `unsupported` when a configured store
+ * keeps no owner for its sessions.
+ */
+export const getSessionMemoryTenantRecordStore = () => {
+  if (configuredSessionMemoryStore) {
+    return typeof configuredSessionMemoryStore.countTenantRecords === "function"
+      ? { status: "ok", store: configuredSessionMemoryStore }
+      : { status: "unsupported", store: null };
+  }
+
+  return isPostgresConfigured()
+    ? { status: "ok", store: getSessionMemoryStore() }
+    : { status: "not_configured", store: null };
 };
 
 export const resetSessionMemory = () => {

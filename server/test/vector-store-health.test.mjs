@@ -263,3 +263,187 @@ test("the local provider is checked like any other backend and reports its direc
     await rm(tempRoot, { force: true, recursive: true });
   }
 });
+
+// --- local and Qdrant are single-tenant stores -------------------------------
+//
+// Neither has a tenant boundary of its own: a search is scoped by the docIds
+// the caller passes, nothing more. With several principals (API_AUTH_TOKENS,
+// JWT or OIDC) the vector store entry says so as a warning; one shared token
+// or auth off is the single-tenant setup they are supported for.
+
+const noAuth = {
+  API_AUTH_ENABLED: "false",
+  API_AUTH_JWT_ENABLED: undefined,
+  API_AUTH_JWT_HS256_SECRET: undefined,
+  API_AUTH_JWT_SECRET: undefined,
+  API_AUTH_OIDC_AUDIENCE: undefined,
+  API_AUTH_OIDC_ENABLED: undefined,
+  API_AUTH_OIDC_ISSUER: undefined,
+  API_AUTH_TOKEN: undefined,
+  API_AUTH_TOKENS: undefined,
+};
+const TOKEN_MAP = JSON.stringify([
+  { token: "alice-token", userId: "alice", workspaceId: "acme" },
+  { token: "bob-token", userId: "bob", workspaceId: "globex" },
+]);
+
+const withLocalDirectory = async (callback) => {
+  const originalDirectory = getRagDataDirectory();
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "vector-health-tenancy-"));
+
+  configureRagDataDirectory(path.join(tempRoot, "rag-data"));
+
+  try {
+    return await callback();
+  } finally {
+    configureRagDataDirectory(originalDirectory);
+    await rm(tempRoot, { force: true, recursive: true });
+  }
+};
+
+const withQdrantHealthz = async (status, callback) => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /\/healthz$/);
+    return { ok: status === 200, status };
+  };
+
+  try {
+    return await callback();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+};
+
+const vectorStoreEntry = async (env) => {
+  resetVectorStore();
+
+  try {
+    return (await withEnv({ ...quietStores, ...noAuth, ...env }, () => buildHealthReport())).checks.vectorStore;
+  } finally {
+    resetVectorStore();
+  }
+};
+
+const assertSingleTenantWarning = (entry, { principalSources, provider, status = "warning" }) => {
+  assert.equal(entry.status, status);
+  assert.equal(entry.provider, provider);
+  assert.equal(entry.tenancy, "single_tenant");
+  assert.deepEqual(entry.warnings, ["single_tenant_vector_store"]);
+  assert.deepEqual(entry.multiPrincipalAuth, principalSources);
+  assert.match(entry.message, new RegExp(`VECTOR_STORE_PROVIDER=${provider} relies on application filters only`));
+  assert.match(entry.message, /supported for single-tenant use/);
+  assert.match(entry.message, /use pgvector, the multi-tenant store/);
+};
+
+const assertNoTenancyNote = (entry) => {
+  assert.equal(entry.tenancy, undefined);
+  assert.equal(entry.warnings, undefined);
+  assert.equal(entry.multiPrincipalAuth, undefined);
+  assert.doesNotMatch(entry.message, /single-tenant use/);
+};
+
+test("local with per-user API_AUTH_TOKENS is a warning (never an error) that names pgvector as the multi-tenant store", async () => {
+  await withLocalDirectory(async () => {
+    const entry = await vectorStoreEntry({
+      API_AUTH_ENABLED: "true",
+      API_AUTH_TOKENS: TOKEN_MAP,
+      VECTOR_STORE_PROVIDER: "local",
+    });
+
+    assertSingleTenantWarning(entry, { principalSources: ["api_auth_tokens"], provider: "local" });
+    assert.equal(entry.backend, "filesystem", "the store's own check is kept");
+    assert.match(entry.message, /^Local JSON vector index is the active provider/);
+  });
+});
+
+test("qdrant with JWT or OIDC auth is a warning; every principal source is named", async () => {
+  await withQdrantHealthz(200, async () => {
+    const jwt = await vectorStoreEntry({
+      API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: "true",
+      API_AUTH_JWT_HS256_SECRET: "a-test-secret-that-is-long-enough",
+      QDRANT_URL: "http://qdrant.local",
+      VECTOR_STORE_PROVIDER: "qdrant",
+    });
+
+    assertSingleTenantWarning(jwt, { principalSources: ["jwt"], provider: "qdrant" });
+    assert.match(jwt.message, /^Qdrant is reachable\./);
+
+    const everything = await vectorStoreEntry({
+      API_AUTH_ENABLED: "true",
+      API_AUTH_JWT_ENABLED: "true",
+      API_AUTH_JWT_HS256_SECRET: "a-test-secret-that-is-long-enough",
+      API_AUTH_OIDC_AUDIENCE: "archive-rag",
+      API_AUTH_OIDC_ENABLED: "true",
+      API_AUTH_OIDC_ISSUER: "https://idp.example.test",
+      API_AUTH_TOKENS: TOKEN_MAP,
+      QDRANT_URL: "http://qdrant.local",
+      VECTOR_STORE_PROVIDER: "qdrant",
+    });
+
+    assertSingleTenantWarning(everything, { principalSources: ["api_auth_tokens", "jwt", "oidc"], provider: "qdrant" });
+  });
+});
+
+test("a Qdrant that is down stays an error and still carries the single-tenant note", async () => {
+  await withQdrantHealthz(503, async () => {
+    const entry = await vectorStoreEntry({
+      API_AUTH_ENABLED: "true",
+      API_AUTH_TOKENS: TOKEN_MAP,
+      QDRANT_URL: "http://qdrant.local",
+      VECTOR_STORE_PROVIDER: "qdrant",
+    });
+
+    assertSingleTenantWarning(entry, { principalSources: ["api_auth_tokens"], provider: "qdrant", status: "error" });
+    assert.match(entry.message, /^Qdrant health endpoint returned 503\./);
+  });
+});
+
+test("the single shared API_AUTH_TOKEN, auth off, or pgvector add no single-tenant warning", async () => {
+  await withLocalDirectory(async () => {
+    const sharedToken = await vectorStoreEntry({
+      API_AUTH_ENABLED: "true",
+      API_AUTH_TOKEN: "one-shared-token",
+      VECTOR_STORE_PROVIDER: "local",
+    });
+
+    assert.equal(sharedToken.status, "ok");
+    assertNoTenancyNote(sharedToken);
+
+    // Token settings left behind with auth switched off name no principal.
+    const authOff = await vectorStoreEntry({
+      API_AUTH_ENABLED: "false",
+      API_AUTH_JWT_ENABLED: "true",
+      API_AUTH_TOKENS: TOKEN_MAP,
+      VECTOR_STORE_PROVIDER: "local",
+    });
+
+    assert.equal(authOff.status, "ok");
+    assertNoTenancyNote(authOff);
+  });
+
+  await withQdrantHealthz(200, async () => {
+    const qdrant = await vectorStoreEntry({
+      API_AUTH_ENABLED: "true",
+      API_AUTH_TOKEN: "one-shared-token",
+      QDRANT_URL: "http://qdrant.local",
+      VECTOR_STORE_PROVIDER: "qdrant",
+    });
+
+    assert.equal(qdrant.status, "ok");
+    assertNoTenancyNote(qdrant);
+  });
+
+  // pgvector is the multi-tenant store: never this note (here it is an error
+  // only because the suite has no database).
+  const pgvector = await vectorStoreEntry({
+    API_AUTH_ENABLED: "true",
+    API_AUTH_TOKENS: TOKEN_MAP,
+    VECTOR_STORE_PROVIDER: "pgvector",
+  });
+
+  assert.equal(pgvector.provider, "pgvector");
+  assertNoTenancyNote(pgvector);
+});

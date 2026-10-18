@@ -24,6 +24,7 @@ import {
   assertPgvectorAnnDimensionsSupported,
   renderIndexVersionChunkTableDdl,
   renderIndexVersionDropDdl,
+  renderSystemAccessInstallStatement,
 } from "./db-migrations.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { getDefaultEmbeddingBatcher } from "./ingest-embedding-batcher.js";
@@ -272,7 +273,11 @@ export const probeEmbeddingSpace = async (space) => {
  * Registers a new `building` version and creates its table, indexes, policy,
  * grant and sparse-rank function in one owner transaction under the exclusive
  * lifecycle lock, so the version becomes a write target in the same commit
- * that makes its table exist. At most one version builds at a time.
+ * that makes its table exist. At most one version builds at a time. With the
+ * role split on the whole transaction runs on the owner pool
+ * (POSTGRES_MIGRATION_DATABASE_URL), registry row included; the system role
+ * gets the new table (migration 035's installer) in the same statement as the
+ * DDL, so the build's own writes, which run as the system role, can reach it.
  */
 export const createIndexVersion = async ({
   builderId = null,
@@ -293,7 +298,7 @@ export const createIndexVersion = async ({
 
   const { pointerTable, versionsTable } = getIndexVersionTableNames();
   const version = await runAsDatabaseSystem(() =>
-    getPgvectorRuntime().withTransaction(async (client) => {
+    getPgvectorRuntime().withOwnerTransaction(async (client) => {
       const query = getPgvectorQuery(client);
 
       await query(
@@ -357,6 +362,9 @@ export const createIndexVersion = async ({
           // Migration 030's BM25 statistics, triggers and rank function, in the
           // version's own text search configuration.
           renderPgvectorBm25InstallStatement({ chunkTable, textSearchConfig: params.textSearchConfig }),
+          // Migration 035: the system role's grant and policies on the table
+          // and its statistics, and EXECUTE on both search functions.
+          renderSystemAccessInstallStatement({ chunkTable }),
         ].join("\n")
       );
 
@@ -1672,8 +1680,9 @@ export const dropRetiredIndexVersionStorage = async ({
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      // DROP and TRUNCATE belong to the owner: the owner pool under the role split.
       await runAsDatabaseSystem(() =>
-        getPgvectorRuntime().withTransaction(async (client) => {
+        getPgvectorRuntime().withOwnerTransaction(async (client) => {
           const query = getPgvectorQuery(client);
 
           await query("SELECT set_config('lock_timeout', $1, true)", [timeout]);

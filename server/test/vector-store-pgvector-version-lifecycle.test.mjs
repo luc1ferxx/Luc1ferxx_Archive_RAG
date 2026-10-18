@@ -229,6 +229,11 @@ test("creating a version locks, renders its table and registers it building, all
     "COMMIT",
   ]);
   assert.match(database.state.tables.get("rag_document_chunks_v2").ddl, /WITH \(m = 24/);
+  // Migration 033's tenant-filtering sparse-rank function, in the same transaction.
+  assert.match(
+    database.state.tables.get("rag_document_chunks_v2").ddl,
+    /SELECT rag_document_chunks_install_sparse_rank\('rag_document_chunks_v2'\);/
+  );
   // The new space was probed once, before any statement: its model answered at its width.
   assert.deepEqual(
     calls.map((call) => [call.kind, call.model, call.texts.length]),

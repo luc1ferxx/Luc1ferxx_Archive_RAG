@@ -7,6 +7,7 @@ import {
   clearDocuments as clearRegisteredDocuments,
   deleteDocument as deleteRegisteredDocument,
   documentMatchesAccessScope,
+  eraseStoredDocuments,
   findDocumentByContentHash,
   getDocument,
   getDocumentFile,
@@ -15,6 +16,7 @@ import {
   initializeDocumentRegistry,
   isDocumentRegistryShared,
   listDocuments,
+  listStoredDocumentsForTenant,
   loadDocumentsFromStore,
   lockDocumentContentHash,
   lockDocumentForContentReplace,
@@ -47,14 +49,26 @@ import {
   recordSessionTurn,
   resolveQueryWithSessionMemory,
 } from "./memory.js";
+import { runDocumentDeletionCascade } from "./document-deletion-cascade.js";
 import { recordRagTrace } from "./observability.js";
 import { invalidateSemanticCacheDocuments } from "./semantic-cache.js";
 import { loadPdfPages } from "./pdf-loader.js";
 import { withPostgresTransaction } from "./postgres.js";
 import { STAGED_INGEST } from "./ingest-stages.js";
 import {
+  assertTenantStorageQuota,
+  describeStorageQuotaScopeKey,
+  getTenantStorageQuotaLimits,
+  hasTenantStorageQuota,
+  lockTenantStorageQuota,
+  resolveStorageQuotaScope,
+} from "./tenant-storage-quota.js";
+import { recordTenantUsage, TENANT_USAGE_METRICS } from "./tenant-usage.js";
+import {
   beginVectorIndexWrite,
   clearVectorIndex,
+  countDocumentChunksForErase,
+  eraseDocumentsFromIndex,
   embedDocumentTextsForIndex,
   embedTextsForIndexWrite,
   ensureVectorStoreReady,
@@ -252,6 +266,24 @@ const withSharedContentLock = async (hash, owner, callback) => {
  *   runs inside that transaction (client set) on pgvector, so an ingest job
  *   records its success atomically with the document; it runs after the
  *   writes (client null) elsewhere. Throwing from it rolls the write back.
+ * - Storage quotas (TENANT_MAX_DOCUMENTS / TENANT_MAX_DOCUMENT_BYTES, off by
+ *   default; rag/tenant-storage-quota.js): a create that would take the
+ *   owner's workspace (else the user's workspace-less documents) over a quota,
+ *   or a replacement that grows it past the byte quota, is refused with
+ *   TENANT_STORAGE_QUOTA_EXCEEDED before anything is written. Commits into
+ *   one quota scope first take turns in this process, before any of them
+ *   checks out a pooled connection, so a burst of uploads into one workspace
+ *   holds at most one connection here instead of parking one per upload
+ *   (which starved every other tenant of the pool and, on local / Qdrant with
+ *   a PostgreSQL registry, left the turn's holder waiting forever for a
+ *   second connection). On pgvector the check then runs in the transaction
+ *   under an advisory lock on the quota scope (across processes), taken after
+ *   the content-hash lock and before the replacement's row lock; elsewhere it
+ *   runs under that in-process turn, on the content-lock transaction's
+ *   connection when there is one. A duplicate resolves before the quota is
+ *   read.
+ * - A committed create or replacement adds its bytes (and a create one
+ *   document) to the owner's usage ledger (rag/tenant-usage.js), in memory.
  *
  * Resolves to { document, docId, duplicate, superseded, documentVersion }.
  */
@@ -278,6 +310,14 @@ export const commitDocument = async ({
   const replacing = mode === "replace";
   const checkDuplicate = !replacing && deduplicate;
   const owner = { ownerUserId, workspaceId };
+  const quotaLimits = getTenantStorageQuotaLimits();
+  const quotaScope = hasTenantStorageQuota(quotaLimits)
+    ? resolveStorageQuotaScope({ ownerUserId, workspaceId })
+    : null;
+  // This process's commits into one quota scope, one at a time, before any
+  // of them checks out a database connection (see the doc comment above).
+  const withQuotaScopeTurn = (callback) =>
+    quotaScope ? withProcessContentLock(describeStorageQuotaScopeKey(quotaScope), callback) : callback();
   const now = new Date().toISOString();
   const hasRequestTime = toTime(requestedAt) !== null;
   const contentRequestedAt = hasRequestTime ? new Date(requestedAt).toISOString() : now;
@@ -337,6 +377,16 @@ export const commitDocument = async ({
     // answer cache now; their keys name the old content version anyway.
     invalidateSemanticCacheDocuments([docId]);
 
+    if (!outcome.duplicate && !outcome.superseded) {
+      recordTenantUsage(
+        { userId: ownerUserId, workspaceId },
+        {
+          [TENANT_USAGE_METRICS.ingestedBytes]: bytes.length,
+          [TENANT_USAGE_METRICS.documents]: replacing ? 0 : 1,
+        }
+      );
+    }
+
     if (outcome.docId !== docId || outcome.superseded) {
       // A document this write did not change: read it the way another
       // process's write would be read.
@@ -356,7 +406,7 @@ export const commitDocument = async ({
       let outcome;
 
       try {
-        outcome = await withPostgresTransaction(async (transactionClient) => {
+        outcome = await withQuotaScopeTurn(() => withPostgresTransaction(async (transactionClient) => {
           // The index write lock comes first: it must precede the
           // transaction's first documents-row lock
           // (vector-store-pgvector-versions.js). The content lock and the
@@ -373,6 +423,13 @@ export const commitDocument = async ({
             }
           }
 
+          // Commits into one quota scope of several processes queue here
+          // (after the content lock, before the replacement's row lock);
+          // this process's own already took turns (withQuotaScopeTurn).
+          if (quotaScope) {
+            await lockTenantStorageQuota(quotaScope, { client });
+          }
+
           let current = null;
 
           if (replacing) {
@@ -387,6 +444,17 @@ export const commitDocument = async ({
             }
           }
 
+          if (quotaScope) {
+            await assertTenantStorageQuota({
+              addedBytes: replacing ? bytes.length - (Number(current?.fileSize) || 0) : bytes.length,
+              addedDocuments: replacing ? 0 : 1,
+              client,
+              limits: quotaLimits,
+              ownerUserId,
+              workspaceId,
+            });
+          }
+
           const registration = registrationFor(current);
 
           await registerDocument(registration, { client });
@@ -396,7 +464,7 @@ export const commitDocument = async ({
             prepared: stampPreparedDocumentVersion(prepared, registration.version),
           });
           return decide({ client, current });
-        });
+        }));
       } catch (error) {
         try {
           await resyncDocument(docId);
@@ -430,6 +498,20 @@ export const commitDocument = async ({
       if (existing && existing.docId !== docId) {
         return decide({ client: null, duplicateOf: existing });
       }
+    }
+
+    if (quotaScope) {
+      // On the content-lock transaction's connection when it holds one: a
+      // second pooled connection here could wait forever behind uploads that
+      // each hold one.
+      await assertTenantStorageQuota({
+        addedBytes: bytes.length,
+        addedDocuments: 1,
+        client: lockClient,
+        limits: quotaLimits,
+        ownerUserId,
+        workspaceId,
+      });
     }
 
     const registration = registrationFor(null);
@@ -466,12 +548,16 @@ export const commitDocument = async ({
   };
 
   // Identical uploads wait for each other in this process, and, when other
-  // processes write the same PostgreSQL registry, across processes too.
+  // processes write the same PostgreSQL registry, across processes too. With
+  // a storage quota, writes into one quota scope then take turns in this
+  // process (so the count each reads includes the ones before it), before
+  // the content-lock transaction checks out its connection. Lock order: the
+  // content hash, then the quota scope, then the connection.
   const outcome = checkDuplicate
     ? await withProcessContentLock(`${ownerUserId}\u0000${workspaceId}\u0000${hash}`, () =>
-        withSharedContentLock(hash, owner, write)
+        withQuotaScopeTurn(() => withSharedContentLock(hash, owner, write))
       )
-    : await write();
+    : await withQuotaScopeTurn(() => write());
 
   return finish(outcome);
 };
@@ -640,11 +726,25 @@ const hasScopedAccess = (accessScope = {}) =>
 
 // Null when this caller cannot see the document, or when the registry store
 // had no row left to delete (another process deleted it first): the route
-// answers 404 either way.
+// answers 404 either way. Once this delete removed the document, `cascade`
+// (rag/document-deletion-cascade.js, wired by app-services.js) cancels its
+// ingest jobs and, with DOCUMENT_DELETE_REDACTION=on, redacts its text from the
+// caller's other records; it never fails the delete. Its chunks in every live
+// index version table go with the delete itself (vector-store-pgvector.js).
 export const deleteDocument = async (
   docId,
-  { deleteFile = true, accessScope = {} } = {}
+  { deleteFile = true, accessScope = {}, cascade = null } = {}
 ) => {
+  const deleted = await deleteDocumentFromStores(docId, { accessScope });
+
+  if (deleted) {
+    await runDocumentDeletionCascade(cascade, { accessScope, docIds: [deleted.docId ?? docId] });
+  }
+
+  return deleted;
+};
+
+const deleteDocumentFromStores = async (docId, { accessScope = {} } = {}) => {
   const storedDocument = getStoredDocument(docId, accessScope);
 
   if (!storedDocument) {
@@ -705,7 +805,21 @@ export const deleteDocument = async (
 export const clearDocuments = async ({
   deleteFiles = true,
   accessScope = {},
+  cascade = null,
 } = {}) => {
+  const documents = await clearDocumentsFromStores({ accessScope });
+
+  if (Array.isArray(documents) && documents.length > 0) {
+    await runDocumentDeletionCascade(cascade, {
+      accessScope,
+      docIds: documents.map((document) => document.docId),
+    });
+  }
+
+  return documents;
+};
+
+const clearDocumentsFromStores = async ({ accessScope = {} } = {}) => {
   const scoped = hasScopedAccess(accessScope);
 
   if (isVectorStoreTransactional()) {
@@ -755,6 +869,122 @@ export const clearDocuments = async ({
     invalidateSemanticCacheDocuments(documents.map((document) => document.docId));
     return documents;
   });
+};
+
+// Documents per erase transaction: each batch locks its rows, removes their
+// chunks from every chunk table and deletes them, so a large tenant does not
+// hold every row lock in one transaction, and an interrupted erase is finished
+// by running it again.
+const TENANT_ERASE_DOCUMENT_BATCH = 100;
+
+const addChunkCounts = (total, counts) => {
+  if (!counts) {
+    return total;
+  }
+
+  const next = total ?? {};
+
+  for (const [table, count] of Object.entries(counts)) {
+    next[table] = (next[table] ?? 0) + count;
+  }
+
+  return next;
+};
+
+/**
+ * The dry run of eraseTenantDocuments: the tenant's stored documents (exact
+ * owner columns, rag/tenant-records.js) and, on pgvector, their chunks per
+ * existing chunk table (null on local and Qdrant, which report no count).
+ */
+export const countTenantDocuments = async (selector) => {
+  const documents = await listStoredDocumentsForTenant(selector);
+  const docIds = documents.map((document) => document.docId);
+
+  return {
+    chunks: docIds.length > 0 ? await countDocumentChunksForErase({ docIds }) : null,
+    documents,
+  };
+};
+
+/**
+ * The tenant erase of documents (rag/tenant-lifecycle.js, run as the system).
+ *
+ * On pgvector each batch is one transaction in the order every writer keeps:
+ * the index-version write lock (beginVectorIndexWrite), the document rows
+ * FOR UPDATE, then the chunks in every existing chunk table -- the write
+ * targets and any other version table that still exists -- and the rows. The
+ * foreign keys would cascade the chunks too; deleting them explicitly first
+ * reaches a table without one and gives the per-table counts. BM25
+ * statistics follow through their triggers. On local and Qdrant the vector
+ * store's own delete call removes the chunks, then the registry deletes the
+ * documents (the file-backed registry removes their bytes from disk). Either
+ * way the semantic cache drops what was built on them.
+ */
+export const eraseTenantDocuments = async (selector) => {
+  const documents = await listStoredDocumentsForTenant(selector);
+  const docIds = documents.map((document) => document.docId);
+  const erased = [];
+  let chunks = null;
+
+  if (docIds.length === 0) {
+    return { chunks, documents: erased };
+  }
+
+  if (isVectorStoreTransactional()) {
+    await ensureVectorStoreReady();
+
+    for (let start = 0; start < docIds.length; start += TENANT_ERASE_DOCUMENT_BATCH) {
+      const batch = docIds.slice(start, start + TENANT_ERASE_DOCUMENT_BATCH);
+
+      await trackDocumentWrite(batch, async () => {
+        try {
+          const batchErased = await withPostgresTransaction(async (transactionClient) => {
+            const client = await beginVectorIndexWrite({ client: transactionClient });
+
+            return eraseStoredDocuments(batch, {
+              beforeDelete: async (lockedDocIds) => {
+                chunks = addChunkCounts(
+                  chunks ?? {},
+                  await eraseDocumentsFromIndex({ client, docIds: lockedDocIds })
+                );
+              },
+              client,
+              selector,
+            });
+          });
+
+          erased.push(...batchErased);
+        } catch (error) {
+          for (const docId of batch) {
+            try {
+              await resyncDocument(docId);
+            } catch (resyncError) {
+              console.error(
+                `Failed to resync document registry entry for docId ${docId} after rollback.`,
+                resyncError
+              );
+            }
+          }
+
+          throw error;
+        } finally {
+          invalidateSemanticCacheDocuments(batch);
+        }
+      });
+    }
+
+    return { chunks, documents: erased };
+  }
+
+  for (let start = 0; start < docIds.length; start += TENANT_ERASE_DOCUMENT_BATCH) {
+    const batch = docIds.slice(start, start + TENANT_ERASE_DOCUMENT_BATCH);
+
+    await eraseDocumentsFromIndex({ docIds: batch });
+    erased.push(...(await eraseStoredDocuments(batch, { selector })));
+    invalidateSemanticCacheDocuments(batch);
+  }
+
+  return { chunks, documents: erased };
 };
 
 // The user's own exchange: one session turn (question + answer) and the

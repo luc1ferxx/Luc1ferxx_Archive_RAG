@@ -13,6 +13,10 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import {
+  getUploadSessionMaxBytesPerTenant,
+  getUploadSessionMaxPerTenant,
+} from "./rag/config.js";
+import {
   MAX_CHUNK_UPLOAD_SIZE,
   MAX_RESUMABLE_UPLOAD_SIZE,
   MAX_UPLOAD_FILE_ID_BYTES,
@@ -21,6 +25,7 @@ import {
   isSafeUploadFileName,
 } from "./upload-policy.js";
 import { resolveDataDirectory } from "./runtime-paths.js";
+import { tenantSelectorMatches } from "./rag/tenant-records.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,6 +51,22 @@ const createUploadError = (message, status = 400) => {
   error.status = status;
   return error;
 };
+
+// The stable code of a POST /upload/init refused (429) because the tenant has
+// too many upload sessions open (limit "sessions") or their declared sizes
+// would pass the byte cap (limit "bytes").
+export const UPLOAD_SESSION_LIMIT_EXCEEDED = "UPLOAD_SESSION_LIMIT_EXCEEDED";
+
+const createUploadSessionLimitError = (limit, maximum) =>
+  Object.assign(
+    createUploadError(
+      limit === "sessions"
+        ? `Too many open upload sessions; at most ${maximum} may be open at once. Complete an open upload or wait for one to expire before starting another.`
+        : `Open upload sessions would exceed ${maximum} declared bytes. Complete an open upload or wait for one to expire before starting another.`,
+      429
+    ),
+    { code: UPLOAD_SESSION_LIMIT_EXCEEDED, limit }
+  );
 
 const parseStrictInteger = (value) => {
   if (typeof value === "number") {
@@ -343,6 +364,202 @@ export const configureUploadSessionDirectory = (nextDirectory) => {
   uploadSessionsDirectory = path.resolve(nextDirectory);
 };
 
+// New sessions of one tenant are created one at a time in this process, so
+// two concurrent /upload/init calls cannot both pass the cap check and both
+// install a manifest. Processes that share one sessions directory do not see
+// each other's lock: together they can pass a cap by at most one session (or
+// one file's bytes) per extra process.
+const tenantSessionCreations = new Map();
+
+const withTenantSessionCreationLock = async (accessScope, operation) => {
+  const tenantKey = JSON.stringify([accessScope.userId, accessScope.workspaceId]);
+  const previous = tenantSessionCreations.get(tenantKey) ?? Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+
+  tenantSessionCreations.set(tenantKey, tail);
+  await previous;
+
+  try {
+    return await operation();
+  } finally {
+    release();
+
+    if (tenantSessionCreations.get(tenantKey) === tail) {
+      tenantSessionCreations.delete(tenantKey);
+    }
+  }
+};
+
+// Bounds the open manifest reads of one scan.
+const MANIFEST_SCAN_CONCURRENCY = 32;
+
+// The tenant's open sessions: every session directory whose manifest names
+// this (user, workspace). Directory names are hashes, so this reads each
+// manifest; it runs only when a new session is about to be created. A session
+// past its TTL still counts until the sweep removes it (it can still be
+// resumed until then). A manifest that cannot be read or parsed names no
+// session anyone can resume, so it counts for nobody.
+const listTenantUploadSessions = async (accessScope) => {
+  let entries;
+
+  try {
+    entries = await readdir(uploadSessionsDirectory, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  }
+
+  const directories = entries.filter((entry) => entry.isDirectory());
+  const sessions = [];
+
+  for (let start = 0; start < directories.length; start += MANIFEST_SCAN_CONCURRENCY) {
+    const batch = await Promise.all(
+      directories.slice(start, start + MANIFEST_SCAN_CONCURRENCY).map(async (entry) => {
+        try {
+          const manifest = JSON.parse(
+            await readFile(
+              path.join(uploadSessionsDirectory, entry.name, "manifest.json"),
+              "utf8"
+            )
+          );
+
+          return manifestMatchesAccessScope(manifest, accessScope)
+            ? {
+                fileSize:
+                  Number.isSafeInteger(manifest.fileSize) && manifest.fileSize > 0
+                    ? manifest.fileSize
+                    : 0,
+              }
+            : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    sessions.push(...batch.filter(Boolean));
+  }
+
+  return sessions;
+};
+
+/**
+ * The tenant erase and export (rag/tenant-lifecycle.js): every session
+ * directory whose manifest names a tenant of `selector` (rag/tenant-records.js;
+ * a workspace-wide selector covers every user of the workspace), with its
+ * manifest and how many chunk files it holds. Directory names are hashes, so
+ * this reads every manifest; one that cannot be read names nobody.
+ */
+export const listUploadSessionsForTenant = async (selector) => {
+  let entries;
+
+  try {
+    entries = await readdir(uploadSessionsDirectory, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  }
+
+  const sessions = [];
+
+  for (const entry of entries.filter((candidate) => candidate.isDirectory())) {
+    let manifest = null;
+
+    try {
+      manifest = JSON.parse(
+        await readFile(path.join(uploadSessionsDirectory, entry.name, "manifest.json"), "utf8")
+      );
+    } catch {
+      continue;
+    }
+
+    if (
+      manifest?.manifestVersion !== MANIFEST_VERSION ||
+      !tenantSelectorMatches(selector, {
+        userId: String(manifest.ownerUserId ?? ""),
+        workspaceId: String(manifest.workspaceId ?? ""),
+      })
+    ) {
+      continue;
+    }
+
+    let chunkFiles = 0;
+
+    try {
+      chunkFiles = (await readdir(path.join(uploadSessionsDirectory, entry.name))).filter(
+        (name) => parseChunkIndex(name) !== null
+      ).length;
+    } catch {
+      chunkFiles = 0;
+    }
+
+    sessions.push({ chunkFiles, directory: entry.name, manifest });
+  }
+
+  return sessions;
+};
+
+/** Removes the directories listUploadSessionsForTenant finds; returns how many. */
+export const eraseUploadSessionsForTenant = async (selector) => {
+  const sessions = await listUploadSessionsForTenant(selector);
+
+  for (const session of sessions) {
+    await rm(path.join(uploadSessionsDirectory, session.directory), {
+      force: true,
+      recursive: true,
+    });
+  }
+
+  return sessions.length;
+};
+
+const assertTenantSessionCapacity = async ({ accessScope, fileSize }) => {
+  const maxSessions = getUploadSessionMaxPerTenant();
+  const maxBytes = getUploadSessionMaxBytesPerTenant();
+
+  if (maxSessions <= 0 && maxBytes <= 0) {
+    return;
+  }
+
+  const sessions = await listTenantUploadSessions(accessScope);
+
+  if (maxSessions > 0 && sessions.length + 1 > maxSessions) {
+    throw createUploadSessionLimitError("sessions", maxSessions);
+  }
+
+  const openBytes = sessions.reduce((total, session) => total + session.fileSize, 0);
+
+  if (maxBytes > 0 && openBytes + fileSize > maxBytes) {
+    throw createUploadSessionLimitError("bytes", maxBytes);
+  }
+};
+
+const toInitializedSession = async (identity, manifest, metadata) => {
+  if (!manifestMatchesAccessScope(manifest, identity.accessScope)) {
+    throw createUploadError("Upload session not found.", 404);
+  }
+
+  if (!metadataMatches(manifest, metadata)) {
+    throw createUploadError(
+      "Upload session metadata does not match the existing session.",
+      409
+    );
+  }
+
+  const uploadedChunks = await listUploadedChunks(identity);
+  return toPublicSession(manifest, uploadedChunks);
+};
+
 export const initializeUploadSession = async (request = {}) => {
   const metadata = normalizeMetadata(request);
   validateMetadata(metadata);
@@ -354,33 +571,37 @@ export const initializeUploadSession = async (request = {}) => {
     },
     fileId: metadata.fileId,
   };
-  const sessionDirectory = getSessionDirectory(identity);
-  await mkdir(sessionDirectory, { recursive: true });
 
-  let existingManifest = await readManifest(identity);
+  // Resuming a session the tenant already has is never refused by the caps
+  // and does not wait for the tenant's lock.
+  const resumedManifest = await readManifest(identity);
 
-  if (!existingManifest) {
-    const installed = await installBufferAtomically(
-      getManifestPath(identity),
-      Buffer.from(JSON.stringify(metadata, null, 2), "utf8")
-    );
-
-    existingManifest = installed ? metadata : await readManifest(identity);
+  if (resumedManifest) {
+    return toInitializedSession(identity, resumedManifest, metadata);
   }
 
-  if (!manifestMatchesAccessScope(existingManifest, identity.accessScope)) {
-    throw createUploadError("Upload session not found.", 404);
-  }
+  return withTenantSessionCreationLock(identity.accessScope, async () => {
+    let existingManifest = await readManifest(identity);
 
-  if (!metadataMatches(existingManifest, metadata)) {
-    throw createUploadError(
-      "Upload session metadata does not match the existing session.",
-      409
-    );
-  }
+    if (!existingManifest) {
+      // Checked before the directory is created, so a refused init leaves
+      // nothing on disk.
+      await assertTenantSessionCapacity({
+        accessScope: identity.accessScope,
+        fileSize: metadata.fileSize,
+      });
+      await mkdir(getSessionDirectory(identity), { recursive: true });
 
-  const uploadedChunks = await listUploadedChunks(identity);
-  return toPublicSession(existingManifest, uploadedChunks);
+      const installed = await installBufferAtomically(
+        getManifestPath(identity),
+        Buffer.from(JSON.stringify(metadata, null, 2), "utf8")
+      );
+
+      existingManifest = installed ? metadata : await readManifest(identity);
+    }
+
+    return toInitializedSession(identity, existingManifest, metadata);
+  });
 };
 
 export const getUploadSessionStatus = async (request = {}) => {
@@ -1035,4 +1256,54 @@ export const cleanupExpiredUploadSessions = async ({
   }
 
   return { removedSessions };
+};
+
+/**
+ * Sweeps expired upload sessions every `intervalMs` while the process runs,
+ * so an abandoned session stops holding its chunks (and its place under the
+ * tenant caps) about one interval after it expires, not at the next restart.
+ * The timer is unref'd, so it never keeps a process alive, and a sweep still
+ * running when the next tick comes skips that tick. `stop()` clears the
+ * timer; a sweep in flight is left to finish or be cut by the exit, as the
+ * start-up sweep always could be: a cleanup claim left by a dead process is
+ * removed by start-up recovery (recoverInterruptedUploadFinalizations), and
+ * whatever a cut removal left behind is past its TTL for the next sweep. An
+ * interval of 0 (or less) starts nothing.
+ */
+export const startUploadSessionSweeper = ({
+  cleanup = cleanupExpiredUploadSessions,
+  intervalMs,
+  logger = console,
+} = {}) => {
+  const delay = Math.floor(Number(intervalMs));
+
+  if (!Number.isFinite(delay) || delay <= 0) {
+    return { running: false, stop: () => {} };
+  }
+
+  let inFlight = null;
+  const timer = setInterval(() => {
+    if (inFlight) {
+      return;
+    }
+
+    inFlight = Promise.resolve()
+      .then(() => cleanup())
+      .catch((error) => {
+        logger.error?.(
+          "[upload-sessions] periodic cleanup of expired upload sessions failed:",
+          error
+        );
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+  }, delay);
+
+  timer.unref?.();
+
+  return {
+    running: true,
+    stop: () => clearInterval(timer),
+  };
 };

@@ -30,6 +30,7 @@ import {
 } from "./doc-registry.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { getRagDataPath, readJsonFileSync, writeJsonFileAsync } from "./storage.js";
+import { tenantSelectorMatches } from "./tenant-records.js";
 
 const REGISTRY_FILE_NAME = "documents.json";
 const DOCUMENTS_DIRECTORY_NAME = "documents";
@@ -334,6 +335,29 @@ export const createFileDocumentRegistryStore = ({
 
         return true;
       });
+    },
+
+    // The tenant export (rag/tenant-records.js): the tenant's records, each
+    // with its file bytes (null when they cannot be read). An erase deletes
+    // through delete() (rag/doc-registry.js eraseStoredDocuments).
+    async listTenantRecords(selector) {
+      const entries = [];
+
+      for (const record of loadRecords().filter((candidate) =>
+        tenantSelectorMatches(selector, candidate)
+      )) {
+        let fileBytes = null;
+
+        try {
+          fileBytes = await readBinaryFile(documentFilePath(record.docId));
+        } catch {
+          fileBytes = null;
+        }
+
+        entries.push({ record: { ...record, fileBytes }, table: "documents" });
+      }
+
+      return entries;
     },
 
     // Deliberately not a wipe. resetDocumentRegistryStore() calls reset() to drop

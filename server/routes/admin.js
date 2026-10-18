@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { getRequestAccessScope } from "../auth.js";
+import { DATA_ACCESS_ACTION_IDS } from "../rag/admin-audit.js";
 import { runAsDatabaseSystem } from "../rag/postgres-tenant.js";
 import {
   getAdminActionPermissionForRequest,
@@ -8,6 +9,10 @@ import {
   getAdminStatusReadPermission,
   requireAdminPermission,
 } from "../rag/admin-authorization.js";
+import {
+  createDataAccessAudit,
+  isPlatformAdminReadScope,
+} from "../rag/data-access-audit.js";
 
 import { serializeError } from "./helpers.js";
 
@@ -44,6 +49,8 @@ export const createAdminActionHandler = ({ adminActionRegistry }) => async (req,
 export const createAdminRouter = (services, { actionHandler } = {}) => {
   const router = Router();
   const { adminAuditService, adminStatusService } = services;
+  // ADMIN_AUDIT_DATA_EVENTS: a platform admin's reads across tenants.
+  const dataAudit = createDataAccessAudit({ auditService: adminAuditService });
 
   router.get(
     "/admin/status",
@@ -52,11 +59,20 @@ export const createAdminRouter = (services, { actionHandler } = {}) => {
     }),
     async (req, res) => {
       try {
-        return res.json(
-          await adminStatusService.buildStatus({
-            accessScope: getRequestAccessScope(req),
-          })
-        );
+        const accessScope = getRequestAccessScope(req);
+        const status = await adminStatusService.buildStatus({
+          accessScope,
+        });
+
+        if (isPlatformAdminReadScope(accessScope)) {
+          await dataAudit.recordOutcome(req, {
+            accessScope,
+            actionId: DATA_ACCESS_ACTION_IDS.adminStatusCrossTenantRead,
+            status: 200,
+          });
+        }
+
+        return res.json(status);
       } catch {
         return res.status(500).json({
           error: "Failed to load admin status.",
@@ -95,13 +111,27 @@ export const createAdminRouter = (services, { actionHandler } = {}) => {
         // tenants as before the policy, so that read runs as the owner, and
         // only here, after the permission check above. A principal limited to
         // a workspace list that names none keeps the tenant read.
-        const platformRead =
-          !String(accessScope.workspaceId ?? "").trim() &&
-          !(accessScope.allowedWorkspaceIds?.length > 0);
+        const platformRead = isPlatformAdminReadScope(accessScope);
 
-        return res.json(
-          await (platformRead ? runAsDatabaseSystem(listEvents) : listEvents())
-        );
+        if (!platformRead) {
+          return res.json(await listEvents());
+        }
+
+        const page = await runAsDatabaseSystem(listEvents);
+
+        // Recorded under the request's own binding, not the owner path the
+        // read ran on, so the event extends the admin's own chain. The target
+        // is the userId filter, if any (a workspaceId in the request makes it
+        // that workspace's read, not a platform one).
+        await dataAudit.recordOutcome(req, {
+          accessScope,
+          actionId: DATA_ACCESS_ACTION_IDS.adminAuditCrossTenantRead,
+          count: Array.isArray(page?.events) ? page.events.length : null,
+          status: 200,
+          target: { userId: req.query?.userId },
+        });
+
+        return res.json(page);
       } catch {
         return res.status(500).json({
           error: "Failed to load admin audit.",

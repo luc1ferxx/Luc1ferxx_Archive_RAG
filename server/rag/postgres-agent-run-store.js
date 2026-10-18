@@ -4,6 +4,7 @@ import {
 } from "./config.js";
 import { runPostgresMigrations } from "./db-migrations.js";
 import { queryPostgres } from "./postgres.js";
+import { createPostgresTenantRecordMethods } from "./tenant-records.js";
 import {
   AGENT_RUN_STATUSES,
   normalizeAgentRun,
@@ -18,10 +19,27 @@ import {
   buildTaskScopeKey,
   normalizeTaskAccessScope,
 } from "./tasks.js";
+import { AGENT_RUN_STATUSES as RUN_STATUSES } from "./agent-run-state-machine.js";
+import {
+  buildRetentionLockKey,
+  normalizeRetentionBatchLimit,
+  normalizeRetentionCutoffs,
+  readRetentionLockAcquired,
+  renderRetentionPreludeCtes,
+} from "./retention-sql.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const APPROVAL_SNAPSHOT_ROLLBACK_SQLSTATE = "22012";
+
+// The only statuses retention may delete: a finished run. Running and
+// waiting_for_user runs (an approval pause, a clarification, a run marked for
+// manual recovery) are what startup recovery lists, so they always stay.
+const RETAINABLE_AGENT_RUN_STATUSES = Object.freeze([
+  RUN_STATUSES.canceled,
+  RUN_STATUSES.completed,
+  RUN_STATUSES.failed,
+]);
 
 const ensureTableName = (tableName, envName) => {
   if (!TABLE_NAME_PATTERN.test(tableName)) {
@@ -949,6 +967,38 @@ export const createPostgresAgentRunStore = ({
       return initialize();
     },
 
+    // The tenant erase and export (rag/tenant-records.js). The approval
+    // snapshots cascade with their run; they and the events (no foreign key)
+    // are deleted before the runs and swept again after them, so an event a
+    // run appended between the statements does not stay behind.
+    ...createPostgresTenantRecordMethods({
+      initialize,
+      query,
+      tables: () => [
+        {
+          keyColumns: ["user_id", "workspace_id", "run_id", "gate_id"],
+          name: "agent_run_approval_snapshots",
+          sweepAfter: true,
+          table: approvalSnapshotsTable,
+          userColumn: "user_id",
+        },
+        {
+          keyColumns: ["event_id"],
+          name: "agent_run_events",
+          sweepAfter: true,
+          table: runEventsTable,
+          userColumn: "user_id",
+        },
+        {
+          keyColumns: ["user_id", "workspace_id", "run_id"],
+          name: "agent_runs",
+          pageSize: 50,
+          table: runsTable,
+          userColumn: "user_id",
+        },
+      ],
+    }),
+
     async appendEvent({ accessScope = {}, event = {}, runId } = {}) {
       await initialize();
 
@@ -1081,6 +1131,71 @@ export const createPostgresAgentRunStore = ({
       return result.rows.map((row) => mapRowToAgentRun(row)).filter(Boolean);
     },
 
+    /**
+     * Runs whose steps, observations, decisions or result serialize a member
+     * from `needles` (rag/document-deletion-redaction.js
+     * buildDocumentReferenceNeedles: a deleted document's `"docId": ...`), in
+     * primary-key order from `after` ({ userId, workspaceId, runId }, the
+     * previous page's `next`). A scope naming a user or a workspace reads
+     * exactly that pair, as every other method does; one naming neither
+     * reads every pair (the unscoped context: auth off, the single shared
+     * token). Under a request's tenant the row policy applies as well. The
+     * runs keep their internal fields (revision, scope, the private result
+     * keys), so the caller can CAS each one through update().
+     */
+    async listRunsReferencingDocuments({ accessScope = {}, after = null, limit = 25, needles = [] } = {}) {
+      await initialize();
+
+      const values = toArray(needles).map(String).filter(Boolean);
+
+      if (values.length === 0) {
+        return { next: null, runs: [] };
+      }
+
+      const scope = normalizeTaskAccessScope(accessScope);
+      const scoped = Boolean(scope.userId || scope.workspaceId);
+      const cursor = after ? normalizeTaskAccessScope(after) : null;
+      const pageSize = Math.max(1, Math.min(100, Number.parseInt(limit, 10) || 25));
+      const result = await query(
+        `
+          SELECT ${agentRunSelectColumns}
+          FROM ${runsTable}
+          WHERE ($1::boolean = FALSE OR (user_id = $2 AND workspace_id = $3))
+            AND ($4::text IS NULL OR (user_id, workspace_id, run_id) > ($4::text, $5::text, $6::text))
+            AND EXISTS (
+              SELECT 1
+              FROM unnest($7::text[]) AS needle(value)
+              WHERE strpos(steps::text, needle.value) > 0
+                 OR strpos(observations::text, needle.value) > 0
+                 OR strpos(decisions::text, needle.value) > 0
+                 OR strpos(result::text, needle.value) > 0
+            )
+          ORDER BY user_id, workspace_id, run_id
+          LIMIT $8
+        `,
+        [
+          scoped,
+          scope.userId,
+          scope.workspaceId,
+          cursor ? cursor.userId : null,
+          cursor ? cursor.workspaceId : null,
+          cursor ? normalizeText(after.runId) : null,
+          values,
+          pageSize,
+        ]
+      );
+      const rows = result.rows ?? [];
+      const last = rows.at(-1);
+
+      return {
+        next:
+          rows.length === pageSize && last
+            ? { runId: String(last.run_id), userId: String(last.user_id ?? ""), workspaceId: String(last.workspace_id ?? "") }
+            : null,
+        runs: rows.map((row) => mapRowToAgentRun(row)).filter(Boolean),
+      };
+    },
+
     async listRecoverable({
       statuses = [
         AGENT_RUN_STATUSES.running,
@@ -1108,6 +1223,78 @@ export const createPostgresAgentRunStore = ({
       );
 
       return result.rows.map((row) => mapRowToAgentRun(row)).filter(Boolean);
+    },
+
+    /**
+     * Retention (rag/retention.js): deletes at most `limit` finished runs
+     * (completed, failed, canceled) of every tenant last updated before their
+     * workspace's cutoff, with their events; their approval snapshots go by
+     * the foreign key's cascade. A running or waiting run -- paused for an
+     * approval, waiting for the user, marked for manual recovery, or
+     * listable by startup recovery -- is never touched, and neither is a row
+     * another transaction holds (SKIP LOCKED: a run being written right now
+     * waits for the next sweep). One statement, so the advisory try-lock that
+     * keeps two instances from sweeping this table at once is held exactly
+     * while it runs. System work: the caller binds runAsDatabaseSystem.
+     * Resolves to { acquired, deleted, deletedEvents }.
+     */
+    async deleteExpired({ cutoff, limit, workspaceCutoffs = [] } = {}) {
+      await initialize();
+
+      const normalized = normalizeRetentionCutoffs({ cutoff, workspaceCutoffs });
+      const result = await query(
+        `
+          WITH ${renderRetentionPreludeCtes({ lockKey: 1, workspaceCutoffs: 6, workspaceIds: 5 })},
+          expired AS (
+            SELECT r.user_id, r.workspace_id, r.run_id
+            FROM ${runsTable} AS r
+            LEFT JOIN retention_overrides AS o ON o.workspace_id = r.workspace_id
+            WHERE (SELECT acquired FROM retention_lock)
+              AND r.status = ANY($2::text[])
+              AND r.updated_at < $4::timestamptz
+              AND r.updated_at < COALESCE(o.cutoff, $3::timestamptz)
+            ORDER BY r.updated_at ASC, r.run_id ASC
+            LIMIT $7
+            FOR UPDATE OF r SKIP LOCKED
+          ),
+          deleted_events AS (
+            DELETE FROM ${runEventsTable} AS e
+            USING expired AS x
+            WHERE e.user_id = x.user_id
+              AND e.workspace_id = x.workspace_id
+              AND e.run_id = x.run_id
+            RETURNING 1
+          ),
+          deleted_runs AS (
+            DELETE FROM ${runsTable} AS r
+            USING expired AS x
+            WHERE r.user_id = x.user_id
+              AND r.workspace_id = x.workspace_id
+              AND r.run_id = x.run_id
+            RETURNING 1
+          )
+          SELECT
+            (SELECT acquired FROM retention_lock) AS acquired,
+            (SELECT COUNT(*) FROM deleted_runs)::int AS deleted,
+            (SELECT COUNT(*) FROM deleted_events)::int AS deleted_events
+        `,
+        [
+          buildRetentionLockKey(runsTable),
+          RETAINABLE_AGENT_RUN_STATUSES,
+          normalized.cutoff,
+          normalized.upperBound,
+          normalized.workspaceIds,
+          normalized.workspaceCutoffs,
+          normalizeRetentionBatchLimit(limit),
+        ]
+      );
+      const row = result.rows?.[0];
+
+      return {
+        acquired: readRetentionLockAcquired(row),
+        deleted: Number(row?.deleted ?? 0) || 0,
+        deletedEvents: Number(row?.deleted_events ?? 0) || 0,
+      };
     },
 
     async update({

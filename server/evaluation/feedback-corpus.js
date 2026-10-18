@@ -513,10 +513,23 @@ export const buildFeedbackCorpusFromJsonlFile = async ({
 export const buildFeedbackCorpusFromJsonlFiles = async ({
   inputPaths = [],
   outputPath,
+}) => buildFeedbackCorpusFromSources({ inputPaths, outputPath });
+
+/**
+ * The records of every JSONL file in `inputPaths` (in that order), then
+ * `records` (feedback:corpus passes the feedback store's records here).
+ */
+export const buildFeedbackCorpusFromSources = async ({
+  inputPaths = [],
+  outputPath,
+  records: storeRecords = [],
 }) => {
-  const records = (
-    await Promise.all(inputPaths.map((inputPath) => readFeedbackJsonl(inputPath)))
-  ).flat();
+  const records = [
+    ...(
+      await Promise.all(inputPaths.map((inputPath) => readFeedbackJsonl(inputPath)))
+    ).flat(),
+    ...storeRecords,
+  ];
   const corpus = buildFeedbackCorpusFromRecords(records);
 
   if (outputPath) {

@@ -6,7 +6,9 @@ import {
   getIngestJobOutputsPostgresTable,
   getIngestJobsPostgresTable,
   getRagIngestMaxPendingBytesPerTenant,
+  getRagIngestMaxPendingBytesPerWorkspace,
   getRagIngestMaxPendingJobsPerTenant,
+  getRagIngestMaxPendingJobsPerWorkspace,
   getRagIngestStageRetryPolicy,
   isPostgresDatabaseConfigured,
 } from "./config.js";
@@ -29,13 +31,20 @@ import {
 } from "./postgres.js";
 import { createPostgresNotificationListener } from "./postgres-notification-listener.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
+import {
+  createPostgresTenantRecordMethods,
+  summarizeTenantRecords,
+  tenantSelectorMatches,
+} from "./tenant-records.js";
 
 // Jobs for RAG_INGEST_MODE=async (migration 015). The upload route enqueues a
 // validated PDF; a worker (rag/ingest-worker.js) claims it, ingests it and
 // records the outcome. Both stores below share one contract:
 //
 // - enqueue() refuses (429) a job that would take its tenant over the pending
-//   job or byte cap (RAG_INGEST_MAX_PENDING_*_PER_TENANT).
+//   job or byte cap (RAG_INGEST_MAX_PENDING_*_PER_TENANT), or its workspace
+//   (every user's jobs in it) over the workspace caps
+//   (RAG_INGEST_MAX_PENDING_*_PER_WORKSPACE, off by default).
 // - claim() takes a job that is queued and due, or running with an expired
 //   lease, preferring tenants with the fewest running jobs and then the oldest
 //   job, marks it running for `workerId` and bumps attempt_count. The returned
@@ -81,6 +90,10 @@ import { runAsDatabaseSystem } from "./postgres-tenant.js";
 //   to that document); the index stage checks again under a lock.
 // - listDeadLetters()/requeue() are scoped to an access scope (the request's)
 //   or an exact owner (the CLI); countByStatus() is for health.
+// - cancelDocumentJobs() settles the queued (retry-waiting included) and
+//   dead-letter jobs of deleted documents as failed with canceled_reason
+//   'document_deleted' (migration 040) and drops their bytes and outputs
+//   (rag/document-deletion-cascade.js), by the same access scope rule.
 
 export const INGEST_JOB_STATUSES = Object.freeze({
   deadLetter: "dead_letter",
@@ -100,11 +113,21 @@ const FILE_READ_CHUNK_BYTES = 8 * 1024 * 1024;
 export const SERVER_ERROR_MESSAGE = "Indexing failed on the server.";
 export const PENDING_LIMIT_ERROR_MESSAGE =
   "Too many uploads from this account are still waiting to be indexed. Try again once some have finished.";
+export const WORKSPACE_PENDING_LIMIT_ERROR_MESSAGE =
+  "Too many uploads in this workspace are still waiting to be indexed. Try again once some have finished.";
 // Statuses the ingest path itself sets for a problem with the upload (422: no
 // extractable text). Any other error may come from a dependency (a model
 // provider's 401 names part of the key, a socket error names a host), so the
 // job keeps a generic message and the worker log keeps the error.
 const PUBLIC_ERROR_STATUSES = new Set([413, 415, 422]);
+
+// Why a job was settled without running to the end (canceled_reason,
+// migration 040). Null on every other job.
+export const INGEST_JOB_CANCEL_REASONS = Object.freeze({
+  documentDeleted: "document_deleted",
+});
+export const DOCUMENT_DELETED_JOB_ERROR_MESSAGE =
+  "The document was deleted before this upload was indexed.";
 
 export const LEASE_EXHAUSTED_ERROR_MESSAGE =
   "The ingestion worker stopped responding during the last allowed attempt.";
@@ -143,6 +166,19 @@ export const toIngestJobErrorMessage = (error) => {
 
 const createPendingLimitError = () =>
   Object.assign(new Error(PENDING_LIMIT_ERROR_MESSAGE), { expose: true, status: 429 });
+
+const createWorkspacePendingLimitError = () =>
+  Object.assign(new Error(WORKSPACE_PENDING_LIMIT_ERROR_MESSAGE), { expose: true, status: 429 });
+
+// Whether a job of `bytes` bytes would take a workspace holding `pending`
+// ({ jobs, bytes }) over its caps. A cap of 0 is off.
+const exceedsWorkspacePendingLimits = ({ bytes, limits, pending }) =>
+  (limits.maxPendingJobsPerWorkspace > 0 && pending.jobs >= limits.maxPendingJobsPerWorkspace) ||
+  (limits.maxPendingBytesPerWorkspace > 0 &&
+    pending.bytes + bytes > limits.maxPendingBytesPerWorkspace);
+
+const hasWorkspacePendingLimits = (limits) =>
+  limits.maxPendingJobsPerWorkspace > 0 || limits.maxPendingBytesPerWorkspace > 0;
 
 export const ingestJobMatchesAccessScope = (job, accessScope = {}) =>
   Boolean(job) &&
@@ -184,6 +220,9 @@ export const toPublicIngestJob = (job) =>
           job.status === INGEST_JOB_STATUSES.deadLetter
             ? { stage: job.deadLetterStage ?? job.stage ?? null, deadLetteredAt: job.deadLetteredAt ?? null }
             : null,
+        // Only on a job the delete of its document settled, so every other
+        // job reads as before.
+        ...(job.canceledReason ? { canceledReason: job.canceledReason } : {}),
       }
     : null;
 
@@ -228,11 +267,28 @@ const toNonNegativeInteger = (value, fallbackValue) => {
 
 const resolvePendingLimits = ({
   maxPendingBytes = getRagIngestMaxPendingBytesPerTenant(),
+  maxPendingBytesPerWorkspace = getRagIngestMaxPendingBytesPerWorkspace(),
   maxPendingJobs = getRagIngestMaxPendingJobsPerTenant(),
+  maxPendingJobsPerWorkspace = getRagIngestMaxPendingJobsPerWorkspace(),
 } = {}) => ({
   maxPendingBytes: toNonNegativeInteger(maxPendingBytes, 0),
+  maxPendingBytesPerWorkspace: toNonNegativeInteger(maxPendingBytesPerWorkspace, 0),
   maxPendingJobs: toNonNegativeInteger(maxPendingJobs, 0),
+  maxPendingJobsPerWorkspace: toNonNegativeInteger(maxPendingJobsPerWorkspace, 0),
 });
+
+// An injected getPendingLimits may name only the per-tenant caps; the
+// workspace caps it leaves out are off.
+const readPendingLimits = (getPendingLimits) => {
+  const limits = getPendingLimits() ?? {};
+
+  return {
+    maxPendingBytes: toNonNegativeInteger(limits.maxPendingBytes, 0),
+    maxPendingBytesPerWorkspace: toNonNegativeInteger(limits.maxPendingBytesPerWorkspace, 0),
+    maxPendingJobs: toNonNegativeInteger(limits.maxPendingJobs, 0),
+    maxPendingJobsPerWorkspace: toNonNegativeInteger(limits.maxPendingJobsPerWorkspace, 0),
+  };
+};
 
 const getFirstStageMaxAttempts = () => getRagIngestStageRetryPolicy(INGEST_STAGES[0]).maxAttempts;
 
@@ -295,6 +351,15 @@ const normalizeStage = (stage) => {
   return stage;
 };
 
+const toCancelDocIds = (docIds) => [
+  ...new Set((Array.isArray(docIds) ? docIds : [docIds]).map(normalizeText).filter(Boolean)),
+];
+
+const toCancelReason = (reason) =>
+  Object.values(INGEST_JOB_CANCEL_REASONS).includes(reason)
+    ? reason
+    : INGEST_JOB_CANCEL_REASONS.documentDeleted;
+
 const toResolvedDocId = (job, docId) => {
   const resolved = normalizeText(docId);
 
@@ -326,7 +391,8 @@ const JOB_COLUMNS = `
   max_attempts, claimed_by, lease_expires_at, available_at, last_error,
   created_at, updated_at, started_at, finished_at, kind, stage, stage_attempts,
   content_sha256, deduplicate, resolved_doc_id, duplicate, document_version,
-  dead_letter_stage, dead_letter_reason, dead_lettered_at, requeue_count, superseded
+  dead_letter_stage, dead_letter_reason, dead_lettered_at, requeue_count, superseded,
+  canceled_reason
 `;
 
 const prefixColumns = (alias) =>
@@ -375,6 +441,7 @@ const mapRowToJob = (row = {}) => ({
   deadLetteredAt: toIsoText(row.dead_lettered_at),
   requeueCount: Number(row.requeue_count ?? 0),
   superseded: row.superseded === true,
+  ...(row.canceled_reason ? { canceledReason: String(row.canceled_reason) } : {}),
 });
 
 // The fence every write after the claim carries.
@@ -619,6 +686,36 @@ export const createPostgresIngestJobStore = ({
   return {
     backend: "postgres",
 
+    // The tenant erase and export (rag/tenant-records.js). The stage outputs
+    // cascade with their job; they are deleted before the jobs and swept again
+    // after them. An export keeps an output's bytes only for document_file
+    // (the upload itself, once parse moved it out of the job row); the pages,
+    // chunks and embeddings outputs are derived from it and listed without
+    // their payload.
+    ...createPostgresTenantRecordMethods({
+      initialize: () => runMigrations(),
+      query: queryPostgres,
+      tables: () => [
+        {
+          keyColumns: ["job_id", "output"],
+          mapRow: ({ payload, ...row }) =>
+            row.output === "document_file" ? { ...row, payload } : row,
+          name: "ingest_job_outputs",
+          pageSize: 5,
+          sweepAfter: true,
+          table: outputsTableName(),
+          userColumn: "owner_user_id",
+        },
+        {
+          keyColumns: ["job_id"],
+          name: "ingest_jobs",
+          pageSize: 5,
+          table: tableName(),
+          userColumn: "owner_user_id",
+        },
+      ],
+    }),
+
     /**
      * Wake-up state for health output and tests: whether the LISTEN session is
      * open right now and how many subscribers it serves.
@@ -690,7 +787,43 @@ export const createPostgresIngestJobStore = ({
         }
       }
 
-      const { maxPendingBytes, maxPendingJobs } = getPendingLimits();
+      const limits = readPendingLimits(getPendingLimits);
+      const { maxPendingBytes, maxPendingJobs } = limits;
+
+      // The workspace caps count every user's jobs in the workspace, which
+      // the tenant's row policy hides, so they are read as system work, in a
+      // statement of their own and only when a workspace cap is on (the
+      // INSERT below is unchanged). Uploads racing each other may overshoot
+      // by the number racing, as the tenant caps may.
+      if (job.workspaceId && hasWorkspacePendingLimits(limits)) {
+        const workspacePending = await runAsSystem(() =>
+          queryPostgres(
+            `
+              SELECT COUNT(*) AS pending_jobs,
+                     COALESCE(SUM(
+                       COALESCE(octet_length(p.file_bytes), 0)
+                       + COALESCE((SELECT SUM(o.byte_size) FROM ${outputsTableName()} AS o WHERE o.job_id = p.job_id), 0)
+                     ), 0) AS pending_bytes
+              FROM ${table} AS p
+              WHERE p.workspace_id = $1::text
+                AND p.status IN ('queued', 'running')
+            `,
+            [job.workspaceId]
+          )
+        );
+        const row = workspacePending.rows[0] ?? {};
+
+        if (
+          exceedsWorkspacePendingLimits({
+            bytes: job.fileBytes.length,
+            limits,
+            pending: { bytes: Number(row.pending_bytes) || 0, jobs: Number(row.pending_jobs) || 0 },
+          })
+        ) {
+          throw createWorkspacePendingLimitError();
+        }
+      }
+
       const result = await queryPostgres(
         `
           WITH inserted AS (
@@ -1368,6 +1501,60 @@ export const createPostgresIngestJobStore = ({
       return mapRowToJob(result.rows[0]);
     },
 
+    /**
+     * The delete of documents `docIds` (rag/document-deletion-cascade.js):
+     * every queued job of theirs (a retry waiting out its delay included) and
+     * every dead-letter one `accessScope` can see is settled failed with
+     * canceled_reason and a public message, and loses its bytes and stage
+     * outputs, which hold the document's text. A running job is left to its
+     * worker: it holds a lease, and a replacement of a deleted document fails
+     * its index stage (404) on its own. Runs in the caller's context, so under
+     * a request's tenant the row policies apply too. Resolves to the job ids.
+     */
+    async cancelDocumentJobs({ accessScope = {}, docIds = [], reason } = {}) {
+      const ids = toCancelDocIds(docIds);
+
+      if (ids.length === 0) {
+        return [];
+      }
+
+      const result = await queryPostgres(
+        `
+          WITH canceled AS (
+            UPDATE ${tableName()} AS j
+            SET status = 'failed',
+                canceled_reason = $7,
+                last_error = $8,
+                file_bytes = NULL,
+                lease_expires_at = NULL,
+                dead_letter_stage = NULL,
+                dead_letter_reason = NULL,
+                dead_lettered_at = NULL,
+                finished_at = NOW(),
+                updated_at = NOW()
+            WHERE j.doc_id = ANY($6::text[])
+              AND j.status IN ('queued', 'dead_letter')
+              AND ${buildScopeSql(1)}
+            RETURNING j.job_id
+          ),
+          dropped AS (
+            DELETE FROM ${outputsTableName()} AS o
+            USING canceled
+            WHERE o.job_id = canceled.job_id
+          )
+          SELECT job_id FROM canceled ORDER BY job_id
+        `,
+        [
+          ...scopeValues({ accessScope }),
+          ids,
+          toCancelReason(reason),
+          DOCUMENT_DELETED_JOB_ERROR_MESSAGE,
+        ]
+      );
+
+      return (result.rows ?? []).map((row) => String(row.job_id));
+    },
+
     /** Jobs per status, over every tenant (health). */
     async countByStatus() {
       const result = await runAsSystem(() =>
@@ -1452,6 +1639,7 @@ export const createInMemoryIngestJobStore = ({
     deadLetterReason: job.deadLetterReason,
     deadLetteredAt: toIsoText(job.deadLetteredAt),
     requeueCount: job.requeueCount,
+    ...(job.canceledReason ? { canceledReason: job.canceledReason } : {}),
   });
 
   const findFenced = ({ attemptCount, jobId, workerId }) => {
@@ -1500,8 +1688,49 @@ export const createInMemoryIngestJobStore = ({
       (job.ownerUserId === normalizeText(owner.ownerUserId) &&
         job.workspaceId === normalizeText(owner.workspaceId)));
 
+  // The tenant erase and export (rag/tenant-records.js).
+  const listTenantJobs = (selector) =>
+    [...jobs.values()].filter((job) => tenantSelectorMatches(selector, job));
+
   return {
     backend: "memory",
+
+    countTenantRecords(selector) {
+      return summarizeTenantRecords(this.listTenantRecords(selector), [
+        "ingest_jobs",
+        "ingest_job_outputs",
+      ]);
+    },
+
+    listTenantRecords(selector) {
+      return listTenantJobs(selector).flatMap((job) => [
+        { record: snapshot(job, { includeBytes: true }), table: "ingest_jobs" },
+        ...[...job.outputs.entries()].map(([output, payload]) => ({
+          record: {
+            byteSize: payload.length,
+            jobId: job.jobId,
+            output,
+            ...(output === "document_file" ? { payload: Buffer.from(payload) } : {}),
+          },
+          table: "ingest_job_outputs",
+        })),
+      ]);
+    },
+
+    deleteTenantRecords(selector) {
+      const matched = listTenantJobs(selector);
+      let outputs = 0;
+
+      for (const job of matched) {
+        outputs += job.outputs.size;
+        jobs.delete(job.jobId);
+      }
+
+      return {
+        ingest_job_outputs: { deleted: outputs },
+        ingest_jobs: { deleted: matched.length },
+      };
+    },
 
     enqueueNotificationStatus() {
       return { channel: null, failures: 0, listening: false, subscribers: subscribers.size };
@@ -1585,7 +1814,31 @@ export const createInMemoryIngestJobStore = ({
         }
       }
 
-      const { maxPendingBytes, maxPendingJobs } = getPendingLimits();
+      const limits = readPendingLimits(getPendingLimits);
+      const { maxPendingBytes, maxPendingJobs } = limits;
+
+      if (normalized.workspaceId && hasWorkspacePendingLimits(limits)) {
+        const inWorkspace = [...jobs.values()].filter(
+          (job) => isPending(job) && job.workspaceId === normalized.workspaceId
+        );
+
+        if (
+          exceedsWorkspacePendingLimits({
+            bytes: normalized.fileBytes.length,
+            limits,
+            pending: {
+              bytes: inWorkspace.reduce(
+                (total, job) => total + (job.fileBytes?.length ?? 0) + outputBytes(job),
+                0
+              ),
+              jobs: inWorkspace.length,
+            },
+          })
+        ) {
+          throw createWorkspacePendingLimitError();
+        }
+      }
+
       const pending = [...jobs.values()].filter(
         (job) => isPending(job) && tenantKey(job) === tenantKey(normalized)
       );
@@ -1895,6 +2148,30 @@ export const createInMemoryIngestJobStore = ({
       job.updatedAt = currentTime;
       subscribers.wake();
       return snapshot(job);
+    },
+
+    async cancelDocumentJobs({ accessScope = {}, docIds = [], reason } = {}) {
+      const ids = new Set(toCancelDocIds(docIds));
+      const currentTime = now();
+      const canceled = [];
+
+      for (const job of jobs.values()) {
+        if (
+          ids.has(job.docId) &&
+          (job.status === INGEST_JOB_STATUSES.queued || job.status === INGEST_JOB_STATUSES.deadLetter) &&
+          ingestJobMatchesAccessScope(job, accessScope)
+        ) {
+          job.canceledReason = toCancelReason(reason);
+          job.lastError = DOCUMENT_DELETED_JOB_ERROR_MESSAGE;
+          job.deadLetterStage = null;
+          job.deadLetterReason = null;
+          job.deadLetteredAt = null;
+          finish(job, INGEST_JOB_STATUSES.failed, currentTime);
+          canceled.push(job.jobId);
+        }
+      }
+
+      return canceled.sort();
     },
 
     async countByStatus() {

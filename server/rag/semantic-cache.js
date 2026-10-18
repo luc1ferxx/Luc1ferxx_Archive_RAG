@@ -128,6 +128,13 @@ const normalizeQuestionText = (value) => String(value ?? "").replace(/\s+/g, " "
 const toTenantKey = (accessScope) =>
   `${String(accessScope?.userId ?? "").trim()}\u0000${String(accessScope?.workspaceId ?? "").trim()}`;
 
+// The same tenant as toTenantKey, kept on an entry so a tenant erase can drop
+// the tenant's entries (invalidateSemanticCacheTenant); it never enters a key.
+const toTenantScope = (accessScope) => ({
+  userId: String(accessScope?.userId ?? "").trim(),
+  workspaceId: String(accessScope?.workspaceId ?? "").trim(),
+});
+
 const describeDocumentVersion = (document = {}) =>
   [
     `v${document.version ?? ""}`,
@@ -293,6 +300,29 @@ export const invalidateSemanticCacheDocuments = (docIds = []) => {
   state.stats.invalidations += removed;
   return removed;
 };
+
+/**
+ * The tenant erase (rag/tenant-lifecycle.js): drops every entry stored for a
+ * tenant `matches(tenant)` accepts ({ userId, workspaceId } of the access
+ * scope the answer was cached under), whichever documents it was built on.
+ * Returns how many entries went.
+ */
+export const invalidateSemanticCacheTenant = (matches) => {
+  let removed = 0;
+
+  for (const [entryId, entry] of [...state.entries]) {
+    if (entry.tenant && matches(entry.tenant)) {
+      removed += removeEntry(entryId) ? 1 : 0;
+    }
+  }
+
+  state.stats.invalidations += removed;
+  return removed;
+};
+
+/** How many entries invalidateSemanticCacheTenant would drop. */
+export const countSemanticCacheTenantEntries = (matches) =>
+  [...state.entries.values()].filter((entry) => entry.tenant && matches(entry.tenant)).length;
 
 export const clearSemanticCache = () => {
   const removed = state.entries.size;
@@ -575,6 +605,7 @@ export const lookupSemanticCache = async ({
       question,
       rawAnalysis,
       rawQuestion,
+      tenant: toTenantScope(accessScope),
       vector,
     },
     trace: {
@@ -625,6 +656,7 @@ export const storeSemanticCacheAnswer = (lookup, response) => {
     question,
     rawAnalysis,
     rawQuestion,
+    tenant = null,
     vector,
   } = lookup.pending;
 
@@ -689,6 +721,7 @@ export const storeSemanticCacheAnswer = (lookup, response) => {
     rawAnalysis,
     rawQuestion,
     response: snapshot,
+    tenant,
     vector,
   };
 

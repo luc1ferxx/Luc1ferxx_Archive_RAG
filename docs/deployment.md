@@ -11,7 +11,7 @@ docker compose --profile app up -d --build
 - 数据位置：
   - 文档、分块、向量、运行记录在 PostgreSQL 的 `pgdata` 卷里；
   - 上传的原始文件和本地数据在 `appdata` 卷里（容器内 `/data`）。
-- 数据库迁移在启动时自动执行。`docker compose ps` 里 `app` 显示 `healthy` 表示 `/ready` 返回 200，也就是健康报告里每一项检查都通过（`/health` 无论结果如何都返回 200，不能当健康检查用）。显示 `unhealthy` 时进程仍在运行，用 `curl -s http://localhost:5001/ready` 看是哪一项报 `error`。
+- 数据库迁移在启动时自动执行。`docker compose ps` 里 `app` 显示 `healthy` 表示 `/ready` 返回 200，也就是健康报告里每一项检查都通过（`/health` 无论结果如何都返回 200，不能当健康检查用）。显示 `unhealthy` 时进程仍在运行，用 `curl -s http://localhost:5001/ready` 看是哪一项报 `error`。开启 API auth 后，不带凭据只返回 `{status}`，要带上单个共享的 `API_AUTH_TOKEN`，或者带有 `admin.status.read` 的 token（例如 admin.viewer 角色）：`curl -s -H "x-api-key: <token>" http://localhost:5001/ready`。
 - 所有发布的端口默认只绑定 `127.0.0.1`，只能从本机访问，见下面的"端口与网络暴露"。
 
 ### 端口与网络暴露
@@ -300,7 +300,7 @@ node service-keys.mjs generate ingest-worker   # 只有独立入库 worker 调�
 - agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康，跳过 5 秒。
 - 检索层或模型网关停掉时，`/chat` 返回 503 `AGENT_DEPENDENCY_UNAVAILABLE`（带 `Retry-After` 和 `dependency`），运行记为可重试的失败；单体里模型或数据库故障时也一样。以前这种情况返回 200，请用户批准 Web 搜索。
 - 各进程的 `/metrics` 和 `deploy/prometheus/` 的告警规则没有在真实的 Prometheus 里加载过；`compose.services.yml` 没有设置 `METRICS_*`。
-- 各层的 `/health` 不需要认证，会列出内部副本地址和密钥 id（不含密钥本身）；api 的 `/health` 每次都会探测每个 agent 副本。
+- 开启 API auth 时，api 和 agent 层的 `/health`、`/ready`、`/livez` 只对单个共享 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据返回完整报告，其他人只拿到 `{status}`；检索层和模型网关的 `/health` 仍不需要认证，会列出内部副本地址和密钥 id（不含密钥本身），这两层的端口不能对外暴露。api 的 `/health` 每次都会探测每个 agent 副本。
 - 拆分模式下检索请求有上限（`RETRIEVAL_SERVICE_MAX_*`），超长问题或配得过大的 topK 返回 400，单体没有这些限制。
 
 ## OIDC 登录和 RBAC（可选）

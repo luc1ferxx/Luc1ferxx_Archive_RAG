@@ -147,6 +147,13 @@ arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要
 | `POSTGRES_SSL_ENABLED` | `false` | PostgreSQL 是否启用 SSL。 |
 | `POSTGRES_ROW_LEVEL_SECURITY` | `enforce` | 行级安全。`enforce` 让带访问范围的请求和后台任务在租户角色下执行，数据库拒绝其他租户的行；`off` 保持 owner 连接（策略仍在，但 owner 绕过）。无法识别的值按 `enforce` 处理。`enforce` 下多文档的全文检索通过迁移 014 的 owner 函数排序候选（行级安全下 `@@` 用不上 GIN），函数只拿到租户在文档表里能看到的文档 id，返回的行仍由策略过滤；健康检查会确认租户角色能执行它。 |
 | `POSTGRES_TENANT_ROLE` | `archive_rag_tenant` | 行级安全使用的租户角色名（小写标识符）。迁移会创建它，并把它授予应用登录角色。出现以下任一情况，健康检查 `checks.rowLevelSecurity` 都报 error：它是 SUPERUSER 或 BYPASSRLS；它拥有、或通过成员关系拥有当前 schema 里的某张表；它能读写一张没有 `tenant_isolation` 策略的表。迁移 016 的 index version 注册表和 pointer 表，以及扩展自带的关系（例如 `pg_stat_statements` 默认授权给 PUBLIC 的视图）不算在内。报 error 后，`/ready` 返回 503；`STARTUP_HEALTH_STRICT=true` 时服务拒绝启动。 |
+| `POSTGRES_ROW_LEVEL_SECURITY_OFF_CONFIRMED` | 空 | 开着 API auth 又设了 `POSTGRES_ROW_LEVEL_SECURITY=off` 时，`checks.rowLevelSecurity` 报 error；只有设为 `true`（不区分大小写）才放行，此时报 `disabled` 并带 `acknowledged: true`。auth 关闭时不起作用。 |
+| `POSTGRES_TENANT_CONTEXT` | `lenient` | `strict`：在 `POSTGRES_ROW_LEVEL_SECURITY=enforce` 下，一条没有绑定任何上下文（请求、任务、系统或租户）的语句直接报 `ARCHIVE_RAG_TENANT_CONTEXT_MISSING`，不再以 owner 身份执行，异步上下文丢失时也不会绕过策略。`lenient` 保持原行为。其他值拒绝启动。评测脚本在顶层直接调用 store，不要在评测读取的 `.env` 里设 `strict`。 |
+| `POSTGRES_MIGRATION_DATABASE_URL` | 空 | 设置后开启数据库角色拆分：这个 owner 登录只用来跑迁移和 DDL（建、删、清空索引版本表等），每个进程最多 2 个连接；`POSTGRES_DATABASE_URL` 换成一个不拥有任何表、NOSUPERUSER、NOBYPASSRLS、建议 NOINHERIT 的运行时登录。系统和不带租户的语句切到 `POSTGRES_SYSTEM_ROLE` 执行，租户语句切到租户角色，什么都没绑定的语句以运行时登录执行、因没有表权限而报错，上下文丢失时不再读到所有租户。每个进程（各 tier、ingest worker、CLI、MCP）都要同时配两个 URL。 |
+| `POSTGRES_SYSTEM_ROLE` | `archive_rag_system` | 迁移 035 创建的 NOLOGIN 系统角色（小写标识符，不能与租户角色相同），带每张 RLS 表的 `system_access` 策略。迁移需要 `CREATEROLE`，否则由 DBA 先执行 `CREATE ROLE archive_rag_system NOLOGIN`。不开拆分时也会创建，但不起作用。 |
+| `POSTGRES_POOL_MAX` | `10` | 主库连接池上限（node-pg 默认值）。 |
+| `POSTGRES_CONNECTION_TIMEOUT_MS` | `0` | 建立连接和等待空闲连接的上限；`0` 为 node-pg 默认的不限。生产环境建议 5000–10000。 |
+| `POSTGRES_STATEMENT_TIMEOUT_MS` / `POSTGRES_IDLE_IN_TRANSACTION_TIMEOUT_MS` | `0` / `0` | 租户语句、租户事务（以及副本读）的 `statement_timeout` 和 `idle_in_transaction_session_timeout`，在原有的租户设置步骤里以绑定参数设置，不增加往返。`0` 保留数据库自身的值。owner 工作（迁移、建索引、恢复扫描）不受影响。 |
 | `DOCUMENTS_POSTGRES_TABLE` | `rag_documents` | 文档表。 |
 | `SESSION_MEMORY_POSTGRES_TABLE` | `rag_session_memory` | 会话记忆表。 |
 | `LONG_MEMORY_POSTGRES_TABLE` | `long_memory_items` | 长期记忆表。 |
@@ -171,20 +178,23 @@ Agent experience memory 只进入 planner hints，不进入 citations/evidence�
 
 各个 store 在应用层按 user/workspace 过滤。迁移 `013_enable_tenant_row_level_security.sql` 让 PostgreSQL 也执行同样的规则，这样即使某条查询漏写了过滤条件，也读不到、写不进其他租户的行。
 
-- **覆盖的表**：文档、切块、任务、任务事件、Agent run、run 事件、审批快照、workspace artifacts、长期记忆（迁移 013），ingest jobs 及其阶段产物（015/017），会话记忆（031）。文档和切块沿用 `documentMatchesAccessScope` 的规则（owner 和 workspace 都为空的行对任何租户不可见）；其余表按 `(user, workspace)` 精确匹配；长期记忆只按用户匹配。
+- **覆盖的表**：文档、切块、任务、任务事件、Agent run、run 事件、审批快照、workspace artifacts、长期记忆（迁移 013），ingest jobs 及其阶段产物（015/017），会话记忆（031），admin audit（032：租户只读本 workspace 的事件，没有 workspace 时只读自己的；只能追加以自己名义的记录，不能改也不能删），答案反馈（034）。文档和切块沿用 `documentMatchesAccessScope` 的规则（owner 和 workspace 都为空的行对任何租户不可见）；其余表按 `(user, workspace)` 精确匹配；长期记忆只按用户匹配。
 - **会话记忆**：session id 由客户端选择，本身不是租户边界。开启 API auth 时，`rag/memory.js` 把会话存在 `tenant:` + sha256(userId \0 workspaceId \0 sessionId) 下，所有 session store（PostgreSQL、内存、standalone）都一样，所以两个租户用同一个 sessionId 是两个会话，同一用户在两个 workspace 也是两个会话；读、写、`DELETE /sessions/:sessionId` 都按调用方的 scope 推导同一个 key（没传 scope 的调用用当前数据库租户）。迁移 031 再加 `owner_user_id` / `workspace_id` 列和 `tenant_isolation` 策略，PostgreSQL store 按当前数据库租户写 owner 列，租户角色即使直接写 SQL 也读不到、改不了、删不掉别的租户的会话行。关闭 auth 时仍用原始 sessionId（本地前端 chat 带 userId、DELETE 不带，两者要指向同一会话）；没有租户的调用方（auth 关闭，或既无 user 也无 workspace 的凭据，语句走 owner 路径、不受策略约束）传来以 `tenant:` 开头的 sessionId 时不对应任何会话，否则拿到别人的 user、workspace 和 sessionId 就能直接按推导出的 key 读写那个会话。split 部署里各 tier 的 `API_AUTH_ENABLED` 要一致，否则后台任务（存储的 scope 不带 `authenticated`）推导的 key 会不同。迁移前写入的会话行 owner 为空：租户看不到，只有 owner 路径（auth 关闭且不带 userId、系统工作）能读；升级后租户丢失升级前会话的上下文，这些行由以 owner 身份运行的 6 小时 TTL 清理删除。租户对这种不可见行的 upsert 会被策略拒绝，此时该轮不记录、回答照常返回。
-- **不覆盖**：admin audit（workspace 管理员需要跨用户读取，由 admin 权限检查控制）。
+- **四种上下文**：`tenant`（切到租户角色）、`system`（`runAsDatabaseSystem`）、`unscoped`（请求或任务的范围里没有租户：auth 关闭、单个共享 token、平台 admin 路由）、`unbound`（什么都没绑定）。后三种都以 owner 身份执行；`POSTGRES_TENANT_CONTEXT=strict` 时 `unbound` 直接报错。
+- **`_sparse_rank` 函数**：迁移 033 重建了每张切块表的 `_sparse_rank`，在租户角色下先按文档表的策略收窄 doc id，直接拿别的租户的 id 调用也排不出任何结果。
 - **生效方式**：鉴权之后的中间件把请求的访问范围放进 `AsyncLocalStorage`。`rag/postgres.js` 看到租户时，把这条语句放进一个短事务：`SET LOCAL ROLE` 切到租户角色，并设置 `archive_rag.user_id` / `archive_rag.workspace_id`，事务结束后自动恢复，不会残留在连接池里。
 - **后台任务**：任务执行和启动时的 Agent run 恢复，都以该记录自己的范围作为租户。
 - **以 owner 身份执行的工作**（`runAsDatabaseSystem`）：迁移、进程级缓存加载（文档 registry）、pgvector 表结构检查和状态统计、跨租户的恢复扫描。
 - **不带范围的请求**：鉴权关闭且没有 `x-user-id` / `x-workspace-id` 的请求没有租户，仍以 owner 身份执行，与之前一样。
-- **权限要求**：应用登录角色需要 `CREATEROLE`（或由 DBA 预先创建租户角色并授予它）。表的 owner 不受策略约束（`ENABLE`，而不是 `FORCE ROW LEVEL SECURITY`）。
+- **权限要求**：应用登录角色需要 `CREATEROLE`（或由 DBA 预先创建租户角色并授予它）。迁移 035 还要建系统角色 `POSTGRES_SYSTEM_ROLE`（默认 `archive_rag_system`），即使不开角色拆分也一样；迁移登录没有 `CREATEROLE` 时，升级前由 DBA 执行 `CREATE ROLE archive_rag_system NOLOGIN`，否则迁移会带提示失败、服务不启动。表的 owner 不受策略约束（`ENABLE`，而不是 `FORCE ROW LEVEL SECURITY`）。
 - **新表**：新增的应用表必须在迁移里 `GRANT` 给租户角色；需要隔离的表还要加 `tenant_isolation` 策略。否则租户请求访问它会报权限错误，即失败时拒绝访问。
 - **健康检查**：`checks.rowLevelSecurity` 以一个探测租户真实执行一次，确认能切到租户角色、上面列出的每张表（含会话记忆表和各索引版本的切块与 BM25 统计表）都带策略；任一条件不满足即报 `error`。
 
+**切换到角色拆分**：(1) 建运行时登录，例如 `CREATE ROLE app LOGIN NOINHERIT PASSWORD '...'` 并授予 CONNECT；新库可以直接用 `deploy/postgres/create-split-roles.sql`（`-v owner_password=... -v runtime_password=...`）。(2) 所有进程把 `POSTGRES_MIGRATION_DATABASE_URL` 设为原来的 owner URL，`POSTGRES_DATABASE_URL` 设为运行时登录。(3) 重启：首次启动时迁移把租户角色和系统角色授予运行时登录（owner 需要对这两个角色有 ADMIN，或是超级用户，或由 DBA 预先授予）。(4) 确认 `checks.rowLevelSecurity.roleSplit.status` 为 `ok`。回滚：去掉 `POSTGRES_MIGRATION_DATABASE_URL`，把 `POSTGRES_DATABASE_URL` 改回 owner。不开拆分时，健康检查的 `roleSplit` 字段给出 warning（登录角色就是表的 owner），不影响整体状态。
+
 已知边界：
 
-- 租户靠异步上下文传递。如果某个中间件从流回调里继续请求链（例如 multer 的内存存储），上下文会丢失，查询回落到 owner 身份，也就是只剩应用层过滤；上传路由在 multer 之后重新绑定了租户。要做到上下文丢失时也拒绝访问，需要一个没有表权限的独立登录角色，owner 连接只留给显式的系统操作。
+- 租户靠异步上下文传递。如果某个中间件从流回调里继续请求链（例如 multer 的内存存储），上下文会丢失；上传路由在 multer 之后重新绑定了租户。默认（`lenient`）下丢失上下文的查询回落到 owner 身份，只剩应用层过滤；`POSTGRES_TENANT_CONTEXT=strict` 时这类查询直接报错。
 - 这层防护针对“漏写过滤条件”这类应用 bug，不防 SQL 注入：注入的语句可以执行 `RESET ROLE`。
 - 开启后，租户设置和语句用扩展协议流水线一次往返发出（`rag/postgres.js` 的 `PipelinedQuery`）；用 pg 的 native 绑定时退回 4 次往返（BEGIN、租户设置、语句本身、COMMIT）。
 
@@ -247,11 +257,59 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 - 跨实例文档可见性：文档注册表在 PostgreSQL 时（默认），不论 `sync` 还是 `async`，API 实例按 docId 查不到或要删除文档时先从数据库按 id 重读，`GET /documents` 和每个 `/chat` 开头先按请求租户重读文档表；同一租户的并发请求共用一次查询，但只共用在它们到达之后才开始的那次。别的实例上传或删除的文档因此在这里立即可见，清空文档以数据库实际删除的行为准。重读不会覆盖本进程事务中尚未提交的入库、删除或清空。文件注册表（standalone）和内存注册表不做这些读取。
 - 前端收到 202 后轮询任务状态，间隔从 1 秒增长到 5 秒，最多 10 分钟；网络错误、429、5xx 继续轮询（遵守 Retry-After），只有任务 `failed` 或 404 才判定失败。
 
+## 请求和上传上限
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `CHAT_MAX_QUESTION_CHARS` | `8000` | `/chat`、GET `/chat`、`/chat/stream` 问题的最大长度（去掉首尾空白后），超过返回 400。 |
+| `CHAT_MAX_DOC_IDS` | 进程内检索：不限；配了 `RETRIEVAL_SERVICE_URL`：`1000` | 每个请求最多的 docId 数，`0` 为不限。前端会把当前范围内的所有文档都发过来，所以单体默认不设上限；拆分部署默认与检索层自己的 `RETRIEVAL_SERVICE_MAX_DOC_IDS` 一致。 |
+| `CHAT_MAX_ID_CHARS` | `256` | 单个 docId 和 sessionId 的最大长度。 |
+| `UPLOAD_SESSION_MAX_PER_TENANT` | `200` | 每个 (user, workspace) 同时打开的分片上传会话数；超出时 `POST /upload/init` 返回 429 `UPLOAD_SESSION_LIMIT_EXCEEDED`，`limit: "sessions"`。续传不受限。`0` 不限。按进程计数，多个进程共用一个会话目录时可能各多出一个。 |
+| `UPLOAD_SESSION_MAX_BYTES_PER_TENANT` | 10 GiB | 该租户所有打开会话声明的大小加上新文件的总和上限，超出返回 429，`limit: "bytes"`。`0` 不限。 |
+| `UPLOAD_SESSION_CLEANUP_INTERVAL_MS` | `900000` | API 进程运行期间清理过期上传会话的间隔（以前只在启动时清理一次）。`0` 只在启动时清理。 |
+
+pgvector 稀疏检索最多使用查询里前 64 个不同的词。
+
+## 多租户治理
+
+第 3、4 阶段新增的设置。除特别注明外，默认都是关闭或不限，不设置时行为与之前一致。
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `TENANT_MEMBERSHIP` | `off` | `enforce`：开启 API auth 时，请求的 workspace 必须登记在租户注册表里（迁移 036）、状态为 active，且有用户时该用户必须是成员；否则返回 403（`WORKSPACE_MEMBERSHIP_REQUIRED`、`WORKSPACE_SUSPENDED`、`WORKSPACE_DELETING`、`WORKSPACE_NOT_REGISTERED`）。没有 workspace 列表的凭据不能再靠 `x-workspace-id` 随意指定 workspace。成员角色会合并进 `workspaceRoles`。注册表不可用时返回 503，不会放行。单个共享 token、auth 关闭、平台 admin 不受影响。其他值拒绝启动。 |
+| `TENANT_REGISTRY_CACHE_TTL_MS` | `5000` | 成员和 workspace 查询在进程内的缓存时间，`0` 关闭缓存。本进程写入时立即失效，其他进程最多晚一个 TTL。 |
+| `WORKSPACES_POSTGRES_TABLE` / `WORKSPACE_MEMBERS_POSTGRES_TABLE` | `rag_workspaces` / `rag_workspace_members` | 注册表的两张表。用 `npm run tenant:registry` 或 `/admin/workspaces` 接口管理（权限 `admin.tenants.read|write`，角色 `admin.tenant_manager`）。 |
+| `TENANT_RATE_LIMIT_ENABLED` | `false` | 认证之后按租户（workspace，没有时按用户，再没有按 IP）和成本类别限流，超出返回 429 `TENANT_RATE_LIMITED`。`RAG_SHARED_STATE=redis` 时跨实例共享。 |
+| `TENANT_RATE_LIMIT_WINDOW_MS` | `60000` | 固定窗口长度。 |
+| `TENANT_RATE_LIMIT_CHAT_MAX` / `_INGEST_MAX` / `_DESTRUCTIVE_MAX` / `_DEFAULT_MAX` | `120` / `600` / `60` / `1200` | 每个窗口各类请求的上限（destructive 包括所有 DELETE 和清空文档）；`0` 关闭该类限制。 |
+| `TENANT_MAX_CONCURRENT_RUNS` | `0` | 每个租户在本进程同时运行的 agent 请求数上限，超出返回 429 `TENANT_CONCURRENCY_LIMITED`。 |
+| `TRUST_PROXY` | 空 | 交给 Express 的 `trust proxy`：跳数、`true`/`false` 或地址列表，非法值拒绝启动。`true` 会把客户端自己能写的 X-Forwarded-For 当成真实 IP，建议用跳数或列表。 |
+| `RAG_LLM_MAX_QUEUE` | `0` | 每个租户在一个模型调用 guard 上最多排队的调用数，超出返回 429 `MODEL_CALL_QUEUE_FULL`。排队本身已默认按租户公平轮转，单租户时与以前一致。 |
+| `RAG_LLM_INGEST_MAX_CONCURRENCY` | 空 | 不设时入库 embedding 和查询共用同一个 guard（一个并发上限、一个熔断器），靠按租户公平排队避免查询排在整批入库后面。设成数字（`0` 为不限）时入库单独一条通道、有自己的上限和熔断器，此时同一端点上两条通道的并发会叠加。 |
+| `MODEL_QUOTA_ENABLED` | `false` | 在本进程按 workspace 执行模型配额（沿用 `MODEL_GATEWAY_QUOTA_*` 的上限），适用于不经过模型网关的调用；超出返回 429 `MODEL_GATEWAY_QUOTA_EXCEEDED`。 |
+| `TENANT_USAGE_LEDGER` | 开启（有数据库时） | 按小时汇总每个租户的模型 token、费用、chat 次数、入库字节和文档数（迁移 037），异步写入，不增加 `/chat` 的语句数。`GET /admin/usage` 查询（权限 `admin.usage.read`）。`off` 关闭。 |
+| `TENANT_USAGE_FLUSH_MS` / `TENANT_USAGE_POSTGRES_TABLE` | `60000` / `tenant_usage` | 写入间隔和表名。 |
+| `TENANT_MAX_DOCUMENTS` / `TENANT_MAX_DOCUMENT_BYTES` | `0` / `0` | 每个 workspace（没有时按用户）的文档数和文件字节上限，在提交文档的写事务里检查，超出返回 `TENANT_STORAGE_QUOTA_EXCEEDED`。 |
+| `RAG_INGEST_MAX_PENDING_JOBS_PER_WORKSPACE` / `RAG_INGEST_MAX_PENDING_BYTES_PER_WORKSPACE` | `0` / `0` | 整个 workspace 排队和运行中的入库任务上限，在原有的按用户上限之外再检查。 |
+| `TENANT_MAX_RUNNING_TASKS` / `TENANT_MAX_QUEUED_TASKS` | `0` / `0` | 每个 (user, workspace) 运行中和排队中的后台任务上限；超出运行上限的任务继续排队，超出排队上限时 `POST /agent-tasks` 返回 429 `TENANT_TASK_LIMITED`。 |
+| `AGENT_RUN_RETENTION_DAYS` / `TASK_RETENTION_DAYS` | `0` / `0` | 已结束的 agent run（含事件和审批快照）和任务的保留天数，`0` 永久保留；运行中和等待中的从不删除。 |
+| `WORKSPACE_ARTIFACT_RETENTION_DAYS` / `FEEDBACK_RETENTION_DAYS` / `RAG_OBSERVABILITY_RETENTION_DAYS` | `0` | 已归档 artifact、PostgreSQL 里的反馈、按天轮转的 observability JSONL 的保留天数。注册表里 workspace 的 `retention_policy` 可以按 workspace 覆盖，键为 `agentRuns`、`tasks`、`workspaceArtifacts`、`feedback`，值为 0–36500 的整数天，其他写法会被注册表拒绝。 |
+| `RETENTION_SWEEP_INTERVAL_MS` / `RETENTION_SWEEP_BATCH_SIZE` | `3600000` / `500` | 清理间隔和每条删除语句的行数。多实例时用 advisory lock 避免重复清理。 |
+| `DOCUMENT_DELETE_REDACTION` | `off` | `on`：删除文档时，把本租户已结束的 run、引用它的 artifact 和反馈引用里的原文替换成 `[source document deleted]`，保留 id。不论开关，删除文档总会取消它排队中的入库任务，并删掉所有索引版本里的切块。 |
+| `ADMIN_AUDIT_DATA_EVENTS` | `off` | `on`：记录数据访问事件（下载、删除、清空、替换文档，清空记忆和会话，平台 admin 的跨租户读取，租户擦除），只记 id 和计数；删除类操作先写意图记录，写不进去时返回 503 `AUDIT_UNAVAILABLE`、不执行。 |
+| `API_AUTH_OIDC_ALLOW_PLATFORM_ROLES` | `true` | `false`：丢弃 OIDC token 或 group 映射带来的 `admin.*` 角色和权限，客户的 IdP 不能授予平台角色。 |
+
+- **租户擦除和导出**：传了但为空的 `userId` 返回 400（不传才表示整个 workspace）。CLI 默认不擦本地向量索引和非 PostgreSQL 注册表里的文档（运行中的服务会把它们写回），确认所有服务都已停止后加 `--servers-stopped`。`POST /admin/tenants/erase`（默认只预览，`dryRun: false` 才执行；有运行中的工作时返回 409，可加 `force`）和 `GET /admin/tenants/export`（NDJSON），或 `npm run tenant:erase -- --workspace <id> [--user <id>] [--apply]` / `npm run tenant:export -- --workspace <id> --output <file>`。只有 admin.owner、平台身份、开启 API auth 时可用。擦除覆盖所有存储，审计记录保留，并写一条擦除 tombstone。其他进程内存里的缓存擦不到。
+- **审计防篡改**：迁移 041 起每条审计记录接在它所在链（按 workspace，没有时按用户）的上一条后面，`npm run audit:verify` 在同一个快照里检查哪一条开始断开。迁移之前的记录不在链上；滚动升级期间旧实例写的无哈希记录，在迁移 041 执行后 24 小时内（`--upgrade-grace-hours`，或用 `--upgrade-window-end <ISO>` 指定）计为升级记录而不是断链，所以旧版本实例要在这个窗口内全部停掉。
+- **升级顺序**：拆分部署用单个共享 token 时，先升级 api 入口再升级 agent tier。`compose.services.yml` 的模型网关现在也连数据库，用来写用量账本。
+- **保留期清理**：读不到按 workspace 的保留期策略时（包括系统角色丢了权限），这一轮不删任何数据库记录，下一轮再试，不会退回全局期限。
+
+## Vector store
 ## Vector store
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `VECTOR_STORE_PROVIDER` | `pgvector` | 严格白名单：`pgvector`（默认，chunk 与向量存在 PostgreSQL）、`local`（本地 JSON 索引，显式 opt-in）、`qdrant`（显式 opt-in）。其他值在启动健康检查、ingest 和检索时都直接报错，不会静默回落到 `local`。 |
+| `VECTOR_STORE_PROVIDER` | `pgvector` | 严格白名单：`pgvector`（默认，chunk 与向量存在 PostgreSQL）、`local`（本地 JSON 索引，显式 opt-in）、`qdrant`（显式 opt-in）。其他值在启动健康检查、ingest 和检索时都直接报错，不会静默回落到 `local`。多租户只支持 `pgvector`：`local` 和 `qdrant` 只靠调用方传入的 docId 过滤，没有行级安全，配了 `API_AUTH_TOKENS`、JWT 或 OIDC 时 `checks.vectorStore` 报 warning；Qdrant 收到空的 docId 列表时返回空结果，不再搜整个 collection。 |
 | `DOCUMENT_CHUNKS_POSTGRES_TABLE` | `rag_document_chunks` | pgvector chunk/向量表；外键级联到 `DOCUMENTS_POSTGRES_TABLE`。 |
 | `RAG_EMBEDDING_DIMENSIONS` | 由模型推导 | pgvector 列宽。留空时按 `OPENAI_EMBEDDING_MODEL` 推导（`text-embedding-3-small`=1536、`-large`=3072、`ada-002`=1536，未知模型 1536）。列宽或模型与库中已有 chunk 不一致时 ingest/检索明确失败并要求 `npm run vector:reindex`。 |
 | `RAG_PGVECTOR_TEXT_SEARCH_CONFIG` | `simple` | 稀疏路（PostgreSQL FTS）使用的 text search configuration。chunk 文本先用应用内 tokenizer 切分（CJK 逐字、ASCII 小写去停用词）再建 tsvector，因此默认 `simple`。排序用 `ts_rank_cd`，不是 BM25。 |
@@ -318,6 +376,8 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | `API_AUTH_JWT_PERMISSIONS_CLAIM` | `permissions` | 映射为 admin permission IDs 的 claim path。 |
 | `API_AUTH_REVOKED_TOKEN_HASHES` | 空 | 逗号分隔的 JWT SHA-256 token hash 撤销列表。 |
 | `API_AUTH_REVOKED_JTIS` | 空 | 逗号分隔的 JWT `jti` 撤销列表。 |
+
+鉴权开启后，`GET /health`、`/ready`、`/livez` 仍然公开、状态码不变，但只有单个共享的 `API_AUTH_TOKEN` 或持有 `admin.status.read` 的调用方才拿到完整报告，其他人只拿到 `{status}`，并带 `Cache-Control: no-store`。认证之后的所有 API 响应都带 `Cache-Control: private, no-store` 和按身份头（Authorization、x-api-key、x-workspace-id、x-user-id）的 `Vary`。
 
 鉴权开启后，一个请求如果既没有 user 也没有 workspace，会被返回 403（“This request needs a user or workspace scope”）。典型情况是 `API_AUTH_TOKENS` 里允许多个 workspace、又没有 userId 的 token，请求时没带 `x-workspace-id`。以前这种请求会被当成“所有租户”，能列出、读取并清空所有人的文档。有两个例外：一是单个共享的 `API_AUTH_TOKEN`（单租户模式，行为不变）；二是 `GET /admin/status`、`GET /admin/audit`、`GET /admin/index-versions`、`GET /auth/me` 和 `POST /admin/actions/:action`，但只对没有 workspace 列表的平台 admin token 放行，这些路由另有 admin 权限检查。另外，`API_AUTH_TOKENS` 里一个既没有 userId、workspaceId、workspaces，也没有 roles、permissions，又没开 `allowClientUserId` 的条目，会让服务拒绝启动（`API_AUTH_TOKEN_WITHOUT_SCOPE`）。
 
@@ -563,7 +623,8 @@ RBAC_MODE=enforce
 | `RAG_OBSERVABILITY_ENABLED` | `false` | 是否写入 RAG / AgentRAG JSONL trace。 |
 | `RAG_OBSERVABILITY_INCLUDE_CONTEXT` | `false` | Trace 是否记录完整 chunk 文本。 |
 | `RAG_OBSERVABILITY_EVENTS_PATH` | 空 | 把 trace 写到指定的 JSONL 文件，而不是默认的 `server/data/rag-observability/events.jsonl`；评测用它把一次运行的事件单独保存。 |
-| `FEEDBACK_DIRECTORY` | `server/data/feedback` | 答案反馈 JSONL 存储目录。 |
+| `FEEDBACK_DIRECTORY` | `server/data/feedback` | 答案反馈 JSONL 存储目录，只在没有数据库时使用。配了 PostgreSQL 时反馈存进 `FEEDBACK_POSTGRES_TABLE`（迁移 034，带行级安全）；升级后用 `npm run feedback:import`（默认只预览，加 `-- --apply` 写入，可重复执行）把旧文件导入。 |
+| `FEEDBACK_POSTGRES_TABLE` | `rag_feedback` | 答案反馈表（最长 45 字节的简单标识符）。 |
 
 默认 trace 只保存 metadata、score、`excerptHash` 和短 preview。启用后，completion、embedding 和 cross-encoder rerank 还会写入 `llmops_metric` 事件，用于 `observability:report` 汇总 operation / model route 的 count、平均延迟和 error rate；这些事件不包含 prompt 原文或 secret。只有本地调试且能接受完整 chunk 文本落盘时，才建议设置：
 

@@ -28,7 +28,7 @@ import test, { after, before, describe } from "node:test";
 
 import { createApp as createProductionApp } from "../app.js";
 import { buildTextPdf } from "../evaluation/load-bench-pdf.mjs";
-import { configureFeedbackDirectory } from "../feedback.js";
+import { configureFeedbackDirectory, createFileFeedbackStore } from "../feedback.js";
 import {
   createAdminAuditService,
   createInMemoryAdminAuditStore,
@@ -62,6 +62,10 @@ import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import { RBAC_ROUTE_ACCESS, RBAC_ROUTE_TABLE } from "../rag/rbac.js";
 import { configureRagDataDirectory, getRagDataDirectory } from "../rag/storage.js";
 import { createInMemoryTaskStore } from "../rag/tasks.js";
+import {
+  createInMemoryTenantRegistryStore,
+  createTenantRegistryService,
+} from "../rag/tenant-registry.js";
 import { resetVectorStore } from "../rag/vector-store.js";
 import {
   ARTIFACT_TYPES,
@@ -139,10 +143,16 @@ const createApp = (tempRoot, options = {}) =>
     adminAuditService: createAdminAuditService({ store: createInMemoryAdminAuditStore() }),
     agentRunStore: createInMemoryAgentRunStore(),
     executionPlannerAdapter: deterministicPlannerAdapter,
+    // The JSONL store, following configureFeedbackDirectory; with a database
+    // URL the default would be the PostgreSQL table.
+    feedbackStore: createFileFeedbackStore(),
     healthService: okHealthService,
     ingestJobStore: createInMemoryIngestJobStore(),
     intentPlannerAdapter: deterministicIntentPlannerAdapter,
     taskStore: createInMemoryTaskStore(),
+    // The in-process registry; with a database URL the default would be the
+    // PostgreSQL tables of migration 036.
+    tenantRegistry: createTenantRegistryService({ store: createInMemoryTenantRegistryStore() }),
     uploadSessionDirectory: path.join(tempRoot, "upload-sessions"),
     uploadsDirectory: path.join(tempRoot, "uploads"),
     workspaceArtifactStore: createInMemoryWorkspaceArtifactStore(),
@@ -223,8 +233,22 @@ const PLATFORM_ROUTES = new Set([
   "GET /admin/audit",
   "GET /admin/index-versions",
   "GET /admin/status",
+  "GET /admin/tenants/export",
+  // Migration 037's usage ledger: every tenant's totals for a platform admin.
+  "GET /admin/usage",
   "GET /auth/me",
   "POST /admin/actions/:action",
+  // The tenant registry (routes/admin-tenants.js, migration 036): platform
+  // data by nature, behind admin.tenants.read / admin.tenants.write.
+  "GET /admin/workspaces",
+  "POST /admin/workspaces",
+  "GET /admin/workspaces/:workspaceId",
+  "POST /admin/workspaces/:workspaceId/actions/:action",
+  "GET /admin/workspaces/:workspaceId/members",
+  "GET /admin/workspaces/:workspaceId/members/:userId",
+  "PUT /admin/workspaces/:workspaceId/members/:userId",
+  "DELETE /admin/workspaces/:workspaceId/members/:userId",
+  "POST /admin/tenants/erase",
 ]);
 
 const PART_A_TOKENS = {
@@ -582,6 +606,54 @@ const OBJECT_ROUTE_FIXTURES = {
     // A workspace scope without a user has no long-term memory at all.
     statuses: { default: [404], "ws-b-without-user": [400] },
   },
+  // The tenant registry: only B's admin passes the admin check, and a
+  // workspace-scoped admin reaches its own workspace only, so A's answers 404
+  // exactly like a workspace that does not exist; registering and changing a
+  // status are platform-only (403 for every principal of B).
+  "GET /admin/workspaces/:workspaceId": {
+    requests: () => [{ method: "GET", path: `/admin/workspaces/${ALICE.workspaceId}` }],
+    statuses: { "bob-admin": [404], default: [403] },
+  },
+  "POST /admin/workspaces/:workspaceId/actions/:action": {
+    requests: () =>
+      ["suspend", "activate"].map((action) => ({
+        body: {},
+        method: "POST",
+        path: `/admin/workspaces/${ALICE.workspaceId}/actions/${action}`,
+      })),
+    statuses: { default: [403] },
+  },
+  "GET /admin/workspaces/:workspaceId/members": {
+    requests: () => [{ method: "GET", path: `/admin/workspaces/${ALICE.workspaceId}/members` }],
+    statuses: { "bob-admin": [404], default: [403] },
+  },
+  "GET /admin/workspaces/:workspaceId/members/:userId": {
+    requests: () => [
+      { method: "GET", path: `/admin/workspaces/${ALICE.workspaceId}/members/${ALICE.userId}` },
+    ],
+    statuses: { "bob-admin": [404], default: [403] },
+  },
+  "PUT /admin/workspaces/:workspaceId/members/:userId": {
+    requests: () => [
+      {
+        body: { roles: ["workspace.admin"] },
+        method: "PUT",
+        path: `/admin/workspaces/${ALICE.workspaceId}/members/bob`,
+      },
+      {
+        body: { roles: [] },
+        method: "PUT",
+        path: `/admin/workspaces/${ALICE.workspaceId}/members/${ALICE.userId}`,
+      },
+    ],
+    statuses: { "bob-admin": [404], default: [403] },
+  },
+  "DELETE /admin/workspaces/:workspaceId/members/:userId": {
+    requests: () => [
+      { method: "DELETE", path: `/admin/workspaces/${ALICE.workspaceId}/members/${ALICE.userId}` },
+    ],
+    statuses: { "bob-admin": [404], default: [403] },
+  },
   "DELETE /sessions/:sessionId": {
     requests: () => [{ method: "DELETE", path: `/sessions/${IDS.session}` }],
     // The caller's scope is part of the session key: B clears its own
@@ -753,6 +825,9 @@ describe("cross-tenant object access", () => {
       createArtifactId: () => IDS.artifact,
       store: createInMemoryWorkspaceArtifactStore(),
     });
+    state.tenantRegistry = createTenantRegistryService({
+      store: createInMemoryTenantRegistryStore(),
+    });
 
     const app = await createApp(state.tempRoot, {
       agentExperienceMemoryService: { recordFromFeedback: async () => null },
@@ -784,6 +859,7 @@ describe("cross-tenant object access", () => {
         },
       },
       taskStore: state.taskStore,
+      tenantRegistry: state.tenantRegistry,
       workspaceArtifactService: state.workspaceArtifactService,
     });
 
@@ -942,6 +1018,21 @@ describe("cross-tenant object access", () => {
       sessionId: IDS.session,
     });
 
+    // A's workspace in the tenant registry, with A as its admin member.
+    await state.tenantRegistry.createWorkspace({
+      plan: `plan-${MARKER}`,
+      region: `region-${MARKER}`,
+      // The retention format (rag/workspace-retention-policy.js) holds only
+      // day counts, so the marker rides on the descriptors.
+      retentionPolicy: { agentRuns: 30 },
+      workspaceId: ALICE.workspaceId,
+    });
+    await state.tenantRegistry.putMember({
+      roles: ["workspace.admin"],
+      userId: ALICE.userId,
+      workspaceId: ALICE.workspaceId,
+    });
+
     // A saved arXiv suggestion for A's document (and the recommendation task
     // it records in A's scope).
     response = await asAlice("GET", `/documents/${IDS.doc}/arxiv/suggestions`);
@@ -1048,6 +1139,19 @@ describe("cross-tenant object access", () => {
       resolveSessionMemoryKey(IDS.session, ALICE)
     );
     assert.equal(aliceSession?.messages.length, 2, "A's session keeps its turn");
+
+    // No tenant-B token is a platform credential, so A's registry entry is
+    // checked on the registry itself.
+    const workspace = await state.tenantRegistry.getWorkspace(ALICE.workspaceId);
+    assert.equal(workspace.status, "active");
+    assert.ok(workspace.plan.includes(MARKER));
+    assert.deepEqual(
+      (await state.tenantRegistry.listMembers(ALICE.workspaceId)).map((member) => [
+        member.userId,
+        member.roles,
+      ]),
+      [[ALICE.userId, ["workspace.admin"]]]
+    );
   };
 
   test("tenant A sees each of its seeded objects (so B's 404s are scope decisions)", async () => {
@@ -1067,6 +1171,8 @@ describe("cross-tenant object access", () => {
       { method: "GET", path: "/feedback" },
       { method: "GET", path: "/admin/ingest-jobs/dead-letter" },
       { method: "GET", path: "/admin/status" },
+      { method: "GET", path: "/admin/workspaces" },
+      { method: "GET", path: "/admin/usage" },
       { body: {}, method: "POST", path: "/documents/clear" },
       { method: "DELETE", path: "/memory" },
     ];

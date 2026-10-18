@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
+import { TENANT_TASK_LIMITED } from "../rag/job-orchestrator.js";
 import { runAgentRequestWithCancellation } from "../rag/request-deadline.js";
 
 import { sendAgentRouteError } from "./chat.js";
@@ -148,6 +149,8 @@ export const createTasksRouter = (services) => {
       });
     } catch (error) {
       return res.status(error.status ?? 500).json({
+        // TENANT_MAX_QUEUED_TASKS (rag/agent-tasks.js): the stable code.
+        ...(error?.code === TENANT_TASK_LIMITED ? { code: error.code } : {}),
         error: serializeError(error, "Failed to create agent task."),
       });
     }

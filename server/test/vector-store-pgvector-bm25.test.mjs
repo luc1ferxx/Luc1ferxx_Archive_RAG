@@ -14,6 +14,8 @@ import {
 } from "../rag/config.js";
 import { renderMigrationSql } from "../rag/db-migrations.js";
 import {
+  PGVECTOR_SPARSE_MAX_QUERY_TERMS,
+  buildTsQuery,
   configurePgvectorRuntime,
   resetPgvectorVectorStore,
   searchPgvectorSparseDocuments,
@@ -395,6 +397,45 @@ test("the sparse route calls the active version's search function with the query
     topK: 3,
   });
   assert.ok(database.calls.at(-1).sql.includes("ts_rank_cd(search_vector"));
+});
+
+test("a sparse query keeps at most its first 64 distinct terms, in order", async () => {
+  process.env.OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+  process.env.VECTOR_STORE_PROVIDER = "pgvector";
+  configureEmbeddingDimensions(4);
+
+  assert.equal(PGVECTOR_SPARSE_MAX_QUERY_TERMS, 64);
+
+  // 100 distinct terms, each repeated: duplicates collapse before the cap, so
+  // the first 64 distinct terms survive, in the order the question names them.
+  const terms = Array.from({ length: 100 }, (_, index) => `term${String(index).padStart(3, "0")}`);
+  const queryText = [...terms, ...terms].join(" ");
+  const expected = terms.slice(0, 64);
+  const built = buildTsQuery(queryText);
+
+  assert.deepEqual(built.tokens, expected);
+  assert.equal(built.tsQuery, expected.map((term) => `'${term}'`).join(" | "));
+  // Below the cap nothing changes.
+  assert.deepEqual(buildTsQuery("What is the Amber ceiling?").tokens, ["amber", "ceiling"]);
+  assert.equal(buildTsQuery("the of a"), null);
+
+  // The capped query is what both scorings send: the tsquery and the term list
+  // of the search function, and the plain ts_rank_cd statement.
+  const database = createFakeDatabase();
+
+  configurePgvectorRuntime(database.runtime);
+  process.env.RAG_SPARSE_SCORING = "bm25";
+  await searchPgvectorSparseDocuments({ docIds: ["doc-1", "doc-2"], queryText, topK: 3 });
+  const call = searchCalls(database).at(-1);
+
+  assert.equal(call.values[1], built.tsQuery);
+  assert.equal(call.values[2], expected.join(" "));
+
+  await searchPgvectorSparseDocuments({ docIds: ["doc-1"], queryText, scoring: "ts_rank_cd", topK: 3 });
+  const plain = database.calls.at(-1);
+
+  assert.ok(plain.sql.includes("ts_rank_cd(search_vector"));
+  assert.ok(plain.values.includes(built.tsQuery));
 });
 
 test("a version without the search function, or a tenant without its grant, fails with the remedy", async () => {

@@ -28,10 +28,12 @@ export const runIngestWorkerProcess = async ({
   tempDirectory = null,
 } = {}) => {
   const [
-    { getVectorStoreProviderConfigStatus, isPostgresDatabaseConfigured },
+    { getPostgresTenantContextMode, getVectorStoreProviderConfigStatus, isPostgresDatabaseConfigured },
     { createDefaultIngestJobStore },
     { createIngestWorker },
     { resetPostgresPool },
+    { runAsDatabaseSystem },
+    { stopTenantUsageLedger },
     { resolveDataDirectory },
     { isStandaloneProfileEnabled },
   ] = await Promise.all([
@@ -39,6 +41,8 @@ export const runIngestWorkerProcess = async ({
     import("./rag/ingest-job-store.js"),
     import("./rag/ingest-worker.js"),
     import("./rag/postgres.js"),
+    import("./rag/postgres-tenant.js"),
+    import("./rag/tenant-usage.js"),
     import("./runtime-paths.js"),
     import("./standalone-profile.js"),
   ]);
@@ -57,10 +61,16 @@ export const runIngestWorkerProcess = async ({
     return null;
   }
 
+  // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js).
+  getPostgresTenantContextMode();
+
   const store = (createStore ?? createDefaultIngestJobStore)();
   const resolvedRagService = ragService ?? (await import("./rag/index.js"));
 
-  await store.initialize?.();
+  // Migrations and the queue's set-up are system work; bound explicitly so
+  // POSTGRES_TENANT_CONTEXT=strict accepts them (the worker's loops bind
+  // themselves, see createIngestWorker's start).
+  await runAsDatabaseSystem(() => store.initialize?.());
 
   const worker = createIngestWorker({
     logger,
@@ -99,6 +109,14 @@ export const runIngestWorkerProcess = async ({
       logger.log(`[ingest-worker] ${signal}: stopping.`);
       await worker.stop();
       await metrics?.close();
+      // The usage the committed jobs recorded (rag/tenant-usage.js: ingested
+      // bytes, documents, embedding tokens) is in memory until the ledger's
+      // next flush; write it before the pool closes. Never fails the shutdown.
+      try {
+        await stopTenantUsageLedger();
+      } catch (error) {
+        logger.error(`[ingest-worker] Failed to flush tenant usage on shutdown: ${error?.message ?? error}`);
+      }
       await resetPostgresPool();
       exit(0);
     })();

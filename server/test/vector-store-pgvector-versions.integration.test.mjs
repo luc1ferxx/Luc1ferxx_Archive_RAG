@@ -742,6 +742,17 @@ if (childMode === "crash-build") {
     assert.ok(topDocIds(mixed).every((docId) => docId !== "b-eta"), `alice saw ${topDocIds(mixed)}`);
     assert.deepEqual(topDocIds(await search(BOB, "eta ledger", ["b-eta"])), ["b-eta"]);
 
+    // Called directly, the built version's sparse-rank function (migration
+    // 033's installer, run by the version DDL) ranks none of Bob's chunks for
+    // Alice, and ranks them for Bob exactly as for the owner.
+    const rankDirect = `SELECT chunk_id, sparse_score
+      FROM rag_document_chunks_v3_sparse_rank(to_tsquery('simple', 'eta'), ARRAY['b-eta'], 8) ORDER BY chunk_id`;
+    const ownerRanks = (await q(rankDirect)).rows;
+
+    assert.ok(ownerRanks.length > 0, "Bob's chunk matches");
+    assert.deepEqual((await asTenant(ALICE, rankDirect)).rows, []);
+    assert.deepEqual((await asTenant(BOB, rankDirect)).rows, ownerRanks);
+
     const report = await modules.health.buildHealthReport();
     const vectorStore = report.checks.vectorStore;
 
@@ -762,11 +773,13 @@ if (childMode === "crash-build") {
       RAG_EMBEDDING_DIMENSIONS: String(DIMENSIONS[MODEL_C]),
     });
     assert.equal(report.checks.rowLevelSecurity.status, "ok", report.checks.rowLevelSecurity.message);
-    // Thirteen tenant tables (ten plus the staged ingest's outputs, migration
-    // 017, session memory, migration 031, and admin audit events, migration
-    // 032), the live version's own chunk table, and the four sparse statistics
-    // tables (migration 030) of each of the two live versions.
-    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 22);
+    // Seventeen tenant tables (ten plus the staged ingest's outputs, migration
+    // 017, session memory, migration 031, admin audit events, migration 032,
+    // answer feedback, migration 034, the tenant registry's workspaces and
+    // members, migration 036, and the tenant usage ledger, migration 037), the
+    // live version's own chunk table, and the four sparse statistics tables
+    // (migration 030) of each of the two live versions.
+    assert.equal(report.checks.rowLevelSecurity.protectedTableCount, 26);
     assert.equal(report.checks.rowLevelSecurity.sparseRankExecutable, true);
     // Pruning is on by default, so tenants call migration 030's search function.
     assert.equal(report.checks.rowLevelSecurity.sparseSearchExecutable, true);
@@ -1112,5 +1125,78 @@ if (childMode === "crash-build") {
     assert.equal((await versionRow(created.versionId)).status, "retired");
     assert.equal((await q(`SELECT to_regclass($1) AS relation`, [created.chunkTable])).rows[0].relation, null);
     assert.equal((await q(`SELECT 1 FROM rag_documents WHERE doc_id = $1`, [racing[0]])).rows.length, 0);
+  });
+
+  // rag/document-deletion-cascade.js, vector-store-pgvector.js
+  // removeFromRetainedVersions: a table no write targets still holds text.
+  test("a delete, a replacement and a scoped clear also reach a failed version's table and a retired one not dropped yet", async () => {
+    const space = modules.lifecycle.resolveBuildEmbeddingSpace({ dimensions: DIMENSIONS[MODEL_B], model: MODEL_B });
+    const created = await modules.lifecycle.createIndexVersion({ builderId: "retained-builder", space });
+    const retained = created.chunkTable;
+
+    // Uploaded while the version builds: dual-written into its table.
+    for (const [docId, topic] of [["r-del", "alpha"], ["r-rep", "beta"], ["r-keep", "gamma"]]) {
+      await ingest(ALICE, docId, [`${topic} retained clause for ${docId}.`]);
+    }
+
+    await ingest(BOB, "r-bob", ["Delta retained clause for bob."]);
+
+    for (const docId of ["r-del", "r-rep", "r-keep", "r-bob"]) {
+      assert.ok((await chunkCounts(retained))[docId] > 0, `${docId} was dual-written`);
+    }
+
+    // The build fails (as a fence or a stopped build leaves it): no write
+    // targets the table any more, and the table stays.
+    await q(
+      `UPDATE rag_index_versions SET status = 'failed', builder_id = NULL, lease_expires_at = NULL WHERE version_id = $1`,
+      [created.versionId]
+    );
+    modules.versions.invalidateIndexVersionSnapshot();
+
+    const activeTable = (await versionRow((await pointerRow()).active_version_id)).chunk_table;
+
+    // A tenant's delete, under the row policies.
+    assert.ok(await remove(ALICE, "r-del"));
+    assert.equal((await chunkCounts(retained))["r-del"], undefined);
+    assert.equal((await chunkCounts(activeTable))["r-del"], undefined);
+
+    // A replacement keeps the document row, so no foreign key cascades: the
+    // old content leaves the failed table, the new one goes only to the targets.
+    const before = (await q(`SELECT content FROM ${retained} WHERE doc_id = 'r-rep'`)).rows.map((row) => row.content);
+
+    assert.match(before.join(" "), /beta retained clause/);
+    await modules.tenant.runWithDatabaseTenant(ALICE, async () =>
+      modules.rag.replaceDocument({
+        docId: "r-rep",
+        fileName: "r-rep.pdf",
+        filePath: await writePdf("r-rep", ["Epsilon replacement clause for r-rep."]),
+        ownerUserId: ALICE.userId,
+        workspaceId: ALICE.workspaceId,
+      })
+    );
+    assert.equal((await chunkCounts(retained))["r-rep"], undefined, "the old content left the failed table");
+    assert.match(
+      (await q(`SELECT content FROM ${activeTable} WHERE doc_id = 'r-rep'`)).rows.map((row) => row.content).join(" "),
+      /Epsilon replacement clause/
+    );
+    assert.ok((await chunkCounts(retained))["r-keep"] > 0, "other documents keep their rows");
+
+    // Bob's scoped clear reaches his rows there and nobody else's.
+    await modules.tenant.runWithDatabaseTenant(BOB, () => modules.rag.clearDocuments({ accessScope: BOB }));
+    assert.equal((await chunkCounts(retained))["r-bob"], undefined);
+    assert.ok((await chunkCounts(retained))["r-keep"] > 0);
+
+    // A retired version whose drop has not landed yet holds its table too.
+    await q(`UPDATE rag_index_versions SET status = 'retired', retired_at = NOW() WHERE version_id = $1`, [
+      created.versionId,
+    ]);
+    assert.ok(await remove(ALICE, "r-keep"));
+    assert.deepEqual(await chunkCounts(retained), {});
+
+    // Running retire again finishes the drop.
+    const finished = await modules.lifecycle.retireIndexVersion({ versionId: created.versionId });
+
+    assert.equal(finished.droppedTable, true);
+    assert.equal((await q(`SELECT to_regclass($1) AS relation`, [retained])).rows[0].relation, null);
   });
 }

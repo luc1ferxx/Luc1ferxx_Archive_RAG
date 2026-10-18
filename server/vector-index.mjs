@@ -27,6 +27,7 @@ import { readFile } from "fs/promises";
 import { pathToFileURL } from "url";
 
 import { resetPostgresPool } from "./rag/postgres.js";
+import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import {
   activateIndexVersion,
   assertIndexVersionsSupported,
@@ -412,7 +413,10 @@ if (invokedDirectly) {
   // that imports the module never picks one up.
   await import("dotenv/config");
 
-  main()
+  // An operator command acts as the owner, like every index-version lifecycle
+  // step it calls; bound explicitly so POSTGRES_TENANT_CONTEXT=strict accepts
+  // the statements it issues outside those steps too.
+  runAsDatabaseSystem(() => main())
     .catch((error) => {
       const validation = error?.details?.validation;
 

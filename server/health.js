@@ -10,6 +10,7 @@ import {
   getAgentRunsPostgresTable,
   getAgentRunStoreProvider,
   getApiAuthConfigStatus,
+  getApiAuthTokens,
   getAgentExperienceMemoryConfigStatus,
   getChatModel,
   getDocumentChunksPostgresTable,
@@ -19,10 +20,12 @@ import {
   getRagIngestMode,
   getDocumentStoreProvider,
   getEmbeddingModel,
+  getFeedbackPostgresTable,
   getHybridFusionMethod,
   getLongMemoryConfigStatus,
   getLongMemoryPostgresTable,
   getPostgresRowLevelSecurityMode,
+  getPostgresSystemRole,
   getPostgresTenantRole,
   getRetrievalRoute,
   getQdrantCollection,
@@ -32,10 +35,16 @@ import {
   getTaskEventsPostgresTable,
   getTaskStoreProvider,
   getTasksPostgresTable,
+  getTenantUsagePostgresTable,
   getVectorStoreProviderConfigStatus,
   getWorkspaceArtifactStoreConfigStatus,
   getWorkspaceArtifactsPostgresTable,
+  getWorkspaceMembersPostgresTable,
+  getWorkspacesPostgresTable,
+  isApiAuthEnabled,
   isHybridRetrievalEnabled,
+  isPostgresRoleSplitEnabled,
+  isPostgresRowLevelSecurityOffConfirmed,
   isStartupHealthStrict,
 } from "./rag/config.js";
 import { describeVectorStoreRuntime, supportsDenseScoreVector } from "./rag/vector-store.js";
@@ -58,7 +67,7 @@ import {
   isPostgresConfigured,
   queryPostgres,
 } from "./rag/postgres.js";
-import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
+import { runAsDatabaseSystem, runWithDatabaseTenant } from "./rag/postgres-tenant.js";
 import { createPostgresIngestJobStore } from "./rag/ingest-job-store.js";
 import { checkReadReplicaHealth } from "./rag/postgres-replicas.js";
 import { checkSharedStateHealth } from "./rag/shared-state.js";
@@ -386,6 +395,43 @@ const checkPgvectorHealth = async () => {
   });
 };
 
+// The local and Qdrant stores scope a search only by the docIds the caller
+// passes (the registry's documents for the request's access scope): an
+// application filter, with no tenant boundary in the store itself, where
+// pgvector has row-level security under it. With one principal (auth off, or
+// the single shared API_AUTH_TOKEN) that is all a deployment needs. With
+// several (API_AUTH_TOKENS, JWT or OIDC) tenants share one index behind that
+// filter alone, which this store is not supported for: a warning, never an
+// error, because the store itself works. Returns null when nothing to say.
+const SINGLE_TENANT_VECTOR_STORES = new Set(["local", "qdrant"]);
+
+const describeSingleTenantVectorStoreUse = (provider) => {
+  if (!SINGLE_TENANT_VECTOR_STORES.has(provider)) {
+    return null;
+  }
+
+  const auth = getApiAuthConfigStatus();
+
+  if (!auth.enabled) {
+    return null;
+  }
+
+  const principalSources = [
+    ...(getApiAuthTokens().trim() ? ["api_auth_tokens"] : []),
+    ...(auth.jwtEnabled ? ["jwt"] : []),
+    ...(auth.oidcEnabled ? ["oidc"] : []),
+  ];
+
+  if (principalSources.length === 0) {
+    return null;
+  }
+
+  return {
+    message: `VECTOR_STORE_PROVIDER=${provider} relies on application filters only (the caller's document ids) and is supported for single-tenant use; multi-principal API auth is configured (${principalSources.join(", ")}), so use pgvector, the multi-tenant store with row-level security.`,
+    principalSources,
+  };
+};
+
 const checkVectorStoreHealth = async () => {
   const providerStatus = getVectorStoreProviderConfigStatus();
   const retrieval = buildRetrievalSummary();
@@ -423,9 +469,21 @@ const checkVectorStoreHealth = async () => {
             provider: "local",
           })
         : await checkPgvectorHealth();
+  const singleTenantUse = describeSingleTenantVectorStoreUse(providerStatus.provider);
 
   return {
     ...entry,
+    // Only ever ok -> warning: a store that is down stays an error, and the
+    // tenancy note never makes a working store one.
+    ...(singleTenantUse
+      ? {
+          message: `${entry.message} ${singleTenantUse.message}`,
+          multiPrincipalAuth: singleTenantUse.principalSources,
+          status: entry.status === "ok" ? "warning" : entry.status,
+          tenancy: "single_tenant",
+          warnings: ["single_tenant_vector_store"],
+        }
+      : {}),
     provider: providerStatus.provider,
     providerSource: providerStatus.reason,
     providerMatchesConfig: true,
@@ -779,7 +837,10 @@ const checkWorkspaceArtifactStoreHealth = async () => {
   }
 };
 
-// The tables migrations 013, 015, 017, 031 and 032 put under the tenant_isolation policy.
+// The tables migrations 013, 015, 017, 031, 032, 034, 036 and 037 put under the
+// tenant_isolation policy (17; migrations 038-041 add columns, functions and
+// grants, no table). The probe adds every live index version's chunk table and
+// the BM25 statistics tables of each (migration 030).
 const getRowLevelSecurityTables = () => [
   getDocumentsPostgresTable(),
   getDocumentChunksPostgresTable(),
@@ -797,6 +858,14 @@ const getRowLevelSecurityTables = () => [
   getSessionMemoryPostgresTable(),
   // Migration 032: admin audit events, read per workspace, append-only.
   getAdminAuditEventsPostgresTable(),
+  // Migration 034: answer feedback, the exact (user, workspace) pair.
+  getFeedbackPostgresTable(),
+  // Migration 036: the tenant registry, read-only for the tenant role (its
+  // own workspace row and its own membership rows).
+  getWorkspacesPostgresTable(),
+  getWorkspaceMembersPostgresTable(),
+  // Migration 037: the tenant usage ledger, read-only for the exact pair.
+  getTenantUsagePostgresTable(),
 ];
 
 const ROW_LEVEL_SECURITY_PROBE_TENANT = Object.freeze({ userId: "__health_probe__" });
@@ -811,10 +880,170 @@ const getTenantReadableSystemTables = () => {
   return [versionsTable, pointerTable];
 };
 
+// Without the role split (POSTGRES_MIGRATION_DATABASE_URL unset) every
+// statement that is not a tenant's runs as the login itself, the role that
+// runs the migrations and owns every table: a chain that lost its tenant
+// context reads every tenant. Reported as a warning inside the entry only; it
+// never changes the entry's status or the report's.
+const describeOwnerLoginRoleSplit = () => ({
+  enabled: false,
+  status: "warning",
+  message:
+    "POSTGRES_DATABASE_URL logs in as the role that runs the migrations and owns every table, so a statement that loses its tenant context runs as the owner and bypasses row-level security. Set POSTGRES_MIGRATION_DATABASE_URL to that owner login and POSTGRES_DATABASE_URL to a runtime login that owns nothing to split the roles.",
+});
+
+// The relations of the schema that are application tables (not an
+// extension's), as a SQL fragment over `c` (pg_class).
+const APPLICATION_RELATION_FILTER = `
+  c.relnamespace = current_schema()::regnamespace
+  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
+`;
+
+// With the role split on, probes as the system role (system work switches
+// into it) and inspects the runtime login it switched from (session_user):
+// the login must not be able to bypass or own anything, nor use a table or a
+// search function without switching role -- otherwise a statement that lost
+// its context would not fail closed -- and the system role must carry its
+// system_access policy on every covered table. `tables` are the tables the
+// tenant probe covers, `functions` the search functions it checks.
+const probeRoleSplit = async ({ functions, tables }) => {
+  const systemRole = getPostgresSystemRole();
+  let row;
+
+  try {
+    const probe = await runAsDatabaseSystem(() =>
+      queryPostgres(
+        `
+          SELECT
+            current_user AS role,
+            session_user AS login,
+            COALESCE((SELECT r.rolsuper FROM pg_roles r WHERE r.rolname = session_user), false)
+              AS login_superuser,
+            COALESCE((SELECT r.rolbypassrls FROM pg_roles r WHERE r.rolname = session_user), false)
+              AS login_bypass_rls,
+            COALESCE((SELECT r.rolsuper FROM pg_roles r WHERE r.rolname = current_user), false)
+              AS role_superuser,
+            -- A member of a table owner may act as the owner (SET ROLE, or
+            -- its privileges when it inherits them).
+            ARRAY(
+              SELECT c.relname::text FROM pg_class c
+              WHERE ${APPLICATION_RELATION_FILTER}
+                AND pg_has_role(session_user, c.relowner, 'MEMBER')
+              ORDER BY 1
+            ) AS login_owned_tables,
+            -- What the login reaches without switching role: a direct grant,
+            -- a grant to PUBLIC, or one it inherits from the tenant or system
+            -- role (granted WITH INHERIT TRUE, or before PostgreSQL 16 to a
+            -- login without NOINHERIT).
+            ARRAY(
+              SELECT c.relname::text FROM pg_class c
+              WHERE ${APPLICATION_RELATION_FILTER}
+                AND has_table_privilege(session_user, c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE')
+              ORDER BY 1
+            ) AS login_usable_tables,
+            ARRAY(
+              SELECT f.signature FROM unnest($2::text[]) AS f(signature)
+              WHERE to_regprocedure(f.signature) IS NOT NULL
+                AND has_function_privilege(session_user, to_regprocedure(f.signature)::oid, 'EXECUTE')
+              ORDER BY 1
+            ) AS login_executable_functions,
+            ARRAY(
+              SELECT c.relname::text FROM pg_class c
+              WHERE ${APPLICATION_RELATION_FILTER}
+                AND pg_has_role(current_user, c.relowner, 'MEMBER')
+              ORDER BY 1
+            ) AS role_owned_tables,
+            ARRAY(
+              SELECT t.name FROM unnest($1::text[]) AS t(name)
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM pg_class c
+                JOIN pg_policy p ON p.polrelid = c.oid AND p.polname = 'system_access'
+                WHERE c.relnamespace = current_schema()::regnamespace
+                  AND c.relname = t.name
+                  AND c.relrowsecurity
+                  AND (SELECT r.oid FROM pg_roles r WHERE r.rolname = current_user) = ANY (p.polroles)
+              )
+              ORDER BY 1
+            ) AS missing_system_policies
+        `,
+        [tables, functions]
+      )
+    );
+
+    row = probe.rows[0] ?? {};
+  } catch (error) {
+    return {
+      enabled: true,
+      status: "error",
+      systemRole,
+      message: `System work could not switch into the system role "${systemRole}": ${
+        error instanceof Error ? error.message : String(error)
+      }. The migrations grant it to the runtime login; check POSTGRES_SYSTEM_ROLE and that migration 035 ran.`,
+    };
+  }
+
+  const login = String(row.login ?? "");
+  const loginAttributes = {
+    bypassRls: row.login_bypass_rls === true,
+    superuser: row.login_superuser === true,
+  };
+  const loginOwnedTables = row.login_owned_tables ?? [];
+  const loginUsableTables = row.login_usable_tables ?? [];
+  const loginExecutableFunctions = row.login_executable_functions ?? [];
+  const systemRoleOwnedTables = row.role_owned_tables ?? [];
+  const missingSystemPolicies = row.missing_system_policies ?? [];
+  const failure =
+    row.role !== systemRole
+      ? `System statements run as "${row.role}" instead of the system role "${systemRole}".`
+      : loginAttributes.superuser || loginAttributes.bypassRls
+        ? `The runtime login "${login}" (POSTGRES_DATABASE_URL) is ${loginAttributes.superuser ? "a superuser" : "BYPASSRLS"}, so a statement that loses its tenant context still bypasses row-level security. Use a NOSUPERUSER NOBYPASSRLS login that owns nothing.`
+        : loginOwnedTables.length > 0
+          ? `The runtime login "${login}" is a member of the owner of ${loginOwnedTables.join(", ")}, so it can act as the owner and bypass their policies. Use a login that owns nothing and is not a member of the owner role; the owner logs in only through POSTGRES_MIGRATION_DATABASE_URL.`
+          : loginUsableTables.length > 0
+            ? `The runtime login "${login}" can use ${loginUsableTables.join(", ")} without switching into the tenant or system role, so a statement that loses its tenant context does not fail closed. Revoke the direct grants and grant the tenant and system roles WITH INHERIT FALSE (PostgreSQL 16+), or make the login NOINHERIT.`
+            : loginExecutableFunctions.length > 0
+              ? `The runtime login "${login}" can execute ${loginExecutableFunctions.join(", ")} without switching role, and called that way they rank every tenant's chunks. Grant the tenant and system roles WITH INHERIT FALSE (PostgreSQL 16+), or make the login NOINHERIT.`
+              : row.role_superuser === true || systemRoleOwnedTables.length > 0
+                ? `The system role "${systemRole}" ${row.role_superuser === true ? "is a superuser" : `has the privileges of the owner of ${systemRoleOwnedTables.join(", ")}`}; it must own nothing, since DDL belongs to the migration login.`
+                : missingSystemPolicies.length > 0
+                  ? `Tables without the system role's system_access policy: ${missingSystemPolicies.join(", ")}, so system work sees none of their rows. Run the migrations (035).`
+                  : null;
+
+  return {
+    enabled: true,
+    status: failure ? "error" : "ok",
+    login,
+    loginAttributes,
+    systemRole,
+    ...(failure
+      ? {
+          loginExecutableFunctions,
+          loginOwnedTables,
+          loginUsableTables,
+          missingSystemPolicies,
+          systemRoleOwnedTables,
+        }
+      : {}),
+    message:
+      failure ??
+      `The runtime login "${login}" owns and reaches nothing by itself; system work runs as "${systemRole}" and DDL on the migration login.`,
+  };
+};
+
 // Probes as a tenant rather than reading configuration: the check passes only
 // when the login role can really switch into the tenant role and every covered
 // table really carries the policy, which is what a scoped request relies on.
-const checkRowLevelSecurityHealth = async () => {
+// With the role split on it also probes as the system role and checks the
+// runtime login (probeRoleSplit); without it the entry carries a warning that
+// the login is the owner (describeOwnerLoginRoleSplit).
+// Exported for the RLS-off branch's unit tests (test/health-access.test.mjs),
+// which run without a database.
+export const checkRowLevelSecurityHealth = async () => {
   const mode = getPostgresRowLevelSecurityMode();
 
   if (!isPostgresConfigured()) {
@@ -825,10 +1054,32 @@ const checkRowLevelSecurityHealth = async () => {
   }
 
   if (mode === "off") {
+    // Auth off has no tenants to separate (every caller may act as any user),
+    // so RLS off is only an unused safety net there. With API auth on, the
+    // policies are what keeps a query that forgets its tenant filter from
+    // reading another tenant's rows, so turning them off is an error until the
+    // operator says it is deliberate.
+    if (!isApiAuthEnabled()) {
+      return buildEntry("disabled", {
+        mode,
+        message:
+          "POSTGRES_ROW_LEVEL_SECURITY=off: scoped queries run as the owner role and bypass the tenant policies.",
+      });
+    }
+
+    if (!isPostgresRowLevelSecurityOffConfirmed()) {
+      return buildEntry("error", {
+        mode,
+        message:
+          "POSTGRES_ROW_LEVEL_SECURITY=off while API_AUTH_ENABLED=true: scoped queries run as the owner role and bypass the tenant policies, so only the application's own filters keep tenants apart. Set POSTGRES_ROW_LEVEL_SECURITY=enforce, or POSTGRES_ROW_LEVEL_SECURITY_OFF_CONFIRMED=true if running without row-level security is deliberate.",
+      });
+    }
+
     return buildEntry("disabled", {
+      acknowledged: true,
       mode,
       message:
-        "POSTGRES_ROW_LEVEL_SECURITY=off: scoped queries run as the owner role and bypass the tenant policies.",
+        "POSTGRES_ROW_LEVEL_SECURITY=off by operator decision (POSTGRES_ROW_LEVEL_SECURITY_OFF_CONFIRMED=true): scoped queries run as the owner role and bypass the tenant policies; only the application's own filters keep tenants apart.",
     });
   }
 
@@ -960,6 +1211,13 @@ const checkRowLevelSecurityHealth = async () => {
                     ? `The tenant role cannot execute ${sparseSearchFunction} (migration 030), so every BM25 or pruned multi-document sparse search a tenant makes would fail. Run the migrations.`
                     : null;
 
+    const roleSplit = isPostgresRoleSplitEnabled()
+      ? await probeRoleSplit({
+          functions: [`${sparseRankFunction}(tsquery, text[], integer)`, sparseSearchFunction].filter(Boolean),
+          tables,
+        })
+      : describeOwnerLoginRoleSplit();
+
     if (failure) {
       return buildEntry("error", {
         mode,
@@ -970,7 +1228,21 @@ const checkRowLevelSecurityHealth = async () => {
         sparseSearchExecutable,
         ungatedTables,
         unprotectedTables,
+        roleSplit,
         message: failure,
+      });
+    }
+
+    if (roleSplit.status === "error") {
+      return buildEntry("error", {
+        mode,
+        role,
+        roleAttributes,
+        sparseRankExecutable,
+        sparseSearchExecutable,
+        protectedTableCount: tables.length,
+        roleSplit,
+        message: roleSplit.message,
       });
     }
 
@@ -981,6 +1253,7 @@ const checkRowLevelSecurityHealth = async () => {
       sparseRankExecutable,
       sparseSearchExecutable,
       protectedTableCount: tables.length,
+      roleSplit,
       message: "Scoped queries run as the tenant role and every tenant table carries its policy.",
     });
   } catch (error) {

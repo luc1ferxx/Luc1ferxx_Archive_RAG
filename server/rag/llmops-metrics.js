@@ -10,6 +10,7 @@ import {
 import { recordRagTrace } from "./observability.js";
 import { recordModelCallMetric } from "./metrics-model.js";
 import { chargeActiveRunUsage } from "./run-usage.js";
+import { recordTenantModelUsage } from "./tenant-usage.js";
 import { normalizePromptDescriptor } from "./prompt-registry.js";
 import {
   GEN_AI_ATTRIBUTES,
@@ -233,6 +234,9 @@ export const recordLlmOpsMetric = async (
   // write fails.
   chargeActiveRunUsage(event);
   recordModelCallMetric(event);
+  // The tenant usage ledger (migration 037): in memory only, flushed later;
+  // gateway mirror events are skipped there.
+  recordTenantModelUsage(event);
 
   try {
     await recorder(event);

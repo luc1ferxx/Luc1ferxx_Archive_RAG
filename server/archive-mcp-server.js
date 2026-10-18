@@ -30,10 +30,13 @@ import {
 } from "./standalone-profile.js";
 
 import {
+  ARCHIVE_MCP_SCOPE_REQUIRED,
+  assertArchiveMcpScope,
   buildEmptyArchiveResult,
   formatAskResult,
   formatDocumentList,
   formatToolError,
+  resolveArchiveMcpAccessScope,
   resolveDocIds,
   toMcpTextContent,
 } from "./archive-mcp-tools.js";
@@ -51,10 +54,10 @@ const server = new McpServer({
 
 // The registry and vector index are in-process snapshots, so this server sees
 // whatever the archive held when it started. `archive_refresh` reloads both.
-const buildAccessScope = () => ({
-  userId: process.env.ARCHIVE_MCP_USER_ID?.trim() || null,
-  workspaceId: process.env.ARCHIVE_MCP_WORKSPACE_ID?.trim() || null,
-});
+// The scope comes from ARCHIVE_MCP_USER_ID / ARCHIVE_MCP_WORKSPACE_ID only;
+// main() refuses to start without one against a multi-tenant configuration
+// (assertArchiveMcpScope in archive-mcp-tools.js).
+const buildAccessScope = () => resolveArchiveMcpAccessScope();
 
 const loadDocuments = async () => {
   await initializeDocumentRegistry();
@@ -168,6 +171,10 @@ server.registerTool(
 );
 
 async function main() {
+  // Before the transport connects, so a client sees the server fail to start
+  // instead of answering from every tenant's documents.
+  assertArchiveMcpScope(buildAccessScope());
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(
@@ -178,7 +185,11 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Fatal error in archive MCP server:", error);
+  if (error?.code === ARCHIVE_MCP_SCOPE_REQUIRED) {
+    console.error(`Archive MCP server refused to start (${error.code}): ${error.message}`);
+  } else {
+    console.error("Fatal error in archive MCP server:", error);
+  }
   process.exit(1);
 });
 

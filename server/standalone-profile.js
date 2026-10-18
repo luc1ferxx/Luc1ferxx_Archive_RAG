@@ -20,13 +20,20 @@
 import { configureDocumentRegistryStore } from "./rag/doc-registry.js";
 import { createFileDocumentRegistryStore } from "./rag/doc-registry-file.js";
 import { configureSessionMemoryStore } from "./rag/memory.js";
+import { getActiveDatabaseTenant } from "./rag/postgres-tenant.js";
+import { summarizeTenantRecords, tenantSelectorMatches } from "./rag/tenant-records.js";
 
 // Session memory is only reachable when a caller passes a sessionId, and the MCP
 // bridge passes none. This exists so that a caller which *does* pass one gets
 // per-process conversation continuity instead of a PostgreSQL connection error.
 // Long-term memory needs no equivalent: getLongMemoryContext() already
 // short-circuits on the disabled config below (rag/long-memory.js:575).
-const createInMemorySessionMemoryStore = () => {
+//
+// Like the PostgreSQL store's owner columns (migration 031), a session keeps
+// the database tenant that first wrote it, so the tenant erase and export
+// (rag/tenant-records.js) can find it; a session written without a tenant
+// (auth off) belongs to no tenant.
+export const createInMemorySessionMemoryStore = () => {
   const sessionsById = new Map();
 
   const cloneSession = (session) =>
@@ -36,6 +43,10 @@ const createInMemorySessionMemoryStore = () => {
           messages: structuredClone(session.messages ?? []),
         }
       : null;
+  const listTenantSessions = (selector) =>
+    [...sessionsById.entries()].filter(
+      ([, session]) => session.owner && tenantSelectorMatches(selector, session.owner)
+    );
 
   return {
     async initialize() {
@@ -45,12 +56,39 @@ const createInMemorySessionMemoryStore = () => {
       return cloneSession(sessionsById.get(sessionId) ?? null);
     },
     async upsert({ sessionId, messages, updatedAt = Date.now() }) {
+      const tenant = getActiveDatabaseTenant();
+
       sessionsById.set(sessionId, {
         updatedAt,
         messages: structuredClone(messages ?? []),
+        owner: sessionsById.get(sessionId)?.owner ?? (tenant ? { ...tenant } : null),
       });
 
       return cloneSession(sessionsById.get(sessionId));
+    },
+    async countTenantRecords(selector) {
+      return summarizeTenantRecords(await this.listTenantRecords(selector), ["session_memory"]);
+    },
+    async listTenantRecords(selector) {
+      return listTenantSessions(selector).map(([sessionId, session]) => ({
+        record: {
+          messages: structuredClone(session.messages ?? []),
+          ownerUserId: session.owner.userId,
+          sessionId,
+          updatedAt: Number(session.updatedAt ?? 0),
+          workspaceId: session.owner.workspaceId,
+        },
+        table: "session_memory",
+      }));
+    },
+    async deleteTenantRecords(selector) {
+      const matched = listTenantSessions(selector);
+
+      for (const [sessionId] of matched) {
+        sessionsById.delete(sessionId);
+      }
+
+      return { session_memory: { deleted: matched.length } };
     },
     async delete(sessionId) {
       return sessionsById.delete(sessionId);

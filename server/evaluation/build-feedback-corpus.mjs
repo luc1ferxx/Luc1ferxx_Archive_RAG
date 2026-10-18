@@ -1,13 +1,21 @@
 import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildFeedbackCorpusFromJsonlFiles } from "./feedback-corpus.js";
+import { buildFeedbackCorpusFromSources } from "./feedback-corpus.js";
 import { getArgValue } from "./eval-cli.js";
+import { getDefaultFeedbackStore, listAllFeedbackAcrossTenants } from "../feedback.js";
+import { resetPostgresPool } from "../rag/postgres.js";
+
+// Builds the feedback regression corpus from the seed file plus the runtime
+// feedback. Runtime records come from the store the server writes: the
+// PostgreSQL feedback table when a database is configured, read on the owner
+// path across every tenant (an operator tool writing a local, ignored
+// evaluation file, as reading the shared JSONL file always was), otherwise the
+// JSONL file under FEEDBACK_DIRECTORY. --input <file> reads that JSONL file
+// instead of the store.
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const serverDirectory = path.join(__dirname, "..");
-const defaultInputPath = path.join(serverDirectory, "data", "feedback", "feedback.jsonl");
 const defaultSeedInputPath = path.join(__dirname, "feedback-seed.jsonl");
 const defaultOutputPath = path.join(__dirname, "generated", "feedback-corpus.json");
 
@@ -16,36 +24,34 @@ const resolvePathArg = (name, fallbackPath) =>
 
 const hasFlag = (name) => process.argv.includes(name);
 
-const resolveInputPaths = () => {
+const main = async () => {
   const inputPath = getArgValue("--input");
   const seedInputPath = getArgValue("--seed-input");
-  const includeSeed = !hasFlag("--no-seed");
-  const runtimeInputPath = path.resolve(process.cwd(), inputPath ?? defaultInputPath);
-  const resolvedInputPaths = [];
+  const filePaths = hasFlag("--no-seed")
+    ? []
+    : [path.resolve(process.cwd(), seedInputPath ?? defaultSeedInputPath)];
+  const store = inputPath ? null : getDefaultFeedbackStore();
 
-  if (includeSeed) {
-    resolvedInputPaths.push(
-      path.resolve(process.cwd(), seedInputPath ?? defaultSeedInputPath)
-    );
+  if (inputPath) {
+    filePaths.push(path.resolve(process.cwd(), inputPath));
   }
 
-  resolvedInputPaths.push(runtimeInputPath);
-
-  return resolvedInputPaths;
-};
-
-const main = async () => {
-  const inputPaths = resolveInputPaths();
+  const runtimeSource = store ? store.describe() : { backend: "jsonl", path: filePaths.at(-1) };
+  const records = store ? await listAllFeedbackAcrossTenants({ store }) : [];
   const outputPath = resolvePathArg("--output", defaultOutputPath);
-  const corpus = await buildFeedbackCorpusFromJsonlFiles({
-    inputPaths,
+  const corpus = await buildFeedbackCorpusFromSources({
+    inputPaths: filePaths,
     outputPath,
+    records,
   });
 
   console.log(
     JSON.stringify(
       {
-        inputPaths,
+        // The seed, then the runtime file when the records came from one.
+        inputPaths: runtimeSource.path && store ? [...filePaths, runtimeSource.path] : filePaths,
+        runtimeSource,
+        ...(store ? { runtimeRecords: records.length } : {}),
         outputPath,
         documents: corpus.documents.length,
         cases: corpus.cases.length,
@@ -61,4 +67,6 @@ try {
 } catch (error) {
   console.error(error);
   process.exitCode = 1;
+} finally {
+  await resetPostgresPool();
 }
