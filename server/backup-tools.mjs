@@ -37,7 +37,8 @@
 //   manifest says it ended. Exit 0 when all hold, 1 when one does not.
 //
 // Not in a backup, deliberately: the tenant keystore of envelope encryption
-// (TENANT_KEYSTORE_DIR, kept outside PostgreSQL and outside this tar so that
+// (TENANT_KEYSTORE_DIR) and the local KMS master key that wraps it
+// (TENANT_KMS_MASTER_KEY_FILE), kept outside PostgreSQL and outside this tar so that
 // erasing a tenant's key also makes that tenant's bytes in every backup copy
 // unreadable; back it up separately, on its own schedule and retention, or
 // not at all), server/.env and every other secret, role passwords and role
@@ -53,13 +54,16 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
 
+import { resolveLocalKmsPaths } from "./rag/kms/local-provider.js";
+
 const __filename = fileURLToPath(import.meta.url);
 const SERVER_DIRECTORY = path.dirname(__filename);
 const MIGRATIONS_DIRECTORY = path.join(SERVER_DIRECTORY, "db", "migrations");
 
 export const BACKUP_MANIFEST_FORMAT = "archive-rag-backup/1";
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
-const KEYSTORE_EXCLUDE_PATTERN = "*keystore*";
+// By name too, for a keystore or master key copied under another path.
+const KEY_MATERIAL_EXCLUDE_PATTERNS = ["*keystore*", "*kms-master*"];
 // An extension's own entry, or its comment, in pg_restore --list output.
 const EXTENSION_TOC_ENTRY = /^\d+;\s+\d+\s+\d+\s+(COMMENT\s+-\s+)?EXTENSION\s/;
 
@@ -417,18 +421,22 @@ const resolveFileSources = (options) => ({
 const writeFilesArchive = async ({ archivePath, options, tar }) => {
   const sources = Object.values(resolveFileSources(options));
   const present = sources.filter((source) => existsSync(source));
-  const keystore = String(process.env.TENANT_KEYSTORE_DIR ?? "").trim();
-  // The tenant keystore stays out (see the header): by its configured path
-  // when it lies inside one of the directories, and by name everywhere.
+  // The tenant keystore and the local KMS master key stay out (see the
+  // header): by the paths the local provider resolves (the settings, else
+  // their defaults under the data root, which is one of the directories
+  // here) when they lie inside one of the directories, and by name everywhere.
+  const { keystoreDirectory, masterKeyFile } = resolveLocalKmsPaths();
   const excluded = [
-    ...present.flatMap((source) => {
-      const relative = keystore ? path.relative(source, path.resolve(keystore)) : "";
+    ...present.flatMap((source) =>
+      [keystoreDirectory, masterKeyFile].flatMap((keyPath) => {
+        const relative = path.relative(source, keyPath);
 
-      return relative && !relative.startsWith("..") && !path.isAbsolute(relative)
-        ? [path.join(path.basename(source), relative)]
-        : [];
-    }),
-    KEYSTORE_EXCLUDE_PATTERN,
+        return relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+          ? [path.join(path.basename(source), relative)]
+          : [];
+      })
+    ),
+    ...KEY_MATERIAL_EXCLUDE_PATTERNS,
   ];
 
   if (present.length === 0) {
@@ -522,7 +530,7 @@ export const runBackup = async (options, { log = (line) => process.stderr.write(
     files,
     format: BACKUP_MANIFEST_FORMAT,
     notIncluded: [
-      "the tenant keystore (TENANT_KEYSTORE_DIR): kept out of every backup on purpose, so erasing a tenant's key makes its bytes in old backups unreadable; back it up separately or not at all",
+      "the tenant keystore (TENANT_KEYSTORE_DIR) and the local KMS master key (TENANT_KMS_MASTER_KEY_FILE): kept out of every backup on purpose, so erasing a tenant's key makes its bytes in old backups unreadable; back it up separately or not at all",
       "server/.env and every other secret",
       "role passwords and role memberships (cluster-wide; the restore recreates the NOLOGIN roles the policies name)",
       "Redis shared state and in-process caches (rebuilt at run time)",

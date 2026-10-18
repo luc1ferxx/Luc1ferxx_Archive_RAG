@@ -172,6 +172,9 @@ if (!adminDatabaseUrl) {
       // Every new PostgreSQL path must bind a tenant or the system.
       POSTGRES_TENANT_CONTEXT: "strict",
       POSTGRES_TENANT_ROLE: tenantRole,
+      // The trash keeps a deleted document's envelope until the purge, and a
+      // restore parses its decrypted bytes again.
+      DOCUMENT_TRASH_RETENTION_HOURS: "24",
       RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
       RAG_CLAIM_JUDGE: "off",
       RAG_DATA_DIRECTORY: path.join(tempRoot, "rag-data"),
@@ -341,6 +344,49 @@ if (!adminDatabaseUrl) {
         question: `What does the ${ALICE_MARKER} policy need?`,
         sessionId: `enc-it-${suffix}`,
       },
+      method: "POST",
+      token: TOKENS.alice,
+    });
+
+    assert.equal(chat.status, 200, chat.bytes.toString("utf8").slice(0, 2000));
+    assert.match(JSON.stringify(chat.json), /manager approval/);
+  });
+
+  test("a trashed document keeps its envelope and a restore parses the decrypted bytes", async () => {
+    const marker = "gamma-ibis";
+    const bytes = pdfFor(marker);
+    const docId = await upload(TOKENS.alice, "alice-annex", bytes);
+
+    assert.equal((await request(`/documents/${docId}`, { method: "DELETE", token: TOKENS.alice })).status, 200);
+
+    const trashedRow = await storedRow(docId);
+    const deletedAt = async () =>
+      (await raw(`SELECT deleted_at FROM rag_documents WHERE doc_id = $1`, [docId])).rows[0]?.deleted_at ?? null;
+
+    assert.ok(await deletedAt(), "the row stays, in the trash");
+    assert.ok(modules.encryption.isTenantEnvelope(trashedRow.file_bytes), "still an envelope in the trash");
+    assert.equal((await raw(`SELECT count(*)::int AS n FROM rag_document_chunks WHERE doc_id = $1`, [docId])).rows[0].n, 0);
+
+    const trash = await request("/documents/trash", { token: TOKENS.alice });
+
+    assert.equal(trash.status, 200);
+    assert.ok(JSON.stringify(trash.json).includes(docId));
+    assert.equal(JSON.stringify((await request("/documents/trash", { token: TOKENS.bob })).json).includes(docId), false);
+    assert.equal((await request(`/documents/${docId}/restore`, { method: "POST", token: TOKENS.bob })).status, 404);
+
+    const restored = await request(`/documents/${docId}/restore`, { method: "POST", token: TOKENS.alice });
+
+    assert.equal(restored.status, 200, restored.bytes.toString("utf8").slice(0, 2000));
+
+    const restoredRow = await storedRow(docId);
+
+    assert.equal(await deletedAt(), null);
+    assert.ok(modules.encryption.isTenantEnvelope(restoredRow.file_bytes));
+    assert.ok((await raw(`SELECT count(*)::int AS n FROM rag_document_chunks WHERE doc_id = $1`, [docId])).rows[0].n > 0);
+    assert.deepEqual((await request(`/documents/${docId}/file`, { token: TOKENS.alice })).bytes, bytes);
+
+    const chat = await request("/chat", {
+      body: { docIds: [docId], question: `What does the ${marker} policy need?`, sessionId: `enc-trash-${suffix}` },
       method: "POST",
       token: TOKENS.alice,
     });

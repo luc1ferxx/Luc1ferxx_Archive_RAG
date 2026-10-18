@@ -350,7 +350,7 @@ if (!adminDatabaseUrl || clientTools.skip) {
     assert.equal(manifestText.includes(ownerRole), false, "not even the login's name");
   });
 
-  test("--with-files archives the state outside PostgreSQL and leaves the tenant keystore out", async () => {
+  test("--with-files archives the state outside PostgreSQL and leaves the tenant keystore and master key out", async () => {
     const root = path.join(tempRoot, "server-state");
     const keystore = path.join(root, "data", "tenant-keystore");
 
@@ -361,6 +361,10 @@ if (!adminDatabaseUrl || clientTools.skip) {
     await writeFile(path.join(root, "upload-sessions", "session-1", "manifest.json"), "{}");
     await writeFile(path.join(root, "data", "documents.json"), "[]");
     await writeFile(path.join(keystore, "ws-a.key"), "not a real key");
+    // The master key under a configured name (left out by path) and a copy
+    // under the default name (left out by name).
+    await writeFile(path.join(root, "data", "wrapping.key"), "not a real master key");
+    await writeFile(path.join(root, "data", "tenant-kms-master.key"), "not a real master key");
 
     const result = await runScript(
       "bash",
@@ -380,7 +384,7 @@ if (!adminDatabaseUrl || clientTools.skip) {
         "--data-dir",
         path.join(root, "data"),
       ],
-      { env: { TENANT_KEYSTORE_DIR: keystore } }
+      { env: { TENANT_KEYSTORE_DIR: keystore, TENANT_KMS_MASTER_KEY_FILE: path.join(root, "data", "wrapping.key") } }
     );
 
     assert.equal(result.code, 0, result.stderr);
@@ -396,6 +400,8 @@ if (!adminDatabaseUrl || clientTools.skip) {
     assert.ok(members.some((member) => member.endsWith("data/documents.json")));
     assert.equal(members.some((member) => member.includes("keystore")), false, members.join(", "));
     assert.ok(manifest.files.excluded.includes("data/tenant-keystore"));
+    assert.equal(members.some((member) => member.endsWith(".key")), false, members.join(", "));
+    assert.ok(manifest.files.excluded.includes("data/wrapping.key"));
     assert.equal(manifest.files.sha256.length, 64);
   });
 
