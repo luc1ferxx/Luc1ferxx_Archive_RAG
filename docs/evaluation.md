@@ -1007,6 +1007,51 @@ train 上（400 题）的损失拆解：
 - **代价很大**：30 篇论文，Docling 在 CPU 上解析共 350 秒（一篇 10 页的论文约 12 秒），pdf.js 共 1.4 秒；镜像压缩后约 2 GB。
 - **结论**：默认仍用 pdf.js。`PDF_PARSER=docling` 作为可选项，适合扫描件（`DOCLING_OCR=true`）或表格很多、需要列名的文档。要在这类数据上证明 Docling 更好，需要更多带标注原文的表格题，或者用能读表格结构的更强模型。
 
+### 按页分流和并行解析（`PDF_PARSER=auto`、`PDF_PARSE_WORKERS`，2026-10-18）
+
+**改了什么**：
+- `PDF_PARSER=auto`：每页先用 pdf.js 解析并采集信号（字符数、表格行、表格标题、图片数和覆盖率、乱码比例），按规则分成 `text`（保留 pdf.js 文本）、`layout`（docling-serve，不做 OCR）、`ocr`（docling-serve，强制 OCR）。只有后两类的页以 `page_range` 请求送 docling-serve，Docling 的文本替换这些页。规则和阈值见 docs/configuration.md 的 `PDF_PARSER` 和 `PDF_AUTO_*`。
+- `PDF_PARSE_WORKERS`：pdf.js 放到 worker_threads 里，文档按 `PDF_PARSE_PAGES_PER_TASK` 切成页段并行解析。
+- 默认（`PDF_PARSER=pdfjs`、`PDF_PARSE_WORKERS=0`）和改动前一样。
+
+**环境和数据**：Node 24.21，本机 macOS，15 个 CPU。只测 pdf.js 这一侧，没有 docling-serve，也没有模型参与。38 个本地 PDF，共 290 页：上一节按表格题挑出的 30 篇 QASPER 论文，加 8 个合成评测文档（24 页）。一致性和耗时是直接对 `parsePdfBytesWithPdfjs` 比较和计时得到的，测量脚本没有进仓库；分流数字可以用 `npm run pdf:route -- <目录> --json` 复现。
+
+**worker 池和进程内逐字节相同**：段落识别开、关两种，配置分别是 1 个 worker（每任务 32 页）、2 个（3 页）、4 个（2 页）、4 个（32 页），页面文本和信号都与进程内解析 `deepStrictEqual`，8 × 38 次对照 0 差异。
+
+**耗时**（38 个文档的总耗时，多次运行的范围）：
+
+| 场景 | 进程内 | 2 个 worker | 4 个 worker | 8 个 worker |
+| --- | --- | --- | --- | --- |
+| 一个接一个解析，只取文本 | 约 0.81 s | 约 0.84–0.85 s | 约 0.84–0.85 s | 没测 |
+| 38 个同时解析，只取文本 | 0.80–0.96 s | 0.45–0.67 s | 0.30–0.48 s | 0.22–0.43 s |
+| 38 个同时解析，带信号（`auto` 的 pdf.js 那一遍） | 2.25–2.48 s | 没测 | 1.0–1.18 s | 没测 |
+
+- **逐个解析没有收益**：一次只有一个文档时，worker 只是把同样的工作换个线程做；第一遍还要多付约 250 ms 的 worker 启动。
+- **同时解析才有收益**：总耗时随 worker 数下降。更重要的是主线程不再被卡住：只取文本时，主线程最长的一次事件循环停顿在进程内是 21–33 ms，用 worker 时是 7–9 ms；带信号时是 66–74 ms 对 7 ms。
+- **信号的代价**：带信号的那一遍约是只取文本的 2.8 倍，主要花在 `getOperatorList` 解码图片上。所以 `auto` 下的 pdf.js 那一遍更值得放到 worker 里。
+- **短文档切页段收益很小**：一篇 25 页的论文带信号解析，进程内约 120 ms，4 个 worker、每任务 4 页，预热后约 100–115 ms。只有长文档切页段才有明显收益。
+
+**分流**（默认阈值）：
+
+| | 页数 |
+| --- | --- |
+| `layout` | 105（103 页因为 `table_rows`，2 页因为 `table_caption`） |
+| `text` | 185 |
+| `ocr` | 0 |
+| 合计 | 290 |
+
+- 30 篇 QASPER 论文每篇至少有一页走 `layout`；8 个合成文档（24 页）一页都没有送出去。
+- **这不是对路由器的独立检验**：阈值就是看这 30 篇论文定的。表格行误判的主要来源是行间公式的编号（例如 `(3)`），所以把"恰好两段墨迹、后一段只是编号"的行排除在外，并把表格行下限定为 4。
+- 没有扫描件，`ocr` 路由在真实文档上一次都没出现过。
+
+**没有测的**：
+- 没有跑真实的 docling-serve：请求、`page_range` 的页码、OCR 和合并只由测试覆盖（`test/pdf-auto-parser.test.mjs`、`test/pdf-auto-end-to-end.test.mjs`，docling-serve 是 fetch 替身）；
+- 没有比较 `auto`、`pdfjs`、`docling` 的答案质量；
+- 没有扫描版 PDF；
+- Docling 一侧的耗时也没有测（这 290 页里有 105 页会送过去）。
+
+**结论**：默认不变。worker 池在多个 PDF 同时解析时有用，主要收益是事件循环不再被大 PDF 卡住，文本不变。**`auto` 的质量现在没有任何证据**，不能说它比 `pdfjs` 或 `docling` 好。要测，等 docling-serve 起来后跑 `npm run eval:layout-parsing -- --parsers pdfjs,auto`：报告会多出 `routing.auto`（每条路由的页数、实际用了 Docling 文本的页、退回 pdf.js 的页、失败的请求，总数和逐篇）。注意 `pdfjs` 这一臂是关掉段落识别的旧文本，而 `auto` 的 pdf.js 部分跟随 `PDF_PARAGRAPH_DETECTION`（默认开），所以这样得到的差里混着段落识别的影响；只看分流本身用 `--parsers pdfjs-paragraphs,auto`，或者在 `PDF_PARAGRAPH_DETECTION=false` 下跑 `pdfjs,auto`。`ocr` 路由还需要另找扫描件来测。
+
 ### 按句子装块（`RAG_CHUNK_STRATEGY=sentence`，2026-10-05）
 
 段落识别开启后，`structured` 的重叠会把整段带进下一块，块会超出 `RAG_CHUNK_SIZE`。为此新增 `sentence` 策略：沿用 `structured` 的标题规则，章节内按整句装块，不超过块大小（只有单句本身超长才在子句或词边界切），重叠只带能放进 `RAG_CHUNK_OVERLAP` 的末尾整句，块不跨页。`structured` 和 `simple` 的输出与之前逐字节相同（55 份 PDF × 两种抽取 × 两组参数，440 次对照 0 差异）。

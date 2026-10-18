@@ -66,6 +66,28 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 - 镜像标签是 `latest`，没有固定版本：仓库里没有记录评测时用的 docling-serve 版本。要可复现的部署，自己把 `docker-compose.yml` 里的标签换成确定的版本；
 - 效果和代价见 [evaluation.md](evaluation.md) 的"版面解析"。
 
+**只把需要的页交给 Docling（`PDF_PARSER=auto`）**：
+
+```bash
+PDF_PARSER=auto docker compose --profile app --profile layout up -d
+```
+
+- 每页先用 pdf.js 解析，同时采集页面信号。只有表格页（`layout` 路由，不做 OCR）和扫描页、纯图片页、乱码页（`ocr` 路由，强制 OCR）送 docling-serve，其余页保留 pdf.js 文本。规则和阈值见 [configuration.md](configuration.md) 的 `PDF_PARSER` 和 `PDF_AUTO_*`；
+- `PDF_PARSER` 要像上面那样写在命令前：compose 给 `app` 的 `environment` 里有 `PDF_PARSER: ${PDF_PARSER:-pdfjs}`，会盖过 `server/.env` 里的同名项。`PDF_AUTO_*`、`DOCLING_*`（`DOCLING_SERVE_URL` 除外）和 `PDF_PARSE_*` 不在 `environment` 里，写在 `server/.env` 就行；
+- 上线前可以先看自己的 PDF 会怎么分，不需要 docling-serve：`cd server && npm run pdf:route -- <file.pdf|目录>`（`--json` 输出 JSON，`--thresholds-from-env` 改用 `server/.env` 里的 `PDF_AUTO_*`，否则用默认阈值）。它只打印页码、路由、原因和信号，不打印页面文本；
+- docling-serve 不可用时，送过去的页保留 pdf.js 文本（`DOCLING_FALLBACK=pdfjs`，默认）或让上传失败（`none`）；超时或连不上时，同一文档还在排队的请求直接放弃，不再一个个等超时。`/health` 的 `checks.pdfParser` 会报错，并给出 `routes`、`doclingMaxConcurrency`、`doclingPageBatchSize`；`PDF_AUTO_ROUTES=none` 时不探测 docling-serve；
+- **并发要和 docling-serve 对齐**：`DOCLING_MAX_CONCURRENCY`（默认 2）是每个应用进程同时发往 docling-serve 的请求数，`docling` 和 `auto` 共用；docling-serve 自己默认 2 个本地 worker（`DOCLING_SERVE_ENG_LOC_NUM_WORKERS`，`docker-compose.yml` 没有设置）。多出来的请求只会在 docling-serve 内部排队，并在那里耗掉 `DOCLING_TIMEOUT_MS`。给 `docling` 服务加 worker 时把 `DOCLING_MAX_CONCURRENCY` 一起调大；多个应用实例或 ingest worker 共用一个 docling-serve 时，上限按进程算，各进程的值加起来不要超过它的 worker 数。`DOCLING_TIMEOUT_MS` 从请求拿到名额时开始算，排队时间不算；
+- **每个分页请求都上传整个文件**：auto 下每段连续的路由页是一个 `page_range` 请求（`DOCLING_PAGE_BATCH_SIZE` 大于 0 时再按页数拆），docling-serve 只转换这一段，但请求里带的是整份 PDF。表格页分散的长文档会把同一个文件上传很多次；应用和 docling-serve 不在同一台机器上时要考虑这部分流量。应用这边同一文档的请求共用一份文件副本，排队中的请求不持有副本；
+- 还没有在真实的 docling-serve 上跑过：分页请求、`page_range` 的页码、OCR 和合并只由测试里的替身覆盖，答案质量也没有测（[evaluation.md](evaluation.md) 的"按页分流和并行解析"）。
+
+**pdf.js 放到 worker 线程（`PDF_PARSE_WORKERS`）**：
+
+- 默认 0：pdf.js 在处理请求的线程里解析，一个大 PDF 会卡住同进程的其他请求。设成 2–4 后，文档按 `PDF_PARSE_PAGES_PER_TASK`（默认 32 页）切成页段，由 worker_threads 并行解析，文本和页面信号与进程内逐字节相同；`pdfjs`、`docling` 失败退回 pdf.js 时和 `auto` 都走这里；
+- 收益只在多个 PDF 同时解析时出现：逐个解析没有变快，同时解析时总耗时下降，主线程的最长停顿从几十毫秒降到个位数。`auto` 的 pdf.js 那一遍要读图片，比只取文本慢约 2.8 倍，更值得开。数字见 [evaluation.md](evaluation.md) 的"按页分流和并行解析"；
+- 每个 worker 有一份自己的 pdf.js，内存按 worker 数增长。`PDF_PARSE_WORKER_MAX_OLD_GENERATION_MB` 给每个 worker 设 V8 老生代上限，超出时那个任务失败（`PDF_PARSE_WORKER_FAILED`，500），worker 被替换；`PDF_PARSE_TIMEOUT_MS` 限制一个页段的解析时间（`PDF_PARSE_TIMEOUT`，504）。异步入库（`RAG_INGEST_MODE=async`）按解析阶段的重试次数重试这两类 5xx，用完后进 `dead_letter`；
+- 关停时应用终止 worker，还在解析的任务以 `PDF_PARSE_POOL_STOPPED`（503）失败，异步入库队列会重试；空闲的 worker 不会拖住进程退出；
+- Docker 镜像是普通的 Node 目录，可以用。**单文件可执行文件打包的构建没有 worker 文件（`rag/pdf-parse-worker.js`），必须保持 0。**
+
 ### 交叉编码器重排（可选，推荐）
 
 ```bash
