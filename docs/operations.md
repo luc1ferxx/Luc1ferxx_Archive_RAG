@@ -247,6 +247,32 @@ npm run backup:restore -- --database-url <目标库> --dump <file>
 
 完整的按租户恢复需要一个与 `tenant:export` 对称的导入工具，这里没有做。
 
+## 升级到租户隔离版本
+
+从迁移 032 之前的版本（例如 main 上的 fe833c50）升级时，按这个顺序做。整个过程由 `test/postgres-upgrade.integration.test.mjs` 演练过：旧版本自己的 `node server.js` 写入文档、run、记忆、审计事件和反馈文件，新版本在最小权限的库上升级并保持隔离。
+
+1. **备份**：`npm run backup:postgres -- --database-url <owner URL>`，再用 `npm run backup:verify` 确认备份能恢复。
+2. **系统角色**：迁移登录没有 `CREATEROLE` 时，先由 DBA 执行 `CREATE ROLE archive_rag_system NOLOGIN`（名字跟 `POSTGRES_SYSTEM_ROLE` 一致）。不建的话，迁移 035 会带着这条提示失败，服务不启动，已有数据不受影响。
+3. **启动新版本**：032 起的新迁移在启动时执行（043、044 这两个编号没有使用）。确认 `/ready` 为 200，并用管理员凭据看 `checks.rowLevelSecurity.status` 为 `ok`。
+4. **反馈文件**：迁移 034 之前的反馈在 JSONL 文件里，执行 `npm run feedback:import`（默认 dry run），确认后加 `--apply`。重复执行不会重复导入。
+5. **审计链**：`npm run audit:verify`。041 之前的记录算作 legacy，不算断裂。
+6. **角色拆分（可选）**：DBA 建一个什么都不拥有的运行时登录，并把租户角色和系统角色授予它（`WITH INHERIT FALSE, SET TRUE`）。然后所有进程把 `POSTGRES_MIGRATION_DATABASE_URL` 设为原来的 owner URL，把 `POSTGRES_DATABASE_URL` 换成运行时登录，再打开 `POSTGRES_TENANT_CONTEXT=strict`。最后确认 `roleSplit.status` 为 `ok`。具体步骤见 `docs/configuration.md` 的"切换到角色拆分"。
+7. **其他加固开关**：按 `docs/tenant-isolation.md` 逐个打开，`deploy/demo/hardened.env` 是全部打开时的参考。
+
+升级演练的运行方式（需要一份旧版本的检出）：
+
+```bash
+git worktree add --detach /tmp/archive-rag-main main
+```
+
+```bash
+ln -s "$PWD/server/node_modules" /tmp/archive-rag-main/server/node_modules
+```
+
+```bash
+cd server && ARCHIVE_RAG_UPGRADE_FROM=/tmp/archive-rag-main TEST_FILES=test/postgres-upgrade.integration.test.mjs bash scripts/run-pgvector-integration.sh
+```
+
 ## 已知限制
 
 - 规则和告警没有在真实的 Prometheus 里跑过（见开头）。
