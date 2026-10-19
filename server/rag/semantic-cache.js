@@ -13,7 +13,7 @@ import {
 import { onDocumentStoreChange } from "./doc-registry.js";
 import { getQueryVectorEmbeddingSpace } from "./embedding-cache.js";
 import { hashPromptSet } from "./prompt-registry.js";
-import { getQueryVectorAdapterFingerprint } from "./query-adapter.js";
+import { getQueryAdapterReportFingerprint } from "./query-adapter.js";
 import { analyzeCacheQuestion, compareCacheQuestions } from "./semantic-cache-guard.js";
 import { addActiveSpanEvent } from "./tracing.js";
 import { readIndexVersionSnapshot } from "./vector-store-pgvector-versions.js";
@@ -33,8 +33,11 @@ import { getPgvectorRuntime } from "./vector-store-pgvector-runtime.js";
 // set with each document's content version (version, content hash, update
 // and upload time, chunk count), the active index version (pgvector version
 // id and pointer generation, or the provider), the query embedding space, the
-// query adapter that shaped the vector (its fingerprint: an adapter retrained
-// in place moves every lookup to a new key), the active answer prompt
+// configured query adapter (the fingerprint of the file as this process
+// currently loads it, so an adapter retrained in place at the same path moves
+// every lookup to a new key and drops the entries built on the old one; the
+// lookup vector is the model's own, never the adapted copy, so the vector
+// cannot say which adapter would shape the search), the active answer prompt
 // fingerprints, the chat and fallback models, the answer mode (route mode and requirement count), the shape of an agent
 // retrieval plan with the question taken out, the long-term memory
 // preference block, and the retrieval/answer configuration (RAG_*, OPENAI_*
@@ -47,11 +50,13 @@ import { getPgvectorRuntime } from "./vector-store-pgvector-runtime.js";
 // answers the raw question ("Answer in Chinese: and for contractors?").
 //
 // Invalidation. A replaced or re-ingested document has another content
-// version, and an index version switch another index key, so older entries
-// can no longer be reached; they are also purged eagerly: ingest, replace,
-// delete and clear call invalidateSemanticCacheDocuments, and a lookup that
-// sees a document version or an index version this process has not seen
-// before drops every entry built on the old one; a registry read that finds a
+// version, and an index version switch or a retrained query adapter another
+// index key (index version, query embedding space and query adapter
+// fingerprint), so older entries can no longer be reached; they are also
+// purged eagerly: ingest, replace, delete and clear call
+// invalidateSemanticCacheDocuments, and a lookup that sees a document version
+// or an index key this process has not seen before drops every entry built on
+// the old one; a registry read that finds a
 // document gone or replaced by another instance (doc-registry.js
 // onDocumentStoreChange) drops its entries at once. Expired entries are swept
 // on every lookup and store.
@@ -192,9 +197,17 @@ export const describeRetrievalPlanShape = (plan, query) => {
   });
 };
 
-const resolveIndexVersionKey = async (queryVector) => {
+// The configured adapter, not the vector's: the lookup sees the model's own
+// vector (rag/query-adapter.js adapts a copy at the retrieval seam).
+// `unavailable:<code>` when the file cannot be used, which the search then
+// runs without. It is what this process loads: where retrieval runs in another
+// process (RETRIEVAL_SERVICE_URL), storeSemanticCacheAnswer also checks the
+// fingerprint the retrieval reports, so an answer the retrieval tier shaped
+// with another adapter is not stored under this one.
+const resolveConfiguredAdapterKey = () => getQueryAdapterReportFingerprint() ?? "no-adapter";
+
+const resolveIndexVersionKey = async (queryVector, adapter) => {
   const space = getQueryVectorEmbeddingSpace(queryVector);
-  const adapter = getQueryVectorAdapterFingerprint(queryVector) ?? "no-adapter";
   const spaceKey = `${space ? `${space.key}|${space.queryPrefix ?? ""}` : "untagged-space"}|${adapter}`;
   const provider = getVectorStoreProviderConfigStatus();
 
@@ -354,8 +367,8 @@ export const getSemanticCacheStats = () => ({
   ttlMs: getSemanticCacheTtlMs(),
 });
 
-// A process that sees a new document version or index version drops what was
-// built on the old one.
+// A process that sees a new document version or index key (index version,
+// query embedding space, query adapter) drops what was built on the old one.
 const reconcileVersions = ({ documentVersions, indexVersionKey }) => {
   if (state.indexVersionKey !== null && state.indexVersionKey !== indexVersionKey) {
     for (const [entryId, entry] of [...state.entries]) {
@@ -477,9 +490,11 @@ export const lookupSemanticCache = async ({
   }
 
   let indexVersionKey;
+  let adapterKey;
 
   try {
-    indexVersionKey = await resolveIndexVersionKey(queryVector);
+    adapterKey = resolveConfiguredAdapterKey();
+    indexVersionKey = await resolveIndexVersionKey(queryVector, adapterKey);
   } catch {
     indexVersionKey = null;
   }
@@ -596,6 +611,7 @@ export const lookupSemanticCache = async ({
   return {
     hit: false,
     pending: {
+      adapterKey,
       analysis,
       docIds: sortedDocIds,
       documentVersions,
@@ -647,6 +663,7 @@ export const storeSemanticCacheAnswer = (lookup, response) => {
   }
 
   const {
+    adapterKey,
     analysis,
     docIds,
     documentVersions,
@@ -684,11 +701,23 @@ export const storeSemanticCacheAnswer = (lookup, response) => {
 
   sweepExpired(now);
 
-  // An answer that was being written while its index version switched, or
-  // while one of its documents was replaced or deleted, is not stored: its key
-  // names what it was built on, which is no longer current.
+  // An answer that was being written while its index key changed (an index
+  // version switch, a retrained query adapter), or while one of its documents
+  // was replaced or deleted, is not stored: its key names what it was built
+  // on, which is no longer current.
   if (state.indexVersionKey !== null && state.indexVersionKey !== indexVersionKey) {
     return { stored: false, storeSkipReason: "index_version_changed" };
+  }
+
+  // The adapter the retrieval says it ranked with (routes.dense.queryAdapter,
+  // set only on an adapted search) must be the one the key names. It differs
+  // when the file changed between this lookup and the search, or when another
+  // process ran the retrieval (RETRIEVAL_SERVICE_URL) with a file this process
+  // does not see the same way.
+  const servedAdapter = response.retrieval?.routes?.dense?.queryAdapter ?? null;
+
+  if (servedAdapter !== null && servedAdapter !== adapterKey) {
+    return { stored: false, storeSkipReason: "query_adapter_changed" };
   }
 
   for (const [docId, version] of documentVersions) {

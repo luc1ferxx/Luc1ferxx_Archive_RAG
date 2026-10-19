@@ -63,6 +63,10 @@ export class QueryAdapterConfigError extends Error {
 export const QUERY_ADAPTER_SCOPE_QA = "single_document_qa";
 
 let loaded = null;
+// { filePath, size, mtimeMs, error } of the last file that failed to parse, so
+// an unchanged broken file is not read and parsed again on every call (the
+// semantic cache asks for the fingerprint on every lookup).
+let failedLoad = null;
 // vector -> fingerprint of the adapter that produced it. Weak, like the
 // embedding cache's own space tags.
 let adaptedVectors = new WeakMap();
@@ -197,7 +201,9 @@ export const serializeQueryAdapter = ({ embedding, matrix, training = null }) =>
  * Reloaded when the path, size or modification time changes (the trainer
  * replaces the file atomically). A file that cannot be read or parsed throws
  * here; the search path turns that into an unadapted search with a warning
- * (adaptQueryVectorForSearch) and the health report into an error.
+ * (adaptQueryVectorForSearch) and the health report into an error. A parse
+ * failure is remembered for the same path, size and modification time, so an
+ * unchanged broken file throws the same error without being read again.
  */
 export const getConfiguredQueryAdapter = () => {
   const configuredPath = getEmbeddingQueryAdapterPath();
@@ -215,8 +221,15 @@ export const getConfiguredQueryAdapter = () => {
     throw new QueryAdapterConfigError(`RAG_EMBEDDING_QUERY_ADAPTER: cannot read ${filePath} (${error.code ?? error.message}).`);
   }
 
-  if (loaded && loaded.filePath === filePath && loaded.size === stat.size && loaded.mtimeMs === stat.mtimeMs) {
+  const isSameFile = (entry) =>
+    entry && entry.filePath === filePath && entry.size === stat.size && entry.mtimeMs === stat.mtimeMs;
+
+  if (isSameFile(loaded)) {
     return loaded.adapter;
+  }
+
+  if (isSameFile(failedLoad)) {
+    throw failedLoad.error;
   }
 
   let adapter;
@@ -224,12 +237,17 @@ export const getConfiguredQueryAdapter = () => {
   try {
     adapter = parseQueryAdapter(readFileSync(filePath, "utf8"), { source: `RAG_EMBEDDING_QUERY_ADAPTER ${filePath}` });
   } catch (error) {
-    throw error instanceof QueryAdapterConfigError
-      ? error
-      : new QueryAdapterConfigError(`RAG_EMBEDDING_QUERY_ADAPTER ${filePath}: ${error.message}`);
+    const configError =
+      error instanceof QueryAdapterConfigError
+        ? error
+        : new QueryAdapterConfigError(`RAG_EMBEDDING_QUERY_ADAPTER ${filePath}: ${error.message}`);
+
+    failedLoad = { error: configError, filePath, mtimeMs: stat.mtimeMs, size: stat.size };
+    throw configError;
   }
 
   loaded = { adapter, filePath, mtimeMs: stat.mtimeMs, size: stat.size };
+  failedLoad = null;
   return adapter;
 };
 
@@ -388,10 +406,13 @@ export const describeQueryAdapter = () => {
 };
 
 /**
- * The configured adapter's fingerprint for evaluation reports, or null when
- * none is configured. A configured file that cannot be used is reported as
- * `unavailable:<code>` (searches then run unadapted), never thrown, so two
- * reports can be refused as a pair when this field differs.
+ * The configured adapter's fingerprint (reloaded on a path, size or
+ * modification time change), or null when none is configured. Evaluation
+ * reports record it, and the semantic answer cache keys on it
+ * (semantic-cache.js), because its lookup vector is the model's own. A
+ * configured file that cannot be used is reported as `unavailable:<code>`
+ * (searches then run unadapted), never thrown, so two reports can be refused
+ * as a pair, and cache entries split, when this field differs.
  */
 export const getQueryAdapterReportFingerprint = () => {
   if (!getEmbeddingQueryAdapterPath()) {
@@ -502,6 +523,7 @@ export const stampQueryAdapterProvenance = (search, fingerprint) => {
 
 export const resetQueryAdapter = () => {
   loaded = null;
+  failedLoad = null;
   adaptedVectors = new WeakMap();
   adaptedByModelVector = new WeakMap();
   modelVectorSpaces = new WeakMap();

@@ -1,6 +1,6 @@
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -461,6 +461,33 @@ test("checks.queryAdapter: an unusable file is an error, settings it would never
 
   useSpace({ adapterPath: writeAdapter(), model: "another-model" });
   assert.deepEqual(describeQueryAdapterHealth(healthy).warnings, ["space_mismatch"]);
+});
+
+test("an unchanged broken adapter file is not parsed again; a changed one is", () => {
+  const filePath = path.join(tempRoot, "adapter-replaced.json");
+  const valid = JSON.stringify(serializeQueryAdapter({ embedding: SPACE, matrix: PERMUTATION }));
+  const broken = valid.replace("query-adapter/v1", "query-adapter/v0");
+  const stamp = new Date("2026-01-01T00:00:00Z");
+
+  assert.notEqual(broken, valid);
+  assert.equal(broken.length, valid.length);
+
+  writeFileSync(filePath, broken);
+  utimesSync(filePath, stamp, stamp);
+  useSpace({ adapterPath: filePath });
+  assert.match(getQueryAdapterReportFingerprint(), /^unavailable:/);
+
+  // Same path, size and modification time: the remembered failure answers and
+  // the file is not read again, so even a valid file written this way is not
+  // noticed (the same rule that keeps a loaded adapter).
+  writeFileSync(filePath, valid);
+  utimesSync(filePath, stamp, stamp);
+  assert.match(getQueryAdapterReportFingerprint(), /^unavailable:/);
+
+  // A new modification time is a new file.
+  const later = new Date("2026-01-02T00:00:00Z");
+  utimesSync(filePath, later, later);
+  assert.match(getQueryAdapterReportFingerprint(), /^qa1-/);
 });
 
 test("reports carry the adapter fingerprint and refuse to pair runs made with different ones", () => {
