@@ -177,8 +177,11 @@ const formatMarkdown = (report) => {
     if (comparison.configDifferences?.length > 0) {
       lines.push(
         "",
-        `The two runs differ in ${comparison.configDifferences
-          .map(({ current, field, other }) => `${field} (${JSON.stringify(current)} here, ${other === null ? "unknown" : JSON.stringify(other)} there)`)
+        `The two runs differ, or cannot be shown to match, in ${comparison.configDifferences
+          .map(
+            ({ current, field, other }) =>
+              `${field} (${current === null ? "unknown" : JSON.stringify(current)} here, ${other === null ? "unknown" : JSON.stringify(other)} there)`
+          )
           .join("; ")}: a delta below may come from that, not only from what was meant to change.`
       );
     }

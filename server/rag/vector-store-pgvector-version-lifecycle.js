@@ -2059,4 +2059,34 @@ export const retireIndexVersion = async ({
   };
 };
 
+/**
+ * Replaces the chunk profile `versionId` recorded (index_params.chunkProfile,
+ * the key alone) after `vector:reindex --from documents` rewrote its chunks:
+ * the profile that run cut every document with, or MIXED_CHUNK_PROFILE when
+ * it cannot say one profile cut them all. Only a version that recorded one
+ * (created by `vector:index build`): version 1 and older versions stay
+ * unknown. Resolves to whether a row changed. The update locks the row alone,
+ * like stop_build; nothing else writes the key after the version is created.
+ */
+export const recordIndexVersionChunkProfile = async ({ chunkProfile, versionId }) => {
+  assertIndexVersionsSupported();
+
+  const { versionsTable } = getIndexVersionTableNames();
+
+  return Boolean(
+    firstRow(
+      await runAsDatabaseSystem(() =>
+        getPgvectorRuntime().query(
+          `/* index_versions:record_chunk_profile */
+            UPDATE ${versionsTable}
+               SET index_params = jsonb_set(index_params, '{chunkProfile}', $2::jsonb), updated_at = NOW()
+             WHERE version_id = $1 AND index_params ? 'chunkProfile'
+            RETURNING version_id`,
+          [requireVersionId(versionId), JSON.stringify(chunkProfile)]
+        )
+      )
+    )
+  );
+};
+
 const toIsoString = (value) => (value instanceof Date ? value.toISOString() : String(value ?? ""));

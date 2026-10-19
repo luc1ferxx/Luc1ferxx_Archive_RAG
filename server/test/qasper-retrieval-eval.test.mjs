@@ -88,5 +88,23 @@ test("a comparison lists where the two runs' chunking or commit differ; an older
       ["git.sha", null],
     ]
   );
-  assert.deepEqual(describeRunConfigDifferences({ chunking, git: null }, { chunking, git: null }), []);
+  // Git could not say on either side: still unknown, so listed.
+  assert.deepEqual(describeRunConfigDifferences({ chunking, git: null }, { chunking, git: null }), [
+    { current: null, field: "git.sha", other: null },
+  ]);
+
+  // Uncommitted changes: the commit does not say which code ran, on either
+  // side, whatever the counts.
+  const dirty = (changedPaths) => ({ chunking, git: { changedPaths, dirty: true, sha: "a".repeat(40) } });
+
+  assert.deepEqual(describeRunConfigDifferences(dirty(3), dirty(3)), [
+    { current: 3, field: "git.changedPaths", other: 3 },
+  ]);
+  assert.deepEqual(describeRunConfigDifferences(config, dirty(5)), [
+    { current: 0, field: "git.changedPaths", other: 5 },
+  ]);
+  assert.deepEqual(
+    describeRunConfigDifferences(dirty(2), { chunking, git: { sha: "b".repeat(40) } }).map(({ field }) => field),
+    ["git.sha", "git.changedPaths"]
+  );
 });

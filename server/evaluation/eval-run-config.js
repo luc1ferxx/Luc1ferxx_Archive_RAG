@@ -47,15 +47,22 @@ const CHUNKING_FIELDS = Object.freeze(["strategy", "size", "overlap", "chunkerVe
 
 /**
  * Where this run's chunking and checkout differ from another report's, for a
- * paired comparison: `[{ field, current, other }]`, with `other: null` when
- * the other report predates the field (unknown, so listed). An empty list
- * means the two runs cut their chunks the same way from the same commit.
+ * paired comparison: `[{ field, current, other }]`, null for a side that
+ * cannot say (a report from before the field, or git unavailable): unknown,
+ * so listed.
+ *
+ * The checkout: `git.sha` when the commits differ or either one is unknown,
+ * and `git.changedPaths` (the uncommitted path counts) whenever either run
+ * had uncommitted changes, also at the same commit and the same count: a
+ * commit does not say which code a dirty work tree ran. An empty list means
+ * both runs cut their chunks the same way from the same clean commit.
  */
 export const describeRunConfigDifferences = (config = {}, otherConfig = {}) => {
   const differences = [];
+  const list = (field, current, other) => differences.push({ current: current ?? null, field, other: other ?? null });
   const compare = (field, current, other) => {
     if (!Object.is(current ?? null, other ?? null)) {
-      differences.push({ current: current ?? null, field, other: other ?? null });
+      list(field, current, other);
     }
   };
 
@@ -63,6 +70,16 @@ export const describeRunConfigDifferences = (config = {}, otherConfig = {}) => {
     compare(`chunking.${field}`, config.chunking?.[field], otherConfig?.chunking?.[field]);
   }
 
-  compare("git.sha", config.git?.sha, otherConfig?.git?.sha);
+  const git = config.git ?? null;
+  const otherGit = otherConfig?.git ?? null;
+
+  if (!git?.sha || !otherGit?.sha || git.sha !== otherGit.sha) {
+    list("git.sha", git?.sha, otherGit?.sha);
+  }
+
+  if (git?.dirty === true || otherGit?.dirty === true) {
+    list("git.changedPaths", git?.changedPaths, otherGit?.changedPaths);
+  }
+
   return differences;
 };

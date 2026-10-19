@@ -360,7 +360,10 @@ const summarizeIndexVersions = (indexVersions) => {
   };
 };
 
-const checkPgvectorHealth = async () => {
+// `chunksDocuments`: whether this process cuts chunks (the api and agent
+// tiers); only then can it compare the index versions' recorded chunk
+// profiles with its own (describeIndexVersions).
+const checkPgvectorHealth = async ({ chunksDocuments = true } = {}) => {
   let status;
 
   try {
@@ -370,7 +373,7 @@ const checkPgvectorHealth = async () => {
       await runPostgresMigrations();
     }
 
-    status = await describePgvectorStatus();
+    status = await describePgvectorStatus({ includeChunkProfile: chunksDocuments });
   } catch (error) {
     return buildEntry("error", {
       backend: "postgresql",
@@ -443,7 +446,7 @@ const describeSingleTenantVectorStoreUse = (provider) => {
   };
 };
 
-const checkVectorStoreHealth = async () => {
+const checkVectorStoreHealth = async ({ chunksDocuments = true } = {}) => {
   const providerStatus = getVectorStoreProviderConfigStatus();
   const retrieval = buildRetrievalSummary();
 
@@ -479,7 +482,7 @@ const checkVectorStoreHealth = async () => {
               "Local JSON vector index is the active provider (explicit opt-in; single-process, not shared).",
             provider: "local",
           })
-        : await checkPgvectorHealth();
+        : await checkPgvectorHealth({ chunksDocuments });
   const singleTenantUse = describeSingleTenantVectorStoreUse(providerStatus.provider);
 
   return {
@@ -1281,7 +1284,7 @@ export const checkRowLevelSecurityHealth = async () => {
 // upload at its chunk stage (it used to chunk as structured without a word).
 // Null otherwise, so a valid configuration adds no entry. An index version
 // built under other chunking settings is a warning of the vectorStore entry
-// (index versions), never this entry's.
+// (index versions) on the same tiers, never this entry's.
 export const checkChunkingHealth = () => {
   try {
     getChunkStrategy();
@@ -1632,10 +1635,14 @@ const buildServiceTopologyEntry = (topology) =>
 
 export const buildHealthReport = async ({ env = process.env } = {}) => {
   const { remoteAgent, split, tiers, topology } = describeHealthTiers(env);
+  // Where documents are chunked: uploads and their ingestion (api), arXiv
+  // imports (agent). Only there do the chunking entry and the index
+  // versions' chunk-profile warnings say anything about this process.
+  const chunksDocuments = tiers.includes("api") || tiers.includes("agent");
   const runnable = {
     apiAuth: () => checkApiAuthHealth(),
     openai: () => checkOpenAIHealth({ env }),
-    vectorStore: () => checkVectorStoreHealth(),
+    vectorStore: () => checkVectorStoreHealth({ chunksDocuments }),
     documentStore: () => checkDocumentStoreHealth(),
     sessionMemory: () => checkSessionMemoryHealth(),
     longMemory: () => checkLongMemoryHealth(),
@@ -1683,8 +1690,8 @@ export const buildHealthReport = async ({ env = process.env } = {}) => {
   }
 
   // Only with an invalid chunking setting, and only where documents are
-  // chunked: uploads and their ingestion (api), arXiv imports (agent).
-  const chunking = tiers.includes("api") || tiers.includes("agent") ? checkChunkingHealth() : null;
+  // chunked.
+  const chunking = chunksDocuments ? checkChunkingHealth() : null;
 
   if (chunking) {
     checks.chunking = chunking;

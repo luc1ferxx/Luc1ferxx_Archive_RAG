@@ -1,4 +1,10 @@
-import { describeChunkProfile, readStoredChunkProfile } from "./chunk-profile.js";
+import {
+  chunkProfilesCutAlike,
+  describeChunkProfile,
+  describePdfParseSettings,
+  readStoredChunkProfile,
+  readStoredPdfParseSettings,
+} from "./chunk-profile.js";
 import { getRagIngestStageOutputMaxBytes, isRagIngestEmbedBatchingEnabled } from "./config.js";
 import { getDefaultEmbeddingBatcher } from "./ingest-embedding-batcher.js";
 import { INGEST_JOB_KINDS, INGEST_STAGE_OUTPUTS, INGEST_STAGES } from "./ingest-stages.js";
@@ -13,7 +19,8 @@ import { embedDocumentTextsForIndex } from "./vector-store.js";
 
 // The staged form of an ingest, run by rag/ingest-worker.js for an async job:
 //
-//   parse  the job's PDF -> `pages` (the PDF itself becomes `document_file`)
+//   parse  the job's PDF -> `pages` (the PDF itself becomes `document_file`;
+//                           the PDF settings it parsed with ride along)
 //   chunk  `pages`       -> `chunks` (chunk documents, page count, profile,
 //                           and the chunk profile they were cut with)
 //   embed  `chunks`      -> `embeddings` (per embedding space, through the
@@ -78,10 +85,17 @@ const assertWithinLimit = (name, buffer, maxBytes) => {
   return buffer;
 };
 
-export const encodeJsonOutput = (name, value, { maxBytes = getRagIngestStageOutputMaxBytes } = {}) =>
-  assertWithinLimit(name, Buffer.from(JSON.stringify({ format: STAGE_OUTPUT_FORMAT_VERSION, value })), maxBytes);
+// `meta` is stored beside the value in the same envelope: a reader that does
+// not know it (an older worker during a rolling deploy) reads `value` alone.
+export const encodeJsonOutput = (name, value, { maxBytes = getRagIngestStageOutputMaxBytes, meta = null } = {}) =>
+  assertWithinLimit(
+    name,
+    Buffer.from(JSON.stringify({ format: STAGE_OUTPUT_FORMAT_VERSION, ...(meta ? { meta } : {}), value })),
+    maxBytes
+  );
 
-export const decodeJsonOutput = (name, buffer) => {
+/** { value, meta } of a JSON output; meta null when it was stored without. */
+export const decodeJsonOutputEnvelope = (name, buffer) => {
   if (!Buffer.isBuffer(buffer) && !(buffer instanceof Uint8Array)) {
     throw createCorruptOutputError(name, "it is missing");
   }
@@ -98,8 +112,13 @@ export const decodeJsonOutput = (name, buffer) => {
     throw createCorruptOutputError(name, `format ${parsed?.format} is not ${STAGE_OUTPUT_FORMAT_VERSION}`);
   }
 
-  return parsed.value;
+  return {
+    meta: parsed.meta && typeof parsed.meta === "object" && !Array.isArray(parsed.meta) ? parsed.meta : null,
+    value: parsed.value,
+  };
 };
+
+export const decodeJsonOutput = (name, buffer) => decodeJsonOutputEnvelope(name, buffer).value;
 
 const describeSpace = (space) => ({
   dimensions: space.dimensions,
@@ -237,6 +256,7 @@ export const createIngestPipeline = ({
   batchingEnabled = isRagIngestEmbedBatchingEnabled,
   chunkPages = chunkDocumentPages,
   commit = commitDocument,
+  describeParse = describePdfParseSettings,
   describeProfile = describeChunkProfile,
   embedChunks = embedDocumentChunks,
   embedUnbatched = embedDocumentTextsForIndex,
@@ -281,20 +301,29 @@ export const createIngestPipeline = ({
     },
 
     /**
-     * Whether the stored `chunks` were cut under another chunk profile than
-     * this process chunks with now (rag/chunk-profile.js): the worker then
-     * runs the job from the chunk stage again instead of embedding or
-     * indexing them. A chunk output without a profile (stored before
-     * profiles were recorded, or by a chunker that records none) is reused,
-     * and so is one this process cannot compare with because its own
-     * chunking setting is invalid (the chunk stage, and the health report's
-     * chunking entry, report that).
+     * Whether re-chunking the stored pages here would cut the stored
+     * `chunks` differently (rag/chunk-profile.js chunkProfilesCutAlike: the
+     * chunker or its settings changed): the worker then runs the job from the
+     * chunk stage again instead of embedding or indexing them. Only the
+     * fields a re-chunk can change count; a PDF setting of this process that
+     * differs from the parse's would cut the same pages into the same chunks.
+     * Reused as they are: a chunk output without a profile (stored before
+     * profiles were recorded, or by a chunker that records none), one this
+     * process cannot compare with because its own chunking setting is invalid
+     * (the chunk stage, and the health report's chunking entry, report that),
+     * and one the chunk stage cut again after such a move back (`rechunked`):
+     * a job moves back once, so workers with different settings on one queue
+     * cannot keep sending it back and its stages' attempt budgets still end
+     * in dead letter.
      */
     chunksAreStale({ inputs }) {
-      const { chunkProfile } = decodeJsonOutput(INGEST_STAGE_OUTPUTS.chunks, inputs[INGEST_STAGE_OUTPUTS.chunks]);
+      const { chunkProfile, rechunked } = decodeJsonOutput(
+        INGEST_STAGE_OUTPUTS.chunks,
+        inputs[INGEST_STAGE_OUTPUTS.chunks]
+      );
       const stored = readStoredChunkProfile(chunkProfile);
 
-      if (stored === null) {
+      if (stored === null || rechunked === true) {
         return false;
       }
 
@@ -306,27 +335,50 @@ export const createIngestPipeline = ({
         return false;
       }
 
-      return stored.id !== current.id;
+      return !chunkProfilesCutAlike(stored, current);
     },
 
     async parse({ filePath }) {
+      // The settings loadPages parses with, stored beside the pages so the
+      // chunk stage, in whichever process, records the parse that made them.
+      let parse = null;
+
+      try {
+        parse = describeParse();
+      } catch {
+        // An invalid PDF_PARSER fails loadPages below.
+      }
+
       const pages = await loadPages(filePath);
 
       return {
         output: encodeJsonOutput(
           INGEST_STAGE_OUTPUTS.pages,
           (Array.isArray(pages) ? pages : []).map((page) => ({ ...page })),
-          { maxBytes: maxOutputBytes }
+          { maxBytes: maxOutputBytes, meta: parse ? { parse } : null }
         ),
       };
     },
 
-    async chunk({ inputs, job }) {
-      const pages = decodeJsonOutput(INGEST_STAGE_OUTPUTS.pages, inputs[INGEST_STAGE_OUTPUTS.pages]);
-      const chunked = chunkPages({ docId: job.docId, fileName: job.fileName, pages, source: null });
+    // `rechunk`: the worker moved the job back here because its chunks were
+    // cut under another profile (chunksAreStale); the new chunks say so.
+    async chunk({ inputs, job, rechunk = false }) {
+      const { meta, value: pages } = decodeJsonOutputEnvelope(
+        INGEST_STAGE_OUTPUTS.pages,
+        inputs[INGEST_STAGE_OUTPUTS.pages]
+      );
+      const chunked = chunkPages({
+        docId: job.docId,
+        fileName: job.fileName,
+        pages,
+        parse: readStoredPdfParseSettings(meta?.parse),
+        source: null,
+      });
 
       return {
-        output: encodeJsonOutput(INGEST_STAGE_OUTPUTS.chunks, chunked, { maxBytes: maxOutputBytes }),
+        output: encodeJsonOutput(INGEST_STAGE_OUTPUTS.chunks, rechunk ? { ...chunked, rechunked: true } : chunked, {
+          maxBytes: maxOutputBytes,
+        }),
       };
     },
 

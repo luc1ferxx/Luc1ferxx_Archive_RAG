@@ -20,12 +20,16 @@ import {
 // `metadata.chunkProfileId` (like `documentVersion`; the citation, trace and
 // response builders copy named fields only, so it never reaches a response);
 // the staged ingest's chunk output carries the whole profile; an index
-// version created by `vector:index build` records it in `index_params`.
+// version created by `vector:index build` records it in `index_params`
+// (and `vector:reindex --from documents` updates that record after rewriting
+// the version, to MIXED_CHUNK_PROFILE when it cannot say one profile cut it).
 //
-// The PDF fields name this process's settings when it chunks. The staged
-// ingest parses before it chunks, possibly in another process: a job parsed
-// under another PDF_PARSER is not re-parsed (its PDF has left the job row by
-// then), only re-chunked.
+// The PDF fields name the settings the pages were parsed with. Where one
+// process parses and chunks in one go (a synchronous upload, a restore, a
+// build, a reindex) those are its own; the staged ingest parses before it
+// chunks, possibly in another process, so its parse stage stores the settings
+// beside the pages and the chunk stage records those (pages stored before
+// that fall back to the chunking process's settings).
 
 // Bump whenever the chunker's output for the same pages and settings changes
 // (chunk text or chunk boundaries), also for a fix: stored chunks and index
@@ -42,6 +46,11 @@ export const CHUNK_PROFILE_FIELDS = Object.freeze([
   "pdfParser",
   "paragraphDetection",
 ]);
+
+// The fields a re-chunk of already parsed pages can change: the chunker and
+// its settings. The PDF fields are decided by the parse, which re-chunking
+// pages does not repeat.
+export const CHUNK_PROFILE_RECHUNK_FIELDS = Object.freeze(["chunkerVersion", "strategy", "size", "overlap"]);
 
 const CHUNK_PROFILE_ID_LENGTH = 12;
 const CHUNK_PROFILE_ID_PATTERN = /^[0-9a-f]{12}$/;
@@ -79,6 +88,43 @@ export const describeChunkProfile = (overrides = {}) =>
     pdfParser: overrides.pdfParser ?? getPdfParser(),
     paragraphDetection: overrides.paragraphDetection ?? isPdfParagraphDetectionEnabled(),
   });
+
+/**
+ * The PDF settings this process parses with, { pdfParser, paragraphDetection }
+ * (the profile's PDF fields). Throws what getPdfParser throws for an invalid
+ * PDF_PARSER.
+ */
+export const describePdfParseSettings = () => ({
+  paragraphDetection: isPdfParagraphDetectionEnabled(),
+  pdfParser: getPdfParser(),
+});
+
+/**
+ * PDF settings read back from storage (the staged ingest's pages output):
+ * the well-formed fields of { pdfParser, paragraphDetection }, or null when
+ * none is (stored before they were recorded). describeChunkProfile takes the
+ * result as overrides; a missing field falls back to this process's setting.
+ */
+export const readStoredPdfParseSettings = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const settings = {
+    ...(typeof value.pdfParser === "string" && value.pdfParser.trim() ? { pdfParser: value.pdfParser.trim() } : {}),
+    ...(typeof value.paragraphDetection === "boolean" ? { paragraphDetection: value.paragraphDetection } : {}),
+  };
+
+  return Object.keys(settings).length > 0 ? settings : null;
+};
+
+/**
+ * Whether re-chunking the pages a chunk set was cut from would cut it again
+ * the same way here: the two profiles agree on CHUNK_PROFILE_RECHUNK_FIELDS.
+ * They may still disagree on the PDF fields, which only a new parse changes.
+ */
+export const chunkProfilesCutAlike = (left, right) =>
+  CHUNK_PROFILE_RECHUNK_FIELDS.every((field) => Object.is(left?.[field] ?? null, right?.[field] ?? null));
 
 /**
  * A profile read back from storage (a stage output, an index version), or
@@ -132,6 +178,16 @@ export const describeChunkProfileChange = (recorded, current) => {
     ),
   };
 };
+
+// What an index version records once its table holds chunks of more than one
+// profile (`vector:reindex --from documents` under another one left documents
+// out, or wrote into a version its builder still cuts under the recorded
+// one): described as "mixed", never compared, so no warning names a profile
+// its chunks do not share.
+export const MIXED_CHUNK_PROFILE = Object.freeze({ mixed: true });
+
+export const isMixedChunkProfileRecord = (value) =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value) && value.mixed === true;
 
 /** `metadata` of a stored chunk, stamped with the profile that cut it. */
 export const stampChunkProfile = (metadata = {}, profile) => ({

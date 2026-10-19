@@ -774,14 +774,15 @@ for (const crashStage of INGEST_STAGES) {
 
 // The real chunk stage (chunkDocumentPages) between a fixed parse, a fake
 // embedding and a recording commit; `failOnce` names stages that fail once
-// with a 503 (retryable), `chunkPages` replaces the chunk stage's chunker.
-const createProfilePipeline = ({ chunkPages = undefined, failOnce = [] } = {}) => {
+// with a 503 (retryable), `failAlways` stages that always do, `chunkPages`
+// replaces the chunk stage's chunker.
+const createProfilePipeline = ({ chunkPages = undefined, failAlways = [], failOnce = [] } = {}) => {
   const calls = [];
   const committed = [];
   const failures = new Set(failOnce);
   const space = { dimensions: 2, documentPrefix: "", identity: "fake", key: "fake|2", model: "fake", queryPrefix: "" };
   const fail = (stage) => {
-    if (failures.delete(stage)) {
+    if (failures.delete(stage) || failAlways.includes(stage)) {
       throw statusError(`${stage} is down`, 503);
     }
   };
@@ -809,6 +810,7 @@ const createProfilePipeline = ({ chunkPages = undefined, failOnce = [] } = {}) =
 
   pipeline.chunk = async (input) => {
     calls.push("chunk");
+    fail("chunk");
 
     const result = await chunk(input);
 
@@ -914,6 +916,128 @@ test("a retry under the same chunk profile, or with chunks stored before profile
     }
   }));
 
+for (const [setting, value] of [
+  ["PDF_PARSER", "docling"],
+  ["PDF_PARAGRAPH_DETECTION", "false"],
+]) {
+  test(`a retry under another ${setting} alone reuses the stored chunks: re-chunking the stored pages would cut the same ones`, async () =>
+    withEnv(PROFILE_ENVIRONMENT, async () => {
+      const clock = createClock();
+      const store = createInMemoryIngestJobStore({ now: clock.now });
+      const scripted = createProfilePipeline({ failOnce: ["embed"] });
+      const worker = createStagedWorker({ clock, pipeline: scripted.pipeline, store, tempDirectory: tempRoot });
+
+      await enqueue(store, ALICE, { docId: `doc-profile-${setting}` });
+      assert.equal((await worker.runOnce()).outcome, "queued");
+
+      const parsedWith = describeChunkProfile();
+
+      process.env[setting] = value;
+      assert.notEqual(describeChunkProfile().id, parsedWith.id, "the whole profile differs");
+      assert.equal((await worker.runOnce()).outcome, "succeeded");
+      // Neither a move back nor a second embedding of the same chunks.
+      assert.deepEqual(scripted.calls, ["parse", "chunk", "embed", "check", "embed", "index"]);
+      // The committed chunks keep naming the parse that made their pages.
+      assert.ok(scripted.committed[0].every((document) => document.metadata.chunkProfileId === parsedWith.id));
+    }));
+}
+
+test("the chunk stage records the PDF settings the parse stored with the pages, not its own process's", async () =>
+  withEnv({ ...PROFILE_ENVIRONMENT, PDF_PARSER: "docling" }, async () => {
+    const clock = createClock();
+    const store = createInMemoryIngestJobStore({ now: clock.now });
+    const scripted = createProfilePipeline({ failOnce: ["chunk"] });
+    const worker = createStagedWorker({ clock, pipeline: scripted.pipeline, store, tempDirectory: tempRoot });
+
+    const job = await enqueue(store, ALICE, { docId: "doc-profile-parse-settings" });
+
+    // Parsed under docling with paragraphs; the chunk stage fails once.
+    assert.equal((await worker.runOnce()).outcome, "queued");
+    assert.equal((await store.get(job.jobId)).stage, "chunk");
+
+    // Another process, with other PDF settings, chunks the stored pages.
+    delete process.env.PDF_PARSER;
+    process.env.PDF_PARAGRAPH_DETECTION = "false";
+    assert.equal((await worker.runOnce()).outcome, "succeeded");
+
+    const [{ chunkProfile }] = scripted.chunkOutputs;
+    const expected = describeChunkProfile({ paragraphDetection: true, pdfParser: "docling" });
+
+    assert.equal(chunkProfile.pdfParser, "docling");
+    assert.equal(chunkProfile.paragraphDetection, true);
+    assert.equal(chunkProfile.id, expected.id);
+    assert.ok(scripted.committed[0].every((document) => document.metadata.chunkProfileId === expected.id));
+  }));
+
+test("pages stored with their parse settings stay readable as before, and pages stored without them fall back to this process's", async () =>
+  withEnv({ ...PROFILE_ENVIRONMENT, PDF_PARSER: "docling" }, async () => {
+    const pipeline = createIngestPipeline({ loadPages: async () => [{ pageNumber: 1, text: "Retention policy for signed contracts." }] });
+    const { output } = await pipeline.parse({ filePath: "ignored.pdf" });
+
+    // An older reader decodes the value alone.
+    assert.deepEqual(decodeJsonOutput("pages", output), [{ pageNumber: 1, text: "Retention policy for signed contracts." }]);
+    assert.deepEqual(JSON.parse(output.toString("utf8")).meta, { parse: { paragraphDetection: true, pdfParser: "docling" } });
+
+    const chunkWith = async (pages) =>
+      decodeJsonOutput("chunks", (await pipeline.chunk({ inputs: { pages }, job: { docId: "doc-meta", fileName: "notes.pdf" } })).output)
+        .chunkProfile;
+
+    process.env.PDF_PARSER = "pdfjs";
+    assert.equal((await chunkWith(output)).pdfParser, "docling");
+    // Stored before the parse recorded its settings.
+    assert.equal((await chunkWith(encodeJsonOutput("pages", [{ pageNumber: 1, text: "Retention policy for signed contracts." }]))).pdfParser, "pdfjs");
+  }));
+
+test("workers with different chunk settings on one queue move a failing job back once, so it still dead-letters", async () =>
+  withEnv(PROFILE_ENVIRONMENT, async () => {
+    const clock = createClock();
+    const store = createInMemoryIngestJobStore({ now: clock.now });
+    const scripted = createProfilePipeline({ failAlways: ["embed"] });
+    const worker = createStagedWorker({
+      clock,
+      pipeline: scripted.pipeline,
+      stageMaxAttempts: (stage) => (stage === "embed" ? 3 : 5),
+      store,
+      tempDirectory: tempRoot,
+    });
+    const job = await enqueue(store, ALICE, { docId: "doc-profile-alternating", maxAttempts: 5 });
+    const outcomes = [];
+
+    // Two workers' settings, claiming in turn while the embedding is down.
+    for (let claim = 0; claim < 8 && outcomes.at(-1) !== "dead_letter"; claim += 1) {
+      if (claim % 2 === 0) {
+        delete process.env.RAG_CHUNK_SIZE;
+      } else {
+        process.env.RAG_CHUNK_SIZE = "300";
+      }
+
+      outcomes.push((await worker.runOnce()).outcome);
+    }
+
+    assert.deepEqual(outcomes, ["queued", "queued", "queued", "dead_letter"]);
+    assert.deepEqual(scripted.calls, [
+      "parse",
+      "chunk",
+      "embed",
+      // The second worker cuts the pages again, once, and marks the result.
+      "check",
+      "chunk",
+      "embed",
+      // Every later claim reuses those chunks whatever its own settings.
+      "check",
+      "embed",
+      "check",
+      "embed",
+    ]);
+    assert.equal(scripted.chunkOutputs[0].rechunked, undefined);
+    assert.equal(scripted.chunkOutputs[1].rechunked, true);
+
+    const finished = await store.get(job.jobId);
+
+    assert.equal(finished.status, "dead_letter");
+    assert.equal(finished.deadLetterStage, "embed");
+  }));
+
 test("stored chunks are stale only when both their profile and this process's are known and differ", () => {
   const recorded = describeChunkProfile();
   const inputsWith = (value) => ({ chunks: encodeJsonOutput("chunks", value) });
@@ -923,6 +1047,24 @@ test("stored chunks are stale only when both their profile and this process's ar
   assert.equal(staleUnder(() => describeChunkProfile({ size: 300 }), { chunkProfile: recorded, documents: [] }), true);
   assert.equal(staleUnder(() => describeChunkProfile({ size: 300 }), { documents: [] }), false, "stored before profiles");
   assert.equal(staleUnder(() => describeChunkProfile({ size: 300 }), { chunkProfile: { id: "x" }, documents: [] }), false);
+  // Only what a re-chunk of the stored pages can change counts.
+  for (const overrides of [{ strategy: "sentence" }, { overlap: 0 }, { size: 300 }]) {
+    assert.equal(staleUnder(() => describeChunkProfile(overrides), { chunkProfile: recorded, documents: [] }), true);
+  }
+
+  const reparsed = describeChunkProfile({ paragraphDetection: !recorded.paragraphDetection, pdfParser: "docling" });
+
+  assert.notEqual(reparsed.id, recorded.id);
+  assert.equal(staleUnder(() => reparsed, { chunkProfile: recorded, documents: [] }), false, "PDF settings alone");
+  assert.equal(
+    staleUnder(() => ({ ...recorded, chunkerVersion: recorded.chunkerVersion + 1 }), { chunkProfile: recorded, documents: [] }),
+    true
+  );
+  // Cut again after a move back: reused, so a job moves back once.
+  assert.equal(
+    staleUnder(() => describeChunkProfile({ size: 300 }), { chunkProfile: recorded, documents: [], rechunked: true }),
+    false
+  );
   // This process's own setting is invalid: the chunk stage reports it; the
   // stored chunks, cut under a valid one, are used.
   assert.equal(

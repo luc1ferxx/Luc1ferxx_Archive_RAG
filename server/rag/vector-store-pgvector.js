@@ -791,11 +791,13 @@ const readSnapshotForStatus = async () => {
  * Non-throwing description of the provider for health and admin status. It
  * describes the active version's whole table, never one tenant's share, so it
  * runs as the owner. Strictly read-only (the reindex dry run relies on it).
+ * `includeChunkProfile: false` leaves out the index versions' chunk-profile
+ * warnings (describeIndexVersions), for a process that chunks no documents.
  */
-export const describePgvectorStatus = async () =>
-  runAsDatabaseSystem(() => describePgvectorTableStatus());
+export const describePgvectorStatus = async ({ includeChunkProfile = true } = {}) =>
+  runAsDatabaseSystem(() => describePgvectorTableStatus({ includeChunkProfile }));
 
-const describePgvectorTableStatus = async () => {
+const describePgvectorTableStatus = async ({ includeChunkProfile }) => {
   const runtime = getPgvectorRuntime();
   const queryPostgres = runtime.query;
   let version = buildLegacyIndexVersion();
@@ -875,7 +877,7 @@ const describePgvectorTableStatus = async () => {
   try {
     // No drift totals here: they scan every live version's table, and health
     // runs every few seconds. The CLI status and the admin route include them.
-    base.indexVersions = await describeIndexVersions({ includeDrift: false });
+    base.indexVersions = await describeIndexVersions({ includeChunkProfile, includeDrift: false });
   } catch (error) {
     base.indexVersions = {
       message: error instanceof Error ? error.message : String(error),
@@ -1213,6 +1215,13 @@ export const beginPgvectorIndexWrite = async ({ client }) => {
   writeTargetsByHandle.set(handle, targets);
   return handle;
 };
+
+/**
+ * The versions a handle from beginPgvectorIndexWrite writes into, active
+ * first, as the transaction read them (toIndexVersion descriptors); [] for
+ * any other client. vector:reindex reads which versions it rewrote.
+ */
+export const getPgvectorIndexWriteTargets = (handle) => [...(writeTargetsByHandle.get(handle) ?? [])];
 
 const withWriteTargets = async (client, callback) => {
   if (client) {

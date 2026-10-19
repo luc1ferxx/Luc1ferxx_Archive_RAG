@@ -1387,6 +1387,15 @@ test("a version's recorded chunk profile is reported, and a different current on
   assert.match(warning.message, /npm run vector:index -- build/);
   assert.deepEqual(status.problems, []);
 
+  // A process that chunks no documents (the retrieval tier's health) does
+  // not compare; the recorded profiles are still reported.
+  const uncompared = await describeIndexVersions({ includeChunkProfile: false, includeDrift: false });
+
+  assert.deepEqual(chunkWarnings(uncompared), []);
+  assert.equal(uncompared.active.chunkProfile.id, older.id);
+  assert.deepEqual(chunkWarnings((await describePgvectorStatus({ includeChunkProfile: false })).indexVersions), []);
+  assert.equal(chunkWarnings((await describePgvectorStatus()).indexVersions).length, 1);
+
   // The same settings here as the active build's: nothing to say about it,
   // but version 3 (still written to) was built under the defaults.
   process.env.RAG_CHUNK_SIZE = "600";

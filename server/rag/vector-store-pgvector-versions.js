@@ -22,6 +22,7 @@ import {
 import {
   describeChunkProfile,
   describeChunkProfileChange,
+  isMixedChunkProfileRecord,
   readStoredChunkProfile,
 } from "./chunk-profile.js";
 import { getIndexVersionRegistryTableNames } from "./db-migrations.js";
@@ -259,8 +260,13 @@ export const toIndexVersion = (row = {}) => {
     chunkCount: toCount(row.chunk_count),
     // The chunk profile the build cut documents with, recorded beside the
     // index params when the version was created (rag/chunk-profile.js); null
-    // for version 1 and every version created before profiles were recorded.
+    // for version 1 and every version created before profiles were recorded,
+    // and for one a partial `vector:reindex --from documents` left holding
+    // chunks of several profiles (chunkProfileMixed).
     chunkProfile: readStoredChunkProfile(
+      row.index_params && typeof row.index_params === "object" ? row.index_params.chunkProfile : null
+    ),
+    chunkProfileMixed: isMixedChunkProfileRecord(
       row.index_params && typeof row.index_params === "object" ? row.index_params.chunkProfile : null
     ),
     chunkTable: String(row.chunk_table ?? ""),
@@ -799,7 +805,7 @@ const describeVersion = (version) => ({
   buildCompletedAt: version.buildCompletedAt,
   buildStartedAt: version.buildStartedAt,
   chunkCount: version.chunkCount,
-  chunkProfile: version.chunkProfile ?? "unknown",
+  chunkProfile: version.chunkProfile ?? (version.chunkProfileMixed ? "mixed" : "unknown"),
   chunkTable: version.chunkTable,
   createdAt: version.createdAt,
   deactivatedAt: version.deactivatedAt,
@@ -886,8 +892,19 @@ const readTableChunkTotals = async (query, chunkTable) => {
  * `includeDrift` compares the chunk and document totals of the active version
  * with every ready one (full scans of each table): the CLI and the admin route
  * ask for it, the health check does not.
+ *
+ * `includeChunkProfile` compares each version's recorded chunk profile with
+ * the one this process cuts chunks with (the chunk_profile_* warnings). Only
+ * a process that chunks documents can say anything with it: the health check
+ * of a tier that never does (retrieval, the model gateway) leaves it out, the
+ * CLI and the admin route keep it.
  */
-export const describeIndexVersions = async ({ includeDrift = true, includeRetired = true, limit = 25 } = {}) =>
+export const describeIndexVersions = async ({
+  includeChunkProfile = true,
+  includeDrift = true,
+  includeRetired = true,
+  limit = 25,
+} = {}) =>
   runAsDatabaseSystem(async () => {
     const runtime = getPgvectorRuntime();
     const { pointerTable, versionsTable } = getIndexVersionTableNames();
@@ -941,7 +958,7 @@ export const describeIndexVersions = async ({ includeDrift = true, includeRetire
     const warnings = [];
     const problems = [];
     const configured = getConfiguredEmbeddingSpace();
-    const currentChunkProfile = readCurrentChunkProfile();
+    const currentChunkProfile = includeChunkProfile ? readCurrentChunkProfile() : null;
 
     if (!active) {
       problems.push("The version pointer names no registered version.");

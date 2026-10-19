@@ -50,8 +50,9 @@ import { writeWorkingFile } from "./working-files.js";
 // job's success inside its own write transaction (store.completeInTransaction)
 // where the provider has one. A ragService whose ingestDocument declares no
 // stages (a test stub, a custom service) runs each job as one step, as before.
-// An attempt that resumes at embed or index with chunks cut under another
-// chunk profile (rag/chunk-profile.js) goes back to the chunk stage first.
+// An attempt that resumes at embed or index with chunks a re-chunk would cut
+// differently (rag/chunk-profile.js) goes back to the chunk stage first, once
+// per job.
 
 const CHUNK_STAGE = "chunk";
 const DEFAULT_SHUTDOWN_GRACE_MS = 5000;
@@ -427,20 +428,27 @@ export const createIngestWorker = ({
     return inputs;
   };
 
-  // Chunks a previous attempt stored under another chunk profile than this
-  // process's (the chunker or its settings changed between attempts, or
-  // another worker runs with other settings) are not embedded or indexed:
-  // the job goes back to the chunk stage, whose input (the pages) is still
-  // stored, and continues from there in this attempt. The stored chunks are
-  // checked once per attempt: chunks this attempt cut itself, or already
-  // found current, are not decoded again. Resolves to true when the job was
-  // moved back, false when the chunks are current (or carry no profile:
-  // stored before profiles were recorded, reused as before), null when the
-  // attempt lost the job.
+  // Chunks a previous attempt stored that this process would cut differently
+  // from the same pages (the chunker or its chunking settings changed between
+  // attempts, or another worker runs with other ones; a PDF setting alone
+  // never counts, stages.chunksAreStale) are not embedded or indexed: the job
+  // goes back to the chunk stage, whose input (the pages) is still stored,
+  // and continues from there in this attempt. The stored chunks are checked
+  // once per attempt: chunks this attempt cut itself, or already found
+  // current, are not decoded again. Resolves to true when the job was moved
+  // back, false when the chunks are current (or carry no profile: stored
+  // before profiles were recorded, reused as before), null when the attempt
+  // lost the job.
   //
-  // Workers with different chunking settings on one queue re-chunk each
-  // other's retried jobs, and every move back starts the stages' attempt
-  // budgets afresh: keep every worker on the same settings.
+  // A move back starts the stages' attempt budgets afresh, so it happens once
+  // per job: the chunk stage marks what it cuts after one (`rechunk`), and
+  // every later attempt reuses those chunks whatever its own settings. Two
+  // workers with different chunking settings on one queue therefore cost a
+  // failing job at most one extra round of its stage's attempts before dead
+  // letter, not a re-chunk per claim. (An attempt that loses the job between
+  // the move back and the chunk stage's advance leaves the old chunks
+  // unmarked; only that can send the job back again.) Keep every worker on
+  // the same settings all the same.
   const rewindStaleChunks = async (job, fence, stages, state, inputs) => {
     if (
       state.chunksCurrent ||
@@ -473,6 +481,7 @@ export const createIngestWorker = ({
     state.stage = CHUNK_STAGE;
     state.attempt = 1;
     state.maxAttempts = stageMaxAttempts(CHUNK_STAGE);
+    state.rechunk = true;
     return true;
   };
 
@@ -602,7 +611,11 @@ export const createIngestWorker = ({
           }
         }
 
-        result = await stages[stage]({ inputs, job });
+        result = await stages[stage]({
+          inputs,
+          job,
+          ...(stage === CHUNK_STAGE && state.rechunk ? { rechunk: true } : {}),
+        });
       }
 
       const nextStage = getNextIngestStage(stage);
@@ -689,12 +702,14 @@ export const createIngestWorker = ({
     renewTimer.unref?.();
 
     // The stage in progress and its attempt number, for the failure record,
-    // and whether the stored chunks are known to be of this process's chunk
-    // profile (rewindStaleChunks).
+    // whether the stored chunks are known to be of this process's chunk
+    // profile, and whether this attempt moved the job back to cut them again
+    // (rewindStaleChunks).
     const state = {
       attempt: Number(job.stageAttempts ?? job.attemptCount) || 1,
       chunksCurrent: false,
       maxAttempts: Number(job.maxAttempts) || 1,
+      rechunk: false,
       stage: job.stage ?? INGEST_STAGES[0],
     };
     let ingestError = null;

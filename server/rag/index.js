@@ -138,11 +138,17 @@ export const hashDocumentBytes = (fileBuffer) =>
  * and the chunk profile they were cut with (rag/chunk-profile.js): its id is
  * stamped on every chunk's metadata, the whole profile is returned as
  * `chunkProfile` (the staged ingest stores it with its chunk output).
+ * `parse` names the PDF settings the pages were parsed with when another
+ * process parsed them (the staged ingest's pages output); without it the
+ * profile names this process's own.
  */
-export const chunkDocumentPages = ({ docId, fileName, pages, source = null }) => {
+export const chunkDocumentPages = ({ docId, fileName, pages, parse = null, source = null }) => {
   const publicFilePath = buildPublicFilePath(docId);
   // Read once: the settings the chunks are cut with are the ones recorded.
-  const chunkProfile = describeChunkProfile();
+  const chunkProfile = describeChunkProfile({
+    paragraphDetection: parse?.paragraphDetection,
+    pdfParser: parse?.pdfParser,
+  });
   const chunks = chunkDocumentWithConfig({
     chunkOverlap: chunkProfile.overlap,
     chunkSize: chunkProfile.size,
