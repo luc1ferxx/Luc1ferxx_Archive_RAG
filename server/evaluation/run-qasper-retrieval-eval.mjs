@@ -34,6 +34,7 @@ import {
   sumTextChars,
 } from "./eval-run-config.js";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -235,7 +236,7 @@ const main = async () => {
   const documents = corpus.documents.filter((doc) => docKeys.has(doc.key));
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "qasper-retrieval-"));
 
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
 
   const { applyStandaloneProfile } = await import("../standalone-profile.js");

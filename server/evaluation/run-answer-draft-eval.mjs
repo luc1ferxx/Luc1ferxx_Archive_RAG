@@ -44,6 +44,7 @@ import {
   describeAgentFollowUp,
   summarizeAgentOutcomes,
 } from "./agent-answer-outcome.js";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 // The answer-rate flags this run used (rag/config.js); null on a checkout
 // that predates them.
@@ -254,7 +255,7 @@ const main = async () => {
 
   // As in run-doccompare-verification: storage reads RAG_DATA_DIRECTORY at first
   // import, so it is set before any RAG module loads.
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
   Object.assign(process.env, {
     AGENT_SKILL_GRAPH_ROLLOUT: "guarded",

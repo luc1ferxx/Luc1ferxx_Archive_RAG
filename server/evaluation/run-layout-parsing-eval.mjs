@@ -54,6 +54,7 @@ import {
 } from "./eval-run-config.js";
 import { describeQasperAnswer } from "./import-qasper.mjs";
 import { normalizeQasperAnswer, qasperAnswerF1, toQasperPrediction } from "./qasper-answer-metrics.js";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -315,7 +316,7 @@ const main = async () => {
   const paperIds = selectTablePapers(qasper, paperCount);
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "layout-parsing-"));
 
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
   Object.assign(process.env, { RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false", RAG_LONG_MEMORY_ENABLED: "false" });
 
