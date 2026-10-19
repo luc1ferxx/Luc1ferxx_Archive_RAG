@@ -1,3 +1,4 @@
+import { describeChunkProfile, readStoredChunkProfile } from "./chunk-profile.js";
 import { getRagIngestStageOutputMaxBytes, isRagIngestEmbedBatchingEnabled } from "./config.js";
 import { getDefaultEmbeddingBatcher } from "./ingest-embedding-batcher.js";
 import { INGEST_JOB_KINDS, INGEST_STAGE_OUTPUTS, INGEST_STAGES } from "./ingest-stages.js";
@@ -13,7 +14,8 @@ import { embedDocumentTextsForIndex } from "./vector-store.js";
 // The staged form of an ingest, run by rag/ingest-worker.js for an async job:
 //
 //   parse  the job's PDF -> `pages` (the PDF itself becomes `document_file`)
-//   chunk  `pages`       -> `chunks` (chunk documents, page count, profile)
+//   chunk  `pages`       -> `chunks` (chunk documents, page count, profile,
+//                           and the chunk profile they were cut with)
 //   embed  `chunks`      -> `embeddings` (per embedding space, through the
 //                           process's cross-document batcher, or one request
 //                           per job and space with RAG_INGEST_EMBED_BATCHING=false)
@@ -235,6 +237,7 @@ export const createIngestPipeline = ({
   batchingEnabled = isRagIngestEmbedBatchingEnabled,
   chunkPages = chunkDocumentPages,
   commit = commitDocument,
+  describeProfile = describeChunkProfile,
   embedChunks = embedDocumentChunks,
   embedUnbatched = embedDocumentTextsForIndex,
   findDuplicate = findDuplicateDocument,
@@ -275,6 +278,35 @@ export const createIngestPipeline = ({
       });
 
       return document ? { docId: document.docId, documentVersion: document.version ?? null } : null;
+    },
+
+    /**
+     * Whether the stored `chunks` were cut under another chunk profile than
+     * this process chunks with now (rag/chunk-profile.js): the worker then
+     * runs the job from the chunk stage again instead of embedding or
+     * indexing them. A chunk output without a profile (stored before
+     * profiles were recorded, or by a chunker that records none) is reused,
+     * and so is one this process cannot compare with because its own
+     * chunking setting is invalid (the chunk stage, and the health report's
+     * chunking entry, report that).
+     */
+    chunksAreStale({ inputs }) {
+      const { chunkProfile } = decodeJsonOutput(INGEST_STAGE_OUTPUTS.chunks, inputs[INGEST_STAGE_OUTPUTS.chunks]);
+      const stored = readStoredChunkProfile(chunkProfile);
+
+      if (stored === null) {
+        return false;
+      }
+
+      let current;
+
+      try {
+        current = describeProfile();
+      } catch {
+        return false;
+      }
+
+      return stored.id !== current.id;
     },
 
     async parse({ filePath }) {

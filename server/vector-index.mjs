@@ -272,7 +272,7 @@ const formatStatus = (status) => {
 
   for (const version of status.versions) {
     lines.push(
-      `${String(version.versionId).padStart(4)}  ${version.status.padEnd(9)} ${version.chunkTable.padEnd(32)} ${version.embedding.identity}/${version.embedding.dimensions} (${version.embedding.source})  chunks=${version.chunkCount ?? "?"}${version.dualWriteUntil ? `  dual-write until ${version.dualWriteUntil}` : ""}`
+      `${String(version.versionId).padStart(4)}  ${version.status.padEnd(9)} ${version.chunkTable.padEnd(32)} ${version.embedding.identity}/${version.embedding.dimensions} (${version.embedding.source})  chunks=${version.chunkCount ?? "?"}  chunk-profile=${version.chunkProfile?.id ?? version.chunkProfile ?? "unknown"}${version.dualWriteUntil ? `  dual-write until ${version.dualWriteUntil}` : ""}`
     );
   }
 

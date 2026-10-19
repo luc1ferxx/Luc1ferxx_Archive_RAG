@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { derivePgvectorHealthProblems } from "../health.js";
+import { computeChunkProfileId, describeChunkProfile } from "../rag/chunk-profile.js";
 import { DEFAULT_SPARSE_PRUNE_DF_FRACTION, configureEmbeddingDimensions } from "../rag/config.js";
 import {
   describeEmbeddingCache,
@@ -91,7 +92,12 @@ const ENV_KEYS = [
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",
   "OPENAI_EMBEDDING_MODEL",
+  "PDF_PARAGRAPH_DETECTION",
+  "PDF_PARSER",
   "POSTGRES_ROW_LEVEL_SECURITY",
+  "RAG_CHUNK_OVERLAP",
+  "RAG_CHUNK_SIZE",
+  "RAG_CHUNK_STRATEGY",
   "RAG_EMBEDDING_DIMENSIONS",
   "RAG_EMBEDDING_DOCUMENT_PREFIX",
   "RAG_EMBEDDING_QUERY_PREFIX",
@@ -1325,6 +1331,84 @@ test("registry status reports progress, drift, stalled builds, closed windows an
 
   empty.state.versions.clear();
   assert.equal((await describeIndexVersions()).registry, "empty");
+});
+
+test("a version's recorded chunk profile is reported, and a different current one is a warning, never a problem", async () => {
+  const database = useDatabase();
+  const current = describeChunkProfile();
+  const older = describeChunkProfile({ paragraphDetection: false, size: 600 });
+  const withProfile = (profile) => ({ indexType: "hnsw", ...(profile ? { chunkProfile: JSON.parse(JSON.stringify(profile)) } : {}) });
+  const chunkWarnings = (status) =>
+    status.warnings.filter((warning) => warning.code.startsWith("chunk_profile_"));
+
+  // Version 1 and versions created before profiles were recorded: unknown,
+  // and nothing to warn about.
+  let status = await describeIndexVersions();
+
+  assert.equal(status.active.chunkProfile, "unknown");
+  assert.deepEqual(chunkWarnings(status), []);
+
+  addPinnedVersion(database, { index_params: withProfile(older), status: "ready", versionId: 2, dual_write_until: new Date(database.clock.now + 60_000) });
+  addPinnedVersion(database, { index_params: withProfile(current), status: "ready", versionId: 3, dual_write_until: new Date(database.clock.now + 60_000) });
+  addPinnedVersion(database, { index_params: withProfile(older), status: "ready", versionId: 4, dual_write_until: new Date(database.clock.now - 1) });
+  addPinnedVersion(database, { index_params: withProfile(null), status: "ready", versionId: 5, dual_write_until: new Date(database.clock.now + 60_000) });
+
+  status = await describeIndexVersions({ includeDrift: false });
+
+  // Version 2 still receives writes under another profile; 4 is past its
+  // window, 3 matches, 5 has none.
+  assert.deepEqual(
+    chunkWarnings(status).map(({ code, versionId }) => [code, versionId]),
+    [["chunk_profile_differs_from_version", 2]]
+  );
+  assert.deepEqual(
+    Object.fromEntries(status.versions.map((version) => [version.versionId, version.chunkProfile?.id ?? version.chunkProfile])),
+    { 1: "unknown", 2: older.id, 3: current.id, 4: older.id, 5: "unknown" }
+  );
+  // The profile beside the index params changes neither them nor the space.
+  assert.deepEqual(
+    status.versions.find((version) => version.versionId === 2).indexParams,
+    status.versions.find((version) => version.versionId === 5).indexParams
+  );
+
+  activate(database, 2);
+  status = await describeIndexVersions({ includeDrift: false });
+
+  const [warning] = chunkWarnings(status);
+
+  assert.equal(chunkWarnings(status).length, 1);
+  assert.equal(warning.code, "chunk_profile_differs_from_active");
+  assert.equal(warning.versionId, 2);
+  assert.deepEqual(warning.recorded, older);
+  assert.deepEqual(warning.current, current);
+  assert.deepEqual(warning.fields, ["size", "paragraphDetection"]);
+  assert.deepEqual(warning.settings, { PDF_PARAGRAPH_DETECTION: "false", RAG_CHUNK_SIZE: "600" });
+  assert.match(warning.message, /RAG_CHUNK_SIZE=600/);
+  assert.match(warning.message, /npm run vector:index -- build/);
+  assert.deepEqual(status.problems, []);
+
+  // The same settings here as the active build's: nothing to say about it,
+  // but version 3 (still written to) was built under the defaults.
+  process.env.RAG_CHUNK_SIZE = "600";
+  process.env.PDF_PARAGRAPH_DETECTION = "false";
+  assert.deepEqual(
+    chunkWarnings(await describeIndexVersions({ includeDrift: false })).map(({ code, versionId }) => [code, versionId]),
+    [["chunk_profile_differs_from_version", 3]]
+  );
+
+  // An older chunker can only be re-cut, no setting restores it.
+  database.state.versions.get(2).index_params = withProfile({ ...older, chunkerVersion: 1, id: computeChunkProfileId({ ...older, chunkerVersion: 1 }) });
+  const [chunkerChanged] = chunkWarnings(await describeIndexVersions({ includeDrift: false }));
+
+  assert.deepEqual(chunkerChanged.fields, ["chunkerVersion"]);
+  assert.deepEqual(chunkerChanged.settings, {});
+
+  // An invalid chunking setting is the health report's chunking entry: the
+  // status read neither throws nor compares.
+  process.env.RAG_CHUNK_STRATEGY = "fixed";
+  status = await describeIndexVersions({ includeDrift: false });
+  assert.deepEqual(chunkWarnings(status), []);
+  assert.equal(status.active.versionId, 2);
 });
 
 test("the active version stays in the status however many newer versions were retired or failed", async () => {

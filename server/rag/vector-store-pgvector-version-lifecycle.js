@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { chunkDocument } from "./chunker.js";
+import { chunkDocumentWithConfig } from "./chunker.js";
+import { describeChunkProfile, stampChunkProfile } from "./chunk-profile.js";
 import {
   getDocumentsPostgresTable,
   getEmbeddingTaskPrefixesForModel,
@@ -303,6 +304,10 @@ export const probeEmbeddingSpace = async (space) => {
  */
 export const createIndexVersion = async ({
   builderId = null,
+  // The chunk profile the build cuts documents with (rag/chunk-profile.js),
+  // recorded with the version's index params; read here, before any DDL, so
+  // an invalid chunking setting creates nothing.
+  chunkProfile = describeChunkProfile(),
   indexParams = {},
   leaseMs = getIndexVersionBuildLeaseMs(),
   space = getConfiguredEmbeddingSpace(),
@@ -414,7 +419,10 @@ export const createIndexVersion = async ({
             space.documentPrefix,
             space.queryPrefix,
             space.dimensions,
-            JSON.stringify(params),
+            // normalizeIndexParams reads the index settings only, so the
+            // profile beside them changes neither the version's index nor
+            // what is compared with the configuration.
+            JSON.stringify({ ...params, chunkProfile }),
             builderId,
             toPositiveInteger(leaseMs, getIndexVersionBuildLeaseMs()),
           ]
@@ -644,7 +652,11 @@ const buildDocumentChunks = async ({ loadPages, source }) => {
     );
   }
 
-  const chunks = chunkDocument({
+  const chunkProfile = describeChunkProfile();
+  const chunks = chunkDocumentWithConfig({
+    chunkOverlap: chunkProfile.overlap,
+    chunkSize: chunkProfile.size,
+    chunkStrategy: chunkProfile.strategy,
     docId,
     fileName: String(source.file_name ?? ""),
     pages,
@@ -656,12 +668,13 @@ const buildDocumentChunks = async ({ loadPages, source }) => {
     throw new DocumentSourceError(`No extractable text was found in the stored PDF of ${docId}.`);
   }
 
-  // Stamped like an ingest stamps them (rag/index.js commitDocument).
+  // Stamped like an ingest stamps them (rag/index.js chunkDocumentPages and
+  // commitDocument).
   const documentVersion = Number(source.content_version ?? 1) || 1;
 
   return chunks.map((chunk) => ({
     id: chunk.id,
-    metadata: stampChunkDocumentVersion(chunk.metadata, documentVersion),
+    metadata: stampChunkDocumentVersion(stampChunkProfile(chunk.metadata, chunkProfile), documentVersion),
     pageContent: chunk.pageContent,
   }));
 };

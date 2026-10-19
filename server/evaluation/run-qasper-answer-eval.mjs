@@ -23,6 +23,11 @@
 // cites its source scores lower than the bare span. Compare runs of this
 // system with each other, not with leaderboard numbers of span extractors.
 //
+// The report records the chunking settings and the commit it ran with
+// (config.chunking, config.git; eval-run-config.js), and on the rag surface
+// each row's contextChars, the characters of chunk text the answer model was
+// given (null on the agent surface, whose body carries no context text).
+//
 // Usage (OpenAI-compatible endpoint, e.g. local Ollama):
 //   OPENAI_BASE_URL=http://127.0.0.1:11434/v1 OPENAI_API_KEY=ollama \
 //   OPENAI_CHAT_MODEL=qwen2.5:7b OPENAI_EMBEDDING_MODEL=nomic-embed-text \
@@ -48,6 +53,7 @@ import {
   isAgentVerdictOverridden,
   summarizeAgentOutcomes,
 } from "./agent-answer-outcome.js";
+import { describeChunkingConfig, describeEvaluationCheckout, sumTextChars } from "./eval-run-config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -100,7 +106,8 @@ const describePromptTemplates = async () => {
 
 // The rag surface's answer as this eval scores it. contextPages are the pages
 // the model was shown (a gate abstention still carries them); citedPages are
-// the pages its [Source N] labels name, empty for an abstention.
+// the pages its [Source N] labels name, empty for an abstention; contextChars
+// is the chunk text of those contexts, in characters.
 export const describeRagSurfaceAnswer = (result) => {
   const abstained = Boolean(result?.abstained);
 
@@ -110,6 +117,7 @@ export const describeRagSurfaceAnswer = (result) => {
     // otherwise an abstention is the confidence gate's.
     abstainSource: abstained ? result.abstainSource ?? "gate" : null,
     citedPages: citedSourcePages({ abstained, citations: result?.citations ?? [], text: result?.text }),
+    contextChars: sumTextChars(result?.retrievedContexts, (context) => context?.text),
     contextPages: (result?.retrievedContexts ?? []).map((context) => Number(context.pageNumber)),
     text: result?.text,
     verdictOverridden: result?.verdictOverridden === true,
@@ -176,6 +184,8 @@ const main = async () => {
   }
 
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  // The checkout, before the run writes anything.
+  const git = await describeEvaluationCheckout();
 
   if (corpus.metadata?.granularity !== "paragraph") {
     throw new Error("Build the corpus with import-qasper.mjs --granularity paragraph so evidence is paragraph-level.");
@@ -277,6 +287,7 @@ const main = async () => {
           // An abstention counts as returning no sources. contextPages keeps
           // the figure earlier agent reports called evidenceRecall.
           citedPages: citedSourcePages({ abstained: !outcome.answered, citations: sources, text: body.agentAnswer }),
+          contextChars: null,
           contextPages: outcome.answered ? sources.map((citation) => Number(citation.pageNumber)) : [],
           text: body.agentAnswer,
           verdictOverridden: isAgentVerdictOverridden(body),
@@ -299,6 +310,7 @@ const main = async () => {
         citationPrecision: evidence.citationPrecision,
         citedEvidenceHit: evidence.citedEvidenceHit,
         citedPages: answer.citedPages,
+        contextChars: answer.contextChars ?? null,
         contextEvidenceHit: evidence.contextEvidenceHit,
         f1: Number(qasperAnswerF1(prediction, testCase.referenceAnswers ?? []).toFixed(4)),
         id: testCase.id,
@@ -323,9 +335,11 @@ const main = async () => {
       answerRateFlags: await describeAnswerRateFlags(),
       cases: caseCount,
       chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
+      chunking: await describeChunkingConfig(),
       claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
       corpus: path.basename(corpusPath),
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
+      git,
       promptTemplates: await describePromptTemplates(),
       // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
       queryAdapter: getQueryAdapterReportFingerprint(),

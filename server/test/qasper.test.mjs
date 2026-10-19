@@ -170,6 +170,22 @@ test("the rag surface resolves labels against the response citations", () => {
   assert.deepEqual(answer.citedPages, [3, 5]);
 });
 
+test("the rag surface records the characters of chunk text the answer model was given", () => {
+  const answer = describeRagSurfaceAnswer({
+    abstained: false,
+    citations: CITATIONS,
+    retrievedContexts: [
+      { pageNumber: 3, rank: 1, text: "BM25 over paragraphs." },
+      { pageNumber: 5, rank: 2, text: "A cross-encoder reranks." },
+      { pageNumber: 7, rank: 3 },
+    ],
+    text: "They use BM25 [Source 1].",
+  });
+
+  assert.equal(answer.contextChars, "BM25 over paragraphs.".length + "A cross-encoder reranks.".length);
+  assert.equal(describeRagSurfaceAnswer({ abstained: true, text: "" }).contextChars, 0);
+});
+
 test("citation precision is the share of distinct cited pages holding evidence", () => {
   // Mixed: page 3 is evidence, page 5 is not.
   assert.deepEqual(

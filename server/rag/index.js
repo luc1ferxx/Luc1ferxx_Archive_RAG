@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { chunkDocument } from "./chunker.js";
+import { chunkDocumentWithConfig } from "./chunker.js";
+import { describeChunkProfile, stampChunkProfile } from "./chunk-profile.js";
 import {
   isAgentFollowUpOriginalQuestionEnabled,
   isDocumentTrashEnabled,
@@ -132,10 +133,20 @@ const createStatusError = (message, status, extra = {}) =>
 export const hashDocumentBytes = (fileBuffer) =>
   createHash("sha256").update(fileBuffer).digest("hex");
 
-/** Chunk stage: the pages as chunk documents, plus what the registry records. */
+/**
+ * Chunk stage: the pages as chunk documents, plus what the registry records,
+ * and the chunk profile they were cut with (rag/chunk-profile.js): its id is
+ * stamped on every chunk's metadata, the whole profile is returned as
+ * `chunkProfile` (the staged ingest stores it with its chunk output).
+ */
 export const chunkDocumentPages = ({ docId, fileName, pages, source = null }) => {
   const publicFilePath = buildPublicFilePath(docId);
-  const chunks = chunkDocument({
+  // Read once: the settings the chunks are cut with are the ones recorded.
+  const chunkProfile = describeChunkProfile();
+  const chunks = chunkDocumentWithConfig({
+    chunkOverlap: chunkProfile.overlap,
+    chunkSize: chunkProfile.size,
+    chunkStrategy: chunkProfile.strategy,
     docId,
     fileName,
     publicFilePath,
@@ -151,10 +162,11 @@ export const chunkDocumentPages = ({ docId, fileName, pages, source = null }) =>
   }
 
   return {
+    chunkProfile,
     documents: chunks.map((chunk) => ({
       id: chunk.id,
       pageContent: chunk.pageContent,
-      metadata: chunk.metadata,
+      metadata: stampChunkProfile(chunk.metadata, chunkProfile),
     })),
     pageCount: pages.length,
     profile: buildDocumentProfile({

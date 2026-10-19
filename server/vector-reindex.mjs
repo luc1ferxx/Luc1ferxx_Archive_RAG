@@ -54,7 +54,8 @@ import os from "os";
 import path from "path";
 import { pathToFileURL } from "url";
 
-import { chunkDocument } from "./rag/chunker.js";
+import { chunkDocumentWithConfig } from "./rag/chunker.js";
+import { describeChunkProfile, stampChunkProfile } from "./rag/chunk-profile.js";
 import {
   getEmbeddingDimensions,
   getEmbeddingIndexIdentity,
@@ -360,13 +361,20 @@ export const prepareFromDocumentBytes = async (document) => {
     // The decrypted bytes (getDocumentFile), parsed from a working file.
     await writeWorkingFile(tempPath, stored.fileBuffer);
     const pages = await loadPdfPages(tempPath);
-    const chunks = chunkDocument({
+    // Re-chunked chunks say which chunk profile cut them, as an ingest's do
+    // (rag/index.js chunkDocumentPages); chunks re-embedded from a local or
+    // Qdrant index keep the metadata they had.
+    const chunkProfile = describeChunkProfile();
+    const chunks = chunkDocumentWithConfig({
+      chunkOverlap: chunkProfile.overlap,
+      chunkSize: chunkProfile.size,
+      chunkStrategy: chunkProfile.strategy,
       docId: document.docId,
       fileName: document.fileName,
       publicFilePath: buildPublicFilePath(document.docId),
       pages,
       source: document.source ?? null,
-    });
+    }).map((chunk) => ({ ...chunk, metadata: stampChunkProfile(chunk.metadata, chunkProfile) }));
 
     // The content these chunks are cut from: the row the bytes were read
     // with. The write stamps the version it finds under its lock.

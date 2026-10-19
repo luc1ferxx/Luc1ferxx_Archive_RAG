@@ -57,11 +57,13 @@ import {
   isRetryableIngestError,
 } from "../rag/ingest-worker.js";
 import {
+  chunkDocumentPages,
   clearDocuments,
   ingestDocument,
   replaceDocument,
   supportsDocumentReplacement,
 } from "../rag/index.js";
+import { describeChunkProfile } from "../rag/chunk-profile.js";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import { configureRagDataDirectory } from "../rag/storage.js";
 import { getActiveDatabaseTenant } from "../rag/postgres-tenant.js";
@@ -767,6 +769,169 @@ for (const crashStage of INGEST_STAGES) {
     assert.deepEqual(scripted.committed[0].documentFile, PDF_BYTES, "the PDF survived the crash as the parse output");
   });
 }
+
+// --- chunk profiles across attempts (rag/chunk-profile.js) ------------------
+
+// The real chunk stage (chunkDocumentPages) between a fixed parse, a fake
+// embedding and a recording commit; `failOnce` names stages that fail once
+// with a 503 (retryable), `chunkPages` replaces the chunk stage's chunker.
+const createProfilePipeline = ({ chunkPages = undefined, failOnce = [] } = {}) => {
+  const calls = [];
+  const committed = [];
+  const failures = new Set(failOnce);
+  const space = { dimensions: 2, documentPrefix: "", identity: "fake", key: "fake|2", model: "fake", queryPrefix: "" };
+  const fail = (stage) => {
+    if (failures.delete(stage)) {
+      throw statusError(`${stage} is down`, 503);
+    }
+  };
+  const pipeline = createIngestPipeline({
+    ...(chunkPages ? { chunkPages } : {}),
+    commit: async ({ documents, docId, onCommit }) => {
+      calls.push("index");
+      fail("index");
+      committed.push(documents);
+      await onCommit?.({ client: null, docId, documentVersion: 1, duplicate: false });
+      return { docId, documentVersion: 1, duplicate: false, superseded: false };
+    },
+    embedChunks: async ({ documents }) => {
+      calls.push("embed");
+      fail("embed");
+      return { spaces: [space], vectorsBySpace: { [space.key]: documents.map(() => [0.5, 0.5]) } };
+    },
+    loadPages: async () => {
+      calls.push("parse");
+      return [{ pageNumber: 1, text: `1 Retention\n${"Signed contracts are kept for seven years after they end. ".repeat(14)}` }];
+    },
+  });
+  const chunk = pipeline.chunk;
+  const chunkOutputs = [];
+
+  pipeline.chunk = async (input) => {
+    calls.push("chunk");
+
+    const result = await chunk(input);
+
+    chunkOutputs.push(decodeJsonOutput("chunks", result.output));
+    return result;
+  };
+
+  const chunksAreStale = pipeline.chunksAreStale;
+
+  pipeline.chunksAreStale = (input) => {
+    calls.push("check");
+    return chunksAreStale(input);
+  };
+
+  return { calls, chunkOutputs, committed, pipeline };
+};
+
+const PROFILE_ENVIRONMENT = { PDF_PARAGRAPH_DETECTION: undefined, PDF_PARSER: undefined, RAG_CHUNK_OVERLAP: undefined, RAG_CHUNK_SIZE: undefined, RAG_CHUNK_STRATEGY: undefined };
+
+for (const failedStage of ["embed", "index"]) {
+  test(`a retry at ${failedStage} under another chunk profile chunks the job again instead of reusing its chunks`, async () =>
+    withEnv(PROFILE_ENVIRONMENT, async () => {
+      const clock = createClock();
+      const store = createInMemoryIngestJobStore({ now: clock.now });
+      const scripted = createProfilePipeline({ failOnce: [failedStage] });
+      const worker = createStagedWorker({ clock, pipeline: scripted.pipeline, store, tempDirectory: tempRoot });
+      const job = await enqueue(store, ALICE, { docId: `doc-profile-${failedStage}` });
+      const before = describeChunkProfile();
+
+      assert.equal((await worker.runOnce()).outcome, "queued");
+      assert.equal((await store.get(job.jobId)).stage, failedStage);
+
+      const [storedChunks] = scripted.chunkOutputs;
+
+      // The stored chunk output carries the profile it was cut with.
+      assert.deepEqual(storedChunks.chunkProfile, JSON.parse(JSON.stringify(before)));
+      assert.ok(storedChunks.documents.every((document) => document.metadata.chunkProfileId === before.id));
+
+      // The next attempt runs with a smaller chunk size.
+      process.env.RAG_CHUNK_SIZE = "300";
+      const after = describeChunkProfile();
+
+      assert.notEqual(after.id, before.id);
+      assert.deepEqual(await worker.runOnce(), { jobId: job.jobId, outcome: "succeeded" });
+      assert.deepEqual(scripted.calls, [
+        // Chunks the first attempt cut itself are never checked.
+        "parse",
+        "chunk",
+        "embed",
+        ...(failedStage === "index" ? ["index"] : []),
+        // The second attempt checks the stored chunks once, then goes back
+        // to the chunk stage, never the parse.
+        "check",
+        "chunk",
+        "embed",
+        "index",
+      ]);
+      assert.equal(scripted.committed.length, 1);
+      assert.ok(scripted.committed[0].every((document) => document.metadata.chunkProfileId === after.id));
+      assert.ok(scripted.committed[0].every((document) => document.pageContent.length <= 300));
+
+      const finished = await store.get(job.jobId);
+
+      assert.equal(finished.status, "succeeded");
+      assert.equal(finished.attemptCount, 2);
+    }));
+}
+
+test("a retry under the same chunk profile, or with chunks stored before profiles, reuses the stored chunks", async () =>
+  withEnv(PROFILE_ENVIRONMENT, async () => {
+    for (const legacy of [false, true]) {
+      const clock = createClock();
+      const store = createInMemoryIngestJobStore({ now: clock.now });
+      // Chunks from before this change: no chunkProfile in the output, no
+      // stamp on the chunks.
+      const chunkPages = legacy
+        ? (input) => {
+            const { chunkProfile, documents, ...rest } = chunkDocumentPages(input);
+
+            return {
+              ...rest,
+              documents: documents.map(({ metadata: { chunkProfileId, ...metadata }, ...document }) => ({ ...document, metadata })),
+            };
+          }
+        : undefined;
+      const scripted = createProfilePipeline({ chunkPages, failOnce: ["embed"] });
+      const worker = createStagedWorker({ clock, pipeline: scripted.pipeline, store, tempDirectory: tempRoot });
+
+      delete process.env.RAG_CHUNK_SIZE;
+      await enqueue(store, ALICE, { docId: `doc-profile-${legacy ? "legacy" : "same"}` });
+      assert.equal((await worker.runOnce()).outcome, "queued");
+
+      // A legacy output is reused even under another profile: nothing says
+      // what cut it.
+      if (legacy) {
+        process.env.RAG_CHUNK_SIZE = "300";
+      }
+
+      assert.equal((await worker.runOnce()).outcome, "succeeded");
+      // Checked once in the second attempt, not again at index.
+      assert.deepEqual(scripted.calls, ["parse", "chunk", "embed", "check", "embed", "index"], legacy ? "legacy" : "same profile");
+      assert.ok(scripted.committed[0].some((document) => document.pageContent.length > 300) || !legacy);
+    }
+  }));
+
+test("stored chunks are stale only when both their profile and this process's are known and differ", () => {
+  const recorded = describeChunkProfile();
+  const inputsWith = (value) => ({ chunks: encodeJsonOutput("chunks", value) });
+  const staleUnder = (describeProfile, value) => createIngestPipeline({ describeProfile }).chunksAreStale({ inputs: inputsWith(value) });
+
+  assert.equal(staleUnder(() => recorded, { chunkProfile: recorded, documents: [] }), false);
+  assert.equal(staleUnder(() => describeChunkProfile({ size: 300 }), { chunkProfile: recorded, documents: [] }), true);
+  assert.equal(staleUnder(() => describeChunkProfile({ size: 300 }), { documents: [] }), false, "stored before profiles");
+  assert.equal(staleUnder(() => describeChunkProfile({ size: 300 }), { chunkProfile: { id: "x" }, documents: [] }), false);
+  // This process's own setting is invalid: the chunk stage reports it; the
+  // stored chunks, cut under a valid one, are used.
+  assert.equal(
+    staleUnder(() => {
+      throw new Error('RAG_CHUNK_STRATEGY must be one of structured, simple, sentence; got "fixed".');
+    }, { chunkProfile: recorded, documents: [] }),
+    false
+  );
+});
 
 test("each stage has its own budget and backoff; a stage out of attempts dead-letters the job, and a requeue resumes it there", async () => {
   const clock = createClock();
