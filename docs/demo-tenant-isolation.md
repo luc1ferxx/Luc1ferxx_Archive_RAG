@@ -194,5 +194,5 @@ TEST_FILES="test/tenant-isolation-hardened.e2e.test.mjs" bash scripts/run-pgvect
 - 进程内状态按进程计：注册表查询缓存（`TENANT_REGISTRY_CACHE_TTL_MS`，其他进程最多晚一个 TTL；按租户分区后仍然是每个进程一份）、查询嵌入缓存（按租户分区，每个进程一份）、限流计数和并发计数（不开 `RAG_SHARED_STATE=redis` 时）、用量账本未刷写的部分。多实例时这些上限按实例分别生效，擦除也碰不到其他进程的内存缓存。
 - 假模型只证明隔离边界在一条能工作的检索和回答路径上成立，不说明回答质量。模型配额的上限设得较宽，walkthrough 不会触发模型配额拒绝。
 - 浏览器界面只适合 token 带 workspace 列表或固定 workspace 的身份（carol、alice、bob），而且 token 是构建时写进前端包的；只有用户的 token 用不了界面（见"浏览器界面"）。界面没有在这里实际打开测试过，只核对了它读取的 `/auth/me` 路径（`workspace_switcher` 检查）。
-- compose override 只用 `docker compose config` 验证过，没有构建镜像、没有实际启动；e2e 测试在本地 PostgreSQL（Postgres.app 18）上跑，不是 compose 里的 pg16。
+- compose override 在 2026-10-18 构建并启动过一次：镜像构建成功、三个容器健康，walkthrough 两遍都是 26 PASS / 0 FAIL / 1 SKIP（见 `docs/tenant-isolation.md`「2026-10-18 的一次完整验证」）；e2e 测试在本地 PostgreSQL（Postgres.app 18）上跑，不是 compose 里的 pg16。
 - 保留期清理的第一次执行在启动后 1 分钟（`RETENTION_SWEEP_INTERVAL_MS` 和 60 秒取小）。e2e 把间隔调成 2 秒，并手工把记录改成过期，才在测试时间内看到删除和清除。

@@ -203,7 +203,7 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 
   - `ed25519`：每个会调用别的层的进程有自己的私钥，所有层共享一份受信公钥列表。用 `node server/service-keys.mjs` 生成。
 
-- **同一份其余配置**：模型、`RAG_*`、embedding 前缀、查询适配器文件等在各层保持一致，目前没有自动检查。模型的 key 只需要给网关；其他层在设了 `MODEL_GATEWAY_URL` 后不再直接调用模型（例外见下面的"限制"）。
+- **同一份其余配置**：模型、`RAG_*`、embedding 前缀、查询适配器文件等在各层保持一致，目前没有自动检查。开语义缓存时，查询适配器文件也要挂到 agent 层（缓存键读调用方进程里的文件）。模型的 key 只需要给网关；其他层在设了 `MODEL_GATEWAY_URL` 后不再直接调用模型（例外见下面的"限制"）。
 - 启动时先校验拓扑：角色未知、地址无效、`api` 没有 `AGENT_SERVICE_URL`、缺少可用密钥（`ed25519` 下还包括缺私钥、被调用的层没有任何合法调用方的公钥、`INTERNAL_SERVICE_REQUEST_BINDING` / `INTERNAL_SERVICE_REPLAY_CACHE` 写了无法识别的值），都会拒绝启动，报错里没有密钥。
 
 ### 在一台机器上跑起来
@@ -320,7 +320,7 @@ node service-keys.mjs generate ingest-worker   # 只有独立入库 worker 调�
 - 层间身份不是 mTLS，层间也没有加密。默认 `hmac` 下每一层都握有同一组密钥，能以任何 issuer 签名，而且默认没有防重放（token 在有效期内可重放，但已绑定方法、路径和请求体）。`ed25519` 下每层只能以自己的身份签名，默认开启防重放；防重放缓存按进程有上限，满了会淘汰最老的条目，没有 Redis 时不在副本之间共享。无论哪种模式，内部端口都必须只在内网可达，层间 TLS 要自己在前面加。
 - `ed25519` 只在四个独立进程的测试里跑通过（`test/service-identity-split.test.mjs`，检索层用的是 local 向量库，不是 PostgreSQL）；没有在 Docker 镜像或 PostgreSQL 上的检索层里跑过。老的几组拆分测试（`service-roles`、`retrieval-service`、`model-gateway` 等）手工签发不带绑定的 token，只在 `hmac` 下通过。
 - 没有 Redis 时，网关的配额、并发上限和熔断都按网关进程计算，多个网关副本时总量会超出设定值。
-- 公网入口的 `AGENT_SERVICE_TIMEOUT_MS` 现在也是 agent 层上运行的截止时间：到点时进行中的检索和模型调用被中止，运行在下一个安全点以 `deadline_exceeded` 结束。数据库语句不取消；检索层收到调用方断开不会停，只在自己的截止时间到时返回 504；模型并发上限的排队不响应取消。检索层没有并发上限或准入控制。
+- 公网入口的 `AGENT_SERVICE_TIMEOUT_MS` 现在也是 agent 层上运行的截止时间：到点时进行中的检索和模型调用被中止，运行在下一个安全点以 `deadline_exceeded` 结束。数据库语句不取消；检索层收到调用方断开不会停，只在自己的截止时间到时返回 504；排队等模型并发槽位的调用在取消时直接离队。检索层没有并发上限或准入控制。
 - agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康，跳过 5 秒。
 - 检索层或模型网关停掉时，`/chat` 返回 503 `AGENT_DEPENDENCY_UNAVAILABLE`（带 `Retry-After` 和 `dependency`），运行记为可重试的失败；单体里模型或数据库故障时也一样。以前这种情况返回 200，请用户批准 Web 搜索。
 - 各进程的 `/metrics` 和 `deploy/prometheus/` 的告警规则没有在真实的 Prometheus 里加载过；`compose.services.yml` 没有设置 `METRICS_*`。

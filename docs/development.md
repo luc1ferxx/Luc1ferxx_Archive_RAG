@@ -158,7 +158,7 @@ server/evaluation/results/<timestamped-files>
 - `/chat` response shape 会被前端 trace UI、feedback metadata 和 evaluation 使用，改字段时需要同步测试。
 - Working memory 是 run-scoped，不应写入长期记忆，除非用户明确要求。
 - `VECTOR_STORE_PROVIDER=pgvector` 是默认值，`local` / `qdrant` 只作显式 opt-in；provider 白名单之外的值必须 fail closed，不要加任何静默回落。pgvector 的 ingest/delete/clear 走 `rag/index.js` 里同一个 PostgreSQL 事务（embedding 在事务外算好），改动时保持这个边界。
-- 文档 RAG 默认两路召回 + RRF；rerank 放在 fusion 之后，不能用 rerank 或任何单路 combined scorer 冒充多路召回。sparse 路在 pgvector 上是 PostgreSQL FTS（`ts_rank_cd`），文档和代码里都不要写成 BM25。
+- 文档 RAG 默认两路召回 + RRF；rerank 放在 fusion 之后，不能用 rerank 或任何单路 combined scorer 冒充多路召回。sparse 路在 pgvector 上是 PostgreSQL FTS，打分由 `RAG_SPARSE_SCORING` 选：默认 `bm25`（Okapi BM25，`sparseBackend` 为 `postgres_bm25`），可选 `ts_rank_cd`（`postgres_fts_ts_rank_cd`）。`ts_rank_cd` 不是 BM25，文档和代码里不要把两者混写。
 - 评测报告的 `evidence` 必须通过 `server/evaluation/eval-evidence.js` 统一生成；不要手写 commit、dirty、corpus hash、config hash 或 source lineage，也不要回填旧 `latest.*`。
 - 不要提交 `server/.env`、私有 PDF、`server/data/`、上传会话文件、生成语料或 timestamped eval 结果。
 

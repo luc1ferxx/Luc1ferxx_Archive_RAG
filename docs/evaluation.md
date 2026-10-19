@@ -1923,20 +1923,20 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 ### 索引切换与入库流水线（2026-09-27）
 
-设计见 `docs/data-lifecycle.md`。2 个实例、`--tenant`、`/chat` 并发 8 全程压测，200 篇文档，新版本从 1536 维换到 768 维：建版本、校验、切换、回滚全程 0 错误（两轮 8,749 和 9,844 次 `/chat`），所有实例 2 秒内跟上新指针，切换和回滚命令约 235 ms。建版本 79 篇/秒（embedding 0 ms）或 8.8 篇/秒（100 ms，串行，每篇一次请求）。激活与当前配置不同模型的版本后，查询要多做一次 embedding，直到配置改过来（100 ms 时吞吐 −60%）。
+设计见 `docs/data-lifecycle.md`。2 个实例、`--tenant`、`/chat` 并发 8 全程压测，200 篇文档（800 个 chunk），新版本从 1536 维换到 768 维：建版本、校验、切换、回滚全程 0 错误（两轮 8,749 和 9,844 次 `/chat`），所有实例 2 秒内跟上新指针，切换和回滚命令约 235 ms。适用范围：只读 `/chat`，期间没有并发的上传、删除或替换，也不含 retire。这两轮跑在并行构建和"查询跟随激活版本"之前的代码上：当时建版本是串行的（embedding 0 ms 时 79 篇/秒，100 ms 时 8.8 篇/秒，每篇一次请求），激活与配置不同模型的版本后查询还要多做一次 embedding。这两点都已改掉，当前数字见下面「按激活版本做查询、并行建版本」。
 
 分阶段入库，64 篇、2 个独立 worker × 8 路、embedding 200 ms/请求、3 次重复：合批开/关在模型并发上限 8 时 64.8 [60.2, 69.4] 对 65.2 [60.5, 69.9] 篇/秒（重叠）；上限 2 时 41.7 [35.7, 47.7] 对 19.6 [19.2, 19.9] 篇/秒。合批只在并发上限或限流卡住时有收益；假模型按请求固定计时，偏向合批，这个倍数是上限。
 
 ### 检索调优（2026-09-27）
 
-设计见 `docs/retrieval-tuning.md`，命令 `eval:sparse-scoring`、`eval:semantic-cache`、`adapter:data`/`adapter:train`/`eval:query-adapter`。
+设计、命令参数和完整结果见 `docs/retrieval-tuning.md`，命令 `eval:sparse-scoring`、`bench:pgvector-scale`、`eval:semantic-cache`、`adapter:data`/`adapter:train`/`eval:query-adapter`。
 
 | 改动 | 结果 | 默认 |
 | --- | --- | --- |
 | BM25 替代 `ts_rank_cd` | dev hybrid 证据召回 −0.0012 [−0.0122, +0.0097]，没证明不差于 0.01，也没有显著差异 | **开**（用户决定） |
-| 常见词剪枝（>1,000 分块时） | 全表含常见词 p95 135 → 49 ms；QASPER 召回差值 0 [0, 0]；纯常见词查询前 10 条只重合 32–41% | 开 |
-| 语义缓存（阈值 0.97 + 守卫） | 留出对照集误命中 0/59；每次命中省 1.35 s；近义改写命中 11/17 | 关 |
-| 查询适配器 | dev hybrid 证据进候选 +0.0463 [+0.0244, +0.0694]；答案 F1 −0.0014，不显著 | 关（推荐配置） |
+| 常见词剪枝（>1,000 分块时） | 合成数据 10 万分块、2000 篇、租户身份查全表：100 条混合查询中含常见词的 11 条 p50/p95 `ts_rank_cd` 135/180 → 39/49 ms、BM25 281/389 → 40/51 ms，100 条整体 `ts_rank_cd` p95 135 → 73 ms；QASPER 全部论文 hybrid hitAtAll 差值 0 [0, 0]；只含常见词的查询剪枝后 top-10 与穷举的重合（recall@K）：单个常见词 `ts_rank_cd` 0.32、BM25 0.29，三个常见词 `ts_rank_cd` 0.41、BM25 0.957；QASPER 里这类题只有 3 + 19 道，对证据召回的影响没测到 | 开 |
+| 语义缓存（阈值 0.97 + 守卫 v2） | 类内对照 0/30（离线）、留出集 confirm 0/59 误命中（单侧 95% 上界 9.5%、5.0%；confirm 集在守卫重建后另写，不是盲测）；在线改写命中 11/17；每次命中省 1.35 s 来自守卫 v1 时的运行（n=26） | 关 |
+| 查询适配器 | dev hybrid 证据进候选 +0.0463 [+0.0244, +0.0694]；答案 F1 0.2576 → 0.2562（−0.0014），不显著 | 关（可选） |
 
 ### 统一图的真实模型规划（2026-09-27）
 
@@ -1944,7 +1944,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 ### 按激活版本做查询、并行建版本（2026-09-27）
 
-关掉查询缓存、2 实例、`--tenant`、embedding 100 ms：激活不同模型的版本而不改配置后，改前每个 `/chat` 3.98 次 embedding、吞吐 −28.4%，改后 2.01 次、−1.4%。200 篇建版本：串行 8.57 → 并行 4 篇 33.2 篇/秒；并发上限 2 时 25.1 篇/秒、153 次请求。命令：`npm run eval:load-test:index-switch`。
+关掉查询缓存、2 实例、`--tenant`、`/chat` 并发 8、embedding 100 ms（假模型：延迟固定、可并行、不限流）：激活不同模型的版本而不改配置后，改前（提交 85efbb6a）每个 `/chat` 3.98 次 embedding、吞吐 −28.4%，改后 2.01 次、−1.4%。200 篇建版本：改前串行 8.57 → 改后并行 4 篇 33.2 篇/秒；改后模型并发上限 2 时 25.1 篇/秒、153 次请求。构建数字是"瓶颈在 embedding、延迟固定"的最好情况；完整前提见 `docs/data-lifecycle.md`「查询嵌入跟随活动版本、并行构建」。命令（每次运行用自己的 `--latest-name`；改前那组是同一份压测脚本跑在 85efbb6a 的代码上）：`cd server && bash scripts/run-load-test-pgvector.sh --scenario index-switch --instances 2 --tenant --documents 200 --embedding-latency-ms 100 --switch-phase-ms 20000 --model-latency-ms 0 --no-embedding-cache --switch-build-concurrency 4 --latest-name <名字>`；在当前代码上测串行构建把 `--switch-build-concurrency` 改成 1，上限 2 再加 `--llm-max-concurrency 2`。`npm run eval:load-test:index-switch` 开着查询缓存、不带 `--no-embedding-cache`，跑不出这组数。
 
 ### 全文检索与行级安全（迁移 014）
 
@@ -1956,6 +1956,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
   - 函数里 `search_path` 固定为 `pg_catalog, pg_temp`，只有租户角色能执行；函数内关掉普通索引扫描（`enable_indexscan = off`），因为优化器不计解压 `search_vector` 的成本，大文档集时会错选"沿 `doc_id` 逐行过滤"，比 BitmapAnd 慢 3 倍；`ROWS 20` 让外层关联走主键索引，不会对整张表做 hash join。
   - `search_vector` 的统计目标提到 1000，让常见词都进入统计信息；默认值下，一条命中全表 46% 的查询被低估，串行打分要 530 ms，现在 180 ms。
   - 健康检查的行级安全项会确认租户角色能执行这个函数。
+  - 现状（迁移 030 之后）：默认 BM25，以及开剪枝的 `ts_rank_cd` 多篇检索，都走 `<分块表>_sparse_search`；`_sparse_rank` 只在 `ts_rank_cd`、剪枝关、租户身份、多篇文档时使用，见 `docs/retrieval-tuning.md`。
 - **修复前后**（2026-09-26，同一台机器，一次性集群，行级安全 enforce，修复前的代码放在临时 worktree 里按同样参数跑，每组 100 条查询）：
 
   | 场景 | sparse 文档集 p50 / p95 修复前 | 修复后 | hybrid 文档集 p50 / p95 修复前 | 修复后 | 单文档 sparse p50 修复前 → 修复后 |
@@ -1964,7 +1965,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
   | 10 万分块，1000/2000 篇 | 141.9 / 157.0 ms | **18.7 / 57.6 ms** | 142.5 / 158.8 ms | **17.4 / 57.5 ms** | 0.72 → 0.72 ms |
   | 10 万分块，全部 2000 篇 | 120.2 / 138.4 ms | **35.4 / 134.4 ms** | 121.0 / 137.1 ms | **30.4 / 136.7 ms** | 0.77 → 0.74 ms |
 
-  - 全表那一组 p95 没变：查询里有一个极常见的词时，几乎所有分块都命中，每一行都要打分，走索引也省不了这部分；这时优化器选并行顺序扫描，和修复前一样。要再降，得在查询里去掉文档频率极高的词（类似 BM25 的 IDF），这会改变检索结果，需要先做相关性评测。
+  - 全表那一组 p95 没变：查询里有一个极常见的词时，几乎所有分块都命中，每一行都要打分，走索引也省不了这部分；这时优化器选并行顺序扫描，和修复前一样。要再降，得在查询里去掉文档频率极高的词（类似 BM25 的 IDF），这会改变检索结果，需要先做相关性评测。后来的常见词剪枝从这里入手：候选只从不常见的词经 GIN 生成，仍用全部查询词打分，结果见「检索调优（2026-09-27）」。
   - 安全审查（三个方向，每个发现再由独立审查尝试推翻）确认并修掉的问题：函数先截断再由策略过滤会泄露"别的租户的文档是否含某词"（改为先按租户过滤文档 id）；表名大小写不一致；外层 hash join；健康检查缺这一项。
 - **整表 HNSW 的 recall 随规模下降**：到 100 万时为 0.495。原因是合成数据在簇内是各向同性噪声，真正的前 10 名之间几乎并列，对图索引来说是最坏情况；而且并行构建的图每次不同，两次运行相差 0.06–0.07。这一列不是应用路径，也不能代表真实 embedding 下的 recall。
 - **写入**：索引在线时，写入一个 50 块的文档，p50 从 1 万时的 203 ms 升到 100 万时的 513 ms（不含 embedding）。集群关了 fsync，所以这是持久化服务器上的下限。
