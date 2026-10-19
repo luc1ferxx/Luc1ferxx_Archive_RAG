@@ -21,9 +21,9 @@ flowchart LR
   CL --> O
 ```
 
-核心目标是让回答过程可解释、可回归。外层 execution plan 仍编排 document/Web/built-in/capability 等阶段；下面的 typed DAG 目前只在 custom Skill 阶段内部生效，不是全工具统一 DAG：
+核心目标是让回答过程可解释、可回归。默认配置下，外层 execution plan 仍编排 document/Web/built-in/capability 等阶段；下面的 typed DAG 只在 custom Skill 阶段内部生效，不是全工具统一 DAG：
 
-将所有阶段迁入同一受治理 DAG 的目标、不变量和验收门禁见 [统一 AgentRAG DAG 迁移决策](unified-agent-dag-migration.md)；v3 合同和 `shadow` 观测虽已部分接线，生产执行仍未完成。
+将所有阶段迁入同一受治理 DAG 的目标、不变量和验收门禁见 [统一 AgentRAG DAG 迁移决策](unified-agent-dag-migration.md)。v3 统一图由 `AGENT_UNIFIED_GRAPH_ROLLOUT` 控制（`off` 默认 / `shadow` / `guarded`）：`guarded` 下通过准入的 v3 图回答整个请求，由 LangGraph.js 调度；图里含一个审批门 Capability 时在图内暂停，批准或拒绝后在同一张图上续跑；执行前被拒时由 V1 回答。默认仍为 `off`，理由见迁移决策的「结论」。本地 qwen2.5:7b 上模型自己的计划只被接受 3/15（其余由确定性图兜底），不能当作真实模型能可靠规划全阶段图的证据。
 
 - Planner 先判断任务类型、文档数量、access scope 和是否需要 skill chain。
 - Retrieval 保留文档边界，尤其是 compare 请求。
@@ -49,7 +49,7 @@ flowchart LR
 1. 结合会话记忆把追问改写成独立检索问题。
 2. 对复杂问题拆分 evidence requirements，例如时间、生效范围、适用地区。
 3. 生成 query embedding，并按选中文档检索。
-4. 默认跑两路独立召回：dense 路（pgvector cosine；local / qdrant 为显式 opt-in）与 sparse 路（PostgreSQL FTS，`ts_rank_cd` 排序，不是 BM25），用 RRF 融合（weighted 可选，`RAG_HYBRID_ENABLED=false` 只跑 dense）。每个候选记录 route、原始 rank/score、fusion 分数和命中它的 retrieval query；多 query × 多路的结果按 `docId:chunkIndex` 稳定去重。`/chat` 响应附加 `retrieval` 块记录 provider 和两路是否真实产生候选。
+4. 默认跑两路独立召回：dense 路（pgvector cosine；local / qdrant 为显式 opt-in）与 sparse 路（pgvector 上为 PostgreSQL FTS，默认 Okapi BM25，`RAG_SPARSE_SCORING=bm25`；可选 `ts_rank_cd`，它不是 BM25），用 RRF 融合（weighted 可选，`RAG_HYBRID_ENABLED=false` 只跑 dense）。每个候选记录 route、原始 rank/score、fusion 分数和命中它的 retrieval query；多 query × 多路的结果按 `docId:chunkIndex` 稳定去重。`/chat` 响应附加 `retrieval` 块记录 provider 和两路是否真实产生候选。
 5. 可选启用 rerank，位置在 fusion 之后、confidence gate 之前；rerank 不能替代任何一路召回。
 6. 使用置信度门控过滤低相关或缺少 anchor coverage 的证据。
 7. 生成 grounded answer、citations、evidence summary 和 AgentRAG observability。
@@ -515,7 +515,7 @@ Task memory 只会作为 intent/execution planner 的 planning context 传入，
 
 | 顺序 | 主题 | 当前落点 |
 | --- | --- | --- |
-| 10 | 收敛编排 | Typed DAG 设为 custom skill 阶段的默认执行器；执行器与规划器拆成两个开关；全阶段 v3 统一图冻结在 shadow。 |
+| 10 | 收敛编排 | Typed DAG 设为 custom skill 阶段的默认执行器；执行器与规划器拆成两个开关；全阶段 v3 统一图先冻结在 shadow，之后开放 `guarded` 档（默认仍 `off`，见迁移决策）。 |
 | 11 | 运行预算 | 每次运行加 token / 成本 / 时长上限，按 LLMOps 事件计量，经 AsyncLocalStorage 归属到运行，超限后在步骤边界降级。 |
 | 12 | 模型网关保护 | 每个模型端点的并发上限和熔断器；熔断时直接切备用模型或立即失败。 |
 | 13 | 可观测性 | OpenTelemetry GenAI trace，默认 protobuf 导出（Phoenix 只收 protobuf），不记录问题、prompt、输出和文档内容。 |

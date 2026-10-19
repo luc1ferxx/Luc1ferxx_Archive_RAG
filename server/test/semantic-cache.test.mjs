@@ -1,6 +1,6 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import chat, { clearDocuments, deleteDocument, ingestDocumentPages } from "../chat.js";
@@ -12,7 +12,7 @@ import {
   resetDocumentRegistry,
   resetDocumentRegistryStore,
 } from "../rag/doc-registry.js";
-import { applyQueryAdapter } from "../rag/query-adapter.js";
+import { getQueryAdapterReportFingerprint, resetQueryAdapter, serializeQueryAdapter } from "../rag/query-adapter.js";
 import { createFileDocumentRegistryStore } from "../rag/doc-registry-file.js";
 import { resetVectorStore } from "../rag/vector-store.js";
 import { resetEmbeddingCache } from "../rag/embedding-cache.js";
@@ -70,6 +70,7 @@ const CACHE_ENV_NAMES = [
   "RAG_OBSERVABILITY_ENABLED",
   "RAG_OBSERVABILITY_EVENTS_PATH",
   "RAG_LONG_MEMORY_ENABLED",
+  "RAG_EMBEDDING_QUERY_ADAPTER",
 ];
 
 let savedEnvironment = {};
@@ -87,6 +88,7 @@ beforeEach(async () => {
   process.env.RAG_HYBRID_ENABLED = "false";
   process.env.RAG_LONG_MEMORY_ENABLED = "false";
   resetSemanticCache();
+  resetQueryAdapter();
 });
 
 afterEach(async () => {
@@ -522,24 +524,94 @@ test("a rewritten question also needs the raw question to match", async () => {
   );
 });
 
-const fakeAdapter = (fingerprint) => ({
-  dimensions: 3,
-  fingerprint,
-  matrix: Float32Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1]),
-});
+const ADAPTER_SPACE = Object.freeze({ dimensions: 3, documentPrefix: "", model: "adapter-test-model", queryPrefix: "" });
+
+const writeAdapterFile = async (filePath, matrix, mtime) => {
+  await writeFile(filePath, JSON.stringify(serializeQueryAdapter({ embedding: ADAPTER_SPACE, matrix })));
+  // A distinct modification time, so the reload does not depend on the
+  // filesystem's timestamp resolution.
+  await utimes(filePath, mtime, mtime);
+};
 
 test("a query adapter retrained in place moves lookups to a new key and purges the old entries", async () => {
   process.env.RAG_SEMANTIC_CACHE = "on";
-  await prime({ queryVector: applyQueryAdapter(fakeAdapter("adapter-a"), unitVector(0)) });
 
-  assert.equal((await lookup({ queryVector: applyQueryAdapter(fakeAdapter("adapter-a"), unitVector(0)) })).hit, true);
+  const adapterRoot = await mkdtemp(path.join(os.tmpdir(), "semantic-cache-adapter-"));
+  const adapterPath = path.join(adapterRoot, "adapter.json");
 
-  // Same file path, new weights: same direction here, but another space.
-  const retrained = await lookup({ queryVector: applyQueryAdapter(fakeAdapter("adapter-b"), unitVector(0)) });
+  try {
+    await writeAdapterFile(adapterPath, [1, 0, 0, 0, 1, 0, 0, 0, 1], new Date("2026-01-01T00:00:00Z"));
+    process.env.RAG_EMBEDDING_QUERY_ADAPTER = adapterPath;
 
-  assert.equal(retrained.hit, false);
-  assert.equal(getSemanticCacheStats().entries, 0);
-  assert.equal((await lookup()).hit, false, "an unadapted vector is another key too");
+    // The lookup sees the model's own vector, as in production
+    // (embedQueryCached); only the configured file can tell the adapters apart.
+    await prime();
+    assert.equal((await lookup()).hit, true);
+
+    // Same path, new weights: the cache must not serve answers the old
+    // adapter's retrieval produced.
+    await writeAdapterFile(adapterPath, [0, 0, 1, 1, 0, 0, 0, 1, 0], new Date("2026-01-02T00:00:00Z"));
+
+    const retrained = await lookup();
+
+    assert.equal(retrained.hit, false);
+    assert.equal(getSemanticCacheStats().entries, 0, "entries built under the old adapter are purged");
+
+    await prime();
+    assert.equal((await lookup()).hit, true, "the retrained adapter gets its own entries");
+
+    // A file that can no longer be read is another key as well: searches then
+    // run unadapted.
+    await rm(adapterPath);
+    assert.equal((await lookup()).hit, false);
+    assert.equal(getSemanticCacheStats().entries, 0);
+  } finally {
+    await rm(adapterRoot, { recursive: true, force: true });
+  }
+});
+
+test("an answer the retrieval ranked with another adapter than the key names is not stored", async () => {
+  process.env.RAG_SEMANTIC_CACHE = "on";
+
+  const adapterRoot = await mkdtemp(path.join(os.tmpdir(), "semantic-cache-adapter-"));
+  const adapterPath = path.join(adapterRoot, "adapter.json");
+  const servedBy = (fingerprint) => ({
+    ...answer(),
+    retrieval: { provider: "local", routes: { dense: { executed: true, queryAdapter: fingerprint } } },
+  });
+
+  try {
+    await writeAdapterFile(adapterPath, [1, 0, 0, 0, 1, 0, 0, 0, 1], new Date("2026-01-01T00:00:00Z"));
+
+    // A retrieval tier (RETRIEVAL_SERVICE_URL) that adapts while this process
+    // has no adapter configured: the key says no-adapter.
+    const unconfigured = await lookup();
+    process.env.RAG_EMBEDDING_QUERY_ADAPTER = adapterPath;
+    const configured = getQueryAdapterReportFingerprint();
+
+    assert.match(configured, /^qa1-/);
+    assert.deepEqual(storeSemanticCacheAnswer(unconfigured, servedBy(configured)), {
+      stored: false,
+      storeSkipReason: "query_adapter_changed",
+    });
+
+    // The file changed between the lookup and the search, or the retrieval
+    // tier loads another file.
+    const mismatch = await lookup();
+
+    assert.deepEqual(storeSemanticCacheAnswer(mismatch, servedBy("qa1-from-another-file")), {
+      stored: false,
+      storeSkipReason: "query_adapter_changed",
+    });
+    assert.equal((await lookup()).hit, false);
+
+    const matching = await lookup();
+
+    assert.equal(storeSemanticCacheAnswer(matching, servedBy(configured)).stored, true);
+    assert.equal((await lookup()).hit, true);
+  } finally {
+    await rm(adapterRoot, { recursive: true, force: true });
+  }
 });
 
 test("expired entries are swept on every store and lookup, not only in their own bucket", async () => {

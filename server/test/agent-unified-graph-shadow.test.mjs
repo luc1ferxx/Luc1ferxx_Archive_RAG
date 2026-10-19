@@ -9,6 +9,20 @@ import { withShadowPlanner } from "../rag/agent-planner-shadow.js";
 import { createCapabilityRegistry } from "../rag/capabilities/registry.js";
 import { createWebSearchCapability } from "../rag/capabilities/web.js";
 import { createDefaultSkillRegistry } from "../rag/skills/registry.js";
+import {
+  APPROVAL_TASK_QUESTION,
+  DOCUMENT_LOOP_QUESTION,
+  UNIFIED_ACCESS_SCOPE,
+  UNIFIED_DOC_ID,
+  UNIFIED_SESSION_ID,
+  createApprovalGatedTaskProposal,
+  createConditionalWebProposal,
+  createDocumentLoopRagService,
+  createProposalAdapter,
+  createTaskCapabilityRegistry,
+  createWebChatService,
+  requestBinding,
+} from "./fixtures/unified-graph-run-fixtures.mjs";
 
 const accessScope = { userId: "alice", workspaceId: "private-workspace" };
 const docIds = ["private-document"];
@@ -234,3 +248,189 @@ test("shadow records the observed planner's own outcome, never a fallback graph"
   assert.deepEqual(calls, { deterministic: 0, model: 2 });
   assert.equal(context.budgetState.used.documentRagCalls, 0);
 });
+
+// The planning problem guarded poses (agent-unified-graph-run.js): the
+// operator's Capability allowlist in the catalog and the same admission on the
+// validated graph.
+const taskActionContext = async ({ allowedCapabilityIds }) => {
+  const taskRagService = createDocumentLoopRagService();
+  const { registry: taskCapabilityRegistry } = await createTaskCapabilityRegistry({ ragService: taskRagService });
+
+  return {
+    accessScope: UNIFIED_ACCESS_SCOPE,
+    allowedCapabilityIds,
+    baseCapabilityRegistry: taskCapabilityRegistry,
+    budgetState: createAgentBudget(),
+    capabilityRegistry: taskCapabilityRegistry,
+    docIds: [UNIFIED_DOC_ID],
+    plan: { actionCapabilityId: "task.create", mode: "workspace_action" },
+    question: APPROVAL_TASK_QUESTION,
+    ragService: taskRagService,
+    registry: createDefaultSkillRegistry(),
+  };
+};
+const proposing = (proposal) => ({
+  id: "injected-shadow",
+  createExecutionGraph: async () => proposal(),
+});
+
+test("with guarded's allowlist, the intent's own approval-gated Capability is selected in shadow", async () => {
+  const allowed = await observeUnifiedAgentGraphShadow({
+    ...(await taskActionContext({ allowedCapabilityIds: ["task.create"] })),
+    plannerAdapter: proposing(createApprovalGatedTaskProposal),
+  });
+
+  assert.equal(allowed.status, "selected");
+  assert.deepEqual(allowed.errorCodes, []);
+  assert.equal(allowed.blockedSkillIds, undefined);
+  assert.deepEqual(allowed.graph.skillIds, ["document_rag", "document_evidence_check", "capability:task.create"]);
+
+  // Without the allowlist the Capability is not in the catalog at all.
+  const unlisted = await observeUnifiedAgentGraphShadow({
+    ...(await taskActionContext({ allowedCapabilityIds: [] })),
+    plannerAdapter: proposing(createApprovalGatedTaskProposal),
+  });
+
+  assert.equal(unlisted.status, "rejected");
+  assert.equal(unlisted.graph, null);
+});
+
+test("shadow runs guarded's admission: an inadmissible graph is rejected with its reason codes", async () => {
+  const taskNode = (nodeId) => ({
+    dependsOn: [],
+    failurePolicy: "fail_fast",
+    inputBindings: { title: requestBinding("question") },
+    nodeId,
+    skillId: "capability:task.create",
+  });
+  const recorded = [];
+  const event = await observeUnifiedAgentGraphShadow({
+    ...(await taskActionContext({ allowedCapabilityIds: ["task.create"] })),
+    plannerAdapter: proposing(() => ({ nodes: [taskNode("private-task"), taskNode("private-task-again")] })),
+    record: (payload) => recorded.push(payload),
+  });
+
+  // The validator accepts two Capability nodes; admission allows one.
+  assert.equal(event.status, "rejected");
+  assert.equal(event.executed, false);
+  assert.equal(event.planner.status, "selected", "the planner's own outcome is kept");
+  assert.deepEqual(event.errorCodes, ["graph_not_projectable", "multiple_approval_gated_capabilities"]);
+  assert.deepEqual(event.blockedSkillIds, ["capability:task.create"]);
+  assert.deepEqual(recorded, [event]);
+  // Blocked nodes are named by skill id only, as the rest of the event.
+  assert.equal(JSON.stringify(event).includes("private-task"), false);
+});
+
+test("a real shadow request plans with the operator's Capability allowlist, as guarded does", async () => {
+  const env = {
+    AGENT_PLANNER_ROLLOUT: "deterministic",
+    AGENT_SKILL_GRAPH_ROLLOUT: "off",
+    AGENT_UNIFIED_GRAPH_CAPABILITIES: "task.create",
+    AGENT_UNIFIED_GRAPH_ROLLOUT: "shadow",
+    RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
+    RAG_LONG_MEMORY_ENABLED: "false",
+  };
+  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  const taskRagService = createDocumentLoopRagService();
+  const { registry: taskCapabilityRegistry, writes } = await createTaskCapabilityRegistry({ ragService: taskRagService });
+  const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
+
+  Object.assign(process.env, env);
+
+  try {
+    const response = await runAgentRag({
+      accessScope: UNIFIED_ACCESS_SCOPE,
+      agentRunService,
+      capabilityRegistry: taskCapabilityRegistry,
+      docIds: [UNIFIED_DOC_ID],
+      question: APPROVAL_TASK_QUESTION,
+      ragService: taskRagService,
+      sessionId: UNIFIED_SESSION_ID,
+      unifiedGraphAllowedCapabilityIds: ["task.create"],
+      unifiedGraphPlannerAdapter: createProposalAdapter(createApprovalGatedTaskProposal),
+      userId: UNIFIED_ACCESS_SCOPE.userId,
+    });
+    const run = await agentRunService.getRun({ accessScope: UNIFIED_ACCESS_SCOPE, runId: response.body.agentRunId });
+    const shadowEvents = run.events.filter((event) => event.type === "unified_graph_planned");
+
+    assert.equal(shadowEvents.length, 1);
+    assert.equal(shadowEvents[0].payload.mode, "shadow");
+    // Without the allowlist the catalog had no task.create node and the
+    // validator refused the proposal guarded would admit.
+    assert.equal(shadowEvents[0].payload.status, "selected");
+    assert.equal(shadowEvents[0].payload.executed, false);
+    assert.equal(run.steps.some((step) => step.type === "graph_node"), false);
+    assert.equal(writes.length, 0, "shadow writes nothing; V1 asks for the approval itself");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("a real shadow request admits a Web node with the request's standing grant, as guarded does", async () => {
+  const env = {
+    AGENT_PLANNER_ROLLOUT: "deterministic",
+    AGENT_SKILL_GRAPH_ROLLOUT: "off",
+    AGENT_UNIFIED_GRAPH_ROLLOUT: "shadow",
+    RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
+    RAG_LONG_MEMORY_ENABLED: "false",
+  };
+  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  const observe = async (capabilityApprovals) => {
+    const webCalls = [];
+    const webRagService = createDocumentLoopRagService();
+    const { registry: webCapabilityRegistry } = await createTaskCapabilityRegistry({
+      ragService: webRagService,
+      webChatService: createWebChatService({ calls: webCalls }),
+    });
+    const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
+    const response = await runAgentRag({
+      accessScope: UNIFIED_ACCESS_SCOPE,
+      agentRunService,
+      capabilityApprovals,
+      capabilityRegistry: webCapabilityRegistry,
+      docIds: [UNIFIED_DOC_ID],
+      question: DOCUMENT_LOOP_QUESTION,
+      ragService: webRagService,
+      sessionId: UNIFIED_SESSION_ID,
+      unifiedGraphPlannerAdapter: createProposalAdapter(createConditionalWebProposal),
+      userId: UNIFIED_ACCESS_SCOPE.userId,
+    });
+    const run = await agentRunService.getRun({ accessScope: UNIFIED_ACCESS_SCOPE, runId: response.body.agentRunId });
+    const events = run.events.filter((event) => event.type === "unified_graph_planned");
+
+    assert.equal(events.length, 1);
+    return { event: events[0].payload, webCalls };
+  };
+
+  Object.assign(process.env, env);
+
+  try {
+    // Without a standing grant, admission refuses the Web node (guarded would
+    // fall back to V1 for the same reason).
+    const ungranted = await observe({});
+
+    assert.equal(ungranted.event.status, "rejected");
+    assert.deepEqual(ungranted.event.errorCodes, ["approval_required_without_standing_grant"]);
+    assert.deepEqual(ungranted.event.blockedSkillIds, ["web_search"]);
+
+    // The request's own grant reaches shadow admission: the graph guarded
+    // would admit is `selected`.
+    const granted = await observe({ "web.search": { approved: true } });
+
+    assert.equal(granted.event.status, "selected");
+    assert.deepEqual(granted.event.errorCodes, []);
+
+    // Shadow executes nothing; the document answer passed, so V1 never asked
+    // the Web either.
+    assert.deepEqual([...ungranted.webCalls, ...granted.webCalls], []);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+

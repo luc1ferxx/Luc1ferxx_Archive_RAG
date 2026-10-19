@@ -704,7 +704,7 @@ const buildRealInterpretation = (providers) => [
   "## Interpreting these numbers (real embeddings — read before quoting)",
   `Dense vectors come from \`${providers.embedding.name}\`, so unlike the deterministic report the dense and hybrid arms here reflect semantic retrieval. Limits to state alongside any number quoted from this report:`,
   "- **Small corpus.** Each split has a few dozen cases. Quote an arm difference only when the paired-delta table shows its 95% CI excluding 0.",
-  "- **The sparse arm is BM25 on the local backend.** A pgvector deployment's sparse route is PostgreSQL `ts_rank_cd` FTS, so the sparse and hybrid rows are not a measurement of the pgvector sparse route.",
+  "- **The sparse arm is BM25 on the local backend.** A pgvector deployment's sparse route is a separate implementation (Okapi BM25 over PostgreSQL full-text matching by default, with per-tenant statistics and common-term pruning; `ts_rank_cd` when `RAG_SPARSE_SCORING=ts_rank_cd`), so the sparse and hybrid rows are not a measurement of the pgvector sparse route; `eval:sparse-scoring` measures that one.",
   providers.rerank.provider === "cross-encoder"
     ? "- **Rerank is a cross-encoder** served by the endpoint named in the header; its latency is inside the timed path."
     : "- **Rerank is the heuristic lexical reranker**, not a neural cross-encoder. Run with `--rerank-provider cross-encoder` to measure one.",
@@ -756,7 +756,7 @@ const buildMarkdown = ({ report }) => {
       ? `- Provider: **real** embeddings — \`${providers.embedding.name}\` via \`${providers.embedding.endpointHost}\`. This run calls the embedding endpoint: ≈ ${report.runEmbeddingEstimate?.tokens ?? "?"} tokens, ${formatUsd(report.runEmbeddingEstimate?.usd)} at list price${providers.refusalProvider === "real" && report.refusal ? ", plus the refusal pass's chat calls (not estimated)" : ""}.`
       : `- Provider: **deterministic** embedding + answer provider (labeled) — model-equivalent \`${cost.embeddingModel}\` for cost estimates`,
     `- Rerank: ${describeRerank(providers)}`,
-    `- Sparse backend on this run: **BM25** (local backend). Note: on a pgvector deployment the sparse route is PostgreSQL \`ts_rank_cd\` FTS, not BM25.`,
+    `- Sparse backend on this run: **BM25** (local backend). Note: a pgvector deployment's sparse route is a separate implementation (Okapi BM25 over PostgreSQL full-text matching by default, \`ts_rank_cd\` when \`RAG_SPARSE_SCORING=ts_rank_cd\`), measured by \`eval:sparse-scoring\`.`,
     "",
     "## What each column means (and what it is NOT)",
     "- **Recall@K / NDCG@K / MRR / Precision@K / Noise@K**: standard IR ranking metrics on the final Top-K, graded against per-case expected evidence units.",
