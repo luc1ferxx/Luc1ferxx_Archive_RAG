@@ -26,6 +26,11 @@
 // Docling pages and fallbacks, in total and per paper, from each document's
 // routing report (codes and counts only).
 //
+// The report records the chunking settings and the commit it ran with
+// (config.chunking, config.git; eval-run-config.js), the PDF settings as
+// configured and as each arm parses (config.pdf), and per row and arm
+// contextChars, the characters of the chunks retrieved for the model.
+//
 // Usage (docling-serve running, a real chat model and embeddings):
 //   DOCLING_SERVE_URL=http://127.0.0.1:5010 OPENAI_BASE_URL=http://127.0.0.1:11434/v1 \
 //   OPENAI_API_KEY=ollama OPENAI_CHAT_MODEL=qwen2.5:7b OPENAI_EMBEDDING_MODEL=nomic-embed-text \
@@ -41,8 +46,15 @@ import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  describeChunkingConfig,
+  describeEvaluationCheckout,
+  describePdfConfig,
+  sumTextChars,
+} from "./eval-run-config.js";
 import { describeQasperAnswer } from "./import-qasper.mjs";
 import { normalizeQasperAnswer, qasperAnswerF1, toQasperPrediction } from "./qasper-answer-metrics.js";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -89,6 +101,27 @@ export const createLayoutParsers = ({ fetchImpl, loadPdfDocument, loadPdfPagesWi
     pages: (await loadPdfDocument(filePath, { paragraphDetection: true })).pages,
     routing: null,
   }),
+});
+
+/**
+ * config.pdf: the PDF settings this process is configured with, and what
+ * each arm parses with -- the pdf.js arms force paragraph detection off or
+ * on whatever the setting says, auto keeps the configured one, and Docling's
+ * text has no paragraph step (null).
+ */
+export const describeLayoutPdfConfig = (parsers, configured) => ({
+  ...configured,
+  arms: Object.fromEntries(
+    parsers.map((parser) => [
+      parser,
+      {
+        auto: { paragraphDetection: configured.paragraphDetection, parser: "auto" },
+        docling: { paragraphDetection: null, parser: "docling" },
+        pdfjs: { paragraphDetection: false, parser: "pdfjs" },
+        "pdfjs-paragraphs": { paragraphDetection: true, parser: "pdfjs" },
+      }[parser],
+    ])
+  ),
 });
 
 const countAutoRouting = (routing) => {
@@ -278,10 +311,12 @@ const main = async () => {
   const [baseParser, variantParser] = parsers;
   const concurrency = Math.max(1, Number(option("--concurrency", "1")) || 1);
   const qasper = JSON.parse(await readFile(qasperPath, "utf8"));
+  // The checkout, before the run writes anything.
+  const git = await describeEvaluationCheckout();
   const paperIds = selectTablePapers(qasper, paperCount);
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "layout-parsing-"));
 
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
   Object.assign(process.env, { RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false", RAG_LONG_MEMORY_ENABLED: "false" });
 
@@ -367,10 +402,12 @@ const main = async () => {
           includeRetrievedContexts: true,
           sessionId: `layout-${qa.question_id}-${parser}`,
         });
-        const context = (result?.retrievedContexts ?? []).map((entry) => entry.text ?? entry.pageContent ?? "").join("\n");
+        const contexts = (result?.retrievedContexts ?? []).map((entry) => entry.text ?? entry.pageContent ?? "");
+        const context = contexts.join("\n");
 
         row[parser] = {
           abstained: Boolean(result?.abstained),
+          contextChars: sumTextChars(contexts),
           f1: Number(qasperAnswerF1(toQasperPrediction({ abstained: result?.abstained, text: result?.text }), references).toFixed(4)),
           inContext: spans.length > 0 ? containsGoldSpan(context, spans) : null,
           inDocument: spans.length > 0 ? containsGoldSpan(parsedText.get(docId), spans) : null,
@@ -417,9 +454,12 @@ const main = async () => {
   const report = {
     config: {
       chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
+      chunking: await describeChunkingConfig(),
       doclingServeUrl: process.env.DOCLING_SERVE_URL ?? null,
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
       failedPapers,
+      git,
+      pdf: describeLayoutPdfConfig(parsers, await describePdfConfig()),
       paperIds,
       concurrency,
       papers: paperIds.length,

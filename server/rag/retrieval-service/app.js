@@ -578,7 +578,9 @@ const describeVectorStoreHealth = async () => {
         await runPostgresMigrations();
       }
 
-      return describePgvectorStatus();
+      // This tier never chunks documents: the index versions' chunk
+      // profiles say nothing about its own settings.
+      return describePgvectorStatus({ includeChunkProfile: false });
     });
     const problems = derivePgvectorHealthProblems(status);
 

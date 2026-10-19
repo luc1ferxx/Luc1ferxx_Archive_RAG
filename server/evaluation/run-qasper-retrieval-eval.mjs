@@ -8,7 +8,11 @@
 //
 // Every row is kept, so two runs over the same sample (same corpus, --cases,
 // --seed) can be compared question by question: --compare <other report.json>
-// adds paired bootstrap 95% CIs for this run minus the other.
+// adds paired bootstrap 95% CIs for this run minus the other, and lists where
+// the two runs' chunking settings or commits differ (an older report without
+// them counts as unknown). Each row also records admittedChars, the
+// characters of the chunks the gate admits, so a chunker change that makes
+// the context larger or smaller shows next to the recall it bought.
 //
 // Usage (real embeddings, e.g. local Ollama):
 //   OPENAI_BASE_URL=http://127.0.0.1:11434/v1 OPENAI_API_KEY=ollama \
@@ -23,7 +27,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  describeChunkingConfig,
+  describeEvaluationCheckout,
+  describeRunConfigDifferences,
+  sumTextChars,
+} from "./eval-run-config.js";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -46,8 +57,22 @@ const metricsOf = (rows) => [
   ),
 ];
 
-export const summarizeRecallRows = (rows) =>
-  Object.fromEntries(metricsOf(rows).map((metric) => [metric, mean(rows.map((row) => (row[metric] ? 1 : 0)))]));
+// Per-question sizes (characters), averaged and compared as numbers; rows of
+// reports written before a size was recorded have none and are left out.
+export const SIZE_METRICS = Object.freeze(["admittedChars"]);
+const sizesOf = (rows, metric) => rows.map((row) => row[metric]).filter((value) => Number.isFinite(value));
+const roundSize = (value) => (value === null ? null : Number(value.toFixed(1)));
+
+export const summarizeRecallRows = (rows) => ({
+  ...Object.fromEntries(metricsOf(rows).map((metric) => [metric, mean(rows.map((row) => (row[metric] ? 1 : 0)))])),
+  ...Object.fromEntries(
+    SIZE_METRICS.filter((metric) => sizesOf(rows, metric).length > 0).map((metric) => {
+      const sizes = sizesOf(rows, metric);
+
+      return [`${metric}Mean`, roundSize(sizes.reduce((sum, value) => sum + value, 0) / sizes.length)];
+    })
+  ),
+});
 
 // mulberry32, as the other QASPER harnesses sample with.
 const createSeededRandom = (seed) => {
@@ -69,46 +94,70 @@ export const pairedRecallDeltas = (rows, otherRows, { iterations = 4000, seed = 
   const other = new Map(otherRows.map((row) => [row.id, row]));
   const pairs = rows.filter((row) => other.has(row.id)).map((row) => [row, other.get(row.id)]);
   const random = createSeededRandom(seed);
+  const bootstrap = (diffs, roundValue) => {
+    const samples = [];
 
-  return {
-    cases: pairs.length,
-    ...Object.fromEntries(
-      metricsOf(rows).map((metric) => {
-        const diffs = pairs.map(([left, right]) => (left[metric] ? 1 : 0) - (right[metric] ? 1 : 0));
-        const samples = [];
+    for (let index = 0; index < iterations; index += 1) {
+      let sum = 0;
 
-        for (let index = 0; index < iterations; index += 1) {
-          let sum = 0;
+      for (let draw = 0; draw < diffs.length; draw += 1) {
+        sum += diffs[Math.floor(random() * diffs.length)];
+      }
 
-          for (let draw = 0; draw < diffs.length; draw += 1) {
-            sum += diffs[Math.floor(random() * diffs.length)];
-          }
+      samples.push(sum / Math.max(1, diffs.length));
+    }
 
-          samples.push(sum / Math.max(1, diffs.length));
-        }
+    samples.sort((left, right) => left - right);
 
-        samples.sort((left, right) => left - right);
-
-        return [
-          metric,
-          {
-            delta: mean(diffs),
-            ci95: diffs.length === 0
-              ? null
-              : [round(samples[Math.floor(iterations * 0.025)]), round(samples[Math.floor(iterations * 0.975)])],
-          },
-        ];
-      })
-    ),
+    return diffs.length === 0
+      ? null
+      : [roundValue(samples[Math.floor(iterations * 0.025)]), roundValue(samples[Math.floor(iterations * 0.975)])];
   };
+  const recall = Object.fromEntries(
+    metricsOf(rows).map((metric) => {
+      const diffs = pairs.map(([left, right]) => (left[metric] ? 1 : 0) - (right[metric] ? 1 : 0));
+
+      return [metric, { delta: mean(diffs), ci95: bootstrap(diffs, round) }];
+    })
+  );
+  // After the recall metrics, so their intervals draw the same samples as
+  // before sizes were compared. Only over pairs where both runs measured it.
+  const sizes = Object.fromEntries(
+    SIZE_METRICS.map((metric) => {
+      const diffs = pairs
+        .filter(([left, right]) => Number.isFinite(left[metric]) && Number.isFinite(right[metric]))
+        .map(([left, right]) => left[metric] - right[metric]);
+
+      return diffs.length === 0
+        ? null
+        : [
+            metric,
+            {
+              cases: diffs.length,
+              ci95: bootstrap(diffs, roundSize),
+              delta: roundSize(diffs.reduce((sum, value) => sum + value, 0) / diffs.length),
+            },
+          ];
+    }).filter(Boolean)
+  );
+
+  return { cases: pairs.length, ...recall, ...sizes };
 };
+
+const formatChunking = (chunking) =>
+  chunking
+    ? `${chunking.strategy}/${chunking.size}/${chunking.overlap}, chunker ${chunking.chunkerVersion}`
+    : "unknown";
+
+const formatCheckout = (git) =>
+  git ? `${git.sha.slice(0, 12)}${git.dirty ? ` with ${git.changedPaths} uncommitted path(s)` : ""}` : "unknown";
 
 const formatMarkdown = (report) => {
   const { summary, config, comparison } = report;
   const lines = [
     "# QASPER evidence recall (single-document QA route)",
     "",
-    `Generated ${report.generatedAt}; corpus \`${config.corpus}\`; ${report.rows.length} answerable questions, seed ${config.seed}; embedding ${config.embeddingModel} (query prefix ${JSON.stringify(config.queryPrefix)}, document prefix ${JSON.stringify(config.documentPrefix)}); retrieval top-K ${config.retrievalTopK}; query adapter ${config.queryAdapter ?? "none"}.`,
+    `Generated ${report.generatedAt}; corpus \`${config.corpus}\`; ${report.rows.length} answerable questions, seed ${config.seed}; embedding ${config.embeddingModel} (query prefix ${JSON.stringify(config.queryPrefix)}, document prefix ${JSON.stringify(config.documentPrefix)}); retrieval top-K ${config.retrievalTopK}; query adapter ${config.queryAdapter ?? "none"}; chunking ${formatChunking(config.chunking)}; commit ${formatCheckout(config.git)}.`,
     "",
     "| Evidence paragraph ... | Rate |",
     "|---|---|",
@@ -120,9 +169,24 @@ const formatMarkdown = (report) => {
       (floor) => `| in the widened context (extra candidates from coverage ${floor}) | ${summary[contextMetric(floor)]} |`
     ),
     ...("gateConfident" in summary ? [`| (questions the gate answers) | ${summary.gateConfident} |`] : []),
+    ...("admittedCharsMean" in summary
+      ? ["", `Admitted context: ${summary.admittedCharsMean} characters per question on average.`]
+      : []),
   ];
 
   if (comparison) {
+    if (comparison.configDifferences?.length > 0) {
+      lines.push(
+        "",
+        `The two runs differ, or cannot be shown to match, in ${comparison.configDifferences
+          .map(
+            ({ current, field, other }) =>
+              `${field} (${current === null ? "unknown" : JSON.stringify(current)} here, ${other === null ? "unknown" : JSON.stringify(other)} there)`
+          )
+          .join("; ")}: a delta below may come from that, not only from what was meant to change.`
+      );
+    }
+
     lines.push(
       "",
       `Paired against \`${comparison.against}\` (${comparison.cases} questions; this run minus that one, bootstrap 95% CI):`,
@@ -156,6 +220,8 @@ const main = async () => {
   // falls below it.
   const minHitAtAll = option("--min-hit-at-all", null);
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  // The checkout, before the run writes anything.
+  const git = await describeEvaluationCheckout();
 
   if (corpus.metadata?.granularity !== "paragraph") {
     throw new Error("Build the corpus with import-qasper.mjs --granularity paragraph so evidence is paragraph-level.");
@@ -170,7 +236,7 @@ const main = async () => {
   const documents = corpus.documents.filter((doc) => docKeys.has(doc.key));
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "qasper-retrieval-"));
 
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
 
   const { applyStandaloneProfile } = await import("../standalone-profile.js");
@@ -263,6 +329,7 @@ const main = async () => {
         ...contextHits,
         gateConfident: confidence.confident,
         admitted: confidence.usableResults.some((result) => expected.has(pageOf(result))),
+        admittedChars: sumTextChars(confidence.usableResults, (result) => result?.document?.pageContent),
         candidateCount: results.length,
         hitAt1: hitRank === 0,
         hitAt3: hitRank >= 0 && hitRank < 3,
@@ -276,20 +343,27 @@ const main = async () => {
       }
     }
 
+    const reportConfig = {
+      cases: caseCount,
+      chunking: await describeChunkingConfig(),
+      corpus: path.basename(corpusPath),
+      documentPrefix: config.getEmbeddingDocumentPrefix(),
+      embeddingModel: config.getEmbeddingModel(),
+      git,
+      queryAdapter,
+      queryPrefix: config.getEmbeddingQueryPrefix(),
+      retrievalTopK: config.getRetrievalTopK(),
+      seed,
+    };
     const report = {
       comparison: other
-        ? { against: path.basename(comparePath), ...pairedRecallDeltas(rows, other.rows ?? []) }
+        ? {
+            against: path.basename(comparePath),
+            configDifferences: describeRunConfigDifferences(reportConfig, other.config ?? {}),
+            ...pairedRecallDeltas(rows, other.rows ?? []),
+          }
         : null,
-      config: {
-        cases: caseCount,
-        corpus: path.basename(corpusPath),
-        documentPrefix: config.getEmbeddingDocumentPrefix(),
-        embeddingModel: config.getEmbeddingModel(),
-        queryAdapter,
-        queryPrefix: config.getEmbeddingQueryPrefix(),
-        retrievalTopK: config.getRetrievalTopK(),
-        seed,
-      },
+      config: reportConfig,
       generatedAt: new Date().toISOString(),
       reportType: "qasper-retrieval",
       rows,

@@ -69,6 +69,7 @@ import {
   DOCCOMPARE_FIXTURES,
   writeDocCompareFixtures,
 } from "./build-doccompare-fixtures.mjs";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -341,7 +342,7 @@ const main = async () => {
   // about: rag/storage.js captures RAG_DATA_DIRECTORY when it is first imported and
   // vector-store-local.js loads its index at import time. So the assignment has to
   // precede the first RAG import, which is why every import below is dynamic.
-  process.env.RAG_DATA_DIRECTORY = dataDirectory;
+  useEvaluationDataDirectory(dataDirectory);
   process.env.DOCCOMPARE_STANDALONE = "1";
 
   const { applyStandaloneProfile } = await import("../standalone-profile.js");

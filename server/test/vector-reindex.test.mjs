@@ -7,10 +7,15 @@ import path from "node:path";
 import {
   main,
   parseArgs,
+  planIndexVersionChunkProfileRecords,
   prepareDocumentForReindex,
   prepareFromStoredVectors,
   writeReindexedDocument,
 } from "../vector-reindex.mjs";
+import { buildTextPdf } from "../evaluation/load-bench-pdf.mjs";
+import { MIXED_CHUNK_PROFILE, describeChunkProfile } from "../rag/chunk-profile.js";
+import { recordIndexVersionChunkProfile } from "../rag/vector-store-pgvector-version-lifecycle.js";
+import { describeIndexVersions, invalidateIndexVersionSnapshot } from "../rag/vector-store-pgvector-versions.js";
 import { TENANT_ENCRYPTION_ERROR_CODES, createTenantEncryptionError } from "../rag/kms/errors.js";
 import { WORKING_FILE_MAGIC } from "../rag/working-files.js";
 import { configureEmbeddingDimensions } from "../rag/config.js";
@@ -427,6 +432,9 @@ test("an applied document is written only while it is still the content it was p
       chunkCount: 2,
       documentVersion: 1,
       status: "written",
+      // The versions it wrote into, with what they recorded (version 1:
+      // nothing).
+      targets: [{ chunkProfile: null, chunkProfileMixed: false, status: "active", versionId: 1 }],
     });
     assert.deepEqual(order, ["index write lock", "lock doc-a"], "the lock order of every writer");
 
@@ -486,4 +494,171 @@ test("--from documents skips a document whose stored PDF cannot be read, and onl
   // Anything else still ends the run.
   configureDocumentRegistryStore({ getFile: fail(Object.assign(new Error("connection lost"), { code: "57P01" })) });
   await assert.rejects(prepareDocumentForReindex(registeredDoc()), /connection lost/);
+});
+
+// ---------------------------------------------------------------------------
+// The chunk profile index versions record after --from documents
+// ---------------------------------------------------------------------------
+
+test("--from documents records the profile it cut with on the versions it rewrote whole, and mixed on the rest", () => {
+  const run = describeChunkProfile();
+  const built = describeChunkProfile({ size: 600 });
+  const versions = (entries) =>
+    new Map(
+      entries.map(([versionId, documents, target = {}]) => [
+        versionId,
+        { documents, target: { chunkProfile: built, chunkProfileMixed: false, status: "active", versionId, ...target } },
+      ])
+    );
+  const plan = (complete, entries, documentsWritten = 3) =>
+    planIndexVersionChunkProfileRecords({ complete, documentsWritten, runProfile: run, versions: versions(entries) });
+
+  // A complete run: the active and a ready version received every document;
+  // a building version's builder goes on cutting under its own profile.
+  assert.deepEqual(plan(true, [[2, 3], [3, 3, { status: "ready" }], [4, 3, { status: "building" }]]), [
+    { chunkProfile: run, previous: built.id, versionId: 2 },
+    { chunkProfile: run, previous: built.id, versionId: 3 },
+    { chunkProfile: MIXED_CHUNK_PROFILE, previous: built.id, versionId: 4 },
+  ]);
+  // Documents left out (--doc-id, a skip), or a version that became a write
+  // target partway: its table holds chunks of both profiles.
+  assert.deepEqual(plan(false, [[2, 3]]), [{ chunkProfile: MIXED_CHUNK_PROFILE, previous: built.id, versionId: 2 }]);
+  assert.deepEqual(plan(true, [[2, 2]]), [{ chunkProfile: MIXED_CHUNK_PROFILE, previous: built.id, versionId: 2 }]);
+  // Already mixed: a partial run leaves it so, a complete one names the run's.
+  assert.deepEqual(plan(false, [[2, 3, { chunkProfile: null, chunkProfileMixed: true }]]), []);
+  assert.deepEqual(plan(true, [[2, 3, { chunkProfile: null, chunkProfileMixed: true }]]), [
+    { chunkProfile: run, previous: "mixed", versionId: 2 },
+  ]);
+  // Nothing to change: the version recorded the run's profile, recorded none
+  // (version 1, older versions: unknown), or received no document.
+  assert.deepEqual(plan(false, [[2, 3, { chunkProfile: run }]]), []);
+  assert.deepEqual(plan(true, [[1, 3, { chunkProfile: null }]]), []);
+  assert.deepEqual(plan(true, [[2, 0]]), []);
+});
+
+test("a version's recorded chunk profile is replaced on its own, never added to a version that recorded none", async () => {
+  process.env.VECTOR_STORE_PROVIDER = "pgvector";
+
+  const database = createFakeVersionDatabase({ baseDimensions: DIMENSIONS });
+  const current = describeChunkProfile();
+  const built = describeChunkProfile({ size: 600 });
+
+  database.state.tables.set("rag_document_chunks_v2", { dimensions: DIMENSIONS, rows: new Map() });
+  database.state.versions.set(2, {
+    ...structuredClone(database.state.versions.get(1)),
+    chunk_table: "rag_document_chunks_v2",
+    embedding_space_source: "pinned",
+    index_params: { chunkProfile: JSON.parse(JSON.stringify(built)), indexType: "hnsw" },
+    sparse_rank_function: "rag_document_chunks_v2_sparse_rank",
+    version_id: 2,
+  });
+  database.state.versions.get(1).status = "ready";
+  database.state.pointer = { ...database.state.pointer, active_version_id: 2, previous_version_id: 1 };
+  configurePgvectorRuntime(database.runtime);
+
+  const chunkWarnings = async () =>
+    (await describeIndexVersions({ includeDrift: false })).warnings.filter((warning) => warning.code.startsWith("chunk_profile_"));
+  const activeProfile = async () => (await describeIndexVersions({ includeDrift: false })).active.chunkProfile;
+
+  try {
+    invalidateIndexVersionSnapshot();
+    assert.deepEqual((await chunkWarnings()).map((warning) => warning.code), ["chunk_profile_differs_from_active"]);
+
+    // Every document was cut again with the current profile.
+    assert.equal(await recordIndexVersionChunkProfile({ chunkProfile: current, versionId: 2 }), true);
+    assert.equal((await activeProfile()).id, current.id);
+    assert.deepEqual(await chunkWarnings(), []);
+    assert.equal(database.state.versions.get(2).index_params.indexType, "hnsw", "the index params stay");
+
+    // Some were left out: no profile is named, and none is compared.
+    assert.equal(await recordIndexVersionChunkProfile({ chunkProfile: MIXED_CHUNK_PROFILE, versionId: 2 }), true);
+    assert.equal(await activeProfile(), "mixed");
+    assert.deepEqual(await chunkWarnings(), []);
+
+    // Version 1 recorded none: it stays unknown.
+    assert.equal(await recordIndexVersionChunkProfile({ chunkProfile: current, versionId: 1 }), false);
+    assert.equal(
+      (await describeIndexVersions({ includeDrift: false })).versions.find((version) => version.versionId === 1).chunkProfile,
+      "unknown"
+    );
+    assert.deepEqual(database.state.versions.get(1).index_params, {});
+  } finally {
+    invalidateIndexVersionSnapshot();
+  }
+});
+
+test("--from documents --apply re-chunks every document and records that profile on the active version", async () => {
+  process.env.VECTOR_STORE_PROVIDER = "pgvector";
+  process.env.OPENAI_EMBEDDING_MODEL = "reindex-embed";
+  configureEmbeddingDimensions(DIMENSIONS);
+  configureOpenAIProvider({
+    embedQuery: async () => [1, 0, 0, 0],
+    embedTexts: async (texts) => texts.map(() => [1, 0, 0, 0]),
+  });
+
+  const database = createFakeVersionDatabase({ baseDimensions: DIMENSIONS });
+  const current = describeChunkProfile();
+  const built = describeChunkProfile({ size: 600 });
+  const documents = ["doc-a", "doc-b"].map((docId) =>
+    registeredDoc({ contentSha256: null, docId, fileName: `${docId}.pdf`, ownerUserId: "alice", version: 1, workspaceId: "ws" })
+  );
+  const pdf = buildTextPdf({ pages: [["Signed contracts are kept for seven years after they end."]] });
+
+  for (const document of documents) {
+    database.addDocument({ docId: document.docId, owner: "alice", pages: ["x"], workspace: "ws" });
+  }
+
+  // The active version 1, built under another chunk size, as a version
+  // `vector:index build` created records it.
+  database.state.versions.get(1).index_params = { chunkProfile: JSON.parse(JSON.stringify(built)) };
+  configurePgvectorRuntime(database.runtime);
+
+  const runWith = async (argv, registered = documents) => {
+    configureDocumentRegistryStore({
+      async getFile(docId) {
+        return { document: registered.find((document) => document.docId === docId), fileBuffer: pdf };
+      },
+      async initialize() {
+        return true;
+      },
+      async list() {
+        return registered;
+      },
+      async lockForContentReplace(docId) {
+        return registered.find((document) => document.docId === docId) ?? null;
+      },
+    });
+    invalidateIndexVersionSnapshot();
+    return runMain(argv);
+  };
+
+  try {
+    // runMain swallows stdout, where node --test's child process also reports
+    // the tests before this one: let those reports out first.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // One document: the table now holds both profiles.
+    let output = await runWith(["--from", "documents", "--apply", "--doc-id", "doc-a"]);
+
+    assert.match(output, new RegExp(`Index version 1 now records a mixed chunk profile \\(was ${built.id}\\)`));
+    assert.deepEqual(database.state.versions.get(1).index_params.chunkProfile, { mixed: true });
+
+    // Every document: the table holds the current profile alone.
+    output = await runWith(["--from", "documents", "--apply"]);
+
+    assert.match(output, new RegExp(`Index version 1 now records chunk profile ${current.id} \\(was mixed\\)`));
+    assert.equal(database.state.versions.get(1).index_params.chunkProfile.id, current.id);
+    assert.ok(
+      [...database.state.tables.get("rag_document_chunks").rows.values()].every((row) => row.metadata.chunkProfileId === current.id)
+    );
+
+    // Run again under the same profile: nothing to record.
+    output = await runWith(["--from", "documents", "--apply"]);
+    assert.doesNotMatch(output, /now records/);
+  } finally {
+    invalidateIndexVersionSnapshot();
+    resetOpenAIProvider();
+    resetPgvectorVectorStore();
+    delete process.env.OPENAI_EMBEDDING_MODEL;
+  }
 });

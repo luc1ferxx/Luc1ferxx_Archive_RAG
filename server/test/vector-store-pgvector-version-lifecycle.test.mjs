@@ -2,6 +2,7 @@ import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { buildTextPdf } from "../evaluation/load-bench-pdf.mjs";
+import { describeChunkProfile } from "../rag/chunk-profile.js";
 import { configureEmbeddingDimensions } from "../rag/config.js";
 import {
   createEmbeddingBatcher,
@@ -55,6 +56,9 @@ const NEW_MODEL = "unit-embed-b";
 const TOPICS = ["alpha", "beta", "gamma", "delta", "epsilon"];
 const ENV_KEYS = [
   "OPENAI_EMBEDDING_MODEL",
+  "RAG_CHUNK_OVERLAP",
+  "RAG_CHUNK_SIZE",
+  "RAG_CHUNK_STRATEGY",
   "RAG_EMBEDDING_DOCUMENT_PREFIX",
   "RAG_EMBEDDING_QUERY_PREFIX",
   "RAG_INGEST_EMBED_BATCHING",
@@ -206,6 +210,14 @@ test("creating a version locks, renders its table and registers it building, all
   assert.equal(version.pinnedSpace.key, `${NEW_MODEL}|3`);
   assert.equal(version.pinnedIndexParams.hnswM, 24);
   assert.equal(new Date(version.leaseExpiresAt).getTime(), database.clock.now + 5000);
+  // The chunk profile the build cuts with, recorded beside the index params
+  // (which it does not change).
+  assert.deepEqual(version.chunkProfile, describeChunkProfile());
+  assert.deepEqual(
+    database.state.versions.get(2).index_params.chunkProfile,
+    JSON.parse(JSON.stringify(describeChunkProfile()))
+  );
+  assert.equal("chunkProfile" in version.pinnedIndexParams, false);
 
   const statements = database.log.map(
     (entry) =>
@@ -325,6 +337,8 @@ test("a build re-embeds every document into the new table, skips one deleted und
   );
   assert.match(rows[2].content, /final/, "the re-ingested bytes, not the ones read first");
   assert.equal(rows[0].metadata.publicFilePath, "documents/doc-a/file");
+  // Stamped with the profile the build cut them with, like an ingest's.
+  assert.ok(rows.every((row) => row.metadata.chunkProfileId === describeChunkProfile().id));
 
   const progress = Object.fromEntries(
     [...database.state.progress.values()].map((entry) => [entry.doc_id, entry.outcome])

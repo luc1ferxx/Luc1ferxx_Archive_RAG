@@ -46,6 +46,13 @@
 // versions it dual-writes). Moving to another embedding model without
 // downtime is `npm run vector:index -- build` followed by `activate`: a new
 // version with its own table is built beside the one serving.
+//
+// --from documents re-chunks under this process's chunk profile
+// (rag/chunk-profile.js), so afterwards it updates the profile each version
+// it wrote into recorded (index_params.chunkProfile, a version built by
+// `vector:index build`): that profile after a complete run, "mixed" when the
+// run left documents out (--doc-id, skips) and the version recorded another
+// one. Version 1 and older versions record none and stay unknown.
 
 import "dotenv/config";
 
@@ -54,7 +61,8 @@ import os from "os";
 import path from "path";
 import { pathToFileURL } from "url";
 
-import { chunkDocument } from "./rag/chunker.js";
+import { chunkDocumentWithConfig } from "./rag/chunker.js";
+import { MIXED_CHUNK_PROFILE, describeChunkProfile, stampChunkProfile } from "./rag/chunk-profile.js";
 import {
   getEmbeddingDimensions,
   getEmbeddingIndexIdentity,
@@ -72,7 +80,6 @@ import {
 import { buildPublicFilePath } from "./rag/document-utils.js";
 import { isTenantEncryptionError } from "./rag/kms/errors.js";
 import { loadPdfPages } from "./rag/pdf-loader.js";
-import { withPostgresTransaction } from "./rag/postgres.js";
 import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataPath, readJsonFileSync } from "./rag/storage.js";
 import { flushTenantUsageOnExit } from "./rag/tenant-usage.js";
@@ -84,9 +91,12 @@ import {
   countPgvectorChunks,
   describePgvectorStatus,
   ensurePgvectorSchema,
+  getPgvectorIndexWriteTargets,
   prepareDocumentsForPgvectorIndex,
   writeDocumentsToPgvectorIndex,
 } from "./rag/vector-store-pgvector.js";
+import { getPgvectorRuntime } from "./rag/vector-store-pgvector-runtime.js";
+import { recordIndexVersionChunkProfile } from "./rag/vector-store-pgvector-version-lifecycle.js";
 
 const USAGE = `Usage: node vector-reindex.mjs [--from local|qdrant|documents] [--apply] [--doc-id <id>]... [--trust-source-embeddings]
 
@@ -304,13 +314,17 @@ const toSourceDocumentVersion = (entries = []) =>
  * UPDATE, so a replacement either committed before (and this sees its version
  * and skips) or waits for this write and then replaces these chunks itself.
  * The chunks are stamped with the locked row's version. Resolves to
- * { status: "written" | "changed" | "gone", ... }.
+ * { status: "written" | "changed" | "gone", ... }; a write names the index
+ * versions it wrote into (`targets`: versionId, status and recorded chunk
+ * profile, as the transaction read them).
  */
 export const writeReindexedDocument = async ({
   docId,
   expected,
   preparedDocuments,
-  withTransaction = withPostgresTransaction,
+  // The pgvector runtime's transaction: withPostgresTransaction unless a
+  // test configured another runtime.
+  withTransaction = (callback) => getPgvectorRuntime().withTransaction(callback),
 }) =>
   withTransaction(async (client) => {
     const handle = await beginPgvectorIndexWrite({ client });
@@ -343,8 +357,63 @@ export const writeReindexedDocument = async ({
       preparedDocuments: stamped,
     });
 
-    return { chunkCount: stamped.length, documentVersion: currentVersion, status: "written" };
+    return {
+      chunkCount: stamped.length,
+      documentVersion: currentVersion,
+      status: "written",
+      targets: getPgvectorIndexWriteTargets(handle).map(({ chunkProfile, chunkProfileMixed, status, versionId }) => ({
+        chunkProfile: chunkProfile ?? null,
+        chunkProfileMixed: chunkProfileMixed === true,
+        status,
+        versionId,
+      })),
+    };
   });
+
+/**
+ * What `--from documents --apply` records afterwards about the chunk profile
+ * of each index version it wrote into, so the version's status describes the
+ * chunks its table holds now rather than the ones its build cut:
+ * [{ versionId, chunkProfile, previous }], where `chunkProfile` is the run's
+ * profile or MIXED_CHUNK_PROFILE and `previous` the recorded profile's id or
+ * "mixed".
+ *
+ * `versions` maps versionId -> { documents (how many documents this run
+ * wrote into it), target (its latest write-target descriptor) }. A version
+ * gets the run's profile only when the run was `complete` (every registered
+ * document rewritten or deleted meanwhile: no --doc-id, nothing skipped), it
+ * received every one of the `documentsWritten`, and it is not building (its
+ * builder goes on cutting documents under the profile it recorded). Any
+ * other version whose recorded profile is not the run's is marked mixed.
+ * A version that recorded none (version 1, a version from before profiles)
+ * stays unknown: nothing says what cut the documents this run left out.
+ */
+export const planIndexVersionChunkProfileRecords = ({ complete, documentsWritten, runProfile, versions }) => {
+  const records = [];
+
+  for (const [versionId, { documents, target }] of versions) {
+    const recorded = target?.chunkProfile ?? null;
+    const mixed = target?.chunkProfileMixed === true;
+
+    if ((!recorded && !mixed) || documents === 0 || recorded?.id === runProfile.id) {
+      continue;
+    }
+
+    const wholeVersion = complete && documents === documentsWritten && target.status !== "building";
+
+    if (!wholeVersion && mixed) {
+      continue;
+    }
+
+    records.push({
+      chunkProfile: wholeVersion ? runProfile : MIXED_CHUNK_PROFILE,
+      previous: mixed ? "mixed" : recorded.id,
+      versionId,
+    });
+  }
+
+  return records.sort((left, right) => left.versionId - right.versionId);
+};
 
 export const prepareFromDocumentBytes = async (document) => {
   const stored = await getDocumentFile(document.docId);
@@ -360,13 +429,20 @@ export const prepareFromDocumentBytes = async (document) => {
     // The decrypted bytes (getDocumentFile), parsed from a working file.
     await writeWorkingFile(tempPath, stored.fileBuffer);
     const pages = await loadPdfPages(tempPath);
-    const chunks = chunkDocument({
+    // Re-chunked chunks say which chunk profile cut them, as an ingest's do
+    // (rag/index.js chunkDocumentPages); chunks re-embedded from a local or
+    // Qdrant index keep the metadata they had.
+    const chunkProfile = describeChunkProfile();
+    const chunks = chunkDocumentWithConfig({
+      chunkOverlap: chunkProfile.overlap,
+      chunkSize: chunkProfile.size,
+      chunkStrategy: chunkProfile.strategy,
       docId: document.docId,
       fileName: document.fileName,
       publicFilePath: buildPublicFilePath(document.docId),
       pages,
       source: document.source ?? null,
-    });
+    }).map((chunk) => ({ ...chunk, metadata: stampChunkProfile(chunk.metadata, chunkProfile) }));
 
     // The content these chunks are cut from: the row the bytes were read
     // with. The write stamps the version it finds under its lock.
@@ -589,9 +665,18 @@ export const main = async () => {
   let written = 0;
   let skipped = 0;
   let unreadable = 0;
+  // For the index versions' chunk-profile records (--from documents): the
+  // profile every document is cut with, the documents written into each
+  // version, and whether every registered document was rewritten.
+  const runChunkProfile = options.from === "documents" ? describeChunkProfile() : null;
+  const versionWrites = new Map();
+  let documentsWritten = 0;
+  const plannedDocIds = new Set(plan.map((item) => item.docId));
+  let complete = wanted.size === 0 && [...registered.keys()].every((docId) => plannedDocIds.has(docId));
 
   for (const item of plan) {
     if (item.action === "skip_missing_registry_row") {
+      complete = false;
       process.stdout.write(
         `skip   ${item.docId}: not registered in PostgreSQL, the chunk table's foreign key needs the document row first.\n`
       );
@@ -603,6 +688,7 @@ export const main = async () => {
     if (!document) {
       // The registry changed between planning and apply, or the row is gone.
       // Skip rather than write chunks with an empty owner/workspace scope.
+      complete = false;
       process.stdout.write(
         `skip   ${item.docId}: no longer registered in PostgreSQL at apply time.\n`
       );
@@ -617,6 +703,7 @@ export const main = async () => {
       const registeredVersion = Number(document.version ?? 1) || 1;
 
       if (sourceVersion !== registeredVersion) {
+        complete = false;
         skipped += 1;
         process.stdout.write(
           `skip   ${item.docId}: the ${item.source} chunks are content version ${sourceVersion}, the registry holds version ${registeredVersion}; use --from documents.\n`
@@ -638,6 +725,7 @@ export const main = async () => {
       const read = await prepareDocumentForReindex(document);
 
       if (read.unreadableCode) {
+        complete = false;
         skipped += 1;
         unreadable += 1;
         process.stdout.write(
@@ -655,6 +743,9 @@ export const main = async () => {
     });
 
     if (outcome.status !== "written") {
+      // A document deleted meanwhile has no chunks left anywhere; one
+      // replaced meanwhile holds the replacement's.
+      complete &&= outcome.status === "gone";
       skipped += 1;
       process.stdout.write(
         outcome.status === "gone"
@@ -665,6 +756,14 @@ export const main = async () => {
     }
 
     written += outcome.chunkCount;
+    documentsWritten += 1;
+
+    for (const target of outcome.targets ?? []) {
+      const entry = versionWrites.get(target.versionId) ?? { documents: 0, target };
+
+      versionWrites.set(target.versionId, { documents: entry.documents + 1, target });
+    }
+
     process.stdout.write(
       `wrote  ${item.docId}: ${outcome.chunkCount} chunk(s) of content version ${outcome.documentVersion}${
         prepared.reembedded ? " (re-embedded)" : " (vectors copied)"
@@ -677,6 +776,27 @@ export const main = async () => {
       unreadable > 0 ? ` (${unreadable} with an unreadable stored PDF)` : ""
     }.\n`
   );
+
+  if (!runChunkProfile) {
+    return;
+  }
+
+  for (const record of planIndexVersionChunkProfileRecords({
+    complete,
+    documentsWritten,
+    runProfile: runChunkProfile,
+    versions: versionWrites,
+  })) {
+    if (!(await recordIndexVersionChunkProfile(record))) {
+      continue;
+    }
+
+    process.stdout.write(
+      record.chunkProfile === MIXED_CHUNK_PROFILE
+        ? `Index version ${record.versionId} now records a mixed chunk profile (was ${record.previous}): this run cut its documents with ${runChunkProfile.id} but left some out or the version is still building, so its table holds chunks of more than one profile. A complete run (no --doc-id, nothing skipped) records ${runChunkProfile.id}.\n`
+        : `Index version ${record.versionId} now records chunk profile ${runChunkProfile.id} (was ${record.previous}): every document in it was cut again with it.\n`
+    );
+  }
 };
 
 // Run only when invoked as a script (node vector-reindex.mjs ...). Importing the

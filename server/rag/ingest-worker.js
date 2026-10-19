@@ -50,7 +50,11 @@ import { writeWorkingFile } from "./working-files.js";
 // job's success inside its own write transaction (store.completeInTransaction)
 // where the provider has one. A ragService whose ingestDocument declares no
 // stages (a test stub, a custom service) runs each job as one step, as before.
+// An attempt that resumes at embed or index with chunks a re-chunk would cut
+// differently (rag/chunk-profile.js) goes back to the chunk stage first, once
+// per job.
 
+const CHUNK_STAGE = "chunk";
 const DEFAULT_SHUTDOWN_GRACE_MS = 5000;
 const DEFAULT_HOUSEKEEPING_INTERVAL_MS = 10 * 60 * 1000;
 const RETRY_BASE_DELAY_MS = 5000;
@@ -424,6 +428,63 @@ export const createIngestWorker = ({
     return inputs;
   };
 
+  // Chunks a previous attempt stored that this process would cut differently
+  // from the same pages (the chunker or its chunking settings changed between
+  // attempts, or another worker runs with other ones; a PDF setting alone
+  // never counts, stages.chunksAreStale) are not embedded or indexed: the job
+  // goes back to the chunk stage, whose input (the pages) is still stored,
+  // and continues from there in this attempt. The stored chunks are checked
+  // once per attempt: chunks this attempt cut itself, or already found
+  // current, are not decoded again. Resolves to true when the job was moved
+  // back, false when the chunks are current (or carry no profile: stored
+  // before profiles were recorded, reused as before), null when the attempt
+  // lost the job.
+  //
+  // A move back starts the stages' attempt budgets afresh, so it happens once
+  // per job: the chunk stage marks what it cuts after one (`rechunk`), and
+  // every later attempt reuses those chunks whatever its own settings. Two
+  // workers with different chunking settings on one queue therefore cost a
+  // failing job at most one extra round of its stage's attempts before dead
+  // letter, not a re-chunk per claim. (An attempt that loses the job between
+  // the move back and the chunk stage's advance leaves the old chunks
+  // unmarked; only that can send the job back again.) Keep every worker on
+  // the same settings all the same.
+  const rewindStaleChunks = async (job, fence, stages, state, inputs) => {
+    if (
+      state.chunksCurrent ||
+      typeof stages.chunksAreStale !== "function" ||
+      !stages.chunksAreStale({ inputs })
+    ) {
+      state.chunksCurrent = true;
+      return false;
+    }
+
+    const rewound = await settleWithRetries(
+      () =>
+        store.advanceStage({
+          ...fence,
+          fromStage: state.stage,
+          leaseMs,
+          maxAttempts: stageMaxAttempts(CHUNK_STAGE),
+          toStage: CHUNK_STAGE,
+        }),
+      { retryDelayMs: settleRetryDelayMs }
+    );
+
+    if (!rewound) {
+      return null;
+    }
+
+    logger.warn?.(
+      `[ingest-worker] job ${job.jobId} holds chunks of another chunk profile at stage ${state.stage}; chunking it again.`
+    );
+    state.stage = CHUNK_STAGE;
+    state.attempt = 1;
+    state.maxAttempts = stageMaxAttempts(CHUNK_STAGE);
+    state.rechunk = true;
+    return true;
+  };
+
   // Runs the job's stages from its current one. `state` tracks the stage in
   // progress and its attempt number, for the failure record. Resolves to
   // { outcome, recorded } (recorded: success is already in the store),
@@ -459,6 +520,16 @@ export const createIngestWorker = ({
 
         if (!inputs) {
           return { leaseLost: true };
+        }
+
+        const rewound = await rewindStaleChunks(job, fence, stages, state, inputs);
+
+        if (rewound === null) {
+          return { leaseLost: true };
+        }
+
+        if (rewound) {
+          continue;
         }
 
         let recorded = false;
@@ -528,7 +599,23 @@ export const createIngestWorker = ({
           return { leaseLost: true };
         }
 
-        result = await stages[stage]({ inputs, job });
+        if (stage !== CHUNK_STAGE) {
+          const rewound = await rewindStaleChunks(job, fence, stages, state, inputs);
+
+          if (rewound === null) {
+            return { leaseLost: true };
+          }
+
+          if (rewound) {
+            continue;
+          }
+        }
+
+        result = await stages[stage]({
+          inputs,
+          job,
+          ...(stage === CHUNK_STAGE && state.rechunk ? { rechunk: true } : {}),
+        });
       }
 
       const nextStage = getNextIngestStage(stage);
@@ -559,6 +646,7 @@ export const createIngestWorker = ({
       }
 
       await hooks.afterStage?.({ job, stage });
+      state.chunksCurrent ||= stage === CHUNK_STAGE;
       state.stage = nextStage;
       state.attempt = 1;
       state.maxAttempts = stageMaxAttempts(nextStage);
@@ -613,10 +701,15 @@ export const createIngestWorker = ({
 
     renewTimer.unref?.();
 
-    // The stage in progress and its attempt number, for the failure record.
+    // The stage in progress and its attempt number, for the failure record,
+    // whether the stored chunks are known to be of this process's chunk
+    // profile, and whether this attempt moved the job back to cut them again
+    // (rewindStaleChunks).
     const state = {
       attempt: Number(job.stageAttempts ?? job.attemptCount) || 1,
+      chunksCurrent: false,
       maxAttempts: Number(job.maxAttempts) || 1,
+      rechunk: false,
       stage: job.stage ?? INGEST_STAGES[0],
     };
     let ingestError = null;

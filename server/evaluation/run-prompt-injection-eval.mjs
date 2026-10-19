@@ -43,6 +43,7 @@ import {
   PROMPT_INJECTION_CASES,
   PROMPT_INJECTION_CONTROLS,
 } from "./prompt-injection-cases.js";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -99,7 +100,7 @@ const runAnswerPart = async ({ only = null, rounds }) => {
 
   // Storage reads RAG_DATA_DIRECTORY at first import, so it is set before any
   // RAG module loads (as in run-answer-draft-eval).
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
   Object.assign(process.env, {
     AGENT_SKILL_GRAPH_ROLLOUT: "guarded",

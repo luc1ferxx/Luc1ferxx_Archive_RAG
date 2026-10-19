@@ -19,6 +19,12 @@ import {
   getPgvectorTextSearchConfig,
   getVectorStoreProviderConfigStatus,
 } from "./config.js";
+import {
+  describeChunkProfile,
+  describeChunkProfileChange,
+  isMixedChunkProfileRecord,
+  readStoredChunkProfile,
+} from "./chunk-profile.js";
 import { getIndexVersionRegistryTableNames } from "./db-migrations.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import {
@@ -252,6 +258,17 @@ export const toIndexVersion = (row = {}) => {
     buildStartedAt: toIso(row.build_started_at),
     builderId: row.builder_id ?? null,
     chunkCount: toCount(row.chunk_count),
+    // The chunk profile the build cut documents with, recorded beside the
+    // index params when the version was created (rag/chunk-profile.js); null
+    // for version 1 and every version created before profiles were recorded,
+    // and for one a partial `vector:reindex --from documents` left holding
+    // chunks of several profiles (chunkProfileMixed).
+    chunkProfile: readStoredChunkProfile(
+      row.index_params && typeof row.index_params === "object" ? row.index_params.chunkProfile : null
+    ),
+    chunkProfileMixed: isMixedChunkProfileRecord(
+      row.index_params && typeof row.index_params === "object" ? row.index_params.chunkProfile : null
+    ),
     chunkTable: String(row.chunk_table ?? ""),
     createdAt: toIso(row.created_at),
     deactivatedAt: toIso(row.deactivated_at),
@@ -788,6 +805,7 @@ const describeVersion = (version) => ({
   buildCompletedAt: version.buildCompletedAt,
   buildStartedAt: version.buildStartedAt,
   chunkCount: version.chunkCount,
+  chunkProfile: version.chunkProfile ?? (version.chunkProfileMixed ? "mixed" : "unknown"),
   chunkTable: version.chunkTable,
   createdAt: version.createdAt,
   deactivatedAt: version.deactivatedAt,
@@ -801,6 +819,54 @@ const describeVersion = (version) => ({
   status: version.status,
   versionId: version.versionId,
 });
+
+// The chunk profile this process cuts new chunks with, or null when the
+// chunking configuration is invalid (the health report's chunking entry says
+// so; a status read does not fail on it).
+const readCurrentChunkProfile = () => {
+  try {
+    return describeChunkProfile();
+  } catch {
+    return null;
+  }
+};
+
+const describeChunkProfileFields = (profile) =>
+  `chunker ${profile.chunkerVersion}, ${profile.strategy}/${profile.size}/${profile.overlap}, ${profile.pdfParser}${
+    profile.paragraphDetection ? " with paragraphs" : ""
+  }`;
+
+/**
+ * A warning when `version` recorded a chunk profile and this process chunks
+ * with another one: chunks the build cut and chunks cut from now on (uploads
+ * written into the version, a resumed build) are cut differently. Never for a
+ * version without a recorded profile (unknown), never an error.
+ */
+const buildChunkProfileWarning = (version, current, { active }) => {
+  if (!version.chunkProfile || !current || version.chunkProfile.id === current.id) {
+    return null;
+  }
+
+  const { fields, settings } = describeChunkProfileChange(version.chunkProfile, current);
+  const chunkerChanged = fields.includes("chunkerVersion");
+  const settingsHint = Object.keys(settings).length > 0
+    ? `set ${formatSettings(settings)} so new chunks are cut as the build cut them${chunkerChanged ? " (the chunker itself changed too)" : ""}, or `
+    : "";
+
+  return {
+    code: active ? "chunk_profile_differs_from_active" : "chunk_profile_differs_from_version",
+    current,
+    fields,
+    message: `${active ? "The active version" : "Version"} ${version.versionId} was built with chunk profile ${version.chunkProfile.id} (${describeChunkProfileFields(
+      version.chunkProfile
+    )}) but this process chunks with ${current.id} (${describeChunkProfileFields(current)}): ${
+      active ? "documents ingested now are" : "documents written into it from now on, and the rest of a resumed build, are"
+    } cut differently from the ones the build cut. To have one profile again, ${settingsHint}build a new version under the current settings (npm run vector:index -- build).`,
+    recorded: version.chunkProfile,
+    settings,
+    versionId: version.versionId,
+  };
+};
 
 const readTableChunkTotals = async (query, chunkTable) => {
   const result = await query(
@@ -826,8 +892,19 @@ const readTableChunkTotals = async (query, chunkTable) => {
  * `includeDrift` compares the chunk and document totals of the active version
  * with every ready one (full scans of each table): the CLI and the admin route
  * ask for it, the health check does not.
+ *
+ * `includeChunkProfile` compares each version's recorded chunk profile with
+ * the one this process cuts chunks with (the chunk_profile_* warnings). Only
+ * a process that chunks documents can say anything with it: the health check
+ * of a tier that never does (retrieval, the model gateway) leaves it out, the
+ * CLI and the admin route keep it.
  */
-export const describeIndexVersions = async ({ includeDrift = true, includeRetired = true, limit = 25 } = {}) =>
+export const describeIndexVersions = async ({
+  includeChunkProfile = true,
+  includeDrift = true,
+  includeRetired = true,
+  limit = 25,
+} = {}) =>
   runAsDatabaseSystem(async () => {
     const runtime = getPgvectorRuntime();
     const { pointerTable, versionsTable } = getIndexVersionTableNames();
@@ -881,6 +958,7 @@ export const describeIndexVersions = async ({ includeDrift = true, includeRetire
     const warnings = [];
     const problems = [];
     const configured = getConfiguredEmbeddingSpace();
+    const currentChunkProfile = includeChunkProfile ? readCurrentChunkProfile() : null;
 
     if (!active) {
       problems.push("The version pointer names no registered version.");
@@ -900,6 +978,14 @@ export const describeIndexVersions = async ({ includeDrift = true, includeRetire
       });
     }
 
+    const activeChunkProfileWarning = active
+      ? buildChunkProfileWarning(active, currentChunkProfile, { active: true })
+      : null;
+
+    if (activeChunkProfileWarning) {
+      warnings.push(activeChunkProfileWarning);
+    }
+
     const liveVersions = versions.filter(
       (version) => !version.isActive && [INDEX_VERSION_STATUSES.building, INDEX_VERSION_STATUSES.ready].includes(version.status)
     );
@@ -910,6 +996,17 @@ export const describeIndexVersions = async ({ includeDrift = true, includeRetire
     const registryPointerTtlMs = toRegistryPointerTtlMs(pointerRow.pointer_ttl_ms);
 
     for (const version of liveVersions) {
+      // Only while chunks still reach it: a ready version past its window
+      // receives none.
+      const chunkProfileWarning =
+        version.status === INDEX_VERSION_STATUSES.building || version.inDualWriteWindow !== false
+          ? buildChunkProfileWarning(version, currentChunkProfile, { active: false })
+          : null;
+
+      if (chunkProfileWarning) {
+        warnings.push(chunkProfileWarning);
+      }
+
       if (version.status === INDEX_VERSION_STATUSES.building) {
         if (version.leaseExpired) {
           warnings.push({

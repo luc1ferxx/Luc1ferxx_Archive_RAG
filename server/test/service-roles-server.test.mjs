@@ -21,6 +21,12 @@ import { getAgentServiceTimeoutMs, getServiceShutdownGraceMs } from "../rag/conf
 import { resetServiceClients, SERVICE_CLIENT_ERROR_CODES } from "../rag/service-client.js";
 import { SERVICE_TOKEN_HEADER, signServiceToken } from "../rag/service-identity.js";
 import { configureRagDataDirectory, getRagDataDirectory } from "../rag/storage.js";
+import { describeChunkProfile } from "../rag/chunk-profile.js";
+import { resetVectorStore } from "../rag/vector-store.js";
+import { configurePgvectorRuntime, resetPgvectorRuntime } from "../rag/vector-store-pgvector.js";
+import { invalidateIndexVersionSnapshot } from "../rag/vector-store-pgvector-versions.js";
+import { buildRetrievalHealthReport } from "../rag/retrieval-service/app.js";
+import { createFakeVersionDatabase } from "./pgvector-version-fake-database.mjs";
 
 // Start-up, graceful shutdown, and health for the split-deployment roles
 // (rag/agent-service/role-server.js, health.js). Everything listens on port 0
@@ -531,6 +537,93 @@ test("the monolith's health runs every check it ran before and names its role", 
     assert.equal(report.service.status, "ok");
     assert.equal(JSON.stringify(report.service).includes(SERVICE_KEYS.split(":")[1]), false);
   });
+});
+
+test("an invalid chunking setting adds a chunking error where documents are chunked, and nothing otherwise", async () => {
+  const monolith = { AGENT_SERVICE_URL: undefined, ARCHIVE_RAG_ROLE: undefined };
+
+  await withHealthEnvironment({ ...monolith, RAG_CHUNK_STRATEGY: "fixed" }, async () => {
+    const report = await buildHealthReport();
+
+    // Appended after the checks every report has (before tenantEncryption,
+    // which stays last), so the 16 keep their order.
+    assert.deepEqual(Object.keys(report.checks), [...MONOLITH_CHECKS, "chunking"]);
+    assert.equal(report.checks.chunking.status, "error");
+    assert.equal(report.checks.chunking.setting, "RAG_CHUNK_STRATEGY");
+    assert.match(
+      report.checks.chunking.message,
+      /RAG_CHUNK_STRATEGY must be one of structured, simple, sentence; got "fixed"/
+    );
+    assert.equal(report.status, "error");
+  });
+
+  // Unset, blank or valid: no entry at all.
+  for (const value of [undefined, "", "   ", "\t", "sentence", " Simple "]) {
+    await withHealthEnvironment({ ...monolith, RAG_CHUNK_STRATEGY: value }, async () => {
+      assert.deepEqual(Object.keys((await buildHealthReport()).checks), MONOLITH_CHECKS, JSON.stringify(value));
+    });
+  }
+
+  // The retrieval tier chunks no document.
+  await withHealthEnvironment({ ARCHIVE_RAG_ROLE: "retrieval", RAG_CHUNK_STRATEGY: "fixed" }, async () => {
+    const report = await buildHealthReport();
+
+    assert.equal(report.service.role, "retrieval");
+    assert.equal("chunking" in report.checks, false);
+  });
+});
+
+test("an index version's chunk profile is compared with this process's only on the tiers that chunk documents", async () => {
+  // The registry's active version was cut with another chunk size than any
+  // of these processes uses (a fake database, no PostgreSQL).
+  const database = createFakeVersionDatabase();
+  const recorded = describeChunkProfile({ size: 600 });
+
+  database.state.versions.get(1).index_params = { chunkProfile: JSON.parse(JSON.stringify(recorded)) };
+  configurePgvectorRuntime(database.runtime);
+
+  try {
+    for (const [role, compares] of [
+      [undefined, true],
+      ["api", true],
+      ["agent", true],
+      // Retrieval never chunks: its settings say nothing about new chunks.
+      ["retrieval", false],
+    ]) {
+      await withHealthEnvironment(
+        { AGENT_SERVICE_URL: undefined, ARCHIVE_RAG_ROLE: role, RAG_CHUNK_SIZE: undefined, VECTOR_STORE_PROVIDER: "pgvector" },
+        async () => {
+          resetVectorStore();
+          invalidateIndexVersionSnapshot();
+
+          const entry = (await buildHealthReport()).checks.vectorStore;
+
+          assert.equal(entry.provider, "pgvector", String(role));
+          assert.ok(entry.indexVersions, String(role));
+          assert.equal(
+            entry.indexVersions.warnings.some((warning) => warning.code === "chunk_profile_differs_from_active"),
+            compares,
+            String(role)
+          );
+        }
+      );
+    }
+
+    // The dedicated retrieval service's own report (retrieval-service.mjs).
+    await withHealthEnvironment({ ARCHIVE_RAG_ROLE: "retrieval", VECTOR_STORE_PROVIDER: "pgvector" }, async () => {
+      resetVectorStore();
+      invalidateIndexVersionSnapshot();
+
+      const { indexVersions } = (await buildRetrievalHealthReport()).checks.vectorStore;
+
+      assert.ok(indexVersions);
+      assert.deepEqual(indexVersions.warnings.filter((warning) => warning.code.startsWith("chunk_profile_")), []);
+    });
+  } finally {
+    resetPgvectorRuntime();
+    invalidateIndexVersionSnapshot();
+    resetVectorStore();
+  }
 });
 
 test("the edge's health probes every agent replica and never fails on the agent tier", async () => {

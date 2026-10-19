@@ -25,6 +25,7 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -140,7 +141,7 @@ const main = async () => {
   // Training vectors are the model's own: never adapted by a previous adapter.
   delete process.env.RAG_EMBEDDING_QUERY_ADAPTER;
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "query-adapter-data-"));
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
 
   try {
     const { chunkDocumentPages } = await import("../rag/index.js");

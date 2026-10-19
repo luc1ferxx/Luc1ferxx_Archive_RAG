@@ -476,6 +476,16 @@ export const createFakeVersionDatabase = ({
             : []
         );
       }
+      case "record_chunk_profile": {
+        const row = state.versions.get(values[0]);
+
+        if (!row || !row.index_params || typeof row.index_params !== "object" || !("chunkProfile" in row.index_params)) {
+          return rows([]);
+        }
+
+        row.index_params = { ...row.index_params, chunkProfile: JSON.parse(values[1]) };
+        return rows([{ version_id: row.version_id }]);
+      }
       case "pin": {
         Object.assign(state.versions.get(values[0]), {
           embedding_dimensions: values[5],

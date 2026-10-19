@@ -1,4 +1,4 @@
-import { getChunkOverlap, getChunkSize, getChunkStrategy } from "./config.js";
+import { CHUNK_STRATEGIES, getChunkOverlap, getChunkSize, getChunkStrategy } from "./config.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { splitLongSentence, splitSentenceSegments } from "./sentence-splitter.js";
 import { normalizeWhitespace, splitParagraphs } from "./text-utils.js";
@@ -819,6 +819,12 @@ const chunkPageWithSentences = ({
   };
 };
 
+const CHUNK_PAGE_BY_STRATEGY = new Map([
+  ["structured", chunkPageWithStructure],
+  ["simple", chunkPageWithFixedWindows],
+  ["sentence", chunkPageWithSentences],
+]);
+
 export const chunkDocumentWithConfig = ({
   docId,
   fileName,
@@ -834,12 +840,15 @@ export const chunkDocumentWithConfig = ({
   const chunks = [];
   let chunkIndex = 0;
 
-  const chunkPage =
-    chunkStrategy === "simple"
-      ? chunkPageWithFixedWindows
-      : chunkStrategy === "sentence"
-        ? chunkPageWithSentences
-        : chunkPageWithStructure;
+  // No strategy means the default; a strategy this chunker does not know is
+  // an error, not structured chunks under another name.
+  const chunkPage = CHUNK_PAGE_BY_STRATEGY.get(chunkStrategy ?? "structured");
+
+  if (!chunkPage) {
+    throw new Error(
+      `Unknown chunk strategy ${JSON.stringify(chunkStrategy)}; expected one of ${CHUNK_STRATEGIES.join(", ")}.`
+    );
+  }
 
   for (const page of pages) {
     const pageChunks = chunkPage({

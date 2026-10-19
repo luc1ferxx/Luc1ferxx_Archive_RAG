@@ -6,6 +6,7 @@ import test, { after, before } from "node:test";
 import {
   containsGoldSpan,
   createLayoutParsers,
+  describeLayoutPdfConfig,
   formatMarkdown,
   pairedDelta,
   parseParserPair,
@@ -68,6 +69,24 @@ test("--parsers picks two distinct known parsers, base first; pdf.js vs Docling 
   assert.throws(() => parseParserPair("pdfjs"), /two distinct parsers/);
   assert.throws(() => parseParserPair("pdfjs,pdfjs"), /two distinct parsers/);
   assert.throws(() => parseParserPair("pdfjs,tika"), /two distinct parsers/);
+});
+
+test("config.pdf records the configured PDF settings and what each arm parses with", () => {
+  assert.deepEqual(
+    describeLayoutPdfConfig(["pdfjs-paragraphs", "auto"], { paragraphDetection: false, parser: "pdfjs" }),
+    {
+      arms: {
+        auto: { paragraphDetection: false, parser: "auto" },
+        "pdfjs-paragraphs": { paragraphDetection: true, parser: "pdfjs" },
+      },
+      paragraphDetection: false,
+      parser: "pdfjs",
+    }
+  );
+  assert.deepEqual(describeLayoutPdfConfig(["pdfjs", "docling"], { paragraphDetection: true, parser: "auto" }).arms, {
+    docling: { paragraphDetection: null, parser: "docling" },
+    pdfjs: { paragraphDetection: false, parser: "pdfjs" },
+  });
 });
 
 test("paired deltas follow the chosen pair: variant minus base", () => {

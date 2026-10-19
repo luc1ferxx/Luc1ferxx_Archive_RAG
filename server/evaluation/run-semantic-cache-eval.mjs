@@ -47,6 +47,7 @@ import {
   summarizeSemanticCacheRuns,
   sweepSemanticCacheDecisions,
 } from "./semantic-cache-eval.js";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -87,7 +88,7 @@ const main = async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "semantic-cache-eval-"));
 
   // Before the first RAG import (rag/storage.js captures it).
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
   process.env.RAG_OBSERVABILITY_ENABLED = "true";
   process.env.RAG_OBSERVABILITY_EVENTS_PATH = path.join(tempRoot, "events.jsonl");

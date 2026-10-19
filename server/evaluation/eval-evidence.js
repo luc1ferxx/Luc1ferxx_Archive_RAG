@@ -225,6 +225,45 @@ export const resolveEvaluationGitState = async ({
   }
 };
 
+/**
+ * The checkout an evaluation run measured, for its report's `config.git`:
+ * { sha, dirty, changedPaths } (changedPaths: paths `git status` lists,
+ * untracked ones included, the evaluation's own outputs under
+ * server/evaluation/generated/ and results/ left out as for the release
+ * evidence). null when git cannot say (no git, not a checkout): a report
+ * never fails for it. Read it before the run writes anything.
+ */
+export const describeEvaluationCheckout = async ({
+  repoRoot = evaluationRepositoryRoot,
+  runGit,
+} = {}) => {
+  const executeGit =
+    runGit ??
+    (async (args) => {
+      const { stdout } = await execFileAsync("git", args, {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+      return stdout;
+    });
+
+  try {
+    const sha = String(await executeGit(["rev-parse", "HEAD"])).trim();
+
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+      return null;
+    }
+
+    const changedPaths = getGitStatusPaths(
+      String(await executeGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"]))
+    ).filter((filePath) => !isControlledEvaluationOutput(normalizeGitStatusPath(filePath))).length;
+
+    return { changedPaths, dirty: changedPaths > 0, sha };
+  } catch {
+    return null;
+  }
+};
+
 const normalizeText = (value, fallback = "unknown") =>
   String(value ?? "").replace(/\s+/g, " ").trim() || fallback;
 

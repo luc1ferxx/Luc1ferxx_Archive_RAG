@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { chunkDocument } from "./chunker.js";
+import { chunkDocumentWithConfig } from "./chunker.js";
+import { describeChunkProfile, stampChunkProfile } from "./chunk-profile.js";
 import {
   getDocumentsPostgresTable,
   getEmbeddingTaskPrefixesForModel,
@@ -303,6 +304,10 @@ export const probeEmbeddingSpace = async (space) => {
  */
 export const createIndexVersion = async ({
   builderId = null,
+  // The chunk profile the build cuts documents with (rag/chunk-profile.js),
+  // recorded with the version's index params; read here, before any DDL, so
+  // an invalid chunking setting creates nothing.
+  chunkProfile = describeChunkProfile(),
   indexParams = {},
   leaseMs = getIndexVersionBuildLeaseMs(),
   space = getConfiguredEmbeddingSpace(),
@@ -414,7 +419,10 @@ export const createIndexVersion = async ({
             space.documentPrefix,
             space.queryPrefix,
             space.dimensions,
-            JSON.stringify(params),
+            // normalizeIndexParams reads the index settings only, so the
+            // profile beside them changes neither the version's index nor
+            // what is compared with the configuration.
+            JSON.stringify({ ...params, chunkProfile }),
             builderId,
             toPositiveInteger(leaseMs, getIndexVersionBuildLeaseMs()),
           ]
@@ -644,7 +652,11 @@ const buildDocumentChunks = async ({ loadPages, source }) => {
     );
   }
 
-  const chunks = chunkDocument({
+  const chunkProfile = describeChunkProfile();
+  const chunks = chunkDocumentWithConfig({
+    chunkOverlap: chunkProfile.overlap,
+    chunkSize: chunkProfile.size,
+    chunkStrategy: chunkProfile.strategy,
     docId,
     fileName: String(source.file_name ?? ""),
     pages,
@@ -656,12 +668,13 @@ const buildDocumentChunks = async ({ loadPages, source }) => {
     throw new DocumentSourceError(`No extractable text was found in the stored PDF of ${docId}.`);
   }
 
-  // Stamped like an ingest stamps them (rag/index.js commitDocument).
+  // Stamped like an ingest stamps them (rag/index.js chunkDocumentPages and
+  // commitDocument).
   const documentVersion = Number(source.content_version ?? 1) || 1;
 
   return chunks.map((chunk) => ({
     id: chunk.id,
-    metadata: stampChunkDocumentVersion(chunk.metadata, documentVersion),
+    metadata: stampChunkDocumentVersion(stampChunkProfile(chunk.metadata, chunkProfile), documentVersion),
     pageContent: chunk.pageContent,
   }));
 };
@@ -2044,6 +2057,36 @@ export const retireIndexVersion = async ({
     previousStatus: retired.alreadyRetired ? INDEX_VERSION_STATUSES.retired : retired.previousStatus,
     versionId: safeVersionId,
   };
+};
+
+/**
+ * Replaces the chunk profile `versionId` recorded (index_params.chunkProfile,
+ * the key alone) after `vector:reindex --from documents` rewrote its chunks:
+ * the profile that run cut every document with, or MIXED_CHUNK_PROFILE when
+ * it cannot say one profile cut them all. Only a version that recorded one
+ * (created by `vector:index build`): version 1 and older versions stay
+ * unknown. Resolves to whether a row changed. The update locks the row alone,
+ * like stop_build; nothing else writes the key after the version is created.
+ */
+export const recordIndexVersionChunkProfile = async ({ chunkProfile, versionId }) => {
+  assertIndexVersionsSupported();
+
+  const { versionsTable } = getIndexVersionTableNames();
+
+  return Boolean(
+    firstRow(
+      await runAsDatabaseSystem(() =>
+        getPgvectorRuntime().query(
+          `/* index_versions:record_chunk_profile */
+            UPDATE ${versionsTable}
+               SET index_params = jsonb_set(index_params, '{chunkProfile}', $2::jsonb), updated_at = NOW()
+             WHERE version_id = $1 AND index_params ? 'chunkProfile'
+            RETURNING version_id`,
+          [requireVersionId(versionId), JSON.stringify(chunkProfile)]
+        )
+      )
+    )
+  );
 };
 
 const toIsoString = (value) => (value instanceof Date ? value.toISOString() : String(value ?? ""));

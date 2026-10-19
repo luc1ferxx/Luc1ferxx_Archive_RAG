@@ -74,6 +74,8 @@ import {
 import { retrieveGlobalContext } from "../rag/retrievers/global-retriever.js";
 import { retrievePerDocumentContext } from "../rag/retrievers/per-doc-retriever.js";
 import { resetEmbeddingCache } from "../rag/embedding-cache.js";
+import { describeChunkProfile } from "../rag/chunk-profile.js";
+import { chunkDocumentWithConfig } from "../rag/chunker.js";
 
 const originalDataDirectory = getRagDataDirectory();
 const EMBEDDING_DIMENSIONS = 64;
@@ -920,6 +922,76 @@ test("ingest stores automatic document profile metadata", async () => {
     importedByUserConfirmation: true,
   });
   assert.equal(getDocument("profiled-benefits").summary, document.summary);
+});
+
+test("stored chunks carry their chunk profile id, and no response, trace or MCP payload does", async () => {
+  const profile = describeChunkProfile();
+  const pages = [
+    "Section 7. Limitation of Liability. The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim.",
+    "Annual leave policy: employees receive 10 paid annual leave days each year.",
+  ];
+  const document = await ingestFixture({ docId: "profile-vendor-a", fileName: "profile-vendor-a.pdf", pages });
+
+  await ingestFixture({
+    docId: "profile-vendor-b",
+    fileName: "profile-vendor-b.pdf",
+    pages: [
+      "Section 7. Limitation of Liability. The total liability of Vendor B shall not exceed the fees paid in the six (6) months preceding the claim.",
+    ],
+  });
+
+  const stored = JSON.parse(await readFile(path.join(getRagDataDirectory(), "vector-index.json"), "utf8"));
+
+  assert.ok(stored.length >= 3);
+  assert.ok(stored.every((entry) => entry.metadata.chunkProfileId === profile.id));
+  // The stamp is all that changed: the chunk text and boundaries are the
+  // chunker's own.
+  assert.deepEqual(
+    stored.filter((entry) => entry.metadata.docId === "profile-vendor-a").map((entry) => [entry.id, entry.pageContent]),
+    chunkDocumentWithConfig({
+      chunkOverlap: profile.overlap,
+      chunkSize: profile.size,
+      chunkStrategy: profile.strategy,
+      docId: "profile-vendor-a",
+      fileName: "profile-vendor-a.pdf",
+      pages: pages.map((text, index) => ({ pageNumber: index + 1, text })),
+    }).map((chunk) => [chunk.id, chunk.pageContent])
+  );
+
+  const leaks = (value) => JSON.stringify(value).includes("chunkProfileId") || JSON.stringify(value).includes(profile.id);
+
+  assert.equal(leaks(document), false, "the ingest response");
+  assert.equal(leaks(getDocument("profile-vendor-a")), false, "the registry's public document");
+
+  await withEnv(
+    { RAG_OBSERVABILITY_ENABLED: "true", RAG_OBSERVABILITY_INCLUDE_CONTEXT: "true" },
+    async () => {
+      const qa = await chat(["profile-vendor-a"], "What is the annual leave policy?", {
+        includeRetrievedContexts: true,
+      });
+      const comparison = await chat(
+        ["profile-vendor-a", "profile-vendor-b"],
+        "Compare the limitation of liability in these two contracts."
+      );
+      const agent = await runAgentRag({
+        accessScope: {},
+        docIds: ["profile-vendor-a"],
+        question: "What is the annual leave policy?",
+        ragService: { chat, getDocument, listDocuments },
+        sessionId: "chunk-profile-session",
+        userId: "alice",
+        webChatService: async () => ({ text: "Web search should not run." }),
+      });
+
+      assert.ok(qa.citations.length > 0);
+      assert.equal(leaks(qa), false, "a QA response with its retrieved contexts");
+      assert.equal(leaks(comparison), false, "a comparison response");
+      assert.equal(leaks(formatAskResult(comparison)), false, "the MCP ask payload");
+      assert.equal(agent.status, 200);
+      assert.equal(leaks(agent.body), false, "the /chat body, retrieval block and observability included");
+      assert.equal(leaks(await readObservabilityEvents()), false, "RAG traces with full context");
+    }
+  );
 });
 
 test("ingest rolls back vector entries when document registration fails", async () => {

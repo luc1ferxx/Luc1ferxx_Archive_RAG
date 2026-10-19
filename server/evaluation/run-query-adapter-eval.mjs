@@ -44,6 +44,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
 import { pairedRecallDeltas, summarizeRecallRows } from "./run-qasper-retrieval-eval.mjs";
+import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
@@ -290,7 +291,7 @@ const main = async () => {
   const documents = corpus.documents.filter((doc) => docKeys.has(doc.key));
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "query-adapter-eval-"));
 
-  process.env.RAG_DATA_DIRECTORY = path.join(tempRoot, "rag-data");
+  useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
   delete process.env.RAG_EMBEDDING_QUERY_ADAPTER;
   delete process.env.RAG_RETRIEVAL_ROUTE;

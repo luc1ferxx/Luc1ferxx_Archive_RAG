@@ -523,8 +523,24 @@ export const getAgentUnifiedGraphCapabilityIds = () =>
     .filter(Boolean);
 // --- end AGENT track block -------------------------------------------------
 
-export const getChunkStrategy = () =>
-  (process.env.RAG_CHUNK_STRATEGY || "structured").trim().toLowerCase();
+// How rag/chunker.js cuts pages into chunks: `structured` (default) keeps
+// headings with their section, `simple` cuts fixed windows, `sentence` packs
+// whole sentences. An empty or whitespace value is unset; any other value
+// fails at ingest (and as the health report's chunking entry) instead of
+// silently chunking with structured, as a typo used to.
+export const CHUNK_STRATEGIES = Object.freeze(["structured", "simple", "sentence"]);
+
+export const getChunkStrategy = () => {
+  const value = String(process.env.RAG_CHUNK_STRATEGY ?? "").trim().toLowerCase() || "structured";
+
+  if (!CHUNK_STRATEGIES.includes(value)) {
+    throw new Error(
+      `RAG_CHUNK_STRATEGY must be one of ${CHUNK_STRATEGIES.join(", ")}; got "${process.env.RAG_CHUNK_STRATEGY}".`
+    );
+  }
+
+  return value;
+};
 
 // Document RAG runs two independent retrieval routes by default -- pgvector
 // cosine search and PostgreSQL full-text search -- and fuses their ranks with
