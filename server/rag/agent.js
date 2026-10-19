@@ -1191,7 +1191,12 @@ const runAgentRagInScope = async ({
       await observeUnifiedAgentGraphShadow({
         accessScope,
         addTraceStep,
+        // The planning problem guarded poses: its allowlist, base registry and
+        // admission inputs.
+        allowedCapabilityIds: unifiedGraphAllowedCapabilityIds,
+        baseCapabilityRegistry,
         budgetState,
+        capabilityApprovals,
         capabilityRegistry: effectiveCapabilityRegistry,
         docIds,
         plan,

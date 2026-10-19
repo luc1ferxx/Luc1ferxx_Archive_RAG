@@ -1,6 +1,7 @@
 import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 import { getShadowPlannerAdapter } from "./agent-planner-shadow.js";
 import { createUnifiedAgentExecutionGraphResult } from "./agent-unified-dag-planner.js";
+import { assessUnifiedGraphAdmission } from "./agent-unified-graph-admission.js";
 
 const noop = () => {};
 
@@ -16,14 +17,31 @@ const noop = () => {};
  * planner fallback applies here: a model proposal that fails to parse,
  * validate, or pass admission is recorded as `rejected` with its reason codes,
  * never replaced by the deterministic graph and counted as a model success.
- * The planning call is awaited on the request path (a model plan adds its
+ *
+ * It poses the planning problem `guarded` poses (agent-unified-graph-run.js):
+ * the same Capability allowlist (AGENT_UNIFIED_GRAPH_CAPABILITIES), the base
+ * Capability registry for the catalog, and the same pure admission
+ * (assessUnifiedGraphAdmission with the request's capability approvals) on
+ * the validated graph, so `selected` means this graph would pass guarded's
+ * admission and `rejected` carries admission's reason codes. It does not
+ * predict which graph guarded plans: under AGENT_PLANNER_ROLLOUT=shadow this
+ * observes the side model while guarded uses the deterministic graph, and
+ * guarded replaces a refused model proposal with the deterministic graph
+ * (allowPlannerFallback here is false). What it does not check is
+ * what only an execution checks (a durable run store, a re-entered run, the
+ * stage's own refusal before its first checkpoint write). Blocked nodes are
+ * recorded by skill id only (`blockedSkillIds`, present only on an admission
+ * refusal and empty for a graph-level reason), never by node id. The
+ * planning call is awaited on the request path (a model plan adds its
  * latency to shadow requests).
  */
 export const observeUnifiedAgentGraphShadow = async ({
   accessScope,
   addTraceStep = noop,
   allowedCapabilityIds = [],
+  baseCapabilityRegistry,
   budgetState,
+  capabilityApprovals = {},
   capabilityRegistry,
   docIds,
   plan,
@@ -36,6 +54,9 @@ export const observeUnifiedAgentGraphShadow = async ({
 } = {}) => {
   let event;
   const observedAdapter = getShadowPlannerAdapter(plannerAdapter) ?? plannerAdapter;
+  // The registry guarded plans and admits against: without the request's
+  // approvals folded in (agent.js passes both).
+  const planningCapabilityRegistry = baseCapabilityRegistry ?? capabilityRegistry;
 
   try {
     const result = await createUnifiedAgentExecutionGraphResult({
@@ -43,7 +64,7 @@ export const observeUnifiedAgentGraphShadow = async ({
       allowPlannerFallback: false,
       allowedCapabilityIds,
       budgetState,
-      capabilityRegistry,
+      capabilityRegistry: planningCapabilityRegistry,
       docIds,
       plan,
       plannerAdapter: observedAdapter,
@@ -53,8 +74,33 @@ export const observeUnifiedAgentGraphShadow = async ({
       taskMemory,
     });
 
+    const admission = result.graph
+      ? assessUnifiedGraphAdmission({
+          accessScope,
+          capabilityApprovals,
+          capabilityRegistry: planningCapabilityRegistry,
+          docIds,
+          graph: result.graph,
+          plan,
+          registry: result.graphRegistry,
+        })
+      : null;
+    const refusedByAdmission = admission !== null && !admission.admitted;
+    const blockedNodeIds = new Set(refusedByAdmission ? admission.blockedNodeIds : []);
+
     event = {
-      errorCodes: result.errors.map((error) => error.code),
+      ...(refusedByAdmission
+        ? {
+            blockedSkillIds: [
+              ...new Set(
+                result.graph.nodes
+                  .filter((node) => blockedNodeIds.has(node.nodeId))
+                  .map((node) => node.skillId)
+              ),
+            ].sort(),
+          }
+        : {}),
+      errorCodes: refusedByAdmission ? admission.reasonCodes : result.errors.map((error) => error.code),
       executed: false,
       fallback: null,
       graph: result.graph
@@ -74,7 +120,7 @@ export const observeUnifiedAgentGraphShadow = async ({
         selectedPlannerId: result.planner.selectedPlannerId ?? null,
         status: result.planner.status,
       },
-      status: result.planner.status,
+      status: refusedByAdmission ? "rejected" : result.planner.status,
     };
   } catch (error) {
     event = {
