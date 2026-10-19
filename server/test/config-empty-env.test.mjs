@@ -213,6 +213,85 @@ test('"" and whitespace give every numeric getter the same value as an unset var
   assert.deepEqual(failures, []);
 });
 
+test('"" and whitespace never make a getter throw that does not throw unset', () => {
+  // A getter that validates its value (a closed set of choices) must read a
+  // blank value as unset, not as an invalid choice.
+  const failures = [];
+
+  withClearedEnv(() => {
+    const baseline = snapshotGetters();
+
+    for (const name of ENV_NAMES) {
+      for (const blank of ["", "   ", "\t"]) {
+        process.env[name] = blank;
+
+        const variant = snapshotGetters();
+
+        for (const [label, expected] of baseline) {
+          const actual = variant.get(label);
+
+          if (!("error" in expected) && "error" in actual) {
+            failures.push(`${name}=${JSON.stringify(blank)} made ${label} throw: ${actual.error}`);
+          }
+        }
+
+        delete process.env[name];
+      }
+    }
+  });
+
+  assert.deepEqual(failures, []);
+});
+
+// The settings whose value is one of a closed set and that refuse anything
+// else (an unknown value used to fall back silently for RAG_CHUNK_STRATEGY).
+const CHOICE_SETTINGS = [
+  {
+    allowed: config.CHUNK_STRATEGIES,
+    name: "RAG_CHUNK_STRATEGY",
+    read: () => config.getChunkStrategy(),
+    unset: "structured",
+  },
+  {
+    allowed: config.PDF_PARSERS,
+    name: "PDF_PARSER",
+    read: () => config.getPdfParser(),
+    unset: "pdfjs",
+  },
+];
+
+test("the choice getters read a blank value as unset and refuse an unknown one", () => {
+  withClearedEnv(() => {
+    for (const { allowed, name, read, unset } of CHOICE_SETTINGS) {
+      assert.equal(read(), unset, `${name} unset`);
+
+      for (const blank of ["", "   ", "\t"]) {
+        process.env[name] = blank;
+        assert.equal(read(), unset, `${name}=${JSON.stringify(blank)}`);
+      }
+
+      for (const value of allowed) {
+        process.env[name] = ` ${value.toUpperCase()} `;
+        assert.equal(read(), value, `${name} accepts ${value} in any case, trimmed`);
+      }
+
+      for (const unknown of ["fixed", "structured-v2", "pdf.js", "none"]) {
+        process.env[name] = unknown;
+        assert.throws(
+          read,
+          (error) =>
+            error.message.includes(name) &&
+            error.message.includes(JSON.stringify(unknown)) &&
+            allowed.every((value) => error.message.includes(value)),
+          `${name}=${unknown} is refused, naming the variable and the allowed values`
+        );
+      }
+
+      delete process.env[name];
+    }
+  });
+});
+
 test("an empty value keeps the specific defaults the review named", () => {
   withClearedEnv(() => {
     const cases = [

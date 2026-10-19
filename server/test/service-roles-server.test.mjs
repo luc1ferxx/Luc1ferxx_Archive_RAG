@@ -533,6 +533,40 @@ test("the monolith's health runs every check it ran before and names its role", 
   });
 });
 
+test("an invalid chunking setting adds a chunking error where documents are chunked, and nothing otherwise", async () => {
+  const monolith = { AGENT_SERVICE_URL: undefined, ARCHIVE_RAG_ROLE: undefined };
+
+  await withHealthEnvironment({ ...monolith, RAG_CHUNK_STRATEGY: "fixed" }, async () => {
+    const report = await buildHealthReport();
+
+    // Appended after the checks every report has (before tenantEncryption,
+    // which stays last), so the 16 keep their order.
+    assert.deepEqual(Object.keys(report.checks), [...MONOLITH_CHECKS, "chunking"]);
+    assert.equal(report.checks.chunking.status, "error");
+    assert.equal(report.checks.chunking.setting, "RAG_CHUNK_STRATEGY");
+    assert.match(
+      report.checks.chunking.message,
+      /RAG_CHUNK_STRATEGY must be one of structured, simple, sentence; got "fixed"/
+    );
+    assert.equal(report.status, "error");
+  });
+
+  // Unset, blank or valid: no entry at all.
+  for (const value of [undefined, "", "   ", "\t", "sentence", " Simple "]) {
+    await withHealthEnvironment({ ...monolith, RAG_CHUNK_STRATEGY: value }, async () => {
+      assert.deepEqual(Object.keys((await buildHealthReport()).checks), MONOLITH_CHECKS, JSON.stringify(value));
+    });
+  }
+
+  // The retrieval tier chunks no document.
+  await withHealthEnvironment({ ARCHIVE_RAG_ROLE: "retrieval", RAG_CHUNK_STRATEGY: "fixed" }, async () => {
+    const report = await buildHealthReport();
+
+    assert.equal(report.service.role, "retrieval");
+    assert.equal("chunking" in report.checks, false);
+  });
+});
+
 test("the edge's health probes every agent replica and never fails on the agent tier", async () => {
   const agentApp = await withEnvironment({ ARCHIVE_RAG_ROLE: "agent" }, () =>
     createAgentApp(appOptions())

@@ -75,6 +75,7 @@ import { checkSharedStateHealth } from "./rag/shared-state.js";
 import { probeDoclingServe } from "./rag/docling-parser.js";
 import { resolvePdfAutoRoutingConfig } from "./rag/pdf-page-router.js";
 import {
+  getChunkStrategy,
   getDoclingFallback,
   getDoclingMaxConcurrency,
   getDoclingMergeGapPages,
@@ -1275,6 +1276,22 @@ export const checkRowLevelSecurityHealth = async () => {
   }
 };
 
+// The chunking settings every ingest cuts chunks with. Reported only when
+// they are invalid: RAG_CHUNK_STRATEGY outside CHUNK_STRATEGIES fails every
+// upload at its chunk stage (it used to chunk as structured without a word).
+// Null otherwise, so a valid configuration adds no entry. An index version
+// built under other chunking settings is a warning of the vectorStore entry
+// (index versions), never this entry's.
+export const checkChunkingHealth = () => {
+  try {
+    getChunkStrategy();
+  } catch (error) {
+    return buildEntry("error", { message: error.message, setting: "RAG_CHUNK_STRATEGY" });
+  }
+
+  return null;
+};
+
 // PDF_PARSER=docling depends on a docling-serve instance. Uploads still parse
 // with pdf.js when it is down (DOCLING_FALLBACK=pdfjs), so like shared state
 // this reports the configured dependency as broken rather than the app.
@@ -1663,6 +1680,14 @@ export const buildHealthReport = async ({ env = process.env } = {}) => {
 
   if (postgresTls) {
     checks.postgresTls = postgresTls;
+  }
+
+  // Only with an invalid chunking setting, and only where documents are
+  // chunked: uploads and their ingestion (api), arXiv imports (agent).
+  const chunking = tiers.includes("api") || tiers.includes("agent") ? checkChunkingHealth() : null;
+
+  if (chunking) {
+    checks.chunking = chunking;
   }
 
   // Only with TENANT_ENCRYPTION on (or invalid), and only where tenant file
