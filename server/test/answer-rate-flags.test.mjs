@@ -43,6 +43,7 @@ const FLAG_KEYS = [
   "RAG_CLAIM_JUDGE_TEMPERATURE",
   "RAG_CLAIM_JUDGE",
   "RAG_QA_ANSWER_VERDICT",
+  "RAG_QA_EXTRACTIVE_OUTPUT",
   "RAG_QA_VERDICT_OVERRIDE",
   "RAG_QA_PARTIAL_COVERAGE_FLOOR",
   "RAG_MIN_QA_QUERY_TERM_COVERAGE",
@@ -638,6 +639,7 @@ test("describeAnswerRateFlags reports every flag, all off by default", () => {
     claimInflection: false,
     claimJudgeTemperature: null,
     claimSourceInheritance: false,
+    qaExtractiveOutput: false,
     qaGateInflection: false,
     qaVerdictOverride: "off",
   });
@@ -661,6 +663,7 @@ test("describeAnswerRateFlags reports every flag, all off by default", () => {
         claimInflection: true,
         claimJudgeTemperature: 0,
         claimSourceInheritance: true,
+        qaExtractiveOutput: false,
         qaGateInflection: true,
         qaVerdictOverride: "supported",
       });

@@ -30,8 +30,9 @@ import {
 const noop = () => {};
 
 // verdictOverridden appears only when RAG_QA_VERDICT_OVERRIDE answered a
-// NOT_IN_EVIDENCE reply (answer-verdict-override.js), so with the flag off the
-// step output keeps its shape.
+// NOT_IN_EVIDENCE reply (answer-verdict-override.js), and directAnswer only
+// when RAG_QA_EXTRACTIVE_OUTPUT grounded one, so with the flags off the step
+// output keeps its shape.
 const buildRagStepOutput = (result = {}) =>
   result.ok
     ? {
@@ -39,6 +40,9 @@ const buildRagStepOutput = (result = {}) =>
         citationCount: result.value?.citations?.length ?? 0,
         text: result.text ?? result.value?.text ?? "",
         ...(result.value?.verdictOverridden === true ? { verdictOverridden: true } : {}),
+        ...(typeof result.value?.directAnswer === "string"
+          ? { directAnswer: result.value.directAnswer }
+          : {}),
       }
     : null;
 

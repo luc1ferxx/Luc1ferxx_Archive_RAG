@@ -1063,6 +1063,7 @@ export const describeAnswerRateFlags = () => ({
   claimInflection: isClaimInflectionEnabled(),
   claimJudgeTemperature: getClaimJudgeTemperature(),
   claimSourceInheritance: isClaimSourceInheritanceEnabled(),
+  qaExtractiveOutput: isQaExtractiveOutputEnabled(),
   qaGateInflection: isQaGateInflectionEnabled(),
   qaVerdictOverride: getQaVerdictOverrideMode(),
 });
@@ -1187,6 +1188,16 @@ export const isNearDuplicateGuardEnabled = () =>
 // prose answer. Off, the comparison call is byte-identical to before.
 export const isComparisonStructuredOutputEnabled = () =>
   toBoolean(process.env.RAG_COMPARISON_STRUCTURED_OUTPUT, false);
+
+// RAG_QA_EXTRACTIVE_OUTPUT (default off): single-document QA asks the model
+// for the shortest exact answer copied from the evidence plus the sentences it
+// came from, each with its Source number, and the server renders the answer
+// from the evidence sentences those quotes resolve to (answer-writer.js). The
+// response carries the short answer as `directAnswer`. It replaces the QA
+// prompt whatever RAG_QA_ANSWER_VERDICT says (an empty reply is the model's
+// abstention) and RAG_QA_VERDICT_OVERRIDE does not apply to it.
+export const isQaExtractiveOutputEnabled = () =>
+  toBoolean(process.env.RAG_QA_EXTRACTIVE_OUTPUT, false);
 
 export const isRagObservabilityEnabled = () =>
   toBoolean(process.env.RAG_OBSERVABILITY_ENABLED, false);

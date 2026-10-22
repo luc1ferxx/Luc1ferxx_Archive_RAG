@@ -117,10 +117,16 @@ export const compareQasperAnswerReports = (
   // answerable subset an abstention counts as 0 instead, as the evaluation
   // notes' F1(abstain=0).
   const f1AbstainZero = (row) => (readAnswered(row) ? f1(row) : 0);
+  // The short-answer score (f1Direct, reports since 2026-10-22), same rule.
+  const f1Direct = (row) => Number(row.f1Direct) || 0;
+  const f1DirectAbstainZero = (row) => (readAnswered(row) ? f1Direct(row) : 0);
   const answered = (row) => (readAnswered(row) ? 1 : 0);
   const whereBoth = (subset, read) =>
     subset.filter(([left, right]) => typeof read(left) === "boolean" && typeof read(right) === "boolean");
+  const whereBothNumeric = (subset, read) =>
+    subset.filter(([left, right]) => Number.isFinite(read(left)) && Number.isFinite(read(right)));
   const readCited = (row) => row.citedEvidenceHit;
+  const readDirect = (row) => (typeof row.f1Direct === "number" ? row.f1Direct : NaN);
 
   return {
     cases: pairs.length,
@@ -134,6 +140,9 @@ export const compareQasperAnswerReports = (
     answerF1: delta(pairs, f1),
     // Over the answerable questions only, where an abstention scores 0.
     answerableF1: delta(answerable, f1AbstainZero),
+    // The short-answer scores, over the questions both reports scored that way.
+    answerF1Direct: delta(whereBothNumeric(pairs, readDirect), f1Direct),
+    answerableF1Direct: delta(whereBothNumeric(answerable, readDirect), f1DirectAbstainZero),
     answerRate: delta(answerable, answered),
     unanswerableAnswered: delta(unanswerable, answered),
     citedEvidenceHit: delta(whereBoth(answerable, readCited), (row) => (readCited(row) ? 1 : 0)),
@@ -153,6 +162,8 @@ export const compareQasperAnswerReports = (
 const METRIC_LABELS = Object.freeze({
   answerF1: "Answer F1 (official, all questions)",
   answerableF1: "Answer F1 on answerable questions (abstention = 0)",
+  answerF1Direct: "Short-answer F1 (directAnswer, else first sentence; all questions)",
+  answerableF1Direct: "Short-answer F1 on answerable questions (abstention = 0)",
   answerRate: "Answer rate (answerable questions)",
   unanswerableAnswered: "Unanswerable questions answered",
   citedEvidenceHit: "Cited evidence recall (answerable, both runs recorded it)",

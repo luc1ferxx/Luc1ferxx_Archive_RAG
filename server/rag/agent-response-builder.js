@@ -240,6 +240,11 @@ export const buildAgentResponse = ({
       agentWorkingMemory: workingMemory,
       researchBrief: publicResearchBrief,
       ragAnswer: finalizerAppliesToRagAnswer ? agentAnswer : ragAnswer,
+      // The short answer of an extractive reply (RAG_QA_EXTRACTIVE_OUTPUT);
+      // the finalizer never rewrites it, and the key is absent otherwise.
+      ...(ragResult?.ok && typeof ragResult.value?.directAnswer === "string"
+        ? { ragDirectAnswer: ragResult.value.directAnswer }
+        : {}),
       ragSources,
       ragResolvedQuestion: ragResult?.ok ? ragResult.value.resolvedQuery ?? question : question,
       ragMemoryApplied: ragResult?.ok ? Boolean(ragResult.value.memoryApplied) : false,
