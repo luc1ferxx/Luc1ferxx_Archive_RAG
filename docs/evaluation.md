@@ -435,17 +435,18 @@ npm run verify:quality
 
 同一台机器、qwen2.5:7b + nomic-embed-text、`eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json --openai-provider real` 各跑 3 轮加 `verify:quality` 1 轮，开关关（87a0734c）和开各一组，`RAG_OBSERVABILITY_ENABLED=true` 下按 RAG trace 的 `modelRejectReason` 统计进入闸门的 16 次对比调用（23 次对比里 7 次走近重复短路、不调模型）：
 
-| | 关（基线） | 开 |
-| --- | --- | --- |
-| 模型答案被采用 | 0 | 10 |
-| `unsupported_claims` | 16（175 条 claim 里 171 条不受支持） | 0 |
-| `differences_not_bound_to_every_document` | 0 | 3 |
-| `structured_no_differences`（模型返回空列表） | – | 3 |
-| 回退模板 / 拒答 | 13 / 3 | 3 / 3 |
-| `verify:quality` | 18/18 | 18/18 |
+| | 关（基线） | 开（第一版） | 开 + 近重复补齐（当前） |
+| --- | --- | --- | --- |
+| 模型答案被采用 | 0 | 10 | 12 |
+| `unsupported_claims` | 16（175 条 claim 里 171 条不受支持） | 0 | 0 |
+| `differences_not_bound_to_every_document` | 0 | 3 | 0 |
+| `structured_no_differences` | – | 3（语料外用例，模型返回空列表） | 4（3 次语料外用例；1 次两文档用例的两条引文都没定位到证据） |
+| 回退模板 / 拒答 | 13 / 3 | 3 / 3 | 1 / 3 |
+| `verify:quality` | 18/18 | 18/18 | 18/18 |
 
-- 采用的 10 次是两文档的数值、范围、审批冲突三个用例各 3 轮，加 `verify:quality` 的一次对比。渲染出来的行没有一条被词法检查拒掉。
-- 没采用的两种都不是新的失败：3 次 `structured_no_differences` 全是语料外文档的用例，模型返回空列表，和基线一样拒答；3 次 `differences_not_bound_to_every_document` 全是"两份近重复 + 一份冲突"的三文档用例，模型每轮只引了其中两份（把"近重复的文档也要各给一条"写进 prompt 之后也一样），闸门要求差异覆盖每份文档，于是回退模板，答案和基线相同。
+- 第一版采用的 10 次是两文档的数值、范围、审批冲突三个用例各 3 轮，加 `verify:quality` 的一次对比。渲染出来的行没有一条被词法检查拒掉。
+- 第一版没采用的两种都不是新的失败：3 次 `structured_no_differences` 全是语料外文档的用例，模型返回空列表，和基线一样拒答；3 次 `differences_not_bound_to_every_document` 全是"两份近重复 + 一份冲突"的三文档用例，模型每轮只引了其中两份（把"近重复的文档也要各给一条"写进 prompt 之后也一样），闸门要求差异覆盖每份文档，于是回退模板，答案和基线相同。
+- **近重复补齐**（同日）：模型漏掉的文档如果和已引文档是近重复对（`analysis.nearDuplicatePairs`）、自己的证据里又有同一句话，服务端就替它补上这一句；补上的条目和它的近重复伙伴同组，只和说法不同的文档配对，不会自己造出对立。再跑 3 轮：三文档用例 3 轮都被采用（每轮补 1–2 条，compare-hard 的检查照常通过）；新出现的一次回退是两文档用例里模型两条引文都改了措辞、定位不到证据，回退模板，答案和基线相同。
 - 第一版渲染器把每份文档的引文各写一行，三文档用例里 6 行差异 claim 全被判不受支持：`evaluateDifferenceSectionSupport` 只接受能两两配成"不同文档、实质对立"的差异段，奇数行或配不上的行整段作废。现在按组两两配对、同一行可以重复出现，和有依据模板一个写法。
 - compare-hard 自己的 8 项检查两组相同（6/8，失败的是 QA 对照组的措辞和语料外用例的无引用拒答，10-04 就是这样）。
 - 只在 qwen2.5:7b 上测过，更强的模型在闸门下的采纳率没测。开关默认关，确定性评测和锁定基线不受影响。
