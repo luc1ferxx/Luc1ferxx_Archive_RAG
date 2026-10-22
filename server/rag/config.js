@@ -1179,6 +1179,15 @@ export const getMaxQueryRequirements = () =>
 export const isNearDuplicateGuardEnabled = () =>
   toBoolean(process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED, true);
 
+// RAG_COMPARISON_STRUCTURED_OUTPUT (default off): the comparison answer model
+// returns, per aspect on which the documents differ, one verbatim quote per
+// document with the Source number it came from, and the server renders the
+// answer from the evidence sentences those quotes resolve to (answer-writer.js).
+// The comparison gate then checks the rendered answer exactly as it checks a
+// prose answer. Off, the comparison call is byte-identical to before.
+export const isComparisonStructuredOutputEnabled = () =>
+  toBoolean(process.env.RAG_COMPARISON_STRUCTURED_OUTPUT, false);
+
 export const isRagObservabilityEnabled = () =>
   toBoolean(process.env.RAG_OBSERVABILITY_ENABLED, false);
 

@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 export const PROMPT_IDS = Object.freeze({
   claimJudge: "claim_judge",
   comparisonAnswer: "comparison_answer",
+  comparisonAnswerStructured: "comparison_answer_structured",
   dagPlanner: "dag_planner",
   executionPlanner: "execution_planner",
   guardedComparisonAnswer: "guarded_comparison_answer",

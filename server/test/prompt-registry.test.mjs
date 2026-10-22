@@ -38,6 +38,9 @@ const PINNED_PROMPT_TEMPLATES = Object.freeze({
   "execution_planner@v1": "46e1a0502f34",
   "guarded_comparison_answer@v1.1": "5a59976484cd",
   "guarded_comparison_answer@v2.1": "e5f60f0f5aba",
+  // v1 / v2: the structured comparison templates (RAG_COMPARISON_STRUCTURED_OUTPUT).
+  "comparison_answer_structured@v1": "3fba02402da0",
+  "comparison_answer_structured@v2": "9141a488e933",
   "intent_planner@v1": "088ec96ebb85",
   "memory_query_rewrite@v1": "482c557f3448",
   "memory_query_rewrite@v2": "c695383ae9e3",
@@ -78,8 +81,8 @@ test("every prompt id has templates and the active set picks exactly one per id"
 
   assert.deepEqual([...listedIds].sort(), Object.values(PROMPT_IDS).sort());
   assert.equal(new Set(activeIds).size, activeIds.length, "one active template per id");
-  // Exactly one of the two comparison prompts is active, by configuration.
-  assert.equal(activeIds.length, Object.values(PROMPT_IDS).length - 1);
+  // Exactly one of the three comparison prompts is active, by configuration.
+  assert.equal(activeIds.length, Object.values(PROMPT_IDS).length - 2);
 });
 
 test("the active set follows RAG_PROMPT_VERSION and hashes independently of order", () => {

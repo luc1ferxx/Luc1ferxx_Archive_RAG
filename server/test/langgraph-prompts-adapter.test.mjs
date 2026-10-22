@@ -57,6 +57,8 @@ const { fingerprintPromptSource } = await import("../rag/prompt-registry.js");
 const PINNED_TEMPLATE_PROMPTS = Object.freeze({
   "comparison_answer@v1.1": "5cfc615314eb",
   "comparison_answer@v2.1": "2046647cec58",
+  "comparison_answer_structured@v1": "3fba02402da0",
+  "comparison_answer_structured@v2": "9141a488e933",
   "guarded_comparison_answer@v1.1": "5a59976484cd",
   "guarded_comparison_answer@v2.1": "e5f60f0f5aba",
   "memory_query_rewrite@v1": "482c557f3448",
@@ -80,6 +82,7 @@ const FUNCTION_BUILT_PROMPT_IDS = Object.freeze([
 ]);
 const TEMPLATE_VARIABLES = Object.freeze({
   comparison_answer: ["context", "diagnostics", "preferenceBlock", "questionBlock"],
+  comparison_answer_structured: ["context", "diagnostics", "preferenceBlock", "questionBlock"],
   guarded_comparison_answer: ["context", "diagnostics", "preferenceBlock", "questionBlock"],
   memory_query_rewrite: ["documents", "longTermMemory", "question", "recentConversation"],
   qa_answer: ["context", "preferenceBlock", "questionBlock"],
