@@ -187,6 +187,7 @@ test("verbatim quotes render as the grounded template's lines and pass the compa
     resolvedEntryCount: 2,
     droppedEntryCount: 0,
     droppedAspectCount: 0,
+    filledEntryCount: 0,
     renderedLineCount: 2,
   });
 });
@@ -210,6 +211,7 @@ test("a quote with a value the evidence does not state is dropped and the answer
     resolvedEntryCount: 1,
     droppedEntryCount: 1,
     droppedAspectCount: 1,
+    filledEntryCount: 0,
     renderedLineCount: 0,
   });
   assert.doesNotMatch(response.text, /4 days/);
@@ -262,21 +264,28 @@ test("an empty differences list falls back as no differences", async () => {
     resolvedEntryCount: 0,
     droppedEntryCount: 0,
     droppedAspectCount: 0,
+    filledEntryCount: 0,
     renderedLineCount: 0,
   });
 });
 
-test("the rendered answer still goes through the gate: an aspect covering one document only is no difference", async () => {
+test("the rendered answer still goes through the gate: a document the reply never binds is refused", async () => {
   const comparison = buildComparison([
     ...NUMERIC_CONFLICT,
     {
       docId: "beta",
       fileName: "handbook-beta.pdf",
-      pageContent: "Employees may work remotely 2 days per week with manager approval.",
+      pageContent: "Travel expenses are reimbursed within 30 days of filing.",
     },
   ]);
-  // Two documents differ, but the third is never bound: the existing gate
-  // rule refuses the rendered answer like a prose one.
+  // Two documents differ, but the third (not a near-duplicate of either, so
+  // nothing fills it in) is never bound: the existing gate rule refuses the
+  // rendered answer like a prose one.
+  assert.ok(
+    comparison.analysis.nearDuplicatePairs.every(
+      (pair) => pair.leftDocId !== "beta" && pair.rightDocId !== "beta"
+    )
+  );
   const { response } = await writeWithModelReply(comparison, differenceReply(comparison));
 
   assert.equal(response.modelRejectReason.code, "differences_not_bound_to_every_document");
@@ -396,6 +405,7 @@ test("a quote that spans two sentences resolves to the sentence holding most of 
     resolvedEntryCount: 4,
     droppedEntryCount: 1,
     droppedAspectCount: 0,
+    filledEntryCount: 0,
     renderedLineCount: 4,
   });
   // Per document (one line each) plus two contrast pairs.
@@ -447,6 +457,80 @@ test("near-duplicate documents form one group and are each paired with the docum
   assert.equal(response.structuredOutput.droppedAspectCount, 0);
 });
 
+test("a near-duplicate document the reply left out is filled in with the sentence its partner quoted", async () => {
+  const comparison = buildComparison(THREE_DOCUMENTS);
+  const alphaRank = rankOf(comparison, "alpha");
+  const betaRank = rankOf(comparison, "beta");
+  const gammaRank = rankOf(comparison, "gamma");
+
+  // alpha and beta are twins; the engine may also pair each with gamma as a
+  // near-duplicate with an explicit conflict, which the fill never uses
+  // because gamma's sentence is not in their evidence.
+  assert.ok(
+    comparison.analysis.nearDuplicatePairs.some(
+      (pair) => [pair.leftDocId, pair.rightDocId].sort().join() === "alpha,beta"
+    )
+  );
+
+  // The model quoted alpha and gamma only, as qwen2.5:7b does with twins.
+  const { response } = await writeWithModelReply(comparison, differenceReply(comparison));
+  const alphaLine = boundLine("handbook-alpha", ALPHA_SENTENCE, alphaRank);
+  const betaLine = boundLine("handbook-beta", ALPHA_SENTENCE, betaRank);
+  const gammaLine = boundLine("handbook-gamma", GAMMA_SENTENCE, gammaRank);
+
+  assert.equal(response.modelRejectReason, undefined);
+  assert.deepEqual(
+    response.text.split("Differences:\n")[1].split("\nGaps or uncertainty:")[0].split("\n"),
+    [alphaLine, gammaLine, betaLine, gammaLine]
+  );
+  assert.deepEqual(response.structuredOutput, {
+    parsed: 1,
+    aspectCount: 1,
+    entryCount: 2,
+    resolvedEntryCount: 2,
+    droppedEntryCount: 0,
+    droppedAspectCount: 0,
+    filledEntryCount: 1,
+    renderedLineCount: 4,
+  });
+});
+
+test("a near-duplicate partner is not filled in when its evidence lacks the quoted sentence", () => {
+  const comparison = buildComparison([
+    ...NUMERIC_CONFLICT,
+    {
+      docId: "beta",
+      fileName: "handbook-beta.pdf",
+      pageContent: "Employees may work remotely 2 days per week with manager approval. Badges renew yearly.",
+    },
+  ]);
+  const alphaRank = rankOf(comparison, "alpha");
+  const betaRank = rankOf(comparison, "beta");
+  const rendered = renderStructuredComparisonAnswer({
+    analysis: {
+      nearDuplicatePairs: [{ leftDocId: "alpha", rightDocId: "beta" }],
+    },
+    bundle: comparison.bundle,
+    parsed: {
+      differences: [
+        {
+          aspect: "Badges",
+          entries: [
+            { quote: "Badges renew yearly.", source: betaRank },
+            { quote: GAMMA_SENTENCE, source: rankOf(comparison, "gamma") },
+          ],
+        },
+      ],
+    },
+  });
+
+  // alpha is beta's twin but never says "Badges renew yearly", so it stays
+  // out; the aspect renders beta against gamma only.
+  assert.equal(rendered.counts.filledEntryCount, 0);
+  assert.equal(rendered.counts.renderedLineCount, 2);
+  assert.doesNotMatch(rendered.text, new RegExp(`\\[Source ${alphaRank}\\]`));
+});
+
 test("an aspect on which every quoted document says the same thing is no difference", async () => {
   const comparison = buildComparison(THREE_DOCUMENTS);
   const alphaRank = rankOf(comparison, "alpha");
@@ -480,6 +564,7 @@ test("an aspect on which every quoted document says the same thing is no differe
     resolvedEntryCount: 5,
     droppedEntryCount: 0,
     droppedAspectCount: 1,
+    filledEntryCount: 0,
     renderedLineCount: 4,
   });
 });

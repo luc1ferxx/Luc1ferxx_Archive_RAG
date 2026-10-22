@@ -1438,13 +1438,34 @@ const toStructuredDifferences = (parsed) =>
         }))
     : null;
 
+// Each document's near-duplicate partners (analysis.nearDuplicatePairs), by id.
+const buildNearDuplicatePartners = (analysis) => {
+  const partners = new Map();
+  const add = (docId, partnerDocId) => {
+    if (!partners.has(docId)) {
+      partners.set(docId, []);
+    }
+
+    partners.get(docId).push(partnerDocId);
+  };
+
+  for (const pair of analysis?.nearDuplicatePairs ?? []) {
+    if (pair?.leftDocId && pair?.rightDocId) {
+      add(pair.leftDocId, pair.rightDocId);
+      add(pair.rightDocId, pair.leftDocId);
+    }
+  }
+
+  return partners;
+};
+
 /**
  * The answer text rendered from a structured comparison reply, in the grounded
  * template's shape, plus counts of what the reply held and what was dropped.
  * `text` is null when nothing parsed or no aspect kept entries of two documents.
  * The counts are integers only: they go to the RAG trace.
  */
-export const renderStructuredComparisonAnswer = ({ bundle, parsed }) => {
+export const renderStructuredComparisonAnswer = ({ analysis = null, bundle, parsed }) => {
   const differences = toStructuredDifferences(parsed);
   const counts = {
     parsed: differences ? 1 : 0,
@@ -1453,6 +1474,7 @@ export const renderStructuredComparisonAnswer = ({ bundle, parsed }) => {
     resolvedEntryCount: 0,
     droppedEntryCount: 0,
     droppedAspectCount: 0,
+    filledEntryCount: 0,
     renderedLineCount: 0,
   };
 
@@ -1461,6 +1483,17 @@ export const renderStructuredComparisonAnswer = ({ bundle, parsed }) => {
   }
 
   const sources = buildStructuredEvidenceSources(bundle);
+  const sourcesByDocId = new Map();
+
+  for (const source of sources.values()) {
+    if (!sourcesByDocId.has(source.docId)) {
+      sourcesByDocId.set(source.docId, []);
+    }
+
+    sourcesByDocId.get(source.docId).push(source);
+  }
+
+  const nearDuplicatePartners = buildNearDuplicatePartners(analysis);
   const differenceLines = [];
   const firstLineByDocId = new Map();
   counts.aspectCount = differences.length;
@@ -1485,6 +1518,41 @@ export const renderStructuredComparisonAnswer = ({ bundle, parsed }) => {
         line: buildDocumentBoundFactLine(source, { rank: source.rank, text: sentence.text }),
         normalized: sentence.normalized,
       });
+    }
+
+    // A document the model left out of an aspect is filled in from its
+    // near-duplicate partner (analysis.nearDuplicatePairs) when its own
+    // evidence holds the very sentence the partner quoted: qwen2.5:7b quotes
+    // one of two near-identical files, and the gate binds every document.
+    // The filled entry joins the partner's group, so it is paired with the
+    // documents that differ, never with the partner.
+    for (const [docId, docSources] of sourcesByDocId) {
+      if (resolvedByDocId.has(docId)) {
+        continue;
+      }
+
+      for (const partnerDocId of nearDuplicatePartners.get(docId) ?? []) {
+        const partner = resolvedByDocId.get(partnerDocId);
+        const match = partner
+          ? docSources
+              .flatMap((source) =>
+                source.sentences.map((sentence) => ({ sentence, source }))
+              )
+              .find(({ sentence }) => sentence.normalized === partner.normalized)
+          : null;
+
+        if (match) {
+          counts.filledEntryCount += 1;
+          resolvedByDocId.set(docId, {
+            line: buildDocumentBoundFactLine(match.source, {
+              rank: match.source.rank,
+              text: match.sentence.text,
+            }),
+            normalized: match.sentence.normalized,
+          });
+          break;
+        }
+      }
     }
 
     // Documents quoting the same sentence agree on this aspect (near-duplicate
@@ -1605,6 +1673,7 @@ export const writeComparisonAnswer = async ({
 
   if (structuredOutputEnabled) {
     const rendered = renderStructuredComparisonAnswer({
+      analysis,
       bundle,
       parsed: parseFirstJsonValue(completion),
     });
