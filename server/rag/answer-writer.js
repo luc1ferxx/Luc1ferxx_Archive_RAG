@@ -39,11 +39,7 @@ import {
   screenUntrustedText,
 } from "./prompt-injection-screen.js";
 import { createAnswerDraftReleaser } from "./answer-drafts.js";
-import {
-  DEFAULT_NOT_IN_EVIDENCE_REASON,
-  QA_NOT_IN_EVIDENCE_MARKER,
-  readQaAnswerVerdict,
-} from "./answer-verdict.js";
+import { QA_NOT_IN_EVIDENCE_MARKER, readQaAnswerVerdict } from "./answer-verdict.js";
 import {
   describeVerdictOverride,
   overrideNotInEvidenceVerdict,
@@ -468,12 +464,10 @@ const QA_EXTRACTIVE_PROMPTS = defineAnswerPrompts({
   v2Template: extractiveQaPromptV2,
 });
 
-const selectQaPrompts = () =>
-  isQaExtractiveOutputEnabled()
-    ? QA_EXTRACTIVE_PROMPTS
-    : isQaAnswerVerdictEnabled()
-      ? QA_VERDICT_PROMPTS
-      : QA_PROMPTS;
+// The prose QA templates: what the QA call sends with RAG_QA_EXTRACTIVE_OUTPUT
+// off, and what the extractive mode falls back to when its attempt fails.
+const selectProseQaPrompts = () =>
+  isQaAnswerVerdictEnabled() ? QA_VERDICT_PROMPTS : QA_PROMPTS;
 const COMPARISON_PROMPTS = defineAnswerPrompts({
   id: PROMPT_IDS.comparisonAnswer,
   v1Template: comparisonPromptV1,
@@ -517,9 +511,13 @@ export const listAnswerPromptDescriptors = () =>
     STRUCTURED_COMPARISON_PROMPTS,
   ].flatMap((variants) => Object.values(variants).map(({ descriptor }) => descriptor));
 
-/** The templates the current configuration would send. */
+/**
+ * The templates the current configuration would send. The extractive mode
+ * sends its own template first and the prose one when that attempt fails.
+ */
 export const getActiveAnswerPromptDescriptors = () => [
-  selectPrompt(selectQaPrompts()).descriptor,
+  ...(isQaExtractiveOutputEnabled() ? [selectPrompt(QA_EXTRACTIVE_PROMPTS).descriptor] : []),
+  selectPrompt(selectProseQaPrompts()).descriptor,
   selectComparisonPrompt().descriptor,
 ];
 
@@ -1285,15 +1283,14 @@ export const writeQaAnswer = async ({
   // by the verdict override, which never answers a multi-part question.
   evidenceRequirementCount = 1,
 }) => {
-  const qaPrompt = selectPrompt(selectQaPrompts());
-  const prompt = qaPrompt.render({
+  const blocks = {
     questionBlock: buildQuestionBlock({
       query,
       resolvedQuery,
     }),
     preferenceBlock: buildPreferenceBlock(preferenceBlock),
     context: bundle.context,
-  });
+  };
   // Streams verified sentences to a waiting client when the agent opened a
   // draft channel for this answer; otherwise null and nothing changes.
   // Checked against the full retrieved text, as the document loop's self-check
@@ -1307,10 +1304,26 @@ export const writeQaAnswer = async ({
     }),
   });
 
-  if (isQaExtractiveOutputEnabled()) {
-    return writeExtractiveQaAnswer({ allowedText, bundle, drafts, prompt, qaPrompt });
-  }
+  const call = { allowedText, blocks, bundle, drafts, evidenceRequirementCount, query, resolvedQuery };
 
+  return isQaExtractiveOutputEnabled() ? writeExtractiveQaAnswer(call) : writeProseQaAnswer(call);
+};
+
+// The QA call as it always was: the prose template (verdict or plain), its
+// reply guarded, the verdict read, the drafts released. With
+// RAG_QA_EXTRACTIVE_OUTPUT on it is also the fallback of a failed extractive
+// attempt, over the same blocks.
+const writeProseQaAnswer = async ({
+  allowedText,
+  blocks,
+  bundle,
+  drafts,
+  evidenceRequirementCount,
+  query,
+  resolvedQuery,
+}) => {
+  const qaPrompt = selectPrompt(selectProseQaPrompts());
+  const prompt = qaPrompt.render(blocks);
   // Models often group sources as [Source 1, Source 3]; every downstream reader
   // (self-check, finalizer, citation projection) parses one rank per bracket.
   const guarded = guardAnswerLinks(
@@ -1938,8 +1951,9 @@ const toExtractiveReply = (parsed) =>
  * `directAnswer`), then one line per resolved quote, every line "<sentence>
  * [Source N]". The lines are claim-checked before they are returned and any
  * line the lexical check refuses is dropped, so the agent's self-check and
- * finalizer meet an answer that passes. `abstained` when nothing resolved or
- * nothing passed. The counts are integers only: they go to the RAG trace.
+ * finalizer meet an answer that passes. `abstained` when nothing resolved,
+ * the direct answer is empty or in none of the resolved sentences, or nothing
+ * passed. The counts are integers only: they go to the RAG trace.
  */
 export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
   const reply = toExtractiveReply(parsed);
@@ -1986,9 +2000,20 @@ export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
 
   const direct = groundDirectAnswer(reply.answer, lines);
 
-  if (direct.directAnswer !== null) {
-    counts.directAnswerGrounded = 1;
+  // Round 2 (2026-10-22): an answer the quotes do not hold is no answer.
+  // Quoting a sentence is easy; in the first round the unanswerable questions
+  // were mostly answered with quotes and an answer found in none of them.
+  if (direct.directAnswer === null) {
+    return {
+      abstained: true,
+      counts,
+      directAnswer: null,
+      reason: direct.kind === "empty" ? "answer_empty" : "answer_ungrounded",
+      text: null,
+    };
   }
+
+  counts.directAnswerGrounded = 1;
 
   const directNormalized = trimQuoteEdges(normalizeQuoteText(direct.directAnswer ?? ""));
   // An answer that is a whole quoted sentence is not written twice.
@@ -2043,28 +2068,31 @@ export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
 
 // writeQaAnswer under RAG_QA_EXTRACTIVE_OUTPUT: one structured call, the
 // rendered answer, and the drafts released once from the rendered text (a JSON
-// reply is not prose, so nothing streams while it is being written).
-const writeExtractiveQaAnswer = async ({ allowedText, bundle, drafts, prompt, qaPrompt }) => {
+// reply is not prose, so nothing streams while it is being written). A failed
+// attempt is handed to the prose call (round 2, 2026-10-22).
+const writeExtractiveQaAnswer = async (call) => {
+  const { allowedText, blocks, bundle, drafts } = call;
+  const qaPrompt = selectPrompt(QA_EXTRACTIVE_PROMPTS);
   const sourceRanks = (bundle.rankedResults ?? []).map((result) => result.rank);
-  const completion = await completeText(prompt, {
+  const completion = await completeText(qaPrompt.render(blocks), {
     promptTemplate: qaPrompt.descriptor,
     ...(sourceRanks.length > 0 ? { responseFormat: buildQaExtractiveResponseFormat(sourceRanks) } : {}),
   });
   const rendered = renderExtractiveQaAnswer({ bundle, parsed: parseFirstJsonValue(completion) });
   // Counts plus one code (unparsable, no_quotes, quotes_unresolved,
-  // unsupported; null when answered), for the trace.
-  const structuredOutput = { ...rendered.counts, code: rendered.reason };
+  // unsupported, answer_empty, answer_ungrounded; null when answered) and
+  // `fallback` ("prose" when the prose call answered instead of the attempt;
+  // null otherwise), for the trace.
+  const structuredOutput = { ...rendered.counts, code: rendered.reason, fallback: null };
 
   if (rendered.abstained) {
-    return {
-      text: DEFAULT_NOT_IN_EVIDENCE_REASON,
-      citations: [],
-      abstained: true,
-      abstainReason: DEFAULT_NOT_IN_EVIDENCE_REASON,
-      abstainSource: "answer_model",
-      injectionScreen: buildInjectionScreenResult(bundle, []),
-      structuredOutput,
-    };
+    // The prose call over the same blocks, handled exactly as with the flag
+    // off (verdict, override, drafts, and the deeper retrieval retry after a
+    // verdict abstention); its answer carries no directAnswer. Before round 2
+    // the attempt's failure was the model's abstention.
+    const fallback = await writeProseQaAnswer(call);
+
+    return { ...fallback, structuredOutput: { ...structuredOutput, fallback: "prose" } };
   }
 
   const guarded = guardAnswerLinks(rendered.text, { allowedText });
