@@ -227,3 +227,17 @@ export const splitParagraphs = (value = "") =>
     .split(/\n+/)
     .map((paragraph) => normalizeWhitespace(paragraph))
     .filter(Boolean);
+
+// The naive sentence boundary the evidence renderers and the QASPER short-answer
+// score share: sentence-final punctuation followed by whitespace, or a line
+// break. (sentence-splitter.js keeps abbreviations together; this one does not,
+// and the recorded short-answer figures were computed with it.)
+export const NAIVE_SENTENCE_BOUNDARY = /(?<=[.!?。！？])\s+|\n+/;
+
+// Dash variants (the Unicode dashes U+2010-2015, the minus sign, the two- and
+// three-em dashes, the small and full-width hyphens) folded to a hyphen, and
+// soft hyphens dropped.
+export const foldDashVariants = (value = "") =>
+  String(value ?? "")
+    .replace(/­/g, "")
+    .replace(/[‐-―−⸺⸻﹣－]/g, "-");

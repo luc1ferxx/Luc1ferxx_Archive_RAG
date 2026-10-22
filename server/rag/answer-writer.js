@@ -20,8 +20,10 @@ import {
   getResultKey,
 } from "./citations.js";
 import { evaluateClaimSupport } from "./agent-self-check.js";
-import { normalizeGroupedSourceLabels } from "./self-check/text.js";
+import { ensureTerminalPunctuation } from "./grounded-answer-finalizer.js";
+import { normalizeGroupedSourceLabels, normalizeSemanticText } from "./self-check/text.js";
 import { isStructuralSectionHeading, joinWrappedLines } from "./self-check/attribution.js";
+import { MAX_MULTIPARTITE_DIFFERENCE_ENTRIES } from "./self-check/support.js";
 import { hasClaimPredicate, splitAnswerStructure } from "./self-check/claims.js";
 import { completeText } from "./openai.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
@@ -44,7 +46,7 @@ import {
   describeVerdictOverride,
   overrideNotInEvidenceVerdict,
 } from "./answer-verdict-override.js";
-import { normalizeWhitespace } from "./text-utils.js";
+import { foldDashVariants, NAIVE_SENTENCE_BOUNDARY, normalizeWhitespace } from "./text-utils.js";
 import { evaluateBidirectionalEvidenceEntailment } from "./comparison-equivalence.js";
 
 // Spotlighting: evidence is data from uploaded documents, never instructions.
@@ -530,7 +532,6 @@ const formatSourceLabels = (ranks) =>
 const getPageNumber = (metadata = {}) =>
   metadata.pageNumber ?? metadata.loc?.pageNumber ?? metadata.page ?? null;
 
-const SENTENCE_BOUNDARY = /(?<=[.!?\u3002\uff01\uff1f])\s+|\n+/;
 const NUMBER_TOKEN_PATTERN = /\$?\d[\d,./-]*%?/g;
 const MAX_COMPARE_SELECTED_RESULTS_PER_DOC = 2;
 
@@ -556,7 +557,7 @@ const normalizeComparableSentence = (sentence = "") =>
 
 const splitEvidenceSentences = (value = "") =>
   String(value ?? "")
-    .split(SENTENCE_BOUNDARY)
+    .split(NAIVE_SENTENCE_BOUNDARY)
     .map((sentence) => normalizeWhitespace(sentence))
     .filter(Boolean);
 
@@ -720,34 +721,41 @@ const joinEvidenceSoftWraps = (text = "") => {
   return blocks.filter(Boolean).join("\n");
 };
 
+// The document a ranked result belongs to, with the fallbacks every reader of
+// a result uses.
+const describeResultDocument = (result) => ({
+  docId: result.document.metadata?.docId ?? result.document.id,
+  fileName: result.document.metadata?.fileName ?? "Unknown document",
+});
+
 // PDF text keeps the page layout, so a sentence wrapped across lines arrives
 // in pieces. The soft wraps are rejoined first (joinEvidenceSoftWraps keeps
 // headings, list items and "Label:" lines on their own lines), and only then
-// are bare headings dropped, so the fallback templates quote whole sentences.
+// are bare headings dropped, so every reader quotes whole sentences: the
+// fallback templates (buildDocEvidenceEntries) and the structured renderers
+// (buildStructuredEvidenceSources) share this one definition.
+const listEvidenceSentences = (text) =>
+  splitEvidenceSentences(joinEvidenceSoftWraps(text)).filter(
+    (sentence) => !isBareHeadingSentence(sentence)
+  );
+
 const buildDocEvidenceEntries = (bundle) => {
   const entriesByDocId = new Map();
 
   for (const result of bundle.rankedResults ?? []) {
-    const docId = result.document.metadata?.docId ?? result.document.id;
+    const { docId, fileName } = describeResultDocument(result);
 
     if (!entriesByDocId.has(docId)) {
-      entriesByDocId.set(docId, {
-        docId,
-        fileName: result.document.metadata?.fileName ?? "Unknown document",
-        ranks: [],
-        sentences: [],
-      });
+      entriesByDocId.set(docId, { docId, fileName, ranks: [], sentences: [] });
     }
 
     const entry = entriesByDocId.get(docId);
     entry.ranks.push(result.rank);
 
-    for (const sentence of splitEvidenceSentences(
-      joinEvidenceSoftWraps(result.document.pageContent)
-    )) {
+    for (const sentence of listEvidenceSentences(result.document.pageContent)) {
       const canonical = normalizeComparableSentence(sentence);
 
-      if (!canonical || isBareHeadingSentence(sentence)) {
+      if (!canonical) {
         continue;
       }
 
@@ -930,7 +938,14 @@ const buildGroundedDifferenceAnswer = ({ analysis, bundle }) => {
     return null;
   }
 
-  return [
+  return renderGroundedDifferenceSections({ differenceLines, perDocumentLines });
+};
+
+// The section skeleton of a grounded comparison answer, the one the gate's
+// claim parser finds the Differences section in; the structured renderer
+// writes the same one.
+const renderGroundedDifferenceSections = ({ differenceLines, perDocumentLines }) =>
+  [
     "Summary:",
     "Per document:",
     ...perDocumentLines,
@@ -938,7 +953,6 @@ const buildGroundedDifferenceAnswer = ({ analysis, bundle }) => {
     ...differenceLines,
     "Gaps or uncertainty:",
   ].join("\n");
-};
 
 // The Differences section is found by the claim parser the self-check uses
 // (splitAnswerStructure), not by matching one spelling, so "Differences:",
@@ -1365,7 +1379,7 @@ const writeProseQaAnswer = async ({
         injectionScreen,
         abstainSource: null,
         verdictOverridden: true,
-        verdictOverride: describeVerdictOverride(override),
+        trace: { verdictOverride: describeVerdictOverride(override) },
       };
     }
 
@@ -1376,7 +1390,7 @@ const writeProseQaAnswer = async ({
       abstainReason: verdict.reason,
       abstainSource: "answer_model",
       injectionScreen,
-      ...(override ? { verdictOverride: describeVerdictOverride(override) } : {}),
+      ...(override ? { trace: { verdictOverride: describeVerdictOverride(override) } } : {}),
     };
   }
 
@@ -1400,10 +1414,29 @@ const MAX_STRUCTURED_QUOTE_CHARS = 400;
  * The strict response format of one structured comparison call: `source` may
  * only name a rank the model was shown, and every string and list is bounded.
  */
+// The ranks a structured reply may cite: the distinct integers among `ranks`.
+const toSourceRanks = (ranks = []) => [
+  ...new Set(ranks.map((rank) => Number(rank)).filter(Number.isInteger)),
+];
+
+// One quoted evidence entry of a structured reply, the same in both modes: a
+// bounded verbatim quote and the rank it was copied from.
+const evidenceQuoteSchema = (sourceRanks) =>
+  strictObject({
+    quote: boundedString(MAX_STRUCTURED_QUOTE_CHARS),
+    source: { enum: sourceRanks, type: "integer" },
+  });
+
+// The completion options of a structured call: its response format, or
+// nothing when no block was shown (an empty `source` enum is no schema).
+const structuredResponseFormatOptions = (bundle, buildResponseFormat) => {
+  const ranks = (bundle.rankedResults ?? []).map((result) => result.rank);
+
+  return ranks.length > 0 ? { responseFormat: buildResponseFormat(ranks) } : {};
+};
+
 export const buildComparisonStructuredResponseFormat = (ranks = []) => {
-  const sourceRanks = [
-    ...new Set(ranks.map((rank) => Number(rank)).filter(Number.isInteger)),
-  ];
+  const sourceRanks = toSourceRanks(ranks);
 
   return buildJsonSchemaResponseFormat({
     name: "comparison_differences",
@@ -1411,13 +1444,7 @@ export const buildComparisonStructuredResponseFormat = (ranks = []) => {
       differences: boundedArray(
         strictObject({
           aspect: boundedString(MAX_STRUCTURED_ASPECT_CHARS),
-          entries: boundedArray(
-            strictObject({
-              quote: boundedString(MAX_STRUCTURED_QUOTE_CHARS),
-              source: { enum: sourceRanks, type: "integer" },
-            }),
-            Math.max(1, sourceRanks.length)
-          ),
+          entries: boundedArray(evidenceQuoteSchema(sourceRanks), Math.max(1, sourceRanks.length)),
         }),
         MAX_STRUCTURED_ASPECTS
       ),
@@ -1427,14 +1454,16 @@ export const buildComparisonStructuredResponseFormat = (ranks = []) => {
 
 // Quotes are matched against the evidence after folding whitespace and case,
 // dropping double quotation marks (a model may wrap a phrase in them) and
-// folding the typographic variants of apostrophes and dashes; numbers stay as
-// they are, because a quote with a changed value must not resolve.
+// folding the typographic variants of apostrophes (normalizeSemanticText, the
+// claim check's own folding, plus the single low and reversed quotation marks)
+// and dashes; numbers stay as they are, because a quote with a changed value
+// must not resolve.
 const normalizeQuoteText = (value = "") =>
-  normalizeWhitespace(String(value ?? ""))
-    .normalize("NFKC")
-    .replace(/[‘’‚‛]/gu, "'")
-    .replace(/[“”„‟"]/gu, "")
-    .replace(/[‐-―−]/gu, "-")
+  foldDashVariants(
+    normalizeSemanticText(normalizeWhitespace(String(value ?? "")))
+      .replace(/[‚‛]/gu, "'")
+      .replace(/[“”„‟"]/gu, "")
+  )
     .replace(/\s+/gu, " ")
     .toLowerCase();
 
@@ -1449,14 +1478,11 @@ const buildStructuredEvidenceSources = (bundle) =>
     (bundle.rankedResults ?? []).map((result) => [
       result.rank,
       {
-        docId: result.document.metadata?.docId ?? result.document.id,
-        fileName: result.document.metadata?.fileName ?? "Unknown document",
+        ...describeResultDocument(result),
         rank: result.rank,
-        sentences: splitEvidenceSentences(
-          joinEvidenceSoftWraps(screenUntrustedText(result.document.pageContent).text)
-        )
-          .filter((sentence) => !isBareHeadingSentence(sentence))
-          .map((sentence) => ({
+        sentences: listEvidenceSentences(
+          screenUntrustedText(result.document.pageContent).text
+        ).map((sentence) => ({
             normalized: normalizeQuoteText(sentence),
             text: sentence,
           })),
@@ -1510,12 +1536,6 @@ const resolveQuoteSentence = (quote, source) => {
   return best;
 };
 
-// The claim check accepts a Differences section only as a perfect matching of
-// atomic claims, each pair two documents in substantive contrast (support.js
-// evaluateDifferenceSectionSupport, at most this many claims). The grounded
-// template writes such pairs; the structured renderer writes the same shape.
-const MAX_STRUCTURED_DIFFERENCE_LINES = 18;
-
 const toStructuredDifferences = (parsed) =>
   Array.isArray(parsed?.differences)
     ? parsed.differences
@@ -1532,25 +1552,20 @@ const toStructuredDifferences = (parsed) =>
     : null;
 
 // Each document's near-duplicate partners (analysis.nearDuplicatePairs), by id.
-const buildNearDuplicatePartners = (analysis) => {
-  const partners = new Map();
-  const add = (docId, partnerDocId) => {
-    if (!partners.has(docId)) {
-      partners.set(docId, []);
-    }
-
-    partners.get(docId).push(partnerDocId);
-  };
-
-  for (const pair of analysis?.nearDuplicatePairs ?? []) {
-    if (pair?.leftDocId && pair?.rightDocId) {
-      add(pair.leftDocId, pair.rightDocId);
-      add(pair.rightDocId, pair.leftDocId);
-    }
-  }
-
-  return partners;
-};
+const buildNearDuplicatePartners = (analysis) =>
+  new Map(
+    [
+      ...Map.groupBy(
+        (analysis?.nearDuplicatePairs ?? [])
+          .filter((pair) => pair?.leftDocId && pair?.rightDocId)
+          .flatMap((pair) => [
+            [pair.leftDocId, pair.rightDocId],
+            [pair.rightDocId, pair.leftDocId],
+          ]),
+        ([docId]) => docId
+      ),
+    ].map(([docId, pairs]) => [docId, pairs.map(([, partnerDocId]) => partnerDocId)])
+  );
 
 /**
  * The answer text rendered from a structured comparison reply, in the grounded
@@ -1572,20 +1587,11 @@ export const renderStructuredComparisonAnswer = ({ analysis = null, bundle, pars
   };
 
   if (!differences) {
-    return { text: null, counts };
+    return { counts, reason: "structured_output_unparsable", text: null };
   }
 
   const sources = buildStructuredEvidenceSources(bundle);
-  const sourcesByDocId = new Map();
-
-  for (const source of sources.values()) {
-    if (!sourcesByDocId.has(source.docId)) {
-      sourcesByDocId.set(source.docId, []);
-    }
-
-    sourcesByDocId.get(source.docId).push(source);
-  }
-
+  const sourcesByDocId = Map.groupBy(sources.values(), (source) => source.docId);
   const nearDuplicatePartners = buildNearDuplicatePartners(analysis);
   const differenceLines = [];
   const firstLineByDocId = new Map();
@@ -1653,11 +1659,7 @@ export const renderStructuredComparisonAnswer = ({ analysis = null, bundle, pars
     // things. Each entry of one group is paired with each entry of every other
     // group, written as the pair's two lines, which is the shape the claim
     // check pairs up; a line therefore repeats when it contrasts with several.
-    const groups = [...new Map(
-      [...resolvedByDocId.values()].map((entry) => [entry.normalized, []])
-    ).keys()].map((normalized) =>
-      [...resolvedByDocId.values()].filter((entry) => entry.normalized === normalized)
-    );
+    const groups = [...Map.groupBy(resolvedByDocId.values(), (entry) => entry.normalized).values()];
 
     if (groups.length < 2) {
       counts.droppedAspectCount += 1;
@@ -1676,7 +1678,9 @@ export const renderStructuredComparisonAnswer = ({ analysis = null, bundle, pars
       }
     }
 
-    if (differenceLines.length + aspectLines.length > MAX_STRUCTURED_DIFFERENCE_LINES) {
+    // The gate pairs at most MAX_MULTIPARTITE_DIFFERENCE_ENTRIES claims of a
+    // three-or-more-document answer; the renderer keeps every answer under it.
+    if (differenceLines.length + aspectLines.length > MAX_MULTIPARTITE_DIFFERENCE_ENTRIES) {
       counts.droppedAspectCount += 1;
       continue;
     }
@@ -1693,7 +1697,7 @@ export const renderStructuredComparisonAnswer = ({ analysis = null, bundle, pars
   counts.renderedLineCount = differenceLines.length;
 
   if (differenceLines.length === 0) {
-    return { text: null, counts };
+    return { counts, reason: "structured_no_differences", text: null };
   }
 
   const perDocumentLines = [...sources.values()]
@@ -1702,14 +1706,8 @@ export const renderStructuredComparisonAnswer = ({ analysis = null, bundle, pars
 
   return {
     counts,
-    text: [
-      "Summary:",
-      "Per document:",
-      ...perDocumentLines,
-      "Differences:",
-      ...differenceLines,
-      "Gaps or uncertainty:",
-    ].join("\n"),
+    reason: null,
+    text: renderGroundedDifferenceSections({ differenceLines, perDocumentLines }),
   };
 };
 
@@ -1751,57 +1749,32 @@ export const writeComparisonAnswer = async ({
     context: bundle.context,
   });
   const structuredOutputEnabled = isComparisonStructuredOutputEnabled();
-  const sourceRanks = (bundle.rankedResults ?? []).map((result) => result.rank);
   const completion = await completeText(selectedPrompt, {
     promptTemplate: comparisonPrompt.descriptor,
-    ...(structuredOutputEnabled && sourceRanks.length > 0
-      ? { responseFormat: buildComparisonStructuredResponseFormat(sourceRanks) }
+    ...(structuredOutputEnabled
+      ? structuredResponseFormatOptions(bundle, buildComparisonStructuredResponseFormat)
       : {}),
   });
   // With structured output on, the model's reply is a selection of evidence
-  // and the text the gate sees is rendered from it; `structuredOutput` counts
-  // what the reply held (integers only, for the trace).
-  let structuredOutput = null;
-  let modelText = completion;
-
-  if (structuredOutputEnabled) {
-    const rendered = renderStructuredComparisonAnswer({
-      analysis,
-      bundle,
-      parsed: parseFirstJsonValue(completion),
-    });
-
-    structuredOutput = rendered.counts;
-    modelText = rendered.text ?? "";
-  }
-
-  const structuredResult = structuredOutput ? { structuredOutput } : {};
-  const guarded = guardAnswerLinks(normalizeGroupedSourceLabels(modelText), {
-    allowedText: buildAllowedLinkText({ bundle, query, resolvedQuery }),
-  });
+  // and the text the gate sees is rendered from it; the counts of what the
+  // reply held (integers only) go to the trace.
+  const rendered = structuredOutputEnabled
+    ? renderStructuredComparisonAnswer({ analysis, bundle, parsed: parseFirstJsonValue(completion) })
+    : null;
+  // This answer's trace-only diagnostics (codes and counts); the caller moves
+  // them to the RAG trace and keeps them out of the response.
+  const trace = rendered ? { comparisonStructuredOutput: rendered.counts } : {};
+  const guarded = guardAnswerLinks(
+    normalizeGroupedSourceLabels(rendered ? rendered.text ?? "" : completion),
+    { allowedText: buildAllowedLinkText({ bundle, query, resolvedQuery }) }
+  );
   const text = guarded.text;
-  const modelGate =
-    structuredOutputEnabled && !modelText
-      ? {
-          safe: false,
-          reason: {
-            code: structuredOutput.parsed
-              ? "structured_no_differences"
-              : "structured_output_unparsable",
-          },
-        }
-      : assessStructuredDifferenceAnswer({
-          analysis,
-          bundle,
-          text,
-        });
+  const modelGate = rendered?.reason
+    ? { safe: false, reason: { code: rendered.reason } }
+    : assessStructuredDifferenceAnswer({ analysis, bundle, text });
 
   if (modelGate.safe) {
-    return {
-      text,
-      citations: bundle.citations,
-      ...structuredResult,
-    };
+    return { text, citations: bundle.citations, ...withTrace(trace) };
   }
 
   const groundedDifferenceAnswer = buildGroundedDifferenceAnswer({
@@ -1815,9 +1788,8 @@ export const writeComparisonAnswer = async ({
       bundle,
       text: groundedDifferenceAnswer,
     }).safe;
-  // Why the model's answer was not used (codes and counts only); the caller
-  // moves it to the RAG trace and keeps it out of the response.
-  const modelRejectReason = {
+  // Why the model's answer was not used (codes and counts only).
+  trace.modelRejectReason = {
     ...modelGate.reason,
     fallback: groundedSafe ? "grounded_template" : "abstained",
   };
@@ -1826,23 +1798,15 @@ export const writeComparisonAnswer = async ({
     const abstainReason =
       "I do not have enough citation-backed evidence to identify a concrete difference reliably.";
 
-    return {
-      text: abstainReason,
-      citations: bundle.citations,
-      abstained: true,
-      abstainReason,
-      modelRejectReason,
-      ...structuredResult,
-    };
+    return { text: abstainReason, citations: bundle.citations, abstained: true, abstainReason, trace };
   }
 
-  return {
-    text: groundedDifferenceAnswer,
-    citations: bundle.citations,
-    modelRejectReason,
-    ...structuredResult,
-  };
+  return { text: groundedDifferenceAnswer, citations: bundle.citations, trace };
 };
+
+// An answer's `trace` field only when it holds something, so an answer that
+// records nothing keeps its shape.
+const withTrace = (trace) => (Object.keys(trace).length > 0 ? { trace } : {});
 
 // --- Extractive QA output (RAG_QA_EXTRACTIVE_OUTPUT) --------------------------
 
@@ -1853,32 +1817,19 @@ const MAX_EXTRACTIVE_QUOTES = 4;
  * The strict response format of one extractive QA call: a bounded answer and
  * at most four quotes, each naming a rank the model was shown.
  */
-export const buildQaExtractiveResponseFormat = (ranks = []) => {
-  const sourceRanks = [
-    ...new Set(ranks.map((rank) => Number(rank)).filter(Number.isInteger)),
-  ];
-
-  return buildJsonSchemaResponseFormat({
+export const buildQaExtractiveResponseFormat = (ranks = []) =>
+  buildJsonSchemaResponseFormat({
     name: "extractive_answer",
     schema: strictObject({
       answer: boundedString(MAX_EXTRACTIVE_ANSWER_CHARS),
-      quotes: boundedArray(
-        strictObject({
-          quote: boundedString(MAX_STRUCTURED_QUOTE_CHARS),
-          source: { enum: sourceRanks, type: "integer" },
-        }),
-        MAX_EXTRACTIVE_QUOTES
-      ),
+      quotes: boundedArray(evidenceQuoteSchema(toSourceRanks(ranks)), MAX_EXTRACTIVE_QUOTES),
     }),
   });
-};
 
-const ensureSentenceEnd = (text) =>
-  /[.!?。！？]$/u.test(text) ? text : `${text}.`;
-
-// The line shape the finalizer writes for a supported claim, so the text is
-// the same whether or not the finalizer rebuilds it.
-const renderEvidenceLine = (text, ranks) => `${ensureSentenceEnd(text)} ${formatSourceLabels(ranks)}`;
+// The line shape the finalizer writes for a supported claim (its own
+// punctuation rule), so the text is the same whether or not it rebuilds it.
+const renderEvidenceLine = (text, ranks) =>
+  `${ensureTerminalPunctuation(text)} ${formatSourceLabels(ranks)}`;
 
 const BOOLEAN_ANSWER_PATTERN = /^(yes|no)\b/iu;
 const ANSWER_ITEM_SEPARATOR = /\s*(?:,|;|\band\b)\s*/iu;
@@ -1962,7 +1913,6 @@ export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
     quoteCount: 0,
     resolvedQuoteCount: 0,
     droppedQuoteCount: 0,
-    directAnswerGrounded: 0,
     directAnswerLine: 0,
     unsupportedLineCount: 0,
     renderedLineCount: 0,
@@ -2013,43 +1963,34 @@ export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
     };
   }
 
-  counts.directAnswerGrounded = 1;
-
-  const directNormalized = trimQuoteEdges(normalizeQuoteText(direct.directAnswer ?? ""));
-  // An answer that is a whole quoted sentence is not written twice.
+  const directNormalized = trimQuoteEdges(normalizeQuoteText(direct.directAnswer));
+  // An answer that is a whole quoted sentence is not written twice, and
+  // yes/no (the one grounded kind without ranks) is never a line.
   const directLine =
-    (direct.kind === "span" || direct.kind === "list") &&
+    direct.ranks.length > 0 &&
     !lines.some((line) => trimQuoteEdges(line.normalized) === directNormalized)
       ? renderEvidenceLine(direct.directAnswer, direct.ranks)
       : null;
-  let rendered = [
+  const candidateLines = [
     ...(directLine ? [directLine] : []),
     ...lines.map((line) => renderEvidenceLine(line.text, [line.rank])),
   ];
-  // The same check the self-check and finalizer run; a line it refuses would
-  // cost a follow-up retrieval on the agent path and then be cut anyway.
-  const claimSupport = evaluateClaimSupport({
-    answerText: rendered.join("\n"),
-    citations: attachRetrievedEvidence({
-      citations: bundle.citations ?? [],
-      retrievedContexts: bundle.retrievedContexts ?? [],
-    }),
+  const citations = attachRetrievedEvidence({
+    citations: bundle.citations ?? [],
+    retrievedContexts: bundle.retrievedContexts ?? [],
+  });
+  // The same check the self-check and finalizer run, one line at a time, so
+  // the unit dropped is the unit judged (a refused direct-answer fragment
+  // never takes the quote line that contains it down with it); a line it
+  // refuses would cost a follow-up retrieval on the agent path and then be
+  // cut anyway.
+  const rendered = candidateLines.filter((line) => {
+    const claimSupport = evaluateClaimSupport({ answerText: line, citations });
+
+    return claimSupport.checked !== true || (claimSupport.unsupportedClaimCount ?? 0) === 0;
   });
 
-  if (claimSupport.checked === true && (claimSupport.unsupportedClaimCount ?? 0) > 0) {
-    const unsupported = (claimSupport.claims ?? [])
-      .filter((claim) => claim.supported !== true)
-      .map((claim) => trimQuoteEdges(normalizeQuoteText(claim.text)))
-      .filter(Boolean);
-
-    rendered = rendered.filter((line) => {
-      const normalized = trimQuoteEdges(normalizeQuoteText(line));
-
-      return !unsupported.some((claimText) => normalized.includes(claimText));
-    });
-    counts.unsupportedLineCount = rendered.length === 0 ? lines.length + (directLine ? 1 : 0) : unsupported.length;
-  }
-
+  counts.unsupportedLineCount = candidateLines.length - rendered.length;
   counts.directAnswerLine = directLine && rendered.includes(directLine) ? 1 : 0;
   counts.renderedLineCount = rendered.length;
 
@@ -2073,17 +2014,16 @@ export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
 const writeExtractiveQaAnswer = async (call) => {
   const { allowedText, blocks, bundle, drafts } = call;
   const qaPrompt = selectPrompt(QA_EXTRACTIVE_PROMPTS);
-  const sourceRanks = (bundle.rankedResults ?? []).map((result) => result.rank);
   const completion = await completeText(qaPrompt.render(blocks), {
     promptTemplate: qaPrompt.descriptor,
-    ...(sourceRanks.length > 0 ? { responseFormat: buildQaExtractiveResponseFormat(sourceRanks) } : {}),
+    ...structuredResponseFormatOptions(bundle, buildQaExtractiveResponseFormat),
   });
   const rendered = renderExtractiveQaAnswer({ bundle, parsed: parseFirstJsonValue(completion) });
   // Counts plus one code (unparsable, no_quotes, quotes_unresolved,
   // unsupported, answer_empty, answer_ungrounded; null when answered) and
   // `fallback` ("prose" when the prose call answered instead of the attempt;
   // null otherwise), for the trace.
-  const structuredOutput = { ...rendered.counts, code: rendered.reason, fallback: null };
+  const qaStructuredOutput = { ...rendered.counts, code: rendered.reason, fallback: null };
 
   if (rendered.abstained) {
     // The prose call over the same blocks, handled exactly as with the flag
@@ -2092,7 +2032,10 @@ const writeExtractiveQaAnswer = async (call) => {
     // the attempt's failure was the model's abstention.
     const fallback = await writeProseQaAnswer(call);
 
-    return { ...fallback, structuredOutput: { ...structuredOutput, fallback: "prose" } };
+    return {
+      ...fallback,
+      trace: { ...fallback.trace, qaStructuredOutput: { ...qaStructuredOutput, fallback: "prose" } },
+    };
   }
 
   const guarded = guardAnswerLinks(rendered.text, { allowedText });
@@ -2104,6 +2047,6 @@ const writeExtractiveQaAnswer = async (call) => {
     citations: bundle.citations,
     directAnswer: rendered.directAnswer,
     injectionScreen: buildInjectionScreenResult(bundle, guarded.removed),
-    structuredOutput,
+    trace: { qaStructuredOutput },
   };
 };

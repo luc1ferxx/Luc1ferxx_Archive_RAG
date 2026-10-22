@@ -198,8 +198,8 @@ test("rows the comparison cannot pair honestly are refused", () => {
 });
 
 test("the comparison renders as a table with the flips and the config differences", () => {
-  const comparison = compareQasperAnswerReports(THIS_RUN, OTHER_RUN, { iterations: 200, seed: 5 });
-  const markdown = formatComparisonMarkdown(comparison, { against: "other.json", iterations: 200, seed: 5 }).join("\n");
+  const comparison = compareQasperAnswerReports(THIS_RUN, OTHER_RUN, { against: "other.json", iterations: 200, seed: 5 });
+  const markdown = formatComparisonMarkdown(comparison).join("\n");
 
   assert.match(markdown, /Paired against `other.json` \(6 questions, 4 answerable/);
   assert.match(markdown, /\| Answer rate \(answerable questions\) \| 4 \| \+0\.25 \| \[/);

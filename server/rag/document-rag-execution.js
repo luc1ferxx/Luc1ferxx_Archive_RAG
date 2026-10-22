@@ -692,25 +692,18 @@ const executeComparisonRag = async ({
     };
   }
 
-  const { modelRejectReason, structuredOutput, ...generatedAnswer } =
-    await writeComparisonAnswer({
-      query,
-      resolvedQuery,
-      bundle,
-      analysis,
-      preferenceBlock,
-    });
+  const { trace: answerTrace, ...generatedAnswer } = await writeComparisonAnswer({
+    query,
+    resolvedQuery,
+    bundle,
+    analysis,
+    preferenceBlock,
+  });
 
-  // Why the model's comparison answer was replaced (codes and counts only)
-  // goes to the trace, not into the response; so do the counts of what a
-  // structured comparison reply held (RAG_COMPARISON_STRUCTURED_OUTPUT).
-  if (modelRejectReason) {
-    traceFields.modelRejectReason = modelRejectReason;
-  }
-
-  if (structuredOutput) {
-    traceFields.comparisonStructuredOutput = structuredOutput;
-  }
+  // The writer's trace-only diagnostics (why the model's comparison answer
+  // was replaced, what a structured reply held; codes and counts only) go to
+  // the trace, never into the response.
+  Object.assign(traceFields, answerTrace);
 
   return {
     routeMode: route.mode,
@@ -879,28 +872,18 @@ const executeQaRag = async ({
         })
       : null;
 
-  // RAG_QA_VERDICT_OVERRIDE: the decision (codes and counts only) goes to the
-  // trace, not into the response; an applied override also marks the answer
-  // verdictOverridden: true. So do the counts of an extractive reply
-  // (RAG_QA_EXTRACTIVE_OUTPUT), under qaStructuredOutput.
-  if (answer.verdictOverride) {
-    traceFields.verdictOverride = answer.verdictOverride;
-  }
-
-  if (answer.structuredOutput) {
-    traceFields.qaStructuredOutput = answer.structuredOutput;
-  }
+  // The writer's trace-only diagnostics (the RAG_QA_VERDICT_OVERRIDE decision,
+  // the counts of an extractive reply; codes and counts only) go to the
+  // trace, never into the response; an applied override also marks the
+  // answer verdictOverridden: true.
+  Object.assign(traceFields, answer.trace);
 
   if (retry) {
     traceFields.verdictRetry = retry.trace;
   }
 
   const final = retry?.answer ? retry : { answer, bundle };
-  const {
-    verdictOverride: _verdictOverride,
-    structuredOutput: _structuredOutput,
-    ...finalAnswer
-  } = final.answer;
+  const { trace: _answerTrace, ...finalAnswer } = final.answer;
 
   return {
     routeMode: route.mode,
@@ -992,14 +975,7 @@ const retryQaWithDeeperRetrieval = async ({
   });
 
   trace.answered = !answer.abstained;
-
-  if (answer.verdictOverride) {
-    trace.verdictOverride = answer.verdictOverride;
-  }
-
-  if (answer.structuredOutput) {
-    trace.qaStructuredOutput = answer.structuredOutput;
-  }
+  Object.assign(trace, answer.trace);
 
   return { answer, bundle, trace };
 };

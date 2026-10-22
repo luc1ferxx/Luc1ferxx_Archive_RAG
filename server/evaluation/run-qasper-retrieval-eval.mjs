@@ -33,7 +33,7 @@ import {
   describeRunConfigDifferences,
   sumTextChars,
 } from "./eval-run-config.js";
-import { createSeededRandom } from "./paired-bootstrap.js";
+import { bootstrapMeanInterval, createSeededRandom, roundTo4 } from "./paired-bootstrap.js";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
@@ -46,9 +46,8 @@ export const RECALL_METRICS = Object.freeze(["hitAt1", "hitAt3", "hitAtAll", "ad
 export const CONTEXT_FLOORS = Object.freeze([0, 0.01, 0.3]);
 const contextMetric = (floor) => `context@${floor}`;
 
-const round = (value) => (value === null ? null : Number(value.toFixed(4)));
 const mean = (values) =>
-  values.length === 0 ? null : round(values.reduce((sum, value) => sum + value, 0) / values.length);
+  values.length === 0 ? null : roundTo4(values.reduce((sum, value) => sum + value, 0) / values.length);
 
 /** rows: { hitAt1, hitAt3, hitAtAll, admitted } booleans per question. */
 const metricsOf = (rows) => [
@@ -82,31 +81,14 @@ export const summarizeRecallRows = (rows) => ({
 export const pairedRecallDeltas = (rows, otherRows, { iterations = 4000, seed = 1 } = {}) => {
   const other = new Map(otherRows.map((row) => [row.id, row]));
   const pairs = rows.filter((row) => other.has(row.id)).map((row) => [row, other.get(row.id)]);
+  // Every interval is drawn from this one RNG, in order.
   const random = createSeededRandom(seed);
-  const bootstrap = (diffs, roundValue) => {
-    const samples = [];
-
-    for (let index = 0; index < iterations; index += 1) {
-      let sum = 0;
-
-      for (let draw = 0; draw < diffs.length; draw += 1) {
-        sum += diffs[Math.floor(random() * diffs.length)];
-      }
-
-      samples.push(sum / Math.max(1, diffs.length));
-    }
-
-    samples.sort((left, right) => left - right);
-
-    return diffs.length === 0
-      ? null
-      : [roundValue(samples[Math.floor(iterations * 0.025)]), roundValue(samples[Math.floor(iterations * 0.975)])];
-  };
+  const bootstrap = (diffs, roundValue) => bootstrapMeanInterval(diffs, { iterations, random, roundValue });
   const recall = Object.fromEntries(
     metricsOf(rows).map((metric) => {
       const diffs = pairs.map(([left, right]) => (left[metric] ? 1 : 0) - (right[metric] ? 1 : 0));
 
-      return [metric, { delta: mean(diffs), ci95: bootstrap(diffs, round) }];
+      return [metric, { delta: mean(diffs), ci95: bootstrap(diffs, roundTo4) }];
     })
   );
   // After the recall metrics, so their intervals draw the same samples as

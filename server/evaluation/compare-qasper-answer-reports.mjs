@@ -14,9 +14,10 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { getArgValue } from "./eval-cli.js";
 import { describeRunConfigDifferences } from "./eval-run-config.js";
 import { pairedDeltaOfDiffs } from "./paired-bootstrap.js";
-import { readContextEvidenceHit } from "./qasper-answer-metrics.js";
+import { readContextEvidenceHit, readF1Direct } from "./qasper-answer-metrics.js";
 
 export const DEFAULT_COMPARE_ITERATIONS = 10000;
 export const DEFAULT_COMPARE_SEED = 12345;
@@ -27,39 +28,31 @@ export const DEFAULT_COMPARE_SEED = 12345;
 export const readAnswered = (row) =>
   typeof row?.answered === "boolean" ? row.answered : !row?.abstained;
 
+// The config fields two answer runs are compared on, each with its reader: the
+// scalar settings, the answer-rate flags and the prompt set (a prompt version
+// is this project's usual A/B, and RAG_QA_ANSWER_VERDICT shows only there).
 const COMPARED_CONFIG_FIELDS = Object.freeze([
-  "surface",
-  "corpus",
-  "chatModel",
-  "embeddingModel",
-  "queryAdapter",
-  "claimJudge",
-  "cases",
-  "seed",
+  ...["surface", "corpus", "chatModel", "embeddingModel", "queryAdapter", "claimJudge", "cases", "seed", "answerRateFlags"].map(
+    (field) => [field, (config) => config?.[field]]
+  ),
+  ["promptTemplates.setHash", (config) => config?.promptTemplates?.setHash],
 ]);
 
 /**
- * The config fields two answer runs differ in, or cannot be shown to match:
- * the scalar settings above, the answer-rate flags, the prompt set (a prompt
- * version is this project's usual A/B, and RAG_QA_ANSWER_VERDICT shows only
- * there), and the chunking and commit fields describeRunConfigDifferences
- * compares for the retrieval eval (a report without them counts as unknown).
+ * The config fields two answer runs differ in, or cannot be shown to match
+ * (a missing value counts as different): the fields above, then the chunking
+ * and commit fields describeRunConfigDifferences compares for the retrieval
+ * eval (a report without them counts as unknown).
  */
-export const describeAnswerRunDifferences = (config = {}, otherConfig = {}) => {
-  const differences = COMPARED_CONFIG_FIELDS.filter(
-    (field) => !Object.is(config?.[field] ?? null, otherConfig?.[field] ?? null)
-  ).map((field) => ({ current: config?.[field] ?? null, field, other: otherConfig?.[field] ?? null }));
-  const compareJson = (field, current, other) => {
-    if (JSON.stringify(current ?? null) !== JSON.stringify(other ?? null)) {
-      differences.push({ current: current ?? null, field, other: other ?? null });
-    }
-  };
+export const describeAnswerRunDifferences = (config = {}, otherConfig = {}) => [
+  ...COMPARED_CONFIG_FIELDS.flatMap(([field, read]) => {
+    const current = read(config) ?? null;
+    const other = read(otherConfig) ?? null;
 
-  compareJson("answerRateFlags", config?.answerRateFlags, otherConfig?.answerRateFlags);
-  compareJson("promptTemplates.setHash", config?.promptTemplates?.setHash, otherConfig?.promptTemplates?.setHash);
-
-  return [...differences, ...describeRunConfigDifferences(config ?? {}, otherConfig ?? {})];
-};
+    return JSON.stringify(current) === JSON.stringify(other) ? [] : [{ current, field, other }];
+  }),
+  ...describeRunConfigDifferences(config ?? {}, otherConfig ?? {}),
+];
 
 /**
  * Refuses rows the comparison cannot pair honestly: every row needs an id
@@ -95,7 +88,7 @@ export const assertComparableRows = (rows, label) => {
 export const compareQasperAnswerReports = (
   report,
   other,
-  { iterations = DEFAULT_COMPARE_ITERATIONS, seed = DEFAULT_COMPARE_SEED } = {}
+  { against = null, iterations = DEFAULT_COMPARE_ITERATIONS, seed = DEFAULT_COMPARE_SEED } = {}
 ) => {
   assertComparableRows(report?.rows, "this report");
   assertComparableRows(other?.rows, "the other report");
@@ -118,17 +111,21 @@ export const compareQasperAnswerReports = (
   // notes' F1(abstain=0).
   const f1AbstainZero = (row) => (readAnswered(row) ? f1(row) : 0);
   // The short-answer score (f1Direct, reports since 2026-10-22), same rule.
-  const f1Direct = (row) => Number(row.f1Direct) || 0;
+  const f1Direct = (row) => readF1Direct(row) ?? 0;
   const f1DirectAbstainZero = (row) => (readAnswered(row) ? f1Direct(row) : 0);
   const answered = (row) => (readAnswered(row) ? 1 : 0);
-  const whereBoth = (subset, read) =>
-    subset.filter(([left, right]) => typeof read(left) === "boolean" && typeof read(right) === "boolean");
-  const whereBothNumeric = (subset, read) =>
-    subset.filter(([left, right]) => Number.isFinite(read(left)) && Number.isFinite(read(right)));
+  // The pairs whose both rows recorded a value (an older report may not have).
+  const whereBoth = (subset, read, holds) =>
+    subset.filter(([left, right]) => holds(read(left)) && holds(read(right)));
+  const isBoolean = (value) => typeof value === "boolean";
+  const isScore = (value) => Number.isFinite(value);
   const readCited = (row) => row.citedEvidenceHit;
-  const readDirect = (row) => (typeof row.f1Direct === "number" ? row.f1Direct : NaN);
 
   return {
+    // What this run was paired against and how, for the report and its Markdown.
+    against,
+    iterations,
+    seed,
     cases: pairs.length,
     // How many rows each report had, so a small intersection shows.
     rows: (report?.rows ?? []).length,
@@ -141,12 +138,12 @@ export const compareQasperAnswerReports = (
     // Over the answerable questions only, where an abstention scores 0.
     answerableF1: delta(answerable, f1AbstainZero),
     // The short-answer scores, over the questions both reports scored that way.
-    answerF1Direct: delta(whereBothNumeric(pairs, readDirect), f1Direct),
-    answerableF1Direct: delta(whereBothNumeric(answerable, readDirect), f1DirectAbstainZero),
+    answerF1Direct: delta(whereBoth(pairs, readF1Direct, isScore), f1Direct),
+    answerableF1Direct: delta(whereBoth(answerable, readF1Direct, isScore), f1DirectAbstainZero),
     answerRate: delta(answerable, answered),
     unanswerableAnswered: delta(unanswerable, answered),
-    citedEvidenceHit: delta(whereBoth(answerable, readCited), (row) => (readCited(row) ? 1 : 0)),
-    contextEvidenceHit: delta(whereBoth(answerable, readContextEvidenceHit), (row) =>
+    citedEvidenceHit: delta(whereBoth(answerable, readCited, isBoolean), (row) => (readCited(row) ? 1 : 0)),
+    contextEvidenceHit: delta(whereBoth(answerable, readContextEvidenceHit, isBoolean), (row) =>
       readContextEvidenceHit(row) ? 1 : 0
     ),
     // Answerable questions this run answered and the other did not, and the
@@ -179,12 +176,12 @@ const formatDelta = (entry) =>
     : `${entry.delta > 0 ? "+" : ""}${entry.delta}`;
 
 /** The comparison as Markdown, for the report and the command line. */
-export const formatComparisonMarkdown = (comparison, { against, iterations, seed }) => [
-  `Paired against \`${against}\` (${comparison.cases} questions, ${comparison.answerableCases} answerable${
+export const formatComparisonMarkdown = (comparison) => [
+  `Paired against \`${comparison.against}\` (${comparison.cases} questions, ${comparison.answerableCases} answerable${
     comparison.cases < Math.max(comparison.rows ?? 0, comparison.otherRows ?? 0)
       ? `, out of ${comparison.rows} rows here and ${comparison.otherRows} there`
       : ""
-  }; this run minus that one, bootstrap 95% CI, ${iterations} iterations, seed ${seed}):`,
+  }; this run minus that one, bootstrap 95% CI, ${comparison.iterations} iterations, seed ${comparison.seed}):`,
   "",
   "| Metric | Questions | Delta | 95% CI |",
   "|---|---|---|---|",
@@ -236,21 +233,21 @@ const parseIntegerOption = (name, value, { min = 0 } = {}) => {
 
 const main = async () => {
   const args = process.argv.slice(2);
-  const option = (name, fallback) => {
-    const index = args.indexOf(name);
-    return index >= 0 ? args[index + 1] : fallback;
-  };
   const positional = args.filter((arg, index) => !arg.startsWith("--") && !args[index - 1]?.startsWith("--"));
 
   if (positional.length !== 2) {
     throw new Error("Usage: compare-qasper-answer-reports.mjs <this report.json> <other report.json> [--iterations N] [--seed N]");
   }
 
-  const iterations = parseIntegerOption("--iterations", option("--iterations", DEFAULT_COMPARE_ITERATIONS), { min: 1 });
-  const seed = parseIntegerOption("--seed", option("--seed", DEFAULT_COMPARE_SEED));
+  const iterations = parseIntegerOption("--iterations", getArgValue("--iterations") ?? DEFAULT_COMPARE_ITERATIONS, { min: 1 });
+  const seed = parseIntegerOption("--seed", getArgValue("--seed") ?? DEFAULT_COMPARE_SEED);
   const report = await readQasperAnswerReport(positional[0]);
   const other = await readQasperAnswerReport(positional[1]);
-  const comparison = compareQasperAnswerReports(report, other, { iterations, seed });
+  const comparison = compareQasperAnswerReports(report, other, {
+    against: path.basename(positional[1]),
+    iterations,
+    seed,
+  });
 
   if (comparison.cases === 0) {
     throw new Error(
@@ -258,9 +255,7 @@ const main = async () => {
     );
   }
 
-  process.stdout.write(
-    formatComparisonMarkdown(comparison, { against: path.basename(positional[1]), iterations, seed }).join("\n")
-  );
+  process.stdout.write(formatComparisonMarkdown(comparison).join("\n"));
 };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

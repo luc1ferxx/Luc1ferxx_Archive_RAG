@@ -15,6 +15,7 @@
 
 import { filterCitationsToSourceRanks } from "../rag/source-labels.js";
 import { extractSourceRanks, normalizeGroupedSourceLabels } from "../rag/self-check/text.js";
+import { foldDashVariants, NAIVE_SENTENCE_BOUNDARY } from "../rag/text-utils.js";
 
 const PUNCTUATION = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g;
 const SOURCE_LABEL = /\[Source \d+\]/g;
@@ -72,14 +73,10 @@ export const qasperAnswerF1 = (prediction, references = []) =>
 // normalization drops ASCII punctuation, so a hyphen vanishes inside a token
 // while an en or em dash stays part of it, and a correct answer written with
 // dashes scores 0 against a hyphenated reference. This folds the dash variants
-// (Unicode dashes, the minus sign, the small and full-width hyphens) to a
-// hyphen on both sides first and drops soft hyphens. It feeds no summary and
-// no decision rule.
-const DASH_VARIANTS = /[‐-―−⸺⸻﹣－]/g;
-const SOFT_HYPHEN = /­/g;
-
-export const normalizeQasperDashes = (text) =>
-  String(text ?? "").replace(SOFT_HYPHEN, "").replace(DASH_VARIANTS, "-");
+// to a hyphen on both sides first and drops soft hyphens (foldDashVariants,
+// the folding the answer writer's quote resolution uses). It feeds no summary
+// and no decision rule.
+export const normalizeQasperDashes = (text) => foldDashVariants(text);
 
 export const qasperAnswerF1DashNormalized = (prediction, references = []) =>
   qasperAnswerF1(
@@ -95,12 +92,10 @@ export const qasperAnswerF1DashNormalized = (prediction, references = []) =>
 export const toQasperPrediction = ({ abstained, text }) =>
   abstained ? "Unanswerable" : String(text ?? "").replace(SOURCE_LABEL, " ").trim();
 
-const FIRST_SENTENCE_BOUNDARY = /(?<=[.!?。！？])\s+|\n+/;
-
 /** The first sentence (or line) of a prediction, labels already removed. */
 export const firstSentenceOf = (text) =>
   String(text ?? "")
-    .split(FIRST_SENTENCE_BOUNDARY)
+    .split(NAIVE_SENTENCE_BOUNDARY)
     .map((sentence) => sentence.trim())
     .find(Boolean) ?? "";
 
@@ -117,6 +112,13 @@ export const toQasperDirectPrediction = ({ abstained, directAnswer, text }) =>
     : typeof directAnswer === "string" && directAnswer.trim()
       ? directAnswer.trim()
       : firstSentenceOf(toQasperPrediction({ abstained, text }));
+
+/**
+ * A row's short-answer score, or null for a row of a report written before
+ * the column existed (2026-10-22); the summary and the paired comparison both
+ * decide "has one" here.
+ */
+export const readF1Direct = (row) => (typeof row?.f1Direct === "number" ? row.f1Direct : null);
 
 const mean = (values) =>
   values.length === 0 ? null : Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(4));
@@ -191,7 +193,7 @@ export const summarizeQasperRuns = (rows) => {
   const precisionRows = answerable.filter((row) => !row.abstained && typeof row.citationPrecision === "number");
   const answeredWithCitationData = rows.filter((row) => !row.abstained && Array.isArray(row.citedPages));
   // Reports before the direct-answer column have no f1Direct.
-  const directRows = rows.filter((row) => typeof row.f1Direct === "number");
+  const directRows = rows.filter((row) => readF1Direct(row) !== null);
 
   return {
     answerF1: mean(rows.map((row) => row.f1)),

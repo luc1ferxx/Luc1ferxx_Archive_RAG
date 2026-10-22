@@ -531,7 +531,7 @@ test("flag on: an overridden reply is an answer with the supported claims and th
     "The total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim [Source 1]."
   );
   assert.deepEqual(written.citations, BUNDLE.citations);
-  assert.deepEqual(written.verdictOverride, {
+  assert.deepEqual(written.trace.verdictOverride, {
     applied: true,
     factualClaimCount: 1,
     hedgeCount: 1,
@@ -546,7 +546,7 @@ test("flag on: an overridden reply is an answer with the supported claims and th
   assert.equal(hedged.abstainSource, null);
   assert.equal(hedged.verdictOverridden, true);
   assert.equal(hedged.text, written.text);
-  assert.equal(hedged.verdictOverride.residualClaimCount, 1);
+  assert.equal(hedged.trace.verdictOverride.residualClaimCount, 1);
 });
 
 test("flag on: a declined override abstains as before and only adds its decision", async () => {
@@ -556,16 +556,19 @@ test("flag on: a declined override abstains as before and only adds its decision
   const off = (await writeWithReply(reply)).written;
 
   process.env.RAG_QA_VERDICT_OVERRIDE = "supported";
-  const { verdictOverride, ...on } = (await writeWithReply(reply)).written;
+  // The decision travels under the answer's trace-only field.
+  const { trace, ...on } = (await writeWithReply(reply)).written;
 
   assert.deepEqual(on, off);
-  assert.deepEqual(verdictOverride, {
-    applied: false,
-    factualClaimCount: 0,
-    hedgeCount: 1,
-    reason: "no_factual_claim",
-    residualClaimCount: 0,
-    supportedClaimCount: 0,
+  assert.deepEqual(trace, {
+    verdictOverride: {
+      applied: false,
+      factualClaimCount: 0,
+      hedgeCount: 1,
+      reason: "no_factual_claim",
+      residualClaimCount: 0,
+      supportedClaimCount: 0,
+    },
   });
 });
 
@@ -605,7 +608,7 @@ test("the override never calls the claim judge", async () => {
 
   assert.equal(prompts.length, 1, "only the answer model was called");
   assert.equal(written.abstained, true);
-  assert.equal(written.verdictOverride.reason, "unsupported_claim");
+  assert.equal(written.trace.verdictOverride.reason, "unsupported_claim");
 });
 
 // ---------------------------------------------------------------------------
@@ -897,7 +900,7 @@ test("writeQaAnswer passes the decomposer's part count to the override", async (
 
   assert.equal(split.abstained, true);
   assert.equal(split.abstainSource, "answer_model");
-  assert.equal(split.verdictOverride.reason, QA_VERDICT_OVERRIDE_REASONS.multiPartQuestion);
+  assert.equal(split.trace.verdictOverride.reason, QA_VERDICT_OVERRIDE_REASONS.multiPartQuestion);
 
   const single = await writeQaAnswer({
     bundle: BUNDLE,
